@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// 串口配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SerialConfig {
     /// 串口名称
     pub port_name: String,
@@ -56,7 +57,6 @@ impl From<DataBits> for serialport::DataBits {
 #[serde(rename_all = "lowercase")]
 pub enum StopBits {
     One,
-    OnePointFive,
     Two,
 }
 
@@ -64,7 +64,6 @@ impl From<StopBits> for serialport::StopBits {
     fn from(bits: StopBits) -> Self {
         match bits {
             StopBits::One => serialport::StopBits::One,
-            StopBits::OnePointFive => serialport::StopBits::OnePointFive,
             StopBits::Two => serialport::StopBits::Two,
         }
     }
@@ -119,6 +118,7 @@ pub enum SerialStatus {
 
 /// 串口信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PortInfo {
     pub name: String,
     pub port_type: String,
@@ -128,6 +128,7 @@ pub struct PortInfo {
 
 /// 数据包
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DataPacket {
     pub id: String,
     pub data: String,

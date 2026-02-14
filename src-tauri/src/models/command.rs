@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// 单条命令
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Command {
     /// 命令 ID
     pub id: String,
@@ -17,6 +18,7 @@ pub struct Command {
 
 /// 命令组
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommandGroup {
     /// 组 ID
     pub id: String,
@@ -32,6 +34,7 @@ pub struct CommandGroup {
 
 impl Command {
     /// 创建新命令
+    #[allow(dead_code)]
     pub fn new(name: String, data: String, description: Option<String>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -45,6 +48,7 @@ impl Command {
 
 impl CommandGroup {
     /// 创建新命令组
+    #[allow(dead_code)]
     pub fn new(name: String) -> Self {
         let now = chrono::Utc::now().timestamp_millis();
         Self {

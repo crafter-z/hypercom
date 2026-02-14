@@ -9,9 +9,10 @@ export interface SerialConfig {
   flowControl: FlowControl;
 }
 
-export type DataBits = 5 | 6 | 7 | 8;
+// 后端使用 lowercase 枚举，所以前端需要发送字符串
+export type DataBits = 'five' | 'six' | 'seven' | 'eight';
 
-export type StopBits = 1 | 1.5 | 2;
+export type StopBits = 'one' | 'two';
 
 export type Parity = 'none' | 'odd' | 'even';
 
@@ -38,8 +39,8 @@ export interface DataPacket {
 export const DEFAULT_SERIAL_CONFIG: SerialConfig = {
   portName: '',
   baudRate: 115200,
-  dataBits: 8,
-  stopBits: 1,
+  dataBits: 'eight',
+  stopBits: 'one',
   parity: 'none',
   flowControl: 'none',
 };
@@ -54,4 +55,18 @@ export const BAUD_RATES = [
   230400,
   460800,
   921600,
+];
+
+// 数据位选项
+export const DATA_BITS_OPTIONS: { value: DataBits; label: string }[] = [
+  { value: 'five', label: '5' },
+  { value: 'six', label: '6' },
+  { value: 'seven', label: '7' },
+  { value: 'eight', label: '8' },
+];
+
+// 停止位选项
+export const STOP_BITS_OPTIONS: { value: StopBits; label: string }[] = [
+  { value: 'one', label: '1' },
+  { value: 'two', label: '2' },
 ];

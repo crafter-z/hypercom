@@ -35,6 +35,7 @@ impl DataThrottler {
     }
 
     /// 强制刷新缓冲区
+    #[allow(dead_code)]
     pub fn flush(&mut self) -> Option<Vec<u8>> {
         if self.buffer.is_empty() {
             None
@@ -47,11 +48,13 @@ impl DataThrottler {
     }
 
     /// 清空缓冲区
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.buffer.clear();
     }
 
     /// 设置节流间隔
+    #[allow(dead_code)]
     pub fn set_interval(&mut self, interval_ms: u64) {
         self.interval = Duration::from_millis(interval_ms);
     }

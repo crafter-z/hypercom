@@ -38,8 +38,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   serialDefaults: {
     portName: '',
     baudRate: 115200,
-    dataBits: 8,
-    stopBits: 1,
+    dataBits: 'eight',
+    stopBits: 'one',
     parity: 'none',
     flowControl: 'none',
   },

@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use super::{SerialConfig, DataBits, StopBits, Parity, FlowControl};
+use super::SerialConfig;
 
 /// 应用设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     /// 显示设置
     pub display: DisplaySettings,
@@ -24,6 +25,7 @@ impl Default for AppSettings {
 
 /// 显示设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DisplaySettings {
     /// 字体大小
     pub font_size: u32,
@@ -54,6 +56,7 @@ impl Default for DisplaySettings {
 
 /// 日志设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogSettings {
     /// 是否启用日志
     pub enabled: bool,

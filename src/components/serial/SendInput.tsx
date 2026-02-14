@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send, Hex, Type } from 'lucide-react';
+import { Send, Binary, Type } from 'lucide-react';
 import { useSerialStore } from '../../stores';
 import { cn, isValidHex } from '../../utils';
 
@@ -45,7 +45,7 @@ export function SendInput() {
             )}
             onClick={() => setFormat('hex')}
           >
-            <Hex className="w-4 h-4" />
+            <Binary className="w-4 h-4" />
             HEX
           </button>
           <button

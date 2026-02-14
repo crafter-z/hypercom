@@ -1,5 +1,5 @@
 import { useSerialStore } from '../../stores';
-import { BAUD_RATES } from '../../types';
+import { BAUD_RATES, DATA_BITS_OPTIONS, STOP_BITS_OPTIONS } from '../../types';
 
 export function SerialConfig() {
   const { config, setConfig } = useSerialStore();
@@ -12,6 +12,7 @@ export function SerialConfig() {
         <div className="flex flex-col gap-1">
           <label className="text-xs text-muted-foreground">波特率</label>
           <select
+            title="波特率"
             className="h-8 px-2 rounded-md border border-input bg-background text-sm"
             value={config.baudRate}
             onChange={(e) => setConfig({ baudRate: Number(e.target.value) })}
@@ -28,14 +29,16 @@ export function SerialConfig() {
         <div className="flex flex-col gap-1">
           <label className="text-xs text-muted-foreground">数据位</label>
           <select
+            title="数据位"
             className="h-8 px-2 rounded-md border border-input bg-background text-sm"
             value={config.dataBits}
-            onChange={(e) => setConfig({ dataBits: Number(e.target.value) as 5 | 6 | 7 | 8 })}
+            onChange={(e) => setConfig({ dataBits: e.target.value as 'five' | 'six' | 'seven' | 'eight' })}
           >
-            <option value={5}>5</option>
-            <option value={6}>6</option>
-            <option value={7}>7</option>
-            <option value={8}>8</option>
+            {DATA_BITS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -43,13 +46,16 @@ export function SerialConfig() {
         <div className="flex flex-col gap-1">
           <label className="text-xs text-muted-foreground">停止位</label>
           <select
+            title="停止位"
             className="h-8 px-2 rounded-md border border-input bg-background text-sm"
             value={config.stopBits}
-            onChange={(e) => setConfig({ stopBits: Number(e.target.value) as 1 | 1.5 | 2 })}
+            onChange={(e) => setConfig({ stopBits: e.target.value as 'one' | 'two' })}
           >
-            <option value={1}>1</option>
-            <option value={1.5}>1.5</option>
-            <option value={2}>2</option>
+            {STOP_BITS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -57,6 +63,7 @@ export function SerialConfig() {
         <div className="flex flex-col gap-1">
           <label className="text-xs text-muted-foreground">校验位</label>
           <select
+            title="校验位"
             className="h-8 px-2 rounded-md border border-input bg-background text-sm"
             value={config.parity}
             onChange={(e) => setConfig({ parity: e.target.value as 'none' | 'odd' | 'even' })}

@@ -21,7 +21,7 @@ interface SerialState {
   setError: (error: string | null) => void;
 }
 
-export const useSerialStore = create<SerialState>((set, get) => ({
+export const useSerialStore = create<SerialState>((set) => ({
   status: 'closed',
   ports: [],
   config: DEFAULT_SERIAL_CONFIG,
@@ -95,7 +95,11 @@ export const initSerialEventListeners = async () => {
   // 监听接收到的数据
   await listen<DataPacket>('serial:data-received', (event) => {
     const packet = event.payload;
-    useSerialStore.getState().receivedData.push(packet);
+    const store = useSerialStore.getState();
+    // 使用 setState 触发 React 重新渲染
+    useSerialStore.setState({
+      receivedData: [...store.receivedData, packet]
+    });
   });
 
   // 监听状态变化

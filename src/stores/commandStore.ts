@@ -18,7 +18,7 @@ interface CommandState {
   exportGroups: (ids: string[]) => Promise<string>;
 }
 
-export const useCommandStore = create<CommandState>((set, get) => ({
+export const useCommandStore = create<CommandState>((set) => ({
   groups: [],
   activeGroupId: null,
   loading: false,

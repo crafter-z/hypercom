@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Emitter, Runtime, State};
 use crate::models::*;
 use crate::serial::{SerialManager, parse_hex_string};
 
@@ -18,7 +18,7 @@ pub fn open_port<R: Runtime>(
     manager.open(config.clone())?;
     
     // 启动读取任务
-    manager.start_read_task(app_handle);
+    manager.start_read_task(app_handle.clone());
     
     // 发送状态变化事件
     let _ = app_handle.emit("serial:status-changed", &SerialStatus::Open);

@@ -1,11 +1,10 @@
+use std::io::{Read, Write};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use parking_lot::Mutex;
 use serialport::{SerialPort, SerialPortType};
 use tauri::{AppHandle, Emitter, Runtime};
-use tokio::sync::mpsc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::interval;
 
 use crate::models::*;
 use super::DataThrottler;
@@ -17,7 +16,9 @@ pub struct SerialManager {
     /// 当前配置
     config: Arc<Mutex<Option<SerialConfig>>>,
     /// 接收任务句柄
-    read_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    read_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// 运行标志
+    running: Arc<Mutex<bool>>,
 }
 
 impl SerialManager {
@@ -27,6 +28,7 @@ impl SerialManager {
             port: Arc::new(Mutex::new(None)),
             config: Arc::new(Mutex::new(None)),
             read_task: Arc::new(Mutex::new(None)),
+            running: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -92,9 +94,12 @@ impl SerialManager {
 
     /// 关闭串口
     pub fn close(&self) -> Result<(), String> {
-        // 停止读取任务
+        // 设置停止标志
+        *self.running.lock() = false;
+
+        // 等待读取线程结束
         if let Some(handle) = self.read_task.lock().take() {
-            handle.abort();
+            let _ = handle.join();
         }
 
         // 关闭串口
@@ -138,16 +143,21 @@ impl SerialManager {
 
     /// 启动读取任务
     pub fn start_read_task<R: Runtime>(&self, app_handle: AppHandle<R>) {
+        // 设置运行标志
+        *self.running.lock() = true;
+        
         let port = Arc::clone(&self.port);
-        let config = Arc::clone(&self.config);
+        let running = Arc::clone(&self.running);
 
-        let handle = tokio::spawn(async move {
+        let handle = thread::spawn(move || {
             let mut throttler = DataThrottler::new(50);
-            let mut read_interval = interval(Duration::from_millis(10));
             let mut buffer = [0u8; 4096];
 
             loop {
-                read_interval.tick().await;
+                // 检查是否应该停止
+                if !*running.lock() {
+                    break;
+                }
 
                 let mut port_guard = port.lock();
                 if let Some(ref mut port) = *port_guard {
@@ -185,6 +195,10 @@ impl SerialManager {
                     // 串口已关闭，退出任务
                     break;
                 }
+                
+                // 释放锁后短暂休眠
+                drop(port_guard);
+                thread::sleep(Duration::from_millis(10));
             }
         });
 
