@@ -25,6 +25,19 @@ export interface LogSettings {
   includeTimestamp: boolean;
 }
 
+// 日志状态
+export type LogStatus = 'Stopped' | 'Recording' | 'Paused';
+
+// 日志配置（与后端对应）
+export interface LogConfig {
+  enabled: boolean;
+  logDir: string;
+  maxFileSize: number;
+  autoSplit: boolean;
+  includeTimestamp: boolean;
+  includeDirection: boolean;
+}
+
 // 默认设置
 export const DEFAULT_SETTINGS: AppSettings = {
   display: {
