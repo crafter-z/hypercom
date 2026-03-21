@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HyperCom",
+  "productName": "hypercom",
   "version": "0.1.0",
   "identifier": "com.hypercom.app",
   "build": {
@@ -13,11 +13,9 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "HyperCom - 串口调试工具",
-        "width": 1200,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
+        "title": "hypercom",
+        "width": 800,
+        "height": 600,
         "resizable": true,
         "fullscreen": false
       }
