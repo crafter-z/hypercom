@@ -1,37 +1,53 @@
-import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+/**
+ * HyperCom 主应用入口
+ * 整体布局：标题栏 + (侧边栏 + 主显示区 + 操作区) + 状态栏
+ */
 
-function App() {
-  const [greeting, setGreeting] = useState("");
-  const [name, setName] = useState("");
+import React from 'react';
+import TitleBar from './components/TitleBar/TitleBar';
+import Sidebar from './components/Sidebar/Sidebar';
+import MainDisplay from './components/MainDisplay/MainDisplay';
+import OperationPanel from './components/OperationPanel/OperationPanel';
+import StatusBar from './components/StatusBar/StatusBar';
+import ConfigModal from './components/ConfigModal/ConfigModal';
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreeting(await invoke("greet", { name }));
-  }
-
+const App: React.FC = () => {
   return (
-    <div className="container">
-      <h1>Welcome to Tauri!</h1>
+    <div
+      style={{
+        width: '100vw',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        background: 'var(--bg-primary)',
+      }}
+    >
+      {/* 标题栏 */}
+      <TitleBar />
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
+      {/* 主体内容区 */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* 左侧串口管理边栏 */}
+        <Sidebar />
 
-      <p>{greeting}</p>
+        {/* 中间主区域 */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* 主显示窗口 */}
+          <MainDisplay />
+
+          {/* 底部操作面板 */}
+          <OperationPanel />
+        </div>
+      </div>
+
+      {/* 底部状态栏 */}
+      <StatusBar />
+
+      {/* 配置弹窗 */}
+      <ConfigModal />
     </div>
   );
-}
+};
 
 export default App;
