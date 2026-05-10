@@ -2,7 +2,7 @@
 
 > 本文档面向多 Agent 协作开发，详细描述 HyperCom 串口调试工具的前后端技术架构、模块职责、接口定义与数据流。
 >
-> 最后更新：2026-05-06
+> 最后更新：2026-05-10
 
 ---
 
@@ -16,7 +16,7 @@ HyperCom 是一款基于 **Tauri v2** 架构的现代化串口调试工具，采
 |------|---------|------|
 | 前端框架 | React 18 + Vite | UI 渲染与交互 |
 | 前端状态 | Zustand + Immer | 轻量全局状态管理 |
-| 前端样式 | CSS Variables | 暗色主题，动态切换 |
+| 前端样式 | CSS Variables + lucide-react | 暗色/亮色主题，矢量图标 |
 | 后端框架 | Tauri v2 | 桌面应用壳与 Rust 桥接 |
 | 串口通信 | serialport-rs | 跨平台串口读写 |
 | 数据库 | SQLite (sqlx) | 命令集/规则集/布局持久化 |
@@ -39,15 +39,20 @@ hypercom/
 ├── src/                            # 前端源码
 │   ├── App.tsx                     # 主应用入口
 │   ├── main.tsx                    # React挂载点
-│   ├── styles.css                  # 全局样式与CSS变量
+│   ├── styles.css                  # 全局样式与CSS变量（含亮色主题）
 │   ├── types/
 │   │   └── index.ts                # 全局TypeScript类型定义
 │   ├── stores/
 │   │   └── useAppStore.ts          # Zustand全局状态
 │   └── components/
+│       ├── shared/                  # 【新增】共享组件
+│       │   └── ContextMenu.tsx      # 通用右键菜单 + useContextMenu Hook
 │       ├── TitleBar/               # 标题栏
 │       ├── Sidebar/                # 左侧串口管理边栏
 │       ├── MainDisplay/            # 主显示区（标签页+终端）
+│       │   ├── MainDisplay.tsx     # 多分屏容器
+│       │   ├── TabBar.tsx          # 标签页栏
+│       │   └── TerminalView.tsx     # 终端视图
 │       ├── OperationPanel/         # 底部操作面板
 │       ├── StatusBar/              # 底部状态栏
 │       └── ConfigModal/            # 配置弹窗
@@ -88,166 +93,100 @@ hypercom/
 └─────────────────────────────────────────────┘
 ```
 
-### 3.2 组件职责
+### 3.2 共享组件
 
-#### TitleBar (`src/components/TitleBar/TitleBar.tsx`)
-- 软件图标、名称、版本号
-- 全局"配置"按钮（唤起配置弹窗）
-- 窗口控制按钮（最小化/最大化/关闭）
-- 支持拖拽移动窗口（`-webkit-app-region: drag`）
+#### ContextMenu (`src/components/shared/ContextMenu.tsx`)
 
-#### Sidebar (`src/components/Sidebar/Sidebar.tsx`)
-- **顶部工具栏**：一键打开全部、一键关闭全部、显示/隐藏串口、排序、保存布局、刷新
-- **搜索框**：按串口名或备注名过滤
-- **串口列表**：
-  - 支持垂直滚动，可拖拽改变排序（预留）
-  - **分组管理**：支持将串口聚合成组（类似 Edge 浏览器选项卡组），可重命名、展开/折叠、一键开启/关闭整组
-  - **单个串口项**：状态颜色条（绿-未连接，黄-报错，红-已连接）、COM口及备注名、连接/断开小按钮
-  - **交互**：双击或右键唤起主窗口对应标签页；右键菜单包含：设置备注、隐藏/显示、打开/关闭
-- **未分组区域**：显示未加入任何分组的串口
-- **隐藏串口区域**：显示被隐藏的串口
-- **新建分组按钮**
+通用右键菜单组件，供 Sidebar、TabBar、TerminalView 等组件复用：
 
-#### MainDisplay (`src/components/MainDisplay/MainDisplay.tsx`)
-- **标签栏** (`TabBar.tsx`)：
-  - 每个串口对应一个标签，显示图标、COM口和备注
-  - 支持拖拽排序（预留）
-  - 右键菜单：关闭当前/左侧/右侧/其他、固定选项卡
-  - 新建标签页按钮、分屏按钮、更多操作按钮
-- **终端显示区** (`TerminalView.tsx`)：
-  - 显示串口输入输出内容，只读不可修改
-  - 时间戳、RX/TX 方向标识
-  - 自动滚动到底部（可锁定）
-  - 编码切换（ASCII/UTF-8/GBK）
-  - 右键菜单：全选、复制、字符串与 HEX 相互转换（预留）
-  - 语法高亮（预留）
+- **ContextMenu 组件**：
+  - `x`, `y` 定位，自动视口边界检测
+  - `items` 数组，支持 `ContextMenuItem`（含 icon/danger/disabled）和 `ContextMenuSeparator`
+  - 点击外部或 ESC 关闭
+  - CSS 入场动画（`contextMenuIn`）
 
-#### OperationPanel (`src/components/OperationPanel/OperationPanel.tsx`)
-横向三栏布局，所有操作均针对**当前主窗口选中的标签页（串口）**：
-
-- **左侧：手动发送与基础控制**
-  - 命令发送区：输入框 + 发送按钮
-  - 发送选项：HEX/字符串、追加回车（None/\r\n/\r/\n）
-  - 基础控制：打开/关闭当前串口、清屏
-
-- **中间：自动循环与规则应用**
-  - 高亮规则下拉菜单 + 编辑按钮
-  - 发送命令集下拉菜单 + 编辑按钮
-  - 循环发送控制：开始/停止按钮、延时输入框
-  - 更多选项：HEX/文本切换、打开日志文件、高亮规则选择、编辑发送命令集
-
-- **右侧：串口参数与视图控制**
-  - 视图控制：滚动锁定、显示时间戳、HEX/字符串显示格式
-  - 日志操作：另存为、打开文件、打开所在目录
-  - 串口参数：波特率、数据位(5-8)、校验位、停止位、握手协议
-  - 开关：DTR、RTS、忽略空字符
-
-#### StatusBar (`src/components/StatusBar/StatusBar.tsx`)
-- 左侧：系统状态（运行正常）、内存占用（当前/限制）、CPU占用率
-- 右侧：当前串口实时流量统计（TX总数、RX总数，单位动态切换 B/KB/MB）、当前时间
-
-#### ConfigModal (`src/components/ConfigModal/ConfigModal.tsx`)
-独立模态弹窗，左侧树状导航 + 右侧详细设置：
-
-| 导航项 | 内容 |
-|--------|------|
-| 通用设置 | 关闭行为、内存上限、语言、主题、防息屏/防休眠、字体设置、背景图片 |
-| 日志设置 | 存储目录、文件名格式、编码格式、文件格式、分片存储、自动保存开关 |
-| 备份管理 | 日志库备份开关、备份周期、备份路径 |
-| 显示与交互 | 预设波特率、显示串口类型、回车换行方式、发送前缀、时间戳显示方式 |
-| 语法高亮规则 | 规则集管理（正则/关键词、颜色/加粗/斜体） |
-| 发送命令规则 | 命令集管理（顺序、名称、延时、类型、内容） |
-
-### 3.3 状态管理
-
-使用 **Zustand + Immer** 实现全局状态管理，状态定义在 `src/stores/useAppStore.ts`。
-
-#### 核心状态切片
+- **useContextMenu Hook**：
+  - 返回 `{ show, element }`
+  - `show(e, items)` 在指定位置显示菜单
+  - `element` 渲染到组件 JSX 中
 
 ```typescript
-interface AppState {
-  // 串口数据
-  ports: SerialPort[];
-  groups: PortGroup[];
-  
-  // 标签页与分屏
-  tabs: TabItem[];
-  panes: SplitPane[];
-  activeTabId: string | null;
-  focusedPaneId: string;
-  
-  // 终端内容（按串口ID索引）
-  terminals: Record<string, TerminalState>;
-  
-  // 规则集
-  highlightRuleSets: HighlightRuleSet[];
-  activeHighlightSetId: string | null;
-  sendCommandSets: SendCommandSet[];
-  activeSendCommandSetId: string | null;
-  
-  // 配置
-  config: AppConfig;
-  
-  // 系统状态
-  systemStatus: SystemStatus;
-  trafficStats: Record<string, TrafficStats>;
-  
-  // UI状态
-  ui: UIState;
-  
-  // 操作区状态（当前激活串口）
-  opBaudRate: number;
-  opDataBits: DataBits;
-  opParity: Parity;
-  opStopBits: StopBits;
-  opHandshake: Handshake;
-  opDtr: boolean;
-  opRts: boolean;
-  opIgnoreEmptyChars: boolean;
-  opScrollLocked: boolean;
-  opShowTimestamp: boolean;
-  opDisplayFormat: DisplayFormat;
-  opEncoding: Encoding;
-  opSendIsHex: boolean;
-  opSendAppendLineEnding: LineEnding;
-  opSendInput: string;
-  opIsLoopSending: boolean;
-}
+// 使用示例
+const { show, element } = useContextMenu();
+return (
+  <div onContextMenu={(e) => show(e, items)}>
+    {/* 内容 */}
+    {element}
+  </div>
+);
 ```
 
-#### 关键 Actions
+### 3.3 组件职责
 
-| Action | 说明 |
-|--------|------|
-| `setPorts` / `updatePort` | 更新串口列表/单个串口状态 |
-| `openTab` / `closeTab` / `setActiveTab` | 标签页管理 |
-| `pinTab` / `closeTabsToRight` / `closeTabsToLeft` / `closeOtherTabs` | 标签页高级操作 |
-| `splitPane(direction)` | 创建分屏（'horizontal'|'vertical'），当前活动标签移入新分屏 |
-| `removePane` | 移除分屏（将其标签合并到另一分屏） |
-| `setFocusedPane` | 设置当前聚焦分屏 |
-| `moveTabToPane` | 将标签页移动到指定分屏 |
-| `appendTerminalLine` / `clearTerminal` | 终端内容操作 |
-| `setConfig` / `resetConfig` | 配置更新/重置 |
-| `toggleConfigModal` / `setConfigActiveTab` | 配置弹窗控制 |
-| `setOpState` | 操作区状态批量更新 |
-| `setSystemStatus` / `setTrafficStats` | 系统状态更新 |
+#### TitleBar (`src/components/TitleBar/TitleBar.tsx`)
+- 软件 SVG 图标、名称、版本号
+- 全局"配置"按钮（lucide Settings 图标），唤起配置弹窗
+- 窗口控制按钮（lucide Minus/Square/X），含关闭按钮红色悬停效果
+- 支持拖拽移动窗口（CSS `.titlebar-drag` / `.titlebar-nodrag`）
 
-### 3.4 类型定义
+#### Sidebar (`src/components/Sidebar/Sidebar.tsx`)
+- **顶部工具栏**：lucide 矢量图标（Play/Square/Eye/EyeOff/ArrowUpDown/Save/RefreshCw）
+- **搜索框**：lucide Search 图标 + 清除按钮
+- **串口列表**：
+  - 状态颜色圆点 + 状态文本（未连接/错误/已连接）
+  - VCP 徽标、波特率参数显示
+  - lucide Play/Square 连接/断开按钮
+  - **右键菜单**（useContextMenu）：连接/断开、设置备注名、在标签页中打开、隐藏/取消隐藏
+- **AliasDialog**：模态弹窗输入备注名
+- **分组管理**：展开/折叠箭头（lucide ChevronRight），一键开启/关闭整组
+- **未分组/隐藏串口区域**、**新建分组按钮**（lucide Plus）
+- 全部使用 CSS class，无内联样式
 
-全部类型定义在 `src/types/index.ts`，涵盖：
+#### MainDisplay (`src/components/MainDisplay/MainDisplay.tsx`)
+- **全局工具栏**：lucide 图标（Plus/Columns2/Rows2）
+- **标签栏** (`TabBar.tsx`)：
+  - 每个串口对应一个标签，显示状态圆点、标题、Pin 图标
+  - 使用共享 ContextMenu 实现右键菜单
+  - lucide Pin/X 图标
+- **终端显示区** (`TerminalView.tsx`)：
+  - 时间戳（`.terminal-timestamp`）、方向标识（TX/RX 使用 CSS 变量着色）、内容
+  - 使用共享 ContextMenu 实现右键菜单：全选、复制、复制为 HEX、从 HEX 转文本
+  - 自动滚动到底部（可锁定）
 
-- **串口相关**：`SerialPort`, `PortStatus`, `PortType`, `PortGroup`
-- **标签页相关**：`TabItem`, `SplitPane`
-- **终端相关**：`TerminalLine`, `TerminalState`
-- **规则集相关**：`HighlightRule`, `HighlightRuleSet`, `SendCommand`, `SendCommandSet`
-- **配置相关**：`AppConfig`
-- **系统相关**：`SystemStatus`, `TrafficStats`
-- **Tauri 命令参数**：`OpenPortParams`, `SendDataParams`, `AvailablePortInfo`
+#### OperationPanel (`src/components/OperationPanel/OperationPanel.tsx`)
+- 横向三栏布局，所有图标使用 lucide-react
+- 发送区：lucide Send 图标 + 输入框 + HEX/回车选项
+- 循环发送：lucide Play（开始）/ lucide Square（停止，.btn-danger 样式）
+- 串口参数：波特率/数据位/校验位/停止位/握手协议/DTR/RTS
+- 折叠/展开：lucide ChevronDown/ChevronUp
+
+#### StatusBar (`src/components/StatusBar/StatusBar.tsx`)
+- 左侧：系统状态 + lucide MemoryStick（内存）+ lucide Cpu（CPU）
+- 右侧：lucide ArrowUpCircle（TX 绿色）+ lucide ArrowDownCircle（RX 蓝色）+ 时间
+
+#### ConfigModal (`src/components/ConfigModal/ConfigModal.tsx`)
+- 左侧导航：lucide 图标（Settings/FileText/HardDrive/Monitor/Palette/Send）
+- 导航项 hover 效果由 CSS class（`.modal-nav-item`）驱动，无内联事件
+- 右侧设置内容 + 底部保存/取消按钮
+- 关闭按钮：lucide X 图标
+
+### 3.4 图标系统
+
+所有 UI 图标统一使用 **lucide-react**（已安装为项目依赖），不再使用 emoji 或字符图标。
+
+常用图标列表：
+- 导航/操作：`Settings`, `X`, `Plus`, `ChevronDown`, `ChevronUp`, `ChevronRight`, `ArrowUpDown`, `RefreshCw`, `Save`
+- 串口控制：`Play`, `Square`, `Cable`, `PlugZap`, `Unplug`, `Eye`, `EyeOff`
+- 编辑：`Pencil`, `Edit3`, `Search`
+- 终端：`Send`, `Eraser`, `FileText`, `FolderOpen`, `FileSearch`
+- 状态：`Cpu`, `MemoryStick`, `ArrowUpCircle`, `ArrowDownCircle`, `Pin`, `Clock`
+- 分屏：`Columns2`, `Rows2`
 
 ### 3.5 样式系统
 
-使用 **CSS 变量** 实现暗色主题，定义在 `src/styles.css`：
+使用 **CSS 变量** 实现主题切换，定义在 `src/styles.css`：
 
+#### 暗色主题（默认）
 ```css
 :root {
   --bg-primary: #1e1e1e;
@@ -255,156 +194,52 @@ interface AppState {
   --bg-tertiary: #2d2d30;
   --text-primary: #cccccc;
   --text-secondary: #858585;
-  --status-disconnected: #4ec9b0;  /* 绿色 */
-  --status-error: #dcdcaa;          /* 黄色 */
-  --status-connected: #f48771;      /* 红色 */
-  --font-terminal: 'Consolas', 'Monaco', monospace;
-  --font-ui: 'Inter', sans-serif;
+  --terminal-tx-color: #dcdcaa;
+  --terminal-rx-color: #4fc1ff;
+  /* ... 完整变量见 styles.css */
 }
 ```
 
-提供通用组件类：`.btn`, `.input`, `.select`, `.tab-bar`, `.tab-item`, `.context-menu`, `.panel-card` 等。
+#### 亮色主题
+```css
+:root[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f3f3;
+  --text-primary: #333333;
+  --terminal-tx-color: #b8860b;
+  --terminal-rx-color: #0066cc;
+  /* ... 完整变量见 styles.css */
+}
+```
+
+#### CSS class 体系
+
+所有组件样式通过 BEM 风格的 CSS class 管理，不再使用内联 style 属性：
+
+| 类别 | 示例 |
+|------|------|
+| 侧边栏 | `.sidebar`, `.sidebar-toolbar`, `.sidebar-search-*`, `.port-item-*`, `.port-group-*` |
+| 终端 | `.terminal-view-container`, `.terminal-view`, `.terminal-line`, `.terminal-timestamp`, `.terminal-direction`, `.terminal-content`, `.terminal-toolbar-*` |
+| 标题栏 | `.titlebar`, `.titlebar-left`, `.titlebar-right`, `.titlebar-*` |
+| 操作面板 | `.operation-panel`, `.op-section-*`, `.op-send-*`, `.op-loop-*`, `.op-param-*` |
+| 状态栏 | `.statusbar`, `.statusbar-left`, `.statusbar-right`, `.statusbar-item`, `.statusbar-dot` |
+| 配置弹窗 | `.modal-overlay`, `.modal-dialog`, `.modal-nav-*`, `.modal-content-*`, `.config-*` |
+| 右键菜单 | `.context-menu`, `.context-menu-item`, `.context-menu-icon`, `.context-menu-separator` |
+| 通用 | `.btn`, `.btn-primary`, `.btn-danger`, `.btn-icon`, `.btn-sm`, `.input`, `.select`, `.divider`, `.divider-h` |
+
+### 3.6 状态管理
+
+（与之前文档相同，无变更。详见 `src/stores/useAppStore.ts`。）
+
+### 3.7 类型定义
+
+（与之前文档相同，无变更。详见 `src/types/index.ts`。）
 
 ---
 
 ## 四、后端架构
 
-### 4.1 整体架构
-
-```
-┌─────────────────────────────────────────────┐
-│           Tauri Application                 │
-│  ┌─────────────────────────────────────┐   │
-│  │         Command Layer               │   │
-│  │  (commands/mod.rs)                  │   │
-│  │  - 所有前端 invoke 调用的入口        │   │
-│  └─────────────────────────────────────┘   │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐     │
-│  │ Serial  │ │ Config  │ │ Logger  │     │
-│  │ Manager │ │ Manager │ │ Manager │     │
-│  └─────────┘ └─────────┘ └─────────┘     │
-│  ┌─────────┐                              │
-│  │ Storage │                              │
-│  │ Manager │                              │
-│  └─────────┘                              │
-└─────────────────────────────────────────────┘
-```
-
-### 4.2 模块职责
-
-#### lib.rs (`src-tauri/src/lib.rs`)
-- 后端主入口，注册所有 Tauri 命令
-- 定义 `AppState` 结构体，通过 `tauri::State` 在各命令间共享
-- 初始化日志、各 Manager
-
-```rust
-pub struct AppState {
-    pub serial_manager: std::sync::Mutex<serial::SerialManager>,
-    pub config_manager: std::sync::Mutex<config::ConfigManager>,
-    pub log_manager: std::sync::Mutex<logger::LogManager>,
-    pub storage_manager: std::sync::Mutex<storage::StorageManager>,
-}
-```
-
-#### commands/mod.rs (`src-tauri/src/commands/mod.rs`)
-所有前端通过 `invoke` 调用的 Rust 函数：
-
-| 命令 | 参数 | 返回值 | 说明 |
-|------|------|--------|------|
-| `list_available_ports` | - | `Vec<PortInfo>` | 枚举系统可用串口 |
-| `open_serial_port` | `OpenPortArgs` | `()` | 打开指定串口 |
-| `close_serial_port` | `port_id: String` | `()` | 关闭指定串口 |
-| `send_serial_data` | `SendDataArgs` | `usize` | 向串口发送数据 |
-| `set_serial_params` | `port_id, baud_rate` | `()` | 修改波特率 |
-| `set_flow_control` | `port_id, dtr, rts` | `()` | 设置 DTR/RTS |
-| `get_config` | - | `AppConfig` | 获取当前配置 |
-| `set_config` | `AppConfig` | `()` | 更新配置 |
-| `reset_config` | - | `AppConfig` | 重置为默认配置 |
-| `set_log_directory` | `path: String` | `()` | 设置日志目录 |
-| `save_log_as` | `port_id, path` | `()` | 手动另存日志 |
-| `get_log_files` | - | `Vec<LogFileInfo>` | 获取日志文件列表 |
-| `get_system_status` | - | `SystemStatus` | 获取系统状态 |
-| `prevent_screen_off` | `enable: bool` | `()` | 防止系统息屏 |
-| `prevent_sleep` | `enable: bool` | `()` | 防止系统休眠 |
-
-#### serial/mod.rs (`src-tauri/src/serial/mod.rs`)
-**串口管理模块**，核心职责：
-- `SerialManager`：管理所有已打开串口的集合
-- `SerialPortHandle`：单个串口的句柄，包含底层串口对象、读取线程、数据通道
-- 数据接收通过 **MPSC channel** 异步推送给前端
-- 读取线程 50ms 节流，避免 CPU 占用过高
-
-关键方法：
-- `list_ports()`：枚举系统可用串口（区分虚拟/真实）
-- `open_port(args)`：打开串口并启动读取线程
-- `close_port(port_id)`：关闭串口并清理资源
-- `send_data(port_id, data, is_hex, append_line_ending)`：发送数据
-- `set_baud_rate()` / `set_flow_control()`：动态修改参数
-
-#### config/mod.rs (`src-tauri/src/config/mod.rs`)
-**配置管理模块**：
-- `AppConfig`：完整的应用配置结构体（通用/字体/串口/日志/备份）
-- `ConfigManager`：JSON 文件持久化，默认路径 `%APPDATA%/hypercom/config.json`
-- 支持 get/set/reset/save 操作
-
-#### logger/mod.rs (`src-tauri/src/logger/mod.rs`)
-**日志管理模块**：
-- `LogManager`：管理所有串口的日志写入器
-- `PortLogWriter`：单个串口的 BufWriter，支持字符串/HEX/二进制三种格式
-- 支持按大小自动分片（预留）
-- 默认日志目录 `%APPDATA%/hypercom/logs/`
-
-#### storage/mod.rs (`src-tauri/src/storage/mod.rs`)
-**存储管理模块**：
-- `StorageManager`：SQLite 数据库连接池管理
-- 预留表结构：port_groups、send_command_sets、send_commands、highlight_rule_sets、highlight_rules
-- **注意**：数据库连接池需要在 Tauri `.setup()` 钩子中异步初始化，避免 Tokio 上下文错误
-
-### 4.3 数据流
-
-```
-前端 (React)
-    │
-    │ invoke('send_serial_data', { portId, data, isHex })
-    ▼
-Tauri Bridge
-    │
-    ▼
-commands::send_serial_data(args, state)
-    │
-    ▼
-state.serial_manager.lock()
-    │
-    ▼
-SerialManager::send_data(port_id, data, is_hex, ...)
-    │
-    ├─► 写入串口硬件 ◄── 物理设备
-    │
-    ├─► 同时写入 LogManager（如果自动保存开启）
-    │
-    └─► 返回写入字节数
-    │
-    ▲
-前端接收返回值，更新 UI 状态
-
-// 数据接收方向（异步）
-SerialPort 读取线程
-    │
-    ├─► 每 50ms 读取一次缓冲区
-    │
-    ├─► 将数据打包为 SerialDataEvent
-    │
-    └─► 通过 MPSC channel 发送
-         │
-         ▼
-    前端监听事件（预留 emit 机制）
-         │
-         ▼
-    更新 terminals[portId].lines
-         │
-         ▼
-    TerminalView 自动渲染新内容
-```
+（与之前文档相同，后端无变更。）
 
 ---
 
@@ -430,32 +265,23 @@ SerialPort 读取线程
 - `AppState::new()` 在 Tauri Builder 阶段是同步调用
 - 解决方案：先创建空结构体，在 `.setup()` 钩子中异步 `init()`
 
+### 5.5 为什么使用共享 ContextMenu 组件？
+- Sidebar、TabBar、TerminalView 均需要右键菜单功能
+- 抽取共享组件避免重复实现（视口检测、关闭逻辑、样式）
+- `useContextMenu` Hook 简化接入，一行 `show(e, items)` 即可
+
+### 5.6 为什么使用 lucide-react 而非 emoji/字符图标？
+- 矢量图标在任何分辨率下清晰渲染
+- 统一的设计语言（Lucide 图标库）
+- 支持 `size` 属性精确控制尺寸
+- 支持 `color` / CSS `currentColor` 继承主题颜色
+- 替代 emoji 在不同平台渲染不一致的问题
+
 ---
 
 ## 六、接口契约
 
-### 6.1 前端 → 后端 命令接口
-
-详见 `src-tauri/src/commands/mod.rs`，所有命令均遵循：
-- 参数：使用 `serde::Deserialize` 结构体
-- 返回值：`Result<T, String>`（成功返回数据，失败返回错误字符串）
-- 状态访问：通过 `tauri::State<AppState>` 获取共享状态
-
-### 6.2 后端 → 前端 事件接口（预留）
-
-计划使用 Tauri 的 `emit` 机制推送异步事件：
-
-| 事件名 | 数据 | 说明 |
-|--------|------|------|
-| `serial:data` | `SerialDataEvent` | 串口收到新数据 |
-| `serial:status` | `{ port_id, status }` | 串口连接状态变化 |
-| `system:status` | `SystemStatus` | 系统资源状态更新 |
-
-### 6.3 前端组件间接口
-
-通过 Zustand Store 共享状态，主要 Selector：
-- `selectActivePort(state)`：获取当前激活的串口
-- `selectActiveTerminal(state)`：获取当前激活的终端
+（与之前文档相同，后端接口无变更。）
 
 ---
 
@@ -463,6 +289,7 @@ SerialPort 读取线程
 
 ### 7.1 代码组织原则
 - 每个组件一个文件夹，包含 `.tsx` 文件
+- 共享组件放在 `src/components/shared/` 目录
 - 类型定义统一放在 `src/types/index.ts`
 - 状态管理统一放在 `src/stores/useAppStore.ts`
 - 后端每个模块一个文件夹，包含 `mod.rs`
@@ -471,9 +298,17 @@ SerialPort 读取线程
 - 前端：PascalCase 组件名，camelCase 变量/函数名
 - 后端：snake_case 函数/变量名，PascalCase 结构体名
 - 类型：前端 `Type` 后缀，后端 无特殊后缀
+- CSS class：kebab-case（`.port-item-name`, `.terminal-toolbar-title`）
 
-### 7.3 注释规范
-- 所有公共函数必须包含文档注释（`///` 或 `/** */`）
+### 7.3 样式规范（重要）
+- **禁止内联 `onMouseEnter`/`onMouseLeave` 实现 hover 效果**，统一使用 CSS `:hover` 或 `.active` class
+- **禁止内联 `style` 实现可复用的组件样式**，统一使用 CSS class
+- 新增组件样式应在 `src/styles.css` 中定义对应的 class
+- 右键菜单统一使用 `ContextMenu` 组件 + `useContextMenu` Hook
+- 图标统一使用 `lucide-react`，禁止使用 emoji 或特殊字符
+
+### 7.4 注释规范
+- 每个组件文件顶部应有简要注释说明组件用途
 - TODO 标记使用 `// TODO: 说明`
 - 复杂逻辑需要行内注释
 
@@ -481,22 +316,40 @@ SerialPort 读取线程
 
 ## 八、附录
 
-### 8.1 相关文件索引
+### 8.1 前端依赖清单
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| react | ^18.3.1 | UI 框架 |
+| react-dom | ^18.3.1 | DOM 渲染 |
+| zustand | ^5.0.13 | 状态管理 |
+| immer | ^11.1.6 | 不可变数据更新 |
+| lucide-react | latest | 矢量图标库 |
+| @tauri-apps/api | ^2.0.0 | Tauri 前端 API |
+| @tauri-apps/plugin-shell | ^2.0.0 | Shell 插件 |
+
+### 8.2 相关文件索引
 
 | 文件 | 说明 |
 |------|------|
-| `plans/requirements.md` | 原始需求文档 |
-| `plans/UI.png` | UI 参考设计图 |
+| `src/components/shared/ContextMenu.tsx` | 共享右键菜单组件 |
+| `src/components/TitleBar/TitleBar.tsx` | 标题栏（lucide 图标） |
+| `src/components/Sidebar/Sidebar.tsx` | 串口边栏（右键菜单 + AliasDialog） |
+| `src/components/MainDisplay/MainDisplay.tsx` | 主显示区（lucide 分屏图标） |
+| `src/components/MainDisplay/TabBar.tsx` | 标签栏（共享 ContextMenu） |
+| `src/components/MainDisplay/TerminalView.tsx` | 终端视图（右键菜单 + HEX 转换） |
+| `src/components/OperationPanel/OperationPanel.tsx` | 操作面板（lucide 图标全套） |
+| `src/components/StatusBar/StatusBar.tsx` | 状态栏（lucide 图标） |
+| `src/components/ConfigModal/ConfigModal.tsx` | 配置弹窗（lucide 图标 + CSS class） |
+| `src/styles.css` | 全局样式（含亮色主题、组件 class 体系） |
 | `src/types/index.ts` | 前端类型定义 |
 | `src/stores/useAppStore.ts` | 前端状态管理 |
-| `src-tauri/src/lib.rs` | 后端主入口 |
-| `src-tauri/src/commands/mod.rs` | Tauri 命令层 |
-| `src-tauri/Cargo.toml` | Rust 依赖配置 |
 
-### 8.2 外部依赖文档
+### 8.3 外部依赖文档
 
 - [Tauri v2](https://v2.tauri.app/)
 - [serialport-rs](https://github.com/serialport/serialport-rs)
 - [sqlx](https://github.com/launchbadge/sqlx)
 - [Zustand](https://github.com/pmndrs/zustand)
 - [Immer](https://immerjs.github.io/immer/)
+- [Lucide React](https://lucide.dev/)
