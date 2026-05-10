@@ -78,6 +78,7 @@ interface AppState {
   tabs: TabItem[];
   panes: SplitPane[];
   activeTabId: string | null;
+  focusedPaneId: string;
   
   // --- 终端内容 (按串口ID索引) ---
   terminals: Record<string, TerminalState>;
@@ -135,7 +136,9 @@ interface AppState {
   pinTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   moveTabToPane: (tabId: string, paneId: string) => void;
-  splitPane: (paneId: string, direction: 'horizontal' | 'vertical') => void;
+  splitPane: (direction: 'horizontal' | 'vertical') => void;
+  removePane: (paneId: string) => void;
+  setFocusedPane: (paneId: string) => void;
   
   // 终端内容
   appendTerminalLine: (portId: string, line: TerminalState['lines'][number]) => void;
@@ -172,8 +175,9 @@ export const useAppStore = create<AppState>()(
     ports: [],
     groups: [],
     tabs: [],
-    panes: [{ id: 'main', direction: 'horizontal', tabIds: [], size: 1 }],
+    panes: [{ id: 'main', direction: 'vertical', tabIds: [], size: 1 }],
     activeTabId: null,
+    focusedPaneId: 'main',
     terminals: {},
     highlightRuleSets: [],
     activeHighlightSetId: null,
@@ -233,6 +237,7 @@ export const useAppStore = create<AppState>()(
     
     openTab: (portId) => set((state) => {
       const existing = state.tabs.find(t => t.id === portId);
+      const targetPaneId = state.focusedPaneId || state.panes[0]?.id || 'main';
       if (!existing) {
         const port = state.ports.find(p => p.id === portId);
         const tab: TabItem = {
@@ -240,12 +245,13 @@ export const useAppStore = create<AppState>()(
           title: port ? `${port.id} ${port.alias || ''}`.trim() : portId,
           isPinned: false,
           isActive: true,
-          splitPaneId: state.panes[0]?.id || 'main',
+          splitPaneId: targetPaneId,
         };
         state.tabs.forEach(t => t.isActive = false);
         state.tabs.push(tab);
         state.activeTabId = portId;
-        // 确保终端状态存在
+        const pane = state.panes.find(p => p.id === targetPaneId);
+        if (pane) pane.tabIds.push(portId);
         if (!state.terminals[portId]) {
           state.terminals[portId] = {
             lines: [],
@@ -260,13 +266,28 @@ export const useAppStore = create<AppState>()(
         state.tabs.forEach(t => t.isActive = false);
         existing.isActive = true;
         state.activeTabId = portId;
+        state.focusedPaneId = existing.splitPaneId;
       }
     }),
     
     closeTab: (tabId) => set((state) => {
+      const tab = state.tabs.find(t => t.id === tabId);
+      const paneId = tab?.splitPaneId;
       state.tabs = state.tabs.filter(t => t.id !== tabId);
+      if (paneId) {
+        const pane = state.panes.find(p => p.id === paneId);
+        if (pane) pane.tabIds = pane.tabIds.filter(id => id !== tabId);
+        if (pane && pane.tabIds.length === 0 && state.panes.length > 1) {
+          state.panes = state.panes.filter(p => p.id !== paneId);
+          if (state.focusedPaneId === paneId) {
+            state.focusedPaneId = state.panes[0]?.id || 'main';
+          }
+        }
+      }
       if (state.activeTabId === tabId) {
-        state.activeTabId = state.tabs[state.tabs.length - 1]?.id || null;
+        const remaining = state.tabs.length > 0 ? state.tabs[state.tabs.length - 1] : null;
+        state.activeTabId = remaining?.id || null;
+        if (remaining) state.focusedPaneId = remaining.splitPaneId;
       }
     }),
     
@@ -274,8 +295,20 @@ export const useAppStore = create<AppState>()(
       const idx = state.tabs.findIndex(t => t.id === tabId);
       if (idx >= 0) {
         const removed = state.tabs.splice(idx + 1);
+        for (const r of removed) {
+          const pane = state.panes.find(p => p.id === r.splitPaneId);
+          if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
+        }
+        // Remove empty panes
+        const emptyPaneIds = state.panes.filter(p => p.tabIds.length === 0).map(p => p.id);
+        for (const pid of emptyPaneIds) {
+          if (state.panes.length > 1) {
+            state.panes = state.panes.filter(p => p.id !== pid);
+          }
+        }
         if (state.activeTabId && removed.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
+          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
         }
       }
     }),
@@ -284,8 +317,19 @@ export const useAppStore = create<AppState>()(
       const idx = state.tabs.findIndex(t => t.id === tabId);
       if (idx > 0) {
         const removed = state.tabs.splice(0, idx);
+        for (const r of removed) {
+          const pane = state.panes.find(p => p.id === r.splitPaneId);
+          if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
+        }
+        const emptyPaneIds = state.panes.filter(p => p.tabIds.length === 0).map(p => p.id);
+        for (const pid of emptyPaneIds) {
+          if (state.panes.length > 1) {
+            state.panes = state.panes.filter(p => p.id !== pid);
+          }
+        }
         if (state.activeTabId && removed.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
+          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
         }
       }
     }),
@@ -293,8 +337,20 @@ export const useAppStore = create<AppState>()(
     closeOtherTabs: (tabId) => set((state) => {
       const target = state.tabs.find(t => t.id === tabId);
       if (target) {
+        const removed = state.tabs.filter(t => t.id !== tabId);
+        for (const r of removed) {
+          const pane = state.panes.find(p => p.id === r.splitPaneId);
+          if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
+        }
+        const emptyPaneIds = state.panes.filter(p => p.tabIds.length === 0).map(p => p.id);
+        for (const pid of emptyPaneIds) {
+          if (state.panes.length > 1) {
+            state.panes = state.panes.filter(p => p.id !== pid);
+          }
+        }
         state.tabs = [target];
         state.activeTabId = tabId;
+        state.focusedPaneId = target.splitPaneId;
       }
     }),
     
@@ -309,25 +365,86 @@ export const useAppStore = create<AppState>()(
       if (tab) {
         tab.isActive = true;
         state.activeTabId = tabId;
+        state.focusedPaneId = tab.splitPaneId;
       }
     }),
     
     moveTabToPane: (tabId, paneId) => set((state) => {
       const tab = state.tabs.find(t => t.id === tabId);
-      if (tab) tab.splitPaneId = paneId;
+      if (!tab) return;
+      const oldPaneId = tab.splitPaneId;
+      if (oldPaneId === paneId) return;
+      // Remove from old pane
+      const oldPane = state.panes.find(p => p.id === oldPaneId);
+      if (oldPane) oldPane.tabIds = oldPane.tabIds.filter(id => id !== tabId);
+      // Add to new pane
+      const newPane = state.panes.find(p => p.id === paneId);
+      if (newPane) {
+        newPane.tabIds.push(tabId);
+        tab.splitPaneId = paneId;
+        state.focusedPaneId = paneId;
+        state.activeTabId = tabId;
+        state.tabs.forEach(t => t.isActive = false);
+        tab.isActive = true;
+      }
+      // Remove empty old pane
+      if (oldPane && oldPane.tabIds.length === 0 && state.panes.length > 1) {
+        state.panes = state.panes.filter(p => p.id !== oldPaneId);
+        if (state.focusedPaneId === oldPaneId) {
+          state.focusedPaneId = paneId;
+        }
+      }
     }),
     
-    splitPane: (_paneId, direction) => set((state) => {
-      // TODO: 实现分屏逻辑 - 创建新pane并移动当前激活tab
-      const newPaneId = `pane-${Date.now()}`;
-      state.panes.push({
-        id: newPaneId,
-        direction,
-        tabIds: state.activeTabId ? [state.activeTabId] : [],
-        size: 0.5,
-      });
+    splitPane: (direction) => set((state) => {
       const activeTab = state.tabs.find(t => t.id === state.activeTabId);
-      if (activeTab) activeTab.splitPaneId = newPaneId;
+      const sourcePaneId = activeTab?.splitPaneId || state.focusedPaneId;
+      const newPaneId = `pane-${Date.now()}`;
+      const sourcePane = state.panes.find(p => p.id === sourcePaneId);
+      
+      // Reduce size of source pane
+      if (sourcePane) sourcePane.size = 0.5;
+      
+      // Create new pane
+      const newPane: SplitPane = {
+        id: newPaneId,
+        direction: direction === 'horizontal' ? 'vertical' : 'horizontal',
+        tabIds: activeTab ? [activeTab.id] : [],
+        size: 0.5,
+      };
+      state.panes.push(newPane);
+      
+      // Move active tab to new pane
+      if (activeTab && sourcePane) {
+        sourcePane.tabIds = sourcePane.tabIds.filter(id => id !== activeTab.id);
+        activeTab.splitPaneId = newPaneId;
+        state.focusedPaneId = newPaneId;
+      }
+    }),
+    
+    removePane: (paneId) => set((state) => {
+      if (state.panes.length <= 1) return;
+      const pane = state.panes.find(p => p.id === paneId);
+      if (pane) {
+        // Move tabs to main pane
+        const mainPane = state.panes.find(p => p.id !== paneId);
+        if (mainPane) {
+          for (const tabId of pane.tabIds) {
+            const tab = state.tabs.find(t => t.id === tabId);
+            if (tab) {
+              tab.splitPaneId = mainPane.id;
+              mainPane.tabIds.push(tabId);
+            }
+          }
+          mainPane.size = 1;
+        }
+        state.panes = state.panes.filter(p => p.id !== paneId);
+        state.focusedPaneId = state.panes[0]?.id || 'main';
+      }
+    }),
+    
+    setFocusedPane: (paneId) => set((state) => {
+      state.focusedPaneId = paneId;
     }),
     
     appendTerminalLine: (portId, line) => set((state) => {
@@ -397,4 +514,8 @@ export const selectActivePort = (state: AppState): SerialPort | undefined => {
 export const selectActiveTerminal = (state: AppState): TerminalState | undefined => {
   if (!state.activeTabId) return undefined;
   return state.terminals[state.activeTabId];
+};
+
+export const selectActivePane = (state: AppState): SplitPane | undefined => {
+  return state.panes.find(p => p.id === state.focusedPaneId);
 };

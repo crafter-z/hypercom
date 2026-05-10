@@ -17,6 +17,8 @@ const App: React.FC = () => {
       style={{
         width: '100vw',
         height: '100vh',
+        minWidth: 720,
+        minHeight: 480,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
@@ -27,12 +29,12 @@ const App: React.FC = () => {
       <TitleBar />
 
       {/* 主体内容区 */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
         {/* 左侧串口管理边栏 */}
         <Sidebar />
 
         {/* 中间主区域 */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 400 }}>
           {/* 主显示窗口 */}
           <MainDisplay />
 

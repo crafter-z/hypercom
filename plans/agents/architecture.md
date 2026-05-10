@@ -174,6 +174,7 @@ interface AppState {
   tabs: TabItem[];
   panes: SplitPane[];
   activeTabId: string | null;
+  focusedPaneId: string;
   
   // 终端内容（按串口ID索引）
   terminals: Record<string, TerminalState>;
@@ -221,7 +222,10 @@ interface AppState {
 | `setPorts` / `updatePort` | 更新串口列表/单个串口状态 |
 | `openTab` / `closeTab` / `setActiveTab` | 标签页管理 |
 | `pinTab` / `closeTabsToRight` / `closeTabsToLeft` / `closeOtherTabs` | 标签页高级操作 |
-| `splitPane` | 分屏（预留） |
+| `splitPane(direction)` | 创建分屏（'horizontal'|'vertical'），当前活动标签移入新分屏 |
+| `removePane` | 移除分屏（将其标签合并到另一分屏） |
+| `setFocusedPane` | 设置当前聚焦分屏 |
+| `moveTabToPane` | 将标签页移动到指定分屏 |
 | `appendTerminalLine` / `clearTerminal` | 终端内容操作 |
 | `setConfig` / `resetConfig` | 配置更新/重置 |
 | `toggleConfigModal` / `setConfigActiveTab` | 配置弹窗控制 |

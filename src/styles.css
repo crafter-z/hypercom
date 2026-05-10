@@ -428,3 +428,53 @@ body {
 .animate-slide-up {
   animation: slideUp 0.2s ease;
 }
+
+/* ==================== 分屏与面板 ==================== */
+
+/* 分屏容器 */
+.pane-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 可拖拽分割线 */
+.pane-resize-handle {
+  flex-shrink: 0;
+  z-index: 10;
+  transition: background var(--transition-fast);
+}
+
+.pane-resize-handle:hover {
+  background: var(--bg-active) !important;
+}
+
+.pane-resize-handle.dragging {
+  background: var(--bg-active) !important;
+}
+
+/* 操作面板折叠状态 */
+.operation-panel-collapsed {
+  height: 32px !important;
+  overflow: hidden;
+}
+
+/* 配置表单行 */
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.config-row > label:first-child {
+  min-width: 110px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* 分屏内的活动轮廓 */
+.pane-focused {
+  outline: 1px solid var(--bg-active);
+  outline-offset: -1px;
+}
