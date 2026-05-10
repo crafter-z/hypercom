@@ -1,11 +1,6 @@
-/**
- * 底部状态栏
- * 左侧显示系统状态、内存、CPU
- * 右侧显示当前串口流量统计 (TX/RX)
- */
-
 import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
+import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle } from 'lucide-react';
 
 const StatusBar: React.FC = () => {
   const { systemStatus, trafficStats, activeTabId } = useAppStore();
@@ -18,51 +13,38 @@ const StatusBar: React.FC = () => {
   };
 
   return (
-    <div
-      style={{
-        height: 'var(--statusbar-height)',
-        background: 'var(--bg-statusbar)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 12px',
-        fontSize: 12,
-        color: '#ffffff',
-        flexShrink: 0,
-      }}
-    >
-      {/* 左侧：系统状态 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4ec9b0' }} />
+    <div className="statusbar">
+      <div className="statusbar-left">
+        <span className="statusbar-item">
+          <span className="statusbar-dot" />
           {systemStatus.status}
         </span>
-
-        <span>
-          内存: {systemStatus.memoryUsedMB}MB / {systemStatus.memoryLimitMB}MB
-          {' '}
-          ({((systemStatus.memoryUsedMB / systemStatus.memoryLimitMB) * 100).toFixed(0)}%)
+        <span className="statusbar-item">
+          <MemoryStick size={12} />
+          {systemStatus.memoryUsedMB}MB / {systemStatus.memoryLimitMB}MB ({((systemStatus.memoryUsedMB / systemStatus.memoryLimitMB) * 100).toFixed(0)}%)
         </span>
-
-        <span>CPU: {systemStatus.cpuUsage.toFixed(1)}%</span>
+        <span className="statusbar-item">
+          <Cpu size={12} />
+          {systemStatus.cpuUsage.toFixed(1)}%
+        </span>
       </div>
 
-      {/* 右侧：流量统计 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+      <div className="statusbar-right">
         {activeTraffic ? (
           <>
-            <span style={{ color: '#4ec9b0' }}>
-              ↑ TX: {formatBytes(activeTraffic.txTotal)}
+            <span className="statusbar-item statusbar-tx">
+              <ArrowUpCircle size={12} />
+              TX: {formatBytes(activeTraffic.txTotal)}
             </span>
-            <span style={{ color: '#4fc1ff' }}>
-              ↓ RX: {formatBytes(activeTraffic.rxTotal)}
+            <span className="statusbar-item statusbar-rx">
+              <ArrowDownCircle size={12} />
+              RX: {formatBytes(activeTraffic.rxTotal)}
             </span>
           </>
         ) : (
-          <span style={{ opacity: 0.7 }}>未选择串口</span>
+          <span className="statusbar-item" style={{ opacity: 0.7 }}>未选择串口</span>
         )}
-
-        <span style={{ opacity: 0.8 }}>
+        <span className="statusbar-item" style={{ opacity: 0.8 }}>
           {new Date().toLocaleTimeString('zh-CN')}
         </span>
       </div>

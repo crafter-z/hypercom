@@ -1,18 +1,13 @@
-/**
- * 终端显示视图
- * 显示串口输入输出内容，支持语法高亮、右键菜单、编码切换
- * 内容只读，不可修改
- */
-
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import type { TerminalLine, TerminalState } from '../../types';
+import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
+import { useState } from 'react';
 
 interface TerminalViewProps {
   portId: string;
   terminal: TerminalState;
 }
 
-// ==================== 模拟数据 ====================
 const mockLines: TerminalLine[] = [
   { id: '1', timestamp: Date.now() - 10000, direction: 'RX', content: 'System start, version: 1.2.3', isHex: false },
   { id: '2', timestamp: Date.now() - 9000, direction: 'RX', content: 'Heap size: 520KB, Stack: 8KB', isHex: false },
@@ -25,82 +20,111 @@ const mockLines: TerminalLine[] = [
   { id: '9', timestamp: Date.now() - 2000, direction: 'RX', content: '0A 0D 1B 7F 55 AA 10 20 30 40', isHex: true },
 ];
 
+function hexToString(hex: string): string {
+  const bytes = hex.trim().split(/\s+/);
+  return bytes.map(b => {
+    const code = parseInt(b, 16);
+    return isNaN(code) ? '?' : String.fromCharCode(code);
+  }).join('');
+}
+
+function stringToHex(str: string): string {
+  return Array.from(str).map(c => c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')).join(' ');
+}
+
 const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const lines = terminal?.lines?.length ? terminal.lines : mockLines;
 
-  // 自动滚动到底部
   useEffect(() => {
-    if (scrollRef.current && terminal?.scrollLocked) {
+    if (scrollRef.current && terminal?.scrollLocked !== false) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [lines, terminal?.scrollLocked]);
+  }, [lines.length, terminal?.scrollLocked]);
 
   const formatTimestamp = (ts: number): string => {
     const d = new Date(ts);
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}.${d.getMilliseconds().toString().padStart(3, '0')}`;
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
   };
 
-  const handleContextMenu = (e: React.MouseEvent) => {
+  const handleSelectAll = useCallback(() => {
+    const sel = window.getSelection();
+    if (sel && scrollRef.current) {
+      const range = document.createRange();
+      range.selectNodeContents(scrollRef.current);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    const sel = window.getSelection();
+    if (sel && sel.toString()) {
+      navigator.clipboard.writeText(sel.toString());
+    }
+  }, []);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    // TODO: 显示右键菜单（全选、复制、HEX转换等）
+    const items: ContextMenuEntry[] = [
+      { label: '全选', onClick: handleSelectAll },
+      { label: '复制', onClick: handleCopy },
+      { type: 'separator' },
+      { label: '复制为 HEX', onClick: () => {
+        const sel = window.getSelection();
+        if (sel && sel.toString()) navigator.clipboard.writeText(stringToHex(sel.toString()));
+      }},
+      { label: '从 HEX 转文本', onClick: () => {
+        const sel = window.getSelection();
+        if (sel && sel.toString()) navigator.clipboard.writeText(hexToString(sel.toString()));
+      }},
+    ];
+    setContextMenu({ x: e.clientX, y: e.clientY, items });
+  }, [handleSelectAll, handleCopy]);
+
+  const directionColor = (dir: string) => {
+    if (dir === 'TX') return 'var(--terminal-tx-color)';
+    return 'var(--terminal-rx-color)';
   };
 
   return (
-    <div
-      ref={scrollRef}
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        padding: '8px 12px',
-        background: 'var(--bg-primary)',
-        fontFamily: 'var(--font-terminal)',
-        fontSize: 'var(--font-size-terminal)',
-        lineHeight: 'var(--line-height-terminal)',
-        cursor: 'text',
-        userSelect: 'text',
-      }}
-      onContextMenu={handleContextMenu}
-    >
-      {lines.map((line) => (
-        <div
-          key={line.id}
-          style={{
-            display: 'flex',
-            gap: 8,
-            padding: '1px 0',
-            color: line.direction === 'TX' ? 'var(--text-warning)' : 'var(--text-primary)',
-          }}
-        >
-          {/* 时间戳 */}
-          {terminal?.showTimestamp !== false && (
-            <span style={{ color: 'var(--text-secondary)', flexShrink: 0, userSelect: 'none' }}>
-              {formatTimestamp(line.timestamp)}
-            </span>
-          )}
-
-          {/* 方向标识 */}
-          <span
-            style={{
-              color: line.direction === 'TX' ? 'var(--text-warning)' : 'var(--text-link)',
-              fontWeight: 600,
-              flexShrink: 0,
-              minWidth: 24,
-              userSelect: 'none',
-            }}
+    <div className="terminal-view-container">
+      <div
+        ref={scrollRef}
+        className="terminal-view"
+        onContextMenu={handleContextMenu}
+      >
+        {lines.map((line) => (
+          <div
+            key={line.id}
+            className="terminal-line"
           >
-            {line.direction}
-          </span>
+            {terminal?.showTimestamp !== false && (
+              <span className="terminal-timestamp">{formatTimestamp(line.timestamp)}</span>
+            )}
+            <span
+              className="terminal-direction"
+              style={{ color: directionColor(line.direction) }}
+            >
+              {line.direction}
+            </span>
+            <span className="terminal-content">
+              {line.content}
+            </span>
+          </div>
+        ))}
+        <div style={{ height: 8 }} />
+      </div>
 
-          {/* 内容 */}
-          <span style={{ wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>
-            {line.content}
-          </span>
-        </div>
-      ))}
-
-      {/* 底部占位，确保滚动空间 */}
-      <div style={{ height: 8 }} />
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 };

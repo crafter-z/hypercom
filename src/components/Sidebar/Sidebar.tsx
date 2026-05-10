@@ -1,14 +1,13 @@
-/**
- * 左侧串口管理边栏
- * 包含顶部工具栏、串口列表、分组管理、右键菜单
- * 状态由 Zustand 统一管理
- */
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import type { SerialPort, PortGroup, PortStatus } from '../../types';
+import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
+import {
+  Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
+  ChevronRight, Plus, X, Search,
+  PlugZap, Pencil, Unplug, ExternalLink
+} from 'lucide-react';
 
-// ==================== 初始化模拟数据 ====================
 const mockPorts: SerialPort[] = [
   { id: 'COM3', name: 'COM3', alias: 'STM32_TTY', status: 'connected', type: 'real', isHidden: false, groupId: 'group1', baudRate: 115200 },
   { id: 'COM4', name: 'COM4', alias: 'ESP32-DevKit', status: 'error', type: 'real', isHidden: false, groupId: 'group1', baudRate: 115200 },
@@ -26,128 +25,128 @@ const mockGroups: PortGroup[] = [
   { id: 'group3', name: '虚拟端口', isExpanded: true, portIds: ['COM9', 'COM10'], order: 2 },
 ];
 
-// ==================== 子组件：顶部工具栏 ====================
-
 const SidebarToolbar: React.FC<{ showHidden: boolean; onToggleHidden: () => void }> = ({ showHidden, onToggleHidden }) => {
   const { setPorts } = useAppStore();
 
   return (
-    <div className="toolbar" style={{ padding: '6px 8px', justifyContent: 'space-between' }}>
-      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>串口管理</span>
-      <div style={{ display: 'flex', gap: 2 }}>
-        <button className="btn btn-icon btn-sm" title="一键打开全部">▶</button>
-        <button className="btn btn-icon btn-sm" title="一键关闭全部">⏹</button>
+    <div className="sidebar-toolbar">
+      <span className="sidebar-toolbar-title">串口管理</span>
+      <div className="sidebar-toolbar-actions">
+        <button className="btn btn-icon btn-sm" title="一键打开全部"><Play size={14} /></button>
+        <button className="btn btn-icon btn-sm" title="一键关闭全部"><Square size={14} /></button>
         <button
-          className="btn btn-icon btn-sm"
-          title={showHidden ? '隐藏' : '显示已隐藏串口'}
+          className={`btn btn-icon btn-sm${showHidden ? ' active' : ''}`}
+          title={showHidden ? '隐藏已隐藏串口' : '显示已隐藏串口'}
           onClick={onToggleHidden}
-          style={{ color: showHidden ? 'var(--text-link)' : undefined }}
         >
-          👁
+          {showHidden ? <Eye size={14} /> : <EyeOff size={14} />}
         </button>
-        <button className="btn btn-icon btn-sm" title="按端口号排序">⇅</button>
-        <button className="btn btn-icon btn-sm" title="保存布局">💾</button>
-        <button className="btn btn-icon btn-sm" title="刷新串口列表" onClick={() => setPorts(mockPorts)}>↻</button>
+        <button className="btn btn-icon btn-sm" title="按端口号排序"><ArrowUpDown size={14} /></button>
+        <button className="btn btn-icon btn-sm" title="保存布局"><Save size={14} /></button>
+        <button className="btn btn-icon btn-sm" title="刷新串口列表" onClick={() => setPorts(mockPorts)}><RefreshCw size={14} /></button>
       </div>
     </div>
   );
 };
 
-// ==================== 子组件：搜索框 ====================
-
 const SearchBox: React.FC<{ value: string; onChange: (v: string) => void }> = ({ value, onChange }) => {
   return (
-    <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-color)' }}>
+    <div className="sidebar-search">
+      <Search size={14} className="sidebar-search-icon" />
       <input
-        className="input"
-        style={{ width: '100%', fontSize: 12 }}
-        placeholder="搜索串口或备注名..."
+        className="sidebar-search-input"
+        placeholder="搜索串口..."
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
+      {value && (
+        <button className="sidebar-search-clear" onClick={() => onChange('')}>
+          <X size={12} />
+        </button>
+      )}
     </div>
   );
 };
-
-// ==================== 子组件：串口项 ====================
 
 interface PortItemProps {
   port: SerialPort;
   isConnected: boolean;
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
+  onSetAlias: (portId: string) => void;
+  onHidePort: (portId: string) => void;
+  onShowPort: (portId: string) => void;
 }
 
-const PortItem: React.FC<PortItemProps> = ({ port, isConnected, onOpenTab, onToggleConnect }) => {
+const PortItem: React.FC<PortItemProps> = ({
+  port,
+  isConnected,
+  onOpenTab,
+  onToggleConnect,
+  onSetAlias,
+  onHidePort,
+  onShowPort,
+}) => {
+  const { show, element } = useContextMenu();
+
   const statusColor = {
     disconnected: 'var(--status-disconnected)',
     error: 'var(--status-error)',
     connected: 'var(--status-connected)',
   }[port.status];
 
+  const statusLabel = {
+    disconnected: '未连接',
+    error: '错误',
+    connected: '已连接',
+  }[port.status];
+
+  const items: ContextMenuEntry[] = [
+    { label: isConnected ? '断开连接' : '连接串口', icon: isConnected ? <Unplug size={14} /> : <PlugZap size={14} />, onClick: () => onToggleConnect(port.id) },
+    { type: 'separator' },
+    { label: '设置备注名', icon: <Pencil size={14} />, onClick: () => onSetAlias(port.id) },
+    { label: '在标签页中打开', icon: <ExternalLink size={14} />, onClick: () => onOpenTab(port.id) },
+    { type: 'separator' },
+    port.isHidden
+      ? { label: '取消隐藏', icon: <Eye size={14} />, onClick: () => onShowPort(port.id) }
+      : { label: '隐藏此串口', icon: <EyeOff size={14} />, onClick: () => onHidePort(port.id) },
+  ];
+
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '5px 10px',
-        cursor: 'pointer',
-        transition: 'background var(--transition-fast)',
-        borderLeft: `3px solid ${statusColor}`,
-      }}
-      onDoubleClick={() => onOpenTab(port.id)}
-      onContextMenu={(e) => e.preventDefault()}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-    >
-      {/* 状态指示 */}
+    <>
       <div
-        className="status-dot"
-        style={{ background: statusColor, boxShadow: `0 0 4px ${statusColor}` }}
-      />
-
-      {/* 串口信息 */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-            {port.id}
-          </span>
-          {port.alias && (
-            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }} className="text-ellipsis">
-              {port.alias}
-            </span>
-          )}
-          {port.type === 'virtual' && (
-            <span style={{ fontSize: 9, color: 'var(--text-secondary)', border: '1px solid var(--border-color)', borderRadius: 2, padding: '0 3px' }}>
-              VCP
-            </span>
-          )}
-        </div>
-        {port.baudRate && (
-          <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 2 }}>
-            {port.baudRate},{port.dataBits || 8}{port.parity?.[0] || 'N'}{port.stopBits === 'One' ? '1' : port.stopBits === 'Two' ? '2' : '1.5'}
-          </div>
-        )}
-      </div>
-
-      {/* 连接/断开按钮 */}
-      <button
-        className="btn btn-icon btn-sm"
-        title={isConnected ? '断开连接' : '连接串口'}
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleConnect(port.id);
-        }}
-        style={{ color: isConnected ? 'var(--status-connected)' : 'var(--status-disconnected)' }}
+        className="port-item"
+        onDoubleClick={() => onOpenTab(port.id)}
+        onContextMenu={(e) => show(e, items)}
       >
-        {isConnected ? '⏹' : '▶'}
-      </button>
-    </div>
+        <div className="port-item-status" style={{ backgroundColor: statusColor, boxShadow: port.status === 'connected' ? `0 0 6px ${statusColor}` : 'none' }} />
+        <div className="port-item-info">
+          <div className="port-item-title">
+            <span className="port-item-name">{port.id}</span>
+            {port.alias && <span className="port-item-alias">{port.alias}</span>}
+            {port.type === 'virtual' && <span className="port-item-badge">VCP</span>}
+          </div>
+          <div className="port-item-meta">
+            <span style={{ color: statusColor }}>{statusLabel}</span>
+            {port.baudRate && (
+              <span className="port-item-baud">
+                {port.baudRate},{port.dataBits || 8}{port.parity?.[0] || 'N'}{port.stopBits === 'One' ? '1' : port.stopBits === 'Two' ? '2' : '1.5'}
+              </span>
+            )}
+          </div>
+        </div>
+        <button
+          className={`btn btn-icon btn-sm port-connect-btn${isConnected ? ' connected' : ''}`}
+          title={isConnected ? '断开连接' : '连接串口'}
+          onClick={(e) => { e.stopPropagation(); onToggleConnect(port.id); }}
+        >
+          {isConnected ? <Square size={12} /> : <Play size={12} />}
+        </button>
+      </div>
+      {element}
+    </>
   );
 };
-
-// ==================== 子组件：分组项 ====================
 
 interface GroupItemProps {
   group: PortGroup;
@@ -155,47 +154,43 @@ interface GroupItemProps {
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
   onToggleExpand: (groupId: string) => void;
+  onSetAlias: (portId: string) => void;
+  onHidePort: (portId: string) => void;
+  onShowPort: (portId: string) => void;
 }
 
-const GroupItem: React.FC<GroupItemProps> = ({ group, ports, onOpenTab, onToggleConnect, onToggleExpand }) => {
+const GroupItem: React.FC<GroupItemProps> = ({
+  group,
+  ports,
+  onOpenTab,
+  onToggleConnect,
+  onToggleExpand,
+  onSetAlias,
+  onHidePort,
+  onShowPort,
+}) => {
   const groupPorts = ports.filter(p => group.portIds.includes(p.id));
   const connectedCount = groupPorts.filter(p => p.status === 'connected').length;
 
   return (
-    <div style={{ marginBottom: 2 }}>
-      {/* 分组头部 */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '5px 10px',
-          cursor: 'pointer',
-          background: 'var(--bg-tertiary)',
-          borderBottom: '1px solid var(--border-color)',
-        }}
-        onClick={() => onToggleExpand(group.id)}
-      >
-        <span style={{
-          fontSize: 10,
-          transition: 'transform 0.2s',
-          transform: group.isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
-        }}>
-          ▶
-        </span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', flex: 1 }}>
-          {group.name}
-        </span>
-        <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>
-          {connectedCount}/{groupPorts.length}
-        </span>
-        <button className="btn btn-icon btn-sm" title="一键连接整组" onClick={(e) => e.stopPropagation()}>▶</button>
-        <button className="btn btn-icon btn-sm" title="一键断开整组" onClick={(e) => e.stopPropagation()}>⏹</button>
+    <div className="port-group">
+      <div className="port-group-header" onClick={() => onToggleExpand(group.id)}>
+        <ChevronRight
+          size={12}
+          className="port-group-chevron"
+          style={{ transform: group.isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
+        />
+        <span className="port-group-name">{group.name}</span>
+        <span className="port-group-count">{connectedCount}/{groupPorts.length}</span>
+        <button className="btn btn-icon btn-sm" title="一键连接整组" onClick={(e) => e.stopPropagation()}>
+          <Play size={10} />
+        </button>
+        <button className="btn btn-icon btn-sm" title="一键断开整组" onClick={(e) => e.stopPropagation()}>
+          <Square size={10} />
+        </button>
       </div>
-
-      {/* 分组内的串口 */}
       {group.isExpanded && (
-        <div>
+        <div className="port-group-list">
           {groupPorts.map(port => (
             <PortItem
               key={port.id}
@@ -203,6 +198,9 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports, onOpenTab, onToggle
               isConnected={port.status === 'connected'}
               onOpenTab={onOpenTab}
               onToggleConnect={onToggleConnect}
+              onSetAlias={onSetAlias}
+              onHidePort={onHidePort}
+              onShowPort={onShowPort}
             />
           ))}
         </div>
@@ -211,7 +209,37 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports, onOpenTab, onToggle
   );
 };
 
-// ==================== 主组件：侧边栏 ====================
+const AliasDialog: React.FC<{ portId: string; currentAlias: string; onSave: (alias: string) => void; onCancel: () => void }> = ({
+  portId,
+  currentAlias,
+  onSave,
+  onCancel,
+}) => {
+  const [value, setValue] = useState(currentAlias);
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
+        <h3 className="modal-dialog-title">设置备注名</h3>
+        <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+          为 <strong>{portId}</strong> 设置备注名
+        </p>
+        <input
+          className="input modal-dialog-input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="输入备注名..."
+          autoFocus
+          onKeyDown={(e) => { if (e.key === 'Enter') onSave(value); if (e.key === 'Escape') onCancel(); }}
+        />
+        <div className="modal-dialog-actions">
+          <button className="btn" onClick={onCancel}>取消</button>
+          <button className="btn btn-primary" onClick={() => onSave(value)}>确定</button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const Sidebar: React.FC = () => {
   const {
@@ -226,8 +254,8 @@ const Sidebar: React.FC = () => {
 
   const [showHidden, setShowHidden] = useState(false);
   const [search, setSearch] = useState('');
+  const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
 
-  // 首次加载时初始化模拟数据
   useEffect(() => {
     if (ports.length === 0) {
       setPorts(mockPorts);
@@ -235,9 +263,7 @@ const Sidebar: React.FC = () => {
     }
   }, []);
 
-  const handleOpenTab = useCallback((portId: string) => {
-    openTab(portId);
-  }, [openTab]);
+  const handleOpenTab = useCallback((portId: string) => { openTab(portId); }, [openTab]);
 
   const handleToggleConnect = useCallback((portId: string) => {
     const port = ports.find(p => p.id === portId);
@@ -248,39 +274,37 @@ const Sidebar: React.FC = () => {
 
   const handleToggleExpand = useCallback((groupId: string) => {
     const group = groups.find(g => g.id === groupId);
-    if (group) {
-      updateGroup(groupId, { isExpanded: !group.isExpanded });
-    }
+    if (group) updateGroup(groupId, { isExpanded: !group.isExpanded });
   }, [groups, updateGroup]);
 
-  // 过滤搜索
+  const handleSetAlias = useCallback((portId: string) => {
+    const port = ports.find(p => p.id === portId);
+    if (port) setAliasDialog({ portId, currentAlias: port.alias || '' });
+  }, [ports]);
+
+  const handleHidePort = useCallback((portId: string) => { updatePort(portId, { isHidden: true }); }, [updatePort]);
+  const handleShowPort = useCallback((portId: string) => { updatePort(portId, { isHidden: false }); }, [updatePort]);
+
+  const handleSaveAlias = useCallback((alias: string) => {
+    if (aliasDialog) {
+      updatePort(aliasDialog.portId, { alias: alias || undefined });
+      setAliasDialog(null);
+    }
+  }, [aliasDialog, updatePort]);
+
   const searchLower = search.toLowerCase();
   const filteredPorts = search
     ? ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)))
     : ports;
 
-  // 未分组的串口
   const ungroupedPorts = filteredPorts.filter(p => !p.groupId && (!p.isHidden || showHidden));
 
   return (
-    <div
-      style={{
-        width: 'var(--sidebar-width)',
-        minWidth: 200,
-        maxWidth: 400,
-        background: 'var(--bg-sidebar)',
-        borderRight: '1px solid var(--border-color)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-      }}
-    >
+    <div className="sidebar">
       <SidebarToolbar showHidden={showHidden} onToggleHidden={() => setShowHidden(!showHidden)} />
       <SearchBox value={search} onChange={setSearch} />
 
-      {/* 串口列表区域 */}
-      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
-        {/* 分组列表 */}
+      <div className="sidebar-list">
         {groups.map(group => {
           const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id));
           if (groupPorts.length === 0 && !search) return null;
@@ -292,21 +316,16 @@ const Sidebar: React.FC = () => {
               onOpenTab={handleOpenTab}
               onToggleConnect={handleToggleConnect}
               onToggleExpand={handleToggleExpand}
+              onSetAlias={handleSetAlias}
+              onHidePort={handleHidePort}
+              onShowPort={handleShowPort}
             />
           );
         })}
 
-        {/* 未分组的串口 */}
         {ungroupedPorts.length > 0 && (
-          <div style={{ marginTop: 4 }}>
-            <div style={{
-              padding: '3px 10px',
-              fontSize: 11,
-              color: 'var(--text-secondary)',
-              background: 'var(--bg-tertiary)',
-            }}>
-              未分组
-            </div>
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">未分组</div>
             {ungroupedPorts.map(port => (
               <PortItem
                 key={port.id}
@@ -314,22 +333,17 @@ const Sidebar: React.FC = () => {
                 isConnected={port.status === 'connected'}
                 onOpenTab={handleOpenTab}
                 onToggleConnect={handleToggleConnect}
+                onSetAlias={handleSetAlias}
+                onHidePort={handleHidePort}
+                onShowPort={handleShowPort}
               />
             ))}
           </div>
         )}
 
-        {/* 隐藏的串口区域 */}
         {showHidden && ports.filter(p => p.isHidden).length > 0 && (
-          <div style={{ marginTop: 4 }}>
-            <div style={{
-              padding: '3px 10px',
-              fontSize: 11,
-              color: 'var(--text-secondary)',
-              background: 'var(--bg-tertiary)',
-            }}>
-              已隐藏
-            </div>
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">已隐藏</div>
             {ports.filter(p => p.isHidden).map(port => (
               <PortItem
                 key={port.id}
@@ -337,18 +351,30 @@ const Sidebar: React.FC = () => {
                 isConnected={port.status === 'connected'}
                 onOpenTab={handleOpenTab}
                 onToggleConnect={handleToggleConnect}
+                onSetAlias={handleSetAlias}
+                onHidePort={handleHidePort}
+                onShowPort={handleShowPort}
               />
             ))}
           </div>
         )}
 
-        {/* 新建分组按钮 */}
-        <div style={{ padding: '8px 10px' }}>
-          <button className="btn" style={{ width: '100%', fontSize: 12 }}>
-            + 新建分组
+        <div className="sidebar-add-group">
+          <button className="btn sidebar-add-group-btn">
+            <Plus size={14} />
+            新建分组
           </button>
         </div>
       </div>
+
+      {aliasDialog && (
+        <AliasDialog
+          portId={aliasDialog.portId}
+          currentAlias={aliasDialog.currentAlias}
+          onSave={handleSaveAlias}
+          onCancel={() => setAliasDialog(null)}
+        />
+      )}
     </div>
   );
 };

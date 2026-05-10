@@ -1,15 +1,10 @@
-/**
- * 主串口显示窗口区
- * 支持多分屏渲染、标签页系统、终端显示
- * 每个分屏区域独立渲染自己的标签栏和终端
- */
-
 import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
-
-// ==================== 分屏面板 ====================
+import {
+  Plus, Columns2, Rows2
+} from 'lucide-react';
 
 interface PaneProps {
   paneId: string;
@@ -35,8 +30,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
   } = useAppStore();
 
   const paneTabs = tabs.filter(t => tabIds.includes(t.id));
-
-  // Per-pane display tab: use global activeTab if it belongs here, else local fallback
   const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);
   const displayTabId = (activeTabId && tabIds.includes(activeTabId))
     ? activeTabId
@@ -58,7 +51,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
     }
   }, [moveTabToPane, localActiveTabId, paneTabs.length]);
 
-  // Keep localActiveTabId in sync when tabs change
   useEffect(() => {
     if (localActiveTabId && !tabIds.includes(localActiveTabId)) {
       setLocalActiveTabId(tabIds[0] || null);
@@ -67,17 +59,9 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
 
   return (
     <div
-      style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        outline: isFocused ? '1px solid var(--bg-active)' : 'none',
-        outlineOffset: -1,
-      }}
+      className={`pane-container-inner${isFocused ? ' pane-focused' : ''}`}
       onClick={onFocus}
     >
-      {/* 标签栏 */}
       <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-secondary)' }}>
         <div style={{ flex: 1, overflow: 'hidden' }}>
           <TabBar
@@ -95,26 +79,16 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
         </div>
       </div>
 
-      {/* 终端工具栏 */}
       {displayTab && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '2px 12px',
-          background: 'var(--bg-secondary)',
-          borderBottom: '1px solid var(--border-color)',
-          fontSize: 11,
-          color: 'var(--text-secondary)',
-        }}>
+        <div className="terminal-toolbar">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span className="status-dot connected" />
-            <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{displayTab.title}</span>
-            <span>(115200, 8N1)</span>
+            <span className="terminal-toolbar-title">{displayTab.title}</span>
+            <span className="terminal-toolbar-info">(115200, 8N1)</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span>编码:</span>
-            <select className="select" style={{ fontSize: 11, padding: '1px 16px 1px 4px' }}>
+            <span className="terminal-toolbar-label">编码:</span>
+            <select className="select terminal-toolbar-select">
               <option>ASCII</option>
               <option>UTF-8</option>
               <option>GBK</option>
@@ -123,7 +97,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
         </div>
       )}
 
-      {/* 终端内容 */}
       <div style={{ flex: 1, overflow: 'hidden' }}>
         {paneTabs.length > 0 && displayTab ? (
           <TerminalView
@@ -131,15 +104,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
             terminal={terminals[displayTab.id]}
           />
         ) : paneTabs.length === 0 ? (
-          <div style={{
-            flex: 1,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-secondary)',
-            fontSize: 13,
-            height: '100%',
-          }}>
+          <div className="terminal-empty-state">
             双击左侧串口打开标签页
           </div>
         ) : null}
@@ -148,15 +113,12 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
   );
 };
 
-// ==================== 可拖拽分割线 ====================
-
 interface ResizeHandleProps {
   onResize: (delta: number) => void;
   direction: 'horizontal' | 'vertical';
 }
 
 const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction }) => {
-  const handleRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
@@ -176,25 +138,16 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction }) => {
   const isH = direction === 'vertical';
   return (
     <div
-      ref={handleRef}
+      className={`pane-resize-handle${dragging ? ' dragging' : ''}`}
       style={{
-        flexShrink: 0,
         width: isH ? 5 : '100%',
         height: isH ? '100%' : 5,
         cursor: isH ? 'col-resize' : 'row-resize',
-        background: dragging ? 'var(--bg-active)' : 'var(--border-color)',
-        transition: dragging ? 'none' : 'background 0.15s',
-        zIndex: 10,
       }}
-      onMouseDown={(e) => {
-        e.preventDefault();
-        setDragging(true);
-      }}
+      onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
     />
   );
 };
-
-// ==================== 主组件 ====================
 
 const MainDisplay: React.FC = () => {
   const {
@@ -211,7 +164,6 @@ const MainDisplay: React.FC = () => {
   );
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Sync sizes when panes change externally
   useEffect(() => {
     const total = panes.reduce((s, p) => s + p.size, 0) || 1;
     setPaneSizes(panes.map(p => (p.size / total) * 100));
@@ -234,18 +186,9 @@ const MainDisplay: React.FC = () => {
   }, []);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* 全局工具栏：分屏与标签操作 */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        background: 'var(--bg-secondary)',
-        borderBottom: '1px solid var(--border-color)',
-        padding: '2px 8px',
-        gap: 4,
-      }}>
+    <div className="main-display">
+      <div className="main-display-toolbar">
         <button className="btn btn-icon btn-sm" title="新建标签页" onClick={() => {
-          // Find an available port and open it
           const { ports } = useAppStore.getState();
           const openedPortIds = new Set(tabs.map(t => t.id));
           const available = ports.find(p => !openedPortIds.has(p.id));
@@ -254,28 +197,19 @@ const MainDisplay: React.FC = () => {
             openTab(available.id);
           }
         }}>
-          +
+          <Plus size={14} />
         </button>
-        <button
-          className="btn btn-icon btn-sm"
-          title="左右分屏 (垂直分割)"
-          onClick={() => splitPane('vertical')}
-        >
-          ⏶
+        <button className="btn btn-icon btn-sm" title="左右分屏" onClick={() => splitPane('vertical')}>
+          <Columns2 size={14} />
         </button>
-        <button
-          className="btn btn-icon btn-sm"
-          title="上下分屏 (水平分割)"
-          onClick={() => splitPane('horizontal')}
-        >
-          ⏷
+        <button className="btn btn-icon btn-sm" title="上下分屏" onClick={() => splitPane('horizontal')}>
+          <Rows2 size={14} />
         </button>
-        <span style={{ fontSize: 10, color: 'var(--text-secondary)', marginLeft: 4 }}>
-          {panes.length > 1 ? `${panes.length} 个分屏` : ''}
-        </span>
+        {panes.length > 1 && (
+          <span className="main-display-info">{panes.length} 个分屏</span>
+        )}
       </div>
 
-      {/* 分屏区 */}
       <div ref={containerRef} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {panes.map((pane, idx) => (
           <React.Fragment key={pane.id}>
@@ -304,16 +238,8 @@ const MainDisplay: React.FC = () => {
         ))}
       </div>
 
-      {/* 无分屏时的空状态 */}
       {(!tabs.length || !activeTabId) && panes.length <= 1 && (
-        <div style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--text-secondary)',
-          fontSize: 14,
-        }}>
+        <div className="terminal-empty-state" style={{ flex: 1 }}>
           请从左侧选择一个串口打开标签页
         </div>
       )}

@@ -1,12 +1,11 @@
-/**
- * 操作面板组件 (底部操作区)
- * 横向三栏布局：手动发送 | 自动循环 | 串口参数与视图
- * 支持折叠/展开
- */
-
 import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import type { DataBits, Parity, StopBits, Handshake, LineEnding } from '../../types';
+import {
+  Send, Cable, Eraser, Pin, Clock,
+  FileText, FolderOpen, FileSearch, Settings,
+  ChevronDown, ChevronUp, Play, Square, Edit3
+} from 'lucide-react';
 
 const OperationPanel: React.FC = () => {
   const {
@@ -39,7 +38,6 @@ const OperationPanel: React.FC = () => {
 
   const handleSend = () => {
     if (!isPortActive || !opSendInput.trim()) return;
-    // TODO: 调用Tauri命令发送数据
   };
 
   const openConfigToTab = (tab: string) => {
@@ -52,78 +50,39 @@ const OperationPanel: React.FC = () => {
   };
 
   return (
-    <div
-      style={{
-        background: 'var(--bg-secondary)',
-        borderTop: '1px solid var(--border-color)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        height: collapsed ? 32 : 'var(--operation-panel-height)',
-        minHeight: collapsed ? 32 : 200,
-        transition: 'height 0.2s ease',
-        flexShrink: 0,
-      }}
-    >
-      {/* 标题栏兼折叠按钮 */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '4px 12px',
-        borderBottom: collapsed ? 'none' : '1px solid var(--border-color)',
-        background: 'var(--bg-tertiary)',
-        cursor: 'pointer',
-        userSelect: 'none',
-      }}
-        onClick={toggleCollapse}
-      >
+    <div className={`operation-panel${collapsed ? ' collapsed' : ''}`}>
+      <div className="operation-panel-header" onClick={toggleCollapse}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            fontSize: 10,
-            transition: 'transform 0.2s',
-            transform: collapsed ? 'rotate(-90deg)' : 'rotate(90deg)',
-          }}>
-            ▶
-          </span>
-          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>
-            操作面板
-          </span>
+          {collapsed ? (
+            <ChevronDown size={12} style={{ transition: 'transform 0.2s' }} />
+          ) : (
+            <ChevronUp size={12} style={{ transition: 'transform 0.2s' }} />
+          )}
+          <span className="operation-panel-title">操作面板</span>
           {isPortActive && (
-            <span style={{ fontSize: 11, color: 'var(--text-primary)' }}>{activeTabId}</span>
+            <span className="operation-panel-port">{activeTabId}</span>
           )}
         </div>
         {!collapsed && (
           <button
             className="btn btn-icon btn-sm"
-            title="收起操作面板"
+            title="收起"
             onClick={(e) => { e.stopPropagation(); toggleCollapse(); }}
-            style={{ fontSize: 14 }}
           >
-            ✕
+            <ChevronDown size={14} />
           </button>
         )}
       </div>
 
-      {/* 操作区内容 */}
       {!collapsed && (
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden', padding: '8px 12px', gap: 12 }}>
-
-          {/* ========== 左侧：手动发送与基础控制 ========== */}
-          <div style={{ flex: 1.2, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+        <div className="operation-panel-content">
+          {/* Left: Send & Control */}
+          <div className="op-section op-section-send">
             <div className="panel-card-title">发送命令 & 基础控制</div>
 
-            {/* 发送输入区 */}
-            <div style={{ display: 'flex', gap: 8, alignItems: 'stretch', minHeight: 0 }}>
+            <div className="op-send-row">
               <textarea
-                className="input"
-                style={{
-                  flex: 1,
-                  resize: 'none',
-                  fontFamily: 'var(--font-terminal)',
-                  fontSize: 13,
-                  minHeight: 52,
-                }}
+                className="input op-send-input"
                 placeholder={isPortActive ? '输入发送内容...' : '未选择串口'}
                 disabled={!isPortActive}
                 value={opSendInput}
@@ -135,17 +94,16 @@ const OperationPanel: React.FC = () => {
                   }
                 }}
               />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, justifyContent: 'flex-end' }}>
+              <div className="op-send-actions">
                 <button
-                  className="btn btn-primary"
-                  style={{ minWidth: 56, padding: '6px 14px', fontSize: 14, fontWeight: 600 }}
+                  className="btn btn-primary op-send-btn"
                   disabled={!isPortActive}
                   onClick={handleSend}
                 >
+                  <Send size={14} />
                   发送
                 </button>
-                {/* 发送选项 - 紧凑排布 */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 10, color: 'var(--text-secondary)' }}>
+                <div className="op-send-options">
                   <label className="checkbox-wrapper" style={{ fontSize: 10 }}>
                     <input
                       type="checkbox"
@@ -169,44 +127,41 @@ const OperationPanel: React.FC = () => {
               </div>
             </div>
 
-            {/* 基础控制按钮 */}
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div className="op-btn-row">
               <button className="btn" style={{ flex: 1 }}>
-                {isPortActive ? '断开串口' : '打开串口'}
+                {isPortActive ? <><Cable size={13} /> 断开串口</> : <><Cable size={13} /> 打开串口</>}
               </button>
-              <button className="btn" title="清空终端显示内容">清屏</button>
+              <button className="btn" title="清屏"><Eraser size={13} /> 清屏</button>
             </div>
           </div>
 
           <div className="divider" style={{ margin: '0 4px' }} />
 
-          {/* ========== 中间：自动循环与规则应用 ========== */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+          {/* Middle: Loop Send & Rules */}
+          <div className="op-section op-section-rules">
             <div className="panel-card-title">循环发送 & 规则</div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 56 }}>高亮规则:</span>
-                <select className="select" style={{ flex: 1, fontSize: 11, padding: '2px 16px 2px 4px' }}>
-                  <option>默认规则集</option>
-                </select>
-                <button className="btn btn-icon btn-sm" title="编辑高亮规则" onClick={() => openConfigToTab('highlight')}>
-                  ⚙
-                </button>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 56 }}>命令集:</span>
-                <select className="select" style={{ flex: 1, fontSize: 11, padding: '2px 16px 2px 4px' }}>
-                  <option>AT指令集</option>
-                </select>
-                <button className="btn btn-icon btn-sm" title="编辑发送命令" onClick={() => openConfigToTab('commands')}>
-                  ✎
-                </button>
-              </div>
+            <div className="op-rule-row">
+              <span className="op-label">高亮规则:</span>
+              <select className="select op-rule-select">
+                <option>默认规则集</option>
+              </select>
+              <button className="btn btn-icon btn-sm" title="编辑高亮规则" onClick={() => openConfigToTab('highlight')}>
+                <Settings size={12} />
+              </button>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+            <div className="op-rule-row">
+              <span className="op-label">命令集:</span>
+              <select className="select op-rule-select">
+                <option>AT指令集</option>
+              </select>
+              <button className="btn btn-icon btn-sm" title="编辑发送命令" onClick={() => openConfigToTab('commands')}>
+                <Edit3 size={12} />
+              </button>
+            </div>
+
+            <div className="op-loop-row">
               {!opIsLoopSending ? (
                 <button
                   className="btn btn-primary"
@@ -214,20 +169,19 @@ const OperationPanel: React.FC = () => {
                   disabled={!isPortActive}
                   onClick={() => setOpState({ opIsLoopSending: true })}
                 >
-                  ▶ 开始循环发送
+                  <Play size={13} /> 开始循环
                 </button>
               ) : (
                 <button
-                  className="btn"
-                  style={{ flex: 1, color: 'var(--text-error)' }}
+                  className="btn btn-danger"
+                  style={{ flex: 1 }}
                   onClick={() => setOpState({ opIsLoopSending: false })}
                 >
-                  ⏹ 停止发送
+                  <Square size={13} /> 停止发送
                 </button>
               )}
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>间隔:</span>
+              <div className="op-delay-input">
+                <span className="op-label">间隔:</span>
                 <input
                   className="input"
                   type="number"
@@ -240,7 +194,7 @@ const OperationPanel: React.FC = () => {
               </div>
             </div>
 
-            <div style={{ marginTop: 'auto', display: 'flex', gap: 6 }}>
+            <div className="op-btn-row" style={{ marginTop: 'auto' }}>
               <button className="btn btn-sm" style={{ flex: 1 }}>HEX/文本</button>
               <button className="btn btn-sm" style={{ flex: 1 }}>日志文件</button>
             </div>
@@ -248,19 +202,18 @@ const OperationPanel: React.FC = () => {
 
           <div className="divider" style={{ margin: '0 4px' }} />
 
-          {/* ========== 右侧：串口参数与视图控制 ========== */}
-          <div style={{ flex: 1.3, display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+          {/* Right: View & Params */}
+          <div className="op-section op-section-params">
             <div className="panel-card-title">视图 & 日志 & 参数</div>
 
-            {/* 视图控制 */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px' }}>
+            <div className="op-checkbox-row">
               <label className="checkbox-wrapper">
                 <input
                   type="checkbox"
                   checked={opScrollLocked}
                   onChange={(e) => setOpState({ opScrollLocked: e.target.checked })}
                 />
-                滚动锁定
+                <Pin size={12} /> 滚动锁定
               </label>
               <label className="checkbox-wrapper">
                 <input
@@ -268,13 +221,12 @@ const OperationPanel: React.FC = () => {
                   checked={opShowTimestamp}
                   onChange={(e) => setOpState({ opShowTimestamp: e.target.checked })}
                 />
-                时间戳
+                <Clock size={12} /> 时间戳
               </label>
             </div>
 
-            {/* 显示格式 */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>显示:</span>
+            <div className="op-radio-row">
+              <span className="op-label">显示:</span>
               <label className="checkbox-wrapper">
                 <input
                   type="radio"
@@ -295,54 +247,33 @@ const OperationPanel: React.FC = () => {
               </label>
             </div>
 
-            {/* 日志操作 */}
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button className="btn btn-sm" style={{ flex: 1 }}>另存为</button>
-              <button className="btn btn-sm" style={{ flex: 1 }}>打开文件</button>
-              <button className="btn btn-sm" style={{ flex: 1 }}>打开目录</button>
+            <div className="op-btn-row">
+              <button className="btn btn-sm" style={{ flex: 1 }}><FileText size={12} /> 另存为</button>
+              <button className="btn btn-sm" style={{ flex: 1 }}><FolderOpen size={12} /> 打开文件</button>
+              <button className="btn btn-sm" style={{ flex: 1 }}><FileSearch size={12} /> 目录</button>
             </div>
 
             <div className="divider-h" />
 
-            {/* 串口参数 */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 44 }}>波特率:</span>
-                <select
-                  className="select"
-                  style={{ flex: 1, fontSize: 11, padding: '2px 14px 2px 4px' }}
-                  value={opBaudRate}
-                  onChange={(e) => setOpState({ opBaudRate: Number(e.target.value) })}
-                >
-                  {config.defaultBaudRates.map(rate => (
-                    <option key={rate} value={rate}>{rate}</option>
-                  ))}
+            <div className="op-params-grid">
+              <div className="op-param-item">
+                <span className="op-label">波特率:</span>
+                <select className="select op-param-select" value={opBaudRate} onChange={(e) => setOpState({ opBaudRate: Number(e.target.value) })}>
+                  {config.defaultBaudRates.map(rate => <option key={rate} value={rate}>{rate}</option>)}
                 </select>
               </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 44 }}>数据位:</span>
-                <select
-                  className="select"
-                  style={{ flex: 1, fontSize: 11, padding: '2px 14px 2px 4px' }}
-                  value={opDataBits}
-                  onChange={(e) => setOpState({ opDataBits: Number(e.target.value) as DataBits })}
-                >
+              <div className="op-param-item">
+                <span className="op-label">数据位:</span>
+                <select className="select op-param-select" value={opDataBits} onChange={(e) => setOpState({ opDataBits: Number(e.target.value) as DataBits })}>
                   <option value={5}>5</option>
                   <option value={6}>6</option>
                   <option value={7}>7</option>
                   <option value={8}>8</option>
                 </select>
               </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 44 }}>校验:</span>
-                <select
-                  className="select"
-                  style={{ flex: 1, fontSize: 11, padding: '2px 14px 2px 4px' }}
-                  value={opParity}
-                  onChange={(e) => setOpState({ opParity: e.target.value as Parity })}
-                >
+              <div className="op-param-item">
+                <span className="op-label">校验:</span>
+                <select className="select op-param-select" value={opParity} onChange={(e) => setOpState({ opParity: e.target.value as Parity })}>
                   <option>None</option>
                   <option>Even</option>
                   <option>Odd</option>
@@ -350,29 +281,17 @@ const OperationPanel: React.FC = () => {
                   <option>Space</option>
                 </select>
               </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 44 }}>停止位:</span>
-                <select
-                  className="select"
-                  style={{ flex: 1, fontSize: 11, padding: '2px 14px 2px 4px' }}
-                  value={opStopBits}
-                  onChange={(e) => setOpState({ opStopBits: e.target.value as StopBits })}
-                >
+              <div className="op-param-item">
+                <span className="op-label">停止位:</span>
+                <select className="select op-param-select" value={opStopBits} onChange={(e) => setOpState({ opStopBits: e.target.value as StopBits })}>
                   <option value="One">1</option>
                   <option value="OnePointFive">1.5</option>
                   <option value="Two">2</option>
                 </select>
               </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, gridColumn: '1 / -1' }}>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 44 }}>握手:</span>
-                <select
-                  className="select"
-                  style={{ flex: 1, fontSize: 11, padding: '2px 14px 2px 4px' }}
-                  value={opHandshake}
-                  onChange={(e) => setOpState({ opHandshake: e.target.value as Handshake })}
-                >
+              <div className="op-param-item" style={{ gridColumn: '1 / -1' }}>
+                <span className="op-label">握手:</span>
+                <select className="select op-param-select" value={opHandshake} onChange={(e) => setOpState({ opHandshake: e.target.value as Handshake })}>
                   <option value="None">None</option>
                   <option value="XonXoff">Xon/Xoff</option>
                   <option value="RequestToSend">RTS/CTS</option>
@@ -381,32 +300,10 @@ const OperationPanel: React.FC = () => {
               </div>
             </div>
 
-            {/* DTR / RTS / 忽略空字符 */}
-            <div style={{ display: 'flex', gap: 10, marginTop: 2 }}>
-              <label className="checkbox-wrapper">
-                <input
-                  type="checkbox"
-                  checked={opDtr}
-                  onChange={(e) => setOpState({ opDtr: e.target.checked })}
-                />
-                DTR
-              </label>
-              <label className="checkbox-wrapper">
-                <input
-                  type="checkbox"
-                  checked={opRts}
-                  onChange={(e) => setOpState({ opRts: e.target.checked })}
-                />
-                RTS
-              </label>
-              <label className="checkbox-wrapper" style={{ fontSize: 11 }}>
-                <input
-                  type="checkbox"
-                  checked={opIgnoreEmptyChars}
-                  onChange={(e) => setOpState({ opIgnoreEmptyChars: e.target.checked })}
-                />
-                忽略空字符
-              </label>
+            <div className="op-checkbox-row" style={{ marginTop: 4 }}>
+              <label className="checkbox-wrapper"><input type="checkbox" checked={opDtr} onChange={(e) => setOpState({ opDtr: e.target.checked })} /> DTR</label>
+              <label className="checkbox-wrapper"><input type="checkbox" checked={opRts} onChange={(e) => setOpState({ opRts: e.target.checked })} /> RTS</label>
+              <label className="checkbox-wrapper" style={{ fontSize: 11 }}><input type="checkbox" checked={opIgnoreEmptyChars} onChange={(e) => setOpState({ opIgnoreEmptyChars: e.target.checked })} /> 忽略空字符</label>
             </div>
           </div>
         </div>
