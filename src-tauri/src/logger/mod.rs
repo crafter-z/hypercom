@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,7 @@ pub struct LogFileInfo {
 
 /// 单个串口的日志写入器
 pub struct PortLogWriter {
+    #[allow(dead_code)]
     pub port_id: String,
     pub file_path: PathBuf,
     pub writer: BufWriter<fs::File>,
@@ -70,6 +71,7 @@ pub struct LogManager {
     /// 活跃写入器（按串口ID索引）
     writers: HashMap<String, PortLogWriter>,
     /// 是否自动保存
+    #[allow(dead_code)]
     auto_save: bool,
     /// 分片大小 (MB)
     split_size_mb: u32,

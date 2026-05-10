@@ -1,10 +1,13 @@
 import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle } from 'lucide-react';
+import { useSystemStatus } from '../../hooks/useTauri';
 
 const StatusBar: React.FC = () => {
   const { systemStatus, trafficStats, activeTabId } = useAppStore();
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
+
+  useSystemStatus(5000);
 
   const formatBytes = (bytes: number): string => {
     if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;

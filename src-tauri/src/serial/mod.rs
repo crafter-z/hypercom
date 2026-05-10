@@ -28,13 +28,12 @@ pub struct PortInfo {
 
 /// 单个串口连接句柄
 pub struct SerialPortHandle {
-    /// 串口名称
+    #[allow(dead_code)]
     pub port_name: String,
-    /// 波特率
+    #[allow(dead_code)]
     pub baud_rate: u32,
-    /// 底层串口对象（通过 Mutex 保证线程安全）
     pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
-    /// 数据接收通道发送端（用于向前端推送数据）
+    #[allow(dead_code)]
     pub tx_channel: mpsc::Sender<SerialDataEvent>,
     /// 读取线程句柄
     pub read_thread: Option<thread::JoinHandle<()>>,

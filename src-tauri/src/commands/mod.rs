@@ -122,6 +122,20 @@ pub fn get_log_files(state: State<AppState>) -> Result<Vec<logger::LogFileInfo>,
     manager.list_files().map_err(|e| e.to_string())
 }
 
+/// 开始记录日志
+#[tauri::command]
+pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
+    manager.create_writer(&port_id, "string").map_err(|e| e.to_string())
+}
+
+/// 停止记录日志
+#[tauri::command]
+pub fn stop_logging(port_id: String, state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
+    manager.close_writer(&port_id).map_err(|e| e.to_string())
+}
+
 // ==================== 系统相关命令 ====================
 
 /// 获取系统状态（内存、CPU）

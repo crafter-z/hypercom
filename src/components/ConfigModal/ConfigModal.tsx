@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
+import { useConfigPersistence } from '../../hooks/useTauri';
 import type { AppConfig } from '../../types';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, X
@@ -272,6 +273,7 @@ const CommandSettings: React.FC = () => {
 
 const ConfigModal: React.FC = () => {
   const { ui, toggleConfigModal, setConfigActiveTab } = useAppStore();
+  const { saveConfig } = useConfigPersistence();
   const { isConfigOpen, configActiveTab } = ui;
 
   if (!isConfigOpen) return null;
@@ -325,7 +327,7 @@ const ConfigModal: React.FC = () => {
 
           <div className="modal-content-footer">
             <button className="btn" onClick={() => toggleConfigModal(false)}>取消</button>
-            <button className="btn btn-primary" onClick={() => toggleConfigModal(false)}>保存</button>
+            <button className="btn btn-primary" onClick={async () => { await saveConfig(useAppStore.getState().config); toggleConfigModal(false); }}>保存</button>
           </div>
         </div>
       </div>

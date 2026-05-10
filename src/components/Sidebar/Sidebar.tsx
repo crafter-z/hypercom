@@ -1,23 +1,13 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
-import type { SerialPort, PortGroup, PortStatus } from '../../types';
+import type { SerialPort, PortGroup } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
   Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
   ChevronRight, Plus, X, Search,
   PlugZap, Pencil, Unplug, ExternalLink
 } from 'lucide-react';
-
-const mockPorts: SerialPort[] = [
-  { id: 'COM3', name: 'COM3', alias: 'STM32_TTY', status: 'connected', type: 'real', isHidden: false, groupId: 'group1', baudRate: 115200 },
-  { id: 'COM4', name: 'COM4', alias: 'ESP32-DevKit', status: 'error', type: 'real', isHidden: false, groupId: 'group1', baudRate: 115200 },
-  { id: 'COM5', name: 'COM5', alias: 'JLink_VCOM', status: 'disconnected', type: 'real', isHidden: false, groupId: 'group2' },
-  { id: 'COM7', name: 'COM7', alias: 'Temp_Sensor', status: 'connected', type: 'real', isHidden: false, groupId: 'group2', baudRate: 57600 },
-  { id: 'COM8', name: 'COM8', alias: 'IMU_Module', status: 'disconnected', type: 'real', isHidden: false, groupId: 'group2' },
-  { id: 'COM9', name: 'COM9', alias: 'VSPort_1', status: 'disconnected', type: 'virtual', isHidden: false, groupId: 'group3' },
-  { id: 'COM10', name: 'COM10', alias: 'VSPort_2', status: 'error', type: 'virtual', isHidden: false, groupId: 'group3' },
-  { id: 'COM11', name: 'COM11', alias: 'Hidden_COM111', status: 'disconnected', type: 'real', isHidden: true },
-];
+import { useSerialPorts, useSerialConnection } from '../../hooks/useTauri';
 
 const mockGroups: PortGroup[] = [
   { id: 'group1', name: '开发板组', isExpanded: true, portIds: ['COM3', 'COM4'], order: 0 },
@@ -25,9 +15,7 @@ const mockGroups: PortGroup[] = [
   { id: 'group3', name: '虚拟端口', isExpanded: true, portIds: ['COM9', 'COM10'], order: 2 },
 ];
 
-const SidebarToolbar: React.FC<{ showHidden: boolean; onToggleHidden: () => void }> = ({ showHidden, onToggleHidden }) => {
-  const { setPorts } = useAppStore();
-
+const SidebarToolbar: React.FC<{ showHidden: boolean; onToggleHidden: () => void; onRefresh: () => void }> = ({ showHidden, onToggleHidden, onRefresh }) => {
   return (
     <div className="sidebar-toolbar">
       <span className="sidebar-toolbar-title">串口管理</span>
@@ -43,7 +31,7 @@ const SidebarToolbar: React.FC<{ showHidden: boolean; onToggleHidden: () => void
         </button>
         <button className="btn btn-icon btn-sm" title="按端口号排序"><ArrowUpDown size={14} /></button>
         <button className="btn btn-icon btn-sm" title="保存布局"><Save size={14} /></button>
-        <button className="btn btn-icon btn-sm" title="刷新串口列表" onClick={() => setPorts(mockPorts)}><RefreshCw size={14} /></button>
+        <button className="btn btn-icon btn-sm" title="刷新串口列表" onClick={onRefresh}><RefreshCw size={14} /></button>
       </div>
     </div>
   );
@@ -248,29 +236,28 @@ const Sidebar: React.FC = () => {
     openTab,
     updatePort,
     updateGroup,
-    setPorts,
     addGroup,
   } = useAppStore();
+
+  const { refreshPorts } = useSerialPorts(3000);
+  const { toggleConnection } = useSerialConnection();
 
   const [showHidden, setShowHidden] = useState(false);
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
 
-  useEffect(() => {
-    if (ports.length === 0) {
-      setPorts(mockPorts);
+  // Initialize mock groups if empty
+  React.useEffect(() => {
+    if (groups.length === 0) {
       mockGroups.forEach(g => addGroup(g));
     }
-  }, []);
+  }, [groups.length, addGroup]);
 
   const handleOpenTab = useCallback((portId: string) => { openTab(portId); }, [openTab]);
 
   const handleToggleConnect = useCallback((portId: string) => {
-    const port = ports.find(p => p.id === portId);
-    if (!port) return;
-    const newStatus: PortStatus = port.status === 'connected' ? 'disconnected' : 'connected';
-    updatePort(portId, { status: newStatus });
-  }, [ports, updatePort]);
+    toggleConnection(portId);
+  }, [toggleConnection]);
 
   const handleToggleExpand = useCallback((groupId: string) => {
     const group = groups.find(g => g.id === groupId);
@@ -301,7 +288,7 @@ const Sidebar: React.FC = () => {
 
   return (
     <div className="sidebar">
-      <SidebarToolbar showHidden={showHidden} onToggleHidden={() => setShowHidden(!showHidden)} />
+      <SidebarToolbar showHidden={showHidden} onToggleHidden={() => setShowHidden(!showHidden)} onRefresh={refreshPorts} />
       <SearchBox value={search} onChange={setSearch} />
 
       <div className="sidebar-list">

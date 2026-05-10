@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
+import { useSerialData, useSerialConnection } from '../../hooks/useTauri';
 import type { DataBits, Parity, StopBits, Handshake, LineEnding } from '../../types';
 import {
   Send, Cable, Eraser, Pin, Clock,
@@ -28,16 +29,35 @@ const OperationPanel: React.FC = () => {
     opIsLoopSending,
     setOpState,
     setUIState,
+    clearTerminal,
     config,
     toggleConfigModal,
     setConfigActiveTab,
   } = useAppStore();
 
+  const { sendData } = useSerialData();
+  const { toggleConnection } = useSerialConnection();
+
+  const activePort = useAppStore((s) => s.ports.find((p) => p.id === s.activeTabId));
+  const isConnected = activePort?.status === 'connected';
+
   const isPortActive = !!activeTabId;
   const collapsed = ui.isOperationPanelCollapsed;
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!isPortActive || !opSendInput.trim()) return;
+    await sendData(activeTabId!, opSendInput, opSendIsHex, opSendAppendLineEnding);
+    setOpState({ opSendInput: '' });
+  };
+
+  const handleToggleConnection = async () => {
+    if (!activeTabId) return;
+    await toggleConnection(activeTabId);
+  };
+
+  const handleClear = () => {
+    if (!activeTabId) return;
+    clearTerminal(activeTabId);
   };
 
   const openConfigToTab = (tab: string) => {
@@ -128,10 +148,10 @@ const OperationPanel: React.FC = () => {
             </div>
 
             <div className="op-btn-row">
-              <button className="btn" style={{ flex: 1 }}>
-                {isPortActive ? <><Cable size={13} /> 断开串口</> : <><Cable size={13} /> 打开串口</>}
+              <button className="btn" style={{ flex: 1 }} onClick={handleToggleConnection} disabled={!isPortActive}>
+                {isConnected ? <><Cable size={13} /> 断开串口</> : <><Cable size={13} /> 打开串口</>}
               </button>
-              <button className="btn" title="清屏"><Eraser size={13} /> 清屏</button>
+              <button className="btn" title="清屏" onClick={handleClear} disabled={!isPortActive}><Eraser size={13} /> 清屏</button>
             </div>
           </div>
 

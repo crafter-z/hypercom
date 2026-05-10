@@ -1,0 +1,260 @@
+import { useEffect, useCallback, useRef } from 'react';
+import { useAppStore } from '../stores/useAppStore';
+import { serialService, configService, systemService, eventService } from '../services/tauri';
+import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent } from '../services/tauri';
+import type { SerialPort, AppConfig } from '../types';
+
+/**
+ * 将后端 PortInfo 映射为前端 SerialPort
+ * 后端的 port_type 是 "real"|"virtual"，前端 PortStatus 需要从后端获取或默认 disconnected
+ */
+function mapPortInfo(info: AvailablePortInfo): SerialPort {
+  return {
+    id: info.id,
+    name: info.name,
+    alias: undefined,
+    status: 'disconnected' as PortStatus,
+    type: (info.port_type === 'real' ? 'real' : 'virtual') as SerialPort['type'],
+    isHidden: false,
+    groupId: undefined,
+  };
+}
+
+import type { PortStatus } from '../types';
+
+/**
+ * Hook: 自动刷新串口列表
+ * 在组件挂载时获取一次串口列表，并可选地定时刷新
+ */
+export function useSerialPorts(pollIntervalMs: number = 3000) {
+  const setPorts = useAppStore((s) => s.setPorts);
+
+  const refreshPorts = useCallback(async () => {
+    try {
+      const ports = await serialService.listAvailablePorts();
+      setPorts(ports.map(mapPortInfo));
+    } catch (err) {
+      console.warn('[useSerialPorts] Failed to list ports:', err);
+    }
+  }, [setPorts]);
+
+  useEffect(() => {
+    refreshPorts();
+    if (pollIntervalMs > 0) {
+      const timer = setInterval(refreshPorts, pollIntervalMs);
+      return () => clearInterval(timer);
+    }
+  }, [refreshPorts, pollIntervalMs]);
+
+  return { refreshPorts };
+}
+
+/**
+ * Hook: 串口连接/断开操作
+ */
+export function useSerialConnection() {
+  const updatePort = useAppStore((s) => s.updatePort);
+  const ports = useAppStore((s) => s.ports);
+
+  const openPort = useCallback(async (portId: string, baudRate: number = 115200) => {
+    try {
+      updatePort(portId, { status: 'connected' });
+      await serialService.openSerialPort({
+        port_id: portId,
+        baud_rate: baudRate,
+        data_bits: 8,
+        parity: 'None',
+        stop_bits: 'One',
+        handshake: 'None',
+        dtr: false,
+        rts: false,
+      });
+      updatePort(portId, { status: 'connected', baudRate });
+    } catch (err) {
+      console.error('[useSerialConnection] Failed to open port:', err);
+      updatePort(portId, { status: 'error' });
+    }
+  }, [updatePort]);
+
+  const closePort = useCallback(async (portId: string) => {
+    try {
+      await serialService.closeSerialPort(portId);
+      updatePort(portId, { status: 'disconnected' });
+    } catch (err) {
+      console.error('[useSerialConnection] Failed to close port:', err);
+      updatePort(portId, { status: 'error' });
+    }
+  }, [updatePort]);
+
+  const toggleConnection = useCallback(async (portId: string) => {
+    const port = ports.find((p) => p.id === portId);
+    if (!port) return;
+    if (port.status === 'connected') {
+      await closePort(portId);
+    } else {
+      await openPort(portId, port.baudRate || 115200);
+    }
+  }, [ports, openPort, closePort]);
+
+  return { openPort, closePort, toggleConnection };
+}
+
+/**
+ * Hook: 串口数据发送/接收
+ * 监听 Tauri 事件，将接收到的数据写入终端
+ */
+export function useSerialData() {
+  const appendTerminalLine = useAppStore((s) => s.appendTerminalLine);
+  const listenCleanups = useRef<Array<() => void>>([]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const setup = async () => {
+      const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
+        if (!mounted) return;
+        const text = new TextDecoder().decode(new Uint8Array(event.data));
+        appendTerminalLine(event.port_id, {
+          id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: event.timestamp,
+          direction: event.direction as 'RX' | 'TX',
+          content: text,
+          isHex: event.is_hex,
+        });
+      });
+
+      const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
+        if (!mounted) return;
+        const statusMap: Record<string, PortStatus> = {
+          connected: 'connected',
+          disconnected: 'disconnected',
+          error: 'error',
+        };
+        useAppStore.getState().updatePort(event.port_id, {
+          status: statusMap[event.status] || 'disconnected',
+        });
+      });
+
+      listenCleanups.current = [unlistenData, unlistenStatus];
+    };
+
+    setup();
+
+    return () => {
+      mounted = false;
+      listenCleanups.current.forEach((fn) => fn());
+      listenCleanups.current = [];
+    };
+  }, [appendTerminalLine]);
+
+  const sendData = useCallback(async (portId: string, data: string, isHex: boolean, lineEnding: string) => {
+    try {
+      const bytesWritten = await serialService.sendSerialData({
+        port_id: portId,
+        data,
+        is_hex: isHex,
+        append_line_ending: lineEnding,
+      });
+
+      // Also show sent data in terminal
+      const { sendPrefix } = useAppStore.getState().config;
+      const prefix = sendPrefix ? `${sendPrefix} ` : '';
+      useAppStore.getState().appendTerminalLine(portId, {
+        id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: Date.now(),
+        direction: 'TX',
+        content: `${prefix}${data}`,
+        isHex: isHex,
+      });
+
+      return bytesWritten;
+    } catch (err) {
+      console.error('[useSerialData] Failed to send data:', err);
+      return 0;
+    }
+  }, []);
+
+  return { sendData };
+}
+
+/**
+ * Hook: 配置持久化
+ * 从后端加载配置、保存配置到后端
+ */
+export function useConfigPersistence() {
+  const setConfig = useAppStore((s) => s.setConfig);
+  const resetConfig = useAppStore((s) => s.resetConfig);
+
+  const loadConfig = useCallback(async () => {
+    try {
+      const config = await configService.getConfig();
+      setConfig(config);
+    } catch (err) {
+      console.warn('[useConfigPersistence] Failed to load config, using defaults:', err);
+    }
+  }, [setConfig]);
+
+  const saveConfig = useCallback(async (config: AppConfig) => {
+    try {
+      await configService.setConfig(config);
+    } catch (err) {
+      console.error('[useConfigPersistence] Failed to save config:', err);
+    }
+  }, []);
+
+  const resetAndReload = useCallback(async () => {
+    try {
+      const defaultConfig = await configService.resetConfig();
+      resetConfig();
+      setConfig(defaultConfig);
+    } catch (err) {
+      console.error('[useConfigPersistence] Failed to reset config:', err);
+    }
+  }, [resetConfig, setConfig]);
+
+  return { loadConfig, saveConfig, resetAndReload };
+}
+
+/**
+ * Hook: 系统状态轮询
+ */
+export function useSystemStatus(pollIntervalMs: number = 5000) {
+  const setSystemStatus = useAppStore((s) => s.setSystemStatus);
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const status = await systemService.getSystemStatus();
+        setSystemStatus({
+          status: status.status,
+          memoryUsedMB: status.memory_used_mb,
+          memoryLimitMB: status.memory_limit_mb,
+          cpuUsage: status.cpu_usage,
+        });
+      } catch (err) {
+        // Backend may not be fully ready yet, silently ignore
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, pollIntervalMs);
+    return () => clearInterval(timer);
+  }, [setSystemStatus, pollIntervalMs]);
+}
+
+/**
+ * Hook: 应用初始化
+ * 在 App 挂载时调用，加载配置、刷新串口列表等
+ */
+export function useAppInit() {
+  const { loadConfig } = useConfigPersistence();
+  const { refreshPorts } = useSerialPorts(0);
+
+  useEffect(() => {
+    const init = async () => {
+      await loadConfig();
+      await refreshPorts();
+    };
+    init();
+  }, [loadConfig, refreshPorts]);
+}

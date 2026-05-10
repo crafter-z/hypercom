@@ -37,15 +37,19 @@ hypercom/
 │   ├── roadmap.md                  # 路线图
 │   └── UI.png                      # UI参考图
 ├── src/                            # 前端源码
-│   ├── App.tsx                     # 主应用入口
+│   ├── App.tsx                     # 主应用入口（调用 useAppInit）
 │   ├── main.tsx                    # React挂载点
 │   ├── styles.css                  # 全局样式与CSS变量（含亮色主题）
 │   ├── types/
 │   │   └── index.ts                # 全局TypeScript类型定义
+│   ├── services/
+│   │   └── tauri.ts                # 【新增】Tauri后端服务层（类型化invoke包装器+事件监听）
+│   ├── hooks/
+│   │   └── useTauri.ts             # 【新增】React Hooks层（桥接Tauri服务与Zustand Store）
 │   ├── stores/
 │   │   └── useAppStore.ts          # Zustand全局状态
 │   └── components/
-│       ├── shared/                  # 【新增】共享组件
+│       ├── shared/                  # 共享组件
 │       │   └── ContextMenu.tsx      # 通用右键菜单 + useContextMenu Hook
 │       ├── TitleBar/               # 标题栏
 │       ├── Sidebar/                # 左侧串口管理边栏
@@ -59,6 +63,8 @@ hypercom/
 ├── src-tauri/                      # 后端源码
 │   ├── Cargo.toml                  # Rust依赖配置
 │   ├── tauri.conf.json             # Tauri应用配置
+│   ├── capabilities/
+│   │   └── default.json            # 【新增】Tauri v2权限配置
 │   └── src/
 │       ├── lib.rs                  # 后端主入口
 │       ├── main.rs                 # 程序入口
@@ -229,9 +235,91 @@ return (
 
 ### 3.6 状态管理
 
-（与之前文档相同，无变更。详见 `src/stores/useAppStore.ts`。）
+状态管理使用 **Zustand + Immer**，定义在 `src/stores/useAppStore.ts`。
 
-### 3.7 类型定义
+核心状态包括：
+- `ports: SerialPort[]` — 串口列表
+- `tabs: TabItem[]` — 标签页列表
+- `terminals: Record<string, TerminalState>` — 终端内容（按串口ID索引）
+- `config: AppConfig` — 应用配置
+- `systemStatus: SystemStatus` — 系统状态
+- `ui: UIState` — UI状态（配置弹窗开关、侧边栏宽度等）
+- `opXxx` — 操作面板各种状态（波特率、数据位、发送内容等）
+
+Actions 包括：setPorts, updatePort, openTab, closeTab, appendTerminalLine, clearTerminal, setConfig, setUIState, setOpState 等约 40 个方法。
+
+### 3.7 Tauri 服务层 (`src/services/tauri.ts`)
+
+类型化的 Tauri invoke 包装器，为所有后端命令提供类型安全的 API：
+
+```typescript
+// 串口服务
+serialService.listAvailablePorts()           // → AvailablePortInfo[]
+serialService.openSerialPort(params)          // → void
+serialService.closeSerialPort(portId)         // → void
+serialService.sendSerialData(params)          // → number (bytesWritten)
+serialService.setSerialParams(portId, baud)   // → void
+serialService.setFlowControl(portId, dtr, rts)// → void
+
+// 配置服务
+configService.getConfig()                     // → AppConfig
+configService.setConfig(config)               // → void
+configService.resetConfig()                   // → AppConfig
+
+// 日志服务
+logService.startLogging(portId)               // → void
+logService.stopLogging(portId)                // → void
+logService.saveLogAs(portId, path)            // → void
+logService.setLogDirectory(path)              // → void
+logService.getLogFiles()                      // → LogFileInfoResult[]
+
+// 系统服务
+systemService.getSystemStatus()               // → SystemStatusResult
+systemService.preventScreenOff(enable)        // → void
+systemService.preventSleep(enable)             // → void
+
+// 事件监听
+eventService.onSerialData(callback)           // → UnlistenFn
+eventService.onSerialStatus(callback)         // → UnlistenFn
+eventService.onSystemStatus(callback)         // → UnlistenFn
+```
+
+所有参数使用 snake_case 命名（如 `port_id`, `baud_rate`），与后端 Rust 结构体的 `#[serde(rename_all = "camelCase")]` 配合。Tauri v2 invoke() 内部会自动进行 camelCase 转换。
+
+### 3.8 React Hooks 层 (`src/hooks/useTauri.ts`)
+
+将 Tauri 服务层桥接到 Zustand Store 和 React 组件生命周期：
+
+| Hook | 功能 | 返回值 |
+|------|------|--------|
+| `useSerialPorts(interval)` | 定时刷新串口列表 | `{ refreshPorts }` |
+| `useSerialConnection()` | 串口连接/断开操作 | `{ openPort, closePort, toggleConnection }` |
+| `useSerialData()` | 串口数据收发 | `{ sendData }` |
+| `useConfigPersistence()` | 配置持久化 | `{ loadConfig, saveConfig, resetAndReload }` |
+| `useSystemStatus(interval)` | 系统状态轮询 | void（自动写入 store） |
+| `useAppInit()` | 应用初始化 | void（挂载时调用 loadConfig + refreshPorts） |
+
+**数据流示例 — 发送数据：**
+```
+用户点击发送 → OperationPanel.handleSend()
+  → useSerialData().sendData(portId, data, isHex, lineEnding)
+    → serialService.sendSerialData(params)
+      → invoke('send_serial_data', { args: params })
+        → Rust: commands::send_serial_data()
+          → SerialManager::send_data()
+            → serialport write
+```
+
+**数据流示例 — 接收数据：**
+```
+Rust 读取线程 → MPSC channel → (TODO: app.emit("serial:data", event))
+  → 前端 eventService.onSerialData(callback)
+    → useSerialData 内 unlisten 回调
+      → useAppStore.getState().appendTerminalLine()
+        → 终端内容更新
+```
+
+### 3.9 类型定义
 
 （与之前文档相同，无变更。详见 `src/types/index.ts`。）
 
@@ -239,7 +327,101 @@ return (
 
 ## 四、后端架构
 
-（与之前文档相同，后端无变更。）
+### 4.1 应用状态 (`src-tauri/src/lib.rs`)
+
+```rust
+pub struct AppState {
+    pub serial_manager: std::sync::Mutex<serial::SerialManager>,
+    pub config_manager: std::sync::Mutex<config::ConfigManager>,
+    pub log_manager: std::sync::Mutex<logger::LogManager>,
+    pub storage_manager: std::sync::Mutex<storage::StorageManager>,
+}
+```
+
+所有 Manager 使用 `std::sync::Mutex` 包装，因为 Tauri 命令是同步函数。在 `run()` 中通过 `.manage()` 注入。
+
+### 4.2 模块职责
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| 命令层 | `commands/mod.rs` | 所有 Tauri invoke 命令的入口，参数校验、调用 Manager、返回结果 |
+| 串口管理 | `serial/mod.rs` | 串口枚举、打开/关闭、参数配置、数据收发、读取线程 |
+| 配置管理 | `config/mod.rs` | JSON 配置读写、默认值、AppConfig 结构体 |
+| 日志管理 | `logger/mod.rs` | BufWriter 写入、按串口独立文件、分片检测、另存为 |
+| 存储管理 | `storage/mod.rs` | SQLite 连接池（延迟初始化）、表结构、CRUD（待实现） |
+
+### 4.3 命令层接口
+
+所有命令使用 `#[tauri::command]` 宏标记，参数结构体使用 `#[serde(rename_all = "camelCase")]`。
+
+**串口命令：**
+
+| 命令 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `list_available_ports` | — | `Vec<PortInfo>` | 枚举系统可用串口 |
+| `open_serial_port` | `OpenPortArgs` | `()` | 打开串口（含波特率、数据位等） |
+| `close_serial_port` | `port_id: String` | `()` | 关闭串口 |
+| `send_serial_data` | `SendDataArgs` | `usize` | 发送数据，返回写入字节数 |
+| `set_serial_params` | `port_id, baud_rate` | `()` | 修改波特率 |
+| `set_flow_control` | `port_id, dtr, rts` | `()` | 设置 DTR/RTS |
+
+**配置命令：**
+
+| 命令 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `get_config` | — | `AppConfig` | 获取当前配置 |
+| `set_config` | `new_config: AppConfig` | `()` | 更新并持久化配置 |
+| `reset_config` | — | `AppConfig` | 重置为默认配置 |
+
+**日志命令：**
+
+| 命令 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `start_logging` | `port_id: String` | `()` | 开始记录日志 |
+| `stop_logging` | `port_id: String` | `()` | 停止记录日志 |
+| `save_log_as` | `port_id, path` | `()` | 手动另存日志 |
+| `set_log_directory` | `path: String` | `()` | 设置日志目录 |
+| `get_log_files` | — | `Vec<LogFileInfo>` | 获取日志文件列表 |
+
+**系统命令：**
+
+| 命令 | 参数 | 返回值 | 说明 |
+|------|------|--------|------|
+| `get_system_status` | — | `SystemStatus` | 获取系统资源状态（当前为硬编码） |
+| `prevent_screen_off` | `enable: bool` | `()` | 防止系统息屏（当前为日志占位） |
+| `prevent_sleep` | `enable: bool` | `()` | 防止系统休眠（当前为日志占位） |
+
+### 4.4 Tauri 权限配置 (`src-tauri/capabilities/default.json`)
+
+Tauri v2 使用 capabilities 声明前端可用的权限：
+
+```json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "shell:allow-open"
+  ]
+}
+```
+
+目前所有 invoke 命令在开发模式下默认可用。生产发布前需为每个命令添加精细权限声明。
+
+### 4.5 事件系统
+
+后端通过 `app.emit("event_name", payload)` 向前端推送事件：
+
+| 事件名 | Payload 类型 | 说明 |
+|--------|-------------|------|
+| `serial:data` | `SerialDataEvent` | 串口接收到数据 |
+| `serial:status` | `SerialStatusEvent` | 串口连接状态变化 |
+| `system:status` | `SystemStatusResult` | 系统资源状态更新 |
+
+> **注意**：当前读取线程使用 MPSC channel 发送数据，但未接入 Tauri 事件系统。需要在 `open_port` 中传入 `AppHandle`，读取线程通过 `app.emit()` 推送数据。
 
 ---
 
@@ -276,6 +458,18 @@ return (
 - 支持 `size` 属性精确控制尺寸
 - 支持 `color` / CSS `currentColor` 继承主题颜色
 - 替代 emoji 在不同平台渲染不一致的问题
+
+### 5.7 为什么前端服务层和 Hooks 层分离？
+- `src/services/tauri.ts` 只负责 invoke 调用和事件监听，不涉及 React 生命周期
+- `src/hooks/useTauri.ts` 负责将服务层桥接到 React 组件（useEffect、useState、useCallback）
+- 分离后，服务层可以在非 React 上下文中使用（如 Zustand middleware）
+- Hooks 层处理轮询、清理、错误日志等横切关注点
+
+### 5.8 为什么使用后端 serde rename_all = "camelCase"？
+- Rust 结构体字段使用 snake_case 命名（Rust 惯例）
+- 前端 JavaScript 使用 camelCase 命名（JS 惯例）
+- Tauri v2 invoke 内部默认使用 camelCase 序列化参数
+- `#[serde(rename_all = "camelCase")]` 自动转换，避免手动映射
 
 ---
 
@@ -332,18 +526,27 @@ return (
 
 | 文件 | 说明 |
 |------|------|
+| `src/services/tauri.ts` | Tauri 后端服务层（类型化 invoke 包装器 + 事件监听） |
+| `src/hooks/useTauri.ts` | React Hooks 层（桥接 Tauri 服务与 Zustand Store） |
+| `src/types/index.ts` | 前端类型定义 |
+| `src/stores/useAppStore.ts` | 前端状态管理（Zustand + Immer） |
 | `src/components/shared/ContextMenu.tsx` | 共享右键菜单组件 |
 | `src/components/TitleBar/TitleBar.tsx` | 标题栏（lucide 图标） |
-| `src/components/Sidebar/Sidebar.tsx` | 串口边栏（右键菜单 + AliasDialog） |
+| `src/components/Sidebar/Sidebar.tsx` | 串口边栏（右键菜单 + AliasDialog + useSerialPorts） |
 | `src/components/MainDisplay/MainDisplay.tsx` | 主显示区（lucide 分屏图标） |
 | `src/components/MainDisplay/TabBar.tsx` | 标签栏（共享 ContextMenu） |
 | `src/components/MainDisplay/TerminalView.tsx` | 终端视图（右键菜单 + HEX 转换） |
-| `src/components/OperationPanel/OperationPanel.tsx` | 操作面板（lucide 图标全套） |
-| `src/components/StatusBar/StatusBar.tsx` | 状态栏（lucide 图标） |
-| `src/components/ConfigModal/ConfigModal.tsx` | 配置弹窗（lucide 图标 + CSS class） |
+| `src/components/OperationPanel/OperationPanel.tsx` | 操作面板（useSerialData + useSerialConnection） |
+| `src/components/StatusBar/StatusBar.tsx` | 状态栏（useSystemStatus） |
+| `src/components/ConfigModal/ConfigModal.tsx` | 配置弹窗（useConfigPersistence） |
 | `src/styles.css` | 全局样式（含亮色主题、组件 class 体系） |
-| `src/types/index.ts` | 前端类型定义 |
-| `src/stores/useAppStore.ts` | 前端状态管理 |
+| `src/App.tsx` | 主应用入口（调用 useAppInit） |
+| `src-tauri/capabilities/default.json` | Tauri v2 权限配置 |
+| `src-tauri/src/commands/mod.rs` | Tauri 命令层 |
+| `src-tauri/src/serial/mod.rs` | 串口管理模块 |
+| `src-tauri/src/config/mod.rs` | 配置管理模块 |
+| `src-tauri/src/logger/mod.rs` | 日志管理模块 |
+| `src-tauri/src/storage/mod.rs` | 数据库存储模块 |
 
 ### 8.3 外部依赖文档
 

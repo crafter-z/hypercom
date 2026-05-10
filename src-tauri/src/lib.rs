@@ -9,8 +9,6 @@ mod logger;
 mod serial;
 mod storage;
 
-use tauri::Manager;
-
 /// 应用状态结构体
 /// 通过 Tauri State 在各命令间共享
 pub struct AppState {
@@ -60,12 +58,14 @@ pub fn run() {
             commands::set_log_directory,
             commands::save_log_as,
             commands::get_log_files,
+            commands::start_logging,
+            commands::stop_logging,
             // ===== 系统相关命令 =====
             commands::get_system_status,
             commands::prevent_screen_off,
             commands::prevent_sleep,
         ])
-        .setup(|app| {
+        .setup(|_app| {
             // 应用启动后的初始化逻辑
             log::info!("HyperCom setup complete");
             Ok(())
