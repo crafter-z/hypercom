@@ -17,7 +17,7 @@ import type {
 export interface AvailablePortInfo {
   id: string;
   name: string;
-  port_type: string;
+  port_type: string; // "real" | "virtual" | "sim"
   manufacturer?: string;
   product?: string;
 }
@@ -90,6 +90,14 @@ export const serialService = {
 
   setFlowControl: (portId: string, dtr: boolean, rts: boolean): Promise<void> => {
     return invoke<void>('set_flow_control', { portId, dtr, rts });
+  },
+
+  enableSimulation: (): Promise<void> => {
+    return invoke<void>('enable_simulation');
+  },
+
+  disableSimulation: (): Promise<void> => {
+    return invoke<void>('disable_simulation');
   },
 };
 

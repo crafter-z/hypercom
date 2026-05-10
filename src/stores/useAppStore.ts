@@ -96,6 +96,9 @@ interface AppState {
   systemStatus: SystemStatus;
   trafficStats: Record<string, TrafficStats>;
   
+  // --- 模拟模式 ---
+  simulationMode: boolean;
+  
   // --- UI状态 ---
   ui: UIState;
   
@@ -165,6 +168,9 @@ interface AppState {
   // 系统状态
   setSystemStatus: (status: Partial<SystemStatus>) => void;
   setTrafficStats: (portId: string, stats: Partial<TrafficStats>) => void;
+  
+  // 模拟模式
+  setSimulationMode: (on: boolean) => void;
 }
 
 // ==================== Store 实现 ====================
@@ -192,6 +198,7 @@ export const useAppStore = create<AppState>()(
     },
     trafficStats: {},
     ui: { ...defaultUIState },
+    simulationMode: false,
     opBaudRate: 115200,
     opDataBits: 8,
     opParity: 'None',
@@ -500,6 +507,10 @@ export const useAppStore = create<AppState>()(
         state.trafficStats[portId] = { portId, txTotal: 0, rxTotal: 0 };
       }
       Object.assign(state.trafficStats[portId], stats);
+    }),
+    
+    setSimulationMode: (on) => set((state) => {
+      state.simulationMode = on;
     }),
   }))
 );

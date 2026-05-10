@@ -4,10 +4,10 @@ import type { SerialPort, PortGroup } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
   Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
-  ChevronRight, Plus, X, Search,
+  ChevronRight, Plus, X, Search, FlaskConical,
   PlugZap, Pencil, Unplug, ExternalLink
 } from 'lucide-react';
-import { useSerialPorts, useSerialConnection } from '../../hooks/useTauri';
+import { useSerialPorts, useSerialConnection, useSimulation } from '../../hooks/useTauri';
 
 const mockGroups: PortGroup[] = [
   { id: 'group1', name: '开发板组', isExpanded: true, portIds: ['COM3', 'COM4'], order: 0 },
@@ -15,13 +15,20 @@ const mockGroups: PortGroup[] = [
   { id: 'group3', name: '虚拟端口', isExpanded: true, portIds: ['COM9', 'COM10'], order: 2 },
 ];
 
-const SidebarToolbar: React.FC<{ showHidden: boolean; onToggleHidden: () => void; onRefresh: () => void }> = ({ showHidden, onToggleHidden, onRefresh }) => {
+const SidebarToolbar: React.FC<{ showHidden: boolean; onToggleHidden: () => void; onRefresh: () => void; simulationMode: boolean; onToggleSimulation: () => void }> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, onToggleSimulation }) => {
   return (
     <div className="sidebar-toolbar">
       <span className="sidebar-toolbar-title">串口管理</span>
       <div className="sidebar-toolbar-actions">
         <button className="btn btn-icon btn-sm" title="一键打开全部"><Play size={14} /></button>
         <button className="btn btn-icon btn-sm" title="一键关闭全部"><Square size={14} /></button>
+        <button
+          className={`btn btn-icon btn-sm${simulationMode ? ' active' : ''}`}
+          title={simulationMode ? '关闭模拟模式' : '开启模拟模式'}
+          onClick={onToggleSimulation}
+        >
+          <FlaskConical size={14} />
+        </button>
         <button
           className={`btn btn-icon btn-sm${showHidden ? ' active' : ''}`}
           title={showHidden ? '隐藏已隐藏串口' : '显示已隐藏串口'}
@@ -112,6 +119,7 @@ const PortItem: React.FC<PortItemProps> = ({
           <div className="port-item-title">
             <span className="port-item-name">{port.id}</span>
             {port.alias && <span className="port-item-alias">{port.alias}</span>}
+            {port.type === 'sim' && <span className="port-item-badge" style={{ backgroundColor: 'var(--accent-color, #4fc3f7)' }}>SIM</span>}
             {port.type === 'virtual' && <span className="port-item-badge">VCP</span>}
           </div>
           <div className="port-item-meta">
@@ -241,6 +249,7 @@ const Sidebar: React.FC = () => {
 
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();
+  const { simulationMode, toggleSimulation } = useSimulation();
 
   const [showHidden, setShowHidden] = useState(false);
   const [search, setSearch] = useState('');
@@ -288,7 +297,7 @@ const Sidebar: React.FC = () => {
 
   return (
     <div className="sidebar">
-      <SidebarToolbar showHidden={showHidden} onToggleHidden={() => setShowHidden(!showHidden)} onRefresh={refreshPorts} />
+      <SidebarToolbar showHidden={showHidden} onToggleHidden={() => setShowHidden(!showHidden)} onRefresh={refreshPorts} simulationMode={simulationMode} onToggleSimulation={toggleSimulation} />
       <SearchBox value={search} onChange={setSearch} />
 
       <div className="sidebar-list">

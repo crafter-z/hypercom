@@ -23,12 +23,12 @@
 | Tauri 服务层 (tauri.ts) | ✅ 已完成 | 100% |
 | React Hooks 层 (useTauri.ts) | ✅ 已完成 | 100% |
 | 后端命令层 (Commands) | ✅ 已完成 | 80% |
-| 串口管理 (Serial) | ✅ 已完成 | 75% |
+| 串口管理 (Serial) | ✅ 已完成 | 90% |
 | 配置管理 (Config) | ✅ 已完成 | 90% |
 | 日志管理 (Logger) | ✅ 已完成 | 80% |
 | 存储管理 (Storage) | ✅ 已完成 | 60% |
 | Tauri 权限配置 | ✅ 已完成 | 100% |
-| Tauri 事件推送 | ⏳ 未开始 | 0% |
+| Tauri 事件推送 | ✅ 已完成 | 100% |
 | 系统资源监控 | ⏳ 未开始 | 0% |
 
 ---
@@ -373,23 +373,30 @@
 
 ### 3.2 串口管理 (`src-tauri/src/serial/mod.rs`)
 
-**状态**: ✅ 已完成 (75%)
+**状态**: ✅ 已完成 (90%)
 
 **已实现**:
-- [x] SerialManager 管理所有已打开串口的集合
-- [x] SerialPortHandle 包含底层串口对象 + 读取线程 + MPSC 通道
-- [x] list_ports() 枚举系统可用串口（区分 real/virtual）
-- [x] open_port() 打开串口 + 启动读取线程（50ms 节流）
-- [x] close_port() 关闭串口 + 等待读取线程结束
-- [x] send_data() 向串口发送数据（支持追加换行符）
-- [x] set_baud_rate() 修改波特率
-- [x] set_flow_control() 设置 DTR/RTS
+- [x] SerialManager 管理所有已打开串口的集合（真实 + 模拟）
+- [x] SerialPortHandle 包含底层串口对象 + 读取线程 + running 标志
+- [x] SimPortHandle 模拟串口句柄，支持回显 + 心跳
+- [x] AppHandle 存储在 SerialManager 中，读取线程通过 `app.emit()` 推送数据
+- [x] `serial:data` 事件推送（RX 数据实时到前端）
+- [x] `serial:status` 事件推送（连接/断开/错误状态）
+- [x] AtomicBool running 标志，支持优雅关闭读取线程
+- [x] 完整的串口参数解析（data_bits, parity, stop_bits, handshake → serialport 枚举）
+- [x] DTR/RTS 参数在 open_port 时设置
+- [x] 模拟模式：SIM:Loopback 虚拟串口
+  - 发送数据后回显 "Received: xxx"
+  - 每 5 秒发送心跳 "[SIM] Heartbeat @ HH:MM:SS"
+  - 连接/断开事件推送
+- [x] `list_ports()` 根据 simulate 标志包含 SIM:Loopback
+- [x] `open_port()` 自动判断真实/模拟串口
+- [x] `send_data()` 模拟串口通过 channel 回显
 
 **遗留事项**:
-- [ ] 读取线程数据通过 `app.emit()` 推送到前端（当前使用 MPSC channel，未接入 Tauri 事件系统）
-- [ ] 串口断开/错误事件推送
-- [ ] HEX 格式发送的实际解析
-- [ ] 数据位/校验位/停止位等参数的实际传递
+- [ ] HEX 格式发送的实际解析（当前 HEX 模式直接当文本发送）
+- [ ] 读取线程优雅关闭（当前 join() 可能阻塞）
+- [ ] 未来：使用 `sysinfo` crate 实现真实系统监控
 
 ---
 
@@ -465,12 +472,10 @@
 | 发送数据 | `useSerialData` → `serialService.sendSerialData()` | `send_serial_data` | ✅ 已对接 |
 | 设置串口参数 | — (未直接使用) | `set_serial_params` | ⏳ 待对接 |
 | 设置流控 | — (未直接使用) | `set_flow_control` | ⏳ 待对接 |
-| 读取配置 | `useAppInit` → `useConfigPersistence().loadConfig()` | `get_config` | ✅ 已对接 |
-| 保存配置 | `useConfigPersistence().saveConfig()` | `set_config` | ✅ 已对接 |
-| 重置配置 | `useConfigPersistence().resetAndReload()` | `reset_config` | ✅ 已对接 |
-| 系统状态 | `useSystemStatus` → `systemService.getSystemStatus()` | `get_system_status` | ✅ 已对接 |
-| 串口数据接收 | `useSerialData` (事件监听 `serial:data`) | 后端 emit | ⏳ 后端未接入 |
-| 串口状态变化 | `useSerialData` (事件监听 `serial:status`) | 后端 emit | ⏳ 后端未接入 |
+| 启用模拟模式 | `useSimulation().toggleSimulation()` | `enable_simulation` | ✅ 已对接 |
+| 禁用模拟模式 | `useSimulation().toggleSimulation()` | `disable_simulation` | ✅ 已对接 |
+| 串口数据接收 | `useSerialData` (事件监听 `serial:data`) | 后端 emit | ✅ 已对接 |
+| 串口状态变化 | `useSerialData` (事件监听 `serial:status`) | 后端 emit | ✅ 已对接 |
 
 ---
 

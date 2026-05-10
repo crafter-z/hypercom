@@ -9,12 +9,13 @@ import type { SerialPort, AppConfig } from '../types';
  * 后端的 port_type 是 "real"|"virtual"，前端 PortStatus 需要从后端获取或默认 disconnected
  */
 function mapPortInfo(info: AvailablePortInfo): SerialPort {
+  const type = info.port_type === 'sim' ? 'sim' : info.port_type === 'real' ? 'real' : 'virtual';
   return {
     id: info.id,
     name: info.name,
     alias: undefined,
     status: 'disconnected' as PortStatus,
-    type: (info.port_type === 'real' ? 'real' : 'virtual') as SerialPort['type'],
+    type: type as SerialPort['type'],
     isHidden: false,
     groupId: undefined,
   };
@@ -257,4 +258,33 @@ export function useAppInit() {
     };
     init();
   }, [loadConfig, refreshPorts]);
+}
+
+/**
+ * Hook: 模拟串口模式
+ * 开启后串口列表会出现 SIM:Loopback 虚拟串口
+ * 发送数据后会回显 "Received: xxx"，每5秒发送心跳
+ */
+export function useSimulation() {
+  const simulationMode = useAppStore((s) => s.simulationMode);
+  const setSimulationMode = useAppStore((s) => s.setSimulationMode);
+
+  const toggleSimulation = useCallback(async () => {
+    try {
+      if (simulationMode) {
+        await serialService.disableSimulation();
+        setSimulationMode(false);
+      } else {
+        await serialService.enableSimulation();
+        setSimulationMode(true);
+      }
+      // 刷新串口列表以显示/隐藏模拟串口
+      const ports = await serialService.listAvailablePorts();
+      useAppStore.getState().setPorts(ports.map(mapPortInfo));
+    } catch (err) {
+      console.error('[useSimulation] Failed to toggle simulation:', err);
+    }
+  }, [simulationMode, setSimulationMode]);
+
+  return { simulationMode, toggleSimulation };
 }

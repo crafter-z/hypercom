@@ -20,7 +20,6 @@ pub fn list_available_ports(state: State<AppState>) -> Result<Vec<serial::PortIn
 }
 
 /// 打开指定串口
-/// 前端调用: invoke('open_serial_port', { portId, baudRate, dataBits, parity, stopBits, ... })
 #[derive(Debug, Deserialize)]
 pub struct OpenPortArgs {
     pub port_id: String,
@@ -74,6 +73,34 @@ pub fn set_serial_params(port_id: String, baud_rate: u32, state: State<AppState>
 pub fn set_flow_control(port_id: String, dtr: bool, rts: bool, state: State<AppState>) -> Result<(), String> {
     let manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
     manager.set_flow_control(&port_id, dtr, rts).map_err(|e| e.to_string())
+}
+
+// ==================== 模拟模式命令 ====================
+
+/// 启用模拟模式（在串口列表中添加 SIM:Loopback）
+#[tauri::command]
+pub fn enable_simulation(state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
+    manager.set_simulate(true);
+    log::info!("Simulation mode enabled");
+    Ok(())
+}
+
+/// 禁用模拟模式（关闭所有模拟串口并从列表中移除）
+#[tauri::command]
+pub fn disable_simulation(state: State<AppState>) -> Result<(), String> {
+    let sim_ids: Vec<String> = {
+        let manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
+        manager.sim_ports.keys().cloned().collect()
+    };
+    for id in &sim_ids {
+        let mut manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
+        manager.close_port(id).map_err(|e| e.to_string())?;
+    }
+    let mut manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
+    manager.set_simulate(false);
+    log::info!("Simulation mode disabled");
+    Ok(())
 }
 
 // ==================== 配置相关命令 ====================

@@ -9,7 +9,7 @@
 export type PortStatus = 'disconnected' | 'error' | 'connected';
 
 /** 串口类型 */
-export type PortType = 'real' | 'virtual';
+export type PortType = 'real' | 'virtual' | 'sim';
 
 /** 串口数据结构 */
 export interface SerialPort {
@@ -252,5 +252,5 @@ export interface SendDataParams {
 export interface AvailablePortInfo {
   id: string;
   name: string;
-  type: PortType;
+  type: PortType; // "real" | "virtual" | "sim"
 }

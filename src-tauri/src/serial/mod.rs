@@ -4,19 +4,27 @@
  * 使用 serialport-rs 库实现跨平台串口通信
  * 
  * 架构设计:
- * - SerialManager: 管理所有已打开串口的集合
- * - SerialPortHandle: 单个串口的句柄，包含读写线程
- * - 数据接收通过 MPSC channel 异步推送给前端
+ * - SerialManager: 管理所有已打开串口的集合（真实 + 模拟）
+ * - SerialPortHandle: 真实串口句柄，包含读取线程
+ * - SimPortHandle: 模拟串口句柄，支持回显 + 心跳
+ * - 数据接收通过 AppHandle.emit() 推送给前端
+ * - 模拟模式: 用于无硬件时的测试，提供 LOOP:Loopback 虚拟串口
  */
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::sync::{mpsc, Arc, Mutex};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
 use crate::commands::OpenPortArgs;
+
+// ==================== 公共类型 ====================
 
 /// 串口信息（返回给前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,21 +32,6 @@ pub struct PortInfo {
     pub id: String,
     pub name: String,
     pub port_type: String, // "real" | "virtual"
-}
-
-/// 单个串口连接句柄
-pub struct SerialPortHandle {
-    #[allow(dead_code)]
-    pub port_name: String,
-    #[allow(dead_code)]
-    pub baud_rate: u32,
-    pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
-    #[allow(dead_code)]
-    pub tx_channel: mpsc::Sender<SerialDataEvent>,
-    /// 读取线程句柄
-    pub read_thread: Option<thread::JoinHandle<()>>,
-    /// 连接状态
-    pub is_connected: bool,
 }
 
 /// 串口数据事件（推送给前端）
@@ -51,57 +44,186 @@ pub struct SerialDataEvent {
     pub is_hex: bool,
 }
 
+/// 串口状态变化事件（推送给前端）
+#[derive(Debug, Clone, Serialize)]
+pub struct SerialStatusEvent {
+    pub port_id: String,
+    pub status: String,
+}
+
+// ==================== 真实串口 ====================
+
+/// 单个串口连接句柄
+pub struct SerialPortHandle {
+    #[allow(dead_code)]
+    pub port_name: String,
+    #[allow(dead_code)]
+    pub baud_rate: u32,
+    pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    pub running: Arc<AtomicBool>,
+    pub read_thread: Option<thread::JoinHandle<()>>,
+}
+
+// ==================== 模拟串口 ====================
+
+/// 模拟串口内部消息
+enum SimMessage {
+    Echo { data: String, is_hex: bool },
+    Stop,
+}
+
+/// 模拟串口连接句柄
+pub struct SimPortHandle {
+    #[allow(dead_code)]
+    pub port_name: String,
+    pub running: Arc<AtomicBool>,
+    tx: mpsc::Sender<SimMessage>,
+    read_thread: Option<thread::JoinHandle<()>>,
+}
+
+// ==================== 参数解析 ====================
+
+fn parse_data_bits(bits: u8) -> serialport::DataBits {
+    match bits {
+        5 => serialport::DataBits::Five,
+        6 => serialport::DataBits::Six,
+        7 => serialport::DataBits::Seven,
+        _ => serialport::DataBits::Eight,
+    }
+}
+
+fn parse_parity(parity: &str) -> serialport::Parity {
+    match parity {
+        "Even" => serialport::Parity::Even,
+        "Odd" => serialport::Parity::Odd,
+        _ => serialport::Parity::None,
+    }
+}
+
+fn parse_stop_bits(bits: &str) -> serialport::StopBits {
+    match bits {
+        "Two" => serialport::StopBits::Two,
+        _ => serialport::StopBits::One,
+    }
+}
+
+fn parse_flow_control(flow: &str) -> serialport::FlowControl {
+    match flow {
+        "XonXoff" => serialport::FlowControl::Software,
+        "RequestToSend" | "RequestToSendXonXoff" => serialport::FlowControl::Hardware,
+        _ => serialport::FlowControl::None,
+    }
+}
+
+// ==================== 串口管理器 ====================
+
 /// 串口管理器
 pub struct SerialManager {
-    /// 已打开的串口集合
+    /// 真实串口集合
     ports: HashMap<String, SerialPortHandle>,
-    /// 全局数据接收通道（前端通过事件监听）
-    pub event_sender: Option<mpsc::Sender<SerialDataEvent>>,
+    /// 模拟串口集合
+    pub sim_ports: HashMap<String, SimPortHandle>,
+    /// 是否启用模拟模式
+    simulate: bool,
+    /// Tauri AppHandle，用于事件推送
+    app_handle: Option<AppHandle>,
 }
 
 impl SerialManager {
     pub fn new() -> Self {
         Self {
             ports: HashMap::new(),
-            event_sender: None,
+            sim_ports: HashMap::new(),
+            simulate: false,
+            app_handle: None,
         }
     }
 
+    /// 设置 AppHandle（在 Tauri setup 钩子中调用）
+    pub fn set_app_handle(&mut self, handle: AppHandle) {
+        self.app_handle = Some(handle);
+    }
+
+    /// 启用/禁用模拟模式
+    pub fn set_simulate(&mut self, on: bool) {
+        self.simulate = on;
+    }
+
     /// 枚举系统可用串口
-    /// TODO: 区分虚拟串口与真实串口
     pub fn list_ports(&self) -> anyhow::Result<Vec<PortInfo>> {
-        let ports = serialport::available_ports()?;
-        let result = ports.into_iter().map(|p| PortInfo {
-            id: p.port_name.clone(),
-            name: p.port_name,
-            port_type: match p.port_type {
-                serialport::SerialPortType::UsbPort(_) => "real".to_string(),
-                serialport::SerialPortType::PciPort => "real".to_string(),
-                serialport::SerialPortType::BluetoothPort => "real".to_string(),
-                serialport::SerialPortType::Unknown => "virtual".to_string(),
-            },
-        }).collect();
+        let mut result: Vec<PortInfo> = serialport::available_ports()?
+            .into_iter()
+            .map(|p| PortInfo {
+                id: p.port_name.clone(),
+                name: p.port_name,
+                port_type: match p.port_type {
+                    serialport::SerialPortType::UsbPort(_) => "real".to_string(),
+                    serialport::SerialPortType::PciPort => "real".to_string(),
+                    serialport::SerialPortType::BluetoothPort => "real".to_string(),
+                    serialport::SerialPortType::Unknown => "virtual".to_string(),
+                },
+            })
+            .collect();
+
+        if self.simulate {
+            result.push(PortInfo {
+                id: "SIM:Loopback".to_string(),
+                name: "SIM:Loopback (模拟串口)".to_string(),
+                port_type: "sim".to_string(),
+            });
+        }
+
         Ok(result)
     }
 
-    /// 打开指定串口
-    /// TODO: 解析参数中的 data_bits/parity/stop_bits/handshake
+    /// 打开串口（自动判断真实/模拟）
     pub fn open_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
+        if args.port_id.starts_with("SIM:") {
+            self.open_sim_port(args)
+        } else {
+            self.open_real_port(args)
+        }
+    }
+
+    /// 打开真实串口
+    fn open_real_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
+        let app_handle = self.app_handle.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
+            .clone();
+
         let port = serialport::new(&args.port_id, args.baud_rate)
-            .timeout(std::time::Duration::from_millis(100))
+            .data_bits(parse_data_bits(args.data_bits))
+            .parity(parse_parity(&args.parity))
+            .stop_bits(parse_stop_bits(&args.stop_bits))
+            .flow_control(parse_flow_control(&args.handshake))
+            .timeout(Duration::from_millis(100))
             .open()?;
 
-        let (tx, _rx) = mpsc::channel::<SerialDataEvent>();
-        let port_arc = Arc::new(Mutex::new(port));
+        // 设置 DTR/RTS
+        // Note: 需要在 Arc<Mutex> 包装之前设置，因为 write_data_terminal_ready 需要可变引用
+        // 但 open() 返回的是 Box<dyn SerialPort>，我们无法直接设置
+        // 这里先打开再设置
 
-        // 启动读取线程
+        let port_arc = Arc::new(Mutex::new(port));
+        let running = Arc::new(AtomicBool::new(true));
+
+        // 设置 DTR/RTS
+        {
+            let mut p = port_arc.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+            p.write_data_terminal_ready(args.dtr)
+                .map_err(|e| anyhow::anyhow!("Failed to set DTR: {}", e))?;
+            p.write_request_to_send(args.rts)
+                .map_err(|e| anyhow::anyhow!("Failed to set RTS: {}", e))?;
+        }
+
         let port_clone = Arc::clone(&port_arc);
+        let running_clone = Arc::clone(&running);
         let port_id = args.port_id.clone();
-        let tx_clone = tx.clone();
+        let app_handle_clone = app_handle.clone();
 
         let read_thread = thread::spawn(move || {
             let mut buffer = [0u8; 1024];
-            loop {
+            while running_clone.load(Ordering::Relaxed) {
                 match port_clone.lock() {
                     Ok(mut p) => match p.read(&mut buffer) {
                         Ok(n) if n > 0 => {
@@ -112,11 +234,16 @@ impl SerialManager {
                                 data: buffer[..n].to_vec(),
                                 is_hex: false,
                             };
-                            let _ = tx_clone.send(event);
+                            let _ = app_handle_clone.emit("serial:data", event);
                         }
                         Ok(_) => {}
-                        Err(e) => {
-                            log::warn!("Serial read error: {}", e);
+Err(e) => {
+                            log::warn!("Serial read error on {}: {}", port_id, e);
+                            let status_event = SerialStatusEvent {
+                                port_id: port_id.clone(),
+                                status: "error".to_string(),
+                            };
+                            let _ = app_handle_clone.emit("serial:status", status_event);
                             break;
                         }
                     },
@@ -125,42 +252,151 @@ impl SerialManager {
                         break;
                     }
                 }
-                // 50ms 节流，避免CPU占用过高
-                thread::sleep(std::time::Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
             }
+            // 读取线程退出时发送断开事件
+            let status_event = SerialStatusEvent {
+                port_id,
+                status: "disconnected".to_string(),
+            };
+            let _ = app_handle_clone.emit("serial:status", status_event);
         });
 
         let handle = SerialPortHandle {
             port_name: args.port_id.clone(),
             baud_rate: args.baud_rate,
             port: port_arc,
-            tx_channel: tx,
+            running,
             read_thread: Some(read_thread),
-            is_connected: true,
         };
 
-        let port_id_clone = args.port_id.clone();
+        // 发送连接成功事件
+        let status_event = SerialStatusEvent {
+            port_id: args.port_id.clone(),
+            status: "connected".to_string(),
+        };
+        let _ = app_handle.emit("serial:status", status_event);
+
+        let port_id = args.port_id.clone();
         self.ports.insert(args.port_id, handle);
-        log::info!("Serial port opened: {}", port_id_clone);
+        log::info!("Serial port opened: {}", port_id);
         Ok(())
     }
 
-    /// 关闭指定串口
-    pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<()> {
-        if let Some(mut handle) = self.ports.remove(port_id) {
-            handle.is_connected = false;
-            // 等待读取线程结束
-            if let Some(thread) = handle.read_thread.take() {
-                let _ = thread.join();
+    /// 打开模拟串口
+    fn open_sim_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
+        let app_handle = self.app_handle.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
+            .clone();
+
+        let (tx, rx) = mpsc::channel::<SimMessage>();
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+        let port_id = args.port_id.clone();
+        let app_handle_clone = app_handle.clone();
+
+        let read_thread = thread::spawn(move || {
+            let mut last_heartbeat = std::time::Instant::now();
+            loop {
+                if !running_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(SimMessage::Echo { data, is_hex }) => {
+                        let echo_data = if is_hex {
+                            format!("[HEX] Received: {}\r\n", data)
+                        } else {
+                            format!("Received: {}\r\n", data)
+                        };
+                        let event = SerialDataEvent {
+                            port_id: port_id.clone(),
+                            timestamp: chrono::Local::now().timestamp_millis(),
+                            direction: "RX".to_string(),
+                            data: echo_data.into_bytes(),
+                            is_hex: false,
+                        };
+                        let _ = app_handle_clone.emit("serial:data", event);
+                    }
+                    Ok(SimMessage::Stop) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // 每 5 秒发送一次心跳
+                        if last_heartbeat.elapsed() >= Duration::from_secs(5) {
+                            let heartbeat = format!(
+                                "[SIM] Heartbeat @ {}\r\n",
+                                chrono::Local::now().format("%H:%M:%S")
+                            );
+                            let event = SerialDataEvent {
+                                port_id: port_id.clone(),
+                                timestamp: chrono::Local::now().timestamp_millis(),
+                                direction: "RX".to_string(),
+                                data: heartbeat.into_bytes(),
+                                is_hex: false,
+                            };
+                            let _ = app_handle_clone.emit("serial:data", event);
+                            last_heartbeat = std::time::Instant::now();
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
-            log::info!("Serial port closed: {}", port_id);
+        });
+
+        let handle = SimPortHandle {
+            port_name: args.port_id.clone(),
+            running,
+            tx,
+            read_thread: Some(read_thread),
+        };
+
+        // 发送连接成功事件
+        let status_event = SerialStatusEvent {
+            port_id: args.port_id.clone(),
+            status: "connected".to_string(),
+        };
+        let _ = app_handle.emit("serial:status", status_event);
+
+        self.sim_ports.insert(args.port_id, handle);
+        log::info!("Sim port opened: SIM:Loopback");
+        Ok(())
+    }
+
+    /// 关闭串口（真实或模拟）
+    pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<()> {
+        if port_id.starts_with("SIM:") {
+            if let Some(mut handle) = self.sim_ports.remove(port_id) {
+                handle.running.store(false, Ordering::Relaxed);
+                let _ = handle.tx.send(SimMessage::Stop);
+                if let Some(thread) = handle.read_thread.take() {
+                    let _ = thread.join();
+                }
+                log::info!("Sim port closed: {}", port_id);
+            }
+        } else {
+            if let Some(mut handle) = self.ports.remove(port_id) {
+                handle.running.store(false, Ordering::Relaxed);
+                if let Some(thread) = handle.read_thread.take() {
+                    let _ = thread.join();
+                }
+                log::info!("Serial port closed: {}", port_id);
+            }
         }
         Ok(())
     }
 
     /// 向串口发送数据
-    /// TODO: 支持 HEX 格式解析、追加换行符
     pub fn send_data(&self, port_id: &str, data: &str, is_hex: bool, append_line_ending: &str) -> anyhow::Result<usize> {
+        // 模拟串口：通过 channel 发送，由读取线程回显
+        if port_id.starts_with("SIM:") {
+            let handle = self.sim_ports.get(port_id)
+                .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
+            handle.tx.send(SimMessage::Echo {
+                data: data.to_string(),
+                is_hex,
+            }).map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
+            return Ok(data.len());
+        }
+
+        // 真实串口：写入串口
         let handle = self.ports.get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
 

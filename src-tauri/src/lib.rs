@@ -9,6 +9,8 @@ mod logger;
 mod serial;
 mod storage;
 
+use tauri::Manager;
+
 /// 应用状态结构体
 /// 通过 Tauri State 在各命令间共享
 pub struct AppState {
@@ -50,6 +52,9 @@ pub fn run() {
             commands::send_serial_data,
             commands::set_serial_params,
             commands::set_flow_control,
+            // ===== 模拟模式命令 =====
+            commands::enable_simulation,
+            commands::disable_simulation,
             // ===== 配置相关命令 =====
             commands::get_config,
             commands::set_config,
@@ -66,7 +71,13 @@ pub fn run() {
             commands::prevent_sleep,
         ])
         .setup(|_app| {
-            // 应用启动后的初始化逻辑
+            // 设置 AppHandle，用于串口数据事件推送
+            let app_handle = _app.handle().clone();
+            let state = _app.state::<AppState>();
+            let mut serial_mgr = state.serial_manager.lock().unwrap();
+            serial_mgr.set_app_handle(app_handle);
+            drop(serial_mgr);
+
             log::info!("HyperCom setup complete");
             Ok(())
         })
