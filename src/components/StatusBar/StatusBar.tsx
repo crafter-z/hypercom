@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle } from 'lucide-react';
 import { useSystemStatus } from '../../hooks/useTauri';
@@ -8,6 +8,12 @@ const StatusBar: React.FC = () => {
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
 
   useSystemStatus(5000);
+
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const formatBytes = (bytes: number): string => {
     if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
@@ -48,7 +54,7 @@ const StatusBar: React.FC = () => {
           <span className="statusbar-item" style={{ opacity: 0.7 }}>未选择串口</span>
         )}
         <span className="statusbar-item" style={{ opacity: 0.8 }}>
-          {new Date().toLocaleTimeString('zh-CN')}
+          {now.toLocaleTimeString('zh-CN')}
         </span>
       </div>
     </div>

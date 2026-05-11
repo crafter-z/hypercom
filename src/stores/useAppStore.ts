@@ -119,6 +119,7 @@ interface AppState {
   opSendAppendLineEnding: LineEnding;
   opSendInput: string;
   opIsLoopSending: boolean;
+  opLoopInterval: number;
   
   // ==================== Actions ====================
   
@@ -162,7 +163,7 @@ interface AppState {
     'opBaudRate' | 'opDataBits' | 'opParity' | 'opStopBits' | 'opHandshake' |
     'opDtr' | 'opRts' | 'opIgnoreEmptyChars' | 'opScrollLocked' | 'opShowTimestamp' |
     'opDisplayFormat' | 'opEncoding' | 'opSendIsHex' | 'opSendAppendLineEnding' |
-    'opSendInput' | 'opIsLoopSending'
+    'opSendInput' | 'opIsLoopSending' | 'opLoopInterval'
   >>) => void;
   
   // 系统状态
@@ -215,6 +216,7 @@ export const useAppStore = create<AppState>()(
     opSendAppendLineEnding: '\\r\\n',
     opSendInput: '',
     opIsLoopSending: false,
+    opLoopInterval: 500,
 
     // --- Actions ---
     

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import TitleBar from './components/TitleBar/TitleBar';
 import Sidebar from './components/Sidebar/Sidebar';
 import MainDisplay from './components/MainDisplay/MainDisplay';
@@ -6,37 +6,104 @@ import OperationPanel from './components/OperationPanel/OperationPanel';
 import StatusBar from './components/StatusBar/StatusBar';
 import ConfigModal from './components/ConfigModal/ConfigModal';
 import { useAppInit } from './hooks/useTauri';
+import { useAppStore } from './stores/useAppStore';
 
-const App: React.FC = () => {
-  useAppInit();
+const SidebarResizeHandle: React.FC = () => {
+  const setUIState = useAppStore((s) => s.setUIState);
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = Math.max(200, Math.min(400, e.clientX));
+      setUIState({ sidebarWidth: newWidth });
+    };
+    const handleMouseUp = () => setDragging(false);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [dragging, setUIState]);
 
   return (
     <div
-      style={{
-        width: '100vw',
-        height: '100vh',
-        minWidth: 720,
-        minHeight: 480,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        background: 'var(--bg-primary)',
-      }}
-    >
-      <TitleBar />
+      className={`sidebar-resize-handle${dragging ? ' dragging' : ''}`}
+      onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
+    />
+  );
+};
 
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
-        <Sidebar />
+const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const theme = useAppStore((s) => s.config.theme);
 
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 400 }}>
-          <MainDisplay />
-          <OperationPanel />
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'system') {
+      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      const applySystemTheme = () => {
+        root.setAttribute('data-theme', mediaQuery.matches ? 'dark' : 'light');
+      };
+      applySystemTheme();
+      mediaQuery.addEventListener('change', applySystemTheme);
+      return () => mediaQuery.removeEventListener('change', applySystemTheme);
+    } else {
+      root.setAttribute('data-theme', theme);
+    }
+  }, [theme]);
+
+  return <>{children}</>;
+};
+
+const App: React.FC = () => {
+  useAppInit();
+  const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+      e.preventDefault();
+    };
+    document.addEventListener('contextmenu', handler);
+    return () => document.removeEventListener('contextmenu', handler);
+  }, []);
+
+  return (
+    <ThemeProvider>
+      <div
+        style={{
+          width: '100vw',
+          height: '100vh',
+          minWidth: 900,
+          minHeight: 600,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          background: 'var(--bg-primary)',
+        }}
+      >
+        <TitleBar />
+
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
+          <div style={{ width: sidebarWidth, flexShrink: 0, overflow: 'hidden' }}>
+            <Sidebar />
+          </div>
+          <SidebarResizeHandle />
+
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 300 }}>
+            <MainDisplay />
+            <OperationPanel />
+          </div>
         </div>
-      </div>
 
-      <StatusBar />
-      <ConfigModal />
-    </div>
+        <StatusBar />
+        <ConfigModal />
+      </div>
+    </ThemeProvider>
   );
 };
 

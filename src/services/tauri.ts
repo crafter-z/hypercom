@@ -84,11 +84,11 @@ export const serialService = {
     return invoke<number>('send_serial_data', { args: params });
   },
 
-  setSerialParams: (portId: string, baudRate: number): Promise<void> => {
-    return invoke<void>('set_serial_params', { portId, baudRate });
+  setSerialParams: (portId: string, params: { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string }) => {
+    return invoke<void>('set_serial_params', { portId, baudRate: params.baudRate });
   },
 
-  setFlowControl: (portId: string, dtr: boolean, rts: boolean): Promise<void> => {
+  setFlowControl: (portId: string, dtr: boolean, rts: boolean) => {
     return invoke<void>('set_flow_control', { portId, dtr, rts });
   },
 

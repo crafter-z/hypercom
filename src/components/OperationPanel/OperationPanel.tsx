@@ -1,11 +1,13 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSerialData, useSerialConnection } from '../../hooks/useTauri';
+import { serialService } from '../../services/tauri';
 import type { DataBits, Parity, StopBits, Handshake, LineEnding } from '../../types';
 import {
   Send, Cable, Eraser, Pin, Clock,
   FileText, FolderOpen, FileSearch, Settings,
-  ChevronDown, ChevronUp, Play, Square, Edit3
+  ChevronDown, ChevronUp, Play, Square, Edit3,
+  ToggleLeft, ToggleRight
 } from 'lucide-react';
 
 const OperationPanel: React.FC = () => {
@@ -27,6 +29,7 @@ const OperationPanel: React.FC = () => {
     opSendAppendLineEnding,
     opSendInput,
     opIsLoopSending,
+    opLoopInterval,
     setOpState,
     setUIState,
     clearTerminal,
@@ -43,6 +46,24 @@ const OperationPanel: React.FC = () => {
 
   const isPortActive = !!activeTabId;
   const collapsed = ui.isOperationPanelCollapsed;
+
+  const prevParamsRef = useRef(`${opBaudRate}-${opDataBits}-${opParity}-${opStopBits}-${opHandshake}-${opDtr}-${opRts}`);
+
+  useEffect(() => {
+    if (!activeTabId || !isConnected) return;
+    const key = `${opBaudRate}-${opDataBits}-${opParity}-${opStopBits}-${opHandshake}-${opDtr}-${opRts}`;
+    if (key !== prevParamsRef.current) {
+      prevParamsRef.current = key;
+      serialService.setSerialParams(activeTabId, {
+        baudRate: opBaudRate,
+        dataBits: opDataBits,
+        parity: opParity,
+        stopBits: opStopBits,
+        handshake: opHandshake,
+      }).catch(() => {});
+      serialService.setFlowControl(activeTabId, opDtr, opRts).catch(() => {});
+    }
+  }, [activeTabId, isConnected, opBaudRate, opDataBits, opParity, opStopBits, opHandshake, opDtr, opRts]);
 
   const handleSend = async () => {
     if (!isPortActive || !opSendInput.trim()) return;
@@ -67,6 +88,10 @@ const OperationPanel: React.FC = () => {
 
   const toggleCollapse = () => {
     setUIState({ isOperationPanelCollapsed: !collapsed });
+  };
+
+  const toggleDisplayFormat = () => {
+    setOpState({ opDisplayFormat: opDisplayFormat === 'hex' ? 'string' : 'hex' });
   };
 
   return (
@@ -96,7 +121,6 @@ const OperationPanel: React.FC = () => {
 
       {!collapsed && (
         <div className="operation-panel-content">
-          {/* Left: Send & Control */}
           <div className="op-section op-section-send">
             <div className="panel-card-title">发送命令 & 基础控制</div>
 
@@ -108,7 +132,7 @@ const OperationPanel: React.FC = () => {
                 value={opSendInput}
                 onChange={(e) => setOpState({ opSendInput: e.target.value })}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
                     handleSend();
                   }
@@ -157,7 +181,6 @@ const OperationPanel: React.FC = () => {
 
           <div className="divider" style={{ margin: '0 4px' }} />
 
-          {/* Middle: Loop Send & Rules */}
           <div className="op-section op-section-rules">
             <div className="panel-card-title">循环发送 & 规则</div>
 
@@ -206,7 +229,8 @@ const OperationPanel: React.FC = () => {
                   className="input"
                   type="number"
                   style={{ width: 56, fontSize: 11, textAlign: 'center' }}
-                  defaultValue={500}
+                  value={opLoopInterval}
+                  onChange={(e) => setOpState({ opLoopInterval: Number(e.target.value) || 500 })}
                   min={0}
                   step={10}
                 />
@@ -215,14 +239,17 @@ const OperationPanel: React.FC = () => {
             </div>
 
             <div className="op-btn-row" style={{ marginTop: 'auto' }}>
-              <button className="btn btn-sm" style={{ flex: 1 }}>HEX/文本</button>
-              <button className="btn btn-sm" style={{ flex: 1 }}>日志文件</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} onClick={toggleDisplayFormat} title={opDisplayFormat === 'hex' ? '切换为文本显示' : '切换为HEX显示'}>
+                {opDisplayFormat === 'hex' ? <><ToggleRight size={12} /> 文本</> : <><ToggleLeft size={12} /> HEX</>}
+              </button>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive} title="日志操作">
+                <FileText size={12} /> 日志
+              </button>
             </div>
           </div>
 
           <div className="divider" style={{ margin: '0 4px' }} />
 
-          {/* Right: View & Params */}
           <div className="op-section op-section-params">
             <div className="panel-card-title">视图 & 日志 & 参数</div>
 
@@ -268,9 +295,9 @@ const OperationPanel: React.FC = () => {
             </div>
 
             <div className="op-btn-row">
-              <button className="btn btn-sm" style={{ flex: 1 }}><FileText size={12} /> 另存为</button>
-              <button className="btn btn-sm" style={{ flex: 1 }}><FolderOpen size={12} /> 打开文件</button>
-              <button className="btn btn-sm" style={{ flex: 1 }}><FileSearch size={12} /> 目录</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive}><FileText size={12} /> 另存为</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive}><FolderOpen size={12} /> 打开文件</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive}><FileSearch size={12} /> 目录</button>
             </div>
 
             <div className="divider-h" />

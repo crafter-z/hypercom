@@ -3,7 +3,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
 import {
-  Plus, Columns2, Rows2
+  Columns2, Rows2
 } from 'lucide-react';
 
 interface PaneProps {
@@ -188,17 +188,6 @@ const MainDisplay: React.FC = () => {
   return (
     <div className="main-display">
       <div className="main-display-toolbar">
-        <button className="btn btn-icon btn-sm" title="新建标签页" onClick={() => {
-          const { ports } = useAppStore.getState();
-          const openedPortIds = new Set(tabs.map(t => t.id));
-          const available = ports.find(p => !openedPortIds.has(p.id));
-          if (available) {
-            const { openTab } = useAppStore.getState();
-            openTab(available.id);
-          }
-        }}>
-          <Plus size={14} />
-        </button>
         <button className="btn btn-icon btn-sm" title="左右分屏" onClick={() => splitPane('vertical')}>
           <Columns2 size={14} />
         </button>

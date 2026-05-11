@@ -2,6 +2,7 @@ import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks/useTauri';
 import type { AppConfig } from '../../types';
+import { open } from '@tauri-apps/plugin-dialog';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, X
 } from 'lucide-react';
@@ -109,7 +110,10 @@ const GeneralSettings: React.FC = () => {
       <div className="config-row">
         <label>背景图片:</label>
         <input className="input" value={config.backgroundImage || ''} placeholder="选择图片路径..." readOnly />
-        <button className="btn btn-sm">浏览...</button>
+        <button className="btn btn-sm" onClick={async () => {
+          const result = await open({ directory: false, multiple: false, filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp'] }] });
+          if (result) setConfig({ backgroundImage: result });
+        }}>浏览...</button>
       </div>
     </div>
   );
@@ -130,7 +134,10 @@ const LogSettings: React.FC = () => {
       <div className="config-row">
         <label>日志存储目录:</label>
         <input className="input" value={config.logDirectory} placeholder="选择日志保存路径..." readOnly />
-        <button className="btn btn-sm">浏览...</button>
+        <button className="btn btn-sm" onClick={async () => {
+          const result = await open({ directory: true });
+          if (result) setConfig({ logDirectory: result });
+        }}>浏览...</button>
       </div>
 
       <div className="config-row">
@@ -192,7 +199,10 @@ const BackupSettings: React.FC = () => {
           <div className="config-row">
             <label>备份存储目录:</label>
             <input className="input" value={config.backupDirectory} placeholder="选择备份保存路径..." readOnly />
-            <button className="btn btn-sm">浏览...</button>
+            <button className="btn btn-sm" onClick={async () => {
+              const result = await open({ directory: true });
+              if (result) setConfig({ backupDirectory: result });
+            }}>浏览...</button>
           </div>
         </>
       )}
