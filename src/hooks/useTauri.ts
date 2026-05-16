@@ -21,6 +21,29 @@ function mapPortInfo(info: AvailablePortInfo): SerialPort {
   };
 }
 
+function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[] {
+  const existingMap = new Map(existing.map(p => [p.id, p]));
+  return incoming.map(p => {
+    const prev = existingMap.get(p.id);
+    if (prev) {
+      // Preserve runtime state: status, alias, hidden, group, connection params
+      return {
+        ...p,
+        status: prev.status,
+        alias: prev.alias,
+        isHidden: prev.isHidden,
+        groupId: prev.groupId,
+        baudRate: prev.baudRate,
+        dataBits: prev.dataBits,
+        parity: prev.parity,
+        stopBits: prev.stopBits,
+        handshake: prev.handshake,
+      };
+    }
+    return p;
+  });
+}
+
 import type { PortStatus } from '../types';
 
 /**
@@ -32,8 +55,9 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
 
   const refreshPorts = useCallback(async () => {
     try {
-      const ports = await serialService.listAvailablePorts();
-      setPorts(ports.map(mapPortInfo));
+      const list = await serialService.listAvailablePorts();
+      const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
+      setPorts(merged);
     } catch (err) {
       console.warn('[useSerialPorts] Failed to list ports:', err);
     }
@@ -57,20 +81,28 @@ export function useSerialConnection() {
   const updatePort = useAppStore((s) => s.updatePort);
   const ports = useAppStore((s) => s.ports);
 
-  const openPort = useCallback(async (portId: string, baudRate: number = 115200) => {
+  const openPort = useCallback(async (portId: string, _baudRate: number = 115200) => {
     try {
+      const store = useAppStore.getState();
       updatePort(portId, { status: 'connected' });
       await serialService.openSerialPort({
         port_id: portId,
-        baud_rate: baudRate,
-        data_bits: 8,
-        parity: 'None',
-        stop_bits: 'One',
-        handshake: 'None',
-        dtr: false,
-        rts: false,
+        baud_rate: store.opBaudRate,
+        data_bits: store.opDataBits,
+        parity: store.opParity,
+        stop_bits: store.opStopBits,
+        handshake: store.opHandshake,
+        dtr: store.opDtr,
+        rts: store.opRts,
       });
-      updatePort(portId, { status: 'connected', baudRate });
+      updatePort(portId, {
+        status: 'connected',
+        baudRate: store.opBaudRate,
+        dataBits: store.opDataBits,
+        parity: store.opParity,
+        stopBits: store.opStopBits,
+        handshake: store.opHandshake,
+      });
     } catch (err) {
       console.error('[useSerialConnection] Failed to open port:', err);
       updatePort(portId, { status: 'error' });
@@ -122,6 +154,10 @@ export function useSerialData() {
           content: text,
           isHex: event.is_hex,
         });
+        // Accumulate traffic stats
+        useAppStore.getState().setTrafficStats(event.port_id, {
+          rxTotal: (useAppStore.getState().trafficStats[event.port_id]?.rxTotal || 0) + event.data.length,
+        });
       });
 
       const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
@@ -167,6 +203,10 @@ export function useSerialData() {
         content: `${prefix}${data}`,
         isHex: isHex,
       });
+
+      // Track TX bytes
+      const currentTx = useAppStore.getState().trafficStats[portId]?.txTotal || 0;
+      useAppStore.getState().setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
 
       return bytesWritten;
     } catch (err) {
@@ -279,8 +319,9 @@ export function useSimulation() {
         setSimulationMode(true);
       }
       // 刷新串口列表以显示/隐藏模拟串口
-      const ports = await serialService.listAvailablePorts();
-      useAppStore.getState().setPorts(ports.map(mapPortInfo));
+      const list = await serialService.listAvailablePorts();
+      const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
+      useAppStore.getState().setPorts(merged);
     } catch (err) {
       console.error('[useSimulation] Failed to toggle simulation:', err);
     }

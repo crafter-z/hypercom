@@ -2,6 +2,8 @@ import React, { useRef, useEffect, useCallback } from 'react';
 import type { TerminalLine, TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { useState } from 'react';
+import { applyHighlightSets } from '../../utils/highlightEngine';
+import { useAppStore } from '../../stores/useAppStore';
 
 interface TerminalViewProps {
   portId: string;
@@ -36,6 +38,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }
   const scrollRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const lines = terminal?.lines?.length ? terminal.lines : mockLines;
+  const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
 
   useEffect(() => {
     if (scrollRef.current && terminal?.scrollLocked !== false) {
@@ -109,9 +112,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }
             >
               {line.direction}
             </span>
-            <span className="terminal-content">
-              {line.content}
-            </span>
+            <span className="terminal-content"
+              dangerouslySetInnerHTML={{
+                __html: applyHighlightSets(line.content, highlightRuleSets)
+              }}
+            />
           </div>
         ))}
         <div style={{ height: 8 }} />

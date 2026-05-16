@@ -97,18 +97,16 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
         </div>
       )}
 
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        {paneTabs.length > 0 && displayTab ? (
-          <TerminalView
-            portId={displayTab.id}
-            terminal={terminals[displayTab.id]}
-          />
-        ) : paneTabs.length === 0 ? (
-          <div className="terminal-empty-state">
-            双击左侧串口打开标签页
-          </div>
-        ) : null}
-      </div>
+      {paneTabs.length > 0 && displayTab ? (
+        <TerminalView
+          portId={displayTab.id}
+          terminal={terminals[displayTab.id]}
+        />
+      ) : paneTabs.length === 0 ? (
+        <div className="terminal-empty-state" style={{ flex: 1 }}>
+          双击左侧串口打开标签页
+        </div>
+      ) : null}
     </div>
   );
 };

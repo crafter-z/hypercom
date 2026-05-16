@@ -192,4 +192,100 @@ export const eventService = {
       callback(event.payload);
     });
   },
+
+  onStorageReady: (callback: () => void) => {
+    return listen<void>('storage:ready', () => {
+      callback();
+    });
+  },
+};
+
+// ==================== 存储命令 ====================
+
+export interface CommandSetInfo {
+  id: string;
+  name: string;
+  is_loop: boolean;
+  loop_delay_ms: number;
+  commands: CommandInfo[];
+}
+
+export interface CommandInfo {
+  id: string;
+  set_id: string;
+  name: string;
+  order_idx: number;
+  delay_ms: number;
+  cmd_type: string;
+  content: string;
+  append_line_ending: string;
+}
+
+export interface HighlightSetInfo {
+  id: string;
+  name: string;
+  is_enabled: boolean;
+  rules: HighlightRuleInfo[];
+}
+
+export interface HighlightRuleInfo {
+  id: string;
+  set_id: string;
+  name: string;
+  pattern: string;
+  is_regex: boolean;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+}
+
+export const storageService = {
+  saveCommandSet: (args: {
+    name: string;
+    is_loop: boolean;
+    loop_delay_ms: number;
+    commands: Array<{
+      id: string;
+      name: string;
+      order_idx: number;
+      delay_ms: number;
+      cmd_type: string;
+      content: string;
+      append_line_ending: string;
+    }>;
+  }): Promise<string> => {
+    return invoke<string>('save_command_set', { args });
+  },
+
+  loadCommandSets: (): Promise<CommandSetInfo[]> => {
+    return invoke<CommandSetInfo[]>('load_command_sets');
+  },
+
+  deleteCommandSet: (setId: string): Promise<void> => {
+    return invoke<void>('delete_command_set', { setId });
+  },
+
+  saveHighlightSet: (args: {
+    name: string;
+    is_enabled: boolean;
+    rules: Array<{
+      id: string;
+      name: string;
+      pattern: string;
+      is_regex: boolean;
+      color: string;
+      bold: boolean;
+      italic: boolean;
+    }>;
+  }): Promise<string> => {
+    return invoke<string>('save_highlight_set', { args });
+  },
+
+  loadHighlightSets: (): Promise<HighlightSetInfo[]> => {
+    return invoke<HighlightSetInfo[]>('load_highlight_sets');
+  },
+
+  deleteHighlightSet: (setId: string): Promise<void> => {
+    return invoke<void>('delete_highlight_set', { setId });
+  },
 };

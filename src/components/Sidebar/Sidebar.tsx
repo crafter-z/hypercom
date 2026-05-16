@@ -1,13 +1,27 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import type { SerialPort, PortGroup } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
   Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
   ChevronRight, Plus, X, Search, FlaskConical,
-  PlugZap, Pencil, Unplug, ExternalLink
+  PlugZap, Pencil, Unplug, ExternalLink, GripVertical
 } from 'lucide-react';
 import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks/useTauri';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 const SidebarToolbar: React.FC<{
   showHidden: boolean;
@@ -67,7 +81,7 @@ const SearchBox: React.FC<{ value: string; onChange: (v: string) => void }> = ({
   );
 };
 
-interface PortItemProps {
+interface SortablePortItemProps {
   port: SerialPort;
   isConnected: boolean;
   onOpenTab: (portId: string) => void;
@@ -77,7 +91,7 @@ interface PortItemProps {
   onShowPort: (portId: string) => void;
 }
 
-const PortItem: React.FC<PortItemProps> = ({
+const SortablePortItem: React.FC<SortablePortItemProps> = ({
   port,
   isConnected,
   onOpenTab,
@@ -87,6 +101,20 @@ const PortItem: React.FC<PortItemProps> = ({
   onShowPort,
 }) => {
   const { show, element } = useContextMenu();
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: port.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
 
   const statusColor = {
     disconnected: 'var(--status-disconnected)',
@@ -112,12 +140,15 @@ const PortItem: React.FC<PortItemProps> = ({
   ];
 
   return (
-    <>
+    <div ref={setNodeRef} style={style}>
       <div
         className="port-item"
         onDoubleClick={() => onOpenTab(port.id)}
         onContextMenu={(e) => show(e, items)}
       >
+        <span className="port-item-drag" {...attributes} {...listeners}>
+          <GripVertical size={12} />
+        </span>
         <div className="port-item-status" style={{ backgroundColor: statusColor, boxShadow: port.status === 'connected' ? `0 0 6px ${statusColor}` : 'none' }} />
         <div className="port-item-info">
           <div className="port-item-title">
@@ -144,7 +175,7 @@ const PortItem: React.FC<PortItemProps> = ({
         </button>
       </div>
       {element}
-    </>
+    </div>
   );
 };
 
@@ -182,6 +213,8 @@ const GroupItem: React.FC<GroupItemProps> = ({
     groupPorts.forEach(p => { if (p.status === 'connected') onToggleConnect(p.id); });
   };
 
+  const portIds = useMemo(() => groupPorts.map(p => p.id), [groupPorts]);
+
   return (
     <div className="port-group">
       <div className="port-group-header" onClick={() => onToggleExpand(group.id)}>
@@ -200,20 +233,42 @@ const GroupItem: React.FC<GroupItemProps> = ({
         </button>
       </div>
       {group.isExpanded && (
-        <div className="port-group-list">
-          {groupPorts.map(port => (
-            <PortItem
-              key={port.id}
-              port={port}
-              isConnected={port.status === 'connected'}
-              onOpenTab={onOpenTab}
-              onToggleConnect={onToggleConnect}
-              onSetAlias={onSetAlias}
-              onHidePort={onHidePort}
-              onShowPort={onShowPort}
-            />
-          ))}
-        </div>
+        <DndContext
+          sensors={useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))}
+          collisionDetection={closestCenter}
+          onDragEnd={(event: DragEndEvent) => {
+            const { active, over } = event;
+            if (over && active.id !== over.id) {
+              const oldIndex = groupPorts.findIndex(p => p.id === active.id);
+              const newIndex = groupPorts.findIndex(p => p.id === over.id);
+              if (oldIndex !== -1 && newIndex !== -1) {
+                const allPorts = useAppStore.getState().ports;
+                const oldGlobal = allPorts.findIndex(p => p.id === active.id);
+                const newGlobal = allPorts.findIndex(p => p.id === over.id);
+                if (oldGlobal !== -1 && newGlobal !== -1) {
+                  useAppStore.getState().reorderPorts(oldGlobal, newGlobal);
+                }
+              }
+            }
+          }}
+        >
+          <SortableContext items={portIds} strategy={verticalListSortingStrategy}>
+            <div className="port-group-list">
+              {groupPorts.map(port => (
+                <SortablePortItem
+                  key={port.id}
+                  port={port}
+                  isConnected={port.status === 'connected'}
+                  onOpenTab={onOpenTab}
+                  onToggleConnect={onToggleConnect}
+                  onSetAlias={onSetAlias}
+                  onHidePort={onHidePort}
+                  onShowPort={onShowPort}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
       )}
     </div>
   );
@@ -259,6 +314,7 @@ const Sidebar: React.FC = () => {
     updatePort,
     updateGroup,
     addGroup,
+    reorderPorts,
   } = useAppStore();
 
   const { refreshPorts } = useSerialPorts(3000);
@@ -318,6 +374,11 @@ const Sidebar: React.FC = () => {
     : ports;
 
   const ungroupedPorts = filteredPorts.filter(p => !p.groupId && (!p.isHidden || showHidden));
+  const ungroupedIds = useMemo(() => ungroupedPorts.map(p => p.id), [ungroupedPorts]);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
 
   const handleSortByPort = useCallback(() => {
     const sorted = [...ports].sort((a, b) => {
@@ -365,18 +426,29 @@ const Sidebar: React.FC = () => {
         {ungroupedPorts.length > 0 && (
           <div className="sidebar-section">
             <div className="sidebar-section-header">未分组</div>
-            {ungroupedPorts.map(port => (
-              <PortItem
-                key={port.id}
-                port={port}
-                isConnected={port.status === 'connected'}
-                onOpenTab={handleOpenTab}
-                onToggleConnect={handleToggleConnect}
-                onSetAlias={handleSetAlias}
-                onHidePort={handleHidePort}
-                onShowPort={handleShowPort}
-              />
-            ))}
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(event) => {
+              const { active, over } = event;
+              if (over && active.id !== over.id) {
+                const oldIndex = ports.findIndex(p => p.id === active.id);
+                const newIndex = ports.findIndex(p => p.id === over.id);
+                if (oldIndex !== -1 && newIndex !== -1) reorderPorts(oldIndex, newIndex);
+              }
+            }}>
+              <SortableContext items={ungroupedIds} strategy={verticalListSortingStrategy}>
+                {ungroupedPorts.map(port => (
+                  <SortablePortItem
+                    key={port.id}
+                    port={port}
+                    isConnected={port.status === 'connected'}
+                    onOpenTab={handleOpenTab}
+                    onToggleConnect={handleToggleConnect}
+                    onSetAlias={handleSetAlias}
+                    onHidePort={handleHidePort}
+                    onShowPort={handleShowPort}
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
           </div>
         )}
 
@@ -384,7 +456,7 @@ const Sidebar: React.FC = () => {
           <div className="sidebar-section">
             <div className="sidebar-section-header">已隐藏</div>
             {ports.filter(p => p.isHidden).map(port => (
-              <PortItem
+              <SortablePortItem
                 key={port.id}
                 port={port}
                 isConnected={port.status === 'connected'}

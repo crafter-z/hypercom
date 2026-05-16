@@ -172,6 +172,24 @@ interface AppState {
   
   // 模拟模式
   setSimulationMode: (on: boolean) => void;
+  
+  // 拖拽排序
+  reorderPorts: (fromIndex: number, toIndex: number) => void;
+  reorderTabs: (fromIndex: number, toIndex: number) => void;
+  
+  // 规则集管理
+  setHighlightRuleSets: (sets: HighlightRuleSet[]) => void;
+  addHighlightRuleSet: (set: HighlightRuleSet) => void;
+  updateHighlightRuleSet: (setId: string, patch: Partial<HighlightRuleSet>) => void;
+  removeHighlightRuleSet: (setId: string) => void;
+  setActiveHighlightSetId: (id: string | null) => void;
+  
+  // 命令集管理
+  setSendCommandSets: (sets: SendCommandSet[]) => void;
+  addSendCommandSet: (set: SendCommandSet) => void;
+  updateSendCommandSet: (setId: string, patch: Partial<SendCommandSet>) => void;
+  removeSendCommandSet: (setId: string) => void;
+  setActiveSendCommandSetId: (id: string | null) => void;
 }
 
 // ==================== Store 实现 ====================
@@ -514,6 +532,38 @@ export const useAppStore = create<AppState>()(
     setSimulationMode: (on) => set((state) => {
       state.simulationMode = on;
     }),
+
+    reorderPorts: (fromIndex, toIndex) => set((state) => {
+      const [moved] = state.ports.splice(fromIndex, 1);
+      state.ports.splice(toIndex, 0, moved);
+    }),
+
+    reorderTabs: (fromIndex, toIndex) => set((state) => {
+      const [moved] = state.tabs.splice(fromIndex, 1);
+      state.tabs.splice(toIndex, 0, moved);
+    }),
+
+    setHighlightRuleSets: (sets) => set((state) => { state.highlightRuleSets = sets; }),
+    addHighlightRuleSet: (ruleSet) => set((state) => { state.highlightRuleSets.push(ruleSet); }),
+    updateHighlightRuleSet: (setId, patch) => set((state) => {
+      const s = state.highlightRuleSets.find(r => r.id === setId);
+      if (s) Object.assign(s, patch);
+    }),
+    removeHighlightRuleSet: (setId) => set((state) => {
+      state.highlightRuleSets = state.highlightRuleSets.filter(r => r.id !== setId);
+    }),
+    setActiveHighlightSetId: (id) => set((state) => { state.activeHighlightSetId = id; }),
+
+    setSendCommandSets: (sets) => set((state) => { state.sendCommandSets = sets; }),
+    addSendCommandSet: (cmdSet) => set((state) => { state.sendCommandSets.push(cmdSet); }),
+    updateSendCommandSet: (setId, patch) => set((state) => {
+      const s = state.sendCommandSets.find(r => r.id === setId);
+      if (s) Object.assign(s, patch);
+    }),
+    removeSendCommandSet: (setId) => set((state) => {
+      state.sendCommandSets = state.sendCommandSets.filter(r => r.id !== setId);
+    }),
+    setActiveSendCommandSetId: (id) => set((state) => { state.activeSendCommandSetId = id; }),
   }))
 );
 

@@ -30,12 +30,18 @@ const OperationPanel: React.FC = () => {
     opSendInput,
     opIsLoopSending,
     opLoopInterval,
+    sendCommandSets,
+    activeSendCommandSetId,
+    highlightRuleSets,
+    activeHighlightSetId,
     setOpState,
     setUIState,
     clearTerminal,
     config,
     toggleConfigModal,
     setConfigActiveTab,
+    setActiveSendCommandSetId,
+    setActiveHighlightSetId,
   } = useAppStore();
 
   const { sendData } = useSerialData();
@@ -48,6 +54,11 @@ const OperationPanel: React.FC = () => {
   const collapsed = ui.isOperationPanelCollapsed;
 
   const prevParamsRef = useRef(`${opBaudRate}-${opDataBits}-${opParity}-${opStopBits}-${opHandshake}-${opDtr}-${opRts}`);
+  const loopRef = useRef<{ timeoutId: ReturnType<typeof setTimeout> | null; currentCmdIdx: number; stopped: boolean }>({
+    timeoutId: null,
+    currentCmdIdx: 0,
+    stopped: false,
+  });
 
   useEffect(() => {
     if (!activeTabId || !isConnected) return;
@@ -64,6 +75,71 @@ const OperationPanel: React.FC = () => {
       serialService.setFlowControl(activeTabId, opDtr, opRts).catch(() => {});
     }
   }, [activeTabId, isConnected, opBaudRate, opDataBits, opParity, opStopBits, opHandshake, opDtr, opRts]);
+
+  // Cyclic send logic
+  useEffect(() => {
+    const ref = loopRef.current;
+    if (!opIsLoopSending || !isPortActive || !isConnected) {
+      ref.stopped = true;
+      if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
+      return;
+    }
+
+    const activeSet = sendCommandSets.find(s => s.id === activeSendCommandSetId);
+    if (!activeSet || activeSet.commands.length === 0) {
+      setOpState({ opIsLoopSending: false });
+      return;
+    }
+
+    ref.stopped = false;
+    ref.currentCmdIdx = 0;
+
+    const sendNext = async () => {
+      if (ref.stopped || !activeTabId) return;
+      const store = useAppStore.getState();
+      const currentSet = store.sendCommandSets.find(s => s.id === store.activeSendCommandSetId);
+      if (!currentSet || currentSet.commands.length === 0) {
+        setOpState({ opIsLoopSending: false });
+        return;
+      }
+      const cmd = currentSet.commands[ref.currentCmdIdx % currentSet.commands.length];
+
+      try {
+        await sendData(
+          activeTabId,
+          cmd.content,
+          cmd.type === 'hex',
+          cmd.appendLineEnding
+        );
+
+        const nextIdx = ref.currentCmdIdx + 1;
+        if (nextIdx >= currentSet.commands.length) {
+          // Completed one full loop
+          if (!currentSet.isLoop) {
+            setOpState({ opIsLoopSending: false });
+            ref.stopped = true;
+            return;
+          }
+        }
+        ref.currentCmdIdx = nextIdx;
+
+        const delay = currentSet.isLoop && nextIdx >= currentSet.commands.length
+          ? (currentSet.loopDelay || opLoopInterval)
+          : cmd.delay ?? opLoopInterval;
+
+        ref.timeoutId = setTimeout(sendNext, delay);
+      } catch {
+        // Send failed, continue
+        ref.timeoutId = setTimeout(sendNext, opLoopInterval);
+      }
+    };
+
+    ref.timeoutId = setTimeout(sendNext, 100);
+    return () => {
+      ref.stopped = true;
+      if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
+    };
+  }, [opIsLoopSending, isPortActive, isConnected, activeSendCommandSetId, opLoopInterval, sendCommandSets, activeTabId, sendData, setOpState]);
 
   const handleSend = async () => {
     if (!isPortActive || !opSendInput.trim()) return;
@@ -92,6 +168,20 @@ const OperationPanel: React.FC = () => {
 
   const toggleDisplayFormat = () => {
     setOpState({ opDisplayFormat: opDisplayFormat === 'hex' ? 'string' : 'hex' });
+  };
+
+  const handleToggleLoop = () => {
+    if (opIsLoopSending) {
+      setOpState({ opIsLoopSending: false });
+    } else {
+      if (!sendCommandSets.find(s => s.id === activeSendCommandSetId)) {
+        // Auto-select first available set
+        if (sendCommandSets.length > 0) {
+          setActiveSendCommandSetId(sendCommandSets[0].id);
+        }
+      }
+      setOpState({ opIsLoopSending: true });
+    }
   };
 
   return (
@@ -186,8 +276,15 @@ const OperationPanel: React.FC = () => {
 
             <div className="op-rule-row">
               <span className="op-label">高亮规则:</span>
-              <select className="select op-rule-select">
-                <option>默认规则集</option>
+              <select
+                className="select op-rule-select"
+                value={activeHighlightSetId || ''}
+                onChange={(e) => setActiveHighlightSetId(e.target.value || null)}
+              >
+                <option value="">默认</option>
+                {highlightRuleSets.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
               </select>
               <button className="btn btn-icon btn-sm" title="编辑高亮规则" onClick={() => openConfigToTab('highlight')}>
                 <Settings size={12} />
@@ -196,8 +293,15 @@ const OperationPanel: React.FC = () => {
 
             <div className="op-rule-row">
               <span className="op-label">命令集:</span>
-              <select className="select op-rule-select">
-                <option>AT指令集</option>
+              <select
+                className="select op-rule-select"
+                value={activeSendCommandSetId || ''}
+                onChange={(e) => setActiveSendCommandSetId(e.target.value || null)}
+              >
+                <option value="">无</option>
+                {sendCommandSets.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
               </select>
               <button className="btn btn-icon btn-sm" title="编辑发送命令" onClick={() => openConfigToTab('commands')}>
                 <Edit3 size={12} />
@@ -209,8 +313,8 @@ const OperationPanel: React.FC = () => {
                 <button
                   className="btn btn-primary"
                   style={{ flex: 1 }}
-                  disabled={!isPortActive}
-                  onClick={() => setOpState({ opIsLoopSending: true })}
+                  disabled={!isPortActive || !activeSendCommandSetId}
+                  onClick={handleToggleLoop}
                 >
                   <Play size={13} /> 开始循环
                 </button>
@@ -218,7 +322,7 @@ const OperationPanel: React.FC = () => {
                 <button
                   className="btn btn-danger"
                   style={{ flex: 1 }}
-                  onClick={() => setOpState({ opIsLoopSending: false })}
+                  onClick={handleToggleLoop}
                 >
                   <Square size={13} /> 停止发送
                 </button>

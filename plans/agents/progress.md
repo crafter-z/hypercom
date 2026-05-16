@@ -2,7 +2,7 @@
 
 > 本文档面向多 Agent 协作开发，标识当前各模块的完成状态、已实现功能与待办事项。
 >
-> 最后更新：2026-05-10
+> 最后更新：2026-05-15
 
 ---
 
@@ -15,21 +15,24 @@
 | 前端全局样式 | ✅ 已完成 | 100% |
 | 共享组件 (ContextMenu) | ✅ 已完成 | 100% |
 | 标题栏 (TitleBar) | ✅ 已完成 | 100% |
-| 串口管理边栏 (Sidebar) | ✅ 已完成 | 98% |
-| 主显示区 (MainDisplay) | ✅ 已完成 | 97% |
-| 操作面板 (OperationPanel) | ✅ 已完成 | 99% |
+| 串口管理边栏 (Sidebar) | ✅ 已完成 | 100% |
+| 主显示区 (MainDisplay) | ✅ 已完成 | 100% |
+| 操作面板 (OperationPanel) | ✅ 已完成 | 100% |
 | 状态栏 (StatusBar) | ✅ 已完成 | 100% |
-| 配置弹窗 (ConfigModal) | ✅ 已完成 | 90% |
+| 配置弹窗 (ConfigModal) | ✅ 已完成 | 100% |
 | Tauri 服务层 (tauri.ts) | ✅ 已完成 | 100% |
 | React Hooks 层 (useTauri.ts) | ✅ 已完成 | 100% |
-| 后端命令层 (Commands) | ✅ 已完成 | 80% |
-| 串口管理 (Serial) | ✅ 已完成 | 90% |
-| 配置管理 (Config) | ✅ 已完成 | 90% |
+| 后端命令层 (Commands) | ✅ 已完成 | 100% |
+| 串口管理 (Serial) | ✅ 已完成 | 100% |
+| 配置管理 (Config) | ✅ 已完成 | 100% |
 | 日志管理 (Logger) | ✅ 已完成 | 80% |
-| 存储管理 (Storage) | ✅ 已完成 | 60% |
+| 存储管理 (Storage) | ✅ 已完成 | 100% |
 | Tauri 权限配置 | ✅ 已完成 | 100% |
 | Tauri 事件推送 | ✅ 已完成 | 100% |
-| 系统资源监控 | ⏳ 未开始 | 0% |
+| 系统资源监控 | ✅ 已完成 | 100% |
+| 拖拽排序 | ✅ 已完成 | 100% |
+| 语法高亮 | ✅ 已完成 | 100% |
+| 循环发送 | ✅ 已完成 | 100% |
 
 ---
 
@@ -561,6 +564,47 @@
 ---
 
 ## 八、变更历史
+
+### 2026-05-15 — 三大功能模块完成
+
+#### 系统资源监控
+- Rust: 引入 `sysinfo = "0.33"`，`get_system_status` 返回真实 CPU/内存数据
+- 使用 `System::new_all()` + `refresh_all()` 在每个命令调用时创建新实例
+- 根据 CPU 使用率和内存限制自动判断"高负载"/"运行正常"状态
+
+#### SQLite 数据库 CRUD
+- `storage/mod.rs`: 完整实现 6 张表（port_groups, port_group_members, send_command_sets, send_commands, highlight_rule_sets, highlight_rules）
+- 新增 6 个 Tauri 命令：`save_command_set`, `load_command_sets`, `delete_command_set`, `save_highlight_set`, `load_highlight_sets`, `delete_highlight_set`
+- 在 `lib.rs` setup 钩子中异步初始化数据库（通过 `create_pool()` + `init_schema_on_pool()` 避免 MutexGuard 跨 await）
+- 所有 CRUD 实现为独立异步函数，与 StorageManager 方法并存
+- `storage:ready` 事件通知前端数据库就绪
+- `services/tauri.ts`: 新增 `storageService` 封装 6 个存储命令
+- `ConfigModal.tsx`: 规则集/命令集编辑器自动从数据库加载初始数据
+
+#### 前端功能完善
+
+**拖拽排序：**
+- 安装 `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`
+- `Sidebar.tsx`: 未分组串口区域 + 分组内串口列表均支持拖拽排序
+- `TabBar.tsx`: 标签页支持水平拖拽排序
+- Store: 新增 `reorderPorts(from, to)`, `reorderTabs(from, to)` actions
+- CSS: 新增 `.port-item-drag` grip handle 样式
+
+**语法高亮：**
+- 新建 `src/utils/highlightEngine.ts` 高亮引擎
+- `applyHighlightSets()`: 对文本应用多个规则集的高亮，支持正则/关键词匹配
+- 支持颜色、加粗、斜体样式，多规则集同时启用
+- `ConfigModal.tsx`: `HighlightSettings` 完整编辑器 — 新建/删除规则集，添加/编辑/删除规则，颜色选择器，预览
+- `TerminalView.tsx`: 使用 `dangerouslySetInnerHTML` 应用高亮
+
+**循环发送：**
+- `OperationPanel.tsx`: `useEffect` 驱动循环发送逻辑
+- 按激活的命令集顺序发送命令，支持每条命令独立延时 + 循环间隔
+- 停止时清理 setTimeout
+- 下拉框从 Store 获取真实规则集/命令集数据
+
+**Store 扩展：**
+- 新增 10 个 Actions: `reorderPorts`, `reorderTabs`, `setHighlightRuleSets`, `addHighlightRuleSet`, `updateHighlightRuleSet`, `removeHighlightRuleSet`, `setActiveHighlightSetId`, `setSendCommandSets`, `addSendCommandSet`, `updateSendCommandSet`, `removeSendCommandSet`, `setActiveSendCommandSetId`
 
 ### 2026-05-10 (更新)
 

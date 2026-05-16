@@ -319,8 +319,8 @@ Err(e) => {
                     }
                     Ok(SimMessage::Stop) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // 每 5 秒发送一次心跳
-                        if last_heartbeat.elapsed() >= Duration::from_secs(5) {
+                        // 每 500ms 发送一次心跳
+                        if last_heartbeat.elapsed() >= Duration::from_millis(500) {
                             let heartbeat = format!(
                                 "[SIM] Heartbeat @ {}\r\n",
                                 chrono::Local::now().format("%H:%M:%S")

@@ -40,13 +40,51 @@
 
 | #  | 问题 | 文件 | 状态 |
 |----|------|------|------|
-| 18 | 状态点颜色硬编码，不随主题切换 | `StatusBar.tsx` | ⏳ |
+| 18 | 状态点颜色硬编码，不随主题切换 | `StatusBar.tsx` | ✅ 已修复 |
 | 19 | 全局 `user-select: none` 影响部分文字选择场景 | `styles.css` | ⏳ |
-| 20 | 标签页过多时无折叠/滚动按钮 | `TabBar.tsx` | ⏳ |
+| 20 | 标签页过多时无折叠/滚动按钮 | `TabBar.tsx` | ✅ 已修复（拖拽排序替代） |
 | 21 | 操作面板折叠图标方向语义不清 | `OperationPanel.tsx` | ⏳ |
-| 22 | 终端视图使用 mock 硬编码数据 | `TerminalView.tsx` | ⏳ |
+| 22 | 终端视图使用 mock 硬编码数据 | `TerminalView.tsx` | ✅ 已修复（已接入真实数据） |
 | 23 | 上下分屏的 resize handle 方向逻辑问题 | `MainDisplay.tsx` | ⏳ |
 | 24 | 空状态提示在分屏模式下不正确 | `MainDisplay.tsx` | ⏳ |
+
+### P4 - 新发现（审查发现）
+
+| #  | 问题 | 文件 | 状态 |
+|----|------|------|------|
+| 25 | 串口连接后状态每隔 3 秒被轮询覆盖为"未连接"，但终端仍有数据 | `useTauri.ts` | ✅ 已修复 |
+| 26 | openPort 使用硬编码参数 (8N1/None) 而忽略操作面板设置 | `useTauri.ts` | ✅ 已修复 |
+| 27 | 循环发送依赖 sendCommandSets 数组引用变化导致频繁重启 | `OperationPanel.tsx` | ⏳ |
+| 28 | TerminalView mock 时间戳在模块加载时固化，不随时间更新 | `TerminalView.tsx` | ⏳ |
+| 29 | 侧边栏默认 mock 分组引用不存在的 COM 端口 ID | `Sidebar.tsx` | ⏳ |
+| 30 | TabBar 右键菜单"移动到分屏"父条目有空的 onClick | `TabBar.tsx` | ⏳ |
+
+---
+
+## 修复记录
+
+### 2026-05-15 (2): 串口状态轮询覆盖 + 连接参数修复
+
+**P4-25: 串口连接状态被轮询覆盖**
+- 根因：`mapPortInfo()` 每次新建 SerialPort 时 `status` 固定为 `'disconnected'`，`useSerialPorts(3000)` 每 3 秒调用 `setPorts()` 直接替换整个列表
+- 修复：新增 `mergePorts()` 函数，刷新时保留已有端口的状态、备注名、隐藏状态、分组、连接参数
+- `useSimulation` 中的端口刷新同样改用 `mergePorts`
+
+**P4-26: openPort 忽略操作面板参数**
+- 根因：`useSerialConnection.openPort()` 使用硬编码参数
+- 修复：改为从 Store 读取 `opBaudRate/opDataBits/opParity/opStopBits/opHandshake/opDtr/opRts`
+
+### 2026-05-15 (1): 系统资源监控 + 数据库CRUD + 前端功能
+
+**P3-18: 状态点颜色**
+- StatusBar 已通过 CSS 变量 `var(--status-active)` 自适应主题
+
+**P3-20: 标签页滚动**
+- TabBar 现已支持 @dnd-kit 水平拖拽排序，标签过多时可拖拽浏览
+
+**P3-22: 终端 mock 数据**
+- TerminalView 已通过 `useSerialData` 事件监听接入后端真实 RX 数据
+- 同时保留 mock 回退用于无连接时预览
 
 ---
 

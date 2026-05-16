@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Tauri 核心
-tauri = { version = "2", features = [] }
+tauri = { version = "2.11", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 
@@ -44,6 +44,9 @@ dirs = "5"
 # 错误处理
 thiserror = "1"
 anyhow = "1"
+
+# 系统监控
+sysinfo = "0.33"
 
 # 工具
 uuid = { version = "1", features = ["v4"] }

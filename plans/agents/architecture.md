@@ -2,7 +2,7 @@
 
 > 本文档面向多 Agent 协作开发，详细描述 HyperCom 串口调试工具的前后端技术架构、模块职责、接口定义与数据流。
 >
-> 最后更新：2026-05-10
+> 最后更新：2026-05-15
 
 ---
 
@@ -20,6 +20,7 @@ HyperCom 是一款基于 **Tauri v2** 架构的现代化串口调试工具，采
 | 后端框架 | Tauri v2 | 桌面应用壳与 Rust 桥接 |
 | 串口通信 | serialport-rs | 跨平台串口读写 |
 | 数据库 | SQLite (sqlx) | 命令集/规则集/布局持久化 |
+| 系统监控 | sysinfo | 真实 CPU/内存数据获取 |
 | 日志存储 | BufWriter + 文件系统 | 高性能异步落盘 |
 | 配置存储 | JSON 文件 | 应用配置持久化 |
 
@@ -43,9 +44,11 @@ hypercom/
 │   ├── types/
 │   │   └── index.ts                # 全局TypeScript类型定义
 │   ├── services/
-│   │   └── tauri.ts                # 【新增】Tauri后端服务层（类型化invoke包装器+事件监听）
+│   │   └── tauri.ts                # Tauri后端服务层（类型化invoke包装器+事件监听+存储API）
 │   ├── hooks/
-│   │   └── useTauri.ts             # 【新增】React Hooks层（桥接Tauri服务与Zustand Store）
+│   │   └── useTauri.ts             # React Hooks层（桥接Tauri服务与Zustand Store）
+│   ├── utils/
+│   │   └── highlightEngine.ts      # 【新增】语法高亮引擎（正则/关键词匹配+颜色/加粗/斜体）
 │   ├── stores/
 │   │   └── useAppStore.ts          # Zustand全局状态
 │   └── components/
@@ -519,6 +522,9 @@ Tauri v2 使用 capabilities 声明前端可用的权限：
 | zustand | ^5.0.13 | 状态管理 |
 | immer | ^11.1.6 | 不可变数据更新 |
 | lucide-react | latest | 矢量图标库 |
+| @dnd-kit/core | latest | 拖拽排序核心 |
+| @dnd-kit/sortable | latest | 可排序列表 |
+| @dnd-kit/utilities | latest | 拖拽工具函数 |
 | @tauri-apps/api | ^2.0.0 | Tauri 前端 API |
 | @tauri-apps/plugin-shell | ^2.0.0 | Shell 插件 |
 

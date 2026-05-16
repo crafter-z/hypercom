@@ -2,9 +2,22 @@ import React, { useState, useCallback } from 'react';
 import type { TabItem, SplitPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
+import { Pin, X } from 'lucide-react';
+import { useAppStore } from '../../stores/useAppStore';
 import {
-  Pin, X
-} from 'lucide-react';
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  horizontalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 interface TabBarProps {
   tabs: TabItem[];
@@ -19,6 +32,56 @@ interface TabBarProps {
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
 }
 
+const SortableTab: React.FC<{
+  tab: TabItem;
+  isActive: boolean;
+  onTabClick: (tabId: string) => void;
+  onTabClose: (tabId: string) => void;
+  onContextMenu: (e: React.MouseEvent, tabId: string) => void;
+}> = ({ tab, isActive, onTabClick, onTabClose, onContextMenu }) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: tab.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`tab-item${isActive ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
+      onClick={() => onTabClick(tab.id)}
+      onContextMenu={(e) => onContextMenu(e, tab.id)}
+      {...attributes}
+      {...listeners}
+    >
+      <span
+        className="tab-status-dot"
+        style={{ background: isActive ? 'var(--text-link)' : 'var(--text-secondary)' }}
+      />
+      <span className="tab-title">{tab.title}</span>
+      {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
+      {!tab.isPinned && (
+        <span
+          className="tab-close"
+          onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
+        >
+          <X size={12} />
+        </span>
+      )}
+    </div>
+  );
+};
+
 const TabBar: React.FC<TabBarProps> = ({
   tabs,
   activeTabId,
@@ -32,6 +95,23 @@ const TabBar: React.FC<TabBarProps> = ({
   onMoveToPane,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
+  const reorderTabs = useAppStore((s) => s.reorderTabs);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      const storeState = useAppStore.getState();
+      const oldIndex = storeState.tabs.findIndex(t => t.id === active.id);
+      const newIndex = storeState.tabs.findIndex(t => t.id === over.id);
+      if (oldIndex !== -1 && newIndex !== -1) {
+        reorderTabs(oldIndex, newIndex);
+      }
+    }
+  }, [reorderTabs]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
@@ -54,7 +134,6 @@ const TabBar: React.FC<TabBarProps> = ({
 
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
       items.push({ type: 'separator' });
-      items.push({ label: '移动到分屏', onClick: () => {} });
       for (const pane of moveToPaneTargets) {
         const paneLabel = `分屏 ${pane.id.replace('pane-', '').slice(0, 4)}`;
         items.push({
@@ -67,34 +146,27 @@ const TabBar: React.FC<TabBarProps> = ({
     return items;
   }, [tabs, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, moveToPaneTargets, onMoveToPane]);
 
+  const tabIds = tabs.map(t => t.id);
+
   return (
-    <div className="tab-bar">
-      {tabs.map((tab) => {
-        const isActive = tab.id === activeTabId;
-        return (
-          <div
-            key={tab.id}
-            className={`tab-item${isActive ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
-            onClick={() => onTabClick(tab.id)}
-            onContextMenu={(e) => handleContextMenu(e, tab.id)}
-          >
-            <span
-              className="tab-status-dot"
-              style={{ background: isActive ? 'var(--text-link)' : 'var(--text-secondary)' }}
-            />
-            <span className="tab-title">{tab.title}</span>
-            {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
-            {!tab.isPinned && (
-              <span
-                className="tab-close"
-                onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
-              >
-                <X size={12} />
-              </span>
-            )}
-          </div>
-        );
-      })}
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
+        <div className="tab-bar">
+          {tabs.map((tab) => {
+            const isActive = tab.id === activeTabId;
+            return (
+              <SortableTab
+                key={tab.id}
+                tab={tab}
+                isActive={isActive}
+                onTabClick={onTabClick}
+                onTabClose={onTabClose}
+                onContextMenu={handleContextMenu}
+              />
+            );
+          })}
+        </div>
+      </SortableContext>
 
       {contextMenu && (
         <ContextMenu
@@ -104,7 +176,7 @@ const TabBar: React.FC<TabBarProps> = ({
           onClose={handleCloseContextMenu}
         />
       )}
-    </div>
+    </DndContext>
   );
 };
 

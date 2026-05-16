@@ -9,7 +9,7 @@ mod logger;
 mod serial;
 mod storage;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 应用状态结构体
 /// 通过 Tauri State 在各命令间共享
@@ -70,14 +70,43 @@ pub fn run() {
             commands::get_system_status,
             commands::prevent_screen_off,
             commands::prevent_sleep,
+            // ===== 存储相关命令 =====
+            commands::save_command_set,
+            commands::load_command_sets,
+            commands::delete_command_set,
+            commands::save_highlight_set,
+            commands::load_highlight_sets,
+            commands::delete_highlight_set,
         ])
         .setup(|_app| {
-            // 设置 AppHandle，用于串口数据事件推送
             let app_handle = _app.handle().clone();
+
+            // 设置 AppHandle，用于串口数据事件推送
             let state = _app.state::<AppState>();
             let mut serial_mgr = state.serial_manager.lock().unwrap();
-            serial_mgr.set_app_handle(app_handle);
+            serial_mgr.set_app_handle(app_handle.clone());
             drop(serial_mgr);
+            drop(state);
+
+            // 异步初始化数据库（不持有 MutexGuard 跨 await）
+            let app_handle2 = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                match storage::create_pool().await {
+                    Ok(pool) => {
+                        if let Err(e) = storage::init_schema_on_pool(&pool).await {
+                            log::warn!("Schema init failed: {}", e);
+                        }
+                        // 使用 AppHandle 获取 state，因为 AppHandle 是 'static
+                        let state2 = app_handle2.state::<AppState>();
+                        let mut mgr = state2.storage_manager.lock().unwrap();
+                        mgr.set_pool(pool);
+                        drop(mgr);
+                        log::info!("Storage initialized successfully");
+                        let _ = app_handle2.emit("storage:ready", ());
+                    }
+                    Err(e) => log::warn!("DB connection failed (non-critical): {}", e),
+                }
+            });
 
             log::info!("HyperCom setup complete");
             Ok(())

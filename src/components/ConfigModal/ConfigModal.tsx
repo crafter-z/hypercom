@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks/useTauri';
-import type { AppConfig } from '../../types';
+import { storageService } from '../../services/tauri';
+import type { AppConfig, HighlightRuleSet, HighlightRule, SendCommandSet, SendCommand } from '../../types';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, X
+  Settings, FileText, HardDrive, Monitor, Palette, Send, X,
+  Plus, Trash2, Check, GripVertical
 } from 'lucide-react';
 
 interface NavItem {
@@ -258,25 +260,350 @@ const DisplaySettings: React.FC = () => {
 };
 
 const HighlightSettings: React.FC = () => {
+  const { highlightRuleSets, addHighlightRuleSet, updateHighlightRuleSet, removeHighlightRuleSet } = useAppStore();
+  const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
+
+  useEffect(() => {
+    storageService.loadHighlightSets().then(sets => {
+      if (sets.length > 0) {
+        useAppStore.getState().setHighlightRuleSets(sets.map(s => ({
+          id: s.id,
+          name: s.name,
+          isEnabled: s.is_enabled,
+          rules: s.rules.map(r => ({
+            id: r.id,
+            name: r.name,
+            pattern: r.pattern,
+            isRegex: r.is_regex,
+            color: r.color,
+            bold: r.bold,
+            italic: r.italic,
+          })),
+        })));
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleSaveSet = async (set: HighlightRuleSet) => {
+    try {
+      await storageService.saveHighlightSet({
+        name: set.name,
+        is_enabled: set.isEnabled,
+        rules: set.rules.map(r => ({
+          id: r.id,
+          name: r.name,
+          pattern: r.pattern,
+          is_regex: r.isRegex,
+          color: r.color || '',
+          bold: r.bold || false,
+          italic: r.italic || false,
+        })),
+      });
+    } catch (err) {
+      console.error('Failed to save highlight set:', err);
+    }
+  };
+
+  const handleAddSet = () => {
+    const id = `hl-${Date.now()}`;
+    addHighlightRuleSet({ id, name: '新建规则集', rules: [], isEnabled: true });
+    setExpandedSetId(id);
+  };
+
+  const handleAddRule = (setId: string) => {
+    const ruleId = `rule-${Date.now()}`;
+    const sets = useAppStore.getState().highlightRuleSets;
+    const set = sets.find(s => s.id === setId);
+    if (set) {
+      updateHighlightRuleSet(setId, {
+        rules: [...set.rules, {
+          id: ruleId,
+          name: `规则 ${set.rules.length + 1}`,
+          pattern: '',
+          isRegex: false,
+          color: '#ff6b6b',
+          bold: false,
+          italic: false,
+        }]
+      });
+    }
+  };
+
+  const RuleEditor: React.FC<{ rule: HighlightRule; ruleIdx: number; onChange: (patch: Partial<HighlightRule>) => void; onDelete: () => void }> = ({ rule, ruleIdx: _ruleIdx, onChange, onDelete }) => (
+    <div style={{ background: 'var(--bg-secondary)', borderRadius: 4, padding: 8, marginBottom: 6 }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+        <GripVertical size={12} style={{ opacity: 0.4 }} />
+        <input className="input" value={rule.name} onChange={e => onChange({ name: e.target.value })} placeholder="规则名称" style={{ width: 100 }} />
+        <input className="input" value={rule.pattern} onChange={e => onChange({ pattern: e.target.value })} placeholder="匹配模式" style={{ flex: 1 }} />
+        <label className="checkbox-wrapper" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+          <input type="checkbox" checked={rule.isRegex} onChange={e => onChange({ isRegex: e.target.checked })} />正则
+        </label>
+        <input type="color" value={rule.color || '#ff6b6b'} onChange={e => onChange({ color: e.target.value })} style={{ width: 28, height: 24, border: '1px solid var(--border-color)', borderRadius: 3, padding: 0 }} />
+        <label className="checkbox-wrapper" style={{ fontSize: 11 }}>
+          <input type="checkbox" checked={rule.bold || false} onChange={e => onChange({ bold: e.target.checked })} />B
+        </label>
+        <label className="checkbox-wrapper" style={{ fontSize: 11, fontStyle: 'italic' }}>
+          <input type="checkbox" checked={rule.italic || false} onChange={e => onChange({ italic: e.target.checked })} />I
+        </label>
+        <button className="btn btn-icon btn-sm" onClick={onDelete} title="删除规则"><Trash2 size={12} /></button>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        预览: <span style={{
+          color: rule.color || 'inherit',
+          fontWeight: rule.bold ? 'bold' : 'normal',
+          fontStyle: rule.italic ? 'italic' : 'normal',
+        }}>{rule.pattern || '(空模式)'}</span>
+      </div>
+    </div>
+  );
+
   return (
     <div className="config-page">
-      <h3 className="config-page-title">语法高亮规则集</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <h3 className="config-page-title" style={{ marginBottom: 0 }}>语法高亮规则集</h3>
+        <button className="btn btn-sm" onClick={handleAddSet}><Plus size={14} /> 新建规则集</button>
+      </div>
       <p className="config-page-desc">
         管理语法高亮规则集。每个规则集包含多条规则，支持正则表达式或关键词匹配，可设置颜色、加粗、斜体。
+        启用多个规则集可同时生效。
       </p>
-      <div className="config-placeholder">规则集编辑器（待实现）</div>
+
+      {highlightRuleSets.length === 0 && (
+        <div className="config-placeholder">暂无规则集，点击"新建规则集"创建</div>
+      )}
+
+      {highlightRuleSets.map(set => (
+        <div key={set.id} style={{ border: '1px solid var(--border-color)', borderRadius: 6, marginBottom: 10, overflow: 'hidden' }}>
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'var(--bg-secondary)', cursor: 'pointer' }}
+            onClick={() => setExpandedSetId(expandedSetId === set.id ? null : set.id)}
+          >
+            <span>{expandedSetId === set.id ? '▼' : '▶'}</span>
+            <input
+              className="input"
+              value={set.name}
+              onChange={e => updateHighlightRuleSet(set.id, { name: e.target.value })}
+              onClick={e => e.stopPropagation()}
+              style={{ border: 'none', background: 'transparent', fontWeight: 600, flex: 1, minWidth: 0 }}
+            />
+            <label className="checkbox-wrapper" style={{ fontSize: 11 }} onClick={e => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                checked={set.isEnabled}
+                onChange={e => updateHighlightRuleSet(set.id, { isEnabled: e.target.checked })}
+              /> 启用
+            </label>
+            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{set.rules.length} 条规则</span>
+            <button className="btn btn-icon btn-sm" title="保存到数据库" onClick={e => { e.stopPropagation(); handleSaveSet(set); }}>
+              <Check size={14} />
+            </button>
+            <button className="btn btn-icon btn-sm" title="删除规则集" onClick={e => { e.stopPropagation(); removeHighlightRuleSet(set.id); }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+
+          {expandedSetId === set.id && (
+            <div style={{ padding: 10 }}>
+              <button className="btn btn-sm" onClick={() => handleAddRule(set.id)} style={{ marginBottom: 8 }}>
+                <Plus size={12} /> 添加规则
+              </button>
+              {set.rules.length === 0 && <div className="config-placeholder" style={{ fontSize: 12 }}>暂无规则，请添加</div>}
+              {set.rules.map((rule, idx) => (
+                <RuleEditor
+                  key={rule.id}
+                  rule={rule}
+                  ruleIdx={idx}
+                  onChange={(patch) => {
+                    const newRules = set.rules.map((r, i) => i === idx ? { ...r, ...patch } : r);
+                    updateHighlightRuleSet(set.id, { rules: newRules });
+                  }}
+                  onDelete={() => {
+                    updateHighlightRuleSet(set.id, { rules: set.rules.filter((_, i) => i !== idx) });
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 };
 
 const CommandSettings: React.FC = () => {
+  const { sendCommandSets, addSendCommandSet, updateSendCommandSet, removeSendCommandSet } = useAppStore();
+  const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
+
+  useEffect(() => {
+    storageService.loadCommandSets().then(sets => {
+      if (sets.length > 0) {
+        useAppStore.getState().setSendCommandSets(sets.map(s => ({
+          id: s.id,
+          name: s.name,
+          isLoop: s.is_loop,
+          loopDelay: s.loop_delay_ms,
+          commands: s.commands.map(c => ({
+            id: c.id,
+            name: c.name,
+            order: c.order_idx,
+            delay: c.delay_ms,
+            type: c.cmd_type as 'string' | 'hex',
+            content: c.content,
+            appendLineEnding: c.append_line_ending as SendCommand['appendLineEnding'],
+          })),
+        })));
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleSaveSet = async (set: SendCommandSet) => {
+    try {
+      await storageService.saveCommandSet({
+        name: set.name,
+        is_loop: set.isLoop,
+        loop_delay_ms: set.loopDelay,
+        commands: set.commands.map(c => ({
+          id: c.id,
+          name: c.name,
+          order_idx: c.order,
+          delay_ms: c.delay,
+          cmd_type: c.type,
+          content: c.content,
+          append_line_ending: c.appendLineEnding,
+        })),
+      });
+    } catch (err) {
+      console.error('Failed to save command set:', err);
+    }
+  };
+
+  const handleAddSet = () => {
+    const id = `cmd-${Date.now()}`;
+    addSendCommandSet({ id, name: '新建命令集', commands: [], isLoop: false, loopDelay: 1000 });
+    setExpandedSetId(id);
+  };
+
+  const handleAddCmd = (setId: string) => {
+    const cmdId = `scmd-${Date.now()}`;
+    const sets = useAppStore.getState().sendCommandSets;
+    const set = sets.find(s => s.id === setId);
+    if (set) {
+      updateSendCommandSet(setId, {
+        commands: [...set.commands, {
+          id: cmdId,
+          name: `命令 ${set.commands.length + 1}`,
+          order: set.commands.length,
+          delay: 100,
+          type: 'string',
+          content: '',
+          appendLineEnding: '\\r\\n',
+        }]
+      });
+    }
+  };
+
+  const CmdEditor: React.FC<{ cmd: SendCommand; cmdIdx: number; onChange: (patch: Partial<SendCommand>) => void; onDelete: () => void }> = ({ cmd, cmdIdx, onChange, onDelete }) => (
+    <div style={{ background: 'var(--bg-secondary)', borderRadius: 4, padding: 8, marginBottom: 6 }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+        <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 20 }}>#{cmdIdx + 1}</span>
+        <input className="input" value={cmd.name} onChange={e => onChange({ name: e.target.value })} placeholder="名称" style={{ width: 80 }} />
+        <input className="input" value={String(cmd.delay)} onChange={e => onChange({ delay: Number(e.target.value) || 0 })} type="number" placeholder="延时(ms)" style={{ width: 80 }} />
+        <select className="select" value={cmd.type} onChange={e => onChange({ type: e.target.value as 'string' | 'hex' })} style={{ width: 80 }}>
+          <option value="string">字符串</option>
+          <option value="hex">HEX</option>
+        </select>
+        <select className="select" value={cmd.appendLineEnding} onChange={e => onChange({ appendLineEnding: e.target.value as SendCommand['appendLineEnding'] })} style={{ width: 70 }}>
+          <option value="\\r\\n">\r\n</option>
+          <option value="\\r">\r</option>
+          <option value="\\n">\n</option>
+          <option value="None">无</option>
+        </select>
+        <button className="btn btn-icon btn-sm" onClick={onDelete} title="删除"><Trash2 size={12} /></button>
+      </div>
+      <input className="input" value={cmd.content} onChange={e => onChange({ content: e.target.value })} placeholder="命令内容..." style={{ width: '100%' }} />
+    </div>
+  );
+
   return (
     <div className="config-page">
-      <h3 className="config-page-title">发送命令规则集</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <h3 className="config-page-title" style={{ marginBottom: 0 }}>发送命令规则集</h3>
+        <button className="btn btn-sm" onClick={handleAddSet}><Plus size={14} /> 新建规则集</button>
+      </div>
       <p className="config-page-desc">
         管理自动发送命令规则集。每个规则集包含多条命令，可设置顺序、名称、延时、发送类型、命令内容。
+        支持循环发送模式。
       </p>
-      <div className="config-placeholder">命令规则集编辑器（待实现）</div>
+
+      {sendCommandSets.length === 0 && (
+        <div className="config-placeholder">暂无命令规则集，点击"新建规则集"创建</div>
+      )}
+
+      {sendCommandSets.map(set => (
+        <div key={set.id} style={{ border: '1px solid var(--border-color)', borderRadius: 6, marginBottom: 10, overflow: 'hidden' }}>
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'var(--bg-secondary)', cursor: 'pointer' }}
+            onClick={() => setExpandedSetId(expandedSetId === set.id ? null : set.id)}
+          >
+            <span>{expandedSetId === set.id ? '▼' : '▶'}</span>
+            <input
+              className="input"
+              value={set.name}
+              onChange={e => updateSendCommandSet(set.id, { name: e.target.value })}
+              onClick={e => e.stopPropagation()}
+              style={{ border: 'none', background: 'transparent', fontWeight: 600, flex: 1, minWidth: 0 }}
+            />
+            <label className="checkbox-wrapper" style={{ fontSize: 11 }} onClick={e => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                checked={set.isLoop}
+                onChange={e => updateSendCommandSet(set.id, { isLoop: e.target.checked })}
+              /> 循环
+            </label>
+            {set.isLoop && (
+              <input
+                className="input"
+                type="number"
+                value={set.loopDelay}
+                onChange={e => updateSendCommandSet(set.id, { loopDelay: Number(e.target.value) })}
+                onClick={e => e.stopPropagation()}
+                style={{ width: 60, fontSize: 11 }}
+                placeholder="ms"
+              />
+            )}
+            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{set.commands.length} 条命令</span>
+            <button className="btn btn-icon btn-sm" title="保存到数据库" onClick={e => { e.stopPropagation(); handleSaveSet(set); }}>
+              <Check size={14} />
+            </button>
+            <button className="btn btn-icon btn-sm" title="删除" onClick={e => { e.stopPropagation(); removeSendCommandSet(set.id); }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+
+          {expandedSetId === set.id && (
+            <div style={{ padding: 10 }}>
+              <button className="btn btn-sm" onClick={() => handleAddCmd(set.id)} style={{ marginBottom: 8 }}>
+                <Plus size={12} /> 添加命令
+              </button>
+              {set.commands.length === 0 && <div className="config-placeholder" style={{ fontSize: 12 }}>暂无命令，请添加</div>}
+              {set.commands.map((cmd, idx) => (
+                <CmdEditor
+                  key={cmd.id}
+                  cmd={cmd}
+                  cmdIdx={idx}
+                  onChange={(patch) => {
+                    const newCmds = set.commands.map((c, i) => i === idx ? { ...c, ...patch } : c);
+                    updateSendCommandSet(set.id, { commands: newCmds });
+                  }}
+                  onDelete={() => {
+                    updateSendCommandSet(set.id, { commands: set.commands.filter((_, i) => i !== idx) });
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 };

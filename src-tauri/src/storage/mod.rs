@@ -3,94 +3,466 @@
  * 负责 SQLite 数据库的初始化与操作
  * 
  * 存储内容:
+ * - 串口分组布局
  * - 自定义命令组/规则集
- * - 历史记录
- * - 串口选项卡布局
  * - 高亮规则集
  * 
  * 使用 sqlx 实现异步数据库操作
  */
 
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use serde::{Deserialize, Serialize};
+
+// ==================== 存储类型 ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortGroupRow {
+    pub id: String,
+    pub name: String,
+    pub order_idx: i32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendCommandRow {
+    pub id: String,
+    pub set_id: String,
+    pub name: String,
+    pub order_idx: i32,
+    pub delay_ms: i32,
+    pub cmd_type: String,
+    pub content: String,
+    pub append_line_ending: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightRuleRow {
+    pub id: String,
+    pub set_id: String,
+    pub name: String,
+    pub pattern: String,
+    pub is_regex: bool,
+    pub color: String,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+// ==================== 聚合类型（用于前端） ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendCommandSet {
+    pub id: String,
+    pub name: String,
+    pub is_loop: bool,
+    pub loop_delay_ms: i32,
+    pub commands: Vec<SendCommandRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightRuleSet {
+    pub id: String,
+    pub name: String,
+    pub is_enabled: bool,
+    pub rules: Vec<HighlightRuleRow>,
+}
+
+/// 前端命令集信息（扁平化，避免嵌套 serde 问题）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandInfo {
+    pub id: String,
+    pub set_id: String,
+    pub name: String,
+    pub order_idx: i32,
+    pub delay_ms: i32,
+    pub cmd_type: String,
+    pub content: String,
+    pub append_line_ending: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandSetInfo {
+    pub id: String,
+    pub name: String,
+    pub is_loop: bool,
+    pub loop_delay_ms: i32,
+    pub commands: Vec<CommandInfo>,
+}
+
+/// 前端高亮规则集信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightRuleInfo {
+    pub id: String,
+    pub set_id: String,
+    pub name: String,
+    pub pattern: String,
+    pub is_regex: bool,
+    pub color: String,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightSetInfo {
+    pub id: String,
+    pub name: String,
+    pub is_enabled: bool,
+    pub rules: Vec<HighlightRuleInfo>,
+}
+
+// ==================== StorageManager ====================
 
 pub struct StorageManager {
-    /// TODO: 数据库连接池，需要在 Tokio runtime 中初始化
     db_pool: Option<Pool<Sqlite>>,
 }
 
 impl StorageManager {
     pub fn new() -> anyhow::Result<Self> {
-        // TODO: 在 setup 钩子中调用 init() 完成异步初始化
         Ok(Self { db_pool: None })
     }
 
     /// 异步初始化数据库连接池
-    /// 应在 Tauri setup 钩子中调用
     pub async fn init(&mut self) -> anyhow::Result<()> {
-        let db_path = dirs::data_dir()
+        let db_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("hypercom")
-            .join("data.db");
-        
+            .join("hypercom");
+        std::fs::create_dir_all(&db_dir)?;
+        let db_path = db_dir.join("data.db");
+
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(&format!("sqlite:{}", db_path.display()))
             .await?;
-        
+
         self.db_pool = Some(pool);
+        self.init_schema().await?;
         Ok(())
     }
 
     /// 初始化数据库表结构
-    /// TODO: 创建所有必要的表
     pub async fn init_schema(&self) -> anyhow::Result<()> {
-        // sqlx::query(
-        //     r#"
-        //     CREATE TABLE IF NOT EXISTS port_groups (
-        //         id TEXT PRIMARY KEY,
-        //         name TEXT NOT NULL,
-        //         order_idx INTEGER DEFAULT 0,
-        //         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        //     );
-        //     CREATE TABLE IF NOT EXISTS send_command_sets (
-        //         id TEXT PRIMARY KEY,
-        //         name TEXT NOT NULL,
-        //         is_loop BOOLEAN DEFAULT FALSE,
-        //         loop_delay_ms INTEGER DEFAULT 0
-        //     );
-        //     CREATE TABLE IF NOT EXISTS send_commands (
-        //         id TEXT PRIMARY KEY,
-        //         set_id TEXT NOT NULL,
-        //         name TEXT,
-        //         order_idx INTEGER,
-        //         delay_ms INTEGER DEFAULT 0,
-        //         cmd_type TEXT,
-        //         content TEXT,
-        //         append_line_ending TEXT
-        //     );
-        //     CREATE TABLE IF NOT EXISTS highlight_rule_sets (
-        //         id TEXT PRIMARY KEY,
-        //         name TEXT NOT NULL,
-        //         is_enabled BOOLEAN DEFAULT TRUE
-        //     );
-        //     CREATE TABLE IF NOT EXISTS highlight_rules (
-        //         id TEXT PRIMARY KEY,
-        //         set_id TEXT NOT NULL,
-        //         name TEXT,
-        //         pattern TEXT NOT NULL,
-        //         is_regex BOOLEAN DEFAULT FALSE,
-        //         color TEXT,
-        //         bold BOOLEAN DEFAULT FALSE,
-        //         italic BOOLEAN DEFAULT FALSE
-        //     );
-        //     "#
-        // ).execute(&self.db_pool).await?;
-        
+        let pool = self.pool()?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS port_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                order_idx INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS port_group_members (
+                group_id TEXT NOT NULL,
+                port_id TEXT NOT NULL,
+                PRIMARY KEY (group_id, port_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS send_command_sets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                is_loop INTEGER DEFAULT 0,
+                loop_delay_ms INTEGER DEFAULT 1000
+            );
+
+            CREATE TABLE IF NOT EXISTS send_commands (
+                id TEXT PRIMARY KEY,
+                set_id TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                order_idx INTEGER DEFAULT 0,
+                delay_ms INTEGER DEFAULT 0,
+                cmd_type TEXT DEFAULT 'string',
+                content TEXT DEFAULT '',
+                append_line_ending TEXT DEFAULT 'None',
+                FOREIGN KEY (set_id) REFERENCES send_command_sets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS highlight_rule_sets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                is_enabled INTEGER DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS highlight_rules (
+                id TEXT PRIMARY KEY,
+                set_id TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                pattern TEXT NOT NULL,
+                is_regex INTEGER DEFAULT 0,
+                color TEXT DEFAULT '',
+                bold INTEGER DEFAULT 0,
+                italic INTEGER DEFAULT 0,
+                FOREIGN KEY (set_id) REFERENCES highlight_rule_sets(id) ON DELETE CASCADE
+            );
+            "#
+        ).execute(pool).await?;
+
+        log::info!("Database schema initialized");
         Ok(())
     }
 
-    // TODO: 实现 CRUD 方法
-    // - save_command_set / load_command_sets
-    // - save_highlight_set / load_highlight_sets
-    // - save_port_layout / load_port_layout
+    /// 获取数据库连接池引用
+    pub fn pool(&self) -> anyhow::Result<&Pool<Sqlite>> {
+        self.db_pool.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Database not initialized"))
+    }
+
+    /// 设置数据库连接池（由外部在异步上下文中创建后注入）
+    pub fn set_pool(&mut self, pool: Pool<Sqlite>) {
+        self.db_pool = Some(pool);
+    }
+
+    fn get_pool(&self) -> anyhow::Result<&Pool<Sqlite>> {
+        self.pool()
+    }
+
+    // ==================== 串口分组 CRUD ====================
+
+    pub async fn save_port_groups(&self, groups: &[PortGroupRow]) -> anyhow::Result<()> {
+        let pool = self.get_pool()?;
+        save_port_groups_to_db(pool, groups).await
+    }
+
+    pub async fn load_port_groups(&self) -> anyhow::Result<Vec<PortGroupRow>> {
+        let pool = self.get_pool()?;
+        load_port_groups_from_db(pool).await
+    }
+
+    pub async fn save_port_group_members(&self, group_id: &str, port_ids: &[String]) -> anyhow::Result<()> {
+        let pool = self.get_pool()?;
+        save_port_group_members_to_db(pool, group_id, port_ids).await
+    }
+
+    pub async fn load_port_group_members(&self, group_id: &str) -> anyhow::Result<Vec<String>> {
+        let pool = self.get_pool()?;
+        load_port_group_members_from_db(pool, group_id).await
+    }
+
+    // ==================== 发送命令集 CRUD ====================
+
+    pub async fn save_command_set(&self, set: &SendCommandSet) -> anyhow::Result<()> {
+        let pool = self.get_pool()?;
+        save_command_set_to_db(pool, set).await
+    }
+
+    pub async fn load_command_sets(&self) -> anyhow::Result<Vec<SendCommandSet>> {
+        let pool = self.get_pool()?;
+        load_command_sets_from_db(pool).await
+    }
+
+    pub async fn delete_command_set(&self, set_id: &str) -> anyhow::Result<()> {
+        let pool = self.get_pool()?;
+        delete_command_set_from_db(pool, set_id).await
+    }
+
+    // ==================== 高亮规则集 CRUD ====================
+
+    pub async fn save_highlight_set(&self, set: &HighlightRuleSet) -> anyhow::Result<()> {
+        let pool = self.get_pool()?;
+        save_highlight_set_to_db(pool, set).await
+    }
+
+    pub async fn load_highlight_sets(&self) -> anyhow::Result<Vec<HighlightRuleSet>> {
+        let pool = self.get_pool()?;
+        load_highlight_sets_from_db(pool).await
+    }
+
+    pub async fn delete_highlight_set(&self, set_id: &str) -> anyhow::Result<()> {
+        let pool = self.get_pool()?;
+        delete_highlight_set_from_db(pool, set_id).await
+    }
+}
+
+/// 初始化数据库连接池（不持有锁）
+pub async fn create_pool() -> anyhow::Result<Pool<Sqlite>> {
+    let db_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("hypercom");
+    std::fs::create_dir_all(&db_dir)?;
+    let db_path = db_dir.join("data.db");
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("sqlite:{}", db_path.display()))
+        .await?;
+
+    Ok(pool)
+}
+
+/// 初始化数据库表结构（不持有锁）
+pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS port_groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            order_idx INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS port_group_members (
+            group_id TEXT NOT NULL,
+            port_id TEXT NOT NULL,
+            PRIMARY KEY (group_id, port_id)
+        );
+        CREATE TABLE IF NOT EXISTS send_command_sets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_loop INTEGER DEFAULT 0,
+            loop_delay_ms INTEGER DEFAULT 1000
+        );
+        CREATE TABLE IF NOT EXISTS send_commands (
+            id TEXT PRIMARY KEY,
+            set_id TEXT NOT NULL,
+            name TEXT DEFAULT '',
+            order_idx INTEGER DEFAULT 0,
+            delay_ms INTEGER DEFAULT 0,
+            cmd_type TEXT DEFAULT 'string',
+            content TEXT DEFAULT '',
+            append_line_ending TEXT DEFAULT 'None',
+            FOREIGN KEY (set_id) REFERENCES send_command_sets(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS highlight_rule_sets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_enabled INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS highlight_rules (
+            id TEXT PRIMARY KEY,
+            set_id TEXT NOT NULL,
+            name TEXT DEFAULT '',
+            pattern TEXT NOT NULL,
+            is_regex INTEGER DEFAULT 0,
+            color TEXT DEFAULT '',
+            bold INTEGER DEFAULT 0,
+            italic INTEGER DEFAULT 0,
+            FOREIGN KEY (set_id) REFERENCES highlight_rule_sets(id) ON DELETE CASCADE
+        );
+        "#
+    ).execute(pool).await?;
+    log::info!("Database schema initialized");
+    Ok(())
+}
+
+pub async fn save_port_groups_to_db(pool: &Pool<Sqlite>, groups: &[PortGroupRow]) -> anyhow::Result<()> {
+    for group in groups {
+        sqlx::query(
+            "INSERT OR REPLACE INTO port_groups (id, name, order_idx, created_at) VALUES (?, ?, ?, ?)"
+        )
+        .bind(&group.id).bind(&group.name).bind(group.order_idx).bind(&group.created_at)
+        .execute(pool).await?;
+    }
+    Ok(())
+}
+
+pub async fn load_port_groups_from_db(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<PortGroupRow>> {
+    let rows = sqlx::query_as::<_, (String, String, i32, String)>(
+        "SELECT id, name, order_idx, created_at FROM port_groups ORDER BY order_idx"
+    ).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|(id, name, order_idx, created_at)| {
+        PortGroupRow { id, name, order_idx, created_at }
+    }).collect())
+}
+
+pub async fn save_port_group_members_to_db(pool: &Pool<Sqlite>, group_id: &str, port_ids: &[String]) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM port_group_members WHERE group_id = ?").bind(group_id).execute(pool).await?;
+    for port_id in port_ids {
+        sqlx::query("INSERT OR REPLACE INTO port_group_members (group_id, port_id) VALUES (?, ?)")
+            .bind(group_id).bind(port_id).execute(pool).await?;
+    }
+    Ok(())
+}
+
+pub async fn load_port_group_members_from_db(pool: &Pool<Sqlite>, group_id: &str) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT port_id FROM port_group_members WHERE group_id = ?"
+    ).bind(group_id).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|(port_id,)| port_id).collect())
+}
+
+pub async fn save_command_set_to_db(pool: &Pool<Sqlite>, set: &SendCommandSet) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO send_command_sets (id, name, is_loop, loop_delay_ms) VALUES (?, ?, ?, ?)"
+    )
+    .bind(&set.id).bind(&set.name).bind(set.is_loop as i32).bind(set.loop_delay_ms)
+    .execute(pool).await?;
+
+    sqlx::query("DELETE FROM send_commands WHERE set_id = ?").bind(&set.id).execute(pool).await?;
+    for cmd in &set.commands {
+        sqlx::query(
+            "INSERT OR REPLACE INTO send_commands (id, set_id, name, order_idx, delay_ms, cmd_type, content, append_line_ending) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&cmd.id).bind(&set.id).bind(&cmd.name).bind(cmd.order_idx)
+        .bind(cmd.delay_ms).bind(&cmd.cmd_type).bind(&cmd.content).bind(&cmd.append_line_ending)
+        .execute(pool).await?;
+    }
+    Ok(())
+}
+
+pub async fn load_command_sets_from_db(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<SendCommandSet>> {
+    let set_rows = sqlx::query_as::<_, (String, String, i32, i32)>(
+        "SELECT id, name, is_loop, loop_delay_ms FROM send_command_sets ORDER BY id"
+    ).fetch_all(pool).await?;
+
+    let mut result = Vec::new();
+    for (id, name, is_loop, loop_delay_ms) in set_rows {
+        let cmd_rows = sqlx::query_as::<_, (String, String, String, i32, i32, String, String, String)>(
+            "SELECT id, set_id, name, order_idx, delay_ms, cmd_type, content, append_line_ending FROM send_commands WHERE set_id = ? ORDER BY order_idx"
+        ).bind(&id).fetch_all(pool).await?;
+
+        let commands = cmd_rows.into_iter().map(|(cid, sid, cn, oi, dm, ct, c, al)| {
+            SendCommandRow { id: cid, set_id: sid, name: cn, order_idx: oi, delay_ms: dm, cmd_type: ct, content: c, append_line_ending: al }
+        }).collect();
+
+        result.push(SendCommandSet { id, name, is_loop: is_loop != 0, loop_delay_ms, commands });
+    }
+    Ok(result)
+}
+
+pub async fn delete_command_set_from_db(pool: &Pool<Sqlite>, set_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM send_commands WHERE set_id = ?").bind(set_id).execute(pool).await?;
+    sqlx::query("DELETE FROM send_command_sets WHERE id = ?").bind(set_id).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn save_highlight_set_to_db(pool: &Pool<Sqlite>, set: &HighlightRuleSet) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO highlight_rule_sets (id, name, is_enabled) VALUES (?, ?, ?)"
+    )
+    .bind(&set.id).bind(&set.name).bind(set.is_enabled as i32)
+    .execute(pool).await?;
+
+    sqlx::query("DELETE FROM highlight_rules WHERE set_id = ?").bind(&set.id).execute(pool).await?;
+    for rule in &set.rules {
+        sqlx::query(
+            "INSERT OR REPLACE INTO highlight_rules (id, set_id, name, pattern, is_regex, color, bold, italic) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&rule.id).bind(&set.id).bind(&rule.name).bind(&rule.pattern)
+        .bind(rule.is_regex as i32).bind(&rule.color).bind(rule.bold as i32).bind(rule.italic as i32)
+        .execute(pool).await?;
+    }
+    Ok(())
+}
+
+pub async fn load_highlight_sets_from_db(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<HighlightRuleSet>> {
+    let set_rows = sqlx::query_as::<_, (String, String, i32)>(
+        "SELECT id, name, is_enabled FROM highlight_rule_sets ORDER BY id"
+    ).fetch_all(pool).await?;
+
+    let mut result = Vec::new();
+    for (id, name, is_enabled) in set_rows {
+        let rule_rows = sqlx::query_as::<_, (String, String, String, String, i32, String, i32, i32)>(
+            "SELECT id, set_id, name, pattern, is_regex, color, bold, italic FROM highlight_rules WHERE set_id = ? ORDER BY id"
+        ).bind(&id).fetch_all(pool).await?;
+
+        let rules = rule_rows.into_iter().map(|(rid, sid, rn, pat, ir, col, b, i)| {
+            HighlightRuleRow { id: rid, set_id: sid, name: rn, pattern: pat, is_regex: ir != 0, color: col, bold: b != 0, italic: i != 0 }
+        }).collect();
+
+        result.push(HighlightRuleSet { id, name, is_enabled: is_enabled != 0, rules });
+    }
+    Ok(result)
+}
+
+pub async fn delete_highlight_set_from_db(pool: &Pool<Sqlite>, set_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM highlight_rules WHERE set_id = ?").bind(set_id).execute(pool).await?;
+    sqlx::query("DELETE FROM highlight_rule_sets WHERE id = ?").bind(set_id).execute(pool).await?;
+    Ok(())
 }
