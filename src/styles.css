@@ -110,7 +110,6 @@ body {
   background-color: var(--bg-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  user-select: none;
 }
 
 /* ==================== Scrollbar ==================== */
@@ -616,16 +615,12 @@ textarea.input {
 }
 
 .titlebar {
-  height: var(--titlebar-height);
-  background: var(--bg-titlebar);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 0 0 12px;
-  border-bottom: 1px solid var(--border-color);
+  height: var(--titlebar-height);
+  background: var(--bg-titlebar);
+  padding: 0 12px;
   user-select: none;
-  -webkit-app-region: drag;
-  app-region: drag;
 }
 
 .titlebar-left {
@@ -686,6 +681,7 @@ textarea.input {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  user-select: none;
 }
 
 .sidebar-resize-handle {

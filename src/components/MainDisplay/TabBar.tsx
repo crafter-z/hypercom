@@ -135,7 +135,7 @@ const TabBar: React.FC<TabBarProps> = ({
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
       items.push({ type: 'separator' });
       for (const pane of moveToPaneTargets) {
-        const paneLabel = `分屏 ${pane.id.replace('pane-', '').slice(0, 4)}`;
+        const paneLabel = `移至分屏 ${pane.id.replace('pane-', '').slice(0, 4)}`;
         items.push({
           label: paneLabel,
           onClick: () => onMoveToPane?.(tabId, pane.id),

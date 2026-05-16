@@ -151,7 +151,6 @@ const MainDisplay: React.FC = () => {
   const {
     panes,
     tabs,
-    activeTabId,
     focusedPaneId,
     setFocusedPane,
     splitPane,
@@ -197,8 +196,14 @@ const MainDisplay: React.FC = () => {
         )}
       </div>
 
-      <div ref={containerRef} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {panes.map((pane, idx) => (
+      <div ref={containerRef} style={{
+        flex: 1, display: 'flex',
+        flexDirection: panes[0]?.direction === 'horizontal' ? 'column' : 'row',
+        overflow: 'hidden'
+      }}>
+        {panes.map((pane, idx) => {
+          const isRow = panes[0]?.direction !== 'horizontal';
+          return (
           <React.Fragment key={pane.id}>
             <div style={{
               flex: idx === 0 && paneSizes.length === panes.length
@@ -217,15 +222,15 @@ const MainDisplay: React.FC = () => {
             </div>
             {idx < panes.length - 1 && (
               <ResizeHandle
-                direction="vertical"
+                direction={isRow ? 'vertical' : 'horizontal'}
                 onResize={(delta) => handleResize(idx, delta)}
               />
             )}
           </React.Fragment>
-        ))}
+        )})}
       </div>
 
-      {(!tabs.length || !activeTabId) && panes.length <= 1 && (
+      {panes.length <= 1 && !tabs.length && (
         <div className="terminal-empty-state" style={{ flex: 1 }}>
           请从左侧选择一个串口打开标签页
         </div>

@@ -42,6 +42,7 @@ const OperationPanel: React.FC = () => {
     setConfigActiveTab,
     setActiveSendCommandSetId,
     setActiveHighlightSetId,
+    setTerminalConfig,
   } = useAppStore();
 
   const { sendData } = useSerialData();
@@ -75,6 +76,12 @@ const OperationPanel: React.FC = () => {
       serialService.setFlowControl(activeTabId, opDtr, opRts).catch(() => {});
     }
   }, [activeTabId, isConnected, opBaudRate, opDataBits, opParity, opStopBits, opHandshake, opDtr, opRts]);
+
+  // Sync scroll lock to active terminal
+  useEffect(() => {
+    if (!activeTabId) return;
+    setTerminalConfig(activeTabId, { scrollLocked: opScrollLocked });
+  }, [opScrollLocked, activeTabId, setTerminalConfig]);
 
   // Cyclic send logic
   useEffect(() => {
@@ -139,7 +146,7 @@ const OperationPanel: React.FC = () => {
       ref.stopped = true;
       if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
     };
-  }, [opIsLoopSending, isPortActive, isConnected, activeSendCommandSetId, opLoopInterval, sendCommandSets, activeTabId, sendData, setOpState]);
+  }, [opIsLoopSending, isPortActive, isConnected, activeSendCommandSetId, opLoopInterval, activeTabId, sendData, setOpState]);
 
   const handleSend = async () => {
     if (!isPortActive || !opSendInput.trim()) return;
@@ -189,9 +196,9 @@ const OperationPanel: React.FC = () => {
       <div className="operation-panel-header" onClick={toggleCollapse}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {collapsed ? (
-            <ChevronDown size={12} style={{ transition: 'transform 0.2s' }} />
-          ) : (
             <ChevronUp size={12} style={{ transition: 'transform 0.2s' }} />
+          ) : (
+            <ChevronDown size={12} style={{ transition: 'transform 0.2s' }} />
           )}
           <span className="operation-panel-title">操作面板</span>
           {isPortActive && (

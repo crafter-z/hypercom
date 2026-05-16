@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback, useMemo } from 'react';
 import type { TerminalLine, TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { useState } from 'react';
@@ -10,17 +10,20 @@ interface TerminalViewProps {
   terminal: TerminalState;
 }
 
-const mockLines: TerminalLine[] = [
-  { id: '1', timestamp: Date.now() - 10000, direction: 'RX', content: 'System start, version: 1.2.3', isHex: false },
-  { id: '2', timestamp: Date.now() - 9000, direction: 'RX', content: 'Heap size: 520KB, Stack: 8KB', isHex: false },
-  { id: '3', timestamp: Date.now() - 8000, direction: 'RX', content: 'Temperature high: 65.3°C', isHex: false },
-  { id: '4', timestamp: Date.now() - 7000, direction: 'RX', content: '41 42 43 44 45 46 47 48 | ABCDEFGH', isHex: true },
-  { id: '5', timestamp: Date.now() - 6000, direction: 'TX', content: 'AT+PING', isHex: false },
-  { id: '6', timestamp: Date.now() - 5000, direction: 'RX', content: '+PONG: OK', isHex: false },
-  { id: '7', timestamp: Date.now() - 4000, direction: 'RX', content: 'Sensor read failed! code=0x02', isHex: false },
-  { id: '8', timestamp: Date.now() - 3000, direction: 'RX', content: 'Line with keyword ALERT: Battery low!', isHex: false },
-  { id: '9', timestamp: Date.now() - 2000, direction: 'RX', content: '0A 0D 1B 7F 55 AA 10 20 30 40', isHex: true },
-];
+function generateMockLines(): TerminalLine[] {
+  const now = Date.now();
+  return [
+    { id: '1', timestamp: now - 10000, direction: 'RX', content: 'System start, version: 1.2.3', isHex: false },
+    { id: '2', timestamp: now - 9000, direction: 'RX', content: 'Heap size: 520KB, Stack: 8KB', isHex: false },
+    { id: '3', timestamp: now - 8000, direction: 'RX', content: 'Temperature high: 65.3°C', isHex: false },
+    { id: '4', timestamp: now - 7000, direction: 'RX', content: '41 42 43 44 45 46 47 48 | ABCDEFGH', isHex: true },
+    { id: '5', timestamp: now - 6000, direction: 'TX', content: 'AT+PING', isHex: false },
+    { id: '6', timestamp: now - 5000, direction: 'RX', content: '+PONG: OK', isHex: false },
+    { id: '7', timestamp: now - 4000, direction: 'RX', content: 'Sensor read failed! code=0x02', isHex: false },
+    { id: '8', timestamp: now - 3000, direction: 'RX', content: 'Line with keyword ALERT: Battery low!', isHex: false },
+    { id: '9', timestamp: now - 2000, direction: 'RX', content: '0A 0D 1B 7F 55 AA 10 20 30 40', isHex: true },
+  ];
+}
 
 function hexToString(hex: string): string {
   const bytes = hex.trim().split(/\s+/);
@@ -37,6 +40,7 @@ function stringToHex(str: string): string {
 const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
+  const mockLines = useMemo(() => generateMockLines(), []);
   const lines = terminal?.lines?.length ? terminal.lines : mockLines;
   const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
 

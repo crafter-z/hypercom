@@ -326,17 +326,6 @@ const Sidebar: React.FC = () => {
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
 
-  React.useEffect(() => {
-    if (groups.length === 0) {
-      const mockGroups: PortGroup[] = [
-        { id: 'group1', name: '开发板组', isExpanded: true, portIds: ['COM3', 'COM4'], order: 0 },
-        { id: 'group2', name: '传感器组', isExpanded: true, portIds: ['COM5', 'COM7', 'COM8'], order: 1 },
-        { id: 'group3', name: '虚拟端口', isExpanded: true, portIds: ['COM9', 'COM10'], order: 2 },
-      ];
-      mockGroups.forEach(g => addGroup(g));
-    }
-  }, [groups.length, addGroup]);
-
   const handleOpenTab = useCallback((portId: string) => { openTab(portId); }, [openTab]);
 
   const handleToggleConnect = useCallback((portId: string) => {
