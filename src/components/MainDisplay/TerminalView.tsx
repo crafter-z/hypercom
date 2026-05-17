@@ -37,18 +37,40 @@ function stringToHex(str: string): string {
   return Array.from(str).map(c => c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')).join(' ');
 }
 
-const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }) => {
+const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const mockLines = useMemo(() => generateMockLines(), []);
   const lines = terminal?.lines?.length ? terminal.lines : mockLines;
   const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
+  const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
+  const autoScrollRef = useRef(true);
+
+  // Sync store's scrollLocked to local ref (for OperationPanel toggle)
+  useEffect(() => {
+    if (terminal?.scrollLocked !== undefined) {
+      autoScrollRef.current = terminal.scrollLocked;
+    }
+  }, [terminal?.scrollLocked]);
 
   useEffect(() => {
-    if (scrollRef.current && terminal?.scrollLocked !== false) {
+    if (scrollRef.current && autoScrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [lines.length, terminal?.scrollLocked]);
+  }, [lines.length]);
+
+  // Detect manual scroll: scroll up = pause auto-follow, scroll to bottom = resume
+  const handleScroll = useCallback(() => {
+    if (!scrollRef.current) return;
+    const el = scrollRef.current;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+    if (atBottom !== autoScrollRef.current) {
+      autoScrollRef.current = atBottom;
+      if (portId && terminal) {
+        setTerminalConfig(portId, { scrollLocked: atBottom });
+      }
+    }
+  }, [portId, terminal, setTerminalConfig]);
 
   const formatTimestamp = (ts: number): string => {
     const d = new Date(ts);
@@ -112,6 +134,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }
         ref={scrollRef}
         className="terminal-view"
         onContextMenu={handleContextMenu}
+        onScroll={handleScroll}
       >
         {lines.map((line) => {
           const displayText = terminal?.displayFormat === 'hex' && line.rawData

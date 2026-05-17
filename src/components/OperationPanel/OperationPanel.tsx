@@ -62,6 +62,7 @@ const OperationPanel: React.FC = () => {
     currentCmdIdx: 0,
     stopped: false,
   });
+  const sendHistoryRef = useRef<{ history: string[]; index: number }>({ history: [], index: -1 });
 
   useEffect(() => {
     if (!activeTabId || !isConnected) return;
@@ -164,6 +165,12 @@ const OperationPanel: React.FC = () => {
 
   const handleSend = async () => {
     if (!isPortActive || !opSendInput.trim()) return;
+    // Add to history
+    const hist = sendHistoryRef.current;
+    hist.history = hist.history.filter(h => h !== opSendInput);
+    hist.history.push(opSendInput);
+    if (hist.history.length > 50) hist.history.shift();
+    hist.index = -1;
     await sendData(activeTabId!, opSendInput, opSendIsHex, opSendAppendLineEnding);
     setOpState({ opSendInput: '' });
   };
@@ -274,6 +281,27 @@ const OperationPanel: React.FC = () => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
                     handleSend();
+                  } else if (e.key === 'ArrowUp' && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    const hist = sendHistoryRef.current;
+                    if (hist.history.length > 0) {
+                      if (hist.index === -1 || hist.index >= hist.history.length) {
+                        hist.index = hist.history.length - 1;
+                      } else if (hist.index > 0) {
+                        hist.index--;
+                      }
+                      setOpState({ opSendInput: hist.history[hist.index] });
+                    }
+                  } else if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    const hist = sendHistoryRef.current;
+                    if (hist.index >= 0 && hist.index < hist.history.length - 1) {
+                      hist.index++;
+                      setOpState({ opSendInput: hist.history[hist.index] });
+                    } else {
+                      hist.index = -1;
+                      setOpState({ opSendInput: '' });
+                    }
                   }
                 }}
               />
