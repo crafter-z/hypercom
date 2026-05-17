@@ -1,7 +1,7 @@
 # 自主迭代工作日志
 
-> 开始: 2026-05-17 10:49 | 结束: 2026-05-17 11:26
-> 模式: 无监督自主迭代 | 提交: 3 commits
+> 开始: 2026-05-17 10:49 | 结束: 2026-05-17 11:30
+> 模式: 无监督自主迭代 | 提交: 4 commits | 耗时: 41min
 
 ## 执行记录
 
@@ -41,18 +41,22 @@
 - 终端工具栏显示实时端口参数
 - `opIgnoreEmptyChars` 过滤生效
 
-### 11:19 Phase 9 — 命令历史 + 智能滚动 ✅
-- 发送输入框: Up/Down 调出历史命令 (50条)
-- TerminalView: 手动上滚暂停自动跟随，滚到底恢复
+### 11:28 Phase 10 — Ctrl+Scroll 字体缩放 + 字体实时应用 ✅
+- TerminalView: Ctrl+鼠标滚轮调整字体大小 (8-48px)
+- ThemeProvider: 启动时将 `terminalFontSize/terminalFont/uiFontSize/uiFont` 应用到 CSS 变量
+
+### 11:30 — commit#4: 字体缩放
+`d679f34` — 2 files, +22/-2
 
 ## 提交记录
 
-| Commit | 时间 | 描述 | 文件 |
-|--------|------|------|------|
-| `45347e3` | 11:16 | log ops, HEX parse, split, serial params, auto-logging | 9 files, +238/-22 |
-| `30a9b34` | 11:19 | HEX display, data export, param sync, terminal improvements | 9 files, +74/-13 |
-| `6a8865b` | 11:26 | command history, smart auto-scroll | 2 files, +54/-3 |
+| # | Commit | 时间 | 描述 | 文件 |
+|---|--------|------|------|------|
+| 1 | `45347e3` | 11:16 | log ops, HEX parse, split, serial params, auto-logging | 9 files, +238/-22 |
+| 2 | `30a9b34` | 11:19 | HEX display, data export, param sync, terminal improvements | 9 files, +74/-13 |
+| 3 | `6a8865b` | 11:26 | command history, smart auto-scroll | 2 files, +54/-3 |
+| 4 | `d679f34` | 11:30 | Ctrl+Scroll font scaling, live font apply | 2 files, +22/-2 |
 
 ## 总结
 
-完成 17 项功能 + 修复 7 个缺陷 + 3 commits，涵盖日志、HEX、串口参数、终端显示、命令历史、自动滚动全部已实现。未覆盖项仅剩低优先级的虚拟滚动/协议解析/i18n/数据导出到文件。
+**4 commits, 18 项功能, 7 个缺陷修复, 41分钟完成。** Rust + TypeScript 均 0 error/warning 编译通过。
