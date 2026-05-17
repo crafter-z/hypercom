@@ -86,6 +86,17 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }
         const sel = window.getSelection();
         if (sel && sel.toString()) navigator.clipboard.writeText(hexToString(sel.toString()));
       }},
+      { type: 'separator' },
+      { label: '导出为 TXT', onClick: () => {
+        const text = lines.map(l => `[${formatTimestamp(l.timestamp)}] ${l.direction} ${l.content}`).join('\n');
+        navigator.clipboard.writeText(text);
+      }},
+      { label: '导出为 CSV', onClick: () => {
+        const csv = 'timestamp,direction,content\n' + lines.map(l =>
+          `"${formatTimestamp(l.timestamp)}","${l.direction}","${l.content.replace(/"/g, '""')}"`
+        ).join('\n');
+        navigator.clipboard.writeText(csv);
+      }},
     ];
     setContextMenu({ x: e.clientX, y: e.clientY, items });
   }, [handleSelectAll, handleCopy]);
@@ -102,7 +113,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }
         className="terminal-view"
         onContextMenu={handleContextMenu}
       >
-        {lines.map((line) => (
+        {lines.map((line) => {
+          const displayText = terminal?.displayFormat === 'hex' && line.rawData
+            ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
+            : line.content;
+          return (
           <div
             key={line.id}
             className="terminal-line"
@@ -118,11 +133,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId: _portId, terminal }
             </span>
             <span className="terminal-content"
               dangerouslySetInnerHTML={{
-                __html: applyHighlightSets(line.content, highlightRuleSets)
+                __html: applyHighlightSets(displayText, highlightRuleSets)
               }}
             />
           </div>
-        ))}
+        )})}
         <div style={{ height: 8 }} />
       </div>
 

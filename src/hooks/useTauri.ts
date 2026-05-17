@@ -160,6 +160,7 @@ export function useSerialData() {
           timestamp: event.timestamp,
           direction: event.direction as 'RX' | 'TX',
           content: text,
+          rawData: event.data,
           isHex: event.is_hex,
         });
         // Accumulate traffic stats
@@ -204,11 +205,13 @@ export function useSerialData() {
       // Also show sent data in terminal
       const { sendPrefix } = useAppStore.getState().config;
       const prefix = sendPrefix ? `${sendPrefix} ` : '';
+      const displayText = `${prefix}${data}`;
       useAppStore.getState().appendTerminalLine(portId, {
         id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp: Date.now(),
         direction: 'TX',
-        content: `${prefix}${data}`,
+        content: displayText,
+        rawData: isHex ? undefined : Array.from(new TextEncoder().encode(displayText)),
         isHex: isHex,
       });
 

@@ -35,6 +35,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
     ? activeTabId
     : (localActiveTabId && tabIds.includes(localActiveTabId) ? localActiveTabId : paneTabs[0]?.id || null);
   const displayTab = paneTabs.find(t => t.id === displayTabId);
+  const displayPort = useAppStore((s) => s.ports.find(p => p.id === displayTabId));
 
   const otherPanes = panes.filter(p => p.id !== paneId);
 
@@ -82,9 +83,12 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
       {displayTab && (
         <div className="terminal-toolbar">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span className="status-dot connected" />
+            <span className={`status-dot ${displayPort?.status === 'connected' ? 'connected' : displayPort?.status === 'error' ? 'error' : 'disconnected'}`} />
             <span className="terminal-toolbar-title">{displayTab.title}</span>
-            <span className="terminal-toolbar-info">(115200, 8N1)</span>
+            <span className="terminal-toolbar-info">
+              ({displayPort?.status || 'disconnected'}
+              {displayPort?.baudRate ? `, ${displayPort.baudRate},${displayPort.dataBits || 8}${displayPort.parity?.[0] || 'N'}${displayPort.stopBits === 'One' ? '1' : '2'}` : ''})
+            </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <span className="terminal-toolbar-label">编码:</span>

@@ -85,6 +85,18 @@ const OperationPanel: React.FC = () => {
     setTerminalConfig(activeTabId, { scrollLocked: opScrollLocked });
   }, [opScrollLocked, activeTabId, setTerminalConfig]);
 
+  // Sync display format to active terminal
+  useEffect(() => {
+    if (!activeTabId) return;
+    setTerminalConfig(activeTabId, { displayFormat: opDisplayFormat });
+  }, [opDisplayFormat, activeTabId, setTerminalConfig]);
+
+  // Sync timestamp toggle to active terminal
+  useEffect(() => {
+    if (!activeTabId) return;
+    setTerminalConfig(activeTabId, { showTimestamp: opShowTimestamp });
+  }, [opShowTimestamp, activeTabId, setTerminalConfig]);
+
   // Cyclic send logic
   useEffect(() => {
     const ref = loopRef.current;

@@ -86,8 +86,9 @@ export interface TerminalLine {
   id: string;
   timestamp: number;       // 时间戳
   direction: 'RX' | 'TX';
-  content: string;         // 原始内容
+  content: string;         // 原始内容（文本格式）
   displayContent?: string; // 格式化后的显示内容（带高亮）
+  rawData?: number[];      // 原始字节数组（用于 HEX 显示）
   isHex: boolean;          // 是否为HEX显示
 }
 

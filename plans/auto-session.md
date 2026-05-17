@@ -60,7 +60,6 @@
 - `closePort` 停止日志
 
 ### 11:13 — 完成总结
-
 ## 成果汇总
 
 | 领域 | 完成项 | 文件 |
@@ -75,10 +74,22 @@
 | 自动日志记录 | 端口连接时若 `autoSaveLog=true` 自动启停日志 | `useTauri.ts`, `commands/mod.rs` |
 | HEX 边界修复 | 奇数长度/非法字符返回明确错误 | `serial/mod.rs` |
 | 跨平台路径 | 移除 `%APPDATA%` Windows-only 路径 | `OperationPanel.tsx` |
-| 文档更新 | 状态/路线图/缺陷记录更新 | `plans/` |
+| 忽略空字符 | `opIgnoreEmptyChars` 过滤空白行 | `useTauri.ts` |
+| save_log_as 反馈 | 无日志写入器时返回明确错误 | `logger/mod.rs` |
+| 状态栏端口名 | StatusBar 显示当前选中串口 | `StatusBar.tsx` |
 
-## 未覆盖项
-- 滚动锁定同步 (上次 commit 已修复)
-- 标题栏窗口控制 (已存在，被误列为未完成)
-- 虚拟滚动 / 协议解析器 / i18n / 数据导出 (阶段 5，低优先级)
+### 11:16 — commit#1: 日志+HEX+参数+自动日志
+`45347e3` — 9 files, +238/-22
+
+### 11:19 — Phase 8: 终端显示增强
+- `TerminalLine`: 新增 `rawData?: number[]` 字段存储原始字节
+- `TerminalView`: 当 `displayFormat === 'hex'` 时渲染 HEX 字节而非 UTF-8 文本
+- `OperationPanel`: `opDisplayFormat` 变化时同步到 `terminal.displayFormat`
+- 右键菜单新增 "导出为 TXT" / "导出为 CSV" (写入剪贴板)
+- `sendData`: TX 行存储 rawData 供 HEX 显示
+- `save_log_as`: 无日志写入器时返回 Err 而非静默失败
+- `StatusBar`: 显示当前活动端口 ID
+
+### 11:19 — commit#2: 终端显示增强
+
 

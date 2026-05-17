@@ -72,6 +72,16 @@ const App: React.FC = () => {
     return () => document.removeEventListener('contextmenu', handler);
   }, []);
 
+  // Enforce terminal memory limit from config (rough: 500 lines/MB)
+  const memoryLimitMB = useAppStore((s) => s.config.memoryLimitMB);
+  useEffect(() => {
+    const maxLines = memoryLimitMB * 500;
+    const store = useAppStore.getState();
+    Object.keys(store.terminals).forEach(portId => {
+      store.setTerminalConfig(portId, { maxLines });
+    });
+  }, [memoryLimitMB]);
+
   return (
     <ThemeProvider>
       <div

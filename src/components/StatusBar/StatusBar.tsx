@@ -28,6 +28,9 @@ const StatusBar: React.FC = () => {
           <span className="statusbar-dot" />
           {systemStatus.status}
         </span>
+        {activeTabId && (
+          <span className="statusbar-item" style={{ opacity: 0.9 }}>{activeTabId}</span>
+        )}
         <span className="statusbar-item">
           <MemoryStick size={12} />
           {systemStatus.memoryUsedMB}MB / {systemStatus.memoryLimitMB}MB ({((systemStatus.memoryUsedMB / systemStatus.memoryLimitMB) * 100).toFixed(0)}%)

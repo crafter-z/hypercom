@@ -181,6 +181,8 @@ impl LogManager {
         if let Some(writer) = self.writers.get(port_id) {
             fs::copy(&writer.file_path, target_path)?;
             log::info!("Log saved from {:?} to {}", writer.file_path, target_path);
+        } else {
+            anyhow::bail!("No log writer exists for port '{}'. Start logging first.", port_id);
         }
         Ok(())
     }
