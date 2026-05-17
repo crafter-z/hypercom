@@ -66,6 +66,8 @@ pub fn run() {
             commands::get_log_files,
             commands::start_logging,
             commands::stop_logging,
+            commands::set_log_split_size,
+            commands::set_log_filename_format,
             // ===== 系统相关命令 =====
             commands::get_system_status,
             commands::prevent_screen_off,

@@ -62,10 +62,21 @@ pub fn send_serial_data(args: SendDataArgs, state: State<AppState>) -> Result<us
 }
 
 /// 设置串口参数（波特率、数据位等）
+#[derive(Debug, Deserialize)]
+pub struct SetSerialParamsArgs {
+    pub port_id: String,
+    pub baud_rate: u32,
+    pub data_bits: u8,
+    pub parity: String,
+    pub stop_bits: String,
+    pub handshake: String,
+}
+
 #[tauri::command]
-pub fn set_serial_params(port_id: String, baud_rate: u32, state: State<AppState>) -> Result<(), String> {
+pub fn set_serial_params(args: SetSerialParamsArgs, state: State<AppState>) -> Result<(), String> {
     let manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
-    manager.set_baud_rate(&port_id, baud_rate).map_err(|e| e.to_string())
+    manager.set_params(&args.port_id, args.baud_rate, &args.data_bits.to_string(), &args.parity, &args.stop_bits, &args.handshake)
+        .map_err(|e| e.to_string())
 }
 
 /// 设置流控（DTR/RTS/握手协议）
@@ -149,11 +160,30 @@ pub fn get_log_files(state: State<AppState>) -> Result<Vec<logger::LogFileInfo>,
     manager.list_files().map_err(|e| e.to_string())
 }
 
+/// 设置日志分片大小 (MB)
+#[tauri::command]
+pub fn set_log_split_size(mb: u32, state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
+    manager.set_split_size(mb);
+    Ok(())
+}
+
+/// 设置日志文件名格式
+#[tauri::command]
+pub fn set_log_filename_format(format: String, state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
+    manager.set_filename_format(&format);
+    Ok(())
+}
+
 /// 开始记录日志
 #[tauri::command]
 pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), String> {
+    let config_mgr = state.config_manager.lock().map_err(|e| e.to_string())?;
+    let format = config_mgr.get_config().log_format.clone();
+    drop(config_mgr);
     let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
-    manager.create_writer(&port_id, "string").map_err(|e| e.to_string())
+    manager.create_writer(&port_id, &format).map_err(|e| e.to_string())
 }
 
 /// 停止记录日志

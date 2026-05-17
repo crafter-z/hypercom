@@ -75,6 +75,8 @@ pub struct LogManager {
     auto_save: bool,
     /// 分片大小 (MB)
     split_size_mb: u32,
+    /// 文件名格式 (e.g. "[com]-[datetime]")
+    filename_format: String,
 }
 
 impl LogManager {
@@ -91,6 +93,7 @@ impl LogManager {
             writers: HashMap::new(),
             auto_save: false,
             split_size_mb: 100,
+            filename_format: "[com]-[datetime]".to_string(),
         }
     }
 
@@ -102,10 +105,29 @@ impl LogManager {
         Ok(())
     }
 
+    /// 设置分片大小
+    pub fn set_split_size(&mut self, mb: u32) {
+        self.split_size_mb = mb;
+    }
+
+    /// 设置文件名格式
+    pub fn set_filename_format(&mut self, format: &str) {
+        self.filename_format = format.to_string();
+    }
+
+    /// 解析文件名模板: [com] → port_id, [datetime] → 20260101_120000, [date] → 2026-01-01, [time] → 12:00:00
+    fn format_filename(&self, port_id: &str) -> String {
+        let now = chrono::Local::now();
+        self.filename_format
+            .replace("[com]", port_id)
+            .replace("[datetime]", &now.format("%Y%m%d_%H%M%S").to_string())
+            .replace("[date]", &now.format("%Y-%m-%d").to_string())
+            .replace("[time]", &now.format("%H-%M-%S").to_string())
+    }
+
     /// 为指定串口创建日志写入器
-    /// TODO: 根据配置生成文件名（支持 [com]-[datetime] 格式）
     pub fn create_writer(&mut self, port_id: &str, format: &str) -> anyhow::Result<()> {
-        let filename = format!("{}-{}", port_id, chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        let filename = self.format_filename(port_id);
         let file_path = self.log_directory.join(format!("{}.log", filename));
         
         let file = OpenOptions::new()
@@ -131,10 +153,15 @@ impl LogManager {
         if let Some(writer) = self.writers.get_mut(port_id) {
             writer.write_line(timestamp, direction, data)?;
             
-            // 检查分片
             if writer.should_split(self.split_size_mb) {
-                // TODO: 关闭当前文件，创建新文件继续写入
-                log::info!("Log split triggered for {}", port_id);
+                let format = writer.format.clone();
+                writer.writer.flush()?;
+                let old_path = writer.file_path.clone();
+                // Close old writer by removing and creating a new one
+                self.writers.remove(port_id);
+                log::info!("Log split: {} closed at {} bytes", port_id, old_path.display());
+                self.create_writer(port_id, &format)?;
+                log::info!("Log split: new file created for {}", port_id);
             }
         }
         Ok(())
@@ -166,9 +193,14 @@ impl LogManager {
                 let entry = entry?;
                 let metadata = entry.metadata()?;
                 if metadata.is_file() {
+                    let path = entry.path();
+                    let stem = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let port_id = stem.split('-').next().unwrap_or("unknown").to_string();
                     files.push(LogFileInfo {
                         path: entry.path().to_string_lossy().to_string(),
-                        port_id: "unknown".to_string(), // TODO: 从文件名解析
+                        port_id,
                         created_at: metadata.created()
                             .ok()
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())

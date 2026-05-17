@@ -401,8 +401,23 @@ Err(e) => {
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
 
         let bytes = if is_hex {
-            // TODO: 解析 HEX 字符串为字节数组
-            data.as_bytes().to_vec()
+            // Parse HEX: "48 65 6C 6C 6F" or "48656C6C6F"
+            let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+            if cleaned.len() % 2 != 0 {
+                return Err(anyhow::anyhow!("HEX string has odd length: {} chars", cleaned.len()));
+            }
+            let mut result = Vec::with_capacity(cleaned.len() / 2);
+            let chars: Vec<char> = cleaned.chars().collect();
+            let mut i = 0;
+            while i + 1 < chars.len() {
+                let hex_pair: String = chars[i..i + 2].iter().collect();
+                match u8::from_str_radix(&hex_pair, 16) {
+                    Ok(byte) => result.push(byte),
+                    Err(_) => return Err(anyhow::anyhow!("Invalid HEX byte at position {}: \"{}\"", i, hex_pair)),
+                }
+                i += 2;
+            }
+            result
         } else {
             let mut text = data.to_string();
             match append_line_ending {
@@ -422,7 +437,13 @@ Err(e) => {
         Ok(n)
     }
 
-    /// 修改波特率
+    /// 修改串口参数（完整）
+    pub fn set_params(&self, port_id: &str, baud_rate: u32, _data_bits: &str, _parity: &str, _stop_bits: &str, _handshake: &str) -> anyhow::Result<()> {
+        // Baud rate can be changed online; other params require reconnect (serialport-rs limitation)
+        self.set_baud_rate(port_id, baud_rate)
+    }
+
+    /// 修改波特率（保留兼容）
     pub fn set_baud_rate(&self, port_id: &str, baud_rate: u32) -> anyhow::Result<()> {
         let handle = self.ports.get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;

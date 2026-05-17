@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { serialService, configService, systemService, eventService } from '../services/tauri';
+import { serialService, configService, systemService, eventService, logService } from '../services/tauri';
 import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import type { SerialPort, AppConfig } from '../types';
 
@@ -103,6 +103,10 @@ export function useSerialConnection() {
         stopBits: store.opStopBits,
         handshake: store.opHandshake,
       });
+      // Auto-start logging if enabled
+      if (store.config.autoSaveLog) {
+        logService.startLogging(portId).catch(() => {});
+      }
     } catch (err) {
       console.error('[useSerialConnection] Failed to open port:', err);
       updatePort(portId, { status: 'error' });
@@ -113,6 +117,8 @@ export function useSerialConnection() {
     try {
       await serialService.closeSerialPort(portId);
       updatePort(portId, { status: 'disconnected' });
+      // Auto-stop logging
+      logService.stopLogging(portId).catch(() => {});
     } catch (err) {
       console.error('[useSerialConnection] Failed to close port:', err);
       updatePort(portId, { status: 'error' });
@@ -147,6 +153,8 @@ export function useSerialData() {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
         if (!mounted) return;
         const text = new TextDecoder().decode(new Uint8Array(event.data));
+        // Skip empty/whitespace lines if ignoreEmptyChars enabled
+        if (useAppStore.getState().opIgnoreEmptyChars && !text.trim()) return;
         appendTerminalLine(event.port_id, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           timestamp: event.timestamp,

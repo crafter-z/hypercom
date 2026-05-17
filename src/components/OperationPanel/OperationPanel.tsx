@@ -1,8 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSerialData, useSerialConnection } from '../../hooks/useTauri';
-import { serialService } from '../../services/tauri';
+import { serialService, logService } from '../../services/tauri';
 import type { DataBits, Parity, StopBits, Handshake, LineEnding } from '../../types';
+import { save } from '@tauri-apps/plugin-dialog';
+import { open } from '@tauri-apps/plugin-shell';
 import {
   Send, Cable, Eraser, Pin, Clock,
   FileText, FolderOpen, FileSearch, Settings,
@@ -189,6 +191,34 @@ const OperationPanel: React.FC = () => {
       }
       setOpState({ opIsLoopSending: true });
     }
+  };
+
+  const handleSaveLogAs = async () => {
+    if (!activeTabId) return;
+    try {
+      const filePath = await save({
+        title: '另存日志',
+        defaultPath: `${activeTabId}.log`,
+        filters: [{ name: '日志文件', extensions: ['log', 'txt'] }],
+      });
+      if (filePath) await logService.saveLogAs(activeTabId, filePath);
+    } catch (e) { console.error('Failed to save log:', e); }
+  };
+
+  const handleOpenLogFile = async () => {
+    if (!activeTabId) return;
+    try {
+      const files = await logService.getLogFiles();
+      const match = files.find(f => f.port_id === activeTabId || f.path.includes(activeTabId));
+      if (match) { await open(match.path); }
+    } catch (e) { console.error('Failed to open log file:', e); }
+  };
+
+  const handleOpenLogDir = async () => {
+    try {
+      const logDir = useAppStore.getState().config.logDirectory;
+      if (logDir) { await open(logDir); }
+    } catch (e) { console.error('Failed to open log dir:', e); }
   };
 
   return (
@@ -406,9 +436,9 @@ const OperationPanel: React.FC = () => {
             </div>
 
             <div className="op-btn-row">
-              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive}><FileText size={12} /> 另存为</button>
-              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive}><FolderOpen size={12} /> 打开文件</button>
-              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive}><FileSearch size={12} /> 目录</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive} onClick={handleSaveLogAs}><FileText size={12} /> 另存为</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive} onClick={handleOpenLogFile}><FolderOpen size={12} /> 打开文件</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} onClick={handleOpenLogDir}><FileSearch size={12} /> 目录</button>
             </div>
 
             <div className="divider-h" />

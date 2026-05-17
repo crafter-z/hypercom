@@ -85,7 +85,14 @@ export const serialService = {
   },
 
   setSerialParams: (portId: string, params: { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string }) => {
-    return invoke<void>('set_serial_params', { portId, baudRate: params.baudRate });
+    return invoke<void>('set_serial_params', { args: {
+      port_id: portId,
+      baud_rate: params.baudRate,
+      data_bits: params.dataBits,
+      parity: params.parity,
+      stop_bits: params.stopBits,
+      handshake: params.handshake,
+    }});
   },
 
   setFlowControl: (portId: string, dtr: boolean, rts: boolean) => {
