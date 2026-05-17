@@ -646,6 +646,7 @@ textarea.input {
   display: flex;
   align-items: center;
   gap: 2px;
+  margin-left: auto;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
