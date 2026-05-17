@@ -36,7 +36,7 @@ const SidebarResizeHandle: React.FC = () => {
 };
 
 const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const theme = useAppStore((s) => s.config.theme);
+  const { theme, terminalFontSize, terminalFont, uiFont, uiFontSize } = useAppStore((s) => s.config);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -52,6 +52,13 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
       root.setAttribute('data-theme', theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--font-size-terminal', `${terminalFontSize}px`);
+    document.documentElement.style.setProperty('--font-terminal', terminalFont);
+    document.documentElement.style.setProperty('--font-size-ui', `${uiFontSize}px`);
+    document.documentElement.style.setProperty('--font-ui', uiFont);
+  }, [terminalFontSize, terminalFont, uiFontSize, uiFont]);
 
   return <>{children}</>;
 };

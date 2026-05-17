@@ -59,7 +59,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     }
   }, [lines.length]);
 
-  // Detect manual scroll: scroll up = pause auto-follow, scroll to bottom = resume
+  // Ctrl+Scroll to adjust font size
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const store = useAppStore.getState();
+    const current = store.config.terminalFontSize;
+    const delta = e.deltaY > 0 ? -1 : 1;
+    const next = Math.max(8, Math.min(48, current + delta));
+    if (next !== current) {
+      document.documentElement.style.setProperty('--font-size-terminal', `${next}px`);
+      store.setConfig({ terminalFontSize: next });
+    }
+  }, []);
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const el = scrollRef.current;
@@ -135,6 +147,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
         className="terminal-view"
         onContextMenu={handleContextMenu}
         onScroll={handleScroll}
+        onWheel={handleWheel}
       >
         {lines.map((line) => {
           const displayText = terminal?.displayFormat === 'hex' && line.rawData
