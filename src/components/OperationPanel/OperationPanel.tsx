@@ -8,8 +8,7 @@ import { open } from '@tauri-apps/plugin-shell';
 import {
   Send, Cable, Eraser, Pin, Clock,
   FileText, FolderOpen, FileSearch, Settings,
-  ChevronDown, ChevronUp, Play, Square, Edit3,
-  ToggleLeft, ToggleRight
+  ChevronDown, ChevronUp, Play, Square, Edit3
 } from 'lucide-react';
 
 const OperationPanel: React.FC = () => {
@@ -189,10 +188,6 @@ const OperationPanel: React.FC = () => {
 
   const toggleCollapse = () => {
     setUIState({ isOperationPanelCollapsed: !collapsed });
-  };
-
-  const toggleDisplayFormat = () => {
-    setOpState({ opDisplayFormat: opDisplayFormat === 'hex' ? 'string' : 'hex' });
   };
 
   const handleToggleLoop = () => {
@@ -414,15 +409,6 @@ const OperationPanel: React.FC = () => {
                 />
                 <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>ms</span>
               </div>
-            </div>
-
-            <div className="op-btn-row" style={{ marginTop: 'auto' }}>
-              <button className="btn btn-sm" style={{ flex: 1 }} onClick={toggleDisplayFormat} title={opDisplayFormat === 'hex' ? '切换为文本显示' : '切换为HEX显示'}>
-                {opDisplayFormat === 'hex' ? <><ToggleRight size={12} /> 文本</> : <><ToggleLeft size={12} /> HEX</>}
-              </button>
-              <button className="btn btn-sm" style={{ flex: 1 }} disabled={!isPortActive} title="日志操作">
-                <FileText size={12} /> 日志
-              </button>
             </div>
           </div>
 
