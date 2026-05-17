@@ -4,7 +4,9 @@ import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle } from 'lucide-react';
 import { useSystemStatus } from '../../hooks/useTauri';
 
 const StatusBar: React.FC = () => {
-  const { systemStatus, trafficStats, activeTabId } = useAppStore();
+  const systemStatus = useAppStore((s) => s.systemStatus);
+  const trafficStats = useAppStore((s) => s.trafficStats);
+  const activeTabId = useAppStore((s) => s.activeTabId);
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
 
   useSystemStatus(5000);

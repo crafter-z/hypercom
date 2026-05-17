@@ -13,39 +13,37 @@ import {
 } from 'lucide-react';
 
 const OperationPanel: React.FC = () => {
-  const {
-    activeTabId,
-    ui,
-    opBaudRate,
-    opDataBits,
-    opParity,
-    opStopBits,
-    opHandshake,
-    opDtr,
-    opRts,
-    opIgnoreEmptyChars,
-    opScrollLocked,
-    opShowTimestamp,
-    opDisplayFormat,
-    opSendIsHex,
-    opSendAppendLineEnding,
-    opSendInput,
-    opIsLoopSending,
-    opLoopInterval,
-    sendCommandSets,
-    activeSendCommandSetId,
-    highlightRuleSets,
-    activeHighlightSetId,
-    setOpState,
-    setUIState,
-    clearTerminal,
-    config,
-    toggleConfigModal,
-    setConfigActiveTab,
-    setActiveSendCommandSetId,
-    setActiveHighlightSetId,
-    setTerminalConfig,
-  } = useAppStore();
+  const activeTabId = useAppStore((s) => s.activeTabId);
+  const collapsed = useAppStore((s) => s.ui.isOperationPanelCollapsed);
+  const opBaudRate = useAppStore((s) => s.opBaudRate);
+  const opDataBits = useAppStore((s) => s.opDataBits);
+  const opParity = useAppStore((s) => s.opParity);
+  const opStopBits = useAppStore((s) => s.opStopBits);
+  const opHandshake = useAppStore((s) => s.opHandshake);
+  const opDtr = useAppStore((s) => s.opDtr);
+  const opRts = useAppStore((s) => s.opRts);
+  const opIgnoreEmptyChars = useAppStore((s) => s.opIgnoreEmptyChars);
+  const opScrollLocked = useAppStore((s) => s.opScrollLocked);
+  const opShowTimestamp = useAppStore((s) => s.opShowTimestamp);
+  const opDisplayFormat = useAppStore((s) => s.opDisplayFormat);
+  const opSendIsHex = useAppStore((s) => s.opSendIsHex);
+  const opSendAppendLineEnding = useAppStore((s) => s.opSendAppendLineEnding);
+  const opSendInput = useAppStore((s) => s.opSendInput);
+  const opIsLoopSending = useAppStore((s) => s.opIsLoopSending);
+  const opLoopInterval = useAppStore((s) => s.opLoopInterval);
+  const sendCommandSets = useAppStore((s) => s.sendCommandSets);
+  const activeSendCommandSetId = useAppStore((s) => s.activeSendCommandSetId);
+  const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
+  const activeHighlightSetId = useAppStore((s) => s.activeHighlightSetId);
+  const config = useAppStore((s) => s.config);
+  const setOpState = useAppStore((s) => s.setOpState);
+  const setUIState = useAppStore((s) => s.setUIState);
+  const clearTerminal = useAppStore((s) => s.clearTerminal);
+  const toggleConfigModal = useAppStore((s) => s.toggleConfigModal);
+  const setConfigActiveTab = useAppStore((s) => s.setConfigActiveTab);
+  const setActiveSendCommandSetId = useAppStore((s) => s.setActiveSendCommandSetId);
+  const setActiveHighlightSetId = useAppStore((s) => s.setActiveHighlightSetId);
+  const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
 
   const { sendData } = useSerialData();
   const { toggleConnection } = useSerialConnection();
@@ -54,7 +52,6 @@ const OperationPanel: React.FC = () => {
   const isConnected = activePort?.status === 'connected';
 
   const isPortActive = !!activeTabId;
-  const collapsed = ui.isOperationPanelCollapsed;
 
   const prevParamsRef = useRef(`${opBaudRate}-${opDataBits}-${opParity}-${opStopBits}-${opHandshake}-${opDtr}-${opRts}`);
   const loopRef = useRef<{ timeoutId: ReturnType<typeof setTimeout> | null; currentCmdIdx: number; stopped: boolean }>({

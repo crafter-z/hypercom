@@ -307,15 +307,13 @@ const AliasDialog: React.FC<{ portId: string; currentAlias: string; onSave: (ali
 };
 
 const Sidebar: React.FC = () => {
-  const {
-    ports,
-    groups,
-    openTab,
-    updatePort,
-    updateGroup,
-    addGroup,
-    reorderPorts,
-  } = useAppStore();
+  const ports = useAppStore((s) => s.ports);
+  const groups = useAppStore((s) => s.groups);
+  const openTab = useAppStore((s) => s.openTab);
+  const updatePort = useAppStore((s) => s.updatePort);
+  const updateGroup = useAppStore((s) => s.updateGroup);
+  const addGroup = useAppStore((s) => s.addGroup);
+  const reorderPorts = useAppStore((s) => s.reorderPorts);
 
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();

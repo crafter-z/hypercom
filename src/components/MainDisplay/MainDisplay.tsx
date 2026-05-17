@@ -15,19 +15,17 @@ interface PaneProps {
 }
 
 const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
-  const {
-    tabs,
-    activeTabId,
-    terminals,
-    panes,
-    setActiveTab,
-    closeTab,
-    pinTab,
-    closeTabsToRight,
-    closeTabsToLeft,
-    closeOtherTabs,
-    moveTabToPane,
-  } = useAppStore();
+  const tabs = useAppStore((s) => s.tabs);
+  const activeTabId = useAppStore((s) => s.activeTabId);
+  const terminals = useAppStore((s) => s.terminals);
+  const panes = useAppStore((s) => s.panes);
+  const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const closeTab = useAppStore((s) => s.closeTab);
+  const pinTab = useAppStore((s) => s.pinTab);
+  const closeTabsToRight = useAppStore((s) => s.closeTabsToRight);
+  const closeTabsToLeft = useAppStore((s) => s.closeTabsToLeft);
+  const closeOtherTabs = useAppStore((s) => s.closeOtherTabs);
+  const moveTabToPane = useAppStore((s) => s.moveTabToPane);
 
   const paneTabs = tabs.filter(t => tabIds.includes(t.id));
   const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);

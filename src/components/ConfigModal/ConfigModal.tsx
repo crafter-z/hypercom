@@ -25,7 +25,8 @@ const navItems: NavItem[] = [
 ];
 
 const GeneralSettings: React.FC = () => {
-  const { config, setConfig } = useAppStore();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
 
   return (
     <div className="config-page">
@@ -122,7 +123,8 @@ const GeneralSettings: React.FC = () => {
 };
 
 const LogSettings: React.FC = () => {
-  const { config, setConfig } = useAppStore();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
 
   return (
     <div className="config-page">
@@ -181,7 +183,8 @@ const LogSettings: React.FC = () => {
 };
 
 const BackupSettings: React.FC = () => {
-  const { config, setConfig } = useAppStore();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
 
   return (
     <div className="config-page">
@@ -213,7 +216,8 @@ const BackupSettings: React.FC = () => {
 };
 
 const DisplaySettings: React.FC = () => {
-  const { config, setConfig } = useAppStore();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
 
   return (
     <div className="config-page">
@@ -260,7 +264,10 @@ const DisplaySettings: React.FC = () => {
 };
 
 const HighlightSettings: React.FC = () => {
-  const { highlightRuleSets, addHighlightRuleSet, updateHighlightRuleSet, removeHighlightRuleSet } = useAppStore();
+  const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
+  const addHighlightRuleSet = useAppStore((s) => s.addHighlightRuleSet);
+  const updateHighlightRuleSet = useAppStore((s) => s.updateHighlightRuleSet);
+  const removeHighlightRuleSet = useAppStore((s) => s.removeHighlightRuleSet);
   const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -431,7 +438,10 @@ const HighlightSettings: React.FC = () => {
 };
 
 const CommandSettings: React.FC = () => {
-  const { sendCommandSets, addSendCommandSet, updateSendCommandSet, removeSendCommandSet } = useAppStore();
+  const sendCommandSets = useAppStore((s) => s.sendCommandSets);
+  const addSendCommandSet = useAppStore((s) => s.addSendCommandSet);
+  const updateSendCommandSet = useAppStore((s) => s.updateSendCommandSet);
+  const removeSendCommandSet = useAppStore((s) => s.removeSendCommandSet);
   const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -609,9 +619,11 @@ const CommandSettings: React.FC = () => {
 };
 
 const ConfigModal: React.FC = () => {
-  const { ui, toggleConfigModal, setConfigActiveTab } = useAppStore();
+  const isConfigOpen = useAppStore((s) => s.ui.isConfigOpen);
+  const configActiveTab = useAppStore((s) => s.ui.configActiveTab);
+  const toggleConfigModal = useAppStore((s) => s.toggleConfigModal);
+  const setConfigActiveTab = useAppStore((s) => s.setConfigActiveTab);
   const { saveConfig } = useConfigPersistence();
-  const { isConfigOpen, configActiveTab } = ui;
 
   if (!isConfigOpen) return null;
 
