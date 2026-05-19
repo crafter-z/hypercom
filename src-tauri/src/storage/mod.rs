@@ -466,3 +466,243 @@ pub async fn delete_highlight_set_from_db(pool: &Pool<Sqlite>, set_id: &str) -> 
     sqlx::query("DELETE FROM highlight_rule_sets WHERE id = ?").bind(set_id).execute(pool).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup_test_db() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_schema_on_pool(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_init_schema_creates_tables() {
+        let pool = setup_test_db().await;
+        // Verify tables exist by querying sqlite_master
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(tables.contains(&"port_groups".to_string()));
+        assert!(tables.contains(&"port_group_members".to_string()));
+        assert!(tables.contains(&"send_command_sets".to_string()));
+        assert!(tables.contains(&"send_commands".to_string()));
+        assert!(tables.contains(&"highlight_rule_sets".to_string()));
+        assert!(tables.contains(&"highlight_rules".to_string()));
+        assert_eq!(tables.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_command_set() {
+        let pool = setup_test_db().await;
+        let set = SendCommandSet {
+            id: "set-1".into(),
+            name: "AT Commands".into(),
+            is_loop: true,
+            loop_delay_ms: 1000,
+            commands: vec![
+                SendCommandRow {
+                    id: "cmd-1".into(),
+                    set_id: "set-1".into(),
+                    name: "Ping".into(),
+                    order_idx: 0,
+                    delay_ms: 100,
+                    cmd_type: "string".into(),
+                    content: "AT+PING".into(),
+                    append_line_ending: "\\r\\n".into(),
+                },
+                SendCommandRow {
+                    id: "cmd-2".into(),
+                    set_id: "set-1".into(),
+                    name: "Status".into(),
+                    order_idx: 1,
+                    delay_ms: 200,
+                    cmd_type: "string".into(),
+                    content: "AT+STATUS".into(),
+                    append_line_ending: "\\r\\n".into(),
+                },
+            ],
+        };
+
+        save_command_set_to_db(&pool, &set).await.unwrap();
+        let loaded = load_command_sets_from_db(&pool).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "AT Commands");
+        assert_eq!(loaded[0].is_loop, true);
+        assert_eq!(loaded[0].loop_delay_ms, 1000);
+        assert_eq!(loaded[0].commands.len(), 2);
+        assert_eq!(loaded[0].commands[0].name, "Ping");
+        assert_eq!(loaded[0].commands[0].content, "AT+PING");
+        assert_eq!(loaded[0].commands[1].content, "AT+STATUS");
+    }
+
+    #[tokio::test]
+    async fn test_delete_command_set_cascade() {
+        let pool = setup_test_db().await;
+        let set = SendCommandSet {
+            id: "to-delete".into(),
+            name: "Test".into(),
+            is_loop: false,
+            loop_delay_ms: 500,
+            commands: vec![SendCommandRow {
+                id: "cmd-x".into(),
+                set_id: "to-delete".into(),
+                name: "TestCmd".into(),
+                order_idx: 0,
+                delay_ms: 0,
+                cmd_type: "string".into(),
+                content: "test".into(),
+                append_line_ending: "None".into(),
+            }],
+        };
+        save_command_set_to_db(&pool, &set).await.unwrap();
+        assert_eq!(load_command_sets_from_db(&pool).await.unwrap().len(), 1);
+
+        delete_command_set_from_db(&pool, "to-delete").await.unwrap();
+        assert!(load_command_sets_from_db(&pool).await.unwrap().is_empty());
+
+        // Verify commands are also deleted
+        let cmd_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM send_commands")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cmd_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_highlight_set() {
+        let pool = setup_test_db().await;
+        let set = HighlightRuleSet {
+            id: "hl-1".into(),
+            name: "Errors".into(),
+            is_enabled: true,
+            rules: vec![
+                HighlightRuleRow {
+                    id: "r-1".into(),
+                    set_id: "hl-1".into(),
+                    name: "ERROR".into(),
+                    pattern: "error".into(),
+                    is_regex: false,
+                    color: "#ff0000".into(),
+                    bold: true,
+                    italic: false,
+                },
+                HighlightRuleRow {
+                    id: "r-2".into(),
+                    set_id: "hl-1".into(),
+                    name: "WARN".into(),
+                    pattern: "warn\\s+\\d+".into(),
+                    is_regex: true,
+                    color: "#ffaa00".into(),
+                    bold: false,
+                    italic: true,
+                },
+            ],
+        };
+
+        save_highlight_set_to_db(&pool, &set).await.unwrap();
+        let loaded = load_highlight_sets_from_db(&pool).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Errors");
+        assert!(loaded[0].is_enabled);
+        assert_eq!(loaded[0].rules.len(), 2);
+        assert_eq!(loaded[0].rules[0].pattern, "error");
+        assert!(loaded[0].rules[0].bold);
+        assert!(loaded[0].rules[1].is_regex);
+        assert_eq!(loaded[0].rules[1].color, "#ffaa00");
+    }
+
+    #[tokio::test]
+    async fn test_delete_highlight_set_cascade() {
+        let pool = setup_test_db().await;
+        let set = HighlightRuleSet {
+            id: "hl-del".into(),
+            name: "ToDelete".into(),
+            is_enabled: false,
+            rules: vec![HighlightRuleRow {
+                id: "r-x".into(),
+                set_id: "hl-del".into(),
+                name: "X".into(),
+                pattern: "x".into(),
+                is_regex: false,
+                color: "".into(),
+                bold: false,
+                italic: false,
+            }],
+        };
+        save_highlight_set_to_db(&pool, &set).await.unwrap();
+        delete_highlight_set_from_db(&pool, "hl-del").await.unwrap();
+        assert!(load_highlight_sets_from_db(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_command_set_replaces_commands() {
+        let pool = setup_test_db().await;
+        let mut set = SendCommandSet {
+            id: "update-test".into(),
+            name: "V1".into(),
+            is_loop: false,
+            loop_delay_ms: 0,
+            commands: vec![SendCommandRow {
+                id: "old".into(),
+                set_id: "update-test".into(),
+                name: "OldCmd".into(),
+                order_idx: 0,
+                delay_ms: 0,
+                cmd_type: "string".into(),
+                content: "old".into(),
+                append_line_ending: "None".into(),
+            }],
+        };
+        save_command_set_to_db(&pool, &set).await.unwrap();
+
+        // Update with new commands
+        set.name = "V2".into();
+        set.commands = vec![
+            SendCommandRow {
+                id: "new-1".into(),
+                set_id: "update-test".into(),
+                name: "NewCmd1".into(),
+                order_idx: 0,
+                delay_ms: 10,
+                cmd_type: "hex".into(),
+                content: "AABB".into(),
+                append_line_ending: "None".into(),
+            },
+            SendCommandRow {
+                id: "new-2".into(),
+                set_id: "update-test".into(),
+                name: "NewCmd2".into(),
+                order_idx: 1,
+                delay_ms: 20,
+                cmd_type: "string".into(),
+                content: "hello".into(),
+                append_line_ending: "\\n".into(),
+            },
+        ];
+        save_command_set_to_db(&pool, &set).await.unwrap();
+
+        let loaded = load_command_sets_from_db(&pool).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "V2");
+        assert_eq!(loaded[0].commands.len(), 2);
+        assert_eq!(loaded[0].commands[0].content, "AABB");
+        assert_eq!(loaded[0].commands[0].cmd_type, "hex");
+        assert_eq!(loaded[0].commands[1].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_empty_load_returns_empty_vec() {
+        let pool = setup_test_db().await;
+        assert!(load_command_sets_from_db(&pool).await.unwrap().is_empty());
+        assert!(load_highlight_sets_from_db(&pool).await.unwrap().is_empty());
+    }
+}

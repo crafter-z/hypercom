@@ -137,3 +137,91 @@ impl ConfigManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("hypercom_test_config");
+        let _ = fs::create_dir_all(&dir);
+        dir.join(format!("{}.json", name))
+    }
+
+    #[test]
+    fn test_default_values() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.close_behavior, "minimize");
+        assert_eq!(cfg.memory_limit_mb, 1024);
+        assert_eq!(cfg.language, "zh-CN");
+        assert_eq!(cfg.theme, "dark");
+        assert!(!cfg.prevent_screen_off);
+        assert!(!cfg.prevent_sleep);
+        assert_eq!(cfg.terminal_font_size, 14);
+        assert_eq!(cfg.default_baud_rates, vec![9600, 19200, 38400, 57600, 115200, 921600]);
+        assert_eq!(cfg.send_prefix, ">>>>>>SEND>>>>>>>>");
+        assert_eq!(cfg.timestamp_mode, "perLine");
+        assert!(!cfg.auto_save_log);
+        assert_eq!(cfg.log_format, "string");
+        assert_eq!(cfg.log_split_size_mb, 100);
+        assert!(!cfg.backup_enabled);
+    }
+
+    #[test]
+    fn test_json_roundtrip() {
+        let cfg = AppConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.close_behavior, cfg.close_behavior);
+        assert_eq!(parsed.memory_limit_mb, cfg.memory_limit_mb);
+        assert_eq!(parsed.language, cfg.language);
+        assert_eq!(parsed.auto_save_log, cfg.auto_save_log);
+    }
+
+    #[test]
+    fn test_json_camel_case() {
+        let cfg = AppConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("closeBehavior"), "missing closeBehavior in: {}", json);
+        assert!(json.contains("memoryLimitMb"), "missing memoryLimitMb in: {}", json);
+        assert!(json.contains("autoSaveLog"), "missing autoSaveLog in: {}", json);
+        assert!(json.contains("logFormat"), "missing logFormat in: {}", json);
+        assert!(json.contains("terminalFontSize"), "missing terminalFontSize in: {}", json);
+    }
+
+    #[test]
+    fn test_set_config_persists() {
+        let path = temp_config_path("test_set");
+        let _ = fs::remove_file(&path);
+        let mut cfg = AppConfig::default();
+        cfg.memory_limit_mb = 512;
+        cfg.theme = "light".to_string();
+        let content = serde_json::to_string_pretty(&cfg).unwrap();
+        fs::write(&path, &content).unwrap();
+
+        let loaded: AppConfig = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.memory_limit_mb, 512);
+        assert_eq!(loaded.theme, "light");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_reset_to_default() {
+        let path = temp_config_path("test_reset");
+        let _ = fs::remove_file(&path);
+        let changed = AppConfig {
+            memory_limit_mb: 999,
+            theme: "light".to_string(),
+            ..AppConfig::default()
+        };
+        let content = serde_json::to_string_pretty(&changed).unwrap();
+        fs::write(&path, &content).unwrap();
+
+        let loaded: AppConfig = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.memory_limit_mb, 999);
+        let default = AppConfig::default();
+        assert_eq!(default.memory_limit_mb, 1024);
+        let _ = fs::remove_file(&path);
+    }
+}

@@ -216,3 +216,137 @@ impl LogManager {
         Ok(files)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hypercom_test_logs_{}", name));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn test_manager(dir: &PathBuf) -> LogManager {
+        LogManager {
+            log_directory: dir.clone(),
+            writers: HashMap::new(),
+            auto_save: false,
+            split_size_mb: 100,
+            filename_format: "[com]-[datetime]".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_create_writer() {
+        let dir = test_dir("create");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM3", "string").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].path.contains("COM3"));
+        assert!(files[0].path.ends_with(".log"));
+        mgr.close_writer("COM3").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_string_format() {
+        let dir = test_dir("string");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:00", "RX", b"Hello").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("Hello"));
+        assert!(content.contains("10:00:00"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_hex_format() {
+        let dir = test_dir("hex");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "hex").unwrap();
+        mgr.write("COM1", "10:00:01", "TX", &[0x48, 0x65, 0x6C, 0x6C, 0x6F]).unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("48 65 6C 6C 6F"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_should_split() {
+        let dir = test_dir("split");
+        let file_path = dir.join("split_test.log");
+        let file = OpenOptions::new().create(true).append(true).open(&file_path).unwrap();
+        let mut writer = PortLogWriter {
+            port_id: "test".into(),
+            file_path: file_path.clone(),
+            writer: BufWriter::new(file),
+            current_size: 0,
+            format: "string".into(),
+        };
+        assert!(!writer.should_split(1));
+        writer.current_size = 1024 * 1024;
+        assert!(writer.should_split(1));
+        writer.current_size = 2 * 1024 * 1024;
+        assert!(writer.should_split(1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_filename_format_variables() {
+        let dir = test_dir("fmt");
+        let mut mgr = test_manager(&dir);
+        mgr.set_filename_format("[com]-[date]");
+        mgr.create_writer("COM5", "string").unwrap();
+        let files = mgr.list_files().unwrap();
+        let name = &files[0].path;
+        assert!(name.contains("COM5"), "Expected COM5 in: {}", name);
+        let date_part = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert!(name.contains(&date_part), "Expected {} in: {}", date_part, name);
+        mgr.close_writer("COM5").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_log_as() {
+        let dir = test_dir("save");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM9", "string").unwrap();
+        mgr.write("COM9", "10:00:00", "RX", b"test data").unwrap();
+        let _files = mgr.list_files().unwrap();
+        let target = dir.join("saved.log");
+        mgr.save_log_as("COM9", &target.to_string_lossy()).unwrap();
+        assert!(target.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_log_as_no_writer() {
+        let dir = test_dir("nowriter");
+        let mgr = test_manager(&dir);
+        let result = mgr.save_log_as("NONEXIST", "/tmp/test.log");
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_accumulates_to_file() {
+        let dir = test_dir("accum");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00", "RX", b"line1\n").unwrap();
+        mgr.write("COM1", "10:01", "RX", b"line2\n").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("line1"));
+        assert!(content.contains("line2"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
