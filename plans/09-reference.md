@@ -4,10 +4,11 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `src/types/index.ts` | 256 | 全局类型定义 |
-| `src/stores/useAppStore.ts` | 580 | Zustand 状态管理 |
-| `src/services/tauri.ts` | 285 | invoke 包装器 |
-| `src/hooks/useTauri.ts` | 328 | React Hooks 桥接 |
+| `src/types/index.ts` | 257 | 全局类型定义 |
+| `src/stores/useAppStore.ts` | 608 | Zustand 状态管理 (55+ Actions) |
+| `src/stores/useAppStore.test.ts` | 167 | useAppStore 单元测试（15 cases，vitest） |
+| `src/services/tauri.ts` | 290+ | invoke 包装器 |
+| `src/hooks/useTauri.ts` | 360+ | React Hooks 桥接 |
 | `src/utils/highlightEngine.ts` | 96 | 语法高亮引擎 |
 | `src/styles.css` | 1427 | 全局样式 |
 | `src/App.tsx` | 110 | 根组件 + 布局 |
@@ -16,16 +17,16 @@
 | `src/components/Sidebar/Sidebar.tsx` | 435 | 侧边栏 + 拖拽 |
 | `src/components/MainDisplay/MainDisplay.tsx` | 226 | 分屏容器 |
 | `src/components/MainDisplay/TabBar.tsx` | 177 | 标签栏 + 拖拽 |
-| `src/components/MainDisplay/TerminalView.tsx` | 136 | 终端视图 + 高亮 |
+| `src/components/MainDisplay/TerminalView.tsx` | 232 | 终端视图 + 虚拟滚动 + 高亮 + 文件导出 |
 | `src/components/OperationPanel/OperationPanel.tsx` | 410 | 操作面板 + 循环发送 |
 | `src/components/StatusBar/StatusBar.tsx` | 64 | 状态栏 |
 | `src/components/ConfigModal/ConfigModal.tsx` | 450 | 配置弹窗 + 规则编辑器 |
 | `src-tauri/src/main.rs` | 6 | 程序入口 |
-| `src-tauri/src/lib.rs` | 96 | 状态定义 + 命令注册 + setup |
-| `src-tauri/src/commands/mod.rs` | 370 | 22 个 Tauri 命令 |
+| `src-tauri/src/lib.rs` | 143 | 状态定义（含 sysinfo 缓存）+ 32 命令注册 + setup |
+| `src-tauri/src/commands/mod.rs` | 400+ | 32 个 Tauri 命令 |
 | `src-tauri/src/serial/mod.rs` | 450 | 串口管理器 |
 | `src-tauri/src/config/mod.rs` | 139 | 配置管理 |
-| `src-tauri/src/logger/mod.rs` | 184 | 日志管理 |
+| `src-tauri/src/logger/mod.rs` | 350+ | 日志管理（含分片续写、多编码、auto_save 短路） |
 | `src-tauri/src/storage/mod.rs` | 530 | SQLite CRUD |
 
 ## 前端依赖
@@ -39,11 +40,13 @@
 | @dnd-kit/core | ^6.3.1 | 拖拽核心 |
 | @dnd-kit/sortable | ^10.0.0 | 可排序列表 |
 | @dnd-kit/utilities | ^3.2.2 | 拖拽工具 |
+| @tanstack/react-virtual | ^3.13.15 | 终端虚拟滚动 |
 | @tauri-apps/api | ^2.0.0 | Tauri 前端 API |
 | @tauri-apps/plugin-dialog | ^2.7.1 | 文件对话框 |
 | @tauri-apps/plugin-shell | ^2.0.0 | Shell/打开外部 |
 | typescript | ^5.6.3 | 类型检查 |
 | vite | ^5.4.10 | 构建工具 |
+| vitest | ^4.x | 单元测试（devDep，environment: 'node'） |
 
 ## 后端依赖
 
@@ -96,6 +99,9 @@ scope: ui / backend / store / hooks / plans
 npm run tauri dev          # 开发模式运行
 npm run tauri build        # 生产构建
 npx tsc --noEmit           # TypeScript 类型检查
+npm run test               # vitest 监听模式
+npm run test:run           # vitest 一次跑
 cargo build                # Rust 编译 (在 src-tauri/ 下)
 cargo check                # Rust 快速检查 (不生成二进制)
+cargo test --lib           # Rust 单元测试
 ```

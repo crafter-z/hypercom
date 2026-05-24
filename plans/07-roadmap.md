@@ -2,14 +2,8 @@
 
 ## 🔴 高优先级
 
-### 日志功能完善 (`logger/mod.rs`)
-- 自动分片：`should_split()` 检测超限后关闭当前文件并创建新文件续写
-- 文件名变量解析：替换 `[com]` → 端口号, `[datetime]` → YYYYMMDD_HHMMSS
-- 自动保存开关：根据 `config.auto_save_log` 决定收到数据时是否写入
-
 ### HEX 发送格式解析 (`serial/mod.rs`)
-- 前端选中 HEX 发送时，后端 `send_data` 应解析 `48 65 6C 6C 6F` → `[0x48, 0x65, 0x6C, 0x6C, 0x6F]` 字节数组再写入
-- 当前是直接 `data.as_bytes().to_vec()`
+- ✅ 已实现（`parse_hex_string` 公共函数；TX 日志按实际写入字节记录）
 
 ### 标题栏窗口控制 (`TitleBar.tsx`)
 - 最小化：调用 Tauri API `appWindow.minimize()`
@@ -41,10 +35,6 @@
 
 ## 🟢 低优先级
 
-### 虚拟滚动
-- 终端数据量较大时 (万行级)，全部渲染 DOM 节点会导致卡顿
-- 方案：`react-window` 或 `@tanstack/react-virtual`
-
 ### 协议解析器
 - 后端定义协议模板 (帧头/长度/校验/帧尾)，自动解析并高亮各字段
 - 前端提供协议模板编辑器
@@ -53,10 +43,6 @@
 - 引入 `i18next` + `react-i18next`
 - 创建 `zh-CN.json` / `en-US.json`
 - 所有组件文本替换为 `t('key')`
-
-### 数据导出
-- `export_data` 命令：将终端内容导出为 TXT/CSV/JSON
-- 文件保存对话框选择路径
 
 ### 字体缩放
 - 终端字体大小绑定 `--font-size-terminal` CSS 变量
@@ -67,3 +53,12 @@
 
 ### 侧边栏 mock 分组清理
 - `Sidebar.tsx` 初始化时创建 mock 分组 (COM3/COM4/...)，应改为仅在有真实端口时可选分组
+
+## ✅ 已完成（移出待办列表）
+
+- **虚拟滚动** — commit `e0ec7ce`（`@tanstack/react-virtual` 替换 naive `lines.map`）
+- **数据导出** — commit `4f1693e`（`save()` 文件对话框 + 新 Rust 命令 `export_terminal_log` 写盘，替代剪贴板方案）
+- **日志功能完善** — 已实现自动分片、文件名变量解析、auto_save 短路
+- **HEX 发送格式解析** — `parse_hex_string` 公共函数已就位
+- **日志操作按钮** — 另存为/打开文件/打开目录全实现
+- **前端测试基线** — commit `35169aa`（vitest 4.x + 15 个 useAppStore 单测）

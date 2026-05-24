@@ -14,7 +14,7 @@ pub struct AppState {
 
 所有 Manager 用 `std::sync::Mutex` 包装。`setup` 钩子中设置 AppHandle 给 SerialManager，异步初始化数据库。
 
-## 命令层 (22 个命令)
+## 命令层 (32 个命令)
 
 ### 串口命令 (6)
 
@@ -23,8 +23,8 @@ pub struct AppState {
 | `list_available_ports` | — | `Vec<PortInfo>` | 枚举系统串口 + SIM:Loopback(如启用) |
 | `open_serial_port` | `OpenPortArgs` (port_id, baud_rate, data_bits, parity, stop_bits, handshake, dtr, rts) | `()` | 打开串口，自动判断真实/模拟 |
 | `close_serial_port` | `port_id: String` | `()` | 关闭串口，清理读线程 |
-| `send_serial_data` | `SendDataArgs` (port_id, data, is_hex, append_line_ending) | `usize` | 发送数据，返回写入字节数 |
-| `set_serial_params` | `port_id: String, baud_rate: u32` | `()` | 仅支持改波特率 |
+| `send_serial_data` | `SendDataArgs` (port_id, data, is_hex, append_line_ending) | `usize` | 发送数据；HEX 模式经 `parse_hex_string` 解析后写入；返回写入字节数 |
+| `set_serial_params` | `SetSerialParamsArgs` (port_id, baud_rate, data_bits, parity, stop_bits, handshake) | `()` | 完整在线参数修改（注：当前后端仍仅消费 baud_rate，其余字段为占位） |
 | `set_flow_control` | `port_id: String, dtr: bool, rts: bool` | `()` | 设置 DTR/RTS |
 
 ### 模拟模式命令 (2)
@@ -38,19 +38,26 @@ pub struct AppState {
 | `set_config` | `new_config: AppConfig` | `()` | 写入 JSON 文件 |
 | `reset_config` | — | `AppConfig` | 恢复默认值 |
 
-### 日志命令 (5)
+### 日志命令 (12)
 
-| `start_logging` | `port_id: String` | `()` | 为端口创建日志写入器 |
-| `stop_logging` | `port_id: String` | `()` | 关闭写入器 |
-| `save_log_as` | `port_id: String, path: String` | `()` | 拷贝日志到指定路径 |
+| `start_logging` | `port_id: String, format: String` | `()` | 为端口创建日志写入器（按 config.log_format） |
+| `stop_logging` | `port_id: String` | `()` | 关闭写入器并 `sync_all` 落盘 |
+| `save_log_as` | `port_id: String, path: String` | `()` | 拷贝活跃日志到指定路径（需要 dialog:allow-save 权限） |
+| `export_terminal_log` | `path: String, content: String` | `()` | 通用文件写入：`std::fs::write`，被终端右键导出 TXT/CSV 调用 |
 | `set_log_directory` | `path: String` | `()` | 修改日志根目录 |
-| `get_log_files` | — | `Vec<LogFileInfo>` | 列出所有日志文件 |
+| `set_log_filename_format` | `format: String` | `()` | 文件名模板 (`[com]/[datetime]/[date]/[time]`) |
+| `set_log_split_size` | `size_mb: u64` | `()` | 单文件分片大小阈值 |
+| `set_log_auto_save` | `enabled: bool` | `()` | auto_save 开关；`write()` 首行短路 |
+| `set_log_encoding` | `encoding: String` | `()` | 默认编码 (UTF-8/GBK/ISO-8859-1/ASCII) |
+| `get_log_files` | — | `Vec<LogFileInfo>` | 列出所有日志文件，port_id 优先用 writer 反向索引 |
+| `open_path` | `path: String, state: State<AppState>` | `()` | 用 OS 打开文件，路径必须 canonicalize 后位于 LogManager.get_directory() 子树内 |
+| `open_log_directory` | — | `()` | 打开日志根目录 |
 
 ### 系统命令 (3) + 存储命令 (6)
 
-| `get_system_status` | — | `SystemStatus` | 进程 CPU/内存 (sysinfo) |
-| `prevent_screen_off` | `enable: bool` | `()` | 占位 (日志记录) |
-| `prevent_sleep` | `enable: bool` | `()` | 占位 (日志记录) |
+| `get_system_status` | — | `SystemStatus` | 进程 CPU/内存（sysinfo 增量刷新；setup 已预热 250ms） |
+| `prevent_screen_off` | `enable: bool` | `()` | Win32 SetThreadExecutionState 实现（其他平台占位日志） |
+| `prevent_sleep` | `enable: bool` | `()` | 同上 |
 | `save_command_set` | `SaveCommandSetArgs` | `String` (id) | 保存命令集到 SQLite |
 | `load_command_sets` | — | `Vec<CommandSetInfo>` | 加载全部命令集 |
 | `delete_command_set` | `set_id: String` | `()` | 删除命令集及子命令 |

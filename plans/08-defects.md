@@ -2,6 +2,31 @@
 
 > 仅记录当前存在的未修复缺陷。已修复项移入变更历史。
 
+## 已修复 (2026-05-24 批次二：虚拟滚动 / 导出 / 测试基线)
+
+### 功能落地
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `e0ec7ce` | `feat(ui)` | 终端虚拟滚动：`@tanstack/react-virtual@^3.13.15` 替换 naive `{lines.map}` 渲染。DOM 节点从 O(N) 降到 ~30–50（视口 + overscan 12）。保留智能跟随、scrollLocked 同步、HEX 模式、语法高亮、Ctrl+滚轮缩放、右键导出（直接读 store）。已注释说明：全选/复制仅覆盖视口可见行，完整导出走右键菜单。 |
+| `4f1693e` | `feat(export)` | 终端导出从剪贴板改为真实文件保存对话框：新增 Rust 命令 `export_terminal_log(path, content)`（`std::fs::write`），前端 `logService.exportTerminalLog` + `@tauri-apps/plugin-dialog` `save()`。默认文件名 `<portId>-YYYYMMDD-HHMMSS.{txt,csv}`，取消静默返回，写入失败 `console.error`。复制/复制为 HEX/HEX 转文本仍走剪贴板。 |
+| `35169aa` | `test(store)` | 前端测试基线：vitest 4.x（`environment: 'node'`，无 jsdom 依赖）。`src/stores/useAppStore.test.ts` 共 15 个测试覆盖 Port & Group（2）、Tabs & Panes（7）、Terminal lines（3）、Misc（3）。`npm run test:run` 156ms 通过。 |
+
+### 顺手修的隐藏缺陷
+
+| # | 文件 | 问题 | 修复 |
+|---|------|------|------|
+| 57 | `src-tauri/capabilities/default.json` | OperationPanel.tsx:217 已经调用 `save()`，但 capabilities 仅声明 `dialog:allow-open`，缺 `dialog:allow-save`。dev 模式可能通过（开发权限放宽），production build 必被 ACL 拦截。 | 新增 `dialog:allow-save` 权限项。Tauri 自动 regen `src-tauri/gen/schemas/capabilities.json`。 |
+
+### 验证
+
+- `npm run test:run`：15/15 passing（156ms）
+- `npx tsc --noEmit`：0 errors
+- `npm run build`：✅ ~1.36s, 323KB（gzip 98.4KB）
+- `cargo check`：0 errors, 0 warnings
+- `ast-grep "$X as any"` in `src/`：0 matches
+- `ast-grep "useAppStore()"` (无选择器调用)：0 matches
+
 ## 未修复
 
 ### P2 — 待优化

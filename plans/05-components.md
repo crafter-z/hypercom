@@ -86,7 +86,7 @@ TabItem          { id, title, isPinned, isActive, splitPaneId }
 SplitPane        { id, direction, tabIds[], size }
 
 // 终端
-TerminalLine     { id, timestamp, direction, content, displayContent?, isHex }
+TerminalLine     { id, timestamp, direction, content, displayContent?, rawData?, isHex }
 TerminalState    { lines[], maxLines, scrollLocked, showTimestamp, displayFormat, encoding }
 
 // 高亮
