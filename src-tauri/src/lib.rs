@@ -71,6 +71,8 @@ pub fn run() {
             commands::stop_logging,
             commands::set_log_split_size,
             commands::set_log_filename_format,
+            commands::set_log_auto_save,
+            commands::set_log_encoding,
             commands::open_path,
             commands::open_log_directory,
             // ===== 系统相关命令 =====
@@ -94,6 +96,23 @@ pub fn run() {
             serial_mgr.set_app_handle(app_handle.clone());
             drop(serial_mgr);
             drop(state);
+
+            // 预热 sysinfo CPU 采样：first refresh_cpu_all 没有基线会返回 0，
+            // 等待 MINIMUM_CPU_UPDATE_INTERVAL (~200ms) 后再次刷新建立基线
+            // (defects #50). 阻塞 main 仅 ~250ms 在 setup 里可接受。
+            {
+                let state = _app.state::<AppState>();
+                let mut sys = state.system_info.lock().unwrap();
+                sys.refresh_cpu_all();
+                drop(sys);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            {
+                let state = _app.state::<AppState>();
+                let mut sys = state.system_info.lock().unwrap();
+                sys.refresh_cpu_all();
+                drop(sys);
+            }
 
             // 异步初始化数据库（不持有 MutexGuard 跨 await）
             let app_handle2 = app_handle.clone();

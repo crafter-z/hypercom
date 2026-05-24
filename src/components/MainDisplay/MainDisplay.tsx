@@ -1,6 +1,7 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { serialService } from '../../services/tauri';
+import type { Encoding } from '../../types';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
 import {
@@ -107,7 +108,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
               value={displayTerminal?.encoding || 'UTF-8'}
               onChange={(e) => {
                 if (displayTabId) {
-                  setTerminalConfig(displayTabId, { encoding: e.target.value as any });
+                  setTerminalConfig(displayTabId, { encoding: e.target.value as Encoding });
                 }
               }}
             >

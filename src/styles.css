@@ -17,6 +17,7 @@
   --bg-sidebar: #252526;
   --bg-statusbar: #007acc;
   --bg-panel: #1e1e1e;
+  --accent-color: #4fc3f7;
 
   --text-primary: #cccccc;
   --text-secondary: #858585;
@@ -68,6 +69,7 @@
   --bg-sidebar: #f3f3f3;
   --bg-statusbar: #007acc;
   --bg-panel: #ffffff;
+  --accent-color: #0288d1;
 
   --text-primary: #333333;
   --text-secondary: #666666;

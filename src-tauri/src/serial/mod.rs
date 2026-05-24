@@ -83,6 +83,27 @@ pub struct SimPortHandle {
 
 // ==================== 参数解析 ====================
 
+/// 解析 HEX 字符串为字节数组。支持空格分隔（"48 65 6C"）或紧凑形式（"48656C"）。
+/// 暴露为 pub 以便日志层在写入 TX 字节时复用。
+pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
+    let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.len() % 2 != 0 {
+        return Err(anyhow::anyhow!("HEX string has odd length: {} chars", cleaned.len()));
+    }
+    let mut result = Vec::with_capacity(cleaned.len() / 2);
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut i = 0;
+    while i + 1 < chars.len() {
+        let hex_pair: String = chars[i..i + 2].iter().collect();
+        match u8::from_str_radix(&hex_pair, 16) {
+            Ok(byte) => result.push(byte),
+            Err(_) => return Err(anyhow::anyhow!("Invalid HEX byte at position {}: \"{}\"", i, hex_pair)),
+        }
+        i += 2;
+    }
+    Ok(result)
+}
+
 fn parse_data_bits(bits: u8) -> serialport::DataBits {
     match bits {
         5 => serialport::DataBits::Five,
@@ -160,7 +181,7 @@ impl SerialManager {
                     serialport::SerialPortType::UsbPort(_) => "real".to_string(),
                     serialport::SerialPortType::PciPort => "real".to_string(),
                     serialport::SerialPortType::BluetoothPort => "real".to_string(),
-                    serialport::SerialPortType::Unknown => "virtual".to_string(),
+                    serialport::SerialPortType::Unknown => "real".to_string(),
                 },
             })
             .collect();
@@ -425,23 +446,7 @@ impl SerialManager {
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
 
         let bytes = if is_hex {
-            // Parse HEX: "48 65 6C 6C 6F" or "48656C6C6F"
-            let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
-            if cleaned.len() % 2 != 0 {
-                return Err(anyhow::anyhow!("HEX string has odd length: {} chars", cleaned.len()));
-            }
-            let mut result = Vec::with_capacity(cleaned.len() / 2);
-            let chars: Vec<char> = cleaned.chars().collect();
-            let mut i = 0;
-            while i + 1 < chars.len() {
-                let hex_pair: String = chars[i..i + 2].iter().collect();
-                match u8::from_str_radix(&hex_pair, 16) {
-                    Ok(byte) => result.push(byte),
-                    Err(_) => return Err(anyhow::anyhow!("Invalid HEX byte at position {}: \"{}\"", i, hex_pair)),
-                }
-                i += 2;
-            }
-            result
+            parse_hex_string(data)?
         } else {
             let mut text = data.to_string();
             match append_line_ending {

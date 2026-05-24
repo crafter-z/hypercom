@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSerialData, useSerialConnection } from '../../hooks/useTauri';
 import { serialService, logService } from '../../services/tauri';
@@ -58,6 +58,14 @@ const OperationPanel: React.FC = () => {
     stopped: false,
   });
   const sendHistoryRef = useRef<{ history: string[]; index: number }>({ history: [], index: -1 });
+  const [isCustomBaud, setIsCustomBaud] = useState(
+    !config.defaultBaudRates.includes(opBaudRate)
+  );
+  const activeCmdCount = sendCommandSets.find(s => s.id === activeSendCommandSetId)?.commands.length ?? 0;
+
+  useEffect(() => {
+    setIsCustomBaud(!config.defaultBaudRates.includes(opBaudRate));
+  }, [opBaudRate, config.defaultBaudRates]);
 
   useEffect(() => {
     if (!activeTabId || !isConnected) return;
@@ -156,7 +164,7 @@ const OperationPanel: React.FC = () => {
       ref.stopped = true;
       if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
     };
-  }, [opIsLoopSending, isPortActive, isConnected, activeSendCommandSetId, opLoopInterval, activeTabId, sendData, setOpState]);
+  }, [opIsLoopSending, isPortActive, isConnected, activeSendCommandSetId, activeCmdCount, opLoopInterval, activeTabId, sendData, setOpState]);
 
   const handleSend = async () => {
     if (!isPortActive || !opSendInput.trim()) return;
@@ -219,7 +227,10 @@ const OperationPanel: React.FC = () => {
     if (!activeTabId) return;
     try {
       const files = await logService.getLogFiles();
-      const match = files.find(f => f.port_id === activeTabId || f.path.includes(activeTabId));
+      const candidates = files.filter(f => f.port_id === activeTabId);
+      const match = candidates.length > 0
+        ? candidates.reduce((newest, f) => f.created_at > newest.created_at ? f : newest)
+        : undefined;
       if (match) { await logService.openPath(match.path); }
     } catch (e) { console.error('Failed to open log file:', e); }
   };
@@ -467,9 +478,33 @@ const OperationPanel: React.FC = () => {
             <div className="op-params-grid">
               <div className="op-param-item">
                 <span className="op-label">波特率:</span>
-                <select className="select op-param-select" value={opBaudRate} onChange={(e) => setOpState({ opBaudRate: Number(e.target.value) })}>
+                <select
+                  className="select op-param-select"
+                  value={isCustomBaud ? '__custom__' : opBaudRate}
+                  onChange={(e) => {
+                    if (e.target.value === '__custom__') {
+                      setIsCustomBaud(true);
+                    } else {
+                      setIsCustomBaud(false);
+                      setOpState({ opBaudRate: Number(e.target.value) });
+                    }
+                  }}
+                >
                   {config.defaultBaudRates.map(rate => <option key={rate} value={rate}>{rate}</option>)}
+                  <option value="__custom__">其他...</option>
                 </select>
+                {isCustomBaud && (
+                  <input
+                    className="input"
+                    type="number"
+                    style={{ width: 80, marginLeft: 4 }}
+                    value={opBaudRate}
+                    onChange={(e) => setOpState({ opBaudRate: Number(e.target.value) || 9600 })}
+                    min={50}
+                    max={4000000}
+                    step={100}
+                  />
+                )}
               </div>
               <div className="op-param-item">
                 <span className="op-label">数据位:</span>

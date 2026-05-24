@@ -409,6 +409,16 @@ const Sidebar: React.FC = () => {
         }
       }
     }
+
+    if (overGroupId === undefined) {
+      // Move to ungrouped: also adjust global port order so active sits next to over
+      const refreshed = useAppStore.getState().ports;
+      const newGlobalOldIdx = refreshed.findIndex(p => p.id === activeId);
+      const newGlobalOverIdx = refreshed.findIndex(p => p.id === overId);
+      if (newGlobalOldIdx !== -1 && newGlobalOverIdx !== -1 && newGlobalOldIdx !== newGlobalOverIdx) {
+        useAppStore.getState().reorderPorts(newGlobalOldIdx, newGlobalOverIdx);
+      }
+    }
   }, []);
 
   return (
@@ -419,8 +429,22 @@ const Sidebar: React.FC = () => {
         onRefresh={refreshPorts}
         simulationMode={simulationMode}
         onToggleSimulation={toggleSimulation}
-        onOpenAll={() => { ports.forEach(p => { if (p.status !== 'connected') toggleConnection(p.id); }); }}
-        onCloseAll={() => { ports.forEach(p => { if (p.status === 'connected') toggleConnection(p.id); }); }}
+        onOpenAll={async () => {
+          for (const p of ports) {
+            if (p.status !== 'connected') {
+              toggleConnection(p.id);
+              await new Promise(r => setTimeout(r, 100));
+            }
+          }
+        }}
+        onCloseAll={async () => {
+          for (const p of ports) {
+            if (p.status === 'connected') {
+              toggleConnection(p.id);
+              await new Promise(r => setTimeout(r, 100));
+            }
+          }
+        }}
         onSortByPort={handleSortByPort}
         onSaveLayout={() => { saveConfig(useAppStore.getState().config); }}
       />

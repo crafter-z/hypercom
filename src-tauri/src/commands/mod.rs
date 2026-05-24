@@ -63,10 +63,21 @@ pub fn send_serial_data(args: SendDataArgs, state: State<AppState>) -> Result<us
     };
     // Write TX data to log if a writer exists
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    let log_data = if args.is_hex {
-        args.data.as_bytes().to_vec()
+    // 用与 send_data() 相同的解析逻辑还原写入串口的字节序列：
+    // - HEX 模式：解析 "48 65 6C" 形式
+    // - 文本模式：附加 line ending（与 send_data 内部行为一致）
+    // 解析失败时仅记录文本字节，避免写入与实际不一致；HEX 解析在前面的 send_data 已成功，理论上不会失败。
+    let log_data: Vec<u8> = if args.is_hex {
+        serial::parse_hex_string(&args.data).unwrap_or_else(|_| args.data.as_bytes().to_vec())
     } else {
-        args.data.as_bytes().to_vec()
+        let mut text = args.data.clone();
+        match args.append_line_ending.as_str() {
+            "\\r\\n" => text.push_str("\r\n"),
+            "\\r" => text.push('\r'),
+            "\\n" => text.push('\n'),
+            _ => {}
+        }
+        text.into_bytes()
     };
     if let Ok(mut log_mgr) = state.log_manager.lock() {
         let _ = log_mgr.write(&args.port_id, &timestamp, "TX", &log_data);
@@ -189,6 +200,23 @@ pub fn set_log_filename_format(format: String, state: State<AppState>) -> Result
     Ok(())
 }
 
+/// 设置日志自动保存开关。前端在 set_config 时调用以同步状态。
+#[tauri::command]
+pub fn set_log_auto_save(enabled: bool, state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
+    manager.set_auto_save(enabled);
+    Ok(())
+}
+
+/// 设置日志默认编码 (UTF-8 / GBK / ISO-8859-1 / ASCII)。
+/// 已存在的 writer 不受影响 — encoding 在 create_writer 时锁定。
+#[tauri::command]
+pub fn set_log_encoding(encoding: String, state: State<AppState>) -> Result<(), String> {
+    let mut manager = state.log_manager.lock().map_err(|e| e.to_string())?;
+    manager.set_default_encoding(&encoding);
+    Ok(())
+}
+
 /// 开始记录日志
 #[tauri::command]
 pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), String> {
@@ -209,15 +237,35 @@ pub fn stop_logging(port_id: String, state: State<AppState>) -> Result<(), Strin
 /// 通过系统默认程序打开任意路径（文件或目录）。
 /// 用于"打开日志文件"和"打开日志目录"按钮。
 #[tauri::command]
-pub fn open_path(path: String) -> Result<(), String> {
+pub fn open_path(path: String, state: State<AppState>) -> Result<(), String> {
+    // 作用域校验 (defects #54): 仅允许打开 LogManager 的 log_directory 子树下的路径。
+    // 防止前端任意 invoke 让后端打开 C:\Windows\System32 等敏感路径。
+    let log_dir = {
+        let mgr = state.log_manager.lock().map_err(|e| e.to_string())?;
+        mgr.get_directory().clone()
+    };
+    let canonical_target = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot canonicalize path: {}", e))?;
+    let canonical_root = log_dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot canonicalize log root: {}", e))?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(format!("Path is outside log directory scope: {}", path));
+    }
+
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // 路径中含 ',' 时 explorer 会把它当多参数分隔符。raw_arg 跳过 Rust 的 quote 处理，
+        // 我们自己用 " 包裹整个路径让 explorer 把它当单一参数 (defects #55)。
+        let quoted = format!("\"{}\"", path);
         std::process::Command::new("explorer")
-            .arg(&path)
+            .raw_arg(&quoted)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -245,7 +293,7 @@ pub fn open_log_directory(state: State<AppState>) -> Result<(), String> {
         let mgr = state.log_manager.lock().map_err(|e| e.to_string())?;
         mgr.get_directory().to_string_lossy().to_string()
     };
-    open_path(dir)
+    open_path(dir, state)
 }
 
 // ==================== 系统相关命令 ====================

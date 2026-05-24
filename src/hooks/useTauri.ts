@@ -154,7 +154,15 @@ export function useSerialData() {
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
         if (cancelled) return;
-        const text = new TextDecoder().decode(new Uint8Array(event.data));
+        const term = useAppStore.getState().terminals[event.port_id];
+        const encoding = term?.encoding || 'UTF-8';
+        const decoderLabel = encoding.toLowerCase() === 'ascii' ? 'utf-8' : encoding.toLowerCase();
+        let text: string;
+        try {
+          text = new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(event.data));
+        } catch {
+          text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(event.data));
+        }
         if (useAppStore.getState().opIgnoreEmptyChars && !text.trim()) return;
         appendTerminalLine(event.port_id, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -208,10 +216,11 @@ export function useSerialData() {
       });
 
       // Also show sent data in terminal
-      const { sendPrefix } = useAppStore.getState().config;
+      const state = useAppStore.getState();
+      const { sendPrefix } = state.config;
       const prefix = sendPrefix ? `${sendPrefix} ` : '';
       const displayText = `${prefix}${data}`;
-      useAppStore.getState().appendTerminalLine(portId, {
+      state.appendTerminalLine(portId, {
         id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp: Date.now(),
         direction: 'TX',
@@ -221,8 +230,8 @@ export function useSerialData() {
       });
 
       // Track TX bytes
-      const currentTx = useAppStore.getState().trafficStats[portId]?.txTotal || 0;
-      useAppStore.getState().setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
+      const currentTx = state.trafficStats[portId]?.txTotal || 0;
+      state.setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
 
       return bytesWritten;
     } catch (err) {
@@ -254,6 +263,10 @@ export function useConfigPersistence() {
   const saveConfig = useCallback(async (config: AppConfig) => {
     try {
       await configService.setConfig(config);
+      await Promise.all([
+        logService.setAutoSave(config.autoSaveLog).catch(() => {}),
+        logService.setEncoding(config.logEncoding).catch(() => {}),
+      ]);
     } catch (err) {
       console.error('[useConfigPersistence] Failed to save config:', err);
     }
@@ -310,6 +323,11 @@ export function useAppInit() {
   useEffect(() => {
     const init = async () => {
       await loadConfig();
+      const loaded = useAppStore.getState().config;
+      await Promise.all([
+        logService.setAutoSave(loaded.autoSaveLog).catch(() => {}),
+        logService.setEncoding(loaded.logEncoding).catch(() => {}),
+      ]);
       await refreshPorts();
     };
     init();

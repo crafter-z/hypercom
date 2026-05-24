@@ -156,6 +156,15 @@ export const logService = {
   openLogDirectory: (): Promise<void> => {
     return invoke<void>('open_log_directory');
   },
+
+  /** 同步 auto_save 状态到后端，避免前后端漂移 */
+  setAutoSave: (enabled: boolean): Promise<void> => {
+    return invoke<void>('set_log_auto_save', { enabled });
+  },
+  /** 设置日志默认编码 (UTF-8 / GBK / ISO-8859-1 / ASCII) */
+  setEncoding: (encoding: string): Promise<void> => {
+    return invoke<void>('set_log_encoding', { encoding });
+  },
 };
 
 // ==================== 系统命令 ====================
