@@ -177,6 +177,13 @@ pub fn save_log_as(port_id: String, path: String, state: State<AppState>) -> Res
     manager.save_log_as(&port_id, &path).map_err(|e| e.to_string())
 }
 
+/// 导出终端日志到指定路径（由前端文件对话框选择）
+#[tauri::command]
+pub fn export_terminal_log(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write export file '{}': {}", path, e))
+}
+
 /// 获取日志文件列表
 #[tauri::command]
 pub fn get_log_files(state: State<AppState>) -> Result<Vec<logger::LogFileInfo>, String> {

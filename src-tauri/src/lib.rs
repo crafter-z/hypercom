@@ -66,6 +66,7 @@ pub fn run() {
             // ===== 日志相关命令 =====
             commands::set_log_directory,
             commands::save_log_as,
+            commands::export_terminal_log,
             commands::get_log_files,
             commands::start_logging,
             commands::stop_logging,

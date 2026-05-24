@@ -135,6 +135,10 @@ export const logService = {
     return invoke<void>('save_log_as', { portId, path });
   },
 
+  exportTerminalLog: (path: string, content: string): Promise<void> => {
+    return invoke<void>('export_terminal_log', { path, content });
+  },
+
   getLogFiles: (): Promise<LogFileInfoResult[]> => {
     return invoke<LogFileInfoResult[]>('get_log_files');
   },

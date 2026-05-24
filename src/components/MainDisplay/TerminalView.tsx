@@ -4,6 +4,8 @@ import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { applyHighlightSets } from '../../utils/highlightEngine';
 import { useAppStore } from '../../stores/useAppStore';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { save } from '@tauri-apps/plugin-dialog';
+import { logService } from '../../services/tauri';
 
 interface TerminalViewProps {
   portId: string;
@@ -25,6 +27,12 @@ function stringToHex(str: string): string {
 function formatTimestamp(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
+function exportTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
@@ -121,15 +129,35 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
         if (sel && sel.toString()) navigator.clipboard.writeText(hexToString(sel.toString()));
       }},
       { type: 'separator' },
-      { label: '导出为 TXT', onClick: () => {
+      { label: '导出为 TXT', onClick: async () => {
         const text = currentLines.map(l => `[${formatTimestamp(l.timestamp)}] ${l.direction} ${l.content}`).join('\n');
-        navigator.clipboard.writeText(text);
+        const filePath = await save({
+          title: '导出为 TXT',
+          defaultPath: `${portId}-${exportTimestamp()}.txt`,
+          filters: [{ name: 'Text', extensions: ['txt'] }],
+        });
+        if (filePath === null) return;
+        try {
+          await logService.exportTerminalLog(filePath, text);
+        } catch (e) {
+          console.error('Failed to export TXT:', e);
+        }
       }},
-      { label: '导出为 CSV', onClick: () => {
+      { label: '导出为 CSV', onClick: async () => {
         const csv = 'timestamp,direction,content\n' + currentLines.map(l =>
           `"${formatTimestamp(l.timestamp)}","${l.direction}","${l.content.replace(/"/g, '""')}"`
         ).join('\n');
-        navigator.clipboard.writeText(csv);
+        const filePath = await save({
+          title: '导出为 CSV',
+          defaultPath: `${portId}-${exportTimestamp()}.csv`,
+          filters: [{ name: 'CSV', extensions: ['csv'] }],
+        });
+        if (filePath === null) return;
+        try {
+          await logService.exportTerminalLog(filePath, csv);
+        } catch (e) {
+          console.error('Failed to export CSV:', e);
+        }
       }},
     ];
     setContextMenu({ x: e.clientX, y: e.clientY, items });
