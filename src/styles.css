@@ -486,7 +486,9 @@ textarea.input {
 }
 
 .config-page-title {
-  display: none;
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
 }
 
 /* ==================== Toolbar ==================== */
@@ -559,12 +561,11 @@ textarea.input {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: '2px 12px';
+  padding: 2px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
   font-size: 11px;
   color: var(--text-secondary);
-  padding: 2px 12px;
 }
 
 .terminal-toolbar-title {

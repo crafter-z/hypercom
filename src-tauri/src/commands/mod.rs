@@ -56,9 +56,22 @@ pub struct SendDataArgs {
 
 #[tauri::command]
 pub fn send_serial_data(args: SendDataArgs, state: State<AppState>) -> Result<usize, String> {
-    let manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
-    manager.send_data(&args.port_id, &args.data, args.is_hex, &args.append_line_ending)
-        .map_err(|e| e.to_string())
+    let n = {
+        let manager = state.serial_manager.lock().map_err(|e| e.to_string())?;
+        manager.send_data(&args.port_id, &args.data, args.is_hex, &args.append_line_ending)
+            .map_err(|e| e.to_string())?
+    };
+    // Write TX data to log if a writer exists
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let log_data = if args.is_hex {
+        args.data.as_bytes().to_vec()
+    } else {
+        args.data.as_bytes().to_vec()
+    };
+    if let Ok(mut log_mgr) = state.log_manager.lock() {
+        let _ = log_mgr.write(&args.port_id, &timestamp, "TX", &log_data);
+    }
+    Ok(n)
 }
 
 /// 设置串口参数（波特率、数据位等）
@@ -193,6 +206,48 @@ pub fn stop_logging(port_id: String, state: State<AppState>) -> Result<(), Strin
     manager.close_writer(&port_id).map_err(|e| e.to_string())
 }
 
+/// 通过系统默认程序打开任意路径（文件或目录）。
+/// 用于"打开日志文件"和"打开日志目录"按钮。
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 打开当前的日志目录（按当前 LogManager 配置）。
+#[tauri::command]
+pub fn open_log_directory(state: State<AppState>) -> Result<(), String> {
+    let dir = {
+        let mgr = state.log_manager.lock().map_err(|e| e.to_string())?;
+        mgr.get_directory().to_string_lossy().to_string()
+    };
+    open_path(dir)
+}
+
 // ==================== 系统相关命令 ====================
 
 /// 获取系统状态（内存、CPU）
@@ -206,20 +261,24 @@ pub struct SystemStatus {
 
 #[tauri::command]
 pub fn get_system_status(state: State<AppState>) -> SystemStatus {
-    let config_mgr = state.config_manager.lock().unwrap();
-    let memory_limit_mb = config_mgr.get_config().memory_limit_mb as u64;
-    drop(config_mgr);
-
-    let mut system = sysinfo::System::new_all();
-    system.refresh_all();
-
-    // Process-specific memory for this app
-    let pid = std::process::id();
-    let used_memory = if let Some(process) = system.process(sysinfo::Pid::from(pid as usize)) {
-        process.memory() / (1024 * 1024)
-    } else {
-        system.used_memory() / (1024 * 1024)
+    let memory_limit_mb = {
+        let config_mgr = state.config_manager.lock().unwrap();
+        config_mgr.get_config().memory_limit_mb as u64
     };
+
+    // 增量刷新缓存的 System 实例 — 仅刷新本进程与全部 CPU，避免每次 new_all() + refresh_all() 的高开销
+    let pid = sysinfo::Pid::from(std::process::id() as usize);
+    let mut system = state.system_info.lock().unwrap();
+    system.refresh_processes(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        false,
+    );
+    system.refresh_cpu_all();
+
+    let used_memory = system
+        .process(pid)
+        .map(|p| p.memory() / (1024 * 1024))
+        .unwrap_or(0);
 
     let cpu_usage = if system.cpus().is_empty() {
         0.0
@@ -229,9 +288,9 @@ pub fn get_system_status(state: State<AppState>) -> SystemStatus {
     };
 
     let status = if cpu_usage > 90.0 || used_memory > memory_limit_mb {
-        "高负载".to_string()
+        "high_load".to_string()
     } else {
-        "运行正常".to_string()
+        "normal".to_string()
     };
 
     SystemStatus {
@@ -243,15 +302,49 @@ pub fn get_system_status(state: State<AppState>) -> SystemStatus {
 }
 
 /// 设置防止系统息屏
+#[cfg(target_os = "windows")]
+mod win32_power {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetThreadExecutionState(esFlags: u32) -> u32;
+    }
+    const ES_CONTINUOUS: u32 = 0x80000000;
+    const ES_SYSTEM_REQUIRED: u32 = 0x00000001;
+    const ES_DISPLAY_REQUIRED: u32 = 0x00000002;
+
+    pub fn prevent_screen_off(enable: bool) {
+        unsafe {
+            if enable {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED);
+            } else {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+        }
+    }
+
+    pub fn prevent_sleep(enable: bool) {
+        unsafe {
+            if enable {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+            } else {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    win32_power::prevent_screen_off(enable);
     log::info!("Prevent screen off: {}", enable);
     Ok(())
 }
 
-/// 设置防止系统休眠
 #[tauri::command]
 pub fn prevent_sleep(enable: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    win32_power::prevent_sleep(enable);
     log::info!("Prevent sleep: {}", enable);
     Ok(())
 }
@@ -261,6 +354,8 @@ pub fn prevent_sleep(enable: bool) -> Result<(), String> {
 /// 保存命令集
 #[derive(Debug, Deserialize)]
 pub struct SaveCommandSetArgs {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub is_loop: bool,
     pub loop_delay_ms: i32,
@@ -285,7 +380,12 @@ pub async fn save_command_set(args: SaveCommandSetArgs, state: State<'_, AppStat
         let db_pool = storage_mgr.pool().map_err(|e| e.to_string())?;
         db_pool.clone()
     };
-    let set_id = uuid::Uuid::new_v4().to_string();
+    let is_update = args.id.is_some();
+    let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // If updating existing set, delete old one first to avoid duplicates
+    if is_update {
+        let _ = storage::delete_command_set_from_db(&pool, &set_id).await;
+    }
     let set = storage::SendCommandSet {
         id: set_id.clone(),
         name: args.name,
@@ -345,6 +445,8 @@ pub async fn delete_command_set(set_id: String, state: State<'_, AppState>) -> R
 /// 保存高亮规则集
 #[derive(Debug, Deserialize)]
 pub struct SaveHighlightSetArgs {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub is_enabled: bool,
     pub rules: Vec<SaveHighlightRuleArgs>,
@@ -368,7 +470,12 @@ pub async fn save_highlight_set(args: SaveHighlightSetArgs, state: State<'_, App
         let db_pool = storage_mgr.pool().map_err(|e| e.to_string())?;
         db_pool.clone()
     };
-    let set_id = uuid::Uuid::new_v4().to_string();
+    let is_update = args.id.is_some();
+    let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // If updating existing set, delete old one first to avoid duplicates
+    if is_update {
+        let _ = storage::delete_highlight_set_from_db(&pool, &set_id).await;
+    }
     let set = storage::HighlightRuleSet {
         id: set_id.clone(),
         name: args.name,

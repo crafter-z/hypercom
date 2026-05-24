@@ -33,7 +33,7 @@ import type {
 
 const defaultConfig: AppConfig = {
   closeBehavior: 'minimize',
-  memoryLimitMB: 1024,
+  memoryLimitMb: 1024,
   language: 'zh-CN',
   theme: 'dark',
   preventScreenOff: false,
@@ -53,7 +53,7 @@ const defaultConfig: AppConfig = {
   logFormat: 'string',
   logEncoding: 'UTF-8',
   logSplitEnabled: false,
-  logSplitSizeMB: 100,
+  logSplitSizeMb: 100,
   backupEnabled: false,
   backupInterval: 24,
   backupDirectory: '',
@@ -212,7 +212,7 @@ export const useAppStore = create<AppState>()(
     systemStatus: {
       status: '运行正常',
       memoryUsedMB: 0,
-      memoryLimitMB: 1024,
+      memoryLimitMb: 1024,
       cpuUsage: 0,
     },
     trafficStats: {},
@@ -242,7 +242,16 @@ export const useAppStore = create<AppState>()(
     
     updatePort: (portId, patch) => set((state) => {
       const port = state.ports.find(p => p.id === portId);
-      if (port) Object.assign(port, patch);
+      if (port) {
+        Object.assign(port, patch);
+        // Update tab title when alias changes
+        if ('alias' in patch || 'name' in patch) {
+          const tab = state.tabs.find(t => t.id === portId);
+          if (tab) {
+            tab.title = `${port.id} ${port.alias || ''}`.trim();
+          }
+        }
+      }
     }),
     
     addGroup: (group) => set((state) => { state.groups.push(group); }),
@@ -259,7 +268,20 @@ export const useAppStore = create<AppState>()(
     
     movePortToGroup: (portId, groupId) => set((state) => {
       const port = state.ports.find(p => p.id === portId);
-      if (port) port.groupId = groupId;
+      if (!port) return;
+      // Remove from old group
+      if (port.groupId) {
+        const oldGroup = state.groups.find(g => g.id === port.groupId);
+        if (oldGroup) oldGroup.portIds = oldGroup.portIds.filter(id => id !== portId);
+      }
+      // Add to new group
+      if (groupId) {
+        const newGroup = state.groups.find(g => g.id === groupId);
+        if (newGroup && !newGroup.portIds.includes(portId)) {
+          newGroup.portIds.push(portId);
+        }
+      }
+      port.groupId = groupId;
     }),
     
     openTab: (portId) => set((state) => {
@@ -282,7 +304,7 @@ export const useAppStore = create<AppState>()(
         if (!state.terminals[portId]) {
           state.terminals[portId] = {
             lines: [],
-            maxLines: 10000,
+            maxLines: state.config.memoryLimitMb * 500 || 10000,
             scrollLocked: true,
             showTimestamp: true,
             displayFormat: 'string',
@@ -321,8 +343,9 @@ export const useAppStore = create<AppState>()(
     closeTabsToRight: (tabId) => set((state) => {
       const idx = state.tabs.findIndex(t => t.id === tabId);
       if (idx >= 0) {
-        const removed = state.tabs.splice(idx + 1);
-        for (const r of removed) {
+        const toRemove = state.tabs.slice(idx + 1).filter(t => !t.isPinned);
+        state.tabs = state.tabs.filter((t, i) => i <= idx || t.isPinned);
+        for (const r of toRemove) {
           const pane = state.panes.find(p => p.id === r.splitPaneId);
           if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
         }
@@ -333,7 +356,7 @@ export const useAppStore = create<AppState>()(
             state.panes = state.panes.filter(p => p.id !== pid);
           }
         }
-        if (state.activeTabId && removed.some(r => r.id === state.activeTabId)) {
+        if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
           state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
         }
@@ -343,8 +366,9 @@ export const useAppStore = create<AppState>()(
     closeTabsToLeft: (tabId) => set((state) => {
       const idx = state.tabs.findIndex(t => t.id === tabId);
       if (idx > 0) {
-        const removed = state.tabs.splice(0, idx);
-        for (const r of removed) {
+        const toRemove = state.tabs.slice(0, idx).filter(t => !t.isPinned);
+        state.tabs = state.tabs.filter((t, i) => i >= idx || t.isPinned);
+        for (const r of toRemove) {
           const pane = state.panes.find(p => p.id === r.splitPaneId);
           if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
         }
@@ -354,7 +378,7 @@ export const useAppStore = create<AppState>()(
             state.panes = state.panes.filter(p => p.id !== pid);
           }
         }
-        if (state.activeTabId && removed.some(r => r.id === state.activeTabId)) {
+        if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
           state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
         }
@@ -364,8 +388,8 @@ export const useAppStore = create<AppState>()(
     closeOtherTabs: (tabId) => set((state) => {
       const target = state.tabs.find(t => t.id === tabId);
       if (target) {
-        const removed = state.tabs.filter(t => t.id !== tabId);
-        for (const r of removed) {
+        const toRemove = state.tabs.filter(t => t.id !== tabId && !t.isPinned);
+        for (const r of toRemove) {
           const pane = state.panes.find(p => p.id === r.splitPaneId);
           if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
         }
@@ -375,7 +399,7 @@ export const useAppStore = create<AppState>()(
             state.panes = state.panes.filter(p => p.id !== pid);
           }
         }
-        state.tabs = [target];
+        state.tabs = state.tabs.filter(t => t.id === tabId || t.isPinned);
         state.activeTabId = tabId;
         state.focusedPaneId = target.splitPaneId;
       }
@@ -435,7 +459,7 @@ export const useAppStore = create<AppState>()(
       // Create new pane
       const newPane: SplitPane = {
         id: newPaneId,
-        direction: direction === 'horizontal' ? 'vertical' : 'horizontal',
+        direction,
         tabIds: activeTab ? [activeTab.id] : [],
         size: 0.5,
       };

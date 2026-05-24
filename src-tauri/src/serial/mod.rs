@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::OpenPortArgs;
 
@@ -227,6 +227,7 @@ impl SerialManager {
                 match port_clone.lock() {
                     Ok(mut p) => match p.read(&mut buffer) {
                         Ok(n) if n > 0 => {
+                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
                             let event = SerialDataEvent {
                                 port_id: port_id.clone(),
                                 timestamp: chrono::Local::now().timestamp_millis(),
@@ -235,9 +236,19 @@ impl SerialManager {
                                 is_hex: false,
                             };
                             let _ = app_handle_clone.emit("serial:data", event);
+                            // Write to log if a writer exists
+                            if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                                if let Ok(mut log_mgr) = state.log_manager.lock() {
+                                    let _ = log_mgr.write(&port_id, &timestamp, "RX", &buffer[..n]);
+                                }
+                            }
                         }
                         Ok(_) => {}
-Err(e) => {
+                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                            // Serial timeout - normal for read loop, continue
+                            continue;
+                        }
+                        Err(e) => {
                             log::warn!("Serial read error on {}: {}", port_id, e);
                             let status_event = SerialStatusEvent {
                                 port_id: port_id.clone(),
@@ -252,7 +263,6 @@ Err(e) => {
                         break;
                     }
                 }
-                thread::sleep(Duration::from_millis(50));
             }
             // 读取线程退出时发送断开事件
             let status_event = SerialStatusEvent {
@@ -308,14 +318,21 @@ Err(e) => {
                         } else {
                             format!("Received: {}\r\n", data)
                         };
+                        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
                         let event = SerialDataEvent {
                             port_id: port_id.clone(),
                             timestamp: chrono::Local::now().timestamp_millis(),
                             direction: "RX".to_string(),
-                            data: echo_data.into_bytes(),
+                            data: echo_data.clone().into_bytes(),
                             is_hex: false,
                         };
                         let _ = app_handle_clone.emit("serial:data", event);
+                        // Write to log if a writer exists
+                        if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                            if let Ok(mut log_mgr) = state.log_manager.lock() {
+                                let _ = log_mgr.write(&port_id, &timestamp, "RX", echo_data.as_bytes());
+                            }
+                        }
                     }
                     Ok(SimMessage::Stop) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -325,14 +342,21 @@ Err(e) => {
                                 "[SIM] Heartbeat @ {}\r\n",
                                 chrono::Local::now().format("%H:%M:%S")
                             );
+                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
                             let event = SerialDataEvent {
                                 port_id: port_id.clone(),
                                 timestamp: chrono::Local::now().timestamp_millis(),
                                 direction: "RX".to_string(),
-                                data: heartbeat.into_bytes(),
+                                data: heartbeat.clone().into_bytes(),
                                 is_hex: false,
                             };
                             let _ = app_handle_clone.emit("serial:data", event);
+                            // Write heartbeat to log if a writer exists
+                            if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                                if let Ok(mut log_mgr) = state.log_manager.lock() {
+                                    let _ = log_mgr.write(&port_id, &timestamp, "RX", heartbeat.as_bytes());
+                                }
+                            }
                             last_heartbeat = std::time::Instant::now();
                         }
                     }
@@ -438,9 +462,21 @@ Err(e) => {
     }
 
     /// 修改串口参数（完整）
-    pub fn set_params(&self, port_id: &str, baud_rate: u32, _data_bits: &str, _parity: &str, _stop_bits: &str, _handshake: &str) -> anyhow::Result<()> {
-        // Baud rate can be changed online; other params require reconnect (serialport-rs limitation)
-        self.set_baud_rate(port_id, baud_rate)
+    pub fn set_params(&self, port_id: &str, baud_rate: u32, data_bits: &str, parity: &str, stop_bits: &str, handshake: &str) -> anyhow::Result<()> {
+        let handle = self.ports.get(port_id)
+            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
+        let mut port = handle.port.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        port.set_baud_rate(baud_rate)?;
+        if data_bits != "8" || parity != "None" || stop_bits != "One" {
+            port.set_data_bits(parse_data_bits(data_bits.parse().unwrap_or(8)))?;
+            port.set_parity(parse_parity(parity))?;
+            port.set_stop_bits(parse_stop_bits(stop_bits))?;
+        }
+        if handshake != "None" {
+            port.set_flow_control(parse_flow_control(handshake))?;
+        }
+        log::info!("Params set for {}: baud={}, data_bits={}, parity={}, stop_bits={}, handshake={}", port_id, baud_rate, data_bits, parity, stop_bits, handshake);
+        Ok(())
     }
 
     /// 修改波特率（保留兼容）

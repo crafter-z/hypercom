@@ -1,5 +1,6 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
+import { serialService } from '../../services/tauri';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
 import {
@@ -17,15 +18,24 @@ interface PaneProps {
 const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
   const tabs = useAppStore((s) => s.tabs);
   const activeTabId = useAppStore((s) => s.activeTabId);
-  const terminals = useAppStore((s) => s.terminals);
+  const ports = useAppStore((s) => s.ports);
   const panes = useAppStore((s) => s.panes);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const closeTab = useAppStore((s) => s.closeTab);
+  const storeCloseTab = useAppStore((s) => s.closeTab);
   const pinTab = useAppStore((s) => s.pinTab);
   const closeTabsToRight = useAppStore((s) => s.closeTabsToRight);
   const closeTabsToLeft = useAppStore((s) => s.closeTabsToLeft);
   const closeOtherTabs = useAppStore((s) => s.closeOtherTabs);
   const moveTabToPane = useAppStore((s) => s.moveTabToPane);
+  const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
+
+  const closeTab = useCallback((tabId: string) => {
+    const port = ports.find(p => p.id === tabId);
+    if (port && port.status === 'connected') {
+      serialService.closeSerialPort(tabId).catch(() => {});
+    }
+    storeCloseTab(tabId);
+  }, [ports, storeCloseTab]);
 
   const paneTabs = tabs.filter(t => tabIds.includes(t.id));
   const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);
@@ -33,7 +43,9 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
     ? activeTabId
     : (localActiveTabId && tabIds.includes(localActiveTabId) ? localActiveTabId : paneTabs[0]?.id || null);
   const displayTab = paneTabs.find(t => t.id === displayTabId);
-  const displayPort = useAppStore((s) => s.ports.find(p => p.id === displayTabId));
+  const displayPort = ports.find(p => p.id === displayTabId);
+  // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
+  const displayTerminal = useAppStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
 
   const otherPanes = panes.filter(p => p.id !== paneId);
 
@@ -90,10 +102,19 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <span className="terminal-toolbar-label">编码:</span>
-            <select className="select terminal-toolbar-select">
-              <option>ASCII</option>
-              <option>UTF-8</option>
-              <option>GBK</option>
+            <select
+              className="select terminal-toolbar-select"
+              value={displayTerminal?.encoding || 'UTF-8'}
+              onChange={(e) => {
+                if (displayTabId) {
+                  setTerminalConfig(displayTabId, { encoding: e.target.value as any });
+                }
+              }}
+            >
+              <option value="ASCII">ASCII</option>
+              <option value="UTF-8">UTF-8</option>
+              <option value="GBK">GBK</option>
+              <option value="ISO-8859-1">ISO-8859-1</option>
             </select>
           </div>
         </div>
@@ -102,7 +123,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
       {paneTabs.length > 0 && displayTab ? (
         <TerminalView
           portId={displayTab.id}
-          terminal={terminals[displayTab.id]}
+          terminal={displayTerminal}
         />
       ) : paneTabs.length === 0 ? (
         <div className="terminal-empty-state" style={{ flex: 1 }}>
@@ -150,13 +171,11 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction }) => {
 };
 
 const MainDisplay: React.FC = () => {
-  const {
-    panes,
-    tabs,
-    focusedPaneId,
-    setFocusedPane,
-    splitPane,
-  } = useAppStore();
+  const panes = useAppStore((s) => s.panes);
+  const tabs = useAppStore((s) => s.tabs);
+  const focusedPaneId = useAppStore((s) => s.focusedPaneId);
+  const setFocusedPane = useAppStore((s) => s.setFocusedPane);
+  const splitPane = useAppStore((s) => s.splitPane);
 
   const [paneSizes, setPaneSizes] = useState<number[]>(() =>
     panes.map(p => p.size * 100)

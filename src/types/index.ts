@@ -6,7 +6,7 @@
 // ==================== 串口相关 ====================
 
 /** 串口连接状态 */
-export type PortStatus = 'disconnected' | 'error' | 'connected';
+export type PortStatus = 'disconnected' | 'connecting' | 'error' | 'connected';
 
 /** 串口类型 */
 export type PortType = 'real' | 'virtual' | 'sim';
@@ -151,7 +151,7 @@ export interface SendCommandSet {
 export interface AppConfig {
   // 通用设置
   closeBehavior: 'minimize' | 'exit';
-  memoryLimitMB: number;
+  memoryLimitMb: number;
   language: 'zh-CN' | 'en-US';
   theme: 'light' | 'dark' | 'system';
   preventScreenOff: boolean;
@@ -180,7 +180,7 @@ export interface AppConfig {
   logFormat: DisplayFormat;
   logEncoding: Encoding;
   logSplitEnabled: boolean;
-  logSplitSizeMB: number;
+  logSplitSizeMb: number;
   
   // 备份设置
   backupEnabled: boolean;
@@ -204,7 +204,7 @@ export interface LogFileInfo {
 export interface SystemStatus {
   status: string;          // 运行状态文本
   memoryUsedMB: number;
-  memoryLimitMB: number;
+  memoryLimitMb: number;
   cpuUsage: number;        // CPU占用率 (%)
 }
 

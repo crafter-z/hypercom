@@ -84,7 +84,7 @@ export function useSerialConnection() {
   const openPort = useCallback(async (portId: string, _baudRate: number = 115200) => {
     try {
       const store = useAppStore.getState();
-      updatePort(portId, { status: 'connected' });
+      updatePort(portId, { status: 'connecting' });
       await serialService.openSerialPort({
         port_id: portId,
         baud_rate: store.opBaudRate,
@@ -95,13 +95,14 @@ export function useSerialConnection() {
         dtr: store.opDtr,
         rts: store.opRts,
       });
+      const currentState = useAppStore.getState();
       updatePort(portId, {
         status: 'connected',
-        baudRate: store.opBaudRate,
-        dataBits: store.opDataBits,
-        parity: store.opParity,
-        stopBits: store.opStopBits,
-        handshake: store.opHandshake,
+        baudRate: currentState.opBaudRate,
+        dataBits: currentState.opDataBits,
+        parity: currentState.opParity,
+        stopBits: currentState.opStopBits,
+        handshake: currentState.opHandshake,
       });
       // Auto-start logging if enabled
       if (store.config.autoSaveLog) {
@@ -144,16 +145,16 @@ export function useSerialConnection() {
  */
 export function useSerialData() {
   const appendTerminalLine = useAppStore((s) => s.appendTerminalLine);
-  const listenCleanups = useRef<Array<() => void>>([]);
+  const setupPromiseRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
-    let mounted = true;
+    let cancelled = false;
+    const cleanups: Array<() => void> = [];
 
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
-        if (!mounted) return;
+        if (cancelled) return;
         const text = new TextDecoder().decode(new Uint8Array(event.data));
-        // Skip empty/whitespace lines if ignoreEmptyChars enabled
         if (useAppStore.getState().opIgnoreEmptyChars && !text.trim()) return;
         appendTerminalLine(event.port_id, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -163,14 +164,13 @@ export function useSerialData() {
           rawData: event.data,
           isHex: event.is_hex,
         });
-        // Accumulate traffic stats
         useAppStore.getState().setTrafficStats(event.port_id, {
           rxTotal: (useAppStore.getState().trafficStats[event.port_id]?.rxTotal || 0) + event.data.length,
         });
       });
 
       const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
-        if (!mounted) return;
+        if (cancelled) return;
         const statusMap: Record<string, PortStatus> = {
           connected: 'connected',
           disconnected: 'disconnected',
@@ -181,15 +181,20 @@ export function useSerialData() {
         });
       });
 
-      listenCleanups.current = [unlistenData, unlistenStatus];
+      if (cancelled) {
+        unlistenData();
+        unlistenStatus();
+        return;
+      }
+
+      cleanups.push(unlistenData, unlistenStatus);
     };
 
-    setup();
+    setupPromiseRef.current = setup();
 
     return () => {
-      mounted = false;
-      listenCleanups.current.forEach((fn) => fn());
-      listenCleanups.current = [];
+      cancelled = true;
+      cleanups.forEach((fn) => fn());
     };
   }, [appendTerminalLine]);
 
@@ -280,7 +285,7 @@ export function useSystemStatus(pollIntervalMs: number = 5000) {
         setSystemStatus({
           status: status.status,
           memoryUsedMB: status.memory_used_mb,
-          memoryLimitMB: status.memory_limit_mb,
+          memoryLimitMb: status.memory_limit_mb,
           cpuUsage: status.cpu_usage,
         });
       } catch (err) {

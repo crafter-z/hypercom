@@ -120,13 +120,16 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     disconnected: 'var(--status-disconnected)',
     error: 'var(--status-error)',
     connected: 'var(--status-connected)',
-  }[port.status];
+    connecting: 'var(--status-disconnected)',
+  }[port.status] || 'var(--status-disconnected)';
 
-  const statusLabel = {
+  const statusLabel: Record<string, string> = {
     disconnected: '未连接',
     error: '错误',
     connected: '已连接',
-  }[port.status];
+    connecting: '连接中',
+  };
+  const label = statusLabel[port.status] || port.status;
 
   const items: ContextMenuEntry[] = [
     { label: isConnected ? '断开连接' : '连接串口', icon: isConnected ? <Unplug size={14} /> : <PlugZap size={14} />, onClick: () => onToggleConnect(port.id) },
@@ -158,7 +161,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
             {port.type === 'virtual' && <span className="port-item-badge">VCP</span>}
           </div>
           <div className="port-item-meta">
-            <span style={{ color: statusColor }}>{statusLabel}</span>
+            <span style={{ color: statusColor }}>{label}</span>
             {port.baudRate && (
               <span className="port-item-baud">
                 {port.baudRate},{port.dataBits || 8}{port.parity?.[0] || 'N'}{port.stopBits === 'One' ? '1' : port.stopBits === 'Two' ? '2' : '1.5'}
@@ -233,42 +236,22 @@ const GroupItem: React.FC<GroupItemProps> = ({
         </button>
       </div>
       {group.isExpanded && (
-        <DndContext
-          sensors={useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))}
-          collisionDetection={closestCenter}
-          onDragEnd={(event: DragEndEvent) => {
-            const { active, over } = event;
-            if (over && active.id !== over.id) {
-              const oldIndex = groupPorts.findIndex(p => p.id === active.id);
-              const newIndex = groupPorts.findIndex(p => p.id === over.id);
-              if (oldIndex !== -1 && newIndex !== -1) {
-                const allPorts = useAppStore.getState().ports;
-                const oldGlobal = allPorts.findIndex(p => p.id === active.id);
-                const newGlobal = allPorts.findIndex(p => p.id === over.id);
-                if (oldGlobal !== -1 && newGlobal !== -1) {
-                  useAppStore.getState().reorderPorts(oldGlobal, newGlobal);
-                }
-              }
-            }
-          }}
-        >
-          <SortableContext items={portIds} strategy={verticalListSortingStrategy}>
-            <div className="port-group-list">
-              {groupPorts.map(port => (
-                <SortablePortItem
-                  key={port.id}
-                  port={port}
-                  isConnected={port.status === 'connected'}
-                  onOpenTab={onOpenTab}
-                  onToggleConnect={onToggleConnect}
-                  onSetAlias={onSetAlias}
-                  onHidePort={onHidePort}
-                  onShowPort={onShowPort}
-                />
-              ))}
-            </div>
-          </SortableContext>
-        </DndContext>
+        <SortableContext items={portIds} strategy={verticalListSortingStrategy}>
+          <div className="port-group-list">
+            {groupPorts.map(port => (
+              <SortablePortItem
+                key={port.id}
+                port={port}
+                isConnected={port.status === 'connected'}
+                onOpenTab={onOpenTab}
+                onToggleConnect={onToggleConnect}
+                onSetAlias={onSetAlias}
+                onHidePort={onHidePort}
+                onShowPort={onShowPort}
+              />
+            ))}
+          </div>
+        </SortableContext>
       )}
     </div>
   );
@@ -313,7 +296,6 @@ const Sidebar: React.FC = () => {
   const updatePort = useAppStore((s) => s.updatePort);
   const updateGroup = useAppStore((s) => s.updateGroup);
   const addGroup = useAppStore((s) => s.addGroup);
-  const reorderPorts = useAppStore((s) => s.reorderPorts);
 
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();
@@ -376,6 +358,59 @@ const Sidebar: React.FC = () => {
     useAppStore.getState().setPorts(sorted);
   }, [ports]);
 
+  // 统一 DnD 处理：支持组内重排序、跨组移动、移入/移出"未分组"
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const activeId = String(active.id);
+    const overId = String(over.id);
+
+    const store = useAppStore.getState();
+    const allPorts = store.ports;
+
+    const activePort = allPorts.find(p => p.id === activeId);
+    const overPort = allPorts.find(p => p.id === overId);
+    if (!activePort || !overPort) return;
+
+    const activeGroupId = activePort.groupId;
+    const overGroupId = overPort.groupId;
+
+    if (activeGroupId === overGroupId) {
+      // 同组（或都是未分组）—— 直接全局重排序
+      const oldGlobal = allPorts.findIndex(p => p.id === activeId);
+      const newGlobal = allPorts.findIndex(p => p.id === overId);
+      if (oldGlobal !== -1 && newGlobal !== -1) {
+        store.reorderPorts(oldGlobal, newGlobal);
+      }
+      return;
+    }
+
+    // 跨组移动：先把 active 移入 over 所在分组，再做位置调整
+    store.movePortToGroup(activeId, overGroupId);
+
+    // 在新分组内重新计算目标位置（基于刚刚更新后的 portIds）
+    const updatedGroups = useAppStore.getState().groups;
+    if (overGroupId) {
+      const newGroup = updatedGroups.find(g => g.id === overGroupId);
+      if (newGroup) {
+        const idxOfActive = newGroup.portIds.indexOf(activeId);
+        const idxOfOver = newGroup.portIds.indexOf(overId);
+        if (idxOfActive !== -1 && idxOfOver !== -1 && idxOfActive !== idxOfOver) {
+          // 将 active 调到 over 旁边（在 group.portIds 数组中）
+          useAppStore.getState().updateGroup(overGroupId, {
+            portIds: (() => {
+              const next = [...newGroup.portIds];
+              next.splice(idxOfActive, 1);
+              next.splice(idxOfOver, 0, activeId);
+              return next;
+            })(),
+          });
+        }
+      }
+    }
+  }, []);
+
   return (
     <div className="sidebar">
       <SidebarToolbar
@@ -392,35 +427,28 @@ const Sidebar: React.FC = () => {
       <SearchBox value={search} onChange={setSearch} />
 
       <div className="sidebar-list">
-        {groups.map(group => {
-          const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id));
-          if (groupPorts.length === 0 && !search) return null;
-          return (
-            <GroupItem
-              key={group.id}
-              group={group}
-              ports={filteredPorts}
-              onOpenTab={handleOpenTab}
-              onToggleConnect={handleToggleConnect}
-              onToggleExpand={handleToggleExpand}
-              onSetAlias={handleSetAlias}
-              onHidePort={handleHidePort}
-              onShowPort={handleShowPort}
-            />
-          );
-        })}
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          {groups.map(group => {
+            const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id));
+            if (groupPorts.length === 0 && !search) return null;
+            return (
+              <GroupItem
+                key={group.id}
+                group={group}
+                ports={filteredPorts}
+                onOpenTab={handleOpenTab}
+                onToggleConnect={handleToggleConnect}
+                onToggleExpand={handleToggleExpand}
+                onSetAlias={handleSetAlias}
+                onHidePort={handleHidePort}
+                onShowPort={handleShowPort}
+              />
+            );
+          })}
 
-        {ungroupedPorts.length > 0 && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-header">未分组</div>
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(event) => {
-              const { active, over } = event;
-              if (over && active.id !== over.id) {
-                const oldIndex = ports.findIndex(p => p.id === active.id);
-                const newIndex = ports.findIndex(p => p.id === over.id);
-                if (oldIndex !== -1 && newIndex !== -1) reorderPorts(oldIndex, newIndex);
-              }
-            }}>
+          {ungroupedPorts.length > 0 && (
+            <div className="sidebar-section">
+              <div className="sidebar-section-header">未分组</div>
               <SortableContext items={ungroupedIds} strategy={verticalListSortingStrategy}>
                 {ungroupedPorts.map(port => (
                   <SortablePortItem
@@ -435,9 +463,9 @@ const Sidebar: React.FC = () => {
                   />
                 ))}
               </SortableContext>
-            </DndContext>
-          </div>
-        )}
+            </div>
+          )}
+        </DndContext>
 
         {showHidden && ports.filter(p => p.isHidden).length > 0 && (
           <div className="sidebar-section">

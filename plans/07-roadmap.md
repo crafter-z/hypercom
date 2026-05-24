@@ -19,9 +19,9 @@
 ## 🟡 中优先级
 
 ### 日志操作按钮 (`OperationPanel.tsx`)
-- "另存为"：调用 `logService.saveLogAs(portId, path)` + 文件保存对话框
-- "打开文件"：调用 `@tauri-apps/plugin-shell` `open()` 打开日志文件
-- "打开目录"：`open()` 打开日志目录
+- "另存为"：✅ 已实现（`logService.saveLogAs` + 文件对话框）
+- "打开文件"：✅ 已实现（`logService.openPath`，后端 `open_path` 命令）
+- "打开目录"：✅ 已实现（`logService.openLogDirectory`，后端 `open_log_directory` 命令）
 
 ### 串口参数完善 (`set_serial_params`)
 - 当前仅支持波特率切换，需扩展为支持 data_bits/parity/stop_bits/handshake 在线修改

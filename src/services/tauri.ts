@@ -146,6 +146,16 @@ export const logService = {
   stopLogging: (portId: string): Promise<void> => {
     return invoke<void>('stop_logging', { portId });
   },
+
+  /** 用系统默认程序打开文件或目录 */
+  openPath: (path: string): Promise<void> => {
+    return invoke<void>('open_path', { path });
+  },
+
+  /** 打开当前日志目录（资源管理器/Finder/xdg） */
+  openLogDirectory: (): Promise<void> => {
+    return invoke<void>('open_log_directory');
+  },
 };
 
 // ==================== 系统命令 ====================
@@ -248,6 +258,7 @@ export interface HighlightRuleInfo {
 
 export const storageService = {
   saveCommandSet: (args: {
+    id?: string;
     name: string;
     is_loop: boolean;
     loop_delay_ms: number;
@@ -273,6 +284,7 @@ export const storageService = {
   },
 
   saveHighlightSet: (args: {
+    id?: string;
     name: string;
     is_enabled: boolean;
     rules: Array<{

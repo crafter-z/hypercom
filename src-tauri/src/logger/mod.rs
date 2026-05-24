@@ -97,6 +97,11 @@ impl LogManager {
         }
     }
 
+    /// 获取当前日志目录
+    pub fn get_directory(&self) -> &PathBuf {
+        &self.log_directory
+    }
+
     /// 设置日志目录
     pub fn set_directory(&mut self, path: String) -> anyhow::Result<()> {
         let new_path = PathBuf::from(path);

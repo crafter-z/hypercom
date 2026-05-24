@@ -27,7 +27,7 @@
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `commands/mod.rs` | ✅ | 22 个命令, sysinfo 真实监控 |
+| `commands/mod.rs` | ✅ | 29 个命令（含 6 个 storage CRUD、`open_path`、`open_log_directory`），sysinfo 缓存增量刷新 |
 | `serial/mod.rs` | ✅ | 真实/模拟串口, 事件推送, 完整参数解析 |
 | `config/mod.rs` | ✅ | JSON 持久化, 36 项配置 |
 | `logger/mod.rs` | 🔄 80% | 基础写入完成, 分片续写待实现 |

@@ -80,14 +80,14 @@ const App: React.FC = () => {
   }, []);
 
   // Enforce terminal memory limit from config (rough: 500 lines/MB)
-  const memoryLimitMB = useAppStore((s) => s.config.memoryLimitMB);
+  const memoryLimitMb = useAppStore((s) => s.config.memoryLimitMb);
   useEffect(() => {
-    const maxLines = memoryLimitMB * 500;
+    const maxLines = memoryLimitMb * 500;
     const store = useAppStore.getState();
     Object.keys(store.terminals).forEach(portId => {
       store.setTerminalConfig(portId, { maxLines });
     });
-  }, [memoryLimitMB]);
+  }, [memoryLimitMb]);
 
   return (
     <ThemeProvider>

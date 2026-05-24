@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks/useTauri';
 import { storageService } from '../../services/tauri';
@@ -49,8 +49,8 @@ const GeneralSettings: React.FC = () => {
         <input
           className="input"
           type="number"
-          value={config.memoryLimitMB}
-          onChange={(e) => setConfig({ memoryLimitMB: Number(e.target.value) })}
+          value={config.memoryLimitMb}
+          onChange={(e) => setConfig({ memoryLimitMb: Number(e.target.value) })}
           min={64}
           max={4096}
           step={64}
@@ -175,7 +175,7 @@ const LogSettings: React.FC = () => {
       {config.logSplitEnabled && (
         <div className="config-row">
           <label>分片大小 (MB):</label>
-          <input className="input" type="number" value={config.logSplitSizeMB} onChange={(e) => setConfig({ logSplitSizeMB: Number(e.target.value) })} min={1} />
+          <input className="input" type="number" value={config.logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: Number(e.target.value) })} min={1} />
         </div>
       )}
     </div>
@@ -322,6 +322,7 @@ const HighlightSettings: React.FC = () => {
   const handleSaveSet = async (set: HighlightRuleSet) => {
     try {
       await storageService.saveHighlightSet({
+        id: set.id,
         name: set.name,
         is_enabled: set.isEnabled,
         rules: set.rules.map(r => ({
@@ -490,6 +491,7 @@ const CommandSettings: React.FC = () => {
   const handleSaveSet = async (set: SendCommandSet) => {
     try {
       await storageService.saveCommandSet({
+        id: set.id,
         name: set.name,
         is_loop: set.isLoop,
         loop_delay_ms: set.loopDelay,
@@ -622,7 +624,33 @@ const ConfigModal: React.FC = () => {
   const configActiveTab = useAppStore((s) => s.ui.configActiveTab);
   const toggleConfigModal = useAppStore((s) => s.toggleConfigModal);
   const setConfigActiveTab = useAppStore((s) => s.setConfigActiveTab);
+  const setConfig = useAppStore((s) => s.setConfig);
   const { saveConfig } = useConfigPersistence();
+  const configSnapshotRef = useRef<AppConfig | null>(null);
+
+  // Save snapshot when modal opens
+  useEffect(() => {
+    if (isConfigOpen && !configSnapshotRef.current) {
+      configSnapshotRef.current = { ...useAppStore.getState().config };
+    }
+    if (!isConfigOpen) {
+      configSnapshotRef.current = null;
+    }
+  }, [isConfigOpen]);
+
+  const handleCancel = () => {
+    if (configSnapshotRef.current) {
+      setConfig(configSnapshotRef.current);
+      configSnapshotRef.current = null;
+    }
+    toggleConfigModal(false);
+  };
+
+  const handleSave = async () => {
+    await saveConfig(useAppStore.getState().config);
+    configSnapshotRef.current = null;
+    toggleConfigModal(false);
+  };
 
   if (!isConfigOpen) return null;
 
@@ -639,7 +667,7 @@ const ConfigModal: React.FC = () => {
   };
 
   return (
-    <div className="modal-overlay animate-fade-in" onClick={() => toggleConfigModal(false)}>
+    <div className="modal-overlay animate-fade-in" onClick={handleCancel}>
       <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <div className="modal-nav">
           <div className="modal-nav-header">
@@ -674,8 +702,8 @@ const ConfigModal: React.FC = () => {
           </div>
 
           <div className="modal-content-footer">
-            <button className="btn" onClick={() => toggleConfigModal(false)}>取消</button>
-            <button className="btn btn-primary" onClick={async () => { await saveConfig(useAppStore.getState().config); toggleConfigModal(false); }}>保存</button>
+            <button className="btn" onClick={handleCancel}>取消</button>
+            <button className="btn btn-primary" onClick={handleSave}>保存</button>
           </div>
         </div>
       </div>

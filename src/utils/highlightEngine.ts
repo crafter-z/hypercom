@@ -30,6 +30,7 @@ export function applyHighlightSets(
       if (!rule.pattern) continue;
       try {
         if (rule.isRegex) {
+          if (rule.pattern.length > 200) continue;
           const regex = new RegExp(rule.pattern, 'g');
           let match: RegExpExecArray | null;
           while ((match = regex.exec(text)) !== null) {
@@ -97,7 +98,12 @@ export function applyHighlightSets(
 
 function buildStyle(rule: HighlightRule): string {
   const styles: string[] = [];
-  if (rule.color) styles.push(`color:${rule.color}`);
+  if (rule.color) {
+    // Only allow valid CSS color values (#hex, rgb, named colors)
+    if (/^#[0-9a-fA-F]{3,8}$/.test(rule.color) || /^(rgb|hsl)a?\(/.test(rule.color) || /^[a-z]+$/i.test(rule.color)) {
+      styles.push(`color:${rule.color}`);
+    }
+  }
   if (rule.bold) styles.push('font-weight:bold');
   if (rule.italic) styles.push('font-style:italic');
   return styles.join(';');

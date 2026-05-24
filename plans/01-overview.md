@@ -36,7 +36,7 @@
 │  Tauri Bridge   invoke / event          │
 ├─────────────────────────────────────────┤
 │  src-tauri/     Rust 逻辑层             │
-│  commands/      22 个 Tauri 命令        │
+│  commands/      29 个 Tauri 命令        │
 │  serial/        串口管理器              │
 │  config/        配置持久化              │
 │  logger/        日志写入器              │

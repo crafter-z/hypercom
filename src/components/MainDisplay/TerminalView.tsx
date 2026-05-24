@@ -1,5 +1,5 @@
-import React, { useRef, useEffect, useCallback, useMemo } from 'react';
-import type { TerminalLine, TerminalState } from '../../types';
+import React, { useRef, useEffect, useCallback } from 'react';
+import type { TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { useState } from 'react';
 import { applyHighlightSets } from '../../utils/highlightEngine';
@@ -7,22 +7,7 @@ import { useAppStore } from '../../stores/useAppStore';
 
 interface TerminalViewProps {
   portId: string;
-  terminal: TerminalState;
-}
-
-function generateMockLines(): TerminalLine[] {
-  const now = Date.now();
-  return [
-    { id: '1', timestamp: now - 10000, direction: 'RX', content: 'System start, version: 1.2.3', isHex: false },
-    { id: '2', timestamp: now - 9000, direction: 'RX', content: 'Heap size: 520KB, Stack: 8KB', isHex: false },
-    { id: '3', timestamp: now - 8000, direction: 'RX', content: 'Temperature high: 65.3°C', isHex: false },
-    { id: '4', timestamp: now - 7000, direction: 'RX', content: '41 42 43 44 45 46 47 48 | ABCDEFGH', isHex: true },
-    { id: '5', timestamp: now - 6000, direction: 'TX', content: 'AT+PING', isHex: false },
-    { id: '6', timestamp: now - 5000, direction: 'RX', content: '+PONG: OK', isHex: false },
-    { id: '7', timestamp: now - 4000, direction: 'RX', content: 'Sensor read failed! code=0x02', isHex: false },
-    { id: '8', timestamp: now - 3000, direction: 'RX', content: 'Line with keyword ALERT: Battery low!', isHex: false },
-    { id: '9', timestamp: now - 2000, direction: 'RX', content: '0A 0D 1B 7F 55 AA 10 20 30 40', isHex: true },
-  ];
+  terminal: TerminalState | undefined;
 }
 
 function hexToString(hex: string): string {
@@ -37,11 +22,15 @@ function stringToHex(str: string): string {
   return Array.from(str).map(c => c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')).join(' ');
 }
 
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
 const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
-  const mockLines = useMemo(() => generateMockLines(), []);
-  const lines = terminal?.lines?.length ? terminal.lines : mockLines;
+  const lines = terminal?.lines ?? [];
   const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
   const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
   const autoScrollRef = useRef(true);
@@ -84,11 +73,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     }
   }, [portId, terminal, setTerminalConfig]);
 
-  const formatTimestamp = (ts: number): string => {
-    const d = new Date(ts);
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
-  };
-
   const handleSelectAll = useCallback(() => {
     const sel = window.getSelection();
     if (sel && scrollRef.current) {
@@ -108,6 +92,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    const currentLines = useAppStore.getState().terminals[portId]?.lines ?? [];
     const items: ContextMenuEntry[] = [
       { label: '全选', onClick: handleSelectAll },
       { label: '复制', onClick: handleCopy },
@@ -122,18 +107,18 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
       }},
       { type: 'separator' },
       { label: '导出为 TXT', onClick: () => {
-        const text = lines.map(l => `[${formatTimestamp(l.timestamp)}] ${l.direction} ${l.content}`).join('\n');
+        const text = currentLines.map(l => `[${formatTimestamp(l.timestamp)}] ${l.direction} ${l.content}`).join('\n');
         navigator.clipboard.writeText(text);
       }},
       { label: '导出为 CSV', onClick: () => {
-        const csv = 'timestamp,direction,content\n' + lines.map(l =>
+        const csv = 'timestamp,direction,content\n' + currentLines.map(l =>
           `"${formatTimestamp(l.timestamp)}","${l.direction}","${l.content.replace(/"/g, '""')}"`
         ).join('\n');
         navigator.clipboard.writeText(csv);
       }},
     ];
     setContextMenu({ x: e.clientX, y: e.clientY, items });
-  }, [handleSelectAll, handleCopy]);
+  }, [handleSelectAll, handleCopy, portId]);
 
   const directionColor = (dir: string) => {
     if (dir === 'TX') return 'var(--terminal-tx-color)';

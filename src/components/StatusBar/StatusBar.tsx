@@ -28,14 +28,14 @@ const StatusBar: React.FC = () => {
       <div className="statusbar-left">
         <span className="statusbar-item">
           <span className="statusbar-dot" />
-          {systemStatus.status}
+          {systemStatus.status === 'high_load' ? '⚠ 高负载' : '● 运行正常'}
         </span>
         {activeTabId && (
           <span className="statusbar-item" style={{ opacity: 0.9 }}>{activeTabId}</span>
         )}
         <span className="statusbar-item">
           <MemoryStick size={12} />
-          {systemStatus.memoryUsedMB}MB / {systemStatus.memoryLimitMB}MB ({((systemStatus.memoryUsedMB / systemStatus.memoryLimitMB) * 100).toFixed(0)}%)
+          {systemStatus.memoryUsedMB}MB / {systemStatus.memoryLimitMb}MB ({systemStatus.memoryLimitMb ? ((systemStatus.memoryUsedMB / systemStatus.memoryLimitMb) * 100).toFixed(0) : '0'}%)
         </span>
         <span className="statusbar-item">
           <Cpu size={12} />

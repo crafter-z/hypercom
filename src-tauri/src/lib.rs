@@ -22,6 +22,8 @@ pub struct AppState {
     pub log_manager: std::sync::Mutex<logger::LogManager>,
     /// 存储管理器：负责 SQLite 数据库操作
     pub storage_manager: std::sync::Mutex<storage::StorageManager>,
+    /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）
+    pub system_info: std::sync::Mutex<sysinfo::System>,
 }
 
 impl AppState {
@@ -31,6 +33,7 @@ impl AppState {
             config_manager: std::sync::Mutex::new(config::ConfigManager::new()?),
             log_manager: std::sync::Mutex::new(logger::LogManager::new()),
             storage_manager: std::sync::Mutex::new(storage::StorageManager::new()?),
+            system_info: std::sync::Mutex::new(sysinfo::System::new()),
         })
     }
 }
@@ -68,6 +71,8 @@ pub fn run() {
             commands::stop_logging,
             commands::set_log_split_size,
             commands::set_log_filename_format,
+            commands::open_path,
+            commands::open_log_directory,
             // ===== 系统相关命令 =====
             commands::get_system_status,
             commands::prevent_screen_off,

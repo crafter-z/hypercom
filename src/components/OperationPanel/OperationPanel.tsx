@@ -4,7 +4,6 @@ import { useSerialData, useSerialConnection } from '../../hooks/useTauri';
 import { serialService, logService } from '../../services/tauri';
 import type { DataBits, Parity, StopBits, Handshake, LineEnding } from '../../types';
 import { save } from '@tauri-apps/plugin-dialog';
-import { open } from '@tauri-apps/plugin-shell';
 import {
   Send, Cable, Eraser, Pin, Clock,
   FileText, FolderOpen, FileSearch, Settings,
@@ -221,14 +220,13 @@ const OperationPanel: React.FC = () => {
     try {
       const files = await logService.getLogFiles();
       const match = files.find(f => f.port_id === activeTabId || f.path.includes(activeTabId));
-      if (match) { await open(match.path); }
+      if (match) { await logService.openPath(match.path); }
     } catch (e) { console.error('Failed to open log file:', e); }
   };
 
   const handleOpenLogDir = async () => {
     try {
-      const logDir = useAppStore.getState().config.logDirectory;
-      if (logDir) { await open(logDir); }
+      await logService.openLogDirectory();
     } catch (e) { console.error('Failed to open log dir:', e); }
   };
 
