@@ -1,9 +1,9 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
 import type { TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
-import { useState } from 'react';
 import { applyHighlightSets } from '../../utils/highlightEngine';
 import { useAppStore } from '../../stores/useAppStore';
+import { useVirtualizer } from '@tanstack/react-virtual';
 
 interface TerminalViewProps {
   portId: string;
@@ -42,11 +42,25 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     }
   }, [terminal?.scrollLocked]);
 
+  const virtualizer = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 22,           // ~14px font * 1.5 line-height + 1px*2 padding
+    overscan: 12,
+    getItemKey: (index) => lines[index]?.id ?? index,
+  });
+
   useEffect(() => {
-    if (scrollRef.current && autoScrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (lines.length === 0) {
+      virtualizer.measure();
     }
-  }, [lines.length]);
+  }, [lines.length, virtualizer]);
+
+  useEffect(() => {
+    if (autoScrollRef.current && lines.length > 0) {
+      virtualizer.scrollToIndex(lines.length - 1, { align: 'end', behavior: 'auto' });
+    }
+  }, [lines.length, virtualizer]);
 
   // Ctrl+Scroll to adjust font size
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -74,6 +88,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   }, [portId, terminal, setTerminalConfig]);
 
   const handleSelectAll = useCallback(() => {
+    // NOTE: with virtualization, only visible lines are selected. Use 导出为 TXT/CSV from context menu for full export.
     const sel = window.getSelection();
     if (sel && scrollRef.current) {
       const range = document.createRange();
@@ -134,32 +149,44 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
         onScroll={handleScroll}
         onWheel={handleWheel}
       >
-        {lines.map((line) => {
-          const displayText = terminal?.displayFormat === 'hex' && line.rawData
-            ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
-            : line.content;
-          return (
-          <div
-            key={line.id}
-            className="terminal-line"
-          >
-            {terminal?.showTimestamp !== false && (
-              <span className="terminal-timestamp">{formatTimestamp(line.timestamp)}</span>
-            )}
-            <span
-              className="terminal-direction"
-              style={{ color: directionColor(line.direction) }}
-            >
-              {line.direction}
-            </span>
-            <span className="terminal-content"
-              dangerouslySetInnerHTML={{
-                __html: applyHighlightSets(displayText, highlightRuleSets)
-              }}
-            />
-          </div>
-        )})}
-        <div style={{ height: 8 }} />
+        <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+          {virtualizer.getVirtualItems().map((vRow) => {
+            const line = lines[vRow.index];
+            const displayText = terminal?.displayFormat === 'hex' && line.rawData
+              ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
+              : line.content;
+            return (
+              <div
+                key={vRow.key}
+                data-index={vRow.index}
+                ref={virtualizer.measureElement}
+                className="terminal-line"
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${vRow.start}px)`,
+                }}
+              >
+                {terminal?.showTimestamp !== false && (
+                  <span className="terminal-timestamp">{formatTimestamp(line.timestamp)}</span>
+                )}
+                <span
+                  className="terminal-direction"
+                  style={{ color: directionColor(line.direction) }}
+                >
+                  {line.direction}
+                </span>
+                <span className="terminal-content"
+                  dangerouslySetInnerHTML={{
+                    __html: applyHighlightSets(displayText, highlightRuleSets)
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {contextMenu && (
