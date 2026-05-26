@@ -43,6 +43,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
   const autoScrollRef = useRef(true);
 
+  // Keep a stable ref to the latest lines array so virtualizer callbacks
+  // (getScrollElement, estimateSize, getItemKey) have stable identities
+  // across renders. Without this, each new function reference causes
+  // useVirtualizer's internal memos (getMeasurementOptions) to detect a
+  // dep change → onChange → notify() → rerender() DURING render → infinite loop.
+  const linesRef = useRef(lines);
+  linesRef.current = lines;
+
   // Sync store's scrollLocked to local ref (for OperationPanel toggle)
   useEffect(() => {
     if (terminal?.scrollLocked !== undefined) {
@@ -50,20 +58,22 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     }
   }, [terminal?.scrollLocked]);
 
+  // Stabilize virtualizer callbacks: closures over refs so function identity
+  // is stable (empty dep array). The refs are kept current on every render.
+  const getScrollElement = useCallback(() => scrollRef.current, []);
+  const estimateSize = useCallback(() => 22, []);
+  const getItemKey = useCallback((index: number) => linesRef.current[index]?.id ?? index, []);
+
   const virtualizer = useVirtualizer({
     count: lines.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 22,           // ~14px font * 1.5 line-height + 1px*2 padding
+    getScrollElement,
+    estimateSize,
     overscan: 12,
-    getItemKey: (index) => lines[index]?.id ?? index,
+    getItemKey,
+    useFlushSync: false,         // Prevent flushSync → synchronous render cascades
   });
 
-  useEffect(() => {
-    if (lines.length === 0) {
-      virtualizer.measure();
-    }
-  }, [lines.length, virtualizer]);
-
+  // Auto-scroll to bottom when new lines arrive
   useEffect(() => {
     if (autoScrollRef.current && lines.length > 0) {
       virtualizer.scrollToIndex(lines.length - 1, { align: 'end', behavior: 'auto' });
@@ -83,6 +93,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
       store.setConfig({ terminalFontSize: next });
     }
   }, []);
+
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const el = scrollRef.current;
@@ -96,7 +107,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   }, [portId, terminal, setTerminalConfig]);
 
   const handleSelectAll = useCallback(() => {
-    // NOTE: with virtualization, only visible lines are selected. Use 导出为 TXT/CSV from context menu for full export.
     const sel = window.getSelection();
     if (sel && scrollRef.current) {
       const range = document.createRange();
