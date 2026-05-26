@@ -148,6 +148,50 @@ const TabBar: React.FC<TabBarProps> = ({
 
   const tabIds = tabs.map(t => t.id);
 
+  // With ≤1 tab, drag-and-drop is meaningless. Rendering DndContext + PointerSensor
+  // adds document-level event listeners that can interfere with Sidebar's DnD
+  // when tabs are opened via double-click, causing rendering crashes.
+  // Skip DnD entirely when there's nothing to sort.
+  if (tabIds.length <= 1) {
+    const tab = tabs[0];
+    const isActive = tab?.id === activeTabId;
+    const ctxItems = tab ? getContextMenuItems(tab.id) : [];
+    return (
+      <div className="tab-bar">
+        {tab && (
+          <div
+            className={`tab-item${isActive ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
+            onClick={() => onTabClick(tab.id)}
+            onContextMenu={(e) => handleContextMenu(e, tab.id)}
+          >
+            <span
+              className="tab-status-dot"
+              style={{ background: isActive ? 'var(--text-link)' : 'var(--text-secondary)' }}
+            />
+            <span className="tab-title">{tab.title}</span>
+            {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
+            {!tab.isPinned && (
+              <span
+                className="tab-close"
+                onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
+              >
+                <X size={12} />
+              </span>
+            )}
+          </div>
+        )}
+        {contextMenu && (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            items={ctxItems}
+            onClose={handleCloseContextMenu}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
