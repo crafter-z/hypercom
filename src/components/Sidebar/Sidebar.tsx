@@ -306,7 +306,11 @@ const Sidebar: React.FC = () => {
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
 
-  const handleOpenTab = useCallback((portId: string) => { openTab(portId); }, [openTab]);
+  const handleOpenTab = useCallback((portId: string) => {
+    if (useAppStore.getState().activeTabId === portId) return;
+    // Defer openTab to next microtask to decouple from @dnd-kit event processing.
+    queueMicrotask(() => openTab(portId));
+  }, [openTab]);
 
   const handleToggleConnect = useCallback((portId: string) => {
     toggleConnection(portId);

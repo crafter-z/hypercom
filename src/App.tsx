@@ -8,6 +8,39 @@ import ConfigModal from './components/ConfigModal/ConfigModal';
 import { useAppInit } from './hooks/useTauri';
 import { useAppStore } from './stores/useAppStore';
 
+// ==================== Error Boundary ====================
+
+interface ErrorBoundaryState { hasError: boolean; error: Error | null; }
+class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false, error: null };
+  static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[AppErrorBoundary] Render crash:', error, info.componentStack);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1e1e1e', color: '#ccc', fontFamily: 'Consolas, monospace', fontSize: 14, flexDirection: 'column', gap: 12 }}>
+          <div style={{ color: '#f48771', fontSize: 18, fontWeight: 'bold' }}>渲染错误</div>
+          <div style={{ maxWidth: 600, background: '#2d2d30', padding: 16, borderRadius: 6, overflow: 'auto', maxHeight: '50vh' }}>
+            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+              {this.state.error?.message}
+            </pre>
+          </div>
+          <button
+            className="btn btn-primary"
+            style={{ marginTop: 8 }}
+            onClick={() => this.setState({ hasError: false, error: null })}
+          >
+            重试
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const SidebarResizeHandle: React.FC = () => {
   const setUIState = useAppStore((s) => s.setUIState);
   const [dragging, setDragging] = useState(false);
@@ -90,37 +123,39 @@ const App: React.FC = () => {
   }, [memoryLimitMb]);
 
   return (
-    <ThemeProvider>
-      <div
-        style={{
-          width: '100vw',
-          height: '100vh',
-          minWidth: 900,
-          minHeight: 600,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-          background: 'var(--bg-primary)',
-        }}
-      >
-        <TitleBar />
+    <AppErrorBoundary>
+      <ThemeProvider>
+        <div
+          style={{
+            width: '100vw',
+            height: '100vh',
+            minWidth: 900,
+            minHeight: 600,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            background: 'var(--bg-primary)',
+          }}
+        >
+          <TitleBar />
 
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
-          <div style={{ width: sidebarWidth, flexShrink: 0, overflow: 'hidden' }}>
-            <Sidebar />
-          </div>
-          <SidebarResizeHandle />
+          <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0 }}>
+            <div style={{ width: sidebarWidth, flexShrink: 0, overflow: 'hidden' }}>
+              <Sidebar />
+            </div>
+            <SidebarResizeHandle />
 
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 300 }}>
-            <MainDisplay />
-            <OperationPanel />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 300 }}>
+              <MainDisplay />
+              <OperationPanel />
+            </div>
           </div>
+
+          <StatusBar />
+          <ConfigModal />
         </div>
-
-        <StatusBar />
-        <ConfigModal />
-      </div>
-    </ThemeProvider>
+      </ThemeProvider>
+    </AppErrorBoundary>
   );
 };
 
