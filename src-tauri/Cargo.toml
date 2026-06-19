@@ -37,6 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # 日志
 log = "0.4"
 env_logger = "0.11"
+encoding_rs = "0.8"
 
 # 目录
 dirs = "5"

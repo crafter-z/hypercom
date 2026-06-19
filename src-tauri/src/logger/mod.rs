@@ -1,19 +1,19 @@
 /**
  * 日志管理模块 (Log Manager)
  * 负责串口通信日志的写入、分片、另存等操作
- * 
+ *
  * 设计要点:
  * - 使用 BufWriter 异步写入，减少磁盘IO阻塞
  * - 支持按日期或大小自动分片
  * - 支持字符串/HEX/二进制三种格式
  * - 每个串口对应独立的日志文件
  */
-
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
+use encoding_rs::GBK;
 use serde::{Deserialize, Serialize};
 
 /// 文件名模板默认值，与前端 defaultConfig.logFilenameFormat 保持一致。
@@ -30,9 +30,6 @@ pub struct LogFileInfo {
 
 /// 单个串口的日志写入器
 pub struct PortLogWriter {
-    /// 端口标识；当前仅用于日志输出（HashMap key 已经编码 port_id），保留以便调试。
-    #[allow(dead_code)]
-    pub port_id: String,
     pub file_path: PathBuf,
     pub writer: BufWriter<fs::File>,
     pub current_size: u64,
@@ -47,11 +44,25 @@ impl PortLogWriter {
     /// - "binary": 原始字节直写，不附元信息。
     /// - 其他（默认 string）: 按 `encoding` 解码为文本后写入。
     ///   GBK/ISO-8859-1 走显式映射，UTF-8/ASCII/未知值回退到 `from_utf8_lossy`。
-    pub fn write_line(&mut self, timestamp: &str, direction: &str, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write_line(
+        &mut self,
+        timestamp: &str,
+        direction: &str,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
         match self.format.as_str() {
             "hex" => {
-                let hex_str = data.iter().map(|b| format!("{:02X} ", b)).collect::<String>();
-                writeln!(self.writer, "[{}] {} {}", timestamp, direction, hex_str.trim())?;
+                let hex_str = data
+                    .iter()
+                    .map(|b| format!("{:02X} ", b))
+                    .collect::<String>();
+                writeln!(
+                    self.writer,
+                    "[{}] {} {}",
+                    timestamp,
+                    direction,
+                    hex_str.trim()
+                )?;
             }
             "binary" => {
                 self.writer.write_all(data)?;
@@ -78,45 +89,16 @@ impl PortLogWriter {
 /// - 其他（UTF-8 / ASCII / 未知）: `String::from_utf8_lossy`。
 fn decode_bytes(bytes: &[u8], encoding: &str) -> String {
     match encoding.to_ascii_uppercase().as_str() {
-        "GBK" | "GB2312" | "GB18030" => {
-            // GBK 是 GB18030 的子集；用 GB18030 解码可兼容两者。
-            // 不引入额外依赖：实现一个最小 GBK→UTF-8 转换。
-            decode_gbk_lossy(bytes)
-        }
+        "GBK" | "GB2312" | "GB18030" => decode_gbk_lossy(bytes),
         "ISO-8859-1" | "LATIN1" => bytes.iter().map(|&b| b as char).collect(),
         // ASCII 是 UTF-8 子集，UTF-8 直接走 lossy。
         _ => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
 
-/// 最小化 GBK 解码：双字节首字节 0x81-0xFE，次字节 0x40-0xFE（不含 0x7F）。
-/// 单字节 ASCII 直接通过；非法序列替换为 U+FFFD。
-/// 不追求完美映射 — 真正的 GBK→Unicode 表需 ~22KB 数据；此处保证不丢字节边界，
-/// 同时把可识别为 ASCII 的字节正确解码（这是 GBK 数据中常见的控制字符）。
+/// GBK 解码：有效 GBK 字节转换为 Unicode；非法序列替换为 U+FFFD。
 fn decode_gbk_lossy(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b < 0x80 {
-            out.push(b as char);
-            i += 1;
-        } else if b >= 0x81 && b <= 0xFE && i + 1 < bytes.len() {
-            let b2 = bytes[i + 1];
-            if (0x40..=0xFE).contains(&b2) && b2 != 0x7F {
-                // 不做精确映射 — 输出占位符 + 16 进制，保证可读且字节边界正确
-                out.push('\u{FFFD}');
-                i += 2;
-            } else {
-                out.push('\u{FFFD}');
-                i += 1;
-            }
-        } else {
-            out.push('\u{FFFD}');
-            i += 1;
-        }
-    }
-    out
+    GBK.decode(bytes).0.into_owned()
 }
 
 pub struct LogManager {
@@ -140,7 +122,7 @@ impl LogManager {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("hypercom")
             .join("logs");
-        
+
         let _ = fs::create_dir_all(&log_directory);
 
         Self {
@@ -205,7 +187,12 @@ impl LogManager {
     }
 
     /// 为指定串口创建带显式 encoding 的写入器
-    pub fn create_writer_with_encoding(&mut self, port_id: &str, format: &str, encoding: &str) -> anyhow::Result<()> {
+    pub fn create_writer_with_encoding(
+        &mut self,
+        port_id: &str,
+        format: &str,
+        encoding: &str,
+    ) -> anyhow::Result<()> {
         let filename = self.format_filename(port_id);
         let file_path = self.log_directory.join(format!("{}.log", filename));
 
@@ -215,7 +202,6 @@ impl LogManager {
             .open(&file_path)?;
 
         let writer = PortLogWriter {
-            port_id: port_id.to_string(),
             file_path: file_path.clone(),
             writer: BufWriter::new(file),
             current_size: 0,
@@ -224,13 +210,24 @@ impl LogManager {
         };
 
         self.writers.insert(port_id.to_string(), writer);
-        log::info!("Log writer created for {} at {:?} (encoding={})", port_id, file_path, encoding);
+        log::info!(
+            "Log writer created for {} at {:?} (encoding={})",
+            port_id,
+            file_path,
+            encoding
+        );
         Ok(())
     }
 
     /// 写入日志。自动短路：auto_save=false 或 port_id 无 writer 时直接返回 Ok。
     /// 单字段同步：避免前端 / 后端状态漂移导致的写入泄漏（defects #53）。
-    pub fn write(&mut self, port_id: &str, timestamp: &str, direction: &str, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write(
+        &mut self,
+        port_id: &str,
+        timestamp: &str,
+        direction: &str,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
         if !self.auto_save {
             return Ok(());
         }
@@ -252,7 +249,11 @@ impl LogManager {
                     }
                     Err(e) => log::warn!("Log split into_inner failed for {}: {}", port_id, e),
                 }
-                log::info!("Log split: {} closed at {} bytes", port_id, old_path.display());
+                log::info!(
+                    "Log split: {} closed at {} bytes",
+                    port_id,
+                    old_path.display()
+                );
                 self.create_writer_with_encoding(port_id, &format, &encoding)?;
                 log::info!("Log split: new file created for {}", port_id);
             }
@@ -275,7 +276,10 @@ impl LogManager {
             fs::copy(&writer.file_path, target_path)?;
             log::info!("Log saved from {:?} to {}", writer.file_path, target_path);
         } else {
-            anyhow::bail!("No log writer exists for port '{}'. Start logging first.", port_id);
+            anyhow::bail!(
+                "No log writer exists for port '{}'. Start logging first.",
+                port_id
+            );
         }
         Ok(())
     }
@@ -285,7 +289,8 @@ impl LogManager {
     /// 2. 文件名按"-"切分取首段（向后兼容默认模板，但不可靠）
     pub fn list_files(&self) -> anyhow::Result<Vec<LogFileInfo>> {
         // 反向索引：file_path → port_id（活跃 writer）
-        let active_index: HashMap<PathBuf, String> = self.writers
+        let active_index: HashMap<PathBuf, String> = self
+            .writers
             .iter()
             .map(|(pid, w)| (w.file_path.clone(), pid.clone()))
             .collect();
@@ -308,7 +313,8 @@ impl LogManager {
                     files.push(LogFileInfo {
                         path: path.to_string_lossy().to_string(),
                         port_id,
-                        created_at: metadata.created()
+                        created_at: metadata
+                            .created()
                             .ok()
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs() as i64)
@@ -377,7 +383,8 @@ mod tests {
         let dir = test_dir("hex");
         let mut mgr = test_manager(&dir);
         mgr.create_writer("COM1", "hex").unwrap();
-        mgr.write("COM1", "10:00:01", "TX", &[0x48, 0x65, 0x6C, 0x6C, 0x6F]).unwrap();
+        mgr.write("COM1", "10:00:01", "TX", &[0x48, 0x65, 0x6C, 0x6C, 0x6F])
+            .unwrap();
         mgr.close_writer("COM1").unwrap();
         let files = mgr.list_files().unwrap();
         let content = fs::read_to_string(&files[0].path).unwrap();
@@ -389,9 +396,12 @@ mod tests {
     fn test_should_split() {
         let dir = test_dir("split");
         let file_path = dir.join("split_test.log");
-        let file = OpenOptions::new().create(true).append(true).open(&file_path).unwrap();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .unwrap();
         let mut writer = PortLogWriter {
-            port_id: "test".into(),
             file_path: file_path.clone(),
             writer: BufWriter::new(file),
             current_size: 0,
@@ -416,7 +426,12 @@ mod tests {
         let name = &files[0].path;
         assert!(name.contains("COM5"), "Expected COM5 in: {}", name);
         let date_part = chrono::Local::now().format("%Y-%m-%d").to_string();
-        assert!(name.contains(&date_part), "Expected {} in: {}", date_part, name);
+        assert!(
+            name.contains(&date_part),
+            "Expected {} in: {}",
+            date_part,
+            name
+        );
         mgr.close_writer("COM5").unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
@@ -465,12 +480,16 @@ mod tests {
         let mut mgr = test_manager(&dir);
         mgr.create_writer("COM1", "string").unwrap();
         mgr.set_auto_save(false);
-        mgr.write("COM1", "10:00", "RX", b"should_not_appear\n").unwrap();
+        mgr.write("COM1", "10:00", "RX", b"should_not_appear\n")
+            .unwrap();
         mgr.close_writer("COM1").unwrap();
         let files = mgr.list_files().unwrap();
         let content = fs::read_to_string(&files[0].path).unwrap();
-        assert!(!content.contains("should_not_appear"),
-                "auto_save=false should short-circuit write, but file contains: {:?}", content);
+        assert!(
+            !content.contains("should_not_appear"),
+            "auto_save=false should short-circuit write, but file contains: {:?}",
+            content
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -484,9 +503,11 @@ mod tests {
         mgr.create_writer("COM7", "string").unwrap();
         let files = mgr.list_files().unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].port_id, "COM7",
-                   "port_id should resolve to COM7 via writer registry, not 'log_log'. Got: {}",
-                   files[0].port_id);
+        assert_eq!(
+            files[0].port_id, "COM7",
+            "port_id should resolve to COM7 via writer registry, not 'log_log'. Got: {}",
+            files[0].port_id
+        );
         mgr.close_writer("COM7").unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
@@ -498,14 +519,30 @@ mod tests {
         let mut mgr = test_manager(&dir);
         mgr.set_default_encoding("ISO-8859-1");
         mgr.create_writer("COM2", "string").unwrap();
-        mgr.write("COM2", "10:00", "RX", &[b'h', b'i', 0xE9]).unwrap();
+        mgr.write("COM2", "10:00", "RX", &[b'h', b'i', 0xE9])
+            .unwrap();
         mgr.close_writer("COM2").unwrap();
         let files = mgr.list_files().unwrap();
         let content = fs::read_to_string(&files[0].path).unwrap();
-        assert!(content.contains("hi"),
-                "expected 'hi' in: {}", content);
-        assert!(content.contains('é') || content.contains("\u{00E9}"),
-                "expected 'é' (U+00E9) in ISO-8859-1 decoded output, got: {}", content);
+        assert!(content.contains("hi"), "expected 'hi' in: {}", content);
+        assert!(
+            content.contains('é') || content.contains("\u{00E9}"),
+            "expected 'é' (U+00E9) in ISO-8859-1 decoded output, got: {}",
+            content
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_gbk_decoding_decodes_chinese_characters() {
+        // Given: common Chinese text encoded as GBK bytes.
+        let (bytes, _, _) = GBK.encode("你好");
+
+        // When: logger decodes the byte stream in GBK mode.
+        let decoded = decode_gbk_lossy(&bytes);
+
+        // Then: the readable Chinese text is preserved, not replaced by U+FFFD.
+        assert_eq!(decoded, "你好");
+        assert!(!decoded.contains('\u{FFFD}'));
     }
 }

@@ -1637,6 +1637,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs 5.0.1",
+ "encoding_rs",
  "env_logger",
  "log",
  "once_cell",
