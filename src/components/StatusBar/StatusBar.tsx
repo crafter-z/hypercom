@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
-import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle } from 'lucide-react';
+import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap } from 'lucide-react';
 import { useSystemStatus } from '../../hooks/useTauri';
 
 const StatusBar: React.FC = () => {
   const systemStatus = useAppStore((s) => s.systemStatus);
   const trafficStats = useAppStore((s) => s.trafficStats);
   const activeTabId = useAppStore((s) => s.activeTabId);
+  const ports = useAppStore((s) => s.ports);
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
+  const connectedCount = ports.filter(p => p.status === 'connected').length;
 
   useSystemStatus(5000);
 
@@ -30,6 +32,12 @@ const StatusBar: React.FC = () => {
           <span className="statusbar-dot" />
           {systemStatus.status === 'high_load' ? '⚠ 高负载' : '● 运行正常'}
         </span>
+        {connectedCount > 0 && (
+          <span className="statusbar-item" style={{ color: 'var(--status-connected)' }}>
+            <PlugZap size={12} />
+            {connectedCount} 已连接
+          </span>
+        )}
         {activeTabId && (
           <span className="statusbar-item" style={{ opacity: 0.9 }}>{activeTabId}</span>
         )}

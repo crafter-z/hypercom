@@ -1,0 +1,61 @@
+/* ==================== Titlebar ==================== */
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: var(--titlebar-height);
+  background: var(--bg-titlebar);
+  padding: 0 12px;
+  user-select: none;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.titlebar-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.titlebar-version {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.titlebar-separator {
+  width: 1px;
+  height: 16px;
+  background: var(--border-color);
+  margin: 0 8px;
+}
+
+.titlebar-control {
+  width: 46px !important;
+  height: var(--titlebar-height) !important;
+  border-radius: 0 !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.titlebar-control:hover {
+  background: var(--bg-hover);
+}
+
+.titlebar-close:hover {
+  background: #e81123 !important;
+  color: #fff !important;
+}

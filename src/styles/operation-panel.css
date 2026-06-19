@@ -1,0 +1,186 @@
+/* ==================== Operation Panel ==================== */
+.operation-panel {
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: height var(--transition-normal);
+}
+
+.operation-panel.collapsed {
+  height: 32px !important;
+  overflow: hidden;
+}
+
+.operation-panel:not(.collapsed) {
+  height: var(--operation-panel-height);
+  min-height: 200px;
+}
+
+.operation-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.operation-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.operation-panel-port {
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.operation-panel-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  padding: 8px 12px;
+  gap: 12px;
+  min-height: 0;
+}
+
+.op-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.op-section-send {
+  flex: 1.2;
+  min-width: 160px;
+}
+
+.op-section-rules {
+  flex: 1;
+  min-width: 140px;
+}
+
+.op-section-params {
+  flex: 1.3;
+  min-width: 180px;
+}
+
+.op-send-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.op-send-input {
+  flex: 1;
+  min-height: 52px !important;
+}
+
+.op-send-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.op-send-btn {
+  min-width: 56px;
+  padding: 6px 14px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+}
+
+.op-send-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.op-btn-row {
+  display: flex;
+  gap: 6px;
+}
+
+.op-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.op-rule-select {
+  flex: 1;
+  font-size: 11px;
+  padding: 2px 16px 2px 4px;
+}
+
+.op-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 44px;
+  flex-shrink: 0;
+}
+
+.op-loop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.op-delay-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.op-checkbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.op-radio-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.op-params-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+}
+
+.op-param-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.op-param-select {
+  flex: 1;
+  font-size: 11px;
+  padding: 2px 14px 2px 4px;
+}
+
+/* ==================== Panel Card Title ==================== */
+.panel-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}

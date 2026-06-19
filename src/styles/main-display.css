@@ -1,0 +1,50 @@
+/* ==================== Main Display ==================== */
+.main-display {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.main-display-toolbar {
+  display: flex;
+  align-items: center;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 2px 8px;
+  gap: 4px;
+}
+
+.main-display-info {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
+.pane-container-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  outline: none;
+}
+
+.pane-container-inner.pane-focused {
+  outline: 1px solid var(--bg-active);
+  outline-offset: -1px;
+}
+
+/* ==================== Pane Resize Handle ==================== */
+.pane-resize-handle {
+  flex-shrink: 0;
+  background: var(--border-color);
+  transition: background var(--transition-fast);
+  z-index: 10;
+}
+
+.pane-resize-handle:hover,
+.pane-resize-handle.dragging {
+  background: var(--bg-active) !important;
+}

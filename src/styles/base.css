@@ -1,0 +1,340 @@
+/**
+ * HyperCom Base Styles
+ * CSS variables (dark + light themes), reset, form controls, shared utilities
+ */
+
+/* ==================== CSS Variables ==================== */
+:root {
+  /* Dark theme (default) */
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-tertiary: #2d2d30;
+  --bg-hover: #3c3c3c;
+  --bg-active: #094771;
+  --bg-input: #3c3c3c;
+  --bg-border: #3e3e42;
+  --bg-titlebar: #323233;
+  --bg-sidebar: #252526;
+  --bg-statusbar: #007acc;
+  --bg-panel: #1e1e1e;
+  --accent-color: #4fc3f7;
+  --bg-image: none;
+
+  --text-primary: #cccccc;
+  --text-secondary: #858585;
+  --text-active: #ffffff;
+  --text-link: #4fc1ff;
+  --text-error: #f48771;
+  --text-warning: #dcdcaa;
+  --text-success: #4ec9b0;
+
+  --status-disconnected: #4ec9b0;
+  --status-error: #dcdcaa;
+  --status-connected: #f48771;
+
+  --terminal-tx-color: #dcdcaa;
+  --terminal-rx-color: #4fc1ff;
+
+  --border-color: #3e3e42;
+  --border-radius: 4px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.4);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.5);
+
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-terminal: 'Consolas', 'Monaco', 'Courier New', monospace;
+  --font-size-ui: 13px;
+  --font-size-terminal: 14px;
+  --line-height-terminal: 1.5;
+
+  --titlebar-height: 36px;
+  --sidebar-width: 260px;
+  --statusbar-height: 24px;
+  --operation-panel-height: 280px;
+  --tab-height: 32px;
+
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+}
+
+/* Light theme */
+:root[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f3f3;
+  --bg-tertiary: #e8e8e8;
+  --bg-hover: #d6d6d6;
+  --bg-active: #0064b8;
+  --bg-input: #ffffff;
+  --bg-border: #d4d4d4;
+  --bg-titlebar: #e8e8e8;
+  --bg-sidebar: #f3f3f3;
+  --bg-statusbar: #007acc;
+  --bg-panel: #ffffff;
+  --accent-color: #0288d1;
+
+  --text-primary: #333333;
+  --text-secondary: #666666;
+  --text-active: #000000;
+  --text-link: #0066cc;
+  --text-error: #d32f2f;
+  --text-warning: #b8860b;
+  --text-success: #2e7d32;
+
+  --status-disconnected: #2e7d32;
+  --status-error: #b8860b;
+  --status-connected: #d32f2f;
+
+  --terminal-tx-color: #b8860b;
+  --terminal-rx-color: #0066cc;
+
+  --border-color: #d4d4d4;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.1);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.15);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+/* ==================== Reset ==================== */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-ui);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  background-image: var(--bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==================== Scrollbar ==================== */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #5a5a5a;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #7a7a7a;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:root[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #e8e8e8;
+}
+
+:root[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #b0b0b0;
+}
+
+:root[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #888888;
+}
+
+/* ==================== Buttons ==================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: var(--font-size-ui);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-secondary);
+}
+
+.btn:active {
+  background: var(--bg-active);
+  color: var(--text-active);
+}
+
+.btn-primary {
+  background: var(--bg-active);
+  border-color: var(--bg-active);
+  color: var(--text-active);
+}
+
+.btn-primary:hover {
+  background: #106ebe;
+}
+
+.btn-danger {
+  border-color: var(--text-error);
+  color: var(--text-error);
+}
+
+.btn-danger:hover {
+  background: var(--text-error);
+  color: var(--text-active);
+  border-color: var(--text-error);
+}
+
+.btn-icon {
+  padding: 4px;
+  width: 28px;
+  height: 28px;
+}
+
+.btn-sm {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.btn-icon.btn-sm {
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+}
+
+.btn.active {
+  background: var(--bg-active);
+  color: var(--text-active);
+}
+
+/* ==================== Input ==================== */
+.input {
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--font-size-ui);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.input:focus {
+  border-color: var(--bg-active);
+}
+
+.input::placeholder {
+  color: var(--text-secondary);
+}
+
+textarea.input {
+  font-family: var(--font-terminal);
+  resize: none;
+}
+
+/* ==================== Select ==================== */
+.select {
+  padding: 4px 24px 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--font-size-ui);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23858585' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+}
+
+.select:focus {
+  border-color: var(--bg-active);
+  outline: none;
+}
+
+/* ==================== Checkbox ==================== */
+.checkbox-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: var(--font-size-ui);
+  color: var(--text-primary);
+}
+
+.checkbox-wrapper input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--bg-active);
+  cursor: pointer;
+}
+
+/* ==================== Status Dot ==================== */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.disconnected { background: var(--status-disconnected); }
+.status-dot.error { background: var(--status-error); }
+.status-dot.connected { background: var(--status-connected); }
+
+/* ==================== Dividers ==================== */
+.divider {
+  width: 1px;
+  background: var(--border-color);
+  align-self: stretch;
+  margin: 0 8px;
+}
+
+.divider-h {
+  height: 1px;
+  background: var(--border-color);
+  margin: 8px 0;
+}
+
+/* ==================== Dragging ==================== */
+.dragging {
+  opacity: 0.5;
+}
+
+/* ==================== Animations ==================== */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.2s ease;
+}

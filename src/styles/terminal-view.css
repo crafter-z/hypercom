@@ -1,0 +1,101 @@
+/* ==================== Terminal ==================== */
+.terminal-view-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.terminal-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  font-family: var(--font-terminal);
+  font-size: var(--font-size-terminal);
+  line-height: var(--line-height-terminal);
+  cursor: text;
+  user-select: text;
+}
+
+.terminal-line {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+}
+
+.terminal-timestamp {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  user-select: none;
+  font-size: calc(var(--font-size-terminal) * 0.85);
+  min-width: 80px;
+}
+
+.terminal-direction {
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 24px;
+  user-select: none;
+  font-size: calc(var(--font-size-terminal) * 0.85);
+}
+
+.terminal-content {
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.terminal-toolbar-title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.terminal-toolbar-info {
+  color: var(--text-secondary);
+}
+
+.terminal-toolbar-label {
+  color: var(--text-secondary);
+}
+
+.terminal-toolbar-select {
+  font-size: 11px;
+  padding: 1px 16px 1px 4px;
+}
+
+.terminal-empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.terminal-empty-state.drop-active {
+  background: var(--bg-active);
+  color: var(--text-active);
+  outline: 2px dashed var(--accent-color, #4fc3f7);
+  outline-offset: -4px;
+}
+
+/* Terminal-specific: always visible scrollbar */
+.terminal-view::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+.terminal-view::-webkit-scrollbar-thumb {
+  background: #5a5a5a;
+}

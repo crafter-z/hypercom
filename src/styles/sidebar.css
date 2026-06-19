@@ -1,0 +1,265 @@
+/* ==================== Sidebar ==================== */
+.sidebar {
+  height: 100%;
+  background: var(--bg-sidebar);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+
+.sidebar-resize-handle {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+  z-index: 10;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.dragging {
+  background: var(--bg-active);
+}
+
+.sidebar-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sidebar-toolbar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.sidebar-toolbar-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  position: relative;
+}
+
+.sidebar-search-icon {
+  position: absolute;
+  left: 14px;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.sidebar-search-input {
+  width: 100%;
+  padding: 4px 8px 4px 28px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.sidebar-search-input:focus {
+  border-color: var(--bg-active);
+}
+
+.sidebar-search-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.sidebar-search-clear {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 2px;
+}
+
+.sidebar-search-clear:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.sidebar-section {
+  margin-top: 4px;
+}
+
+.sidebar-section-header {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+}
+
+.sidebar-add-group {
+  padding: 8px 10px;
+}
+
+.sidebar-add-group-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* ==================== Port Item ==================== */
+.port-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  border-left: 3px solid transparent;
+}
+
+.port-item:hover {
+  background: var(--bg-hover);
+}
+
+.port-item-drag {
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  opacity: 0.4;
+  padding: 2px;
+  flex-shrink: 0;
+}
+.port-item-drag:hover { opacity: 0.8; }
+.port-item-drag:active { cursor: grabbing; }
+
+.port-item-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.port-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.port-item-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.port-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.port-item-alias {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-item-badge {
+  font-size: 9px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  padding: 0 3px;
+  line-height: 1;
+}
+
+.port-item-meta {
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.port-item-baud {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.port-connect-btn {
+  color: var(--text-secondary);
+  transition: color var(--transition-fast);
+}
+
+.port-connect-btn.connected {
+  color: var(--status-connected);
+}
+
+.port-connect-btn:not(.connected) {
+  color: var(--status-disconnected);
+}
+
+/* ==================== Port Group ==================== */
+.port-group {
+  margin-bottom: 2px;
+}
+
+.port-group.drop-active {
+  outline: 2px dashed var(--accent-color, #4fc3f7);
+  outline-offset: -2px;
+  border-radius: var(--border-radius);
+}
+
+.port-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  transition: background var(--transition-fast);
+}
+
+.port-group-header:hover {
+  background: var(--bg-hover);
+}
+
+.port-group-chevron {
+  transition: transform 0.2s;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.port-group-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.port-group-count {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.port-group-list {
+  /* Sub-items rendered as port-item */
+}
