@@ -1,0 +1,134 @@
+import { useEffect, useRef } from 'react';
+import { useRuleStore } from '../../../stores/useRuleStore';
+import type { SendCommand } from '../../../types';
+
+export interface UseCyclicSendOptions {
+  activeTabId: string | null;
+  /** Commands of the active send-command set — used for the initial guard. */
+  commands: SendCommand[];
+  /** Store-driven loop flag (isLoopSending). The loop runs while this is true. */
+  isLooping: boolean;
+  isPortActive: boolean;
+  isConnected: boolean;
+  activeSendCommandSetId: string | null;
+  loopInterval: number;
+  sendData: (portId: string, data: string, isHex: boolean, lineEnding: string) => Promise<number>;
+  setOpState: (partial: { isLoopSending?: boolean }) => void;
+}
+
+export interface UseCyclicSendReturn {
+  isLooping: boolean;
+  startLoop: () => void;
+  stopLoop: () => void;
+  currentCmdIdx: number;
+}
+
+/**
+ * Cyclic send state machine — extracted from OperationPanel.
+ *
+ * Encapsulates the recursive-setTimeout loop that iterates over the active
+  * send-command set. The loop is driven by `isLooping` (store's isLoopSending);
+ * `startLoop` / `stopLoop` are thin wrappers that flip that store flag.
+ *
+ * Inside the loop, the active command set is re-read from the store on every
+ * tick so that edits to commands / isLoop / loopDelay take effect immediately
+ * (same behaviour as the original inline implementation).
+ */
+export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendReturn {
+  const {
+    activeTabId,
+    commands,
+    isLooping,
+    isPortActive,
+    isConnected,
+    activeSendCommandSetId,
+    loopInterval,
+    sendData,
+    setOpState,
+  } = options;
+
+  const loopRef = useRef<{
+    timeoutId: ReturnType<typeof setTimeout> | null;
+    currentCmdIdx: number;
+    stopped: boolean;
+  }>({
+    timeoutId: null,
+    currentCmdIdx: 0,
+    stopped: false,
+  });
+
+  useEffect(() => {
+    const ref = loopRef.current;
+    if (!isLooping || !isPortActive || !isConnected) {
+      ref.stopped = true;
+      if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
+      return;
+    }
+
+    // Initial guard — if the active set has no commands, bail out.
+    if (commands.length === 0) {
+      setOpState({ isLoopSending: false });
+      return;
+    }
+
+    ref.stopped = false;
+    ref.currentCmdIdx = 0;
+
+    const sendNext = async () => {
+      if (ref.stopped || !activeTabId) return;
+      // Re-read from store for freshness (same as original behaviour).
+      const store = useRuleStore.getState();
+      const currentSet = store.sendCommandSets.find(s => s.id === store.activeSendCommandSetId);
+      if (!currentSet || currentSet.commands.length === 0) {
+        setOpState({ isLoopSending: false });
+        return;
+      }
+      const cmd = currentSet.commands[ref.currentCmdIdx % currentSet.commands.length];
+
+      try {
+        await sendData(
+          activeTabId,
+          cmd.content,
+          cmd.type === 'hex',
+          cmd.appendLineEnding,
+        );
+
+        const nextIdx = ref.currentCmdIdx + 1;
+        if (nextIdx >= currentSet.commands.length) {
+          // Completed one full loop.
+          if (!currentSet.isLoop) {
+            setOpState({ isLoopSending: false });
+            ref.stopped = true;
+            return;
+          }
+        }
+        ref.currentCmdIdx = nextIdx;
+
+        const delay = currentSet.isLoop && nextIdx >= currentSet.commands.length
+          ? (currentSet.loopDelay || loopInterval)
+          : cmd.delay ?? loopInterval;
+
+        ref.timeoutId = setTimeout(sendNext, delay);
+      } catch (err) {
+        console.warn('[useCyclicSend] Cyclic send failed:', err);
+        ref.timeoutId = setTimeout(sendNext, loopInterval);
+      }
+    };
+
+    ref.timeoutId = setTimeout(sendNext, 100);
+    return () => {
+      ref.stopped = true;
+      if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
+    };
+  }, [isLooping, isPortActive, isConnected, activeSendCommandSetId, commands.length, loopInterval, activeTabId, sendData, setOpState]);
+
+  const startLoop = () => setOpState({ isLoopSending: true });
+  const stopLoop = () => setOpState({ isLoopSending: false });
+
+  return {
+    isLooping,
+    startLoop,
+    stopLoop,
+    currentCmdIdx: loopRef.current.currentCmdIdx,
+  };
+}
