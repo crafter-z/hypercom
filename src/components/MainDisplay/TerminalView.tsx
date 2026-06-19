@@ -3,25 +3,16 @@ import type { TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { applyHighlightSets } from '../../utils/highlightEngine';
 import { useAppStore } from '../../stores/useAppStore';
+import { useRuleStore } from '../../stores/useRuleStore';
+import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { save } from '@tauri-apps/plugin-dialog';
 import { logService } from '../../services/tauri';
+import { hexToString, stringToHex } from '../../utils/hexUtils';
 
 interface TerminalViewProps {
   portId: string;
   terminal: TerminalState | undefined;
-}
-
-function hexToString(hex: string): string {
-  const bytes = hex.trim().split(/\s+/);
-  return bytes.map(b => {
-    const code = parseInt(b, 16);
-    return isNaN(code) ? '?' : String.fromCharCode(code);
-  }).join('');
-}
-
-function stringToHex(str: string): string {
-  return Array.from(str).map(c => c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')).join(' ');
 }
 
 function formatTimestamp(ts: number): string {
@@ -39,8 +30,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const lines = terminal?.lines ?? [];
-  const highlightRuleSets = useAppStore((s) => s.highlightRuleSets);
-  const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
+  const highlightRuleSets = useRuleStore((s) => s.highlightRuleSets);
+  const setTerminalConfig = useTerminalStore((s) => s.setTerminalConfig);
   const autoScrollRef = useRef(true);
 
   // Keep a stable ref to the latest lines array so virtualizer callbacks
@@ -61,7 +52,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   // Stabilize virtualizer callbacks: closures over refs so function identity
   // is stable (empty dep array). The refs are kept current on every render.
   const getScrollElement = useCallback(() => scrollRef.current, []);
-  const estimateSize = useCallback(() => 22, []);
+  const estimateSize = useCallback(() => {
+    const fontSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-terminal')) || 14;
+    return Math.round(fontSize * 1.5);
+  }, []);
   const getItemKey = useCallback((index: number) => linesRef.current[index]?.id ?? index, []);
 
   const virtualizer = useVirtualizer({
@@ -94,6 +88,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     }
   }, []);
 
+  // Ctrl+L to clear terminal
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.ctrlKey && e.key === 'l') {
+      e.preventDefault();
+      useTerminalStore.getState().clearTerminal(portId);
+    }
+  }, [portId]);
+
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const el = scrollRef.current;
@@ -125,7 +127,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    const currentLines = useAppStore.getState().terminals[portId]?.lines ?? [];
+    const currentLines = useTerminalStore.getState().terminals[portId]?.lines ?? [];
     const items: ContextMenuEntry[] = [
       { label: '全选', onClick: handleSelectAll },
       { label: '复制', onClick: handleCopy },
@@ -183,9 +185,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
       <div
         ref={scrollRef}
         className="terminal-view"
+        tabIndex={0}
         onContextMenu={handleContextMenu}
         onScroll={handleScroll}
         onWheel={handleWheel}
+        onKeyDown={handleKeyDown}
       >
         <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
           {virtualizer.getVirtualItems().map((vRow) => {

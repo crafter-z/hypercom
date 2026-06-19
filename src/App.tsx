@@ -5,8 +5,10 @@ import MainDisplay from './components/MainDisplay/MainDisplay';
 import OperationPanel from './components/OperationPanel/OperationPanel';
 import StatusBar from './components/StatusBar/StatusBar';
 import ConfigModal from './components/ConfigModal/ConfigModal';
-import { useAppInit } from './hooks/useTauri';
+import { useAppInit, useSerialReceive } from './hooks/useTauri';
 import { useAppStore } from './stores/useAppStore';
+import { useTerminalStore } from './stores/useTerminalStore';
+import { systemService } from './services/tauri';
 
 // ==================== Error Boundary ====================
 
@@ -69,7 +71,7 @@ const SidebarResizeHandle: React.FC = () => {
 };
 
 const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { theme, terminalFontSize, terminalFont, uiFont, uiFontSize } = useAppStore((s) => s.config);
+  const { theme, terminalFontSize, terminalFont, uiFont, uiFontSize, backgroundImage, preventScreenOff, preventSleep } = useAppStore((s) => s.config);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -93,11 +95,30 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     document.documentElement.style.setProperty('--font-ui', uiFont);
   }, [terminalFontSize, terminalFont, uiFontSize, uiFont]);
 
+  useEffect(() => {
+    if (backgroundImage) {
+      document.documentElement.style.setProperty('--bg-image', `url("${backgroundImage}")`);
+    } else {
+      document.documentElement.style.removeProperty('--bg-image');
+    }
+  }, [backgroundImage]);
+
+  useEffect(() => {
+    systemService.preventScreenOff(preventScreenOff).catch((e) => console.debug('[App] preventScreenOff failed:', e));
+  }, [preventScreenOff]);
+
+  useEffect(() => {
+    systemService.preventSleep(preventSleep).catch((e) => console.debug('[App] preventSleep failed:', e));
+  }, [preventSleep]);
+
   return <>{children}</>;
 };
 
 const App: React.FC = () => {
   useAppInit();
+  // Serial event listeners (onSerialData / onSerialStatus) are set up once at app root.
+  // Send actions live on useSerialSend in OperationPanel — see SRP split in useTauri.ts.
+  useSerialReceive();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
 
   useEffect(() => {
@@ -116,7 +137,7 @@ const App: React.FC = () => {
   const memoryLimitMb = useAppStore((s) => s.config.memoryLimitMb);
   useEffect(() => {
     const maxLines = memoryLimitMb * 500;
-    const store = useAppStore.getState();
+    const store = useTerminalStore.getState();
     Object.keys(store.terminals).forEach(portId => {
       store.setTerminalConfig(portId, { maxLines });
     });

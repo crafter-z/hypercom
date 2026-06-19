@@ -3,15 +3,6 @@ import type { TabItem, SplitPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
 import { Pin, X } from 'lucide-react';
-import { useAppStore } from '../../stores/useAppStore';
-import {
-  DndContext,
-  closestCenter,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
 import {
   SortableContext,
   useSortable,
@@ -20,8 +11,10 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 
 interface TabBarProps {
+  paneId: string;
   tabs: TabItem[];
   activeTabId: string | null;
+  isMultiPane?: boolean;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
   onTabPin: (tabId: string) => void;
@@ -31,6 +24,8 @@ interface TabBarProps {
   moveToPaneTargets?: SplitPane[];
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
 }
+
+// ==================== SortableTab ====================
 
 const SortableTab: React.FC<{
   tab: TabItem;
@@ -51,7 +46,8 @@ const SortableTab: React.FC<{
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.5 : 1,
+    opacity: isDragging ? 0.4 : 1,
+    zIndex: isDragging ? 1 : 0,
   };
 
   return (
@@ -82,9 +78,13 @@ const SortableTab: React.FC<{
   );
 };
 
+// ==================== TabBar ====================
+
 const TabBar: React.FC<TabBarProps> = ({
+  paneId,
   tabs,
   activeTabId,
+  isMultiPane,
   onTabClick,
   onTabClose,
   onTabPin,
@@ -95,23 +95,6 @@ const TabBar: React.FC<TabBarProps> = ({
   onMoveToPane,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
-  const reorderTabs = useAppStore((s) => s.reorderTabs);
-
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
-  );
-
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event;
-    if (over && active.id !== over.id) {
-      const storeState = useAppStore.getState();
-      const oldIndex = storeState.tabs.findIndex(t => t.id === active.id);
-      const newIndex = storeState.tabs.findIndex(t => t.id === over.id);
-      if (oldIndex !== -1 && newIndex !== -1) {
-        reorderTabs(oldIndex, newIndex);
-      }
-    }
-  }, [reorderTabs]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
@@ -134,11 +117,11 @@ const TabBar: React.FC<TabBarProps> = ({
 
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
       items.push({ type: 'separator' });
-      for (const pane of moveToPaneTargets) {
-        const paneLabel = `移至分屏 ${pane.id.replace('pane-', '').slice(0, 4)}`;
+      for (const targetPane of moveToPaneTargets) {
+        const label = `移至分屏 ${targetPane.id.replace('pane-', '').slice(0, 4)}`;
         items.push({
-          label: paneLabel,
-          onClick: () => onMoveToPane?.(tabId, pane.id),
+          label,
+          onClick: () => onMoveToPane?.(tabId, targetPane.id),
         });
       }
     }
@@ -148,25 +131,25 @@ const TabBar: React.FC<TabBarProps> = ({
 
   const tabIds = tabs.map(t => t.id);
 
-  // With ≤1 tab, drag-and-drop is meaningless. Rendering DndContext + PointerSensor
-  // adds document-level event listeners that can interfere with Sidebar's DnD
-  // when tabs are opened via double-click, causing rendering crashes.
-  // Skip DnD entirely when there's nothing to sort.
-  if (tabIds.length <= 1) {
+  // When single-pane with ≤1 tab: no sorting targets, render plain (no DnD overhead).
+  // When multi-pane: always use SortableContext so tabs are draggable across panes.
+  const shouldUseSortable = tabIds.length >= 2 || !!isMultiPane;
+
+  if (!shouldUseSortable) {
     const tab = tabs[0];
-    const isActive = tab?.id === activeTabId;
     const ctxItems = tab ? getContextMenuItems(tab.id) : [];
+    void paneId; // suppress unused warning — paneId is for parent DnD identification
     return (
       <div className="tab-bar">
         {tab && (
           <div
-            className={`tab-item${isActive ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
+            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
             onClick={() => onTabClick(tab.id)}
             onContextMenu={(e) => handleContextMenu(e, tab.id)}
           >
             <span
               className="tab-status-dot"
-              style={{ background: isActive ? 'var(--text-link)' : 'var(--text-secondary)' }}
+              style={{ background: tab.id === activeTabId ? 'var(--text-link)' : 'var(--text-secondary)' }}
             />
             <span className="tab-title">{tab.title}</span>
             {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
@@ -192,25 +175,23 @@ const TabBar: React.FC<TabBarProps> = ({
     );
   }
 
+  // With >1 tab or multi-pane: always render as sortable so @dnd-kit can
+  // handle both within-pane reordering and cross-pane tab moves.
+  void paneId; // suppress unused warning — paneId is for parent DnD identification
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-      <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
-        <div className="tab-bar">
-          {tabs.map((tab) => {
-            const isActive = tab.id === activeTabId;
-            return (
-              <SortableTab
-                key={tab.id}
-                tab={tab}
-                isActive={isActive}
-                onTabClick={onTabClick}
-                onTabClose={onTabClose}
-                onContextMenu={handleContextMenu}
-              />
-            );
-          })}
-        </div>
-      </SortableContext>
+    <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
+      <div className="tab-bar">
+        {tabs.map((tab) => (
+          <SortableTab
+            key={tab.id}
+            tab={tab}
+            isActive={tab.id === activeTabId}
+            onTabClick={onTabClick}
+            onTabClose={onTabClose}
+            onContextMenu={handleContextMenu}
+          />
+        ))}
+      </div>
 
       {contextMenu && (
         <ContextMenu
@@ -220,7 +201,7 @@ const TabBar: React.FC<TabBarProps> = ({
           onClose={handleCloseContextMenu}
         />
       )}
-    </DndContext>
+    </SortableContext>
   );
 };
 

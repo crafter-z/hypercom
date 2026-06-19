@@ -1,175 +1,19 @@
 import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
-import { serialService } from '../../services/tauri';
-import type { Encoding } from '../../types';
-import TabBar from './TabBar';
-import TerminalView from './TerminalView';
+import { Columns2, Rows2 } from 'lucide-react';
 import {
-  Columns2, Rows2
-} from 'lucide-react';
-
-interface PaneProps {
-  paneId: string;
-  tabIds: string[];
-  size: number;
-  isFocused: boolean;
-  onFocus: () => void;
-}
-
-const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, onFocus }) => {
-  const tabs = useAppStore((s) => s.tabs);
-  const activeTabId = useAppStore((s) => s.activeTabId);
-  const ports = useAppStore((s) => s.ports);
-  const panes = useAppStore((s) => s.panes);
-  const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const storeCloseTab = useAppStore((s) => s.closeTab);
-  const pinTab = useAppStore((s) => s.pinTab);
-  const closeTabsToRight = useAppStore((s) => s.closeTabsToRight);
-  const closeTabsToLeft = useAppStore((s) => s.closeTabsToLeft);
-  const closeOtherTabs = useAppStore((s) => s.closeOtherTabs);
-  const moveTabToPane = useAppStore((s) => s.moveTabToPane);
-  const setTerminalConfig = useAppStore((s) => s.setTerminalConfig);
-
-  const closeTab = useCallback((tabId: string) => {
-    const port = ports.find(p => p.id === tabId);
-    if (port && port.status === 'connected') {
-      serialService.closeSerialPort(tabId).catch(() => {});
-    }
-    storeCloseTab(tabId);
-  }, [ports, storeCloseTab]);
-
-  const paneTabs = tabs.filter(t => tabIds.includes(t.id));
-  const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);
-  const displayTabId = (activeTabId && tabIds.includes(activeTabId))
-    ? activeTabId
-    : (localActiveTabId && tabIds.includes(localActiveTabId) ? localActiveTabId : paneTabs[0]?.id || null);
-  const displayTab = paneTabs.find(t => t.id === displayTabId);
-  const displayPort = ports.find(p => p.id === displayTabId);
-  // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
-  const displayTerminal = useAppStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
-
-  const otherPanes = panes.filter(p => p.id !== paneId);
-
-  const handleTabClick = useCallback((tabId: string) => {
-    onFocus();
-    setActiveTab(tabId);
-    setLocalActiveTabId(tabId);
-  }, [onFocus, setActiveTab]);
-
-  const handleMoveTabToPane = useCallback((tabId: string, targetPaneId: string) => {
-    moveTabToPane(tabId, targetPaneId);
-    if (tabId === localActiveTabId && paneTabs.length <= 1) {
-      setLocalActiveTabId(null);
-    }
-  }, [moveTabToPane, localActiveTabId, paneTabs.length]);
-
-  useEffect(() => {
-    if (localActiveTabId && !tabIds.includes(localActiveTabId)) {
-      setLocalActiveTabId(tabIds[0] || null);
-    }
-  }, [tabIds, localActiveTabId]);
-
-  return (
-    <div
-      className={`pane-container-inner${isFocused ? ' pane-focused' : ''}`}
-      onClick={onFocus}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-secondary)' }}>
-        <div style={{ flex: 1, overflow: 'hidden' }}>
-          <TabBar
-            tabs={paneTabs}
-            activeTabId={displayTabId}
-            onTabClick={handleTabClick}
-            onTabClose={closeTab}
-            onTabPin={pinTab}
-            onCloseToRight={closeTabsToRight}
-            onCloseToLeft={closeTabsToLeft}
-            onCloseOthers={closeOtherTabs}
-            moveToPaneTargets={otherPanes}
-            onMoveToPane={handleMoveTabToPane}
-          />
-        </div>
-      </div>
-
-      {displayTab && (
-        <div className="terminal-toolbar">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span className={`status-dot ${displayPort?.status === 'connected' ? 'connected' : displayPort?.status === 'error' ? 'error' : 'disconnected'}`} />
-            <span className="terminal-toolbar-title">{displayTab.title}</span>
-            <span className="terminal-toolbar-info">
-              ({displayPort?.status || 'disconnected'}
-              {displayPort?.baudRate ? `, ${displayPort.baudRate},${displayPort.dataBits || 8}${displayPort.parity?.[0] || 'N'}${displayPort.stopBits === 'One' ? '1' : '2'}` : ''})
-            </span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span className="terminal-toolbar-label">编码:</span>
-            <select
-              className="select terminal-toolbar-select"
-              value={displayTerminal?.encoding || 'UTF-8'}
-              onChange={(e) => {
-                if (displayTabId) {
-                  setTerminalConfig(displayTabId, { encoding: e.target.value as Encoding });
-                }
-              }}
-            >
-              <option value="ASCII">ASCII</option>
-              <option value="UTF-8">UTF-8</option>
-              <option value="GBK">GBK</option>
-              <option value="ISO-8859-1">ISO-8859-1</option>
-            </select>
-          </div>
-        </div>
-      )}
-
-      {paneTabs.length > 0 && displayTab ? (
-        <TerminalView
-          portId={displayTab.id}
-          terminal={displayTerminal}
-        />
-      ) : paneTabs.length === 0 ? (
-        <div className="terminal-empty-state" style={{ flex: 1 }}>
-          双击左侧串口打开标签页
-        </div>
-      ) : null}
-    </div>
-  );
-};
-
-interface ResizeHandleProps {
-  onResize: (delta: number) => void;
-  direction: 'horizontal' | 'vertical';
-}
-
-const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction }) => {
-  const [dragging, setDragging] = useState(false);
-
-  useEffect(() => {
-    if (!dragging) return;
-    const handleMouseMove = (e: MouseEvent) => {
-      onResize(direction === 'vertical' ? e.movementX : e.movementY);
-    };
-    const handleMouseUp = () => setDragging(false);
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [dragging, onResize, direction]);
-
-  const isH = direction === 'vertical';
-  return (
-    <div
-      className={`pane-resize-handle${dragging ? ' dragging' : ''}`}
-      style={{
-        width: isH ? 5 : '100%',
-        height: isH ? '100%' : 5,
-        cursor: isH ? 'col-resize' : 'row-resize',
-      }}
-      onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
-    />
-  );
-};
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragOverlay,
+  type DragStartEvent,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import Pane from './Pane';
+import ResizeHandle from './ResizeHandle';
+import { useTabDragEnd } from './hooks/useTabDragEnd';
 
 const MainDisplay: React.FC = () => {
   const panes = useAppStore((s) => s.panes);
@@ -177,11 +21,18 @@ const MainDisplay: React.FC = () => {
   const focusedPaneId = useAppStore((s) => s.focusedPaneId);
   const setFocusedPane = useAppStore((s) => s.setFocusedPane);
   const splitPane = useAppStore((s) => s.splitPane);
+  const moveTabToPane = useAppStore((s) => s.moveTabToPane);
+  const reorderPaneTabIds = useAppStore((s) => s.reorderPaneTabIds);
 
   const [paneSizes, setPaneSizes] = useState<number[]>(() =>
     panes.map(p => p.size * 100)
   );
   const containerRef = useRef<HTMLDivElement>(null);
+  const [dragTabId, setDragTabId] = useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
 
   useEffect(() => {
     const total = panes.reduce((s, p) => s + p.size, 0) || 1;
@@ -204,6 +55,55 @@ const MainDisplay: React.FC = () => {
     });
   }, []);
 
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    setDragTabId(String(event.active.id));
+  }, []);
+
+  const dragEndHandler = useTabDragEnd({ moveTabToPane, reorderPaneTabIds });
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    setDragTabId(null);
+    dragEndHandler(event);
+  }, [dragEndHandler]);
+
+  const dragTab = dragTabId ? tabs.find(t => t.id === dragTabId) : null;
+
+  const panesLayout = (
+    <div ref={containerRef} style={{
+      flex: 1, display: 'flex',
+      flexDirection: panes[0]?.direction === 'horizontal' ? 'column' : 'row',
+      overflow: 'hidden'
+    }}>
+      {panes.map((pane, idx) => {
+        const isRow = panes[0]?.direction !== 'horizontal';
+        return (
+        <React.Fragment key={pane.id}>
+          <div style={{
+            flex: idx === 0 && paneSizes.length === panes.length
+              ? `0 0 ${paneSizes[idx] || 100 / panes.length}%`
+              : 1,
+            display: 'flex',
+            overflow: 'hidden',
+          }}>
+            <Pane
+              paneId={pane.id}
+              tabIds={pane.tabIds}
+              size={pane.size}
+              isFocused={pane.id === focusedPaneId}
+              isMultiPane={panes.length > 1}
+              onFocus={() => setFocusedPane(pane.id)}
+            />
+          </div>
+          {idx < panes.length - 1 && (
+            <ResizeHandle
+              direction={isRow ? 'vertical' : 'horizontal'}
+              onResize={(delta) => handleResize(idx, delta)}
+            />
+          )}
+        </React.Fragment>
+      )})}
+    </div>
+  );
+
   return (
     <div className="main-display">
       <div className="main-display-toolbar">
@@ -218,39 +118,21 @@ const MainDisplay: React.FC = () => {
         )}
       </div>
 
-      <div ref={containerRef} style={{
-        flex: 1, display: 'flex',
-        flexDirection: panes[0]?.direction === 'horizontal' ? 'column' : 'row',
-        overflow: 'hidden'
-      }}>
-        {panes.map((pane, idx) => {
-          const isRow = panes[0]?.direction !== 'horizontal';
-          return (
-          <React.Fragment key={pane.id}>
-            <div style={{
-              flex: idx === 0 && paneSizes.length === panes.length
-                ? `0 0 ${paneSizes[idx] || 100 / panes.length}%`
-                : 1,
-              display: 'flex',
-              overflow: 'hidden',
-            }}>
-              <Pane
-                paneId={pane.id}
-                tabIds={pane.tabIds}
-                size={pane.size}
-                isFocused={pane.id === focusedPaneId}
-                onFocus={() => setFocusedPane(pane.id)}
-              />
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+      >
+        {panesLayout}
+        <DragOverlay dropAnimation={null}>
+          {dragTab ? (
+            <div className="tab-drag-overlay">
+              <span className="tab-drag-overlay-title">{dragTab.title}</span>
             </div>
-            {idx < panes.length - 1 && (
-              <ResizeHandle
-                direction={isRow ? 'vertical' : 'horizontal'}
-                onResize={(delta) => handleResize(idx, delta)}
-              />
-            )}
-          </React.Fragment>
-        )})}
-      </div>
+          ) : null}
+        </DragOverlay>
+      </DndContext>
 
       {panes.length <= 1 && !tabs.length && (
         <div className="terminal-empty-state" style={{ flex: 1 }}>
