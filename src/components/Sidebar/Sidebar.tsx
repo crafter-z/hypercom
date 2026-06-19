@@ -5,7 +5,7 @@ import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
   Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
   ChevronRight, Plus, X, Search, FlaskConical,
-  PlugZap, Pencil, Unplug, ExternalLink, GripVertical
+  PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2
 } from 'lucide-react';
 import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks/useTauri';
 import {
@@ -14,8 +14,10 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
-  type DragEndEvent,
+  useDroppable,
 } from '@dnd-kit/core';
+import AliasDialog from './AliasDialog';
+import { usePortDragEnd } from './hooks/usePortDragEnd';
 import {
   SortableContext,
   useSortable,
@@ -188,6 +190,8 @@ interface GroupItemProps {
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
   onToggleExpand: (groupId: string) => void;
+  onRenameGroup: (groupId: string, name: string) => void;
+  onRemoveGroup: (groupId: string) => void;
   onSetAlias: (portId: string) => void;
   onHidePort: (portId: string) => void;
   onShowPort: (portId: string) => void;
@@ -199,12 +203,24 @@ const GroupItem: React.FC<GroupItemProps> = ({
   onOpenTab,
   onToggleConnect,
   onToggleExpand,
+  onRenameGroup,
+  onRemoveGroup,
   onSetAlias,
   onHidePort,
   onShowPort,
 }) => {
   const groupPorts = ports.filter(p => group.portIds.includes(p.id));
   const connectedCount = groupPorts.filter(p => p.status === 'connected').length;
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(group.name);
+
+  const { show, element } = useContextMenu();
+
+  // Make the group a droppable target so ports can be dropped onto the group
+  // header itself (not just onto individual ports inside the group).
+  const { setNodeRef: setGroupDropRef, isOver: isGroupDropOver } = useDroppable({
+    id: `droppable-${group.id}`,
+  });
 
   const handleConnectAll = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -216,17 +232,65 @@ const GroupItem: React.FC<GroupItemProps> = ({
     groupPorts.forEach(p => { if (p.status === 'connected') onToggleConnect(p.id); });
   };
 
+  const handleStartRename = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenameValue(group.name);
+    setIsRenaming(true);
+  };
+
+  const handleCommitRename = () => {
+    const trimmed = renameValue.trim();
+    if (trimmed && trimmed !== group.name) {
+      onRenameGroup(group.id, trimmed);
+    }
+    setIsRenaming(false);
+  };
+
+  const groupMenuItems: ContextMenuEntry[] = [
+    { label: '重命名分组', icon: <Pencil size={14} />, onClick: () => { setRenameValue(group.name); setIsRenaming(true); } },
+    { label: '删除分组', icon: <Trash2 size={14} />, onClick: () => onRemoveGroup(group.id) },
+  ];
+
   const portIds = useMemo(() => groupPorts.map(p => p.id), [groupPorts]);
 
   return (
-    <div className="port-group">
-      <div className="port-group-header" onClick={() => onToggleExpand(group.id)}>
+    <div
+      ref={setGroupDropRef}
+      className={`port-group${isGroupDropOver ? ' drop-active' : ''}`}
+    >
+      <div
+        className="port-group-header"
+        onClick={() => onToggleExpand(group.id)}
+        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); show(e, groupMenuItems); }}
+      >
         <ChevronRight
           size={12}
           className="port-group-chevron"
           style={{ transform: group.isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
         />
-        <span className="port-group-name">{group.name}</span>
+        {isRenaming ? (
+          <input
+            className="input"
+            style={{ flex: 1, fontSize: 12, padding: '2px 4px', minWidth: 0 }}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={handleCommitRename}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleCommitRename();
+              if (e.key === 'Escape') setIsRenaming(false);
+            }}
+            onClick={(e) => e.stopPropagation()}
+            autoFocus
+          />
+        ) : (
+          <span
+            className="port-group-name"
+            onDoubleClick={handleStartRename}
+            title="双击重命名"
+          >
+            {group.name}
+          </span>
+        )}
         <span className="port-group-count">{connectedCount}/{groupPorts.length}</span>
         <button className="btn btn-icon btn-sm" title="一键连接整组" onClick={handleConnectAll}>
           <Play size={10} />
@@ -234,7 +298,15 @@ const GroupItem: React.FC<GroupItemProps> = ({
         <button className="btn btn-icon btn-sm" title="一键断开整组" onClick={handleDisconnectAll}>
           <Square size={10} />
         </button>
+        <button
+          className="btn btn-icon btn-sm"
+          title="删除分组"
+          onClick={(e) => { e.stopPropagation(); onRemoveGroup(group.id); }}
+        >
+          <Trash2 size={10} />
+        </button>
       </div>
+      {element}
       {group.isExpanded && (
         <SortableContext items={portIds} strategy={verticalListSortingStrategy}>
           <div className="port-group-list">
@@ -257,38 +329,6 @@ const GroupItem: React.FC<GroupItemProps> = ({
   );
 };
 
-const AliasDialog: React.FC<{ portId: string; currentAlias: string; onSave: (alias: string) => void; onCancel: () => void }> = ({
-  portId,
-  currentAlias,
-  onSave,
-  onCancel,
-}) => {
-  const [value, setValue] = useState(currentAlias);
-
-  return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
-        <h3 className="modal-dialog-title">设置备注名</h3>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
-          为 <strong>{portId}</strong> 设置备注名
-        </p>
-        <input
-          className="input modal-dialog-input"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="输入备注名..."
-          autoFocus
-          onKeyDown={(e) => { if (e.key === 'Enter') onSave(value); if (e.key === 'Escape') onCancel(); }}
-        />
-        <div className="modal-dialog-actions">
-          <button className="btn" onClick={onCancel}>取消</button>
-          <button className="btn btn-primary" onClick={() => onSave(value)}>确定</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const Sidebar: React.FC = () => {
   const ports = useAppStore((s) => s.ports);
   const groups = useAppStore((s) => s.groups);
@@ -296,6 +336,7 @@ const Sidebar: React.FC = () => {
   const updatePort = useAppStore((s) => s.updatePort);
   const updateGroup = useAppStore((s) => s.updateGroup);
   const addGroup = useAppStore((s) => s.addGroup);
+  const removeGroup = useAppStore((s) => s.removeGroup);
 
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();
@@ -341,6 +382,14 @@ const Sidebar: React.FC = () => {
     addGroup({ id, name: '新建分组', isExpanded: true, portIds: [], order: groups.length });
   }, [addGroup, groups.length]);
 
+  const handleRenameGroup = useCallback((groupId: string, name: string) => {
+    updateGroup(groupId, { name });
+  }, [updateGroup]);
+
+  const handleRemoveGroup = useCallback((groupId: string) => {
+    removeGroup(groupId);
+  }, [removeGroup]);
+
   const searchLower = search.toLowerCase();
   const filteredPorts = search
     ? ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)))
@@ -362,68 +411,7 @@ const Sidebar: React.FC = () => {
     useAppStore.getState().setPorts(sorted);
   }, [ports]);
 
-  // 统一 DnD 处理：支持组内重排序、跨组移动、移入/移出"未分组"
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-
-    const activeId = String(active.id);
-    const overId = String(over.id);
-
-    const store = useAppStore.getState();
-    const allPorts = store.ports;
-
-    const activePort = allPorts.find(p => p.id === activeId);
-    const overPort = allPorts.find(p => p.id === overId);
-    if (!activePort || !overPort) return;
-
-    const activeGroupId = activePort.groupId;
-    const overGroupId = overPort.groupId;
-
-    if (activeGroupId === overGroupId) {
-      // 同组（或都是未分组）—— 直接全局重排序
-      const oldGlobal = allPorts.findIndex(p => p.id === activeId);
-      const newGlobal = allPorts.findIndex(p => p.id === overId);
-      if (oldGlobal !== -1 && newGlobal !== -1) {
-        store.reorderPorts(oldGlobal, newGlobal);
-      }
-      return;
-    }
-
-    // 跨组移动：先把 active 移入 over 所在分组，再做位置调整
-    store.movePortToGroup(activeId, overGroupId);
-
-    // 在新分组内重新计算目标位置（基于刚刚更新后的 portIds）
-    const updatedGroups = useAppStore.getState().groups;
-    if (overGroupId) {
-      const newGroup = updatedGroups.find(g => g.id === overGroupId);
-      if (newGroup) {
-        const idxOfActive = newGroup.portIds.indexOf(activeId);
-        const idxOfOver = newGroup.portIds.indexOf(overId);
-        if (idxOfActive !== -1 && idxOfOver !== -1 && idxOfActive !== idxOfOver) {
-          // 将 active 调到 over 旁边（在 group.portIds 数组中）
-          useAppStore.getState().updateGroup(overGroupId, {
-            portIds: (() => {
-              const next = [...newGroup.portIds];
-              next.splice(idxOfActive, 1);
-              next.splice(idxOfOver, 0, activeId);
-              return next;
-            })(),
-          });
-        }
-      }
-    }
-
-    if (overGroupId === undefined) {
-      // Move to ungrouped: also adjust global port order so active sits next to over
-      const refreshed = useAppStore.getState().ports;
-      const newGlobalOldIdx = refreshed.findIndex(p => p.id === activeId);
-      const newGlobalOverIdx = refreshed.findIndex(p => p.id === overId);
-      if (newGlobalOldIdx !== -1 && newGlobalOverIdx !== -1 && newGlobalOldIdx !== newGlobalOverIdx) {
-        useAppStore.getState().reorderPorts(newGlobalOldIdx, newGlobalOverIdx);
-      }
-    }
-  }, []);
+  const handleDragEnd = usePortDragEnd({ groups, ports });
 
   return (
     <div className="sidebar">
@@ -458,7 +446,7 @@ const Sidebar: React.FC = () => {
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           {groups.map(group => {
             const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id));
-            if (groupPorts.length === 0 && !search) return null;
+            if (groupPorts.length === 0 && search) return null;
             return (
               <GroupItem
                 key={group.id}
@@ -467,6 +455,8 @@ const Sidebar: React.FC = () => {
                 onOpenTab={handleOpenTab}
                 onToggleConnect={handleToggleConnect}
                 onToggleExpand={handleToggleExpand}
+                onRenameGroup={handleRenameGroup}
+                onRemoveGroup={handleRemoveGroup}
                 onSetAlias={handleSetAlias}
                 onHidePort={handleHidePort}
                 onShowPort={handleShowPort}
