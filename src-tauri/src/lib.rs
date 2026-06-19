@@ -2,12 +2,12 @@
  * HyperCom 后端主入口
  * 注册所有 Tauri 命令、初始化各模块、管理应用生命周期
  */
-
 mod commands;
 mod config;
 mod logger;
 mod serial;
 mod storage;
+mod system;
 
 use tauri::{Emitter, Manager};
 
@@ -93,9 +93,11 @@ pub fn run() {
 
             // 设置 AppHandle，用于串口数据事件推送
             let state = _app.state::<AppState>();
-            let mut serial_mgr = state.serial_manager.lock().unwrap();
-            serial_mgr.set_app_handle(app_handle.clone());
-            drop(serial_mgr);
+            if let Ok(mut serial_mgr) = state.serial_manager.lock() {
+                serial_mgr.set_app_handle(app_handle.clone());
+            } else {
+                log::error!("serial_manager mutex poisoned during setup; serial events will not be emitted");
+            }
             drop(state);
 
             // 预热 sysinfo CPU 采样：first refresh_cpu_all 没有基线会返回 0，
@@ -103,16 +105,22 @@ pub fn run() {
             // (defects #50). 阻塞 main 仅 ~250ms 在 setup 里可接受。
             {
                 let state = _app.state::<AppState>();
-                let mut sys = state.system_info.lock().unwrap();
-                sys.refresh_cpu_all();
-                drop(sys);
+                if let Ok(mut sys) = state.system_info.lock() {
+                    sys.refresh_cpu_all();
+                } else {
+                    log::warn!("system_info mutex poisoned during CPU warmup (first refresh)");
+                }
+                drop(state);
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
             {
                 let state = _app.state::<AppState>();
-                let mut sys = state.system_info.lock().unwrap();
-                sys.refresh_cpu_all();
-                drop(sys);
+                if let Ok(mut sys) = state.system_info.lock() {
+                    sys.refresh_cpu_all();
+                } else {
+                    log::warn!("system_info mutex poisoned during CPU warmup (second refresh)");
+                }
+                drop(state);
             }
 
             // 异步初始化数据库（不持有 MutexGuard 跨 await）
@@ -125,11 +133,15 @@ pub fn run() {
                         }
                         // 使用 AppHandle 获取 state，因为 AppHandle 是 'static
                         let state2 = app_handle2.state::<AppState>();
-                        let mut mgr = state2.storage_manager.lock().unwrap();
-                        mgr.set_pool(pool);
-                        drop(mgr);
-                        log::info!("Storage initialized successfully");
-                        let _ = app_handle2.emit("storage:ready", ());
+                        let stored = state2.storage_manager.lock()
+                            .map(|mut mgr| mgr.set_pool(pool))
+                            .is_ok();
+                        if stored {
+                            log::info!("Storage initialized successfully");
+                            let _ = app_handle2.emit("storage:ready", ());
+                        } else {
+                            log::error!("storage_manager mutex poisoned; DB pool not stored. DB unavailable.");
+                        }
                     }
                     Err(e) => log::warn!("DB connection failed (non-critical): {}", e),
                 }

@@ -2,10 +2,9 @@
  * 配置管理模块 (Config Manager)
  * 负责应用配置的持久化存储与读取
  * 使用 JSON 文件存储在应用数据目录中
- * 
+ *
  * 配置项涵盖：通用设置、日志设置、备份设置、显示设置等
  */
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -16,10 +15,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     // --- 通用设置 ---
-    pub close_behavior: String,      // "minimize" | "exit"
+    pub close_behavior: String, // "minimize" | "exit"
     pub memory_limit_mb: u32,
-    pub language: String,            // "zh-CN" | "en-US"
-    pub theme: String,               // "light" | "dark" | "system"
+    pub language: String, // "zh-CN" | "en-US"
+    pub theme: String,    // "light" | "dark" | "system"
     pub prevent_screen_off: bool,
     pub prevent_sleep: bool,
 
@@ -37,20 +36,20 @@ pub struct AppConfig {
     pub show_port_type: bool,
 
     // --- 时间戳设置 ---
-    pub timestamp_mode: String,      // "perLine" | "perRound"
+    pub timestamp_mode: String, // "perLine" | "perRound"
 
     // --- 日志设置 ---
     pub auto_save_log: bool,
     pub log_directory: String,
     pub log_filename_format: String,
-    pub log_format: String,          // "string" | "hex" | "binary"
-    pub log_encoding: String,        // "ASCII" | "UTF-8"
+    pub log_format: String,   // "string" | "hex" | "binary"
+    pub log_encoding: String, // "ASCII" | "UTF-8"
     pub log_split_enabled: bool,
     pub log_split_size_mb: u32,
 
     // --- 备份设置 ---
     pub backup_enabled: bool,
-    pub backup_interval: u32,        // 小时
+    pub backup_interval: u32, // 小时
     pub backup_directory: String,
 }
 
@@ -97,7 +96,7 @@ impl ConfigManager {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?
             .join("hypercom");
-        
+
         fs::create_dir_all(&config_dir)?;
         let config_path = config_dir.join("config.json");
 
@@ -108,7 +107,10 @@ impl ConfigManager {
             AppConfig::default()
         };
 
-        Ok(Self { config, config_path })
+        Ok(Self {
+            config,
+            config_path,
+        })
     }
 
     /// 获取当前配置
@@ -159,7 +161,10 @@ mod tests {
         assert!(!cfg.prevent_screen_off);
         assert!(!cfg.prevent_sleep);
         assert_eq!(cfg.terminal_font_size, 14);
-        assert_eq!(cfg.default_baud_rates, vec![9600, 19200, 38400, 57600, 115200, 921600]);
+        assert_eq!(
+            cfg.default_baud_rates,
+            vec![9600, 19200, 38400, 57600, 115200, 921600]
+        );
         assert_eq!(cfg.send_prefix, ">>>>>>SEND>>>>>>>>");
         assert_eq!(cfg.timestamp_mode, "perLine");
         assert!(!cfg.auto_save_log);
@@ -183,11 +188,27 @@ mod tests {
     fn test_json_camel_case() {
         let cfg = AppConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
-        assert!(json.contains("closeBehavior"), "missing closeBehavior in: {}", json);
-        assert!(json.contains("memoryLimitMb"), "missing memoryLimitMb in: {}", json);
-        assert!(json.contains("autoSaveLog"), "missing autoSaveLog in: {}", json);
+        assert!(
+            json.contains("closeBehavior"),
+            "missing closeBehavior in: {}",
+            json
+        );
+        assert!(
+            json.contains("memoryLimitMb"),
+            "missing memoryLimitMb in: {}",
+            json
+        );
+        assert!(
+            json.contains("autoSaveLog"),
+            "missing autoSaveLog in: {}",
+            json
+        );
         assert!(json.contains("logFormat"), "missing logFormat in: {}", json);
-        assert!(json.contains("terminalFontSize"), "missing terminalFontSize in: {}", json);
+        assert!(
+            json.contains("terminalFontSize"),
+            "missing terminalFontSize in: {}",
+            json
+        );
     }
 
     #[test]
