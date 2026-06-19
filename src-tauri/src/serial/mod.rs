@@ -2,7 +2,7 @@
  * 串口管理模块 (Serial Manager)
  * 负责串口的枚举、打开/关闭、参数配置、数据收发
  * 使用 serialport-rs 库实现跨平台串口通信
- * 
+ *
  * 架构设计:
  * - SerialManager: 管理所有已打开串口的集合（真实 + 模拟）
  * - SerialPortHandle: 真实串口句柄，包含读取线程
@@ -10,7 +10,6 @@
  * - 数据接收通过 AppHandle.emit() 推送给前端
  * - 模拟模式: 用于无硬件时的测试，提供 LOOP:Loopback 虚拟串口
  */
-
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,10 +54,6 @@ pub struct SerialStatusEvent {
 
 /// 单个串口连接句柄
 pub struct SerialPortHandle {
-    #[allow(dead_code)]
-    pub port_name: String,
-    #[allow(dead_code)]
-    pub baud_rate: u32,
     pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     pub running: Arc<AtomicBool>,
     pub read_thread: Option<thread::JoinHandle<()>>,
@@ -74,8 +69,6 @@ enum SimMessage {
 
 /// 模拟串口连接句柄
 pub struct SimPortHandle {
-    #[allow(dead_code)]
-    pub port_name: String,
     pub running: Arc<AtomicBool>,
     tx: mpsc::Sender<SimMessage>,
     read_thread: Option<thread::JoinHandle<()>>,
@@ -88,7 +81,10 @@ pub struct SimPortHandle {
 pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
     let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
     if cleaned.len() % 2 != 0 {
-        return Err(anyhow::anyhow!("HEX string has odd length: {} chars", cleaned.len()));
+        return Err(anyhow::anyhow!(
+            "HEX string has odd length: {} chars",
+            cleaned.len()
+        ));
     }
     let mut result = Vec::with_capacity(cleaned.len() / 2);
     let chars: Vec<char> = cleaned.chars().collect();
@@ -97,7 +93,13 @@ pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
         let hex_pair: String = chars[i..i + 2].iter().collect();
         match u8::from_str_radix(&hex_pair, 16) {
             Ok(byte) => result.push(byte),
-            Err(_) => return Err(anyhow::anyhow!("Invalid HEX byte at position {}: \"{}\"", i, hex_pair)),
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Invalid HEX byte at position {}: \"{}\"",
+                    i,
+                    hex_pair
+                ))
+            }
         }
         i += 2;
     }
@@ -133,6 +135,36 @@ fn parse_flow_control(flow: &str) -> serialport::FlowControl {
         "XonXoff" => serialport::FlowControl::Software,
         "RequestToSend" | "RequestToSendXonXoff" => serialport::FlowControl::Hardware,
         _ => serialport::FlowControl::None,
+    }
+}
+
+// ==================== 数据事件辅助函数 ====================
+
+/// Emit a serial data event to the frontend and write to the log file.
+/// Called from spawned threads (real port reader, sim port echo, sim port heartbeat).
+fn emit_data_event(
+    app_handle: &tauri::AppHandle,
+    port_id: &str,
+    direction: &str,
+    data: &[u8],
+    is_hex: bool,
+) {
+    let timestamp_str = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string();
+    let event = SerialDataEvent {
+        port_id: port_id.to_string(),
+        timestamp: chrono::Local::now().timestamp_millis(),
+        direction: direction.to_string(),
+        data: data.to_vec(),
+        is_hex,
+    };
+    let _ = app_handle.emit("serial:data", event);
+    // Write to log if a writer exists
+    if let Some(state) = app_handle.try_state::<crate::AppState>() {
+        if let Ok(mut log_mgr) = state.log_manager.lock() {
+            let _ = log_mgr.write(port_id, &timestamp_str, direction, data);
+        }
     }
 }
 
@@ -208,7 +240,9 @@ impl SerialManager {
 
     /// 打开真实串口
     fn open_real_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        let app_handle = self.app_handle.as_ref()
+        let app_handle = self
+            .app_handle
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
             .clone();
 
@@ -230,7 +264,9 @@ impl SerialManager {
 
         // 设置 DTR/RTS
         {
-            let mut p = port_arc.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+            let mut p = port_arc
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
             p.write_data_terminal_ready(args.dtr)
                 .map_err(|e| anyhow::anyhow!("Failed to set DTR: {}", e))?;
             p.write_request_to_send(args.rts)
@@ -248,21 +284,7 @@ impl SerialManager {
                 match port_clone.lock() {
                     Ok(mut p) => match p.read(&mut buffer) {
                         Ok(n) if n > 0 => {
-                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-                            let event = SerialDataEvent {
-                                port_id: port_id.clone(),
-                                timestamp: chrono::Local::now().timestamp_millis(),
-                                direction: "RX".to_string(),
-                                data: buffer[..n].to_vec(),
-                                is_hex: false,
-                            };
-                            let _ = app_handle_clone.emit("serial:data", event);
-                            // Write to log if a writer exists
-                            if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                                if let Ok(mut log_mgr) = state.log_manager.lock() {
-                                    let _ = log_mgr.write(&port_id, &timestamp, "RX", &buffer[..n]);
-                                }
-                            }
+                            emit_data_event(&app_handle_clone, &port_id, "RX", &buffer[..n], false);
                         }
                         Ok(_) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
@@ -294,8 +316,6 @@ impl SerialManager {
         });
 
         let handle = SerialPortHandle {
-            port_name: args.port_id.clone(),
-            baud_rate: args.baud_rate,
             port: port_arc,
             running,
             read_thread: Some(read_thread),
@@ -316,7 +336,9 @@ impl SerialManager {
 
     /// 打开模拟串口
     fn open_sim_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        let app_handle = self.app_handle.as_ref()
+        let app_handle = self
+            .app_handle
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
             .clone();
 
@@ -339,21 +361,13 @@ impl SerialManager {
                         } else {
                             format!("Received: {}\r\n", data)
                         };
-                        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-                        let event = SerialDataEvent {
-                            port_id: port_id.clone(),
-                            timestamp: chrono::Local::now().timestamp_millis(),
-                            direction: "RX".to_string(),
-                            data: echo_data.clone().into_bytes(),
-                            is_hex: false,
-                        };
-                        let _ = app_handle_clone.emit("serial:data", event);
-                        // Write to log if a writer exists
-                        if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                            if let Ok(mut log_mgr) = state.log_manager.lock() {
-                                let _ = log_mgr.write(&port_id, &timestamp, "RX", echo_data.as_bytes());
-                            }
-                        }
+                        emit_data_event(
+                            &app_handle_clone,
+                            &port_id,
+                            "RX",
+                            echo_data.as_bytes(),
+                            false,
+                        );
                     }
                     Ok(SimMessage::Stop) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -363,21 +377,13 @@ impl SerialManager {
                                 "[SIM] Heartbeat @ {}\r\n",
                                 chrono::Local::now().format("%H:%M:%S")
                             );
-                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-                            let event = SerialDataEvent {
-                                port_id: port_id.clone(),
-                                timestamp: chrono::Local::now().timestamp_millis(),
-                                direction: "RX".to_string(),
-                                data: heartbeat.clone().into_bytes(),
-                                is_hex: false,
-                            };
-                            let _ = app_handle_clone.emit("serial:data", event);
-                            // Write heartbeat to log if a writer exists
-                            if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                                if let Ok(mut log_mgr) = state.log_manager.lock() {
-                                    let _ = log_mgr.write(&port_id, &timestamp, "RX", heartbeat.as_bytes());
-                                }
-                            }
+                            emit_data_event(
+                                &app_handle_clone,
+                                &port_id,
+                                "RX",
+                                heartbeat.as_bytes(),
+                                false,
+                            );
                             last_heartbeat = std::time::Instant::now();
                         }
                     }
@@ -387,7 +393,6 @@ impl SerialManager {
         });
 
         let handle = SimPortHandle {
-            port_name: args.port_id.clone(),
             running,
             tx,
             read_thread: Some(read_thread),
@@ -429,20 +434,33 @@ impl SerialManager {
     }
 
     /// 向串口发送数据
-    pub fn send_data(&self, port_id: &str, data: &str, is_hex: bool, append_line_ending: &str) -> anyhow::Result<usize> {
+    pub fn send_data(
+        &self,
+        port_id: &str,
+        data: &str,
+        is_hex: bool,
+        append_line_ending: &str,
+    ) -> anyhow::Result<usize> {
         // 模拟串口：通过 channel 发送，由读取线程回显
         if port_id.starts_with("SIM:") {
-            let handle = self.sim_ports.get(port_id)
+            let handle = self
+                .sim_ports
+                .get(port_id)
                 .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
-            handle.tx.send(SimMessage::Echo {
-                data: data.to_string(),
-                is_hex,
-            }).map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
+            handle
+                .tx
+                .send(SimMessage::Echo {
+                    data: data.to_string(),
+                    is_hex,
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
             return Ok(data.len());
         }
 
         // 真实串口：写入串口
-        let handle = self.ports.get(port_id)
+        let handle = self
+            .ports
+            .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
 
         let bytes = if is_hex {
@@ -458,7 +476,10 @@ impl SerialManager {
             text.into_bytes()
         };
 
-        let mut port = handle.port.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut port = handle
+            .port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         let n = port.write(&bytes)?;
         port.flush()?;
 
@@ -467,10 +488,23 @@ impl SerialManager {
     }
 
     /// 修改串口参数（完整）
-    pub fn set_params(&self, port_id: &str, baud_rate: u32, data_bits: &str, parity: &str, stop_bits: &str, handshake: &str) -> anyhow::Result<()> {
-        let handle = self.ports.get(port_id)
+    pub fn set_params(
+        &self,
+        port_id: &str,
+        baud_rate: u32,
+        data_bits: &str,
+        parity: &str,
+        stop_bits: &str,
+        handshake: &str,
+    ) -> anyhow::Result<()> {
+        let handle = self
+            .ports
+            .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        let mut port = handle.port.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut port = handle
+            .port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.set_baud_rate(baud_rate)?;
         if data_bits != "8" || parity != "None" || stop_bits != "One" {
             port.set_data_bits(parse_data_bits(data_bits.parse().unwrap_or(8)))?;
@@ -480,15 +514,28 @@ impl SerialManager {
         if handshake != "None" {
             port.set_flow_control(parse_flow_control(handshake))?;
         }
-        log::info!("Params set for {}: baud={}, data_bits={}, parity={}, stop_bits={}, handshake={}", port_id, baud_rate, data_bits, parity, stop_bits, handshake);
+        log::info!(
+            "Params set for {}: baud={}, data_bits={}, parity={}, stop_bits={}, handshake={}",
+            port_id,
+            baud_rate,
+            data_bits,
+            parity,
+            stop_bits,
+            handshake
+        );
         Ok(())
     }
 
     /// 修改波特率（保留兼容）
     pub fn set_baud_rate(&self, port_id: &str, baud_rate: u32) -> anyhow::Result<()> {
-        let handle = self.ports.get(port_id)
+        let handle = self
+            .ports
+            .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        let mut port = handle.port.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut port = handle
+            .port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.set_baud_rate(baud_rate)?;
         log::info!("Baud rate set to {} for {}", baud_rate, port_id);
         Ok(())
@@ -496,17 +543,16 @@ impl SerialManager {
 
     /// 设置流控（DTR/RTS）
     pub fn set_flow_control(&self, port_id: &str, dtr: bool, rts: bool) -> anyhow::Result<()> {
-        let handle = self.ports.get(port_id)
+        let handle = self
+            .ports
+            .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        let mut port = handle.port.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut port = handle
+            .port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.write_data_terminal_ready(dtr)?;
         port.write_request_to_send(rts)?;
         Ok(())
-    }
-
-    /// 获取已连接串口的流量统计
-    pub fn get_traffic_stats(&self, _port_id: &str) -> anyhow::Result<(u64, u64)> {
-        // TODO: 实现 TX/RX 字节统计
-        Ok((0, 0))
     }
 }
