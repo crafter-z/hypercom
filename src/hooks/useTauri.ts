@@ -1,8 +1,11 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { serialService, configService, systemService, eventService, logService } from '../services/tauri';
-import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent } from '../services/tauri';
-import type { SerialPort, AppConfig } from '../types';
+import { useOperationStore } from '../stores/useOperationStore';
+import { useTerminalStore } from '../stores/useTerminalStore';
+import { useRuleStore } from '../stores/useRuleStore';
+import { serialService, configService, systemService, eventService, logService, storageService } from '../services/tauri';
+import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent, CommandSetInfo, HighlightSetInfo, CommandInfo, HighlightRuleInfo } from '../services/tauri';
+import type { SerialPort, AppConfig, SendCommandSet, HighlightRuleSet, SendCommand } from '../types';
 
 /**
  * 将后端 PortInfo 映射为前端 SerialPort
@@ -46,6 +49,43 @@ function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[
 
 import type { PortStatus } from '../types';
 
+/** Map backend CommandSetInfo to frontend SendCommandSet */
+function mapCommandSetInfo(s: CommandSetInfo): SendCommandSet {
+  return {
+    id: s.id,
+    name: s.name,
+    isLoop: s.is_loop,
+    loopDelay: s.loop_delay_ms,
+    commands: s.commands.map((c: CommandInfo) => ({
+      id: c.id,
+      name: c.name,
+      order: c.order_idx,
+      delay: c.delay_ms,
+      type: c.cmd_type as SendCommand['type'],
+      content: c.content,
+      appendLineEnding: c.append_line_ending as SendCommand['appendLineEnding'],
+    })),
+  };
+}
+
+/** Map backend HighlightSetInfo to frontend HighlightRuleSet */
+function mapHighlightSetInfo(s: HighlightSetInfo): HighlightRuleSet {
+  return {
+    id: s.id,
+    name: s.name,
+    isEnabled: s.is_enabled,
+    rules: s.rules.map((r: HighlightRuleInfo) => ({
+      id: r.id,
+      name: r.name,
+      pattern: r.pattern,
+      isRegex: r.is_regex,
+      color: r.color,
+      bold: r.bold,
+      italic: r.italic,
+    })),
+  };
+}
+
 /**
  * Hook: 自动刷新串口列表
  * 在组件挂载时获取一次串口列表，并可选地定时刷新
@@ -83,30 +123,30 @@ export function useSerialConnection() {
 
   const openPort = useCallback(async (portId: string, _baudRate: number = 115200) => {
     try {
-      const store = useAppStore.getState();
+      const opStore = useOperationStore.getState();
       updatePort(portId, { status: 'connecting' });
       await serialService.openSerialPort({
         port_id: portId,
-        baud_rate: store.opBaudRate,
-        data_bits: store.opDataBits,
-        parity: store.opParity,
-        stop_bits: store.opStopBits,
-        handshake: store.opHandshake,
-        dtr: store.opDtr,
-        rts: store.opRts,
+        baud_rate: opStore.baudRate,
+        data_bits: opStore.dataBits,
+        parity: opStore.parity,
+        stop_bits: opStore.stopBits,
+        handshake: opStore.handshake,
+        dtr: opStore.dtr,
+        rts: opStore.rts,
       });
-      const currentState = useAppStore.getState();
+      const currentOp = useOperationStore.getState();
       updatePort(portId, {
         status: 'connected',
-        baudRate: currentState.opBaudRate,
-        dataBits: currentState.opDataBits,
-        parity: currentState.opParity,
-        stopBits: currentState.opStopBits,
-        handshake: currentState.opHandshake,
+        baudRate: currentOp.baudRate,
+        dataBits: currentOp.dataBits,
+        parity: currentOp.parity,
+        stopBits: currentOp.stopBits,
+        handshake: currentOp.handshake,
       });
       // Auto-start logging if enabled
-      if (store.config.autoSaveLog) {
-        logService.startLogging(portId).catch(() => {});
+      if (useAppStore.getState().config.autoSaveLog) {
+        logService.startLogging(portId).catch((e) => console.debug('[useTauri] startLogging failed:', e));
       }
     } catch (err) {
       console.error('[useSerialConnection] Failed to open port:', err);
@@ -119,7 +159,7 @@ export function useSerialConnection() {
       await serialService.closeSerialPort(portId);
       updatePort(portId, { status: 'disconnected' });
       // Auto-stop logging
-      logService.stopLogging(portId).catch(() => {});
+      logService.stopLogging(portId).catch((e) => console.debug('[useTauri] stopLogging failed:', e));
     } catch (err) {
       console.error('[useSerialConnection] Failed to close port:', err);
       updatePort(portId, { status: 'error' });
@@ -128,7 +168,7 @@ export function useSerialConnection() {
 
   const toggleConnection = useCallback(async (portId: string) => {
     const port = ports.find((p) => p.id === portId);
-    if (!port) return;
+    if (!port || port.status === 'connecting') return;
     if (port.status === 'connected') {
       await closePort(portId);
     } else {
@@ -140,11 +180,15 @@ export function useSerialConnection() {
 }
 
 /**
- * Hook: 串口数据发送/接收
- * 监听 Tauri 事件，将接收到的数据写入终端
+ * Hook: 串口数据接收（事件监听生命周期）
+ * 监听 Tauri 的 onSerialData / onSerialStatus 事件，将接收到的数据写入终端，
+ * 并在后端上报端口状态变化时同步到 app store。
+ *
+ * SRP：只负责事件订阅与数据解码入终端，不涉及任何用户主动发送动作。
+ * 必须在应用根组件挂载一次（事件监听全局唯一）。
  */
-export function useSerialData() {
-  const appendTerminalLine = useAppStore((s) => s.appendTerminalLine);
+export function useSerialReceive() {
+  const appendTerminalLine = useTerminalStore((s) => s.appendTerminalLine);
   const setupPromiseRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
@@ -154,16 +198,17 @@ export function useSerialData() {
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
         if (cancelled) return;
-        const term = useAppStore.getState().terminals[event.port_id];
+        const term = useTerminalStore.getState().terminals[event.port_id];
         const encoding = term?.encoding || 'UTF-8';
         const decoderLabel = encoding.toLowerCase() === 'ascii' ? 'utf-8' : encoding.toLowerCase();
         let text: string;
         try {
           text = new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(event.data));
         } catch {
+          console.warn('[useSerialReceive] TextDecoder failed for encoding:', encoding, 'falling back to utf-8');
           text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(event.data));
         }
-        if (useAppStore.getState().opIgnoreEmptyChars && !text.trim()) return;
+        if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
         appendTerminalLine(event.port_id, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           timestamp: event.timestamp,
@@ -205,7 +250,15 @@ export function useSerialData() {
       cleanups.forEach((fn) => fn());
     };
   }, [appendTerminalLine]);
+}
 
+/**
+ * Hook: 串口数据发送（用户动作）
+ * 返回 sendData 回调，调用后端 serialService 发送数据，并把发送内容回显到终端、累加 TX 流量统计。
+ *
+ * SRP：只负责"发送"这一个用户动作，不订阅任何事件，可在任意需要发送的组件中调用。
+ */
+export function useSerialSend() {
   const sendData = useCallback(async (portId: string, data: string, isHex: boolean, lineEnding: string) => {
     try {
       const bytesWritten = await serialService.sendSerialData({
@@ -220,7 +273,7 @@ export function useSerialData() {
       const { sendPrefix } = state.config;
       const prefix = sendPrefix ? `${sendPrefix} ` : '';
       const displayText = `${prefix}${data}`;
-      state.appendTerminalLine(portId, {
+      useTerminalStore.getState().appendTerminalLine(portId, {
         id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp: Date.now(),
         direction: 'TX',
@@ -235,7 +288,7 @@ export function useSerialData() {
 
       return bytesWritten;
     } catch (err) {
-      console.error('[useSerialData] Failed to send data:', err);
+      console.error('[useSerialSend] Failed to send data:', err);
       return 0;
     }
   }, []);
@@ -264,8 +317,8 @@ export function useConfigPersistence() {
     try {
       await configService.setConfig(config);
       await Promise.all([
-        logService.setAutoSave(config.autoSaveLog).catch(() => {}),
-        logService.setEncoding(config.logEncoding).catch(() => {}),
+        logService.setAutoSave(config.autoSaveLog).catch((e) => console.debug('[useTauri] setAutoSave failed:', e)),
+        logService.setEncoding(config.logEncoding).catch((e) => console.debug('[useTauri] setEncoding failed:', e)),
       ]);
     } catch (err) {
       console.error('[useConfigPersistence] Failed to save config:', err);
@@ -325,9 +378,20 @@ export function useAppInit() {
       await loadConfig();
       const loaded = useAppStore.getState().config;
       await Promise.all([
-        logService.setAutoSave(loaded.autoSaveLog).catch(() => {}),
-        logService.setEncoding(loaded.logEncoding).catch(() => {}),
+        logService.setAutoSave(loaded.autoSaveLog).catch((e) => console.debug('[useTauri] setAutoSave failed:', e)),
+        logService.setEncoding(loaded.logEncoding).catch((e) => console.debug('[useTauri] setEncoding failed:', e)),
       ]);
+      // Load persisted rule sets and command sets at startup
+      try {
+        const [cmdSets, hlSets] = await Promise.all([
+          storageService.loadCommandSets(),
+          storageService.loadHighlightSets(),
+        ]);
+        useRuleStore.getState().setSendCommandSets(cmdSets.map(mapCommandSetInfo));
+        useRuleStore.getState().setHighlightRuleSets(hlSets.map(mapHighlightSetInfo));
+      } catch (e) {
+        console.warn('[useAppInit] Failed to load stored rules/commands:', e);
+      }
       await refreshPorts();
     };
     init();
