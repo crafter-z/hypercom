@@ -12,8 +12,8 @@
 |----|------|------|------|
 | 桌面壳 | Tauri | 2.11 | 跨平台桌面框架，Rust ↔ JS 桥接 |
 | 前端框架 | React + Vite | 18 + 5 | UI 渲染 |
-| 前端状态 | Zustand + Immer | 5 + 11 | 全局状态管理 (约 55 个 Actions) |
-| 前端样式 | CSS Variables | — | 暗色/亮色主题切换 |
+| 前端状态 | Zustand + Immer | 5 + 11 | 全局状态管理 (4 个 Store，约 55 个 Actions) |
+| 前端样式 | CSS Variables | — | 暗色/亮色主题切换 (10 个 CSS 文件) |
 | 前端图标 | lucide-react | 1.14 | 矢量图标库 |
 | 前端拖拽 | @dnd-kit | 6 | 侧边栏 + 标签页拖拽排序 |
 | 终端虚拟滚动 | @tanstack/react-virtual | 3.13 | 大数据量终端高性能渲染 |
@@ -21,6 +21,7 @@
 | 串口通信 | serialport-rs | 4 | 跨平台串口读写 |
 | 数据库 | sqlx (SQLite) | 0.7 | 规则集、命令集持久化 |
 | 系统监控 | sysinfo | 0.33 | 进程 CPU/内存监控 |
+| 编码解码 | encoding_rs | — | GBK 等多编码真实解码 |
 | 配置存储 | serde_json | 1 | JSON 文件持久化 |
 | 日志落盘 | BufWriter + fs | std | 高性能异步写入 |
 
@@ -29,20 +30,21 @@
 ```
 ┌─────────────────────────────────────────┐
 │  src/           React UI 层             │
-│  components/    6 个核心组件 + 共享组件   │
-│  stores/        Zustand 全局状态        │
+│  components/    6 个组件目录 + 共享组件   │
+│  stores/        4 个 Zustand Store      │
 │  hooks/         React Hooks 桥接层      │
 │  services/      Tauri invoke 封装       │
-│  utils/         高亮引擎               │
+│  utils/         高亮引擎 + HEX 工具     │
 ├─────────────────────────────────────────┤
 │  Tauri Bridge   invoke / event          │
 ├─────────────────────────────────────────┤
 │  src-tauri/     Rust 逻辑层             │
-│  commands/      32 个 Tauri 命令        │
+│  commands/      8 个命令模块 (32 命令)  │
 │  serial/        串口管理器              │
 │  config/        配置持久化              │
 │  logger/        日志写入器              │
 │  storage/       SQLite CRUD            │
+│  system.rs      Win32 电源 FFI         │
 ├─────────────────────────────────────────┤
 │  OS             串口 / 文件系统 / 进程   │
 └─────────────────────────────────────────┘
@@ -72,7 +74,8 @@
 | HEX 发送格式解析（含边界检查） | ✅ |
 | 终端虚拟滚动 (@tanstack/react-virtual) | ✅ |
 | 终端数据真实文件导出 (TXT/CSV) | ✅ |
-| 前端单元测试基线 (vitest, 15 cases) | ✅ |
+| GBK 真实解码 (encoding_rs) | ✅ |
+| 前端单元测试基线 (vitest, 49+ cases) | ✅ |
 | 窗口控制按钮 (最小化/最大化/关闭) | ⏳ |
 | 协议解析器 | ⏳ |
 | 多语言支持 | ⏳ |

@@ -1,33 +1,6 @@
 # 待办事项
 
-## 🔴 高优先级
-
-### HEX 发送格式解析 (`serial/mod.rs`)
-- ✅ 已实现（`parse_hex_string` 公共函数；TX 日志按实际写入字节记录）
-
-### 标题栏窗口控制 (`TitleBar.tsx`)
-- 最小化：调用 Tauri API `appWindow.minimize()`
-- 最大化/还原：`appWindow.toggleMaximize()`
-- 关闭：`appWindow.close()`
-
 ## 🟡 中优先级
-
-### 日志操作按钮 (`OperationPanel.tsx`)
-- "另存为"：✅ 已实现（`logService.saveLogAs` + 文件对话框）
-- "打开文件"：✅ 已实现（`logService.openPath`，后端 `open_path` 命令）
-- "打开目录"：✅ 已实现（`logService.openLogDirectory`，后端 `open_log_directory` 命令）
-
-### 串口参数完善 (`set_serial_params`)
-- 当前仅支持波特率切换，需扩展为支持 data_bits/parity/stop_bits/handshake 在线修改
-- 前端 `serialService.setSerialParams` 已传递完整参数但后端未使用
-
-### 滚动锁定同步
-- OperationPanel 的 `opScrollLocked` 与 `TerminalState.scrollLocked` 未双向同步
-- 应在切换 `opScrollLocked` 时调用 `setTerminalConfig(portId, { scrollLocked })`
-
-### 窗口防休眠 API
-- `prevent_screen_off` / `prevent_sleep` 当前仅日志记录
-- Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)`
 
 ### 分屏嵌套
 - 当前 Pane 为平铺模型，不支持树状嵌套分屏 (VS Code 式)
@@ -51,14 +24,35 @@
 ### 背景图片
 - ConfigModal 已有路径选择，需实现在主窗口 CSS `background-image` 应用
 
-### 侧边栏 mock 分组清理
-- `Sidebar.tsx` 初始化时创建 mock 分组 (COM3/COM4/...)，应改为仅在有真实端口时可选分组
-
 ## ✅ 已完成（移出待办列表）
+
+### 2026-06 重构批次 (12 commits)
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `ccfd867` | `fix(backend)` | GBK 解码改用 encoding_rs, 替换 U+FFFD 占位符 |
+| `6d805b3` | `refactor(backend)` | 移除 serial 死代码, 抽取 emit_data_event helper |
+| `8bf661d` | `refactor(backend)` | 移除 storage 死 CRUD, 合并重复类型, 修复 6 处 .lock().unwrap() |
+| `686b7be` | `refactor(backend)` | commands 单体拆分为 6 个领域文件 + CommandError 枚举 + 抽取 win32_power |
+| `5224457` | `fix(utils)` | 抽取 hexUtils, 移除 3 个死导出 |
+| `cec426c` | `refactor(store)` | god store 拆分为 4 个 store + removeEmptyPanes helper |
+| `8944418` | `refactor(hooks)` | useSerialData 拆分为 useSerialReceive + useSerialSend |
+| `a724c05` | `refactor(ui)` | ConfigModal 拆分为 10 个文件 + RuleSetAccordion |
+| `3ed0bab` | `refactor(ui)` | OperationPanel 拆分为 4 个文件 + useCyclicSend hook |
+| `e33bd30` | `refactor(ui)` | Sidebar 抽取 usePortDragEnd hook + AliasDialog |
+| `bbd4540` | `refactor(ui)` | MainDisplay 拆分 + 修复 closeTab 生命周期 + 移除 setTimeout(0) |
+| `ef32ce0` | `refactor(ui)` | styles.css 拆分为 11 个文件, 移除 20 个死 CSS class |
+
+### 早期完成项
 
 - **虚拟滚动** — commit `e0ec7ce`（`@tanstack/react-virtual` 替换 naive `lines.map`）
 - **数据导出** — commit `4f1693e`（`save()` 文件对话框 + 新 Rust 命令 `export_terminal_log` 写盘，替代剪贴板方案）
 - **日志功能完善** — 已实现自动分片、文件名变量解析、auto_save 短路
 - **HEX 发送格式解析** — `parse_hex_string` 公共函数已就位
 - **日志操作按钮** — 另存为/打开文件/打开目录全实现
-- **前端测试基线** — commit `35169aa`（vitest 4.x + 15 个 useAppStore 单测）
+- **前端测试基线** — commit `35169aa`（vitest 4.x + 15 个 useAppStore 单测，后扩展至 71 cases / 2 files）
+- **标题栏窗口控制** — 最小化/最大化/关闭已绑定 Tauri API
+- **串口参数完善** — `set_serial_params` 支持完整参数 (baud_rate + data_bits + parity + stop_bits + handshake)
+- **窗口防休眠** — Win32 `SetThreadExecutionState` 已实现 (`system.rs`)
+- **滚动锁定同步** — OperationPanel `opScrollLocked` 与 TerminalState 已同步
+- **侧边栏 mock 分组清理** — 已改为仅在有真实端口时可选分组

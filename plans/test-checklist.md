@@ -2,6 +2,17 @@
 
 > 每次发版前逐项验证。使用 SIM:Loopback 虚拟串口完成串口相关测试。
 
+## 零、自动化测试
+
+| 套件 | 命令 | 数量 | 说明 |
+|------|------|------|------|
+| 前端 (vitest) | `npm run test:run` | 71 tests / 2 files | `useAppStore.test.ts` (49 cases) + `highlightEngine.test.ts` (22 cases) |
+| 后端 (cargo) | `cargo test --lib` | 24 tests | logger 编码/分片/反向索引等 |
+| TypeScript | `npx tsc --noEmit` | 0 errors | 类型检查 |
+| Rust | `cargo check` | 0 errors, 0 warnings | 快速编译检查 |
+
+发版前四项必须全绿。
+
 ## 一、串口通信 (7 项)
 
 | # | 步骤 | 预期 |

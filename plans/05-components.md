@@ -17,9 +17,9 @@
 │ │ ● COM4│ │ │                                          │ │
 │ │Group2▸│ │ │                                          │ │
 │ │ 未分组 │ │ └──────────────────────────────────────────┘ │
-│ │ ● COM7│ ├──────────────────────────────────────────────┤
+│ │ ● COM7├──────────────────────────────────────────────┤
 │ │ 已隐藏 │ │ OperationPanel                              │
-│ └──────┘ │ │ [发送区 | 循环发送 | 参数区]               │  280px
+│ └──────┘ │ │ [SendSection | RulesSection | ParamsSection]│  280px
 │          │ └──────────────────────────────────────────────┘
 ├──────────┴──────────────────────────────────────────────┤
 │ StatusBar  ● 运行正常  150MB/1024MB  CPU 2.3% │ TX:1.2KB RX:8.5KB  14:30 │
@@ -30,39 +30,52 @@
 
 ```
 App
- ├─ ThemeProvider (设置 data-theme 属性)
- │   └─ TitleBar
- │       └─ props: 无 (直接操作 Store)
- │   └─ Sidebar
- │       └─ props: 无 (直接操作 Store + Hooks)
- │       └─ 子组件:
- │           ├─ SidebarToolbar (showHidden, onToggleHidden, onRefresh, ...)
- │           ├─ SearchBox (value, onChange)
- │           ├─ GroupItem (group, ports, onOpenTab, onToggleConnect, ...)
- │           │   └─ DndContext → SortableContext → SortablePortItem[]
- │           ├─ SortablePortItem (port, isConnected, onOpenTab, ...)
- │           └─ AliasDialog (portId, currentAlias, onSave, onCancel)
- │   └─ SidebarResizeHandle (拖拽调整宽度)
- │   └─ MainDisplay
- │       ├─ 全局工具栏 (分屏按钮)
- │       └─ Pane[] (每个分屏)
- │           ├─ TabBar (tabs, activeTabId, onTabClick, ...)
- │           │   └─ DndContext → SortableContext → SortableTab[]
- │           ├─ terminal-toolbar (端口信息 + 编码选择)
- │           └─ TerminalView (portId, terminal)
- │   └─ OperationPanel
- │       └─ props: 无 (直接操作 Store + Hooks)
- │   └─ StatusBar
- │       └─ props: 无 (直接操作 Store + Hooks)
- │   └─ ConfigModal (overlay)
- │       ├─ 左侧导航 (general/log/backup/display/highlight/commands)
- │       └─ 右侧内容:
- │           ├─ GeneralSettings
- │           ├─ LogSettings
- │           ├─ BackupSettings
- │           ├─ DisplaySettings
- │           ├─ HighlightSettings (含 RuleEditor)
- │           └─ CommandSettings (含 CmdEditor)
+  ├─ ErrorBoundary (捕获子树渲染错误)
+  ├─ ThemeProvider (设置 data-theme 属性)
+  │   ├─ TitleBar
+  │   │   └─ props: 无 (直接操作 Store)
+  │   ├─ Sidebar
+  │   │   └─ props: 无 (直接操作 Store + Hooks)
+  │   │   └─ 子组件:
+  │   │       ├─ SidebarToolbar (showHidden, onToggleHidden, onRefresh, ...)
+  │   │       ├─ SearchBox (value, onChange)
+  │   │       ├─ GroupItem (group, ports, onOpenTab, onToggleConnect, ...)
+  │   │       │   └─ DndContext → SortableContext → SortablePortItem[]
+  │   │       ├─ SortablePortItem (port, isConnected, onOpenTab, ...)
+  │   │       ├─ AliasDialog (portId, currentAlias, onSave, onCancel)
+  │   │       └─ usePortDragEnd (拖拽结束处理 Hook)
+  │   ├─ SidebarResizeHandle (拖拽调整宽度)
+  │   ├─ MainDisplay
+  │   │   ├─ 全局工具栏 (分屏按钮)
+  │   │   └─ Pane[] (每个分屏)
+  │   │       ├─ TabBar (tabs, activeTabId, onTabClick, ...)
+  │   │       │   └─ DndContext → SortableContext → SortableTab[]
+  │   │       │   └─ useTabDragEnd (拖拽结束处理 Hook)
+  │   │       ├─ ResizeHandle (分割线拖拽)
+  │   │       ├─ terminal-toolbar (端口信息 + 编码选择)
+  │   │       └─ TerminalView (portId, terminal)
+  │   ├─ OperationPanel
+  │   │   └─ props: 无 (直接操作 Store + Hooks)
+  │   │   └─ 子组件:
+  │   │       ├─ SendSection (发送区: 输入 + HEX + 行结束符)
+  │   │       ├─ RulesSection (循环发送: 命令集选择 + 启停)
+  │   │       │   └─ useCyclicSend (循环发送逻辑 Hook)
+  │   │       └─ ParamsSection (串口参数: 波特率/数据位/校验/停止位/流控/DTR/RTS)
+  │   ├─ StatusBar
+  │   │   └─ props: 无 (直接操作 Store + Hooks)
+  │   └─ ConfigModal (overlay)
+  │       ├─ 左侧导航 (general/log/backup/display/highlight/commands)
+  │       └─ 右侧内容:
+  │           ├─ GeneralSettings
+  │           ├─ LogSettings
+  │           ├─ BackupSettings
+  │           ├─ DisplaySettings
+  │           ├─ HighlightSettings
+  │           │   └─ RuleSetAccordion (通用 CRUD 手风琴)
+  │           │       └─ HighlightRuleEditor
+  │           └─ CommandSettings
+  │               └─ RuleSetAccordion
+  │                   └─ SendCmdEditor
 ```
 
 ## 类型定义速查
@@ -113,6 +126,21 @@ UIState          { isConfigOpen, configActiveTab, sidebarWidth, operationPanelHe
 
 ## 样式系统 (CSS Variables)
 
+样式从单文件 `styles.css` (1470 行) 拆分为 10 个模块文件，`styles.css` (14 行) 仅作 `@import` 入口。重构中清理了 20 个无用 class。
+
+| 文件 | 职责 |
+|------|------|
+| `styles/base.css` | CSS 变量、主题、reset |
+| `styles/titlebar.css` | 标题栏 |
+| `styles/sidebar.css` | 侧边栏 |
+| `styles/main-display.css` | 主显示区 |
+| `styles/tabbar.css` | 标签页栏 |
+| `styles/terminal-view.css` | 终端视图 |
+| `styles/operation-panel.css` | 操作面板 |
+| `styles/status-bar.css` | 状态栏 |
+| `styles/config-modal.css` | 配置弹窗 |
+| `styles/context-menu.css` | 右键菜单 |
+
 暗色主题 (`:root`)：
 ```css
 --bg-primary: #1e1e1e;     --bg-secondary: #252526;    --bg-tertiary: #2d2d30;
@@ -124,11 +152,11 @@ UIState          { isConfigOpen, configActiveTab, sidebarWidth, operationPanelHe
 
 亮色主题 (`:root[data-theme="light"]`) 对应覆盖所有变量。
 
-组件 CSS class 体系见 `styles.css`，遵循 kebab-case 命名 (`.port-item-name`, `.terminal-toolbar-title`)。
+组件 CSS class 体系遵循 kebab-case 命名 (`.port-item-name`, `.terminal-toolbar-title`)。
 
 ## 共享组件
 
-### ContextMenu (`shared/ContextMenu.tsx`)
+### ContextMenu (`shared/ContextMenu.tsx`，94 行)
 
 ```tsx
 // 使用 useContextMenu Hook (推荐)
@@ -153,3 +181,28 @@ interface ContextMenuSeparator { type: 'separator'; }
 ```
 
 特性：视口边界自动检测、ESC/点击外部关闭、CSS 入场动画、danger/disabled 样式。
+
+## 配置弹窗组件
+
+### RuleSetAccordion (`ConfigModal/RuleSetAccordion.tsx`，78 行)
+
+通用 CRUD 手风琴组件，被 HighlightSettings 和 CommandSettings 复用，消除两页之间的重复列表/增删逻辑：
+
+```tsx
+<RuleSetAccordion
+  sets={ruleSets}
+  activeSetId={activeId}
+  onSelect={handleSelect}
+  onAdd={handleAdd}
+  onDelete={handleDelete}
+  onToggle={handleToggle}
+  renderEditor={(set) => <HighlightRuleEditor ... />}
+/>
+```
+
+### 编辑器 (`ConfigModal/editors/`)
+
+| 编辑器 | 文件 | 职责 |
+|--------|------|------|
+| `HighlightRuleEditor` | 35 行 | 单条高亮规则编辑 (pattern/isRegex/color/bold/italic) |
+| `SendCmdEditor` | 30 行 | 单条发送命令编辑 (type/content/appendLineEnding/delay) |

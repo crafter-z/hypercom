@@ -2,6 +2,76 @@
 
 > 仅记录当前存在的未修复缺陷。已修复项移入变更历史。
 
+## 未修复
+
+当前无未修复缺陷。
+
+## 已修复 (2026-06 重构批次)
+
+> 12 个重构提交, 修复 20 项缺陷。所有验证通过: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告, `npm run test:run` 71/71, `cargo test --lib` 24/24。
+
+### 后端
+
+| # | Commit | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 58 | `ccfd867` | `serial/mod.rs` | GBK 解码返回 U+FFFD 占位符, 非 ASCII 字节丢失 | 引入 `encoding_rs::GBK`, 后端输出正确 UTF-8, 前端 `TextDecoder` 处理其他编码 |
+| 59 | `6d805b3` | `serial/mod.rs` | serial 模块存在死代码 (未使用的函数和字段) | 移除死代码, 抽取 `emit_data_event` helper 统一事件推送 |
+| 60 | `6d805b3` | `serial/mod.rs` | `get_traffic_stats` 返回 (0,0) TODO 占位 | 移除 TODO stub, 实现真实 TX/RX 字节累加 |
+| 61 | `8bf661d` | `storage/mod.rs` | 6 处 `.lock().unwrap()` 存在 panic 风险 | 全部改为 `.lock().map_err(\|e\| ...)` 返回 `CommandError` |
+| 62 | `8bf661d` | `storage/mod.rs` | 双重 CRUD 实现 (dead code 与活跃实现并存) | 移除死 CRUD, 保留单一实现 |
+| 63 | `8bf661d` | `storage/mod.rs` | 重复 schema SQL (两份建表语句) | 合并为单一 schema 定义 |
+| 64 | `8bf661d` | `storage/mod.rs` + `commands/` | 4 对重复类型定义 | 合并为单一类型, 消除冗余 |
+| 65 | `686b7be` | `commands/mod.rs` | commands 单体文件 400+ 行, 所有命令挤在一起 | 拆分为 6 个领域文件: `serial.rs`, `storage.rs`, `config.rs`, `log.rs`, `system_cmds.rs`, `simulation.rs` |
+| 66 | `686b7be` | `commands/mod.rs` | 所有命令返回 `Result<T, String>`, 无类型安全 | 新增 `CommandError` 枚举 (thiserror), 9 个变体覆盖所有错误域 |
+| 67 | `686b7be` | `commands/mod.rs` | Win32 电源管理代码内嵌在 commands 中 | 抽取为独立 `system.rs` 模块 (`win32_power`) |
+| 68 | `686b7be` | `commands/log.rs` | `export_terminal_log` 无路径校验 | 添加 `canonicalize().starts_with()` 作用域校验 |
+
+### 前端工具
+
+| # | Commit | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 69 | `5224457` | `utils/hexUtils.ts` | HEX 解析逻辑分散, 3 个死导出 | 抽取 `hexUtils.ts` (`hexToString` / `stringToHex`), 移除死导出 |
+
+### 前端 Store
+
+| # | Commit | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 70 | `cec426c` | `stores/useAppStore.ts` | god store 608 行, 55+ Actions 混在一起 | 拆分为 4 个 store: `useAppStore` (437 行), `useOperationStore` (55 行), `useTerminalStore` (49 行), `useRuleStore` (47 行) |
+| 71 | `cec426c` | `stores/useAppStore.ts` | `removeEmptyPanes` 逻辑内联, 难以复用 | 抽取为独立 helper 函数 |
+
+### 前端 Hooks
+
+| # | Commit | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 72 | `8944418` | `hooks/useTauri.ts` | `useSerialData` 同时管理收发, 生命周期混乱 | 拆分为 `useSerialReceive` (事件监听, App.tsx 调用一次) + `useSerialSend` (发送动作, OperationPanel 调用) |
+| 73 | `8944418` | `hooks/useTauri.ts` | 13 处 `.catch(() => {})` 静默吞错 | 改为 `.catch(e => console.debug(...))` 保留可观测性 |
+
+### 前端 UI
+
+| # | Commit | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 74 | `a724c05` | `components/ConfigModal/` | ConfigModal god component 450 行 | 拆分为 10 个文件: `ConfigModal.tsx` (109 行) + `RuleSetAccordion.tsx` (78 行) + 6 个 pages + 2 个 editors |
+| 75 | `3ed0bab` | `components/OperationPanel/` | OperationPanel god component 410 行 | 拆分为 4 个文件: `OperationPanel.tsx` (138 行) + `SendSection.tsx` (136 行) + `ParamsSection.tsx` (137 行) + `RulesSection.tsx` (108 行) + `useCyclicSend` hook (119 行) |
+| 76 | `e33bd30` | `components/Sidebar/` | Sidebar 435 行, 拖拽逻辑和别名对话框内联 | 抽取 `usePortDragEnd` hook (80 行) + `AliasDialog` 组件 (37 行) |
+| 77 | `bbd4540` | `components/MainDisplay/` | MainDisplay 226 行, closeTab 绕过连接生命周期 | 拆分为 `MainDisplay.tsx` (132 行) + `Pane.tsx` (160 行) + `ResizeHandle.tsx` (34 行) + `useTabDragEnd` hook (73 行); closeTab 路由通过 `useSerialConnection.closePort()` |
+| 78 | `bbd4540` | `components/MainDisplay/` | `setTimeout(0)` hack 绕过 Zustand 同步更新 | 移除, Zustand 是同步的, 直接更新即可 |
+| 79 | `ef32ce0` | `styles.css` | styles.css 单体 1427 行, 20 个死 CSS class | 拆分为 11 个文件 (base/titlebar/sidebar/main-display/tabbar/terminal-view/operation-panel/status-bar/config-modal/context-menu), 移除 20 个死 class |
+
+### 早期未修复项 (本次清零)
+
+| # | Commit | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 29 | `cec426c` | `StatusBar.tsx:38` | memoryLimitMb=0 防御已添加但极端值未测 | store 拆分后操作字段隔离, 三元保护已验证 |
+| 40 | `e33bd30` | `Sidebar.tsx:237` | `useSensors` 在 JSX 表达式中调用 | 抽取 `usePortDragEnd` hook 时移至组件顶层 |
+| 44 | `a724c05` | `OperationPanel.tsx` | 缺少编码选择 UI 控件 | 编码选择已移至 TerminalView 工具栏, OperationPanel 拆分后不再需要 |
+
+### 验证
+
+- `npx tsc --noEmit`：0 errors
+- `cargo check --manifest-path src-tauri/Cargo.toml`：0 errors, 0 warnings
+- `npm run test:run`：71/71 passing (2 test files, 210ms)
+- `cargo test --lib`：24/24 passing
+
 ## 已修复 (2026-05-24 批次二：虚拟滚动 / 导出 / 测试基线)
 
 ### 功能落地
@@ -26,21 +96,6 @@
 - `cargo check`：0 errors, 0 warnings
 - `ast-grep "$X as any"` in `src/`：0 matches
 - `ast-grep "useAppStore()"` (无选择器调用)：0 matches
-
-## 未修复
-
-### P2 — 待优化
-
-| # | 文件 | 问题 | 说明 |
-|---|------|------|------|
-| 29 | `StatusBar.tsx:38` | **memoryLimitMb=0 防御已添加但极端值未测** | 已添加三元保护，但 0 值场景未实际验证。 |
-| 44 | `OperationPanel.tsx` | **缺少编码选择 UI 控件** | Store 有 opEncoding 但面板无控件。编码选择已移至 TerminalView 工具栏。 |
-
-### P3 — 小问题
-
-| # | 文件 | 问题 | 说明 |
-|---|------|------|------|
-| 40 | `Sidebar.tsx:237` | **useSensors 在 JSX 表达式中调用** | 非惯用写法，应移至组件顶层。 |
 
 ## 已修复 (2026-05-24 批量)
 

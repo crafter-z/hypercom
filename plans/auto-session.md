@@ -1,5 +1,67 @@
 # 自主迭代工作日志
 
+## 2026-06 重构批次
+
+> 开始: 2026-06-19 | 模式: 无监督自主迭代 | 提交: 12 commits | 工作单元: 16 | 阶段: 5
+
+### Phase 1 — 后端重构 (4 commits, 10 work units)
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `ccfd867` | `fix(backend)` | GBK 解码改用 `encoding_rs::GBK`, 替换 U+FFFD 占位符。后端输出正确 UTF-8, 前端 `TextDecoder` 处理其他编码 |
+| `6d805b3` | `refactor(backend)` | 移除 serial 死代码 (未使用函数/字段), 抽取 `emit_data_event` helper 统一事件推送, 移除 `get_traffic_stats` TODO stub |
+| `8bf661d` | `refactor(backend)` | 移除 storage 死 CRUD, 合并 4 对重复类型, 合并重复 schema SQL, 6 处 `.lock().unwrap()` 改为 `.map_err()` |
+| `686b7be` | `refactor(backend)` | commands 单体 400+ 行拆分为 6 个领域文件 (`serial.rs` / `storage.rs` / `config.rs` / `log.rs` / `system_cmds.rs` / `simulation.rs`), 新增 `CommandError` 枚举 (thiserror, 9 变体), 抽取 `system.rs` (`win32_power`), `export_terminal_log` 添加路径校验 |
+
+### Phase 2 — 工具与 Store (2 commits, 2 work units)
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `5224457` | `fix(utils)` | 抽取 `hexUtils.ts` (`hexToString` / `stringToHex`), 移除 3 个死导出 |
+| `cec426c` | `refactor(store)` | god store 608 行拆分为 4 个 store: `useAppStore` (437 行, tabs/ports/panes/config/groups), `useOperationStore` (55 行, 操作字段无 `op` 前缀), `useTerminalStore` (49 行), `useRuleStore` (47 行)。抽取 `removeEmptyPanes` helper |
+
+### Phase 3 — Hooks 重构 (1 commit, 2 work units)
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `8944418` | `refactor(hooks)` | `useSerialData` 拆分为 `useSerialReceive` (事件监听, App.tsx 调用一次) + `useSerialSend` (发送动作, OperationPanel 调用)。13 处 `.catch(() => {})` 改为 `console.debug` |
+
+### Phase 4 — UI 组件拆分 (4 commits, 4 work units)
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `a724c05` | `refactor(ui)` | ConfigModal god component 450 行拆分为 10 个文件: `ConfigModal.tsx` (109) + `RuleSetAccordion.tsx` (78) + 6 个 pages + 2 个 editors |
+| `3ed0bab` | `refactor(ui)` | OperationPanel 410 行拆分为 4 个文件: `OperationPanel.tsx` (138) + `SendSection.tsx` (136) + `ParamsSection.tsx` (137) + `RulesSection.tsx` (108) + `useCyclicSend` hook (119) |
+| `e33bd30` | `refactor(ui)` | Sidebar 抽取 `usePortDragEnd` hook (80 行) + `AliasDialog` 组件 (37 行), `useSensors` 移至组件顶层 |
+| `bbd4540` | `refactor(ui)` | MainDisplay 拆分为 `MainDisplay.tsx` (132) + `Pane.tsx` (160) + `ResizeHandle.tsx` (34) + `useTabDragEnd` hook (73)。closeTab 路由通过 `useSerialConnection.closePort()` 修复生命周期泄漏。移除 `setTimeout(0)` hack (Zustand 是同步的) |
+
+### Phase 5 — 样式拆分 (1 commit, 1 work unit)
+
+| Commit | 范围 | 说明 |
+|--------|------|------|
+| `ef32ce0` | `refactor(ui)` | `styles.css` 单体 1427 行拆分为 11 个文件 (base/titlebar/sidebar/main-display/tabbar/terminal-view/operation-panel/status-bar/config-modal/context-menu), 移除 20 个死 CSS class |
+
+### 验证
+
+| 检查 | 结果 |
+|------|------|
+| `npx tsc --noEmit` | 0 errors |
+| `cargo check --manifest-path src-tauri/Cargo.toml` | 0 errors, 0 warnings |
+| `npm run test:run` | 71/71 passing (2 test files, 210ms) |
+| `cargo test --lib` | 24/24 passing |
+
+### 缺陷清零
+
+本次重构修复 20 项缺陷 (编号 58-79 + 早期遗留 29/40/44), 详见 `plans/08-defects.md` 的「已修复 (2026-06 重构批次)」章节。重构后「未修复」列表为空。
+
+### 总结
+
+**12 commits, 16 work units, 5 phases。** 后端从单体 commands 文件拆为 6 个领域文件 + 类型安全错误枚举。前端从 god store 拆为 4 个职责清晰的 store, god 组件拆为可维护的小文件, 单体样式拆为 11 个按组件划分的 CSS。所有验证全绿。
+
+---
+
+## 2026-05-17 初始迭代
+
 > 开始: 2026-05-17 10:49 | 结束: 2026-05-17 11:30
 > 模式: 无监督自主迭代 | 提交: 4 commits | 耗时: 41min
 

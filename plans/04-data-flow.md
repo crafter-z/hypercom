@@ -7,10 +7,10 @@
   → Sidebar.onToggleConnect(portId)
     → useSerialConnection().toggleConnection(portId)
       → useSerialConnection().openPort(portId, baud)
-        → updatePort(portId, { status: 'connected' })   // 乐观更新
+        → useAppStore.updatePort(portId, { status: 'connected' })   // 乐观更新
         → serialService.openSerialPort({
             port_id, baud_rate, data_bits, parity, stop_bits, handshake, dtr, rts
-          })  // 从 useAppStore.getState().op* 读取参数
+          })  // 从 useOperationStore.getState().op* 读取参数
           → invoke('open_serial_port', { args })
             → Rust: SerialManager.open_real_port() 或 open_sim_port()
               → serialport::new().open() 或 创建 mpsc channel
@@ -18,43 +18,45 @@
               → emit serial:status("connected")
             ← Ok(())
           ← Promise<void>
-        → updatePort(portId, { status: 'connected', baudRate, ... })
+        → useAppStore.updatePort(portId, { status: 'connected', baudRate, ... })
 
 同时: serial:status("connected") 事件
   → eventService.onSerialStatus(callback)
-    → useAppStore.getState().updatePort(port_id, { status: 'connected' })
+    → useSerialReceive 回调
+      → useAppStore.getState().updatePort(port_id, { status: 'connected' })
 ```
 
-## 2. 串口数据接收
+## 2. 串口数据接收 (useSerialReceive)
 
 ```
 读线程 (50ms 轮询)
   → port.read(&mut buffer) → Ok(n > 0)
-    → emit serial:data({
+    → emit_data_event(serial:data{
         port_id, timestamp, direction: "RX",
         data: buffer[..n].to_vec(), is_hex: false
       })
     → 前端 eventService.onSerialData(callback)
-      → TextDecoder.decode(event.data)
-      → appendTerminalLine(port_id, {
-          id, timestamp, direction, content, isHex
-        })
-        → terminals[portId].lines.push(line)
-        → 超出 maxLines 则 shift
-      → setTrafficStats(port_id, {
-          rxTotal: prev + event.data.length
-        })  // 累加 RX
-    → TerminalView 重渲染 (Zustand 订阅)
+      → useSerialReceive 回调
+        → TextDecoder.decode(event.data)
+        → useTerminalStore.getState().appendTerminalLine(port_id, {
+            id, timestamp, direction, content, isHex
+          })
+          → terminals[portId].lines.push(line)
+          → 超出 maxLines 则 shift
+        → useAppStore.getState().setTrafficStats(port_id, {
+            rxTotal: prev + event.data.length
+          })  // 累加 RX
+    → TerminalView 重渲染 (Zustand 订阅 useTerminalStore)
     → useEffect 检测 lines.length 变化
       → scrollRef.current.scrollTop = scrollHeight  // 自动滚底
 ```
 
-## 3. 串口数据发送
+## 3. 串口数据发送 (useSerialSend)
 
 ```
 用户输入 + 点击发送
-  → OperationPanel.handleSend()
-    → useSerialData().sendData(portId, data, isHex, lineEnding)
+  → SendSection.handleSend()
+    → useSerialSend().sendData(portId, data, isHex, lineEnding)
       → serialService.sendSerialData({
           port_id, data, is_hex, append_line_ending
         })
@@ -62,29 +64,30 @@
           → Rust: 模拟端口 → channel.send(Echo) → 读线程 emit serial:data 回显
                    真实端口 → port.write(bytes) → port.flush()
           ← bytesWritten
-      → appendTerminalLine(portId, { direction: 'TX', content: prefix + data })
-      → setTrafficStats(portId, { txTotal: prev + bytesWritten })  // 累加 TX
-      → setOpState({ opSendInput: '' })  // 清空输入框
+      → useTerminalStore.getState().appendTerminalLine(portId, { direction: 'TX', content: prefix + data })
+      → useAppStore.getState().setTrafficStats(portId, { txTotal: prev + bytesWritten })  // 累加 TX
+      → useOperationStore.getState().setOpState({ opSendInput: '' })  // 清空输入框
 ```
 
-## 4. 循环发送
+## 4. 循环发送 (useCyclicSend)
 
 ```
 用户点击开始循环
-  → OperationPanel.handleToggleLoop()
-    → setOpState({ opIsLoopSending: true })
-    → useEffect 触发:
-      ├─ 获取 activeSendCommandSet.commands
+  → RulesSection.handleToggleLoop()
+    → useOperationStore.setOpState({ opIsLoopSending: true })
+    → useCyclicSend useEffect 触发:
+      ├─ 从 useRuleStore 获取 sendCommandSets
+      │   按 useOperationStore.opActiveSendCommandSetId 找到当前命令集
       ├─ 从第 0 条开始:
-      │   └─ sendData(port, cmd.content, cmd.type, cmd.appendLineEnding)
+      │   └─ useSerialSend().sendData(port, cmd.content, cmd.type, cmd.appendLineEnding)
       │       → await 完成
-      │       → currentCmdIdx++
+      │       → useOperationStore.setOpState({ opCurrentCmdIdx: idx++ })
       │       → 如果是最后一条:
       │           ├─ 非循环模式 → setOpState({ opIsLoopSending: false }), 停止
       │           └─ 循环模式 → 等待 loopDelay ms, currentCmdIdx=0 重新开始
       │       → 否则: 等待 cmd.delay 或 opLoopInterval ms, 发送下一条
       └─ 停止:
-          → setOpState({ opIsLoopSending: false })
+          → useOperationStore.setOpState({ opIsLoopSending: false })
           → ref.stopped = true → clearTimeout
 ```
 
@@ -98,7 +101,7 @@
         → invoke('get_config')
           → Rust: ConfigManager.get_config() → JSON 文件读取
         ← AppConfig
-      → setConfig(config)  // 写入 Store
+      → useAppStore.setConfig(config)  // 写入主 Store
 
 用户保存配置
   → ConfigModal 保存按钮
@@ -123,7 +126,7 @@
           if (prev) return { ...p, status: prev.status, alias, isHidden, groupId, baudRate, ... }
           return p
         })
-    → setPorts(merged)
+    → useAppStore.setPorts(merged)
 ```
 
 ## 7. 数据库 CRUD
@@ -137,16 +140,17 @@ ConfigModal 加载规则集
           → load_highlight_sets_from_db(&pool).await
             → SELECT * FROM highlight_rule_sets + highlight_rules
         ← Vec<HighlightSetInfo>
-    → setHighlightRuleSets(transformed)
+    → useRuleStore.setHighlightRuleSets(transformed)
 
 ConfigModal 保存规则集
-  → handleSaveSet(set)
+  → RuleSetAccordion handleSaveSet(set)
     → storageService.saveHighlightSet({ name, is_enabled, rules })
       → invoke('save_highlight_set', { args })
         → Rust: lock → clone pool → drop lock
           → save_highlight_set_to_db(&pool, &set).await
             → INSERT/REPLACE INTO highlight_rule_sets + highlight_rules
         ← set_id (UUID v4)
+    → useRuleStore 更新对应规则集
 ```
 
 ## 8. 语法高亮渲染
@@ -154,6 +158,7 @@ ConfigModal 保存规则集
 ```
 TerminalView 渲染每行
   → applyHighlightSets(line.content, highlightRuleSets)
+    ├─ 从 useRuleStore 订阅 highlightRuleSets
     ├─ 过滤 isEnabled 的规则集
     ├─ 遍历每条规则:
     │   ├─ isRegex → new RegExp(pattern, 'g').exec(text)
