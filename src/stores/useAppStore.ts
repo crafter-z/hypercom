@@ -1,9 +1,6 @@
 /**
  * HyperCom 全局状态管理 (Zustand)
  * 管理串口、标签页、配置、UI状态等所有全局数据
- * 
- * TODO: 安装依赖后启用
- * npm install zustand
  */
 
 import { create } from 'zustand';
@@ -13,21 +10,12 @@ import type {
   PortGroup,
   TabItem,
   SplitPane,
-  TerminalState,
-  HighlightRuleSet,
-  SendCommandSet,
   AppConfig,
   SystemStatus,
   TrafficStats,
   UIState,
-  DisplayFormat,
-  Encoding,
-  LineEnding,
-  DataBits,
-  Parity,
-  StopBits,
-  Handshake,
 } from '../types';
+import { useTerminalStore } from './useTerminalStore';
 
 // ==================== 默认配置 ====================
 
@@ -67,6 +55,12 @@ const defaultUIState: UIState = {
   isOperationPanelCollapsed: false,
 };
 
+function removeEmptyPanes(panes: SplitPane[]): SplitPane[] {
+  if (panes.length <= 1) return panes;
+  const nonEmptyPanes = panes.filter((pane) => pane.tabIds.length > 0);
+  return nonEmptyPanes.length > 0 ? nonEmptyPanes : [panes[0]];
+}
+
 // ==================== Store 状态定义 ====================
 
 interface AppState {
@@ -80,15 +74,6 @@ interface AppState {
   activeTabId: string | null;
   focusedPaneId: string;
   
-  // --- 终端内容 (按串口ID索引) ---
-  terminals: Record<string, TerminalState>;
-  
-  // --- 规则集 ---
-  highlightRuleSets: HighlightRuleSet[];
-  activeHighlightSetId: string | null;
-  sendCommandSets: SendCommandSet[];
-  activeSendCommandSetId: string | null;
-  
   // --- 配置 ---
   config: AppConfig;
   
@@ -101,25 +86,6 @@ interface AppState {
   
   // --- UI状态 ---
   ui: UIState;
-  
-  // --- 操作区状态 (当前激活串口) ---
-  opBaudRate: number;
-  opDataBits: DataBits;
-  opParity: Parity;
-  opStopBits: StopBits;
-  opHandshake: Handshake;
-  opDtr: boolean;
-  opRts: boolean;
-  opIgnoreEmptyChars: boolean;
-  opScrollLocked: boolean;
-  opShowTimestamp: boolean;
-  opDisplayFormat: DisplayFormat;
-  opEncoding: Encoding;
-  opSendIsHex: boolean;
-  opSendAppendLineEnding: LineEnding;
-  opSendInput: string;
-  opIsLoopSending: boolean;
-  opLoopInterval: number;
   
   // ==================== Actions ====================
   
@@ -143,11 +109,7 @@ interface AppState {
   splitPane: (direction: 'horizontal' | 'vertical') => void;
   removePane: (paneId: string) => void;
   setFocusedPane: (paneId: string) => void;
-  
-  // 终端内容
-  appendTerminalLine: (portId: string, line: TerminalState['lines'][number]) => void;
-  clearTerminal: (portId: string) => void;
-  setTerminalConfig: (portId: string, patch: Partial<TerminalState>) => void;
+  reorderPaneTabIds: (paneId: string, tabIds: string[]) => void;
   
   // 配置
   setConfig: (patch: Partial<AppConfig>) => void;
@@ -157,14 +119,6 @@ interface AppState {
   setUIState: (patch: Partial<UIState>) => void;
   toggleConfigModal: (open?: boolean) => void;
   setConfigActiveTab: (tab: string) => void;
-  
-  // 操作区
-  setOpState: (patch: Partial<Pick<AppState, 
-    'opBaudRate' | 'opDataBits' | 'opParity' | 'opStopBits' | 'opHandshake' |
-    'opDtr' | 'opRts' | 'opIgnoreEmptyChars' | 'opScrollLocked' | 'opShowTimestamp' |
-    'opDisplayFormat' | 'opEncoding' | 'opSendIsHex' | 'opSendAppendLineEnding' |
-    'opSendInput' | 'opIsLoopSending' | 'opLoopInterval'
-  >>) => void;
   
   // 系统状态
   setSystemStatus: (status: Partial<SystemStatus>) => void;
@@ -177,19 +131,6 @@ interface AppState {
   reorderPorts: (fromIndex: number, toIndex: number) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
   
-  // 规则集管理
-  setHighlightRuleSets: (sets: HighlightRuleSet[]) => void;
-  addHighlightRuleSet: (set: HighlightRuleSet) => void;
-  updateHighlightRuleSet: (setId: string, patch: Partial<HighlightRuleSet>) => void;
-  removeHighlightRuleSet: (setId: string) => void;
-  setActiveHighlightSetId: (id: string | null) => void;
-  
-  // 命令集管理
-  setSendCommandSets: (sets: SendCommandSet[]) => void;
-  addSendCommandSet: (set: SendCommandSet) => void;
-  updateSendCommandSet: (setId: string, patch: Partial<SendCommandSet>) => void;
-  removeSendCommandSet: (setId: string) => void;
-  setActiveSendCommandSetId: (id: string | null) => void;
 }
 
 // ==================== Store 实现 ====================
@@ -203,11 +144,6 @@ export const useAppStore = create<AppState>()(
     panes: [{ id: 'main', direction: 'vertical', tabIds: [], size: 1 }],
     activeTabId: null,
     focusedPaneId: 'main',
-    terminals: {},
-    highlightRuleSets: [],
-    activeHighlightSetId: null,
-    sendCommandSets: [],
-    activeSendCommandSetId: null,
     config: { ...defaultConfig },
     systemStatus: {
       status: '运行正常',
@@ -218,24 +154,6 @@ export const useAppStore = create<AppState>()(
     trafficStats: {},
     ui: { ...defaultUIState },
     simulationMode: false,
-    opBaudRate: 115200,
-    opDataBits: 8,
-    opParity: 'None',
-    opStopBits: 'One',
-    opHandshake: 'None',
-    opDtr: false,
-    opRts: false,
-    opIgnoreEmptyChars: false,
-    opScrollLocked: true,
-    opShowTimestamp: true,
-    opDisplayFormat: 'string',
-    opEncoding: 'ASCII',
-    opSendIsHex: false,
-    opSendAppendLineEnding: '\\r\\n',
-    opSendInput: '',
-    opIsLoopSending: false,
-    opLoopInterval: 500,
-
     // --- Actions ---
     
     setPorts: (ports) => set((state) => { state.ports = ports; }),
@@ -284,7 +202,9 @@ export const useAppStore = create<AppState>()(
       port.groupId = groupId;
     }),
     
-    openTab: (portId) => set((state) => {
+    openTab: (portId) => {
+      useTerminalStore.getState().ensureTerminal(portId);
+      set((state) => {
       const existing = state.tabs.find(t => t.id === portId);
       const targetPaneId = state.focusedPaneId || state.panes[0]?.id || 'main';
       if (!existing) {
@@ -301,23 +221,14 @@ export const useAppStore = create<AppState>()(
         state.activeTabId = portId;
         const pane = state.panes.find(p => p.id === targetPaneId);
         if (pane) pane.tabIds.push(portId);
-        if (!state.terminals[portId]) {
-          state.terminals[portId] = {
-            lines: [],
-            maxLines: state.config.memoryLimitMb * 500 || 10000,
-            scrollLocked: true,
-            showTimestamp: true,
-            displayFormat: 'string',
-            encoding: 'ASCII',
-          };
-        }
       } else {
         state.tabs.forEach(t => t.isActive = false);
         existing.isActive = true;
         state.activeTabId = portId;
         state.focusedPaneId = existing.splitPaneId;
       }
-    }),
+      });
+    },
     
     closeTab: (tabId) => set((state) => {
       const tab = state.tabs.find(t => t.id === tabId);
@@ -349,13 +260,7 @@ export const useAppStore = create<AppState>()(
           const pane = state.panes.find(p => p.id === r.splitPaneId);
           if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
         }
-        // Remove empty panes
-        const emptyPaneIds = state.panes.filter(p => p.tabIds.length === 0).map(p => p.id);
-        for (const pid of emptyPaneIds) {
-          if (state.panes.length > 1) {
-            state.panes = state.panes.filter(p => p.id !== pid);
-          }
-        }
+        state.panes = removeEmptyPanes(state.panes);
         if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
           state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
@@ -372,12 +277,7 @@ export const useAppStore = create<AppState>()(
           const pane = state.panes.find(p => p.id === r.splitPaneId);
           if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
         }
-        const emptyPaneIds = state.panes.filter(p => p.tabIds.length === 0).map(p => p.id);
-        for (const pid of emptyPaneIds) {
-          if (state.panes.length > 1) {
-            state.panes = state.panes.filter(p => p.id !== pid);
-          }
-        }
+        state.panes = removeEmptyPanes(state.panes);
         if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
           state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
@@ -393,12 +293,7 @@ export const useAppStore = create<AppState>()(
           const pane = state.panes.find(p => p.id === r.splitPaneId);
           if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
         }
-        const emptyPaneIds = state.panes.filter(p => p.tabIds.length === 0).map(p => p.id);
-        for (const pid of emptyPaneIds) {
-          if (state.panes.length > 1) {
-            state.panes = state.panes.filter(p => p.id !== pid);
-          }
-        }
+        state.panes = removeEmptyPanes(state.panes);
         state.tabs = state.tabs.filter(t => t.id === tabId || t.isPinned);
         state.activeTabId = tabId;
         state.focusedPaneId = target.splitPaneId;
@@ -453,8 +348,11 @@ export const useAppStore = create<AppState>()(
       const newPaneId = `pane-${Date.now()}`;
       const sourcePane = state.panes.find(p => p.id === sourcePaneId);
       
-      // Reduce size of source pane
-      if (sourcePane) sourcePane.size = 0.5;
+      // Reduce size of source pane and sync direction
+      if (sourcePane) {
+        sourcePane.size = 0.5;
+        sourcePane.direction = direction;
+      }
       
       // Create new pane
       const newPane: SplitPane = {
@@ -497,25 +395,10 @@ export const useAppStore = create<AppState>()(
     setFocusedPane: (paneId) => set((state) => {
       state.focusedPaneId = paneId;
     }),
-    
-    appendTerminalLine: (portId, line) => set((state) => {
-      const term = state.terminals[portId];
-      if (term) {
-        term.lines.push(line);
-        if (term.lines.length > term.maxLines) {
-          term.lines.shift();
-        }
-      }
-    }),
-    
-    clearTerminal: (portId) => set((state) => {
-      const term = state.terminals[portId];
-      if (term) term.lines = [];
-    }),
-    
-    setTerminalConfig: (portId, patch) => set((state) => {
-      const term = state.terminals[portId];
-      if (term) Object.assign(term, patch);
+
+    reorderPaneTabIds: (paneId, tabIds) => set((state) => {
+      const pane = state.panes.find(p => p.id === paneId);
+      if (pane) pane.tabIds = tabIds;
     }),
     
     setConfig: (patch) => set((state) => {
@@ -536,10 +419,6 @@ export const useAppStore = create<AppState>()(
     
     setConfigActiveTab: (tab) => set((state) => {
       state.ui.configActiveTab = tab;
-    }),
-    
-    setOpState: (patch) => set((state) => {
-      Object.assign(state, patch);
     }),
     
     setSystemStatus: (status) => set((state) => {
@@ -567,42 +446,5 @@ export const useAppStore = create<AppState>()(
       state.tabs.splice(toIndex, 0, moved);
     }),
 
-    setHighlightRuleSets: (sets) => set((state) => { state.highlightRuleSets = sets; }),
-    addHighlightRuleSet: (ruleSet) => set((state) => { state.highlightRuleSets.push(ruleSet); }),
-    updateHighlightRuleSet: (setId, patch) => set((state) => {
-      const s = state.highlightRuleSets.find(r => r.id === setId);
-      if (s) Object.assign(s, patch);
-    }),
-    removeHighlightRuleSet: (setId) => set((state) => {
-      state.highlightRuleSets = state.highlightRuleSets.filter(r => r.id !== setId);
-    }),
-    setActiveHighlightSetId: (id) => set((state) => { state.activeHighlightSetId = id; }),
-
-    setSendCommandSets: (sets) => set((state) => { state.sendCommandSets = sets; }),
-    addSendCommandSet: (cmdSet) => set((state) => { state.sendCommandSets.push(cmdSet); }),
-    updateSendCommandSet: (setId, patch) => set((state) => {
-      const s = state.sendCommandSets.find(r => r.id === setId);
-      if (s) Object.assign(s, patch);
-    }),
-    removeSendCommandSet: (setId) => set((state) => {
-      state.sendCommandSets = state.sendCommandSets.filter(r => r.id !== setId);
-    }),
-    setActiveSendCommandSetId: (id) => set((state) => { state.activeSendCommandSetId = id; }),
   }))
 );
-
-// ==================== 选择器 (性能优化) ====================
-
-export const selectActivePort = (state: AppState): SerialPort | undefined => {
-  if (!state.activeTabId) return undefined;
-  return state.ports.find(p => p.id === state.activeTabId);
-};
-
-export const selectActiveTerminal = (state: AppState): TerminalState | undefined => {
-  if (!state.activeTabId) return undefined;
-  return state.terminals[state.activeTabId];
-};
-
-export const selectActivePane = (state: AppState): SplitPane | undefined => {
-  return state.panes.find(p => p.id === state.focusedPaneId);
-};

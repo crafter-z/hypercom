@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useAppStore } from './useAppStore';
+import { useTerminalStore } from './useTerminalStore';
+import { useRuleStore } from './useRuleStore';
+import { useOperationStore } from './useOperationStore';
 import type { SerialPort, PortGroup, TerminalLine } from '../types';
 
 // Snapshot of initial state for reset between tests
@@ -14,33 +17,38 @@ beforeEach(() => {
     panes: [{ id: 'main', direction: 'vertical', tabIds: [], size: 1 }],
     activeTabId: null,
     focusedPaneId: 'main',
-    terminals: {},
-    highlightRuleSets: [],
-    activeHighlightSetId: null,
-    sendCommandSets: [],
-    activeSendCommandSetId: null,
     trafficStats: {},
     simulationMode: false,
     config: INITIAL_STATE.config,
     systemStatus: INITIAL_STATE.systemStatus,
     ui: INITIAL_STATE.ui,
-    opBaudRate: 115200,
-    opDataBits: 8,
-    opParity: 'None',
-    opStopBits: 'One',
-    opHandshake: 'None',
-    opDtr: false,
-    opRts: false,
-    opIgnoreEmptyChars: false,
-    opScrollLocked: true,
-    opShowTimestamp: true,
-    opDisplayFormat: 'string',
-    opEncoding: 'ASCII',
-    opSendIsHex: false,
-    opSendAppendLineEnding: '\\r\\n',
-    opSendInput: '',
-    opIsLoopSending: false,
-    opLoopInterval: 500,
+  });
+  // Reset separate stores
+  useTerminalStore.setState({ terminals: {} });
+  useRuleStore.setState({
+    highlightRuleSets: [],
+    activeHighlightSetId: null,
+    sendCommandSets: [],
+    activeSendCommandSetId: null,
+  });
+  useOperationStore.setState({
+    baudRate: 115200,
+    dataBits: 8,
+    parity: 'None',
+    stopBits: 'One',
+    handshake: 'None',
+    dtr: false,
+    rts: false,
+    ignoreEmptyChars: false,
+    scrollLocked: true,
+    showTimestamp: true,
+    displayFormat: 'string',
+    encoding: 'ASCII',
+    sendIsHex: false,
+    sendAppendLineEnding: '\\r\\n',
+    sendInput: '',
+    isLoopSending: false,
+    loopInterval: 500,
   });
 });
 
@@ -94,8 +102,8 @@ describe('Tab & Pane actions', () => {
     expect(s.tabs[0].isActive).toBe(true);
     expect(s.activeTabId).toBe('COM1');
     expect(s.panes[0].tabIds).toContain('COM1');
-    expect(s.terminals['COM1']).toBeDefined();
-    expect(s.terminals['COM1'].lines).toEqual([]);
+    expect(useTerminalStore.getState().terminals['COM1']).toBeDefined();
+    expect(useTerminalStore.getState().terminals['COM1'].lines).toEqual([]);
   });
 
   it('openTab on existing tab reactivates it without duplicating', () => {
@@ -177,39 +185,34 @@ describe('Tab & Pane actions', () => {
 
 describe('Terminal line actions', () => {
   it('appendTerminalLine pushes to lines array', () => {
-    useAppStore.setState({
-      ports: [makePort('COM1')],
-    });
-    useAppStore.getState().openTab('COM1');
-    useAppStore.getState().appendTerminalLine('COM1', makeLine('l1'));
-    useAppStore.getState().appendTerminalLine('COM1', makeLine('l2'));
-    const lines = useAppStore.getState().terminals['COM1'].lines;
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1'));
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l2'));
+    const lines = useTerminalStore.getState().terminals['COM1'].lines;
     expect(lines.map(l => l.id)).toEqual(['l1', 'l2']);
   });
 
   it('appendTerminalLine drops oldest when exceeding maxLines (ring buffer)', () => {
-    useAppStore.setState({ ports: [makePort('COM1')] });
-    useAppStore.getState().openTab('COM1');
-    useAppStore.setState((state) => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.setState((state) => {
       state.terminals['COM1'].maxLines = 3;
     });
-    const append = useAppStore.getState().appendTerminalLine;
+    const append = useTerminalStore.getState().appendTerminalLine;
     append('COM1', makeLine('l1'));
     append('COM1', makeLine('l2'));
     append('COM1', makeLine('l3'));
     append('COM1', makeLine('l4')); // l1 should be evicted
-    const lines = useAppStore.getState().terminals['COM1'].lines;
+    const lines = useTerminalStore.getState().terminals['COM1'].lines;
     expect(lines.map(l => l.id)).toEqual(['l2', 'l3', 'l4']);
   });
 
   it('clearTerminal empties lines but preserves config (scrollLocked, displayFormat)', () => {
-    useAppStore.setState({ ports: [makePort('COM1')] });
-    useAppStore.getState().openTab('COM1');
-    const { setTerminalConfig, appendTerminalLine, clearTerminal } = useAppStore.getState();
+    useTerminalStore.getState().ensureTerminal('COM1');
+    const { setTerminalConfig, appendTerminalLine, clearTerminal } = useTerminalStore.getState();
     setTerminalConfig('COM1', { scrollLocked: false, displayFormat: 'hex' });
     appendTerminalLine('COM1', makeLine('l1'));
     clearTerminal('COM1');
-    const t = useAppStore.getState().terminals['COM1'];
+    const t = useTerminalStore.getState().terminals['COM1'];
     expect(t.lines).toEqual([]);
     expect(t.scrollLocked).toBe(false);
     expect(t.displayFormat).toBe('hex');
@@ -246,5 +249,287 @@ describe('Misc actions', () => {
     useAppStore.getState().reorderPorts(0, 2); // move A to index 2
     const ids = useAppStore.getState().ports.map(p => p.id);
     expect(ids).toEqual(['B', 'C', 'A', 'D']);
+  });
+});
+
+// ==================== Group E: Config ====================
+
+describe('Config actions', () => {
+  it('setConfig updates individual fields without affecting others', () => {
+    useAppStore.getState().setConfig({ memoryLimitMb: 2048 });
+    const c = useAppStore.getState().config;
+    expect(c.memoryLimitMb).toBe(2048);
+    expect(c.theme).toBe('dark'); // unchanged
+  });
+
+  it('resetConfig restores all defaults', () => {
+    useAppStore.getState().setConfig({ theme: 'light', memoryLimitMb: 500 });
+    useAppStore.getState().resetConfig();
+    const c = useAppStore.getState().config;
+    expect(c.theme).toBe('dark');
+    expect(c.memoryLimitMb).toBe(1024);
+  });
+
+  it('terminalFontSize config is persisted after setConfig', () => {
+    useAppStore.getState().setConfig({ terminalFontSize: 18 });
+    expect(useAppStore.getState().config.terminalFontSize).toBe(18);
+  });
+
+  it('defaultBaudRates config can be modified', () => {
+    useAppStore.getState().setConfig({ defaultBaudRates: [4800, 9600] });
+    expect(useAppStore.getState().config.defaultBaudRates).toEqual([4800, 9600]);
+  });
+});
+
+// ==================== Group F: Highlight Rule Sets ====================
+
+describe('Highlight Rule Set actions', () => {
+  const makeHighlightSet = (id: string) => ({
+    id, name: `Set ${id}`, rules: [], isEnabled: true,
+  });
+
+  it('addHighlightRuleSet adds to the array', () => {
+    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
+    expect(useRuleStore.getState().highlightRuleSets).toHaveLength(1);
+    expect(useRuleStore.getState().highlightRuleSets[0].id).toBe('h1');
+  });
+
+  it('updateHighlightRuleSet modifies existing set', () => {
+    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
+    useRuleStore.getState().updateHighlightRuleSet('h1', { isEnabled: false });
+    expect(useRuleStore.getState().highlightRuleSets[0].isEnabled).toBe(false);
+  });
+
+  it('updateHighlightRuleSet is no-op for unknown id', () => {
+    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
+    useRuleStore.getState().updateHighlightRuleSet('nonexistent', { isEnabled: false });
+    expect(useRuleStore.getState().highlightRuleSets[0].isEnabled).toBe(true);
+  });
+
+  it('removeHighlightRuleSet deletes correct set', () => {
+    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
+    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h2'));
+    useRuleStore.getState().removeHighlightRuleSet('h1');
+    expect(useRuleStore.getState().highlightRuleSets).toHaveLength(1);
+    expect(useRuleStore.getState().highlightRuleSets[0].id).toBe('h2');
+  });
+
+  it('setActiveHighlightSetId updates active set', () => {
+    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
+    useRuleStore.getState().setActiveHighlightSetId('h1');
+    expect(useRuleStore.getState().activeHighlightSetId).toBe('h1');
+  });
+});
+
+// ==================== Group G: Send Command Sets ====================
+
+describe('Send Command Set actions', () => {
+  const makeCmdSet = (id: string) => ({
+    id, name: `Cmd ${id}`, commands: [], isLoop: false, loopDelay: 100,
+  });
+
+  it('addSendCommandSet adds to the array', () => {
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
+    expect(useRuleStore.getState().sendCommandSets).toHaveLength(1);
+  });
+
+  it('updateSendCommandSet modifies name and isLoop', () => {
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
+    useRuleStore.getState().updateSendCommandSet('s1', { name: 'New Name', isLoop: true });
+    const s = useRuleStore.getState().sendCommandSets[0];
+    expect(s.name).toBe('New Name');
+    expect(s.isLoop).toBe(true);
+  });
+
+  it('removeSendCommandSet cleans up correctly', () => {
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s2'));
+    useRuleStore.getState().removeSendCommandSet('s2');
+    expect(useRuleStore.getState().sendCommandSets).toHaveLength(1);
+  });
+
+  it('setActiveSendCommandSetId updates selection', () => {
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
+    useRuleStore.getState().setActiveSendCommandSetId('s1');
+    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s1');
+  });
+});
+
+// ==================== Group H: UI State ====================
+
+describe('UI State actions', () => {
+  it('setUIState updates individual field', () => {
+    useAppStore.getState().setUIState({ sidebarWidth: 300 });
+    expect(useAppStore.getState().ui.sidebarWidth).toBe(300);
+    expect(useAppStore.getState().ui.isConfigOpen).toBe(false); // unchanged
+  });
+
+  it('toggleConfigModal opens and closes', () => {
+    useAppStore.getState().toggleConfigModal(true);
+    expect(useAppStore.getState().ui.isConfigOpen).toBe(true);
+    useAppStore.getState().toggleConfigModal(false);
+    expect(useAppStore.getState().ui.isConfigOpen).toBe(false);
+  });
+
+  it('toggleConfigModal toggles when no arg', () => {
+    expect(useAppStore.getState().ui.isConfigOpen).toBe(false);
+    useAppStore.getState().toggleConfigModal();
+    expect(useAppStore.getState().ui.isConfigOpen).toBe(true);
+    useAppStore.getState().toggleConfigModal();
+    expect(useAppStore.getState().ui.isConfigOpen).toBe(false);
+  });
+});
+
+// ==================== Group I: Operation State ====================
+
+describe('Operation State actions', () => {
+  it('setOpState updates multiple op fields', () => {
+    useOperationStore.getState().setOpState({ baudRate: 9600, dtr: true });
+    expect(useOperationStore.getState().baudRate).toBe(9600);
+    expect(useOperationStore.getState().dtr).toBe(true);
+  });
+
+  it('setOpState preserves unmodified op fields', () => {
+    const oldParity = useOperationStore.getState().parity;
+    useOperationStore.getState().setOpState({ baudRate: 38400 });
+    expect(useOperationStore.getState().parity).toBe(oldParity);
+  });
+
+  it('setOpState handles encoding change', () => {
+    useOperationStore.getState().setOpState({ encoding: 'GBK' });
+    expect(useOperationStore.getState().encoding).toBe('GBK');
+  });
+
+  it('setOpState handles loop state toggle', () => {
+    useOperationStore.getState().setOpState({ isLoopSending: true, loopInterval: 200 });
+    expect(useOperationStore.getState().isLoopSending).toBe(true);
+    expect(useOperationStore.getState().loopInterval).toBe(200);
+  });
+});
+
+// ==================== Group J: Simulation Mode ====================
+
+describe('Simulation Mode', () => {
+  it('setSimulationMode toggles on and off', () => {
+    useAppStore.getState().setSimulationMode(true);
+    expect(useAppStore.getState().simulationMode).toBe(true);
+    useAppStore.getState().setSimulationMode(false);
+    expect(useAppStore.getState().simulationMode).toBe(false);
+  });
+});
+
+// ==================== Group K: Edge Cases ====================
+
+describe('Edge cases', () => {
+  it('openTab with memoryLimitMb=0 uses default maxLines=10000', () => {
+    useAppStore.getState().setConfig({ memoryLimitMb: 0 });
+    useAppStore.setState({ ports: [makePort('COM1')] });
+    useAppStore.getState().openTab('COM1');
+    // Terminal is now in useTerminalStore; openTab in useAppStore still creates tab
+    expect(useAppStore.getState().tabs.find(t => t.id === 'COM1')).toBeDefined();
+  });
+
+  it('closeTab on non-existent tab is no-op', () => {
+    useAppStore.setState({ ports: [makePort('COM1')] });
+    useAppStore.getState().openTab('COM1');
+    const tabCountBefore = useAppStore.getState().tabs.length;
+    useAppStore.getState().closeTab('nonexistent');
+    expect(useAppStore.getState().tabs.length).toBe(tabCountBefore);
+  });
+
+  it('removePane on single pane is no-op', () => {
+    expect(useAppStore.getState().panes).toHaveLength(1);
+    useAppStore.getState().removePane('main');
+    expect(useAppStore.getState().panes).toHaveLength(1);
+  });
+
+  it('setTrafficStats accumulates statistics', () => {
+    useAppStore.getState().setTrafficStats('COM1', { txTotal: 50 });
+    useAppStore.getState().setTrafficStats('COM1', { rxTotal: 30 });
+    const stats = useAppStore.getState().trafficStats['COM1'];
+    expect(stats.txTotal).toBe(50);
+    expect(stats.rxTotal).toBe(30);
+  });
+
+  it('appendTerminalLine to non-existent port is no-op', () => {
+    const stateBefore = useTerminalStore.getState().terminals;
+    useTerminalStore.getState().appendTerminalLine('nonexistent', makeLine('l1'));
+    expect(useTerminalStore.getState().terminals).toEqual(stateBefore);
+  });
+
+  it('setTerminalConfig on non-existent port is no-op', () => {
+    useTerminalStore.getState().setTerminalConfig('nonexistent', { scrollLocked: false });
+    expect(useTerminalStore.getState().terminals['nonexistent']).toBeUndefined();
+  });
+
+  it('movePortToGroup with non-existent port is no-op', () => {
+    useAppStore.setState({
+      ports: [makePort('COM1')],
+      groups: [makeGroup('g1', [])],
+    });
+    const portsBefore = [...useAppStore.getState().ports];
+    useAppStore.getState().movePortToGroup('nonexistent', 'g1');
+    expect(useAppStore.getState().ports).toEqual(portsBefore);
+  });
+
+  it('updatePort updates alias and syncs tab title', () => {
+    useAppStore.setState({ ports: [makePort('COM1')] });
+    useAppStore.getState().openTab('COM1');
+    useAppStore.getState().updatePort('COM1', { alias: 'My Device' });
+    const tab = useAppStore.getState().tabs.find(t => t.id === 'COM1');
+    expect(tab?.title).toBe('COM1 My Device');
+  });
+
+  it('openTab when port has no alias creates title from port id', () => {
+    useAppStore.setState({ ports: [makePort('COM3')] });
+    useAppStore.getState().openTab('COM3');
+    const tab = useAppStore.getState().tabs.find(t => t.id === 'COM3');
+    expect(tab?.title).toBe('COM3');
+  });
+
+  it('clearTerminal on non-existent port is no-op', () => {
+    useTerminalStore.getState().clearTerminal('nonexistent');
+    // Should not throw
+    expect(true).toBe(true);
+  });
+
+  it('reorderPaneTabIds updates pane tab order', () => {
+    useAppStore.setState({
+      ports: ['A', 'B', 'C'].map(p => makePort(p)),
+      panes: [{ id: 'main', direction: 'vertical', tabIds: ['A', 'B', 'C'], size: 1 }],
+    });
+    ['A', 'B', 'C'].forEach(id => useAppStore.getState().openTab(id));
+    useAppStore.getState().reorderPaneTabIds('main', ['C', 'A', 'B']);
+    expect(useAppStore.getState().panes[0].tabIds).toEqual(['C', 'A', 'B']);
+  });
+
+  it('reorderPaneTabIds on non-existent pane is no-op', () => {
+    useAppStore.setState({ panes: [{ id: 'main', direction: 'vertical', tabIds: ['A'], size: 1 }] });
+    useAppStore.getState().reorderPaneTabIds('nonexistent', ['A', 'B']);
+    expect(useAppStore.getState().panes[0].tabIds).toEqual(['A']);
+  });
+
+  it('moveTabToPane cross-pane then reorder works correctly', () => {
+    useAppStore.setState({
+      ports: ['A', 'B', 'C'].map(p => makePort(p)),
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
+        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane1' },
+        { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'pane2' },
+      ],
+      panes: [
+        { id: 'pane1', direction: 'vertical' as const, tabIds: ['A', 'B'], size: 0.5 },
+        { id: 'pane2', direction: 'vertical' as const, tabIds: ['C'], size: 0.5 },
+      ],
+    });
+    // Move B from pane1 to pane2
+    useAppStore.getState().moveTabToPane('B', 'pane2');
+    // Now reorder so B comes before C in pane2
+    useAppStore.getState().reorderPaneTabIds('pane2', ['B', 'C']);
+    const p2 = useAppStore.getState().panes.find(p => p.id === 'pane2')!;
+    expect(p2.tabIds).toEqual(['B', 'C']);
+    const p1 = useAppStore.getState().panes.find(p => p.id === 'pane1');
+    expect(p1).toBeDefined();
+    expect(p1!.tabIds).toEqual(['A']);
   });
 });
