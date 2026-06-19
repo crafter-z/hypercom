@@ -55,7 +55,8 @@ export function applyHighlightSets(
           }
         }
       } catch {
-        // Invalid regex, skip
+        // Invalid regex pattern, skip
+        console.warn('[highlightEngine] Invalid regex pattern:', rule.pattern.slice(0, 50));
       }
     }
   }
