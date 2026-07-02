@@ -262,3 +262,104 @@ pub async fn delete_highlight_set(
         .await
         .map_err(|e| CommandError::Storage(e.to_string()))
 }
+
+/// 保存协议模板
+#[derive(Debug, Deserialize)]
+pub struct SaveProtocolTemplateArgs {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub is_enabled: bool,
+    pub header_bytes: String,
+    pub length_field_offset: i32,
+    pub length_field_size: i32,
+    pub length_endian: String,
+    pub length_adjust: i32,
+    pub checksum_algorithm: String,
+    pub checksum_offset: i32,
+    pub footer_bytes: String,
+    pub color_header: String,
+    pub color_length: String,
+    pub color_payload: String,
+    pub color_checksum: String,
+    pub color_footer: String,
+}
+
+#[tauri::command]
+pub async fn save_protocol_template(
+    args: SaveProtocolTemplateArgs,
+    state: State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let row = storage::ProtocolTemplateRow {
+        id: id.clone(),
+        name: args.name,
+        is_enabled: args.is_enabled as i32,
+        header_bytes: args.header_bytes,
+        length_field_offset: args.length_field_offset,
+        length_field_size: args.length_field_size,
+        length_endian: args.length_endian,
+        length_adjust: args.length_adjust,
+        checksum_algorithm: args.checksum_algorithm,
+        checksum_offset: args.checksum_offset,
+        footer_bytes: args.footer_bytes,
+        color_header: args.color_header,
+        color_length: args.color_length,
+        color_payload: args.color_payload,
+        color_checksum: args.color_checksum,
+        color_footer: args.color_footer,
+    };
+    storage::save_protocol_template_to_db(&pool, &row)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn load_protocol_templates(
+    state: State<'_, AppState>,
+) -> Result<Vec<storage::ProtocolTemplateRow>, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::load_protocol_templates_from_db(&pool)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn delete_protocol_template(
+    set_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::delete_protocol_template_from_db(&pool, &set_id)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}

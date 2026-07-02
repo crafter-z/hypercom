@@ -87,6 +87,9 @@ pub fn run() {
             commands::save_highlight_set,
             commands::load_highlight_sets,
             commands::delete_highlight_set,
+            commands::save_protocol_template,
+            commands::load_protocol_templates,
+            commands::delete_protocol_template,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();
