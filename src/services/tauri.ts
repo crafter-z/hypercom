@@ -269,6 +269,25 @@ export interface HighlightRuleInfo {
   italic: boolean;
 }
 
+export interface ProtocolTemplateInfo {
+  id: string;
+  name: string;
+  is_enabled: boolean;
+  header_bytes: string;
+  length_field_offset: number;
+  length_field_size: number;
+  length_endian: string;
+  length_adjust: number;
+  checksum_algorithm: string;
+  checksum_offset: number;
+  footer_bytes: string;
+  color_header: string;
+  color_length: string;
+  color_payload: string;
+  color_checksum: string;
+  color_footer: string;
+}
+
 export const storageService = {
   saveCommandSet: (args: {
     id?: string;
@@ -319,5 +338,23 @@ export const storageService = {
 
   deleteHighlightSet: (setId: string): Promise<void> => {
     return invoke<void>('delete_highlight_set', { setId });
+  },
+
+  saveProtocolTemplate: (args: {
+    id?: string; name: string; is_enabled: boolean;
+    header_bytes: string; length_field_offset: number; length_field_size: number;
+    length_endian: string; length_adjust: number; checksum_algorithm: string;
+    checksum_offset: number; footer_bytes: string; color_header: string;
+    color_length: string; color_payload: string; color_checksum: string; color_footer: string;
+  }): Promise<string> => {
+    return invoke<string>('save_protocol_template', { args });
+  },
+
+  loadProtocolTemplates: (): Promise<ProtocolTemplateInfo[]> => {
+    return invoke<ProtocolTemplateInfo[]>('load_protocol_templates');
+  },
+
+  deleteProtocolTemplate: (setId: string): Promise<void> => {
+    return invoke<void>('delete_protocol_template', { setId });
   },
 };
