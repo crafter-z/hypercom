@@ -65,6 +65,26 @@ pub struct HighlightRuleSet {
     pub rules: Vec<HighlightRuleRow>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolTemplateRow {
+    pub id: String,
+    pub name: String,
+    pub is_enabled: i32,
+    pub header_bytes: String,
+    pub length_field_offset: i32,
+    pub length_field_size: i32,
+    pub length_endian: String,
+    pub length_adjust: i32,
+    pub checksum_algorithm: String,
+    pub checksum_offset: i32,
+    pub footer_bytes: String,
+    pub color_header: String,
+    pub color_length: String,
+    pub color_payload: String,
+    pub color_checksum: String,
+    pub color_footer: String,
+}
+
 // ==================== StorageManager ====================
 
 pub struct StorageManager {
@@ -160,6 +180,24 @@ pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             bold INTEGER DEFAULT 0,
             italic INTEGER DEFAULT 0,
             FOREIGN KEY (set_id) REFERENCES highlight_rule_sets(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS protocol_templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_enabled INTEGER DEFAULT 1,
+            header_bytes TEXT DEFAULT '',
+            length_field_offset INTEGER DEFAULT 0,
+            length_field_size INTEGER DEFAULT 1,
+            length_endian TEXT DEFAULT 'little',
+            length_adjust INTEGER DEFAULT 0,
+            checksum_algorithm TEXT DEFAULT 'none',
+            checksum_offset INTEGER DEFAULT 0,
+            footer_bytes TEXT DEFAULT '',
+            color_header TEXT DEFAULT '#4fc3f7',
+            color_length TEXT DEFAULT '#ce9178',
+            color_payload TEXT DEFAULT '#dcdcaa',
+            color_checksum TEXT DEFAULT '#b5cea8',
+            color_footer TEXT DEFAULT '#6a9955'
         );
         "#,
     )
@@ -385,6 +423,113 @@ pub async fn delete_highlight_set_from_db(pool: &Pool<Sqlite>, set_id: &str) -> 
     Ok(())
 }
 
+pub async fn save_protocol_template_to_db(
+    pool: &Pool<Sqlite>,
+    template: &ProtocolTemplateRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO protocol_templates (id, name, is_enabled, header_bytes, length_field_offset, length_field_size, length_endian, length_adjust, checksum_algorithm, checksum_offset, footer_bytes, color_header, color_length, color_payload, color_checksum, color_footer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&template.id)
+    .bind(&template.name)
+    .bind(template.is_enabled)
+    .bind(&template.header_bytes)
+    .bind(template.length_field_offset)
+    .bind(template.length_field_size)
+    .bind(&template.length_endian)
+    .bind(template.length_adjust)
+    .bind(&template.checksum_algorithm)
+    .bind(template.checksum_offset)
+    .bind(&template.footer_bytes)
+    .bind(&template.color_header)
+    .bind(&template.color_length)
+    .bind(&template.color_payload)
+    .bind(&template.color_checksum)
+    .bind(&template.color_footer)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_protocol_templates_from_db(
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<Vec<ProtocolTemplateRow>> {
+    let rows = sqlx::query_as::<_, (
+        String,
+        String,
+        i32,
+        String,
+        i32,
+        i32,
+        String,
+        i32,
+        String,
+        i32,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>(
+        "SELECT id, name, is_enabled, header_bytes, length_field_offset, length_field_size, length_endian, length_adjust, checksum_algorithm, checksum_offset, footer_bytes, color_header, color_length, color_payload, color_checksum, color_footer FROM protocol_templates ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                name,
+                is_enabled,
+                header_bytes,
+                length_field_offset,
+                length_field_size,
+                length_endian,
+                length_adjust,
+                checksum_algorithm,
+                checksum_offset,
+                footer_bytes,
+                color_header,
+                color_length,
+                color_payload,
+                color_checksum,
+                color_footer,
+            )| ProtocolTemplateRow {
+                id,
+                name,
+                is_enabled,
+                header_bytes,
+                length_field_offset,
+                length_field_size,
+                length_endian,
+                length_adjust,
+                checksum_algorithm,
+                checksum_offset,
+                footer_bytes,
+                color_header,
+                color_length,
+                color_payload,
+                color_checksum,
+                color_footer,
+            },
+        )
+        .collect())
+}
+
+pub async fn delete_protocol_template_from_db(
+    pool: &Pool<Sqlite>,
+    id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM protocol_templates WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,7 +559,8 @@ mod tests {
         assert!(tables.contains(&"send_commands".to_string()));
         assert!(tables.contains(&"highlight_rule_sets".to_string()));
         assert!(tables.contains(&"highlight_rules".to_string()));
-        assert_eq!(tables.len(), 6);
+        assert!(tables.contains(&"protocol_templates".to_string()));
+        assert_eq!(tables.len(), 7);
     }
 
     #[tokio::test]
@@ -560,6 +706,83 @@ mod tests {
         save_highlight_set_to_db(&pool, &set).await.unwrap();
         delete_highlight_set_from_db(&pool, "hl-del").await.unwrap();
         assert!(load_highlight_sets_from_db(&pool).await.unwrap().is_empty());
+    }
+
+    fn sample_protocol_template() -> ProtocolTemplateRow {
+        ProtocolTemplateRow {
+            id: "proto-1".into(),
+            name: "Binary Frame".into(),
+            is_enabled: 1,
+            header_bytes: "AA55".into(),
+            length_field_offset: 2,
+            length_field_size: 2,
+            length_endian: "big".into(),
+            length_adjust: -1,
+            checksum_algorithm: "crc16".into(),
+            checksum_offset: -2,
+            footer_bytes: "0D0A".into(),
+            color_header: "#111111".into(),
+            color_length: "#222222".into(),
+            color_payload: "#333333".into(),
+            color_checksum: "#444444".into(),
+            color_footer: "#555555".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_protocol_template() {
+        let pool = setup_test_db().await;
+        let template = sample_protocol_template();
+
+        save_protocol_template_to_db(&pool, &template).await.unwrap();
+        let loaded = load_protocol_templates_from_db(&pool).await.unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "proto-1");
+        assert_eq!(loaded[0].name, "Binary Frame");
+        assert_eq!(loaded[0].is_enabled, 1);
+        assert_eq!(loaded[0].header_bytes, "AA55");
+        assert_eq!(loaded[0].length_field_offset, 2);
+        assert_eq!(loaded[0].length_field_size, 2);
+        assert_eq!(loaded[0].length_endian, "big");
+        assert_eq!(loaded[0].length_adjust, -1);
+        assert_eq!(loaded[0].checksum_algorithm, "crc16");
+        assert_eq!(loaded[0].checksum_offset, -2);
+        assert_eq!(loaded[0].footer_bytes, "0D0A");
+        assert_eq!(loaded[0].color_header, "#111111");
+        assert_eq!(loaded[0].color_length, "#222222");
+        assert_eq!(loaded[0].color_payload, "#333333");
+        assert_eq!(loaded[0].color_checksum, "#444444");
+        assert_eq!(loaded[0].color_footer, "#555555");
+    }
+
+    #[tokio::test]
+    async fn test_delete_protocol_template() {
+        let pool = setup_test_db().await;
+        let template = sample_protocol_template();
+
+        save_protocol_template_to_db(&pool, &template).await.unwrap();
+        delete_protocol_template_from_db(&pool, "proto-1")
+            .await
+            .unwrap();
+
+        assert!(load_protocol_templates_from_db(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_protocol_template() {
+        let pool = setup_test_db().await;
+        let mut template = sample_protocol_template();
+
+        save_protocol_template_to_db(&pool, &template).await.unwrap();
+        template.name = "Updated Binary Frame".into();
+        save_protocol_template_to_db(&pool, &template).await.unwrap();
+        let loaded = load_protocol_templates_from_db(&pool).await.unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "proto-1");
+        assert_eq!(loaded[0].name, "Updated Binary Frame");
+        assert_eq!(loaded[0].header_bytes, "AA55");
     }
 
     #[tokio::test]
