@@ -26,6 +26,8 @@ export interface SerialPort {
   parity?: Parity;
   stopBits?: StopBits;
   handshake?: Handshake;
+  // 协议解析绑定（可选，绑定后接收数据按协议模板解析字段着色）
+  protocolTemplateId?: string;
 }
 
 /** 数据位 */
@@ -81,6 +83,14 @@ export interface SplitPane {
 
 // ==================== 终端内容相关 ====================
 
+/** 协议解析字段标注（运行时生成，不持久化） */
+export interface ParsedField {
+  name: string;            // 字段名: "Header" | "Length" | "Payload" | "Checksum" | "Footer"
+  byteStart: number;       // 在行 rawData 中的起始字节偏移
+  byteEnd: number;         // 结束字节偏移（不含）
+  color: string;           // 字段着色 (hex color)
+}
+
 /** 单行终端数据 */
 export interface TerminalLine {
   id: string;
@@ -90,6 +100,7 @@ export interface TerminalLine {
   displayContent?: string; // 格式化后的显示内容（带高亮）
   rawData?: number[];      // 原始字节数组（用于 HEX 显示）
   isHex: boolean;          // 是否为HEX显示
+  parsedFields?: ParsedField[]; // 协议解析字段标注（存在时按字段着色渲染）
 }
 
 /** 终端视图状态 */
@@ -143,6 +154,36 @@ export interface SendCommandSet {
   commands: SendCommand[];
   isLoop: boolean;         // 是否循环发送
   loopDelay: number;       // 循环间隔
+}
+
+// ==================== 协议解析相关 ====================
+
+/** 校验和算法 */
+export type ChecksumAlgorithm = 'none' | 'sum8' | 'xor' | 'crc8';
+
+/** 长度字段字节序 */
+export type LengthEndian = 'little' | 'big';
+
+/** 协议解析模板（定义帧结构，用于自动解析接收到的串口数据） */
+export interface ProtocolTemplate {
+  id: string;
+  name: string;
+  isEnabled: boolean;
+  // 帧结构定义
+  headerBytes: string;           // 帧头 hex 字符串，如 "AA BB"（空 = 无帧头，从字节 0 开始解析）
+  lengthFieldOffset: number;     // 长度字段在帧中的字节偏移（从帧起始计）
+  lengthFieldSize: 1 | 2;        // 长度字段字节数
+  lengthEndian: LengthEndian;    // 长度字段字节序
+  lengthAdjust: number;          // 长度修正值: 实际负载长度 = 原始长度值 - lengthAdjust
+  checksumAlgorithm: ChecksumAlgorithm; // 校验和算法
+  checksumOffset: number;        // 校验和位置偏移（0 = 自动，置于帧尾之前）
+  footerBytes: string;           // 帧尾 hex 字符串，如 "0D 0A"（空 = 无帧尾）
+  // 各结构字段着色
+  colorHeader: string;
+  colorLength: string;
+  colorPayload: string;
+  colorChecksum: string;
+  colorFooter: string;
 }
 
 // ==================== 配置相关 ====================
