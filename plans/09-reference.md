@@ -38,6 +38,10 @@
 | `src/utils/highlightEngine.ts` | 104 | 语法高亮引擎 |
 | `src/utils/highlightEngine.test.ts` | 197 | 高亮引擎单测（22 cases） |
 | `src/utils/hexUtils.ts` | 21 | HEX 解析工具 (hexToString / stringToHex) |
+| `src/utils/protocolParser.ts` | 363 | 协议帧解析引擎: ProtocolFrameReassembler 状态机 + sum8/xor8/crc8 校验和 |
+| `src/utils/protocolParser.test.ts` | 181 | 解析引擎单测（17 cases） |
+| `src/utils/protocolRenderer.ts` | 119 | 协议字段着色渲染器: renderProtocolLine 逐字段解码着色 |
+| `src/utils/protocolRenderer.test.ts` | 146 | 渲染器单测（8 cases） |
 
 ### 前端样式 (11 个文件)
 
@@ -88,6 +92,8 @@
 | `src/components/ConfigModal/pages/CommandSettings.tsx` | 142 | 命令规则页 |
 | `src/components/ConfigModal/editors/HighlightRuleEditor.tsx` | 35 | 高亮规则编辑器 |
 | `src/components/ConfigModal/editors/SendCmdEditor.tsx` | 30 | 发送命令编辑器 |
+| `src/components/ConfigModal/pages/ProtocolSettings.tsx` | 141 | 协议模板设置页 (CRUD 手风琴 + 映射) |
+| `src/components/ConfigModal/editors/ProtocolTemplateEditor.tsx` | 170 | 协议模板编辑器 (帧结构/校验/颜色三段式) |
 
 ### 后端
 
@@ -98,7 +104,7 @@
 | `src-tauri/src/system.rs` | 55 | Win32 电源管理 (SetThreadExecutionState) |
 | `src-tauri/src/commands/mod.rs` | 39 | 命令注册 + CommandError 枚举 |
 | `src-tauri/src/commands/serial.rs` | 141 | 串口命令: open_port, close_port, send_data, get_port_status |
-| `src-tauri/src/commands/storage.rs` | 251 | SQLite CRUD 命令: 规则集 + 命令集 |
+| `src-tauri/src/commands/storage.rs` | 370 | SQLite CRUD 命令: 规则集 + 命令集 + 协议模板 |
 | `src-tauri/src/commands/config.rs` | 36 | 配置命令: get_config, save_config, reset_config |
 | `src-tauri/src/commands/log.rs` | 196 | 日志命令: start/stop_logging, save_as, open_file, open_directory |
 | `src-tauri/src/commands/system_cmds.rs` | 67 | 系统状态 + 电源管理命令 |
@@ -106,7 +112,7 @@
 | `src-tauri/src/serial/mod.rs` | 483 | 串口管理器 (真实 + 模拟) + emit_data_event |
 | `src-tauri/src/config/mod.rs` | 219 | JSON 配置 (36 项) |
 | `src-tauri/src/logger/mod.rs` | 467 | 日志管理 (分片续写 + 多编码 + auto_save) |
-| `src-tauri/src/storage/mod.rs` | 571 | SQLite CRUD (6 张表) |
+| `src-tauri/src/storage/mod.rs` | 850 | SQLite CRUD (7 张表, 含 protocol_templates) |
 
 > commands 拆分前为单一 `commands/mod.rs` (400+ 行)。2026-06 重构拆为 6 个领域文件 + CommandError 枚举 + 抽取 `system.rs`。
 

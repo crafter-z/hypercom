@@ -83,7 +83,7 @@ pub enum CommandError {
 | `open_path` | `path: String, state: State<AppState>` | `()` | 用 OS 打开文件，路径必须 canonicalize 后位于 LogManager.get_directory() 子树内 |
 | `open_log_directory` | — | `()` | 打开日志根目录 |
 
-### 系统命令 (`commands/system_cmds.rs`，67 行，3 个) + 存储命令 (`commands/storage.rs`，251 行，6 个)
+### 系统命令 (`commands/system_cmds.rs`，67 行，3 个) + 存储命令 (`commands/storage.rs`，370 行，9 个)
 
 | `get_system_status` | — | `SystemStatus` | 进程 CPU/内存（sysinfo 增量刷新；setup 已预热 250ms） |
 | `prevent_screen_off` | `enable: bool` | `()` | 调用 `system.rs` 的 win32_power 实现（其他平台占位日志） |
@@ -94,6 +94,9 @@ pub enum CommandError {
 | `save_highlight_set` | `SaveHighlightSetArgs` | `String` (id) | 保存高亮规则集 |
 | `load_highlight_sets` | — | `Vec<HighlightSetInfo>` | 加载全部规则集 |
 | `delete_highlight_set` | `set_id: String` | `()` | 删除规则集及子规则 |
+| `save_protocol_template` | `SaveProtocolTemplateArgs` | `String` (id) | 保存协议模板到 SQLite |
+| `load_protocol_templates` | — | `Vec<ProtocolTemplateRow>` | 加载全部协议模板 |
+| `delete_protocol_template` | `set_id: String` | `()` | 删除协议模板 |
 
 ## 事件系统
 
@@ -182,7 +185,7 @@ run() → setup 钩子
 
 通过分离 `create_pool()` 和 `init_schema_on_pool()` 为独立异步函数，避免 `MutexGuard` 跨 `.await` 导致的 `!Send` 编译错误。重构中修复了 6 处 `.lock().unwrap()` 跨 await 的问题。
 
-### 表结构 (6 张表)
+### 表结构 (7 张表)
 
 ```sql
 -- 串口分组
@@ -214,6 +217,17 @@ CREATE TABLE highlight_rules (
     id TEXT PRIMARY KEY, set_id TEXT NOT NULL REFERENCES highlight_rule_sets(id),
     name TEXT, pattern TEXT NOT NULL, is_regex INTEGER DEFAULT 0,
     color TEXT, bold INTEGER DEFAULT 0, italic INTEGER DEFAULT 0
+);
+
+-- 协议解析模板
+CREATE TABLE protocol_templates (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, is_enabled INTEGER DEFAULT 1,
+    header_bytes TEXT DEFAULT '', length_field_offset INTEGER DEFAULT 0,
+    length_field_size INTEGER DEFAULT 1, length_endian TEXT DEFAULT 'little',
+    length_adjust INTEGER DEFAULT 0, checksum_algorithm TEXT DEFAULT 'none',
+    checksum_offset INTEGER DEFAULT 0, footer_bytes TEXT DEFAULT '',
+    color_header TEXT, color_length TEXT, color_payload TEXT,
+    color_checksum TEXT, color_footer TEXT
 );
 ```
 

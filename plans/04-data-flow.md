@@ -171,3 +171,39 @@ TerminalView 渲染每行
         </span>
     → 通过 dangerouslySetInnerHTML 注入 (escapeHtml 防 XSS)
 ```
+
+## 9. 协议解析与字段着色
+
+```
+串口数据到达 (serial:data 事件)
+  → useSerialReceive 回调
+    → 检查端口是否绑定协议模板 (port.protocolTemplateId)
+    → 如果绑定且模板已启用:
+      → 获取/创建 ProtocolFrameReassembler (per-port, useRef Map)
+      → reassembler.feed(event.data)
+        ├─ 追加字节到内部 buffer
+        ├─ 循环:
+        │   ├─ buffer > MAX_FRAME_SIZE (64KB)? → 全部 flush 为非帧字节
+        │   ├─ headerBytes 非空? → 扫描 buffer 寻找帧头
+        │   │   ├─ 未找到 → flush 全部 buffer 为非帧字节
+        │   │   └─ 找到 (offset > 0) → flush 帧头之前的字节
+        │   ├─ parseFrameBytes(buffer, template):
+        │   │   ├─ 验证帧头匹配
+        │   │   ├─ 读取长度字段 → totalFrameLength = lengthValue - adjust + fieldSize
+        │   │   ├─ 验证帧尾
+        │   │   ├─ 计算校验和 (sum8/xor8/crc8) → isValid
+        │   │   └─ 构建 ParsedField[] (Header/Length/Payload/Checksum/Footer + 颜色)
+        │   ├─ 完整帧 → 提取, 继续循环
+        │   └─ 不完整 → break (等待更多字节)
+        ├─ 每个 frame → appendTerminalLine(parsedFields: frame.fields, rawData: frame.bytes)
+        └─ flushedBytes → appendTerminalLine (无 parsedFields, 普通行)
+      → 端口断开时清理 reassembler (onSerialStatus disconnected → delete from Map)
+
+TerminalView 渲染每行
+  → line.parsedFields 存在?
+    → YES: renderProtocolLine(line)
+      ├─ hex 模式: 每字段字节 → 2字符 hex, 包裹 <span style="color:...">
+      └─ text 模式: 每字段字节 → TextDecoder 解码, escapeHtml, 包裹 <span>
+    → NO: applyHighlightSets(displayText, highlightRuleSets) [原有路径]
+  → dangerouslySetInnerHTML 注入
+```

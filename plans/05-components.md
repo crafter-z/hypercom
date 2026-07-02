@@ -63,19 +63,22 @@ App
   │   │       └─ ParamsSection (串口参数: 波特率/数据位/校验/停止位/流控/DTR/RTS)
   │   ├─ StatusBar
   │   │   └─ props: 无 (直接操作 Store + Hooks)
-  │   └─ ConfigModal (overlay)
-  │       ├─ 左侧导航 (general/log/backup/display/highlight/commands)
-  │       └─ 右侧内容:
-  │           ├─ GeneralSettings
-  │           ├─ LogSettings
-  │           ├─ BackupSettings
-  │           ├─ DisplaySettings
-  │           ├─ HighlightSettings
-  │           │   └─ RuleSetAccordion (通用 CRUD 手风琴)
-  │           │       └─ HighlightRuleEditor
-  │           └─ CommandSettings
-  │               └─ RuleSetAccordion
-  │                   └─ SendCmdEditor
+   │   └─ ConfigModal (overlay)
+   │       ├─ 左侧导航 (general/log/backup/display/highlight/commands/protocol)
+   │       └─ 右侧内容:
+   │           ├─ GeneralSettings
+   │           ├─ LogSettings
+   │           ├─ BackupSettings
+   │           ├─ DisplaySettings
+   │           ├─ HighlightSettings
+   │           │   └─ RuleSetAccordion (通用 CRUD 手风琴)
+   │           │       └─ HighlightRuleEditor
+   │           ├─ CommandSettings
+   │           │   └─ RuleSetAccordion
+   │           │       └─ SendCmdEditor
+   │           └─ ProtocolSettings
+   │               └─ RuleSetAccordion
+   │                   └─ ProtocolTemplateEditor
 ```
 
 ## 类型定义速查

@@ -8,10 +8,6 @@
 
 ## 🟢 低优先级
 
-### 协议解析器
-- 后端定义协议模板 (帧头/长度/校验/帧尾)，自动解析并高亮各字段
-- 前端提供协议模板编辑器
-
 ### 多语言 i18n
 - 引入 `i18next` + `react-i18next`
 - 创建 `zh-CN.json` / `en-US.json`
@@ -25,6 +21,15 @@
 - ConfigModal 已有路径选择，需实现在主窗口 CSS `background-image` 应用
 
 ## ✅ 已完成（移出待办列表）
+
+### 协议解析器 (2026-07)
+
+- **协议模板数据模型** — `ProtocolTemplate` 类型 (15 字段: 帧头/长度字段/校验和/帧尾 + 5 个字段颜色), SQLite 持久化 (`protocol_templates` 表)
+- **前端解析引擎** — `ProtocolFrameReassembler` 状态机 (SEARCH_HEADER → IN_FRAME → COMPLETE), 跨 50ms 读块重组帧, 支持 sum8/xor/crc8 校验和
+- **字段着色渲染** — `renderProtocolLine` 逐字段解码着色, hex/text 双模式, 校验失败红色高亮
+- **ConfigModal 第 7 页** — ProtocolSettings + ProtocolTemplateEditor (帧结构/校验/颜色三段式表单)
+- **集成** — `useSerialReceive` 按端口绑定模板喂入重组器, `TerminalView` 渲染分支 (协议行用字段色, 普通行用高亮引擎), TerminalView 工具栏协议选择下拉
+- **测试** — 前端 25 cases (17 parser + 8 renderer), 后端 3 DB tests, 共 96 前端 + 27 后端全通过
 
 ### 2026-06 重构批次 (12 commits)
 

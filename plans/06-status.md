@@ -17,6 +17,10 @@
 | `utils/highlightEngine.ts` | ✅ | 正则/关键词高亮引擎 (104 行) |
 | `utils/highlightEngine.test.ts` | ✅ | 高亮引擎单测 (197 行, 22 cases) |
 | `utils/hexUtils.ts` | ✅ | HEX 解析工具 (21 行) |
+| `utils/protocolParser.ts` | ✅ | 协议帧解析引擎: 状态机 + 校验和 (363 行) |
+| `utils/protocolParser.test.ts` | ✅ | 解析引擎单测 (181 行, 17 cases) |
+| `utils/protocolRenderer.ts` | ✅ | 协议字段着色渲染器 (119 行) |
+| `utils/protocolRenderer.test.ts` | ✅ | 渲染器单测 (146 行, 8 cases) |
 | `styles.css` | ✅ | 入口文件, @import 11 个子样式 (14 行) |
 | `styles/base.css` | ✅ | 主题变量 + 基础样式 (288 行) |
 | `styles/titlebar.css` | ✅ | 标题栏样式 (53 行) |
@@ -57,6 +61,8 @@
 | `components/ConfigModal/pages/CommandSettings.tsx` | ✅ | 命令规则页 (142 行) |
 | `components/ConfigModal/editors/HighlightRuleEditor.tsx` | ✅ | 高亮规则编辑器 (35 行) |
 | `components/ConfigModal/editors/SendCmdEditor.tsx` | ✅ | 发送命令编辑器 (30 行) |
+| `components/ConfigModal/pages/ProtocolSettings.tsx` | ✅ | 协议模板设置页 (141 行) |
+| `components/ConfigModal/editors/ProtocolTemplateEditor.tsx` | ✅ | 协议模板编辑器 (170 行) |
 
 ## 后端
 
@@ -67,7 +73,7 @@
 | `system.rs` | ✅ | Win32 电源管理 (SetThreadExecutionState) (55 行) |
 | `commands/mod.rs` | ✅ | 命令注册 + CommandError 枚举 (39 行) |
 | `commands/serial.rs` | ✅ | 串口命令 (141 行) |
-| `commands/storage.rs` | ✅ | SQLite CRUD 命令 (251 行) |
+| `commands/storage.rs` | ✅ | SQLite CRUD 命令: 规则集 + 命令集 + 协议模板 |
 | `commands/config.rs` | ✅ | 配置命令 (36 行) |
 | `commands/log.rs` | ✅ | 日志命令 (196 行) |
 | `commands/system_cmds.rs` | ✅ | 系统状态 + 电源管理命令 (67 行) |
@@ -75,7 +81,7 @@
 | `serial/mod.rs` | ✅ | 真实/模拟串口, 事件推送, emit_data_event helper (483 行) |
 | `config/mod.rs` | ✅ | JSON 持久化, 36 项配置 (219 行) |
 | `logger/mod.rs` | ✅ | 写入 / 分片续写 / 文件名变量 / auto_save 短路 / 多编码 (467 行) |
-| `storage/mod.rs` | ✅ | 6 表 + 完整 CRUD, 延迟初始化 (571 行) |
+| `storage/mod.rs` | ✅ | 7 表 + 完整 CRUD, 延迟初始化 (含 protocol_templates) |
 | `Cargo.toml` | ✅ | tauri 2.11, sysinfo, sqlx, serialport, encoding_rs |
 | `capabilities/default.json` | ✅ | 事件权限, shell:allow-open, dialog:allow-open/save, 6 个 window 控件权限 |
 
@@ -110,9 +116,9 @@
 | 虚拟滚动 (`@tanstack/react-virtual`) | ✅ |
 | 真实文件导出 (TXT/CSV via `save()` + Rust 写盘) | ✅ |
 | GBK 解码 (encoding_rs) | ✅ |
-| 前端单元测试 (vitest, 71 cases / 2 files) | ✅ |
-| 后端单元测试 (cargo test, 24 cases) | ✅ |
-| 协议解析器 | ⏳ |
+| 前端单元测试 (vitest, 96 cases / 4 files) | ✅ |
+| 后端单元测试 (cargo test, 27 cases) | ✅ |
+| 协议解析器 | ✅ |
 | 多语言支持 | ⏳ |
 
 ## 重构 (2026-06)
