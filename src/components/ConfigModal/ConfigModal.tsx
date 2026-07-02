@@ -3,7 +3,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks/useTauri';
 import type { AppConfig } from '../../types';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, X,
+  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, X,
 } from 'lucide-react';
 import GeneralSettings from './pages/GeneralSettings';
 import LogSettings from './pages/LogSettings';
@@ -11,6 +11,7 @@ import BackupSettings from './pages/BackupSettings';
 import DisplaySettings from './pages/DisplaySettings';
 import HighlightSettings from './pages/HighlightSettings';
 import CommandSettings from './pages/CommandSettings';
+import ProtocolSettings from './pages/ProtocolSettings';
 
 interface NavItem {
   id: string;
@@ -25,6 +26,7 @@ const navItems: NavItem[] = [
   { id: 'display', label: '显示与交互', icon: <Monitor size={16} /> },
   { id: 'highlight', label: '语法高亮规则', icon: <Palette size={16} /> },
   { id: 'commands', label: '发送命令规则', icon: <Send size={16} /> },
+  { id: 'protocol', label: '协议解析', icon: <Code2 size={16} /> },
 ];
 
 const ConfigModal: React.FC = () => {
@@ -70,6 +72,7 @@ const ConfigModal: React.FC = () => {
       case 'display': return <DisplaySettings />;
       case 'highlight': return <HighlightSettings />;
       case 'commands': return <CommandSettings />;
+      case 'protocol': return <ProtocolSettings />;
       default: return <GeneralSettings />;
     }
   };
