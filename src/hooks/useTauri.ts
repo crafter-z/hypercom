@@ -4,8 +4,9 @@ import { useOperationStore } from '../stores/useOperationStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { serialService, configService, systemService, eventService, logService, storageService } from '../services/tauri';
-import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent, CommandSetInfo, HighlightSetInfo, CommandInfo, HighlightRuleInfo } from '../services/tauri';
-import type { SerialPort, AppConfig, SendCommandSet, HighlightRuleSet, SendCommand } from '../types';
+import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent, CommandSetInfo, HighlightSetInfo, CommandInfo, HighlightRuleInfo, ProtocolTemplateInfo } from '../services/tauri';
+import type { SerialPort, AppConfig, SendCommandSet, HighlightRuleSet, SendCommand, ProtocolTemplate } from '../types';
+import { ProtocolFrameReassembler } from '../utils/protocolParser';
 
 /**
  * 将后端 PortInfo 映射为前端 SerialPort
@@ -86,9 +87,30 @@ function mapHighlightSetInfo(s: HighlightSetInfo): HighlightRuleSet {
   };
 }
 
+/** Map backend ProtocolTemplateInfo to frontend ProtocolTemplate */
+function mapProtocolTemplateInfo(s: ProtocolTemplateInfo): ProtocolTemplate {
+  return {
+    id: s.id,
+    name: s.name,
+    isEnabled: s.is_enabled,
+    headerBytes: s.header_bytes,
+    lengthFieldOffset: s.length_field_offset,
+    lengthFieldSize: s.length_field_size as 1 | 2,
+    lengthEndian: s.length_endian as 'little' | 'big',
+    lengthAdjust: s.length_adjust,
+    checksumAlgorithm: s.checksum_algorithm as ProtocolTemplate['checksumAlgorithm'],
+    checksumOffset: s.checksum_offset,
+    footerBytes: s.footer_bytes,
+    colorHeader: s.color_header,
+    colorLength: s.color_length,
+    colorPayload: s.color_payload,
+    colorChecksum: s.color_checksum,
+    colorFooter: s.color_footer,
+  };
+}
+
 /**
  * Hook: 自动刷新串口列表
- * 在组件挂载时获取一次串口列表，并可选地定时刷新
  */
 export function useSerialPorts(pollIntervalMs: number = 3000) {
   const setPorts = useAppStore((s) => s.setPorts);
@@ -190,6 +212,7 @@ export function useSerialConnection() {
 export function useSerialReceive() {
   const appendTerminalLine = useTerminalStore((s) => s.appendTerminalLine);
   const setupPromiseRef = useRef<Promise<void> | null>(null);
+  const reassemblersRef = useRef<Map<string, ProtocolFrameReassembler>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -209,6 +232,46 @@ export function useSerialReceive() {
           text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(event.data));
         }
         if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
+        // Protocol frame parsing: if port has a protocol template bound, feed bytes into reassembler
+        const port = useAppStore.getState().ports.find(p => p.id === event.port_id);
+        const templateId = port?.protocolTemplateId;
+        if (templateId) {
+          const template = useRuleStore.getState().protocolTemplates.find(t => t.id === templateId && t.isEnabled);
+          if (template) {
+            let reassembler = reassemblersRef.current.get(event.port_id);
+            if (!reassembler) {
+              reassembler = new ProtocolFrameReassembler(template);
+              reassemblersRef.current.set(event.port_id, reassembler);
+            }
+            const { frames, flushedBytes } = reassembler.feed(event.data);
+            for (const frame of frames) {
+              const frameText = new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(frame.bytes));
+              appendTerminalLine(event.port_id, {
+                id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                timestamp: event.timestamp,
+                direction: event.direction as 'RX' | 'TX',
+                content: frameText,
+                rawData: frame.bytes,
+                isHex: event.is_hex,
+                parsedFields: frame.fields,
+              });
+            }
+            if (flushedBytes.length > 0) {
+              appendTerminalLine(event.port_id, {
+                id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                timestamp: event.timestamp,
+                direction: event.direction as 'RX' | 'TX',
+                content: new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(flushedBytes)),
+                rawData: flushedBytes,
+                isHex: event.is_hex,
+              });
+            }
+            useAppStore.getState().setTrafficStats(event.port_id, {
+              rxTotal: (useAppStore.getState().trafficStats[event.port_id]?.rxTotal || 0) + event.data.length,
+            });
+            return;
+          }
+        }
         appendTerminalLine(event.port_id, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           timestamp: event.timestamp,
@@ -232,6 +295,9 @@ export function useSerialReceive() {
         useAppStore.getState().updatePort(event.port_id, {
           status: statusMap[event.status] || 'disconnected',
         });
+        if (event.status === 'disconnected') {
+          reassemblersRef.current.delete(event.port_id);
+        }
       });
 
       if (cancelled) {
@@ -383,12 +449,14 @@ export function useAppInit() {
       ]);
       // Load persisted rule sets and command sets at startup
       try {
-        const [cmdSets, hlSets] = await Promise.all([
+        const [cmdSets, hlSets, protoTemplates] = await Promise.all([
           storageService.loadCommandSets(),
           storageService.loadHighlightSets(),
+          storageService.loadProtocolTemplates(),
         ]);
         useRuleStore.getState().setSendCommandSets(cmdSets.map(mapCommandSetInfo));
         useRuleStore.getState().setHighlightRuleSets(hlSets.map(mapHighlightSetInfo));
+        useRuleStore.getState().setProtocolTemplates(protoTemplates.map(mapProtocolTemplateInfo));
       } catch (e) {
         console.warn('[useAppInit] Failed to load stored rules/commands:', e);
       }

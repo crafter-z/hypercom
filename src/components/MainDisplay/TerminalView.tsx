@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import type { TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { applyHighlightSets } from '../../utils/highlightEngine';
+import { renderProtocolLine } from '../../utils/protocolRenderer';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
@@ -31,6 +32,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const lines = terminal?.lines ?? [];
   const highlightRuleSets = useRuleStore((s) => s.highlightRuleSets);
+  const protocolTemplates = useRuleStore((s) => s.protocolTemplates);
+  const protocolTemplateId = useAppStore((s) => s.ports.find(p => p.id === portId)?.protocolTemplateId);
   const setTerminalConfig = useTerminalStore((s) => s.setTerminalConfig);
   const autoScrollRef = useRef(true);
 
@@ -182,6 +185,24 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
 
   return (
     <div className="terminal-view-container">
+      {protocolTemplates.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderBottom: '1px solid var(--border-color)', fontSize: 12, flexShrink: 0 }}>
+          <span style={{ color: 'var(--text-secondary)' }}>协议:</span>
+          <select
+            className="select"
+            style={{ width: 150, height: 22, fontSize: 12 }}
+            value={protocolTemplateId || ''}
+            onChange={(e) => {
+              useAppStore.getState().updatePort(portId, { protocolTemplateId: e.target.value || undefined });
+            }}
+          >
+            <option value="">-- 无协议 --</option>
+            {protocolTemplates.filter(t => t.isEnabled).map(t => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div
         ref={scrollRef}
         className="terminal-view"
@@ -194,9 +215,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
         <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
           {virtualizer.getVirtualItems().map((vRow) => {
             const line = lines[vRow.index];
-            const displayText = terminal?.displayFormat === 'hex' && line.rawData
-              ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
-              : line.content;
+            let lineHtml: string;
+            if (line.parsedFields && line.parsedFields.length > 0) {
+              lineHtml = renderProtocolLine(line);
+            } else {
+              const displayText = terminal?.displayFormat === 'hex' && line.rawData
+                ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
+                : line.content;
+              lineHtml = applyHighlightSets(displayText, highlightRuleSets);
+            }
             return (
               <div
                 key={vRow.key}
@@ -221,9 +248,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
                   {line.direction}
                 </span>
                 <span className="terminal-content"
-                  dangerouslySetInnerHTML={{
-                    __html: applyHighlightSets(displayText, highlightRuleSets)
-                  }}
+                  dangerouslySetInnerHTML={{ __html: lineHtml }}
                 />
               </div>
             );
