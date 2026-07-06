@@ -9,13 +9,128 @@ import type {
   SerialPort,
   PortGroup,
   TabItem,
-  SplitPane,
+  PaneNode,
+  LeafPane,
+  BranchPane,
   AppConfig,
   SystemStatus,
   TrafficStats,
   UIState,
 } from '../types';
 import { useTerminalStore } from './useTerminalStore';
+
+// ==================== 分屏树辅助函数 ====================
+
+/** 查找指定 ID 的叶子节点 */
+export function findLeafById(node: PaneNode, id: string): LeafPane | undefined {
+  if (node.type === 'leaf') {
+    return node.id === id ? node : undefined;
+  }
+  for (const child of node.children) {
+    const found = findLeafById(child, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** 查找包含指定标签页 ID 的叶子节点 */
+export function findLeafByTabId(node: PaneNode, tabId: string): LeafPane | undefined {
+  if (node.type === 'leaf') {
+    return node.tabIds.includes(tabId) ? node : undefined;
+  }
+  for (const child of node.children) {
+    const found = findLeafByTabId(child, tabId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** 查找指定 ID 的分支节点 */
+export function findBranchById(node: PaneNode, id: string): BranchPane | undefined {
+  if (node.type === 'leaf') return undefined;
+  if (node.id === id) return node;
+  for (const child of node.children) {
+    const found = findBranchById(child, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** 查找指定叶子节点的父分支节点 */
+export function findParentBranch(node: PaneNode, leafId: string): BranchPane | undefined {
+  if (node.type === 'leaf') return undefined;
+  if (node.children.some(c => c.type === 'leaf' && c.id === leafId)) {
+    return node;
+  }
+  for (const child of node.children) {
+    if (child.type === 'branch') {
+      const found = findParentBranch(child, leafId);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/** 收集树中所有叶子节点 */
+export function collectLeaves(node: PaneNode): LeafPane[] {
+  if (node.type === 'leaf') return [node];
+  return node.children.flatMap(c => collectLeaves(c));
+}
+
+/** 统计树中叶子节点数量 */
+export function countLeaves(node: PaneNode): number {
+  if (node.type === 'leaf') return 1;
+  return node.children.reduce((sum, c) => sum + countLeaves(c), 0);
+}
+
+/**
+ * 递归修剪分屏树：
+ * - 移除空叶子节点（非根）
+ * - 移除空分支节点
+ * - 将只有 1 个子节点的分支折叠为该子节点（继承父分支的 size）
+ * - 根节点若为空分支则替换为空叶子
+ */
+function pruneChildrenArray(children: PaneNode[]): PaneNode[] {
+  const result: PaneNode[] = [];
+  for (const child of children) {
+    if (child.type === 'branch') {
+      child.children = pruneChildrenArray(child.children);
+      if (child.children.length === 0) {
+        continue; // 丢弃空分支
+      } else if (child.children.length === 1) {
+        // 折叠：用唯一子节点替换此分支，继承 size
+        const sole = child.children[0];
+        sole.size = child.size;
+        result.push(sole);
+      } else {
+        result.push(child);
+      }
+    } else {
+      // 叶子节点 — 空则丢弃
+      if (child.tabIds.length === 0) {
+        continue;
+      }
+      result.push(child);
+    }
+  }
+  return result;
+}
+
+function pruneTree(tree: PaneNode): PaneNode {
+  if (tree.type === 'leaf') {
+    return tree; // 根叶子保留（即使为空）
+  }
+  tree.children = pruneChildrenArray(tree.children);
+  if (tree.children.length === 0) {
+    return { id: 'main', type: 'leaf', tabIds: [], size: 1 };
+  }
+  if (tree.children.length === 1) {
+    const sole = tree.children[0];
+    sole.size = 1;
+    return sole;
+  }
+  return tree;
+}
 
 // ==================== 默认配置 ====================
 
@@ -55,12 +170,6 @@ const defaultUIState: UIState = {
   isOperationPanelCollapsed: false,
 };
 
-function removeEmptyPanes(panes: SplitPane[]): SplitPane[] {
-  if (panes.length <= 1) return panes;
-  const nonEmptyPanes = panes.filter((pane) => pane.tabIds.length > 0);
-  return nonEmptyPanes.length > 0 ? nonEmptyPanes : [panes[0]];
-}
-
 // ==================== Store 状态定义 ====================
 
 interface AppState {
@@ -70,7 +179,7 @@ interface AppState {
   
   // --- 标签页与分屏 ---
   tabs: TabItem[];
-  panes: SplitPane[];
+  paneTree: PaneNode;
   activeTabId: string | null;
   focusedPaneId: string;
   
@@ -110,6 +219,7 @@ interface AppState {
   removePane: (paneId: string) => void;
   setFocusedPane: (paneId: string) => void;
   reorderPaneTabIds: (paneId: string, tabIds: string[]) => void;
+  resizeChildren: (branchId: string, childIndex: number, deltaFraction: number) => void;
   
   // 配置
   setConfig: (patch: Partial<AppConfig>) => void;
@@ -141,7 +251,7 @@ export const useAppStore = create<AppState>()(
     ports: [],
     groups: [],
     tabs: [],
-    panes: [{ id: 'main', direction: 'vertical', tabIds: [], size: 1 }],
+    paneTree: { id: 'main', type: 'leaf', tabIds: [], size: 1 },
     activeTabId: null,
     focusedPaneId: 'main',
     config: { ...defaultConfig },
@@ -202,11 +312,11 @@ export const useAppStore = create<AppState>()(
       port.groupId = groupId;
     }),
     
-    openTab: (portId) => {
+openTab: (portId) => {
       useTerminalStore.getState().ensureTerminal(portId);
       set((state) => {
       const existing = state.tabs.find(t => t.id === portId);
-      const targetPaneId = state.focusedPaneId || state.panes[0]?.id || 'main';
+      const targetPaneId = state.focusedPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
       if (!existing) {
         const port = state.ports.find(p => p.id === portId);
         const tab: TabItem = {
@@ -219,8 +329,8 @@ export const useAppStore = create<AppState>()(
         state.tabs.forEach(t => t.isActive = false);
         state.tabs.push(tab);
         state.activeTabId = portId;
-        const pane = state.panes.find(p => p.id === targetPaneId);
-        if (pane) pane.tabIds.push(portId);
+        const leaf = findLeafById(state.paneTree, targetPaneId);
+        if (leaf) leaf.tabIds.push(portId);
       } else {
         state.tabs.forEach(t => t.isActive = false);
         existing.isActive = true;
@@ -235,65 +345,64 @@ export const useAppStore = create<AppState>()(
       const paneId = tab?.splitPaneId;
       state.tabs = state.tabs.filter(t => t.id !== tabId);
       if (paneId) {
-        const pane = state.panes.find(p => p.id === paneId);
-        if (pane) pane.tabIds = pane.tabIds.filter(id => id !== tabId);
-        if (pane && pane.tabIds.length === 0 && state.panes.length > 1) {
-          state.panes = state.panes.filter(p => p.id !== paneId);
-          if (state.focusedPaneId === paneId) {
-            state.focusedPaneId = state.panes[0]?.id || 'main';
-          }
-        }
+        const leaf = findLeafById(state.paneTree, paneId);
+        if (leaf) leaf.tabIds = leaf.tabIds.filter(id => id !== tabId);
       }
+      state.paneTree = pruneTree(state.paneTree);
       if (state.activeTabId === tabId) {
         const remaining = state.tabs.length > 0 ? state.tabs[state.tabs.length - 1] : null;
         state.activeTabId = remaining?.id || null;
         if (remaining) state.focusedPaneId = remaining.splitPaneId;
       }
+      const leaves = collectLeaves(state.paneTree);
+      if (!leaves.find(l => l.id === state.focusedPaneId)) {
+        state.focusedPaneId = leaves[0]?.id || 'main';
+      }
     }),
     
-    closeTabsToRight: (tabId) => set((state) => {
+closeTabsToRight: (tabId) => set((state) => {
       const idx = state.tabs.findIndex(t => t.id === tabId);
       if (idx >= 0) {
         const toRemove = state.tabs.slice(idx + 1).filter(t => !t.isPinned);
         state.tabs = state.tabs.filter((t, i) => i <= idx || t.isPinned);
         for (const r of toRemove) {
-          const pane = state.panes.find(p => p.id === r.splitPaneId);
-          if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
+          const leaf = findLeafById(state.paneTree, r.splitPaneId);
+          if (leaf) leaf.tabIds = leaf.tabIds.filter(id => id !== r.id);
         }
-        state.panes = removeEmptyPanes(state.panes);
+        state.paneTree = pruneTree(state.paneTree);
         if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
-          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
+          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
         }
       }
     }),
     
-    closeTabsToLeft: (tabId) => set((state) => {
+closeTabsToLeft: (tabId) => set((state) => {
       const idx = state.tabs.findIndex(t => t.id === tabId);
       if (idx > 0) {
         const toRemove = state.tabs.slice(0, idx).filter(t => !t.isPinned);
         state.tabs = state.tabs.filter((t, i) => i >= idx || t.isPinned);
         for (const r of toRemove) {
-          const pane = state.panes.find(p => p.id === r.splitPaneId);
-          if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
+          const leaf = findLeafById(state.paneTree, r.splitPaneId);
+          if (leaf) leaf.tabIds = leaf.tabIds.filter(id => id !== r.id);
         }
-        state.panes = removeEmptyPanes(state.panes);
+        state.paneTree = pruneTree(state.paneTree);
         if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
           state.activeTabId = tabId;
-          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || 'main';
+          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
         }
       }
     }),
     
-    closeOtherTabs: (tabId) => set((state) => {
+closeOtherTabs: (tabId) => set((state) => {
       const target = state.tabs.find(t => t.id === tabId);
       if (target) {
         const toRemove = state.tabs.filter(t => t.id !== tabId && !t.isPinned);
         for (const r of toRemove) {
-          const pane = state.panes.find(p => p.id === r.splitPaneId);
-          if (pane) pane.tabIds = pane.tabIds.filter(id => id !== r.id);
+          const leaf = findLeafById(state.paneTree, r.splitPaneId);
+          if (leaf) leaf.tabIds = leaf.tabIds.filter(id => id !== r.id);
         }
-        state.panes = removeEmptyPanes(state.panes);
+        state.paneTree = pruneTree(state.paneTree);
         state.tabs = state.tabs.filter(t => t.id === tabId || t.isPinned);
         state.activeTabId = tabId;
         state.focusedPaneId = target.splitPaneId;
@@ -320,75 +429,115 @@ export const useAppStore = create<AppState>()(
       if (!tab) return;
       const oldPaneId = tab.splitPaneId;
       if (oldPaneId === paneId) return;
-      // Remove from old pane
-      const oldPane = state.panes.find(p => p.id === oldPaneId);
-      if (oldPane) oldPane.tabIds = oldPane.tabIds.filter(id => id !== tabId);
-      // Add to new pane
-      const newPane = state.panes.find(p => p.id === paneId);
-      if (newPane) {
-        newPane.tabIds.push(tabId);
+      // Remove from old leaf
+      const oldLeaf = findLeafById(state.paneTree, oldPaneId);
+      if (oldLeaf) oldLeaf.tabIds = oldLeaf.tabIds.filter(id => id !== tabId);
+      // Add to new leaf
+      const newLeaf = findLeafById(state.paneTree, paneId);
+      if (newLeaf) {
+        newLeaf.tabIds.push(tabId);
         tab.splitPaneId = paneId;
         state.focusedPaneId = paneId;
         state.activeTabId = tabId;
         state.tabs.forEach(t => t.isActive = false);
         tab.isActive = true;
       }
-      // Remove empty old pane
-      if (oldPane && oldPane.tabIds.length === 0 && state.panes.length > 1) {
-        state.panes = state.panes.filter(p => p.id !== oldPaneId);
-        if (state.focusedPaneId === oldPaneId) {
-          state.focusedPaneId = paneId;
-        }
+      // Prune tree (source leaf may have become empty)
+      state.paneTree = pruneTree(state.paneTree);
+      // Ensure focusedPaneId is valid after pruning
+      const leaves = collectLeaves(state.paneTree);
+      if (!leaves.find(l => l.id === state.focusedPaneId)) {
+        state.focusedPaneId = leaves[0]?.id || 'main';
       }
     }),
     
     splitPane: (direction) => set((state) => {
       const activeTab = state.tabs.find(t => t.id === state.activeTabId);
-      const sourcePaneId = activeTab?.splitPaneId || state.focusedPaneId;
-      const newPaneId = `pane-${Date.now()}`;
-      const sourcePane = state.panes.find(p => p.id === sourcePaneId);
-      
-      // Reduce size of source pane and sync direction
-      if (sourcePane) {
-        sourcePane.size = 0.5;
-        sourcePane.direction = direction;
+      const sourceLeafId = activeTab?.splitPaneId || state.focusedPaneId;
+      const sourceLeaf = findLeafById(state.paneTree, sourceLeafId);
+      if (!sourceLeaf) return;
+
+      const originalSize = sourceLeaf.size;
+      const newLeafId = `pane-${Date.now()}`;
+
+      // Move active tab from source leaf to new leaf
+      if (activeTab) {
+        sourceLeaf.tabIds = sourceLeaf.tabIds.filter(id => id !== activeTab.id);
+        activeTab.splitPaneId = newLeafId;
       }
-      
-      // Create new pane
-      const newPane: SplitPane = {
-        id: newPaneId,
-        direction,
+      sourceLeaf.size = 0.5;
+
+      const newLeaf: LeafPane = {
+        id: newLeafId,
+        type: 'leaf',
         tabIds: activeTab ? [activeTab.id] : [],
         size: 0.5,
       };
-      state.panes.push(newPane);
-      
-      // Move active tab to new pane
-      if (activeTab && sourcePane) {
-        sourcePane.tabIds = sourcePane.tabIds.filter(id => id !== activeTab.id);
-        activeTab.splitPaneId = newPaneId;
-        state.focusedPaneId = newPaneId;
+
+      const newBranch: BranchPane = {
+        id: `branch-${Date.now()}`,
+        type: 'branch',
+        direction,
+        children: [sourceLeaf, newLeaf],
+        size: originalSize,
+      };
+
+      // Find parent branch and replace source leaf with new branch
+      const parentBranch = findParentBranch(state.paneTree, sourceLeafId);
+      if (parentBranch) {
+        const idx = parentBranch.children.findIndex(c => c.id === sourceLeafId);
+        if (idx >= 0) {
+          parentBranch.children[idx] = newBranch;
+        }
+      } else {
+        // Source leaf is the root — wrap it in a new branch
+        newBranch.size = 1;
+        state.paneTree = newBranch;
       }
+
+      state.focusedPaneId = newLeafId;
     }),
     
     removePane: (paneId) => set((state) => {
-      if (state.panes.length <= 1) return;
-      const pane = state.panes.find(p => p.id === paneId);
-      if (pane) {
-        // Move tabs to main pane
-        const mainPane = state.panes.find(p => p.id !== paneId);
-        if (mainPane) {
-          for (const tabId of pane.tabIds) {
-            const tab = state.tabs.find(t => t.id === tabId);
-            if (tab) {
-              tab.splitPaneId = mainPane.id;
-              mainPane.tabIds.push(tabId);
-            }
+      // Find the parent branch of this leaf
+      const parentBranch = findParentBranch(state.paneTree, paneId);
+      if (!parentBranch) return; // root leaf — cannot remove
+
+      const removedLeaf = parentBranch.children.find(c => c.id === paneId);
+      if (!removedLeaf || removedLeaf.type !== 'leaf') return;
+
+      const removedSize = removedLeaf.size;
+
+      // Move tabs from removed leaf to the first remaining leaf in the tree
+      const allLeavesBefore = collectLeaves(state.paneTree);
+      const targetLeaf = allLeavesBefore.find(l => l.id !== paneId);
+      if (targetLeaf && removedLeaf.tabIds.length > 0) {
+        for (const tabId of removedLeaf.tabIds) {
+          const tab = state.tabs.find(t => t.id === tabId);
+          if (tab) {
+            tab.splitPaneId = targetLeaf.id;
+            targetLeaf.tabIds.push(tabId);
           }
-          mainPane.size = 1;
         }
-        state.panes = state.panes.filter(p => p.id !== paneId);
-        state.focusedPaneId = state.panes[0]?.id || 'main';
+      }
+
+      // Remove leaf from parent's children
+      parentBranch.children = parentBranch.children.filter(c => c.id !== paneId);
+
+      // Redistribute removed size equally among remaining siblings
+      const remaining = parentBranch.children;
+      if (remaining.length > 0) {
+        const addSize = removedSize / remaining.length;
+        remaining.forEach(c => { c.size += addSize; });
+      }
+
+      // Prune tree (collapse branches with ≤1 child)
+      state.paneTree = pruneTree(state.paneTree);
+
+      // Update focusedPaneId
+      const leaves = collectLeaves(state.paneTree);
+      if (!leaves.find(l => l.id === state.focusedPaneId)) {
+        state.focusedPaneId = leaves[0]?.id || 'main';
       }
     }),
     
@@ -397,8 +546,24 @@ export const useAppStore = create<AppState>()(
     }),
 
     reorderPaneTabIds: (paneId, tabIds) => set((state) => {
-      const pane = state.panes.find(p => p.id === paneId);
-      if (pane) pane.tabIds = tabIds;
+      const leaf = findLeafById(state.paneTree, paneId);
+      if (leaf) leaf.tabIds = tabIds;
+    }),
+
+    resizeChildren: (branchId, childIndex, deltaFraction) => set((state) => {
+      const branch = findBranchById(state.paneTree, branchId);
+      if (!branch || childIndex < 0 || childIndex >= branch.children.length - 1) return;
+      const a = branch.children[childIndex];
+      const b = branch.children[childIndex + 1];
+      let newA = a.size + deltaFraction;
+      let newB = b.size - deltaFraction;
+      // Clamp 0.15–0.85
+      if (newA < 0.15) { newB -= (0.15 - newA); newA = 0.15; }
+      if (newA > 0.85) { newB += (newA - 0.85); newA = 0.85; }
+      if (newB < 0.15) { newA -= (0.15 - newB); newB = 0.15; }
+      if (newB > 0.85) { newA += (newB - 0.85); newB = 0.85; }
+      a.size = newA;
+      b.size = newB;
     }),
     
     setConfig: (patch) => set((state) => {

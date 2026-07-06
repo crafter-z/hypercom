@@ -99,7 +99,10 @@ DisplayFormat    'string' | 'hex' | 'binary'
 
 // 标签页
 TabItem          { id, title, isPinned, isActive, splitPaneId }
-SplitPane        { id, direction, tabIds[], size }
+SplitDirection   'horizontal' | 'vertical'
+LeafPane         { id, type: 'leaf', tabIds[], size }            // 承载标签页
+BranchPane       { id, type: 'branch', direction, children[], size } // 可嵌套
+PaneNode         LeafPane | BranchPane                            // 分屏树节点联合
 
 // 终端
 TerminalLine     { id, timestamp, direction, content, displayContent?, rawData?, isHex }

@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
-import type { TabItem, SplitPane } from '../../types';
+import { useTranslation } from 'react-i18next';
+import type { TabItem, LeafPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
 import { Pin, X } from 'lucide-react';
@@ -21,7 +22,7 @@ interface TabBarProps {
   onCloseToRight: (tabId: string) => void;
   onCloseToLeft: (tabId: string) => void;
   onCloseOthers: (tabId: string) => void;
-  moveToPaneTargets?: SplitPane[];
+  moveToPaneTargets?: LeafPane[];
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
 }
 
@@ -95,6 +96,7 @@ const TabBar: React.FC<TabBarProps> = ({
   onMoveToPane,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
+  const { t } = useTranslation();
 
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
@@ -107,18 +109,18 @@ const TabBar: React.FC<TabBarProps> = ({
   const getContextMenuItems = useCallback((tabId: string): ContextMenuEntry[] => {
     const tab = tabs.find(t => t.id === tabId);
     const items: ContextMenuEntry[] = [
-      { label: tab?.isPinned ? '取消固定' : '固定选项卡', icon: <Pin size={14} />, onClick: () => onTabPin(tabId) },
+      { label: tab?.isPinned ? t('tabBar.contextMenu.unpin') : t('tabBar.contextMenu.pin'), icon: <Pin size={14} />, onClick: () => onTabPin(tabId) },
       { type: 'separator' },
-      { label: '关闭', onClick: () => onTabClose(tabId) },
-      { label: '关闭右侧', onClick: () => onCloseToRight(tabId) },
-      { label: '关闭左侧', onClick: () => onCloseToLeft(tabId) },
-      { label: '关闭其他', onClick: () => onCloseOthers(tabId) },
+      { label: t('tabBar.contextMenu.close'), onClick: () => onTabClose(tabId) },
+      { label: t('tabBar.contextMenu.closeToRight'), onClick: () => onCloseToRight(tabId) },
+      { label: t('tabBar.contextMenu.closeToLeft'), onClick: () => onCloseToLeft(tabId) },
+      { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId) },
     ];
 
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
       items.push({ type: 'separator' });
       for (const targetPane of moveToPaneTargets) {
-        const label = `移至分屏 ${targetPane.id.replace('pane-', '').slice(0, 4)}`;
+        const label = t('tabBar.contextMenu.moveToPane', { target: targetPane.id.replace('pane-', '').slice(0, 4) });
         items.push({
           label,
           onClick: () => onMoveToPane?.(tabId, targetPane.id),
@@ -127,7 +129,7 @@ const TabBar: React.FC<TabBarProps> = ({
     }
 
     return items;
-  }, [tabs, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, moveToPaneTargets, onMoveToPane]);
+  }, [tabs, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, moveToPaneTargets, onMoveToPane, t]);
 
   const tabIds = tabs.map(t => t.id);
 

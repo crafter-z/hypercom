@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useAppStore } from './useAppStore';
+import { useAppStore, findLeafById, findLeafByTabId, collectLeaves, countLeaves } from './useAppStore';
 import { useTerminalStore } from './useTerminalStore';
 import { useRuleStore } from './useRuleStore';
 import { useOperationStore } from './useOperationStore';
-import type { SerialPort, PortGroup, TerminalLine } from '../types';
+import type { SerialPort, PortGroup, TerminalLine, LeafPane, BranchPane, PaneNode } from '../types';
 
 // Snapshot of initial state for reset between tests
 const INITIAL_STATE = useAppStore.getState();
@@ -14,7 +14,7 @@ beforeEach(() => {
     ports: [],
     groups: [],
     tabs: [],
-    panes: [{ id: 'main', direction: 'vertical', tabIds: [], size: 1 }],
+    paneTree: { id: 'main', type: 'leaf' as const, tabIds: [], size: 1 },
     activeTabId: null,
     focusedPaneId: 'main',
     trafficStats: {},
@@ -101,7 +101,8 @@ describe('Tab & Pane actions', () => {
     expect(s.tabs[0].id).toBe('COM1');
     expect(s.tabs[0].isActive).toBe(true);
     expect(s.activeTabId).toBe('COM1');
-    expect(s.panes[0].tabIds).toContain('COM1');
+    expect(s.paneTree.type).toBe('leaf');
+    expect((s.paneTree as LeafPane).tabIds).toContain('COM1');
     expect(useTerminalStore.getState().terminals['COM1']).toBeDefined();
     expect(useTerminalStore.getState().terminals['COM1'].lines).toEqual([]);
   });
@@ -126,7 +127,8 @@ describe('Tab & Pane actions', () => {
     expect(s.tabs).toHaveLength(1);
     expect(s.tabs[0].id).toBe('COM1');
     expect(s.activeTabId).toBe('COM1');
-    expect(s.panes[0].tabIds).toEqual(['COM1']);
+    expect(s.paneTree.type).toBe('leaf');
+    expect((s.paneTree as LeafPane).tabIds).toEqual(['COM1']);
   });
 
   it('closeTabsToRight preserves pinned tabs to the right of target', () => {
@@ -155,14 +157,16 @@ describe('Tab & Pane actions', () => {
     useAppStore.getState().openTab('A');
     useAppStore.getState().splitPane('horizontal');
     const s = useAppStore.getState();
-    expect(s.panes).toHaveLength(2);
-    const main = s.panes.find(p => p.id === 'main')!;
-    const newPane = s.panes.find(p => p.id !== 'main')!;
+    expect(s.paneTree.type).toBe('branch');
+    const branch = s.paneTree as BranchPane;
+    expect(branch.children).toHaveLength(2);
+    const main = branch.children.find((c): c is LeafPane => c.type === 'leaf' && c.id === 'main')!;
+    const newLeaf = branch.children.find((c): c is LeafPane => c.type === 'leaf' && c.id !== 'main')!;
     expect(main.size).toBe(0.5);
-    expect(newPane.size).toBe(0.5);
-    expect(newPane.tabIds).toEqual(['A']);
+    expect(newLeaf.size).toBe(0.5);
+    expect(newLeaf.tabIds).toEqual(['A']);
     expect(main.tabIds).toEqual([]);
-    expect(s.tabs.find(t => t.id === 'A')!.splitPaneId).toBe(newPane.id);
+    expect(s.tabs.find(t => t.id === 'A')!.splitPaneId).toBe(newLeaf.id);
   });
 
   it('moveTabToPane removes empty source pane and migrates active state', () => {
@@ -170,14 +174,74 @@ describe('Tab & Pane actions', () => {
     const { openTab, splitPane, moveTabToPane } = useAppStore.getState();
     openTab('A'); openTab('B'); // both in 'main'
     splitPane('vertical'); // active tab B moves to new pane
-    const newPaneId = useAppStore.getState().panes.find(p => p.id !== 'main')!.id;
-    moveTabToPane('B', 'main'); // move B back; new pane becomes empty -> removed
+    const newLeafId = (useAppStore.getState().paneTree as BranchPane).children
+      .find((c): c is LeafPane => c.type === 'leaf' && c.id !== 'main')!.id;
+    moveTabToPane('B', 'main'); // move B back; source leaf becomes empty -> pruned
     const s = useAppStore.getState();
-    expect(s.panes).toHaveLength(1);
-    expect(s.panes[0].id).toBe('main');
-    expect([...s.panes[0].tabIds].sort()).toEqual(['A', 'B']);
+    expect(s.paneTree.type).toBe('leaf');
+    expect((s.paneTree as LeafPane).id).toBe('main');
+    expect([...(s.paneTree as LeafPane).tabIds].sort()).toEqual(['A', 'B']);
     expect(s.tabs.find(t => t.id === 'B')!.splitPaneId).toBe('main');
-    void newPaneId; // referenced for clarity, not asserted further
+    void newLeafId;
+  });
+
+  it('splitPane on a non-root leaf creates a 3-level nested tree', () => {
+    useAppStore.setState({ ports: [makePort('A')] });
+    useAppStore.getState().openTab('A');
+    useAppStore.getState().splitPane('horizontal'); // root branch with [main(empty), leaf1(A)]
+    const root = useAppStore.getState().paneTree as BranchPane;
+    const leaf1 = root.children.find((c): c is LeafPane => c.type === 'leaf' && c.id !== 'main')!;
+    // 把焦点切回非根 leaf (其内含活动标签 A，自然就是焦点)
+    useAppStore.getState().setFocusedPane(leaf1.id);
+    useAppStore.getState().splitPane('vertical');
+    const s = useAppStore.getState();
+    expect(s.paneTree.type).toBe('branch');
+    const r = s.paneTree as BranchPane;
+    expect(r.children).toHaveLength(2);
+    // leaf1 应已被替换为 inner branch
+    const innerBranch = r.children.find((c): c is BranchPane => c.type === 'branch')!;
+    expect(innerBranch).toBeDefined();
+    expect(innerBranch.children).toHaveLength(2);
+    expect(innerBranch.children.every(c => c.type === 'leaf')).toBe(true);
+    expect(innerBranch.direction).toBe('vertical');
+    expect(innerBranch.size).toBe(0.5);
+    expect(countLeaves(s.paneTree)).toBe(3);
+  });
+
+  it('removePane on an inner leaf collapses the inner branch', () => {
+    // 直接构造 3 叶子嵌套树：root[h] -> [main(A), inner[v] -> [leafX(B), leafY(C)]]
+    const mainLeaf: LeafPane = { id: 'main', type: 'leaf', tabIds: ['A'], size: 0.5 };
+    const leafX: LeafPane = { id: 'leafX', type: 'leaf', tabIds: ['B'], size: 0.5 };
+    const leafY: LeafPane = { id: 'leafY', type: 'leaf', tabIds: ['C'], size: 0.5 };
+    const innerBranch: BranchPane = {
+      id: 'inner', type: 'branch', direction: 'vertical',
+      children: [leafX, leafY], size: 0.5,
+    };
+    useAppStore.setState({
+      ports: ['A', 'B', 'C'].map(p => makePort(p)),
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'main' },
+        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'leafX' },
+        { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'leafY' },
+      ],
+      paneTree: {
+        id: 'root', type: 'branch', direction: 'horizontal',
+        children: [mainLeaf, innerBranch], size: 1,
+      },
+      focusedPaneId: 'leafY',
+    });
+    // Remove leafY — its tab C migrates to first available leaf (main per DFS),
+    // innerBranch collapses to its sole child leafX, root stays as branch with 2 leaves.
+    useAppStore.getState().removePane('leafY');
+    const s = useAppStore.getState();
+    expect(s.paneTree.type).toBe('branch');
+    const r = s.paneTree as BranchPane;
+    expect(r.children).toHaveLength(2);
+    expect(r.children.every(c => c.type === 'leaf')).toBe(true);
+    const survivorIds = r.children.map(c => c.id).sort();
+    expect(survivorIds).toEqual(['leafX', 'main']);
+    expect(countLeaves(s.paneTree)).toBe(2);
+    expect(findLeafById(s.paneTree, 'main')!.tabIds).toContain('C');
   });
 });
 
@@ -438,9 +502,9 @@ describe('Edge cases', () => {
   });
 
   it('removePane on single pane is no-op', () => {
-    expect(useAppStore.getState().panes).toHaveLength(1);
+    expect(useAppStore.getState().paneTree.type).toBe('leaf');
     useAppStore.getState().removePane('main');
-    expect(useAppStore.getState().panes).toHaveLength(1);
+    expect(useAppStore.getState().paneTree.type).toBe('leaf');
   });
 
   it('setTrafficStats accumulates statistics', () => {
@@ -496,20 +560,23 @@ describe('Edge cases', () => {
   it('reorderPaneTabIds updates pane tab order', () => {
     useAppStore.setState({
       ports: ['A', 'B', 'C'].map(p => makePort(p)),
-      panes: [{ id: 'main', direction: 'vertical', tabIds: ['A', 'B', 'C'], size: 1 }],
+      paneTree: { id: 'main', type: 'leaf' as const, tabIds: ['A', 'B', 'C'], size: 1 },
     });
     ['A', 'B', 'C'].forEach(id => useAppStore.getState().openTab(id));
     useAppStore.getState().reorderPaneTabIds('main', ['C', 'A', 'B']);
-    expect(useAppStore.getState().panes[0].tabIds).toEqual(['C', 'A', 'B']);
+    expect((useAppStore.getState().paneTree as LeafPane).tabIds).toEqual(['C', 'A', 'B']);
   });
 
   it('reorderPaneTabIds on non-existent pane is no-op', () => {
-    useAppStore.setState({ panes: [{ id: 'main', direction: 'vertical', tabIds: ['A'], size: 1 }] });
+    useAppStore.setState({ paneTree: { id: 'main', type: 'leaf' as const, tabIds: ['A'], size: 1 } });
     useAppStore.getState().reorderPaneTabIds('nonexistent', ['A', 'B']);
-    expect(useAppStore.getState().panes[0].tabIds).toEqual(['A']);
+    expect((useAppStore.getState().paneTree as LeafPane).tabIds).toEqual(['A']);
   });
 
   it('moveTabToPane cross-pane then reorder works correctly', () => {
+    // 树：root branch(vertical) -> [leaf pane1[A,B], leaf pane2[C]]
+    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A', 'B'], size: 0.5 };
+    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['C'], size: 0.5 };
     useAppStore.setState({
       ports: ['A', 'B', 'C'].map(p => makePort(p)),
       tabs: [
@@ -517,19 +584,32 @@ describe('Edge cases', () => {
         { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane1' },
         { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'pane2' },
       ],
-      panes: [
-        { id: 'pane1', direction: 'vertical' as const, tabIds: ['A', 'B'], size: 0.5 },
-        { id: 'pane2', direction: 'vertical' as const, tabIds: ['C'], size: 0.5 },
-      ],
+      paneTree: {
+        id: 'root', type: 'branch', direction: 'vertical' as const,
+        children: [pane1, pane2], size: 1,
+      },
+      focusedPaneId: 'pane1',
     });
     // Move B from pane1 to pane2
     useAppStore.getState().moveTabToPane('B', 'pane2');
     // Now reorder so B comes before C in pane2
     useAppStore.getState().reorderPaneTabIds('pane2', ['B', 'C']);
-    const p2 = useAppStore.getState().panes.find(p => p.id === 'pane2')!;
+    const s = useAppStore.getState();
+    const p2 = findLeafById(s.paneTree, 'pane2')!;
     expect(p2.tabIds).toEqual(['B', 'C']);
-    const p1 = useAppStore.getState().panes.find(p => p.id === 'pane1');
+    const p1 = findLeafById(s.paneTree, 'pane1');
     expect(p1).toBeDefined();
     expect(p1!.tabIds).toEqual(['A']);
+  });
+
+  it('findLeafByTabId and collectLeaves helpers traverse tree correctly', () => {
+    const leaf1: LeafPane = { id: 'l1', type: 'leaf', tabIds: ['A'], size: 0.5 };
+    const leaf2: LeafPane = { id: 'l2', type: 'leaf', tabIds: ['B', 'C'], size: 0.5 };
+    const tree: PaneNode = { id: 'root', type: 'branch', direction: 'vertical', children: [leaf1, leaf2], size: 1 };
+    expect(findLeafByTabId(tree, 'B')?.id).toBe('l2');
+    expect(findLeafByTabId(tree, 'A')?.id).toBe('l1');
+    expect(findLeafByTabId(tree, 'missing')).toBeUndefined();
+    expect(collectLeaves(tree).map(l => l.id).sort()).toEqual(['l1', 'l2']);
+    expect(countLeaves(tree)).toBe(2);
   });
 });

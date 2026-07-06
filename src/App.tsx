@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import i18n from './i18n';
 import TitleBar from './components/TitleBar/TitleBar';
 import Sidebar from './components/Sidebar/Sidebar';
 import MainDisplay from './components/MainDisplay/MainDisplay';
@@ -23,7 +24,7 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
     if (this.state.hasError) {
       return (
         <div style={{ width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1e1e1e', color: '#ccc', fontFamily: 'Consolas, monospace', fontSize: 14, flexDirection: 'column', gap: 12 }}>
-          <div style={{ color: '#f48771', fontSize: 18, fontWeight: 'bold' }}>渲染错误</div>
+          <div style={{ color: '#f48771', fontSize: 18, fontWeight: 'bold' }}>{i18n.t('app.errorBoundary.title')}</div>
           <div style={{ maxWidth: 600, background: '#2d2d30', padding: 16, borderRadius: 6, overflow: 'auto', maxHeight: '50vh' }}>
             <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
               {this.state.error?.message}
@@ -34,7 +35,7 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
             style={{ marginTop: 8 }}
             onClick={() => this.setState({ hasError: false, error: null })}
           >
-            重试
+            {i18n.t('app.errorBoundary.retry')}
           </button>
         </div>
       );
@@ -155,7 +156,7 @@ const App: React.FC = () => {
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
-            background: 'var(--bg-primary)',
+            backgroundColor: 'var(--bg-primary)',
           }}
         >
           <TitleBar />

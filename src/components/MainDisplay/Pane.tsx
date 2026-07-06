@@ -1,5 +1,6 @@
-import React, { useCallback, useState, useEffect } from 'react';
-import { useAppStore } from '../../stores/useAppStore';
+import React, { useCallback, useState, useEffect, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialConnection } from '../../hooks/useTauri';
 import type { Encoding } from '../../types';
@@ -21,7 +22,8 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const tabs = useAppStore((s) => s.tabs);
   const activeTabId = useAppStore((s) => s.activeTabId);
   const ports = useAppStore((s) => s.ports);
-  const panes = useAppStore((s) => s.panes);
+  const paneTree = useAppStore((s) => s.paneTree);
+  const { t } = useTranslation();
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const storeCloseTab = useAppStore((s) => s.closeTab);
   const pinTab = useAppStore((s) => s.pinTab);
@@ -66,7 +68,10 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
   const displayTerminal = useTerminalStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
 
-  const otherPanes = panes.filter(p => p.id !== paneId);
+  const otherPanes = useMemo(
+    () => collectLeaves(paneTree).filter(l => l.id !== paneId),
+    [paneTree, paneId],
+  );
 
   const handleTabClick = useCallback((tabId: string) => {
     onFocus();
@@ -122,7 +127,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span className="terminal-toolbar-label">编码:</span>
+            <span className="terminal-toolbar-label">{t('pane.toolbar.encodingLabel')}</span>
             <select
               className="select terminal-toolbar-select"
               value={displayTerminal?.encoding || 'UTF-8'}
@@ -153,15 +158,15 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
           style={{ flex: 1, flexDirection: 'column', gap: 8 }}
         >
           <span style={{ opacity: 0.7 }}>
-            {isDropOver ? '释放以移入选项卡' : isMultiPane ? '拖入选项卡或双击左侧串口' : '双击左侧串口打开标签页'}
+            {isDropOver ? t('pane.emptyState.dropToMove') : isMultiPane ? t('pane.emptyState.dropOrDoubleClick') : t('pane.emptyState.doubleClick')}
           </span>
           {isMultiPane && (
             <button
               className="btn btn-sm"
-              title="关闭此分屏"
+              title={t('pane.emptyState.closePane')}
               onClick={(e) => { e.stopPropagation(); removePane(paneId); }}
             >
-              <X size={12} /> 关闭分屏
+              <X size={12} /> {t('pane.emptyState.closePaneButton')}
             </button>
           )}
         </div>

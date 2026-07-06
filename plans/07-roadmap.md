@@ -1,26 +1,38 @@
 # 待办事项
 
-## 🟡 中优先级
-
-### 分屏嵌套
-- 当前 Pane 为平铺模型，不支持树状嵌套分屏 (VS Code 式)
-- Pane 内再分屏需重构 `SplitPane` 为树结构
-
 ## 🟢 低优先级
 
-### 多语言 i18n
-- 引入 `i18next` + `react-i18next`
-- 创建 `zh-CN.json` / `en-US.json`
-- 所有组件文本替换为 `t('key')`
-
-### 字体缩放
-- 终端字体大小绑定 `--font-size-terminal` CSS 变量
-- 添加 Ctrl+滚轮 或滑块调整
-
-### 背景图片
-- ConfigModal 已有路径选择，需实现在主窗口 CSS `background-image` 应用
+### 多语言 i18n 收尾
+- ✅ 基础设施已就位：`src/i18n.ts` 含 zh-CN/en-US 字典 218 项，`main.tsx` 已接入，`useAppStore.subscribe` 同步 `config.language → i18n.changeLanguage`
+- ✅ 7 个文件已完成 `t()` 替换：`App.tsx`、`TitleBar.tsx`、`StatusBar.tsx`、`Sidebar/AliasDialog.tsx`、`MainDisplay/` 3 文件
+- ⏳ 15 文件待接 `t()`：`TerminalView.tsx`、`OperationPanel/*` 3 文件、`Sidebar/Sidebar.tsx`、`ConfigModal/*` 10 文件 — 当前保留中文 (与原始行为一致，不影响运行)
+- 切换语言后界面会混合显示：已替换的文件切换语言，未替换的文件继续显示中文
 
 ## ✅ 已完成（移出待办列表）
+
+### 2026-07 批次：字体/背景/分屏树/i18n 基础设施
+
+#### 分屏嵌套（VS Code 树状）
+- **类型重构** — `SplitPane` 平铺数组改为 `PaneNode = LeafPane | BranchPane` 联合，支持任意深度嵌套
+- **Store 重构** — `panes: SplitPane[]` → `paneTree: PaneNode`，新增 7 个树辅助函数 (`findLeafById` / `findLeafByTabId` / `findParentBranch` / `collectLeaves` / `countLeaves` / `pruneTree` / `findBranchById`) + `resizeChildren` action
+- **MainDisplay 递归渲染** — `renderNode(node, parentBranch)` 分支 flex 容器 + 叶子调用 `<Pane>`；本地 `paneSizes[]` state 改为直接读取并更新 store node.size
+- **DnD 树遍历** — `useTabDragEnd` 改用 `findLeafByTabId` / `findLeafById` 替代扁平 `state.panes.find(...)`；按空叶 id 命中 droppable
+- **测试** — 8 个扁平 pane 测试改写为 `paneTree` 形状断言；新增 2 个嵌套测试（3 层深度构造 + 内层 removePane 折叠）+ 1 个 helper 测试 → 99/99 通过
+
+#### 字体缩放
+- ✅ CSS 变量 `--font-size-terminal` 与 TerminalView Ctrl+滚轮处理程序 (lines 80-92) 已在 2026-06 存在
+- ✅ 新增 ParamsSection 字号滑块 (`<input type="range" min=8 max=48>`) 绑定 `config.terminalFontSize`，通过 ThemeProvider effect 同步 CSS 变量
+
+#### 背景图片
+- ✅ 修复 1 行 bug：App.tsx L158 顶层 div 用 `background:` 简写覆盖了 body 的 `background-image` → 改为 `backgroundColor:` 仅设颜色
+- 配置管道（GeneralSettings 路径选择 → ThemeProvider effect 设 `--bg-image` CSS 变量 → body 应用）此前已就位，只是顶层 div 遮蔽
+
+#### 多语言 i18n 基础设施
+- ✅ `src/i18n.ts` — i18next + react-i18next 初始化，扁平 dotted key (`keySeparator: false`)，218 keys × 2 语言
+- ✅ `main.tsx` import 引入副作用初始化
+- ✅ `useAppStore.subscribe` 监听 `config.language` 变化触发 `i18n.changeLanguage`
+- ✅ 7 个文件已全替换：App/TitleBar/StatusBar/AliasDialog/MainDisplay/TabBar/Pane
+- ⏳ 15 文件待续 — 见上方待办节
 
 ### 协议解析器 (2026-07)
 

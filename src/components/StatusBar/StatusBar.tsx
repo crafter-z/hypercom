@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
+import i18n from '../../i18n';
 import { useAppStore } from '../../stores/useAppStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap } from 'lucide-react';
 import { useSystemStatus } from '../../hooks/useTauri';
@@ -10,6 +12,7 @@ const StatusBar: React.FC = () => {
   const ports = useAppStore((s) => s.ports);
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
   const connectedCount = ports.filter(p => p.status === 'connected').length;
+  const { t } = useTranslation();
 
   useSystemStatus(5000);
 
@@ -30,12 +33,12 @@ const StatusBar: React.FC = () => {
       <div className="statusbar-left">
         <span className="statusbar-item">
           <span className="statusbar-dot" />
-          {systemStatus.status === 'high_load' ? '⚠ 高负载' : '● 运行正常'}
+          {systemStatus.status === 'high_load' ? t('statusBar.highLoad') : t('statusBar.normal')}
         </span>
         {connectedCount > 0 && (
           <span className="statusbar-item" style={{ color: 'var(--status-connected)' }}>
             <PlugZap size={12} />
-            {connectedCount} 已连接
+            {t('statusBar.connectedCount', { count: connectedCount })}
           </span>
         )}
         {activeTabId && (
@@ -64,10 +67,10 @@ const StatusBar: React.FC = () => {
             </span>
           </>
         ) : (
-          <span className="statusbar-item" style={{ opacity: 0.7 }}>未选择串口</span>
+          <span className="statusbar-item" style={{ opacity: 0.7 }}>{t('statusBar.noPortSelected')}</span>
         )}
         <span className="statusbar-item" style={{ opacity: 0.8 }}>
-          {now.toLocaleTimeString('zh-CN')}
+          {now.toLocaleTimeString(i18n.language === 'en-US' ? 'en-US' : 'zh-CN')}
         </span>
       </div>
     </div>

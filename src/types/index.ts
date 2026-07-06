@@ -73,13 +73,28 @@ export interface TabItem {
   splitPaneId: string;     // 所属分屏区域ID
 }
 
-/** 分屏区域 */
-export interface SplitPane {
+/** 分屏方向 */
+export type SplitDirection = 'horizontal' | 'vertical';
+
+/** 分屏叶子节点（承载标签页） */
+export interface LeafPane {
   id: string;
-  direction: 'horizontal' | 'vertical';
+  type: 'leaf';
   tabIds: string[];
-  size: number;            // 占比 (0-1)
+  size: number;            // 在父分支子节点中的相对占比 (0-1)
 }
+
+/** 分屏分支节点（包含子节点，可嵌套） */
+export interface BranchPane {
+  id: string;
+  type: 'branch';
+  direction: SplitDirection;
+  children: PaneNode[];
+  size: number;            // 在父分支子节点中的相对占比 (0-1)
+}
+
+/** 分屏树节点（叶子或分支的联合类型） */
+export type PaneNode = LeafPane | BranchPane;
 
 // ==================== 终端内容相关 ====================
 

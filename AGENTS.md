@@ -237,3 +237,32 @@ scope: ui | backend | store | hooks | plans
 - OperationPanel split into section components: `OperationPanel.tsx`, `SendSection.tsx`, `ParamsSection.tsx`, `RulesSection.tsx`.
 - MainDisplay split into: `MainDisplay.tsx`, `Pane.tsx`, `TabBar.tsx`, `TerminalView.tsx`, `ResizeHandle.tsx`.
 - Sidebar split into: `Sidebar.tsx`, `AliasDialog.tsx`.
+
+## Pane tree (2026-07 refactor)
+
+`panes: SplitPane[]` 平铺数组已替换为 `paneTree: PaneNode`（单根递归树）。
+
+```ts
+type PaneNode = LeafPane | BranchPane;
+interface LeafPane   { id: string; type: 'leaf';   tabIds: string[];    size: number; }
+interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; children: PaneNode[]; size: number; }
+```
+
+- `focusedPaneId` 引用树中的**叶子 id**（不再是扁平数组索引）
+- 树辅助函数全部在 `src/stores/useAppStore.ts` 顶层 export：`findLeafById`、`findLeafByTabId`、`findParentBranch`、`findBranchById`、`collectLeaves`、`countLeaves`、`pruneTree`（私有）
+- `pruneTree` 会自动：① 删除非根空叶子 → ② 折叠只有 1 个子节点的分支为该子节点（继承 size）→ ③ 根分支为空时退化为空叶 `'main'`
+- `MainDisplay.tsx` 用 `renderNode(node, parentBranch)` 递归渲染；分支 flex 容器内 ResizeHandle 调用 `resizeChildren(branchId, childIndex, deltaFraction)` action
+- `useTabDragEnd` 用 `findLeafByTabId` / `findLeafById` 树遍历，不要再用 `state.panes.find(...)`
+- 新 splitPane：找焦点叶子 → 在父分支子数组里替换为含 [源叶(0.5), 新叶(0.5)] 的新分支；焦点叶是根时整树替换
+- 测试断言：`state.paneTree.type === 'branch'` 后 `as BranchPane` 再断 `children` — 严禁再用 `state.panes[0]` / `state.panes.length`
+
+## i18n (2026-07 基础设施)
+
+- `src/i18n.ts` 已就位 — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），218 keys × zh-CN/en-US
+- `main.tsx` 第 5 行 `import './i18n'` 副作用初始化
+- `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
+- 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`
+- **类组件**（如 `App.tsx` 的 `AppErrorBoundary`）不能使用 hook，直接 `import i18n from './i18n'` 后 `i18n.t('key')` —— 但不会随语言切换重渲染（仅在错误边界这种边缘场景可接受）
+- 不翻译的字符串：协议词汇 `None/Even/Odd/Mark/Space`、`Xon/Xoff`、`RTS/CTS`；编码名 `ASCII/UTF-8/GBK/ISO-8859-1`；单位 `ms/px/MB`；首字母缩写 `SIM/VCP/HEX/DTR/RTS` —— 这些在 i18n.ts 中也无对应 key
+- ⚠️ 7 个文件已替换为 `t()`；15 个文件保留中文硬编码（暂未完成 i18n 接入，不影响编译运行）— 新增组件如需文本，先查 `src/i18n.ts` 现有 key 是否够用
+- 切换语言时已替换的文件实时切换，未替换的继续显示中文

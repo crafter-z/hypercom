@@ -6,9 +6,10 @@
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `types/index.ts` | ✅ | 全部类型定义 (219 行) |
-| `stores/useAppStore.ts` | ✅ | Zustand + Immer, 核心状态 (437 行) |
+| `types/index.ts` | ✅ | 全部类型定义 (267 行) — 含 PaneNode/LeafPane/BranchPane 联合 |
+| `stores/useAppStore.ts` | ✅ | Zustand + Immer, 核心状态 (580 行) — paneTree + 7 树辅助 + resizeChildren |
 | `stores/useOperationStore.ts` | ✅ | 操作面板状态 (55 行) |
+| `i18n.ts` | ✅ | i18next + react-i18next 初始化, 218 keys × 2 langs (583 行) — main.tsx 副作用导入 |
 | `stores/useTerminalStore.ts` | ✅ | 终端状态 (49 行) |
 | `stores/useRuleStore.ts` | ✅ | 规则集状态 (47 行) |
 | `stores/useAppStore.test.ts` | ✅ | vitest 单测 (470 行, 49 cases) |
@@ -39,12 +40,12 @@
 | `components/Sidebar/Sidebar.tsx` | ✅ | 含 @dnd-kit 拖拽, 搜索, 分组, 备注 (482 行) |
 | `components/Sidebar/AliasDialog.tsx` | ✅ | 别名编辑对话框 (37 行) |
 | `components/Sidebar/hooks/usePortDragEnd.ts` | ✅ | 端口拖拽结束处理 hook (80 行) |
-| `components/MainDisplay/MainDisplay.tsx` | ✅ | 分屏容器 + Pane 编排 (132 行) |
-| `components/MainDisplay/Pane.tsx` | ✅ | 单 Pane 容器 + 标签管理 (160 行) |
-| `components/MainDisplay/ResizeHandle.tsx` | ✅ | 分割线拖拽 (34 行) |
-| `components/MainDisplay/TabBar.tsx` | ✅ | 含 @dnd-kit 水平拖拽, 右键菜单 (190 行) |
-| `components/MainDisplay/TerminalView.tsx` | ✅ | 真实数据 + 语法高亮 + 虚拟滚动 + 文件导出 (227 行) |
-| `components/MainDisplay/hooks/useTabDragEnd.ts` | ✅ | 标签拖拽结束处理 hook (73 行) |
+| `components/MainDisplay/MainDisplay.tsx` | ✅ | 分屏容器 + 递归树渲染 renderNode (182 行) |
+| `components/MainDisplay/Pane.tsx` | ✅ | 单 Pane 容器 + 收集 otherPanes via collectLeaves (165 行) |
+| `components/MainDisplay/ResizeHandle.tsx` | ✅ | 分割线拖拽 (34 行) — 树状重构未改动 |
+| `components/MainDisplay/TabBar.tsx` | ✅ | 含 @dnd-kit 水平拖拽, 右键菜单, i18n (192 行) |
+| `components/MainDisplay/TerminalView.tsx` | ✅ | 真实数据 + 语法高亮 + 虚拟滚动 + 文件导出 (227 行) — 已 t() 替换保留 |
+| `components/MainDisplay/hooks/useTabDragEnd.ts` | ✅ | 树遍历拖拽 hook (findLeafByTabId/findLeafById) (72 行) |
 | `components/OperationPanel/OperationPanel.tsx` | ✅ | 操作面板容器 + 三栏编排 (138 行) |
 | `components/OperationPanel/SendSection.tsx` | ✅ | 手动发送区 (136 行) |
 | `components/OperationPanel/ParamsSection.tsx` | ✅ | 串口参数区 (137 行) |
@@ -116,10 +117,13 @@
 | 虚拟滚动 (`@tanstack/react-virtual`) | ✅ |
 | 真实文件导出 (TXT/CSV via `save()` + Rust 写盘) | ✅ |
 | GBK 解码 (encoding_rs) | ✅ |
-| 前端单元测试 (vitest, 96 cases / 4 files) | ✅ |
+| 前端单元测试 (vitest, 99 cases / 4 files) | ✅ |
 | 后端单元测试 (cargo test, 27 cases) | ✅ |
 | 协议解析器 | ✅ |
-| 多语言支持 | ⏳ |
+| 分屏嵌套 (VS Code 树状) | ✅ |
+| 字体缩放 (CSS 变量 + ParamsSection 滑块) | ✅ |
+| 背景图片 (主窗口应用) | ✅ |
+| 多语言支持 (i18n 基础设施 + 7/22 文件) | 🔄 |
 
 ## 重构 (2026-06)
 

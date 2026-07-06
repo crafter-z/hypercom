@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import type { DragEndEvent } from '@dnd-kit/core';
-import { useAppStore } from '../../../stores/useAppStore';
+import { useAppStore, findLeafByTabId, findLeafById } from '../../../stores/useAppStore';
 
 interface UseTabDragEndOptions {
   moveTabToPane: (tabId: string, paneId: string) => void;
@@ -34,45 +34,44 @@ export function useTabDragEnd(
 
     const state = useAppStore.getState();
 
-    // Find which panes the active and over targets belong to.
-    // The `over` might be a SortableContext tab (tab ID → lookup in pane.tabIds)
-    // or a useDroppable pane (pane ID → lookup in panes directly).
-    const activePane = state.panes.find(p => p.tabIds.includes(activeTabId));
-    let overPane = state.panes.find(p => p.tabIds.includes(overTabId));
-    if (!overPane) {
-      // Check if over is an empty pane's droppable (over.id == paneId)
-      overPane = state.panes.find(p => p.id === overTabId);
+    // Locate the active and over leaves in the pane tree.
+    // `over` may be a SortableContext tab (look up by tabId) or an empty
+    // pane's useDroppable (over.id == leaf id).
+    const activeLeaf = findLeafByTabId(state.paneTree, activeTabId);
+    let overLeaf = findLeafByTabId(state.paneTree, overTabId);
+    if (!overLeaf) {
+      overLeaf = findLeafById(state.paneTree, overTabId);
     }
 
-    if (!activePane || !overPane) return;
+    if (!activeLeaf || !overLeaf) return;
 
-    if (activePane.id === overPane.id) {
-      // Same pane — reorder within this pane's tabIds
-      const tabIds = [...activePane.tabIds];
+    if (activeLeaf.id === overLeaf.id) {
+      // Same leaf — reorder within this leaf's tabIds
+      const tabIds = [...activeLeaf.tabIds];
       const oldIdx = tabIds.indexOf(activeTabId);
       const newIdx = tabIds.indexOf(overTabId);
       if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
         tabIds.splice(oldIdx, 1);
         tabIds.splice(newIdx, 0, activeTabId);
-        reorderPaneTabIds(activePane.id, tabIds);
+        reorderPaneTabIds(activeLeaf.id, tabIds);
       }
     } else {
-      // Cross-pane — move tab to other pane
-      const targetIsEmpty = overPane.tabIds.length === 0;
-      moveTabToPane(activeTabId, overPane.id);
+      // Cross-pane — move tab to other leaf
+      const targetIsEmpty = overLeaf.tabIds.length === 0;
+      moveTabToPane(activeTabId, overLeaf.id);
       if (!targetIsEmpty) {
         // Zustand + immer `set` is synchronous: getState() here already
         // reflects the moveTabToPane mutation above — no deferral needed.
         const updated = useAppStore.getState();
-        const targetPane = updated.panes.find(p => p.id === overPane.id);
-        if (targetPane && targetPane.tabIds.includes(activeTabId)) {
-          const tabIds = [...targetPane.tabIds];
+        const targetLeaf = findLeafById(updated.paneTree, overLeaf.id);
+        if (targetLeaf && targetLeaf.tabIds.includes(activeTabId)) {
+          const tabIds = [...targetLeaf.tabIds];
           const oldIdx = tabIds.indexOf(activeTabId);
           const newIdx = tabIds.indexOf(overTabId);
           if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
             tabIds.splice(oldIdx, 1);
             tabIds.splice(newIdx, 0, activeTabId);
-            reorderPaneTabIds(overPane.id, tabIds);
+            reorderPaneTabIds(overLeaf.id, tabIds);
           }
         }
       }

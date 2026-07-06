@@ -139,6 +139,19 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive, isConnected
             <option value="RequestToSend">RTS/CTS</option><option value="RequestToSendXonXoff">RTS/CTS+Xon/Xoff</option>
           </select>
         </div>
+        <div className="op-param-item" style={{ gridColumn: '1 / -1' }}>
+          <span className="op-label">字号:</span>
+          <input
+            type="range"
+            min={8}
+            max={48}
+            step={1}
+            value={config.terminalFontSize}
+            onChange={e => useAppStore.getState().setConfig({ terminalFontSize: Number(e.target.value) })}
+            style={{ flex: 1, accentColor: 'var(--accent-color)' }}
+          />
+          <span style={{ fontSize: 11, minWidth: 36, textAlign: 'right' }}>{config.terminalFontSize}px</span>
+        </div>
       </div>
 
       <div className="op-checkbox-row" style={{ marginTop: 4 }}>
