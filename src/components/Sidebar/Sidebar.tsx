@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import type { SerialPort, PortGroup } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
@@ -36,41 +37,45 @@ const SidebarToolbar: React.FC<{
   onSortByPort: () => void;
   onSaveLayout: () => void;
 }> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort, onSaveLayout }) => {
+  const { t } = useTranslation();
   return (
     <div className="sidebar-toolbar">
-      <span className="sidebar-toolbar-title">串口管理</span>
+      <span className="sidebar-toolbar-title">{t('sidebar.toolbar.title')}</span>
       <div className="sidebar-toolbar-actions">
-        <button className="btn btn-icon btn-sm" title="一键打开全部" onClick={onOpenAll}><Play size={14} /></button>
-        <button className="btn btn-icon btn-sm" title="一键关闭全部" onClick={onCloseAll}><Square size={14} /></button>
+        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.openAll')} onClick={onOpenAll}><Play size={14} /></button>
+        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.closeAll')} onClick={onCloseAll}><Square size={14} /></button>
+        <span className="sidebar-toolbar-sep" />
         <button
           className={`btn btn-icon btn-sm${simulationMode ? ' active' : ''}`}
-          title={simulationMode ? '关闭模拟模式' : '开启模拟模式'}
+          title={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
           onClick={onToggleSimulation}
         >
           <FlaskConical size={14} />
         </button>
         <button
           className={`btn btn-icon btn-sm${showHidden ? ' active' : ''}`}
-          title={showHidden ? '隐藏已隐藏串口' : '显示已隐藏串口'}
+          title={showHidden ? t('sidebar.toolbar.hideHidden') : t('sidebar.toolbar.showHidden')}
           onClick={onToggleHidden}
         >
           {showHidden ? <Eye size={14} /> : <EyeOff size={14} />}
         </button>
-        <button className="btn btn-icon btn-sm" title="按端口号排序" onClick={onSortByPort}><ArrowUpDown size={14} /></button>
-        <button className="btn btn-icon btn-sm" title="保存布局" onClick={onSaveLayout}><Save size={14} /></button>
-        <button className="btn btn-icon btn-sm" title="刷新串口列表" onClick={onRefresh}><RefreshCw size={14} /></button>
+        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.sortByPort')} onClick={onSortByPort}><ArrowUpDown size={14} /></button>
+        <span className="sidebar-toolbar-sep" />
+        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.saveLayout')} onClick={onSaveLayout}><Save size={14} /></button>
+        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}><RefreshCw size={14} /></button>
       </div>
     </div>
   );
 };
 
 const SearchBox: React.FC<{ value: string; onChange: (v: string) => void }> = ({ value, onChange }) => {
+  const { t } = useTranslation();
   return (
     <div className="sidebar-search">
       <Search size={14} className="sidebar-search-icon" />
       <input
         className="sidebar-search-input"
-        placeholder="搜索串口..."
+        placeholder={t('sidebar.search.placeholder')}
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
@@ -102,6 +107,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
   onHidePort,
   onShowPort,
 }) => {
+  const { t } = useTranslation();
   const { show, element } = useContextMenu();
   const {
     attributes,
@@ -122,26 +128,26 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     disconnected: 'var(--status-disconnected)',
     error: 'var(--status-error)',
     connected: 'var(--status-connected)',
-    connecting: 'var(--status-disconnected)',
+    connecting: 'var(--status-connecting)',
   }[port.status] || 'var(--status-disconnected)';
 
   const statusLabel: Record<string, string> = {
-    disconnected: '未连接',
-    error: '错误',
-    connected: '已连接',
-    connecting: '连接中',
+    disconnected: t('sidebar.port.status.disconnected'),
+    error: t('sidebar.port.status.error'),
+    connected: t('sidebar.port.status.connected'),
+    connecting: t('sidebar.port.status.connecting'),
   };
   const label = statusLabel[port.status] || port.status;
 
   const items: ContextMenuEntry[] = [
-    { label: isConnected ? '断开连接' : '连接串口', icon: isConnected ? <Unplug size={14} /> : <PlugZap size={14} />, onClick: () => onToggleConnect(port.id) },
+    { label: isConnected ? t('sidebar.port.contextMenu.disconnect') : t('sidebar.port.contextMenu.connect'), icon: isConnected ? <Unplug size={14} /> : <PlugZap size={14} />, onClick: () => onToggleConnect(port.id) },
     { type: 'separator' },
-    { label: '设置备注名', icon: <Pencil size={14} />, onClick: () => onSetAlias(port.id) },
-    { label: '在标签页中打开', icon: <ExternalLink size={14} />, onClick: () => onOpenTab(port.id) },
+    { label: t('sidebar.port.contextMenu.setAlias'), icon: <Pencil size={14} />, onClick: () => onSetAlias(port.id) },
+    { label: t('sidebar.port.contextMenu.openInTab'), icon: <ExternalLink size={14} />, onClick: () => onOpenTab(port.id) },
     { type: 'separator' },
     port.isHidden
-      ? { label: '取消隐藏', icon: <Eye size={14} />, onClick: () => onShowPort(port.id) }
-      : { label: '隐藏此串口', icon: <EyeOff size={14} />, onClick: () => onHidePort(port.id) },
+      ? { label: t('sidebar.port.contextMenu.unhide'), icon: <Eye size={14} />, onClick: () => onShowPort(port.id) }
+      : { label: t('sidebar.port.contextMenu.hide'), icon: <EyeOff size={14} />, onClick: () => onHidePort(port.id) },
   ];
 
   return (
@@ -173,7 +179,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
         </div>
         <button
           className={`btn btn-icon btn-sm port-connect-btn${isConnected ? ' connected' : ''}`}
-          title={isConnected ? '断开连接' : '连接串口'}
+          title={isConnected ? t('sidebar.port.connectBtn.disconnect') : t('sidebar.port.connectBtn.connect')}
           onClick={(e) => { e.stopPropagation(); onToggleConnect(port.id); }}
         >
           {isConnected ? <Square size={12} /> : <Play size={12} />}
@@ -209,6 +215,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
   onHidePort,
   onShowPort,
 }) => {
+  const { t } = useTranslation();
   const groupPorts = ports.filter(p => group.portIds.includes(p.id));
   const connectedCount = groupPorts.filter(p => p.status === 'connected').length;
   const [isRenaming, setIsRenaming] = useState(false);
@@ -247,8 +254,8 @@ const GroupItem: React.FC<GroupItemProps> = ({
   };
 
   const groupMenuItems: ContextMenuEntry[] = [
-    { label: '重命名分组', icon: <Pencil size={14} />, onClick: () => { setRenameValue(group.name); setIsRenaming(true); } },
-    { label: '删除分组', icon: <Trash2 size={14} />, onClick: () => onRemoveGroup(group.id) },
+    { label: t('sidebar.group.contextMenu.rename'), icon: <Pencil size={14} />, onClick: () => { setRenameValue(group.name); setIsRenaming(true); } },
+    { label: t('sidebar.group.contextMenu.delete'), icon: <Trash2 size={14} />, onClick: () => onRemoveGroup(group.id) },
   ];
 
   const portIds = useMemo(() => groupPorts.map(p => p.id), [groupPorts]);
@@ -286,21 +293,21 @@ const GroupItem: React.FC<GroupItemProps> = ({
           <span
             className="port-group-name"
             onDoubleClick={handleStartRename}
-            title="双击重命名"
+            title={t('sidebar.group.doubleClickRename')}
           >
             {group.name}
           </span>
         )}
         <span className="port-group-count">{connectedCount}/{groupPorts.length}</span>
-        <button className="btn btn-icon btn-sm" title="一键连接整组" onClick={handleConnectAll}>
+        <button className="btn btn-icon btn-sm" title={t('sidebar.group.connectAll')} onClick={handleConnectAll}>
           <Play size={10} />
         </button>
-        <button className="btn btn-icon btn-sm" title="一键断开整组" onClick={handleDisconnectAll}>
+        <button className="btn btn-icon btn-sm" title={t('sidebar.group.disconnectAll')} onClick={handleDisconnectAll}>
           <Square size={10} />
         </button>
         <button
           className="btn btn-icon btn-sm"
-          title="删除分组"
+          title={t('sidebar.group.delete')}
           onClick={(e) => { e.stopPropagation(); onRemoveGroup(group.id); }}
         >
           <Trash2 size={10} />
@@ -330,6 +337,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
 };
 
 const Sidebar: React.FC = () => {
+  const { t } = useTranslation();
   const ports = useAppStore((s) => s.ports);
   const groups = useAppStore((s) => s.groups);
   const openTab = useAppStore((s) => s.openTab);
@@ -379,8 +387,8 @@ const Sidebar: React.FC = () => {
 
   const handleAddGroup = useCallback(() => {
     const id = `group-${Date.now()}`;
-    addGroup({ id, name: '新建分组', isExpanded: true, portIds: [], order: groups.length });
-  }, [addGroup, groups.length]);
+    addGroup({ id, name: t('sidebar.addGroup.defaultName'), isExpanded: true, portIds: [], order: groups.length });
+  }, [addGroup, groups.length, t]);
 
   const handleRenameGroup = useCallback((groupId: string, name: string) => {
     updateGroup(groupId, { name });
@@ -466,7 +474,7 @@ const Sidebar: React.FC = () => {
 
           {ungroupedPorts.length > 0 && (
             <div className="sidebar-section">
-              <div className="sidebar-section-header">未分组</div>
+              <div className="sidebar-section-header">{t('sidebar.section.ungrouped')}</div>
               <SortableContext items={ungroupedIds} strategy={verticalListSortingStrategy}>
                 {ungroupedPorts.map(port => (
                   <SortablePortItem
@@ -487,7 +495,7 @@ const Sidebar: React.FC = () => {
 
         {showHidden && ports.filter(p => p.isHidden).length > 0 && (
           <div className="sidebar-section">
-            <div className="sidebar-section-header">已隐藏</div>
+            <div className="sidebar-section-header">{t('sidebar.section.hidden')}</div>
             {ports.filter(p => p.isHidden).map(port => (
               <SortablePortItem
                 key={port.id}
@@ -506,7 +514,7 @@ const Sidebar: React.FC = () => {
         <div className="sidebar-add-group">
           <button className="btn sidebar-add-group-btn" onClick={handleAddGroup}>
             <Plus size={14} />
-            新建分组
+            {t('sidebar.addGroup.button')}
           </button>
         </div>
       </div>

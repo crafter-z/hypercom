@@ -32,17 +32,17 @@ const StatusBar: React.FC = () => {
     <div className="statusbar">
       <div className="statusbar-left">
         <span className="statusbar-item">
-          <span className="statusbar-dot" />
+          <span className={systemStatus.status === 'high_load' ? 'statusbar-dot warning' : 'statusbar-dot'} />
           {systemStatus.status === 'high_load' ? t('statusBar.highLoad') : t('statusBar.normal')}
         </span>
         {connectedCount > 0 && (
-          <span className="statusbar-item" style={{ color: 'var(--status-connected)' }}>
+          <span className="statusbar-item statusbar-connected">
             <PlugZap size={12} />
             {t('statusBar.connectedCount', { count: connectedCount })}
           </span>
         )}
         {activeTabId && (
-          <span className="statusbar-item" style={{ opacity: 0.9 }}>{activeTabId}</span>
+          <span className="statusbar-item statusbar-value">{activeTabId}</span>
         )}
         <span className="statusbar-item">
           <MemoryStick size={12} />
@@ -67,9 +67,9 @@ const StatusBar: React.FC = () => {
             </span>
           </>
         ) : (
-          <span className="statusbar-item" style={{ opacity: 0.7 }}>{t('statusBar.noPortSelected')}</span>
+          <span className="statusbar-item">{t('statusBar.noPortSelected')}</span>
         )}
-        <span className="statusbar-item" style={{ opacity: 0.8 }}>
+        <span className="statusbar-item">
           {now.toLocaleTimeString(i18n.language === 'en-US' ? 'en-US' : 'zh-CN')}
         </span>
       </div>

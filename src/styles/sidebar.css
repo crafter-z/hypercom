@@ -19,7 +19,7 @@
 
 .sidebar-resize-handle:hover,
 .sidebar-resize-handle.dragging {
-  background: var(--bg-active);
+  background: var(--accent-color);
 }
 
 .sidebar-toolbar {
@@ -40,6 +40,15 @@
 .sidebar-toolbar-actions {
   display: flex;
   gap: 2px;
+  align-items: center;
+}
+
+.sidebar-toolbar-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border-color);
+  margin: 0 4px;
+  flex-shrink: 0;
 }
 
 .sidebar-search {
@@ -70,7 +79,7 @@
 }
 
 .sidebar-search-input:focus {
-  border-color: var(--bg-active);
+  border-color: var(--accent-color);
 }
 
 .sidebar-search-input::placeholder {

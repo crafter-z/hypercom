@@ -6,12 +6,15 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialSend, useSerialConnection } from '../../hooks/useTauri';
 import { serialService } from '../../services/tauri';
 import { ChevronDown, ChevronUp } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
 import RulesSection from './RulesSection';
 import ParamsSection from './ParamsSection';
+import ViewStrip from './ViewStrip';
 import { useCyclicSend } from './hooks/useCyclicSend';
 
 const OperationPanel: React.FC = () => {
+  const { t } = useTranslation();
   const activeTabId = useAppStore(s => s.activeTabId);
   const collapsed = useAppStore(s => s.ui.isOperationPanelCollapsed);
   const baudRate = useOperationStore(s => s.baudRate);
@@ -113,7 +116,7 @@ const OperationPanel: React.FC = () => {
           ) : (
             <ChevronDown size={12} style={{ transition: 'transform 0.2s' }} />
           )}
-          <span className="operation-panel-title">操作面板</span>
+          <span className="operation-panel-title">{t('operationPanel.title')}</span>
           {isPortActive && (
             <span className="operation-panel-port">{activeTabId}</span>
           )}
@@ -121,7 +124,7 @@ const OperationPanel: React.FC = () => {
         {!collapsed && (
           <button
             className="btn btn-icon btn-sm"
-            title="收起"
+            title={t('operationPanel.collapse')}
             onClick={e => { e.stopPropagation(); toggleCollapse(); }}
           >
             <ChevronDown size={14} />
@@ -130,21 +133,22 @@ const OperationPanel: React.FC = () => {
       </div>
 
       {!collapsed && (
-        <div className="operation-panel-content">
-          <SendSection
-            activeTabId={activeTabId}
-            isPortActive={isPortActive}
-            isConnected={isConnected}
-            isConnecting={isConnecting}
-            isPortError={isPortError}
-            sendData={sendData}
-            toggleConnection={toggleConnection}
-          />
-          <div className="divider" style={{ margin: '0 4px' }} />
-          <RulesSection isPortActive={isPortActive} isConnected={isConnected} />
-          <div className="divider" style={{ margin: '0 4px' }} />
-          <ParamsSection isPortActive={isPortActive} isConnected={isConnected} activeTabId={activeTabId} />
-        </div>
+        <>
+          <ViewStrip isPortActive={isPortActive} activeTabId={activeTabId} />
+          <div className="operation-panel-content">
+            <SendSection
+              activeTabId={activeTabId}
+              isPortActive={isPortActive}
+              isConnected={isConnected}
+              isConnecting={isConnecting}
+              isPortError={isPortError}
+              sendData={sendData}
+              toggleConnection={toggleConnection}
+            />
+            <RulesSection isPortActive={isPortActive} isConnected={isConnected} />
+            <ParamsSection isConnected={isConnected} />
+          </div>
+        </>
       )}
     </div>
   );

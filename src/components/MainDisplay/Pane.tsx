@@ -6,7 +6,7 @@ import { useSerialConnection } from '../../hooks/useTauri';
 import type { Encoding } from '../../types';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
-import { X } from 'lucide-react';
+import { X, Cable } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
 
 interface PaneProps {
@@ -155,9 +155,9 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
         <div
           ref={isMultiPane ? setDropRef : undefined}
           className={`terminal-empty-state${isDropOver ? ' drop-active' : ''}`}
-          style={{ flex: 1, flexDirection: 'column', gap: 8 }}
         >
-          <span style={{ opacity: 0.7 }}>
+          <Cable size={30} strokeWidth={1.5} className="empty-state-icon" />
+          <span className="empty-state-text">
             {isDropOver ? t('pane.emptyState.dropToMove') : isMultiPane ? t('pane.emptyState.dropOrDoubleClick') : t('pane.emptyState.doubleClick')}
           </span>
           {isMultiPane && (

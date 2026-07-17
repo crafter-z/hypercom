@@ -101,7 +101,7 @@ const resources = {
       'sendSection.connectBtn.connecting': '连接中...',
       'sendSection.connectBtn.retry': '重试连接',
       'sendSection.connectBtn.open': '打开串口',
-      'sendSection.cardTitle': '发送命令 & 基础控制',
+      'sendSection.cardTitle': '发送命令',
       'sendSection.input.placeholder.active': '输入发送内容...',
       'sendSection.input.placeholder.noPort': '未选择串口',
       'sendSection.sendButton': '发送',
@@ -112,7 +112,7 @@ const resources = {
       'sendSection.lineEnding.none': '无',
       'sendSection.clearButton': '清屏',
 
-      'paramsSection.cardTitle': '视图 & 日志 & 参数',
+      'paramsSection.cardTitle': '串口参数',
       'paramsSection.scrollLock': '滚动锁定',
       'paramsSection.timestamp': '时间戳',
       'paramsSection.displayLabel': '显示:',
@@ -134,7 +134,7 @@ const resources = {
       'paramsSection.saveDialog.title': '另存日志',
       'paramsSection.saveDialog.filterName': '日志文件',
 
-      'rulesSection.cardTitle': '循环发送 & 规则',
+      'rulesSection.cardTitle': '循环发送',
       'rulesSection.highlightLabel': '高亮规则:',
       'rulesSection.highlightDefault': '默认',
       'rulesSection.editHighlight': '编辑高亮规则',
@@ -146,8 +146,8 @@ const resources = {
       'rulesSection.intervalLabel': '间隔:',
       'rulesSection.intervalUnit': 'ms',
 
-      'statusBar.highLoad': '⚠ 高负载',
-      'statusBar.normal': '● 运行正常',
+      'statusBar.highLoad': '高负载',
+      'statusBar.normal': '运行正常',
       'statusBar.connectedCount': '{{count}} 已连接',
       'statusBar.noPortSelected': '未选择串口',
 
@@ -399,7 +399,7 @@ const resources = {
       'sendSection.connectBtn.connecting': 'Connecting...',
       'sendSection.connectBtn.retry': 'Retry',
       'sendSection.connectBtn.open': 'Open Port',
-      'sendSection.cardTitle': 'Send Commands & Basic Control',
+      'sendSection.cardTitle': 'Send',
       'sendSection.input.placeholder.active': 'Enter content to send...',
       'sendSection.input.placeholder.noPort': 'No port selected',
       'sendSection.sendButton': 'Send',
@@ -410,7 +410,7 @@ const resources = {
       'sendSection.lineEnding.none': 'None',
       'sendSection.clearButton': 'Clear',
 
-      'paramsSection.cardTitle': 'View & Log & Parameters',
+      'paramsSection.cardTitle': 'Serial Parameters',
       'paramsSection.scrollLock': 'Scroll Lock',
       'paramsSection.timestamp': 'Timestamp',
       'paramsSection.displayLabel': 'Display:',
@@ -432,7 +432,7 @@ const resources = {
       'paramsSection.saveDialog.title': 'Save Log As',
       'paramsSection.saveDialog.filterName': 'Log Files',
 
-      'rulesSection.cardTitle': 'Loop Send & Rules',
+      'rulesSection.cardTitle': 'Loop Send',
       'rulesSection.highlightLabel': 'Highlight Rules:',
       'rulesSection.highlightDefault': 'Default',
       'rulesSection.editHighlight': 'Edit Highlight Rules',
@@ -444,8 +444,8 @@ const resources = {
       'rulesSection.intervalLabel': 'Interval:',
       'rulesSection.intervalUnit': 'ms',
 
-      'statusBar.highLoad': '⚠ High Load',
-      'statusBar.normal': '● Normal',
+      'statusBar.highLoad': 'High Load',
+      'statusBar.normal': 'Normal',
       'statusBar.connectedCount': '{{count}} Connected',
       'statusBar.noPortSelected': 'No port selected',
 

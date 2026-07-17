@@ -1,13 +1,14 @@
 /* ==================== Statusbar ==================== */
 .statusbar {
   height: var(--statusbar-height);
-  background: var(--bg-statusbar);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 12px;
   font-size: 12px;
-  color: #ffffff;
+  color: var(--text-secondary);
   flex-shrink: 0;
 }
 
@@ -22,19 +23,33 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  font-variant-numeric: tabular-nums;  /* stop clock/percentage jitter */
 }
 
 .statusbar-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #4ec9b0;
+  background: var(--status-connected);
+  flex-shrink: 0;
+}
+
+.statusbar-dot.warning {
+  background: var(--text-warning);
+}
+
+.statusbar-connected {
+  color: var(--status-connected);
+}
+
+.statusbar-value {
+  color: var(--text-primary);
 }
 
 .statusbar-tx {
-  color: #4ec9b0;
+  color: var(--terminal-tx-color);
 }
 
 .statusbar-rx {
-  color: #4fc1ff;
+  color: var(--terminal-rx-color);
 }

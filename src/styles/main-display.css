@@ -32,7 +32,7 @@
 }
 
 .pane-container-inner.pane-focused {
-  outline: 1px solid var(--bg-active);
+  outline: 1px solid var(--accent-color);
   outline-offset: -1px;
 }
 
@@ -46,5 +46,5 @@
 
 .pane-resize-handle:hover,
 .pane-resize-handle.dragging {
-  background: var(--bg-active) !important;
+  background: var(--accent-color) !important;
 }

@@ -79,23 +79,27 @@
 .terminal-empty-state {
   flex: 1;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .terminal-empty-state.drop-active {
   background: var(--bg-active);
-  color: var(--text-active);
+  color: var(--accent-color);
   outline: 2px dashed var(--accent-color, #4fc3f7);
   outline-offset: -4px;
 }
 
-/* Terminal-specific: always visible scrollbar */
-.terminal-view::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
+.empty-state-icon {
+  color: var(--text-secondary);
+  opacity: 0.4;
 }
-.terminal-view::-webkit-scrollbar-thumb {
-  background: #5a5a5a;
+
+.empty-state-text {
+  font-size: 13px;
+  color: var(--text-secondary);
 }

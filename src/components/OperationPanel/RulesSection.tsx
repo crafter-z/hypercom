@@ -3,6 +3,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { Settings, Edit3, Play, Square } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export interface RulesSectionProps {
   isPortActive: boolean;
@@ -10,6 +11,7 @@ export interface RulesSectionProps {
 }
 
 const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }) => {
+  const { t } = useTranslation();
   const isLoopSending = useOperationStore(s => s.isLoopSending);
   const loopInterval = useOperationStore(s => s.loopInterval);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
@@ -43,38 +45,38 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
 
   return (
     <div className="op-section op-section-rules">
-      <div className="panel-card-title">循环发送 & 规则</div>
+      <div className="panel-card-title">{t('rulesSection.cardTitle')}</div>
 
       <div className="op-rule-row">
-        <span className="op-label">高亮规则:</span>
+        <span className="op-label">{t('rulesSection.highlightLabel')}</span>
         <select
           className="select op-rule-select"
           value={activeHighlightSetId || ''}
           onChange={e => setActiveHighlightSetId(e.target.value || null)}
         >
-          <option value="">默认</option>
+          <option value="">{t('rulesSection.highlightDefault')}</option>
           {highlightRuleSets.map(s => (
             <option key={s.id} value={s.id}>{s.name}</option>
           ))}
         </select>
-        <button className="btn btn-icon btn-sm" title="编辑高亮规则" onClick={() => openConfigToTab('highlight')}>
+        <button className="btn btn-icon btn-sm" title={t('rulesSection.editHighlight')} onClick={() => openConfigToTab('highlight')}>
           <Settings size={12} />
         </button>
       </div>
 
       <div className="op-rule-row">
-        <span className="op-label">命令集:</span>
+        <span className="op-label">{t('rulesSection.commandSetLabel')}</span>
         <select
           className="select op-rule-select"
           value={activeSendCommandSetId || ''}
           onChange={e => setActiveSendCommandSetId(e.target.value || null)}
         >
-          <option value="">无</option>
+          <option value="">{t('rulesSection.commandSetNone')}</option>
           {sendCommandSets.map(s => (
             <option key={s.id} value={s.id}>{s.name}</option>
           ))}
         </select>
-        <button className="btn btn-icon btn-sm" title="编辑发送命令" onClick={() => openConfigToTab('commands')}>
+        <button className="btn btn-icon btn-sm" title={t('rulesSection.editCommands')} onClick={() => openConfigToTab('commands')}>
           <Edit3 size={12} />
         </button>
       </div>
@@ -82,12 +84,12 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
       <div className="op-loop-row">
         {!isLoopSending ? (
           <button
-            className="btn btn-primary"
+            className="btn"
             style={{ flex: 1 }}
             disabled={!isPortActive || !activeSendCommandSetId || !isConnected}
             onClick={handleToggleLoop}
           >
-            <Play size={13} /> 开始循环
+            <Play size={13} /> {t('rulesSection.startLoop')}
           </button>
         ) : (
           <button
@@ -95,11 +97,11 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
             style={{ flex: 1 }}
             onClick={handleToggleLoop}
           >
-            <Square size={13} /> 停止发送
+            <Square size={13} /> {t('rulesSection.stopLoop')}
           </button>
         )}
         <div className="op-delay-input">
-          <span className="op-label">间隔:</span>
+          <span className="op-label">{t('rulesSection.intervalLabel')}</span>
           <input
             className="input"
             type="number"
@@ -109,7 +111,7 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
             min={10}
             step={10}
           />
-          <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>ms</span>
+          <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{t('rulesSection.intervalUnit')}</span>
         </div>
       </div>
     </div>

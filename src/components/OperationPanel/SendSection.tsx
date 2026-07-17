@@ -2,6 +2,7 @@ import React, { useRef } from 'react';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { Send, Cable, Eraser } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { LineEnding } from '../../types';
 
 export interface SendSectionProps {
@@ -23,6 +24,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   sendData,
   toggleConnection,
 }) => {
+  const { t } = useTranslation();
   const sendInput = useOperationStore(s => s.sendInput);
   const sendIsHex = useOperationStore(s => s.sendIsHex);
   const sendAppendLineEnding = useOperationStore(s => s.sendAppendLineEnding);
@@ -32,13 +34,14 @@ const SendSection: React.FC<SendSectionProps> = ({
   const sendHistoryRef = useRef<{ history: string[]; index: number }>({ history: [], index: -1 });
 
   const connectButtonLabel = isConnected
-    ? '断开串口'
+    ? t('sendSection.connectBtn.disconnect')
     : isConnecting
-    ? '连接中...'
+    ? t('sendSection.connectBtn.connecting')
     : isPortError
-    ? '重试连接'
-    : '打开串口';
+    ? t('sendSection.connectBtn.retry')
+    : t('sendSection.connectBtn.open');
   const connectButtonDisabled = !isPortActive || isConnecting;
+  const showAccent = isPortActive && !isConnected && !isConnecting;
 
   const handleSend = async () => {
     if (!isPortActive || !sendInput.trim()) return;
@@ -63,12 +66,12 @@ const SendSection: React.FC<SendSectionProps> = ({
 
   return (
     <div className="op-section op-section-send">
-      <div className="panel-card-title">发送命令 & 基础控制</div>
+      <div className="panel-card-title">{t('sendSection.cardTitle')}</div>
 
       <div className="op-send-row">
         <textarea
           className="input op-send-input"
-          placeholder={isPortActive ? '输入发送内容...' : '未选择串口'}
+          placeholder={isPortActive ? t('sendSection.input.placeholder.active') : t('sendSection.input.placeholder.noPort')}
           disabled={!isPortActive}
           value={sendInput}
           onChange={e => setOpState({ sendInput: e.target.value })}
@@ -107,7 +110,7 @@ const SendSection: React.FC<SendSectionProps> = ({
             onClick={handleSend}
           >
             <Send size={14} />
-            发送
+            {t('sendSection.sendButton')}
           </button>
           <div className="op-send-options">
             <label className="checkbox-wrapper" style={{ fontSize: 10 }}>
@@ -124,21 +127,31 @@ const SendSection: React.FC<SendSectionProps> = ({
               value={sendAppendLineEnding}
               onChange={e => setOpState({ sendAppendLineEnding: e.target.value as LineEnding })}
             >
-              <option value="\\r\\n">\r\n</option>
-              <option value="\\r">\r</option>
-              <option value="\\n">\n</option>
-              <option value="None">无</option>
+              <option value="\\r\\n">{t('sendSection.lineEnding.crlf')}</option>
+              <option value="\\r">{t('sendSection.lineEnding.cr')}</option>
+              <option value="\\n">{t('sendSection.lineEnding.lf')}</option>
+              <option value="None">{t('sendSection.lineEnding.none')}</option>
             </select>
           </div>
         </div>
       </div>
 
       <div className="op-btn-row">
-        <button className="btn" style={{ flex: 1 }} onClick={handleToggleConnection} disabled={connectButtonDisabled}>
+        <button
+          className={`btn${showAccent ? ' op-connect-accent' : ''}`}
+          style={{ flex: 1 }}
+          onClick={handleToggleConnection}
+          disabled={connectButtonDisabled}
+        >
           <Cable size={13} /> {connectButtonLabel}
         </button>
-        <button className="btn" title="清屏" onClick={handleClear} disabled={!isPortActive}>
-          <Eraser size={13} /> 清屏
+        <button
+          className="btn"
+          title={t('sendSection.clearButton')}
+          onClick={handleClear}
+          disabled={!isPortActive}
+        >
+          <Eraser size={13} /> {t('sendSection.clearButton')}
         </button>
       </div>
     </div>

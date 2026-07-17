@@ -29,7 +29,7 @@
 
 .context-menu-item:hover {
   background: var(--bg-active);
-  color: var(--text-active);
+  color: var(--text-primary);
 }
 
 .context-menu-item.danger {

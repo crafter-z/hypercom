@@ -186,12 +186,6 @@ const MainDisplay: React.FC = () => {
           ) : null}
         </DragOverlay>
       </DndContext>
-
-      {leafCount <= 1 && tabs.length === 0 && (
-        <div className="terminal-empty-state" style={{ flex: 1 }}>
-          {t('mainDisplay.emptyState')}
-        </div>
-      )}
     </div>
   );
 };
