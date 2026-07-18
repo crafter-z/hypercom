@@ -1,4 +1,86 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE — HyperCom
+
+**Generated:** 2026-07-18 · **Commit:** ea75456 (main) · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + sqlx + serialport)
+
+## OVERVIEW
+
+HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 8 lifecycle-disciplined hooks own the Tauri bridge. Backend commands split into 6 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Decorations disabled — custom TitleBar drives window controls.
+
+## STRUCTURE
+
+```
+hypercom/
+├── src/                          # React frontend
+│   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
+│   ├── i18n.ts                   # i18next + react-i18next, 218 keys × zh-CN/en-US
+│   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
+│   ├── hooks/useTauri.ts         # 8 lifecycle-critical hooks (456 lines)
+│   ├── stores/                   # 4 Zustand + Immer stores (no god store)
+│   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
+│   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix)
+│   │   ├── useTerminalStore.ts   # terminal buffer + appendTerminalLine
+│   │   └── useRuleStore.ts       # highlight + send-command rule sets + CRUD
+│   ├── utils/                    # highlightEngine / protocolParser / hexUtils + their tests
+│   ├── types/index.ts            # shared TS types
+│   └── components/               # MainDisplay / ConfigModal / OperationPanel / Sidebar / TitleBar / StatusBar / shared
+├── src-tauri/src/                # Rust backend
+│   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
+│   ├── system.rs                 # win32_power FFI (SetThreadExecutionState)
+│   ├── commands/                 # 6 domain files + mod.rs (CommandError enum + re-exports)
+│   ├── serial/mod.rs             # serialport + SIM:Loopback virtual port (505 lines)
+│   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
+│   ├── storage/mod.rs            # SQLite via sqlx (6 tables), largest backend file (785 lines)
+│   └── config/mod.rs             # JSON config persistence
+└── plans/                        # 10 design docs (see "Key files to read first" below)
+```
+
+## WHERE TO LOOK
+
+| Task | Location | Notes |
+|------|----------|-------|
+| Add frontend state field | `src/stores/use{App,Operation,Terminal,Rule}Store.ts` | pick correct store only; god store is deprecated |
+| Add Tauri command | `src-tauri/src/commands/<domain>.rs` + register in `lib.rs` | return `Result<T, CommandError>`, NOT `String` |
+| Cross `.await` lock | extract + clone + drop the `MutexGuard` first | see pattern in `commands/log.rs` |
+| Add serial hook | `src/hooks/useTauri.ts` | follow 8-hook lifecycle; do not revive `useSerialData`-style |
+| Split pane recursively | `useAppStore.splitPane` action via tree helpers | NO flat `state.panes` anywhere |
+| Pane tree traversal | module-top exports in `useAppStore.ts` (`findLeafById` … `countLeaves`) | do not hand-roll tree walks |
+| Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
+| ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; SQLite via `storageService` |
+| Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState` |
+| Win32 power | `src-tauri/src/system.rs` `win32_power` module | `prevent_sleep` / `prevent_screen_off` |
+| Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` | serial_data carries UTF-8 bytes |
+| Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
+| Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
+
+## CODE MAP
+
+Frontend (manual review; TypeScript LSP unavailable in this environment):
+
+| Symbol | File | Type | Role |
+|--------|------|------|------|
+| `useAppStore` | `src/stores/useAppStore.ts:248` | Zustand store | tabs / ports / `paneTree` / config / groups |
+| `useOperationStore` | `src/stores/useOperationStore.ts:35` | Zustand store | serial params + send (NO `op` prefix) |
+| `useTerminalStore` | `src/stores/useTerminalStore.ts:20` | Zustand store | line buffer + `appendTerminalLine` |
+| `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
+| `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
+| `useSerialReceive` (212) / `useSerialSend` (327) / `useSerialConnection` (142) / `useAppInit` (438) / `useSerialPorts` (115) / `useSystemStatus` (410) / `useConfigPersistence` (369) / `useSimulation` (474) | `src/hooks/useTauri.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
+| `tauri` service modules | `src/services/tauri.ts` | service | wrapped `invoke` calls (6 modules) |
+
+Backend:
+
+| Symbol | File | Type | Role |
+|--------|------|------|------|
+| `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/Storage/System/Lock/Io/Other; manual `serde::Serialize` |
+| All Tauri commands (6 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| `StorageManager` + row structs (`PortGroupRow` `:18` … `ProtocolTemplateRow` `:69`) | `src-tauri/src/storage/mod.rs` | struct / models | SQLite pool; 6 tables — see `src-tauri/src/storage/AGENTS.md` |
+| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `storage_manager` / `logger` behind `std::sync::Mutex` |
+| `win32_power` | `src-tauri/src/system.rs` | mod | `SetThreadExecutionState` FFI |
+
+Subdir guides: [`src/stores/AGENTS.md`](src/stores/AGENTS.md) · [`src/hooks/AGENTS.md`](src/hooks/AGENTS.md) · [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md) · [`src-tauri/src/storage/AGENTS.md`](src-tauri/src/storage/AGENTS.md) · [`src/components/MainDisplay/AGENTS.md`](src/components/MainDisplay/AGENTS.md) · [`src/components/ConfigModal/AGENTS.md`](src/components/ConfigModal/AGENTS.md) · [`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md)
+
+---
+
+## Detailed gotchas
 
 ## Build & verify
 
