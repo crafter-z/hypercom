@@ -1,0 +1,113 @@
+/**
+ * First-run tour overlay.
+ * z-index 11000 — above toast (10000) and context menu (10000) on purpose:
+ * the tour owns the screen until dismissed.
+ */
+
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 11000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  animation: fadeIn 0.2s ease;
+}
+
+.tour-modal {
+  width: 400px;
+  max-width: calc(100vw - 48px);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: slideUp 0.25s ease;
+}
+
+.tour-accent-bar {
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent-color), var(--accent-emphasis));
+}
+
+/* 终端字体小字眉题 —— 串口工具的工程师气质 */
+.tour-welcome {
+  padding: 18px 24px 0;
+  font-family: var(--font-terminal);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.tour-body {
+  padding: 14px 24px 18px;
+  animation: slideUp 0.25s ease;
+}
+
+.tour-step-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-emphasis);
+  background: var(--bg-active);
+  color: var(--accent-color);
+}
+
+.tour-step-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-active);
+  margin-bottom: 6px;
+}
+
+.tour-step-body {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.tour-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 24px 18px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.tour-dots {
+  display: flex;
+  gap: 6px;
+}
+
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-color);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.tour-dot.active {
+  background: var(--accent-color);
+  transform: scale(1.3);
+}
+
+.tour-counter {
+  font-family: var(--font-terminal);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.tour-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}

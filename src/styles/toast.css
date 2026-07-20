@@ -1,0 +1,117 @@
+/**
+ * Toast notification styles.
+ * Uses CSS variables from base.css (--bg-*, --text-*, --border-color,
+ * --shadow-*, --border-radius, --transition-*) so it follows the dark/light
+ * theme automatically.
+ */
+
+.toast-container {
+  position: fixed;
+  right: 12px;
+  /* Sit above the StatusBar (--statusbar-height = 24px) with a small gap. */
+  bottom: calc(var(--statusbar-height) + 8px);
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  z-index: 10000;
+  max-width: 360px;
+  /* Let empty areas pass clicks through; individual toasts re-enable. */
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--border-radius);
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+  font-size: var(--font-size-ui);
+  line-height: 1.4;
+  /* Slide-in + fade-in; matches the existing slideUp keyframe direction. */
+  animation: toast-in 0.2s ease;
+  overflow: hidden;
+}
+
+.toast-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.toast-message {
+  flex: 1;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.toast-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.toast-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.toast-close:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+/* Severity accents: a left border + tinted icon color. */
+.toast-info {
+  border-left: 3px solid var(--accent-color);
+}
+.toast-info .toast-icon {
+  color: var(--accent-color);
+}
+
+.toast-success {
+  border-left: 3px solid var(--text-success);
+}
+.toast-success .toast-icon {
+  color: var(--text-success);
+}
+
+.toast-warning {
+  border-left: 3px solid var(--text-warning);
+}
+.toast-warning .toast-icon {
+  color: var(--text-warning);
+}
+
+.toast-error {
+  border-left: 3px solid var(--text-error);
+}
+.toast-error .toast-icon {
+  color: var(--text-error);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
