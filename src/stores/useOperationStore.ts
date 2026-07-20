@@ -26,6 +26,8 @@ interface OperationState {
   sendIsHex: boolean;
   sendAppendLineEnding: LineEnding;
   sendInput: string;
+  sendOnEnter: boolean;
+  quickSendSlots: (string | null)[];
   isLoopSending: boolean;
   loopInterval: number;
 
@@ -49,6 +51,8 @@ export const useOperationStore = create<OperationState>()(
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
+    sendOnEnter: true,
+    quickSendSlots: [null, null, null, null, null],
     isLoopSending: false,
     loopInterval: 500,
 

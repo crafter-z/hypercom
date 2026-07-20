@@ -51,6 +51,9 @@ export type Encoding = 'ASCII' | 'UTF-8' | 'GBK' | 'ISO-8859-1';
 /** 显示格式 */
 export type DisplayFormat = 'string' | 'hex' | 'binary';
 
+/** 时间戳格式 */
+export type TimestampFormat = 'absolute' | 'relative' | 'uptime';
+
 // ==================== 分组相关 ====================
 
 /** 串口分组 */
@@ -126,6 +129,7 @@ export interface TerminalState {
   showTimestamp: boolean;
   displayFormat: DisplayFormat;
   encoding: Encoding;
+  connectedAt: number | null; // 端口连接成功时间戳 (ms)
 }
 
 // ==================== 高亮规则相关 ====================
@@ -212,7 +216,11 @@ export interface AppConfig {
   theme: 'light' | 'dark' | 'system';
   preventScreenOff: boolean;
   preventSleep: boolean;
-  
+
+  // 自动重连设置
+  autoReconnect: boolean;
+  maxRetries: number;
+
   // 字体设置
   terminalFont: string;
   terminalFontSize: number;
@@ -225,9 +233,12 @@ export interface AppConfig {
   defaultLineEnding: LineEnding;
   sendPrefix: string;      // 发送提示前缀，默认 ">>>>>>SEND>>>>>>>>"
   showPortType: boolean;   // 显示串口类型
-  
+  sendOnEnter: boolean;     // 聚焦发送框时 Enter 是否直接发送
+  quickSendSlots: (string | null)[]; // 5 个快捷发送槽
+
   // 时间戳设置
   timestampMode: 'perLine' | 'perRound';
+  timestampFormat: TimestampFormat;
   
   // 日志设置
   autoSaveLog: boolean;
@@ -242,6 +253,13 @@ export interface AppConfig {
   backupEnabled: boolean;
   backupInterval: number;  // 备份周期 (小时)
   backupDirectory: string;
+
+  // 引导设置
+  hasSeenTour: boolean;    // 是否已完成首次启动引导（false 时显示新手引导）
+
+  // 会话恢复
+  restoreSession: boolean;   // 启动时是否恢复上次会话
+  sessionSnapshot: string;   // 序列化的会话快照 JSON（退出时写入）
 }
 
 // ==================== 日志相关 ====================
@@ -280,6 +298,8 @@ export interface UIState {
   sidebarWidth: number;    // 左侧边栏宽度 (px)
   operationPanelHeight: number; // 操作区高度 (px)
   isOperationPanelCollapsed: boolean;
+  configLoaded: boolean;   // 配置是否已从后端加载完成（避免引导弹窗在加载前闪烁）
+  isHotkeyHelpOpen: boolean; // 快捷键帮助弹窗是否打开
 }
 
 // ==================== Tauri 命令参数/返回类型 ====================

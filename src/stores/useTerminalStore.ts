@@ -7,6 +7,7 @@ interface TerminalStoreState {
   terminals: Record<string, TerminalState>;
 
   ensureTerminal: (portId: string) => void;
+  setTerminalConnectedAt: (portId: string, ts: number) => void;
   appendTerminalLine: (portId: string, line: TerminalState['lines'][number]) => void;
   clearTerminal: (portId: string) => void;
   setTerminalConfig: (portId: string, patch: Partial<TerminalState>) => void;
@@ -30,7 +31,15 @@ export const useTerminalStore = create<TerminalStoreState>()(
           showTimestamp: true,
           displayFormat: 'string',
           encoding: 'ASCII',
+          connectedAt: null,
         };
+      }
+    }),
+
+    setTerminalConnectedAt: (portId, ts) => set((state) => {
+      const term = state.terminals[portId];
+      if (term) {
+        term.connectedAt = ts;
       }
     }),
 

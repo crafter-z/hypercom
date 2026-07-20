@@ -141,6 +141,8 @@ const defaultConfig: AppConfig = {
   theme: 'dark',
   preventScreenOff: false,
   preventSleep: false,
+  autoReconnect: false,
+  maxRetries: 3,
   terminalFont: 'Consolas, monospace',
   terminalFontSize: 14,
   uiFont: 'Inter, sans-serif',
@@ -149,7 +151,10 @@ const defaultConfig: AppConfig = {
   defaultLineEnding: '\\r\\n',
   sendPrefix: '>>>>>>SEND>>>>>>>>',
   showPortType: true,
+  sendOnEnter: true,
+  quickSendSlots: [null, null, null, null, null],
   timestampMode: 'perLine',
+  timestampFormat: 'absolute',
   autoSaveLog: false,
   logDirectory: '',
   logFilenameFormat: '[com]-[datetime]',
@@ -160,6 +165,9 @@ const defaultConfig: AppConfig = {
   backupEnabled: false,
   backupInterval: 24,
   backupDirectory: '',
+  hasSeenTour: false,
+  restoreSession: true,
+  sessionSnapshot: '',
 };
 
 const defaultUIState: UIState = {
@@ -168,6 +176,8 @@ const defaultUIState: UIState = {
   sidebarWidth: 260,
   operationPanelHeight: 280,
   isOperationPanelCollapsed: false,
+  configLoaded: false,
+  isHotkeyHelpOpen: false,
 };
 
 // ==================== Store 状态定义 ====================
@@ -240,6 +250,12 @@ interface AppState {
   // 拖拽排序
   reorderPorts: (fromIndex: number, toIndex: number) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
+
+  // 会话恢复
+  restoreSessionSnapshot: (snapshot: {
+    paneTree: PaneNode;
+    tabs: Array<{ id: string; title: string; splitPaneId: string; isPinned: boolean }>;
+  }) => void;
   
 }
 
@@ -602,14 +618,60 @@ closeOtherTabs: (tabId) => set((state) => {
     }),
 
     reorderPorts: (fromIndex, toIndex) => set((state) => {
+      if (
+        fromIndex < 0 || fromIndex >= state.ports.length ||
+        toIndex < 0 || toIndex >= state.ports.length
+      ) return;
       const [moved] = state.ports.splice(fromIndex, 1);
       state.ports.splice(toIndex, 0, moved);
     }),
 
     reorderTabs: (fromIndex, toIndex) => set((state) => {
+      if (
+        fromIndex < 0 || fromIndex >= state.tabs.length ||
+        toIndex < 0 || toIndex >= state.tabs.length
+      ) return;
       const [moved] = state.tabs.splice(fromIndex, 1);
       state.tabs.splice(toIndex, 0, moved);
     }),
+
+    restoreSessionSnapshot: (snapshot) => {
+      for (const tab of snapshot.tabs) {
+        useTerminalStore.getState().ensureTerminal(tab.id);
+      }
+      set((state) => {
+        state.tabs = snapshot.tabs.map((t, i) => ({
+          id: t.id,
+          title: t.title,
+          splitPaneId: t.splitPaneId,
+          isPinned: t.isPinned,
+          isActive: i === 0,
+        }));
+
+        // Sanitize restored tree: each leaf's tabIds must only reference
+        // tabs present in the restored array. pruneTree then drops any
+        // leaves that became empty and validates the structure.
+        const validTabIds = new Set(state.tabs.map(t => t.id));
+        const sanitize = (node: PaneNode): PaneNode => {
+          if (node.type === 'leaf') {
+            return { ...node, tabIds: node.tabIds.filter(id => validTabIds.has(id)) };
+          }
+          return { ...node, children: node.children.map(sanitize) };
+        };
+        state.paneTree = pruneTree(sanitize(snapshot.paneTree));
+
+        if (snapshot.tabs.length > 0) {
+          state.activeTabId = snapshot.tabs[0].id;
+          const targetPaneId = snapshot.tabs[0].splitPaneId;
+          state.focusedPaneId = findLeafById(state.paneTree, targetPaneId)
+            ? targetPaneId
+            : collectLeaves(state.paneTree)[0]?.id ?? 'main';
+        } else {
+          state.activeTabId = null;
+          state.focusedPaneId = 'main';
+        }
+      });
+    },
 
   }))
 );
