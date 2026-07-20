@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialConnection } from '../../hooks/useTauri';
+import { notifyError } from '../../stores/useToastStore';
 import type { Encoding } from '../../types';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
@@ -48,7 +49,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     if (port && port.status === 'connected') {
       // Route through the full connection lifecycle (closeSerialPort +
       // updatePort(disconnected) + stopLogging) instead of bypassing it.
-      closePort(tabId).catch((e) => console.debug('[MainDisplay] closePort failed:', e));
+      closePort(tabId).catch((e) => { console.debug('[MainDisplay] closePort failed:', e); notifyError(e); });
     }
     // Free terminal memory for the closed tab (lines cleared, config dropped
     // implicitly when the entry is no longer referenced).
@@ -148,6 +149,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
 
       {paneTabs.length > 0 && displayTab ? (
         <TerminalView
+          key={displayTab.id}
           portId={displayTab.id}
           terminal={displayTerminal}
         />

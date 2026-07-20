@@ -1,15 +1,16 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TabItem, LeafPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import { Pin, X } from 'lucide-react';
+import { Pin, X, AlertTriangle } from 'lucide-react';
 import {
   SortableContext,
   useSortable,
   horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { useAppStore } from '../../stores/useAppStore';
 
 interface TabBarProps {
   paneId: string;
@@ -31,10 +32,11 @@ interface TabBarProps {
 const SortableTab: React.FC<{
   tab: TabItem;
   isActive: boolean;
+  isPortDisconnected: boolean;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
   onContextMenu: (e: React.MouseEvent, tabId: string) => void;
-}> = ({ tab, isActive, onTabClick, onTabClose, onContextMenu }) => {
+}> = ({ tab, isActive, isPortDisconnected, onTabClick, onTabClose, onContextMenu }) => {
   const {
     attributes,
     listeners,
@@ -65,6 +67,9 @@ const SortableTab: React.FC<{
         className="tab-status-dot"
         style={{ background: isActive ? 'var(--text-link)' : 'var(--text-secondary)' }}
       />
+      {isPortDisconnected && (
+        <AlertTriangle size={12} className="tab-warning-icon" />
+      )}
       <span className="tab-title">{tab.title}</span>
       {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
       {!tab.isPinned && (
@@ -97,6 +102,22 @@ const TabBar: React.FC<TabBarProps> = ({
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const { t } = useTranslation();
+  const ports = useAppStore((s) => s.ports);
+
+  // Lookup: portId → is disconnected (status 'disconnected' or port missing).
+  // A missing port (USB unplug removed it from the list) is treated as
+  // disconnected so the warning icon stays visible on the stale tab.
+  const disconnectedPortIds = useMemo(() => {
+    const portMap = new Map(ports.map(p => [p.id, p]));
+    const set = new Set<string>();
+    for (const tab of tabs) {
+      const port = portMap.get(tab.id);
+      if (!port || port.status === 'disconnected') {
+        set.add(tab.id);
+      }
+    }
+    return set;
+  }, [ports, tabs]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
@@ -153,6 +174,9 @@ const TabBar: React.FC<TabBarProps> = ({
               className="tab-status-dot"
               style={{ background: tab.id === activeTabId ? 'var(--text-link)' : 'var(--text-secondary)' }}
             />
+            {disconnectedPortIds.has(tab.id) && (
+              <AlertTriangle size={12} className="tab-warning-icon" />
+            )}
             <span className="tab-title">{tab.title}</span>
             {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
             {!tab.isPinned && (
@@ -188,6 +212,7 @@ const TabBar: React.FC<TabBarProps> = ({
             key={tab.id}
             tab={tab}
             isActive={tab.id === activeTabId}
+            isPortDisconnected={disconnectedPortIds.has(tab.id)}
             onTabClick={onTabClick}
             onTabClose={onTabClose}
             onContextMenu={handleContextMenu}

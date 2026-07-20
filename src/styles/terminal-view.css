@@ -34,6 +34,11 @@
   min-width: 80px;
 }
 
+.terminal-timestamp-muted {
+  color: var(--text-secondary);
+  opacity: 0.4;
+}
+
 .terminal-direction {
   font-weight: 600;
   flex-shrink: 0;
@@ -102,4 +107,263 @@
 .empty-state-text {
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+/* ==================== Terminal Filter Bar ==================== */
+.terminal-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.terminal-filter-icon {
+  color: var(--text-secondary);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+/* Direction segmented control (All / TX / RX) */
+.terminal-filter-segment {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.terminal-filter-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-right: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-ui);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.terminal-filter-seg-btn:last-child {
+  border-right: none;
+}
+
+.terminal-filter-seg-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.terminal-filter-seg-btn.active {
+  background: var(--bg-active);
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+.terminal-filter-input {
+  flex: 0 1 200px;
+  min-width: 90px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.terminal-filter-input:focus {
+  border-color: var(--accent-color);
+}
+
+.terminal-filter-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.terminal-filter-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.terminal-filter-count.no-results {
+  color: var(--text-error);
+}
+
+.terminal-filter-spacer {
+  flex: 1;
+}
+
+/* Pause / resume toggle */
+.terminal-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--border-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.terminal-filter-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.terminal-filter-btn.active {
+  background: var(--bg-active);
+  color: var(--text-warning);
+  border-color: var(--text-warning);
+}
+
+/* "Paused" indicator with a soft pulse so the frozen state reads at a glance */
+.terminal-filter-paused {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-warning);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.terminal-filter-paused-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-warning);
+  animation: terminal-filter-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes terminal-filter-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* ==================== Terminal Search Bar ==================== */
+.terminal-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.terminal-search-input {
+  flex: 1;
+  min-width: 80px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.terminal-search-input:focus {
+  border-color: var(--accent-color);
+}
+
+.terminal-search-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.terminal-search-counter {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 36px;
+  text-align: center;
+}
+
+.terminal-search-counter.no-results {
+  color: var(--text-error);
+}
+
+.terminal-search-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--border-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.terminal-search-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.terminal-search-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.terminal-search-btn.active {
+  background: var(--bg-active);
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+/* ==================== Terminal Row Selection / Match ==================== */
+.terminal-line.selected {
+  background: rgba(79, 195, 247, 0.14);
+  box-shadow: inset 3px 0 0 var(--accent-color);
+}
+
+:root[data-theme="light"] .terminal-line.selected {
+  background: rgba(2, 136, 209, 0.14);
+}
+
+.terminal-line.search-hit-line {
+  background: rgba(220, 220, 170, 0.10);
+}
+
+:root[data-theme="light"] .terminal-line.search-hit-line {
+  background: rgba(255, 235, 59, 0.18);
+}
+
+.terminal-line.current-match {
+  background: rgba(220, 220, 170, 0.22);
+  box-shadow: inset 3px 0 0 var(--text-warning);
+}
+
+:root[data-theme="light"] .terminal-line.current-match {
+  background: rgba(255, 235, 59, 0.32);
+}
+
+/* Selected + match combo: selection takes priority visually */
+.terminal-line.selected.search-hit-line,
+.terminal-line.selected.current-match {
+  background: rgba(79, 195, 247, 0.20);
 }
