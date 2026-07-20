@@ -2,6 +2,7 @@ import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { logService } from '../../services/tauri';
+import { notifyError } from '../../stores/useToastStore';
 import { save } from '@tauri-apps/plugin-dialog';
 import { Pin, Clock, Type, FileText, FolderOpen, FileSearch } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -28,7 +29,7 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
         filters: [{ name: t('paramsSection.saveDialog.filterName'), extensions: ['log', 'txt'] }],
       });
       if (filePath) await logService.saveLogAs(activeTabId, filePath);
-    } catch (e) { console.error('Failed to save log:', e); }
+    } catch (e) { console.error('Failed to save log:', e); notifyError(e); }
   };
 
   const handleOpenLogFile = async () => {
@@ -40,12 +41,12 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
         ? candidates.reduce((newest, f) => f.created_at > newest.created_at ? f : newest)
         : undefined;
       if (match) { await logService.openPath(match.path); }
-    } catch (e) { console.error('Failed to open log file:', e); }
+    } catch (e) { console.error('Failed to open log file:', e); notifyError(e); }
   };
 
   const handleOpenLogDir = async () => {
     try { await logService.openLogDirectory(); }
-    catch (e) { console.error('Failed to open log dir:', e); }
+    catch (e) { console.error('Failed to open log dir:', e); notifyError(e); }
   };
 
   return (

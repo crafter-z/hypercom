@@ -43,6 +43,16 @@
   margin: 0 8px;
 }
 
+.titlebar-help {
+  color: var(--text-secondary);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.titlebar-help:hover {
+  color: var(--accent-color);
+  background: var(--bg-hover);
+}
+
 .titlebar-control {
   width: 46px !important;
   height: var(--titlebar-height) !important;

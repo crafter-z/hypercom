@@ -5,6 +5,7 @@ import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialSend, useSerialConnection } from '../../hooks/useTauri';
 import { serialService } from '../../services/tauri';
+import { notifyError } from '../../stores/useToastStore';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
@@ -36,7 +37,7 @@ const OperationPanel: React.FC = () => {
   const setUIState = useAppStore(s => s.setUIState);
   const setTerminalConfig = useTerminalStore(s => s.setTerminalConfig);
 
-  const { sendData } = useSerialSend();
+  const { sendData, historyUp, historyDown, clearHistory } = useSerialSend();
   const { toggleConnection } = useSerialConnection();
 
   const activePort = useAppStore(s => s.ports.find(p => p.id === s.activeTabId));
@@ -74,8 +75,8 @@ const OperationPanel: React.FC = () => {
         parity,
         stopBits,
         handshake,
-      }).catch(e => console.debug('[OperationPanel] setSerialParams failed:', e));
-      serialService.setFlowControl(activeTabId, dtr, rts).catch(e => console.debug('[OperationPanel] setFlowControl failed:', e));
+      }).catch(e => { console.debug('[OperationPanel] setSerialParams failed:', e); notifyError(e); });
+      serialService.setFlowControl(activeTabId, dtr, rts).catch(e => { console.debug('[OperationPanel] setFlowControl failed:', e); notifyError(e); });
     }
   }, [activeTabId, isConnected, baudRate, dataBits, parity, stopBits, handshake, dtr, rts]);
 
@@ -144,6 +145,9 @@ const OperationPanel: React.FC = () => {
               isPortError={isPortError}
               sendData={sendData}
               toggleConnection={toggleConnection}
+              historyUp={historyUp}
+              historyDown={historyDown}
+              clearHistory={clearHistory}
             />
             <RulesSection isPortActive={isPortActive} isConnected={isConnected} />
             <ParamsSection isConnected={isConnected} />

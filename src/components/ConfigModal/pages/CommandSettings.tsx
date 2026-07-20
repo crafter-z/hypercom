@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
+import { notifyError } from '../../../stores/useToastStore';
 import type { SendCommandSet, SendCommand } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
 
 const CommandSettings: React.FC = () => {
+  const { t } = useTranslation();
   const sendCommandSets = useRuleStore((s) => s.sendCommandSets);
   const addSendCommandSet = useRuleStore((s) => s.addSendCommandSet);
   const updateSendCommandSet = useRuleStore((s) => s.updateSendCommandSet);
@@ -36,7 +39,7 @@ const CommandSettings: React.FC = () => {
 
   const handleRemoveCmdSet = async (setId: string) => {
     removeSendCommandSet(setId);
-    try { await storageService.deleteCommandSet(setId); } catch (e) { console.error('Failed to delete command set from DB:', e); }
+    try { await storageService.deleteCommandSet(setId); } catch (e) { console.error('Failed to delete command set from DB:', e); notifyError(e); }
   };
 
   const handleSaveSet = async (setId: string) => {
@@ -60,12 +63,13 @@ const CommandSettings: React.FC = () => {
       });
     } catch (err) {
       console.error('Failed to save command set:', err);
+      notifyError(err);
     }
   };
 
   const handleAddSet = () => {
     const id = `cmd-${Date.now()}`;
-    addSendCommandSet({ id, name: '新建命令集', commands: [], isLoop: false, loopDelay: 1000 });
+    addSendCommandSet({ id, name: t('commandSettings.addSet'), commands: [], isLoop: false, loopDelay: 1000 });
     setExpandedSetId(id);
   };
 
@@ -77,7 +81,7 @@ const CommandSettings: React.FC = () => {
       updateSendCommandSet(setId, {
         commands: [...set.commands, {
           id: cmdId,
-          name: `命令 ${set.commands.length + 1}`,
+          name: t('commandSettings.defaultCommandName', { index: set.commands.length + 1 }),
           order: set.commands.length,
           delay: 100,
           type: 'string',
@@ -92,10 +96,10 @@ const CommandSettings: React.FC = () => {
 
   return (
     <RuleSetAccordion<SendCommandSet>
-      title="发送命令规则集"
-      description="管理自动发送命令规则集。每个规则集包含多条命令，可设置顺序、名称、延时、发送类型、命令内容。支持循环发送模式。"
-      addLabel="新建规则集"
-      emptyText='暂无命令规则集，点击"新建规则集"创建'
+      title={t('commandSettings.accordionTitle')}
+      description={t('commandSettings.accordionDescription')}
+      addLabel={t('commandSettings.accordionAddLabel')}
+      emptyText={t('commandSettings.accordionEmptyText')}
       items={sendCommandSets}
       selectedId={expandedSetId}
       onSelect={handleSelect}
@@ -110,7 +114,7 @@ const CommandSettings: React.FC = () => {
               type="checkbox"
               checked={set.isLoop}
               onChange={e => updateSendCommandSet(set.id, { isLoop: e.target.checked })}
-            /> 循环
+            /> {t('commandSettings.loopCheckbox')}
           </label>
           {set.isLoop && (
             <input
@@ -139,11 +143,11 @@ const CommandSettings: React.FC = () => {
           }}
         />
       ))}
-      countLabel={(set) => `${set.commands.length} 条命令`}
-      addItemLabel="添加命令"
+      countLabel={(set) => t('commandSettings.countLabel', { count: set.commands.length })}
+      addItemLabel={t('commandSettings.addCommandButton')}
       onAddItem={handleAddCmd}
       itemCount={(set) => set.commands.length}
-      emptyItemText="暂无命令，请添加"
+      emptyItemText={t('commandSettings.emptyCommandsText')}
     />
   );
 };

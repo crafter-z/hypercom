@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Plus, Check, Trash2 } from 'lucide-react';
 
 /**
@@ -32,6 +33,7 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
   onAdd, onDelete, onSave, onRename, renderHeaderExtra, renderEditor,
   countLabel, addItemLabel, onAddItem, itemCount, emptyItemText,
 }: RuleSetAccordionProps<TSet>) {
+  const { t } = useTranslation();
   return (
     <div className="config-page">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -58,10 +60,10 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
             />
             {renderHeaderExtra(set)}
             <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{countLabel(set)}</span>
-            <button className="btn btn-icon btn-sm" title="保存到数据库" onClick={e => { e.stopPropagation(); onSave(set.id); }}>
+            <button className="btn btn-icon btn-sm" title={t('ruleSetAccordion.saveToDb')} onClick={e => { e.stopPropagation(); onSave(set.id); }}>
               <Check size={14} />
             </button>
-            <button className="btn btn-icon btn-sm" title="删除" onClick={e => { e.stopPropagation(); onDelete(set.id); }}>
+            <button className="btn btn-icon btn-sm" title={t('ruleSetAccordion.delete')} onClick={e => { e.stopPropagation(); onDelete(set.id); }}>
               <Trash2 size={14} />
             </button>
           </div>

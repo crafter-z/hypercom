@@ -1,17 +1,19 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { AppConfig } from '../../../types';
 
 const DisplaySettings: React.FC = () => {
+  const { t } = useTranslation();
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
 
   return (
     <div className="config-page">
-      <h3 className="config-page-title">显示与交互</h3>
+      <h3 className="config-page-title">{t('displaySettings.title')}</h3>
 
       <div className="config-row">
-        <label>预设波特率:</label>
+        <label>{t('displaySettings.defaultBaudRatesLabel')}</label>
         <input
           className="input"
           value={config.defaultBaudRates.join(', ')}
@@ -22,28 +24,37 @@ const DisplaySettings: React.FC = () => {
 
       <label className="checkbox-wrapper">
         <input type="checkbox" checked={config.showPortType} onChange={(e) => setConfig({ showPortType: e.target.checked })} />
-        显示串口类型 (虚拟/真实)
+        {t('displaySettings.showPortType')}
       </label>
 
       <div className="config-row">
-        <label>默认换行方式:</label>
+        <label>{t('displaySettings.defaultLineEndingLabel')}</label>
         <select className="select" value={config.defaultLineEnding} onChange={(e) => setConfig({ defaultLineEnding: e.target.value as AppConfig['defaultLineEnding'] })}>
-          <option value="\\r\\n">\r\n</option>
-          <option value="\\r">\r</option>
-          <option value="\\n">\n</option>
+          <option value="\\r\\n">{t('displaySettings.lineEnding.crlf')}</option>
+          <option value="\\r">{t('displaySettings.lineEnding.cr')}</option>
+          <option value="\\n">{t('displaySettings.lineEnding.lf')}</option>
         </select>
       </div>
 
       <div className="config-row">
-        <label>发送提示前缀:</label>
+        <label>{t('displaySettings.sendPrefixLabel')}</label>
         <input className="input" value={config.sendPrefix} onChange={(e) => setConfig({ sendPrefix: e.target.value })} />
       </div>
 
       <div className="config-row">
-        <label>时间戳显示方式:</label>
+        <label>{t('displaySettings.timestampModeLabel')}</label>
         <select className="select" value={config.timestampMode} onChange={(e) => setConfig({ timestampMode: e.target.value as AppConfig['timestampMode'] })}>
-          <option value="perLine">每行显示一个时间戳</option>
-          <option value="perRound">每轮输出显示一个时间戳</option>
+          <option value="perLine">{t('displaySettings.timestampMode.perLine')}</option>
+          <option value="perRound">{t('displaySettings.timestampMode.perRound')}</option>
+        </select>
+      </div>
+
+      <div className="config-row">
+        <label>{t('displaySettings.timestampFormat.label')}</label>
+        <select className="select" value={config.timestampFormat} onChange={(e) => setConfig({ timestampFormat: e.target.value as AppConfig['timestampFormat'] })}>
+          <option value="absolute">{t('displaySettings.timestampFormat.absolute')}</option>
+          <option value="relative">{t('displaySettings.timestampFormat.relative')}</option>
+          <option value="uptime">{t('displaySettings.timestampFormat.uptime')}</option>
         </select>
       </div>
     </div>

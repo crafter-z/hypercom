@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
+import { notifyError } from '../../../stores/useToastStore';
 import type { ProtocolTemplateInfo } from '../../../services/tauri';
 import type { ProtocolTemplate } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
@@ -29,6 +31,7 @@ function mapInfo(s: ProtocolTemplateInfo): ProtocolTemplate {
 }
 
 const ProtocolSettings: React.FC = () => {
+  const { t } = useTranslation();
   const protocolTemplates = useRuleStore((s) => s.protocolTemplates);
   const addProtocolTemplate = useRuleStore((s) => s.addProtocolTemplate);
   const updateProtocolTemplate = useRuleStore((s) => s.updateProtocolTemplate);
@@ -45,7 +48,7 @@ const ProtocolSettings: React.FC = () => {
 
   const handleRemoveSet = async (setId: string) => {
     removeProtocolTemplate(setId);
-    try { await storageService.deleteProtocolTemplate(setId); } catch (e) { console.error('Failed to delete protocol template from DB:', e); }
+    try { await storageService.deleteProtocolTemplate(setId); } catch (e) { console.error('Failed to delete protocol template from DB:', e); notifyError(e); }
   };
 
   const handleSaveSet = async (setId: string) => {
@@ -72,6 +75,7 @@ const ProtocolSettings: React.FC = () => {
       });
     } catch (err) {
       console.error('Failed to save protocol template:', err);
+      notifyError(err);
     }
   };
 
@@ -79,7 +83,7 @@ const ProtocolSettings: React.FC = () => {
     const id = `proto-${Date.now()}`;
     addProtocolTemplate({
       id,
-      name: '新建协议模板',
+      name: t('protocolSettings.addSet'),
       isEnabled: true,
       headerBytes: '',
       lengthFieldOffset: 0,
@@ -102,10 +106,10 @@ const ProtocolSettings: React.FC = () => {
 
   return (
     <RuleSetAccordion<ProtocolTemplate>
-      title="协议解析模板"
-      description="管理协议帧解析模板。定义帧头、长度字段、校验和、帧尾，接收数据时自动解析并按字段着色。每个串口可绑定一个协议模板。"
-      addLabel="新建模板"
-      emptyText='暂无协议模板，点击"新建模板"创建'
+      title={t('protocolSettings.accordionTitle')}
+      description={t('protocolSettings.accordionDescription')}
+      addLabel={t('protocolSettings.accordionAddLabel')}
+      emptyText={t('protocolSettings.accordionEmptyText')}
       items={protocolTemplates}
       selectedId={expandedSetId}
       onSelect={handleSelect}
@@ -119,7 +123,7 @@ const ProtocolSettings: React.FC = () => {
             type="checkbox"
             checked={template.isEnabled}
             onChange={e => updateProtocolTemplate(template.id, { isEnabled: e.target.checked })}
-          /> 启用
+          /> {t('protocolSettings.enableCheckbox')}
         </label>
       )}
       renderEditor={(template) => (

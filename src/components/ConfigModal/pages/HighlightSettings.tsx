@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
+import { notifyError } from '../../../stores/useToastStore';
 import type { HighlightRuleSet } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import HighlightRuleEditor from '../editors/HighlightRuleEditor';
 
 const HighlightSettings: React.FC = () => {
+  const { t } = useTranslation();
   const highlightRuleSets = useRuleStore((s) => s.highlightRuleSets);
   const addHighlightRuleSet = useRuleStore((s) => s.addHighlightRuleSet);
   const updateHighlightRuleSet = useRuleStore((s) => s.updateHighlightRuleSet);
@@ -35,7 +38,7 @@ const HighlightSettings: React.FC = () => {
 
   const handleRemoveSet = async (setId: string) => {
     removeHighlightRuleSet(setId);
-    try { await storageService.deleteHighlightSet(setId); } catch (e) { console.error('Failed to delete highlight set from DB:', e); }
+    try { await storageService.deleteHighlightSet(setId); } catch (e) { console.error('Failed to delete highlight set from DB:', e); notifyError(e); }
   };
 
   const handleSaveSet = async (setId: string) => {
@@ -58,12 +61,13 @@ const HighlightSettings: React.FC = () => {
       });
     } catch (err) {
       console.error('Failed to save highlight set:', err);
+      notifyError(err);
     }
   };
 
   const handleAddSet = () => {
     const id = `hl-${Date.now()}`;
-    addHighlightRuleSet({ id, name: '新建规则集', rules: [], isEnabled: true });
+    addHighlightRuleSet({ id, name: t('highlightSettings.addSet'), rules: [], isEnabled: true });
     setExpandedSetId(id);
   };
 
@@ -75,7 +79,7 @@ const HighlightSettings: React.FC = () => {
       updateHighlightRuleSet(setId, {
         rules: [...set.rules, {
           id: ruleId,
-          name: `规则 ${set.rules.length + 1}`,
+          name: t('highlightSettings.defaultRuleName', { index: set.rules.length + 1 }),
           pattern: '',
           isRegex: false,
           color: '#ff6b6b',
@@ -90,10 +94,10 @@ const HighlightSettings: React.FC = () => {
 
   return (
     <RuleSetAccordion<HighlightRuleSet>
-      title="语法高亮规则集"
-      description="管理语法高亮规则集。每个规则集包含多条规则，支持正则表达式或关键词匹配，可设置颜色、加粗、斜体。启用多个规则集可同时生效。"
-      addLabel="新建规则集"
-      emptyText='暂无规则集，点击"新建规则集"创建'
+      title={t('highlightSettings.accordionTitle')}
+      description={t('highlightSettings.accordionDescription')}
+      addLabel={t('highlightSettings.accordionAddLabel')}
+      emptyText={t('highlightSettings.accordionEmptyText')}
       items={highlightRuleSets}
       selectedId={expandedSetId}
       onSelect={handleSelect}
@@ -107,7 +111,7 @@ const HighlightSettings: React.FC = () => {
             type="checkbox"
             checked={set.isEnabled}
             onChange={e => updateHighlightRuleSet(set.id, { isEnabled: e.target.checked })}
-          /> 启用
+          /> {t('highlightSettings.enableCheckbox')}
         </label>
       )}
       renderEditor={(set) => set.rules.map((rule, idx) => (
@@ -123,11 +127,11 @@ const HighlightSettings: React.FC = () => {
           }}
         />
       ))}
-      countLabel={(set) => `${set.rules.length} 条规则`}
-      addItemLabel="添加规则"
+      countLabel={(set) => t('highlightSettings.countLabel', { count: set.rules.length })}
+      addItemLabel={t('highlightSettings.addRuleButton')}
       onAddItem={handleAddRule}
       itemCount={(set) => set.rules.length}
-      emptyItemText="暂无规则，请添加"
+      emptyItemText={t('highlightSettings.emptyRulesText')}
     />
   );
 };

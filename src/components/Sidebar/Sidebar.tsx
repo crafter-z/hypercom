@@ -18,6 +18,7 @@ import {
   useDroppable,
 } from '@dnd-kit/core';
 import AliasDialog from './AliasDialog';
+import GuideCard from './GuideCard';
 import { usePortDragEnd } from './hooks/usePortDragEnd';
 import {
   SortableContext,
@@ -451,6 +452,11 @@ const Sidebar: React.FC = () => {
       <SearchBox value={search} onChange={setSearch} />
 
       <div className="sidebar-list">
+        {/* 空端口引导卡片：任意端口（真实/SIM）出现后条件不成立自动消失。
+            位于 DndContext 之外，不影响端口拖拽排序。 */}
+        {ports.length === 0 && !simulationMode && (
+          <GuideCard onEnableSimulation={toggleSimulation} />
+        )}
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           {groups.map(group => {
             const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id));

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useRuleStore } from '../../../stores/useRuleStore';
+import { notifyError } from '../../../stores/useToastStore';
 import type { SendCommand } from '../../../types';
 
 export interface UseCyclicSendOptions {
@@ -57,6 +58,10 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
     stopped: false,
   });
 
+  // Spam guard: the loop retries on failure, so only surface the FIRST
+  // error of each cyclic-run session as a toast. Reset when a run starts.
+  const notifiedRef = useRef(false);
+
   useEffect(() => {
     const ref = loopRef.current;
     if (!isLooping || !isPortActive || !isConnected) {
@@ -73,6 +78,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
 
     ref.stopped = false;
     ref.currentCmdIdx = 0;
+    notifiedRef.current = false;
 
     const sendNext = async () => {
       if (ref.stopped || !activeTabId) return;
@@ -111,6 +117,10 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
         ref.timeoutId = setTimeout(sendNext, delay);
       } catch (err) {
         console.warn('[useCyclicSend] Cyclic send failed:', err);
+        if (!notifiedRef.current) {
+          notifiedRef.current = true;
+          notifyError(err);
+        }
         ref.timeoutId = setTimeout(sendNext, loopInterval);
       }
     };

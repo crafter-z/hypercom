@@ -1,30 +1,32 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { AppConfig } from '../../../types';
 
 const GeneralSettings: React.FC = () => {
+  const { t } = useTranslation();
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
 
   return (
     <div className="config-page">
-      <h3 className="config-page-title">通用设置</h3>
+      <h3 className="config-page-title">{t('generalSettings.title')}</h3>
 
       <div className="config-row">
-        <label>程序关闭行为:</label>
+        <label>{t('generalSettings.closeBehaviorLabel')}</label>
         <select
           className="select"
           value={config.closeBehavior}
           onChange={(e) => setConfig({ closeBehavior: e.target.value as AppConfig['closeBehavior'] })}
         >
-          <option value="minimize">最小化到托盘</option>
-          <option value="exit">直接退出</option>
+          <option value="minimize">{t('generalSettings.closeBehavior.minimize')}</option>
+          <option value="exit">{t('generalSettings.closeBehavior.exit')}</option>
         </select>
       </div>
 
       <div className="config-row">
-        <label>内存占用上限 (MB):</label>
+        <label>{t('generalSettings.memoryLimitLabel')}</label>
         <input
           className="input"
           type="number"
@@ -37,65 +39,117 @@ const GeneralSettings: React.FC = () => {
       </div>
 
       <div className="config-row">
-        <label>语言:</label>
+        <label>{t('generalSettings.languageLabel')}</label>
         <select
           className="select"
           value={config.language}
           onChange={(e) => setConfig({ language: e.target.value as AppConfig['language'] })}
         >
-          <option value="zh-CN">简体中文</option>
-          <option value="en-US">English</option>
+          <option value="zh-CN">{t('generalSettings.language.zhCN')}</option>
+          <option value="en-US">{t('generalSettings.language.enUS')}</option>
         </select>
       </div>
 
       <div className="config-row">
-        <label>主题:</label>
+        <label>{t('generalSettings.themeLabel')}</label>
         <select
           className="select"
           value={config.theme}
           onChange={(e) => setConfig({ theme: e.target.value as AppConfig['theme'] })}
         >
-          <option value="light">亮色</option>
-          <option value="dark">暗色</option>
-          <option value="system">跟随系统</option>
+          <option value="light">{t('generalSettings.theme.light')}</option>
+          <option value="dark">{t('generalSettings.theme.dark')}</option>
+          <option value="system">{t('generalSettings.theme.system')}</option>
         </select>
       </div>
 
       <div className="config-row">
         <label className="checkbox-wrapper">
           <input type="checkbox" checked={config.preventScreenOff} onChange={(e) => setConfig({ preventScreenOff: e.target.checked })} />
-          防止系统息屏
+          {t('generalSettings.preventScreenOff')}
         </label>
         <label className="checkbox-wrapper">
           <input type="checkbox" checked={config.preventSleep} onChange={(e) => setConfig({ preventSleep: e.target.checked })} />
-          防止系统休眠
+          {t('generalSettings.preventSleep')}
+        </label>
+        <label className="checkbox-wrapper">
+          <input type="checkbox" checked={config.restoreSession} onChange={(e) => setConfig({ restoreSession: e.target.checked })} />
+          {t('generalSettings.restoreSession')}
         </label>
       </div>
 
       <div className="divider-h" />
-      <h4 className="config-section-title">字体设置</h4>
+      <h4 className="config-section-title">{t('settings.reconnect.sectionTitle')}</h4>
 
       <div className="config-row">
-        <label>终端字体:</label>
+        <label className="checkbox-wrapper">
+          <input
+            type="checkbox"
+            checked={config.autoReconnect}
+            onChange={(e) => setConfig({ autoReconnect: e.target.checked })}
+          />
+          {t('settings.reconnect.autoReconnect.label')}
+        </label>
+      </div>
+
+      <div className="config-row">
+        <label>{t('settings.reconnect.maxRetries.label')}:</label>
+        <input
+          className="input"
+          type="number"
+          value={config.maxRetries}
+          onChange={(e) => setConfig({ maxRetries: Math.max(1, Math.min(10, Number(e.target.value))) })}
+          min={1}
+          max={10}
+          step={1}
+          style={{ width: 80 }}
+        />
+      </div>
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('settings.quickSend.sectionTitle')}</h4>
+
+      {config.quickSendSlots.map((slot, idx) => (
+        <div className="config-row" key={idx}>
+          <label>{t('settings.quickSend.slotN', { n: idx + 1 })}:</label>
+          <input
+            className="input"
+            value={slot ?? ''}
+            placeholder={t('op.quickSend.unboundLabel')}
+            onChange={(e) => {
+              const next = [...config.quickSendSlots];
+              next[idx] = e.target.value || null;
+              setConfig({ quickSendSlots: next });
+            }}
+            style={{ flex: 1 }}
+          />
+        </div>
+      ))}
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('generalSettings.fontSectionTitle')}</h4>
+
+      <div className="config-row">
+        <label>{t('generalSettings.terminalFontLabel')}</label>
         <input className="input" value={config.terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
         <input className="input" type="number" value={config.terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: Number(e.target.value) })} style={{ width: 60 }} />
-        <span>px</span>
+        <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
-        <label>UI字体:</label>
+        <label>{t('generalSettings.uiFontLabel')}</label>
         <input className="input" value={config.uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
         <input className="input" type="number" value={config.uiFontSize} onChange={(e) => setConfig({ uiFontSize: Number(e.target.value) })} style={{ width: 60 }} />
-        <span>px</span>
+        <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
-        <label>背景图片:</label>
-        <input className="input" value={config.backgroundImage || ''} placeholder="选择图片路径..." readOnly />
+        <label>{t('generalSettings.backgroundImageLabel')}</label>
+        <input className="input" value={config.backgroundImage || ''} placeholder={t('generalSettings.backgroundImagePlaceholder')} readOnly />
         <button className="btn btn-sm" onClick={async () => {
-          const result = await open({ directory: false, multiple: false, filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp'] }] });
+          const result = await open({ directory: false, multiple: false, filters: [{ name: t('generalSettings.imageFilterName'), extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp'] }] });
           if (result) setConfig({ backgroundImage: result });
-        }}>浏览...</button>
+        }}>{t('generalSettings.browseButton')}</button>
       </div>
     </div>
   );

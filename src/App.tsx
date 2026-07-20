@@ -6,10 +6,15 @@ import MainDisplay from './components/MainDisplay/MainDisplay';
 import OperationPanel from './components/OperationPanel/OperationPanel';
 import StatusBar from './components/StatusBar/StatusBar';
 import ConfigModal from './components/ConfigModal/ConfigModal';
-import { useAppInit, useSerialReceive } from './hooks/useTauri';
+import FirstRunTour from './components/Tour/FirstRunTour';
+import ToastContainer from './components/shared/Toast/ToastContainer';
+import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
+import { useAppInit, useSerialReceive, usePinStatesSubscriber } from './hooks/useTauri';
+import { useHotkeys } from './hooks/useHotkeys';
 import { useAppStore } from './stores/useAppStore';
 import { useTerminalStore } from './stores/useTerminalStore';
-import { systemService } from './services/tauri';
+import { systemService, configService } from './services/tauri';
+import { notifyError } from './stores/useToastStore';
 
 // ==================== Error Boundary ====================
 
@@ -105,22 +110,105 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   }, [backgroundImage]);
 
   useEffect(() => {
-    systemService.preventScreenOff(preventScreenOff).catch((e) => console.debug('[App] preventScreenOff failed:', e));
+    systemService.preventScreenOff(preventScreenOff).catch((e) => {
+      console.debug('[App] preventScreenOff failed:', e);
+      notifyError(e);
+    });
   }, [preventScreenOff]);
 
   useEffect(() => {
-    systemService.preventSleep(preventSleep).catch((e) => console.debug('[App] preventSleep failed:', e));
+    systemService.preventSleep(preventSleep).catch((e) => {
+      console.debug('[App] preventSleep failed:', e);
+      notifyError(e);
+    });
   }, [preventSleep]);
 
   return <>{children}</>;
 };
 
+// ==================== Session snapshot persistence (F.3) ====================
+
+/**
+ * Build the session snapshot JSON from the current app state.
+ * Returns null when session restore is disabled.
+ */
+function buildSessionSnapshot(state: ReturnType<typeof useAppStore.getState>): string | null {
+  if (!state.config.restoreSession) return null;
+  return JSON.stringify({
+    paneTree: state.paneTree,
+    tabs: state.tabs.map((t) => ({ id: t.id, title: t.title, splitPaneId: t.splitPaneId, isPinned: t.isPinned })),
+    portConfigs: Object.fromEntries(
+      state.tabs.map((t) => {
+        const port = state.ports.find((p) => p.id === t.id);
+        return [t.id, {
+          baudRate: port?.baudRate ?? 115200,
+          dataBits: port?.dataBits ?? 8,
+          parity: port?.parity ?? 'None',
+          stopBits: port?.stopBits ?? 'One',
+          handshake: port?.handshake ?? 'None',
+        }];
+      })
+    ),
+  });
+}
+
+/**
+ * Best-effort, fire-and-forget persistence of the session snapshot.
+ * Failures are only logged — this must never throw (used from beforeunload).
+ */
+function saveSessionSnapshot(): void {
+  try {
+    const state = useAppStore.getState();
+    const snapshot = buildSessionSnapshot(state);
+    if (snapshot === null) return;
+    const config = { ...state.config, sessionSnapshot: snapshot };
+    configService.setConfig(config).catch((e) => {
+      console.debug('[App] Failed to save session snapshot:', e);
+    });
+  } catch (e) {
+    console.debug('[App] Failed to build session snapshot:', e);
+  }
+}
+
 const App: React.FC = () => {
   useAppInit();
-  // Serial event listeners (onSerialData / onSerialStatus) are set up once at app root.
+  // Serial event listeners (onSerialData / onSerialStatus / onSerialPinStates /
+  // onSerialReconnectHint) are set up once at app root.
   // Send actions live on useSerialSend in OperationPanel — see SRP split in useTauri.ts.
   useSerialReceive();
+  usePinStatesSubscriber();
+  useHotkeys();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
+
+  // F.3: persist the session snapshot incrementally whenever tabs/paneTree
+  // change (debounced). The WebView may terminate before an async invoke
+  // resolves during shutdown, so the debounced save is the primary
+  // persistence path — beforeunload below is only a best-effort final flush.
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = useAppStore.subscribe((state, prevState) => {
+      if (state.tabs === prevState.tabs && state.paneTree === prevState.paneTree) return;
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        timeoutId = null;
+        saveSessionSnapshot();
+      }, 1000);
+    });
+    return () => {
+      unsubscribe();
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
+  }, []);
+
+  // F.3: best-effort flush on window close (failures caught — the WebView
+  // may not wait for the invoke to resolve).
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      saveSessionSnapshot();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -175,6 +263,9 @@ const App: React.FC = () => {
 
           <StatusBar />
           <ConfigModal />
+          <FirstRunTour />
+          <HotkeyHelpDialog />
+          <ToastContainer />
         </div>
       </ThemeProvider>
     </AppErrorBoundary>

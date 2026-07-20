@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks/useTauri';
 import type { AppConfig } from '../../types';
@@ -15,21 +16,22 @@ import ProtocolSettings from './pages/ProtocolSettings';
 
 interface NavItem {
   id: string;
-  label: string;
+  labelKey: string;
   icon: React.ReactNode;
 }
 
 const navItems: NavItem[] = [
-  { id: 'general', label: '通用设置', icon: <Settings size={16} /> },
-  { id: 'log', label: '日志设置', icon: <FileText size={16} /> },
-  { id: 'backup', label: '备份管理', icon: <HardDrive size={16} /> },
-  { id: 'display', label: '显示与交互', icon: <Monitor size={16} /> },
-  { id: 'highlight', label: '语法高亮规则', icon: <Palette size={16} /> },
-  { id: 'commands', label: '发送命令规则', icon: <Send size={16} /> },
-  { id: 'protocol', label: '协议解析', icon: <Code2 size={16} /> },
+  { id: 'general', labelKey: 'configModal.nav.general', icon: <Settings size={16} /> },
+  { id: 'log', labelKey: 'configModal.nav.log', icon: <FileText size={16} /> },
+  { id: 'backup', labelKey: 'configModal.nav.backup', icon: <HardDrive size={16} /> },
+  { id: 'display', labelKey: 'configModal.nav.display', icon: <Monitor size={16} /> },
+  { id: 'highlight', labelKey: 'configModal.nav.highlight', icon: <Palette size={16} /> },
+  { id: 'commands', labelKey: 'configModal.nav.commands', icon: <Send size={16} /> },
+  { id: 'protocol', labelKey: 'configModal.nav.protocol', icon: <Code2 size={16} /> },
 ];
 
 const ConfigModal: React.FC = () => {
+  const { t } = useTranslation();
   const isConfigOpen = useAppStore((s) => s.ui.isConfigOpen);
   const configActiveTab = useAppStore((s) => s.ui.configActiveTab);
   const toggleConfigModal = useAppStore((s) => s.toggleConfigModal);
@@ -82,7 +84,7 @@ const ConfigModal: React.FC = () => {
       <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <div className="modal-nav">
           <div className="modal-nav-header">
-            <h2 className="modal-nav-title">设置</h2>
+            <h2 className="modal-nav-title">{t('configModal.title')}</h2>
           </div>
           <div className="modal-nav-list">
             {navItems.map(item => (
@@ -92,7 +94,7 @@ const ConfigModal: React.FC = () => {
                 onClick={() => setConfigActiveTab(item.id)}
               >
                 <span className="modal-nav-icon">{item.icon}</span>
-                {item.label}
+                {t(item.labelKey)}
               </div>
             ))}
           </div>
@@ -101,9 +103,9 @@ const ConfigModal: React.FC = () => {
         <div className="modal-content-area">
           <div className="modal-content-header">
             <span className="modal-content-title">
-              {navItems.find(n => n.id === configActiveTab)?.label}
+              {navItems.find(n => n.id === configActiveTab)?.labelKey ? t(navItems.find(n => n.id === configActiveTab)!.labelKey) : ''}
             </span>
-            <button className="btn btn-icon" onClick={() => toggleConfigModal(false)} title="关闭">
+            <button className="btn btn-icon" onClick={() => toggleConfigModal(false)} title={t('configModal.close')}>
               <X size={16} />
             </button>
           </div>
@@ -113,8 +115,8 @@ const ConfigModal: React.FC = () => {
           </div>
 
           <div className="modal-content-footer">
-            <button className="btn" onClick={handleCancel}>取消</button>
-            <button className="btn btn-primary" onClick={handleSave}>保存</button>
+            <button className="btn" onClick={handleCancel}>{t('configModal.cancel')}</button>
+            <button className="btn btn-primary" onClick={handleSave}>{t('configModal.save')}</button>
           </div>
         </div>
       </div>

@@ -1,26 +1,67 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
-import { Settings, Minus, Square, X, Minimize2 } from 'lucide-react';
+import { Settings, HelpCircle, Keyboard, Minus, Square, X, Minimize2 } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const TitleBar: React.FC = () => {
   const toggleConfigModal = useAppStore((state) => state.toggleConfigModal);
+  const setConfig = useAppStore((state) => state.setConfig);
+  const setUIState = useAppStore((state) => state.setUIState);
   const [isMaximized, setIsMaximized] = useState(false);
   const { t } = useTranslation();
+
+  // F.5: derive active port info with primitive selectors (no unnecessary re-renders)
+  const activeTabId = useAppStore((s) => s.activeTabId);
+  const activePortStatus = useAppStore((s) => {
+    if (!s.activeTabId) return 'none';
+    return s.ports.find((p) => p.id === s.activeTabId)?.status ?? 'none';
+  });
+  const activePortBaudRate = useAppStore((s) => {
+    if (!s.activeTabId) return null;
+    return s.ports.find((p) => p.id === s.activeTabId)?.baudRate ?? null;
+  });
+
+  const titleText = useMemo(() => {
+    if (activeTabId && activePortStatus === 'connected' && activePortBaudRate != null) {
+      return `${activeTabId} (${activePortBaudRate}) — HyperCom`;
+    }
+    return 'HyperCom';
+  }, [activeTabId, activePortStatus, activePortBaudRate]);
+
+  // F.5: sync OS-level window title
+  useEffect(() => {
+    getCurrentWindow().setTitle(titleText).catch((e) => console.debug('[TitleBar] setTitle failed:', e));
+  }, [titleText]);
+
+  // hasSeenTour 置 false 后 FirstRunTour 自动重新挂载（无需额外状态）
+  const handleShowTour = () => {
+    setConfig({ hasSeenTour: false });
+  };
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
 
     const setup = async () => {
-      setIsMaximized(await appWindow.isMaximized());
-      unlisten = await appWindow.onResized(async () => {
+      try {
         setIsMaximized(await appWindow.isMaximized());
-      });
+        unlisten = await appWindow.onResized(async () => {
+          setIsMaximized(await appWindow.isMaximized());
+        });
+        // Unmount raced ahead of registration — tear down the listener now.
+        if (cancelled) {
+          unlisten();
+          unlisten = undefined;
+        }
+      } catch (e) {
+        console.debug('[TitleBar] Window state setup failed:', e);
+      }
     };
     setup();
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);
@@ -45,11 +86,21 @@ const TitleBar: React.FC = () => {
           <path d="M2 17l10 5 10-5" />
           <path d="M2 12l10 5 10-5" />
         </svg>
-        <span className="titlebar-title" data-tauri-drag-region>{t('titleBar.appName')}</span>
+        <span className="titlebar-title" data-tauri-drag-region>{titleText}</span>
         <span className="titlebar-version" data-tauri-drag-region>{t('titleBar.version')}</span>
       </div>
 
       <div className="titlebar-right">
+        <button
+          className="btn btn-icon btn-sm titlebar-help"
+          title={t('hotkeys.title')}
+          onClick={() => setUIState({ isHotkeyHelpOpen: true })}
+        >
+          <Keyboard size={15} />
+        </button>
+        <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.help')} onClick={handleShowTour}>
+          <HelpCircle size={15} />
+        </button>
         <button className="btn btn-icon btn-sm" title={t('titleBar.settings')} onClick={() => toggleConfigModal(true)}>
           <Settings size={15} />
         </button>
