@@ -18,7 +18,7 @@ pub fn list_available_ports(state: State<AppState>) -> Result<Vec<serial::PortIn
 }
 
 /// 打开指定串口
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct OpenPortArgs {
     pub port_id: String,
     pub baud_rate: u32,
@@ -44,13 +44,21 @@ pub fn open_serial_port(args: OpenPortArgs, state: State<AppState>) -> Result<()
 /// 关闭指定串口
 #[tauri::command]
 pub fn close_serial_port(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .close_port(&port_id)
-        .map_err(|e| CommandError::Serial(e.to_string()))
+    // 持锁期间只停止读取线程并取出 JoinHandle，立即释放锁
+    let join_handle = {
+        let mut manager = state
+            .serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager
+            .close_port(&port_id)
+            .map_err(|e| CommandError::Serial(e.to_string()))?
+    };
+    // 在锁外 join：读取线程退出最长约 100ms，不能阻塞其他串口命令
+    if let Some(thread) = join_handle {
+        let _ = thread.join();
+    }
+    Ok(())
 }
 
 /// 向串口发送数据
@@ -120,7 +128,7 @@ pub fn set_serial_params(
     args: SetSerialParamsArgs,
     state: State<AppState>,
 ) -> Result<(), CommandError> {
-    let manager = state
+    let mut manager = state
         .serial_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -133,6 +141,34 @@ pub fn set_serial_params(
             &args.stop_bits,
             &args.handshake,
         )
+        .map_err(|e| CommandError::Serial(e.to_string()))
+}
+
+/// 尝试重新连接指定串口（异常断线后的自动恢复）
+#[tauri::command]
+pub fn attempt_reconnect(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
+    // 阶段 1：持锁关闭残留句柄，取出读取线程 JoinHandle 后释放锁
+    let join_handle = {
+        let mut manager = state
+            .serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager
+            .close_port(&port_id)
+            .map_err(|e| CommandError::Serial(e.to_string()))?
+    };
+    // 阶段 2：在锁外 join，避免阻塞其他串口命令；
+    // 也确保旧端口句柄已释放，后续 open_port 不会因端口被占用而失败
+    if let Some(thread) = join_handle {
+        let _ = thread.join();
+    }
+    // 阶段 3：重新持锁，校验端口并以上次参数打开
+    let mut manager = state
+        .serial_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager
+        .attempt_reconnect(&port_id)
         .map_err(|e| CommandError::Serial(e.to_string()))
 }
 

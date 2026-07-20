@@ -240,7 +240,9 @@ impl LogManager {
                 let old_path = writer.file_path.clone();
                 // 显式 flush + 取出 inner File + sync_all，确保 OS 把缓冲落盘后再丢弃
                 // (defects #56：避免依赖 BufWriter::Drop 的 flush 把错误吞掉)
-                let removed = self.writers.remove(port_id).expect("writer just retrieved");
+                let Some(removed) = self.writers.remove(port_id) else {
+                    return Ok(());
+                };
                 match removed.writer.into_inner() {
                     Ok(file) => {
                         if let Err(e) = file.sync_all() {
@@ -266,6 +268,22 @@ impl LogManager {
         if let Some(mut writer) = self.writers.remove(port_id) {
             writer.writer.flush()?;
             log::info!("Log writer closed for {}", port_id);
+        }
+        Ok(())
+    }
+
+    /// 强制刷新所有活跃日志写入器到磁盘。
+    /// 在 panic hook 中调用，避免崩溃前丢失最后一批日志。
+    pub fn flush_all(&mut self) -> anyhow::Result<()> {
+        for (port_id, writer) in self.writers.iter_mut() {
+            if let Err(e) = writer.writer.flush() {
+                log::warn!("Failed to flush log writer for {}: {}", port_id, e);
+            }
+            if let Ok(file) = writer.writer.get_ref().try_clone() {
+                if let Err(e) = file.sync_all() {
+                    log::warn!("Failed to sync log file for {}: {}", port_id, e);
+                }
+            }
         }
         Ok(())
     }

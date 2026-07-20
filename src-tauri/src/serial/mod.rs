@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -50,6 +50,24 @@ pub struct SerialStatusEvent {
     pub status: String,
 }
 
+/// 串口自动重连提示事件（推送给前端）
+#[derive(Debug, Clone, Serialize)]
+pub struct SerialReconnectHintEvent {
+    pub port_name: String,
+}
+
+/// 串口引脚状态事件（推送给前端）
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct SerialPinStatesEvent {
+    pub port_id: String,
+    pub dtr: bool,
+    pub rts: bool,
+    pub cts: bool,
+    pub dsr: bool,
+    pub rlsd: bool,
+    pub ri: bool,
+}
+
 // ==================== 真实串口 ====================
 
 /// 单个串口连接句柄
@@ -57,6 +75,11 @@ pub struct SerialPortHandle {
     pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     pub running: Arc<AtomicBool>,
     pub read_thread: Option<thread::JoinHandle<()>>,
+    /// 当前 DTR 引脚状态。与读取线程共享；set_flow_control 写入端口后同步更新，
+    /// 避免 pin_states 事件报告连接时的快照值。
+    pub dtr_state: Arc<AtomicBool>,
+    /// 当前 RTS 引脚状态。与读取线程共享；set_flow_control 写入端口后同步更新。
+    pub rts_state: Arc<AtomicBool>,
 }
 
 // ==================== 模拟串口 ====================
@@ -180,6 +203,8 @@ pub struct SerialManager {
     simulate: bool,
     /// Tauri AppHandle，用于事件推送
     app_handle: Option<AppHandle>,
+    /// 上次成功连接的参数，用于自动重连
+    last_params: HashMap<String, OpenPortArgs>,
 }
 
 impl SerialManager {
@@ -189,6 +214,7 @@ impl SerialManager {
             sim_ports: HashMap::new(),
             simulate: false,
             app_handle: None,
+            last_params: HashMap::new(),
         }
     }
 
@@ -261,6 +287,9 @@ impl SerialManager {
 
         let port_arc = Arc::new(Mutex::new(port));
         let running = Arc::new(AtomicBool::new(true));
+        // DTR/RTS 当前状态：从打开参数初始化，后续由 set_flow_control 更新
+        let dtr_state = Arc::new(AtomicBool::new(args.dtr));
+        let rts_state = Arc::new(AtomicBool::new(args.rts));
 
         // 设置 DTR/RTS
         {
@@ -275,11 +304,18 @@ impl SerialManager {
 
         let port_clone = Arc::clone(&port_arc);
         let running_clone = Arc::clone(&running);
-        let port_id = args.port_id.clone();
+        let thread_port_id = args.port_id.clone();
+        let thread_dtr = Arc::clone(&dtr_state);
+        let thread_rts = Arc::clone(&rts_state);
         let app_handle_clone = app_handle.clone();
 
         let read_thread = thread::spawn(move || {
+            let port_id = thread_port_id;
             let mut buffer = [0u8; 1024];
+            let mut abnormal = false;
+            let mut last_pin_check = Instant::now();
+            let mut last_pin_states: Option<SerialPinStatesEvent> = None;
+
             while running_clone.load(Ordering::Relaxed) {
                 match port_clone.lock() {
                     Ok(mut p) => match p.read(&mut buffer) {
@@ -298,28 +334,67 @@ impl SerialManager {
                                 status: "error".to_string(),
                             };
                             let _ = app_handle_clone.emit("serial:status", status_event);
+                            abnormal = true;
                             break;
                         }
                     },
                     Err(e) => {
                         log::error!("Serial port lock error: {}", e);
+                        abnormal = true;
                         break;
                     }
                 }
+
+                // 每 200ms 轮询一次引脚状态，仅在状态变化时推送。
+                // DTR/RTS 是输出引脚，serialport-rs 未暴露读回 API，因此读取
+                // 与句柄共享的 AtomicBool（set_flow_control 写端口时会同步更新），
+                // 而非连接时的参数快照。
+                if last_pin_check.elapsed() >= Duration::from_millis(200) {
+                    if let Ok(mut p) = port_clone.lock() {
+                        let current = SerialPinStatesEvent {
+                            port_id: port_id.clone(),
+                            dtr: thread_dtr.load(Ordering::Relaxed),
+                            rts: thread_rts.load(Ordering::Relaxed),
+                            cts: p.read_clear_to_send().unwrap_or(false),
+                            dsr: p.read_data_set_ready().unwrap_or(false),
+                            rlsd: p.read_carrier_detect().unwrap_or(false),
+                            ri: p.read_ring_indicator().unwrap_or(false),
+                        };
+                        if last_pin_states.as_ref() != Some(&current) {
+                            let _ = app_handle_clone.emit("serial:pin_states", current.clone());
+                            last_pin_states = Some(current);
+                        }
+                    }
+                    last_pin_check = Instant::now();
+                }
             }
+
             // 读取线程退出时发送断开事件
             let status_event = SerialStatusEvent {
-                port_id,
+                port_id: port_id.clone(),
                 status: "disconnected".to_string(),
             };
             let _ = app_handle_clone.emit("serial:status", status_event);
+
+            // 异常退出时发送一次重连提示，避免每次轮询都产生噪音
+            if abnormal {
+                let hint = SerialReconnectHintEvent {
+                    port_name: port_id,
+                };
+                let _ = app_handle_clone.emit("serial:reconnect_hint", hint);
+            }
         });
 
         let handle = SerialPortHandle {
             port: port_arc,
             running,
             read_thread: Some(read_thread),
+            dtr_state,
+            rts_state,
         };
+
+        // 记录连接参数，用于自动重连
+        self.last_params.insert(args.port_id.clone(), args.clone());
 
         // 发送连接成功事件
         let status_event = SerialStatusEvent {
@@ -410,27 +485,55 @@ impl SerialManager {
         Ok(())
     }
 
-    /// 关闭串口（真实或模拟）
-    pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<()> {
-        if port_id.starts_with("SIM:") {
+    /// 关闭串口（真实或模拟）。
+    /// 停止读取线程并返回其 JoinHandle（若有），由调用方在释放 serial_manager
+    /// 锁之后 join——join 最长可阻塞约 100ms（读取超时），不能在持锁期间进行，
+    /// 否则会卡住所有其他串口命令。
+    pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<thread::JoinHandle<()>>> {
+        let join_handle = if port_id.starts_with("SIM:") {
             if let Some(mut handle) = self.sim_ports.remove(port_id) {
                 handle.running.store(false, Ordering::Relaxed);
                 let _ = handle.tx.send(SimMessage::Stop);
-                if let Some(thread) = handle.read_thread.take() {
-                    let _ = thread.join();
-                }
                 log::info!("Sim port closed: {}", port_id);
+                handle.read_thread.take()
+            } else {
+                None
             }
+        } else if let Some(mut handle) = self.ports.remove(port_id) {
+            handle.running.store(false, Ordering::Relaxed);
+            log::info!("Serial port closed: {}", port_id);
+            handle.read_thread.take()
         } else {
-            if let Some(mut handle) = self.ports.remove(port_id) {
-                handle.running.store(false, Ordering::Relaxed);
-                if let Some(thread) = handle.read_thread.take() {
-                    let _ = thread.join();
-                }
-                log::info!("Serial port closed: {}", port_id);
-            }
+            None
+        };
+        Ok(join_handle)
+    }
+
+    /// 尝试重新连接指定串口。
+    /// 先关闭残留句柄，再校验系统端口列表中存在该端口，最后用上次成功的参数打开。
+    pub fn attempt_reconnect(&mut self, port_id: &str) -> anyhow::Result<()> {
+        if port_id.starts_with("SIM:") {
+            return Err(anyhow::anyhow!("Cannot reconnect simulation port"));
         }
-        Ok(())
+
+        // 关闭残留句柄（如果异常断线后仍被保留）
+        if self.ports.contains_key(port_id) {
+            self.close_port(port_id)?;
+        }
+
+        // 确认端口重新出现在系统列表中
+        let available = self.list_ports()?;
+        if !available.iter().any(|p| p.id == port_id) {
+            return Err(anyhow::anyhow!("Port {} is not available", port_id));
+        }
+
+        let params = self
+            .last_params
+            .get(port_id)
+            .ok_or_else(|| anyhow::anyhow!("No previous connection params for {}", port_id))?
+            .clone();
+
+        self.open_port(params)
     }
 
     /// 向串口发送数据
@@ -489,7 +592,7 @@ impl SerialManager {
 
     /// 修改串口参数（完整）
     pub fn set_params(
-        &self,
+        &mut self,
         port_id: &str,
         baud_rate: u32,
         data_bits: &str,
@@ -514,6 +617,17 @@ impl SerialManager {
         if handshake != "None" {
             port.set_flow_control(parse_flow_control(handshake))?;
         }
+        drop(port);
+
+        // 同步更新重连参数缓存
+        if let Some(params) = self.last_params.get_mut(port_id) {
+            params.baud_rate = baud_rate;
+            params.data_bits = data_bits.parse().unwrap_or(8);
+            params.parity = parity.to_string();
+            params.stop_bits = stop_bits.to_string();
+            params.handshake = handshake.to_string();
+        }
+
         log::info!(
             "Params set for {}: baud={}, data_bits={}, parity={}, stop_bits={}, handshake={}",
             port_id,
@@ -553,6 +667,10 @@ impl SerialManager {
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.write_data_terminal_ready(dtr)?;
         port.write_request_to_send(rts)?;
+        drop(port);
+        // 同步更新共享状态，读取线程下一次 pin 轮询即报告新值
+        handle.dtr_state.store(dtr, Ordering::Relaxed);
+        handle.rts_state.store(rts, Ordering::Relaxed);
         Ok(())
     }
 }

@@ -22,6 +22,10 @@ pub struct AppConfig {
     pub prevent_screen_off: bool,
     pub prevent_sleep: bool,
 
+    // --- 自动重连设置 ---
+    pub auto_reconnect: bool,
+    pub max_retries: u8,
+
     // --- 字体设置 ---
     pub terminal_font: String,
     pub terminal_font_size: u32,
@@ -51,6 +55,22 @@ pub struct AppConfig {
     pub backup_enabled: bool,
     pub backup_interval: u32, // 小时
     pub backup_directory: String,
+
+    // --- 引导设置 ---
+    // #[serde(default)]：旧版本 config.json 缺少此字段时回退为 false，
+    // 避免整个配置反序列化失败而被重置为默认值
+    #[serde(default)]
+    pub has_seen_tour: bool,
+
+    // --- 会话恢复 ---
+    #[serde(default = "default_restore_session")]
+    pub restore_session: bool,
+    #[serde(default)]
+    pub session_snapshot: String,
+}
+
+fn default_restore_session() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -62,6 +82,8 @@ impl Default for AppConfig {
             theme: "dark".to_string(),
             prevent_screen_off: false,
             prevent_sleep: false,
+            auto_reconnect: false,
+            max_retries: 3,
             terminal_font: "Consolas, monospace".to_string(),
             terminal_font_size: 14,
             ui_font: "Inter, sans-serif".to_string(),
@@ -82,6 +104,9 @@ impl Default for AppConfig {
             backup_enabled: false,
             backup_interval: 24,
             backup_directory: String::new(),
+            has_seen_tour: false,
+            restore_session: true,
+            session_snapshot: String::new(),
         }
     }
 }
@@ -160,6 +185,8 @@ mod tests {
         assert_eq!(cfg.theme, "dark");
         assert!(!cfg.prevent_screen_off);
         assert!(!cfg.prevent_sleep);
+        assert!(!cfg.auto_reconnect);
+        assert_eq!(cfg.max_retries, 3);
         assert_eq!(cfg.terminal_font_size, 14);
         assert_eq!(
             cfg.default_baud_rates,
@@ -171,6 +198,41 @@ mod tests {
         assert_eq!(cfg.log_format, "string");
         assert_eq!(cfg.log_split_size_mb, 100);
         assert!(!cfg.backup_enabled);
+        assert!(!cfg.has_seen_tour);
+        assert!(cfg.restore_session);
+        assert!(cfg.session_snapshot.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_json_without_has_seen_tour() {
+        // 旧版本 config.json 不含 hasSeenTour 字段，
+        // 反序列化必须成功并回退为 false（#[serde(default)]），
+        // 否则整个配置会被 unwrap_or_default 重置
+        let mut cfg = AppConfig::default();
+        cfg.has_seen_tour = true;
+        let mut json: serde_json::Value = serde_json::to_value(&cfg).unwrap();
+        json.as_object_mut().unwrap().remove("hasSeenTour");
+        let parsed: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(!parsed.has_seen_tour);
+        assert_eq!(parsed.memory_limit_mb, 1024);
+    }
+
+    #[test]
+    fn test_legacy_json_without_session_fields() {
+        // 旧版本 config.json 不含 restoreSession / sessionSnapshot 字段，
+        // 反序列化必须成功并回退为默认值（true / ""）
+        let mut cfg = AppConfig::default();
+        cfg.restore_session = false;
+        cfg.session_snapshot = "some-data".to_string();
+        let mut json: serde_json::Value = serde_json::to_value(&cfg).unwrap();
+        {
+            let obj = json.as_object_mut().unwrap();
+            obj.remove("restoreSession");
+            obj.remove("sessionSnapshot");
+        }
+        let parsed: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(parsed.restore_session); // default = true
+        assert!(parsed.session_snapshot.is_empty());
     }
 
     #[test]
@@ -207,6 +269,27 @@ mod tests {
         assert!(
             json.contains("terminalFontSize"),
             "missing terminalFontSize in: {}",
+            json
+        );
+        assert!(
+            json.contains("autoReconnect"),
+            "missing autoReconnect in: {}",
+            json
+        );
+        assert!(json.contains("maxRetries"), "missing maxRetries in: {}", json);
+        assert!(
+            json.contains("hasSeenTour"),
+            "missing hasSeenTour in: {}",
+            json
+        );
+        assert!(
+            json.contains("restoreSession"),
+            "missing restoreSession in: {}",
+            json
+        );
+        assert!(
+            json.contains("sessionSnapshot"),
+            "missing sessionSnapshot in: {}",
             json
         );
     }

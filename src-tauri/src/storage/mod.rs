@@ -85,6 +85,16 @@ pub struct ProtocolTemplateRow {
     pub color_footer: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SendHistoryRow {
+    pub id: String,
+    pub port_id: String,
+    pub content: String,
+    pub format: String,
+    pub line_ending: String,
+    pub created_at: String,
+}
+
 // ==================== StorageManager ====================
 
 pub struct StorageManager {
@@ -199,6 +209,15 @@ pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             color_checksum TEXT DEFAULT '#b5cea8',
             color_footer TEXT DEFAULT '#6a9955'
         );
+        CREATE TABLE IF NOT EXISTS send_history (
+            id TEXT PRIMARY KEY,
+            port_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            format TEXT NOT NULL DEFAULT 'string',
+            line_ending TEXT NOT NULL DEFAULT 'None',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_send_history_port_created ON send_history(port_id, created_at DESC);
         "#,
     )
     .execute(pool)
@@ -530,6 +549,76 @@ pub async fn delete_protocol_template_from_db(
     Ok(())
 }
 
+// ==================== 发送历史 ====================
+
+pub async fn list_send_history_from_db(
+    pool: &Pool<Sqlite>,
+    port_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<SendHistoryRow>> {
+    let rows = sqlx::query_as::<_, SendHistoryRow>(
+        "SELECT id, port_id, content, format, line_ending, created_at FROM send_history WHERE port_id = ? ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(port_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn add_send_history_to_db(
+    pool: &Pool<Sqlite>,
+    port_id: &str,
+    content: &str,
+    format: &str,
+    line_ending: &str,
+) -> anyhow::Result<SendHistoryRow> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let created_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    sqlx::query(
+        "INSERT INTO send_history (id, port_id, content, format, line_ending, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(port_id)
+    .bind(content)
+    .bind(format)
+    .bind(line_ending)
+    .bind(&created_at)
+    .execute(pool)
+    .await?;
+
+    // Cap to 50 rows per port: delete oldest beyond the limit.
+    // created_at is not unique; use rowid as tiebreaker so the ORDER BY is
+    // deterministic and the just-inserted row (highest rowid) is never deleted.
+    sqlx::query(
+        "DELETE FROM send_history WHERE port_id = ? AND rowid NOT IN (SELECT rowid FROM send_history WHERE port_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50)",
+    )
+    .bind(port_id)
+    .bind(port_id)
+    .execute(pool)
+    .await?;
+
+    Ok(SendHistoryRow {
+        id,
+        port_id: port_id.to_string(),
+        content: content.to_string(),
+        format: format.to_string(),
+        line_ending: line_ending.to_string(),
+        created_at,
+    })
+}
+
+pub async fn clear_send_history_from_db(
+    pool: &Pool<Sqlite>,
+    port_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM send_history WHERE port_id = ?")
+        .bind(port_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,7 +649,8 @@ mod tests {
         assert!(tables.contains(&"highlight_rule_sets".to_string()));
         assert!(tables.contains(&"highlight_rules".to_string()));
         assert!(tables.contains(&"protocol_templates".to_string()));
-        assert_eq!(tables.len(), 7);
+        assert!(tables.contains(&"send_history".to_string()));
+        assert_eq!(tables.len(), 8);
     }
 
     #[tokio::test]

@@ -43,9 +43,12 @@ pub async fn save_command_set(
     };
     let is_update = args.id.is_some();
     let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // If updating existing set, delete old one first to avoid duplicates
+    // If updating existing set, delete old one first to avoid duplicates.
+    // Propagate delete failure: if old child rows remain, the insert creates duplicates.
     if is_update {
-        let _ = storage::delete_command_set_from_db(&pool, &set_id).await;
+        storage::delete_command_set_from_db(&pool, &set_id)
+            .await
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
     }
     let set = storage::SendCommandSet {
         id: set_id.clone(),
@@ -173,9 +176,12 @@ pub async fn save_highlight_set(
     };
     let is_update = args.id.is_some();
     let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // If updating existing set, delete old one first to avoid duplicates
+    // If updating existing set, delete old one first to avoid duplicates.
+    // Propagate delete failure: if old child rows remain, the insert creates duplicates.
     if is_update {
-        let _ = storage::delete_highlight_set_from_db(&pool, &set_id).await;
+        storage::delete_highlight_set_from_db(&pool, &set_id)
+            .await
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
     }
     let set = storage::HighlightRuleSet {
         id: set_id.clone(),
@@ -360,6 +366,72 @@ pub async fn delete_protocol_template(
         db_pool.clone()
     };
     storage::delete_protocol_template_from_db(&pool, &set_id)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+// ==================== 发送历史 ====================
+
+#[tauri::command]
+pub async fn list_send_history(
+    port_id: String,
+    limit: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<storage::SendHistoryRow>, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::list_send_history_from_db(&pool, &port_id, limit)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn add_send_history(
+    port_id: String,
+    content: String,
+    format: String,
+    line_ending: String,
+    state: State<'_, AppState>,
+) -> Result<storage::SendHistoryRow, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::add_send_history_to_db(&pool, &port_id, &content, &format, &line_ending)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn clear_send_history(
+    port_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::clear_send_history_from_db(&pool, &port_id)
         .await
         .map_err(|e| CommandError::Storage(e.to_string()))
 }

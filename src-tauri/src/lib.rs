@@ -11,6 +11,27 @@ mod system;
 
 use tauri::{Emitter, Manager};
 
+use std::backtrace::Backtrace;
+
+/// 构建崩溃报告文本，用于 panic hook 写入文件并在测试中断言。
+fn format_crash_report(
+    message: &str,
+    location: Option<&std::panic::Location>,
+    backtrace: &Backtrace,
+) -> String {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let loc = location
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "unknown location".to_string());
+    format!(
+        "HyperCom Crash Report\n=====================\n\nTimestamp: {}\nLocation: {}\n\nPanic message:\n{}\n\nBacktrace:\n{}\n",
+        timestamp,
+        loc,
+        message,
+        backtrace
+    )
+}
+
 /// 应用状态结构体
 /// 通过 Tauri State 在各命令间共享
 pub struct AppState {
@@ -47,6 +68,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new().expect("Failed to initialize app state"))
         .invoke_handler(tauri::generate_handler![
             // ===== 串口相关命令 =====
@@ -56,6 +78,7 @@ pub fn run() {
             commands::send_serial_data,
             commands::set_serial_params,
             commands::set_flow_control,
+            commands::attempt_reconnect,
             // ===== 模拟模式命令 =====
             commands::enable_simulation,
             commands::disable_simulation,
@@ -90,6 +113,10 @@ pub fn run() {
             commands::save_protocol_template,
             commands::load_protocol_templates,
             commands::delete_protocol_template,
+            // ===== 发送历史命令 =====
+            commands::list_send_history,
+            commands::add_send_history,
+            commands::clear_send_history,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();
@@ -150,9 +177,70 @@ pub fn run() {
                 }
             });
 
+            // 安装 panic hook：先 flush 日志，再写崩溃报告，最后 abort 终止进程
+            let panic_app_handle = app_handle.clone();
+            std::panic::set_hook(Box::new(move |info| {
+                let message = info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                    .unwrap_or("panic occurred");
+                let location = info.location();
+                let backtrace = Backtrace::force_capture();
+
+                // 尽最大努力 flush 日志，flush 失败不遮蔽原 panic。
+                // 用 try_lock 而非 lock：std::sync::Mutex 不可重入，若 panic 发生在
+                // 已持有 log_manager 锁的线程（如日志写入途中），lock() 会永久阻塞，
+                // 导致 process::abort() 永远无法到达。拿不到锁就跳过 flush——
+                // 崩溃报告比最后一批日志更重要。
+                if let Ok(mut log_mgr) = panic_app_handle.state::<AppState>().log_manager.try_lock() {
+                    let _ = log_mgr.flush_all();
+                }
+
+                let report = format_crash_report(message, location, &backtrace);
+                let crash_dir = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("hypercom")
+                    .join("crash");
+                let _ = std::fs::create_dir_all(&crash_dir);
+                let filename = chrono::Local::now().format("crash-%Y%m%d-%H%M%S.txt").to_string();
+                let crash_path = crash_dir.join(filename);
+                if let Err(e) = std::fs::write(&crash_path, &report) {
+                    eprintln!("Failed to write crash report to {:?}: {}", crash_path, e);
+                }
+
+                eprintln!("{}\n", report);
+                std::process::abort();
+            }));
+
             log::info!("HyperCom setup complete");
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_crash_report_contains_timestamp_message_location_and_backtrace() {
+        let backtrace = Backtrace::force_capture();
+        let report = format_crash_report("test panic message", Some(std::panic::Location::caller()), &backtrace);
+        assert!(report.contains("HyperCom Crash Report"));
+        assert!(report.contains("test panic message"));
+        assert!(report.contains("lib.rs"));
+        assert!(report.contains("Backtrace"));
+        assert!(report.contains("Timestamp:"));
+    }
+
+    #[test]
+    fn test_format_crash_report_falls_back_when_location_missing() {
+        let backtrace = Backtrace::force_capture();
+        let report = format_crash_report("no location", None, &backtrace);
+        assert!(report.contains("unknown location"));
+        assert!(report.contains("no location"));
+    }
 }
