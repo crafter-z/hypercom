@@ -99,6 +99,10 @@ export const serialService = {
     return invoke<void>('set_flow_control', { portId, dtr, rts });
   },
 
+  attemptReconnect: (portId: string): Promise<void> => {
+    return invoke<void>('attempt_reconnect', { portId });
+  },
+
   enableSimulation: (): Promise<void> => {
     return invoke<void>('enable_simulation');
   },
@@ -204,6 +208,22 @@ export interface SerialStatusEvent {
   status: string;
 }
 
+/** 串口自动重连提示事件 payload */
+export interface SerialReconnectHintEvent {
+  port_name: string;
+}
+
+/** 串口引脚状态事件 payload */
+export interface SerialPinStatesEvent {
+  port_id: string;
+  dtr: boolean;
+  rts: boolean;
+  cts: boolean;
+  dsr: boolean;
+  rlsd: boolean;
+  ri: boolean;
+}
+
 export const eventService = {
   onSerialData: (callback: (event: SerialDataEvent) => void) => {
     return listen<SerialDataEvent>('serial:data', (event) => {
@@ -226,6 +246,18 @@ export const eventService = {
   onStorageReady: (callback: () => void) => {
     return listen<void>('storage:ready', () => {
       callback();
+    });
+  },
+
+  onSerialReconnectHint: (callback: (event: SerialReconnectHintEvent) => void) => {
+    return listen<SerialReconnectHintEvent>('serial:reconnect_hint', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  onSerialPinStates: (callback: (event: SerialPinStatesEvent) => void) => {
+    return listen<SerialPinStatesEvent>('serial:pin_states', (event) => {
+      callback(event.payload);
     });
   },
 };
@@ -287,6 +319,33 @@ export interface ProtocolTemplateInfo {
   color_checksum: string;
   color_footer: string;
 }
+
+// ==================== 发送历史命令 ====================
+
+export interface SendHistoryItem {
+  id: string;
+  port_id: string;
+  content: string;
+  format: string;
+  line_ending: string;
+  created_at: string;
+}
+
+export const sendHistoryService = {
+  listSendHistory: (portId: string, limit: number): Promise<SendHistoryItem[]> => {
+    return invoke<SendHistoryItem[]>('list_send_history', { portId, limit });
+  },
+
+  addSendHistory: (portId: string, content: string, format: string, lineEnding: string): Promise<SendHistoryItem> => {
+    return invoke<SendHistoryItem>('add_send_history', { portId, content, format, lineEnding });
+  },
+
+  clearSendHistory: (portId: string): Promise<void> => {
+    return invoke<void>('clear_send_history', { portId });
+  },
+};
+
+// ==================== 存储命令 ====================
 
 export const storageService = {
   saveCommandSet: (args: {
