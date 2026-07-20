@@ -6,6 +6,56 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-07-21 缺陷审计轮)
+
+> 5 路并行探索 agent 审计（Zustand 选择器 / 内存泄漏 / 错误处理 / 类型安全 / Rust 后端），发现并修复 26 项缺陷。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告, `npm run test:run` 158/158, `cargo test --lib` 31/31。Zustand 选择器审计 0 违规。
+
+### Rust 后端
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| CRITICAL | `lib.rs` | panic hook 在持有 `log_manager` 锁时 panic 会死锁（Mutex 非可重入），`abort()` 永不执行 | `.lock()` 改 `.try_lock()`，拿不到锁则跳过 flush |
+| HIGH | `storage/mod.rs` | send_history 50 行上限查询按 `created_at` 排序非确定性，时间戳重复时可能删掉刚插入的行 | 改用 `rowid` 作 tiebreaker + 新增 `(port_id, created_at)` 索引 |
+| HIGH | `commands/storage.rs` | `save_command_set`/`save_highlight_set` 更新路径 `let _ =` 吞掉删除失败 → 子行重复 | 改为 `?` 传播错误 |
+| HIGH | `serial/mod.rs` | 引脚事件上报 DTR/RTS 用连接时的快照，`set_flow_control` 后过期 | 新增 `dtr_state`/`rts_state` `Arc<AtomicBool>`，读线程实时读取 |
+| MEDIUM | `storage/mod.rs` | send_history `created_at` 用 UTC，其余代码用 Local | 改 `chrono::Local::now()` |
+| MEDIUM | `serial/mod.rs` | `close_port` 持 `serial_manager` 锁期间 `thread.join()` 阻塞所有命令 ~100ms | `close_port` 返回 `JoinHandle`，调用方 drop 锁后再 join |
+
+### 前端生命周期 & 竞态
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| CRITICAL | `App.tsx` | `beforeunload` 异步保存会话快照，WebView 可能提前终止 → 快照丢失 | 改为订阅 store 增量防抖保存（1s），beforeunload 降为兜底 |
+| HIGH | `useTauri.ts` | 重连提示监听器注册是异步，快速挂载/卸载时 cleanup 跑在 promise resolve 前 → 监听器永久泄漏 | 保存 pending promise，cleanup 时若未 resolve 则 `.then(u => u())` |
+| HIGH | `TitleBar.tsx` | `onResized` 异步注册同类竞态泄漏 | 加 `cancelled` 标志，resolve 后检查 |
+| MEDIUM | `useTauri.ts` | 协议重组器仅按 port_id 缓存，切换模板后仍用旧模板解析 | 缓存 key 改 `portId:templateId` |
+| LOW | `useTauri.ts` | 重连循环首次尝试前也 sleep 500ms | 仅 `attempt > 0` 时 sleep |
+| LOW | `useTauri.ts` | 发送历史去重只看 content，hex "AA" 与 string "AA" 互相覆盖 | 去重 key 加 format |
+| LOW | `GeneralSettings.tsx` | maxRetries 允许 0 → 自动重连空转 | 下限改 1 |
+
+### 前端逻辑 & 健壮性
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| MEDIUM | `useAppStore.ts` | `reorderPorts`/`reorderTabs` 无边界检查，越界 splice 插入 undefined 损坏数组 | 加边界守卫提前返回 |
+| MEDIUM | `useAppStore.ts` | 会话恢复不校验 tree 叶子 tabIds 与有效 tab 对应，可能渲染幽灵标签 | 恢复时按有效 tab 过滤 tabIds + pruneTree + focusedPaneId 兜底 |
+| LOW | `TerminalView.tsx` | 过滤器隐藏全部匹配时 jumpToMatch 指向不可见行 | 无可见匹配时不更新 currentMatch |
+| LOW | `timeFormat.ts` | 相对时间戳负 delta 输出 "+-5ms" | `Math.max(0, delta)` |
+| LOW | `sendUtils.ts` | HEX 奇数长度静默丢弃末字符 | 末字符补前导 0 |
+
+### 错误处理（24 处用户可见操作静默失败 → 补 Toast）
+
+| 文件 | 修复 |
+|------|------|
+| `useTauri.ts` | closePort / resetConfig / useSimulation / startLogging 失败补 `notifyError`；pinStates setup 补 catch |
+| `App.tsx` | preventScreenOff / preventSleep 失败补 `notifyError` |
+| `ViewStrip.tsx` | 日志另存/打开文件/打开目录 3 处补 `notifyError` |
+| `HighlightSettings/CommandSettings/ProtocolSettings` | 各 2 处（删除+保存）补 `notifyError` |
+| `OperationPanel.tsx` | setSerialParams / setFlowControl 补 `notifyError` |
+| `Pane.tsx` | closePort 补 `notifyError` |
+| `useCyclicSend.ts` | 循环发送失败补 `notifyError`（用 ref 防重复 toast） |
+| `TerminalView.tsx` | 导出 TXT/CSV 失败补 `notifyError` |
+
 ## 已修复 (2026-06 重构批次)
 
 > 12 个重构提交, 修复 20 项缺陷。所有验证通过: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告, `npm run test:run` 71/71, `cargo test --lib` 24/24。
