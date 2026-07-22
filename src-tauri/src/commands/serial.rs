@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use super::CommandError;
 use crate::{serial, AppState};
@@ -110,6 +110,76 @@ pub fn send_serial_data(args: SendDataArgs, state: State<AppState>) -> Result<us
         let _ = log_mgr.write(&args.port_id, &timestamp, "TX", &log_data);
     }
     Ok(n)
+}
+
+/// 文件发送进度事件 payload
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileProgressPayload {
+    pub port_id: String,
+    pub sent_bytes: usize,
+    pub total_bytes: usize,
+    pub done: bool,
+}
+
+/// 发送文件参数
+#[derive(Debug, Deserialize)]
+pub struct SendFileArgs {
+    pub port_id: String,
+    pub path: String,
+    pub chunk_size: usize,
+    pub delay_ms: u64,
+}
+
+/// 发送文件内容到串口（分块发送 + 进度事件 + 间隔延时）
+#[tauri::command]
+pub async fn send_file(
+    args: SendFileArgs,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<usize, CommandError> {
+    let data = std::fs::read(&args.path)
+        .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
+    let total = data.len();
+    if total == 0 {
+        return Ok(0);
+    }
+    let chunk_size = args.chunk_size.max(1);
+    let mut sent = 0usize;
+    for chunk in data.chunks(chunk_size) {
+        // 锁作用域仅限写入本身，释放后再 await（sleep）
+        {
+            let manager = state
+                .serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            manager
+                .write_raw(&args.port_id, chunk)
+                .map_err(|e| CommandError::Serial(e.to_string()))?;
+        }
+        sent += chunk.len();
+        let _ = app.emit(
+            "serial:file_progress",
+            FileProgressPayload {
+                port_id: args.port_id.clone(),
+                sent_bytes: sent,
+                total_bytes: total,
+                done: false,
+            },
+        );
+        if args.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
+        }
+    }
+    let _ = app.emit(
+        "serial:file_progress",
+        FileProgressPayload {
+            port_id: args.port_id.clone(),
+            sent_bytes: sent,
+            total_bytes: total,
+            done: true,
+        },
+    );
+    Ok(sent)
 }
 
 /// 设置串口参数（波特率、数据位等）

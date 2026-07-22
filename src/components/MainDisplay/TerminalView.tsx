@@ -7,15 +7,16 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { save } from '@tauri-apps/plugin-dialog';
+import { save, open } from '@tauri-apps/plugin-dialog';
 import { logService } from '../../services/tauri';
 import { hexToString, stringToHex } from '../../utils/hexUtils';
 import { formatTerminalTimestamp, isSameRound } from '../../utils/timeFormat';
 import { useTranslation } from 'react-i18next';
-import { X, ChevronUp, ChevronDown, Type, Pause, Play, Filter } from 'lucide-react';
+import { X, ChevronUp, ChevronDown, Type, Pause, Play, Filter, History, Square } from 'lucide-react';
 import { findMatches, formatLineForCopy } from './terminalSearch';
 import { filterLines, type DirectionFilter } from '../../utils/lineFilter';
 import { notifyError } from '../../stores/useToastStore';
+import { useLogReplay } from './hooks/useLogReplay';
 
 interface TerminalViewProps {
   portId: string;
@@ -154,6 +155,11 @@ interface FilterBarProps {
   showMatchCount: boolean; // true when the debounced keyword is non-empty
   paused: boolean;
   onTogglePause: () => void;
+  isReplaying: boolean;
+  replaySpeed: number;
+  onReplaySpeedChange: (s: number) => void;
+  onStartReplay: () => void;
+  onStopReplay: () => void;
 }
 
 const FilterBar: React.FC<FilterBarProps> = ({
@@ -165,6 +171,11 @@ const FilterBar: React.FC<FilterBarProps> = ({
   showMatchCount,
   paused,
   onTogglePause,
+  isReplaying,
+  replaySpeed,
+  onReplaySpeedChange,
+  onStartReplay,
+  onStopReplay,
 }) => {
   const { t } = useTranslation();
 
@@ -222,6 +233,28 @@ const FilterBar: React.FC<FilterBarProps> = ({
       >
         {paused ? <Play size={13} /> : <Pause size={13} />}
       </button>
+      <select
+        className="select"
+        style={{ fontSize: 10, padding: '1px 4px', height: 22, width: 52 }}
+        value={replaySpeed}
+        onChange={(e) => onReplaySpeedChange(Number(e.target.value))}
+        title={t('terminal.replay.speedTooltip')}
+        disabled={isReplaying}
+      >
+        <option value={1}>1×</option>
+        <option value={4}>4×</option>
+        <option value={16}>16×</option>
+        <option value={0}>{t('terminal.replay.speedMax')}</option>
+      </select>
+      <button
+        type="button"
+        className={`terminal-filter-btn${isReplaying ? ' active' : ''}`}
+        onClick={isReplaying ? onStopReplay : onStartReplay}
+        title={isReplaying ? t('terminal.replay.stop') : t('terminal.replay.start')}
+        aria-pressed={isReplaying}
+      >
+        {isReplaying ? <Square size={13} /> : <History size={13} />}
+      </button>
     </div>
   );
 };
@@ -276,6 +309,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   // original indices, so filteredIndices still maps into `lines` correctly.
   const [paused, setPaused] = useState(false);
   const [frozenCount, setFrozenCount] = useState<number | null>(null);
+
+  // ---- 日志回放状态 (UI-local) ----
+  const { isReplaying, startReplay, stopReplay } = useLogReplay(portId);
+  const [replaySpeed, setReplaySpeed] = useState(4);
+
+  const handleStartReplay = useCallback(async () => {
+    const path = await open({
+      multiple: false,
+      filters: [{ name: 'Log', extensions: ['log', 'txt'] }],
+    });
+    if (!path || typeof path !== 'string') return;
+    await startReplay(path, replaySpeed);
+  }, [startReplay, replaySpeed]);
 
   const visibleLines = useMemo(
     () => (paused && frozenCount !== null ? lines.slice(0, frozenCount) : lines),
@@ -649,6 +695,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
         showMatchCount={debouncedKeyword.trim().length > 0}
         paused={paused}
         onTogglePause={togglePause}
+        isReplaying={isReplaying}
+        replaySpeed={replaySpeed}
+        onReplaySpeedChange={setReplaySpeed}
+        onStartReplay={handleStartReplay}
+        onStopReplay={stopReplay}
       />
       {searchOpen && (
         <SearchBar

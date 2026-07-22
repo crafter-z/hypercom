@@ -1,11 +1,14 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useAppStore } from '../../stores/useAppStore';
-import { Send, Cable, Eraser, CornerDownLeft, TextCursorInput, Trash2, Plus } from 'lucide-react';
+import { Send, Cable, Eraser, CornerDownLeft, TextCursorInput, Trash2, Plus, FileUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { open } from '@tauri-apps/plugin-dialog';
 import type { LineEnding } from '../../types';
-import type { SendHistoryItem } from '../../services/tauri';
+import type { SendHistoryItem, FileProgressPayload } from '../../services/tauri';
+import { serialService, eventService } from '../../services/tauri';
+import { notifyError, notifySuccess } from '../../stores/useToastStore';
 import { computeByteCount, formatLineEndingHex } from '../../utils/sendUtils';
 
 export interface SendSectionProps {
@@ -47,6 +50,30 @@ const SendSection: React.FC<SendSectionProps> = ({
   const toggleConfigModal = useAppStore(s => s.toggleConfigModal);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [fileProgress, setFileProgress] = useState<{ sent: number; total: number } | null>(null);
+
+  // 文件发送进度事件订阅（异步注册竞态保护：参考 TitleBar onResized 模式）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    eventService
+      .onFileProgress((p: FileProgressPayload) => {
+        if (p.done) {
+          setFileProgress(null);
+        } else {
+          setFileProgress({ sent: p.sent_bytes, total: p.total_bytes });
+        }
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      })
+      .catch((e) => console.debug('[SendSection] onFileProgress failed:', e));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   const byteCount = useMemo(
     () => computeByteCount(sendInput, sendIsHex, encoding, sendAppendLineEnding),
@@ -92,6 +119,20 @@ const SendSection: React.FC<SendSectionProps> = ({
   const handleClearHistory = async () => {
     if (!activeTabId) return;
     await clearHistory(activeTabId);
+  };
+
+  const handleSendFile = async () => {
+    if (!activeTabId) return;
+    const path = await open({ multiple: false });
+    if (!path || typeof path !== 'string') return;
+    try {
+      setFileProgress({ sent: 0, total: 0 });
+      await serialService.sendFile({ portId: activeTabId, path, chunkSize: 1024, delayMs: 10 });
+      notifySuccess('sendSection.file.sent');
+    } catch (e) {
+      setFileProgress(null);
+      notifyError(e);
+    }
   };
 
   const insertNewlineAtCursor = () => {
@@ -257,6 +298,14 @@ const SendSection: React.FC<SendSectionProps> = ({
         </button>
         <button
           className="btn"
+          title={t('sendSection.file.button')}
+          onClick={handleSendFile}
+          disabled={!isConnected || fileProgress !== null}
+        >
+          <FileUp size={13} /> {t('sendSection.file.button')}
+        </button>
+        <button
+          className="btn"
           title={t('sendSection.clearButton')}
           onClick={handleClear}
           disabled={!isPortActive}
@@ -264,6 +313,24 @@ const SendSection: React.FC<SendSectionProps> = ({
           <Eraser size={13} /> {t('sendSection.clearButton')}
         </button>
       </div>
+
+      {fileProgress && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+          <div style={{ flex: 1, height: 6, borderRadius: 3, background: 'var(--bg-secondary)', overflow: 'hidden' }}>
+            <div
+              style={{
+                width: `${fileProgress.total > 0 ? Math.round((fileProgress.sent / fileProgress.total) * 100) : 0}%`,
+                height: '100%',
+                background: 'var(--text-link)',
+                transition: 'width 0.1s linear',
+              }}
+            />
+          </div>
+          <span style={{ fontSize: 10, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+            {fileProgress.sent} / {fileProgress.total} B
+          </span>
+        </div>
+      )}
     </div>
   );
 };

@@ -590,6 +590,42 @@ impl SerialManager {
         Ok(n)
     }
 
+    /// 向串口写入原始字节（不做 HEX 解析、不附加行结束符）。用于文件发送。
+    /// SIM 端口将字节序列转为 HEX 字符串回显，便于无硬件测试。
+    pub fn write_raw(&self, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
+        if port_id.starts_with("SIM:") {
+            let handle = self
+                .sim_ports
+                .get(port_id)
+                .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
+            let hex_str = bytes
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            handle
+                .tx
+                .send(SimMessage::Echo {
+                    data: hex_str,
+                    is_hex: true,
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
+            return Ok(bytes.len());
+        }
+
+        let handle = self
+            .ports
+            .get(port_id)
+            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
+        let mut port = handle
+            .port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let n = port.write(bytes)?;
+        port.flush()?;
+        Ok(n)
+    }
+
     /// 修改串口参数（完整）
     pub fn set_params(
         &mut self,

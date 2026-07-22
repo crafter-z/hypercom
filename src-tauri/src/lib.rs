@@ -76,6 +76,7 @@ pub fn run() {
             commands::open_serial_port,
             commands::close_serial_port,
             commands::send_serial_data,
+            commands::send_file,
             commands::set_serial_params,
             commands::set_flow_control,
             commands::attempt_reconnect,
