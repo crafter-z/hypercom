@@ -24,9 +24,14 @@ function flexDirectionFor(direction: SplitDirection): 'row' | 'column' {
   return direction === 'horizontal' ? 'column' : 'row';
 }
 
-/** ResizeHandle 的 direction 与 flex 方向相反 */
+/**
+ * 分隔条方向与分屏方向一致：'vertical' 分屏（左右并排）用竖向分隔条
+ * （width:5, col-resize, 拖 X）；'horizontal' 分屏（上下堆叠）用横向
+ * 分隔条（height:5, row-resize, 拖 Y）。此前返回相反方向，导致并排
+ * 分屏时分隔条渲染成 100% 宽的横条，整个显示区溢出错乱。
+ */
 function resizeHandleDirection(direction: SplitDirection): 'horizontal' | 'vertical' {
-  return direction === 'horizontal' ? 'vertical' : 'horizontal';
+  return direction;
 }
 
 const MainDisplay: React.FC = () => {
@@ -67,22 +72,19 @@ const MainDisplay: React.FC = () => {
     node: PaneNode,
     parentBranch: BranchPane | null,
   ): React.ReactNode => {
-    // flex-basis: 当节点处于分支内时按 size 比例展开；根节点 flex:1
+    // flex-basis: 当节点处于分支内时按 size 比例展开；根节点 flex:1。
+    // flex-shrink 取 1（而非 0）：兄弟节点之间还有 5px 分隔条，百分比
+    // 之和加上分隔条会略超 100%，允许收缩才能刚好填满而不溢出裁切。
     const flexBasis = parentBranch
-      ? `0 0 ${(node.size * 100).toFixed(2)}%`
+      ? `0 1 ${(node.size * 100).toFixed(2)}%`
       : '1';
 
     if (node.type === 'leaf') {
       return (
         <div
           key={node.id}
-          style={{
-            flex: flexBasis,
-            display: 'flex',
-            overflow: 'hidden',
-            minWidth: 0,
-            minHeight: 0,
-          }}
+          className="pane-node"
+          style={{ flex: flexBasis }}
         >
           <Pane
             paneId={node.id}
@@ -102,14 +104,8 @@ const MainDisplay: React.FC = () => {
     return (
       <div
         key={branch.id}
-        style={{
-          flex: flexBasis,
-          display: 'flex',
-          flexDirection: flexDirectionFor(branch.direction),
-          overflow: 'hidden',
-          minWidth: 0,
-          minHeight: 0,
-        }}
+        className={`pane-branch pane-branch-${flexDirectionFor(branch.direction)}`}
+        style={{ flex: flexBasis }}
       >
         {children.map((child, idx) => {
           const siblings = children;
@@ -150,9 +146,7 @@ const MainDisplay: React.FC = () => {
   }, [focusedPaneId, isMultiPane, setFocusedPane, resizeChildren]);
 
   const panesLayout = (
-    <div ref={containerRef} style={{
-      flex: 1, display: 'flex', overflow: 'hidden', minWidth: 0, minHeight: 0,
-    }}>
+    <div ref={containerRef} className="panes-layout">
       {renderNode(paneTree, null)}
     </div>
   );

@@ -10,16 +10,46 @@
 .main-display-toolbar {
   display: flex;
   align-items: center;
+  height: var(--toolbar-height);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
-  padding: 2px 8px;
-  gap: 4px;
+  box-shadow: var(--edge-top);
+  padding: 0 var(--space-2);
+  gap: var(--space-1);
+  flex-shrink: 0;
 }
 
 .main-display-info {
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
-  margin-left: 4px;
+  margin-left: var(--space-1);
+}
+
+/* ---- Pane-tree flex scaffolding ----
+ * Static layout lives here; only each node's live `flex` fraction (from
+ * the PaneNode tree) stays inline in MainDisplay.tsx. */
+.panes-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane-node,
+.pane-branch {
+  display: flex;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane-branch-row {
+  flex-direction: row;
+}
+
+.pane-branch-column {
+  flex-direction: column;
 }
 
 .pane-container-inner {
@@ -44,7 +74,8 @@
   z-index: 10;
 }
 
+/* (0,2,0) beats the base rule above — no !important needed. */
 .pane-resize-handle:hover,
 .pane-resize-handle.dragging {
-  background: var(--accent-color) !important;
+  background: var(--accent-color);
 }
