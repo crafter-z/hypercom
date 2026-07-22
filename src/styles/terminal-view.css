@@ -1,4 +1,8 @@
-/* ==================== Terminal ==================== */
+/* ==================== Terminal ====================
+ * The instrument core. Deepest surface in the app (--bg-primary), monospace
+ * voice, TX/RX direction coloring from --terminal-tx-color/--terminal-rx-color.
+ * Spacing/type draw exclusively from the base.css token scales.
+ */
 .terminal-view-container {
   display: flex;
   flex-direction: column;
@@ -11,7 +15,7 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--bg-primary);
   font-family: var(--font-terminal);
   font-size: var(--font-size-terminal);
@@ -22,8 +26,8 @@
 
 .terminal-line {
   display: flex;
-  gap: 8px;
-  padding: 1px 0;
+  gap: var(--space-2);
+  padding: 1px 0; /* optical row breathing — deliberately below the 4px scale */
 }
 
 .terminal-timestamp {
@@ -40,9 +44,9 @@
 }
 
 .terminal-direction {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   flex-shrink: 0;
-  min-width: 24px;
+  min-width: var(--space-6);
   user-select: none;
   font-size: calc(var(--font-size-terminal) * 0.85);
 }
@@ -52,51 +56,23 @@
   white-space: pre-wrap;
 }
 
-.terminal-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 2px 12px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.terminal-toolbar-title {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.terminal-toolbar-info {
-  color: var(--text-secondary);
-}
-
-.terminal-toolbar-label {
-  color: var(--text-secondary);
-}
-
-.terminal-toolbar-select {
-  font-size: 11px;
-  padding: 1px 16px 1px 4px;
-}
-
+/* ==================== Empty State ==================== */
 .terminal-empty-state {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .terminal-empty-state.drop-active {
   background: var(--bg-active);
   color: var(--accent-color);
-  outline: 2px dashed var(--accent-color, #4fc3f7);
-  outline-offset: -4px;
+  outline: 2px dashed var(--accent-color);
+  outline-offset: calc(-1 * var(--space-1));
 }
 
 .empty-state-icon {
@@ -105,18 +81,67 @@
 }
 
 .empty-state-text {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
+}
+
+/* ==================== Instrument Strips (shared) ====================
+ * FilterBar / SearchBar / protocol bar are compact strips raised one
+ * surface above the terminal, edged with the inset top highlight.
+ * Buttons, inputs, segmented controls and numeric readouts come from the
+ * base.css primitives (.icon-btn / .toolbar-input / .segmented / .chip) —
+ * this file only adds strip layout + terminal-specific modifiers.
+ */
+
+/* Compact select for use inside strips (encoding, replay speed, protocol). */
+.terminal-bar-select {
+  height: 24px;
+  padding: 0 var(--space-6) 0 var(--space-2);
+  font-size: var(--text-2xs);
+  border-radius: var(--radius-sm);
+}
+
+/* Label + control cluster inside a strip. */
+.terminal-bar-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+/* Numeric readouts (.chip) flip to the error color when a search/filter
+ * returns nothing — the strip's "no signal" state. */
+.terminal-filter-count.no-results,
+.terminal-search-counter.no-results {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+/* Protocol template picker strip (rendered only when templates exist). */
+.terminal-protocol-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: var(--edge-top);
+  flex-shrink: 0;
+}
+
+.terminal-protocol-bar .terminal-bar-select {
+  width: 150px;
 }
 
 /* ==================== Terminal Filter Bar ==================== */
 .terminal-filter-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
+  box-shadow: var(--edge-top);
   flex-shrink: 0;
 }
 
@@ -126,119 +151,16 @@
   flex-shrink: 0;
 }
 
-/* Direction segmented control (All / TX / RX) */
-.terminal-filter-segment {
-  display: inline-flex;
-  align-items: stretch;
-  border: 1px solid var(--border-color);
-  border-radius: var(--border-radius);
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.terminal-filter-seg-btn {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 8px;
-  border: none;
-  border-right: 1px solid var(--border-color);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-family: var(--font-ui);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.terminal-filter-seg-btn:last-child {
-  border-right: none;
-}
-
-.terminal-filter-seg-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.terminal-filter-seg-btn.active {
-  background: var(--bg-active);
-  color: var(--accent-color);
-  font-weight: 600;
-}
-
-.terminal-filter-input {
-  flex: 0 1 200px;
-  min-width: 90px;
-  height: 22px;
-  padding: 0 6px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--border-radius);
-  background: var(--bg-input);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-family: var(--font-ui);
-  outline: none;
-  transition: border-color var(--transition-fast);
-}
-
-.terminal-filter-input:focus {
-  border-color: var(--accent-color);
-}
-
-.terminal-filter-input::placeholder {
-  color: var(--text-secondary);
-}
-
-.terminal-filter-count {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.terminal-filter-count.no-results {
-  color: var(--text-error);
-}
-
 .terminal-filter-spacer {
   flex: 1;
-}
-
-/* Pause / resume toggle */
-.terminal-filter-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--border-radius);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all var(--transition-fast);
-}
-
-.terminal-filter-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.terminal-filter-btn.active {
-  background: var(--bg-active);
-  color: var(--text-warning);
-  border-color: var(--text-warning);
 }
 
 /* "Paused" indicator with a soft pulse so the frozen state reads at a glance */
 .terminal-filter-paused {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
   color: var(--text-warning);
   white-space: nowrap;
   user-select: none;
@@ -261,78 +183,25 @@
 .terminal-search-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
+  box-shadow: var(--edge-top);
   flex-shrink: 0;
 }
 
+/* Search field stretches to fill the strip; the .toolbar-input base caps
+ * generic toolbar fields at 200px. */
 .terminal-search-input {
   flex: 1;
-  min-width: 80px;
-  height: 22px;
-  padding: 0 6px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--border-radius);
-  background: var(--bg-input);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-family: var(--font-ui);
-  outline: none;
-  transition: border-color var(--transition-fast);
 }
 
-.terminal-search-input:focus {
-  border-color: var(--accent-color);
-}
-
-.terminal-search-input::placeholder {
-  color: var(--text-secondary);
-}
-
+/* Search position readout — held at a steady width to avoid strip jitter
+ * while stepping through matches. */
 .terminal-search-counter {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
   min-width: 36px;
-  text-align: center;
-}
-
-.terminal-search-counter.no-results {
-  color: var(--text-error);
-}
-
-.terminal-search-btn {
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--border-radius);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.terminal-search-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.terminal-search-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.terminal-search-btn.active {
-  background: var(--bg-active);
-  color: var(--accent-color);
-  border-color: var(--accent-color);
 }
 
 /* ==================== Terminal Row Selection / Match ==================== */
