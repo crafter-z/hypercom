@@ -1,10 +1,17 @@
-/* ==================== Sidebar ==================== */
+/* ==================== Sidebar ====================
+ * The port rack. Reads as a raised instrument panel beside the terminal:
+ * --bg-sidebar steps up from --bg-primary, control strips step up again
+ * to --bg-tertiary, and --edge-top gives raised strips a hairline light
+ * edge. Connection state = pulsing .status-dot + left accent, never
+ * loud fills.
+ */
 .sidebar {
   height: 100%;
-  background: var(--bg-sidebar);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-color);
   user-select: none;
 }
 
@@ -22,147 +29,145 @@
   background: var(--accent-color);
 }
 
+/* ---- Toolbar ---- */
 .sidebar-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px;
-  background: var(--bg-secondary);
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border-color);
+  box-shadow: var(--edge-top);
 }
 
+/* Typography comes from .eyebrow; this only clips overflow. */
 .sidebar-toolbar-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .sidebar-toolbar-actions {
   display: flex;
-  gap: 2px;
   align-items: center;
+  gap: var(--space-1);
 }
 
-.sidebar-toolbar-sep {
-  width: 1px;
-  height: 14px;
-  background: var(--border-color);
-  margin: 0 4px;
-  flex-shrink: 0;
-}
-
+/* ---- Search ---- */
 .sidebar-search {
+  position: relative;
   display: flex;
   align-items: center;
-  padding: 6px 8px;
+  padding: var(--space-1) var(--space-2);
   border-bottom: 1px solid var(--border-color);
-  position: relative;
 }
 
 .sidebar-search-icon {
   position: absolute;
-  left: 14px;
+  left: calc(var(--space-2) + var(--space-2)); /* search padding + input padding */
   color: var(--text-secondary);
   pointer-events: none;
 }
 
+/* .toolbar-input (base) sized to fill the row, room for icon + clear. */
 .sidebar-search-input {
   width: 100%;
-  padding: 4px 8px 4px 28px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--border-radius);
-  background: var(--bg-input);
-  color: var(--text-primary);
-  font-size: 12px;
-  outline: none;
-  transition: border-color var(--transition-fast);
-}
-
-.sidebar-search-input:focus {
-  border-color: var(--accent-color);
-}
-
-.sidebar-search-input::placeholder {
-  color: var(--text-secondary);
+  flex: 1 1 auto;
+  padding-left: var(--space-7);
+  padding-right: var(--space-6);
 }
 
 .sidebar-search-clear {
   position: absolute;
-  right: 12px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--text-secondary);
+  right: calc(var(--space-2) + var(--space-1));
   display: flex;
   align-items: center;
   padding: 2px;
-  border-radius: 2px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--transition-fast);
 }
 
 .sidebar-search-clear:hover {
   color: var(--text-primary);
 }
 
+/* ---- List / sections ---- */
 .sidebar-list {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding-top: var(--space-1);
 }
 
 .sidebar-section {
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
+/* Typography comes from .eyebrow; this is just the inset. */
 .sidebar-section-header {
-  padding: 3px 10px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-tertiary);
+  padding: var(--space-1) var(--space-3);
 }
 
 .sidebar-add-group {
-  padding: 8px 10px;
+  padding: var(--space-2);
 }
 
+/* Dashed "empty slot" affordance — quieter than a solid button. */
 .sidebar-add-group-btn {
   width: 100%;
-  display: flex;
-  align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-1);
+  border-style: dashed;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 
 /* ==================== Port Item ==================== */
 .port-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
-  cursor: pointer;
-  transition: background var(--transition-fast);
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
   border-left: 3px solid transparent;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .port-item:hover {
   background: var(--bg-hover);
+  border-left-color: var(--accent-emphasis);
+}
+
+/* A live link locks the left accent to the link color; the pulsing
+   .status-dot (base.css) carries the heartbeat. */
+.port-item.connected,
+.port-item.connected:hover {
+  border-left-color: var(--status-connected);
 }
 
 .port-item-drag {
-  cursor: grab;
   display: flex;
   align-items: center;
-  opacity: 0.4;
-  padding: 2px;
   flex-shrink: 0;
+  padding: 2px 0;
+  color: var(--text-secondary);
+  opacity: 0.35;
+  cursor: grab;
+  transition: opacity var(--transition-fast);
 }
+
 .port-item-drag:hover { opacity: 0.8; }
 .port-item-drag:active { cursor: grabbing; }
 
-.port-item-status {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+/* base.css ships .status-dot.{disconnected,error,connected}; the rack
+   also surfaces the transitional state. */
+.port-item .status-dot.connecting {
+  background: var(--status-connecting);
 }
 
 .port-item-info {
@@ -173,56 +178,74 @@
 .port-item-title {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
 .port-item-name {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
   color: var(--text-primary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: color var(--transition-fast);
+}
+
+.port-item:hover .port-item-name {
+  color: var(--text-active);
 }
 
 .port-item-alias {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .port-item-badge {
-  font-size: 9px;
-  color: var(--text-secondary);
+  flex-shrink: 0;
+  padding: 0 var(--space-1);
   border: 1px solid var(--border-color);
-  border-radius: 2px;
-  padding: 0 3px;
-  line-height: 1;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  color: var(--text-secondary);
 }
 
+.port-item-badge.sim {
+  color: var(--accent-color);
+  border-color: var(--accent-emphasis);
+}
+
+/* Quiet secondary monospace — state + line coding, nothing louder. */
 .port-item-meta {
   display: flex;
-  gap: 6px;
-  font-size: 10px;
+  gap: var(--space-2);
+  margin-top: 1px;
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
-  margin-top: 2px;
-}
-
-.port-item-baud {
-  font-size: 10px;
-  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .port-connect-btn {
   color: var(--text-secondary);
-  transition: color var(--transition-fast);
+}
+
+.port-connect-btn:hover {
+  color: var(--accent-color);
 }
 
 .port-connect-btn.connected {
   color: var(--status-connected);
 }
 
-.port-connect-btn:not(.connected) {
-  color: var(--status-disconnected);
+/* Hovering a live link hints at what the click will do: drop it. */
+.port-connect-btn.connected:hover {
+  color: var(--status-error);
 }
 
 /* ==================== Port Group ==================== */
@@ -231,19 +254,19 @@
 }
 
 .port-group.drop-active {
-  outline: 2px dashed var(--accent-color, #4fc3f7);
+  outline: 2px dashed var(--accent-color);
   outline-offset: -2px;
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-sm);
 }
 
 .port-group-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  cursor: pointer;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
   transition: background var(--transition-fast);
 }
 
@@ -252,37 +275,53 @@
 }
 
 .port-group-chevron {
-  transition: transform 0.2s;
   flex-shrink: 0;
   color: var(--text-secondary);
+  transition: transform var(--transition-normal);
 }
 
+/* Typography comes from .eyebrow; this handles the flex slot. */
 .port-group-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .port-group-count {
-  font-size: 10px;
+  flex-shrink: 0;
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  transition: color var(--transition-fast);
 }
 
-.port-group-list {
-  /* Sub-items rendered as port-item */
+/* The count lights up when anything in the group is live. */
+.port-group-count.has-connected {
+  color: var(--status-connected);
+}
+
+/* Inline rename field sits inside the header strip — compact. */
+.port-group-rename-input {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 2px var(--space-1);
+  font-size: var(--text-sm);
 }
 
 /* ==================== Empty-State Guide Card ==================== */
 .guide-card {
   position: relative;
-  margin: 10px;
-  padding: 16px 12px 12px;
+  margin: var(--space-3);
+  padding: var(--space-4) var(--space-3) var(--space-3);
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 8px;
+  gap: var(--space-2);
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
   background: linear-gradient(160deg, var(--bg-tertiary), var(--bg-secondary));
@@ -320,13 +359,13 @@
 }
 
 .guide-card-title {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
   color: var(--text-active);
 }
 
 .guide-card-hint {
-  font-size: 11px;
+  font-size: var(--text-xs);
   line-height: 1.65;
   color: var(--text-secondary);
 }
@@ -334,7 +373,8 @@
 .guide-card-sim-btn {
   width: 100%;
   margin-top: 2px;
-  transition: transform var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+  transition: transform var(--transition-fast), background var(--transition-fast),
+              border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .guide-card-sim-btn:hover {
@@ -348,10 +388,10 @@
 
 .guide-card-quickstart-link {
   margin-top: 2px;
-  padding: 2px 4px;
+  padding: 2px var(--space-1);
   background: none;
   border: none;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-link);
   cursor: pointer;
   opacity: 0.85;
@@ -388,10 +428,11 @@
 .guide-quickstart-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-tertiary);
+  box-shadow: var(--edge-top);
 }
 
 .guide-quickstart-header-icon {
@@ -399,14 +440,14 @@
 }
 
 .guide-quickstart-title {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
   color: var(--text-active);
 }
 
 .guide-quickstart-list {
   list-style: none;
-  padding: 8px;
+  padding: var(--space-2);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -415,8 +456,8 @@
 .guide-quickstart-item {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 8px;
+  gap: var(--space-3);
+  padding: var(--space-2);
   border-radius: var(--border-radius);
   transition: background var(--transition-fast);
 }
@@ -438,13 +479,13 @@
 }
 
 .guide-quickstart-item-title {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
   color: var(--text-primary);
 }
 
 .guide-quickstart-item-body {
-  font-size: 11px;
+  font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-secondary);
   margin-top: 2px;
@@ -453,5 +494,5 @@
 .guide-quickstart-footer {
   display: flex;
   justify-content: flex-end;
-  padding: 10px 16px 14px;
+  padding: var(--space-3) var(--space-4);
 }

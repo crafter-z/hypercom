@@ -5,8 +5,8 @@ import type { SerialPort, PortGroup } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
   Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
-  ChevronRight, Plus, X, Search, FlaskConical,
-  PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2
+  ChevronRight, Plus, X, Search, FlaskConical, Ellipsis,
+  PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
 } from 'lucide-react';
 import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks/useTauri';
 import {
@@ -27,6 +27,14 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
+/**
+ * Sidebar toolbar — the rack's control strip.
+ *
+ * Only high-frequency actions live here visibly (simulation toggle,
+ * refresh). Everything low-frequency (open/close all, show hidden,
+ * sort, save layout) folds into a single overflow menu so the strip
+ * stays at ≤4 controls.
+ */
 const SidebarToolbar: React.FC<{
   showHidden: boolean;
   onToggleHidden: () => void;
@@ -39,32 +47,47 @@ const SidebarToolbar: React.FC<{
   onSaveLayout: () => void;
 }> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort, onSaveLayout }) => {
   const { t } = useTranslation();
+  const { show, element } = useContextMenu();
+
+  const overflowItems: ContextMenuEntry[] = [
+    { label: t('sidebar.toolbar.openAll'), icon: <Play size={14} />, onClick: onOpenAll },
+    { label: t('sidebar.toolbar.closeAll'), icon: <Square size={14} />, onClick: onCloseAll },
+    { type: 'separator' },
+    {
+      label: showHidden ? t('sidebar.toolbar.hideHidden') : t('sidebar.toolbar.showHidden'),
+      icon: showHidden ? <Eye size={14} /> : <EyeOff size={14} />,
+      onClick: onToggleHidden,
+    },
+    { label: t('sidebar.toolbar.sortByPort'), icon: <ArrowUpDown size={14} />, onClick: onSortByPort },
+    { type: 'separator' },
+    { label: t('sidebar.toolbar.saveLayout'), icon: <Save size={14} />, onClick: onSaveLayout },
+  ];
+
   return (
     <div className="sidebar-toolbar">
-      <span className="sidebar-toolbar-title">{t('sidebar.toolbar.title')}</span>
+      <span className="sidebar-toolbar-title eyebrow">{t('sidebar.toolbar.title')}</span>
       <div className="sidebar-toolbar-actions">
-        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.openAll')} onClick={onOpenAll}><Play size={14} /></button>
-        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.closeAll')} onClick={onCloseAll}><Square size={14} /></button>
-        <span className="sidebar-toolbar-sep" />
         <button
-          className={`btn btn-icon btn-sm${simulationMode ? ' active' : ''}`}
+          className={`icon-btn${simulationMode ? ' active' : ''}`}
           title={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
           onClick={onToggleSimulation}
         >
           <FlaskConical size={14} />
         </button>
-        <button
-          className={`btn btn-icon btn-sm${showHidden ? ' active' : ''}`}
-          title={showHidden ? t('sidebar.toolbar.hideHidden') : t('sidebar.toolbar.showHidden')}
-          onClick={onToggleHidden}
-        >
-          {showHidden ? <Eye size={14} /> : <EyeOff size={14} />}
+        <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
+          <RefreshCw size={14} />
         </button>
-        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.sortByPort')} onClick={onSortByPort}><ArrowUpDown size={14} /></button>
-        <span className="sidebar-toolbar-sep" />
-        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.saveLayout')} onClick={onSaveLayout}><Save size={14} /></button>
-        <button className="btn btn-icon btn-sm" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}><RefreshCw size={14} /></button>
+        <span className="toolbar-sep" />
+        <button
+          className="icon-btn"
+          title={t('sidebar.toolbar.more')}
+          aria-label={t('sidebar.toolbar.more')}
+          onClick={(e) => show(e, overflowItems)}
+        >
+          <Ellipsis size={14} />
+        </button>
       </div>
+      {element}
     </div>
   );
 };
@@ -73,9 +96,9 @@ const SearchBox: React.FC<{ value: string; onChange: (v: string) => void }> = ({
   const { t } = useTranslation();
   return (
     <div className="sidebar-search">
-      <Search size={14} className="sidebar-search-icon" />
+      <Search size={13} className="sidebar-search-icon" />
       <input
-        className="sidebar-search-input"
+        className="toolbar-input sidebar-search-input"
         placeholder={t('sidebar.search.placeholder')}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -99,6 +122,11 @@ interface SortablePortItemProps {
   onShowPort: (portId: string) => void;
 }
 
+/**
+ * One slot in the port rack: drag handle, pulsing status dot,
+ * name (+alias/badges), a quiet monospace meta line, and the
+ * connect toggle. Everything else lives in the right-click menu.
+ */
 const SortablePortItem: React.FC<SortablePortItemProps> = ({
   port,
   isConnected,
@@ -125,13 +153,6 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     opacity: isDragging ? 0.5 : 1,
   };
 
-  const statusColor = {
-    disconnected: 'var(--status-disconnected)',
-    error: 'var(--status-error)',
-    connected: 'var(--status-connected)',
-    connecting: 'var(--status-connecting)',
-  }[port.status] || 'var(--status-disconnected)';
-
   const statusLabel: Record<string, string> = {
     disconnected: t('sidebar.port.status.disconnected'),
     error: t('sidebar.port.status.error'),
@@ -154,23 +175,23 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
   return (
     <div ref={setNodeRef} style={style}>
       <div
-        className="port-item"
+        className={`port-item${isConnected ? ' connected' : ''}`}
         onDoubleClick={() => onOpenTab(port.id)}
         onContextMenu={(e) => show(e, items)}
       >
         <span className="port-item-drag" {...attributes} {...listeners}>
           <GripVertical size={12} />
         </span>
-        <div className="port-item-status" style={{ backgroundColor: statusColor, boxShadow: port.status === 'connected' ? `0 0 6px ${statusColor}` : 'none' }} />
+        <span className={`status-dot ${port.status}`} />
         <div className="port-item-info">
           <div className="port-item-title">
             <span className="port-item-name">{port.id}</span>
             {port.alias && <span className="port-item-alias">{port.alias}</span>}
-            {port.type === 'sim' && <span className="port-item-badge" style={{ backgroundColor: 'var(--accent-color, #4fc3f7)' }}>SIM</span>}
-            {port.type === 'virtual' && <span className="port-item-badge">VCP</span>}
+            {port.type === 'sim' && <span className="port-item-badge sim">{t('sidebar.port.badge.sim')}</span>}
+            {port.type === 'virtual' && <span className="port-item-badge">{t('sidebar.port.badge.vcp')}</span>}
           </div>
           <div className="port-item-meta">
-            <span style={{ color: statusColor }}>{label}</span>
+            <span>{label}</span>
             {port.baudRate && (
               <span className="port-item-baud">
                 {port.baudRate},{port.dataBits || 8}{port.parity?.[0] || 'N'}{port.stopBits === 'One' ? '1' : port.stopBits === 'Two' ? '2' : '1.5'}
@@ -179,7 +200,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
           </div>
         </div>
         <button
-          className={`btn btn-icon btn-sm port-connect-btn${isConnected ? ' connected' : ''}`}
+          className={`icon-btn port-connect-btn${isConnected ? ' connected' : ''}`}
           title={isConnected ? t('sidebar.port.connectBtn.disconnect') : t('sidebar.port.connectBtn.connect')}
           onClick={(e) => { e.stopPropagation(); onToggleConnect(port.id); }}
         >
@@ -204,6 +225,12 @@ interface GroupItemProps {
   onShowPort: (portId: string) => void;
 }
 
+/**
+ * Group header — chevron + name + connected-count, nothing else.
+ * Connect-all / disconnect-all / rename / delete all live in the
+ * right-click context menu. The header stays a droppable target for
+ * cross-group port drops.
+ */
 const GroupItem: React.FC<GroupItemProps> = ({
   group,
   ports,
@@ -217,7 +244,9 @@ const GroupItem: React.FC<GroupItemProps> = ({
   onShowPort,
 }) => {
   const { t } = useTranslation();
-  const groupPorts = ports.filter(p => group.portIds.includes(p.id));
+  // Exclude hidden ports so "hide" actually works for grouped ports too
+  // (they reappear in the hidden section when toggled visible).
+  const groupPorts = ports.filter(p => group.portIds.includes(p.id) && !p.isHidden);
   const connectedCount = groupPorts.filter(p => p.status === 'connected').length;
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(group.name);
@@ -230,13 +259,11 @@ const GroupItem: React.FC<GroupItemProps> = ({
     id: `droppable-${group.id}`,
   });
 
-  const handleConnectAll = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const connectAll = () => {
     groupPorts.forEach(p => { if (p.status !== 'connected') onToggleConnect(p.id); });
   };
 
-  const handleDisconnectAll = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const disconnectAll = () => {
     groupPorts.forEach(p => { if (p.status === 'connected') onToggleConnect(p.id); });
   };
 
@@ -254,9 +281,16 @@ const GroupItem: React.FC<GroupItemProps> = ({
     setIsRenaming(false);
   };
 
+  const hasDisconnectable = groupPorts.some(p => p.status === 'connected');
+  const hasConnectable = groupPorts.some(p => p.status !== 'connected');
+
   const groupMenuItems: ContextMenuEntry[] = [
+    { label: t('sidebar.group.connectAll'), icon: <Play size={14} />, onClick: connectAll, disabled: !hasConnectable },
+    { label: t('sidebar.group.disconnectAll'), icon: <Square size={14} />, onClick: disconnectAll, disabled: !hasDisconnectable },
+    { type: 'separator' },
     { label: t('sidebar.group.contextMenu.rename'), icon: <Pencil size={14} />, onClick: () => { setRenameValue(group.name); setIsRenaming(true); } },
-    { label: t('sidebar.group.contextMenu.delete'), icon: <Trash2 size={14} />, onClick: () => onRemoveGroup(group.id) },
+    { type: 'separator' },
+    { label: t('sidebar.group.contextMenu.delete'), icon: <Trash2 size={14} />, danger: true, onClick: () => onRemoveGroup(group.id) },
   ];
 
   const portIds = useMemo(() => groupPorts.map(p => p.id), [groupPorts]);
@@ -269,7 +303,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
       <div
         className="port-group-header"
         onClick={() => onToggleExpand(group.id)}
-        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); show(e, groupMenuItems); }}
+        onContextMenu={(e) => show(e, groupMenuItems)}
       >
         <ChevronRight
           size={12}
@@ -278,8 +312,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
         />
         {isRenaming ? (
           <input
-            className="input"
-            style={{ flex: 1, fontSize: 12, padding: '2px 4px', minWidth: 0 }}
+            className="input port-group-rename-input"
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
             onBlur={handleCommitRename}
@@ -292,27 +325,16 @@ const GroupItem: React.FC<GroupItemProps> = ({
           />
         ) : (
           <span
-            className="port-group-name"
+            className="port-group-name eyebrow"
             onDoubleClick={handleStartRename}
             title={t('sidebar.group.doubleClickRename')}
           >
             {group.name}
           </span>
         )}
-        <span className="port-group-count">{connectedCount}/{groupPorts.length}</span>
-        <button className="btn btn-icon btn-sm" title={t('sidebar.group.connectAll')} onClick={handleConnectAll}>
-          <Play size={10} />
-        </button>
-        <button className="btn btn-icon btn-sm" title={t('sidebar.group.disconnectAll')} onClick={handleDisconnectAll}>
-          <Square size={10} />
-        </button>
-        <button
-          className="btn btn-icon btn-sm"
-          title={t('sidebar.group.delete')}
-          onClick={(e) => { e.stopPropagation(); onRemoveGroup(group.id); }}
-        >
-          <Trash2 size={10} />
-        </button>
+        <span className={`port-group-count${connectedCount > 0 ? ' has-connected' : ''}`}>
+          {connectedCount}/{groupPorts.length}
+        </span>
       </div>
       {element}
       {group.isExpanded && (
@@ -404,8 +426,14 @@ const Sidebar: React.FC = () => {
     ? ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)))
     : ports;
 
-  const ungroupedPorts = filteredPorts.filter(p => !p.groupId && (!p.isHidden || showHidden));
+  // Hidden ports never appear in their normal location (group / ungrouped);
+  // they surface ONLY in the dedicated hidden section when toggled visible.
+  // (Previously they double-rendered — once here and once in the hidden
+  // section — producing duplicate @dnd-kit ids and broken dragging.)
+  const ungroupedPorts = filteredPorts.filter(p => !p.groupId && !p.isHidden);
   const ungroupedIds = useMemo(() => ungroupedPorts.map(p => p.id), [ungroupedPorts]);
+  const hiddenPorts = useMemo(() => ports.filter(p => p.isHidden), [ports]);
+  const hiddenIds = useMemo(() => hiddenPorts.map(p => p.id), [hiddenPorts]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -459,7 +487,7 @@ const Sidebar: React.FC = () => {
         )}
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           {groups.map(group => {
-            const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id));
+            const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id) && !p.isHidden);
             if (groupPorts.length === 0 && search) return null;
             return (
               <GroupItem
@@ -480,7 +508,7 @@ const Sidebar: React.FC = () => {
 
           {ungroupedPorts.length > 0 && (
             <div className="sidebar-section">
-              <div className="sidebar-section-header">{t('sidebar.section.ungrouped')}</div>
+              <div className="sidebar-section-header eyebrow">{t('sidebar.section.ungrouped')}</div>
               <SortableContext items={ungroupedIds} strategy={verticalListSortingStrategy}>
                 {ungroupedPorts.map(port => (
                   <SortablePortItem
@@ -497,25 +525,27 @@ const Sidebar: React.FC = () => {
               </SortableContext>
             </div>
           )}
-        </DndContext>
 
-        {showHidden && ports.filter(p => p.isHidden).length > 0 && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-header">{t('sidebar.section.hidden')}</div>
-            {ports.filter(p => p.isHidden).map(port => (
-              <SortablePortItem
-                key={port.id}
-                port={port}
-                isConnected={port.status === 'connected'}
-                onOpenTab={handleOpenTab}
-                onToggleConnect={handleToggleConnect}
-                onSetAlias={handleSetAlias}
-                onHidePort={handleHidePort}
-                onShowPort={handleShowPort}
-              />
-            ))}
-          </div>
-        )}
+          {showHidden && hiddenPorts.length > 0 && (
+            <div className="sidebar-section">
+              <div className="sidebar-section-header eyebrow">{t('sidebar.section.hidden')}</div>
+              <SortableContext items={hiddenIds} strategy={verticalListSortingStrategy}>
+                {hiddenPorts.map(port => (
+                  <SortablePortItem
+                    key={port.id}
+                    port={port}
+                    isConnected={port.status === 'connected'}
+                    onOpenTab={handleOpenTab}
+                    onToggleConnect={handleToggleConnect}
+                    onSetAlias={handleSetAlias}
+                    onHidePort={handleHidePort}
+                    onShowPort={handleShowPort}
+                  />
+                ))}
+              </SortableContext>
+            </div>
+          )}
+        </DndContext>
 
         <div className="sidebar-add-group">
           <button className="btn sidebar-add-group-btn" onClick={handleAddGroup}>
