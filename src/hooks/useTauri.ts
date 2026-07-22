@@ -56,6 +56,26 @@ async function runReconnectLoop(portId: string) {
     }
     try {
       await serialService.attemptReconnect(portId);
+      // Mirror openPort's post-connect side effects — attemptReconnect alone
+      // leaves the store status stale and (with autoSaveLog on) silently
+      // stops logging after a drop/reconnect cycle.
+      const port = useAppStore.getState().ports.find((p) => p.id === portId);
+      const opStore = useOperationStore.getState();
+      useAppStore.getState().updatePort(portId, {
+        status: 'connected',
+        baudRate: port?.baudRate ?? opStore.baudRate,
+        dataBits: port?.dataBits ?? opStore.dataBits,
+        parity: port?.parity ?? opStore.parity,
+        stopBits: port?.stopBits ?? opStore.stopBits,
+        handshake: port?.handshake ?? opStore.handshake,
+      });
+      useTerminalStore.getState().setTerminalConnectedAt(portId, Date.now());
+      if (useAppStore.getState().config.autoSaveLog) {
+        logService.startLogging(portId).catch((e) => {
+          console.debug('[useTauri] startLogging failed:', e);
+          notifyError(e);
+        });
+      }
       notifySuccess('toast.reconnect.succeeded');
       break;
     } catch (err) {
@@ -91,10 +111,12 @@ function mapPortInfo(info: AvailablePortInfo): SerialPort {
 
 function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[] {
   const existingMap = new Map(existing.map(p => [p.id, p]));
-  return incoming.map(p => {
+  const merged = incoming.map(p => {
     const prev = existingMap.get(p.id);
     if (prev) {
-      // Preserve runtime state: status, alias, hidden, group, connection params
+      // Preserve runtime state: status, alias, hidden, group, connection
+      // params, and the protocol-template binding (TerminalView sets
+      // protocolTemplateId via updatePort; the 3s poll must not wipe it).
       return {
         ...p,
         status: prev.status,
@@ -106,10 +128,22 @@ function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[
         parity: prev.parity,
         stopBits: prev.stopBits,
         handshake: prev.handshake,
+        protocolTemplateId: prev.protocolTemplateId,
       };
     }
     return p;
   });
+  // Union back any live port that transiently vanished from the enumeration
+  // (USB glitch / sleep-resume). Dropping a connected/connecting port while
+  // its tab/terminal still reference it causes store/backend drift; it would
+  // reappear later as 'disconnected'.
+  const incomingIds = new Set(incoming.map(p => p.id));
+  for (const prev of existing) {
+    if (!incomingIds.has(prev.id) && (prev.status === 'connected' || prev.status === 'connecting')) {
+      merged.push(prev);
+    }
+  }
+  return merged;
 }
 
 import type { PortStatus } from '../types';
@@ -245,27 +279,41 @@ export function useSerialConnection() {
   }, []);
 
   const openPort = useCallback(async (portId: string, _baudRate: number = 115200) => {
+    // Reconnecting overrides any prior user-initiated close mark so the
+    // DisconnectBanner / status toast resume normal unexpected-disconnect
+    // detection for this port.
+    userClosingPortIds.delete(portId);
     try {
+      // Resolve connection params from the target port first (session restore
+      // and per-port presets write per-port values that must win over the
+      // global OperationPanel defaults), falling back to the operation store
+      // for any field the port lacks. dtr/rts are global-only (not stored
+      // per-port).
       const opStore = useOperationStore.getState();
+      const port = useAppStore.getState().ports.find((p) => p.id === portId);
+      const baudRate = port?.baudRate ?? opStore.baudRate;
+      const dataBits = port?.dataBits ?? opStore.dataBits;
+      const parity = port?.parity ?? opStore.parity;
+      const stopBits = port?.stopBits ?? opStore.stopBits;
+      const handshake = port?.handshake ?? opStore.handshake;
       updatePort(portId, { status: 'connecting' });
       await serialService.openSerialPort({
         port_id: portId,
-        baud_rate: opStore.baudRate,
-        data_bits: opStore.dataBits,
-        parity: opStore.parity,
-        stop_bits: opStore.stopBits,
-        handshake: opStore.handshake,
+        baud_rate: baudRate,
+        data_bits: dataBits,
+        parity: parity,
+        stop_bits: stopBits,
+        handshake: handshake,
         dtr: opStore.dtr,
         rts: opStore.rts,
       });
-      const currentOp = useOperationStore.getState();
       updatePort(portId, {
         status: 'connected',
-        baudRate: currentOp.baudRate,
-        dataBits: currentOp.dataBits,
-        parity: currentOp.parity,
-        stopBits: currentOp.stopBits,
-        handshake: currentOp.handshake,
+        baudRate: baudRate,
+        dataBits: dataBits,
+        parity: parity,
+        stopBits: stopBits,
+        handshake: handshake,
       });
       useTerminalStore.getState().setTerminalConnectedAt(portId, Date.now());
       // Auto-start logging if enabled
@@ -285,7 +333,9 @@ export function useSerialConnection() {
   const closePort = useCallback(async (portId: string) => {
     // Mark this port as user-initiated close so the serial:status event
     // handler and DisconnectBanner suppress the "unexpected disconnect"
-    // toast/banner. Removed after a 3s delay to tolerate late status events.
+    // toast/banner. The mark is PERSISTENT and cleared on the next reconnect
+    // (openPort) — a timer-based removal made the banner false-alarm on a
+    // deliberately disconnected port whose tab was still open.
     userClosingPortIds.add(portId);
     try {
       await serialService.closeSerialPort(portId);
@@ -296,8 +346,6 @@ export function useSerialConnection() {
       console.error('[useSerialConnection] Failed to close port:', err);
       notifyError(err);
       updatePort(portId, { status: 'error' });
-    } finally {
-      setTimeout(() => userClosingPortIds.delete(portId), 3000);
     }
   }, [updatePort]);
 
@@ -360,10 +408,39 @@ export function useSerialReceive() {
   const appendTerminalLine = useTerminalStore((s) => s.appendTerminalLine);
   const setupPromiseRef = useRef<Promise<void> | null>(null);
   const reassemblersRef = useRef<Map<string, ProtocolFrameReassembler>>(new Map());
+  // Persistent streaming decoders keyed `${portId}:${decoderLabel}`. A fresh
+  // TextDecoder per event decodes multi-byte chars (GBK 2-byte, UTF-8 3-byte)
+  // that straddle two serial:data events to U+FFFD on BOTH halves — guaranteed
+  // mojibake on GBK traffic. Streaming decode ({stream:true}) retains a partial
+  // trailing char in the decoder and emits it once the next event completes it.
+  const decodersRef = useRef<Map<string, TextDecoder>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+
+    // Look up (or lazily create) the streaming decoder for a port+label.
+    // Recreating under a new label drops any stale entry for that port so a
+    // buffered partial from the previous encoding can't resurface after an
+    // encoding switch.
+    const getStreamingDecoder = (portId: string, label: string): TextDecoder => {
+      const key = `${portId}:${label}`;
+      let decoder = decodersRef.current.get(key);
+      if (!decoder) {
+        const prefix = `${portId}:`;
+        for (const k of decodersRef.current.keys()) {
+          if (k.startsWith(prefix)) decodersRef.current.delete(k);
+        }
+        try {
+          decoder = new TextDecoder(label, { fatal: false });
+        } catch {
+          console.warn('[useSerialReceive] TextDecoder failed for encoding:', label, 'falling back to utf-8');
+          decoder = new TextDecoder('utf-8', { fatal: false });
+        }
+        decodersRef.current.set(key, decoder);
+      }
+      return decoder;
+    };
 
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
@@ -371,14 +448,6 @@ export function useSerialReceive() {
         const term = useTerminalStore.getState().terminals[event.port_id];
         const encoding = term?.encoding || 'UTF-8';
         const decoderLabel = encoding.toLowerCase() === 'ascii' ? 'utf-8' : encoding.toLowerCase();
-        let text: string;
-        try {
-          text = new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(event.data));
-        } catch {
-          console.warn('[useSerialReceive] TextDecoder failed for encoding:', encoding, 'falling back to utf-8');
-          text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(event.data));
-        }
-        if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
         // Protocol frame parsing: if port has a protocol template bound, feed bytes into reassembler
         const port = useAppStore.getState().ports.find(p => p.id === event.port_id);
         const templateId = port?.protocolTemplateId;
@@ -396,6 +465,8 @@ export function useSerialReceive() {
             }
             const { frames, flushedBytes } = reassembler.feed(event.data);
             for (const frame of frames) {
+              // Frames are self-contained — a fresh per-frame decoder is
+              // correct here (no char can straddle two frames).
               const frameText = new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(frame.bytes));
               appendTerminalLine(event.port_id, {
                 id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -408,14 +479,21 @@ export function useSerialReceive() {
               });
             }
             if (flushedBytes.length > 0) {
-              appendTerminalLine(event.port_id, {
-                id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                timestamp: event.timestamp,
-                direction: event.direction as 'RX' | 'TX',
-                content: new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(flushedBytes)),
-                rawData: flushedBytes,
-                isHex: event.is_hex,
-              });
+              // Flushed (non-frame) bytes are a raw stream that CAN split a
+              // multi-byte char across events — use the streaming decoder.
+              const flushedText = getStreamingDecoder(event.port_id, decoderLabel).decode(new Uint8Array(flushedBytes), { stream: true });
+              // A partial trailing char decodes to '' (bytes retained in the
+              // decoder) — skip the empty append; it surfaces on the next event.
+              if (flushedText) {
+                appendTerminalLine(event.port_id, {
+                  id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  timestamp: event.timestamp,
+                  direction: event.direction as 'RX' | 'TX',
+                  content: flushedText,
+                  rawData: flushedBytes,
+                  isHex: event.is_hex,
+                });
+              }
             }
             useAppStore.getState().setTrafficStats(event.port_id, {
               rxTotal: (useAppStore.getState().trafficStats[event.port_id]?.rxTotal || 0) + event.data.length,
@@ -423,6 +501,12 @@ export function useSerialReceive() {
             return;
           }
         }
+        // Common non-protocol path: streaming decode so multi-byte chars that
+        // straddle events reassemble instead of corrupting to U+FFFD.
+        const text = getStreamingDecoder(event.port_id, decoderLabel).decode(new Uint8Array(event.data), { stream: true });
+        // An empty string here is a buffered partial multi-byte char — the
+        // bytes are retained in the decoder, so skipping is safe.
+        if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
         appendTerminalLine(event.port_id, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           timestamp: event.timestamp,
@@ -461,12 +545,18 @@ export function useSerialReceive() {
           status: statusMap[event.status] || 'disconnected',
         });
         if (event.status === 'disconnected') {
-          // Reassemblers are keyed `${portId}:${templateId}` — drop every
-          // entry for this port regardless of template.
+          // Reassemblers are keyed `${portId}:${templateId}` and streaming
+          // decoders `${portId}:${label}` — drop every entry for this port
+          // regardless of suffix so a reconnect starts with clean state.
           const prefix = `${event.port_id}:`;
           for (const key of reassemblersRef.current.keys()) {
             if (key.startsWith(prefix)) {
               reassemblersRef.current.delete(key);
+            }
+          }
+          for (const key of decodersRef.current.keys()) {
+            if (key.startsWith(prefix)) {
+              decodersRef.current.delete(key);
             }
           }
         }
@@ -542,7 +632,7 @@ export function useSerialSend() {
   );
 
   const sendData = useCallback(
-    async (portId: string, data: string, isHex: boolean, lineEnding: string) => {
+    async (portId: string, data: string, isHex: boolean, lineEnding: string, silent = false) => {
       try {
         const bytesWritten = await serialService.sendSerialData({
           port_id: portId,
@@ -556,12 +646,24 @@ export function useSerialSend() {
         const { sendPrefix } = state.config;
         const prefix = sendPrefix ? `${sendPrefix} ` : '';
         const displayText = `${prefix}${data}`;
+        // rawData must reflect the ACTUAL transmitted bytes (drives the
+        // HEX/string display toggle + CSV export):
+        //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
+        //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
+        const txRawData: number[] = isHex
+          ? data
+              .trim()
+              .split(/\s+/)
+              .filter((tok) => tok.length > 0)
+              .map((tok) => parseInt(tok, 16))
+              .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
+          : Array.from(new TextEncoder().encode(data));
         useTerminalStore.getState().appendTerminalLine(portId, {
           id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           timestamp: Date.now(),
           direction: 'TX',
           content: displayText,
-          rawData: isHex ? undefined : Array.from(new TextEncoder().encode(displayText)),
+          rawData: txRawData,
           isHex: isHex,
         });
 
@@ -574,6 +676,9 @@ export function useSerialSend() {
 
         return bytesWritten;
       } catch (err) {
+        // Silent mode (cyclic send) re-throws so the caller aggregates the
+        // error + retries — otherwise every failed send raises its own toast.
+        if (silent) throw err;
         console.error('[useSerialSend] Failed to send data:', err);
         notifyError(err);
         return 0;
