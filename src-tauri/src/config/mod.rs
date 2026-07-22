@@ -6,6 +6,7 @@
  * 配置项涵盖：通用设置、日志设置、备份设置、显示设置等
  */
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -156,10 +157,19 @@ impl ConfigManager {
         Ok(self.config.clone())
     }
 
-    /// 保存到文件
+    /// 保存到文件（原子写入）
     fn save(&self) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(&self.config)?;
-        fs::write(&self.config_path, content)?;
+        // 先写入同目录临时文件并 sync_all 落盘，再 rename 覆盖正式文件
+        // （同卷 rename 是原子的）。避免掉电 / 崩溃在写入途中留下被截断的
+        // config.json，导致下次启动反序列化失败、全部配置被重置为默认值。
+        let tmp_path = self.config_path.with_extension("json.tmp");
+        {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &self.config_path)?;
         log::info!("Config saved to {:?}", self.config_path);
         Ok(())
     }

@@ -240,7 +240,18 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    "tray.quit" => app.exit(0),
+                    "tray.quit" => {
+                        // Destroy the (possibly tray-hidden) window BEFORE exit.
+                        // Otherwise its handle still exists during teardown and
+                        // WebView2/Chromium logs "Failed to unregister class
+                        // Chrome_WidgetWin_0 (Error 1411)". destroy() bypasses
+                        // CloseRequested, so the minimize-to-tray guard won't
+                        // re-hide it.
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.destroy();
+                        }
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {

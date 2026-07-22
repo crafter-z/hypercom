@@ -310,6 +310,14 @@ impl SerialManager {
         let app_handle_clone = app_handle.clone();
 
         let read_thread = thread::spawn(move || {
+            // 读取循环单次读取的结果分类：把"读到数据" / "读超时" / "真实错误"分离，
+            // 以便在释放端口锁之后再派发事件，且超时路径不再跳过引脚轮询。
+            enum ReadOutcome {
+                Data(usize),
+                Timeout,
+                Error(std::io::Error),
+            }
+
             let port_id = thread_port_id;
             let mut buffer = [0u8; 1024];
             let mut abnormal = false;
@@ -317,29 +325,37 @@ impl SerialManager {
             let mut last_pin_states: Option<SerialPinStatesEvent> = None;
 
             while running_clone.load(Ordering::Relaxed) {
-                match port_clone.lock() {
+                // 仅在 read() 调用期间持有端口锁，读完立即释放。
+                // emit_data_event 会派发 Tauri 事件并同步写日志落盘，不能在持锁期间执行，
+                // 否则会阻塞 send_data / 引脚读取 / 流控设置，高波特率下还可能撑爆 OS 接收缓冲区。
+                let outcome = match port_clone.lock() {
                     Ok(mut p) => match p.read(&mut buffer) {
-                        Ok(n) if n > 0 => {
-                            emit_data_event(&app_handle_clone, &port_id, "RX", &buffer[..n], false);
-                        }
-                        Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                            // Serial timeout - normal for read loop, continue
-                            continue;
-                        }
-                        Err(e) => {
-                            log::warn!("Serial read error on {}: {}", port_id, e);
-                            let status_event = SerialStatusEvent {
-                                port_id: port_id.clone(),
-                                status: "error".to_string(),
-                            };
-                            let _ = app_handle_clone.emit("serial:status", status_event);
-                            abnormal = true;
-                            break;
-                        }
+                        Ok(n) => ReadOutcome::Data(n),
+                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ReadOutcome::Timeout,
+                        Err(e) => ReadOutcome::Error(e),
                     },
                     Err(e) => {
                         log::error!("Serial port lock error: {}", e);
+                        abnormal = true;
+                        break;
+                    }
+                };
+                // 端口 MutexGuard 在此处已释放
+
+                match outcome {
+                    ReadOutcome::Data(n) if n > 0 => {
+                        emit_data_event(&app_handle_clone, &port_id, "RX", &buffer[..n], false);
+                    }
+                    // 无数据或读超时（100ms 超时下的正常空闲态）：不 continue，
+                    // 落到下方引脚状态轮询，保证空闲连接上 pin 事件持续触发。
+                    ReadOutcome::Data(_) | ReadOutcome::Timeout => {}
+                    ReadOutcome::Error(e) => {
+                        log::warn!("Serial read error on {}: {}", port_id, e);
+                        let status_event = SerialStatusEvent {
+                            port_id: port_id.clone(),
+                            status: "error".to_string(),
+                        };
+                        let _ = app_handle_clone.emit("serial:status", status_event);
                         abnormal = true;
                         break;
                     }
@@ -583,11 +599,12 @@ impl SerialManager {
             .port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let n = port.write(&bytes)?;
+        // write_all 循环写入直到全部发送，避免 write() 部分写入时静默丢失剩余字节
+        port.write_all(&bytes)?;
         port.flush()?;
 
-        log::debug!("Sent {} bytes to {}", n, port_id);
-        Ok(n)
+        log::debug!("Sent {} bytes to {}", bytes.len(), port_id);
+        Ok(bytes.len())
     }
 
     /// 向串口写入原始字节（不做 HEX 解析、不附加行结束符）。用于文件发送。
@@ -621,9 +638,10 @@ impl SerialManager {
             .port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let n = port.write(bytes)?;
+        // write_all 循环写入直到全部发送，避免 write() 部分写入时静默丢失剩余字节
+        port.write_all(bytes)?;
         port.flush()?;
-        Ok(n)
+        Ok(bytes.len())
     }
 
     /// 修改串口参数（完整）
@@ -645,14 +663,12 @@ impl SerialManager {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.set_baud_rate(baud_rate)?;
-        if data_bits != "8" || parity != "None" || stop_bits != "One" {
-            port.set_data_bits(parse_data_bits(data_bits.parse().unwrap_or(8)))?;
-            port.set_parity(parse_parity(parity))?;
-            port.set_stop_bits(parse_stop_bits(stop_bits))?;
-        }
-        if handshake != "None" {
-            port.set_flow_control(parse_flow_control(handshake))?;
-        }
+        // 无条件应用帧格式与流控：仅在非默认值时才设置会导致无法从
+        // 7E1 / 硬件流控等配置改回 8N1 / None 默认值。
+        port.set_data_bits(parse_data_bits(data_bits.parse().unwrap_or(8)))?;
+        port.set_parity(parse_parity(parity))?;
+        port.set_stop_bits(parse_stop_bits(stop_bits))?;
+        port.set_flow_control(parse_flow_control(handshake))?;
         drop(port);
 
         // 同步更新重连参数缓存

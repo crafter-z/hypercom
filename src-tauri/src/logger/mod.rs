@@ -101,6 +101,15 @@ fn decode_gbk_lossy(bytes: &[u8]) -> String {
     GBK.decode(bytes).0.into_owned()
 }
 
+/// 净化要替换进文件名模板的 port_id（路径遍历防御，defects #54 同类）：
+/// port_id 来自前端，若含路径分隔符或 ".."，拼出的日志文件会逃逸出日志目录，
+/// 造成任意文件追加。把 Windows 非法字符 \/:*?"<>| 与 ".." 统一替换为 '_'。
+fn sanitize_filename_component(input: &str) -> String {
+    input
+        .replace(&['/', '\\', ':', '*', '?', '"', '<', '>', '|'][..], "_")
+        .replace("..", "_")
+}
+
 pub struct LogManager {
     /// 日志根目录
     log_directory: PathBuf,
@@ -174,7 +183,7 @@ impl LogManager {
     fn format_filename(&self, port_id: &str) -> String {
         let now = chrono::Local::now();
         self.filename_format
-            .replace("[com]", port_id)
+            .replace("[com]", &sanitize_filename_component(port_id))
             .replace("[datetime]", &now.format("%Y%m%d_%H%M%S").to_string())
             .replace("[date]", &now.format("%Y-%m-%d").to_string())
             .replace("[time]", &now.format("%H-%M-%S").to_string())
