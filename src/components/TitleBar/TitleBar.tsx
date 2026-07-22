@@ -124,13 +124,13 @@ const TitleBar: React.FC = () => {
           <Settings size={15} />
         </button>
         <div className="titlebar-separator" />
-        <button className="btn btn-icon btn-sm titlebar-control" title={t('titleBar.minimize')} onClick={handleMinimize}>
+        <button className="titlebar-control" title={t('titleBar.minimize')} onClick={handleMinimize}>
           <Minus size={15} />
         </button>
-        <button className="btn btn-icon btn-sm titlebar-control" title={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} onClick={handleMaximize}>
+        <button className="titlebar-control" title={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} onClick={handleMaximize}>
           {isMaximized ? <Minimize2 size={13} /> : <Square size={13} />}
         </button>
-        <button className="btn btn-icon btn-sm titlebar-control titlebar-close" title={t('titleBar.close')} onClick={handleClose}>
+        <button className="titlebar-control titlebar-close" title={t('titleBar.close')} onClick={handleClose}>
           <X size={15} />
         </button>
       </div>

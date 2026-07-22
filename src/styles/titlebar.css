@@ -1,36 +1,41 @@
-/* ==================== Titlebar ==================== */
+/* ==================== Titlebar ====================
+ * Instrument-panel chrome: a calm 36px strip. Window controls are flat,
+ * 46px-wide buttons flush to the right — self-contained (they do NOT build
+ * on `.btn`), so no specificity wars and no forced overrides.
+ */
 .titlebar {
   display: flex;
   align-items: center;
   height: var(--titlebar-height);
   background: var(--bg-titlebar);
-  padding: 0 12px;
+  box-shadow: var(--edge-top);
+  padding: 0 var(--space-3);
   user-select: none;
 }
 
 .titlebar-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   -webkit-app-region: drag;
   app-region: drag;
 }
 
 .titlebar-title {
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
   color: var(--text-primary);
 }
 
 .titlebar-version {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
 }
 
 .titlebar-right {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 2px; /* tighter than the spacing scale on purpose — control cluster */
   margin-left: auto;
   -webkit-app-region: no-drag;
   app-region: no-drag;
@@ -38,9 +43,9 @@
 
 .titlebar-separator {
   width: 1px;
-  height: 16px;
+  height: var(--space-4);
   background: var(--border-color);
-  margin: 0 8px;
+  margin: 0 var(--space-2);
 }
 
 .titlebar-help {
@@ -53,19 +58,36 @@
   background: var(--bg-hover);
 }
 
+/* ---- Window controls (minimize / maximize / close) ----
+ * Full-bleed flat buttons spanning the titlebar height. `.titlebar-close:hover`
+ * comes after `.titlebar-control:hover` so the red hover wins on equal
+ * specificity — plain cascade, no forced overrides.
+ */
 .titlebar-control {
-  width: 46px !important;
-  height: var(--titlebar-height) !important;
-  border-radius: 0 !important;
-  border: none !important;
-  padding: 0 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: var(--titlebar-height);
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 
 .titlebar-control:hover {
   background: var(--bg-hover);
 }
 
+.titlebar-control:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
 .titlebar-close:hover {
-  background: #e81123 !important;
-  color: #fff !important;
+  background: #e81123;
+  color: #ffffff;
 }
