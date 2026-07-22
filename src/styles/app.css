@@ -1,0 +1,36 @@
+/* ==================== App Shell ====================
+ * Composition-root layout. The sidebar column's width is the one dynamic
+ * value in the shell and is applied as a single inline style on
+ * `.app-sidebar-col` (driven by `ui.sidebarWidth`).
+ */
+
+.app-root {
+  width: 100vw;
+  height: 100vh;
+  min-width: 900px;
+  min-height: 600px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--bg-primary);
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.app-sidebar-col {
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.app-content-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 300px;
+}
