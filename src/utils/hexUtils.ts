@@ -5,13 +5,17 @@
 
 /**
  * Convert a space-separated hex string (e.g. "41 42 43") to a string ("ABC").
- * Invalid bytes are replaced with '?'.
+ * Empty / whitespace-only input yields "". Tokens that are not a valid single
+ * byte (NaN or outside 0x00–0xFF) are skipped.
  */
 export function hexToString(hex: string): string {
-  const bytes = hex.trim().split(/\s+/);
+  const trimmed = hex.trim();
+  if (trimmed.length === 0) return '';
+  const bytes = trimmed.split(/\s+/);
   return bytes.map(b => {
     const code = parseInt(b, 16);
-    return isNaN(code) ? '?' : String.fromCharCode(code);
+    if (isNaN(code) || code < 0 || code > 0xFF) return '';
+    return String.fromCharCode(code);
   }).join('');
 }
 

@@ -120,32 +120,48 @@ function readLengthValue(
 // ==================== Frame parsing ====================
 
 /**
- * Attempt to parse a single complete frame from the START of `bytes`.
- * Returns null if not enough bytes for a complete frame, or if header/footer mismatch.
+ * Discriminated result of attempting to parse a frame at the start of a buffer.
+ *
+ * - `complete`:   a full frame was parsed; `frame` holds it.
+ * - `incomplete`: the buffer starts plausibly but lacks enough bytes — wait for more data.
+ * - `corrupt`:    the header matched and enough bytes are present, but the frame is
+ *                 invalid (bad length field or footer mismatch). The reassembler must
+ *                 advance the buffer by `skip` bytes and keep scanning, NOT stall.
+ */
+type FrameParseOutcome =
+  | { status: 'complete'; frame: ParsedFrame }
+  | { status: 'incomplete' }
+  | { status: 'corrupt'; skip: number };
+
+/**
+ * Internal parser that distinguishes "need more data" from "corrupt frame".
  *
  * The length field value represents the frame size excluding the length field
  * bytes themselves: totalFrameLength = lengthValue - lengthAdjust + lengthFieldSize
  */
-export function parseFrameBytes(
+function parseFrameOutcome(
   bytes: number[],
   template: ProtocolTemplate
-): ParsedFrame | null {
+): FrameParseOutcome {
   const headerBytes = parseHexString(template.headerBytes);
   const footerBytes = parseHexString(template.footerBytes);
   const headerLength = headerBytes.length;
   const footerLength = footerBytes.length;
+  // On a corrupt frame, resync just past the matched header (at least 1 byte)
+  // so the scanner can look for the next frame instead of re-finding this one.
+  const skipPastHeader = Math.max(1, headerLength);
 
   // If header is defined, verify bytes start with header
   if (headerLength > 0) {
-    if (bytes.length < headerLength) return null;
+    if (bytes.length < headerLength) return { status: 'incomplete' };
     for (let i = 0; i < headerLength; i++) {
-      if (bytes[i] !== headerBytes[i]) return null;
+      if (bytes[i] !== headerBytes[i]) return { status: 'corrupt', skip: skipPastHeader };
     }
   }
 
   // Read length field
   const lengthFieldEnd = template.lengthFieldOffset + template.lengthFieldSize;
-  if (bytes.length < lengthFieldEnd) return null;
+  if (bytes.length < lengthFieldEnd) return { status: 'incomplete' };
 
   const lengthValue = readLengthValue(
     bytes,
@@ -156,16 +172,18 @@ export function parseFrameBytes(
 
   // totalFrameLength = lengthValue - lengthAdjust + lengthFieldSize
   const totalFrameLength = lengthValue - template.lengthAdjust + template.lengthFieldSize;
-  if (totalFrameLength <= 0) return null;
+  if (totalFrameLength <= 0) return { status: 'corrupt', skip: skipPastHeader };
 
   // Check if we have enough bytes for the complete frame
-  if (bytes.length < totalFrameLength) return null;
+  if (bytes.length < totalFrameLength) return { status: 'incomplete' };
 
   // Verify footer if defined
   if (footerLength > 0) {
     const footerStart = totalFrameLength - footerLength;
     for (let i = 0; i < footerLength; i++) {
-      if (bytes[footerStart + i] !== footerBytes[i]) return null;
+      if (bytes[footerStart + i] !== footerBytes[i]) {
+        return { status: 'corrupt', skip: skipPastHeader };
+      }
     }
   }
 
@@ -258,10 +276,29 @@ export function parseFrameBytes(
   }
 
   return {
-    bytes: bytes.slice(0, totalFrameLength),
-    fields,
-    isValid,
+    status: 'complete',
+    frame: {
+      bytes: bytes.slice(0, totalFrameLength),
+      fields,
+      isValid,
+    },
   };
+}
+
+/**
+ * Attempt to parse a single complete frame from the START of `bytes`.
+ * Returns null if not enough bytes for a complete frame, or if the frame is
+ * corrupt (header/footer mismatch or invalid length).
+ *
+ * The length field value represents the frame size excluding the length field
+ * bytes themselves: totalFrameLength = lengthValue - lengthAdjust + lengthFieldSize
+ */
+export function parseFrameBytes(
+  bytes: number[],
+  template: ProtocolTemplate
+): ParsedFrame | null {
+  const outcome = parseFrameOutcome(bytes, template);
+  return outcome.status === 'complete' ? outcome.frame : null;
 }
 
 // ==================== Header search ====================
@@ -337,15 +374,25 @@ export class ProtocolFrameReassembler {
       }
 
       // Try to parse a frame from the current buffer start
-      const frame = parseFrameBytes(this.buffer, this.template);
-      if (frame === null) {
-        // Incomplete frame — need more bytes
+      const outcome = parseFrameOutcome(this.buffer, this.template);
+      if (outcome.status === 'incomplete') {
+        // Genuinely not enough bytes — wait for more data
         break;
       }
 
-      // Extract frame bytes from buffer
-      frames.push(frame);
-      this.buffer = this.buffer.slice(frame.bytes.length);
+      if (outcome.status === 'corrupt') {
+        // Header matched but the frame is invalid (bad length / footer mismatch).
+        // Advance past the matched header and keep scanning for the next frame,
+        // instead of stalling on the same bytes forever.
+        const skip = Math.min(Math.max(1, outcome.skip), this.buffer.length);
+        flushedBytes.push(...this.buffer.slice(0, skip));
+        this.buffer = this.buffer.slice(skip);
+        continue;
+      }
+
+      // Extract complete frame bytes from buffer
+      frames.push(outcome.frame);
+      this.buffer = this.buffer.slice(outcome.frame.bytes.length);
     }
 
     return { frames, flushedBytes };
