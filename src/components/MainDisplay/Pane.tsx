@@ -4,7 +4,6 @@ import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialConnection } from '../../hooks/useTauri';
 import { notifyError } from '../../stores/useToastStore';
-import type { Encoding } from '../../types';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
 import { X, Cable } from 'lucide-react';
@@ -32,7 +31,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const closeTabsToLeft = useAppStore((s) => s.closeTabsToLeft);
   const closeOtherTabs = useAppStore((s) => s.closeOtherTabs);
   const moveTabToPane = useAppStore((s) => s.moveTabToPane);
-  const setTerminalConfig = useTerminalStore((s) => s.setTerminalConfig);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const removePane = useAppStore((s) => s.removePane);
   const { closePort } = useSerialConnection();
@@ -44,18 +42,60 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     disabled: !isMultiPane,
   });
 
-  const closeTab = useCallback((tabId: string) => {
+  // Shared per-tab close lifecycle: route connected ports through closePort()
+  // (stopLogging + status update) and free the terminal buffer. Used by both
+  // the single-tab close and the bulk-close wrappers below so bulk actions
+  // never bypass the closeTab lifecycle invariant (no log-handle/memory leak).
+  const cleanupClosedTab = useCallback((tabId: string) => {
     const port = ports.find(p => p.id === tabId);
     if (port && port.status === 'connected') {
-      // Route through the full connection lifecycle (closeSerialPort +
-      // updatePort(disconnected) + stopLogging) instead of bypassing it.
       closePort(tabId).catch((e) => { console.debug('[MainDisplay] closePort failed:', e); notifyError(e); });
     }
-    // Free terminal memory for the closed tab (lines cleared, config dropped
-    // implicitly when the entry is no longer referenced).
     clearTerminal(tabId);
+  }, [ports, closePort, clearTerminal]);
+
+  const closeTab = useCallback((tabId: string) => {
+    cleanupClosedTab(tabId);
     storeCloseTab(tabId);
-  }, [ports, closePort, clearTerminal, storeCloseTab]);
+  }, [cleanupClosedTab, storeCloseTab]);
+
+  // Bulk-close wrappers: run the close lifecycle for EACH tab about to be
+  // closed, computing the close set the SAME way the store action does.
+  // close-to-right/left are pane-scoped (this leaf's tabIds order); the store
+  // action is invoked afterwards to mutate state.
+  const handleCloseToRight = useCallback((tabId: string) => {
+    const idx = tabIds.indexOf(tabId);
+    if (idx >= 0) {
+      for (const id of tabIds.slice(idx + 1)) {
+        const tab = tabs.find(t => t.id === id);
+        if (!tab || tab.isPinned) continue;
+        cleanupClosedTab(id);
+      }
+    }
+    closeTabsToRight(tabId);
+  }, [tabIds, tabs, cleanupClosedTab, closeTabsToRight]);
+
+  const handleCloseToLeft = useCallback((tabId: string) => {
+    const idx = tabIds.indexOf(tabId);
+    if (idx > 0) {
+      for (const id of tabIds.slice(0, idx)) {
+        const tab = tabs.find(t => t.id === id);
+        if (!tab || tab.isPinned) continue;
+        cleanupClosedTab(id);
+      }
+    }
+    closeTabsToLeft(tabId);
+  }, [tabIds, tabs, cleanupClosedTab, closeTabsToLeft]);
+
+  // close-others is global in the store (keeps only target + pinned across all
+  // panes), so run the lifecycle for every non-pinned tab except the target.
+  const handleCloseOthers = useCallback((tabId: string) => {
+    for (const tab of tabs) {
+      if (tab.id === tabId || tab.isPinned) continue;
+      cleanupClosedTab(tab.id);
+    }
+    closeOtherTabs(tabId);
+  }, [tabs, cleanupClosedTab, closeOtherTabs]);
 
   // paneTabs must follow the pane's tabIds order, not the global tabs array order.
   // Array.filter preserves original array order, which breaks after reorderPaneTabIds.
@@ -65,7 +105,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     ? activeTabId
     : (localActiveTabId && tabIds.includes(localActiveTabId) ? localActiveTabId : paneTabs[0]?.id || null);
   const displayTab = paneTabs.find(t => t.id === displayTabId);
-  const displayPort = ports.find(p => p.id === displayTabId);
   // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
   const displayTerminal = useTerminalStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
 
@@ -101,51 +140,20 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
       <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-secondary)' }}>
         <div style={{ flex: 1, overflow: 'hidden' }}>
           <TabBar
-            paneId={paneId}
             tabs={paneTabs}
             activeTabId={displayTabId}
             isMultiPane={isMultiPane}
             onTabClick={handleTabClick}
             onTabClose={closeTab}
             onTabPin={pinTab}
-            onCloseToRight={closeTabsToRight}
-            onCloseToLeft={closeTabsToLeft}
-            onCloseOthers={closeOtherTabs}
+            onCloseToRight={handleCloseToRight}
+            onCloseToLeft={handleCloseToLeft}
+            onCloseOthers={handleCloseOthers}
             moveToPaneTargets={otherPanes}
             onMoveToPane={handleMoveTabToPane}
           />
         </div>
       </div>
-
-      {displayTab && (
-        <div className="terminal-toolbar">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span className={`status-dot ${displayPort?.status === 'connected' ? 'connected' : displayPort?.status === 'error' ? 'error' : 'disconnected'}`} />
-            <span className="terminal-toolbar-title">{displayTab.title}</span>
-            <span className="terminal-toolbar-info">
-              ({displayPort?.status || 'disconnected'}
-              {displayPort?.baudRate ? `, ${displayPort.baudRate},${displayPort.dataBits || 8}${displayPort.parity?.[0] || 'N'}${displayPort.stopBits === 'One' ? '1' : '2'}` : ''})
-            </span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span className="terminal-toolbar-label">{t('pane.toolbar.encodingLabel')}</span>
-            <select
-              className="select terminal-toolbar-select"
-              value={displayTerminal?.encoding || 'UTF-8'}
-              onChange={(e) => {
-                if (displayTabId) {
-                  setTerminalConfig(displayTabId, { encoding: e.target.value as Encoding });
-                }
-              }}
-            >
-              <option value="ASCII">ASCII</option>
-              <option value="UTF-8">UTF-8</option>
-              <option value="GBK">GBK</option>
-              <option value="ISO-8859-1">ISO-8859-1</option>
-            </select>
-          </div>
-        </div>
-      )}
 
       {paneTabs.length > 0 && displayTab ? (
         <TerminalView

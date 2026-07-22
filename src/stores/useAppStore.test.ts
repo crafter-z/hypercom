@@ -152,6 +152,73 @@ describe('Tab & Pane actions', () => {
     expect(s.activeTabId).toBe('C');
   });
 
+  it('closeTabsToRight is pane-scoped: uses leaf tab order and never touches other panes', () => {
+    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A', 'B', 'C'], size: 0.5 };
+    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['X', 'Y'], size: 0.5 };
+    useAppStore.setState({
+      ports: ['A', 'B', 'C', 'X', 'Y'].map(p => makePort(p)),
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
+        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane1' },
+        { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'pane1' },
+        { id: 'X', title: 'X', isPinned: false, isActive: false, splitPaneId: 'pane2' },
+        { id: 'Y', title: 'Y', isPinned: false, isActive: false, splitPaneId: 'pane2' },
+      ],
+      paneTree: {
+        id: 'root', type: 'branch', direction: 'vertical',
+        children: [pane1, pane2], size: 1,
+      },
+      focusedPaneId: 'pane1',
+    });
+    useAppStore.getState().closeTabsToRight('A');
+    const s = useAppStore.getState();
+    // B,C removed from pane1; pane2 (X,Y) untouched
+    expect(s.tabs.map(t => t.id)).toEqual(['A', 'X', 'Y']);
+    expect(findLeafById(s.paneTree, 'pane1')!.tabIds).toEqual(['A']);
+    expect(findLeafById(s.paneTree, 'pane2')!.tabIds).toEqual(['X', 'Y']);
+  });
+
+  it('closeTabsToLeft respects reordered pane tab order (not global order)', () => {
+    useAppStore.setState({ ports: ['A', 'B', 'C'].map(p => makePort(p)) });
+    const { openTab, reorderPaneTabIds, closeTabsToLeft } = useAppStore.getState();
+    openTab('A'); openTab('B'); openTab('C'); // main leaf: [A,B,C]
+    reorderPaneTabIds('main', ['C', 'A', 'B']);
+    closeTabsToLeft('A'); // left of A in pane order is only [C]
+    const s = useAppStore.getState();
+    expect(s.tabs.map(t => t.id).sort()).toEqual(['A', 'B']);
+    expect((s.paneTree as LeafPane).tabIds).toEqual(['A', 'B']);
+  });
+
+  it('closeTabsToRight repairs a dangling focusedPaneId', () => {
+    useAppStore.setState({
+      ports: ['A', 'B'].map(p => makePort(p)),
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'main' },
+        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'main' },
+      ],
+      paneTree: { id: 'main', type: 'leaf', tabIds: ['A', 'B'], size: 1 },
+      focusedPaneId: 'ghost', // dangling before the action
+    });
+    useAppStore.getState().closeTabsToRight('A');
+    const s = useAppStore.getState();
+    expect(s.tabs.map(t => t.id)).toEqual(['A']);
+    expect(s.focusedPaneId).toBe('main');
+  });
+
+  it('openTab falls back to first leaf when focusedPaneId is dangling (no orphan tab)', () => {
+    useAppStore.setState({
+      ports: [makePort('A'), makePort('B')],
+      tabs: [{ id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'main' }],
+      paneTree: { id: 'main', type: 'leaf', tabIds: ['A'], size: 1 },
+      focusedPaneId: 'ghost', // dangling
+    });
+    useAppStore.getState().openTab('B');
+    const s = useAppStore.getState();
+    // B must land in a real leaf, not just in state.tabs
+    expect(s.tabs.find(t => t.id === 'B')!.splitPaneId).toBe('main');
+    expect(findLeafById(s.paneTree, 'main')!.tabIds).toContain('B');
+  });
+
   it('splitPane sets source size to 0.5, creates new pane with active tab', () => {
     useAppStore.setState({ ports: [makePort('A')] });
     useAppStore.getState().openTab('A');

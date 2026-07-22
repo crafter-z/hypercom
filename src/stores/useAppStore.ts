@@ -333,7 +333,11 @@ openTab: (portId) => {
       useTerminalStore.getState().ensureTerminal(portId);
       set((state) => {
       const existing = state.tabs.find(t => t.id === portId);
-      const targetPaneId = state.focusedPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
+      // Harden against a dangling focusedPaneId: verify it still exists in the
+      // tree, otherwise fall back to the first leaf. Trusting a stale id would
+      // push the tab to state.tabs without adding it to any leaf → orphan tab.
+      const focusedLeaf = findLeafById(state.paneTree, state.focusedPaneId);
+      const targetPaneId = focusedLeaf?.id || collectLeaves(state.paneTree)[0]?.id || 'main';
       if (!existing) {
         const port = state.ports.find(p => p.id === portId);
         const tab: TabItem = {
@@ -377,37 +381,59 @@ openTab: (portId) => {
       }
     }),
     
-closeTabsToRight: (tabId) => set((state) => {
-      const idx = state.tabs.findIndex(t => t.id === tabId);
-      if (idx >= 0) {
-        const toRemove = state.tabs.slice(idx + 1).filter(t => !t.isPinned);
-        state.tabs = state.tabs.filter((t, i) => i <= idx || t.isPinned);
-        for (const r of toRemove) {
-          const leaf = findLeafById(state.paneTree, r.splitPaneId);
-          if (leaf) leaf.tabIds = leaf.tabIds.filter(id => id !== r.id);
-        }
-        state.paneTree = pruneTree(state.paneTree);
-        if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
-          state.activeTabId = tabId;
-          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
-        }
+    closeTabsToRight: (tabId) => set((state) => {
+      // Pane-scoped: "right" is defined by the containing leaf's tabIds order
+      // (the displayed order), NOT the global state.tabs index. Never touches
+      // tabs in other panes.
+      const leaf = findLeafByTabId(state.paneTree, tabId);
+      if (!leaf) return;
+      const idx = leaf.tabIds.indexOf(tabId);
+      if (idx < 0) return;
+      const removeIds = leaf.tabIds.slice(idx + 1).filter(id => {
+        const tab = state.tabs.find(t => t.id === id);
+        return tab !== undefined && !tab.isPinned;
+      });
+      if (removeIds.length === 0) return;
+      const removeSet = new Set(removeIds);
+      leaf.tabIds = leaf.tabIds.filter(id => !removeSet.has(id));
+      state.tabs = state.tabs.filter(t => !removeSet.has(t.id));
+      state.paneTree = pruneTree(state.paneTree);
+      if (state.activeTabId && removeSet.has(state.activeTabId)) {
+        state.activeTabId = tabId;
+        state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
+      }
+      // Ensure focusedPaneId is valid after pruning
+      const leaves = collectLeaves(state.paneTree);
+      if (!leaves.find(l => l.id === state.focusedPaneId)) {
+        state.focusedPaneId = leaves[0]?.id || 'main';
       }
     }),
     
-closeTabsToLeft: (tabId) => set((state) => {
-      const idx = state.tabs.findIndex(t => t.id === tabId);
-      if (idx > 0) {
-        const toRemove = state.tabs.slice(0, idx).filter(t => !t.isPinned);
-        state.tabs = state.tabs.filter((t, i) => i >= idx || t.isPinned);
-        for (const r of toRemove) {
-          const leaf = findLeafById(state.paneTree, r.splitPaneId);
-          if (leaf) leaf.tabIds = leaf.tabIds.filter(id => id !== r.id);
-        }
-        state.paneTree = pruneTree(state.paneTree);
-        if (state.activeTabId && toRemove.some(r => r.id === state.activeTabId)) {
-          state.activeTabId = tabId;
-          state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
-        }
+    closeTabsToLeft: (tabId) => set((state) => {
+      // Pane-scoped: "left" is defined by the containing leaf's tabIds order
+      // (the displayed order), NOT the global state.tabs index. Never touches
+      // tabs in other panes.
+      const leaf = findLeafByTabId(state.paneTree, tabId);
+      if (!leaf) return;
+      const idx = leaf.tabIds.indexOf(tabId);
+      if (idx <= 0) return;
+      const removeIds = leaf.tabIds.slice(0, idx).filter(id => {
+        const tab = state.tabs.find(t => t.id === id);
+        return tab !== undefined && !tab.isPinned;
+      });
+      if (removeIds.length === 0) return;
+      const removeSet = new Set(removeIds);
+      leaf.tabIds = leaf.tabIds.filter(id => !removeSet.has(id));
+      state.tabs = state.tabs.filter(t => !removeSet.has(t.id));
+      state.paneTree = pruneTree(state.paneTree);
+      if (state.activeTabId && removeSet.has(state.activeTabId)) {
+        state.activeTabId = tabId;
+        state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
+      }
+      // Ensure focusedPaneId is valid after pruning
+      const leaves = collectLeaves(state.paneTree);
+      if (!leaves.find(l => l.id === state.focusedPaneId)) {
+        state.focusedPaneId = leaves[0]?.id || 'main';
       }
     }),
     
@@ -423,6 +449,12 @@ closeOtherTabs: (tabId) => set((state) => {
         state.tabs = state.tabs.filter(t => t.id === tabId || t.isPinned);
         state.activeTabId = tabId;
         state.focusedPaneId = target.splitPaneId;
+        // Ensure focusedPaneId is valid after pruning (target.splitPaneId may
+        // reference a leaf that no longer exists in a degraded/inconsistent tree)
+        const leaves = collectLeaves(state.paneTree);
+        if (!leaves.find(l => l.id === state.focusedPaneId)) {
+          state.focusedPaneId = leaves[0]?.id || 'main';
+        }
       }
     }),
     
