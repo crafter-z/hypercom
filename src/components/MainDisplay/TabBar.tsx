@@ -13,7 +13,6 @@ import { CSS } from '@dnd-kit/utilities';
 import { useAppStore } from '../../stores/useAppStore';
 
 interface TabBarProps {
-  paneId: string;
   tabs: TabItem[];
   activeTabId: string | null;
   isMultiPane?: boolean;
@@ -27,16 +26,43 @@ interface TabBarProps {
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
 }
 
-// ==================== SortableTab ====================
+// ==================== Tab rendering ====================
 
-const SortableTab: React.FC<{
+interface TabItemProps {
   tab: TabItem;
   isActive: boolean;
   isPortDisconnected: boolean;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
   onContextMenu: (e: React.MouseEvent, tabId: string) => void;
-}> = ({ tab, isActive, isPortDisconnected, onTabClick, onTabClose, onContextMenu }) => {
+}
+
+const tabItemClassName = (tab: TabItem, isActive: boolean): string =>
+  `tab-item${isActive ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`;
+
+/** Presentational tab innards shared by the sortable and static shells —
+ * the single source of truth for what a tab looks like. */
+const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, onTabClose }) => (
+  <>
+    <span className="tab-status-dot" />
+    {isPortDisconnected && (
+      <AlertTriangle size={12} className="tab-warning-icon" />
+    )}
+    <span className="tab-title">{tab.title}</span>
+    {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
+    {!tab.isPinned && (
+      <span
+        className="tab-close"
+        onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
+      >
+        <X size={12} />
+      </span>
+    )}
+  </>
+);
+
+/** DnD-enabled shell — used when reordering / cross-pane drag applies. */
+const SortableTab: React.FC<TabItemProps> = (props) => {
   const {
     attributes,
     listeners,
@@ -44,7 +70,7 @@ const SortableTab: React.FC<{
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: tab.id });
+  } = useSortable({ id: props.tab.id });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -57,37 +83,31 @@ const SortableTab: React.FC<{
     <div
       ref={setNodeRef}
       style={style}
-      className={`tab-item${isActive ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
-      onClick={() => onTabClick(tab.id)}
-      onContextMenu={(e) => onContextMenu(e, tab.id)}
+      className={tabItemClassName(props.tab, props.isActive)}
+      onClick={() => props.onTabClick(props.tab.id)}
+      onContextMenu={(e) => props.onContextMenu(e, props.tab.id)}
       {...attributes}
       {...listeners}
     >
-      <span
-        className="tab-status-dot"
-        style={{ background: isActive ? 'var(--text-link)' : 'var(--text-secondary)' }}
-      />
-      {isPortDisconnected && (
-        <AlertTriangle size={12} className="tab-warning-icon" />
-      )}
-      <span className="tab-title">{tab.title}</span>
-      {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
-      {!tab.isPinned && (
-        <span
-          className="tab-close"
-          onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
-        >
-          <X size={12} />
-        </span>
-      )}
+      <TabItemContent {...props} />
     </div>
   );
 };
 
+/** Plain shell — single tab in a single pane, no DnD overhead. */
+const StaticTab: React.FC<TabItemProps> = (props) => (
+  <div
+    className={tabItemClassName(props.tab, props.isActive)}
+    onClick={() => props.onTabClick(props.tab.id)}
+    onContextMenu={(e) => props.onContextMenu(e, props.tab.id)}
+  >
+    <TabItemContent {...props} />
+  </div>
+);
+
 // ==================== TabBar ====================
 
 const TabBar: React.FC<TabBarProps> = ({
-  paneId,
   tabs,
   activeTabId,
   isMultiPane,
@@ -154,70 +174,33 @@ const TabBar: React.FC<TabBarProps> = ({
 
   const tabIds = tabs.map(t => t.id);
 
-  // When single-pane with ≤1 tab: no sorting targets, render plain (no DnD overhead).
-  // When multi-pane: always use SortableContext so tabs are draggable across panes.
+  // Single-pane with ≤1 tab: no sorting targets, render static shells (no
+  // DnD overhead — the SortableContext gets an empty item list). With >1 tab
+  // or multi-pane, tabs render as sortable so @dnd-kit handles both
+  // within-pane reordering and cross-pane moves.
   const shouldUseSortable = tabIds.length >= 2 || !!isMultiPane;
 
-  if (!shouldUseSortable) {
-    const tab = tabs[0];
-    const ctxItems = tab ? getContextMenuItems(tab.id) : [];
-    void paneId; // suppress unused warning — paneId is for parent DnD identification
-    return (
-      <div className="tab-bar">
-        {tab && (
-          <div
-            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.isPinned ? ' pinned' : ''}`}
-            onClick={() => onTabClick(tab.id)}
-            onContextMenu={(e) => handleContextMenu(e, tab.id)}
-          >
-            <span
-              className="tab-status-dot"
-              style={{ background: tab.id === activeTabId ? 'var(--text-link)' : 'var(--text-secondary)' }}
-            />
-            {disconnectedPortIds.has(tab.id) && (
-              <AlertTriangle size={12} className="tab-warning-icon" />
-            )}
-            <span className="tab-title">{tab.title}</span>
-            {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
-            {!tab.isPinned && (
-              <span
-                className="tab-close"
-                onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
-              >
-                <X size={12} />
-              </span>
-            )}
-          </div>
-        )}
-        {contextMenu && (
-          <ContextMenu
-            x={contextMenu.x}
-            y={contextMenu.y}
-            items={ctxItems}
-            onClose={handleCloseContextMenu}
-          />
-        )}
-      </div>
-    );
-  }
+  const renderTab = (tab: TabItem) => {
+    const itemProps: TabItemProps = {
+      tab,
+      isActive: tab.id === activeTabId,
+      isPortDisconnected: disconnectedPortIds.has(tab.id),
+      onTabClick,
+      onTabClose,
+      onContextMenu: handleContextMenu,
+    };
+    return shouldUseSortable
+      ? <SortableTab key={tab.id} {...itemProps} />
+      : <StaticTab key={tab.id} {...itemProps} />;
+  };
 
-  // With >1 tab or multi-pane: always render as sortable so @dnd-kit can
-  // handle both within-pane reordering and cross-pane tab moves.
-  void paneId; // suppress unused warning — paneId is for parent DnD identification
   return (
-    <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
+    <SortableContext
+      items={shouldUseSortable ? tabIds : []}
+      strategy={horizontalListSortingStrategy}
+    >
       <div className="tab-bar">
-        {tabs.map((tab) => (
-          <SortableTab
-            key={tab.id}
-            tab={tab}
-            isActive={tab.id === activeTabId}
-            isPortDisconnected={disconnectedPortIds.has(tab.id)}
-            onTabClick={onTabClick}
-            onTabClose={onTabClose}
-            onContextMenu={handleContextMenu}
-          />
-        ))}
+        {tabs.map(renderTab)}
       </div>
 
       {contextMenu && (

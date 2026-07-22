@@ -13,7 +13,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   height: calc(var(--tab-height) - 1px);
   min-width: 120px;
   max-width: 200px;
@@ -36,19 +36,25 @@
 
 .tab-item.pinned {
   min-width: auto;
-  padding: 0 8px;
+  padding: 0 var(--space-2);
 }
 
+/* Status dot — idle gray, lit by the active tab (no inline styles). */
 .tab-status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+  background: var(--text-secondary);
+}
+
+.tab-item.active .tab-status-dot {
+  background: var(--text-link);
 }
 
 .tab-title {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--text-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -65,7 +71,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   opacity: 0;
   transition: opacity var(--transition-fast);
   color: var(--text-secondary);
@@ -87,7 +93,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   height: calc(var(--tab-height) - 1px);
   min-width: 120px;
   max-width: 200px;
@@ -96,7 +102,7 @@
   color: var(--text-primary);
   border-radius: var(--border-radius);
   box-shadow: var(--shadow-lg);
-  font-size: 12px;
+  font-size: var(--text-sm);
   white-space: nowrap;
   overflow: hidden;
 }
