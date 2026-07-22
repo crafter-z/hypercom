@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE — HyperCom
 
-**Generated:** 2026-07-18 · **Commit:** ea75456 (main) · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + sqlx + serialport)
+**Generated:** 2026-07-21 · **Commit:** 1206a8a (main) · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + sqlx + serialport)
 
 ## OVERVIEW
 
@@ -14,7 +14,7 @@ hypercom/
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
 │   ├── i18n.ts                   # i18next + react-i18next, 218 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
-│   ├── hooks/useTauri.ts         # 8 lifecycle-critical hooks (456 lines)
+│   ├── hooks/useTauri.ts         # 9 lifecycle-critical hooks (含 usePinStatesSubscriber)
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
 │   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix)
@@ -220,12 +220,13 @@ The old `useSerialData` hook was split into two hooks with different lifecycles:
 
 Both hooks write to the terminal store through `getState()` to avoid re-rendering the hook owner on every line.
 
-The full hook set in `src/hooks/useTauri.ts` (8 hooks):
+The full hook set in `src/hooks/useTauri.ts` (9 hooks):
 
 | Hook | Purpose | Called in |
 |------|---------|-----------|
 | `useSerialPorts` | Polls port list every 3s | Sidebar |
 | `useSerialConnection` | open/close port, routes through `closePort()` | Sidebar / TabBar |
+| `usePinStatesSubscriber` | `serial:pin_states` event listener (DTR/RTS/CTS/DSR/RLSD/RI) | App.tsx (once) |
 | `useSerialReceive` | `serial_data` event listener | App.tsx (once) |
 | `useSerialSend` | Send action | OperationPanel |
 | `useConfigPersistence` | Load/save config to backend | App.tsx |
@@ -346,5 +347,5 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`
 - **类组件**（如 `App.tsx` 的 `AppErrorBoundary`）不能使用 hook，直接 `import i18n from './i18n'` 后 `i18n.t('key')` —— 但不会随语言切换重渲染（仅在错误边界这种边缘场景可接受）
 - 不翻译的字符串：协议词汇 `None/Even/Odd/Mark/Space`、`Xon/Xoff`、`RTS/CTS`；编码名 `ASCII/UTF-8/GBK/ISO-8859-1`；单位 `ms/px/MB`；首字母缩写 `SIM/VCP/HEX/DTR/RTS` —— 这些在 i18n.ts 中也无对应 key
-- ⚠️ 7 个文件已替换为 `t()`；15 个文件保留中文硬编码（暂未完成 i18n 接入，不影响编译运行）— 新增组件如需文本，先查 `src/i18n.ts` 现有 key 是否够用
-- 切换语言时已替换的文件实时切换，未替换的继续显示中文
+- ✅ 全部 30 个组件 `.tsx` 文件已接入 `t()`（2026-07-21 完成）— 新增组件文本必须先查 `src/i18n.ts` 现有 key，不够用则在 zh-CN 和 en-US 两侧同时新增 key
+- 切换语言时全部界面实时切换，无硬编码中文残留

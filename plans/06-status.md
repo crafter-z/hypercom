@@ -14,7 +14,7 @@
 | `stores/useRuleStore.ts` | ✅ | 规则集状态 (47 行) |
 | `stores/useAppStore.test.ts` | ✅ | vitest 单测 (470 行, 49 cases) |
 | `services/tauri.ts` | ✅ | 5 个服务模块, 含 storageService (268 行) |
-| `hooks/useTauri.ts` | ✅ | 7 个 Hooks, mergePorts 防覆盖 (378 行) |
+| `hooks/useTauri.ts` | ✅ | 9 个 Hooks (含 usePinStatesSubscriber 引脚订阅), mergePorts 防覆盖 |
 | `utils/highlightEngine.ts` | ✅ | 正则/关键词高亮引擎 (104 行) |
 | `utils/highlightEngine.test.ts` | ✅ | 高亮引擎单测 (197 行, 22 cases) |
 | `utils/hexUtils.ts` | ✅ | HEX 解析工具 (21 行) |
@@ -22,6 +22,8 @@
 | `utils/protocolParser.test.ts` | ✅ | 解析引擎单测 (181 行, 17 cases) |
 | `utils/protocolRenderer.ts` | ✅ | 协议字段着色渲染器 (119 行) |
 | `utils/protocolRenderer.test.ts` | ✅ | 渲染器单测 (146 行, 8 cases) |
+| `utils/logReplay.ts` | ✅ | 日志回放解析工具 (行格式解析) |
+| `utils/logReplay.test.ts` | ✅ | 回放解析单测 (10 cases) |
 | `styles.css` | ✅ | 入口文件, @import 11 个子样式 (14 行) |
 | `styles/base.css` | ✅ | 主题变量 + 基础样式 (288 行) |
 | `styles/titlebar.css` | ✅ | 标题栏样式 (53 行) |
@@ -36,6 +38,7 @@
 | `App.tsx` | ✅ | 布局编排 + useAppInit + ThemeProvider (163 行) |
 | `main.tsx` | ✅ | ReactDOM.createRoot (9 行) |
 | `components/shared/ContextMenu.tsx` | ✅ | 通用右键菜单 (94 行) |
+| `components/shared/AboutDialog.tsx` | ✅ | 关于对话框 (版本/技术栈/许可) |
 | `components/TitleBar/TitleBar.tsx` | ✅ | 完整, 窗口按钮绑定 API (60 行) |
 | `components/Sidebar/Sidebar.tsx` | ✅ | 含 @dnd-kit 拖拽, 搜索, 分组, 备注 (482 行) |
 | `components/Sidebar/AliasDialog.tsx` | ✅ | 别名编辑对话框 (37 行) |
@@ -46,6 +49,7 @@
 | `components/MainDisplay/TabBar.tsx` | ✅ | 含 @dnd-kit 水平拖拽, 右键菜单, i18n (192 行) |
 | `components/MainDisplay/TerminalView.tsx` | ✅ | 真实数据 + 语法高亮 + 虚拟滚动 + 文件导出 (227 行) — 已 t() 替换保留 |
 | `components/MainDisplay/hooks/useTabDragEnd.ts` | ✅ | 树遍历拖拽 hook (findLeafByTabId/findLeafById) (72 行) |
+| `components/MainDisplay/hooks/useLogReplay.ts` | ✅ | 日志回放 hook (按时间戳写回终端 + 倍速) |
 | `components/OperationPanel/OperationPanel.tsx` | ✅ | 操作面板容器 + 三栏编排 (138 行) |
 | `components/OperationPanel/SendSection.tsx` | ✅ | 手动发送区 (136 行) |
 | `components/OperationPanel/ParamsSection.tsx` | ✅ | 串口参数区 (137 行) |
@@ -78,6 +82,7 @@
 | `commands/config.rs` | ✅ | 配置命令 (36 行) |
 | `commands/log.rs` | ✅ | 日志命令 (196 行) |
 | `commands/system_cmds.rs` | ✅ | 系统状态 + 电源管理命令 (67 行) |
+| `commands/file.rs` | ✅ | 通用文件读写 (配置导出/导入) |
 | `commands/simulation.rs` | ✅ | 模拟串口命令 (39 行) |
 | `serial/mod.rs` | ✅ | 真实/模拟串口, 事件推送, emit_data_event helper (483 行) |
 | `config/mod.rs` | ✅ | JSON 持久化, 36 项配置 (219 行) |
@@ -117,13 +122,21 @@
 | 虚拟滚动 (`@tanstack/react-virtual`) | ✅ |
 | 真实文件导出 (TXT/CSV via `save()` + Rust 写盘) | ✅ |
 | GBK 解码 (encoding_rs) | ✅ |
-| 前端单元测试 (vitest, 99 cases / 4 files) | ✅ |
-| 后端单元测试 (cargo test, 27 cases) | ✅ |
+| 前端单元测试 (vitest, 168 cases / 11 files) | ✅ |
+| 后端单元测试 (cargo test, 32 cases) | ✅ |
 | 协议解析器 | ✅ |
 | 分屏嵌套 (VS Code 树状) | ✅ |
 | 字体缩放 (CSS 变量 + ParamsSection 滑块) | ✅ |
 | 背景图片 (主窗口应用) | ✅ |
-| 多语言支持 (i18n 基础设施 + 7/22 文件) | 🔄 |
+| 多语言支持 (i18n, 全部 30 个组件文件接入) | ✅ |
+| 窗口置顶 (TitleBar + setAlwaysOnTop) | ✅ |
+| 关于对话框 (版本/技术栈/许可) | ✅ |
+| 配置导出/导入 (JSON bundle, 含规则集与协议模板) | ✅ |
+| 端口参数预设 (SQLite 持久化 + ParamsSection) | ✅ |
+| 文件发送 / 二进制传输 (分块 + 进度事件) | ✅ |
+| 日志回放 (按时间戳写回 + 倍速 1/4/16/最快) | ✅ |
+| 批量发送脚本 (循环发送重复轮数控制) | ✅ |
+| 最小化到托盘 (closeBehavior + 系统托盘菜单) | ✅ |
 
 ## 重构 (2026-06)
 

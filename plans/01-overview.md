@@ -34,12 +34,12 @@
 │  stores/        4 个 Zustand Store      │
 │  hooks/         React Hooks 桥接层      │
 │  services/      Tauri invoke 封装       │
-│  utils/         高亮引擎 + HEX 工具     │
+│  utils/         高亮 / 协议解析 / HEX 工具 │
 ├─────────────────────────────────────────┤
 │  Tauri Bridge   invoke / event          │
 ├─────────────────────────────────────────┤
 │  src-tauri/     Rust 逻辑层             │
-│  commands/      8 个命令模块 (32 命令)  │
+│  commands/      6 个命令域文件 + CommandError │
 │  serial/        串口管理器              │
 │  config/        配置持久化              │
 │  logger/        日志写入器              │
@@ -75,10 +75,17 @@
 | 终端虚拟滚动 (@tanstack/react-virtual) | ✅ |
 | 终端数据真实文件导出 (TXT/CSV) | ✅ |
 | GBK 真实解码 (encoding_rs) | ✅ |
-| 前端单元测试基线 (vitest, 49+ cases) | ✅ |
-| 窗口控制按钮 (最小化/最大化/关闭) | ⏳ |
-| 协议解析器 | ⏳ |
-| 多语言支持 | ⏳ |
+| 分屏嵌套 (VS Code 风格树状) | ✅ |
+| 字体缩放 / 背景图片 | ✅ |
+| 协议解析器 (帧重组 + 校验和 + 字段着色) | ✅ |
+| 多语言支持 (i18n, zh-CN/en-US 全接入) | ✅ |
+| 窗口控制按钮 (最小化/最大化/关闭) | ✅ |
+| 终端搜索 / 选择复制 / 数据过滤 | ✅ |
+| Toast 通知 + 断线警示 + 自动重连 | ✅ |
+| 引脚状态监视 (DTR/RTS/CTS/DSR/RLSD/RI) | ✅ |
+| 发送历史持久化 + 快捷发送槽 | ✅ |
+| 首启引导 + 快捷键帮助 | ✅ |
+| 单元测试 (vitest 158 cases / cargo 31 cases) | ✅ |
 
 ## 运行
 

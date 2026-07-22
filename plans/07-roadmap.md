@@ -1,14 +1,25 @@
 # 待办事项
 
-## 🟢 低优先级
-
-### 多语言 i18n 收尾
-- ✅ 基础设施已就位：`src/i18n.ts` 含 zh-CN/en-US 字典 218 项，`main.tsx` 已接入，`useAppStore.subscribe` 同步 `config.language → i18n.changeLanguage`
-- ✅ 7 个文件已完成 `t()` 替换：`App.tsx`、`TitleBar.tsx`、`StatusBar.tsx`、`Sidebar/AliasDialog.tsx`、`MainDisplay/` 3 文件
-- ⏳ 15 文件待接 `t()`：`TerminalView.tsx`、`OperationPanel/*` 3 文件、`Sidebar/Sidebar.tsx`、`ConfigModal/*` 10 文件 — 当前保留中文 (与原始行为一致，不影响运行)
-- 切换语言后界面会混合显示：已替换的文件切换语言，未替换的文件继续显示中文
-
 ## ✅ 已完成（移出待办列表）
+
+### 多语言 i18n 收尾 (2026-07-21)
+- ✅ 基础设施：`src/i18n.ts` 含 zh-CN/en-US 字典，`main.tsx` 已接入，`useAppStore.subscribe` 同步 `config.language → i18n.changeLanguage`
+- ✅ 全部 30 个组件 `.tsx` 文件已接入 `t()`（grep `useTranslation` 验证）：ConfigModal (10) / OperationPanel (5) / MainDisplay (4) / Sidebar (3) / StatusBar (2) / shared (2) / TitleBar / Tour 等
+- ✅ 语言切换全程实时生效，不再混合显示中英文
+
+### Phase G 进阶功能批次 1 (2026-07-21)
+- ✅ **窗口置顶** — TitleBar Pin/PinOff 按钮 + `getCurrentWindow().setAlwaysOnTop()`，capabilities 补 `core:window:allow-set-always-on-top`
+- ✅ **关于对话框** — 新增 `AboutDialog.tsx`（`getVersion()` + 技术栈 + 许可），TitleBar Info 按钮入口，`ui.isAboutOpen` 状态
+- ✅ **配置导出/导入** — 新增 `commands/file.rs`（`write_text_file`/`read_text_file`），BackupSettings 导出 config + 高亮规则 + 命令集 + 协议模板为 JSON bundle，导入解析写回 + 自动重载
+- ✅ **端口参数预设** — 新增 `port_presets` 表 + CRUD（`commands/storage.rs`），ParamsSection 预设选择/保存当前/删除；后端测试 +1（32 cases）
+
+### Phase G 进阶功能批次 2 (2026-07-21)
+- ✅ **文件发送 / 二进制传输**（GAPS #14）— `serial::write_raw`（SIM 端口转 HEX 回显）+ `send_file` 异步命令（分块 + `serial:file_progress` 进度事件 + 间隔延时），SendSection 文件选择按钮 + 实时进度条
+- ✅ **日志回放**（GAPS #13）— `utils/logReplay.ts` 解析 `[ts] DIR content` 行格式（10 测试），`useLogReplay` hook 按时间戳间隔写回终端（倍速 1/4/16/最快，可停止），TerminalView FilterBar 回放按钮；前端测试 158→168
+
+### Phase G 进阶功能批次 3 (2026-07-21)
+- ✅ **批量发送脚本** — `useOperationStore.loopRepeatCount`（0=跟随命令集 isLoop，>0=发送 N 轮后停止），`useCyclicSend` 轮次计数（每 tick 从 store 读最新值），RulesSection 重复轮数输入
+- ✅ **最小化到托盘** — tauri 核心 `tray-icon` feature（非独立插件），`lib.rs` setup 创建系统托盘（显示/退出菜单 + 单击图标显示窗口），`on_window_event` 按 `config.closeBehavior` 拦截关闭隐藏到托盘；打通此前已存在但未生效的 GeneralSettings 关闭行为设置
 
 ### 2026-07 批次：字体/背景/分屏树/i18n 基础设施
 

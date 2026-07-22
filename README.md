@@ -18,6 +18,7 @@
 
 ### 终端与显示
 - 📑 **多标签 + 灵活分屏** — 支持上下/左右分屏、跨 Pane 拖拽标签、`@dnd-kit` 水平排序
+- ⏪ **日志回放** — 读取日志文件按原始时间戳写回终端，倍速可选（1/4/16/最快）
 - ⚡ **虚拟滚动** — `@tanstack/react-virtual`，DOM 节点从 O(N) 降到约 30–50（视口 + overscan）
 - 🎨 **语法高亮** — 正则 / 关键词规则集，可配置颜色、加粗、斜体，通过 `dangerouslySetInnerHTML` 注入（已 `escapeHtml`）
 - 📅 **时间戳 / TX·RX 着色** — 多种时间戳格式、字符串/HEX/二进制显示切换
@@ -27,6 +28,8 @@
 - ✉️ **手动发送** — 字符串 / HEX 解析（含边界检查）/ 自定义行结束符
 - 🔁 **循环发送** — 命令集顺序执行、单条延时、整体循环间隔
 - 📦 **命令集编辑器** — SQLite 持久化，可配置每条命令的类型、内容、行结束符、延时
+- 📤 **文件发送** — 选择文件分块发送到串口，实时进度条（二进制传输）
+- 🔢 **批量发送** — 循环发送支持指定重复轮数（0=无限），命令集逐条延时执行
 
 ### 日志与导出
 - 📝 **自动日志** — 每端口独立 `BufWriter`，连接即写、断开即 `sync_all` 落盘
@@ -40,6 +43,11 @@
 - 📈 **流量统计** — 每端口 TX/RX 字节累加
 - 🛠️ **6 页配置弹窗** — 通用、日志、备份、显示、高亮规则、命令规则
 - 🔋 **防休眠** — Win32 `SetThreadExecutionState` 实现 `ES_CONTINUOUS | ES_DISPLAY_REQUIRED`
+- 📌 **窗口置顶** — 标题栏一键置顶（`setAlwaysOnTop`）
+- ℹ️ **关于对话框** — 版本 / 技术栈 / 许可信息
+- 📤 **配置导出/导入** — 配置与全部规则集导出为 JSON bundle，一键导入恢复
+- ⭐ **端口参数预设** — 常用波特率/数据位组合存为预设，快速应用
+- 🧰 **系统托盘常驻** — 关闭时最小化到托盘（可配置），托盘菜单快速显示/退出
 
 ---
 
@@ -96,7 +104,7 @@ hypercom/
 │   ├── styles.css                    # @import 入口（指向 styles/ 目录）
 │   ├── types/index.ts                # 全局 TS 类型
 │   ├── services/tauri.ts             # invoke 包装层（6 个服务模块）
-│   ├── hooks/useTauri.ts             # React Hooks 桥接（8 个 Hooks）
+│   ├── hooks/useTauri.ts             # React Hooks 桥接（9 个 Hooks）
 │   ├── stores/                       # Zustand + Immer，按领域拆分为 4 个 store
 │   │   ├── useAppStore.ts            # 标签 / 端口 / 分屏 / 配置 / 分组
 │   │   ├── useAppStore.test.ts       # vitest 单测
@@ -241,8 +249,8 @@ cargo check --manifest-path src-tauri/Cargo.toml       # Rust 快速检查
 
 ```bash
 npm run test                                           # vitest 监听模式
-npm run test:run                                       # vitest 一次跑（71 cases）
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（24 cases）
+npm run test:run                                       # vitest 一次跑（168 cases / 11 files）
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 cases）
 ```
 
 ---
@@ -313,7 +321,7 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（24 
 | `useTerminalStore` | 终端行缓冲 | `terminals`、`appendTerminalLine`、`clearTerminal`、`setTerminalConfig`、`ensureTerminal` |
 | `useRuleStore` | 高亮规则集 + 命令集 | `highlightRuleSets`、`activeHighlightSetId`、`sendCommandSets`、`activeSendCommandSetId` + CRUD |
 
-### Hook 拆分（8 个 Hooks）
+### Hook 拆分（9 个 Hooks）
 
 原 `useSerialData` 拆为两个生命周期不同的 Hook：
 
@@ -438,22 +446,23 @@ scope: ui | backend | store | hooks | plans
 **重构已完成**：
 
 - ✅ **Store 拆分** — 单一 god store 拆为 4 个领域 store（useAppStore / useOperationStore / useTerminalStore / useRuleStore）
-- ✅ **Hook 拆分** — `useSerialData` 拆为 `useSerialReceive` + `useSerialSend`，8 个 Hook 各司其职
+- ✅ **Hook 拆分** — `useSerialData` 拆为 `useSerialReceive` + `useSerialSend`，9 个 Hook 各司其职
 - ✅ **组件拆分** — ConfigModal（724→10 文件）、OperationPanel（526→4 文件）、MainDisplay（359→5 文件）、Sidebar（626→2 文件）
 - ✅ **后端命令拆分** — `commands/mod.rs` 拆为 6 个领域文件 + `CommandError` 枚举（thiserror）
 - ✅ **CSS 拆分** — `styles.css`（1470 行）拆为 `styles/` 目录 11 个文件
 - ✅ **GBK 解码修复** — 采用 `encoding_rs::GBK`，替代旧 U+FFFD 占位符方案
 - ✅ **closeTab 生命周期** — 经 `closePort()` 路由，修复日志句柄泄漏
 
-**进行中 / 计划中**：
+**2026-07 功能批次（已完成）**：
 
-- ⏳ **协议解析器** — 帧头/长度/校验/帧尾模板，自动字段着色
-- ⏳ **多语言（i18n）** — `i18next` + `zh-CN` / `en-US`
-- ⏳ **字体缩放** — 终端字号绑定 CSS 变量，支持 Ctrl+滚轮
-- ⏳ **背景图片** — ConfigModal 已有路径选择，待应用到主窗口
-- ⏳ **分屏嵌套（VS Code 风格）** — 当前 Pane 为平铺模型
+- ✅ **协议解析器** — 帧重组状态机 + sum8/xor/crc8 校验 + 字段着色，ConfigModal 协议模板页
+- ✅ **多语言（i18n）** — `i18next` + `zh-CN` / `en-US`，全部 30 个组件文件接入
+- ✅ **字体缩放** — 终端字号绑定 CSS 变量，Ctrl+滚轮 + 参数面板滑块
+- ✅ **背景图片** — ConfigModal 路径选择 → CSS 变量应用到主窗口
+- ✅ **分屏嵌套（VS Code 风格）** — `paneTree: PaneNode` 递归树，任意深度嵌套
+- ✅ **v0.1 可见性与鲁棒性** — Toast 通知、终端搜索（Ctrl+F）、选择复制、断线警示、自动重连、引脚状态监视、发送历史持久化、快捷发送槽、首启引导、快捷键帮助、会话恢复、数据过滤
 
-完整待办见 [`plans/07-roadmap.md`](plans/07-roadmap.md)。
+完整待办见 [`plans/07-roadmap.md`](plans/07-roadmap.md) 与 [`plans/10-v0.1-roadmap.md`](plans/10-v0.1-roadmap.md)。剩余：Phase E 真机验证（待硬件）/ 代码签名（待证书）。
 
 ---
 
@@ -467,6 +476,6 @@ MIT License
 
 - `npx tsc --noEmit` 0 错误
 - `cargo check --manifest-path src-tauri/Cargo.toml` 0 错误 0 警告
-- `npm run test:run` 全部通过（71 cases）
-- `cargo test --lib --manifest-path src-tauri/Cargo.toml` 全部通过（24 cases）
+- `npm run test:run` 全部通过（168 cases / 11 files）
+- `cargo test --lib --manifest-path src-tauri/Cargo.toml` 全部通过（32 cases）
 - 遵循 [`AGENTS.md`](AGENTS.md) 的开发约束
