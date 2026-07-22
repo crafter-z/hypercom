@@ -2,10 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useAppStore } from '../../stores/useAppStore';
-import { Send, Cable, Eraser, CornerDownLeft, TextCursorInput, Trash2, Plus, FileUp } from 'lucide-react';
+import { useRuleStore } from '../../stores/useRuleStore';
+import { Send, Cable, Eraser, CornerDownLeft, TextCursorInput, Trash2, Plus, Edit3, FileUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { LineEnding } from '../../types';
+import type { LineEnding, SendCommand } from '../../types';
 import type { SendHistoryItem, FileProgressPayload } from '../../services/tauri';
 import { serialService, eventService } from '../../services/tauri';
 import { notifyError, notifySuccess } from '../../stores/useToastStore';
@@ -41,11 +42,11 @@ const SendSection: React.FC<SendSectionProps> = ({
   const sendIsHex = useOperationStore(s => s.sendIsHex);
   const sendAppendLineEnding = useOperationStore(s => s.sendAppendLineEnding);
   const sendOnEnter = useOperationStore(s => s.sendOnEnter);
-  const quickSendSlots = useOperationStore(s => s.quickSendSlots);
   const encoding = useOperationStore(s => s.encoding);
   const setOpState = useOperationStore(s => s.setOpState);
   const clearTerminal = useTerminalStore(s => s.clearTerminal);
-  const setUIState = useAppStore(s => s.setUIState);
+  const sendCommandSets = useRuleStore(s => s.sendCommandSets);
+  const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
   const setConfigActiveTab = useAppStore(s => s.setConfigActiveTab);
   const toggleConfigModal = useAppStore(s => s.toggleConfigModal);
 
@@ -85,6 +86,14 @@ const SendSection: React.FC<SendSectionProps> = ({
     [sendAppendLineEnding]
   );
 
+  // Quick-send is driven by the ACTIVE send-command set — the same sets the
+  // loop-send system uses. No static slot cap; one pill per command.
+  const activeCommands = useMemo(() => {
+    const set = sendCommandSets.find(s => s.id === activeSendCommandSetId);
+    if (!set) return [];
+    return [...set.commands].sort((a, b) => a.order - b.order);
+  }, [sendCommandSets, activeSendCommandSetId]);
+
   const connectButtonLabel = isConnected
     ? t('sendSection.connectBtn.disconnect')
     : isConnecting
@@ -101,9 +110,11 @@ const SendSection: React.FC<SendSectionProps> = ({
     setOpState({ sendInput: '' });
   };
 
-  const handleQuickSend = async (content: string) => {
-    if (!isPortActive || !content) return;
-    await sendData(activeTabId!, content, sendIsHex, sendAppendLineEnding);
+  // Send one command from the active set ONCE — each command carries its own
+  // type (string/hex) and line ending, independent of the compose-row options.
+  const handleQuickCommand = async (cmd: SendCommand) => {
+    if (!isPortActive || !activeTabId || !cmd.content) return;
+    await sendData(activeTabId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
   };
 
   const handleToggleConnection = async () => {
@@ -160,10 +171,9 @@ const SendSection: React.FC<SendSectionProps> = ({
     }
   };
 
-  const openQuickSendSettings = () => {
-    setConfigActiveTab('general');
+  const openConfigToTab = (tab: string) => {
+    setConfigActiveTab(tab);
     toggleConfigModal(true);
-    setUIState({ isConfigOpen: true, configActiveTab: 'general' });
   };
 
   const toggleSendOnEnter = () => {
@@ -174,29 +184,42 @@ const SendSection: React.FC<SendSectionProps> = ({
 
   return (
     <div className="op-section op-section-send">
-      <div className="panel-card-title">{t('sendSection.cardTitle')}</div>
+      <div className="panel-card-title eyebrow">{t('sendSection.cardTitle')}</div>
 
       <div className="op-quick-send-row">
-        {quickSendSlots.map((slot, idx) =>
-          slot ? (
+        {activeCommands.length > 0 ? (
+          <>
+            {activeCommands.map(cmd => (
+              <button
+                key={cmd.id}
+                className="btn btn-sm op-quick-cmd"
+                disabled={!isPortActive}
+                title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
+                onClick={() => handleQuickCommand(cmd)}
+              >
+                {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
+                <span className="op-quick-cmd-text">{cmd.content}</span>
+              </button>
+            ))}
             <button
-              key={idx}
-              className="btn btn-sm op-quick-send-slot"
-              disabled={!isPortActive}
-              title={`${t('settings.quickSend.slotN', { n: idx + 1 })}: ${slot}`}
-              onClick={() => handleQuickSend(slot)}
+              className="icon-btn"
+              title={t('rulesSection.editCommands')}
+              onClick={() => openConfigToTab('commands')}
             >
-              {slot}
+              <Edit3 size={12} />
             </button>
-          ) : null
+          </>
+        ) : (
+          <div className="op-quick-send-empty">
+            <span>{t('sendSection.quickCommands.emptyHint')}</span>
+            <button
+              className="btn btn-sm op-quick-cmd-configure"
+              onClick={() => openConfigToTab('commands')}
+            >
+              <Plus size={12} /> {t('sendSection.quickCommands.configure')}
+            </button>
+          </div>
         )}
-        <button
-          className="btn btn-sm op-quick-send-edit"
-          title={t('op.quickSend.editButton')}
-          onClick={openQuickSendSettings}
-        >
-          <Plus size={12} />
-        </button>
       </div>
 
       <div className="op-send-row">
@@ -208,7 +231,11 @@ const SendSection: React.FC<SendSectionProps> = ({
           value={sendInput}
           onChange={e => setOpState({ sendInput: e.target.value })}
           onKeyDown={e => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+              // Ctrl/Cmd+Enter ALWAYS sends, regardless of sendOnEnter
+              e.preventDefault();
+              handleSend();
+            } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               if (sendOnEnter) {
                 handleSend();
@@ -227,7 +254,7 @@ const SendSection: React.FC<SendSectionProps> = ({
             }
           }}
         />
-        <div className="op-send-byte-chip" title={byteCount.tooltip}>
+        <div className="chip op-send-byte-chip" title={byteCount.tooltip}>
           {byteCount.count} {t('op.send.bytesLabel')}
         </div>
         <div className="op-send-actions">
@@ -257,7 +284,7 @@ const SendSection: React.FC<SendSectionProps> = ({
             </button>
           </div>
           <div className="op-send-options">
-            <label className="checkbox-wrapper" style={{ fontSize: 10 }}>
+            <label className="checkbox-wrapper op-checkbox-compact">
               <input
                 type="checkbox"
                 checked={sendIsHex}
@@ -266,8 +293,7 @@ const SendSection: React.FC<SendSectionProps> = ({
               HEX
             </label>
             <select
-              className="select"
-              style={{ fontSize: 10, padding: '1px 14px 1px 3px', width: 56 }}
+              className="select op-line-ending-select"
               value={sendAppendLineEnding}
               onChange={e => setOpState({ sendAppendLineEnding: e.target.value as LineEnding })}
             >
@@ -289,8 +315,7 @@ const SendSection: React.FC<SendSectionProps> = ({
 
       <div className="op-btn-row">
         <button
-          className={`btn${showAccent ? ' op-connect-accent' : ''}`}
-          style={{ flex: 1 }}
+          className={`btn op-btn-grow${showAccent ? ' op-connect-accent' : ''}`}
           onClick={handleToggleConnection}
           disabled={connectButtonDisabled}
         >
@@ -315,18 +340,16 @@ const SendSection: React.FC<SendSectionProps> = ({
       </div>
 
       {fileProgress && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
-          <div style={{ flex: 1, height: 6, borderRadius: 3, background: 'var(--bg-secondary)', overflow: 'hidden' }}>
+        <div className="op-file-progress">
+          <div className="op-file-progress-track">
             <div
+              className="op-file-progress-fill"
               style={{
                 width: `${fileProgress.total > 0 ? Math.round((fileProgress.sent / fileProgress.total) * 100) : 0}%`,
-                height: '100%',
-                background: 'var(--text-link)',
-                transition: 'width 0.1s linear',
               }}
             />
           </div>
-          <span style={{ fontSize: 10, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+          <span className="op-file-progress-label">
             {fileProgress.sent} / {fileProgress.total} B
           </span>
         </div>

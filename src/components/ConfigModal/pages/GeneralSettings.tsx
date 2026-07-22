@@ -4,6 +4,12 @@ import { useAppStore } from '../../../stores/useAppStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { AppConfig } from '../../../types';
 
+/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
+const clampNumber = (raw: string, min: number, max: number): number => {
+  const value = Number(raw);
+  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
+};
+
 const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
   const config = useAppStore((s) => s.config);
@@ -31,7 +37,7 @@ const GeneralSettings: React.FC = () => {
           className="input"
           type="number"
           value={config.memoryLimitMb}
-          onChange={(e) => setConfig({ memoryLimitMb: Number(e.target.value) })}
+          onChange={(e) => setConfig({ memoryLimitMb: clampNumber(e.target.value, 64, 4096) })}
           min={64}
           max={4096}
           step={64}
@@ -98,7 +104,7 @@ const GeneralSettings: React.FC = () => {
           className="input"
           type="number"
           value={config.maxRetries}
-          onChange={(e) => setConfig({ maxRetries: Math.max(1, Math.min(10, Number(e.target.value))) })}
+          onChange={(e) => setConfig({ maxRetries: clampNumber(e.target.value, 1, 10) })}
           min={1}
           max={10}
           step={1}
@@ -107,39 +113,19 @@ const GeneralSettings: React.FC = () => {
       </div>
 
       <div className="divider-h" />
-      <h4 className="config-section-title">{t('settings.quickSend.sectionTitle')}</h4>
-
-      {config.quickSendSlots.map((slot, idx) => (
-        <div className="config-row" key={idx}>
-          <label>{t('settings.quickSend.slotN', { n: idx + 1 })}:</label>
-          <input
-            className="input"
-            value={slot ?? ''}
-            placeholder={t('op.quickSend.unboundLabel')}
-            onChange={(e) => {
-              const next = [...config.quickSendSlots];
-              next[idx] = e.target.value || null;
-              setConfig({ quickSendSlots: next });
-            }}
-            style={{ flex: 1 }}
-          />
-        </div>
-      ))}
-
-      <div className="divider-h" />
       <h4 className="config-section-title">{t('generalSettings.fontSectionTitle')}</h4>
 
       <div className="config-row">
         <label>{t('generalSettings.terminalFontLabel')}</label>
         <input className="input" value={config.terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
-        <input className="input" type="number" value={config.terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: Number(e.target.value) })} style={{ width: 60 }} />
+        <input className="input" type="number" value={config.terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('generalSettings.uiFontLabel')}</label>
         <input className="input" value={config.uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
-        <input className="input" type="number" value={config.uiFontSize} onChange={(e) => setConfig({ uiFontSize: Number(e.target.value) })} style={{ width: 60 }} />
+        <input className="input" type="number" value={config.uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
