@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useRuleStore } from '../../../stores/useRuleStore';
+import { useOperationStore } from '../../../stores/useOperationStore';
 import { notifyError } from '../../../stores/useToastStore';
 import type { SendCommand } from '../../../types';
 
@@ -51,10 +52,12 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
   const loopRef = useRef<{
     timeoutId: ReturnType<typeof setTimeout> | null;
     currentCmdIdx: number;
+    completedRounds: number;
     stopped: boolean;
   }>({
     timeoutId: null,
     currentCmdIdx: 0,
+    completedRounds: 0,
     stopped: false,
   });
 
@@ -78,6 +81,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
 
     ref.stopped = false;
     ref.currentCmdIdx = 0;
+    ref.completedRounds = 0;
     notifiedRef.current = false;
 
     const sendNext = async () => {
@@ -99,10 +103,17 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
           cmd.appendLineEnding,
         );
 
+        // 重复轮数优先：>0 时发送 N 轮后停止（覆盖命令集 isLoop）；
+        // 0 时跟随命令集 isLoop（无限循环或单轮）。
+        const loopRepeatCount = useOperationStore.getState().loopRepeatCount;
         const nextIdx = ref.currentCmdIdx + 1;
-        if (nextIdx >= currentSet.commands.length) {
-          // Completed one full loop.
-          if (!currentSet.isLoop) {
+        const completedRound = nextIdx >= currentSet.commands.length;
+        if (completedRound) {
+          ref.completedRounds += 1;
+          const reachedLimit = loopRepeatCount > 0
+            ? ref.completedRounds >= loopRepeatCount
+            : !currentSet.isLoop;
+          if (reachedLimit) {
             setOpState({ isLoopSending: false });
             ref.stopped = true;
             return;
@@ -110,7 +121,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
         }
         ref.currentCmdIdx = nextIdx;
 
-        const delay = currentSet.isLoop && nextIdx >= currentSet.commands.length
+        const delay = completedRound && (currentSet.isLoop || loopRepeatCount > 0)
           ? (currentSet.loopDelay || loopInterval)
           : cmd.delay ?? loopInterval;
 

@@ -9,6 +9,8 @@ mod serial;
 mod storage;
 mod system;
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 
 use std::backtrace::Backtrace;
@@ -222,8 +224,57 @@ pub fn run() {
                 std::process::abort();
             }));
 
+            // ===== 系统托盘（最小化到托盘）=====
+            // 菜单：显示窗口 / 退出；单击托盘图标亦显示窗口。
+            let show_item = MenuItem::with_id(_app, "tray.show", "Show HyperCom", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(_app, "tray.quit", "Quit", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(_app, &[&show_item, &quit_item])?;
+            let mut tray_builder = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .tooltip("HyperCom")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "tray.show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "tray.quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { .. } = event {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
+            if let Some(icon) = _app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            tray_builder.build(_app)?;
+
             log::info!("HyperCom setup complete");
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关闭行为：config.closeBehavior == "minimize" 时拦截关闭、隐藏到托盘
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let close_to_tray = window
+                    .state::<AppState>()
+                    .config_manager
+                    .lock()
+                    .map(|mgr| mgr.get_config().close_behavior == "minimize")
+                    .unwrap_or(false);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

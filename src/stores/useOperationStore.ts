@@ -30,6 +30,7 @@ interface OperationState {
   quickSendSlots: (string | null)[];
   isLoopSending: boolean;
   loopInterval: number;
+  loopRepeatCount: number; // 循环重复轮数: 0 = 跟随命令集 isLoop, >0 = 发送 N 轮后停止
 
   setOpState: (patch: Partial<Omit<OperationState, 'setOpState'>>) => void;
 }
@@ -55,6 +56,7 @@ export const useOperationStore = create<OperationState>()(
     quickSendSlots: [null, null, null, null, null],
     isLoopSending: false,
     loopInterval: 500,
+    loopRepeatCount: 0,
 
     setOpState: (patch) => set((state) => {
       Object.assign(state, patch);

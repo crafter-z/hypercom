@@ -14,6 +14,7 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
   const { t } = useTranslation();
   const isLoopSending = useOperationStore(s => s.isLoopSending);
   const loopInterval = useOperationStore(s => s.loopInterval);
+  const loopRepeatCount = useOperationStore(s => s.loopRepeatCount);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
   const highlightRuleSets = useRuleStore(s => s.highlightRuleSets);
@@ -112,6 +113,23 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
             step={10}
           />
           <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{t('rulesSection.intervalUnit')}</span>
+        </div>
+      </div>
+
+      <div className="op-loop-row" style={{ marginTop: 4 }}>
+        <div className="op-delay-input">
+          <span className="op-label">{t('rulesSection.repeatLabel')}</span>
+          <input
+            className="input"
+            type="number"
+            style={{ width: 56, fontSize: 11, textAlign: 'center' }}
+            value={loopRepeatCount}
+            onChange={e => setOpState({ loopRepeatCount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+            min={0}
+            step={1}
+            title={t('rulesSection.repeatTooltip')}
+          />
+          <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{t('rulesSection.repeatUnit')}</span>
         </div>
       </div>
     </div>
