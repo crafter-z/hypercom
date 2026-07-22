@@ -6,7 +6,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialSend, useSerialConnection } from '../../hooks/useTauri';
 import { serialService } from '../../services/tauri';
 import { notifyError } from '../../stores/useToastStore';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
 import RulesSection from './RulesSection';
@@ -30,7 +30,6 @@ const OperationPanel: React.FC = () => {
   const displayFormat = useOperationStore(s => s.displayFormat);
   const encoding = useOperationStore(s => s.encoding);
   const isLoopSending = useOperationStore(s => s.isLoopSending);
-  const loopInterval = useOperationStore(s => s.loopInterval);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
   const setOpState = useOperationStore(s => s.setOpState);
@@ -56,7 +55,6 @@ const OperationPanel: React.FC = () => {
     isPortActive,
     isConnected,
     activeSendCommandSetId,
-    loopInterval,
     sendData,
     setOpState,
   });
@@ -110,27 +108,18 @@ const OperationPanel: React.FC = () => {
 
   return (
     <div className={`operation-panel${collapsed ? ' collapsed' : ''}`}>
-      <div className="operation-panel-header" onClick={toggleCollapse}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {collapsed ? (
-            <ChevronUp size={12} style={{ transition: 'transform 0.2s' }} />
-          ) : (
-            <ChevronDown size={12} style={{ transition: 'transform 0.2s' }} />
-          )}
+      <div
+        className="operation-panel-header"
+        title={t('operationPanel.collapse')}
+        onClick={toggleCollapse}
+      >
+        <div className="operation-panel-header-group">
+          <ChevronDown size={12} className="operation-panel-chevron" />
           <span className="operation-panel-title">{t('operationPanel.title')}</span>
           {isPortActive && (
             <span className="operation-panel-port">{activeTabId}</span>
           )}
         </div>
-        {!collapsed && (
-          <button
-            className="btn btn-icon btn-sm"
-            title={t('operationPanel.collapse')}
-            onClick={e => { e.stopPropagation(); toggleCollapse(); }}
-          >
-            <ChevronDown size={14} />
-          </button>
-        )}
       </div>
 
       {!collapsed && (
@@ -150,7 +139,7 @@ const OperationPanel: React.FC = () => {
               clearHistory={clearHistory}
             />
             <RulesSection isPortActive={isPortActive} isConnected={isConnected} />
-            <ParamsSection isConnected={isConnected} />
+            <ParamsSection isPortActive={isPortActive} />
           </div>
         </>
       )}

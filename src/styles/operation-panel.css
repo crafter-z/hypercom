@@ -1,4 +1,9 @@
-/* ==================== Operation Panel ==================== */
+/* ==================== Operation Panel ====================
+ * The instrument's control deck: a fixed-height strip beneath the terminal.
+ * Drawn entirely from base.css tokens. This file cascades after base.css,
+ * so specificity is structured to override .btn/.input/.select without a
+ * single !important.
+ */
 .operation-panel {
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
@@ -9,9 +14,10 @@
   transition: height var(--transition-normal);
 }
 
+/* Collapsed — only the header strip remains. Nothing else sets a height
+ * on the collapsed state, so plain specificity is enough. */
 .operation-panel.collapsed {
-  height: 32px !important;
-  overflow: hidden;
+  height: var(--space-8);
 }
 
 .operation-panel:not(.collapsed) {
@@ -19,28 +25,50 @@
   min-height: 200px;
 }
 
+/* ---- Header: the single collapse affordance ---- */
 .operation-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 12px;
+  padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-tertiary);
+  box-shadow: var(--edge-top);
   cursor: pointer;
   user-select: none;
+  flex-shrink: 0;
+}
+
+.operation-panel-header-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* One chevron, rotated by state — down when expanded, up when collapsed. */
+.operation-panel-chevron {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition: transform var(--transition-normal);
+}
+
+.operation-panel.collapsed .operation-panel-chevron {
+  transform: rotate(180deg);
 }
 
 .operation-panel-title {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
 }
 
 .operation-panel-port {
-  font-size: 10px;
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
   color: var(--accent-color);
   background: var(--bg-active);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 1px 6px;
 }
 
@@ -48,45 +76,113 @@
   flex: 1;
   display: flex;
   overflow: hidden;
-  padding: 8px 12px;
-  gap: 16px;
+  padding: var(--space-2) var(--space-3);
+  gap: var(--space-4);
   min-height: 0;
 }
 
+/* ==================== Section Cards ==================== */
 .op-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
+/* 发送命令是主操作，占据明显最大的份额（约 56%）；循环发送与串口
+ * 参数是辅助配置，收窄到刚好容纳控件即可。 */
 .op-section-send {
-  flex: 1.2;
-  min-width: 160px;
+  flex: 2.4;
+  min-width: 240px;
 }
 
 .op-section-rules {
-  flex: 1;
+  flex: 0.85;
   min-width: 140px;
 }
 
 .op-section-params {
-  flex: 1.3;
-  min-width: 180px;
+  flex: 1;
+  min-width: 176px;
 }
 
+/* Section label — the .eyebrow primitive (base.css) supplies the uppercase
+ * monospace voice; this class only contributes card spacing. */
+.panel-card-title {
+  margin-bottom: var(--space-2);
+}
+
+/* ==================== Send Section ==================== */
+
+/* ---- Quick commands — one pill per command in the ACTIVE send-command
+ *      set (the same sets loop-send uses). Dynamic count, no slot cap. ---- */
+.op-quick-send-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Compact monospace pill — truncates long payloads; the full content rides
+ * in the title tooltip. */
+.op-quick-cmd {
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  max-width: 140px;
+}
+
+/* min-width:0 lets the flex item shrink below content size so the
+ * ellipsis actually fires inside the capped button. */
+.op-quick-cmd-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Type tag — the single accent on hex-command pills. */
+.op-quick-cmd-hex {
+  flex-shrink: 0;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.6px;
+  color: var(--accent-color);
+}
+
+/* Empty state — quiet hint plus a dashed configure affordance. */
+.op-quick-send-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+
+.op-quick-cmd-configure {
+  border-style: dashed;
+  color: var(--text-secondary);
+}
+
+/* ---- Compose row ---- */
 .op-send-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: stretch;
   min-height: 0;
 }
 
 .op-send-input {
   flex: 1;
-  min-height: 52px !important;
+  min-height: 52px;
+}
+
+/* Byte-count readout — rides the .chip primitive; pinned to the top of
+ * the compose row so it never stretches with the textarea. */
+.op-send-byte-chip {
+  align-self: flex-start;
+  flex-shrink: 0;
 }
 
 .op-send-actions {
@@ -96,26 +192,100 @@
   justify-content: flex-end;
 }
 
+/* The primary action of the whole deck. Complete styling of its own —
+ * same specificity as .btn, later in the cascade, no !important. */
 .op-send-btn {
   min-width: 56px;
-  padding: 6px 14px !important;
-  font-size: 14px !important;
-  font-weight: 600 !important;
+  padding: 6px var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.op-send-tool-row {
+  display: flex;
+  gap: var(--space-1);
 }
 
 .op-send-options {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
 }
 
+/* Compact controls for the options cluster (HEX toggle, line ending). */
+.op-checkbox-compact {
+  font-size: var(--text-xs);
+}
+
+.op-line-ending-select {
+  width: 56px;
+  padding: 1px 14px 1px 3px;
+  font-size: var(--text-2xs);
+}
+
+/* HEX-mode line-ending hint — quiet monospace aside. */
+.op-send-hex-suffix {
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+
+/* ---- Connect / file / clear row ---- */
 .op-btn-row {
   display: flex;
   gap: 6px;
 }
 
+.op-btn-grow {
+  flex: 1;
+}
+
+/* "Open port" call-to-action. .btn.op-connect-accent (0,2,0) outranks
+ * .btn and .btn:hover on its own — no !important required. */
+.btn.op-connect-accent {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.btn.op-connect-accent:hover {
+  background: var(--bg-active);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+/* ---- File-send progress ---- */
+.op-file-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.op-file-progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.op-file-progress-fill {
+  height: 100%;
+  background: var(--text-link);
+  transition: width 0.1s linear;
+}
+
+.op-file-progress-label {
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==================== Rules Section ==================== */
 .op-rule-row {
   display: flex;
   align-items: center;
@@ -124,12 +294,12 @@
 
 .op-rule-select {
   flex: 1;
-  font-size: 11px;
-  padding: 2px 16px 2px 4px;
+  font-size: var(--text-xs);
+  padding: 2px var(--space-4) 2px var(--space-1);
 }
 
 .op-label {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   min-width: 44px;
   flex-shrink: 0;
@@ -138,66 +308,100 @@
 .op-loop-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
 }
 
 .op-delay-input {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
+}
+
+/* Numeric fields (interval ms, repeat count) — tabular monospace digits. */
+.op-number-input {
+  width: 56px;
+  font-size: var(--text-xs);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.op-unit-label {
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
 }
 
 .op-checkbox-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-1);
 }
 
-.op-radio-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
+/* ==================== Params Section ==================== */
 .op-params-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 4px 8px;
+  gap: var(--space-1) var(--space-2);
 }
 
 .op-param-item {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
+}
+
+.op-param-item-wide {
+  grid-column: 1 / -1;
 }
 
 .op-param-select {
   flex: 1;
-  font-size: 11px;
-  padding: 2px 14px 2px 4px;
+  font-size: var(--text-xs);
+  padding: 2px 14px 2px var(--space-1);
 }
 
-/* ==================== Panel Card Title ==================== */
-.panel-card-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 8px;
+.op-baud-custom-input {
+  width: 80px;
+  margin-left: var(--space-1);
 }
 
 /* ==================== View/Log Strip ==================== */
-.op-strip { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 12px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
-.op-strip-group { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.op-strip-sep { width: 1px; height: 14px; background: var(--border-color); margin: 0 4px; flex-shrink: 0; }
-.op-strip-slider { width: 90px; accent-color: var(--accent-color); }
-.op-strip-value { font-size: 11px; color: var(--text-secondary); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
-.op-segmented { display: flex; border: 1px solid var(--border-color); border-radius: var(--border-radius); overflow: hidden; }
-.op-segmented-btn { padding: 2px 10px; font-size: 11px; background: transparent; color: var(--text-secondary); border: none; cursor: pointer; transition: background var(--transition-fast), color var(--transition-fast); }
-.op-segmented-btn + .op-segmented-btn { border-left: 1px solid var(--border-color); }
-.op-segmented-btn:hover { color: var(--text-primary); }
-.op-segmented-btn.active { background: var(--bg-active); color: var(--accent-color); }
-.op-connect-accent { border-color: var(--accent-color) !important; color: var(--accent-color) !important; }
-.op-connect-accent:hover { background: var(--bg-active) !important; }
+.op-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.op-strip-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.op-strip-icon {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.op-strip-slider {
+  width: 90px;
+  accent-color: var(--accent-color);
+}
+
+.op-strip-value {
+  font-family: var(--font-terminal);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  min-width: var(--space-8);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Strip separators and the HEX/string switch use the .toolbar-sep and
+ * .segmented/.segmented-btn primitives from base.css directly. */

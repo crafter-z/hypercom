@@ -46,7 +46,7 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
 
   return (
     <div className="op-section op-section-rules">
-      <div className="panel-card-title">{t('rulesSection.cardTitle')}</div>
+      <div className="panel-card-title eyebrow">{t('rulesSection.cardTitle')}</div>
 
       <div className="op-rule-row">
         <span className="op-label">{t('rulesSection.highlightLabel')}</span>
@@ -85,8 +85,7 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
       <div className="op-loop-row">
         {!isLoopSending ? (
           <button
-            className="btn"
-            style={{ flex: 1 }}
+            className="btn op-btn-grow"
             disabled={!isPortActive || !activeSendCommandSetId || !isConnected}
             onClick={handleToggleLoop}
           >
@@ -94,8 +93,7 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
           </button>
         ) : (
           <button
-            className="btn btn-danger"
-            style={{ flex: 1 }}
+            className="btn btn-danger op-btn-grow"
             onClick={handleToggleLoop}
           >
             <Square size={13} /> {t('rulesSection.stopLoop')}
@@ -104,32 +102,30 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
         <div className="op-delay-input">
           <span className="op-label">{t('rulesSection.intervalLabel')}</span>
           <input
-            className="input"
+            className="input op-number-input"
             type="number"
-            style={{ width: 56, fontSize: 11, textAlign: 'center' }}
             value={loopInterval}
             onChange={e => setOpState({ loopInterval: Number(e.target.value) || 500 })}
             min={10}
             step={10}
           />
-          <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{t('rulesSection.intervalUnit')}</span>
+          <span className="op-unit-label">{t('rulesSection.intervalUnit')}</span>
         </div>
       </div>
 
-      <div className="op-loop-row" style={{ marginTop: 4 }}>
+      <div className="op-loop-row">
         <div className="op-delay-input">
           <span className="op-label">{t('rulesSection.repeatLabel')}</span>
           <input
-            className="input"
+            className="input op-number-input"
             type="number"
-            style={{ width: 56, fontSize: 11, textAlign: 'center' }}
             value={loopRepeatCount}
             onChange={e => setOpState({ loopRepeatCount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
             min={0}
             step={1}
             title={t('rulesSection.repeatTooltip')}
           />
-          <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{t('rulesSection.repeatUnit')}</span>
+          <span className="op-unit-label">{t('rulesSection.repeatUnit')}</span>
         </div>
       </div>
     </div>

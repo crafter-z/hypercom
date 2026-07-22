@@ -13,8 +13,7 @@ export interface UseCyclicSendOptions {
   isPortActive: boolean;
   isConnected: boolean;
   activeSendCommandSetId: string | null;
-  loopInterval: number;
-  sendData: (portId: string, data: string, isHex: boolean, lineEnding: string) => Promise<number>;
+  sendData: (portId: string, data: string, isHex: boolean, lineEnding: string, silent?: boolean) => Promise<number>;
   setOpState: (partial: { isLoopSending?: boolean }) => void;
 }
 
@@ -44,7 +43,6 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
     isPortActive,
     isConnected,
     activeSendCommandSetId,
-    loopInterval,
     sendData,
     setOpState,
   } = options;
@@ -94,6 +92,9 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
         return;
       }
       const cmd = currentSet.commands[ref.currentCmdIdx % currentSet.commands.length];
+      // Read the interval live each tick so editing it takes effect without
+      // restarting the effect (which would reset round/progress counters).
+      const loopInterval = useOperationStore.getState().loopInterval;
 
       try {
         await sendData(
@@ -101,6 +102,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
           cmd.content,
           cmd.type === 'hex',
           cmd.appendLineEnding,
+          true, // silent — failures are aggregated below, not toasted per-send
         );
 
         // 重复轮数优先：>0 时发送 N 轮后停止（覆盖命令集 isLoop）；
@@ -141,7 +143,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
       ref.stopped = true;
       if (ref.timeoutId) { clearTimeout(ref.timeoutId); ref.timeoutId = null; }
     };
-  }, [isLooping, isPortActive, isConnected, activeSendCommandSetId, commands.length, loopInterval, activeTabId, sendData, setOpState]);
+  }, [isLooping, isPortActive, isConnected, activeSendCommandSetId, commands.length, activeTabId, sendData, setOpState]);
 
   const startLoop = () => setOpState({ isLoopSending: true });
   const stopLoop = () => setOpState({ isLoopSending: false });

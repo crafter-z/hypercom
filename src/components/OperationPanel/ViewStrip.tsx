@@ -2,7 +2,7 @@ import React from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { logService } from '../../services/tauri';
-import { notifyError } from '../../stores/useToastStore';
+import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { save } from '@tauri-apps/plugin-dialog';
 import { Pin, Clock, Type, FileText, FolderOpen, FileSearch } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -40,7 +40,12 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
       const match = candidates.length > 0
         ? candidates.reduce((newest, f) => f.created_at > newest.created_at ? f : newest)
         : undefined;
-      if (match) { await logService.openPath(match.path); }
+      if (match) {
+        await logService.openPath(match.path);
+      } else {
+        // Previously a silent no-op — users read it as a dead button.
+        notifyInfo('paramsSection.log.notFound');
+      }
     } catch (e) { console.error('Failed to open log file:', e); notifyError(e); }
   };
 
@@ -66,16 +71,16 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
         >
           <Clock size={14} />
         </button>
-        <span className="op-strip-sep" />
-        <div className="op-segmented">
+        <span className="toolbar-sep" />
+        <div className="segmented">
           <button
-            className={`op-segmented-btn${displayFormat === 'hex' ? ' active' : ''}`}
+            className={`segmented-btn${displayFormat === 'hex' ? ' active' : ''}`}
             onClick={() => setOpState({ displayFormat: 'hex' })}
           >
             HEX
           </button>
           <button
-            className={`op-segmented-btn${displayFormat === 'string' ? ' active' : ''}`}
+            className={`segmented-btn${displayFormat === 'string' ? ' active' : ''}`}
             onClick={() => setOpState({ displayFormat: 'string' })}
           >
             {t('paramsSection.displayFormat.string')}
@@ -83,7 +88,7 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
         </div>
       </div>
       <div className="op-strip-group">
-        <Type size={13} style={{ color: 'var(--text-secondary)' }} />
+        <Type size={13} className="op-strip-icon" />
         <input
           type="range"
           className="op-strip-slider"
@@ -94,7 +99,7 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
           onChange={e => useAppStore.getState().setConfig({ terminalFontSize: Number(e.target.value) })}
         />
         <span className="op-strip-value">{config.terminalFontSize}px</span>
-        <span className="op-strip-sep" />
+        <span className="toolbar-sep" />
         <button
           className="btn btn-icon btn-sm"
           title={t('paramsSection.log.saveAs')}
