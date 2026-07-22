@@ -300,6 +300,7 @@ export interface UIState {
   isOperationPanelCollapsed: boolean;
   configLoaded: boolean;   // 配置是否已从后端加载完成（避免引导弹窗在加载前闪烁）
   isHotkeyHelpOpen: boolean; // 快捷键帮助弹窗是否打开
+  isAboutOpen: boolean;    // 关于对话框是否打开
 }
 
 // ==================== Tauri 命令参数/返回类型 ====================

@@ -178,6 +178,7 @@ const defaultUIState: UIState = {
   isOperationPanelCollapsed: false,
   configLoaded: false,
   isHotkeyHelpOpen: false,
+  isAboutOpen: false,
 };
 
 // ==================== Store 状态定义 ====================

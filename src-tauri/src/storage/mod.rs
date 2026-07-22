@@ -95,6 +95,20 @@ pub struct SendHistoryRow {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PortPresetRow {
+    pub id: String,
+    pub name: String,
+    pub baud_rate: i32,
+    pub data_bits: i32,
+    pub parity: String,
+    pub stop_bits: String,
+    pub handshake: String,
+    pub dtr: i32,
+    pub rts: i32,
+    pub created_at: String,
+}
+
 // ==================== StorageManager ====================
 
 pub struct StorageManager {
@@ -218,6 +232,18 @@ pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_send_history_port_created ON send_history(port_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS port_presets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            baud_rate INTEGER NOT NULL DEFAULT 9600,
+            data_bits INTEGER NOT NULL DEFAULT 8,
+            parity TEXT NOT NULL DEFAULT 'None',
+            stop_bits TEXT NOT NULL DEFAULT 'One',
+            handshake TEXT NOT NULL DEFAULT 'None',
+            dtr INTEGER NOT NULL DEFAULT 0,
+            rts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         "#,
     )
     .execute(pool)
@@ -549,6 +575,51 @@ pub async fn delete_protocol_template_from_db(
     Ok(())
 }
 
+// ==================== 端口参数预设 ====================
+
+pub async fn save_port_preset_to_db(
+    pool: &Pool<Sqlite>,
+    preset: &PortPresetRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO port_presets (id, name, baud_rate, data_bits, parity, stop_bits, handshake, dtr, rts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&preset.id)
+    .bind(&preset.name)
+    .bind(preset.baud_rate)
+    .bind(preset.data_bits)
+    .bind(&preset.parity)
+    .bind(&preset.stop_bits)
+    .bind(&preset.handshake)
+    .bind(preset.dtr)
+    .bind(preset.rts)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_port_presets_from_db(
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<Vec<PortPresetRow>> {
+    let rows = sqlx::query_as::<_, PortPresetRow>(
+        "SELECT id, name, baud_rate, data_bits, parity, stop_bits, handshake, dtr, rts, created_at FROM port_presets ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn delete_port_preset_from_db(
+    pool: &Pool<Sqlite>,
+    id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM port_presets WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 // ==================== 发送历史 ====================
 
 pub async fn list_send_history_from_db(
@@ -650,7 +721,37 @@ mod tests {
         assert!(tables.contains(&"highlight_rules".to_string()));
         assert!(tables.contains(&"protocol_templates".to_string()));
         assert!(tables.contains(&"send_history".to_string()));
-        assert_eq!(tables.len(), 8);
+        assert!(tables.contains(&"port_presets".to_string()));
+        assert_eq!(tables.len(), 9);
+    }
+
+    #[tokio::test]
+    async fn test_save_load_delete_port_preset() {
+        let pool = setup_test_db().await;
+        let preset = PortPresetRow {
+            id: "preset-1".into(),
+            name: "Modbus RTU".into(),
+            baud_rate: 19200,
+            data_bits: 8,
+            parity: "Even".into(),
+            stop_bits: "One".into(),
+            handshake: "None".into(),
+            dtr: 1,
+            rts: 0,
+            created_at: String::new(),
+        };
+        save_port_preset_to_db(&pool, &preset).await.unwrap();
+
+        let loaded = load_port_presets_from_db(&pool).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Modbus RTU");
+        assert_eq!(loaded[0].baud_rate, 19200);
+        assert_eq!(loaded[0].parity, "Even");
+        assert_eq!(loaded[0].dtr, 1);
+
+        delete_port_preset_from_db(&pool, "preset-1").await.unwrap();
+        let after_delete = load_port_presets_from_db(&pool).await.unwrap();
+        assert!(after_delete.is_empty());
     }
 
     #[tokio::test]

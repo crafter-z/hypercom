@@ -9,6 +9,7 @@ import ConfigModal from './components/ConfigModal/ConfigModal';
 import FirstRunTour from './components/Tour/FirstRunTour';
 import ToastContainer from './components/shared/Toast/ToastContainer';
 import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
+import AboutDialog from './components/shared/AboutDialog';
 import { useAppInit, useSerialReceive, usePinStatesSubscriber } from './hooks/useTauri';
 import { useHotkeys } from './hooks/useHotkeys';
 import { useAppStore } from './stores/useAppStore';
@@ -265,6 +266,7 @@ const App: React.FC = () => {
           <ConfigModal />
           <FirstRunTour />
           <HotkeyHelpDialog />
+          <AboutDialog />
           <ToastContainer />
         </div>
       </ThemeProvider>

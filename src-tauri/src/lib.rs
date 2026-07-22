@@ -113,10 +113,17 @@ pub fn run() {
             commands::save_protocol_template,
             commands::load_protocol_templates,
             commands::delete_protocol_template,
+            // ===== 端口参数预设命令 =====
+            commands::save_port_preset,
+            commands::load_port_presets,
+            commands::delete_port_preset,
             // ===== 发送历史命令 =====
             commands::list_send_history,
             commands::add_send_history,
             commands::clear_send_history,
+            // ===== 通用文件命令 =====
+            commands::write_text_file,
+            commands::read_text_file,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
-import { Settings, HelpCircle, Keyboard, Minus, Square, X, Minimize2 } from 'lucide-react';
+import { Settings, HelpCircle, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const TitleBar: React.FC = () => {
@@ -9,6 +9,7 @@ const TitleBar: React.FC = () => {
   const setConfig = useAppStore((state) => state.setConfig);
   const setUIState = useAppStore((state) => state.setUIState);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [isPinned, setIsPinned] = useState(false);
   const { t } = useTranslation();
 
   // F.5: derive active port info with primitive selectors (no unnecessary re-renders)
@@ -78,6 +79,14 @@ const TitleBar: React.FC = () => {
     getCurrentWindow().close();
   };
 
+  const handleTogglePin = () => {
+    const next = !isPinned;
+    getCurrentWindow()
+      .setAlwaysOnTop(next)
+      .then(() => setIsPinned(next))
+      .catch((e) => console.debug('[TitleBar] setAlwaysOnTop failed:', e));
+  };
+
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left" data-tauri-drag-region>
@@ -93,6 +102,13 @@ const TitleBar: React.FC = () => {
       <div className="titlebar-right">
         <button
           className="btn btn-icon btn-sm titlebar-help"
+          title={isPinned ? t('titleBar.unpinOnTop') : t('titleBar.pinOnTop')}
+          onClick={handleTogglePin}
+        >
+          {isPinned ? <PinOff size={15} /> : <Pin size={15} />}
+        </button>
+        <button
+          className="btn btn-icon btn-sm titlebar-help"
           title={t('hotkeys.title')}
           onClick={() => setUIState({ isHotkeyHelpOpen: true })}
         >
@@ -100,6 +116,9 @@ const TitleBar: React.FC = () => {
         </button>
         <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.help')} onClick={handleShowTour}>
           <HelpCircle size={15} />
+        </button>
+        <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.about')} onClick={() => setUIState({ isAboutOpen: true })}>
+          <Info size={15} />
         </button>
         <button className="btn btn-icon btn-sm" title={t('titleBar.settings')} onClick={() => toggleConfigModal(true)}>
           <Settings size={15} />

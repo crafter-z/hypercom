@@ -370,6 +370,95 @@ pub async fn delete_protocol_template(
         .map_err(|e| CommandError::Storage(e.to_string()))
 }
 
+// ==================== 端口参数预设 ====================
+
+#[derive(Debug, Deserialize)]
+pub struct SavePortPresetArgs {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub baud_rate: i32,
+    pub data_bits: i32,
+    pub parity: String,
+    pub stop_bits: String,
+    pub handshake: String,
+    pub dtr: bool,
+    pub rts: bool,
+}
+
+#[tauri::command]
+pub async fn save_port_preset(
+    args: SavePortPresetArgs,
+    state: State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let row = storage::PortPresetRow {
+        id: id.clone(),
+        name: args.name,
+        baud_rate: args.baud_rate,
+        data_bits: args.data_bits,
+        parity: args.parity,
+        stop_bits: args.stop_bits,
+        handshake: args.handshake,
+        dtr: args.dtr as i32,
+        rts: args.rts as i32,
+        created_at: String::new(),
+    };
+    storage::save_port_preset_to_db(&pool, &row)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn load_port_presets(
+    state: State<'_, AppState>,
+) -> Result<Vec<storage::PortPresetRow>, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::load_port_presets_from_db(&pool)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn delete_port_preset(
+    preset_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::delete_port_preset_from_db(&pool, &preset_id)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
 // ==================== 发送历史 ====================
 
 #[tauri::command]

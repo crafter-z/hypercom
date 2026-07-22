@@ -84,6 +84,16 @@ export const serialService = {
     return invoke<number>('send_serial_data', { args: params });
   },
 
+  /** 分块发送文件内容到串口，进度经 serial:file_progress 事件推送 */
+  sendFile: (params: { portId: string; path: string; chunkSize: number; delayMs: number }): Promise<number> => {
+    return invoke<number>('send_file', { args: {
+      port_id: params.portId,
+      path: params.path,
+      chunk_size: params.chunkSize,
+      delay_ms: params.delayMs,
+    }});
+  },
+
   setSerialParams: (portId: string, params: { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string }) => {
     return invoke<void>('set_serial_params', { args: {
       port_id: portId,
@@ -224,6 +234,14 @@ export interface SerialPinStatesEvent {
   ri: boolean;
 }
 
+/** 文件发送进度事件 payload */
+export interface FileProgressPayload {
+  port_id: string;
+  sent_bytes: number;
+  total_bytes: number;
+  done: boolean;
+}
+
 export const eventService = {
   onSerialData: (callback: (event: SerialDataEvent) => void) => {
     return listen<SerialDataEvent>('serial:data', (event) => {
@@ -257,6 +275,12 @@ export const eventService = {
 
   onSerialPinStates: (callback: (event: SerialPinStatesEvent) => void) => {
     return listen<SerialPinStatesEvent>('serial:pin_states', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  onFileProgress: (callback: (event: FileProgressPayload) => void) => {
+    return listen<FileProgressPayload>('serial:file_progress', (event) => {
       callback(event.payload);
     });
   },
@@ -415,5 +439,58 @@ export const storageService = {
 
   deleteProtocolTemplate: (setId: string): Promise<void> => {
     return invoke<void>('delete_protocol_template', { setId });
+  },
+};
+
+// ==================== 通用文件命令 ====================
+
+export const fileService = {
+  /** 将文本内容写入指定路径（配置导出）。路径来自 save() 对话框。 */
+  writeTextFile: (path: string, content: string): Promise<void> => {
+    return invoke<void>('write_text_file', { path, content });
+  },
+
+  /** 读取文本文件内容（配置导入）。路径来自 open() 对话框。 */
+  readTextFile: (path: string): Promise<string> => {
+    return invoke<string>('read_text_file', { path });
+  },
+};
+
+// ==================== 端口参数预设命令 ====================
+
+export interface PortPresetInfo {
+  id: string;
+  name: string;
+  baud_rate: number;
+  data_bits: number;
+  parity: string;
+  stop_bits: string;
+  handshake: string;
+  dtr: number;
+  rts: number;
+  created_at: string;
+}
+
+export const portPresetService = {
+  savePortPreset: (args: {
+    id?: string;
+    name: string;
+    baud_rate: number;
+    data_bits: number;
+    parity: string;
+    stop_bits: string;
+    handshake: string;
+    dtr: boolean;
+    rts: boolean;
+  }): Promise<string> => {
+    return invoke<string>('save_port_preset', { args });
+  },
+
+  loadPortPresets: (): Promise<PortPresetInfo[]> => {
+    return invoke<PortPresetInfo[]>('load_port_presets');
+  },
+
+  deletePortPreset: (presetId: string): Promise<void> => {
+    return invoke<void>('delete_port_preset', { presetId });
   },
 };
