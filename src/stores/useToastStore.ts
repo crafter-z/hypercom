@@ -127,3 +127,11 @@ export function notifyError(e: unknown, fallbackKey: string = 'toast.fallback.op
 export function notifySuccess(msgKey: string): void {
   useToastStore.getState().push({ severity: 'success', messageKey: msgKey });
 }
+
+/**
+ * Surface a neutral informational toast (e.g. "nothing found" feedback for
+ * an action that otherwise no-ops silently). Message is an i18n key.
+ */
+export function notifyInfo(msgKey: string): void {
+  useToastStore.getState().push({ severity: 'info', messageKey: msgKey });
+}

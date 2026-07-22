@@ -4,6 +4,12 @@ import { useAppStore } from '../../../stores/useAppStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { AppConfig } from '../../../types';
 
+/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
+const clampNumber = (raw: string, min: number, max: number): number => {
+  const value = Number(raw);
+  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
+};
+
 const LogSettings: React.FC = () => {
   const { t } = useTranslation();
   const config = useAppStore((s) => s.config);
@@ -58,7 +64,7 @@ const LogSettings: React.FC = () => {
       {config.logSplitEnabled && (
         <div className="config-row">
           <label>{t('logSettings.splitSizeLabel')}</label>
-          <input className="input" type="number" value={config.logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: Number(e.target.value) })} min={1} />
+          <input className="input" type="number" value={config.logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: clampNumber(e.target.value, 1, 10240) })} min={1} max={10240} />
         </div>
       )}
     </div>

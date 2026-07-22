@@ -7,6 +7,12 @@ import type { SendCommandSet, SendCommand } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
 
+/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
+const clampNumber = (raw: string, min: number, max: number): number => {
+  const value = Number(raw);
+  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
+};
+
 const CommandSettings: React.FC = () => {
   const { t } = useTranslation();
   const sendCommandSets = useRuleStore((s) => s.sendCommandSets);
@@ -121,8 +127,10 @@ const CommandSettings: React.FC = () => {
               className="input"
               type="number"
               value={set.loopDelay}
-              onChange={e => updateSendCommandSet(set.id, { loopDelay: Number(e.target.value) })}
+              onChange={e => updateSendCommandSet(set.id, { loopDelay: clampNumber(e.target.value, 0, 3600000) })}
               onClick={e => e.stopPropagation()}
+              min={0}
+              max={3600000}
               style={{ width: 60, fontSize: 11 }}
               placeholder="ms"
             />

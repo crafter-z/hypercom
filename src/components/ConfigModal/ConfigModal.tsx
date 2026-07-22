@@ -105,7 +105,7 @@ const ConfigModal: React.FC = () => {
             <span className="modal-content-title">
               {navItems.find(n => n.id === configActiveTab)?.labelKey ? t(navItems.find(n => n.id === configActiveTab)!.labelKey) : ''}
             </span>
-            <button className="btn btn-icon" onClick={() => toggleConfigModal(false)} title={t('configModal.close')}>
+            <button className="btn btn-icon" onClick={handleCancel} title={t('configModal.close')}>
               <X size={16} />
             </button>
           </div>

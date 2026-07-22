@@ -46,6 +46,9 @@ export const useRuleStore = create<RuleState>()(
     }),
     removeHighlightRuleSet: (setId) => set((state) => {
       state.highlightRuleSets = state.highlightRuleSets.filter((r) => r.id !== setId);
+      if (state.activeHighlightSetId === setId) {
+        state.activeHighlightSetId = state.highlightRuleSets[0]?.id ?? null;
+      }
     }),
     setActiveHighlightSetId: (id) => set((state) => { state.activeHighlightSetId = id; }),
 
@@ -68,6 +71,9 @@ export const useRuleStore = create<RuleState>()(
     }),
     removeSendCommandSet: (setId) => set((state) => {
       state.sendCommandSets = state.sendCommandSets.filter((r) => r.id !== setId);
+      if (state.activeSendCommandSetId === setId) {
+        state.activeSendCommandSetId = state.sendCommandSets[0]?.id ?? null;
+      }
     }),
     setActiveSendCommandSetId: (id) => set((state) => { state.activeSendCommandSetId = id; }),
   }))

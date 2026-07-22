@@ -11,6 +11,12 @@ import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 const BUNDLE_APP = 'hypercom';
 const BUNDLE_VERSION = 1;
 
+/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
+const clampNumber = (raw: string, min: number, max: number): number => {
+  const value = Number(raw);
+  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
+};
+
 /** 配置导出 bundle 结构（config + 三类规则集） */
 interface ConfigBundle {
   app?: string;
@@ -128,7 +134,7 @@ const BackupSettings: React.FC = () => {
         <>
           <div className="config-row">
             <label>{t('backupSettings.intervalLabel')}</label>
-            <input className="input" type="number" value={config.backupInterval} onChange={(e) => setConfig({ backupInterval: Number(e.target.value) })} min={1} />
+            <input className="input" type="number" value={config.backupInterval} onChange={(e) => setConfig({ backupInterval: clampNumber(e.target.value, 1, 8760) })} min={1} max={8760} />
           </div>
           <div className="config-row">
             <label>{t('backupSettings.directoryLabel')}</label>
