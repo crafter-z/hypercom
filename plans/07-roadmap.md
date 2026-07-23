@@ -2,7 +2,20 @@
 
 ## ✅ 已完成（移出待办列表）
 
-### 多语言 i18n 收尾 (2026-07-21)
+### 架构迭代 (2026-07 修复 + 重构 4 阶段)
+
+- ✅ **配置架构 overhaul** — `config_version` + `migrate()` 迁移框架 (forward-compatible, additive)；`ConfigManager::new(Option<PathBuf>)` 三级路径解析 (CLI `--config` > `HYPERCOM_CONFIG` env > portable > 默认)；`validate_and_clamp()` 在 `set_config` 时校验字段边界；`config_path()` getter；GeneralSettings 显示配置文件路径
+- ✅ **会话快照专用命令** — `update_session_snapshot` 单字段更新（避免全量配置保存引发的竞态覆盖），`sessionSnapshot.ts` 改用 `configService.updateSessionSnapshot()`
+- ✅ **双 store 消除** — `sendOnEnter` / `quickSendSlots` 从 `useOperationStore` 迁移至 `useAppStore.config`（单源）；SendSection 从 `useAppStore(s => s.config.sendOnEnter)` 读取；hooks 同步代码移除
+- ✅ **日志默认值调整** — `auto_save_log` 默认改 `true`；`log_split_enabled` 默认改 `true`；空 `log_directory` 解析到 `dirs::data_dir()/hypercom/logs`；`save_log_as`/`export_terminal_log` 作用域限制移除（仅保留父目录 canonicalize）
+- ✅ **数据清理** — `port_groups` + `port_group_members` 表移除 (9→7 表)；`PortGroupRow` 结构体删除；`save_command_set_to_db` / `save_highlight_set_to_db` 改为事务包裹；`save_port_preset_to_db` 使用 `ON CONFLICT` 保留 `created_at`；`PRAGMA journal_mode=WAL` + `PRAGMA foreign_keys=ON`
+- ✅ **导入校验** — `BackupSettings.tsx` 新增 `validateConfigBundle()`；`commands/file.rs` 新增 `validate_config_path()` 限制路径在配置目录内
+- ✅ **配置备份/恢复** — `save()` 写前生成 `.bak`；`new()` 读 JSON 失败时回退 `.bak` 恢复（corrupt JSON auto-recovered）
+- ✅ **选择器优化** — ConfigModal 四个页面 (GeneralSettings/LogSettings/DisplaySettings/BackupSettings) 改用逐字段选择器替代整 config 订阅
+- ✅ **Bug 修复 30+** — 日志/配置/后端/UI/契约五类缺陷修复（详见 `08-defects.md` 2026-07 批次）
+
+### Phase H 多语言 i18n 收尾 (2026-07-21)
+
 - ✅ 基础设施：`src/i18n.ts` 含 zh-CN/en-US 字典，`main.tsx` 已接入，`useAppStore.subscribe` 同步 `config.language → i18n.changeLanguage`
 - ✅ 全部 30 个组件 `.tsx` 文件已接入 `t()`（grep `useTranslation` 验证）：ConfigModal (10) / OperationPanel (5) / MainDisplay (4) / Sidebar (3) / StatusBar (2) / shared (2) / TitleBar / Tour 等
 - ✅ 语言切换全程实时生效，不再混合显示中英文

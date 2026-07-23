@@ -7,12 +7,13 @@
 | Store | File:line | Job |
 |-------|-----------|-----|
 | `useAppStore` | `useAppStore.ts:248` | tabs / ports / `paneTree` / config / groups |
-| `useOperationStore` | `useOperationStore.ts:35` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `sendInput`, `displayFormat`, `encoding` (NO `op` prefix) |
+| `useOperationStore` | `useOperationStore.ts:35` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `sendInput`, `displayFormat`, `encoding` (NO `op` prefix; NO `sendOnEnter`/`quickSendSlots` — those live in `useAppStore.config`) |
 | `useTerminalStore` | `useTerminalStore.ts:20` | line buffer + `appendTerminalLine` + `ensureTerminal` + `setTerminalConfig` |
 | `useRuleStore` | `useRuleStore.ts:32` | highlight rule sets + send-command sets + CRUD + active-set ids |
 
 ## Conventions (root covers selector discipline)
 
+- `sendOnEnter` and `quickSendSlots` live ONLY in `useAppStore.config`. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)`. They were removed from `useOperationStore` to eliminate dual-source ambiguity.
 - **Recursive pane tree helpers exported at module top of `useAppStore.ts`**: `findLeafById` (25), `findLeafByTabId` (37), `findBranchById` (49), `findParentBranch` (60), `collectLeaves` (75), `countLeaves` (81). Use these; don't hand-roll tree walks.
 - `pruneTree` is private; auto-runs after every tree mutation: ① drops non-root empty leaves → ② collapses single-child branches (size inherits) → ③ empty root branch → degenerate `'main'` leaf.
 - `focusedPaneId` references a LEAF ID in the tree (never a flat array index).

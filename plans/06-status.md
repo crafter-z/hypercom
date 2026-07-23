@@ -8,12 +8,12 @@
 |------|------|------|
 | `types/index.ts` | ✅ | 全部类型定义 (267 行) — 含 PaneNode/LeafPane/BranchPane 联合 |
 | `stores/useAppStore.ts` | ✅ | Zustand + Immer, 核心状态 (580 行) — paneTree + 7 树辅助 + resizeChildren |
-| `stores/useOperationStore.ts` | ✅ | 操作面板状态 (55 行) |
+| `stores/useOperationStore.ts` | ✅ | 操作面板状态 (57 行) — sendOnEnter/quickSendSlots 已移至 useAppStore.config |
 | `i18n.ts` | ✅ | i18next + react-i18next 初始化, 218 keys × 2 langs (583 行) — main.tsx 副作用导入 |
 | `stores/useTerminalStore.ts` | ✅ | 终端状态 (49 行) |
 | `stores/useRuleStore.ts` | ✅ | 规则集状态 (47 行) |
 | `stores/useAppStore.test.ts` | ✅ | vitest 单测 (470 行, 49 cases) |
-| `services/tauri.ts` | ✅ | 5 个服务模块, 含 storageService (268 行) |
+| `services/tauri.ts` | ✅ | 6 个服务模块, 含 storageService + configService (430 行) — camelCase 对齐、移除死代码 |
 | `hooks/useTauri.ts` | ✅ | 9 个 Hooks (含 usePinStatesSubscriber 引脚订阅), mergePorts 防覆盖 |
 | `utils/highlightEngine.ts` | ✅ | 正则/关键词高亮引擎 (104 行) |
 | `utils/highlightEngine.test.ts` | ✅ | 高亮引擎单测 (197 行, 22 cases) |
@@ -74,20 +74,20 @@
 | 文件 | 状态 | 说明 |
 |------|------|------|
 | `main.rs` | ✅ | 程序入口 (5 行) |
-| `lib.rs` | ✅ | AppState（含 sysinfo 缓存）, 命令注册, setup (135 行) |
+| `lib.rs` | ✅ | AppState（含 sysinfo 缓存）, 命令注册, CLI --config 解析, setup (306 行) |
 | `system.rs` | ✅ | Win32 电源管理 (SetThreadExecutionState) (55 行) |
-| `commands/mod.rs` | ✅ | 命令注册 + CommandError 枚举 (39 行) |
-| `commands/serial.rs` | ✅ | 串口命令 (141 行) |
+| `commands/mod.rs` | ✅ | 命令注册 + CommandError 枚举 (42 行) |
+| `commands/serial.rs` | ✅ | 串口命令 (255 行) — 含 send_file TX 元数据日志 |
 | `commands/storage.rs` | ✅ | SQLite CRUD 命令: 规则集 + 命令集 + 协议模板 |
-| `commands/config.rs` | ✅ | 配置命令 (36 行) |
-| `commands/log.rs` | ✅ | 日志命令 (196 行) |
+| `commands/config.rs` | ✅ | 配置命令 (66 行) — get/set/reset/update_session_snapshot/get_config_path |
+| `commands/log.rs` | ✅ | 日志命令 (230 行) — 13 命令, 含 set_log_split_enabled, save_log_as/export 作用域放宽 |
 | `commands/system_cmds.rs` | ✅ | 系统状态 + 电源管理命令 (67 行) |
-| `commands/file.rs` | ✅ | 通用文件读写 (配置导出/导入) |
+| `commands/file.rs` | ✅ | 配置导出/导入 + validate_config_path 路径限制 (54 行) |
 | `commands/simulation.rs` | ✅ | 模拟串口命令 (39 行) |
 | `serial/mod.rs` | ✅ | 真实/模拟串口, 事件推送, emit_data_event helper (483 行) |
-| `config/mod.rs` | ✅ | JSON 持久化, 36 项配置 (219 行) |
-| `logger/mod.rs` | ✅ | 写入 / 分片续写 / 文件名变量 / auto_save 短路 / 多编码 (467 行) |
-| `storage/mod.rs` | ✅ | 7 表 + 完整 CRUD, 延迟初始化 (含 protocol_templates) |
+| `config/mod.rs` | ✅ | JSON 持久化 + config_version 迁移框架 + validate_and_clamp + 路径解析 (CLI/env/portable) + .bak 备份/恢复 (475 行) |
+| `logger/mod.rs` | ✅ | 写入 / 分片续写 / split_enabled 开关 / 文件名变量 / auto_save 短路 / sync_all 落盘 / 多编码 (541 行) |
+| `storage/mod.rs` | ✅ | 7 表 (port_groups 已移除) + WAL+FK  pragmas + 事务写 + ON CONFLICT 保 createdAt, 延迟初始化 (887 行) |
 | `Cargo.toml` | ✅ | tauri 2.11, sysinfo, sqlx, serialport, encoding_rs |
 | `capabilities/default.json` | ✅ | 事件权限, shell:allow-open, dialog:allow-open/save, 6 个 window 控件权限 |
 
@@ -137,6 +137,16 @@
 | 日志回放 (按时间戳写回 + 倍速 1/4/16/最快) | ✅ |
 | 批量发送脚本 (循环发送重复轮数控制) | ✅ |
 | 最小化到托盘 (closeBehavior + 系统托盘菜单) | ✅ |
+| 配置版本化 + 迁移框架 (config_version + migrate) | ✅ |
+| 配置路径自定义 (CLI --config / HYPERCOM_CONFIG env / portable) | ✅ |
+| 配置字段校验 (validate_and_clamp on set_config) | ✅ |
+| 配置备份/恢复 (.bak 落盘 + corrupt fallback) | ✅ |
+| 会话快照专用命令 (update_session_snapshot, 避全量保存竞态) | ✅ |
+| sendOnEnter/quickSendSlots 归一 (useAppStore.config 单源) | ✅ |
+| 日志分片开关 (set_log_split_enabled + log_split_enabled 默认 true) | ✅ |
+| SQLite WAL+FK  pragmas + 事务写 (save_command_set / save_highlight_set) | ✅ |
+| 日志导出作用域放宽 (save_log_as / export_terminal_log 不再限 log_directory 子树) | ✅ |
+| ConfigModal 页面逐字段选择器 (替代整 config 订阅) | ✅ |
 
 ## 重构 (2026-06)
 
@@ -156,3 +166,44 @@
 | 10 | `e33bd30` | `refactor(ui)` | Sidebar 抽取 usePortDragEnd hook + AliasDialog |
 | 11 | `bbd4540` | `refactor(ui)` | MainDisplay 拆分 + 修复 closeTab 生命周期 + 移除 setTimeout(0) |
 | 12 | `ef32ce0` | `refactor(ui)` | styles.css 拆分为 11 个文件, 移除 20 个死 CSS class |
+
+## 重构 (2026-07)
+
+> Bug 修复（30+ 项）+ 架构迭代（4 阶段）。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告。
+
+### Phase 1 — 配置架构
+
+- `config/mod.rs` (219→475 行)：`config_version: u32` + `migrate()` 迁移框架；`ConfigManager::new(Option<PathBuf>)` 支持 CLI `--config` / `HYPERCOM_CONFIG` 环境变量 / portable 模式路径解析；`validate_and_clamp()` 在 `set_config` 时执行字段校验与裁剪；`update_session_snapshot()` 单字段更新方法（避免全量保存竞态）；`config_path()` getter；`save()` 写前生成 `.bak`；`new()` 读取失败时回退到 `.bak`
+- `commands/config.rs` (36→66 行)：新增 `update_session_snapshot`、`get_config_path` 命令；`save_config` 改名为 `set_config`
+- `lib.rs` (135→306 行)：CLI `--config` 参数解析；注册新命令
+- `useOperationStore.ts`：移除 `sendOnEnter`、`quickSendSlots`（现仅存于 `useAppStore.config`）
+- `SendSection.tsx`：从 `useAppStore(s => s.config.sendOnEnter)` 读取
+- `useTauri.ts`：移除 useAppInit / resetAndReload 中的 sendOnEnter/quickSendSlots 同步代码
+- `sessionSnapshot.ts`：改用 `configService.updateSessionSnapshot()`（专用命令）；移除 `configSaveInProgress` 标志
+- `GeneralSettings.tsx`：通过 `getConfigPath()` 显示配置文件路径
+
+### Phase 2 — 日志
+
+- `config/mod.rs`：`auto_save_log` 默认改为 `true`；`log_split_enabled` 默认改为 `true`；空 `log_directory` 解析为 `dirs::data_dir()/hypercom/logs`
+- `commands/log.rs` (196→230 行)：新增 `set_log_split_enabled` 命令；`save_log_as` 和 `export_terminal_log` 作用域限制移除（允许 save 对话框选择的任意路径）
+- `logger/mod.rs` (467→541 行)：`close_writer` 调用 `sync_all()` 确保数据落盘；新增 `split_enabled` 字段 + 守卫生成切片
+- `services/tauri.ts`：新增 `setLogFilenameFormat`、`setLogSplitSize`、`setLogSplitEnabled` 包装；移除废弃 `onSystemStatus` 事件监听
+- `useTauri.ts`：`syncLogSettingsToBackend()` 同步全部 6 个日志设置
+- `useAppStore.ts`：`defaultConfig` 中 `autoSaveLog: true`、`logSplitEnabled: true`
+
+### Phase 3 — 数据清理
+
+- `storage/mod.rs`：移除 `port_groups` 和 `port_group_members` 表（9→7 表）；`PortGroupRow` 结构体移除
+- `storage/mod.rs`：新增 `PRAGMA journal_mode=WAL` + `PRAGMA foreign_keys=ON`；`save_command_set_to_db` 和 `save_highlight_set_to_db` 改为事务包裹；`save_port_preset_to_db` 使用 `ON CONFLICT` 保留 `created_at`；移除死代码（`set_baud_rate`、旧端口分组函数）
+- `BackupSettings.tsx`：新增 `validateConfigBundle()` 导入校验；store 同步后再 reload
+
+### Phase 4 — 鲁棒性
+
+- `config/mod.rs`：`save()` 写前生成 `.bak` 备份；`new()` 读 JSON 失败时回退到 `.bak` 恢复
+- ConfigModal 页面（GeneralSettings / LogSettings / DisplaySettings / BackupSettings）：逐字段选择器替代整 config 订阅，避免无关字段变更触发重渲染
+- `types/index.ts`：`SystemStatus.memoryUsedMB` → `memoryUsedMb`（camelCase 对齐）
+- `hooks/useTauri.ts`：`useSystemStatus` camelCase 字段名对齐；`mapProtocolTemplateInfo` 增加 `Boolean()` 转换
+- `SystemStatus` / `LogFileInfo`：增加 `#[serde(rename_all = "camelCase")]` 确保前后端一致
+- 对话框（AboutDialog / HotkeyHelpDialog / AliasDialog）：使用新增 `.modal-dialog-compact` CSS 类
+- `commands/file.rs`：新增 `validate_config_path()` 限制导入路径在配置目录内
+- `commands/serial.rs`：`send_file` 新增 TX 元数据日志记录

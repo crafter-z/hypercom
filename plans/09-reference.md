@@ -100,21 +100,22 @@
 | 文件 | 行数 | 职责 |
 |------|------|------|
 | `src-tauri/src/main.rs` | 5 | 程序入口 |
-| `src-tauri/src/lib.rs` | 135 | AppState + 命令注册 + setup |
+| `src-tauri/src/lib.rs` | 306 | AppState + 命令注册 + CLI --config 解析 + setup |
 | `src-tauri/src/system.rs` | 55 | Win32 电源管理 (SetThreadExecutionState) |
-| `src-tauri/src/commands/mod.rs` | 39 | 命令注册 + CommandError 枚举 |
-| `src-tauri/src/commands/serial.rs` | 141 | 串口命令: open_port, close_port, send_data, get_port_status |
+| `src-tauri/src/commands/mod.rs` | 42 | 命令注册 + CommandError 枚举 |
+| `src-tauri/src/commands/serial.rs` | 255 | 串口命令: open_port, close_port, send_data, get_port_status, send_file |
 | `src-tauri/src/commands/storage.rs` | 370 | SQLite CRUD 命令: 规则集 + 命令集 + 协议模板 |
-| `src-tauri/src/commands/config.rs` | 36 | 配置命令: get_config, save_config, reset_config |
-| `src-tauri/src/commands/log.rs` | 196 | 日志命令: start/stop_logging, save_as, open_file, open_directory |
+| `src-tauri/src/commands/config.rs` | 66 | 配置命令: get_config, set_config, reset_config, update_session_snapshot, get_config_path |
+| `src-tauri/src/commands/log.rs` | 230 | 日志命令: start/stop_logging, save_log_as, export_terminal_log, get_log_files, set_log_*, open_path, open_log_directory |
 | `src-tauri/src/commands/system_cmds.rs` | 67 | 系统状态 + 电源管理命令 |
 | `src-tauri/src/commands/simulation.rs` | 39 | 模拟串口命令: enable/disable_simulation |
+| `src-tauri/src/commands/file.rs` | 54 | 配置导出/导入 + validate_config_path |
 | `src-tauri/src/serial/mod.rs` | 483 | 串口管理器 (真实 + 模拟) + emit_data_event |
-| `src-tauri/src/config/mod.rs` | 219 | JSON 配置 (36 项) |
-| `src-tauri/src/logger/mod.rs` | 467 | 日志管理 (分片续写 + 多编码 + auto_save) |
-| `src-tauri/src/storage/mod.rs` | 850 | SQLite CRUD (7 张表, 含 protocol_templates) |
+| `src-tauri/src/config/mod.rs` | 475 | JSON 配置 (versioning + migrate + validate_and_clamp + path resolution + backup) |
+| `src-tauri/src/logger/mod.rs` | 541 | 日志管理 (分片续写 + split_enabled + sync_all + 多编码 + auto_save) |
+| `src-tauri/src/storage/mod.rs` | 887 | SQLite CRUD (7 张表, 含 protocol_templates, WAL+FK, 事务写) |
 
-> commands 拆分前为单一 `commands/mod.rs` (400+ 行)。2026-06 重构拆为 6 个领域文件 + CommandError 枚举 + 抽取 `system.rs`。
+> commands 拆分前为单一 `commands/mod.rs` (400+ 行)。2026-06 重构拆为 7 个领域文件 + CommandError 枚举 + 抽取 `system.rs`。
 
 ## 前端依赖
 

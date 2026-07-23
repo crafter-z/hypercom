@@ -42,6 +42,10 @@
 - 📊 **资源监控** — `sysinfo` 进程级 CPU / 内存采样（启动时 250ms 预热建立 CPU 基线）
 - 📈 **流量统计** — 每端口 TX/RX 字节累加
 - 🛠️ **6 页配置弹窗** — 通用、日志、备份、显示、高亮规则、命令规则
+- 🔄 **配置版本化** — `config_version` + `migrate()` 框架，前向兼容、可加字段无需破坏旧配置
+- 🎯 **配置路径自定义** — CLI `--config` 参数 / `HYPERCOM_CONFIG` 环境变量 / portable 模式，三级解析
+- ✅ **配置字段校验** — `validate_and_clamp()` 在每次 `set_config` 时执行，强制字段边界
+- 💾 **配置备份/恢复** — `save()` 写前自动生成 `.bak`；读取失败时回退 `.bak` 恢复损坏配置
 - 🔋 **防休眠** — Win32 `SetThreadExecutionState` 实现 `ES_CONTINUOUS | ES_DISPLAY_REQUIRED`
 - 📌 **窗口置顶** — 标题栏一键置顶（`setAlwaysOnTop`）
 - ℹ️ **关于对话框** — 版本 / 技术栈 / 许可信息
@@ -108,7 +112,7 @@ hypercom/
 │   ├── stores/                       # Zustand + Immer，按领域拆分为 4 个 store
 │   │   ├── useAppStore.ts            # 标签 / 端口 / 分屏 / 配置 / 分组
 │   │   ├── useAppStore.test.ts       # vitest 单测
-│   │   ├── useOperationStore.ts      # 串口参数 + 发送设置（baudRate / dataBits / parity / ...）
+│   │   ├── useOperationStore.ts      # 串口参数 + 发送设置（baudRate / dataBits / parity / ...；不含 sendOnEnter/quickSendSlots）
 │   │   ├── useTerminalStore.ts       # 终端行缓冲 + appendTerminalLine / clearTerminal
 │   │   └── useRuleStore.ts           # 高亮规则集 + 命令集 CRUD
 │   ├── utils/
@@ -159,20 +163,20 @@ hypercom/
 ├── src-tauri/                        # Rust 后端
 │   ├── src/
 │   │   ├── main.rs                   # 程序入口
-│   │   ├── lib.rs                    # AppState + 命令注册 + setup
+│   │   ├── lib.rs                    # AppState + 命令注册 + CLI --config 解析 + setup
 │   │   ├── system.rs                 # win32_power 模块（SetThreadExecutionState FFI）
 │   │   ├── commands/                 # Tauri 命令层，按领域拆分
 │   │   │   ├── mod.rs                # CommandError 枚举（thiserror）+ re-export
 │   │   │   ├── serial.rs             # open_port / close_port / send_data / get_port_status
 │   │   │   ├── simulation.rs         # enable_simulation / disable_simulation
-│   │   │   ├── config.rs             # get_config / save_config / reset_config
-│   │   │   ├── log.rs                # start_logging / stop_logging / save_as / open_file
+│   │   │   ├── config.rs             # get_config / set_config / reset_config / update_session_snapshot / get_config_path
+│   │   │   ├── log.rs                # start_logging / stop_logging / save_log_as / export_terminal_log / get_log_files / set_log_split_* / set_log_*
 │   │   │   ├── storage.rs            # 高亮规则集 + 命令集 CRUD
 │   │   │   └── system_cmds.rs        # get_system_status / prevent_sleep / prevent_screen_off
 │   │   ├── serial/mod.rs             # 串口管理器（真实 + 模拟）
-│   │   ├── config/mod.rs             # JSON 配置
-│   │   ├── logger/mod.rs             # BufWriter 日志（分片 / 多编码）
-│   │   └── storage/mod.rs            # SQLite CRUD（6 张表）
+│   │   ├── config/mod.rs             # JSON 配置 + 版本化 + 校验 + 路径解析 + 备份
+│   │   ├── logger/mod.rs             # BufWriter 日志（分片 / 多编码 / sync_all 落盘）
+│   │   └── storage/mod.rs            # SQLite CRUD（7 表, WAL+FK, 事务写）
 │   ├── capabilities/default.json     # Tauri ACL 权限声明
 │   ├── Cargo.toml
 │   └── tauri.conf.json
@@ -316,8 +320,8 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 
 | Store | 职责 | 关键字段 / Actions |
 |-------|------|-------------------|
-| `useAppStore` | 标签、端口、分屏、配置、分组 | `ports`、`tabs`、`panes`、`config`、`groups`、`openTab`、`closeTab` |
-| `useOperationStore` | 串口参数 + 发送设置（**无 `op` 前缀**） | `baudRate`、`dataBits`、`parity`、`stopBits`、`handshake`、`dtr`、`rts`、`sendInput`、`displayFormat`、`encoding`、`setOpState` |
+| `useAppStore` | 标签，端口，分屏，配置（含 `sendOnEnter`/`quickSendSlots`），分组 | `ports`、`tabs`、`paneTree`、`config`、`groups`、`openTab`、`closeTab` |
+| `useOperationStore` | 串口参数 + 发送设置（**无 `op` 前缀**；不包含 `sendOnEnter`/`quickSendSlots`） | `baudRate`、`dataBits`、`parity`、`stopBits`、`handshake`、`dtr`、`rts`、`sendInput`、`displayFormat`、`encoding`、`setOpState` |
 | `useTerminalStore` | 终端行缓冲 | `terminals`、`appendTerminalLine`、`clearTerminal`、`setTerminalConfig`、`ensureTerminal` |
 | `useRuleStore` | 高亮规则集 + 命令集 | `highlightRuleSets`、`activeHighlightSetId`、`sendCommandSets`、`activeSendCommandSetId` + CRUD |
 
@@ -338,11 +342,11 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 
 `useSerialReceive` 和 `useSerialSend` 都通过 `useTerminalStore.getState().appendTerminalLine()` 写入终端，避免每次行写入触发 Hook 拥有者 re-render。
 
-### 后端命令拆分（6 个领域文件 + CommandError）
+### 后端命令拆分（7 个领域文件 + CommandError）
 
 所有 Tauri 命令返回 `Result<T, CommandError>` 而非 `Result<T, String>`。`CommandError` 是 `commands/mod.rs` 中基于 `thiserror` 的枚举，按领域分变体（Serial / Config / Log / Storage / System / Lock / Io / Other），手动实现 `serde::Serialize` 让前端通过 `invoke` 收到错误字符串。
 
-命令按领域拆分到 `src-tauri/src/commands/` 下的 6 个文件，`mod.rs` 统一 re-export。`src-tauri/src/system.rs` 包含 `win32_power` 模块（Win32 `SetThreadExecutionState` FFI），供 `system_cmds.rs` 调用。
+命令按领域拆分到 `src-tauri/src/commands/` 下的 7 个文件，`mod.rs` 统一 re-export。`src-tauri/src/system.rs` 包含 `win32_power` 模块（Win32 `SetThreadExecutionState` FFI），供 `system_cmds.rs` 调用。
 
 ### 组件拆分
 
@@ -419,6 +423,17 @@ some_async_fn(&pool).await;
 
 所有 Tauri 命令返回 `Result<T, CommandError>`，不再返回 `Result<T, String>`。新增命令时在 `commands/mod.rs` 的 `CommandError` 枚举中选择合适的变体，或新增变体。
 
+### 9. 配置架构约束
+
+- **版本化**：`AppConfig` 带 `config_version` 字段。加新字段必须同时更新 `current_config_version()` 和 `migrate()` 函数。
+- **校验**：`set_config` 命令执行 `validate_and_clamp()`，强制字段边界（例如 `max_retries` 最小为 1）。
+- **路径解析**：`ConfigManager::new` 按三级优先级解析配置文件路径 — CLI `--config` > `HYPERCOM_CONFIG` env > portable 模式（exe 目录下的 `config.json`）> 用户数据目录。
+- **备份/恢复**：`save()` 写前生成 `.bak`；`new()` 读 JSON 失败时回退到 `.bak` 恢复。
+
+### 10. 日志设置同步
+
+`syncLogSettingsToBackend()` 在 `useConfigPersistence` 中同步全部 6 项日志设置到后端（directory / filenameFormat / splitSize / splitEnabled / autoSave / encoding）。修改日志设置后无需手动调用。
+
 ---
 
 ## 提交规范
@@ -448,7 +463,7 @@ scope: ui | backend | store | hooks | plans
 - ✅ **Store 拆分** — 单一 god store 拆为 4 个领域 store（useAppStore / useOperationStore / useTerminalStore / useRuleStore）
 - ✅ **Hook 拆分** — `useSerialData` 拆为 `useSerialReceive` + `useSerialSend`，9 个 Hook 各司其职
 - ✅ **组件拆分** — ConfigModal（724→10 文件）、OperationPanel（526→4 文件）、MainDisplay（359→5 文件）、Sidebar（626→2 文件）
-- ✅ **后端命令拆分** — `commands/mod.rs` 拆为 6 个领域文件 + `CommandError` 枚举（thiserror）
+- ✅ **后端命令拆分** — `commands/mod.rs` 拆为 7 个领域文件 + `CommandError` 枚举（thiserror）
 - ✅ **CSS 拆分** — `styles.css`（1470 行）拆为 `styles/` 目录 11 个文件
 - ✅ **GBK 解码修复** — 采用 `encoding_rs::GBK`，替代旧 U+FFFD 占位符方案
 - ✅ **closeTab 生命周期** — 经 `closePort()` 路由，修复日志句柄泄漏
@@ -461,6 +476,15 @@ scope: ui | backend | store | hooks | plans
 - ✅ **背景图片** — ConfigModal 路径选择 → CSS 变量应用到主窗口
 - ✅ **分屏嵌套（VS Code 风格）** — `paneTree: PaneNode` 递归树，任意深度嵌套
 - ✅ **v0.1 可见性与鲁棒性** — Toast 通知、终端搜索（Ctrl+F）、选择复制、断线警示、自动重连、引脚状态监视、发送历史持久化、快捷发送槽、首启引导、快捷键帮助、会话恢复、数据过滤
+
+**2026-07 架构迭代（已完成）**：
+
+- ✅ **配置架构 overhaul** — `config_version` + `migrate()` 迁移框架 + `validate_and_clamp()` 校验 + CLI/env/portable 路径解析 + `.bak` 备份/恢复
+- ✅ **双 store 消除** — `sendOnEnter`/`quickSendSlots` 从 `useOperationStore` 迁移至 `useAppStore.config`（单源）
+- ✅ **会话快照专用命令** — `update_session_snapshot` 避免全量配置保存竞态
+- ✅ **日志默认值调整** — `auto_save_log` / `log_split_enabled` 默认 true；`save_log_as`/`export_terminal_log` 作用域放宽
+- ✅ **数据清理** — `port_groups` 表移除 (9→7)；SQLite WAL+FK 开启；事务写 + ON CONFLICT
+- ✅ **30+ Bug 修复** — 日志/配置/后端/UI/契约五类缺陷修复
 
 完整待办见 [`plans/07-roadmap.md`](plans/07-roadmap.md) 与 [`plans/10-v0.1-roadmap.md`](plans/10-v0.1-roadmap.md)。剩余：Phase E 真机验证（待硬件）/ 代码签名（待证书）。
 

@@ -1,6 +1,6 @@
 # src/hooks/
 
-Single file: `useTauri.ts` (456 lines) — 8 hooks that own the React↔Tauri lifecycle.
+Single file: `useTauri.ts` (871 lines) — 9 hooks that own the React↔Tauri lifecycle.
 
 ## Where to look
 
@@ -22,7 +22,8 @@ Single file: `useTauri.ts` (456 lines) — 8 hooks that own the React↔Tauri li
 - `useSerialConnection.closePort()` is the only sanctioned close path: triggers `stopLogging` and updates port status. Bypassing leaks log file handles + leaves status "connected" stuck.
 - `useSerialPorts(3000)` uses `mergePorts()` on every refresh — `mapPortInfo()` always overwrites status to `'disconnected'`; merge preserves alias / group / connection state / baud match.
 - Polling hooks accept `pollIntervalMs` as a parameter intentionally — do not hardcode inside the hook.
-- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`.
+- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter/quickSendSlots (those live only in config).
+- `useConfigPersistence` syncs all 6 log settings to backend via `syncLogSettingsToBackend()` (not just autoSave).
 - Inside hook callbacks/effects, prefer `use{App,Operation,Terminal,Rule}Store.getState()` over selector-bound locals when the value must be live.
 
 ## Anti-patterns

@@ -6,6 +6,73 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-07 缺陷审计 + 架构迭代)
+
+> Bug 修复（30+ 项）+ 4 阶段架构迭代。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告。
+
+### 日志 & 配置契约
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `logger/mod.rs` | `close_writer` 仅 flush 不 `sync_all`，断电丢数据 | 关闭前调用 `sync_all()` 确保 OS 层落盘 |
+| HIGH | `logger/mod.rs` | 分片开关缺失，始终按大小切片 | 新增 `split_enabled` 字段 + 守卫生成切片 |
+| HIGH | `commands/log.rs` | `save_log_as` 作用域限制过严（`canonicalize().starts_with`），用户 save 对话框选择的路径被拒 | 移除子树限制，仅保留父目录 canonicalize 校验 |
+| HIGH | `commands/log.rs` | `export_terminal_log` 同上作用域限制问题 | 同上移除限制 |
+| HIGH | `services/tauri.ts` | 缺少 `setLogFilenameFormat`、`setLogSplitSize`、`setLogSplitEnabled` 包装 | 新增三个 service wrapper |
+| MEDIUM | `hooks/useTauri.ts` | `syncLogSettingsToBackend` 只同步部分日志设置 | 同步全部 6 项日志设置（directory/filenameFormat/splitSize/splitEnabled/autoSave/encoding） |
+| MEDIUM | `logger/mod.rs` | `LogFileInfo` 字段名 snake_case 与前端 camelCase 不匹配 | 增加 `#[serde(rename_all = "camelCase")]` |
+| LOW | `services/tauri.ts` | `onSystemStatus` 事件监听废弃代码残留 | 移除死代码 |
+
+### 配置 & Store 架构
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `config/mod.rs` | 配置无版本号，加字段只能靠 `Option` 兜底 | 新增 `config_version: u32` + `migrate()` 迁移框架 |
+| HIGH | `config/mod.rs` | 配置文件路径硬编码，无法自定义 | `ConfigManager::new(Option<PathBuf>)` 三级解析（CLI > env > portable > 默认） |
+| HIGH | `config/mod.rs` | `set_config` 不校验字段边界，任意值透传 | 新增 `validate_and_clamp()` 在写入时校验裁剪 |
+| HIGH | `config/mod.rs` | 会话快照通过全量 `set_config` 更新，竞态覆盖其余字段 | 新增 `update_session_snapshot()` 单字段方法 |
+| HIGH | `useOperationStore.ts` | `sendOnEnter` / `quickSendSlots` 存在于两个 store（opStore + appStore.config），源不唯一 | 从 opStore 移除，仅在 `useAppStore.config` 中保留 |
+| HIGH | `sessionSnapshot.ts` | `configSaveInProgress` 标志 + 超时轮询，逻辑复杂且仍有竞态窗口 | 改用 `configService.updateSessionSnapshot()` 专用命令，移除全部锁逻辑 |
+| MEDIUM | `config/mod.rs` | 配置损坏时整个应用启动失败 | `save()` 写前生成 `.bak`；`new()` 读取失败时回退到 `.bak` |
+| MEDIUM | `config/mod.rs` | 空 `log_directory` 不解析为默认路径，前端拿到空串 | 在 `migrate()` 中将空值解析为 `dirs::data_dir()/hypercom/logs` |
+| MEDIUM | `config/mod.rs` | `auto_save_log` 默认 `false` 违背用户预期 | 改为 `true` |
+| MEDIUM | `config/mod.rs` | `log_split_enabled` 默认 `false` 违背用户预期 | 改为 `true` |
+| LOW | `hooks/useTauri.ts` | `resetAndReload` 漏同步 opStore | 补充 opStore 同步 |
+| LOW | `hooks/useTauri.ts` | `useAppInit` 残留 sendOnEnter/quickSendSlots 同步代码 | 移除，同步逻辑已无意义 |
+
+### 后端存储 & 数据
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `storage/mod.rs` | 未开启 WAL 和 FK，并发写可能锁库 + FK 约束不生效 | 新增 `PRAGMA journal_mode=WAL` + `PRAGMA foreign_keys=ON` |
+| HIGH | `storage/mod.rs` | `save_command_set_to_db` / `save_highlight_set_to_db` 非事务，子行残留 | 改为事务包裹（DELETE old + INSERT new 原子化） |
+| MEDIUM | `storage/mod.rs` | `save_port_preset_to_db` 覆盖时丢失 `created_at` | 使用 `ON CONFLICT` 保留 `created_at` |
+| MEDIUM | `storage/mod.rs` | `port_groups` + `port_group_members` 表废弃但仍在 schema 中 | 删除两张表 + `PortGroupRow` 结构体 + 相关死代码 |
+| LOW | `storage/mod.rs` | `set_baud_rate` 函数从未被调用 | 移除死代码 |
+
+### 前端 UI & 类型
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| MEDIUM | `types/index.ts` | `SystemStatus.memoryUsedMB` 大小写与 serde camelCase 输出不匹配 | 改为 `memoryUsedMb` |
+| MEDIUM | `StatusBar.tsx` / `ViewStrip.tsx` | 同上字段名不对齐 | 全面对齐 camelCase |
+| MEDIUM | `hooks/useTauri.ts` | `useSystemStatus` 字段名与后端 snake/camelCase 不一致 | 对齐至 camelCase |
+| MEDIUM | `hooks/useTauri.ts` | `mapProtocolTemplateInfo` 未转换可选字段 | 增加 `Boolean()` 转换确保布尔类型 |
+| MEDIUM | ConfigModal 页面 | 四个设置页订阅整 config，无关字段变更触发重渲染 | 改为逐字段选择器 |
+| LOW | `stores/useAppStore.ts` | `defaultConfig.backgroundImage: ''` 空串被 CSS 当路径处理 | 改为 `undefined` |
+| LOW | `system_cmds.rs` | `SystemStatus` 字段名与前端 camelCase 不一致 | 增加 `#[serde(rename_all = "camelCase")]` |
+| LOW | CSS | AboutDialog / HotkeyHelpDialog / AliasDialog 弹窗样式未复用 | 新增 `.modal-dialog-compact` 公共类 |
+| LOW | `commands/serial.rs` | `send_file` 不记录 TX 元数据日志 | 新增 TX metadata 日志记录 |
+| LOW | `commands/file.rs` | 配置导入不校验路径，可读取任意位置 | 新增 `validate_config_path()` 限制在配置目录 |
+
+### 架构改进补充
+
+- `lib.rs` 新增 CLI `--config` 参数解析
+- `commands/config.rs` 新增 `update_session_snapshot`、`get_config_path` 命令；`save_config` 改名为 `set_config`
+- `GeneralSettings.tsx` 通过 `getConfigPath()` 显示配置文件路径
+- `i18n.ts` 新增 `general.configPath` key
+- `SendSection.tsx` 从 `useAppStore(s => s.config.sendOnEnter)` 读取
+
 ## 已修复 (2026-07-21 缺陷审计轮)
 
 > 5 路并行探索 agent 审计（Zustand 选择器 / 内存泄漏 / 错误处理 / 类型安全 / Rust 后端），发现并修复 26 项缺陷。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告, `npm run test:run` 158/158, `cargo test --lib` 31/31。Zustand 选择器审计 0 违规。

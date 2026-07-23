@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 8 lifecycle-disciplined hooks own the Tauri bridge. Backend commands split into 6 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Decorations disabled — custom TitleBar drives window controls.
+HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 8 lifecycle-disciplined hooks own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Decorations disabled — custom TitleBar drives window controls.
 
 ## STRUCTURE
 
@@ -26,11 +26,11 @@ hypercom/
 ├── src-tauri/src/                # Rust backend
 │   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
 │   ├── system.rs                 # win32_power FFI (SetThreadExecutionState)
-│   ├── commands/                 # 6 domain files + mod.rs (CommandError enum + re-exports)
+│   ├── commands/                 # 7 domain files + mod.rs (CommandError enum + re-exports)
 │   ├── serial/mod.rs             # serialport + SIM:Loopback virtual port (505 lines)
 │   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
-│   ├── storage/mod.rs            # SQLite via sqlx (6 tables), largest backend file (785 lines)
-│   └── config/mod.rs             # JSON config persistence
+│   ├── storage/mod.rs            # SQLite via sqlx (7 tables), WAL+FK pragmas (887 lines)
+│   └── config/mod.rs             # JSON config + versioning + validation + path + backup (475 lines)
 └── plans/                        # 10 design docs (see "Key files to read first" below)
 ```
 
@@ -51,6 +51,11 @@ hypercom/
 | Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` | serial_data carries UTF-8 bytes |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
+| Config versioning / migration | `config/mod.rs` `migrate()` + `config_version` field | forward-compatible, additive |
+| Config path customization | CLI `--config` / `HYPERCOM_CONFIG` env / portable mode | resolution order in `ConfigManager::new` |
+| Config validation | `config/mod.rs` `validate_and_clamp()` | runs on `set_config` to enforce bounds |
+| Config backup / recovery | `config/mod.rs` `save()` writes `.bak` / `new()` falls back to `.bak` | corrupt JSON auto-recovered |
+| Session snapshot update | `update_session_snapshot` dedicated command | avoids full config save race |
 
 ## CODE MAP
 
@@ -71,9 +76,10 @@ Backend:
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/Storage/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (6 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `StorageManager` + row structs (`PortGroupRow` `:18` … `ProtocolTemplateRow` `:69`) | `src-tauri/src/storage/mod.rs` | struct / models | SQLite pool; 6 tables — see `src-tauri/src/storage/AGENTS.md` |
-| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `storage_manager` / `logger` behind `std::sync::Mutex` |
+| All Tauri commands (7 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| `StorageManager` + row structs (`SendCommandRow` `:18` … `PortPresetRow` `:91`) | `src-tauri/src/storage/mod.rs` | struct / models | SQLite pool (7 tables, WAL+FK); see `src-tauri/src/storage/AGENTS.md` |
+| `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | versioning + validation + path resolution + backup/recovery (475 lines) |
+| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `storage_manager` / `logger` / `config_manager` behind `std::sync::Mutex` |
 | `win32_power` | `src-tauri/src/system.rs` | mod | `SetThreadExecutionState` FFI |
 
 Subdir guides: [`src/stores/AGENTS.md`](src/stores/AGENTS.md) · [`src/hooks/AGENTS.md`](src/hooks/AGENTS.md) · [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md) · [`src-tauri/src/storage/AGENTS.md`](src-tauri/src/storage/AGENTS.md) · [`src/components/MainDisplay/AGENTS.md`](src/components/MainDisplay/AGENTS.md) · [`src/components/ConfigModal/AGENTS.md`](src/components/ConfigModal/AGENTS.md) · [`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md)
@@ -133,6 +139,8 @@ const openTab = useAppStore(s => s.openTab);
 ### useOperationStore — baudRate, dataBits, parity, stopBits, handshake, dtr, rts, sendInput, displayFormat, encoding, ...
 
 Operation fields have **NO `op` prefix**. They were renamed from `opBaudRate` to `baudRate`, `opDataBits` to `dataBits`, etc.
+
+**Note**: `sendOnEnter` and `quickSendSlots` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)`.
 
 ```tsx
 const baudRate = useOperationStore(s => s.baudRate);
@@ -262,14 +270,14 @@ pub enum CommandError {
 
 It implements `serde::Serialize` manually so the frontend receives the error string via `invoke`.
 
-Commands are split into 6 domain files under `src-tauri/src/commands/`:
+Commands are split into 7 domain files under `src-tauri/src/commands/`:
 
 | File | Domain |
 |------|--------|
 | `serial.rs` | open_port, close_port, send_data, get_port_status |
 | `simulation.rs` | enable_simulation, disable_simulation |
-| `config.rs` | get_config, save_config, reset_config |
-| `log.rs` | start_logging, stop_logging, save_as, open_file, open_directory |
+| `config.rs` | get_config, set_config, reset_config, update_session_snapshot, get_config_path |
+| `log.rs` | start_logging, stop_logging, save_log_as, export_terminal_log, get_log_files, set_log_split_size, set_log_split_enabled, set_log_filename_format, set_log_auto_save, set_log_encoding, open_path, open_log_directory |
 | `storage.rs` | highlight rule sets + send command sets CRUD |
 | `system_cmds.rs` | get_system_status, prevent_sleep, prevent_screen_off |
 
@@ -313,6 +321,7 @@ scope: ui | backend | store | hooks | plans
 - `tsconfig.json` enforces `noUnusedLocals` and `noUnusedParameters` — unused vars are compile errors
 - Serial data events carry `data: number[]` (bytes). Frontend decodes with `TextDecoder`. For HEX display, raw bytes are stored in `TerminalLine.rawData`.
 - ConfigModal's rule/command editors save to SQLite via `storageService`. Load on mount via `useEffect`. Rule state lives in `useRuleStore`.
+- ConfigModal pages (GeneralSettings, LogSettings, DisplaySettings, BackupSettings) use **per-field selectors** instead of subscribing to the whole config — this prevents unnecessary re-renders when unrelated config fields change.
 - SIM:Loopback virtual port is available when `enable_simulation` is called (flask icon in sidebar toolbar)
 - CSS is split across `src/styles/` (10 component CSS files + `base.css`). `src/styles.css` is just an `@import` entry point, not the main stylesheet.
 - `src/utils/hexUtils.ts` provides `hexToString` and `stringToHex` for HEX send/parse.
@@ -342,6 +351,8 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 ## i18n (2026-07 基础设施)
 
 - `src/i18n.ts` 已就位 — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），218 keys × zh-CN/en-US
+
+  > 2026-07-21 起新增 `general.configPath` key（通用设置页显示配置文件路径），key 数随新增功能递增。
 - `main.tsx` 第 5 行 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`
