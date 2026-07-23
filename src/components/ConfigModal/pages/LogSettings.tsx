@@ -12,7 +12,13 @@ const clampNumber = (raw: string, min: number, max: number): number => {
 
 const LogSettings: React.FC = () => {
   const { t } = useTranslation();
-  const config = useAppStore((s) => s.config);
+  const autoSaveLog = useAppStore(s => s.config.autoSaveLog);
+  const logDirectory = useAppStore(s => s.config.logDirectory);
+  const logFilenameFormat = useAppStore(s => s.config.logFilenameFormat);
+  const logFormat = useAppStore(s => s.config.logFormat);
+  const logEncoding = useAppStore(s => s.config.logEncoding);
+  const logSplitEnabled = useAppStore(s => s.config.logSplitEnabled);
+  const logSplitSizeMb = useAppStore(s => s.config.logSplitSizeMb);
   const setConfig = useAppStore((s) => s.setConfig);
 
   return (
@@ -20,13 +26,13 @@ const LogSettings: React.FC = () => {
       <h3 className="config-page-title">{t('logSettings.title')}</h3>
 
       <label className="checkbox-wrapper">
-        <input type="checkbox" checked={config.autoSaveLog} onChange={(e) => setConfig({ autoSaveLog: e.target.checked })} />
+        <input type="checkbox" checked={autoSaveLog} onChange={(e) => setConfig({ autoSaveLog: e.target.checked })} />
         {t('logSettings.autoSaveLog')}
       </label>
 
       <div className="config-row">
         <label>{t('logSettings.directoryLabel')}</label>
-        <input className="input" value={config.logDirectory} placeholder={t('logSettings.directoryPlaceholder')} readOnly />
+        <input className="input" value={logDirectory} placeholder={t('logSettings.directoryPlaceholder')} readOnly />
         <button className="btn btn-sm" onClick={async () => {
           const result = await open({ directory: true });
           if (result) setConfig({ logDirectory: result });
@@ -35,13 +41,13 @@ const LogSettings: React.FC = () => {
 
       <div className="config-row">
         <label>{t('logSettings.filenameFormatLabel')}</label>
-        <input className="input" value={config.logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
+        <input className="input" value={logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
         <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('logSettings.filenameFormatHint')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('logSettings.formatLabel')}</label>
-        <select className="select" value={config.logFormat} onChange={(e) => setConfig({ logFormat: e.target.value as AppConfig['logFormat'] })}>
+        <select className="select" value={logFormat} onChange={(e) => setConfig({ logFormat: e.target.value as AppConfig['logFormat'] })}>
           <option value="string">{t('logSettings.format.string')}</option>
           <option value="hex">{t('logSettings.format.hex')}</option>
           <option value="binary">{t('logSettings.format.binary')}</option>
@@ -50,21 +56,21 @@ const LogSettings: React.FC = () => {
 
       <div className="config-row">
         <label>{t('logSettings.encodingLabel')}</label>
-        <select className="select" value={config.logEncoding} onChange={(e) => setConfig({ logEncoding: e.target.value as AppConfig['logEncoding'] })}>
+        <select className="select" value={logEncoding} onChange={(e) => setConfig({ logEncoding: e.target.value as AppConfig['logEncoding'] })}>
           <option value="ASCII">ASCII</option>
           <option value="UTF-8">UTF-8</option>
         </select>
       </div>
 
       <label className="checkbox-wrapper">
-        <input type="checkbox" checked={config.logSplitEnabled} onChange={(e) => setConfig({ logSplitEnabled: e.target.checked })} />
+        <input type="checkbox" checked={logSplitEnabled} onChange={(e) => setConfig({ logSplitEnabled: e.target.checked })} />
         {t('logSettings.splitEnabled')}
       </label>
 
-      {config.logSplitEnabled && (
+      {logSplitEnabled && (
         <div className="config-row">
           <label>{t('logSettings.splitSizeLabel')}</label>
-          <input className="input" type="number" value={config.logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: clampNumber(e.target.value, 1, 10240) })} min={1} max={10240} />
+          <input className="input" type="number" value={logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: clampNumber(e.target.value, 1, 10240) })} min={1} max={10240} />
         </div>
       )}
     </div>

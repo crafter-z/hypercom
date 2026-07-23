@@ -28,9 +28,25 @@ interface ConfigBundle {
   protocolTemplates?: ProtocolTemplateInfo[];
 }
 
+/** Validate an imported config bundle's config section. Returns error message or null if valid. */
+function validateConfigBundle(bundle: ConfigBundle): string | null {
+  if (!bundle || typeof bundle !== 'object') return 'Invalid bundle format';
+  if (bundle.config) {
+    const c = bundle.config;
+    if (typeof c.memoryLimitMb !== 'number') return 'Invalid config: memoryLimitMb must be a number';
+    if (typeof c.theme !== 'string') return 'Invalid config: theme must be a string';
+    if (typeof c.language !== 'string') return 'Invalid config: language must be a string';
+    if (c.terminalFontSize !== undefined && typeof c.terminalFontSize !== 'number') return 'Invalid config: terminalFontSize must be a number';
+    if (c.autoSaveLog !== undefined && typeof c.autoSaveLog !== 'boolean') return 'Invalid config: autoSaveLog must be a boolean';
+  }
+  return null;
+}
+
 const BackupSettings: React.FC = () => {
   const { t } = useTranslation();
-  const config = useAppStore((s) => s.config);
+  const backupEnabled = useAppStore(s => s.config.backupEnabled);
+  const backupInterval = useAppStore(s => s.config.backupInterval);
+  const backupDirectory = useAppStore(s => s.config.backupDirectory);
   const setConfig = useAppStore((s) => s.setConfig);
 
   const handleExport = async () => {
@@ -75,8 +91,14 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(t('backupSettings.importInvalid')));
         return;
       }
+      const validationError = validateConfigBundle(bundle);
+      if (validationError) {
+        notifyError(new Error(validationError));
+        return;
+      }
       if (bundle.config) {
         await configService.setConfig(bundle.config);
+        useAppStore.getState().setConfig(bundle.config);
       }
       for (const set of bundle.highlightSets ?? []) {
         await storageService.saveHighlightSet({
@@ -126,19 +148,19 @@ const BackupSettings: React.FC = () => {
       <h3 className="config-page-title">{t('backupSettings.title')}</h3>
 
       <label className="checkbox-wrapper">
-        <input type="checkbox" checked={config.backupEnabled} onChange={(e) => setConfig({ backupEnabled: e.target.checked })} />
+        <input type="checkbox" checked={backupEnabled} onChange={(e) => setConfig({ backupEnabled: e.target.checked })} />
         {t('backupSettings.enabled')}
       </label>
 
-      {config.backupEnabled && (
+      {backupEnabled && (
         <>
           <div className="config-row">
             <label>{t('backupSettings.intervalLabel')}</label>
-            <input className="input" type="number" value={config.backupInterval} onChange={(e) => setConfig({ backupInterval: clampNumber(e.target.value, 1, 8760) })} min={1} max={8760} />
+            <input className="input" type="number" value={backupInterval} onChange={(e) => setConfig({ backupInterval: clampNumber(e.target.value, 1, 8760) })} min={1} max={8760} />
           </div>
           <div className="config-row">
             <label>{t('backupSettings.directoryLabel')}</label>
-            <input className="input" value={config.backupDirectory} placeholder={t('backupSettings.directoryPlaceholder')} readOnly />
+            <input className="input" value={backupDirectory} placeholder={t('backupSettings.directoryPlaceholder')} readOnly />
             <button className="btn btn-sm" onClick={async () => {
               const result = await open({ directory: true });
               if (result) setConfig({ backupDirectory: result });

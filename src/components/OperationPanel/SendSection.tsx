@@ -41,7 +41,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   const sendInput = useOperationStore(s => s.sendInput);
   const sendIsHex = useOperationStore(s => s.sendIsHex);
   const sendAppendLineEnding = useOperationStore(s => s.sendAppendLineEnding);
-  const sendOnEnter = useOperationStore(s => s.sendOnEnter);
+  const sendOnEnter = useAppStore(s => s.config.sendOnEnter);
   const encoding = useOperationStore(s => s.encoding);
   const setOpState = useOperationStore(s => s.setOpState);
   const clearTerminal = useTerminalStore(s => s.clearTerminal);
@@ -178,7 +178,6 @@ const SendSection: React.FC<SendSectionProps> = ({
 
   const toggleSendOnEnter = () => {
     const next = !sendOnEnter;
-    setOpState({ sendOnEnter: next });
     useAppStore.getState().setConfig({ sendOnEnter: next });
   };
 

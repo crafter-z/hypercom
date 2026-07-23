@@ -453,6 +453,7 @@ const resources = {
       'statusBar.rate.peak': '峰值',
 
       'generalSettings.restoreSession': '启动时恢复上次会话',
+      'general.configPath': '配置文件路径',
     },
   },
   'en-US': {
@@ -902,6 +903,7 @@ const resources = {
       'statusBar.rate.peak': 'peak',
 
       'generalSettings.restoreSession': 'Restore session on startup',
+      'general.configPath': 'Config file path',
     },
   },
 };

@@ -277,7 +277,7 @@ export interface LogFileInfo {
 /** 系统资源状态 */
 export interface SystemStatus {
   status: string;          // 运行状态文本
-  memoryUsedMB: number;
+  memoryUsedMb: number;
   memoryLimitMb: number;
   cpuUsage: number;        // CPU占用率 (%)
 }

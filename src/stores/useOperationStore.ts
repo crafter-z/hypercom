@@ -26,8 +26,6 @@ interface OperationState {
   sendIsHex: boolean;
   sendAppendLineEnding: LineEnding;
   sendInput: string;
-  sendOnEnter: boolean;
-  quickSendSlots: (string | null)[];
   isLoopSending: boolean;
   loopInterval: number;
   loopRepeatCount: number; // 循环重复轮数: 0 = 跟随命令集 isLoop, >0 = 发送 N 轮后停止
@@ -52,8 +50,6 @@ export const useOperationStore = create<OperationState>()(
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
-    sendOnEnter: true,
-    quickSendSlots: [null, null, null, null, null],
     isLoopSending: false,
     loopInterval: 500,
     loopRepeatCount: 0,

@@ -23,7 +23,7 @@ const AboutDialog: React.FC = () => {
 
   return (
     <div className="modal-overlay" onClick={close}>
-      <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()} style={{ minWidth: 380 }}>
+      <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('about.title')}</h3>
           <button className="btn btn-icon btn-sm" onClick={close} title={t('hotkeys.close')}>

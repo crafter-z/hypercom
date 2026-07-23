@@ -190,7 +190,9 @@ function mapProtocolTemplateInfo(s: ProtocolTemplateInfo): ProtocolTemplate {
   return {
     id: s.id,
     name: s.name,
-    isEnabled: s.is_enabled,
+    // SQLite stores is_enabled as i32 — coerce to a real boolean so the
+    // frontend never sees a truthy number masquerading as a boolean.
+    isEnabled: Boolean(s.is_enabled),
     headerBytes: s.header_bytes,
     lengthFieldOffset: s.length_field_offset,
     lengthFieldSize: s.length_field_size as 1 | 2,
@@ -205,6 +207,25 @@ function mapProtocolTemplateInfo(s: ProtocolTemplateInfo): ProtocolTemplate {
     colorChecksum: s.color_checksum,
     colorFooter: s.color_footer,
   };
+}
+
+/**
+ * Push every log-related config field to the backend logger so the two sides
+ * never drift. `logDirectory` is only synced when non-empty — an empty string
+ * would wipe the backend's default log root. Individual failures are logged
+ * and swallowed; a single unsupported setter must not abort the whole sync.
+ */
+function syncLogSettingsToBackend(config: AppConfig): Promise<void> {
+  return Promise.all([
+    logService.setAutoSave(config.autoSaveLog).catch((e) => console.debug('[useTauri] setAutoSave failed:', e)),
+    logService.setEncoding(config.logEncoding).catch((e) => console.debug('[useTauri] setEncoding failed:', e)),
+    logService.setLogFilenameFormat(config.logFilenameFormat).catch((e) => console.debug('[useTauri] setLogFilenameFormat failed:', e)),
+    logService.setLogSplitSize(config.logSplitSizeMb).catch((e) => console.debug('[useTauri] setLogSplitSize failed:', e)),
+    logService.setLogSplitEnabled(config.logSplitEnabled).catch((e) => console.debug('[useTauri] setLogSplitEnabled failed:', e)),
+    ...(config.logDirectory
+      ? [logService.setLogDirectory(config.logDirectory).catch((e) => console.debug('[useTauri] setLogDirectory failed:', e))]
+      : []),
+  ]).then(() => undefined);
 }
 
 /**
@@ -744,10 +765,7 @@ export function useConfigPersistence() {
   const saveConfig = useCallback(async (config: AppConfig) => {
     try {
       await configService.setConfig(config);
-      await Promise.all([
-        logService.setAutoSave(config.autoSaveLog).catch((e) => console.debug('[useTauri] setAutoSave failed:', e)),
-        logService.setEncoding(config.logEncoding).catch((e) => console.debug('[useTauri] setEncoding failed:', e)),
-      ]);
+      await syncLogSettingsToBackend(config);
     } catch (err) {
       console.error('[useConfigPersistence] Failed to save config:', err);
       notifyError(err);
@@ -759,6 +777,7 @@ export function useConfigPersistence() {
       const defaultConfig = await configService.resetConfig();
       resetConfig();
       setConfig(defaultConfig);
+      await syncLogSettingsToBackend(defaultConfig);
     } catch (err) {
       console.error('[useConfigPersistence] Failed to reset config:', err);
       notifyError(err);
@@ -780,9 +799,9 @@ export function useSystemStatus(pollIntervalMs: number = 5000) {
         const status = await systemService.getSystemStatus();
         setSystemStatus({
           status: status.status,
-          memoryUsedMB: status.memory_used_mb,
-          memoryLimitMb: status.memory_limit_mb,
-          cpuUsage: status.cpu_usage,
+          memoryUsedMb: status.memoryUsedMb,
+          memoryLimitMb: status.memoryLimitMb,
+          cpuUsage: status.cpuUsage,
         });
       } catch (err) {
         // Backend may not be fully ready yet, silently ignore
@@ -828,14 +847,7 @@ export function useAppInit() {
       // 此处无论成功与否都需要置位）
       useAppStore.getState().setUIState({ configLoaded: true });
       const loaded = useAppStore.getState().config;
-      useOperationStore.getState().setOpState({
-        sendOnEnter: loaded.sendOnEnter,
-        quickSendSlots: loaded.quickSendSlots,
-      });
-      await Promise.all([
-        logService.setAutoSave(loaded.autoSaveLog).catch((e) => console.debug('[useTauri] setAutoSave failed:', e)),
-        logService.setEncoding(loaded.logEncoding).catch((e) => console.debug('[useTauri] setEncoding failed:', e)),
-      ]);
+      await syncLogSettingsToBackend(loaded);
       // Load persisted rule sets and command sets at startup
       try {
         const [cmdSets, hlSets, protoTemplates] = await Promise.all([

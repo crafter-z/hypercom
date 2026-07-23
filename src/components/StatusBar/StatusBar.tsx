@@ -185,7 +185,7 @@ const StatusBar: React.FC = () => {
           ))}
         <span className="statusbar-item">
           <MemoryStick size={12} />
-          {systemStatus.memoryUsedMB}MB / {systemStatus.memoryLimitMb}MB ({systemStatus.memoryLimitMb ? ((systemStatus.memoryUsedMB / systemStatus.memoryLimitMb) * 100).toFixed(0) : '0'}%)
+          {systemStatus.memoryUsedMb}MB / {systemStatus.memoryLimitMb}MB ({systemStatus.memoryLimitMb ? ((systemStatus.memoryUsedMb / systemStatus.memoryLimitMb) * 100).toFixed(0) : '0'}%)
         </span>
         <span className="statusbar-item">
           <Cpu size={12} />

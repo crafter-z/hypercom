@@ -36,9 +36,9 @@ const ViewStrip: React.FC<ViewStripProps> = ({ isPortActive, activeTabId }) => {
     if (!activeTabId) return;
     try {
       const files = await logService.getLogFiles();
-      const candidates = files.filter(f => f.port_id === activeTabId);
+      const candidates = files.filter(f => f.portId === activeTabId);
       const match = candidates.length > 0
-        ? candidates.reduce((newest, f) => f.created_at > newest.created_at ? f : newest)
+        ? candidates.reduce((newest, f) => f.createdAt > newest.createdAt ? f : newest)
         : undefined;
       if (match) {
         await logService.openPath(match.path);

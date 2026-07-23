@@ -28,7 +28,9 @@ export function buildSessionSnapshot(state: ReturnType<typeof useAppStore.getSta
 }
 
 /**
- * Best-effort, fire-and-forget persistence of the session snapshot.
+ * Best-effort persistence of the session snapshot via the dedicated
+ * `update_session_snapshot` command (only writes the snapshot field,
+ * never the full config — eliminates the race with ConfigModal saves).
  * Failures are only logged — this must never throw (used from beforeunload).
  */
 export function saveSessionSnapshot(): void {
@@ -36,10 +38,10 @@ export function saveSessionSnapshot(): void {
     const state = useAppStore.getState();
     const snapshot = buildSessionSnapshot(state);
     if (snapshot === null) return;
-    const config = { ...state.config, sessionSnapshot: snapshot };
-    configService.setConfig(config).catch((e) => {
-      console.debug('[App] Failed to save session snapshot:', e);
-    });
+    configService.updateSessionSnapshot(snapshot)
+      .catch((e) => {
+        console.debug('[App] Failed to save session snapshot:', e);
+      });
   } catch (e) {
     console.debug('[App] Failed to build session snapshot:', e);
   }

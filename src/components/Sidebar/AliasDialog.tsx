@@ -19,7 +19,7 @@ const AliasDialog: React.FC<AliasDialogProps> = ({
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <h3 className="modal-dialog-title">{t('aliasDialog.title')}</h3>
         <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
           {t('aliasDialog.description', { portId })}

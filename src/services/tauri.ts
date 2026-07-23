@@ -42,12 +42,12 @@ export interface SendDataParams {
   append_line_ending: string;
 }
 
-/** 系统状态 */
+/** 系统状态（后端 #[serde(rename_all = "camelCase")] 序列化） */
 export interface SystemStatusResult {
   status: string;
-  memory_used_mb: number;
-  memory_limit_mb: number;
-  cpu_usage: number;
+  memoryUsedMb: number;
+  memoryLimitMb: number;
+  cpuUsage: number;
 }
 
 /** 流量统计 */
@@ -57,11 +57,11 @@ export interface TrafficStatsResult {
   rx_total: number;
 }
 
-/** 日志文件信息 */
+/** 日志文件信息（后端 #[serde(rename_all = "camelCase")] 序列化） */
 export interface LogFileInfoResult {
   path: string;
-  port_id: string;
-  created_at: number;
+  portId: string;
+  createdAt: number;
   size: number;
 }
 
@@ -136,6 +136,14 @@ export const configService = {
   resetConfig: (): Promise<AppConfig> => {
     return invoke<AppConfig>('reset_config');
   },
+
+  updateSessionSnapshot: (snapshot: string): Promise<void> => {
+    return invoke<void>('update_session_snapshot', { snapshot });
+  },
+
+  getConfigPath: (): Promise<string> => {
+    return invoke<string>('get_config_path');
+  },
 };
 
 // ==================== 日志命令 ====================
@@ -182,6 +190,18 @@ export const logService = {
   /** 设置日志默认编码 (UTF-8 / GBK / ISO-8859-1 / ASCII) */
   setEncoding: (encoding: string): Promise<void> => {
     return invoke<void>('set_log_encoding', { encoding });
+  },
+  /** 设置日志文件名模板（[com]/[datetime]/[date]/[time] 变量） */
+  setLogFilenameFormat: (format: string): Promise<void> => {
+    return invoke<void>('set_log_filename_format', { format });
+  },
+  /** 设置日志分片大小阈值 (MB) */
+  setLogSplitSize: (mb: number): Promise<void> => {
+    return invoke<void>('set_log_split_size', { mb });
+  },
+  /** 开关日志按大小自动分片 */
+  setLogSplitEnabled: (enabled: boolean): Promise<void> => {
+    return invoke<void>('set_log_split_enabled', { enabled });
   },
 };
 
@@ -251,12 +271,6 @@ export const eventService = {
 
   onSerialStatus: (callback: (event: SerialStatusEvent) => void) => {
     return listen<SerialStatusEvent>('serial:status', (event) => {
-      callback(event.payload);
-    });
-  },
-
-  onSystemStatus: (callback: (event: SystemStatusResult) => void) => {
-    return listen<SystemStatusResult>('system:status', (event) => {
       callback(event.payload);
     });
   },

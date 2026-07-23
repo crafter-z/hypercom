@@ -24,6 +24,22 @@
   box-shadow: var(--shadow-lg);
 }
 
+.modal-dialog-compact {
+  width: auto;
+  height: auto;
+  min-width: 340px;
+  max-width: 90vw;
+  max-height: 85vh;
+  padding: 20px 24px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+}
+
 .modal-nav {
   width: 180px;
   background: var(--bg-secondary);

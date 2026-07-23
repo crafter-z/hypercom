@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
+import { configService } from '../../../services/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { AppConfig } from '../../../types';
 
@@ -12,8 +13,26 @@ const clampNumber = (raw: string, min: number, max: number): number => {
 
 const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
-  const config = useAppStore((s) => s.config);
+  const closeBehavior = useAppStore(s => s.config.closeBehavior);
+  const memoryLimitMb = useAppStore(s => s.config.memoryLimitMb);
+  const language = useAppStore(s => s.config.language);
+  const theme = useAppStore(s => s.config.theme);
+  const preventScreenOff = useAppStore(s => s.config.preventScreenOff);
+  const preventSleep = useAppStore(s => s.config.preventSleep);
+  const restoreSession = useAppStore(s => s.config.restoreSession);
+  const autoReconnect = useAppStore(s => s.config.autoReconnect);
+  const maxRetries = useAppStore(s => s.config.maxRetries);
+  const terminalFont = useAppStore(s => s.config.terminalFont);
+  const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
+  const uiFont = useAppStore(s => s.config.uiFont);
+  const uiFontSize = useAppStore(s => s.config.uiFontSize);
+  const backgroundImage = useAppStore(s => s.config.backgroundImage);
   const setConfig = useAppStore((s) => s.setConfig);
+
+  const [configPath, setConfigPath] = useState('');
+  useEffect(() => {
+    configService.getConfigPath().then(setConfigPath).catch(() => {});
+  }, []);
 
   return (
     <div className="config-page">
@@ -23,7 +42,7 @@ const GeneralSettings: React.FC = () => {
         <label>{t('generalSettings.closeBehaviorLabel')}</label>
         <select
           className="select"
-          value={config.closeBehavior}
+          value={closeBehavior}
           onChange={(e) => setConfig({ closeBehavior: e.target.value as AppConfig['closeBehavior'] })}
         >
           <option value="minimize">{t('generalSettings.closeBehavior.minimize')}</option>
@@ -36,7 +55,7 @@ const GeneralSettings: React.FC = () => {
         <input
           className="input"
           type="number"
-          value={config.memoryLimitMb}
+          value={memoryLimitMb}
           onChange={(e) => setConfig({ memoryLimitMb: clampNumber(e.target.value, 64, 4096) })}
           min={64}
           max={4096}
@@ -48,7 +67,7 @@ const GeneralSettings: React.FC = () => {
         <label>{t('generalSettings.languageLabel')}</label>
         <select
           className="select"
-          value={config.language}
+          value={language}
           onChange={(e) => setConfig({ language: e.target.value as AppConfig['language'] })}
         >
           <option value="zh-CN">{t('generalSettings.language.zhCN')}</option>
@@ -60,7 +79,7 @@ const GeneralSettings: React.FC = () => {
         <label>{t('generalSettings.themeLabel')}</label>
         <select
           className="select"
-          value={config.theme}
+          value={theme}
           onChange={(e) => setConfig({ theme: e.target.value as AppConfig['theme'] })}
         >
           <option value="light">{t('generalSettings.theme.light')}</option>
@@ -71,15 +90,15 @@ const GeneralSettings: React.FC = () => {
 
       <div className="config-row">
         <label className="checkbox-wrapper">
-          <input type="checkbox" checked={config.preventScreenOff} onChange={(e) => setConfig({ preventScreenOff: e.target.checked })} />
+          <input type="checkbox" checked={preventScreenOff} onChange={(e) => setConfig({ preventScreenOff: e.target.checked })} />
           {t('generalSettings.preventScreenOff')}
         </label>
         <label className="checkbox-wrapper">
-          <input type="checkbox" checked={config.preventSleep} onChange={(e) => setConfig({ preventSleep: e.target.checked })} />
+          <input type="checkbox" checked={preventSleep} onChange={(e) => setConfig({ preventSleep: e.target.checked })} />
           {t('generalSettings.preventSleep')}
         </label>
         <label className="checkbox-wrapper">
-          <input type="checkbox" checked={config.restoreSession} onChange={(e) => setConfig({ restoreSession: e.target.checked })} />
+          <input type="checkbox" checked={restoreSession} onChange={(e) => setConfig({ restoreSession: e.target.checked })} />
           {t('generalSettings.restoreSession')}
         </label>
       </div>
@@ -91,7 +110,7 @@ const GeneralSettings: React.FC = () => {
         <label className="checkbox-wrapper">
           <input
             type="checkbox"
-            checked={config.autoReconnect}
+            checked={autoReconnect}
             onChange={(e) => setConfig({ autoReconnect: e.target.checked })}
           />
           {t('settings.reconnect.autoReconnect.label')}
@@ -103,7 +122,7 @@ const GeneralSettings: React.FC = () => {
         <input
           className="input"
           type="number"
-          value={config.maxRetries}
+          value={maxRetries}
           onChange={(e) => setConfig({ maxRetries: clampNumber(e.target.value, 1, 10) })}
           min={1}
           max={10}
@@ -117,25 +136,29 @@ const GeneralSettings: React.FC = () => {
 
       <div className="config-row">
         <label>{t('generalSettings.terminalFontLabel')}</label>
-        <input className="input" value={config.terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
-        <input className="input" type="number" value={config.terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
+        <input className="input" value={terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
+        <input className="input" type="number" value={terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('generalSettings.uiFontLabel')}</label>
-        <input className="input" value={config.uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
-        <input className="input" type="number" value={config.uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
+        <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
+        <input className="input" type="number" value={uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('generalSettings.backgroundImageLabel')}</label>
-        <input className="input" value={config.backgroundImage || ''} placeholder={t('generalSettings.backgroundImagePlaceholder')} readOnly />
+        <input className="input" value={backgroundImage || ''} placeholder={t('generalSettings.backgroundImagePlaceholder')} readOnly />
         <button className="btn btn-sm" onClick={async () => {
           const result = await open({ directory: false, multiple: false, filters: [{ name: t('generalSettings.imageFilterName'), extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp'] }] });
           if (result) setConfig({ backgroundImage: result });
         }}>{t('generalSettings.browseButton')}</button>
+      </div>
+
+      <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
+        {t('general.configPath')}: {configPath}
       </div>
     </div>
   );
