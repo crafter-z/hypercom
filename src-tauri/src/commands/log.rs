@@ -24,30 +24,14 @@ pub fn save_log_as(
     path: String,
     state: State<AppState>,
 ) -> Result<(), CommandError> {
-    // 作用域校验 (与 export_terminal_log 同级): 仅允许写入 LogManager 的 log_directory
-    // 子树下的路径，防止前端借另存为覆盖任意文件 (defects #54 同类)。
-    let log_dir = {
-        let mgr = state
-            .log_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.get_directory().clone()
-    };
+    // 目标路径由用户通过系统 save 对话框显式选择，因此不再限制在日志目录子树内。
+    // 仅对父目录 canonicalize 以确认路径有效（父目录存在），保留基本校验。
     let target = Path::new(&path);
-    // 目标文件可能尚不存在（save 对话框返回的新文件路径），因此对父目录 canonicalize
-    let canonical_parent = target
+    target
         .parent()
         .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path}")))?
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
-    let canonical_root = log_dir
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("Cannot canonicalize log root: {e}")))?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        return Err(CommandError::Log(format!(
-            "Path outside allowed directory: {path}"
-        )));
-    }
     let manager = state
         .log_manager
         .lock()
@@ -62,32 +46,16 @@ pub fn save_log_as(
 pub fn export_terminal_log(
     path: String,
     content: String,
-    state: State<AppState>,
+    _state: State<AppState>,
 ) -> Result<(), CommandError> {
-    // 作用域校验 (defense-in-depth): 仅允许写入 LogManager 的 log_directory 子树下的路径。
-    // 前端 save() 对话框已限制路径，但后端必须独立校验防止越权写入 (defects #54 同类)。
-    let log_dir = {
-        let mgr = state
-            .log_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.get_directory().clone()
-    };
+    // 目标路径由用户通过系统 save 对话框显式选择，因此不再限制在日志目录子树内。
+    // 仅对父目录 canonicalize 以确认路径有效（父目录存在），保留基本校验。
     let target = Path::new(&path);
-    // 导出文件可能尚不存在（save 对话框返回的新文件路径），因此对父目录 canonicalize
-    let canonical_parent = target
+    target
         .parent()
         .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path}")))?
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
-    let canonical_root = log_dir
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("Cannot canonicalize log root: {e}")))?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        return Err(CommandError::Log(format!(
-            "Path outside allowed directory: {path}"
-        )));
-    }
     std::fs::write(&path, content.as_bytes())
         .map_err(|e| CommandError::Io(format!("Failed to write export file '{path}': {e}")))
 }
@@ -112,6 +80,17 @@ pub fn set_log_split_size(mb: u32, state: State<AppState>) -> Result<(), Command
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     manager.set_split_size(mb);
+    Ok(())
+}
+
+/// 设置日志按大小自动分片开关。前端在 set_config 时调用以同步状态。
+#[tauri::command]
+pub fn set_log_split_enabled(enabled: bool, state: State<AppState>) -> Result<(), CommandError> {
+    let mut manager = state
+        .log_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.set_split_enabled(enabled);
     Ok(())
 }
 

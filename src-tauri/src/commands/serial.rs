@@ -145,7 +145,7 @@ pub async fn send_file(
     }
     let chunk_size = args.chunk_size.max(1);
     let mut sent = 0usize;
-    for chunk in data.chunks(chunk_size) {
+    for (chunk_index, chunk) in data.chunks(chunk_size).enumerate() {
         // 锁作用域仅限写入本身，释放后再 await（sleep）
         {
             let manager = state
@@ -155,6 +155,15 @@ pub async fn send_file(
             manager
                 .write_raw(&args.port_id, chunk)
                 .map_err(|e| CommandError::Serial(e.to_string()))?;
+        }
+        // 记录 TX 元信息（仅 chunk 序号与长度，不记录二进制内容本身）。
+        // log_manager 锁在下方 await（sleep）之前释放，不跨 await 持有 MutexGuard。
+        if let Ok(mut log_mgr) = state.log_manager.lock() {
+            let timestamp = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
+            let log_data = format!("[FILE] chunk {} ({} bytes)", chunk_index, chunk.len());
+            let _ = log_mgr.write(&args.port_id, &timestamp, "TX", log_data.as_bytes());
         }
         sent += chunk.len();
         let _ = app.emit(

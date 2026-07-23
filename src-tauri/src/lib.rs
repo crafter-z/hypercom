@@ -51,9 +51,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> anyhow::Result<Self> {
+        // 解析 CLI `--config <path>` 参数，允许自定义配置文件路径
+        let config_arg = std::env::args()
+            .skip(1)
+            .position(|a| a == "--config")
+            .and_then(|i| std::env::args().nth(i + 2))
+            .map(std::path::PathBuf::from);
         Ok(Self {
             serial_manager: std::sync::Mutex::new(serial::SerialManager::new()),
-            config_manager: std::sync::Mutex::new(config::ConfigManager::new()?),
+            config_manager: std::sync::Mutex::new(config::ConfigManager::new(config_arg)?),
             log_manager: std::sync::Mutex::new(logger::LogManager::new()),
             storage_manager: std::sync::Mutex::new(storage::StorageManager::new()?),
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
@@ -89,6 +95,8 @@ pub fn run() {
             commands::get_config,
             commands::set_config,
             commands::reset_config,
+            commands::update_session_snapshot,
+            commands::get_config_path,
             // ===== 日志相关命令 =====
             commands::set_log_directory,
             commands::save_log_as,
@@ -97,6 +105,7 @@ pub fn run() {
             commands::start_logging,
             commands::stop_logging,
             commands::set_log_split_size,
+            commands::set_log_split_enabled,
             commands::set_log_filename_format,
             commands::set_log_auto_save,
             commands::set_log_encoding,

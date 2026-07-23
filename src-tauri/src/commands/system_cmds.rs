@@ -6,6 +6,7 @@ use crate::AppState;
 
 /// 获取系统状态（内存、CPU）
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
     pub status: String,
     pub memory_used_mb: u64,

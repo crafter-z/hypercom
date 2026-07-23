@@ -11,10 +11,22 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// 当前配置 schema 版本号。每次破坏性变更配置结构时递增，
+/// 并在 `ConfigManager::migrate` 中追加对应的迁移分支。
+const CURRENT_CONFIG_VERSION: u32 = 1;
+
+fn current_config_version() -> u32 {
+    CURRENT_CONFIG_VERSION
+}
+
 /// 应用全局配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    // --- schema 版本 ---
+    #[serde(default = "current_config_version")]
+    pub config_version: u32,
+
     // --- 通用设置 ---
     pub close_behavior: String, // "minimize" | "exit"
     pub memory_limit_mb: u32,
@@ -39,6 +51,12 @@ pub struct AppConfig {
     pub default_line_ending: String, // "\\r\\n" | "\\r" | "\\n"
     pub send_prefix: String,
     pub show_port_type: bool,
+    #[serde(default = "default_send_on_enter")]
+    pub send_on_enter: bool,
+    #[serde(default)]
+    pub quick_send_slots: Vec<Option<String>>,
+    #[serde(default = "default_timestamp_format")]
+    pub timestamp_format: String,
 
     // --- 时间戳设置 ---
     pub timestamp_mode: String, // "perLine" | "perRound"
@@ -74,9 +92,18 @@ fn default_restore_session() -> bool {
     true
 }
 
+fn default_send_on_enter() -> bool {
+    true
+}
+
+fn default_timestamp_format() -> String {
+    "absolute".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             close_behavior: "minimize".to_string(),
             memory_limit_mb: 1024,
             language: "zh-CN".to_string(),
@@ -94,13 +121,16 @@ impl Default for AppConfig {
             default_line_ending: "\\r\\n".to_string(),
             send_prefix: ">>>>>>SEND>>>>>>>>".to_string(),
             show_port_type: true,
+            send_on_enter: true,
+            quick_send_slots: vec![None, None, None, None, None],
+            timestamp_format: "absolute".to_string(),
             timestamp_mode: "perLine".to_string(),
-            auto_save_log: false,
+            auto_save_log: true,
             log_directory: String::new(),
             log_filename_format: "[com]-[datetime]".to_string(),
             log_format: "string".to_string(),
             log_encoding: "UTF-8".to_string(),
-            log_split_enabled: false,
+            log_split_enabled: true,
             log_split_size_mb: 100,
             backup_enabled: false,
             backup_interval: 24,
@@ -118,20 +148,83 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new() -> anyhow::Result<Self> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?
-            .join("hypercom");
+    /// 创建配置管理器。
+    ///
+    /// 配置文件路径按优先级解析：
+    /// 1. `custom_path`（CLI `--config` 参数显式指定）
+    /// 2. `HYPERCOM_CONFIG` 环境变量
+    /// 3. 便携模式：可执行文件同目录下已存在的 `config.json`
+    /// 4. 默认：%APPDATA%/hypercom/config.json（`dirs::config_dir`）
+    pub fn new(custom_path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let config_path = if let Some(p) = custom_path {
+            // CLI --config 显式指定
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            p
+        } else if let Ok(env_path) = std::env::var("HYPERCOM_CONFIG") {
+            // 环境变量指定
+            let p = PathBuf::from(env_path);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            p
+        } else {
+            // 便携模式：可执行文件同目录下已存在 config.json 时优先使用
+            let portable = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("config.json")));
+            if let Some(ref p) = portable {
+                if p.exists() {
+                    p.clone()
+                } else {
+                    Self::default_config_path()?
+                }
+            } else {
+                Self::default_config_path()?
+            }
+        };
 
-        fs::create_dir_all(&config_dir)?;
-        let config_path = config_dir.join("config.json");
-
-        let config = if config_path.exists() {
+        let mut config = if config_path.exists() {
             let content = fs::read_to_string(&config_path)?;
-            serde_json::from_str(&content).unwrap_or_default()
+            // 先解析为 Value 做版本检测 + 迁移，再反序列化为 AppConfig。
+            // 解析失败时尝试 .bak 恢复，避免损坏的 config.json 导致全部配置丢失。
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(mut json) => {
+                    let version = json
+                        .get("configVersion")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    if version < CURRENT_CONFIG_VERSION {
+                        Self::migrate(&mut json, version);
+                    }
+                    serde_json::from_value(json).unwrap_or_default()
+                }
+                Err(e) => {
+                    log::warn!("Config file corrupt ({}), attempting .bak recovery", e);
+                    let bak_path = config_path.with_extension("json.bak");
+                    if bak_path.exists() {
+                        let bak_content = fs::read_to_string(&bak_path)?;
+                        serde_json::from_str(&bak_content).unwrap_or_default()
+                    } else {
+                        log::warn!("No .bak available, using defaults");
+                        AppConfig::default()
+                    }
+                }
+            }
         } else {
             AppConfig::default()
         };
+
+        // Resolve empty log_directory to the actual default path so the
+        // frontend always sees a real directory and syncLogSettingsToBackend
+        // passes a valid path to set_log_directory.
+        if config.log_directory.is_empty() {
+            if let Some(data_dir) = dirs::data_dir() {
+                config.log_directory =
+                    data_dir.join("hypercom").join("logs").display().to_string();
+            }
+        }
 
         Ok(Self {
             config,
@@ -139,14 +232,90 @@ impl ConfigManager {
         })
     }
 
+    /// 默认配置路径：%APPDATA%/hypercom/config.json
+    fn default_config_path() -> anyhow::Result<PathBuf> {
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?
+            .join("hypercom");
+        fs::create_dir_all(&config_dir)?;
+        Ok(config_dir.join("config.json"))
+    }
+
+    /// 从 `from_version` 顺序迁移到 CURRENT_CONFIG_VERSION。
+    /// 每次版本升级对应一个 match 分支。当前为空（v0→v1 为基线）。
+    fn migrate(json: &mut serde_json::Value, from_version: u32) {
+        let obj = match json.as_object_mut() {
+            Some(o) => o,
+            None => return,
+        };
+        // 未来迁移示例：
+        // if from_version < 2 {
+        //     // v1→v2: 重命名旧字段、为新字段补默认值等
+        // }
+        obj.insert(
+            "configVersion".to_string(),
+            serde_json::json!(CURRENT_CONFIG_VERSION),
+        );
+        log::info!(
+            "Config migrated from v{} to v{}",
+            from_version,
+            CURRENT_CONFIG_VERSION
+        );
+    }
+
+    /// 当前配置文件路径
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
     /// 获取当前配置
     pub fn get_config(&self) -> &AppConfig {
         &self.config
     }
 
-    /// 更新配置并持久化
-    pub fn set_config(&mut self, new_config: AppConfig) -> anyhow::Result<()> {
+    /// 将配置值收敛到合法范围。每次 set_config 时调用。
+    fn validate_and_clamp(config: &mut AppConfig) {
+        config.terminal_font_size = config.terminal_font_size.clamp(8, 48);
+        config.ui_font_size = config.ui_font_size.clamp(8, 48);
+        config.memory_limit_mb = config.memory_limit_mb.clamp(64, 8192);
+        config.max_retries = config.max_retries.clamp(1, 10);
+        config.log_split_size_mb = config.log_split_size_mb.clamp(1, 10240);
+        config.backup_interval = config.backup_interval.clamp(1, 720);
+        // quick_send_slots 固定为 5 个槽位
+        config.quick_send_slots.resize(5, None);
+        // 校验枚举型字符串
+        if !["minimize", "exit"].contains(&config.close_behavior.as_str()) {
+            config.close_behavior = "minimize".to_string();
+        }
+        if !["light", "dark", "system"].contains(&config.theme.as_str()) {
+            config.theme = "dark".to_string();
+        }
+        if !["zh-CN", "en-US"].contains(&config.language.as_str()) {
+            config.language = "zh-CN".to_string();
+        }
+        if !["string", "hex", "binary"].contains(&config.log_format.as_str()) {
+            config.log_format = "string".to_string();
+        }
+        if !["perLine", "perRound"].contains(&config.timestamp_mode.as_str()) {
+            config.timestamp_mode = "perLine".to_string();
+        }
+        if !["absolute", "relative", "uptime"].contains(&config.timestamp_format.as_str()) {
+            config.timestamp_format = "absolute".to_string();
+        }
+    }
+
+    /// 更新配置并持久化（写入前校验 + 收敛，并刷新 schema 版本）
+    pub fn set_config(&mut self, mut new_config: AppConfig) -> anyhow::Result<()> {
+        Self::validate_and_clamp(&mut new_config);
+        new_config.config_version = CURRENT_CONFIG_VERSION;
         self.config = new_config;
+        self.save()
+    }
+
+    /// 仅更新 session_snapshot 字段并保存，不触碰其他配置值。
+    /// 避免会话快照做全量配置保存时覆盖 ConfigModal 的并发修改（竞态）。
+    pub fn update_session_snapshot(&mut self, snapshot: &str) -> anyhow::Result<()> {
+        self.config.session_snapshot = snapshot.to_string();
         self.save()
     }
 
@@ -160,6 +329,11 @@ impl ConfigManager {
     /// 保存到文件（原子写入）
     fn save(&self) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(&self.config)?;
+        // Backup existing config before overwriting (best-effort).
+        if self.config_path.exists() {
+            let bak_path = self.config_path.with_extension("json.bak");
+            let _ = fs::copy(&self.config_path, &bak_path);
+        }
         // 先写入同目录临时文件并 sync_all 落盘，再 rename 覆盖正式文件
         // （同卷 rename 是原子的）。避免掉电 / 崩溃在写入途中留下被截断的
         // config.json，导致下次启动反序列化失败、全部配置被重置为默认值。
@@ -189,6 +363,7 @@ mod tests {
     #[test]
     fn test_default_values() {
         let cfg = AppConfig::default();
+        assert_eq!(cfg.config_version, 1);
         assert_eq!(cfg.close_behavior, "minimize");
         assert_eq!(cfg.memory_limit_mb, 1024);
         assert_eq!(cfg.language, "zh-CN");
@@ -204,8 +379,9 @@ mod tests {
         );
         assert_eq!(cfg.send_prefix, ">>>>>>SEND>>>>>>>>");
         assert_eq!(cfg.timestamp_mode, "perLine");
-        assert!(!cfg.auto_save_log);
+        assert!(cfg.auto_save_log);
         assert_eq!(cfg.log_format, "string");
+        assert!(cfg.log_split_enabled);
         assert_eq!(cfg.log_split_size_mb, 100);
         assert!(!cfg.backup_enabled);
         assert!(!cfg.has_seen_tour);

@@ -21,6 +21,7 @@ const DEFAULT_FILENAME_FORMAT: &str = "[com]-[datetime]";
 
 /// 日志文件信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogFileInfo {
     pub path: String,
     pub port_id: String,
@@ -123,6 +124,8 @@ pub struct LogManager {
     filename_format: String,
     /// 默认 encoding（创建 writer 时使用，前端可在 start_logging 时覆盖）
     default_encoding: String,
+    /// 是否启用按大小自动分片（前端可运行时开关）
+    split_enabled: bool,
 }
 
 impl LogManager {
@@ -141,6 +144,7 @@ impl LogManager {
             split_size_mb: 100,
             filename_format: DEFAULT_FILENAME_FORMAT.to_string(),
             default_encoding: "UTF-8".to_string(),
+            split_enabled: true,
         }
     }
 
@@ -177,6 +181,11 @@ impl LogManager {
     /// 已存在的 writer 不受影响 — encoding 在 create_writer 时锁定。
     pub fn set_default_encoding(&mut self, encoding: &str) {
         self.default_encoding = encoding.to_string();
+    }
+
+    /// 设置是否启用按大小自动分片。前端在 set_config 时同步调用。
+    pub fn set_split_enabled(&mut self, enabled: bool) {
+        self.split_enabled = enabled;
     }
 
     /// 解析文件名模板: [com] → port_id, [datetime] → 20260101_120000, [date] → 2026-01-01, [time] → 12:00:00
@@ -243,7 +252,7 @@ impl LogManager {
         if let Some(writer) = self.writers.get_mut(port_id) {
             writer.write_line(timestamp, direction, data)?;
 
-            if writer.should_split(self.split_size_mb) {
+            if self.split_enabled && writer.should_split(self.split_size_mb) {
                 let format = writer.format.clone();
                 let encoding = writer.encoding.clone();
                 let old_path = writer.file_path.clone();
@@ -276,6 +285,12 @@ impl LogManager {
     pub fn close_writer(&mut self, port_id: &str) -> anyhow::Result<()> {
         if let Some(mut writer) = self.writers.remove(port_id) {
             writer.writer.flush()?;
+            // flush 后再 sync_all，确保 OS 把缓冲落盘（defects #56 同类）
+            if let Ok(file) = writer.writer.get_ref().try_clone() {
+                if let Err(e) = file.sync_all() {
+                    log::warn!("Log close sync_all failed for {}: {}", port_id, e);
+                }
+            }
             log::info!("Log writer closed for {}", port_id);
         }
         Ok(())
@@ -375,6 +390,7 @@ mod tests {
             split_size_mb: 100,
             filename_format: "[com]-[datetime]".to_string(),
             default_encoding: "UTF-8".to_string(),
+            split_enabled: true,
         }
     }
 

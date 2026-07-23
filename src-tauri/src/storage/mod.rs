@@ -15,14 +15,6 @@ use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 // ==================== 存储类型 ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortGroupRow {
-    pub id: String,
-    pub name: String,
-    pub order_idx: i32,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendCommandRow {
     pub id: String,
     pub set_id: String,
@@ -117,7 +109,6 @@ pub struct StorageManager {
 
 impl StorageManager {
     pub fn new() -> anyhow::Result<Self> {
-        keep_port_group_api_reachable();
         Ok(Self { db_pool: None })
     }
 
@@ -134,13 +125,6 @@ impl StorageManager {
     }
 }
 
-fn keep_port_group_api_reachable() {
-    let _ = save_port_groups_to_db;
-    let _ = load_port_groups_from_db;
-    let _ = save_port_group_members_to_db;
-    let _ = load_port_group_members_from_db;
-}
-
 /// 初始化数据库连接池（不持有锁）
 pub async fn create_pool() -> anyhow::Result<Pool<Sqlite>> {
     let db_dir = dirs::data_dir()
@@ -154,6 +138,9 @@ pub async fn create_pool() -> anyhow::Result<Pool<Sqlite>> {
         .connect(&format!("sqlite:{}", db_path.display()))
         .await?;
 
+    sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
+    sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
+
     Ok(pool)
 }
 
@@ -161,17 +148,6 @@ pub async fn create_pool() -> anyhow::Result<Pool<Sqlite>> {
 pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS port_groups (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            order_idx INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS port_group_members (
-            group_id TEXT NOT NULL,
-            port_id TEXT NOT NULL,
-            PRIMARY KEY (group_id, port_id)
-        );
         CREATE TABLE IF NOT EXISTS send_command_sets (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -252,81 +228,21 @@ pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn save_port_groups_to_db(
-    pool: &Pool<Sqlite>,
-    groups: &[PortGroupRow],
-) -> anyhow::Result<()> {
-    for group in groups {
-        sqlx::query(
-            "INSERT OR REPLACE INTO port_groups (id, name, order_idx, created_at) VALUES (?, ?, ?, ?)"
-        )
-        .bind(&group.id).bind(&group.name).bind(group.order_idx).bind(&group.created_at)
-        .execute(pool).await?;
-    }
-    Ok(())
-}
-
-pub async fn load_port_groups_from_db(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<PortGroupRow>> {
-    let rows = sqlx::query_as::<_, (String, String, i32, String)>(
-        "SELECT id, name, order_idx, created_at FROM port_groups ORDER BY order_idx",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, name, order_idx, created_at)| PortGroupRow {
-            id,
-            name,
-            order_idx,
-            created_at,
-        })
-        .collect())
-}
-
-pub async fn save_port_group_members_to_db(
-    pool: &Pool<Sqlite>,
-    group_id: &str,
-    port_ids: &[String],
-) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM port_group_members WHERE group_id = ?")
-        .bind(group_id)
-        .execute(pool)
-        .await?;
-    for port_id in port_ids {
-        sqlx::query("INSERT OR REPLACE INTO port_group_members (group_id, port_id) VALUES (?, ?)")
-            .bind(group_id)
-            .bind(port_id)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
-}
-
-pub async fn load_port_group_members_from_db(
-    pool: &Pool<Sqlite>,
-    group_id: &str,
-) -> anyhow::Result<Vec<String>> {
-    let rows =
-        sqlx::query_as::<_, (String,)>("SELECT port_id FROM port_group_members WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_all(pool)
-            .await?;
-    Ok(rows.into_iter().map(|(port_id,)| port_id).collect())
-}
-
 pub async fn save_command_set_to_db(
     pool: &Pool<Sqlite>,
     set: &SendCommandSet,
 ) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
     sqlx::query(
         "INSERT OR REPLACE INTO send_command_sets (id, name, is_loop, loop_delay_ms) VALUES (?, ?, ?, ?)"
     )
     .bind(&set.id).bind(&set.name).bind(set.is_loop as i32).bind(set.loop_delay_ms)
-    .execute(pool).await?;
+    .execute(&mut *tx).await?;
 
     sqlx::query("DELETE FROM send_commands WHERE set_id = ?")
         .bind(&set.id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     for cmd in &set.commands {
         sqlx::query(
@@ -334,8 +250,10 @@ pub async fn save_command_set_to_db(
         )
         .bind(&cmd.id).bind(&set.id).bind(&cmd.name).bind(cmd.order_idx)
         .bind(cmd.delay_ms).bind(&cmd.cmd_type).bind(&cmd.content).bind(&cmd.append_line_ending)
-        .execute(pool).await?;
+        .execute(&mut *tx).await?;
     }
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -393,18 +311,20 @@ pub async fn save_highlight_set_to_db(
     pool: &Pool<Sqlite>,
     set: &HighlightRuleSet,
 ) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
     sqlx::query(
         "INSERT OR REPLACE INTO highlight_rule_sets (id, name, is_enabled) VALUES (?, ?, ?)",
     )
     .bind(&set.id)
     .bind(&set.name)
     .bind(set.is_enabled as i32)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query("DELETE FROM highlight_rules WHERE set_id = ?")
         .bind(&set.id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     for rule in &set.rules {
         sqlx::query(
@@ -412,8 +332,10 @@ pub async fn save_highlight_set_to_db(
         )
         .bind(&rule.id).bind(&set.id).bind(&rule.name).bind(&rule.pattern)
         .bind(rule.is_regex as i32).bind(&rule.color).bind(rule.bold as i32).bind(rule.italic as i32)
-        .execute(pool).await?;
+        .execute(&mut *tx).await?;
     }
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -582,7 +504,12 @@ pub async fn save_port_preset_to_db(
     preset: &PortPresetRow,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT OR REPLACE INTO port_presets (id, name, baud_rate, data_bits, parity, stop_bits, handshake, dtr, rts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO port_presets (id, name, baud_rate, data_bits, parity, stop_bits, handshake, dtr, rts) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET 
+           name=excluded.name, baud_rate=excluded.baud_rate, data_bits=excluded.data_bits,
+           parity=excluded.parity, stop_bits=excluded.stop_bits, handshake=excluded.handshake,
+           dtr=excluded.dtr, rts=excluded.rts"
     )
     .bind(&preset.id)
     .bind(&preset.name)
@@ -713,8 +640,6 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert!(tables.contains(&"port_groups".to_string()));
-        assert!(tables.contains(&"port_group_members".to_string()));
         assert!(tables.contains(&"send_command_sets".to_string()));
         assert!(tables.contains(&"send_commands".to_string()));
         assert!(tables.contains(&"highlight_rule_sets".to_string()));
@@ -722,7 +647,7 @@ mod tests {
         assert!(tables.contains(&"protocol_templates".to_string()));
         assert!(tables.contains(&"send_history".to_string()));
         assert!(tables.contains(&"port_presets".to_string()));
-        assert_eq!(tables.len(), 9);
+        assert_eq!(tables.len(), 7);
     }
 
     #[tokio::test]

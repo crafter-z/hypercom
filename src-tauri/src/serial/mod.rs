@@ -692,21 +692,6 @@ impl SerialManager {
         Ok(())
     }
 
-    /// 修改波特率（保留兼容）
-    pub fn set_baud_rate(&self, port_id: &str, baud_rate: u32) -> anyhow::Result<()> {
-        let handle = self
-            .ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        let mut port = handle
-            .port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        port.set_baud_rate(baud_rate)?;
-        log::info!("Baud rate set to {} for {}", baud_rate, port_id);
-        Ok(())
-    }
-
     /// 设置流控（DTR/RTS）
     pub fn set_flow_control(&self, port_id: &str, dtr: bool, rts: bool) -> anyhow::Result<()> {
         let handle = self
