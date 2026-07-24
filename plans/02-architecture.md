@@ -33,40 +33,53 @@ src/
 │   ├── status-bar.css
 │   ├── config-modal.css
 │   └── context-menu.css
-├── types/index.ts              # 全局 TS 类型 (219 行)
-├── services/tauri.ts           # Tauri invoke 包装 + event 监听 (268 行，6 个服务模块)
-├── hooks/useTauri.ts           # React Hooks 桥接层 (378 行，8 个 Hooks)
+├── types/index.ts              # 全局 TS 类型 (288 行, 含 SendHistoryEntry)
+├── services/tauri.ts           # Tauri invoke 包装 + event 监听 (410 行，6 个服务模块)
+├── hooks/
+│   ├── useTauri.ts             # React Hooks 桥接层 (886 行，8 个 Hooks + lostPortIds/filterLostTabIds)
+│   └── useHotkeys.ts           # 快捷键绑定 (61 行)
 ├── stores/                     # 4 个 Zustand Store (从单一 596 行 god store 拆分)
-│   ├── useAppStore.ts          # 主 Store: ports/groups/tabs/panes/config/ui/system/traffic/simulation (437 行)
-│   ├── useOperationStore.ts    # 操作区: 16 个 op 字段 + setOpState (55 行)
-│   ├── useTerminalStore.ts     # 终端: terminals + ensureTerminal/appendTerminalLine/clearTerminal/setTerminalConfig (49 行)
+│   ├── useAppStore.ts          # 主 Store: ports/groups/tabs/panes/config/ui/system/traffic/simulation (672 行)
+│   ├── useOperationStore.ts    # 操作区: 串口参数 + 发送字段 (45 行) — 无显示状态/编码/循环间隔
+│   ├── useTerminalStore.ts     # 终端: terminals + ensureTerminal/appendTerminalLine/clearTerminal/setTerminalConfig/setTerminalEncoding (73 行)
 │   ├── useRuleStore.ts         # 规则集: highlightRuleSets + sendCommandSets CRUD (47 行)
-│   └── useAppStore.test.ts     # vitest 单测 (470 行，49 cases)
+│   └── useAppStore.test.ts     # vitest 单测 (606 行，56 cases)
 ├── utils/
 │   ├── highlightEngine.ts      # 语法高亮引擎 (104 行)
-│   ├── highlightEngine.test.ts # 高亮引擎单测 (197 行)
-│   └── hexUtils.ts             # hexToString / stringToHex (21 行)
+│   ├── highlightEngine.test.ts # 高亮引擎单测 (197 行, 22 cases)
+│   ├── hexUtils.ts             # hexToString / stringToHex (21 行)
+│   ├── sendUtils.ts            # HEX<->文本双向转换 + sanitize (108 行)
+│   ├── sendUtils.test.ts       # 发送工具单测 (120 行, 21 cases)
+│   ├── timeFormat.ts           # 时间戳格式化
+│   └── timeFormat.test.ts      # 时间格式化单测 (88 行, 13 cases)
 └── components/
     ├── shared/ContextMenu.tsx  # 通用右键菜单 (94 行)
+    ├── shared/HotkeyHelpDialog.tsx # 快捷键帮助弹窗 (66 行)
     ├── TitleBar/TitleBar.tsx   # 标题栏 (60 行)
     ├── Sidebar/
-    │   ├── Sidebar.tsx         # 串口列表 + 分组 + 拖拽 (482 行)
+    │   ├── Sidebar.tsx         # 串口列表 + 分组 + 拖拽 + open-all/close-all 按钮 (527 行)
     │   ├── AliasDialog.tsx     # 备注名弹窗 (37 行)
+    │   ├── GuideCard.tsx       # 首启引导卡
     │   └── hooks/usePortDragEnd.ts  # 端口拖拽结束处理 (80 行)
     ├── MainDisplay/
-    │   ├── MainDisplay.tsx     # 多分屏容器 (132 行)
-    │   ├── Pane.tsx            # 单个分屏 (160 行)
+    │   ├── MainDisplay.tsx     # 多分屏容器 (156 行)
+    │   ├── Pane.tsx            # 单个分屏 (175 行)
     │   ├── ResizeHandle.tsx    # 可拖拽分割线 (34 行)
-    │   ├── TabBar.tsx          # 标签页栏 + @dnd-kit 拖拽 (190 行)
-    │   ├── TerminalView.tsx    # 终端 + 虚拟滚动 + 高亮 + 导出 (227 行)
+    │   ├── TabBar.tsx          # 标签页栏 + @dnd-kit 拖拽 + split 按钮 (211 行)
+    │   ├── TerminalFilterBar.tsx # per-tab showTimestamp/scrollLocked/displayFormat/encoding 控件 (162 行)
+    │   ├── TerminalView.tsx    # 终端 + 虚拟滚动 + 高亮 + 导出 + 过滤 (316 行)
+    │   ├── TerminalRow.tsx     # 单行渲染组件
+    │   ├── TerminalSearchBar.tsx # 终端内 Ctrl+F 搜索条
     │   └── hooks/useTabDragEnd.ts  # 标签拖拽结束处理 (73 行)
     ├── OperationPanel/
-    │   ├── OperationPanel.tsx  # 三栏布局容器 (138 行)
-    │   ├── SendSection.tsx     # 发送区 (136 行)
-    │   ├── RulesSection.tsx    # 规则/循环发送区 (108 行)
-    │   ├── ParamsSection.tsx   # 串口参数区 (137 行)
-    │   └── hooks/useCyclicSend.ts  # 循环发送逻辑 (119 行)
-    ├── StatusBar/StatusBar.tsx # 系统状态 + 流量 + 时钟 (69 行)
+    │   ├── OperationPanel.tsx  # 顶部 strip (连接/清屏 | 回放速率/启停 | 日志 | 字号) + 三栏布局 (212 行)
+    │   ├── SendSection.tsx     # 发送区: HEX<->文本双向 + 文件发送 + 输入框 (283 行)
+    │   ├── RulesSection.tsx    # 循环发送 + 命令集区 (110 行) — 无 loopInterval 字段
+    │   ├── ParamsSection.tsx   # 串口参数: apply-only 预设下拉 (119 行)
+    │   └── hooks/useCyclicSend.ts  # 循环发送逻辑 (138 行)
+    ├── StatusBar/
+    │   ├── StatusBar.tsx       # 系统状态 + 流量 + 时钟 (69 行)
+    │   └── DisconnectBanner.tsx # 断线横幅 (filterLostTabIds 驱动) (71 行)
     └── ConfigModal/
         ├── ConfigModal.tsx     # 6 页配置弹窗容器 (109 行)
         ├── RuleSetAccordion.tsx # 通用 CRUD 手风琴 (78 行)
@@ -74,7 +87,7 @@ src/
         │   ├── HighlightRuleEditor.tsx (35 行)
         │   └── SendCmdEditor.tsx (30 行)
         └── pages/              # 6 个设置页
-            ├── GeneralSettings.tsx (92 行)
+            ├── GeneralSettings.tsx (248 行) — 含 Enter 行为开关 + 预设管理
             ├── LogSettings.tsx (55 行)
             ├── BackupSettings.tsx (33 行)
             ├── DisplaySettings.tsx (45 行)
@@ -138,11 +151,12 @@ App root (flex column, 100vh)
 | TitleBar | `TitleBar/TitleBar.tsx` | 图标、配置按钮、窗口控制、拖拽区域 |
 | Sidebar | `Sidebar/Sidebar.tsx` + `AliasDialog` + `usePortDragEnd` | 工具栏、搜索、串口列表、分组、备注名弹窗、@dnd-kit 拖拽 |
 | MainDisplay | `MainDisplay/MainDisplay.tsx` + `Pane` + `ResizeHandle` | 分屏容器、Pane 独立渲染、可拖拽分割线 |
-| TabBar | `MainDisplay/TabBar.tsx` + `useTabDragEnd` | 标签页渲染、激活样式、右键菜单、@dnd-kit 水平拖拽 |
-| TerminalView | `MainDisplay/TerminalView.tsx` | 终端虚拟滚动、时间戳、TX/RX 着色、右键菜单、语法高亮、文件导出 |
-| OperationPanel | `OperationPanel/` 5 文件 | 三栏布局：SendSection + RulesSection + ParamsSection；useCyclicSend 处理循环 |
+| TabBar | `MainDisplay/TabBar.tsx` + `useTabDragEnd` | 标签页渲染、激活样式、右键菜单、@dnd-kit 水平拖拽、右端分屏按钮 (`onSplitVertical` / `onSplitHorizontal`) |
+| TerminalView | `MainDisplay/TerminalView.tsx` + `TerminalFilterBar.tsx` + `TerminalRow.tsx` + `TerminalSearchBar.tsx` | 终端虚拟滚动、虚拟滚动；per-tab 显示控件（时间戳/滚动锁/HEX·字符串/编码）走 `TerminalFilterBar` 直写 `useTerminalStore`；编码切换通过 `setTerminalEncoding` 重解码存量行；Ctrl+F 搜索条穿透虚拟视口 |
+| DisconnectBanner | `StatusBar/DisconnectBanner.tsx` | 仅展示本次会话真实断线（`filterLostTabIds` 驱动，`isPortLost` 仅 connected→disconnected 的端口入 Set） |
+| OperationPanel | `OperationPanel/` 4 文件 + `useCyclicSend` hook | 顶部 strip 集中了连接/清屏、回放速率/启停、日志另存/打开/打开目录、字号；下方三栏 SendSection + RulesSection + ParamsSection；useCyclicSend 仅按 per-command delay + 命令集 loopDelay + 错误重试 500ms 驱动（无 loopInterval 字段） |
 | StatusBar | `StatusBar/StatusBar.tsx` | 系统状态、进程内存、CPU、TX/RX 流量、时钟 |
-| ConfigModal | `ConfigModal/` 10 文件 | 6 页设置 + RuleSetAccordion 通用 CRUD + 2 个编辑器 |
+| ConfigModal | `ConfigModal/` 10 文件 | 6 页设置 + RuleSetAccordion 通用 CRUD + 2 个编辑器；`GeneralSettings.tsx` 承载 Enter 行为开关 (`!config.sendOnEnter`) 与预设列表/命名/保存当前参数 |
 
 ### 状态管理 (4 个 Store)
 
@@ -150,14 +164,14 @@ App root (flex column, 100vh)
 
 | Store | 文件 | 职责 | Actions |
 |-------|------|------|---------|
-| `useAppStore` | 437 行 | ports, groups, tabs, panes, config, ui, system, traffic, simulation + removeEmptyPanes | setPorts, updatePort, addGroup, updateGroup, removeGroup, movePortToGroup, reorderPorts, openTab, closeTab, pinTab, setActiveTab, moveTabToPane, splitPane, removePane, setFocusedPane, reorderTabs, setConfig, resetConfig, setUIState, toggleConfigModal, setConfigActiveTab, setSystemStatus, setTrafficStats, setSimulationMode 等 |
-| `useOperationStore` | 55 行 | 16 个 op 字段 (opSendInput, opIsHex, opLineEnding, opIsLoopSending, opLoopInterval, opActiveSendCommandSetId, opCurrentCmdIdx 等) | setOpState |
-| `useTerminalStore` | 49 行 | terminals Map | ensureTerminal, appendTerminalLine, clearTerminal, setTerminalConfig |
+| `useAppStore` | 672 行 | ports, groups, tabs, paneTree, config, ui, system, traffic, simulation + removeEmptyPanes | setPorts, updatePort, addGroup, updateGroup, removeGroup, movePortToGroup, reorderPorts, openTab, closeTab, pinTab, setActiveTab, moveTabToPane, splitPane, removePane, setFocusedPane, reorderTabs, setConfig, resetConfig, setUIState, toggleConfigModal, setConfigActiveTab, setSystemStatus, setTrafficStats, setSimulationMode 等 |
+| `useOperationStore` | 45 行 | 仅串口参数 + 发送字段 (`baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `isLoopSending`, `loopRepeatCount`)，**无** `scrollLocked`/`showTimestamp`/`displayFormat`/`encoding`/`loopInterval` | setOpState |
+| `useTerminalStore` | 73 行 | terminals Map (per-tab `scrollLocked`/`showTimestamp`/`displayFormat`/`encoding`) | ensureTerminal, appendTerminalLine, clearTerminal, setTerminalConfig, **setTerminalEncoding** (重解码存量行) |
 | `useRuleStore` | 47 行 | highlightRuleSets, activeHighlightSetId, sendCommandSets, activeSendCommandSetId | set/add/update/remove + setActive (各 2 套) |
 
 ### Tauri 服务层
 
-`services/tauri.ts` (268 行) — 6 个服务模块，纯函数无 React 依赖：
+`services/tauri.ts` (410 行) — 6 个服务模块，纯函数无 React 依赖：
 
 | 模块 | 方法数 | 说明 |
 |------|--------|------|
@@ -170,7 +184,7 @@ App root (flex column, 100vh)
 
 ### React Hooks 层
 
-`hooks/useTauri.ts` (378 行) — 8 个 Hooks：
+`hooks/useTauri.ts` (886 行) — 8 个 Hooks + 模块级 `lostPortIds: Set<string>` + `isPortLost` helper：
 
 | Hook | 频率 | 功能 |
 |------|------|------|
@@ -187,7 +201,7 @@ App root (flex column, 100vh)
 
 | Hook | 文件 | 功能 |
 |------|------|------|
-| `useCyclicSend` | `OperationPanel/hooks/useCyclicSend.ts` | 循环发送序列执行 + 延时控制 |
+| `useCyclicSend` | `OperationPanel/hooks/useCyclicSend.ts` | 循环发送序列执行 + per-command delay + 命令集 loopDelay + 错误重试 500ms（无 loopInterval 字段） |
 | `usePortDragEnd` | `Sidebar/hooks/usePortDragEnd.ts` | 端口拖拽结束处理 |
 | `useTabDragEnd` | `MainDisplay/hooks/useTabDragEnd.ts` | 标签拖拽结束处理 |
 

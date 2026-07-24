@@ -83,9 +83,9 @@
 | 终端搜索 / 选择复制 / 数据过滤 | ✅ |
 | Toast 通知 + 断线警示 + 自动重连 | ✅ |
 | 引脚状态监视 (DTR/RTS/CTS/DSR/RLSD/RI) | ✅ |
-| 发送历史持久化 + 快捷发送槽 | ✅ |
+| 发送历史内存化（↑/↓ 回忆, per-port, 上限 50, 会话内有效）+ 快捷发送槽 | ✅ |
 | 首启引导 + 快捷键帮助 | ✅ |
-| 单元测试 (vitest 158 cases / cargo 31 cases) | ✅ |
+| 单元测试 (vitest 179 cases / 11 files, cargo 33 cases) | ✅ |
 
 ## 运行
 

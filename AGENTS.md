@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 8 lifecycle-disciplined hooks own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Decorations disabled — custom TitleBar drives window controls.
+HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 9 lifecycle-disciplined hooks own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls.
 
 ## STRUCTURE
 
@@ -12,13 +12,13 @@ HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
-│   ├── i18n.ts                   # i18next + react-i18next, 218 keys × zh-CN/en-US
+│   ├── i18n.ts                   # i18next + react-i18next, 250 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
 │   ├── hooks/useTauri.ts         # 9 lifecycle-critical hooks (含 usePinStatesSubscriber)
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
-│   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix)
-│   │   ├── useTerminalStore.ts   # terminal buffer + appendTerminalLine
+│   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix; NO display state fields)
+│   │   ├── useTerminalStore.ts   # terminal buffer + appendTerminalLine + setTerminalEncoding
 │   │   └── useRuleStore.ts       # highlight + send-command rule sets + CRUD
 │   ├── utils/                    # highlightEngine / protocolParser / hexUtils + their tests
 │   ├── types/index.ts            # shared TS types
@@ -41,14 +41,15 @@ hypercom/
 | Add frontend state field | `src/stores/use{App,Operation,Terminal,Rule}Store.ts` | pick correct store only; god store is deprecated |
 | Add Tauri command | `src-tauri/src/commands/<domain>.rs` + register in `lib.rs` | return `Result<T, CommandError>`, NOT `String` |
 | Cross `.await` lock | extract + clone + drop the `MutexGuard` first | see pattern in `commands/log.rs` |
-| Add serial hook | `src/hooks/useTauri.ts` | follow 8-hook lifecycle; do not revive `useSerialData`-style |
+| Add serial hook | `src/hooks/useTauri.ts` | follow 9-hook lifecycle; do not revive `useSerialData`-style |
 | Split pane recursively | `useAppStore.splitPane` action via tree helpers | NO flat `state.panes` anywhere |
 | Pane tree traversal | module-top exports in `useAppStore.ts` (`findLeafById` … `countLeaves`) | do not hand-roll tree walks |
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
 | ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; SQLite via `storageService` |
-| Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState` |
+| Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState`; timing via per-command `delay` + set `loopDelay` only (no global interval) |
 | Win32 power | `src-tauri/src/system.rs` `win32_power` module | `prevent_sleep` / `prevent_screen_off` |
-| Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` | serial_data carries UTF-8 bytes |
+| Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` + `setTerminalEncoding` | serial_data carries UTF-8 bytes; live re-decode on switch |
+| DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `useTauri.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
 | Config versioning / migration | `config/mod.rs` `migrate()` + `config_version` field | forward-compatible, additive |
@@ -63,12 +64,12 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 
 | Symbol | File | Type | Role |
 |--------|------|------|------|
-| `useAppStore` | `src/stores/useAppStore.ts:248` | Zustand store | tabs / ports / `paneTree` / config / groups |
-| `useOperationStore` | `src/stores/useOperationStore.ts:35` | Zustand store | serial params + send (NO `op` prefix) |
-| `useTerminalStore` | `src/stores/useTerminalStore.ts:20` | Zustand store | line buffer + `appendTerminalLine` |
+| `useAppStore` | `src/stores/useAppStore.ts:266` | Zustand store | tabs / ports / `paneTree` / config / groups |
+| `useOperationStore` | `src/stores/useOperationStore.ts:29` | Zustand store | serial params + send (NO `op` prefix; NO display state) |
+| `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` + `setTerminalEncoding` (re-decode on switch) |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
-| `useSerialReceive` (212) / `useSerialSend` (327) / `useSerialConnection` (142) / `useAppInit` (438) / `useSerialPorts` (115) / `useSystemStatus` (410) / `useConfigPersistence` (369) / `useSimulation` (474) | `src/hooks/useTauri.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
+| `useSerialPorts` (248) / `useSerialConnection` (279) / `usePinStatesSubscriber` (410) / `useSerialReceive` (447) / `useSerialSend` (646) / `useConfigPersistence` (770) / `useSystemStatus` (811) / `useAppInit` (856) / `useSimulation` (935) | `src/hooks/useTauri.ts` (959 lines) | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
 | `tauri` service modules | `src/services/tauri.ts` | service | wrapped `invoke` calls (6 modules) |
 
 Backend:
@@ -136,11 +137,11 @@ const ports = useAppStore(s => s.ports);
 const openTab = useAppStore(s => s.openTab);
 ```
 
-### useOperationStore — baudRate, dataBits, parity, stopBits, handshake, dtr, rts, sendInput, displayFormat, encoding, ...
+### useOperationStore — baudRate, dataBits, parity, stopBits, handshake, dtr, rts, sendInput, sendIsHex, sendAppendLineEnding, ...
 
 Operation fields have **NO `op` prefix**. They were renamed from `opBaudRate` to `baudRate`, `opDataBits` to `dataBits`, etc.
 
-**Note**: `sendOnEnter` and `quickSendSlots` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)`.
+**Note**: `sendOnEnter` and `quickSendSlots` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)`. Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`.
 
 ```tsx
 const baudRate = useOperationStore(s => s.baudRate);
@@ -148,7 +149,7 @@ const sendInput = useOperationStore(s => s.sendInput);
 const setOpState = useOperationStore(s => s.setOpState);
 ```
 
-### useTerminalStore — terminals, appendTerminalLine, clearTerminal, setTerminalConfig, ensureTerminal
+### useTerminalStore — terminals, appendTerminalLine, clearTerminal, setTerminalConfig, setTerminalEncoding, ensureTerminal
 
 Hooks that need to write terminal lines without subscribing should use `getState()`:
 
@@ -327,8 +328,10 @@ scope: ui | backend | store | hooks | plans
 - `src/utils/hexUtils.ts` provides `hexToString` and `stringToHex` for HEX send/parse.
 - ConfigModal split into 10 files: `ConfigModal.tsx`, `RuleSetAccordion.tsx`, `pages/` (6 settings pages), `editors/` (HighlightRuleEditor, SendCmdEditor).
 - OperationPanel split into section components: `OperationPanel.tsx`, `SendSection.tsx`, `ParamsSection.tsx`, `RulesSection.tsx`.
-- MainDisplay split into: `MainDisplay.tsx`, `Pane.tsx`, `TabBar.tsx`, `TerminalView.tsx`, `ResizeHandle.tsx`.
+- MainDisplay split into: `MainDisplay.tsx`, `Pane.tsx`, `TabBar.tsx`, `TerminalView.tsx`, `TerminalFilterBar.tsx`, `ResizeHandle.tsx`.
 - Sidebar split into: `Sidebar.tsx`, `AliasDialog.tsx`.
+- Per-tab display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) lives in `useTerminalStore`, NOT in `useOperationStore`. Display controls (TerminalFilterBar, encoding select) must write via `useTerminalStore.getState().setTerminalConfig(portId, ...)` or `setTerminalEncoding(portId, encoding)`. Never reintroduce global display fields in `useOperationStore`.
+- `src/utils/sendUtils.ts` provides `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` / `computeByteCount` / `parseHexBytes` / `getLineEndingBytes` for HEX send/parse (pure, unit-tested).
 
 ## Pane tree (2026-07 refactor)
 
@@ -350,9 +353,9 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## i18n (2026-07 基础设施)
 
-- `src/i18n.ts` 已就位 — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），218 keys × zh-CN/en-US
+- `src/i18n.ts` 已就位 — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），250 keys × zh-CN/en-US
 
-  > 2026-07-21 起新增 `general.configPath` key（通用设置页显示配置文件路径），key 数随新增功能递增。
+  > 2026-07-21 起新增 `general.configPath` key（通用设置页显示配置文件路径），UI/UX overhaul 批次后达 250 keys。
 - `main.tsx` 第 5 行 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`

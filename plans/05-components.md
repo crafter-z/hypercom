@@ -45,29 +45,29 @@ App
   │   │       ├─ AliasDialog (portId, currentAlias, onSave, onCancel)
   │   │       └─ usePortDragEnd (拖拽结束处理 Hook)
   │   ├─ SidebarResizeHandle (拖拽调整宽度)
-  │   ├─ MainDisplay
-  │   │   ├─ 全局工具栏 (分屏按钮)
-  │   │   └─ Pane[] (每个分屏)
-  │   │       ├─ TabBar (tabs, activeTabId, onTabClick, ...)
-  │   │       │   └─ DndContext → SortableContext → SortableTab[]
-  │   │       │   └─ useTabDragEnd (拖拽结束处理 Hook)
-  │   │       ├─ ResizeHandle (分割线拖拽)
-  │   │       ├─ terminal-toolbar (端口信息 + 编码选择)
-  │   │       └─ TerminalView (portId, terminal)
-  │   ├─ OperationPanel
-  │   │   └─ props: 无 (直接操作 Store + Hooks)
-  │   │   └─ 子组件:
-  │   │       ├─ SendSection (发送区: 输入 + HEX + 行结束符)
-  │   │       ├─ RulesSection (循环发送: 命令集选择 + 启停)
-  │   │       │   └─ useCyclicSend (循环发送逻辑 Hook)
-  │   │       └─ ParamsSection (串口参数: 波特率/数据位/校验/停止位/流控/DTR/RTS)
+   │   ├─ MainDisplay
+   │   │   └─ Pane[] (每个分屏)
+   │   │       ├─ TabBar (tabs, activeTabId, onTabClick, onSplitVertical, onSplitHorizontal, ...)
+   │   │       │   └─ DndContext → SortableContext → SortableTab[] + 右端分屏按钮
+   │   │       │   └─ useTabDragEnd (拖拽结束处理 Hook)
+   │   │       ├─ ResizeHandle (分割线拖拽)
+   │   │       ├─ TerminalFilterBar (per-tab showTimestamp/scrollLocked/displayFormat/encoding)
+   │   │       └─ TerminalView (portId, terminal)
+   │   ├─ OperationPanel
+   │   │   └─ props: 无 (直接操作 Store + Hooks)
+   │   │   └─ 子组件:
+   │   │       ├─ Top Strip (连接/清屏 ‖ 回放速率/启停 ‖ 日志另存/打开/目录 ‖ 字号)
+   │   │       ├─ SendSection (发送区: HEX<->文本双向 + 文件发送 + Enter 发送)
+   │   │       ├─ RulesSection (循环发送: 命令集选择 + 启停; 无 loopInterval 字段)
+   │   │       │   └─ useCyclicSend (per-command delay + 命令集 loopDelay + 错误 500ms 重试)
+   │   │       └─ ParamsSection (串口参数: 波特率/数据位/校验/停止位/流控/DTR/RTS; apply-only 预设)
   │   ├─ StatusBar
   │   │   └─ props: 无 (直接操作 Store + Hooks)
    │   └─ ConfigModal (overlay)
    │       ├─ 左侧导航 (general/log/backup/display/highlight/commands/protocol)
-   │       └─ 右侧内容:
-   │           ├─ GeneralSettings
-   │           ├─ LogSettings
+    │       └─ 右侧内容:
+    │           ├─ GeneralSettings (+ Enter 行为开关 + 预设管理)
+    │           ├─ LogSettings
    │           ├─ BackupSettings
    │           ├─ DisplaySettings
    │           ├─ HighlightSettings
@@ -105,8 +105,11 @@ BranchPane       { id, type: 'branch', direction, children[], size } // 可嵌�
 PaneNode         LeafPane | BranchPane                            // 分屏树节点联合
 
 // 终端
-TerminalLine     { id, timestamp, direction, content, displayContent?, rawData?, isHex }
-TerminalState    { lines[], maxLines, scrollLocked, showTimestamp, displayFormat, encoding }
+TerminalLine     { id, timestamp, direction, content, displayContent?, rawData?, isHex, parsedFields? }
+TerminalState    { lines[], maxLines, scrollLocked, showTimestamp, displayFormat, encoding, connectedAt? }
+
+// 发送历史 (内存, per-port, 上限 50, 会话内有效)
+SendHistoryEntry { content, isHex, appendLineEnding, timestamp }
 
 // 高亮
 HighlightRule    { id, name, pattern, isRegex, color?, bold?, italic? }

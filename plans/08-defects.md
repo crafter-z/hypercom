@@ -6,6 +6,19 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-07-25 UI/UX 大修)
+
+> UI/UX 大修轮。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告, `npm run test:run` 179/179 (11 files), `cargo test --lib` 33/33。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `DisconnectBanner.tsx` / `useTauri.ts` | 会话恢复的标签启动即触发"端口已断开"横幅误报 | `useTauri.ts` 模块级 `lostPortIds: Set<string>` 仅记录本次会话 connected→disconnected 的端口 + `isPortLost`；横幅改由新纯函数 `filterLostTabIds(tabs, isLost)` 驱动 (单测 5 cases) |
+| HIGH | `OperationPanel.tsx` / `useOperationStore.ts` | `scrollLocked` / `showTimestamp` / `displayFormat` / `encoding` / `loopInterval` 5 字段全局态每次切标签覆盖 per-tab 终端状态（编码选择"不生效"根因） | 4 字段移出 opStore，显示控制下沉 `TerminalFilterBar` 直写 `useTerminalStore` |
+| MEDIUM | `useTerminalStore.ts` | 切换编码只影响新数据，存量行不重解码，用户感知无效 | `setTerminalEncoding` 更新 encoding + 从 `rawData` 重解码全部存量行 |
+| MEDIUM | `useHotkeys.ts` | 全局 Ctrl+Enter 发送与"Ctrl+Enter 永远换行"的交互决策冲突 | 移除全局热键及帮助弹窗对应行 |
+| LOW | `RulesSection.tsx` / `useCyclicSend.ts` | `loopInterval` 与命令集 per-command delay 双数据源语义重叠 | 移除间隔字段，时机由命令集延时唯一决定（同时消除窄窗口下间隔控件被裁切） |
+| LOW | `SendSection.tsx` | HEX/字符串切换无内容转换、HEX 模式不限制输入 | `sendUtils.ts` 新增 `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` 提供双向转换 + 输入过滤 |
+
 ## 已修复 (2026-07 缺陷审计 + 架构迭代)
 
 > Bug 修复（30+ 项）+ 4 阶段架构迭代。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告。

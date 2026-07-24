@@ -17,18 +17,20 @@
 - 🗂️ **分组管理** — 自定义分组、备注名、隐藏开关、搜索过滤、跨组拖拽排序
 
 ### 终端与显示
-- 📑 **多标签 + 灵活分屏** — 支持上下/左右分屏、跨 Pane 拖拽标签、`@dnd-kit` 水平排序
-- ⏪ **日志回放** — 读取日志文件按原始时间戳写回终端，倍速可选（1/4/16/最快）
+- 📑 **多标签 + 灵活分屏** — 支持上下/左右分屏（分屏按钮在每个 Pane 的 TabBar 右端）、跨 Pane 拖拽标签、`@dnd-kit` 水平排序
+- ⏪ **日志回放** — 读取日志文件按原始时间戳写回终端，倍速可选（1/4/16/最快），回放控件在 OperationPanel 顶栏
 - ⚡ **虚拟滚动** — `@tanstack/react-virtual`，DOM 节点从 O(N) 降到约 30–50（视口 + overscan）
 - 🎨 **语法高亮** — 正则 / 关键词规则集，可配置颜色、加粗、斜体，通过 `dangerouslySetInnerHTML` 注入（已 `escapeHtml`）
-- 📅 **时间戳 / TX·RX 着色** — 多种时间戳格式、字符串/HEX/二进制显示切换
+- 📅 **时间戳 / TX·RX 着色** — 多种时间戳格式、字符串/HEX/二进制显示切换（per-tab，位于终端过滤栏）
+- 🌐 **编码实时切换** — 切换编码（UTF-8 / GBK / ISO-8859-1 / ASCII）时自动从 `rawData` 重新解码已有行内容
 - 🌗 **暗色 / 亮色 / 跟随系统** — 基于 CSS 变量的主题体系
 
 ### 收发与命令
-- ✉️ **手动发送** — 字符串 / HEX 解析（含边界检查）/ 自定义行结束符
-- 🔁 **循环发送** — 命令集顺序执行、单条延时、整体循环间隔
+- ✉️ **手动发送** — 字符串 / HEX 解析（HEX 复选框双向转换内容；HEX 模式输入自动净化）/ 自定义行结束符 / Enter 发送（可在设置中改为 Enter 插入换行）
+- 📝 **发送历史** — 会话内存态（按端口隔离，上限 50 条，关应用即清空），↑/↓ 键回溯
+- 🔁 **循环发送** — 命令集顺序执行、单条延时、整体 `loopDelay`；定时仅由命令集自身延时决定
 - 📦 **命令集编辑器** — SQLite 持久化，可配置每条命令的类型、内容、行结束符、延时
-- 📤 **文件发送** — 选择文件分块发送到串口，实时进度条（二进制传输）
+- 📤 **文件发送** — 选择文件分块发送到串口，实时进度条（二进制传输），按钮在发送按钮旁
 - 🔢 **批量发送** — 循环发送支持指定重复轮数（0=无限），命令集逐条延时执行
 
 ### 日志与导出
@@ -50,7 +52,7 @@
 - 📌 **窗口置顶** — 标题栏一键置顶（`setAlwaysOnTop`）
 - ℹ️ **关于对话框** — 版本 / 技术栈 / 许可信息
 - 📤 **配置导出/导入** — 配置与全部规则集导出为 JSON bundle，一键导入恢复
-- ⭐ **端口参数预设** — 常用波特率/数据位组合存为预设，快速应用
+- ⭐ **端口参数预设** — 常用波特率/数据位组合存为预设，在通用设置页管理（列表 / 应用 / 删除 / 保存当前）
 - 🧰 **系统托盘常驻** — 关闭时最小化到托盘（可配置），托盘菜单快速显示/退出
 
 ---
@@ -106,19 +108,24 @@ hypercom/
 │   ├── App.tsx                       # 根组件：布局编排 + useAppInit + useSerialReceive + 全局右键禁用
 │   ├── main.tsx                      # ReactDOM.createRoot
 │   ├── styles.css                    # @import 入口（指向 styles/ 目录）
-│   ├── types/index.ts                # 全局 TS 类型
+│   ├── i18n.ts                       # i18next + react-i18next（250 keys × zh-CN/en-US）
+│   ├── types/index.ts                # 全局 TS 类型（含 SendHistoryEntry）
 │   ├── services/tauri.ts             # invoke 包装层（6 个服务模块）
-│   ├── hooks/useTauri.ts             # React Hooks 桥接（9 个 Hooks）
+│   ├── hooks/
+│   │   ├── useTauri.ts               # React Hooks 桥接（9 个 Hooks）
+│   │   └── useHotkeys.ts             # 全局快捷键绑定
 │   ├── stores/                       # Zustand + Immer，按领域拆分为 4 个 store
 │   │   ├── useAppStore.ts            # 标签 / 端口 / 分屏 / 配置 / 分组
 │   │   ├── useAppStore.test.ts       # vitest 单测
-│   │   ├── useOperationStore.ts      # 串口参数 + 发送设置（baudRate / dataBits / parity / ...；不含 sendOnEnter/quickSendSlots）
-│   │   ├── useTerminalStore.ts       # 终端行缓冲 + appendTerminalLine / clearTerminal
+│   │   ├── useOperationStore.ts      # 串口参数 + 发送设置（baudRate / dataBits / parity / ...；不含 sendOnEnter/quickSendSlots/displayFormat/encoding）
+│   │   ├── useTerminalStore.ts       # 终端行缓冲 + appendTerminalLine / clearTerminal / setTerminalEncoding（切换时重解码）
 │   │   └── useRuleStore.ts           # 高亮规则集 + 命令集 CRUD
 │   ├── utils/
 │   │   ├── highlightEngine.ts        # 语法高亮引擎
 │   │   ├── highlightEngine.test.ts   # 高亮引擎单测
-│   │   └── hexUtils.ts               # hexToString / stringToHex
+│   │   ├── hexUtils.ts               # hexToString / stringToHex
+│   │   ├── sendUtils.ts              # HEX 预览转换 / 输入净化 / 字节计数（+ 单测）
+│   │   └── protocolParser.ts         # 协议帧重组状态机
 │   ├── styles/                       # 按组件拆分的 CSS（10 个组件文件 + base.css）
 │   │   ├── base.css                  # CSS 变量 / 主题 / 重置
 │   │   ├── sidebar.css
@@ -134,18 +141,25 @@ hypercom/
 │       ├── shared/ContextMenu.tsx    # 通用右键菜单
 │       ├── TitleBar/TitleBar.tsx     # 标题栏 + 窗口控制
 │       ├── Sidebar/                  # 串口列表 + 分组 + 拖拽（Sidebar.tsx + AliasDialog.tsx）
-│       ├── MainDisplay/              # 多分屏容器（5 个文件）
+│       ├── MainDisplay/              # 多分屏容器（8 个文件）
 │       │   ├── MainDisplay.tsx       # Pane 编排 + ResizeHandle
 │       │   ├── Pane.tsx              # 单个分屏容器
-│       │   ├── TabBar.tsx            # 标签页 + 水平拖拽
+│       │   ├── TabBar.tsx            # 标签页 + 水平拖拽 + 分屏按钮（右端）
 │       │   ├── TerminalView.tsx      # 终端 + 虚拟滚动 + 高亮 + 导出
-│       │   └── ResizeHandle.tsx      # 分屏拖拽手柄
-│       ├── OperationPanel/           # 发送区 + 循环发送 + 参数（4 个 section 组件）
-│       │   ├── OperationPanel.tsx    # 容器编排
-│       │   ├── SendSection.tsx       # 手动 / 循环发送
-│       │   ├── ParamsSection.tsx     # 串口参数配置
-│       │   └── RulesSection.tsx      # 高亮 / 命令规则快捷
-│       ├── StatusBar/StatusBar.tsx   # 系统状态 + 流量 + 时钟
+│       │   ├── TerminalFilterBar.tsx # 终端过滤栏：方向/关键词 + per-tab 显示控件（滚动锁/时间戳/HEX-文本/编码）
+│       │   ├── ResizeHandle.tsx      # 分屏拖拽手柄
+│       │   └── hooks/
+│       │       ├── useTabDragEnd.ts  # 拖拽结束移动标签
+│       │       └── useLogReplay.ts   # 日志回放（目标为活动标签）
+│       ├── OperationPanel/           # 发送区 + 循环发送 + 参数（4 个 section + 1 个 hook）
+│       │   ├── OperationPanel.tsx    # 顶栏编排：连接/清屏/回放/日志/字号
+│       │   ├── SendSection.tsx       # 手动发送（HEX 双向转换 / Enter 语义受设置控制）
+│       │   ├── ParamsSection.tsx     # 串口参数配置（仅应用预设下拉）
+│       │   ├── RulesSection.tsx      # 高亮 / 命令规则快捷
+│       │   └── hooks/useCyclicSend.ts # 循环发送（单命令延时 + 命令集 loopDelay）
+│       ├── StatusBar/
+│       │   ├── StatusBar.tsx         # 系统状态 + 流量 + 时钟
+│       │   └── DisconnectBanner.tsx  # 断线警示（filterLostTabIds 纯函数驱动）
 │       └── ConfigModal/              # 6 页配置弹窗 + 规则编辑器（10 个文件）
 │           ├── ConfigModal.tsx       # 弹窗容器 + 标签页切换
 │           ├── RuleSetAccordion.tsx  # 规则集折叠列表
@@ -253,8 +267,8 @@ cargo check --manifest-path src-tauri/Cargo.toml       # Rust 快速检查
 
 ```bash
 npm run test                                           # vitest 监听模式
-npm run test:run                                       # vitest 一次跑（168 cases / 11 files）
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 cases）
+npm run test:run                                       # vitest 一次跑（179 cases / 11 files）
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（33 cases）
 ```
 
 ---
@@ -262,18 +276,19 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 ## 使用说明
 
 ### 1. 连接串口
-1. 在左侧栏选择串口（或启用「模拟模式」获取 `SIM:Loopback`）
+1. 在左侧栏选择串口（或启用「模拟模式」获取 `SIM:Loopback`）；侧边栏工具栏提供「全部打开」/「全部关闭」一级图标按钮
 2. 在 OperationPanel 右栏配置波特率、数据位、停止位、校验位、流控、DTR/RTS
-3. 点击列表项右侧的连接按钮；连接成功状态点变绿，并自动开启该端口的日志文件
+3. 点击 OperationPanel 顶栏左侧的主连接按钮（或列表项右侧的连接按钮）；连接成功状态点变绿，并自动开启该端口的日志文件
 
 ### 2. 收发数据
-- **发送**：在 OperationPanel 左栏输入字符串或 HEX（如 `AA BB CC`），选择行结束符后回车 / 点击发送
-- **循环发送**：切换到「循环发送」栏，选择命令集后启动；每条命令可单独配置延时；循环模式下整体重放
-- **接收**：终端自动按时间戳显示 TX/RX，可右键切换显示格式或导出
+- **发送**：在 OperationPanel 发送区输入字符串或勾选 HEX 切换（HEX 模式自动将内容转为 `68 65 6C 6C 6F` 格式，取消勾选则回转为文本；输入自动净化非 HEX 字符）。Plain Enter 默认直接发送；可在通用设置中开启「Enter 插入换行」（此时仅通过 Send 按钮发送）。**Shift+Enter 和 Ctrl+Enter 始终插入换行**。
+- **发送历史**：会话内存态（每端口最多 50 条，关应用即清空），↑/↓ 键回溯
+- **循环发送**：选择命令集后启动；每条命令可单独配置延时（`delay`）；整体重放间隔由命令集的 `loopDelay` 决定
+- **接收**：终端自动按时间戳显示 TX/RX；per-tab 显示控件（滚动锁 / 时间戳 / HEX-文本编码 / 编码切换）位于终端过滤栏；切换编码时已有行实时重新解码
 
 ### 3. 多标签与分屏
 - 点击串口或双击标签 → 在当前 Pane 打开标签
-- TabBar 工具栏「分屏」按钮 → 上下/左右创建新 Pane
+- TabBar 右端的「分屏」按钮（上下/左右）→ 创建新 Pane（聚焦当前 Pane 后 split）
 - 拖拽标签到目标 Pane 即可移动；拖拽到 ResizeHandle 处可触发新分屏
 
 ### 4. 高亮规则与命令集
@@ -286,7 +301,7 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 ### 5. 日志与导出
 - **自动落盘**：连接即写；按文件名模板分文件夹组织（`[com]` / `[datetime]` 等变量）
 - **分片**：超过阈值自动切片续写，旧文件 `sync_all` 后释放
-- **另存为 / 打开文件 / 打开目录**：OperationPanel 工具栏按钮，路径限定在日志根目录内
+- **回放 / 另存 / 打开文件 / 打开目录**：OperationPanel 顶栏按钮组（回放倍速 1/4/16/最快，目标为活动标签），路径限定在日志根目录内
 - **终端导出**：终端右键菜单 → 导出 TXT/CSV 真实文件（不是剪贴板）
 
 详细数据流见 [`plans/04-data-flow.md`](plans/04-data-flow.md)。
@@ -321,8 +336,8 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 | Store | 职责 | 关键字段 / Actions |
 |-------|------|-------------------|
 | `useAppStore` | 标签，端口，分屏，配置（含 `sendOnEnter`/`quickSendSlots`），分组 | `ports`、`tabs`、`paneTree`、`config`、`groups`、`openTab`、`closeTab` |
-| `useOperationStore` | 串口参数 + 发送设置（**无 `op` 前缀**；不包含 `sendOnEnter`/`quickSendSlots`） | `baudRate`、`dataBits`、`parity`、`stopBits`、`handshake`、`dtr`、`rts`、`sendInput`、`displayFormat`、`encoding`、`setOpState` |
-| `useTerminalStore` | 终端行缓冲 | `terminals`、`appendTerminalLine`、`clearTerminal`、`setTerminalConfig`、`ensureTerminal` |
+| `useOperationStore` | 串口参数 + 发送设置（**无 `op` 前缀**；不包含 `sendOnEnter`/`quickSendSlots`；不包含 `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — 这些 per-tab 显示状态在 `useTerminalStore`） | `baudRate`、`dataBits`、`parity`、`stopBits`、`handshake`、`dtr`、`rts`、`sendInput`、`sendIsHex`、`sendAppendLineEnding`、`isLoopSending`、`loopRepeatCount`、`setOpState` |
+| `useTerminalStore` | 终端行缓冲 + per-tab 显示状态 | `terminals`、`appendTerminalLine`、`clearTerminal`、`setTerminalConfig`、`ensureTerminal`、`setTerminalEncoding`（切换时重解码已有行） |
 | `useRuleStore` | 高亮规则集 + 命令集 | `highlightRuleSets`、`activeHighlightSetId`、`sendCommandSets`、`activeSendCommandSetId` + CRUD |
 
 ### Hook 拆分（9 个 Hooks）
@@ -333,8 +348,9 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 |------|------|---------|
 | `useSerialPorts` | 每 3s 轮询端口列表 | Sidebar |
 | `useSerialConnection` | 打开 / 关闭端口，经 `closePort()` 路由 | Sidebar / TabBar |
-| `useSerialReceive` | `serial_data` 事件监听（**仅调用一次**） | App.tsx |
-| `useSerialSend` | 发送动作 | OperationPanel |
+| `usePinStatesSubscriber` | `serial:pin_states` 事件监听（DTR/RTS/CTS/DSR/RLSD/RI） | App.tsx（仅一次） |
+| `useSerialReceive` | `serial_data` 事件监听（**仅调用一次**）+ 断线状态追踪（`lostPortIds`/`isPortLost`） | App.tsx |
+| `useSerialSend` | 发送动作 + 会话内存态历史（`Map<portId, SendHistoryEntry[]>`，上限 50） | OperationPanel |
 | `useConfigPersistence` | 加载 / 保存配置到后端 | App.tsx |
 | `useSystemStatus` | 每 5s 轮询 CPU / 内存 | StatusBar |
 | `useAppInit` | 一次性应用初始化 | App.tsx |
@@ -353,8 +369,8 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试（32 
 | 目录 | 拆分前 | 拆分后 | 文件 |
 |------|--------|--------|------|
 | `ConfigModal/` | 724 行单文件 | 10 个文件 | `ConfigModal.tsx` + `RuleSetAccordion.tsx` + `pages/`（6 页）+ `editors/`（2 个编辑器） |
-| `OperationPanel/` | 526 行单文件 | 4 个 section 组件 | `OperationPanel.tsx` + `SendSection` + `ParamsSection` + `RulesSection` |
-| `MainDisplay/` | 359 行单文件 | 5 个文件 | `MainDisplay` + `Pane` + `TabBar` + `TerminalView` + `ResizeHandle` |
+| `OperationPanel/` | 526 行单文件 | 4 个 section + 1 个 hook | `OperationPanel.tsx` + `SendSection` + `ParamsSection` + `RulesSection` + `hooks/useCyclicSend.ts` |
+| `MainDisplay/` | 359 行单文件 | 8 个文件 | `MainDisplay` + `Pane` + `TabBar` + `TerminalView` + `TerminalFilterBar` + `ResizeHandle` + `hooks/useTabDragEnd.ts` + `hooks/useLogReplay.ts` |
 | `Sidebar/` | 626 行单文件 | 2 个文件 | `Sidebar.tsx` + `AliasDialog.tsx` |
 
 ### CSS 拆分
@@ -475,7 +491,7 @@ scope: ui | backend | store | hooks | plans
 - ✅ **字体缩放** — 终端字号绑定 CSS 变量，Ctrl+滚轮 + 参数面板滑块
 - ✅ **背景图片** — ConfigModal 路径选择 → CSS 变量应用到主窗口
 - ✅ **分屏嵌套（VS Code 风格）** — `paneTree: PaneNode` 递归树，任意深度嵌套
-- ✅ **v0.1 可见性与鲁棒性** — Toast 通知、终端搜索（Ctrl+F）、选择复制、断线警示、自动重连、引脚状态监视、发送历史持久化、快捷发送槽、首启引导、快捷键帮助、会话恢复、数据过滤
+- ✅ **v0.1 可见性与鲁棒性** — Toast 通知、终端搜索（Ctrl+F）、选择复制、断线警示（`DisconnectBanner`，`lostPortIds` 驱动）、自动重连、引脚状态监视、快捷发送槽、首启引导、快捷键帮助、会话恢复、数据过滤
 
 **2026-07 架构迭代（已完成）**：
 
@@ -485,6 +501,23 @@ scope: ui | backend | store | hooks | plans
 - ✅ **日志默认值调整** — `auto_save_log` / `log_split_enabled` 默认 true；`save_log_as`/`export_terminal_log` 作用域放宽
 - ✅ **数据清理** — `port_groups` 表移除 (9→7)；SQLite WAL+FK 开启；事务写 + ON CONFLICT
 - ✅ **30+ Bug 修复** — 日志/配置/后端/UI/契约五类缺陷修复
+
+**2026-07 UI/UX overhaul（已完成）**：
+
+- ✅ **DisconnectBanner 误报修复** — `lostPortIds` + `filterLostTabIds` 纯函数驱动；会话恢复的标签不再触发断线警示
+- ✅ **Per-tab 显示状态** — `scrollLocked`/`showTimestamp`/`displayFormat`/`encoding` 从 `useOperationStore` 迁移到 `useTerminalStore`；`setTerminalEncoding` 切换时重解码已有行
+- ✅ **发送历史改为会话内存态** — 按端口隔离，上限 50 条，关应用即清空；`SendHistoryEntry` 类型
+- ✅ **OperationPanel 顶栏重构** — `ViewStrip.tsx` 删除；连接/清屏/回放/日志/字号按钮统一在顶栏
+- ✅ **SendSection 增强** — HEX 双向转换（`textToHexPreview`/`hexToTextPreview`）、HEX 输入净化、Enter 语义受设置控制
+- ✅ **RulesSection/useCyclicSend 精简** — 移除全局 interval 输入，定时仅由命令延时 + `loopDelay` 决定
+- ✅ **ParamsSection 精简** — 预设管理移至通用设置页；本处仅保留应用预设下拉
+- ✅ **TerminalFilterBar** — 新增 per-tab 显示控件（滚动锁/时间戳/HEX-文本/编码选择）
+- ✅ **TabBar 分屏按钮** — 从 MainDisplay 工具栏移至每个 Pane 的 TabBar 右端（sticky 定位）
+- ✅ **Sidebar** — 全部打开/全部关闭提升为一级工具栏图标按钮
+- ✅ **通用设置页** — 「Enter 插入换行」复选框 + 「串口参数预设」管理区
+- ✅ **i18n 同步** — 新增 9 keys / 删除 12 dead keys / 250 unique keys
+- ✅ **sendUtils.ts** — `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` 纯函数（+ 单测）
+- ✅ **Ctrl+Enter 全局热键** — 从 `useHotkeys.ts` 移除（Ctrl+Enter 始终插入换行）
 
 完整待办见 [`plans/07-roadmap.md`](plans/07-roadmap.md) 与 [`plans/10-v0.1-roadmap.md`](plans/10-v0.1-roadmap.md)。剩余：Phase E 真机验证（待硬件）/ 代码签名（待证书）。
 
@@ -500,6 +533,6 @@ MIT License
 
 - `npx tsc --noEmit` 0 错误
 - `cargo check --manifest-path src-tauri/Cargo.toml` 0 错误 0 警告
-- `npm run test:run` 全部通过（168 cases / 11 files）
-- `cargo test --lib --manifest-path src-tauri/Cargo.toml` 全部通过（32 cases）
+- `npm run test:run` 全部通过（179 cases / 11 files）
+- `cargo test --lib --manifest-path src-tauri/Cargo.toml` 全部通过（33 cases）
 - 遵循 [`AGENTS.md`](AGENTS.md) 的开发约束

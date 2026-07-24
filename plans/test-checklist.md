@@ -7,8 +7,8 @@
 
 | 套件 | 命令 | 数量 | 说明 |
 |------|------|------|------|
-| 前端 (vitest) | `npm run test:run` | 138 tests / 8 files | useAppStore (49) + highlightEngine (22) + protocolParser (17) + protocolRenderer (8) + terminalSearch (9) + DisconnectBanner (8) + timeFormat (12) + sendUtils (13) |
-| 后端 (cargo) | `cargo test --lib` | 30 tests | logger 编码/分片/反向索引 + storage CRUD + crash report + config serde |
+| 前端 (vitest) | `npm run test:run` | 179 tests / 11 files | useAppStore (56) + highlightEngine (22) + protocolParser (17) + protocolRenderer (8) + terminalSearch (9) + DisconnectBanner (5) + timeFormat (13) + sendUtils (21) + logReplay (10) + lineFilter (11) + protocolE2E (7) |
+| 后端 (cargo) | `cargo test --lib` | 33 tests | config (7) + logger (13) + storage (11) + lib (2) |
 | TypeScript | `npx tsc --noEmit` | 0 errors | 类型检查 |
 | Rust | `cargo check` | 0 errors, 0 warnings | 快速编译检查 |
 
@@ -61,14 +61,14 @@
 | # | 步骤 | 预期 |
 |---|------|------|
 | 28 | 在侧边栏拖拽串口 | 串口顺序改变 |
-| 29 | 点击左右分屏按钮 | 出现两个分屏区域，可拖拽分割线 |
+| 29 | 点击当前 Pane 的 TabBar 右端分屏按钮 (↑/←) | 出现两个分屏区域，可拖拽分割线（split 按钮已迁至每个 Pane 自己的 TabBar 右端；Toolbar 行已删除） |
 | 30 | 在分屏内再次分屏（3 层嵌套） | 树状嵌套正常渲染，各层分割线可拖拽 |
 | 31 | 拖拽标签到另一个分屏 | 标签迁移到目标分屏 |
 | 32 | 右键终端 → 导出为 TXT | **弹出文件保存对话框**，选择路径后生成 .txt 文件（非剪贴板） |
 | 33 | Ctrl+滚轮在终端区滚动 | 字体大小改变 |
-| 34 | Up 箭头在发送框按下 | 调出历史发送记录（从 SQLite 加载） |
+| 34 | Up 箭头在发送框按下 | 调出历史发送记录（从进程内 per-port Map 加载；会话期间有效，重启为空） |
 | 35 | 发送框输入文本，观察字节计数芯片 | 显示正确的字节数（HEX 模式计解析后字节，文本模式计编码后字节） |
-| 36 | 切换 Enter 行为为"换行"，按 Enter | 输入框内换行而非发送 |
+| 36 | 设置 → 通用 → 勾选"回车键插入换行"，发送框按 Enter | 输入框内换行而非发送（默认 Enter 发送，Shift/Ctrl+Enter 永远换行） |
 | 37 | HEX 模式下观察输入框下方提示 | 显示"末尾追加: 0D 0A"（或对应行结束符） |
 
 ## 五、错误提示 & 连接恢复 (7 项)
@@ -88,8 +88,8 @@
 | # | 步骤 | 预期 |
 |---|------|------|
 | 45 | 设置 → 通用 → 快捷发送槽填入 `AT\r\n` | SendSection 出现快捷按钮，点击即发送 |
-| 46 | 发送 3 条不同内容，关闭应用重开 | 发送历史从 SQLite 恢复，Up 箭头可调出 |
-| 47 | 右键发送历史 → 清除 | 历史清空，Up 箭头无响应 |
+| 46 | 发送 3 条不同内容（含 HEX 与字符串），关闭应用重开 | 发送历史为空（session-only：进程内 per-port Map, 上限 50；重启自然丢失，符合用户决策）。会话期间 Up/Down 箭头可回忆 |
+| 47 | 关闭并重启应用 | 发送历史为空（session-only；重启自然丢失）。右键"清除历史"按钮已移除 |
 | 48 | 快捷发送槽全部为空 | SendSection 不显示快捷按钮区域 |
 | 49 | 发送历史超过 50 条 | 最旧的记录被自动删除，仅保留最新 50 条 |
 
@@ -102,7 +102,7 @@
 | 52 | 完成/跳过 Tour 后重启应用 | Tour 不再弹出 |
 | 53 | 点击 TitleBar 帮助按钮（?图标） | Tour 重新弹出 |
 
-## 八、日志 & 编码 (5 项)
+## 八、日志 & 编码 (6 项)
 
 | # | 步骤 | 预期 |
 |---|------|------|
@@ -110,6 +110,7 @@
 | 55 | 日志分片阈值设小（如 1KB），持续接收数据 | 自动分片，旧文件关闭，新文件续写 |
 | 56 | 切换终端编码为 GBK，发送中文 | 终端正确显示中文（非乱码） |
 | 57 | 切换终端编码为 ISO-8859-1 | 高字节字符正确显示 |
+| 57a | 已接收 20 行 UTF-8 数据后，切换编码为 GBK 再切回 UTF-8 | 切 GBK 后存量行立即从 `rawData` 重解码为 GBK；切回 UTF-8 后再立即重解码为 UTF-8（非只影响新数据） |
 | 58 | 右键终端 → 导出为 CSV | 弹出保存对话框，CSV 文件含时间戳/方向/内容三列 |
 
 ## 九、协议解析 (3 项)
@@ -130,4 +131,4 @@
 
 ---
 
-**总计: 64 项手工测试 + 4 项自动化测试套件**
+**总计: 65 项手工测试 + 4 项自动化测试套件**
