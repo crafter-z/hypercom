@@ -2,8 +2,6 @@ import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import type {
   DataBits,
-  DisplayFormat,
-  Encoding,
   Handshake,
   LineEnding,
   Parity,
@@ -19,15 +17,10 @@ interface OperationState {
   dtr: boolean;
   rts: boolean;
   ignoreEmptyChars: boolean;
-  scrollLocked: boolean;
-  showTimestamp: boolean;
-  displayFormat: DisplayFormat;
-  encoding: Encoding;
   sendIsHex: boolean;
   sendAppendLineEnding: LineEnding;
   sendInput: string;
   isLoopSending: boolean;
-  loopInterval: number;
   loopRepeatCount: number; // 循环重复轮数: 0 = 跟随命令集 isLoop, >0 = 发送 N 轮后停止
 
   setOpState: (patch: Partial<Omit<OperationState, 'setOpState'>>) => void;
@@ -43,15 +36,10 @@ export const useOperationStore = create<OperationState>()(
     dtr: false,
     rts: false,
     ignoreEmptyChars: false,
-    scrollLocked: true,
-    showTimestamp: true,
-    displayFormat: 'string',
-    encoding: 'ASCII',
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
     isLoopSending: false,
-    loopInterval: 500,
     loopRepeatCount: 0,
 
     setOpState: (patch) => set((state) => {

@@ -92,9 +92,6 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
         return;
       }
       const cmd = currentSet.commands[ref.currentCmdIdx % currentSet.commands.length];
-      // Read the interval live each tick so editing it takes effect without
-      // restarting the effect (which would reset round/progress counters).
-      const loopInterval = useOperationStore.getState().loopInterval;
 
       try {
         await sendData(
@@ -124,8 +121,8 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
         ref.currentCmdIdx = nextIdx;
 
         const delay = completedRound && (currentSet.isLoop || loopRepeatCount > 0)
-          ? (currentSet.loopDelay || loopInterval)
-          : cmd.delay ?? loopInterval;
+          ? (currentSet.loopDelay ?? 0)
+          : (cmd.delay ?? 0);
 
         ref.timeoutId = setTimeout(sendNext, delay);
       } catch (err) {
@@ -134,7 +131,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
           notifiedRef.current = true;
           notifyError(err);
         }
-        ref.timeoutId = setTimeout(sendNext, loopInterval);
+        ref.timeoutId = setTimeout(sendNext, 500);
       }
     };
 

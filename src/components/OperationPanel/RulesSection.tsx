@@ -13,7 +13,6 @@ export interface RulesSectionProps {
 const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }) => {
   const { t } = useTranslation();
   const isLoopSending = useOperationStore(s => s.isLoopSending);
-  const loopInterval = useOperationStore(s => s.loopInterval);
   const loopRepeatCount = useOperationStore(s => s.loopRepeatCount);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
@@ -99,21 +98,6 @@ const RulesSection: React.FC<RulesSectionProps> = ({ isPortActive, isConnected }
             <Square size={13} /> {t('rulesSection.stopLoop')}
           </button>
         )}
-        <div className="op-delay-input">
-          <span className="op-label">{t('rulesSection.intervalLabel')}</span>
-          <input
-            className="input op-number-input"
-            type="number"
-            value={loopInterval}
-            onChange={e => setOpState({ loopInterval: Number(e.target.value) || 500 })}
-            min={10}
-            step={10}
-          />
-          <span className="op-unit-label">{t('rulesSection.intervalUnit')}</span>
-        </div>
-      </div>
-
-      <div className="op-loop-row">
         <div className="op-delay-input">
           <span className="op-label">{t('rulesSection.repeatLabel')}</span>
           <input

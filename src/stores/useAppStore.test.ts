@@ -40,15 +40,11 @@ beforeEach(() => {
     dtr: false,
     rts: false,
     ignoreEmptyChars: false,
-    scrollLocked: true,
-    showTimestamp: true,
-    displayFormat: 'string',
-    encoding: 'ASCII',
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
     isLoopSending: false,
-    loopInterval: 500,
+    loopRepeatCount: 0,
   });
 });
 
@@ -526,15 +522,15 @@ describe('Operation State actions', () => {
     expect(useOperationStore.getState().parity).toBe(oldParity);
   });
 
-  it('setOpState handles encoding change', () => {
-    useOperationStore.getState().setOpState({ encoding: 'GBK' });
-    expect(useOperationStore.getState().encoding).toBe('GBK');
+  it('setOpState handles send-mode change', () => {
+    useOperationStore.getState().setOpState({ sendIsHex: true });
+    expect(useOperationStore.getState().sendIsHex).toBe(true);
   });
 
   it('setOpState handles loop state toggle', () => {
-    useOperationStore.getState().setOpState({ isLoopSending: true, loopInterval: 200 });
+    useOperationStore.getState().setOpState({ isLoopSending: true, loopRepeatCount: 3 });
     expect(useOperationStore.getState().isLoopSending).toBe(true);
-    expect(useOperationStore.getState().loopInterval).toBe(200);
+    expect(useOperationStore.getState().loopRepeatCount).toBe(3);
   });
 });
 

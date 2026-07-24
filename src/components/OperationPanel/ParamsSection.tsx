@@ -2,11 +2,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTranslation } from 'react-i18next';
-import { Save, Trash2 } from 'lucide-react';
 import type { DataBits, Parity, StopBits, Handshake } from '../../types';
 import { portPresetService } from '../../services/tauri';
 import type { PortPresetInfo } from '../../services/tauri';
-import { notifyError, notifySuccess } from '../../stores/useToastStore';
 
 export interface ParamsSectionProps {
   /** True when a port tab is selected (params editable pre-connect so the
@@ -64,39 +62,6 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     });
   };
 
-  const handleSavePreset = async () => {
-    const name = window.prompt(t('paramsSection.preset.namePrompt'));
-    if (!name || !name.trim()) return;
-    try {
-      await portPresetService.savePortPreset({
-        name: name.trim(),
-        baud_rate: baudRate,
-        data_bits: dataBits,
-        parity,
-        stop_bits: stopBits,
-        handshake,
-        dtr,
-        rts,
-      });
-      await loadPresets();
-      notifySuccess('paramsSection.preset.saved');
-    } catch (e) {
-      notifyError(e);
-    }
-  };
-
-  const handleDeletePreset = async () => {
-    if (!selectedPresetId) return;
-    try {
-      await portPresetService.deletePortPreset(selectedPresetId);
-      setSelectedPresetId('');
-      await loadPresets();
-      notifySuccess('paramsSection.preset.deleted');
-    } catch (e) {
-      notifyError(e);
-    }
-  };
-
   return (
     <div className="op-section op-section-params">
       <div className="panel-card-title eyebrow">{t('paramsSection.cardTitle')}</div>
@@ -109,12 +74,6 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
             <option value="">{t('paramsSection.preset.selectPlaceholder')}</option>
             {presets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-          <button className="btn btn-icon btn-sm" title={t('paramsSection.preset.saveTooltip')} onClick={handleSavePreset}>
-            <Save size={13} />
-          </button>
-          <button className="btn btn-icon btn-sm" title={t('paramsSection.preset.deleteTooltip')} onClick={handleDeletePreset} disabled={!selectedPresetId}>
-            <Trash2 size={13} />
-          </button>
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.baudRateLabel')}</span>

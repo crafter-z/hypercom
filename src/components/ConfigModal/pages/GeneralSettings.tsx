@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
-import { configService } from '../../../services/tauri';
+import { useOperationStore } from '../../../stores/useOperationStore';
+import { configService, portPresetService } from '../../../services/tauri';
+import type { PortPresetInfo } from '../../../services/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { AppConfig } from '../../../types';
+import type { AppConfig, DataBits, Parity, StopBits, Handshake } from '../../../types';
+import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 
 /** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
 const clampNumber = (raw: string, min: number, max: number): number => {
@@ -20,6 +23,7 @@ const GeneralSettings: React.FC = () => {
   const preventScreenOff = useAppStore(s => s.config.preventScreenOff);
   const preventSleep = useAppStore(s => s.config.preventSleep);
   const restoreSession = useAppStore(s => s.config.restoreSession);
+  const sendOnEnter = useAppStore(s => s.config.sendOnEnter);
   const autoReconnect = useAppStore(s => s.config.autoReconnect);
   const maxRetries = useAppStore(s => s.config.maxRetries);
   const terminalFont = useAppStore(s => s.config.terminalFont);
@@ -33,6 +37,67 @@ const GeneralSettings: React.FC = () => {
   useEffect(() => {
     configService.getConfigPath().then(setConfigPath).catch(() => {});
   }, []);
+
+  const [presets, setPresets] = useState<PortPresetInfo[]>([]);
+  const [presetName, setPresetName] = useState('');
+
+  const loadPresets = useCallback(async () => {
+    try {
+      const list = await portPresetService.loadPortPresets();
+      setPresets(list);
+    } catch (e) {
+      console.debug('[GeneralSettings] loadPortPresets failed:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPresets();
+  }, [loadPresets]);
+
+  const handleApplyPreset = (p: PortPresetInfo) => {
+    useOperationStore.getState().setOpState({
+      baudRate: p.baud_rate,
+      dataBits: p.data_bits as DataBits,
+      parity: p.parity as Parity,
+      stopBits: p.stop_bits as StopBits,
+      handshake: p.handshake as Handshake,
+      dtr: p.dtr !== 0,
+      rts: p.rts !== 0,
+    });
+  };
+
+  const handleDeletePreset = async (id: string) => {
+    try {
+      await portPresetService.deletePortPreset(id);
+      await loadPresets();
+      notifySuccess('paramsSection.preset.deleted');
+    } catch (e) {
+      notifyError(e);
+    }
+  };
+
+  const handleSavePreset = async () => {
+    const name = presetName.trim();
+    if (!name) return;
+    try {
+      const op = useOperationStore.getState();
+      await portPresetService.savePortPreset({
+        name,
+        baud_rate: op.baudRate,
+        data_bits: op.dataBits,
+        parity: op.parity,
+        stop_bits: op.stopBits,
+        handshake: op.handshake,
+        dtr: op.dtr,
+        rts: op.rts,
+      });
+      setPresetName('');
+      await loadPresets();
+      notifySuccess('paramsSection.preset.saved');
+    } catch (e) {
+      notifyError(e);
+    }
+  };
 
   return (
     <div className="config-page">
@@ -103,6 +168,17 @@ const GeneralSettings: React.FC = () => {
         </label>
       </div>
 
+      <div className="config-row">
+        <label className="checkbox-wrapper" title={t('generalSettings.enterNewline.hint')}>
+          <input
+            type="checkbox"
+            checked={!sendOnEnter}
+            onChange={(e) => setConfig({ sendOnEnter: !e.target.checked })}
+          />
+          {t('generalSettings.enterNewline')}
+        </label>
+      </div>
+
       <div className="divider-h" />
       <h4 className="config-section-title">{t('settings.reconnect.sectionTitle')}</h4>
 
@@ -130,6 +206,39 @@ const GeneralSettings: React.FC = () => {
           style={{ width: 80 }}
         />
       </div>
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('generalSettings.presets.sectionTitle')}</h4>
+
+      <div className="config-row">
+        <input
+          className="input"
+          style={{ flex: 1 }}
+          value={presetName}
+          placeholder={t('generalSettings.presets.namePlaceholder')}
+          onChange={(e) => setPresetName(e.target.value)}
+        />
+        <button className="btn btn-sm" disabled={!presetName.trim()} onClick={handleSavePreset}>
+          {t('generalSettings.presets.saveCurrent')}
+        </button>
+      </div>
+
+      {presets.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('generalSettings.presets.empty')}</div>
+      ) : (
+        presets.map((p) => (
+          <div className="config-row" key={p.id}>
+            <span style={{ flex: 1, fontSize: 13 }}>
+              {p.name}
+              <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-terminal)' }}>
+                {p.baud_rate},{p.data_bits}{(p.parity ?? 'None')[0]}{p.stop_bits === 'One' ? '1' : p.stop_bits === 'Two' ? '2' : '1.5'}
+              </span>
+            </span>
+            <button className="btn btn-sm" onClick={() => handleApplyPreset(p)}>{t('generalSettings.presets.apply')}</button>
+            <button className="btn btn-sm" onClick={() => handleDeletePreset(p.id)}>{t('generalSettings.presets.delete')}</button>
+          </div>
+        ))
+      )}
 
       <div className="divider-h" />
       <h4 className="config-section-title">{t('generalSettings.fontSectionTitle')}</h4>

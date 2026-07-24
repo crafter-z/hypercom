@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { TerminalState } from '../types';
+import type { Encoding, TerminalState } from '../types';
 import { useAppStore } from './useAppStore';
 
 interface TerminalStoreState {
@@ -11,6 +11,7 @@ interface TerminalStoreState {
   appendTerminalLine: (portId: string, line: TerminalState['lines'][number]) => void;
   clearTerminal: (portId: string) => void;
   setTerminalConfig: (portId: string, patch: Partial<TerminalState>) => void;
+  setTerminalEncoding: (portId: string, encoding: Encoding) => void;
 }
 
 const getConfiguredMaxLines = (): number => {
@@ -61,6 +62,22 @@ export const useTerminalStore = create<TerminalStoreState>()(
     setTerminalConfig: (portId, patch) => set((state) => {
       const term = state.terminals[portId];
       if (term) Object.assign(term, patch);
+    }),
+
+    setTerminalEncoding: (portId, encoding) => set((state) => {
+      const term = state.terminals[portId];
+      if (!term) return;
+      term.encoding = encoding;
+      // Re-decode existing lines from raw bytes so the switch is immediately visible.
+      const label = encoding.toLowerCase() === 'ascii' ? 'utf-8' : encoding.toLowerCase();
+      let decoder: TextDecoder;
+      try { decoder = new TextDecoder(label, { fatal: false }); }
+      catch { decoder = new TextDecoder('utf-8', { fatal: false }); }
+      for (const line of term.lines) {
+        if (line.rawData && line.rawData.length > 0 && (!line.parsedFields || line.parsedFields.length === 0)) {
+          line.content = decoder.decode(new Uint8Array(line.rawData));
+        }
+      }
     }),
   }))
 );

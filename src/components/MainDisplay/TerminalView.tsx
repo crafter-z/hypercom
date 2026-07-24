@@ -9,7 +9,6 @@ import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import type { TerminalState } from '../../types';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import { useAppStore } from '../../stores/useAppStore';
-import { useOperationStore } from '../../stores/useOperationStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -177,11 +176,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
       autoScrollRef.current = atBottom;
       if (portId && terminal) {
         setTerminalConfig(portId, { scrollLocked: atBottom });
-        // 滚轮解除/恢复滚动锁定时，同步写回 OperationStore，让操作面板
-        // 的「钉住」按钮状态与终端实际滚动状态联动（否则仅单向 op→terminal）。
-        if (useAppStore.getState().activeTabId === portId) {
-          useOperationStore.getState().setOpState({ scrollLocked: atBottom });
-        }
       }
     }
   }, [portId, terminal, setTerminalConfig]);
@@ -263,6 +257,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
       <TerminalFilterBar
         portId={portId}
         encoding={terminal?.encoding}
+        scrollLocked={terminal?.scrollLocked}
+        showTimestamp={terminal?.showTimestamp}
+        displayFormat={terminal?.displayFormat}
         direction={directionFilter}
         onDirectionChange={setDirectionFilter}
         keyword={keywordInput}
