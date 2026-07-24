@@ -9,7 +9,6 @@ interface ShortcutRow {
 }
 
 const SHORTCUTS: ShortcutRow[] = [
-  { keys: 'Ctrl+Enter', actionKey: 'hotkeys.send' },
   { keys: 'Ctrl+L', actionKey: 'hotkeys.clearTerminal' },
   { keys: 'Ctrl+F', actionKey: 'hotkeys.focusSearch' },
   { keys: 'Ctrl+K', actionKey: 'hotkeys.toggleConnect' },

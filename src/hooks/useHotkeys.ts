@@ -1,7 +1,6 @@
 /**
  * useHotkeys — 全局键盘快捷键（副作用 Hook，在 App.tsx 中挂载一次）
  *
- * Ctrl+Enter  → 发送当前输入框内容
  * Ctrl+L      → 清空当前终端
  * Ctrl+K      → 连接/断开当前活动端口
  * Ctrl+/      → 切换快捷键帮助弹窗
@@ -12,9 +11,8 @@
  */
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { useOperationStore } from '../stores/useOperationStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { useSerialConnection, useSerialSend } from './useTauri';
+import { useSerialConnection } from './useTauri';
 
 function isFormField(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
@@ -24,13 +22,10 @@ function isFormField(el: EventTarget | null): boolean {
 
 export function useHotkeys(): void {
   const { toggleConnection } = useSerialConnection();
-  const { sendData } = useSerialSend();
 
   // Keep latest callbacks in refs so the keydown listener is registered only once.
   const toggleRef = useRef(toggleConnection);
   toggleRef.current = toggleConnection;
-  const sendRef = useRef(sendData);
-  sendRef.current = sendData;
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -52,14 +47,7 @@ export function useHotkeys(): void {
       // Ignore shortcuts when focus is in a form field
       if (isFormField(e.target)) return;
 
-      if (ctrl && e.key === 'Enter') {
-        e.preventDefault();
-        const { activeTabId } = useAppStore.getState();
-        if (!activeTabId) return;
-        const op = useOperationStore.getState();
-        if (!op.sendInput.trim()) return;
-        void sendRef.current(activeTabId, op.sendInput, op.sendIsHex, op.sendAppendLineEnding);
-      } else if (ctrl && (e.key === 'l' || e.key === 'L')) {
+      if (ctrl && (e.key === 'l' || e.key === 'L')) {
         e.preventDefault();
         const { activeTabId } = useAppStore.getState();
         if (activeTabId) useTerminalStore.getState().clearTerminal(activeTabId);

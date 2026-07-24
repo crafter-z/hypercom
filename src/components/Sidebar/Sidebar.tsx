@@ -30,10 +30,10 @@ import { CSS } from '@dnd-kit/utilities';
 /**
  * Sidebar toolbar — the rack's control strip.
  *
- * Only high-frequency actions live here visibly (simulation toggle,
- * refresh). Everything low-frequency (open/close all, show hidden,
- * sort, save layout) folds into a single overflow menu so the strip
- * stays at ≤4 controls.
+ * High-frequency actions live here visibly: simulation toggle,
+ * refresh, and open/close all (promoted from the overflow menu —
+ * they're the rack's bread and butter). Only low-frequency actions
+ * (show hidden, sort, save layout) fold into the overflow menu.
  */
 const SidebarToolbar: React.FC<{
   showHidden: boolean;
@@ -50,9 +50,6 @@ const SidebarToolbar: React.FC<{
   const { show, element } = useContextMenu();
 
   const overflowItems: ContextMenuEntry[] = [
-    { label: t('sidebar.toolbar.openAll'), icon: <Play size={14} />, onClick: onOpenAll },
-    { label: t('sidebar.toolbar.closeAll'), icon: <Square size={14} />, onClick: onCloseAll },
-    { type: 'separator' },
     {
       label: showHidden ? t('sidebar.toolbar.hideHidden') : t('sidebar.toolbar.showHidden'),
       icon: showHidden ? <Eye size={14} /> : <EyeOff size={14} />,
@@ -76,6 +73,12 @@ const SidebarToolbar: React.FC<{
         </button>
         <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
           <RefreshCw size={14} />
+        </button>
+        <button className="icon-btn" title={t('sidebar.toolbar.openAll')} onClick={onOpenAll}>
+          <Play size={14} />
+        </button>
+        <button className="icon-btn" title={t('sidebar.toolbar.closeAll')} onClick={onCloseAll}>
+          <Square size={14} />
         </button>
         <span className="toolbar-sep" />
         <button

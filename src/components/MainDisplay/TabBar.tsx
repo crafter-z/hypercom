@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { TabItem, LeafPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import { Pin, X, AlertTriangle } from 'lucide-react';
+import { Pin, X, AlertTriangle, Columns2, Rows2 } from 'lucide-react';
 import {
   SortableContext,
   useSortable,
@@ -24,6 +24,8 @@ interface TabBarProps {
   onCloseOthers: (tabId: string) => void;
   moveToPaneTargets?: LeafPane[];
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
+  onSplitVertical?: () => void;
+  onSplitHorizontal?: () => void;
 }
 
 // ==================== Tab rendering ====================
@@ -119,6 +121,8 @@ const TabBar: React.FC<TabBarProps> = ({
   onCloseOthers,
   moveToPaneTargets,
   onMoveToPane,
+  onSplitVertical,
+  onSplitHorizontal,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const { t } = useTranslation();
@@ -201,6 +205,18 @@ const TabBar: React.FC<TabBarProps> = ({
     >
       <div className="tab-bar">
         {tabs.map(renderTab)}
+        {onSplitVertical && onSplitHorizontal && (
+          <div className="tab-bar-split-group">
+            <button className="icon-btn" title={t('mainDisplay.toolbar.splitVertical')}
+              onClick={(e) => { e.stopPropagation(); onSplitVertical(); }}>
+              <Columns2 size={13} />
+            </button>
+            <button className="icon-btn" title={t('mainDisplay.toolbar.splitHorizontal')}
+              onClick={(e) => { e.stopPropagation(); onSplitHorizontal(); }}>
+              <Rows2 size={13} />
+            </button>
+          </div>
+        )}
       </div>
 
       {contextMenu && (

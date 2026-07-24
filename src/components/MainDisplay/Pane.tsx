@@ -31,6 +31,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const closeTabsToLeft = useAppStore((s) => s.closeTabsToLeft);
   const closeOtherTabs = useAppStore((s) => s.closeOtherTabs);
   const moveTabToPane = useAppStore((s) => s.moveTabToPane);
+  const splitPane = useAppStore((s) => s.splitPane);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const removePane = useAppStore((s) => s.removePane);
   const { closePort } = useSerialConnection();
@@ -151,6 +152,8 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             onCloseOthers={handleCloseOthers}
             moveToPaneTargets={otherPanes}
             onMoveToPane={handleMoveTabToPane}
+            onSplitVertical={() => { onFocus(); splitPane('vertical'); }}
+            onSplitHorizontal={() => { onFocus(); splitPane('horizontal'); }}
           />
         </div>
       </div>

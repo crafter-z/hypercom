@@ -1,8 +1,6 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { useAppStore, countLeaves } from '../../stores/useAppStore';
 import type { PaneNode, BranchPane, SplitDirection } from '../../types';
-import { Columns2, Rows2 } from 'lucide-react';
 import {
   DndContext,
   closestCenter,
@@ -39,11 +37,9 @@ const MainDisplay: React.FC = () => {
   const tabs = useAppStore((s) => s.tabs);
   const focusedPaneId = useAppStore((s) => s.focusedPaneId);
   const setFocusedPane = useAppStore((s) => s.setFocusedPane);
-  const splitPane = useAppStore((s) => s.splitPane);
   const moveTabToPane = useAppStore((s) => s.moveTabToPane);
   const reorderPaneTabIds = useAppStore((s) => s.reorderPaneTabIds);
   const resizeChildren = useAppStore((s) => s.resizeChildren);
-  const { t } = useTranslation();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragTabId, setDragTabId] = useState<string | null>(null);
@@ -153,18 +149,6 @@ const MainDisplay: React.FC = () => {
 
   return (
     <div className="main-display">
-      <div className="main-display-toolbar">
-        <button className="btn btn-icon btn-sm" title={t('mainDisplay.toolbar.splitVertical')} onClick={() => splitPane('vertical')}>
-          <Columns2 size={14} />
-        </button>
-        <button className="btn btn-icon btn-sm" title={t('mainDisplay.toolbar.splitHorizontal')} onClick={() => splitPane('horizontal')}>
-          <Rows2 size={14} />
-        </button>
-        {leafCount > 1 && (
-          <span className="main-display-info">{t('mainDisplay.toolbar.paneCount', { count: leafCount })}</span>
-        )}
-      </div>
-
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}

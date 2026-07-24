@@ -1,12 +1,29 @@
 /* ==================== Tab Bar ==================== */
 .tab-bar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   height: var(--tab-height);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
   overflow-x: auto;
   overflow-y: hidden;
+}
+
+/* Split-pane buttons pinned to the far right of the tab bar.
+ * `position: sticky; right: 0` keeps them visible even when the
+ * tab list overflows and scrolls horizontally; the opaque background
+ * prevents scrolled tabs from showing through underneath. */
+.tab-bar-split-group {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: var(--space-1);
+  flex-shrink: 0;
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: var(--bg-secondary);
 }
 
 .tab-item {
