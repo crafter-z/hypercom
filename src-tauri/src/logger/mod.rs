@@ -312,18 +312,38 @@ impl LogManager {
         Ok(())
     }
 
-    /// 手动另存日志
+    /// 手动另存日志。
+    /// 优先使用活跃 writer 的文件路径（精确）；无活跃 writer 时回退到
+    /// 日志目录中该端口最新的日志文件（通过 list_files 的 port_id 反查）。
     pub fn save_log_as(&self, port_id: &str, target_path: &str) -> anyhow::Result<()> {
+        // 1. 活跃 writer → 直接拷贝其文件（路径精确，无歧义）
         if let Some(writer) = self.writers.get(port_id) {
             fs::copy(&writer.file_path, target_path)?;
             log::info!("Log saved from {:?} to {}", writer.file_path, target_path);
-        } else {
-            anyhow::bail!(
-                "No log writer exists for port '{}'. Start logging first.",
-                port_id
-            );
+            return Ok(());
         }
-        Ok(())
+
+        // 2. 无活跃 writer → 回退：在日志目录中查找该端口最新的日志文件
+        let files = self.list_files()?;
+        let best = files
+            .iter()
+            .filter(|f| f.port_id == port_id)
+            .max_by_key(|f| f.created_at);
+
+        if let Some(file_info) = best {
+            fs::copy(&file_info.path, target_path)?;
+            log::info!(
+                "Log saved (fallback, no active writer) from {} to {}",
+                file_info.path,
+                target_path
+            );
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "No log file found for port '{}'. Connect the port with auto-save logging enabled first.",
+            port_id
+        )
     }
 
     /// 列出所有日志文件。port_id 解析优先级：
@@ -493,11 +513,29 @@ mod tests {
     }
 
     #[test]
-    fn test_save_log_as_no_writer() {
+    fn test_save_log_as_no_writer_no_files() {
         let dir = test_dir("nowriter");
         let mgr = test_manager(&dir);
         let result = mgr.save_log_as("NONEXIST", "/tmp/test.log");
         assert!(result.is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_log_as_fallback_after_writer_closed() {
+        // writer 已关闭（端口断开）后，save_log_as 应回退到日志目录中查找该端口最新文件
+        let dir = test_dir("fallback");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM4", "string").unwrap();
+        mgr.write("COM4", "10:00:00", "RX", b"fallback data").unwrap();
+        mgr.close_writer("COM4").unwrap();
+        // writer 已不存在，但文件仍在日志目录中
+        assert!(mgr.writers.get("COM4").is_none());
+        let target = dir.join("fallback_saved.log");
+        mgr.save_log_as("COM4", &target.to_string_lossy()).unwrap();
+        assert!(target.exists());
+        let content = fs::read_to_string(&target).unwrap();
+        assert!(content.contains("fallback data"));
         let _ = fs::remove_dir_all(&dir);
     }
 
