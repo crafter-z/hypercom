@@ -3,48 +3,45 @@ import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
-import { Send, Cable, Eraser, CornerDownLeft, TextCursorInput, Trash2, Plus, Edit3, FileUp } from 'lucide-react';
+import { Send, Plus, Edit3, FileUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { LineEnding, SendCommand } from '../../types';
-import type { SendHistoryItem, FileProgressPayload } from '../../services/tauri';
+import type { LineEnding, SendCommand, SendHistoryEntry } from '../../types';
+import type { FileProgressPayload } from '../../services/tauri';
 import { serialService, eventService } from '../../services/tauri';
 import { notifyError, notifySuccess } from '../../stores/useToastStore';
-import { computeByteCount, formatLineEndingHex } from '../../utils/sendUtils';
+import {
+  computeByteCount,
+  formatLineEndingHex,
+  textToHexPreview,
+  hexToTextPreview,
+  sanitizeHexInput,
+} from '../../utils/sendUtils';
 
 export interface SendSectionProps {
   activeTabId: string | null;
   isPortActive: boolean;
   isConnected: boolean;
-  isConnecting: boolean;
-  isPortError: boolean;
   sendData: (portId: string, data: string, isHex: boolean, lineEnding: string) => Promise<number>;
-  toggleConnection: (portId: string) => Promise<void>;
-  historyUp: () => SendHistoryItem | null;
-  historyDown: () => SendHistoryItem | null;
-  clearHistory: (portId: string) => Promise<void>;
+  historyUp: () => SendHistoryEntry | null;
+  historyDown: () => SendHistoryEntry | null;
 }
 
 const SendSection: React.FC<SendSectionProps> = ({
   activeTabId,
   isPortActive,
   isConnected,
-  isConnecting,
-  isPortError,
   sendData,
-  toggleConnection,
   historyUp,
   historyDown,
-  clearHistory,
 }) => {
   const { t } = useTranslation();
   const sendInput = useOperationStore(s => s.sendInput);
   const sendIsHex = useOperationStore(s => s.sendIsHex);
   const sendAppendLineEnding = useOperationStore(s => s.sendAppendLineEnding);
   const sendOnEnter = useAppStore(s => s.config.sendOnEnter);
-  const encoding = useOperationStore(s => s.encoding);
+  const encoding = useTerminalStore(s => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
   const setOpState = useOperationStore(s => s.setOpState);
-  const clearTerminal = useTerminalStore(s => s.clearTerminal);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
   const setConfigActiveTab = useAppStore(s => s.setConfigActiveTab);
@@ -77,7 +74,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   }, []);
 
   const byteCount = useMemo(
-    () => computeByteCount(sendInput, sendIsHex, encoding, sendAppendLineEnding),
+    () => computeByteCount(sendInput, sendIsHex, encoding ?? 'ASCII', sendAppendLineEnding),
     [sendInput, sendIsHex, encoding, sendAppendLineEnding]
   );
 
@@ -94,16 +91,6 @@ const SendSection: React.FC<SendSectionProps> = ({
     return [...set.commands].sort((a, b) => a.order - b.order);
   }, [sendCommandSets, activeSendCommandSetId]);
 
-  const connectButtonLabel = isConnected
-    ? t('sendSection.connectBtn.disconnect')
-    : isConnecting
-    ? t('sendSection.connectBtn.connecting')
-    : isPortError
-    ? t('sendSection.connectBtn.retry')
-    : t('sendSection.connectBtn.open');
-  const connectButtonDisabled = !isPortActive || isConnecting;
-  const showAccent = isPortActive && !isConnected && !isConnecting;
-
   const handleSend = async () => {
     if (!isPortActive || !sendInput.trim()) return;
     await sendData(activeTabId!, sendInput, sendIsHex, sendAppendLineEnding);
@@ -115,21 +102,6 @@ const SendSection: React.FC<SendSectionProps> = ({
   const handleQuickCommand = async (cmd: SendCommand) => {
     if (!isPortActive || !activeTabId || !cmd.content) return;
     await sendData(activeTabId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
-  };
-
-  const handleToggleConnection = async () => {
-    if (!activeTabId) return;
-    await toggleConnection(activeTabId);
-  };
-
-  const handleClear = () => {
-    if (!activeTabId) return;
-    clearTerminal(activeTabId);
-  };
-
-  const handleClearHistory = async () => {
-    if (!activeTabId) return;
-    await clearHistory(activeTabId);
   };
 
   const handleSendFile = async () => {
@@ -159,12 +131,12 @@ const SendSection: React.FC<SendSectionProps> = ({
     }, 0);
   };
 
-  const applyHistoryItem = (item: SendHistoryItem | null) => {
+  const applyHistoryItem = (item: SendHistoryEntry | null) => {
     if (item) {
       setOpState({
         sendInput: item.content,
         sendIsHex: item.format === 'hex',
-        sendAppendLineEnding: item.line_ending as LineEnding,
+        sendAppendLineEnding: item.lineEnding,
       });
     } else {
       setOpState({ sendInput: '' });
@@ -176,9 +148,16 @@ const SendSection: React.FC<SendSectionProps> = ({
     toggleConfigModal(true);
   };
 
-  const toggleSendOnEnter = () => {
-    const next = !sendOnEnter;
-    useAppStore.getState().setConfig({ sendOnEnter: next });
+  // Toggling HEX mode converts the current compose buffer in place so the user
+  // never loses what they typed — text→hex bytes when enabling, hex→text when
+  // disabling (both UTF-8, non-fatal so partial input survives the switch).
+  const handleToggleHex = (next: boolean) => {
+    if (next === sendIsHex) return;
+    if (next) {
+      setOpState({ sendIsHex: true, sendInput: textToHexPreview(sendInput) });
+    } else {
+      setOpState({ sendIsHex: false, sendInput: hexToTextPreview(sendInput) });
+    }
   };
 
   return (
@@ -225,25 +204,24 @@ const SendSection: React.FC<SendSectionProps> = ({
         <textarea
           ref={textareaRef}
           className="input op-send-input"
-          placeholder={isPortActive ? t('sendSection.input.placeholder.active') : t('sendSection.input.placeholder.noPort')}
+          placeholder={
+            !isPortActive ? t('sendSection.input.placeholder.noPort')
+            : sendIsHex ? t('sendSection.input.placeholder.hex')
+            : t('sendSection.input.placeholder.active')
+          }
           disabled={!isPortActive}
           value={sendInput}
-          onChange={e => setOpState({ sendInput: e.target.value })}
+          onChange={e => setOpState({ sendInput: sendIsHex ? sanitizeHexInput(e.target.value) : e.target.value })}
           onKeyDown={e => {
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
-              // Ctrl/Cmd+Enter ALWAYS sends, regardless of sendOnEnter
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              handleSend();
-            } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              if (sendOnEnter) {
-                handleSend();
+              if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                insertNewlineAtCursor();          // Ctrl/Meta/Shift+Enter: ALWAYS newline
+              } else if (sendOnEnter) {
+                handleSend();                     // plain Enter: sends only when setting on
               } else {
                 insertNewlineAtCursor();
               }
-            } else if (e.key === 'Enter' && e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              insertNewlineAtCursor();
             } else if (e.key === 'ArrowUp' && !e.nativeEvent.isComposing) {
               e.preventDefault();
               applyHistoryItem(historyUp());
@@ -265,29 +243,20 @@ const SendSection: React.FC<SendSectionProps> = ({
             <Send size={14} />
             {t('sendSection.sendButton')}
           </button>
-          <div className="op-send-tool-row">
-            <button
-              className={`btn btn-icon btn-sm${sendOnEnter ? ' active' : ''}`}
-              title={sendOnEnter ? t('op.send.enterBehavior.tooltipSend') : t('op.send.enterBehavior.tooltipNewline')}
-              onClick={toggleSendOnEnter}
-            >
-              {sendOnEnter ? <CornerDownLeft size={13} /> : <TextCursorInput size={13} />}
-            </button>
-            <button
-              className="btn btn-icon btn-sm"
-              title={t('op.send.clearHistory')}
-              onClick={handleClearHistory}
-              disabled={!isPortActive}
-            >
-              <Trash2 size={13} />
-            </button>
-          </div>
+          <button
+            className="btn btn-sm"
+            title={t('sendSection.file.button')}
+            onClick={handleSendFile}
+            disabled={!isConnected || fileProgress !== null}
+          >
+            <FileUp size={13} /> {t('sendSection.file.button')}
+          </button>
           <div className="op-send-options">
             <label className="checkbox-wrapper op-checkbox-compact">
               <input
                 type="checkbox"
                 checked={sendIsHex}
-                onChange={e => setOpState({ sendIsHex: e.target.checked })}
+                onChange={e => handleToggleHex(e.target.checked)}
               />
               HEX
             </label>
@@ -311,32 +280,6 @@ const SendSection: React.FC<SendSectionProps> = ({
           {hexSuffix ?? t('sendSection.lineEnding.none')}
         </div>
       )}
-
-      <div className="op-btn-row">
-        <button
-          className={`btn op-btn-grow${showAccent ? ' op-connect-accent' : ''}`}
-          onClick={handleToggleConnection}
-          disabled={connectButtonDisabled}
-        >
-          <Cable size={13} /> {connectButtonLabel}
-        </button>
-        <button
-          className="btn"
-          title={t('sendSection.file.button')}
-          onClick={handleSendFile}
-          disabled={!isConnected || fileProgress !== null}
-        >
-          <FileUp size={13} /> {t('sendSection.file.button')}
-        </button>
-        <button
-          className="btn"
-          title={t('sendSection.clearButton')}
-          onClick={handleClear}
-          disabled={!isPortActive}
-        >
-          <Eraser size={13} /> {t('sendSection.clearButton')}
-        </button>
-      </div>
 
       {fileProgress && (
         <div className="op-file-progress">

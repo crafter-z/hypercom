@@ -7,6 +7,9 @@ import {
   parseHexBytes,
   computeByteCount,
   formatLineEndingHex,
+  textToHexPreview,
+  hexToTextPreview,
+  sanitizeHexInput,
 } from './sendUtils';
 
 describe('sendUtils', () => {
@@ -81,6 +84,59 @@ describe('sendUtils', () => {
       expect(formatLineEndingHex('\\r')).toBe('0D');
       expect(formatLineEndingHex('\\n')).toBe('0A');
       expect(formatLineEndingHex('None')).toBeNull();
+    });
+  });
+
+  describe('textToHexPreview', () => {
+    it('converts ascii text to spaced uppercase hex bytes', () => {
+      expect(textToHexPreview('hello')).toBe('68 65 6C 6C 6F');
+    });
+
+    it('returns empty string for empty input', () => {
+      expect(textToHexPreview('')).toBe('');
+    });
+
+    it('encodes multi-byte UTF-8 characters', () => {
+      // 中 = U+4E2D → UTF-8 E4 B8 AD
+      expect(textToHexPreview('中')).toBe('E4 B8 AD');
+    });
+  });
+
+  describe('hexToTextPreview', () => {
+    it('decodes space-separated hex to text', () => {
+      expect(hexToTextPreview('68 65 6C 6C 6F')).toBe('hello');
+    });
+
+    it('decodes compact hex to text', () => {
+      expect(hexToTextPreview('68656C6C6F')).toBe('hello');
+    });
+
+    it('returns empty string for empty input', () => {
+      expect(hexToTextPreview('')).toBe('');
+      expect(hexToTextPreview('   ')).toBe('');
+    });
+
+    it('returns empty string for invalid-only input', () => {
+      expect(hexToTextPreview('ZZ GG')).toBe('');
+    });
+  });
+
+  describe('round-trip textToHexPreview <-> hexToTextPreview', () => {
+    it('round-trips ascii text', () => {
+      const samples = ['hello', 'AT+OK', 'abc 123', ''];
+      for (const s of samples) {
+        expect(hexToTextPreview(textToHexPreview(s))).toBe(s);
+      }
+    });
+  });
+
+  describe('sanitizeHexInput', () => {
+    it('strips non-hex characters but keeps spaces and case', () => {
+      expect(sanitizeHexInput('GG 12 ZZ34 ')).toBe(' 12 34 ');
+    });
+
+    it('keeps valid hex digits and whitespace untouched', () => {
+      expect(sanitizeHexInput('AB cd 09\n')).toBe('AB cd 09\n');
     });
   });
 });

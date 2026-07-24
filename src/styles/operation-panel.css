@@ -201,11 +201,6 @@
   font-weight: var(--weight-semibold);
 }
 
-.op-send-tool-row {
-  display: flex;
-  gap: var(--space-1);
-}
-
 .op-send-options {
   display: flex;
   flex-direction: column;
@@ -232,14 +227,21 @@
   color: var(--text-secondary);
 }
 
-/* ---- Connect / file / clear row ---- */
-.op-btn-row {
-  display: flex;
-  gap: 6px;
-}
-
 .op-btn-grow {
   flex: 1;
+}
+
+/* Connect button in the top strip — semibold so the primary connection
+ * affordance reads heavier than the neighbouring icon buttons. */
+.op-connect-btn {
+  font-weight: var(--weight-semibold);
+}
+
+/* Compact replay-speed picker that sits inline in the strip. */
+.op-replay-speed {
+  width: 52px;
+  padding: 1px 12px 1px 3px;
+  font-size: var(--text-2xs);
 }
 
 /* "Open port" call-to-action. .btn.op-connect-accent (0,2,0) outranks
@@ -308,6 +310,7 @@
 .op-loop-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
   margin-top: var(--space-1);
 }
@@ -315,6 +318,7 @@
 .op-delay-input {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: var(--space-1);
 }
 

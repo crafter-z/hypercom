@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { getUnexpectedDisconnectedTabIds } from './DisconnectBanner';
-import type { TabItem, SerialPort } from '../../types';
+import { filterLostTabIds } from './DisconnectBanner';
+import type { TabItem } from '../../types';
 
 const makeTab = (id: string): TabItem => ({
   id,
@@ -10,86 +10,29 @@ const makeTab = (id: string): TabItem => ({
   splitPaneId: 'main',
 });
 
-const makePort = (id: string, status: SerialPort['status']): SerialPort => ({
-  id,
-  name: id,
-  status,
-  type: 'real',
-  isHidden: false,
-});
-
-describe('getUnexpectedDisconnectedTabIds', () => {
-  it('returns tab ids for ports with status disconnected (not user-initiated)', () => {
-    const tabs = [
-      makeTab('COM3'),
-      makeTab('COM4'),
-      makeTab('COM5'),
-    ];
-    const ports = [
-      makePort('COM3', 'disconnected'),
-      makePort('COM4', 'connected'),
-      makePort('COM5', 'connecting'),
-    ];
-    const userClosing = new Set<string>();
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual(['COM3']);
-  });
-
-  it('returns tab ids when port is missing from ports list (USB unplug)', () => {
-    const tabs = [makeTab('COM3'), makeTab('COM4')];
-    const ports = [makePort('COM4', 'connected')];
-    const userClosing = new Set<string>();
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual(['COM3']);
-  });
-
-  it('excludes tabs whose portId is in the userClosingPortIds set', () => {
-    const tabs = [makeTab('COM3'), makeTab('COM4')];
-    const ports = [
-      makePort('COM3', 'disconnected'),
-      makePort('COM4', 'disconnected'),
-    ];
-    const userClosing = new Set<string>(['COM3']);
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual(['COM4']);
-  });
-
-  it('returns empty array when all ports are connected', () => {
-    const tabs = [makeTab('COM3'), makeTab('COM4')];
-    const ports = [
-      makePort('COM3', 'connected'),
-      makePort('COM4', 'connected'),
-    ];
-    const userClosing = new Set<string>();
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual([]);
-  });
-
-  it('returns empty array when all disconnected ports are user-initiated', () => {
-    const tabs = [makeTab('COM3'), makeTab('COM4')];
-    const ports = [
-      makePort('COM3', 'disconnected'),
-      makePort('COM4', 'disconnected'),
-    ];
-    const userClosing = new Set<string>(['COM3', 'COM4']);
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual([]);
-  });
-
-  it('returns multiple tab ids when multiple ports are unexpectedly disconnected', () => {
-    const tabs = [makeTab('COM3'), makeTab('COM4'), makeTab('COM5')];
-    const ports = [
-      makePort('COM3', 'disconnected'),
-      makePort('COM4', 'connected'),
-      // COM5 missing from ports list
-    ];
-    const userClosing = new Set<string>();
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual(['COM3', 'COM5']);
-  });
-
+describe('filterLostTabIds', () => {
   it('returns empty array for empty tabs', () => {
-    expect(getUnexpectedDisconnectedTabIds([], [], new Set<string>())).toEqual([]);
+    expect(filterLostTabIds([], () => true)).toEqual([]);
   });
 
-  it('does not treat error status as disconnected', () => {
-    const tabs = [makeTab('COM3')];
-    const ports = [makePort('COM3', 'error')];
-    const userClosing = new Set<string>();
-    expect(getUnexpectedDisconnectedTabIds(tabs, ports, userClosing)).toEqual([]);
+  it('returns empty array when no tab is lost', () => {
+    const tabs = [makeTab('COM3'), makeTab('COM4')];
+    expect(filterLostTabIds(tabs, () => false)).toEqual([]);
+  });
+
+  it('returns only the tabs whose id the predicate marks lost', () => {
+    const tabs = [makeTab('COM3'), makeTab('COM4'), makeTab('COM5')];
+    const lost = new Set(['COM3', 'COM5']);
+    expect(filterLostTabIds(tabs, (id) => lost.has(id))).toEqual(['COM3', 'COM5']);
+  });
+
+  it('preserves tab order', () => {
+    const tabs = [makeTab('COM9'), makeTab('COM1'), makeTab('COM7')];
+    expect(filterLostTabIds(tabs, () => true)).toEqual(['COM9', 'COM1', 'COM7']);
+  });
+
+  it('returns all ids when every tab is lost', () => {
+    const tabs = [makeTab('COM3'), makeTab('COM4')];
+    expect(filterLostTabIds(tabs, () => true)).toEqual(['COM3', 'COM4']);
   });
 });

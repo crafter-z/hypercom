@@ -3,10 +3,10 @@ import { useAppStore } from '../stores/useAppStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useRuleStore } from '../stores/useRuleStore';
-import { serialService, configService, systemService, eventService, logService, storageService, sendHistoryService } from '../services/tauri';
-import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent, SerialReconnectHintEvent, SerialPinStatesEvent, CommandSetInfo, HighlightSetInfo, CommandInfo, HighlightRuleInfo, ProtocolTemplateInfo, SendHistoryItem } from '../services/tauri';
+import { serialService, configService, systemService, eventService, logService, storageService } from '../services/tauri';
+import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent, SerialReconnectHintEvent, SerialPinStatesEvent, CommandSetInfo, HighlightSetInfo, CommandInfo, HighlightRuleInfo, ProtocolTemplateInfo } from '../services/tauri';
 import { usePinStatesStore } from '../stores/usePinStatesStore';
-import type { SerialPort, AppConfig, SendCommandSet, HighlightRuleSet, SendCommand, ProtocolTemplate, PaneNode } from '../types';
+import type { SerialPort, AppConfig, SendCommandSet, HighlightRuleSet, SendCommand, ProtocolTemplate, PaneNode, SendHistoryEntry, LineEnding } from '../types';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
 import { notifyError, notifySuccess, extractErrorMessage } from '../stores/useToastStore';
 import { useToastStore } from '../stores/useToastStore';
@@ -15,8 +15,8 @@ import i18n from '../i18n';
 // ==================== Module-level disconnect tracking ====================
 // Tracks portIds that the user is explicitly closing via closePort(). The
 // `useSerialReceive` status handler reads this to suppress the "port lost"
-// toast for user-initiated disconnects, and `DisconnectBanner` reads it
-// (via `isUserClosingPort`) to suppress the banner for the same reason.
+// toast (and the `lostPortIds` mark that drives DisconnectBanner) for
+// user-initiated disconnects.
 //
 // Entries are removed 3s after closePort resolves to tolerate late
 // `serial:status` events that arrive after the backend close response.
@@ -25,6 +25,18 @@ const userClosingPortIds = new Set<string>();
 /** Returns true if the given portId is currently being closed by the user. */
 export function isUserClosingPort(portId: string): boolean {
   return userClosingPortIds.has(portId);
+}
+
+// Tracks portIds that were CONNECTED this session and then dropped
+// unexpectedly (USB unplug, device reset). Session-restored tabs were never
+// connected this session, so they must never appear here — that is what
+// prevents the DisconnectBanner false-alarm on app startup. Cleared on
+// openPort / closePort / successful reconnect.
+const lostPortIds = new Set<string>();
+
+/** True if the port was connected this session and dropped unexpectedly. */
+export function isPortLost(portId: string): boolean {
+  return lostPortIds.has(portId);
 }
 
 // ==================== Module-level auto-reconnect tracking ====================
@@ -76,6 +88,8 @@ async function runReconnectLoop(portId: string) {
           notifyError(e);
         });
       }
+      // Reconnected — the port is no longer lost; hide the banner.
+      lostPortIds.delete(portId);
       notifySuccess('toast.reconnect.succeeded');
       break;
     } catch (err) {
@@ -304,6 +318,9 @@ export function useSerialConnection() {
     // DisconnectBanner / status toast resume normal unexpected-disconnect
     // detection for this port.
     userClosingPortIds.delete(portId);
+    // A deliberate (re)connect clears the lost mark — the banner must hide
+    // the moment the user retries a dropped port.
+    lostPortIds.delete(portId);
     try {
       // Resolve connection params from the target port first (session restore
       // and per-port presets write per-port values that must win over the
@@ -358,6 +375,8 @@ export function useSerialConnection() {
     // (openPort) — a timer-based removal made the banner false-alarm on a
     // deliberately disconnected port whose tab was still open.
     userClosingPortIds.add(portId);
+    // User-initiated close is never "lost" — clear any stale mark.
+    lostPortIds.delete(portId);
     try {
       await serialService.closeSerialPort(portId);
       updatePort(portId, { status: 'disconnected' });
@@ -548,12 +567,20 @@ export function useSerialReceive() {
           disconnected: 'disconnected',
           error: 'error',
         };
+        // A fresh connection clears any prior "lost" mark so the banner
+        // hides as soon as the port is back up.
+        if (event.status === 'connected') {
+          lostPortIds.delete(event.port_id);
+        }
         // Detect unexpected connected → disconnected transition BEFORE
         // updating the store (we need the previous status). User-initiated
         // closes are tracked in `userClosingPortIds` and suppressed.
         if (event.status === 'disconnected' && !userClosingPortIds.has(event.port_id)) {
           const prevPort = useAppStore.getState().ports.find(p => p.id === event.port_id);
           if (prevPort && prevPort.status === 'connected') {
+            // Mark lost so DisconnectBanner shows; only a real
+            // connected→disconnected transition this session lands here.
+            lostPortIds.add(event.port_id);
             const portName = prevPort.alias || prevPort.name;
             useToastStore.getState().push({
               severity: 'warning',
@@ -601,53 +628,48 @@ export function useSerialReceive() {
   }, [appendTerminalLine]);
 }
 
+// ==================== Module-level in-memory send history ====================
+// Per-port send history lives ONLY in memory (user decision: history may
+// vanish on app close — no SQLite persistence). Keyed by portId, capped at
+// SEND_HISTORY_CAP entries (oldest dropped). The hook mirrors the active
+// port's slice into local state for Up/Down recall.
+const sendHistoryMap = new Map<string, SendHistoryEntry[]>();
+const SEND_HISTORY_CAP = 50;
+
 /**
  * Hook: 串口数据发送（用户动作）
  * 返回 sendData 回调，调用后端 serialService 发送数据，并把发送内容回显到终端、累加 TX 流量统计。
- * 同时维护当前端口的发送历史（SQLite 持久化），供发送框 Up/Down 键 recall。
+ * 同时维护当前端口的发送历史（内存态，按端口隔离，上限 50 条），供发送框 Up/Down 键 recall。
  *
  * SRP：只负责"发送"这一个用户动作 + 发送历史，不订阅任何事件。
  */
 export function useSerialSend() {
   const activeTabId = useAppStore((s) => s.activeTabId);
-  const [sendHistory, setSendHistory] = useState<SendHistoryItem[]>([]);
+  const [sendHistory, setSendHistory] = useState<SendHistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
 
-  // Load persisted send history when the active tab changes.
+  // Mirror the active port's in-memory history into state synchronously.
   useEffect(() => {
-    if (!activeTabId) {
-      setSendHistory([]);
-      historyIndexRef.current = -1;
-      return;
-    }
-    sendHistoryService
-      .listSendHistory(activeTabId, 50)
-      .then((rows) => {
-        // Backend returns newest-first; present chronological oldest -> newest for recall.
-        setSendHistory(rows.reverse());
-        historyIndexRef.current = -1;
-      })
-      .catch((err) => console.debug('[useSerialSend] Failed to load history:', err));
+    setSendHistory(activeTabId ? (sendHistoryMap.get(activeTabId) ?? []) : []);
+    historyIndexRef.current = -1;
   }, [activeTabId]);
 
   const addToHistory = useCallback(
-    async (portId: string, data: string, isHex: boolean, lineEnding: string) => {
-      try {
-        const row = await sendHistoryService.addSendHistory(
-          portId,
-          data,
-          isHex ? 'hex' : 'string',
-          lineEnding
-        );
-        setSendHistory((prev) => {
-          // Dedup on content AND format — the same text sent as HEX vs
-          // string (e.g. "AA") is a distinct history entry.
-          const filtered = prev.filter((h) => !(h.content === row.content && h.format === row.format));
-          return [...filtered, row];
-        });
-      } catch (err) {
-        console.debug('[useSerialSend] Failed to persist history:', err);
-      }
+    (portId: string, data: string, isHex: boolean, lineEnding: string) => {
+      const entry: SendHistoryEntry = {
+        content: data,
+        format: isHex ? 'hex' : 'string',
+        lineEnding: lineEnding as LineEnding,
+      };
+      const prev = sendHistoryMap.get(portId) ?? [];
+      // Dedup on content AND format — the same text sent as HEX vs
+      // string (e.g. "AA") is a distinct history entry.
+      const filtered = prev.filter((h) => !(h.content === entry.content && h.format === entry.format));
+      const next = [...filtered, entry];
+      // Cap at SEND_HISTORY_CAP, dropping the oldest entries.
+      const capped = next.length > SEND_HISTORY_CAP ? next.slice(next.length - SEND_HISTORY_CAP) : next;
+      sendHistoryMap.set(portId, capped);
+      setSendHistory(capped);
     },
     []
   );
@@ -692,7 +714,7 @@ export function useSerialSend() {
         const currentTx = state.trafficStats[portId]?.txTotal || 0;
         state.setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
 
-        // Persist send history asynchronously (non-blocking)
+        // Record send history in memory (per-port, capped)
         addToHistory(portId, data, isHex, lineEnding);
 
         return bytesWritten;
@@ -708,7 +730,7 @@ export function useSerialSend() {
     [addToHistory]
   );
 
-  const historyUp = useCallback((): SendHistoryItem | null => {
+  const historyUp = useCallback((): SendHistoryEntry | null => {
     if (sendHistory.length === 0) return null;
     let idx = historyIndexRef.current;
     if (idx === -1 || idx >= sendHistory.length) {
@@ -720,7 +742,7 @@ export function useSerialSend() {
     return sendHistory[idx] ?? null;
   }, [sendHistory]);
 
-  const historyDown = useCallback((): SendHistoryItem | null => {
+  const historyDown = useCallback((): SendHistoryEntry | null => {
     if (historyIndexRef.current < 0) return null;
     let idx = historyIndexRef.current;
     if (idx < sendHistory.length - 1) {
@@ -732,14 +754,10 @@ export function useSerialSend() {
     return null;
   }, [sendHistory]);
 
-  const clearHistory = useCallback(async (portId: string) => {
-    try {
-      await sendHistoryService.clearSendHistory(portId);
-      setSendHistory([]);
-      historyIndexRef.current = -1;
-    } catch (err) {
-      console.debug('[useSerialSend] Failed to clear history:', err);
-    }
+  const clearHistory = useCallback((portId: string) => {
+    sendHistoryMap.delete(portId);
+    setSendHistory([]);
+    historyIndexRef.current = -1;
   }, []);
 
   return { sendData, sendHistory, historyUp, historyDown, clearHistory };

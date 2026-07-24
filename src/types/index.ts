@@ -175,6 +175,13 @@ export interface SendCommandSet {
   loopDelay: number;       // 循环间隔
 }
 
+/** 发送历史条目 — 仅内存态（不持久化，关应用即清空），按端口隔离 */
+export interface SendHistoryEntry {
+  content: string;
+  format: 'hex' | 'string';
+  lineEnding: LineEnding;
+}
+
 // ==================== 协议解析相关 ====================
 
 /** 校验和算法 */

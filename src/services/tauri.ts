@@ -358,31 +358,6 @@ export interface ProtocolTemplateInfo {
   color_footer: string;
 }
 
-// ==================== 发送历史命令 ====================
-
-export interface SendHistoryItem {
-  id: string;
-  port_id: string;
-  content: string;
-  format: string;
-  line_ending: string;
-  created_at: string;
-}
-
-export const sendHistoryService = {
-  listSendHistory: (portId: string, limit: number): Promise<SendHistoryItem[]> => {
-    return invoke<SendHistoryItem[]>('list_send_history', { portId, limit });
-  },
-
-  addSendHistory: (portId: string, content: string, format: string, lineEnding: string): Promise<SendHistoryItem> => {
-    return invoke<SendHistoryItem>('add_send_history', { portId, content, format, lineEnding });
-  },
-
-  clearSendHistory: (portId: string): Promise<void> => {
-    return invoke<void>('clear_send_history', { portId });
-  },
-};
-
 // ==================== 存储命令 ====================
 
 export const storageService = {

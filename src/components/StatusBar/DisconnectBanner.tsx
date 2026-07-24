@@ -2,37 +2,24 @@ import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
-import { isUserClosingPort } from '../../hooks/useTauri';
-import type { TabItem, SerialPort } from '../../types';
+import { isPortLost } from '../../hooks/useTauri';
+import type { TabItem } from '../../types';
 
 /**
- * Pure helper: returns the tab IDs whose ports are unexpectedly disconnected.
+ * Pure helper: returns the IDs of open tabs whose ports are "lost".
  *
- * A tab is "unexpectedly disconnected" when:
- *  - The tab is still open.
- *  - The port is missing from `ports[]` (USB unplug removed it) OR the port
- *    status is `'disconnected'`.
- *  - The disconnect was NOT user-initiated (portId not in `userClosingPortIds`).
+ * A port is lost only after a real connected → disconnected transition THIS
+ * session (tracked by `lostPortIds` in useTauri.ts). Session-restored tabs
+ * were never connected this session, so they never light up the banner —
+ * that is what fixes the startup false-alarm.
  *
  * Exported for unit testing (see `DisconnectBanner.test.ts`).
  */
-export function getUnexpectedDisconnectedTabIds(
+export function filterLostTabIds(
   tabs: TabItem[],
-  ports: SerialPort[],
-  userClosingPortIds: Set<string>,
+  isLost: (id: string) => boolean,
 ): string[] {
-  const portMap = new Map(ports.map(p => [p.id, p]));
-  return tabs
-    .filter((tab) => {
-      if (userClosingPortIds.has(tab.id)) return false;
-      const port = portMap.get(tab.id);
-      // Port missing from list = USB unplug = unexpected
-      if (!port) return true;
-      // Port present but disconnected = unexpected (user-initiated already
-      // filtered above)
-      return port.status === 'disconnected';
-    })
-    .map(tab => tab.id);
+  return tabs.filter((t) => isLost(t.id)).map((t) => t.id);
 }
 
 /**
@@ -54,26 +41,14 @@ const DisconnectBanner: React.FC = () => {
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const { t } = useTranslation();
 
-  // Build the effective user-closing set from the module-level probe.
-  // `isUserClosingPort` reads the module-level Set in useTauri.ts that is
-  // populated by `useSerialConnection.closePort`. Re-evaluated on every
-  // render; renders are triggered by `ports`/`tabs` subscription, which
-  // always changes in tandem with the closing set (closePort calls
-  // updatePort after marking the port).
-  const closingSet = useMemo(
-    () => {
-      const set = new Set<string>();
-      for (const tab of tabs) {
-        if (isUserClosingPort(tab.id)) set.add(tab.id);
-      }
-      return set;
-    },
-    [tabs, ports],
-  );
-
+  // `isPortLost` reads the module-level `lostPortIds` Set in useTauri.ts,
+  // which mutates in tandem with port status updates (the status handler
+  // adds on unexpected disconnect and deletes on connect, and openPort /
+  // closePort / reconnect clear it). `ports` is in the deps so this memo
+  // re-runs on every status change that can flip a port's lost state.
   const disconnectedTabIds = useMemo(
-    () => getUnexpectedDisconnectedTabIds(tabs, ports, closingSet),
-    [tabs, ports, closingSet],
+    () => filterLostTabIds(tabs, isPortLost),
+    [tabs, ports],
   );
 
   if (disconnectedTabIds.length === 0) return null;

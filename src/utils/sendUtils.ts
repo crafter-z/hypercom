@@ -96,3 +96,24 @@ export function formatLineEndingHex(lineEnding: LineEnding): string | null {
   if (bytes.length === 0) return null;
   return bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
 }
+
+/** Convert plain text to a spaced uppercase HEX byte preview (UTF-8 bytes). '' → ''. */
+export function textToHexPreview(text: string): string {
+  if (!text) return '';
+  return Array.from(new TextEncoder().encode(text))
+    .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+    .join(' ');
+}
+
+/** Decode a HEX byte string back to text (UTF-8, non-fatal). Empty/whitespace → ''. */
+export function hexToTextPreview(hex: string): string {
+  if (!hex.trim()) return '';
+  const bytes = parseHexBytes(hex);
+  if (bytes.length === 0) return '';
+  return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));
+}
+
+/** Strip anything that isn't a HEX digit or whitespace (HEX-mode input guard). */
+export function sanitizeHexInput(input: string): string {
+  return input.replace(/[^0-9a-fA-F\s]/g, '');
+}
