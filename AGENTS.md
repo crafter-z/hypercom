@@ -31,7 +31,7 @@ hypercom/
 │   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
 │   ├── storage/mod.rs            # SQLite via sqlx (7 tables), WAL+FK pragmas (887 lines)
 │   └── config/mod.rs             # JSON config + versioning + validation + path + backup (475 lines)
-└── plans/                        # 10 design docs (see "Key files to read first" below)
+└── plans/                        # design docs (see "Key design reference" below)
 ```
 
 ## WHERE TO LOOK
@@ -303,18 +303,10 @@ type: feat | fix | docs | style | refactor | perf | test | chore
 scope: ui | backend | store | hooks | plans
 ```
 
-## Key files to read first
+## Key design reference
 
-- `plans/02-architecture.md` — full frontend layout with flexbox chain
-- `plans/03-backend.md` — Rust modules, commands, DB schema, events
 - `plans/04-data-flow.md` — 8 annotated data flow sequences
-- `plans/05-components.md` — component tree, props, type reference
-- `plans/06-status.md` — per-file/per-feature completion
-- `plans/07-roadmap.md` — prioritized remaining tasks
 - `plans/08-defects.md` — active bug tracker
-- `plans/09-reference.md` — file index, deps, naming conventions
-
-> Note: some plan files predate the store/hook/component split refactor. Cross-check with the actual source in `src/stores/`, `src/hooks/useTauri.ts`, and `src/components/` when the docs disagree with the code.
 
 ## Other gotchas
 
