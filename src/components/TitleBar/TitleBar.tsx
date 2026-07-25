@@ -90,10 +90,9 @@ const TitleBar: React.FC = () => {
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left" data-tauri-drag-region>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-link)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
+        <svg width="18" height="18" viewBox="0 0 96 96" fill="none">
+          <path d="M25 18 V78 M71 18 V78 M25 48 H36 V38 H48 V58 H60 V48 H71"
+                stroke="currentColor" strokeWidth="10" strokeLinecap="round" strokeLinejoin="miter"/>
         </svg>
         <span className="titlebar-title" data-tauri-drag-region>{titleText}</span>
         <span className="titlebar-version" data-tauri-drag-region>{t('titleBar.version')}</span>

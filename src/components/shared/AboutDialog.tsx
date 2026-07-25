@@ -32,10 +32,9 @@ const AboutDialog: React.FC = () => {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '8px 0 16px' }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-link)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5z" />
-            <path d="M2 17l10 5 10-5" />
-            <path d="M2 12l10 5 10-5" />
+          <svg width="48" height="48" viewBox="0 0 96 96" fill="none">
+            <path d="M25 18 V78 M71 18 V78 M25 48 H36 V38 H48 V58 H60 V48 H71"
+                  stroke="var(--accent-color, #4fc3f7)" strokeWidth="10" strokeLinecap="round" strokeLinejoin="miter"/>
           </svg>
           <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)' }}>{t('titleBar.appName')}</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
