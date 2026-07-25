@@ -31,6 +31,12 @@ pub struct PortInfo {
     pub id: String,
     pub name: String,
     pub port_type: String, // "real" | "virtual"
+    /// USB 厂商名（仅 USB 串口有值；PCI/蓝牙/模拟口为空，序列化时省略）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    /// USB 产品名（仅 USB 串口有值；PCI/蓝牙/模拟口为空，序列化时省略）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
 }
 
 /// 串口数据事件（推送给前端）
@@ -232,15 +238,23 @@ impl SerialManager {
     pub fn list_ports(&self) -> anyhow::Result<Vec<PortInfo>> {
         let mut result: Vec<PortInfo> = serialport::available_ports()?
             .into_iter()
-            .map(|p| PortInfo {
-                id: p.port_name.clone(),
-                name: p.port_name,
-                port_type: match p.port_type {
-                    serialport::SerialPortType::UsbPort(_) => "real".to_string(),
-                    serialport::SerialPortType::PciPort => "real".to_string(),
-                    serialport::SerialPortType::BluetoothPort => "real".to_string(),
-                    serialport::SerialPortType::Unknown => "real".to_string(),
-                },
+            .map(|p| {
+                // USB 口从 UsbPortInfo 提取厂商/产品名；其它类型无此信息。
+                let (port_type, manufacturer, product) = match p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => {
+                        ("real".to_string(), info.manufacturer, info.product)
+                    }
+                    serialport::SerialPortType::PciPort => ("real".to_string(), None, None),
+                    serialport::SerialPortType::BluetoothPort => ("real".to_string(), None, None),
+                    serialport::SerialPortType::Unknown => ("real".to_string(), None, None),
+                };
+                PortInfo {
+                    id: p.port_name.clone(),
+                    name: p.port_name,
+                    port_type,
+                    manufacturer,
+                    product,
+                }
             })
             .collect();
 
@@ -249,6 +263,8 @@ impl SerialManager {
                 id: "SIM:Loopback".to_string(),
                 name: "SIM:Loopback (模拟串口)".to_string(),
                 port_type: "sim".to_string(),
+                manufacturer: None,
+                product: None,
             });
         }
 

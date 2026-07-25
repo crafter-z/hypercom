@@ -6,7 +6,7 @@
 
 | File | Commands |
 |------|----------|
-| `serial.rs` | `open_port`, `close_port`, `send_data`, `get_port_status` |
+| `serial.rs` | `open_port`, `close_port`, `send_data`, `send_file`, `set_serial_params`, `set_flow_control`, `attempt_reconnect` |
 | `simulation.rs` | `enable_simulation`, `disable_simulation` |
 | `config.rs` | `get_config`, `set_config`, `reset_config`, `update_session_snapshot`, `get_config_path` |
 | `log.rs` | `start_logging`, `stop_logging`, `save_log_as`, `export_terminal_log`, `get_log_files`, `set_log_split_size`, `set_log_split_enabled`, `set_log_filename_format`, `set_log_auto_save`, `set_log_encoding`, `open_path`, `open_log_directory`. Note: `save_log_as` and `export_terminal_log` scope restriction removed (user-chosen save dialog path only needs valid parent). |

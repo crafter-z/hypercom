@@ -619,7 +619,9 @@ export function useSerialReceive() {
       cleanups.push(unlistenData, unlistenStatus);
     };
 
-    setupPromiseRef.current = setup();
+    setupPromiseRef.current = setup().catch((e) => {
+      console.error('[useSerialReceive] Failed to subscribe to serial events:', e);
+    });
 
     return () => {
       cancelled = true;

@@ -11,7 +11,7 @@ mod system;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 use std::backtrace::Backtrace;
 
@@ -129,10 +129,6 @@ pub fn run() {
             commands::save_port_preset,
             commands::load_port_presets,
             commands::delete_port_preset,
-            // ===== 发送历史命令 =====
-            commands::list_send_history,
-            commands::add_send_history,
-            commands::clear_send_history,
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,
@@ -187,7 +183,6 @@ pub fn run() {
                             .is_ok();
                         if stored {
                             log::info!("Storage initialized successfully");
-                            let _ = app_handle2.emit("storage:ready", ());
                         } else {
                             log::error!("storage_manager mutex poisoned; DB pool not stored. DB unavailable.");
                         }

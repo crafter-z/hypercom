@@ -50,13 +50,6 @@ export interface SystemStatusResult {
   cpuUsage: number;
 }
 
-/** 流量统计 */
-export interface TrafficStatsResult {
-  port_id: string;
-  tx_total: number;
-  rx_total: number;
-}
-
 /** 日志文件信息（后端 #[serde(rename_all = "camelCase")] 序列化） */
 export interface LogFileInfoResult {
   path: string;
@@ -272,12 +265,6 @@ export const eventService = {
   onSerialStatus: (callback: (event: SerialStatusEvent) => void) => {
     return listen<SerialStatusEvent>('serial:status', (event) => {
       callback(event.payload);
-    });
-  },
-
-  onStorageReady: (callback: () => void) => {
-    return listen<void>('storage:ready', () => {
-      callback();
     });
   },
 
