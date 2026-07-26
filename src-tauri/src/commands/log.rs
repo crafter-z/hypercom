@@ -131,18 +131,22 @@ pub fn set_log_encoding(encoding: String, state: State<AppState>) -> Result<(), 
 /// 开始记录日志
 #[tauri::command]
 pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
-    let config_mgr = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let format = config_mgr.get_config().log_format.clone();
-    drop(config_mgr);
+    // 从配置读取 log_format 和 log_encoding，确保 writer 使用用户配置的格式与编码，
+    // 而非依赖 set_log_encoding 是否已在前端同步（消除启动时序窗口的不一致）。
+    let (format, encoding) = {
+        let config_mgr = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let cfg = config_mgr.get_config();
+        (cfg.log_format.clone(), cfg.log_encoding.clone())
+    };
     let mut manager = state
         .log_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     manager
-        .create_writer(&port_id, &format)
+        .create_writer_with_encoding(&port_id, &format, &encoding)
         .map_err(|e| CommandError::Log(e.to_string()))
 }
 

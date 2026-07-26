@@ -52,7 +52,6 @@ sysinfo = "0.33"
 
 # 工具
 uuid = { version = "1", features = ["v4"] }
-once_cell = "1"
 
 [profile.release]
 opt-level = 3
