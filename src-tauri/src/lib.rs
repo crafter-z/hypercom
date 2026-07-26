@@ -143,6 +143,9 @@ pub fn run() {
             } else {
                 log::error!("serial_manager mutex poisoned during setup; serial events will not be emitted");
             }
+            // drop(state) 对 borrow checker 有意义：State<'_, T> 是引用包装，
+            // 显式 drop 确保 MutexGuard 临时值在 state 之前析构。
+            #[allow(clippy::drop_non_drop)]
             drop(state);
 
             // 预热 sysinfo CPU 采样：first refresh_cpu_all 没有基线会返回 0，
@@ -155,6 +158,7 @@ pub fn run() {
                 } else {
                     log::warn!("system_info mutex poisoned during CPU warmup (first refresh)");
                 }
+                #[allow(clippy::drop_non_drop)]
                 drop(state);
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -165,6 +169,7 @@ pub fn run() {
                 } else {
                     log::warn!("system_info mutex poisoned during CPU warmup (second refresh)");
                 }
+                #[allow(clippy::drop_non_drop)]
                 drop(state);
             }
 

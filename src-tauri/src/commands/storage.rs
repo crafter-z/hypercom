@@ -41,15 +41,10 @@ pub async fn save_command_set(
             .map_err(|e| CommandError::Storage(e.to_string()))?;
         db_pool.clone()
     };
-    let is_update = args.id.is_some();
     let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // If updating existing set, delete old one first to avoid duplicates.
-    // Propagate delete failure: if old child rows remain, the insert creates duplicates.
-    if is_update {
-        storage::delete_command_set_from_db(&pool, &set_id)
-            .await
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-    }
+    // 更新路径无需单独 delete：save_command_set_to_db 内部事务已包含
+    // INSERT OR REPLACE（父行）+ DELETE + INSERT（子行），原子完成。
+    // 旧实现在事务外先 delete 再 save，若 save 失败则数据丢失。
     let set = storage::SendCommandSet {
         id: set_id.clone(),
         name: args.name,
@@ -174,15 +169,9 @@ pub async fn save_highlight_set(
             .map_err(|e| CommandError::Storage(e.to_string()))?;
         db_pool.clone()
     };
-    let is_update = args.id.is_some();
     let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // If updating existing set, delete old one first to avoid duplicates.
-    // Propagate delete failure: if old child rows remain, the insert creates duplicates.
-    if is_update {
-        storage::delete_highlight_set_from_db(&pool, &set_id)
-            .await
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-    }
+    // 更新路径无需单独 delete：save_highlight_set_to_db 内部事务已包含
+    // INSERT OR REPLACE（父行）+ DELETE + INSERT（子行），原子完成。
     let set = storage::HighlightRuleSet {
         id: set_id.clone(),
         name: args.name,

@@ -45,36 +45,44 @@ impl PortLogWriter {
     /// - "binary": 原始字节直写，不附元信息。
     /// - 其他（默认 string）: 按 `encoding` 解码为文本后写入。
     ///   GBK/ISO-8859-1 走显式映射，UTF-8/ASCII/未知值回退到 `from_utf8_lossy`。
+    ///
+    /// 不在此处 flush——BufWriter 的缓冲在 close_writer / split / flush_all 时
+    /// 统一落盘。高波特率下逐行 flush 会导致每条数据都触发一次磁盘 IO，
+    /// 完全丧失 BufWriter 的缓冲收益。
     pub fn write_line(
         &mut self,
         timestamp: &str,
         direction: &str,
         data: &[u8],
     ) -> anyhow::Result<()> {
-        match self.format.as_str() {
+        let written = match self.format.as_str() {
             "hex" => {
                 let hex_str = data
                     .iter()
                     .map(|b| format!("{:02X} ", b))
                     .collect::<String>();
-                writeln!(
-                    self.writer,
-                    "[{}] {} {}",
+                let line = format!(
+                    "[{}] {} {}\n",
                     timestamp,
                     direction,
                     hex_str.trim()
-                )?;
+                );
+                self.writer.write_all(line.as_bytes())?;
+                line.len()
             }
             "binary" => {
                 self.writer.write_all(data)?;
+                data.len()
             }
             _ => {
                 let text = decode_bytes(data, &self.encoding);
-                writeln!(self.writer, "[{}] {} {}", timestamp, direction, text)?;
+                let line = format!("[{}] {} {}\n", timestamp, direction, text);
+                self.writer.write_all(line.as_bytes())?;
+                line.len()
             }
-        }
-        self.writer.flush()?;
-        self.current_size += data.len() as u64;
+        };
+        // 累加实际写入字节数（含时间戳/方向前缀/换行），使分片阈值准确反映文件真实大小。
+        self.current_size += written as u64;
         Ok(())
     }
 

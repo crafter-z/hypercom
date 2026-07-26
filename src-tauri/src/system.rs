@@ -1,6 +1,7 @@
 #[cfg(target_os = "windows")]
 mod win32_power {
-    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use std::sync::{Mutex, OnceLock};
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -18,6 +19,47 @@ mod win32_power {
     /// 导致防休眠与防息屏互相抵消（最后一次调用生效）。
     static DESIRED_STATE: Mutex<(bool, bool)> = Mutex::new((false, false));
 
+    /// 专用电源管理线程的发送端。
+    /// SetThreadExecutionState 是 **per-thread** 的：在 Tauri 命令线程池中，
+    /// 每次调用可能落在不同线程上，导致 prevent_sleep(false) 清的是另一个线程
+    /// 的状态，而原线程的 ES_SYSTEM_REQUIRED 永远残留、系统永不休眠。
+    /// 解决方案：所有 SetThreadExecutionState 调用固定到一个专用线程，
+    /// 命令线程仅通过 channel 发送期望状态。
+    static POWER_TX: OnceLock<mpsc::Sender<(bool, bool)>> = OnceLock::new();
+
+    /// 获取（或首次创建）专用电源线程的发送端。
+    fn power_sender() -> &'static mpsc::Sender<(bool, bool)> {
+        POWER_TX.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<(bool, bool)>();
+            std::thread::Builder::new()
+                .name("hypercom-power".into())
+                .spawn(move || {
+                    // 循环接收期望状态，在同一线程上调用 SetThreadExecutionState。
+                    // channel 断开（所有 Sender drop）时线程自然退出。
+                    while let Ok((sleep, screen)) = rx.recv() {
+                        let flags = ES_CONTINUOUS
+                            | (if sleep { ES_SYSTEM_REQUIRED } else { 0 })
+                            | (if screen { ES_DISPLAY_REQUIRED } else { 0 });
+                        // SAFETY: [Category 8 — FFI Boundary UB]
+                        // The call passes a plain u32 bitmask documented by Win32; no Rust
+                        // references, pointers, or ownership cross the FFI boundary, and the
+                        // extern signature uses the documented system ABI and return type.
+                        let prev = unsafe { set_thread_execution_state(flags) };
+                        if prev == 0 {
+                            log::warn!(
+                                "SetThreadExecutionState failed: {}",
+                                std::io::Error::last_os_error()
+                            );
+                        }
+                    }
+                    // 线程退出前清除状态（所有 Sender 已 drop = 应用关闭）
+                    unsafe { set_thread_execution_state(ES_CONTINUOUS) };
+                })
+                .expect("failed to spawn power management thread");
+            tx
+        })
+    }
+
     pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
         apply_state(|state| state.1 = enable)
     }
@@ -26,32 +68,18 @@ mod win32_power {
         apply_state(|state| state.0 = enable)
     }
 
-    /// 更新期望状态的一半，再按完整状态合并标志调用 Win32 API。
+    /// 更新期望状态的一半，再通过专用线程应用完整状态。
     fn apply_state(update: impl FnOnce(&mut (bool, bool))) -> Result<(), String> {
-        let flags = {
-            let mut desired = DESIRED_STATE
+        let desired = {
+            let mut guard = DESIRED_STATE
                 .lock()
                 .map_err(|e| format!("Failed to lock power state: {}", e))?;
-            update(&mut desired);
-            let (sleep, screen) = *desired;
-            ES_CONTINUOUS
-                | (if sleep { ES_SYSTEM_REQUIRED } else { 0 })
-                | (if screen { ES_DISPLAY_REQUIRED } else { 0 })
+            update(&mut guard);
+            *guard
         };
-        set_thread_execution_state_checked(flags)
-    }
-
-    fn set_thread_execution_state_checked(flags: u32) -> Result<(), String> {
-        // SAFETY: [Category 8 — FFI Boundary UB]
-        // The call passes a plain u32 bitmask documented by Win32; no Rust references,
-        // pointers, or ownership cross the FFI boundary, and the extern signature uses
-        // the documented system ABI and return type for SetThreadExecutionState.
-        let previous_state = unsafe { set_thread_execution_state(flags) };
-        if previous_state == 0 {
-            Err(std::io::Error::last_os_error().to_string())
-        } else {
-            Ok(())
-        }
+        power_sender()
+            .send(desired)
+            .map_err(|e| format!("Power thread channel closed: {}", e))
     }
 }
 

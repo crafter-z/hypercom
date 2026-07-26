@@ -301,10 +301,8 @@ pub async fn load_command_sets_from_db(pool: &Pool<Sqlite>) -> anyhow::Result<Ve
 }
 
 pub async fn delete_command_set_from_db(pool: &Pool<Sqlite>, set_id: &str) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM send_commands WHERE set_id = ?")
-        .bind(set_id)
-        .execute(pool)
-        .await?;
+    // FK ON DELETE CASCADE 已启用（SqliteConnectOptions.foreign_keys(true)），
+    // 删除父行时子行自动级联删除，无需手动 DELETE send_commands。
     sqlx::query("DELETE FROM send_command_sets WHERE id = ?")
         .bind(set_id)
         .execute(pool)
@@ -384,10 +382,7 @@ pub async fn load_highlight_sets_from_db(
 }
 
 pub async fn delete_highlight_set_from_db(pool: &Pool<Sqlite>, set_id: &str) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM highlight_rules WHERE set_id = ?")
-        .bind(set_id)
-        .execute(pool)
-        .await?;
+    // FK ON DELETE CASCADE 已启用，删除父行时子行自动级联删除。
     sqlx::query("DELETE FROM highlight_rule_sets WHERE id = ?")
         .bind(set_id)
         .execute(pool)

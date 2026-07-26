@@ -109,7 +109,7 @@ pub struct SimPortHandle {
 /// 暴露为 pub 以便日志层在写入 TX 字节时复用。
 pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
     let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(anyhow::anyhow!(
             "HEX string has odd length: {} chars",
             cleaned.len()
@@ -542,15 +542,20 @@ impl SerialManager {
     }
 
     /// 尝试重新连接指定串口。
-    /// 先关闭残留句柄，再校验系统端口列表中存在该端口，最后用上次成功的参数打开。
+    /// 先关闭残留句柄并 join 读取线程，再校验系统端口列表中存在该端口，最后用上次成功的参数打开。
+    /// 注意：此方法会阻塞直到旧读取线程退出（最长约 100ms），不能在持有
+    /// serial_manager 锁时调用——调用方（commands/serial.rs）已在锁外 join。
     pub fn attempt_reconnect(&mut self, port_id: &str) -> anyhow::Result<()> {
         if port_id.starts_with("SIM:") {
             return Err(anyhow::anyhow!("Cannot reconnect simulation port"));
         }
 
-        // 关闭残留句柄（如果异常断线后仍被保留）
+        // 关闭残留句柄并 join 读取线程，确保旧端口句柄已释放。
+        // 不 join 就 open_port 会因端口被旧线程占用而失败。
         if self.ports.contains_key(port_id) {
-            self.close_port(port_id)?;
+            if let Some(thread) = self.close_port(port_id)? {
+                let _ = thread.join();
+            }
         }
 
         // 确认端口重新出现在系统列表中
@@ -582,6 +587,13 @@ impl SerialManager {
                 .sim_ports
                 .get(port_id)
                 .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
+            // 计算实际字节数：HEX 模式返回解析后的字节数，文本模式返回 UTF-8 字节数。
+            // 与真实串口路径保持一致——前端用返回值累加 TX 统计。
+            let byte_count = if is_hex {
+                parse_hex_string(data)?.len()
+            } else {
+                data.len()
+            };
             handle
                 .tx
                 .send(SimMessage::Echo {
@@ -589,7 +601,7 @@ impl SerialManager {
                     is_hex,
                 })
                 .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
-            return Ok(data.len());
+            return Ok(byte_count);
         }
 
         // 真实串口：写入串口
