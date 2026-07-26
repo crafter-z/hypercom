@@ -137,6 +137,18 @@ pub async fn send_file(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<usize, CommandError> {
+    // 文件大小上限 100 MB：串口发送速率有限（115200 baud ≈ 11.5 KB/s），
+    // 超大文件发送不切实际，且 std::fs::read 会一次性加载到内存。
+    const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+    let metadata = std::fs::metadata(&args.path)
+        .map_err(|e| CommandError::Io(format!("Failed to stat file '{}': {}", args.path, e)))?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(CommandError::Io(format!(
+            "File too large ({} bytes, max {} bytes)",
+            metadata.len(),
+            MAX_FILE_SIZE
+        )));
+    }
     let data = std::fs::read(&args.path)
         .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
     let total = data.len();
