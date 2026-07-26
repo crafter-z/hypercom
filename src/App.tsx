@@ -13,7 +13,7 @@ import AboutDialog from './components/shared/AboutDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, usePinStatesSubscriber } from './hooks/useTauri';
+import { useAppInit, useSerialReceive, usePinStatesSubscriber, useToolOutput } from './hooks/useTauri';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
@@ -61,6 +61,7 @@ const App: React.FC = () => {
   // Send actions live on useSerialSend in OperationPanel — see SRP split in useTauri.ts.
   useSerialReceive();
   usePinStatesSubscriber();
+  useToolOutput();
   useHotkeys();
   usePowerManagement();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);

@@ -191,3 +191,69 @@
   color: var(--text-secondary);
   flex-shrink: 0;
 }
+
+/* ---- External Tool Settings ---- */
+.tool-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.tool-settings-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  background: var(--bg-secondary);
+}
+
+.tool-settings-port {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.tool-settings-port-name {
+  font-weight: var(--weight-semibold);
+  font-family: var(--font-terminal);
+  font-size: 13px;
+}
+
+.tool-settings-port-alias {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.tool-settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.tool-settings-input {
+  width: 100%;
+  font-family: var(--font-terminal);
+  font-size: 12px;
+}
+
+.tool-settings-preview {
+  margin-top: var(--space-1);
+}
+
+.tool-settings-preview-code {
+  display: block;
+  font-family: var(--font-terminal);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.config-section-actions {
+  margin-top: var(--space-4);
+  display: flex;
+  justify-content: flex-end;
+}

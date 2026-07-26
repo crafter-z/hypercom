@@ -220,6 +220,17 @@
   border-color: var(--accent-emphasis);
 }
 
+.port-item-badge.tool {
+  color: var(--terminal-tool-color, #c3e88d);
+  border-color: var(--terminal-tool-color, #c3e88d);
+  animation: pulse-badge 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 /* Quiet secondary monospace — state + line coding, nothing louder. */
 .port-item-meta {
   display: flex;

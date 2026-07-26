@@ -4,7 +4,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks/useTauri';
 import type { AppConfig } from '../../types';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, X,
+  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, X,
 } from 'lucide-react';
 import GeneralSettings from './pages/GeneralSettings';
 import LogSettings from './pages/LogSettings';
@@ -13,6 +13,7 @@ import DisplaySettings from './pages/DisplaySettings';
 import HighlightSettings from './pages/HighlightSettings';
 import CommandSettings from './pages/CommandSettings';
 import ProtocolSettings from './pages/ProtocolSettings';
+import ToolSettings from './pages/ToolSettings';
 
 interface NavItem {
   id: string;
@@ -28,6 +29,7 @@ const navItems: NavItem[] = [
   { id: 'highlight', labelKey: 'configModal.nav.highlight', icon: <Palette size={16} /> },
   { id: 'commands', labelKey: 'configModal.nav.commands', icon: <Send size={16} /> },
   { id: 'protocol', labelKey: 'configModal.nav.protocol', icon: <Code2 size={16} /> },
+  { id: 'tools', labelKey: 'configModal.nav.tools', icon: <Wrench size={16} /> },
 ];
 
 const ConfigModal: React.FC = () => {
@@ -75,6 +77,7 @@ const ConfigModal: React.FC = () => {
       case 'highlight': return <HighlightSettings />;
       case 'commands': return <CommandSettings />;
       case 'protocol': return <ProtocolSettings />;
+      case 'tools': return <ToolSettings />;
       default: return <GeneralSettings />;
     }
   };

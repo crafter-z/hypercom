@@ -738,4 +738,9 @@ impl SerialManager {
         handle.rts_state.store(rts, Ordering::Relaxed);
         Ok(())
     }
+
+    /// 获取指定端口上次成功连接的参数（用于外部工具执行后重开端口）。
+    pub fn get_last_params(&self, port_id: &str) -> Option<OpenPortArgs> {
+        self.last_params.get(port_id).cloned()
+    }
 }

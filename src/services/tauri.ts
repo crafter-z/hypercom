@@ -255,6 +255,19 @@ export interface FileProgressPayload {
   done: boolean;
 }
 
+/** 外部工具输出事件 payload */
+export interface ToolOutputPayload {
+  port_id: string;
+  line: string;
+  stream: string; // "stdout" | "stderr"
+}
+
+/** 外部工具退出事件 payload */
+export interface ToolExitPayload {
+  port_id: string;
+  code: number;
+}
+
 export const eventService = {
   onSerialData: (callback: (event: SerialDataEvent) => void) => {
     return listen<SerialDataEvent>('serial:data', (event) => {
@@ -282,6 +295,18 @@ export const eventService = {
 
   onFileProgress: (callback: (event: FileProgressPayload) => void) => {
     return listen<FileProgressPayload>('serial:file_progress', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  onToolOutput: (callback: (event: ToolOutputPayload) => void) => {
+    return listen<ToolOutputPayload>('tool:output', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  onToolExit: (callback: (event: ToolExitPayload) => void) => {
+    return listen<ToolExitPayload>('tool:exit', (event) => {
       callback(event.payload);
     });
   },
@@ -415,6 +440,24 @@ export const storageService = {
 
   deleteProtocolTemplate: (setId: string): Promise<void> => {
     return invoke<void>('delete_protocol_template', { setId });
+  },
+};
+
+// ==================== 外部工具命令 ====================
+
+export const toolService = {
+  /** 执行外部工具：关闭串口 → 运行命令 → 流式输出 → 退出 → 重开串口 */
+  runPortTool: (params: { portId: string; command: string; workdir?: string }): Promise<number> => {
+    return invoke<number>('run_port_tool', { args: {
+      port_id: params.portId,
+      command: params.command,
+      workdir: params.workdir ?? null,
+    }});
+  },
+
+  /** 终止正在运行的外部工具进程 */
+  killPortTool: (portId: string): Promise<void> => {
+    return invoke<void>('kill_port_tool', { portId });
   },
 };
 

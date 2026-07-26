@@ -14,9 +14,12 @@ import { applyHighlightSets } from '../../utils/highlightEngine';
 import { renderProtocolLine } from '../../utils/protocolRenderer';
 import { formatTerminalTimestamp } from '../../utils/timeFormat';
 
-/** TX/RX direction coloring — the terminal's signal semantics. */
-const directionColor = (dir: string) =>
-  dir === 'TX' ? 'var(--terminal-tx-color)' : 'var(--terminal-rx-color)';
+/** TX/RX/TOOL direction coloring — the terminal's signal semantics. */
+const directionColor = (dir: string, stream?: string) => {
+  if (dir === 'TX') return 'var(--terminal-tx-color)';
+  if (dir === 'TOOL') return stream === 'stderr' ? 'var(--terminal-tool-stderr-color, #f48771)' : 'var(--terminal-tool-color, #dcdcaa)';
+  return 'var(--terminal-rx-color)';
+};
 
 interface TerminalRowProps {
   line: TerminalLine;
@@ -107,8 +110,8 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
         </span>
       )}
       <span
-        className="terminal-direction"
-        style={{ color: directionColor(line.direction) }}
+        className={`terminal-direction${line.direction === 'TOOL' ? ' terminal-direction-tool' : ''}`}
+        style={{ color: directionColor(line.direction, line.toolStream) }}
       >
         {line.direction}
       </span>

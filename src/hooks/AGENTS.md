@@ -15,6 +15,7 @@ Single file: `useTauri.ts` (959 lines) — 9 hooks that own the React↔Tauri li
 | `useSystemStatus(pollMs=5000)` (811) | StatusBar | polling |
 | `useAppInit()` (856) | `App.tsx` | one-shot bootstrap |
 | `useSimulation()` (935) | Sidebar toolbar | SIM:Loopback virtual port toggle |
+| `useToolOutput()` (965) | `App.tsx` **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
 
 ## Conventions (root covers lifecycle split rationale)
 

@@ -51,6 +51,12 @@
   font-size: calc(var(--font-size-terminal) * 0.85);
 }
 
+/* TOOL direction: external tool output — slightly muted, italic to distinguish from serial data */
+.terminal-direction-tool {
+  font-style: italic;
+  opacity: 0.85;
+}
+
 .terminal-content {
   word-break: break-all;
   white-space: pre-wrap;

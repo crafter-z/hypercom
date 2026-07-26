@@ -28,6 +28,10 @@ export interface SerialPort {
   handshake?: Handshake;
   // 协议解析绑定（可选，绑定后接收数据按协议模板解析字段着色）
   protocolTemplateId?: string;
+  // 外部工具（烧录等）：命令模板，{port} 运行时替换为端口名
+  toolCommand?: string;
+  // 外部工具是否正在运行（运行期间串口关闭，工具输出显示在终端）
+  toolRunning?: boolean;
 }
 
 /** 数据位 */
@@ -113,12 +117,13 @@ export interface ParsedField {
 export interface TerminalLine {
   id: string;
   timestamp: number;       // 时间戳
-  direction: 'RX' | 'TX';
+  direction: 'RX' | 'TX' | 'TOOL';
   content: string;         // 原始内容（文本格式）
   displayContent?: string; // 格式化后的显示内容（带高亮）
   rawData?: number[];      // 原始字节数组（用于 HEX 显示）
   isHex: boolean;          // 是否为HEX显示
   parsedFields?: ParsedField[]; // 协议解析字段标注（存在时按字段着色渲染）
+  toolStream?: 'stdout' | 'stderr'; // TOOL 方向行的来源流
 }
 
 /** 终端视图状态 */

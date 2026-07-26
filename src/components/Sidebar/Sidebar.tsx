@@ -7,8 +7,11 @@ import {
   Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
   ChevronRight, Plus, X, Search, FlaskConical, Ellipsis,
   PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
+  Wrench, TerminalSquare,
 } from 'lucide-react';
 import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks/useTauri';
+import { toolService } from '../../services/tauri';
+import { notifyError } from '../../stores/useToastStore';
 import {
   DndContext,
   closestCenter,
@@ -123,6 +126,9 @@ interface SortablePortItemProps {
   onSetAlias: (portId: string) => void;
   onHidePort: (portId: string) => void;
   onShowPort: (portId: string) => void;
+  onRunTool: (portId: string) => void;
+  onKillTool: (portId: string) => void;
+  onConfigTool: () => void;
 }
 
 /**
@@ -138,6 +144,9 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
   onSetAlias,
   onHidePort,
   onShowPort,
+  onRunTool,
+  onKillTool,
+  onConfigTool,
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
@@ -170,6 +179,14 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     { label: t('sidebar.port.contextMenu.setAlias'), icon: <Pencil size={14} />, onClick: () => onSetAlias(port.id) },
     { label: t('sidebar.port.contextMenu.openInTab'), icon: <ExternalLink size={14} />, onClick: () => onOpenTab(port.id) },
     { type: 'separator' },
+    // 外部工具：已配置命令时显示执行/终止，始终显示配置入口
+    ...(port.toolCommand
+      ? port.toolRunning
+        ? [{ label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool(port.id), danger: true }]
+        : [{ label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(port.id) }]
+      : []),
+    { label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: onConfigTool },
+    { type: 'separator' },
     port.isHidden
       ? { label: t('sidebar.port.contextMenu.unhide'), icon: <Eye size={14} />, onClick: () => onShowPort(port.id) }
       : { label: t('sidebar.port.contextMenu.hide'), icon: <EyeOff size={14} />, onClick: () => onHidePort(port.id) },
@@ -192,6 +209,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
             {port.alias && <span className="port-item-alias">{port.alias}</span>}
             {port.type === 'sim' && <span className="port-item-badge sim">{t('sidebar.port.badge.sim')}</span>}
             {port.type === 'virtual' && <span className="port-item-badge">{t('sidebar.port.badge.vcp')}</span>}
+            {port.toolRunning && <span className="port-item-badge tool">TOOL</span>}
           </div>
           <div className="port-item-meta">
             <span>{label}</span>
@@ -226,6 +244,9 @@ interface GroupItemProps {
   onSetAlias: (portId: string) => void;
   onHidePort: (portId: string) => void;
   onShowPort: (portId: string) => void;
+  onRunTool: (portId: string) => void;
+  onKillTool: (portId: string) => void;
+  onConfigTool: () => void;
 }
 
 /**
@@ -245,6 +266,9 @@ const GroupItem: React.FC<GroupItemProps> = ({
   onSetAlias,
   onHidePort,
   onShowPort,
+  onRunTool,
+  onKillTool,
+  onConfigTool,
 }) => {
   const { t } = useTranslation();
   // Exclude hidden ports so "hide" actually works for grouped ports too
@@ -353,6 +377,9 @@ const GroupItem: React.FC<GroupItemProps> = ({
                 onSetAlias={onSetAlias}
                 onHidePort={onHidePort}
                 onShowPort={onShowPort}
+                onRunTool={onRunTool}
+                onKillTool={onKillTool}
+                onConfigTool={onConfigTool}
               />
             ))}
           </div>
@@ -403,6 +430,31 @@ const Sidebar: React.FC = () => {
 
   const handleHidePort = useCallback((portId: string) => { updatePort(portId, { isHidden: true }); }, [updatePort]);
   const handleShowPort = useCallback((portId: string) => { updatePort(portId, { isHidden: false }); }, [updatePort]);
+
+  const handleRunTool = useCallback(async (portId: string) => {
+    const port = useAppStore.getState().ports.find(p => p.id === portId);
+    if (!port?.toolCommand) return;
+    updatePort(portId, { toolRunning: true });
+    try {
+      await toolService.runPortTool({ portId, command: port.toolCommand });
+    } catch (err) {
+      updatePort(portId, { toolRunning: false });
+      notifyError(err);
+    }
+  }, [updatePort]);
+
+  const handleKillTool = useCallback(async (portId: string) => {
+    try {
+      await toolService.killPortTool(portId);
+    } catch (err) {
+      notifyError(err);
+    }
+  }, []);
+
+  const handleConfigTool = useCallback(() => {
+    useAppStore.getState().setConfigActiveTab('tools');
+    useAppStore.getState().toggleConfigModal(true);
+  }, []);
 
   const handleSaveAlias = useCallback((alias: string) => {
     if (aliasDialog) {
@@ -505,6 +557,9 @@ const Sidebar: React.FC = () => {
                 onSetAlias={handleSetAlias}
                 onHidePort={handleHidePort}
                 onShowPort={handleShowPort}
+                onRunTool={handleRunTool}
+                onKillTool={handleKillTool}
+                onConfigTool={handleConfigTool}
               />
             );
           })}
@@ -523,6 +578,9 @@ const Sidebar: React.FC = () => {
                     onSetAlias={handleSetAlias}
                     onHidePort={handleHidePort}
                     onShowPort={handleShowPort}
+                    onRunTool={handleRunTool}
+                    onKillTool={handleKillTool}
+                    onConfigTool={handleConfigTool}
                   />
                 ))}
               </SortableContext>
@@ -543,6 +601,9 @@ const Sidebar: React.FC = () => {
                     onSetAlias={handleSetAlias}
                     onHidePort={handleHidePort}
                     onShowPort={handleShowPort}
+                    onRunTool={handleRunTool}
+                    onKillTool={handleKillTool}
+                    onConfigTool={handleConfigTool}
                   />
                 ))}
               </SortableContext>

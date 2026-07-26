@@ -75,6 +75,8 @@
 
   --terminal-tx-color: #dcdcaa;
   --terminal-rx-color: #5eb1ff;
+  --terminal-tool-color: #c3e88d;
+  --terminal-tool-stderr-color: #f48771;
 
   --border-color: #363a44;
   --border-radius: 6px;
@@ -135,6 +137,8 @@
 
   --terminal-tx-color: #b8860b;
   --terminal-rx-color: #0066cc;
+  --terminal-tool-color: #558b2f;
+  --terminal-tool-stderr-color: #d32f2f;
 
   --border-color: #d3d7de;
   --edge-top: inset 0 1px 0 rgba(255,255,255,0.7);

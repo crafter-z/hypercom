@@ -52,6 +52,7 @@ hypercom/
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `useTauri.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
+| External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 200px, clamp [160,600] |
 | First-run database creation | `storage/mod.rs` `create_pool()` `.create_if_missing(true)` | sqlx won't create a missing `data.db` without it; pool built synchronously in `lib.rs` setup (`block_on`) |
 | Config versioning / migration | `config/mod.rs` `migrate()` + `config_version` field | forward-compatible, additive |

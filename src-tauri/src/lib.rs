@@ -47,6 +47,8 @@ pub struct AppState {
     pub storage_manager: std::sync::Mutex<storage::StorageManager>,
     /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）
     pub system_info: std::sync::Mutex<sysinfo::System>,
+    /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
+    pub tool_processes: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
             log_manager: std::sync::Mutex::new(logger::LogManager::new()),
             storage_manager: std::sync::Mutex::new(storage::StorageManager::new()?),
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
+            tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 }
@@ -88,6 +91,8 @@ pub fn run() {
             commands::set_serial_params,
             commands::set_flow_control,
             commands::attempt_reconnect,
+            commands::run_port_tool,
+            commands::kill_port_tool,
             // ===== 模拟模式命令 =====
             commands::enable_simulation,
             commands::disable_simulation,

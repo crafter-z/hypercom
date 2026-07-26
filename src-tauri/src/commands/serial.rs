@@ -4,6 +4,8 @@ use tauri::{AppHandle, Emitter, State};
 use super::CommandError;
 use crate::{serial, AppState};
 
+use tokio::io::{AsyncBufReadExt, BufReader};
+
 /// 获取系统可用串口列表
 /// 前端调用: invoke('list_available_ports')
 #[tauri::command]
@@ -278,4 +280,190 @@ pub fn set_flow_control(
     manager
         .set_flow_control(&port_id, dtr, rts)
         .map_err(|e| CommandError::Serial(e.to_string()))
+}
+
+// ==================== 外部工具执行 ====================
+
+/// 工具输出事件 payload（逐行推送到前端终端）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolOutputPayload {
+    pub port_id: String,
+    pub line: String,
+    pub stream: String, // "stdout" | "stderr"
+}
+
+/// 工具退出事件 payload
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolExitPayload {
+    pub port_id: String,
+    pub code: i32,
+}
+
+/// 执行外部工具参数
+#[derive(Debug, Deserialize)]
+pub struct RunPortToolArgs {
+    pub port_id: String,
+    /// 命令模板，`{port}` 在运行时替换为实际端口名
+    pub command: String,
+    /// 可选工作目录
+    pub workdir: Option<String>,
+}
+
+/// 执行外部工具：关闭串口 → 运行命令 → 流式输出 → 命令退出 → 立即重开串口。
+///
+/// 整个 close→run→reopen 闭环在后端一次完成，步骤 5→6（进程退出→串口重开）
+/// 之间没有 await 让出点，确保 MCU reset 后第一帧调试输出能被立即捕获。
+#[tauri::command]
+pub async fn run_port_tool(
+    args: RunPortToolArgs,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<i32, CommandError> {
+    // 1. 获取上次连接参数 + 关闭串口（一次锁完成）
+    let last_params = {
+        let mut mgr = state
+            .serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let params = mgr.get_last_params(&args.port_id);
+        let join_handle = mgr
+            .close_port(&args.port_id)
+            .map_err(|e| CommandError::Serial(e.to_string()))?;
+        // 在锁内 join：close_port 已取出 JoinHandle，读线程最长 100ms 退出。
+        // 此处持锁 join 可接受——工具执行期间不会有其他串口命令并发。
+        if let Some(t) = join_handle {
+            let _ = t.join();
+        }
+        params
+    };
+
+    // 2. 替换命令模板中的 {port} 占位符
+    let cmd = args.command.replace("{port}", &args.port_id);
+
+    // 3. 构建子进程
+    #[cfg(target_os = "windows")]
+    let mut command = tokio::process::Command::new("cmd");
+    #[cfg(target_os = "windows")]
+    command.args(["/C", &cmd]);
+
+    #[cfg(not(target_os = "windows"))]
+    let mut command = tokio::process::Command::new("sh");
+    #[cfg(not(target_os = "windows"))]
+    command.args(["-c", &cmd]);
+
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    if let Some(ref dir) = args.workdir {
+        command.current_dir(dir);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| CommandError::Io(format!("Failed to spawn tool process: {}", e)))?;
+
+    // 4. 取出 stdout/stderr 句柄后将 Child 存入 AppState（供 kill_port_tool 使用）
+    let stdout = child.stdout.take().ok_or_else(|| CommandError::Io("Failed to capture stdout".into()))?;
+    let stderr = child.stderr.take().ok_or_else(|| CommandError::Io("Failed to capture stderr".into()))?;
+    {
+        let mut procs = state
+            .tool_processes
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        procs.insert(args.port_id.clone(), child);
+    }
+
+    // 5. 并发读取 stdout/stderr，逐行推送 tool:output 事件
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
+
+    let tx_out = tx.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx_out.send(("stdout".to_string(), line)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let tx_err = tx.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx_err.send(("stderr".to_string(), line)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    drop(tx); // 两个 reader 任务结束后 channel 关闭，rx.recv() 返回 None
+
+    while let Some((stream, line)) = rx.recv().await {
+        let _ = app.emit(
+            "tool:output",
+            ToolOutputPayload {
+                port_id: args.port_id.clone(),
+                line,
+                stream,
+            },
+        );
+    }
+
+    // 6. 等待进程退出（先取出 Child 再 drop 锁，MutexGuard 不跨 await）
+    let child = {
+        let mut procs = state
+            .tool_processes
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        procs.remove(&args.port_id)
+    };
+    let exit_code = match child {
+        Some(mut c) => c
+            .wait()
+            .await
+            .map(|s| s.code().unwrap_or(-1))
+            .map_err(|e| CommandError::Io(format!("Failed to wait for tool process: {}", e)))?,
+        // 进程已被 kill_port_tool 移除并 wait，此处无法再 wait
+        None => -1,
+    };
+
+    // 7. 推送退出事件
+    let _ = app.emit(
+        "tool:exit",
+        ToolExitPayload {
+            port_id: args.port_id.clone(),
+            code: exit_code,
+        },
+    );
+
+    // 8. 立即重开串口（零延迟抢回 COM 口）
+    if let Some(params) = last_params {
+        let mut mgr = state
+            .serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        if let Err(e) = mgr.open_port(params) {
+            log::warn!("Failed to reopen port {} after tool exit: {}", args.port_id, e);
+            // 重开失败不视为命令错误——工具已成功执行，端口状态由前端处理
+        }
+    }
+
+    Ok(exit_code)
+}
+
+/// 终止正在运行的外部工具进程。
+/// 进程被 kill 后 run_port_tool 的 wait() 会返回，自动触发串口重开。
+#[tauri::command]
+pub fn kill_port_tool(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
+    let mut procs = state
+        .tool_processes
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    if let Some(child) = procs.get_mut(&port_id) {
+        child
+            .start_kill()
+            .map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
+    }
+    Ok(())
 }
