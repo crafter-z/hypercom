@@ -168,28 +168,31 @@ pub fn run() {
                 drop(state);
             }
 
-            // 异步初始化数据库（不持有 MutexGuard 跨 await）
-            let app_handle2 = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                match storage::create_pool().await {
-                    Ok(pool) => {
-                        if let Err(e) = storage::init_schema_on_pool(&pool).await {
-                            log::warn!("Schema init failed: {}", e);
-                        }
-                        // 使用 AppHandle 获取 state，因为 AppHandle 是 'static
-                        let state2 = app_handle2.state::<AppState>();
-                        let stored = state2.storage_manager.lock()
-                            .map(|mut mgr| mgr.set_pool(pool))
-                            .is_ok();
-                        if stored {
-                            log::info!("Storage initialized successfully");
-                        } else {
-                            log::error!("storage_manager mutex poisoned; DB pool not stored. DB unavailable.");
-                        }
-                    }
-                    Err(e) => log::warn!("DB connection failed (non-critical): {}", e),
-                }
+            // 同步初始化数据库：在 setup 内 block_on 完成建池 + 建表，保证前端
+            // 任何存储命令都不会与建池竞态。旧实现用 spawn 异步建池，而前端
+            // useAppInit 一挂载就并发加载命令集/规则集、ParamsSection 一挂载就
+            // 加载端口预设——这些调用常常跑在建池完成之前，命中 "Database not
+            // initialized"，且预设加载失败后不再重试，导致下拉菜单永远为空。
+            // 阻塞 main 线程数十毫秒可接受（上方 CPU 预热已阻塞 ~250ms）。
+            // block_on 内部不持有 MutexGuard；set_pool 在 block_on 返回后执行。
+            let db_result = tauri::async_runtime::block_on(async {
+                let pool = storage::create_pool().await?;
+                storage::init_schema_on_pool(&pool).await?;
+                anyhow::Ok(pool)
             });
+            match db_result {
+                Ok(pool) => {
+                    let stored = _app.state::<AppState>().storage_manager.lock()
+                        .map(|mut mgr| mgr.set_pool(pool))
+                        .is_ok();
+                    if stored {
+                        log::info!("Storage initialized successfully");
+                    } else {
+                        log::error!("storage_manager mutex poisoned; DB pool not stored. DB unavailable.");
+                    }
+                }
+                Err(e) => log::error!("DB initialization failed: {}. Storage commands will be unavailable.", e),
+            }
 
             // 安装 panic hook：先 flush 日志，再写崩溃报告，最后 abort 终止进程
             let panic_app_handle = app_handle.clone();

@@ -104,7 +104,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
-            close_behavior: "minimize".to_string(),
+            close_behavior: "exit".to_string(),
             memory_limit_mb: 1024,
             language: "zh-CN".to_string(),
             theme: "dark".to_string(),
@@ -285,7 +285,7 @@ impl ConfigManager {
         config.quick_send_slots.resize(5, None);
         // 校验枚举型字符串
         if !["minimize", "exit"].contains(&config.close_behavior.as_str()) {
-            config.close_behavior = "minimize".to_string();
+            config.close_behavior = "exit".to_string();
         }
         if !["light", "dark", "system"].contains(&config.theme.as_str()) {
             config.theme = "dark".to_string();
@@ -364,7 +364,7 @@ mod tests {
     fn test_default_values() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.config_version, 1);
-        assert_eq!(cfg.close_behavior, "minimize");
+        assert_eq!(cfg.close_behavior, "exit");
         assert_eq!(cfg.memory_limit_mb, 1024);
         assert_eq!(cfg.language, "zh-CN");
         assert_eq!(cfg.theme, "dark");

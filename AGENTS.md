@@ -52,6 +52,8 @@ hypercom/
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `useTauri.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
+| Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 200px, clamp [160,600] |
+| First-run database creation | `storage/mod.rs` `create_pool()` `.create_if_missing(true)` | sqlx won't create a missing `data.db` without it; pool built synchronously in `lib.rs` setup (`block_on`) |
 | Config versioning / migration | `config/mod.rs` `migrate()` + `config_version` field | forward-compatible, additive |
 | Config path customization | CLI `--config` / `HYPERCOM_CONFIG` env / portable mode | resolution order in `ConfigManager::new` |
 | Config validation | `config/mod.rs` `validate_and_clamp()` | runs on `set_config` to enforce bounds |
@@ -215,6 +217,10 @@ let pool = {
 };
 some_async_fn(&pool).await;
 ```
+
+## Database init: synchronous, create-if-missing (2026-07 fix)
+
+The SQLite pool is created **synchronously** in `lib.rs` `setup` via `tauri::async_runtime::block_on(create_pool + init_schema_on_pool)`, then injected with `set_pool`. Do **not** spawn it async — frontend `useAppInit` loads command/highlight/protocol sets and `ParamsSection` loads port presets immediately on mount; an async spawn races them, they fail with `Database not initialized`, and presets never retry (the preset dropdown stays permanently empty). `create_pool` uses `SqliteConnectOptions::create_if_missing(true)` because sqlx will not create a missing `data.db` by default (first run would otherwise fail to open the DB forever).
 
 ## Port list polling: preserve state with mergePorts
 

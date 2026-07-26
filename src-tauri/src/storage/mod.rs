@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
  *
  * 使用 sqlx 实现异步数据库操作
  */
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    Pool, Sqlite,
+};
 
 // ==================== 存储类型 ====================
 
@@ -123,13 +126,21 @@ pub async fn create_pool() -> anyhow::Result<Pool<Sqlite>> {
     std::fs::create_dir_all(&db_dir)?;
     let db_path = db_dir.join("data.db");
 
+    // `create_if_missing(true)` 是关键：sqlx 默认 *不会* 创建缺失的数据库
+    // 文件，首次运行（data.db 不存在）时连接会直接失败，导致连接池永远为
+    // None、所有存储命令报 "Database not initialized"。WAL 与外键约束通过
+    // 连接选项下发，确保对池内 *每一个* 连接生效（旧实现只对单条连接 PRAGMA，
+    // 其余 4 条连接外键仍是 OFF）。
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&format!("sqlite:{}", db_path.display()))
+        .connect_with(options)
         .await?;
-
-    sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
-    sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
     Ok(pool)
 }

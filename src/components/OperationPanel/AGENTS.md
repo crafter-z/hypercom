@@ -1,6 +1,6 @@
 # src/components/OperationPanel/
 
-Send area + serial params + rule quick access. Split into 4 view sections and the `useCyclicSend` hook. `OperationPanel.tsx` owns the top strip (connect / clear screen / log replay / log save-open / font-size slider).
+Send area + serial params + rule quick access. Split into 4 view sections and the `useCyclicSend` hook. `OperationPanel.tsx` owns the top strip (connect / clear screen / log replay / log save-open / font-size slider). The panel height is drag-resizable: `OperationPanelResizeHandle` (in `src/components/shared/`, mounted between `MainDisplay` and `OperationPanel` in `App.tsx`) writes `ui.operationPanelHeight`, which `OperationPanel.tsx` applies as an inline height (the collapsed state still pins to the header via CSS).
 
 ## Files
 
@@ -23,6 +23,7 @@ Send area + serial params + rule quick access. Split into 4 view sections and th
 - Log replay (`useLogReplay` in `src/components/MainDisplay/hooks/useLogReplay.ts`) is driven from OperationPanel's strip; targets the active tab.
 - Timing for cyclic send is single-sourced from the command set's per-command `delay` and `loopDelay`. No global interval field exists.
 - The 4 section components are defined at module level — never inline them in `OperationPanel.tsx`'s body.
+- Panel height lives in `ui.operationPanelHeight` (default 200, clamped [160, 600] by `OperationPanelResizeHandle`) and is applied inline in `OperationPanel.tsx`. The old static `--operation-panel-height` CSS variable is gone — don't reintroduce a fixed height in CSS.
 
 ## Anti-patterns
 

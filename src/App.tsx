@@ -11,6 +11,7 @@ import ToastContainer from './components/shared/Toast/ToastContainer';
 import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
 import AboutDialog from './components/shared/AboutDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
+import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
 import { useAppInit, useSerialReceive, usePinStatesSubscriber } from './hooks/useTauri';
 import { useHotkeys } from './hooks/useHotkeys';
@@ -130,6 +131,7 @@ const App: React.FC = () => {
 
             <div className="app-content-col">
               <MainDisplay />
+              <OperationPanelResizeHandle />
               <OperationPanel />
             </div>
           </div>

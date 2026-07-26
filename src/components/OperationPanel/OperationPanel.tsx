@@ -19,6 +19,7 @@ const OperationPanel: React.FC = () => {
   const { t } = useTranslation();
   const activeTabId = useAppStore(s => s.activeTabId);
   const collapsed = useAppStore(s => s.ui.isOperationPanelCollapsed);
+  const panelHeight = useAppStore(s => s.ui.operationPanelHeight);
   const baudRate = useOperationStore(s => s.baudRate);
   const dataBits = useOperationStore(s => s.dataBits);
   const parity = useOperationStore(s => s.parity);
@@ -146,7 +147,10 @@ const OperationPanel: React.FC = () => {
   };
 
   return (
-    <div className={`operation-panel${collapsed ? ' collapsed' : ''}`}>
+    <div
+      className={`operation-panel${collapsed ? ' collapsed' : ''}`}
+      style={!collapsed ? { height: panelHeight } : undefined}
+    >
       <div
         className="operation-panel-header"
         title={t('operationPanel.collapse')}

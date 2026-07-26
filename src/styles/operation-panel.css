@@ -11,18 +11,38 @@
   flex-direction: column;
   overflow: hidden;
   flex-shrink: 0;
-  transition: height var(--transition-normal);
 }
 
-/* Collapsed — only the header strip remains. Nothing else sets a height
- * on the collapsed state, so plain specificity is enough. */
+/* Collapsed — only the header strip remains. The expanded height is applied
+ * inline from `ui.operationPanelHeight` (drag-resizable), so the collapsed
+ * state only needs to pin the header height. */
 .operation-panel.collapsed {
   height: var(--space-8);
 }
 
+/* Floor for the drag-resizable height; OperationPanelResizeHandle clamps to
+ * the same minimum. The live height comes from the inline style, so no static
+ * height is declared here. */
 .operation-panel:not(.collapsed) {
-  height: var(--operation-panel-height);
-  min-height: 200px;
+  min-height: 160px;
+}
+
+/* ---- Drag handle above the panel ----
+ * Sits between the main display and the panel; dragging vertically resizes
+ * `ui.operationPanelHeight`. Transparent at rest, accent on hover/drag so the
+ * affordance is discoverable without adding visual noise. */
+.operation-panel-resize-handle {
+  flex-shrink: 0;
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+  z-index: 10;
+}
+
+.operation-panel-resize-handle:hover,
+.operation-panel-resize-handle.dragging {
+  background: var(--accent-color);
 }
 
 /* ---- Header: the single collapse affordance ---- */

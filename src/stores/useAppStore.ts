@@ -135,7 +135,7 @@ function pruneTree(tree: PaneNode): PaneNode {
 // ==================== 默认配置 ====================
 
 const defaultConfig: AppConfig = {
-  closeBehavior: 'minimize',
+  closeBehavior: 'exit',
   memoryLimitMb: 1024,
   language: 'zh-CN',
   theme: 'dark',
@@ -175,7 +175,7 @@ const defaultUIState: UIState = {
   isConfigOpen: false,
   configActiveTab: 'general',
   sidebarWidth: 260,
-  operationPanelHeight: 280,
+  operationPanelHeight: 200,
   isOperationPanelCollapsed: false,
   configLoaded: false,
   isHotkeyHelpOpen: false,
