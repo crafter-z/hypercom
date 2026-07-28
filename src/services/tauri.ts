@@ -490,6 +490,14 @@ export interface PortPresetInfo {
   created_at: string;
 }
 
+export interface PortToolConfigInfo {
+  id: string;
+  name: string;
+  port_id: string;
+  command: string;
+  workdir: string;
+}
+
 export const portPresetService = {
   savePortPreset: (args: {
     id?: string;
@@ -511,5 +519,27 @@ export const portPresetService = {
 
   deletePortPreset: (presetId: string): Promise<void> => {
     return invoke<void>('delete_port_preset', { presetId });
+  },
+};
+
+// ==================== 外部工具配置命令 ====================
+
+export const portToolConfigService = {
+  savePortToolConfig: (args: {
+    id?: string;
+    name: string;
+    port_id: string;
+    command: string;
+    workdir: string;
+  }): Promise<string> => {
+    return invoke<string>('save_port_tool_config', { args });
+  },
+
+  loadPortToolConfigs: (): Promise<PortToolConfigInfo[]> => {
+    return invoke<PortToolConfigInfo[]>('load_port_tool_configs');
+  },
+
+  deletePortToolConfig: (configId: string): Promise<void> => {
+    return invoke<void>('delete_port_tool_config', { configId });
   },
 };

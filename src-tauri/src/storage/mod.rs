@@ -94,6 +94,16 @@ pub struct PortPresetRow {
     pub created_at: String,
 }
 
+/// 外部工具配置：端口号 → 命令行工具的映射关系
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PortToolConfigRow {
+    pub id: String,
+    pub name: String,
+    pub port_id: String,
+    pub command: String,
+    pub workdir: String,
+}
+
 // ==================== StorageManager ====================
 
 pub struct StorageManager {
@@ -224,6 +234,13 @@ pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             dtr INTEGER NOT NULL DEFAULT 0,
             rts INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS port_tool_configs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            port_id TEXT NOT NULL,
+            command TEXT NOT NULL DEFAULT '',
+            workdir TEXT NOT NULL DEFAULT ''
         );
         "#,
     )
@@ -547,6 +564,47 @@ pub async fn delete_port_preset_from_db(
     Ok(())
 }
 
+// ==================== 外部工具配置 ====================
+
+pub async fn save_port_tool_config_to_db(
+    pool: &Pool<Sqlite>,
+    config: &PortToolConfigRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO port_tool_configs (id, name, port_id, command, workdir) VALUES (?, ?, ?, ?, ?)"
+    )
+    .bind(&config.id)
+    .bind(&config.name)
+    .bind(&config.port_id)
+    .bind(&config.command)
+    .bind(&config.workdir)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_port_tool_configs_from_db(
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<Vec<PortToolConfigRow>> {
+    let rows = sqlx::query_as::<_, PortToolConfigRow>(
+        "SELECT id, name, port_id, command, workdir FROM port_tool_configs ORDER BY name ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn delete_port_tool_config_from_db(
+    pool: &Pool<Sqlite>,
+    id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM port_tool_configs WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,7 +635,8 @@ mod tests {
         assert!(tables.contains(&"protocol_templates".to_string()));
         assert!(tables.contains(&"send_history".to_string()));
         assert!(tables.contains(&"port_presets".to_string()));
-        assert_eq!(tables.len(), 7);
+        assert!(tables.contains(&"port_tool_configs".to_string()));
+        assert_eq!(tables.len(), 8);
     }
 
     #[tokio::test]

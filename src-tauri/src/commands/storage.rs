@@ -447,3 +447,83 @@ pub async fn delete_port_preset(
         .await
         .map_err(|e| CommandError::Storage(e.to_string()))
 }
+
+// ==================== 外部工具配置 ====================
+
+#[derive(Debug, Deserialize)]
+pub struct SavePortToolConfigArgs {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub port_id: String,
+    pub command: String,
+    pub workdir: String,
+}
+
+#[tauri::command]
+pub async fn save_port_tool_config(
+    args: SavePortToolConfigArgs,
+    state: State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let row = storage::PortToolConfigRow {
+        id: id.clone(),
+        name: args.name,
+        port_id: args.port_id,
+        command: args.command,
+        workdir: args.workdir,
+    };
+    storage::save_port_tool_config_to_db(&pool, &row)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn load_port_tool_configs(
+    state: State<'_, AppState>,
+) -> Result<Vec<storage::PortToolConfigRow>, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::load_port_tool_configs_from_db(&pool)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn delete_port_tool_config(
+    config_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::delete_port_tool_config_from_db(&pool, &config_id)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}

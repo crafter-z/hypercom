@@ -12,6 +12,7 @@ import {
 import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks/useTauri';
 import { toolService } from '../../services/tauri';
 import { notifyError } from '../../stores/useToastStore';
+import { useRuleStore } from '../../stores/useRuleStore';
 import {
   DndContext,
   closestCenter,
@@ -179,12 +180,10 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     { label: t('sidebar.port.contextMenu.setAlias'), icon: <Pencil size={14} />, onClick: () => onSetAlias(port.id) },
     { label: t('sidebar.port.contextMenu.openInTab'), icon: <ExternalLink size={14} />, onClick: () => onOpenTab(port.id) },
     { type: 'separator' },
-    // 外部工具：已配置命令时显示执行/终止，始终显示配置入口
-    ...(port.toolCommand
-      ? port.toolRunning
-        ? [{ label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool(port.id), danger: true }]
-        : [{ label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(port.id) }]
-      : []),
+    // 外部工具：执行入口始终可见；未配置时点击跳转配置页。运行中显示终止。
+    port.toolRunning
+      ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool(port.id), danger: true }
+      : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(port.id) },
     { label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: onConfigTool },
     { type: 'separator' },
     port.isHidden
@@ -432,11 +431,20 @@ const Sidebar: React.FC = () => {
   const handleShowPort = useCallback((portId: string) => { updatePort(portId, { isHidden: false }); }, [updatePort]);
 
   const handleRunTool = useCallback(async (portId: string) => {
-    const port = useAppStore.getState().ports.find(p => p.id === portId);
-    if (!port?.toolCommand) return;
+    const config = useRuleStore.getState().findToolConfigByPort(portId);
+    if (!config) {
+      // 未配置 → 跳转配置页
+      useAppStore.getState().setConfigActiveTab('tools');
+      useAppStore.getState().toggleConfigModal(true);
+      return;
+    }
     updatePort(portId, { toolRunning: true });
     try {
-      await toolService.runPortTool({ portId, command: port.toolCommand });
+      await toolService.runPortTool({
+        portId,
+        command: config.command,
+        workdir: config.workdir || undefined,
+      });
     } catch (err) {
       updatePort(portId, { toolRunning: false });
       notifyError(err);

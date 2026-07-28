@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate } from '../types';
+import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig } from '../types';
 
 interface RuleState {
   highlightRuleSets: HighlightRuleSet[];
@@ -9,6 +9,7 @@ interface RuleState {
   activeProtocolTemplateId: string | null;
   sendCommandSets: SendCommandSet[];
   activeSendCommandSetId: string | null;
+  portToolConfigs: PortToolConfig[];
 
   setHighlightRuleSets: (sets: HighlightRuleSet[]) => void;
   addHighlightRuleSet: (set: HighlightRuleSet) => void;
@@ -27,16 +28,24 @@ interface RuleState {
   updateSendCommandSet: (setId: string, patch: Partial<SendCommandSet>) => void;
   removeSendCommandSet: (setId: string) => void;
   setActiveSendCommandSetId: (id: string | null) => void;
+
+  setPortToolConfigs: (configs: PortToolConfig[]) => void;
+  addPortToolConfig: (config: PortToolConfig) => void;
+  updatePortToolConfig: (id: string, patch: Partial<PortToolConfig>) => void;
+  removePortToolConfig: (id: string) => void;
+  /** 按端口号查找工具配置（取第一个匹配） */
+  findToolConfigByPort: (portId: string) => PortToolConfig | undefined;
 }
 
 export const useRuleStore = create<RuleState>()(
-  immer((set) => ({
+  immer((set, get) => ({
     highlightRuleSets: [],
     activeHighlightSetId: null,
     protocolTemplates: [],
     activeProtocolTemplateId: null,
     sendCommandSets: [],
     activeSendCommandSetId: null,
+    portToolConfigs: [],
 
     setHighlightRuleSets: (sets) => set((state) => { state.highlightRuleSets = sets; }),
     addHighlightRuleSet: (ruleSet) => set((state) => { state.highlightRuleSets.push(ruleSet); }),
@@ -76,5 +85,18 @@ export const useRuleStore = create<RuleState>()(
       }
     }),
     setActiveSendCommandSetId: (id) => set((state) => { state.activeSendCommandSetId = id; }),
+
+    setPortToolConfigs: (configs) => set((state) => { state.portToolConfigs = configs; }),
+    addPortToolConfig: (config) => set((state) => { state.portToolConfigs.push(config); }),
+    updatePortToolConfig: (id, patch) => set((state) => {
+      const config = state.portToolConfigs.find((c) => c.id === id);
+      if (config) Object.assign(config, patch);
+    }),
+    removePortToolConfig: (id) => set((state) => {
+      state.portToolConfigs = state.portToolConfigs.filter((c) => c.id !== id);
+    }),
+    findToolConfigByPort: (portId) => {
+      return get().portToolConfigs.find((c) => c.portId === portId);
+    },
   }))
 );

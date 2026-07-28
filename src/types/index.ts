@@ -28,8 +28,6 @@ export interface SerialPort {
   handshake?: Handshake;
   // 协议解析绑定（可选，绑定后接收数据按协议模板解析字段着色）
   protocolTemplateId?: string;
-  // 外部工具（烧录等）：命令模板，{port} 运行时替换为端口名
-  toolCommand?: string;
   // 外部工具是否正在运行（运行期间串口关闭，工具输出显示在终端）
   toolRunning?: boolean;
 }
@@ -185,6 +183,15 @@ export interface SendHistoryEntry {
   content: string;
   format: 'hex' | 'string';
   lineEnding: LineEnding;
+}
+
+/** 外部工具配置：端口号 → 命令行工具的映射（SQLite 持久化，不依赖串口存在） */
+export interface PortToolConfig {
+  id: string;
+  name: string;            // 配置名称，如 "STM32 烧录"
+  portId: string;          // 端口号，如 "COM5"
+  command: string;         // 命令模板，{port} 运行时替换
+  workdir: string;         // 工作目录（可选，空串表示默认）
 }
 
 // ==================== 协议解析相关 ====================

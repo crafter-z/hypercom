@@ -134,6 +134,9 @@ pub fn run() {
             commands::save_port_preset,
             commands::load_port_presets,
             commands::delete_port_preset,
+            commands::save_port_tool_config,
+            commands::load_port_tool_configs,
+            commands::delete_port_tool_config,
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,

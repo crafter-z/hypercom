@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useRuleStore } from '../stores/useRuleStore';
-import { serialService, configService, systemService, eventService, logService, storageService } from '../services/tauri';
+import { serialService, configService, systemService, eventService, logService, storageService, portToolConfigService } from '../services/tauri';
 import type { AvailablePortInfo, SerialDataEvent, SerialStatusEvent, SerialReconnectHintEvent, SerialPinStatesEvent, CommandSetInfo, HighlightSetInfo, CommandInfo, HighlightRuleInfo, ProtocolTemplateInfo } from '../services/tauri';
 import { usePinStatesStore } from '../stores/usePinStatesStore';
 import type { SerialPort, AppConfig, SendCommandSet, HighlightRuleSet, SendCommand, ProtocolTemplate, PaneNode, SendHistoryEntry, LineEnding } from '../types';
@@ -143,7 +143,6 @@ function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[
         stopBits: prev.stopBits,
         handshake: prev.handshake,
         protocolTemplateId: prev.protocolTemplateId,
-        toolCommand: prev.toolCommand,
         toolRunning: prev.toolRunning,
       };
     }
@@ -872,14 +871,22 @@ export function useAppInit() {
       await syncLogSettingsToBackend(loaded);
       // Load persisted rule sets and command sets at startup
       try {
-        const [cmdSets, hlSets, protoTemplates] = await Promise.all([
+        const [cmdSets, hlSets, protoTemplates, toolConfigs] = await Promise.all([
           storageService.loadCommandSets(),
           storageService.loadHighlightSets(),
           storageService.loadProtocolTemplates(),
+          portToolConfigService.loadPortToolConfigs(),
         ]);
         useRuleStore.getState().setSendCommandSets(cmdSets.map(mapCommandSetInfo));
         useRuleStore.getState().setHighlightRuleSets(hlSets.map(mapHighlightSetInfo));
         useRuleStore.getState().setProtocolTemplates(protoTemplates.map(mapProtocolTemplateInfo));
+        useRuleStore.getState().setPortToolConfigs(toolConfigs.map(c => ({
+          id: c.id,
+          name: c.name,
+          portId: c.port_id,
+          command: c.command,
+          workdir: c.workdir,
+        })));
       } catch (e) {
         console.warn('[useAppInit] Failed to load stored rules/commands:', e);
       }
