@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Cable, Terminal, SlidersHorizontal } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
-import { useConfigPersistence } from '../../hooks/useTauri';
+import { useConfigPersistence } from '../../hooks';
 
 /** 引导步骤定义（模块级常量，避免每次渲染重建） */
 const TOUR_STEPS: ReadonlyArray<{ icon: React.ReactNode; titleKey: string; bodyKey: string }> = [

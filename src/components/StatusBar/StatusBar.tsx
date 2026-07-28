@@ -5,7 +5,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { usePinStatesStore, type PinStates } from '../../stores/usePinStatesStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
-import { useSystemStatus } from '../../hooks/useTauri';
+import { useSystemStatus } from '../../hooks';
 import DisconnectBanner from './DisconnectBanner';
 
 interface PinLedGroupProps {

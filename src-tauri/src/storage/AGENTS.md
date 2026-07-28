@@ -1,6 +1,6 @@
 # src-tauri/src/storage/
 
-SQLite via sqlx (`runtime-tokio`, `sqlite`). Single 887-line `mod.rs` — largest backend file. 7 tables (was 9; `port_groups` and `port_group_members` removed). Pool created with `create_if_missing(true)` + WAL + FK via `SqliteConnectOptions`, synchronously in `lib.rs` setup.
+SQLite via sqlx (`runtime-tokio`, `sqlite`). Single `mod.rs` — largest backend file. 8 tables (was 9; `port_groups` and `port_group_members` removed; `trigger_rules` added). Pool created with `create_if_missing(true)` + WAL + FK via `SqliteConnectOptions`, synchronously in `lib.rs` setup.
 
 ## Models (top-level structs at `mod.rs`)
 

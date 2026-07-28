@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
-import { isPortLost } from '../../hooks/useTauri';
+import { isPortLost } from '../../hooks';
 import type { TabItem } from '../../types';
 
 /**

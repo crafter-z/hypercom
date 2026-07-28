@@ -351,3 +351,24 @@ export interface AvailablePortInfo {
   name: string;
   type: PortType; // "real" | "virtual" | "sim"
 }
+
+// ==================== 条件触发相关 ====================
+
+/** 条件触发器匹配方式 */
+export type TriggerMatchType = 'contains' | 'exact' | 'regex' | 'hex';
+
+/** 条件触发器动作类型 */
+export type TriggerActionType = 'alert' | 'respond' | 'bookmark';
+
+/** 条件触发规则 */
+export interface TriggerRule {
+  id: string;
+  name: string;
+  pattern: string;
+  isRegex: boolean;
+  matchType: TriggerMatchType;
+  actionType: TriggerActionType;
+  actionContent: string;
+  actionIsHex: boolean;
+  isEnabled: boolean;
+}

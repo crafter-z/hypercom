@@ -9,7 +9,7 @@ import {
   PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
   Wrench, TerminalSquare,
 } from 'lucide-react';
-import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks/useTauri';
+import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks';
 import { toolService } from '../../services/tauri';
 import { notifyError } from '../../stores/useToastStore';
 import { useRuleStore } from '../../stores/useRuleStore';

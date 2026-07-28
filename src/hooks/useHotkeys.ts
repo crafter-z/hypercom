@@ -12,7 +12,7 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { useSerialConnection } from './useTauri';
+import { useSerialConnection } from './useSerialConnection';
 
 function isFormField(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;

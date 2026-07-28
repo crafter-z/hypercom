@@ -7,8 +7,9 @@
 
 | 套件 | 命令 | 数量 | 说明 |
 |------|------|------|------|
-| 前端 (vitest) | `npm run test:run` | 179 tests / 11 files | useAppStore (56) + highlightEngine (22) + protocolParser (17) + protocolRenderer (8) + terminalSearch (9) + DisconnectBanner (5) + timeFormat (13) + sendUtils (21) + logReplay (10) + lineFilter (11) + protocolE2E (7) |
-| 后端 (cargo) | `cargo test --lib` | 33 tests | config (7) + logger (13) + storage (11) + lib (2) |
+| 前端 (vitest) | `npm run test:run` | 280 tests / 15 files | useAppStore (56) + highlightEngine (22) + protocolParser (17) + protocolRenderer (8) + terminalSearch (9) + DisconnectBanner (5) + timeFormat (13) + sendUtils (21) + logReplay (10) + lineFilter (11) + protocolE2E (7) + triggerEngine (20) + useOperationStore (19) + useTerminalStore (22) + useRuleStore (37) |
+| 后端 (cargo) | `cargo test --lib` | 39 tests | config (7) + logger (13) + storage (16) + system (2) + lib (2) |
+| E2E (Playwright) | `npx playwright test` | 6 tests | Chromium smoke: app-root / TitleBar / Sidebar / MainDisplay / StatusBar / OperationPanel 渲染（Tauri mock via addInitScript） |
 | TypeScript | `npx tsc --noEmit` | 0 errors | 类型检查 |
 | Rust | `cargo check` | 0 errors, 0 warnings | 快速编译检查 |
 

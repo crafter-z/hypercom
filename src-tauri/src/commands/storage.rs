@@ -527,3 +527,91 @@ pub async fn delete_port_tool_config(
         .await
         .map_err(|e| CommandError::Storage(e.to_string()))
 }
+
+// ==================== 条件触发规则 ====================
+
+#[derive(Debug, Deserialize)]
+pub struct SaveTriggerRuleArgs {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub pattern: String,
+    pub is_regex: bool,
+    pub match_type: String,
+    pub action_type: String,
+    pub action_content: String,
+    pub action_is_hex: bool,
+    pub is_enabled: bool,
+}
+
+#[tauri::command]
+pub async fn save_trigger_rule(
+    args: SaveTriggerRuleArgs,
+    state: State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let row = storage::TriggerRuleRow {
+        id: id.clone(),
+        name: args.name,
+        pattern: args.pattern,
+        is_regex: args.is_regex,
+        match_type: args.match_type,
+        action_type: args.action_type,
+        action_content: args.action_content,
+        action_is_hex: args.action_is_hex,
+        is_enabled: args.is_enabled,
+    };
+    storage::save_trigger_rule_to_db(&pool, &row)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn load_trigger_rules(
+    state: State<'_, AppState>,
+) -> Result<Vec<storage::TriggerRuleRow>, CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::load_trigger_rules_from_db(&pool)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn delete_trigger_rule(
+    rule_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let pool = {
+        let storage_mgr = state
+            .storage_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let db_pool = storage_mgr
+            .pool()
+            .map_err(|e| CommandError::Storage(e.to_string()))?;
+        db_pool.clone()
+    };
+    storage::delete_trigger_rule_from_db(&pool, &rule_id)
+        .await
+        .map_err(|e| CommandError::Storage(e.to_string()))
+}

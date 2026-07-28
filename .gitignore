@@ -36,3 +36,7 @@ src-tauri/target/
 
 # Test files
 test-*.txt
+
+# Playwright
+test-results/
+playwright-report/

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig } from '../types';
+import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig, TriggerRule } from '../types';
 
 interface RuleState {
   highlightRuleSets: HighlightRuleSet[];
@@ -35,6 +35,12 @@ interface RuleState {
   removePortToolConfig: (id: string) => void;
   /** 按端口号查找工具配置（取第一个匹配） */
   findToolConfigByPort: (portId: string) => PortToolConfig | undefined;
+
+  triggerRules: TriggerRule[];
+  setTriggerRules: (rules: TriggerRule[]) => void;
+  addTriggerRule: (rule: TriggerRule) => void;
+  updateTriggerRule: (id: string, patch: Partial<TriggerRule>) => void;
+  removeTriggerRule: (id: string) => void;
 }
 
 export const useRuleStore = create<RuleState>()(
@@ -98,5 +104,16 @@ export const useRuleStore = create<RuleState>()(
     findToolConfigByPort: (portId) => {
       return get().portToolConfigs.find((c) => c.portId === portId);
     },
+
+    triggerRules: [],
+    setTriggerRules: (rules) => set((state) => { state.triggerRules = rules; }),
+    addTriggerRule: (rule) => set((state) => { state.triggerRules.push(rule); }),
+    updateTriggerRule: (id, patch) => set((state) => {
+      const rule = state.triggerRules.find((r) => r.id === id);
+      if (rule) Object.assign(rule, patch);
+    }),
+    removeTriggerRule: (id) => set((state) => {
+      state.triggerRules = state.triggerRules.filter((r) => r.id !== id);
+    }),
   }))
 );

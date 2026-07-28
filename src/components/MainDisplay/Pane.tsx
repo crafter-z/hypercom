@@ -2,7 +2,7 @@ import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { useSerialConnection } from '../../hooks/useTauri';
+import { useSerialConnection } from '../../hooks';
 import { notifyError } from '../../stores/useToastStore';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';

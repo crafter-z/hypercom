@@ -10,7 +10,7 @@
 | `simulation.rs` | `enable_simulation`, `disable_simulation` |
 | `config.rs` | `get_config`, `set_config`, `reset_config`, `update_session_snapshot`, `get_config_path` |
 | `log.rs` | `start_logging`, `stop_logging`, `save_log_as`, `export_terminal_log`, `get_log_files`, `set_log_split_size`, `set_log_split_enabled`, `set_log_filename_format`, `set_log_auto_save`, `set_log_encoding`, `open_path`, `open_log_directory`. Note: `save_log_as` and `export_terminal_log` scope restriction removed (user-chosen save dialog path only needs valid parent). |
-| `storage.rs` | highlight rule sets + send command sets + protocol templates CRUD. Writes wrapped in transactions. 7 tables (port_groups removed). |
+| `storage.rs` | highlight rule sets + send command sets + protocol templates + trigger rules CRUD. Writes wrapped in transactions. 8 tables (port_groups removed). |
 | `system_cmds.rs` | `get_system_status`, `prevent_sleep`, `prevent_screen_off` |
 | `file.rs` | `write_text_file`, `read_text_file`. `validate_config_path()` restricts import paths to config directory. |
 | `mod.rs` | `CommandError` enum (thiserror) + `pub use domain::*;` re-exports |

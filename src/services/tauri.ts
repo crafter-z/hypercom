@@ -441,6 +441,28 @@ export const storageService = {
   deleteProtocolTemplate: (setId: string): Promise<void> => {
     return invoke<void>('delete_protocol_template', { setId });
   },
+
+  saveTriggerRule: (args: {
+    id?: string;
+    name: string;
+    pattern: string;
+    is_regex: boolean;
+    match_type: string;
+    action_type: string;
+    action_content: string;
+    action_is_hex: boolean;
+    is_enabled: boolean;
+  }): Promise<string> => {
+    return invoke<string>('save_trigger_rule', { args });
+  },
+
+  loadTriggerRules: (): Promise<TriggerRuleInfo[]> => {
+    return invoke<TriggerRuleInfo[]>('load_trigger_rules');
+  },
+
+  deleteTriggerRule: (ruleId: string): Promise<void> => {
+    return invoke<void>('delete_trigger_rule', { ruleId });
+  },
 };
 
 // ==================== 外部工具命令 ====================
@@ -496,6 +518,18 @@ export interface PortToolConfigInfo {
   port_id: string;
   command: string;
   workdir: string;
+}
+
+export interface TriggerRuleInfo {
+  id: string;
+  name: string;
+  pattern: string;
+  is_regex: boolean;
+  match_type: string;
+  action_type: string;
+  action_content: string;
+  action_is_hex: boolean;
+  is_enabled: boolean;
 }
 
 export const portPresetService = {

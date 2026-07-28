@@ -83,12 +83,205 @@ mod win32_power {
     }
 }
 
+/// macOS power management via `caffeinate`.
+///
+/// Manages a single `caffeinate` child process whose flags reflect the combined
+/// desired state (same pattern as Windows `DESIRED_STATE`). The process is
+/// restarted whenever either half of the state changes.
+///
+/// Flags: `-d` = prevent display sleep, `-i` = prevent idle sleep,
+/// `-s` = prevent system sleep (AC).
+#[cfg(target_os = "macos")]
+mod macos_power {
+    use std::process::{Child, Command};
+    use std::sync::Mutex;
+
+    /// Desired `(prevent_sleep, prevent_screen_off)` state.
+    static DESIRED_STATE: Mutex<(bool, bool)> = Mutex::new((false, false));
+
+    /// Handle to the spawned `caffeinate` child process.
+    static CAFFEINATE_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+
+    pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
+        apply_state(|state| state.1 = enable)
+    }
+
+    pub fn prevent_sleep(enable: bool) -> Result<(), String> {
+        apply_state(|state| state.0 = enable)
+    }
+
+    /// Update one half of the desired state, then restart `caffeinate` with
+    /// flags matching the combined state.
+    fn apply_state(update: impl FnOnce(&mut (bool, bool))) -> Result<(), String> {
+        let desired = {
+            let mut guard = DESIRED_STATE
+                .lock()
+                .map_err(|e| format!("Failed to lock power state: {}", e))?;
+            update(&mut guard);
+            *guard
+        };
+        restart_caffeinate(desired.0, desired.1)
+    }
+
+    /// Kill any running `caffeinate` and spawn a new one if either flag is set.
+    fn restart_caffeinate(sleep: bool, screen: bool) -> Result<(), String> {
+        let mut child_guard = CAFFEINATE_CHILD
+            .lock()
+            .map_err(|e| format!("Failed to lock caffeinate child: {}", e))?;
+
+        // Kill existing process and reap it.
+        if let Some(ref mut child) = *child_guard {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *child_guard = None;
+
+        if !sleep && !screen {
+            return Ok(());
+        }
+
+        let args = caffeinate_args(sleep, screen);
+
+        match Command::new("caffeinate").args(&args).spawn() {
+            Ok(child) => {
+                *child_guard = Some(child);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("Failed to spawn caffeinate: {}", e);
+                Err(format!("Failed to spawn caffeinate: {}", e))
+            }
+        }
+    }
+
+    /// Build the `caffeinate` flag list from the desired state.
+    pub(crate) fn caffeinate_args(sleep: bool, screen: bool) -> Vec<&'static str> {
+        let mut args = Vec::new();
+        if screen {
+            args.push("-d");
+        }
+        if sleep {
+            args.push("-i");
+            args.push("-s");
+        }
+        args
+    }
+}
+
+/// Linux power management via `systemd-inhibit`.
+///
+/// Spawns `systemd-inhibit --what=<what> --who=HyperCom --why=Serial-debug-session
+/// --mode=block sleep infinity` as a child process. The inhibitor is released by
+/// killing the child. On non-systemd systems the spawn fails gracefully
+/// (`Ok(())` + `log::warn!`).
+#[cfg(target_os = "linux")]
+mod linux_power {
+    use std::process::{Child, Command};
+    use std::sync::Mutex;
+
+    /// Desired `(prevent_sleep, prevent_screen_off)` state.
+    static DESIRED_STATE: Mutex<(bool, bool)> = Mutex::new((false, false));
+
+    /// Handle to the spawned `systemd-inhibit` child process.
+    static INHIBIT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+
+    pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
+        apply_state(|state| state.1 = enable)
+    }
+
+    pub fn prevent_sleep(enable: bool) -> Result<(), String> {
+        apply_state(|state| state.0 = enable)
+    }
+
+    /// Update one half of the desired state, then restart `systemd-inhibit`
+    /// with the appropriate `--what` value.
+    fn apply_state(update: impl FnOnce(&mut (bool, bool))) -> Result<(), String> {
+        let desired = {
+            let mut guard = DESIRED_STATE
+                .lock()
+                .map_err(|e| format!("Failed to lock power state: {}", e))?;
+            update(&mut guard);
+            *guard
+        };
+        restart_inhibit(desired.0, desired.1)
+    }
+
+    /// Kill any running inhibitor and spawn a new one if either flag is set.
+    fn restart_inhibit(sleep: bool, screen: bool) -> Result<(), String> {
+        let mut child_guard = INHIBIT_CHILD
+            .lock()
+            .map_err(|e| format!("Failed to lock inhibit child: {}", e))?;
+
+        // Kill existing process and reap it.
+        if let Some(ref mut child) = *child_guard {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *child_guard = None;
+
+        if !sleep && !screen {
+            return Ok(());
+        }
+
+        let what = inhibit_what(sleep, screen);
+
+        match Command::new("systemd-inhibit")
+            .args([
+                format!("--what={}", what),
+                "--who=HyperCom".to_string(),
+                "--why=Serial-debug-session".to_string(),
+                "--mode=block".to_string(),
+                "sleep".to_string(),
+                "infinity".to_string(),
+            ])
+            .spawn()
+        {
+            Ok(child) => {
+                *child_guard = Some(child);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to spawn systemd-inhibit (non-systemd system?): {}",
+                    e
+                );
+                // Graceful fallback — don't error on non-systemd systems.
+                Ok(())
+            }
+        }
+    }
+
+    /// Map desired state to the `systemd-inhibit --what` value.
+    ///
+    /// `idle` inhibits screen blanking; `sleep` inhibits suspend/hibernate.
+    pub(crate) fn inhibit_what(sleep: bool, screen: bool) -> &'static str {
+        match (sleep, screen) {
+            (true, true) => "idle:sleep",
+            (true, false) => "sleep",
+            (false, true) => "idle",
+            (false, false) => "",
+        }
+    }
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
 #[cfg(target_os = "windows")]
 pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
     win32_power::prevent_screen_off(enable)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
+    macos_power::prevent_screen_off(enable)
+}
+
+#[cfg(target_os = "linux")]
+pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
+    linux_power::prevent_screen_off(enable)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn prevent_screen_off(_enable: bool) -> Result<(), String> {
     Ok(())
 }
@@ -98,7 +291,89 @@ pub fn prevent_sleep(enable: bool) -> Result<(), String> {
     win32_power::prevent_sleep(enable)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub fn prevent_sleep(enable: bool) -> Result<(), String> {
+    macos_power::prevent_sleep(enable)
+}
+
+#[cfg(target_os = "linux")]
+pub fn prevent_sleep(enable: bool) -> Result<(), String> {
+    linux_power::prevent_sleep(enable)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn prevent_sleep(_enable: bool) -> Result<(), String> {
     Ok(())
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prevent_screen_off_roundtrip() {
+        assert!(prevent_screen_off(true).is_ok());
+        assert!(prevent_screen_off(false).is_ok());
+    }
+
+    #[test]
+    fn prevent_sleep_roundtrip() {
+        assert!(prevent_sleep(true).is_ok());
+        assert!(prevent_sleep(false).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos_tests {
+        use crate::system::macos_power;
+
+        #[test]
+        fn caffeinate_args_screen_only() {
+            assert_eq!(macos_power::caffeinate_args(false, true), vec!["-d"]);
+        }
+
+        #[test]
+        fn caffeinate_args_sleep_only() {
+            assert_eq!(macos_power::caffeinate_args(true, false), vec!["-i", "-s"]);
+        }
+
+        #[test]
+        fn caffeinate_args_both() {
+            assert_eq!(
+                macos_power::caffeinate_args(true, true),
+                vec!["-d", "-i", "-s"]
+            );
+        }
+
+        #[test]
+        fn caffeinate_args_neither() {
+            assert!(macos_power::caffeinate_args(false, false).is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_tests {
+        use crate::system::linux_power;
+
+        #[test]
+        fn inhibit_what_screen_only() {
+            assert_eq!(linux_power::inhibit_what(false, true), "idle");
+        }
+
+        #[test]
+        fn inhibit_what_sleep_only() {
+            assert_eq!(linux_power::inhibit_what(true, false), "sleep");
+        }
+
+        #[test]
+        fn inhibit_what_both() {
+            assert_eq!(linux_power::inhibit_what(true, true), "idle:sleep");
+        }
+
+        #[test]
+        fn inhibit_what_neither() {
+            assert_eq!(linux_power::inhibit_what(false, false), "");
+        }
+    }
 }

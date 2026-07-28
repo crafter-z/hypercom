@@ -13,7 +13,7 @@ import AboutDialog from './components/shared/AboutDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, usePinStatesSubscriber, useToolOutput } from './hooks/useTauri';
+import { useAppInit, useSerialReceive, usePinStatesSubscriber, useToolOutput } from './hooks';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';

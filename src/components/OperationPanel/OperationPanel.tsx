@@ -3,7 +3,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { useSerialSend, useSerialConnection } from '../../hooks/useTauri';
+import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { open, save } from '@tauri-apps/plugin-dialog';

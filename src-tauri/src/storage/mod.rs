@@ -104,6 +104,21 @@ pub struct PortToolConfigRow {
     pub workdir: String,
 }
 
+/// 条件触发规则：接收数据匹配模式时自动执行动作
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerRuleRow {
+    pub id: String,
+    pub name: String,
+    pub pattern: String,
+    pub is_regex: bool,
+    pub match_type: String,
+    pub action_type: String,
+    pub action_content: String,
+    pub action_is_hex: bool,
+    pub is_enabled: bool,
+}
+
 // ==================== StorageManager ====================
 
 pub struct StorageManager {
@@ -241,6 +256,18 @@ pub async fn init_schema_on_pool(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             port_id TEXT NOT NULL,
             command TEXT NOT NULL DEFAULT '',
             workdir TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS trigger_rules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            is_regex INTEGER NOT NULL DEFAULT 0,
+            match_type TEXT NOT NULL DEFAULT 'contains',
+            action_type TEXT NOT NULL DEFAULT 'alert',
+            action_content TEXT NOT NULL DEFAULT '',
+            action_is_hex INTEGER NOT NULL DEFAULT 0,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );
         "#,
     )
@@ -605,6 +632,69 @@ pub async fn delete_port_tool_config_from_db(
     Ok(())
 }
 
+// ==================== 条件触发规则 ====================
+
+pub async fn save_trigger_rule_to_db(
+    pool: &Pool<Sqlite>,
+    rule: &TriggerRuleRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO trigger_rules (id, name, pattern, is_regex, match_type, action_type, action_content, action_is_hex, is_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&rule.id)
+    .bind(&rule.name)
+    .bind(&rule.pattern)
+    .bind(rule.is_regex as i32)
+    .bind(&rule.match_type)
+    .bind(&rule.action_type)
+    .bind(&rule.action_content)
+    .bind(rule.action_is_hex as i32)
+    .bind(rule.is_enabled as i32)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_trigger_rules_from_db(
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<Vec<TriggerRuleRow>> {
+    let rows = sqlx::query_as::<_, (String, String, String, i32, String, String, String, i32, i32)>(
+        "SELECT id, name, pattern, is_regex, match_type, action_type, action_content, action_is_hex, is_enabled FROM trigger_rules ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, name, pattern, is_regex, match_type, action_type, action_content, action_is_hex, is_enabled)| {
+                TriggerRuleRow {
+                    id,
+                    name,
+                    pattern,
+                    is_regex: is_regex != 0,
+                    match_type,
+                    action_type,
+                    action_content,
+                    action_is_hex: action_is_hex != 0,
+                    is_enabled: is_enabled != 0,
+                }
+            },
+        )
+        .collect())
+}
+
+pub async fn delete_trigger_rule_from_db(
+    pool: &Pool<Sqlite>,
+    id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM trigger_rules WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,7 +726,8 @@ mod tests {
         assert!(tables.contains(&"send_history".to_string()));
         assert!(tables.contains(&"port_presets".to_string()));
         assert!(tables.contains(&"port_tool_configs".to_string()));
-        assert_eq!(tables.len(), 8);
+        assert!(tables.contains(&"trigger_rules".to_string()));
+        assert_eq!(tables.len(), 9);
     }
 
     #[tokio::test]
@@ -951,5 +1042,92 @@ mod tests {
         let pool = setup_test_db().await;
         assert!(load_command_sets_from_db(&pool).await.unwrap().is_empty());
         assert!(load_highlight_sets_from_db(&pool).await.unwrap().is_empty());
+    }
+
+    fn sample_trigger_rule() -> TriggerRuleRow {
+        TriggerRuleRow {
+            id: "trig-1".into(),
+            name: "Error Alert".into(),
+            pattern: "ERROR".into(),
+            is_regex: false,
+            match_type: "contains".into(),
+            action_type: "alert".into(),
+            action_content: "Error detected!".into(),
+            action_is_hex: false,
+            is_enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_trigger_rule() {
+        let pool = setup_test_db().await;
+        let rule = sample_trigger_rule();
+
+        save_trigger_rule_to_db(&pool, &rule).await.unwrap();
+        let loaded = load_trigger_rules_from_db(&pool).await.unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "trig-1");
+        assert_eq!(loaded[0].name, "Error Alert");
+        assert_eq!(loaded[0].pattern, "ERROR");
+        assert!(!loaded[0].is_regex);
+        assert_eq!(loaded[0].match_type, "contains");
+        assert_eq!(loaded[0].action_type, "alert");
+        assert_eq!(loaded[0].action_content, "Error detected!");
+        assert!(!loaded[0].action_is_hex);
+        assert!(loaded[0].is_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_update_trigger_rule() {
+        let pool = setup_test_db().await;
+        let mut rule = sample_trigger_rule();
+
+        save_trigger_rule_to_db(&pool, &rule).await.unwrap();
+        rule.name = "Updated Alert".into();
+        rule.pattern = "FATAL".into();
+        rule.is_enabled = false;
+        save_trigger_rule_to_db(&pool, &rule).await.unwrap();
+
+        let loaded = load_trigger_rules_from_db(&pool).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Updated Alert");
+        assert_eq!(loaded[0].pattern, "FATAL");
+        assert!(!loaded[0].is_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_delete_trigger_rule() {
+        let pool = setup_test_db().await;
+        let rule = sample_trigger_rule();
+
+        save_trigger_rule_to_db(&pool, &rule).await.unwrap();
+        delete_trigger_rule_from_db(&pool, "trig-1").await.unwrap();
+
+        assert!(load_trigger_rules_from_db(&pool).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_trigger_rule_hex_action() {
+        let pool = setup_test_db().await;
+        let rule = TriggerRuleRow {
+            id: "trig-hex".into(),
+            name: "Hex Respond".into(),
+            pattern: "AA 55".into(),
+            is_regex: false,
+            match_type: "hex".into(),
+            action_type: "respond".into(),
+            action_content: "BB 66".into(),
+            action_is_hex: true,
+            is_enabled: true,
+        };
+
+        save_trigger_rule_to_db(&pool, &rule).await.unwrap();
+        let loaded = load_trigger_rules_from_db(&pool).await.unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].match_type, "hex");
+        assert_eq!(loaded[0].action_type, "respond");
+        assert!(loaded[0].action_is_hex);
     }
 }

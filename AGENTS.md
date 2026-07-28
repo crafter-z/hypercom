@@ -1,10 +1,10 @@
 # PROJECT KNOWLEDGE BASE — HyperCom
 
-**Generated:** 2026-07-21 · **Commit:** 1206a8a (main) · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + sqlx + serialport)
+**Generated:** 2026-07-28 · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + sqlx + serialport)
 
 ## OVERVIEW
 
-HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 9 lifecycle-disciplined hooks own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls.
+HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 10 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → auto-respond/alert/bookmark).
 
 ## STRUCTURE
 
@@ -12,24 +12,24 @@ HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
-│   ├── i18n.ts                   # i18next + react-i18next, 250 keys × zh-CN/en-US
+│   ├── i18n.ts                   # i18next + react-i18next, 266 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
-│   ├── hooks/useTauri.ts         # 9 lifecycle-critical hooks (含 usePinStatesSubscriber)
+│   ├── hooks/                    # 10 hooks in individual files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
 │   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix; NO display state fields)
 │   │   ├── useTerminalStore.ts   # terminal buffer + appendTerminalLine + setTerminalEncoding
-│   │   └── useRuleStore.ts       # highlight + send-command rule sets + CRUD
-│   ├── utils/                    # highlightEngine / protocolParser / hexUtils + their tests
+│   │   └── useRuleStore.ts       # highlight + send-command + trigger rule sets + CRUD
+│   ├── utils/                    # highlightEngine / protocolParser / triggerEngine / hexUtils + their tests
 │   ├── types/index.ts            # shared TS types
 │   └── components/               # MainDisplay / ConfigModal / OperationPanel / Sidebar / TitleBar / StatusBar / shared
 ├── src-tauri/src/                # Rust backend
 │   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
-│   ├── system.rs                 # win32_power FFI (SetThreadExecutionState)
+│   ├── system.rs                 # cross-platform power mgmt (Win32 FFI / macOS caffeinate / Linux systemd-inhibit)
 │   ├── commands/                 # 7 domain files + mod.rs (CommandError enum + re-exports)
 │   ├── serial/mod.rs             # serialport + SIM:Loopback virtual port (505 lines)
 │   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
-│   ├── storage/mod.rs            # SQLite via sqlx (7 tables), WAL+FK pragmas (887 lines)
+│   ├── storage/mod.rs            # SQLite via sqlx (8 tables), WAL+FK pragmas
 │   └── config/mod.rs             # JSON config + versioning + validation + path + backup (475 lines)
 └── plans/                        # design docs (see "Key design reference" below)
 ```
@@ -41,15 +41,16 @@ hypercom/
 | Add frontend state field | `src/stores/use{App,Operation,Terminal,Rule}Store.ts` | pick correct store only; god store is deprecated |
 | Add Tauri command | `src-tauri/src/commands/<domain>.rs` + register in `lib.rs` | return `Result<T, CommandError>`, NOT `String` |
 | Cross `.await` lock | extract + clone + drop the `MutexGuard` first | see pattern in `commands/log.rs` |
-| Add serial hook | `src/hooks/useTauri.ts` | follow 9-hook lifecycle; do not revive `useSerialData`-style |
+| Add serial hook | `src/hooks/<hookName>.ts` + export from `index.ts` | follow 10-hook lifecycle; do not revive `useSerialData`-style |
 | Split pane recursively | `useAppStore.splitPane` action via tree helpers | NO flat `state.panes` anywhere |
 | Pane tree traversal | module-top exports in `useAppStore.ts` (`findLeafById` … `countLeaves`) | do not hand-roll tree walks |
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
 | ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; SQLite via `storageService` |
 | Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState`; timing via per-command `delay` + set `loopDelay` only (no global interval) |
-| Win32 power | `src-tauri/src/system.rs` `win32_power` module | `prevent_sleep` / `prevent_screen_off` |
+| Cross-platform power | `src-tauri/src/system.rs` | Win32 `SetThreadExecutionState` / macOS `caffeinate` / Linux `systemd-inhibit` |
 | Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` + `setTerminalEncoding` | serial_data carries UTF-8 bytes; live re-decode on switch |
-| DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `useTauri.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
+| DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `hooks/disconnectTracking.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
+| Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond/bookmark; SQLite persisted |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
 | External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
@@ -72,7 +73,8 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` + `setTerminalEncoding` (re-decode on switch) |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
-| `useSerialPorts` (248) / `useSerialConnection` (279) / `usePinStatesSubscriber` (410) / `useSerialReceive` (447) / `useSerialSend` (646) / `useConfigPersistence` (770) / `useSystemStatus` (811) / `useAppInit` (856) / `useSimulation` (935) | `src/hooks/useTauri.ts` (959 lines) | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
+| 10 hooks: `useSerialPorts` / `useSerialConnection` / `usePinStatesSubscriber` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useToolOutput` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
+| `evaluateTriggers` | `src/utils/triggerEngine.ts` | pure fn | conditional trigger matching engine (contains/exact/regex/hex) |
 | `tauri` service modules | `src/services/tauri.ts` | service | wrapped `invoke` calls (6 modules) |
 
 Backend:
@@ -81,10 +83,10 @@ Backend:
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/Storage/System/Lock/Io/Other; manual `serde::Serialize` |
 | All Tauri commands (7 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `StorageManager` + row structs (`SendCommandRow` `:18` … `PortPresetRow` `:91`) | `src-tauri/src/storage/mod.rs` | struct / models | SQLite pool (7 tables, WAL+FK); see `src-tauri/src/storage/AGENTS.md` |
+| `StorageManager` + row structs (`SendCommandRow` … `TriggerRuleRow`) | `src-tauri/src/storage/mod.rs` | struct / models | SQLite pool (8 tables, WAL+FK); see `src-tauri/src/storage/AGENTS.md` |
 | `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | versioning + validation + path resolution + backup/recovery (475 lines) |
 | `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `storage_manager` / `logger` / `config_manager` behind `std::sync::Mutex` |
-| `win32_power` | `src-tauri/src/system.rs` | mod | `SetThreadExecutionState` FFI |
+| `win32_power` / `macos_power` / `linux_power` | `src-tauri/src/system.rs` | mod | cross-platform `prevent_sleep` / `prevent_screen_off` |
 
 Subdir guides: [`src/stores/AGENTS.md`](src/stores/AGENTS.md) · [`src/hooks/AGENTS.md`](src/hooks/AGENTS.md) · [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md) · [`src-tauri/src/storage/AGENTS.md`](src-tauri/src/storage/AGENTS.md) · [`src/components/MainDisplay/AGENTS.md`](src/components/MainDisplay/AGENTS.md) · [`src/components/ConfigModal/AGENTS.md`](src/components/ConfigModal/AGENTS.md) · [`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md)
 
@@ -164,7 +166,7 @@ useTerminalStore.getState().appendTerminalLine(portId, line);
 const terminals = useTerminalStore(s => s.terminals);
 ```
 
-### useRuleStore — highlightRuleSets, sendCommandSets + CRUD
+### useRuleStore — highlightRuleSets, sendCommandSets, triggerRules + CRUD
 
 ```tsx
 const highlightRuleSets = useRuleStore(s => s.highlightRuleSets);
@@ -236,7 +238,7 @@ The old `useSerialData` hook was split into two hooks with different lifecycles:
 
 Both hooks write to the terminal store through `getState()` to avoid re-rendering the hook owner on every line.
 
-The full hook set in `src/hooks/useTauri.ts` (9 hooks):
+The full hook set in `src/hooks/` (10 hooks, individual files):
 
 | Hook | Purpose | Called in |
 |------|---------|-----------|
@@ -249,6 +251,7 @@ The full hook set in `src/hooks/useTauri.ts` (9 hooks):
 | `useSystemStatus` | Polls CPU/memory every 5s | StatusBar |
 | `useAppInit` | One-shot app bootstrap | App.tsx |
 | `useSimulation` | Toggle SIM:Loopback virtual port | Sidebar toolbar |
+| `useToolOutput` | `tool:output` / `tool:exit` event listeners | App.tsx (once) |
 
 ## Rust backend: CommandError and commands/ split
 

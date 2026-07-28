@@ -1,27 +1,29 @@
 # src/hooks/
 
-Single file: `useTauri.ts` (959 lines) — 9 hooks that own the React↔Tauri lifecycle.
+10 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
 
-## Where to look
+## File structure
 
-| Hook (line) | Call site | Lifecycle |
-|-------------|-----------|-----------|
-| `useSerialPorts(pollMs=3000)` (248) | Sidebar | polling |
-| `useSerialConnection()` (279) | Sidebar / TabBar | open/close; routes through `closePort()` |
-| `usePinStatesSubscriber()` (410) | `App.tsx` **exactly once** | `serial:pin_states` event listener |
-| `useSerialReceive()` (447) | `App.tsx` **exactly once** | owns `serial_data` event listener + status handler (manages `lostPortIds` for DisconnectBanner) |
-| `useSerialSend()` (646) | OperationPanel | action; in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite) |
-| `useConfigPersistence()` (770) | `App.tsx` | load + save |
-| `useSystemStatus(pollMs=5000)` (811) | StatusBar | polling |
-| `useAppInit()` (856) | `App.tsx` | one-shot bootstrap |
-| `useSimulation()` (935) | Sidebar toolbar | SIM:Loopback virtual port toggle |
-| `useToolOutput()` (965) | `App.tsx` **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
+| File | Exports | Call site | Lifecycle |
+|------|---------|-----------|-----------|
+| `disconnectTracking.ts` | `userClosingPortIds`, `lostPortIds`, `isUserClosingPort()`, `isPortLost()` | shared by useSerialConnection + useSerialReceive | module-level Sets for session-aware disconnect tracking |
+| `useSerialPorts.ts` | `useSerialPorts(pollMs=3000)`, `mapPortInfo()`, `mergePorts()` | Sidebar | polling; `mapPortInfo`/`mergePorts` also used by useSimulation |
+| `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop |
+| `usePinStatesSubscriber.ts` | `usePinStatesSubscriber()` | `App.tsx` **exactly once** | `serial:pin_states` event listener |
+| `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial_data` event listener + status handler (writes `lostPortIds` for DisconnectBanner) |
+| `useSerialSend.ts` | `useSerialSend()` | OperationPanel | action; in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite) |
+| `useConfigPersistence.ts` | `useConfigPersistence()`, `syncLogSettingsToBackend()` | `App.tsx` | load + save; `syncLogSettingsToBackend` also used by useAppInit |
+| `useSystemStatus.ts` | `useSystemStatus(pollMs=5000)` | StatusBar | polling |
+| `useAppInit.ts` | `useAppInit()` | `App.tsx` | one-shot bootstrap; owns `isValidPaneNode` + `mapCommandSetInfo`/`mapHighlightSetInfo`/`mapProtocolTemplateInfo` |
+| `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts |
+| `useToolOutput.ts` | `useToolOutput()` | `App.tsx` **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
+| `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
 
 ## Conventions (root covers lifecycle split rationale)
 
 - Both `useSerialReceive` and `useSerialSend` write lines via `useTerminalStore.getState().appendTerminalLine` — NOT via hook selector. Prevents re-rendering the owner every frame.
 - `useSerialReceive` MUST be called exactly once in `App.tsx`. Calling it twice double-registers the `serial_data` listener → every line gets appended twice.
-- `useSerialReceive`'s status handler is the ONLY place that writes to `lostPortIds` (module-level `Set<string>`). A port is marked "lost" only on a connected→disconnected transition within this session; successful `openPort`/`closePort`/reconnect clear it. `isPortLost(portId)` is exported for `DisconnectBanner.tsx` which uses the pure helper `filterLostTabIds(tabs, isPortLost)` — never probe port state from outside the hook.
+- `useSerialReceive`'s status handler is the ONLY place that writes to `lostPortIds` (in `disconnectTracking.ts`). A port is marked "lost" only on a connected→disconnected transition within this session; successful `openPort`/`closePort`/reconnect clear it. `isPortLost(portId)` is exported for `DisconnectBanner.tsx` which uses the pure helper `filterLostTabIds(tabs, isPortLost)` — never probe port state from outside the hook.
 - `useSerialSend` maintains in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, dedup on content+format). `SendHistoryEntry` lives in `src/types/index.ts`. No SQLite persistence; the old `sendHistoryService` / `SendHistoryItem` were removed. Backend Rust commands survive but are not invoked from the frontend.
 - `useSerialConnection.closePort()` is the only sanctioned close path: triggers `stopLogging` and updates port status. Bypassing leaks log file handles + leaves status "connected" stuck.
 - `useSerialPorts(3000)` uses `mergePorts()` on every refresh — `mapPortInfo()` always overwrites status to `'disconnected'`; merge preserves alias / group / connection state / baud match.
@@ -38,4 +40,3 @@ Single file: `useTauri.ts` (959 lines) — 9 hooks that own the React↔Tauri li
 - Bypassing `closePort()` to remove a tab — corrupts log lifecycle + port status.
 - Mutating `lostPortIds` from anywhere except the status handler inside `useSerialReceive`. The set encapsulates session-aware disconnect tracking; external mutation breaks `DisconnectBanner` correctness.
 - Re-introducing global display fields (`displayFormat`, `encoding`, `scrollLocked`, `showTimestamp`, `loopInterval`) in `useOperationStore` — those live per-tab in `useTerminalStore`.
-- Splitting `useTauri.ts` into per-hook files. The 9-hook lifecycle is intentionally co-located; extraction was deferred on purpose.

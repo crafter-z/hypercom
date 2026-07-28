@@ -44,12 +44,13 @@
 
 ### 系统与配置
 - 📊 **资源监控** — `sysinfo` 进程级 CPU / 内存采样
-- 🛠️ **6 页配置弹窗** — 通用、日志、备份、显示、高亮规则、命令规则
+- 🛠️ **7 页配置弹窗** — 通用、日志、备份、显示、高亮规则、命令规则、条件触发
 - 🔄 **配置版本化** — `config_version` + `migrate()`，前向兼容
 - 🎯 **配置路径** — CLI `--config` / `HYPERCOM_CONFIG` env / portable 模式
 - ✅ **字段校验** — `validate_and_clamp()` 强制边界
 - 💾 **备份/恢复** — `.bak` 自动备份，损坏时回退恢复
-- 🔋 **防休眠** — Win32 `SetThreadExecutionState`
+- 🔋 **防休眠** — 跨平台（Win32 / macOS `caffeinate` / Linux `systemd-inhibit`）
+- ⚡ **条件触发器** — 接收匹配（包含/精确/正则/HEX）→ 自动回复 / 弹窗告警 / 书签标记
 - 📌 **窗口置顶** / ℹ️ **关于** / 📤 **配置导出导入** / ⭐ **端口预设** / 🧰 **系统托盘**
 
 ---
@@ -124,8 +125,8 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (179 cases / 11 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (33 cases)
+npm run test:run                                       # vitest (280 cases / 15 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (39 cases)
 ```
 
 ---

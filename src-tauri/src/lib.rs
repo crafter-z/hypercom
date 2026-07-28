@@ -137,6 +137,10 @@ pub fn run() {
             commands::save_port_tool_config,
             commands::load_port_tool_configs,
             commands::delete_port_tool_config,
+            // ===== 条件触发规则命令 =====
+            commands::save_trigger_rule,
+            commands::load_trigger_rules,
+            commands::delete_trigger_rule,
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,
