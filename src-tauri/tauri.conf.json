@@ -50,7 +50,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJDMDZBRjBBNDAwNzFGNTIKUldSU0h3ZEFDcThHTE1nY2d6OWdJUDAxY0JaMzd6Y1NhWmpaVU5wYVlDWWMrRzY5VlpvckFXNkcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0RjM3MTczMEUyOUMzNjkKUldScHd5a09jM0h6NUFqTXJPZVNDMTZOTGZOMVZNTlA1TkZhVVFuTnBta3ZzamJ1cTFaWmprb00K",
       "endpoints": [
         "https://github.com/crafter-z/hypercom/releases/latest/download/latest.json"
       ],
