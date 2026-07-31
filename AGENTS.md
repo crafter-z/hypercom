@@ -317,6 +317,7 @@ scope: ui | backend | store | hooks | plans
 
 - `plans/04-data-flow.md` — 8 annotated data flow sequences
 - `plans/08-defects.md` — active bug tracker
+- `plans/09-release-workflow.md` — GitHub Actions release + updater workflow (tag-triggered build, RELEASE_NOTES.md unified notes, secrets, troubleshooting)
 
 ## Other gotchas
 
