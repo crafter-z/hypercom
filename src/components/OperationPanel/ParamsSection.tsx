@@ -5,6 +5,8 @@ import { useTranslation } from 'react-i18next';
 import type { DataBits, Parity, StopBits, Handshake } from '../../types';
 import { portPresetService } from '../../services/tauri';
 import type { PortPresetInfo } from '../../services/tauri';
+import { notifySuccess, notifyError } from '../../stores/useToastStore';
+import { Save, Trash2 } from 'lucide-react';
 
 export interface ParamsSectionProps {
   /** True when a port tab is selected (params editable pre-connect so the
@@ -62,6 +64,46 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     });
   };
 
+  /** Auto-generate a preset name from current params: "9600-8N1" style. */
+  const autoPresetName = useCallback(() => {
+    const op = useOperationStore.getState();
+    const parityChar = (op.parity ?? 'None')[0].toUpperCase();
+    const stopShort = op.stopBits === 'One' ? '1' : op.stopBits === 'OnePointFive' ? '1.5' : '2';
+    return `${op.baudRate}-${op.dataBits}${parityChar}${stopShort}`;
+  }, []);
+
+  const handleSavePreset = useCallback(async () => {
+    try {
+      const op = useOperationStore.getState();
+      await portPresetService.savePortPreset({
+        name: autoPresetName(),
+        baud_rate: op.baudRate,
+        data_bits: op.dataBits,
+        parity: op.parity,
+        stop_bits: op.stopBits,
+        handshake: op.handshake,
+        dtr: op.dtr,
+        rts: op.rts,
+      });
+      await loadPresets();
+      notifySuccess('paramsSection.preset.saved');
+    } catch (e) {
+      notifyError(e);
+    }
+  }, [autoPresetName, loadPresets]);
+
+  const handleDeletePreset = useCallback(async () => {
+    if (!selectedPresetId) return;
+    try {
+      await portPresetService.deletePortPreset(selectedPresetId);
+      setSelectedPresetId('');
+      await loadPresets();
+      notifySuccess('paramsSection.preset.deleted');
+    } catch (e) {
+      notifyError(e);
+    }
+  }, [selectedPresetId, loadPresets]);
+
   return (
     <div className="op-section op-section-params">
       <div className="panel-card-title eyebrow">{t('paramsSection.cardTitle')}</div>
@@ -74,6 +116,14 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
             <option value="">{t('paramsSection.preset.selectPlaceholder')}</option>
             {presets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
+          <button className="icon-btn" title={t('paramsSection.preset.save')} onClick={handleSavePreset}>
+            <Save size={14} />
+          </button>
+          {selectedPresetId && (
+            <button className="icon-btn" title={t('paramsSection.preset.delete')} onClick={handleDeletePreset}>
+              <Trash2 size={14} />
+            </button>
+          )}
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.baudRateLabel')}</span>
