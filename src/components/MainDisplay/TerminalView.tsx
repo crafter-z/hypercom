@@ -38,6 +38,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const timestampMode = useAppStore((s) => s.config.timestampMode);
   const setTerminalConfig = useTerminalStore((s) => s.setTerminalConfig);
   const autoScrollRef = useRef(true);
+  // Guards handleScroll from reacting to programmatic scrollToIndex events.
+  // During fast serial output the virtualizer's layout lags behind the DOM,
+  // causing atBottom to flicker false and permanently killing auto-scroll.
+  const isAutoScrollingRef = useRef(false);
+  const autoScrollTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Per-round grouping: lines within ~50ms of their predecessor share a round.
   const firstInRound = useMemo(() => {
@@ -125,12 +130,26 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   useEffect(() => {
     if (paused) return;
     if (autoScrollRef.current && filteredIndices.length > 0) {
+      isAutoScrollingRef.current = true;
       virtualizer.scrollToIndex(filteredIndices.length - 1, { align: 'end', behavior: 'auto' });
+      // Clear the guard after the scroll settles. During sustained fast output
+      // the timer keeps resetting so the flag stays true (desired — the user
+      // can still disengage via the scroll-lock toggle or a wheel event).
+      clearTimeout(autoScrollTimerRef.current);
+      autoScrollTimerRef.current = setTimeout(() => {
+        isAutoScrollingRef.current = false;
+      }, 80);
     }
   }, [filteredIndices.length, virtualizer, paused]);
 
+  // Cleanup the auto-scroll timer on unmount.
+  useEffect(() => () => clearTimeout(autoScrollTimerRef.current), []);
+
   // Ctrl+wheel font zoom (8–48px, mirrored to the --font-size-terminal var)
   const handleWheel = useCallback((e: React.WheelEvent) => {
+    // Any user-initiated wheel scroll clears the programmatic-scroll guard so
+    // handleScroll can correctly detect the user's intent to disengage auto-scroll.
+    isAutoScrollingRef.current = false;
     if (!e.ctrlKey) return;
     e.preventDefault();
     const store = useAppStore.getState();
@@ -170,15 +189,20 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
 
   const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
+    // Ignore scroll events triggered by our own scrollToIndex calls — during
+    // fast output the virtualizer's measured sizes lag, making atBottom
+    // unreliable and permanently killing auto-scroll.
+    if (isAutoScrollingRef.current) return;
     const el = scrollRef.current;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+    // 30px tolerance absorbs virtualizer layout lag during bursts.
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
     if (atBottom !== autoScrollRef.current) {
       autoScrollRef.current = atBottom;
-      if (portId && terminal) {
+      if (portId) {
         setTerminalConfig(portId, { scrollLocked: atBottom });
       }
     }
-  }, [portId, terminal, setTerminalConfig]);
+  }, [portId, setTerminalConfig]);
 
   const handleSelectAll = useCallback(() => {
     const sel = window.getSelection();
