@@ -109,6 +109,10 @@
       → configService.setConfig(config)
         → invoke('set_config', { new_config })
           → Rust: ConfigManager.set_config() → JSON 文件写入
+            → sync_log_manager_from_config()  // set_config/reset_config 内部同步日志设置到 LogManager
+
+注: 会话快照 (session snapshot) 走独立命令 get_session_snapshot / update_session_snapshot，
+    读写独立的 session.json (不触发 config.json 的 .bak 备份)。
 ```
 
 ## 6. 端口列表刷新 (mergePorts 去重)
@@ -129,26 +133,25 @@
     → useAppStore.setPorts(merged)
 ```
 
-## 7. 数据库 CRUD
+## 7. 设置实体 CRUD (config.json)
 
 ```
 ConfigModal 加载规则集
   → HighlightSettings useEffect
     → storageService.loadHighlightSets()
       → invoke('load_highlight_sets')
-        → Rust: lock → clone pool → drop lock
-          → load_highlight_sets_from_db(&pool).await
-            → SELECT * FROM highlight_rule_sets + highlight_rules
-        ← Vec<HighlightSetInfo>
-    → useRuleStore.setHighlightRuleSets(transformed)
+        → Rust: lock config_manager
+          → 返回 AppConfig.highlight_rule_sets 的 clone
+        ← Vec<HighlightRuleSetEntry>   // camelCase 线格式 == store 格式
+    → useRuleStore.setHighlightRuleSets(...)
 
 ConfigModal 保存规则集
   → RuleSetAccordion handleSaveSet(set)
-    → storageService.saveHighlightSet({ name, is_enabled, rules })
+    → storageService.saveHighlightSet({ name, isEnabled, rules })
       → invoke('save_highlight_set', { args })
-        → Rust: lock → clone pool → drop lock
-          → save_highlight_set_to_db(&pool, &set).await
-            → INSERT/REPLACE INTO highlight_rule_sets + highlight_rules
+        → Rust: lock config_manager
+          → 通过 get_config_mut() 修改 AppConfig.highlight_rule_sets
+          → save() 原子写入 config.json (tmp + rename + .bak)
         ← set_id (UUID v4)
     → useRuleStore 更新对应规则集
 ```

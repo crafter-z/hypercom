@@ -13,9 +13,9 @@
 | `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial_data` event listener + status handler (writes `lostPortIds` for DisconnectBanner) |
 | `useSerialSend.ts` | `useSerialSend()`, `sendToPort()` | OperationPanel (hook); `usePopoutBridge` (module fn) | action; module-level `sendToPort` owns the real send (backend call + TX echo + traffic stats + in-memory per-port history `Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite); the hook is a thin wrapper mirroring history into state for ↑/↓ recall |
 | `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | pop-out intent bus: listens `popout:send-command` (→ `sendToPort(activeTabId)`) / `popout:open-config` (→ ConfigModal page) / `popout:request-sync` (→ replay `active-tab:changed`); subscribes `useRuleStore.sendCommandSets` + `useAppStore.activeTabId` → emits `command-sets:changed` / `active-tab:changed` refresh signals |
-| `useConfigPersistence.ts` | `useConfigPersistence()`, `syncLogSettingsToBackend()` | `App.tsx` | load + save; `syncLogSettingsToBackend` also used by useAppInit |
+| `useConfigPersistence.ts` | `useConfigPersistence()` | `App.tsx` | load + save config |
 | `useSystemStatus.ts` | `useSystemStatus(pollMs=5000)` | StatusBar | polling |
-| `useAppInit.ts` | `useAppInit()` | `App.tsx` | one-shot bootstrap; owns `isValidPaneNode` + `mapCommandSetInfo`/`mapHighlightSetInfo`/`mapProtocolTemplateInfo` |
+| `useAppInit.ts` | `useAppInit()` | `App.tsx` | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; session restore via `configService.getSessionSnapshot()` |
 | `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts |
 | `useToolOutput.ts` | `useToolOutput()` | `App.tsx` **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
 | `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
@@ -29,9 +29,9 @@
 - `useSerialConnection.closePort()` is the only sanctioned close path: triggers `stopLogging` and updates port status. Bypassing leaks log file handles + leaves status "connected" stuck.
 - `useSerialPorts(3000)` uses `mergePorts()` on every refresh — `mapPortInfo()` always overwrites status to `'disconnected'`; merge preserves alias / group / connection state / baud match.
 - Polling hooks accept `pollIntervalMs` as a parameter intentionally — do not hardcode inside the hook.
-- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter (lives only in config). Owns + exports `mapCommandSetInfo` (reused by `QuickSendPanel`), `mapHighlightSetInfo`, `mapProtocolTemplateInfo`.
+- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter (lives only in config). Loads settings entities directly from `config` (`cfg.sendCommandSets` etc., wire format matches store format via camelCase) into `useRuleStore` — including `triggerRules`; no startup `storageService.loadCommandSets()` calls. Session restore uses `configService.getSessionSnapshot()`.
 - Pop-out windows are SEPARATE webviews with their own store instances — they never share mutable frontend state with the main window, only intents/signals (`popoutEventService` in `src/services/tauri.ts`). Sending from a pop-out MUST go through `popout:send-command` → main's `sendToPort`; a direct `serialService.sendSerialData` call from the pop-out would skip the TX echo / traffic stats / send history (the backend emits no TX event).
-- `useConfigPersistence` syncs all 6 log settings to backend via `syncLogSettingsToBackend()` (not just autoSave).
+- Log settings are synced to LogManager internally by the backend `set_config`/`reset_config` commands (`sync_log_manager_from_config()`); the frontend no longer syncs them (`syncLogSettingsToBackend` deleted).
 - Inside hook callbacks/effects, prefer `use{App,Operation,Terminal,Rule}Store.getState()` over selector-bound locals when the value must be live.
 
 ## Anti-patterns

@@ -31,7 +31,7 @@
 - ✉️ **手动发送** — 字符串 / HEX（双向转换、输入净化）/ 自定义行结束符
 - 📝 **发送历史** — 会话内存态（每端口 50 条），↑/↓ 键回溯
 - 🔁 **循环发送** — 命令集顺序执行、单条延时、整体 `loopDelay`
-- 📦 **命令集编辑器** — SQLite 持久化，可配类型、内容、行结束符、延时
+- 📦 **命令集编辑器** — config.json 持久化，可配类型、内容、行结束符、延时
 - 📤 **文件发送** — 分块发送 + 实时进度条
 - 🔢 **批量发送** — 指定重复轮数（0=无限），逐条延时
 
@@ -81,7 +81,6 @@
 | `tauri` | 2.11 | 桌面框架 |
 | `serialport` | 4 | 串口 I/O |
 | `tokio` | 1 (full) | 异步运行时 |
-| `sqlx` | 0.7 (sqlite) | SQLite CRUD |
 | `sysinfo` | 0.33 | CPU / 内存采样 |
 | `serde` / `serde_json` | 1 | 序列化 |
 | `encoding_rs` | 0.8 | GBK 等多编码解码 |
@@ -137,7 +136,7 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (39 c
 2. **收发**：发送区输入字符串/HEX → Enter 发送（设置可改为 Enter 插入换行）；Shift/Ctrl+Enter 始终换行；↑/↓ 回溯历史
 3. **循环发送**：选命令集 → 启动；每条可配 `delay`，整体 `loopDelay`
 4. **分屏**：TabBar 右端分屏按钮 → 拖拽标签移动
-5. **规则**：配置弹窗 → 高亮/命令规则标签页 → SQLite 持久化
+5. **规则**：配置弹窗 → 高亮/命令规则标签页 → config.json 持久化
 6. **日志**：连接即自动写日志；回放/另存/导出在 OperationPanel 顶栏
 
 详细数据流见 [`plans/04-data-flow.md`](plans/04-data-flow.md)。

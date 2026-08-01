@@ -9,7 +9,7 @@
 | `useAppStore` | `useAppStore.ts:266` | tabs / ports / `paneTree` / config / groups |
 | `useOperationStore` | `useOperationStore.ts:29` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `isLoopSending`, `loopRepeatCount` (NO `op` prefix; NO `sendOnEnter`/`quickSendInlineCount` — those live in `useAppStore.config`; NO `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — those live per-tab in `useTerminalStore`) |
 | `useTerminalStore` | `useTerminalStore.ts:22` | line buffer + `appendTerminalLine` + `ensureTerminal` + `setTerminalConfig` + `setTerminalEncoding` |
-| `useRuleStore` | `useRuleStore.ts:32` | highlight rule sets + send-command sets + CRUD + active-set ids |
+| `useRuleStore` | `useRuleStore.ts:32` | highlight rule sets + send-command sets + protocol templates + trigger rules + port tool configs + CRUD + active-set ids. Entities persist in config.json (loaded at startup by `useAppInit` from `config`, saved via `storageService` config-backed commands). |
 
 ## Conventions (root covers selector discipline)
 

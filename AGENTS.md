@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE — HyperCom
 
-**Generated:** 2026-07-28 · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + sqlx + serialport)
+**Generated:** 2026-08-02 · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
 
 ## OVERVIEW
 
@@ -29,8 +29,7 @@ hypercom/
 │   ├── commands/                 # 7 domain files + mod.rs (CommandError enum + re-exports)
 │   ├── serial/mod.rs             # serialport + SIM:Loopback virtual port (505 lines)
 │   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
-│   ├── storage/mod.rs            # SQLite via sqlx (8 tables), WAL+FK pragmas
-│   └── config/mod.rs             # JSON config + versioning + validation + path + backup (475 lines)
+│   └── config/mod.rs             # JSON config + 6 settings entity types + session.json + versioning + validation + path + backup
 └── plans/                        # design docs (see "Key design reference" below)
 ```
 
@@ -45,22 +44,22 @@ hypercom/
 | Split pane recursively | `useAppStore.splitPane` action via tree helpers | NO flat `state.panes` anywhere |
 | Pane tree traversal | module-top exports in `useAppStore.ts` (`findLeafById` … `countLeaves`) | do not hand-roll tree walks |
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
-| ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; SQLite via `storageService` |
+| ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; persisted via config.json (`storageService` wraps config-backed commands) |
 | Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState`; timing via per-command `delay` + set `loopDelay` only (no global interval) |
 | Cross-platform power | `src-tauri/src/system.rs` | Win32 `SetThreadExecutionState` / macOS `caffeinate` / Linux `systemd-inhibit` |
 | Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` + `setTerminalEncoding` | serial_data carries UTF-8 bytes; live re-decode on switch |
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `hooks/disconnectTracking.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
-| Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond/bookmark; SQLite persisted |
+| Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond/bookmark; persisted in config.json |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
 | External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 200px, clamp [160,600] |
-| First-run database creation | `storage/mod.rs` `create_pool()` `.create_if_missing(true)` | sqlx won't create a missing `data.db` without it; pool built synchronously in `lib.rs` setup (`block_on`) |
-| Config versioning / migration | `config/mod.rs` `migrate()` + `config_version` field | forward-compatible, additive |
+| First-run config creation | `config/mod.rs` `ConfigManager::new` | config.json created on first run with default `AppConfig` (empty entity arrays); no database |
+| Config versioning / migration | `config/mod.rs` `migrate()` + `config_version` field | fresh schema (`config_version = 1`), forward-compatible, additive |
 | Config path customization | CLI `--config` / `HYPERCOM_CONFIG` env / portable mode | resolution order in `ConfigManager::new` |
 | Config validation | `config/mod.rs` `validate_and_clamp()` | runs on `set_config` to enforce bounds |
 | Config backup / recovery | `config/mod.rs` `save()` writes `.bak` / `new()` falls back to `.bak` | corrupt JSON auto-recovered |
-| Session snapshot update | `update_session_snapshot` dedicated command | avoids full config save race |
+| Session snapshot update | `update_session_snapshot` dedicated command | writes separate `session.json` (not config.json); avoids full config save + `.bak` churn |
 
 ## CODE MAP
 
@@ -82,14 +81,13 @@ Backend:
 
 | Symbol | File | Type | Role |
 |--------|------|------|------|
-| `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/Storage/System/Lock/Io/Other; manual `serde::Serialize` |
+| `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
 | All Tauri commands (7 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `StorageManager` + row structs (`SendCommandRow` … `TriggerRuleRow`) | `src-tauri/src/storage/mod.rs` | struct / models | SQLite pool (8 tables, WAL+FK); see `src-tauri/src/storage/AGENTS.md` |
-| `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | versioning + validation + path resolution + backup/recovery (475 lines) |
-| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `storage_manager` / `logger` / `config_manager` behind `std::sync::Mutex` |
+| `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | holds all settings entities (6 Vec fields) + session.json + versioning + validation + path resolution + backup/recovery |
+| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `logger` / `config_manager` behind `std::sync::Mutex` |
 | `win32_power` / `macos_power` / `linux_power` | `src-tauri/src/system.rs` | mod | cross-platform `prevent_sleep` / `prevent_screen_off` |
 
-Subdir guides: [`src/stores/AGENTS.md`](src/stores/AGENTS.md) · [`src/hooks/AGENTS.md`](src/hooks/AGENTS.md) · [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md) · [`src-tauri/src/storage/AGENTS.md`](src-tauri/src/storage/AGENTS.md) · [`src/components/MainDisplay/AGENTS.md`](src/components/MainDisplay/AGENTS.md) · [`src/components/ConfigModal/AGENTS.md`](src/components/ConfigModal/AGENTS.md) · [`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md)
+Subdir guides: [`src/stores/AGENTS.md`](src/stores/AGENTS.md) · [`src/hooks/AGENTS.md`](src/hooks/AGENTS.md) · [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md) · [`src/components/MainDisplay/AGENTS.md`](src/components/MainDisplay/AGENTS.md) · [`src/components/ConfigModal/AGENTS.md`](src/components/ConfigModal/AGENTS.md) · [`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md)
 
 ---
 
@@ -215,16 +213,12 @@ let mgr = state.serial_manager.lock().unwrap();
 mgr.some_async_method().await;  // MutexGuard held across await
 
 // CORRECT
-let pool = {
-    let mgr = state.storage_manager.lock().unwrap();
-    mgr.pool().unwrap().clone()  // extract & clone, then drop MutexGuard
+let cfg = {
+    let mgr = state.config_manager.lock().unwrap();
+    mgr.get_config().clone()  // extract & clone, then drop MutexGuard
 };
-some_async_fn(&pool).await;
+some_async_fn(&cfg).await;
 ```
-
-## Database init: synchronous, create-if-missing (2026-07 fix)
-
-The SQLite pool is created **synchronously** in `lib.rs` `setup` via `tauri::async_runtime::block_on(create_pool + init_schema_on_pool)`, then injected with `set_pool`. Do **not** spawn it async — frontend `useAppInit` loads command/highlight/protocol sets and `ParamsSection` loads port presets immediately on mount; an async spawn races them, they fail with `Database not initialized`, and presets never retry (the preset dropdown stays permanently empty). `create_pool` uses `SqliteConnectOptions::create_if_missing(true)` because sqlx will not create a missing `data.db` by default (first run would otherwise fail to open the DB forever).
 
 ## Port list polling: preserve state with mergePorts
 
@@ -268,8 +262,6 @@ pub enum CommandError {
     Config(String),
     #[error("Log error: {0}")]
     Log(String),
-    #[error("Storage error: {0}")]
-    Storage(String),
     #[error("System error: {0}")]
     System(String),
     #[error("Lock error: {0}")]
@@ -289,9 +281,9 @@ Commands are split into 7 domain files under `src-tauri/src/commands/`:
 |------|--------|
 | `serial.rs` | open_port, close_port, send_data, get_port_status |
 | `simulation.rs` | enable_simulation, disable_simulation |
-| `config.rs` | get_config, set_config, reset_config, update_session_snapshot, get_config_path |
-| `log.rs` | start_logging, stop_logging, save_log_as, export_terminal_log, get_log_files, set_log_split_size, set_log_split_enabled, set_log_filename_format, set_log_auto_save, set_log_encoding, open_path, open_log_directory |
-| `storage.rs` | highlight rule sets + send command sets CRUD |
+| `config.rs` | get_config, set_config, reset_config, update_session_snapshot, get_session_snapshot, get_config_path |
+| `log.rs` | start_logging, stop_logging, save_log_as, export_terminal_log, get_log_files, set_log_split_size, set_log_split_enabled, set_log_filename_format, set_log_auto_save, set_log_encoding, open_path, open_log_directory, migrate_log_directory |
+| `storage.rs` | settings entities CRUD (command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs) — synchronous ConfigManager operations on config.json |
 | `system_cmds.rs` | get_system_status, prevent_sleep, prevent_screen_off |
 
 `mod.rs` re-exports all commands and defines `CommandError`.
@@ -326,7 +318,8 @@ scope: ui | backend | store | hooks | plans
 - `tauri.conf.json` has `"decorations": false` — custom TitleBar handles window controls via `@tauri-apps/api/window`
 - `tsconfig.json` enforces `noUnusedLocals` and `noUnusedParameters` — unused vars are compile errors
 - Serial data events carry `data: number[]` (bytes). Frontend decodes with `TextDecoder`. For HEX display, raw bytes are stored in `TerminalLine.rawData`.
-- ConfigModal's rule/command editors save to SQLite via `storageService`. Load on mount via `useEffect`. Rule state lives in `useRuleStore`.
+- ConfigModal's rule/command editors save to config.json via `storageService` (which wraps config-backed commands). Load on mount via `useEffect`. Rule state lives in `useRuleStore`.
+- **config.json is the single source of truth for ALL settings entities** (2026-08 migration: the SQLite layer was removed entirely). The 6 entity types (`SendCommandSetEntry`, `HighlightRuleSetEntry`, `ProtocolTemplateEntry`, `TriggerRuleEntry`, `PortPresetEntry`, `PortToolConfigEntry`, all `#[serde(rename_all = "camelCase")]`) live as 6 `Vec` fields on `AppConfig` (`send_command_sets`, `highlight_rule_sets`, `protocol_templates`, `trigger_rules`, `port_presets`, `port_tool_configs`). `commands/storage.rs` CRUD is synchronous: lock `config_manager` → mutate the Vec via `get_config_mut()` → `save()` writes config.json atomically (tmp + rename + `.bak`). The session snapshot was split out into a separate `session.json` (next to config.json) via `load_session_snapshot()`/`save_session_snapshot()`; `update_session_snapshot` writes session.json and does NOT trigger a config `.bak`. `LogManager` is initialized FROM `ConfigManager` in `AppState::new()`, and `set_config`/`reset_config` auto-sync log settings via `sync_log_manager_from_config()` — the frontend no longer syncs log settings (`syncLogSettingsToBackend` deleted).
 - ConfigModal pages (GeneralSettings, LogSettings, DisplaySettings, BackupSettings) use **per-field selectors** instead of subscribing to the whole config — this prevents unnecessary re-renders when unrelated config fields change.
 - SIM:Loopback virtual port is available when `enable_simulation` is called (flask icon in sidebar toolbar)
 - CSS is split across `src/styles/` (10 component CSS files + `base.css`). `src/styles.css` is just an `@import` entry point, not the main stylesheet.
