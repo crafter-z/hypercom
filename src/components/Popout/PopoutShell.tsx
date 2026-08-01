@@ -38,11 +38,14 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
   const [pinned, setPinned] = useState(true); // 建窗默认 always_on_top(true)
 
   const label = popoutLabel(kind, targetId);
+  // Terminal pop-out titles include the port id (e.g. "终端 — COM3") so users
+  // can identify the window at a glance when multiple terminals are popped out.
+  // Quick-send stays as-is (singleton, no target).
   const title =
     kind === 'quick-send'
       ? t('popout.quickSendTitle')
       : kind === 'terminal'
-        ? t('popout.terminalTitle')
+        ? `${t('popout.terminalTitle')} — ${targetId ?? ''}`
         : kind;
 
   const handleTogglePin = () => {

@@ -499,6 +499,7 @@ const resources = {
       'popout.terminalPlaceholder': '终端弹出（Phase 3 实现）',
 
       'terminalPopout.poppedOutPlaceholder': '该终端已弹出到独立窗口',
+      'terminalPopout.poppedOutHint': '{{port}} 已弹出到独立窗口',
       'terminalPopout.reattach': '收回',
       'terminalPopout.popOut': '弹出到独立窗口',
       'terminalPopout.noTarget': '无端口',
@@ -1006,6 +1007,7 @@ const resources = {
       'popout.terminalPlaceholder': 'Terminal pop-out (Phase 3)',
 
       'terminalPopout.poppedOutPlaceholder': 'This terminal is popped out to a separate window',
+      'terminalPopout.poppedOutHint': '{{port}} popped out to a separate window',
       'terminalPopout.reattach': 'Reattach',
       'terminalPopout.popOut': 'Pop out to window',
       'terminalPopout.noTarget': 'No port',

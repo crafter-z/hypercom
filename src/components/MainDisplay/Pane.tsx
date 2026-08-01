@@ -109,11 +109,17 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   // paneTabs must follow the pane's tabIds order, not the global tabs array order.
   // Array.filter preserves original array order, which breaks after reorderPaneTabIds.
   const paneTabs = tabIds.map(id => tabs.find(t => t.id === id)!).filter(Boolean);
+  // visibleTabs: Chrome-style detach — popped-out tabs vanish from the main window's
+  // TabBar but stay in the data model (tabs + paneTree.tabIds) for reattach-on-close.
+  const visibleTabs = paneTabs.filter(t => !t.poppedOut);
   const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);
-  const displayTabId = (activeTabId && tabIds.includes(activeTabId))
+  // displayTabId is always a visible (non-popped) tab or null — popped tabs never
+  // render their terminal content in the main pane.
+  const visibleTabIds = visibleTabs.map(t => t.id);
+  const displayTabId = (activeTabId && visibleTabIds.includes(activeTabId))
     ? activeTabId
-    : (localActiveTabId && tabIds.includes(localActiveTabId) ? localActiveTabId : paneTabs[0]?.id || null);
-  const displayTab = paneTabs.find(t => t.id === displayTabId);
+    : (localActiveTabId && visibleTabIds.includes(localActiveTabId) ? localActiveTabId : visibleTabs[0]?.id || null);
+  const displayTab = visibleTabs.find(t => t.id === displayTabId);
   // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
   const displayTerminal = useTerminalStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
 
@@ -129,13 +135,26 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   }, [onFocus, setActiveTab]);
 
   // detach：标记标签弹出 + 开窗（open_popout 对已存在窗口仅聚焦，重复弹出安全）。
+  // 若弹出的标签是当前活动/显示标签，焦点迁移到下一个可见（非弹出）标签，
+  // 使主窗内容区不会停留在"已被弹出"的空洞状态。
   const handlePopOut = useCallback((tabId: string) => {
     setTabPoppedOut(tabId, true);
+    const currentActiveId = useAppStore.getState().activeTabId;
+    if (currentActiveId === tabId) {
+      const stateTabs = useAppStore.getState().tabs;
+      const nextVisible = tabIds.find(
+        id => id !== tabId && !stateTabs.find(t => t.id === id)?.poppedOut,
+      );
+      if (nextVisible) {
+        setActiveTab(nextVisible);
+        setLocalActiveTabId(nextVisible);
+      }
+    }
     popoutService.openPopout('terminal', tabId).catch((e) => {
       console.debug('[MainDisplay] openPopout failed:', e);
       notifyError(e);
     });
-  }, [setTabPoppedOut]);
+  }, [setTabPoppedOut, tabIds, setActiveTab]);
 
   // 回贴：乐观清标记 + 关窗。Rust 关窗事件亦会清标记（幂等），先后顺序无关。
   const handleReattach = useCallback((tabId: string) => {
@@ -165,7 +184,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
       <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-secondary)' }}>
         <div style={{ flex: 1, overflow: 'hidden' }}>
           <TabBar
-            tabs={paneTabs}
+            tabs={visibleTabs}
             activeTabId={displayTabId}
             isMultiPane={isMultiPane}
             onTabClick={handleTabClick}
@@ -183,26 +202,32 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
         </div>
       </div>
 
-      {paneTabs.length > 0 && displayTab ? (
-        displayTab.poppedOut ? (
-          // detach 占位：终端已移入独立窗，主窗保留标签身份、仅替换内容区。
-          <div className="terminal-empty-state">
-            <Cable size={30} strokeWidth={1.5} className="empty-state-icon" />
-            <span className="empty-state-text">{t('terminalPopout.poppedOutPlaceholder')}</span>
-            <button
-              className="btn btn-sm"
-              onClick={(e) => { e.stopPropagation(); handleReattach(displayTab.id); }}
-            >
-              {t('terminalPopout.reattach')}
-            </button>
-          </div>
-        ) : (
-          <TerminalView
-            key={displayTab.id}
-            portId={displayTab.id}
-            terminal={displayTerminal}
-          />
-        )
+      {visibleTabs.length > 0 && displayTab ? (
+        <TerminalView
+          key={displayTab.id}
+          portId={displayTab.id}
+          terminal={displayTerminal}
+        />
+      ) : paneTabs.length > 0 ? (
+        // All tabs in this pane are popped out — Chrome-style detach: content area
+        // shows per-tab "popped out" hint with an explicit Reattach affordance. This
+        // avoids the misleading "double-click to add port" generic empty state.
+        <div className="terminal-empty-state">
+          <Cable size={30} strokeWidth={1.5} className="empty-state-icon" />
+          {paneTabs.filter(pt => pt.poppedOut).map((pt) => (
+            <div key={pt.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span className="empty-state-text">
+                {t('terminalPopout.poppedOutHint', { port: pt.title || pt.id })}
+              </span>
+              <button
+                className="btn btn-sm"
+                onClick={(e) => { e.stopPropagation(); handleReattach(pt.id); }}
+              >
+                {t('terminalPopout.reattach')}
+              </button>
+            </div>
+          ))}
+        </div>
       ) : paneTabs.length === 0 ? (
         <div
           ref={isMultiPane ? setDropRef : undefined}

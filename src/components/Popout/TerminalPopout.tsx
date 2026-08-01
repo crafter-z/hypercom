@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useAppStore } from '../../stores/useAppStore';
@@ -37,6 +38,13 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
   const terminal = useTerminalStore((s) => s.terminals[portId]);
 
   useEffect(() => {
+    // OS window title mirrors the main-window convention: "HyperCom — <portId>"
+    // so the user can identify the window from the taskbar/Alt-Tab. Fire-and-forget;
+    // a failure (webview not yet attached) only logs at debug level.
+    getCurrentWindow()
+      .setTitle(`HyperCom — ${portId}`)
+      .catch((e) => console.debug('[TerminalPopout] setTitle failed:', e));
+
     const store = useTerminalStore.getState();
     store.ensureTerminal(portId);
 
