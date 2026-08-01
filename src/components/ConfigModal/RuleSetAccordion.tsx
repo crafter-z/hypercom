@@ -70,11 +70,11 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
 
           {selectedId === set.id && (
             <div style={{ padding: 10 }}>
-              <button className="btn btn-sm" onClick={() => onAddItem(set.id)} style={{ marginBottom: 8 }}>
-                <Plus size={12} /> {addItemLabel}
-              </button>
               {itemCount(set) === 0 && <div className="config-placeholder" style={{ fontSize: 12 }}>{emptyItemText}</div>}
               {renderEditor(set)}
+              <button className="btn btn-sm" onClick={() => onAddItem(set.id)} style={{ marginTop: 8 }}>
+                <Plus size={12} /> {addItemLabel}
+              </button>
             </div>
           )}
         </div>

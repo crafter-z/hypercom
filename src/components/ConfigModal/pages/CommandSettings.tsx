@@ -20,6 +20,7 @@ const CommandSettings: React.FC = () => {
   const updateSendCommandSet = useRuleStore((s) => s.updateSendCommandSet);
   const removeSendCommandSet = useRuleStore((s) => s.removeSendCommandSet);
   const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
+  const [lastAddedCmdId, setLastAddedCmdId] = useState<string | null>(null);
 
   useEffect(() => {
     storageService.loadCommandSets().then(sets => {
@@ -81,6 +82,7 @@ const CommandSettings: React.FC = () => {
 
   const handleAddCmd = (setId: string) => {
     const cmdId = `scmd-${Date.now()}`;
+    setLastAddedCmdId(cmdId);
     const sets = useRuleStore.getState().sendCommandSets;
     const set = sets.find(s => s.id === setId);
     if (set) {
@@ -142,6 +144,7 @@ const CommandSettings: React.FC = () => {
           key={cmd.id}
           cmd={cmd}
           cmdIdx={idx}
+          autoFocus={cmd.id === lastAddedCmdId}
           onChange={(patch) => {
             const newCmds = set.commands.map((c, i) => i === idx ? { ...c, ...patch } : c);
             updateSendCommandSet(set.id, { commands: newCmds });

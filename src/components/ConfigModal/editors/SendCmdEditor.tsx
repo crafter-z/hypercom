@@ -1,15 +1,27 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2 } from 'lucide-react';
 import type { SendCommand } from '../../../types';
 
-const SendCmdEditor: React.FC<{
+interface SendCmdEditorProps {
   cmd: SendCommand;
   cmdIdx: number;
   onChange: (patch: Partial<SendCommand>) => void;
   onDelete: () => void;
-}> = ({ cmd, cmdIdx, onChange, onDelete }) => {
+  autoFocus?: boolean;
+}
+
+const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, onDelete, autoFocus }) => {
   const { t } = useTranslation();
+  const contentRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (autoFocus) {
+      contentRef.current?.focus();
+      contentRef.current?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [autoFocus]);
+
   return (
     <div style={{ background: 'var(--bg-secondary)', borderRadius: 4, padding: 8, marginBottom: 6 }}>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
@@ -28,7 +40,7 @@ const SendCmdEditor: React.FC<{
         </select>
         <button className="btn btn-icon btn-sm" onClick={onDelete} title={t('sendCmdEditor.delete')}><Trash2 size={12} /></button>
       </div>
-      <input className="input" value={cmd.content} onChange={e => onChange({ content: e.target.value })} placeholder={t('sendCmdEditor.contentPlaceholder')} style={{ width: '100%' }} />
+      <input ref={contentRef} className="input" value={cmd.content} onChange={e => onChange({ content: e.target.value })} placeholder={t('sendCmdEditor.contentPlaceholder')} style={{ width: '100%' }} />
     </div>
   );
 };
