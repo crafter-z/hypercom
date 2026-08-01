@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2/capability",
   "identifier": "default",
-  "description": "Default capability for the main window",
-  "windows": ["main"],
+  "description": "Default capability for the main window and pop-out windows",
+  "windows": ["main", "quick-send", "terminal-*"],
   "permissions": [
     "core:default",
     "core:event:default",

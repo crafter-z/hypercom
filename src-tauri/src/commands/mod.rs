@@ -5,6 +5,7 @@
 mod config;
 mod file;
 mod log;
+mod popout;
 mod serial;
 mod simulation;
 mod storage;
@@ -13,6 +14,7 @@ mod system_cmds;
 pub use config::*;
 pub use file::*;
 pub use log::*;
+pub use popout::*;
 pub use serial::*;
 pub use simulation::*;
 pub use storage::*;

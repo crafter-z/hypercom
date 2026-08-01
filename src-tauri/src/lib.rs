@@ -49,6 +49,8 @@ pub struct AppState {
     pub system_info: std::sync::Mutex<sysinfo::System>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
     pub tool_processes: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
+    /// 弹出窗注册表：key 为窗口 label，value 记录 {kind, target_id}（Phase 1 柔性工作区）
+    pub popouts: std::sync::Mutex<std::collections::HashMap<String, commands::PopoutMeta>>,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
             storage_manager: std::sync::Mutex::new(storage::StorageManager::new()?),
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 }
@@ -144,6 +147,10 @@ pub fn run() {
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,
+            // ===== 弹出窗命令（柔性工作区 Phase 1）=====
+            commands::open_popout,
+            commands::close_popout,
+            commands::set_popout_always_on_top,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();

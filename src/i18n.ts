@@ -491,6 +491,13 @@ const resources = {
       'trigger.actionIsHex': 'HEX 格式发送',
       'trigger.addRule': '添加触发规则',
       'trigger.empty': '暂无触发规则',
+
+      'popout.quickSendTitle': '快捷发送',
+      'popout.terminalTitle': '终端',
+      'popout.alwaysOnTop': '置顶',
+      'popout.close': '关闭',
+      'popout.quickSendPlaceholder': '快捷发送面板（Phase 2 实现）',
+      'popout.terminalPlaceholder': '终端弹出（Phase 3 实现）',
     },
   },
   'en-US': {
@@ -978,6 +985,13 @@ const resources = {
       'trigger.actionIsHex': 'Send as HEX',
       'trigger.addRule': 'Add Trigger Rule',
       'trigger.empty': 'No trigger rules',
+
+      'popout.quickSendTitle': 'Quick Send',
+      'popout.terminalTitle': 'Terminal',
+      'popout.alwaysOnTop': 'Always on top',
+      'popout.close': 'Close',
+      'popout.quickSendPlaceholder': 'Quick send panel (Phase 2)',
+      'popout.terminalPlaceholder': 'Terminal pop-out (Phase 3)',
     },
   },
 };

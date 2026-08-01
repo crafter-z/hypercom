@@ -1,0 +1,68 @@
+/**
+ * PopoutShell styles — self-drawn titlebar + content area for pop-out windows.
+ * Draws entirely from base.css design tokens; reuses the `.icon-btn` primitive.
+ */
+
+.popout-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+/* ---- Self-drawn narrow titlebar (drag region) ---- */
+.popout-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  height: var(--titlebar-height);
+  flex-shrink: 0;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: var(--edge-top);
+  user-select: none;
+}
+
+.popout-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.popout-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+/* Close button warms to the error hue on hover, echoing the main titlebar. */
+.popout-close:hover {
+  background: var(--text-error);
+  color: #ffffff;
+}
+
+/* ---- Content area ---- */
+.popout-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.popout-placeholder {
+  margin: auto;
+  padding: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: center;
+}

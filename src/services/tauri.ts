@@ -577,3 +577,22 @@ export const portToolConfigService = {
     return invoke<void>('delete_port_tool_config', { configId });
   },
 };
+
+// ==================== 柔性工作区 · 弹出窗命令 ====================
+
+export const popoutService = {
+  /** 打开（或聚焦已存在的）弹出窗。kind: "quick-send" | "terminal"。 */
+  openPopout: (kind: string, targetId?: string | null): Promise<void> => {
+    return invoke<void>('open_popout', { kind, targetId: targetId ?? null });
+  },
+
+  /** 关闭弹出窗（label 由 popoutLabel() 计算）。 */
+  closePopout: (label: string): Promise<void> => {
+    return invoke<void>('close_popout', { label });
+  },
+
+  /** 切换弹出窗置顶。 */
+  setAlwaysOnTop: (label: string, on: boolean): Promise<void> => {
+    return invoke<void>('set_popout_always_on_top', { label, on });
+  },
+};
