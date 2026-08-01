@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
-import { portToolConfigService } from '../../../services/tauri';
+import { storageService } from '../../../services/tauri';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { Plus, Check, Trash2, ChevronRight, Wrench } from 'lucide-react';
 
@@ -19,15 +19,9 @@ const ToolSettings: React.FC = () => {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
-    portToolConfigService.loadPortToolConfigs().then(rows => {
+    storageService.loadPortToolConfigs().then(rows => {
       if (rows.length > 0) {
-        useRuleStore.getState().setPortToolConfigs(rows.map(r => ({
-          id: r.id,
-          name: r.name,
-          portId: r.port_id,
-          command: r.command,
-          workdir: r.workdir,
-        })));
+        useRuleStore.getState().setPortToolConfigs(rows);
       }
     }).catch((e) => console.debug('[ToolSettings] load failed:', e));
   }, []);
@@ -40,20 +34,14 @@ const ToolSettings: React.FC = () => {
 
   const handleDelete = async (id: string) => {
     removeConfig(id);
-    try { await portToolConfigService.deletePortToolConfig(id); } catch (e) { notifyError(e); }
+    try { await storageService.deletePortToolConfig(id); } catch (e) { notifyError(e); }
   };
 
   const handleSave = async (id: string) => {
     const config = useRuleStore.getState().portToolConfigs.find(c => c.id === id);
     if (!config) return;
     try {
-      await portToolConfigService.savePortToolConfig({
-        id: config.id,
-        name: config.name,
-        port_id: config.portId,
-        command: config.command,
-        workdir: config.workdir,
-      });
+      await storageService.savePortToolConfig(config);
       notifySuccess(t('toolSettings.saved'));
     } catch (e) {
       notifyError(e);

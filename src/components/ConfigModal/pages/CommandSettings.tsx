@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
 import { notifyError } from '../../../stores/useToastStore';
-import type { SendCommandSet, SendCommand } from '../../../types';
+import type { SendCommandSet } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
 
@@ -25,21 +25,7 @@ const CommandSettings: React.FC = () => {
   useEffect(() => {
     storageService.loadCommandSets().then(sets => {
       if (sets.length > 0) {
-        useRuleStore.getState().setSendCommandSets(sets.map(s => ({
-          id: s.id,
-          name: s.name,
-          isLoop: s.is_loop,
-          loopDelay: s.loop_delay_ms,
-          commands: s.commands.map(c => ({
-            id: c.id,
-            name: c.name,
-            order: c.order_idx,
-            delay: c.delay_ms,
-            type: c.cmd_type as 'string' | 'hex',
-            content: c.content,
-            appendLineEnding: c.append_line_ending as SendCommand['appendLineEnding'],
-          })),
-        })));
+        useRuleStore.getState().setSendCommandSets(sets);
       }
     }).catch((e) => console.debug('[ConfigModal] loadCommandSets failed:', e));
   }, []);
@@ -53,21 +39,7 @@ const CommandSettings: React.FC = () => {
     const set = useRuleStore.getState().sendCommandSets.find(s => s.id === setId);
     if (!set) return;
     try {
-      await storageService.saveCommandSet({
-        id: set.id,
-        name: set.name,
-        is_loop: set.isLoop,
-        loop_delay_ms: set.loopDelay,
-        commands: set.commands.map(c => ({
-          id: c.id,
-          name: c.name,
-          order_idx: c.order,
-          delay_ms: c.delay,
-          cmd_type: c.type,
-          content: c.content,
-          append_line_ending: c.appendLineEnding,
-        })),
-      });
+      await storageService.saveCommandSet(set);
     } catch (err) {
       console.error('Failed to save command set:', err);
       notifyError(err);

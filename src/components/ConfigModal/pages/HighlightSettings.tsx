@@ -18,20 +18,7 @@ const HighlightSettings: React.FC = () => {
   useEffect(() => {
     storageService.loadHighlightSets().then(sets => {
       if (sets.length > 0) {
-        useRuleStore.getState().setHighlightRuleSets(sets.map(s => ({
-          id: s.id,
-          name: s.name,
-          isEnabled: s.is_enabled,
-          rules: s.rules.map(r => ({
-            id: r.id,
-            name: r.name,
-            pattern: r.pattern,
-            isRegex: r.is_regex,
-            color: r.color,
-            bold: r.bold,
-            italic: r.italic,
-          })),
-        })));
+        useRuleStore.getState().setHighlightRuleSets(sets);
       }
     }).catch((e) => console.debug('[ConfigModal] loadHighlightSets failed:', e));
   }, []);
@@ -45,20 +32,7 @@ const HighlightSettings: React.FC = () => {
     const set = useRuleStore.getState().highlightRuleSets.find(s => s.id === setId);
     if (!set) return;
     try {
-      await storageService.saveHighlightSet({
-        id: set.id,
-        name: set.name,
-        is_enabled: set.isEnabled,
-        rules: set.rules.map(r => ({
-          id: r.id,
-          name: r.name,
-          pattern: r.pattern,
-          is_regex: r.isRegex,
-          color: r.color || '',
-          bold: r.bold || false,
-          italic: r.italic || false,
-        })),
-      });
+      await storageService.saveHighlightSet(set);
     } catch (err) {
       console.error('Failed to save highlight set:', err);
       notifyError(err);

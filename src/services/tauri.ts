@@ -10,6 +10,12 @@ import { emit, listen } from '@tauri-apps/api/event';
 import type {
   AppConfig,
   TerminalState,
+  SendCommandSet,
+  HighlightRuleSet,
+  ProtocolTemplate,
+  TriggerRule,
+  PortPreset,
+  PortToolConfig,
 } from '../types';
 
 // ==================== 类型定义 ====================
@@ -135,6 +141,10 @@ export const configService = {
     return invoke<void>('update_session_snapshot', { snapshot });
   },
 
+  getSessionSnapshot: (): Promise<string> => {
+    return invoke<string>('get_session_snapshot');
+  },
+
   getConfigPath: (): Promise<string> => {
     return invoke<string>('get_config_path');
   },
@@ -177,25 +187,9 @@ export const logService = {
     return invoke<void>('open_log_directory');
   },
 
-  /** 同步 auto_save 状态到后端，避免前后端漂移 */
-  setAutoSave: (enabled: boolean): Promise<void> => {
-    return invoke<void>('set_log_auto_save', { enabled });
-  },
-  /** 设置日志默认编码 (UTF-8 / GBK / ISO-8859-1 / ASCII) */
-  setEncoding: (encoding: string): Promise<void> => {
-    return invoke<void>('set_log_encoding', { encoding });
-  },
-  /** 设置日志文件名模板（[com]/[datetime]/[date]/[time] 变量） */
-  setLogFilenameFormat: (format: string): Promise<void> => {
-    return invoke<void>('set_log_filename_format', { format });
-  },
-  /** 设置日志分片大小阈值 (MB) */
-  setLogSplitSize: (mb: number): Promise<void> => {
-    return invoke<void>('set_log_split_size', { mb });
-  },
-  /** 开关日志按大小自动分片 */
-  setLogSplitEnabled: (enabled: boolean): Promise<void> => {
-    return invoke<void>('set_log_split_enabled', { enabled });
+  /** 将旧日志目录中的 .log 文件迁移到新目录，返回迁移文件数 */
+  migrateLogDirectory: (oldDir: string, newDir: string): Promise<number> => {
+    return invoke<number>('migrate_log_directory', { oldDir, newDir });
   },
 };
 
@@ -315,154 +309,77 @@ export const eventService = {
 
 // ==================== 存储命令 ====================
 
-export interface CommandSetInfo {
-  id: string;
-  name: string;
-  is_loop: boolean;
-  loop_delay_ms: number;
-  commands: CommandInfo[];
-}
-
-export interface CommandInfo {
-  id: string;
-  set_id: string;
-  name: string;
-  order_idx: number;
-  delay_ms: number;
-  cmd_type: string;
-  content: string;
-  append_line_ending: string;
-}
-
-export interface HighlightSetInfo {
-  id: string;
-  name: string;
-  is_enabled: boolean;
-  rules: HighlightRuleInfo[];
-}
-
-export interface HighlightRuleInfo {
-  id: string;
-  set_id: string;
-  name: string;
-  pattern: string;
-  is_regex: boolean;
-  color: string;
-  bold: boolean;
-  italic: boolean;
-}
-
-export interface ProtocolTemplateInfo {
-  id: string;
-  name: string;
-  is_enabled: boolean;
-  header_bytes: string;
-  length_field_offset: number;
-  length_field_size: number;
-  length_endian: string;
-  length_adjust: number;
-  checksum_algorithm: string;
-  checksum_offset: number;
-  footer_bytes: string;
-  color_header: string;
-  color_length: string;
-  color_payload: string;
-  color_checksum: string;
-  color_footer: string;
-}
-
-// ==================== 存储命令 ====================
-
 export const storageService = {
-  saveCommandSet: (args: {
-    id?: string;
-    name: string;
-    is_loop: boolean;
-    loop_delay_ms: number;
-    commands: Array<{
-      id: string;
-      name: string;
-      order_idx: number;
-      delay_ms: number;
-      cmd_type: string;
-      content: string;
-      append_line_ending: string;
-    }>;
-  }): Promise<string> => {
+  saveCommandSet: (args: SendCommandSet): Promise<string> => {
     return invoke<string>('save_command_set', { args });
   },
 
-  loadCommandSets: (): Promise<CommandSetInfo[]> => {
-    return invoke<CommandSetInfo[]>('load_command_sets');
+  loadCommandSets: (): Promise<SendCommandSet[]> => {
+    return invoke<SendCommandSet[]>('load_command_sets');
   },
 
   deleteCommandSet: (setId: string): Promise<void> => {
     return invoke<void>('delete_command_set', { setId });
   },
 
-  saveHighlightSet: (args: {
-    id?: string;
-    name: string;
-    is_enabled: boolean;
-    rules: Array<{
-      id: string;
-      name: string;
-      pattern: string;
-      is_regex: boolean;
-      color: string;
-      bold: boolean;
-      italic: boolean;
-    }>;
-  }): Promise<string> => {
+  saveHighlightSet: (args: HighlightRuleSet): Promise<string> => {
     return invoke<string>('save_highlight_set', { args });
   },
 
-  loadHighlightSets: (): Promise<HighlightSetInfo[]> => {
-    return invoke<HighlightSetInfo[]>('load_highlight_sets');
+  loadHighlightSets: (): Promise<HighlightRuleSet[]> => {
+    return invoke<HighlightRuleSet[]>('load_highlight_sets');
   },
 
   deleteHighlightSet: (setId: string): Promise<void> => {
     return invoke<void>('delete_highlight_set', { setId });
   },
 
-  saveProtocolTemplate: (args: {
-    id?: string; name: string; is_enabled: boolean;
-    header_bytes: string; length_field_offset: number; length_field_size: number;
-    length_endian: string; length_adjust: number; checksum_algorithm: string;
-    checksum_offset: number; footer_bytes: string; color_header: string;
-    color_length: string; color_payload: string; color_checksum: string; color_footer: string;
-  }): Promise<string> => {
+  saveProtocolTemplate: (args: ProtocolTemplate): Promise<string> => {
     return invoke<string>('save_protocol_template', { args });
   },
 
-  loadProtocolTemplates: (): Promise<ProtocolTemplateInfo[]> => {
-    return invoke<ProtocolTemplateInfo[]>('load_protocol_templates');
+  loadProtocolTemplates: (): Promise<ProtocolTemplate[]> => {
+    return invoke<ProtocolTemplate[]>('load_protocol_templates');
   },
 
   deleteProtocolTemplate: (setId: string): Promise<void> => {
     return invoke<void>('delete_protocol_template', { setId });
   },
 
-  saveTriggerRule: (args: {
-    id?: string;
-    name: string;
-    pattern: string;
-    is_regex: boolean;
-    match_type: string;
-    action_type: string;
-    action_content: string;
-    action_is_hex: boolean;
-    is_enabled: boolean;
-  }): Promise<string> => {
+  saveTriggerRule: (args: TriggerRule): Promise<string> => {
     return invoke<string>('save_trigger_rule', { args });
   },
 
-  loadTriggerRules: (): Promise<TriggerRuleInfo[]> => {
-    return invoke<TriggerRuleInfo[]>('load_trigger_rules');
+  loadTriggerRules: (): Promise<TriggerRule[]> => {
+    return invoke<TriggerRule[]>('load_trigger_rules');
   },
 
   deleteTriggerRule: (ruleId: string): Promise<void> => {
     return invoke<void>('delete_trigger_rule', { ruleId });
+  },
+
+  savePortPreset: (args: PortPreset): Promise<string> => {
+    return invoke<string>('save_port_preset', { args });
+  },
+
+  loadPortPresets: (): Promise<PortPreset[]> => {
+    return invoke<PortPreset[]>('load_port_presets');
+  },
+
+  deletePortPreset: (presetId: string): Promise<void> => {
+    return invoke<void>('delete_port_preset', { presetId });
+  },
+
+  savePortToolConfig: (args: PortToolConfig): Promise<string> => {
+    return invoke<string>('save_port_tool_config', { args });
+  },
+
+  loadPortToolConfigs: (): Promise<PortToolConfig[]> => {
+    return invoke<PortToolConfig[]>('load_port_tool_configs');
+  },
+
+  deletePortToolConfig: (configId: string): Promise<void> => {
+    return invoke<void>('delete_port_tool_config', { configId });
   },
 };
 
@@ -495,87 +412,6 @@ export const fileService = {
   /** 读取文本文件内容（配置导入）。路径来自 open() 对话框。 */
   readTextFile: (path: string): Promise<string> => {
     return invoke<string>('read_text_file', { path });
-  },
-};
-
-// ==================== 端口参数预设命令 ====================
-
-export interface PortPresetInfo {
-  id: string;
-  name: string;
-  baud_rate: number;
-  data_bits: number;
-  parity: string;
-  stop_bits: string;
-  handshake: string;
-  dtr: number;
-  rts: number;
-  created_at: string;
-}
-
-export interface PortToolConfigInfo {
-  id: string;
-  name: string;
-  port_id: string;
-  command: string;
-  workdir: string;
-}
-
-export interface TriggerRuleInfo {
-  id: string;
-  name: string;
-  pattern: string;
-  is_regex: boolean;
-  match_type: string;
-  action_type: string;
-  action_content: string;
-  action_is_hex: boolean;
-  is_enabled: boolean;
-}
-
-export const portPresetService = {
-  savePortPreset: (args: {
-    id?: string;
-    name: string;
-    baud_rate: number;
-    data_bits: number;
-    parity: string;
-    stop_bits: string;
-    handshake: string;
-    dtr: boolean;
-    rts: boolean;
-  }): Promise<string> => {
-    return invoke<string>('save_port_preset', { args });
-  },
-
-  loadPortPresets: (): Promise<PortPresetInfo[]> => {
-    return invoke<PortPresetInfo[]>('load_port_presets');
-  },
-
-  deletePortPreset: (presetId: string): Promise<void> => {
-    return invoke<void>('delete_port_preset', { presetId });
-  },
-};
-
-// ==================== 外部工具配置命令 ====================
-
-export const portToolConfigService = {
-  savePortToolConfig: (args: {
-    id?: string;
-    name: string;
-    port_id: string;
-    command: string;
-    workdir: string;
-  }): Promise<string> => {
-    return invoke<string>('save_port_tool_config', { args });
-  },
-
-  loadPortToolConfigs: (): Promise<PortToolConfigInfo[]> => {
-    return invoke<PortToolConfigInfo[]>('load_port_tool_configs');
-  },
-
-  deletePortToolConfig: (configId: string): Promise<void> => {
-    return invoke<void>('delete_port_tool_config', { configId });
   },
 };
 

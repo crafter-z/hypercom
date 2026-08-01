@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { Pencil, Search } from 'lucide-react';
 import { storageService, popoutEventService } from '../../services/tauri';
-import { mapCommandSetInfo } from '../../hooks/useAppInit';
 import type { LineEnding, SendCommand, SendCommandSet } from '../../types';
 
 /** 行尾符 → i18n key（与发送区共用同一套词汇，协议词汇不翻译）。 */
@@ -43,11 +42,10 @@ const QuickSendPanel: React.FC = () => {
   const reload = useCallback(() => {
     storageService
       .loadCommandSets()
-      .then((infos) => {
-        const mapped = infos.map(mapCommandSetInfo);
-        setSets(mapped);
+      .then((sets) => {
+        setSets(sets);
         setSelectedSetId((prev) =>
-          prev != null && mapped.some((s) => s.id === prev) ? prev : mapped[0]?.id ?? null
+          prev != null && sets.some((s) => s.id === prev) ? prev : sets[0]?.id ?? null
         );
       })
       .catch((e) => console.debug('[QuickSendPanel] loadCommandSets failed:', e));

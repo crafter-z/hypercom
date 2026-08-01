@@ -3,32 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
 import { notifyError } from '../../../stores/useToastStore';
-import type { ProtocolTemplateInfo } from '../../../services/tauri';
 import type { ProtocolTemplate } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import ProtocolTemplateEditor from '../editors/ProtocolTemplateEditor';
-
-/** Map backend snake_case ProtocolTemplateInfo to frontend camelCase ProtocolTemplate */
-function mapInfo(s: ProtocolTemplateInfo): ProtocolTemplate {
-  return {
-    id: s.id,
-    name: s.name,
-    isEnabled: s.is_enabled,
-    headerBytes: s.header_bytes,
-    lengthFieldOffset: s.length_field_offset,
-    lengthFieldSize: s.length_field_size as 1 | 2,
-    lengthEndian: s.length_endian as 'little' | 'big',
-    lengthAdjust: s.length_adjust,
-    checksumAlgorithm: s.checksum_algorithm as ProtocolTemplate['checksumAlgorithm'],
-    checksumOffset: s.checksum_offset,
-    footerBytes: s.footer_bytes,
-    colorHeader: s.color_header,
-    colorLength: s.color_length,
-    colorPayload: s.color_payload,
-    colorChecksum: s.color_checksum,
-    colorFooter: s.color_footer,
-  };
-}
 
 const ProtocolSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -41,7 +18,7 @@ const ProtocolSettings: React.FC = () => {
   useEffect(() => {
     storageService.loadProtocolTemplates().then(templates => {
       if (templates.length > 0) {
-        useRuleStore.getState().setProtocolTemplates(templates.map(mapInfo));
+        useRuleStore.getState().setProtocolTemplates(templates);
       }
     }).catch((e) => console.debug('[ConfigModal] loadProtocolTemplates failed:', e));
   }, []);
@@ -55,24 +32,7 @@ const ProtocolSettings: React.FC = () => {
     const template = useRuleStore.getState().protocolTemplates.find(t => t.id === setId);
     if (!template) return;
     try {
-      await storageService.saveProtocolTemplate({
-        id: template.id,
-        name: template.name,
-        is_enabled: template.isEnabled,
-        header_bytes: template.headerBytes,
-        length_field_offset: template.lengthFieldOffset,
-        length_field_size: template.lengthFieldSize,
-        length_endian: template.lengthEndian,
-        length_adjust: template.lengthAdjust,
-        checksum_algorithm: template.checksumAlgorithm,
-        checksum_offset: template.checksumOffset,
-        footer_bytes: template.footerBytes,
-        color_header: template.colorHeader,
-        color_length: template.colorLength,
-        color_payload: template.colorPayload,
-        color_checksum: template.colorChecksum,
-        color_footer: template.colorFooter,
-      });
+      await storageService.saveProtocolTemplate(template);
     } catch (err) {
       console.error('Failed to save protocol template:', err);
       notifyError(err);

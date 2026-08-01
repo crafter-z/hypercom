@@ -4,7 +4,7 @@ export { usePinStatesSubscriber } from './usePinStatesSubscriber';
 export { useSerialReceive } from './useSerialReceive';
 export { useSerialSend, sendToPort } from './useSerialSend';
 export { usePopoutBridge } from './usePopoutBridge';
-export { useConfigPersistence, syncLogSettingsToBackend } from './useConfigPersistence';
+export { useConfigPersistence } from './useConfigPersistence';
 export { useSystemStatus } from './useSystemStatus';
 export { useAppInit } from './useAppInit';
 export { useSimulation } from './useSimulation';

@@ -3,8 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { storageService, configService, fileService } from '../../../services/tauri';
-import type { HighlightSetInfo, CommandSetInfo, ProtocolTemplateInfo } from '../../../services/tauri';
-import type { AppConfig } from '../../../types';
+import type { AppConfig, HighlightRuleSet, SendCommandSet, ProtocolTemplate } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
@@ -23,9 +22,9 @@ interface ConfigBundle {
   version?: number;
   exportedAt?: string;
   config?: AppConfig;
-  highlightSets?: HighlightSetInfo[];
-  commandSets?: CommandSetInfo[];
-  protocolTemplates?: ProtocolTemplateInfo[];
+  highlightSets?: HighlightRuleSet[];
+  commandSets?: SendCommandSet[];
+  protocolTemplates?: ProtocolTemplate[];
 }
 
 /** Validate an imported config bundle's config section. Returns error message or null if valid. */
@@ -101,39 +100,13 @@ const BackupSettings: React.FC = () => {
         useAppStore.getState().setConfig(bundle.config);
       }
       for (const set of bundle.highlightSets ?? []) {
-        await storageService.saveHighlightSet({
-          id: set.id,
-          name: set.name,
-          is_enabled: set.is_enabled,
-          rules: (set.rules ?? []).map((r) => ({
-            id: r.id, name: r.name, pattern: r.pattern, is_regex: r.is_regex,
-            color: r.color, bold: r.bold, italic: r.italic,
-          })),
-        });
+        await storageService.saveHighlightSet(set);
       }
       for (const set of bundle.commandSets ?? []) {
-        await storageService.saveCommandSet({
-          id: set.id,
-          name: set.name,
-          is_loop: set.is_loop,
-          loop_delay_ms: set.loop_delay_ms,
-          commands: (set.commands ?? []).map((c) => ({
-            id: c.id, name: c.name, order_idx: c.order_idx, delay_ms: c.delay_ms,
-            cmd_type: c.cmd_type, content: c.content, append_line_ending: c.append_line_ending,
-          })),
-        });
+        await storageService.saveCommandSet(set);
       }
       for (const tpl of bundle.protocolTemplates ?? []) {
-        await storageService.saveProtocolTemplate({
-          id: tpl.id, name: tpl.name, is_enabled: tpl.is_enabled,
-          header_bytes: tpl.header_bytes, length_field_offset: tpl.length_field_offset,
-          length_field_size: tpl.length_field_size, length_endian: tpl.length_endian,
-          length_adjust: tpl.length_adjust, checksum_algorithm: tpl.checksum_algorithm,
-          checksum_offset: tpl.checksum_offset, footer_bytes: tpl.footer_bytes,
-          color_header: tpl.color_header, color_length: tpl.color_length,
-          color_payload: tpl.color_payload, color_checksum: tpl.color_checksum,
-          color_footer: tpl.color_footer,
-        });
+        await storageService.saveProtocolTemplate(tpl);
       }
       notifySuccess('backupSettings.importSuccess');
       // 延时重载，让所有 store 与组件重新加载导入的数据

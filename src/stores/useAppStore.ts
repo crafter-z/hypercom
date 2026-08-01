@@ -168,7 +168,12 @@ const defaultConfig: AppConfig = {
   backupDirectory: '',
   hasSeenTour: false,
   restoreSession: true,
-  sessionSnapshot: '',
+  sendCommandSets: [],
+  highlightRuleSets: [],
+  protocolTemplates: [],
+  triggerRules: [],
+  portPresets: [],
+  portToolConfigs: [],
 };
 
 const defaultUIState: UIState = {

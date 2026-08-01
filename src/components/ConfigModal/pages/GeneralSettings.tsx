@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { useOperationStore } from '../../../stores/useOperationStore';
-import { configService, portPresetService } from '../../../services/tauri';
-import type { PortPresetInfo } from '../../../services/tauri';
+import { configService, storageService } from '../../../services/tauri';
+import type { PortPreset } from '../../../types';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { AppConfig, DataBits, Parity, StopBits, Handshake } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
@@ -38,12 +38,12 @@ const GeneralSettings: React.FC = () => {
     configService.getConfigPath().then(setConfigPath).catch(() => {});
   }, []);
 
-  const [presets, setPresets] = useState<PortPresetInfo[]>([]);
+  const [presets, setPresets] = useState<PortPreset[]>([]);
   const [presetName, setPresetName] = useState('');
 
   const loadPresets = useCallback(async () => {
     try {
-      const list = await portPresetService.loadPortPresets();
+      const list = await storageService.loadPortPresets();
       setPresets(list);
     } catch (e) {
       console.debug('[GeneralSettings] loadPortPresets failed:', e);
@@ -54,21 +54,21 @@ const GeneralSettings: React.FC = () => {
     loadPresets();
   }, [loadPresets]);
 
-  const handleApplyPreset = (p: PortPresetInfo) => {
+  const handleApplyPreset = (p: PortPreset) => {
     useOperationStore.getState().setOpState({
-      baudRate: p.baud_rate,
-      dataBits: p.data_bits as DataBits,
+      baudRate: p.baudRate,
+      dataBits: p.dataBits as DataBits,
       parity: p.parity as Parity,
-      stopBits: p.stop_bits as StopBits,
+      stopBits: p.stopBits as StopBits,
       handshake: p.handshake as Handshake,
-      dtr: p.dtr !== 0,
-      rts: p.rts !== 0,
+      dtr: p.dtr,
+      rts: p.rts,
     });
   };
 
   const handleDeletePreset = async (id: string) => {
     try {
-      await portPresetService.deletePortPreset(id);
+      await storageService.deletePortPreset(id);
       await loadPresets();
       notifySuccess('paramsSection.preset.deleted');
     } catch (e) {
@@ -81,12 +81,13 @@ const GeneralSettings: React.FC = () => {
     if (!name) return;
     try {
       const op = useOperationStore.getState();
-      await portPresetService.savePortPreset({
+      await storageService.savePortPreset({
+        id: `preset-${Date.now()}`,
         name,
-        baud_rate: op.baudRate,
-        data_bits: op.dataBits,
+        baudRate: op.baudRate,
+        dataBits: op.dataBits,
         parity: op.parity,
-        stop_bits: op.stopBits,
+        stopBits: op.stopBits,
         handshake: op.handshake,
         dtr: op.dtr,
         rts: op.rts,
@@ -231,7 +232,7 @@ const GeneralSettings: React.FC = () => {
             <span style={{ flex: 1, fontSize: 13 }}>
               {p.name}
               <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-terminal)' }}>
-                {p.baud_rate},{p.data_bits}{(p.parity ?? 'None')[0]}{p.stop_bits === 'One' ? '1' : p.stop_bits === 'Two' ? '2' : '1.5'}
+                {p.baudRate},{p.dataBits}{(p.parity ?? 'None')[0]}{p.stopBits === 'One' ? '1' : p.stopBits === 'Two' ? '2' : '1.5'}
               </span>
             </span>
             <button className="btn btn-sm" onClick={() => handleApplyPreset(p)}>{t('generalSettings.presets.apply')}</button>

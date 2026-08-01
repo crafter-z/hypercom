@@ -21,17 +21,7 @@ const TriggerSettings: React.FC = () => {
   useEffect(() => {
     storageService.loadTriggerRules().then(rows => {
       if (rows.length > 0) {
-        useRuleStore.getState().setTriggerRules(rows.map(r => ({
-          id: r.id,
-          name: r.name,
-          pattern: r.pattern,
-          isRegex: r.is_regex,
-          matchType: r.match_type as TriggerMatchType,
-          actionType: r.action_type as TriggerActionType,
-          actionContent: r.action_content,
-          actionIsHex: r.action_is_hex,
-          isEnabled: r.is_enabled,
-        })));
+        useRuleStore.getState().setTriggerRules(rows);
       }
     }).catch((e) => console.debug('[TriggerSettings] load failed:', e));
   }, []);
@@ -61,17 +51,7 @@ const TriggerSettings: React.FC = () => {
     const rule = useRuleStore.getState().triggerRules.find(r => r.id === id);
     if (!rule) return;
     try {
-      await storageService.saveTriggerRule({
-        id: rule.id,
-        name: rule.name,
-        pattern: rule.pattern,
-        is_regex: rule.isRegex,
-        match_type: rule.matchType,
-        action_type: rule.actionType,
-        action_content: rule.actionContent,
-        action_is_hex: rule.actionIsHex,
-        is_enabled: rule.isEnabled,
-      });
+      await storageService.saveTriggerRule(rule);
       notifySuccess(t('toast.severity.success'));
     } catch (e) {
       notifyError(e);

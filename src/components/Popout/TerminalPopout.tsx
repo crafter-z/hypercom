@@ -10,7 +10,6 @@ import {
   storageService,
   configService,
 } from '../../services/tauri';
-import { mapHighlightSetInfo } from '../../hooks/useAppInit';
 import { StreamingDecoderCache } from '../../utils/streamingDecoder';
 import TerminalView from '../MainDisplay/TerminalView';
 
@@ -52,7 +51,7 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
     // 与主窗观感一致。均为一次性只读，fire-and-forget；失败仅退化为无高亮/默认配置。
     storageService
       .loadHighlightSets()
-      .then((sets) => useRuleStore.getState().setHighlightRuleSets(sets.map(mapHighlightSetInfo)))
+      .then((sets) => useRuleStore.getState().setHighlightRuleSets(sets))
       .catch((e) => console.debug('[TerminalPopout] loadHighlightSets failed:', e));
     configService
       .getConfig()

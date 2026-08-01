@@ -2,9 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTranslation } from 'react-i18next';
-import type { DataBits, Parity, StopBits, Handshake } from '../../types';
-import { portPresetService } from '../../services/tauri';
-import type { PortPresetInfo } from '../../services/tauri';
+import type { DataBits, Parity, StopBits, Handshake, PortPreset } from '../../types';
+import { storageService } from '../../services/tauri';
 import { notifySuccess, notifyError } from '../../stores/useToastStore';
 import { Save, Trash2 } from 'lucide-react';
 
@@ -29,7 +28,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const setOpState = useOperationStore(s => s.setOpState);
 
   const [isCustomBaud, setIsCustomBaud] = useState(!config.defaultBaudRates.includes(baudRate));
-  const [presets, setPresets] = useState<PortPresetInfo[]>([]);
+  const [presets, setPresets] = useState<PortPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
 
   useEffect(() => {
@@ -38,7 +37,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
 
   const loadPresets = useCallback(async () => {
     try {
-      const list = await portPresetService.loadPortPresets();
+      const list = await storageService.loadPortPresets();
       setPresets(list);
     } catch (e) {
       console.debug('[ParamsSection] loadPortPresets failed:', e);
@@ -54,13 +53,13 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     const preset = presets.find(p => p.id === id);
     if (!preset) return;
     setOpState({
-      baudRate: preset.baud_rate,
-      dataBits: preset.data_bits as DataBits,
+      baudRate: preset.baudRate,
+      dataBits: preset.dataBits as DataBits,
       parity: preset.parity as Parity,
-      stopBits: preset.stop_bits as StopBits,
+      stopBits: preset.stopBits as StopBits,
       handshake: preset.handshake as Handshake,
-      dtr: preset.dtr !== 0,
-      rts: preset.rts !== 0,
+      dtr: preset.dtr,
+      rts: preset.rts,
     });
   };
 
@@ -75,12 +74,13 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const handleSavePreset = useCallback(async () => {
     try {
       const op = useOperationStore.getState();
-      await portPresetService.savePortPreset({
+      await storageService.savePortPreset({
+        id: `preset-${Date.now()}`,
         name: autoPresetName(),
-        baud_rate: op.baudRate,
-        data_bits: op.dataBits,
+        baudRate: op.baudRate,
+        dataBits: op.dataBits,
         parity: op.parity,
-        stop_bits: op.stopBits,
+        stopBits: op.stopBits,
         handshake: op.handshake,
         dtr: op.dtr,
         rts: op.rts,
@@ -95,7 +95,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const handleDeletePreset = useCallback(async () => {
     if (!selectedPresetId) return;
     try {
-      await portPresetService.deletePortPreset(selectedPresetId);
+      await storageService.deletePortPreset(selectedPresetId);
       setSelectedPresetId('');
       await loadPresets();
       notifySuccess('paramsSection.preset.deleted');

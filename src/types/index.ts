@@ -186,13 +186,26 @@ export interface SendHistoryEntry {
   lineEnding: LineEnding;
 }
 
-/** 外部工具配置：端口号 → 命令行工具的映射（SQLite 持久化，不依赖串口存在） */
+/** 外部工具配置：端口号 → 命令行工具的映射（config.json 持久化，不依赖串口存在） */
 export interface PortToolConfig {
   id: string;
   name: string;            // 配置名称，如 "STM32 烧录"
   portId: string;          // 端口号，如 "COM5"
   command: string;         // 命令模板，{port} 运行时替换
   workdir: string;         // 工作目录（可选，空串表示默认）
+}
+
+/** 串口参数预设（config.json 持久化） */
+export interface PortPreset {
+  id: string;
+  name: string;
+  baudRate: number;
+  dataBits: number;
+  parity: string;
+  stopBits: string;
+  handshake: string;
+  dtr: boolean;
+  rts: boolean;
 }
 
 // ==================== 协议解析相关 ====================
@@ -279,7 +292,14 @@ export interface AppConfig {
 
   // 会话恢复
   restoreSession: boolean;   // 启动时是否恢复上次会话
-  sessionSnapshot: string;   // 序列化的会话快照 JSON（退出时写入）
+
+  // 设置实体（全部存入 config.json）
+  sendCommandSets: SendCommandSet[];
+  highlightRuleSets: HighlightRuleSet[];
+  protocolTemplates: ProtocolTemplate[];
+  triggerRules: TriggerRule[];
+  portPresets: PortPreset[];
+  portToolConfigs: PortToolConfig[];
 }
 
 // ==================== 日志相关 ====================
