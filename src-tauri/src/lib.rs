@@ -10,7 +10,7 @@ mod storage;
 mod system;
 
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 use std::backtrace::Backtrace;
@@ -279,7 +279,10 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { .. } = event {
+                    // Only react to LEFT click. On Windows a right-click also
+                    // fires TrayIconEvent::Click; calling set_focus() there
+                    // steals focus from the native tray menu and dismisses it.
+                    if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
