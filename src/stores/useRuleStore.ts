@@ -78,8 +78,22 @@ export const useRuleStore = create<RuleState>()(
     }),
     setActiveProtocolTemplateId: (id) => set((state) => { state.activeProtocolTemplateId = id; }),
 
-    setSendCommandSets: (sets) => set((state) => { state.sendCommandSets = sets; }),
-    addSendCommandSet: (cmdSet) => set((state) => { state.sendCommandSets.push(cmdSet); }),
+    setSendCommandSets: (sets) => set((state) => {
+      state.sendCommandSets = sets;
+      // 维持「有命令集时 activeSendCommandSetId 必指向有效集」不变量：
+      // 当前激活集仍存在则保留，否则回退到第一个。修复 activeSendCommandSetId
+      // 从不自动设置导致「配置了命令集但操作面板快捷区/循环发送无反应」。
+      if (!sets.some((s) => s.id === state.activeSendCommandSetId)) {
+        state.activeSendCommandSetId = sets[0]?.id ?? null;
+      }
+    }),
+    addSendCommandSet: (cmdSet) => set((state) => {
+      state.sendCommandSets.push(cmdSet);
+      // 首个命令集自动激活，使快捷发送/循环发送立即可用。
+      if (state.activeSendCommandSetId == null) {
+        state.activeSendCommandSetId = cmdSet.id;
+      }
+    }),
     updateSendCommandSet: (setId, patch) => set((state) => {
       const commandSet = state.sendCommandSets.find((r) => r.id === setId);
       if (commandSet) Object.assign(commandSet, patch);

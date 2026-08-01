@@ -6,6 +6,12 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-01 命令集激活缺陷)
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `useRuleStore.ts` | 配置了发送命令集后操作面板快捷区/循环发送无反应：`activeSendCommandSetId` 是会话态（每次启动归零），而 `setSendCommandSets`（启动加载 / 设置页加载）与 `addSendCommandSet`（新建集）都从不设置它，用户必须手动在 RulesSection 下拉里选中才生效 | 两个 action 建立不变量「有命令集时 `activeSendCommandSetId` 必指向有效集」：`setSendCommandSets` 保留仍有效的激活集、否则回退首个；`addSendCommandSet` 无激活时激活新集。与既有 `removeSendCommandSet` 回退逻辑对称。补 6 个单测 |
+
 ## 已修复 (2026-08-01 三处 Bug 修复)
 
 | 严重度 | 文件 | 问题 | 修复 |

@@ -173,6 +173,41 @@ describe('Send Command Set CRUD', () => {
     useRuleStore.getState().setActiveSendCommandSetId('s1');
     expect(useRuleStore.getState().activeSendCommandSetId).toBe('s1');
   });
+
+  it('setSendCommandSets auto-selects first set when active is null', () => {
+    useRuleStore.getState().setSendCommandSets([makeCmdSet('s1'), makeCmdSet('s2')]);
+    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s1');
+  });
+
+  it('setSendCommandSets preserves a still-valid active selection', () => {
+    useRuleStore.getState().setSendCommandSets([makeCmdSet('s1'), makeCmdSet('s2')]);
+    useRuleStore.getState().setActiveSendCommandSetId('s2');
+    useRuleStore.getState().setSendCommandSets([makeCmdSet('s1'), makeCmdSet('s2')]);
+    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s2');
+  });
+
+  it('setSendCommandSets falls back to first when active no longer exists', () => {
+    useRuleStore.getState().setSendCommandSets([makeCmdSet('s1')]);
+    useRuleStore.getState().setSendCommandSets([makeCmdSet('s2')]);
+    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s2');
+  });
+
+  it('setSendCommandSets sets active to null when given empty array', () => {
+    useRuleStore.getState().setSendCommandSets([makeCmdSet('s1')]);
+    useRuleStore.getState().setSendCommandSets([]);
+    expect(useRuleStore.getState().activeSendCommandSetId).toBeNull();
+  });
+
+  it('addSendCommandSet activates the first added set', () => {
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
+    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s1');
+  });
+
+  it('addSendCommandSet keeps existing active selection', () => {
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
+    useRuleStore.getState().addSendCommandSet(makeCmdSet('s2'));
+    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s1');
+  });
 });
 
 // ==================== Protocol Templates ====================
