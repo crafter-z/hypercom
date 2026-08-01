@@ -2,13 +2,13 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { storageService, configService, fileService } from '../../../services/tauri';
-import type { AppConfig, HighlightRuleSet, SendCommandSet, ProtocolTemplate } from '../../../types';
+import { configService, fileService } from '../../../services/tauri';
+import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
-const BUNDLE_VERSION = 1;
+const BUNDLE_VERSION = 2;
 
 /** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
 const clampNumber = (raw: string, min: number, max: number): number => {
@@ -16,15 +16,16 @@ const clampNumber = (raw: string, min: number, max: number): number => {
   return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
 };
 
-/** 配置导出 bundle 结构（config + 三类规则集） */
+/**
+ * 配置导出 bundle 结构。
+ * v2（config.json 单一数据源后）：全部设置实体已内嵌于 AppConfig，
+ * 因此 bundle 只需包裹一份完整 config，不再有顶层冗余实体数组。
+ */
 interface ConfigBundle {
   app?: string;
   version?: number;
   exportedAt?: string;
   config?: AppConfig;
-  highlightSets?: HighlightRuleSet[];
-  commandSets?: SendCommandSet[];
-  protocolTemplates?: ProtocolTemplate[];
 }
 
 /** Validate an imported config bundle's config section. Returns error message or null if valid. */
@@ -50,20 +51,15 @@ const BackupSettings: React.FC = () => {
 
   const handleExport = async () => {
     try {
-      const currentConfig = useAppStore.getState().config;
-      const [highlightSets, commandSets, protocolTemplates] = await Promise.all([
-        storageService.loadHighlightSets(),
-        storageService.loadCommandSets(),
-        storageService.loadProtocolTemplates(),
-      ]);
+      // 从后端读取最新配置（config.json 是唯一数据源）。不能用前端 store 的
+      // config——设置页的规则 CRUD 只更新 useRuleStore + 后端 config.json，
+      // 不回写 store.config，直接读 store 会导出陈旧的实体数组。
+      const currentConfig = await configService.getConfig();
       const bundle: ConfigBundle = {
         app: BUNDLE_APP,
         version: BUNDLE_VERSION,
         exportedAt: new Date().toISOString(),
         config: currentConfig,
-        highlightSets,
-        commandSets,
-        protocolTemplates,
       };
       const path = await save({
         defaultPath: `hypercom-config-${new Date().toISOString().slice(0, 10)}.json`,
@@ -95,21 +91,15 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(validationError));
         return;
       }
-      if (bundle.config) {
-        await configService.setConfig(bundle.config);
-        useAppStore.getState().setConfig(bundle.config);
+      if (!bundle.config) {
+        notifyError(new Error(t('backupSettings.importInvalid')));
+        return;
       }
-      for (const set of bundle.highlightSets ?? []) {
-        await storageService.saveHighlightSet(set);
-      }
-      for (const set of bundle.commandSets ?? []) {
-        await storageService.saveCommandSet(set);
-      }
-      for (const tpl of bundle.protocolTemplates ?? []) {
-        await storageService.saveProtocolTemplate(tpl);
-      }
+      // 全量写回 config.json（含全部设置实体），set_config 内部会校验收敛并同步 LogManager。
+      await configService.setConfig(bundle.config);
+      useAppStore.getState().setConfig(bundle.config);
       notifySuccess('backupSettings.importSuccess');
-      // 延时重载，让所有 store 与组件重新加载导入的数据
+      // 重载让 useAppInit 从 config.json 重新加载实体到各 store。
       setTimeout(() => window.location.reload(), 1200);
     } catch (e) {
       notifyError(e);

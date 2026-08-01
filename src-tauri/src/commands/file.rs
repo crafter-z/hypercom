@@ -2,57 +2,38 @@
  * 通用文件读写命令
  * 用于配置 bundle 的导出 / 导入。
  *
- * 作用域校验 (defects #54 同类): 仅允许读写应用配置目录
- * (dirs::config_dir()/hypercom) 子树下的路径，防止前端借读写命令
- * 越权访问任意文件。canonicalize 解析符号链接与 ".." 后再比对前缀。
+ * 路径来自用户通过系统 save/open 对话框的显式选择（@tauri-apps/plugin-dialog），
+ * 原生对话框本身即安全边界，因此不再限制在配置目录子树内——与 commands/log.rs 的
+ * save_log_as / export_terminal_log 同一模式（defects #54 同类修复）。导出/导入的
+ * 核心用途就是把配置搬到任意位置（桌面、U 盘、另一台机器），子树限制会使其失效。
+ * 仅做基本有效性校验：写入确认父目录存在，读取确认文件可 canonicalize。
  */
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::commands::CommandError;
 
-/// 校验目标路径位于应用配置目录子树内，返回原始 PathBuf。
-/// 写入场景下文件可能尚不存在，因此回退到对父目录 canonicalize。
-fn validate_config_path(path: &str) -> Result<PathBuf, CommandError> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| CommandError::Io("Cannot resolve config directory".into()))?
-        .join("hypercom");
-    let target = PathBuf::from(path);
-    let canonical = target
-        .canonicalize()
-        .or_else(|_| {
-            // File might not exist yet (for write), check parent
-            target
-                .parent()
-                .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "No parent")
-                })
-                .and_then(|p| p.canonicalize())
-        })
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    let canonical_root = config_dir
-        .canonicalize()
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    if !canonical.starts_with(&canonical_root) {
-        return Err(CommandError::Io(format!(
-            "Path outside config directory: {}",
-            path
-        )));
-    }
-    Ok(target)
-}
-
-/// 将文本内容写入指定路径（配置导出）
+/// 将文本内容写入指定路径（配置导出）。
+/// 目标路径由用户通过系统 save 对话框显式选择，仅校验父目录有效。
 #[tauri::command]
 pub fn write_text_file(path: String, content: String) -> Result<(), CommandError> {
-    let target = validate_config_path(&path)?;
-    std::fs::write(&target, content.as_bytes())
+    let target = Path::new(&path);
+    target
+        .parent()
+        .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path}")))?
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
+    std::fs::write(target, content.as_bytes())
         .map_err(|e| CommandError::Io(format!("Failed to write file '{path}': {e}")))
 }
 
-/// 读取文本文件内容（配置导入）
+/// 读取文本文件内容（配置导入）。
+/// 目标路径由用户通过系统 open 对话框显式选择，仅校验文件存在且可 canonicalize。
 #[tauri::command]
 pub fn read_text_file(path: String) -> Result<String, CommandError> {
-    let target = validate_config_path(&path)?;
-    std::fs::read_to_string(&target)
+    let target = Path::new(&path);
+    target
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("Cannot canonicalize path: {e}")))?;
+    std::fs::read_to_string(target)
         .map_err(|e| CommandError::Io(format!("Failed to read file '{path}': {e}")))
 }
