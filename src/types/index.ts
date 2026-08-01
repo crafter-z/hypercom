@@ -76,6 +76,7 @@ export interface TabItem {
   isPinned: boolean;       // 是否固定
   isActive: boolean;       // 是否当前激活
   splitPaneId: string;     // 所属分屏区域ID
+  poppedOut?: boolean;     // 终端已 detach 到独立弹出窗（主窗显示占位，关窗回贴）
 }
 
 /** 分屏方向 */

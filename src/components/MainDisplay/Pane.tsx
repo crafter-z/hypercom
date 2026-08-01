@@ -4,6 +4,8 @@ import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialConnection } from '../../hooks';
 import { notifyError } from '../../stores/useToastStore';
+import { popoutService } from '../../services/tauri';
+import { popoutLabel } from '../Popout/popoutLabel';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
 import { X, Cable } from 'lucide-react';
@@ -32,6 +34,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const closeOtherTabs = useAppStore((s) => s.closeOtherTabs);
   const moveTabToPane = useAppStore((s) => s.moveTabToPane);
   const splitPane = useAppStore((s) => s.splitPane);
+  const setTabPoppedOut = useAppStore((s) => s.setTabPoppedOut);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const removePane = useAppStore((s) => s.removePane);
   const { closePort } = useSerialConnection();
@@ -51,6 +54,11 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     const port = ports.find(p => p.id === tabId);
     if (port && port.status === 'connected') {
       closePort(tabId).catch((e) => { console.debug('[MainDisplay] closePort failed:', e); notifyError(e); });
+    }
+    // 标签若已弹出，连同其独立窗一起销毁，避免遗留孤儿窗口（关窗事件随后幂等清标记）。
+    if (useAppStore.getState().tabs.find(t => t.id === tabId)?.poppedOut) {
+      const label = popoutLabel('terminal', tabId);
+      if (label) popoutService.closePopout(label).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
     }
     clearTerminal(tabId);
   }, [ports, closePort, clearTerminal]);
@@ -120,6 +128,22 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     setLocalActiveTabId(tabId);
   }, [onFocus, setActiveTab]);
 
+  // detach：标记标签弹出 + 开窗（open_popout 对已存在窗口仅聚焦，重复弹出安全）。
+  const handlePopOut = useCallback((tabId: string) => {
+    setTabPoppedOut(tabId, true);
+    popoutService.openPopout('terminal', tabId).catch((e) => {
+      console.debug('[MainDisplay] openPopout failed:', e);
+      notifyError(e);
+    });
+  }, [setTabPoppedOut]);
+
+  // 回贴：乐观清标记 + 关窗。Rust 关窗事件亦会清标记（幂等），先后顺序无关。
+  const handleReattach = useCallback((tabId: string) => {
+    setTabPoppedOut(tabId, false);
+    const label = popoutLabel('terminal', tabId);
+    if (label) popoutService.closePopout(label).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
+  }, [setTabPoppedOut]);
+
   const handleMoveTabToPane = useCallback((tabId: string, targetPaneId: string) => {
     moveTabToPane(tabId, targetPaneId);
     if (tabId === localActiveTabId && paneTabs.length <= 1) {
@@ -150,6 +174,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             onCloseToRight={handleCloseToRight}
             onCloseToLeft={handleCloseToLeft}
             onCloseOthers={handleCloseOthers}
+            onPopOut={handlePopOut}
             moveToPaneTargets={otherPanes}
             onMoveToPane={handleMoveTabToPane}
             onSplitVertical={() => { onFocus(); splitPane('vertical'); }}
@@ -159,11 +184,25 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
       </div>
 
       {paneTabs.length > 0 && displayTab ? (
-        <TerminalView
-          key={displayTab.id}
-          portId={displayTab.id}
-          terminal={displayTerminal}
-        />
+        displayTab.poppedOut ? (
+          // detach 占位：终端已移入独立窗，主窗保留标签身份、仅替换内容区。
+          <div className="terminal-empty-state">
+            <Cable size={30} strokeWidth={1.5} className="empty-state-icon" />
+            <span className="empty-state-text">{t('terminalPopout.poppedOutPlaceholder')}</span>
+            <button
+              className="btn btn-sm"
+              onClick={(e) => { e.stopPropagation(); handleReattach(displayTab.id); }}
+            >
+              {t('terminalPopout.reattach')}
+            </button>
+          </div>
+        ) : (
+          <TerminalView
+            key={displayTab.id}
+            portId={displayTab.id}
+            terminal={displayTerminal}
+          />
+        )
       ) : paneTabs.length === 0 ? (
         <div
           ref={isMultiPane ? setDropRef : undefined}

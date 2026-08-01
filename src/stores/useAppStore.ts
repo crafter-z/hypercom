@@ -226,6 +226,7 @@ interface AppState {
   closeOtherTabs: (tabId: string) => void;
   pinTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
+  setTabPoppedOut: (tabId: string, poppedOut: boolean) => void;
   moveTabToPane: (tabId: string, paneId: string) => void;
   splitPane: (direction: 'horizontal' | 'vertical') => void;
   removePane: (paneId: string) => void;
@@ -472,6 +473,13 @@ closeOtherTabs: (tabId) => set((state) => {
         state.activeTabId = tabId;
         state.focusedPaneId = tab.splitPaneId;
       }
+    }),
+
+    // detach 语义：标记标签已弹出到独立窗（主窗占位）/ 关窗回贴时清除。
+    // 幂等——弹出窗关闭事件与主窗"收回"按钮都会调用，重复设置无副作用。
+    setTabPoppedOut: (tabId, poppedOut) => set((state) => {
+      const tab = state.tabs.find(t => t.id === tabId);
+      if (tab) tab.poppedOut = poppedOut;
     }),
     
     moveTabToPane: (tabId, paneId) => set((state) => {

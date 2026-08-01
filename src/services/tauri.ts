@@ -9,6 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import type {
   AppConfig,
+  TerminalState,
 } from '../types';
 
 // ==================== 类型定义 ====================
@@ -620,6 +621,22 @@ export interface ActiveTabChangedPayload {
   portId: string | null;
 }
 
+/** 终端弹窗 → 主窗：挂载完成，请求一次性历史快照（request→reply 避免竞态）。 */
+export interface PopoutTerminalRequestSnapshotPayload {
+  portId: string;
+}
+
+/** 主窗 → 终端弹窗：当前终端缓冲 + 显示态快照（一次性）。 */
+export interface PopoutTerminalSnapshotPayload {
+  portId: string;
+  terminal: TerminalState;
+}
+
+/** 主窗(Rust) → 主窗(前端)：某终端弹出窗已关闭 → 回贴标签。 */
+export interface PopoutTerminalClosedPayload {
+  portId: string;
+}
+
 export const popoutEventService = {
   /** 弹窗 → 主窗：请求发送。 */
   onSendCommand: (callback: (payload: PopoutSendCommandPayload) => void) => {
@@ -656,6 +673,27 @@ export const popoutEventService = {
     });
   },
 
+  /** 终端弹窗 → 主窗：请求历史快照。 */
+  onTerminalRequestSnapshot: (callback: (payload: PopoutTerminalRequestSnapshotPayload) => void) => {
+    return listen<PopoutTerminalRequestSnapshotPayload>('popout:terminal:request-snapshot', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  /** 主窗 → 终端弹窗：回推历史快照。 */
+  onTerminalSnapshot: (callback: (payload: PopoutTerminalSnapshotPayload) => void) => {
+    return listen<PopoutTerminalSnapshotPayload>('popout:terminal:snapshot', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  /** 主窗(Rust) → 主窗(前端)：终端弹出窗关闭 → 回贴标签。 */
+  onTerminalClosed: (callback: (payload: PopoutTerminalClosedPayload) => void) => {
+    return listen<PopoutTerminalClosedPayload>('popout:terminal:closed', (event) => {
+      callback(event.payload);
+    });
+  },
+
   emitSendCommand: (payload: PopoutSendCommandPayload): Promise<void> => {
     return emit('popout:send-command', payload);
   },
@@ -674,5 +712,15 @@ export const popoutEventService = {
 
   emitRequestSync: (): Promise<void> => {
     return emit('popout:request-sync');
+  },
+
+  /** 终端弹窗 → 主窗：请求历史快照。 */
+  emitTerminalRequestSnapshot: (payload: PopoutTerminalRequestSnapshotPayload): Promise<void> => {
+    return emit('popout:terminal:request-snapshot', payload);
+  },
+
+  /** 主窗 → 终端弹窗：回推历史快照。 */
+  emitTerminalSnapshot: (payload: PopoutTerminalSnapshotPayload): Promise<void> => {
+    return emit('popout:terminal:snapshot', payload);
   },
 };

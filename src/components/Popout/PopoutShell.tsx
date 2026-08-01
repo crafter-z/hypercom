@@ -5,21 +5,25 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { popoutService } from '../../services/tauri';
 import { popoutLabel } from './popoutLabel';
 import QuickSendPanel from './QuickSendPanel';
+import TerminalPopout from './TerminalPopout';
 
 interface PopoutShellProps {
   kind: string;
   targetId: string | null;
 }
 
-/** 内容区：按 kind 分发。Phase 1 仅占位，Phase 2/3 在此接入真实面板。 */
-const PopoutContent: React.FC<{ kind: string }> = ({ kind }) => {
+/** 内容区：按 kind 分发到真实面板（快捷发送 / 终端）。 */
+const PopoutContent: React.FC<{ kind: string; targetId: string | null }> = ({ kind, targetId }) => {
   const { t } = useTranslation();
   switch (kind) {
     case 'quick-send':
       return <QuickSendPanel />;
     case 'terminal':
-      // Phase 3: return <TerminalPopout />;
-      return <div className="popout-placeholder">{t('popout.terminalPlaceholder')}</div>;
+      // 终端弹出以 portId 为目标；缺失时降级为占位（URL 异常兜底）。
+      if (!targetId) {
+        return <div className="popout-placeholder">{t('terminalPopout.noTarget')}</div>;
+      }
+      return <TerminalPopout portId={targetId} />;
     default:
       return <div className="popout-placeholder">{kind}</div>;
   }
@@ -74,7 +78,7 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
         </div>
       </div>
       <div className="popout-content">
-        <PopoutContent kind={kind} />
+        <PopoutContent kind={kind} targetId={targetId} />
       </div>
     </div>
   );

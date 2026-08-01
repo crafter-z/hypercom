@@ -498,6 +498,11 @@ const resources = {
       'popout.close': '关闭',
       'popout.terminalPlaceholder': '终端弹出（Phase 3 实现）',
 
+      'terminalPopout.poppedOutPlaceholder': '该终端已弹出到独立窗口',
+      'terminalPopout.reattach': '收回',
+      'terminalPopout.popOut': '弹出到独立窗口',
+      'terminalPopout.noTarget': '无端口',
+
       'quickSend.searchPlaceholder': '搜索命令…（/ 聚焦）',
       'quickSend.setLabel': '命令集',
       'quickSend.editSet': '编辑命令集',
@@ -999,6 +1004,11 @@ const resources = {
       'popout.alwaysOnTop': 'Always on top',
       'popout.close': 'Close',
       'popout.terminalPlaceholder': 'Terminal pop-out (Phase 3)',
+
+      'terminalPopout.poppedOutPlaceholder': 'This terminal is popped out to a separate window',
+      'terminalPopout.reattach': 'Reattach',
+      'terminalPopout.popOut': 'Pop out to window',
+      'terminalPopout.noTarget': 'No port',
 
       'quickSend.searchPlaceholder': 'Search commands… (press /)',
       'quickSend.setLabel': 'Command set',

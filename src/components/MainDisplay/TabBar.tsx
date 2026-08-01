@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { TabItem, LeafPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import { Pin, X, AlertTriangle, Columns2, Rows2 } from 'lucide-react';
+import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink } from 'lucide-react';
 import {
   SortableContext,
   useSortable,
@@ -22,6 +22,7 @@ interface TabBarProps {
   onCloseToRight: (tabId: string) => void;
   onCloseToLeft: (tabId: string) => void;
   onCloseOthers: (tabId: string) => void;
+  onPopOut?: (tabId: string) => void;
   moveToPaneTargets?: LeafPane[];
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
   onSplitVertical?: () => void;
@@ -119,6 +120,7 @@ const TabBar: React.FC<TabBarProps> = ({
   onCloseToRight,
   onCloseToLeft,
   onCloseOthers,
+  onPopOut,
   moveToPaneTargets,
   onMoveToPane,
   onSplitVertical,
@@ -162,6 +164,15 @@ const TabBar: React.FC<TabBarProps> = ({
       { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId) },
     ];
 
+    // 弹出入口：仅未弹出时提供（弹出后主窗内容区为占位，标签右键不再给此项）。
+    if (onPopOut && !tab?.poppedOut) {
+      items.splice(1, 0, {
+        label: t('terminalPopout.popOut'),
+        icon: <ExternalLink size={14} />,
+        onClick: () => onPopOut(tabId),
+      });
+    }
+
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
       items.push({ type: 'separator' });
       for (const targetPane of moveToPaneTargets) {
@@ -174,7 +185,7 @@ const TabBar: React.FC<TabBarProps> = ({
     }
 
     return items;
-  }, [tabs, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, moveToPaneTargets, onMoveToPane, t]);
+  }, [tabs, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, t]);
 
   const tabIds = tabs.map(t => t.id);
 

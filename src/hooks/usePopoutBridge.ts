@@ -1,8 +1,15 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
+import { useTerminalStore } from '../stores/useTerminalStore';
 import { popoutEventService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
+
+/**
+ * 终端快照行数上限（R3）：缓冲接近 memoryLimitMb 时整包快照载荷过大，
+ * 仅推最近 N 行——弹出窗是"实时监视器"，远古历史价值低。v1 取 5000。
+ */
+const SNAPSHOT_LINE_CAP = 5000;
 
 /**
  * Hook: 弹出窗意图总线（主窗侧，`App.tsx` 中恰好调用一次）。
@@ -61,6 +68,40 @@ export function usePopoutBridge() {
         else unlisteners.push(u);
       })
       .catch((e) => console.debug('[usePopoutBridge] onRequestSync failed:', e));
+
+    // 终端弹窗请求历史快照：终端行是主窗内存态（不在 SQLite），故由主窗一次性
+    // 回推当前缓冲 + 显示态。request→reply 保证快照晚于弹窗监听器注册到达。
+    // 快照仅含纯可序列化数据（lines + 显示态）；超长按 R3 截最近 N 行。
+    popoutEventService
+      .onTerminalRequestSnapshot((payload) => {
+        const terminal = useTerminalStore.getState().terminals[payload.portId];
+        if (!terminal) {
+          console.debug('[usePopoutBridge] terminal snapshot skipped — no buffer for', payload.portId);
+          return;
+        }
+        const lines = terminal.lines.length > SNAPSHOT_LINE_CAP
+          ? terminal.lines.slice(terminal.lines.length - SNAPSHOT_LINE_CAP)
+          : terminal.lines;
+        void popoutEventService
+          .emitTerminalSnapshot({ portId: payload.portId, terminal: { ...terminal, lines } })
+          .catch((e) => console.debug('[usePopoutBridge] emitTerminalSnapshot failed:', e));
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisteners.push(u);
+      })
+      .catch((e) => console.debug('[usePopoutBridge] onTerminalRequestSnapshot failed:', e));
+
+    // 终端弹出窗关闭（Rust on_window_event 探测）→ 回贴标签，主窗恢复终端显示。
+    popoutEventService
+      .onTerminalClosed((payload) => {
+        useAppStore.getState().setTabPoppedOut(payload.portId, false);
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisteners.push(u);
+      })
+      .catch((e) => console.debug('[usePopoutBridge] onTerminalClosed failed:', e));
 
     // 命令集变更 → 广播信号，弹窗回库重读（immer 变更后引用必变，引用比较即真值）。
     const unsubscribeRules = useRuleStore.subscribe((state, prevState) => {

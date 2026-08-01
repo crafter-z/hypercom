@@ -43,7 +43,7 @@ export function mapCommandSetInfo(s: CommandSetInfo): SendCommandSet {
 }
 
 /** Map backend HighlightSetInfo to frontend HighlightRuleSet */
-function mapHighlightSetInfo(s: HighlightSetInfo): HighlightRuleSet {
+export function mapHighlightSetInfo(s: HighlightSetInfo): HighlightRuleSet {
   return {
     id: s.id,
     name: s.name,

@@ -9,6 +9,7 @@ interface TerminalStoreState {
   ensureTerminal: (portId: string) => void;
   setTerminalConnectedAt: (portId: string, ts: number) => void;
   appendTerminalLine: (portId: string, line: TerminalState['lines'][number]) => void;
+  setTerminalLines: (portId: string, lines: TerminalState['lines']) => void;
   clearTerminal: (portId: string) => void;
   setTerminalConfig: (portId: string, patch: Partial<TerminalState>) => void;
   setTerminalEncoding: (portId: string, encoding: Encoding) => void;
@@ -52,6 +53,16 @@ export const useTerminalStore = create<TerminalStoreState>()(
           term.lines.shift();
         }
       }
+    }),
+
+    // 批量替换缓冲区（弹出窗用主窗快照补历史）。保留最近 maxLines 行，
+    // 与 appendTerminalLine 的上限语义一致。
+    setTerminalLines: (portId, lines) => set((state) => {
+      const term = state.terminals[portId];
+      if (!term) return;
+      term.lines = lines.length > term.maxLines
+        ? lines.slice(lines.length - term.maxLines)
+        : lines;
     }),
 
     clearTerminal: (portId) => set((state) => {

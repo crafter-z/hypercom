@@ -11,7 +11,7 @@ mod system;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use std::backtrace::Backtrace;
 
@@ -71,6 +71,15 @@ impl AppState {
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
+}
+
+/// 终端弹出窗关闭事件载荷（Rust → 主窗前端，触发 detach 标签回贴）。
+/// `#[serde(rename_all = "camelCase")]` 使 `port_id` 在 wire 上为 `portId`，
+/// 与前端 `PopoutTerminalClosedPayload` 一致。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalClosedPayload {
+    port_id: String,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -307,17 +316,45 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关闭行为：config.closeBehavior == "minimize" 时拦截关闭、隐藏到托盘
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let close_to_tray = window
-                    .state::<AppState>()
-                    .config_manager
-                    .lock()
-                    .map(|mgr| mgr.get_config().close_behavior == "minimize")
-                    .unwrap_or(false);
-                if close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
+            let label = window.label();
+
+            // 主窗关闭行为：config.closeBehavior == "minimize" 时拦截关闭、隐藏到托盘。
+            // 仅限主窗——弹出窗（quick-send / terminal-*）必须正常关闭，不能被托盘逻辑吞掉
+            // （旧实现未区分 label，closeBehavior=minimize 时弹窗会被 hide 而非关闭）。
+            if label == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let close_to_tray = window
+                        .state::<AppState>()
+                        .config_manager
+                        .lock()
+                        .map(|mgr| mgr.get_config().close_behavior == "minimize")
+                        .unwrap_or(false);
+                    if close_to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            }
+
+            // 终端弹出窗销毁 → 通知主窗回贴标签（detach 的"关窗回贴"）。
+            // 选 Destroyed 而非 CloseRequested：`close_popout`（"收回"按钮）走 destroy()
+            // 会绕过 CloseRequested，而 Destroyed 对 X 按钮 / destroy() 两条路径都恰好触发
+            // 一次。先从注册表移除再 emit，使任何重复触发幂等（移除后 target_id 为 None）。
+            if label.starts_with("terminal-") {
+                if let tauri::WindowEvent::Destroyed = event {
+                    let target = window
+                        .state::<AppState>()
+                        .popouts
+                        .lock()
+                        .ok()
+                        .and_then(|mut popouts| popouts.remove(label))
+                        .and_then(|meta| meta.target_id);
+                    if let Some(port_id) = target {
+                        let _ = window.app_handle().emit(
+                            "popout:terminal:closed",
+                            TerminalClosedPayload { port_id },
+                        );
+                    }
                 }
             }
         })

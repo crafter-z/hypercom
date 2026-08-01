@@ -6,6 +6,7 @@ import { useRuleStore } from '../stores/useRuleStore';
 import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
+import { StreamingDecoderCache } from '../utils/streamingDecoder';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
 import type { PortStatus } from '../types';
@@ -23,39 +24,17 @@ export function useSerialReceive() {
   const appendTerminalLine = useTerminalStore((s) => s.appendTerminalLine);
   const setupPromiseRef = useRef<Promise<void> | null>(null);
   const reassemblersRef = useRef<Map<string, ProtocolFrameReassembler>>(new Map());
-  // Persistent streaming decoders keyed `${portId}:${decoderLabel}`. A fresh
-  // TextDecoder per event decodes multi-byte chars (GBK 2-byte, UTF-8 3-byte)
-  // that straddle two serial:data events to U+FFFD on BOTH halves — guaranteed
-  // mojibake on GBK traffic. Streaming decode ({stream:true}) retains a partial
-  // trailing char in the decoder and emits it once the next event completes it.
-  const decodersRef = useRef<Map<string, TextDecoder>>(new Map());
+  // Persistent streaming decoders (shared helper, also used by the terminal
+  // pop-out). A fresh TextDecoder per event decodes multi-byte chars (GBK
+  // 2-byte, UTF-8 3-byte) that straddle two serial:data events to U+FFFD on
+  // BOTH halves — guaranteed mojibake on GBK traffic. Streaming decode
+  // ({stream:true}) retains a partial trailing char and emits it once the next
+  // event completes it. See StreamingDecoderCache for the full rationale.
+  const decodersRef = useRef(new StreamingDecoderCache());
 
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
-
-    // Look up (or lazily create) the streaming decoder for a port+label.
-    // Recreating under a new label drops any stale entry for that port so a
-    // buffered partial from the previous encoding can't resurface after an
-    // encoding switch.
-    const getStreamingDecoder = (portId: string, label: string): TextDecoder => {
-      const key = `${portId}:${label}`;
-      let decoder = decodersRef.current.get(key);
-      if (!decoder) {
-        const prefix = `${portId}:`;
-        for (const k of decodersRef.current.keys()) {
-          if (k.startsWith(prefix)) decodersRef.current.delete(k);
-        }
-        try {
-          decoder = new TextDecoder(label, { fatal: false });
-        } catch {
-          console.warn('[useSerialReceive] TextDecoder failed for encoding:', label, 'falling back to utf-8');
-          decoder = new TextDecoder('utf-8', { fatal: false });
-        }
-        decodersRef.current.set(key, decoder);
-      }
-      return decoder;
-    };
 
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
@@ -96,7 +75,7 @@ export function useSerialReceive() {
             if (flushedBytes.length > 0) {
               // Flushed (non-frame) bytes are a raw stream that CAN split a
               // multi-byte char across events — use the streaming decoder.
-              const flushedText = getStreamingDecoder(event.port_id, decoderLabel).decode(new Uint8Array(flushedBytes), { stream: true });
+              const flushedText = decodersRef.current.get(event.port_id, decoderLabel).decode(new Uint8Array(flushedBytes), { stream: true });
               // A partial trailing char decodes to '' (bytes retained in the
               // decoder) — skip the empty append; it surfaces on the next event.
               if (flushedText) {
@@ -118,7 +97,7 @@ export function useSerialReceive() {
         }
         // Common non-protocol path: streaming decode so multi-byte chars that
         // straddle events reassemble instead of corrupting to U+FFFD.
-        const text = getStreamingDecoder(event.port_id, decoderLabel).decode(new Uint8Array(event.data), { stream: true });
+        const text = decodersRef.current.get(event.port_id, decoderLabel).decode(new Uint8Array(event.data), { stream: true });
         // An empty string here is a buffered partial multi-byte char — the
         // bytes are retained in the decoder, so skipping is safe.
         if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
@@ -177,11 +156,7 @@ export function useSerialReceive() {
               reassemblersRef.current.delete(key);
             }
           }
-          for (const key of decodersRef.current.keys()) {
-            if (key.startsWith(prefix)) {
-              decodersRef.current.delete(key);
-            }
-          }
+          decodersRef.current.clearPort(event.port_id);
         }
       });
 
