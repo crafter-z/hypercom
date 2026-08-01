@@ -71,11 +71,18 @@ impl PortLogWriter {
                 line.len()
             }
             "binary" => {
+                // Frame: [timestamp] direction <raw data>\n — keeps raw bytes intact
+                // while adding a parseable header line.
+                let header = format!("[{}] {} ", timestamp, direction);
+                self.writer.write_all(header.as_bytes())?;
                 self.writer.write_all(data)?;
-                data.len()
+                self.writer.write_all(b"\n")?;
+                header.len() + data.len() + 1
             }
             _ => {
-                let text = decode_bytes(data, &self.encoding);
+                let text = decode_bytes(data, &self.encoding)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
                 let line = format!("[{}] {} {}\n", timestamp, direction, text);
                 self.writer.write_all(line.as_bytes())?;
                 line.len()
@@ -134,6 +141,8 @@ pub struct LogManager {
     default_encoding: String,
     /// 是否启用按大小自动分片（前端可运行时开关）
     split_enabled: bool,
+    /// 上次 flush 时间戳，用于周期性刷盘（每 5 秒）
+    last_flush: std::time::Instant,
 }
 
 impl LogManager {
@@ -143,7 +152,13 @@ impl LogManager {
             .join("hypercom")
             .join("logs");
 
-        let _ = fs::create_dir_all(&log_directory);
+        if let Err(e) = fs::create_dir_all(&log_directory) {
+            log::error!(
+                "Failed to create log directory {:?}: {}. Logging will fail.",
+                log_directory,
+                e
+            );
+        }
 
         Self {
             log_directory,
@@ -153,6 +168,7 @@ impl LogManager {
             filename_format: DEFAULT_FILENAME_FORMAT.to_string(),
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
+            last_flush: std::time::Instant::now(),
         }
     }
 
@@ -227,10 +243,13 @@ impl LogManager {
             .append(true)
             .open(&file_path)?;
 
+        // 追加模式下从已有文件大小初始化 current_size，使分片阈值对续写文件准确。
+        let existing_size = file.metadata()?.len();
+
         let writer = PortLogWriter {
             file_path: file_path.clone(),
             writer: BufWriter::new(file),
-            current_size: 0,
+            current_size: existing_size,
             format: format.to_string(),
             encoding: encoding.to_string(),
         };
@@ -286,6 +305,14 @@ impl LogManager {
                 log::info!("Log split: new file created for {}", port_id);
             }
         }
+
+        // 周期性刷盘：每 5 秒 flush 所有活跃 writer，防止崩溃丢失最后一批数据。
+        // 仅 flush BufWriter，不做 sync_all（性能考量）。
+        if self.last_flush.elapsed() >= std::time::Duration::from_secs(5) {
+            let _ = self.flush_all_internal();
+            self.last_flush = std::time::Instant::now();
+        }
+
         Ok(())
     }
 
@@ -320,12 +347,27 @@ impl LogManager {
         Ok(())
     }
 
+    /// 内部周期刷盘：仅 flush BufWriter 缓冲，不做 sync_all（性能优先）。
+    /// 由 write() 每 5 秒自动调用。
+    fn flush_all_internal(&mut self) -> anyhow::Result<()> {
+        for (port_id, writer) in self.writers.iter_mut() {
+            if let Err(e) = writer.writer.flush() {
+                log::warn!("Periodic flush failed for {}: {}", port_id, e);
+            }
+        }
+        Ok(())
+    }
+
     /// 手动另存日志。
     /// 优先使用活跃 writer 的文件路径（精确）；无活跃 writer 时回退到
     /// 日志目录中该端口最新的日志文件（通过 list_files 的 port_id 反查）。
-    pub fn save_log_as(&self, port_id: &str, target_path: &str) -> anyhow::Result<()> {
-        // 1. 活跃 writer → 直接拷贝其文件（路径精确，无歧义）
-        if let Some(writer) = self.writers.get(port_id) {
+    pub fn save_log_as(&mut self, port_id: &str, target_path: &str) -> anyhow::Result<()> {
+        // 1. 活跃 writer → flush + sync 后拷贝（确保缓冲数据落盘，拷贝完整）
+        if let Some(writer) = self.writers.get_mut(port_id) {
+            writer.writer.flush()?;
+            if let Ok(file) = writer.writer.get_ref().try_clone() {
+                let _ = file.sync_all();
+            }
             fs::copy(&writer.file_path, target_path)?;
             log::info!("Log saved from {:?} to {}", writer.file_path, target_path);
             return Ok(());
@@ -373,7 +415,12 @@ impl LogManager {
                 if metadata.is_file() {
                     let path = entry.path();
                     let port_id = active_index.get(&path).cloned().unwrap_or_else(|| {
-                        // fallback：按"-"切分文件名首段
+                        // Fallback heuristic: split filename stem on '-' and take the first segment.
+                        // LIMITATION: This is unreliable for custom filename formats (e.g. "log_[com]_[date]"
+                        // yields "log" instead of the port id). It only works correctly with the default
+                        // "[com]-[datetime]" template. For closed writers, there is no reliable way to
+                        // recover the port_id without a persistent registry (out of scope).
+                        // Active writers always resolve correctly via active_index above.
                         path.file_stem()
                             .and_then(|s| s.to_str())
                             .and_then(|stem| stem.split('-').next())
@@ -419,6 +466,7 @@ mod tests {
             filename_format: "[com]-[datetime]".to_string(),
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
+            last_flush: std::time::Instant::now(),
         }
     }
 
@@ -523,7 +571,7 @@ mod tests {
     #[test]
     fn test_save_log_as_no_writer_no_files() {
         let dir = test_dir("nowriter");
-        let mgr = test_manager(&dir);
+        let mut mgr = test_manager(&dir);
         let result = mgr.save_log_as("NONEXIST", "/tmp/test.log");
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&dir);

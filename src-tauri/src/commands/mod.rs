@@ -28,8 +28,6 @@ pub enum CommandError {
     Config(String),
     #[error("Log error: {0}")]
     Log(String),
-    #[error("Storage error: {0}")]
-    Storage(String),
     #[error("System error: {0}")]
     System(String),
     #[error("Lock error: {0}")]

@@ -6,7 +6,6 @@ mod commands;
 mod config;
 mod logger;
 mod serial;
-mod storage;
 mod system;
 
 use tauri::menu::{Menu, MenuItem};
@@ -39,12 +38,10 @@ fn format_crash_report(
 pub struct AppState {
     /// 串口管理器：负责串口的打开/关闭/数据收发
     pub serial_manager: std::sync::Mutex<serial::SerialManager>,
-    /// 配置管理器：负责读写应用配置
+    /// 配置管理器：负责读写应用配置（含全部设置实体）
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
     /// 日志管理器：负责日志文件的写入与管理
     pub log_manager: std::sync::Mutex<logger::LogManager>,
-    /// 存储管理器：负责 SQLite 数据库操作
-    pub storage_manager: std::sync::Mutex<storage::StorageManager>,
     /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）
     pub system_info: std::sync::Mutex<sysinfo::System>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
@@ -61,11 +58,26 @@ impl AppState {
             .position(|a| a == "--config")
             .and_then(|i| std::env::args().nth(i + 2))
             .map(std::path::PathBuf::from);
+
+        // 先建 ConfigManager，再用其配置初始化 LogManager（消除双数据源）
+        let config_manager = config::ConfigManager::new(config_arg)?;
+        let cfg = config_manager.get_config();
+        let mut log_manager = logger::LogManager::new();
+        log_manager.set_auto_save(cfg.auto_save_log);
+        log_manager.set_default_encoding(&cfg.log_encoding);
+        log_manager.set_filename_format(&cfg.log_filename_format);
+        log_manager.set_split_size(cfg.log_split_size_mb);
+        log_manager.set_split_enabled(cfg.log_split_enabled);
+        if !cfg.log_directory.is_empty() {
+            if let Err(e) = log_manager.set_directory(cfg.log_directory.clone()) {
+                log::warn!("Failed to set log directory from config: {}", e);
+            }
+        }
+
         Ok(Self {
             serial_manager: std::sync::Mutex::new(serial::SerialManager::new()),
-            config_manager: std::sync::Mutex::new(config::ConfigManager::new(config_arg)?),
-            log_manager: std::sync::Mutex::new(logger::LogManager::new()),
-            storage_manager: std::sync::Mutex::new(storage::StorageManager::new()?),
+            config_manager: std::sync::Mutex::new(config_manager),
+            log_manager: std::sync::Mutex::new(log_manager),
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -113,6 +125,7 @@ pub fn run() {
             commands::set_config,
             commands::reset_config,
             commands::update_session_snapshot,
+            commands::get_session_snapshot,
             commands::get_config_path,
             // ===== 日志相关命令 =====
             commands::set_log_directory,
@@ -128,6 +141,7 @@ pub fn run() {
             commands::set_log_encoding,
             commands::open_path,
             commands::open_log_directory,
+            commands::migrate_log_directory,
             // ===== 系统相关命令 =====
             commands::get_system_status,
             commands::prevent_screen_off,
@@ -199,32 +213,6 @@ pub fn run() {
                 }
                 #[allow(clippy::drop_non_drop)]
                 drop(state);
-            }
-
-            // 同步初始化数据库：在 setup 内 block_on 完成建池 + 建表，保证前端
-            // 任何存储命令都不会与建池竞态。旧实现用 spawn 异步建池，而前端
-            // useAppInit 一挂载就并发加载命令集/规则集、ParamsSection 一挂载就
-            // 加载端口预设——这些调用常常跑在建池完成之前，命中 "Database not
-            // initialized"，且预设加载失败后不再重试，导致下拉菜单永远为空。
-            // 阻塞 main 线程数十毫秒可接受（上方 CPU 预热已阻塞 ~250ms）。
-            // block_on 内部不持有 MutexGuard；set_pool 在 block_on 返回后执行。
-            let db_result = tauri::async_runtime::block_on(async {
-                let pool = storage::create_pool().await?;
-                storage::init_schema_on_pool(&pool).await?;
-                anyhow::Ok(pool)
-            });
-            match db_result {
-                Ok(pool) => {
-                    let stored = _app.state::<AppState>().storage_manager.lock()
-                        .map(|mut mgr| mgr.set_pool(pool))
-                        .is_ok();
-                    if stored {
-                        log::info!("Storage initialized successfully");
-                    } else {
-                        log::error!("storage_manager mutex poisoned; DB pool not stored. DB unavailable.");
-                    }
-                }
-                Err(e) => log::error!("DB initialization failed: {}. Storage commands will be unavailable.", e),
             }
 
             // 安装 panic hook：先 flush 日志，再写崩溃报告，最后 abort 终止进程

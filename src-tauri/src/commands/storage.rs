@@ -1,617 +1,316 @@
-use serde::Deserialize;
 use tauri::State;
 
 use super::CommandError;
-use crate::{storage, AppState};
+use crate::{config, AppState};
 
-/// 保存命令集
-#[derive(Debug, Deserialize)]
-pub struct SaveCommandSetArgs {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub is_loop: bool,
-    pub loop_delay_ms: i32,
-    pub commands: Vec<SaveCommandArgs>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SaveCommandArgs {
-    pub id: String,
-    pub name: String,
-    pub order_idx: i32,
-    pub delay_ms: i32,
-    pub cmd_type: String,
-    pub content: String,
-    pub append_line_ending: String,
-}
+// ==================== 命令集 ====================
 
 #[tauri::command]
-pub async fn save_command_set(
-    args: SaveCommandSetArgs,
-    state: State<'_, AppState>,
+pub fn save_command_set(
+    args: config::SendCommandSetEntry,
+    state: State<AppState>,
 ) -> Result<String, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    let id = if args.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        args.id.clone()
     };
-    let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // 更新路径无需单独 delete：save_command_set_to_db 内部事务已包含
-    // INSERT OR REPLACE（父行）+ DELETE + INSERT（子行），原子完成。
-    // 旧实现在事务外先 delete 再 save，若 save 失败则数据丢失。
-    let set = storage::SendCommandSet {
-        id: set_id.clone(),
-        name: args.name,
-        is_loop: args.is_loop,
-        loop_delay_ms: args.loop_delay_ms,
-        commands: args
-            .commands
-            .into_iter()
-            .map(|c| storage::SendCommandRow {
-                id: c.id,
-                set_id: set_id.clone(),
-                name: c.name,
-                order_idx: c.order_idx,
-                delay_ms: c.delay_ms,
-                cmd_type: c.cmd_type,
-                content: c.content,
-                append_line_ending: c.append_line_ending,
-            })
-            .collect(),
-    };
-    storage::save_command_set_to_db(&pool, &set)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
-    Ok(set_id)
-}
-
-#[tauri::command]
-pub async fn load_command_sets(
-    state: State<'_, AppState>,
-) -> Result<Vec<storage::SendCommandSet>, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    let sets = storage::load_command_sets_from_db(&pool)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
-    Ok(sets
-        .into_iter()
-        .map(|s| storage::SendCommandSet {
-            id: s.id,
-            name: s.name,
-            is_loop: s.is_loop,
-            loop_delay_ms: s.loop_delay_ms,
-            commands: s
-                .commands
-                .into_iter()
-                .map(|c| storage::SendCommandRow {
-                    id: c.id,
-                    set_id: c.set_id,
-                    name: c.name,
-                    order_idx: c.order_idx,
-                    delay_ms: c.delay_ms,
-                    cmd_type: c.cmd_type,
-                    content: c.content,
-                    append_line_ending: c.append_line_ending,
-                })
-                .collect(),
-        })
-        .collect())
-}
-
-#[tauri::command]
-pub async fn delete_command_set(
-    set_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::delete_command_set_from_db(&pool, &set_id)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
-}
-
-/// 保存高亮规则集
-#[derive(Debug, Deserialize)]
-pub struct SaveHighlightSetArgs {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub is_enabled: bool,
-    pub rules: Vec<SaveHighlightRuleArgs>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SaveHighlightRuleArgs {
-    pub id: String,
-    pub name: String,
-    pub pattern: String,
-    pub is_regex: bool,
-    pub color: String,
-    pub bold: bool,
-    pub italic: bool,
-}
-
-#[tauri::command]
-pub async fn save_highlight_set(
-    args: SaveHighlightSetArgs,
-    state: State<'_, AppState>,
-) -> Result<String, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    let set_id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // 更新路径无需单独 delete：save_highlight_set_to_db 内部事务已包含
-    // INSERT OR REPLACE（父行）+ DELETE + INSERT（子行），原子完成。
-    let set = storage::HighlightRuleSet {
-        id: set_id.clone(),
-        name: args.name,
-        is_enabled: args.is_enabled,
-        rules: args
-            .rules
-            .into_iter()
-            .map(|r| storage::HighlightRuleRow {
-                id: r.id,
-                set_id: set_id.clone(),
-                name: r.name,
-                pattern: r.pattern,
-                is_regex: r.is_regex,
-                color: r.color,
-                bold: r.bold,
-                italic: r.italic,
-            })
-            .collect(),
-    };
-    storage::save_highlight_set_to_db(&pool, &set)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
-    Ok(set_id)
-}
-
-#[tauri::command]
-pub async fn load_highlight_sets(
-    state: State<'_, AppState>,
-) -> Result<Vec<storage::HighlightRuleSet>, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    let sets = storage::load_highlight_sets_from_db(&pool)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
-    Ok(sets
-        .into_iter()
-        .map(|s| storage::HighlightRuleSet {
-            id: s.id,
-            name: s.name,
-            is_enabled: s.is_enabled,
-            rules: s
-                .rules
-                .into_iter()
-                .map(|r| storage::HighlightRuleRow {
-                    id: r.id,
-                    set_id: r.set_id,
-                    name: r.name,
-                    pattern: r.pattern,
-                    is_regex: r.is_regex,
-                    color: r.color,
-                    bold: r.bold,
-                    italic: r.italic,
-                })
-                .collect(),
-        })
-        .collect())
-}
-
-#[tauri::command]
-pub async fn delete_highlight_set(
-    set_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::delete_highlight_set_from_db(&pool, &set_id)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
-}
-
-/// 保存协议模板
-#[derive(Debug, Deserialize)]
-pub struct SaveProtocolTemplateArgs {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub is_enabled: bool,
-    pub header_bytes: String,
-    pub length_field_offset: i32,
-    pub length_field_size: i32,
-    pub length_endian: String,
-    pub length_adjust: i32,
-    pub checksum_algorithm: String,
-    pub checksum_offset: i32,
-    pub footer_bytes: String,
-    pub color_header: String,
-    pub color_length: String,
-    pub color_payload: String,
-    pub color_checksum: String,
-    pub color_footer: String,
-}
-
-#[tauri::command]
-pub async fn save_protocol_template(
-    args: SaveProtocolTemplateArgs,
-    state: State<'_, AppState>,
-) -> Result<String, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let row = storage::ProtocolTemplateRow {
-        id: id.clone(),
-        name: args.name,
-        is_enabled: args.is_enabled as i32,
-        header_bytes: args.header_bytes,
-        length_field_offset: args.length_field_offset,
-        length_field_size: args.length_field_size,
-        length_endian: args.length_endian,
-        length_adjust: args.length_adjust,
-        checksum_algorithm: args.checksum_algorithm,
-        checksum_offset: args.checksum_offset,
-        footer_bytes: args.footer_bytes,
-        color_header: args.color_header,
-        color_length: args.color_length,
-        color_payload: args.color_payload,
-        color_checksum: args.color_checksum,
-        color_footer: args.color_footer,
-    };
-    storage::save_protocol_template_to_db(&pool, &row)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    let mut entry = args;
+    entry.id = id.clone();
+    if let Some(existing) = cfg.send_command_sets.iter_mut().find(|s| s.id == id) {
+        *existing = entry;
+    } else {
+        cfg.send_command_sets.push(entry);
+    }
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))?;
     Ok(id)
 }
 
 #[tauri::command]
-pub async fn load_protocol_templates(
-    state: State<'_, AppState>,
-) -> Result<Vec<storage::ProtocolTemplateRow>, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::load_protocol_templates_from_db(&pool)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+pub fn load_command_sets(
+    state: State<AppState>,
+) -> Result<Vec<config::SendCommandSetEntry>, CommandError> {
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(manager.get_config().send_command_sets.clone())
 }
 
 #[tauri::command]
-pub async fn delete_protocol_template(
+pub fn delete_command_set(
     set_id: String,
-    state: State<'_, AppState>,
+    state: State<AppState>,
 ) -> Result<(), CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().send_command_sets.retain(|s| s.id != set_id);
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
+}
+
+// ==================== 高亮规则集 ====================
+
+#[tauri::command]
+pub fn save_highlight_set(
+    args: config::HighlightRuleSetEntry,
+    state: State<AppState>,
+) -> Result<String, CommandError> {
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    let id = if args.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        args.id.clone()
     };
-    storage::delete_protocol_template_from_db(&pool, &set_id)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+    let mut entry = args;
+    entry.id = id.clone();
+    if let Some(existing) = cfg.highlight_rule_sets.iter_mut().find(|s| s.id == id) {
+        *existing = entry;
+    } else {
+        cfg.highlight_rule_sets.push(entry);
+    }
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn load_highlight_sets(
+    state: State<AppState>,
+) -> Result<Vec<config::HighlightRuleSetEntry>, CommandError> {
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(manager.get_config().highlight_rule_sets.clone())
+}
+
+#[tauri::command]
+pub fn delete_highlight_set(
+    set_id: String,
+    state: State<AppState>,
+) -> Result<(), CommandError> {
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().highlight_rule_sets.retain(|s| s.id != set_id);
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
+}
+
+// ==================== 协议模板 ====================
+
+#[tauri::command]
+pub fn save_protocol_template(
+    args: config::ProtocolTemplateEntry,
+    state: State<AppState>,
+) -> Result<String, CommandError> {
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    let id = if args.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        args.id.clone()
+    };
+    let mut entry = args;
+    entry.id = id.clone();
+    if let Some(existing) = cfg.protocol_templates.iter_mut().find(|s| s.id == id) {
+        *existing = entry;
+    } else {
+        cfg.protocol_templates.push(entry);
+    }
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn load_protocol_templates(
+    state: State<AppState>,
+) -> Result<Vec<config::ProtocolTemplateEntry>, CommandError> {
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(manager.get_config().protocol_templates.clone())
+}
+
+#[tauri::command]
+pub fn delete_protocol_template(
+    set_id: String,
+    state: State<AppState>,
+) -> Result<(), CommandError> {
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().protocol_templates.retain(|s| s.id != set_id);
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
 }
 
 // ==================== 端口参数预设 ====================
 
-#[derive(Debug, Deserialize)]
-pub struct SavePortPresetArgs {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub baud_rate: i32,
-    pub data_bits: i32,
-    pub parity: String,
-    pub stop_bits: String,
-    pub handshake: String,
-    pub dtr: bool,
-    pub rts: bool,
-}
-
 #[tauri::command]
-pub async fn save_port_preset(
-    args: SavePortPresetArgs,
-    state: State<'_, AppState>,
+pub fn save_port_preset(
+    args: config::PortPresetEntry,
+    state: State<AppState>,
 ) -> Result<String, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    let id = if args.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        args.id.clone()
     };
-    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let row = storage::PortPresetRow {
-        id: id.clone(),
-        name: args.name,
-        baud_rate: args.baud_rate,
-        data_bits: args.data_bits,
-        parity: args.parity,
-        stop_bits: args.stop_bits,
-        handshake: args.handshake,
-        dtr: args.dtr as i32,
-        rts: args.rts as i32,
-        created_at: String::new(),
-    };
-    storage::save_port_preset_to_db(&pool, &row)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    let mut entry = args;
+    entry.id = id.clone();
+    if let Some(existing) = cfg.port_presets.iter_mut().find(|s| s.id == id) {
+        *existing = entry;
+    } else {
+        cfg.port_presets.push(entry);
+    }
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))?;
     Ok(id)
 }
 
 #[tauri::command]
-pub async fn load_port_presets(
-    state: State<'_, AppState>,
-) -> Result<Vec<storage::PortPresetRow>, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::load_port_presets_from_db(&pool)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+pub fn load_port_presets(
+    state: State<AppState>,
+) -> Result<Vec<config::PortPresetEntry>, CommandError> {
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(manager.get_config().port_presets.clone())
 }
 
 #[tauri::command]
-pub async fn delete_port_preset(
+pub fn delete_port_preset(
     preset_id: String,
-    state: State<'_, AppState>,
+    state: State<AppState>,
 ) -> Result<(), CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::delete_port_preset_from_db(&pool, &preset_id)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().port_presets.retain(|s| s.id != preset_id);
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
 }
 
 // ==================== 外部工具配置 ====================
 
-#[derive(Debug, Deserialize)]
-pub struct SavePortToolConfigArgs {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub port_id: String,
-    pub command: String,
-    pub workdir: String,
-}
-
 #[tauri::command]
-pub async fn save_port_tool_config(
-    args: SavePortToolConfigArgs,
-    state: State<'_, AppState>,
+pub fn save_port_tool_config(
+    args: config::PortToolConfigEntry,
+    state: State<AppState>,
 ) -> Result<String, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    let id = if args.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        args.id.clone()
     };
-    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let row = storage::PortToolConfigRow {
-        id: id.clone(),
-        name: args.name,
-        port_id: args.port_id,
-        command: args.command,
-        workdir: args.workdir,
-    };
-    storage::save_port_tool_config_to_db(&pool, &row)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    let mut entry = args;
+    entry.id = id.clone();
+    if let Some(existing) = cfg.port_tool_configs.iter_mut().find(|s| s.id == id) {
+        *existing = entry;
+    } else {
+        cfg.port_tool_configs.push(entry);
+    }
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))?;
     Ok(id)
 }
 
 #[tauri::command]
-pub async fn load_port_tool_configs(
-    state: State<'_, AppState>,
-) -> Result<Vec<storage::PortToolConfigRow>, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::load_port_tool_configs_from_db(&pool)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+pub fn load_port_tool_configs(
+    state: State<AppState>,
+) -> Result<Vec<config::PortToolConfigEntry>, CommandError> {
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(manager.get_config().port_tool_configs.clone())
 }
 
 #[tauri::command]
-pub async fn delete_port_tool_config(
+pub fn delete_port_tool_config(
     config_id: String,
-    state: State<'_, AppState>,
+    state: State<AppState>,
 ) -> Result<(), CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::delete_port_tool_config_from_db(&pool, &config_id)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().port_tool_configs.retain(|s| s.id != config_id);
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
 }
 
 // ==================== 条件触发规则 ====================
 
-#[derive(Debug, Deserialize)]
-pub struct SaveTriggerRuleArgs {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub name: String,
-    pub pattern: String,
-    pub is_regex: bool,
-    pub match_type: String,
-    pub action_type: String,
-    pub action_content: String,
-    pub action_is_hex: bool,
-    pub is_enabled: bool,
-}
-
 #[tauri::command]
-pub async fn save_trigger_rule(
-    args: SaveTriggerRuleArgs,
-    state: State<'_, AppState>,
+pub fn save_trigger_rule(
+    args: config::TriggerRuleEntry,
+    state: State<AppState>,
 ) -> Result<String, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    let id = if args.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        args.id.clone()
     };
-    let id = args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let row = storage::TriggerRuleRow {
-        id: id.clone(),
-        name: args.name,
-        pattern: args.pattern,
-        is_regex: args.is_regex,
-        match_type: args.match_type,
-        action_type: args.action_type,
-        action_content: args.action_content,
-        action_is_hex: args.action_is_hex,
-        is_enabled: args.is_enabled,
-    };
-    storage::save_trigger_rule_to_db(&pool, &row)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))?;
+    let mut entry = args;
+    entry.id = id.clone();
+    if let Some(existing) = cfg.trigger_rules.iter_mut().find(|s| s.id == id) {
+        *existing = entry;
+    } else {
+        cfg.trigger_rules.push(entry);
+    }
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))?;
     Ok(id)
 }
 
 #[tauri::command]
-pub async fn load_trigger_rules(
-    state: State<'_, AppState>,
-) -> Result<Vec<storage::TriggerRuleRow>, CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::load_trigger_rules_from_db(&pool)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+pub fn load_trigger_rules(
+    state: State<AppState>,
+) -> Result<Vec<config::TriggerRuleEntry>, CommandError> {
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(manager.get_config().trigger_rules.clone())
 }
 
 #[tauri::command]
-pub async fn delete_trigger_rule(
+pub fn delete_trigger_rule(
     rule_id: String,
-    state: State<'_, AppState>,
+    state: State<AppState>,
 ) -> Result<(), CommandError> {
-    let pool = {
-        let storage_mgr = state
-            .storage_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let db_pool = storage_mgr
-            .pool()
-            .map_err(|e| CommandError::Storage(e.to_string()))?;
-        db_pool.clone()
-    };
-    storage::delete_trigger_rule_from_db(&pool, &rule_id)
-        .await
-        .map_err(|e| CommandError::Storage(e.to_string()))
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().trigger_rules.retain(|s| s.id != rule_id);
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
 }

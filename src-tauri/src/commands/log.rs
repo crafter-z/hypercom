@@ -32,7 +32,7 @@ pub fn save_log_as(
         .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path}")))?
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
-    let manager = state
+    let mut manager = state
         .log_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -231,4 +231,66 @@ pub fn open_log_directory(state: State<AppState>) -> Result<(), CommandError> {
         mgr.get_directory().to_string_lossy().to_string()
     };
     open_path(dir, state)
+}
+
+/// 将旧日志目录中的 .log 文件迁移到新目录。
+/// 返回成功迁移的文件数。跳过已存在的同名文件（不覆盖）。
+#[tauri::command]
+pub fn migrate_log_directory(
+    old_dir: String,
+    new_dir: String,
+    state: State<AppState>,
+) -> Result<u32, CommandError> {
+    let old_path = std::path::Path::new(&old_dir);
+    let new_path = std::path::Path::new(&new_dir);
+
+    if !old_path.exists() || !old_path.is_dir() {
+        return Err(CommandError::Log(format!(
+            "Old log directory does not exist: {old_dir}"
+        )));
+    }
+    std::fs::create_dir_all(new_path)
+        .map_err(|e| CommandError::Io(format!("Cannot create new log directory: {e}")))?;
+
+    let mut migrated = 0u32;
+    let entries = std::fs::read_dir(old_path)
+        .map_err(|e| CommandError::Io(format!("Cannot read old log directory: {e}")))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| CommandError::Io(e.to_string()))?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                if ext == "log" {
+                    let dest = new_path.join(path.file_name().unwrap());
+                    if !dest.exists() {
+                        // 优先 rename（同卷零拷贝），跨卷回退到 copy + delete
+                        if std::fs::rename(&path, &dest).is_err() {
+                            std::fs::copy(&path, &dest)
+                                .map_err(|e| CommandError::Io(format!("Copy failed: {e}")))?;
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        migrated += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 更新 LogManager 的目录指向
+    {
+        let mut mgr = state
+            .log_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        mgr.set_directory(new_dir.clone())
+            .map_err(|e| CommandError::Log(e.to_string()))?;
+    }
+
+    log::info!(
+        "Migrated {} log files from {} to {}",
+        migrated,
+        old_dir,
+        new_dir
+    );
+    Ok(migrated)
 }
