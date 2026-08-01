@@ -6,6 +6,14 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-01 三处 Bug 修复)
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `lib.rs` | 托盘右键菜单瞬间消失：`on_tray_icon_event` 匹配所有 `TrayIconEvent::Click`（含右键），Windows 右键同时弹出原生菜单并触发 Click 事件，`set_focus()` 抢走焦点导致菜单关闭 | 模式匹配限定 `button: MouseButton::Left`，仅左键触发显示窗口 |
+| HIGH | `TerminalView.tsx` | 高速输出时滚动锁定抖动后失效：`scrollToIndex` 触发的 scroll 事件中 virtualizer 布局滞后，`atBottom` 误判为 false 并永久关闭 autoScroll | 新增 `isAutoScrollingRef` 守卫（scrollToIndex 前置位、80ms 后清除），`handleScroll` 跳过程序化滚动；atBottom 容差从 2px 增至 30px；wheel 事件清除守卫以保留用户意图 |
+| HIGH | `ParamsSection.tsx` | 参数预设下拉永远为空：预设仅在 ConfigModal→GeneralSettings 中管理，ParamsSection 挂载后不再刷新，用户无法发现/创建预设 | 下拉旁新增保存（💾 自动生成 "9600-8N1" 式名称）和删除（🗑）按钮，操作后立即刷新列表；新增 4 条 i18n key |
+
 ## 已修复 (2026-07-25 UI/UX 大修)
 
 > UI/UX 大修轮。验证: `npx tsc --noEmit` 0 错误, `cargo check` 0 错误 0 警告, `npm run test:run` 179/179 (11 files), `cargo test --lib` 33/33。
