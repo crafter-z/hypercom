@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
-import { Settings, HelpCircle, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info } from 'lucide-react';
+import { Settings, HelpCircle, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const TitleBar: React.FC = () => {
   const toggleConfigModal = useAppStore((state) => state.toggleConfigModal);
   const setConfig = useAppStore((state) => state.setConfig);
   const setUIState = useAppStore((state) => state.setUIState);
+  const sidebarCollapsed = useAppStore((state) => state.ui.sidebarCollapsed);
   const [isMaximized, setIsMaximized] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
   const { t } = useTranslation();
@@ -94,6 +95,13 @@ const TitleBar: React.FC = () => {
           <path d="M25 18 V78 M71 18 V78 M25 48 H36 V38 H48 V58 H60 V48 H71"
                 stroke="currentColor" strokeWidth="10" strokeLinecap="round" strokeLinejoin="miter"/>
         </svg>
+        <button
+          className="btn btn-icon btn-sm titlebar-panel-toggle"
+          title={sidebarCollapsed ? t('titleBar.expandSidebar') : t('titleBar.collapseSidebar')}
+          onClick={() => setUIState({ sidebarCollapsed: !sidebarCollapsed })}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+        </button>
         <span className="titlebar-title" data-tauri-drag-region>{titleText}</span>
         <span className="titlebar-version" data-tauri-drag-region>{t('titleBar.version')}</span>
       </div>

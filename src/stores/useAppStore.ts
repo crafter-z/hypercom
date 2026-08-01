@@ -180,6 +180,7 @@ const defaultUIState: UIState = {
   configLoaded: false,
   isHotkeyHelpOpen: false,
   isAboutOpen: false,
+  sidebarCollapsed: false,
 };
 
 // ==================== Store 状态定义 ====================

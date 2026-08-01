@@ -58,6 +58,21 @@
   background: var(--bg-hover);
 }
 
+/* Titlebar-left toggle (sidebar collapse/expand). Lives outside `.titlebar-right`
+ * so it needs its own `app-region: no-drag` to stay clickable through the drag
+ * region of `titlebar-left`. Visually matches `.titlebar-help`. */
+.titlebar-panel-toggle {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  color: var(--text-secondary);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.titlebar-panel-toggle:hover {
+  color: var(--accent-color);
+  background: var(--bg-hover);
+}
+
 /* ---- Window controls (minimize / maximize / close) ----
  * Full-bleed flat buttons spanning the titlebar height. `.titlebar-close:hover`
  * comes after `.titlebar-control:hover` so the red hover wins on equal

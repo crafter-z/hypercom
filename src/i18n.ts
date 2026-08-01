@@ -22,6 +22,8 @@ const resources = {
       'titleBar.about': '关于',
       'titleBar.pinOnTop': '置顶',
       'titleBar.unpinOnTop': '取消置顶',
+      'titleBar.collapseSidebar': '收起侧边栏',
+      'titleBar.expandSidebar': '展开侧边栏',
 
       'about.title': '关于 HyperCom',
       'about.description': '现代化串口调试工具，为替代 SSCOM / SuperCom 而生',
@@ -453,6 +455,7 @@ const resources = {
       'hotkeys.clearTerminal': '清空终端',
       'hotkeys.focusSearch': '聚焦终端搜索',
       'hotkeys.toggleConnect': '连接/断开当前端口',
+      'hotkeys.toggleSidebar': '切换侧边栏显示',
       'hotkeys.closeModal': '关闭弹窗',
       'hotkeys.showHelp': '显示快捷键帮助',
       'hotkeys.shortcut': '快捷键',
@@ -530,6 +533,8 @@ const resources = {
       'titleBar.about': 'About',
       'titleBar.pinOnTop': 'Always on Top',
       'titleBar.unpinOnTop': 'Exit Always on Top',
+      'titleBar.collapseSidebar': 'Collapse sidebar',
+      'titleBar.expandSidebar': 'Expand sidebar',
 
       'about.title': 'About HyperCom',
       'about.description': 'A modern serial port debugging tool built to replace SSCOM / SuperCom',
@@ -961,6 +966,7 @@ const resources = {
       'hotkeys.clearTerminal': 'Clear terminal',
       'hotkeys.focusSearch': 'Focus terminal search',
       'hotkeys.toggleConnect': 'Connect/disconnect active port',
+      'hotkeys.toggleSidebar': 'Toggle sidebar',
       'hotkeys.closeModal': 'Close modal/dialog',
       'hotkeys.showHelp': 'Show shortcut help',
       'hotkeys.shortcut': 'Shortcut',

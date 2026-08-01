@@ -25,6 +25,13 @@
 .app-sidebar-col {
   flex-shrink: 0;
   overflow: hidden;
+  transition: width 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar-col {
+    transition: none;
+  }
 }
 
 .app-content-col {

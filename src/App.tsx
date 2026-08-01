@@ -66,6 +66,7 @@ const App: React.FC = () => {
   useHotkeys();
   usePowerManagement();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
+  const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed);
 
   // F.3: persist the session snapshot incrementally whenever tabs/paneTree
   // change (debounced). The WebView may terminate before an async invoke
@@ -126,10 +127,12 @@ const App: React.FC = () => {
           <TitleBar />
 
           <div className="app-main">
-            <div className="app-sidebar-col" style={{ width: sidebarWidth }}>
-              <Sidebar />
+            <div className="app-sidebar-col" style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}>
+              <div style={{ width: sidebarWidth, height: '100%' }}>
+                <Sidebar />
+              </div>
             </div>
-            <SidebarResizeHandle />
+            {!sidebarCollapsed && <SidebarResizeHandle />}
 
             <div className="app-content-col">
               <MainDisplay />

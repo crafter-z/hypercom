@@ -321,6 +321,7 @@ export interface UIState {
   configLoaded: boolean;   // 配置是否已从后端加载完成（避免引导弹窗在加载前闪烁）
   isHotkeyHelpOpen: boolean; // 快捷键帮助弹窗是否打开
   isAboutOpen: boolean;    // 关于对话框是否打开
+  sidebarCollapsed: boolean; // 左侧边栏是否折叠（仅本次会话有效，不进入重启快照）
 }
 
 // ==================== Tauri 命令参数/返回类型 ====================

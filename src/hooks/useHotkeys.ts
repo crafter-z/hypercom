@@ -3,6 +3,7 @@
  *
  * Ctrl+L      → 清空当前终端
  * Ctrl+K      → 连接/断开当前活动端口
+ * Ctrl+B      → 切换左侧边栏显示/隐藏
  * Ctrl+/      → 切换快捷键帮助弹窗
  * Escape      → 关闭最上层弹窗（快捷键帮助 → 配置弹窗 → 新手引导）
  *
@@ -55,6 +56,10 @@ export function useHotkeys(): void {
         e.preventDefault();
         const { activeTabId } = useAppStore.getState();
         if (activeTabId) void toggleRef.current(activeTabId);
+      } else if (ctrl && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault();
+        const state = useAppStore.getState();
+        state.setUIState({ sidebarCollapsed: !state.ui.sidebarCollapsed });
       } else if (ctrl && e.key === '/') {
         e.preventDefault();
         const state = useAppStore.getState();
