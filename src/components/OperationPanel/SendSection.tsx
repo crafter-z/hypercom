@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { LineEnding, SendCommand, SendHistoryEntry } from '../../types';
 import type { FileProgressPayload } from '../../services/tauri';
-import { serialService, eventService } from '../../services/tauri';
+import { serialService, eventService, popoutService } from '../../services/tauri';
 import { notifyError, notifySuccess } from '../../stores/useToastStore';
 import {
   computeByteCount,
@@ -40,6 +40,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   const sendIsHex = useOperationStore(s => s.sendIsHex);
   const sendAppendLineEnding = useOperationStore(s => s.sendAppendLineEnding);
   const sendOnEnter = useAppStore(s => s.config.sendOnEnter);
+  const quickSendInlineCount = useAppStore(s => s.config.quickSendInlineCount);
   const encoding = useTerminalStore(s => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
   const setOpState = useOperationStore(s => s.setOpState);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
@@ -84,12 +85,19 @@ const SendSection: React.FC<SendSectionProps> = ({
   );
 
   // Quick-send is driven by the ACTIVE send-command set — the same sets the
-  // loop-send system uses. No static slot cap; one pill per command.
+  // loop-send system uses. The inline strip shows the first N commands
+  // (N = config.quickSendInlineCount; 0 hides the strip entirely — pure
+  // pop-out mode); the rest overflow into the quick-send pop-out window.
   const activeCommands = useMemo(() => {
     const set = sendCommandSets.find(s => s.id === activeSendCommandSetId);
     if (!set) return [];
     return [...set.commands].sort((a, b) => a.order - b.order);
   }, [sendCommandSets, activeSendCommandSetId]);
+  const inlineCommands = useMemo(
+    () => activeCommands.slice(0, quickSendInlineCount),
+    [activeCommands, quickSendInlineCount]
+  );
+  const hiddenCount = activeCommands.length - inlineCommands.length;
 
   const handleSend = async () => {
     if (!isPortActive || !sendInput.trim()) return;
@@ -164,41 +172,56 @@ const SendSection: React.FC<SendSectionProps> = ({
     <div className="op-section op-section-send">
       <div className="panel-card-title eyebrow">{t('sendSection.cardTitle')}</div>
 
-      <div className="op-quick-send-row">
-        {activeCommands.length > 0 ? (
-          <>
-            {activeCommands.map(cmd => (
+      {quickSendInlineCount > 0 && (
+        <div className="op-quick-send-row">
+          {activeCommands.length > 0 ? (
+            <>
+              {inlineCommands.map(cmd => (
+                <button
+                  key={cmd.id}
+                  className="btn btn-sm op-quick-cmd"
+                  disabled={!isPortActive}
+                  title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
+                  onClick={() => handleQuickCommand(cmd)}
+                >
+                  {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
+                  <span className="op-quick-cmd-text">{cmd.content}</span>
+                </button>
+              ))}
+              {hiddenCount > 0 && (
+                <button
+                  className="btn btn-sm op-quick-cmd op-quick-cmd-overflow"
+                  title={t('quickSend.overflow')}
+                  onClick={() =>
+                    popoutService
+                      .openPopout('quick-send')
+                      .catch((e) => console.debug('[SendSection] openPopout failed:', e))
+                  }
+                >
+                  ⋯ +{hiddenCount}
+                </button>
+              )}
               <button
-                key={cmd.id}
-                className="btn btn-sm op-quick-cmd"
-                disabled={!isPortActive}
-                title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
-                onClick={() => handleQuickCommand(cmd)}
+                className="icon-btn"
+                title={t('rulesSection.editCommands')}
+                onClick={() => openConfigToTab('commands')}
               >
-                {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
-                <span className="op-quick-cmd-text">{cmd.content}</span>
+                <Edit3 size={12} />
               </button>
-            ))}
-            <button
-              className="icon-btn"
-              title={t('rulesSection.editCommands')}
-              onClick={() => openConfigToTab('commands')}
-            >
-              <Edit3 size={12} />
-            </button>
-          </>
-        ) : (
-          <div className="op-quick-send-empty">
-            <span>{t('sendSection.quickCommands.emptyHint')}</span>
-            <button
-              className="btn btn-sm op-quick-cmd-configure"
-              onClick={() => openConfigToTab('commands')}
-            >
-              <Plus size={12} /> {t('sendSection.quickCommands.configure')}
-            </button>
-          </div>
-        )}
-      </div>
+            </>
+          ) : (
+            <div className="op-quick-send-empty">
+              <span>{t('sendSection.quickCommands.emptyHint')}</span>
+              <button
+                className="btn btn-sm op-quick-cmd-configure"
+                onClick={() => openConfigToTab('commands')}
+              >
+                <Plus size={12} /> {t('sendSection.quickCommands.configure')}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="op-send-row">
         <textarea

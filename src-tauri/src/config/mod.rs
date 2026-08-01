@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// 当前配置 schema 版本号。每次破坏性变更配置结构时递增，
 /// 并在 `ConfigManager::migrate` 中追加对应的迁移分支。
-const CURRENT_CONFIG_VERSION: u32 = 1;
+const CURRENT_CONFIG_VERSION: u32 = 2;
 
 fn current_config_version() -> u32 {
     CURRENT_CONFIG_VERSION
@@ -53,8 +53,9 @@ pub struct AppConfig {
     pub show_port_type: bool,
     #[serde(default = "default_send_on_enter")]
     pub send_on_enter: bool,
-    #[serde(default)]
-    pub quick_send_slots: Vec<Option<String>>,
+    /// 快捷发送内联条显示的命令数（0 = 隐藏内联条，纯弹出窗模式）。
+    #[serde(default = "default_quick_send_inline_count")]
+    pub quick_send_inline_count: u32,
     #[serde(default = "default_timestamp_format")]
     pub timestamp_format: String,
 
@@ -96,6 +97,10 @@ fn default_send_on_enter() -> bool {
     true
 }
 
+fn default_quick_send_inline_count() -> u32 {
+    6
+}
+
 fn default_timestamp_format() -> String {
     "absolute".to_string()
 }
@@ -122,7 +127,7 @@ impl Default for AppConfig {
             send_prefix: ">>>>>>SEND>>>>>>>>".to_string(),
             show_port_type: true,
             send_on_enter: true,
-            quick_send_slots: vec![None, None, None, None, None],
+            quick_send_inline_count: 6,
             timestamp_format: "absolute".to_string(),
             timestamp_mode: "perLine".to_string(),
             auto_save_log: true,
@@ -242,16 +247,19 @@ impl ConfigManager {
     }
 
     /// 从 `from_version` 顺序迁移到 CURRENT_CONFIG_VERSION。
-    /// 每次版本升级对应一个 match 分支。当前为空（v0→v1 为基线）。
+    /// 每次版本升级对应一个 match 分支。v0→v1 为基线。
     fn migrate(json: &mut serde_json::Value, from_version: u32) {
         let obj = match json.as_object_mut() {
             Some(o) => o,
             None => return,
         };
-        // 未来迁移示例：
-        // if from_version < 2 {
-        //     // v1→v2: 重命名旧字段、为新字段补默认值等
-        // }
+        if from_version < 2 {
+            // v1→v2: 删除死代码字段 quickSendSlots（快捷发送改为命令集驱动），
+            // 为新字段 quickSendInlineCount 补默认值 6（内联条显示前 6 条）。
+            obj.remove("quickSendSlots");
+            obj.entry("quickSendInlineCount")
+                .or_insert(serde_json::json!(default_quick_send_inline_count()));
+        }
         obj.insert(
             "configVersion".to_string(),
             serde_json::json!(CURRENT_CONFIG_VERSION),
@@ -281,8 +289,7 @@ impl ConfigManager {
         config.max_retries = config.max_retries.clamp(1, 10);
         config.log_split_size_mb = config.log_split_size_mb.clamp(1, 10240);
         config.backup_interval = config.backup_interval.clamp(1, 720);
-        // quick_send_slots 固定为 5 个槽位
-        config.quick_send_slots.resize(5, None);
+        config.quick_send_inline_count = config.quick_send_inline_count.clamp(0, 20);
         // 校验枚举型字符串
         if !["minimize", "exit"].contains(&config.close_behavior.as_str()) {
             config.close_behavior = "exit".to_string();
@@ -363,7 +370,8 @@ mod tests {
     #[test]
     fn test_default_values() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.config_version, 1);
+        assert_eq!(cfg.config_version, 2);
+        assert_eq!(cfg.quick_send_inline_count, 6);
         assert_eq!(cfg.close_behavior, "exit");
         assert_eq!(cfg.memory_limit_mb, 1024);
         assert_eq!(cfg.language, "zh-CN");
@@ -422,6 +430,36 @@ mod tests {
     }
 
     #[test]
+    fn test_migrate_v1_removes_quick_send_slots_and_adds_inline_count() {
+        // v1 配置含死字段 quickSendSlots、缺 quickSendInlineCount。
+        // 迁移必须删除死字段并补默认值 6，旧配置才能平滑升级。
+        let mut json = serde_json::json!({
+            "configVersion": 1,
+            "quickSendSlots": [null, "AT", null, null, null],
+        });
+        ConfigManager::migrate(&mut json, 1);
+        let obj = json.as_object().unwrap();
+        assert!(!obj.contains_key("quickSendSlots"));
+        assert_eq!(obj.get("quickSendInlineCount").unwrap(), 6);
+        assert_eq!(obj.get("configVersion").unwrap(), 2);
+        // 用户已自定义的值不被覆盖。
+        let mut custom = serde_json::json!({ "configVersion": 1, "quickSendInlineCount": 3 });
+        ConfigManager::migrate(&mut custom, 1);
+        assert_eq!(custom.as_object().unwrap().get("quickSendInlineCount").unwrap(), 3);
+    }
+
+    #[test]
+    fn test_quick_send_inline_count_clamped() {
+        // validate_and_clamp 将 quick_send_inline_count 收敛到 [0, 20]。
+        let mut cfg = AppConfig { quick_send_inline_count: 99, ..AppConfig::default() };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.quick_send_inline_count, 20);
+        cfg.quick_send_inline_count = 0; // 0 = 隐藏内联条，合法下界
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.quick_send_inline_count, 0);
+    }
+
+    #[test]
     fn test_json_roundtrip() {
         let cfg = AppConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
@@ -476,6 +514,16 @@ mod tests {
         assert!(
             json.contains("sessionSnapshot"),
             "missing sessionSnapshot in: {}",
+            json
+        );
+        assert!(
+            json.contains("quickSendInlineCount"),
+            "missing quickSendInlineCount in: {}",
+            json
+        );
+        assert!(
+            !json.contains("quickSendSlots"),
+            "dead quickSendSlots still serialized in: {}",
             json
         );
     }

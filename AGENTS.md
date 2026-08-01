@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 10 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → auto-respond/alert/bookmark).
+HyperCom — modern serial-port debug tool replacing SSCOM/SuperCom. Rust owns I/O; React owns UI. State in 4 Zustand stores; 11 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → auto-respond/alert/bookmark).
 
 ## STRUCTURE
 
@@ -14,7 +14,7 @@ hypercom/
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
 │   ├── i18n.ts                   # i18next + react-i18next, 266 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
-│   ├── hooks/                    # 10 hooks in individual files + barrel index.ts + disconnectTracking.ts
+│   ├── hooks/                    # 11 hooks in individual files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
 │   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix; NO display state fields)
@@ -73,7 +73,8 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` + `setTerminalEncoding` (re-decode on switch) |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
-| 10 hooks: `useSerialPorts` / `useSerialConnection` / `usePinStatesSubscriber` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useToolOutput` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
+| 11 hooks: `useSerialPorts` / `useSerialConnection` / `usePinStatesSubscriber` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useToolOutput` / `usePopoutBridge` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md` |
+| Pop-out intent bridge | `src/hooks/usePopoutBridge.ts` + `popoutEventService` in `src/services/tauri.ts` | pop-outs are separate webviews: exchange intents (`popout:send-command` / `popout:open-config` / `popout:request-sync`) + refresh signals (`command-sets:changed` / `active-tab:changed`), never shared mutable state; sends route through module-level `sendToPort` so TX echo/traffic/history work |
 | `evaluateTriggers` | `src/utils/triggerEngine.ts` | pure fn | conditional trigger matching engine (contains/exact/regex/hex) |
 | `tauri` service modules | `src/services/tauri.ts` | service | wrapped `invoke` calls (6 modules) |
 
@@ -146,7 +147,7 @@ const openTab = useAppStore(s => s.openTab);
 
 Operation fields have **NO `op` prefix**. They were renamed from `opBaudRate` to `baudRate`, `opDataBits` to `dataBits`, etc.
 
-**Note**: `sendOnEnter` and `quickSendSlots` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)`. Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`.
+**Note**: `sendOnEnter` and `quickSendInlineCount` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`.
 
 ```tsx
 const baudRate = useOperationStore(s => s.baudRate);
@@ -234,11 +235,11 @@ The SQLite pool is created **synchronously** in `lib.rs` `setup` via `tauri::asy
 The old `useSerialData` hook was split into two hooks with different lifecycles:
 
 - **`useSerialReceive()`** — Owns the serial data event listener lifecycle. Called **once** in `App.tsx`. Listens to `serial_data` events, decodes bytes, and calls `useTerminalStore.getState().appendTerminalLine()`. Never call this more than once.
-- **`useSerialSend()`** — Returns a send action. Called in `OperationPanel`. Writes to the serial port and appends the sent line to the terminal via `useTerminalStore.getState().appendTerminalLine()`.
+- **`useSerialSend()`** — Returns a send action. Called in `OperationPanel`. Writes to the serial port and appends the sent line to the terminal via `useTerminalStore.getState().appendTerminalLine()`. The actual work lives in the **module-level exported `sendToPort(portId, data, isHex, lineEnding, silent?)`** (TX echo + traffic stats + in-memory history) so non-hook callers — the pop-out intent bridge — reuse the exact same pipeline instead of calling the backend directly.
 
 Both hooks write to the terminal store through `getState()` to avoid re-rendering the hook owner on every line.
 
-The full hook set in `src/hooks/` (10 hooks, individual files):
+The full hook set in `src/hooks/` (11 hooks, individual files):
 
 | Hook | Purpose | Called in |
 |------|---------|-----------|
@@ -252,6 +253,7 @@ The full hook set in `src/hooks/` (10 hooks, individual files):
 | `useAppInit` | One-shot app bootstrap | App.tsx |
 | `useSimulation` | Toggle SIM:Loopback virtual port | Sidebar toolbar |
 | `useToolOutput` | `tool:output` / `tool:exit` event listeners | App.tsx (once) |
+| `usePopoutBridge` | pop-out intent bus: `popout:send-command` → `sendToPort(activeTabId)`, `popout:open-config` → ConfigModal page, `popout:request-sync` → replay `active-tab:changed`; broadcasts `command-sets:changed` / `active-tab:changed` on store changes | App.tsx (once) |
 
 ## Rust backend: CommandError and commands/ split
 

@@ -1,6 +1,6 @@
 # src/hooks/
 
-10 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
+11 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
 
 ## File structure
 
@@ -11,7 +11,8 @@
 | `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop |
 | `usePinStatesSubscriber.ts` | `usePinStatesSubscriber()` | `App.tsx` **exactly once** | `serial:pin_states` event listener |
 | `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial_data` event listener + status handler (writes `lostPortIds` for DisconnectBanner) |
-| `useSerialSend.ts` | `useSerialSend()` | OperationPanel | action; in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite) |
+| `useSerialSend.ts` | `useSerialSend()`, `sendToPort()` | OperationPanel (hook); `usePopoutBridge` (module fn) | action; module-level `sendToPort` owns the real send (backend call + TX echo + traffic stats + in-memory per-port history `Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite); the hook is a thin wrapper mirroring history into state for ↑/↓ recall |
+| `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | pop-out intent bus: listens `popout:send-command` (→ `sendToPort(activeTabId)`) / `popout:open-config` (→ ConfigModal page) / `popout:request-sync` (→ replay `active-tab:changed`); subscribes `useRuleStore.sendCommandSets` + `useAppStore.activeTabId` → emits `command-sets:changed` / `active-tab:changed` refresh signals |
 | `useConfigPersistence.ts` | `useConfigPersistence()`, `syncLogSettingsToBackend()` | `App.tsx` | load + save; `syncLogSettingsToBackend` also used by useAppInit |
 | `useSystemStatus.ts` | `useSystemStatus(pollMs=5000)` | StatusBar | polling |
 | `useAppInit.ts` | `useAppInit()` | `App.tsx` | one-shot bootstrap; owns `isValidPaneNode` + `mapCommandSetInfo`/`mapHighlightSetInfo`/`mapProtocolTemplateInfo` |
@@ -28,7 +29,8 @@
 - `useSerialConnection.closePort()` is the only sanctioned close path: triggers `stopLogging` and updates port status. Bypassing leaks log file handles + leaves status "connected" stuck.
 - `useSerialPorts(3000)` uses `mergePorts()` on every refresh — `mapPortInfo()` always overwrites status to `'disconnected'`; merge preserves alias / group / connection state / baud match.
 - Polling hooks accept `pollIntervalMs` as a parameter intentionally — do not hardcode inside the hook.
-- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter/quickSendSlots (those live only in config).
+- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter (lives only in config). Owns + exports `mapCommandSetInfo` (reused by `QuickSendPanel`), `mapHighlightSetInfo`, `mapProtocolTemplateInfo`.
+- Pop-out windows are SEPARATE webviews with their own store instances — they never share mutable frontend state with the main window, only intents/signals (`popoutEventService` in `src/services/tauri.ts`). Sending from a pop-out MUST go through `popout:send-command` → main's `sendToPort`; a direct `serialService.sendSerialData` call from the pop-out would skip the TX echo / traffic stats / send history (the backend emits no TX event).
 - `useConfigPersistence` syncs all 6 log settings to backend via `syncLogSettingsToBackend()` (not just autoSave).
 - Inside hook callbacks/effects, prefer `use{App,Operation,Terminal,Rule}Store.getState()` over selector-bound locals when the value must be live.
 

@@ -24,7 +24,7 @@ function isValidPaneNode(node: unknown): node is PaneNode {
 }
 
 /** Map backend CommandSetInfo to frontend SendCommandSet */
-function mapCommandSetInfo(s: CommandSetInfo): SendCommandSet {
+export function mapCommandSetInfo(s: CommandSetInfo): SendCommandSet {
   return {
     id: s.id,
     name: s.name,

@@ -4,6 +4,7 @@ import { Pin, PinOff, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { popoutService } from '../../services/tauri';
 import { popoutLabel } from './popoutLabel';
+import QuickSendPanel from './QuickSendPanel';
 
 interface PopoutShellProps {
   kind: string;
@@ -15,8 +16,7 @@ const PopoutContent: React.FC<{ kind: string }> = ({ kind }) => {
   const { t } = useTranslation();
   switch (kind) {
     case 'quick-send':
-      // Phase 2: return <QuickSendPanel />;
-      return <div className="popout-placeholder">{t('popout.quickSendPlaceholder')}</div>;
+      return <QuickSendPanel />;
     case 'terminal':
       // Phase 3: return <TerminalPopout />;
       return <div className="popout-placeholder">{t('popout.terminalPlaceholder')}</div>;

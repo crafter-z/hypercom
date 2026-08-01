@@ -7,13 +7,13 @@
 | Store | File:line | Job |
 |-------|-----------|-----|
 | `useAppStore` | `useAppStore.ts:266` | tabs / ports / `paneTree` / config / groups |
-| `useOperationStore` | `useOperationStore.ts:29` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `isLoopSending`, `loopRepeatCount` (NO `op` prefix; NO `sendOnEnter`/`quickSendSlots` — those live in `useAppStore.config`; NO `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — those live per-tab in `useTerminalStore`) |
+| `useOperationStore` | `useOperationStore.ts:29` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `isLoopSending`, `loopRepeatCount` (NO `op` prefix; NO `sendOnEnter`/`quickSendInlineCount` — those live in `useAppStore.config`; NO `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — those live per-tab in `useTerminalStore`) |
 | `useTerminalStore` | `useTerminalStore.ts:22` | line buffer + `appendTerminalLine` + `ensureTerminal` + `setTerminalConfig` + `setTerminalEncoding` |
 | `useRuleStore` | `useRuleStore.ts:32` | highlight rule sets + send-command sets + CRUD + active-set ids |
 
 ## Conventions (root covers selector discipline)
 
-- `sendOnEnter` and `quickSendSlots` live ONLY in `useAppStore.config`. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)`. They were removed from `useOperationStore` to eliminate dual-source ambiguity.
+- `sendOnEnter` and `quickSendInlineCount` live ONLY in `useAppStore.config`. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. They were removed from `useOperationStore` to eliminate dual-source ambiguity. The dead `quickSendSlots` field was deleted entirely (quick-send is command-set driven; `quickSendInlineCount` = inline strip size, 0 hides it).
 - `setTerminalEncoding(portId, encoding)` updates `term.encoding` and re-decodes every existing line's `content` from `rawData` (lines with non-empty `parsedFields` are skipped). This is the ONLY correct way to switch encoding — never write `term.encoding` via `setTerminalConfig` alone (it wouldn't re-decode).
 - Per-tab display state (`scrollLocked`, `showTimestamp`, `displayFormat`, `encoding`) was migrated from `useOperationStore` to `useTerminalStore` in the UI/UX overhaul. Display controls must use `useTerminalStore.getState().setTerminalConfig(portId, ...)` or `setTerminalEncoding(portId, encoding)`. Never reintroduce global display fields in `useOperationStore`.
 - **Recursive pane tree helpers exported at module top of `useAppStore.ts`**: `findLeafById` (25), `findLeafByTabId` (37), `findBranchById` (49), `findParentBranch` (60), `collectLeaves` (75), `countLeaves` (81). Use these; don't hand-roll tree walks.

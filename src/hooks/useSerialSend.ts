@@ -13,10 +13,96 @@ import { notifyError } from '../stores/useToastStore';
 const sendHistoryMap = new Map<string, SendHistoryEntry[]>();
 const SEND_HISTORY_CAP = 50;
 
+/** Append an entry to a port's in-memory history (dedup + cap). Returns the new list. */
+function recordSendHistory(portId: string, data: string, isHex: boolean, lineEnding: string): SendHistoryEntry[] {
+  const entry: SendHistoryEntry = {
+    content: data,
+    format: isHex ? 'hex' : 'string',
+    lineEnding: lineEnding as LineEnding,
+  };
+  const prev = sendHistoryMap.get(portId) ?? [];
+  // Dedup on content AND format — the same text sent as HEX vs
+  // string (e.g. "AA") is a distinct history entry.
+  const filtered = prev.filter((h) => !(h.content === entry.content && h.format === entry.format));
+  const next = [...filtered, entry];
+  // Cap at SEND_HISTORY_CAP, dropping the oldest entries.
+  const capped = next.length > SEND_HISTORY_CAP ? next.slice(next.length - SEND_HISTORY_CAP) : next;
+  sendHistoryMap.set(portId, capped);
+  return capped;
+}
+
+/**
+ * 发送核心（模块级，无 hook 依赖）——TX 回显 / 流量统计 / 发送历史的唯一实现。
+ *
+ * 后端 `send_serial_data` 不发 TX 事件：终端 TX 行、TX 流量、发送历史全部由这里
+ * 在前端产生。弹出窗经意图事件（`popout:send-command`）回到主窗调用本函数，
+ * 从而复用同一条发送管线——弹窗自己直连后端会丢掉 TX 回显与统计。
+ *
+ * `silent`（循环发送用）出错时原样抛出由调用方聚合；否则 toast 提示并返回 0。
+ */
+export async function sendToPort(
+  portId: string,
+  data: string,
+  isHex: boolean,
+  lineEnding: string,
+  silent = false
+): Promise<number> {
+  try {
+    const bytesWritten = await serialService.sendSerialData({
+      port_id: portId,
+      data,
+      is_hex: isHex,
+      append_line_ending: lineEnding,
+    });
+
+    // Also show sent data in terminal
+    const state = useAppStore.getState();
+    const { sendPrefix } = state.config;
+    const prefix = sendPrefix ? `${sendPrefix} ` : '';
+    const displayText = `${prefix}${data}`;
+    // rawData must reflect the ACTUAL transmitted bytes (drives the
+    // HEX/string display toggle + CSV export):
+    //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
+    //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
+    const txRawData: number[] = isHex
+      ? data
+          .trim()
+          .split(/\s+/)
+          .filter((tok) => tok.length > 0)
+          .map((tok) => parseInt(tok, 16))
+          .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
+      : Array.from(new TextEncoder().encode(data));
+    useTerminalStore.getState().appendTerminalLine(portId, {
+      id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      direction: 'TX',
+      content: displayText,
+      rawData: txRawData,
+      isHex: isHex,
+    });
+
+    // Track TX bytes
+    const currentTx = state.trafficStats[portId]?.txTotal || 0;
+    state.setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
+
+    // Record send history in memory (per-port, capped)
+    recordSendHistory(portId, data, isHex, lineEnding);
+
+    return bytesWritten;
+  } catch (err) {
+    // Silent mode (cyclic send) re-throws so the caller aggregates the
+    // error + retries — otherwise every failed send raises its own toast.
+    if (silent) throw err;
+    console.error('[sendToPort] Failed to send data:', err);
+    notifyError(err);
+    return 0;
+  }
+}
+
 /**
  * Hook: 串口数据发送（用户动作）
- * 返回 sendData 回调，调用后端 serialService 发送数据，并把发送内容回显到终端、累加 TX 流量统计。
- * 同时维护当前端口的发送历史（内存态，按端口隔离，上限 50 条），供发送框 Up/Down 键 recall。
+ * 返回 sendData 回调（`sendToPort` 的薄包装），并把发送历史镜像到本地 state，
+ * 供发送框 Up/Down 键 recall。
  *
  * SRP：只负责"发送"这一个用户动作 + 发送历史，不订阅任何事件。
  */
@@ -31,80 +117,14 @@ export function useSerialSend() {
     historyIndexRef.current = -1;
   }, [activeTabId]);
 
-  const addToHistory = useCallback(
-    (portId: string, data: string, isHex: boolean, lineEnding: string) => {
-      const entry: SendHistoryEntry = {
-        content: data,
-        format: isHex ? 'hex' : 'string',
-        lineEnding: lineEnding as LineEnding,
-      };
-      const prev = sendHistoryMap.get(portId) ?? [];
-      // Dedup on content AND format — the same text sent as HEX vs
-      // string (e.g. "AA") is a distinct history entry.
-      const filtered = prev.filter((h) => !(h.content === entry.content && h.format === entry.format));
-      const next = [...filtered, entry];
-      // Cap at SEND_HISTORY_CAP, dropping the oldest entries.
-      const capped = next.length > SEND_HISTORY_CAP ? next.slice(next.length - SEND_HISTORY_CAP) : next;
-      sendHistoryMap.set(portId, capped);
-      setSendHistory(capped);
-    },
-    []
-  );
-
   const sendData = useCallback(
     async (portId: string, data: string, isHex: boolean, lineEnding: string, silent = false) => {
-      try {
-        const bytesWritten = await serialService.sendSerialData({
-          port_id: portId,
-          data,
-          is_hex: isHex,
-          append_line_ending: lineEnding,
-        });
-
-        // Also show sent data in terminal
-        const state = useAppStore.getState();
-        const { sendPrefix } = state.config;
-        const prefix = sendPrefix ? `${sendPrefix} ` : '';
-        const displayText = `${prefix}${data}`;
-        // rawData must reflect the ACTUAL transmitted bytes (drives the
-        // HEX/string display toggle + CSV export):
-        //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
-        //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
-        const txRawData: number[] = isHex
-          ? data
-              .trim()
-              .split(/\s+/)
-              .filter((tok) => tok.length > 0)
-              .map((tok) => parseInt(tok, 16))
-              .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
-          : Array.from(new TextEncoder().encode(data));
-        useTerminalStore.getState().appendTerminalLine(portId, {
-          id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          timestamp: Date.now(),
-          direction: 'TX',
-          content: displayText,
-          rawData: txRawData,
-          isHex: isHex,
-        });
-
-        // Track TX bytes
-        const currentTx = state.trafficStats[portId]?.txTotal || 0;
-        state.setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
-
-        // Record send history in memory (per-port, capped)
-        addToHistory(portId, data, isHex, lineEnding);
-
-        return bytesWritten;
-      } catch (err) {
-        // Silent mode (cyclic send) re-throws so the caller aggregates the
-        // error + retries — otherwise every failed send raises its own toast.
-        if (silent) throw err;
-        console.error('[useSerialSend] Failed to send data:', err);
-        notifyError(err);
-        return 0;
-      }
+      const bytesWritten = await sendToPort(portId, data, isHex, lineEnding, silent);
+      // Mirror the just-updated in-memory history for Up/Down recall.
+      setSendHistory(sendHistoryMap.get(portId) ?? []);
+      return bytesWritten;
     },
-    [addToHistory]
+    []
   );
 
   const historyUp = useCallback((): SendHistoryEntry | null => {

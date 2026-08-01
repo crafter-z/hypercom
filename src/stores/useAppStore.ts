@@ -153,7 +153,7 @@ const defaultConfig: AppConfig = {
   sendPrefix: '>>>>>>SEND>>>>>>>>',
   showPortType: true,
   sendOnEnter: true,
-  quickSendSlots: [null, null, null, null, null],
+  quickSendInlineCount: 6,
   timestampMode: 'perLine',
   timestampFormat: 'absolute',
   autoSaveLog: true,

@@ -6,7 +6,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import type {
   AppConfig,
 } from '../types';
@@ -594,5 +594,85 @@ export const popoutService = {
   /** 切换弹出窗置顶。 */
   setAlwaysOnTop: (label: string, on: boolean): Promise<void> => {
     return invoke<void>('set_popout_always_on_top', { label, on });
+  },
+};
+
+// ==================== 柔性工作区 · 弹出窗意图事件 ====================
+// 弹出窗是独立 webview、自带 store 实例——窗口间不共享可变前端态，只交换
+// "意图/事件"。发送必须经 `popout:send-command` 回到主窗走 sendToPort 管线
+// （TX 回显 / 流量统计 / 发送历史全在主窗产生，弹窗直连后端会丢失它们）。
+// 数据变更只发"信号"（不携带数据），收方自己回 SQLite 重读。
+
+/** 弹窗请求主窗发送一条命令。不含 portId——主窗发送到自己的活动标签。 */
+export interface PopoutSendCommandPayload {
+  content: string;
+  isHex: boolean;
+  lineEnding: string;
+}
+
+/** 弹窗请求主窗打开 ConfigModal 指定页（如 'commands'）。 */
+export interface PopoutOpenConfigPayload {
+  page: string;
+}
+
+/** 主窗活动标签变化 → 弹窗更新"发送到 ● COMx"指示。 */
+export interface ActiveTabChangedPayload {
+  portId: string | null;
+}
+
+export const popoutEventService = {
+  /** 弹窗 → 主窗：请求发送。 */
+  onSendCommand: (callback: (payload: PopoutSendCommandPayload) => void) => {
+    return listen<PopoutSendCommandPayload>('popout:send-command', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  /** 弹窗 → 主窗：请求打开配置弹窗指定页。 */
+  onOpenConfig: (callback: (payload: PopoutOpenConfigPayload) => void) => {
+    return listen<PopoutOpenConfigPayload>('popout:open-config', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  /** 主窗 → 弹窗：命令集已变更（仅信号，弹窗回库重读）。 */
+  onCommandSetsChanged: (callback: () => void) => {
+    return listen<null>('command-sets:changed', () => {
+      callback();
+    });
+  },
+
+  /** 主窗 → 弹窗：活动标签已变更。 */
+  onActiveTabChanged: (callback: (payload: ActiveTabChangedPayload) => void) => {
+    return listen<ActiveTabChangedPayload>('active-tab:changed', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  /** 弹窗 → 主窗：挂载完成，请求一次状态对表（主窗回放 active-tab:changed）。 */
+  onRequestSync: (callback: () => void) => {
+    return listen<null>('popout:request-sync', () => {
+      callback();
+    });
+  },
+
+  emitSendCommand: (payload: PopoutSendCommandPayload): Promise<void> => {
+    return emit('popout:send-command', payload);
+  },
+
+  emitOpenConfig: (payload: PopoutOpenConfigPayload): Promise<void> => {
+    return emit('popout:open-config', payload);
+  },
+
+  emitCommandSetsChanged: (): Promise<void> => {
+    return emit('command-sets:changed');
+  },
+
+  emitActiveTabChanged: (payload: ActiveTabChangedPayload): Promise<void> => {
+    return emit('active-tab:changed', payload);
+  },
+
+  emitRequestSync: (): Promise<void> => {
+    return emit('popout:request-sync');
   },
 };

@@ -66,3 +66,221 @@
   font-size: var(--text-sm);
   text-align: center;
 }
+
+/* ==================== QuickSendPanel — Stream-Deck style command deck =====
+ * Tall pop-out: search + set selector on top, one-click command rows in the
+ * middle, live target-port indicator at the bottom. Whole row = send.
+ */
+
+.quicksend-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+/* ---- Toolbar: search over set-selector + edit ---- */
+.quicksend-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.quicksend-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.quicksend-search-icon {
+  position: absolute;
+  left: var(--space-2);
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.quicksend-search {
+  width: 100%;
+  padding-left: 26px; /* clear the leading icon */
+  font-size: var(--text-sm);
+}
+
+.quicksend-set-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.quicksend-set-select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Command list ---- */
+.quicksend-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1);
+}
+
+.quicksend-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.quicksend-row:hover,
+.quicksend-row.is-cursor {
+  background: var(--bg-hover);
+}
+
+/* Keyboard cursor rides an accent rail — the row is the affordance. */
+.quicksend-row.is-cursor {
+  border-left-color: var(--accent-color);
+}
+
+/* Send feedback — short accent wash, shared language with the inline strip. */
+.quicksend-row.is-flash {
+  animation: quicksend-flash 0.26s ease-out;
+}
+
+@keyframes quicksend-flash {
+  0% {
+    background: var(--accent-emphasis);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.quicksend-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.quicksend-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.quicksend-badge {
+  flex-shrink: 0;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.6px;
+  color: var(--text-secondary);
+}
+
+.quicksend-badge-hex {
+  color: var(--accent-color);
+  border-color: var(--accent-emphasis);
+}
+
+.quicksend-le {
+  flex-shrink: 0;
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+
+.quicksend-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+
+.quicksend-empty {
+  margin: auto;
+  padding: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* ---- Target indicator footer ---- */
+.quicksend-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  font-size: var(--text-2xs);
+}
+
+.quicksend-target {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-secondary);
+  letter-spacing: 0.4px;
+}
+
+/* Live dot — the port is breathing, not a static glyph. */
+.quicksend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-success);
+  box-shadow: 0 0 4px var(--text-success);
+  animation: quicksend-pulse 2s ease-in-out infinite;
+}
+
+@keyframes quicksend-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.quicksend-target-port {
+  font-family: var(--font-terminal);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.quicksend-target-muted {
+  opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quicksend-dot {
+    animation: none;
+  }
+}

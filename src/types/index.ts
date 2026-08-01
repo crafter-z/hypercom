@@ -253,7 +253,7 @@ export interface AppConfig {
   sendPrefix: string;      // 发送提示前缀，默认 ">>>>>>SEND>>>>>>>>"
   showPortType: boolean;   // 显示串口类型
   sendOnEnter: boolean;     // 聚焦发送框时 Enter 是否直接发送
-  quickSendSlots: (string | null)[]; // 5 个快捷发送槽
+  quickSendInlineCount: number; // 快捷发送内联条显示条数（0 = 隐藏内联条，纯弹出窗模式）
 
   // 时间戳设置
   timestampMode: 'perLine' | 'perRound';

@@ -13,7 +13,7 @@ import AboutDialog from './components/shared/AboutDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, usePinStatesSubscriber, useToolOutput } from './hooks';
+import { useAppInit, useSerialReceive, usePinStatesSubscriber, useToolOutput, usePopoutBridge } from './hooks';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
@@ -62,6 +62,7 @@ const App: React.FC = () => {
   useSerialReceive();
   usePinStatesSubscriber();
   useToolOutput();
+  usePopoutBridge();
   useHotkeys();
   usePowerManagement();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);

@@ -136,13 +136,17 @@
 
 /* ==================== Send Section ==================== */
 
-/* ---- Quick commands — one pill per command in the ACTIVE send-command
- *      set (the same sets loop-send uses). Dynamic count, no slot cap. ---- */
+/* ---- Quick commands — the inline overflow strip shows the first
+ *      config.quickSendInlineCount commands of the ACTIVE send-command set
+ *      on ONE row (no wrap); the rest collapse into a live "⋯ +K" button
+ *      that opens the quick-send pop-out window. ---- */
 .op-quick-send-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--space-1);
+  overflow: hidden;
+  min-width: 0;
 }
 
 /* Compact monospace pill — truncates long payloads; the full content rides
@@ -169,6 +173,20 @@
   font-weight: var(--weight-bold);
   letter-spacing: 0.6px;
   color: var(--accent-color);
+}
+
+/* Overflow affordance — never truncates (the live +K count is the point);
+ * the accent count signals "more lives behind this click". */
+.op-quick-cmd-overflow {
+  flex-shrink: 0;
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  border-style: dashed;
+}
+
+.op-quick-cmd-overflow:hover {
+  color: var(--accent-color);
+  border-color: var(--accent-emphasis);
 }
 
 /* Empty state — quiet hint plus a dashed configure affordance. */
