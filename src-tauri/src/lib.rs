@@ -46,6 +46,9 @@ pub struct AppState {
     pub system_info: std::sync::Mutex<sysinfo::System>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
     pub tool_processes: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
+    /// 文件发送取消令牌（按 port_id 索引），供 cancel_file_send 置位
+    pub file_send_cancel:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// 弹出窗注册表：key 为窗口 label，value 记录 {kind, target_id}（Phase 1 柔性工作区）
     pub popouts: std::sync::Mutex<std::collections::HashMap<String, commands::PopoutMeta>>,
 }
@@ -80,6 +83,7 @@ impl AppState {
             log_manager: std::sync::Mutex::new(log_manager),
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -117,6 +121,7 @@ pub fn run() {
             commands::attempt_reconnect,
             commands::run_port_tool,
             commands::kill_port_tool,
+            commands::cancel_file_send,
             // ===== 模拟模式命令 =====
             commands::enable_simulation,
             commands::disable_simulation,

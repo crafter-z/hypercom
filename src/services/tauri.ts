@@ -120,6 +120,11 @@ export const serialService = {
   disableSimulation: (): Promise<void> => {
     return invoke<void>('disable_simulation');
   },
+
+  /** 取消正在进行的文件发送（置位后端 per-port 取消标志；读循环在下一块前退出）。 */
+  cancelFileSend: (portId: string): Promise<void> => {
+    return invoke<void>('cancel_file_send', { portId });
+  },
 };
 
 // ==================== 配置命令 ====================

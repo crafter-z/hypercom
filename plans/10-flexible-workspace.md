@@ -38,7 +38,7 @@ HyperCom 工作区当前为固定布局。串口调试的真实负载差异极�
 | 弹出对象 | 数据关系 | 耦合度 |
 |---|---|---|
 | 快捷发送 | 只**发**（走后端命令，天然跨窗口） | 低 |
-| 终端标签 | 只**收**（订阅 `serial_data` 流 + 一次性历史快照） | 中 |
+| 终端标签 | 只**收**（订阅 `serial:data` 流 + 一次性历史快照） | 中 |
 | 串口控制栏 | **又读又写前端态**（端口列表同步 + 开标签/切焦点要反映到主窗 `useAppStore`） | 高 |
 
 控制栏的"连接/断开"走后端命令哪个窗口都能调，但"开标签/切焦点"是纯前端态（tabs 活在 `useAppStore`，后端没有），需要额外的"意图总线"。故本轮排除，且对控制栏而言**收放比弹出更值钱**（间歇性使用，多数时候想收没而非挪到副屏）。
@@ -76,14 +76,14 @@ HyperCom 工作区当前为固定布局。串口调试的真实负载差异极�
 |---|---|---|---|
 | `command-sets:changed` | 主窗 → 快捷发送窗 | 无（信号） | 命令集改动后弹窗回库刷新 |
 | `active-tab:changed` | 主窗 → 快捷发送窗 | `portId` | 弹窗知道发送到哪个端口 |
-| `serial_data` | 后端 → 所有窗 | 字节流 | 终端弹窗订阅（**需验证当前是否全播**，见 R1） |
+| `serial:data` | 后端 → 所有窗 | 字节流 | 终端弹窗订阅（**需验证当前是否全播**，见 R1） |
 | `popout:terminal:snapshot` | 主窗 → 终端弹窗 | 历史行（一次性） | 弹出时补历史 |
 | `popout:open-config` | 弹窗 → 主窗 | `{page}` | 弹窗请求主窗打开 ConfigModal 指定页 |
 
 ### 1.5 状态同步策略
 
 - 命令集：弹窗 mount 时 `load_command_sets()` 直读 SQLite；主窗 save 后 emit `command-sets:changed`，弹窗重读。
-- 发送：弹窗直接 `invoke('send_data')` → 共享 `AppState` → 后端 emit `serial_data` → 主窗 `useSerialReceive` 自动写终端。**发送→回显链路天然跨窗口，零额外代码。**
+- 发送：弹窗直接 `invoke('send_data')` → 共享 `AppState` → 后端 emit `serial:data` → 主窗 `useSerialReceive` 自动写终端。**发送→回显链路天然跨窗口，零额外代码。**
 
 ### 1.6 权限配置（`capabilities/default.json`）
 
@@ -134,7 +134,7 @@ HyperCom 工作区当前为固定布局。串口调试的真实负载差异极�
 
 ### 3.3 数据流
 
-- 新数据：弹窗订阅 `serial_data`（后端已广播），自建缓冲 + 跑虚拟滚动。
+- 新数据：弹窗订阅 `serial:data`（后端已广播），自建缓冲 + 跑虚拟滚动。
 - 历史：终端行是前端内存态（`memoryLimitMb` 上限），**不在 SQLite**。弹出时主窗经 `popout:terminal:snapshot` 一次性推送当前缓冲（大缓冲注意载荷体积，见 R3）。
 - 显示态（编码/格式/滚动锁定）：弹窗自带控制，降低耦合。
 
@@ -162,7 +162,7 @@ Phase 4 收放（独立，任意时机插入）
 
 | # | 风险 | 应对 |
 |---|---|---|
-| R1 | `serial_data` 当前是否广播到所有窗口（若 `emit_to` 定向则弹窗收不到） | Phase 3 开工前验证 `serial/mod.rs` 的 emit 方式，必要时改全播 |
+| R1 | `serial:data` 当前是否广播到所有窗口（若 `emit_to` 定向则弹窗收不到） | Phase 3 开工前验证 `serial/mod.rs` 的 emit 方式，必要时改全播 |
 | R2 | 弹窗 capability 漏配 → invoke 静默失败 | Phase 1 即配齐 + 冒烟验证 |
 | R3 | 终端历史快照载荷过大（接近 memoryLimitMb） | 评估分片推送 / v1 仅推近 N 行 |
 | R4 | Windows 窗口 z-order / 焦点怪癖 | `.parent()` owner 语义兜底 + 实测 |

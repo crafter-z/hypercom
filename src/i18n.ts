@@ -157,6 +157,7 @@ const resources = {
       'sendSection.clearButton': '清屏',
       'sendSection.file.button': '发送文件',
       'sendSection.file.sent': '文件已发送',
+      'sendSection.file.cancel': '取消发送',
       'sendSection.quickCommands.emptyHint': '暂无快捷命令 — 请配置命令集',
       'sendSection.quickCommands.configure': '配置命令集',
 
@@ -674,6 +675,7 @@ const resources = {
       'sendSection.clearButton': 'Clear',
       'sendSection.file.button': 'Send File',
       'sendSection.file.sent': 'File sent',
+      'sendSection.file.cancel': 'Cancel Send',
       'sendSection.quickCommands.emptyHint': 'No quick commands — configure a command set',
       'sendSection.quickCommands.configure': 'Configure Set',
 

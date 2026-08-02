@@ -61,6 +61,11 @@ const SendSection: React.FC<SendSectionProps> = ({
       .onFileProgress((p: FileProgressPayload) => {
         if (p.done) {
           setFileProgress(null);
+          // 仅「真正发完」才提示成功；取消(sent<total)与空文件(total==0)静默清除进度条，
+          // 否则取消时误报「已发送」、空文件残留 0/0 进度条（done 事件由后端保证必发）。
+          if (p.total_bytes > 0 && p.sent_bytes >= p.total_bytes) {
+            notifySuccess('sendSection.file.sent');
+          }
         } else {
           setFileProgress({ sent: p.sent_bytes, total: p.total_bytes });
         }
@@ -133,11 +138,21 @@ const SendSection: React.FC<SendSectionProps> = ({
     try {
       setFileProgress({ sent: 0, total: 0 });
       await serialService.sendFile({ portId: activeTabId, path, chunkSize: 1024, delayMs: 10 });
-      notifySuccess('sendSection.file.sent');
+      // 成功提示由 serial:file_progress 的 done 事件统一触发（见 onFileProgress），
+      // 此处不再 toast——否则取消或出错时也会误报「已发送」。
     } catch (e) {
       setFileProgress(null);
       notifyError(e);
     }
+  };
+
+  // 取消正在进行的文件发送：置位后端 per-port 取消标志，读循环在下一块前退出，
+  // 随后后端必发 done 事件清除进度条（取消不弹成功提示）。
+  const handleCancelFile = () => {
+    if (!activeTabId) return;
+    serialService
+      .cancelFileSend(activeTabId)
+      .catch((e) => console.debug('[SendSection] cancelFileSend failed:', e));
   };
 
   const insertNewlineAtCursor = () => {
@@ -305,14 +320,24 @@ const SendSection: React.FC<SendSectionProps> = ({
             <Send size={14} />
             {t('sendSection.sendButton')}
           </button>
-          <button
-            className="btn btn-sm"
-            title={t('sendSection.file.button')}
-            onClick={handleSendFile}
-            disabled={!isConnected || fileProgress !== null}
-          >
-            <FileUp size={13} /> {t('sendSection.file.button')}
-          </button>
+          {fileProgress !== null ? (
+            <button
+              className="btn btn-sm btn-danger"
+              title={t('sendSection.file.cancel')}
+              onClick={handleCancelFile}
+            >
+              <Square size={13} /> {t('sendSection.file.cancel')}
+            </button>
+          ) : (
+            <button
+              className="btn btn-sm"
+              title={t('sendSection.file.button')}
+              onClick={handleSendFile}
+              disabled={!isConnected}
+            >
+              <FileUp size={13} /> {t('sendSection.file.button')}
+            </button>
+          )}
           <div className="op-send-options">
             <label className="checkbox-wrapper op-checkbox-compact">
               <input

@@ -108,31 +108,67 @@ pub struct SimPortHandle {
 /// 解析 HEX 字符串为字节数组。支持空格分隔（"48 65 6C"）或紧凑形式（"48656C"）。
 /// 暴露为 pub 以便日志层在写入 TX 字节时复用。
 pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
-    let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
-    if !cleaned.len().is_multiple_of(2) {
+    // 收集 (原始索引, 字节) 并跳过空白；保留原始索引使错误定位指向输入原文，
+    // 而非去空白后的字符串（"AA ZZ" 的坏对应报位置 3，而非 2）。
+    let hex_bytes: Vec<(usize, u8)> = data
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !b.is_ascii_whitespace())
+        .map(|(i, b)| (i, *b))
+        .collect();
+    if !hex_bytes.len().is_multiple_of(2) {
         return Err(anyhow::anyhow!(
-            "HEX string has odd length: {} chars",
-            cleaned.len()
+            "HEX string has odd length: {} hex chars",
+            hex_bytes.len()
         ));
     }
-    let mut result = Vec::with_capacity(cleaned.len() / 2);
-    let chars: Vec<char> = cleaned.chars().collect();
-    let mut i = 0;
-    while i + 1 < chars.len() {
-        let hex_pair: String = chars[i..i + 2].iter().collect();
-        match u8::from_str_radix(&hex_pair, 16) {
-            Ok(byte) => result.push(byte),
-            Err(_) => {
+    // 将单个 ASCII 十六进制字符解码为数值 0-15，非法字符返回 None。
+    let nibble = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut result = Vec::with_capacity(hex_bytes.len() / 2);
+    for pair in hex_bytes.chunks(2) {
+        let (hi_index, hi_byte) = pair[0];
+        let (_, lo_byte) = pair[1];
+        match (nibble(hi_byte), nibble(lo_byte)) {
+            (Some(hi), Some(lo)) => result.push((hi << 4) | lo),
+            _ => {
+                let hex_pair = String::from_utf8_lossy(&[hi_byte, lo_byte]).into_owned();
                 return Err(anyhow::anyhow!(
                     "Invalid HEX byte at position {}: \"{}\"",
-                    i,
+                    hi_index,
                     hex_pair
-                ))
+                ));
             }
         }
-        i += 2;
     }
     Ok(result)
+}
+
+/// 计算"实际写入串口"的字节序列——发送路径与日志路径的唯一事实来源。
+/// HEX 模式解析十六进制字符串（忽略行结束符）；文本模式附加行结束符。
+pub fn build_tx_bytes(
+    data: &str,
+    is_hex: bool,
+    append_line_ending: &str,
+) -> anyhow::Result<Vec<u8>> {
+    if is_hex {
+        return parse_hex_string(data);
+    }
+    let mut bytes = data.as_bytes().to_vec();
+    match append_line_ending {
+        "\\r\\n" => bytes.extend_from_slice(b"\r\n"),
+        "\\r" => bytes.push(b'\r'),
+        "\\n" => bytes.push(b'\n'),
+        _ => {}
+    }
+    Ok(bytes)
 }
 
 fn parse_data_bits(bits: u8) -> serialport::DataBits {
@@ -178,12 +214,13 @@ fn emit_data_event(
     data: &[u8],
     is_hex: bool,
 ) {
-    let timestamp_str = chrono::Local::now()
-        .format("%Y-%m-%d %H:%M:%S%.3f")
-        .to_string();
+    // 只取一次当前时间：格式化字符串与毫秒时间戳同源，避免两次 now() 跨毫秒不一致。
+    let now = chrono::Local::now();
+    let timestamp_str = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let timestamp_ms = now.timestamp_millis();
     let event = SerialDataEvent {
         port_id: port_id.to_string(),
-        timestamp: chrono::Local::now().timestamp_millis(),
+        timestamp: timestamp_ms,
         direction: direction.to_string(),
         data: data.to_vec(),
         is_hex,
@@ -287,6 +324,18 @@ impl SerialManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
             .clone();
+
+        // 陈旧句柄守卫：若已有存活句柄则干净报错（避免 insert 泄漏游离读取线程）；
+        // 若仅有死线程的陈旧句柄则移除之，释放 OS 端口，重开不再 "access denied"。
+        let stale_alive = self
+            .ports
+            .get(&args.port_id)
+            .map(|h| h.running.load(Ordering::Relaxed))
+            .unwrap_or(false);
+        if stale_alive {
+            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
+        }
+        self.ports.remove(&args.port_id);
 
         let port = serialport::new(&args.port_id, args.baud_rate)
             .data_bits(parse_data_bits(args.data_bits))
@@ -449,6 +498,17 @@ impl SerialManager {
             .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
             .clone();
 
+        // 陈旧句柄守卫（与 open_real_port 同形）：存活句柄报错，死线程句柄移除。
+        let stale_alive = self
+            .sim_ports
+            .get(&args.port_id)
+            .map(|h| h.running.load(Ordering::Relaxed))
+            .unwrap_or(false);
+        if stale_alive {
+            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
+        }
+        self.sim_ports.remove(&args.port_id);
+
         let (tx, rx) = mpsc::channel::<SimMessage>();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
@@ -497,6 +557,15 @@ impl SerialManager {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
+
+            // 读取线程退出时发送断开事件（与真实串口线程对齐的 parity 修复）
+            let _ = app_handle_clone.emit(
+                "serial:status",
+                SerialStatusEvent {
+                    port_id: port_id.clone(),
+                    status: "disconnected".to_string(),
+                },
+            );
         });
 
         let handle = SimPortHandle {
@@ -587,13 +656,9 @@ impl SerialManager {
                 .sim_ports
                 .get(port_id)
                 .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
-            // 计算实际字节数：HEX 模式返回解析后的字节数，文本模式返回 UTF-8 字节数。
-            // 与真实串口路径保持一致——前端用返回值累加 TX 统计。
-            let byte_count = if is_hex {
-                parse_hex_string(data)?.len()
-            } else {
-                data.len()
-            };
+            // 与真实串口路径共用 build_tx_bytes，使返回字节数 == 真实路径 == 日志。
+            // 回显内容仍用人类可读的原始文本（Echo 不变），仅返回的字节数对齐。
+            let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
             handle
                 .tx
                 .send(SimMessage::Echo {
@@ -601,7 +666,7 @@ impl SerialManager {
                     is_hex,
                 })
                 .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
-            return Ok(byte_count);
+            return Ok(bytes.len());
         }
 
         // 真实串口：写入串口
@@ -610,18 +675,7 @@ impl SerialManager {
             .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
 
-        let bytes = if is_hex {
-            parse_hex_string(data)?
-        } else {
-            let mut text = data.to_string();
-            match append_line_ending {
-                "\\r\\n" => text.push_str("\r\n"),
-                "\\r" => text.push('\r'),
-                "\\n" => text.push('\n'),
-                _ => {}
-            }
-            text.into_bytes()
-        };
+        let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
 
         let mut port = handle
             .port
@@ -677,7 +731,7 @@ impl SerialManager {
         &mut self,
         port_id: &str,
         baud_rate: u32,
-        data_bits: &str,
+        data_bits: u8,
         parity: &str,
         stop_bits: &str,
         handshake: &str,
@@ -693,7 +747,7 @@ impl SerialManager {
         port.set_baud_rate(baud_rate)?;
         // 无条件应用帧格式与流控：仅在非默认值时才设置会导致无法从
         // 7E1 / 硬件流控等配置改回 8N1 / None 默认值。
-        port.set_data_bits(parse_data_bits(data_bits.parse().unwrap_or(8)))?;
+        port.set_data_bits(parse_data_bits(data_bits))?;
         port.set_parity(parse_parity(parity))?;
         port.set_stop_bits(parse_stop_bits(stop_bits))?;
         port.set_flow_control(parse_flow_control(handshake))?;
@@ -702,7 +756,7 @@ impl SerialManager {
         // 同步更新重连参数缓存
         if let Some(params) = self.last_params.get_mut(port_id) {
             params.baud_rate = baud_rate;
-            params.data_bits = data_bits.parse().unwrap_or(8);
+            params.data_bits = data_bits;
             params.parity = parity.to_string();
             params.stop_bits = stop_bits.to_string();
             params.handshake = handshake.to_string();
@@ -742,5 +796,242 @@ impl SerialManager {
     /// 获取指定端口上次成功连接的参数（用于外部工具执行后重开端口）。
     pub fn get_last_params(&self, port_id: &str) -> Option<OpenPortArgs> {
         self.last_params.get(port_id).cloned()
+    }
+}
+
+impl Drop for SerialManager {
+    fn drop(&mut self) {
+        // 尽最大努力通知所有读取线程退出（应用退出时）。
+        // 只发信号、不 join——进程退出会回收线程，join 可能阻塞约 100ms。
+        for h in self.ports.values() {
+            h.running.store(false, Ordering::Relaxed);
+        }
+        for h in self.sim_ports.values() {
+            h.running.store(false, Ordering::Relaxed);
+            let _ = h.tx.send(SimMessage::Stop);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // 显式导入而非 `use super::*`：通配导入会把整个 serial 模块（含 serialport FFI
+    // 路径）拉进 *测试* 二进制的链接闭包，导致 Windows 上 cargo test 的 harness
+    // 因缺少应用清单而 0xc0000139 加载失败。这里仅按需导入：纯函数测试在 Windows
+    // 也能跑；引用 serialport 类型 / 管理器的测试所需导入随测试本身仅在非 Windows 启用。
+    use super::{build_tx_bytes, parse_hex_string};
+    #[cfg(not(target_os = "windows"))]
+    use super::{
+        parse_data_bits, parse_flow_control, parse_parity, parse_stop_bits, SerialManager,
+    };
+    #[cfg(not(target_os = "windows"))]
+    use crate::commands::OpenPortArgs;
+
+    // ---------- parse_hex_string ----------
+
+    #[test]
+    fn parse_hex_accepts_space_separated_compact_and_mixed() {
+        assert_eq!(parse_hex_string("48 65 6C").unwrap(), vec![0x48, 0x65, 0x6C]);
+        assert_eq!(parse_hex_string("48656c").unwrap(), vec![0x48, 0x65, 0x6C]);
+        assert_eq!(parse_hex_string("48 656C").unwrap(), vec![0x48, 0x65, 0x6C]);
+    }
+
+    #[test]
+    fn parse_hex_accepts_lowercase_and_boundary_values() {
+        assert_eq!(parse_hex_string("aF").unwrap(), vec![0xAF]);
+        assert_eq!(parse_hex_string("FF 00").unwrap(), vec![255, 0]);
+    }
+
+    #[test]
+    fn parse_hex_empty_and_whitespace_only_yield_empty() {
+        assert_eq!(parse_hex_string("").unwrap(), Vec::<u8>::new());
+        assert_eq!(parse_hex_string("  ").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn parse_hex_rejects_odd_length() {
+        assert!(parse_hex_string("486").is_err());
+    }
+
+    #[test]
+    fn parse_hex_rejects_invalid_nibbles() {
+        assert!(parse_hex_string("4Z").is_err());
+    }
+
+    #[test]
+    fn parse_hex_error_reports_original_index_of_bad_pair() {
+        // "AA ZZ": 空格在原始索引 2，坏对 "ZZ" 从原始索引 3 开始（证明位置修复）。
+        let err = parse_hex_string("AA ZZ").unwrap_err().to_string();
+        assert!(err.contains('3'), "error should contain original index 3: {err}");
+    }
+
+    // ---------- build_tx_bytes ----------
+
+    #[test]
+    fn build_tx_bytes_text_appends_line_endings() {
+        assert_eq!(build_tx_bytes("hi", false, "\\r\\n").unwrap(), b"hi\r\n");
+        assert_eq!(build_tx_bytes("hi", false, "\\r").unwrap(), b"hi\r");
+        assert_eq!(build_tx_bytes("hi", false, "\\n").unwrap(), b"hi\n");
+        assert_eq!(build_tx_bytes("hi", false, "None").unwrap(), b"hi");
+        assert_eq!(build_tx_bytes("", false, "None").unwrap(), b"");
+    }
+
+    #[test]
+    fn build_tx_bytes_hex_ignores_line_ending_and_validates() {
+        assert_eq!(build_tx_bytes("48 65", true, "\\r\\n").unwrap(), vec![0x48, 0x65]);
+        assert!(build_tx_bytes("4", true, "None").is_err());
+    }
+
+    // ---------- 参数映射（模块内私有函数）----------
+    // 这些测试引用 serialport 的枚举类型；为与下方管理器测试一致、并彻底避免在
+    // Windows 测试二进制中拉入 serialport FFI（见上方说明），同样仅在非 Windows 运行。
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_data_bits_maps_values_and_defaults_to_eight() {
+        assert!(matches!(parse_data_bits(5), serialport::DataBits::Five));
+        assert!(matches!(parse_data_bits(6), serialport::DataBits::Six));
+        assert!(matches!(parse_data_bits(7), serialport::DataBits::Seven));
+        assert!(matches!(parse_data_bits(8), serialport::DataBits::Eight));
+        assert!(matches!(parse_data_bits(9), serialport::DataBits::Eight));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_parity_maps_values_and_defaults_to_none() {
+        assert!(matches!(parse_parity("Even"), serialport::Parity::Even));
+        assert!(matches!(parse_parity("Odd"), serialport::Parity::Odd));
+        assert!(matches!(parse_parity("None"), serialport::Parity::None));
+        assert!(matches!(parse_parity("bogus"), serialport::Parity::None));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_stop_bits_maps_values_and_defaults_to_one() {
+        assert!(matches!(parse_stop_bits("Two"), serialport::StopBits::Two));
+        assert!(matches!(parse_stop_bits("One"), serialport::StopBits::One));
+        assert!(matches!(parse_stop_bits("bogus"), serialport::StopBits::One));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_flow_control_maps_values_and_defaults_to_none() {
+        assert!(matches!(parse_flow_control("XonXoff"), serialport::FlowControl::Software));
+        assert!(matches!(parse_flow_control("RequestToSend"), serialport::FlowControl::Hardware));
+        assert!(matches!(
+            parse_flow_control("RequestToSendXonXoff"),
+            serialport::FlowControl::Hardware
+        ));
+        assert!(matches!(parse_flow_control("None"), serialport::FlowControl::None));
+        assert!(matches!(parse_flow_control("bogus"), serialport::FlowControl::None));
+    }
+
+    // ---------- 管理器错误路径（app_handle = None，无硬件、不 panic）----------
+    //
+    // 注意：open_port / attempt_reconnect / list_ports 三个测试（及其 open_args
+    // 辅助函数）在 Windows 上被排除。原因：它们的函数体静态引用了 serialport 的
+    // 自由函数（serialport::new / available_ports），会把串口 FFI 拉进 *测试* 二
+    // 进制的导入表；而 cargo test 的 harness 不像应用二进制那样内嵌 Tauri/Windows
+    // 清单，导致该 Windows 主机上加载器解析不到某个入口点（0xc0000139，
+    // STATUS_ENTRYPOINT_NOT_FOUND）。其余仅经 dyn 派发 / 自有函数访问串口的错误
+    // 路径测试不含此类静态引用，可在 Windows 运行。被排除的测试在非 Windows
+    // （CI 的 Linux/macOS）上照常编译运行。
+
+    #[cfg(not(target_os = "windows"))]
+    fn open_args(port_id: &str) -> OpenPortArgs {
+        OpenPortArgs {
+            port_id: port_id.to_string(),
+            baud_rate: 9600,
+            data_bits: 8,
+            parity: "None".to_string(),
+            stop_bits: "One".to_string(),
+            handshake: "None".to_string(),
+            dtr: false,
+            rts: false,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn send_data_errors_on_missing_ports() {
+        let m = SerialManager::new();
+        let real_err = m.send_data("COM1", "x", false, "None").unwrap_err().to_string();
+        assert!(real_err.contains("Port not found"), "{real_err}");
+        let sim_err = m.send_data("SIM:x", "x", false, "None").unwrap_err().to_string();
+        assert!(sim_err.contains("Sim port not found"), "{sim_err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn write_raw_errors_on_missing_ports() {
+        let m = SerialManager::new();
+        let real_err = m.write_raw("COM1", b"x").unwrap_err().to_string();
+        assert!(real_err.contains("Port not found"), "{real_err}");
+        let sim_err = m.write_raw("SIM:x", b"x").unwrap_err().to_string();
+        assert!(sim_err.contains("Sim port not found"), "{sim_err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn set_flow_control_errors_on_missing_port() {
+        let m = SerialManager::new();
+        assert!(m.set_flow_control("COM1", true, true).is_err());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn set_params_errors_on_missing_port() {
+        let mut m = SerialManager::new();
+        assert!(m.set_params("COM1", 9600, 8, "None", "One", "None").is_err());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn close_port_is_idempotent_on_missing_port() {
+        let mut m = SerialManager::new();
+        assert!(m.close_port("COM1").unwrap().is_none());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn get_last_params_is_none_for_unknown_port() {
+        let m = SerialManager::new();
+        assert!(m.get_last_params("COM1").is_none());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn attempt_reconnect_rejects_simulation_port() {
+        let mut m = SerialManager::new();
+        let err = m.attempt_reconnect("SIM:Loopback").unwrap_err().to_string();
+        assert!(err.contains("Cannot reconnect"), "{err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn open_port_errors_without_app_handle() {
+        let mut m = SerialManager::new();
+        let real_err = m.open_port(open_args("COM1")).unwrap_err().to_string();
+        assert!(real_err.contains("AppHandle not initialized"), "{real_err}");
+        let sim_err = m.open_port(open_args("SIM:x")).unwrap_err().to_string();
+        assert!(sim_err.contains("AppHandle not initialized"), "{sim_err}");
+    }
+
+    // ---------- list_ports 模拟开关 ----------
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn list_ports_shows_sim_entry_only_when_simulate_enabled() {
+        let mut m = SerialManager::new();
+        // 仅断言 SIM 条目，不对真实端口列表长度做任何假设。
+        assert!(!m.list_ports().unwrap().iter().any(|p| p.id == "SIM:Loopback"));
+        m.set_simulate(true);
+        let sim = m
+            .list_ports()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == "SIM:Loopback")
+            .expect("SIM:Loopback entry should exist when simulate is enabled");
+        assert_eq!(sim.port_type, "sim");
     }
 }

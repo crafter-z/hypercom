@@ -6,7 +6,20 @@
 
 当前无未修复缺陷。
 
-## 已修复 (2026-08-02 操作面板缺陷 + 布局整合)
+## 已修复 (2026-08-03 后端串口加固 + 串口测试 + 文件发送取消)
+
+> 验证: `cargo check` 0 错 0 警告, `cargo test --lib` 37/37（Windows；非 Windows 另含参数映射 / 管理器错误路径 / 端口枚举测试）, `npx tsc --noEmit` 0 错, `npm run test:run` 290/290。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `commands/serial.rs` `send_file` | 文件发送无法取消；写错误 / 取消 / 空文件时不发终结事件 → 前端进度条永久卡住；`delay_ms==0` 时整循环无 `.await` 让出点，饿死其它异步任务；`std::fs::read` 在异步命令里阻塞运行时线程 | 注册 per-port 取消令牌（`AppState.file_send_cancel`）+ 新命令 `cancel_file_send`；循环每块前检查令牌、写错误捕获后 break；`delay_ms==0` 改 `yield_now().await`；读文件改 `tokio::fs::read`；循环后**无条件**清理令牌并发 `serial:file_progress{done:true}`（正常 / 取消 / 写错 / 空文件四路径都触发） |
+| HIGH | `serial/mod.rs` | 异常断线后陈旧句柄留在 `ports`，`open_port` 无守卫 → 手动重开报 OS「access denied」，且 `insert` 可能丢弃存活句柄、泄漏游离读线程；SIM 端口读线程退出从不发 `disconnected`（与真实端口不一致） | `open_real_port` / `open_sim_port` 加陈旧句柄守卫（存活 → 干净报错「already open」；死线程 → 移除并释放 OS 端口）；SIM 读线程退出补发 `serial:status disconnected` |
+| MEDIUM | `commands/serial.rs` `run_port_tool` | 在全局串口锁内 `thread.join()`（阻塞其它串口命令）；`BufReader::lines()` 遇非法 UTF-8 静默截断烧录器二进制输出；重开端口失败仅 `log::warn`，UI 不反映 | join 移到锁外；stdout/stderr 改 `read_until(b'\n')` + `from_utf8_lossy`；重开失败补发 `serial:status error` |
+| MEDIUM | `serial/mod.rs` / `commands/serial.rs` | SIM / 文本带行结束符时，发送字节数、TX 日志字节数、回显三处不一致（SIM `send_data` 忽略行结束符；TX 日志另抄一份解析逻辑） | 抽出 `build_tx_bytes` 作为「实际写入字节」唯一事实来源，`send_data` 与 TX 日志共用；`emit_data_event` 只取一次 `now()`，格式化串与毫秒同源 |
+| MEDIUM | `serial/mod.rs` 测试 | 整个串口模块零测试；且 `use super::*` 通配导入会把 `serialport` FFI 拉进 *测试* 二进制，Windows 上 `cargo test` harness 因缺应用清单而 `0xc0000139`（STATUS_ENTRYPOINT_NOT_FOUND）加载失败 | 新增 `#[cfg(test)] mod tests`，用**显式导入**（非通配）：纯函数测试（hex 解析含原始索引定位、`build_tx_bytes` 各分支）在 Windows 运行；引用 `serialport` 类型 / `SerialManager` 的测试 `#[cfg(not(target_os = "windows"))]`，在 Linux/macOS CI 运行 |
+| LOW | `serial/mod.rs` | `parse_hex_string` 每字节分配 `String`、错误位置指向去空白串；`set_params` 的 `data_bits` 走 `&str` 往返解析 | hex 解析改字节切片、错误位置指向输入原文；`set_params` 的 `data_bits` 改 `u8` 直传（命令层同步去掉 `to_string()` 往返） |
+
+## 已修复 (2026-08-03 操作面板缺陷 + 布局整合)
 
 > 验证: `npx tsc --noEmit` 0 错误, `npm run test:run` 290/290 (16 files), `cargo check` 0 错误 0 警告。前端为主，另在 `config/mod.rs` 给 `SendCommandSetEntry` 加 `repeat_count`（`#[serde(default)]` 兼容旧 config.json）。
 
