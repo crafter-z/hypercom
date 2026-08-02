@@ -72,23 +72,27 @@
 ## 4. 循环发送 (useCyclicSend)
 
 ```
-用户点击开始循环
-  → RulesSection.handleToggleLoop()
-    → useOperationStore.setOpState({ opIsLoopSending: true })
+用户点击 SendSection 紧凑头部的循环图标按钮
+  → SendSection.handleToggleLoop()
+    → useOperationStore.setOpState({ isLoopSending: true })
     → useCyclicSend useEffect 触发:
-      ├─ 从 useRuleStore 获取 sendCommandSets
-      │   按 useOperationStore.opActiveSendCommandSetId 找到当前命令集
-      ├─ 从第 0 条开始:
-      │   └─ useSerialSend().sendData(port, cmd.content, cmd.type, cmd.appendLineEnding)
+      ├─ 从 useRuleStore.getState() 取 sendCommandSets
+      │   按 activeSendCommandSetId 找到当前命令集 currentSet
+      ├─ 从 currentCmdIdx = 0 开始, 每 tick 重读 store 取最新命令:
+      │   └─ sendData(port, cmd.content, cmd.type, cmd.appendLineEnding, silent=true)
       │       → await 完成
-      │       → useOperationStore.setOpState({ opCurrentCmdIdx: idx++ })
-      │       → 如果是最后一条:
-      │           ├─ 非循环模式 → setOpState({ opIsLoopSending: false }), 停止
-      │           └─ 循环模式 → 等待 loopDelay ms, currentCmdIdx=0 重新开始
-      │       → 否则: 等待 cmd.delay 或 opLoopInterval ms, 发送下一条
+      │       → 用「是否本轮最后一条」(currentCmdIdx === length-1) 判轮次边界:
+      │           ├─ 非末条 → currentCmdIdx += 1, 等待 cmd.delay 发下一条
+      │           └─ 末条   → completedRounds += 1
+      │               ├─ 达到上限? (repeatCount>0 ? completedRounds>=repeatCount : !isLoop)
+      │               │     → 是: setOpState({ isLoopSending: false }), 停止
+      │               │     → 否: currentCmdIdx = 0, 等待 loopDelay 进入下一轮
       └─ 停止:
-          → useOperationStore.setOpState({ opIsLoopSending: false })
+          → setOpState({ isLoopSending: false })
           → ref.stopped = true → clearTimeout
+注: 重复轮数 repeatCount 是命令集自有字段 (config.json), 不再是全局操作态;
+    轮内一律用 per-command delay, 仅轮间用 loopDelay (currentCmdIdx 每轮归零,
+    故不会出现「第二轮起每条都误用 loopDelay」的旧缺陷)。
 ```
 
 ## 5. 配置读写

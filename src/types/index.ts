@@ -176,7 +176,8 @@ export interface SendCommandSet {
   name: string;
   commands: SendCommand[];
   isLoop: boolean;         // 是否循环发送
-  loopDelay: number;       // 循环间隔
+  loopDelay: number;       // 轮间间隔 (ms)
+  repeatCount: number;     // 重复轮数: 0 = 跟随 isLoop, >0 = 发送 N 轮后停止
 }
 
 /** 发送历史条目 — 仅内存态（不持久化，关应用即清空），按端口隔离 */

@@ -10,7 +10,6 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { ChevronDown, Cable, Eraser, FileText, FolderOpen, FileSearch, History, Square, Type } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
-import RulesSection from './RulesSection';
 import ParamsSection from './ParamsSection';
 import { useLogReplay } from '../MainDisplay/hooks/useLogReplay';
 import { useCyclicSend } from './hooks/useCyclicSend';
@@ -222,7 +221,6 @@ const OperationPanel: React.FC = () => {
               historyUp={historyUp}
               historyDown={historyDown}
             />
-            <RulesSection isPortActive={isPortActive} isConnected={isConnected} />
             <ParamsSection isPortActive={isPortActive} />
           </div>
         </>

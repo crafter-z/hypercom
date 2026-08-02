@@ -47,38 +47,42 @@ export async function sendToPort(
   lineEnding: string,
   silent = false
 ): Promise<number> {
+  const state = useAppStore.getState();
+  const { sendPrefix } = state.config;
+  const prefix = sendPrefix ? `${sendPrefix} ` : '';
+  const displayText = `${prefix}${data}`;
+  // rawData must reflect the ACTUAL transmitted bytes (drives the
+  // HEX/string display toggle + CSV export):
+  //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
+  //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
+  const txRawData: number[] = isHex
+    ? data
+        .trim()
+        .split(/\s+/)
+        .filter((tok) => tok.length > 0)
+        .map((tok) => parseInt(tok, 16))
+        .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
+    : Array.from(new TextEncoder().encode(data));
+
+  // Append the TX echo BEFORE the backend call. The sim port's read thread
+  // emits the loopback RX during the await below; appending TX only after the
+  // await resolved let RX win the race and render ABOVE the sent line.
+  // Writing TX first guarantees the sent line always precedes its response.
+  useTerminalStore.getState().appendTerminalLine(portId, {
+    id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: Date.now(),
+    direction: 'TX',
+    content: displayText,
+    rawData: txRawData,
+    isHex: isHex,
+  });
+
   try {
     const bytesWritten = await serialService.sendSerialData({
       port_id: portId,
       data,
       is_hex: isHex,
       append_line_ending: lineEnding,
-    });
-
-    // Also show sent data in terminal
-    const state = useAppStore.getState();
-    const { sendPrefix } = state.config;
-    const prefix = sendPrefix ? `${sendPrefix} ` : '';
-    const displayText = `${prefix}${data}`;
-    // rawData must reflect the ACTUAL transmitted bytes (drives the
-    // HEX/string display toggle + CSV export):
-    //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
-    //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
-    const txRawData: number[] = isHex
-      ? data
-          .trim()
-          .split(/\s+/)
-          .filter((tok) => tok.length > 0)
-          .map((tok) => parseInt(tok, 16))
-          .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
-      : Array.from(new TextEncoder().encode(data));
-    useTerminalStore.getState().appendTerminalLine(portId, {
-      id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      timestamp: Date.now(),
-      direction: 'TX',
-      content: displayText,
-      rawData: txRawData,
-      isHex: isHex,
     });
 
     // Track TX bytes

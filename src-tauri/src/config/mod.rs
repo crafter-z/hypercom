@@ -45,6 +45,10 @@ pub struct SendCommandSetEntry {
     pub name: String,
     pub is_loop: bool,
     pub loop_delay: i32,
+    /// 重复轮数: 0 = 跟随 is_loop, >0 = 发送 N 轮后停止。
+    /// `#[serde(default)]` 保证旧版 config.json（无此字段）反序列化为 0。
+    #[serde(default)]
+    pub repeat_count: i32,
     pub commands: Vec<SendCommandEntry>,
 }
 

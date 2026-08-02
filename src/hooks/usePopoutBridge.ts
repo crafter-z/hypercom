@@ -56,12 +56,16 @@ export function usePopoutBridge() {
       })
       .catch((e) => console.debug('[usePopoutBridge] onOpenConfig failed:', e));
 
-    // 弹窗挂载即请求对表：回放一次当前活动标签，避免指示器在首次切标签前失真。
+    // 弹窗挂载即请求对表：回放当前活动标签 + 当前命令集，避免指示器/命令列表
+    // 在首次变更信号到达前失真（命令集载荷含未保存编辑，弹窗无需回库重读）。
     popoutEventService
       .onRequestSync(() => {
         void popoutEventService.emitActiveTabChanged({
           portId: useAppStore.getState().activeTabId,
         });
+        void popoutEventService.emitCommandSetsChanged(
+          useRuleStore.getState().sendCommandSets
+        );
       })
       .then((u) => {
         if (cancelled) u();
@@ -103,10 +107,12 @@ export function usePopoutBridge() {
       })
       .catch((e) => console.debug('[usePopoutBridge] onTerminalClosed failed:', e));
 
-    // 命令集变更 → 广播信号，弹窗回库重读（immer 变更后引用必变，引用比较即真值）。
+    // 命令集变更 → 广播完整命令集载荷（immer 变更后引用必变，引用比较即真值）。
+    // 携带载荷而非仅信号：主窗 useRuleStore 是唯一真相，config.json 异步落盘，
+    // 配置弹窗里未保存的编辑不在盘上——弹窗回库重读会漏掉这些编辑。
     const unsubscribeRules = useRuleStore.subscribe((state, prevState) => {
       if (state.sendCommandSets === prevState.sendCommandSets) return;
-      void popoutEventService.emitCommandSetsChanged();
+      void popoutEventService.emitCommandSetsChanged(state.sendCommandSets);
     });
 
     // 活动标签变更 → 广播新 portId，弹窗更新发送目标指示。

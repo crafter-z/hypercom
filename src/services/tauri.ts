@@ -438,7 +438,9 @@ export const popoutService = {
 // 弹出窗是独立 webview、自带 store 实例——窗口间不共享可变前端态，只交换
 // "意图/事件"。发送必须经 `popout:send-command` 回到主窗走 sendToPort 管线
 // （TX 回显 / 流量统计 / 发送历史全在主窗产生，弹窗直连后端会丢失它们）。
-// 数据变更只发"信号"（不携带数据），收方自己回 SQLite 重读。
+// 命令集变更携带完整 `SendCommandSet[]` 载荷：主窗 `useRuleStore` 是唯一真相
+// （config.json 异步落盘，未保存的编辑不在盘上），弹窗直接消费载荷而非回库重读，
+// 否则配置弹窗里未点"保存"的编辑不会同步到快捷发送窗口。
 
 /** 弹窗请求主窗发送一条命令。不含 portId——主窗发送到自己的活动标签。 */
 export interface PopoutSendCommandPayload {
@@ -488,10 +490,10 @@ export const popoutEventService = {
     });
   },
 
-  /** 主窗 → 弹窗：命令集已变更（仅信号，弹窗回库重读）。 */
-  onCommandSetsChanged: (callback: () => void) => {
-    return listen<null>('command-sets:changed', () => {
-      callback();
+  /** 主窗 → 弹窗：命令集已变更（携带完整命令集载荷，弹窗直接消费）。 */
+  onCommandSetsChanged: (callback: (sets: SendCommandSet[]) => void) => {
+    return listen<SendCommandSet[]>('command-sets:changed', (event) => {
+      callback(event.payload);
     });
   },
 
@@ -538,8 +540,8 @@ export const popoutEventService = {
     return emit('popout:open-config', payload);
   },
 
-  emitCommandSetsChanged: (): Promise<void> => {
-    return emit('command-sets:changed');
+  emitCommandSetsChanged: (sets: SendCommandSet[]): Promise<void> => {
+    return emit('command-sets:changed', sets);
   },
 
   emitActiveTabChanged: (payload: ActiveTabChangedPayload): Promise<void> => {

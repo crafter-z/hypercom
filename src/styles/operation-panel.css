@@ -111,16 +111,20 @@
   overflow-x: hidden;
 }
 
-/* 发送命令是主操作，占据明显最大的份额（约 56%）；循环发送与串口
- * 参数是辅助配置，收窄到刚好容纳控件即可。 */
-.op-section-send {
-  flex: 2.4;
-  min-width: 240px;
+/* 关键：分区子元素不得被压缩。面板变矮时内容超出分区高度，子元素若
+ * flex-shrink 会被压塌——尤其 .op-send-row（min-height:0）会塌成 0 高，
+ * 其内的发送键/文件键/HEX 选项保持自身尺寸溢出，叠到上方快捷发送区。
+ * 让子元素保持自然高度、改由分区自身滚动，即可消除叠压。 */
+.op-section > * {
+  flex-shrink: 0;
 }
 
-.op-section-rules {
-  flex: 0.85;
-  min-width: 140px;
+/* 发送命令是主操作（含命令集选择 + 循环控制 + 快捷发送 + 编辑区），
+ * 占据明显最大的份额；串口参数是辅助配置，收窄到刚好容纳控件即可。
+ * 原独立的「循环发送」分区已并入发送区（.op-section-rules 已移除）。 */
+.op-section-send {
+  flex: 2.4;
+  min-width: 280px;
 }
 
 .op-section-params {
@@ -132,6 +136,50 @@
  * monospace voice; this class only contributes card spacing. */
 .panel-card-title {
   margin-bottom: var(--space-2);
+}
+
+/* ---- Send-section header: title + compact command-set controls ----
+ * 命令集选择 / 循环开关 / 编辑按钮与分区标题同行，不再各占一整行，
+ * 把纵向空间让给编辑区。循环开关运行时以错误色呼吸脉动，状态一目了然。 */
+.op-send-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.op-send-header .panel-card-title {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+
+.op-send-header-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+  min-width: 0;
+}
+
+/* 紧凑命令集选择器——长集名截断，完整名称悬停可见。 */
+.op-cmdset-select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 150px;
+  font-size: var(--text-2xs);
+  padding: 2px 18px 2px 6px;
+}
+
+/* 循环开关——运行时错误色 + 呼吸光晕，停止态恢复普通图标按钮。 */
+.op-loop-toggle.is-running {
+  color: var(--text-error);
+  border-color: var(--text-error);
+  animation: op-loop-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes op-loop-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--text-error) 0%, transparent); }
+  50%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-error) 28%, transparent); }
 }
 
 /* ==================== Send Section ==================== */
@@ -265,10 +313,6 @@
   color: var(--text-secondary);
 }
 
-.op-btn-grow {
-  flex: 1;
-}
-
 /* Connect button in the top strip — semibold so the primary connection
  * affordance reads heavier than the neighbouring icon buttons. */
 .op-connect-btn {
@@ -325,52 +369,14 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ==================== Rules Section ==================== */
-.op-rule-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.op-rule-select {
-  flex: 1;
-  font-size: var(--text-xs);
-  padding: 2px var(--space-4) 2px var(--space-1);
-}
-
+/* ==================== Shared param labels ====================
+ * 原「循环发送」分区的行/数值控件类已随该分区并入发送区而移除；
+ * 仅保留 ParamsSection 仍在使用的标签与复选框行。 */
 .op-label {
   font-size: var(--text-xs);
   color: var(--text-secondary);
   min-width: 44px;
   flex-shrink: 0;
-}
-
-.op-loop-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-1);
-}
-
-.op-delay-input {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-  gap: var(--space-1);
-}
-
-/* Numeric fields (interval ms, repeat count) — tabular monospace digits. */
-.op-number-input {
-  width: 56px;
-  font-size: var(--text-xs);
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.op-unit-label {
-  font-size: var(--text-2xs);
-  color: var(--text-secondary);
 }
 
 .op-checkbox-row {

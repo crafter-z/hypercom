@@ -48,7 +48,7 @@ const CommandSettings: React.FC = () => {
 
   const handleAddSet = () => {
     const id = `cmd-${Date.now()}`;
-    addSendCommandSet({ id, name: t('commandSettings.addSet'), commands: [], isLoop: false, loopDelay: 1000 });
+    addSendCommandSet({ id, name: t('commandSettings.addSet'), commands: [], isLoop: false, loopDelay: 1000, repeatCount: 0 });
     setExpandedSetId(id);
   };
 
@@ -107,8 +107,23 @@ const CommandSettings: React.FC = () => {
               max={3600000}
               style={{ width: 60, fontSize: 11 }}
               placeholder="ms"
+              title={t('commandSettings.loopDelayTooltip')}
             />
           )}
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
+            {t('commandSettings.repeatLabel')}
+          </span>
+          <input
+            className="input"
+            type="number"
+            value={set.repeatCount ?? 0}
+            onChange={e => updateSendCommandSet(set.id, { repeatCount: clampNumber(e.target.value, 0, 1000000) })}
+            onClick={e => e.stopPropagation()}
+            min={0}
+            max={1000000}
+            style={{ width: 52, fontSize: 11 }}
+            title={t('commandSettings.repeatTooltip')}
+          />
         </>
       )}
       renderEditor={(set) => set.commands.map((cmd, idx) => (

@@ -6,6 +6,20 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-02 操作面板缺陷 + 布局整合)
+
+> 验证: `npx tsc --noEmit` 0 错误, `npm run test:run` 290/290 (16 files), `cargo check` 0 错误 0 警告。前端为主，另在 `config/mod.rs` 给 `SendCommandSetEntry` 加 `repeat_count`（`#[serde(default)]` 兼容旧 config.json）。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `useCyclicSend.ts` | 循环发送第一轮按 per-command `delay`（如 100ms），第二轮起每条命令都变成 `loopDelay`（如 1000ms），且重复轮数>0 时半路提前停发：轮次边界用 `nextIdx >= commands.length` 判定，而 `currentCmdIdx` 持续自增从不归零 → 第一轮后该式恒真，每条命令都误用 `loopDelay`、`completedRounds` 按「条」而非「轮」累加 | 改用「是否本轮最后一条」（`currentCmdIdx === length-1`）判定轮次边界；末条触发 `completedRounds += 1`、`loopDelay` 作轮间间隔、索引归零进入下一轮；轮内命令始终用 per-command `delay`。重复轮数改读命令集自有字段 `repeatCount`（见下），按完整轮数精确停止 |
+| HIGH | `usePopoutBridge.ts` / `QuickSendPanel.tsx` / `services/tauri.ts` | 配置弹窗里编辑命令集后若不点「✓ 保存」，主窗快捷发送区能显示新命令，但独立浮窗的发送区不显示：`command-sets:changed` 是不带载荷的信号，弹窗收到后回 config.json 重读，而未保存的编辑只在主窗 `useRuleStore` 内存态、尚未落盘 | 信号改为携带完整 `SendCommandSet[]` 载荷（主窗 store 是唯一真相）：`emitCommandSetsChanged(sets)` / `onCommandSetsChanged(cb:(sets)=>void)`；桥接订阅传 `state.sendCommandSets`，并在 `request-sync` 时回放当前命令集；弹窗抽出 `applySets()` 直接 `setSets(载荷)`，mount 仍读 config.json 取基线、随后载荷纠正为含未保存编辑的实时态 |
+| MEDIUM | `useSerialSend.ts` | 发送时 RX 先于 TX 显示（模拟串口尤甚）：`sendToPort` 在 `await sendSerialData` 之后才追加 TX 行，而模拟端口读线程在 await 期间已 emit 回显 RX，RX 抢先入终端 | TX 行改为在调用后端**之前**同步追加（先算 `displayText`/`txRawData` 再 `appendTerminalLine`），保证发送行恒先于其响应；流量统计 / 发送历史仍在 await 成功后记录 |
+| MEDIUM | `SendSection.tsx` | 快捷发送区按钮显示命令**内容**而非命令**名称**（独立浮窗早已是 `name \|\| content`，内联条不一致） | 按钮文本改为 `cmd.name \|\| cmd.content`，与浮窗一致；tooltip 保留「名称 — 内容」 |
+| MEDIUM | `types/index.ts` / `config/mod.rs` / `CommandSettings.tsx` / `useOperationStore.ts`(+测试) / `useCyclicSend.ts` | 循环「重复轮数」放在全局操作态 `loopRepeatCount`，与命令集脱钩——同一轮数套用到所有命令集，且占操作面板空间 | 重复轮数下沉为命令集自有字段 `SendCommandSet.repeatCount`（Rust `SendCommandSetEntry.repeat_count`，`#[serde(default)]` 兼容旧配置）；从 `useOperationStore` 删除 `loopRepeatCount`；`useCyclicSend` 改读 `currentSet.repeatCount`；编辑入口在 CommandSettings 命令集头部（与"循环"开关、轮间间隔同行） |
+| MEDIUM | `operation-panel.css` | 操作面板拖矮时发送区按键叠到上方快捷发送区：`.op-send-row` 是分区 flex 列的子项且 `min-height:0`，面板变矮时被压塌成 0 高，其内发送键/文件键/HEX 选项保持自身尺寸溢出叠压 | 新增 `.op-section > * { flex-shrink: 0 }`：分区子元素保持自然高度，超出由分区自身滚动，杜绝叠压 |
+| LOW | `SendSection.tsx` / `OperationPanel.tsx` / `RulesSection.tsx`(删除) / `operation-panel.css` / `i18n.ts` | ① 命令集选择与快捷发送被拆在两个分区，不符合直觉；② 上一版把命令集选择 + 循环做成两条整宽行，喧宾夺主；③ 高亮规则下拉实为死控件（高亮引擎按各集 `isEnabled` 过滤，从不读 `activeHighlightSetId`） | 命令集选择 + 循环开关 + 编辑按钮收进发送区**标题同一行**的紧凑头部（`.op-send-header`：标题左、控件右），循环开关为图标按钮、运行时错误色呼吸脉动，不再各占整行；删除独立 `RulesSection`；高亮规则管理保留在设置弹窗 HighlightSettings（按集启用）；移除失效 i18n key 与 `.op-section-rules`/`.op-rule-row`/`.op-loop-row` 等死样式 |
+
 ## 已修复 (2026-08-01 命令集激活缺陷)
 
 | 严重度 | 文件 | 问题 | 修复 |

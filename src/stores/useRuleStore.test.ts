@@ -19,7 +19,7 @@ const makeHighlightSet = (id: string, overrides?: Partial<HighlightRuleSet>): Hi
   id, name: `Set ${id}`, rules: [], isEnabled: true, ...overrides,
 });
 const makeCmdSet = (id: string, overrides?: Partial<SendCommandSet>): SendCommandSet => ({
-  id, name: `Cmd ${id}`, commands: [], isLoop: false, loopDelay: 100, ...overrides,
+  id, name: `Cmd ${id}`, commands: [], isLoop: false, loopDelay: 100, repeatCount: 0, ...overrides,
 });
 const makeProtocol = (id: string, overrides?: Partial<ProtocolTemplate>): ProtocolTemplate => ({
   id, name: `Proto ${id}`, isEnabled: true,

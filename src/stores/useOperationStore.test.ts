@@ -15,7 +15,6 @@ beforeEach(() => {
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
     isLoopSending: false,
-    loopRepeatCount: 0,
   });
 });
 
@@ -67,10 +66,6 @@ describe('Operation store defaults', () => {
   it('has correct isLoopSending default (false)', () => {
     expect(useOperationStore.getState().isLoopSending).toBe(false);
   });
-
-  it('has correct loopRepeatCount default (0)', () => {
-    expect(useOperationStore.getState().loopRepeatCount).toBe(0);
-  });
 });
 
 // ==================== setOpState ====================
@@ -121,11 +116,9 @@ describe('setOpState', () => {
   it('patches loop state fields', () => {
     useOperationStore.getState().setOpState({
       isLoopSending: true,
-      loopRepeatCount: 5,
     });
     const s = useOperationStore.getState();
     expect(s.isLoopSending).toBe(true);
-    expect(s.loopRepeatCount).toBe(5);
   });
 
   it('patches handshake and stopBits', () => {

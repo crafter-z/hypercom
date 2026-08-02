@@ -3,7 +3,7 @@ import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
-import { Send, Plus, Edit3, FileUp } from 'lucide-react';
+import { Send, Plus, Edit3, FileUp, Play, Square } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { LineEnding, SendCommand, SendHistoryEntry } from '../../types';
@@ -43,8 +43,10 @@ const SendSection: React.FC<SendSectionProps> = ({
   const quickSendInlineCount = useAppStore(s => s.config.quickSendInlineCount);
   const encoding = useTerminalStore(s => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
   const setOpState = useOperationStore(s => s.setOpState);
+  const isLoopSending = useOperationStore(s => s.isLoopSending);
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
+  const setActiveSendCommandSetId = useRuleStore(s => s.setActiveSendCommandSetId);
   const setConfigActiveTab = useAppStore(s => s.setConfigActiveTab);
   const toggleConfigModal = useAppStore(s => s.toggleConfigModal);
 
@@ -112,6 +114,18 @@ const SendSection: React.FC<SendSectionProps> = ({
     await sendData(activeTabId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
   };
 
+  // 循环发送开关：启动前若未选中命令集则自动选首个可用集（与快捷发送共用同一激活集）。
+  const handleToggleLoop = () => {
+    if (isLoopSending) {
+      setOpState({ isLoopSending: false });
+    } else {
+      if (!sendCommandSets.find(s => s.id === activeSendCommandSetId) && sendCommandSets.length > 0) {
+        setActiveSendCommandSetId(sendCommandSets[0].id);
+      }
+      setOpState({ isLoopSending: true });
+    }
+  };
+
   const handleSendFile = async () => {
     if (!activeTabId) return;
     const path = await open({ multiple: false });
@@ -170,7 +184,39 @@ const SendSection: React.FC<SendSectionProps> = ({
 
   return (
     <div className="op-section op-section-send">
-      <div className="panel-card-title eyebrow">{t('sendSection.cardTitle')}</div>
+      {/* 标题行：左侧分区名，右侧紧凑命令集控制（选择 + 循环开关 + 编辑）。
+          循环开关为图标按钮，运行时呼吸脉动；重复轮数已并入命令集设置。 */}
+      <div className="op-send-header">
+        <div className="panel-card-title eyebrow">{t('sendSection.cardTitle')}</div>
+        <div className="op-send-header-controls">
+          <select
+            className="select op-cmdset-select"
+            value={activeSendCommandSetId || ''}
+            onChange={e => setActiveSendCommandSetId(e.target.value || null)}
+            title={t('rulesSection.commandSetLabel')}
+          >
+            <option value="">{t('rulesSection.commandSetNone')}</option>
+            {sendCommandSets.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <button
+            className={`btn btn-icon btn-sm op-loop-toggle${isLoopSending ? ' is-running' : ''}`}
+            disabled={!isLoopSending && (!isPortActive || !activeSendCommandSetId || !isConnected)}
+            onClick={handleToggleLoop}
+            title={isLoopSending ? t('rulesSection.stopLoop') : t('rulesSection.startLoop')}
+          >
+            {isLoopSending ? <Square size={13} /> : <Play size={13} />}
+          </button>
+          <button
+            className="btn btn-icon btn-sm"
+            title={t('rulesSection.editCommands')}
+            onClick={() => openConfigToTab('commands')}
+          >
+            <Edit3 size={12} />
+          </button>
+        </div>
+      </div>
 
       {quickSendInlineCount > 0 && (
         <div className="op-quick-send-row">
@@ -185,7 +231,7 @@ const SendSection: React.FC<SendSectionProps> = ({
                   onClick={() => handleQuickCommand(cmd)}
                 >
                   {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
-                  <span className="op-quick-cmd-text">{cmd.content}</span>
+                  <span className="op-quick-cmd-text">{cmd.name || cmd.content}</span>
                 </button>
               ))}
               {hiddenCount > 0 && (
@@ -201,13 +247,6 @@ const SendSection: React.FC<SendSectionProps> = ({
                   ⋯ +{hiddenCount}
                 </button>
               )}
-              <button
-                className="icon-btn"
-                title={t('rulesSection.editCommands')}
-                onClick={() => openConfigToTab('commands')}
-              >
-                <Edit3 size={12} />
-              </button>
             </>
           ) : (
             <div className="op-quick-send-empty">

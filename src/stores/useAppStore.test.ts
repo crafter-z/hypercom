@@ -44,7 +44,6 @@ beforeEach(() => {
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
     isLoopSending: false,
-    loopRepeatCount: 0,
   });
 });
 
@@ -452,7 +451,7 @@ describe('Highlight Rule Set actions', () => {
 
 describe('Send Command Set actions', () => {
   const makeCmdSet = (id: string) => ({
-    id, name: `Cmd ${id}`, commands: [], isLoop: false, loopDelay: 100,
+    id, name: `Cmd ${id}`, commands: [], isLoop: false, loopDelay: 100, repeatCount: 0,
   });
 
   it('addSendCommandSet adds to the array', () => {
@@ -528,9 +527,8 @@ describe('Operation State actions', () => {
   });
 
   it('setOpState handles loop state toggle', () => {
-    useOperationStore.getState().setOpState({ isLoopSending: true, loopRepeatCount: 3 });
+    useOperationStore.getState().setOpState({ isLoopSending: true });
     expect(useOperationStore.getState().isLoopSending).toBe(true);
-    expect(useOperationStore.getState().loopRepeatCount).toBe(3);
   });
 });
 

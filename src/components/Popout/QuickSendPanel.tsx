@@ -19,8 +19,10 @@ const FLASH_MS = 260;
  * 快捷发送面板（瘦高独立窗内容，宿主无关组件）。
  *
  * 架构原则：弹窗与主窗不共享可变前端态，只交换意图/事件。
- * - 数据：SQLite 是唯一真相——mount 时直读 `load_command_sets`，
- *   收到 `command-sets:changed` 信号后自行回库重读（信号不携带数据）。
+ * - 数据：主窗 `useRuleStore` 是唯一真相——mount 时先读 `load_command_sets`
+ *   取持久化基线，随后 `command-sets:changed` 携带完整命令集载荷到达
+ *   （含配置弹窗里未点"保存"的编辑），直接 setSets 消费；request-sync 也会
+ *   触发主窗回放一次当前命令集，故弹窗始终与主窗实时一致。
  * - 发送：整行可点 = emit `popout:send-command` 意图，主窗经 sendToPort
  *   走既有管线（TX 回显 / 流量 / 历史因此与手动发送完全一致）。
  * - 键盘流：`/` 聚焦搜索，`↑/↓` 移动光标，`Enter` 发送高亮命令。
@@ -38,18 +40,21 @@ const QuickSendPanel: React.FC = () => {
   const listRef = useRef<HTMLDivElement>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** 回库重读命令集；选中集被删除时回退到第一个。 */
+  /** 应用一组命令集；选中集被删除时回退到第一个。 */
+  const applySets = useCallback((next: SendCommandSet[]) => {
+    setSets(next);
+    setSelectedSetId((prev) =>
+      prev != null && next.some((s) => s.id === prev) ? prev : next[0]?.id ?? null
+    );
+  }, []);
+
+  /** 回库重读命令集（mount 时取持久化基线；随后 request-sync 载荷纠正为含未保存编辑的实时态）。 */
   const reload = useCallback(() => {
     storageService
       .loadCommandSets()
-      .then((sets) => {
-        setSets(sets);
-        setSelectedSetId((prev) =>
-          prev != null && sets.some((s) => s.id === prev) ? prev : sets[0]?.id ?? null
-        );
-      })
+      .then(applySets)
       .catch((e) => console.debug('[QuickSendPanel] loadCommandSets failed:', e));
-  }, []);
+  }, [applySets]);
 
   useEffect(() => {
     reload();
@@ -60,7 +65,7 @@ const QuickSendPanel: React.FC = () => {
     void (async () => {
       try {
         const [unCmdSets, unActiveTab] = await Promise.all([
-          popoutEventService.onCommandSetsChanged(reload),
+          popoutEventService.onCommandSetsChanged(applySets),
           popoutEventService.onActiveTabChanged((payload) => setTargetPortId(payload.portId)),
         ]);
         if (cancelled) {

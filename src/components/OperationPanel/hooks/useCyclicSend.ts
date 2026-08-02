@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react';
 import { useRuleStore } from '../../../stores/useRuleStore';
-import { useOperationStore } from '../../../stores/useOperationStore';
 import { notifyError } from '../../../stores/useToastStore';
 import type { SendCommand } from '../../../types';
 
@@ -104,10 +103,15 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
 
         // 重复轮数优先：>0 时发送 N 轮后停止（覆盖命令集 isLoop）；
         // 0 时跟随命令集 isLoop（无限循环或单轮）。
-        const loopRepeatCount = useOperationStore.getState().loopRepeatCount;
-        const nextIdx = ref.currentCmdIdx + 1;
-        const completedRound = nextIdx >= currentSet.commands.length;
-        if (completedRound) {
+        // 重复轮数为每命令集自有配置（repeatCount），不再是全局操作态。
+        const loopRepeatCount = currentSet.repeatCount ?? 0;
+        // 轮次边界用「是否本轮最后一条」判定，而非 `nextIdx >= length`：
+        // currentCmdIdx 持续自增、从不归零会让后者在第一轮之后恒为真，
+        // 导致第二轮起每条命令都误用 loopDelay（用户配置的 per-command
+        // delay 失效）、且 completedRounds 按「条」而非「轮」累加 → 提前停发。
+        const isLastInRound = ref.currentCmdIdx === currentSet.commands.length - 1;
+        let nextDelay = cmd.delay ?? 0;
+        if (isLastInRound) {
           ref.completedRounds += 1;
           const reachedLimit = loopRepeatCount > 0
             ? ref.completedRounds >= loopRepeatCount
@@ -117,14 +121,14 @@ export function useCyclicSend(options: UseCyclicSendOptions): UseCyclicSendRetur
             ref.stopped = true;
             return;
           }
+          // 轮间间隔用 loopDelay，索引归零进入下一轮（轮内仍用 per-command delay）。
+          nextDelay = currentSet.loopDelay ?? 0;
+          ref.currentCmdIdx = 0;
+        } else {
+          ref.currentCmdIdx += 1;
         }
-        ref.currentCmdIdx = nextIdx;
 
-        const delay = completedRound && (currentSet.isLoop || loopRepeatCount > 0)
-          ? (currentSet.loopDelay ?? 0)
-          : (cmd.delay ?? 0);
-
-        ref.timeoutId = setTimeout(sendNext, delay);
+        ref.timeoutId = setTimeout(sendNext, nextDelay);
       } catch (err) {
         console.warn('[useCyclicSend] Cyclic send failed:', err);
         if (!notifiedRef.current) {

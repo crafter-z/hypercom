@@ -21,7 +21,6 @@ interface OperationState {
   sendAppendLineEnding: LineEnding;
   sendInput: string;
   isLoopSending: boolean;
-  loopRepeatCount: number; // 循环重复轮数: 0 = 跟随命令集 isLoop, >0 = 发送 N 轮后停止
 
   setOpState: (patch: Partial<Omit<OperationState, 'setOpState'>>) => void;
 }
@@ -40,7 +39,6 @@ export const useOperationStore = create<OperationState>()(
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
     isLoopSending: false,
-    loopRepeatCount: 0,
 
     setOpState: (patch) => set((state) => {
       Object.assign(state, patch);
