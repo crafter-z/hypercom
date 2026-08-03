@@ -12,6 +12,7 @@ import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pause, Play, Filter, Pin, Clock } from 'lucide-react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
+import { getRxPipeline } from '../../utils/rxPipeline';
 import type { DisplayFormat, Encoding } from '../../types';
 import type { DirectionFilter } from '../../utils/lineFilter';
 
@@ -69,8 +70,12 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
 
   // Encoding switches apply straight to this port's decode pipeline and
   // re-decode existing content; the bar itself needs no re-render, so write
-  // through getState() without subscribing.
+  // through getState() without subscribing. Flush the RX pipeline's pending
+  // tail under the OLD encoding first — otherwise a partially-buffered line
+  // (e.g. a half GBK char) would be re-decoded under the new label and
+  // corrupt the seam.
   const handleEncodingChange = useCallback((value: string) => {
+    getRxPipeline().flushAndReset(portId);
     useTerminalStore.getState().setTerminalEncoding(portId, value as Encoding);
   }, [portId]);
 

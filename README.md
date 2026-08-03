@@ -22,6 +22,8 @@
 - 📑 **多标签 + 分屏** — 上下/左右分屏、跨 Pane 拖拽、`@dnd-kit` 排序
 - ⏪ **日志回放** — 按原始时间戳写回终端，倍速可选（1/4/16/最快）
 - ⚡ **虚拟滚动** — `@tanstack/react-virtual`，DOM 约 30–50 节点
+- 🧩 **RX 行聚合** — 字节级 CR/LF/CRLF 切行 + rAF 批写，跨事件响应不再碎成多行，高频流不掉帧
+- 📌 **滚动锁定 + 快捷跳转** — 显式意图锁定（不再被输出顶开），滚动条两端一键到顶/到底
 - 🎨 **语法高亮** — 正则 / 关键词规则集，可配置颜色、加粗、斜体
 - 📅 **时间戳 / TX·RX 着色** — 多种格式、字符串/HEX/二进制切换（per-tab）
 - 🌐 **编码实时切换** — UTF-8 / GBK / ISO-8859-1 / ASCII，切换时自动重解码
@@ -124,7 +126,7 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (280 cases / 15 files)
+npm run test:run                                       # vitest (364 cases / 17 files)
 cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (39 cases)
 ```
 

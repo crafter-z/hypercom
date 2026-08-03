@@ -19,8 +19,11 @@ import type { TerminalLine, DisplayFormat } from '../../types';
 import { findMatches } from './terminalSearch';
 
 export interface SearchJumpContext {
-  /** Original line index → rendered (filtered) row index. */
-  originalToFiltered: Map<number, number>;
+  /** Original line index → rendered (filtered) row index; `null` when no
+   *  filter is active (identity — the original index IS the rendered row). */
+  originalToFiltered: Map<number, number> | null;
+  /** Number of rows currently rendered (the frozen prefix length while paused). */
+  visibleCount: number;
   /** Total line count of the unfiltered buffer. */
   lineCount: number;
   /** Scroll the virtualizer so the given filtered row index is centered. */
@@ -82,18 +85,24 @@ export function useTerminalSearch({
   const jumpToMatch = useCallback((idx: number) => {
     const matches = matchIndicesRef.current;
     if (matches.length === 0) return;
-    const { originalToFiltered, lineCount, scrollToFilteredIndex } = getJumpContext();
+    const { originalToFiltered, visibleCount, lineCount, scrollToFilteredIndex } = getJumpContext();
     let clamped = ((idx % matches.length) + matches.length) % matches.length;
     // Search runs over the FULL view, but the jump must land on a rendered
-    // row: if the target match is hidden by an active filter, advance to the
-    // nearest visible match instead. If NO match survives the filter, leave
-    // state unchanged so the UI never points at a hidden line.
-    if (originalToFiltered.size < lineCount) {
-      if (!originalToFiltered.has(matches[clamped])) {
+    // row. A match is rendered iff it survives the active filter (map lookup)
+    // or — when no filter is active (map === null, identity) — iff it lies
+    // within the visible prefix (matches[i] < visibleCount), which also keeps
+    // paused views from jumping past the frozen prefix. If the target match
+    // is hidden, advance to the nearest visible match; if NO match is
+    // visible, leave state unchanged so the UI never points at a hidden line.
+    const map = originalToFiltered;
+    const isVisible = (origIdx: number): boolean =>
+      map !== null ? map.has(origIdx) : origIdx < visibleCount;
+    if ((map !== null ? map.size : visibleCount) < lineCount) {
+      if (!isVisible(matches[clamped])) {
         let foundVisible = false;
         for (let step = 1; step < matches.length; step++) {
           const candidate = (clamped + step) % matches.length;
-          if (originalToFiltered.has(matches[candidate])) {
+          if (isVisible(matches[candidate])) {
             clamped = candidate;
             foundVisible = true;
             break;
@@ -102,7 +111,8 @@ export function useTerminalSearch({
         if (!foundVisible) return;
       }
     }
-    const virtIdx = originalToFiltered.get(matches[clamped]);
+    // Rendered row index: map lookup when filtered, identity otherwise.
+    const virtIdx = map !== null ? map.get(matches[clamped]) : matches[clamped];
     if (virtIdx === undefined) return;
     setCurrentMatch(clamped);
     scrollToFilteredIndex(virtIdx);

@@ -320,12 +320,29 @@ function findHeader(buffer: number[], header: number[]): number {
   return -1;
 }
 
+// ==================== ReassemblerSegment ====================
+
+/**
+ * 有序段（流顺序）：帧段或裸字节段。
+ *
+ * 旧 API `{ frames, flushedBytes }` 把**所有**帧与**所有**裸字节分开返回——
+ * 但裸字节可能出现在第一帧**之前**（header 搜索跳过的非帧前缀）、两帧**之间**
+ * （垃圾数据）或损坏帧跳过后。调用方把全部 frames 追加后才追加 flushedBytes，
+ * 导致字节流顺序错乱（先帧后裸，而实际应先裸后帧）。
+ *
+ * 新 API 返回按流位置排列的段数组：裸字节 flushed 在扫描到 header 之前
+ * 就排在对应帧之前，下游按段顺序入队即可保持字节流时序。
+ */
+export type ReassemblerSegment =
+  | { kind: 'frame'; frame: ParsedFrame }
+  | { kind: 'raw'; bytes: number[] };
+
 // ==================== ProtocolFrameReassembler ====================
 
 /**
  * Stateful frame reassembler. Maintains a byte buffer across feeds.
- * Call `feed()` with incoming byte chunks; it returns complete frames
- * and any non-frame bytes that were flushed.
+ * Call `feed()` with incoming byte chunks; it returns an ORDERED stream of
+ * segments (frames and raw bytes in byte-stream order).
  */
 export class ProtocolFrameReassembler {
   private buffer: number[] = [];
@@ -336,23 +353,37 @@ export class ProtocolFrameReassembler {
   }
 
   /**
-   * Feed incoming bytes and return complete frames plus any flushed non-frame bytes.
-   * Non-frame bytes (header search failures, corrupt frames) are returned in flushedBytes.
+   * Feed incoming bytes and return an ordered array of segments.
+   *
+   * Raw bytes that appear BEFORE a frame in the stream (header-scan skips,
+   * inter-frame garbage, corrupt-frame skips) are emitted as `{kind:'raw'}`
+   * segments ordered relative to `{kind:'frame'}` segments. Adjacent raw
+   * segments are merged so the caller gets at most one raw between two frames.
    */
-  feed(bytes: number[]): { frames: ParsedFrame[]; flushedBytes: number[] } {
-    const frames: ParsedFrame[] = [];
-    const flushedBytes: number[] = [];
+  feed(bytes: number[]): ReassemblerSegment[] {
+    const segments: ReassemblerSegment[] = [];
 
     // Append incoming bytes to buffer
     this.buffer.push(...bytes);
 
     const headerBytes = parseHexString(this.template.headerBytes);
 
+    // emitRaw: push a raw segment, merging with the previous if it is also raw
+    const emitRaw = (rawBytes: number[]): void => {
+      if (rawBytes.length === 0) return;
+      const last = segments[segments.length - 1];
+      if (last && last.kind === 'raw') {
+        last.bytes.push(...rawBytes);
+      } else {
+        segments.push({ kind: 'raw', bytes: [...rawBytes] });
+      }
+    };
+
     // Main parsing loop
     while (this.buffer.length > 0) {
       // Safety: prevent unbounded buffer growth
       if (this.buffer.length > MAX_FRAME_SIZE) {
-        flushedBytes.push(...this.buffer);
+        emitRaw(this.buffer);
         this.buffer = [];
         break;
       }
@@ -362,13 +393,13 @@ export class ProtocolFrameReassembler {
         const headerPos = findHeader(this.buffer, headerBytes);
         if (headerPos === -1) {
           // No header found — flush all buffer as non-frame bytes
-          flushedBytes.push(...this.buffer);
+          emitRaw(this.buffer);
           this.buffer = [];
           break;
         }
         // Flush bytes before header match
         if (headerPos > 0) {
-          flushedBytes.push(...this.buffer.slice(0, headerPos));
+          emitRaw(this.buffer.slice(0, headerPos));
           this.buffer = this.buffer.slice(headerPos);
         }
       }
@@ -385,17 +416,17 @@ export class ProtocolFrameReassembler {
         // Advance past the matched header and keep scanning for the next frame,
         // instead of stalling on the same bytes forever.
         const skip = Math.min(Math.max(1, outcome.skip), this.buffer.length);
-        flushedBytes.push(...this.buffer.slice(0, skip));
+        emitRaw(this.buffer.slice(0, skip));
         this.buffer = this.buffer.slice(skip);
         continue;
       }
 
       // Extract complete frame bytes from buffer
-      frames.push(outcome.frame);
+      segments.push({ kind: 'frame', frame: outcome.frame });
       this.buffer = this.buffer.slice(outcome.frame.bytes.length);
     }
 
-    return { frames, flushedBytes };
+    return segments;
   }
 
   /** Reset the internal buffer (e.g., when template changes or port disconnects) */

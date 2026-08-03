@@ -4,6 +4,7 @@ import { useTerminalStore } from '../stores/useTerminalStore';
 import { serialService } from '../services/tauri';
 import type { SendHistoryEntry, LineEnding } from '../types';
 import { notifyError } from '../stores/useToastStore';
+import { getRxPipeline } from '../utils/rxPipeline';
 
 // ==================== Module-level in-memory send history ====================
 // Per-port send history lives ONLY in memory (user decision: history may
@@ -63,6 +64,15 @@ export async function sendToPort(
         .map((tok) => parseInt(tok, 16))
         .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
     : Array.from(new TextEncoder().encode(data));
+
+  // Drain any pending RX lines from the pipeline queue BEFORE appending the
+  // TX echo. With RX now batched up to one animation frame, a zero-delay
+  // cyclic send would otherwise render TX1,TX2,RX1 instead of the natural
+  // TX1,RX1,TX2 order. RX that physically arrived before this send but
+  // hasn't flushed yet would render AFTER the TX line without this drain.
+  // Synchronously flushing here restores the "TX precedes its own response"
+  // invariant — the response arrives during the await below, not before.
+  getRxPipeline().flushNow(portId);
 
   // Append the TX echo BEFORE the backend call. The sim port's read thread
   // emits the loopback RX during the await below; appending TX only after the

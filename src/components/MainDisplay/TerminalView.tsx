@@ -4,6 +4,14 @@
  * Display modes (filter/pause) → useTerminalDisplay · search →
  * useTerminalSearch + TerminalSearchBar · strip UI + replay →
  * TerminalFilterBar · rows → TerminalRow · menu → buildTerminalContextMenuItems.
+ *
+ * SCROLL-LOCK DESIGN: `scrollLocked` (per-tab, in useTerminalStore) changes
+ * ONLY via explicit user intent — the pin toggle, the quick-jump buttons, or
+ * the settle() evaluation that runs ~120ms after a user scroll gesture ends.
+ * There is deliberately NO onScroll handler: raw scroll events also fire for
+ * programmatic scrolls, mount-at-top, virtualizer measurement lag, content
+ * growth and maxLines-trim clamping, and letting them write scrollLocked was
+ * the root cause of the implicit-unlock bugs.
  */
 import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import type { TerminalState } from '../../types';
@@ -12,6 +20,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
 import { isSameRound } from '../../utils/timeFormat';
 import { useTranslation } from 'react-i18next';
 import { useTerminalDisplay } from './useTerminalDisplay';
@@ -36,29 +45,28 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const protocolTemplateId = useAppStore((s) => s.ports.find(p => p.id === portId)?.protocolTemplateId);
   const timestampFormat = useAppStore((s) => s.config.timestampFormat);
   const timestampMode = useAppStore((s) => s.config.timestampMode);
+  const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const setTerminalConfig = useTerminalStore((s) => s.setTerminalConfig);
-  const autoScrollRef = useRef(true);
-  // Guards handleScroll from reacting to programmatic scrollToIndex events.
-  // During fast serial output the virtualizer's layout lags behind the DOM,
-  // causing atBottom to flicker false and permanently killing auto-scroll.
-  const isAutoScrollingRef = useRef(false);
-  const autoScrollTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
-  // Per-round grouping: lines within ~50ms of their predecessor share a round.
-  const firstInRound = useMemo(() => {
-    if (timestampMode !== 'perRound' || lines.length === 0) return null;
-    const arr = new Array<boolean>(lines.length);
-    arr[0] = true;
-    for (let i = 1; i < lines.length; i++) {
-      arr[i] = !isSameRound(lines[i - 1], lines[i]);
-    }
-    return arr;
-  }, [lines, timestampMode]);
+  // Mirrors terminal.scrollLocked — the single follow-flag read by the
+  // auto-follow effect. Written only by the sync effect below (store-driven).
+  const followRef = useRef(true);
+  // Current rendered row count — scrollToBottom reads it through this ref so
+  // its identity stays stable (STABILIZATION pattern).
+  const countRef = useRef(0);
+
+  // Gesture system: explicit user-scroll detection. While a gesture is
+  // active, auto-follow is suppressed; when it settles (120ms of quiet),
+  // settle() derives the NEW scrollLocked from the final position — the only
+  // place scroll input can change the lock state.
+  const gestureActiveRef = useRef(false);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const pointerHoldRef = useRef(false);
 
   // Display modes: direction/keyword filtering + pause/freeze (UI-local).
   const {
     directionFilter, setDirectionFilter, keywordInput, setKeywordInput,
-    debouncedKeyword, paused, togglePause, filteredIndices, originalToFiltered,
+    debouncedKeyword, paused, togglePause, visibleCount, filteredIndices, originalToFiltered,
   } = useTerminalDisplay({ portId, lines });
 
   // Selection state (UI-local); contextLineIndexRef backs the context menu's
@@ -77,26 +85,25 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const filteredIndicesRef = useRef(filteredIndices);
   filteredIndicesRef.current = filteredIndices;
 
-  // Sync store's scrollLocked to local ref (for OperationPanel toggle)
-  useEffect(() => {
-    if (terminal?.scrollLocked !== undefined) {
-      autoScrollRef.current = terminal.scrollLocked;
-    }
-  }, [terminal?.scrollLocked]);
+  // null sentinel = no filter active → identity mapping, render the visible
+  // prefix directly; otherwise render exactly the surviving indices.
+  const renderedCount = filteredIndices ? filteredIndices.length : visibleCount;
+  countRef.current = renderedCount;
 
   const getScrollElement = useCallback(() => scrollRef.current, []);
-  const estimateSize = useCallback(() => {
-    const fontSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size-terminal')) || 14;
-    return Math.round(fontSize * 1.5);
-  }, []);
+  // Row height estimate from the store font size (kept in sync with the
+  // --font-size-terminal var by ThemeProvider + the Ctrl+wheel handler) —
+  // avoids a per-call getComputedStyle on the hot virtualizer path.
+  const estimateSize = useCallback(() => Math.round(terminalFontSize * 1.5), [terminalFontSize]);
   const getItemKey = useCallback((index: number) => {
-    const orig = filteredIndicesRef.current[index];
+    const indices = filteredIndicesRef.current;
+    const orig = indices ? indices[index] : index;
     if (orig === undefined) return index;
     return linesRef.current[orig]?.id ?? index;
   }, []);
 
   const virtualizer = useVirtualizer({
-    count: filteredIndices.length,
+    count: renderedCount,
     getScrollElement,
     estimateSize,
     overscan: 12,
@@ -104,16 +111,98 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     useFlushSync: false,         // Prevent flushSync → synchronous render cascades
   });
 
+  // Scroll to the last rendered row; reads the live count through countRef.
+  const scrollToBottom = useCallback(() => {
+    const count = countRef.current;
+    if (count > 0) {
+      virtualizer.scrollToIndex(count - 1, { align: 'end', behavior: 'auto' });
+    }
+  }, [virtualizer]);
+
+  // Sync the store's scrollLocked to followRef. Explicit-intent transitions:
+  // on false→true OR on first render with locked=true (tab remount of a
+  // locked tab — Pane keys TerminalView by tabId) jump to the latest row
+  // immediately, fixing "click pin doesn't jump" and "locked tab loses its
+  // position after tab switch". Mount with locked=false shows the buffer top.
+  const prevLockedRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    const locked = terminal?.scrollLocked;
+    if (locked === undefined) return;
+    const prev = prevLockedRef.current;
+    prevLockedRef.current = locked;
+    followRef.current = locked;
+    const becameLocked = prev === undefined ? locked : locked && !prev;
+    if (becameLocked) scrollToBottom();
+  }, [terminal?.scrollLocked, scrollToBottom]);
+
+  // Settle handler: a user scroll gesture ended — derive scrollLocked from
+  // the final position (50px tolerance absorbs virtualizer layout lag).
+  const settle = useCallback(() => {
+    gestureActiveRef.current = false;
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
+    if (atBottom !== useTerminalStore.getState().terminals[portId]?.scrollLocked) {
+      setTerminalConfig(portId, { scrollLocked: atBottom });
+    }
+  }, [portId, setTerminalConfig]);
+
+  const beginGesture = useCallback(() => {
+    gestureActiveRef.current = true;
+    clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = setTimeout(settle, 120);
+  }, [settle]);
+
+  // Cleanup the settle timer on unmount.
+  useEffect(() => () => clearTimeout(settleTimerRef.current), []);
+
+  // Ctrl+wheel font zoom (8–48px, mirrored to the --font-size-terminal var);
+  // every wheel event is also an explicit scroll gesture.
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    beginGesture();
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const store = useAppStore.getState();
+    const current = store.config.terminalFontSize;
+    const delta = e.deltaY > 0 ? -1 : 1;
+    const next = Math.max(8, Math.min(48, current + delta));
+    if (next !== current) {
+      document.documentElement.style.setProperty('--font-size-terminal', `${next}px`);
+      store.setConfig({ terminalFontSize: next });
+    }
+  }, [beginGesture]);
+
+  // Scrollbar drag / middle-click autoscroll start: target===currentTarget
+  // means the pointer hit the scroll container itself (the scrollbar track
+  // or thumb — row divs are nested deeper); button===1 covers Windows
+  // middle-click autoscroll. Hold the gesture open until pointer-up.
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button === 1 || e.target === e.currentTarget) {
+      gestureActiveRef.current = true;
+      pointerHoldRef.current = true;
+      clearTimeout(settleTimerRef.current);
+    }
+  }, []);
+
+  const handlePointerUp = useCallback(() => {
+    if (!pointerHoldRef.current) return;
+    pointerHoldRef.current = false;
+    clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = setTimeout(settle, 120);
+  }, [settle]);
+
   // Search jumps need the filtered-view mapping + virtualizer scroll (both
   // change every render) — exposed via a ref-backed getter so the hook's
   // callbacks stay stable (same pattern as linesRef above).
   const jumpContextRef = useRef<SearchJumpContext>({
-    originalToFiltered: new Map(),
+    originalToFiltered: null,
+    visibleCount: 0,
     lineCount: 0,
     scrollToFilteredIndex: () => {},
   });
   jumpContextRef.current = {
     originalToFiltered,
+    visibleCount,
     lineCount: lines.length,
     scrollToFilteredIndex: (filteredIndex) => virtualizer.scrollToIndex(filteredIndex, { align: 'center' }),
   };
@@ -125,42 +214,30 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     nextMatch, prevMatch,
   } = useTerminalSearch({ lines, displayFormat: terminal?.displayFormat, getJumpContext });
 
-  // Auto-scroll to bottom on new lines; skipped while paused (frozen view).
-  // On resume, filteredIndices.length changes and this effect catches up.
+  // Follow suppression while the search bar is open — the view must not snap
+  // back under the user's current match. Updated during render so effects
+  // (which run after render) always see the current value.
+  const searchOpenRef = useRef(searchOpen);
+  searchOpenRef.current = searchOpen;
+
+  // Closing search re-engages follow when the store says scrollLocked: the
+  // auto-follow effect won't refire on its own (no count change), so jump
+  // back to latest explicitly.
+  const handleSearchClose = useCallback(() => {
+    closeSearch();
+    if (useTerminalStore.getState().terminals[portId]?.scrollLocked) {
+      scrollToBottom();
+    }
+  }, [closeSearch, portId, scrollToBottom]);
+
+  // Auto-follow: keep the bottom row in view as new rows render. Runs on
+  // count changes; skipped while paused (frozen view), unlocked, mid-gesture
+  // (explicit user scroll), or while search is open. On resume the count
+  // changes and this effect catches up.
   useEffect(() => {
-    if (paused) return;
-    if (autoScrollRef.current && filteredIndices.length > 0) {
-      isAutoScrollingRef.current = true;
-      virtualizer.scrollToIndex(filteredIndices.length - 1, { align: 'end', behavior: 'auto' });
-      // Clear the guard after the scroll settles. During sustained fast output
-      // the timer keeps resetting so the flag stays true (desired — the user
-      // can still disengage via the scroll-lock toggle or a wheel event).
-      clearTimeout(autoScrollTimerRef.current);
-      autoScrollTimerRef.current = setTimeout(() => {
-        isAutoScrollingRef.current = false;
-      }, 80);
-    }
-  }, [filteredIndices.length, virtualizer, paused]);
-
-  // Cleanup the auto-scroll timer on unmount.
-  useEffect(() => () => clearTimeout(autoScrollTimerRef.current), []);
-
-  // Ctrl+wheel font zoom (8–48px, mirrored to the --font-size-terminal var)
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    // Any user-initiated wheel scroll clears the programmatic-scroll guard so
-    // handleScroll can correctly detect the user's intent to disengage auto-scroll.
-    isAutoScrollingRef.current = false;
-    if (!e.ctrlKey) return;
-    e.preventDefault();
-    const store = useAppStore.getState();
-    const current = store.config.terminalFontSize;
-    const delta = e.deltaY > 0 ? -1 : 1;
-    const next = Math.max(8, Math.min(48, current + delta));
-    if (next !== current) {
-      document.documentElement.style.setProperty('--font-size-terminal', `${next}px`);
-      store.setConfig({ terminalFontSize: next });
-    }
-  }, []);
+    if (paused || !followRef.current || gestureActiveRef.current || searchOpenRef.current) return;
+    scrollToBottom();
+  }, [renderedCount, virtualizer, paused, scrollToBottom]);
 
   // Ctrl+L clears, Ctrl+F toggles search, F3/Shift+F3 step matches, Esc closes
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -178,31 +255,33 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     }
     if (e.key === 'Escape' && searchOpen) {
       e.preventDefault();
-      closeSearch();
+      handleSearchClose();
       return;
     }
     if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) {
       e.preventDefault();
       useTerminalStore.getState().clearTerminal(portId);
+      return;
     }
-  }, [portId, searchOpen, toggleSearch, openSearch, closeSearch, nextMatch, prevMatch]);
+    // Native keyboard scrolling on the focused container is an explicit
+    // gesture — settle() evaluates the final position (Ctrl+Home/End share
+    // the key names and are covered too).
+    if (e.target === e.currentTarget && ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
+      beginGesture();
+    }
+  }, [portId, searchOpen, toggleSearch, openSearch, handleSearchClose, nextMatch, prevMatch, beginGesture]);
 
-  const handleScroll = useCallback(() => {
-    if (!scrollRef.current) return;
-    // Ignore scroll events triggered by our own scrollToIndex calls — during
-    // fast output the virtualizer's measured sizes lag, making atBottom
-    // unreliable and permanently killing auto-scroll.
-    if (isAutoScrollingRef.current) return;
-    const el = scrollRef.current;
-    // 30px tolerance absorbs virtualizer layout lag during bursts.
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-    if (atBottom !== autoScrollRef.current) {
-      autoScrollRef.current = atBottom;
-      if (portId) {
-        setTerminalConfig(portId, { scrollLocked: atBottom });
-      }
-    }
-  }, [portId, setTerminalConfig]);
+  // Quick-jump button targets (pinned at the scrollbar ends). Both are
+  // explicit intent: they WRITE scrollLocked.
+  const jumpToTop = useCallback(() => {
+    setTerminalConfig(portId, { scrollLocked: false });
+    virtualizer.scrollToIndex(0, { align: 'start', behavior: 'auto' });
+  }, [portId, setTerminalConfig, virtualizer]);
+
+  const jumpToBottom = useCallback(() => {
+    setTerminalConfig(portId, { scrollLocked: true });
+    scrollToBottom();
+  }, [portId, setTerminalConfig, scrollToBottom]);
 
   const handleSelectAll = useCallback(() => {
     const sel = window.getSelection();
@@ -241,12 +320,21 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     const range = selectedRange ?? (
       clickedIdx !== null ? { start: clickedIdx, end: clickedIdx } : null
     );
+    // On-demand first-in-round check over the menu's own snapshot — O(1) per
+    // exported line instead of a precomputed boolean[] over the whole buffer.
+    const isFirstInRound = (idx: number): boolean => {
+      if (idx <= 0) return true;
+      const prev = currentLines[idx - 1];
+      const cur = currentLines[idx];
+      if (!prev || !cur) return true;
+      return !isSameRound(prev, cur);
+    };
     const items = buildTerminalContextMenuItems({
       portId,
       lines: currentLines,
       range,
       timestampMode,
-      firstInRound,
+      isFirstInRound,
       connectedAt: terminal?.connectedAt ?? null,
       timestampFormat,
       t,
@@ -254,10 +342,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     });
     setContextMenu({ x: e.clientX, y: e.clientY, items });
     contextLineIndexRef.current = null;
-  }, [handleSelectAll, portId, selectedRange, t, timestampMode, firstInRound, terminal?.connectedAt, timestampFormat]);
+  }, [handleSelectAll, portId, selectedRange, t, timestampMode, terminal?.connectedAt, timestampFormat]);
 
   const matchSet = useMemo(() => new Set(matchIndices), [matchIndices]);
   const currentMatchLineIdx = matchIndices.length > 0 ? matchIndices[currentMatch] : -1;
+  const scrollLocked = terminal?.scrollLocked === true;
 
   return (
     <div className="terminal-view-container">
@@ -288,7 +377,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
         onDirectionChange={setDirectionFilter}
         keyword={keywordInput}
         onKeywordChange={setKeywordInput}
-        matchCount={filteredIndices.length}
+        matchCount={renderedCount}
         showMatchCount={debouncedKeyword.trim().length > 0}
         paused={paused}
         onTogglePause={togglePause}
@@ -303,49 +392,79 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
           matchCount={matchIndices.length}
           onNext={nextMatch}
           onPrev={prevMatch}
-          onClose={closeSearch}
+          onClose={handleSearchClose}
         />
       )}
-      <div
-        ref={scrollRef}
-        className="terminal-view"
-        tabIndex={0}
-        onContextMenu={handleContextMenu}
-        onScroll={handleScroll}
-        onWheel={handleWheel}
-        onKeyDown={handleKeyDown}
-      >
-        <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
-          {virtualizer.getVirtualItems().map((vRow) => {
-            // Filtered row index → original lines[] index, so timestamps,
-            // selection, copy and search highlighting target the right line.
-            const origIdx = filteredIndices[vRow.index] ?? vRow.index;
-            const line = lines[origIdx];
-            if (!line) return null;
-            return (
-              <TerminalRow
-                key={vRow.key}
-                line={line}
-                origIdx={origIdx}
-                lines={lines}
-                terminal={terminal}
-                highlightRuleSets={highlightRuleSets}
-                timestampFormat={timestampFormat}
-                timestampMode={timestampMode}
-                firstInRound={firstInRound}
-                selectedRange={selectedRange}
-                searchOpen={searchOpen}
-                matchSet={matchSet}
-                currentMatchLineIdx={currentMatchLineIdx}
-                rowIndex={vRow.index}
-                rowStart={vRow.start}
-                measureRef={virtualizer.measureElement}
-                onRowClick={handleRowClick}
-                onRowContextMenu={handleRowContextMenu}
-              />
-            );
-          })}
+      <div className="terminal-scroll-wrap">
+        <div
+          ref={scrollRef}
+          className="terminal-view"
+          tabIndex={0}
+          onContextMenu={handleContextMenu}
+          onWheel={handleWheel}
+          onKeyDown={handleKeyDown}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+        >
+          <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+            {virtualizer.getVirtualItems().map((vRow) => {
+              // Filtered row index → original lines[] index, so timestamps,
+              // selection, copy and search highlighting target the right line.
+              // null filteredIndices → identity (no filter active).
+              const origIdx = filteredIndices ? (filteredIndices[vRow.index] ?? vRow.index) : vRow.index;
+              const line = lines[origIdx];
+              if (!line) return null;
+              // O(1) per-row round boundary (replaces the precomputed
+              // boolean[] over the whole buffer).
+              const isFirstInRound = timestampMode !== 'perRound'
+                ? true
+                : origIdx === 0 || !isSameRound(lines[origIdx - 1], line);
+              return (
+                <TerminalRow
+                  key={vRow.key}
+                  line={line}
+                  origIdx={origIdx}
+                  prevLine={origIdx > 0 ? lines[origIdx - 1] : undefined}
+                  displayFormat={terminal?.displayFormat}
+                  showTimestamp={terminal?.showTimestamp}
+                  connectedAt={terminal?.connectedAt}
+                  highlightRuleSets={highlightRuleSets}
+                  timestampFormat={timestampFormat}
+                  timestampMode={timestampMode}
+                  isFirstInRound={isFirstInRound}
+                  selectedRange={selectedRange}
+                  searchOpen={searchOpen}
+                  matchSet={matchSet}
+                  currentMatchLineIdx={currentMatchLineIdx}
+                  rowIndex={vRow.index}
+                  rowStart={vRow.start}
+                  measureRef={virtualizer.measureElement}
+                  onRowClick={handleRowClick}
+                  onRowContextMenu={handleRowContextMenu}
+                />
+              );
+            })}
+          </div>
         </div>
+        <button
+          type="button"
+          className="terminal-jump-btn top"
+          title={t('terminal.jumpToTop')}
+          aria-label={t('terminal.jumpToTop')}
+          onClick={jumpToTop}
+        >
+          <ArrowUpToLine size={13} />
+        </button>
+        <button
+          type="button"
+          className={`terminal-jump-btn bottom${scrollLocked ? ' active' : ''}`}
+          title={t('terminal.jumpToBottom')}
+          aria-label={t('terminal.jumpToBottom')}
+          onClick={jumpToBottom}
+        >
+          <ArrowDownToLine size={13} />
+        </button>
       </div>
 
       {contextMenu && (

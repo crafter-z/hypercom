@@ -20,11 +20,11 @@ const sample = (): TerminalLine[] => [
 ];
 
 describe('filterLines', () => {
-  it('returns identity mapping when no filter is active', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: '' })).toEqual([0, 1, 2, 3, 4]);
+  it('returns null (implicit identity) when no filter is active', () => {
+    expect(filterLines(sample(), { direction: 'all', keyword: '' })).toBeNull();
   });
 
-  it('returns empty array for empty input', () => {
+  it('returns empty array for empty input with an active filter', () => {
     expect(filterLines([], { direction: 'TX', keyword: 'x' })).toEqual([]);
   });
 
@@ -42,7 +42,7 @@ describe('filterLines', () => {
   });
 
   it('treats whitespace-only keyword as no keyword filter', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: '   ' })).toEqual([0, 1, 2, 3, 4]);
+    expect(filterLines(sample(), { direction: 'all', keyword: '   ' })).toBeNull();
   });
 
   it('trims keyword before matching', () => {
@@ -69,8 +69,34 @@ describe('filterLines', () => {
   });
 
   it('accepts every DirectionFilter value', () => {
+    const lines = sample();
     const dirs: DirectionFilter[] = ['all', 'TX', 'RX'];
-    const counts = dirs.map((d) => filterLines(sample(), { direction: d, keyword: '' }).length);
+    // null means implicit identity — count falls back to lines.length.
+    const counts = dirs.map((d) => filterLines(lines, { direction: d, keyword: '' })?.length ?? lines.length);
     expect(counts).toEqual([5, 2, 3]);
+  });
+
+  describe('limit', () => {
+    it('stops scanning at limit for keyword filters', () => {
+      // 'at' matches indices 0, 2, 4 in the full sample; limit 2 scans 0..1.
+      expect(filterLines(sample(), { direction: 'all', keyword: 'at' }, 2)).toEqual([0]);
+    });
+
+    it('stops scanning at limit for direction filters', () => {
+      // RX lives at 1, 3, 4; limit 3 scans 0..2 → only index 1.
+      expect(filterLines(sample(), { direction: 'RX', keyword: '' }, 3)).toEqual([1]);
+    });
+
+    it('returns empty for limit 0 with an active filter', () => {
+      expect(filterLines(sample(), { direction: 'all', keyword: 'at' }, 0)).toEqual([]);
+    });
+
+    it('still returns null with no active filter regardless of limit', () => {
+      expect(filterLines(sample(), { direction: 'all', keyword: '' }, 2)).toBeNull();
+    });
+
+    it('treats limit beyond the buffer as the full buffer', () => {
+      expect(filterLines(sample(), { direction: 'RX', keyword: '' }, 99)).toEqual([1, 3, 4]);
+    });
   });
 });

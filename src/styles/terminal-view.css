@@ -24,6 +24,67 @@
   user-select: text;
 }
 
+/* ==================== Scroll Wrap + Quick-Jump Buttons ====================
+ * Relative-positioned flex wrapper around the scroll container — keeps the
+ * min-height:0 chain intact and pins the quick-jump buttons at the ends of
+ * the scrollbar without touching the virtualized content.
+ */
+.terminal-scroll-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Small pill button riding the scrollbar edge; hover/active pick up the
+ * accent treatment (active mirrors the filter-bar pin look). */
+.terminal-jump-btn {
+  position: absolute;
+  right: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition-fast), color var(--transition-fast),
+              border-color var(--transition-fast);
+}
+
+.terminal-jump-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.terminal-jump-btn.top {
+  top: 6px;
+}
+
+.terminal-jump-btn.bottom {
+  bottom: 6px;
+}
+
+/* Follow-mode engaged (bottom button tracks scrollLocked). */
+.terminal-jump-btn.active {
+  background: var(--bg-active);
+  color: var(--accent-color);
+  border-color: var(--accent-emphasis);
+}
+
+.terminal-jump-btn:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
 .terminal-line {
   display: flex;
   gap: var(--space-2);

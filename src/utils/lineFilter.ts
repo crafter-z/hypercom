@@ -7,6 +7,11 @@
  * The filter works at the DATA level: it returns the list of ORIGINAL
  * indices into `lines` that pass the filter, so the virtualizer only
  * renders matching rows (never hidden DOM nodes).
+ *
+ * Null-sentinel contract: when NO filter is active the function returns
+ * `null` instead of allocating the identity array [0..n-1] — callers treat
+ * null as "identity is implicit" and render `limit ?? lines.length` rows
+ * directly. This keeps the high-frequency append path allocation-free.
  */
 import type { TerminalLine } from '../types';
 
@@ -26,26 +31,28 @@ export interface LineFilterOptions {
  * - direction 'all' imposes no constraint.
  * - keyword is trimmed and matched case-insensitively against `content`;
  *   an empty/whitespace keyword imposes no constraint.
- * - With no active filter, returns the identity mapping [0..n-1].
+ * - With no active filter, returns `null` (identity is implicit; callers
+ *   render `limit ?? lines.length` rows directly — no allocation).
+ * - `limit` caps the scanned prefix of `lines` (0..limit). It replaces the
+ *   old paused-prefix slice: callers pass the frozen line count while the
+ *   view is paused instead of allocating `lines.slice(0, frozenCount)`.
  */
 export function filterLines(
   lines: TerminalLine[],
-  options: LineFilterOptions
-): number[] {
+  options: LineFilterOptions,
+  limit?: number
+): number[] | null {
   const direction = options.direction;
   const keyword = options.keyword.trim().toLowerCase();
   const hasDirection = direction !== 'all';
   const hasKeyword = keyword.length > 0;
 
-  // Fast path: identity mapping when nothing is filtered.
-  if (!hasDirection && !hasKeyword) {
-    const all = new Array<number>(lines.length);
-    for (let i = 0; i < lines.length; i++) all[i] = i;
-    return all;
-  }
+  // Fast path: identity when nothing is filtered — no allocation.
+  if (!hasDirection && !hasKeyword) return null;
 
+  const end = limit !== undefined && limit < lines.length ? limit : lines.length;
   const result: number[] = [];
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0; i < end; i++) {
     const line = lines[i];
     if (hasDirection && line.direction !== direction) continue;
     if (hasKeyword && !line.content.toLowerCase().includes(keyword)) continue;

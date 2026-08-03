@@ -14,17 +14,26 @@ export function formatAbsoluteTimestamp(ts: number): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
 }
 
+/** Relative delta between two adjacent lines ('+0ms' without a predecessor). */
+export function formatRelativeDelta(
+  line: TerminalLine,
+  prevLine: TerminalLine | undefined
+): string {
+  if (!prevLine) return '+0ms';
+  const delta = Math.max(0, line.timestamp - prevLine.timestamp);
+  if (delta >= 1000) {
+    return `+${(delta / 1000).toFixed(1)}s`;
+  }
+  return `+${delta}ms`;
+}
+
 /** Relative delta since the previous line of the same port. */
 export function formatRelativeTimestamp(
   lines: TerminalLine[],
   index: number
 ): string {
-  if (index <= 0 || lines.length === 0) return '+0ms';
-  const delta = Math.max(0, lines[index].timestamp - lines[index - 1].timestamp);
-  if (delta >= 1000) {
-    return `+${(delta / 1000).toFixed(1)}s`;
-  }
-  return `+${delta}ms`;
+  if (lines.length === 0) return '+0ms';
+  return formatRelativeDelta(lines[index], index > 0 ? lines[index - 1] : undefined);
 }
 
 /** Elapsed time since the port connected (or the line timestamp if unknown). */
@@ -55,6 +64,30 @@ export function formatTerminalTimestamp(
   switch (format) {
     case 'relative':
       return formatRelativeTimestamp(lines, index);
+    case 'uptime':
+      return formatUptimeTimestamp(line, connectedAt);
+    case 'absolute':
+    default:
+      return formatAbsoluteTimestamp(line.timestamp);
+  }
+}
+
+/**
+ * Adjacency-based variant of formatTerminalTimestamp: takes the line and its
+ * DIRECT predecessor instead of the whole buffer + index, so memoized rows
+ * can format timestamps without an O(n) array lookup. Relative mode shows the
+ * delta from `prevLine` ('+0ms' when absent); uptime/absolute are identical
+ * to formatTerminalTimestamp.
+ */
+export function formatTerminalTimestampAdj(
+  line: TerminalLine,
+  prevLine: TerminalLine | undefined,
+  connectedAt: number | null | undefined,
+  format: TimestampFormat
+): string {
+  switch (format) {
+    case 'relative':
+      return formatRelativeDelta(line, prevLine);
     case 'uptime':
       return formatUptimeTimestamp(line, connectedAt);
     case 'absolute':

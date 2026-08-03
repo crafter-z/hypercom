@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { ProtocolTemplate } from '../types';
 import { ProtocolFrameReassembler, crc8, parseFrameBytes, sum8, xor8 } from './protocolParser';
+import type { ParsedFrame, ReassemblerSegment } from './protocolParser';
+
+/** 从有序段数组中提取帧（保持流顺序） */
+const extractFrames = (segments: ReassemblerSegment[]): ParsedFrame[] =>
+  segments.filter((s): s is Extract<ReassemblerSegment, { kind: 'frame' }> => s.kind === 'frame').map((s) => s.frame);
+
+/** 从有序段数组中收集所有裸字节（已合并相邻段） */
+const extractRaw = (segments: ReassemblerSegment[]): number[] => {
+  const raw: number[] = [];
+  for (const s of segments) {
+    if (s.kind === 'raw') raw.push(...s.bytes);
+  }
+  return raw;
+};
 
 const template = (overrides: Partial<ProtocolTemplate> = {}): ProtocolTemplate => ({
   id: 'tpl1',
@@ -23,13 +37,12 @@ const template = (overrides: Partial<ProtocolTemplate> = {}): ProtocolTemplate =
 });
 
 describe('ProtocolFrameReassembler', () => {
-  it('returns no frames and no flushed bytes when feeding an empty buffer', () => {
+  it('returns no segments when feeding an empty buffer', () => {
     const reassembler = new ProtocolFrameReassembler(template());
 
     const result = reassembler.feed([]);
 
-    expect(result.frames).toHaveLength(0);
-    expect(result.flushedBytes).toEqual([]);
+    expect(result).toEqual([]);
   });
 
   it('flushes a non-matching single byte when a header is required', () => {
@@ -37,8 +50,8 @@ describe('ProtocolFrameReassembler', () => {
 
     const result = reassembler.feed([0x00]);
 
-    expect(result.frames).toHaveLength(0);
-    expect(result.flushedBytes).toEqual([0x00]);
+    expect(extractFrames(result)).toHaveLength(0);
+    expect(extractRaw(result)).toEqual([0x00]);
   });
 
   it('parses a complete frame from a single feed', () => {
@@ -46,9 +59,10 @@ describe('ProtocolFrameReassembler', () => {
     const bytes = [0xaa, 0xbb, 0x06, 0x01, 0x02, 0x0d, 0x0a];
 
     const result = reassembler.feed(bytes);
+    const frames = extractFrames(result);
 
-    expect(result.frames).toHaveLength(1);
-    expect(result.frames[0]?.bytes).toEqual(bytes);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.bytes).toEqual(bytes);
   });
 
   it('reassembles a frame split across feeds', () => {
@@ -56,10 +70,11 @@ describe('ProtocolFrameReassembler', () => {
 
     const first = reassembler.feed([0xaa, 0xbb, 0x06]);
     const second = reassembler.feed([0x01, 0x02, 0x0d, 0x0a]);
+    const frames = extractFrames(second);
 
-    expect(first.frames).toHaveLength(0);
-    expect(second.frames).toHaveLength(1);
-    expect(second.frames[0]?.bytes).toEqual([0xaa, 0xbb, 0x06, 0x01, 0x02, 0x0d, 0x0a]);
+    expect(first).toEqual([]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.bytes).toEqual([0xaa, 0xbb, 0x06, 0x01, 0x02, 0x0d, 0x0a]);
   });
 
   it('parses a no-header template from byte zero', () => {
@@ -70,9 +85,10 @@ describe('ProtocolFrameReassembler', () => {
     }));
 
     const result = reassembler.feed([0x03, 0x41, 0x42, 0x43]);
+    const frames = extractFrames(result);
 
-    expect(result.frames).toHaveLength(1);
-    expect(result.frames[0]?.bytes).toEqual([0x03, 0x41, 0x42, 0x43]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.bytes).toEqual([0x03, 0x41, 0x42, 0x43]);
   });
 
   it('parses a template without a footer', () => {
@@ -83,9 +99,10 @@ describe('ProtocolFrameReassembler', () => {
     }));
 
     const result = reassembler.feed([0xaa, 0x03, 0x01, 0x02]);
+    const frames = extractFrames(result);
 
-    expect(result.frames).toHaveLength(1);
-    expect(result.frames[0]?.bytes).toEqual([0xaa, 0x03, 0x01, 0x02]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.bytes).toEqual([0xaa, 0x03, 0x01, 0x02]);
   });
 
   it('validates a sum8 checksum in a frame', () => {
@@ -94,8 +111,9 @@ describe('ProtocolFrameReassembler', () => {
     const checksum = sum8(frameWithoutChecksum);
 
     const result = reassembler.feed([...frameWithoutChecksum, checksum, 0x0d, 0x0a]);
+    const frames = extractFrames(result);
 
-    expect(result.frames[0]?.isValid).toBe(true);
+    expect(frames[0]?.isValid).toBe(true);
   });
 
   it('flushes oversized garbage to avoid unbounded buffering', () => {
@@ -103,8 +121,8 @@ describe('ProtocolFrameReassembler', () => {
 
     const result = reassembler.feed(Array.from({ length: 70_000 }, () => 0x00));
 
-    expect(result.frames).toHaveLength(0);
-    expect(result.flushedBytes).toHaveLength(70_000);
+    expect(extractFrames(result)).toHaveLength(0);
+    expect(extractRaw(result)).toHaveLength(70_000);
     expect(reassembler.getBufferedLength()).toBe(0);
   });
 
@@ -114,36 +132,50 @@ describe('ProtocolFrameReassembler', () => {
 
     const result = reassembler.feed(bytes);
 
-    expect(result.frames).toHaveLength(2);
-    expect(result.flushedBytes).toEqual([0xff]);
+    expect(extractFrames(result)).toHaveLength(2);
+    expect(extractRaw(result)).toEqual([0xff]);
   });
 
   it('parses 2-byte little-endian lengths', () => {
     const reassembler = new ProtocolFrameReassembler(template({ lengthFieldSize: 2 }));
 
     const result = reassembler.feed([0xaa, 0xbb, 0x06, 0x00, 0x01, 0x02, 0x0d, 0x0a]);
+    const frames = extractFrames(result);
 
-    expect(result.frames).toHaveLength(1);
-    expect(result.frames[0]?.bytes).toHaveLength(8);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.bytes).toHaveLength(8);
   });
 
   it('parses 2-byte big-endian lengths', () => {
     const reassembler = new ProtocolFrameReassembler(template({ lengthFieldSize: 2, lengthEndian: 'big' }));
 
     const result = reassembler.feed([0xaa, 0xbb, 0x00, 0x06, 0x01, 0x02, 0x0d, 0x0a]);
+    const frames = extractFrames(result);
 
-    expect(result.frames).toHaveLength(1);
-    expect(result.frames[0]?.bytes).toHaveLength(8);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.bytes).toHaveLength(8);
   });
 
   it('applies positive lengthAdjust before extracting payload fields', () => {
     const reassembler = new ProtocolFrameReassembler(template({ lengthAdjust: 2 }));
 
     const result = reassembler.feed([0xaa, 0xbb, 0x08, 0x01, 0x02, 0x0d, 0x0a]);
-    const payload = result.frames[0]?.fields.find((field) => field.name === 'Payload');
+    const frames = extractFrames(result);
+    const payload = frames[0]?.fields.find((field) => field.name === 'Payload');
 
-    expect(result.frames).toHaveLength(1);
+    expect(frames).toHaveLength(1);
     expect(payload).toMatchObject({ byteStart: 3, byteEnd: 5 });
+  });
+
+  it('emits raw bytes BEFORE the frame that follows them (stream order)', () => {
+    const reassembler = new ProtocolFrameReassembler(template());
+    // 垃圾字节 [0xff, 0xfe] 在前，帧在后
+    const frameBytes = [0xaa, 0xbb, 0x06, 0x01, 0x02, 0x0d, 0x0a];
+    const result = reassembler.feed([0xff, 0xfe, ...frameBytes]);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({ kind: 'raw', bytes: [0xff, 0xfe] });
+    expect(result[1]?.kind).toBe('frame');
   });
 });
 

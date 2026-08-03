@@ -4,7 +4,9 @@
  * Owns the UI-local display modes (direction + keyword filtering with
  * debounce, pause/freeze) and derives the index structures the virtualizer
  * renders from: `filteredIndices` (original line indices that survive the
- * filters) and `originalToFiltered` (the reverse map search jumps use).
+ * filters, or `null` when no filter is active — identity is implicit and
+ * rows 0..visibleCount-1 map 1:1) and `originalToFiltered` (the reverse map
+ * search jumps use, likewise `null` under identity).
  *
  * This state is deliberately NOT in Zustand — it resets on tab remount.
  */
@@ -24,8 +26,9 @@ export function useTerminalDisplay({ portId, lines }: UseTerminalDisplayOptions)
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
 
   // While paused, lines keep accumulating in the store; the view renders only
-  // the snapshot prefix lines.slice(0, frozenCount) — a prefix slice preserves
-  // original indices, so filteredIndices still maps into `lines` correctly.
+  // the frozen prefix. `visibleCount` caps the filter scan (limit-based) — no
+  // `lines.slice()` allocation — and since a prefix preserves original
+  // indices, filteredIndices still maps into `lines` correctly.
   const [paused, setPaused] = useState(false);
   const [frozenCount, setFrozenCount] = useState<number | null>(null);
 
@@ -48,21 +51,24 @@ export function useTerminalDisplay({ portId, lines }: UseTerminalDisplayOptions)
     }
   }, [paused, portId]);
 
-  const visibleLines = useMemo(
-    () => (paused && frozenCount !== null ? lines.slice(0, frozenCount) : lines),
-    [lines, paused, frozenCount]
-  );
+  // Number of buffer rows the view currently renders — the frozen prefix
+  // length while paused, otherwise the full buffer length.
+  const visibleCount = paused ? (frozenCount ?? 0) : lines.length;
 
   // Data-level filtering: original indices into `lines` that pass both the
   // direction and keyword filters — the virtualizer renders exactly
-  // filteredIndices.length rows, never hidden DOM nodes.
+  // filteredIndices.length rows, never hidden DOM nodes. `null` means no
+  // filter is active (implicit identity); `visibleCount` caps the scan so
+  // pause never allocates a prefix slice.
   const filteredIndices = useMemo(
-    () => filterLines(visibleLines, { direction: directionFilter, keyword: debouncedKeyword }),
-    [visibleLines, directionFilter, debouncedKeyword]
+    () => filterLines(lines, { direction: directionFilter, keyword: debouncedKeyword }, visibleCount),
+    [lines, directionFilter, debouncedKeyword, visibleCount]
   );
 
-  // Reverse map: original line index → filtered row index (identity when no filter).
+  // Reverse map: original line index → filtered row index. Only built when a
+  // filter is active; `null` under identity (search jumps use the index as-is).
   const originalToFiltered = useMemo(() => {
+    if (filteredIndices === null) return null;
     const m = new Map<number, number>();
     for (let i = 0; i < filteredIndices.length; i++) m.set(filteredIndices[i], i);
     return m;
@@ -76,6 +82,7 @@ export function useTerminalDisplay({ portId, lines }: UseTerminalDisplayOptions)
     debouncedKeyword,
     paused,
     togglePause,
+    visibleCount,
     filteredIndices,
     originalToFiltered,
   };

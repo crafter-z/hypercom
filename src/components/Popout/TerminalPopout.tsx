@@ -3,14 +3,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useAppStore } from '../../stores/useAppStore';
-import { useOperationStore } from '../../stores/useOperationStore';
 import {
   popoutEventService,
   eventService,
   storageService,
   configService,
 } from '../../services/tauri';
-import { StreamingDecoderCache } from '../../utils/streamingDecoder';
+import { getRxPipeline } from '../../utils/rxPipeline';
 import TerminalView from '../MainDisplay/TerminalView';
 
 interface TerminalPopoutProps {
@@ -24,14 +23,14 @@ interface TerminalPopoutProps {
  * 架构原则（贯穿柔性工作区）：弹窗与主窗不共享可变前端态，只交换意图/事件。
  * - 历史：终端行是主窗内存态（不在 SQLite）。mount 时发 `popout:terminal:request-snapshot`，
  *   主窗经 `popout:terminal:snapshot` 一次性回推当前缓冲 + 显示态（request→reply 避免竞态）。
- * - 实时：后端 `serial:data` 是广播，本窗直接订阅并按 portId 过滤，**无需主窗转发**。
- *   字节→行复用与 useSerialReceive 同一份 StreamingDecoderCache（防 GBK 跨事件乱码）。
+ * - 实时：后端 `serial:data` 是广播，本窗直接订阅并按 portId 过滤，走与主窗相同的
+ *   RxPipeline（字节级行聚合 + rAF 批写）。弹窗是独立 webview —— getRxPipeline()
+ *   自然接线到本窗自己的 store。
  *
  * v1 限制（已记录）：
  * - 协议帧重组（ProtocolFrameReassembler）不在弹窗复刻——绑定协议模板的端口在弹窗里
  *   按原始流解码显示（无字段着色）。快照里既有的 parsedFields 行仍按字段着色渲染。
  * - TX 回显是主窗前端行为（后端不发 TX 事件），故弹窗只显示 RX（及环回模拟回声）。
- * - `ignoreEmptyChars` 取本窗 useOperationStore 默认值（该字段非持久化，主窗会话内改动不同步）。
  */
 const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
   const terminal = useTerminalStore((s) => s.terminals[portId]);
@@ -60,8 +59,9 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
 
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
-    // 本窗私有的流式解码缓存（与主窗实例隔离，按本窗显示的编码独立维护尾部字节）。
-    const decoders = new StreamingDecoderCache();
+    // Pipeline singleton for THIS webview — separate module scope from the
+    // main window yields a separate instance wired to this window's stores.
+    const pipeline = getRxPipeline();
 
     void (async () => {
       try {
@@ -77,23 +77,11 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
             t.setTerminalConfig(portId, display);
             t.setTerminalLines(portId, lines);
           }),
-          // 实时流：广播按 portId 过滤，流式解码后写入本窗缓冲。
+          // 实时流：广播按 portId 过滤，经 RxPipeline 完成字节级行聚合 +
+          // rAF 批写。ignoreEmptyChars / 编码切换 / 静默 flush 全部管线内部处理。
           eventService.onSerialData((event) => {
             if (event.port_id !== portId) return;
-            const term = useTerminalStore.getState().terminals[portId];
-            const encoding = term?.encoding || 'UTF-8';
-            const decoderLabel = encoding.toLowerCase() === 'ascii' ? 'utf-8' : encoding.toLowerCase();
-            const text = decoders.get(portId, decoderLabel).decode(new Uint8Array(event.data), { stream: true });
-            // 空串是 buffered 的不完整多字节字符（字节仍留在 decoder 里），跳过安全。
-            if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
-            useTerminalStore.getState().appendTerminalLine(portId, {
-              id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              timestamp: event.timestamp,
-              direction: event.direction as 'RX' | 'TX',
-              content: text,
-              rawData: event.data,
-              isHex: event.is_hex,
-            });
+            pipeline.feedBytes(portId, event.data, event.timestamp);
           }),
         ]);
         if (cancelled) {
@@ -112,6 +100,7 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
     return () => {
       cancelled = true;
       unlisteners.forEach((u) => u());
+      // Do NOT dispose the pipeline singleton — it has app lifetime.
     };
   }, [portId]);
 

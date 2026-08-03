@@ -13,7 +13,21 @@
 import { describe, expect, it } from 'vitest';
 import type { ProtocolTemplate, TerminalLine } from '../types';
 import { ProtocolFrameReassembler } from './protocolParser';
+import type { ParsedFrame, ReassemblerSegment } from './protocolParser';
 import { renderProtocolLine } from './protocolRenderer';
+
+/** 从有序段数组中提取帧 */
+const extractFrames = (segments: ReassemblerSegment[]): ParsedFrame[] =>
+  segments.filter((s): s is Extract<ReassemblerSegment, { kind: 'frame' }> => s.kind === 'frame').map((s) => s.frame);
+
+/** 从有序段数组中收集所有裸字节 */
+const extractRaw = (segments: ReassemblerSegment[]): number[] => {
+  const raw: number[] = [];
+  for (const s of segments) {
+    if (s.kind === 'raw') raw.push(...s.bytes);
+  }
+  return raw;
+};
 
 const COLORS = {
   header: '#4fc3f7',
@@ -68,9 +82,10 @@ const VALID_FRAME = [0xaa, 0x55, 0x08, 0x01, 0x02, 0x03, 0x0d, 0x0d, 0x0a];
 describe('Protocol E2E: bytes → reassembler → renderer', () => {
   it('parses a complete frame in one feed and renders colored hex HTML', () => {
     const reassembler = new ProtocolFrameReassembler(makeTemplate());
-    const { frames, flushedBytes } = reassembler.feed(VALID_FRAME);
+    const segments = reassembler.feed(VALID_FRAME);
+    const frames = extractFrames(segments);
 
-    expect(flushedBytes).toEqual([]);
+    expect(extractRaw(segments)).toEqual([]);
     expect(frames).toHaveLength(1);
 
     const frame = frames[0]!;
@@ -101,11 +116,12 @@ describe('Protocol E2E: bytes → reassembler → renderer', () => {
     const chunk2 = reassembler.feed([0x08, 0x01, 0x02]);
     const chunk3 = reassembler.feed([0x03, 0x0d, 0x0d, 0x0a]);
 
-    expect(chunk1.frames).toHaveLength(0);
-    expect(chunk2.frames).toHaveLength(0);
-    expect(chunk3.frames).toHaveLength(1);
+    expect(extractFrames(chunk1)).toHaveLength(0);
+    expect(extractFrames(chunk2)).toHaveLength(0);
+    const chunk3Frames = extractFrames(chunk3);
+    expect(chunk3Frames).toHaveLength(1);
 
-    const frame = chunk3.frames[0]!;
+    const frame = chunk3Frames[0]!;
     expect(frame.bytes).toEqual(VALID_FRAME);
 
     const html = renderProtocolLine(frameToLine(frame, true));
@@ -116,9 +132,10 @@ describe('Protocol E2E: bytes → reassembler → renderer', () => {
   it('flushes garbage before a valid frame and still renders the frame', () => {
     const reassembler = new ProtocolFrameReassembler(makeTemplate());
     const garbage = [0x00, 0xff, 0x42];
-    const { frames, flushedBytes } = reassembler.feed([...garbage, ...VALID_FRAME]);
+    const segments = reassembler.feed([...garbage, ...VALID_FRAME]);
+    const frames = extractFrames(segments);
 
-    expect(flushedBytes).toEqual(garbage);
+    expect(extractRaw(segments)).toEqual(garbage);
     expect(frames).toHaveLength(1);
 
     const html = renderProtocolLine(frameToLine(frames[0]!, true));
@@ -132,7 +149,7 @@ describe('Protocol E2E: bytes → reassembler → renderer', () => {
     const tpl = makeTemplate({ footerBytes: '' });
     const reassembler = new ProtocolFrameReassembler(tpl);
     const frameBytes = [0xaa, 0x55, 0x05, 0x48, 0x69, 0xb5];
-    const { frames } = reassembler.feed(frameBytes);
+    const frames = extractFrames(reassembler.feed(frameBytes));
 
     expect(frames).toHaveLength(1);
     expect(frames[0]!.isValid).toBe(true);
@@ -157,7 +174,7 @@ describe('Protocol E2E: bytes → reassembler → renderer', () => {
     const reassembler = new ProtocolFrameReassembler(makeTemplate());
     // frame2: payload 04 05 06, checksum = sum8(AA+55+08+04+05+06) & 0xFF = 278 & 0xFF = 0x16
     const frame2 = [0xaa, 0x55, 0x08, 0x04, 0x05, 0x06, 0x16, 0x0d, 0x0a];
-    const { frames } = reassembler.feed([...VALID_FRAME, ...frame2]);
+    const frames = extractFrames(reassembler.feed([...VALID_FRAME, ...frame2]));
 
     expect(frames).toHaveLength(2);
 
@@ -173,7 +190,7 @@ describe('Protocol E2E: bytes → reassembler → renderer', () => {
     const reassembler = new ProtocolFrameReassembler(makeTemplate());
     const badFrame = [...VALID_FRAME];
     badFrame[6] = 0xff; // corrupt checksum
-    const { frames } = reassembler.feed(badFrame);
+    const frames = extractFrames(reassembler.feed(badFrame));
 
     expect(frames).toHaveLength(1);
     expect(frames[0]!.isValid).toBe(false);

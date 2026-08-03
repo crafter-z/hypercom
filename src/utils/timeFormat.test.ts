@@ -6,8 +6,10 @@ import type { TerminalLine } from '../types';
 import {
   formatAbsoluteTimestamp,
   formatRelativeTimestamp,
+  formatRelativeDelta,
   formatUptimeTimestamp,
   formatTerminalTimestamp,
+  formatTerminalTimestampAdj,
   isSameRound,
 } from './timeFormat';
 
@@ -50,6 +52,21 @@ describe('timeFormat', () => {
     });
   });
 
+  describe('formatRelativeDelta', () => {
+    it('returns +0ms without a predecessor', () => {
+      expect(formatRelativeDelta(makeLine(1000), undefined)).toBe('+0ms');
+    });
+
+    it('shows the delta from the adjacent predecessor', () => {
+      expect(formatRelativeDelta(makeLine(1123), makeLine(1000))).toBe('+123ms');
+      expect(formatRelativeDelta(makeLine(2500), makeLine(1000))).toBe('+1.5s');
+    });
+
+    it('clamps negative delta to +0ms', () => {
+      expect(formatRelativeDelta(makeLine(1000), makeLine(1500))).toBe('+0ms');
+    });
+  });
+
   describe('formatUptimeTimestamp', () => {
     it('formats elapsed time since connection', () => {
       const line = makeLine(3723004);
@@ -77,6 +94,30 @@ describe('timeFormat', () => {
 
     it('formats uptime', () => {
       expect(formatTerminalTimestamp(lines, 1, 1000, 'uptime')).toBe('0:00:00.050');
+    });
+  });
+
+  describe('formatTerminalTimestampAdj', () => {
+    const first = makeLine(1000);
+    const second = makeLine(1050);
+
+    it('relative: +0ms without a predecessor, delta from prevLine otherwise', () => {
+      expect(formatTerminalTimestampAdj(first, undefined, null, 'relative')).toBe('+0ms');
+      expect(formatTerminalTimestampAdj(second, first, null, 'relative')).toBe('+50ms');
+      expect(formatTerminalTimestampAdj(makeLine(2050), second, null, 'relative')).toBe('+1.0s');
+    });
+
+    it('relative: clamps negative delta to +0ms', () => {
+      expect(formatTerminalTimestampAdj(first, second, null, 'relative')).toBe('+0ms');
+    });
+
+    it('uptime matches formatTerminalTimestamp', () => {
+      expect(formatTerminalTimestampAdj(second, first, 1000, 'uptime')).toBe('0:00:00.050');
+    });
+
+    it('absolute matches formatTerminalTimestamp', () => {
+      expect(formatTerminalTimestampAdj(first, undefined, null, 'absolute'))
+        .toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3}$/);
     });
   });
 

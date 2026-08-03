@@ -1,12 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { useOperationStore } from '../stores/useOperationStore';
-import { useTerminalStore } from '../stores/useTerminalStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
-import { StreamingDecoderCache } from '../utils/streamingDecoder';
+import { getRxPipeline } from '../utils/rxPipeline';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
 import type { PortStatus } from '../types';
@@ -17,33 +15,35 @@ import { userClosingPortIds, lostPortIds } from './disconnectTracking';
  * 监听 Tauri 的 onSerialData / onSerialStatus 事件，将接收到的数据写入终端，
  * 并在后端上报端口状态变化时同步到 app store。
  *
- * SRP：只负责事件订阅与数据解码入终端，不涉及任何用户主动发送动作。
+ * RX 路径走 RxPipeline（字节级行聚合 + rAF 批写）：
+ * - 普通流：pipeline.feedBytes → 组装器切行 → 解码 → 入队 → rAF 批写
+ * - 协议帧：ProtocolFrameReassembler 返回有序段，帧段经 enqueueLines 入队，
+ *   裸段经 feedBytes 入队——两者共享队列，天然保流顺序
+ *
+ * SRP：只负责事件订阅与数据入管线，不涉及任何用户主动发送动作。
  * 必须在应用根组件挂载一次（事件监听全局唯一）。
  */
 export function useSerialReceive() {
-  const appendTerminalLine = useTerminalStore((s) => s.appendTerminalLine);
   const setupPromiseRef = useRef<Promise<void> | null>(null);
   const reassemblersRef = useRef<Map<string, ProtocolFrameReassembler>>(new Map());
-  // Persistent streaming decoders (shared helper, also used by the terminal
-  // pop-out). A fresh TextDecoder per event decodes multi-byte chars (GBK
-  // 2-byte, UTF-8 3-byte) that straddle two serial:data events to U+FFFD on
-  // BOTH halves — guaranteed mojibake on GBK traffic. Streaming decode
-  // ({stream:true}) retains a partial trailing char and emits it once the next
-  // event completes it. See StreamingDecoderCache for the full rationale.
-  const decodersRef = useRef(new StreamingDecoderCache());
 
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+    const pipeline = getRxPipeline();
 
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
         if (cancelled) return;
-        const term = useTerminalStore.getState().terminals[event.port_id];
-        const encoding = term?.encoding || 'UTF-8';
-        const decoderLabel = encoding.toLowerCase() === 'ascii' ? 'utf-8' : encoding.toLowerCase();
-        // Protocol frame parsing: if port has a protocol template bound, feed bytes into reassembler
-        const port = useAppStore.getState().ports.find(p => p.id === event.port_id);
+        const portId = event.port_id;
+        // Traffic stats ONCE per event for ALL paths (protocol + common)
+        const app = useAppStore.getState();
+        app.setTrafficStats(portId, {
+          rxTotal: (app.trafficStats[portId]?.rxTotal || 0) + event.data.length,
+        });
+
+        // Protocol-template path: port has a protocol template bound
+        const port = useAppStore.getState().ports.find(p => p.id === portId);
         const templateId = port?.protocolTemplateId;
         if (templateId) {
           const template = useRuleStore.getState().protocolTemplates.find(t => t.id === templateId && t.isEnabled);
@@ -51,67 +51,39 @@ export function useSerialReceive() {
             // Key by port + template so switching the port's protocol
             // template naturally creates a fresh reassembler (the stale one,
             // with its old header/checksum framing, is left to GC).
-            const reassemblerKey = `${event.port_id}:${templateId}`;
+            const reassemblerKey = `${portId}:${templateId}`;
             let reassembler = reassemblersRef.current.get(reassemblerKey);
             if (!reassembler) {
               reassembler = new ProtocolFrameReassembler(template);
               reassemblersRef.current.set(reassemblerKey, reassembler);
             }
-            const { frames, flushedBytes } = reassembler.feed(event.data);
-            for (const frame of frames) {
-              // Frames are self-contained — a fresh per-frame decoder is
-              // correct here (no char can straddle two frames).
-              const frameText = new TextDecoder(decoderLabel, { fatal: false }).decode(new Uint8Array(frame.bytes));
-              appendTerminalLine(event.port_id, {
-                id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                timestamp: event.timestamp,
-                direction: event.direction as 'RX' | 'TX',
-                content: frameText,
-                rawData: frame.bytes,
-                isHex: event.is_hex,
-                parsedFields: frame.fields,
-              });
-            }
-            if (flushedBytes.length > 0) {
-              // Flushed (non-frame) bytes are a raw stream that CAN split a
-              // multi-byte char across events — use the streaming decoder.
-              const flushedText = decodersRef.current.get(event.port_id, decoderLabel).decode(new Uint8Array(flushedBytes), { stream: true });
-              // A partial trailing char decodes to '' (bytes retained in the
-              // decoder) — skip the empty append; it surfaces on the next event.
-              if (flushedText) {
-                appendTerminalLine(event.port_id, {
+            // Ordered segments: raw bytes before frames maintain stream order
+            const segments = reassembler.feed(event.data);
+            for (const seg of segments) {
+              if (seg.kind === 'frame') {
+                // Frames are self-contained — a fresh per-frame decode is
+                // correct here (no char can straddle two frames).
+                const frameText = pipeline.decodeText(portId, seg.frame.bytes);
+                pipeline.enqueueLines(portId, [{
                   id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                   timestamp: event.timestamp,
                   direction: event.direction as 'RX' | 'TX',
-                  content: flushedText,
-                  rawData: flushedBytes,
+                  content: frameText,
+                  rawData: seg.frame.bytes,
                   isHex: event.is_hex,
-                });
+                  parsedFields: seg.frame.fields,
+                }]);
+              } else {
+                // Raw (non-frame) bytes — feed through the pipeline for
+                // line aggregation + batched store writes
+                pipeline.feedBytes(portId, seg.bytes, event.timestamp);
               }
             }
-            useAppStore.getState().setTrafficStats(event.port_id, {
-              rxTotal: (useAppStore.getState().trafficStats[event.port_id]?.rxTotal || 0) + event.data.length,
-            });
             return;
           }
         }
-        // Common non-protocol path: streaming decode so multi-byte chars that
-        // straddle events reassemble instead of corrupting to U+FFFD.
-        const text = decodersRef.current.get(event.port_id, decoderLabel).decode(new Uint8Array(event.data), { stream: true });
-        // An empty string here is a buffered partial multi-byte char — the
-        // bytes are retained in the decoder, so skipping is safe.
-        if (useOperationStore.getState().ignoreEmptyChars && !text.trim()) return;
-        appendTerminalLine(event.port_id, {
-          id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          timestamp: event.timestamp,
-          direction: event.direction as 'RX' | 'TX',
-          content: text,
-          rawData: event.data,
-          isHex: event.is_hex,
-        });
-        useAppStore.getState().setTrafficStats(event.port_id, {
-          rxTotal: (useAppStore.getState().trafficStats[event.port_id]?.rxTotal || 0) + event.data.length,
-        });
+        // Common non-protocol path: byte-level line aggregation + batched writes
+        pipeline.feedBytes(portId, event.data, event.timestamp);
       });
 
       const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
@@ -147,16 +119,18 @@ export function useSerialReceive() {
           status: statusMap[event.status] || 'disconnected',
         });
         if (event.status === 'disconnected') {
-          // Reassemblers are keyed `${portId}:${templateId}` and streaming
-          // decoders `${portId}:${label}` — drop every entry for this port
-          // regardless of suffix so a reconnect starts with clean state.
+          // Reassemblers are keyed `${portId}:${templateId}` — drop every
+          // entry for this port regardless of suffix so a reconnect starts
+          // with clean state.
           const prefix = `${event.port_id}:`;
           for (const key of reassemblersRef.current.keys()) {
             if (key.startsWith(prefix)) {
               reassemblersRef.current.delete(key);
             }
           }
-          decodersRef.current.clearPort(event.port_id);
+          // Pipeline: flush tail + discard ALL per-port state (assembler,
+          // decoders, timers, queue) — reconnect starts from scratch.
+          pipeline.disconnect(event.port_id);
         }
       });
 
@@ -177,5 +151,8 @@ export function useSerialReceive() {
       cancelled = true;
       cleanups.forEach((fn) => fn());
     };
-  }, [appendTerminalLine]);
+    // No store selector subscriptions — pipeline is a module singleton;
+    // effect deps are empty so listeners register exactly once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 }

@@ -261,3 +261,61 @@ describe('setTerminalConnectedAt', () => {
     expect(useTerminalStore.getState().terminals['GHOST']).toBeUndefined();
   });
 });
+
+// ==================== appendTerminalLines (bulk) ====================
+
+describe('appendTerminalLines (bulk)', () => {
+  it('appends all lines in a single store update, preserving order', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    const lines: TerminalLine[] = [
+      makeLine('b1'), makeLine('b2'), makeLine('b3'),
+    ];
+    useTerminalStore.getState().appendTerminalLines('COM1', lines);
+    const result = useTerminalStore.getState().terminals['COM1'].lines;
+    expect(result.map(l => l.id)).toEqual(['b1', 'b2', 'b3']);
+  });
+
+  it('interleaves correctly with individual appendTerminalLine calls', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('single1'));
+    useTerminalStore.getState().appendTerminalLines('COM1', [makeLine('bulk1'), makeLine('bulk2')]);
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('single2'));
+    const lines = useTerminalStore.getState().terminals['COM1'].lines;
+    expect(lines.map(l => l.id)).toEqual(['single1', 'bulk1', 'bulk2', 'single2']);
+  });
+
+  it('trims to maxLines in a single splice when bulk exceeds capacity', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().setTerminalConfig('COM1', { maxLines: 5 });
+    const lines: TerminalLine[] = Array.from({ length: 8 }, (_, i) => makeLine(`b${i}`));
+    useTerminalStore.getState().appendTerminalLines('COM1', lines);
+    const result = useTerminalStore.getState().terminals['COM1'].lines;
+    // Last 5 kept in original order
+    expect(result.map(l => l.id)).toEqual(['b3', 'b4', 'b5', 'b6', 'b7']);
+  });
+
+  it('trims combined single + bulk lines to maxLines', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().setTerminalConfig('COM1', { maxLines: 4 });
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('pre1'));
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('pre2'));
+    useTerminalStore.getState().appendTerminalLines('COM1', [
+      makeLine('b1'), makeLine('b2'), makeLine('b3'), makeLine('b4'),
+    ]);
+    const result = useTerminalStore.getState().terminals['COM1'].lines;
+    // 6 total → keep last 4
+    expect(result.map(l => l.id)).toEqual(['b1', 'b2', 'b3', 'b4']);
+  });
+
+  it('is no-op for non-existent (ghost) terminal', () => {
+    const before = useTerminalStore.getState().terminals;
+    useTerminalStore.getState().appendTerminalLines('GHOST', [makeLine('x')]);
+    expect(useTerminalStore.getState().terminals).toEqual(before);
+  });
+
+  it('handles an empty lines array without error', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().appendTerminalLines('COM1', []);
+    expect(useTerminalStore.getState().terminals['COM1'].lines).toEqual([]);
+  });
+});

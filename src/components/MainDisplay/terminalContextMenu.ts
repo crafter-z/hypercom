@@ -33,8 +33,8 @@ export interface TerminalContextMenuData {
   /** Resolved copy range; null disables "copy selected lines". */
   range: { start: number; end: number } | null;
   timestampMode: 'perLine' | 'perRound';
-  /** Per-round grouping flags; entries muted to '-' when not first in round. */
-  firstInRound: boolean[] | null;
+  /** On-demand first-in-round check (O(1) per line); entries muted to '-' when not first in round. */
+  isFirstInRound: (idx: number) => boolean;
   connectedAt: number | null;
   timestampFormat: TimestampFormat;
   t: TFunction;
@@ -46,13 +46,13 @@ export function buildTerminalContextMenuItems(
   data: TerminalContextMenuData
 ): ContextMenuEntry[] {
   const {
-    portId, lines, range, timestampMode, firstInRound,
+    portId, lines, range, timestampMode, isFirstInRound,
     connectedAt, timestampFormat, t, onSelectAll,
   } = data;
 
   // Timestamp cell for a given line index, honoring per-round muting.
   const lineTimestamp = (idx: number): string =>
-    timestampMode === 'perRound' && idx > 0 && !firstInRound?.[idx]
+    timestampMode === 'perRound' && idx > 0 && !isFirstInRound(idx)
       ? '-'
       : formatTerminalTimestamp(lines, idx, connectedAt, timestampFormat);
 

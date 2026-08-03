@@ -10,7 +10,7 @@
 | `useSerialPorts.ts` | `useSerialPorts(pollMs=3000)`, `mapPortInfo()`, `mergePorts()` | Sidebar | polling; `mapPortInfo`/`mergePorts` also used by useSimulation |
 | `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop |
 | `usePinStatesSubscriber.ts` | `usePinStatesSubscriber()` | `App.tsx` **exactly once** | `serial:pin_states` event listener |
-| `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial:data` event listener + status handler (writes `lostPortIds` for DisconnectBanner) |
+| `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial:data` event listener + status handler (writes `lostPortIds` for DisconnectBanner); RX feeds `RxPipeline` (byte-level line aggregation + rAF-batched store writes), NOT direct per-event appends |
 | `useSerialSend.ts` | `useSerialSend()`, `sendToPort()` | OperationPanel (hook); `usePopoutBridge` (module fn) | action; module-level `sendToPort` owns the real send (backend call + TX echo + traffic stats + in-memory per-port history `Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite); the hook is a thin wrapper mirroring history into state for ↑/↓ recall |
 | `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | pop-out intent bus: listens `popout:send-command` (→ `sendToPort(activeTabId)`) / `popout:open-config` (→ ConfigModal page) / `popout:request-sync` (→ replay `active-tab:changed`); subscribes `useRuleStore.sendCommandSets` + `useAppStore.activeTabId` → emits `command-sets:changed` / `active-tab:changed` refresh signals |
 | `useConfigPersistence.ts` | `useConfigPersistence()` | `App.tsx` | load + save config |
@@ -22,7 +22,8 @@
 
 ## Conventions (root covers lifecycle split rationale)
 
-- Both `useSerialReceive` and `useSerialSend` write lines via `useTerminalStore.getState().appendTerminalLine` — NOT via hook selector. Prevents re-rendering the owner every frame.
+- RX lines land via `RxPipeline` (module singleton `getRxPipeline()`): byte-level line splitting, per-port queue, ONE rAF-batched `appendTerminalLines` per port per frame, 250ms silence flush for unterminated tails. Single-line writers (`appendTerminalLine`) remain for TX echo (`useSerialSend`), tool output, log replay. `sendToPort` MUST call `getRxPipeline().flushNow(portId)` BEFORE the TX echo so queued RX can't render after the send line (zero-delay cyclic sends otherwise interleave TX1,TX2,RX1). Never write `serial:data` bytes straight into the terminal store.
+- The pipeline singleton is app-lifetime per webview: neither `useSerialReceive` cleanup nor `TerminalPopout` cleanup may call `dispose()`. Disconnect cleanup goes through `pipeline.disconnect(portId)` (flush tail + drop per-port state) inside the status handler.
 - `useSerialReceive` MUST be called exactly once in `App.tsx`. Calling it twice double-registers the `serial:data` listener → every line gets appended twice.
 - `useSerialReceive`'s status handler is the ONLY place that writes to `lostPortIds` (in `disconnectTracking.ts`). A port is marked "lost" only on a connected→disconnected transition within this session; successful `openPort`/`closePort`/reconnect clear it. `isPortLost(portId)` is exported for `DisconnectBanner.tsx` which uses the pure helper `filterLostTabIds(tabs, isPortLost)` — never probe port state from outside the hook.
 - `useSerialSend` maintains in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, dedup on content+format). `SendHistoryEntry` lives in `src/types/index.ts`. No SQLite persistence; the old `sendHistoryService` / `SendHistoryItem` were removed. Backend Rust commands survive but are not invoked from the frontend.
@@ -38,6 +39,9 @@
 
 - Calling `useSerialReceive` more than once per app lifetime.
 - Registering an ad-hoc `listen('serial:data', …)` outside `useSerialReceive`.
+- Bypassing `RxPipeline` in a `serial:data` handler (per-event `appendTerminalLine` fragments lines across multi-event responses AND re-renders the terminal at event rate).
+- Calling `getRxPipeline().dispose()` anywhere — the singleton is app-lifetime; per-port cleanup goes through `pipeline.disconnect(portId)` in the status handler.
+- Appending the TX echo before `getRxPipeline().flushNow(portId)` — queued RX then overtakes the send line (zero-delay cyclic sends interleave TX1,TX2,RX1).
 - Subscribing the whole `useTerminalStore` from a component that owns a hook — same re-render pathology as in any component.
 - Bypassing `closePort()` to remove a tab — corrupts log lifecycle + port status.
 - Mutating `lostPortIds` from anywhere except the status handler inside `useSerialReceive`. The set encapsulates session-aware disconnect tracking; external mutation breaks `DisconnectBanner` correctness.

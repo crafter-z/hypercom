@@ -7,12 +7,16 @@
  * round in perRound mode. The injected HTML comes only from
  * renderProtocolLine / applyHighlightSets, both of which escapeHtml their
  * input — this is the single sanctioned dangerouslySetInnerHTML site.
+ *
+ * Wrapped in React.memo: props are stable primitives (no `terminal` object —
+ * its identity changes on every appended line — and no `lines` array) so an
+ * unchanged row skips re-render entirely during high-frequency output.
  */
 import React from 'react';
-import type { HighlightRuleSet, TerminalLine, TerminalState, TimestampFormat } from '../../types';
+import type { DisplayFormat, HighlightRuleSet, TerminalLine, TimestampFormat } from '../../types';
 import { applyHighlightSets } from '../../utils/highlightEngine';
 import { renderProtocolLine } from '../../utils/protocolRenderer';
-import { formatTerminalTimestamp } from '../../utils/timeFormat';
+import { formatTerminalTimestampAdj } from '../../utils/timeFormat';
 
 /** TX/RX/TOOL direction coloring — the terminal's signal semantics. */
 const directionColor = (dir: string, stream?: string) => {
@@ -25,13 +29,19 @@ interface TerminalRowProps {
   line: TerminalLine;
   /** Original index into the full `lines` buffer. */
   origIdx: number;
-  /** Full buffer — formatTerminalTimestamp needs neighboring lines. */
-  lines: TerminalLine[];
-  terminal: TerminalState | undefined;
+  /** The line immediately before `line` in the buffer (undefined for the
+   *  first row) — adjacency input for the relative timestamp formatter. */
+  prevLine: TerminalLine | undefined;
+  /** Primitive display-state slices (the `terminal` object itself changes
+   *  identity on every append, which would defeat React.memo). */
+  displayFormat: DisplayFormat | undefined;
+  showTimestamp: boolean | undefined;
+  connectedAt: number | null | undefined;
   highlightRuleSets: HighlightRuleSet[];
   timestampFormat: TimestampFormat;
   timestampMode: 'perLine' | 'perRound';
-  firstInRound: boolean[] | null;
+  /** O(1) per-row round boundary flag (computed in TerminalView). */
+  isFirstInRound: boolean;
   selectedRange: { start: number; end: number } | null;
   searchOpen: boolean;
   matchSet: Set<number>;
@@ -49,12 +59,14 @@ interface TerminalRowProps {
 const TerminalRow: React.FC<TerminalRowProps> = ({
   line,
   origIdx,
-  lines,
-  terminal,
+  prevLine,
+  displayFormat,
+  showTimestamp,
+  connectedAt,
   highlightRuleSets,
   timestampFormat,
   timestampMode,
-  firstInRound,
+  isFirstInRound,
   selectedRange,
   searchOpen,
   matchSet,
@@ -69,7 +81,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
   if (line.parsedFields && line.parsedFields.length > 0) {
     lineHtml = renderProtocolLine(line);
   } else {
-    const displayText = terminal?.displayFormat === 'hex' && line.rawData
+    const displayText = displayFormat === 'hex' && line.rawData
       ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
       : line.content;
     lineHtml = applyHighlightSets(displayText, highlightRuleSets);
@@ -80,7 +92,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
     && origIdx <= selectedRange.end;
   const isMatch = searchOpen && matchSet.has(origIdx);
   const isCurrent = searchOpen && origIdx === currentMatchLineIdx;
-  const muted = timestampMode === 'perRound' && origIdx > 0 && !firstInRound?.[origIdx];
+  const muted = timestampMode === 'perRound' && !isFirstInRound;
   const classes = [
     'terminal-line',
     isSelected ? 'selected' : '',
@@ -102,11 +114,11 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
         transform: `translateY(${rowStart}px)`,
       }}
     >
-      {terminal?.showTimestamp !== false && (
+      {showTimestamp !== false && (
         <span className={`terminal-timestamp${muted ? ' terminal-timestamp-muted' : ''}`}>
           {muted
             ? '-'
-            : formatTerminalTimestamp(lines, origIdx, terminal?.connectedAt, timestampFormat)}
+            : formatTerminalTimestampAdj(line, prevLine, connectedAt, timestampFormat)}
         </span>
       )}
       <span
@@ -122,4 +134,4 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
   );
 };
 
-export default TerminalRow;
+export default React.memo(TerminalRow);

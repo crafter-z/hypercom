@@ -6,6 +6,23 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-04 RX 管线重构 + 滚动锁重设计 + 快捷跳转，关闭 GitHub issue #1)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 364/364 (17 files), `cargo check` 0 错 0 警告（后端未改动）。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `useSerialReceive.ts` / 新 `utils/rxAssembler.ts` / `utils/rxPipeline.ts` / `useTerminalStore.ts` | RX 输出碎片化（issue #1-1）：「一事件一行」模型下，跨多个 serial:data 事件到达的设备响应被撕成碎片行，首字符经常独占一行 | 新 RX 管线：`RxLineAssembler` 字节级切行（CR/LF/跨事件 CRLF 对/空行/4KB 无分隔强制发射——0x0A/0x0D 在全部四种受支持编码中都不可能出现在多字节序列内部）+ `RxPipeline` rAF 批写（每帧每端口最多 1 次 `appendTerminalLines`）+ 250ms 静默 flush（尾行时间戳沿用最后事件时间而非 flush 时刻）+ 每端口缓存解码器（`ignoreBOM:true`，非流式 decode 默认剥行首 UTF-8 BOM）。`StreamingDecoderCache` 整体删除（被取代） |
+| HIGH | `TerminalView.tsx` | 滚动锁几乎不可用（issue #1-2/3）：`onScroll` 按 atBottom 隐式写 `scrollLocked`——挂载时虚拟滚动器在顶部、测量滞后、80ms 守卫过期后的内容增长都会误解锁；点锁定按钮不滚底 | 显式意图状态机：`scrollLocked` 仅由图钉按钮 / 跳转按钮 / 手势 settle（滚轮、滚动键、滚动条拖拽 `target===currentTarget`、中键自动滚动 `button===1`，120ms 静默后按最终位置 50px 容差判定）写入；**彻底删除 onScroll 隐式解锁**；锁定（false→true 或挂载即锁定）立即滚底；搜索栏打开时抑制跟随、关闭时若锁定则回到最新 |
+| MEDIUM | `useSerialSend.ts` | 批写引入的时序隐患：零延时循环发送会渲染成 TX1,TX2,RX1（RX1 响应还在队列等 rAF）；发送前到达的 RX 显示在 TX 行之后 | `sendToPort` TX 回显前 `getRxPipeline().flushNow(portId)` 同步排空该端口 RX 队列，双重恢复「发送前的 RX 先于 TX、TX 先于其响应」时序 |
+| MEDIUM | `protocolParser.ts` | `feed()` 返回 `{frames, flushedBytes}`：帧**之前**的裸字节被排在所有帧之后渲染，字节流顺序错乱（既有缺陷，批写会放大紊乱窗口） | 改返回有序段数组 `ReassemblerSegment[]`（`{kind:'frame'|'raw'}`，相邻 raw 合并）；`useSerialReceive` 按段顺序入队（帧走 `enqueueLines`、raw 走 `feedBytes`，共享队列天然保序） |
+| MEDIUM | `TerminalView.tsx` / `TerminalRow.tsx` / `useTerminalDisplay.ts` / `lineFilter.ts` / `timeFormat.ts` | 高频输出渲染热点：恒等过滤映射每帧分配全缓冲索引数组；`firstInRound` / `originalToFiltered` 每帧 O(n) 全缓冲重算；`TerminalRow` 每帧全量重渲染（`terminal`/`lines` prop 身份每帧变化） | `filterLines` 无过滤返回 `null` 哨兵 + `limit` 参数替代暂停前缀 slice；`originalToFiltered` 惰性构建；firstInRound 每可见行 O(1)；`TerminalRow` `React.memo` + 原语 props（`prevLine`/`displayFormat`/`showTimestamp`/`connectedAt`）+ `formatTerminalTimestampAdj`；`estimateSize` 读 store 字号（去掉逐次 getComputedStyle） |
+| LOW | `TerminalFilterBar.tsx` | 编码切换时 RX 管线未终结尾部字节被新 label 直接解码，缝合处乱码（如 GBK 尾字节被当 UTF-8 首字节） | 切换前 `getRxPipeline().flushAndReset(portId)`：旧编码冲刷尾部落盘 + 重置组装器/解码器 |
+
+新功能：终端滚动条上下两端快捷跳转按钮（`ArrowUpToLine`/`ArrowDownToLine`）——到顶自动解除滚动锁定、到底锁定并跟随最新（按钮在锁定态点亮）；Ctrl+Home/Ctrl+End 等价键盘路径。i18n 新增 `terminal.jumpToTop` / `terminal.jumpToBottom`。
+
+架构变化：弹出窗 RX 与主窗共用 `RxPipeline`（独立 webview 各自的模块单例）；`useSerialReceive` 不再持有任何 store 选择器订阅（effect deps `[]`）；流量统计在事件处理器顶部统一计一次。已知平台降级：Linux WebKitGTK 原生滚动条可能不派发 pointerdown——滚动条拖拽解锁在该平台静默失效，滚轮/键盘/图钉不受影响。
+
 ## 已修复 (2026-08-03 后端串口加固 + 串口测试 + 文件发送取消)
 
 > 验证: `cargo check` 0 错 0 警告, `cargo test --lib` 37/37（Windows；非 Windows 另含参数映射 / 管理器错误路径 / 端口枚举测试）, `npx tsc --noEmit` 0 错, `npm run test:run` 290/290。
