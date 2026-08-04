@@ -19,7 +19,6 @@ const OperationPanel: React.FC = () => {
   const activeTabId = useAppStore(s => s.activeTabId);
   const collapsed = useAppStore(s => s.ui.isOperationPanelCollapsed);
   const panelHeight = useAppStore(s => s.ui.operationPanelHeight);
-  const baudRate = useOperationStore(s => s.baudRate);
   const dataBits = useOperationStore(s => s.dataBits);
   const parity = useOperationStore(s => s.parity);
   const stopBits = useOperationStore(s => s.stopBits);
@@ -60,14 +59,25 @@ const OperationPanel: React.FC = () => {
     setOpState,
   });
 
-  const prevParamsRef = useRef(`${baudRate}-${dataBits}-${parity}-${stopBits}-${handshake}-${dtr}-${rts}`);
+  // 参数同步基线：挂载时快照一次 store 参数（不订阅 baudRate——键入期间
+  // OperationPanel 不应重渲染，实时值在 effect 内经 getState() 读取）。
+  const prevParamsRef = useRef<string | null>(null);
+  if (prevParamsRef.current === null) {
+    const p = useOperationStore.getState();
+    prevParamsRef.current = `${p.baudRate}-${p.dataBits}-${p.parity}-${p.stopBits}-${p.handshake}-${p.dtr}-${p.rts}`;
+  }
+  const paramsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync serial params to backend when they change
+  // Sync serial params to backend when they change (debounced 300ms so fast
+  // baud typing while connected collapses into a single setSerialParams).
   useEffect(() => {
     if (!activeTabId || !isConnected) return;
+    const { baudRate, dataBits, parity, stopBits, handshake, dtr, rts } = useOperationStore.getState();
     const key = `${baudRate}-${dataBits}-${parity}-${stopBits}-${handshake}-${dtr}-${rts}`;
-    if (key !== prevParamsRef.current) {
-      prevParamsRef.current = key;
+    if (key === prevParamsRef.current) return;
+    prevParamsRef.current = key;
+    if (paramsSyncTimerRef.current) clearTimeout(paramsSyncTimerRef.current);
+    paramsSyncTimerRef.current = setTimeout(() => {
       serialService.setSerialParams(activeTabId, {
         baudRate,
         dataBits,
@@ -76,8 +86,12 @@ const OperationPanel: React.FC = () => {
         handshake,
       }).catch(e => { console.debug('[OperationPanel] setSerialParams failed:', e); notifyError(e); });
       serialService.setFlowControl(activeTabId, dtr, rts).catch(e => { console.debug('[OperationPanel] setFlowControl failed:', e); notifyError(e); });
-    }
-  }, [activeTabId, isConnected, baudRate, dataBits, parity, stopBits, handshake, dtr, rts]);
+    }, 300);
+  }, [activeTabId, isConnected, dataBits, parity, stopBits, handshake, dtr, rts]);
+
+  useEffect(() => () => {
+    if (paramsSyncTimerRef.current) clearTimeout(paramsSyncTimerRef.current);
+  }, []);
 
   const toggleCollapse = () => {
     setUIState({ isOperationPanelCollapsed: !collapsed });

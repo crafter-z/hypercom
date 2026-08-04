@@ -90,6 +90,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const renderedCount = filteredIndices ? filteredIndices.length : visibleCount;
   countRef.current = renderedCount;
 
+  // O(1) identity primitives for the auto-follow effect: the buffer trims
+  // from the HEAD once maxLines is full (lines.length stays constant), so
+  // renderedCount alone never changes even though every getItemKey shifts —
+  // these ids make the effect re-pin on new rows (lastLineId) AND on head
+  // trims (firstLineId).
+  const lastLineId = lines.length > 0 ? lines[lines.length - 1].id : undefined;
+  const firstLineId = lines.length > 0 ? lines[0].id : undefined;
+
   const getScrollElement = useCallback(() => scrollRef.current, []);
   // Row height estimate from the store font size (kept in sync with the
   // --font-size-terminal var by ThemeProvider + the Ctrl+wheel handler) —
@@ -117,6 +125,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     if (count > 0) {
       virtualizer.scrollToIndex(count - 1, { align: 'end', behavior: 'auto' });
     }
+    // Measurement-lag fallback: scrollToIndex targets the last item's
+    // (possibly estimated) end — unmeasured tail rows are estimateSize until
+    // ResizeObserver lands, so totalSize can grow and stale the scrollTop.
+    // One frame later the measurements are in; pin the real bottom directly.
+    // Touches ONLY scrollTop — never scrollLocked/followRef.
+    requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
   }, [virtualizer]);
 
   // Sync the store's scrollLocked to followRef. Explicit-intent transitions:
@@ -231,13 +248,17 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   }, [closeSearch, portId, scrollToBottom]);
 
   // Auto-follow: keep the bottom row in view as new rows render. Runs on
-  // count changes; skipped while paused (frozen view), unlocked, mid-gesture
+  // count changes OR on line-identity changes — lastLineId moves with every
+  // new row (splice keeps the length constant once maxLines is full), and
+  // firstLineId moves when the buffer trims from the head, which is exactly
+  // when the virtualizer re-keys every row and shifts content under a stable
+  // scrollTop. Skipped while paused (frozen view), unlocked, mid-gesture
   // (explicit user scroll), or while search is open. On resume the count
   // changes and this effect catches up.
   useEffect(() => {
     if (paused || !followRef.current || gestureActiveRef.current || searchOpenRef.current) return;
     scrollToBottom();
-  }, [renderedCount, virtualizer, paused, scrollToBottom]);
+  }, [renderedCount, lastLineId, firstLineId, virtualizer, paused, scrollToBottom]);
 
   // Ctrl+L clears, Ctrl+F toggles search, F3/Shift+F3 step matches, Esc closes
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

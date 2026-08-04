@@ -27,13 +27,21 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const config = useAppStore(s => s.config);
   const setOpState = useOperationStore(s => s.setOpState);
 
+  // isCustomBaud 是显式用户意图：只由 select 的 onChange 写入（选「其他...」→ true，
+  // 选预设 → false）。绝不从 baudRate 自动派生——否则键入到预设值瞬间输入框被卸载。
+  // 挂载时按初始 store 值恢复一次自定义态（应用会话恢复的自定义波特率）。
   const [isCustomBaud, setIsCustomBaud] = useState(!config.defaultBaudRates.includes(baudRate));
+  // 自定义波特率输入框的本地 draft：键入只改 draft 字符串，blur 时才解析提交，
+  // 避免每个键都 setOpState（后端重配 + 整个面板重渲染导致卡顿/回弹）。
+  const [customBaudInput, setCustomBaudInput] = useState(String(baudRate));
   const [presets, setPresets] = useState<PortPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
 
+  // 外部改 store baudRate（选预设/应用预设）时 draft 跟随；键入期间 baudRate 不变，
+  // 此 effect 不会触发，与用户输入天然无冲突。
   useEffect(() => {
-    setIsCustomBaud(!config.defaultBaudRates.includes(baudRate));
-  }, [baudRate, config.defaultBaudRates]);
+    setCustomBaudInput(String(baudRate));
+  }, [baudRate]);
 
   const loadPresets = useCallback(async () => {
     try {
@@ -137,8 +145,17 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
           </select>
           {isCustomBaud && (
             <input className="input op-baud-custom-input" type="number" disabled={!isPortActive}
-              value={baudRate} onChange={e => setOpState({ baudRate: Number(e.target.value) || 9600 })}
-              min={50} max={4000000} step={100} />
+              value={customBaudInput}
+              onChange={e => setCustomBaudInput(e.target.value)}
+              onBlur={() => {
+                const parsed = Number(customBaudInput);
+                if (Number.isFinite(parsed) && parsed > 0 && parsed <= 4000000) {
+                  setOpState({ baudRate: parsed });
+                } else {
+                  setCustomBaudInput(String(baudRate));
+                }
+              }}
+              min={1} max={4000000} />
           )}
         </div>
         <div className="op-param-item">

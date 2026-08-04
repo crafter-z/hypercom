@@ -387,4 +387,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   );
 };
 
-export default SendSection;
+// memo：props 均稳定（activeTabId 字符串 / 布尔原语 / sendData·historyUp·historyDown
+// 均为 useCallback 返回），OperationPanel 重渲染时不再拖累发送区。
+// historyUp/Down 仅在发送历史变化（即一次真实发送）后更换引用，此时重渲染是合理的。
+export default React.memo(SendSection);
