@@ -106,6 +106,9 @@ pub struct TriggerRuleEntry {
     pub action_content: String,
     pub action_is_hex: bool,
     pub is_enabled: bool,
+    /// 仅对该串口生效；None/空 = 全部端口（issue #3-1）
+    #[serde(default)]
+    pub port_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,7 +175,6 @@ pub struct AppConfig {
     pub terminal_font_size: u32,
     pub ui_font: String,
     pub ui_font_size: u32,
-    pub background_image: Option<String>,
 
     // --- 串口默认设置 ---
     pub default_baud_rates: Vec<u32>,
@@ -197,6 +199,12 @@ pub struct AppConfig {
     pub log_encoding: String, // "ASCII" | "UTF-8" | "GBK" | "ISO-8859-1"
     pub log_split_enabled: bool,
     pub log_split_size_mb: u32,
+    /// 日志行前缀是否包含时间戳（issue #3-4）
+    #[serde(default = "default_true")]
+    pub log_include_timestamp: bool,
+    /// 日志行前缀是否包含 RX/TX 方向标记（issue #3-4）
+    #[serde(default = "default_true")]
+    pub log_include_direction: bool,
 
     // --- 备份设置 ---
     pub backup_enabled: bool,
@@ -234,6 +242,10 @@ fn default_restore_session() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_send_on_enter() -> bool {
     true
 }
@@ -262,7 +274,6 @@ impl Default for AppConfig {
             terminal_font_size: 14,
             ui_font: "Inter, sans-serif".to_string(),
             ui_font_size: 14,
-            background_image: None,
             default_baud_rates: vec![9600, 19200, 38400, 57600, 115200, 921600],
             default_line_ending: "\\r\\n".to_string(),
             send_prefix: ">>>>>>SEND>>>>>>>>".to_string(),
@@ -278,6 +289,8 @@ impl Default for AppConfig {
             log_encoding: "UTF-8".to_string(),
             log_split_enabled: true,
             log_split_size_mb: 100,
+            log_include_timestamp: true,
+            log_include_direction: true,
             backup_enabled: false,
             backup_interval: 24,
             backup_directory: String::new(),
@@ -533,6 +546,9 @@ mod tests {
         assert_eq!(cfg.log_encoding, "UTF-8");
         assert!(cfg.log_split_enabled);
         assert_eq!(cfg.log_split_size_mb, 100);
+        // issue #3-4：日志行前缀开关默认开启（向后兼容旧行为）
+        assert!(cfg.log_include_timestamp);
+        assert!(cfg.log_include_direction);
         assert!(!cfg.backup_enabled);
         assert!(!cfg.has_seen_tour);
         assert!(cfg.restore_session);
@@ -567,11 +583,59 @@ mod tests {
             "hasSeenTour", "restoreSession", "quickSendInlineCount",
             "sendCommandSets", "highlightRuleSets", "protocolTemplates",
             "triggerRules", "portPresets", "portToolConfigs", "portGroups",
+            "logIncludeTimestamp", "logIncludeDirection", // issue #3-4
         ] {
             assert!(json.contains(key), "missing {} in JSON", key);
         }
         // session_snapshot 不应出现在 config JSON 中
         assert!(!json.contains("sessionSnapshot"), "sessionSnapshot must not be in config.json");
+    }
+
+    #[test]
+    fn test_log_prefix_fields_default_when_absent() {
+        // issue #3-4：旧 config.json 没有 logIncludeTimestamp / logIncludeDirection，
+        // 反序列化必须回退到默认 true（serde(default = "default_true")）。
+        // 使用 0.3.1 真实 schema 的完整 JSON，仅省略这两个新字段。
+        let old_json = r#"{
+            "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
+            "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
+            "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
+            "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
+            "uiFont": "Inter, sans-serif", "uiFontSize": 14,
+            "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
+            "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
+            "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
+            "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
+            "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
+            "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
+            "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
+            "hasSeenTour": false, "restoreSession": true,
+            "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
+            "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert!(cfg.log_include_timestamp);
+        assert!(cfg.log_include_direction);
+    }
+
+    #[test]
+    fn test_trigger_rule_port_id_optional() {
+        // issue #3-1：旧 config.json 的 trigger 规则没有 portId，反序列化回退 None；
+        // 新规则带 portId 时 camelCase 序列化往返一致。
+        let old_rule: TriggerRuleEntry = serde_json::from_str(
+            r#"{"id":"r1","name":"n","pattern":"p","isRegex":false,
+                "matchType":"contains","actionType":"alert",
+                "actionContent":"","actionIsHex":false,"isEnabled":true}"#,
+        )
+        .unwrap();
+        assert!(old_rule.port_id.is_none());
+
+        let rule = TriggerRuleEntry {
+            port_id: Some("COM3".to_string()),
+            ..old_rule
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(json.contains(r#""portId":"COM3""#), "got: {json}");
     }
 
     #[test]

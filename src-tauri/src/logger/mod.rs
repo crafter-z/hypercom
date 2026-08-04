@@ -37,6 +37,10 @@ pub struct PortLogWriter {
     pub format: String, // "string" | "hex" | "binary"
     /// 解码标签：UTF-8 / GBK / ISO-8859-1 / ASCII，用于 string 模式下解码字节流。
     pub encoding: String,
+    /// 行前缀是否包含时间戳（issue #3-4）
+    pub include_timestamp: bool,
+    /// 行前缀是否包含 RX/TX 方向标记（issue #3-4）
+    pub include_direction: bool,
 }
 
 impl PortLogWriter {
@@ -45,6 +49,9 @@ impl PortLogWriter {
     /// - "binary": 原始字节直写，不附元信息。
     /// - 其他（默认 string）: 按 `encoding` 解码为文本后写入。
     ///   GBK/ISO-8859-1 走显式映射，UTF-8/ASCII/未知值回退到 `from_utf8_lossy`。
+    ///
+    /// 行前缀（时间戳 / RX·TX 方向）按 `include_timestamp` / `include_direction`
+    /// 开关拼接（issue #3-4）：两开关都关时前缀为空。
     ///
     /// 不在此处 flush——BufWriter 的缓冲在 close_writer / split / flush_all 时
     /// 统一落盘。高波特率下逐行 flush 会导致每条数据都触发一次磁盘 IO，
@@ -55,35 +62,35 @@ impl PortLogWriter {
         direction: &str,
         data: &[u8],
     ) -> anyhow::Result<()> {
+        let prefix = match (self.include_timestamp, self.include_direction) {
+            (true, true) => format!("[{}] {} ", timestamp, direction),
+            (true, false) => format!("[{}] ", timestamp),
+            (false, true) => format!("{} ", direction),
+            (false, false) => String::new(),
+        };
         let written = match self.format.as_str() {
             "hex" => {
                 let hex_str = data
                     .iter()
                     .map(|b| format!("{:02X} ", b))
                     .collect::<String>();
-                let line = format!(
-                    "[{}] {} {}\n",
-                    timestamp,
-                    direction,
-                    hex_str.trim()
-                );
+                let line = format!("{}{}\n", prefix, hex_str.trim());
                 self.writer.write_all(line.as_bytes())?;
                 line.len()
             }
             "binary" => {
                 // Frame: [timestamp] direction <raw data>\n — keeps raw bytes intact
                 // while adding a parseable header line.
-                let header = format!("[{}] {} ", timestamp, direction);
-                self.writer.write_all(header.as_bytes())?;
+                self.writer.write_all(prefix.as_bytes())?;
                 self.writer.write_all(data)?;
                 self.writer.write_all(b"\n")?;
-                header.len() + data.len() + 1
+                prefix.len() + data.len() + 1
             }
             _ => {
                 let text = decode_bytes(data, &self.encoding)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
-                let line = format!("[{}] {} {}\n", timestamp, direction, text);
+                let line = format!("{}{}\n", prefix, text);
                 self.writer.write_all(line.as_bytes())?;
                 line.len()
             }
@@ -141,6 +148,10 @@ pub struct LogManager {
     default_encoding: String,
     /// 是否启用按大小自动分片（前端可运行时开关）
     split_enabled: bool,
+    /// 行前缀是否包含时间戳（issue #3-4）：create_writer 时锁定
+    include_timestamp: bool,
+    /// 行前缀是否包含 RX/TX 方向标记（issue #3-4）：create_writer 时锁定
+    include_direction: bool,
     /// 上次 flush 时间戳，用于周期性刷盘（每 5 秒）
     last_flush: std::time::Instant,
 }
@@ -168,6 +179,8 @@ impl LogManager {
             filename_format: DEFAULT_FILENAME_FORMAT.to_string(),
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
+            include_timestamp: true,
+            include_direction: true,
             last_flush: std::time::Instant::now(),
         }
     }
@@ -212,6 +225,16 @@ impl LogManager {
         self.split_enabled = enabled;
     }
 
+    /// 设置日志行前缀是否包含时间戳（issue #3-4）。前端在 set_config 时同步调用。
+    pub fn set_include_timestamp(&mut self, on: bool) {
+        self.include_timestamp = on;
+    }
+
+    /// 设置日志行前缀是否包含 RX/TX 方向标记（issue #3-4）。前端在 set_config 时同步调用。
+    pub fn set_include_direction(&mut self, on: bool) {
+        self.include_direction = on;
+    }
+
     /// 解析文件名模板: [com] → port_id, [datetime] → 20260101_120000, [date] → 2026-01-01, [time] → 12:00:00
     fn format_filename(&self, port_id: &str) -> String {
         let now = chrono::Local::now();
@@ -252,6 +275,8 @@ impl LogManager {
             current_size: existing_size,
             format: format.to_string(),
             encoding: encoding.to_string(),
+            include_timestamp: self.include_timestamp,
+            include_direction: self.include_direction,
         };
 
         self.writers.insert(port_id.to_string(), writer);
@@ -466,6 +491,8 @@ mod tests {
             filename_format: "[com]-[datetime]".to_string(),
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
+            include_timestamp: true,
+            include_direction: true,
             last_flush: std::time::Instant::now(),
         }
     }
@@ -498,6 +525,52 @@ mod tests {
     }
 
     #[test]
+    fn test_write_prefix_toggles() {
+        // issue #3-4：日志行前缀按 include_timestamp / include_direction 开关拼接
+
+        // 仅时间戳（无方向）
+        let dir = test_dir("prefix_ts");
+        let mut mgr = test_manager(&dir);
+        mgr.set_include_timestamp(true);
+        mgr.set_include_direction(false);
+        mgr.create_writer("C1", "string").unwrap();
+        mgr.write("C1", "10:00:00", "RX", b"alpha").unwrap();
+        mgr.close_writer("C1").unwrap();
+        let files = mgr.list_files().unwrap();
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("[10:00:00] alpha"), "got: {content}");
+        assert!(!content.contains("RX"), "direction must be omitted: {content}");
+        let _ = fs::remove_dir_all(&dir);
+
+        // 仅方向（无时间戳）
+        let dir = test_dir("prefix_dir");
+        let mut mgr = test_manager(&dir);
+        mgr.set_include_timestamp(false);
+        mgr.set_include_direction(true);
+        mgr.create_writer("C2", "string").unwrap();
+        mgr.write("C2", "10:00:00", "TX", b"beta").unwrap();
+        mgr.close_writer("C2").unwrap();
+        let files = mgr.list_files().unwrap();
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("TX beta"), "got: {content}");
+        assert!(!content.contains("["), "timestamp must be omitted: {content}");
+        let _ = fs::remove_dir_all(&dir);
+
+        // 两者都关：纯数据行
+        let dir = test_dir("prefix_none");
+        let mut mgr = test_manager(&dir);
+        mgr.set_include_timestamp(false);
+        mgr.set_include_direction(false);
+        mgr.create_writer("C3", "string").unwrap();
+        mgr.write("C3", "10:00:00", "RX", b"gamma").unwrap();
+        mgr.close_writer("C3").unwrap();
+        let files = mgr.list_files().unwrap();
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert_eq!(content, "gamma\n", "expected bare data line: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_write_hex_format() {
         let dir = test_dir("hex");
         let mut mgr = test_manager(&dir);
@@ -526,6 +599,8 @@ mod tests {
             current_size: 0,
             format: "string".into(),
             encoding: "UTF-8".into(),
+            include_timestamp: true,
+            include_direction: true,
         };
         assert!(!writer.should_split(1));
         writer.current_size = 1024 * 1024;

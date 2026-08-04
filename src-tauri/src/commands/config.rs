@@ -105,6 +105,8 @@ fn sync_log_manager_from_config(state: &State<AppState>) -> Result<(), CommandEr
     log_mgr.set_filename_format(&cfg.log_filename_format);
     log_mgr.set_split_size(cfg.log_split_size_mb);
     log_mgr.set_split_enabled(cfg.log_split_enabled);
+    log_mgr.set_include_timestamp(cfg.log_include_timestamp);
+    log_mgr.set_include_direction(cfg.log_include_direction);
     if !cfg.log_directory.is_empty() {
         if let Err(e) = log_mgr.set_directory(cfg.log_directory.clone()) {
             log::warn!("Failed to set log directory '{}': {}", cfg.log_directory, e);

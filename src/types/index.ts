@@ -260,7 +260,6 @@ export interface AppConfig {
   terminalFontSize: number;
   uiFont: string;
   uiFontSize: number;
-  backgroundImage?: string;
   
   // 串口默认设置
   defaultBaudRates: number[];
@@ -282,6 +281,8 @@ export interface AppConfig {
   logEncoding: Encoding;
   logSplitEnabled: boolean;
   logSplitSizeMb: number;
+  logIncludeTimestamp: boolean; // 日志行前缀是否包含时间戳（issue #3-4）
+  logIncludeDirection: boolean; // 日志行前缀是否包含 RX/TX 方向标记（issue #3-4）
   
   // 备份设置
   backupEnabled: boolean;
@@ -382,7 +383,7 @@ export interface AvailablePortInfo {
 export type TriggerMatchType = 'contains' | 'exact' | 'regex' | 'hex';
 
 /** 条件触发器动作类型 */
-export type TriggerActionType = 'alert' | 'respond' | 'bookmark';
+export type TriggerActionType = 'alert' | 'respond';
 
 /** 条件触发规则 */
 export interface TriggerRule {
@@ -395,4 +396,6 @@ export interface TriggerRule {
   actionContent: string;
   actionIsHex: boolean;
   isEnabled: boolean;
+  /** 仅对该串口生效；空/缺省 = 全部端口（issue #3-1） */
+  portId?: string;
 }
