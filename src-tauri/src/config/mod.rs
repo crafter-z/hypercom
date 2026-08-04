@@ -132,6 +132,19 @@ pub struct PortToolConfigEntry {
     pub workdir: String,
 }
 
+/// 串口分组（issue #2-3 起持久化到 config.json）。
+/// `port_ids` 记录组内成员及顺序；端口的 `groupId` 由前端在启动时
+/// 根据成员关系回填到内存态端口列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortGroupEntry {
+    pub id: String,
+    pub name: String,
+    pub is_expanded: bool,
+    pub port_ids: Vec<String>,
+    pub order: i32,
+}
+
 // ==================== AppConfig ====================
 
 /// 应用全局配置
@@ -211,6 +224,10 @@ pub struct AppConfig {
     pub port_presets: Vec<PortPresetEntry>,
     #[serde(default)]
     pub port_tool_configs: Vec<PortToolConfigEntry>,
+    /// 串口分组布局（issue #2-3）：`#[serde(default)]` 使旧版 config.json
+    /// （无此字段）反序列化为空列表。
+    #[serde(default)]
+    pub port_groups: Vec<PortGroupEntry>,
 }
 
 fn default_restore_session() -> bool {
@@ -272,6 +289,7 @@ impl Default for AppConfig {
             trigger_rules: Vec::new(),
             port_presets: Vec::new(),
             port_tool_configs: Vec::new(),
+            port_groups: Vec::new(),
         }
     }
 }
@@ -524,6 +542,7 @@ mod tests {
         assert!(cfg.trigger_rules.is_empty());
         assert!(cfg.port_presets.is_empty());
         assert!(cfg.port_tool_configs.is_empty());
+        assert!(cfg.port_groups.is_empty());
     }
 
     #[test]
@@ -547,7 +566,7 @@ mod tests {
             "logEncoding", "terminalFontSize", "autoReconnect", "maxRetries",
             "hasSeenTour", "restoreSession", "quickSendInlineCount",
             "sendCommandSets", "highlightRuleSets", "protocolTemplates",
-            "triggerRules", "portPresets", "portToolConfigs",
+            "triggerRules", "portPresets", "portToolConfigs", "portGroups",
         ] {
             assert!(json.contains(key), "missing {} in JSON", key);
         }
@@ -635,6 +654,25 @@ mod tests {
         assert!(parsed.send_command_sets.is_empty());
         assert!(parsed.highlight_rule_sets.is_empty());
         assert!(parsed.port_presets.is_empty());
+        assert!(parsed.port_groups.is_empty());
+    }
+
+    #[test]
+    fn test_port_group_entry_camel_case_serialization() {
+        let group = PortGroupEntry {
+            id: "group-1".into(),
+            name: "开发板".into(),
+            is_expanded: true,
+            port_ids: vec!["COM1".into(), "COM12".into()],
+            order: 0,
+        };
+        let json = serde_json::to_string(&group).unwrap();
+        assert!(json.contains("\"isExpanded\":true"), "should be camelCase: {}", json);
+        assert!(json.contains("\"portIds\""), "should be camelCase: {}", json);
+        assert!(!json.contains("port_ids"), "should not contain snake_case key: {}", json);
+        // 完整往返
+        let parsed: PortGroupEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.port_ids, vec!["COM1".to_string(), "COM12".to_string()]);
     }
 
     #[test]

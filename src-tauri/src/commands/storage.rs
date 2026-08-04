@@ -263,6 +263,25 @@ pub fn delete_port_tool_config(
     manager.save().map_err(|e| CommandError::Config(e.to_string()))
 }
 
+// ==================== 串口分组 ====================
+
+/// 整体替换保存全部串口分组（issue #2-3）。
+/// 分组是「一个整体布局」而非独立实体：前端在分组变更（增删/改名/展开/
+/// 拖拽成员）后防抖发送完整列表，这里一次替换并落盘 config.json。
+/// 读取不需要专门命令——`get_config` 已随 `AppConfig.port_groups` 返回。
+#[tauri::command]
+pub fn save_port_groups(
+    args: Vec<config::PortGroupEntry>,
+    state: State<AppState>,
+) -> Result<(), CommandError> {
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().port_groups = args;
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
+}
+
 // ==================== 条件触发规则 ====================
 
 #[tauri::command]

@@ -168,6 +168,8 @@ pub fn run() {
             commands::save_port_tool_config,
             commands::load_port_tool_configs,
             commands::delete_port_tool_config,
+            // ===== 串口分组命令 =====
+            commands::save_port_groups,
             // ===== 条件触发规则命令 =====
             commands::save_trigger_rule,
             commands::load_trigger_rules,
