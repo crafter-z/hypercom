@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
+import { useAppStore } from '../../../stores/useAppStore';
 import { storageService } from '../../../services/tauri';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { Plus, Check, Trash2, ChevronRight, Zap } from 'lucide-react';
@@ -8,21 +9,22 @@ import type { TriggerMatchType, TriggerActionType } from '../../../types';
 
 /**
  * 条件触发配置页：管理触发规则（接收数据匹配模式时自动执行动作）。
- * 数据通过 SQLite 持久化（trigger_rules 表）。
+ * 数据持久化到 config.json（config 实体，经 storageService 读写）。
  */
 const TriggerSettings: React.FC = () => {
   const { t } = useTranslation();
   const triggerRules = useRuleStore((s) => s.triggerRules);
+  const ports = useAppStore((s) => s.ports);
   const addTriggerRule = useRuleStore((s) => s.addTriggerRule);
   const updateTriggerRule = useRuleStore((s) => s.updateTriggerRule);
   const removeTriggerRule = useRuleStore((s) => s.removeTriggerRule);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
+    // Unconditional replace: after the user deletes ALL rules, a stale
+    // non-empty result must not resurrect them on the next open.
     storageService.loadTriggerRules().then(rows => {
-      if (rows.length > 0) {
-        useRuleStore.getState().setTriggerRules(rows);
-      }
+      useRuleStore.getState().setTriggerRules(rows);
     }).catch((e) => console.debug('[TriggerSettings] load failed:', e));
   }, []);
 
@@ -38,6 +40,7 @@ const TriggerSettings: React.FC = () => {
       actionContent: '',
       actionIsHex: false,
       isEnabled: true,
+      portId: undefined,
     });
     setExpandedId(id);
   };
@@ -59,7 +62,7 @@ const TriggerSettings: React.FC = () => {
   };
 
   const matchTypeOptions: TriggerMatchType[] = ['contains', 'exact', 'regex', 'hex'];
-  const actionTypeOptions: TriggerActionType[] = ['alert', 'respond', 'bookmark'];
+  const actionTypeOptions: TriggerActionType[] = ['alert', 'respond'];
 
   return (
     <div className="config-page">
@@ -120,6 +123,20 @@ const TriggerSettings: React.FC = () => {
                 >
                   {matchTypeOptions.map(opt => (
                     <option key={opt} value={opt}>{t(`trigger.matchType.${opt}`)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="config-row">
+                <label>{t('trigger.portId')}</label>
+                <select
+                  className="input"
+                  value={rule.portId ?? ''}
+                  onChange={e => updateTriggerRule(rule.id, { portId: e.target.value || undefined })}
+                  style={{ flex: 1 }}
+                >
+                  <option value="">{t('trigger.portId.all')}</option>
+                  {ports.map(p => (
+                    <option key={p.id} value={p.id}>{p.alias || p.name}</option>
                   ))}
                 </select>
               </div>

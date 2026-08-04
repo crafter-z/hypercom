@@ -5,10 +5,17 @@ import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
 import { getRxPipeline } from '../utils/rxPipeline';
+import { evaluateTriggers } from '../utils/triggerEngine';
+import { sendToPort } from './useSerialSend';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
 import type { PortStatus } from '../types';
 import { userClosingPortIds, lostPortIds } from './disconnectTracking';
+
+// Alert toast throttle: same rule re-matched within this window (ms) must
+// not spam toasts — module-level so it survives the empty-deps effect.
+const TRIGGER_ALERT_THROTTLE_MS = 1000;
+const triggerAlertThrottle = new Map<string, number>();
 
 /**
  * Hook: 串口数据接收（事件监听生命周期）
@@ -41,6 +48,41 @@ export function useSerialReceive() {
         app.setTrafficStats(portId, {
           rxTotal: (app.trafficStats[portId]?.rxTotal || 0) + event.data.length,
         });
+
+        // Conditional triggers: match RX against trigger rules. Rules are read
+        // live via getState() (never subscribe inside a callback) so store
+        // edits take effect on the next event. Exceptions here must not crash
+        // the RX loop — the pipeline below still needs this event.
+        try {
+          const triggerRules = useRuleStore.getState().triggerRules;
+          if (triggerRules.length > 0) {
+            // contains/exact/regex match against the decoded text; hex matches
+            // against the raw bytes (handled inside evaluateTriggers).
+            const decoded = pipeline.decodeText(portId, event.data);
+            const matched = evaluateTriggers(decoded, event.data, triggerRules, portId);
+            for (const action of matched) {
+              const rule = action.rule;
+              if (rule.actionType === 'alert') {
+                // Throttle: don't re-toast the same rule within 1s.
+                const now = Date.now();
+                if (now - (triggerAlertThrottle.get(rule.id) ?? 0) < TRIGGER_ALERT_THROTTLE_MS) continue;
+                triggerAlertThrottle.set(rule.id, now);
+                useToastStore.getState().push({
+                  severity: 'warning',
+                  message: i18n.t('trigger.alertMessage', { port: portId, rule: rule.name }),
+                });
+              } else if (rule.actionType === 'respond') {
+                // silent=true: sendToPort re-throws on failure so the caller
+                // can aggregate — swallow here to keep the RX loop alive.
+                sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true).catch(() => {
+                  // Respond failure is silent by design.
+                });
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[useSerialReceive] Trigger evaluation failed:', e);
+        }
 
         // Protocol-template path: port has a protocol template bound
         const port = useAppStore.getState().ports.find(p => p.id === portId);

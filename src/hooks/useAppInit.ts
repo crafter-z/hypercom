@@ -43,7 +43,12 @@ export function useAppInit() {
       useRuleStore.getState().setSendCommandSets(cfg.sendCommandSets);
       useRuleStore.getState().setHighlightRuleSets(cfg.highlightRuleSets);
       useRuleStore.getState().setProtocolTemplates(cfg.protocolTemplates);
-      useRuleStore.getState().setTriggerRules(cfg.triggerRules);
+      // 迁移旧版残留的 bookmark 动作（从未实现，issue #3-1）：归一为 alert。
+      // 旧 config.json 的 actionType 是任意字符串，用 String() 比较避免与
+      // TriggerActionType 联合类型（已移除 'bookmark'）的不重叠比较错误。
+      useRuleStore.getState().setTriggerRules(
+        cfg.triggerRules.map((r) => (String(r.actionType) === 'bookmark' ? { ...r, actionType: 'alert' } : r))
+      );
       useRuleStore.getState().setPortToolConfigs(cfg.portToolConfigs);
 
       // 串口分组恢复（issue #2-3）：分组布局持久化在 config.json。
