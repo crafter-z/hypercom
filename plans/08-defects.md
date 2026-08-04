@@ -6,6 +6,25 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-04 issue #3 六项：条件触发接线+指定串口 · 波特率自定义输入卡顿 · 滚动锁定脱节 · 日志格式设定 · 背景图删除 · 漏斗图标删除)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 410/410 (19 files), `cargo check` 0 错 0 警告, `cargo test --lib` 41/41。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `useSerialReceive.ts` / `triggerEngine.ts` | 条件触发完全不生效（issue #3-1）：`evaluateTriggers` 规则链（定义/持久化/加载/CRUD）完整但**生产代码零调用**——没有任何代码把 RX 数据喂给引擎 | 在 `serial:data` 回调（流量统计后、protocol 分支前）接入 `evaluateTriggers`：用 `useRuleStore.getState().triggerRules` 实时读取（回调内禁订阅）、`pipeline.decodeText` 解码文本供 contains/exact/regex、原始字节供 hex；`alert` → `useToastStore.push`（i18n `trigger.alertMessage`，同规则 1s 节流防刷屏）、`respond` → `sendToPort(portId, content, isHex, 'None', silent=true)`（失败静默不打断 RX 循环）；try/catch 兜底 |
+| HIGH | `types/index.ts` / `config/mod.rs` / `TriggerSettings.tsx` | 触发规则无法指定串口（issue #3-1）：`TriggerRule` 无 portId 字段，规则对所有端口生效 | `TriggerRule.portId?: string`（前端）+ `TriggerRuleEntry.port_id: Option<String>`（后端 `#[serde(default)]` 兼容旧配置）+ `evaluateTriggers` 第 4 参 `portId` 过滤（规则声明了 portId 且与当前端口不符时跳过，空=全部端口）；TriggerSettings 展开区新增「指定串口」下拉（`useAppStore.ports`，`trigger.portId`/`trigger.portId.all` i18n key） |
+| HIGH | `types/index.ts` / `i18n.ts` / `TriggerSettings.tsx` / `useAppInit.ts` | 「添加书签」触发动作是死功能（issue #3-1）：项目无书签系统，`bookmark` 仅存在于类型联合/i18n key/UI 选项，零实现 | 从 `TriggerActionType` 联合、`trigger.actionType.bookmark` i18n key、TriggerSettings 动作下拉三处移除；`useAppInit` 启动加载时把旧 config.json 残留的 `actionType==='bookmark'` 规则归一为 `alert`（String 比较规避类型不重叠）；TriggerSettings 修复加载 bug（删除全部规则后重启残留旧规则——`rows.length>0` 才 set 改为无条件 set） |
+| HIGH | `ParamsSection.tsx` / `OperationPanel.tsx` / `SendSection.tsx` | 波特率选「其他...」后 UI 特别卡且无法手动输入（issue #3-2）：① `isCustomBaud` 由 useEffect 从 `defaultBaudRates.includes(baudRate)` 派生，键入到预设值（如 9600/115200）瞬间翻转 → 输入框卸载、焦点丢失；② `Number(v) \|\| 9600` 清空/输 0 回弹；③ 每键 setOpState → OperationPanel 订阅 baudRate 全面板重渲染 + 连接时每键 2 次后端重配（setSerialParams+setFlowControl） | ① `isCustomBaud` 改**显式用户意图**：仅 select onChange 写入，删除自动派生 effect（挂载时按初始 store 值恢复一次）；② 自定义输入改**本地 draft state**：键入只改字符串、blur 才解析提交（有效 >0≤4000000 提交、无效还原），无回弹；③ OperationPanel 删除 baudRate 订阅（effect 内 `getState()` 读实时值），参数同步 effect 下沉 300ms 防抖（连续键入合并为一次后端调用）+ unmount 清理 timer；SendSection `React.memo`（props 全稳定） |
+| HIGH | `TerminalView.tsx` | 大量数据输出时滚动锁定显示锁定但实际不在底部（issue #3-2→#3-3）：① maxLines 满后 `appendTerminalLines` 头部 splice → `lines.length` 恒定 → auto-follow effect（依赖 `renderedCount`）永不重触发，但 getItemKey 全量平移重挂载重测量导致 scrollTop 过期；② `scrollToIndex(count-1, align:'end')` 用未测量尾行的 estimateSize，ResizeObserver 实测后 totalSize 增长、tanstack retry 窗口（10 rAF）耗尽后无校正 | ① auto-follow effect 追加**首尾行 id 依赖**（`lastLineId`/`firstLineId`，O(1) 派生）：新行到达与头部裁剪都触发重钉底；② `scrollToBottom` 在 scrollToIndex 后追加一帧 rAF 的 DOM 钉底（`el.scrollTop = el.scrollHeight`，只碰 scrollTop 不碰 scrollLocked/followRef）兜底测量滞后 |
+| MEDIUM | `config/mod.rs` / `logger/mod.rs` / `commands/config.rs` / `LogSettings.tsx` / `types/index.ts` / `useAppStore.ts` | 日志格式不可配置（issue #3-4）：`[timestamp] direction data` 硬编码在 `PortLogWriter::write_line`，无时间戳/RX·TX 前缀开关 | 新增 `AppConfig.log_include_timestamp` / `log_include_direction`（`#[serde(default = "default_true")]` 兼容旧 config.json）+ `LogManager` 同名字段与 setter + `PortLogWriter` 创建时锁定 + `write_line` 前缀按开关拼接（四组合：全开/仅时间戳/仅方向/全关）+ `sync_log_manager_from_config` 同步两行；LogSettings 新增两个 checkbox（`logSettings.includeTimestamp`/`includeDirection` i18n key） |
+| MEDIUM | `GeneralSettings.tsx` / `ThemeProvider.tsx` / `base.css` / `types/index.ts` / `useAppStore.ts` / `config/mod.rs` / `i18n.ts` | 背景图片功能未实现，设置界面不应展示该选项（issue #3-5） | 从设置界面删除背景图 config-row（selector + 浏览按钮 + `open` import），删除 `AppConfig.backgroundImage`（TS + Rust）、`defaultConfig.backgroundImage`、ThemeProvider 的 `--bg-image` effect、base.css 的 `--bg-image` 变量与 body background-image 规则、4 个 i18n key |
+| LOW | `TerminalFilterBar.tsx` / `terminal-view.css` | 「全部/仅TX/仅RX」前有无意义的漏斗图标（issue #3-6） | 删除 `<Filter>` 图标（lucide import + JSX 行，纯装饰 aria-hidden 无交互）与 `.terminal-filter-icon` CSS 规则 |
+
+架构变化：`TriggerRule`/`TriggerRuleEntry` 新增可选 `portId`（空=全部端口）；`TriggerActionType` 移除死成员 `bookmark`；AppConfig 日志实体新增 2 个布尔格式开关；`background_image` 配置字段全链路删除。测试新增：triggerEngine portId 过滤 3 例、useRuleStore TriggerRule CRUD 7 例、logger 前缀开关 1 例、config 兼容性 2 例（日志字段缺省回退 + port_id 可选）。
+
+已知边界（记录而非缺陷）：① 触发匹配按**事件**粒度（serial:data 每事件解码文本），跨事件拆行的 contains 匹配依赖 RX 管线成行后才有完整文本——字节级 HEX 匹配不受影响；② alert 节流为模块级 Map（规则 id → 最后时间戳），应用生命周期内有效。
+
 ## 已修复 (2026-08-04 issue #2 九项：标签菜单批量开关/外部工具 · 分组持久化 · 自然排序 · 面板尺寸 · 搜索高亮 · SIM 仅调试)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 400/400 (19 files), `cargo check` 0 错 0 警告, `cargo test --lib` 38/38。

@@ -16,7 +16,7 @@ Multi-page settings modal. Split into `pages/` (7 settings), `editors/` (3 row f
 | `pages/CommandSettings.tsx` | 142 | bind `useRuleStore` send-command sets + manage commands |
 | `pages/ProtocolSettings.tsx` | 132 | protocol templates: frame head/length/checksum/tail |
 | `pages/ToolSettings.tsx` | 100 | per-port external tool command template config (`{port}` placeholder) |
-| `pages/TriggerSettings.tsx` | ~180 | conditional trigger rules: pattern match → alert/auto-respond/bookmark |
+| `pages/TriggerSettings.tsx` | ~200 | conditional trigger rules: pattern match → alert/auto-respond; optional per-port scoping (`portId` dropdown, empty=all) |
 | `editors/HighlightRuleEditor.tsx` | 35 | row form for highlight rule |
 | `editors/SendCmdEditor.tsx` | 30 | row form for send command |
 | `editors/ProtocolTemplateEditor.tsx` | 164 | field-by-field template form |
