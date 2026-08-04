@@ -10,7 +10,7 @@
  */
 import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pause, Play, Filter, Pin, Clock } from 'lucide-react';
+import { Pause, Play, Pin, Clock } from 'lucide-react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import type { DisplayFormat, Encoding } from '../../types';
@@ -81,7 +81,6 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
 
   return (
     <div className="terminal-filter-bar">
-      <Filter size={13} className="terminal-filter-icon" aria-hidden="true" />
       <div className="segmented" role="group">
         {DIRECTION_OPTIONS.map((d) => (
           <button

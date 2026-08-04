@@ -58,7 +58,6 @@
   --accent-color: #5eafff;
   --accent-emphasis: #2f7fd6;
   --accent-emphasis-hover: #3f92ea;
-  --bg-image: none;
 
   --text-primary: #c9cdd6;
   --text-secondary: #828899;
@@ -165,10 +164,6 @@ body {
   font-size: var(--font-size-ui);
   color: var(--text-primary);
   background-color: var(--bg-primary);
-  background-image: var(--bg-image, none);
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }

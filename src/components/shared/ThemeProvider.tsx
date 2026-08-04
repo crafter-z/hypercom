@@ -5,7 +5,6 @@ import { useAppStore } from '../../stores/useAppStore';
  * Applies presentation concerns to `<html>`:
  *  - theme (`dark` / `light` / `system` via matchMedia) as `data-theme`
  *  - user-configured font families + sizes as CSS variables
- *  - optional background image as `--bg-image`
  *
  * Power management (preventScreenOff / preventSleep) intentionally lives in
  * `usePowerManagement` — call it at the app root instead.
@@ -16,7 +15,6 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   const terminalFont = useAppStore((s) => s.config.terminalFont);
   const uiFont = useAppStore((s) => s.config.uiFont);
   const uiFontSize = useAppStore((s) => s.config.uiFontSize);
-  const backgroundImage = useAppStore((s) => s.config.backgroundImage);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -39,14 +37,6 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     document.documentElement.style.setProperty('--font-size-ui', `${uiFontSize}px`);
     document.documentElement.style.setProperty('--font-ui', uiFont);
   }, [terminalFontSize, terminalFont, uiFontSize, uiFont]);
-
-  useEffect(() => {
-    if (backgroundImage) {
-      document.documentElement.style.setProperty('--bg-image', `url("${backgroundImage}")`);
-    } else {
-      document.documentElement.style.removeProperty('--bg-image');
-    }
-  }, [backgroundImage]);
 
   return <>{children}</>;
 };

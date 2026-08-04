@@ -4,7 +4,6 @@ import { useAppStore } from '../../../stores/useAppStore';
 import { useOperationStore } from '../../../stores/useOperationStore';
 import { configService, storageService } from '../../../services/tauri';
 import type { PortPreset } from '../../../types';
-import { open } from '@tauri-apps/plugin-dialog';
 import type { AppConfig, DataBits, Parity, StopBits, Handshake } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 
@@ -30,7 +29,6 @@ const GeneralSettings: React.FC = () => {
   const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
   const uiFont = useAppStore(s => s.config.uiFont);
   const uiFontSize = useAppStore(s => s.config.uiFontSize);
-  const backgroundImage = useAppStore(s => s.config.backgroundImage);
   const setConfig = useAppStore((s) => s.setConfig);
 
   const [configPath, setConfigPath] = useState('');
@@ -256,15 +254,6 @@ const GeneralSettings: React.FC = () => {
         <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
         <input className="input" type="number" value={uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
-      </div>
-
-      <div className="config-row">
-        <label>{t('generalSettings.backgroundImageLabel')}</label>
-        <input className="input" value={backgroundImage || ''} placeholder={t('generalSettings.backgroundImagePlaceholder')} readOnly />
-        <button className="btn btn-sm" onClick={async () => {
-          const result = await open({ directory: false, multiple: false, filters: [{ name: t('generalSettings.imageFilterName'), extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp'] }] });
-          if (result) setConfig({ backgroundImage: result });
-        }}>{t('generalSettings.browseButton')}</button>
       </div>
 
       <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>

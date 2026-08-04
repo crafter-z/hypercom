@@ -60,6 +60,8 @@ const DirChangeDialog: React.FC<DirChangeDialogProps> = ({
 const LogSettings: React.FC = () => {
   const { t } = useTranslation();
   const autoSaveLog = useAppStore(s => s.config.autoSaveLog);
+  const logIncludeTimestamp = useAppStore(s => s.config.logIncludeTimestamp);
+  const logIncludeDirection = useAppStore(s => s.config.logIncludeDirection);
   const logDirectory = useAppStore(s => s.config.logDirectory);
   const logFilenameFormat = useAppStore(s => s.config.logFilenameFormat);
   const logFormat = useAppStore(s => s.config.logFormat);
@@ -129,6 +131,15 @@ const LogSettings: React.FC = () => {
         <input className="input" value={logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
         <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('logSettings.filenameFormatHint')}</span>
       </div>
+
+      <label className="checkbox-wrapper">
+        <input type="checkbox" checked={logIncludeTimestamp} onChange={(e) => setConfig({ logIncludeTimestamp: e.target.checked })} />
+        {t('logSettings.includeTimestamp')}
+      </label>
+      <label className="checkbox-wrapper">
+        <input type="checkbox" checked={logIncludeDirection} onChange={(e) => setConfig({ logIncludeDirection: e.target.checked })} />
+        {t('logSettings.includeDirection')}
+      </label>
 
       <div className="config-row">
         <label>{t('logSettings.formatLabel')}</label>

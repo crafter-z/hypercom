@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useRuleStore } from './useRuleStore';
-import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig } from '../types';
+import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig, TriggerRule } from '../types';
 
 beforeEach(() => {
   useRuleStore.setState({
@@ -11,6 +11,7 @@ beforeEach(() => {
     sendCommandSets: [],
     activeSendCommandSetId: null,
     portToolConfigs: [],
+    triggerRules: [],
   });
 });
 
@@ -330,5 +331,60 @@ describe('Port Tool Config CRUD', () => {
     useRuleStore.getState().addPortToolConfig(makeToolConfig('t2', { portId: 'COM3' }));
     const found = useRuleStore.getState().findToolConfigByPort('COM3');
     expect(found!.id).toBe('t1');
+  });
+});
+
+// ==================== Trigger Rule CRUD ====================
+
+const makeTriggerRule = (id: string, overrides?: Partial<TriggerRule>): TriggerRule => ({
+  id, name: `Rule ${id}`, pattern: 'ERROR', isRegex: false, matchType: 'contains',
+  actionType: 'alert', actionContent: '', actionIsHex: false, isEnabled: true,
+  ...overrides,
+});
+
+describe('Trigger Rule CRUD', () => {
+  it('setTriggerRules replaces the entire array', () => {
+    useRuleStore.getState().setTriggerRules([makeTriggerRule('t1')]);
+    useRuleStore.getState().setTriggerRules([makeTriggerRule('t2')]);
+    expect(useRuleStore.getState().triggerRules.map(r => r.id)).toEqual(['t2']);
+  });
+
+  it('addTriggerRule appends to the array', () => {
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t1'));
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t2'));
+    expect(useRuleStore.getState().triggerRules).toHaveLength(2);
+  });
+
+  it('updateTriggerRule patches existing rule', () => {
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t1'));
+    useRuleStore.getState().updateTriggerRule('t1', { pattern: 'FATAL', portId: 'COM3' });
+    const rule = useRuleStore.getState().triggerRules[0];
+    expect(rule.pattern).toBe('FATAL');
+    expect(rule.portId).toBe('COM3');
+  });
+
+  it('updateTriggerRule is no-op for unknown id', () => {
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t1'));
+    useRuleStore.getState().updateTriggerRule('ghost', { pattern: 'X' });
+    expect(useRuleStore.getState().triggerRules[0].pattern).toBe('ERROR');
+  });
+
+  it('removeTriggerRule deletes the correct rule', () => {
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t1'));
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t2'));
+    useRuleStore.getState().removeTriggerRule('t1');
+    expect(useRuleStore.getState().triggerRules.map(r => r.id)).toEqual(['t2']);
+  });
+
+  it('removeTriggerRule is no-op for unknown id', () => {
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t1'));
+    useRuleStore.getState().removeTriggerRule('ghost');
+    expect(useRuleStore.getState().triggerRules).toHaveLength(1);
+  });
+
+  it('updateTriggerRule clears portId back to undefined for all-ports scope', () => {
+    useRuleStore.getState().addTriggerRule(makeTriggerRule('t1', { portId: 'COM3' }));
+    useRuleStore.getState().updateTriggerRule('t1', { portId: undefined });
+    expect(useRuleStore.getState().triggerRules[0].portId).toBeUndefined();
   });
 });

@@ -212,12 +212,6 @@
   flex-shrink: 0;
 }
 
-.terminal-filter-icon {
-  color: var(--text-secondary);
-  opacity: 0.7;
-  flex-shrink: 0;
-}
-
 .terminal-filter-spacer {
   flex: 1;
 }
