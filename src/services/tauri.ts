@@ -16,6 +16,7 @@ import type {
   TriggerRule,
   PortPreset,
   PortToolConfig,
+  PortGroup,
 } from '../types';
 
 // ==================== 类型定义 ====================
@@ -385,6 +386,12 @@ export const storageService = {
 
   deletePortToolConfig: (configId: string): Promise<void> => {
     return invoke<void>('delete_port_tool_config', { configId });
+  },
+
+  /** 整体替换保存串口分组布局（issue #2-3，前端分组变更后防抖调用）。
+   *  读取随 get_config 返回的 AppConfig.portGroups，无单独 load 命令。 */
+  savePortGroups: (groups: PortGroup[]): Promise<void> => {
+    return invoke<void>('save_port_groups', { args: groups });
   },
 };
 

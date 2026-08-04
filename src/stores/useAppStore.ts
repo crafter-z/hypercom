@@ -174,13 +174,16 @@ const defaultConfig: AppConfig = {
   triggerRules: [],
   portPresets: [],
   portToolConfigs: [],
+  portGroups: [],
 };
 
 const defaultUIState: UIState = {
   isConfigOpen: false,
   configActiveTab: 'general',
   sidebarWidth: 260,
-  operationPanelHeight: 200,
+  // 200px 无法完整展示「发送区 + 参数区」两行控件（issue #2-6），
+  // 提高到 280px 保证首次启动即完整可见（可拖拽范围仍为 [160, 600]）。
+  operationPanelHeight: 280,
   isOperationPanelCollapsed: false,
   configLoaded: false,
   isHotkeyHelpOpen: false,
@@ -219,6 +222,8 @@ interface AppState {
   // 串口管理
   setPorts: (ports: SerialPort[]) => void;
   updatePort: (portId: string, patch: Partial<SerialPort>) => void;
+  /** 一次性载入持久化的分组列表（启动时从 config.portGroups 恢复）。 */
+  setGroups: (groups: PortGroup[]) => void;
   addGroup: (group: PortGroup) => void;
   updateGroup: (groupId: string, patch: Partial<PortGroup>) => void;
   removeGroup: (groupId: string) => void;
@@ -308,6 +313,8 @@ export const useAppStore = create<AppState>()(
     }),
     
     addGroup: (group) => set((state) => { state.groups.push(group); }),
+
+    setGroups: (groups) => set((state) => { state.groups = groups; }),
     
     updateGroup: (groupId, patch) => set((state) => {
       const group = state.groups.find(g => g.id === groupId);

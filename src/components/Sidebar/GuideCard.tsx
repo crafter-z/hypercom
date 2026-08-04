@@ -61,6 +61,8 @@ const QuickStartModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 interface GuideCardProps {
   /** 复用 Sidebar 工具栏烧瓶按钮的 toggleSimulation handler */
   onEnableSimulation: () => void;
+  /** release 安装包不暴露模拟串口（issue #2-9）→ 隐藏 SIM 引导按钮 */
+  simulationAvailable: boolean;
 }
 
 /**
@@ -68,7 +70,7 @@ interface GuideCardProps {
  * 仅在 ports 为空且未开启模拟模式时由 Sidebar 渲染，
  * 任意端口（真实 / SIM）出现后自动消失。
  */
-const GuideCard: React.FC<GuideCardProps> = ({ onEnableSimulation }) => {
+const GuideCard: React.FC<GuideCardProps> = ({ onEnableSimulation, simulationAvailable }) => {
   const { t } = useTranslation();
   const [showQuickStart, setShowQuickStart] = useState(false);
 
@@ -79,10 +81,12 @@ const GuideCard: React.FC<GuideCardProps> = ({ onEnableSimulation }) => {
       </div>
       <div className="guide-card-title">{t('guide.title')}</div>
       <p className="guide-card-hint">{t('guide.hint')}</p>
-      <button className="btn btn-primary btn-sm guide-card-sim-btn" onClick={onEnableSimulation}>
-        <FlaskConical size={13} />
-        {t('guide.simButton')}
-      </button>
+      {simulationAvailable && (
+        <button className="btn btn-primary btn-sm guide-card-sim-btn" onClick={onEnableSimulation}>
+          <FlaskConical size={13} />
+          {t('guide.simButton')}
+        </button>
+      )}
       <button className="guide-card-quickstart-link" onClick={() => setShowQuickStart(true)}>
         {t('guide.quickStartLink')}
       </button>

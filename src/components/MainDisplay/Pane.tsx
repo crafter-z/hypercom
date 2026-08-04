@@ -2,7 +2,7 @@ import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { useSerialConnection } from '../../hooks';
+import { useSerialConnection, usePortToolActions } from '../../hooks';
 import { notifyError } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
 import { popoutLabel } from '../Popout/popoutLabel';
@@ -37,7 +37,8 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const setTabPoppedOut = useAppStore((s) => s.setTabPoppedOut);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const removePane = useAppStore((s) => s.removePane);
-  const { closePort } = useSerialConnection();
+  const { openPort, closePort } = useSerialConnection();
+  const { runTool, killTool, configTool } = usePortToolActions();
 
   // Droppable target for the empty pane area — allows tabs to be
   // dragged into this pane even when it has no SortableContext.
@@ -105,6 +106,27 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     }
     closeOtherTabs(tabId);
   }, [tabs, cleanupClosedTab, closeOtherTabs]);
+
+  // 批量打开/断开「所有标签页」对应的串口（issue #2-1）——作用于全局 tabs
+  // （跨分屏、含已弹出标签），而非仅本 pane。与侧边栏一键开/关同款
+  // 100ms 节流，避免并发 open/close 在后端抢串口句柄。
+  const handleConnectAllTabs = useCallback(async () => {
+    for (const tab of useAppStore.getState().tabs) {
+      const port = useAppStore.getState().ports.find(p => p.id === tab.id);
+      if (!port || port.status === 'connected' || port.status === 'connecting') continue;
+      await openPort(tab.id, port.baudRate || 115200);
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }, [openPort]);
+
+  const handleDisconnectAllTabs = useCallback(async () => {
+    for (const tab of useAppStore.getState().tabs) {
+      const port = useAppStore.getState().ports.find(p => p.id === tab.id);
+      if (!port || port.status !== 'connected') continue;
+      await closePort(tab.id);
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }, [closePort]);
 
   // paneTabs must follow the pane's tabIds order, not the global tabs array order.
   // Array.filter preserves original array order, which breaks after reorderPaneTabIds.
@@ -198,6 +220,11 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             onMoveToPane={handleMoveTabToPane}
             onSplitVertical={() => { onFocus(); splitPane('vertical'); }}
             onSplitHorizontal={() => { onFocus(); splitPane('horizontal'); }}
+            onConnectAllTabs={handleConnectAllTabs}
+            onDisconnectAllTabs={handleDisconnectAllTabs}
+            onRunTool={runTool}
+            onKillTool={killTool}
+            onConfigTool={configTool}
           />
         </div>
       </div>

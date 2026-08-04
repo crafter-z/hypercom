@@ -126,8 +126,8 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (364 cases / 17 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (39 cases)
+npm run test:run                                       # vitest (400 cases / 19 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (38 cases)
 ```
 
 ---

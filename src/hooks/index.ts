@@ -9,4 +9,5 @@ export { useSystemStatus } from './useSystemStatus';
 export { useAppInit } from './useAppInit';
 export { useSimulation } from './useSimulation';
 export { useToolOutput } from './useToolOutput';
+export { usePortToolActions } from './usePortToolActions';
 export { isUserClosingPort, isPortLost } from './disconnectTracking';

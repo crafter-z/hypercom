@@ -1,6 +1,6 @@
 # src/hooks/
 
-11 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
+12 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
 
 ## File structure
 
@@ -15,9 +15,10 @@
 | `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | pop-out intent bus: listens `popout:send-command` (→ `sendToPort(activeTabId)`) / `popout:open-config` (→ ConfigModal page) / `popout:request-sync` (→ replay `active-tab:changed`); subscribes `useRuleStore.sendCommandSets` + `useAppStore.activeTabId` → emits `command-sets:changed` / `active-tab:changed` refresh signals |
 | `useConfigPersistence.ts` | `useConfigPersistence()` | `App.tsx` | load + save config |
 | `useSystemStatus.ts` | `useSystemStatus(pollMs=5000)` | StatusBar | polling |
-| `useAppInit.ts` | `useAppInit()` | `App.tsx` | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; session restore via `configService.getSessionSnapshot()` |
-| `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts |
-| `useToolOutput.ts` | `useToolOutput()` | `App.tsx` **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
+| `useAppInit.ts` | `useAppInit()` | App.tsx | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; restores `config.portGroups` into `useAppStore.groups` + backfills `ports.groupId`; debounced (500ms) auto-save of groups on any change (issue #2-3); session restore via `configService.getSessionSnapshot()` |
+| `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts; **dev-only** — no-op when `DEV_FEATURES_ENABLED` is false (issue #2-9) |
+| `useToolOutput.ts` | `useToolOutput()` | App.tsx **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
+| `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool` |
 | `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
 
 ## Conventions (root covers lifecycle split rationale)
@@ -28,7 +29,7 @@
 - `useSerialReceive`'s status handler is the ONLY place that writes to `lostPortIds` (in `disconnectTracking.ts`). A port is marked "lost" only on a connected→disconnected transition within this session; successful `openPort`/`closePort`/reconnect clear it. `isPortLost(portId)` is exported for `DisconnectBanner.tsx` which uses the pure helper `filterLostTabIds(tabs, isPortLost)` — never probe port state from outside the hook.
 - `useSerialSend` maintains in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, dedup on content+format). `SendHistoryEntry` lives in `src/types/index.ts`. No SQLite persistence; the old `sendHistoryService` / `SendHistoryItem` were removed. Backend Rust commands survive but are not invoked from the frontend.
 - `useSerialConnection.closePort()` is the only sanctioned close path: triggers `stopLogging` and updates port status. Bypassing leaks log file handles + leaves status "connected" stuck.
-- `useSerialPorts(3000)` uses `mergePorts()` on every refresh — `mapPortInfo()` always overwrites status to `'disconnected'`; merge preserves alias / group / connection state / baud match.
+- `useSerialPorts(3000)` uses `mergePorts()` on every refresh — `mapPortInfo()` always overwrites status to `'disconnected'`; merge preserves alias / group / connection state / baud match AND the **existing port order** (manual sort / drag order survive polling, issue #2-5); genuinely new ports append at the end.
 - Polling hooks accept `pollIntervalMs` as a parameter intentionally — do not hardcode inside the hook.
 - `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter (lives only in config). Loads settings entities directly from `config` (`cfg.sendCommandSets` etc., wire format matches store format via camelCase) into `useRuleStore` — including `triggerRules`; no startup `storageService.loadCommandSets()` calls. Session restore uses `configService.getSessionSnapshot()`.
 - Pop-out windows are SEPARATE webviews with their own store instances — they never share mutable frontend state with the main window, only intents/signals (`popoutEventService` in `src/services/tauri.ts`). Sending from a pop-out MUST go through `popout:send-command` → main's `sendToPort`; a direct `serialService.sendSerialData` call from the pop-out would skip the TX echo / traffic stats / send history (the backend emits no TX event).

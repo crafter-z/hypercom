@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TerminalLine, DisplayFormat } from '../../types';
-import { findMatches } from './terminalSearch';
+import { findMatchesIncremental, type MatchCache } from './terminalSearch';
 
 export interface SearchJumpContext {
   /** Original line index → rendered (filtered) row index; `null` when no
@@ -47,14 +47,35 @@ export function useTerminalSearch({
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [currentMatch, setCurrentMatch] = useState(0); // index into matchIndices
 
-  const matchIndices = useMemo(
-    () => findMatches(lines, {
+  // 增量匹配缓存（issue #2-8 性能）：继续输入时只重扫旧匹配∪新增行。
+  // ref 在 memo 内更新是幂等的（同输入重算结果相同，StrictMode 双渲染安全）。
+  const matchCacheRef = useRef<MatchCache | null>(null);
+
+  // 性能关键点：匹配计算**只在搜索栏打开时**进行。关闭状态下即使残留
+  // query，高频 RX 批写（lines 身份每批变化）也不再触发全缓冲扫描。
+  const matchIndices = useMemo(() => {
+    if (!searchOpen) {
+      matchCacheRef.current = null;
+      return [];
+    }
+    if (!debouncedQuery) {
+      matchCacheRef.current = null;
+      return [];
+    }
+    const matches = findMatchesIncremental(
+      lines,
+      { query: debouncedQuery, caseSensitive, displayFormat },
+      matchCacheRef.current
+    );
+    matchCacheRef.current = {
       query: debouncedQuery,
       caseSensitive,
       displayFormat,
-    }),
-    [lines, debouncedQuery, caseSensitive, displayFormat]
-  );
+      matches,
+      lineCount: lines.length,
+    };
+    return matches;
+  }, [lines, debouncedQuery, caseSensitive, displayFormat, searchOpen]);
 
   // Debounce search input (~150ms) — only recompute matches on debounced value
   useEffect(() => {
@@ -137,6 +158,7 @@ export function useTerminalSearch({
   return {
     searchOpen,
     searchQuery,
+    debouncedQuery,
     caseSensitive,
     currentMatch,
     matchIndices,

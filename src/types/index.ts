@@ -301,6 +301,7 @@ export interface AppConfig {
   triggerRules: TriggerRule[];
   portPresets: PortPreset[];
   portToolConfigs: PortToolConfig[];
+  portGroups: PortGroup[];   // 串口分组布局（issue #2-3 起 config.json 持久化 + 自动保存）
 }
 
 // ==================== 日志相关 ====================

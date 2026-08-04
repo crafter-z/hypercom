@@ -6,6 +6,25 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-04 issue #2 九项：标签菜单批量开关/外部工具 · 分组持久化 · 自然排序 · 面板尺寸 · 搜索高亮 · SIM 仅调试)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 400/400 (19 files), `cargo check` 0 错 0 警告, `cargo test --lib` 38/38。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `config/mod.rs` / `commands/storage.rs` / `useAppInit.ts` / `Sidebar.tsx` | 分组设置无法保存，关窗即丢失；「保存布局」手动按钮不直观（issue #2-3） | 新增实体 `PortGroupEntry` + `AppConfig.port_groups`（`#[serde(default)]` 兼容旧 config.json）+ 命令 `save_port_groups`（整体替换落盘）；前端启动经 `get_config` 恢复分组并按成员关系回填 `ports.groupId`，`useAppInit` 订阅 `groups` 变更 500ms 防抖自动保存；移除「保存布局」按钮与 `sidebar.toolbar.saveLayout` key |
+| HIGH | `useSerialPorts.ts` / `portSort.ts` / `Sidebar.tsx` | ① 排序结果为字典序 COM1-COM12-COM2（issue #2-4）；② 点击排序后 3s 轮询用枚举顺序覆盖 store，排序瞬间丢失（issue #2-5） | ① 新纯函数 `naturalCompare`/`sortPortsByNatural`：数字段按数值比较（COM1<COM2<COM12），其余逐位不区分大小写；② 根因修复：`mergePorts` 改为按 **existing 顺序**合并（新端口追加），手动排序/拖拽顺序不再被轮询冲掉；侧边栏排序改为**持久开关**——激活时渲染派生自然序（新端口自动落位），排序中禁用拖拽，菜单项带 active 态 |
+| HIGH | `TabBar.tsx` / `Pane.tsx` | 标签页右键菜单缺批量开关串口入口（issue #2-1） | 新增「打开所有标签页 / 断开所有标签页」：遍历**全局** tabs，逐个 openPort/closePort（100ms 节流，与侧边栏一键开/关同款），无可连/可断端口时禁用；复用 Pane 的 `useSerialConnection` |
+| MEDIUM | `usePortToolActions.ts` / `TabBar.tsx` / `Sidebar.tsx` | 标签页右键菜单缺外部工具入口（issue #2-2） | 抽出共享 hook `usePortToolActions`（runTool 未配置→跳配置页 / killTool / configTool），侧边栏与标签页菜单同源复用，文案复用 `sidebar.port.contextMenu.*` key 保证两处完全一致；运行中显示「终止外部工具」（danger） |
+| MEDIUM | `useAppStore.ts` | 操作面板默认高度 200px 无法完整显示发送区+参数区（issue #2-6） | `defaultUIState.operationPanelHeight` 200→280（可拖拽范围不变 [160, 600]）；会话快照本就不持久化 UI 态，新默认对全体用户生效 |
+| MEDIUM | `operation-panel.css` | 宽窗口下参数栏 flex:1 拉到 350px+，挤占发送区（issue #2-7） | `.op-section-params` 加 `max-width: 300px` 封顶，多余宽度还给发送区 |
+| MEDIUM | `terminalSearch.ts` / `useTerminalSearch.ts` / `TerminalRow.tsx` / `terminal-view.css` | Ctrl+F 搜索仅整行底色，无字符级高亮；且关闭搜索栏后残留 query 仍随每批 RX 全缓冲重扫（issue #2-8 性能隐患） | ① `markSearchMatchesInHtml`：HTML tag/实体感知的 `<mark>` 叠加层，只在命中行（每屏 ~50 行）上包 query 出现处，兼容用户高亮 span 与协议着色（跨界匹配自动拆段），当前匹配行用 current 加强样式；② 匹配计算**仅在搜索栏打开时**进行；③ `findMatchesIncremental` 前缀收窄——继续输入时只重扫「旧匹配 ∪ 新增行」 |
+| LOW | `devMode.ts` / `vite-env.d.ts` / `Sidebar.tsx` / `GuideCard.tsx` / `useSimulation.ts` / `simulation.rs` | release 安装包不应含模拟串口（issue #2-9） | 双层门控：前端 `DEV_FEATURES_ENABLED = import.meta.env.DEV` 隐藏烧瓶按钮 / GuideCard SIM 按钮，`useSimulation` 兜底 no-op；后端 `enable/disable_simulation` 在 `cfg(not(debug_assertions))` 下返回错误。`tauri dev`（dev profile + Vite dev server）照常可用 |
+
+架构变化：`ContextMenuEntry` 新增可选 `active` 布尔（开关态菜单项，accent 着色）；hooks 增至 12 个（`usePortToolActions`）；config.json 实体类型增至 7 个（`port_groups`）。
+
+已知边界（记录而非缺陷）：搜索栏关闭期间按 F3 重新打开时，首次导航需再按一次（匹配在打开后才计算——这是「不后台全缓冲扫描」的代价，主路径 Ctrl+F/Enter 不受影响）。
+
 ## 已修复 (2026-08-04 RX 管线重构 + 滚动锁重设计 + 快捷跳转，关闭 GitHub issue #1)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 364/364 (17 files), `cargo check` 0 错 0 警告（后端未改动）。

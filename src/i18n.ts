@@ -38,7 +38,6 @@ const resources = {
       'sidebar.toolbar.hideHidden': '隐藏已隐藏串口',
       'sidebar.toolbar.showHidden': '显示已隐藏串口',
       'sidebar.toolbar.sortByPort': '按端口号排序',
-      'sidebar.toolbar.saveLayout': '保存布局',
       'sidebar.toolbar.refresh': '刷新串口列表',
       'sidebar.toolbar.more': '更多操作',
       'sidebar.search.placeholder': '搜索串口...',
@@ -94,6 +93,8 @@ const resources = {
       'tabBar.contextMenu.closeToRight': '关闭右侧',
       'tabBar.contextMenu.closeToLeft': '关闭左侧',
       'tabBar.contextMenu.closeOthers': '关闭其他',
+      'tabBar.contextMenu.openAll': '打开所有标签页',
+      'tabBar.contextMenu.disconnectAll': '断开所有标签页',
       'tabBar.contextMenu.moveToPane': '移至分屏 {{target}}',
 
       'terminalView.contextMenu.selectAll': '全选',
@@ -558,7 +559,6 @@ const resources = {
       'sidebar.toolbar.hideHidden': 'Hide Hidden Ports',
       'sidebar.toolbar.showHidden': 'Show Hidden Ports',
       'sidebar.toolbar.sortByPort': 'Sort by Port',
-      'sidebar.toolbar.saveLayout': 'Save Layout',
       'sidebar.toolbar.refresh': 'Refresh Ports',
       'sidebar.toolbar.more': 'More Actions',
       'sidebar.search.placeholder': 'Search ports...',
@@ -614,6 +614,8 @@ const resources = {
       'tabBar.contextMenu.closeToRight': 'Close to Right',
       'tabBar.contextMenu.closeToLeft': 'Close to Left',
       'tabBar.contextMenu.closeOthers': 'Close Others',
+      'tabBar.contextMenu.openAll': 'Connect All Tabs',
+      'tabBar.contextMenu.disconnectAll': 'Disconnect All Tabs',
       'tabBar.contextMenu.moveToPane': 'Move to Pane {{target}}',
 
       'terminalView.contextMenu.selectAll': 'Select All',

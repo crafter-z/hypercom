@@ -209,7 +209,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   const getJumpContext = useCallback(() => jumpContextRef.current, []);
 
   const {
-    searchOpen, searchQuery, caseSensitive, currentMatch, matchIndices,
+    searchOpen, searchQuery, debouncedQuery, caseSensitive, currentMatch, matchIndices,
     setSearchQuery, openSearch, toggleSearch, toggleCase, closeSearch,
     nextMatch, prevMatch,
   } = useTerminalSearch({ lines, displayFormat: terminal?.displayFormat, getJumpContext });
@@ -437,6 +437,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
                   searchOpen={searchOpen}
                   matchSet={matchSet}
                   currentMatchLineIdx={currentMatchLineIdx}
+                  searchQuery={searchOpen ? debouncedQuery : ''}
+                  searchCaseSensitive={caseSensitive}
                   rowIndex={vRow.index}
                   rowStart={vRow.start}
                   measureRef={virtualizer.measureElement}

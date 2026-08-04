@@ -6,6 +6,8 @@ export interface ContextMenuItem {
   onClick: () => void;
   danger?: boolean;
   disabled?: boolean;
+  /** Toggle-state affordance — rendered with the active (accent) treatment. */
+  active?: boolean;
 }
 
 export interface ContextMenuSeparator {
@@ -70,7 +72,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
         return (
           <div
             key={`item-${idx}`}
-            className={`context-menu-item${menuItem.danger ? ' danger' : ''}${menuItem.disabled ? ' disabled' : ''}`}
+            className={`context-menu-item${menuItem.danger ? ' danger' : ''}${menuItem.disabled ? ' disabled' : ''}${menuItem.active ? ' active' : ''}`}
             onClick={() => {
               if (!menuItem.disabled) {
                 menuItem.onClick();

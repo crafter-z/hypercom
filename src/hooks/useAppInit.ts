@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
-import { configService } from '../services/tauri';
+import { configService, storageService } from '../services/tauri';
 import type { PaneNode, SerialPort } from '../types';
 import { useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
@@ -46,7 +46,20 @@ export function useAppInit() {
       useRuleStore.getState().setTriggerRules(cfg.triggerRules);
       useRuleStore.getState().setPortToolConfigs(cfg.portToolConfigs);
 
+      // 串口分组恢复（issue #2-3）：分组布局持久化在 config.json。
+      // setGroups 必须在下方 groups 自动保存订阅注册**之前**执行，
+      // 否则启动载入本身会触发一次无意义的回写。
+      useAppStore.getState().setGroups(cfg.portGroups ?? []);
+
       await refreshPorts();
+
+      // 按持久化的分组成员关系回填 ports.groupId（端口由枚举产生，
+      // 自身不记录分组；mergePorts 之后的每次轮询都会保留该字段）。
+      for (const group of useAppStore.getState().groups) {
+        for (const portId of group.portIds) {
+          useAppStore.getState().updatePort(portId, { groupId: group.id });
+        }
+      }
 
       // F.3: Session restore — recreate tabs + paneTree from snapshot (no auto-connect)
       if (cfg.restoreSession) {
@@ -94,4 +107,27 @@ export function useAppInit() {
     };
     init();
   }, [loadConfig, refreshPorts]);
+
+  // 分组自动保存（issue #2-3）：分组增删 / 重命名 / 展开折叠 / 拖拽成员等
+  // 任何 groups 变更 → 500ms 防抖 → 整组列表回写 config.json（原子写 + .bak
+  // 由后端 ConfigManager.save() 保证）。替代旧的「保存布局」手动按钮。
+  // 与 App.tsx 会话快照订阅同款防抖写法；后台持久化失败只记日志不弹 toast，
+  // 避免高频操作期间的重复打扰。
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = useAppStore.subscribe((state, prevState) => {
+      if (state.groups === prevState.groups) return;
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        timeoutId = null;
+        storageService.savePortGroups(useAppStore.getState().groups).catch((e) => {
+          console.warn('[useAppInit] Failed to auto-save port groups:', e);
+        });
+      }, 500);
+    });
+    return () => {
+      unsubscribe();
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
+  }, []);
 }

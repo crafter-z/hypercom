@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { TabItem, LeafPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink } from 'lucide-react';
+import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare } from 'lucide-react';
 import {
   SortableContext,
   useSortable,
@@ -27,6 +27,14 @@ interface TabBarProps {
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
   onSplitVertical?: () => void;
   onSplitHorizontal?: () => void;
+  /** 一次性打开（连接）全部标签页对应串口（issue #2-1）。 */
+  onConnectAllTabs?: () => void;
+  /** 一次性断开全部标签页对应串口（issue #2-1）。 */
+  onDisconnectAllTabs?: () => void;
+  /** 外部工具三入口 —— 与侧边栏端口右键菜单同源同行为（issue #2-2）。 */
+  onRunTool?: (tabId: string) => void;
+  onKillTool?: (tabId: string) => void;
+  onConfigTool?: () => void;
 }
 
 // ==================== Tab rendering ====================
@@ -125,10 +133,17 @@ const TabBar: React.FC<TabBarProps> = ({
   onMoveToPane,
   onSplitVertical,
   onSplitHorizontal,
+  onConnectAllTabs,
+  onDisconnectAllTabs,
+  onRunTool,
+  onKillTool,
+  onConfigTool,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const { t } = useTranslation();
   const ports = useAppStore((s) => s.ports);
+  // 批量开/关针对**全部标签页**（跨分屏），禁用态按全局 tabs 计算。
+  const allTabs = useAppStore((s) => s.tabs);
 
   // Lookup: portId → is disconnected (status 'disconnected' or port missing).
   // A missing port (USB unplug removed it from the list) is treated as
@@ -155,23 +170,58 @@ const TabBar: React.FC<TabBarProps> = ({
 
   const getContextMenuItems = useCallback((tabId: string): ContextMenuEntry[] => {
     const tab = tabs.find(t => t.id === tabId);
+    const portMap = new Map(ports.map(p => [p.id, p]));
     const items: ContextMenuEntry[] = [
       { label: tab?.isPinned ? t('tabBar.contextMenu.unpin') : t('tabBar.contextMenu.pin'), icon: <Pin size={14} />, onClick: () => onTabPin(tabId) },
-      { type: 'separator' },
-      { label: t('tabBar.contextMenu.close'), onClick: () => onTabClose(tabId) },
-      { label: t('tabBar.contextMenu.closeToRight'), onClick: () => onCloseToRight(tabId) },
-      { label: t('tabBar.contextMenu.closeToLeft'), onClick: () => onCloseToLeft(tabId) },
-      { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId) },
     ];
 
     // 弹出入口：仅未弹出时提供（弹出后主窗内容区为占位，标签右键不再给此项）。
     if (onPopOut && !tab?.poppedOut) {
-      items.splice(1, 0, {
+      items.push({
         label: t('terminalPopout.popOut'),
         icon: <ExternalLink size={14} />,
         onClick: () => onPopOut(tabId),
       });
     }
+
+    // 批量连接/断开所有标签页对应的串口（issue #2-1）。
+    if (onConnectAllTabs || onDisconnectAllTabs) {
+      const hasConnectable = allTabs.some(tb => {
+        const port = portMap.get(tb.id);
+        return !!port && port.status !== 'connected' && port.status !== 'connecting';
+      });
+      const hasDisconnectable = allTabs.some(tb => portMap.get(tb.id)?.status === 'connected');
+      items.push(
+        { type: 'separator' },
+        { label: t('tabBar.contextMenu.openAll'), icon: <PlugZap size={14} />, onClick: () => onConnectAllTabs?.(), disabled: !hasConnectable },
+        { label: t('tabBar.contextMenu.disconnectAll'), icon: <Unplug size={14} />, onClick: () => onDisconnectAllTabs?.(), disabled: !hasDisconnectable },
+      );
+    }
+
+    // 外部工具：与侧边栏端口右键菜单同文案同行为（issue #2-2）。
+    // 执行入口始终可见；未配置时点击跳转配置页。运行中显示终止。
+    if (onRunTool || onConfigTool) {
+      const toolRunning = portMap.get(tabId)?.toolRunning === true;
+      items.push({ type: 'separator' });
+      if (onRunTool) {
+        items.push(
+          toolRunning
+            ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool?.(tabId), danger: true }
+            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(tabId) },
+        );
+      }
+      if (onConfigTool) {
+        items.push({ label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: () => onConfigTool() });
+      }
+    }
+
+    items.push(
+      { type: 'separator' },
+      { label: t('tabBar.contextMenu.close'), onClick: () => onTabClose(tabId) },
+      { label: t('tabBar.contextMenu.closeToRight'), onClick: () => onCloseToRight(tabId) },
+      { label: t('tabBar.contextMenu.closeToLeft'), onClick: () => onCloseToLeft(tabId) },
+      { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId) },
+    );
 
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
       items.push({ type: 'separator' });
@@ -185,7 +235,7 @@ const TabBar: React.FC<TabBarProps> = ({
     }
 
     return items;
-  }, [tabs, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, t]);
+  }, [tabs, allTabs, ports, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, onConnectAllTabs, onDisconnectAllTabs, onRunTool, onKillTool, onConfigTool, t]);
 
   const tabIds = tabs.map(t => t.id);
 

@@ -46,6 +46,11 @@
   cursor: default;
 }
 
+/* Toggle-state entry (e.g. «sort by port» while the sort mode is on) */
+.context-menu-item.active {
+  color: var(--accent-color);
+}
+
 .context-menu-item.disabled:hover {
   background: transparent;
   color: var(--text-primary);

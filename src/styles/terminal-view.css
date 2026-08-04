@@ -311,3 +311,24 @@
 .terminal-line.selected.current-match {
   background: rgba(79, 195, 247, 0.20);
 }
+
+/* Character-level search highlight (issue #2-8): <mark> wraps the exact
+ * query occurrences inside a hit line, layered over user highlights and
+ * protocol coloring. The current-match line gets a stronger fill. */
+.terminal-search-mark {
+  background: rgba(220, 220, 170, 0.30);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.terminal-line.current-match .terminal-search-mark {
+  background: rgba(255, 193, 7, 0.55);
+}
+
+:root[data-theme="light"] .terminal-search-mark {
+  background: rgba(255, 235, 59, 0.45);
+}
+
+:root[data-theme="light"] .terminal-line.current-match .terminal-search-mark {
+  background: rgba(255, 152, 0, 0.45);
+}

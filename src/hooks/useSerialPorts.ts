@@ -22,15 +22,21 @@ export function mapPortInfo(info: AvailablePortInfo): SerialPort {
 }
 
 export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[] {
-  const existingMap = new Map(existing.map(p => [p.id, p]));
-  const merged = incoming.map(p => {
-    const prev = existingMap.get(p.id);
-    if (prev) {
-      // Preserve runtime state: status, alias, hidden, group, connection
-      // params, and the protocol-template binding (TerminalView sets
-      // protocolTemplateId via updatePort; the 3s poll must not wipe it).
-      return {
-        ...p,
+  const incomingMap = new Map(incoming.map(p => [p.id, p]));
+  const merged: SerialPort[] = [];
+  const seen = new Set<string>();
+  // 1) Iterate EXISTING first so the previously established order survives the
+  //    poll (issue #2-5): manual «sort by port», drag reordering and group
+  //    membership would otherwise be reset to raw enumeration order every 3s.
+  //    Runtime state must still be preserved per port: status, alias, hidden,
+  //    group, connection params, tool flag, and the protocol-template binding
+  //    (TerminalView sets protocolTemplateId via updatePort; the poll must not
+  //    wipe it).
+  for (const prev of existing) {
+    const fresh = incomingMap.get(prev.id);
+    if (fresh) {
+      merged.push({
+        ...fresh,
         status: prev.status,
         alias: prev.alias,
         isHidden: prev.isHidden,
@@ -42,19 +48,20 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
         handshake: prev.handshake,
         protocolTemplateId: prev.protocolTemplateId,
         toolRunning: prev.toolRunning,
-      };
-    }
-    return p;
-  });
-  // Union back any live port that transiently vanished from the enumeration
-  // (USB glitch / sleep-resume). Dropping a connected/connecting port while
-  // its tab/terminal still reference it causes store/backend drift; it would
-  // reappear later as 'disconnected'.
-  const incomingIds = new Set(incoming.map(p => p.id));
-  for (const prev of existing) {
-    if (!incomingIds.has(prev.id) && (prev.status === 'connected' || prev.status === 'connecting')) {
+      });
+      seen.add(prev.id);
+    } else if (prev.status === 'connected' || prev.status === 'connecting') {
+      // Union back any live port that transiently vanished from the enumeration
+      // (USB glitch / sleep-resume). Dropping a connected/connecting port while
+      // its tab/terminal still reference it causes store/backend drift; it
+      // would reappear later as 'disconnected'.
       merged.push(prev);
+      seen.add(prev.id);
     }
+  }
+  // 2) Genuinely new ports append at the end in enumeration order.
+  for (const p of incoming) {
+    if (!seen.has(p.id)) merged.push(p);
   }
   return merged;
 }

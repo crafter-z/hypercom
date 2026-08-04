@@ -4,15 +4,14 @@ import { useAppStore } from '../../stores/useAppStore';
 import type { SerialPort, PortGroup } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
-  Play, Square, Eye, EyeOff, ArrowUpDown, Save, RefreshCw,
+  Play, Square, Eye, EyeOff, ArrowUpDown, RefreshCw,
   ChevronRight, Plus, X, Search, FlaskConical, Ellipsis,
   PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
   Wrench, TerminalSquare,
 } from 'lucide-react';
-import { useSerialPorts, useSerialConnection, useSimulation, useConfigPersistence } from '../../hooks';
-import { toolService } from '../../services/tauri';
-import { notifyError } from '../../stores/useToastStore';
-import { useRuleStore } from '../../stores/useRuleStore';
+import { useSerialPorts, useSerialConnection, useSimulation, usePortToolActions } from '../../hooks';
+import { sortPortsByNatural } from '../../utils/portSort';
+import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import {
   DndContext,
   closestCenter,
@@ -34,22 +33,24 @@ import { CSS } from '@dnd-kit/utilities';
 /**
  * Sidebar toolbar — the rack's control strip.
  *
- * High-frequency actions live here visibly: simulation toggle,
- * refresh, and open/close all (promoted from the overflow menu —
+ * High-frequency actions live here visibly: simulation toggle (dev builds
+ * only), refresh, and open/close all (promoted from the overflow menu —
  * they're the rack's bread and butter). Only low-frequency actions
- * (show hidden, sort, save layout) fold into the overflow menu.
+ * (show hidden, sort) fold into the overflow menu. 分组/布局变更现在自动
+ * 持久化（issue #2-3），原「保存布局」按钮已移除。
  */
 const SidebarToolbar: React.FC<{
   showHidden: boolean;
   onToggleHidden: () => void;
   onRefresh: () => void;
   simulationMode: boolean;
+  simulationAvailable: boolean;
   onToggleSimulation: () => void;
   onOpenAll: () => void;
   onCloseAll: () => void;
   onSortByPort: () => void;
-  onSaveLayout: () => void;
-}> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort, onSaveLayout }) => {
+  sortActive: boolean;
+}> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, simulationAvailable, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort, sortActive }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
 
@@ -59,22 +60,22 @@ const SidebarToolbar: React.FC<{
       icon: showHidden ? <Eye size={14} /> : <EyeOff size={14} />,
       onClick: onToggleHidden,
     },
-    { label: t('sidebar.toolbar.sortByPort'), icon: <ArrowUpDown size={14} />, onClick: onSortByPort },
-    { type: 'separator' },
-    { label: t('sidebar.toolbar.saveLayout'), icon: <Save size={14} />, onClick: onSaveLayout },
+    { label: t('sidebar.toolbar.sortByPort'), icon: <ArrowUpDown size={14} />, onClick: onSortByPort, active: sortActive },
   ];
 
   return (
     <div className="sidebar-toolbar">
       <span className="sidebar-toolbar-title eyebrow">{t('sidebar.toolbar.title')}</span>
       <div className="sidebar-toolbar-actions">
-        <button
-          className={`icon-btn${simulationMode ? ' active' : ''}`}
-          title={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
-          onClick={onToggleSimulation}
-        >
-          <FlaskConical size={14} />
-        </button>
+        {simulationAvailable && (
+          <button
+            className={`icon-btn${simulationMode ? ' active' : ''}`}
+            title={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
+            onClick={onToggleSimulation}
+          >
+            <FlaskConical size={14} />
+          </button>
+        )}
         <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
           <RefreshCw size={14} />
         </button>
@@ -122,6 +123,9 @@ const SearchBox: React.FC<{ value: string; onChange: (v: string) => void }> = ({
 interface SortablePortItemProps {
   port: SerialPort;
   isConnected: boolean;
+  /** True while the natural sort mode is active — the rendered order is then
+   *  derived (not the store order), so dragging is disabled (issue #2-4/5). */
+  dragDisabled?: boolean;
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
   onSetAlias: (portId: string) => void;
@@ -140,6 +144,7 @@ interface SortablePortItemProps {
 const SortablePortItem: React.FC<SortablePortItemProps> = ({
   port,
   isConnected,
+  dragDisabled,
   onOpenTab,
   onToggleConnect,
   onSetAlias,
@@ -158,7 +163,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: port.id });
+  } = useSortable({ id: port.id, disabled: dragDisabled });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -235,6 +240,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
 interface GroupItemProps {
   group: PortGroup;
   ports: SerialPort[];
+  dragDisabled?: boolean;
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
   onToggleExpand: (groupId: string) => void;
@@ -257,6 +263,7 @@ interface GroupItemProps {
 const GroupItem: React.FC<GroupItemProps> = ({
   group,
   ports,
+  dragDisabled,
   onOpenTab,
   onToggleConnect,
   onToggleExpand,
@@ -371,6 +378,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
                 key={port.id}
                 port={port}
                 isConnected={port.status === 'connected'}
+                dragDisabled={dragDisabled}
                 onOpenTab={onOpenTab}
                 onToggleConnect={onToggleConnect}
                 onSetAlias={onSetAlias}
@@ -401,11 +409,14 @@ const Sidebar: React.FC = () => {
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();
   const { simulationMode, toggleSimulation } = useSimulation();
-  const { saveConfig } = useConfigPersistence();
+  const { runTool, killTool, configTool } = usePortToolActions();
 
   const [showHidden, setShowHidden] = useState(false);
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
+  // 排序是持久开关而非一次性动作（issue #2-5）：激活时列表按派生的自然序渲染，
+  // 3s 轮询只能改变成员、无法改变顺序，排序状态不会被轮询"刷新掉"。
+  const [sortMode, setSortMode] = useState<'manual' | 'port'>('manual');
 
   const handleOpenTab = useCallback((portId: string) => {
     if (useAppStore.getState().activeTabId === portId) return;
@@ -430,40 +441,6 @@ const Sidebar: React.FC = () => {
   const handleHidePort = useCallback((portId: string) => { updatePort(portId, { isHidden: true }); }, [updatePort]);
   const handleShowPort = useCallback((portId: string) => { updatePort(portId, { isHidden: false }); }, [updatePort]);
 
-  const handleRunTool = useCallback(async (portId: string) => {
-    const config = useRuleStore.getState().findToolConfigByPort(portId);
-    if (!config) {
-      // 未配置 → 跳转配置页
-      useAppStore.getState().setConfigActiveTab('tools');
-      useAppStore.getState().toggleConfigModal(true);
-      return;
-    }
-    updatePort(portId, { toolRunning: true });
-    try {
-      await toolService.runPortTool({
-        portId,
-        command: config.command,
-        workdir: config.workdir || undefined,
-      });
-    } catch (err) {
-      updatePort(portId, { toolRunning: false });
-      notifyError(err);
-    }
-  }, [updatePort]);
-
-  const handleKillTool = useCallback(async (portId: string) => {
-    try {
-      await toolService.killPortTool(portId);
-    } catch (err) {
-      notifyError(err);
-    }
-  }, []);
-
-  const handleConfigTool = useCallback(() => {
-    useAppStore.getState().setConfigActiveTab('tools');
-    useAppStore.getState().toggleConfigModal(true);
-  }, []);
-
   const handleSaveAlias = useCallback((alias: string) => {
     if (aliasDialog) {
       updatePort(aliasDialog.portId, { alias: alias || undefined });
@@ -484,32 +461,41 @@ const Sidebar: React.FC = () => {
     removeGroup(groupId);
   }, [removeGroup]);
 
-  const searchLower = search.toLowerCase();
-  const filteredPorts = search
-    ? ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)))
-    : ports;
+  const filteredPorts = useMemo(() => {
+    if (!search) return ports;
+    const searchLower = search.toLowerCase();
+    return ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)));
+  }, [ports, search]);
+
+  // 排序模式下用自然序（COM1 < COM2 < COM12）派生显示列表（issue #2-4）：
+  // 不改动 store 中的端口数组（保留手动顺序供切回），新枚举到的端口自动落位，
+  // 3s 轮询只能增删成员、无法打乱派生顺序（issue #2-5）。
+  const displayedPorts = useMemo(
+    () => (sortMode === 'port' ? sortPortsByNatural(filteredPorts) : filteredPorts),
+    [sortMode, filteredPorts],
+  );
 
   // Hidden ports never appear in their normal location (group / ungrouped);
   // they surface ONLY in the dedicated hidden section when toggled visible.
   // (Previously they double-rendered — once here and once in the hidden
   // section — producing duplicate @dnd-kit ids and broken dragging.)
-  const ungroupedPorts = filteredPorts.filter(p => !p.groupId && !p.isHidden);
+  const ungroupedPorts = displayedPorts.filter(p => !p.groupId && !p.isHidden);
   const ungroupedIds = useMemo(() => ungroupedPorts.map(p => p.id), [ungroupedPorts]);
-  const hiddenPorts = useMemo(() => ports.filter(p => p.isHidden), [ports]);
+  const hiddenPorts = useMemo(() => {
+    const hidden = ports.filter(p => p.isHidden);
+    return sortMode === 'port' ? sortPortsByNatural(hidden) : hidden;
+  }, [ports, sortMode]);
   const hiddenIds = useMemo(() => hiddenPorts.map(p => p.id), [hiddenPorts]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
+  // 点击切换排序开关（issue #2-5）：不再一次性 setPorts（那次排序会被下一次
+  // 3s 轮询的枚举顺序覆盖），改为持久的派生排序模式。
   const handleSortByPort = useCallback(() => {
-    const sorted = [...ports].sort((a, b) => {
-      const aNum = parseInt(a.id.replace(/\D/g, ''), 10) || 0;
-      const bNum = parseInt(b.id.replace(/\D/g, ''), 10) || 0;
-      return aNum - bNum;
-    });
-    useAppStore.getState().setPorts(sorted);
-  }, [ports]);
+    setSortMode(m => (m === 'port' ? 'manual' : 'port'));
+  }, []);
 
   const handleDragEnd = usePortDragEnd({ groups, ports });
 
@@ -520,6 +506,7 @@ const Sidebar: React.FC = () => {
         onToggleHidden={() => setShowHidden(!showHidden)}
         onRefresh={refreshPorts}
         simulationMode={simulationMode}
+        simulationAvailable={DEV_FEATURES_ENABLED}
         onToggleSimulation={toggleSimulation}
         onOpenAll={async () => {
           for (const p of ports) {
@@ -538,7 +525,7 @@ const Sidebar: React.FC = () => {
           }
         }}
         onSortByPort={handleSortByPort}
-        onSaveLayout={() => { saveConfig(useAppStore.getState().config); }}
+        sortActive={sortMode === 'port'}
       />
       <SearchBox value={search} onChange={setSearch} />
 
@@ -546,17 +533,18 @@ const Sidebar: React.FC = () => {
         {/* 空端口引导卡片：任意端口（真实/SIM）出现后条件不成立自动消失。
             位于 DndContext 之外，不影响端口拖拽排序。 */}
         {ports.length === 0 && !simulationMode && (
-          <GuideCard onEnableSimulation={toggleSimulation} />
+          <GuideCard onEnableSimulation={toggleSimulation} simulationAvailable={DEV_FEATURES_ENABLED} />
         )}
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           {groups.map(group => {
-            const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id) && !p.isHidden);
+            const groupPorts = displayedPorts.filter(p => group.portIds.includes(p.id) && !p.isHidden);
             if (groupPorts.length === 0 && search) return null;
             return (
               <GroupItem
                 key={group.id}
                 group={group}
-                ports={filteredPorts}
+                ports={displayedPorts}
+                dragDisabled={sortMode === 'port'}
                 onOpenTab={handleOpenTab}
                 onToggleConnect={handleToggleConnect}
                 onToggleExpand={handleToggleExpand}
@@ -565,9 +553,9 @@ const Sidebar: React.FC = () => {
                 onSetAlias={handleSetAlias}
                 onHidePort={handleHidePort}
                 onShowPort={handleShowPort}
-                onRunTool={handleRunTool}
-                onKillTool={handleKillTool}
-                onConfigTool={handleConfigTool}
+                onRunTool={runTool}
+                onKillTool={killTool}
+                onConfigTool={configTool}
               />
             );
           })}
@@ -581,14 +569,15 @@ const Sidebar: React.FC = () => {
                     key={port.id}
                     port={port}
                     isConnected={port.status === 'connected'}
+                    dragDisabled={sortMode === 'port'}
                     onOpenTab={handleOpenTab}
                     onToggleConnect={handleToggleConnect}
                     onSetAlias={handleSetAlias}
                     onHidePort={handleHidePort}
                     onShowPort={handleShowPort}
-                    onRunTool={handleRunTool}
-                    onKillTool={handleKillTool}
-                    onConfigTool={handleConfigTool}
+                    onRunTool={runTool}
+                    onKillTool={killTool}
+                    onConfigTool={configTool}
                   />
                 ))}
               </SortableContext>
@@ -604,14 +593,15 @@ const Sidebar: React.FC = () => {
                     key={port.id}
                     port={port}
                     isConnected={port.status === 'connected'}
+                    dragDisabled={sortMode === 'port'}
                     onOpenTab={handleOpenTab}
                     onToggleConnect={handleToggleConnect}
                     onSetAlias={handleSetAlias}
                     onHidePort={handleHidePort}
                     onShowPort={handleShowPort}
-                    onRunTool={handleRunTool}
-                    onKillTool={handleKillTool}
-                    onConfigTool={handleConfigTool}
+                    onRunTool={runTool}
+                    onKillTool={killTool}
+                    onConfigTool={configTool}
                   />
                 ))}
               </SortableContext>

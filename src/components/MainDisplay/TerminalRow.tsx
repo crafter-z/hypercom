@@ -17,6 +17,7 @@ import type { DisplayFormat, HighlightRuleSet, TerminalLine, TimestampFormat } f
 import { applyHighlightSets } from '../../utils/highlightEngine';
 import { renderProtocolLine } from '../../utils/protocolRenderer';
 import { formatTerminalTimestampAdj } from '../../utils/timeFormat';
+import { markSearchMatchesInHtml } from './terminalSearch';
 
 /** TX/RX/TOOL direction coloring — the terminal's signal semantics. */
 const directionColor = (dir: string, stream?: string) => {
@@ -46,6 +47,10 @@ interface TerminalRowProps {
   searchOpen: boolean;
   matchSet: Set<number>;
   currentMatchLineIdx: number;
+  /** Debounced search query + case flag — feeds the character-level `<mark>`
+   *  layer (issue #2-8). '' when the search bar is closed. */
+  searchQuery: string;
+  searchCaseSensitive: boolean;
   /* ---- Virtualizer plumbing ---- */
   /** Filtered row index, written to data-index for the virtualizer. */
   rowIndex: number;
@@ -71,6 +76,8 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
   searchOpen,
   matchSet,
   currentMatchLineIdx,
+  searchQuery,
+  searchCaseSensitive,
   rowIndex,
   rowStart,
   measureRef,
@@ -92,6 +99,13 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
     && origIdx <= selectedRange.end;
   const isMatch = searchOpen && matchSet.has(origIdx);
   const isCurrent = searchOpen && origIdx === currentMatchLineIdx;
+
+  // 搜索字符级高亮（issue #2-8）：只在命中行上把 query 出现处包 <mark>，
+  // 叠加在用户高亮/协议着色之上（tag/实体感知，不改标签与属性）。
+  if (isMatch && searchQuery) {
+    lineHtml = markSearchMatchesInHtml(lineHtml, searchQuery, searchCaseSensitive, isCurrent);
+  }
+
   const muted = timestampMode === 'perRound' && !isFirstInRound;
   const classes = [
     'terminal-line',

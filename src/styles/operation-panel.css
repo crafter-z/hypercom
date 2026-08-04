@@ -127,9 +127,12 @@
   min-width: 280px;
 }
 
+/* max-width 封顶（issue #2-7）：宽窗口下 flex:1 会把参数区拉到 350px+，
+ * 两列下拉控件用不了那么宽，多余空间还给发送区。 */
 .op-section-params {
   flex: 1;
   min-width: 176px;
+  max-width: 300px;
 }
 
 /* Section label — the .eyebrow primitive (base.css) supplies the uppercase

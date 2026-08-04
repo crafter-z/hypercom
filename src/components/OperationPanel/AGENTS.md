@@ -24,7 +24,8 @@ Send area + serial params. Split into 3 view sections (send / params) and the `u
 - The compose-row file button becomes a cancel button while `fileProgress !== null` (calls `serialService.cancelFileSend(activeTabId)` → backend `cancel_file_send`, which sets the per-port cancel token so `send_file` breaks at the next chunk). The success toast is fired from the `onFileProgress` handler only when the `done` event arrives with `sent>=total>0`; cancel and empty-file completions clear the bar with no toast (the backend guarantees the `done:true` event on every exit path).
 - The section components are defined at module level — never inline them in `OperationPanel.tsx`'s body.
 - `.op-section > *` carries `flex-shrink: 0`: when the panel is dragged short, section children keep their natural height and the section scrolls. Removing this re-introduces the overlap bug where `.op-send-row` (which has `min-height: 0`) collapsed to 0 height and its 发送/文件/HEX controls spilled onto the quick-send pills.
-- Panel height lives in `ui.operationPanelHeight` (default 200, clamped [160, 600] by `OperationPanelResizeHandle`) and is applied inline in `OperationPanel.tsx`. The old static `--operation-panel-height` CSS variable is gone — don't reintroduce a fixed height in CSS.
+- Panel height lives in `ui.operationPanelHeight` (default 280 — raised from 200 because 200 clipped the full send+params layout, issue #2-6; clamped [160, 600] by `OperationPanelResizeHandle`) and is applied inline in `OperationPanel.tsx`. The old static `--operation-panel-height` CSS variable is gone — don't reintroduce a fixed height in CSS.
+- Params section width is capped: `.op-section-params` has `max-width: 300px` (issue #2-7) — wide windows previously stretched it past 350px at the send section's expense. Don't remove the cap.
 
 ## Anti-patterns
 
