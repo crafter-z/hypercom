@@ -17,6 +17,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-set-focus",
     "core:window:allow-set-always-on-top",
+    "core:window:allow-set-title",
     "core:app:allow-version",
     "dialog:allow-open",
     "dialog:allow-save"
