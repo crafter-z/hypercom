@@ -1,6 +1,6 @@
 # HyperCom
 
-一款现代化的串口调试工具，基于 **Tauri v2 + React 18 + Rust** 构建。面向嵌入式开发场景，目标是替代 SSCOM / SuperCom 等传统工具。
+一款现代化的串口调试工具，基于 **Tauri v2 + React 18 + Rust** 构建，面向嵌入式开发场景。
 
 > 核心理念：**Rust 处理底层性能，React 负责 UI 交互**。
 
@@ -126,8 +126,8 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (400 cases / 19 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (38 cases)
+npm run test:run                                       # vitest (410 cases / 19 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (42 cases)
 ```
 
 ---
@@ -148,6 +148,8 @@ cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (38 c
 ## 许可证
 
 MIT License
+
+本项目依赖的第三方开源项目及其许可证见 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)（或应用「关于」界面「开源许可证」按钮）。
 
 ## 贡献
 

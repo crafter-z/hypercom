@@ -6,6 +6,27 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-05 issue #4 十项：高频滚动钉底 · 参数实时生效 · 状态栏去 LED · 去「替代」文案 · 移除帮助 demo · About 链接/版本/许可证 · 备注名与分组持久化)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 410/410 (19 files), `cargo check` 0 错 0 警告, `cargo test --lib` 42/42。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `TerminalView.tsx` | 快速大量输出时滚动锁定跟踪不及时：`scrollToIndex(count-1, align:'end')` 用未测量尾行的 estimateSize，单帧 rAF 钉底在虚拟器测得新行、totalSize 增长后仍会偏上，持续高频输出下每帧漂移数像素（issue #4-1） | `scrollToBottom` 改为**双帧 rAF 钉底**：第一帧钉到当前底部，第二帧（虚拟器已重新测量新行并增长 totalSize）再钉到真实底部；只碰 scrollTop，不碰 scrollLocked/followRef |
+| HIGH | `OperationPanel.tsx` / `useSerialConnection.ts` | 串口参数不实时生效、重连回退 115200、侧边栏/标题栏不跟随（issue #4-2）：① 参数同步 effect 依赖数组缺 `baudRate`，改波特率不触发后端重配；② openPort 用 `port?.baudRate ?? opStore.baudRate`，而端口存储的 baudRate 不随操作面板更新，重连读回旧值；③ 参数变更不回写端口字段，串口管理面板/标题栏显示旧参数 | ① 订阅 `baudRate`（自定义输入走 ParamsSection 本地 draft，仅失焦提交，逐键不重渲染）并加入同步 effect 依赖；② effect 改为按「端口+参数签名」区分切换标签与参数变更：切换标签把该端口已存参数载入操作面板，参数变更时 `updatePort` 回写端口字段（侧边栏/标题栏/重连同步）+ 后端防抖实时应用（已连接时 `setSerialParams`+`setFlowControl`） |
+| HIGH | `StatusBar.tsx` / `usePinStatesSubscriber` / `usePinStatesStore` / `serial/mod.rs` | 状态栏每连接串口显示 6 个引脚状态灯，USB-TTL 两针串口无意义且多端口时底栏混乱（issue #4-3） | 移除状态栏引脚 LED 显示，并端到端清理引脚状态死代码：前端 `usePinStatesSubscriber`/`usePinStatesStore`/`eventService.onSerialPinStates`/`pin.*` i18n/`pin-led` CSS；后端 `SerialPinStatesEvent` + 读线程 200ms 引脚轮询 + `dtr_state`/`rts_state` 共享字段（DTR/RTS 控制仍保留在操作面板） |
+| LOW | `i18n.ts` / `README.md` / `AGENTS.md` | 「为替代 SSCOM / SuperCom 而生」等对比文案散落各处（issue #4-4） | 全部改为中性描述（`about.description` 中/英、README 首段、AGENTS 概述）；release note 不再含此类对比信息 |
+| MEDIUM | `TitleBar.tsx` / `FirstRunTour.tsx`(删除) / `useHotkeys.ts` / `config/mod.rs` | 「帮助」按钮只是 demo 引导（首次运行 Tour），无用（issue #4-5） | 删除帮助按钮 + `FirstRunTour` 组件 + `tour.css` + `tour.*` i18n + `config.hasSeenTour`（后端 `#[serde(default)]` 兼容旧 config.json）+ `ui.configLoaded` + useHotkeys 中 Escape 关闭引导分支；快捷键帮助弹窗（真实功能）保留 |
+| MEDIUM | `AboutDialog.tsx` | 关于界面无 GitHub 链接（issue #4-6） | 新增「GitHub 仓库」按钮，`@tauri-apps/plugin-shell` `open()` 打开 `https://github.com/crafter-z/hypercom`（capabilities 已有 `shell:allow-open`） |
+| MEDIUM | `AboutDialog.tsx` / `TitleBar.tsx` / `i18n.ts` | 关于界面版本号显示 `v0.1.0 (0.3.2)`（issue #4-7）：硬编码 `titleBar.version`('v0.1.0') 叠加真实版本 | 删除硬编码版本；About 只显示 `getVersion()` 真实版本（`v0.3.2`）；删除标题栏静态版本号与 `titleBar.version` key |
+| MEDIUM | `THIRD_PARTY_LICENSES.md`(新增) / `AboutDialog.tsx` / `LicensesDialog.tsx`(新增) | 技术栈依赖许可证未成文，About 无浏览入口（issue #4-8） | 新建 `THIRD_PARTY_LICENSES.md` 列全部前后端依赖与 SPDX 许可证（含双许可说明）；About 新增「开源许可证」按钮打开 `LicensesDialog`（前端/后端依赖→许可证表格，含备注指向完整文档） |
+| HIGH | `config/mod.rs` / `commands/storage.rs` / `useAppInit.ts` / `services/tauri.ts` | 串口「备注名」仅存内存，重启丢失，只显示串口号（issue #4-9） | 新增 `PortMetaEntry{portId, alias?, isHidden}` + `AppConfig.port_meta`（`#[serde(default)]`）+ `save_port_meta`（整体替换落盘）+ `storageService.savePortMeta`；`useAppInit` 启动回填 alias/isHidden 到端口列表，并新增按「alias/isHidden 签名」比较的 500ms 防抖自动保存（3s 轮询重建数组但值不变不会误触发） |
+| HIGH | `useAppInit.ts` | 分组重启丢失（issue #4-10）：分组走 `save_port_groups` 单独落盘，但 ConfigModal/主题切换等**全量 `set_config`** 会用 store 中陈旧的 `config.portGroups` 覆盖掉已保存的分组 | 分组自动保存落盘前同步 `setConfig({ portGroups })`（元数据保存同理），确保任何全量保存都携带最新分组；启动恢复顺序不变 |
+
+架构变化：`AppConfig` 新增第 8 类实体 `port_meta`（备注名/隐藏）；移除 `hasSeenTour` 配置字段与引脚状态全链路；`useOperationStore` 现订阅 `baudRate`（提交时，非逐键）；新增 `LicensesDialog`。测试新增：config `port_meta` 往返/缺省回退 1 例。
+
+已知边界（记录而非缺陷）：① 端口参数（baudRate 等）仍走会话快照持久化（`restoreSession` 开启时）；仅备注名/隐藏状态随 `port_meta` 无条件持久化。② 参数「切换标签载入端口已存值」意味着操作面板随标签切换更新参数——这是 per-port 参数的预期行为，旧版「全局参数」不再适用。
+
 ## 已修复 (2026-08-04 issue #3 六项：条件触发接线+指定串口 · 波特率自定义输入卡顿 · 滚动锁定脱节 · 日志格式设定 · 背景图删除 · 漏斗图标删除)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 410/410 (19 files), `cargo check` 0 错 0 警告, `cargo test --lib` 41/41。
