@@ -3,8 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
-import { X, ExternalLink, ScrollText } from 'lucide-react';
+import { X, ExternalLink, ScrollText, Bug } from 'lucide-react';
 import LicensesDialog from './LicensesDialog';
+import DiagnosticLogDialog from './DiagnosticLogDialog';
 
 /** 项目 GitHub 仓库地址（issue #4-6，「关于」界面一键跳转）。 */
 const GITHUB_URL = 'https://github.com/crafter-z/hypercom';
@@ -15,6 +16,7 @@ const AboutDialog: React.FC = () => {
   const setUIState = useAppStore((s) => s.setUIState);
   const [version, setVersion] = useState('');
   const [showLicenses, setShowLicenses] = useState(false);
+  const [showDiagLog, setShowDiagLog] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -71,6 +73,10 @@ const AboutDialog: React.FC = () => {
             <ScrollText size={14} />
             {t('about.licenses')}
           </button>
+          <button className="btn btn-sm" onClick={() => setShowDiagLog(true)}>
+            <Bug size={14} />
+            {t('about.diagLog')}
+          </button>
         </div>
 
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-secondary)', textAlign: 'center' }}>
@@ -79,6 +85,7 @@ const AboutDialog: React.FC = () => {
       </div>
 
       {showLicenses && <LicensesDialog onClose={() => setShowLicenses(false)} />}
+      {showDiagLog && <DiagnosticLogDialog onClose={() => setShowDiagLog(false)} />}
     </div>
   );
 };

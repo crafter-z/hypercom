@@ -18,6 +18,10 @@ import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
 import { useTerminalStore } from './stores/useTerminalStore';
 import { saveSessionSnapshot } from './utils/sessionSnapshot';
+import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
+
+// 模块加载即安装前端 console 捕获（幂等），尽早收集前端诊断日志。
+setupDiagLogCapture();
 
 // ==================== Error Boundary ====================
 // Inline styles are intentional: this must render even if CSS fails to load.
@@ -65,6 +69,12 @@ const App: React.FC = () => {
   usePowerManagement();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
   const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed);
+
+  // 诊断日志开关：随 config.diagnosticLogEnabled 同步前端日志转发。
+  const diagnosticLogEnabled = useAppStore((s) => s.config.diagnosticLogEnabled);
+  useEffect(() => {
+    setDiagLogForwardEnabled(diagnosticLogEnabled);
+  }, [diagnosticLogEnabled]);
 
   // F.3: persist the session snapshot incrementally whenever tabs/paneTree
   // change (debounced). The WebView may terminate before an async invoke

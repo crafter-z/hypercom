@@ -168,6 +168,7 @@ const defaultConfig: AppConfig = {
   backupInterval: 24,
   backupDirectory: '',
   restoreSession: true,
+  diagnosticLogEnabled: true,
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],

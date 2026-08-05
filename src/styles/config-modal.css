@@ -103,6 +103,105 @@
   color: var(--text-secondary);
 }
 
+/* ==================== 诊断日志弹窗 ==================== */
+.diag-log-dialog {
+  width: min(760px, 92vw);
+  height: min(560px, 80vh);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+}
+
+.diag-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.diag-log-title {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.diag-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.diag-log-toggle {
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.diag-log-filter {
+  min-width: 90px;
+}
+
+.diag-log-view {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-secondary, #111);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--font-terminal);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 0;
+}
+
+.diag-log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.diag-level-trace,
+.diag-level-debug {
+  color: var(--text-tertiary, #888);
+}
+
+.diag-level-info {
+  color: var(--text-primary);
+}
+
+.diag-level-warn {
+  color: #e6a23c;
+}
+
+.diag-level-error {
+  color: #f56c6c;
+}
+
+.diag-log-empty {
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 24px 0;
+}
+
+.diag-log-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.diag-log-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径从右侧截断，保留文件名 */
+  text-align: left;
+}
+
 .modal-nav {
   width: 180px;
   background: var(--bg-secondary);

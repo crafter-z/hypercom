@@ -292,6 +292,9 @@ export interface AppConfig {
   // 会话恢复
   restoreSession: boolean;   // 启动时是否恢复上次会话
 
+  // 诊断日志
+  diagnosticLogEnabled: boolean; // 是否启用应用自身维测日志（前后端统一落盘）
+
   // 设置实体（全部存入 config.json）
   sendCommandSets: SendCommandSet[];
   highlightRuleSets: HighlightRuleSet[];
