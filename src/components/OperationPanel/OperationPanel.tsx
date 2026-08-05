@@ -7,7 +7,7 @@ import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { ChevronDown, Cable, Eraser, FileText, FolderOpen, FileSearch, History, Square, Type } from 'lucide-react';
+import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Square, Type } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
 import ParamsSection from './ParamsSection';
@@ -239,9 +239,9 @@ const OperationPanel: React.FC = () => {
                 {isReplaying ? <Square size={14} /> : <History size={14} />}
               </button>
               <span className="toolbar-sep" />
-              <button className="btn btn-icon btn-sm" title={t('paramsSection.log.saveAs')} disabled={!isPortActive} onClick={handleSaveLogAs}><FileText size={14} /></button>
-              <button className="btn btn-icon btn-sm" title={t('paramsSection.log.openFile')} disabled={!isPortActive} onClick={handleOpenLogFile}><FolderOpen size={14} /></button>
-              <button className="btn btn-icon btn-sm" title={t('paramsSection.log.openDir')} onClick={handleOpenLogDir}><FileSearch size={14} /></button>
+              <button className="btn btn-icon btn-sm" title={t('paramsSection.log.saveAs')} disabled={!isPortActive} onClick={handleSaveLogAs}><Save size={14} /></button>
+              <button className="btn btn-icon btn-sm" title={t('paramsSection.log.openFile')} disabled={!isPortActive} onClick={handleOpenLogFile}><FileSearch size={14} /></button>
+              <button className="btn btn-icon btn-sm" title={t('paramsSection.log.openDir')} onClick={handleOpenLogDir}><FolderOpen size={14} /></button>
             </div>
             <div className="op-strip-group">
               <Type size={13} className="op-strip-icon" />
