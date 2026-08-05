@@ -170,6 +170,8 @@ pub fn run() {
             commands::delete_port_tool_config,
             // ===== 串口分组命令 =====
             commands::save_port_groups,
+            // ===== 串口元数据命令（备注名/隐藏，issue #4-9）=====
+            commands::save_port_meta,
             // ===== 条件触发规则命令 =====
             commands::save_trigger_rule,
             commands::load_trigger_rules,

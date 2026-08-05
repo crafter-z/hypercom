@@ -282,6 +282,23 @@ pub fn save_port_groups(
     manager.save().map_err(|e| CommandError::Config(e.to_string()))
 }
 
+/// 整体替换保存全部串口元数据（备注名 / 隐藏状态，issue #4-9）。
+/// 与 `save_port_groups` 同款整体替换语义：前端在端口元数据（别名/隐藏）
+/// 变更后防抖发送完整列表，一次替换并落盘 config.json。
+/// 读取不需要专门命令——`get_config` 已随 `AppConfig.port_meta` 返回。
+#[tauri::command]
+pub fn save_port_meta(
+    args: Vec<config::PortMetaEntry>,
+    state: State<AppState>,
+) -> Result<(), CommandError> {
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    manager.get_config_mut().port_meta = args;
+    manager.save().map_err(|e| CommandError::Config(e.to_string()))
+}
+
 // ==================== 条件触发规则 ====================
 
 #[tauri::command]

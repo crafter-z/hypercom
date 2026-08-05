@@ -148,6 +148,20 @@ pub struct PortGroupEntry {
     pub order: i32,
 }
 
+/// 串口元数据（备注名 / 隐藏状态，issue #4-9）。
+/// 备注名与隐藏状态是端口级 UI 状态，此前仅存内存、重启即丢；
+/// 现在随 config.json 持久化，启动时按 `port_id` 回填到端口列表。
+/// `#[serde(default)]` 保证旧版 config.json（无此字段）反序列化为空 Vec。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortMetaEntry {
+    pub port_id: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub is_hidden: bool,
+}
+
 // ==================== AppConfig ====================
 
 /// 应用全局配置
@@ -211,10 +225,6 @@ pub struct AppConfig {
     pub backup_interval: u32, // 小时
     pub backup_directory: String,
 
-    // --- 引导设置 ---
-    #[serde(default)]
-    pub has_seen_tour: bool,
-
     // --- 会话恢复 ---
     #[serde(default = "default_restore_session")]
     pub restore_session: bool,
@@ -236,6 +246,9 @@ pub struct AppConfig {
     /// （无此字段）反序列化为空列表。
     #[serde(default)]
     pub port_groups: Vec<PortGroupEntry>,
+    /// 串口备注名 / 隐藏状态（issue #4-9）：随 config.json 持久化。
+    #[serde(default)]
+    pub port_meta: Vec<PortMetaEntry>,
 }
 
 fn default_restore_session() -> bool {
@@ -294,7 +307,6 @@ impl Default for AppConfig {
             backup_enabled: false,
             backup_interval: 24,
             backup_directory: String::new(),
-            has_seen_tour: false,
             restore_session: true,
             send_command_sets: Vec::new(),
             highlight_rule_sets: Vec::new(),
@@ -303,6 +315,7 @@ impl Default for AppConfig {
             port_presets: Vec::new(),
             port_tool_configs: Vec::new(),
             port_groups: Vec::new(),
+            port_meta: Vec::new(),
         }
     }
 }
@@ -550,7 +563,6 @@ mod tests {
         assert!(cfg.log_include_timestamp);
         assert!(cfg.log_include_direction);
         assert!(!cfg.backup_enabled);
-        assert!(!cfg.has_seen_tour);
         assert!(cfg.restore_session);
         assert!(cfg.send_command_sets.is_empty());
         assert!(cfg.highlight_rule_sets.is_empty());
@@ -559,6 +571,7 @@ mod tests {
         assert!(cfg.port_presets.is_empty());
         assert!(cfg.port_tool_configs.is_empty());
         assert!(cfg.port_groups.is_empty());
+        assert!(cfg.port_meta.is_empty());
     }
 
     #[test]
@@ -580,9 +593,10 @@ mod tests {
         for key in [
             "closeBehavior", "memoryLimitMb", "autoSaveLog", "logFormat",
             "logEncoding", "terminalFontSize", "autoReconnect", "maxRetries",
-            "hasSeenTour", "restoreSession", "quickSendInlineCount",
+            "restoreSession", "quickSendInlineCount",
             "sendCommandSets", "highlightRuleSets", "protocolTemplates",
             "triggerRules", "portPresets", "portToolConfigs", "portGroups",
+            "portMeta", // issue #4-9
             "logIncludeTimestamp", "logIncludeDirection", // issue #3-4
         ] {
             assert!(json.contains(key), "missing {} in JSON", key);
@@ -737,6 +751,38 @@ mod tests {
         // 完整往返
         let parsed: PortGroupEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.port_ids, vec!["COM1".to_string(), "COM12".to_string()]);
+    }
+
+    #[test]
+    fn test_port_meta_entry_roundtrip_and_defaults() {
+        // 带备注名 + 隐藏的完整往返（camelCase）。
+        let meta = PortMetaEntry {
+            port_id: "COM3".into(),
+            alias: Some("温度计".into()),
+            is_hidden: true,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"portId\":\"COM3\""), "got: {}", json);
+        assert!(json.contains("\"alias\":\"温度计\""), "got: {}", json);
+        assert!(json.contains("\"isHidden\":true"), "got: {}", json);
+        let parsed: PortMetaEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.port_id, "COM3");
+        assert_eq!(parsed.alias.as_deref(), Some("温度计"));
+        assert!(parsed.is_hidden);
+
+        // 旧 config.json 无 portMeta 字段 → AppConfig 反序列化回退空 Vec。
+        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
+            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
+            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
+            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
+            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
+            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
+            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
+            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
+            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
+            "backupDirectory":"","restoreSession":true}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert!(cfg.port_meta.is_empty());
     }
 
     #[test]

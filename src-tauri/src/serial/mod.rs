@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -62,18 +62,6 @@ pub struct SerialReconnectHintEvent {
     pub port_name: String,
 }
 
-/// 串口引脚状态事件（推送给前端）
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
-pub struct SerialPinStatesEvent {
-    pub port_id: String,
-    pub dtr: bool,
-    pub rts: bool,
-    pub cts: bool,
-    pub dsr: bool,
-    pub rlsd: bool,
-    pub ri: bool,
-}
-
 // ==================== 真实串口 ====================
 
 /// 单个串口连接句柄
@@ -81,11 +69,6 @@ pub struct SerialPortHandle {
     pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     pub running: Arc<AtomicBool>,
     pub read_thread: Option<thread::JoinHandle<()>>,
-    /// 当前 DTR 引脚状态。与读取线程共享；set_flow_control 写入端口后同步更新，
-    /// 避免 pin_states 事件报告连接时的快照值。
-    pub dtr_state: Arc<AtomicBool>,
-    /// 当前 RTS 引脚状态。与读取线程共享；set_flow_control 写入端口后同步更新。
-    pub rts_state: Arc<AtomicBool>,
 }
 
 // ==================== 模拟串口 ====================
@@ -352,9 +335,6 @@ impl SerialManager {
 
         let port_arc = Arc::new(Mutex::new(port));
         let running = Arc::new(AtomicBool::new(true));
-        // DTR/RTS 当前状态：从打开参数初始化，后续由 set_flow_control 更新
-        let dtr_state = Arc::new(AtomicBool::new(args.dtr));
-        let rts_state = Arc::new(AtomicBool::new(args.rts));
 
         // 设置 DTR/RTS
         {
@@ -370,8 +350,6 @@ impl SerialManager {
         let port_clone = Arc::clone(&port_arc);
         let running_clone = Arc::clone(&running);
         let thread_port_id = args.port_id.clone();
-        let thread_dtr = Arc::clone(&dtr_state);
-        let thread_rts = Arc::clone(&rts_state);
         let app_handle_clone = app_handle.clone();
 
         let read_thread = thread::spawn(move || {
@@ -386,13 +364,11 @@ impl SerialManager {
             let port_id = thread_port_id;
             let mut buffer = [0u8; 1024];
             let mut abnormal = false;
-            let mut last_pin_check = Instant::now();
-            let mut last_pin_states: Option<SerialPinStatesEvent> = None;
 
             while running_clone.load(Ordering::Relaxed) {
                 // 仅在 read() 调用期间持有端口锁，读完立即释放。
                 // emit_data_event 会派发 Tauri 事件并同步写日志落盘，不能在持锁期间执行，
-                // 否则会阻塞 send_data / 引脚读取 / 流控设置，高波特率下还可能撑爆 OS 接收缓冲区。
+                // 否则会阻塞 send_data / 流控设置，高波特率下还可能撑爆 OS 接收缓冲区。
                 let outcome = match port_clone.lock() {
                     Ok(mut p) => match p.read(&mut buffer) {
                         Ok(n) => ReadOutcome::Data(n),
@@ -411,8 +387,6 @@ impl SerialManager {
                     ReadOutcome::Data(n) if n > 0 => {
                         emit_data_event(&app_handle_clone, &port_id, "RX", &buffer[..n], false);
                     }
-                    // 无数据或读超时（100ms 超时下的正常空闲态）：不 continue，
-                    // 落到下方引脚状态轮询，保证空闲连接上 pin 事件持续触发。
                     ReadOutcome::Data(_) | ReadOutcome::Timeout => {}
                     ReadOutcome::Error(e) => {
                         log::warn!("Serial read error on {}: {}", port_id, e);
@@ -424,29 +398,6 @@ impl SerialManager {
                         abnormal = true;
                         break;
                     }
-                }
-
-                // 每 200ms 轮询一次引脚状态，仅在状态变化时推送。
-                // DTR/RTS 是输出引脚，serialport-rs 未暴露读回 API，因此读取
-                // 与句柄共享的 AtomicBool（set_flow_control 写端口时会同步更新），
-                // 而非连接时的参数快照。
-                if last_pin_check.elapsed() >= Duration::from_millis(200) {
-                    if let Ok(mut p) = port_clone.lock() {
-                        let current = SerialPinStatesEvent {
-                            port_id: port_id.clone(),
-                            dtr: thread_dtr.load(Ordering::Relaxed),
-                            rts: thread_rts.load(Ordering::Relaxed),
-                            cts: p.read_clear_to_send().unwrap_or(false),
-                            dsr: p.read_data_set_ready().unwrap_or(false),
-                            rlsd: p.read_carrier_detect().unwrap_or(false),
-                            ri: p.read_ring_indicator().unwrap_or(false),
-                        };
-                        if last_pin_states.as_ref() != Some(&current) {
-                            let _ = app_handle_clone.emit("serial:pin_states", current.clone());
-                            last_pin_states = Some(current);
-                        }
-                    }
-                    last_pin_check = Instant::now();
                 }
             }
 
@@ -470,8 +421,6 @@ impl SerialManager {
             port: port_arc,
             running,
             read_thread: Some(read_thread),
-            dtr_state,
-            rts_state,
         };
 
         // 记录连接参数，用于自动重连
@@ -786,10 +735,6 @@ impl SerialManager {
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.write_data_terminal_ready(dtr)?;
         port.write_request_to_send(rts)?;
-        drop(port);
-        // 同步更新共享状态，读取线程下一次 pin 轮询即报告新值
-        handle.dtr_state.store(dtr, Ordering::Relaxed);
-        handle.rts_state.store(rts, Ordering::Relaxed);
         Ok(())
     }
 
