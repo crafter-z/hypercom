@@ -1,0 +1,61 @@
+# 统一换行符策略（2026-08-05）
+#
+# 原则：仓库内统一存储 LF（跨平台差分的正确格式），
+#       checkout 到工作区时按平台转换 —— Windows 上为 CRLF（Windows 风格）。
+#
+# 依赖：配合 `core.autocrlf=true` 生效。任何编辑工具写入 LF 都不会再产生
+#       "假修改"（git 会按本规则计价行尾差异）。
+
+# 全部文本文件：自动检测，仓库存 LF，检出时按平台转换（Windows=CRLF）
+* text=auto
+
+# 显式声明常见文本类型，确保不被误判为二进制
+*.ts        text
+*.tsx       text
+*.js        text
+*.jsx       text
+*.mjs       text
+*.cjs       text
+*.rs        text
+*.css       text
+*.scss      text
+*.less      text
+*.html      text
+*.json      text
+*.md        text
+*.yml       text
+*.yaml      text
+*.toml      text
+*.ini       text
+*.cfg       text
+
+# 脚本类：shebang / 跨平台执行必须保持 LF，禁止 CRLF
+*.sh        text eol=lf
+*.py        text eol=lf
+
+# 二进制文件：绝不触碰
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.bmp       binary
+*.ico       binary
+*.icns      binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
+*.otf       binary
+*.pdf       binary
+*.zip       binary
+*.tar       binary
+*.gz        binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.dylib     binary
+*.msi       binary
+*.dmg       binary
+*.deb       binary
+*.rpm       binary
+*.appimage  binary
