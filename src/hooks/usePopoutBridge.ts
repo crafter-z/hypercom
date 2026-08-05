@@ -33,7 +33,7 @@ export function usePopoutBridge() {
       .onSendCommand((payload) => {
         const portId = useAppStore.getState().activeTabId;
         if (!portId) {
-          console.debug('[usePopoutBridge] popout:send-command ignored — no active tab');
+          // 无活动标签是正常控制流分支（弹窗发送无目标），非错误，不记录。
           return;
         }
         void sendToPort(portId, payload.content, payload.isHex, payload.lineEnding);
@@ -80,7 +80,7 @@ export function usePopoutBridge() {
       .onTerminalRequestSnapshot((payload) => {
         const terminal = useTerminalStore.getState().terminals[payload.portId];
         if (!terminal) {
-          console.debug('[usePopoutBridge] terminal snapshot skipped — no buffer for', payload.portId);
+          // 弹窗在端口终端尚未建立时快照，属正常竞态分支，非错误，不记录。
           return;
         }
         const lines = terminal.lines.length > SNAPSHOT_LINE_CAP

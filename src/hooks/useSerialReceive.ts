@@ -16,6 +16,8 @@ import { userClosingPortIds, lostPortIds } from './disconnectTracking';
 // not spam toasts — module-level so it survives the empty-deps effect.
 const TRIGGER_ALERT_THROTTLE_MS = 1000;
 const triggerAlertThrottle = new Map<string, number>();
+// 触发引擎异常限流：规则配置错误时随每次 RX 触发，最多每 2s 打一条日志。
+let lastTriggerEvalErrorLog = 0;
 
 /**
  * Hook: 串口数据接收（事件监听生命周期）
@@ -81,7 +83,12 @@ export function useSerialReceive() {
             }
           }
         } catch (e) {
-          console.error('[useSerialReceive] Trigger evaluation failed:', e);
+          // 触发引擎异常多在规则配置错误，随每次 RX 触发：限流到每 2s 至多一条，避免刷屏。
+          const now = Date.now();
+          if (now - lastTriggerEvalErrorLog > 2000) {
+            lastTriggerEvalErrorLog = now;
+            console.error('[useSerialReceive] Trigger evaluation failed:', e);
+          }
         }
 
         // Protocol-template path: port has a protocol template bound

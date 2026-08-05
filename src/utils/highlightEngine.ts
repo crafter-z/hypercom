@@ -5,6 +5,9 @@
 
 import type { HighlightRuleSet, HighlightRule } from '../types';
 
+/** 已告警过的非法正则模式（按 pattern 去重，避免随每批 RX 反复刷屏）。 */
+const warnedInvalidRegex = new Set<string>();
+
 export interface HighlightMatch {
   start: number;
   end: number;
@@ -55,8 +58,11 @@ export function applyHighlightSets(
           }
         }
       } catch {
-        // Invalid regex pattern, skip
-        console.warn('[highlightEngine] Invalid regex pattern:', rule.pattern.slice(0, 50));
+        // Invalid regex pattern, skip. 同一 pattern 只告警一次，避免随 RX 刷屏。
+        if (!warnedInvalidRegex.has(rule.pattern)) {
+          warnedInvalidRegex.add(rule.pattern);
+          console.warn('[highlightEngine] Invalid regex pattern:', rule.pattern.slice(0, 50));
+        }
       }
     }
   }

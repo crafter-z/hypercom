@@ -4,6 +4,9 @@ import { serialService } from '../services/tauri';
 import type { AvailablePortInfo } from '../services/tauri';
 import type { SerialPort, PortStatus } from '../types';
 
+/** 上一次端口列表刷新是否失败（用于连续失败时降级日志级别，避免 3s 轮询刷屏）。 */
+let lastListFailed = false;
+
 /**
  * 将后端 PortInfo 映射为前端 SerialPort
  * 后端的 port_type 是 "real"|"virtual"，前端 PortStatus 需要从后端获取或默认 disconnected
@@ -77,8 +80,15 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
       const list = await serialService.listAvailablePorts();
       const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
       setPorts(merged);
+      lastListFailed = false;
     } catch (err) {
-      console.warn('[useSerialPorts] Failed to list ports:', err);
+      // 轮询每 3s 一次：连续失败时只在首次告警，后续降为 debug，避免刷屏。
+      if (!lastListFailed) {
+        console.warn('[useSerialPorts] Failed to list ports:', err);
+      } else {
+        console.debug('[useSerialPorts] Port listing still failing:', err);
+      }
+      lastListFailed = true;
     }
   }, [setPorts]);
 

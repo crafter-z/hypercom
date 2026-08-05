@@ -20,12 +20,15 @@ const ProtocolSettings: React.FC = () => {
       if (templates.length > 0) {
         useRuleStore.getState().setProtocolTemplates(templates);
       }
-    }).catch((e) => console.debug('[ConfigModal] loadProtocolTemplates failed:', e));
+    }).catch((e) => {
+      console.warn('[ConfigModal] loadProtocolTemplates failed:', e);
+      notifyError(e);
+    });
   }, []);
 
   const handleRemoveSet = async (setId: string) => {
     removeProtocolTemplate(setId);
-    try { await storageService.deleteProtocolTemplate(setId); } catch (e) { console.error('Failed to delete protocol template from DB:', e); notifyError(e); }
+    try { await storageService.deleteProtocolTemplate(setId); } catch (e) { console.error('Failed to delete protocol template:', e); notifyError(e); }
   };
 
   const handleSaveSet = async (setId: string) => {

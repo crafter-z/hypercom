@@ -48,7 +48,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
       const list = await storageService.loadPortPresets();
       setPresets(list);
     } catch (e) {
-      console.debug('[ParamsSection] loadPortPresets failed:', e);
+      console.warn('[ParamsSection] loadPortPresets failed:', e);
     }
   }, []);
 

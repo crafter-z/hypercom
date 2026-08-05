@@ -8,7 +8,7 @@ import { Plus, Check, Trash2, ChevronRight, Wrench } from 'lucide-react';
 /**
  * 外部工具配置页：管理端口号 → 命令行工具的映射关系。
  * 独立于串口存在——端口不在列表中也可以预配置。
- * 数据通过 SQLite 持久化（port_tool_configs 表）。
+ * 数据随 config.json 持久化（`portToolConfigs` 实体数组）。
  */
 const ToolSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -23,7 +23,7 @@ const ToolSettings: React.FC = () => {
       if (rows.length > 0) {
         useRuleStore.getState().setPortToolConfigs(rows);
       }
-    }).catch((e) => console.debug('[ToolSettings] load failed:', e));
+    }).catch((e) => console.warn('[ToolSettings] load failed:', e));
   }, []);
 
   const handleAdd = () => {

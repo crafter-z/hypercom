@@ -25,7 +25,7 @@ const TriggerSettings: React.FC = () => {
     // non-empty result must not resurrect them on the next open.
     storageService.loadTriggerRules().then(rows => {
       useRuleStore.getState().setTriggerRules(rows);
-    }).catch((e) => console.debug('[TriggerSettings] load failed:', e));
+    }).catch((e) => console.warn('[TriggerSettings] load failed:', e));
   }, []);
 
   const handleAdd = () => {

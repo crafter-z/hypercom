@@ -27,12 +27,15 @@ const CommandSettings: React.FC = () => {
       if (sets.length > 0) {
         useRuleStore.getState().setSendCommandSets(sets);
       }
-    }).catch((e) => console.debug('[ConfigModal] loadCommandSets failed:', e));
+    }).catch((e) => {
+      console.warn('[ConfigModal] loadCommandSets failed:', e);
+      notifyError(e);
+    });
   }, []);
 
   const handleRemoveCmdSet = async (setId: string) => {
     removeSendCommandSet(setId);
-    try { await storageService.deleteCommandSet(setId); } catch (e) { console.error('Failed to delete command set from DB:', e); notifyError(e); }
+    try { await storageService.deleteCommandSet(setId); } catch (e) { console.error('Failed to delete command set:', e); notifyError(e); }
   };
 
   const handleSaveSet = async (setId: string) => {

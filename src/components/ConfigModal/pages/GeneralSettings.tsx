@@ -44,7 +44,7 @@ const GeneralSettings: React.FC = () => {
       const list = await storageService.loadPortPresets();
       setPresets(list);
     } catch (e) {
-      console.debug('[GeneralSettings] loadPortPresets failed:', e);
+      console.warn('[GeneralSettings] loadPortPresets failed:', e);
     }
   }, []);
 

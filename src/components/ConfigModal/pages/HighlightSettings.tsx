@@ -20,12 +20,15 @@ const HighlightSettings: React.FC = () => {
       if (sets.length > 0) {
         useRuleStore.getState().setHighlightRuleSets(sets);
       }
-    }).catch((e) => console.debug('[ConfigModal] loadHighlightSets failed:', e));
+    }).catch((e) => {
+      console.warn('[ConfigModal] loadHighlightSets failed:', e);
+      notifyError(e);
+    });
   }, []);
 
   const handleRemoveSet = async (setId: string) => {
     removeHighlightRuleSet(setId);
-    try { await storageService.deleteHighlightSet(setId); } catch (e) { console.error('Failed to delete highlight set from DB:', e); notifyError(e); }
+    try { await storageService.deleteHighlightSet(setId); } catch (e) { console.error('Failed to delete highlight set:', e); notifyError(e); }
   };
 
   const handleSaveSet = async (setId: string) => {
