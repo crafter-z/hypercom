@@ -229,6 +229,12 @@ pub struct AppConfig {
     #[serde(default = "default_restore_session")]
     pub restore_session: bool,
 
+    // --- 诊断日志 ---
+    /// 是否启用应用自身维测日志（前后端统一落盘到诊断日志文件）。
+    /// `#[serde(default = "default_diag_log_enabled")]` 兼容旧版 config.json。
+    #[serde(default = "default_diag_log_enabled")]
+    pub diag_log_enabled: bool,
+
     // --- 设置实体（全部存入 config.json，单文件即可完整迁移）---
     #[serde(default)]
     pub send_command_sets: Vec<SendCommandSetEntry>,
@@ -252,6 +258,10 @@ pub struct AppConfig {
 }
 
 fn default_restore_session() -> bool {
+    true
+}
+
+fn default_diag_log_enabled() -> bool {
     true
 }
 
@@ -308,6 +318,7 @@ impl Default for AppConfig {
             backup_interval: 24,
             backup_directory: String::new(),
             restore_session: true,
+            diag_log_enabled: true,
             send_command_sets: Vec::new(),
             highlight_rule_sets: Vec::new(),
             protocol_templates: Vec::new(),
@@ -564,6 +575,7 @@ mod tests {
         assert!(cfg.log_include_direction);
         assert!(!cfg.backup_enabled);
         assert!(cfg.restore_session);
+        assert!(cfg.diag_log_enabled);
         assert!(cfg.send_command_sets.is_empty());
         assert!(cfg.highlight_rule_sets.is_empty());
         assert!(cfg.protocol_templates.is_empty());
@@ -597,6 +609,7 @@ mod tests {
             "sendCommandSets", "highlightRuleSets", "protocolTemplates",
             "triggerRules", "portPresets", "portToolConfigs", "portGroups",
             "portMeta", // issue #4-9
+            "diagLogEnabled", // 诊断日志开关
             "logIncludeTimestamp", "logIncludeDirection", // issue #3-4
         ] {
             assert!(json.contains(key), "missing {} in JSON", key);
@@ -712,6 +725,23 @@ mod tests {
         let json = serde_json::to_string(&preset).unwrap();
         assert!(json.contains("\"baudRate\""), "should be camelCase: {}", json);
         assert!(json.contains("\"dtr\":true"), "dtr should be bool: {}", json);
+    }
+
+    #[test]
+    fn test_diag_log_enabled_defaults_when_absent() {
+        // 旧版 config.json 无 diagLogEnabled 字段 → 反序列化回退默认 true。
+        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
+            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
+            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
+            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
+            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
+            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
+            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
+            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
+            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
+            "backupDirectory":"","restoreSession":true}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert!(cfg.diag_log_enabled);
     }
 
     #[test]

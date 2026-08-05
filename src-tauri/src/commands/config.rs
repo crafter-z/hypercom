@@ -14,7 +14,8 @@ pub fn get_config(state: State<AppState>) -> Result<config::AppConfig, CommandEr
 }
 
 /// 更新应用配置。
-/// 写入 config.json 后自动同步日志设置到 LogManager（消除双数据源）。
+/// 写入 config.json 后自动同步日志设置到 LogManager、诊断日志开关到 DiagLogger
+///（消除双数据源）。
 #[tauri::command]
 pub fn set_config(
     new_config: config::AppConfig,
@@ -32,6 +33,8 @@ pub fn set_config(
     }
     // 再同步 LogManager（锁顺序：config → log，与 start_logging 一致）
     sync_log_manager_from_config(&state)?;
+    // 同步诊断日志开关（原子开关，无需锁）
+    state.diag_logger.set_enabled(new_config.diag_log_enabled);
     Ok(())
 }
 
@@ -48,6 +51,7 @@ pub fn reset_config(state: State<AppState>) -> Result<config::AppConfig, Command
             .map_err(|e| CommandError::Config(e.to_string()))?
     };
     sync_log_manager_from_config(&state)?;
+    state.diag_logger.set_enabled(cfg.diag_log_enabled);
     Ok(cfg)
 }
 

@@ -4,6 +4,7 @@
  */
 mod commands;
 mod config;
+mod diaglog;
 mod logger;
 mod serial;
 mod system;
@@ -42,6 +43,8 @@ pub struct AppState {
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
     /// 日志管理器：负责日志文件的写入与管理
     pub log_manager: std::sync::Mutex<logger::LogManager>,
+    /// 诊断日志器：应用自身维测日志（后端 `log::*` + 前端 `console.*` 转发，统一落盘+轮转）
+    pub diag_logger: std::sync::Arc<diaglog::DiagLogger>,
     /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）
     pub system_info: std::sync::Mutex<sysinfo::System>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
@@ -54,7 +57,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(diag_logger: std::sync::Arc<diaglog::DiagLogger>) -> anyhow::Result<Self> {
         // 解析 CLI `--config <path>` 参数，允许自定义配置文件路径
         let config_arg = std::env::args()
             .skip(1)
@@ -77,10 +80,14 @@ impl AppState {
             }
         }
 
+        // 用配置同步诊断日志开关。
+        diag_logger.set_enabled(cfg.diag_log_enabled);
+
         Ok(Self {
             serial_manager: std::sync::Mutex::new(serial::SerialManager::new()),
             config_manager: std::sync::Mutex::new(config_manager),
             log_manager: std::sync::Mutex::new(log_manager),
+            diag_logger,
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -100,15 +107,29 @@ struct TerminalClosedPayload {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化日志
-    env_logger::init();
+    // 初始化诊断日志器（替换原 env_logger）：后端 log::* 统一落盘 + 轮转。
+    // 目录取数据目录 `hypercom/diag`（与串口日志 `hypercom/logs` 同级）。
+    let diag_dir = dirs::data_dir()
+        .map(|d| d.join("hypercom").join("diag"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let diag_logger = match diaglog::install(diag_dir) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[diaglog] init failed ({}), file logging disabled", e);
+            // 兜底：命令路径需要一个可用的 DiagLogger 实例。
+            std::sync::Arc::new(
+                diaglog::DiagLogger::new(std::env::temp_dir().join("hypercom-diag"))
+                    .expect("diag logger fallback"),
+            )
+        }
+    };
     log::info!("HyperCom starting...");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState::new().expect("Failed to initialize app state"))
+        .manage(AppState::new(diag_logger).expect("Failed to initialize app state"))
         .invoke_handler(tauri::generate_handler![
             // ===== 串口相关命令 =====
             commands::list_available_ports,
@@ -179,6 +200,11 @@ pub fn run() {
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,
+            // ===== 诊断日志命令 =====
+            commands::get_diag_log_path,
+            commands::read_diag_log,
+            commands::clear_diag_log,
+            commands::append_diag_log,
             // ===== 弹出窗命令（柔性工作区 Phase 1）=====
             commands::open_popout,
             commands::close_popout,

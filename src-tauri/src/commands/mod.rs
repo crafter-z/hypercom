@@ -3,6 +3,7 @@
  * 前端通过 invoke 调用的 Rust 函数按领域拆分在本目录子模块中。
  */
 mod config;
+mod diag;
 mod file;
 mod log;
 mod popout;
@@ -12,6 +13,7 @@ mod storage;
 mod system_cmds;
 
 pub use config::*;
+pub use diag::*;
 pub use file::*;
 pub use log::*;
 pub use popout::*;

@@ -11,6 +11,7 @@
 | `config.rs` | `get_config`, `set_config`, `reset_config`, `update_session_snapshot`, `get_session_snapshot`, `get_config_path`. `set_config`/`reset_config` auto-sync LogManager via `sync_log_manager_from_config()`. `update_session_snapshot` writes the separate `session.json` (not config.json, no `.bak`). |
 | `log.rs` | `start_logging`, `stop_logging`, `save_log_as`, `export_terminal_log`, `get_log_files`, `set_log_split_size`, `set_log_split_enabled`, `set_log_filename_format`, `set_log_auto_save`, `set_log_encoding`, `open_path`, `open_log_directory`, `migrate_log_directory`. Note: `save_log_as` and `export_terminal_log` scope restriction removed (user-chosen save dialog path only needs valid parent). |
 | `storage.rs` | settings entities CRUD (command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs) + `save_port_groups` (whole-list replace of port groups, issue #2-3 — read back via `get_config`'s `AppConfig.port_groups`, no separate load command) + `save_port_meta` (whole-list replace of port meta `{portId, alias, isHidden}`, issue #4-9 — read back via `AppConfig.port_meta`). Synchronous ConfigManager operations — lock `config_manager`, mutate the entity Vec in `AppConfig`, save config.json. NO SQLite/async/transactions. |
+| `diag.rs` | `get_diag_log_path`, `read_diag_log(limit?)`, `clear_diag_log`, `append_diag_log(entries)` — 应用自身维测日志的读取/清空 + 前端 `console.*` 转发追加；底层由 `crate::diaglog::DiagLogger`（全局 logger，落盘 + 轮转）提供 |
 | `system_cmds.rs` | `get_system_status`, `prevent_sleep`, `prevent_screen_off` |
 | `file.rs` | `write_text_file`, `read_text_file`. `validate_config_path()` restricts import paths to config directory. |
 | `mod.rs` | `CommandError` enum (thiserror) + `pub use domain::*;` re-exports |
@@ -27,6 +28,6 @@
 
 - Returning `Result<T, String>` — frontend no longer parses raw strings; serialization contract is broken.
 - Holding a `std::sync::MutexGuard` on `state.serial_manager` / `state.logger` / `state.config_manager` across `.await` — `MutexGuard` is `!Send`, the Tauri future must be `Send`. Pattern: extract + clone, drop guard, then `.await`. See `log.rs`.
-- `eprintln!` for error logging — use the `log` crate (`error!` / `warn!`). Backend uses `log`/`env_logger`, not print macros.
+- `eprintln!` for error logging — use the `log` crate (`error!` / `warn!`). Backend uses `log` → `diaglog::DiagLogger` (全局 logger，落盘 + 轮转，替换原 env_logger), not print macros.
 - Adding a 7th domain file without classifying its failure mode in `CommandError`.
 - Bypassing the `tauri` service module in the frontend and calling `invoke('<cmd>', ...)` directly.
