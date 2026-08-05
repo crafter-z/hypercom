@@ -522,8 +522,10 @@ impl ConfigManager {
 
     // ==================== 持久化 ====================
 
-    /// 保存配置到文件（原子写入 + .bak 备份）
-    pub fn save(&self) -> anyhow::Result<()> {
+/// 保存配置到文件（原子写入 + .bak 备份）。
+/// 失败时记录错误日志（诊断日志排查需要落盘根因，而非仅返回 Result）。
+pub fn save(&self) -> anyhow::Result<()> {
+    let result = (|| -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(&self.config)?;
         if self.config_path.exists() {
             let bak_path = self.config_path.with_extension("json.bak");
@@ -538,7 +540,12 @@ impl ConfigManager {
         fs::rename(&tmp_path, &self.config_path)?;
         log::info!("Config saved to {:?}", self.config_path);
         Ok(())
+    })();
+    if let Err(e) = &result {
+        log::error!("Failed to save config to {:?}: {}", self.config_path, e);
     }
+    result
+}
 }
 
 #[cfg(test)]

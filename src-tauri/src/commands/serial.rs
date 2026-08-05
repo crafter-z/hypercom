@@ -41,9 +41,10 @@ pub fn open_serial_port(args: OpenPortArgs, state: State<AppState>) -> Result<()
         .serial_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .open_port(args)
-        .map_err(|e| CommandError::Serial(e.to_string()))
+    manager.open_port(args.clone()).map_err(|e| {
+        log::warn!("Failed to open port {}: {}", args.port_id, e);
+        CommandError::Serial(e.to_string())
+    })
 }
 
 /// 关闭指定串口
@@ -55,9 +56,10 @@ pub fn close_serial_port(port_id: String, state: State<AppState>) -> Result<(), 
             .serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .close_port(&port_id)
-            .map_err(|e| CommandError::Serial(e.to_string()))?
+        manager.close_port(&port_id).map_err(|e| {
+            log::warn!("Failed to close port {}: {}", port_id, e);
+            CommandError::Serial(e.to_string())
+        })?
     };
     // 在锁外 join：读取线程退出最长约 100ms，不能阻塞其他串口命令
     if let Some(thread) = join_handle {
@@ -89,7 +91,10 @@ pub fn send_serial_data(args: SendDataArgs, state: State<AppState>) -> Result<us
                 args.is_hex,
                 &args.append_line_ending,
             )
-            .map_err(|e| CommandError::Serial(e.to_string()))?
+            .map_err(|e| {
+                log::warn!("Failed to send data to {}: {}", args.port_id, e);
+                CommandError::Serial(e.to_string())
+            })?
     };
     // Write TX data to log if a writer exists
     let timestamp = chrono::Local::now()
@@ -227,7 +232,16 @@ pub async fn send_file(
         },
     );
     match send_err {
-        Some(e) => Err(e),
+        Some(e) => {
+            log::warn!(
+                "File send failed for {} (sent {} of {} bytes): {}",
+                args.port_id,
+                sent,
+                total,
+                e
+            );
+            Err(e)
+        }
         None => Ok(sent),
     }
 }
@@ -261,7 +275,10 @@ pub fn set_serial_params(
             &args.stop_bits,
             &args.handshake,
         )
-        .map_err(|e| CommandError::Serial(e.to_string()))
+        .map_err(|e| {
+            log::warn!("Failed to set params for {}: {}", args.port_id, e);
+            CommandError::Serial(e.to_string())
+        })
 }
 
 /// 尝试重新连接指定串口（异常断线后的自动恢复）
@@ -287,9 +304,10 @@ pub fn attempt_reconnect(port_id: String, state: State<AppState>) -> Result<(), 
         .serial_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .attempt_reconnect(&port_id)
-        .map_err(|e| CommandError::Serial(e.to_string()))
+    manager.attempt_reconnect(&port_id).map_err(|e| {
+        log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
+        CommandError::Serial(e.to_string())
+    })
 }
 
 /// 设置流控（DTR/RTS/握手协议）
@@ -306,7 +324,10 @@ pub fn set_flow_control(
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     manager
         .set_flow_control(&port_id, dtr, rts)
-        .map_err(|e| CommandError::Serial(e.to_string()))
+        .map_err(|e| {
+            log::warn!("Failed to set flow control for {}: {}", port_id, e);
+            CommandError::Serial(e.to_string())
+        })
 }
 
 // ==================== 外部工具执行 ====================

@@ -410,6 +410,7 @@ impl SerialManager {
 
             // 异常退出时发送一次重连提示，避免每次轮询都产生噪音
             if abnormal {
+                log::warn!("Serial port {} read thread exited abnormally (unplanned disconnect)", port_id);
                 let hint = SerialReconnectHintEvent {
                     port_name: port_id,
                 };
