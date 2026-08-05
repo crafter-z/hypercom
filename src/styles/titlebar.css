@@ -27,11 +27,6 @@
   color: var(--text-primary);
 }
 
-.titlebar-version {
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-}
-
 .titlebar-right {
   display: flex;
   align-items: center;

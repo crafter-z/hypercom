@@ -17,6 +17,7 @@ import type {
   PortPreset,
   PortToolConfig,
   PortGroup,
+  PortMetaEntry,
 } from '../types';
 
 // ==================== 类型定义 ====================
@@ -237,17 +238,6 @@ export interface SerialReconnectHintEvent {
   port_name: string;
 }
 
-/** 串口引脚状态事件 payload */
-export interface SerialPinStatesEvent {
-  port_id: string;
-  dtr: boolean;
-  rts: boolean;
-  cts: boolean;
-  dsr: boolean;
-  rlsd: boolean;
-  ri: boolean;
-}
-
 /** 文件发送进度事件 payload */
 export interface FileProgressPayload {
   port_id: string;
@@ -284,12 +274,6 @@ export const eventService = {
 
   onSerialReconnectHint: (callback: (event: SerialReconnectHintEvent) => void) => {
     return listen<SerialReconnectHintEvent>('serial:reconnect_hint', (event) => {
-      callback(event.payload);
-    });
-  },
-
-  onSerialPinStates: (callback: (event: SerialPinStatesEvent) => void) => {
-    return listen<SerialPinStatesEvent>('serial:pin_states', (event) => {
       callback(event.payload);
     });
   },
@@ -392,6 +376,12 @@ export const storageService = {
    *  读取随 get_config 返回的 AppConfig.portGroups，无单独 load 命令。 */
   savePortGroups: (groups: PortGroup[]): Promise<void> => {
     return invoke<void>('save_port_groups', { args: groups });
+  },
+
+  /** 整体替换保存串口备注名 / 隐藏状态（issue #4-9，前端端口元数据变更后防抖调用）。
+   *  读取随 get_config 返回的 AppConfig.portMeta，无单独 load 命令。 */
+  savePortMeta: (meta: PortMetaEntry[]): Promise<void> => {
+    return invoke<void>('save_port_meta', { args: meta });
   },
 };
 

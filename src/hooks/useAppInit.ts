@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
-import type { PaneNode, SerialPort } from '../types';
+import type { PaneNode, SerialPort, PortMetaEntry } from '../types';
 import { useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
 
@@ -33,10 +33,6 @@ export function useAppInit() {
   useEffect(() => {
     const init = async () => {
       await loadConfig();
-      // 配置加载完成后才允许首次启动引导弹窗渲染，避免 hasSeenTour
-      // 尚未从后端同步到 store 时引导一闪而过（loadConfig 内部已吞掉异常，
-      // 此处无论成功与否都需要置位）
-      useAppStore.getState().setUIState({ configLoaded: true });
 
       // Load persisted rule sets and command sets from config (entities now live in config.json)
       const cfg = useAppStore.getState().config;
@@ -64,6 +60,15 @@ export function useAppInit() {
         for (const portId of group.portIds) {
           useAppStore.getState().updatePort(portId, { groupId: group.id });
         }
+      }
+
+      // 回填持久化的端口备注名 / 隐藏状态（issue #4-9）：端口由枚举产生，
+      // `mapPortInfo` 不携带 alias/isHidden，需从 config.portMeta 恢复。
+      for (const meta of useAppStore.getState().config.portMeta ?? []) {
+        useAppStore.getState().updatePort(meta.portId, {
+          alias: meta.alias,
+          isHidden: meta.isHidden,
+        });
       }
 
       // F.3: Session restore — recreate tabs + paneTree from snapshot (no auto-connect)
@@ -118,6 +123,9 @@ export function useAppInit() {
   // 由后端 ConfigManager.save() 保证）。替代旧的「保存布局」手动按钮。
   // 与 App.tsx 会话快照订阅同款防抖写法；后台持久化失败只记日志不弹 toast，
   // 避免高频操作期间的重复打扰。
+  // issue #4-10：落盘前同步回写 store.config.portGroups——否则 ConfigModal /
+  // 主题切换等「全量保存 config」路径会用陈旧的 config.portGroups 覆盖掉
+  // 本次保存的分组，导致重启后分组丢失。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
@@ -125,8 +133,51 @@ export function useAppInit() {
       if (timeoutId !== null) clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
         timeoutId = null;
-        storageService.savePortGroups(useAppStore.getState().groups).catch((e) => {
+        const groups = useAppStore.getState().groups;
+        useAppStore.getState().setConfig({ portGroups: groups });
+        storageService.savePortGroups(groups).catch((e) => {
           console.warn('[useAppInit] Failed to auto-save port groups:', e);
+        });
+      }, 500);
+    });
+    return () => {
+      unsubscribe();
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
+  }, []);
+
+  // 端口元数据自动保存（备注名 / 隐藏状态，issue #4-9）：与分组同款防抖 +
+  // 整体替换落盘。订阅用「别名/隐藏 签名」比较而非数组引用，因为 3s 端口轮询
+  // 每次都会重建 ports 数组，但 mergePorts 保留了 alias/isHidden 值，签名不变
+  // 就不会误触发。同样同步回写 store.config.portMeta，防全量保存覆盖。
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let lastSignature = '';
+    const computeSignature = () =>
+      useAppStore
+        .getState()
+        .ports.filter((p) => p.alias != null || p.isHidden)
+        .map((p) => `${p.id}\u0001${p.alias ?? ''}\u0001${p.isHidden ? '1' : '0'}`)
+        .join('\u0002');
+    lastSignature = computeSignature();
+    const unsubscribe = useAppStore.subscribe((state, prevState) => {
+      // 端口数组引用未变（仅流量/UI 等其它字段更新）时跳过，避免每次 TX/RX
+      // 统计都重算签名；3s 轮询会重建数组但这不携带 alias/isHidden 变化，
+      // 签名比较仍能正确去重。
+      if (state.ports === prevState.ports) return;
+      const sig = computeSignature();
+      if (sig === lastSignature) return;
+      lastSignature = sig;
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        timeoutId = null;
+        const state = useAppStore.getState();
+        const meta: PortMetaEntry[] = state.ports
+          .filter((p) => p.alias != null || p.isHidden)
+          .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden }));
+        state.setConfig({ portMeta: meta });
+        storageService.savePortMeta(meta).catch((e) => {
+          console.warn('[useAppInit] Failed to auto-save port meta:', e);
         });
       }, 500);
     });

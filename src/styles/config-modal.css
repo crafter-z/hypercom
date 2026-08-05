@@ -40,6 +40,69 @@
   box-shadow: var(--shadow-lg);
 }
 
+/* ==================== About 弹窗 ==================== */
+.about-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.about-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ==================== 开源许可证弹窗 ==================== */
+.licenses-dialog {
+  min-width: 440px;
+  max-width: 520px;
+}
+
+.licenses-scroll {
+  overflow-y: auto;
+  max-height: 50vh;
+  flex: 1;
+}
+
+.licenses-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 10px 0 6px;
+}
+
+.licenses-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.licenses-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.licenses-dep {
+  color: var(--text-primary);
+}
+
+.licenses-spdx {
+  color: var(--text-secondary);
+  text-align: right;
+  font-family: var(--font-terminal);
+  white-space: nowrap;
+}
+
+.licenses-note {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .modal-nav {
   width: 180px;
   background: var(--bg-secondary);

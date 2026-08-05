@@ -1,6 +1,5 @@
 export { useSerialPorts, mapPortInfo, mergePorts } from './useSerialPorts';
 export { useSerialConnection } from './useSerialConnection';
-export { usePinStatesSubscriber } from './usePinStatesSubscriber';
 export { useSerialReceive } from './useSerialReceive';
 export { useSerialSend, sendToPort } from './useSerialSend';
 export { usePopoutBridge } from './usePopoutBridge';

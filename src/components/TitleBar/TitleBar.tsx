@@ -1,12 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
-import { Settings, HelpCircle, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Settings, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const TitleBar: React.FC = () => {
   const toggleConfigModal = useAppStore((state) => state.toggleConfigModal);
-  const setConfig = useAppStore((state) => state.setConfig);
   const setUIState = useAppStore((state) => state.setUIState);
   const sidebarCollapsed = useAppStore((state) => state.ui.sidebarCollapsed);
   const [isMaximized, setIsMaximized] = useState(false);
@@ -35,11 +34,6 @@ const TitleBar: React.FC = () => {
   useEffect(() => {
     getCurrentWindow().setTitle(titleText).catch((e) => console.debug('[TitleBar] setTitle failed:', e));
   }, [titleText]);
-
-  // hasSeenTour 置 false 后 FirstRunTour 自动重新挂载（无需额外状态）
-  const handleShowTour = () => {
-    setConfig({ hasSeenTour: false });
-  };
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
@@ -103,7 +97,6 @@ const TitleBar: React.FC = () => {
           {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
         </button>
         <span className="titlebar-title" data-tauri-drag-region>{titleText}</span>
-        <span className="titlebar-version" data-tauri-drag-region>{t('titleBar.version')}</span>
       </div>
 
       <div className="titlebar-right">
@@ -120,9 +113,6 @@ const TitleBar: React.FC = () => {
           onClick={() => setUIState({ isHotkeyHelpOpen: true })}
         >
           <Keyboard size={15} />
-        </button>
-        <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.help')} onClick={handleShowTour}>
-          <HelpCircle size={15} />
         </button>
         <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.about')} onClick={() => setUIState({ isAboutOpen: true })}>
           <Info size={15} />

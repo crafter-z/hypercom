@@ -103,42 +103,6 @@
   background: rgba(255, 255, 255, 0.15);
 }
 
-.pin-led-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px; /* LED cluster — intentionally tighter than the spacing scale */
-}
-
-.pin-led-tab-item {
-  gap: 6px;
-}
-
-.pin-led-tab-label {
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  max-width: 80px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pin-led {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  transition: background-color var(--transition-fast);
-}
-
-.pin-led.active {
-  background-color: var(--status-connected);
-  box-shadow: 0 0 3px var(--status-connected);
-}
-
-.pin-led.inactive {
-  background-color: var(--status-disconnected);
-}
-
 /* ==================== Tab Warning Icon ==================== */
 .tab-warning-icon {
   color: var(--status-error);

@@ -6,14 +6,13 @@ import MainDisplay from './components/MainDisplay/MainDisplay';
 import OperationPanel from './components/OperationPanel/OperationPanel';
 import StatusBar from './components/StatusBar/StatusBar';
 import ConfigModal from './components/ConfigModal/ConfigModal';
-import FirstRunTour from './components/Tour/FirstRunTour';
 import ToastContainer from './components/shared/Toast/ToastContainer';
 import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
 import AboutDialog from './components/shared/AboutDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, usePinStatesSubscriber, useToolOutput, usePopoutBridge } from './hooks';
+import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge } from './hooks';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
@@ -56,11 +55,10 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
 
 const App: React.FC = () => {
   useAppInit();
-  // Serial event listeners (onSerialData / onSerialStatus / onSerialPinStates /
+  // Serial event listeners (onSerialData / onSerialStatus /
   // onSerialReconnectHint) are set up once at app root.
   // Send actions live on useSerialSend in OperationPanel — see SRP split in useTauri.ts.
   useSerialReceive();
-  usePinStatesSubscriber();
   useToolOutput();
   usePopoutBridge();
   useHotkeys();
@@ -143,7 +141,6 @@ const App: React.FC = () => {
 
           <StatusBar />
           <ConfigModal />
-          <FirstRunTour />
           <HotkeyHelpDialog />
           <AboutDialog />
           <ToastContainer />

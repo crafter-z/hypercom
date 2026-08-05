@@ -3,40 +3,9 @@ import { useTranslation } from 'react-i18next';
 import i18n from '../../i18n';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { usePinStatesStore, type PinStates } from '../../stores/usePinStatesStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
 import { useSystemStatus } from '../../hooks';
 import DisconnectBanner from './DisconnectBanner';
-
-interface PinLedGroupProps {
-  portId: string;
-}
-
-const PinLedGroup: React.FC<PinLedGroupProps> = ({ portId }) => {
-  const { t } = useTranslation();
-  const pins = usePinStatesStore((s) => s.pinStates[portId]);
-
-  const items: Array<{ key: keyof PinStates; label: string }> = [
-    { key: 'dtr', label: t('pin.dtr.label') },
-    { key: 'rts', label: t('pin.rts.label') },
-    { key: 'cts', label: t('pin.cts.label') },
-    { key: 'dsr', label: t('pin.dsr.label') },
-    { key: 'rlsd', label: t('pin.rlsd.label') },
-    { key: 'ri', label: t('pin.ri.label') },
-  ];
-
-  return (
-    <span className="pin-led-group">
-      {items.map(({ key, label }) => (
-        <span
-          key={key}
-          className={`pin-led ${pins?.[key] ? 'active' : 'inactive'}`}
-          title={`${label}: ${pins?.[key] ? t('pin.state.active') : t('pin.state.inactive')}`}
-        />
-      ))}
-    </span>
-  );
-};
 
 /** Format bytes/sec with auto-scaling */
 function formatRate(bytesPerSec: number): string {
@@ -72,7 +41,6 @@ const StatusBar: React.FC = () => {
   const systemStatus = useAppStore((s) => s.systemStatus);
   const trafficStats = useAppStore((s) => s.trafficStats);
   const activeTabId = useAppStore((s) => s.activeTabId);
-  const tabs = useAppStore((s) => s.tabs);
   const ports = useAppStore((s) => s.ports);
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
   const connectedCount = ports.filter(p => p.status === 'connected').length;
@@ -175,14 +143,6 @@ const StatusBar: React.FC = () => {
         {activeTabId && (
           <span className="statusbar-item statusbar-value">{activeTabId}</span>
         )}
-        {tabs
-          .filter((tab) => ports.find((p) => p.id === tab.id)?.status === 'connected')
-          .map((tab) => (
-            <span key={tab.id} className="statusbar-item pin-led-tab-item" title={tab.id}>
-              <PinLedGroup portId={tab.id} />
-              <span className="pin-led-tab-label">{tab.id}</span>
-            </span>
-          ))}
         <span className="statusbar-item">
           <MemoryStick size={12} />
           {systemStatus.memoryUsedMb}MB / {systemStatus.memoryLimitMb}MB ({systemStatus.memoryLimitMb ? ((systemStatus.memoryUsedMb / systemStatus.memoryLimitMb) * 100).toFixed(0) : '0'}%)

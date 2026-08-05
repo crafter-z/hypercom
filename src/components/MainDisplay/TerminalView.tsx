@@ -128,12 +128,22 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     // Measurement-lag fallback: scrollToIndex targets the last item's
     // (possibly estimated) end — unmeasured tail rows are estimateSize until
     // ResizeObserver lands, so totalSize can grow and stale the scrollTop.
-    // One frame later the measurements are in; pin the real bottom directly.
-    // Touches ONLY scrollTop — never scrollLocked/followRef.
-    requestAnimationFrame(() => {
+    // Re-pin for TWO frames: the first pins to the current bottom; the second,
+    // after the virtualizer has measured the newly appended rows and grown
+    // totalSize, re-pins to the true bottom. Under sustained high-frequency
+    // output a single pin lets the view drift upward by a few px per frame and
+    // scroll-lock visibly loses the latest rows (issue #4-1). Touches ONLY
+    // scrollTop — never scrollLocked/followRef.
+    let frames = 0;
+    const pinToBottom = () => {
+      // A user gesture starting mid-chain must not be yanked back to the bottom.
+      if (gestureActiveRef.current) return;
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
-    });
+      frames += 1;
+      if (frames < 2) requestAnimationFrame(pinToBottom);
+    };
+    requestAnimationFrame(pinToBottom);
   }, [virtualizer]);
 
   // Sync the store's scrollLocked to followRef. Explicit-intent transitions:

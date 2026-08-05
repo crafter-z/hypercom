@@ -39,8 +39,6 @@ export function useHotkeys(): void {
           state.setUIState({ isHotkeyHelpOpen: false });
         } else if (state.ui.isConfigOpen) {
           state.toggleConfigModal(false);
-        } else if (!state.config.hasSeenTour) {
-          state.setConfig({ hasSeenTour: true });
         }
         return;
       }

@@ -167,7 +167,6 @@ const defaultConfig: AppConfig = {
   backupEnabled: false,
   backupInterval: 24,
   backupDirectory: '',
-  hasSeenTour: false,
   restoreSession: true,
   sendCommandSets: [],
   highlightRuleSets: [],
@@ -176,6 +175,7 @@ const defaultConfig: AppConfig = {
   portPresets: [],
   portToolConfigs: [],
   portGroups: [],
+  portMeta: [],
 };
 
 const defaultUIState: UIState = {
@@ -186,7 +186,6 @@ const defaultUIState: UIState = {
   // 提高到 280px 保证首次启动即完整可见（可拖拽范围仍为 [160, 600]）。
   operationPanelHeight: 280,
   isOperationPanelCollapsed: false,
-  configLoaded: false,
   isHotkeyHelpOpen: false,
   isAboutOpen: false,
   sidebarCollapsed: false,

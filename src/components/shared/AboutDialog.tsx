@@ -2,13 +2,19 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { getVersion } from '@tauri-apps/api/app';
-import { X } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-shell';
+import { X, ExternalLink, ScrollText } from 'lucide-react';
+import LicensesDialog from './LicensesDialog';
+
+/** 项目 GitHub 仓库地址（issue #4-6，「关于」界面一键跳转）。 */
+const GITHUB_URL = 'https://github.com/crafter-z/hypercom';
 
 const AboutDialog: React.FC = () => {
   const { t } = useTranslation();
   const isOpen = useAppStore((s) => s.ui.isAboutOpen);
   const setUIState = useAppStore((s) => s.setUIState);
   const [version, setVersion] = useState('');
+  const [showLicenses, setShowLicenses] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -20,6 +26,10 @@ const AboutDialog: React.FC = () => {
   if (!isOpen) return null;
 
   const close = () => setUIState({ isAboutOpen: false });
+
+  const openGithub = () => {
+    open(GITHUB_URL).catch((e) => console.debug('[AboutDialog] open GitHub failed:', e));
+  };
 
   return (
     <div className="modal-overlay" onClick={close}>
@@ -37,8 +47,9 @@ const AboutDialog: React.FC = () => {
                   stroke="var(--accent-color, #4fc3f7)" strokeWidth="10" strokeLinecap="round" strokeLinejoin="miter"/>
           </svg>
           <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)' }}>{t('titleBar.appName')}</div>
+          {/* issue #4-7：版本号只显示真实版本（getVersion），不再叠加硬编码的 v0.1.0。 */}
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            {t('titleBar.version')}{version ? ` (${version})` : ''}
+            {t('about.version')} {version ? `v${version}` : ''}
           </div>
           <div style={{ fontSize: 13, color: 'var(--text-secondary)', textAlign: 'center', marginTop: 4 }}>
             {t('about.description')}
@@ -48,13 +59,26 @@ const AboutDialog: React.FC = () => {
         <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
           <div style={{ marginBottom: 6, fontWeight: 500, color: 'var(--text-primary)' }}>{t('about.techStack')}</div>
           <div>Tauri v2 · React 18 · Rust · TypeScript</div>
-          <div style={{ marginTop: 4 }}>serialport-rs · sqlx · tokio · Zustand</div>
+          <div style={{ marginTop: 4 }}>serialport-rs · tokio · Zustand · i18next</div>
+        </div>
+
+        <div className="about-actions">
+          <button className="btn btn-sm" onClick={openGithub}>
+            <ExternalLink size={14} />
+            {t('about.github')}
+          </button>
+          <button className="btn btn-sm" onClick={() => setShowLicenses(true)}>
+            <ScrollText size={14} />
+            {t('about.licenses')}
+          </button>
         </div>
 
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-secondary)', textAlign: 'center' }}>
           {t('about.license')} · © 2026 HyperCom
         </div>
       </div>
+
+      {showLicenses && <LicensesDialog onClose={() => setShowLicenses(false)} />}
     </div>
   );
 };

@@ -1,6 +1,6 @@
 # src/hooks/
 
-12 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
+11 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
 
 ## File structure
 
@@ -9,13 +9,12 @@
 | `disconnectTracking.ts` | `userClosingPortIds`, `lostPortIds`, `isUserClosingPort()`, `isPortLost()` | shared by useSerialConnection + useSerialReceive | module-level Sets for session-aware disconnect tracking |
 | `useSerialPorts.ts` | `useSerialPorts(pollMs=3000)`, `mapPortInfo()`, `mergePorts()` | Sidebar | polling; `mapPortInfo`/`mergePorts` also used by useSimulation |
 | `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop |
-| `usePinStatesSubscriber.ts` | `usePinStatesSubscriber()` | `App.tsx` **exactly once** | `serial:pin_states` event listener |
 | `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial:data` event listener + status handler (writes `lostPortIds` for DisconnectBanner); RX feeds `RxPipeline` (byte-level line aggregation + rAF-batched store writes), NOT direct per-event appends |
 | `useSerialSend.ts` | `useSerialSend()`, `sendToPort()` | OperationPanel (hook); `usePopoutBridge` (module fn) | action; module-level `sendToPort` owns the real send (backend call + TX echo + traffic stats + in-memory per-port history `Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite); the hook is a thin wrapper mirroring history into state for ↑/↓ recall |
 | `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | pop-out intent bus: listens `popout:send-command` (→ `sendToPort(activeTabId)`) / `popout:open-config` (→ ConfigModal page) / `popout:request-sync` (→ replay `active-tab:changed`); subscribes `useRuleStore.sendCommandSets` + `useAppStore.activeTabId` → emits `command-sets:changed` / `active-tab:changed` refresh signals |
 | `useConfigPersistence.ts` | `useConfigPersistence()` | `App.tsx` | load + save config |
 | `useSystemStatus.ts` | `useSystemStatus(pollMs=5000)` | StatusBar | polling |
-| `useAppInit.ts` | `useAppInit()` | App.tsx | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; restores `config.portGroups` into `useAppStore.groups` + backfills `ports.groupId`; debounced (500ms) auto-save of groups on any change (issue #2-3); session restore via `configService.getSessionSnapshot()` |
+| `useAppInit.ts` | `useAppInit()` | App.tsx | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; restores `config.portGroups` into `useAppStore.groups` + backfills `ports.groupId`; restores `config.portMeta` (alias/isHidden) into ports (issue #4-9); debounced (500ms) auto-save of groups AND port meta on change (issue #2-3 / #4-9/10 — both write back into `config` so a full `set_config` never clobbers them); session restore via `configService.getSessionSnapshot()` |
 | `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts; **dev-only** — no-op when `DEV_FEATURES_ENABLED` is false (issue #2-9) |
 | `useToolOutput.ts` | `useToolOutput()` | App.tsx **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
 | `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool` |

@@ -289,9 +289,6 @@ export interface AppConfig {
   backupInterval: number;  // 备份周期 (小时)
   backupDirectory: string;
 
-  // 引导设置
-  hasSeenTour: boolean;    // 是否已完成首次启动引导（false 时显示新手引导）
-
   // 会话恢复
   restoreSession: boolean;   // 启动时是否恢复上次会话
 
@@ -303,6 +300,16 @@ export interface AppConfig {
   portPresets: PortPreset[];
   portToolConfigs: PortToolConfig[];
   portGroups: PortGroup[];   // 串口分组布局（issue #2-3 起 config.json 持久化 + 自动保存）
+  portMeta: PortMetaEntry[]; // 串口备注名/隐藏状态（issue #4-9 起 config.json 持久化 + 自动保存）
+}
+
+// ==================== 串口元数据相关 ====================
+
+/** 串口元数据（备注名 / 隐藏状态，随 config.json 持久化，issue #4-9） */
+export interface PortMetaEntry {
+  portId: string;
+  alias?: string;
+  isHidden: boolean;
 }
 
 // ==================== 日志相关 ====================
@@ -341,7 +348,6 @@ export interface UIState {
   sidebarWidth: number;    // 左侧边栏宽度 (px)
   operationPanelHeight: number; // 操作区高度 (px)
   isOperationPanelCollapsed: boolean;
-  configLoaded: boolean;   // 配置是否已从后端加载完成（避免引导弹窗在加载前闪烁）
   isHotkeyHelpOpen: boolean; // 快捷键帮助弹窗是否打开
   isAboutOpen: boolean;    // 关于对话框是否打开
   sidebarCollapsed: boolean; // 左侧边栏是否折叠（仅本次会话有效，不进入重启快照）
