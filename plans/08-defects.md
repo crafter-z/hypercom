@@ -6,6 +6,20 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-05 日志审计完善：错误路径补日志 + 分级合理化 + 去噪音/刷屏)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 415/415 (20 files), `cargo check` 0 错 0 警告, `cargo test --lib` 48/48。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `commands/serial.rs` / `config/mod.rs` | 后端错误路径只抛 `CommandError`、不落后端日志：开/关/发/设参数/设流控/发文件/重连/存配置失败时，诊断日志文件（后端 `log::*`）缺失根因，只能依赖前端转发 | 各命令错误分支补 `log::warn!`（开/关/发/参数/流控/发文件/自动重连），`ConfigManager::save()` 失败补 `log::error!` |
+| MEDIUM | `serial/mod.rs` | 读线程异常退出（意外断线）无后端日志，只有前端事件 | 异常退出时补 `log::warn!("...read thread exited abnormally")` |
+| LOW | `usePopoutBridge.ts` | 两处正常控制流分支（无活动标签/无缓冲区）当错误打 debug，属噪音 | 删除（正常分支非错误） |
+| LOW | `useSerialPorts.ts` / `highlightEngine.ts` / `useSerialReceive.ts` | 潜在刷屏：端口枚举失败每 3s 一条 warn；非法正则随每批 RX；触发引擎异常随每次 RX | 端口枚举连续失败仅首次 warn、后续降 debug；非法正则以 pattern 去重只告警一次；触发异常限流每 2s 一条 |
+| MEDIUM | ConfigModal 各设置页 / OperationPanel | 设置实体加载失败仅 `console.debug` 且无用户提示，用户无感知 | 提升为 `console.warn`；命令集/高亮/协议模板加载失败补 `notifyError` toast（用户持久化数据）；顺带修正 `ToolSettings` 过时的 "SQLite" 注释与 `delete ... from DB` 文案 |
+
+测试新增：`diagLog` 解析已在上一轮补充；本次主要改日志语句，无新增测试（`cargo test` 48、vitest 415 均保持）。
+
 ## 已修复 (2026-08-05 issue #4 十项：高频滚动钉底 · 参数实时生效 · 状态栏去 LED · 去「替代」文案 · 移除帮助 demo · About 链接/版本/许可证 · 备注名与分组持久化)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 410/410 (19 files), `cargo check` 0 错 0 警告, `cargo test --lib` 42/42。
