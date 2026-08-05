@@ -1,6 +1,6 @@
 # src-tauri/src/commands/
 
-7 domain files + `mod.rs` re-export hub. All Tauri commands return `Result<T, CommandError>`.
+9 domain files + `mod.rs` re-export hub. All Tauri commands return `Result<T, CommandError>`.
 
 ## Where to look
 

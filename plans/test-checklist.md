@@ -7,8 +7,8 @@
 
 | 套件 | 命令 | 数量 | 说明 |
 |------|------|------|------|
-| 前端 (vitest) | `npm run test:run` | 280 tests / 15 files | useAppStore (56) + highlightEngine (22) + protocolParser (17) + protocolRenderer (8) + terminalSearch (9) + DisconnectBanner (5) + timeFormat (13) + sendUtils (21) + logReplay (10) + lineFilter (11) + protocolE2E (7) + triggerEngine (20) + useOperationStore (19) + useTerminalStore (22) + useRuleStore (37) |
-| 后端 (cargo) | `cargo test --lib` | 39 tests | config (7) + logger (13) + storage (16) + system (2) + lib (2) |
+| 前端 (vitest) | `npm run test:run` | 415 tests / 20 files | useAppStore (56) + useRuleStore (48) + rxAssembler (32) + useTerminalStore (30) + rxPipeline (28) + triggerEngine (26) + terminalSearch (25) + highlightEngine (22) + sendUtils (21) + timeFormat (20) + protocolParser (18) + useOperationStore (18) + lineFilter (16) + portSort (12) + logReplay (10) + protocolRenderer (8) + useSerialPorts (8) + protocolE2E (7) + diagLog (5) + DisconnectBanner (5) |
+| 后端 (cargo) | `cargo test --lib` | 48 tests | config (13) + logger (14) + diaglog (5) + commands (4) + serial (8, Windows FFI-free) + system (2) + lib (2) |
 | E2E (Playwright) | `npx playwright test` | 6 tests | Chromium smoke: app-root / TitleBar / Sidebar / MainDisplay / StatusBar / OperationPanel 渲染（Tauri mock via addInitScript） |
 | TypeScript | `npx tsc --noEmit` | 0 errors | 类型检查 |
 | Rust | `cargo check` | 0 errors, 0 warnings | 快速编译检查 |
@@ -111,7 +111,7 @@
 |---|------|------|
 | 50 | 首次启动（无串口、无 SIM） | Sidebar 显示引导卡："未检测到串口设备" + 模拟模式按钮 + 快速入门链接 |
 | 51 | 点击 TitleBar 关于按钮 | 弹出「关于 HyperCom」弹窗 |
-| 52 | 关于弹窗操作 | 版本号显示真实版本（如 `v0.3.2`，不再有 `v0.1.0`）；「GitHub 仓库」按钮可打开仓库链接；「开源许可证」按钮弹出依赖许可证表格；帮助按钮不存在（已被移除） |
+| 52 | 关于弹窗操作 | 版本号显示真实版本（如 `v0.3.3`，不再有 `v0.1.0`）；「GitHub 仓库」按钮可打开仓库链接；「开源许可证」按钮弹出依赖许可证表格；帮助按钮不存在（已被移除） |
 | 52a | 关于 → 诊断日志按钮 | 弹出诊断日志对话框，显示后端 `log` 与前端 `console` 统一落盘的内容（含时间戳/级别/来源行） |
 | 52b | 诊断日志对话框工具栏 | 级别过滤（全部/INFO/WARN/ERROR）生效；「自动刷新」开启时日志实时增长；手动滚动后不强制跳底 |
 | 52c | 诊断日志 → 导出 / 清空 | 导出弹出保存对话框并生成 .log 文件；清空后日志为空（含前端待刷缓冲一并清空） |

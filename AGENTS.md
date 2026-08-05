@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-HyperCom — modern serial-port debug tool. Rust owns I/O; React owns UI. State in 4 Zustand stores; 12 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 7 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → alert/auto-respond, per-port scoping via `portId`, wired in `useSerialReceive` — issue #3-1).
+HyperCom — modern serial-port debug tool. Rust owns I/O; React owns UI. State in 4 Zustand stores; 11 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 9 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → alert/auto-respond, per-port scoping via `portId`, wired in `useSerialReceive` — issue #3-1).
 
 ## STRUCTURE
 
@@ -27,7 +27,7 @@ hypercom/
 │   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
 │   ├── system.rs                 # cross-platform power mgmt (Win32 FFI / macOS caffeinate / Linux systemd-inhibit)
 │   ├── diaglog.rs                # 应用自身诊断日志（全局 log::Log，落盘 + 轮转 + 读/清/追加）
-│   ├── commands/                 # 8 domain files + mod.rs (CommandError enum + re-exports)
+│   ├── commands/                 # 9 domain files + mod.rs (CommandError enum + re-exports)
 │   ├── serial/mod.rs             # serialport + SIM:Loopback virtual port (505 lines)
 │   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
 │   └── config/mod.rs             # JSON config + 8 settings entity types + session.json + versioning + validation + path + backup
@@ -93,8 +93,8 @@ Backend:
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (7 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | holds all settings entities (6 Vec fields) + session.json + versioning + validation + path resolution + backup/recovery |
+| All Tauri commands (9 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | holds all settings entities (8 Vec fields) + session.json + versioning + validation + path resolution + backup/recovery |
 | `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `logger` / `config_manager` behind `std::sync::Mutex` |
 | `win32_power` / `macos_power` / `linux_power` | `src-tauri/src/system.rs` | mod | cross-platform `prevent_sleep` / `prevent_screen_off` |
 
@@ -285,15 +285,18 @@ pub enum CommandError {
 
 It implements `serde::Serialize` manually so the frontend receives the error string via `invoke`.
 
-Commands are split into 7 domain files under `src-tauri/src/commands/`:
+Commands are split into 9 domain files under `src-tauri/src/commands/`:
 
 | File | Domain |
 |------|--------|
-| `serial.rs` | open_port, close_port, send_data, get_port_status |
+| `serial.rs` | open_port, close_port, send_data, set_serial_params, set_flow_control, send_file, cancel_file_send, attempt_reconnect, run_port_tool, kill_port_tool |
 | `simulation.rs` | enable_simulation, disable_simulation |
 | `config.rs` | get_config, set_config, reset_config, update_session_snapshot, get_session_snapshot, get_config_path |
+| `diag.rs` | get_diag_log_path, read_diag_log, clear_diag_log, append_diag_log（应用自身诊断日志） |
 | `log.rs` | start_logging, stop_logging, save_log_as, export_terminal_log, get_log_files, set_log_split_size, set_log_split_enabled, set_log_filename_format, set_log_auto_save, set_log_encoding, open_path, open_log_directory, migrate_log_directory |
-| `storage.rs` | settings entities CRUD (command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs) — synchronous ConfigManager operations on config.json |
+| `storage.rs` | settings entities CRUD (command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs) + save_port_groups + save_port_meta — synchronous ConfigManager operations on config.json |
+| `file.rs` | write_text_file, read_text_file（配置导入导出） |
+| `popout.rs` | open_popout, close_popout, set_popout_always_on_top |
 | `system_cmds.rs` | get_system_status, prevent_sleep, prevent_screen_off |
 
 `mod.rs` re-exports all commands and defines `CommandError`.
@@ -331,7 +334,7 @@ scope: ui | backend | store | hooks | plans
 - **RX 管线（2026-08-04 重构）**：`serial:data` 事件不再「一事件一行」，而是进 `getRxPipeline()`（每 webview 一个模块单例）：`RxLineAssembler` 字节级切行（CR/LF/跨事件 CRLF/4KB 强制发射）→ 每端口队列 → rAF tick 每端口一次 `appendTerminalLines`（高频下把 store 更新压到每帧一次）→ 250ms 静默 flush 未终结尾部（时间戳取最后事件时间）。`sendToPort` 在 TX 回显前 `flushNow` 排空队列保收发时序；断线走 `pipeline.disconnect`；编码切换前必须 `flushAndReset`（旧编码冲刷尾部，`TerminalFilterBar` 已接线）。**不得**在 hook/弹窗 cleanup 里 `dispose()` 单例。`StreamingDecoderCache` 已删除。
 - **滚动锁定（2026-08-04 重设计）**：`scrollLocked` 只由显式意图写入——图钉按钮、`.terminal-jump-btn` 跳转按钮（滚动条两端：到顶解锁、到底锁定并点亮）、手势 settle（滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定）。`TerminalView` **没有 onScroll 处理器**——程序化滚动/挂载/测量滞后/内容增长产生的 scroll 事件不再碰锁定状态。搜索栏打开时抑制跟随，关闭时若锁定则滚回最新。
 - ConfigModal's rule/command editors save to config.json via `storageService` (which wraps config-backed commands). Load on mount via `useEffect`. Rule state lives in `useRuleStore`.
-- **config.json is the single source of truth for ALL settings entities** (2026-08 migration: the SQLite layer was removed entirely). The 7 entity types (`SendCommandSetEntry`, `HighlightRuleSetEntry`, `ProtocolTemplateEntry`, `TriggerRuleEntry`, `PortPresetEntry`, `PortToolConfigEntry`, `PortGroupEntry`, all `#[serde(rename_all = "camelCase")]`) live as 7 `Vec` fields on `AppConfig` (`send_command_sets`, `highlight_rule_sets`, `protocol_templates`, `trigger_rules`, `port_presets`, `port_tool_configs`, `port_groups`). `commands/storage.rs` CRUD is synchronous: lock `config_manager` → mutate the Vec via `get_config_mut()` → `save()` writes config.json atomically (tmp + rename + `.bak`). `port_groups` is a whole-list replace (`save_port_groups`, issue #2-3) — groups auto-save via a 500ms-debounced store subscription in `useAppInit`; there is no manual «save layout» button. The session snapshot was split out into a separate `session.json` (next to config.json) via `load_session_snapshot()`/`save_session_snapshot()`; `update_session_snapshot` writes session.json and does NOT trigger a config `.bak`. `LogManager` is initialized FROM `ConfigManager` in `AppState::new()`, and `set_config`/`reset_config` auto-sync log settings via `sync_log_manager_from_config()` — the frontend no longer syncs log settings (`syncLogSettingsToBackend` deleted). Log line prefix format is configurable (issue #3-4): `log_include_timestamp` / `log_include_direction` (`#[serde(default = "default_true")]` — old config.json without them reads back as `true`) control whether `PortLogWriter::write_line` emits `[timestamp] ` / `RX|TX ` prefixes; both off → bare data line. They lock at `create_writer` time (like encoding) and sync via `sync_log_manager_from_config`. The dead `background_image` config field was removed entirely (issue #3-5).
+- **config.json is the single source of truth for ALL settings entities** (2026-08 migration: the SQLite layer was removed entirely). The 8 entity types (`SendCommandSetEntry`, `HighlightRuleSetEntry`, `ProtocolTemplateEntry`, `TriggerRuleEntry`, `PortPresetEntry`, `PortToolConfigEntry`, `PortGroupEntry`, `PortMetaEntry`, all `#[serde(rename_all = "camelCase")]`) live as 8 `Vec` fields on `AppConfig` (`send_command_sets`, `highlight_rule_sets`, `protocol_templates`, `trigger_rules`, `port_presets`, `port_tool_configs`, `port_groups`, `port_meta`). `commands/storage.rs` CRUD is synchronous: lock `config_manager` → mutate the Vec via `get_config_mut()` → `save()` writes config.json atomically (tmp + rename + `.bak`). `port_groups` is a whole-list replace (`save_port_groups`, issue #2-3) — groups auto-save via a 500ms-debounced store subscription in `useAppInit`; there is no manual «save layout» button. `port_meta`（备注名/隐藏状态）同款整体替换（`save_port_meta`, issue #4-9）。The session snapshot was split out into a separate `session.json` (next to config.json) via `load_session_snapshot()`/`save_session_snapshot()`; `update_session_snapshot` writes session.json and does NOT trigger a config `.bak`. `LogManager` is initialized FROM `ConfigManager` in `AppState::new()`, and `set_config`/`reset_config` auto-sync log settings via `sync_log_manager_from_config()` — the frontend no longer syncs log settings (`syncLogSettingsToBackend` deleted). Log line prefix format is configurable (issue #3-4): `log_include_timestamp` / `log_include_direction` (`#[serde(default = "default_true")]` — old config.json without them reads back as `true`) control whether `PortLogWriter::write_line` emits `[timestamp] ` / `RX|TX ` prefixes; both off → bare data line. They lock at `create_writer` time (like encoding) and sync via `sync_log_manager_from_config`. The dead `background_image` config field was removed entirely (issue #3-5).
 - ConfigModal pages (GeneralSettings, LogSettings, DisplaySettings, BackupSettings) use **per-field selectors** instead of subscribing to the whole config — this prevents unnecessary re-renders when unrelated config fields change.
 - SIM:Loopback virtual port is available when `enable_simulation` is called (flask icon in sidebar toolbar)
 - CSS is split across `src/styles/` (10 component CSS files + `base.css`). `src/styles.css` is just an `@import` entry point, not the main stylesheet.
