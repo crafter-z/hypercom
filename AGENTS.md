@@ -14,22 +14,23 @@ hypercom/
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
 │   ├── i18n.ts                   # i18next + react-i18next, 266 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
-│   ├── hooks/                    # 12 hooks in individual files + barrel index.ts + disconnectTracking.ts
+│   ├── hooks/                    # 11 hooks in individual files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
 │   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix; NO display state fields)
 │   │   ├── useTerminalStore.ts   # terminal buffer + appendTerminalLine + setTerminalEncoding
 │   │   └── useRuleStore.ts       # highlight + send-command + trigger rule sets + CRUD
-│   ├── utils/                    # highlightEngine / protocolParser / triggerEngine / hexUtils / rxAssembler / rxPipeline + their tests
+│   ├── utils/                    # highlightEngine / protocolParser / triggerEngine / hexUtils / rxAssembler / rxPipeline / diagLog + their tests
 │   ├── types/index.ts            # shared TS types
 │   └── components/               # MainDisplay / ConfigModal / OperationPanel / Sidebar / TitleBar / StatusBar / shared
 ├── src-tauri/src/                # Rust backend
 │   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
 │   ├── system.rs                 # cross-platform power mgmt (Win32 FFI / macOS caffeinate / Linux systemd-inhibit)
-│   ├── commands/                 # 7 domain files + mod.rs (CommandError enum + re-exports)
+│   ├── diaglog.rs                # 应用自身诊断日志（全局 log::Log，落盘 + 轮转 + 读/清/追加）
+│   ├── commands/                 # 8 domain files + mod.rs (CommandError enum + re-exports)
 │   ├── serial/mod.rs             # serialport + SIM:Loopback virtual port (505 lines)
 │   ├── logger/mod.rs             # BufWriter + rotation + path templating (501 lines)
-│   └── config/mod.rs             # JSON config + 7 settings entity types + session.json + versioning + validation + path + backup
+│   └── config/mod.rs             # JSON config + 8 settings entity types + session.json + versioning + validation + path + backup
 └── plans/                        # design docs (see "Key design reference" below)
 ```
 
@@ -40,7 +41,8 @@ hypercom/
 | Add frontend state field | `src/stores/use{App,Operation,Terminal,Rule}Store.ts` | pick correct store only; god store is deprecated |
 | Add Tauri command | `src-tauri/src/commands/<domain>.rs` + register in `lib.rs` | return `Result<T, CommandError>`, NOT `String` |
 | Cross `.await` lock | extract + clone + drop the `MutexGuard` first | see pattern in `commands/log.rs` |
-| Add serial hook | `src/hooks/<hookName>.ts` + export from `index.ts` | follow 10-hook lifecycle; do not revive `useSerialData`-style |
+| Add serial hook | `src/hooks/<hookName>.ts` + export from `index.ts` | follow 11-hook lifecycle; do not revive `useSerialData`-style |
+| 应用自身诊断日志 | `src-tauri/src/diaglog.rs` + `commands/diag.rs` + `src/utils/diagLog.ts` + `shared/DiagnosticLogDialog.tsx` | 后端 `log::*` + 前端 `console.*`（`setupDiagLogCapture` 拦截转发）统一落盘 `%APPDATA%/hypercom/diag/hypercom-debug.log`（512KB 轮转保留 3 份）；查看入口在「关于 → 诊断日志」，开关 `config.diagnosticLogEnabled` |
 | Split pane recursively | `useAppStore.splitPane` action via tree helpers | NO flat `state.panes` anywhere |
 | Pane tree traversal | module-top exports in `useAppStore.ts` (`findLeafById` … `countLeaves`) | do not hand-roll tree walks |
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |

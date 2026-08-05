@@ -52,7 +52,8 @@
 - ✅ **字段校验** — `validate_and_clamp()` 强制边界
 - 💾 **备份/恢复** — `.bak` 自动备份，损坏时回退恢复
 - 🔋 **防休眠** — 跨平台（Win32 / macOS `caffeinate` / Linux `systemd-inhibit`）
-- ⚡ **条件触发器** — 接收匹配（包含/精确/正则/HEX）→ 自动回复 / 弹窗告警 / 书签标记
+- ⚡ **条件触发器** — 接收匹配（包含/精确/正则/HEX）→ 自动回复 / 弹窗告警
+- 🐛 **诊断日志** — 前后端 `log`/`console` 统一落盘（512KB 轮转），「关于 → 诊断日志」查看/过滤/导出/清空，可配置开关
 - 📌 **窗口置顶** / ℹ️ **关于** / 📤 **配置导出导入** / ⭐ **端口预设** / 🧰 **系统托盘**
 
 ---
@@ -126,8 +127,8 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (410 cases / 19 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (42 cases)
+npm run test:run                                       # vitest (415 cases / 20 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (48 cases)
 ```
 
 ---
