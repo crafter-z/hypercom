@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE — HyperCom
 
-**Generated:** 2026-08-02 · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
+**Generated:** 2026-08-06 · **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
 
 ## OVERVIEW
 
@@ -20,9 +20,9 @@ hypercom/
 │   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix; NO display state fields)
 │   │   ├── useTerminalStore.ts   # terminal buffer + appendTerminalLine + setTerminalEncoding
 │   │   └── useRuleStore.ts       # highlight + send-command + trigger rule sets + CRUD
-│   ├── utils/                    # highlightEngine / protocolParser / triggerEngine / hexUtils / rxAssembler / rxPipeline / diagLog + their tests
+│   ├── utils/                    # highlightEngine / protocolParser / triggerEngine / hexUtils / rxAssembler / rxPipeline / diagLog / followLogic / sendStrip / textSend / sendGuard / configMerge / groupTool + their tests
 │   ├── types/index.ts            # shared TS types
-│   └── components/               # MainDisplay / ConfigModal / OperationPanel / Sidebar / TitleBar / StatusBar / shared
+│   └── components/               # MainDisplay / ConfigModal / OperationPanel / Sidebar / TitleBar / StatusBar(含 NotificationCenter) / Popout / shared(含 GroupToolDialog)
 ├── src-tauri/src/                # Rust backend
 │   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
 │   ├── system.rs                 # cross-platform power mgmt (Win32 FFI / macOS caffeinate / Linux systemd-inhibit)
@@ -42,21 +42,25 @@ hypercom/
 | Add Tauri command | `src-tauri/src/commands/<domain>.rs` + register in `lib.rs` | return `Result<T, CommandError>`, NOT `String` |
 | Cross `.await` lock | extract + clone + drop the `MutexGuard` first | see pattern in `commands/log.rs` |
 | Add serial hook | `src/hooks/<hookName>.ts` + export from `index.ts` | follow 11-hook lifecycle; do not revive `useSerialData`-style |
-| 应用自身诊断日志 | `src-tauri/src/diaglog.rs` + `commands/diag.rs` + `src/utils/diagLog.ts` + `shared/DiagnosticLogDialog.tsx` | 后端 `log::*` + 前端 `console.*`（`setupDiagLogCapture` 拦截转发）统一落盘 `%APPDATA%/hypercom/diag/hypercom-debug.log`（512KB 轮转保留 3 份）；查看入口在「关于 → 诊断日志」，开关 `config.diagnosticLogEnabled` |
+| 应用自身诊断日志 | `src-tauri/src/diaglog.rs` + `commands/diag.rs` + `src/utils/diagLog.ts` + `shared/DiagnosticLogDialog.tsx` | 后端 `log::*` + 前端 `console.*`（`setupDiagLogCapture` 拦截转发）统一落盘 `%APPDATA%/hypercom/diag/hypercom-debug.log`（512KB 轮转保留 3 份）；查看入口在「关于 → 诊断日志」，开关 `config.diagLogEnabled`（Rust 序列化名，前端线名已对齐，issue #5-2） |
 | Split pane recursively | `useAppStore.splitPane` action via tree helpers | NO flat `state.panes` anywhere |
 | Pane tree traversal | module-top exports in `useAppStore.ts` (`findLeafById` … `countLeaves`) | do not hand-roll tree walks |
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
 | ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; persisted via config.json (`storageService` wraps config-backed commands) |
 | Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState`; timing via per-command `delay` + set `loopDelay` only (no global interval) |
+| 命令发送区 / 快捷发送条 / 命令面板 | `OperationPanel/SendSection.tsx` + `Popout/QuickSendPanel.tsx` + `hooks/useSerialSend.ts` | 快捷条 pill 显示名称+内容（`op-quick-cmd-name`/`op-quick-cmd-content`）、宽度自适应（ResizeObserver + `utils/sendStrip.ts` `computeFitCount`）、首槽固定「打开命令面板」按钮（`op-quick-panel-btn`，PanelRightOpen，`quickSend.openPanel`）；`quickSendInlineCount` 仅 0=隐藏条；QuickSendPanel 双模式（列表+行内编辑 / 文本逐行发送，`usePanelCyclicSend` 4 种运行方式）；`sendToPort` 经 `utils/sendGuard.ts` 守卫未打开端口 |
 | Cross-platform power | `src-tauri/src/system.rs` | Win32 `SetThreadExecutionState` / macOS `caffeinate` / Linux `systemd-inhibit` |
 | Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` + `setTerminalEncoding` | RX 切行/解码/批写统一走 `RxPipeline`（每端口按 label 缓存 decoder，`ignoreBOM:true`）；切换编码 live re-decode |
 | RX 高频接收管线 | `src/utils/rxAssembler.ts` + `rxPipeline.ts` | 字节级行聚合（CR/LF/跨事件 CRLF/4KB 强制发射）+ rAF 批写 + 250ms 静默 flush（时间戳=最后事件时间）；`getRxPipeline()` 每 webview 一个单例，cleanup 不得 dispose |
-| 滚动锁定 / 快捷跳转 | `TerminalView.tsx` 显式意图状态机 + `.terminal-jump-btn` | `scrollLocked` 仅由图钉按钮/跳转按钮/手势 settle 写入，**无 onScroll 隐式解锁**；跳转按钮钉在滚动条两端（到顶解锁、到底锁定跟随） |
+| 日志保存子目录 / RX 日志行组装 | `logger/mod.rs` + `config/mod.rs` `log_subdir_mode` + `LogSettings.tsx` | `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 date）→ `create_writer_with_encoding` 路径 join（create_dir_all）+ `collect_log_files` 递归 list_files（MAX_LIST_DEPTH=16）；RX 日志经 `LogManager::write_rx` + `LogLineAssembler` 字节级组行（镜像前端 rxAssembler，250ms 陈旧尾 flush），不再按读取块一行（issue #5-9/10） |
+| 滚动锁定 / 快捷跳转 | `TerminalView.tsx` + `utils/followLogic.ts` + `.terminal-jump-btn` | `scrollLocked` 仅由图钉按钮/跳转按钮/手势 settle 写入，**无 onScroll 隐式解锁**；跟随路径 `scrollToBottom` 走双 rAF 原始 `scrollTop = computePinTarget(scrollHeight, clientHeight)` 测量钉底（**不用** `virtualizer.scrollToIndex`——避免 @tanstack 10 次重试循环），settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`computePinTarget`/`becameLocked`/`shouldFollow`；到顶/搜索跳转这类用户一次性滚动才走 scrollToIndex；跳转按钮钉在滚动条两端（到顶解锁、到底锁定跟随） |
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `hooks/disconnectTracking.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
-| Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond; per-port via `portId` (empty=all); persisted in config.json; **wired in `useSerialReceive`** (issue #3-1) |
+| Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` + `StatusBar/NotificationCenter.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond; per-port via `portId` (empty=all); **wired in `useSerialReceive`** (issue #3-1); alert 是 sticky toast 显示 `rule.actionContent`（`durationMs:0` 不自动关闭，标题带端口/规则上下文）；规则 300ms 防抖逐条自动落盘（`savedSnapshotRef` diff，issue #5-3） |
+| 通知中心 / toast | `src/stores/useToastStore.ts` + `src/components/StatusBar/NotificationCenter.tsx` | `durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列不丢弃；`clearAll()` / `setCenterOpen` + `centerOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`，外点/Escape 关闭，样式 `notification-center.css` |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
 | External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
+| 分组整组执行外部工具 | `Sidebar.tsx` 分组右键菜单 + `shared/GroupToolDialog.tsx` + `usePortToolActions.runToolForGroup` | 分组菜单 `sidebar.group.contextMenu.runTool` → 对话框列出配置/未配置端口（Cancel / Configure Missing 跳工具设置页 / Run Configured Only）；严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；顺序 100ms 节流运行（跳过运行中端口） |
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 280px (issue #2-6), clamp [160,600] |
 | 标签页批量开关串口 / 标签外部工具菜单 | `TabBar.tsx` 右键菜单 + `Pane.tsx` 接线 + `usePortToolActions` | 「打开/断开所有标签页」遍历全局 tabs 逐个 open/close（100ms 节流）；工具三入口与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key |
 | 串口分组持久化 | `config/mod.rs` `port_groups` + `commands/storage.rs` `save_port_groups` + `useAppInit` | 分组是第 7 类 config 实体；启动经 `get_config` 恢复并回填 `ports.groupId`；groups 变更 500ms 防抖自动保存（无手动「保存布局」按钮） |
@@ -69,6 +73,8 @@ hypercom/
 | Config validation | `config/mod.rs` `validate_and_clamp()` | runs on `set_config` to enforce bounds |
 | Config backup / recovery | `config/mod.rs` `save()` writes `.bak` / `new()` falls back to `.bak` | corrupt JSON auto-recovered |
 | Session snapshot update | `update_session_snapshot` dedicated command | writes separate `session.json` (not config.json); avoids full config save + `.bak` churn |
+| 状态栏内存显示 | `commands/system_cmds.rs` `get_system_status` | 系统级内存：`system.refresh_memory()` + `system.used_memory()/1048576`（旧实现取应用自身进程 RSS，webview 内存在独立进程、读数恒平）；`memory_used_mb`/`load_status` 纯函数（issue #5-5） |
+| 配置持久化审计（全量保存不丢实体） | `utils/configMerge.ts` `mergeLiveRuleEntities` + `ConfigModal.tsx` / `DiagnosticLogDialog.tsx` | store.config 实体数组是启动快照、从不跟随 `useRuleStore`——全量 `set_config` 前必须 `mergeLiveRuleEntities(config, useRuleStore.getState())` 合并 5 个活实体（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs）；`portPresets` 无 store 镜像（仅 store.config + 设置页本地态）；`portGroups`/`portMeta` 已由 useAppInit 同步（#4-10 模式，issue #5-2） |
 
 ## CODE MAP
 
@@ -81,7 +87,7 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` (单行：TX/工具/回放) + `appendTerminalLines` (RX 批写) + `setTerminalEncoding` (re-decode on switch) |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
-| 11 hooks: `useSerialPorts` / `useSerialConnection` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useToolOutput` / `usePopoutBridge` / `usePortToolActions` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md`; RX → `RxPipeline` 批写，TX 回显前 `flushNow` 排空队列保时序；`useAppInit` 还负责分组/端口元数据（备注名/隐藏）恢复 + 防抖自动保存（issue #2-3 / #4-9/10）；`usePortToolActions` 是侧边栏/标签页外部工具菜单的共享动作源（issue #2-2） |
+| 11 hooks: `useSerialPorts` / `useSerialConnection` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useToolOutput` / `usePopoutBridge` / `usePortToolActions` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md`; RX → `RxPipeline` 批写，TX 回显前 `flushNow` 排空队列保时序；`useAppInit` 还负责分组/端口元数据（备注名/隐藏）恢复 + 防抖自动保存（issue #2-3 / #4-9/10）；`usePortToolActions` 是侧边栏/标签页外部工具菜单的共享动作源（issue #2-2），现还返回 `runToolForGroup`（分组整组执行，issue #5-7） |
 | `RxLineAssembler` / `RxPipeline` / `getRxPipeline` | `src/utils/rxAssembler.ts`, `src/utils/rxPipeline.ts` | RX 管线 | 字节级行聚合 + rAF 批写 + 静默/断线/编码切换 flush；主窗与弹出窗各自模块单例 |
 | `ReassemblerSegment` | `src/utils/protocolParser.ts` | type | `ProtocolFrameReassembler.feed()` 返回有序段数组（frame/raw 按流顺序），不再是 `{frames, flushedBytes}` |
 | Pop-out intent bridge | `src/hooks/usePopoutBridge.ts` + `popoutEventService` in `src/services/tauri.ts` | pop-outs are separate webviews: exchange intents (`popout:send-command` / `popout:open-config` / `popout:request-sync`) + refresh signals (`command-sets:changed` / `active-tab:changed`), never shared mutable state; sends route through module-level `sendToPort` so TX echo/traffic/history work |
@@ -156,7 +162,7 @@ const openTab = useAppStore(s => s.openTab);
 
 Operation fields have **NO `op` prefix**. They were renamed from `opBaudRate` to `baudRate`, `opDataBits` to `dataBits`, etc.
 
-**Note**: `sendOnEnter` and `quickSendInlineCount` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`. The cyclic-send repeat count (`loopRepeatCount`) is also NOT here — it moved to per-command-set `SendCommandSet.repeatCount` (config.json), read by `useCyclicSend` from the active set.
+**Note**: `sendOnEnter` and `quickSendInlineCount` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. `quickSendInlineCount` 自 issue #5-4 起仅语义为 0=隐藏快捷条，>0 时可见条数宽度自适应（`computeFitCount`）。Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`. The cyclic-send repeat count (`loopRepeatCount`) is also NOT here — it moved to per-command-set `SendCommandSet.repeatCount` (config.json), read by `useCyclicSend` from the active set.
 
 ```tsx
 const baudRate = useOperationStore(s => s.baudRate);
@@ -346,12 +352,20 @@ scope: ui | backend | store | hooks | plans
 - MainDisplay split into: `MainDisplay.tsx`, `Pane.tsx`, `TabBar.tsx`, `TerminalView.tsx`, `TerminalFilterBar.tsx`, `ResizeHandle.tsx`.
 - Sidebar split into: `Sidebar.tsx`, `AliasDialog.tsx`.
 - Per-tab display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) lives in `useTerminalStore`, NOT in `useOperationStore`. Display controls (TerminalFilterBar, encoding select) must write via `useTerminalStore.getState().setTerminalConfig(portId, ...)` or `setTerminalEncoding(portId, encoding)`. Never reintroduce global display fields in `useOperationStore`.
-- `src/utils/sendUtils.ts` provides `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` / `computeByteCount` / `parseHexBytes` / `getLineEndingBytes` for HEX send/parse (pure, unit-tested).
+- `src/utils/sendUtils.ts` provides `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` / `computeByteCount` / `parseHexBytes` / `getLineEndingBytes` / `LINE_ENDING_VALUES` / `lineEndingLabelKey` for HEX send/parse (pure, unit-tested). issue #5-6 起所有行结束符下拉统一从 `LINE_ENDING_VALUES` 取（见 JSX 转义 gotcha）。
+
+- **JSX 属性字符串不转义（issue #5-6）**：`<option value="\r\n">` 里 `\r\n` 不会按转义处理，运行时值是 6 字符字面量 `\\r\\n`，与域值 4 字符 `\r\n` 不等 → `formatLineEndingHex`/`getLineEndingBytes` 落到默认分支，行尾提示/字节数/发送字节全错。行结束符选项必须用表达式字面量 `value={'\r\n'}`，label 走 `lineEndingLabelKey(v, ns)`。
+- **发送守卫（issue #5-4）**：`sendToPort` 非静默发送前检查 `utils/sendGuard.ts` `isSendablePort`——端口缺失/断开/连接中/错误时推 `sendSection.portClosedWarning` toast 并返回 0；循环发送与触发自动回复的静默发送（`silent=true`）静默返回 0 不打扰用户。新增发送逻辑若绕过 `sendToPort` 直连后端，会失去该守卫与 TX 回显/历史管线。
+- **config 实体快照陷阱（issue #5-2）**：`useAppStore.config` 的实体数组（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs/portPresets）是**启动快照**，不会自动跟随 `useRuleStore`。任何全量 `set_config`/`saveConfig` 前必须 `mergeLiveRuleEntities(config, useRuleStore.getState())` 合并活实体，否则用陈旧数据整体覆盖 config.json（曾清空用户编辑）。`portPresets` 无 store 镜像（仅 store.config + 设置页本地态）；`portGroups`/`portMeta` 由 useAppInit 防抖同步（#4-10 模式）。ConfigModal/DiagnosticLogDialog 已接线，新增全量保存点照抄。
+- **滚动锁定跟随（issue #5-1）**：跟随路径 `scrollToBottom` 不再用 `virtualizer.scrollToIndex(count-1, align:'end')`（@tanstack 对未测量尾行走 10 次重试，刷 "Failed to scroll to index" 日志）——改双 rAF 原始 `scrollTop = computePinTarget(scrollHeight, clientHeight)` 测量钉底（gestureActiveRef 守卫），`countRef` 已删除；settle/抑制/锁定迁移判断全在 `utils/followLogic.ts` 纯函数；到顶/搜索跳转这类用户一次性滚动仍走 scrollToIndex。
+- **通知中心（issue #5-3）**：`durationMs === 0` 的 toast 是粘滞的（Toast.tsx 不启动自动关闭计时）；超过 `MAX_VISIBLE=5` 的 toast 进 `stashed` 队列（不是丢弃），可经 NotificationCenter 查看/逐条关闭/清空。
+- **触发规则自动持久化（issue #5-3）**：TriggerSettings 编辑触发规则 300ms 防抖逐条保存（`savedSnapshotRef` 与当前 rules diff），关闭弹窗时 flush 窗口内未保存编辑；新增/修改规则应走 `storageService.saveTriggerRule`，勿绕过。
+- **日志 RX 组装与子目录（issue #5-9/10）**：`logger/mod.rs` 现含 `LogLineAssembler`（字节级 CR/LF/CRLF 合并/pendingCR/4096 强制 flush/take_tail，镜像前端 rxAssembler）+ `LogManager::write_rx`（RX 方向组行落盘，TX 保持直写 `write`）+ `subdir_mode`（`none`/`date`/`port`，默认 `date`，非法值 clamp 回 date，路径 join 处 create_dir_all，`collect_log_files` 递归 MAX_LIST_DEPTH=16）。改日志路径/分片/子目录相关代码要同时看这里，`LogManager` 现含 `write_rx`/`maybe_split_writer`/`periodic_flush` 私有助手。
+- **状态栏内存（issue #5-5）**：`get_system_status` 的内存是**系统级**（`system.refresh_memory()` + `system.used_memory()/1048576`），不是应用自身 RSS——webview 内存独立进程，进程级读数恒平。别退回 `process(pid).memory()`。
 
 ## Pane tree (2026-07 refactor)
 
 `panes: SplitPane[]` 平铺数组已替换为 `paneTree: PaneNode`（单根递归树）。
-
 ```ts
 type PaneNode = LeafPane | BranchPane;
 interface LeafPane   { id: string; type: 'leaf';   tabIds: string[];    size: number; }
