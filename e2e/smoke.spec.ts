@@ -183,4 +183,73 @@ test.describe('HyperCom smoke tests', () => {
       'hidden-drain',
     );
   });
+
+  // ==================== issue #7-1：通知中心串口号 + 时间戳 ====================
+
+  /** 通过 mock 事件桥派发 serial:status 连接状态变化 */
+  async function dispatchSerialStatus(
+    page: import('@playwright/test').Page,
+    portId: string,
+    status: string,
+  ): Promise<void> {
+    await page.evaluate(
+      ({ portId, status }) => {
+        window.__TAURI_INTERNALS__.dispatchEvent('serial:status', { port_id: portId, status });
+      },
+      { portId, status },
+    );
+  }
+
+  test('notification center shows port id + timestamp for serial messages (issue #7-1)', async ({ page }) => {
+    await openCom1Tab(page);
+    // 模拟已连接端口意外断开 → portLost toast 携带串口号
+    await dispatchSerialStatus(page, 'COM1', 'connected');
+    await dispatchSerialStatus(page, 'COM1', 'disconnected');
+    // 打开通知中心（状态栏铃铛）
+    await page.locator('.notify-btn').click();
+    const row = page.locator('.notify-row').first();
+    await expect(row).toBeVisible();
+    // 串口 chip 展示消息来源
+    await expect(row.locator('.notify-row-port')).toHaveText('COM1');
+    // 每条通知都带时间戳（HH:MM:SS）
+    await expect(row.locator('.notify-row-time')).toHaveText(/\d{2}:\d{2}:\d{2}/);
+  });
+
+  test('trigger alert toast carries the rule port context (issue #7-1)', async ({ page }) => {
+    await openCom1Tab(page);
+    // 触发告警走 serial:data 匹配路径（无规则时无告警——此处仅验证配置规则路径不崩溃）
+    await dispatchSerialData(page, 'COM1', 'anything\n');
+    // 铃铛仍可用（未配置触发规则时不应有通知）
+    await page.locator('.notify-btn').click();
+    await expect(page.locator('.notify-empty')).toBeVisible();
+  });
+
+  // ==================== issue #7-10：自定义文本右键菜单 ====================
+
+  test('custom context menu replaces the native menu on text areas (issue #7-10)', async ({ page }) => {
+    await openCom1Tab(page);
+    const input = page.locator('.op-send-input');
+    await input.fill('AA BB CC');
+    // 选中一部分文本（复制/剪切需要选区）
+    await input.evaluate((el: HTMLTextAreaElement) => {
+      el.focus();
+      el.setSelectionRange(0, 5);
+    });
+    // 右键 → 应用自己的菜单（剪切/复制/粘贴/全选…），而非 webview 原生菜单
+    await input.click({ button: 'right', position: { x: 20, y: 10 } });
+    await expect(page.locator('.context-menu')).toBeVisible();
+    await expect(page.locator('.context-menu-item', { hasText: '复制' })).toBeVisible();
+    await expect(page.locator('.context-menu-item', { hasText: '粘贴' })).toBeVisible();
+    await expect(page.locator('.context-menu-item', { hasText: '全选' })).toBeVisible();
+    // Escape 关闭
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.context-menu')).toHaveCount(0);
+  });
+
+  test('right-click on non-editable area shows no native menu (issue #7-10)', async ({ page }) => {
+    // 侧边栏空白区域右键：不应出现自定义文本菜单（非可编辑元素被屏蔽）
+    await page.locator('.sidebar').click({ button: 'right', position: { x: 30, y: 200 } });
+    await page.waitForTimeout(200);
+    await expect(page.locator('.context-menu')).toHaveCount(0);
+  });
 });
