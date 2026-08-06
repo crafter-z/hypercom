@@ -10,12 +10,14 @@ v0.4.1 (issue #6): 双层内存预算（`memoryLimitMb` 整个应用含 webview 
 
 v0.4.2 (issue #6-10)：TX 读写句柄 try_clone 拆分（`SerialPortHandle` 拆为 read_port/write_port 双 `Arc<Mutex<..>>`，读线程独占读句柄、发送独占写句柄，TX 阻塞不再饿死 RX）；热路径摘除无界 `flush()`（Windows = FlushFileBuffers，无超时、受流控约束）+ `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s）；发送两段式（全局锁内只取写句柄克隆，锁外只持 per-port 写锁写，不再持全局 serial_manager 锁执行写）；前端 RX 管线 visibility-aware 排空（document.hidden 时 rAF 停摆 → setTimeout 兜底，visibilitychange 重排）+ 每端口队列上限 `maxQueuedLines`（默认 10000，超限丢最旧）。
 
+v0.4.3 (issue #7 UI 缺陷修复十项)：通知中心——`ToastItem` 新增可选 `portId`（触发告警/断线/发送目标关闭/重连失败均携带），通知行显示串口 chip + HH:MM:SS 时间戳；快捷发送条「打开命令面板」按钮改**按压按钮样式**（accent 填充 + 文字标签 `quickSend.openPanelShort`，min-height 34px 与两行药丸对齐）；发送提示前缀 `sendPrefix` 默认留空（功能保留，DisplaySettings 可配）；快捷发送面板目标串口下拉去掉 `· REAL/VIRTUAL` 后缀，底栏「发送到」提示灯跟随真实状态（订阅 `serial:status` + 新 `port-statuses:sync` 对表事件：绿=连接呼吸/灰=断开）；发送区命令集选择/循环/编辑三控件紧跟「发送命令」标题（去 `margin-left:auto`）；设置界面移除「串口参数预设」（操作面板参数区已有完整管理）；去「一键」文案；分组整组执行外部工具改 **Promise.all 并行**；新 `TextEditContextMenu`/`useTextEditContextMenu`——输入框/文本域/可编辑区右键显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选，`document.execCommand` + 选区快照恢复），App 根 + PopoutShell 各挂一次，取代 App.tsx 旧 contextmenu effect。
+
 ## STRUCTURE
 
 ```
 hypercom/
 ├── src/                          # React frontend
-│   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global right-click disable)
+│   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
 │   ├── i18n.ts                   # i18next + react-i18next, 266 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
 │   ├── hooks/                    # 11 hooks in individual files + barrel index.ts + disconnectTracking.ts
@@ -52,7 +54,7 @@ hypercom/
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
 | ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; persisted via config.json (`storageService` wraps config-backed commands) |
 | Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState`; timing via per-command `delay` + set `loopDelay` only (no global interval) |
-| 命令发送区 / 快捷发送条 / 命令面板 | `OperationPanel/SendSection.tsx` + `Popout/QuickSendPanel.tsx` + `hooks/useSerialSend.ts` | 快捷条 pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（ResizeObserver + `utils/sendStrip.ts` `computeFitCount`）、首槽固定「打开命令面板」按钮（`op-quick-panel-btn`，PanelRightOpen，`quickSend.openPanel`）；`quickSendInlineCount` 仅 0=隐藏条；QuickSendPanel 双模式（列表+行内编辑 / 文本逐行发送，`usePanelCyclicSend` 4 种运行方式，文本模式另含「执行当前行并移至下一行」`runCurrentLineAndAdvance`/`moveCursorToNextLine`，issue #6-3）；`sendToPort` 经 `utils/sendGuard.ts` 守卫未打开端口 |
+| 命令发送区 / 快捷发送条 / 命令面板 | `OperationPanel/SendSection.tsx` + `Popout/QuickSendPanel.tsx` + `hooks/useSerialSend.ts` | 快捷条 pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（ResizeObserver + `utils/sendStrip.ts` `computeFitCount`）、首槽固定「打开命令面板」按钮（`op-quick-panel-btn`：**accent 填充按压按钮** + 文字标签 `quickSend.openPanelShort`，min-height 34px 两行药丸高度，issue #7-2）；`quickSendInlineCount` 仅 0=隐藏条；QuickSendPanel 双模式（列表+行内编辑 / 文本逐行发送，`usePanelCyclicSend` 4 种运行方式，文本模式另含「执行当前行并移至下一行」`runCurrentLineAndAdvance`/`moveCursorToNextLine`，issue #6-3）；目标串口下拉只显示串口号（去 `· REAL/VIRTUAL` 后缀，issue #7-4）；底栏「发送到」提示灯跟随真实连接状态（订阅 `serial:status` + `port-statuses:sync` 对表：绿=连接呼吸/灰=断开，issue #7-5）；`sendToPort` 经 `utils/sendGuard.ts` 守卫未打开端口 |
 | Cross-platform power | `src-tauri/src/system.rs` | Win32 `SetThreadExecutionState` / macOS `caffeinate` / Linux `systemd-inhibit` |
 | Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` + `setTerminalEncoding` | RX 切行/解码/批写统一走 `RxPipeline`（每端口按 label 缓存 decoder，`ignoreBOM:true`）；切换编码 live re-decode |
 | RX 高频接收管线 | `src/utils/rxAssembler.ts` + `rxPipeline.ts` | 字节级行聚合（CR/LF/跨事件 CRLF/4KB 强制发射）+ rAF 批写 + 250ms 静默 flush（时间戳=最后事件时间）+ **写量限制** `maxLinesPerTick`（默认 2000：每端口每帧最多写 N 行超出顺延；`flushNow` 同步最多排空 N 行其余 rAF 续写，issue #6-2）+ **visibility-aware 排空**（issue #6-10）：document.hidden 时 rAF 停摆 → setTimeout 兜底 + visibilitychange 重排；每端口队列上限 `maxQueuedLines`（默认 10000，超限丢最旧）；`getRxPipeline()` 每 webview 一个单例，cleanup 不得 dispose |
@@ -61,11 +63,11 @@ hypercom/
 | 滚动锁定 / 快捷跳转 | `TerminalView.tsx` + `utils/followLogic.ts` + `.terminal-jump-btn` | `scrollLocked` 仅由图钉按钮/跳转按钮/手势 settle 写入，**无 onScroll 隐式解锁**；跟随路径 `scrollToBottom` 走双 rAF 原始 `scrollTop = computePinTarget(scrollHeight, clientHeight)` 测量钉底（**不用** `virtualizer.scrollToIndex`——避免 @tanstack 10 次重试循环），settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`computePinTarget`/`becameLocked`/`shouldFollow`；到顶/搜索跳转这类用户一次性滚动才走 scrollToIndex；跳转按钮钉在滚动条两端（到顶解锁、到底锁定跟随） |
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `hooks/disconnectTracking.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
 | Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` + `StatusBar/NotificationCenter.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond; per-port via `portId` (empty=all); **wired in `useSerialReceive`** (issue #3-1); alert 是 sticky toast 显示 `rule.actionContent`（`durationMs:0` 不自动关闭，标题带端口/规则上下文）；规则 300ms 防抖逐条自动落盘（`savedSnapshotRef` diff，issue #5-3） |
-| 通知中心 / toast | `src/stores/useToastStore.ts` + `src/components/StatusBar/NotificationCenter.tsx` | `durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列不丢弃；`clearAll()` / `setCenterOpen` + `centerOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`，外点/Escape 关闭，样式 `notification-center.css` |
+| 通知中心 / toast | `src/stores/useToastStore.ts` + `src/components/StatusBar/NotificationCenter.tsx` | `durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列不丢弃；`clearAll()` / `setCenterOpen` + `centerOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`，外点/Escape 关闭，样式 `notification-center.css`；`ToastItem.portId?`（issue #7-1）——串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行显示 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳 |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
 | External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
-| 分组整组执行外部工具 | `Sidebar.tsx` 分组右键菜单 + `shared/GroupToolDialog.tsx` + `usePortToolActions.runToolForGroup` | 分组菜单 `sidebar.group.contextMenu.runTool` → 对话框列出配置/未配置端口（Cancel / Configure Missing 跳工具设置页 / Run Configured Only）；严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；顺序 100ms 节流运行（跳过运行中端口） |
+| 分组整组执行外部工具 | `Sidebar.tsx` 分组右键菜单 + `shared/GroupToolDialog.tsx` + `usePortToolActions.runToolForGroup` | 分组菜单 `sidebar.group.contextMenu.runTool` → 对话框列出配置/未配置端口（Cancel / Configure Missing 跳工具设置页 / Run Configured Only）；严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（issue #7-9，跳过运行中端口，单端口失败不中断整组） |
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 280px (issue #2-6), clamp [160,600] |
 | 标签页批量开关串口 / 标签外部工具菜单 | `TabBar.tsx` 右键菜单 + `Pane.tsx` 接线 + `usePortToolActions` | 「打开/断开所有标签页」遍历全局 tabs 逐个 open/close（100ms 节流）；工具三入口与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key |
 | 串口分组持久化 | `config/mod.rs` `port_groups` + `commands/storage.rs` `save_port_groups` + `useAppInit` | 分组是第 7 类 config 实体；启动经 `get_config` 恢复并回填 `ports.groupId`；groups 变更 500ms 防抖自动保存（无手动「保存布局」按钮） |
@@ -82,7 +84,8 @@ hypercom/
 | Session snapshot update | `update_session_snapshot` dedicated command | writes separate `session.json` (not config.json); avoids full config save + `.bak` churn |
 | 状态栏内存显示 | `commands/system_cmds.rs` `get_system_status` | **应用进程树级内存**：本进程+全部后代进程（含 WebView2/Chromium 子进程）RSS 之和（`collect_app_pids` 纯函数 + `refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`，issue #6-6）；CPU 仍系统级；`memory_used_mb`/`load_status` 纯函数（issue #5-5 / #6-6） |
 | ConfigModal 框选不关闭 | `ConfigModal.tsx` | overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭（框选文字松手界外不再误关，issue #6-8） |
-| 通知中心面板 / 快捷发送 pill 样式 | `notification-center.css` + `operation-panel.css` | `.notify-panel` 320→360px 宽、340→400px 高（issue #6-7）；`.op-quick-cmd` flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称）在上、`.op-quick-cmd-content` 在下（issue #6-9） |
+| 通知中心面板 / 快捷发送 pill 样式 | `notification-center.css` + `operation-panel.css` | `.notify-panel` 320→360px 宽、340→400px 高（issue #6-7）；`.op-quick-cmd` flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称）在上、`.op-quick-cmd-content` 在下（issue #6-9）；`.notify-row-port`/`.notify-row-time`（issue #7-1）；`.op-quick-panel-btn` accent 填充按压按钮 + `.op-quick-panel-btn-label`（issue #7-2） |
+| 自定义文本右键菜单 | `src/components/shared/TextEditContextMenu.tsx` + `App.tsx` / `PopoutShell.tsx` | 输入框/文本域/可编辑区右键显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选，`contextMenu.*` i18n）；`useTextEditContextMenu()` document 级拦截——可编辑目标 `preventDefault` + 弹自定义菜单（右键时快照选区，点击项先恢复焦点+选区再 `document.execCommand`），非可编辑目标一律 `preventDefault`（取代旧 App.tsx effect）；App 根 + PopoutShell 各挂一次；组件级 `onContextMenu`（stopPropagation 的终端行/侧边栏/标签页）不受影响 |
 | 配置持久化审计（全量保存不丢实体） | `utils/configMerge.ts` `mergeLiveRuleEntities` + `ConfigModal.tsx` / `DiagnosticLogDialog.tsx` | store.config 实体数组是启动快照、从不跟随 `useRuleStore`——全量 `set_config` 前必须 `mergeLiveRuleEntities(config, useRuleStore.getState())` 合并 5 个活实体（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs）；`portPresets` 无 store 镜像（仅 store.config + 设置页本地态）；`portGroups`/`portMeta` 已由 useAppInit 同步（#4-10 模式，issue #5-2） |
 
 ## CODE MAP
@@ -384,6 +387,9 @@ scope: ui | backend | store | hooks | plans
 - **ConfigModal 框选不关闭（issue #6-8）**：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭——只响应按下+松开都在遮罩上的点击，框选文字松手界外不再误关弹窗。
 - **快捷发送 pill 两行（issue #6-9）**：`.op-quick-cmd` 改 flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称同行）在上、`.op-quick-cmd-content` 内容在下。
 - **通知中心面板加大（issue #6-7）**：`.notify-panel` 320→360px 宽、340→400px 高。
+- **通知中心串口上下文（issue #7-1）**：串口来源的 toast 必须带 `portId`（触发告警/断线/发送目标关闭/重连失败已接），通知中心据此渲染串口 chip；时间戳取 `createdAt`（push 时打点），不另行记录。非串口消息不设 portId。
+- **自定义文本右键菜单（issue #7-10）**：`useTextEditContextMenu()` 取代 App.tsx 旧 contextmenu effect，**必须**在 App 根 + PopoutShell 各挂一次（弹窗是独立 webview，旧 effect 从未覆盖）。可编辑目标右键 → 自定义菜单（`document.execCommand` 执行，右键时快照选区、点击项先 `focus({preventScroll:true})` + 恢复选区再执行——mousedown 在菜单上会先 blur 目标丢掉选区）；组件级 `onContextMenu` 且 stopPropagation 的区域（终端行/侧边栏/标签页）不受影响。
+- **发送提示前缀默认空（issue #7-3）**：`sendPrefix` 默认 `''`（TS `useAppStore.defaultConfig` + Rust `AppConfig::default` 两侧同步）；终端 TX 行已有方向标识，前缀只是可选的附加提示。
 
 ## Pane tree (2026-07 refactor)
 

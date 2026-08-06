@@ -6,6 +6,27 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-06 issue #7 十项：通知中心串口上下文+时间戳 · 快捷面板按钮样式 · 发送前缀默认空 · 快捷面板 REAL 后缀/状态灯 · 发送区控件位置 · 设置移除参数预设 · 去「一键」文案 · 分组工具并行 · 自定义右键菜单)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 530/530 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 112/112, `npx playwright test` 14/14。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| MEDIUM | `useToastStore.ts` + `NotificationCenter.tsx` + `useSerialReceive.ts`/`useSerialSend.ts`/`useSerialConnection.ts` | 通知中心消息无来源与时间上下文（issue #7-1）：条件触发告警/断线等串口消息不带串口号，通知无法分辨来自哪个串口、何时发生 | `ToastItem`/`ToastPushInput` 新增可选 `portId`；串口相关 push 全部携带 portId（触发告警、端口意外断开、发送目标端口关闭、自动重连失败）；通知中心每行渲染串口 chip（`.notify-row-port`）+ 时间戳（`.notify-row-time`，HH:MM:SS） |
+| MEDIUM | `SendSection.tsx` + `operation-panel.css` | 快捷发送条「打开命令面板」按钮样式像带状态的图标按钮、太矮（issue #7-2）：与命令药丸两行高度不齐，可点击性弱 | 按钮改**按压按钮样式**：accent 填充（同 `.btn-primary` 视觉）+ 文字标签 `quickSend.openPanelShort`（命令面板），`min-height: 34px` 与两行药丸对齐 |
+| LOW | `useAppStore.ts` / `config/mod.rs` + 测试 | 终端已有 TX/RX 方向标识，发送提示前缀 `>>>>>>SEND>>>>>>>>` 冗余（issue #7-3） | `sendPrefix` 默认值改空（功能保留，DisplaySettings 可配）；TS/Rust 默认值、config 单测、configMerge 测试同步 |
+| LOW | `Popout/QuickSendPanel.tsx` | 快捷发送面板目标串口下拉显示 `COM3 · REAL` 类型后缀，无意义（issue #7-4） | option 只显示 `p.name` |
+| MEDIUM | `Popout/QuickSendPanel.tsx` + `popout.css` + `usePopoutBridge.ts` + `tauri.ts` | 快捷发送面板「发送到」提示灯恒绿呼吸、不反映真实连接状态（issue #7-5）：端口断开仍显示绿色 | 弹窗订阅全局 `serial:status` 维护已连接集合（`connectedPortIds`）；新 `port-statuses:sync` 事件（主窗 request-sync 时回放全量端口状态）解决「已连接状态下打开弹窗」初始态；`.quicksend-dot` 默认灰色、`.is-connected` 绿色呼吸 |
+| LOW | `operation-panel.css` | 发送区命令集选择/循环/编辑三控件被 `margin-left: auto` 推到行尾，与「发送命令」标题割裂（issue #7-6） | 移除 `margin-left: auto`，控件紧跟标题文字之后 |
+| LOW | `GeneralSettings.tsx` + `i18n.ts` | 设置界面重复管理「串口参数预设」（issue #7-7）：操作面板参数区已有完整的预设管理（保存/应用/删除） | 移除 GeneralSettings 预设区块（state/handlers/JSX）与 `generalSettings.presets.*` 6 个 i18n key |
+| LOW | `i18n.ts` | 「一键XXX」冗余描述（issue #7-8）：直接描述操作即可 | 去「一键」：打开全部/关闭全部/连接整组/断开整组/清空 |
+| MEDIUM | `usePortToolActions.ts` | 分组整组执行外部工具串行 100ms 节流（issue #7-9）：多端口组等前一个跑完才轮到下一个 | `runConfiguredPorts` 改 `Promise.all` **并行**启动所有已配置端口（仍跳过运行中端口，单端口失败不中断整组） |
+| MEDIUM | 新 `shared/TextEditContextMenu.tsx` + `App.tsx`/`PopoutShell.tsx` + `context-menu.css` + `i18n.ts` | 输入框/文本域/可编辑区域仍弹 webview 原生右键菜单（issue #7-10）：App 全局 contextmenu 屏蔽对 INPUT/TEXTAREA 放行，快捷发送面板等独立窗口更是完全未屏蔽 | 新 `useTextEditContextMenu()`：document 级监听——可编辑目标 → `preventDefault` + 显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选，`document.execCommand` 执行，右键时快照选区、点击项时先恢复焦点+选区再执行）；非可编辑目标一律 `preventDefault`（取代旧 effect）。App 根 + PopoutShell 各挂一次；菜单复用 `.context-menu` 样式；`contextMenu.*` 6 个 i18n key |
+
+架构变化：`ToastItem` 新增可选 `portId`；新 popout 事件 `port-statuses:sync`（`PortStatusSyncItem[]`，request-sync 回放全量端口状态）；新共享组件 `TextEditContextMenu`/`useTextEditContextMenu`（App + PopoutShell 双 webview 根挂载，替代 App.tsx 旧 contextmenu effect）；`runConfiguredPorts` 改并行。移除 `generalSettings.presets.*` 6 个 key；新增 `contextMenu.*` 6 个 + `quickSend.openPanelShort` 1 个 key。
+
+测试新增：前端 useToastStore portId/createdAt 3 例；config 默认 sendPrefix 断言更新；e2e 4 例（通知中心串口 chip+时间戳、无规则时通知空态、文本框自定义右键菜单、非可编辑区域无原生菜单）。
+
 ## 已修复 (2026-08-06 issue #6 遗留：TX 后长时间收不到响应根因——读写句柄拆分 + 无界 flush 摘除 + 前端隐藏排空)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 527/527 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 112/112, `npx playwright test` 10/10。
