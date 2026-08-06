@@ -6,6 +6,8 @@
 
 HyperCom — modern serial-port debug tool. Rust owns I/O; React owns UI. State in 4 Zustand stores; 11 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 9 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → alert/auto-respond, per-port scoping via `portId`, wired in `useSerialReceive` — issue #3-1).
 
+v0.4.1 (issue #6): 双层内存预算（`memoryLimitMb` 整个应用含 webview 总预算软兜底，默认 2048MB；`memoryPerPortBudgetMb` 每端口硬约束，默认 200MB，超限一次性裁到 50%）；`TerminalLine.rawData` 由 number[] 改 `Uint8Array`（内存 8 倍削减 + 免解码临时拷贝）；RX 管线写量限制（`maxLinesPerTick` 默认 2000）；`send_serial_data` 改 async + `tokio::task::spawn_blocking`（消除每次 TX 主线程卡顿与 tao 警告白屏），`AppState` 字段改 `Arc<Mutex<..>>`；状态栏内存为应用进程树 RSS（本进程 + 含 WebView2/Chromium 的后代进程）；端口排序改一次性动作 `sortPortsByNumber()`（移除持久 sortMode 开关）；串口右键菜单分组控制；QuickSendPanel 文本模式「执行当前行并移至下一行」按钮；ConfigModal 框选文字松手界外不再关闭；通知中心面板加大；快捷发送 pill 两行显示。
+
 ## STRUCTURE
 
 ```
@@ -48,10 +50,11 @@ hypercom/
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
 | ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` | rule state in `useRuleStore`; persisted via config.json (`storageService` wraps config-backed commands) |
 | Cyclic send | `src/components/OperationPanel/hooks/useCyclicSend.ts` | reads `useRuleStore.sendCommandSets` via `getState`; timing via per-command `delay` + set `loopDelay` only (no global interval) |
-| 命令发送区 / 快捷发送条 / 命令面板 | `OperationPanel/SendSection.tsx` + `Popout/QuickSendPanel.tsx` + `hooks/useSerialSend.ts` | 快捷条 pill 显示名称+内容（`op-quick-cmd-name`/`op-quick-cmd-content`）、宽度自适应（ResizeObserver + `utils/sendStrip.ts` `computeFitCount`）、首槽固定「打开命令面板」按钮（`op-quick-panel-btn`，PanelRightOpen，`quickSend.openPanel`）；`quickSendInlineCount` 仅 0=隐藏条；QuickSendPanel 双模式（列表+行内编辑 / 文本逐行发送，`usePanelCyclicSend` 4 种运行方式）；`sendToPort` 经 `utils/sendGuard.ts` 守卫未打开端口 |
+| 命令发送区 / 快捷发送条 / 命令面板 | `OperationPanel/SendSection.tsx` + `Popout/QuickSendPanel.tsx` + `hooks/useSerialSend.ts` | 快捷条 pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（ResizeObserver + `utils/sendStrip.ts` `computeFitCount`）、首槽固定「打开命令面板」按钮（`op-quick-panel-btn`，PanelRightOpen，`quickSend.openPanel`）；`quickSendInlineCount` 仅 0=隐藏条；QuickSendPanel 双模式（列表+行内编辑 / 文本逐行发送，`usePanelCyclicSend` 4 种运行方式，文本模式另含「执行当前行并移至下一行」`runCurrentLineAndAdvance`/`moveCursorToNextLine`，issue #6-3）；`sendToPort` 经 `utils/sendGuard.ts` 守卫未打开端口 |
 | Cross-platform power | `src-tauri/src/system.rs` | Win32 `SetThreadExecutionState` / macOS `caffeinate` / Linux `systemd-inhibit` |
 | Multi-encoding | backend `encoding_rs::GBK`, frontend `TextDecoder` + `setTerminalEncoding` | RX 切行/解码/批写统一走 `RxPipeline`（每端口按 label 缓存 decoder，`ignoreBOM:true`）；切换编码 live re-decode |
-| RX 高频接收管线 | `src/utils/rxAssembler.ts` + `rxPipeline.ts` | 字节级行聚合（CR/LF/跨事件 CRLF/4KB 强制发射）+ rAF 批写 + 250ms 静默 flush（时间戳=最后事件时间）；`getRxPipeline()` 每 webview 一个单例，cleanup 不得 dispose |
+| RX 高频接收管线 | `src/utils/rxAssembler.ts` + `rxPipeline.ts` | 字节级行聚合（CR/LF/跨事件 CRLF/4KB 强制发射）+ rAF 批写 + 250ms 静默 flush（时间戳=最后事件时间）+ **写量限制** `maxLinesPerTick`（默认 2000：每端口每帧最多写 N 行超出顺延；`flushNow` 同步最多排空 N 行其余 rAF 续写，issue #6-2）；`getRxPipeline()` 每 webview 一个单例，cleanup 不得 dispose |
+| 内存预算 / 终端缓冲裁剪 | `useTerminalStore.ts` `totalBytes`/`maxBytes` + `config.memoryLimitMb`/`memoryPerPortBudgetMb` + `rxPipeline.ts` | `memoryLimitMb`=整个应用（含 webview）内存总预算软兜底（默认 2048MB）；`memoryPerPortBudgetMb`=每端口硬约束（默认 200MB，`maxLines = 预算×500`）；`appendTerminalLine(s)` 返回 boolean（true=触发裁剪），超预算**一次性裁到 50%**；「因内存限制清屏」toast（`toast.memoryTrim`，每端口 10s 节流）由 RxPipeline 接线层在 store 返回 true 时弹出（store 保持纯净，issue #6-2） |
 | 日志保存子目录 / RX 日志行组装 | `logger/mod.rs` + `config/mod.rs` `log_subdir_mode` + `LogSettings.tsx` | `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 date）→ `create_writer_with_encoding` 路径 join（create_dir_all）+ `collect_log_files` 递归 list_files（MAX_LIST_DEPTH=16）；RX 日志经 `LogManager::write_rx` + `LogLineAssembler` 字节级组行（镜像前端 rxAssembler，250ms 陈旧尾 flush），不再按读取块一行（issue #5-9/10） |
 | 滚动锁定 / 快捷跳转 | `TerminalView.tsx` + `utils/followLogic.ts` + `.terminal-jump-btn` | `scrollLocked` 仅由图钉按钮/跳转按钮/手势 settle 写入，**无 onScroll 隐式解锁**；跟随路径 `scrollToBottom` 走双 rAF 原始 `scrollTop = computePinTarget(scrollHeight, clientHeight)` 测量钉底（**不用** `virtualizer.scrollToIndex`——避免 @tanstack 10 次重试循环），settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`computePinTarget`/`becameLocked`/`shouldFollow`；到顶/搜索跳转这类用户一次性滚动才走 scrollToIndex；跳转按钮钉在滚动条两端（到顶解锁、到底锁定跟随） |
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `hooks/disconnectTracking.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
@@ -64,7 +67,9 @@ hypercom/
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 280px (issue #2-6), clamp [160,600] |
 | 标签页批量开关串口 / 标签外部工具菜单 | `TabBar.tsx` 右键菜单 + `Pane.tsx` 接线 + `usePortToolActions` | 「打开/断开所有标签页」遍历全局 tabs 逐个 open/close（100ms 节流）；工具三入口与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key |
 | 串口分组持久化 | `config/mod.rs` `port_groups` + `commands/storage.rs` `save_port_groups` + `useAppInit` | 分组是第 7 类 config 实体；启动经 `get_config` 恢复并回填 `ports.groupId`；groups 变更 500ms 防抖自动保存（无手动「保存布局」按钮） |
-| 端口自然排序 | `src/utils/portSort.ts` + `Sidebar.tsx` `sortMode` | `naturalCompare` 数字段按数值比较（COM1<COM2<COM12）；排序是持久开关→派生序渲染；`mergePorts` 按 existing 顺序合并，轮询不冲掉排序/拖拽顺序 |
+| 端口自然排序 | `src/utils/portSort.ts` + `useAppStore.sortPortsByNumber` | `naturalCompare` 数字段按数值比较（COM1<COM2<COM12）；排序是**一次性动作** `sortPortsByNumber()`（重排 ports + 各分组 portIds，幂等、不重置 groupId，issue #6-4），Sidebar 无持久 sortMode 开关，拖拽/分组始终可用；组内顺序随 `save_port_groups` 持久化、未分组顺序不保存；`mergePorts` 按 existing 顺序合并，轮询不冲掉顺序 |
+| 串口右键菜单分组控制 | `Sidebar.tsx` + `useAppStore.ts` | 按端口分组态动态渲染菜单项（issue #6-5）：未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」；i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}` |
+| 发送异步化 | `commands/serial.rs` `send_serial_data` + `lib.rs` `AppState` | `send_serial_data` 改 async fn + `tokio::task::spawn_blocking`（原同步命令在事件循环主线程执行 write_all+flush+日志写→每次 TX 卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏，issue #6-1）；`AppState.serial_manager`/`log_manager` 改 `Arc<Mutex<..>>`（Deref 使 `.lock()` 调用点零改动）；`send_file` 本就是 async（tokio::fs::read + 分块 yield），无同类阻塞 |
 | 模拟串口仅调试模式 | `src/utils/devMode.ts` + `commands/simulation.rs` | 前端 `DEV_FEATURES_ENABLED = import.meta.env.DEV` 隐藏全部 SIM UI；后端 release（`cfg(not(debug_assertions))`）命令直接报错；仅 `npm run tauri dev` 可用 |
 | 终端搜索字符级高亮 | `terminalSearch.ts` `markSearchMatchesInHtml` | HTML tag/实体感知的 `<mark>` 叠加层，只在命中行应用；匹配计算仅搜索栏打开时进行 + `findMatchesIncremental` 前缀收窄 |
 | First-run config creation | `config/mod.rs` `ConfigManager::new` | config.json created on first run with default `AppConfig` (empty entity arrays); no database |
@@ -73,7 +78,9 @@ hypercom/
 | Config validation | `config/mod.rs` `validate_and_clamp()` | runs on `set_config` to enforce bounds |
 | Config backup / recovery | `config/mod.rs` `save()` writes `.bak` / `new()` falls back to `.bak` | corrupt JSON auto-recovered |
 | Session snapshot update | `update_session_snapshot` dedicated command | writes separate `session.json` (not config.json); avoids full config save + `.bak` churn |
-| 状态栏内存显示 | `commands/system_cmds.rs` `get_system_status` | 系统级内存：`system.refresh_memory()` + `system.used_memory()/1048576`（旧实现取应用自身进程 RSS，webview 内存在独立进程、读数恒平）；`memory_used_mb`/`load_status` 纯函数（issue #5-5） |
+| 状态栏内存显示 | `commands/system_cmds.rs` `get_system_status` | **应用进程树级内存**：本进程+全部后代进程（含 WebView2/Chromium 子进程）RSS 之和（`collect_app_pids` 纯函数 + `refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`，issue #6-6）；CPU 仍系统级；`memory_used_mb`/`load_status` 纯函数（issue #5-5 / #6-6） |
+| ConfigModal 框选不关闭 | `ConfigModal.tsx` | overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭（框选文字松手界外不再误关，issue #6-8） |
+| 通知中心面板 / 快捷发送 pill 样式 | `notification-center.css` + `operation-panel.css` | `.notify-panel` 320→360px 宽、340→400px 高（issue #6-7）；`.op-quick-cmd` flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称）在上、`.op-quick-cmd-content` 在下（issue #6-9） |
 | 配置持久化审计（全量保存不丢实体） | `utils/configMerge.ts` `mergeLiveRuleEntities` + `ConfigModal.tsx` / `DiagnosticLogDialog.tsx` | store.config 实体数组是启动快照、从不跟随 `useRuleStore`——全量 `set_config` 前必须 `mergeLiveRuleEntities(config, useRuleStore.getState())` 合并 5 个活实体（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs）；`portPresets` 无 store 镜像（仅 store.config + 设置页本地态）；`portGroups`/`portMeta` 已由 useAppInit 同步（#4-10 模式，issue #5-2） |
 
 ## CODE MAP
@@ -82,13 +89,13 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 
 | Symbol | File | Type | Role |
 |--------|------|------|------|
-| `useAppStore` | `src/stores/useAppStore.ts:266` | Zustand store | tabs / ports / `paneTree` / config / groups |
+| `useAppStore` | `src/stores/useAppStore.ts:266` | Zustand store | tabs / ports / `paneTree` / config / groups + `sortPortsByNumber`（一次性自然序排序动作，issue #6-4） |
 | `useOperationStore` | `src/stores/useOperationStore.ts:29` | Zustand store | serial params + send (NO `op` prefix; NO display state) |
-| `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` (单行：TX/工具/回放) + `appendTerminalLines` (RX 批写) + `setTerminalEncoding` (re-decode on switch) |
+| `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` (单行：TX/工具/回放) + `appendTerminalLines` (RX 批写) + `setTerminalEncoding` (re-decode on switch)；`totalBytes`/`maxBytes` 字节记账，两个 append 返回 boolean（true=触发内存裁剪，一次性裁到 50%） |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
 | 11 hooks: `useSerialPorts` / `useSerialConnection` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useToolOutput` / `usePopoutBridge` / `usePortToolActions` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md`; RX → `RxPipeline` 批写，TX 回显前 `flushNow` 排空队列保时序；`useAppInit` 还负责分组/端口元数据（备注名/隐藏）恢复 + 防抖自动保存（issue #2-3 / #4-9/10）；`usePortToolActions` 是侧边栏/标签页外部工具菜单的共享动作源（issue #2-2），现还返回 `runToolForGroup`（分组整组执行，issue #5-7） |
-| `RxLineAssembler` / `RxPipeline` / `getRxPipeline` | `src/utils/rxAssembler.ts`, `src/utils/rxPipeline.ts` | RX 管线 | 字节级行聚合 + rAF 批写 + 静默/断线/编码切换 flush；主窗与弹出窗各自模块单例 |
+| `RxLineAssembler` / `RxPipeline` / `getRxPipeline` | `src/utils/rxAssembler.ts`, `src/utils/rxPipeline.ts` | RX 管线 | 字节级行聚合 + rAF 批写 + 静默/断线/编码切换 flush + `maxLinesPerTick` 写量限制 + 内存裁剪 toast 接线；主窗与弹出窗各自模块单例 |
 | `ReassemblerSegment` | `src/utils/protocolParser.ts` | type | `ProtocolFrameReassembler.feed()` 返回有序段数组（frame/raw 按流顺序），不再是 `{frames, flushedBytes}` |
 | Pop-out intent bridge | `src/hooks/usePopoutBridge.ts` + `popoutEventService` in `src/services/tauri.ts` | pop-outs are separate webviews: exchange intents (`popout:send-command` / `popout:open-config` / `popout:request-sync`) + refresh signals (`command-sets:changed` / `active-tab:changed`), never shared mutable state; sends route through module-level `sendToPort` so TX echo/traffic/history work |
 | `evaluateTriggers` | `src/utils/triggerEngine.ts` | pure fn | conditional trigger matching engine (contains/exact/regex/hex) |
@@ -101,8 +108,9 @@ Backend:
 | `CommandError` | `src-tauri/src/commands/mod.rs:20` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
 | All Tauri commands (9 domain files) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
 | `ConfigManager` + `AppConfig` | `src-tauri/src/config/mod.rs` | struct | holds all settings entities (8 Vec fields) + session.json + versioning + validation + path resolution + backup/recovery |
-| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `logger` / `config_manager` behind `std::sync::Mutex` |
+| `AppState` | `src-tauri/src/lib.rs` | struct | holds `serial_manager` / `logger` / `config_manager` behind `Arc<Mutex<..>>`（issue #6-1：Deref 使 `.lock()` 调用点零改动，`spawn_blocking` 闭包可持 'static 句柄） |
 | `win32_power` / `macos_power` / `linux_power` | `src-tauri/src/system.rs` | mod | cross-platform `prevent_sleep` / `prevent_screen_off` |
+| `collect_app_pids` / `get_system_status` | `src-tauri/src/commands/system_cmds.rs` | fn / cmd | 应用进程树内存：本进程+后代进程（含 WebView2/Chromium 子进程）RSS 之和（`refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`）；CPU 仍系统级；纯函数可注入进程表便于单测（issue #6-6） |
 
 Subdir guides: [`src/stores/AGENTS.md`](src/stores/AGENTS.md) · [`src/hooks/AGENTS.md`](src/hooks/AGENTS.md) · [`src-tauri/src/commands/AGENTS.md`](src-tauri/src/commands/AGENTS.md) · [`src/components/MainDisplay/AGENTS.md`](src/components/MainDisplay/AGENTS.md) · [`src/components/ConfigModal/AGENTS.md`](src/components/ConfigModal/AGENTS.md) · [`src/components/OperationPanel/AGENTS.md`](src/components/OperationPanel/AGENTS.md)
 
@@ -336,7 +344,7 @@ scope: ui | backend | store | hooks | plans
 
 - `tauri.conf.json` has `"decorations": false` — custom TitleBar handles window controls via `@tauri-apps/api/window`
 - `tsconfig.json` enforces `noUnusedLocals` and `noUnusedParameters` — unused vars are compile errors
-- Serial data events carry `data: number[]` (bytes). Frontend decodes with `TextDecoder`. For HEX display, raw bytes are stored in `TerminalLine.rawData`.
+- Serial data events carry `data: number[]` (bytes). Frontend decodes with `TextDecoder`. `TerminalLine.rawData` is a **`Uint8Array`** since issue #6-2 (8× memory cut + no temp copy on decode) — `TerminalRow`/`terminalSearch`/`protocolRenderer` must use `Array.from` instead of `.map` (Uint8Array has no `.map`); `setTerminalEncoding` decodes `rawData` directly without wrapping.
 - **RX 管线（2026-08-04 重构）**：`serial:data` 事件不再「一事件一行」，而是进 `getRxPipeline()`（每 webview 一个模块单例）：`RxLineAssembler` 字节级切行（CR/LF/跨事件 CRLF/4KB 强制发射）→ 每端口队列 → rAF tick 每端口一次 `appendTerminalLines`（高频下把 store 更新压到每帧一次）→ 250ms 静默 flush 未终结尾部（时间戳取最后事件时间）。`sendToPort` 在 TX 回显前 `flushNow` 排空队列保收发时序；断线走 `pipeline.disconnect`；编码切换前必须 `flushAndReset`（旧编码冲刷尾部，`TerminalFilterBar` 已接线）。**不得**在 hook/弹窗 cleanup 里 `dispose()` 单例。`StreamingDecoderCache` 已删除。
 - **滚动锁定（2026-08-04 重设计）**：`scrollLocked` 只由显式意图写入——图钉按钮、`.terminal-jump-btn` 跳转按钮（滚动条两端：到顶解锁、到底锁定并点亮）、手势 settle（滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定）。`TerminalView` **没有 onScroll 处理器**——程序化滚动/挂载/测量滞后/内容增长产生的 scroll 事件不再碰锁定状态。搜索栏打开时抑制跟随，关闭时若锁定则滚回最新。
 - ConfigModal's rule/command editors save to config.json via `storageService` (which wraps config-backed commands). Load on mount via `useEffect`. Rule state lives in `useRuleStore`.
@@ -361,7 +369,17 @@ scope: ui | backend | store | hooks | plans
 - **通知中心（issue #5-3）**：`durationMs === 0` 的 toast 是粘滞的（Toast.tsx 不启动自动关闭计时）；超过 `MAX_VISIBLE=5` 的 toast 进 `stashed` 队列（不是丢弃），可经 NotificationCenter 查看/逐条关闭/清空。
 - **触发规则自动持久化（issue #5-3）**：TriggerSettings 编辑触发规则 300ms 防抖逐条保存（`savedSnapshotRef` 与当前 rules diff），关闭弹窗时 flush 窗口内未保存编辑；新增/修改规则应走 `storageService.saveTriggerRule`，勿绕过。
 - **日志 RX 组装与子目录（issue #5-9/10）**：`logger/mod.rs` 现含 `LogLineAssembler`（字节级 CR/LF/CRLF 合并/pendingCR/4096 强制 flush/take_tail，镜像前端 rxAssembler）+ `LogManager::write_rx`（RX 方向组行落盘，TX 保持直写 `write`）+ `subdir_mode`（`none`/`date`/`port`，默认 `date`，非法值 clamp 回 date，路径 join 处 create_dir_all，`collect_log_files` 递归 MAX_LIST_DEPTH=16）。改日志路径/分片/子目录相关代码要同时看这里，`LogManager` 现含 `write_rx`/`maybe_split_writer`/`periodic_flush` 私有助手。
-- **状态栏内存（issue #5-5）**：`get_system_status` 的内存是**系统级**（`system.refresh_memory()` + `system.used_memory()/1048576`），不是应用自身 RSS——webview 内存独立进程，进程级读数恒平。别退回 `process(pid).memory()`。
+- **状态栏内存（issue #5-5 → #6-6）**：`get_system_status` 的内存自 issue #6-6 起为**应用进程树级**——本进程+全部后代进程（含 WebView2/Chromium 子进程）RSS 之和（`collect_app_pids` + `refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`）。历史：issue #5-5 曾从单进程 RSS 改**系统级**（`system.refresh_memory()`），但系统级看不到软件自身占用、内存预算软兜底也无法工作；#6-6 再改回进程树级，以当前为准。CPU 仍系统级；`load_status` 阈值语义不变。
+- **rawData / 内存瘦身（issue #6-2）**：`TerminalLine.rawData` 由 number[] 改 `Uint8Array`（内存 8 倍削减 + 免解码临时拷贝）；`setTerminalEncoding` 直接 `decoder.decode(rawData)` 不再包一层 Uint8Array；`TerminalRow`/`terminalSearch`/`protocolRenderer` 用 `Array.from` 逐字节（Uint8Array 无 `.map`）。TX 行 `txRawData` 同样存 Uint8Array。
+- **双层内存预算（issue #6-2）**：`memoryLimitMb` 语义改为「整个应用（含 webview）内存总预算」默认 2048MB（**软兜底**）；新增 `memoryPerPortBudgetMb` 默认 200MB（**每端口硬约束**，`maxLines = 预算×500`）。Rust `AppConfig.memory_per_port_budget_mb`（`#[serde(default = "default_memory_per_port_budget_mb")]`，旧 config.json 缺省回退 200）+ `validate_and_clamp` [16,2048]；`memory_limit_mb` clamp [64,8192]。
+- **裁剪触发（issue #6-2）**：`TerminalState` 新增 `totalBytes`（字节记账）与 `maxBytes`（每端口预算字节）；`appendTerminalLine`/`appendTerminalLines` 返回 boolean（true=触发内存裁剪）；超预算**一次性裁到 50%**（不再逐行 shift）；`clearTerminal`/`setTerminalLines` 重算 totalBytes。触发优先级：每端口硬约束优先、总预算软兜底（`systemStatus.memoryUsedMb` 应用进程级内存超总预算时也裁）。「因内存限制清屏」toast（`toast.memoryTrim`，每端口 10s 节流）由 **RxPipeline 接线层**在 store 返回 true 时弹出——store 保持纯净，避免 useToastStore→i18n→useAppStore 循环依赖。
+- **RX 写量限制（issue #6-2）**：`maxLinesPerTick`（默认 2000）每端口每帧最多写 N 行，超出顺延下一帧；`flushNow` 同步最多排空 N 行，其余 rAF 续写（修 TX 卡顿同源根因）。
+- **发送异步化（issue #6-1）**：`send_serial_data` 由同步命令改 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager`/`log_manager` 改 `Arc<Mutex<..>>`（Deref 使 `.lock()` 调用点零改动）。`send_file` 本就是 async（tokio::fs::read + 分块 yield），无同类主线程阻塞。
+- **排序一次性动作（issue #6-4）**：新 store action `sortPortsByNumber()`（重排 ports + 各分组 portIds，自然序）；Sidebar **移除 sortMode 持久开关**，拖拽/分组始终可用。组内顺序随 `save_port_groups` 持久化、未分组顺序不保存。
+- **串口右键菜单分组控制（issue #6-5）**：按端口分组态动态渲染——未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」。i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}`。
+- **ConfigModal 框选不关闭（issue #6-8）**：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭——只响应按下+松开都在遮罩上的点击，框选文字松手界外不再误关弹窗。
+- **快捷发送 pill 两行（issue #6-9）**：`.op-quick-cmd` 改 flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称同行）在上、`.op-quick-cmd-content` 内容在下。
+- **通知中心面板加大（issue #6-7）**：`.notify-panel` 320→360px 宽、340→400px 高。
 
 ## Pane tree (2026-07 refactor)
 
@@ -391,4 +409,5 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - **类组件**（如 `App.tsx` 的 `AppErrorBoundary`）不能使用 hook，直接 `import i18n from './i18n'` 后 `i18n.t('key')` —— 但不会随语言切换重渲染（仅在错误边界这种边缘场景可接受）
 - 不翻译的字符串：协议词汇 `None/Even/Odd/Mark/Space`、`Xon/Xoff`、`RTS/CTS`；编码名 `ASCII/UTF-8/GBK/ISO-8859-1`；单位 `ms/px/MB`；首字母缩写 `SIM/VCP/HEX/DTR/RTS` —— 这些在 i18n.ts 中也无对应 key
 - ✅ 全部 30 个组件 `.tsx` 文件已接入 `t()`（2026-07-21 完成）— 新增组件文本必须先查 `src/i18n.ts` 现有 key，不够用则在 zh-CN 和 en-US 两侧同时新增 key
+- issue #6 新增 key：`sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}`（串口右键分组）、`quickSend.runCurrentLineAdvance`（文本模式执行当前行并移至下一行）、`toast.memoryTrim`（内存裁剪提示，含 `{{port}}` 插值）
 - 切换语言时全部界面实时切换，无硬编码中文残留

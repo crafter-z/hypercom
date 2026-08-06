@@ -6,6 +6,26 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-06 issue #6 九项：发送异步化 · 双层内存预算+rawData 瘦身+写量限制 · 文本模式新按钮 · 排序一次性 · 串口右键分组 · 进程级内存 · 通知框加大 · 框选不关闭 · 两行 pill)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 519/519 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 106/106, `npx playwright test` 8/8。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `commands/serial.rs` + `lib.rs` | 每次 TX 无条件卡顿 + 白屏警告（issue #6-1）：`send_serial_data` 是**同步命令**，在事件循环主线程执行 write_all+flush+日志写——每次发送阻塞 UI，高频收发时刷 tao `NewEvents`/`RedrawEventsCleared` 警告乃至白屏 | `send_serial_data` 改 async fn + `tokio::task::spawn_blocking`（串口 IO 与日志写移出事件循环主线程）；`AppState.serial_manager`/`log_manager` 改 `Arc<Mutex<..>>`（Deref 使 `.lock()` 调用点零改动、闭包可持 'static 句柄）；`send_file` 本就是 async（tokio::fs::read + 分块 yield），无同类主线程阻塞 |
+| HIGH | `useTerminalStore.ts` / `types/index.ts` / `rxPipeline.ts` / `rxAssembler.ts` / `config/mod.rs` | 终端缓冲与 RX 管线内存无上限（issue #6-2）：rawData 用 number[]（每字节 8× 开销 + 解码临时拷贝）；缓冲只按行数裁剪、无字节记账；RX 每帧批写无写量上限——高频长跑内存暴涨，与 TX 卡顿同源 | ① rawData 改 `Uint8Array`（内存 8 倍削减 + 免解码临时拷贝），`setTerminalEncoding` 直接 decode，`TerminalRow`/`terminalSearch`/`protocolRenderer` 用 `Array.from`（Uint8Array 无 `.map`）；② `TerminalState` 新增 `totalBytes`（字节记账）/`maxBytes`（每端口预算字节），`appendTerminalLine(s)` 返回 boolean（true=触发裁剪），超预算**一次性裁到 50%**（不再逐行 shift），`clearTerminal`/`setTerminalLines` 重算 totalBytes；③ 双层内存预算：`memoryLimitMb` 语义改「整个应用（含 webview）总预算」默认 2048MB（软兜底）+ 新 `memoryPerPortBudgetMb` 默认 200MB（每端口硬约束，`maxLines = 预算×500`），Rust `AppConfig.memory_per_port_budget_mb`（`#[serde(default=...)]` 兼容旧 config）+ `validate_and_clamp` [16,2048]、`memory_limit_mb` clamp [64,8192]；④ 裁剪触发优先级：每端口硬约束优先、总预算软兜底（`systemStatus.memoryUsedMb` 超限也裁），「因内存限制清屏」toast（`toast.memoryTrim`，每端口 10s 节流）由 **RxPipeline 接线层**在 store 返回 true 时弹出（store 保持纯净，避免 useToastStore→i18n→useAppStore 循环依赖）；⑤ 写量限制 `maxLinesPerTick`（默认 2000）：每帧每端口最多写 N 行、`flushNow` 同步最多排空 N 行其余 rAF 续写 |
+| MEDIUM | `Popout/QuickSendPanel.tsx` | 文本模式逐行调试无「执行当前行并下移」能力（issue #6-3）：点执行当前行后光标停在原行，逐行核对命令需手动点选下一行 | 新增「执行当前行并移至下一行」按钮：`runCurrentLineAndAdvance`（执行当前行后 `moveCursorToNextLine` 经 textareaRef 把光标/选区移到下一行行首）；i18n `quickSend.runCurrentLineAdvance` |
+| MEDIUM | `useAppStore.ts` + `Sidebar.tsx` + `utils/portSort.ts` | 排序依赖持久开关且禁用拖拽/分组（issue #6-4）：开启排序后拖拽与分组入口不可用，排序态随配置持久化、行为不直观 | 排序改**一次性动作** `sortPortsByNumber()`：直接重排 store 的 ports + 各分组 portIds（自然序，幂等、不重置 groupId）；Sidebar **移除 sortMode 持久开关**，拖拽/分组始终可用；组内顺序随 `save_port_groups` 持久化、未分组顺序不保存 |
+| MEDIUM | `Sidebar.tsx` + `useAppStore.ts` | 串口右键菜单无分组控制入口（issue #6-5）：分组/移组只能拖拽，批量归类或移出繁琐 | 菜单项按端口分组态动态渲染：未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」；i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}` |
+| MEDIUM | `commands/system_cmds.rs` | 内存显示再次失真（issue #6-6）：#5-5 改系统级后无法看出应用自身（含 webview 子进程）的内存占用，内存预算软兜底也无从判断 | 内存改**应用进程树级**：本进程+全部后代进程（含 WebView2/Chromium 子进程）RSS 之和——新纯函数 `collect_app_pids`（可注入进程表便于单测）+ `refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`；CPU 仍系统级；`load_status` 阈值语义不变 |
+| LOW | `notification-center.css` | 通知中心面板偏小（issue #6-7）：宽 320 / 高 340 容纳长告警文案与多条通知局促 | `.notify-panel` 320→360px 宽、340→400px 高 |
+| LOW | `ConfigModal.tsx` | 设置弹窗内框选文字松手在遮罩上误关弹窗（issue #6-8）：overlay click 即关闭，复制参数/内容时松手出界丢失弹窗 | overlay pointerdown 记录起点是否在弹窗内；click 时起点在弹窗内则忽略关闭（只响应按下+松开都在遮罩上的点击） |
+| LOW | `SendSection.tsx` + `operation-panel.css` | 快捷发送 pill 名称+内容挤一行，窄窗口下内容截断看不清（issue #6-9） | pill 改 flex column 两行：`.op-quick-cmd-name-row`（HEX 徽标+名称同行）在上、`.op-quick-cmd-content` 内容在下 |
+
+架构变化：`TerminalLine.rawData` 由 number[] 改 `Uint8Array`（TX `txRawData` 同样）；`TerminalState` 新增 `totalBytes`/`maxBytes` 字节记账，两个 append 返回 boolean；`RxPipeline` 新增 `maxLinesPerTick` 写量限制 + 内存裁剪 toast 接线（`toast.memoryTrim` 每端口 10s 节流）；`AppConfig` 新增 `memory_per_port_budget_mb`（`memoryLimitMb` 语义改为应用含 webview 总预算软兜底）；`AppState` 字段改 `Arc<Mutex<..>>`；`send_serial_data` 改 async + `spawn_blocking`；`get_system_status` 内存改应用进程树级（新 `collect_app_pids`）；新 store action `sortPortsByNumber()`，Sidebar 移除 sortMode 持久开关；串口右键菜单新增 3 个分组控制项；QuickSendPanel 文本模式新增执行+下移按钮；ConfigModal overlay 关闭判定加按下起点检查；`.notify-panel`/`.op-quick-cmd` 样式调整。
+
+测试新增：前端 useTerminalStore 字节记账/裁剪 4、useAppStore sortPortsByNumber 3、rxPipeline maxLinesPerTick 3；后端 config 内存预算缺省回退+clamp 4、system_cmds 进程级内存纯函数（collect_app_pids/memory_used_mb/load_status）扩展。
+
 ## 已修复 (2026-08-06 issue #5 十项：滚动锁定跟随重构 · 配置持久化审计 · 条件触发三缺陷+通知中心 · 发送区大改版 · 状态栏内存 · 行尾提示不跟随 · 分组整组执行工具 · 输出区点击切换面板目标 · 保存 log 首字符独占一行 · 日志子目录)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 506/506 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 103/103, `npx playwright test` 6/6。

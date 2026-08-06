@@ -1,15 +1,15 @@
 # 手工测试清单
 
 > 每次发版前逐项验证。串口相关测试使用 SIM:Loopback 虚拟串口（真实硬件测试见 `plans/hardware-matrix.md`）。
-> 更新日期: 2026-07-20 · 覆盖 Phase A-D 全部新功能
+> 更新日期: 2026-08-06 · 覆盖 Phase A-D 全部新功能 + issue #6 回归
 
 ## 零、自动化测试
 
 | 套件 | 命令 | 数量 | 说明 |
 |------|------|------|------|
-| 前端 (vitest) | `npm run test:run` | 415 tests / 20 files | useAppStore (56) + useRuleStore (48) + rxAssembler (32) + useTerminalStore (30) + rxPipeline (28) + triggerEngine (26) + terminalSearch (25) + highlightEngine (22) + sendUtils (21) + timeFormat (20) + protocolParser (18) + useOperationStore (18) + lineFilter (16) + portSort (12) + logReplay (10) + protocolRenderer (8) + useSerialPorts (8) + protocolE2E (7) + diagLog (5) + DisconnectBanner (5) |
-| 后端 (cargo) | `cargo test --lib` | 48 tests | config (13) + logger (14) + diaglog (5) + commands (4) + serial (8, Windows FFI-free) + system (2) + lib (2) |
-| E2E (Playwright) | `npx playwright test` | 6 tests | Chromium smoke: app-root / TitleBar / Sidebar / MainDisplay / StatusBar / OperationPanel 渲染（Tauri mock via addInitScript） |
+| 前端 (vitest) | `npm run test:run` | 519 tests / 27 files | useAppStore (61) + useRuleStore (48) + useTerminalStore (37) + rxAssembler (32) + rxPipeline (31) + triggerEngine (26) + terminalSearch (25) + sendUtils (23) + highlightEngine (22) + textSend (21) + timeFormat (20) + followLogic (20) + protocolParser (18) + useOperationStore (18) + sendStrip (16) + lineFilter (16) + portSort (12) + logReplay (10) + useToastStore (10) + sendGuard (9) + protocolRenderer (8) + useSerialPorts (8) + protocolE2E (7) + groupTool (7) + diagLog (5) + DisconnectBanner (5) + configMerge (4) |
+| 后端 (cargo) | `cargo test --lib` | 106 tests（Windows 运行数） | config (15) + logger (58) + system_cmds (12) + system (10, 平台子集) + diaglog (5) + popout (4) + lib (2) + serial (21, 其中 16 个 `#[cfg(not(target_os = "windows"))]` 非 Windows 运行) |
+| E2E (Playwright) | `npx playwright test` | 8 tests | Chromium smoke: app-root / TitleBar / Sidebar / MainDisplay / StatusBar / OperationPanel 渲染 + 状态栏内存预算指示 + 通用设置内存预算双输入（issue #6-2/#6-6，Tauri mock via addInitScript） |
 | TypeScript | `npx tsc --noEmit` | 0 errors | 类型检查 |
 | Rust | `cargo check` | 0 errors, 0 warnings | 快速编译检查 |
 
@@ -144,6 +144,17 @@
 | 63 | 运行 NSIS 安装器 | 双语选择（简中/English），安装到 Program Files，创建开始菜单快捷方式 |
 | 64 | 卸载 HyperCom | 程序文件清理干净 |
 
+## 十一、issue #6 回归 (6 项)
+
+| # | 步骤 | 预期 |
+|---|------|------|
+| 65 | 设置 → 通用 → 内存：修改「内存总预算」与「每端口内存预算」并保存 | 两个输入均可调、保存后重启保留；越界值被 clamp（总预算 [64,8192]MB、每端口 [16,2048]MB） |
+| 66 | 连接 SIM:Loopback 并持续灌入大流量（如循环发送长报文）直到超过每端口预算 | 终端自动裁剪最早一半内容，弹出「因内存限制已清除 {{port}} 最早一半的终端内容」toast（每端口 10s 节流，不刷屏）；持续输出不再无限占用内存 |
+| 67 | 点击侧边栏工具栏「按端口号排序」 | ports 与各分组组内顺序按 COM1<COM2<COM12 自然序重排；排完仍可拖拽/分组；重启后组内顺序保留、未分组顺序不保留 |
+| 68 | 串口右键菜单：未分组且有组时选「移入分组『名称』」/ 无组时选「新建分组并移入」；已在组内选「移出分组」 | 菜单项按端口分组态正确显示；分组关系立即生效并自动保存（重启保留） |
+| 69 | 独立发送面板 → 文本模式 → 光标停在某行 → 点「执行当前行并移至下一行」 | 当前行被执行，光标/选区移到下一行行首；在最后一行执行后不再下移 |
+| 70 | 设置弹窗内框选一段文字、鼠标松手在弹窗外 | 弹窗不关闭、选中内容保留（仅「按下+松开都在遮罩上」的点击才关闭弹窗） |
+
 ---
 
-**总计: 71 项手工测试 + 4 项自动化测试套件**
+**总计: 77 项手工测试 + 4 项自动化测试套件**
