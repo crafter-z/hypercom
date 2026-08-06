@@ -230,11 +230,23 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
       </div>
 
       {visibleTabs.length > 0 && displayTab ? (
-        <TerminalView
-          key={displayTab.id}
-          portId={displayTab.id}
-          terminal={displayTerminal}
-        />
+        <div
+          className="pane-terminal-wrap"
+          onClick={() => {
+            // Clicking the output area activates the pane's displayed tab,
+            // which also moves the operation-panel target (issue #5-8).
+            const target = displayTabId;
+            if (target && useAppStore.getState().activeTabId !== target) {
+              setActiveTab(target); // also sets focusedPaneId via the store action
+            }
+          }}
+        >
+          <TerminalView
+            key={displayTab.id}
+            portId={displayTab.id}
+            terminal={displayTerminal}
+          />
+        </div>
       ) : paneTabs.length > 0 ? (
         // All tabs in this pane are popped out — Chrome-style detach: content area
         // shows per-tab "popped out" hint with an explicit Reattach affordance. This

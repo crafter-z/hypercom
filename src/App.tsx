@@ -70,11 +70,11 @@ const App: React.FC = () => {
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
   const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed);
 
-  // 诊断日志开关：随 config.diagnosticLogEnabled 同步前端日志转发。
-  const diagnosticLogEnabled = useAppStore((s) => s.config.diagnosticLogEnabled);
+  // 诊断日志开关：随 config.diagLogEnabled 同步前端日志转发（issue #5-2 对齐 wire 名）。
+  const diagLogEnabled = useAppStore((s) => s.config.diagLogEnabled);
   useEffect(() => {
-    setDiagLogForwardEnabled(diagnosticLogEnabled);
-  }, [diagnosticLogEnabled]);
+    setDiagLogForwardEnabled(diagLogEnabled);
+  }, [diagLogEnabled]);
 
   // F.3: persist the session snapshot incrementally whenever tabs/paneTree
   // change (debounced). The WebView may terminate before an async invoke

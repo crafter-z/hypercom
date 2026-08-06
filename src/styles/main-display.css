@@ -48,6 +48,18 @@
   outline-offset: -1px;
 }
 
+/* Click-to-activate wrapper around TerminalView (issue #5-8): clicking the
+ * output area activates the pane's displayed tab. Must preserve the flex
+ * column min-height:0 chain: .pane-container-inner > wrapper >
+ * .terminal-view-container > .terminal-view all allow shrinking. */
+.pane-terminal-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* ==================== Pane Resize Handle ==================== */
 .pane-resize-handle {
   flex-shrink: 0;

@@ -283,6 +283,7 @@ export interface AppConfig {
   logSplitSizeMb: number;
   logIncludeTimestamp: boolean; // 日志行前缀是否包含时间戳（issue #3-4）
   logIncludeDirection: boolean; // 日志行前缀是否包含 RX/TX 方向标记（issue #3-4）
+  logSubdirMode: LogSubdirMode; // 日志子目录策略：none | date | port（issue #5-10，默认 date）
   
   // 备份设置
   backupEnabled: boolean;
@@ -293,7 +294,7 @@ export interface AppConfig {
   restoreSession: boolean;   // 启动时是否恢复上次会话
 
   // 诊断日志
-  diagnosticLogEnabled: boolean; // 是否启用应用自身维测日志（前后端统一落盘）
+  diagLogEnabled: boolean; // 是否启用应用自身维测日志（前后端统一落盘；wire 名为 diagLogEnabled，issue #5-2 对齐）
 
   // 设置实体（全部存入 config.json）
   sendCommandSets: SendCommandSet[];
@@ -304,6 +305,18 @@ export interface AppConfig {
   portToolConfigs: PortToolConfig[];
   portGroups: PortGroup[];   // 串口分组布局（issue #2-3 起 config.json 持久化 + 自动保存）
   portMeta: PortMetaEntry[]; // 串口备注名/隐藏状态（issue #4-9 起 config.json 持久化 + 自动保存）
+}
+
+/** 日志保存的子目录策略（issue #5-10）。 */
+export type LogSubdirMode = 'none' | 'date' | 'port';
+
+/** 快捷发送面板·文本模式的发送参数（面板内本地态，不持久化，issue #5-4-6）。 */
+export interface TextSendConfig {
+  portId: string;          // 目标串口（空 = 跟随主窗活动标签）
+  lineEnding: LineEnding;
+  isHex: boolean;
+  sendIntervalMs: number;  // 行间发送间隔
+  roundIntervalMs: number; // 轮次间循环间隔
 }
 
 // ==================== 串口元数据相关 ====================

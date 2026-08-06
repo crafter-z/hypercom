@@ -8,7 +8,7 @@
  * - 模块单例，`setupDiagLogCapture()` 在 App.tsx 调用一次。
  * - 覆盖前先把原始 console 方法存为 `original`，内部错误用原始方法记录，
  *   避免递归进捕获链路。
- * - `forwardEnabled` 随配置 `diagnosticLogEnabled` 同步；默认 true（配置默认开启）。
+ * - `forwardEnabled` 随配置 `diagLogEnabled` 同步；默认 true（配置默认开启）。
  * - 批量转发：累计到 50 条或 500ms 静默即 flush，降低 IPC 频率。
  * - 诊断日志弹窗读取的是后端文件（含后端日志 + 转发的前端日志），无独立内存缓冲。
  */
@@ -29,7 +29,7 @@ const LEVEL_MAP: Record<ConsoleMethod, string> = {
 const original: Record<string, (...args: unknown[]) => void> = {};
 
 let installed = false;
-/** 是否向前端转发（随 config.diagnosticLogEnabled 同步）。 */
+/** 是否向前端转发（随 config.diagLogEnabled 同步）。 */
 let forwardEnabled = true;
 let batch: DiagLogEntry[] = [];
 let batchTimer: ReturnType<typeof setTimeout> | null = null;

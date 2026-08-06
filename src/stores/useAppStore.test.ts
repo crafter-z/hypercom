@@ -305,6 +305,51 @@ describe('Tab & Pane actions', () => {
     expect(countLeaves(s.paneTree)).toBe(2);
     expect(findLeafById(s.paneTree, 'main')!.tabIds).toContain('C');
   });
+
+  it('setActiveTab sets BOTH activeTabId and focusedPaneId (operation-panel target follows)', () => {
+    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A'], size: 0.5 };
+    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['B'], size: 0.5 };
+    useAppStore.setState({
+      ports: [makePort('A'), makePort('B')],
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
+        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane2' },
+      ],
+      paneTree: {
+        id: 'root', type: 'branch', direction: 'vertical',
+        children: [pane1, pane2], size: 1,
+      },
+      focusedPaneId: 'pane1',
+    });
+    useAppStore.getState().setActiveTab('B');
+    const s = useAppStore.getState();
+    expect(s.activeTabId).toBe('B');
+    expect(s.focusedPaneId).toBe('pane2'); // tabB.splitPaneId
+    expect(s.tabs.find(t => t.id === 'B')!.isActive).toBe(true);
+    expect(s.tabs.find(t => t.id === 'A')!.isActive).toBe(false);
+  });
+
+  it('setFocusedPane leaves activeTabId unchanged (output-area click must call setActiveTab)', () => {
+    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A'], size: 0.5 };
+    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['B'], size: 0.5 };
+    useAppStore.setState({
+      ports: [makePort('A'), makePort('B')],
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
+        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane2' },
+      ],
+      paneTree: {
+        id: 'root', type: 'branch', direction: 'vertical',
+        children: [pane1, pane2], size: 1,
+      },
+      activeTabId: 'A',
+      focusedPaneId: 'pane1',
+    });
+    useAppStore.getState().setFocusedPane('pane2');
+    const s = useAppStore.getState();
+    expect(s.focusedPaneId).toBe('pane2');
+    expect(s.activeTabId).toBe('A'); // unchanged — the asymmetry the fix relies on
+  });
 });
 
 // ==================== Group C: Terminal lines ====================
