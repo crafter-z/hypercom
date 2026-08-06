@@ -89,7 +89,8 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
     lineHtml = renderProtocolLine(line);
   } else {
     const displayText = displayFormat === 'hex' && line.rawData
-      ? line.rawData.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
+      // Uint8Array 无 .map：Array.from 逐字节格式化（issue #6-2）
+      ? Array.from(line.rawData, b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
       : line.content;
     lineHtml = applyHighlightSets(displayText, highlightRuleSets);
   }

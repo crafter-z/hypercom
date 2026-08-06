@@ -31,15 +31,15 @@ describe('ensureTerminal', () => {
     expect(t.connectedAt).toBeNull();
   });
 
-  it('uses maxLines derived from config.memoryLimitMb', () => {
-    // Default memoryLimitMb is 1024 → 1024 * 500 = 512000
+  it('uses maxLines derived from config.memoryPerPortBudgetMb (issue #6-2)', () => {
+    // 每端口预算默认 200 → 200 * 500 = 100000
     useTerminalStore.getState().ensureTerminal('COM1');
     const t = useTerminalStore.getState().terminals['COM1'];
-    expect(t.maxLines).toBe(INITIAL_CONFIG.memoryLimitMb * 500 || 10000);
+    expect(t.maxLines).toBe(INITIAL_CONFIG.memoryPerPortBudgetMb * 500 || 10000);
   });
 
-  it('uses fallback maxLines=10000 when memoryLimitMb=0', () => {
-    useAppStore.getState().setConfig({ memoryLimitMb: 0 });
+  it('uses fallback maxLines=10000 when memoryPerPortBudgetMb=0', () => {
+    useAppStore.getState().setConfig({ memoryPerPortBudgetMb: 0 });
     useTerminalStore.getState().ensureTerminal('COM1');
     const t = useTerminalStore.getState().terminals['COM1'];
     expect(t.maxLines).toBe(10000);
@@ -78,7 +78,7 @@ describe('appendTerminalLine', () => {
     expect(lines.map(l => l.id)).toEqual(['l1', 'l2', 'l3']);
   });
 
-  it('respects maxLines — shifts oldest when exceeded', () => {
+  it('trims to half (not one-by-one shift) when maxLines exceeded (issue #6-2)', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.setState((state) => {
       state.terminals['COM1'].maxLines = 3;
@@ -87,9 +87,9 @@ describe('appendTerminalLine', () => {
     append('COM1', makeLine('l1'));
     append('COM1', makeLine('l2'));
     append('COM1', makeLine('l3'));
-    append('COM1', makeLine('l4')); // evicts l1
+    append('COM1', makeLine('l4')); // 4 > 3 → 一次性裁到一半 → 保留 2 行
     const lines = useTerminalStore.getState().terminals['COM1'].lines;
-    expect(lines.map(l => l.id)).toEqual(['l2', 'l3', 'l4']);
+    expect(lines.map(l => l.id)).toEqual(['l3', 'l4']);
   });
 
   it('is no-op for non-existent terminal', () => {
@@ -176,7 +176,7 @@ describe('setTerminalEncoding', () => {
     // "AB" in ASCII/UTF-8 = [65, 66]
     useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1', {
       content: 'old',
-      rawData: [65, 66],
+      rawData: new Uint8Array([65, 66]),
     }));
     useTerminalStore.getState().setTerminalEncoding('COM1', 'UTF-8');
     const line = useTerminalStore.getState().terminals['COM1'].lines[0];
@@ -187,7 +187,7 @@ describe('setTerminalEncoding', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1', {
       content: 'original',
-      rawData: [65, 66],
+      rawData: new Uint8Array([65, 66]),
       parsedFields: [{ name: 'Header', byteStart: 0, byteEnd: 1, color: '#ff0000' }],
     }));
     useTerminalStore.getState().setTerminalEncoding('COM1', 'UTF-8');
@@ -209,7 +209,7 @@ describe('setTerminalEncoding', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1', {
       content: 'empty-raw',
-      rawData: [],
+      rawData: new Uint8Array(0),
     }));
     useTerminalStore.getState().setTerminalEncoding('COM1', 'UTF-8');
     const line = useTerminalStore.getState().terminals['COM1'].lines[0];
@@ -220,7 +220,7 @@ describe('setTerminalEncoding', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1', {
       content: 'old',
-      rawData: [72, 105], // "Hi"
+      rawData: new Uint8Array([72, 105]), // "Hi"
     }));
     useTerminalStore.getState().setTerminalEncoding('COM1', 'ASCII');
     const line = useTerminalStore.getState().terminals['COM1'].lines[0];
@@ -231,7 +231,7 @@ describe('setTerminalEncoding', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1', {
       content: 'old',
-      rawData: [79, 75], // "OK"
+      rawData: new Uint8Array([79, 75]), // "OK"
     }));
     // Cast to bypass type check — simulating an invalid label at runtime
     useTerminalStore.getState().setTerminalEncoding('COM1', 'INVALID' as never);
@@ -284,17 +284,18 @@ describe('appendTerminalLines (bulk)', () => {
     expect(lines.map(l => l.id)).toEqual(['single1', 'bulk1', 'bulk2', 'single2']);
   });
 
-  it('trims to maxLines in a single splice when bulk exceeds capacity', () => {
+  it('trims to half in a single splice when bulk exceeds capacity (issue #6-2)', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().setTerminalConfig('COM1', { maxLines: 5 });
     const lines: TerminalLine[] = Array.from({ length: 8 }, (_, i) => makeLine(`b${i}`));
-    useTerminalStore.getState().appendTerminalLines('COM1', lines);
+    const trimmed = useTerminalStore.getState().appendTerminalLines('COM1', lines);
     const result = useTerminalStore.getState().terminals['COM1'].lines;
-    // Last 5 kept in original order
-    expect(result.map(l => l.id)).toEqual(['b3', 'b4', 'b5', 'b6', 'b7']);
+    // 8 行 > 5 → 一次性裁到一半 → 保留 4 行
+    expect(trimmed).toBe(true);
+    expect(result.map(l => l.id)).toEqual(['b4', 'b5', 'b6', 'b7']);
   });
 
-  it('trims combined single + bulk lines to maxLines', () => {
+  it('trims combined single + bulk lines to half', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().setTerminalConfig('COM1', { maxLines: 4 });
     useTerminalStore.getState().appendTerminalLine('COM1', makeLine('pre1'));
@@ -303,8 +304,8 @@ describe('appendTerminalLines (bulk)', () => {
       makeLine('b1'), makeLine('b2'), makeLine('b3'), makeLine('b4'),
     ]);
     const result = useTerminalStore.getState().terminals['COM1'].lines;
-    // 6 total → keep last 4
-    expect(result.map(l => l.id)).toEqual(['b1', 'b2', 'b3', 'b4']);
+    // 6 行 > 4 → 裁到一半 → 保留 3 行
+    expect(result.map(l => l.id)).toEqual(['b2', 'b3', 'b4']);
   });
 
   it('is no-op for non-existent (ghost) terminal', () => {
@@ -317,5 +318,90 @@ describe('appendTerminalLines (bulk)', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.getState().appendTerminalLines('COM1', []);
     expect(useTerminalStore.getState().terminals['COM1'].lines).toEqual([]);
+  });
+});
+
+// ==================== issue #6-2：字节记账 + 每端口预算裁剪 ====================
+
+describe('memory budget (issue #6-2)', () => {
+  const byteLine = (id: string, len: number): TerminalLine =>
+    makeLine(id, { rawData: new Uint8Array(len), content: 'x'.repeat(len) });
+
+  it('accumulates totalBytes on append (rawData length)', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    const append = useTerminalStore.getState().appendTerminalLine;
+    append('COM1', byteLine('a', 3));
+    append('COM1', byteLine('b', 5));
+    expect(useTerminalStore.getState().terminals['COM1'].totalBytes).toBe(8);
+  });
+
+  it('accumulates totalBytes for lines without rawData via content bytes', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('a', { content: 'ab' }));
+    expect(useTerminalStore.getState().terminals['COM1'].totalBytes).toBe(2);
+  });
+
+  it('trims to half when per-port maxBytes (hard constraint) is exceeded', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.setState((state) => {
+      state.terminals['COM1'].maxBytes = 9; // 4 行 × 3B = 12B 超出
+    });
+    const append = useTerminalStore.getState().appendTerminalLine;
+    append('COM1', byteLine('a', 3));
+    append('COM1', byteLine('b', 3));
+    append('COM1', byteLine('c', 3));
+    const trimmed = append('COM1', byteLine('d', 3)); // totalBytes 12 > 9
+    expect(trimmed).toBe(true);
+    const t = useTerminalStore.getState().terminals['COM1'];
+    // 4 行 → 一次性裁到一半 → 保留 2 行
+    expect(t.lines.map(l => l.id)).toEqual(['c', 'd']);
+    expect(t.totalBytes).toBe(6); // 记账重算准确
+  });
+
+  it('does not trim while within budget (returns false)', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    const trimmed = useTerminalStore.getState().appendTerminalLine('COM1', byteLine('a', 3));
+    expect(trimmed).toBe(false);
+    expect(useTerminalStore.getState().terminals['COM1'].lines).toHaveLength(1);
+  });
+
+  it('batch append triggers a single 50% trim on byte overflow', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.setState((state) => {
+      state.terminals['COM1'].maxBytes = 100;
+    });
+    // 6 行 × 30B = 180B > 100 → 一次性裁到一半 → 保留 3 行
+    const lines: TerminalLine[] = Array.from({ length: 6 }, (_, i) => byteLine(`b${i}`, 30));
+    const trimmed = useTerminalStore.getState().appendTerminalLines('COM1', lines);
+    expect(trimmed).toBe(true);
+    const t = useTerminalStore.getState().terminals['COM1'];
+    expect(t.lines.map(l => l.id)).toEqual(['b3', 'b4', 'b5']);
+    expect(t.totalBytes).toBe(90);
+  });
+
+  it('clearTerminal resets totalBytes', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().appendTerminalLine('COM1', byteLine('a', 10));
+    useTerminalStore.getState().clearTerminal('COM1');
+    const t = useTerminalStore.getState().terminals['COM1'];
+    expect(t.lines).toEqual([]);
+    expect(t.totalBytes).toBe(0);
+  });
+
+  it('total-budget soft backstop trims when app memory exceeds memoryLimitMb', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    // 模拟状态栏轮询到的应用内存已超总预算（2048MB 默认）
+    useAppStore.getState().setSystemStatus({ memoryUsedMb: 3000 });
+    useTerminalStore.setState((state) => {
+      state.terminals['COM1'].maxBytes = 10_000; // 硬约束不触发
+    });
+    const lines: TerminalLine[] = [
+      byteLine('a', 100), byteLine('b', 100), byteLine('c', 100), byteLine('d', 100),
+    ];
+    const trimmed = useTerminalStore.getState().appendTerminalLines('COM1', lines);
+    expect(trimmed).toBe(true); // 总预算软兜底触发
+    expect(useTerminalStore.getState().terminals['COM1'].lines.map(l => l.id)).toEqual(['c', 'd']);
+    // 清理：复位系统状态，避免影响其它用例
+    useAppStore.getState().setSystemStatus({ memoryUsedMb: 0 });
   });
 });

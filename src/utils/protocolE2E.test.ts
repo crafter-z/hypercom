@@ -68,7 +68,7 @@ function frameToLine(
     timestamp: Date.now(),
     direction: 'RX',
     content: frame.bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
-    rawData: frame.bytes,
+    rawData: new Uint8Array(frame.bytes),
     isHex,
     parsedFields: frame.fields,
   };

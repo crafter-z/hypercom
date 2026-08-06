@@ -174,7 +174,13 @@ pub struct AppConfig {
 
     // --- 通用设置 ---
     pub close_behavior: String, // "minimize" | "exit"
+    /// 整个应用（含 webview 中本软件占用部分）的内存总预算（MB）。
+    /// issue #6-2：语义从「单端口行数上限」改为「总预算软兜底」，默认 2048MB。
     pub memory_limit_mb: u32,
+    /// 每端口终端缓冲区（rawData 字节）内存预算（MB）。
+    /// issue #6-2：硬约束，任一端口超过即裁剪该端口最早一半屏，默认 200MB。
+    #[serde(default = "default_memory_per_port_budget_mb")]
+    pub memory_per_port_budget_mb: u32,
     pub language: String, // "zh-CN" | "en-US"
     pub theme: String,    // "light" | "dark" | "system"
     pub prevent_screen_off: bool,
@@ -280,6 +286,11 @@ fn default_quick_send_inline_count() -> u32 {
     6
 }
 
+/// issue #6-2：每端口内存预算默认 200MB（总预算的软兜底为 memory_limit_mb）。
+fn default_memory_per_port_budget_mb() -> u32 {
+    200
+}
+
 fn default_timestamp_format() -> String {
     "absolute".to_string()
 }
@@ -294,7 +305,9 @@ impl Default for AppConfig {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
             close_behavior: "exit".to_string(),
-            memory_limit_mb: 1024,
+            // issue #6-2：总预算默认从 1024 提升到 2048MB（含 webview 占用）。
+            memory_limit_mb: 2048,
+            memory_per_port_budget_mb: 200,
             language: "zh-CN".to_string(),
             theme: "dark".to_string(),
             prevent_screen_off: false,
@@ -450,6 +463,8 @@ impl ConfigManager {
         config.terminal_font_size = config.terminal_font_size.clamp(8, 48);
         config.ui_font_size = config.ui_font_size.clamp(8, 48);
         config.memory_limit_mb = config.memory_limit_mb.clamp(64, 8192);
+        // issue #6-2：每端口预算边界 [16, 2048]MB，非法值收敛到范围内。
+        config.memory_per_port_budget_mb = config.memory_per_port_budget_mb.clamp(16, 2048);
         config.max_retries = config.max_retries.clamp(1, 10);
         config.log_split_size_mb = config.log_split_size_mb.clamp(1, 10240);
         config.backup_interval = config.backup_interval.clamp(1, 720);
@@ -570,7 +585,9 @@ mod tests {
         assert_eq!(cfg.config_version, 1);
         assert_eq!(cfg.quick_send_inline_count, 6);
         assert_eq!(cfg.close_behavior, "exit");
-        assert_eq!(cfg.memory_limit_mb, 1024);
+        // issue #6-2：总预算默认 2048MB（含 webview 占用），每端口默认 200MB
+        assert_eq!(cfg.memory_limit_mb, 2048);
+        assert_eq!(cfg.memory_per_port_budget_mb, 200);
         assert_eq!(cfg.language, "zh-CN");
         assert_eq!(cfg.theme, "dark");
         assert!(!cfg.prevent_screen_off);
@@ -614,6 +631,7 @@ mod tests {
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.close_behavior, cfg.close_behavior);
         assert_eq!(parsed.memory_limit_mb, cfg.memory_limit_mb);
+        assert_eq!(parsed.memory_per_port_budget_mb, cfg.memory_per_port_budget_mb);
         assert_eq!(parsed.language, cfg.language);
         assert_eq!(parsed.auto_save_log, cfg.auto_save_log);
         assert_eq!(parsed.log_encoding, cfg.log_encoding);
@@ -624,7 +642,7 @@ mod tests {
         let cfg = AppConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         for key in [
-            "closeBehavior", "memoryLimitMb", "autoSaveLog", "logFormat",
+            "closeBehavior", "memoryLimitMb", "memoryPerPortBudgetMb", "autoSaveLog", "logFormat",
             "logEncoding", "terminalFontSize", "autoReconnect", "maxRetries",
             "restoreSession", "quickSendInlineCount",
             "sendCommandSets", "highlightRuleSets", "protocolTemplates",
@@ -735,6 +753,8 @@ mod tests {
             quick_send_inline_count: 99,
             terminal_font_size: 200,
             memory_limit_mb: 0,
+            // issue #6-2：每端口预算非法值收敛到 [16, 2048]
+            memory_per_port_budget_mb: 9999,
             max_retries: 0,
             ..AppConfig::default()
         };
@@ -742,7 +762,27 @@ mod tests {
         assert_eq!(cfg.quick_send_inline_count, 20);
         assert_eq!(cfg.terminal_font_size, 48);
         assert_eq!(cfg.memory_limit_mb, 64);
+        assert_eq!(cfg.memory_per_port_budget_mb, 2048);
         assert_eq!(cfg.max_retries, 1);
+    }
+
+    #[test]
+    fn test_memory_per_port_budget_defaults_when_absent() {
+        // issue #6-2：旧 config.json 无 memoryPerPortBudgetMb → 反序列化回退默认 200。
+        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
+            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
+            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
+            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
+            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
+            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
+            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
+            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
+            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
+            "backupDirectory":"","restoreSession":true}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert_eq!(cfg.memory_per_port_budget_mb, 200);
+        // 旧值 memoryLimitMb=1024 保留（前端默认 2048 只影响全新安装）
+        assert_eq!(cfg.memory_limit_mb, 1024);
     }
 
     #[test]

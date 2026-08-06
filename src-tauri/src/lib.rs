@@ -37,12 +37,15 @@ fn format_crash_report(
 /// 应用状态结构体
 /// 通过 Tauri State 在各命令间共享
 pub struct AppState {
-    /// 串口管理器：负责串口的打开/关闭/数据收发
-    pub serial_manager: std::sync::Mutex<serial::SerialManager>,
+    /// 串口管理器：负责串口的打开/关闭/数据收发。
+    /// `Arc<Mutex<..>>`（issue #6-1）：异步命令经 spawn_blocking 把阻塞写
+    /// 挪到独立线程时，需要从 State 克隆出 'static 句柄——Arc 允许克隆，
+    /// `Deref<Target=Mutex<..>>` 使既有 `.lock()` 调用点零改动。
+    pub serial_manager: std::sync::Arc<std::sync::Mutex<serial::SerialManager>>,
     /// 配置管理器：负责读写应用配置（含全部设置实体）
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
-    /// 日志管理器：负责日志文件的写入与管理
-    pub log_manager: std::sync::Mutex<logger::LogManager>,
+    /// 日志管理器：负责日志文件的写入与管理（同 serial_manager 的 Arc 理由）
+    pub log_manager: std::sync::Arc<std::sync::Mutex<logger::LogManager>>,
     /// 诊断日志器：应用自身维测日志（后端 `log::*` + 前端 `console.*` 转发，统一落盘+轮转）
     pub diag_logger: std::sync::Arc<diaglog::DiagLogger>,
     /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）
@@ -85,9 +88,9 @@ impl AppState {
         diag_logger.set_enabled(cfg.diag_log_enabled);
 
         Ok(Self {
-            serial_manager: std::sync::Mutex::new(serial::SerialManager::new()),
+            serial_manager: std::sync::Arc::new(std::sync::Mutex::new(serial::SerialManager::new())),
             config_manager: std::sync::Mutex::new(config_manager),
-            log_manager: std::sync::Mutex::new(log_manager),
+            log_manager: std::sync::Arc::new(std::sync::Mutex::new(log_manager)),
             diag_logger,
             system_info: std::sync::Mutex::new(sysinfo::System::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),

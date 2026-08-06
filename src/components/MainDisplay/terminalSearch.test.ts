@@ -44,8 +44,8 @@ describe('findMatches', () => {
 
   it('searches hex representation when displayFormat is hex', () => {
     const lines = [
-      makeLine({ id: 'a', content: 'ignored', rawData: [0xaa, 0xbb, 0xcc] }),
-      makeLine({ id: 'b', content: 'nope', rawData: [0x01, 0x02] }),
+      makeLine({ id: 'a', content: 'ignored', rawData: new Uint8Array([0xaa, 0xbb, 0xcc]) }),
+      makeLine({ id: 'b', content: 'nope', rawData: new Uint8Array([0x01, 0x02]) }),
     ];
     const matches = findMatches(lines, { query: 'AA BB', caseSensitive: true, displayFormat: 'hex' });
     expect(matches).toEqual([0]);
@@ -59,12 +59,12 @@ describe('findMatches', () => {
 
 describe('getSearchableText', () => {
   it('returns content for string display format', () => {
-    const line = makeLine({ content: 'abc', rawData: [0x61] });
+    const line = makeLine({ content: 'abc', rawData: new Uint8Array([0x61]) });
     expect(getSearchableText(line, 'string')).toBe('abc');
   });
 
   it('returns hex string for hex display format when rawData exists', () => {
-    const line = makeLine({ content: 'ignored', rawData: [0xaa, 0x0f] });
+    const line = makeLine({ content: 'ignored', rawData: new Uint8Array([0xaa, 0x0f]) });
     expect(getSearchableText(line, 'hex')).toBe('AA 0F');
   });
 

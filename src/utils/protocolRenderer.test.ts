@@ -25,7 +25,7 @@ describe('renderProtocolLine', () => {
   it('renders hex mode with a single field spanning all bytes', () => {
     const line = makeLine({
       isHex: true,
-      rawData: [0xFF, 0x00, 0xAB],
+      rawData: new Uint8Array([0xFF, 0x00, 0xAB]),
       parsedFields: [makeField({ name: 'Payload', byteStart: 0, byteEnd: 3, color: '#ff0000' })],
       content: 'FF 00 AB',
     });
@@ -41,7 +41,7 @@ describe('renderProtocolLine', () => {
   it('renders hex mode with multiple adjacent fields in distinct colors', () => {
     const line = makeLine({
       isHex: true,
-      rawData: [0xAA, 0xBB, 0x01, 0x02, 0x0D, 0x0A],
+      rawData: new Uint8Array([0xAA, 0xBB, 0x01, 0x02, 0x0D, 0x0A]),
       parsedFields: [
         { name: 'Header', byteStart: 0, byteEnd: 2, color: '#ff0000' },
         { name: 'Payload', byteStart: 2, byteEnd: 4, color: '#00ff00' },
@@ -65,7 +65,7 @@ describe('renderProtocolLine', () => {
   it('renders text mode with a single field spanning all bytes', () => {
     const line = makeLine({
       isHex: false,
-      rawData: [0x48, 0x65, 0x6C, 0x6C, 0x6F], // "Hello"
+      rawData: new Uint8Array([0x48, 0x65, 0x6C, 0x6C, 0x6F]), // "Hello"
       parsedFields: [makeField({ name: 'Payload', byteStart: 0, byteEnd: 5, color: '#00ff00' })],
       content: 'Hello',
     });
@@ -74,7 +74,7 @@ describe('renderProtocolLine', () => {
   });
 
   it('renders text mode with non-ASCII CJK characters correctly decoded', () => {
-    const cjkBytes = [0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD]; // "你好"
+    const cjkBytes = new Uint8Array([0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD]); // "你好"
     const line = makeLine({
       isHex: false,
       rawData: cjkBytes,
@@ -89,7 +89,7 @@ describe('renderProtocolLine', () => {
 
   it('returns empty string when rawData is empty and parsedFields is empty', () => {
     const line = makeLine({
-      rawData: [],
+      rawData: new Uint8Array(0),
       parsedFields: [],
       content: '',
     });
@@ -99,7 +99,7 @@ describe('renderProtocolLine', () => {
 
   it('falls back to escapeHtml(content) when parsedFields is undefined', () => {
     const line = makeLine({
-      rawData: [0xFF],
+      rawData: new Uint8Array([0xFF]),
       parsedFields: undefined,
       content: 'some & text',
     });
@@ -110,7 +110,7 @@ describe('renderProtocolLine', () => {
   it('renders gap bytes between fields without color styling', () => {
     const line = makeLine({
       isHex: true,
-      rawData: [0xAA, 0xBB, 0xFF, 0xCC],
+      rawData: new Uint8Array([0xAA, 0xBB, 0xFF, 0xCC]),
       parsedFields: [
         makeField({ name: 'Header', byteStart: 0, byteEnd: 2, color: '#ff0000' }),
         makeField({ name: 'Footer', byteStart: 3, byteEnd: 4, color: '#00ff00' }),
@@ -131,7 +131,7 @@ describe('renderProtocolLine', () => {
   it('applies checksum error color to a field', () => {
     const line = makeLine({
       isHex: true,
-      rawData: [0xAA, 0xBB, 0xCC],
+      rawData: new Uint8Array([0xAA, 0xBB, 0xCC]),
       parsedFields: [
         makeField({ name: 'Header', byteStart: 0, byteEnd: 2, color: '#00ff00' }),
         makeField({ name: 'Checksum', byteStart: 2, byteEnd: 3, color: '#f48771' }),

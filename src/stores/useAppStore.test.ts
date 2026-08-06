@@ -83,6 +83,38 @@ describe('Port & Group actions', () => {
     expect(s.groups).toEqual([]);
     expect(s.ports.every(p => p.groupId === undefined)).toBe(true);
   });
+
+  // ===== issue #6-4：排序是一次性重排（含组内顺序），拖拽/分组仍可用 =====
+
+  it('sortPortsByNumber reorders ports naturally (COM1 < COM2 < COM12) in one pass', () => {
+    useAppStore.setState({
+      ports: [makePort('COM12'), makePort('COM2'), makePort('COM1')],
+    });
+    useAppStore.getState().sortPortsByNumber();
+    expect(useAppStore.getState().ports.map(p => p.id)).toEqual(['COM1', 'COM2', 'COM12']);
+  });
+
+  it('sortPortsByNumber reorders group portIds too (persisted via save_port_groups)', () => {
+    useAppStore.setState({
+      ports: [makePort('COM1'), makePort('COM2'), makePort('COM12')],
+      groups: [makeGroup('g1', ['COM12', 'COM1'])],
+    });
+    useAppStore.getState().sortPortsByNumber();
+    const g = useAppStore.getState().groups[0];
+    expect(g.portIds).toEqual(['COM1', 'COM12']);
+  });
+
+  it('sortPortsByNumber is idempotent and does not reset port.groupId', () => {
+    useAppStore.setState({
+      ports: [makePort('COM1', { groupId: 'g1' }), makePort('COM2', { groupId: 'g1' })],
+      groups: [makeGroup('g1', ['COM1', 'COM2'])],
+    });
+    const s = useAppStore.getState();
+    s.sortPortsByNumber();
+    s.sortPortsByNumber();
+    expect(s.ports.map(p => p.id)).toEqual(['COM1', 'COM2']);
+    expect(s.ports.every(p => p.groupId === 'g1')).toBe(true);
+  });
 });
 
 // ==================== Group B: Tabs & Panes ====================
@@ -363,7 +395,7 @@ describe('Terminal line actions', () => {
     expect(lines.map(l => l.id)).toEqual(['l1', 'l2']);
   });
 
-  it('appendTerminalLine drops oldest when exceeding maxLines (ring buffer)', () => {
+  it('appendTerminalLine trims to half when exceeding maxLines (issue #6-2)', () => {
     useTerminalStore.getState().ensureTerminal('COM1');
     useTerminalStore.setState((state) => {
       state.terminals['COM1'].maxLines = 3;
@@ -372,9 +404,9 @@ describe('Terminal line actions', () => {
     append('COM1', makeLine('l1'));
     append('COM1', makeLine('l2'));
     append('COM1', makeLine('l3'));
-    append('COM1', makeLine('l4')); // l1 should be evicted
+    append('COM1', makeLine('l4')); // 4 > 3 → 一次性裁到一半 → 保留 2 行
     const lines = useTerminalStore.getState().terminals['COM1'].lines;
-    expect(lines.map(l => l.id)).toEqual(['l2', 'l3', 'l4']);
+    expect(lines.map(l => l.id)).toEqual(['l3', 'l4']);
   });
 
   it('clearTerminal empties lines but preserves config (scrollLocked, displayFormat)', () => {
@@ -434,11 +466,13 @@ describe('Config actions', () => {
   });
 
   it('resetConfig restores all defaults', () => {
-    useAppStore.getState().setConfig({ theme: 'light', memoryLimitMb: 500 });
+    useAppStore.getState().setConfig({ theme: 'light', memoryLimitMb: 500, memoryPerPortBudgetMb: 50 });
     useAppStore.getState().resetConfig();
     const c = useAppStore.getState().config;
     expect(c.theme).toBe('dark');
-    expect(c.memoryLimitMb).toBe(1024);
+    // issue #6-2：总预算默认 2048，每端口默认 200
+    expect(c.memoryLimitMb).toBe(2048);
+    expect(c.memoryPerPortBudgetMb).toBe(200);
   });
 
   it('terminalFontSize config is persisted after setConfig', () => {
@@ -591,8 +625,8 @@ describe('Simulation Mode', () => {
 // ==================== Group K: Edge Cases ====================
 
 describe('Edge cases', () => {
-  it('openTab with memoryLimitMb=0 uses default maxLines=10000', () => {
-    useAppStore.getState().setConfig({ memoryLimitMb: 0 });
+  it('openTab with memoryPerPortBudgetMb=0 uses default maxLines=10000', () => {
+    useAppStore.getState().setConfig({ memoryPerPortBudgetMb: 0 });
     useAppStore.setState({ ports: [makePort('COM1')] });
     useAppStore.getState().openTab('COM1');
     // Terminal is now in useTerminalStore; openTab in useAppStore still creates tab

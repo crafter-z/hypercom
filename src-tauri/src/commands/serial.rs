@@ -69,7 +69,7 @@ pub fn close_serial_port(port_id: String, state: State<AppState>) -> Result<(), 
 }
 
 /// 向串口发送数据
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SendDataArgs {
     pub port_id: String,
     pub data: String,
@@ -77,38 +77,61 @@ pub struct SendDataArgs {
     pub append_line_ending: String,
 }
 
+/// 向串口发送数据（异步非阻塞，issue #6-1）。
+///
+/// 旧实现是同步命令（pub fn）：Tauri 的同步命令在事件循环主线程上同步执行，
+/// 内部每次调用都无条件执行「拿 serial_manager 锁 → write_all+flush 写串口 →
+/// 拿 log_manager 锁 → BufWriter 写日志」。这些阻塞 IO 跑完前主线程无法处理
+/// 重绘/点击/RX 刷新——每次发送都无条件卡顿，长期占用主线程还会错过 tao 的
+/// RedrawEventsCleared 窗口，触发 NewEvents/RedrawEventsCleared 警告与白屏
+/// （与 RX 数据量无关，纯发送路径自身阻塞）。
+///
+/// 修法：改 async fn（命令移到 tokio 运行时，不再占主线程），再经
+/// `spawn_blocking` 把串口 IO 与日志写放到独立线程池——主线程发完命令立即返回。
+/// `send_file` 本就是 async fn（tokio::fs::read + 分块间 yield），无同类主线程
+/// 阻塞点；其分块写入的阻塞上限是单块大小，可接受。
 #[tauri::command]
-pub fn send_serial_data(args: SendDataArgs, state: State<AppState>) -> Result<usize, CommandError> {
-    let n = {
-        let manager = state
-            .serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .send_data(
-                &args.port_id,
-                &args.data,
-                args.is_hex,
-                &args.append_line_ending,
-            )
-            .map_err(|e| {
-                log::warn!("Failed to send data to {}: {}", args.port_id, e);
-                CommandError::Serial(e.to_string())
-            })?
-    };
-    // Write TX data to log if a writer exists
-    let timestamp = chrono::Local::now()
-        .format("%Y-%m-%d %H:%M:%S%.3f")
-        .to_string();
-    // 用与发送路径完全相同的 build_tx_bytes 还原写入串口的字节序列，
-    // 使日志 TX 字节 == 实际发送字节（消除 SIM / 文本带行结束符的三处字节数不一致）。
-    // 解析失败时仅记录文本字节；HEX 解析在前面 send_data 已成功，理论上不会失败。
-    let log_data = serial::build_tx_bytes(&args.data, args.is_hex, &args.append_line_ending)
-        .unwrap_or_else(|_| args.data.as_bytes().to_vec());
-    if let Ok(mut log_mgr) = state.log_manager.lock() {
-        let _ = log_mgr.write(&args.port_id, &timestamp, "TX", &log_data);
-    }
-    Ok(n)
+pub async fn send_serial_data(
+    args: SendDataArgs,
+    state: State<'_, AppState>,
+) -> Result<usize, CommandError> {
+    // 从 State 克隆出 'static 的 Arc 句柄供 spawn_blocking 闭包使用
+    // （AppState 的 serial_manager / log_manager 是 Arc<Mutex<..>>）。
+    let serial_manager = state.serial_manager.clone();
+    let log_manager = state.log_manager.clone();
+    let port_id = args.port_id.clone();
+    let data = args.data.clone();
+    let is_hex = args.is_hex;
+    let append_line_ending = args.append_line_ending.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let n = {
+            let manager = serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            manager
+                .send_data(&port_id, &data, is_hex, &append_line_ending)
+                .map_err(|e| {
+                    log::warn!("Failed to send data to {}: {}", port_id, e);
+                    CommandError::Serial(e.to_string())
+                })?
+        };
+        // Write TX data to log if a writer exists
+        let timestamp = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string();
+        // 用与发送路径完全相同的 build_tx_bytes 还原写入串口的字节序列，
+        // 使日志 TX 字节 == 实际发送字节（消除 SIM / 文本带行结束符的三处字节数不一致）。
+        // 解析失败时仅记录文本字节；HEX 解析在前面 send_data 已成功，理论上不会失败。
+        let log_data = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
+            .unwrap_or_else(|_| data.as_bytes().to_vec());
+        if let Ok(mut log_mgr) = log_manager.lock() {
+            let _ = log_mgr.write(&port_id, &timestamp, "TX", &log_data);
+        }
+        Ok(n)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("Send task panicked: {e}")))?
 }
 
 /// 文件发送进度事件 payload

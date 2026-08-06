@@ -18,6 +18,7 @@ import type {
   UIState,
 } from '../types';
 import { useTerminalStore } from './useTerminalStore';
+import { naturalCompare, sortPortsByNatural } from '../utils/portSort';
 
 // ==================== 分屏树辅助函数 ====================
 
@@ -136,7 +137,9 @@ function pruneTree(tree: PaneNode): PaneNode {
 
 const defaultConfig: AppConfig = {
   closeBehavior: 'exit',
-  memoryLimitMb: 1024,
+  // issue #6-2：总预算默认 2048MB（含 webview 占用），每端口默认 200MB
+  memoryLimitMb: 2048,
+  memoryPerPortBudgetMb: 200,
   language: 'zh-CN',
   theme: 'dark',
   preventScreenOff: false,
@@ -266,6 +269,9 @@ interface AppState {
   // 拖拽排序
   reorderPorts: (fromIndex: number, toIndex: number) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
+  /** issue #6-4：按端口号自然序一次性重排（非持久模式）。排序后仍可拖拽调整、
+   *  操作分组；组内顺序随 save_port_groups 持久化，未分组顺序只影响本次会话。 */
+  sortPortsByNumber: () => void;
 
   // 会话恢复
   restoreSessionSnapshot: (snapshot: {
@@ -290,7 +296,7 @@ export const useAppStore = create<AppState>()(
     systemStatus: {
       status: '运行正常',
       memoryUsedMb: 0,
-      memoryLimitMb: 1024,
+      memoryLimitMb: 2048,
       cpuUsage: 0,
     },
     trafficStats: {},
@@ -681,6 +687,16 @@ closeOtherTabs: (tabId) => set((state) => {
       ) return;
       const [moved] = state.ports.splice(fromIndex, 1);
       state.ports.splice(toIndex, 0, moved);
+    }),
+
+    // issue #6-4：排序是一次性动作而非持久开关——直接重排 ports 数组并同步重排
+    // 各分组 portIds（组内顺序随 save_port_groups 自动持久化）。排序后拖拽/分组
+    // 操作照常可用（不再有 sortMode 禁用拖拽的窗口期）。
+    sortPortsByNumber: () => set((state) => {
+      state.ports = sortPortsByNatural(state.ports);
+      for (const group of state.groups) {
+        group.portIds = [...group.portIds].sort(naturalCompare);
+      }
     }),
 
     reorderTabs: (fromIndex, toIndex) => set((state) => {

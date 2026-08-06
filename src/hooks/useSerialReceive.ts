@@ -123,13 +123,15 @@ export function useSerialReceive() {
               if (seg.kind === 'frame') {
                 // Frames are self-contained — a fresh per-frame decode is
                 // correct here (no char can straddle two frames).
-                const frameText = pipeline.decodeText(portId, seg.frame.bytes);
+                const frameBytes = new Uint8Array(seg.frame.bytes);
+                const frameText = pipeline.decodeText(portId, frameBytes);
                 pipeline.enqueueLines(portId, [{
                   id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                   timestamp: event.timestamp,
                   direction: event.direction as 'RX' | 'TX',
                   content: frameText,
-                  rawData: seg.frame.bytes,
+                  // issue #6-2：rawData 存 Uint8Array（省内存 + 免解码临时拷贝）
+                  rawData: frameBytes,
                   isHex: event.is_hex,
                   parsedFields: seg.frame.fields,
                 }]);

@@ -20,6 +20,29 @@ import type { TerminalLine } from '../types';
 import { RxLineAssembler } from './rxAssembler';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
+import { useToastStore } from '../stores/useToastStore';
+import i18n from '../i18n';
+
+/** 每端口内存裁剪 toast 节流：同一端口在窗口内至多提示一次，避免高频 RX 刷屏。 */
+const TRIM_TOAST_THROTTLE_MS = 10_000;
+const trimToastLastAt = new Map<string, number>();
+
+/**
+ * 因内存限制清屏的通知（issue #6-2）。由 RxPipeline 接线层在 store 返回
+ * trimmed=true 时触发（store 保持纯净，避免 useToastStore→i18n→useAppStore
+ * 的模块级循环依赖）。
+ */
+function notifyMemoryTrim(portId: string): void {
+  const now = Date.now();
+  if (now - (trimToastLastAt.get(portId) ?? 0) >= TRIM_TOAST_THROTTLE_MS) {
+    trimToastLastAt.set(portId, now);
+    useToastStore.getState().push({
+      severity: 'warning',
+      message: i18n.t('toast.memoryTrim', { port: portId }),
+      durationMs: 5000,
+    });
+  }
+}
 
 export interface RxPipelineOptions {
   /** 批量写入终端 store（每端口每 tick 一次） */
@@ -32,6 +55,10 @@ export interface RxPipelineOptions {
   silenceFlushMs?: number;
   /** 转发给组装器的强制发射阈值（字节）。默认 4096 */
   maxPendingBytes?: number;
+  /** 每端口每 tick 最多写入 store 的行数（issue #6-2 写量限制）。
+   *  超出部分留在队列里，下一帧继续写——避免高频大缓冲一次性 append 阻塞
+   *  主线程（tao 事件循环错过 RedrawEventsCleared 的同类根因）。默认 2000 */
+  maxLinesPerTick?: number;
   /** 调度批写 tick；可注入以便测试。默认 requestAnimationFrame，不可用时 setTimeout(cb,16) */
   scheduleFlush?: (cb: () => void) => number;
   /** 取消批写 tick，与 scheduleFlush 配对 */
@@ -53,6 +80,7 @@ interface PortRxState {
 
 const DEFAULT_SILENCE_FLUSH_MS = 250;
 const DEFAULT_MAX_PENDING_BYTES = 4096;
+const DEFAULT_MAX_LINES_PER_TICK = 2000;
 const FALLBACK_TICK_MS = 16;
 
 /** 行 ID 格式与代码库其它写入点一致 */
@@ -74,6 +102,7 @@ export class RxPipeline {
   private readonly opts: RxPipelineOptions;
   private readonly silenceFlushMs: number;
   private readonly maxPendingBytes: number;
+  private readonly maxLinesPerTick: number;
   private readonly scheduleFlush: (cb: () => void) => number;
   private readonly cancelFlush: (handle: number) => void;
   private readonly ports = new Map<string, PortRxState>();
@@ -84,6 +113,7 @@ export class RxPipeline {
     this.opts = opts;
     this.silenceFlushMs = opts.silenceFlushMs ?? DEFAULT_SILENCE_FLUSH_MS;
     this.maxPendingBytes = opts.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES;
+    this.maxLinesPerTick = opts.maxLinesPerTick ?? DEFAULT_MAX_LINES_PER_TICK;
     this.scheduleFlush = opts.scheduleFlush ?? defaultScheduleFlush;
     this.cancelFlush = opts.cancelFlush ?? defaultCancelFlush;
   }
@@ -93,7 +123,7 @@ export class RxPipeline {
    * 组装器切出的完成行解码后入队并调度批写；若仍有未终结尾部则（重新）武装
    * 静默定时器。流量统计不归这里管——由事件处理器在调用前完成。
    */
-  feedBytes(portId: string, bytes: number[], timestamp: number): void {
+  feedBytes(portId: string, bytes: number[] | Uint8Array, timestamp: number): void {
     if (bytes.length === 0) return;
     const state = this.getPortState(portId);
     state.lastEventTs = timestamp;
@@ -101,7 +131,10 @@ export class RxPipeline {
     if (chunks.length > 0) {
       const ignoreEmptyChars = this.opts.getIgnoreEmptyChars();
       for (const chunk of chunks) {
-        const text = this.decodeUnderCurrentLabel(state, portId, chunk);
+        // issue #6-2 内存瘦身：chunk（number[]）转 Uint8Array 后**同一份**既用于
+        // 解码又存进 rawData——比旧的「解码临时拷贝 + number[] 存 rawData」省一份。
+        const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        const text = this.decodeUnderCurrentLabel(state, portId, raw);
         // ignoreEmptyChars 语义与旧路径一致：解码后 trim 为空（纯分隔/空白）的行丢弃
         if (ignoreEmptyChars && !text.trim()) continue;
         state.queue.push({
@@ -109,7 +142,7 @@ export class RxPipeline {
           timestamp,
           direction: 'RX',
           content: text,
-          rawData: chunk,
+          rawData: raw,
           isHex: false,
         });
       }
@@ -132,19 +165,30 @@ export class RxPipeline {
   /**
    * 用端口当前编码的缓存解码器解码一段字节（协议帧自成单元、不跨行，
    * 用非流式解码即可）。对 label 变化自动切换解码器。
+   * 输入可为 number[]（事件 payload / 协议帧）或 Uint8Array（feedBytes 已转换）。
    */
-  decodeText(portId: string, bytes: number[]): string {
+  decodeText(portId: string, bytes: number[] | Uint8Array): string {
     const state = this.getPortState(portId);
     return this.decodeUnderCurrentLabel(state, portId, bytes);
   }
 
-  /** 同步排空该端口队列（写入 store）。发送 TX 回显前调用以恢复收发时序 */
+  /**
+   * 同步排空该端口队列（写入 store）。发送 TX 回显前调用以恢复收发时序。
+   *
+   * issue #6-2 写量限制：单次同步最多写 maxLinesPerTick 行，超出部分留在队列
+   * 里由 rAF 续写——高频大缓冲下 flushNow 不再一次性阻塞主线程（旧实现同步
+   * 全排空是 TX 卡顿/tao 警告的另一同源根因）。
+   */
   flushNow(portId: string): void {
     const state = this.ports.get(portId);
     if (!state || state.queue.length === 0) return;
-    const lines = state.queue;
-    state.queue = [];
+    const take = Math.min(state.queue.length, this.maxLinesPerTick);
+    const lines = state.queue.splice(0, take);
     this.opts.appendLines(portId, lines);
+    if (state.queue.length > 0) {
+      // 剩余行顺延到下一 tick 续写，避免同步写爆主线程
+      this.scheduleTick();
+    }
   }
 
   /**
@@ -156,12 +200,13 @@ export class RxPipeline {
     if (!state) return;
     const tail = state.assembler.takeTail();
     if (tail.length === 0) return;
+    const raw = new Uint8Array(tail);
     state.queue.push({
       id: makeLineId(),
       timestamp: state.lastEventTs ?? Date.now(),
       direction: 'RX',
-      content: this.decodeUnderCurrentLabel(state, portId, tail),
-      rawData: tail,
+      content: this.decodeUnderCurrentLabel(state, portId, raw),
+      rawData: raw,
       isHex: false,
     });
   }
@@ -228,7 +273,11 @@ export class RxPipeline {
   }
 
   /** 按端口当前 label 取（或惰性创建）缓存解码器后解码 */
-  private decodeUnderCurrentLabel(state: PortRxState, portId: string, bytes: number[]): string {
+  private decodeUnderCurrentLabel(
+    state: PortRxState,
+    portId: string,
+    bytes: number[] | Uint8Array,
+  ): string {
     const label = this.opts.getEncodingLabel(portId);
     let decoder = state.decoders.get(label);
     if (!decoder) {
@@ -240,7 +289,8 @@ export class RxPipeline {
       }
       state.decoders.set(label, decoder);
     }
-    return decoder.decode(new Uint8Array(bytes));
+    // issue #6-2：已传 Uint8Array（feedBytes 转换的 raw）时不再次拷贝
+    return decoder.decode(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
   }
 
   /** 调度全管线唯一的批写 tick；tick 内对每个有排队的端口各做一次 appendLines */
@@ -250,9 +300,14 @@ export class RxPipeline {
       this.flushTickHandle = null;
       for (const [portId, state] of this.ports) {
         if (state.queue.length > 0) {
-          const lines = state.queue;
-          state.queue = [];
+          // 每端口每帧最多写 maxLinesPerTick 行（issue #6-2）：超出顺延到下一帧，
+          // 避免一次 append 数千行阻塞主线程；队列仍在增长时下一帧继续写。
+          const take = Math.min(state.queue.length, this.maxLinesPerTick);
+          const lines = state.queue.splice(0, take);
           this.opts.appendLines(portId, lines);
+          if (state.queue.length > 0) {
+            this.scheduleTick();
+          }
         }
       }
     });
@@ -295,7 +350,10 @@ export function getRxPipeline(): RxPipeline {
   if (!rxPipelineSingleton) {
     rxPipelineSingleton = new RxPipeline({
       appendLines: (portId, lines) => {
-        useTerminalStore.getState().appendTerminalLines(portId, lines);
+        // issue #6-2：裁剪由 store 判定（返回 true 表示超预算已裁最早一半屏），
+        // 接线层负责弹「因内存限制清屏」的通知。
+        const trimmed = useTerminalStore.getState().appendTerminalLines(portId, lines);
+        if (trimmed) notifyMemoryTrim(portId);
       },
       getEncodingLabel: (portId) => {
         const encoding = useTerminalStore.getState().terminals[portId]?.encoding || 'UTF-8';

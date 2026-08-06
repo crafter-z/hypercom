@@ -38,7 +38,7 @@ function getFieldForByte(fields: ParsedField[], byteIndex: number): ParsedField 
  * Consecutive bytes belonging to the same field are grouped into one <span>.
  * Gap bytes are rendered without color.
  */
-function renderHexMode(rawData: number[], coverage: (ParsedField | null)[]): string {
+function renderHexMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): string {
   const parts: string[] = [];
   let i = 0;
   while (i < rawData.length) {
@@ -64,7 +64,7 @@ function renderHexMode(rawData: number[], coverage: (ParsedField | null)[]): str
  * Field groups are wrapped in colored <span> tags.
  * Gap groups are rendered as plain escaped text.
  */
-function renderTextMode(rawData: number[], coverage: (ParsedField | null)[]): string {
+function renderTextMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): string {
   const parts: string[] = [];
   let i = 0;
   while (i < rawData.length) {
@@ -110,7 +110,10 @@ export function renderProtocolLine(line: TerminalLine): string {
   const rawData = line.rawData;
 
   // Build coverage map: for each byte index, which field it belongs to (or null for gap)
-  const coverage: (ParsedField | null)[] = rawData.map((_, i) => getFieldForByte(fields, i));
+  // Uint8Array 无 .map：Array.from 逐索引映射（issue #6-2）
+  const coverage: (ParsedField | null)[] = Array.from({ length: rawData.length }, (_, i) =>
+    getFieldForByte(fields, i)
+  );
 
   if (line.isHex) {
     return renderHexMode(rawData, coverage);

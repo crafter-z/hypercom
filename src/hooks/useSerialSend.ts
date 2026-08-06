@@ -73,14 +73,17 @@ export async function sendToPort(
   // HEX/string display toggle + CSV export):
   //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
   //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
-  const txRawData: number[] = isHex
-    ? data
-        .trim()
-        .split(/\s+/)
-        .filter((tok) => tok.length > 0)
-        .map((tok) => parseInt(tok, 16))
-        .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
-    : Array.from(new TextEncoder().encode(data));
+  // issue #6-2：存 Uint8Array（与 RX 行一致，省内存、类型统一）
+  const txRawData: Uint8Array = isHex
+    ? Uint8Array.from(
+        data
+          .trim()
+          .split(/\s+/)
+          .filter((tok) => tok.length > 0)
+          .map((tok) => parseInt(tok, 16))
+          .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
+      )
+    : new TextEncoder().encode(data);
 
   // Drain any pending RX lines from the pipeline queue BEFORE appending the
   // TX echo. With RX now batched up to one animation frame, a zero-delay

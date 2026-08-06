@@ -1,5 +1,6 @@
 use serde::Serialize;
 use tauri::State;
+use sysinfo::ProcessRefreshKind;
 
 use super::CommandError;
 use crate::AppState;
@@ -28,6 +29,30 @@ fn load_status(cpu: f32, used_mb: u64, limit_mb: u64) -> &'static str {
     }
 }
 
+/// 收集本进程 + 全部后代进程的 PID 集合（自底向上扩散，最多一轮全表扫描）。
+/// WebView2/Chromium 的渲染/工具/GPU 子进程都挂在 host 进程之下，需要一并计入
+/// 「软件自身内存」；纯函数、可注入进程表，便于单测（issue #6-6）。
+fn collect_app_pids(
+    own_pid: Option<sysinfo::Pid>,
+    processes: &std::collections::HashMap<sysinfo::Pid, sysinfo::Process>,
+) -> std::collections::HashSet<sysinfo::Pid> {
+    let mut pids: std::collections::HashSet<sysinfo::Pid> = std::collections::HashSet::new();
+    if let Some(pid) = own_pid {
+        pids.insert(pid);
+    }
+    let mut changed = !pids.is_empty();
+    while changed {
+        changed = false;
+        for (pid, proc_) in processes.iter() {
+            if !pids.contains(pid) && proc_.parent().map_or(false, |p| pids.contains(&p)) {
+                pids.insert(*pid);
+                changed = true;
+            }
+        }
+    }
+    pids
+}
+
 #[tauri::command]
 pub fn get_system_status(state: State<AppState>) -> Result<SystemStatus, CommandError> {
     let memory_limit_mb = match state.config_manager.lock() {
@@ -38,13 +63,26 @@ pub fn get_system_status(state: State<AppState>) -> Result<SystemStatus, Command
         }
     };
 
-    // 增量刷新缓存的 System 实例 — 仅刷新内存与全部 CPU，避免每次 new_all() + refresh_all() 的高开销
-    let (used_memory, cpu_usage) = match state.system_info.lock() {
+    // 增量刷新缓存的 System 实例。内存改为【应用进程级】：本进程 + 全部后代
+    // 进程（含 WebView2 子进程）的 RSS 之和。旧实现取系统级 used_memory——
+    // webview 是独立进程，系统级读数既不反映本软件占用，且永远大于总预算
+    // 导致状态恒为 high_load（issue #6-6）。CPU 仍取系统级（load_status 的
+    // 90% 阈值语义不变）。
+    let (app_memory_used, cpu_usage) = match state.system_info.lock() {
         Ok(mut system) => {
-            system.refresh_memory();
-            system.refresh_cpu_all();
-
-            let used_memory = memory_used_mb(system.used_memory());
+            // 进程级内存 + CPU 采样（跳过 disk/exe，避免无谓开销）
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().with_memory().with_cpu(),
+            );
+            let app_pids = collect_app_pids(sysinfo::get_current_pid().ok(), system.processes());
+            let app_memory_bytes: u64 = system
+                .processes()
+                .iter()
+                .filter(|(pid, _)| app_pids.contains(pid))
+                .map(|(_, proc_)| proc_.memory())
+                .sum();
 
             let cpu_usage = if system.cpus().is_empty() {
                 0.0
@@ -53,7 +91,7 @@ pub fn get_system_status(state: State<AppState>) -> Result<SystemStatus, Command
                 total / system.cpus().len() as f32
             };
 
-            (used_memory, cpu_usage)
+            (memory_used_mb(app_memory_bytes), cpu_usage)
         }
         Err(e) => {
             log::warn!("system_info lock failed: {e}");
@@ -61,11 +99,11 @@ pub fn get_system_status(state: State<AppState>) -> Result<SystemStatus, Command
         }
     };
 
-    let status = load_status(cpu_usage, used_memory, memory_limit_mb).to_string();
+    let status = load_status(cpu_usage, app_memory_used, memory_limit_mb).to_string();
 
     Ok(SystemStatus {
         status,
-        memory_used_mb: used_memory,
+        memory_used_mb: app_memory_used,
         memory_limit_mb,
         cpu_usage: (cpu_usage * 10.0).round() / 10.0,
     })
@@ -88,6 +126,7 @@ pub fn prevent_sleep(enable: bool) -> Result<(), CommandError> {
 
 #[cfg(test)]
 mod tests {
+    use super::collect_app_pids;
     use super::load_status;
     use super::memory_used_mb;
 
@@ -141,5 +180,42 @@ mod tests {
     #[test]
     fn load_status_both_below_thresholds_is_normal() {
         assert_eq!(load_status(50.0, 512, 1024), "normal");
+    }
+
+    // ===== issue #6-6：进程级内存的 PID 收集 =====
+
+    #[test]
+    fn collect_app_pids_includes_self_and_children() {
+        // 直接验证 collect_app_pids 在空表 / 仅自身 / 带子进程表上的行为。
+        // sysinfo::Process 构造不可用，这里用最小可测面：空表 + 自身。
+        let empty: std::collections::HashMap<sysinfo::Pid, sysinfo::Process> =
+            std::collections::HashMap::new();
+        let none = collect_app_pids(None, &empty);
+        assert!(none.is_empty(), "no own pid + empty table -> empty set");
+
+        let own = sysinfo::get_current_pid().ok();
+        let only_self = collect_app_pids(own, &empty);
+        if let Some(pid) = own {
+            assert!(only_self.contains(&pid));
+            assert_eq!(only_self.len(), 1);
+        } else {
+            assert!(only_self.is_empty());
+        }
+    }
+
+    #[test]
+    fn collect_app_pids_never_panics_on_real_process_table() {
+        // 用真实进程表跑一遍扩散逻辑，验证不会 panic、且必然包含本进程。
+        let mut system = sysinfo::System::new_all();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        let own = sysinfo::get_current_pid().ok();
+        let pids = collect_app_pids(own, system.processes());
+        if let Some(pid) = own {
+            assert!(pids.contains(&pid), "own pid must be in the collected set");
+        }
     }
 }

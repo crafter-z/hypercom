@@ -17,6 +17,7 @@ const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
   const closeBehavior = useAppStore(s => s.config.closeBehavior);
   const memoryLimitMb = useAppStore(s => s.config.memoryLimitMb);
+  const memoryPerPortBudgetMb = useAppStore(s => s.config.memoryPerPortBudgetMb);
   const language = useAppStore(s => s.config.language);
   const theme = useAppStore(s => s.config.theme);
   const preventScreenOff = useAppStore(s => s.config.preventScreenOff);
@@ -114,16 +115,30 @@ const GeneralSettings: React.FC = () => {
         </select>
       </div>
 
-      <div className="config-row">
+      {/* issue #6-2：内存预算拆为「总预算（软兜底）」+「每端口预算（硬约束）」双配置 */}
+      <div className="config-row" title={t('generalSettings.memoryLimitHint')}>
         <label>{t('generalSettings.memoryLimitLabel')}</label>
         <input
           className="input"
           type="number"
           value={memoryLimitMb}
-          onChange={(e) => setConfig({ memoryLimitMb: clampNumber(e.target.value, 64, 4096) })}
+          onChange={(e) => setConfig({ memoryLimitMb: clampNumber(e.target.value, 64, 8192) })}
           min={64}
-          max={4096}
+          max={8192}
           step={64}
+        />
+      </div>
+
+      <div className="config-row" title={t('generalSettings.memoryPerPortBudgetHint')}>
+        <label>{t('generalSettings.memoryPerPortBudgetLabel')}</label>
+        <input
+          className="input"
+          type="number"
+          value={memoryPerPortBudgetMb}
+          onChange={(e) => setConfig({ memoryPerPortBudgetMb: clampNumber(e.target.value, 16, 2048) })}
+          min={16}
+          max={2048}
+          step={16}
         />
       </div>
 

@@ -23,9 +23,7 @@ export function getSearchableText(
   displayFormat?: DisplayFormat
 ): string {
   if (displayFormat === 'hex' && line.rawData) {
-    return line.rawData
-      .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
-      .join(' ');
+    return Array.from(line.rawData, (b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
   }
   return line.content;
 }
