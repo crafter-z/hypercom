@@ -22,7 +22,7 @@
 - 📑 **多标签 + 分屏** — 上下/左右分屏、跨 Pane 拖拽、`@dnd-kit` 排序
 - ⏪ **日志回放** — 按原始时间戳写回终端，倍速可选（1/4/16/最快）
 - ⚡ **虚拟滚动** — `@tanstack/react-virtual`，DOM 约 30–50 节点
-- 🧩 **RX 行聚合** — 字节级 CR/LF/CRLF 切行 + rAF 批写，跨事件响应不再碎成多行；写量限制（每帧每端口 2000 行封顶）与内存预算裁剪（超限自动清掉最早一半）防长时间运行内存暴涨
+- 🧩 **RX 行聚合** — 字节级 CR/LF/CRLF 切行 + rAF 批写，跨事件响应不再碎成多行；写量限制（每帧每端口 2000 行封顶）与内存预算裁剪（超限自动清掉最早一半）防长时间运行内存暴涨；窗口最小化/隐藏时以 setTimeout 兜底排空（不依赖 rAF），每端口队列设上限防隐藏期间无界积压
 - 📌 **滚动锁定 + 快捷跳转** — 显式意图锁定（不再被输出顶开），滚动条两端一键到顶/到底；跟随路径双 rAF 测量钉底，高频输出不掉位
 - 🎨 **语法高亮** — 正则 / 关键词规则集，可配置颜色、加粗、斜体
 - 📅 **时间戳 / TX·RX 着色** — 多种格式、字符串/HEX/二进制切换（per-tab）
@@ -31,6 +31,7 @@
 
 ### 收发与命令
 - ✉️ **手动发送** — 字符串 / HEX（双向转换、输入净化）/ 自定义行结束符
+- 🔀 **读写句柄独立** — 发送与接收各占独立句柄（try_clone），发送阻塞不再影响接收读取，设备响应即时上屏；热路径不再等待物理发完（移除无界 flush），写入带总期限保护
 - ⚡ **快捷发送条** — 宽度自适应，pill 两行显示名称（含 HEX 徽标）与内容，首槽固定「打开命令面板」按钮，溢出收进 `⋯ +N`
 - 🪟 **命令面板** — 列表 / 文本双模式：列表模式支持行内编辑（名称/内容/行结束符/STR·HEX 直接落盘），文本模式大文本域逐行发送（当前行 / 全部顺序 / 从光标 / 循环至停止 / **执行当前行并移至下一行**）
 - 🚫 **未连接提醒** — 发送目标端口未打开时弹警告 toast；循环发送 / 触发自动回复静默跳过，不打断流程
@@ -133,9 +134,9 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (519 cases / 27 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (106 cases)
-npx playwright test                                    # E2E 冒烟 (8 tests)
+npm run test:run                                       # vitest (527 cases / 27 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (112 cases)
+npx playwright test                                    # E2E 冒烟 (10 tests)
 ```
 
 ---

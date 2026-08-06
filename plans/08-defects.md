@@ -6,6 +6,19 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-06 issue #6 遗留：TX 后长时间收不到响应根因——读写句柄拆分 + 无界 flush 摘除 + 前端隐藏排空)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 527/527 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 112/112, `npx playwright test` 10/10。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `serial/mod.rs` + `commands/serial.rs` | TX 后长时间收不到响应（issue #6-10）：① TX 的 write_all+flush 与 RX 读线程共用同一把 per-port `Mutex<Box<dyn SerialPort>>`；② Windows `flush()` = `FlushFileBuffers` 无超时、受流控约束（CTS 拉低/XOFF 时无界阻塞）——阻塞期间端口锁被 TX 独占，RX 读线程被饿死，设备响应早已到达 OS 接收缓冲却直到 TX 释放锁才被读出；③ 附带：TX 阻塞期间还持有全局 serial_manager 锁，端口列表轮询/其它端口命令被卡 | 方案1：`SerialPortHandle` 经 `try_clone()`（Windows = DuplicateHandle，crate 以 dwShareMode=0 打开故不能二次 CreateFile）拆 read_port/write_port 双句柄——读线程只锁读、发送只锁写，TX 阻塞不再饿死 RX；方案2：热路径摘除 `flush()`（唯一无界阻塞点）+ 新 `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 重试到期限、Interrupted 继续，防长 payload 无限循环）；发送改**两段式**——全局锁内 `get_write_handle` 只做 HashMap 查找 + Arc 克隆，锁外只持 per-port 写锁写（不再持全局锁执行写）；`set_params`/`set_flow_control` 同时锁读写句柄（DCB/COMMTIMEOUTS 设备级、两句柄共享，改参避开另一句柄 I/O） |
+| MEDIUM | `rxPipeline.ts` | 前端管线排空依赖 rAF（issue #6-10 补漏）：document.hidden 时 rAF 停摆，队列里的行永远写不进 store；隐藏窗口长时间 RX 无界积压 | 方案3：默认调度器 visibility-aware（页面可见且 rAF 可用 → rAF；隐藏/无 rAF → setTimeout(16ms) 兜底排空）+ 构造时注册 `visibilitychange` 监听（隐藏 → 取消未触发 rAF tick 按当前可见性重排；可见 → 重排回 rAF）+ 每端口队列上限 `maxQueuedLines`（默认 10000，超限丢弃**最旧**）；`defaultCancelFlush` 改同时调用 cancelAnimationFrame + clearTimeout（两种句柄命名空间不同、对错误 id 均静默 no-op，保证 visibility 切换后的 tick 总能真正取消） |
+
+架构变化：`SerialPortHandle.port` → `read_port`/`write_port` 双 `Arc<Mutex<..>>`；热路径不再调用 `flush()`；新模块级 `write_all_with_deadline` + `pub const WRITE_TOTAL_DEADLINE`；新 `SerialManager::get_write_handle`；`send_serial_data`/`send_file`（逐 chunk）改两段式发送（SIM 仍锁内 channel 发送）；`RxPipeline` 新增 `maxQueuedLines`/`isDocumentHidden` 注入 + visibilitychange 监听（dispose 移除）。
+
+测试新增：后端 `write_all_with_deadline` 6 例（正常写/部分写/0 字节/恒 TimedOut 超时/Interrupted 重试/空 payload，纯 std mock 在 Windows 亦可运行）+ `get_write_handle` 错误路径 1 例（非 Windows）；前端 rxPipeline 8 例（队列上限 4 + visibility-aware 4）；e2e 2 例（RX 数据渲染 + 隐藏窗口排空，TAURI_MOCK 扩展事件分发）。
+
 ## 已修复 (2026-08-06 issue #6 九项：发送异步化 · 双层内存预算+rawData 瘦身+写量限制 · 文本模式新按钮 · 排序一次性 · 串口右键分组 · 进程级内存 · 通知框加大 · 框选不关闭 · 两行 pill)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 519/519 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 106/106, `npx playwright test` 8/8。
