@@ -4,6 +4,7 @@ import { Pin, PinOff, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { popoutService } from '../../services/tauri';
 import { popoutLabel } from './popoutLabel';
+import { useTextEditContextMenu } from '../shared/TextEditContextMenu';
 import QuickSendPanel from './QuickSendPanel';
 import TerminalPopout from './TerminalPopout';
 
@@ -36,6 +37,8 @@ const PopoutContent: React.FC<{ kind: string; targetId: string | null }> = ({ ki
 const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
   const { t } = useTranslation();
   const [pinned, setPinned] = useState(true); // 建窗默认 always_on_top(true)
+  // issue #7-10：弹出窗是独立 webview，同样需要自定义右键菜单替换原生菜单。
+  const { element: textEditMenuElement } = useTextEditContextMenu();
 
   const label = popoutLabel(kind, targetId);
   // Terminal pop-out titles include the port id (e.g. "终端 — COM3") so users
@@ -83,6 +86,7 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
       <div className="popout-content">
         <PopoutContent kind={kind} targetId={targetId} />
       </div>
+      {textEditMenuElement}
     </div>
   );
 };

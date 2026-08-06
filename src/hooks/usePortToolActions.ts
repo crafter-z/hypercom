@@ -15,9 +15,9 @@ import GroupToolDialog from '../components/shared/GroupToolDialog';
  *   已配置 → 置 `toolRunning` 并调用后端（后端负责 关串口→跑工具→流式输出→重开串口）。
  * - killTool：终止运行中的工具进程。
  * - configTool：打开配置弹窗「外部工具」页。
- * - runToolForGroup：整组执行（issue #5-7）——组内存在未正确配置（无配置或命令为空）
+ * - runToolForGroup：整组执行（issue #5-7 / #7-9）——组内存在未正确配置（无配置或命令为空）
  *   的串口时弹出 GroupToolDialog 警告，用户可选择仅运行已配置的串口或先去配置；
- *   全部已配置则直接顺序执行（100ms 节流，跳过运行中串口）。
+ *   全部已配置则直接**并行**执行（issue #7-9，跳过运行中串口）。
  */
 export function usePortToolActions() {
   const updatePort = useAppStore((s) => s.updatePort);
@@ -61,20 +61,22 @@ export function usePortToolActions() {
     useAppStore.getState().toggleConfigModal(true);
   }, []);
 
-  // 顺序执行已配置端口（100ms 节流，与 connectAll / Pane.tsx 批量开关同款）。
+  // issue #7-9：整组执行改为**并行**——组内每个已配置端口同时启动外部工具
+  // （此前 100ms 节流串行，多端口组要等前一个跑完才轮到下一个）。
   // 每个端口执行前重新查 store 跳过已运行中的；单端口失败不中断整组
   // （runTool 内部已自行 toast 错误，此处仅防御性兜底）。
   const runConfiguredPorts = useCallback(async (configured: SerialPort[]) => {
-    for (const p of configured) {
-      const port = useAppStore.getState().ports.find((x) => x.id === p.id);
-      if (port?.toolRunning) continue;
-      try {
-        await runTool(p.id);
-      } catch {
-        // 忽略：runTool 已通知错误
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    await Promise.all(
+      configured.map(async (p) => {
+        const port = useAppStore.getState().ports.find((x) => x.id === p.id);
+        if (port?.toolRunning) return;
+        try {
+          await runTool(p.id);
+        } catch {
+          // 忽略：runTool 已通知错误
+        }
+      })
+    );
   }, [runTool]);
 
   const runToolForGroup = useCallback((group: PortGroup) => {

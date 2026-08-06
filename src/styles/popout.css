@@ -249,13 +249,20 @@
   letter-spacing: 0.4px;
 }
 
-/* Live dot — the port is breathing, not a static glyph. */
+/* Live dot — issue #7-5：跟随串口真实状态。默认（未连接）灰色；已连接绿色呼吸。 */
 .quicksend-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
+  background: var(--text-secondary);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.quicksend-dot.is-connected {
   background: var(--text-success);
   box-shadow: 0 0 4px var(--text-success);
+  opacity: 1;
   animation: quicksend-pulse 2s ease-in-out infinite;
 }
 

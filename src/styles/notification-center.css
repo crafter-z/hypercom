@@ -183,6 +183,26 @@
   color: var(--text-secondary);
 }
 
+/* issue #7-1：串口来源 chip + 时间戳（monospace、tabular 数字，视觉上稳定）。 */
+.notify-row-port {
+  padding: 0 5px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  color: var(--accent-color);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+}
+
+.notify-row-time {
+  margin-left: auto;
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
 .notify-empty {
   padding: var(--space-6) var(--space-3);
   text-align: center;

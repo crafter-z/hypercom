@@ -152,7 +152,8 @@ const defaultConfig: AppConfig = {
   uiFontSize: 14,
   defaultBaudRates: [9600, 19200, 38400, 57600, 115200, 921600],
   defaultLineEnding: '\\r\\n',
-  sendPrefix: '>>>>>>SEND>>>>>>>>',
+  // issue #7-3：终端已有 TX/RX 方向标识，发送提示前缀默认留空（功能保留，设置页可配）。
+  sendPrefix: '',
   showPortType: true,
   sendOnEnter: true,
   quickSendInlineCount: 6,

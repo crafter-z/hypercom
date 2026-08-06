@@ -503,6 +503,12 @@ export interface PopoutTerminalClosedPayload {
   portId: string;
 }
 
+/** 主窗 → 弹窗：全部串口连接状态快照（issue #7-5 初始态对表）。 */
+export interface PortStatusSyncItem {
+  portId: string;
+  status: string;
+}
+
 export const popoutEventService = {
   /** 弹窗 → 主窗：请求发送。 */
   onSendCommand: (callback: (payload: PopoutSendCommandPayload) => void) => {
@@ -560,6 +566,13 @@ export const popoutEventService = {
     });
   },
 
+  /** 主窗 → 弹窗：全部串口连接状态快照（request-sync 时回放，issue #7-5）。 */
+  onPortStatusesSync: (callback: (payload: PortStatusSyncItem[]) => void) => {
+    return listen<PortStatusSyncItem[]>('port-statuses:sync', (event) => {
+      callback(event.payload);
+    });
+  },
+
   emitSendCommand: (payload: PopoutSendCommandPayload): Promise<void> => {
     return emit('popout:send-command', payload);
   },
@@ -588,5 +601,10 @@ export const popoutEventService = {
   /** 主窗 → 终端弹窗：回推历史快照。 */
   emitTerminalSnapshot: (payload: PopoutTerminalSnapshotPayload): Promise<void> => {
     return emit('popout:terminal:snapshot', payload);
+  },
+
+  /** 主窗 → 弹窗：回放全部串口连接状态（issue #7-5）。 */
+  emitPortStatusesSync: (payload: PortStatusSyncItem[]): Promise<void> => {
+    return emit('port-statuses:sync', payload);
   },
 };

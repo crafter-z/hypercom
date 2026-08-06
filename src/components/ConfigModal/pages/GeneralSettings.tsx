@@ -1,11 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
-import { useOperationStore } from '../../../stores/useOperationStore';
-import { configService, storageService } from '../../../services/tauri';
-import type { PortPreset } from '../../../types';
-import type { AppConfig, DataBits, Parity, StopBits, Handshake } from '../../../types';
-import { notifyError, notifySuccess } from '../../../stores/useToastStore';
+import { configService } from '../../../services/tauri';
+import type { AppConfig } from '../../../types';
 
 /** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
 const clampNumber = (raw: string, min: number, max: number): number => {
@@ -36,68 +33,6 @@ const GeneralSettings: React.FC = () => {
   useEffect(() => {
     configService.getConfigPath().then(setConfigPath).catch(() => {});
   }, []);
-
-  const [presets, setPresets] = useState<PortPreset[]>([]);
-  const [presetName, setPresetName] = useState('');
-
-  const loadPresets = useCallback(async () => {
-    try {
-      const list = await storageService.loadPortPresets();
-      setPresets(list);
-    } catch (e) {
-      console.warn('[GeneralSettings] loadPortPresets failed:', e);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadPresets();
-  }, [loadPresets]);
-
-  const handleApplyPreset = (p: PortPreset) => {
-    useOperationStore.getState().setOpState({
-      baudRate: p.baudRate,
-      dataBits: p.dataBits as DataBits,
-      parity: p.parity as Parity,
-      stopBits: p.stopBits as StopBits,
-      handshake: p.handshake as Handshake,
-      dtr: p.dtr,
-      rts: p.rts,
-    });
-  };
-
-  const handleDeletePreset = async (id: string) => {
-    try {
-      await storageService.deletePortPreset(id);
-      await loadPresets();
-      notifySuccess('paramsSection.preset.deleted');
-    } catch (e) {
-      notifyError(e);
-    }
-  };
-
-  const handleSavePreset = async () => {
-    const name = presetName.trim();
-    if (!name) return;
-    try {
-      const op = useOperationStore.getState();
-      await storageService.savePortPreset({
-        id: `preset-${Date.now()}`,
-        name,
-        baudRate: op.baudRate,
-        dataBits: op.dataBits,
-        parity: op.parity,
-        stopBits: op.stopBits,
-        handshake: op.handshake,
-        dtr: op.dtr,
-        rts: op.rts,
-      });
-      setPresetName('');
-      await loadPresets();
-      notifySuccess('paramsSection.preset.saved');
-    } catch (e) {
-      notifyError(e);
-    }
-  };
 
   return (
     <div className="config-page">
@@ -220,39 +155,6 @@ const GeneralSettings: React.FC = () => {
           style={{ width: 80 }}
         />
       </div>
-
-      <div className="divider-h" />
-      <h4 className="config-section-title">{t('generalSettings.presets.sectionTitle')}</h4>
-
-      <div className="config-row">
-        <input
-          className="input"
-          style={{ flex: 1 }}
-          value={presetName}
-          placeholder={t('generalSettings.presets.namePlaceholder')}
-          onChange={(e) => setPresetName(e.target.value)}
-        />
-        <button className="btn btn-sm" disabled={!presetName.trim()} onClick={handleSavePreset}>
-          {t('generalSettings.presets.saveCurrent')}
-        </button>
-      </div>
-
-      {presets.length === 0 ? (
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('generalSettings.presets.empty')}</div>
-      ) : (
-        presets.map((p) => (
-          <div className="config-row" key={p.id}>
-            <span style={{ flex: 1, fontSize: 13 }}>
-              {p.name}
-              <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-terminal)' }}>
-                {p.baudRate},{p.dataBits}{(p.parity ?? 'None')[0]}{p.stopBits === 'One' ? '1' : p.stopBits === 'Two' ? '2' : '1.5'}
-              </span>
-            </span>
-            <button className="btn btn-sm" onClick={() => handleApplyPreset(p)}>{t('generalSettings.presets.apply')}</button>
-            <button className="btn btn-sm" onClick={() => handleDeletePreset(p.id)}>{t('generalSettings.presets.delete')}</button>
-          </div>
-        ))
-      )}
 
       <div className="divider-h" />
       <h4 className="config-section-title">{t('generalSettings.fontSectionTitle')}</h4>

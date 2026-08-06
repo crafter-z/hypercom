@@ -62,6 +62,8 @@ export async function sendToPort(
       useToastStore.getState().push({
         severity: 'warning',
         messageKey: 'sendSection.portClosedWarning',
+        // issue #7-1：通知中心展示消息来源串口。
+        portId,
       });
     }
     return 0;

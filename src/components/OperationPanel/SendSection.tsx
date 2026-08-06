@@ -334,15 +334,17 @@ const SendSection: React.FC<SendSectionProps> = ({
 
       {quickSendInlineCount > 0 && (
         <div className="op-quick-send-row" ref={stripRef}>
-          {/* 首槽：常驻「打开独立发送面板」入口——accent 描边图标按钮，
-              与命令药丸视觉区分；0 条命令时也保留（面板仍有内容可看）。 */}
+          {/* 首槽：常驻「打开独立发送面板」入口——issue #7-2：明显的按压按钮样式
+              （accent 填充 + 文字标签，区别于滚动锁定等带状态的图标按钮），
+              高度与两行药丸对齐；0 条命令时也保留（面板仍有内容可看）。 */}
           <button
             ref={panelBtnRef}
             className="btn btn-sm op-quick-panel-btn"
             title={t('quickSend.openPanel')}
             onClick={openQuickPanel}
           >
-            <PanelRightOpen size={13} />
+            <PanelRightOpen size={14} />
+            <span className="op-quick-panel-btn-label">{t('quickSend.openPanelShort')}</span>
           </button>
           {activeCommands.length > 0 ? (
             <>

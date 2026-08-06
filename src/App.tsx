@@ -7,6 +7,7 @@ import OperationPanel from './components/OperationPanel/OperationPanel';
 import StatusBar from './components/StatusBar/StatusBar';
 import ConfigModal from './components/ConfigModal/ConfigModal';
 import ToastContainer from './components/shared/Toast/ToastContainer';
+import { useTextEditContextMenu } from './components/shared/TextEditContextMenu';
 import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
 import AboutDialog from './components/shared/AboutDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
@@ -67,6 +68,10 @@ const App: React.FC = () => {
   usePopoutBridge();
   useHotkeys();
   usePowerManagement();
+  // issue #7-10：全局自定义右键菜单——可编辑元素（输入框/文本域/可编辑区）显示
+  // 应用自己的 剪切/复制/粘贴/全选 菜单（替代 webview 原生菜单），其余元素一律
+  // 屏蔽原生菜单。取代了旧版"仅屏蔽非输入元素"的 contextmenu effect。
+  const { element: textEditMenuElement } = useTextEditContextMenu();
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
   const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed);
 
@@ -106,18 +111,6 @@ const App: React.FC = () => {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-        return;
-      }
-      e.preventDefault();
-    };
-    document.addEventListener('contextmenu', handler);
-    return () => document.removeEventListener('contextmenu', handler);
-  }, []);
-
   // Enforce terminal memory limit from config (rough: 500 lines/MB)
   const memoryLimitMb = useAppStore((s) => s.config.memoryLimitMb);
   useEffect(() => {
@@ -154,6 +147,7 @@ const App: React.FC = () => {
           <HotkeyHelpDialog />
           <AboutDialog />
           <ToastContainer />
+          {textEditMenuElement}
         </div>
       </ThemeProvider>
     </AppErrorBoundary>

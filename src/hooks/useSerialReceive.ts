@@ -80,6 +80,8 @@ export function useSerialReceive() {
                   // center; the live toast renders the message only.
                   title: generic,
                   message: content || generic,
+                  // issue #7-1：通知中心展示消息来源串口。
+                  portId,
                   // Sticky: persists in the notification center until the
                   // user dismisses or clears it (durationMs 0 = no timer).
                   durationMs: 0,
@@ -173,6 +175,8 @@ export function useSerialReceive() {
             useToastStore.getState().push({
               severity: 'warning',
               message: i18n.t('toast.disconnect.portLost', { port: portName }),
+              // issue #7-1：通知中心展示消息来源串口。
+              portId: event.port_id,
               durationMs: 8000,
             });
           }

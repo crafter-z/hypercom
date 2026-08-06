@@ -68,6 +68,10 @@ export function usePopoutBridge() {
         void popoutEventService.emitCommandSetsChanged(
           useRuleStore.getState().sendCommandSets
         );
+        // issue #7-5：回放全部串口连接状态，弹窗「发送到」提示灯打开即准确。
+        void popoutEventService.emitPortStatusesSync(
+          useAppStore.getState().ports.map((p) => ({ portId: p.id, status: p.status }))
+        );
       })
       .then((u) => {
         if (cancelled) u();

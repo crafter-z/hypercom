@@ -40,6 +40,38 @@ describe('useToastStore', () => {
     expect(toast.message).toBe('ALERT PAYLOAD');
   });
 
+  // issue #7-1：串口来源消息携带 portId；每条通知自带 createdAt 时间戳。
+  it('push passes portId through for the notification center', () => {
+    useToastStore.getState().push({
+      severity: 'warning',
+      message: 'port lost',
+      portId: 'COM3',
+      durationMs: 8000,
+    });
+    const toast = useToastStore.getState().toasts[0];
+    expect(toast.portId).toBe('COM3');
+  });
+
+  it('push without portId leaves it undefined (non-serial messages)', () => {
+    useToastStore.getState().push({ severity: 'info', messageKey: 'toast.some.info' });
+    expect(useToastStore.getState().toasts[0].portId).toBeUndefined();
+  });
+
+  it('createdAt is stamped at push time and survives into the stash', () => {
+    const before = Date.now();
+    useToastStore.getState().push({ severity: 'info', message: 'm1', durationMs: 4000 });
+    for (let i = 2; i <= 6; i++) {
+      useToastStore.getState().push({ severity: 'info', message: `m${i}`, durationMs: 4000 });
+    }
+    const state = useToastStore.getState();
+    expect(state.stashed).toHaveLength(1);
+    expect(state.stashed[0].message).toBe('m1');
+    expect(state.stashed[0].createdAt).toBeGreaterThanOrEqual(before);
+    expect(state.stashed[0].createdAt).toBeLessThanOrEqual(Date.now());
+    // 通知中心按 createdAt 倒序渲染——时间戳是排序的唯一事实来源
+    expect(state.stashed[0].createdAt).toBeLessThanOrEqual(state.toasts[4].createdAt);
+  });
+
   it('overflow moves the oldest live toast into stashed instead of dropping', () => {
     for (let i = 1; i <= 6; i++) {
       useToastStore.getState().push({ severity: 'info', message: `m${i}`, durationMs: 4000 });

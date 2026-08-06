@@ -7,6 +7,13 @@ import { useToastStore } from '../../stores/useToastStore';
 /** Badge caps at 99+ so the status bar chip never blows out. */
 const MAX_BADGE_COUNT = 99;
 
+/** Notification row time — HH:MM:SS (issue #7-1: every notification carries a timestamp). */
+function formatNotifyTime(ts: number): string {
+  const d = new Date(ts);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 /**
  * Notification center (VSCode-style, issue #5-3): a persistent bell + badge in
  * the StatusBar. Clicking toggles a popover listing ALL notifications (live
@@ -103,6 +110,9 @@ const NotificationCenter: React.FC = () => {
                     <div className="notify-row-msg">{text}</div>
                     <div className="notify-row-meta">
                       <span>{t(`toast.severity.${toast.severity}`)}</span>
+                      {/* issue #7-1：串口来源消息携带串口号；每条通知附带时间戳 */}
+                      {toast.portId && <span className="notify-row-port">{toast.portId}</span>}
+                      <span className="notify-row-time">{formatNotifyTime(toast.createdAt)}</span>
                       {toast.durationMs === 0 && <Pin size={10} aria-hidden="true" />}
                     </div>
                   </button>

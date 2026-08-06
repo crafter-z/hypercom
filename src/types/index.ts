@@ -274,7 +274,7 @@ export interface AppConfig {
   // 串口默认设置
   defaultBaudRates: number[];
   defaultLineEnding: LineEnding;
-  sendPrefix: string;      // 发送提示前缀，默认 ">>>>>>SEND>>>>>>>>"
+  sendPrefix: string;      // 发送提示前缀，默认空（issue #7-3：终端已有 TX/RX 方向标识）
   showPortType: boolean;   // 显示串口类型
   sendOnEnter: boolean;     // 聚焦发送框时 Enter 是否直接发送
   quickSendInlineCount: number; // 快捷发送内联条显示条数（0 = 隐藏内联条，纯弹出窗模式）

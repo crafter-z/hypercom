@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  eventService,
   popoutEventService,
   serialService,
   storageService,
@@ -173,6 +174,47 @@ const QuickSendPanel: React.FC = () => {
       .catch((e) => console.debug('[QuickSendPanel] listAvailablePorts failed:', e));
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // issue #7-5：「发送到」提示灯跟随串口真实连接状态——订阅全局 serial:status
+  // 事件维护已连接端口集合（Tauri 事件对全部 webview 可见，弹窗可直接监听）；
+  // 挂载对表时主窗经 port-statuses:sync 回放一次全量状态，弹窗在已连接状态下
+  // 打开时提示灯也立即准确。
+  const [connectedPortIds, setConnectedPortIds] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    let unlisteners: Array<() => void> = [];
+    Promise.all([
+      eventService.onSerialStatus((event) => {
+        if (cancelled) return;
+        setConnectedPortIds((prev) => {
+          const next = new Set(prev);
+          if (event.status === 'connected') {
+            next.add(event.port_id);
+          } else {
+            next.delete(event.port_id);
+          }
+          return next;
+        });
+      }),
+      popoutEventService.onPortStatusesSync((items) => {
+        if (cancelled) return;
+        setConnectedPortIds(new Set(items.filter((i) => i.status === 'connected').map((i) => i.portId)));
+      }),
+    ])
+      .then(([u1, u2]) => {
+        if (cancelled) {
+          u1();
+          u2();
+          return;
+        }
+        unlisteners = [u1, u2];
+      })
+      .catch((e) => console.debug('[QuickSendPanel] status listeners failed:', e));
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((u) => u());
     };
   }, []);
 
@@ -519,7 +561,8 @@ const QuickSendPanel: React.FC = () => {
             </option>
             {ports.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} · {p.port_type.toUpperCase()}
+                {/* issue #7-4：去掉无意义的「· REAL/VIRTUAL」类型后缀，只显示串口号 */}
+                {p.name}
               </option>
             ))}
           </select>
@@ -850,7 +893,11 @@ const QuickSendPanel: React.FC = () => {
         {effectivePortId ? (
           <span className="quicksend-target">
             {t('quickSend.sendTo')}
-            <span className="quicksend-dot" aria-hidden="true" />
+            {/* issue #7-5：提示灯跟随真实连接状态——已连接绿色（呼吸）、未连接灰色 */}
+            <span
+              className={`quicksend-dot${connectedPortIds.has(effectivePortId) ? ' is-connected' : ''}`}
+              aria-hidden="true"
+            />
             <span className="quicksend-target-port">{effectivePortId}</span>
           </span>
         ) : (

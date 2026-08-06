@@ -320,7 +320,8 @@ impl Default for AppConfig {
             ui_font_size: 14,
             default_baud_rates: vec![9600, 19200, 38400, 57600, 115200, 921600],
             default_line_ending: "\\r\\n".to_string(),
-            send_prefix: ">>>>>>SEND>>>>>>>>".to_string(),
+            // issue #7-3：终端已有 TX/RX 方向标识，发送提示前缀默认留空。
+            send_prefix: String::new(),
             show_port_type: true,
             send_on_enter: true,
             quick_send_inline_count: 6,
@@ -599,7 +600,8 @@ mod tests {
             cfg.default_baud_rates,
             vec![9600, 19200, 38400, 57600, 115200, 921600]
         );
-        assert_eq!(cfg.send_prefix, ">>>>>>SEND>>>>>>>>");
+        // issue #7-3：发送提示前缀默认留空（终端已有 TX/RX 方向标识）
+        assert_eq!(cfg.send_prefix, "");
         assert_eq!(cfg.timestamp_mode, "perLine");
         assert!(cfg.auto_save_log);
         assert_eq!(cfg.log_format, "string");

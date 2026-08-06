@@ -24,6 +24,9 @@ export interface ToastItem {
   message?: string;
   /** Optional title — rendered by the notification center (bell popover). */
   title?: string;
+  /** Optional source serial port id — rendered as a chip by the notification
+   *  center when the message originates from a serial port (issue #7-1). */
+  portId?: string;
   /** Auto-dismiss delay in ms. `0` = sticky: NO auto-dismiss (persists until
    *  dismissed or cleared). Defaults to DEFAULT_DURATION_MS (or ERROR_* for
    *  error severity) when omitted. */
@@ -36,6 +39,7 @@ export interface ToastPushInput {
   messageKey?: string;
   message?: string;
   title?: string;
+  portId?: string;
   durationMs?: number;
 }
 
@@ -82,6 +86,7 @@ export const useToastStore = create<ToastStoreState>()(
         messageKey: input.messageKey,
         message: input.message,
         title: input.title,
+        portId: input.portId,
         durationMs,
         createdAt: Date.now(),
       };

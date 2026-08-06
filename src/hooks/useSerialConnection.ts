@@ -65,6 +65,8 @@ async function runReconnectLoop(portId: string) {
         severity: 'error',
         messageKey: 'toast.reconnect.failed',
         message: extractErrorMessage(err),
+        // issue #7-1：通知中心展示消息来源串口。
+        portId,
       });
       if (attempt >= maxRetries - 1) break;
       delayMs = nextReconnectDelay(delayMs);

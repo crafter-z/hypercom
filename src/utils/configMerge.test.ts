@@ -26,7 +26,7 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   uiFontSize: 14,
   defaultBaudRates: [9600, 19200],
   defaultLineEnding: '\\r\\n',
-  sendPrefix: '>>>>>>SEND>>>>>>>>',
+  sendPrefix: '',
   showPortType: true,
   sendOnEnter: true,
   quickSendInlineCount: 6,

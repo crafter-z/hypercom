@@ -156,11 +156,12 @@
   flex-shrink: 0;
 }
 
+/* issue #7-6：命令集选择 / 循环开关 / 编辑按钮紧跟「发送命令」标题文字之后，
+ * 不再 margin-left:auto 推到行尾（标题与控件之间保留一个间距即可）。 */
 .op-send-header-controls {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin-left: auto;
   min-width: 0;
 }
 
@@ -262,19 +263,35 @@
   color: var(--accent-color);
 }
 
-/* Panel entry — the strip's permanent first slot; accent-bordered icon
- * button so it reads as a distinct affordance next to the command pills. */
+/* Panel entry — the strip's permanent first slot. issue #7-2：明显的"按压
+ * 按钮"样式——accent 填充 + 文字标签（同 .btn-primary 视觉语言），区别于
+ * 滚动锁定/循环开关等带状态的图标按钮；高度与两行药丸对齐（约 34px）。 */
 .op-quick-panel-btn {
   flex-shrink: 0;
-  color: var(--accent-color);
-  border-color: var(--accent-color);
-  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px var(--space-2);
+  background: var(--accent-emphasis);
+  border-color: var(--accent-emphasis);
+  color: #ffffff;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
 }
 
 .op-quick-panel-btn:hover {
-  background: var(--bg-active);
-  border-color: var(--accent-emphasis);
-  color: var(--accent-color);
+  background: var(--accent-emphasis-hover);
+  border-color: var(--accent-emphasis-hover);
+  color: #ffffff;
+}
+
+.op-quick-panel-btn-label {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.2;
 }
 
 /* Hidden measuring row — lays out every command pill off-flow (absolute +
