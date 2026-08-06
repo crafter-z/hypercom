@@ -46,8 +46,11 @@ function renderQuickCmdPill(cmd: SendCommand, isPortActive: boolean, onClick: ()
       title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
       onClick={onClick}
     >
-      {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
-      <span className="op-quick-cmd-name">{cmd.name}</span>
+      {/* issue #6-9：名称在上（HEX 徽标与名称同行）、内容在下，两行显示 */}
+      <span className="op-quick-cmd-name-row">
+        {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
+        <span className="op-quick-cmd-name">{cmd.name || cmd.content}</span>
+      </span>
       <span className="op-quick-cmd-content">{cmd.content}</span>
     </button>
   );

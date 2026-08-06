@@ -45,6 +45,11 @@ const ConfigModal: React.FC = () => {
   const setConfig = useAppStore((s) => s.setConfig);
   const { saveConfig } = useConfigPersistence();
   const configSnapshotRef = useRef<AppConfig | null>(null);
+  // issue #6-8：overlay 点击关闭只应响应「按下和松开都在遮罩上」的点击。
+  // 框选文字时按下在弹窗内、松开在弹窗外——mouseup 落在遮罩上会合成一次
+  // overlay click 导致设置界面误关闭。用 pointerdown 记录起点是否在弹窗内。
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const mouseDownInsideDialogRef = useRef(false);
 
   // Save snapshot when modal opens
   useEffect(() => {
@@ -92,8 +97,23 @@ const ConfigModal: React.FC = () => {
   };
 
   return (
-    <div className="modal-overlay animate-fade-in" onClick={handleCancel}>
-      <div className="modal-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay animate-fade-in"
+      onPointerDown={(e) => {
+        // 记录按下起点是否在弹窗内部：仅当起点在遮罩上才允许点击关闭
+        mouseDownInsideDialogRef.current =
+          dialogRef.current?.contains(e.target as Node) ?? false;
+      }}
+      onClick={() => {
+        // issue #6-8：框选文字（按下在弹窗内、松开在遮罩上）不触发关闭
+        if (mouseDownInsideDialogRef.current) {
+          mouseDownInsideDialogRef.current = false;
+          return;
+        }
+        handleCancel();
+      }}
+    >
+      <div className="modal-dialog animate-slide-up" ref={dialogRef} onClick={(e) => e.stopPropagation()}>
         <div className="modal-nav">
           <div className="modal-nav-header">
             <h2 className="modal-nav-title">{t('configModal.title')}</h2>

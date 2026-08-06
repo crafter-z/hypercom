@@ -7,10 +7,9 @@ import {
   Play, Square, Eye, EyeOff, ArrowUpDown, RefreshCw,
   ChevronRight, Plus, X, Search, FlaskConical, Ellipsis,
   PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
-  Wrench, TerminalSquare,
+  Wrench, TerminalSquare, FolderPlus, FolderInput, FolderMinus,
 } from 'lucide-react';
 import { useSerialPorts, useSerialConnection, useSimulation, usePortToolActions } from '../../hooks';
-import { sortPortsByNatural } from '../../utils/portSort';
 import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import {
   DndContext,
@@ -49,8 +48,7 @@ const SidebarToolbar: React.FC<{
   onOpenAll: () => void;
   onCloseAll: () => void;
   onSortByPort: () => void;
-  sortActive: boolean;
-}> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, simulationAvailable, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort, sortActive }) => {
+}> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, simulationAvailable, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
 
@@ -60,7 +58,8 @@ const SidebarToolbar: React.FC<{
       icon: showHidden ? <Eye size={14} /> : <EyeOff size={14} />,
       onClick: onToggleHidden,
     },
-    { label: t('sidebar.toolbar.sortByPort'), icon: <ArrowUpDown size={14} />, onClick: onSortByPort, active: sortActive },
+    // issue #6-4：排序改一次性动作（重排后仍可拖拽/分组），不再是持久开关
+    { label: t('sidebar.toolbar.sortByPort'), icon: <ArrowUpDown size={14} />, onClick: onSortByPort },
   ];
 
   return (
@@ -123,9 +122,6 @@ const SearchBox: React.FC<{ value: string; onChange: (v: string) => void }> = ({
 interface SortablePortItemProps {
   port: SerialPort;
   isConnected: boolean;
-  /** True while the natural sort mode is active — the rendered order is then
-   *  derived (not the store order), so dragging is disabled (issue #2-4/5). */
-  dragDisabled?: boolean;
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
   onSetAlias: (portId: string) => void;
@@ -144,7 +140,6 @@ interface SortablePortItemProps {
 const SortablePortItem: React.FC<SortablePortItemProps> = ({
   port,
   isConnected,
-  dragDisabled,
   onOpenTab,
   onToggleConnect,
   onSetAlias,
@@ -156,6 +151,10 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
+  // issue #6-5：分组控制需要实时读 groups 与 store actions（菜单项在渲染时构建）
+  const groups = useAppStore((s) => s.groups);
+  const movePortToGroup = useAppStore((s) => s.movePortToGroup);
+  const addGroup = useAppStore((s) => s.addGroup);
   const {
     attributes,
     listeners,
@@ -163,7 +162,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: port.id, disabled: dragDisabled });
+  } = useSortable({ id: port.id });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -179,6 +178,44 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
   };
   const label = statusLabel[port.status] || port.status;
 
+  // issue #6-5：串口分组控制——
+  //  - 已在组里：移出分组
+  //  - 未分组且有组：快捷移入已有组（逐组一项）
+  //  - 未分组且无组（或嫌逐个麻烦）：新建分组并移入
+  const currentGroup = port.groupId ? groups.find(g => g.id === port.groupId) : undefined;
+  const groupControlItems: ContextMenuEntry[] = [];
+  if (currentGroup) {
+    groupControlItems.push({
+      label: t('sidebar.port.contextMenu.removeFromGroup'),
+      icon: <FolderMinus size={14} />,
+      onClick: () => movePortToGroup(port.id, undefined),
+    });
+  } else {
+    for (const g of groups) {
+      groupControlItems.push({
+        label: t('sidebar.port.contextMenu.addToGroup', { name: g.name }),
+        icon: <FolderInput size={14} />,
+        onClick: () => movePortToGroup(port.id, g.id),
+      });
+    }
+    groupControlItems.push({
+      label: t('sidebar.port.contextMenu.createGroupWithPort'),
+      icon: <FolderPlus size={14} />,
+      onClick: () => {
+        const id = `group-${Date.now()}`;
+        // 先建组再加入端口：movePortToGroup 依赖 group 已存在于 store
+        addGroup({
+          id,
+          name: t('sidebar.addGroup.defaultName'),
+          isExpanded: true,
+          portIds: [port.id],
+          order: groups.length,
+        });
+        movePortToGroup(port.id, id);
+      },
+    });
+  }
+
   const items: ContextMenuEntry[] = [
     { label: isConnected ? t('sidebar.port.contextMenu.disconnect') : t('sidebar.port.contextMenu.connect'), icon: isConnected ? <Unplug size={14} /> : <PlugZap size={14} />, onClick: () => onToggleConnect(port.id) },
     { type: 'separator' },
@@ -190,6 +227,8 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
       ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool(port.id), danger: true }
       : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(port.id) },
     { label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: onConfigTool },
+    { type: 'separator' },
+    ...groupControlItems,
     { type: 'separator' },
     port.isHidden
       ? { label: t('sidebar.port.contextMenu.unhide'), icon: <Eye size={14} />, onClick: () => onShowPort(port.id) }
@@ -240,7 +279,6 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
 interface GroupItemProps {
   group: PortGroup;
   ports: SerialPort[];
-  dragDisabled?: boolean;
   onOpenTab: (portId: string) => void;
   onToggleConnect: (portId: string) => void;
   onToggleExpand: (groupId: string) => void;
@@ -264,7 +302,6 @@ interface GroupItemProps {
 const GroupItem: React.FC<GroupItemProps> = ({
   group,
   ports,
-  dragDisabled,
   onOpenTab,
   onToggleConnect,
   onToggleExpand,
@@ -381,7 +418,6 @@ const GroupItem: React.FC<GroupItemProps> = ({
                 key={port.id}
                 port={port}
                 isConnected={port.status === 'connected'}
-                dragDisabled={dragDisabled}
                 onOpenTab={onOpenTab}
                 onToggleConnect={onToggleConnect}
                 onSetAlias={onSetAlias}
@@ -417,9 +453,6 @@ const Sidebar: React.FC = () => {
   const [showHidden, setShowHidden] = useState(false);
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
-  // 排序是持久开关而非一次性动作（issue #2-5）：激活时列表按派生的自然序渲染，
-  // 3s 轮询只能改变成员、无法改变顺序，排序状态不会被轮询"刷新掉"。
-  const [sortMode, setSortMode] = useState<'manual' | 'port'>('manual');
 
   const handleOpenTab = useCallback((portId: string) => {
     if (useAppStore.getState().activeTabId === portId) return;
@@ -470,13 +503,10 @@ const Sidebar: React.FC = () => {
     return ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)));
   }, [ports, search]);
 
-  // 排序模式下用自然序（COM1 < COM2 < COM12）派生显示列表（issue #2-4）：
-  // 不改动 store 中的端口数组（保留手动顺序供切回），新枚举到的端口自动落位，
-  // 3s 轮询只能增删成员、无法打乱派生顺序（issue #2-5）。
-  const displayedPorts = useMemo(
-    () => (sortMode === 'port' ? sortPortsByNatural(filteredPorts) : filteredPorts),
-    [sortMode, filteredPorts],
-  );
+  // issue #6-4：排序是一次性动作（sortPortsByNumber 直接重排 store 的 ports 数组），
+  // 不再是持久派生模式——列表始终按 store 顺序渲染，拖拽/分组操作始终可用，
+  // 3s 轮询的 mergePorts 按 existing 顺序合并，不会冲掉手动/排序后的顺序。
+  const displayedPorts = filteredPorts;
 
   // Hidden ports never appear in their normal location (group / ungrouped);
   // they surface ONLY in the dedicated hidden section when toggled visible.
@@ -485,19 +515,18 @@ const Sidebar: React.FC = () => {
   const ungroupedPorts = displayedPorts.filter(p => !p.groupId && !p.isHidden);
   const ungroupedIds = useMemo(() => ungroupedPorts.map(p => p.id), [ungroupedPorts]);
   const hiddenPorts = useMemo(() => {
-    const hidden = ports.filter(p => p.isHidden);
-    return sortMode === 'port' ? sortPortsByNatural(hidden) : hidden;
-  }, [ports, sortMode]);
+    return ports.filter(p => p.isHidden);
+  }, [ports]);
   const hiddenIds = useMemo(() => hiddenPorts.map(p => p.id), [hiddenPorts]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
-  // 点击切换排序开关（issue #2-5）：不再一次性 setPorts（那次排序会被下一次
-  // 3s 轮询的枚举顺序覆盖），改为持久的派生排序模式。
+  // issue #6-4：点击「按端口号排序」= 一次性重排 store 顺序（含组内顺序），
+  // 排序后拖拽/分组照常可用；组内顺序随 save_port_groups 持久化。
   const handleSortByPort = useCallback(() => {
-    setSortMode(m => (m === 'port' ? 'manual' : 'port'));
+    useAppStore.getState().sortPortsByNumber();
   }, []);
 
   const handleDragEnd = usePortDragEnd({ groups, ports });
@@ -528,7 +557,6 @@ const Sidebar: React.FC = () => {
           }
         }}
         onSortByPort={handleSortByPort}
-        sortActive={sortMode === 'port'}
       />
       <SearchBox value={search} onChange={setSearch} />
 
@@ -547,7 +575,6 @@ const Sidebar: React.FC = () => {
                 key={group.id}
                 group={group}
                 ports={displayedPorts}
-                dragDisabled={sortMode === 'port'}
                 onOpenTab={handleOpenTab}
                 onToggleConnect={handleToggleConnect}
                 onToggleExpand={handleToggleExpand}
@@ -573,8 +600,7 @@ const Sidebar: React.FC = () => {
                     key={port.id}
                     port={port}
                     isConnected={port.status === 'connected'}
-                    dragDisabled={sortMode === 'port'}
-                    onOpenTab={handleOpenTab}
+                        onOpenTab={handleOpenTab}
                     onToggleConnect={handleToggleConnect}
                     onSetAlias={handleSetAlias}
                     onHidePort={handleHidePort}
@@ -597,8 +623,7 @@ const Sidebar: React.FC = () => {
                     key={port.id}
                     port={port}
                     isConnected={port.status === 'connected'}
-                    dragDisabled={sortMode === 'port'}
-                    onOpenTab={handleOpenTab}
+                        onOpenTab={handleOpenTab}
                     onToggleConnect={handleToggleConnect}
                     onSetAlias={handleSetAlias}
                     onHidePort={handleHidePort}

@@ -59,8 +59,9 @@
   position: absolute;
   right: 0;
   bottom: calc(100% + 6px);
-  width: 320px;
-  max-height: 340px;
+  /* issue #6-7：通知框再大一点点（320→360 宽、340→400 高） */
+  width: 360px;
+  max-height: 400px;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-color);

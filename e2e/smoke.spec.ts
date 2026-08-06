@@ -98,4 +98,18 @@ test.describe('HyperCom smoke tests', () => {
   test('OperationPanel renders', async ({ page }) => {
     await expect(page.locator('.operation-panel')).toBeVisible();
   });
+
+  test('StatusBar renders memory budget indicator (issue #6-2/6-6)', async ({ page }) => {
+    // 状态栏内存显示：总预算来自 config（mock 下为默认 2048MB）
+    await expect(page.locator('.statusbar')).toBeVisible();
+    await expect(page.locator('.statusbar-left').getByText(/MB \//)).toBeVisible();
+  });
+
+  test('GeneralSettings shows total + per-port memory budget inputs (issue #6-2)', async ({ page }) => {
+    // 打开设置弹窗（TitleBar 右侧设置按钮）
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await expect(page.locator('.modal-overlay')).toBeVisible();
+    await expect(page.locator('.config-page').getByText('内存总预算 (MB):')).toBeVisible();
+    await expect(page.locator('.config-page').getByText('每端口内存预算 (MB):')).toBeVisible();
+  });
 });

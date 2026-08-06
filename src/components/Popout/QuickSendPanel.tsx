@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  CornerDownRight,
   ListRestart,
   Pencil,
   Play,
@@ -112,6 +113,7 @@ const QuickSendPanel: React.FC = () => {
 
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** 应用一组命令集；选中集被删除时回退到第一个。 */
@@ -370,6 +372,42 @@ const QuickSendPanel: React.FC = () => {
     flashTimerRef.current = setTimeout(() => setFlashLine(null), FLASH_MS);
     void emitSendLine(line, config.isHex, config.lineEnding).catch((e) => notifyError(e));
   }, [running, canSend, textCursorLine, lines, config.isHex, config.lineEnding, emitSendLine]);
+
+  /** 把 textarea 光标移动到下一行行首（issue #6-3）。 */
+  const moveCursorToNextLine = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const value = el.value;
+    const pos = el.selectionStart ?? 0;
+    const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+    const lineEndIdx = value.indexOf('\n', lineStart);
+    const nextPos = lineEndIdx === -1 ? value.length : lineEndIdx + 1;
+    el.setSelectionRange(nextPos, nextPos);
+    el.focus();
+    // setSelectionRange 不触发 onSelect/onClick，手动同步光标行号
+    const upTo = value.slice(0, nextPos).split(/\r?\n/).length - 1;
+    setTextCursorLine(Math.min(upTo, Math.max(lines.length - 1, 0)));
+  }, [lines.length]);
+
+  /** 执行当前行，执行完毕后把光标移到下一行（issue #6-3 新增按钮）。 */
+  const runCurrentLineAndAdvance = useCallback(() => {
+    if (running || !canSend) return;
+    const idx = Math.min(textCursorLine, Math.max(lines.length - 1, 0));
+    const line = lines[idx];
+    if (!line || line.trim() === '') {
+      moveCursorToNextLine();
+      return;
+    }
+    if (config.isHex && !isValidHexLine(line)) {
+      notifyInfo('quickSend.invalidHex');
+      return;
+    }
+    setFlashLine(idx);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlashLine(null), FLASH_MS);
+    void emitSendLine(line, config.isHex, config.lineEnding).catch((e) => notifyError(e));
+    moveCursorToNextLine();
+  }, [running, canSend, textCursorLine, lines, config.isHex, config.lineEnding, emitSendLine, moveCursorToNextLine]);
 
   /** 切换模式：运行中先停止；就地编辑一并收起。 */
   const switchMode = useCallback(
@@ -722,6 +760,7 @@ const QuickSendPanel: React.FC = () => {
       ) : (
         <div className="quicksend-text-mode">
           <textarea
+            ref={textareaRef}
             className="quicksend-textarea"
             value={text}
             placeholder={t('quickSend.textPlaceholder')}
@@ -748,6 +787,17 @@ const QuickSendPanel: React.FC = () => {
                 aria-label={t('quickSend.runCurrentLine')}
               >
                 <Play size={12} />
+              </button>
+              {/* issue #6-3：执行当前行，且执行完毕后把光标移到下一行 */}
+              <button
+                type="button"
+                className="quicksend-run-btn"
+                disabled={running || !canSend || !hasContent}
+                onClick={runCurrentLineAndAdvance}
+                title={t('quickSend.runCurrentLineAdvance')}
+                aria-label={t('quickSend.runCurrentLineAdvance')}
+              >
+                <CornerDownRight size={12} />
               </button>
               <button
                 type="button"

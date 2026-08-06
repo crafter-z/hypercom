@@ -202,12 +202,20 @@
   min-width: 0;
 }
 
-/* Compact monospace pill — truncates long payloads; the full content rides
- * in the title tooltip. */
+/* Compact monospace pill — issue #6-9：名称在上、内容在下两行显示；
+ * 长内容截断，完整内容在 title tooltip 里。 */
 .op-quick-cmd {
   font-family: var(--font-terminal);
   font-size: var(--text-2xs);
   max-width: 140px;
+  /* 两行布局：名称在上、内容在下（line-height 收紧，垂直居中） */
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  line-height: 1.25;
+  padding-top: 2px;
+  padding-bottom: 2px;
 }
 
 /* min-width:0 lets each flex item shrink below content size so the ellipsis
@@ -215,23 +223,37 @@
 .op-quick-cmd-name,
 .op-quick-cmd-content {
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Name — the emphasized part of the pill. */
+/* Name row — hex badge + name share the first line. */
+.op-quick-cmd-name-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Name — the emphasized part of the pill, always on the first line. */
 .op-quick-cmd-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: var(--weight-semibold);
 }
 
-/* Content — secondary monospace voice, quieter than the name. */
+/* Content — secondary monospace voice, quieter than the name, on the second line. */
 .op-quick-cmd-content {
   color: var(--text-secondary);
   opacity: 0.9;
 }
 
-/* Type tag — the single accent on hex-command pills. */
+/* Type tag — the single accent on hex-command pills (行首 inline，与名称同行)。 */
 .op-quick-cmd-hex {
   flex-shrink: 0;
   font-size: var(--text-2xs);
