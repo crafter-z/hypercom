@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
-import { Send, Plus, Edit3, FileUp, Play, Square } from 'lucide-react';
+import { Send, Plus, Edit3, FileUp, Play, Square, PanelRightOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { LineEnding, SendCommand, SendHistoryEntry } from '../../types';
@@ -17,6 +17,8 @@ import {
   hexToTextPreview,
   sanitizeHexInput,
 } from '../../utils/sendUtils';
+import { computeFitCount } from '../../utils/sendStrip';
+import type { SendStripLayout } from '../../utils/sendStrip';
 
 export interface SendSectionProps {
   activeTabId: string | null;
@@ -25,6 +27,30 @@ export interface SendSectionProps {
   sendData: (portId: string, data: string, isHex: boolean, lineEnding: string) => Promise<number>;
   historyUp: () => SendHistoryEntry | null;
   historyDown: () => SendHistoryEntry | null;
+}
+
+// Strip layout constants — must mirror the CSS:
+// - gap = var(--space-1) = 4px (`.op-quick-send-row` gap)
+// - panel button estimate used before the first measurement lands.
+const QUICK_STRIP_GAP = 4;
+const PANEL_BUTTON_ESTIMATE = 32;
+
+// 命令药丸的单点渲染源：可见行与隐藏测量行共用同一份 JSX，保证测量宽度
+// 与真实渲染宽度一致（模块级函数，非组件——不携带 hook，避免重挂载）。
+function renderQuickCmdPill(cmd: SendCommand, isPortActive: boolean, onClick: () => void) {
+  return (
+    <button
+      key={cmd.id}
+      className="btn btn-sm op-quick-cmd"
+      disabled={!isPortActive}
+      title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
+      onClick={onClick}
+    >
+      {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
+      <span className="op-quick-cmd-name">{cmd.name}</span>
+      <span className="op-quick-cmd-content">{cmd.content}</span>
+    </button>
+  );
 }
 
 const SendSection: React.FC<SendSectionProps> = ({
@@ -52,6 +78,66 @@ const SendSection: React.FC<SendSectionProps> = ({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [fileProgress, setFileProgress] = useState<{ sent: number; total: number } | null>(null);
+
+  // ---- Quick-send strip: width-adaptive visibility (issue #5-4) ----
+  // The inline strip shows as many command pills as fit the available width:
+  // a ResizeObserver tracks the strip container, a hidden measuring row tracks
+  // every command pill's real width, and computeFitCount derives the visible
+  // slice + overflow count. quickSendInlineCount still gates visibility only
+  // (0 = hide the strip entirely — pure pop-out mode).
+  const stripRef = useRef<HTMLDivElement>(null);
+  const measureRowRef = useRef<HTMLDivElement>(null);
+  const panelBtnRef = useRef<HTMLButtonElement>(null);
+  const [stripWidth, setStripWidth] = useState(0);
+  const [panelBtnWidth, setPanelBtnWidth] = useState(0);
+  const [cmdWidths, setCmdWidths] = useState<number[]>([]);
+  const stripVisible = quickSendInlineCount > 0;
+
+  // Quick-send is driven by the ACTIVE send-command set — the same sets the
+  // loop-send system uses. quickSendInlineCount only gates strip visibility
+  // (0 = pure pop-out mode); the visible slice is width-driven (issue #5-4).
+  const activeCommands = useMemo(() => {
+    const set = sendCommandSets.find(s => s.id === activeSendCommandSetId);
+    if (!set) return [];
+    return [...set.commands].sort((a, b) => a.order - b.order);
+  }, [sendCommandSets, activeSendCommandSetId]);
+
+  // 容器宽度 + 面板按钮宽度：挂载即测（useLayoutEffect 保证首帧前就有值），
+  // 之后由 ResizeObserver 跟踪窗口/面板缩放。
+  useLayoutEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const update = () => {
+      setStripWidth(el.getBoundingClientRect().width);
+      setPanelBtnWidth(panelBtnRef.current?.getBoundingClientRect().width ?? 0);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [stripVisible]);
+
+  // 命令药丸宽度：隐藏测量行渲染全部命令，其尺寸变化（命令集切换/字体加载）
+  // 由 ResizeObserver 捕获；等值守卫避免无谓的重渲染循环。
+  useLayoutEffect(() => {
+    const row = measureRowRef.current;
+    if (!row) {
+      setCmdWidths([]);
+      return;
+    }
+    const update = () => {
+      const widths = Array.from(row.children).map(c =>
+        Math.ceil(c.getBoundingClientRect().width)
+      );
+      setCmdWidths(prev =>
+        prev.length === widths.length && prev.every((w, i) => w === widths[i]) ? prev : widths
+      );
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(row);
+    return () => ro.disconnect();
+  }, [activeCommands, stripVisible]);
 
   // 文件发送进度事件订阅（异步注册竞态保护：参考 TitleBar onResized 模式）
   useEffect(() => {
@@ -91,20 +177,30 @@ const SendSection: React.FC<SendSectionProps> = ({
     [sendAppendLineEnding]
   );
 
-  // Quick-send is driven by the ACTIVE send-command set — the same sets the
-  // loop-send system uses. The inline strip shows the first N commands
-  // (N = config.quickSendInlineCount; 0 hides the strip entirely — pure
-  // pop-out mode); the rest overflow into the quick-send pop-out window.
-  const activeCommands = useMemo(() => {
-    const set = sendCommandSets.find(s => s.id === activeSendCommandSetId);
-    if (!set) return [];
-    return [...set.commands].sort((a, b) => a.order - b.order);
-  }, [sendCommandSets, activeSendCommandSetId]);
-  const inlineCommands = useMemo(
-    () => activeCommands.slice(0, quickSendInlineCount),
-    [activeCommands, quickSendInlineCount]
+  // 布局：按实际测量宽度计算「放得下几条 + 溢出几条」。测量未落地前保守
+  // 回退为 0 可见（useLayoutEffect 保证首帧前完成测量，用户看不到回退态）。
+  const layout = useMemo<SendStripLayout>(() => {
+    if (activeCommands.length === 0) return { visibleCount: 0, overflowCount: 0 };
+    if (stripWidth <= 0 || cmdWidths.length === 0) {
+      return { visibleCount: 0, overflowCount: activeCommands.length };
+    }
+    return computeFitCount(stripWidth, cmdWidths, {
+      panelButtonWidth: panelBtnWidth > 0 ? panelBtnWidth : PANEL_BUTTON_ESTIMATE,
+      gap: QUICK_STRIP_GAP,
+      minButtons: 1, // 有条命令时至少露一条（容器放得下面板按钮的前提下）
+      maxButtons: activeCommands.length, // 纯宽度驱动，不再按 config 条数截断
+    });
+  }, [stripWidth, cmdWidths, panelBtnWidth, activeCommands]);
+  const visibleCommands = useMemo(
+    () => activeCommands.slice(0, layout.visibleCount),
+    [activeCommands, layout.visibleCount]
   );
-  const hiddenCount = activeCommands.length - inlineCommands.length;
+
+  const openQuickPanel = () => {
+    popoutService
+      .openPopout('quick-send')
+      .catch((e) => console.debug('[SendSection] openPopout failed:', e));
+  };
 
   const handleSend = async () => {
     if (!isPortActive || !sendInput.trim()) return;
@@ -234,32 +330,27 @@ const SendSection: React.FC<SendSectionProps> = ({
       </div>
 
       {quickSendInlineCount > 0 && (
-        <div className="op-quick-send-row">
+        <div className="op-quick-send-row" ref={stripRef}>
+          {/* 首槽：常驻「打开独立发送面板」入口——accent 描边图标按钮，
+              与命令药丸视觉区分；0 条命令时也保留（面板仍有内容可看）。 */}
+          <button
+            ref={panelBtnRef}
+            className="btn btn-sm op-quick-panel-btn"
+            title={t('quickSend.openPanel')}
+            onClick={openQuickPanel}
+          >
+            <PanelRightOpen size={13} />
+          </button>
           {activeCommands.length > 0 ? (
             <>
-              {inlineCommands.map(cmd => (
-                <button
-                  key={cmd.id}
-                  className="btn btn-sm op-quick-cmd"
-                  disabled={!isPortActive}
-                  title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
-                  onClick={() => handleQuickCommand(cmd)}
-                >
-                  {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
-                  <span className="op-quick-cmd-text">{cmd.name || cmd.content}</span>
-                </button>
-              ))}
-              {hiddenCount > 0 && (
+              {visibleCommands.map(cmd => renderQuickCmdPill(cmd, isPortActive, () => handleQuickCommand(cmd)))}
+              {layout.overflowCount > 0 && (
                 <button
                   className="btn btn-sm op-quick-cmd op-quick-cmd-overflow"
                   title={t('quickSend.overflow')}
-                  onClick={() =>
-                    popoutService
-                      .openPopout('quick-send')
-                      .catch((e) => console.debug('[SendSection] openPopout failed:', e))
-                  }
+                  onClick={openQuickPanel}
                 >
-                  ⋯ +{hiddenCount}
+                  ⋯ +{layout.overflowCount}
                 </button>
               )}
             </>
@@ -272,6 +363,13 @@ const SendSection: React.FC<SendSectionProps> = ({
               >
                 <Plus size={12} /> {t('sendSection.quickCommands.configure')}
               </button>
+            </div>
+          )}
+          {/* 隐藏测量行：绝对定位 + visibility:hidden，渲染全部命令以测量
+              真实宽度；与可见药丸共用 renderQuickCmdPill，宽度严格一致。 */}
+          {activeCommands.length > 0 && (
+            <div className="op-quick-measure-row" ref={measureRowRef} aria-hidden="true">
+              {activeCommands.map(cmd => renderQuickCmdPill(cmd, isPortActive, () => {}))}
             </div>
           )}
         </div>
@@ -352,9 +450,9 @@ const SendSection: React.FC<SendSectionProps> = ({
               value={sendAppendLineEnding}
               onChange={e => setOpState({ sendAppendLineEnding: e.target.value as LineEnding })}
             >
-              <option value="\\r\\n">{t('sendSection.lineEnding.crlf')}</option>
-              <option value="\\r">{t('sendSection.lineEnding.cr')}</option>
-              <option value="\\n">{t('sendSection.lineEnding.lf')}</option>
+              <option value={'\r\n'}>{t('sendSection.lineEnding.crlf')}</option>
+              <option value={'\r'}>{t('sendSection.lineEnding.cr')}</option>
+              <option value={'\n'}>{t('sendSection.lineEnding.lf')}</option>
               <option value="None">{t('sendSection.lineEnding.none')}</option>
             </select>
           </div>

@@ -187,11 +187,13 @@
 
 /* ==================== Send Section ==================== */
 
-/* ---- Quick commands — the inline overflow strip shows the first
- *      config.quickSendInlineCount commands of the ACTIVE send-command set
- *      on ONE row (no wrap); the rest collapse into a live "⋯ +K" button
- *      that opens the quick-send pop-out window. ---- */
+/* ---- Quick commands — the inline strip shows every command of the ACTIVE
+ *      send-command set that fits the available width on ONE row (no wrap),
+ *      measured live via a hidden measuring row; the rest collapse into a
+ *      "⋯ +K" button that opens the quick-send pop-out window. The first
+ *      slot is a permanent panel-open button. ---- */
 .op-quick-send-row {
+  position: relative; /* anchors .op-quick-measure-row */
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -208,13 +210,25 @@
   max-width: 140px;
 }
 
-/* min-width:0 lets the flex item shrink below content size so the
- * ellipsis actually fires inside the capped button. */
-.op-quick-cmd-text {
+/* min-width:0 lets each flex item shrink below content size so the ellipsis
+ * actually fires inside the capped button. */
+.op-quick-cmd-name,
+.op-quick-cmd-content {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Name — the emphasized part of the pill. */
+.op-quick-cmd-name {
+  font-weight: var(--weight-semibold);
+}
+
+/* Content — secondary monospace voice, quieter than the name. */
+.op-quick-cmd-content {
+  color: var(--text-secondary);
+  opacity: 0.9;
 }
 
 /* Type tag — the single accent on hex-command pills. */
@@ -224,6 +238,34 @@
   font-weight: var(--weight-bold);
   letter-spacing: 0.6px;
   color: var(--accent-color);
+}
+
+/* Panel entry — the strip's permanent first slot; accent-bordered icon
+ * button so it reads as a distinct affordance next to the command pills. */
+.op-quick-panel-btn {
+  flex-shrink: 0;
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+}
+
+.op-quick-panel-btn:hover {
+  background: var(--bg-active);
+  border-color: var(--accent-emphasis);
+  color: var(--accent-color);
+}
+
+/* Hidden measuring row — lays out every command pill off-flow (absolute +
+ * visibility:hidden keeps layout, pointer-events:none keeps it inert) so
+ * computeFitCount can derive the visible slice from real widths. */
+.op-quick-measure-row {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  gap: var(--space-1);
 }
 
 /* Overflow affordance — never truncates (the live +K count is the point);

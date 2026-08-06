@@ -10,6 +10,7 @@ import {
   textToHexPreview,
   hexToTextPreview,
   sanitizeHexInput,
+  LINE_ENDING_VALUES,
 } from './sendUtils';
 
 describe('sendUtils', () => {
@@ -137,6 +138,33 @@ describe('sendUtils', () => {
 
     it('keeps valid hex digits and whitespace untouched', () => {
       expect(sanitizeHexInput('AB cd 09\n')).toBe('AB cd 09\n');
+    });
+  });
+
+  describe('LINE_ENDING_VALUES (issue #5-6 regression)', () => {
+    it('every option value round-trips through getLineEndingBytes', () => {
+      expect(LINE_ENDING_VALUES).toEqual(['\\r\\n', '\\r', '\\n', 'None']);
+      for (const v of LINE_ENDING_VALUES) {
+        const bytes = getLineEndingBytes(v);
+        if (v === 'None') {
+          expect(bytes).toEqual([]);
+        } else {
+          expect(bytes.length).toBeGreaterThan(0);
+        }
+      }
+    });
+
+    it('values are the canonical escaped forms (never the raw JSX-attribute form)', () => {
+      // 6-char "\\r\\n" (raw JSX attribute, unescaped by the Babel pipeline)
+      // would hit the `default` branch -> empty bytes -> null hex -> stuck hint.
+      // Canonical escaped lengths: '\r\n'=4, '\r'=2, '\n'=2, 'None'=4.
+      const expectedLen: Record<string, number> = { '\\r\\n': 4, '\\r': 2, '\\n': 2, None: 4 };
+      for (const v of LINE_ENDING_VALUES) {
+        expect(v.length).toBe(expectedLen[v]);
+        if (v !== 'None') {
+          expect(formatLineEndingHex(v)).not.toBeNull();
+        }
+      }
     });
   });
 });

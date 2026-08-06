@@ -279,8 +279,256 @@
   opacity: 0.7;
 }
 
+/* ==================== QuickSendPanel — dual-mode (issue #5-4) =============
+ * Mode tabs + shared params bar (target port / line ending / STR·HEX toggle,
+ * text mode adds send/round intervals), then either the command list with
+ * in-panel row editing or the text mode (textarea + run controls).
+ */
+
+/* ---- Mode tabs (segmented control) ---- */
+.quicksend-mode-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+  padding: var(--space-2) var(--space-2) 0;
+}
+
+.quicksend-mode-tab {
+  flex: 1;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.quicksend-mode-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.quicksend-mode-tab.active {
+  background: var(--bg-active);
+  border-color: var(--accent-emphasis);
+  color: var(--text-active);
+}
+
+/* ---- Shared params bar ---- */
+.quicksend-params {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.quicksend-param-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.quicksend-param-label {
+  flex-shrink: 0;
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  letter-spacing: 0.3px;
+}
+
+.quicksend-param-control {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+.quicksend-param-number {
+  width: 64px;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+}
+
+/* STR / HEX segmented toggle (shared: params bar + row edit form). */
+.quicksend-format-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.quicksend-format-toggle button {
+  padding: 2px var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.quicksend-format-toggle button.active {
+  background: var(--bg-active);
+  color: var(--accent-color);
+}
+
+/* ---- Command rows: in-panel edit affordance ---- */
+.quicksend-edit-btn {
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+
+.quicksend-row:hover .quicksend-edit-btn,
+.quicksend-row.is-cursor .quicksend-edit-btn {
+  opacity: 1;
+}
+
+.quicksend-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+  min-width: 0;
+}
+
+.quicksend-edit-input {
+  width: 100%;
+  font-size: var(--text-xs);
+}
+
+.quicksend-edit-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.quicksend-edit-select {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+/* ---- Text mode ---- */
+.quicksend-text-mode {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.quicksend-textarea {
+  flex: 1;
+  min-height: 90px;
+  width: 100%;
+  resize: none;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-terminal);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  padding: var(--space-2);
+}
+
+.quicksend-textarea:focus {
+  border-color: var(--accent-emphasis);
+  outline: none;
+}
+
+.quicksend-run-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.quicksend-run-buttons {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.quicksend-run-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.quicksend-run-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.quicksend-run-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.quicksend-run-btn.is-loop {
+  border-color: var(--accent-emphasis);
+  color: var(--accent-color);
+}
+
+.quicksend-run-btn.is-stop {
+  border-color: var(--status-error);
+  color: var(--text-error);
+}
+
+/* Current-line indicator — pulses while a run is in progress. */
+.quicksend-current-line {
+  flex-shrink: 0;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.quicksend-current-line.is-running {
+  color: var(--accent-color);
+  border-color: var(--accent-emphasis);
+  animation: quicksend-line-pulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes quicksend-line-pulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .quicksend-dot {
+    animation: none;
+  }
+
+  .quicksend-current-line.is-running {
     animation: none;
   }
 }

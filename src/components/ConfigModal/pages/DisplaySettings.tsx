@@ -35,9 +35,9 @@ const DisplaySettings: React.FC = () => {
       <div className="config-row">
         <label>{t('displaySettings.defaultLineEndingLabel')}</label>
         <select className="select" value={defaultLineEnding} onChange={(e) => setConfig({ defaultLineEnding: e.target.value as AppConfig['defaultLineEnding'] })}>
-          <option value="\\r\\n">{t('displaySettings.lineEnding.crlf')}</option>
-          <option value="\\r">{t('displaySettings.lineEnding.cr')}</option>
-          <option value="\\n">{t('displaySettings.lineEnding.lf')}</option>
+          <option value={'\r\n'}>{t('displaySettings.lineEnding.crlf')}</option>
+          <option value={'\r'}>{t('displaySettings.lineEnding.cr')}</option>
+          <option value={'\n'}>{t('displaySettings.lineEnding.lf')}</option>
         </select>
       </div>
 

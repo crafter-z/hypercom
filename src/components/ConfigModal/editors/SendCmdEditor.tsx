@@ -33,9 +33,9 @@ const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, on
           <option value="hex">HEX</option>
         </select>
         <select className="select" value={cmd.appendLineEnding} onChange={e => onChange({ appendLineEnding: e.target.value as SendCommand['appendLineEnding'] })} style={{ width: 70 }}>
-          <option value="\\r\\n">\r\n</option>
-          <option value="\\r">\r</option>
-          <option value="\\n">\n</option>
+          <option value={'\r\n'}>\r\n</option>
+          <option value={'\r'}>\r</option>
+          <option value={'\n'}>\n</option>
           <option value="None">{t('sendCmdEditor.lineEnding.none')}</option>
         </select>
         <button className="btn btn-icon btn-sm" onClick={onDelete} title={t('sendCmdEditor.delete')}><Trash2 size={12} /></button>

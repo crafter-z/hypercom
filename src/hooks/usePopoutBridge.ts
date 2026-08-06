@@ -31,7 +31,9 @@ export function usePopoutBridge() {
     // 异步注册竞态保护：参考 SendSection onFileProgress 模式。
     popoutEventService
       .onSendCommand((payload) => {
-        const portId = useAppStore.getState().activeTabId;
+        // 显式目标端口优先（issue #5-4-6）：弹窗携带 portId 时发送到该端口，
+        // 否则退回活动标签。端口已关闭时 sendToPort 内部守卫负责 toast/静默。
+        const portId = payload.portId ?? useAppStore.getState().activeTabId;
         if (!portId) {
           // 无活动标签是正常控制流分支（弹窗发送无目标），非错误，不记录。
           return;

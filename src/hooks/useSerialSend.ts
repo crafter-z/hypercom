@@ -3,8 +3,9 @@ import { useAppStore } from '../stores/useAppStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { serialService } from '../services/tauri';
 import type { SendHistoryEntry, LineEnding } from '../types';
-import { notifyError } from '../stores/useToastStore';
+import { notifyError, useToastStore } from '../stores/useToastStore';
 import { getRxPipeline } from '../utils/rxPipeline';
+import { isSendablePort } from '../utils/sendGuard';
 
 // ==================== Module-level in-memory send history ====================
 // Per-port send history lives ONLY in memory (user decision: history may
@@ -49,6 +50,22 @@ export async function sendToPort(
   silent = false
 ): Promise<number> {
   const state = useAppStore.getState();
+  // Closed-port guard (issue #5-4-7): a tab can exist while its port is
+  // disconnected, so the send button stays enabled — the guard belongs HERE,
+  // at the single sendToPort chokepoint (manual send / pop-out bridge /
+  // cyclic send / trigger auto-respond all route through it). Non-silent
+  // callers get one warning toast; silent callers (loops) just no-op and
+  // return 0 without touching the backend, the TX echo, history or stats.
+  const port = state.ports.find((p) => p.id === portId);
+  if (!isSendablePort(port)) {
+    if (!silent) {
+      useToastStore.getState().push({
+        severity: 'warning',
+        messageKey: 'sendSection.portClosedWarning',
+      });
+    }
+    return 0;
+  }
   const { sendPrefix } = state.config;
   const prefix = sendPrefix ? `${sendPrefix} ` : '';
   const displayText = `${prefix}${data}`;

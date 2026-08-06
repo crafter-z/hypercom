@@ -469,11 +469,12 @@ export const popoutService = {
 // （config.json 异步落盘，未保存的编辑不在盘上），弹窗直接消费载荷而非回库重读，
 // 否则配置弹窗里未点"保存"的编辑不会同步到快捷发送窗口。
 
-/** 弹窗请求主窗发送一条命令。不含 portId——主窗发送到自己的活动标签。 */
+/** 弹窗请求主窗发送一条命令。portId 缺省时主窗发送到自己的活动标签（issue #5-4-6）。 */
 export interface PopoutSendCommandPayload {
   content: string;
   isHex: boolean;
   lineEnding: string;
+  portId?: string;
 }
 
 /** 弹窗请求主窗打开 ConfigModal 指定页（如 'commands'）。 */

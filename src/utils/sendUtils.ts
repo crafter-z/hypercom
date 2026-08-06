@@ -117,3 +117,29 @@ export function hexToTextPreview(hex: string): string {
 export function sanitizeHexInput(input: string): string {
   return input.replace(/[^0-9a-fA-F\s]/g, '');
 }
+
+/**
+ * 行尾枚举的规范取值（issue #5-6 回归锁）。
+ *
+ * ⚠️ 这些值必须以 JS 字符串字面量形式使用（`value={'\r\n'}`），
+ * 不能写成 JSX 属性字符串（`value="\\r\\n"`）——@vitejs/plugin-react
+ * 的 Babel 转义管线不会对 JSX 属性字符串做转义处理，运行时值会变成
+ * 6 字符的 `\\r\\n`，导致 `formatLineEndingHex` / `getLineEndingBytes`
+ * 匹配失败（行尾提示不跟随、行尾字节丢失）。
+ */
+export const LINE_ENDING_VALUES: readonly LineEnding[] = [
+  '\\r\\n',
+  '\\r',
+  '\\n',
+  'None',
+] as const;
+
+/** 行尾选项对应的 i18n label key（按命名空间，供各组件复用同一组取值）。 */
+export function lineEndingLabelKey(
+  v: LineEnding,
+  ns: 'sendSection' | 'displaySettings' | 'sendCmdEditor' | 'quickSend' = 'sendSection'
+): string {
+  const suffix =
+    v === 'None' ? 'none' : v === '\\r\\n' ? 'crlf' : v === '\\r' ? 'cr' : 'lf';
+  return `${ns}.lineEnding.${suffix}`;
+}
