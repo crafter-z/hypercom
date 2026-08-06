@@ -64,6 +64,7 @@ const LogSettings: React.FC = () => {
   const logIncludeDirection = useAppStore(s => s.config.logIncludeDirection);
   const logDirectory = useAppStore(s => s.config.logDirectory);
   const logFilenameFormat = useAppStore(s => s.config.logFilenameFormat);
+  const logSubdirMode = useAppStore(s => s.config.logSubdirMode);
   const logFormat = useAppStore(s => s.config.logFormat);
   const logEncoding = useAppStore(s => s.config.logEncoding);
   const logSplitEnabled = useAppStore(s => s.config.logSplitEnabled);
@@ -130,6 +131,15 @@ const LogSettings: React.FC = () => {
         <label>{t('logSettings.filenameFormatLabel')}</label>
         <input className="input" value={logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
         <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('logSettings.filenameFormatHint')}</span>
+      </div>
+
+      <div className="config-row">
+        <label>{t('logSettings.subdirModeLabel')}</label>
+        <select className="select" value={logSubdirMode} onChange={(e) => setConfig({ logSubdirMode: e.target.value as AppConfig['logSubdirMode'] })}>
+          <option value="none">{t('logSettings.subdirMode.none')}</option>
+          <option value="date">{t('logSettings.subdirMode.date')}</option>
+          <option value="port">{t('logSettings.subdirMode.port')}</option>
+        </select>
       </div>
 
       <label className="checkbox-wrapper">

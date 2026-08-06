@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 /// 文件名模板默认值，与前端 defaultConfig.logFilenameFormat 保持一致。
 const DEFAULT_FILENAME_FORMAT: &str = "[com]-[datetime]";
 
+/// 日志子目录策略默认值（issue #5-10）：按日期分文件夹，与前端 defaultConfig 保持一致。
+const DEFAULT_SUBDIR_MODE: &str = "date";
+
 /// 日志文件信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +44,12 @@ pub struct PortLogWriter {
     pub include_timestamp: bool,
     /// 行前缀是否包含 RX/TX 方向标记（issue #3-4）
     pub include_direction: bool,
+    /// RX 行聚合器（issue #5-9）：事件字节先进这里按行边界聚合，
+    /// 只有完整行才落盘——跨事件的响应不再被切成碎片行。
+    pub assembler: LogLineAssembler,
+    /// RX 尾部开始驻留的时刻（pending 空→非空时置位，清空时复位）：
+    /// 供 250ms 静默冲刷判定，长停顿的未终结尾部不能无限滞留。
+    pub rx_pending_since: Option<std::time::Instant>,
 }
 
 impl PortLogWriter {
@@ -104,6 +113,150 @@ impl PortLogWriter {
     pub fn should_split(&self, split_size_mb: u32) -> bool {
         self.current_size >= (split_size_mb as u64) * 1024 * 1024
     }
+
+    /// RX 尾部滞留超时（250ms）时把尾部作为一行冲刷落盘（issue #5-9）。
+    /// 由 write_rx 在每个事件到来时机会性调用——日志路径没有后台定时器，
+    /// 长停顿的半行会在下一次事件时成行，避免无限滞留（对齐前端 250ms
+    /// 静默 flush 的意图；时间戳沿用当前事件时间）。
+    pub fn flush_stale_rx_tail(&mut self, timestamp: &str) -> anyhow::Result<()> {
+        let stale = self
+            .rx_pending_since
+            .map(|since| since.elapsed() >= RX_TAIL_SILENCE_FLUSH)
+            .unwrap_or(false);
+        if stale {
+            self.rx_pending_since = None;
+            if let Some(tail) = self.assembler.take_tail() {
+                self.write_line(timestamp, "RX", &tail)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// feed 后维护尾部驻留计时：pending 空→非空置位（记首字节时刻）；清空则复位。
+    pub fn update_rx_pending_since(&mut self) {
+        if self.assembler.has_pending() {
+            if self.rx_pending_since.is_none() {
+                self.rx_pending_since = Some(std::time::Instant::now());
+            }
+        } else {
+            self.rx_pending_since = None;
+        }
+    }
+
+    /// 关闭前冲刷未终结的 RX 尾部（作为该端口的最后一行），并复位计时。
+    pub fn flush_rx_tail(&mut self, timestamp: &str) -> anyhow::Result<()> {
+        self.rx_pending_since = None;
+        if let Some(tail) = self.assembler.take_tail() {
+            self.write_line(timestamp, "RX", &tail)?;
+        }
+        Ok(())
+    }
+}
+
+/// 字节级 RX 行聚合器（issue #5-9）——日志路径的 LogLineAssembler。
+///
+/// 与前端 `src/utils/rxAssembler.ts` 的 RxLineAssembler 语义逐字节对齐：
+/// 串口读事件按 ≤1024B/次切分、与行边界无关，一次设备响应可能横跨多个
+/// 事件；按 0x0A (LF) / 0x0D (CR) 在**字节级**把流切成「已完成行的字节块」：
+///
+/// - CR、LF 均为分隔符；跨两次 feed 的 CRLF 对识别为**一个**分隔符——
+///   CR 处发射当前行并置 pending_cr 标记，下一字节是 LF 则静默吞掉，
+///   是其它字节则照常处理（标记随之清除）。
+/// - 单独的 CR 也是分隔符（classic Mac 风格 / 部分设备）。
+/// - 连续分隔符发射空块（空行）。
+/// - pending 达到 max_pending_bytes 时无分隔符强制发射——防止无换行的
+///   二进制流让缓冲无限增长。
+///
+/// 0x0A/0x0D 不可能出现在 UTF-8 / GBK 的多字节序列内部（ISO-8859-1 与
+/// ASCII 本就是单字节），因此字节级切分对全部四种受支持编码都安全。
+///
+/// 纯逻辑：无 IO 依赖，可独立单测（FFI-free，Windows cargo test 可跑）。
+pub struct LogLineAssembler {
+    /// 尚未终结的行字节（不含分隔符）
+    pending: Vec<u8>,
+    /// 上一个发射的分隔符是 CR：下一字节若是 LF 则视为 CRLF 对的后半，静默吞掉
+    pending_cr: bool,
+    /// 强制发射阈值（字节）：pending 达到该长度即无分隔符发射。默认 4096
+    max_pending_bytes: usize,
+}
+
+/// 无分隔符强制发射阈值（与前端 RxLineAssembler 默认一致）
+const RX_LINE_MAX_PENDING_BYTES: usize = 4096;
+/// 静默冲刷超时：RX 尾部滞留超过该时长即作为一行落盘（与前端默认一致）
+const RX_TAIL_SILENCE_FLUSH: std::time::Duration = std::time::Duration::from_millis(250);
+/// list_files 递归下钻深度上限（issue #5-10）：防御目录联接成环导致无限递归
+const MAX_LIST_DEPTH: usize = 16;
+
+impl LogLineAssembler {
+    pub fn new() -> Self {
+        Self::with_max_pending(RX_LINE_MAX_PENDING_BYTES)
+    }
+
+    /// 自定义强制发射阈值（测试注入用）
+    pub fn with_max_pending(max_pending_bytes: usize) -> Self {
+        Self {
+            pending: Vec::new(),
+            pending_cr: false,
+            max_pending_bytes,
+        }
+    }
+
+    /// 喂入一段字节，返回按流顺序完成的行字节块（块内容不含分隔符）。
+    /// 输入不会被修改；返回块是独立分配。
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        for &b in bytes {
+            if self.pending_cr {
+                self.pending_cr = false;
+                if b == b'\n' {
+                    // CRLF 对的后半：行已在 CR 处发射，静默消费
+                    continue;
+                }
+                // 非 LF：标记已清除，按普通字节继续处理
+            }
+            if b == b'\r' || b == b'\n' {
+                // 分隔符：发射当前行（pending 为空时即空块 = 空行），重置 pending。
+                // CR 额外置 pending_cr，用于识别跨 feed 的 CRLF 对。
+                lines.push(std::mem::take(&mut self.pending));
+                if b == b'\r' {
+                    self.pending_cr = true;
+                }
+            } else {
+                self.pending.push(b);
+                if self.pending.len() >= self.max_pending_bytes {
+                    // 强制发射：防止无换行二进制流无界增长。发射后继续扫描本段剩余字节
+                    lines.push(std::mem::take(&mut self.pending));
+                }
+            }
+        }
+        lines
+    }
+
+    /// 取出未终结的尾部字节并重置状态（静默冲刷 / 关闭时用）。
+    /// 无 pending 字节时返回 None。
+    pub fn take_tail(&mut self) -> Option<Vec<u8>> {
+        self.pending_cr = false;
+        let tail = std::mem::take(&mut self.pending);
+        if tail.is_empty() {
+            None
+        } else {
+            Some(tail)
+        }
+    }
+
+    /// 是否存在未终结的尾部字节
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// 丢弃所有缓冲字节与分隔符标记（重连 / 关闭后从干净状态开始）。
+    /// 与前端 RxLineAssembler.reset() API 对齐；当前生产路径在 close_writer
+    /// 时整体丢弃 assembler，此方法保留供重连/编码切换类场景与测试使用。
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.pending.clear();
+        self.pending_cr = false;
+    }
 }
 
 /// 按 encoding 解码字节为字符串。仅在 string 模式下调用。
@@ -144,6 +297,8 @@ pub struct LogManager {
     split_size_mb: u32,
     /// 文件名格式 (e.g. "[com]-[datetime]")
     filename_format: String,
+    /// 日志子目录策略（issue #5-10）："none" | "date" | "port"
+    subdir_mode: String,
     /// 默认 encoding（创建 writer 时使用，前端可在 start_logging 时覆盖）
     default_encoding: String,
     /// 是否启用按大小自动分片（前端可运行时开关）
@@ -177,6 +332,7 @@ impl LogManager {
             auto_save: false,
             split_size_mb: 100,
             filename_format: DEFAULT_FILENAME_FORMAT.to_string(),
+            subdir_mode: DEFAULT_SUBDIR_MODE.to_string(),
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
             include_timestamp: true,
@@ -206,6 +362,12 @@ impl LogManager {
     /// 设置文件名格式
     pub fn set_filename_format(&mut self, format: &str) {
         self.filename_format = format.to_string();
+    }
+
+    /// 设置日志子目录策略（issue #5-10）："none" / "date" / "port"。
+    /// 前端在 set_config 时同步调用；create_writer 时按当前值决定子目录。
+    pub fn set_subdir_mode(&mut self, mode: &str) {
+        self.subdir_mode = mode.to_string();
     }
 
     /// 设置 auto_save 开关。前端在 set_config 时同步调用，让后端在 write() 中
@@ -245,6 +407,18 @@ impl LogManager {
             .replace("[time]", &now.format("%H-%M-%S").to_string())
     }
 
+    /// 计算子目录名（issue #5-10）：
+    /// - "none" → None（直接存入日志目录）
+    /// - "port" → 净化后的 port_id（复用 sanitize_filename_component，防路径遍历）
+    /// - "date" 与未知模式 → 当前日期 YYYY-MM-DD（未知模式按默认 date 收敛，与配置端 clamp 一致）
+    fn subdir_component(&self, port_id: &str) -> Option<String> {
+        match self.subdir_mode.as_str() {
+            "none" => None,
+            "port" => Some(sanitize_filename_component(port_id)),
+            _ => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+        }
+    }
+
     /// 为指定串口创建日志写入器（使用默认 encoding）
     pub fn create_writer(&mut self, port_id: &str, format: &str) -> anyhow::Result<()> {
         let encoding = self.default_encoding.clone();
@@ -259,7 +433,15 @@ impl LogManager {
         encoding: &str,
     ) -> anyhow::Result<()> {
         let filename = self.format_filename(port_id);
-        let file_path = self.log_directory.join(format!("{}.log", filename));
+        // issue #5-10：按子目录策略解析目标目录（none → 根目录；date/port → 子目录）
+        let file_path = match self.subdir_component(port_id) {
+            Some(sub) => {
+                let sub_dir = self.log_directory.join(&sub);
+                fs::create_dir_all(&sub_dir)?;
+                sub_dir.join(format!("{}.log", filename))
+            }
+            None => self.log_directory.join(format!("{}.log", filename)),
+        };
 
         let file = OpenOptions::new()
             .create(true)
@@ -277,6 +459,8 @@ impl LogManager {
             encoding: encoding.to_string(),
             include_timestamp: self.include_timestamp,
             include_direction: self.include_direction,
+            assembler: LogLineAssembler::new(),
+            rx_pending_since: None,
         };
 
         self.writers.insert(port_id.to_string(), writer);
@@ -291,6 +475,7 @@ impl LogManager {
 
     /// 写入日志。自动短路：auto_save=false 或 port_id 无 writer 时直接返回 Ok。
     /// 单字段同步：避免前端 / 后端状态漂移导致的写入泄漏（defects #53）。
+    /// TX / 直接写入走这里——每次调用自成一行，不参与行聚合。
     pub fn write(
         &mut self,
         port_id: &str,
@@ -303,47 +488,110 @@ impl LogManager {
         }
         if let Some(writer) = self.writers.get_mut(port_id) {
             writer.write_line(timestamp, direction, data)?;
-
-            if self.split_enabled && writer.should_split(self.split_size_mb) {
-                let format = writer.format.clone();
-                let encoding = writer.encoding.clone();
-                let old_path = writer.file_path.clone();
-                // 显式 flush + 取出 inner File + sync_all，确保 OS 把缓冲落盘后再丢弃
-                // (defects #56：避免依赖 BufWriter::Drop 的 flush 把错误吞掉)
-                let Some(removed) = self.writers.remove(port_id) else {
-                    return Ok(());
-                };
-                match removed.writer.into_inner() {
-                    Ok(file) => {
-                        if let Err(e) = file.sync_all() {
-                            log::warn!("Log split sync_all failed for {}: {}", port_id, e);
-                        }
-                    }
-                    Err(e) => log::warn!("Log split into_inner failed for {}: {}", port_id, e),
-                }
-                log::info!(
-                    "Log split: {} closed at {} bytes",
-                    port_id,
-                    old_path.display()
-                );
-                self.create_writer_with_encoding(port_id, &format, &encoding)?;
-                log::info!("Log split: new file created for {}", port_id);
-            }
         }
+        // 分片检查与滚动（write / write_rx 共用，issue #5-9 提取）
+        self.maybe_split_writer(port_id)?;
 
         // 周期性刷盘：每 5 秒 flush 所有活跃 writer，防止崩溃丢失最后一批数据。
         // 仅 flush BufWriter，不做 sync_all（性能考量）。
+        self.periodic_flush();
+
+        Ok(())
+    }
+
+    /// 写入 RX 日志（issue #5-9）——字节级行聚合。
+    ///
+    /// 串口读事件按 ≤1024B/次切分、与行边界无关：一次设备响应可能横跨多个
+    /// serial:data 事件，一个事件里也可能有多行。旧路径「一事件一行」会把
+    /// 跨事件的响应切成碎片行（首字符独占一行）。本方法把事件字节喂进该端口
+    /// 的 LogLineAssembler，只有聚合完成的完整行才经 write_line（方向固定
+    /// "RX"）落盘，与终端侧 rxAssembler 语义逐字节对齐。
+    ///
+    /// 若尾部滞留超过 250ms（自其首字节驻留起算），下一个事件到来时先把
+    /// 尾部冲刷为一行，保证长时间停顿的半行不会无限滞留（对齐前端 250ms
+    /// 静默 flush 的意图；时间戳沿用当前事件时间）。
+    pub fn write_rx(
+        &mut self,
+        port_id: &str,
+        timestamp: &str,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        if !self.auto_save {
+            return Ok(());
+        }
+        if let Some(writer) = self.writers.get_mut(port_id) {
+            // 1. 机会性静默冲刷：尾部滞留 ≥250ms → 先成行落盘
+            writer.flush_stale_rx_tail(timestamp)?;
+            // 2. 聚合新字节：完整行逐行落盘（方向固定 RX）
+            let lines = writer.assembler.feed(data);
+            for line in lines {
+                writer.write_line(timestamp, "RX", &line)?;
+            }
+            // 3. 维护尾部驻留计时（pending 空→非空置位；清空复位）
+            writer.update_rx_pending_since();
+        }
+        self.maybe_split_writer(port_id)?;
+        self.periodic_flush();
+        Ok(())
+    }
+
+    /// 分片检查与滚动（write / write_rx 共用）：当前 writer 达阈值时
+    /// 显式 flush + sync_all 后重建新文件 writer，保证续写分片准确
+    /// (defects #56：避免依赖 BufWriter::Drop 的 flush 把错误吞掉)。
+    fn maybe_split_writer(&mut self, port_id: &str) -> anyhow::Result<()> {
+        let needs_split = self
+            .writers
+            .get(port_id)
+            .map(|w| self.split_enabled && w.should_split(self.split_size_mb))
+            .unwrap_or(false);
+        if !needs_split {
+            return Ok(());
+        }
+        let (format, encoding, old_path) = match self.writers.get(port_id) {
+            Some(w) => (w.format.clone(), w.encoding.clone(), w.file_path.clone()),
+            None => return Ok(()),
+        };
+        let Some(removed) = self.writers.remove(port_id) else {
+            return Ok(());
+        };
+        match removed.writer.into_inner() {
+            Ok(file) => {
+                if let Err(e) = file.sync_all() {
+                    log::warn!("Log split sync_all failed for {}: {}", port_id, e);
+                }
+            }
+            Err(e) => log::warn!("Log split into_inner failed for {}: {}", port_id, e),
+        }
+        log::info!(
+            "Log split: {} closed at {} bytes",
+            port_id,
+            old_path.display()
+        );
+        self.create_writer_with_encoding(port_id, &format, &encoding)?;
+        log::info!("Log split: new file created for {}", port_id);
+        Ok(())
+    }
+
+    /// 周期性刷盘：每 5 秒 flush 所有活跃 writer，防止崩溃丢失最后一批数据。
+    /// 仅 flush BufWriter，不做 sync_all（性能考量）。
+    fn periodic_flush(&mut self) {
         if self.last_flush.elapsed() >= std::time::Duration::from_secs(5) {
             let _ = self.flush_all_internal();
             self.last_flush = std::time::Instant::now();
         }
-
-        Ok(())
     }
 
     /// 关闭串口日志
     pub fn close_writer(&mut self, port_id: &str) -> anyhow::Result<()> {
         if let Some(mut writer) = self.writers.remove(port_id) {
+            // issue #5-9：关闭前先把未终结的 RX 尾部作为最后一行冲刷落盘，
+            // 避免半行数据在关闭瞬间被丢弃（时间戳取当前时间，无事件可参考）。
+            let now = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
+            if let Err(e) = writer.flush_rx_tail(&now) {
+                log::warn!("Log RX tail flush failed for {}: {}", port_id, e);
+            }
             writer.writer.flush()?;
             // flush 后再 sync_all，确保 OS 把缓冲落盘（defects #56 同类）
             if let Ok(file) = writer.writer.get_ref().try_clone() {
@@ -421,7 +669,68 @@ impl LogManager {
         )
     }
 
-    /// 列出所有日志文件。port_id 解析优先级：
+    /// 递归收集日志根目录下的日志文件（issue #5-10：date/port 子目录模式的文件
+    /// 也要出现在 UI 日志列表中）。子目录 read_dir 失败只告警跳过（防御性），
+    /// 根目录 read_dir 失败仍上抛保持旧行为。
+    fn collect_log_files(
+        &self,
+        dir: &std::path::Path,
+        depth: usize,
+        active_index: &HashMap<PathBuf, String>,
+        files: &mut Vec<LogFileInfo>,
+    ) -> anyhow::Result<()> {
+        // 深度上限防御：异常深/成环的嵌套（如目录联接）不会无限递归
+        if depth > MAX_LIST_DEPTH {
+            log::warn!("Log subdirectory walk exceeded depth {} at {:?}", MAX_LIST_DEPTH, dir);
+            return Ok(());
+        }
+        let entries = match fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                if depth > 0 {
+                    log::warn!("Failed to read log subdirectory {:?}: {}", dir, e);
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                self.collect_log_files(&path, depth + 1, active_index, files)?;
+            } else if metadata.is_file() {
+                let port_id = active_index.get(&path).cloned().unwrap_or_else(|| {
+                    // Fallback heuristic: split filename stem on '-' and take the first segment.
+                    // LIMITATION: This is unreliable for custom filename formats (e.g. "log_[com]_[date]"
+                    // yields "log" instead of the port id). It only works correctly with the default
+                    // "[com]-[datetime]" template. For closed writers, there is no reliable way to
+                    // recover the port_id without a persistent registry (out of scope).
+                    // Active writers always resolve correctly via active_index above.
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|stem| stem.split('-').next())
+                        .unwrap_or("unknown")
+                        .to_string()
+                });
+                files.push(LogFileInfo {
+                    path: path.to_string_lossy().to_string(),
+                    port_id,
+                    created_at: metadata
+                        .created()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                    size: metadata.len(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 列出所有日志文件（递归遍历子目录，issue #5-10）。port_id 解析优先级：
     /// 1. 活跃 writer 的 file_path 反查（精确，独立于 filename_format）
     /// 2. 文件名按"-"切分取首段（向后兼容默认模板，但不可靠）
     pub fn list_files(&self) -> anyhow::Result<Vec<LogFileInfo>> {
@@ -434,37 +743,7 @@ impl LogManager {
 
         let mut files = Vec::new();
         if self.log_directory.exists() {
-            for entry in fs::read_dir(&self.log_directory)? {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                if metadata.is_file() {
-                    let path = entry.path();
-                    let port_id = active_index.get(&path).cloned().unwrap_or_else(|| {
-                        // Fallback heuristic: split filename stem on '-' and take the first segment.
-                        // LIMITATION: This is unreliable for custom filename formats (e.g. "log_[com]_[date]"
-                        // yields "log" instead of the port id). It only works correctly with the default
-                        // "[com]-[datetime]" template. For closed writers, there is no reliable way to
-                        // recover the port_id without a persistent registry (out of scope).
-                        // Active writers always resolve correctly via active_index above.
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .and_then(|stem| stem.split('-').next())
-                            .unwrap_or("unknown")
-                            .to_string()
-                    });
-                    files.push(LogFileInfo {
-                        path: path.to_string_lossy().to_string(),
-                        port_id,
-                        created_at: metadata
-                            .created()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0),
-                        size: metadata.len(),
-                    });
-                }
-            }
+            self.collect_log_files(&self.log_directory, 0, &active_index, &mut files)?;
         }
         Ok(files)
     }
@@ -489,6 +768,7 @@ mod tests {
             auto_save: true,
             split_size_mb: 100,
             filename_format: "[com]-[datetime]".to_string(),
+            subdir_mode: "date".to_string(),
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
             include_timestamp: true,
@@ -601,6 +881,8 @@ mod tests {
             encoding: "UTF-8".into(),
             include_timestamp: true,
             include_direction: true,
+            assembler: LogLineAssembler::new(),
+            rx_pending_since: None,
         };
         assert!(!writer.should_split(1));
         writer.current_size = 1024 * 1024;
@@ -756,5 +1038,620 @@ mod tests {
         // Then: the readable Chinese text is preserved, not replaced by U+FFFD.
         assert_eq!(decoded, "你好");
         assert!(!decoded.contains('\u{FFFD}'));
+    }
+}
+
+/// issue #5-9：RX 日志行聚合测试（LogLineAssembler + LogManager::write_rx）。
+///
+/// 与 serial/mod.rs 的测试约定一致：**显式导入**而非 `use super::*`——通配
+/// 导入会把整个 logger 模块（及 encoding_rs 等依赖链）拖进测试二进制的链接
+/// 闭包，仅按需导入被测符号，保证 Windows `cargo test` harness 可直接运行。
+#[cfg(test)]
+mod rx_log_tests {
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{LogLineAssembler, LogManager};
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hypercom_test_rx_{}", name));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn test_manager(dir: &PathBuf) -> LogManager {
+        // 测试中默认开启 auto_save，否则 write_rx() 会被短路
+        LogManager {
+            log_directory: dir.clone(),
+            writers: HashMap::new(),
+            auto_save: true,
+            split_size_mb: 100,
+            filename_format: "[com]-[datetime]".to_string(),
+            subdir_mode: "date".to_string(),
+            default_encoding: "UTF-8".to_string(),
+            split_enabled: true,
+            include_timestamp: true,
+            include_direction: true,
+            last_flush: std::time::Instant::now(),
+        }
+    }
+
+    /// 读回指定端口最近日志文件的完整内容
+    fn read_log(mgr: &LogManager, port_id: &str) -> String {
+        let files = mgr.list_files().unwrap();
+        let f = files
+            .iter()
+            .find(|f| f.port_id == port_id)
+            .expect("log file must exist");
+        fs::read_to_string(&f.path).unwrap()
+    }
+
+    fn bytes(s: &str) -> Vec<u8> {
+        s.as_bytes().to_vec()
+    }
+
+    /// 显式类型的空行字节块（`vec![]` 嵌套推断在 PartialEq 上会有歧义）
+    fn empty_line() -> Vec<u8> {
+        Vec::new()
+    }
+
+    // ---------- LogLineAssembler：基础分隔符 ----------
+
+    #[test]
+    fn feed_empty_returns_nothing() {
+        let mut asm = LogLineAssembler::new();
+        assert!(asm.feed(b"").is_empty());
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_lf_terminated_line() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"hello\n"), vec![bytes("hello")]);
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_cr_terminated_line() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"hello\r"), vec![bytes("hello")]);
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_keeps_line_free_of_separator_bytes() {
+        let mut asm = LogLineAssembler::new();
+        let lines = asm.feed(&[0x41, 0x0a, 0x42, 0x0d]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], vec![0x41]);
+        assert!(!lines[0].contains(&0x0a));
+        assert_eq!(lines[1], vec![0x42]);
+    }
+
+    #[test]
+    fn feed_handles_full_binary_byte_range() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(
+            asm.feed(&[0x00, 0x7f, 0x80, 0xff, 0x0a]),
+            vec![vec![0x00, 0x7f, 0x80, 0xff]]
+        );
+    }
+
+    // ---------- LogLineAssembler：CRLF 对处理 ----------
+
+    #[test]
+    fn feed_crlf_pair_within_one_feed_is_one_separator() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"AB\r\nCD\n"), vec![bytes("AB"), bytes("CD")]);
+    }
+
+    #[test]
+    fn feed_crlf_pair_split_across_two_feeds_is_one_separator() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"AB\r"), vec![bytes("AB")]);
+        // LF 是上一 feed CR 的后半：必须被静默吞掉，不能产生空行
+        assert_eq!(asm.feed(b"\nCD\n"), vec![bytes("CD")]);
+    }
+
+    #[test]
+    fn feed_crlf_pair_straddling_two_feeds_then_more_data() {
+        // 任务要求用例：b"hel" + b"lo\r\nX" → 完成行 ["hello"]，尾部 "X"
+        let mut asm = LogLineAssembler::new();
+        assert!(asm.feed(b"hel").is_empty());
+        assert_eq!(asm.feed(b"lo\r\nX"), vec![bytes("hello")]);
+        assert!(asm.has_pending());
+        assert_eq!(asm.take_tail(), Some(bytes("X")));
+    }
+
+    #[test]
+    fn feed_does_not_swallow_non_lf_after_cr_across_feeds() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"X\r"), vec![bytes("X")]);
+        // 下一段以 'Y' 开头：pending_cr 被清除，Y 正常进入下一行
+        assert_eq!(asm.feed(b"YZ\n"), vec![bytes("YZ")]);
+    }
+
+    #[test]
+    fn feed_emits_empty_line_for_bare_crlf_between_text_lines() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(
+            asm.feed(b"a\r\n\r\nb\n"),
+            vec![bytes("a"), empty_line(), bytes("b")]
+        );
+    }
+
+    #[test]
+    fn feed_clears_pending_cr_after_normal_byte() {
+        let mut asm = LogLineAssembler::new();
+        asm.feed(b"a\r");
+        asm.feed(b"b");
+        // CR 后的字节已正常处理；此时到来的 LF 是**新的**分隔符
+        assert_eq!(asm.feed(b"\n"), vec![bytes("b")]);
+    }
+
+    // ---------- LogLineAssembler：连续分隔符 / 空行 ----------
+
+    #[test]
+    fn feed_emits_one_empty_chunk_per_consecutive_lf() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(
+            asm.feed(b"\n\n\n"),
+            vec![empty_line(), empty_line(), empty_line()]
+        );
+    }
+
+    #[test]
+    fn feed_emits_one_empty_chunk_per_consecutive_cr() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"\r\r"), vec![empty_line(), empty_line()]);
+    }
+
+    #[test]
+    fn feed_emits_one_empty_chunk_per_crlf_pair_in_separator_only_feed() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"\r\n\r\n"), vec![empty_line(), empty_line()]);
+    }
+
+    #[test]
+    fn feed_handles_interleaved_cr_lf_crlf_separators() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(
+            asm.feed(b"a\rb\nc\r\nd\n"),
+            vec![bytes("a"), bytes("b"), bytes("c"), bytes("d")]
+        );
+    }
+
+    // ---------- LogLineAssembler：feed 边界 ----------
+
+    #[test]
+    fn feed_keeps_unterminated_tail_pending_until_next_separator() {
+        let mut asm = LogLineAssembler::new();
+        assert!(asm.feed(b"hel").is_empty());
+        assert!(asm.has_pending());
+        assert_eq!(asm.feed(b"lo\n"), vec![bytes("hello")]);
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_fragmented_response_matches_single_feed() {
+        // issue #5-9 核心复现：跨事件的 "H" + "ello\r\n" 必须聚合成一行 "Hello"
+        let mut asm = LogLineAssembler::new();
+        assert!(asm.feed(b"H").is_empty());
+        assert_eq!(asm.feed(b"ello\r\n"), vec![bytes("Hello")]);
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_byte_by_byte_matches_whole_feed() {
+        let stream = b"hello\r\nworld\rend\nlast\n";
+        let mut whole = LogLineAssembler::new();
+        let expected = whole.feed(stream);
+
+        let mut stepwise = LogLineAssembler::new();
+        let mut collected: Vec<Vec<u8>> = Vec::new();
+        for &c in stream {
+            collected.extend(stepwise.feed(&[c]));
+        }
+
+        assert_eq!(collected, expected);
+        assert_eq!(
+            collected,
+            vec![bytes("hello"), bytes("world"), bytes("end"), bytes("last")]
+        );
+    }
+
+    #[test]
+    fn feed_handles_split_at_every_byte_of_lf_stream() {
+        let stream = b"ab\ncd\n";
+        for split_at in 0..=stream.len() {
+            let mut asm = LogLineAssembler::new();
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            out.extend(asm.feed(&stream[..split_at]));
+            out.extend(asm.feed(&stream[split_at..]));
+            assert_eq!(out, vec![bytes("ab"), bytes("cd")], "split at {split_at}");
+        }
+    }
+
+    #[test]
+    fn feed_handles_split_at_every_byte_of_crlf_stream() {
+        let stream = b"ab\r\ncd\r\n";
+        for split_at in 0..=stream.len() {
+            let mut asm = LogLineAssembler::new();
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            out.extend(asm.feed(&stream[..split_at]));
+            out.extend(asm.feed(&stream[split_at..]));
+            assert_eq!(out, vec![bytes("ab"), bytes("cd")], "split at {split_at}");
+        }
+    }
+
+    #[test]
+    fn feed_returns_independent_line_buffers() {
+        let mut asm = LogLineAssembler::new();
+        let input = bytes("ab\ncd\n");
+        let lines = asm.feed(&input);
+        assert_eq!(lines, vec![bytes("ab"), bytes("cd")]);
+        // 输入未被修改；返回块是独立分配
+        assert_eq!(input, bytes("ab\ncd\n"));
+    }
+
+    // ---------- LogLineAssembler：强制发射 ----------
+
+    #[test]
+    fn feed_force_flushes_at_custom_threshold_without_separator() {
+        let mut asm = LogLineAssembler::with_max_pending(4);
+        assert_eq!(asm.feed(&[1, 2, 3, 4]), vec![vec![1, 2, 3, 4]]);
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_emits_multiple_force_flush_chunks_on_long_separator_less_stream() {
+        let mut asm = LogLineAssembler::with_max_pending(4);
+        // 注意避开 10 (0x0A=LF) / 13 (0x0D=CR)——它们是分隔符
+        assert_eq!(
+            asm.feed(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 11]),
+            vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]
+        );
+        assert_eq!(asm.take_tail(), Some(vec![9, 11]));
+    }
+
+    #[test]
+    fn feed_continues_scanning_after_mid_feed_force_flush() {
+        let mut asm = LogLineAssembler::with_max_pending(4);
+        // 4 字节强制发射，随后 5|LF、6 7|CRLF 正常按行切
+        assert_eq!(
+            asm.feed(&[1, 2, 3, 4, 5, 0x0a, 6, 7, 0x0d, 0x0a]),
+            vec![vec![1, 2, 3, 4], vec![5], vec![6, 7]]
+        );
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn feed_resumes_normal_accumulation_after_force_flush() {
+        let mut asm = LogLineAssembler::with_max_pending(3);
+        assert_eq!(asm.feed(&[1, 2, 3, 4, 0x0a]), vec![vec![1, 2, 3], vec![4]]);
+    }
+
+    #[test]
+    fn feed_uses_default_4096_threshold() {
+        let mut asm = LogLineAssembler::new();
+        let bulk = vec![0x61u8; 4096];
+        assert_eq!(asm.feed(&bulk), vec![vec![0x61u8; 4096]]);
+        // 再多 1 字节不会触发第二次发射（未达阈值），留在 pending
+        assert!(asm.feed(&[0x62]).is_empty());
+        assert_eq!(asm.take_tail(), Some(vec![0x62]));
+    }
+
+    // ---------- LogLineAssembler：take_tail / reset ----------
+
+    #[test]
+    fn take_tail_returns_pending_bytes() {
+        let mut asm = LogLineAssembler::new();
+        asm.feed(b"partial");
+        assert_eq!(asm.take_tail(), Some(bytes("partial")));
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn take_tail_returns_none_when_nothing_pending() {
+        let mut asm = LogLineAssembler::new();
+        asm.feed(b"done\n");
+        assert_eq!(asm.take_tail(), None);
+    }
+
+    #[test]
+    fn take_tail_resets_state_so_next_feed_starts_fresh_line() {
+        let mut asm = LogLineAssembler::new();
+        asm.feed(b"old");
+        assert!(asm.take_tail().is_some());
+        assert_eq!(asm.feed(b"new\n"), vec![bytes("new")]);
+    }
+
+    #[test]
+    fn take_tail_clears_pending_cr_so_following_lf_is_real_separator() {
+        let mut asm = LogLineAssembler::new();
+        assert_eq!(asm.feed(b"a\r"), vec![bytes("a")]);
+        asm.take_tail(); // 清除 pending_cr
+        // LF 不再是「CRLF 后半」，而是新行的分隔符 → 发射空行
+        assert_eq!(asm.feed(b"\n"), vec![empty_line()]);
+    }
+
+    #[test]
+    fn has_pending_reflects_buffer_state_across_feeds() {
+        let mut asm = LogLineAssembler::new();
+        assert!(!asm.has_pending());
+        asm.feed(b"x");
+        assert!(asm.has_pending());
+        asm.feed(b"\n");
+        assert!(!asm.has_pending());
+    }
+
+    #[test]
+    fn reset_discards_pending_bytes_and_pending_cr_flag() {
+        let mut asm = LogLineAssembler::new();
+        asm.feed(b"junk\r");
+        asm.reset();
+        assert!(!asm.has_pending());
+        assert_eq!(asm.take_tail(), None);
+        // reset 后到来的 LF 是真正的分隔符（pending_cr 已清）
+        assert_eq!(asm.feed(b"\nfirst\n"), vec![empty_line(), bytes("first")]);
+    }
+
+    // ---------- LogManager::write_rx 集成 ----------
+
+    #[test]
+    fn write_rx_assembles_fragmented_response_into_single_line() {
+        // issue #5-9 核心复现：跨事件的 "H" + "ello\r\n" 必须写成一行 "Hello"，
+        // 而不是首字符独占一行。
+        let dir = test_dir("fragmented");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write_rx("COM1", "10:00:00.000", b"H").unwrap();
+        mgr.write_rx("COM1", "10:00:00.001", b"ello\r\n").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        assert_eq!(content, "[10:00:00.001] RX Hello\n", "got: {content}");
+        assert_eq!(content.lines().count(), 1, "got: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_rx_splits_multi_line_event_into_separate_lines() {
+        // 一个事件里包含多行 → 每行独立落盘（字节级切行）
+        let dir = test_dir("multiline");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write_rx("COM1", "10:00:00.000", b"line1\nline2\r\nline3\n")
+            .unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3, "got: {content}");
+        assert!(lines[0].ends_with("line1"), "got: {content}");
+        assert!(lines[1].ends_with("line2"), "got: {content}");
+        assert!(lines[2].ends_with("line3"), "got: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_rx_close_writer_flushes_unterminated_tail() {
+        // 未终结尾部在 close_writer 时作为最后一行落盘
+        let dir = test_dir("tail_close");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write_rx("COM1", "10:00:00.000", b"partial").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        assert!(content.contains("partial"), "got: {content}");
+        assert_eq!(content.lines().count(), 1, "got: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_rx_flushes_stale_tail_after_silence() {
+        // 250ms 静默冲刷：尾部滞留超时后，下一个事件先把它冲刷成行
+        let dir = test_dir("stale");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write_rx("COM1", "10:00:00.000", b"par").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        mgr.write_rx("COM1", "10:00:00.300", b"tial\n").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        assert!(content.contains("par"), "got: {content}");
+        assert!(content.contains("tial"), "got: {content}");
+        assert!(!content.contains("partial"), "got: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_rx_respects_prefix_toggles() {
+        // 前缀开关对 write_rx 生效（与 write_line 同规则，issue #3-4）
+        let dir = test_dir("prefix");
+        let mut mgr = test_manager(&dir);
+        mgr.set_include_timestamp(false);
+        mgr.set_include_direction(false);
+        mgr.create_writer("C1", "string").unwrap();
+        mgr.write_rx("C1", "10:00:00.000", b"bare\n").unwrap();
+        mgr.close_writer("C1").unwrap();
+        let content = read_log(&mgr, "C1");
+        assert_eq!(content, "bare\n", "expected bare data line: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// issue #5-10：日志子目录模式测试（none/date/port 路径构建 + list_files 递归）。
+///
+/// 显式导入（与 rx_log_tests 同约定，不用 `use super::*`），保证 FFI-free、
+/// Windows `cargo test` 可运行。
+#[cfg(test)]
+mod subdir_tests {
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::LogManager;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hypercom_test_subdir_{}", name));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn test_manager(dir: &PathBuf) -> LogManager {
+        LogManager {
+            log_directory: dir.clone(),
+            writers: HashMap::new(),
+            auto_save: true,
+            split_size_mb: 100,
+            filename_format: "[com]-[datetime]".to_string(),
+            subdir_mode: "date".to_string(),
+            default_encoding: "UTF-8".to_string(),
+            split_enabled: true,
+            include_timestamp: true,
+            include_direction: true,
+            last_flush: std::time::Instant::now(),
+        }
+    }
+
+    /// 断言日志文件位于 `root/<expected_sub>/` 直接子目录下，且端口名能正确反查
+    fn assert_in_subdir(mgr: &LogManager, root: &PathBuf, expected_sub: &str, port_id: &str) {
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 1, "expected exactly 1 log file, got {:?}", files);
+        let p = PathBuf::from(&files[0].path);
+        let parent = p.parent().expect("log file must have a parent dir");
+        assert_eq!(
+            parent,
+            root.join(expected_sub),
+            "log file must live in subdir '{}', got parent {:?}",
+            expected_sub,
+            parent
+        );
+        assert!(root.join(expected_sub).is_dir(), "subdir must exist on disk");
+        assert_eq!(files[0].port_id, port_id, "port_id must resolve via active writer");
+    }
+
+    #[test]
+    fn date_mode_writes_into_dated_subdir() {
+        // date 模式：子目录 = 当前日期 %Y-%m-%d
+        let dir = test_dir("date");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM3", "string").unwrap();
+        let expected = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_in_subdir(&mgr, &dir, &expected, "COM3");
+        mgr.close_writer("COM3").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn port_mode_writes_into_sanitized_port_subdir() {
+        // port 模式：子目录 = 净化后的 port_id
+        let dir = test_dir("port");
+        let mut mgr = test_manager(&dir);
+        mgr.set_subdir_mode("port");
+        mgr.create_writer("COM7", "string").unwrap();
+        assert_in_subdir(&mgr, &dir, "COM7", "COM7");
+        mgr.close_writer("COM7").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn port_mode_sanitizes_hostile_port_id() {
+        // 恶意 port_id 不能逃逸日志目录：路径分隔符与 ".." 被替换为 '_'
+        let dir = test_dir("port_hostile");
+        let mut mgr = test_manager(&dir);
+        mgr.set_subdir_mode("port");
+        mgr.create_writer("COM9\\..\\evil", "string").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 1, "got: {:?}", files);
+        let p = PathBuf::from(&files[0].path);
+        assert!(
+            p.starts_with(&dir),
+            "log file must stay inside log dir, got: {}",
+            p.display()
+        );
+        let parent = p.parent().unwrap();
+        // 净化后子目录是根目录的直接子级，不含路径分隔符
+        assert_eq!(parent.parent().unwrap(), dir.as_path());
+        assert!(
+            !parent.file_name().unwrap().to_str().unwrap().contains(['\\', '/']),
+            "subdir name must not contain path separators: {:?}",
+            parent
+        );
+        // 根目录下不应出现逃逸文件
+        let root_entries = fs::read_dir(&dir).unwrap().collect::<Vec<_>>();
+        assert_eq!(root_entries.len(), 1, "root must contain only the subdir, got {:?}", root_entries);
+        mgr.close_writer("COM9\\..\\evil").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn none_mode_writes_flat_into_log_dir() {
+        // none 模式：文件直接写入日志根目录
+        let dir = test_dir("none");
+        let mut mgr = test_manager(&dir);
+        mgr.set_subdir_mode("none");
+        mgr.create_writer("COM2", "string").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 1);
+        let p = PathBuf::from(&files[0].path);
+        assert_eq!(p.parent().unwrap(), dir.as_path(), "must be flat in log dir");
+        mgr.close_writer("COM2").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_mode_falls_back_to_date_subdir() {
+        // 未知模式按默认 date 收敛（与配置端 validate_and_clamp 一致）
+        let dir = test_dir("invalid");
+        let mut mgr = test_manager(&dir);
+        mgr.set_subdir_mode("monthly");
+        mgr.create_writer("COM5", "string").unwrap();
+        let expected = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_in_subdir(&mgr, &dir, &expected, "COM5");
+        mgr.close_writer("COM5").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_files_recurses_into_nested_subdirs() {
+        // list_files 必须递归：根目录 + 一层子目录 + 二层嵌套的文件都要列出
+        let dir = test_dir("recursive");
+        let mgr = test_manager(&dir);
+        fs::create_dir_all(dir.join("2026-08-01")).unwrap();
+        fs::create_dir_all(dir.join("2026-08-01").join("nested")).unwrap();
+        fs::write(dir.join("root.log"), b"root").unwrap();
+        fs::write(dir.join("2026-08-01").join("a.log"), b"a").unwrap();
+        fs::write(dir.join("2026-08-01").join("nested").join("b.log"), b"b").unwrap();
+
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 3, "all files in subdirs must be listed, got: {:?}", files);
+        assert!(files.iter().any(|f| f.path.ends_with("root.log")), "got: {:?}", files);
+        assert!(files.iter().any(|f| f.path.ends_with("a.log")), "got: {:?}", files);
+        assert!(files.iter().any(|f| f.path.ends_with("b.log")), "got: {:?}", files);
+        // 无活跃 writer 时 port_id 走文件名反查启发式
+        let a = files.iter().find(|f| f.path.ends_with("a.log")).unwrap();
+        assert_eq!(a.port_id, "a", "fallback heuristic should split on '-', got: {}", a.port_id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_log_as_fallback_finds_file_in_date_subdir() {
+        // writer 关闭后，save_log_as 的回退路径必须能通过递归 list_files
+        // 找到子目录中的日志（date 模式，默认模板 [com]-[datetime]）
+        let dir = test_dir("save_subdir");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM4", "string").unwrap();
+        mgr.write("COM4", "10:00:00", "RX", b"fallback data").unwrap();
+        mgr.close_writer("COM4").unwrap();
+        assert!(mgr.writers.get("COM4").is_none());
+        let target = dir.join("saved.log");
+        mgr.save_log_as("COM4", &target.to_string_lossy()).unwrap();
+        assert!(target.exists());
+        let content = fs::read_to_string(&target).unwrap();
+        assert!(content.contains("fallback data"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

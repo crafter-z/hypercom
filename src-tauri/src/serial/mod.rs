@@ -209,10 +209,16 @@ fn emit_data_event(
         is_hex,
     };
     let _ = app_handle.emit("serial:data", event);
-    // Write to log if a writer exists
+    // Write to log if a writer exists.
+    // RX 走 write_rx（字节级行聚合，issue #5-9：完整行才落盘，跨事件的响应
+    // 不再被切成碎片行）；TX 保持 write()（每次发送自成一行，不参与聚合）。
     if let Some(state) = app_handle.try_state::<crate::AppState>() {
         if let Ok(mut log_mgr) = state.log_manager.lock() {
-            let _ = log_mgr.write(port_id, &timestamp_str, direction, data);
+            if direction == "RX" {
+                let _ = log_mgr.write_rx(port_id, &timestamp_str, data);
+            } else {
+                let _ = log_mgr.write(port_id, &timestamp_str, direction, data);
+            }
         }
     }
 }

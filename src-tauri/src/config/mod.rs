@@ -219,6 +219,9 @@ pub struct AppConfig {
     /// 日志行前缀是否包含 RX/TX 方向标记（issue #3-4）
     #[serde(default = "default_true")]
     pub log_include_direction: bool,
+    /// 日志子目录策略（issue #5-10）："none"（直接存入日志目录）| "date"（按日期分文件夹）| "port"（按串口号分文件夹）
+    #[serde(default = "default_log_subdir_mode")]
+    pub log_subdir_mode: String,
 
     // --- 备份设置 ---
     pub backup_enabled: bool,
@@ -281,6 +284,11 @@ fn default_timestamp_format() -> String {
     "absolute".to_string()
 }
 
+/// issue #5-10：日志子目录策略默认按日期分文件夹（与前端 defaultConfig 一致）。
+fn default_log_subdir_mode() -> String {
+    "date".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -314,6 +322,7 @@ impl Default for AppConfig {
             log_split_size_mb: 100,
             log_include_timestamp: true,
             log_include_direction: true,
+            log_subdir_mode: "date".to_string(),
             backup_enabled: false,
             backup_interval: 24,
             backup_directory: String::new(),
@@ -466,6 +475,9 @@ impl ConfigManager {
         if !["ASCII", "UTF-8", "GBK", "ISO-8859-1"].contains(&config.log_encoding.as_str()) {
             config.log_encoding = "UTF-8".to_string();
         }
+        if !["none", "date", "port"].contains(&config.log_subdir_mode.as_str()) {
+            config.log_subdir_mode = "date".to_string();
+        }
         if !["\\r\\n", "\\r", "\\n", "None"].contains(&config.default_line_ending.as_str()) {
             config.default_line_ending = "\\r\\n".to_string();
         }
@@ -580,6 +592,8 @@ mod tests {
         // issue #3-4：日志行前缀开关默认开启（向后兼容旧行为）
         assert!(cfg.log_include_timestamp);
         assert!(cfg.log_include_direction);
+        // issue #5-10：日志子目录策略默认按日期分文件夹
+        assert_eq!(cfg.log_subdir_mode, "date");
         assert!(!cfg.backup_enabled);
         assert!(cfg.restore_session);
         assert!(cfg.diag_log_enabled);
@@ -618,6 +632,7 @@ mod tests {
             "portMeta", // issue #4-9
             "diagLogEnabled", // 诊断日志开关
             "logIncludeTimestamp", "logIncludeDirection", // issue #3-4
+            "logSubdirMode", // issue #5-10
         ] {
             assert!(json.contains(key), "missing {} in JSON", key);
         }
@@ -653,6 +668,32 @@ mod tests {
     }
 
     #[test]
+    fn test_log_subdir_mode_default_when_absent() {
+        // issue #5-10：旧 config.json 没有 logSubdirMode，
+        // 反序列化必须回退到默认 "date"（serde(default = "default_log_subdir_mode")）。
+        // 使用 0.3.1 真实 schema 的完整 JSON，仅省略新字段。
+        let old_json = r#"{
+            "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
+            "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
+            "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
+            "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
+            "uiFont": "Inter, sans-serif", "uiFontSize": 14,
+            "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
+            "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
+            "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
+            "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
+            "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
+            "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
+            "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
+            "hasSeenTour": false, "restoreSession": true,
+            "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
+            "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert_eq!(cfg.log_subdir_mode, "date");
+    }
+
+    #[test]
     fn test_trigger_rule_port_id_optional() {
         // issue #3-1：旧 config.json 的 trigger 规则没有 portId，反序列化回退 None；
         // 新规则带 portId 时 camelCase 序列化往返一致。
@@ -678,12 +719,14 @@ mod tests {
             log_encoding: "INVALID".to_string(),
             default_line_ending: "BAD".to_string(),
             log_format: "xml".to_string(),
+            log_subdir_mode: "monthly".to_string(),
             ..AppConfig::default()
         };
         ConfigManager::validate_and_clamp(&mut cfg);
         assert_eq!(cfg.log_encoding, "UTF-8");
         assert_eq!(cfg.default_line_ending, "\\r\\n");
         assert_eq!(cfg.log_format, "string");
+        assert_eq!(cfg.log_subdir_mode, "date");
     }
 
     #[test]
