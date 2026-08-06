@@ -18,7 +18,6 @@ const TAURI_MOCK = `
 
   // Commands that return arrays — must NOT return null or .map() crashes.
   const ARRAY_COMMANDS = new Set([
-    'list_available_ports',
     'load_command_sets',
     'load_highlight_sets',
     'load_protocol_templates',
@@ -28,13 +27,31 @@ const TAURI_MOCK = `
     'get_log_files',
   ]);
 
+  // 事件名 → transformCallback id（issue #6-10 e2e：驱动 serial:data 事件）
+  const eventListeners = {};
+
   window.__TAURI_INTERNALS__ = {
-    invoke: async (cmd) => {
+    invoke: async (cmd, args) => {
       if (ARRAY_COMMANDS.has(cmd)) return [];
-      if (cmd === 'plugin:event|listen') return nextId++;
+      if (cmd === 'list_available_ports') {
+        // 给 e2e 一个可打开标签页的端口（issue #6-10 RX 显示路径测试）
+        return [{ id: 'COM1', name: 'COM1', port_type: 'real', manufacturer: null, product: null }];
+      }
+      if (cmd === 'plugin:event|listen') {
+        const id = nextId++;
+        if (args && args.event) eventListeners[args.event] = args.handler;
+        return id;
+      }
       if (cmd === 'get_system_status')
         return { status: 'normal', memoryUsedMb: 0, memoryLimitMb: 0, cpuUsage: 0 };
       return null;
+    },
+    // 测试驱动：向某个已注册的事件监听器派发 payload（@tauri-apps/api 的
+    // handler 收到 { event, payload } 对象）。
+    dispatchEvent: (event, payload) => {
+      const handlerId = eventListeners[event];
+      const cb = callbacks.get(handlerId);
+      if (cb) cb({ event, id: handlerId, payload });
     },
     transformCallback: (cb, once = false) => {
       const id = nextId++;
@@ -111,5 +128,59 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.modal-overlay')).toBeVisible();
     await expect(page.locator('.config-page').getByText('内存总预算 (MB):')).toBeVisible();
     await expect(page.locator('.config-page').getByText('每端口内存预算 (MB):')).toBeVisible();
+  });
+
+  // ==================== issue #6-10：RX 显示 + 隐藏窗口排空 ====================
+
+  /** 打开 COM1 标签页（侧边栏双击端口行）并等终端渲染 */
+  async function openCom1Tab(page: import('@playwright/test').Page): Promise<void> {
+    await page.locator('.port-item-name', { hasText: 'COM1' }).dblclick();
+    await expect(page.locator('.tab-item', { hasText: 'COM1' })).toBeVisible();
+  }
+
+  /** 通过 mock 事件桥向应用派发一条 serial:data */
+  async function dispatchSerialData(
+    page: import('@playwright/test').Page,
+    portId: string,
+    text: string,
+  ): Promise<void> {
+    await page.evaluate(
+      ({ portId, text }) => {
+        const bytes = Array.from(new TextEncoder().encode(text));
+        window.__TAURI_INTERNALS__.dispatchEvent('serial:data', {
+          port_id: portId,
+          timestamp: Date.now(),
+          direction: 'RX',
+          data: bytes,
+          is_hex: false,
+        });
+      },
+      { portId, text },
+    );
+  }
+
+  test('RX serial data renders in the terminal (issue #6-10)', async ({ page }) => {
+    await openCom1Tab(page);
+    await dispatchSerialData(page, 'COM1', 'hello-rx\n');
+    await expect(page.locator('.terminal-line .terminal-content').first()).toContainText(
+      'hello-rx',
+    );
+  });
+
+  test('RX data still drains while the document is hidden (issue #6-10)', async ({ page }) => {
+    await openCom1Tab(page);
+    // 强制页面进入隐藏态（rAF 停摆的等价条件）+ 派发 visibilitychange 让管线重排
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'hidden',
+        configurable: true,
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await dispatchSerialData(page, 'COM1', 'hidden-drain\n');
+    // 隐藏时 rAF 停摆，管线靠 setTimeout 兜底排空——行仍应出现在终端
+    await expect(page.locator('.terminal-line .terminal-content').first()).toContainText(
+      'hidden-drain',
+    );
   });
 });
