@@ -17,9 +17,9 @@ const HighlightSettings: React.FC = () => {
 
   useEffect(() => {
     storageService.loadHighlightSets().then(sets => {
-      if (sets.length > 0) {
-        useRuleStore.getState().setHighlightRuleSets(sets);
-      }
+      // 无条件替换：空结果也要写入 store，否则「删光全部规则集」后重开弹窗
+      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
+      useRuleStore.getState().setHighlightRuleSets(sets);
     }).catch((e) => {
       console.warn('[ConfigModal] loadHighlightSets failed:', e);
       notifyError(e);

@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
+import { useRuleStore } from '../../stores/useRuleStore';
 import { useConfigPersistence } from '../../hooks';
+import { mergeLiveRuleEntities } from '../../utils/configMerge';
 import { diagLogService, fileService } from '../../services/tauri';
 import { save } from '@tauri-apps/plugin-dialog';
 import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
@@ -23,7 +25,7 @@ function levelClass(level: string): string {
 
 const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { t } = useTranslation();
-  const diagEnabled = useAppStore((s) => s.config.diagnosticLogEnabled);
+  const diagEnabled = useAppStore((s) => s.config.diagLogEnabled);
   const setConfig = useAppStore((s) => s.setConfig);
   const { saveConfig } = useConfigPersistence();
 
@@ -72,8 +74,10 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   }, [logText]);
 
   const handleToggleDiag = async (checked: boolean) => {
-    setConfig({ diagnosticLogEnabled: checked });
-    await saveConfig(useAppStore.getState().config);
+    setConfig({ diagLogEnabled: checked });
+    // 与 ConfigModal 页脚 Save 同款问题（issue #5-2）：全量保存必须携带
+    // useRuleStore 的实时实体，否则用启动快照整体替换掉刚保存的规则。
+    await saveConfig(mergeLiveRuleEntities(useAppStore.getState().config, useRuleStore.getState()));
   };
 
   const handleClear = async () => {

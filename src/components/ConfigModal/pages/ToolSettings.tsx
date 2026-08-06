@@ -20,9 +20,9 @@ const ToolSettings: React.FC = () => {
 
   useEffect(() => {
     storageService.loadPortToolConfigs().then(rows => {
-      if (rows.length > 0) {
-        useRuleStore.getState().setPortToolConfigs(rows);
-      }
+      // 无条件替换：空结果也要写入 store，否则「删光全部工具配置」后重开弹窗
+      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
+      useRuleStore.getState().setPortToolConfigs(rows);
     }).catch((e) => console.warn('[ToolSettings] load failed:', e));
   }, []);
 

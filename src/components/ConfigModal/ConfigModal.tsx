@@ -1,7 +1,9 @@
 import React, { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
+import { useRuleStore } from '../../stores/useRuleStore';
 import { useConfigPersistence } from '../../hooks';
+import { mergeLiveRuleEntities } from '../../utils/configMerge';
 import type { AppConfig } from '../../types';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, X,
@@ -63,7 +65,11 @@ const ConfigModal: React.FC = () => {
   };
 
   const handleSave = async () => {
-    await saveConfig(useAppStore.getState().config);
+    // `useAppStore.config` 的实体数组是启动时的快照：规则页里的单条 ✓ 保存
+    // 直接经 storageService 落盘 config.json，从不回写 store.config。这里若
+    // 直接全量保存会用过期快照整体替换后端刚写入的实体（issue #5-2）——
+    // 先合并 useRuleStore 的实时实体再保存。
+    await saveConfig(mergeLiveRuleEntities(useAppStore.getState().config, useRuleStore.getState()));
     configSnapshotRef.current = null;
     toggleConfigModal(false);
   };

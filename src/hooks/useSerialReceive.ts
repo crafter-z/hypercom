@@ -69,9 +69,20 @@ export function useSerialReceive() {
                 const now = Date.now();
                 if (now - (triggerAlertThrottle.get(rule.id) ?? 0) < TRIGGER_ALERT_THROTTLE_MS) continue;
                 triggerAlertThrottle.set(rule.id, now);
+                // The alert must surface the rule's ACTION CONTENT, not a
+                // generic line (issue #5-3). Fall back to the generic message
+                // only when the rule has no content configured.
+                const generic = i18n.t('trigger.alertMessage', { port: portId, rule: rule.name });
+                const content = (rule.actionContent ?? '').trim();
                 useToastStore.getState().push({
                   severity: 'warning',
-                  message: i18n.t('trigger.alertMessage', { port: portId, rule: rule.name }),
+                  // Title keeps the port/rule context in the notification
+                  // center; the live toast renders the message only.
+                  title: generic,
+                  message: content || generic,
+                  // Sticky: persists in the notification center until the
+                  // user dismisses or clears it (durationMs 0 = no timer).
+                  durationMs: 0,
                 });
               } else if (rule.actionType === 'respond') {
                 // silent=true: sendToPort re-throws on failure so the caller

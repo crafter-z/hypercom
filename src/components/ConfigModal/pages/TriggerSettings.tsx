@@ -1,11 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { useAppStore } from '../../../stores/useAppStore';
 import { storageService } from '../../../services/tauri';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { Plus, Check, Trash2, ChevronRight, Zap } from 'lucide-react';
-import type { TriggerMatchType, TriggerActionType } from '../../../types';
+import type { TriggerMatchType, TriggerActionType, TriggerRule } from '../../../types';
+
+/** Debounce window for auto-persisting rule edits (issue #5-3). */
+const SAVE_DEBOUNCE_MS = 300;
 
 /**
  * 条件触发配置页：管理触发规则（接收数据匹配模式时自动执行动作）。
@@ -20,17 +23,78 @@ const TriggerSettings: React.FC = () => {
   const removeTriggerRule = useRuleStore((s) => s.removeTriggerRule);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Persistence state (issue #5-3): edits must survive a dialog reopen, so
+  // every store change is debounce-saved to config.json. `hydratedRef` gates
+  // the watcher until the mount load has replaced the store — the initial
+  // load itself must never trigger a redundant save. `savedSnapshotRef` is
+  // the last known-persisted state; only rules that differ are re-saved.
+  const hydratedRef = useRef(false);
+  const savedSnapshotRef = useRef<TriggerRule[]>([]);
+
   useEffect(() => {
     // Unconditional replace: after the user deletes ALL rules, a stale
     // non-empty result must not resurrect them on the next open.
-    storageService.loadTriggerRules().then(rows => {
-      useRuleStore.getState().setTriggerRules(rows);
-    }).catch((e) => console.warn('[TriggerSettings] load failed:', e));
+    storageService.loadTriggerRules()
+      .then(rows => {
+        useRuleStore.getState().setTriggerRules(rows);
+      })
+      .catch((e) => console.warn('[TriggerSettings] load failed:', e))
+      .finally(() => {
+        // Hydrate regardless of load outcome: on failure the store keeps the
+        // app-startup rules (same persisted source) and edits still save.
+        savedSnapshotRef.current = useRuleStore.getState().triggerRules.map(r => ({ ...r }));
+        hydratedRef.current = true;
+      });
+  }, []);
+
+  // Debounced auto-save: any add/edit in the store persists 300ms after the
+  // last change, so closing the dialog never loses the final keystroke.
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    const timer = setTimeout(() => {
+      const rules = useRuleStore.getState().triggerRules;
+      const prevMap = new Map(savedSnapshotRef.current.map(r => [r.id, r]));
+      const changed = rules.filter((rule) => {
+        const old = prevMap.get(rule.id);
+        if (!old) return true; // newly added rule
+        return JSON.stringify(old) !== JSON.stringify(rule);
+      });
+      if (changed.length === 0) return;
+      // Snapshot advances only after every save succeeds — a failed save is
+      // retried on the next edit (failure is surfaced via notifyError).
+      Promise.all(
+        changed.map(rule =>
+          storageService.saveTriggerRule(rule).catch((e) => { notifyError(e); throw e; })
+        )
+      ).then(() => {
+        savedSnapshotRef.current = rules.map(r => ({ ...r }));
+      }).catch(() => { /* individual failures already toasted */ });
+    }, SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [triggerRules]);
+
+  // Unmount flush: an edit made within the debounce window (then the dialog
+  // closes, unmounting this page) would otherwise be lost — persist now.
+  useEffect(() => {
+    return () => {
+      if (!hydratedRef.current) return;
+      const rules = useRuleStore.getState().triggerRules;
+      const prevMap = new Map(savedSnapshotRef.current.map(r => [r.id, r]));
+      const changed = rules.filter((rule) => {
+        const old = prevMap.get(rule.id);
+        if (!old) return true;
+        return JSON.stringify(old) !== JSON.stringify(rule);
+      });
+      if (changed.length === 0) return;
+      for (const rule of changed) {
+        storageService.saveTriggerRule(rule).catch(e => notifyError(e));
+      }
+    };
   }, []);
 
   const handleAdd = () => {
     const id = `trig-${Date.now()}`;
-    addTriggerRule({
+    const rule: TriggerRule = {
       id,
       name: t('trigger.addRule'),
       pattern: '',
@@ -41,7 +105,12 @@ const TriggerSettings: React.FC = () => {
       actionIsHex: false,
       isEnabled: true,
       portId: undefined,
-    });
+    };
+    addTriggerRule(rule);
+    // Persist immediately (fire-and-forget; the UI path must not await the
+    // backend): a fresh rule survives a dialog reopen even if the debounced
+    // watcher never fires before the page unmounts.
+    storageService.saveTriggerRule(rule).catch(e => notifyError(e));
     setExpandedId(id);
   };
 

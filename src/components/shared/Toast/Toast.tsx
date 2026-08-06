@@ -28,6 +28,9 @@ const Toast: React.FC<ToastProps> = ({ toast }) => {
   const dismiss = useToastStore((s) => s.dismiss);
 
   useEffect(() => {
+    // Sticky toasts (durationMs === 0) never auto-dismiss — they persist
+    // until the user closes them or clears the notification center.
+    if (toast.durationMs <= 0) return;
     const timer = setTimeout(() => dismiss(toast.id), toast.durationMs);
     return () => clearTimeout(timer);
   }, [toast.id, toast.durationMs, dismiss]);

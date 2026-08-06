@@ -1,0 +1,201 @@
+/**
+ * Notification center styles (VSCode-style bell popover, issue #5-3).
+ * Mounted in the StatusBar; the panel pops up above the bar. Draws from the
+ * design tokens in base.css (--bg-*, --text-*, --border-color, --shadow-*)
+ * so it follows the dark/light theme automatically.
+ */
+
+.notify-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.notify-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 20px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.notify-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.notify-btn:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+.notify-badge {
+  position: absolute;
+  top: -5px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--status-error);
+  color: #ffffff;
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.notify-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  width: 320px;
+  max-height: 340px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  z-index: 10002;
+  overflow: hidden;
+  animation: notify-in 0.15s ease;
+}
+
+.notify-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  flex-shrink: 0;
+}
+
+.notify-clear-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.notify-clear-all:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.notify-clear-all:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.notify-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.notify-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-bottom: 1px solid var(--border-color);
+  border-left: 3px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-ui);
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.notify-row:last-child {
+  border-bottom: none;
+}
+
+.notify-row:hover {
+  background: var(--bg-hover);
+}
+
+.notify-row:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
+/* Severity accent: tinted left border, matching the live toast treatment. */
+.notify-row.notify-warning {
+  border-left-color: var(--text-warning);
+}
+.notify-row.notify-error {
+  border-left-color: var(--text-error);
+}
+.notify-row.notify-success {
+  border-left-color: var(--text-success);
+}
+.notify-row.notify-info {
+  border-left-color: var(--accent-color);
+}
+
+.notify-row-title {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+  word-break: break-word;
+}
+
+.notify-row-msg {
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.notify-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.notify-empty {
+  padding: var(--space-6) var(--space-3);
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+@keyframes notify-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

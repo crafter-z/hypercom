@@ -17,9 +17,9 @@ const ProtocolSettings: React.FC = () => {
 
   useEffect(() => {
     storageService.loadProtocolTemplates().then(templates => {
-      if (templates.length > 0) {
-        useRuleStore.getState().setProtocolTemplates(templates);
-      }
+      // 无条件替换：空结果也要写入 store，否则「删光全部模板」后重开弹窗
+      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
+      useRuleStore.getState().setProtocolTemplates(templates);
     }).catch((e) => {
       console.warn('[ConfigModal] loadProtocolTemplates failed:', e);
       notifyError(e);

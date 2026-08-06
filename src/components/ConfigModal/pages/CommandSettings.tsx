@@ -24,9 +24,9 @@ const CommandSettings: React.FC = () => {
 
   useEffect(() => {
     storageService.loadCommandSets().then(sets => {
-      if (sets.length > 0) {
-        useRuleStore.getState().setSendCommandSets(sets);
-      }
+      // 无条件替换：空结果也要写入 store，否则「删光全部命令集」后重开弹窗
+      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
+      useRuleStore.getState().setSendCommandSets(sets);
     }).catch((e) => {
       console.warn('[ConfigModal] loadCommandSets failed:', e);
       notifyError(e);

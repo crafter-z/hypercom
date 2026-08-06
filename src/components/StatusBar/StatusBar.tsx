@@ -6,6 +6,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
 import { useSystemStatus } from '../../hooks';
 import DisconnectBanner from './DisconnectBanner';
+import NotificationCenter from './NotificationCenter';
 
 /** Format bytes/sec with auto-scaling */
 function formatRate(bytesPerSec: number): string {
@@ -183,6 +184,7 @@ const StatusBar: React.FC = () => {
         ) : (
           <span className="statusbar-item">{t('statusBar.noPortSelected')}</span>
         )}
+        <NotificationCenter />
         <span className="statusbar-item">
           {now.toLocaleTimeString(i18n.language === 'en-US' ? 'en-US' : 'zh-CN')}
         </span>

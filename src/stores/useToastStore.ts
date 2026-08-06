@@ -22,6 +22,11 @@ export interface ToastItem {
   messageKey?: string;
   /** Raw message — shown verbatim when `messageKey` is absent. */
   message?: string;
+  /** Optional title — rendered by the notification center (bell popover). */
+  title?: string;
+  /** Auto-dismiss delay in ms. `0` = sticky: NO auto-dismiss (persists until
+   *  dismissed or cleared). Defaults to DEFAULT_DURATION_MS (or ERROR_* for
+   *  error severity) when omitted. */
   durationMs: number;
   createdAt: number;
 }
@@ -30,13 +35,23 @@ export interface ToastPushInput {
   severity: ToastSeverity;
   messageKey?: string;
   message?: string;
+  title?: string;
   durationMs?: number;
 }
 
 interface ToastStoreState {
+  /** Live toast stack rendered by ToastContainer (capped at MAX_VISIBLE). */
   toasts: ToastItem[];
+  /** Overflowed toasts (beyond MAX_VISIBLE). Nothing is dropped — the
+   *  notification center shows live + stashed, newest first. */
+  stashed: ToastItem[];
+  /** Notification center popover visibility (bell in the StatusBar). */
+  centerOpen: boolean;
   push: (input: ToastPushInput) => string;
   dismiss: (id: string) => void;
+  /** Clears the live stack AND the stash. */
+  clearAll: () => void;
+  setCenterOpen: (open: boolean) => void;
 }
 
 const MAX_VISIBLE = 5;
@@ -54,6 +69,8 @@ function genToastId(): string {
 export const useToastStore = create<ToastStoreState>()(
   immer((set) => ({
     toasts: [],
+    stashed: [],
+    centerOpen: false,
 
     push: (input) => {
       const id = genToastId();
@@ -64,14 +81,18 @@ export const useToastStore = create<ToastStoreState>()(
         severity: input.severity,
         messageKey: input.messageKey,
         message: input.message,
+        title: input.title,
         durationMs,
         createdAt: Date.now(),
       };
       set((state) => {
         state.toasts.push(toast);
-        // Overflow: drop oldest beyond MAX_VISIBLE (they fade out via CSS).
+        // Overflow: the oldest live toasts move into the notification-center
+        // stash instead of being dropped — nothing is lost anymore.
         if (state.toasts.length > MAX_VISIBLE) {
-          state.toasts.splice(0, state.toasts.length - MAX_VISIBLE);
+          const overflowCount = state.toasts.length - MAX_VISIBLE;
+          const overflowed = state.toasts.splice(0, overflowCount);
+          state.stashed.push(...overflowed);
         }
       });
       return id;
@@ -79,8 +100,24 @@ export const useToastStore = create<ToastStoreState>()(
 
     dismiss: (id) =>
       set((state) => {
-        const idx = state.toasts.findIndex((t) => t.id === id);
-        if (idx >= 0) state.toasts.splice(idx, 1);
+        const liveIdx = state.toasts.findIndex((t) => t.id === id);
+        if (liveIdx >= 0) {
+          state.toasts.splice(liveIdx, 1);
+          return;
+        }
+        const stashIdx = state.stashed.findIndex((t) => t.id === id);
+        if (stashIdx >= 0) state.stashed.splice(stashIdx, 1);
+      }),
+
+    clearAll: () =>
+      set((state) => {
+        state.toasts = [];
+        state.stashed = [];
+      }),
+
+    setCenterOpen: (open) =>
+      set((state) => {
+        state.centerOpen = open;
       }),
   }))
 );
