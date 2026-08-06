@@ -422,3 +422,159 @@ describe('RxPipeline — maxLinesPerTick write limit (issue #6-2)', () => {
     expect(h.pendingTick).not.toBeNull();
   });
 });
+
+// ==================== issue #6-10 方案3：队列上限 + visibility-aware 排空 ====================
+
+describe('RxPipeline — maxQueuedLines queue cap (issue #6-10)', () => {
+  const frameLine = (id: string): TerminalLine => ({
+    id,
+    timestamp: 1,
+    direction: 'RX',
+    content: 'FRAME',
+    rawData: new Uint8Array([0xaa]),
+    isHex: true,
+    parsedFields: [],
+  });
+
+  it('drops the OLDEST lines when the queue exceeds maxQueuedLines', () => {
+    const h = makeHarness({ maxQueuedLines: 3 });
+    h.pipeline.feedBytes('COM1', bytes('a\nb\nc\nd\ne\n'), 1);
+    runTick(h);
+    // 5 行入队超 3 行上限：丢弃最旧的 a、b，保留 c、d、e
+    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['c', 'd', 'e']);
+  });
+
+  it('enqueueLines also respects the queue cap', () => {
+    const h = makeHarness({ maxQueuedLines: 2 });
+    h.pipeline.enqueueLines('COM1', [frameLine('f1'), frameLine('f2'), frameLine('f3')]);
+    runTick(h);
+    expect(h.appended[0]!.lines.map((l) => l.id)).toEqual(['f2', 'f3']);
+  });
+
+  it('does not drop anything when under the cap', () => {
+    const h = makeHarness({ maxQueuedLines: 5 });
+    h.pipeline.feedBytes('COM1', bytes('a\nb\nc\n'), 1);
+    runTick(h);
+    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('enforces the cap on the shared queue across feedBytes + enqueueLines', () => {
+    const h = makeHarness({ maxQueuedLines: 3 });
+    h.pipeline.feedBytes('COM1', bytes('a\nb\nc\n'), 1);
+    h.pipeline.enqueueLines('COM1', [frameLine('f1'), frameLine('f2')]);
+    runTick(h);
+    // 队列 = [a,b,c] + [f1,f2] = 5 行超 3：丢最旧 a、b，保留 c,f1,f2
+    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['c', 'FRAME', 'FRAME']);
+  });
+});
+
+describe('RxPipeline — visibility-aware drain (issue #6-10)', () => {
+  // 保存原全局，供 afterEach 恢复（node 环境默认无 document/rAF）
+  const originalDoc = globalThis.document;
+  const originalRaf = globalThis.requestAnimationFrame;
+  const originalCaf = globalThis.cancelAnimationFrame;
+
+  /** 构造可切换可见性的 document stub + rAF/cancelAnimationFrame stub */
+  function stubVisibilityGlobals(initial: 'visible' | 'hidden') {
+    const docListeners: Record<string, Array<() => void>> = {};
+    let rafCallback: (() => void) | null = null;
+    let rafCalls = 0;
+    const doc = {
+      visibilityState: initial,
+      addEventListener: (ev: string, cb: () => void) => {
+        (docListeners[ev] ??= []).push(cb);
+      },
+      removeEventListener: () => {},
+    };
+    (globalThis as any).document = doc;
+    (globalThis as any).requestAnimationFrame = (cb: () => void): number => {
+      rafCallback = cb;
+      return ++rafCalls;
+    };
+    const cancelSpy = vi.fn(() => {
+      // 取消 rAF id 即放弃当前挂起的 rAF 回调（对 setTimeout id 的误调不影响，
+      // 此时 rafCallback 本就为 null）
+      rafCallback = null;
+    });
+    (globalThis as any).cancelAnimationFrame = cancelSpy;
+    return {
+      docListeners,
+      raf: () => rafCallback, // 未触发则 null
+      cancelSpy,
+      setVisibility: (v: 'visible' | 'hidden') => {
+        doc.visibilityState = v;
+        docListeners['visibilitychange']?.forEach((cb) => cb());
+      },
+    };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    const g = globalThis as any;
+    if (originalDoc === undefined) delete g.document;
+    else g.document = originalDoc;
+    if (originalRaf === undefined) delete g.requestAnimationFrame;
+    else g.requestAnimationFrame = originalRaf;
+    if (originalCaf === undefined) delete g.cancelAnimationFrame;
+    else g.cancelAnimationFrame = originalCaf;
+  });
+
+  it('falls back to setTimeout when the document is hidden (rAF must not be used)', () => {
+    vi.useFakeTimers();
+    const stub = stubVisibilityGlobals('hidden');
+    const h = makeHarness({ scheduleFlush: undefined, cancelFlush: undefined });
+    h.pipeline.feedBytes('COM1', bytes('line\n'), 1);
+    expect(stub.raf()).toBeNull(); // 隐藏时绝不走 rAF
+    expect(h.appended).toHaveLength(0);
+    vi.advanceTimersByTime(16); // setTimeout 兜底排空
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0]!.lines[0]!.content).toBe('line');
+  });
+
+  it('uses rAF when visible and drains on the rAF tick', () => {
+    vi.useFakeTimers();
+    const stub = stubVisibilityGlobals('visible');
+    const h = makeHarness({ scheduleFlush: undefined, cancelFlush: undefined });
+    h.pipeline.feedBytes('COM1', bytes('abc\n'), 1);
+    expect(stub.raf()).not.toBeNull(); // 可见时走 rAF
+    expect(h.appended).toHaveLength(0);
+    stub.raf()!(); // 触发 rAF tick
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0]!.lines[0]!.content).toBe('abc');
+  });
+
+  it('re-arms a pending rAF tick as setTimeout when visibility flips to hidden', () => {
+    vi.useFakeTimers();
+    const stub = stubVisibilityGlobals('visible');
+    const h = makeHarness({ scheduleFlush: undefined, cancelFlush: undefined });
+    h.pipeline.feedBytes('COM1', bytes('a\n'), 1);
+    expect(stub.raf()).not.toBeNull(); // 可见：rAF tick 挂起未触发
+    expect(stub.cancelSpy).not.toHaveBeenCalled();
+
+    // 切到隐藏：visibilitychange → 取消未触发 rAF tick + 按当前可见性重排（setTimeout）
+    stub.setVisibility('hidden');
+    expect(stub.cancelSpy).toHaveBeenCalled();
+    expect(stub.raf()).toBeNull(); // 旧 rAF 回调已被取消放弃
+
+    vi.advanceTimersByTime(16);
+    expect(h.appended).toHaveLength(1); // setTimeout 兜底排空
+    expect(h.appended[0]!.lines[0]!.content).toBe('a');
+  });
+
+  it('re-arms a pending setTimeout tick back to rAF when visibility flips to visible', () => {
+    vi.useFakeTimers();
+    const stub = stubVisibilityGlobals('hidden');
+    const h = makeHarness({ scheduleFlush: undefined, cancelFlush: undefined });
+    h.pipeline.feedBytes('COM1', bytes('b\n'), 1);
+    expect(stub.raf()).toBeNull(); // 隐藏：setTimeout tick 挂起
+
+    stub.setVisibility('visible'); // visibilitychange → 重排回 rAF
+    expect(stub.raf()).not.toBeNull();
+    // 让旧 setTimeout tick 到期也不该二次排空（已被取消；若取消失败会重复 append）
+    vi.advanceTimersByTime(16);
+    expect(h.appended).toHaveLength(0); // 新 tick 是 rAF，尚未触发
+    stub.raf()!();
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0]!.lines[0]!.content).toBe('b');
+  });
+});

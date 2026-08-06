@@ -59,6 +59,13 @@ export interface RxPipelineOptions {
    *  超出部分留在队列里，下一帧继续写——避免高频大缓冲一次性 append 阻塞
    *  主线程（tao 事件循环错过 RedrawEventsCleared 的同类根因）。默认 2000 */
   maxLinesPerTick?: number;
+  /** 每端口队列上限（行）（issue #6-10 方案3）：入队后超过该上限丢弃**最旧**的
+   *  行——隐藏窗口长时间积压时最旧的行最无价值，防无界增长。默认 10000 */
+  maxQueuedLines?: number;
+  /** 页面是否隐藏（issue #6-10 方案3）：隐藏时 rAF 停摆，批写 tick 必须走
+   *  setTimeout 兜底排空。默认读 `document.visibilityState === 'hidden'`；
+   *  可注入以便测试。 */
+  isDocumentHidden?: () => boolean;
   /** 调度批写 tick；可注入以便测试。默认 requestAnimationFrame，不可用时 setTimeout(cb,16) */
   scheduleFlush?: (cb: () => void) => number;
   /** 取消批写 tick，与 scheduleFlush 配对 */
@@ -81,21 +88,25 @@ interface PortRxState {
 const DEFAULT_SILENCE_FLUSH_MS = 250;
 const DEFAULT_MAX_PENDING_BYTES = 4096;
 const DEFAULT_MAX_LINES_PER_TICK = 2000;
+/** 每端口队列上限（行）：超过即丢弃最旧，防隐藏窗口期间无界积压（issue #6-10） */
+const DEFAULT_MAX_QUEUED_LINES = 10_000;
 const FALLBACK_TICK_MS = 16;
 
 /** 行 ID 格式与代码库其它写入点一致 */
 const makeLineId = (): string =>
   `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-const defaultScheduleFlush = (cb: () => void): number => {
-  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(cb);
-  return setTimeout(cb, FALLBACK_TICK_MS);
-};
+/** 页面是否隐藏：document.hidden / visibilityState === 'hidden' 时 rAF 停摆（issue #6-10） */
+const defaultIsDocumentHidden = (): boolean =>
+  typeof document !== 'undefined' && document.visibilityState === 'hidden';
 
 const defaultCancelFlush = (handle: number): void => {
-  // 与 defaultScheduleFlush 的分支一一对应：有 rAF 就用 rAF 取消，否则 clearTimeout
+  // 与 defaultScheduleFlush 的 visibility-aware 调度对应：tick 可能由 rAF 或
+  // setTimeout 任一机制产生。rAF 与 setTimeout 的句柄命名空间不同，但对
+  // 错误命名空间的 id，cancelAnimationFrame / clearTimeout 都是静默 no-op——
+  // 同时调用两种取消，保证无论 tick 由哪种机制调度都能真正取消。
   if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(handle);
-  else clearTimeout(handle);
+  clearTimeout(handle);
 };
 
 export class RxPipeline {
@@ -103,6 +114,8 @@ export class RxPipeline {
   private readonly silenceFlushMs: number;
   private readonly maxPendingBytes: number;
   private readonly maxLinesPerTick: number;
+  private readonly maxQueuedLines: number;
+  private readonly isHidden: () => boolean;
   private readonly scheduleFlush: (cb: () => void) => number;
   private readonly cancelFlush: (handle: number) => void;
   private readonly ports = new Map<string, PortRxState>();
@@ -114,9 +127,37 @@ export class RxPipeline {
     this.silenceFlushMs = opts.silenceFlushMs ?? DEFAULT_SILENCE_FLUSH_MS;
     this.maxPendingBytes = opts.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES;
     this.maxLinesPerTick = opts.maxLinesPerTick ?? DEFAULT_MAX_LINES_PER_TICK;
-    this.scheduleFlush = opts.scheduleFlush ?? defaultScheduleFlush;
+    this.maxQueuedLines = opts.maxQueuedLines ?? DEFAULT_MAX_QUEUED_LINES;
+    this.isHidden = opts.isDocumentHidden ?? defaultIsDocumentHidden;
+    // issue #6-10 方案3 visibility-aware 默认调度器：页面可见且 rAF 可用 → rAF；
+    // 页面隐藏（rAF 停摆）或无 rAF → setTimeout(16ms) 兜底排空。注意调度时刻的
+    // 可见性不代表触发时刻的可见性——真正的保险是下方的 visibilitychange 监听
+    // （隐藏时把未触发的 rAF tick 重排成 setTimeout）。
+    this.scheduleFlush =
+      opts.scheduleFlush ??
+      ((cb: () => void): number => {
+        if (typeof requestAnimationFrame === 'function' && !this.isHidden()) {
+          return requestAnimationFrame(cb);
+        }
+        return setTimeout(cb, FALLBACK_TICK_MS);
+      });
     this.cancelFlush = opts.cancelFlush ?? defaultCancelFlush;
+    // issue #6-10 方案3：页面隐藏时 rAF 停摆，已调度的 rAF tick 永远不会触发——
+    // 监听 visibilitychange，隐藏时把未触发的 tick 按当前调度器重排
+    // （隐藏 → setTimeout 兜底排空；恢复可见 → 换回 rAF 更低延迟）。
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    }
   }
+
+  /** visibilitychange 处理：取消未触发的批写 tick，按当前可见性用默认调度器重排 */
+  private readonly handleVisibilityChange = (): void => {
+    if (this.flushTickHandle !== null) {
+      this.cancelFlush(this.flushTickHandle);
+      this.flushTickHandle = null;
+      this.scheduleTick();
+    }
+  };
 
   /**
    * 喂入一段 RX 字节（一个 serial:data 事件的 payload）。
@@ -149,6 +190,7 @@ export class RxPipeline {
       this.scheduleTick();
     }
     this.armSilenceTimer(portId, state);
+    this.enforceQueueCap(state);
   }
 
   /**
@@ -159,6 +201,7 @@ export class RxPipeline {
     if (lines.length === 0) return;
     const state = this.getPortState(portId);
     state.queue.push(...lines);
+    this.enforceQueueCap(state);
     this.scheduleTick();
   }
 
@@ -253,9 +296,24 @@ export class RxPipeline {
         state.silenceTimer = null;
       }
     }
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    }
   }
 
   // ==================== 内部 ====================
+
+  /**
+   * 队列上限（issue #6-10 方案3）：超过 `maxQueuedLines` 时丢弃**最旧**的行。
+   * 触发场景是排空跟不上入队（隐藏窗口 rAF 停摆 / 主线程长时间忙）——此时最旧
+   * 的行最无价值（很快会被内存裁剪清掉），保留最新数据优先。
+   */
+  private enforceQueueCap(state: PortRxState): void {
+    const overflow = state.queue.length - this.maxQueuedLines;
+    if (overflow > 0) {
+      state.queue.splice(0, overflow);
+    }
+  }
 
   private getPortState(portId: string): PortRxState {
     let state = this.ports.get(portId);
