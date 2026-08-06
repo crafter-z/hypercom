@@ -22,6 +22,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
 import { isSameRound } from '../../utils/timeFormat';
+import { becameLocked, computePinTarget, isAtBottom, shouldFollow } from '../../utils/followLogic';
 import { useTranslation } from 'react-i18next';
 import { useTerminalDisplay } from './useTerminalDisplay';
 import { useTerminalSearch, type SearchJumpContext } from './useTerminalSearch';
@@ -51,9 +52,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   // Mirrors terminal.scrollLocked — the single follow-flag read by the
   // auto-follow effect. Written only by the sync effect below (store-driven).
   const followRef = useRef(true);
-  // Current rendered row count — scrollToBottom reads it through this ref so
-  // its identity stays stable (STABILIZATION pattern).
-  const countRef = useRef(0);
 
   // Gesture system: explicit user-scroll detection. While a gesture is
   // active, auto-follow is suppressed; when it settles (120ms of quiet),
@@ -88,7 +86,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   // null sentinel = no filter active → identity mapping, render the visible
   // prefix directly; otherwise render exactly the surviving indices.
   const renderedCount = filteredIndices ? filteredIndices.length : visibleCount;
-  countRef.current = renderedCount;
 
   // O(1) identity primitives for the auto-follow effect: the buffer trims
   // from the HEAD once maxLines is full (lines.length stays constant), so
@@ -119,32 +116,29 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     useFlushSync: false,         // Prevent flushSync → synchronous render cascades
   });
 
-  // Scroll to the last rendered row; reads the live count through countRef.
+  // Pin the viewport to the latest row by raw measurement. This is the
+  // FOLLOW path — it deliberately does NOT use virtualizer.scrollToIndex:
+  // under sustained high-frequency output each new batch raced the
+  // virtualizer's measurement pass, scrollToIndex entered its 10-attempt
+  // retry loop ("Failed to scroll to index ... after 10 attempts") and the
+  // follow visibly lagged the latest rows. Pinning scrollTop directly is
+  // independent of the virtualizer's measurement state.
+  // Re-pin for TWO frames: the first pins to the current bottom; the second,
+  // after the newly appended rows have been measured and totalSize has
+  // grown, re-pins to the true bottom. Touches ONLY scrollTop — never
+  // scrollLocked/followRef.
   const scrollToBottom = useCallback(() => {
-    const count = countRef.current;
-    if (count > 0) {
-      virtualizer.scrollToIndex(count - 1, { align: 'end', behavior: 'auto' });
-    }
-    // Measurement-lag fallback: scrollToIndex targets the last item's
-    // (possibly estimated) end — unmeasured tail rows are estimateSize until
-    // ResizeObserver lands, so totalSize can grow and stale the scrollTop.
-    // Re-pin for TWO frames: the first pins to the current bottom; the second,
-    // after the virtualizer has measured the newly appended rows and grown
-    // totalSize, re-pins to the true bottom. Under sustained high-frequency
-    // output a single pin lets the view drift upward by a few px per frame and
-    // scroll-lock visibly loses the latest rows (issue #4-1). Touches ONLY
-    // scrollTop — never scrollLocked/followRef.
     let frames = 0;
     const pinToBottom = () => {
       // A user gesture starting mid-chain must not be yanked back to the bottom.
       if (gestureActiveRef.current) return;
       const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el) el.scrollTop = computePinTarget(el.scrollHeight, el.clientHeight);
       frames += 1;
       if (frames < 2) requestAnimationFrame(pinToBottom);
     };
     requestAnimationFrame(pinToBottom);
-  }, [virtualizer]);
+  }, []);
 
   // Sync the store's scrollLocked to followRef. Explicit-intent transitions:
   // on false→true OR on first render with locked=true (tab remount of a
@@ -158,8 +152,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     const prev = prevLockedRef.current;
     prevLockedRef.current = locked;
     followRef.current = locked;
-    const becameLocked = prev === undefined ? locked : locked && !prev;
-    if (becameLocked) scrollToBottom();
+    if (becameLocked(prev, locked)) scrollToBottom();
   }, [terminal?.scrollLocked, scrollToBottom]);
 
   // Settle handler: a user scroll gesture ended — derive scrollLocked from
@@ -168,7 +161,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
     gestureActiveRef.current = false;
     const el = scrollRef.current;
     if (!el) return;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
+    const atBottom = isAtBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
     if (atBottom !== useTerminalStore.getState().terminals[portId]?.scrollLocked) {
       setTerminalConfig(portId, { scrollLocked: atBottom });
     }
@@ -266,7 +259,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, terminal }) => {
   // (explicit user scroll), or while search is open. On resume the count
   // changes and this effect catches up.
   useEffect(() => {
-    if (paused || !followRef.current || gestureActiveRef.current || searchOpenRef.current) return;
+    if (!shouldFollow(paused, followRef.current, gestureActiveRef.current, searchOpenRef.current)) return;
     scrollToBottom();
   }, [renderedCount, lastLineId, firstLineId, virtualizer, paused, scrollToBottom]);
 

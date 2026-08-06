@@ -252,6 +252,7 @@ interface GroupItemProps {
   onRunTool: (portId: string) => void;
   onKillTool: (portId: string) => void;
   onConfigTool: () => void;
+  onRunToolForGroup: (group: PortGroup) => void;
 }
 
 /**
@@ -275,6 +276,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
   onRunTool,
   onKillTool,
   onConfigTool,
+  onRunToolForGroup,
 }) => {
   const { t } = useTranslation();
   // Exclude hidden ports so "hide" actually works for grouped ports too
@@ -320,6 +322,7 @@ const GroupItem: React.FC<GroupItemProps> = ({
   const groupMenuItems: ContextMenuEntry[] = [
     { label: t('sidebar.group.connectAll'), icon: <Play size={14} />, onClick: connectAll, disabled: !hasConnectable },
     { label: t('sidebar.group.disconnectAll'), icon: <Square size={14} />, onClick: disconnectAll, disabled: !hasDisconnectable },
+    { label: t('sidebar.group.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunToolForGroup(group) },
     { type: 'separator' },
     { label: t('sidebar.group.contextMenu.rename'), icon: <Pencil size={14} />, onClick: () => { setRenameValue(group.name); setIsRenaming(true); } },
     { type: 'separator' },
@@ -409,7 +412,7 @@ const Sidebar: React.FC = () => {
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();
   const { simulationMode, toggleSimulation } = useSimulation();
-  const { runTool, killTool, configTool } = usePortToolActions();
+  const { runTool, killTool, configTool, runToolForGroup, groupToolDialog } = usePortToolActions();
 
   const [showHidden, setShowHidden] = useState(false);
   const [search, setSearch] = useState('');
@@ -556,6 +559,7 @@ const Sidebar: React.FC = () => {
                 onRunTool={runTool}
                 onKillTool={killTool}
                 onConfigTool={configTool}
+                onRunToolForGroup={runToolForGroup}
               />
             );
           })}
@@ -625,6 +629,7 @@ const Sidebar: React.FC = () => {
           onCancel={() => setAliasDialog(null)}
         />
       )}
+      {groupToolDialog}
     </div>
   );
 };
