@@ -11,7 +11,6 @@
  * - 模拟模式: 用于无硬件时的测试，提供 LOOP:Loopback 虚拟串口
  */
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -64,9 +63,24 @@ pub struct SerialReconnectHintEvent {
 
 // ==================== 真实串口 ====================
 
-/// 单个串口连接句柄
+/// 单个串口连接句柄。
+///
+/// issue #6-10（方案1）：读写句柄经 `try_clone()` 拆分（Windows 上 =
+/// `DuplicateHandle`），读线程独占 `read_port`、发送路径独占 `write_port`。
+/// 拆分前读线程与 TX 写路径共享同一把 per-port `Mutex<Box<dyn SerialPort>>`：
+/// TX 的 write_all+flush 阻塞期间端口锁被 TX 独占，RX 读线程被饿死——设备
+/// 响应早已到达 OS 接收缓冲区，却直到 TX 释放锁才被读出来（"TX 后等一分钟
+/// 才收到响应"的根因）。拆分后 TX 再阻塞也影响不到 RX 读取。
+///
+/// 注意：不能对同一 COM 口二次 `CreateFile`（serialport crate 以
+/// `dwShareMode=0` 打开），`try_clone()` 是唯一拆分途径；DCB/COMMTIMEOUTS
+/// 是设备级状态、两个句柄共享，改参（set_params/set_flow_control）只在
+/// 写句柄上进行。
 pub struct SerialPortHandle {
-    pub port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    /// 读句柄：读线程独占（只锁读）
+    pub read_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    /// 写句柄：发送路径独占（只锁写）
+    pub write_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     pub running: Arc<AtomicBool>,
     pub read_thread: Option<thread::JoinHandle<()>>,
 }
@@ -152,6 +166,63 @@ pub fn build_tx_bytes(
         _ => {}
     }
     Ok(bytes)
+}
+
+/// 发送写操作的总写入期限（issue #6-10，方案2）。
+///
+/// Windows 上每次 `write()`（WriteFile）受 `COMMTIMEOUTS` 约束
+/// （`.timeout(100ms)` → `WriteTotalTimeoutConstant: 100`，每次最多 ~100ms），
+/// 但超时不是错误——返回部分/零字节计数，`write_all` 以 ~100ms/次循环重试。
+/// 对端长时间不取走数据（流控卡住 / USB-UART FIFO 满）时，长 payload 的
+/// `write_all` 会无限循环；本常量作为总期限兜底，超时即报错而非无限等待。
+pub const WRITE_TOTAL_DEADLINE: Duration = Duration::from_millis(2000);
+
+/// 带总写入期限的 `write_all`（issue #6-10，方案2）。
+///
+/// 替代 `std::io::Write::write_all`：
+/// - **不调用 `flush()`**——Windows 上 `flush()` = `FlushFileBuffers`，无超时、
+///   受流控约束，对端忙/CTS 拉低/XOFF 时**无界阻塞**（"TX 后长时间收不到
+///   响应"的根因；`write_all` 已把字节交给驱动，等物理发完对调试工具几乎
+///   无收益）。
+/// - `Ok(0)` 立即报错（`WriteZero` 语义：流控卡死时驱动缓冲不空，WriteFile
+///   超时返回零字节计数）。
+/// - `TimedOut`（WriteTotalTimeoutConstant 到期）重试到总期限；`Interrupted`
+///   直接继续。
+/// - 超过 `deadline` 仍未写完时报错，避免长 payload 以 ~100ms/次无限循环。
+///
+/// 接受 `&mut dyn std::io::Write`（`serialport::SerialPort: io::Read + io::Write`），
+/// 测试可用纯 std mock writer，不触碰 serialport FFI。
+pub fn write_all_with_deadline(
+    port: &mut dyn std::io::Write,
+    bytes: &[u8],
+    deadline: Duration,
+) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+    let mut written = 0usize;
+    while written < bytes.len() {
+        match port.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(anyhow::anyhow!(
+                    "Serial write returned 0 bytes (flow control stalled?)"
+                ));
+            }
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // 写超时（WriteTotalTimeoutConstant 到期，驱动缓冲未空）：重试，
+            // 由总期限兜底防止无限循环。
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(anyhow::anyhow!("Serial write error: {e}")),
+        }
+        if written < bytes.len() && start.elapsed() >= deadline {
+            return Err(anyhow::anyhow!(
+                "Serial write timed out after {}ms ({} of {} bytes written)",
+                deadline.as_millis(),
+                written,
+                bytes.len()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_data_bits(bits: u8) -> serialport::DataBits {
@@ -326,7 +397,7 @@ impl SerialManager {
         }
         self.ports.remove(&args.port_id);
 
-        let port = serialport::new(&args.port_id, args.baud_rate)
+        let mut port = serialport::new(&args.port_id, args.baud_rate)
             .data_bits(parse_data_bits(args.data_bits))
             .parity(parse_parity(&args.parity))
             .stop_bits(parse_stop_bits(&args.stop_bits))
@@ -334,26 +405,24 @@ impl SerialManager {
             .timeout(Duration::from_millis(100))
             .open()?;
 
-        // 设置 DTR/RTS
-        // Note: 需要在 Arc<Mutex> 包装之前设置，因为 write_data_terminal_ready 需要可变引用
-        // 但 open() 返回的是 Box<dyn SerialPort>，我们无法直接设置
-        // 这里先打开再设置
+        // 设置 DTR/RTS：必须在 try_clone 之前、在 Arc<Mutex> 包装之前设置
+        // （open() 返回的是 Box<dyn SerialPort>，需可变引用）。
+        // DTR/RTS 是设备级状态、两个句柄共享，设一次即可。
+        port.write_data_terminal_ready(args.dtr)?;
+        port.write_request_to_send(args.rts)?;
 
-        let port_arc = Arc::new(Mutex::new(port));
+        // issue #6-10（方案1）：拆分读写句柄——读线程独占读句柄、发送路径独占
+        // 写句柄。try_clone() 在 Windows 上 = DuplicateHandle（唯一拆分途径，
+        // 不能对同一 COM 口二次 CreateFile）；DCB/COMMTIMEOUTS 是设备级状态，
+        // 两个句柄共享。原句柄作为读句柄，clone 出的作为写句柄。
+        let write_port = port.try_clone()?;
+        let read_port = port;
+
+        let read_port_arc = Arc::new(Mutex::new(read_port));
+        let write_port_arc = Arc::new(Mutex::new(write_port));
         let running = Arc::new(AtomicBool::new(true));
 
-        // 设置 DTR/RTS
-        {
-            let mut p = port_arc
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-            p.write_data_terminal_ready(args.dtr)
-                .map_err(|e| anyhow::anyhow!("Failed to set DTR: {}", e))?;
-            p.write_request_to_send(args.rts)
-                .map_err(|e| anyhow::anyhow!("Failed to set RTS: {}", e))?;
-        }
-
-        let port_clone = Arc::clone(&port_arc);
+        let port_clone = Arc::clone(&read_port_arc);
         let running_clone = Arc::clone(&running);
         let thread_port_id = args.port_id.clone();
         let app_handle_clone = app_handle.clone();
@@ -425,7 +494,8 @@ impl SerialManager {
         });
 
         let handle = SerialPortHandle {
-            port: port_arc,
+            read_port: read_port_arc,
+            write_port: write_port_arc,
             running,
             read_thread: Some(read_thread),
         };
@@ -598,7 +668,17 @@ impl SerialManager {
         self.open_port(params)
     }
 
-    /// 向串口发送数据
+    /// 向串口发送数据。
+    ///
+    /// 真实串口路径（issue #6-10）：只用**写句柄**（读写句柄已 try_clone 拆分，
+    /// 不再与 RX 读线程争锁）；**摘除热路径 `flush()`**（FlushFileBuffers 无超时、
+    /// 受流控约束，是对端忙时无界阻塞的根因）；写入带总期限（`WRITE_TOTAL_DEADLINE`）
+    /// 兜底，避免长 payload 以 ~100ms/次无限循环。
+    ///
+    /// 注意：本方法在**调用方持有的 serial_manager 全局锁**内执行真实写。
+    /// commands/serial.rs 的 `send_serial_data` 为不拖死端口列表轮询/其它端口
+    /// 命令，改用 `get_write_handle` + `write_all_with_deadline` 的**两段式**
+    /// （锁内取句柄 → 锁外写）；此处保留完整 API 供测试与复用。
     pub fn send_data(
         &self,
         port_id: &str,
@@ -625,7 +705,7 @@ impl SerialManager {
             return Ok(bytes.len());
         }
 
-        // 真实串口：写入串口
+        // 真实串口：只用写句柄写入（读写句柄分离，issue #6-10）
         let handle = self
             .ports
             .get(port_id)
@@ -634,19 +714,37 @@ impl SerialManager {
         let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
 
         let mut port = handle
-            .port
+            .write_port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        // write_all 循环写入直到全部发送，避免 write() 部分写入时静默丢失剩余字节
-        port.write_all(&bytes)?;
-        port.flush()?;
+        // 带总写入期限的 write_all（摘除无界 flush，issue #6-10 方案2）
+        write_all_with_deadline(&mut **port, &bytes, WRITE_TOTAL_DEADLINE)?;
 
         log::debug!("Sent {} bytes to {}", bytes.len(), port_id);
         Ok(bytes.len())
     }
 
+    /// 取指定端口的**写句柄**克隆（issue #6-10 方案2 两段式的第一段）。
+    ///
+    /// 必须在持有 serial_manager 全局锁时调用；返回后调用方应**立即释放全局锁**，
+    /// 再只持 per-port 写锁完成 `write_all_with_deadline`——写串口不占用全局锁，
+    /// 端口列表轮询/其它端口命令不被慢发送拖死。
+    pub fn get_write_handle(
+        &self,
+        port_id: &str,
+    ) -> anyhow::Result<Arc<Mutex<Box<dyn serialport::SerialPort>>>> {
+        let handle = self
+            .ports
+            .get(port_id)
+            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
+        Ok(Arc::clone(&handle.write_port))
+    }
+
     /// 向串口写入原始字节（不做 HEX 解析、不附加行结束符）。用于文件发送。
     /// SIM 端口将字节序列转为 HEX 字符串回显，便于无硬件测试。
+    /// 真实路径与 `send_data` 同款：只用写句柄 + 去 flush + 总写入期限。
+    /// 注意：真实路径在调用方持有的全局锁内写，commands/serial.rs 的
+    /// `send_file` 已改用 `get_write_handle` 两段式（锁外写）。
     pub fn write_raw(&self, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
         if port_id.starts_with("SIM:") {
             let handle = self
@@ -673,12 +771,10 @@ impl SerialManager {
             .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
         let mut port = handle
-            .port
+            .write_port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        // write_all 循环写入直到全部发送，避免 write() 部分写入时静默丢失剩余字节
-        port.write_all(bytes)?;
-        port.flush()?;
+        write_all_with_deadline(&mut **port, bytes, WRITE_TOTAL_DEADLINE)?;
         Ok(bytes.len())
     }
 
@@ -696,8 +792,16 @@ impl SerialManager {
             .ports
             .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
+        // DCB/COMMTIMEOUTS 是设备级状态、两个句柄共享。改参是设备级操作：
+        // 同时锁住读写句柄，避免改参瞬间另一句柄正在 I/O（读线程单次
+        // read 最长 ~100ms，此锁最长阻塞 ~100ms，可接受）；参数只在写句柄
+        // 上应用（读句柄从不调用 set_*，其缓存的陈旧设置不会推给驱动）。
+        let _read_guard = handle
+            .read_port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         let mut port = handle
-            .port
+            .write_port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.set_baud_rate(baud_rate)?;
@@ -736,8 +840,14 @@ impl SerialManager {
             .ports
             .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
+        // DTR/RTS 是设备级状态、两句柄共享：同时锁读写句柄避免改参瞬间
+        // 另一句柄正在 I/O，DTR/RTS 在写句柄上应用。
+        let _read_guard = handle
+            .read_port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         let mut port = handle
-            .port
+            .write_port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.write_data_terminal_ready(dtr)?;
@@ -771,7 +881,8 @@ mod tests {
     // 路径）拉进 *测试* 二进制的链接闭包，导致 Windows 上 cargo test 的 harness
     // 因缺少应用清单而 0xc0000139 加载失败。这里仅按需导入：纯函数测试在 Windows
     // 也能跑；引用 serialport 类型 / 管理器的测试所需导入随测试本身仅在非 Windows 启用。
-    use super::{build_tx_bytes, parse_hex_string};
+    use super::{build_tx_bytes, parse_hex_string, write_all_with_deadline};
+    use std::time::Duration;
     #[cfg(not(target_os = "windows"))]
     use super::{
         parse_data_bits, parse_flow_control, parse_parity, parse_stop_bits, SerialManager,
@@ -832,6 +943,122 @@ mod tests {
     fn build_tx_bytes_hex_ignores_line_ending_and_validates() {
         assert_eq!(build_tx_bytes("48 65", true, "\\r\\n").unwrap(), vec![0x48, 0x65]);
         assert!(build_tx_bytes("4", true, "None").is_err());
+    }
+
+    // ---------- write_all_with_deadline（纯 std mock，Windows 亦可运行）----------
+    //
+    // 这些测试只用 std::io::Write 的 mock writer，不触碰 serialport FFI，
+    // 因此不受 Windows 测试二进制缺应用清单（0xc0000139）的限制。
+
+    struct ZeroWriter;
+    impl std::io::Write for ZeroWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 模拟 WriteTotalTimeoutConstant 到期：WriteFile 超时返回 TimedOut。
+    struct AlwaysTimeoutWriter;
+    impl std::io::Write for AlwaysTimeoutWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 每次调用至多写 max 字节的部分写 writer：模拟驱动缓冲不空时
+    /// WriteFile 返回部分字节计数的场景。
+    struct PartialWriter {
+        max: usize,
+        buf: Vec<u8>,
+    }
+    impl std::io::Write for PartialWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.max);
+            self.buf.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 第一次 write 返回 Interrupted，之后正常写入。
+    struct InterruptedOnceWriter {
+        buf: Vec<u8>,
+        interrupted: bool,
+    }
+    impl std::io::Write for InterruptedOnceWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted",
+                ));
+            }
+            self.buf.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_all_with_deadline_writes_all_bytes_to_a_normal_writer() {
+        let mut buf = Vec::new();
+        write_all_with_deadline(&mut buf, b"hello", Duration::from_secs(1)).unwrap();
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn write_all_with_deadline_handles_partial_writes() {
+        let mut w = PartialWriter {
+            max: 2,
+            buf: Vec::new(),
+        };
+        write_all_with_deadline(&mut w, b"abcdef", Duration::from_secs(1)).unwrap();
+        assert_eq!(w.buf, b"abcdef");
+    }
+
+    #[test]
+    fn write_all_with_deadline_errors_on_zero_byte_write() {
+        let mut w = ZeroWriter;
+        let err = write_all_with_deadline(&mut w, b"x", Duration::from_secs(1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("returned 0 bytes"), "{err}");
+    }
+
+    #[test]
+    fn write_all_with_deadline_times_out_when_writes_never_progress() {
+        let mut w = AlwaysTimeoutWriter;
+        let err = write_all_with_deadline(&mut w, b"payload", Duration::from_millis(1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn write_all_with_deadline_retries_interrupted_writes() {
+        let mut w = InterruptedOnceWriter {
+            buf: Vec::new(),
+            interrupted: false,
+        };
+        write_all_with_deadline(&mut w, b"abc", Duration::from_secs(1)).unwrap();
+        assert_eq!(w.buf, b"abc");
+    }
+
+    #[test]
+    fn write_all_with_deadline_empty_payload_is_a_noop() {
+        let mut w = ZeroWriter; // 即使 writer 恒返回 0，空 payload 也不该报错
+        write_all_with_deadline(&mut w, b"", Duration::from_secs(1)).unwrap();
     }
 
     // ---------- 参数映射（模块内私有函数）----------
@@ -921,6 +1148,14 @@ mod tests {
         assert!(real_err.contains("Port not found"), "{real_err}");
         let sim_err = m.write_raw("SIM:x", b"x").unwrap_err().to_string();
         assert!(sim_err.contains("Sim port not found"), "{sim_err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn get_write_handle_errors_on_missing_port() {
+        let m = SerialManager::new();
+        let err = m.get_write_handle("COM1").unwrap_err().to_string();
+        assert!(err.contains("Port not found"), "{err}");
     }
 
     #[cfg(not(target_os = "windows"))]

@@ -109,12 +109,36 @@ pub async fn send_serial_data(
             let manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            manager
-                .send_data(&port_id, &data, is_hex, &append_line_ending)
-                .map_err(|e| {
+            if port_id.starts_with("SIM:") {
+                // SIM 端口：channel 发送非阻塞，锁内完成即可。
+                manager
+                    .send_data(&port_id, &data, is_hex, &append_line_ending)
+                    .map_err(|e| {
+                        log::warn!("Failed to send data to {}: {}", port_id, e);
+                        CommandError::Serial(e.to_string())
+                    })?
+            } else {
+                // 真实串口（issue #6-10 方案2）：**两段式**——全局锁内只做
+                // HashMap 查找 + Arc 克隆写句柄，立即释放全局锁，再只持
+                // per-port 写锁执行带总期限的写入。不再持全局 serial_manager
+                // 锁执行写：端口列表轮询 / 其它端口命令不被慢发送拖死。
+                let write_port = manager.get_write_handle(&port_id).map_err(|e| {
                     log::warn!("Failed to send data to {}: {}", port_id, e);
                     CommandError::Serial(e.to_string())
-                })?
+                })?;
+                let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
+                    .map_err(|e| CommandError::Serial(e.to_string()))?;
+                drop(manager); // 释放全局锁，写操作在锁外执行
+                let mut port = write_port
+                    .lock()
+                    .map_err(|e| CommandError::Lock(e.to_string()))?;
+                serial::write_all_with_deadline(&mut **port, &bytes, serial::WRITE_TOTAL_DEADLINE)
+                    .map_err(|e| {
+                        log::warn!("Failed to send data to {}: {}", port_id, e);
+                        CommandError::Serial(e.to_string())
+                    })?;
+                bytes.len()
+            }
         };
         // Write TX data to log if a writer exists
         let timestamp = chrono::Local::now()
@@ -202,9 +226,29 @@ pub async fn send_file(
                     .serial_manager
                     .lock()
                     .map_err(|e| CommandError::Lock(e.to_string()))?;
-                manager
-                    .write_raw(&args.port_id, chunk)
+                if args.port_id.starts_with("SIM:") {
+                    // SIM：channel 发送非阻塞，锁内完成。
+                    manager
+                        .write_raw(&args.port_id, chunk)
+                        .map_err(|e| CommandError::Serial(e.to_string()))
+                } else {
+                    // 真实串口（issue #6-10 方案2）：两段式——全局锁内只取写句柄
+                    // 克隆，释放全局锁后锁外写（不持全局锁执行写）。
+                    let write_port = manager.get_write_handle(&args.port_id).map_err(|e| {
+                        CommandError::Serial(e.to_string())
+                    })?;
+                    drop(manager);
+                    let mut port = write_port
+                        .lock()
+                        .map_err(|e| CommandError::Lock(e.to_string()))?;
+                    serial::write_all_with_deadline(
+                        &mut **port,
+                        chunk,
+                        serial::WRITE_TOTAL_DEADLINE,
+                    )
+                    .map(|_| chunk.len())
                     .map_err(|e| CommandError::Serial(e.to_string()))
+                }
             } {
                 Ok(_) => {}
                 Err(e) => {
