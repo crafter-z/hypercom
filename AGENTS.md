@@ -18,7 +18,7 @@ v0.4.3 (issue #7 UI 缺陷修复十项)：通知中心——`ToastItem` 新增�
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
-│   ├── i18n.ts                   # i18next + react-i18next, 266 keys × zh-CN/en-US
+│   ├── i18n.ts                   # i18next + react-i18next, ~516 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
 │   ├── hooks/                    # 11 hooks in individual files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
