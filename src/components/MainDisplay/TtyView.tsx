@@ -54,21 +54,49 @@ const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+
+    // TX：用户键入/粘贴 → 发送到串口（无本地回显，由对端 echo）。
+    const onDataDisposable = term.onData((data) => {
+      ttyService.send(portId, data);
+    });
+    // issue #11：onResize 必须在 open/fit **之前**注册——初始 fit 把 xterm 从
+    // 默认 80×24 变到实际尺寸时会触发一次 onResize，注册过晚该事件被漏掉，
+    // 首帧尺寸从未上报：打开 GIT:BASH 时 pty 拿不到正确尺寸（固定 80×24），
+    // vim/top 全屏应用按错误尺寸渲染（开屏混乱 / 编辑只用约 3/4 宽度）。
+    // 尺寸协商：cols/rows 变化 → 同步对端（GIT: 模拟端口走后端 pty resize；
+    // 真实串口由对端经 `\x1b[18t` 查询，xterm 经 onData 自动回尺寸）。
+    const onResizeDisposable = term.onResize(({ cols, rows }) => {
+      ttyService.resize(portId, cols, rows);
+    });
+
     term.open(container);
     try {
       fitAddon.fit();
     } catch {
       // 容器尺寸为 0（隐藏/未布局）时 fit 抛错——交给 ResizeObserver 稍后重试
     }
+    // 兜底：无论初始 fit 是否触发 onResize，显式上报当前尺寸（term.cols/rows
+    // 即当前实际值；容器 0 尺寸时为默认 80×24，待 ResizeObserver 校正）。
+    ttyService.resize(portId, term.cols, term.rows);
 
-    // TX：用户键入/粘贴 → 发送到串口（无本地回显，由对端 echo）。
-    const onDataDisposable = term.onData((data) => {
-      ttyService.send(portId, data);
-    });
-    // 尺寸协商：cols/rows 变化 → 同步对端（GIT: 模拟端口走后端 pty resize）。
-    const onResizeDisposable = term.onResize(({ cols, rows }) => {
-      ttyService.resize(portId, cols, rows);
-    });
+    // 字体加载兜底：monospace 字体异步加载导致首帧 fit 按错误 cell 尺寸测算
+    // （终端偏小）——字体就绪后重新 fit 覆盖该竞态。
+    let cancelled = false;
+    let fontRaf = 0;
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready
+        .then(() => {
+          if (cancelled) return;
+          fontRaf = requestAnimationFrame(() => {
+            try {
+              fitAddon.fit();
+            } catch {
+              // 容器仍无尺寸——下一次回调再试
+            }
+          });
+        })
+        .catch(() => {});
+    }
 
     ttyService.attach(portId, term);
 
@@ -88,11 +116,13 @@ const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
     ro.observe(container);
 
     return () => {
+      cancelled = true;
       ttyService.detach(portId);
       onDataDisposable.dispose();
       onResizeDisposable.dispose();
       ro.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
+      if (fontRaf) cancelAnimationFrame(fontRaf);
       term.dispose();
     };
   }, [portId, terminalFont, terminalFontSize]);
