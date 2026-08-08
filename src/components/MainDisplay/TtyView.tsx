@@ -8,9 +8,13 @@
  *
  * 与 TerminalView（TRX 行缓冲）零共享状态；Terminal 实例由本组件拥有，
  * 卸载时 dispose（ttyService.detach 不清实例）。
+ *
+ * 字体/字号变更走 `term.options.fontSize/fontFamily` **活更新**（不重建 Terminal）
+ * ——重建会清空整个终端缓冲（曾因此改配置即丢会话）；Ctrl+滚轮缩放镜像
+ * TerminalView（8–48px，同步 config + `--font-size-terminal` CSS 变量）。
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -20,6 +24,9 @@ import { ttyService } from '../../utils/ttyService';
 
 interface TtyViewProps {
   portId: string;
+  /** true = 该标签非当前展示（Pane 常驻挂载 + display:none 隐藏）。xterm 实例与
+   *  缓冲跨标签切换保留（issue #11：会话跨标签保留）；恢复可见时自动 re-fit。 */
+  hidden?: boolean;
 }
 
 /** 从设计系统 CSS 变量读取主题色；缺省时回退到暗色 token 的写死值。 */
@@ -28,17 +35,24 @@ function cssVar(name: string, fallback: string): string {
   return value || fallback;
 }
 
-const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
+/** 字体缩放夹取区间（与 TerminalView 的 Ctrl+wheel 一致）。 */
+const FONT_MIN = 8;
+const FONT_MAX = 48;
+
+const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const terminalFont = useAppStore((s) => s.config.terminalFont);
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    // 挂载时刻的配置值（字体/字号）——Terminal 实例不随配置变更重建，
-    // 保持终端缓冲与滚动位置；改配置后下次挂载生效。
+    // 挂载一次性用当前配置创建 Terminal。字体/字号**不入依赖**——变更走下方
+    // options 活更新；若把字体字段放进 deps，effect 重跑 → cleanup dispose →
+    // 整个终端缓冲被清空（修复 issue #11 的字体切换丢会话缺陷）。
     const term = new Terminal({
       fontFamily: terminalFont || 'monospace',
       fontSize: terminalFontSize,
@@ -51,9 +65,11 @@ const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
         selectionBackground: cssVar('--bg-active', 'rgba(94, 175, 255, 0.16)'),
       },
     });
+    termRef.current = term;
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    fitRef.current = fitAddon;
 
     // TX：用户键入/粘贴 → 发送到串口（无本地回显，由对端 echo）。
     const onDataDisposable = term.onData((data) => {
@@ -81,8 +97,13 @@ const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
       // 容器尺寸为 0（隐藏/未布局）时 fit 抛错——交给 ResizeObserver 稍后重试
     }
     // 兜底：无论初始 fit 是否触发 onResize，显式上报当前尺寸（term.cols/rows
-    // 即当前实际值；容器 0 尺寸时为默认 80×24，待 ResizeObserver 校正）。
-    ttyService.resize(portId, term.cols, term.rows);
+    // 即当前实际值）。**隐藏挂载**（display:none → 容器 0 尺寸）时 fit 未生效、
+    // term 仍是默认 80×24——此时上报会用 80×24 覆盖已记录的正确尺寸
+    // （lastCols/lastRows），使重开 GIT:BASH 再次回退 80×24；跳过，尺寸留待
+    // 恢复可见时的 re-fit（onResize → resize）校正。
+    if (container.clientWidth > 0 && container.clientHeight > 0) {
+      ttyService.resize(portId, term.cols, term.rows);
+    }
 
     // 字体加载兜底：monospace 字体异步加载导致首帧 fit 按错误 cell 尺寸测算
     // （终端偏小）——字体就绪后重新 fit 覆盖该竞态。
@@ -128,12 +149,53 @@ const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
       ro.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
       if (fontRaf) cancelAnimationFrame(fontRaf);
+      termRef.current = null;
+      fitRef.current = null;
       term.dispose();
     };
-  }, [portId, terminalFont, terminalFontSize]);
+    // 字体/字号经下方 effect 活更新；挂载 effect 只认 portId。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portId]);
+
+  // 字体/字号变更 → 直接写 xterm options（不重建 Terminal，保缓冲与滚动位置）。
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontFamily = terminalFont || 'monospace';
+    term.options.fontSize = terminalFontSize;
+  }, [terminalFont, terminalFontSize]);
+
+  // 隐藏（display:none → 容器 0 尺寸）恢复可见 → 显式 re-fit。ResizeObserver
+  // 也会在 display:none→block 时触发，这里再补一次保证确定性（隐藏期间 fit 被
+  // 跳过、尺寸未更新，恢复后立即按真实容器尺寸重排，vim/top 全屏应用据此重绘）。
+  useEffect(() => {
+    if (hidden) return;
+    const raf = requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        // 容器仍无尺寸——RO/下一次可见再试
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [hidden]);
+
+  // Ctrl+滚轮缩放（镜像 TerminalView：8–48px，同步 config + CSS 变量）。
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const store = useAppStore.getState();
+    const current = store.config.terminalFontSize;
+    const delta = e.deltaY > 0 ? -1 : 1;
+    const next = Math.max(FONT_MIN, Math.min(FONT_MAX, current + delta));
+    if (next !== current) {
+      document.documentElement.style.setProperty('--font-size-terminal', `${next}px`);
+      store.setConfig({ terminalFontSize: next });
+    }
+  }, []);
 
   return (
-    <div className="tty-view">
+    <div className={`tty-view${hidden ? ' tty-view-hidden' : ''}`} onWheel={handleWheel}>
       <div className="tty-titlebar">
         <span className="tty-titlebar-label eyebrow">{t('tty.title')}</span>
         <span className="tty-titlebar-port">{portId}</span>

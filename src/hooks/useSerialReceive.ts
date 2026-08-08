@@ -56,7 +56,7 @@ export function useSerialReceive() {
         // 跳过触发引擎 / 协议解析 / RxPipeline 行组装——终端字节流没有「行」语义，
         // 由 xterm.js 完整终端模拟（ANSI 颜色、光标寻址、备用屏幕、CR 覆写）接管。
         if (useAppStore.getState().ports.find(p => p.id === portId)?.mode === 'tty') {
-          ttyService.feed(portId, event.data, event.timestamp);
+          ttyService.feed(portId, event.data);
           return;
         }
 

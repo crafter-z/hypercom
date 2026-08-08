@@ -56,3 +56,11 @@
   background: var(--accent-color);
   border-color: var(--accent-color);
 }
+
+/* 非活动 TTY 标签的隐藏态（issue #11 会话跨标签保留）：Pane 常驻挂载所有 TTY
+ * 标签，仅当前展示标签可见。display:none 使容器尺寸为 0——TtyView 在恢复可见
+ * 时显式 re-fit（`hidden` effect）+ ResizeObserver 兜底，重新按真实容器尺寸
+ * 排布（vim/top 全屏应用据此重绘）。 */
+.tty-view-hidden {
+  display: none;
+}

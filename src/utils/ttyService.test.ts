@@ -39,7 +39,7 @@ describe('ttyService — streaming UTF-8 decode', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
     // 你 = E4 BD A0（UTF-8 3 字节）
-    ttyService.feed('P1', [0xe4, 0xbd, 0xa0], 1000);
+    ttyService.feed('P1', [0xe4, 0xbd, 0xa0]);
     vi.advanceTimersByTime(16);
     expect(write).toHaveBeenCalledWith('你');
     ttyService.detach('P1');
@@ -48,8 +48,8 @@ describe('ttyService — streaming UTF-8 decode', () => {
   it('reassembles a multi-byte char split across two feeds', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
-    ttyService.feed('P1', [0xe4], 1000); // 首字节：解码器缓冲，无输出
-    ttyService.feed('P1', [0xbd, 0xa0], 1001); // 剩余字节：拼回完整字符
+    ttyService.feed('P1', [0xe4]); // 首字节：解码器缓冲，无输出
+    ttyService.feed('P1', [0xbd, 0xa0]); // 剩余字节：拼回完整字符
     vi.advanceTimersByTime(16);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith('你');
@@ -59,7 +59,7 @@ describe('ttyService — streaming UTF-8 decode', () => {
   it('unknown bytes decode as U+FFFD without throwing', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
-    ttyService.feed('P1', [0xff, 0xfe], 1000);
+    ttyService.feed('P1', [0xff, 0xfe]);
     vi.advanceTimersByTime(16);
     expect(write).toHaveBeenCalled();
     ttyService.detach('P1');
@@ -70,7 +70,7 @@ describe('ttyService — batched write', () => {
   it('writes decoded text to the attached term', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
-    ttyService.feed('P1', [0x68, 0x69], 1000); // 'hi'
+    ttyService.feed('P1', [0x68, 0x69]); // 'hi'
     vi.advanceTimersByTime(16);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith('hi');
@@ -80,9 +80,9 @@ describe('ttyService — batched write', () => {
   it('batches multiple feeds into one write', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
-    ttyService.feed('P1', [0x68], 1000); // 'h'
-    ttyService.feed('P1', [0x69], 1001); // 'i'
-    ttyService.feed('P1', [0x21], 1002); // '!'
+    ttyService.feed('P1', [0x68]); // 'h'
+    ttyService.feed('P1', [0x69]); // 'i'
+    ttyService.feed('P1', [0x21]); // '!'
     vi.advanceTimersByTime(16);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith('hi!');
@@ -92,7 +92,7 @@ describe('ttyService — batched write', () => {
   it('ignores empty byte payloads', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
-    ttyService.feed('P1', [], 1000);
+    ttyService.feed('P1', []);
     vi.advanceTimersByTime(16);
     expect(write).not.toHaveBeenCalled();
     ttyService.detach('P1');
@@ -102,7 +102,7 @@ describe('ttyService — batched write', () => {
 describe('ttyService — queue cap before attach', () => {
   it('buffers into the queue while unattached, replaying on attach', () => {
     // 未 attach：term 为 null → 只入队不调度
-    for (let i = 0; i < 3; i++) ttyService.feed('P1', [0x41], 1000 + i); // 'AAA'
+    for (let i = 0; i < 3; i++) ttyService.feed('P1', [0x41]); // 'AAA'
     expect(ttyService.get('P1')?.queue).toEqual(['A', 'A', 'A']);
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
@@ -115,8 +115,8 @@ describe('ttyService — queue cap before attach', () => {
 
   it('drops the oldest entries beyond MAX_TTY_QUEUE', () => {
     // 前 5 条 'X'（最旧），随后灌满队列 'Y'
-    for (let i = 0; i < 5; i++) ttyService.feed('P1', [0x58], 1000 + i);
-    for (let i = 0; i < MAX_TTY_QUEUE; i++) ttyService.feed('P1', [0x59], 2000 + i);
+    for (let i = 0; i < 5; i++) ttyService.feed('P1', [0x58]);
+    for (let i = 0; i < MAX_TTY_QUEUE; i++) ttyService.feed('P1', [0x59]);
     const state = ttyService.get('P1');
     expect(state?.queue.length).toBe(MAX_TTY_QUEUE);
     const { term, write } = mockTerm();
@@ -133,7 +133,7 @@ describe('ttyService — disconnect / clear', () => {
   it('flushes pending queue on disconnect but keeps the term alive', () => {
     const { term, write } = mockTerm();
     ttyService.attach('P1', term);
-    ttyService.feed('P1', [0x68, 0x69], 1000); // 'hi'（有 pending 批写）
+    ttyService.feed('P1', [0x68, 0x69]); // 'hi'（有 pending 批写）
     ttyService.disconnect('P1');
     // 同步 flush 队列；保留端口状态与 term（视图跨重连挂载）
     expect(write).toHaveBeenCalledWith('hi');
@@ -143,7 +143,7 @@ describe('ttyService — disconnect / clear', () => {
   });
 
   it('drops the queue on disconnect while keeping the (unattached) state', () => {
-    ttyService.feed('P1', [0x68, 0x69], 1000);
+    ttyService.feed('P1', [0x68, 0x69]);
     ttyService.disconnect('P1');
     // 状态保留（视图跨重连挂载），队列清空、term 仍为 null
     const state = ttyService.get('P1');
@@ -158,6 +158,34 @@ describe('ttyService — disconnect / clear', () => {
     ttyService.clear('P1');
     expect(clear).toHaveBeenCalled();
     ttyService.detach('P1');
+  });
+
+  it('disconnect resets the streaming decoder (stale partial char cannot corrupt the next connection)', () => {
+    const { term, write } = mockTerm();
+    ttyService.attach('P1', term);
+    ttyService.feed('P1', [0xe4]); // 多字节字符首字节：解码器缓冲，无输出
+    ttyService.disconnect('P1'); // 断线：解码器重建
+    ttyService.feed('P1', [0x41]); // 重连后新流的首字节 'A'——若解码器未重建，
+    // 0xe4 会与 0x41 拼成残缺序列输出 U+FFFD，而非干净的 'A'
+    vi.advanceTimersByTime(16);
+    expect(write).toHaveBeenCalledWith('A');
+    ttyService.detach('P1');
+  });
+
+  it('detach preserves lastCols/lastRows for re-open but drops queue/term/decoder', () => {
+    const { term } = mockTerm();
+    ttyService.attach('P1', term);
+    ttyService.resize('P1', 100, 30);
+    ttyService.feed('P1', [0x68, 0x69]); // 'hi' 入队（有 pending 批写）
+    ttyService.detach('P1');
+    const state = ttyService.get('P1');
+    // 尺寸保留：同端口再次挂载/打开 GIT:BASH 时以正确尺寸 spawn pty
+    expect(state?.lastCols).toBe(100);
+    expect(state?.lastRows).toBe(30);
+    // Terminal 由视图拥有并 dispose；队列/解码器丢弃，不污染下次挂载
+    expect(state?.term).toBeNull();
+    expect(state?.queue).toEqual([]);
+    expect(state?.decoder).toBeNull();
   });
 });
 
@@ -222,7 +250,7 @@ describe('ttyService — resize', () => {
   });
 
   it('stores the last known size for reuse at open/resync', () => {
-    ttyService.feed('COM1', [0x68], 1000); // create state
+    ttyService.feed('COM1', [0x68]); // create state
     ttyService.resize('COM1', 132, 43);
     const state = ttyService.get('COM1');
     expect(state?.lastCols).toBe(132);
@@ -230,7 +258,7 @@ describe('ttyService — resize', () => {
   });
 
   it('ignores invalid sizes (NaN / non-positive) and does not store them', () => {
-    ttyService.feed('COM1', [0x68], 1000);
+    ttyService.feed('COM1', [0x68]);
     ttyService.resize('COM1', Number.NaN, 43);
     ttyService.resize('COM1', 0, -1);
     ttyService.resize('COM1', 132, 43);
@@ -244,7 +272,7 @@ describe('ttyService — resize', () => {
     useAppStore.setState({
       ports: [{ id: 'GIT:BASH', name: 'GIT:BASH', status: 'disconnected', type: 'sim', isHidden: false }],
     });
-    ttyService.feed('GIT:BASH', [0x68], 1000);
+    ttyService.feed('GIT:BASH', [0x68]);
     ttyService.resize('GIT:BASH', 100, 30);
     vi.clearAllMocks();
     ttyService.resync('GIT:BASH');
@@ -259,7 +287,7 @@ describe('ttyService — resize', () => {
       ],
     });
     ttyService.resync('GIT:BASH'); // 无 stored size
-    ttyService.feed('COM1', [0x68], 1000);
+    ttyService.feed('COM1', [0x68]);
     ttyService.resize('COM1', 80, 24);
     vi.clearAllMocks();
     ttyService.resync('COM1'); // 非 GIT: 端口

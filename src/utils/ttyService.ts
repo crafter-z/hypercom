@@ -43,8 +43,6 @@ export interface TtyPortState {
   rafId: number | null;
   /** setTimeout 兜底批写句柄（页面隐藏 / 无 rAF 时用） */
   timerId: number | null;
-  /** 最后一次 feed 的事件时间戳（暂未消费，保留供将来静默 flush 语义使用） */
-  lastTs: number;
   /** 最近一次已知的 xterm 尺寸（issue #11）：打开 GIT:BASH 端口时随请求传给后端，
    *  使 pty 以正确尺寸 spawn；连接后 resync 亦复用。 */
   lastCols: number | null;
@@ -81,7 +79,6 @@ function getPortState(portId: string): TtyPortState {
       queue: [],
       rafId: null,
       timerId: null,
-      lastTs: 0,
       lastCols: null,
       lastRows: null,
     };
@@ -161,12 +158,24 @@ export const ttyService = {
     }
   },
 
-  /** TtyView 卸载时移除端口状态（含 pending 批写）。不 dispose Terminal（视图拥有）。 */
+  /**
+   * TtyView 卸载时移除端口运行时状态（含 pending 批写）。不 dispose Terminal（视图拥有）。
+   * 仅保留最近一次尺寸（lastCols/lastRows）——同端口再次挂载/打开 GIT:BASH 时
+   * 仍能以正确尺寸 spawn pty（否则切走标签再重开会回退 80×24 首帧错乱）。
+   */
   detach(portId: string): void {
     const state = ports.get(portId);
     if (!state) return;
     cancelPending(state);
-    ports.delete(portId);
+    ports.set(portId, {
+      term: null,
+      decoder: null,
+      queue: [],
+      rafId: null,
+      timerId: null,
+      lastCols: state.lastCols,
+      lastRows: state.lastRows,
+    });
   },
 
   /**
@@ -174,13 +183,12 @@ export const ttyService = {
    * 流式 UTF-8 解码 → 入队 → 剪裁容量 → term 已 attach 时调度批量 term.write。
    * term 未 attach 时只入队（上限裁剪），attach 时统一 replay。
    */
-  feed(portId: string, bytes: number[] | Uint8Array, ts: number): void {
+  feed(portId: string, bytes: number[] | Uint8Array): void {
     if (bytes.length === 0) return;
     const state = getPortState(portId);
     if (!state.decoder) {
       state.decoder = new TextDecoder('utf-8', { fatal: false });
     }
-    state.lastTs = ts;
     const text = state.decoder.decode(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), {
       stream: true,
     });
@@ -196,8 +204,10 @@ export const ttyService = {
 
   /**
    * 断线：取消 pending 批写，把队列剩余内容推向 xterm（term 为空则丢弃），
-   * 之后保留端口状态与 term——视图跨重连保持挂载，重连后继续接收。
-   * 不 detach / 不 dispose。
+   * 并重建流式解码器——断线时 decoder 内可能残留未完成的多字节 UTF-8 字符，
+   * 保留会在重连后与下一连接的首字节拼出错误字符（TRX 侧 pipeline.disconnect
+   * 是全量丢弃 per-port 状态，此处对齐该语义）。端口状态与 term 保留——
+   * 视图跨重连保持挂载，重连后继续接收。不 detach / 不 dispose。
    */
   disconnect(portId: string): void {
     const state = ports.get(portId);
@@ -207,6 +217,7 @@ export const ttyService = {
       if (state.term) state.term.write(state.queue.join(''));
       state.queue.length = 0;
     }
+    state.decoder = null;
   },
 
   /**
@@ -234,22 +245,23 @@ export const ttyService = {
    * 尺寸协商：记录到端口状态（供打开端口时随请求传给后端 pty），并仅对 GIT:
    * 模拟端口实时同步后端 pty 尺寸（vim/top 全屏应用据此重绘）。
    * 真实串口无需后端 resize——远端 getty 经 `\x1b[18t` 查询由 xterm 经 onData 自动回尺寸。
-   * 非法尺寸（NaN/非正数，FitAddon 在容器未布局时可能产生）直接忽略。
+   * 先取整再校验：FitAddon 在容器未布局时可能产生 NaN/0.x 等非法值，取整后
+   * 的 0/负数同样拒绝（避免把 0 尺寸推给后端 ConPTY 报错）。
    */
   resize(portId: string, cols: number, rows: number): void {
-    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return;
+    const c = Math.round(cols);
+    const r = Math.round(rows);
+    if (!Number.isFinite(c) || !Number.isFinite(r) || c <= 0 || r <= 0) return;
     const state = ports.get(portId);
     if (state) {
-      state.lastCols = Math.round(cols);
-      state.lastRows = Math.round(rows);
+      state.lastCols = c;
+      state.lastRows = r;
     }
     const port = useAppStore.getState().ports.find((p) => p.id === portId);
     if (port && port.id.startsWith('GIT:')) {
-      gitBashSimService.resizeGitBashSim(portId, Math.round(cols), Math.round(rows)).catch(
-        (err) => {
-          console.error('[ttyService] resize failed for', portId, err);
-        },
-      );
+      gitBashSimService.resizeGitBashSim(portId, c, r).catch((err) => {
+        console.error('[ttyService] resize failed for', portId, err);
+      });
     }
   },
 

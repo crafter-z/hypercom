@@ -251,9 +251,18 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             }
           }}
         >
-          {displayPort?.mode === 'tty' ? (
-            <TtyView key={displayTab.id} portId={displayTab.id} />
-          ) : (
+          {/* issue #11（会话跨标签保留）：TTY 端口**常驻挂载**——xterm 缓冲在实例
+              内，切走再切回必须保留实例（TRX 缓冲在 store 里天然保留）。非活动
+              TTY 标签以 display:none 隐藏（`.tty-view-hidden`，TtyView 恢复可见时
+              自动 re-fit）；TTY 标签不渲染 TerminalView，TRX 标签照旧只在被展示
+              时挂载（缓冲在 store，无实例生命周期）。已知限制：跨 Pane 拖拽/
+              关闭标签仍会销毁实例（会话随实例释放）。 */}
+          {visibleTabs
+            .filter((tab) => ports.find((p) => p.id === tab.id)?.mode === 'tty')
+            .map((tab) => (
+              <TtyView key={tab.id} portId={tab.id} hidden={tab.id !== displayTabId} />
+            ))}
+          {displayPort?.mode !== 'tty' && (
             <TerminalView
               key={displayTab.id}
               portId={displayTab.id}
