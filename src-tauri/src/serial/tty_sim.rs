@@ -237,7 +237,7 @@ mod tests {
     // portable-pty FFI 拉进 *测试* 二进制。构造空句柄（None 字段）不触碰 FFI，
     // 因此这些错误路径测试在 Windows 上也能运行。
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::TtySimPortHandle;
 

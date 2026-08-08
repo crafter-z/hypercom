@@ -37,7 +37,7 @@ pub fn enable_gitbash_sim(state: State<AppState>) -> Result<String, CommandError
 
 /// 禁用模拟终端模式（关闭所有模拟终端端口并从列表中移除）
 #[tauri::command]
-pub fn disable_gitbash_sim(state: State<AppState>) -> Result<(), CommandError> {
+pub async fn disable_gitbash_sim(state: State<'_, AppState>) -> Result<(), CommandError> {
     #[cfg(not(debug_assertions))]
     {
         let _ = state;
@@ -45,31 +45,37 @@ pub fn disable_gitbash_sim(state: State<AppState>) -> Result<(), CommandError> {
     }
     #[cfg(debug_assertions)]
     {
-        let git_ids: Vec<String> = {
-            let manager = state
-                .serial_manager
+        let serial_manager = state.serial_manager.clone();
+        // 持锁期间遍历全部 GIT: 端口逐个 close_port（kill + drop master → ConPTY
+        // 关闭 → 读线程 read() 解除阻塞退出），取出 JoinHandle 后立即释放锁。
+        let join_handles = {
+            let mut manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            manager.tty_sim_ports.keys().cloned().collect()
-        };
-        for id in &git_ids {
-            // 持锁期间只 kill + 取出读取线程 JoinHandle，立即释放锁
-            let join_handle = {
-                let mut manager = state
-                    .serial_manager
-                    .lock()
-                    .map_err(|e| CommandError::Lock(e.to_string()))?;
-                manager
+            let git_ids: Vec<String> = manager.tty_sim_ports.keys().cloned().collect();
+            let mut handles = Vec::with_capacity(git_ids.len());
+            for id in &git_ids {
+                if let Some(thread) = manager
                     .close_port(id)
                     .map_err(|e| CommandError::Serial(e.to_string()))?
-            };
-            // 在锁外 join，避免阻塞其他串口命令
-            if let Some(thread) = join_handle {
-                let _ = thread.join();
+                {
+                    handles.push(thread);
+                }
             }
+            handles
+        };
+        // 在锁外、阻塞线程池里 join（与 close_serial_port 同款，issue #11）：即使
+        // 某个 GIT: 读线程异常不退，同步 join 也不会冻结应用 UI/事件循环。
+        for thread in join_handles {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = thread.join();
+            })
+            .await
+            .map_err(|e| {
+                CommandError::Other(format!("disable git bash sim join task failed: {e}"))
+            })?;
         }
-        let mut manager = state
-            .serial_manager
+        let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         manager.set_gitbash_sim(false);

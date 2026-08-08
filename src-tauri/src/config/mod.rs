@@ -148,7 +148,7 @@ pub struct PortGroupEntry {
     pub order: i32,
 }
 
-/// 串口元数据（备注名 / 隐藏状态，issue #4-9）。
+/// 串口元数据（备注名 / 隐藏状态 / 工作模式，issue #4-9；模式字段 issue #11）。
 /// 备注名与隐藏状态是端口级 UI 状态，此前仅存内存、重启即丢；
 /// 现在随 config.json 持久化，启动时按 `port_id` 回填到端口列表。
 /// `#[serde(default)]` 保证旧版 config.json（无此字段）反序列化为空 Vec。
@@ -160,6 +160,11 @@ pub struct PortMetaEntry {
     pub alias: Option<String>,
     #[serde(default)]
     pub is_hidden: bool,
+    /// 端口工作模式（issue #11）：`"trx"`（传统收发）| `"tty"`（终端模式）。
+    /// `None` 或缺省 = trx。前端持久化 mode 时经此字段往返——缺失该字段会导致
+    /// serde 静默丢弃未知字段，TTY 模式重启即丢（曾为此缺陷）。
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 // ==================== AppConfig ====================
@@ -497,6 +502,14 @@ impl ConfigManager {
         if !["\\r\\n", "\\r", "\\n", "None"].contains(&config.default_line_ending.as_str()) {
             config.default_line_ending = "\\r\\n".to_string();
         }
+        // issue #11：端口工作模式钳制——非法值（含旧版残留的任意字符串）收敛回 trx。
+        for meta in &mut config.port_meta {
+            if let Some(mode) = &mut meta.mode {
+                if mode != "trx" && mode != "tty" {
+                    *mode = "trx".to_string();
+                }
+            }
+        }
     }
 
     /// 更新配置并持久化（写入前校验 + 收敛）
@@ -769,6 +782,38 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_and_clamp_port_meta_mode() {
+        // issue #11：合法模式保留，非法/残留值收敛回 trx。
+        let mut cfg = AppConfig {
+            port_meta: vec![
+                PortMetaEntry {
+                    port_id: "COM1".into(),
+                    alias: None,
+                    is_hidden: false,
+                    mode: Some("tty".into()),
+                },
+                PortMetaEntry {
+                    port_id: "COM2".into(),
+                    alias: None,
+                    is_hidden: false,
+                    mode: Some("bogus".into()),
+                },
+                PortMetaEntry {
+                    port_id: "COM3".into(),
+                    alias: None,
+                    is_hidden: false,
+                    mode: None,
+                },
+            ],
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.port_meta[0].mode.as_deref(), Some("tty"));
+        assert_eq!(cfg.port_meta[1].mode.as_deref(), Some("trx"));
+        assert_eq!(cfg.port_meta[2].mode, None);
+    }
+
+    #[test]
     fn test_memory_per_port_budget_defaults_when_absent() {
         // issue #6-2：旧 config.json 无 memoryPerPortBudgetMb → 反序列化回退默认 200。
         let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
@@ -877,20 +922,33 @@ mod tests {
 
     #[test]
     fn test_port_meta_entry_roundtrip_and_defaults() {
-        // 带备注名 + 隐藏的完整往返（camelCase）。
+        // 带备注名 + 隐藏 + 工作模式的完整往返（camelCase，issue #11 mode 字段）。
         let meta = PortMetaEntry {
             port_id: "COM3".into(),
             alias: Some("温度计".into()),
             is_hidden: true,
+            mode: Some("tty".into()),
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(json.contains("\"portId\":\"COM3\""), "got: {}", json);
         assert!(json.contains("\"alias\":\"温度计\""), "got: {}", json);
         assert!(json.contains("\"isHidden\":true"), "got: {}", json);
+        assert!(json.contains("\"mode\":\"tty\""), "got: {}", json);
         let parsed: PortMetaEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.port_id, "COM3");
         assert_eq!(parsed.alias.as_deref(), Some("温度计"));
         assert!(parsed.is_hidden);
+        assert_eq!(parsed.mode.as_deref(), Some("tty"));
+
+        // 旧版 config.json 缺 mode 字段 → 反序列化回退 None（= trx）。
+        let legacy_json = r#"{"portId":"COM3","alias":"温度计","isHidden":true}"#;
+        let legacy: PortMetaEntry = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.mode, None);
+
+        // 前端发送的 mode 携带来回往返不丢（修复前 serde 静默丢弃未知字段）。
+        let frontend_json = r#"{"portId":"GIT:BASH","isHidden":false,"mode":"tty"}"#;
+        let from_frontend: PortMetaEntry = serde_json::from_str(frontend_json).unwrap();
+        assert_eq!(from_frontend.mode.as_deref(), Some("tty"));
 
         // 旧 config.json 无 portMeta 字段 → AppConfig 反序列化回退空 Vec。
         let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
