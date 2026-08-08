@@ -6,7 +6,7 @@
 
 | Store | File:line | Job |
 |-------|-----------|-----|
-| `useAppStore` | `useAppStore.ts:266` | tabs / ports / `paneTree` / config / groups — `setGroups` bulk-loads persisted groups at startup; group changes auto-save (500ms debounce in `useAppInit`); port alias/isHidden persisted via `config.portMeta` (issue #4-9) |
+| `useAppStore` | `useAppStore.ts:266` | tabs / ports / `paneTree` / config / groups — `setGroups` bulk-loads persisted groups at startup; group changes auto-save (500ms debounce in `useAppInit`); port alias/isHidden persisted via `config.portMeta` (issue #4-9); `setPortMode(portId, mode)` writes `Port.mode` (`'trx' | 'tty'`, issue #11), persisted via `portMeta` (no-op when port missing) |
 | `useOperationStore` | `useOperationStore.ts:29` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `isLoopSending` (NO `op` prefix; NO `sendOnEnter`/`quickSendInlineCount` — those live in `useAppStore.config`; NO `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — those live per-tab in `useTerminalStore`; NO `loopRepeatCount` — repeat count is per-command-set `SendCommandSet.repeatCount`) |
 | `useTerminalStore` | `useTerminalStore.ts:22` | line buffer + `appendTerminalLine` (single lines: TX/tool/replay) + `appendTerminalLines` (RX batch writes) + `ensureTerminal` + `setTerminalConfig` + `setTerminalEncoding` |
 | `useRuleStore` | `useRuleStore.ts:32` | highlight rule sets + send-command sets + protocol templates + trigger rules + port tool configs + CRUD + active-set ids. Entities persist in config.json (loaded at startup by `useAppInit` from `config`, saved via `storageService` config-backed commands). |

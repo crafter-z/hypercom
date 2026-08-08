@@ -7,7 +7,8 @@ Recursive pane tree (2026-07 refactor). `MainDisplay` renders the tree; leaves w
 | File | Lines | Job |
 |------|------:|-----|
 | `MainDisplay.tsx` | 171 | `renderNode(node, parentBranch)` recursion; root toggle for empty `'main'` leaf |
-| `Pane.tsx` | 191 | leaf shell: TabBar + terminal container |
+| `Pane.tsx` | 308 | leaf shell: TabBar + terminal container; renders `TtyView` for `mode==='tty'` ports, else `TerminalView`; blocks pop-out for TTY ports (`tty.popoutUnsupported` toast) |
+| `TtyView.tsx` | 111 | xterm.js TTY host (issue #11): creates `Terminal` + FitAddon per port (fonts/theme from config + CSS vars), `term.open` + ResizeObserver+rAF-debounced fit, onData→`ttyService.send`, onResize→`ttyService.resize`; owns the Terminal instance (dispose on unmount, `ttyService.detach` keeps it) |
 | `TabBar.tsx` | 234 | tabs + `@dnd-kit/sortable` horizontal reorder + cross-pane drag + split buttons (right-end `.tab-bar-split-group`, sticky so it never scrolls away; accepts `onSplitVertical`/`onSplitHorizontal` props) |
 | `TerminalView.tsx` | 482 | `@tanstack/react-virtual` + highlight engine + right-click export (TXT/CSV); explicit-intent scroll lock (NO onScroll handler) + scrollbar-end quick-jump buttons; orchestrates `TerminalFilterBar` for per-tab display controls |
 | `TerminalRow.tsx` | — | one virtualized row; `React.memo` + primitive props (`prevLine`/`displayFormat`/`showTimestamp`/`connectedAt`) so only newly-rendered rows do highlight work under batched appends; search hit-rows get the character-level `<mark>` layer via `markSearchMatchesInHtml` (`searchQuery`/`searchCaseSensitive` props — empty query while search closed) |

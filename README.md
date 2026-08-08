@@ -14,12 +14,13 @@
 
 ### 串口与连接
 - 🔌 **自动枚举** — 每 3 秒刷新，`mergePorts` 保留连接态、别名、分组
-- 🧪 **模拟串口** — `SIM:Loopback` 虚拟端口，无硬件调试
+- 🧪 **模拟串口** — `SIM:Loopback` 虚拟端口，无硬件调试；另有调试专用 **GIT:BASH 模拟终端**（git bash pty，仅 `npm run tauri dev` 可用，用于无硬件验证 TTY 模式）
 - ⚙️ **完整参数** — 波特率（含自定义）、数据位、停止位、校验位、流控、DTR/RTS
 - 🗂️ **分组管理** — 自定义分组、备注名、搜索过滤、跨组拖拽排序；串口右键一键移入/移出分组或新建分组并移入，按端口号一次性排序
 
 ### 终端与显示
 - 📑 **多标签 + 分屏** — 上下/左右分屏、跨 Pane 拖拽、`@dnd-kit` 排序
+- 🖥️ **TTY 终端模式** — 端口可切到 xterm.js 完整交互终端（真实 ANSI/VT100、光标、备用屏幕 vim/top、尺寸协商），无本地回显由对端 echo；模式经 `port_meta` 持久化（`OperationPanel → 参数` 分段控件切换）
 - ⏪ **日志回放** — 按原始时间戳写回终端，倍速可选（1/4/16/最快）
 - ⚡ **虚拟滚动** — `@tanstack/react-virtual`，DOM 约 30–50 节点
 - 🧩 **RX 行聚合** — 字节级 CR/LF/CRLF 切行 + rAF 批写，跨事件响应不再碎成多行；写量限制（每帧每端口 2000 行封顶）与内存预算裁剪（超限自动清掉最早一半）防长时间运行内存暴涨；窗口最小化/隐藏时以 setTimeout 兜底排空（不依赖 rAF），每端口队列设上限防隐藏期间无界积压
@@ -78,6 +79,7 @@
 | `zustand` + `immer` | ^5.0.13 / ^11.1.6 | 状态管理（4 store） |
 | `@dnd-kit` | ^6.3.1 | 拖拽（侧边栏、标签页） |
 | `@tanstack/react-virtual` | ^3.13.15 | 终端虚拟滚动 |
+| `@xterm/xterm` / `@xterm/addon-fit` | — | TTY 模式完整终端（ANSI/VT100、备用屏幕、尺寸协商） |
 | `@tauri-apps/api` | ^2.0.0 | Tauri 桥接 |
 | `@tauri-apps/plugin-dialog` / `shell` | ^2.7.1 / ^2.0.0 | 文件对话框 / 外部链接 |
 | `lucide-react` | ^1.14.0 | 图标 |
@@ -95,6 +97,7 @@
 | `sysinfo` | 0.33 | CPU / 内存采样 |
 | `serde` / `serde_json` | 1 | 序列化 |
 | `encoding_rs` | 0.8 | GBK 等多编码解码 |
+| `portable-pty` | 0.9 | 调试专用 GIT:BASH 模拟终端（Windows = ConPTY） |
 | `chrono` / `dirs` / `uuid` | — | 时间 / 目录 / ID |
 | `thiserror` | 1 | `CommandError` 枚举 |
 
