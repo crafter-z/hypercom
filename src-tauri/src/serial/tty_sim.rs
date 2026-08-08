@@ -118,16 +118,23 @@ pub(crate) fn find_bash() -> Option<std::path::PathBuf> {
 
 /// spawn 一个本地 git bash，跑在 pty 上，作为「虚拟串口」。
 /// 返回的句柄持有：writer（TX）、master（resize）、child（kill）、读线程。
+/// `cols`/`rows` 是前端 xterm 的当前尺寸（issue #11）：pty 以正确尺寸初始化，
+/// 全屏应用（vim/top）才按真实显示尺寸渲染。
 pub(crate) fn spawn_bash(
     app_handle: &tauri::AppHandle,
     port_id: &str,
+    cols: u16,
+    rows: u16,
 ) -> anyhow::Result<TtySimPortHandle> {
     let bash = find_bash()
         .ok_or_else(|| anyhow::anyhow!("git bash not found — install Git for Windows"))?;
     let pty_system = portable_pty::native_pty_system();
+    // 防御：上游传入非法尺寸（0/NaN 序列化失败等）时回退 80×24，避免 ConPTY 异常。
+    let cols = if cols > 0 { cols } else { 80 };
+    let rows = if rows > 0 { rows } else { 24 };
     let pair = pty_system.openpty(portable_pty::PtySize {
-        rows: 24,
-        cols: 80,
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     })?;

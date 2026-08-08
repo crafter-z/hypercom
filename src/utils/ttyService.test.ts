@@ -220,6 +220,51 @@ describe('ttyService — resize', () => {
     ttyService.resize('NOPE', 80, 24);
     expect(gitBashSimService.resizeGitBashSim).not.toHaveBeenCalled();
   });
+
+  it('stores the last known size for reuse at open/resync', () => {
+    ttyService.feed('COM1', [0x68], 1000); // create state
+    ttyService.resize('COM1', 132, 43);
+    const state = ttyService.get('COM1');
+    expect(state?.lastCols).toBe(132);
+    expect(state?.lastRows).toBe(43);
+  });
+
+  it('ignores invalid sizes (NaN / non-positive) and does not store them', () => {
+    ttyService.feed('COM1', [0x68], 1000);
+    ttyService.resize('COM1', Number.NaN, 43);
+    ttyService.resize('COM1', 0, -1);
+    ttyService.resize('COM1', 132, 43);
+    const state = ttyService.get('COM1');
+    expect(state?.lastCols).toBe(132); // 仅最后一次合法尺寸被记录
+    expect(state?.lastRows).toBe(43);
+    expect(gitBashSimService.resizeGitBashSim).not.toHaveBeenCalled();
+  });
+
+  it('resync pushes the stored size to the backend for GIT: ports', () => {
+    useAppStore.setState({
+      ports: [{ id: 'GIT:BASH', name: 'GIT:BASH', status: 'disconnected', type: 'sim', isHidden: false }],
+    });
+    ttyService.feed('GIT:BASH', [0x68], 1000);
+    ttyService.resize('GIT:BASH', 100, 30);
+    vi.clearAllMocks();
+    ttyService.resync('GIT:BASH');
+    expect(gitBashSimService.resizeGitBashSim).toHaveBeenCalledWith('GIT:BASH', 100, 30);
+  });
+
+  it('resync is a no-op without a stored size or for non-GIT ports', () => {
+    useAppStore.setState({
+      ports: [
+        { id: 'GIT:BASH', name: 'GIT:BASH', status: 'disconnected', type: 'sim', isHidden: false },
+        { id: 'COM1', name: 'COM1', status: 'disconnected', type: 'real', isHidden: false },
+      ],
+    });
+    ttyService.resync('GIT:BASH'); // 无 stored size
+    ttyService.feed('COM1', [0x68], 1000);
+    ttyService.resize('COM1', 80, 24);
+    vi.clearAllMocks();
+    ttyService.resync('COM1'); // 非 GIT: 端口
+    expect(gitBashSimService.resizeGitBashSim).not.toHaveBeenCalled();
+  });
 });
 
 beforeEach(() => {

@@ -45,6 +45,10 @@ export interface TtyPortState {
   timerId: number | null;
   /** 最后一次 feed 的事件时间戳（暂未消费，保留供将来静默 flush 语义使用） */
   lastTs: number;
+  /** 最近一次已知的 xterm 尺寸（issue #11）：打开 GIT:BASH 端口时随请求传给后端，
+   *  使 pty 以正确尺寸 spawn；连接后 resync 亦复用。 */
+  lastCols: number | null;
+  lastRows: number | null;
 }
 
 /** 每端口状态表（模块级单例） */
@@ -78,6 +82,8 @@ function getPortState(portId: string): TtyPortState {
       rafId: null,
       timerId: null,
       lastTs: 0,
+      lastCols: null,
+      lastRows: null,
     };
     ports.set(portId, state);
   }
@@ -225,14 +231,40 @@ export const ttyService = {
   },
 
   /**
-   * 尺寸协商：仅 GIT: 模拟端口需要后端 pty 同步尺寸（vim/top 全屏应用据此重绘）。
+   * 尺寸协商：记录到端口状态（供打开端口时随请求传给后端 pty），并仅对 GIT:
+   * 模拟端口实时同步后端 pty 尺寸（vim/top 全屏应用据此重绘）。
    * 真实串口无需后端 resize——远端 getty 经 `\x1b[18t` 查询由 xterm 经 onData 自动回尺寸。
+   * 非法尺寸（NaN/非正数，FitAddon 在容器未布局时可能产生）直接忽略。
    */
   resize(portId: string, cols: number, rows: number): void {
+    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return;
+    const state = ports.get(portId);
+    if (state) {
+      state.lastCols = Math.round(cols);
+      state.lastRows = Math.round(rows);
+    }
     const port = useAppStore.getState().ports.find((p) => p.id === portId);
     if (port && port.id.startsWith('GIT:')) {
-      gitBashSimService.resizeGitBashSim(portId, cols, rows).catch((err) => {
-        console.error('[ttyService] resize failed for', portId, err);
+      gitBashSimService.resizeGitBashSim(portId, Math.round(cols), Math.round(rows)).catch(
+        (err) => {
+          console.error('[ttyService] resize failed for', portId, err);
+        },
+      );
+    }
+  },
+
+  /**
+   * 连接后重新同步尺寸（issue #11 保险）：端口刚 open 时 pty 已按打开请求的尺寸
+   * spawn，此处把最近一次 xterm 尺寸再推一次，覆盖「spawn 后容器才完成布局」的
+   * 边角时序。仅对已有有效尺寸的 GIT: 端口生效，其余为 no-op。
+   */
+  resync(portId: string): void {
+    const state = ports.get(portId);
+    if (!state || state.lastCols == null || state.lastRows == null) return;
+    const port = useAppStore.getState().ports.find((p) => p.id === portId);
+    if (port && port.id.startsWith('GIT:')) {
+      gitBashSimService.resizeGitBashSim(portId, state.lastCols, state.lastRows).catch((err) => {
+        console.error('[ttyService] resync failed for', portId, err);
       });
     }
   },

@@ -170,6 +170,9 @@ export function useSerialReceive() {
         // hides as soon as the port is back up.
         if (event.status === 'connected') {
           lostPortIds.delete(event.port_id);
+          // issue #11：连接后把 xterm 尺寸再同步一次到后端 pty（覆盖「spawn 后
+          // 容器才完成布局」的边角时序；非 GIT: 端口 / 无尺寸时为 no-op）。
+          ttyService.resync(event.port_id);
         }
         // Detect unexpected connected → disconnected transition BEFORE
         // updating the store (we need the previous status). User-initiated

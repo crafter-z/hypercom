@@ -33,6 +33,22 @@ pub struct OpenPortArgs {
     pub handshake: String,
     pub dtr: bool,
     pub rts: bool,
+    /// TTY 模拟终端（GIT:BASH）初始尺寸（issue #11）：前端 xterm fit() 后把当前
+    /// cols/rows 随打开请求带来，pty 以正确尺寸 spawn——否则 pty 固定 80×24，
+    /// vim/top 全屏应用按 80×24 渲染而 xterm 按自身尺寸显示，画面错乱。
+    /// 真实串口忽略；缺省时 serde 回退默认值。
+    #[serde(default = "default_tty_cols")]
+    pub cols: u16,
+    #[serde(default = "default_tty_rows")]
+    pub rows: u16,
+}
+
+fn default_tty_cols() -> u16 {
+    80
+}
+
+fn default_tty_rows() -> u16 {
+    24
 }
 
 #[tauri::command]

@@ -6,6 +6,7 @@ import { serialService, eventService, logService } from '../services/tauri';
 import type { SerialReconnectHintEvent } from '../services/tauri';
 import { notifyError, notifySuccess, extractErrorMessage, useToastStore } from '../stores/useToastStore';
 import { userClosingPortIds, lostPortIds } from './disconnectTracking';
+import { ttyService } from '../utils/ttyService';
 
 // ==================== Module-level auto-reconnect tracking ====================
 // Prevents duplicate reconnect listeners when `useSerialConnection()` is called
@@ -142,6 +143,12 @@ export function useSerialConnection() {
       const stopBits = port?.stopBits ?? opStore.stopBits;
       const handshake = port?.handshake ?? opStore.handshake;
       updatePort(portId, { status: 'connecting' });
+      // issue #11：TTY 模拟终端（GIT:BASH）打开时带上当前 xterm 尺寸——pty 以
+      // 正确尺寸 spawn，vim/top 全屏应用才按真实显示尺寸渲染（否则 pty 固定
+      // 80×24，画面错乱）。无 TTY 状态/未 fit 时省略参数，后端回退 80×24。
+      const ttyState = ttyService.get(portId);
+      const hasTtySize =
+        ttyState != null && ttyState.lastCols != null && ttyState.lastRows != null;
       await serialService.openSerialPort({
         port_id: portId,
         baud_rate: baudRate,
@@ -151,6 +158,7 @@ export function useSerialConnection() {
         handshake: handshake,
         dtr: opStore.dtr,
         rts: opStore.rts,
+        ...(hasTtySize ? { cols: ttyState!.lastCols!, rows: ttyState!.lastRows! } : {}),
       });
       updatePort(portId, {
         status: 'connected',

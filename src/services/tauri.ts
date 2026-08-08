@@ -41,6 +41,9 @@ export interface OpenPortParams {
   handshake: string;
   dtr: boolean;
   rts: boolean;
+  /** TTY 模拟终端初始尺寸（issue #11）：缺省时后端回退 80×24。真实串口忽略。 */
+  cols?: number;
+  rows?: number;
 }
 
 /** 发送数据参数 */

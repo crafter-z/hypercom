@@ -661,7 +661,8 @@ impl SerialManager {
         }
         self.tty_sim_ports.remove(&args.port_id);
 
-        let handle = crate::serial::tty_sim::spawn_bash(&app_handle, &args.port_id)?;
+        // issue #11：把前端 xterm 当前尺寸传给 pty（否则固定 80×24，vim/top 错乱）。
+        let handle = crate::serial::tty_sim::spawn_bash(&app_handle, &args.port_id, args.cols, args.rows)?;
 
         // 发送连接成功事件
         let status_event = SerialStatusEvent {
@@ -1234,6 +1235,8 @@ mod tests {
             handshake: "None".to_string(),
             dtr: false,
             rts: false,
+            cols: 80,
+            rows: 24,
         }
     }
 
