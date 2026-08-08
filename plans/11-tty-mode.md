@@ -2,6 +2,7 @@
 
 > 状态：**已实现（M1–M3）** · 2026-08-08
 > 实现进度：M1 模式状态+开关 ✅ · M2 xterm 视图+管线+git bash 模拟终端 ✅ · M3 快捷发送接入 ✅ · M4 可选打磨（未做）
+> 2026-08-08 复审修正：① 模式经 `port_meta` 持久化在 Rust serde 边界断路（`PortMetaEntry` 缺 `mode` 字段）已补字段+钳制+测试；② 字体/字号变更重建 Terminal 清空缓冲 → 改 `term.options` 活更新；③ `disable_gitbash_sim` 同步 join 阻塞 → 改 async + spawn_blocking；④ **标签切换保留会话**（§3.2）已实现。
 > 场景：下位机是 Linux 设备，与上位机串口链路实际是 TTY（serial console / getty shell）。
 > v2 变更：范围从「显示级 ANSI 上色」升级为**完整交互式终端**（vim/top 全屏应用、光标寻址、滚动区、备用屏幕），技术选型改为 **xterm.js**。TX 默认行为与真实 Linux Shell 一致（无本地回显，由对端 echo）。
 
@@ -66,6 +67,16 @@ npm install @xterm/xterm @xterm/addon-fit
 - 持久化：进 `port_meta`（issue #4-9 现有机制）→ config.json，重启恢复。
 - 动作：`useAppStore.setPortMode(portId, mode)`。
 - 切换副作用（M1）：清空对应 TTY/RX 缓冲、flush 管线、detach/dispose xterm 实例，避免模式混合残留。
+
+### 3.2 标签切换保留会话（2026-08-08 增强，已实现）
+
+xterm 终端缓冲在 `Terminal` 实例内（不像 TRX 在 store 行缓冲），若标签切换即卸载 `TtyView` → `term.dispose()` → 会话丢失。实现上改为：
+
+- **Pane 内 TTY 标签常驻挂载**：`Pane.tsx` 对当前 Pane 内所有 TTY 标签各渲染一个 `TtyView`（`key={tab.id}`），非活动标签传 `hidden` → `.tty-view-hidden`（`display: none`，容器 0 尺寸）；TRX 标签照旧只在展示时挂载（缓冲在 store，无实例生命周期）。
+- **恢复可见自动 re-fit**：`TtyView` 在 `hidden` 转 false 时显式 rAF `fit()`，ResizeObserver（display:none→block 同样触发）兜底——vim/top 全屏应用按真实尺寸重绘；隐藏期间 `ttyService.feed` 照常 `term.write`（xterm 缓冲先到先得，受自身 scrollback 约束）。
+- **销毁时机（仍然销毁实例）**：模式切换 TRX↔TTY（清缓冲的既定语义）、关闭标签、跨 Pane 拖拽（实例随组件卸载，xterm `open()` 只能调用一次、不能二次挂载）。
+
+> 交互不变式：`Pane` 终端区渲染 = 「TTY 常驻挂载（隐藏非活动）+ TRX 按需挂载」；`displayPort` 决定哪个 TtyView 可见与是否渲染 TerminalView。
 
 ---
 
@@ -202,6 +213,7 @@ xterm 宿主组件，每端口一个：
 - **性能**：高速 TTY 下逐字节解码 + xterm 渲染；复用 rAF 批写 / visibility-aware 调度 + 队列上限，防隐藏窗口积压。
 - **编码边界**：xterm 内建 UTF-8。GBK RX 需流式转码（已设计）；GBK TX 为 M4 选做。
 - **模式切换残留**：切换时清空缓冲 + flush + detach/dispose xterm，避免 TRX 行与 TTY 行混染。
+- **会话跨标签保留（已实现 §3.2）**：xterm 缓冲在实例内，切标签销毁实例会丢会话——Pane 改为 TTY 标签常驻挂载 + 非活动隐藏（display:none），恢复可见 re-fit；TRX 缓冲在 store 天然保留，不受影响。残余限制：跨 Pane 拖拽/关闭标签仍销毁实例。
 - **尺寸协商**：依赖 FitAddon 随容器尺寸 `fit()`；容器尺寸变化时 xterm 经 onData 通知对端，全屏应用据此重绘。分屏拖拽/面板缩放时需触发 refit。
 - **GIT:BASH pty 尺寸（已实现）**：打开端口时前端把 xterm 当前尺寸随 `OpenPortArgs.cols/rows` 传给后端，pty 以正确尺寸 spawn（否则固定 80×24，vim/top 全屏错乱）；`ttyService` 记录 `lastCols/lastRows`，连接后 `resync()` 再推一次覆盖边角时序。
 - **依赖成本**：xterm.js 纯前端、无原生依赖，体积适中，不影响 Rust 侧与打包。

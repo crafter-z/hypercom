@@ -1,3 +1,29 @@
+# HyperCom v0.5.0
+
+本次更新实现 issue #11 **TTY 终端模式**：端口可切换为 xterm.js 完整交互终端（真实 ANSI/VT100、光标、备用屏幕 vim/top、尺寸协商、无本地回显由对端 echo），并完成持久化、会话保留与健壮性打磨。
+
+## 新功能
+
+**TTY 终端模式（issue #11）** — 每端口可在 TRX（既有行级终端）与 TTY（xterm.js 完整终端模拟）间切换（`OperationPanel → 参数` 分段控件，模式经 `port_meta` 持久化、重启恢复）：ANSI/VT100 全语义（颜色/加粗/光标寻址/滚动区/备用屏幕）、全屏应用（vim/top/htop）、readline 行编辑与粘贴、尺寸协商（对端 `\x1b[18t` 查询由 xterm 经 onData 自动回）；TX **无本地回显**（命令由对端 shell echo），快捷发送/命令面板在 TTY 下复用（跳过 TX 回显行）；`useSerialReceive` 对 TTY 端口字节直喂 `ttyService`（跳过触发引擎/协议解析/行组装）
+
+**会话跨标签保留（issue #11）** — TTY 标签在 Pane 内**常驻挂载**，非活动标签隐藏（display:none），切换标签不丢终端缓冲与滚动位置；恢复可见自动重排尺寸（vim/top 按真实尺寸重绘）。仅模式切换 / 关闭标签 / 跨 Pane 拖拽销毁实例
+
+**模拟终端（调试专用，issue #11）** — 侧边栏工具栏新增「模拟终端」按钮：后端以 portable-pty（Windows = ConPTY）spawn 本地 git bash 作为 GIT:BASH 虚拟串口，无硬件即可验证 TTY 交互（vim/top/readline/尺寸协商/DSR 应答）；双层门控（前端 `import.meta.env.DEV` + 后端 release 命令拒绝），仅 `npm run tauri dev` 可用
+
+**字体/字号活更新（issue #11）** — TTY 终端字体、字号经 `term.options` 实时应用，不重建 Terminal、不丢缓冲；Ctrl+滚轮缩放（8–48px，与 TRX 终端一致）
+
+## 修复
+
+- **TTY 模式持久化断路** — Rust `PortMetaEntry` 缺失 `mode` 字段，serde 静默丢弃 → 重启后 TTY 端口回退 TRX；补字段 + 校验钳制 + 往返测试
+- **字体变更清空终端缓冲** — TtyView 挂载 effect 依赖含字体配置，改动即重建 xterm 丢会话；改 `term.options` 活更新
+- **禁用模拟终端阻塞 UI** — `disable_gitbash_sim` 同步 join 读线程改 async + `spawn_blocking`（与 `close_serial_port` 对齐防「断开卡死」）
+- **断线解码器残留 / resize 取整 / 死字段清理** — 断线重建流式解码器（防多字节字符跨连接污染）；pty 尺寸先取整再校验（0/负数拒绝）；移除 `lastTs` 未用字段；`detach` 保留最近尺寸（重开不再回退 80×24）
+
+## 其他
+
+- 新增 i18n 双语 key：`params.mode.*`（3）、`tty.*`（2）、`sidebar.toolbar.{enable,disable}GitBashSim`（2）
+- 测试扩充：vitest 530 → **557**（28 文件），cargo test 112 → **121**
+
 # HyperCom v0.4.3
 
 本次更新集中解决 GitHub issue #7 列出的 10 个 UI 缺陷/体验问题：通知中心信息增强、快捷发送面板按钮样式与状态灯、自定义右键菜单，以及若干文案与布局修正。

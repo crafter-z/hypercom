@@ -6,6 +6,22 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-08 issue #11 复审修复 + 会话跨标签保留：TTY 模式持久化断路 · 字体切换清空缓冲 · disable 同步 join · 断线解码器残留 · resize 取整 · 会话跨标签保留)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 557/557 (28 files), `cargo check` 0 错 0 警告, `cargo test --lib` 121/121。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `config/mod.rs` | TTY 模式持久化断路（issue #11 复审）：前端 `PortMetaEntry.mode` 随 `save_port_meta` 发送，但 Rust `PortMetaEntry` 只有 `port_id`/`alias`/`is_hidden`——serde（未设 `deny_unknown_fields`）**静默丢弃未知字段**，config.json 永不落盘 → 重启后 TTY 端口全部回退 TRX（文档声称「经 port_meta 持久化」与实现不符；TS 测试不穿过 invoke 边界、Rust 测试只 roundtrip alias/isHidden，均未拦截） | Rust `PortMetaEntry` 补 `#[serde(default)] pub mode: Option<String>`（缺省 None = trx）+ `validate_and_clamp` 钳制非 `trx`/`tty` 值回 trx；roundtrip 测试覆盖 mode 往返 / 旧版缺省回退 / 前端 JSON 携 mode / 钳制三类回归 |
+| HIGH | `MainDisplay/TtyView.tsx` | 字体/字号变更清空整个 TTY 终端缓冲（issue #11 复审）：挂载 effect 依赖含 `terminalFont`/`terminalFontSize`，改动即 cleanup `term.dispose()` 重建——注释声称「不随配置重建」与实现矛盾；TRX 侧经 CSS 变量无此问题 | 挂载 effect 依赖收窄为 `[portId]`；新增独立 effect 经 `term.options.fontFamily/fontSize` **活更新**（不重建、不丢缓冲）；补 Ctrl+滚轮缩放（8–48px，镜像 TerminalView，同步 config + `--font-size-terminal`） |
+| MEDIUM | `commands/tty_sim.rs` | `disable_gitbash_sim` 同步命令内 `thread.join()` 阻塞主线程（issue #11 复审）：a3a5db3 已把 `close_serial_port` 改 async + `spawn_blocking` join 防「断开卡死」，此处未对齐 | `disable_gitbash_sim` 改 async + `tokio::task::spawn_blocking` join；一次持锁关闭全部 GIT: 端口取出 JoinHandle，锁外统一 join |
+| MEDIUM | `utils/ttyService.ts` | 三处 P2（issue #11 复审）：① `lastTs` 死字段（注释「暂未消费」）；② `disconnect` 保留流式解码器——断线残留的半截多字节 UTF-8 字符会在重连后与下一连接首字节拼出错误字符（TRX 侧 `pipeline.disconnect` 全量丢弃 per-port 状态，语义不一致）；③ `resize` 先校验后取整——`Math.round(0.4)=0` 会被存进 state 并推给后端 ConPTY | ① 删 `lastTs` + `feed` 去掉无用的 `ts` 参数（同步调用点与 18 处测试调用）；② `disconnect` 重建 `decoder`；③ 先取整再校验（取整后的 0/负数同样拒绝）；附加：`detach` 保留 `lastCols/lastRows`（丢弃队列/decoder/term），切走标签再重开 GIT:BASH 不再回退 80×24 首帧错乱 |
+| MEDIUM | `MainDisplay/Pane.tsx` + `TtyView.tsx` + `tty.css` | TTY 会话跨标签切换丢失（issue #11 遗留）：`key={displayTab.id}` 使切标签即卸载 `TtyView` → `term.dispose()` 清空 xterm 缓冲（TRX 缓冲在 store 天然保留）；重开 GIT:BASH 还因 `detach` 清尺寸回退 80×24 | Pane 终端区改「**TTY 常驻挂载 + TRX 按需挂载**」：当前 Pane 内所有 TTY 标签各渲染一个 `TtyView`（`key={tab.id}` 稳定），非活动标签传 `hidden` → `.tty-view-hidden`（display:none）；`TtyView` 恢复可见时显式 rAF `fit()` + ResizeObserver 兜底；`displayPort?.mode !== 'tty'` 才渲染 TerminalView。残留限制（文档化）：模式切换/关闭标签/跨 Pane 拖拽仍销毁实例（xterm `open()` 只能调用一次） |
+
+架构变化：`PortMetaEntry` 新增 `mode` 字段（Rust serde 契约，前端类型早已对齐）；`TtyView` 新增 `hidden` prop + `fitRef`（恢复可见 re-fit 效果）；`ttyService.feed` 签名去掉 `ts` 参数；`Pane` 终端区渲染逻辑改为 TTY 常驻挂载。
+
+测试新增：Rust config `test_port_meta_entry_roundtrip_and_defaults` 扩 mode 往返 + 新 `test_validate_and_clamp_port_meta_mode`；前端 ttyService 2 例（disconnect 重建解码器、detach 保留尺寸）。
+
 ## 已修复 (2026-08-06 issue #7 十项：通知中心串口上下文+时间戳 · 快捷面板按钮样式 · 发送前缀默认空 · 快捷面板 REAL 后缀/状态灯 · 发送区控件位置 · 设置移除参数预设 · 去「一键」文案 · 分组工具并行 · 自定义右键菜单)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 530/530 (27 files), `cargo check` 0 错 0 警告, `cargo test --lib` 112/112, `npx playwright test` 14/14。
