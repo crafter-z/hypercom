@@ -203,4 +203,5 @@ xterm 宿主组件，每端口一个：
 - **编码边界**：xterm 内建 UTF-8。GBK RX 需流式转码（已设计）；GBK TX 为 M4 选做。
 - **模式切换残留**：切换时清空缓冲 + flush + detach/dispose xterm，避免 TRX 行与 TTY 行混染。
 - **尺寸协商**：依赖 FitAddon 随容器尺寸 `fit()`；容器尺寸变化时 xterm 经 onData 通知对端，全屏应用据此重绘。分屏拖拽/面板缩放时需触发 refit。
+- **GIT:BASH pty 尺寸（已实现）**：打开端口时前端把 xterm 当前尺寸随 `OpenPortArgs.cols/rows` 传给后端，pty 以正确尺寸 spawn（否则固定 80×24，vim/top 全屏错乱）；`ttyService` 记录 `lastCols/lastRows`，连接后 `resync()` 再推一次覆盖边角时序。
 - **依赖成本**：xterm.js 纯前端、无原生依赖，体积适中，不影响 Rust 侧与打包。
