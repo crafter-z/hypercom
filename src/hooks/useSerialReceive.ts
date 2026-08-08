@@ -5,6 +5,7 @@ import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
 import { getRxPipeline } from '../utils/rxPipeline';
+import { ttyService } from '../utils/ttyService';
 import { evaluateTriggers } from '../utils/triggerEngine';
 import { sendToPort } from './useSerialSend';
 import { useToastStore } from '../stores/useToastStore';
@@ -50,6 +51,14 @@ export function useSerialReceive() {
         app.setTrafficStats(portId, {
           rxTotal: (app.trafficStats[portId]?.rxTotal || 0) + event.data.length,
         });
+
+        // TTY 模式（issue #11）：字节直喂 ttyService（xterm 渲染）。
+        // 跳过触发引擎 / 协议解析 / RxPipeline 行组装——终端字节流没有「行」语义，
+        // 由 xterm.js 完整终端模拟（ANSI 颜色、光标寻址、备用屏幕、CR 覆写）接管。
+        if (useAppStore.getState().ports.find(p => p.id === portId)?.mode === 'tty') {
+          ttyService.feed(portId, event.data, event.timestamp);
+          return;
+        }
 
         // Conditional triggers: match RX against trigger rules. Rules are read
         // live via getState() (never subscribe inside a callback) so store
@@ -197,6 +206,8 @@ export function useSerialReceive() {
           // Pipeline: flush tail + discard ALL per-port state (assembler,
           // decoders, timers, queue) — reconnect starts from scratch.
           pipeline.disconnect(event.port_id);
+          // TTY（issue #11）：flush 队列、保留 xterm 实例——视图跨重连保持挂载。
+          ttyService.disconnect(event.port_id);
         }
       });
 

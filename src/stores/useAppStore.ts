@@ -16,6 +16,7 @@ import type {
   SystemStatus,
   TrafficStats,
   UIState,
+  PortMode,
 } from '../types';
 import { useTerminalStore } from './useTerminalStore';
 import { naturalCompare, sortPortsByNatural } from '../utils/portSort';
@@ -228,6 +229,8 @@ interface AppState {
   // 串口管理
   setPorts: (ports: SerialPort[]) => void;
   updatePort: (portId: string, patch: Partial<SerialPort>) => void;
+  /** issue #11：设置端口工作模式（trx=传统收发 | tty=终端模式）。 */
+  setPortMode: (portId: string, mode: PortMode) => void;
   /** 一次性载入持久化的分组列表（启动时从 config.portGroups 恢复）。 */
   setGroups: (groups: PortGroup[]) => void;
   addGroup: (group: PortGroup) => void;
@@ -318,6 +321,14 @@ export const useAppStore = create<AppState>()(
             tab.title = `${port.id} ${port.alias || ''}`.trim();
           }
         }
+      }
+    }),
+
+    // issue #11：直接写 port.mode，端口缺失时 no-op。
+    setPortMode: (portId, mode) => set((state) => {
+      const port = state.ports.find(p => p.id === portId);
+      if (port) {
+        Object.assign(port, { mode });
       }
     }),
     

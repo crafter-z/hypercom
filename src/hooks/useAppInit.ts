@@ -62,12 +62,13 @@ export function useAppInit() {
         }
       }
 
-      // 回填持久化的端口备注名 / 隐藏状态（issue #4-9）：端口由枚举产生，
-      // `mapPortInfo` 不携带 alias/isHidden，需从 config.portMeta 恢复。
+      // 回填持久化的端口备注名 / 隐藏状态 / 工作模式（issue #4-9；模式 issue #11）：
+      // 端口由枚举产生，`mapPortInfo` 不携带 alias/isHidden/mode，需从 config.portMeta 恢复。
       for (const meta of useAppStore.getState().config.portMeta ?? []) {
         useAppStore.getState().updatePort(meta.portId, {
           alias: meta.alias,
           isHidden: meta.isHidden,
+          mode: meta.mode,
         });
       }
 
@@ -156,8 +157,9 @@ export function useAppInit() {
     const computeSignature = () =>
       useAppStore
         .getState()
-        .ports.filter((p) => p.alias != null || p.isHidden)
-        .map((p) => `${p.id}\u0001${p.alias ?? ''}\u0001${p.isHidden ? '1' : '0'}`)
+        .ports.filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
+        // issue #11：签名纳入 mode，工厂 reset 或合并回 'trx' 时能正确触发回写。
+        .map((p) => `${p.id}\u0001${p.alias ?? ''}\u0001${p.isHidden ? '1' : '0'}\u0001${p.mode ?? 'trx'}`)
         .join('\u0002');
     lastSignature = computeSignature();
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
@@ -173,8 +175,9 @@ export function useAppInit() {
         timeoutId = null;
         const state = useAppStore.getState();
         const meta: PortMetaEntry[] = state.ports
-          .filter((p) => p.alias != null || p.isHidden)
-          .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden }));
+          .filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
+          // issue #11：meta 携带 mode——只有 tty 需要持久化（trx 是默认值，缺省即 trx）。
+          .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
         state.setConfig({ portMeta: meta });
         storageService.savePortMeta(meta).catch((e) => {
           console.warn('[useAppInit] Failed to auto-save port meta:', e);

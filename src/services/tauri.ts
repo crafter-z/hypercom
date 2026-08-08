@@ -129,6 +129,17 @@ export const serialService = {
   },
 };
 
+// ==================== 模拟终端（git bash，仅 debug，issue #11）====================
+export const gitBashSimService = {
+  /** 启用 GIT:BASH 模拟终端（spawn 本地 git bash pty）。 */
+  enableGitBashSim: (): Promise<string> => invoke<string>('enable_gitbash_sim'),
+  /** 停用并关闭 GIT:BASH 模拟终端。 */
+  disableGitBashSim: (): Promise<void> => invoke<void>('disable_gitbash_sim'),
+  /** 调整 GIT:BASH pty 尺寸（cols×rows），供全屏应用（vim/top）正确重绘。 */
+  resizeGitBashSim: (portId: string, cols: number, rows: number): Promise<void> =>
+    invoke<void>('resize_gitbash_sim', { portId, cols, rows }),
+};
+
 // ==================== 配置命令 ====================
 
 export const configService = {

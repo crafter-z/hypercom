@@ -8,6 +8,9 @@
 /** 串口连接状态 */
 export type PortStatus = 'disconnected' | 'connecting' | 'error' | 'connected';
 
+/** 端口工作模式：trx=传统收发 | tty=终端模式（issue #11） */
+export type PortMode = 'trx' | 'tty';
+
 /** 串口类型 */
 export type PortType = 'real' | 'virtual' | 'sim';
 
@@ -30,6 +33,8 @@ export interface SerialPort {
   protocolTemplateId?: string;
   // 外部工具是否正在运行（运行期间串口关闭，工具输出显示在终端）
   toolRunning?: boolean;
+  // 端口工作模式：trx=传统收发 | tty=终端模式（issue #11）
+  mode?: PortMode;
 }
 
 /** 数据位 */
@@ -331,11 +336,12 @@ export interface TextSendConfig {
 
 // ==================== 串口元数据相关 ====================
 
-/** 串口元数据（备注名 / 隐藏状态，随 config.json 持久化，issue #4-9） */
+/** 串口元数据（备注名 / 隐藏状态 / 工作模式，随 config.json 持久化，issue #4-9；模式字段 issue #11） */
 export interface PortMetaEntry {
   portId: string;
   alias?: string;
   isHidden: boolean;
+  mode?: PortMode;
 }
 
 // ==================== 日志相关 ====================

@@ -69,45 +69,53 @@ export async function sendToPort(
     return 0;
   }
   const { sendPrefix } = state.config;
-  const prefix = sendPrefix ? `${sendPrefix} ` : '';
-  const displayText = `${prefix}${data}`;
-  // rawData must reflect the ACTUAL transmitted bytes (drives the
-  // HEX/string display toggle + CSV export):
-  //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
-  //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
-  // issue #6-2：存 Uint8Array（与 RX 行一致，省内存、类型统一）
-  const txRawData: Uint8Array = isHex
-    ? Uint8Array.from(
-        data
-          .trim()
-          .split(/\s+/)
-          .filter((tok) => tok.length > 0)
-          .map((tok) => parseInt(tok, 16))
-          .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
-      )
-    : new TextEncoder().encode(data);
 
-  // Drain any pending RX lines from the pipeline queue BEFORE appending the
-  // TX echo. With RX now batched up to one animation frame, a zero-delay
-  // cyclic send would otherwise render TX1,TX2,RX1 instead of the natural
-  // TX1,RX1,TX2 order. RX that physically arrived before this send but
-  // hasn't flushed yet would render AFTER the TX line without this drain.
-  // Synchronously flushing here restores the "TX precedes its own response"
-  // invariant — the response arrives during the await below, not before.
-  getRxPipeline().flushNow(portId);
+  // TTY 模式（issue #11）：无本地回显——对端 shell 会把命令 echo 回来，本地再
+  // 插一条 TX 行既重复又破坏终端流。因此 TTY 下跳过 TX 回显与 RX 队列排空，
+  // 仍走「后端发送 + 流量统计 + 发送历史」（快捷发送/命令面板在 TTY 下可复用）。
+  const isTty = port?.mode === 'tty';
 
-  // Append the TX echo BEFORE the backend call. The sim port's read thread
-  // emits the loopback RX during the await below; appending TX only after the
-  // await resolved let RX win the race and render ABOVE the sent line.
-  // Writing TX first guarantees the sent line always precedes its response.
-  useTerminalStore.getState().appendTerminalLine(portId, {
-    id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    timestamp: Date.now(),
-    direction: 'TX',
-    content: displayText,
-    rawData: txRawData,
-    isHex: isHex,
-  });
+  if (!isTty) {
+    const prefix = sendPrefix ? `${sendPrefix} ` : '';
+    const displayText = `${prefix}${data}`;
+    // rawData must reflect the ACTUAL transmitted bytes (drives the
+    // HEX/string display toggle + CSV export):
+    //  - HEX: the parsed byte values of `data` (e.g. "AA BB" -> [170,187])
+    //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
+    // issue #6-2：存 Uint8Array（与 RX 行一致，省内存、类型统一）
+    const txRawData: Uint8Array = isHex
+      ? Uint8Array.from(
+          data
+            .trim()
+            .split(/\s+/)
+            .filter((tok) => tok.length > 0)
+            .map((tok) => parseInt(tok, 16))
+            .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
+        )
+      : new TextEncoder().encode(data);
+
+    // Drain any pending RX lines from the pipeline queue BEFORE appending the
+    // TX echo. With RX now batched up to one animation frame, a zero-delay
+    // cyclic send would otherwise render TX1,TX2,RX1 instead of the natural
+    // TX1,RX1,TX2 order. RX that physically arrived before this send but
+    // hasn't flushed yet would render AFTER the TX line without this drain.
+    // Synchronously flushing here restores the "TX precedes its own response"
+    // invariant — the response arrives during the await below, not before.
+    getRxPipeline().flushNow(portId);
+
+    // Append the TX echo BEFORE the backend call. The sim port's read thread
+    // emits the loopback RX during the await below; appending TX only after the
+    // await resolved let RX win the race and render ABOVE the sent line.
+    // Writing TX first guarantees the sent line always precedes its response.
+    useTerminalStore.getState().appendTerminalLine(portId, {
+      id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      direction: 'TX',
+      content: displayText,
+      rawData: txRawData,
+      isHex: isHex,
+    });
+  }
 
   try {
     const bytesWritten = await serialService.sendSerialData({

@@ -21,6 +21,8 @@ export function mapPortInfo(info: AvailablePortInfo): SerialPort {
     type: type as SerialPort['type'],
     isHidden: false,
     groupId: undefined,
+    // issue #11：枚举出的端口默认传统收发模式；持久化的 mode 由 mergePorts 回填。
+    mode: 'trx' as const,
   };
 }
 
@@ -51,6 +53,8 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
         handshake: prev.handshake,
         protocolTemplateId: prev.protocolTemplateId,
         toolRunning: prev.toolRunning,
+        // issue #11：保留持久化的工作模式，否则每 3s 轮询会把 TTY 重置回 TRX。
+        mode: prev.mode,
       });
       seen.add(prev.id);
     } else if (prev.status === 'connected' || prev.status === 'connecting') {

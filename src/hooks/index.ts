@@ -7,6 +7,7 @@ export { useConfigPersistence } from './useConfigPersistence';
 export { useSystemStatus } from './useSystemStatus';
 export { useAppInit } from './useAppInit';
 export { useSimulation } from './useSimulation';
+export { useGitBashSim } from './useGitBashSim';
 export { useToolOutput } from './useToolOutput';
 export { usePortToolActions } from './usePortToolActions';
 export { isUserClosingPort, isPortLost } from './disconnectTracking';

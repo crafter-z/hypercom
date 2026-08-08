@@ -8,8 +8,9 @@ import {
   ChevronRight, Plus, X, Search, FlaskConical, Ellipsis,
   PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
   Wrench, TerminalSquare, FolderPlus, FolderInput, FolderMinus,
+  Terminal,
 } from 'lucide-react';
-import { useSerialPorts, useSerialConnection, useSimulation, usePortToolActions } from '../../hooks';
+import { useSerialPorts, useSerialConnection, useSimulation, usePortToolActions, useGitBashSim } from '../../hooks';
 import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import {
   DndContext,
@@ -45,10 +46,13 @@ const SidebarToolbar: React.FC<{
   simulationMode: boolean;
   simulationAvailable: boolean;
   onToggleSimulation: () => void;
+  gitBashMode: boolean;
+  gitBashAvailable: boolean;
+  onToggleGitBash: () => void;
   onOpenAll: () => void;
   onCloseAll: () => void;
   onSortByPort: () => void;
-}> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, simulationAvailable, onToggleSimulation, onOpenAll, onCloseAll, onSortByPort }) => {
+}> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, simulationAvailable, onToggleSimulation, gitBashMode, gitBashAvailable, onToggleGitBash, onOpenAll, onCloseAll, onSortByPort }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
 
@@ -73,6 +77,15 @@ const SidebarToolbar: React.FC<{
             onClick={onToggleSimulation}
           >
             <FlaskConical size={14} />
+          </button>
+        )}
+        {gitBashAvailable && (
+          <button
+            className={`icon-btn${gitBashMode ? ' active' : ''}`}
+            title={gitBashMode ? t('sidebar.toolbar.disableGitBashSim') : t('sidebar.toolbar.enableGitBashSim')}
+            onClick={onToggleGitBash}
+          >
+            <Terminal size={14} />
           </button>
         )}
         <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
@@ -448,6 +461,7 @@ const Sidebar: React.FC = () => {
   const { refreshPorts } = useSerialPorts(3000);
   const { toggleConnection } = useSerialConnection();
   const { simulationMode, toggleSimulation } = useSimulation();
+  const { gitBashMode, toggleGitBashSim } = useGitBashSim();
   const { runTool, killTool, configTool, runToolForGroup, groupToolDialog } = usePortToolActions();
 
   const [showHidden, setShowHidden] = useState(false);
@@ -540,6 +554,9 @@ const Sidebar: React.FC = () => {
         simulationMode={simulationMode}
         simulationAvailable={DEV_FEATURES_ENABLED}
         onToggleSimulation={toggleSimulation}
+        gitBashMode={gitBashMode}
+        gitBashAvailable={DEV_FEATURES_ENABLED}
+        onToggleGitBash={toggleGitBashSim}
         onOpenAll={async () => {
           for (const p of ports) {
             if (p.status !== 'connected') {

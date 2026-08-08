@@ -10,6 +10,7 @@
 @import "./styles/main-display.css";
 @import "./styles/tabbar.css";
 @import "./styles/terminal-view.css";
+@import "./styles/tty.css";
 @import "./styles/operation-panel.css";
 @import "./styles/status-bar.css";
 @import "./styles/config-modal.css";

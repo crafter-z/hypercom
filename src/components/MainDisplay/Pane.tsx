@@ -3,11 +3,12 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialConnection, usePortToolActions } from '../../hooks';
-import { notifyError } from '../../stores/useToastStore';
+import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
 import { popoutLabel } from '../Popout/popoutLabel';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
+import TtyView from './TtyView';
 import { X, Cable } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
 
@@ -142,6 +143,8 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     ? activeTabId
     : (localActiveTabId && visibleTabIds.includes(localActiveTabId) ? localActiveTabId : visibleTabs[0]?.id || null);
   const displayTab = visibleTabs.find(t => t.id === displayTabId);
+  // issue #11：TTY 模式端口渲染 xterm（TtyView），TRX 端口渲染 TerminalView。
+  const displayPort = ports.find(p => p.id === displayTabId);
   // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
   const displayTerminal = useTerminalStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
 
@@ -160,6 +163,13 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   // 若弹出的标签是当前活动/显示标签，焦点迁移到下一个可见（非弹出）标签，
   // 使主窗内容区不会停留在"已被弹出"的空洞状态。
   const handlePopOut = useCallback((tabId: string) => {
+    // issue #11：TTY 模式暂不支持弹出窗（弹出窗是快照式独立 webview，不共享
+    // ttyService/xterm 实例）——阻止 detach 并提示，避免主窗出现空洞。
+    const ttyPort = useAppStore.getState().ports.find(p => p.id === tabId);
+    if (ttyPort?.mode === 'tty') {
+      notifyInfo('tty.popoutUnsupported');
+      return;
+    }
     setTabPoppedOut(tabId, true);
     const currentActiveId = useAppStore.getState().activeTabId;
     if (currentActiveId === tabId) {
@@ -241,11 +251,15 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             }
           }}
         >
-          <TerminalView
-            key={displayTab.id}
-            portId={displayTab.id}
-            terminal={displayTerminal}
-          />
+          {displayPort?.mode === 'tty' ? (
+            <TtyView key={displayTab.id} portId={displayTab.id} />
+          ) : (
+            <TerminalView
+              key={displayTab.id}
+              portId={displayTab.id}
+              terminal={displayTerminal}
+            />
+          )}
         </div>
       ) : paneTabs.length > 0 ? (
         // All tabs in this pane are popped out — Chrome-style detach: content area

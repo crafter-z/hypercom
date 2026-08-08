@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
+import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useTranslation } from 'react-i18next';
-import type { DataBits, Parity, StopBits, Handshake, PortPreset } from '../../types';
+import type { DataBits, Parity, StopBits, Handshake, PortPreset, PortMode } from '../../types';
 import { storageService } from '../../services/tauri';
 import { notifySuccess, notifyError } from '../../stores/useToastStore';
+import { getRxPipeline } from '../../utils/rxPipeline';
+import { ttyService } from '../../utils/ttyService';
 import { Save, Trash2 } from 'lucide-react';
 
 export interface ParamsSectionProps {
@@ -26,6 +29,10 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const ignoreEmptyChars = useOperationStore(s => s.ignoreEmptyChars);
   const config = useAppStore(s => s.config);
   const setOpState = useOperationStore(s => s.setOpState);
+  // issue #11：端口工作模式切换（trx=传统收发 | tty=终端模式）
+  const activeTabId = useAppStore(s => s.activeTabId);
+  const setPortMode = useAppStore(s => s.setPortMode);
+  const portMode = useAppStore(s => s.ports.find(p => p.id === s.activeTabId)?.mode ?? 'trx');
 
   // isCustomBaud 是显式用户意图：只由 select 的 onChange 写入（选「其他...」→ true，
   // 选预设 → false）。绝不从 baudRate 自动派生——否则键入到预设值瞬间输入框被卸载。
@@ -112,11 +119,43 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     }
   }, [selectedPresetId, loadPresets]);
 
+  // issue #11：切换工作模式 → 落 store + 清屏 + 冲刷 RX 管线残留字节，
+  // 避免旧模式 buffered 的数据混入新模式首屏。TRX 侧清 TerminalStore + 冲刷
+  // RxPipeline；TTY 侧清 ttyService 屏幕（若该端口已挂 TTY 视图）。
+  const handleModeChange = useCallback((mode: PortMode) => {
+    if (!activeTabId) return;
+    setPortMode(activeTabId, mode);
+    useTerminalStore.getState().clearTerminal(activeTabId);
+    getRxPipeline().flushAndReset(activeTabId);
+    ttyService.clear(activeTabId);
+  }, [activeTabId, setPortMode]);
+
   return (
     <div className="op-section op-section-params">
       <div className="panel-card-title eyebrow">{t('paramsSection.cardTitle')}</div>
 
       <div className="op-params-grid">
+        {/* issue #11：工作模式切换（trx=传统收发 | tty=终端模式），样式复刻
+            TerminalFilterBar 的 HEX/Text 分段控件（.segmented + .btn.btn-sm + active）。 */}
+        <div className="op-param-item">
+          <span className="op-label">{t('params.mode')}</span>
+          <div className="segmented" role="group">
+            <button type="button"
+              className={`btn btn-sm${portMode === 'trx' ? ' active' : ''}`}
+              disabled={!isPortActive}
+              onClick={() => handleModeChange('trx')}
+              aria-pressed={portMode === 'trx'}>
+              {t('params.mode.trx')}
+            </button>
+            <button type="button"
+              className={`btn btn-sm${portMode === 'tty' ? ' active' : ''}`}
+              disabled={!isPortActive}
+              onClick={() => handleModeChange('tty')}
+              aria-pressed={portMode === 'tty'}>
+              {t('params.mode.tty')}
+            </button>
+          </div>
+        </div>
         <div className="op-param-item op-param-item-wide">
           <span className="op-label">{t('paramsSection.preset.label')}</span>
           <select className="select op-param-select" value={selectedPresetId}

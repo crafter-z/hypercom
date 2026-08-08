@@ -115,6 +115,36 @@ describe('Port & Group actions', () => {
     expect(s.ports.map(p => p.id)).toEqual(['COM1', 'COM2']);
     expect(s.ports.every(p => p.groupId === 'g1')).toBe(true);
   });
+
+  // ===== issue #11：端口工作模式（trx=传统收发 | tty=终端模式） =====
+
+  it('setPortMode sets mode on an existing port', () => {
+    useAppStore.setState({ ports: [makePort('COM1')] });
+    useAppStore.getState().setPortMode('COM1', 'tty');
+    expect(useAppStore.getState().ports[0].mode).toBe('tty');
+    useAppStore.getState().setPortMode('COM1', 'trx');
+    expect(useAppStore.getState().ports[0].mode).toBe('trx');
+  });
+
+  it('setPortMode is a no-op when port is missing', () => {
+    useAppStore.setState({ ports: [makePort('COM1')] });
+    const portsBefore = [...useAppStore.getState().ports];
+    useAppStore.getState().setPortMode('nonexistent', 'tty');
+    expect(useAppStore.getState().ports).toEqual(portsBefore);
+  });
+
+  it('setPortMode preserves other port fields', () => {
+    useAppStore.setState({
+      ports: [makePort('COM1', { alias: 'My Device', status: 'connected', groupId: 'g1' })],
+    });
+    useAppStore.getState().setPortMode('COM1', 'tty');
+    const p = useAppStore.getState().ports[0];
+    expect(p.mode).toBe('tty');
+    expect(p.alias).toBe('My Device');
+    expect(p.status).toBe('connected');
+    expect(p.groupId).toBe('g1');
+    expect(p.name).toBe('COM1');
+  });
 });
 
 // ==================== Group B: Tabs & Panes ====================
