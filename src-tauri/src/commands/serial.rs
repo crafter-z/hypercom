@@ -65,11 +65,14 @@ pub fn open_serial_port(args: OpenPortArgs, state: State<AppState>) -> Result<()
 
 /// 关闭指定串口
 #[tauri::command]
-pub fn close_serial_port(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
+pub async fn close_serial_port(
+    port_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let serial_manager = state.serial_manager.clone();
     // 持锁期间只停止读取线程并取出 JoinHandle，立即释放锁
     let join_handle = {
-        let mut manager = state
-            .serial_manager
+        let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         manager.close_port(&port_id).map_err(|e| {
@@ -77,9 +80,15 @@ pub fn close_serial_port(port_id: String, state: State<AppState>) -> Result<(), 
             CommandError::Serial(e.to_string())
         })?
     };
-    // 在锁外 join：读取线程退出最长约 100ms，不能阻塞其他串口命令
+    // issue #11：join 移到阻塞线程池执行，不占主线程——GIT:BASH 读线程需等
+    // ConPTY 关闭（close_port 已 drop master）后才退出；即使读线程异常不退，
+    // 同步 join 也不会再冻结整个应用 UI。
     if let Some(thread) = join_handle {
-        let _ = thread.join();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = thread.join();
+        })
+        .await
+        .map_err(|e| CommandError::Other(format!("close port join task failed: {e}")))?;
     }
     Ok(())
 }

@@ -682,10 +682,15 @@ impl SerialManager {
     /// 否则会卡住所有其他串口命令。
     pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<thread::JoinHandle<()>>> {
         let join_handle = if port_id.starts_with("GIT:") {
-            // 模拟终端：kill bash（pty 关闭 → 读线程 EOF 退出）并取读线程 JoinHandle
+            // 模拟终端：kill bash + drop master（关闭 ConPTY → 读线程 EOF 退出）
             if let Some(mut handle) = self.tty_sim_ports.remove(port_id) {
                 handle.running.store(false, Ordering::Relaxed);
                 handle.kill();
+                // issue #11（断线卡死修复）：drop master → 关闭 ConPTY
+                // （ClosePseudoConsole）→ 输出管道写端关闭 → 读线程 read() 解除
+                // 阻塞退出——否则读线程永久阻塞在 ConPTY 读上，close_serial_port
+                // 的 join 永不返回（同步命令在主线程执行 → 应用卡死）。
+                handle.master = None;
                 log::info!("TTY sim port closed: {}", port_id);
                 handle.read_thread.take()
             } else {

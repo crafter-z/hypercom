@@ -29,14 +29,14 @@ pub struct TtySimPortHandle {
     pub running: Arc<AtomicBool>,
     /// 写句柄（pty master 的 writer，TX 路径独占；锁内 write）
     pub writer: Option<Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
-    /// pty master 自身（writer 已 take 走，master 只用 resize；锁内 resize）
+    /// pty master 自身（writer 已 take 走，master 只用 resize；锁内 resize）。
+    /// 关闭端口时置 None → drop 该 Arc → ConPTY 关闭（ClosePseudoConsole）→
+    /// 输出管道写端关闭 → 读线程 read() 解除阻塞退出（断线卡死修复，issue #11）。
     pub master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     /// bash 子进程（kill 时 drop 并终止）
     pub child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// 读线程（pty stdout → serial:data，退出时发 disconnected）
     pub read_thread: Option<thread::JoinHandle<()>>,
-    /// 当前 pty 尺寸（cols, rows）：resize 时更新；读线程应答 DSR（\x1b[6n）用
-    pub size: Arc<Mutex<(u16, u16)>>,
 }
 
 impl TtySimPortHandle {
@@ -63,11 +63,6 @@ impl TtySimPortHandle {
 
     /// 调整 pty 尺寸（全屏应用 vim/top 需要正确 cols/rows 才会触发对端重绘）。
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
-        // 先更新共享尺寸（读线程应答 DSR 用），再 resize pty。
-        *self
-            .size
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))? = (cols, rows);
         let master = self
             .master
             .as_ref()
@@ -156,14 +151,12 @@ pub(crate) fn spawn_bash(
 
     let master_arc = Arc::new(Mutex::new(master));
     let writer_arc = Arc::new(Mutex::new(writer));
-    let size_arc = Arc::new(Mutex::new((cols, rows)));
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
     let thread_port_id = port_id.to_string();
     let app_handle_clone = app_handle.clone();
     let writer_clone = Arc::clone(&writer_arc);
-    let size_clone = Arc::clone(&size_arc);
 
     let read_thread = thread::spawn(move || {
         let port_id = thread_port_id;
@@ -181,14 +174,14 @@ pub(crate) fn spawn_bash(
                     crate::serial::emit_data_event(&app_handle_clone, &port_id, "RX", chunk, false);
                     // DSR 应答（issue #11）：bash/readline 启动时查询光标位置
                     // （\x1b[6n）并阻塞等待应答——TRX 模式没有终端模拟器，后端必须
-                    // 应答 \x1b[rows;colsR，否则 bash 永不处理输入（发送面板命令
-                    // 全部无响应）。TTY 模式由 xterm 自动应答，前端 TtyView 已对
-                    // GIT: 端口过滤 xterm 的应答，保证 pty 输入只收到一次应答。
+                    // 应答否则 bash 永不处理输入（发送面板命令全部无响应）。应答
+                    // \x1b[1;1R（新建会话的真实光标位置，与真实终端一致）而非
+                    // 终端尺寸——按尺寸应答会把提示符画到右下角。TTY 模式由 xterm
+                    // 自动应答，前端 TtyView 已对 GIT: 端口过滤 xterm 的应答，
+                    // 保证 pty 输入只收到一次应答。
                     if scan_dsr(&mut dsr_tail, chunk) {
-                        let (rows, cols) = *size_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        let resp = format!("\x1b[{};{}R", rows, cols);
                         if let Ok(mut w) = writer_clone.lock() {
-                            let _ = w.write_all(resp.as_bytes());
+                            let _ = w.write_all(b"\x1b[1;1R");
                         }
                     }
                 }
@@ -217,7 +210,6 @@ pub(crate) fn spawn_bash(
         master: Some(master_arc),
         child: Some(child),
         read_thread: Some(read_thread),
-        size: size_arc,
     })
 }
 
@@ -256,7 +248,6 @@ mod tests {
             master: None,
             child: None,
             read_thread: None,
-            size: Arc::new(Mutex::new((80, 24))),
         }
     }
 
@@ -315,7 +306,7 @@ mod tests {
         assert!(tail.len() <= 3, "tail 最多保留 3 字节：{:?}", tail);
     }
 
-    #[test]
+#[test]
     fn scan_dsr_keeps_at_most_three_tail_bytes() {
         let mut tail = Vec::new();
         for i in 0..10u8 {
