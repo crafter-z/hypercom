@@ -26,6 +26,9 @@ serde_json = "1"
 # 串口通信
 serialport = "4"
 
+# 伪终端（模拟终端 git bash pty，issue #11；Windows = ConPTY，无需 feature）
+portable-pty = "0.9"
+
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 

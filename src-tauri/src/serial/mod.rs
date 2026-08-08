@@ -22,6 +22,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::OpenPortArgs;
 
+pub(crate) mod tty_sim;
+use tty_sim::TtySimPortHandle;
+
 // ==================== 公共类型 ====================
 
 /// 串口信息（返回给前端）
@@ -261,7 +264,8 @@ fn parse_flow_control(flow: &str) -> serialport::FlowControl {
 
 /// Emit a serial data event to the frontend and write to the log file.
 /// Called from spawned threads (real port reader, sim port echo, sim port heartbeat).
-fn emit_data_event(
+/// `pub(crate)`：tty_sim 模拟终端读线程（issue #11）也经此派发 RX 事件。
+pub(crate) fn emit_data_event(
     app_handle: &tauri::AppHandle,
     port_id: &str,
     direction: &str,
@@ -302,8 +306,12 @@ pub struct SerialManager {
     ports: HashMap<String, SerialPortHandle>,
     /// 模拟串口集合
     pub sim_ports: HashMap<String, SimPortHandle>,
+    /// 模拟终端（git bash pty）集合，issue #11
+    pub tty_sim_ports: HashMap<String, TtySimPortHandle>,
     /// 是否启用模拟模式
     simulate: bool,
+    /// 是否启用模拟终端（git bash pty，仅 debug，issue #11）
+    pub gitbash_sim: bool,
     /// Tauri AppHandle，用于事件推送
     app_handle: Option<AppHandle>,
     /// 上次成功连接的参数，用于自动重连
@@ -315,7 +323,9 @@ impl SerialManager {
         Self {
             ports: HashMap::new(),
             sim_ports: HashMap::new(),
+            tty_sim_ports: HashMap::new(),
             simulate: false,
+            gitbash_sim: false,
             app_handle: None,
             last_params: HashMap::new(),
         }
@@ -329,6 +339,12 @@ impl SerialManager {
     /// 启用/禁用模拟模式
     pub fn set_simulate(&mut self, on: bool) {
         self.simulate = on;
+    }
+
+    /// 启用/禁用模拟终端（git bash pty，issue #11）。
+    /// 仅 debug 构建可用——命令层（commands/tty_sim.rs）已在 release 拒绝。
+    pub fn set_gitbash_sim(&mut self, on: bool) {
+        self.gitbash_sim = on;
     }
 
     /// 枚举系统可用串口
@@ -365,12 +381,24 @@ impl SerialManager {
             });
         }
 
+        if self.gitbash_sim {
+            result.push(PortInfo {
+                id: "GIT:BASH".to_string(),
+                name: "GIT:BASH (git bash 模拟终端)".to_string(),
+                port_type: "sim".to_string(),
+                manufacturer: None,
+                product: None,
+            });
+        }
+
         Ok(result)
     }
 
     /// 打开串口（自动判断真实/模拟）
     pub fn open_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        if args.port_id.starts_with("SIM:") {
+        if args.port_id.starts_with("GIT:") {
+            self.open_tty_sim_port(args)
+        } else if args.port_id.starts_with("SIM:") {
             self.open_sim_port(args)
         } else {
             self.open_real_port(args)
@@ -612,12 +640,57 @@ impl SerialManager {
         Ok(())
     }
 
+    /// 打开模拟终端端口（git bash pty，issue #11）。
+    /// 仅 debug 构建可用（命令层已在 release 拒绝）；spawn_bash 失败（git bash
+    /// 未安装等）时干净报错，不在 tty_sim_ports 留下游离句柄。
+    fn open_tty_sim_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
+        let app_handle = self
+            .app_handle
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
+            .clone();
+
+        // 陈旧句柄守卫（与 open_sim_port 同形）：存活句柄报错，死线程句柄移除。
+        let stale_alive = self
+            .tty_sim_ports
+            .get(&args.port_id)
+            .map(|h| h.running.load(Ordering::Relaxed))
+            .unwrap_or(false);
+        if stale_alive {
+            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
+        }
+        self.tty_sim_ports.remove(&args.port_id);
+
+        let handle = crate::serial::tty_sim::spawn_bash(&app_handle, &args.port_id)?;
+
+        // 发送连接成功事件
+        let status_event = SerialStatusEvent {
+            port_id: args.port_id.clone(),
+            status: "connected".to_string(),
+        };
+        let _ = app_handle.emit("serial:status", status_event);
+
+        self.tty_sim_ports.insert(args.port_id, handle);
+        log::info!("TTY sim port opened: GIT:BASH");
+        Ok(())
+    }
+
     /// 关闭串口（真实或模拟）。
     /// 停止读取线程并返回其 JoinHandle（若有），由调用方在释放 serial_manager
     /// 锁之后 join——join 最长可阻塞约 100ms（读取超时），不能在持锁期间进行，
     /// 否则会卡住所有其他串口命令。
     pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<thread::JoinHandle<()>>> {
-        let join_handle = if port_id.starts_with("SIM:") {
+        let join_handle = if port_id.starts_with("GIT:") {
+            // 模拟终端：kill bash（pty 关闭 → 读线程 EOF 退出）并取读线程 JoinHandle
+            if let Some(mut handle) = self.tty_sim_ports.remove(port_id) {
+                handle.running.store(false, Ordering::Relaxed);
+                handle.kill();
+                log::info!("TTY sim port closed: {}", port_id);
+                handle.read_thread.take()
+            } else {
+                None
+            }
+        } else if port_id.starts_with("SIM:") {
             if let Some(mut handle) = self.sim_ports.remove(port_id) {
                 handle.running.store(false, Ordering::Relaxed);
                 let _ = handle.tx.send(SimMessage::Stop);
@@ -641,7 +714,7 @@ impl SerialManager {
     /// 注意：此方法会阻塞直到旧读取线程退出（最长约 100ms），不能在持有
     /// serial_manager 锁时调用——调用方（commands/serial.rs）已在锁外 join。
     pub fn attempt_reconnect(&mut self, port_id: &str) -> anyhow::Result<()> {
-        if port_id.starts_with("SIM:") {
+        if port_id.starts_with("SIM:") || port_id.starts_with("GIT:") {
             return Err(anyhow::anyhow!("Cannot reconnect simulation port"));
         }
 
@@ -686,6 +759,16 @@ impl SerialManager {
         is_hex: bool,
         append_line_ending: &str,
     ) -> anyhow::Result<usize> {
+        // 模拟终端（git bash pty）：直接写 pty stdin（writer 锁内完成，非阻塞）。
+        if port_id.starts_with("GIT:") {
+            let handle = self
+                .tty_sim_ports
+                .get(port_id)
+                .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
+            let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
+            let n = handle.write(&bytes)?;
+            return Ok(n);
+        }
         // 模拟串口：通过 channel 发送，由读取线程回显
         if port_id.starts_with("SIM:") {
             let handle = self
@@ -746,6 +829,15 @@ impl SerialManager {
     /// 注意：真实路径在调用方持有的全局锁内写，commands/serial.rs 的
     /// `send_file` 已改用 `get_write_handle` 两段式（锁外写）。
     pub fn write_raw(&self, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
+        // 模拟终端（git bash pty）：直接写 pty stdin（原始字节，不做 HEX 解析）
+        if port_id.starts_with("GIT:") {
+            let handle = self
+                .tty_sim_ports
+                .get(port_id)
+                .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
+            let n = handle.write(bytes)?;
+            return Ok(n);
+        }
         if port_id.starts_with("SIM:") {
             let handle = self
                 .sim_ports
@@ -859,6 +951,16 @@ impl SerialManager {
     pub fn get_last_params(&self, port_id: &str) -> Option<OpenPortArgs> {
         self.last_params.get(port_id).cloned()
     }
+
+    /// 调整模拟终端（git bash pty）的尺寸（issue #11）。
+    /// 前端 TTY 视图（xterm.js）随容器 fit() 后调用，全屏应用据此重绘。
+    pub fn resize_tty_sim(&self, port_id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let handle = self
+            .tty_sim_ports
+            .get(port_id)
+            .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
+        handle.resize(cols, rows)
+    }
 }
 
 impl Drop for SerialManager {
@@ -871,6 +973,11 @@ impl Drop for SerialManager {
         for h in self.sim_ports.values() {
             h.running.store(false, Ordering::Relaxed);
             let _ = h.tx.send(SimMessage::Stop);
+        }
+        // 模拟终端：kill bash 子进程，让读线程在 pty 关闭后退出（进程退出回收线程）
+        for h in self.tty_sim_ports.values_mut() {
+            h.running.store(false, Ordering::Relaxed);
+            h.kill();
         }
     }
 }
@@ -1148,6 +1255,45 @@ mod tests {
         assert!(real_err.contains("Port not found"), "{real_err}");
         let sim_err = m.write_raw("SIM:x", b"x").unwrap_err().to_string();
         assert!(sim_err.contains("Sim port not found"), "{sim_err}");
+    }
+
+    // ---------- 模拟终端错误路径（issue #11）----------
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn send_data_errors_on_missing_git_port() {
+        let m = SerialManager::new();
+        let err = m
+            .send_data("GIT:BASH", "x", false, "None")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TTY sim port not found"), "{err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn write_raw_errors_on_missing_git_port() {
+        let m = SerialManager::new();
+        let err = m.write_raw("GIT:BASH", b"x").unwrap_err().to_string();
+        assert!(err.contains("TTY sim port not found"), "{err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn resize_tty_sim_errors_on_missing_port() {
+        let m = SerialManager::new();
+        let err = m
+            .resize_tty_sim("GIT:BASH", 80, 24)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TTY sim port not found"), "{err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn close_port_is_idempotent_on_missing_git_port() {
+        let mut m = SerialManager::new();
+        assert!(m.close_port("GIT:BASH").unwrap().is_none());
     }
 
     #[cfg(not(target_os = "windows"))]

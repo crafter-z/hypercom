@@ -150,6 +150,10 @@ pub fn run() {
             // ===== 模拟模式命令 =====
             commands::enable_simulation,
             commands::disable_simulation,
+            // ===== 模拟终端命令（git bash，仅 debug，issue #11）=====
+            commands::enable_gitbash_sim,
+            commands::disable_gitbash_sim,
+            commands::resize_gitbash_sim,
             // ===== 配置相关命令 =====
             commands::get_config,
             commands::set_config,

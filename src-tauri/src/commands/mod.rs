@@ -11,6 +11,7 @@ mod serial;
 mod simulation;
 mod storage;
 mod system_cmds;
+mod tty_sim;
 
 pub use config::*;
 pub use diag::*;
@@ -21,6 +22,7 @@ pub use serial::*;
 pub use simulation::*;
 pub use storage::*;
 pub use system_cmds::*;
+pub use tty_sim::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {

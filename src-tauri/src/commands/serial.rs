@@ -109,8 +109,9 @@ pub async fn send_serial_data(
             let manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            if port_id.starts_with("SIM:") {
-                // SIM 端口：channel 发送非阻塞，锁内完成即可。
+            if port_id.starts_with("SIM:") || port_id.starts_with("GIT:") {
+                // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成即可
+                // （GIT: 模拟终端 pty stdin 写，issue #11）。
                 manager
                     .send_data(&port_id, &data, is_hex, &append_line_ending)
                     .map_err(|e| {
@@ -226,8 +227,9 @@ pub async fn send_file(
                     .serial_manager
                     .lock()
                     .map_err(|e| CommandError::Lock(e.to_string()))?;
-                if args.port_id.starts_with("SIM:") {
-                    // SIM：channel 发送非阻塞，锁内完成。
+                if args.port_id.starts_with("SIM:") || args.port_id.starts_with("GIT:") {
+                    // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成
+                    // （GIT: 模拟终端 pty stdin 写，issue #11）。
                     manager
                         .write_raw(&args.port_id, chunk)
                         .map_err(|e| CommandError::Serial(e.to_string()))
