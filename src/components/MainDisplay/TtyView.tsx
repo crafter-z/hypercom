@@ -57,6 +57,11 @@ const TtyView: React.FC<TtyViewProps> = ({ portId }) => {
 
     // TX：用户键入/粘贴 → 发送到串口（无本地回显，由对端 echo）。
     const onDataDisposable = term.onData((data) => {
+      // issue #11：GIT:BASH 模拟终端的 DSR（\x1b[6n 光标位置查询）由后端应答
+      // （TRX 模式没有终端模拟器，后端必须应答 bash 才不阻塞）；xterm 也会自动
+      // 应答 \x1b[row;colR——对 GIT: 端口过滤掉 xterm 的应答，避免 pty 收到双应答
+      // （后端应答使用的 pty 尺寸已与 xterm 尺寸同步，数值一致）。
+      if (portId.startsWith('GIT:') && /^\x1b\[\d+;\d+R$/.test(data)) return;
       ttyService.send(portId, data);
     });
     // issue #11：onResize 必须在 open/fit **之前**注册——初始 fit 把 xterm 从

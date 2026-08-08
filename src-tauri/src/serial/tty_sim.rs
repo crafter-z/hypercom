@@ -11,7 +11,7 @@
 //! 前端 `import.meta.env.DEV` 隐藏 UI，双层门控；本模块本身不 gate（release
 //! 编译但不暴露入口，命令层已拒绝）。
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -35,6 +35,8 @@ pub struct TtySimPortHandle {
     pub child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// 读线程（pty stdout → serial:data，退出时发 disconnected）
     pub read_thread: Option<thread::JoinHandle<()>>,
+    /// 当前 pty 尺寸（cols, rows）：resize 时更新；读线程应答 DSR（\x1b[6n）用
+    pub size: Arc<Mutex<(u16, u16)>>,
 }
 
 impl TtySimPortHandle {
@@ -61,6 +63,11 @@ impl TtySimPortHandle {
 
     /// 调整 pty 尺寸（全屏应用 vim/top 需要正确 cols/rows 才会触发对端重绘）。
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        // 先更新共享尺寸（读线程应答 DSR 用），再 resize pty。
+        *self
+            .size
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))? = (cols, rows);
         let master = self
             .master
             .as_ref()
@@ -149,15 +156,20 @@ pub(crate) fn spawn_bash(
 
     let master_arc = Arc::new(Mutex::new(master));
     let writer_arc = Arc::new(Mutex::new(writer));
+    let size_arc = Arc::new(Mutex::new((cols, rows)));
 
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
     let thread_port_id = port_id.to_string();
     let app_handle_clone = app_handle.clone();
+    let writer_clone = Arc::clone(&writer_arc);
+    let size_clone = Arc::clone(&size_arc);
 
     let read_thread = thread::spawn(move || {
         let port_id = thread_port_id;
         let mut buf = [0u8; 4096];
+        // DSR 序列跨 chunk 的残片缓冲（\x1b[6n 占 4 字节，可能被事件切分）
+        let mut dsr_tail: Vec<u8> = Vec::new();
         loop {
             if !running_clone.load(Ordering::Relaxed) {
                 break;
@@ -165,7 +177,20 @@ pub(crate) fn spawn_bash(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF（bash 退出 / pty 关闭）
                 Ok(n) => {
-                    crate::serial::emit_data_event(&app_handle_clone, &port_id, "RX", &buf[..n], false);
+                    let chunk = &buf[..n];
+                    crate::serial::emit_data_event(&app_handle_clone, &port_id, "RX", chunk, false);
+                    // DSR 应答（issue #11）：bash/readline 启动时查询光标位置
+                    // （\x1b[6n）并阻塞等待应答——TRX 模式没有终端模拟器，后端必须
+                    // 应答 \x1b[rows;colsR，否则 bash 永不处理输入（发送面板命令
+                    // 全部无响应）。TTY 模式由 xterm 自动应答，前端 TtyView 已对
+                    // GIT: 端口过滤 xterm 的应答，保证 pty 输入只收到一次应答。
+                    if scan_dsr(&mut dsr_tail, chunk) {
+                        let (rows, cols) = *size_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let resp = format!("\x1b[{};{}R", rows, cols);
+                        if let Ok(mut w) = writer_clone.lock() {
+                            let _ = w.write_all(resp.as_bytes());
+                        }
+                    }
                 }
                 // 超时是正常现象（pty 无数据可读），继续等待；其它错误退出。
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
@@ -192,7 +217,26 @@ pub(crate) fn spawn_bash(
         master: Some(master_arc),
         child: Some(child),
         read_thread: Some(read_thread),
+        size: size_arc,
     })
+}
+
+/// 在 (tail + chunk) 拼接流中检测 `\x1b[6n`（DSR 光标位置查询）。
+/// 找到返回 true 并清空 tail；未找到则把 chunk 末尾不足序列长度的字节存入 tail
+/// 供下一次拼接（跨 chunk 的序列能正确识别）。纯函数，便于单测。
+fn scan_dsr(tail: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    const DSR: &[u8] = b"\x1b[6n";
+    tail.extend_from_slice(chunk);
+    if tail.windows(DSR.len()).any(|w| w == DSR) {
+        tail.clear();
+        return true;
+    }
+    // 保留末尾最多 len-1 字节（序列可能跨 chunk）
+    let keep = tail.len().min(DSR.len() - 1);
+    if keep < tail.len() {
+        tail.drain(..tail.len() - keep);
+    }
+    false
 }
 
 #[cfg(test)]
@@ -201,7 +245,7 @@ mod tests {
     // portable-pty FFI 拉进 *测试* 二进制。构造空句柄（None 字段）不触碰 FFI，
     // 因此这些错误路径测试在 Windows 上也能运行。
     use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::TtySimPortHandle;
 
@@ -212,6 +256,7 @@ mod tests {
             master: None,
             child: None,
             read_thread: None,
+            size: Arc::new(Mutex::new((80, 24))),
         }
     }
 
@@ -233,4 +278,50 @@ mod tests {
         let handle = empty_handle();
         assert!(handle.resize(80, 24).is_err());
     }
+
+    // ---------- scan_dsr（纯函数，各平台可运行）----------
+
+    #[test]
+    fn scan_dsr_finds_whole_sequence_in_chunk() {
+        let mut tail = Vec::new();
+        assert!(super::scan_dsr(&mut tail, b"hello\x1b[6nworld"));
+        assert!(tail.is_empty(), "找到后应清空 tail");
+    }
+
+    #[test]
+    fn scan_dsr_handles_sequence_split_across_chunks() {
+        let mut tail = Vec::new();
+        // 序列被切成两半：\x1b[ 和 6n
+        assert!(!super::scan_dsr(&mut tail, b"\x1b["));
+        assert_eq!(tail, b"\x1b[", "未找到时应保留末尾残片");
+        assert!(super::scan_dsr(&mut tail, b"6n"), "跨 chunk 拼接后应识别");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn scan_dsr_handles_sequence_split_into_three_chunks() {
+        let mut tail = Vec::new();
+        assert!(!super::scan_dsr(&mut tail, b"\x1b"));
+        assert!(!super::scan_dsr(&mut tail, b"[6"));
+        assert!(super::scan_dsr(&mut tail, b"n"), "三段拼接后应识别");
+    }
+
+    #[test]
+    fn scan_dsr_ignores_unrelated_escape_sequences() {
+        let mut tail = Vec::new();
+        // \x1b[2J（清屏）等其它 CSI 序列不应误判为 DSR
+        assert!(!super::scan_dsr(&mut tail, b"\x1b[2J\x1b[31m"));
+        assert!(!super::scan_dsr(&mut tail, b"plain text"));
+        assert!(tail.len() <= 3, "tail 最多保留 3 字节：{:?}", tail);
+    }
+
+    #[test]
+    fn scan_dsr_keeps_at_most_three_tail_bytes() {
+        let mut tail = Vec::new();
+        for i in 0..10u8 {
+            let _ = super::scan_dsr(&mut tail, &[i]);
+            assert!(tail.len() <= 3, "tail 不应超过 3 字节（第 {} 次）", i);
+        }
+    }
+
 }
