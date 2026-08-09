@@ -6,6 +6,18 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-08 0.5.0 发布后反馈：GIT:BASH 快捷发送多执行一行空命令——TTY 写 pty 回车归一)
+
+> 验证: `cargo check` 0 错 0 警告, `cargo test --lib` 123/123, `npx tsc --noEmit` 0 错。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `serial/mod.rs` | GIT:BASH（模拟 TTY）快捷发送后**多执行一行空命令**（0.5.0 发布后反馈）：快捷发送按命令集行结束符发送，默认 `\r\n`——pty 行规程（ICRNL）把 `\r` 转成 `\n`，bash 收到 `cmd\n\n`（**两个换行**）：执行完命令还多收到一个空行回车 | `SerialManager::send_data` GIT: 分支行结束符归一：新纯函数 `normalize_tty_line_ending`——`\r\n` → `\r`（真实终端 Enter，ICRNL 转回单个 `\n`），`\r`/`\n`/`None` 原样保留；覆盖快捷发送/循环发送/触发自动回复/弹出窗全部 TX 路径（均经 `send_data`）；`build_tx_bytes` 与日志字节同步归一 |
+
+架构变化：无（后端发送路径内归一，前端零改动）。
+
+测试新增：`normalize_tty_line_ending` 映射 1 例 + 归一后实际写入字节 1 例。
+
 ## 已修复 (2026-08-08 issue #11 复审修复 + 会话跨标签保留：TTY 模式持久化断路 · 字体切换清空缓冲 · disable 同步 join · 断线解码器残留 · resize 取整 · 会话跨标签保留)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 557/557 (28 files), `cargo check` 0 错 0 警告, `cargo test --lib` 121/121。

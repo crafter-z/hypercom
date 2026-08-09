@@ -144,7 +144,7 @@ xterm 宿主组件，每端口一个：
 - `sendToPort` 增加**模式感知分支**（一个函数内，薄适配）：
   - TTY 模式：**跳过 TX 回显**（远端 echo，避免重复）→ 只发字节 + 更新流量统计/发送历史。
   - TRX 模式：现有逻辑不变。
-- 命令 `appendLineEnding` 默认 `\r`（shell 回车）由命令集配置决定，不改代码。
+- 命令 `appendLineEnding` 由命令集配置决定，但 **TTY 端口发送时后端做回车归一**（2026-08-08 修复）：pty 行规程（ICRNL）会把 `\r` 转成 `\n`——`\r\n` 会变成**两个换行**，bash 执行完命令后还多收到一个空行（「快捷发送后多执行一行空命令」）。`SerialManager::send_data` 的 GIT: 分支把 `\r\n` 归一为单个 `\r`（真实终端 Enter），`\r`/`\n`/`None` 原样保留；纯函数 `normalize_tty_line_ending` + 单测。
 - 时序：TTY 模式无 TX 回显行，无需像 TRX 那样 `flushNow` 排 RX 队列；命令发出后由对端 echo 进 xterm，天然有序。
 
 ---

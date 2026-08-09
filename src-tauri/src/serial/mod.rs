@@ -151,6 +151,20 @@ pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
     Ok(result)
 }
 
+/// 模拟终端（git bash pty，issue #11）发送时的行结束符归一。
+///
+/// pty 行规程（ICRNL）会把输入里的 `\r` 转成 `\n`——因此对 TTY 类端口发送
+/// `\r\n` 会变成**两个**换行：bash 执行完命令后还多收到一个空行，表现为
+/// 「快捷发送后额外多执行一行空命令」。TTY 语义下回车统一为单个 `\r`
+/// （真实终端 Enter 发出的就是 `\r`）；`\r`/`\n`/`None` 原样保留。
+fn normalize_tty_line_ending(append_line_ending: &str) -> &str {
+    if append_line_ending == "\\r\\n" {
+        "\\r"
+    } else {
+        append_line_ending
+    }
+}
+
 /// 计算"实际写入串口"的字节序列——发送路径与日志路径的唯一事实来源。
 /// HEX 模式解析十六进制字符串（忽略行结束符）；文本模式附加行结束符。
 pub fn build_tx_bytes(
@@ -771,7 +785,9 @@ impl SerialManager {
                 .tty_sim_ports
                 .get(port_id)
                 .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
-            let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
+            // issue #11：行结束符归一——pty 行规程（ICRNL）把 `\r` 转成 `\n`，
+            // `\r\n` 会变成两个换行（快捷发送后多执行一行空命令），统一为单个 `\r`。
+            let bytes = build_tx_bytes(data, is_hex, normalize_tty_line_ending(append_line_ending))?;
             let n = handle.write(&bytes)?;
             return Ok(n);
         }
@@ -994,7 +1010,7 @@ mod tests {
     // 路径）拉进 *测试* 二进制的链接闭包，导致 Windows 上 cargo test 的 harness
     // 因缺少应用清单而 0xc0000139 加载失败。这里仅按需导入：纯函数测试在 Windows
     // 也能跑；引用 serialport 类型 / 管理器的测试所需导入随测试本身仅在非 Windows 启用。
-    use super::{build_tx_bytes, parse_hex_string, write_all_with_deadline};
+    use super::{build_tx_bytes, normalize_tty_line_ending, parse_hex_string, write_all_with_deadline};
     use std::time::Duration;
     #[cfg(not(target_os = "windows"))]
     use super::{
@@ -1056,6 +1072,34 @@ mod tests {
     fn build_tx_bytes_hex_ignores_line_ending_and_validates() {
         assert_eq!(build_tx_bytes("48 65", true, "\\r\\n").unwrap(), vec![0x48, 0x65]);
         assert!(build_tx_bytes("4", true, "None").is_err());
+    }
+
+    // ---------- normalize_tty_line_ending（issue #11：快捷发送后多执行一行空命令）----------
+
+    #[test]
+    fn tty_line_ending_crlf_normalizes_to_single_cr() {
+        // pty 行规程（ICRNL）把 \r 转成 \n：`\r\n` 会变成两个换行 → bash 多执行
+        // 一行空命令。TTY 发送 `\r\n` 必须归一为单个 `\r`（真实终端 Enter）。
+        assert_eq!(normalize_tty_line_ending("\\r\\n"), "\\r");
+        assert_eq!(normalize_tty_line_ending("\\r"), "\\r");
+        assert_eq!(normalize_tty_line_ending("\\n"), "\\n");
+        assert_eq!(normalize_tty_line_ending("None"), "None");
+    }
+
+    #[test]
+    fn tty_send_bytes_after_normalization_are_single_terminated() {
+        // 归一后的实际写入字节：`echo hi\r\n` → `echo hi\r`（一个回车，不再双换行）。
+        let bytes = build_tx_bytes("echo hi", false, normalize_tty_line_ending("\\r\\n")).unwrap();
+        assert_eq!(bytes, b"echo hi\r");
+        // `\n` 与 `None` 不受归一影响。
+        assert_eq!(
+            build_tx_bytes("echo hi", false, normalize_tty_line_ending("\\n")).unwrap(),
+            b"echo hi\n"
+        );
+        assert_eq!(
+            build_tx_bytes("echo hi", false, normalize_tty_line_ending("None")).unwrap(),
+            b"echo hi"
+        );
     }
 
     // ---------- write_all_with_deadline（纯 std mock，Windows 亦可运行）----------
