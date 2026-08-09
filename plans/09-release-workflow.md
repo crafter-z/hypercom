@@ -127,9 +127,11 @@ GitHub 网页上的 release 说明，和 updater 弹窗里显示的更新说明�
 
 机制：
 
-- workflow 在构建前用 `read release notes` step 把 `RELEASE_NOTES.md` 读成 step output，传给 `tauri-action` 的 `releaseBody`。
+- workflow 在构建前用 `read release notes` step 提取 `RELEASE_NOTES.md` **顶部当前版本章节**（`awk '/^# HyperCom /{n++} n <= 1 {print} n > 1 {exit}'`，截至下一个 `# HyperCom v` 头为止）作为 step output，传给 `tauri-action` 的 `releaseBody`。
 - `tauri-action` 的 `releaseBody` **同时**驱动两处：① GitHub Release 的 body（网页 notes）；② 写入 `latest.json` 的 `notes` 字段（updater 弹窗文案）。
 - 因此发版时**只需维护 `RELEASE_NOTES.md` 一个文件**，构建后网页 notes 与弹窗文案自动一致，Publish 时也无需再手动填 notes。
+
+> **release body / updater 弹窗 = 仅当前版本章节**（2026-08-09 起）。`RELEASE_NOTES.md` 是累积式——旧版本章节保留在文件里作为**历史归档**，但**不会**进入 release 描述与 updater 弹窗（此前 `cat` 全文件会把全部历史版本带进 body，0.5.1 及更早版本受影响）。如需把历史也带进 release 描述，改该 step 为 `cat RELEASE_NOTES.md` 即可。
 
 注意点：
 
