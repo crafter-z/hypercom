@@ -57,7 +57,11 @@ jobs:
         run: |
           {
             echo "body<<RELEASE_NOTES_EOF"
-            cat RELEASE_NOTES.md
+            # 只取顶部**当前版本**章节（截至下一个 `# HyperCom v` 头之前）：
+            # RELEASE_NOTES.md 是累积式（新章节加在顶部、旧版本保留），`cat` 全文件
+            # 会把所有历史版本都带进 release 描述与 updater 弹窗（见
+            # plans/09-release-workflow.md「Release notes 与 updater 弹窗文案」）。
+            awk '/^# HyperCom /{n++} n <= 1 {print} n > 1 {exit}' RELEASE_NOTES.md
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
