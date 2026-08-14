@@ -429,15 +429,42 @@ impl SerialManager {
 
         // 陈旧句柄守卫：若已有存活句柄则干净报错（避免 insert 泄漏游离读取线程）；
         // 若仅有死线程的陈旧句柄则移除之，释放 OS 端口，重开不再 "access denied"。
+        // 热插拔（issue）：USB 拔出后读线程可能因空闲而永不报错（read 一直
+        // timeout），running 停在 true——此时若端口已从系统枚举消失，说明设备
+        // 已不在，句柄是幽灵活尸。继续报 "already open" 会让用户重插后永远开
+        // 不了（只能重启应用）。交叉核对系统枚举：设备已消失 → 当作陈旧句柄
+        // 回收而非报错；设备仍在系统里 → 才是真正的 "already open"。
         let stale_alive = self
             .ports
             .get(&args.port_id)
             .map(|h| h.running.load(Ordering::Relaxed))
             .unwrap_or(false);
         if stale_alive {
-            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
+            let device_still_present = self
+                .list_ports()?
+                .iter()
+                .any(|p| p.id == args.port_id);
+            if device_still_present {
+                return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
+            }
+            log::warn!(
+                "Port {} stale handle detected (device vanished from enumeration); recycling",
+                args.port_id
+            );
+            // 回收幽灵活尸：停线程（读线程会在下一次 read timeout（≤100ms）后
+            // 退出），join 确保 OS 端口句柄在该线程持有的 Arc 被释放后才重开——
+            // 否则旧读线程仍持句柄，紧接的 open() 会 "access denied"（串口 crate
+            // 以 dwShareMode=0 打开，同一 COM 不能二次打开）。join 受 read 超时
+            // 上界约束（≤100ms），且仅在此罕见的热插拔回收路径发生。
+            if let Some(mut h) = self.ports.remove(&args.port_id) {
+                h.running.store(false, Ordering::Relaxed);
+                if let Some(t) = h.read_thread.take() {
+                    let _ = t.join();
+                }
+            }
+        } else {
+            self.ports.remove(&args.port_id);
         }
-        self.ports.remove(&args.port_id);
 
         let mut port = serialport::new(&args.port_id, args.baud_rate)
             .data_bits(parse_data_bits(args.data_bits))

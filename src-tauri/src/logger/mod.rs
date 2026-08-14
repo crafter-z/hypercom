@@ -71,6 +71,14 @@ impl PortLogWriter {
         direction: &str,
         data: &[u8],
     ) -> anyhow::Result<()> {
+        // 空数据不落盘（issue：日志文件大量空日志）——空行在日志里是纯噪音：
+        // - RX：连续分隔符 / 行首行尾分隔符经 LogLineAssembler 产出**空块**，
+        //   直接跳过（否则每行都是 "[ts] RX \n"）；
+        // - TX 空内容：空内容发送 / 只带行结束符的内容（decode 后 trim 为空的
+        //   `\r\n`）同样属于空日志。
+        if data.is_empty() {
+            return Ok(());
+        }
         let prefix = match (self.include_timestamp, self.include_direction) {
             (true, true) => format!("[{}] {} ", timestamp, direction),
             (true, false) => format!("[{}] ", timestamp),
@@ -99,6 +107,10 @@ impl PortLogWriter {
                 let text = decode_bytes(data, &self.encoding)
                     .trim_end_matches(['\r', '\n'])
                     .to_string();
+                // 纯行结束符（如 TX 空内容 + `\r\n`）解码后为空 → 不落盘
+                if text.is_empty() {
+                    return Ok(());
+                }
                 let line = format!("{}{}\n", prefix, text);
                 self.writer.write_all(line.as_bytes())?;
                 line.len()
@@ -599,6 +611,26 @@ impl LogManager {
                     log::warn!("Log close sync_all failed for {}: {}", port_id, e);
                 }
             }
+            // 空日志不落盘（issue：日志文件大量空日志）——连接后没有任何数据
+            // 写入会话（0 字节文件）直接把文件删掉，不给磁盘留空文件。
+            if writer.current_size == 0 {
+                if let Ok(meta) = std::fs::metadata(&writer.file_path) {
+                    if meta.len() == 0 {
+                        match std::fs::remove_file(&writer.file_path) {
+                            Ok(()) => log::info!(
+                                "Log writer closed for {} (empty, file removed)",
+                                port_id
+                            ),
+                            Err(e) => log::warn!(
+                                "Failed to remove empty log file for {}: {}",
+                                port_id,
+                                e
+                            ),
+                        }
+                        return Ok(());
+                    }
+                }
+            }
             log::info!("Log writer closed for {}", port_id);
         }
         Ok(())
@@ -977,12 +1009,13 @@ mod tests {
         mgr.write("COM1", "10:00", "RX", b"should_not_appear\n")
             .unwrap();
         mgr.close_writer("COM1").unwrap();
+        // issue：空日志不落盘 —— 没有任何数据写入（0 字节文件）在关闭时被删除，
+        // 不应再出现在日志列表里（也不含被短路的数据）。
         let files = mgr.list_files().unwrap();
-        let content = fs::read_to_string(&files[0].path).unwrap();
         assert!(
-            !content.contains("should_not_appear"),
-            "auto_save=false should short-circuit write, but file contains: {:?}",
-            content
+            files.is_empty(),
+            "empty log file must be removed on close (auto-save off -> nothing written), got: {:?}",
+            files
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1477,6 +1510,98 @@ mod rx_log_tests {
         mgr.close_writer("C1").unwrap();
         let content = read_log(&mgr, "C1");
         assert_eq!(content, "bare\n", "expected bare data line: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------- issue：日志文件大量空日志（空行不落盘） ----------
+
+    #[test]
+    fn write_rx_skips_empty_chunks_from_consecutive_separators() {
+        // 连续分隔符 / 行首行尾分隔符会产生**空块**，旧实现把它们写成空日志行
+        // （"[ts] RX \n"）。修复后空块不落盘——日志只含真实内容行。
+        let dir = test_dir("empty_lines");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        // 前导 \r\n（空行）+ hello + 双回车（空行）+ world + 结尾 \r\n（空行）
+        mgr.write_rx("COM1", "10:00:00.000", b"\r\nhello\n\nworld\r\n").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "expected only non-empty lines, got: {content:?}");
+        assert!(lines[0].ends_with("hello"), "got: {content}");
+        assert!(lines[1].ends_with("world"), "got: {content}");
+        // 逐字节检查：无任何"只有前缀"的空白行
+        for line in &lines {
+            let stripped = line.trim_end();
+            let without_prefix = stripped
+                .strip_prefix('[')
+                .and_then(|s| s.split_once("] RX"))
+                .map(|(_, rest)| rest);
+            assert!(
+                !without_prefix.map(str::is_empty).unwrap_or(false),
+                "empty log line written: {:?}",
+                line
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_skips_empty_data_for_all_formats() {
+        // 直写路径（TX 等）：空 data / 只含行结束符的 data 都不落盘
+        let dir = test_dir("empty_write");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:00.000", "TX", b"").unwrap();
+        mgr.write("COM1", "10:00:00.001", "TX", b"\r\n").unwrap();
+        mgr.write("COM1", "10:00:00.002", "TX", b"real").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        assert_eq!(content.lines().count(), 1, "got: {content}");
+        assert!(content.contains("real"), "got: {content}");
+        assert!(!content.contains("TX \n"), "empty TX line written: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_skips_empty_hex_data() {
+        let dir = test_dir("empty_hex");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "hex").unwrap();
+        mgr.write("COM1", "10:00:00.000", "TX", b"").unwrap();
+        mgr.write("COM1", "10:00:00.001", "TX", &[0x48, 0x49]).unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let content = read_log(&mgr, "COM1");
+        assert_eq!(content.lines().count(), 1, "got: {content}");
+        assert!(content.contains("48 49"), "got: {content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_writer_removes_zero_byte_log_file() {
+        // 连接后无任何数据（0 字节文件）→ 关闭时删除，不给磁盘留空日志文件
+        let dir = test_dir("remove_empty");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert!(
+            files.is_empty(),
+            "empty log file should be removed on close, got: {:?}",
+            files
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_writer_keeps_file_that_has_data() {
+        let dir = test_dir("keep_data");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:00.000", "TX", b"data").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 1, "file with data must be kept, got: {:?}", files);
         let _ = fs::remove_dir_all(&dir);
     }
 }
