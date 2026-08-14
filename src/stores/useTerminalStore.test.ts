@@ -395,13 +395,64 @@ describe('memory budget (issue #6-2)', () => {
     useTerminalStore.setState((state) => {
       state.terminals['COM1'].maxBytes = 10_000; // 硬约束不触发
     });
-    const lines: TerminalLine[] = [
-      byteLine('a', 100), byteLine('b', 100), byteLine('c', 100), byteLine('d', 100),
-    ];
+    // 缓冲必须「相当可观」（totalBytes > maxBytes/2）才软裁：12 行 × 600B =
+    // 7200B > 5000B，触发软兜底裁剪
+    const lines: TerminalLine[] = Array.from({ length: 12 }, (_, i) => byteLine(`s${i}`, 600));
     const trimmed = useTerminalStore.getState().appendTerminalLines('COM1', lines);
     expect(trimmed).toBe(true); // 总预算软兜底触发
-    expect(useTerminalStore.getState().terminals['COM1'].lines.map(l => l.id)).toEqual(['c', 'd']);
+    expect(useTerminalStore.getState().terminals['COM1'].lines.map(l => l.id)).toEqual(
+      lines.slice(6).map(l => l.id) // 12 行裁到一半 → 保留后 6 行
+    );
     // 清理：复位系统状态，避免影响其它用例
     useAppStore.getState().setSystemStatus({ memoryUsedMb: 0 });
+  });
+
+  it('does NOT soft-trim a small buffer even when app memory exceeds the budget (half-page refresh fix)', () => {
+    // 复现 issue：多串口压测 RSS 超预算，小缓冲（半页）被反复裁掉——
+    // 软兜底必须跳过不构成内存元凶的小端口缓冲。
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useAppStore.getState().setSystemStatus({ memoryUsedMb: 3000 });
+    useTerminalStore.setState((state) => {
+      state.terminals['COM1'].maxBytes = 10_000;
+    });
+    const lines: TerminalLine[] = [
+      byteLine('a', 100), byteLine('b', 100), byteLine('c', 100), byteLine('d', 100),
+    ]; // 400B << maxBytes/2 (5000B)
+    const trimmed = useTerminalStore.getState().appendTerminalLines('COM1', lines);
+    expect(trimmed).toBe(false); // 小缓冲不裁
+    expect(useTerminalStore.getState().terminals['COM1'].lines.map(l => l.id)).toEqual(['a', 'b', 'c', 'd']);
+    useAppStore.getState().setSystemStatus({ memoryUsedMb: 0 });
+  });
+
+  it('soft total-budget trim is cooldown-gated per port (no repeated halving every batch)', () => {
+    // 用独立端口隔离模块级冷却表（同一文件内多个用例共享 lastSoftTrimAt Map）
+    useTerminalStore.getState().ensureTerminal('COOL');
+    useAppStore.getState().setSystemStatus({ memoryUsedMb: 3000 });
+    useTerminalStore.setState((state) => {
+      state.terminals['COOL'].maxBytes = 10_000;
+    });
+    // 第一批：超过 maxBytes/2 → 触发软裁
+    const batch = (n: number, base: string, size = 600): TerminalLine[] =>
+      Array.from({ length: n }, (_, i) => byteLine(`${base}${i}`, size));
+    const t1 = useTerminalStore.getState().appendTerminalLines('COOL', batch(12, 'a'));
+    expect(t1).toBe(true);
+    // 第二批（同一端口、冷却窗口内）：RSS 仍超预算但冷却未过 → 不再裁
+    const t2 = useTerminalStore.getState().appendTerminalLines('COOL', batch(4, 'b'));
+    expect(t2).toBe(false);
+    useAppStore.getState().setSystemStatus({ memoryUsedMb: 0 });
+  });
+
+  it('hard per-port overBytes still trims immediately (not cooldown-gated)', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.setState((state) => {
+      state.terminals['COM1'].maxBytes = 100;
+    });
+    const append = useTerminalStore.getState().appendTerminalLine;
+    // 硬约束：无论冷却如何，超 maxBytes 立即裁
+    const t1 = append('COM1', byteLine('h1', 60)); // 60 < 100
+    expect(t1).toBe(false);
+    const t2 = append('COM1', byteLine('h2', 60)); // 120 > 100 → 立即裁（保留 1 行）
+    expect(t2).toBe(true);
+    expect(useTerminalStore.getState().terminals['COM1'].lines.map(l => l.id)).toEqual(['h2']);
   });
 });

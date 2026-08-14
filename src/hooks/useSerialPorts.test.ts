@@ -54,6 +54,51 @@ describe('mergePorts', () => {
     expect(mergePorts(incoming, existing).map(p => p.id)).toEqual(['COM1']);
   });
 
+  it('resets a stuck `error` status to disconnected when the port is re-enumerated (hot-plug refresh fix)', () => {
+    // 打开失败后 status 停在 error；端口重新出现在枚举里（重插/恢复）→
+    // 合并结果必须是 disconnected，否则刷新按钮永远救不回报错状态。
+    const existing = [makePort('COM1', { status: 'error' })];
+    const incoming = [makePort('COM1')];
+    const merged = mergePorts(incoming, existing);
+    expect(merged[0].status).toBe('disconnected');
+  });
+
+  it('still carries over connected/connecting status for re-enumerated ports', () => {
+    const existing = [makePort('COM1', { status: 'connecting' })];
+    const incoming = [makePort('COM1')];
+    const merged = mergePorts(incoming, existing);
+    expect(merged[0].status).toBe('connecting');
+  });
+
+  it('drops a ghost connected port after MAX_MISSING_POLLS consecutive misses (hot-plug ghost fix)', () => {
+    // 拔出后端口消失、读线程空闲不报 disconnected，status 停在 connected：
+    // union-back 不能永续保留幽灵端口，超过宽限轮数后必须消失。
+    const ghost = makePort('COM9', { status: 'connected' });
+    const incoming = [makePort('COM1')];
+    // 模拟连续 4 次轮询 COM9 都不在枚举中
+    let existing = [ghost, makePort('COM1')];
+    for (let i = 0; i < 4; i++) {
+      const merged = mergePorts(incoming, existing);
+      // 前 MAX_MISSING_POLLS=3 轮保留，第 4 轮起丢弃
+      const expected = i < 3;
+      expect(merged.some(p => p.id === 'COM9')).toBe(expected);
+      existing = merged;
+    }
+  });
+
+  it('reappearing ghost port resets the missing counter', () => {
+    const ghost = makePort('COM9', { status: 'connected' });
+    let existing = [ghost, makePort('COM1')];
+    // 2 次缺失 → 仍保留
+    existing = mergePorts([makePort('COM1')], existing);
+    existing = mergePorts([makePort('COM1')], existing);
+    expect(existing.some(p => p.id === 'COM9')).toBe(true);
+    // 端口重新出现 → 计数清零，后续缺失重新计时
+    existing = mergePorts([makePort('COM9')], existing);
+    existing = mergePorts([makePort('COM1')], existing);
+    expect(existing.some(p => p.id === 'COM9')).toBe(true);
+  });
+
   it('returns incoming ports as-is when nothing exists yet', () => {
     const incoming = [makePort('COM1'), makePort('COM2')];
     expect(mergePorts(incoming, []).map(p => p.id)).toEqual(['COM1', 'COM2']);

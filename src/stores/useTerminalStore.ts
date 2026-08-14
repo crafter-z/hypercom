@@ -7,6 +7,16 @@ import { useAppStore } from './useAppStore';
 const LINES_PER_BUDGET_MB = 500;
 
 /**
+ * 总预算软兜底裁剪冷却（issue：多串口压测日志只加载半页就被前半页刷新掉）：
+ * `overTotalBudget` 读的是 5s 轮询的应用 RSS 采样，RSS 一旦 ≥ memoryLimitMb 就
+ * 会持续满足——若无冷却，每个 append 批都会把该端口缓冲裁到 50%，高频接收下
+ * 用户视野里"刚加载的半页又被前半页顶掉"的现象反复出现。加每端口冷却后，软
+ * 兜底至多每 10s 触发一次（与 toast 节流同量级），硬约束（bytes/maxLines）不受影响。
+ */
+const SOFT_TRIM_COOLDOWN_MS = 10_000;
+const lastSoftTrimAt = new Map<string, number>();
+
+/**
  * 单行占用字节数：优先 rawData（Uint8Array 长度即真实字节数，O(1)）；
  * 无 rawData 的 TX/TOOL 行退回 content 的 UTF-8 字节数（近似，低频路径可接受）。
  */
@@ -49,21 +59,39 @@ const getConfiguredMaxLines = (): number => {
 };
 
 /**
- * 单端口内存裁剪核心（issue #6-2）：超出【每端口硬约束 maxBytes】或【总预算软
- * 兜底】任一限制后，一次性清除该端口最早的一半屏（批量裁剪，避免每帧裁剪引发
- * 的 re-key 风暴）。返回是否裁剪。纯 state 变更，无副作用——「因内存限制清屏」
- * 的通知由调用方（RxPipeline 接线层）在返回 true 时弹出。
+ * 内存裁剪核心（issue #6-2 + 热插拔压测修复）：返回是否裁剪。纯 state 变更，
+ * 无副作用——「因内存限制清屏」的通知由调用方（RxPipeline 接线层）在返回 true
+ * 时弹出。裁剪时机分两类：
  *
- * 优先级：单端口 200MB 硬约束优先；总预算 2048MB 软兜底——先触发谁先裁谁
- * （本端口正在接收数据、正是内存增长点，总预算超限时裁它最直接）。
+ * 1) 硬约束（本端口字节超 maxBytes / 行数超 maxLines）——立即裁，每次 append
+ *    都检查，触发即裁到 50%。这是每端口真正的上限，必须无条件生效。
+ * 2) 总预算软兜底（应用 RSS ≥ memoryLimitMb）——**不再每个 append 都裁**：
+ *    - 只裁「本端口缓冲已相当可观」（totalBytes > maxBytes 的 50%）的端口——
+ *      小缓冲不是 RSS 超限的元凶，裁它只会让用户看到"半页就被刷掉"。
+ *    - 每端口冷却 `SOFT_TRIM_COOLDOWN_MS`（10s）内不重复软裁——RSS 采样是
+ *      5s 一次、超限后会持续满足，无冷却则高频接收下每批都裁（半页反复被
+ *      前半页顶掉的根因）。
+ *
+ * 优先级不变：每端口硬约束优先；总预算软兜底——先触发谁先裁谁。软兜底冷却
+ * 用模块级 Map（portId → 上次软裁时间戳），与 toast 节流同量级、不随 store 快照。
  */
-function trimIfOverBudget(term: TerminalState): boolean {
+function trimIfOverBudget(portId: string, term: TerminalState): boolean {
   const overPerPort = term.totalBytes > term.maxBytes;
   const overTotalBudget =
     useAppStore.getState().systemStatus.memoryUsedMb > 0 &&
     useAppStore.getState().systemStatus.memoryUsedMb * 1024 * 1024 >= getTotalBudgetBytes();
   if (!overPerPort && !overTotalBudget && term.lines.length <= term.maxLines) {
     return false;
+  }
+
+  if (overTotalBudget && !overPerPort && term.lines.length <= term.maxLines) {
+    // 软兜底路径：本端口缓冲不小 + 冷却窗口内未裁过才裁；否则跳过（下次 append
+    // 再评估）。行数超 maxLines 的硬约束不受冷却限制。
+    if (term.totalBytes <= term.maxBytes / 2) return false;
+    const now = Date.now();
+    const lastAt = lastSoftTrimAt.get(portId) ?? 0;
+    if (now - lastAt < SOFT_TRIM_COOLDOWN_MS) return false;
+    lastSoftTrimAt.set(portId, now);
   }
 
   // 一次性裁到 50%（半屏后的行数必然 ≤ maxLines）
@@ -113,7 +141,7 @@ export const useTerminalStore = create<TerminalStoreState>()(
         if (!term) return;
         term.lines.push(line);
         term.totalBytes += lineBytes(line);
-        trimmed = trimIfOverBudget(term);
+        trimmed = trimIfOverBudget(portId, term);
       });
       return trimmed;
     },
@@ -129,7 +157,7 @@ export const useTerminalStore = create<TerminalStoreState>()(
         let added = 0;
         for (const line of lines) added += lineBytes(line);
         term.totalBytes += added;
-        trimmed = trimIfOverBudget(term);
+        trimmed = trimIfOverBudget(portId, term);
       });
       return trimmed;
     },

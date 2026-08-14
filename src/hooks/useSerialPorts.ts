@@ -8,6 +8,16 @@ import type { SerialPort, PortStatus } from '../types';
 let lastListFailed = false;
 
 /**
+ * 「幽灵」存活端口连续未出现在枚举中的次数（issue：串口热插拔后侧边栏状态
+ * 卡死）：USB 拔出后读线程可能因空闲而永不报错（无 disconnected 事件），store
+ * status 停在 connected，union-back 会把已消失的端口永续插回列表。这里按连续
+ * 缺失轮数限制保留期——容忍瞬时 USB 抖动 / 睡眠恢复，但不允许永久幽灵。
+ */
+const ghostMissingPolls = new Map<string, number>();
+/** 连续缺失 MAX_MISSING_POLLS 轮枚举后放弃保留（3s 轮询 ≈ 9 秒宽限）。 */
+const MAX_MISSING_POLLS = 3;
+
+/**
  * 将后端 PortInfo 映射为前端 SerialPort
  * 后端的 port_type 是 "real"|"virtual"，前端 PortStatus 需要从后端获取或默认 disconnected
  */
@@ -40,9 +50,16 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
   for (const prev of existing) {
     const fresh = incomingMap.get(prev.id);
     if (fresh) {
+      // 端口重新出现在枚举中（热插拔重插 / 上次打开失败后恢复）：`error` 是
+      // 瞬时失败态（openPort 失败写入），新枚举证明端口现在可用——重置为
+      // disconnected，这样「刷新按钮」能真正修复卡死的报错状态，无需重启。
+      // connected / connecting 反映真实会话，必须保留。
+      const status = prev.status === 'error' ? 'disconnected' : prev.status;
+      // 端口仍在枚举中 → 幽灵计数清零
+      ghostMissingPolls.delete(prev.id);
       merged.push({
         ...fresh,
-        status: prev.status,
+        status,
         alias: prev.alias,
         isHidden: prev.isHidden,
         groupId: prev.groupId,
@@ -62,8 +79,19 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
       // (USB glitch / sleep-resume). Dropping a connected/connecting port while
       // its tab/terminal still reference it causes store/backend drift; it
       // would reappear later as 'disconnected'.
-      merged.push(prev);
-      seen.add(prev.id);
+      // issue：串口热插拔「幽灵端口」——拔出/重插后读线程可能不报错，端口从
+      // 枚举消失而 status 停在 connected，无脑 union-back 会永远保留幽灵。
+      // 按连续缺失轮数限制保留期：允许短暂抖动，但拔出后不产生永久幽灵。
+      const missing = (ghostMissingPolls.get(prev.id) ?? 0) + 1;
+      if (missing <= MAX_MISSING_POLLS) {
+        ghostMissingPolls.set(prev.id, missing);
+        merged.push(prev);
+        seen.add(prev.id);
+      } else {
+        // 超过宽限：放弃保留。端口从列表消失符合物理现实，重插 / 重启后
+        // 会重新枚举出现。
+        ghostMissingPolls.delete(prev.id);
+      }
     }
   }
   // 2) Genuinely new ports append at the end in enumeration order.
