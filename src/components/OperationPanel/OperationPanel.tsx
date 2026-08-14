@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
-import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
@@ -28,10 +27,6 @@ const OperationPanel: React.FC = () => {
   // 订阅 baudRate：自定义输入走 ParamsSection 本地 draft，opStore.baudRate 仅在
   // 预设选择 / 输入框失焦提交时更新，订阅不会在逐键输入时重渲染面板。
   const baudRate = useOperationStore(s => s.baudRate);
-  const isLoopSending = useOperationStore(s => s.isLoopSending);
-  const sendCommandSets = useRuleStore(s => s.sendCommandSets);
-  const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
-  const setOpState = useOperationStore(s => s.setOpState);
   const setUIState = useAppStore(s => s.setUIState);
   const clearTerminal = useTerminalStore(s => s.clearTerminal);
   const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
@@ -48,19 +43,11 @@ const OperationPanel: React.FC = () => {
   const isPortError = activePort?.status === 'error';
   const isPortActive = !!activeTabId;
 
-  const activeCommands = sendCommandSets.find(s => s.id === activeSendCommandSetId)?.commands ?? [];
-
-  // Cyclic send state machine (extracted to useCyclicSend hook)
-  useCyclicSend({
-    activeTabId,
-    commands: activeCommands,
-    isLooping: isLoopSending,
-    isPortActive,
-    isConnected,
-    activeSendCommandSetId,
-    sendData,
-    setOpState,
-  });
+  // 每端口独立循环发送引擎（issue #12）：目标端口由 hook 内部绑定——在哪个
+  // 端口上启动就持续发给它，切换标签/窗口聚焦不影响已在运行的循环；运行标志
+  // 存 useOperationStore.cyclicLoops（每端口 Record），SendSection 按钮按当前
+  // 聚焦端口查询状态。
+  useCyclicSend({ sendData });
 
   // 参数同步（issue #4-2）：记录「已应用参数」的所属端口与签名，用于区分
   // 「切换标签」与「参数变更」——切换标签时把该端口的已存参数载入操作面板；

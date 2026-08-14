@@ -72,7 +72,11 @@ const SendSection: React.FC<SendSectionProps> = ({
   const quickSendInlineCount = useAppStore(s => s.config.quickSendInlineCount);
   const encoding = useTerminalStore(s => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
   const setOpState = useOperationStore(s => s.setOpState);
-  const isLoopSending = useOperationStore(s => s.isLoopSending);
+  // issue #12：循环发送为每端口独立状态——按钮按**当前聚焦端口**查询，切换
+  // 标签后按钮自动反映该端口的循环运行态（切回正在循环的端口显示「停止」）。
+  const cyclicLoops = useOperationStore(s => s.cyclicLoops);
+  const setCyclicLoop = useOperationStore(s => s.setCyclicLoop);
+  const isLoopSending = activeTabId ? !!cyclicLoops[activeTabId] : false;
   const sendCommandSets = useRuleStore(s => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore(s => s.activeSendCommandSetId);
   const setActiveSendCommandSetId = useRuleStore(s => s.setActiveSendCommandSetId);
@@ -218,15 +222,18 @@ const SendSection: React.FC<SendSectionProps> = ({
     await sendData(activeTabId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
   };
 
-  // 循环发送开关：启动前若未选中命令集则自动选首个可用集（与快捷发送共用同一激活集）。
+  // 循环发送开关（issue #12）：按**当前聚焦端口**启停该端口的独立循环——
+  // 启动前若未选中命令集则自动选首个可用集（与快捷发送共用同一激活集）；
+  // 停止只影响当前聚焦端口，其它端口已运行的循环不受影响。
   const handleToggleLoop = () => {
+    if (!activeTabId) return;
     if (isLoopSending) {
-      setOpState({ isLoopSending: false });
+      setCyclicLoop(activeTabId, false);
     } else {
       if (!sendCommandSets.find(s => s.id === activeSendCommandSetId) && sendCommandSets.length > 0) {
         setActiveSendCommandSetId(sendCommandSets[0].id);
       }
-      setOpState({ isLoopSending: true });
+      setCyclicLoop(activeTabId, true);
     }
   };
 

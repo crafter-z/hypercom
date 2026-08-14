@@ -67,11 +67,15 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
 
   const ref = useRef({
     timeoutId: null as ReturnType<typeof setTimeout> | null,
+    /** 下一 tick 的预期触发时间（防止窗口被遮挡时 WebView2 节流 setTimeout 链） */
+    nextFireAt: 0,
     currentIdx: 0,
     pendingStart: false,
     stopped: true,
     invalidCount: 0,
     invalidNotified: false,
+    /** tick 正在执行（await onSend 中）——防可见性补发与定时器双触发 */
+    busy: false,
   });
   const runningRef = useRef(false);
   const runLinesRef = useRef<string[]>([]);
@@ -105,6 +109,7 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
         r.currentIdx = 0;
         setCurrentLine(0);
         o.onProgress(0);
+        r.nextFireAt = Date.now() + clampRoundInterval(o.roundIntervalMs);
         r.timeoutId = setTimeout(() => {
           void tick();
         }, clampRoundInterval(o.roundIntervalMs));
@@ -116,6 +121,7 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
     r.currentIdx += 1;
     setCurrentLine(r.currentIdx);
     o.onProgress(r.currentIdx);
+    r.nextFireAt = Date.now() + clampInterval(o.sendIntervalMs);
     r.timeoutId = setTimeout(() => {
       void tick();
     }, clampInterval(o.sendIntervalMs));
@@ -124,42 +130,52 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
   const tick = async () => {
     const o = optsRef.current;
     const r = ref.current;
-    if (r.stopped) return;
-
-    // 首次 tick：此刻 optsRef 已含最新 mode/startIndex（start() 内还是旧值）。
-    if (r.pendingStart) {
-      r.pendingStart = false;
-      r.currentIdx =
-        o.mode === 'fromCursor'
-          ? Math.min(Math.max(0, o.startIndex), o.lines.length - 1)
-          : 0;
-      setCurrentLine(r.currentIdx);
-      o.onProgress(r.currentIdx);
+    if (r.stopped || r.busy) return;
+    // 消费已到期的定时器句柄：可见性补发可能与本次 tick 竞争，句柄置空后
+    // 补发逻辑不再重复触发（double-send 防护）。
+    if (r.timeoutId !== null) {
+      clearTimeout(r.timeoutId);
+      r.timeoutId = null;
     }
-
-    const idx = r.currentIdx;
-    if (idx < 0 || idx >= o.lines.length) {
-      finish();
-      return;
-    }
-    const line = o.lines[idx];
-    const isEmpty = line.trim() === '';
-    const isInvalidHex = o.isHex && !isEmpty && !isValidHexLine(line);
-    if (isEmpty || isInvalidHex) {
-      if (isInvalidHex) r.invalidCount += 1;
-      advanceRound();
-      return;
-    }
-
+    r.busy = true;
     try {
-      await o.onSend(line, idx);
-    } catch (err) {
-      o.onError(err);
-      finish();
-      return;
+      // 首次 tick：此刻 optsRef 已含最新 mode/startIndex（start() 内还是旧值）。
+      if (r.pendingStart) {
+        r.pendingStart = false;
+        r.currentIdx =
+          o.mode === 'fromCursor'
+            ? Math.min(Math.max(0, o.startIndex), o.lines.length - 1)
+            : 0;
+        setCurrentLine(r.currentIdx);
+        o.onProgress(r.currentIdx);
+      }
+
+      const idx = r.currentIdx;
+      if (idx < 0 || idx >= o.lines.length) {
+        finish();
+        return;
+      }
+      const line = o.lines[idx];
+      const isEmpty = line.trim() === '';
+      const isInvalidHex = o.isHex && !isEmpty && !isValidHexLine(line);
+      if (isEmpty || isInvalidHex) {
+        if (isInvalidHex) r.invalidCount += 1;
+        advanceRound();
+        return;
+      }
+
+      try {
+        await o.onSend(line, idx);
+      } catch (err) {
+        o.onError(err);
+        finish();
+        return;
+      }
+      if (r.stopped) return;
+      advanceRound();
+    } finally {
+      r.busy = false;
     }
-    if (r.stopped) return;
-    advanceRound();
   };
 
   const start = useCallback(() => {
@@ -174,6 +190,7 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
     runningRef.current = true;
     runLinesRef.current = o.lines;
     setRunning(true);
+    r.nextFireAt = Date.now();
     r.timeoutId = setTimeout(() => {
       void tick();
     }, 0);
@@ -192,6 +209,21 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options.lines]);
 
+  // 焦点无关（可见性补发，issue：循环发送切换窗口聚焦后失效）：窗口被遮挡时
+  // WebView2 会把 setTimeout 链节流到 ~1s，恢复可见后若原定 tick 已过期则立即
+  // 补发一次，把行间节奏拉回用户配置值——跨窗口聚焦不打断/不丢失发送。
+  const onVisibilityChange = () => {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const r = ref.current;
+    if (r.stopped || r.busy) return;
+    // 已到期但 (因隐藏节流) 尚未触发：取消挂起定时器直接执行一次 tick
+    if (r.timeoutId !== null && Date.now() >= r.nextFireAt + 50) {
+      clearTimeout(r.timeoutId);
+      r.timeoutId = null;
+      void tick();
+    }
+  };
+
   // 卸载 → 停止（不触碰 React 状态）。
   useEffect(
     () => () => {
@@ -201,9 +233,23 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
         clearTimeout(ref.current.timeoutId);
         ref.current.timeoutId = null;
       }
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
     },
     []
   );
+
+  useEffect(() => {
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    }
+    return () => {
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+    };
+  }, []);
 
   return { running, currentLine, start, stop };
 }

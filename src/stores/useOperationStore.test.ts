@@ -14,7 +14,7 @@ beforeEach(() => {
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
-    isLoopSending: false,
+    cyclicLoops: {},
   });
 });
 
@@ -63,8 +63,8 @@ describe('Operation store defaults', () => {
     expect(useOperationStore.getState().sendInput).toBe('');
   });
 
-  it('has correct isLoopSending default (false)', () => {
-    expect(useOperationStore.getState().isLoopSending).toBe(false);
+  it('has empty cyclicLoops default ({} — per-port loop flags)', () => {
+    expect(useOperationStore.getState().cyclicLoops).toEqual({});
   });
 });
 
@@ -113,14 +113,6 @@ describe('setOpState', () => {
     expect(s.sendInput).toBe('AA BB CC');
   });
 
-  it('patches loop state fields', () => {
-    useOperationStore.getState().setOpState({
-      isLoopSending: true,
-    });
-    const s = useOperationStore.getState();
-    expect(s.isLoopSending).toBe(true);
-  });
-
   it('patches handshake and stopBits', () => {
     useOperationStore.getState().setOpState({
       handshake: 'RequestToSend',
@@ -148,5 +140,37 @@ describe('setOpState', () => {
     expect(after.baudRate).toBe(before.baudRate);
     expect(after.dataBits).toBe(before.dataBits);
     expect(after.parity).toBe(before.parity);
+  });
+});
+
+// ==================== setCyclicLoop（每端口循环开关，issue #12）====================
+
+describe('setCyclicLoop', () => {
+  it('enables a loop for a port', () => {
+    useOperationStore.getState().setCyclicLoop('COM3', true);
+    expect(useOperationStore.getState().cyclicLoops['COM3']).toBe(true);
+  });
+
+  it('disables a loop for a port (removes key)', () => {
+    useOperationStore.getState().setCyclicLoop('COM3', true);
+    useOperationStore.getState().setCyclicLoop('COM3', false);
+    expect(useOperationStore.getState().cyclicLoops['COM3']).toBeUndefined();
+  });
+
+  it('keeps per-port loops independent — multiple ports can run concurrently', () => {
+    // 压测场景核心：COM3 循环运行期间启动 COM4 循环，两者互不影响。
+    useOperationStore.getState().setCyclicLoop('COM3', true);
+    useOperationStore.getState().setCyclicLoop('COM4', true);
+    expect(useOperationStore.getState().cyclicLoops['COM3']).toBe(true);
+    expect(useOperationStore.getState().cyclicLoops['COM4']).toBe(true);
+    // 停止 COM4 不影响 COM3
+    useOperationStore.getState().setCyclicLoop('COM4', false);
+    expect(useOperationStore.getState().cyclicLoops['COM3']).toBe(true);
+    expect(useOperationStore.getState().cyclicLoops['COM4']).toBeUndefined();
+  });
+
+  it('is a no-op for empty port id', () => {
+    useOperationStore.getState().setCyclicLoop('', true);
+    expect(useOperationStore.getState().cyclicLoops).toEqual({});
   });
 });

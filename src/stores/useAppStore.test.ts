@@ -43,7 +43,7 @@ beforeEach(() => {
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
     sendInput: '',
-    isLoopSending: false,
+    cyclicLoops: {},
   });
 });
 
@@ -635,9 +635,9 @@ describe('Operation State actions', () => {
     expect(useOperationStore.getState().sendIsHex).toBe(true);
   });
 
-  it('setOpState handles loop state toggle', () => {
-    useOperationStore.getState().setOpState({ isLoopSending: true });
-    expect(useOperationStore.getState().isLoopSending).toBe(true);
+  it('setCyclicLoop handles per-port loop toggle', () => {
+    useOperationStore.getState().setCyclicLoop('COM3', true);
+    expect(useOperationStore.getState().cyclicLoops['COM3']).toBe(true);
   });
 });
 
