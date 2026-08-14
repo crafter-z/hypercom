@@ -6,6 +6,21 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-14 issue #12 四项：循环发送焦点免疫 · 串口热插拔状态卡死 · 软兜底裁剪半页刷屏 · 日志空行落盘)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 567/567 (28 files), `cargo check` 0 错 0 警告, `cargo test --lib` 128/128。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `useCyclicSend.ts` + `usePanelCyclicSend.ts` | 循环自动 TX 只会在**当前激活的窗口/webview** 发送；切换聚焦（弹窗置顶遮挡主窗 → WebView2 隐藏窗口节流 setTimeout 链；切换标签至未连接端口 → 守卫杀死循环）后自动发送失效：① effect 闭包捕获 `activeTabId`、依赖含 `activeTabId`/`isPortActive`/`isConnected`——切标签即 teardown 重启，目标端口未连接时 `ref.stopped=true` 且运行标志保持 true（按钮点亮但永不发）；② 全局单例 `isLoopSending`——循环只能作用于活动标签，无法**多端口并行**压测；③ 主窗 `useCyclicSend` 与弹窗 `usePanelCyclicSend` 都是裸 `setTimeout` 链，无 visibility 兜底 | **重构为每端口独立循环引擎**：store 运行标志改 `cyclicLoops: Record<portId, boolean>`（新 action `setCyclicLoop`），runtime 目标端口**启动时绑定、聚焦无关**——COM3 启动后切标签/窗口 COM3 继续发，切回 COM3 按钮变回「停止」可手动停；多端口各自独立 runtime 并行发（压测多端口灌数据）；引擎每 tick 实时读取端口状态（目标不可用 → 跳过 tick 500ms 重试，不推进索引）；新增 `visibilitychange` 监听——窗口恢复可见且 tick 已到期（被隐藏节流）时**立即补发**（与 rxPipeline 的 issue #6-10 模式对齐）；弹窗文本循环 `usePanelCyclicSend` 同步加 `nextFireAt` + 可见性补发 |
+| HIGH | `useSerialPorts.ts` `mergePorts` + `serial/mod.rs` `open_real_port` | 串口热插拔导致侧边栏状态报错且「刷新按钮治不了，只能退出重进」：① `mergePorts` 第 45 行无条件保留 `prev.status`——一次失败的 open（如热插拔竞态下 open 报错）写的 `status:'error'` 被每次轮询**永久重建**，而刷新按钮与 3s 轮询走同一条 `refreshPorts`→`mergePorts` 链，永远救不回；② union-back（60-67 行）把已消失的 `connected` 端口**无限期**插回列表——拔出后读线程因空闲永不报错（无 disconnected 事件），幽灵端口常驻；③ 后端 `open_real_port` 陈旧句柄守卫：`running==true` 就报 `already open`，设备已拔出时读线程可能仍停在 timeout 循环，重插后永远开不了 | ① `mergePorts`：fresh 枚举命中且旧状态为 `error` 时**重置为 disconnected**（connected/connecting 仍保留）——刷新按钮从此能真正修复卡死状态；② union-back 加**连续缺失计数**（模块级 `ghostMissingPolls` Map，`MAX_MISSING_POLLS=3` 轮 ≈9s 宽限），超限即放弃保留——容忍瞬时 USB 抖动，不产生永久幽灵；③ `open_real_port` stale 守卫**交叉核对系统枚举**（`list_ports()`）：设备已消失 → 当作幽灵回收（置 `running=false` + join 读线程 ≤100ms 读超时上界）后重开，设备仍存在 → 才报 `already open` |
+| HIGH | `useTerminalStore.ts` `trimIfOverBudget` | 多串口压测时日志只加载半页就被**前半页刷新掉**：总预算软兜底读 5s 轮询的**应用 RSS**（含 webview），一旦 ≥ memoryLimitMb（默认 2048MB）就**每个 append 批**都把该端口缓冲裁到 50%——RSS 不会因裁剪立即回落，条件持续满足 → 缓冲被反复对半切，用户视野里"刚加载的半页又被前半页顶掉" | 软兜底路径加双闸：① **只裁本端口缓冲已相当可观的端口**（`totalBytes > maxBytes/2`）——小缓冲不是 RSS 超限的元凶，裁它只制造"半页刷屏"；② **每端口 10s 冷却**（模块级 `lastSoftTrimAt` Map，与 toast 节流同量级）——不再每个 append 批都裁。硬约束（`totalBytes>maxBytes` / `lines>maxLines`）保持无条件立即裁（真正上限必须时刻生效）。store 纯状态原则不变（冷却表在 store 外，通知仍由 RxPipeline 接线层弹） |
+| MEDIUM | `logger/mod.rs` | 落盘日志文件有大量**空日志**：① `LogLineAssembler` 对连续分隔符/行首行尾分隔符产出**空块**，`write_rx` 无条件逐块 `write_line` → 每块写一行 `[ts] RX \n` 空行；② 直写路径（TX）空 data / 只含行结束符的 data（decode 后 trim 为空）同样写成 `[ts] TX \n`；③ 连接即开文件（`create(true)`），无任何数据也会留下 0 字节空文件 | ① `write_line` 顶部空 data 直接返 `Ok`（覆盖 RX 空块 + TX 空发送）；string 格式 decode 后 `text.is_empty()`（`\r\n`-only 内容）同样跳过；② `write_rx` 空块经 `write_line` 守卫自然过滤；③ `close_writer` 时 `current_size==0` 且磁盘 0 字节 → **删除空文件**，不给磁盘留空日志 |
+
+架构变化：`useCyclicSend` 重构为**每端口独立循环引擎**——store 运行标志由单布尔 `isLoopSending` 改为每端口 `cyclicLoops: Record<portId, boolean>`（新 action `setCyclicLoop`），runtime 目标端口在启动时绑定、聚焦无关，多端口可并行；`SendSection.handleToggleLoop` 按聚焦端口查询/启停；`useCyclicSend` 的 options 简化为仅 `sendData`（链接 OperationPanel 同步删参）；`usePanelCyclicSend` ref 新增 `nextFireAt`；`mergePorts` 新增模块级幽灵计数；`open_real_port` 幽灵回收路径（join ≤100ms 仅在罕见热插拔路径）；`trimIfOverBudget` 新增 portId 参数。
+
+测试新增：前端 useOperationStore setCyclicLoop 4（启用/停用/多端口独立/空 id no-op）、useAppStore setCyclicLoop 1、useSerialPorts 4（error 重置 / connecting 保留 / 幽灵 3 轮后消失 / 重出现清计数）、useTerminalStore 3（软兜底大缓冲裁 / 小缓冲不裁 / 冷却门控 + 硬约束立即裁）；后端 logger rx_log_tests 5（连续分隔符空块跳过 / 空 TX 全格式跳过 / hex 空跳过 / 0 字节文件关闭删除 / 有数据文件保留）+ `test_auto_save_off_short_circuits_write` 断言改为「空文件被删除」。
+
 ## 已修复 (2026-08-08 0.5.0 发布后反馈：GIT:BASH 快捷发送多执行一行空命令——TTY 写 pty 回车归一)
 
 > 验证: `cargo check` 0 错 0 警告, `cargo test --lib` 123/123, `npx tsc --noEmit` 0 错。

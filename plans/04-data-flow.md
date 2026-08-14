@@ -69,30 +69,34 @@
       → useOperationStore.getState().setOpState({ opSendInput: '' })  // 清空输入框
 ```
 
-## 4. 循环发送 (useCyclicSend)
+## 4. 循环发送 (useCyclicSend) —— 每端口独立引擎 (issue #12)
 
 ```
-用户点击 SendSection 紧凑头部的循环图标按钮
+用户点击 SendSection 紧凑头部的循环图标按钮 (当前聚焦端口 = COM3)
   → SendSection.handleToggleLoop()
-    → useOperationStore.setOpState({ isLoopSending: true })
-    → useCyclicSend useEffect 触发:
-      ├─ 从 useRuleStore.getState() 取 sendCommandSets
+    → useOperationStore.setCyclicLoop('COM3', true)   // 每端口运行标志 Record<portId, boolean>
+    → useCyclicSend 的 reconcile useEffect 检测到 COM3 开启且无 runtime:
+      ├─ startRuntime('COM3') — 为该端口创建独立 runtime (目标端口固定、聚焦无关)
+      ├─ 每个 runtime 每 tick 从 useRuleStore.getState() 取 sendCommandSets
       │   按 activeSendCommandSetId 找到当前命令集 currentSet
       ├─ 从 currentCmdIdx = 0 开始, 每 tick 重读 store 取最新命令:
-      │   └─ sendData(port, cmd.content, cmd.type, cmd.appendLineEnding, silent=true)
+      │   └─ sendData('COM3', cmd.content, cmd.type, cmd.appendLineEnding, silent=true)
       │       → await 完成
       │       → 用「是否本轮最后一条」(currentCmdIdx === length-1) 判轮次边界:
       │           ├─ 非末条 → currentCmdIdx += 1, 等待 cmd.delay 发下一条
       │           └─ 末条   → completedRounds += 1
       │               ├─ 达到上限? (repeatCount>0 ? completedRounds>=repeatCount : !isLoop)
-      │               │     → 是: setOpState({ isLoopSending: false }), 停止
+      │               │     → 是: setCyclicLoop('COM3', false), 停止
       │               │     → 否: currentCmdIdx = 0, 等待 loopDelay 进入下一轮
+      ├─ 端口未连接 → 跳过 tick 不推进索引, 500ms 重试 (切聚焦/短暂断开不中断)
       └─ 停止:
-          → setOpState({ isLoopSending: false })
-          → ref.stopped = true → clearTimeout
-注: 重复轮数 repeatCount 是命令集自有字段 (config.json), 不再是全局操作态;
-    轮内一律用 per-command delay, 仅轮间用 loopDelay (currentCmdIdx 每轮归零,
-    故不会出现「第二轮起每条都误用 loopDelay」的旧缺陷)。
+          → 用户切回 COM3 聚焦, 按钮读 cyclicLoops['COM3'] 显示「停止」
+          → setCyclicLoop('COM3', false) → reconcile 停掉 COM3 runtime
+          → rt.stopped = true → clearTimeout
+多端口并行: COM3 循环运行期间切到 COM4 再启动循环 → setCyclicLoop('COM4', true)
+          → 独立 runtime 并行发送, 互不影响; 停止任一端口只影响该端口
+注: 重复轮数 repeatCount 是命令集自有字段 (config.json); 轮内一律用 per-command
+    delay, 仅轮间用 loopDelay; 各端口共享当前激活命令集 (activeSendCommandSetId)。
 ```
 
 ## 5. 配置读写

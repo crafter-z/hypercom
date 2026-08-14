@@ -101,7 +101,7 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `useAppStore` | `src/stores/useAppStore.ts:266` | Zustand store | tabs / ports / `paneTree` / config / groups + `sortPortsByNumber`（一次性自然序排序动作，issue #6-4） |
-| `useOperationStore` | `src/stores/useOperationStore.ts:29` | Zustand store | serial params + send (NO `op` prefix; NO display state) |
+| `useOperationStore` | `src/stores/useOperationStore.ts:29` | Zustand store | serial params + send (NO `op` prefix; NO display state); `cyclicLoops: Record<portId, boolean>` 每端口循环发送开关（issue #12，`setCyclicLoop` 逐端口启停，替代旧全局 `isLoopSending`） |
 | `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` (单行：TX/工具/回放) + `appendTerminalLines` (RX 批写) + `setTerminalEncoding` (re-decode on switch)；`totalBytes`/`maxBytes` 字节记账，两个 append 返回 boolean（true=触发内存裁剪，一次性裁到 50%） |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
@@ -186,7 +186,7 @@ const openTab = useAppStore(s => s.openTab);
 
 Operation fields have **NO `op` prefix**. They were renamed from `opBaudRate` to `baudRate`, `opDataBits` to `dataBits`, etc.
 
-**Note**: `sendOnEnter` and `quickSendInlineCount` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. `quickSendInlineCount` 自 issue #5-4 起仅语义为 0=隐藏快捷条，>0 时可见条数宽度自适应（`computeFitCount`）。Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`. The cyclic-send repeat count (`loopRepeatCount`) is also NOT here — it moved to per-command-set `SendCommandSet.repeatCount` (config.json), read by `useCyclicSend` from the active set.
+**Note**: `sendOnEnter` and `quickSendInlineCount` do NOT live here. They are in `useAppStore.config` only. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. `quickSendInlineCount` 自 issue #5-4 起仅语义为 0=隐藏快捷条，>0 时可见条数宽度自适应（`computeFitCount`）。Display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) and `loopInterval` are also NOT here — they live per-tab in `useTerminalStore`. The cyclic-send repeat count (`loopRepeatCount`) is also NOT here — it moved to per-command-set `SendCommandSet.repeatCount` (config.json), read by `useCyclicSend` from the active set. **循环发送运行标志（issue #12）**：旧全局单例 `isLoopSending` 已删除，改为每端口 `cyclicLoops: Record<portId, boolean>`（`setCyclicLoop(portId, running)` 逐端口启停）——循环目标绑定启动它的端口、聚焦无关，多端口可并行。
 
 ```tsx
 const baudRate = useOperationStore(s => s.baudRate);
@@ -264,6 +264,11 @@ some_async_fn(&cfg).await;
 ## Port list polling: preserve state with mergePorts
 
 `useSerialPorts(3000)` polls every 3s. `mapPortInfo()` always sets `status: 'disconnected'`. Use `mergePorts()` to preserve existing port state (status, alias, group, baud rate, etc.) when refreshing the list.
+
+**Hot-plug 语义（issue #12）**：
+- fresh 枚举命中的端口保留 `connected`/`connecting`（真实会话），**但不保留 `error`**——重置为 `disconnected`，否则本次 open 失败的状态被每次轮询永久重建，刷新按钮（与轮询同一条 `refreshPorts`→`mergePorts` 链）永远救不回。
+- 从枚举消失的 `connected`/`connecting` 端口经 union-back 保留**最多 `MAX_MISSING_POLLS=3` 轮**（模块级 `ghostMissingPolls`），超限放弃——拔出后读线程可能永不发 `disconnected`（空闲），无上限保留会产生幽灵端口。
+- 后端 `open_real_port` stale 守卫交叉核对系统枚举：设备已消失 → 回收幽灵句柄（停线程 + join ≤100ms）允许重插后直开；设备仍存在 → 才报 `already open`。
 
 ## Hooks: useSerialReceive vs useSerialSend
 
@@ -387,10 +392,11 @@ scope: ui | backend | store | hooks | plans
 - **通知中心（issue #5-3）**：`durationMs === 0` 的 toast 是粘滞的（Toast.tsx 不启动自动关闭计时）；超过 `MAX_VISIBLE=5` 的 toast 进 `stashed` 队列（不是丢弃），可经 NotificationCenter 查看/逐条关闭/清空。
 - **触发规则自动持久化（issue #5-3）**：TriggerSettings 编辑触发规则 300ms 防抖逐条保存（`savedSnapshotRef` 与当前 rules diff），关闭弹窗时 flush 窗口内未保存编辑；新增/修改规则应走 `storageService.saveTriggerRule`，勿绕过。
 - **日志 RX 组装与子目录（issue #5-9/10）**：`logger/mod.rs` 现含 `LogLineAssembler`（字节级 CR/LF/CRLF 合并/pendingCR/4096 强制 flush/take_tail，镜像前端 rxAssembler）+ `LogManager::write_rx`（RX 方向组行落盘，TX 保持直写 `write`）+ `subdir_mode`（`none`/`date`/`port`，默认 `date`，非法值 clamp 回 date，路径 join 处 create_dir_all，`collect_log_files` 递归 MAX_LIST_DEPTH=16）。改日志路径/分片/子目录相关代码要同时看这里，`LogManager` 现含 `write_rx`/`maybe_split_writer`/`periodic_flush` 私有助手。
+- **日志空行不落盘（issue #12）**：`write_line` 顶部 `data.is_empty()` 直接返回 Ok；string 格式 decode 后 `trim_end_matches(['\r','\n'])` 为空（只含行结束符的 TX）同样跳过——`write_rx` 对连续分隔符/行首行尾分隔符产出的**空块**因此天然不落盘。`close_writer` 关闭时 `current_size==0` 且磁盘 0 字节 → 删除空文件。新增日志写入路径时不要绕过这两个守卫（组装器仍会产出空块，这是刻意的行边界语义）。
 - **状态栏内存（issue #5-5 → #6-6）**：`get_system_status` 的内存自 issue #6-6 起为**应用进程树级**——本进程+全部后代进程（含 WebView2/Chromium 子进程）RSS 之和（`collect_app_pids` + `refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`）。历史：issue #5-5 曾从单进程 RSS 改**系统级**（`system.refresh_memory()`），但系统级看不到软件自身占用、内存预算软兜底也无法工作；#6-6 再改回进程树级，以当前为准。CPU 仍系统级；`load_status` 阈值语义不变。
 - **rawData / 内存瘦身（issue #6-2）**：`TerminalLine.rawData` 由 number[] 改 `Uint8Array`（内存 8 倍削减 + 免解码临时拷贝）；`setTerminalEncoding` 直接 `decoder.decode(rawData)` 不再包一层 Uint8Array；`TerminalRow`/`terminalSearch`/`protocolRenderer` 用 `Array.from` 逐字节（Uint8Array 无 `.map`）。TX 行 `txRawData` 同样存 Uint8Array。
 - **双层内存预算（issue #6-2）**：`memoryLimitMb` 语义改为「整个应用（含 webview）内存总预算」默认 2048MB（**软兜底**）；新增 `memoryPerPortBudgetMb` 默认 200MB（**每端口硬约束**，`maxLines = 预算×500`）。Rust `AppConfig.memory_per_port_budget_mb`（`#[serde(default = "default_memory_per_port_budget_mb")]`，旧 config.json 缺省回退 200）+ `validate_and_clamp` [16,2048]；`memory_limit_mb` clamp [64,8192]。
-- **裁剪触发（issue #6-2）**：`TerminalState` 新增 `totalBytes`（字节记账）与 `maxBytes`（每端口预算字节）；`appendTerminalLine`/`appendTerminalLines` 返回 boolean（true=触发内存裁剪）；超预算**一次性裁到 50%**（不再逐行 shift）；`clearTerminal`/`setTerminalLines` 重算 totalBytes。触发优先级：每端口硬约束优先、总预算软兜底（`systemStatus.memoryUsedMb` 应用进程级内存超总预算时也裁）。「因内存限制清屏」toast（`toast.memoryTrim`，每端口 10s 节流）由 **RxPipeline 接线层**在 store 返回 true 时弹出——store 保持纯净，避免 useToastStore→i18n→useAppStore 循环依赖。
+- **裁剪触发（issue #6-2 → #12）**：`TerminalState` 新增 `totalBytes`（字节记账）与 `maxBytes`（每端口预算字节）；`appendTerminalLine`/`appendTerminalLines` 返回 boolean（true=触发内存裁剪）；超预算**一次性裁到 50%**（不再逐行 shift）；`clearTerminal`/`setTerminalLines` 重算 totalBytes。触发优先级：每端口硬约束（硬约束无条件立即裁）优先、总预算软兜底（`systemStatus.memoryUsedMb` 应用进程级内存超总预算时裁）——**软兜底有双闸**（issue #12）：只裁 `totalBytes > maxBytes/2` 的端口 + 每端口 10s 冷却（模块级 `lastSoftTrimAt`），否则 RSS 超限期间每个 append 批都裁半（多串口压测"半页刷屏"根因）。「因内存限制清屏」toast（`toast.memoryTrim`，每端口 10s 节流）由 **RxPipeline 接线层**在 store 返回 true 时弹出——store 保持纯净，避免 useToastStore→i18n→useAppStore 循环依赖。
 - **RX 写量限制（issue #6-2）**：`maxLinesPerTick`（默认 2000）每端口每帧最多写 N 行，超出顺延下一帧；`flushNow` 同步最多排空 N 行，其余 rAF 续写（修 TX 卡顿同源根因）。
 - **发送异步化（issue #6-1）**：`send_serial_data` 由同步命令改 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager`/`log_manager` 改 `Arc<Mutex<..>>`（Deref 使 `.lock()` 调用点零改动）。`send_file` 本就是 async（tokio::fs::read + 分块 yield），无同类主线程阻塞。
 - **TX/RX 读写句柄拆分 + 无界 flush 摘除（issue #6-10）**：此前「TX 后等一分钟才收到响应」的根因有二——① 读写共用同一把 per-port 锁，TX 的 write_all+flush 阻塞时读线程拿不到锁，响应到了 OS 接收缓冲也读不走、显示不出；② 热路径 `flush()`（Windows = FlushFileBuffers）无超时、受流控约束（对端 CTS 拉低/XOFF 时无界阻塞）。修复：`SerialPortHandle` try_clone（Windows = DuplicateHandle）拆 read_port/write_port 双句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开），try_clone 是唯一途径；读线程只锁读、发送只锁写，DCB/COMMTIMEOUTS 设备级、两句柄共享。热路径去 flush + `write_all_with_deadline` 总写期限（`pub const WRITE_TOTAL_DEADLINE: Duration = Duration::from_millis(2000)`，Ok(0) 立即报错、TimedOut 重试到总期限、Interrupted 继续，防长 payload 在驱动缓冲不空时以 ~100ms/次无限循环）。发送改**两段式**：全局锁内 `get_write_handle` 只做 HashMap 查找 + Arc 克隆（SIM 走 channel 发送）→ 释放全局锁 → 锁外只持 per-port 写锁调用 write_all_with_deadline——**不再持全局 serial_manager 锁执行写**，端口列表轮询/其它端口命令不被 TX 阻塞拖死。每次 WriteFile 受 WriteTotalTimeoutConstant（`.timeout(100ms)`）约束 ≈100ms，per-port 写锁单次持有上限 = 总期限 2s（极端场景），RX 最坏延迟从分钟级降为百毫秒级（且因读写锁分离，RX 根本不再被 TX 锁饿死）。`send_data`/`write_raw` 仍保留完整 API（SIM + 真实分支），真实分支同样去 flush + 用 write_all_with_deadline + write_port。
