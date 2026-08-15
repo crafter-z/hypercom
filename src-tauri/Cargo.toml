@@ -18,6 +18,7 @@ tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
@@ -51,6 +52,10 @@ sysinfo = "0.33"
 
 # 工具
 uuid = { version = "1", features = ["v4"] }
+
+# 自动更新：GitHub API 解析 preview 通道（issue #12）；版本对齐 tauri-plugin-updater 自带 reqwest
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+url = "2"
 
 [profile.release]
 opt-level = 3
