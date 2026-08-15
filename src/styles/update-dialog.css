@@ -1,0 +1,98 @@
+/* ==================== UpdateDialog（issue #12）====================
+ * 更新弹窗独立样式——方案 M1.4 原定 styles/update-dialog.css；首轮实现误落
+ * config-modal.css，复审迁回（组件 CSS 一文件一组件纪律）。
+ */
+.update-dialog-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.update-channel-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+}
+
+.update-channel-stable { background: rgba(76, 175, 80, 0.16); color: #66bb6a; }
+.update-channel-preview { background: rgba(255, 167, 38, 0.16); color: #ffb74d; }
+
+.update-version {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.update-date {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.update-dialog-current {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.update-changelog {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  margin-bottom: 12px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.update-changelog-title {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+}
+
+.update-changelog-body {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  color: var(--text-primary);
+}
+
+.update-changelog-empty {
+  padding: 12px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.update-download-progress {
+  font-size: 12.5px;
+  color: var(--accent-color, #4fc3f7);
+  margin-bottom: 10px;
+}
+
+.update-error {
+  font-size: 12.5px;
+  color: #ef5350;
+  margin-bottom: 10px;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.update-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
