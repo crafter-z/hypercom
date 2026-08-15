@@ -249,6 +249,12 @@ pub struct AppConfig {
     #[serde(default = "default_diag_log_enabled")]
     pub diag_log_enabled: bool,
 
+    // --- 自动更新（issue #12）---
+    /// 自动检查更新模式：`"none"`（不检查）| `"stable"`（定期到正式版）| `"preview"`（定期到 preview）。
+    /// 检查周期统一 7 天（前端 localStorage 记账 lastCheckAt/snoozeUntil）。
+    #[serde(default = "default_update_check_mode")]
+    pub update_check_mode: String,
+
     // --- 设置实体（全部存入 config.json，单文件即可完整迁移）---
     #[serde(default)]
     pub send_command_sets: Vec<SendCommandSetEntry>,
@@ -277,6 +283,11 @@ fn default_restore_session() -> bool {
 
 fn default_diag_log_enabled() -> bool {
     true
+}
+
+/// issue #12：自动更新默认「定期检查到正式版」（用户决策，2026-08-15）。
+fn default_update_check_mode() -> String {
+    "stable".to_string()
 }
 
 fn default_true() -> bool {
@@ -347,6 +358,7 @@ impl Default for AppConfig {
             backup_directory: String::new(),
             restore_session: true,
             diag_log_enabled: true,
+            update_check_mode: "stable".to_string(),
             send_command_sets: Vec::new(),
             highlight_rule_sets: Vec::new(),
             protocol_templates: Vec::new(),
@@ -498,6 +510,10 @@ impl ConfigManager {
         }
         if !["none", "date", "port"].contains(&config.log_subdir_mode.as_str()) {
             config.log_subdir_mode = "date".to_string();
+        }
+        // issue #12：自动更新模式钳制——非法值（含旧版残留）收敛回 stable。
+        if !["none", "stable", "preview"].contains(&config.update_check_mode.as_str()) {
+            config.update_check_mode = "stable".to_string();
         }
         if !["\\r\\n", "\\r", "\\n", "None"].contains(&config.default_line_ending.as_str()) {
             config.default_line_ending = "\\r\\n".to_string();
@@ -753,6 +769,8 @@ mod tests {
             default_line_ending: "BAD".to_string(),
             log_format: "xml".to_string(),
             log_subdir_mode: "monthly".to_string(),
+            // issue #12：非法自动更新模式收敛回 stable
+            update_check_mode: "beta".to_string(),
             ..AppConfig::default()
         };
         ConfigManager::validate_and_clamp(&mut cfg);
@@ -760,6 +778,14 @@ mod tests {
         assert_eq!(cfg.default_line_ending, "\\r\\n");
         assert_eq!(cfg.log_format, "string");
         assert_eq!(cfg.log_subdir_mode, "date");
+        assert_eq!(cfg.update_check_mode, "stable");
+    }
+
+    #[test]
+    fn test_default_update_check_mode_is_stable() {
+        // issue #12：用户决策默认「定期检查到正式版」。
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.update_check_mode, "stable");
     }
 
     #[test]

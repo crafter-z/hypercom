@@ -132,6 +132,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new(diag_logger).expect("Failed to initialize app state"))
         .invoke_handler(tauri::generate_handler![
@@ -217,6 +218,9 @@ pub fn run() {
             commands::open_popout,
             commands::close_popout,
             commands::set_popout_always_on_top,
+            // ===== 自动更新命令（issue #12）=====
+            commands::check_for_update,
+            commands::download_and_install_update,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();
