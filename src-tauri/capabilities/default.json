@@ -21,7 +21,6 @@
     "core:app:allow-version",
     "dialog:allow-open",
     "dialog:allow-save",
-    "updater:default",
     "process:default"
   ]
 }
