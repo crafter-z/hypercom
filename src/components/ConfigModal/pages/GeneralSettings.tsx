@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { configService } from '../../../services/tauri';
+import { updateTiming } from '../../../utils/updateService';
 import type { AppConfig } from '../../../types';
 import type { UpdateCheckMode } from '../../../types';
 
@@ -32,6 +33,9 @@ const GeneralSettings: React.FC = () => {
   const setConfig = useAppStore((s) => s.setConfig);
 
   const [configPath, setConfigPath] = useState('');
+  // issue #12 二轮：上次自动检查时间（localStorage 记账，挂载时读取——页面卸载
+  // 重挂即刷新，保存边界触发的后台检查落账后下次打开可见）。
+  const [lastCheckAt] = useState<number | null>(() => updateTiming.getLastCheckAt());
   useEffect(() => {
     configService.getConfigPath().then(setConfigPath).catch(() => {});
   }, []);
@@ -179,6 +183,13 @@ const GeneralSettings: React.FC = () => {
             </label>
           ))}
         </div>
+      </div>
+
+      <div className="config-row">
+        <label>{t('update.lastCheckLabel')}</label>
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+          {lastCheckAt === null ? t('update.lastCheckNever') : new Date(lastCheckAt).toLocaleString()}
+        </span>
       </div>
 
       <div className="divider-h" />

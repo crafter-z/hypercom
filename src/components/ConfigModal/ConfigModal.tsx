@@ -4,7 +4,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useConfigPersistence } from '../../hooks';
 import { mergeLiveRuleEntities } from '../../utils/configMerge';
-import { updateTiming } from '../../utils/updateService';
+import { updateTiming, runAutoCheck } from '../../utils/updateService';
 import type { AppConfig } from '../../types';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, X,
@@ -81,13 +81,23 @@ const ConfigModal: React.FC = () => {
     // 旧通道的 7 天周期会推迟新通道首检。
     const snapshot = configSnapshotRef.current;
     const current = useAppStore.getState().config;
-    if (snapshot && snapshot.updateCheckMode !== current.updateCheckMode) {
+    const modeChanged = snapshot !== null && snapshot.updateCheckMode !== current.updateCheckMode;
+    if (modeChanged) {
       updateTiming.clearSnooze();
       updateTiming.clearLastCheck();
     }
     await saveConfig(mergeLiveRuleEntities(current, useRuleStore.getState()));
     configSnapshotRef.current = null;
     toggleConfigModal(false);
+    // issue #12 二轮：改通道保存后立即首检（不等下次启动）——bypass 周期/snooze
+    // 语义同手动检查；DEV 短路在 runCheck 内部。后台执行，有更新则弹窗。
+    if (modeChanged && current.updateCheckMode !== 'none') {
+      void runAutoCheck(current.updateCheckMode).then((update) => {
+        if (update) {
+          useAppStore.getState().setUIState({ isUpdateOpen: true, updateCandidate: update });
+        }
+      });
+    }
   };
 
   if (!isConfigOpen) return null;
