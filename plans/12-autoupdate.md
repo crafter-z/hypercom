@@ -97,6 +97,7 @@ preview channel: ① GET https://api.github.com/repos/crafter-z/hypercom/release
 ```
 
 - **解除 v1.1 限制**：preview 模式能发现「比已装 preview 更新的 preview」→ preview→preview 自动升级可用（唯一 tag 不变、仍只依赖 GitHub 服务）。
+- **二轮修正（preview 语义 = max(preview, stable)）**：preview 收尾发布 stable 后（如 0.6.0-preview.N → 0.6.0），只查 preview 端点的用户**永远收不到晋升与后续 stable 热修**——`check_for_update("preview")` 因此改为**双检查**：preview 与 stable endpoint 都查，纯函数 `version_key`（数值四元组，stable rank=u64::MAX 保证同核心 preview<stable）+ `newer_channel` 取 semver 大者；`payload.channel` 反映更新**实际来源**（徽标显示「正式版」，安装按该通道解析 endpoint）。preview 端点解析失败（API 限流/无 preview release）降级仅 stable；双通道一边失败另一边有更新则用有更新的一边（不因半边失败丢可用更新）。
 - 需新增 `reqwest`（Rust）依赖做 GitHub API 调用；插件自身 reqwest 不可复用（内部私有）。
 - GitHub API 未认证限流 60 req/h/IP——7 天周期 + 手动检查用量极低；办公室 NAT 共享 IP 场景可接受，超限时静默降级为「无更新」。
 
@@ -280,3 +281,28 @@ npm install @tauri-apps/plugin-process
 > `UpdatePayload.channel` 携带，版本号后缀解析无消费方（后端 tag 校验由
 > `update.rs` `is_preview_tag` 承担，语义更严格）。§6 文件表中
 > `styles/update-dialog.css` 已按 M1.4 落地。
+
+---
+
+## 10. 二轮增强（2026-08-16，方案层补漏，全部落地）
+
+复审后第二轮——修复**方案级语义空洞与流程护栏**（区别于 §9 的实现级修复）：
+
+| # | 增强 | 实现 |
+|---|------|------|
+| 1 | **preview 语义 = max(preview, stable)** | 见 §2.2 二轮修正：`newer_channel`/`version_key` 纯函数（+2 单测）；preview 用户收尾后自动晋升 stable、热修不缺 |
+| 2 | **会话内 6h 周期重评估** | 串口工具常驻挂机——启动评估一次覆盖不了多天不重启的用户；`useAutoUpdate` 加 `setInterval(6h)`（门控在 `shouldAutoCheck`，未到期只读 localStorage） |
+| 3 | **改通道保存后立即首检 + 可见性** | `ConfigModal.handleSave` 检测 mode 变更 → `runAutoCheck`（bypass 周期/snooze，语义同手动检查，后台执行有更新弹窗）；通用设置页显示「上次自动检查」时间（localStorage 记账） |
+| 4 | **changelog 轻量 Markdown 渲染** | `utils/changelog.ts`（heading/bullet/bold 纯函数解析，非 dangerouslySetInnerHTML——渲染层防注入纪律）替代 `<pre>` 原文 |
+| 5 | **发布页链接** | 弹窗「查看发布页」→ `releaseUrl(version)`（§2.5 rawJson 预留的落地；tag 约定 `v<version>`） |
+| 6 | **时钟回拨防护** | `shouldAutoCheck`：`now < lastCheckAt` 视为记账损坏放行（否则负差值永远到不了周期阈值）+ 单测 |
+| 7 | **发版 CI 三重护栏** | 两条流同款：① tsc + vitest + `cargo test --lib` 质量门前置于构建；② `verify release notes match version`——RELEASE_NOTES 顶部章节↔tauri.conf.json 版本不一致显式 fail（防忘加章节静默抓上一版 notes）；③ `verify-release` gate job——`latest.json` 四平台键（windows-x86_64/linux-x86_64/darwin-aarch64/darwin-x86_64）url+signature 完整性校验，把 §5.1 矩阵部分失败的静默损坏变成显式红叉 |
+
+立场与设计决策（二轮定稿）：
+
+- **macOS 暂不支持自动更新**：构建产物照常发布（可手动下载安装），但未签名/公证的 `.app` 带 quarantine 属性会被 Gatekeeper 拦截，更新后 relaunch 不可用。启用前置条件 = Apple Developer ID 签名 + 公证（见 `plans/code-signing.md`）。`verify-release` 仍校验 darwin 键（产物完整性），不代表 macOS 更新可用。
+- **国内网络限制**：GitHub Release 资产下载慢/断流是已知限制。立场：全量下载、无断点续传、无镜像——失败重试 = 重新点「立即更新」（全量重下）；自动检查触网极少（7 天周期），手动/安装失败有 toast 告知。镜像加速不在本阶段。
+- **签名密钥轮换与坏版本召回**：SOP 落 `plans/09-release-workflow.md`（过渡版本两步换钥；preview 删 release+tag 天然可召回、stable 只能 ship-forward）。
+- **长期运行与触发**：检查触发点更新为 启动评估 + **会话内 6h 重评估** + 手动按钮（§2.5 原「启动评估 + 手动」表述以此为准）。
+
+验证基线：`tsc --noEmit` 0 错 · `vitest` 600/600（31 files）· `cargo check` 0 错 0 警告 · `cargo test --lib` 138/138 · `playwright` 16/16。

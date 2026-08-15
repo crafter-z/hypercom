@@ -57,7 +57,10 @@ git push --tags  ──────────────►  tag push 事件
 
 预览版本号约定：`0.x.y-preview.N` 属于「下一个核心」——目标 stable 0.6.0 → preview 依次
 `0.6.0-preview.1/2/…`，stable 0.6.0 落地即收尾。semver 保证同核心下 preview < stable，
-preview 用户发布后自动晋升 stable。
+preview 用户发布后自动晋升 stable——该晋升由 **preview 通道双检查**实际兑现
+（issue #12 二轮）：`check_for_update("preview")` 同查 preview 与 stable、取 semver
+大者返回（`newer_channel`/`version_key` 纯函数），stable 发布后 preview 用户自动
+收到晋升与后续 stable 热修，见 `plans/12-autoupdate.md` §2.2。
 
 Preview 发版操作步骤（与 stable §发版操作步骤 同构）：
 
@@ -199,14 +202,47 @@ workflow 使用 `actions/checkout@v5` 与 `actions/setup-node@v5`。
 | Linux 构建缺依赖 | 缺系统库 | workflow 已装 `libwebkit2gtk-4.1-dev`（Tauri）+ `libudev-dev`（`serialport` 枚举 `/dev/ttyUSB*`）；若仍报 `libudev-sys` 失败，确认 runner 为 ubuntu-22.04 |
 | Annotations: `Node.js 20 is deprecated` | action 旧版本声明 node20 | 已升 checkout/setup-node 到 v5（node24）；纯警告，不影响产物 |
 | macOS 公证失败 | 未配置 Apple 证书 | 当前未做代码签名，macOS 用户需手动信任；后续见 `plans/code-signing.md` |
-| 矩阵部分失败（issue #12） | tauri-action 逐 job 覆盖 `latest.json`，`fail-fast: false` 下部分平台失败会生成**缺平台键**的清单 | manifest 反序列化先于版本比较——缺平台键会让该平台 `check()` 报错而非忽略（相对罕见但影响整通道）。**Publish 前**在 release 资产里人工核验各平台 `.sig`/安装包齐全；必要时后续改为各平台独立 JSON。preview 流失败**天然不影响** stable 通道（资产各自 release，共用 endpoint 只认 `releases/latest`） |
+| 矩阵部分失败（issue #12） | tauri-action 逐 job 覆盖 `latest.json`，`fail-fast: false` 下部分平台失败会生成**缺平台键**的清单 | manifest 反序列化先于版本比较——缺平台键会让该平台 `check()` 报错而非忽略（相对罕见但影响整通道）。issue #12 二轮起由 `verify-release` gate job 自动校验 latest.json 四平台键完整性（缺键即 workflow 红叉）：重跑失败 job / 补齐资产后重触发。preview 流失败**天然不影响** stable 通道（资产各自 release，共用 endpoint 只认 `releases/latest`） |
+| RELEASE_NOTES 与版本不一致（issue #12 二轮） | 发版前忘加新版本章节 / 误留上一版章节 → awk 静默抓上一版 notes 写进 release 描述与 latest.json | workflow `verify release notes match version` step 显式 fail——核对 RELEASE_NOTES.md 顶部 `# HyperCom vX` 与 tauri.conf.json 版本一致 |
+| verify-release FAILED（issue #12 二轮） | latest.json 缺平台键 / 缺 url / 缺 signature / version 不符 | 看 gate 输出的具体错误项；重跑失败的矩阵 job 或人工补齐 release 资产后重新触发 workflow |
+
+## 发版 SOP（issue #12 二轮）
+
+### macOS 与自动更新
+
+macOS 构建照常发布（可手动下载安装），但**自动更新暂不支持**：未签名/公证的
+`.app` 带 quarantine 属性会被 Gatekeeper 拦截，更新 relaunch 即失败。macOS 用户
+更新路径 = 手动下载安装新版。启用自动更新的前置条件 = Apple Developer ID 签名
++ 公证（见 `plans/code-signing.md`）。`verify-release` gate 仍校验 darwin 键
+（产物完整性），不代表 macOS 更新可用。
+
+### 签名密钥轮换 SOP（TAURI_SIGNING_PRIVATE_KEY 泄漏/丢失）
+
+updater **先验签名再安装**——直接换 pubkey 会让旧客户端对新签名的 release 验证
+失败、无法更新，必须两步：
+
+1. **过渡版本**：旧密钥仍有效时，发一个仅把 `tauri.conf.json` `pubkey` 改为新公钥
+   的常规版本（仍用旧密钥签名）→ 旧客户端验签照常通过、升级到过渡版；
+2. **切换**：过渡版覆盖装机面后，签名切新密钥（更新仓库 Secrets 的
+   `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`），后续 release 用新密钥。
+
+跳过过渡版的客户端无法再原地更新（验签失败），只能手动下载安装新版。
+
+### 坏版本召回
+
+- **preview**：直接删除该 release 与 tag → GitHub API 解析（`find_latest_preview_tag`）
+  自动回落到上一个 preview；已装该版的客户端不受影响（无强制降级），下次检查
+  自然收到新版本。
+- **stable**：draft 审查期（`releaseDraft: true`）就是缓冲闸；一旦 Publish **不可
+  召回**（已装客户端无法回滚），只能 ship-forward——修复后发布更高版本号。
+  因此 Publish 前确认 `verify-release` gate 绿、各平台资产齐全。
 
 ## 相关文件
 
 | 文件 | 作用 |
 |------|------|
-| `.github/workflows/publish.yml` | stable CI/CD 工作流定义（`v*` + `!v*-preview*` 否定过滤，issue #12；`updaterJsonPreferNsis: true`——latest.json Windows 块指向 NSIS） |
-| `.github/workflows/publish-preview.yml` | preview CI/CD 工作流（唯一 tag + `prerelease: true`，issue #12） |
+| `.github/workflows/publish.yml` | stable CI/CD 工作流定义（`v*` + `!v*-preview*` 否定过滤，issue #12；`updaterJsonPreferNsis: true`——latest.json Windows 块指向 NSIS；二轮：质量门 + notes↔版本校验 + `verify-release` gate） |
+| `.github/workflows/publish-preview.yml` | preview CI/CD 工作流（唯一 tag + `prerelease: true`，issue #12；三轮护栏与 stable 同款） |
 | `RELEASE_NOTES.md` | 本次发版说明，构建时写入网页 notes 与 `latest.json.notes` |
 | `src-tauri/tauri.conf.json` | bundle + updater 配置 |
 | `src-tauri/Cargo.toml` | Rust 版本号 |
