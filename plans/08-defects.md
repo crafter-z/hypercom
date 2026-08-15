@@ -6,6 +6,25 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-15 issue #12 自动更新复审：workflow NSIS 产物偏好 · 安装 TOCTOU · 下载中可关弹窗 · 清账副作用边界 · configReady 信号 · 死代码清理)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 587/587 (30 files), `cargo check` 0 错 0 警告, `cargo test --lib` 136/136。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `publish.yml` + `publish-preview.yml` | 两条发版流都未设 `updaterJsonPreferNsis`——tauri-action 默认 false，MSI+NSIS 并存时 `latest.json` Windows 块指向 **MSI**（源码核实优先级表），与方案 §5.5 决策「设 true 走 NSIS passive `/UPDATE` 流程」相反，Windows 在线更新走的是从未验收的路径（msiexec `/i /passive /promptrestart`） | 两流 tauri-action 均显式 `updaterJsonPreferNsis: true` |
+| HIGH | `update.rs` + `services/tauri.ts` + `UpdateDialog.tsx` | check/install 两次独立往返（设计使然）：弹窗展示版本 X 后若发布了新版 Y，`download_and_install_update` 装的是 Y——「展示的 X、装的 Y」TOCTOU | 安装命令加 `expected_version` 参数：安装前重检查结果版本与候选不一致 → 报错拒绝安装（错误文案带 expected/found，前端重新检查即可）；`downloadAndInstall(channel, expectedVersion)` 传 `candidate.version` |
+| MEDIUM | `UpdateDialog.tsx` | 下载中 X 与三个动作按钮都 `disabled`，唯独遮罩 `onClick={close}` 无守卫——点外面关弹窗后后端装完仍无预警 relaunch | 遮罩 onClick 加 `downloading` 守卫（下载中不可关闭） |
+| MEDIUM | `GeneralSettings.tsx` + `ConfigModal.tsx` | 三态 radio 的 `updateTiming.clearSnooze()` 在 onChange 立即执行——用户改模式后点「取消」，配置经快照回滚但 snooze 已清，副作用泄漏出保存边界 | 挪到 `ConfigModal.handleSave` 保存边界：快照与当前 `updateCheckMode` 实际不同时才 `clearSnooze()+clearLastCheck()` |
+| MEDIUM | `updateService.ts` + `useAutoUpdate.ts` | ① `lastCheckAt` 不分通道：stable 昨天查过，今天切 preview → 首次 preview 检查被旧周期推迟最多 6 天，注释「新意图立即生效」不成立；② `useAutoUpdate` 3s 启发式窗口：config 加载超过 3s 按默认 stable 评估，无视用户配置的 none/preview；③ `markCheckedAt(now)` 用 await 前的评估开始时刻 | ① 新 `updateTiming.clearLastCheck()`，与 snooze 一并在模式保存变更时清（回到「从未检查」→ 立即检查语义）；② 新 `ui.configReady` 信号（`useConfigPersistence.loadConfig` finally 置位，成功/失败同）——hook 订阅 false→true 跳变后评估，15s 兜底防信号失联；③ 改记完成时刻 |
+| LOW | `update.rs` | ① `find_latest_preview_tag` 取 API 顺序第一个（GitHub `/releases` 创建时间序）——为旧核心补发 preview 会漏掉最新 preview；② `reqwest::Client::new()` 无超时——API 挂起时手动检查按钮永久「正在检查」；③ 未知 channel 静默回退 stable（`_ =>`）；④ `.find()` 后 `.filter(!is_empty)` 死逻辑（regex 通过者不可能为空）；⑤ 函数名 `regex_matches_preview_tag` 实际无 regex | ① 改 `parse_preview_tag` 数值四元组 `(major,minor,patch,n)` 取 `max_by_key`（+2 单测：乱序 API / 数值非词典序 0.10.0>0.9.9、preview.10>preview.9）；② `GITHUB_API_TIMEOUT` 15s；③ 报 `unknown update channel`；④ 删；⑤ 重命名 `is_preview_tag` |
+| LOW | `channel.ts` / `i18n.ts` / `package.json` / `capabilities` | 死代码与死依赖：`detectChannel`/`isPreviewVersion` 零生产引用（仅测试）——通道最终是运行时用户选择 + payload 携带；`update.newVersion/publishDate/downloadFailed/upToDate` 4 键（双语 8 条）无消费者；`@tauri-apps/plugin-updater` npm 全项目零引用（更新链路全走 Rust 命令，JS 插件未用）；`updater:default` capability 冗余 | 删两函数仅留 `channelLabelKey`（测试重写 4→1）；删 8 条 i18n；卸载 npm 包；capability 移除（`process:default` 保留——relaunch 必需） |
+| LOW | `config-modal.css` | UpdateDialog 样式误落 config-modal.css（方案 M1.4 原定 `styles/update-dialog.css`），AGENTS.md 样式表亦未记 | 迁 `src/styles/update-dialog.css` + `styles.css` @import |
+
+架构变化：`UIState.configReady` 新信号（loadConfig 完成置位，不进会话快照）；`updateTiming.clearLastCheck()`；`downloadAndInstall` 签名 +`expectedVersion`；Rust `find_latest_preview_tag` 语义由「API 顺序第一个」改「semver 最大」。
+
+测试新增：Rust 2（`picks_highest_version_not_first_in_api_order` / `version_comparison_is_numeric_not_lexical`）；前端 `updateTiming.clearLastCheck` 1（含清账后 shouldAutoCheck 立即放行断言）；`channel.test.ts` 重写为 `channelLabelKey` 单测。
+
 ## 已修复 (2026-08-14 issue #12 四项：循环发送焦点免疫 · 串口热插拔状态卡死 · 软兜底裁剪半页刷屏 · 日志空行落盘)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 567/567 (28 files), `cargo check` 0 错 0 警告, `cargo test --lib` 128/128。

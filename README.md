@@ -83,11 +83,11 @@
 | `@xterm/xterm` / `@xterm/addon-fit` | — | TTY 模式完整终端（ANSI/VT100、备用屏幕、尺寸协商） |
 | `@tauri-apps/api` | ^2.0.0 | Tauri 桥接 |
 | `@tauri-apps/plugin-dialog` / `shell` | ^2.7.1 / ^2.0.0 | 文件对话框 / 外部链接 |
-| `@tauri-apps/plugin-process` / `plugin-updater` | ^2.x / ^2.10 | 自动更新 relaunch / 更新器（issue #12） |
+| `@tauri-apps/plugin-process` | ^2.x | 自动更新安装后 relaunch（issue #12；更新器本体走 Rust 插件 + 自定义命令，无 JS updater 包） |
 | `lucide-react` | ^1.14.0 | 图标 |
 | `vitest` | ^4.1.7 | 单元测试 |
 
-> 全局 CSS Variables，按组件拆分到 `src/styles/`（10 组件 CSS + `base.css`），无 CSS-in-JS。
+> 全局 CSS Variables，按组件拆分到 `src/styles/`（11 组件 CSS + `base.css`），无 CSS-in-JS。
 
 ### 后端
 
@@ -142,9 +142,9 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (530 cases / 27 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (112 cases)
-npx playwright test                                    # E2E 冒烟 (14 tests)
+npm run test:run                                       # vitest (587 cases / 30 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (136 cases)
+npx playwright test                                    # E2E 冒烟 (16 tests)
 ```
 
 ---

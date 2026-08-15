@@ -18,7 +18,7 @@
 | `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts; **dev-only** — no-op when `DEV_FEATURES_ENABLED` is false (issue #2-9) |
 | `useGitBashSim.ts` | `useGitBashSim()` | Sidebar toolbar | debug-only GIT:BASH 模拟终端 toggle (issue #11); mirrors `useSimulation` dev gating (no-op when `DEV_FEATURES_ENABLED` false); local `useState` for the mode flag (no new store field) |
 | `useToolOutput.ts` | `useToolOutput()` | App.tsx **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
-| `useAutoUpdate.ts` | `useAutoUpdate()` | App.tsx **exactly once** | issue #12 自动更新评估：启动 3s 后按 `shouldAutoCheck`（7 天周期/snooze/首启立即）决定是否 `runCheck`；成功（有无更新同）记 lastCheckAt，失败静默（diagLog 落盘、不重置——下次启动重试）；有更新 → `setUIState({ isUpdateOpen, updateCandidate })`。DEV 构建短路（`isUpdateCheckEnabled`） |
+| `useAutoUpdate.ts` | `useAutoUpdate()` | App.tsx **exactly once** | issue #12 自动更新评估：等 `ui.configReady`（`useConfigPersistence.loadConfig` 完成置位；复审替代旧 3s 启发式窗口——config 加载慢于 3s 会按默认 stable 误判用户设置的 none/preview；15s 兜底防信号失联）后按 `shouldAutoCheck`（7 天周期/snooze/首启立即）决定是否 `runCheck`；成功（有无更新同）记 lastCheckAt（**完成时刻**，非评估开始时刻），失败静默（diagLog 落盘、不重置——下次启动重试）；有更新 → `setUIState({ isUpdateOpen, updateCandidate })`。DEV 构建短路（`isUpdateCheckEnabled`） |
 | `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool` |
 | `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
 

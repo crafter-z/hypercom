@@ -252,3 +252,31 @@ npm install @tauri-apps/plugin-process
 | 手动检查 | 不受 `none` 限制；检查时选择 正式版/preview |
 | preview 指针 | GitHub API 解析（+reqwest）；超限静默降级 |
 | DEV 门控 | 前端 `import.meta.env.DEV` 短路 + Rust `#[cfg(debug_assertions)]` 返回 Ok(None) |
+
+---
+
+## 9. 复审修复（2026-08-15，全部落地）
+
+首轮实现复审（代码审查）发现的问题与修复对照，按严重度：
+
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | **两条发版流未设 `updaterJsonPreferNsis`**——与 §5.5 决策矛盾：tauri-action 默认 false，MSI+NSIS 并存时 `latest.json` Windows 块指向 MSI，更新走 msiexec 路径而非本方案验收的 NSIS `/UPDATE` passive 路径 | publish.yml + publish-preview.yml 均显式 `updaterJsonPreferNsis: true` |
+| 2 | **安装 TOCTOU**：§2.2「重解析 endpoint」设计使弹窗展示版本 X 后若发布新版 Y，`download_and_install` 装 Y | 安装命令加 `expected_version`：安装前重检查，版本不一致 → 拒绝安装报错（前端重新检查即可）；`downloadAndInstall(channel, expectedVersion)` 传 `candidate.version` |
+| 3 | **下载中遮罩可关闭弹窗**：X/动作按钮 disabled 但遮罩 onClick 无守卫——关闭后后端装完无预警 relaunch | 遮罩 onClick 加 `downloading` 守卫 |
+| 4 | **`clearSnooze()` 在 radio onChange 立即执行**：取消时配置回滚但副作用泄漏 | 挪到 `ConfigModal.handleSave` 保存边界（mode 实际变化才执行） |
+| 5 | **`lastCheckAt` 不分通道**：切通道被旧通道 7 天周期推迟首检，「新意图立即生效」不成立 | 新 `updateTiming.clearLastCheck()`，改 mode 保存时与 snooze 一并清（回到首启立即语义） |
+| 6 | **`useAutoUpdate` 3s 启发式窗口**：config 加载 >3s 按默认模式误判 | 新 `ui.configReady` 信号（`loadConfig` finally 置位），hook 订阅跳变后评估，15s 兜底 |
+| 7 | **`find_latest_preview_tag` 取 API 顺序第一个**：GitHub `/releases` 创建时间序，补发旧核心 preview 漏最新 | `parse_preview_tag` 数值四元组取 `max_by_key`（+2 单测） |
+| 8 | **`reqwest::Client::new()` 无超时**：API 挂起手动检查永久「正在检查」 | `GITHUB_API_TIMEOUT = 15s` |
+| 9 | **未知 channel 静默回退 stable**（`_ =>`） | 报错 `unknown update channel: {other}` |
+| 10 | 死代码：`channel.ts` `detectChannel`/`isPreviewVersion`（零生产引用）、i18n 4 键无消费者（×2 语言）、`@tauri-apps/plugin-updater` npm 零引用、`updater:default` capability 冗余、`.find()` 后死 `.filter(is_empty)`、`regex_matches_preview_tag` 名不副实 | 删函数/键/包/权限/死过滤；重命名 `is_preview_tag`；`channelLabelKey` 保留 |
+| 11 | UpdateDialog 样式误落 config-modal.css（§M1.4 原定独立文件） | 迁 `src/styles/update-dialog.css` + @import |
+| 12 | `markCheckedAt(now)` 用评估开始时刻 | 改记检查**完成**时刻 |
+
+验证基线：`tsc --noEmit` 0 错 · `vitest` 587/587 · `cargo check` 0 错 0 警告 · `cargo test --lib` 136/136（Windows）。
+
+> §2.4 备注：`detectChannel`/`isPreviewVersion` 已删——通道最终是运行时用户选择 +
+> `UpdatePayload.channel` 携带，版本号后缀解析无消费方（后端 tag 校验由
+> `update.rs` `is_preview_tag` 承担，语义更严格）。§6 文件表中
+> `styles/update-dialog.css` 已按 M1.4 落地。

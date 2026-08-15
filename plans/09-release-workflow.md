@@ -38,7 +38,7 @@ git push --tags  ──────────────►  tag push 事件
 
 | 事件 | 说明 |
 |------|------|
-| `git push origin v0.x.0` | 推送匹配 `v*` 的 tag 即触发（issue #12：`v*-preview*` 已被 `tags-ignore` 排除，由 preview 流负责） |
+| `git push origin v0.x.0` | 推送匹配 `v*` 的 tag 即触发（issue #12：`v*-preview*` 经同过滤器 `!` 否定排除——GitHub Actions 禁止 tags 与 tags-ignore 同事件共存，由 preview 流负责） |
 | `git push origin v0.x.y-preview.N` | **preview 流**（`.github/workflows/publish-preview.yml`）：每版独立唯一 tag，`prerelease: true`（详见 §Preview 发版） |
 | 手动 | GitHub → Actions → publish → Run workflow（未配置，如需可加 `workflow_dispatch`） |
 
@@ -48,10 +48,11 @@ git push --tags  ──────────────►  tag push 事件
 
 | 项 | stable（publish.yml） | preview（publish-preview.yml） |
 |---|---|---|
-| 触发 tag | `v*`（排除 `v*-preview*`） | `v*-preview*` |
+| 触发 tag | `v*` + `!v*-preview*` 否定（同过滤器内，GitHub 禁止 tags 与 tags-ignore 共存） | `v*-preview*` |
 | tag | `v0.6.0`（唯一） | `v0.6.0-preview.N`（**每版唯一，绝不复用**） |
 | releaseDraft | true（Publish 后生效） | **false**（必须立即可见——GitHub API `/releases` 解析依赖它入列） |
 | prerelease | false | **true**（从 `releases/latest` 排除 → stable 用户零污染；API 解析按此筛选） |
+| updaterJsonPreferNsis | **true**（复审修复：tauri-action 默认 false → latest.json Windows 块指 MSI；更新链路按 NSIS `/UPDATE` passive 验收，必须显式优先 NSIS） | **true**（同款） |
 | 版本号三处 | `0.6.0` | `0.6.0-preview.N` |
 
 预览版本号约定：`0.x.y-preview.N` 属于「下一个核心」——目标 stable 0.6.0 → preview 依次
@@ -149,7 +150,7 @@ git push origin main --tags
 
 > 最终运行链路见 `plans/12-autoupdate.md`（本工作流只保证产物/清单/渠道正确，客户端行为由前端 `useAutoUpdate` + 后端 `commands/update.rs` 驱动）。要点：
 
-1. 应用启动 3s 后，前端评估自动更新（`updateCheckMode` 设置决定通道与开关，7 天周期）
+1. 应用启动 config 就绪后（`ui.configReady` 信号，复审替代旧 3s 启发式窗口），前端评估自动更新（`updateCheckMode` 设置决定通道与开关，7 天周期）
 2. 后端 `check_for_update` 请求该通道 endpoint 获取 `latest.json`（stable 直连 `releases/latest`，preview 经 GitHub API 解析最新 preview tag）
 3. 比较 `latest.json.version` 与当前 `app.version`（semver `>`：同版本/降级不更新）
 4. 有新版本 → 弹窗展示 changelog（`notes`）→ 用户点「立即更新」→ 下载**该平台安装包 + `.sig`**
@@ -204,7 +205,7 @@ workflow 使用 `actions/checkout@v5` 与 `actions/setup-node@v5`。
 
 | 文件 | 作用 |
 |------|------|
-| `.github/workflows/publish.yml` | stable CI/CD 工作流定义（`tags-ignore: v*-preview*`，issue #12） |
+| `.github/workflows/publish.yml` | stable CI/CD 工作流定义（`v*` + `!v*-preview*` 否定过滤，issue #12；`updaterJsonPreferNsis: true`——latest.json Windows 块指向 NSIS） |
 | `.github/workflows/publish-preview.yml` | preview CI/CD 工作流（唯一 tag + `prerelease: true`，issue #12） |
 | `RELEASE_NOTES.md` | 本次发版说明，构建时写入网页 notes 与 `latest.json.notes` |
 | `src-tauri/tauri.conf.json` | bundle + updater 配置 |
