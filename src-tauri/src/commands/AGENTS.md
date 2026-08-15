@@ -1,6 +1,6 @@
 # src-tauri/src/commands/
 
-10 domain files + `mod.rs` re-export hub. All Tauri commands return `Result<T, CommandError>`.
+11 domain files + `mod.rs` re-export hub. All Tauri commands return `Result<T, CommandError>`.
 
 ## Where to look
 
@@ -15,6 +15,7 @@
 | `diag.rs` | `get_diag_log_path`, `read_diag_log(limit?)`, `clear_diag_log`, `append_diag_log(entries)` — 应用自身维测日志的读取/清空 + 前端 `console.*` 转发追加；底层由 `crate::diaglog::DiagLogger`（全局 logger，落盘 + 轮转）提供 |
 | `system_cmds.rs` | `get_system_status`, `prevent_sleep`, `prevent_screen_off` |
 | `file.rs` | `write_text_file`, `read_text_file`. `validate_config_path()` restricts import paths to config directory. |
+| `update.rs` | `check_for_update`, `download_and_install_update`（自动更新，issue #12）。**通道是运行时参数**：JS `check()` 无法指定 endpoint → 本模块经 `app.updater_builder().endpoints(vec![url])` 按 channel 选 endpoint——`stable` 直连 `releases/latest/download/latest.json`（GitHub「最新非 prerelease」指针）；`preview` 先经 GitHub API（`api.github.com/releases?per_page=100`，未认证限流 60/h/IP 超限静默降级）用纯函数 `find_latest_preview_tag` 取最新 `vX.Y.Z-preview.N` tag 再 tag-pinned URL。**门控与 simulation.rs 同向但相反**：release（`cfg(not(debug_assertions))`）才执行真实逻辑，debug 直接返回 Ok(None)/Ok(())（前端 `import.meta.env.DEV` 自动短路外另有前端 `manualCheck` 不过门控——显式意图，依赖本层 debug 兜底）。下载进度经 `Emitter` 发 `update:progress` 事件（`UpdateProgressPayload` camelCase：downloaded/total/phase）。错误统一 `CommandError::Other`。 |
 | `mod.rs` | `CommandError` enum (thiserror) + `pub use domain::*;` re-exports |
 
 ## Conventions

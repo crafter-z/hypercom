@@ -63,6 +63,7 @@
 - 🔔 **通知中心** — 触发告警为粘滞通知（不自动消失），超出屏幕数量的通知进溢出队列不丢失；串口来源消息携带**串口号**与**时间戳**，铃铛一键查看/清空
 - 🖱️ **自定义右键菜单** — 输入框/文本域右键显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选），主窗与独立窗口一致
 - 🐛 **诊断日志** — 前后端 `log`/`console` 统一落盘（512KB 轮转），「关于 → 诊断日志」查看/过滤/导出/清空，可配置开关
+- 🔄 **自动更新** — 通道运行时用户选择：设置项「不检查 / 定期到正式版 / 定期到 preview」（7 天周期）；发现更新弹窗三动作（立即更新带进度 / 7 天后提醒 / 永不提醒同步设置）；About 手动检查可选正式版/preview；stable 直连 GitHub 最新正式版、preview 经 GitHub API 解析最新 preview tag（唯一 tag，互不污染）
 - 📌 **窗口置顶** / ℹ️ **关于** / 📤 **配置导出导入** / ⭐ **端口预设** / 🧰 **系统托盘**
 
 ---
@@ -82,6 +83,7 @@
 | `@xterm/xterm` / `@xterm/addon-fit` | — | TTY 模式完整终端（ANSI/VT100、备用屏幕、尺寸协商） |
 | `@tauri-apps/api` | ^2.0.0 | Tauri 桥接 |
 | `@tauri-apps/plugin-dialog` / `shell` | ^2.7.1 / ^2.0.0 | 文件对话框 / 外部链接 |
+| `@tauri-apps/plugin-process` / `plugin-updater` | ^2.x / ^2.10 | 自动更新 relaunch / 更新器（issue #12） |
 | `lucide-react` | ^1.14.0 | 图标 |
 | `vitest` | ^4.1.7 | 单元测试 |
 
@@ -98,6 +100,8 @@
 | `serde` / `serde_json` | 1 | 序列化 |
 | `encoding_rs` | 0.8 | GBK 等多编码解码 |
 | `portable-pty` | 0.9 | 调试专用 GIT:BASH 模拟终端（Windows = ConPTY） |
+| `tauri-plugin-updater` / `process` | 2.10 / 2 | 自动更新（issue #12）：运行时通道选择 + relaunch |
+| `reqwest` | 0.13 (rustls) | 自动更新 preview 通道 GitHub API 解析（issue #12） |
 | `chrono` / `dirs` / `uuid` | — | 时间 / 目录 / ID |
 | `thiserror` | 1 | `CommandError` 枚举 |
 

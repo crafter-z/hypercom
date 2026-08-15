@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-HyperCom — modern serial-port debug tool. Rust owns I/O; React owns UI. State in 4 Zustand stores; 12 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 10 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → alert/auto-respond, per-port scoping via `portId`, wired in `useSerialReceive` — issue #3-1).
+HyperCom — modern serial-port debug tool. Rust owns I/O; React owns UI. State in 4 Zustand stores; 13 hooks in individual files under `src/hooks/` own the Tauri bridge. Backend commands split into 11 domain files + `CommandError` enum. `paneTree: PaneNode` (recursive) replaced the flat `panes` array on 2026-07. Per-tab display state (scrollLocked/displayFormat/encoding/showTimestamp) lives in `useTerminalStore`, NOT in `useOperationStore`. Decorations disabled — custom TitleBar drives window controls. Cross-platform power management (Win32/macOS/Linux). Conditional trigger engine (pattern match → alert/auto-respond, per-port scoping via `portId`, wired in `useSerialReceive` — issue #3-1).
 
 v0.4.1 (issue #6): 双层内存预算（`memoryLimitMb` 整个应用含 webview 总预算软兜底，默认 2048MB；`memoryPerPortBudgetMb` 每端口硬约束，默认 200MB，超限一次性裁到 50%）；`TerminalLine.rawData` 由 number[] 改 `Uint8Array`（内存 8 倍削减 + 免解码临时拷贝）；RX 管线写量限制（`maxLinesPerTick` 默认 2000）；`send_serial_data` 改 async + `tokio::task::spawn_blocking`（消除每次 TX 主线程卡顿与 tao 警告白屏），`AppState` 字段改 `Arc<Mutex<..>>`；状态栏内存为应用进程树 RSS（本进程 + 含 WebView2/Chromium 的后代进程）；端口排序改一次性动作 `sortPortsByNumber()`（移除持久 sortMode 开关）；串口右键菜单分组控制；QuickSendPanel 文本模式「执行当前行并移至下一行」按钮；ConfigModal 框选文字松手界外不再关闭；通知中心面板加大；快捷发送 pill 两行显示。
 
@@ -22,9 +22,9 @@ v0.5.3+ (issue #12 自动更新)：**通道是运行时用户选择**（设置�
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
-│   ├── i18n.ts                   # i18next + react-i18next, ~529 keys × zh-CN/en-US
+│   ├── i18n.ts                   # i18next + react-i18next, ~558 keys × zh-CN/en-US
 │   ├── services/tauri.ts         # invoke wrapper layer (6 service modules)
-│   ├── hooks/                    # 12 hooks in individual files + barrel index.ts + disconnectTracking.ts
+│   ├── hooks/                    # 13 hooks in individual files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 4 Zustand + Immer stores (no god store)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + tree helpers
 │   │   ├── useOperationStore.ts  # serial params + send (NO `op` prefix; NO display state fields)
@@ -108,7 +108,7 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | `useTerminalStore` | `src/stores/useTerminalStore.ts:22` | Zustand store | line buffer + `appendTerminalLine` (单行：TX/工具/回放) + `appendTerminalLines` (RX 批写) + `setTerminalEncoding` (re-decode on switch)；`totalBytes`/`maxBytes` 字节记账，两个 append 返回 boolean（true=触发内存裁剪，一次性裁到 50%） |
 | `useRuleStore` | `src/stores/useRuleStore.ts:32` | Zustand store | highlight + send-command rule sets + CRUD |
 | `findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` | `src/stores/useAppStore.ts:25-85` | pure fns | recursive `PaneNode` tree traversal |
-| 12 hooks: `useSerialPorts` / `useSerialConnection` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useGitBashSim` / `useToolOutput` / `usePopoutBridge` / `usePortToolActions` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md`; RX → `RxPipeline` 批写（TTY 端口走 `ttyService.feed`），TX 回显前 `flushNow` 排空队列保时序；`useAppInit` 还负责分组/端口元数据（备注名/隐藏）恢复 + 防抖自动保存（issue #2-3 / #4-9/10）；`useGitBashSim` 是调试专用 GIT:BASH 模拟终端开关（issue #11，双层门控）；`usePortToolActions` 是侧边栏/标签页外部工具菜单的共享动作源（issue #2-2），现还返回 `runToolForGroup`（分组整组执行，issue #5-7） |
+| 13 hooks: `useSerialPorts` / `useSerialConnection` / `useSerialReceive` / `useSerialSend` / `useConfigPersistence` / `useSystemStatus` / `useAppInit` / `useSimulation` / `useGitBashSim` / `useToolOutput` / `useAutoUpdate` / `usePopoutBridge` / `usePortToolActions` | `src/hooks/*.ts` + barrel `index.ts` | hooks | Tauri bridge — see `src/hooks/AGENTS.md`; RX → `RxPipeline` 批写（TTY 端口走 `ttyService.feed`），TX 回显前 `flushNow` 排空队列保时序；`useAppInit` 还负责分组/端口元数据（备注名/隐藏）恢复 + 防抖自动保存（issue #2-3 / #4-9/10）；`useGitBashSim` 是调试专用 GIT:BASH 模拟终端开关（issue #11，双层门控）；`useAutoUpdate` 是启动自动更新评估（issue #12，7 天周期/snooze/首启立即，失败静默）；`usePortToolActions` 是侧边栏/标签页外部工具菜单的共享动作源（issue #2-2），现还返回 `runToolForGroup`（分组整组执行，issue #5-7） |
 | `RxLineAssembler` / `RxPipeline` / `getRxPipeline` | `src/utils/rxAssembler.ts`, `src/utils/rxPipeline.ts` | RX 管线 | 字节级行聚合 + rAF 批写 + 静默/断线/编码切换 flush + `maxLinesPerTick` 写量限制 + 内存裁剪 toast 接线 + visibility-aware 调度（页面隐藏时 rAF 停摆 → setTimeout 兜底，visibilitychange 重排）+ 每端口队列上限 `maxQueuedLines`（默认 10000，超限丢最旧，issue #6-10）；主窗与弹出窗各自模块单例 |
 | `ttyService` | `src/utils/ttyService.ts` | module singleton | TTY 模式 RX/TX 服务（issue #11）：流式 UTF-8 解码 + 每端口队列 + visibility-aware 批写 `term.write`；`attach`/`detach`/`feed`/`clear`/`disconnect`/`send`/`resize`；队列上限 `MAX_TTY_QUEUE`（10000 丢最旧）；TX 刻意不走 `sendToPort`（无本地回显） |
 | `TtyView` | `src/components/MainDisplay/TtyView.tsx` | component | TTY 端口 xterm 宿主（issue #11）：Terminal + FitAddon fit（ResizeObserver + rAF 防抖）、onData→`ttyService.send`、onResize→`ttyService.resize`；`hidden` prop = 非活动标签（`.tty-view-hidden` display:none，恢复可见显式 re-fit，**会话跨标签保留**）；字体/字号经 `term.options` 活更新不重建；Ctrl+滚轮缩放（8–48px，镜像 TerminalView）；Terminal 实例由本组件拥有，卸载时 dispose（`ttyService.detach` 不清实例） |
@@ -282,7 +282,7 @@ The old `useSerialData` hook was split into two hooks with different lifecycles:
 
 Both hooks write to the terminal store through `getState()` to avoid re-rendering the hook owner on every line.
 
-The full hook set in `src/hooks/` (12 hooks, individual files):
+The full hook set in `src/hooks/` (13 hooks, individual files):
 
 | Hook | Purpose | Called in |
 |------|---------|-----------|
@@ -434,9 +434,9 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## i18n (2026-07 基础设施)
 
-- `src/i18n.ts` 已就位 — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），250 keys × zh-CN/en-US
+- `src/i18n.ts` 已就位 — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），558 keys × zh-CN/en-US
 
-  > 2026-07-21 起新增 `general.configPath` key（通用设置页显示配置文件路径），UI/UX overhaul 批次后达 250 keys。
+  > 2026-08-15 issue #12 自动更新后达 558 keys（新增 `update.*` 28 键）。
 - `main.tsx` 第 5 行 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`

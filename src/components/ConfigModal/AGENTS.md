@@ -8,7 +8,7 @@ Multi-page settings modal. Split into `pages/` (7 settings), `editors/` (3 row f
 |------|------:|-----|
 | `ConfigModal.tsx` | 112 | tab switcher (7 pages) + dialog open/close |
 | `RuleSetAccordion.tsx` | 78 | collapsed rule-set listing |
-| `pages/GeneralSettings.tsx` | 92 | theme + language + ports refresh interval |
+| `pages/GeneralSettings.tsx` | ~210 | theme + language + ports refresh interval + 内存预算双配置（总/每端口）+ **自动更新三态 radio**（`updateCheckMode: none/stable/preview`，issue #12；改模式即 `updateTiming.clearSnooze()`） |
 | `pages/LogSettings.tsx` | ~190 | file path template, shard threshold, auto-start, encoding (ASCII/UTF-8/GBK/ISO-8859-1), directory-change migration dialog (DirChangeDialog) |
 | `pages/BackupSettings.tsx` | 33 | import/export config file |
 | `pages/DisplaySettings.tsx` | 45 | timestamp / TX·RX coloring / display format defaults |
