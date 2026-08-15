@@ -14,6 +14,8 @@ v0.4.3 (issue #7 UI 缺陷修复十项)：通知中心——`ToastItem` 新增�
 
 v0.5.0 (issue #11 TTY 模式)：每端口新增 `mode: 'trx' | 'tty'`——TRX=既有行级终端（不变）；TTY=xterm.js（`@xterm/xterm` + `@xterm/addon-fit`）渲染的完整交互终端（真实 ANSI/VT100、光标、备用屏幕 vim/top、onData 尺寸协商，**无本地回显**由对端 echo），取代该端口的 TerminalView。切换在 OperationPanel→ParamsSection 分段控件（i18n `params.mode.*`），经 `port_meta`（config.json）持久化；`useSerialReceive` 按 `mode==='tty'` 分流字节直喂 `ttyService`（跳过触发引擎/协议解析/RxPipeline），断线走 `ttyService.disconnect`；`sendToPort` TTY 分支跳过 TX 回显与 flushNow（保留后端发送/流量统计/发送历史）。**TTY 标签在 Pane 内常驻挂载**（非活动标签 `.tty-view-hidden` display:none 隐藏，恢复可见自动 re-fit），**会话跨标签切换保留**——仅模式切换/关闭标签/跨 Pane 拖拽销毁实例（xterm `open()` 只能调用一次）。字体/字号经 `term.options` 活更新不重建 Terminal。新增调试专用「模拟终端」GIT:BASH 虚拟串口（Cargo `portable-pty` 0.9，Windows = ConPTY，spawn 本地 git bash pty），门控与 SIM:Loopback 一致（前端 `import.meta.env.DEV`、后端 `cfg(not(debug_assertions))` 命令拒绝），侧边栏工具栏按钮（Terminal 图标，i18n `sidebar.toolbar.enableGitBashSim`/`disableGitBashSim`）。
 
+v0.5.3+ (issue #12 自动更新)：**通道是运行时用户选择**（设置项 `updateCheckMode: 'none'|'stable'|'preview'`，config.json 持久化，默认 stable；About 手动检查可选正式版/preview，不过 DEV 门控）。由于 JS `check()` 无法运行时指定 endpoint，更新链路由新 `commands/update.rs` 承载（`check_for_update`/`download_and_install_update` + `update:progress` 事件，`cfg(not(debug_assertions))` 门控返回 Ok(None)）——stable 直连 `releases/latest/download/latest.json`（GitHub 原生「最新非 prerelease」指针，永不泄漏 preview）；preview 先经 GitHub API（`api.github.com/releases?per_page=100`，含 prerelease）解析最新 `vX.Y.Z-preview.N` tag（纯函数 `find_latest_preview_tag`）再指向 `releases/download/<tag>/latest.json`（唯一 tag、preview→preview 自升级；未认证 API 限流 60/h/IP 超限静默降级）。前端 `useAutoUpdate`（App 启动 3s 后评估）：7 天周期 + `shouldAutoCheck` 纯函数（首启立即、snooze 暂停、成功检查才记 lastCheckAt —— localStorage 记账）；发现更新 → `UpdateDialog` 三动作（立即更新带进度/7 天后提醒写 snooze/永不提醒同步 `updateCheckMode=none`）。版本号约定：稳定 `0.x.y`、preview `0.x.y-preview.N`（属于下一核心，同核心 preview<stable 晋升自洽）。发布：`.github/workflows/publish-preview.yml`（tag `v*-preview*`，唯一 tag + `prerelease:true` + `releaseDraft:false`）与 publish.yml（`tags-ignore: v*-preview*`）双流；capabilities 加 `updater:default`+`process:default`；新增 `@tauri-apps/plugin-process`/`tauri-plugin-process`/`reqwest 0.13(rustls)+url` 依赖。评估/周期/snooze 纯逻辑注入测试用 `enabledOverride` 参数（vitest 中 import.meta.env.DEV 被静态替换为 true，无法 stubEnv）。详 `plans/12-autoupdate.md`。
+
 ## STRUCTURE
 
 ```
@@ -71,6 +73,7 @@ hypercom/
 | 通知中心 / toast | `src/stores/useToastStore.ts` + `src/components/StatusBar/NotificationCenter.tsx` | `durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列不丢弃；`clearAll()` / `setCenterOpen` + `centerOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`，外点/Escape 关闭，样式 `notification-center.css`；`ToastItem.portId?`（issue #7-1）——串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行显示 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳 |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...) |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
+| 自动更新（issue #12） | `commands/update.rs` + `hooks/useAutoUpdate.ts` + `utils/updateService.ts` + `utils/channel.ts` + `shared/UpdateDialog.tsx` | **通道是运行时用户选择**：`updateCheckMode: none/stable/preview`（config.json，默认 stable；About 手动检查可选通道且不过 DEV 门控）。JS `check()` 无运行时 endpoint → 命令走 Rust `updater_builder().endpoints(vec![..])`：stable 直连 `releases/latest/download/latest.json`（GitHub「最新非 prerelease」指针，永不泄漏 preview）；preview 先 `api.github.com/releases?per_page=100` 解析最新 `vX.Y.Z-preview.N` tag（纯函数 `find_latest_preview_tag`，未认证限流 60/h/IP 超限静默降级）再 tag-pinned。自动检查：启动 3s 后 `useAutoUpdate` 评估，7 天周期 + `shouldAutoCheck` 纯函数（首启立即/snooze 暂停/成功才记 lastCheckAt，localStorage 记账）；`UpdateDialog` 三动作（立即更新进度+relaunch/7 天后写 snooze/永不提醒同步 mode=none 全量保存）。`#[cfg(debug_assertions)]` 命令返回 Ok(None)（自动检查前端另有 `import.meta.env.DEV` 短路；**手动检查不过 DEV 门控**——显式意图，debug 后端子 Ok(None) 兜底，E2E 可 mock 驱动）。E2E/单测注入：runCheck 的 `enabledOverride` 参数（vitest 中 import.meta.env.DEV 静态替换为 true 无法 stubEnv）。发布流：`publish-preview.yml`（tag `v*-preview*`、唯一 tag+prerelease+draft:false）与 publish.yml（tags-ignore）双流；权限 `updater:default`+`process:default`；依赖 `@tauri-apps/plugin-process`/`tauri-plugin-process`/`reqwest 0.13(rustls)+url`。详 `plans/12-autoupdate.md` |
 | External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
 | 分组整组执行外部工具 | `Sidebar.tsx` 分组右键菜单 + `shared/GroupToolDialog.tsx` + `usePortToolActions.runToolForGroup` | 分组菜单 `sidebar.group.contextMenu.runTool` → 对话框列出配置/未配置端口（Cancel / Configure Missing 跳工具设置页 / Run Configured Only）；严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（issue #7-9，跳过运行中端口，单端口失败不中断整组） |
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 280px (issue #2-6), clamp [160,600] |
@@ -293,6 +296,7 @@ The full hook set in `src/hooks/` (12 hooks, individual files):
 | `useSimulation` | Toggle SIM:Loopback virtual port | Sidebar toolbar |
 | `useGitBashSim` | Debug-only GIT:BASH 模拟终端 toggle (issue #11; mirrors `useSimulation` dev gating) | Sidebar toolbar |
 | `useToolOutput` | `tool:output` / `tool:exit` event listeners | App.tsx (once) |
+| `useAutoUpdate` | 启动自动更新评估（issue #12）：启动 3s 后 `shouldAutoCheck`（7 天周期/snooze/首启立即）→ `runCheck` → 有更新开 UpdateDialog；失败静默不重置 lastCheckAt | App.tsx (once) |
 | `usePopoutBridge` | pop-out intent bus: `popout:send-command` → `sendToPort(activeTabId)`, `popout:open-config` → ConfigModal page, `popout:request-sync` → replay `active-tab:changed`; broadcasts `command-sets:changed` / `active-tab:changed` on store changes | App.tsx (once) |
 
 ## Rust backend: CommandError and commands/ split
@@ -321,7 +325,7 @@ pub enum CommandError {
 
 It implements `serde::Serialize` manually so the frontend receives the error string via `invoke`.
 
-Commands are split into 10 domain files under `src-tauri/src/commands/`:
+Commands are split into 11 domain files under `src-tauri/src/commands/`:
 
 | File | Domain |
 |------|--------|
@@ -335,6 +339,7 @@ Commands are split into 10 domain files under `src-tauri/src/commands/`:
 | `file.rs` | write_text_file, read_text_file（配置导入导出） |
 | `popout.rs` | open_popout, close_popout, set_popout_always_on_top |
 | `system_cmds.rs` | get_system_status, prevent_sleep, prevent_screen_off |
+| `update.rs` | check_for_update, download_and_install_update（自动更新，issue #12；release 才执行，debug 返回 Ok(None)） |
 
 `mod.rs` re-exports all commands and defines `CommandError`.
 

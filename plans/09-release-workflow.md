@@ -38,8 +38,40 @@ git push --tags  ──────────────►  tag push 事件
 
 | 事件 | 说明 |
 |------|------|
-| `git push origin v0.x.0` | 推送匹配 `v*` 的 tag 即触发 |
+| `git push origin v0.x.0` | 推送匹配 `v*` 的 tag 即触发（issue #12：`v*-preview*` 已被 `tags-ignore` 排除，由 preview 流负责） |
+| `git push origin v0.x.y-preview.N` | **preview 流**（`.github/workflows/publish-preview.yml`）：每版独立唯一 tag，`prerelease: true`（详见 §Preview 发版） |
 | 手动 | GitHub → Actions → publish → Run workflow（未配置，如需可加 `workflow_dispatch`） |
+
+## Preview 发版（issue #12）
+
+与 stable 完全同构的独立 release 流，唯一差异在 release 标记：
+
+| 项 | stable（publish.yml） | preview（publish-preview.yml） |
+|---|---|---|
+| 触发 tag | `v*`（排除 `v*-preview*`） | `v*-preview*` |
+| tag | `v0.6.0`（唯一） | `v0.6.0-preview.N`（**每版唯一，绝不复用**） |
+| releaseDraft | true（Publish 后生效） | **false**（必须立即可见——GitHub API `/releases` 解析依赖它入列） |
+| prerelease | false | **true**（从 `releases/latest` 排除 → stable 用户零污染；API 解析按此筛选） |
+| 版本号三处 | `0.6.0` | `0.6.0-preview.N` |
+
+预览版本号约定：`0.x.y-preview.N` 属于「下一个核心」——目标 stable 0.6.0 → preview 依次
+`0.6.0-preview.1/2/…`，stable 0.6.0 落地即收尾。semver 保证同核心下 preview < stable，
+preview 用户发布后自动晋升 stable。
+
+Preview 发版操作步骤（与 stable §发版操作步骤 同构）：
+
+```bash
+# 1. 三处版本写 0.x.y-preview.N（package.json / tauri.conf.json / Cargo.toml）
+# 2. RELEASE_NOTES.md 顶部新章节 # HyperCom v0.x.y-preview.N（awk 前缀天然兼容）
+# 3. git add -A && git commit && git tag v0.x.y-preview.N
+# 4. git push origin main --tags  → publish-preview.yml 构建
+# 5. release 已发布（非 draft），检查 /releases 中 prerelease 标记
+```
+
+> **为什么 preview release 必须 `prerelease: true` + 非 draft**：① `releases/latest`
+> 语义排除 prerelease → stable 通道（共用 endpoint）永不泄漏 preview；② 前端
+> `commands/update.rs` 的 GitHub API 解析只认 `prerelease && !draft` 的 release——
+> draft 不在 `/releases` 列表中，preview 用户将永远查不到新 preview。
 
 ## 构建矩阵
 
@@ -164,12 +196,14 @@ workflow 使用 `actions/checkout@v5` 与 `actions/setup-node@v5`。
 | Linux 构建缺依赖 | 缺系统库 | workflow 已装 `libwebkit2gtk-4.1-dev`（Tauri）+ `libudev-dev`（`serialport` 枚举 `/dev/ttyUSB*`）；若仍报 `libudev-sys` 失败，确认 runner 为 ubuntu-22.04 |
 | Annotations: `Node.js 20 is deprecated` | action 旧版本声明 node20 | 已升 checkout/setup-node 到 v5（node24）；纯警告，不影响产物 |
 | macOS 公证失败 | 未配置 Apple 证书 | 当前未做代码签名，macOS 用户需手动信任；后续见 `plans/code-signing.md` |
+| 矩阵部分失败（issue #12） | tauri-action 逐 job 覆盖 `latest.json`，`fail-fast: false` 下部分平台失败会生成**缺平台键**的清单 | manifest 反序列化先于版本比较——缺平台键会让该平台 `check()` 报错而非忽略（相对罕见但影响整通道）。**Publish 前**在 release 资产里人工核验各平台 `.sig`/安装包齐全；必要时后续改为各平台独立 JSON。preview 流失败**天然不影响** stable 通道（资产各自 release，共用 endpoint 只认 `releases/latest`） |
 
 ## 相关文件
 
 | 文件 | 作用 |
 |------|------|
-| `.github/workflows/publish.yml` | CI/CD 工作流定义 |
+| `.github/workflows/publish.yml` | stable CI/CD 工作流定义（`tags-ignore: v*-preview*`，issue #12） |
+| `.github/workflows/publish-preview.yml` | preview CI/CD 工作流（唯一 tag + `prerelease: true`，issue #12） |
 | `RELEASE_NOTES.md` | 本次发版说明，构建时写入网页 notes 与 `latest.json.notes` |
 | `src-tauri/tauri.conf.json` | bundle + updater 配置 |
 | `src-tauri/Cargo.toml` | Rust 版本号 |
