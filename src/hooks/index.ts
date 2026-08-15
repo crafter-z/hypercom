@@ -10,4 +10,5 @@ export { useSimulation } from './useSimulation';
 export { useGitBashSim } from './useGitBashSim';
 export { useToolOutput } from './useToolOutput';
 export { usePortToolActions } from './usePortToolActions';
+export { useAutoUpdate } from './useAutoUpdate';
 export { isUserClosingPort, isPortLost } from './disconnectTracking';
