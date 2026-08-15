@@ -298,6 +298,9 @@ const resources = {
       'update.manualCheckPreview': '检查 preview 更新',
       'update.manualNoUpdate': '已是最新 {{channel}} 版',
       'update.neverReminderDone': '已关闭自动更新提醒（可在设置中重新开启）',
+      'update.viewRelease': '查看发布页',
+      'update.lastCheckLabel': '上次自动检查:',
+      'update.lastCheckNever': '从未检查',
 
       'logSettings.title': '日志设置',
       'logSettings.autoSaveLog': '自动保存日志',
@@ -906,6 +909,9 @@ const resources = {
       'update.manualCheckPreview': 'Check Preview Updates',
       'update.manualNoUpdate': 'You are on the latest {{channel}} version',
       'update.neverReminderDone': 'Auto-update reminders are off. You can re-enable them in Settings',
+      'update.viewRelease': 'View Release',
+      'update.lastCheckLabel': 'Last auto-check:',
+      'update.lastCheckNever': 'Never checked',
 
       'logSettings.title': 'Logging Settings',
       'logSettings.autoSaveLog': 'Auto-save logs',
