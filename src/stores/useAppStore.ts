@@ -175,6 +175,8 @@ const defaultConfig: AppConfig = {
   backupDirectory: '',
   restoreSession: true,
   diagLogEnabled: true,
+  // issue #12：默认「定期检查到正式版」（用户决策，2026-08-15）。
+  updateCheckMode: 'stable',
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],
@@ -196,6 +198,9 @@ const defaultUIState: UIState = {
   isHotkeyHelpOpen: false,
   isAboutOpen: false,
   sidebarCollapsed: false,
+  // issue #12：更新弹窗初始关闭、无候选更新。
+  isUpdateOpen: false,
+  updateCandidate: null,
 };
 
 // ==================== Store 状态定义 ====================
