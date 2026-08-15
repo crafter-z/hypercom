@@ -3,7 +3,7 @@ name: 'publish-preview'
 # issue #12：preview 发版流（每版本独立唯一 tag，如 v0.6.0-preview.1）
 #
 # 与 stable publish.yml 的差异：
-# - 触发：tag 匹配 v*-preview*（stable 流已 tags-ignore 排除，两流互不干扰）
+# - 触发：tag 匹配 v*-preview*（stable 流已用 `!v*-preview*` 否定排除，两流互不干扰）
 # - releaseDraft: false —— preview release 必须立即可见（GitHub API 解析依赖
 #   它出现在 /releases 列表；draft 不进列表，`find_latest_preview_tag` 也过滤掉）
 # - prerelease: true —— 从 GitHub「latest」解析中排除，stable 用户永不见 preview

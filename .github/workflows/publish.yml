@@ -3,12 +3,12 @@ name: 'publish'
 on:
   push:
     tags:
+      # issue #12：preview tag（v*-preview*）由 publish-preview.yml 专属负责。
+      # GitHub Actions 不允许同一事件同时使用 tags 与 tags-ignore（配置解析失败
+      # 会变成「普通 push 也触发 + 0s workflow file issue」）——排除必须用
+      # 同一过滤器内的 `!` 否定模式（顺序敏感，否定项放在最后）。
       - 'v*'
-      # issue #12：preview tag（v*-preview*）专属 publish-preview.yml 负责，
-      # stable 流必须显式排除——否则 v0.6.0-preview.1 会同时命中两个 workflow，
-      # 同一 tag 被 stable 流再次构建/覆盖 release。
-    tags-ignore:
-      - 'v*-preview*'
+      - '!v*-preview*'
 
 jobs:
   publish-tauri:
