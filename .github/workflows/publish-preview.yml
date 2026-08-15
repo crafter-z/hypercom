@@ -94,4 +94,7 @@ jobs:
           # 关键：标记 prerelease —— ① 从 releases/latest 解析排除（stable 通道
           # 零污染）；② 前端 API 解析按 prerelease 筛选（见 commands/update.rs）。
           prerelease: true
+          # issue #12 复审：与 stable 流同款——latest.json Windows 块优先 NSIS
+          # （tauri-action 默认 false 会指向 MSI，偏离 NSIS /UPDATE 验收路径）。
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}

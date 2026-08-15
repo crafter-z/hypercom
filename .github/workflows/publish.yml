@@ -81,4 +81,9 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
+          # issue #12 复审：tauri-action 默认 false → MSI+NSIS 并存时 latest.json
+          # 的 Windows 块指向 MSI。更新链路按 NSIS `/UPDATE` 流程设计与验收
+          # （plugins.updater.windows.installMode=passive，installer 等应用退出再
+          # 替换文件并自重启）——必须显式优先 NSIS（plans/12 §5.5 决策项）。
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
