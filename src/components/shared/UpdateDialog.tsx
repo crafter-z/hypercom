@@ -66,7 +66,9 @@ const UpdateDialog: React.FC = () => {
     setDownloading(true);
     setProgress({ downloaded: 0, total: null, phase: 'download' });
     try {
-      await updateService.downloadAndInstall(candidate.channel);
+      // 传候选版本做 TOCTOU 防护：安装前重检查若版本已变（展示后发布了新版），
+      // 后端拒绝安装并报错——重新检查即可（issue #12 复审）。
+      await updateService.downloadAndInstall(candidate.channel, candidate.version);
       // 安装完成后清除 snooze（用户已主动更新）
       updateTiming.clearSnooze();
       await relaunch();
@@ -99,7 +101,9 @@ const UpdateDialog: React.FC = () => {
     : '';
 
   return (
-    <div className="modal-overlay" onClick={close}>
+    // issue #12 复审：下载中遮罩点击不可关闭——X 与三个动作按钮都 disabled，
+    // 遮罩是同一意图的漏网之口（否则点外面关弹窗，后台装完仍无预警 relaunch）。
+    <div className="modal-overlay" onClick={downloading ? undefined : close}>
       <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('update.title')}</h3>
