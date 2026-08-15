@@ -20,6 +20,8 @@
     "core:window:allow-set-title",
     "core:app:allow-version",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "updater:default",
+    "process:default"
   ]
 }
