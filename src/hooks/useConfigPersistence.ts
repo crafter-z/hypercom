@@ -10,6 +10,7 @@ import { notifyError } from '../stores/useToastStore';
  */
 export function useConfigPersistence() {
   const setConfig = useAppStore((s) => s.setConfig);
+  const setUIState = useAppStore((s) => s.setUIState);
   const resetConfig = useAppStore((s) => s.resetConfig);
 
   const loadConfig = useCallback(async () => {
@@ -18,8 +19,13 @@ export function useConfigPersistence() {
       setConfig(config);
     } catch (err) {
       console.warn('[useConfigPersistence] Failed to load config, using defaults:', err);
+    } finally {
+      // issue #12 复审：config 就绪信号（失败时保留默认值同样置位）——
+      // useAutoUpdate 等该信号再评估更新模式，替代旧 3s 启发式窗口
+      // （config 加载超过 3s 会按默认 stable 误判用户设置的 none/preview）。
+      setUIState({ configReady: true });
     }
-  }, [setConfig]);
+  }, [setConfig, setUIState]);
 
   const saveConfig = useCallback(async (config: AppConfig) => {
     try {
