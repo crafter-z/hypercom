@@ -41,6 +41,9 @@ export function shouldAutoCheck(
 ): boolean {
   if (mode === 'none') return false;
   if (lastCheckAt === null) return true;
+  // 时钟回拨防护（issue #12 二轮）：now 早于 lastCheckAt 视为记账损坏直接放行
+  // （否则 now-lastCheckAt 恒为负、永远到不了周期阈值，回拨后永不检查）。
+  if (now < lastCheckAt) return true;
   if (snoozeUntil !== null && now < snoozeUntil) return false;
   return now - lastCheckAt >= CHECK_PERIOD_MS;
 }
@@ -111,6 +114,23 @@ export async function runCheck(
     console.debug('[update] check failed:', e);
     return { update: null, failed: true };
   }
+}
+
+/**
+ * 执行一次自动检查并记账（issue #12 二轮提取，useAutoUpdate 与
+ * ConfigModal「改通道保存后立即首检」共用）：成功（有无更新同）记
+ * lastCheckAt 完成时刻；失败返回 null 不记账（调用方静默或提示自定）。
+ *
+ * @param enabledOverride 仅测试用：透传 runCheck 的 DEV 门控注入。生产不传。
+ */
+export async function runAutoCheck(
+  channel: 'stable' | 'preview',
+  enabledOverride?: boolean,
+): Promise<UpdatePayload | null> {
+  const outcome = await runCheck(channel, enabledOverride);
+  if (outcome.failed) return null;
+  updateTiming.markCheckedAt();
+  return outcome.update;
 }
 
 /**

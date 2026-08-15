@@ -3,6 +3,7 @@ import {
   CHECK_PERIOD_MS,
   parseStoredTs,
   runCheck,
+  runAutoCheck,
   shouldAutoCheck,
   updateTiming,
   manualCheck,
@@ -66,6 +67,13 @@ describe('shouldAutoCheck (issue #12, 7 天周期)', () => {
 
   it('snooze in the past does not block', () => {
     expect(shouldAutoCheck('stable', NOW, NOW - 30 * DAY, NOW - 1)).toBe(true);
+  });
+
+  it('clock rollback treated as corrupted ledger → check anyway (issue #12 二轮)', () => {
+    // now 早于 lastCheckAt（用户回拨系统时钟）→ 负差值永远到不了周期阈值，
+    // 视为记账损坏放行（含 snooze 也在未来时）
+    expect(shouldAutoCheck('stable', NOW, NOW + 5 * DAY, null)).toBe(true);
+    expect(shouldAutoCheck('stable', NOW, NOW + DAY, NOW + 2 * DAY)).toBe(true);
   });
 });
 
@@ -136,6 +144,41 @@ describe('runCheck (issue #12 三分支)', () => {
     expect(outcome.failed).toBe(false);
     expect(outcome.update).toBeNull();
     expect(tauriUpdate.checkForUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAutoCheck (issue #12 二轮：检查+记账一体)', () => {
+  beforeEach(() => {
+    vi.mocked(tauriUpdate.checkForUpdate).mockReset();
+    localStorage.clear();
+  });
+
+  it('success (有更新) → marks lastCheckAt at completion + returns payload', async () => {
+    const payload: UpdatePayload = {
+      version: '0.6.0',
+      currentVersion: '0.5.2',
+      date: 1750000000,
+      notes: 'notes',
+      channel: 'stable',
+    };
+    vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(payload);
+    const update = await runAutoCheck('stable', true);
+    expect(update).toEqual(payload);
+    expect(updateTiming.getLastCheckAt()).not.toBeNull();
+  });
+
+  it('success (无更新) → still marks lastCheckAt', async () => {
+    vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(null);
+    const update = await runAutoCheck('preview', true);
+    expect(update).toBeNull();
+    expect(updateTiming.getLastCheckAt()).not.toBeNull();
+  });
+
+  it('failure → null without marking (下次启动重试)', async () => {
+    vi.mocked(tauriUpdate.checkForUpdate).mockRejectedValue(new Error('network down'));
+    const update = await runAutoCheck('stable', true);
+    expect(update).toBeNull();
+    expect(updateTiming.getLastCheckAt()).toBeNull();
   });
 });
 
