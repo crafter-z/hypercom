@@ -56,6 +56,29 @@ jobs:
       - name: install frontend dependencies
         run: npm ci
 
+      # issue #12 二轮发版护栏①：质量门——发版构建必须先过类型/单测门禁。
+      - name: frontend checks (tsc + vitest)
+        shell: bash
+        run: |
+          npx tsc --noEmit
+          npm run test:run
+
+      - name: cargo test
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+
+      # issue #12 二轮发版护栏②：RELEASE_NOTES 顶部章节必须与版本一致——
+      # 忘加新章节/误留旧章节时 awk 会静默抓上一版 notes 写进 release 描述
+      # 与 latest.json（updater 弹窗文案），此处显式 fail。
+      - name: verify release notes match version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          NOTES_VERSION=$(grep -m1 '^# HyperCom v' RELEASE_NOTES.md | sed 's/^# HyperCom v//' | tr -d '[:space:]')
+          if [ "$VERSION" != "$NOTES_VERSION" ]; then
+            echo "::error::RELEASE_NOTES.md 顶部章节 v$NOTES_VERSION 与 tauri.conf.json 版本 $VERSION 不一致——发版前确认已新增本版本章节"
+            exit 1
+          fi
+
       - name: read release notes
         id: notes
         shell: bash
@@ -87,3 +110,48 @@ jobs:
           # 替换文件并自重启）——必须显式优先 NSIS（plans/12 §5.5 决策项）。
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+  # issue #12 二轮发版护栏③：latest.json 全平台键完整性门禁。
+  # 矩阵部分失败（fail-fast:false）时 tauri-action 逐 job 覆盖 latest.json，
+  # 会产出**缺平台键**的清单——该平台 check() 直接报错（plans/12 §5.1）。
+  # 此 job 把静默损坏变成显式红叉：重跑失败 job / 修复 release 资产后重触发。
+  verify-release:
+    name: verify latest.json integrity
+    needs: publish-tauri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+
+      - name: verify latest.json platform keys
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          URL="https://github.com/crafter-z/hypercom/releases/download/v$VERSION/latest.json"
+          echo "checking $URL"
+          curl -fsSL "$URL" -o latest.json
+          node -e '
+            const fs = require("fs");
+            const j = JSON.parse(fs.readFileSync("latest.json", "utf8"));
+            const version = process.argv[1];
+            const errors = [];
+            if (j.version !== version) errors.push("version mismatch: " + j.version + " != " + version);
+            const required = ["windows-x86_64", "linux-x86_64", "darwin-aarch64", "darwin-x86_64"];
+            for (const key of required) {
+              const p = j.platforms && j.platforms[key];
+              if (!p) { errors.push("missing platform key: " + key); continue; }
+              if (!p.url) errors.push(key + ": missing url");
+              if (!p.signature) errors.push(key + ": missing signature");
+            }
+            if (errors.length) {
+              console.error("latest.json integrity check FAILED:");
+              for (const e of errors) console.error("  - " + e);
+              console.error("重跑失败的矩阵 job 或人工补齐 release 资产后重新触发本 workflow。");
+              process.exit(1);
+            }
+            console.log("latest.json integrity OK: all platform keys present with url+signature");
+          ' "$VERSION"
