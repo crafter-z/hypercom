@@ -47,6 +47,8 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   backupDirectory: '',
   restoreSession: true,
   diagLogEnabled: true,
+  // issue #12：updateCheckMode 必填字面量类型，fixture 补默认值
+  updateCheckMode: 'stable',
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],
