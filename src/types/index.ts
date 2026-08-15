@@ -11,6 +11,9 @@ export type PortStatus = 'disconnected' | 'connecting' | 'error' | 'connected';
 /** 端口工作模式：trx=传统收发 | tty=终端模式（issue #11） */
 export type PortMode = 'trx' | 'tty';
 
+/** 发布通道（issue #12）：stable=正式版 | preview=预览版 */
+export type ReleaseChannel = 'stable' | 'preview';
+
 /** 串口类型 */
 export type PortType = 'real' | 'virtual' | 'sim';
 
@@ -311,6 +314,9 @@ export interface AppConfig {
   // 诊断日志
   diagLogEnabled: boolean; // 是否启用应用自身维测日志（前后端统一落盘；wire 名为 diagLogEnabled，issue #5-2 对齐）
 
+  // 自动更新（issue #12）
+  updateCheckMode: UpdateCheckMode; // 自动检查更新模式：none | stable | preview
+
   // 设置实体（全部存入 config.json）
   sendCommandSets: SendCommandSet[];
   highlightRuleSets: HighlightRuleSet[];
@@ -324,6 +330,28 @@ export interface AppConfig {
 
 /** 日志保存的子目录策略（issue #5-10）。 */
 export type LogSubdirMode = 'none' | 'date' | 'port';
+
+/** 自动检查更新模式（issue #12）：none=不检查，stable=定期到正式版，preview=定期到 preview 版。 */
+export type UpdateCheckMode = 'none' | 'stable' | 'preview';
+
+/** 更新检查返回（Rust `UpdatePayload`，camelCase wire 对齐）。 */
+export interface UpdatePayload {
+  version: string;
+  currentVersion: string;
+  /** unix 秒（RFC3339 pub_date 转来，前端本地化展示） */
+  date: number | null;
+  /** 更新日志（latest.json 的 notes 字段） */
+  notes: string | null;
+  /** 本次检查的通道：stable | preview */
+  channel: ReleaseChannel;
+}
+
+/** `update:progress` 事件载荷（Rust `UpdateProgressPayload`）。 */
+export interface UpdateProgressPayload {
+  downloaded: number;
+  total: number | null;
+  phase: 'download' | 'install';
+}
 
 /** 快捷发送面板·文本模式的发送参数（面板内本地态，不持久化，issue #5-4-6）。 */
 export interface TextSendConfig {
@@ -383,6 +411,9 @@ export interface UIState {
   isHotkeyHelpOpen: boolean; // 快捷键帮助弹窗是否打开
   isAboutOpen: boolean;    // 关于对话框是否打开
   sidebarCollapsed: boolean; // 左侧边栏是否折叠（仅本次会话有效，不进入重启快照）
+  // 更新弹窗（issue #12）：isUpdateOpen + 待展示的更新载荷（null = 仅提示无更新）
+  isUpdateOpen: boolean;
+  updateCandidate: UpdatePayload | null;
 }
 
 // ==================== Tauri 命令参数/返回类型 ====================
