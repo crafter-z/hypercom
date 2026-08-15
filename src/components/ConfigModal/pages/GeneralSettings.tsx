@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { configService } from '../../../services/tauri';
+import { updateTiming } from '../../../utils/updateService';
 import type { AppConfig } from '../../../types';
+import type { UpdateCheckMode } from '../../../types';
 
 /** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
 const clampNumber = (raw: string, min: number, max: number): number => {
@@ -27,6 +29,7 @@ const GeneralSettings: React.FC = () => {
   const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
   const uiFont = useAppStore(s => s.config.uiFont);
   const uiFontSize = useAppStore(s => s.config.uiFontSize);
+  const updateCheckMode = useAppStore(s => s.config.updateCheckMode);
   const setConfig = useAppStore((s) => s.setConfig);
 
   const [configPath, setConfigPath] = useState('');
@@ -154,6 +157,31 @@ const GeneralSettings: React.FC = () => {
           step={1}
           style={{ width: 80 }}
         />
+      </div>
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('update.sectionTitle')}</h4>
+
+      {/* issue #12：自动更新三态模式。改模式同时清除 snooze——新意图立即生效。 */}
+      <div className="config-row" title={t('update.periodHint')}>
+        <label>{t('update.modeLabel')}</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+          {(['none', 'stable', 'preview'] as UpdateCheckMode[]).map((mode) => (
+            <label key={mode} className="checkbox-wrapper">
+              <input
+                type="radio"
+                name="updateCheckMode"
+                value={mode}
+                checked={updateCheckMode === mode}
+                onChange={() => {
+                  setConfig({ updateCheckMode: mode });
+                  updateTiming.clearSnooze();
+                }}
+              />
+              {t(`update.mode.${mode}`)}
+            </label>
+          ))}
+        </div>
       </div>
 
       <div className="divider-h" />

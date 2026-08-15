@@ -3,9 +3,13 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
-import { X, ExternalLink, ScrollText, Bug } from 'lucide-react';
+import { X, ExternalLink, ScrollText, Bug, Download } from 'lucide-react';
 import LicensesDialog from './LicensesDialog';
 import DiagnosticLogDialog from './DiagnosticLogDialog';
+import { manualCheck } from '../../utils/updateService';
+import { useToastStore } from '../../stores/useToastStore';
+import { channelLabelKey } from '../../utils/channel';
+import type { ReleaseChannel } from '../../types';
 
 /** 项目 GitHub 仓库地址（issue #4-6，「关于」界面一键跳转）。 */
 const GITHUB_URL = 'https://github.com/crafter-z/hypercom';
@@ -17,6 +21,8 @@ const AboutDialog: React.FC = () => {
   const [version, setVersion] = useState('');
   const [showLicenses, setShowLicenses] = useState(false);
   const [showDiagLog, setShowDiagLog] = useState(false);
+  // issue #12：手动检查状态（checking → 已完成），disable 期间防重复点击
+  const [checking, setChecking] = useState<ReleaseChannel | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -31,6 +37,37 @@ const AboutDialog: React.FC = () => {
 
   const openGithub = () => {
     open(GITHUB_URL).catch((e) => console.debug('[AboutDialog] open GitHub failed:', e));
+  };
+
+  /**
+   * issue #12：手动检查更新（bypass 周期/snooze，两种通道可选）。
+   * - 有更新 → 打开 UpdateDialog（关掉 About 避免叠层）
+   * - 无更新 → info toast「已是最新」
+   * - 失败 → error toast（手动检查失败要告知用户；自动检查才静默）
+   */
+  const handleManualCheck = async (channel: ReleaseChannel) => {
+    if (checking) return;
+    setChecking(channel);
+    try {
+      // 手动检查不过 DEV 门控：显式用户意图，后端 debug 构建返回 Ok(None)
+      // 双保险（开发时不触网）。E2E 在 dev server 上 mock check_for_update 驱动。
+      const outcome = await manualCheck(channel);
+      if (outcome.failed) {
+        // 固定文案用 messageKey（notifyError 的 raw 优先会吞掉 fallbackKey）
+        useToastStore.getState().push({ severity: 'error', messageKey: 'update.checkFailed' });
+      } else if (outcome.update) {
+        setUIState({ isAboutOpen: false });
+        setUIState({ isUpdateOpen: true, updateCandidate: outcome.update });
+      } else {
+        // manualNoUpdate 带 {{channel}} 插值，经 t() 渲染后以 message 投递
+        useToastStore.getState().push({
+          severity: 'info',
+          message: t('update.manualNoUpdate', { channel: t(channelLabelKey(channel)) }),
+        });
+      }
+    } finally {
+      setChecking(null);
+    }
   };
 
   return (
@@ -76,6 +113,26 @@ const AboutDialog: React.FC = () => {
           <button className="btn btn-sm" onClick={() => setShowDiagLog(true)}>
             <Bug size={14} />
             {t('about.diagLog')}
+          </button>
+        </div>
+
+        {/* issue #12：手动检查更新（正式版 / preview 任选，不受 updateCheckMode=none 限制） */}
+        <div className="about-actions">
+          <button
+            className="btn btn-sm"
+            onClick={() => handleManualCheck('stable')}
+            disabled={checking !== null}
+          >
+            <Download size={14} />
+            {checking === 'stable' ? t('update.checking') : t('update.manualCheckStable')}
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={() => handleManualCheck('preview')}
+            disabled={checking !== null}
+          >
+            <Download size={14} />
+            {checking === 'preview' ? t('update.checking') : t('update.manualCheckPreview')}
           </button>
         </div>
 
