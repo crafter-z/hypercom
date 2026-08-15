@@ -65,6 +65,14 @@ export const updateTiming = {
   markCheckedAt(now: number = Date.now()): void {
     localStorage.setItem(LS_LAST_CHECK, String(now));
   },
+  /**
+   * 清除检查时间记账（issue #12 复审：设置里改通道时与 clearSnooze 一并调用）。
+   * lastCheckAt 不分通道——切通道后旧通道的 7 天周期会推迟新通道首检，
+   * 清掉使新意图立即生效（首启语义：lastCheckAt=null → 立即检查）。
+   */
+  clearLastCheck(): void {
+    localStorage.removeItem(LS_LAST_CHECK);
+  },
   /** 「7 天后再次提醒」 */
   setSnooze(days: number = 7, now: number = Date.now()): void {
     localStorage.setItem(LS_SNOOZE, String(now + days * 24 * 60 * 60 * 1000));

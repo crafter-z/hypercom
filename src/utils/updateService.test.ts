@@ -184,4 +184,13 @@ describe('updateTiming (localStorage 记账)', () => {
     updateTiming.clearSnooze();
     expect(updateTiming.getSnoozeUntil()).toBeNull();
   });
+
+  it('clearLastCheck removes the check timestamp (issue #12 复审：改通道立即生效)', () => {
+    updateTiming.markCheckedAt(NOW);
+    expect(updateTiming.getLastCheckAt()).toBe(NOW);
+    updateTiming.clearLastCheck();
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+    // 清账后回到「从未检查过」语义 → shouldAutoCheck 立即放行
+    expect(shouldAutoCheck('preview', NOW, updateTiming.getLastCheckAt(), null)).toBe(true);
+  });
 });
