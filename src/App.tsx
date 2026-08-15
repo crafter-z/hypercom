@@ -10,10 +10,11 @@ import ToastContainer from './components/shared/Toast/ToastContainer';
 import { useTextEditContextMenu } from './components/shared/TextEditContextMenu';
 import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
 import AboutDialog from './components/shared/AboutDialog';
+import UpdateDialog from './components/shared/UpdateDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge } from './hooks';
+import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUpdate } from './hooks';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
@@ -68,6 +69,8 @@ const App: React.FC = () => {
   usePopoutBridge();
   useHotkeys();
   usePowerManagement();
+  // issue #12：启动自动更新检查（仅主窗）。
+  useAutoUpdate();
   // issue #7-10：全局自定义右键菜单——可编辑元素（输入框/文本域/可编辑区）显示
   // 应用自己的 剪切/复制/粘贴/全选 菜单（替代 webview 原生菜单），其余元素一律
   // 屏蔽原生菜单。取代了旧版"仅屏蔽非输入元素"的 contextmenu effect。
@@ -146,6 +149,7 @@ const App: React.FC = () => {
           <ConfigModal />
           <HotkeyHelpDialog />
           <AboutDialog />
+          <UpdateDialog />
           <ToastContainer />
           {textEditMenuElement}
         </div>
