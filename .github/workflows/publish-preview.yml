@@ -1,17 +1,25 @@
-name: 'publish'
+name: 'publish-preview'
+
+# issue #12：preview 发版流（每版本独立唯一 tag，如 v0.6.0-preview.1）
+#
+# 与 stable publish.yml 的差异：
+# - 触发：tag 匹配 v*-preview*（stable 流已 tags-ignore 排除，两流互不干扰）
+# - releaseDraft: false —— preview release 必须立即可见（GitHub API 解析依赖
+#   它出现在 /releases 列表；draft 不进列表，`find_latest_preview_tag` 也过滤掉）
+# - prerelease: true —— 从 GitHub「latest」解析中排除，stable 用户永不见 preview
+# - tagName: v__VERSION__ —— 沿用 tauri-action 的版本占位符；发版前三文件版本
+#   同步为 0.x.y-preview.N 即生成唯一 tag（绝不重复使用 tag）
+#
+# 产物与 stable 相同（NSIS/MSI/AppImage/dmg + .sig + latest.json），同一把
+# minisign 私钥签名；manifest notes 同样来自 RELEASE_NOTES.md 顶部当前章节。
 
 on:
   push:
     tags:
-      - 'v*'
-      # issue #12：preview tag（v*-preview*）专属 publish-preview.yml 负责，
-      # stable 流必须显式排除——否则 v0.6.0-preview.1 会同时命中两个 workflow，
-      # 同一 tag 被 stable 流再次构建/覆盖 release。
-    tags-ignore:
       - 'v*-preview*'
 
 jobs:
-  publish-tauri:
+  publish-preview-tauri:
     permissions:
       contents: write
     strategy:
@@ -62,10 +70,8 @@ jobs:
         run: |
           {
             echo "body<<RELEASE_NOTES_EOF"
-            # 只取顶部**当前版本**章节（截至下一个 `# HyperCom v` 头之前）：
-            # RELEASE_NOTES.md 是累积式（新章节加在顶部、旧版本保留），`cat` 全文件
-            # 会把所有历史版本都带进 release 描述与 updater 弹窗（见
-            # plans/09-release-workflow.md「Release notes 与 updater 弹窗文案」）。
+            # 与 stable 流同款：只取顶部**当前版本**章节（preview 章节头为
+            # `# HyperCom v0.6.0-preview.1`，同样命中 `^# HyperCom ` 前缀）。
             awk '/^# HyperCom /{n++} n <= 1 {print} n > 1 {exit}' RELEASE_NOTES.md
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
@@ -76,9 +82,16 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          # 每版独立唯一 tag（发版前版本号三处写 0.x.y-preview.N 即生成）。
+          # 绝不复用 tag：prerelease release 会被 GitHub「latest」排除，也无法通过
+          # 共用 endpoint 被 stable 用户拿到，唯一 tag 是 preview 通道的寻址基础。
           tagName: v__VERSION__
-          releaseName: 'HyperCom v__VERSION__'
+          releaseName: 'HyperCom v__VERSION__ (preview)'
           releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: true
-          prerelease: false
+          # 必须立即发布（非 draft）：GitHub API /releases 列表与 updater 的
+          # tag-pinned URL 都需要已发布状态；draft 不在 /releases 中。
+          releaseDraft: false
+          # 关键：标记 prerelease —— ① 从 releases/latest 解析排除（stable 通道
+          # 零污染）；② 前端 API 解析按 prerelease 筛选（见 commands/update.rs）。
+          prerelease: true
           args: ${{ matrix.args }}
