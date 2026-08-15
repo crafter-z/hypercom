@@ -56,15 +56,56 @@
   background: var(--bg-secondary);
 }
 
+/* issue #12 二轮：changelog 结构化渲染（Markdown 轻量解析替代 <pre> 原文） */
 .update-changelog-body {
   margin: 0;
   padding: 10px 12px;
   font-size: 12.5px;
   line-height: 1.6;
-  white-space: pre-wrap;
   word-break: break-word;
   font-family: inherit;
   color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.update-changelog-h1 {
+  font-size: 13.5px;
+  font-weight: 700;
+  margin-top: 8px;
+}
+
+.update-changelog-h1:first-child { margin-top: 0; }
+
+.update-changelog-h2 {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-top: 8px;
+  color: var(--text-primary);
+}
+
+.update-changelog-h3 {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 6px;
+  color: var(--text-secondary);
+}
+
+.update-changelog-bullet {
+  position: relative;
+  padding-left: 14px;
+}
+
+.update-changelog-bullet::before {
+  content: '•';
+  position: absolute;
+  left: 4px;
+  color: var(--text-secondary);
+}
+
+.update-changelog-para {
+  color: var(--text-secondary);
 }
 
 .update-changelog-empty {
@@ -95,4 +136,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* issue #12 二轮：发布页链接靠左（三个动作按钮仍靠右） */
+.update-release-link {
+  margin-right: auto;
 }

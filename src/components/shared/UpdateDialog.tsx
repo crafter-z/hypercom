@@ -1,15 +1,38 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { open } from '@tauri-apps/plugin-shell';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { configService, updateService } from '../../services/tauri';
 import { mergeLiveRuleEntities } from '../../utils/configMerge';
 import { notifyError, notifySuccess } from '../../stores/useToastStore';
-import { channelLabelKey } from '../../utils/channel';
+import { channelLabelKey, releaseUrl } from '../../utils/channel';
+import { parseChangelog, splitBold } from '../../utils/changelog';
 import { updateTiming } from '../../utils/updateService';
 import type { UpdateProgressPayload } from '../../types';
-import { X, Download, Clock, Ban } from 'lucide-react';
+import { X, Download, Clock, Ban, ExternalLink } from 'lucide-react';
+
+/** changelog 块 → React 节点（issue #12 二轮：Markdown 轻量渲染替代 <pre> 原文）。 */
+const ChangelogBlocks: React.FC<{ notes: string }> = ({ notes }) => (
+  <div className="update-changelog-body">
+    {parseChangelog(notes).map((block, i) => {
+      // 行内加粗拆分；React 文本子节点天然转义，无注入面。
+      const segments = splitBold(block.text).map((seg, j) =>
+        seg.bold ? <strong key={j}>{seg.text}</strong> : <span key={j}>{seg.text}</span>,
+      );
+      if (block.kind === 'heading') {
+        return (
+          <div key={i} className={`update-changelog-h${block.level}`}>{segments}</div>
+        );
+      }
+      if (block.kind === 'bullet') {
+        return <div key={i} className="update-changelog-bullet">{segments}</div>;
+      }
+      return <div key={i} className="update-changelog-para">{segments}</div>;
+    })}
+  </div>
+);
 
 /** 更新弹窗（issue #12）：展示版本/日期/changelog + 三动作决策流。 */
 const UpdateDialog: React.FC = () => {
@@ -125,7 +148,7 @@ const UpdateDialog: React.FC = () => {
         <div className="update-changelog">
           <div className="update-changelog-title">{t('update.changelogTitle')}</div>
           {candidate.notes ? (
-            <pre className="update-changelog-body">{candidate.notes}</pre>
+            <ChangelogBlocks notes={candidate.notes} />
           ) : (
             <div className="update-changelog-empty">{t('update.noChangelog')}</div>
           )}
@@ -143,6 +166,18 @@ const UpdateDialog: React.FC = () => {
         {error && <div className="update-error">{error}</div>}
 
         <div className="update-actions">
+          {/* issue #12 二轮：跳转该版本 GitHub Release 页（方案 §2.5 rawJson 预留的落地） */}
+          <button
+            className="btn update-release-link"
+            onClick={() =>
+              open(releaseUrl(candidate.version)).catch((e) =>
+                console.debug('[UpdateDialog] open release page failed:', e),
+              )
+            }
+          >
+            <ExternalLink size={14} />
+            {t('update.viewRelease')}
+          </button>
           <button className="btn" onClick={remindLater} disabled={downloading}>
             <Clock size={14} />
             {t('update.later')}

@@ -8,11 +8,8 @@ import LicensesDialog from './LicensesDialog';
 import DiagnosticLogDialog from './DiagnosticLogDialog';
 import { manualCheck } from '../../utils/updateService';
 import { useToastStore } from '../../stores/useToastStore';
-import { channelLabelKey } from '../../utils/channel';
+import { channelLabelKey, GITHUB_REPO_URL } from '../../utils/channel';
 import type { ReleaseChannel } from '../../types';
-
-/** 项目 GitHub 仓库地址（issue #4-6，「关于」界面一键跳转）。 */
-const GITHUB_URL = 'https://github.com/crafter-z/hypercom';
 
 const AboutDialog: React.FC = () => {
   const { t } = useTranslation();
@@ -36,7 +33,7 @@ const AboutDialog: React.FC = () => {
   const close = () => setUIState({ isAboutOpen: false });
 
   const openGithub = () => {
-    open(GITHUB_URL).catch((e) => console.debug('[AboutDialog] open GitHub failed:', e));
+    open(GITHUB_REPO_URL).catch((e) => console.debug('[AboutDialog] open GitHub failed:', e));
   };
 
   /**

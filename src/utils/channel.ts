@@ -13,3 +13,11 @@ import type { ReleaseChannel } from '../types';
 export function channelLabelKey(channel: ReleaseChannel): string {
   return channel === 'preview' ? 'update.channel.preview' : 'update.channel.stable';
 }
+
+/** 项目 GitHub 仓库（issue #4-6；AboutDialog 与更新弹窗共用）。 */
+export const GITHUB_REPO_URL = 'https://github.com/crafter-z/hypercom';
+
+/** 版本对应 GitHub Release 页地址（tag 约定 `v<version>`，见发版流 tagName）。 */
+export function releaseUrl(version: string): string {
+  return `${GITHUB_REPO_URL}/releases/tag/v${version}`;
+}
