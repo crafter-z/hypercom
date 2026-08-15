@@ -201,6 +201,8 @@ const defaultUIState: UIState = {
   // issue #12：更新弹窗初始关闭、无候选更新。
   isUpdateOpen: false,
   updateCandidate: null,
+  // issue #12 复审：启动时 config 未就绪，loadConfig 完成后置 true。
+  configReady: false,
 };
 
 // ==================== Store 状态定义 ====================
