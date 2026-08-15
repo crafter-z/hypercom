@@ -10,7 +10,9 @@
  *   解析出**版本号最大**的 preview tag（issue #12 复审：API 顺序是创建时间序，
  *   补发旧核心 preview 会乱序——取 semver 最大而非第一个命中），再指向
  *   `releases/download/<tag>/latest.json`（唯一 tag 不受影响，preview→preview
- *   自动升级可用）。
+ *   自动升级可用）。**preview 语义 = max(preview, stable)**（issue #12 二轮）：
+ *   preview 检查同时查 stable，取 semver 大者的通道——preview 收尾发布 stable
+ *   后用户自动晋升（含 stable 热修），preview 端点解析失败也降级到 stable。
  * - 双层门控：与 simulation.rs 同款三态——release 构建走真实逻辑；
  *   debug 构建（`cargo check`/`tauri dev`）命令直接返回 Ok(None)/Ok(())；
  *   纯解析函数 `#[cfg(any(test, not(debug_assertions)))]`（测试在 debug
@@ -147,6 +149,50 @@ fn parse_preview_tag(tag: &str) -> (u64, u64, u64, u64) {
     (major, minor, patch, n)
 }
 
+/// 版本号比较键 `(major, minor, patch, rank)`（issue #12 二轮）。
+/// rank 语义与 semver precedence 一致：无后缀（stable）= `u64::MAX`
+/// （同核心号下 stable > preview.N），`preview.N` = N；其它后缀防御性取 0
+/// （发布纪律下不会出现 alpha/beta）。容忍可选 `v` 前缀。纯函数。
+#[cfg(any(test, not(debug_assertions)))]
+fn version_key(version: &str) -> (u64, u64, u64, u64) {
+    let without_v = version.strip_prefix('v').unwrap_or(version);
+    let (core, suffix) = without_v.split_once('-').unwrap_or((without_v, ""));
+    let mut segs = core.split('.').map(|s| s.parse::<u64>().unwrap_or(0));
+    let major = segs.next().unwrap_or(0);
+    let minor = segs.next().unwrap_or(0);
+    let patch = segs.next().unwrap_or(0);
+    let rank = if suffix.is_empty() {
+        u64::MAX
+    } else {
+        suffix
+            .strip_prefix("preview.")
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    (major, minor, patch, rank)
+}
+
+/// 双通道候选版本中取 semver 大者的通道（issue #12 二轮 preview 语义）；
+/// 键相等（不应发生，防御）取 stable——正式形态优先。纯函数，便于单测。
+#[cfg(any(test, not(debug_assertions)))]
+fn newer_channel<'a>(
+    preview_version: Option<&'a str>,
+    stable_version: Option<&'a str>,
+) -> Option<&'static str> {
+    match (preview_version, stable_version) {
+        (Some(p), Some(s)) => {
+            if version_key(p) > version_key(s) {
+                Some("preview")
+            } else {
+                Some("stable")
+            }
+        }
+        (Some(_), None) => Some("preview"),
+        (None, Some(_)) => Some("stable"),
+        (None, None) => None,
+    }
+}
+
 /// 检查更新结果（序列化给前端，camelCase）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,7 +276,26 @@ async fn updater_for_channel(
     build_updater(app, endpoint)
 }
 
-/// 检查是否有更新（debug 构建直接返回「无更新」）
+/// 单 endpoint 检查（构造 updater + check 一次）
+#[cfg(not(debug_assertions))]
+async fn check_endpoint(
+    app: &AppHandle,
+    endpoint: url::Url,
+) -> Result<Option<tauri_plugin_updater::Update>, CommandError> {
+    let updater = build_updater(app, endpoint)?;
+    updater
+        .check()
+        .await
+        .map_err(|e| CommandError::Other(format!("update check failed: {e}")))
+}
+
+/// 检查是否有更新（debug 构建直接返回「无更新」）。
+///
+/// **preview 通道语义 = max(preview, stable)**（issue #12 二轮）：preview 收尾
+/// 发布 stable 后，只查 preview 端点的用户永远收不到晋升与 stable 热修——
+/// 因此 preview 检查同时查 stable，取 semver 大者的通道返回（payload.channel
+/// 反映更新实际来源，安装时按该通道解析 endpoint）。preview 端点解析失败
+/// （API 限流/无 preview release）降级为仅 stable。
 #[tauri::command]
 pub async fn check_for_update(
     app: tauri::AppHandle,
@@ -243,11 +308,60 @@ pub async fn check_for_update(
     }
     #[cfg(not(debug_assertions))]
     {
-        let updater = updater_for_channel(&app, &channel).await?;
-        match updater.check().await {
-            Ok(Some(update)) => Ok(Some(to_payload(&update, &channel))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(CommandError::Other(format!("update check failed: {e}"))),
+        let client = reqwest::Client::builder()
+            .timeout(GITHUB_API_TIMEOUT)
+            .build()
+            .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
+
+        match channel.as_str() {
+            "stable" => {
+                let update = check_endpoint(&app, stable_endpoint()?).await?;
+                Ok(update.map(|u| to_payload(&u, "stable")))
+            }
+            "preview" => {
+                let preview_result = async {
+                    let endpoint = preview_endpoint(&client).await?;
+                    check_endpoint(&app, endpoint).await
+                }
+                .await;
+                let stable_result = check_endpoint(&app, stable_endpoint()?).await;
+
+                match (preview_result, stable_result) {
+                    (Ok(preview), Ok(stable)) => {
+                        let chosen = newer_channel(
+                            preview.as_ref().map(|u| u.version.as_str()),
+                            stable.as_ref().map(|u| u.version.as_str()),
+                        );
+                        Ok(match chosen {
+                            Some("preview") => preview.map(|u| to_payload(&u, "preview")),
+                            Some("stable") => stable.map(|u| to_payload(&u, "stable")),
+                            None => None,
+                        })
+                    }
+                    // 双通道之一失败：另一通道有更新就用它，否则把失败透出
+                    // （自动检查静默、手动检查 toast——不因半边失败丢可用更新）。
+                    (Ok(preview), Err(e)) => {
+                        if preview.is_some() {
+                            log::warn!("stable check failed, using preview result: {e}");
+                            Ok(preview.map(|u| to_payload(&u, "preview")))
+                        } else {
+                            Err(e)
+                        }
+                    }
+                    (Err(e), Ok(stable)) => {
+                        if stable.is_some() {
+                            log::warn!("preview resolution/check failed, falling back to stable: {e}");
+                            Ok(stable.map(|u| to_payload(&u, "stable")))
+                        } else {
+                            Err(e)
+                        }
+                    }
+                    (Err(e_preview), Err(_e_stable)) => Err(e_preview),
+                }
+            }
+            other => Err(CommandError::Other(format!(
+                "unknown update channel: {other}"
+            ))),
         }
     }
 }
@@ -393,5 +507,47 @@ mod tests {
             find_latest_preview_tag(&json).as_deref(),
             Some("v0.10.0-preview.10")
         );
+    }
+
+    // ==================== issue #12 二轮：version_key / newer_channel ====================
+
+    #[test]
+    fn version_key_respects_semver_precedence() {
+        // 同核心号：stable > preview.N（晋升判定基础）
+        assert!(version_key("0.6.0") > version_key("0.6.0-preview.9"));
+        // preview 序号数值比较
+        assert!(version_key("0.6.0-preview.10") > version_key("0.6.0-preview.2"));
+        // 核心号数值比较（非词典序）
+        assert!(version_key("0.10.0") > version_key("0.9.9"));
+        assert!(version_key("0.10.0-preview.1") > version_key("0.9.9"));
+        // 容忍 v 前缀
+        assert_eq!(version_key("v0.6.0"), version_key("0.6.0"));
+        // 相等
+        assert_eq!(version_key("0.6.0-preview.2"), version_key("v0.6.0-preview.2"));
+    }
+
+    #[test]
+    fn newer_channel_picks_semver_max() {
+        // preview 核心号更高 → preview
+        assert_eq!(
+            newer_channel(Some("0.6.0-preview.1"), Some("0.5.3")),
+            Some("preview")
+        );
+        // 同核心 stable 已发布 → stable（晋升）
+        assert_eq!(
+            newer_channel(Some("0.6.0-preview.3"), Some("0.6.0")),
+            Some("stable")
+        );
+        // stable 热修高于旧核心 preview（防御补发旧核心场景）
+        assert_eq!(
+            newer_channel(Some("0.5.4-preview.1"), Some("0.6.1")),
+            Some("stable")
+        );
+        // 单边候选 / 无候选
+        assert_eq!(newer_channel(Some("0.6.0-preview.1"), None), Some("preview"));
+        assert_eq!(newer_channel(None, Some("0.5.3")), Some("stable"));
+        assert_eq!(newer_channel(None, None), None);
+        // 相等（防御）→ stable 优先
+        assert_eq!(newer_channel(Some("0.6.0"), Some("0.6.0")), Some("stable"));
     }
 }
