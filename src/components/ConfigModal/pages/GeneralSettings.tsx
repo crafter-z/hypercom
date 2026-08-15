@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { configService } from '../../../services/tauri';
-import { updateTiming } from '../../../utils/updateService';
 import type { AppConfig } from '../../../types';
 import type { UpdateCheckMode } from '../../../types';
 
@@ -162,7 +161,8 @@ const GeneralSettings: React.FC = () => {
       <div className="divider-h" />
       <h4 className="config-section-title">{t('update.sectionTitle')}</h4>
 
-      {/* issue #12：自动更新三态模式。改模式同时清除 snooze——新意图立即生效。 */}
+      {/* issue #12：自动更新三态模式。模式变更的清账副作用（clearSnooze +
+          clearLastCheck）在 ConfigModal.handleSave 保存边界执行——取消时不泄漏。 */}
       <div className="config-row" title={t('update.periodHint')}>
         <label>{t('update.modeLabel')}</label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
@@ -173,10 +173,7 @@ const GeneralSettings: React.FC = () => {
                 name="updateCheckMode"
                 value={mode}
                 checked={updateCheckMode === mode}
-                onChange={() => {
-                  setConfig({ updateCheckMode: mode });
-                  updateTiming.clearSnooze();
-                }}
+                onChange={() => setConfig({ updateCheckMode: mode })}
               />
               {t(`update.mode.${mode}`)}
             </label>

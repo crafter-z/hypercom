@@ -4,6 +4,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useConfigPersistence } from '../../hooks';
 import { mergeLiveRuleEntities } from '../../utils/configMerge';
+import { updateTiming } from '../../utils/updateService';
 import type { AppConfig } from '../../types';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, X,
@@ -74,7 +75,17 @@ const ConfigModal: React.FC = () => {
     // 直接经 storageService 落盘 config.json，从不回写 store.config。这里若
     // 直接全量保存会用过期快照整体替换后端刚写入的实体（issue #5-2）——
     // 先合并 useRuleStore 的实时实体再保存。
-    await saveConfig(mergeLiveRuleEntities(useAppStore.getState().config, useRuleStore.getState()));
+    // issue #12 复审：更新模式变更的副作用挪到**保存边界**（旧实现放 radio
+    // onChange——用户点「取消」时配置回滚、snooze 却已清，副作用泄漏）。
+    // 清 snooze + lastCheckAt 使新通道立即生效：lastCheckAt 不分通道，
+    // 旧通道的 7 天周期会推迟新通道首检。
+    const snapshot = configSnapshotRef.current;
+    const current = useAppStore.getState().config;
+    if (snapshot && snapshot.updateCheckMode !== current.updateCheckMode) {
+      updateTiming.clearSnooze();
+      updateTiming.clearLastCheck();
+    }
+    await saveConfig(mergeLiveRuleEntities(current, useRuleStore.getState()));
     configSnapshotRef.current = null;
     toggleConfigModal(false);
   };
