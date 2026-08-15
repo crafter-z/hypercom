@@ -77,7 +77,7 @@ Preview 发版操作步骤（与 stable §发版操作步骤 同构）：
 
 | Runner | 产物 | 备注 |
 |--------|------|------|
-| `windows-latest` | NSIS `.exe` + `.msi` + `.nsis.zip`（updater） | 主要分发平台 |
+| `windows-latest` | NSIS `.exe` + `.msi`（含对应的 `.sig`，updater） | 主要分发平台；`createUpdaterArtifacts: true`（raw 安装包，非 zip） |
 | `ubuntu-22.04` | `.deb` + `.AppImage` | 需 webkit2gtk + libudev 系统依赖 |
 | `macos-latest` (aarch64) | `.dmg` | Apple Silicon |
 | `macos-latest` (x86_64) | `.dmg` | Intel Mac |
@@ -107,7 +107,7 @@ npx tauri signer generate -w ~/.tauri/hypercom.key
 
 ### 3. Updater Endpoint
 
-当前配置（`tauri.conf.json`）：
+`tauri.conf.json` 中的 endpoint 是 stable 通道（`releases/latest/download/latest.json`）——config 级兜底；运行时实际 endpoint 由 `commands/update.rs` 按通道选择（stable 直连上述 URL，preview 经 GitHub API 解析 tag），见 `plans/12-autoupdate.md` §2.2。
 
 ```json
 "endpoints": [
@@ -147,11 +147,13 @@ git push origin main --tags
 
 ## Updater 自动更新原理
 
-1. 应用启动时，`tauri-plugin-updater` 请求 endpoint 获取 `latest.json`
-2. 比较 `latest.json.version` 与当前 `app.version`
-3. 有新版本 → 下载对应平台的 `.nsis.zip`（Windows）/ `.dmg`（macOS）/ `.AppImage`（Linux）
-4. 用 `pubkey` 验证 `.sig` 签名 → 合法则提示用户更新
-5. Windows 使用 `passive` 安装模式（显示进度条，无需用户交互）
+> 最终运行链路见 `plans/12-autoupdate.md`（本工作流只保证产物/清单/渠道正确，客户端行为由前端 `useAutoUpdate` + 后端 `commands/update.rs` 驱动）。要点：
+
+1. 应用启动 3s 后，前端评估自动更新（`updateCheckMode` 设置决定通道与开关，7 天周期）
+2. 后端 `check_for_update` 请求该通道 endpoint 获取 `latest.json`（stable 直连 `releases/latest`，preview 经 GitHub API 解析最新 preview tag）
+3. 比较 `latest.json.version` 与当前 `app.version`（semver `>`：同版本/降级不更新）
+4. 有新版本 → 弹窗展示 changelog（`notes`）→ 用户点「立即更新」→ 下载**该平台安装包 + `.sig`**
+5. 用 `pubkey` 验证 `.sig` 签名 → 合法才安装；Windows 使用 `passive` 安装模式（`/UPDATE`，显示进度条，无需用户交互）
 
 ## Release notes 与 updater 弹窗文案（RELEASE_NOTES.md）
 

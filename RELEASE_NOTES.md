@@ -1,3 +1,23 @@
+# HyperCom v0.5.3
+
+0.5.2 之后的新功能：**自动更新**（issue #12）——通道（正式版/preview）运行时用户选择、7 天周期检查、更新弹窗三动作决策流、About 手动检查；同步配套 preview 双 release 流。
+
+## 新功能
+
+**自动更新（issue #12）** — 完整自动更新链路：
+
+- **通道用户可选的运行时设置**：通用设置新增「自动更新」三态——不自动检查 / 定期检查到正式版（默认）/ 定期检查到 preview 版；**所有周期统一 7 天**（启动时评估：首启立即、上次成功检查后满 7 天、忽略 snooze 期），记账存 localStorage 随安装持久
+- **发现更新 → 弹窗三动作**：通道徽标 + 新版本 + 发布日期 + 更新日志（changelog）；**立即更新**（下载进度条 → 安装 → 重启）、**7 天后提醒**（写 snooze）、**不更新（永不提醒）**（同步设置项为「不自动检查」，可在设置重新开启）
+- **About 手动检查**：可选「检查正式版更新」或「检查 preview 更新」，不受「不自动检查」限制；无更新/失败有明确 toast
+- **通道隔离**：正式版用户永远只看正式版（GitHub `releases/latest` 语义天然排除 prerelease）；preview 用户自动跟进最新 preview（经 GitHub API 解析最新 `vX.Y.Z-preview.N` tag，每版唯一 tag），对应正式版发布后自动晋升
+- **双层门控**：debug 构建不检查（后端返回"无更新" + 前端短路），仅 release 安装包生效；检查失败静默降级（诊断日志记录），手动检查失败才提示
+- **preview 发版流**：新 `.github/workflows/publish-preview.yml`——tag `v0.x.y-preview.N`（唯一 tag + prerelease 标记）触发独立构建，stable 流已排除 preview tag 防重复
+
+## 其他
+
+- 测试扩充：vitest 567 → **589**（30 文件，updateService/channel 22），cargo test 128 → **134**（`find_latest_preview_tag` 5 + update_check_mode clamp 1），E2E 14 → **16**（更新弹窗冒烟 + 永不提醒同步断言）
+- 文档：`plans/12-autoupdate.md` 方案、`plans/09-release-workflow.md` preview 发版流程、各 AGENTS.md 同步
+
 # HyperCom v0.5.2
 
 0.5.0 发布后的四项修复：循环发送每端口独立引擎（多串口并行压测）、串口热插拔状态卡死、多串口压测日志"半页刷屏"、日志空行落盘。
