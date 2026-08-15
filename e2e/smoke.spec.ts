@@ -252,4 +252,68 @@ test.describe('HyperCom smoke tests', () => {
     await page.waitForTimeout(200);
     await expect(page.locator('.context-menu')).toHaveCount(0);
   });
+
+  // ==================== issue #12：自动更新 ====================
+
+  test('About manual check finds an update and opens the dialog (issue #12)', async ({ page }) => {
+    // mock 后端：手动检查 stable 返回一个有更新的 payload（dev server 外其余命令回退原 mock）
+    await page.evaluate(() => {
+      const original = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: { channel?: string }) => {
+        if (cmd === 'check_for_update' && args?.channel === 'stable') {
+          return {
+            version: '0.6.0',
+            currentVersion: '0.5.2',
+            date: 1750000000,
+            notes: 'New stable release notes',
+            channel: 'stable',
+          };
+        }
+        return original(cmd, args as never);
+      };
+    });
+
+    // 打开 About 对话框（标题栏「关于」图标按钮）
+    await page.locator('.titlebar-right button[title="关于"]').click();
+    await expect(page.locator('.modal-dialog-compact')).toBeVisible();
+    // 点「检查正式版更新」→ 弹窗应出现
+    await page.locator('.about-actions button', { hasText: '检查正式版更新' }).click();
+    await expect(page.locator('.update-channel-badge')).toBeVisible();
+    await expect(page.locator('.update-channel-badge')).toHaveText('正式版');
+    await expect(page.locator('.update-version')).toHaveText('0.6.0');
+    await expect(page.locator('.update-changelog-body')).toHaveText('New stable release notes');
+    // 三动作按钮存在
+    await expect(page.locator('.update-actions button', { hasText: '立即更新' })).toBeVisible();
+    await expect(page.locator('.update-actions button', { hasText: '7 天后提醒' })).toBeVisible();
+    await expect(page.locator('.update-actions button', { hasText: '不更新（永不提醒）' })).toBeVisible();
+  });
+
+  test('Update dialog never-remind syncs updateCheckMode=none (issue #12)', async ({ page }) => {
+    // mock：每次 stable 检查都有新版本 → 手动检查 → 永不提醒 → 设置项同步
+    await page.evaluate(() => {
+      const original = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: { channel?: string }) => {
+        if (cmd === 'check_for_update' && args?.channel === 'stable') {
+          return {
+            version: '0.6.1',
+            currentVersion: '0.5.2',
+            date: 1750000000,
+            notes: 'notes',
+            channel: 'stable',
+          };
+        }
+        return original(cmd, args as never);
+      };
+    });
+    // About → 手动检查 → 永不提醒
+    await page.locator('.titlebar-right button[title="关于"]').click();
+    await page.locator('.about-actions button', { hasText: '检查正式版更新' }).click();
+    await page.locator('.update-actions button', { hasText: '不更新（永不提醒）' }).click();
+    await expect(page.locator('.update-dialog-meta')).toHaveCount(0);
+    // 打开设置弹窗 → 自动更新 radio「不自动检查更新」应被选中
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await expect(page.locator('.config-page').getByText('不自动检查更新')).toBeVisible();
+    const radio = page.locator('input[name="updateCheckMode"][value="none"]');
+    await expect(radio).toBeChecked();
+  });
 });
