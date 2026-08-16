@@ -1520,6 +1520,7 @@ name = "hypercom"
 version = "0.5.2"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "encoding_rs",

@@ -201,6 +201,16 @@ pub struct AppConfig {
     pub ui_font: String,
     pub ui_font_size: u32,
 
+    // --- 背景图设置（自定义背景图片，issue #13）---
+    #[serde(default)]
+    pub background_image: String,
+    #[serde(default = "default_false")]
+    pub background_image_enabled: bool,
+    #[serde(default = "default_background_image_opacity")]
+    pub background_image_opacity: u32,
+    #[serde(default = "default_background_image_blur")]
+    pub background_image_blur: u32,
+
     // --- 串口默认设置 ---
     pub default_baud_rates: Vec<u32>,
     pub default_line_ending: String, // "\\r\\n" | "\\r" | "\\n" | "None"
@@ -316,6 +326,20 @@ fn default_log_subdir_mode() -> String {
     "date".to_string()
 }
 
+fn default_false() -> bool {
+    false
+}
+
+/// issue #13：背景图默认不透明度 50%。
+fn default_background_image_opacity() -> u32 {
+    50
+}
+
+/// issue #13：背景图默认模糊半径 0（不模糊）。
+fn default_background_image_blur() -> u32 {
+    0
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -334,6 +358,10 @@ impl Default for AppConfig {
             terminal_font_size: 14,
             ui_font: "Inter, sans-serif".to_string(),
             ui_font_size: 14,
+            background_image: String::new(),
+            background_image_enabled: false,
+            background_image_opacity: 50,
+            background_image_blur: 0,
             default_baud_rates: vec![9600, 19200, 38400, 57600, 115200, 921600],
             default_line_ending: "\\r\\n".to_string(),
             // issue #7-3：终端已有 TX/RX 方向标识，发送提示前缀默认留空。
@@ -487,6 +515,9 @@ impl ConfigManager {
         config.log_split_size_mb = config.log_split_size_mb.clamp(1, 10240);
         config.backup_interval = config.backup_interval.clamp(1, 720);
         config.quick_send_inline_count = config.quick_send_inline_count.clamp(0, 20);
+        // issue #13：背景图不透明度 [0,100]；模糊半径 [0,64]。
+        config.background_image_opacity = config.background_image_opacity.clamp(0, 100);
+        config.background_image_blur = config.background_image_blur.clamp(0, 64);
         if !["minimize", "exit"].contains(&config.close_behavior.as_str()) {
             config.close_behavior = "exit".to_string();
         }
@@ -913,7 +944,7 @@ mod tests {
         let json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
             "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
             "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
-            "uiFont":"sans","uiFontSize":14,"backgroundImage":null,
+            "uiFont":"sans","uiFontSize":14,
             "defaultBaudRates":[9600],"defaultLineEnding":"\\r\\n","sendPrefix":">>",
             "showPortType":true,"sendOnEnter":true,"quickSendInlineCount":6,
             "timestampFormat":"absolute","timestampMode":"perLine",
