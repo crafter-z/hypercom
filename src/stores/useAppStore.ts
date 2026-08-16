@@ -151,6 +151,11 @@ const defaultConfig: AppConfig = {
   terminalFontSize: 14,
   uiFont: 'Inter, sans-serif',
   uiFontSize: 14,
+  // 背景图（issue #13）：默认关闭；启用后全窗毛玻璃（透明度 50%，模糊 0px 起步）。
+  backgroundImage: '',
+  backgroundImageEnabled: false,
+  backgroundImageOpacity: 50,
+  backgroundImageBlur: 0,
   defaultBaudRates: [9600, 19200, 38400, 57600, 115200, 921600],
   defaultLineEnding: '\\r\\n',
   // issue #7-3：终端已有 TX/RX 方向标识，发送提示前缀默认留空（功能保留，设置页可配）。

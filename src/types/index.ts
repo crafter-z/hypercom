@@ -278,6 +278,13 @@ export interface AppConfig {
   terminalFontSize: number;
   uiFont: string;
   uiFontSize: number;
+
+  // 背景图设置（自定义背景图片，issue #13）：全应用毛玻璃——启用后各面板表面
+  // 变为半透明，露出全局背景图（不透明度/模糊度可调）。
+  backgroundImage: string;          // 图片绝对路径，'' = 未设置
+  backgroundImageEnabled: boolean;  // 是否启用背景图（触发毛玻璃）
+  backgroundImageOpacity: number;   // 不透明度 0–100（%）
+  backgroundImageBlur: number;      // 模糊度 0–64（px）
   
   // 串口默认设置
   defaultBaudRates: number[];
