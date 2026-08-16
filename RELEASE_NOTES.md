@@ -1,3 +1,29 @@
+# HyperCom v0.6.0-preview.1
+
+0.6.0 核心的首个 **preview**（prerelease——不进入「最新正式版」解析，stable 通道用户不受影响；preview 通道用户可经自动更新或手动安装获取）。汇聚自 v0.5.2 以来 main 上的新功能：**自动更新（issue #12）** 与 **自定义背景图 · 全应用毛玻璃（issue #13）**。
+
+## 新功能
+
+**自动更新（issue #12）**：
+
+- **通道运行时用户选择**：通用设置「自动更新」三态——不检查 / 定期检查到正式版（默认）/ 定期检查到 preview；7 天周期（首启立即、上次成功检查后满 7 天、snooze 暂停、会话内 6h 重评估覆盖常驻挂机），记账存 localStorage
+- **发现更新 → 弹窗三动作**：立即更新（下载进度条 → 安装 → 重启）/ 7 天后提醒 / 永不提醒（同步设置项）；About 手动检查可选正式版 / preview
+- **preview 通道语义 = max(preview, stable)**：本版 tag 为 `v0.6.0-preview.1`（唯一 tag），0.6.0 stable 落地后 preview 用户自动晋升；stable 通道永不泄漏 preview
+- **发版 CI 三重护栏**：tsc + vitest + cargo test 质量门、RELEASE_NOTES 章节↔版本校验、verify-release 对 latest.json 四平台键完整性门禁
+- **macOS 暂不支持自动更新**（未签名/公证，macOS 用户手动安装即可）
+
+**自定义背景图（issue #13）**：
+
+- 「设置 → 显示与交互」新增「背景图」区段：启用勾选 → 浏览选择图片（原生对话框，png/jpg/jpeg/bmp/webp/gif）→ 不透明度 0–100% → 模糊度 0–64px
+- 路径存 config.json，经后端 `read_image_data_url` 读为 base64 data URL（20MB 上限 + 扩展名白名单 + 静默降级），dev/prod 一致、不依赖 asset protocol（issue #3-5 旧实现曾因硬化 webview 载不动裸路径而删除，本次以 data URL 形态回归）
+- **全应用毛玻璃**：启用后所有 `--bg-*` 表面 token 换半透明 rgba（亮/暗主题两套 alpha，终端区最深 0.72、浮层 0.90 保可读），背景图垫全窗口底层（`z-index:-1`）；TTY xterm 背景实时重绘
+
+## 其他
+
+- 测试：vitest **600** 例 / 31 文件、cargo test **145** 例全绿；tsc + cargo check 0 错误
+- 文档：AGENTS.md / README / RELEASE_NOTES / 子目录 AGENTS.md 已同步至 issue #13
+- 已知边界：弹出窗（独立 webview）不共享背景层；macOS 自动更新需手动安装
+
 # HyperCom v0.5.4
 
 0.5.3 之后的新功能：**自定义背景图**（issue #13）——可选背景图片 + 不透明度/模糊度调节，启用后**全应用毛玻璃**。
