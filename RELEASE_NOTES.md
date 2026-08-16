@@ -1,3 +1,20 @@
+# HyperCom v0.5.4
+
+0.5.3 之后的新功能：**自定义背景图**（issue #13）——可选背景图片 + 不透明度/模糊度调节，启用后**全应用毛玻璃**。
+
+## 新功能
+
+**自定义背景图（issue #13）**：
+
+- **设置入口**：「设置 → 显示与交互」新增「背景图」区段——启用勾选、只读路径 + 浏览按钮（原生对话框，png/jpg/jpeg/bmp/webp/gif 过滤器）、不透明度 0–100%、模糊度 0–64px；四项配置存 config.json
+- **全应用毛玻璃**：启用后所有 `--bg-*` 表面 token 换半透明 rgba（亮/暗主题各一套 alpha，终端区最深 0.72、浮层 0.90 保可读），背景图垫全窗口底层（`.app-background` fixed + `z-index:-1`）；TTY xterm 背景实时重绘（创建时快照，切换时按 config 活更新）
+- **图片加载**：路径经后端 `read_image_data_url` 读为 base64 data URL（20MB 上限 + 扩展名白名单 + 静默降级），dev/prod 一致，不依赖 asset protocol（历史：issue #3-5 曾因硬化 webview 载不动裸路径而删除过背景图功能，本次以 data URL 形态回归）
+
+## 其他
+
+- 测试扩充：vitest 589 → **600**（31 文件），cargo test 134 → **145**（`image_mime_from_ext` 映射 + `read_image_data_url` data URL 往返等 7 例）
+- 文档：README 功能列表与测试计数、根 AGENTS.md（overview 条目 / WHERE TO LOOK / 命令表 / i18n 计数 / 死字段说明）、commands/ConfigModal/MainDisplay 子目录 AGENTS.md、THIRD_PARTY_LICENSES 补充 base64
+
 # HyperCom v0.5.3
 
 0.5.2 之后的新功能：**自动更新**（issue #12）——通道（正式版/preview）运行时用户选择、7 天周期检查、更新弹窗三动作决策流、About 手动检查；同步配套 preview 双 release 流。

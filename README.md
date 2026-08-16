@@ -29,6 +29,7 @@
 - 📅 **时间戳 / TX·RX 着色** — 多种格式、字符串/HEX/二进制切换（per-tab）
 - 🌐 **编码实时切换** — UTF-8 / GBK / ISO-8859-1 / ASCII，切换时自动重解码
 - 🌗 **暗色 / 亮色 / 跟随系统** — CSS 变量主题
+- 🖼️ **自定义背景图** — 支持设置背景图片（浏览选择 / 路径存于 config.json，经后端读为 base64 data URL）、不透明度（0–100%）、模糊度（0–64px）；启用后**全应用毛玻璃**（各面板 `--bg-*` token 换半透明 rgba，亮/暗主题各一套 alpha，TTY xterm 背景实时重绘），设置入口在「显示与交互」页
 
 ### 收发与命令
 - ✉️ **手动发送** — 字符串 / HEX（双向转换、输入净化）/ 自定义行结束符
@@ -87,7 +88,7 @@
 | `lucide-react` | ^1.14.0 | 图标 |
 | `vitest` | ^4.1.7 | 单元测试 |
 
-> 全局 CSS Variables，按组件拆分到 `src/styles/`（11 组件 CSS + `base.css`），无 CSS-in-JS。
+> 全局 CSS Variables，按组件拆分到 `src/styles/`（12 组件 CSS + `base.css`），无 CSS-in-JS。
 
 ### 后端
 
@@ -142,8 +143,8 @@ npm run tauri build
 ```bash
 npx tsc --noEmit                                       # TypeScript
 cargo check --manifest-path src-tauri/Cargo.toml       # Rust
-npm run test:run                                       # vitest (587 cases / 30 files)
-cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (136 cases)
+npm run test:run                                       # vitest (600 cases / 31 files)
+cargo test --lib --manifest-path src-tauri/Cargo.toml  # Rust 单元测试 (145 cases)
 npx playwright test                                    # E2E 冒烟 (16 tests)
 ```
 

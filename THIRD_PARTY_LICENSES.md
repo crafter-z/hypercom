@@ -44,6 +44,7 @@ HyperCom 基于以下开源项目构建。本页列出各技术栈依赖及其�
 | `log` | 0.4 | MIT OR Apache-2.0 |
 | `env_logger` | 0.11 | MIT OR Apache-2.0 |
 | `sysinfo` | 0.33 | MIT |
+| `base64` | 0.22 | MIT OR Apache-2.0 |
 
 ## 许可证说明
 
