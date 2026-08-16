@@ -335,6 +335,12 @@ pub async fn check_for_update(
                         Ok(match chosen {
                             Some("preview") => preview.map(|u| to_payload(&u, "preview")),
                             Some("stable") => stable.map(|u| to_payload(&u, "stable")),
+                            // 防御：newer_channel 纯函数目前只返回 preview/stable/None；
+                            // 未来演进若出现意外值，不静默装错通道，记日志按无更新处理。
+                            Some(other) => {
+                                log::warn!("newer_channel returned unexpected channel: {other}");
+                                None
+                            }
                             None => None,
                         })
                     }
