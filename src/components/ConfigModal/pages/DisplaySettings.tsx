@@ -1,7 +1,14 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { AppConfig } from '../../../types';
+
+/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
+const clampNumber = (raw: string, min: number, max: number): number => {
+  const value = Number(raw);
+  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
+};
 
 const DisplaySettings: React.FC = () => {
   const { t } = useTranslation();
@@ -11,7 +18,19 @@ const DisplaySettings: React.FC = () => {
   const sendPrefix = useAppStore(s => s.config.sendPrefix);
   const timestampMode = useAppStore(s => s.config.timestampMode);
   const timestampFormat = useAppStore(s => s.config.timestampFormat);
+  const backgroundImage = useAppStore(s => s.config.backgroundImage);
+  const backgroundImageEnabled = useAppStore(s => s.config.backgroundImageEnabled);
+  const backgroundImageOpacity = useAppStore(s => s.config.backgroundImageOpacity);
+  const backgroundImageBlur = useAppStore(s => s.config.backgroundImageBlur);
   const setConfig = useAppStore((s) => s.setConfig);
+
+  const handleBrowseImage = async () => {
+    const result = await open({
+      multiple: false,
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'] }],
+    });
+    if (result && typeof result === 'string') setConfig({ backgroundImage: result });
+  };
 
   return (
     <div className="config-page">
@@ -45,6 +64,56 @@ const DisplaySettings: React.FC = () => {
         <label>{t('displaySettings.sendPrefixLabel')}</label>
         <input className="input" value={sendPrefix} onChange={(e) => setConfig({ sendPrefix: e.target.value })} />
       </div>
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('displaySettings.background.sectionTitle')}</h4>
+
+      <label className="checkbox-wrapper">
+        <input type="checkbox" checked={backgroundImageEnabled} onChange={(e) => setConfig({ backgroundImageEnabled: e.target.checked })} />
+        {t('displaySettings.background.enable')}
+      </label>
+
+      {backgroundImageEnabled && (
+        <>
+          <div className="config-row">
+            <label>{t('displaySettings.background.pathLabel')}</label>
+            <input
+              className="input"
+              value={backgroundImage}
+              placeholder={t('displaySettings.background.pathPlaceholder')}
+              readOnly
+              style={{ flex: 1 }}
+            />
+            <button className="btn btn-sm" onClick={handleBrowseImage}>{t('displaySettings.background.browseButton')}</button>
+          </div>
+
+          <div className="config-row">
+            <label>{t('displaySettings.background.opacityLabel')}</label>
+            <input
+              className="input"
+              type="number"
+              value={backgroundImageOpacity}
+              onChange={(e) => setConfig({ backgroundImageOpacity: clampNumber(e.target.value, 0, 100) })}
+              min={0} max={100} step={1}
+              style={{ width: 80 }}
+            />
+            <span>%</span>
+          </div>
+
+          <div className="config-row">
+            <label>{t('displaySettings.background.blurLabel')}</label>
+            <input
+              className="input"
+              type="number"
+              value={backgroundImageBlur}
+              onChange={(e) => setConfig({ backgroundImageBlur: clampNumber(e.target.value, 0, 64) })}
+              min={0} max={64} step={1}
+              style={{ width: 80 }}
+            />
+            <span>px</span>
+          </div>
+        </>
+      )}
 
       <div className="config-row">
         <label>{t('displaySettings.timestampModeLabel')}</label>
