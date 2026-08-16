@@ -46,6 +46,7 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const fitRef = useRef<FitAddon | null>(null);
   const terminalFont = useAppStore((s) => s.config.terminalFont);
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
+  const backgroundImageEnabled = useAppStore((s) => s.config.backgroundImageEnabled);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -164,6 +165,20 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     term.options.fontFamily = terminalFont || 'monospace';
     term.options.fontSize = terminalFontSize;
   }, [terminalFont, terminalFontSize]);
+
+  // 背景图毛玻璃（issue #13）：xterm 主题背景在创建时快照，玻璃开关切换后需重绘。
+  // 直接按 config + 当前 data-theme 构造 rgba —— 不读 CSS 变量，避免与
+  // ThemeProvider 的 effect 执行顺序竞态（父 effect 晚于子 effect 跑）。
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const dark = document.documentElement.getAttribute('data-theme') !== 'light';
+    const [r, g, b] = dark ? [25, 26, 30] : [255, 255, 255];
+    const background = backgroundImageEnabled
+      ? `rgba(${r}, ${g}, ${b}, 0.72)`
+      : dark ? '#191a1e' : '#ffffff';
+    term.options.theme = { ...(term.options.theme ?? {}), background };
+  }, [backgroundImageEnabled]);
 
   // 隐藏（display:none → 容器 0 尺寸）恢复可见 → 显式 re-fit。ResizeObserver
   // 也会在 display:none→block 时触发，这里再补一次保证确定性（隐藏期间 fit 被

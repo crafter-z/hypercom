@@ -1,0 +1,51 @@
+/* ==================== 自定义背景图（issue #13）====================
+ * 全应用毛玻璃：background div 垫底（z-index:-1，在 .app-root 自身背景
+ * 之下、常规内容之上），启用时所有 --bg-* 表面 token 换半透明 rgba，
+ * 面板 "磨砂" 透出背景图。层级越深（终端/编辑器）alpha 越低越透明；
+ * 浮层（弹窗/elevated）保持接近不透明保证可读性。
+ */
+
+.app-background {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--app-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: var(--app-bg-opacity, 0.5);
+  filter: blur(var(--app-bg-blur, 0px));
+}
+
+/* 启用背景图 → 毛玻璃开：app-root 自身不再铺底色（否则与各面板叠加双重着色），
+ * body/html 背景仍在最底，.app-background 在其上、内容在其下。 */
+:root[data-app-bg="on"] .app-root {
+  background-color: transparent;
+}
+
+:root[data-app-bg="on"] {
+  --bg-primary: rgba(25, 26, 30, 0.72);    /* terminal / editor — 最透 */
+  --bg-secondary: rgba(32, 34, 39, 0.78);  /* panels, sidebar */
+  --bg-tertiary: rgba(39, 42, 49, 0.82);   /* headers, toolbars */
+  --bg-elevated: rgba(46, 49, 58, 0.90);   /* popovers, overlays */
+  --bg-hover: rgba(51, 54, 63, 0.86);
+  --bg-input: rgba(39, 42, 49, 0.80);
+  --bg-border: rgba(54, 58, 68, 0.65);
+  --bg-titlebar: rgba(35, 37, 43, 0.80);
+  --bg-sidebar: rgba(32, 34, 39, 0.78);
+  --bg-panel: rgba(25, 26, 30, 0.72);
+}
+
+:root[data-theme="light"][data-app-bg="on"] {
+  --bg-primary: rgba(255, 255, 255, 0.70);
+  --bg-secondary: rgba(244, 245, 247, 0.76);
+  --bg-tertiary: rgba(233, 235, 239, 0.80);
+  --bg-elevated: rgba(226, 229, 234, 0.90);
+  --bg-hover: rgba(217, 220, 226, 0.86);
+  --bg-input: rgba(255, 255, 255, 0.80);
+  --bg-border: rgba(211, 215, 222, 0.65);
+  --bg-titlebar: rgba(233, 235, 239, 0.80);
+  --bg-sidebar: rgba(244, 245, 247, 0.76);
+  --bg-panel: rgba(255, 255, 255, 0.70);
+}

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
+import { fileService } from '../../services/tauri';
 
 /**
  * Applies presentation concerns to `<html>`:
@@ -15,6 +16,10 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   const terminalFont = useAppStore((s) => s.config.terminalFont);
   const uiFont = useAppStore((s) => s.config.uiFont);
   const uiFontSize = useAppStore((s) => s.config.uiFontSize);
+  const backgroundImage = useAppStore((s) => s.config.backgroundImage);
+  const backgroundImageEnabled = useAppStore((s) => s.config.backgroundImageEnabled);
+  const backgroundImageOpacity = useAppStore((s) => s.config.backgroundImageOpacity);
+  const backgroundImageBlur = useAppStore((s) => s.config.backgroundImageBlur);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -37,6 +42,39 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     document.documentElement.style.setProperty('--font-size-ui', `${uiFontSize}px`);
     document.documentElement.style.setProperty('--font-ui', uiFont);
   }, [terminalFontSize, terminalFont, uiFontSize, uiFont]);
+
+  // 自定义背景图（issue #13）：把配置映射到 CSS 变量 + html[data-app-bg] 门控。
+  // 图片经后端 read_image_data_url 读为 base64 data URL（dev/prod 一致，无需 asset protocol）；
+  // 异步读取期间以 cancelled 防竞态；opacity/blur 前端再夹取一次（后端 set_config 已夹取）。
+  useEffect(() => {
+    const root = document.documentElement;
+    let cancelled = false;
+    const active = backgroundImageEnabled && backgroundImage !== '';
+    root.style.setProperty('--app-bg-opacity', String(Math.max(0, Math.min(100, backgroundImageOpacity)) / 100));
+    root.style.setProperty('--app-bg-blur', `${Math.max(0, Math.min(64, backgroundImageBlur))}px`);
+    if (!active) {
+      root.removeAttribute('data-app-bg');
+      root.style.removeProperty('--app-bg-image');
+      return undefined;
+    }
+    root.setAttribute('data-app-bg', 'on');
+    fileService
+      .readImageDataUrl(backgroundImage)
+      .then((dataUrl) => {
+        if (cancelled) return;
+        if (!dataUrl) {
+          root.style.removeProperty('--app-bg-image');
+          return;
+        }
+        root.style.setProperty('--app-bg-image', `url("${dataUrl}")`);
+      })
+      .catch(() => {
+        if (!cancelled) root.style.removeProperty('--app-bg-image');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backgroundImage, backgroundImageEnabled, backgroundImageOpacity, backgroundImageBlur]);
 
   return <>{children}</>;
 };

@@ -128,6 +128,7 @@ const App: React.FC = () => {
     <AppErrorBoundary>
       <ThemeProvider>
         <div className="app-root">
+          <div className="app-background" aria-hidden="true" />
           <TitleBar />
 
           <div className="app-main">

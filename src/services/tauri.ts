@@ -457,6 +457,11 @@ export const fileService = {
   readTextFile: (path: string): Promise<string> => {
     return invoke<string>('read_text_file', { path });
   },
+
+  /** 读取图片文件为 base64 data URL（自定义背景图，issue #13）。失败/非图片 → ''。 */
+  readImageDataUrl: (path: string): Promise<string> => {
+    return invoke<string>('read_image_data_url', { path });
+  },
 };
 
 // ==================== 柔性工作区 · 弹出窗命令 ====================
