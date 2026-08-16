@@ -10,8 +10,10 @@ name: 'publish-preview'
 # - tagName: v__VERSION__ —— 沿用 tauri-action 的版本占位符；发版前三文件版本
 #   同步为 0.x.y-preview.N 即生成唯一 tag（绝不重复使用 tag）
 #
-# 产物与 stable 相同（NSIS/MSI/AppImage/dmg + .sig + latest.json），同一把
-# minisign 私钥签名；manifest notes 同样来自 RELEASE_NOTES.md 顶部当前章节。
+# 产物与 stable 基本相同（AppImage/dmg + .sig + latest.json）；Windows 例外：
+# 只打 NSIS（MSI/WiX 只接受数字版本，semver pre-release 版本打包直接报错，
+# 见下方 Windows 矩阵项注释），同一把 minisign 私钥签名；manifest notes
+# 同样来自 RELEASE_NOTES.md 顶部当前章节。
 
 on:
   push:
@@ -27,7 +29,11 @@ jobs:
       matrix:
         include:
           - platform: 'windows-latest'
-            args: ''
+            # issue #12 preview：Windows 只打 NSIS——MSI（WiX）只接受数字版本，
+            # `0.6.0-preview.N` 的 pre-release 段非数字，bundler 直接拒绝打包；
+            # 更新链路 latest.json Windows 块本就走 NSIS（updaterJsonPreferNsis），
+            # MSI 对 preview 仅是手动安装件，跳过零损失；stable 流保持 MSI+NSIS。
+            args: '--bundles nsis'
           - platform: 'ubuntu-22.04'
             args: ''
           - platform: 'macos-latest'

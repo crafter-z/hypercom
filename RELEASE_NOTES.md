@@ -1,6 +1,6 @@
-# HyperCom v0.6.0-preview.1
+# HyperCom v0.6.0-preview.2
 
-0.6.0 核心的首个 **preview**（prerelease——不进入「最新正式版」解析，stable 通道用户不受影响；preview 通道用户可经自动更新或手动安装获取）。汇聚自 v0.5.2 以来 main 上的新功能：**自动更新（issue #12）** 与 **自定义背景图 · 全应用毛玻璃（issue #13）**。
+0.6.0 核心的第二个 **preview**（首个 `preview.1` 因 Windows MSI/WiX 只接受数字版本、`0.6.0-preview.1` 打包直接报错而作废重建；自本版起 preview 流 Windows 只发布 NSIS 安装包，stable 流保持 MSI+NSIS）。prerelease——不进入「最新正式版」解析，stable 通道用户不受影响；preview 通道用户可经自动更新或手动安装获取。汇聚自 v0.5.2 以来 main 上的新功能：**自动更新（issue #12）** 与 **自定义背景图 · 全应用毛玻璃（issue #13）**。
 
 ## 新功能
 
@@ -8,7 +8,7 @@
 
 - **通道运行时用户选择**：通用设置「自动更新」三态——不检查 / 定期检查到正式版（默认）/ 定期检查到 preview；7 天周期（首启立即、上次成功检查后满 7 天、snooze 暂停、会话内 6h 重评估覆盖常驻挂机），记账存 localStorage
 - **发现更新 → 弹窗三动作**：立即更新（下载进度条 → 安装 → 重启）/ 7 天后提醒 / 永不提醒（同步设置项）；About 手动检查可选正式版 / preview
-- **preview 通道语义 = max(preview, stable)**：本版 tag 为 `v0.6.0-preview.1`（唯一 tag），0.6.0 stable 落地后 preview 用户自动晋升；stable 通道永不泄漏 preview
+- **preview 通道语义 = max(preview, stable)**：本版 tag 为 `v0.6.0-preview.2`（唯一 tag），0.6.0 stable 落地后 preview 用户自动晋升；stable 通道永不泄漏 preview
 - **发版 CI 三重护栏**：tsc + vitest + cargo test 质量门、RELEASE_NOTES 章节↔版本校验、verify-release 对 latest.json 四平台键完整性门禁
 - **macOS 暂不支持自动更新**（未签名/公证，macOS 用户手动安装即可）
 
