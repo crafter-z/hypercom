@@ -6,7 +6,7 @@ import { open } from '@tauri-apps/plugin-shell';
 import { X, ExternalLink, ScrollText, Bug, Download } from 'lucide-react';
 import LicensesDialog from './LicensesDialog';
 import DiagnosticLogDialog from './DiagnosticLogDialog';
-import { manualCheck } from '../../utils/updateService';
+import { manualCheck, isMacPlatform } from '../../utils/updateService';
 import { useToastStore } from '../../stores/useToastStore';
 import { channelLabelKey, GITHUB_REPO_URL } from '../../utils/channel';
 import type { ReleaseChannel } from '../../types';
@@ -113,7 +113,9 @@ const AboutDialog: React.FC = () => {
           </button>
         </div>
 
-        {/* issue #12：手动检查更新（正式版 / preview 任选，不受 updateCheckMode=none 限制） */}
+        {/* issue #12：手动检查更新（正式版 / preview 任选，不受 updateCheckMode=none 限制）。
+            macOS 暂不支持自动更新（未签名/公证）——隐藏按钮，避免引导到必然失败的安装。 */}
+        {!isMacPlatform() && (
         <div className="about-actions">
           <button
             className="btn btn-sm"
@@ -132,6 +134,7 @@ const AboutDialog: React.FC = () => {
             {checking === 'preview' ? t('update.checking') : t('update.manualCheckPreview')}
           </button>
         </div>
+        )}
 
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-secondary)', textAlign: 'center' }}>
           {t('about.license')} · © 2026 HyperCom

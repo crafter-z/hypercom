@@ -6,7 +6,8 @@ import {
   runAutoCheck,
   shouldAutoCheck,
   updateTiming,
-  manualCheck,
+    manualCheck,
+  isMacPlatform,
 } from './updateService';
 import { updateService as tauriUpdate } from '../services/tauri';
 import type { UpdatePayload } from '../types';
@@ -207,6 +208,14 @@ describe('manualCheck (issue #12: 显式意图，不过 DEV 门控)', () => {
     const outcome = await manualCheck('stable');
     expect(outcome.failed).toBe(true);
     expect(outcome.update).toBeNull();
+  });
+});
+
+describe('isMacPlatform (issue #12 已知边界落地：macOS 暂不支持自动更新)', () => {
+  it('node 测试环境（无 navigator）→ false，不阻塞自动检查', () => {
+    // vitest environment=node：navigator 不存在 → 平台门控放行（macOS 上真实
+    // webview 的 navigator.platform 为 MacIntel 才会命中）。
+    expect(isMacPlatform()).toBe(false);
   });
 });
 

@@ -86,9 +86,17 @@ export const updateTiming = {
   },
 };
 
-/** DEV 构建不检查（debug 走后端 Ok(None) 双保险）。 */
+/** DEV 构建不检查（debug 走后端 Ok(None) 双保险）；macOS 平台不检查（未签名/公证）。 */
 export function isUpdateCheckEnabled(): boolean {
-  return !import.meta.env.DEV;
+  // macOS 暂不支持自动更新（未签名/公证，Gatekeeper 拦截更新后 relaunch，
+  // plans/12 §9 已知边界）：不检查、不弹窗——避免把 macOS 用户引导到必然
+  // 失败的安装。未来签名/公证落地后移除该平台判断即可启用。
+  return !import.meta.env.DEV && !isMacPlatform();
+}
+
+/** macOS 平台检测：Tauri webview 的 navigator.platform 为 MacIntel/MacPPC（Windows 为 Win32/Win64）。 */
+export function isMacPlatform(): boolean {
+  return typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac');
 }
 
 /**
