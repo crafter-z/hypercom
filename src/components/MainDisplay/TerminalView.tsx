@@ -193,6 +193,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
       // container itself (no data-seq) and never freeze.
       if (e.button === 0 && TerminalRenderer.seqFromEventTarget(e.target) !== null) {
         vm.setSelecting(true);
+        // 拖选 = 主动浏览/选择历史数据：脱离滚动锁定。否则 follow pin 在
+        // 数据快速刷新时每帧把 scrollTop 钉在增长中的底部，冻结的 active
+        // 行停在旧位置被甩出视口 → 输出区空白。解锁后视口固定，冻结行
+        // 保持原位，选择范围稳定；settle 不参与拖选（非 gesture 路径），
+        // 用户停在哪锁定就保持在哪，点底部按钮可重新跟随。
+        if (useTerminalStore.getState().terminals[portId]?.scrollLocked) {
+          useTerminalStore.getState().setTerminalConfig(portId, { scrollLocked: false });
+        }
+        vm.setLocked(false);
       }
     },
     [vm],

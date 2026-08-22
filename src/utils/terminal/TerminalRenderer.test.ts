@@ -295,6 +295,46 @@ describe('TerminalRenderer scroll + recycling', () => {
     expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
   });
 
+  it('drag-select disengages follow: viewport stays put while data streams (blank-output fix)', () => {
+    fill(buf, Array.from({ length: 500 }, (_, i) => String(i)));
+    // Follow locked at the bottom.
+    renderer.render(buf, identityView({ followEnabled: true, locked: true }));
+    const pinnedTop = container.scrollTop;
+    expect(pinnedTop).toBeGreaterThan(0);
+    const anchorSeq = Math.floor((pinnedTop + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+    const anchorRow = container.querySelector(`[data-seq="${anchorSeq}"]`) as HTMLElement;
+    expect(anchorRow).not.toBeNull();
+    const anchorTransform = anchorRow.style.transform;
+    const anchorHtml = anchorRow.innerHTML;
+
+    // User starts a drag-select on a row. TerminalView calls setSelecting(true)
+    // AND setLocked(false) — the drag must disengage follow so the frozen
+    // viewport does not ride the growing content (old behavior: scrollTop
+    // pinned to the growing bottom each frame, frozen rows left behind →
+    // blank output).
+    renderer.setSelecting(true);
+    renderer.render(buf, identityView({ followEnabled: false, locked: false }));
+    // Stream more data at high rate while frozen.
+    fill(buf, Array.from({ length: 3000 }, (_, i) => String(500 + i)));
+    for (let i = 0; i < 5; i++) {
+      renderer.render(buf, identityView({ followEnabled: false, locked: false }));
+    }
+    // Viewport did NOT ride down — rows stayed in place, selection intact.
+    expect(container.scrollTop).toBe(pinnedTop);
+    const still = container.querySelector(`[data-seq="${anchorSeq}"]`) as HTMLElement;
+    expect(still).toBe(anchorRow); // same live node
+    expect(still.style.transform).toBe(anchorTransform);
+    expect(still.innerHTML).toBe(anchorHtml);
+    // The viewport still shows rows (not blank).
+    const visible = Array.from(container.querySelectorAll('.terminal-line')).filter(
+      (r) => {
+        const top = Number(/translateY\((\d+)px\)/.exec((r as HTMLElement).style.transform)?.[1]);
+        return top >= container.scrollTop && top < container.scrollTop + CLIENT_HEIGHT;
+      },
+    );
+    expect(visible.length).toBeGreaterThan(0);
+  });
+
   it('maintains DOM order == visIdx order after alternating scroll (insertRowInOrder min-visIdx fix)', () => {
     fill(buf, Array.from({ length: 3000 }, (_, i) => String(i)));
     // Scroll down, up, down, up — this jumbles the Map iteration order
