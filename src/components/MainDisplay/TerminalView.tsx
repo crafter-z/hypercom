@@ -187,10 +187,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         vm.beginGesture();
         clearTimeout(settleTimerRef.current);
       }
-      // Left-button drag on the terminal starts a native cross-row text
-      // selection — freeze renderer structural DOM changes until release so
-      // the selection Range stays anchored to live nodes.
-      if (e.button === 0 && e.target !== e.currentTarget) {
+      // Left-button drag on a row starts a native cross-row text selection —
+      // freeze renderer structural DOM changes until release so the selection
+      // Range stays anchored to live nodes. Scrollbar presses hit the
+      // container itself (no data-seq) and never freeze.
+      if (e.button === 0 && TerminalRenderer.seqFromEventTarget(e.target) !== null) {
         vm.setSelecting(true);
       }
     },
