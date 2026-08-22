@@ -132,10 +132,6 @@ jobs:
     name: verify latest.json integrity
     needs: publish-preview-tauri
     runs-on: ubuntu-latest
-    # draft release 的资产对匿名请求 404——preview 流 releaseDraft: false 本可匿名，
-    # 但统一带 GITHUB_TOKEN 与 stable 流行为一致（且防止未来改 draft 时踩坑）。
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -147,18 +143,13 @@ jobs:
       - name: verify latest.json platform keys
         shell: bash
         run: |
+          # preview 流 releaseDraft: false——push 后资产立即公开，匿名 curl 即可
+          # （preview.2 发布已验证该路径）；GITHUB_TOKEN 在 draft 下 401、在已发布
+          # 下也无必要，保持匿名最简。
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          # draft release 的资产任何身份都不能经 releases/download/ 下载（404）——
-          # 只能经 API 资产端点（releases/assets/{id} + Accept: octet-stream）。
-          # 与 stable 流 verify 同款路径（draft/已发布状态统一可用）。
-          # releases/tags/{tag} 端点对 draft release 同样 404（认证下）——用列表
-          # 端点 + tag_name 匹配（'v'+version，tag 命名约定 v<version>）。
-          ASSET_ID=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/crafter-z/hypercom/releases?per_page=100" \
-            | node -e "const j=JSON.parse(require('fs').readFileSync(0)); const tag='v'+process.argv[1]; const r=j.find(r=>r.tag_name===tag); if(!r){console.error('release not found for tag '+tag);process.exit(1)} const a=r.assets.find(a=>a.name==='latest.json'); if(!a){console.error('latest.json asset missing');process.exit(1)} console.log(a.id)" "$VERSION")
-          echo "latest.json asset id: $ASSET_ID"
-          curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/crafter-z/hypercom/releases/assets/$ASSET_ID" -o latest.json
+          URL="https://github.com/crafter-z/hypercom/releases/download/v$VERSION/latest.json"
+          echo "checking $URL"
+          curl -fsSL "$URL" -o latest.json
           node -e '
             const fs = require("fs");
             const j = JSON.parse(fs.readFileSync("latest.json", "utf8"));
