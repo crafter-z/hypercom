@@ -9,9 +9,19 @@ on:
       # 同一过滤器内的 `!` 否定模式（顺序敏感，否定项放在最后）。
       - 'v*'
       - '!v*-preview*'
+  # issue #12 二轮门禁修正：verify 必须等 release **published** 后跑——
+  # draft release 的资产任何身份都取不到（releases/download/ 匿名 404、协作者
+  # PAT 404、GITHUB_TOKEN 调 releases API 也 401），push 阶段矩阵构建到 draft
+  # 时无法验证 latest.json。发布动作（release: published）触发独立 verify job。
+  release:
+    types: [published]
+  workflow_dispatch: {}
 
 jobs:
   publish-tauri:
+    # 仅在 tag push 时构建——published/dispatch 事件只跑 verify，不触发矩阵重建
+    # （否则发布 draft 会立刻对已发布 release 做一次多余重建）。
+    if: github.event_name == 'push'
     permissions:
       contents: write
     strategy:
@@ -114,16 +124,16 @@ jobs:
   # issue #12 二轮发版护栏③：latest.json 全平台键完整性门禁。
   # 矩阵部分失败（fail-fast:false）时 tauri-action 逐 job 覆盖 latest.json，
   # 会产出**缺平台键**的清单——该平台 check() 直接报错（plans/12 §5.1）。
-  # 此 job 把静默损坏变成显式红叉：重跑失败 job / 修复 release 资产后重触发。
+  # 此 job 把静默损坏变成显式红叉。
+  #
+  # 触发时点修正（实测）：draft release 的资产**任何身份都取不到**——匿名
+  # releases/download/ 404、协作者 PAT 也 404、GITHUB_TOKEN 调 releases API 401。
+  # push（构建到 draft）阶段无法验证，verify 必须等 release **published** 事件
+  # （发布后资产公开，匿名 curl 即可）或 workflow_dispatch 手动重跑。
   verify-release:
     name: verify latest.json integrity
-    needs: publish-tauri
+    if: ${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    # draft release 的资产对匿名请求 404（GitHub 只对协作者可见）——stable 流
-    # releaseDraft: true 故意保持 draft 待人工发布，verify 必须带 GITHUB_TOKEN
-    # 下载 latest.json 才能验证（issue #12 二轮门禁自引入起从未在 draft 状态跑过）。
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -135,19 +145,14 @@ jobs:
       - name: verify latest.json platform keys
         shell: bash
         run: |
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          # draft release 的资产**任何身份**都不能经 releases/download/ 下载（404，
-          # 实测协作者 PAT 同样 404）——只能经 API 资产端点（releases/assets/{id}
-          # + Accept: octet-stream）。stable 流 releaseDraft: true 保持 draft 待
-          # 人工发布，verify 必须走 API 端点；已发布状态该端点同样可用，统一路径。
-          # releases/tags/{tag} 端点对 draft release 同样 404（认证下）——用列表
-          # 端点 + tag_name 匹配（'v'+version，tag 命名约定 v<version>）。
-          ASSET_ID=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/crafter-z/hypercom/releases?per_page=100" \
-            | node -e "const j=JSON.parse(require('fs').readFileSync(0)); const tag='v'+process.argv[1]; const r=j.find(r=>r.tag_name===tag); if(!r){console.error('release not found for tag '+tag);process.exit(1)} const a=r.assets.find(a=>a.name==='latest.json'); if(!a){console.error('latest.json asset missing');process.exit(1)} console.log(a.id)" "$VERSION")
-          echo "latest.json asset id: $ASSET_ID"
-          curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/crafter-z/hypercom/releases/assets/$ASSET_ID" -o latest.json
+          # release published 事件：tag_name 即 v<version>；workflow_dispatch 兜底
+          # 从 tauri.conf.json 取版本。release 已发布 → 资产公开可匿名下载。
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          [ -n "$VERSION" ] || VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          URL="https://github.com/crafter-z/hypercom/releases/download/v$VERSION/latest.json"
+          echo "checking $URL"
+          curl -fsSL "$URL" -o latest.json
           node -e '
             const fs = require("fs");
             const j = JSON.parse(fs.readFileSync("latest.json", "utf8"));
