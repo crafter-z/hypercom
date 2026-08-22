@@ -94,9 +94,12 @@ export function isUpdateCheckEnabled(): boolean {
   return !import.meta.env.DEV && !isMacPlatform();
 }
 
-/** macOS 平台检测：Tauri webview 的 navigator.platform 为 MacIntel/MacPPC（Windows 为 Win32/Win64）。 */
-export function isMacPlatform(): boolean {
-  return typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac');
+/** macOS 平台检测：Tauri webview 的 navigator.platform 为 MacIntel/MacPPC（Windows 为 Win32/Win64）。
+ * `platform` 可注入便于纯函数测试——注意 Node 21+ 也有全局 navigator（platform 反映
+ * 宿主 OS），CI macOS runner 上默认读取即命中 MacIntel，测试必须显式传参。 */
+export function isMacPlatform(platform?: string): boolean {
+  const p = platform ?? (typeof navigator !== 'undefined' ? navigator.platform : '');
+  return p.toLowerCase().includes('mac');
 }
 
 /**
