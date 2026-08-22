@@ -119,6 +119,11 @@ jobs:
     name: verify latest.json integrity
     needs: publish-tauri
     runs-on: ubuntu-latest
+    # draft release 的资产对匿名请求 404（GitHub 只对协作者可见）——stable 流
+    # releaseDraft: true 故意保持 draft 待人工发布，verify 必须带 GITHUB_TOKEN
+    # 下载 latest.json 才能验证（issue #12 二轮门禁自引入起从未在 draft 状态跑过）。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -133,7 +138,7 @@ jobs:
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           URL="https://github.com/crafter-z/hypercom/releases/download/v$VERSION/latest.json"
           echo "checking $URL"
-          curl -fsSL "$URL" -o latest.json
+          curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$URL" -o latest.json
           node -e '
             const fs = require("fs");
             const j = JSON.parse(fs.readFileSync("latest.json", "utf8"));
