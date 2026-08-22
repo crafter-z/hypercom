@@ -289,6 +289,42 @@ describe('TerminalRenderer scroll + recycling', () => {
     expect(container.querySelector('[data-seq="100"]')).toBeNull(); // recycled
   });
 
+  it('maintains DOM order == visIdx order after alternating scroll (insertRowInOrder min-visIdx fix)', () => {
+    fill(buf, Array.from({ length: 3000 }, (_, i) => String(i)));
+    // Scroll down, up, down, up — this jumbles the Map iteration order
+    // (recycles delete middle entries, re-acquires append to Map end).
+    // The old insertRowInOrder took the first Map-order match, not the
+    // minimum visIdx, so DOM order diverged from visual order.
+    const jumps = [200, 1000, 500, 1500, 300, 2000, 100, 2500, 50, 1800];
+    for (const top of jumps) {
+      container.scrollTop = top * ROW_HEIGHT;
+      renderer.render(buf, identityView({ followEnabled: false }));
+    }
+    const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
+    expect(rows.length).toBeGreaterThan(10);
+    const seqs = rows.map((r) => Number(r.dataset.seq));
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+    }
+  });
+
+  it('follow pin shows the last row fully (padding-aware scrollTop)', () => {
+    fill(buf, Array.from({ length: 500 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: true }));
+    // The last row must be fully inside the viewport — scrollTop + clientHeight
+    // must reach the bottom of the content (including padding). The old
+    // `totalHeight - clientHeight` left ~8px unscrolled, cutting off ~1/3 of
+    // the last row.
+    const lastSeq = buf.lastSeq;
+    const lastRow = container.querySelector(`[data-seq="${lastSeq}"]`) as HTMLElement;
+    expect(lastRow).not.toBeNull();
+    const lastRowTop = Number(/translateY\((\d+)px\)/.exec(lastRow.style.transform)?.[1]);
+    const lastRowBottom = lastRowTop + ROW_HEIGHT;
+    const viewportBottom = container.scrollTop + container.clientHeight;
+    // viewport bottom must reach at least the last row's bottom edge.
+    expect(viewportBottom).toBeGreaterThanOrEqual(lastRowBottom);
+  });
+
   it('keeps DOM order == visual order when scrolling up (drag-select fix)', () => {
     fill(buf, Array.from({ length: 2000 }, (_, i) => String(i)));
     // Land deep in the buffer (rows ~900..980 in view), then scroll UP so the

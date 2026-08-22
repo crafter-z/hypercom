@@ -268,6 +268,22 @@ export class TerminalRenderer {
       }
     }
 
+    // 1b. Ensure DOM order matches visIdx order for surviving rows. Past
+    //     insertRowInOrder bugs may have left the DOM scrambled; fix it now
+    //     so the browser's native cross-row selection walks the correct
+    //     document order. Skipped during drag-selection (moving nodes would
+    //     break the live Range).
+    if (!selecting) {
+      const sorted = Array.from(this.active.values()).sort((a, b) => a.visIdx - b.visIdx);
+      let prev: HTMLDivElement | null = null;
+      for (const row of sorted) {
+        if (prev !== null && row.node.previousSibling !== prev) {
+          layer.insertBefore(row.node, prev.nextSibling);
+        }
+        prev = row.node;
+      }
+    }
+
     // 2. Ensure + update visible rows.
     for (let visIdx = firstVisIdx; visIdx <= lastVisIdx; visIdx++) {
       const seq = this.visIdxToSeq(visIdx, view, buffer, frozen);
@@ -314,9 +330,16 @@ export class TerminalRenderer {
     this.fullRedraw = false;
     this.lastRenderedSeq = lastSeq;
 
-    // 3. Follow pin — same frame, zero latency.
+    // 3. Follow pin — same frame, zero latency. Account for the container's
+    //    padding (8px top/bottom on .terminal-view) so the last row is fully
+    //    visible. The old `totalHeight - clientHeight` left ~8px unscrolled,
+    //    cutting off the bottom third of the last row. getComputedStyle is
+    //    read only when following; jsdom has no layout (padding 0 → old formula).
     if (follow) {
-      container.scrollTop = Math.max(0, totalHeight - container.clientHeight);
+      const cs = getComputedStyle(container);
+      const padTop = parseFloat(cs.paddingTop) || 0;
+      const padBottom = parseFloat(cs.paddingBottom) || 0;
+      container.scrollTop = Math.max(0, padTop + totalHeight + padBottom - container.clientHeight);
     }
   }
 
@@ -443,15 +466,23 @@ export class TerminalRenderer {
   }
 
   /** Insert the node keeping contentLayer children sorted by visIdx (DOM
-   *  order == visual order). No-op when already in place. */
+   *  order == visual order). No-op when already in place.
+   *
+   *  Must find the row with the SMALLEST visIdx > current — not the first
+   *  in Map iteration order. Map preserves insertion order, which diverges
+   *  from visIdx order after recycles/re-acquires; taking the first match
+   *  inserts the node before the wrong sibling, scrambling DOM order. The
+   *  browser's native cross-row selection walks DOM document order, so a
+   *  scrambled order makes drag-select skip rows (issue #14). */
   private insertRowInOrder(node: HTMLDivElement, visIdx: number): void {
     const layer = this.contentLayer;
     if (!layer) return;
     let target: HTMLDivElement | null = null;
+    let targetVisIdx = Infinity;
     for (const row of this.active.values()) {
-      if (row.node !== node && row.visIdx > visIdx) {
+      if (row.node !== node && row.visIdx > visIdx && row.visIdx < targetVisIdx) {
         target = row.node;
-        break;
+        targetVisIdx = row.visIdx;
       }
     }
     if (target === null) {
