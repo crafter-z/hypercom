@@ -215,12 +215,12 @@ describe('isMacPlatform (issue #12 已知边界落地：macOS 暂不支持自动
   it('detects mac from platform string (纯函数注入，不依赖运行环境)', () => {
     // 注意：Node 21+ 存在全局 navigator（platform 反映宿主 OS），CI macOS
     // runner 上默认读取即命中 MacIntel——测试必须显式传参才能跨平台稳定。
+    // **禁止无参断言**：默认读取宿主平台，跨平台结果不同（macOS runner
+    // 上为 true、Windows/Linux 为 false），本地验证无法发现。
     expect(isMacPlatform('MacIntel')).toBe(true);
     expect(isMacPlatform('MacPPC')).toBe(true);
     expect(isMacPlatform('Win32')).toBe(false);
     expect(isMacPlatform('Linux x86_64')).toBe(false);
-    // 无参数时：node 测试环境无 navigator → 空串 → false
-    expect(isMacPlatform()).toBe(false);
   });
 });
 
