@@ -11,7 +11,6 @@ const makeField = (overrides?: Partial<ParsedField>): ParsedField => ({
 });
 
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
-  id: 'test-line',
   timestamp: 0,
   direction: 'RX',
   content: '',

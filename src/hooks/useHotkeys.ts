@@ -12,7 +12,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { useTerminalStore } from '../stores/useTerminalStore';
+import { clearTerminal } from '../utils/terminal/viewportManager';
 import { useSerialConnection } from './useSerialConnection';
 
 function isFormField(el: EventTarget | null): boolean {
@@ -49,7 +49,7 @@ export function useHotkeys(): void {
       if (ctrl && (e.key === 'l' || e.key === 'L')) {
         e.preventDefault();
         const { activeTabId } = useAppStore.getState();
-        if (activeTabId) useTerminalStore.getState().clearTerminal(activeTabId);
+        if (activeTabId) clearTerminal(activeTabId);
       } else if (ctrl && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         const { activeTabId } = useAppStore.getState();

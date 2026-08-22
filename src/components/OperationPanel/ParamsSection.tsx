@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
-import { useTerminalStore } from '../../stores/useTerminalStore';
+import { clearTerminal, releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { useTranslation } from 'react-i18next';
 import type { DataBits, Parity, StopBits, Handshake, PortPreset, PortMode } from '../../types';
 import { storageService } from '../../services/tauri';
@@ -120,12 +120,16 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   }, [selectedPresetId, loadPresets]);
 
   // issue #11：切换工作模式 → 落 store + 清屏 + 冲刷 RX 管线残留字节，
-  // 避免旧模式 buffered 的数据混入新模式首屏。TRX 侧清 TerminalStore + 冲刷
-  // RxPipeline；TTY 侧清 ttyService 屏幕（若该端口已挂 TTY 视图）。
+  // 避免旧模式 buffered 的数据混入新模式首屏。TRX 侧清 viewport buffer + 冲刷
+  // RxPipeline（切 TTY 时销毁 TRX 缓冲）；TTY 侧清 ttyService 屏幕（若已挂 TTY 视图）。
   const handleModeChange = useCallback((mode: PortMode) => {
     if (!activeTabId) return;
     setPortMode(activeTabId, mode);
-    useTerminalStore.getState().clearTerminal(activeTabId);
+    clearTerminal(activeTabId);
+    if (mode === 'tty') {
+      // TRX 缓冲销毁；切回 TRX 时 TerminalView 挂载会重建 manager
+      releaseViewportManager(activeTabId);
+    }
     getRxPipeline().flushAndReset(activeTabId);
     ttyService.clear(activeTabId);
   }, [activeTabId, setPortMode]);

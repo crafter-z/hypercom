@@ -64,7 +64,6 @@ function frameToLine(
   isHex: boolean
 ): TerminalLine {
   return {
-    id: `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     timestamp: Date.now(),
     direction: 'RX',
     content: frame.bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
@@ -161,7 +160,6 @@ describe('Protocol E2E: bytes → reassembler → renderer', () => {
 
   it('falls back to plain content when parsedFields are missing', () => {
     const line: TerminalLine = {
-      id: 'fallback-1',
       timestamp: Date.now(),
       direction: 'RX',
       content: 'plain text line',

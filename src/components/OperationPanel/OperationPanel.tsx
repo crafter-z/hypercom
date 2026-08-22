@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
-import { useTerminalStore } from '../../stores/useTerminalStore';
+import { clearTerminal } from '../../utils/terminal/viewportManager';
 import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
@@ -28,7 +28,6 @@ const OperationPanel: React.FC = () => {
   // 预设选择 / 输入框失焦提交时更新，订阅不会在逐键输入时重渲染面板。
   const baudRate = useOperationStore(s => s.baudRate);
   const setUIState = useAppStore(s => s.setUIState);
-  const clearTerminal = useTerminalStore(s => s.clearTerminal);
   const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
   const setConfig = useAppStore(s => s.setConfig);
 

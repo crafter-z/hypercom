@@ -3,7 +3,7 @@ import { useAppStore, findLeafById, findLeafByTabId, collectLeaves, countLeaves 
 import { useTerminalStore } from './useTerminalStore';
 import { useRuleStore } from './useRuleStore';
 import { useOperationStore } from './useOperationStore';
-import type { SerialPort, PortGroup, TerminalLine, LeafPane, BranchPane, PaneNode } from '../types';
+import type { SerialPort, PortGroup, LeafPane, BranchPane, PaneNode } from '../types';
 
 // Snapshot of initial state for reset between tests
 const INITIAL_STATE = useAppStore.getState();
@@ -54,10 +54,6 @@ const makePort = (id: string, overrides?: Partial<SerialPort>): SerialPort => ({
 const makeGroup = (id: string, portIds: string[] = []): PortGroup => ({
   id, name: id, isExpanded: true, portIds, order: 0,
 });
-const makeLine = (id: string, content = 'x'): TerminalLine => ({
-  id, timestamp: 0, direction: 'RX', content, isHex: false,
-});
-
 // ==================== Group A: Port & Group ====================
 
 describe('Port & Group actions', () => {
@@ -161,7 +157,7 @@ describe('Tab & Pane actions', () => {
     expect(s.paneTree.type).toBe('leaf');
     expect((s.paneTree as LeafPane).tabIds).toContain('COM1');
     expect(useTerminalStore.getState().terminals['COM1']).toBeDefined();
-    expect(useTerminalStore.getState().terminals['COM1'].lines).toEqual([]);
+    expect(useTerminalStore.getState().terminals['COM1'].scrollLocked).toBe(true);
   });
 
   it('openTab on existing tab reactivates it without duplicating', () => {
@@ -414,44 +410,6 @@ describe('Tab & Pane actions', () => {
   });
 });
 
-// ==================== Group C: Terminal lines ====================
-
-describe('Terminal line actions', () => {
-  it('appendTerminalLine pushes to lines array', () => {
-    useTerminalStore.getState().ensureTerminal('COM1');
-    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l1'));
-    useTerminalStore.getState().appendTerminalLine('COM1', makeLine('l2'));
-    const lines = useTerminalStore.getState().terminals['COM1'].lines;
-    expect(lines.map(l => l.id)).toEqual(['l1', 'l2']);
-  });
-
-  it('appendTerminalLine trims to half when exceeding maxLines (issue #6-2)', () => {
-    useTerminalStore.getState().ensureTerminal('COM1');
-    useTerminalStore.setState((state) => {
-      state.terminals['COM1'].maxLines = 3;
-    });
-    const append = useTerminalStore.getState().appendTerminalLine;
-    append('COM1', makeLine('l1'));
-    append('COM1', makeLine('l2'));
-    append('COM1', makeLine('l3'));
-    append('COM1', makeLine('l4')); // 4 > 3 → 一次性裁到一半 → 保留 2 行
-    const lines = useTerminalStore.getState().terminals['COM1'].lines;
-    expect(lines.map(l => l.id)).toEqual(['l3', 'l4']);
-  });
-
-  it('clearTerminal empties lines but preserves config (scrollLocked, displayFormat)', () => {
-    useTerminalStore.getState().ensureTerminal('COM1');
-    const { setTerminalConfig, appendTerminalLine, clearTerminal } = useTerminalStore.getState();
-    setTerminalConfig('COM1', { scrollLocked: false, displayFormat: 'hex' });
-    appendTerminalLine('COM1', makeLine('l1'));
-    clearTerminal('COM1');
-    const t = useTerminalStore.getState().terminals['COM1'];
-    expect(t.lines).toEqual([]);
-    expect(t.scrollLocked).toBe(false);
-    expect(t.displayFormat).toBe('hex');
-  });
-});
-
 // ==================== Group D: Misc ====================
 
 describe('Misc actions', () => {
@@ -655,11 +613,11 @@ describe('Simulation Mode', () => {
 // ==================== Group K: Edge Cases ====================
 
 describe('Edge cases', () => {
-  it('openTab with memoryPerPortBudgetMb=0 uses default maxLines=10000', () => {
+  it('openTab still creates a tab when memoryPerPortBudgetMb=0', () => {
     useAppStore.getState().setConfig({ memoryPerPortBudgetMb: 0 });
     useAppStore.setState({ ports: [makePort('COM1')] });
     useAppStore.getState().openTab('COM1');
-    // Terminal is now in useTerminalStore; openTab in useAppStore still creates tab
+    // Terminal display state is now in useTerminalStore; openTab still creates the tab
     expect(useAppStore.getState().tabs.find(t => t.id === 'COM1')).toBeDefined();
   });
 
@@ -683,12 +641,6 @@ describe('Edge cases', () => {
     const stats = useAppStore.getState().trafficStats['COM1'];
     expect(stats.txTotal).toBe(50);
     expect(stats.rxTotal).toBe(30);
-  });
-
-  it('appendTerminalLine to non-existent port is no-op', () => {
-    const stateBefore = useTerminalStore.getState().terminals;
-    useTerminalStore.getState().appendTerminalLine('nonexistent', makeLine('l1'));
-    expect(useTerminalStore.getState().terminals).toEqual(stateBefore);
   });
 
   it('setTerminalConfig on non-existent port is no-op', () => {
@@ -719,12 +671,6 @@ describe('Edge cases', () => {
     useAppStore.getState().openTab('COM3');
     const tab = useAppStore.getState().tabs.find(t => t.id === 'COM3');
     expect(tab?.title).toBe('COM3');
-  });
-
-  it('clearTerminal on non-existent port is no-op', () => {
-    useTerminalStore.getState().clearTerminal('nonexistent');
-    // Should not throw
-    expect(true).toBe(true);
   });
 
   it('reorderPaneTabIds updates pane tab order', () => {

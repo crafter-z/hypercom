@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { useTerminalStore } from '../stores/useTerminalStore';
+import { appendTerminalLine } from '../utils/terminal/viewportManager';
 import { eventService } from '../services/tauri';
 import i18n from '../i18n';
 
@@ -18,8 +18,7 @@ export function useToolOutput() {
     const setup = async () => {
       const unlistenOutput = await eventService.onToolOutput((event) => {
         if (cancelled) return;
-        useTerminalStore.getState().appendTerminalLine(event.port_id, {
-          id: `tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        appendTerminalLine(event.port_id, {
           timestamp: Date.now(),
           direction: 'TOOL',
           content: event.line,
@@ -36,8 +35,7 @@ export function useToolOutput() {
         const exitText = event.code === 0
           ? i18n.t('terminal.toolExitSuccess')
           : i18n.t('terminal.toolExitCode', { code: event.code });
-        useTerminalStore.getState().appendTerminalLine(event.port_id, {
-          id: `tool-exit-${Date.now()}`,
+        appendTerminalLine(event.port_id, {
           timestamp: Date.now(),
           direction: 'TOOL',
           content: exitText,

@@ -137,7 +137,6 @@ export function useSerialReceive() {
                 const frameBytes = new Uint8Array(seg.frame.bytes);
                 const frameText = pipeline.decodeText(portId, frameBytes);
                 pipeline.enqueueLines(portId, [{
-                  id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                   timestamp: event.timestamp,
                   direction: event.direction as 'RX' | 'TX',
                   content: frameText,

@@ -1,7 +1,7 @@
 import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, collectLeaves } from '../../stores/useAppStore';
-import { useTerminalStore } from '../../stores/useTerminalStore';
+import { releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { useSerialConnection, usePortToolActions } from '../../hooks';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
@@ -36,7 +36,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const moveTabToPane = useAppStore((s) => s.moveTabToPane);
   const splitPane = useAppStore((s) => s.splitPane);
   const setTabPoppedOut = useAppStore((s) => s.setTabPoppedOut);
-  const clearTerminal = useTerminalStore((s) => s.clearTerminal);
   const removePane = useAppStore((s) => s.removePane);
   const { openPort, closePort } = useSerialConnection();
   const { runTool, killTool, configTool } = usePortToolActions();
@@ -62,8 +61,9 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
       const label = popoutLabel('terminal', tabId);
       if (label) popoutService.closePopout(label).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
     }
-    clearTerminal(tabId);
-  }, [ports, closePort, clearTerminal]);
+    // 方案B：释放环形缓冲区 + 渲染实例（标签关闭 = 缓冲销毁）。
+    releaseViewportManager(tabId);
+  }, [ports, closePort]);
 
   const closeTab = useCallback((tabId: string) => {
     cleanupClosedTab(tabId);
@@ -143,10 +143,6 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     ? activeTabId
     : (localActiveTabId && visibleTabIds.includes(localActiveTabId) ? localActiveTabId : visibleTabs[0]?.id || null);
   const displayTab = visibleTabs.find(t => t.id === displayTabId);
-  // issue #11：TTY 模式端口渲染 xterm（TtyView），TRX 端口渲染 TerminalView。
-  const displayPort = ports.find(p => p.id === displayTabId);
-  // Subscribe only to the active terminal — avoids re-rendering on data from other ports (defect #24)
-  const displayTerminal = useTerminalStore((s) => (displayTabId ? s.terminals[displayTabId] : undefined));
 
   const otherPanes = useMemo(
     () => collectLeaves(paneTree).filter(l => l.id !== paneId),
@@ -251,24 +247,21 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             }
           }}
         >
-          {/* issue #11（会话跨标签保留）：TTY 端口**常驻挂载**——xterm 缓冲在实例
-              内，切走再切回必须保留实例（TRX 缓冲在 store 里天然保留）。非活动
-              TTY 标签以 display:none 隐藏（`.tty-view-hidden`，TtyView 恢复可见时
-              自动 re-fit）；TTY 标签不渲染 TerminalView，TRX 标签照旧只在被展示
-              时挂载（缓冲在 store，无实例生命周期）。已知限制：跨 Pane 拖拽/
-              关闭标签仍会销毁实例（会话随实例释放）。 */}
+          {/* issue #11/#14：TTY 与 TRX 标签都**常驻挂载**——TTY 的 xterm 缓冲在
+              实例内、TRX 的环形缓冲在 viewportManager 内，切走再切回都必须保留。
+              非活动标签以 display:none 隐藏（`.tty-view-hidden` / TerminalView 的
+              hidden prop），恢复可见时自动 re-render/re-fit。已知限制：跨 Pane
+              拖拽/关闭标签仍会销毁实例（会话随实例释放）。 */}
           {visibleTabs
             .filter((tab) => ports.find((p) => p.id === tab.id)?.mode === 'tty')
             .map((tab) => (
               <TtyView key={tab.id} portId={tab.id} hidden={tab.id !== displayTabId} />
             ))}
-          {displayPort?.mode !== 'tty' && (
-            <TerminalView
-              key={displayTab.id}
-              portId={displayTab.id}
-              terminal={displayTerminal}
-            />
-          )}
+          {visibleTabs
+            .filter((tab) => ports.find((p) => p.id === tab.id)?.mode !== 'tty')
+            .map((tab) => (
+              <TerminalView key={tab.id} portId={tab.id} hidden={tab.id !== displayTabId} />
+            ))}
         </div>
       ) : paneTabs.length > 0 ? (
         // All tabs in this pane are popped out — Chrome-style detach: content area

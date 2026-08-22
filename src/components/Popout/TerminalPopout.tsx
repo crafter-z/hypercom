@@ -11,6 +11,7 @@ import {
 } from '../../services/tauri';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import TerminalView from '../MainDisplay/TerminalView';
+import { replaceTerminalLines } from '../../utils/terminal/viewportManager';
 
 interface TerminalPopoutProps {
   portId: string;
@@ -33,8 +34,6 @@ interface TerminalPopoutProps {
  * - TX 回显是主窗前端行为（后端不发 TX 事件），故弹窗只显示 RX（及环回模拟回声）。
  */
 const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
-  const terminal = useTerminalStore((s) => s.terminals[portId]);
-
   useEffect(() => {
     // OS window title mirrors the main-window convention: "HyperCom — <portId>"
     // so the user can identify the window from the taskbar/Alt-Tab. Fire-and-forget;
@@ -68,14 +67,13 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
         const [unSnapshot, unData] = await Promise.all([
           // 主窗回推快照：套用显示态 + 灌入历史行。encoding 经 setTerminalConfig
           // 直接赋值（**不**走 setTerminalEncoding）——快照行的 content 已按该编码
-          // 解码好，重解码既冗余又可能扰动。先设显示态（含 maxLines）再灌行，
-          // 使 setTerminalLines 的上限裁剪与快照一致。
+          // 解码好，重解码既冗余又可能扰动。先设显示态（含 maxLines）再灌行。
           popoutEventService.onTerminalSnapshot((payload) => {
             if (payload.portId !== portId) return;
             const { lines, ...display } = payload.terminal;
             const t = useTerminalStore.getState();
             t.setTerminalConfig(portId, display);
-            t.setTerminalLines(portId, lines);
+            replaceTerminalLines(portId, lines);
           }),
           // 实时流：广播按 portId 过滤，经 RxPipeline 完成字节级行聚合 +
           // rAF 批写。ignoreEmptyChars / 编码切换 / 静默 flush 全部管线内部处理。
@@ -104,7 +102,7 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
     };
   }, [portId]);
 
-  return <TerminalView portId={portId} terminal={terminal} />;
+  return <TerminalView portId={portId} />;
 };
 
 export default TerminalPopout;

@@ -1,12 +1,9 @@
 import { useCallback, useRef, useState } from 'react';
-import { useTerminalStore } from '../../../stores/useTerminalStore';
+import { appendTerminalLine } from '../../../utils/terminal/viewportManager';
 import { fileService } from '../../../services/tauri';
 import { parseLogContent } from '../../../utils/logReplay';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/** 回放行的全局自增序号，保证 id 唯一 */
-let replayLineSeq = 0;
 
 /**
  * 日志回放 hook：读取日志文件，按原始时间戳间隔把日志行写回终端。
@@ -38,14 +35,11 @@ export function useLogReplay(portId: string) {
     busyRef.current = true;
     cancelRef.current = false;
     setIsReplaying(true);
-    const store = useTerminalStore.getState();
-    store.ensureTerminal(portId);
 
     for (let i = 0; i < lines.length; i++) {
       if (cancelRef.current) break;
       const line = lines[i];
-      store.appendTerminalLine(portId, {
-        id: `replay-${portId}-${replayLineSeq++}`,
+      appendTerminalLine(portId, {
         timestamp: line.time,
         direction: line.direction,
         content: line.content,

@@ -15,7 +15,6 @@ const FRONTEND_LICENSES: LicenseRow[] = [
   { name: 'zustand', license: 'MIT' },
   { name: 'immer', license: 'MIT' },
   { name: '@dnd-kit (core / sortable / utilities)', license: 'MIT' },
-  { name: '@tanstack/react-virtual', license: 'MIT' },
   { name: '@tauri-apps/* (api / plugins / cli)', license: 'Apache-2.0 OR MIT' },
   { name: 'i18next / react-i18next', license: 'MIT' },
   { name: 'lucide-react', license: 'ISC' },

@@ -14,6 +14,13 @@ import type { RxPipelineOptions } from './rxPipeline';
 
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
 
+/** RX 行不再带 content（方案B, issue #14）：按管线约定（ignoreBOM:true 保留
+ *  行首 BOM）从 rawData 惰性解码出文本用于断言。 */
+const decodeLine = (line: TerminalLine, encoding = 'utf-8'): string =>
+  new TextDecoder(encoding, { fatal: false, ignoreBOM: true }).decode(line.rawData ?? new Uint8Array());
+const lineTexts = (lines: TerminalLine[], encoding = 'utf-8'): string[] =>
+  lines.map((l) => decodeLine(l, encoding));
+
 interface RecordedAppend {
   portId: string;
   lines: TerminalLine[];
@@ -69,7 +76,7 @@ describe('RxPipeline — batched writes', () => {
     runTick(h);
     expect(h.appended).toHaveLength(1);
     expect(h.appended[0]!.portId).toBe('COM1');
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['abc', 'def']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['abc', 'def']);
   });
 
   it('drains every queued port exactly once in a single tick (per-port isolation)', () => {
@@ -79,8 +86,8 @@ describe('RxPipeline — batched writes', () => {
     runTick(h);
     expect(h.appended).toHaveLength(2);
     expect(h.appended.map((a) => a.portId)).toEqual(['COM1', 'COM2']);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a']);
-    expect(h.appended[1]!.lines.map((l) => l.content)).toEqual(['b']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['a']);
+    expect(lineTexts(h.appended[1]!.lines)).toEqual(['b']);
   });
 
   it('builds TerminalLines with event timestamp, RX direction and raw chunk bytes', () => {
@@ -88,7 +95,6 @@ describe('RxPipeline — batched writes', () => {
     h.pipeline.feedBytes('COM1', bytes('hi\n'), 42);
     runTick(h);
     const line = h.appended[0]!.lines[0]!;
-    expect(line.id).toMatch(/^line-\d+-/);
     expect(line.timestamp).toBe(42);
     expect(line.direction).toBe('RX');
     expect(line.rawData).toEqual(bytes('hi'));
@@ -100,7 +106,7 @@ describe('RxPipeline — batched writes', () => {
     h.pipeline.feedBytes('COM1', bytes('abc\r'), 1);
     h.pipeline.feedBytes('COM1', bytes('\ndef\n'), 2);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['abc', 'def']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['abc', 'def']);
   });
 
   it('does nothing for an empty feed (no line, no tick)', () => {
@@ -133,7 +139,7 @@ describe('RxPipeline — silence flush', () => {
     vi.advanceTimersByTime(250); // 静默 flush 到期
     expect(h.appended).toHaveLength(1);
     const line = h.appended[0]!.lines[0]!;
-    expect(line.content).toBe('partial');
+    expect(decodeLine(line)).toBe('partial');
     // 关键断言：行时间戳 = 事件时间，而不是 flush 时刻（已过去 266ms）
     expect(line.timestamp).toBe(eventTs);
     expect(Date.now()).toBeGreaterThan(eventTs);
@@ -149,7 +155,7 @@ describe('RxPipeline — silence flush', () => {
     expect(h.appended).toHaveLength(0);
     vi.advanceTimersByTime(20); // 距上次 feed 满 100ms
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines[0]!.content).toBe('abcdef');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('abcdef');
     expect(h.appended[0]!.lines[0]!.timestamp).toBe(20);
   });
 
@@ -161,7 +167,7 @@ describe('RxPipeline — silence flush', () => {
     vi.advanceTimersByTime(16 + 50 + 50);
     // 只有批写 tick 的一次落盘；静默定时器已被取消，不会产生尾行
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['abc']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['abc']);
   });
 });
 
@@ -173,7 +179,7 @@ describe('RxPipeline — force flush via assembler', () => {
     runTick(h);
     expect(h.appended).toHaveLength(1);
     const line = h.appended[0]!.lines[0]!;
-    expect(line.content).toHaveLength(4096);
+    expect(decodeLine(line)).toHaveLength(4096);
     expect(line.rawData).toHaveLength(4096);
     expect(h.pendingTick).toBeNull(); // 无未终结尾部 → 没有静默定时器残留
   });
@@ -194,7 +200,7 @@ describe('RxPipeline — flushNow / flushAndReset / disconnect', () => {
     expect(h.appended).toHaveLength(0);
     h.pipeline.flushNow('COM1');
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['x', 'y']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['x', 'y']);
   });
 
   it('flushAndReset emits the pending tail before resetting assembler state', () => {
@@ -202,12 +208,12 @@ describe('RxPipeline — flushNow / flushAndReset / disconnect', () => {
     h.pipeline.feedBytes('COM1', bytes('abc'), 7);
     h.pipeline.flushAndReset('COM1');
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['abc']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['abc']);
     expect(h.appended[0]!.lines[0]!.timestamp).toBe(7);
     // 重置后新字节不再与旧尾部合并
     h.pipeline.feedBytes('COM1', bytes('def\n'), 8);
     runTick(h);
-    expect(h.appended[1]!.lines.map((l) => l.content)).toEqual(['def']);
+    expect(lineTexts(h.appended[1]!.lines)).toEqual(['def']);
   });
 
   it('flushAndReset cancels the pending silence timer', () => {
@@ -227,7 +233,7 @@ describe('RxPipeline — flushNow / flushAndReset / disconnect', () => {
     h.pipeline.feedBytes('COM1', bytes('tail'), 100);
     h.pipeline.disconnect('COM1');
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines[0]!.content).toBe('tail');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('tail');
     expect(h.appended[0]!.lines[0]!.timestamp).toBe(100);
     // 静默定时器已随端口状态一起丢弃：不会二次 flush
     vi.advanceTimersByTime(1000);
@@ -236,7 +242,7 @@ describe('RxPipeline — flushNow / flushAndReset / disconnect', () => {
     h.pipeline.feedBytes('COM1', bytes('fresh\n'), 200);
     vi.advanceTimersByTime(16);
     expect(h.appended).toHaveLength(2);
-    expect(h.appended[1]!.lines[0]!.content).toBe('fresh');
+    expect(decodeLine(h.appended[1]!.lines[0]!)).toBe('fresh');
   });
 
   it('flushNow / flushTail / disconnect are no-ops for unknown ports', () => {
@@ -256,14 +262,14 @@ describe('RxPipeline — ignoreEmptyChars', () => {
     const h = makeHarness({ getIgnoreEmptyChars: () => true });
     h.pipeline.feedBytes('COM1', bytes('keep\n   \n\t\nalso\n'), 1);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['keep', 'also']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['keep', 'also']);
   });
 
   it('keeps whitespace-only lines when disabled', () => {
     const h = makeHarness({ getIgnoreEmptyChars: () => false });
     h.pipeline.feedBytes('COM1', bytes('a\n \nb\n'), 1);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a', ' ', 'b']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['a', ' ', 'b']);
   });
 
   it('reads the flag live per feed (not cached at construction)', () => {
@@ -273,17 +279,15 @@ describe('RxPipeline — ignoreEmptyChars', () => {
     ignore = true;
     h.pipeline.feedBytes('COM1', bytes('  \nok\n'), 2);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual([' ', 'ok']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual([' ', 'ok']);
   });
 });
 
 describe('RxPipeline — enqueueLines ordering', () => {
   const frameLine = (id: string): TerminalLine => ({
-    id,
     timestamp: 1,
     direction: 'RX',
-    content: 'FRAME',
-    rawData: new Uint8Array([0xaa]),
+    rawData: bytes(`FRAME-${id}`),
     isHex: true,
     parsedFields: [],
   });
@@ -295,20 +299,20 @@ describe('RxPipeline — enqueueLines ordering', () => {
     h.pipeline.feedBytes('COM1', bytes('def\n'), 2); // 'abcdef' 成行排在帧之后
     h.pipeline.feedBytes('COM1', bytes('ghi\n'), 3);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['FRAME', 'abcdef', 'ghi']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['FRAME-proto-1', 'abcdef', 'ghi']);
   });
 
   it('keeps multiple enqueued lines in insertion order', () => {
     const h = makeHarness();
     h.pipeline.enqueueLines('COM1', [frameLine('p1'), frameLine('p2')]);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.id)).toEqual(['p1', 'p2']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['FRAME-p1', 'FRAME-p2']);
   });
 
   it('does not filter enqueued lines through ignoreEmptyChars (protocol frames bypass)', () => {
     const h = makeHarness({ getIgnoreEmptyChars: () => true });
     const blank: TerminalLine = {
-      id: 'p-blank', timestamp: 1, direction: 'RX', content: '   ', rawData: new Uint8Array([0x20]), isHex: false,
+      timestamp: 1, direction: 'RX', rawData: new Uint8Array([0x20]), isHex: false,
     };
     h.pipeline.enqueueLines('COM1', [blank]);
     runTick(h);
@@ -321,7 +325,7 @@ describe('RxPipeline — decoding', () => {
     const h = makeHarness();
     h.pipeline.feedBytes('COM1', [0xef, 0xbb, 0xbf, 0x41, 0x0a], 1);
     runTick(h);
-    expect(h.appended[0]!.lines[0]!.content).toBe('\uFEFFA');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('\uFEFFA');
   });
 
   it('decodes multibyte chars kept whole by byte-level line splitting', () => {
@@ -329,7 +333,7 @@ describe('RxPipeline — decoding', () => {
     // '你' UTF-8 = E4 BD A0；行边界不会切断它
     h.pipeline.feedBytes('COM1', [0xe4, 0xbd, 0xa0, 0x0a], 1);
     runTick(h);
-    expect(h.appended[0]!.lines[0]!.content).toBe('你');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('你');
   });
 
   it('decodeText decodes under the port-specific current label (GBK example)', () => {
@@ -348,7 +352,7 @@ describe('RxPipeline — decoding', () => {
     label = 'iso-8859-1';
     h.pipeline.feedBytes('COM1', [0xe9, 0x0a], 2); // é in ISO-8859-1
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['en', 'é']);
+    expect(lineTexts(h.appended[0]!.lines, 'iso-8859-1')).toEqual(['en', 'é']);
   });
 });
 
@@ -382,15 +386,15 @@ describe('RxPipeline — maxLinesPerTick write limit (issue #6-2)', () => {
     runTick(h);
     // 首 tick 只写 2 行，剩余 3 行留在队列并重新调度
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a', 'b']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['a', 'b']);
     expect(h.pendingTick).not.toBeNull();
 
     runTick(h);
-    expect(h.appended[1]!.lines.map((l) => l.content)).toEqual(['c', 'd']);
+    expect(lineTexts(h.appended[1]!.lines)).toEqual(['c', 'd']);
     expect(h.pendingTick).not.toBeNull();
 
     runTick(h);
-    expect(h.appended[2]!.lines.map((l) => l.content)).toEqual(['e']);
+    expect(lineTexts(h.appended[2]!.lines)).toEqual(['e']);
     expect(h.pendingTick).toBeNull(); // 队列已空
   });
 
@@ -399,13 +403,13 @@ describe('RxPipeline — maxLinesPerTick write limit (issue #6-2)', () => {
     h.pipeline.feedBytes('COM1', bytes('a\nb\nc\nd\ne\nf\ng\n'), 1);
     // 尚未 tick：直接 flushNow（同步）
     h.pipeline.flushNow('COM1');
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a', 'b', 'c']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['a', 'b', 'c']);
     // 剩余 4 行由 rAF 续写
     expect(h.pendingTick).not.toBeNull();
     runTick(h);
-    expect(h.appended[1]!.lines.map((l) => l.content)).toEqual(['d', 'e', 'f']);
+    expect(lineTexts(h.appended[1]!.lines)).toEqual(['d', 'e', 'f']);
     runTick(h);
-    expect(h.appended[2]!.lines.map((l) => l.content)).toEqual(['g']);
+    expect(lineTexts(h.appended[2]!.lines)).toEqual(['g']);
     expect(h.pendingTick).toBeNull();
   });
 
@@ -416,8 +420,8 @@ describe('RxPipeline — maxLinesPerTick write limit (issue #6-2)', () => {
     runTick(h);
     // 同一 tick 内两端口各写 2 行
     expect(h.appended.map((a) => a.portId)).toEqual(['COM1', 'COM2']);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a', 'b']);
-    expect(h.appended[1]!.lines.map((l) => l.content)).toEqual(['x', 'y']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['a', 'b']);
+    expect(lineTexts(h.appended[1]!.lines)).toEqual(['x', 'y']);
     // 两端口都还有剩余 → 下一 tick 续写
     expect(h.pendingTick).not.toBeNull();
   });
@@ -427,11 +431,9 @@ describe('RxPipeline — maxLinesPerTick write limit (issue #6-2)', () => {
 
 describe('RxPipeline — maxQueuedLines queue cap (issue #6-10)', () => {
   const frameLine = (id: string): TerminalLine => ({
-    id,
     timestamp: 1,
     direction: 'RX',
-    content: 'FRAME',
-    rawData: new Uint8Array([0xaa]),
+    rawData: bytes(`FRAME-${id}`),
     isHex: true,
     parsedFields: [],
   });
@@ -441,21 +443,21 @@ describe('RxPipeline — maxQueuedLines queue cap (issue #6-10)', () => {
     h.pipeline.feedBytes('COM1', bytes('a\nb\nc\nd\ne\n'), 1);
     runTick(h);
     // 5 行入队超 3 行上限：丢弃最旧的 a、b，保留 c、d、e
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['c', 'd', 'e']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['c', 'd', 'e']);
   });
 
   it('enqueueLines also respects the queue cap', () => {
     const h = makeHarness({ maxQueuedLines: 2 });
     h.pipeline.enqueueLines('COM1', [frameLine('f1'), frameLine('f2'), frameLine('f3')]);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.id)).toEqual(['f2', 'f3']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['FRAME-f2', 'FRAME-f3']);
   });
 
   it('does not drop anything when under the cap', () => {
     const h = makeHarness({ maxQueuedLines: 5 });
     h.pipeline.feedBytes('COM1', bytes('a\nb\nc\n'), 1);
     runTick(h);
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['a', 'b', 'c']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['a', 'b', 'c']);
   });
 
   it('enforces the cap on the shared queue across feedBytes + enqueueLines', () => {
@@ -464,7 +466,7 @@ describe('RxPipeline — maxQueuedLines queue cap (issue #6-10)', () => {
     h.pipeline.enqueueLines('COM1', [frameLine('f1'), frameLine('f2')]);
     runTick(h);
     // 队列 = [a,b,c] + [f1,f2] = 5 行超 3：丢最旧 a、b，保留 c,f1,f2
-    expect(h.appended[0]!.lines.map((l) => l.content)).toEqual(['c', 'FRAME', 'FRAME']);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['c', 'FRAME-f1', 'FRAME-f2']);
   });
 });
 
@@ -528,7 +530,7 @@ describe('RxPipeline — visibility-aware drain (issue #6-10)', () => {
     expect(h.appended).toHaveLength(0);
     vi.advanceTimersByTime(16); // setTimeout 兜底排空
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines[0]!.content).toBe('line');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('line');
   });
 
   it('uses rAF when visible and drains on the rAF tick', () => {
@@ -540,7 +542,7 @@ describe('RxPipeline — visibility-aware drain (issue #6-10)', () => {
     expect(h.appended).toHaveLength(0);
     stub.raf()!(); // 触发 rAF tick
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines[0]!.content).toBe('abc');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('abc');
   });
 
   it('re-arms a pending rAF tick as setTimeout when visibility flips to hidden', () => {
@@ -558,7 +560,7 @@ describe('RxPipeline — visibility-aware drain (issue #6-10)', () => {
 
     vi.advanceTimersByTime(16);
     expect(h.appended).toHaveLength(1); // setTimeout 兜底排空
-    expect(h.appended[0]!.lines[0]!.content).toBe('a');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('a');
   });
 
   it('re-arms a pending setTimeout tick back to rAF when visibility flips to visible', () => {
@@ -575,6 +577,6 @@ describe('RxPipeline — visibility-aware drain (issue #6-10)', () => {
     expect(h.appended).toHaveLength(0); // 新 tick 是 rAF，尚未触发
     stub.raf()!();
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0]!.lines[0]!.content).toBe('b');
+    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('b');
   });
 });

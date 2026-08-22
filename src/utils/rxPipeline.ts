@@ -14,6 +14,10 @@
  *
  * 主窗与弹出窗各持一个模块单例：弹窗是独立 webview（独立模块作用域与 store
  * 实例），getRxPipeline() 在那里自然接线到本窗自己的 store——绝不跨窗共享。
+ *
+ * 方案B（issue #14）：批写目标从 useTerminalStore 的行数组改为
+ * viewportManager 的环形缓冲区（appendTerminalLines）。行不再携带解码后的
+ * content 字符串——渲染/搜索/过滤按需惰性解码。
  */
 
 import type { TerminalLine } from '../types';
@@ -21,6 +25,7 @@ import { RxLineAssembler } from './rxAssembler';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { useToastStore } from '../stores/useToastStore';
+import { appendTerminalLines } from './terminal/viewportManager';
 import i18n from '../i18n';
 
 /** 每端口内存裁剪 toast 节流：同一端口在窗口内至多提示一次，避免高频 RX 刷屏。 */
@@ -28,8 +33,8 @@ const TRIM_TOAST_THROTTLE_MS = 10_000;
 const trimToastLastAt = new Map<string, number>();
 
 /**
- * 因内存限制清屏的通知（issue #6-2）。由 RxPipeline 接线层在 store 返回
- * trimmed=true 时触发（store 保持纯净，避免 useToastStore→i18n→useAppStore
+ * 因内存限制清屏的通知（issue #6-2）。由 RxPipeline 接线层在 append 返回
+ * trimmed=true 时触发（接线层保持纯净，避免 useToastStore→i18n→useAppStore
  * 的模块级循环依赖）。
  */
 function notifyMemoryTrim(portId: string): void {
@@ -91,10 +96,6 @@ const DEFAULT_MAX_LINES_PER_TICK = 2000;
 /** 每端口队列上限（行）：超过即丢弃最旧，防隐藏窗口期间无界积压（issue #6-10） */
 const DEFAULT_MAX_QUEUED_LINES = 10_000;
 const FALLBACK_TICK_MS = 16;
-
-/** 行 ID 格式与代码库其它写入点一致 */
-const makeLineId = (): string =>
-  `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 /** 页面是否隐藏：document.hidden / visibilityState === 'hidden' 时 rAF 停摆（issue #6-10） */
 const defaultIsDocumentHidden = (): boolean =>
@@ -174,15 +175,14 @@ export class RxPipeline {
       for (const chunk of chunks) {
         // issue #6-2 内存瘦身：chunk（number[]）转 Uint8Array 后**同一份**既用于
         // 解码又存进 rawData——比旧的「解码临时拷贝 + number[] 存 rawData」省一份。
+        // issue #14：不再存解码后的 content 字符串（渲染/搜索/过滤按需惰性解码）。
         const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
         const text = this.decodeUnderCurrentLabel(state, portId, raw);
         // ignoreEmptyChars 语义与旧路径一致：解码后 trim 为空（纯分隔/空白）的行丢弃
         if (ignoreEmptyChars && !text.trim()) continue;
         state.queue.push({
-          id: makeLineId(),
           timestamp,
           direction: 'RX',
-          content: text,
           rawData: raw,
           isHex: false,
         });
@@ -243,13 +243,10 @@ export class RxPipeline {
     if (!state) return;
     const tail = state.assembler.takeTail();
     if (tail.length === 0) return;
-    const raw = new Uint8Array(tail);
     state.queue.push({
-      id: makeLineId(),
       timestamp: state.lastEventTs ?? Date.now(),
       direction: 'RX',
-      content: this.decodeUnderCurrentLabel(state, portId, raw),
-      rawData: raw,
+      rawData: new Uint8Array(tail),
       isHex: false,
     });
   }
@@ -408,9 +405,9 @@ export function getRxPipeline(): RxPipeline {
   if (!rxPipelineSingleton) {
     rxPipelineSingleton = new RxPipeline({
       appendLines: (portId, lines) => {
-        // issue #6-2：裁剪由 store 判定（返回 true 表示超预算已裁最早一半屏），
-        // 接线层负责弹「因内存限制清屏」的通知。
-        const trimmed = useTerminalStore.getState().appendTerminalLines(portId, lines);
+        // 方案B（issue #14）：批写入环形缓冲区；返回 true 表示缓冲区丢弃过
+        // 最旧行（内存预算裁剪），接线层负责弹「因内存限制清屏」的通知。
+        const trimmed = appendTerminalLines(portId, lines);
         if (trimmed) notifyMemoryTrim(portId);
       },
       getEncodingLabel: (portId) => {

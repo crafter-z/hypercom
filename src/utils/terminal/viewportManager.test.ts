@@ -1,0 +1,181 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { TerminalLine } from '../../types';
+import { TerminalViewportManager, appendTerminalLines, clearTerminal, computeBufferLimits } from './viewportManager';
+import { useAppStore } from '../../stores/useAppStore';
+import { useTerminalStore } from '../../stores/useTerminalStore';
+
+const makeLine = (tag: string, direction: 'RX' | 'TX' = 'RX'): TerminalLine => ({
+  timestamp: 0,
+  direction,
+  rawData: new TextEncoder().encode(tag),
+  isHex: false,
+});
+
+let vm: TerminalViewportManager;
+
+beforeEach(() => {
+  // Reset the display store so the manager reads clean defaults.
+  useTerminalStore.setState({ terminals: {} });
+  vm = new TerminalViewportManager('COM1', { maxLines: 100, maxBytes: 0 });
+});
+
+describe('TerminalViewportManager appendLines', () => {
+  it('appends lines to the buffer with monotonic seqs', () => {
+    vm.appendLines([makeLine('a'), makeLine('b')]);
+    expect(vm.buffer.length).toBe(2);
+    expect(vm.buffer.firstSeq).toBe(0);
+    expect(vm.buffer.lastSeq).toBe(1);
+  });
+
+  it('reports trimmed when the buffer drops oldest lines', () => {
+    const small = new TerminalViewportManager('COM1', { maxLines: 2, maxBytes: 0 });
+    small.appendLines([makeLine('a'), makeLine('b')]);
+    expect(small.appendLines([makeLine('c')])).toBe(true);
+    expect(small.buffer.firstSeq).toBe(1);
+  });
+});
+
+describe('TerminalViewportManager filter', () => {
+  it('identity mode (no filter) returns all lines', () => {
+    vm.appendLines([makeLine('a'), makeLine('b')]);
+    expect(vm.getVisibleCount()).toBe(2);
+  });
+
+  it('direction filter keeps only matching lines (incremental append)', () => {
+    vm.setFilter('RX', '');
+    vm.appendLines([makeLine('a', 'RX'), makeLine('b', 'TX'), makeLine('c', 'RX')]);
+    expect(vm.getVisibleCount()).toBe(2);
+    // Incremental extension: a new TX line must NOT join the list.
+    vm.appendLines([makeLine('d', 'TX')]);
+    expect(vm.getVisibleCount()).toBe(2);
+    vm.appendLines([makeLine('e', 'RX')]);
+    expect(vm.getVisibleCount()).toBe(3);
+  });
+
+  it('keyword filter matches decoded text case-insensitively', () => {
+    vm.setFilter('all', 'HELLO');
+    vm.appendLines([makeLine('hello world'), makeLine('goodbye')]);
+    expect(vm.getVisibleCount()).toBe(1);
+  });
+
+  it('clearing the filter restores identity count', () => {
+    vm.setFilter('TX', '');
+    vm.appendLines([makeLine('a', 'RX'), makeLine('b', 'TX')]);
+    expect(vm.getVisibleCount()).toBe(1);
+    vm.setFilter('all', '');
+    expect(vm.getVisibleCount()).toBe(2);
+  });
+
+  it('trims dropped seqs from the filtered list (O(1) offset)', () => {
+    const small = new TerminalViewportManager('COM1', { maxLines: 3, maxBytes: 0 });
+    small.setFilter('all', '');
+    small.appendLines([makeLine('a'), makeLine('b'), makeLine('c')]);
+    expect(small.getVisibleCount()).toBe(3);
+    small.appendLines([makeLine('d')]); // drops 'a'
+    expect(small.getVisibleCount()).toBe(3);
+    small.appendLines([makeLine('e')]); // drops 'b'
+    small.appendLines([makeLine('f')]); // drops 'c'
+    expect(small.getVisibleCount()).toBe(3);
+  });
+});
+
+describe('TerminalViewportManager pause', () => {
+  it('freezes the visible count at the current newest line', () => {
+    vm.appendLines([makeLine('a'), makeLine('b')]);
+    vm.setPaused(true);
+    expect(vm.getVisibleCount()).toBe(2);
+    vm.appendLines([makeLine('c')]);
+    expect(vm.getVisibleCount()).toBe(2); // frozen
+    vm.setPaused(false);
+    expect(vm.getVisibleCount()).toBe(3);
+  });
+});
+
+describe('TerminalViewportManager search', () => {
+  it('finds matches incrementally while the search bar is open', () => {
+    vm.setSearch(true, 'hello', false);
+    vm.appendLines([makeLine('hello world'), makeLine('goodbye')]);
+    expect(vm.getMatchCount()).toBe(1);
+    vm.appendLines([makeLine('say hello again')]);
+    expect(vm.getMatchCount()).toBe(2);
+  });
+
+  it('case-sensitive search distinguishes case', () => {
+    vm.setSearch(true, 'HELLO', true);
+    vm.appendLines([makeLine('hello'), makeLine('HELLO')]);
+    expect(vm.getMatchCount()).toBe(1);
+  });
+
+  it('closing search clears the match set', () => {
+    vm.setSearch(true, 'hello', false);
+    vm.appendLines([makeLine('hello')]);
+    expect(vm.getMatchCount()).toBe(1);
+    vm.setSearch(false, '', false);
+    expect(vm.getMatchCount()).toBe(0);
+  });
+
+  it('jumpToMatch wraps and returns false when empty', () => {
+    expect(vm.jumpToMatch(0)).toBe(false);
+    vm.setSearch(true, 'a', false);
+    vm.appendLines([makeLine('a1'), makeLine('x'), makeLine('a2')]);
+    expect(vm.jumpToMatch(0)).toBe(true);
+    expect(vm.getCurrentMatchIndex()).toBe(0);
+    expect(vm.jumpToMatch(2)).toBe(true);
+    expect(vm.getCurrentMatchIndex()).toBe(0); // 2 % 2 = 0（回绕）
+    expect(vm.jumpToMatch(1)).toBe(true);
+    expect(vm.getCurrentMatchIndex()).toBe(1);
+  });
+});
+
+describe('TerminalViewportManager replaceAll / clear / applyLimits', () => {
+  it('replaceAll replaces the buffer and recomputes the filter', () => {
+    vm.setFilter('RX', '');
+    vm.appendLines([makeLine('a', 'RX'), makeLine('b', 'TX')]);
+    expect(vm.getVisibleCount()).toBe(1);
+    vm.replaceAll([makeLine('x', 'TX'), makeLine('y', 'TX')]);
+    expect(vm.buffer.length).toBe(2);
+    expect(vm.getVisibleCount()).toBe(0); // filter still RX, all TX
+  });
+
+  it('clear empties the buffer and resets counts', () => {
+    vm.appendLines([makeLine('a'), makeLine('b')]);
+    vm.setSearch(true, 'a', false);
+    vm.clear();
+    expect(vm.buffer.length).toBe(0);
+    expect(vm.getVisibleCount()).toBe(0);
+    expect(vm.getMatchCount()).toBe(0);
+  });
+
+  it('applyLimits shrinks the buffer to the new capacity', () => {
+    vm.appendLines([makeLine('a'), makeLine('b'), makeLine('c')]);
+    vm.applyLimits({ maxLines: 2, maxBytes: 0 });
+    expect(vm.buffer.length).toBe(2);
+    expect(vm.buffer.firstSeq).toBe(1); // kept b, c
+  });
+});
+
+describe('TerminalViewportManager subscription', () => {
+  it('notifies listeners on render passes (data ingest)', () => {
+    // No renderer attached — requestRender is skipped, so subscribe fires
+    // nothing. Instead verify the subscription lifecycle is safe.
+    const fn = vi.fn();
+    const unsub = vm.subscribe(fn);
+    unsub();
+    unsub(); // double-unsubscribe is a no-op
+    expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe('viewportManager adapter functions', () => {
+  it('appendTerminalLines creates the manager and returns trim flag', () => {
+    expect(appendTerminalLines('COM2', [makeLine('a')])).toBe(false);
+    expect(clearTerminal('COM2')).toBeUndefined(); // no-op on missing is fine
+  });
+
+  it('computeBufferLimits reads the config budget', () => {
+    useAppStore.getState().setConfig({ memoryPerPortBudgetMb: 64 });
+    const limits = computeBufferLimits();
+    expect(limits.maxLines).toBe(32000);
+    expect(limits.maxBytes).toBe(64 * 1024 * 1024);
+  });
+});

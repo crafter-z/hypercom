@@ -4,6 +4,7 @@ import { useRuleStore } from '../stores/useRuleStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { popoutEventService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
+import { snapshotTerminalLines } from '../utils/terminal/viewportManager';
 
 /**
  * 终端快照行数上限（R3）：缓冲接近 memoryLimitMb 时整包快照载荷过大，
@@ -89,9 +90,7 @@ export function usePopoutBridge() {
           // 弹窗在端口终端尚未建立时快照，属正常竞态分支，非错误，不记录。
           return;
         }
-        const lines = terminal.lines.length > SNAPSHOT_LINE_CAP
-          ? terminal.lines.slice(terminal.lines.length - SNAPSHOT_LINE_CAP)
-          : terminal.lines;
+        const lines = snapshotTerminalLines(payload.portId, SNAPSHOT_LINE_CAP);
         void popoutEventService
           .emitTerminalSnapshot({ portId: payload.portId, terminal: { ...terminal, lines } })
           .catch((e) => console.debug('[usePopoutBridge] emitTerminalSnapshot failed:', e));

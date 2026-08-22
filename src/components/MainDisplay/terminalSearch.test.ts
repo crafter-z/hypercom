@@ -10,7 +10,6 @@ import {
 import type { TerminalLine } from '../../types';
 
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
-  id: 'l1',
   timestamp: 0,
   direction: 'RX',
   content: '',
@@ -26,17 +25,17 @@ describe('findMatches', () => {
 
   it('finds case-insensitive matches across multiple lines', () => {
     const lines = [
-      makeLine({ id: 'a', content: 'Hello World' }),
-      makeLine({ id: 'b', content: 'no match here' }),
-      makeLine({ id: 'c', content: 'world of warcraft' }),
+      makeLine({ content: 'Hello World' }),
+      makeLine({ content: 'no match here' }),
+      makeLine({ content: 'world of warcraft' }),
     ];
     expect(findMatches(lines, { query: 'world', caseSensitive: false })).toEqual([0, 2]);
   });
 
   it('respects caseSensitive flag', () => {
     const lines = [
-      makeLine({ id: 'a', content: 'Hello World' }),
-      makeLine({ id: 'b', content: 'hello world' }),
+      makeLine({ content: 'Hello World' }),
+      makeLine({ content: 'hello world' }),
     ];
     expect(findMatches(lines, { query: 'Hello', caseSensitive: true })).toEqual([0]);
     expect(findMatches(lines, { query: 'Hello', caseSensitive: false })).toEqual([0, 1]);
@@ -44,8 +43,8 @@ describe('findMatches', () => {
 
   it('searches hex representation when displayFormat is hex', () => {
     const lines = [
-      makeLine({ id: 'a', content: 'ignored', rawData: new Uint8Array([0xaa, 0xbb, 0xcc]) }),
-      makeLine({ id: 'b', content: 'nope', rawData: new Uint8Array([0x01, 0x02]) }),
+      makeLine({ content: 'ignored', rawData: new Uint8Array([0xaa, 0xbb, 0xcc]) }),
+      makeLine({ content: 'nope', rawData: new Uint8Array([0x01, 0x02]) }),
     ];
     const matches = findMatches(lines, { query: 'AA BB', caseSensitive: true, displayFormat: 'hex' });
     expect(matches).toEqual([0]);
@@ -88,9 +87,9 @@ describe('formatLineForCopy', () => {
 
 describe('findMatchesIncremental (issue #2-8 perf)', () => {
   const lines = [
-    makeLine({ id: 'a', content: 'hello world' }),
-    makeLine({ id: 'b', content: 'help me' }),
-    makeLine({ id: 'c', content: 'foo' }),
+    makeLine({ content: 'hello world' }),
+    makeLine({ content: 'help me' }),
+    makeLine({ content: 'foo' }),
   ];
 
   it('falls back to a full scan without a previous cache', () => {
@@ -112,7 +111,7 @@ describe('findMatchesIncremental (issue #2-8 perf)', () => {
       query: 'hel', caseSensitive: false, displayFormat: undefined,
       matches: [0, 1], lineCount: 3,
     };
-    const grown = [...lines, makeLine({ id: 'd', content: 'HELLO again' })];
+    const grown = [...lines, makeLine({ content: 'HELLO again' })];
     expect(findMatchesIncremental(grown, { query: 'hel', caseSensitive: false }, prev))
       .toEqual([0, 1, 3]);
   });
@@ -131,7 +130,7 @@ describe('findMatchesIncremental (issue #2-8 perf)', () => {
       query: 'hel', caseSensitive: false, displayFormat: undefined,
       matches: [0, 1], lineCount: 3,
     };
-    const caseLines = [makeLine({ id: 'a', content: 'HELLO' }), makeLine({ id: 'b', content: 'hello' })];
+    const caseLines = [makeLine({ content: 'HELLO' }), makeLine({ content: 'hello' })];
     const prevCase: MatchCache = { ...prev, query: 'HE', matches: [0], lineCount: 2 };
     // caseSensitive flipped → full re-scan finds only the exact-case line
     expect(findMatchesIncremental(caseLines, { query: 'HEL', caseSensitive: true }, prevCase))

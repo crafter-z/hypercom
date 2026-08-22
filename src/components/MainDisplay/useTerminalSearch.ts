@@ -1,173 +1,77 @@
 /**
- * Terminal search state hook — extracted from TerminalView.
+ * Terminal search hook — UI-local search state backed by the viewport
+ * manager (方案B, issue #14).
  *
- * Owns the UI-local search state (open / query / case-sensitivity / current
- * match), the debounced match computation, and match-jump navigation.
- *
- * Jump navigation is filter-aware: search runs over the FULL line buffer,
- * but a jump must land on a rendered row, so when the target match is hidden
- * by an active direction/keyword filter it advances to the nearest visible
- * match instead (see jumpToMatch).
- *
- * The scroll target is supplied lazily via `getJumpContext` so every returned
- * callback keeps a stable identity across renders — the same stabilization
- * pattern TerminalView uses for the virtualizer (churned function references
- * trigger useVirtualizer's internal memos → notify() during render → loop).
+ * Holds the open flag / query input / case-sensitivity toggle; the manager
+ * computes match seqs incrementally (matched once at append time — no
+ * per-keystroke buffer rescans while RX flows) and owns match navigation.
+ * Readouts (current index, match count) refresh via the manager's render-pass
+ * subscription.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { TerminalLine, DisplayFormat } from '../../types';
-import { findMatchesIncremental, type MatchCache } from './terminalSearch';
-
-export interface SearchJumpContext {
-  /** Original line index → rendered (filtered) row index; `null` when no
-   *  filter is active (identity — the original index IS the rendered row). */
-  originalToFiltered: Map<number, number> | null;
-  /** Number of rows currently rendered (the frozen prefix length while paused). */
-  visibleCount: number;
-  /** Total line count of the unfiltered buffer. */
-  lineCount: number;
-  /** Scroll the virtualizer so the given filtered row index is centered. */
-  scrollToFilteredIndex: (filteredIndex: number) => void;
-}
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { TerminalViewportManager } from '../../utils/terminal/viewportManager';
 
 interface UseTerminalSearchOptions {
-  lines: TerminalLine[];
-  displayFormat?: DisplayFormat;
-  getJumpContext: () => SearchJumpContext;
+  vm: TerminalViewportManager;
 }
 
-export function useTerminalSearch({
-  lines,
-  displayFormat,
-  getJumpContext,
-}: UseTerminalSearchOptions) {
+const QUERY_DEBOUNCE_MS = 150;
+
+export function useTerminalSearch({ vm }: UseTerminalSearchOptions) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [caseSensitive, setCaseSensitive] = useState(false);
   const [debouncedQuery, setDebouncedQuery] = useState('');
-  const [currentMatch, setCurrentMatch] = useState(0); // index into matchIndices
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [, forceRender] = useState(0);
+  const vmRef = useRef(vm);
+  vmRef.current = vm;
 
-  // 增量匹配缓存（issue #2-8 性能）：继续输入时只重扫旧匹配∪新增行。
-  // ref 在 memo 内更新是幂等的（同输入重算结果相同，StrictMode 双渲染安全）。
-  const matchCacheRef = useRef<MatchCache | null>(null);
-
-  // 性能关键点：匹配计算**只在搜索栏打开时**进行。关闭状态下即使残留
-  // query，高频 RX 批写（lines 身份每批变化）也不再触发全缓冲扫描。
-  const matchIndices = useMemo(() => {
-    if (!searchOpen) {
-      matchCacheRef.current = null;
-      return [];
-    }
-    if (!debouncedQuery) {
-      matchCacheRef.current = null;
-      return [];
-    }
-    const matches = findMatchesIncremental(
-      lines,
-      { query: debouncedQuery, caseSensitive, displayFormat },
-      matchCacheRef.current
-    );
-    matchCacheRef.current = {
-      query: debouncedQuery,
-      caseSensitive,
-      displayFormat,
-      matches,
-      lineCount: lines.length,
-    };
-    return matches;
-  }, [lines, debouncedQuery, caseSensitive, displayFormat, searchOpen]);
-
-  // Debounce search input (~150ms) — only recompute matches on debounced value
+  // Debounce query input — only recompute matches on the debounced value.
   useEffect(() => {
-    const handle = setTimeout(() => {
-      setDebouncedQuery(searchQuery);
-      setCurrentMatch(0);
-    }, 150);
+    const handle = setTimeout(() => setDebouncedQuery(searchQuery), QUERY_DEBOUNCE_MS);
     return () => clearTimeout(handle);
   }, [searchQuery]);
 
-  // Clamp currentMatch when matchIndices shrinks
+  // Push open/query/case into the manager (full recompute).
   useEffect(() => {
-    if (matchIndices.length === 0) {
-      if (currentMatch !== 0) setCurrentMatch(0);
-      return;
-    }
-    if (currentMatch >= matchIndices.length) {
-      setCurrentMatch(matchIndices.length - 1);
-    }
-  }, [matchIndices, currentMatch]);
+    vmRef.current.setSearch(searchOpen, debouncedQuery, caseSensitive);
+  }, [searchOpen, debouncedQuery, caseSensitive]);
 
-  // Refs keep jump/next/prev callback identities stable across renders.
-  const matchIndicesRef = useRef(matchIndices);
-  matchIndicesRef.current = matchIndices;
-  const currentMatchRef = useRef(currentMatch);
-  currentMatchRef.current = currentMatch;
-
-  const jumpToMatch = useCallback((idx: number) => {
-    const matches = matchIndicesRef.current;
-    if (matches.length === 0) return;
-    const { originalToFiltered, visibleCount, lineCount, scrollToFilteredIndex } = getJumpContext();
-    let clamped = ((idx % matches.length) + matches.length) % matches.length;
-    // Search runs over the FULL view, but the jump must land on a rendered
-    // row. A match is rendered iff it survives the active filter (map lookup)
-    // or — when no filter is active (map === null, identity) — iff it lies
-    // within the visible prefix (matches[i] < visibleCount), which also keeps
-    // paused views from jumping past the frozen prefix. If the target match
-    // is hidden, advance to the nearest visible match; if NO match is
-    // visible, leave state unchanged so the UI never points at a hidden line.
-    const map = originalToFiltered;
-    const isVisible = (origIdx: number): boolean =>
-      map !== null ? map.has(origIdx) : origIdx < visibleCount;
-    if ((map !== null ? map.size : visibleCount) < lineCount) {
-      if (!isVisible(matches[clamped])) {
-        let foundVisible = false;
-        for (let step = 1; step < matches.length; step++) {
-          const candidate = (clamped + step) % matches.length;
-          if (isVisible(matches[candidate])) {
-            clamped = candidate;
-            foundVisible = true;
-            break;
-          }
-        }
-        if (!foundVisible) return;
-      }
-    }
-    // Rendered row index: map lookup when filtered, identity otherwise.
-    const virtIdx = map !== null ? map.get(matches[clamped]) : matches[clamped];
-    if (virtIdx === undefined) return;
-    setCurrentMatch(clamped);
-    scrollToFilteredIndex(virtIdx);
-  }, [getJumpContext]);
-
-  const nextMatch = useCallback(() => {
-    jumpToMatch(currentMatchRef.current + 1);
-  }, [jumpToMatch]);
-
-  const prevMatch = useCallback(() => {
-    jumpToMatch(currentMatchRef.current - 1);
-  }, [jumpToMatch]);
+  // Refresh readouts on manager render passes (match list changes as data
+  // flows while the search bar is open).
+  useEffect(() => {
+    return vm.subscribe(() => forceRender((v) => v + 1));
+  }, [vm]);
 
   const openSearch = useCallback(() => setSearchOpen(true), []);
   const toggleSearch = useCallback(() => setSearchOpen((prev) => !prev), []);
   const toggleCase = useCallback(() => setCaseSensitive((v) => !v), []);
   const closeSearch = useCallback(() => {
-    // Keep query so re-opening restores it; clear debounced to stop recompute churn
+    // Keep the query so re-opening restores it; clear the debounced value so
+    // the manager drops the stale match set immediately.
     setSearchOpen(false);
+    setDebouncedQuery('');
+  }, []);
+
+  const nextMatch = useCallback(() => {
+    vmRef.current.jumpToMatch(vmRef.current.getCurrentMatchIndex() + 1);
+  }, []);
+
+  const prevMatch = useCallback(() => {
+    vmRef.current.jumpToMatch(vmRef.current.getCurrentMatchIndex() - 1);
   }, []);
 
   return {
     searchOpen,
     searchQuery,
-    debouncedQuery,
     caseSensitive,
-    currentMatch,
-    matchIndices,
+    currentMatch: vm.getCurrentMatchIndex(),
+    searchMatchCount: vm.getMatchCount(),
     setSearchQuery,
     openSearch,
     toggleSearch,
     toggleCase,
     closeSearch,
-    jumpToMatch,
     nextMatch,
     prevMatch,
   };

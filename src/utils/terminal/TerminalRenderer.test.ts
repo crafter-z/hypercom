@@ -1,0 +1,326 @@
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach } from 'vitest';
+import type { TerminalLine } from '../../types';
+import { TerminalBuffer } from './TerminalBuffer';
+import { TerminalRenderer, type RendererConfig, type TerminalViewState } from './TerminalRenderer';
+
+const ROW_HEIGHT = 18;
+const CLIENT_HEIGHT = 200;
+
+const makeLine = (tag: string): TerminalLine => ({
+  timestamp: 0,
+  direction: 'RX',
+  content: undefined,
+  rawData: new TextEncoder().encode(tag),
+  isHex: false,
+});
+
+const makeConfig = (overrides?: Partial<RendererConfig>): RendererConfig => ({
+  rowHeight: ROW_HEIGHT,
+  showTimestamp: true,
+  displayFormat: 'string',
+  encoding: 'UTF-8',
+  timestampFormat: 'absolute',
+  timestampMode: 'perLine',
+  highlightRuleSets: [],
+  connectedAt: null,
+  ...overrides,
+});
+
+const identityView = (overrides?: Partial<TerminalViewState>): TerminalViewState => ({
+  visibleSeqs: null,
+  visibleSeqsOffset: 0,
+  frozenSeq: null,
+  matchSet: null,
+  currentMatchSeq: -1,
+  searchQuery: '',
+  searchCaseSensitive: false,
+  selectedRange: null,
+  locked: true,
+  gestureActive: false,
+  followEnabled: true,
+  ...overrides,
+});
+
+function mount(config?: RendererConfig) {
+  const container = document.createElement('div');
+  Object.defineProperty(container, 'clientHeight', { value: CLIENT_HEIGHT, configurable: true });
+  document.body.appendChild(container);
+  const renderer = new TerminalRenderer(config ?? makeConfig());
+  renderer.attachToContainer(container);
+  return { container, renderer };
+}
+
+const fill = (b: TerminalBuffer, tags: string[]) => {
+  for (const t of tags) b.append(makeLine(t));
+};
+
+let buf: TerminalBuffer;
+let container: HTMLDivElement;
+let renderer: TerminalRenderer;
+
+beforeEach(() => {
+  buf = new TerminalBuffer({ maxLines: 10_000, maxBytes: 0 });
+  ({ container, renderer } = mount());
+});
+
+describe('TerminalRenderer lifecycle', () => {
+  it('attach creates the content layer', () => {
+    const layer = container.querySelector('.terminal-content-layer');
+    expect(layer).not.toBeNull();
+    expect(renderer.getConfig().rowHeight).toBe(ROW_HEIGHT);
+  });
+
+  it('detach removes the layer; re-attach to a new container works', () => {
+    renderer.detach();
+    expect(container.querySelector('.terminal-content-layer')).toBeNull();
+    const container2 = document.createElement('div');
+    Object.defineProperty(container2, 'clientHeight', { value: 200, configurable: true });
+    renderer.attachToContainer(container2);
+    expect(container2.querySelector('.terminal-content-layer')).not.toBeNull();
+    expect(container.querySelector('.terminal-content-layer')).toBeNull();
+  });
+
+  it('clear empties the layer and resets height', () => {
+    fill(buf, ['a', 'b', 'c']);
+    renderer.render(buf, identityView());
+    expect(container.querySelectorAll('.terminal-line').length).toBeGreaterThan(0);
+    renderer.clear();
+    expect(container.querySelectorAll('.terminal-line').length).toBe(0);
+    expect((container.querySelector('.terminal-content-layer') as HTMLElement).style.height).toBe('0px');
+  });
+});
+
+describe('TerminalRenderer identity rendering', () => {
+  it('renders the pinned bottom window with correct transforms', () => {
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView());
+    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
+    expect(layer.style.height).toBe('1800px'); // 100 × 18
+    // locked + followEnabled → scrollTop = 1800 - 200 = 1600 → rows 76..99
+    expect(container.scrollTop).toBe(1600);
+    const rows = container.querySelectorAll('.terminal-line');
+    expect(rows.length).toBe(24);
+    const last = rows[rows.length - 1] as HTMLElement;
+    expect(last.dataset.seq).toBe('99');
+    expect(last.style.transform).toBe('translateY(1782px)');
+  });
+
+  it('does not pin when a gesture is active', () => {
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ gestureActive: true }));
+    expect(container.scrollTop).toBe(0);
+  });
+
+  it('does not pin when follow is disabled (search open)', () => {
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(container.scrollTop).toBe(0);
+  });
+});
+
+describe('TerminalRenderer dirty tracking', () => {
+  it('keeps the same DOM node and content for rows that did not change', () => {
+    fill(buf, Array.from({ length: 30 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const before = container.querySelector('[data-seq="5"]') as HTMLElement;
+    expect(before).not.toBeNull();
+    const beforeHtml = before.innerHTML;
+
+    // Append 10 more lines and re-render — the pinned window shifts; seq 5
+    // may leave the window. To force it to stay, scroll to the top.
+    fill(buf, Array.from({ length: 10 }, (_, i) => `n${i}`));
+    container.scrollTop = 0;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const after = container.querySelector('[data-seq="5"]') as HTMLElement;
+    expect(after).not.toBeNull();
+    expect(after).toBe(before);
+    expect(after.innerHTML).toBe(beforeHtml);
+  });
+
+  it('writes content only for new rows (existing rows untouched)', () => {
+    fill(buf, Array.from({ length: 30 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // Force every existing row into the window (scroll top), capture content.
+    container.scrollTop = 0;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const htmlBySeq = new Map<string, string>();
+    for (const node of container.querySelectorAll('.terminal-line')) {
+      htmlBySeq.set((node as HTMLElement).dataset.seq!, (node as HTMLElement).innerHTML);
+    }
+    fill(buf, Array.from({ length: 5 }, (_, i) => `x${i}`));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    for (const node of container.querySelectorAll('.terminal-line')) {
+      const el = node as HTMLElement;
+      if (htmlBySeq.has(el.dataset.seq!)) {
+        expect(el.innerHTML).toBe(htmlBySeq.get(el.dataset.seq!));
+      }
+    }
+  });
+
+  it('head trim does not recreate surviving rows', () => {
+    const small = new TerminalBuffer({ maxLines: 20, maxBytes: 0 });
+    fill(small, Array.from({ length: 20 }, (_, i) => String(i)));
+    renderer.render(small, identityView({ followEnabled: false }));
+    container.scrollTop = 0;
+    renderer.render(small, identityView({ followEnabled: false }));
+    const nodeSeq15 = container.querySelector('[data-seq="15"]') as HTMLElement;
+    expect(nodeSeq15).not.toBeNull();
+
+    // Append 5 more → head trims 5 → seq 15 still alive.
+    fill(small, Array.from({ length: 5 }, (_, i) => `n${i}`));
+    renderer.render(small, identityView({ followEnabled: false }));
+    const nodeSeq15After = container.querySelector('[data-seq="15"]') as HTMLElement;
+    expect(nodeSeq15After).not.toBeNull();
+    expect(nodeSeq15After).toBe(nodeSeq15);
+  });
+});
+
+describe('TerminalRenderer filtered rendering', () => {
+  it('renders only the surviving seqs, positioned by list index', () => {
+    fill(buf, Array.from({ length: 10 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ visibleSeqs: [0, 2, 4, 6], followEnabled: false }));
+    const rows = container.querySelectorAll('.terminal-line');
+    expect(rows.length).toBe(4);
+    const seqs = Array.from(rows).map((n) => (n as HTMLElement).dataset.seq);
+    expect(seqs).toEqual(['0', '2', '4', '6']);
+    const transforms = Array.from(rows).map((n) => (n as HTMLElement).style.transform);
+    expect(transforms).toEqual([
+      'translateY(0px)',
+      'translateY(18px)',
+      'translateY(36px)',
+      'translateY(54px)',
+    ]);
+  });
+
+  it('caps the rendered window at frozenSeq when paused', () => {
+    fill(buf, Array.from({ length: 10 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ frozenSeq: 4, followEnabled: false }));
+    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
+    expect(layer.style.height).toBe('90px'); // 5 rows × 18
+    const maxSeq = Math.max(...Array.from(container.querySelectorAll('.terminal-line')).map((n) => Number((n as HTMLElement).dataset.seq)));
+    expect(maxSeq).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('TerminalRenderer search + selection', () => {
+  it('paints <mark> on hit rows and current-match on the active one', () => {
+    buf.append({ timestamp: 0, direction: 'RX', content: 'hello world', isHex: false });
+    buf.append({ timestamp: 0, direction: 'RX', content: 'hello', isHex: false });
+    buf.append({ timestamp: 0, direction: 'RX', content: 'world peace', isHex: false });
+    renderer.render(buf, identityView({
+      matchSet: new Set([0, 2]),
+      currentMatchSeq: 2,
+      searchQuery: 'world',
+      followEnabled: false,
+    }));
+    const row0 = container.querySelector('[data-seq="0"]') as HTMLElement;
+    expect(row0.querySelector('.terminal-search-mark')).not.toBeNull();
+    expect(row0.className).toContain('search-hit-line');
+    const row2 = container.querySelector('[data-seq="2"]') as HTMLElement;
+    expect(row2.className).toContain('current-match');
+    const row1 = container.querySelector('[data-seq="1"]') as HTMLElement;
+    expect(row1.querySelector('.terminal-search-mark')).toBeNull();
+  });
+
+  it('renders hex display from rawData', () => {
+    const { container: hexContainer, renderer: hexRenderer } = mount(makeConfig({ displayFormat: 'hex' }));
+    buf.append({ timestamp: 0, direction: 'RX', rawData: new Uint8Array([0x41, 0x42]), isHex: false });
+    hexRenderer.render(buf, identityView({ followEnabled: false }));
+    const content = hexContainer.querySelector('[data-seq="0"] .terminal-content') as HTMLElement;
+    expect(content.textContent).toBe('41 42');
+  });
+});
+
+describe('TerminalRenderer scroll + recycling', () => {
+  it('scrollToSeq centers the target row', () => {
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    renderer.scrollToSeq(50, 'center', buf, identityView({ followEnabled: false }));
+    // center: targetTop = 50*18 = 900; scrollTop = 900 - (200-18)/2 = 809
+    expect(container.scrollTop).toBe(809);
+    const rows = container.querySelectorAll('.terminal-line');
+    expect(Array.from(rows).some((n) => (n as HTMLElement).dataset.seq === '50')).toBe(true);
+  });
+
+  it('recycles nodes when the window scrolls (bounded DOM)', () => {
+    fill(buf, Array.from({ length: 2000 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const initialCount = container.querySelectorAll('.terminal-line').length;
+    expect(initialCount).toBeLessThan(100);
+    // Scroll in steps; DOM size stays bounded AND the target rows materialize.
+    for (let top = 0; top < 2000 * ROW_HEIGHT; top += 500) {
+      container.scrollTop = top;
+      renderer.render(buf, identityView({ followEnabled: false }));
+      expect(container.querySelectorAll('.terminal-line').length).toBeLessThan(100);
+      // The row under the viewport center must be present in the DOM.
+      const centerSeq = Math.floor((top + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+      expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
+    }
+  });
+
+  it('keeps DOM order == visual order when scrolling up (drag-select fix)', () => {
+    fill(buf, Array.from({ length: 2000 }, (_, i) => String(i)));
+    // Land deep in the buffer (rows ~900..980 in view), then scroll UP so the
+    // recycle/acquire pattern pulls head rows from the pool — the bug appends
+    // them at the contentLayer tail, reversing DOM order vs visual order.
+    container.scrollTop = 900 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    container.scrollTop = 700 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    container.scrollTop = 500 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // Every visible row's translateY must be monotonically increasing and the
+    // DOM children must be sorted by their seq (== visual top-to-bottom).
+    const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
+    expect(rows.length).toBeGreaterThan(10);
+    const seqs = rows.map((r) => Number(r.dataset.seq));
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+    }
+    const tops = rows.map((r) => Number(/translateY\((\d+)px\)/.exec(r.style.transform)?.[1]));
+    for (let i = 1; i < tops.length; i++) {
+      expect(tops[i]).toBeGreaterThan(tops[i - 1]);
+    }
+  });
+
+  it('empty buffer renders zero rows', () => {
+    renderer.render(buf, identityView());
+    expect(container.querySelectorAll('.terminal-line').length).toBe(0);
+  });
+});
+
+describe('TerminalRenderer.seqFromEventTarget', () => {
+  it('extracts the seq from a nested row child', () => {
+    fill(buf, Array.from({ length: 5 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const content = container.querySelector('[data-seq="3"] .terminal-content') as HTMLElement;
+    expect(TerminalRenderer.seqFromEventTarget(content)).toBe(3);
+    expect(TerminalRenderer.seqFromEventTarget(container)).toBeNull();
+    expect(TerminalRenderer.seqFromEventTarget(null)).toBeNull();
+  });
+});
+
+describe('TerminalRenderer updateConfig', () => {
+  it('redraws all rows with the new display format', () => {
+    buf.append({ timestamp: 0, direction: 'RX', rawData: new Uint8Array([0x41, 0x42]), isHex: false });
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const contentBefore = (container.querySelector('.terminal-content') as HTMLElement).textContent;
+    expect(contentBefore).toBe('AB');
+
+    renderer.updateConfig({ displayFormat: 'hex' });
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const contentAfter = (container.querySelector('.terminal-content') as HTMLElement).textContent;
+    expect(contentAfter).toBe('41 42');
+  });
+
+  it('row height change repositions rows', () => {
+    fill(buf, Array.from({ length: 5 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false }));
+    renderer.updateConfig({ rowHeight: 36 });
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const row4 = container.querySelector('[data-seq="4"]') as HTMLElement;
+    expect(row4.style.transform).toBe('translateY(144px)');
+    expect(row4.style.height).toBe('36px');
+  });
+});

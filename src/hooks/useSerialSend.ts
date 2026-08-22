@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../stores/useAppStore';
-import { useTerminalStore } from '../stores/useTerminalStore';
+import { appendTerminalLine } from '../utils/terminal/viewportManager';
 import { serialService } from '../services/tauri';
 import type { SendHistoryEntry, LineEnding } from '../types';
 import { notifyError, useToastStore } from '../stores/useToastStore';
@@ -107,8 +107,7 @@ export async function sendToPort(
     // emits the loopback RX during the await below; appending TX only after the
     // await resolved let RX win the race and render ABOVE the sent line.
     // Writing TX first guarantees the sent line always precedes its response.
-    useTerminalStore.getState().appendTerminalLine(portId, {
-      id: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    appendTerminalLine(portId, {
       timestamp: Date.now(),
       direction: 'TX',
       content: displayText,

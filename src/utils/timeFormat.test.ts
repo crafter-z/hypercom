@@ -15,7 +15,6 @@ import {
 
 function makeLine(timestamp: number, direction: 'RX' | 'TX' = 'RX'): TerminalLine {
   return {
-    id: `line-${timestamp}`,
     timestamp,
     direction,
     content: '',

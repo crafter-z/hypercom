@@ -18,9 +18,9 @@ import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUp
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
-import { useTerminalStore } from './stores/useTerminalStore';
 import { saveSessionSnapshot } from './utils/sessionSnapshot';
 import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
+import { computeBufferLimits, getManagerPortIds, getViewportManager } from './utils/terminal/viewportManager';
 
 // 模块加载即安装前端 console 捕获（幂等），尽早收集前端诊断日志。
 setupDiagLogCapture();
@@ -114,15 +114,15 @@ const App: React.FC = () => {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
-  // Enforce terminal memory limit from config (rough: 500 lines/MB)
-  const memoryLimitMb = useAppStore((s) => s.config.memoryLimitMb);
+  // 方案B（issue #14）：内存预算由每端口环形缓冲区容量承载。配置变更时把
+  // 新上限同步到所有已存在的端口实例（尚未创建的实例在创建时读取最新配置）。
+  const memoryPerPortBudgetMb = useAppStore((s) => s.config.memoryPerPortBudgetMb);
   useEffect(() => {
-    const maxLines = memoryLimitMb * 500;
-    const store = useTerminalStore.getState();
-    Object.keys(store.terminals).forEach(portId => {
-      store.setTerminalConfig(portId, { maxLines });
-    });
-  }, [memoryLimitMb]);
+    const limits = computeBufferLimits();
+    for (const portId of getManagerPortIds()) {
+      getViewportManager(portId).applyLimits(limits);
+    }
+  }, [memoryPerPortBudgetMb]);
 
   return (
     <AppErrorBoundary>

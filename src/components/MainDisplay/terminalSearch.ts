@@ -4,28 +4,33 @@
  * Extracted from TerminalView so search logic can be unit-tested under
  * vitest's `environment: 'node'` config (no jsdom required).
  */
-import type { TerminalLine, DisplayFormat } from '../../types';
+import type { TerminalLine, DisplayFormat, Encoding } from '../../types';
+import { getLineText } from '../../utils/lineText';
 
 export interface FindMatchesOptions {
   query: string;
   caseSensitive: boolean;
   /** When 'hex', matches against the hex representation of rawData. */
   displayFormat?: DisplayFormat;
+  /** Encoding for lazily decoding RX lines without `content` (issue #14). */
+  encoding?: Encoding | string;
 }
 
 /**
  * Returns the searchable text for a single terminal line, mirroring the
  * rendering branch in TerminalView (hex display falls back to rawData,
- * everything else uses content).
+ * everything else uses content, lazily decoded from rawData when absent —
+ * issue #14: RX lines carry no decoded string).
  */
 export function getSearchableText(
   line: TerminalLine,
-  displayFormat?: DisplayFormat
+  displayFormat?: DisplayFormat,
+  encoding?: Encoding | string
 ): string {
   if (displayFormat === 'hex' && line.rawData) {
     return Array.from(line.rawData, (b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
   }
-  return line.content;
+  return getLineText(line, encoding ?? 'UTF-8');
 }
 
 /**
@@ -36,12 +41,12 @@ export function findMatches(
   lines: TerminalLine[],
   options: FindMatchesOptions
 ): number[] {
-  const { query, caseSensitive, displayFormat } = options;
+  const { query, caseSensitive, displayFormat, encoding } = options;
   if (!query) return [];
   const needle = caseSensitive ? query : query.toLowerCase();
   const result: number[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const text = getSearchableText(lines[i], displayFormat);
+    const text = getSearchableText(lines[i], displayFormat, encoding);
     const haystack = caseSensitive ? text : text.toLowerCase();
     if (haystack.includes(needle)) result.push(i);
   }
@@ -55,6 +60,7 @@ export interface MatchCache {
   query: string;
   caseSensitive: boolean;
   displayFormat?: DisplayFormat;
+  encoding?: Encoding | string;
   matches: number[];
   /** 计算时缓冲区的行数（之后新增的行需要补扫）。 */
   lineCount: number;
@@ -64,15 +70,15 @@ export interface MatchCache {
  * 增量匹配：继续输入（新 query 以旧 query 为前缀）时，匹配结果只可能
  * 在「旧匹配 ∪ 新增行」中产生——扫描集从全缓冲缩到这两者，高频接收
  * 场景下每次按键的代价从 O(全部行) 降到 O(旧匹配数 + 新增行数)。
- * 前缀不成立（删字/改字）、大小写或显示格式变化、缓冲被 maxLines 裁剪
- * （lineCount 回退）时自动退回全量 findMatches。
+ * 前缀不成立（删字/改字）、大小写或显示格式或编码变化、缓冲被 maxLines
+ * 裁剪（lineCount 回退）时自动退回全量 findMatches。
  */
 export function findMatchesIncremental(
   lines: TerminalLine[],
   options: FindMatchesOptions,
   prev: MatchCache | null
 ): number[] {
-  const { query, caseSensitive, displayFormat } = options;
+  const { query, caseSensitive, displayFormat, encoding } = options;
   if (!query) return [];
   if (
     prev &&
@@ -80,6 +86,7 @@ export function findMatchesIncremental(
     query.startsWith(prev.query) &&
     prev.caseSensitive === caseSensitive &&
     prev.displayFormat === displayFormat &&
+    prev.encoding === encoding &&
     prev.lineCount <= lines.length
   ) {
     const needle = caseSensitive ? query : query.toLowerCase();
@@ -87,12 +94,12 @@ export function findMatchesIncremental(
     // prev.matches 升序且全部 < prev.lineCount；新增行索引 >= prev.lineCount，
     // 两者串接后依然升序，结果保持升序。
     for (const i of prev.matches) {
-      const text = getSearchableText(lines[i], displayFormat);
+      const text = getSearchableText(lines[i], displayFormat, encoding);
       const haystack = caseSensitive ? text : text.toLowerCase();
       if (haystack.includes(needle)) result.push(i);
     }
     for (let i = prev.lineCount; i < lines.length; i++) {
-      const text = getSearchableText(lines[i], displayFormat);
+      const text = getSearchableText(lines[i], displayFormat, encoding);
       const haystack = caseSensitive ? text : text.toLowerCase();
       if (haystack.includes(needle)) result.push(i);
     }
@@ -278,12 +285,8 @@ export function markSearchMatchesInHtml(
   return out;
 }
 
-/**
- * Formats a terminal line as plain text for clipboard copy / export,
- * matching the existing export format: `[timestamp] direction content`.
- */
-export function formatLineForCopy(line: TerminalLine): string {
+export function formatLineForCopy(line: TerminalLine, encoding?: Encoding | string): string {
   const d = new Date(line.timestamp);
   const ts = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
-  return `[${ts}] ${line.direction} ${line.content}`;
+  return `[${ts}] ${line.direction} ${getLineText(line, encoding ?? 'UTF-8')}`;
 }

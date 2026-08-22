@@ -10,6 +10,7 @@ import { emit, listen } from '@tauri-apps/api/event';
 import type { ReleaseChannel } from '../types';
 import type {
   AppConfig,
+  TerminalLine,
   TerminalState,
   SendCommandSet,
   HighlightRuleSet,
@@ -517,7 +518,8 @@ export interface PopoutTerminalRequestSnapshotPayload {
 /** 主窗 → 终端弹窗：当前终端缓冲 + 显示态快照（一次性）。 */
 export interface PopoutTerminalSnapshotPayload {
   portId: string;
-  terminal: TerminalState;
+  /** 显示态（TerminalState 纯显示字段）+ 历史行（方案B：行来自环形缓冲区快照）。 */
+  terminal: TerminalState & { lines: TerminalLine[] };
 }
 
 /** 主窗(Rust) → 主窗(前端)：某终端弹出窗已关闭 → 回贴标签。 */

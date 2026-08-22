@@ -102,7 +102,7 @@ function renderTextMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): 
  */
 export function renderProtocolLine(line: TerminalLine): string {
   if (!line.rawData || !line.parsedFields || line.parsedFields.length === 0) {
-    return escapeHtml(line.content);
+    return escapeHtml(line.content ?? '');
   }
 
   // Sort fields by byteStart ascending for deterministic coverage

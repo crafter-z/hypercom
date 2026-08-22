@@ -120,30 +120,24 @@ export interface ParsedField {
   color: string;           // 字段着色 (hex color)
 }
 
-/** 单行终端数据 */
+/** 单行终端数据（方案B：行流存储层重构，issue #14） */
 export interface TerminalLine {
-  id: string;
   timestamp: number;       // 时间戳
   direction: 'RX' | 'TX' | 'TOOL';
-  content: string;         // 原始内容（文本格式）
-  displayContent?: string; // 格式化后的显示内容（带高亮）
-  /** 原始字节（用于 HEX 显示 / 编码切换重解码 / 协议解析字段着色）。
-   *  issue #6-2：由 number[] 改为 Uint8Array——内存 8 倍削减（number[] 每
-   *  元素占 8B 装箱/指针 vs 每字节 1B），顺带省去解码时的临时拷贝。 */
+  /** 文本内容（TX/TOOL/回放行）。RX 行**省略**——由 `getLineText` 按
+   *   rawData + 当前编码惰性解码（省内存：不再冗余存一份解码字符串）。 */
+  content?: string;
+  /** 原始字节（RX 行必填；HEX 显示 / 编码切换重解码 / 协议解析字段着色）。
+   *   issue #6-2：由 number[] 改为 Uint8Array——内存 8 倍削减（number[] 每
+   *   元素占 8B 装箱/指针 vs 每字节 1B）。 */
   rawData?: Uint8Array;
   isHex: boolean;          // 是否为HEX显示
   parsedFields?: ParsedField[]; // 协议解析字段标注（存在时按字段着色渲染）
   toolStream?: 'stdout' | 'stderr'; // TOOL 方向行的来源流
 }
 
-/** 终端视图状态 */
+/** 终端视图状态（方案B：行缓冲移入 TerminalViewportManager 环形缓冲区，issue #14） */
 export interface TerminalState {
-  lines: TerminalLine[];
-  maxLines: number;        // 最大保留行数
-  /** 当前缓冲区累计字节数（rawData 长度之和，O(1) 记账；issue #6-2） */
-  totalBytes: number;
-  /** 每端口内存预算（字节）。超出即裁剪最早一半屏（issue #6-2 硬约束） */
-  maxBytes: number;
   scrollLocked: boolean;   // 是否滚动锁定
   showTimestamp: boolean;
   displayFormat: DisplayFormat;

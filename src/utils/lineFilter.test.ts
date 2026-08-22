@@ -2,21 +2,24 @@ import { describe, it, expect } from 'vitest';
 import { filterLines, type DirectionFilter } from './lineFilter';
 import type { TerminalLine } from '../types';
 
+const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+// RX 行不带 content（方案B, issue #14）：文本由 filterLines 内部经 getLineText
+// 按 rawData + encoding 惰性解码；TX 行保留 content。
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
-  id: 'l1',
   timestamp: 0,
   direction: 'RX',
-  content: '',
+  rawData: new Uint8Array(),
   isHex: false,
   ...overrides,
 });
 
 const sample = (): TerminalLine[] => [
-  makeLine({ id: 'a', direction: 'TX', content: 'AT+RESET' }),
-  makeLine({ id: 'b', direction: 'RX', content: 'OK' }),
-  makeLine({ id: 'c', direction: 'TX', content: 'AT+GMR' }),
-  makeLine({ id: 'd', direction: 'RX', content: 'error: timeout' }),
-  makeLine({ id: 'e', direction: 'RX', content: 'AT command echoed' }),
+  makeLine({ direction: 'TX', content: 'AT+RESET' }),
+  makeLine({ direction: 'RX', rawData: bytes('OK') }),
+  makeLine({ direction: 'TX', content: 'AT+GMR' }),
+  makeLine({ direction: 'RX', rawData: bytes('error: timeout') }),
+  makeLine({ direction: 'RX', rawData: bytes('AT command echoed') }),
 ];
 
 describe('filterLines', () => {
@@ -61,11 +64,20 @@ describe('filterLines', () => {
 
   it('returns original indices, not re-numbered positions', () => {
     const lines = [
-      makeLine({ id: 'x', direction: 'RX', content: 'skip' }),
-      makeLine({ id: 'y', direction: 'RX', content: 'keep' }),
-      makeLine({ id: 'z', direction: 'RX', content: 'skip' }),
+      makeLine({ direction: 'RX', rawData: bytes('skip') }),
+      makeLine({ direction: 'RX', rawData: bytes('keep') }),
+      makeLine({ direction: 'RX', rawData: bytes('skip') }),
     ];
     expect(filterLines(lines, { direction: 'all', keyword: 'keep' })).toEqual([1]);
+  });
+
+  it('decodes RX rawData lazily under the given encoding', () => {
+    // '你好' GBK = C4E3 BAC3：默认 UTF-8 解不出（得到替换符），显式传 encoding 才命中
+    const lines = [
+      makeLine({ direction: 'RX', rawData: new Uint8Array([0xc4, 0xe3, 0xba, 0xc3]) }),
+    ];
+    expect(filterLines(lines, { direction: 'all', keyword: '你好' })).toEqual([]);
+    expect(filterLines(lines, { direction: 'all', keyword: '你好', encoding: 'GBK' })).toEqual([0]);
   });
 
   it('accepts every DirectionFilter value', () => {

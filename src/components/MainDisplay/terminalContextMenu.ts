@@ -15,9 +15,10 @@ import { logService } from '../../services/tauri';
 import { hexToString, stringToHex } from '../../utils/hexUtils';
 import { formatTerminalTimestamp } from '../../utils/timeFormat';
 import { formatLineForCopy } from './terminalSearch';
+import { getLineText } from '../../utils/lineText';
 import { notifyError } from '../../stores/useToastStore';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import type { TerminalLine, TimestampFormat } from '../../types';
+import type { Encoding, TerminalLine, TimestampFormat } from '../../types';
 
 /** File-name timestamp: YYYYMMDD-HHmmss (matches the export defaultPath). */
 function exportTimestamp(): string {
@@ -37,6 +38,8 @@ export interface TerminalContextMenuData {
   isFirstInRound: (idx: number) => boolean;
   connectedAt: number | null;
   timestampFormat: TimestampFormat;
+  /** Current encoding — lazily decodes RX lines without `content` (issue #14). */
+  encoding?: Encoding | string;
   t: TFunction;
   /** Select-all needs the scroll container ref, so it stays a callback. */
   onSelectAll: () => void;
@@ -47,7 +50,7 @@ export function buildTerminalContextMenuItems(
 ): ContextMenuEntry[] {
   const {
     portId, lines, range, timestampMode, isFirstInRound,
-    connectedAt, timestampFormat, t, onSelectAll,
+    connectedAt, timestampFormat, encoding, t, onSelectAll,
   } = data;
 
   // Timestamp cell for a given line index, honoring per-round muting.
@@ -58,12 +61,12 @@ export function buildTerminalContextMenuItems(
 
   const copySelected = () => {
     if (!range) return;
-    const text = lines.slice(range.start, range.end + 1).map(formatLineForCopy).join('\n');
+    const text = lines.slice(range.start, range.end + 1).map((l) => formatLineForCopy(l, encoding)).join('\n');
     if (text) navigator.clipboard.writeText(text);
   };
 
   const copyAll = () => {
-    const text = lines.map(formatLineForCopy).join('\n');
+    const text = lines.map((l) => formatLineForCopy(l, encoding)).join('\n');
     if (text) navigator.clipboard.writeText(text);
   };
 
@@ -73,10 +76,11 @@ export function buildTerminalContextMenuItems(
   };
 
   const exportLines = async (ext: 'txt' | 'csv') => {
+    const enc = encoding ?? 'UTF-8';
     const body = ext === 'txt'
-      ? lines.map((l, idx) => `[${lineTimestamp(idx)}] ${l.direction} ${l.content}`).join('\n')
+      ? lines.map((l, idx) => `[${lineTimestamp(idx)}] ${l.direction} ${getLineText(l, enc)}`).join('\n')
       : 'timestamp,direction,content\n' + lines.map((l, idx) =>
-          `"${lineTimestamp(idx)}","${l.direction}","${l.content.replace(/"/g, '""')}"`
+          `"${lineTimestamp(idx)}","${l.direction}","${getLineText(l, enc).replace(/"/g, '""')}"`
         ).join('\n');
     const filePath = await save({
       title: t(ext === 'txt' ? 'terminalView.saveDialog.title.txt' : 'terminalView.saveDialog.title.csv'),

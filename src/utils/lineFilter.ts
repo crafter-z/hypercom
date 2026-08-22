@@ -14,14 +14,33 @@
  * directly. This keeps the high-frequency append path allocation-free.
  */
 import type { TerminalLine } from '../types';
+import { getLineText } from './lineText';
 
 /** Direction filter: 'all' shows everything, 'TX'/'RX' only that direction. */
 export type DirectionFilter = 'all' | 'TX' | 'RX';
 
 export interface LineFilterOptions {
   direction: DirectionFilter;
-  /** Case-insensitive substring match against `line.content`. */
+  /** Case-insensitive substring match against the line text. */
   keyword: string;
+  /** Encoding for lazily decoding RX lines without `content` (issue #14). */
+  encoding?: string;
+}
+
+/**
+ * Direction + keyword line predicate (encoding-aware lazy decode). Shared by
+ * the array path below and the ring-buffer path in the viewport manager.
+ */
+export function linePassesFilter(
+  line: TerminalLine,
+  direction: DirectionFilter,
+  keyword: string,
+  encoding: string,
+): boolean {
+  if (direction !== 'all' && line.direction !== direction) return false;
+  const kw = keyword.trim().toLowerCase();
+  if (!kw) return true;
+  return getLineText(line, encoding).toLowerCase().includes(kw);
 }
 
 /**
@@ -29,8 +48,8 @@ export interface LineFilterOptions {
  * keyword filters, in ascending order.
  *
  * - direction 'all' imposes no constraint.
- * - keyword is trimmed and matched case-insensitively against `content`;
- *   an empty/whitespace keyword imposes no constraint.
+ * - keyword is trimmed and matched case-insensitively; an empty/whitespace
+ *   keyword imposes no constraint.
  * - With no active filter, returns `null` (identity is implicit; callers
  *   render `limit ?? lines.length` rows directly — no allocation).
  * - `limit` caps the scanned prefix of `lines` (0..limit). It replaces the
@@ -43,7 +62,8 @@ export function filterLines(
   limit?: number
 ): number[] | null {
   const direction = options.direction;
-  const keyword = options.keyword.trim().toLowerCase();
+  const keyword = options.keyword.trim();
+  const encoding = options.encoding ?? 'UTF-8';
   const hasDirection = direction !== 'all';
   const hasKeyword = keyword.length > 0;
 
@@ -53,10 +73,7 @@ export function filterLines(
   const end = limit !== undefined && limit < lines.length ? limit : lines.length;
   const result: number[] = [];
   for (let i = 0; i < end; i++) {
-    const line = lines[i];
-    if (hasDirection && line.direction !== direction) continue;
-    if (hasKeyword && !line.content.toLowerCase().includes(keyword)) continue;
-    result.push(i);
+    if (linePassesFilter(lines[i], direction, keyword, encoding)) result.push(i);
   }
   return result;
 }
