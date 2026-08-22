@@ -187,9 +187,29 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         vm.beginGesture();
         clearTimeout(settleTimerRef.current);
       }
+      // Left-button drag on the terminal starts a native cross-row text
+      // selection — freeze renderer structural DOM changes until release so
+      // the selection Range stays anchored to live nodes.
+      if (e.button === 0 && e.target !== e.currentTarget) {
+        vm.setSelecting(true);
+      }
     },
     [vm],
   );
+
+  // Release the selection freeze anywhere (mouseup may happen off-container).
+  const handleSelectionEnd = useCallback(() => {
+    vm.setSelecting(false);
+  }, [vm]);
+
+  useEffect(() => {
+    window.addEventListener('pointerup', handleSelectionEnd);
+    window.addEventListener('pointercancel', handleSelectionEnd);
+    return () => {
+      window.removeEventListener('pointerup', handleSelectionEnd);
+      window.removeEventListener('pointercancel', handleSelectionEnd);
+    };
+  }, [handleSelectionEnd]);
 
   const handlePointerUp = useCallback(() => {
     clearTimeout(settleTimerRef.current);

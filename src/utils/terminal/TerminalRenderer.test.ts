@@ -259,6 +259,36 @@ describe('TerminalRenderer scroll + recycling', () => {
     }
   });
 
+  it('freezes row nodes during drag-selection and restores on release', () => {
+    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const before = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(before).not.toBeNull();
+    const beforeHtml = before.innerHTML;
+
+    // Drag-selection in progress: data keeps flowing and the viewport moves
+    // (auto-scroll at the selection edge), but render() must NOT recycle,
+    // re-acquire or rewrite the rows the live Range anchors to.
+    renderer.setSelecting(true);
+    fill(buf, Array.from({ length: 400 }, (_, i) => String(200 + i))); // append 200..599
+    container.scrollTop = 300 * ROW_HEIGHT; // window shifted far away
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const during = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(during).toBe(before); // same live node — selection Range intact
+    expect(during.innerHTML).toBe(beforeHtml); // content untouched mid-drag
+    // Window moved: rows outside it were not materialized while frozen, but
+    // the rows that exist keep their positions.
+    expect(during.style.transform).toBe(`translateY(${100 * ROW_HEIGHT}px)`);
+
+    // Release: full redraw materializes the new window and recycles the rest.
+    renderer.setSelecting(false);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const centerSeq = Math.floor((300 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+    expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
+    expect(container.querySelector('[data-seq="100"]')).toBeNull(); // recycled
+  });
+
   it('keeps DOM order == visual order when scrolling up (drag-select fix)', () => {
     fill(buf, Array.from({ length: 2000 }, (_, i) => String(i)));
     // Land deep in the buffer (rows ~900..980 in view), then scroll UP so the

@@ -225,6 +225,14 @@ export class TerminalViewportManager {
     this.requestRender();
   }
 
+  /** Forward drag-selection guard to the renderer (freezes row DOM mid-drag
+   *  so the native cross-row selection survives; release triggers a full
+   *  redraw). */
+  setSelecting(active: boolean): void {
+    this.renderer?.setSelecting(active);
+    if (!active) this.requestRender();
+  }
+
   setLocked(locked: boolean): void {
     this.locked = locked;
     this.requestRender();

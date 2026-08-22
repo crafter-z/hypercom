@@ -106,6 +106,10 @@ export class TerminalRenderer {
   private filterVersion = 0;
   private onScrollHandler: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  /** Drag-selection in progress: render freezes structural DOM changes so the
+   *  browser's native cross-row selection (anchored to live nodes) is not
+   *  broken by recycle/rewrite. Restored via a full redraw on release. */
+  private isSelecting = false;
 
   /** Set by the manager: (re)schedule a rAF render (coalesces scroll/resize). */
   onRenderNeeded: (() => void) | null = null;
@@ -193,6 +197,19 @@ export class TerminalRenderer {
     this.fullRedraw = true;
   }
 
+  /** Drag-selection guard: while active, render() keeps the row DOM
+   *  structurally frozen (no recycle/acquire/innerHTML) so the browser's
+   *  native cross-row selection stays anchored. Release schedules a full
+   *  redraw that restores everything the freeze skipped. */
+  setSelecting(active: boolean): void {
+    if (this.isSelecting === active) return;
+    this.isSelecting = active;
+    if (!active) {
+      this.fullRedraw = true;
+      this.onRenderNeeded?.();
+    }
+  }
+
   getConfig(): Readonly<RendererConfig> {
     return this.config;
   }
@@ -237,14 +254,15 @@ export class TerminalRenderer {
       Math.ceil((scrollTop + container.clientHeight) / rowHeight) + OVERSACAN_ROWS,
     );
 
-    // 1. Recycle rows that left the visible window (O(1) per active row via
-    //    the cached visIdx — valid only when the filter version matches).
+    //    Frozen during drag-selection: removing a node whose text is inside
+    //    the live selection range breaks the native cross-row Range.
+    const selecting = this.isSelecting;
     for (const [seq, row] of this.active) {
       const stale =
         row.version !== this.filterVersion ||
         row.visIdx < firstVisIdx ||
         row.visIdx > lastVisIdx;
-      if (stale) {
+      if (stale && !selecting) {
         this.recycle(row);
         this.active.delete(seq);
       }
@@ -259,6 +277,11 @@ export class TerminalRenderer {
 
       let row = this.active.get(seq);
       if (!row) {
+        // Frozen: keep the DOM untouched mid-drag — new rows appear after
+        // release (full redraw). Creating/inserting nodes here would also be
+        // safe for the selection, but the recycled node may be re-inserted at
+        // a new position, shifting the Range endpoints.
+        if (selecting) continue;
         row = this.acquireRow();
         this.active.set(seq, row);
         // DOM 顺序 = 视觉顺序：池复用/新建节点默认在 contentLayer 末尾，必须
@@ -275,13 +298,19 @@ export class TerminalRenderer {
 
       // A row is dirty when it's new (seq beyond the last written one), the
       // node was recycled from another seq, or a full redraw is pending.
-      if (this.fullRedraw || seq > this.lastRenderedSeq || node.dataset.renderedSeq !== String(seq)) {
+      // Content is frozen during drag-selection too: innerHTML replacement
+      // rebuilds the text node the Range endpoint points at, silently
+      // dropping the selected text from the highlight (the row appears
+      // half-selected).
+      if (
+        !selecting &&
+        (this.fullRedraw || seq > this.lastRenderedSeq || node.dataset.renderedSeq !== String(seq))
+      ) {
         this.writeRowContent(node, line, seq, buffer, view);
         node.dataset.renderedSeq = String(seq);
       }
       this.applyRowClasses(node, seq, view);
     }
-
     this.fullRedraw = false;
     this.lastRenderedSeq = lastSeq;
 
