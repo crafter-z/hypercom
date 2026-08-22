@@ -311,6 +311,10 @@ pub struct LogManager {
     filename_format: String,
     /// 日志子目录策略（issue #5-10）："none" | "date" | "port"
     subdir_mode: String,
+    /// 每次打开串口新建日志文件（不续写已有文件）：true 时 create_writer 用
+    /// create_new 原子分配唯一文件名（同名冲突追加 -1/-2… 后缀），每次连接
+    /// 都从空文件开始；false（默认）沿用旧行为——文件名冲突时续写。
+    new_file_per_session: bool,
     /// 默认 encoding（创建 writer 时使用，前端可在 start_logging 时覆盖）
     default_encoding: String,
     /// 是否启用按大小自动分片（前端可运行时开关）
@@ -345,6 +349,7 @@ impl LogManager {
             split_size_mb: 100,
             filename_format: DEFAULT_FILENAME_FORMAT.to_string(),
             subdir_mode: DEFAULT_SUBDIR_MODE.to_string(),
+            new_file_per_session: false,
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
             include_timestamp: true,
@@ -380,6 +385,12 @@ impl LogManager {
     /// 前端在 set_config 时同步调用；create_writer 时按当前值决定子目录。
     pub fn set_subdir_mode(&mut self, mode: &str) {
         self.subdir_mode = mode.to_string();
+    }
+
+    /// 设置「每次打开串口新建日志文件」开关。前端在 set_config 时同步调用；
+    /// create_writer 时按当前值决定文件分配策略（续写 vs create_new 唯一化）。
+    pub fn set_new_file_per_session(&mut self, on: bool) {
+        self.new_file_per_session = on;
     }
 
     /// 设置 auto_save 开关。前端在 set_config 时同步调用，让后端在 write() 中
@@ -431,6 +442,37 @@ impl LogManager {
         }
     }
 
+    /// 分配一个**不存在的**日志文件（new_file_per_session 模式）：
+    /// 目标路径已存在时依次尝试 `name-1.log`、`name-2.log`…（数字后缀插在
+    /// 扩展名前）。`create_new(true)` 原子保证并发/重入下也不会续写已有文件。
+    fn open_new_log_file(&self, base: &std::path::Path) -> anyhow::Result<(PathBuf, fs::File)> {
+        for n in 0.. {
+            let candidate = if n == 0 {
+                base.to_path_buf()
+            } else {
+                let stem = base
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("log");
+                let ext = base
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("log");
+                base.with_file_name(format!("{stem}-{n}.{ext}"))
+            };
+            match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&candidate)
+            {
+                Ok(file) => return Ok((candidate, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        unreachable!("suffix loop is unbounded")
+    }
+
     /// 为指定串口创建日志写入器（使用默认 encoding）
     pub fn create_writer(&mut self, port_id: &str, format: &str) -> anyhow::Result<()> {
         let encoding = self.default_encoding.clone();
@@ -444,6 +486,31 @@ impl LogManager {
         format: &str,
         encoding: &str,
     ) -> anyhow::Result<()> {
+        self.create_writer_inner(port_id, format, encoding, false)
+    }
+
+    /// 分片续片专用：**总是**分配新文件（唯一化），与 new_file_per_session 开关
+    /// 无关——分片的语义就是新文件。若沿用 append 重开刚关闭的同名文件（粗粒度
+    /// 模板如 `[com]`/`[com]-[date]` 时 format_filename 恒同名），current_size 会从
+    /// 已超阈值的大小初始化，之后每次写入都触发 split，形成无限分片循环。
+    fn create_split_writer(
+        &mut self,
+        port_id: &str,
+        format: &str,
+        encoding: &str,
+    ) -> anyhow::Result<()> {
+        self.create_writer_inner(port_id, format, encoding, true)
+    }
+
+    /// create_writer 内部实现。`force_new_file`：分片续片强制唯一化；
+    /// 否则按 new_file_per_session 开关决定（续写 vs create_new 唯一化）。
+    fn create_writer_inner(
+        &mut self,
+        port_id: &str,
+        format: &str,
+        encoding: &str,
+        force_new_file: bool,
+    ) -> anyhow::Result<()> {
         let filename = self.format_filename(port_id);
         // issue #5-10：按子目录策略解析目标目录（none → 根目录；date/port → 子目录）
         let file_path = match self.subdir_component(port_id) {
@@ -455,13 +522,22 @@ impl LogManager {
             None => self.log_directory.join(format!("{}.log", filename)),
         };
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)?;
-
-        // 追加模式下从已有文件大小初始化 current_size，使分片阈值对续写文件准确。
-        let existing_size = file.metadata()?.len();
+        // 文件分配策略：默认（续写）append 打开、current_size 从已有文件大小
+        // 初始化（分片阈值对续写文件准确）；new_file_per_session 开启时每次
+        // create_writer 都分配一个**不存在**的新文件（同名冲突追加 -1/-2… 后缀，
+        // create_new 原子保证绝不续写）——「每次打开串口日志存入新文件」。
+        let (file_path, file, existing_size) = if force_new_file || self.new_file_per_session {
+            let (path, file) = self.open_new_log_file(&file_path)?;
+            (path, file, 0)
+        } else {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_path)?;
+            // 追加模式下从已有文件大小初始化 current_size，使分片阈值对续写文件准确。
+            let existing_size = file.metadata()?.len();
+            (file_path, file, existing_size)
+        };
 
         let writer = PortLogWriter {
             file_path: file_path.clone(),
@@ -579,7 +655,7 @@ impl LogManager {
             port_id,
             old_path.display()
         );
-        self.create_writer_with_encoding(port_id, &format, &encoding)?;
+        self.create_split_writer(port_id, &format, &encoding)?;
         log::info!("Log split: new file created for {}", port_id);
         Ok(())
     }
@@ -801,6 +877,7 @@ mod tests {
             split_size_mb: 100,
             filename_format: "[com]-[datetime]".to_string(),
             subdir_mode: "date".to_string(),
+            new_file_per_session: false,
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
             include_timestamp: true,
@@ -921,6 +998,62 @@ mod tests {
         assert!(writer.should_split(1));
         writer.current_size = 2 * 1024 * 1024;
         assert!(writer.should_split(1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_continuation_never_reopens_same_file() {
+        // 回归：粗粒度模板（[com] 恒同名）+ 小分片——split 续片若 append 重开
+        // 刚关闭的超阈值文件，current_size 从超阈值大小初始化，之后每次写入都
+        // 触发 split（同文件无限 append + 每写必分片）。修复：续片强制唯一化，
+        // 得到带 -1 后缀的新文件，后续写入不再触发 split。
+        let dir = test_dir("split_new");
+        let mut mgr = test_manager(&dir);
+        mgr.set_filename_format("[com]");
+        mgr.set_split_size(1); // 1MB 阈值
+        mgr.create_writer("COM1", "string").unwrap();
+        let big = vec![b'x'; 1024 * 1024 + 1]; // 超过阈值，触发第一次 split
+        mgr.write("COM1", "10:00:00", "TX", &big).unwrap();
+        // 循环 bug 下这两次写会各再 split 一次（文件数仍是 1，但每写必分片）
+        mgr.write("COM1", "10:00:01", "TX", b"more").unwrap();
+        mgr.write("COM1", "10:00:02", "TX", b"even more").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(
+            files.len(),
+            2,
+            "split must produce exactly 2 files (no split loop), got {:?}",
+            files
+        );
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| {
+                PathBuf::from(&f.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(names.contains(&"COM1.log".to_string()), "got {names:?}");
+        assert!(names.contains(&"COM1-1.log".to_string()), "got {names:?}");
+        // 续片文件内容独立（首个文件只含超阈值大块，续片只含后续小写）。
+        // list_files 顺序不保证创建序 → 按文件名定位再读内容。
+        let read_by_name = |name: &str| -> String {
+            let p = files
+                .iter()
+                .find(|f| PathBuf::from(&f.path).file_name().unwrap() == name)
+                .expect(name);
+            fs::read_to_string(&p.path).unwrap()
+        };
+        let first = read_by_name("COM1.log");
+        let second = read_by_name("COM1-1.log");
+        assert!(first.contains('x'), "first file must hold the bulk data");
+        assert!(
+            !first.contains("more"),
+            "continuation data must not leak into first file: {first}"
+        );
+        assert!(second.contains("more") && second.contains("even more"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1103,6 +1236,7 @@ mod rx_log_tests {
             split_size_mb: 100,
             filename_format: "[com]-[datetime]".to_string(),
             subdir_mode: "date".to_string(),
+            new_file_per_session: false,
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
             include_timestamp: true,
@@ -1633,6 +1767,7 @@ mod subdir_tests {
             split_size_mb: 100,
             filename_format: "[com]-[datetime]".to_string(),
             subdir_mode: "date".to_string(),
+            new_file_per_session: false,
             default_encoding: "UTF-8".to_string(),
             split_enabled: true,
             include_timestamp: true,
@@ -1777,6 +1912,121 @@ mod subdir_tests {
         assert!(target.exists());
         let content = fs::read_to_string(&target).unwrap();
         assert!(content.contains("fallback data"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+/// issue：每次打开串口新建日志文件（不续写已有文件）测试。
+///
+/// 显式导入（与 rx_log_tests / subdir_tests 同约定），FFI-free，Windows cargo test 可运行。
+#[cfg(test)]
+mod session_file_tests {
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::LogManager;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hypercom_test_session_file_{}", name));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn test_manager(dir: &PathBuf) -> LogManager {
+        // 固定文件名模板 [com]：同一端口每次 create_writer 同名，冲突路径确定。
+        LogManager {
+            log_directory: dir.clone(),
+            writers: HashMap::new(),
+            auto_save: true,
+            split_size_mb: 100,
+            filename_format: "[com]".to_string(),
+            subdir_mode: "none".to_string(),
+            new_file_per_session: false,
+            default_encoding: "UTF-8".to_string(),
+            split_enabled: true,
+            include_timestamp: true,
+            include_direction: true,
+            last_flush: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn default_appends_existing_file_on_reopen() {
+        // 默认行为（配置项关闭）：同名冲突续写同一文件——重开端口不丢历史。
+        let dir = test_dir("append");
+        let mut mgr = test_manager(&dir);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:00", "TX", b"first").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:01", "TX", b"second").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 1, "default must append, got {:?}", files);
+        let content = fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("first") && content.contains("second"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_file_per_session_never_appends() {
+        // 开启后：每次 create_writer 都分配新文件（同名冲突 → -1/-2… 后缀），
+        // 每次连接都从空文件开始，内容互不混入。
+        let dir = test_dir("new_each");
+        let mut mgr = test_manager(&dir);
+        mgr.set_new_file_per_session(true);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:00", "TX", b"first").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:01", "TX", b"second").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:02", "TX", b"third").unwrap();
+        mgr.close_writer("COM1").unwrap();
+        let files = mgr.list_files().unwrap();
+        assert_eq!(files.len(), 3, "each open must get its own file, got {:?}", files);
+        let mut contents: Vec<String> = files
+            .iter()
+            .map(|f| fs::read_to_string(&f.path).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(
+            contents,
+            vec![
+                "[10:00:00] TX first\n".to_string(),
+                "[10:00:01] TX second\n".to_string(),
+                "[10:00:02] TX third\n".to_string(),
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_file_mode_file_names_get_suffix() {
+        // 文件名后缀语义：首个用原名，之后 -1、-2…（数字插在扩展名前）。
+        // 每会话写数据后再关闭——close_writer 会删除空文件，不写数据文件
+        // 不落盘（空日志不落盘设计），同名冲突就永远不会发生。
+        let dir = test_dir("suffix");
+        let mut mgr = test_manager(&dir);
+        mgr.set_new_file_per_session(true);
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:00", "TX", b"one").unwrap();
+        let first = mgr.writers.get("COM1").unwrap().file_path.clone();
+        mgr.close_writer("COM1").unwrap();
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:01", "TX", b"two").unwrap();
+        let second = mgr.writers.get("COM1").unwrap().file_path.clone();
+        mgr.close_writer("COM1").unwrap();
+        mgr.create_writer("COM1", "string").unwrap();
+        mgr.write("COM1", "10:00:02", "TX", b"three").unwrap();
+        let third = mgr.writers.get("COM1").unwrap().file_path.clone();
+        mgr.close_writer("COM1").unwrap();
+        assert_eq!(first.file_name().unwrap(), "COM1.log");
+        assert_eq!(second.file_name().unwrap(), "COM1-1.log");
+        assert_eq!(third.file_name().unwrap(), "COM1-2.log");
         let _ = fs::remove_dir_all(&dir);
     }
 }

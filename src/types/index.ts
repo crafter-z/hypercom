@@ -303,6 +303,7 @@ export interface AppConfig {
   logIncludeTimestamp: boolean; // 日志行前缀是否包含时间戳（issue #3-4）
   logIncludeDirection: boolean; // 日志行前缀是否包含 RX/TX 方向标记（issue #3-4）
   logSubdirMode: LogSubdirMode; // 日志子目录策略：none | date | port（issue #5-10，默认 date）
+  logNewFilePerSession: boolean; // 每次打开串口新建日志文件（不续写已有文件）
   
   // 备份设置
   backupEnabled: boolean;

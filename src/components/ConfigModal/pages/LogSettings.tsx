@@ -65,6 +65,7 @@ const LogSettings: React.FC = () => {
   const logDirectory = useAppStore(s => s.config.logDirectory);
   const logFilenameFormat = useAppStore(s => s.config.logFilenameFormat);
   const logSubdirMode = useAppStore(s => s.config.logSubdirMode);
+  const logNewFilePerSession = useAppStore(s => s.config.logNewFilePerSession);
   const logFormat = useAppStore(s => s.config.logFormat);
   const logEncoding = useAppStore(s => s.config.logEncoding);
   const logSplitEnabled = useAppStore(s => s.config.logSplitEnabled);
@@ -119,6 +120,11 @@ const LogSettings: React.FC = () => {
       <label className="checkbox-wrapper">
         <input type="checkbox" checked={autoSaveLog} onChange={(e) => setConfig({ autoSaveLog: e.target.checked })} />
         {t('logSettings.autoSaveLog')}
+      </label>
+
+      <label className="checkbox-wrapper">
+        <input type="checkbox" checked={logNewFilePerSession} onChange={(e) => setConfig({ logNewFilePerSession: e.target.checked })} />
+        {t('logSettings.newFilePerSession')}
       </label>
 
       <div className="config-row">

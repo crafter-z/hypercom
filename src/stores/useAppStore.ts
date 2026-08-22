@@ -175,6 +175,7 @@ const defaultConfig: AppConfig = {
   logIncludeTimestamp: true,
   logIncludeDirection: true,
   logSubdirMode: 'date',
+  logNewFilePerSession: false,
   backupEnabled: false,
   backupInterval: 24,
   backupDirectory: '',

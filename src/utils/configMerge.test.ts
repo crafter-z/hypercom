@@ -46,6 +46,7 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   logIncludeTimestamp: true,
   logIncludeDirection: true,
   logSubdirMode: 'date',
+  logNewFilePerSession: false,
   backupEnabled: false,
   backupInterval: 24,
   backupDirectory: '',

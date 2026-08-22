@@ -78,6 +78,7 @@ impl AppState {
         log_manager.set_split_size(cfg.log_split_size_mb);
         log_manager.set_split_enabled(cfg.log_split_enabled);
         log_manager.set_subdir_mode(&cfg.log_subdir_mode);
+        log_manager.set_new_file_per_session(cfg.log_new_file_per_session);
         if !cfg.log_directory.is_empty() {
             if let Err(e) = log_manager.set_directory(cfg.log_directory.clone()) {
                 log::warn!("Failed to set log directory from config: {}", e);

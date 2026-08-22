@@ -304,6 +304,7 @@ const resources = {
 
       'logSettings.title': '日志设置',
       'logSettings.autoSaveLog': '自动保存日志',
+      'logSettings.newFilePerSession': '每次打开串口时新建日志文件（不续写已有文件）',
       'logSettings.directoryLabel': '日志存储目录:',
       'logSettings.directoryPlaceholder': '选择日志保存路径...',
       'logSettings.browseButton': '浏览...',
@@ -922,6 +923,7 @@ const resources = {
 
       'logSettings.title': 'Logging Settings',
       'logSettings.autoSaveLog': 'Auto-save logs',
+      'logSettings.newFilePerSession': 'Create a new log file each time a port is opened (no appending)',
       'logSettings.directoryLabel': 'Log Directory:',
       'logSettings.directoryPlaceholder': 'Select log save path...',
       'logSettings.browseButton': 'Browse...',

@@ -243,6 +243,9 @@ pub struct AppConfig {
     /// 日志子目录策略（issue #5-10）："none"（直接存入日志目录）| "date"（按日期分文件夹）| "port"（按串口号分文件夹）
     #[serde(default = "default_log_subdir_mode")]
     pub log_subdir_mode: String,
+    /// 每次打开串口新建日志文件（不续写已有文件）：true 时每次连接都从空文件开始
+    #[serde(default = "default_false")]
+    pub log_new_file_per_session: bool,
 
     // --- 备份设置 ---
     pub backup_enabled: bool,
@@ -381,6 +384,7 @@ impl Default for AppConfig {
             log_include_timestamp: true,
             log_include_direction: true,
             log_subdir_mode: "date".to_string(),
+            log_new_file_per_session: false,
             backup_enabled: false,
             backup_interval: 24,
             backup_directory: String::new(),
@@ -673,6 +677,8 @@ mod tests {
         assert!(cfg.log_include_direction);
         // issue #5-10：日志子目录策略默认按日期分文件夹
         assert_eq!(cfg.log_subdir_mode, "date");
+        // issue：每次打开新建日志文件默认关闭（保持旧续写行为）
+        assert!(!cfg.log_new_file_per_session);
         assert!(!cfg.backup_enabled);
         assert!(cfg.restore_session);
         assert!(cfg.diag_log_enabled);
@@ -771,6 +777,31 @@ mod tests {
         }"#;
         let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
         assert_eq!(cfg.log_subdir_mode, "date");
+    }
+
+    #[test]
+    fn test_log_new_file_per_session_default_when_absent() {
+        // 旧 config.json 没有 logNewFilePerSession → 反序列化回退默认 false
+        // （保持旧续写行为）。使用 0.3.1 真实 schema 的完整 JSON，仅省略新字段。
+        let old_json = r#"{
+            "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
+            "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
+            "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
+            "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
+            "uiFont": "Inter, sans-serif", "uiFontSize": 14,
+            "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
+            "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
+            "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
+            "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
+            "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
+            "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
+            "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
+            "hasSeenTour": false, "restoreSession": true,
+            "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
+            "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+        assert!(!cfg.log_new_file_per_session);
     }
 
     #[test]
