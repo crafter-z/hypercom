@@ -205,7 +205,12 @@ export class TerminalRenderer {
     if (this.isSelecting === active) return;
     this.isSelecting = active;
     if (!active) {
-      this.fullRedraw = true;
+      // Do NOT set fullRedraw here — a full redraw rewrites every row's
+      // innerHTML, replacing the text nodes the browser's live selection
+      // Range is anchored to. The selection would silently empty, making
+      // all selection-based copy menu items read blank. Instead just
+      // schedule one render: rows already written (renderedSeq === seq)
+      // are skipped, new/skipped rows are picked up via the dirty check.
       this.onRenderNeeded?.();
     }
   }
@@ -327,8 +332,17 @@ export class TerminalRenderer {
       }
       this.applyRowClasses(node, seq, view);
     }
-    this.fullRedraw = false;
-    this.lastRenderedSeq = lastSeq;
+    // Don't advance lastRenderedSeq or clear fullRedraw during drag-selection:
+    // freezing them lets the post-release dirty check distinguish "rows that
+    // were already rendered before the freeze" (renderedSeq === seq, seq <=
+    // lastRenderedSeq → not dirty → text nodes survive) from "rows that
+    // arrived or were skipped during the freeze" (seq > lastRenderedSeq or
+    // renderedSeq mismatch → dirty → written). This preserves the browser
+    // selection Range across the freeze-release cycle.
+    if (!selecting) {
+      this.fullRedraw = false;
+      this.lastRenderedSeq = lastSeq;
+    }
 
     // 3. Follow pin — same frame, zero latency. Account for the container's
     //    padding (8px top/bottom on .terminal-view) so the last row is fully

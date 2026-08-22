@@ -281,12 +281,18 @@ describe('TerminalRenderer scroll + recycling', () => {
     // the rows that exist keep their positions.
     expect(during.style.transform).toBe(`translateY(${100 * ROW_HEIGHT}px)`);
 
-    // Release: full redraw materializes the new window and recycles the rest.
+    // Release: NO fullRedraw — rows that were already rendered (renderedSeq
+    // === seq, seq <= lastRenderedSeq) keep their text nodes so a browser
+    // selection Range anchored on them survives. New/skipped rows are picked
+    // up by the dirty check. This is what makes selection-based copy work.
     renderer.setSelecting(false);
     renderer.render(buf, identityView({ followEnabled: false }));
+    // The row at seq=100 was in the active set during freeze and is now stale
+    // (window moved far away) — it should be recycled.
+    expect(container.querySelector('[data-seq="100"]')).toBeNull(); // recycled
+    // New window rows materialize.
     const centerSeq = Math.floor((300 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
     expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
-    expect(container.querySelector('[data-seq="100"]')).toBeNull(); // recycled
   });
 
   it('maintains DOM order == visIdx order after alternating scroll (insertRowInOrder min-visIdx fix)', () => {
