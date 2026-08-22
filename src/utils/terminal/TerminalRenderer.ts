@@ -199,8 +199,10 @@ export class TerminalRenderer {
 
   /** Drag-selection guard: while active, render() keeps the row DOM
    *  structurally frozen (no recycle/acquire/innerHTML) so the browser's
-   *  native cross-row selection stays anchored. Release schedules a full
-   *  redraw that restores everything the freeze skipped. */
+   *  native cross-row selection stays anchored. Release schedules ONE
+   *  render (NOT a full redraw) — already-rendered rows keep their text
+   *  nodes (selection survives), while rows that arrived or were skipped
+   *  during the freeze are picked up by the normal dirty check. */
   setSelecting(active: boolean): void {
     if (this.isSelecting === active) return;
     this.isSelecting = active;
