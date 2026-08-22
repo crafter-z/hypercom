@@ -148,9 +148,17 @@ jobs:
         shell: bash
         run: |
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          URL="https://github.com/crafter-z/hypercom/releases/download/v$VERSION/latest.json"
-          echo "checking $URL"
-          curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$URL" -o latest.json
+          # draft release 的资产任何身份都不能经 releases/download/ 下载（404）——
+          # 只能经 API 资产端点（releases/assets/{id} + Accept: octet-stream）。
+          # 与 stable 流 verify 同款路径（draft/已发布状态统一可用）。
+          # releases/tags/{tag} 端点对 draft release 同样 404（认证下）——用列表
+          # 端点 + tag_name 匹配（'v'+version，tag 命名约定 v<version>）。
+          ASSET_ID=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/crafter-z/hypercom/releases?per_page=100" \
+            | node -e "const j=JSON.parse(require('fs').readFileSync(0)); const tag='v'+process.argv[1]; const r=j.find(r=>r.tag_name===tag); if(!r){console.error('release not found for tag '+tag);process.exit(1)} const a=r.assets.find(a=>a.name==='latest.json'); if(!a){console.error('latest.json asset missing');process.exit(1)} console.log(a.id)" "$VERSION")
+          echo "latest.json asset id: $ASSET_ID"
+          curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/crafter-z/hypercom/releases/assets/$ASSET_ID" -o latest.json
           node -e '
             const fs = require("fs");
             const j = JSON.parse(fs.readFileSync("latest.json", "utf8"));
