@@ -9,7 +9,7 @@ Multi-page settings modal. Split into `pages/` (7 settings), `editors/` (3 row f
 | `ConfigModal.tsx` | 112 | tab switcher (7 pages) + dialog open/close |
 | `RuleSetAccordion.tsx` | 78 | collapsed rule-set listing |
 | `pages/GeneralSettings.tsx` | ~230 | theme + language + ports refresh interval + 内存预算双配置（总/每端口）+ **自动更新三态 radio**（`updateCheckMode: none/stable/preview`，issue #12）。模式变更的清账副作用在 **`ConfigModal.handleSave` 保存边界**执行（`updateTiming.clearSnooze()+clearLastCheck()`，issue #12 复审——旧在 radio onChange，取消时配置回滚但 snooze 已清，副作用泄漏；清 lastCheckAt 使新通道立即生效）；**二轮**：保存后 mode 实际变化且非 none → `runAutoCheck` 后台立即首检（bypass 周期/snooze，有更新弹窗）；页面显示「上次自动检查」时间（localStorage 记账，挂载时读取） |
-| `pages/LogSettings.tsx` | ~190 | file path template, shard threshold, auto-start, encoding (ASCII/UTF-8/GBK/ISO-8859-1), directory-change migration dialog (DirChangeDialog) |
+| `pages/LogSettings.tsx` | ~195 | file path template, shard threshold, auto-start, encoding (ASCII/UTF-8/GBK/ISO-8859-1), **每次打开新建日志文件**（`logNewFilePerSession`，issue：不续写已有文件）, directory-change migration dialog (DirChangeDialog) |
 | `pages/BackupSettings.tsx` | 33 | import/export config file |
 | `pages/DisplaySettings.tsx` | ~140 | 预设波特率 / 显示串口类型 / 默认换行 / 发送提示前缀 / 时间戳模式与格式；**背景图设置**（issue #13 区段：启用勾选 → 路径浏览（plugin-dialog 图片过滤器）→ 不透明度 0–100 / 模糊度 0–64 number input + `clampNumber`），写 `backgroundImage*` 四字段 |
 | `pages/HighlightSettings.tsx` | 126 | bind `useRuleStore` highlight sets + manage rules |
