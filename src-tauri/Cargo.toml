@@ -59,6 +59,7 @@ base64 = "0.22"
 # 自动更新：GitHub API 解析 preview 通道（issue #12）；版本对齐 tauri-plugin-updater 自带 reqwest
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 url = "2"
+tauri-plugin-clipboard-manager = "2"
 
 [profile.release]
 opt-level = 3

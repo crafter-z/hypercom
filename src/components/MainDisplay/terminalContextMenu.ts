@@ -17,6 +17,7 @@ import { formatTerminalTimestamp } from '../../utils/timeFormat';
 import { formatLineForCopy } from './terminalSearch';
 import { getLineText } from '../../utils/lineText';
 import { notifyError } from '../../stores/useToastStore';
+import { writeClipboardText } from '../../utils/clipboard';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
 import type { Encoding, TerminalLine, TimestampFormat } from '../../types';
 
@@ -62,17 +63,17 @@ export function buildTerminalContextMenuItems(
   const copySelected = () => {
     if (!range) return;
     const text = lines.slice(range.start, range.end + 1).map((l) => formatLineForCopy(l, encoding)).join('\n');
-    if (text) navigator.clipboard.writeText(text);
+    if (text) void writeClipboardText(text);
   };
 
   const copyAll = () => {
     const text = lines.map((l) => formatLineForCopy(l, encoding)).join('\n');
-    if (text) navigator.clipboard.writeText(text);
+    if (text) void writeClipboardText(text);
   };
 
   const copyBrowserSelection = () => {
     const sel = window.getSelection();
-    if (sel && sel.toString()) navigator.clipboard.writeText(sel.toString());
+    if (sel && sel.toString()) void writeClipboardText(sel.toString());
   };
 
   const exportLines = async (ext: 'txt' | 'csv') => {
@@ -108,11 +109,11 @@ export function buildTerminalContextMenuItems(
     { type: 'separator' },
     { label: t('terminalView.contextMenu.copyAsHex'), onClick: () => {
       const sel = window.getSelection();
-      if (sel && sel.toString()) navigator.clipboard.writeText(stringToHex(sel.toString()));
+      if (sel && sel.toString()) void writeClipboardText(stringToHex(sel.toString()));
     }},
     { label: t('terminalView.contextMenu.hexToText'), onClick: () => {
       const sel = window.getSelection();
-      if (sel && sel.toString()) navigator.clipboard.writeText(hexToString(sel.toString()));
+      if (sel && sel.toString()) void writeClipboardText(hexToString(sel.toString()));
     }},
     { type: 'separator' },
     { label: t('terminalView.contextMenu.exportTxt'), onClick: () => { void exportLines('txt'); } },

@@ -21,6 +21,8 @@
     "core:app:allow-version",
     "dialog:allow-open",
     "dialog:allow-save",
-    "process:default"
+    "process:default",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text"
   ]
 }
