@@ -14,7 +14,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   padding: var(--space-2) var(--space-3);
   background: var(--bg-primary);
   font-family: var(--font-terminal);
@@ -119,8 +119,11 @@
 }
 
 .terminal-content {
-  word-break: break-all;
-  white-space: pre-wrap;
+  /* issue #9：禁止换行——引擎按固定行高定位（方案B，translateY(visIdx × rowHeight)），
+     CSS 换行会让行的实际绘制高度超出固定行高，下一行叠在换行内容上。数据由
+     white-space: pre 原样保留（连续空格/内嵌换行不折叠），超宽行经 .terminal-view
+     的 overflow-x: auto 横向滚动查看。 */
+  white-space: pre;
 }
 
 /* ==================== Empty State ==================== */

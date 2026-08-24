@@ -565,7 +565,11 @@ export class TerminalRenderer {
     const dirColor = this.directionColor(line.direction, line.toolStream);
     const dirClass = line.direction === 'TOOL' ? ' terminal-direction-tool' : '';
     const dirHtml = `<span class="terminal-direction${dirClass}" style="color:${dirColor}">${line.direction}</span>`;
-    node.innerHTML = `${tsHtml}${dirHtml}<span class="terminal-content">${html}</span>`;
+    // issue #9：行高固定（rowHeight）而内容 span 在 .terminal-content 的
+    // white-space: pre 下不再被容器宽度换行——但 TX 多行输入等内嵌 \n 仍会画出
+    // 第二视觉行并叠到下一行上，这里把内容裁剪在固定行盒内（横向不裁：span 宽度
+    // 随内容撑开，超宽部分由 .terminal-view 的 overflow-x 横向滚动查看）。
+    node.innerHTML = `${tsHtml}${dirHtml}<span class="terminal-content" style="max-height:${c.rowHeight}px;overflow:hidden">${html}</span>`;
   }
 
   private applyRowClasses(node: HTMLDivElement, seq: number, view: TerminalViewState): void {

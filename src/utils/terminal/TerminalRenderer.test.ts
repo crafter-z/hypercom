@@ -106,6 +106,43 @@ describe('TerminalRenderer identity rendering', () => {
     expect(last.style.transform).toBe('translateY(1782px)');
   });
 
+  it('keeps a fixed-height lattice for over-wide lines (issue #9)', () => {
+    // An over-wide line must stay ONE fixed-height row: with CSS wrapping the
+    // row painted a second visual line over the next row (fixed rowHeight +
+    // pre-wrap). The lattice below is what makes overlap impossible.
+    const long = 'X'.repeat(5000);
+    fill(buf, ['a', long, 'b', 'c']);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
+    expect(rows.length).toBe(4); // exactly one row per line — no wrapped rows
+    const tops = rows.map((n) => {
+      const m = n.style.transform.match(/translateY\(([-\d.]+)px\)/);
+      return m ? Number(m[1]) : NaN;
+    });
+    for (let i = 1; i < tops.length; i++) {
+      expect(tops[i] - tops[i - 1]).toBe(ROW_HEIGHT); // strict lattice — no overlap
+    }
+    for (const row of rows) {
+      expect(row.style.height).toBe(`${ROW_HEIGHT}px`);
+    }
+    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
+    expect(layer.style.height).toBe(`${4 * ROW_HEIGHT}px`);
+    // Full text survives (selection/copy/search still see the whole line).
+    expect(rows[1].querySelector('.terminal-content')?.textContent).toBe(long);
+  });
+
+  it('clips embedded newlines inside the fixed row box (issue #9)', () => {
+    // Multi-line TX input embeds \n in a single line; it must not paint a
+    // second visual line over the next row. The content span is clipped to
+    // the fixed row box (horizontal overflow is scrolled by the container).
+    buf.append({ timestamp: 0, direction: 'TX', content: 'line1\nline2', isHex: false });
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const content = container.querySelector('[data-seq="0"] .terminal-content') as HTMLElement;
+    expect(content.style.maxHeight).toBe(`${ROW_HEIGHT}px`);
+    expect(content.style.overflow).toBe('hidden');
+    expect(content.textContent).toBe('line1\nline2'); // data intact
+  });
+
   it('does not pin when a gesture is active', () => {
     fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
     renderer.render(buf, identityView({ gestureActive: true }));
