@@ -316,4 +316,138 @@ test.describe('HyperCom smoke tests', () => {
     const radio = page.locator('input[name="updateCheckMode"][value="none"]');
     await expect(radio).toBeChecked();
   });
+
+  // ==================== issue #11：关闭标签页不关闭串口 ====================
+
+  test('closing a tab keeps the port connected; reopening starts a fresh session (issue #11)', async ({ page }) => {
+    await openCom1Tab(page);
+    await dispatchSerialStatus(page, 'COM1', 'connected');
+    await dispatchSerialData(page, 'COM1', 'hello-before\n');
+    await expect(page.locator('.terminal-line .terminal-content').first()).toContainText('hello-before');
+
+    // 包装 invoke：记录 close_port 调用（关闭标签页不得触碰串口连接）
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__closePortCalls = 0;
+      const original = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+        if (cmd === 'close_port') {
+          (window as unknown as Record<string, unknown>).__closePortCalls =
+            ((window as unknown as Record<string, unknown>).__closePortCalls as number) + 1;
+        }
+        return original(cmd, args);
+      };
+    });
+
+    // 关闭标签页
+    await page.locator('.tab-item', { hasText: 'COM1' }).locator('.tab-close').click();
+    await expect(page.locator('.tab-item', { hasText: 'COM1' })).toHaveCount(0);
+    // 端口仍保持连接（侧边栏连接态）
+    await expect(page.locator('.port-item.connected')).toBeVisible();
+    const closeCalls = await page.evaluate(
+      () => (window as unknown as Record<string, unknown>).__closePortCalls as number,
+    );
+    expect(closeCalls).toBe(0);
+
+    // 关闭期间数据继续到达（端口仍连接）——前端无显示目标，静默丢弃
+    await dispatchSerialData(page, 'COM1', 'hello-during\n');
+    await page.waitForTimeout(200);
+
+    // 重新打开标签页 → 从零开始：无关闭前的旧数据
+    await page.locator('.port-item-name', { hasText: 'COM1' }).dblclick();
+    await expect(page.locator('.tab-item', { hasText: 'COM1' })).toBeVisible();
+    await expect(page.locator('.terminal-line .terminal-content')).toHaveCount(0);
+
+    await dispatchSerialData(page, 'COM1', 'hello-after\n');
+    await expect(page.locator('.terminal-line .terminal-content').first()).toContainText('hello-after');
+    const text = await page.locator('.terminal-view').innerText();
+    expect(text).not.toContain('hello-before');
+    expect(text).not.toContain('hello-during');
+  });
+
+  // ==================== issue #10：高频输出 + 缓冲裁剪阶段 DOM 有界 ====================
+
+  test('high-rate RX with buffer trim keeps the row DOM bounded (issue #10)', async ({ page }) => {
+    await openCom1Tab(page);
+    const stats = await page.evaluate(async () => {
+      const view = document.querySelector('.terminal-view') as HTMLElement;
+      let maxRows = 0;
+      let nonMonotonic = 0;
+      let prevSt: number | null = null;
+      let raf = 0;
+      const sample = () => {
+        maxRows = Math.max(maxRows, view.querySelectorAll('.terminal-line').length);
+        const st = view.scrollTop;
+        if (prevSt !== null && st < prevSt) nonMonotonic++;
+        prevSt = st;
+        raf = requestAnimationFrame(sample);
+      };
+      raf = requestAnimationFrame(sample);
+      const lines: number[] = [];
+      for (let i = 0; i < 400; i++) lines.push(i);
+      const bytes = Array.from(new TextEncoder().encode(lines.map((i) => `line-${i}`).join('\n') + '\n'));
+      const interval = setInterval(() => {
+        window.__TAURI_INTERNALS__.dispatchEvent('serial:data', {
+          port_id: 'COM1', timestamp: Date.now(), direction: 'RX', data: bytes, is_hex: false,
+        });
+      }, 8);
+      // 填满默认缓冲（100000 行 × 500/预算）并覆盖持续 trim 阶段
+      await new Promise((r) => setTimeout(r, 10000));
+      clearInterval(interval);
+      cancelAnimationFrame(raf);
+      return { maxRows, nonMonotonic };
+    });
+    // DOM 行数有界（窗口 + overscan；修复前 head trim 泄漏到数千行 → 每帧 O(n)
+    // 渲染 → 输出区抖动）
+    expect(stats.maxRows).toBeLessThanOrEqual(40);
+    // 跟随 scrollTop 单调（无回跳）
+    expect(stats.nonMonotonic).toBe(0);
+  });
+
+  // ==================== issue #12：拖选滚动时新露出的行可渲染可选中 ====================
+
+  test('drag-selecting while scrolling up shows newly exposed rows (issue #12)', async ({ page }) => {
+    await openCom1Tab(page);
+    // 灌入足够数据（20 × 50 行）
+    for (let i = 0; i < 20; i++) {
+      await dispatchSerialData(page, 'COM1', `chunk-${i}\n`.repeat(50));
+    }
+    await page.waitForTimeout(300);
+    // 滚到内容中部
+    await page.locator('.terminal-view').evaluate((el: HTMLElement) => { el.scrollTop = el.scrollHeight / 2; });
+    await page.waitForTimeout(100);
+
+    // 鼠标按下（终端行上）→ 拖选冻结开始
+    const box = (await page.locator('.terminal-view').boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    // 向上滚动——新行进入视口（修复前 selecting 冻结期跳过创建 → 黑块、选不到）
+    for (let i = 0; i < 10; i++) {
+      await page.mouse.wheel(0, -300);
+      await page.waitForTimeout(16);
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+
+    // 视口内所有行都必须已渲染且带内容
+    const visibleRows = await page.locator('.terminal-view').evaluate((el: HTMLElement) => {
+      const rows = el.querySelectorAll('.terminal-line') as NodeListOf<HTMLElement>;
+      const box = el.getBoundingClientRect();
+      const res: Array<{ seq: number; hasContent: boolean }> = [];
+      const top = el.scrollTop;
+      const bottom = top + el.clientHeight;
+      for (const r of rows) {
+        const y = r.getBoundingClientRect().top - box.top + el.scrollTop;
+        if (y >= top && y < bottom) {
+          const content = r.querySelector('.terminal-content');
+          res.push({
+            seq: Number(r.dataset.seq),
+            hasContent: !!content && content.textContent!.length > 0,
+          });
+        }
+      }
+      return res;
+    });
+    expect(visibleRows.length).toBeGreaterThan(5);
+    for (const r of visibleRows) expect(r.hasContent).toBe(true);
+  });
 });
