@@ -361,6 +361,37 @@ describe('TerminalRenderer scroll + recycling', () => {
     expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
   });
 
+  it('materializes newly visible rows during drag-selection scroll (issue #12)', () => {
+    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // 拖选冻结进行中，向上滚动——新进视口的行必须物化且带内容。旧实现
+    // `if (selecting) continue` 跳过创建 → 上方露出区域一片黑、选不到。
+    renderer.setSelecting(true);
+    container.scrollTop = 50 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const centerSeq = Math.floor((50 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+    const newRow = container.querySelector(`[data-seq="${centerSeq}"]`) as HTMLElement;
+    expect(newRow).not.toBeNull();
+    expect(newRow.querySelector('.terminal-content')?.textContent).toBe(String(centerSeq));
+    // 冻结的已有行（选区 Range 锚点）未被回收/重写。
+    const anchor = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(anchor).not.toBeNull();
+    const anchorHtml = anchor.innerHTML;
+    const anchorTransform = anchor.style.transform;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(anchor.innerHTML).toBe(anchorHtml);
+    expect(anchor.style.transform).toBe(anchorTransform);
+    // 释放：不设 fullRedraw——已物化行（renderedSeq === seq）文本节点保留，
+    // 期间跳过/新增的行由 dirty 检查补齐；窗口外行被回收。
+    renderer.setSelecting(false);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const still = container.querySelector(`[data-seq="${centerSeq}"]`) as HTMLElement;
+    expect(still).not.toBeNull();
+    expect(still.querySelector('.terminal-content')?.textContent).toBe(String(centerSeq));
+    expect(container.querySelector('[data-seq="100"]')).toBeNull(); // stale → recycled
+  });
+
   it('drag-select disengages follow: viewport stays put while data streams (blank-output fix)', () => {
     fill(buf, Array.from({ length: 500 }, (_, i) => String(i)));
     // Follow locked at the bottom.

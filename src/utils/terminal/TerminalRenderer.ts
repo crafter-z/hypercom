@@ -309,12 +309,14 @@ export class TerminalRenderer {
       if (!line) continue;
 
       let row = this.active.get(seq);
+      const isNew = !row;
       if (!row) {
-        // Frozen: keep the DOM untouched mid-drag — new rows appear after
-        // release (full redraw). Creating/inserting nodes here would also be
-        // safe for the selection, but the recycled node may be re-inserted at
-        // a new position, shifting the Range endpoints.
-        if (selecting) continue;
+        // issue #12：拖选冻结期间也物化**新**行——滚动（含拖选边缘的浏览器
+        // auto-scroll）新进视口的行与冻结期间新到达的数据行必须出现在 DOM 里，
+        // 否则露出区域一片黑且选不到。冻结只保护**已有**行（浏览器原生选区
+        // Range 锚定的节点）不被回收/重写；新行不在任何活 Range 端点内，
+        // acquire + 按 visIdx 归位 + 写内容都安全（池节点已从 DOM 移除，
+        // 重插不会回移已有节点的 Range）。
         row = this.acquireRow();
         this.active.set(seq, row);
         // DOM 顺序 = 视觉顺序：池复用/新建节点默认在 contentLayer 末尾，必须
@@ -331,13 +333,16 @@ export class TerminalRenderer {
 
       // A row is dirty when it's new (seq beyond the last written one), the
       // node was recycled from another seq, or a full redraw is pending.
-      // Content is frozen during drag-selection too: innerHTML replacement
-      // rebuilds the text node the Range endpoint points at, silently
-      // dropping the selected text from the highlight (the row appears
-      // half-selected).
+      // Content is frozen during drag-selection **for existing rows only**:
+      // innerHTML replacement rebuilds the text node the Range endpoint
+      // points at, silently dropping the selected text from the highlight.
+      // New rows (isNew) get their content written even mid-drag — they are
+      // not part of any live Range yet (issue #12: scrolling during a drag
+      // must show the newly exposed rows, not black space).
       if (
-        !selecting &&
-        (this.fullRedraw || seq > this.lastRenderedSeq || node.dataset.renderedSeq !== String(seq))
+        isNew ||
+        (!selecting &&
+          (this.fullRedraw || seq > this.lastRenderedSeq || node.dataset.renderedSeq !== String(seq)))
       ) {
         this.writeRowContent(node, line, seq, buffer, view);
         node.dataset.renderedSeq = String(seq);
