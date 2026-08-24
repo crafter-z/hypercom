@@ -1,3 +1,15 @@
+# HyperCom v0.6.1
+
+## 新特性
+- 超宽行改为横向滚动查看（不再自动换行）：单行内容完整保留，横滚动条仅在存在超宽行时出现；整行文本的选择 / 复制 / 搜索不受影响
+
+## Bugfix
+- 修复超宽行文本重叠（issue #9）：v0.6.0 方案B 引擎按固定行高定位（`translateY(visIdx × rowHeight)`、零 DOM 测量），而 `.terminal-content` 的 CSS 换行（`white-space: pre-wrap` + `word-break: break-all`）会让超宽行在固定行盒之外画出第二视觉行，叠在下一行文本上。修复：终端内容禁止自动换行（`white-space: pre`，数据原样保留），`.terminal-view` 改 `overflow-x: auto`——行与行之间任何情况下不再重叠
+
+## 其他
+- 测试：vitest 644 → **648** 例（新增「超宽行固定行高格栅不重叠」「内嵌换行裁剪在行盒内」「终端不换行 CSS 契约（getComputedStyle）」回归测试）、cargo test 157 例全绿、tsc 0 错误
+- 渲染引擎几何不变式（固定行高、零测量）未改动——修复全部落在 CSS 层 + 行内容裁剪，未触碰引擎核心
+
 # HyperCom v0.6.0
 
 ## 新特性
