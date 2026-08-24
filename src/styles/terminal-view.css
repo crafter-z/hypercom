@@ -122,8 +122,16 @@
   /* issue #9：禁止换行——引擎按固定行高定位（方案B，translateY(visIdx × rowHeight)），
      CSS 换行会让行的实际绘制高度超出固定行高，下一行叠在换行内容上。数据由
      white-space: pre 原样保留（连续空格/内嵌换行不折叠），超宽行经 .terminal-view
-     的 overflow-x: auto 横向滚动查看。 */
+     的 overflow-x: auto 横向滚动查看。
+     issue #15：行内容 span 是 .terminal-line（flex）的 flex item，其内联
+     overflow:hidden（垂直裁剪内嵌 \n 的第二视觉行）会把自动最小尺寸（min-width:auto）
+     归零（flexbox §4.5：overflow ≠ visible 时自动最小尺寸为 0）——默认 flex-shrink:1
+     会把 span 压到行宽，超宽内容在 span 内部被裁掉、overflow 永远到不了
+     .terminal-view，横向滚动条不出现。flex: none（0 0 auto）把 span 钉在内容宽度
+     （max-content），超宽部分以盒子溢出形式传播到滚动容器；垂直方向仍由内联
+     max-height + overflow:hidden 裁剪。 */
   white-space: pre;
+  flex: none;
 }
 
 /* ==================== Empty State ==================== */

@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type { TerminalLine } from '../../types';
 import { TerminalBuffer } from './TerminalBuffer';
 import { TerminalRenderer, type RendererConfig, type TerminalViewState } from './TerminalRenderer';
+import '../../styles/terminal-view.css';
 
 const ROW_HEIGHT = 18;
 const CLIENT_HEIGHT = 200;
@@ -471,5 +472,40 @@ describe('TerminalRenderer updateConfig', () => {
     const row4 = container.querySelector('[data-seq="4"]') as HTMLElement;
     expect(row4.style.transform).toBe('translateY(144px)');
     expect(row4.style.height).toBe('36px');
+  });
+});
+
+describe('TerminalRenderer over-wide lines (issue #15)', () => {
+  it('content span carries the vertical clip and the no-shrink contract', () => {
+    // 超宽行：white-space: pre 不换行，内容 span 内联 max-height + overflow:hidden
+    // 负责垂直裁剪（内嵌 \n 的第二视觉行不叠到下一行）；横向不得裁——span 作为
+    // .terminal-line（flex）的 flex item，必须 flex: none（0 0 auto，不收缩），
+    // 否则内联 overflow:hidden 把自动最小尺寸归零后 flex-shrink 会把 span 压到
+    // 行宽、超宽内容在 span 内部被裁，.terminal-view 的 overflow-x: auto 拿不到
+    // 溢出 → 横向滚动条不出现（issue #15 回归）。
+    const wide = 'X'.repeat(400);
+    fill(buf, [wide]);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const span = container.querySelector('.terminal-content') as HTMLElement;
+    expect(span).not.toBeNull();
+    expect(span.style.maxHeight).toBe(`${ROW_HEIGHT}px`);
+    expect(span.style.overflow).toBe('hidden');
+    // 计算样式来自注入的 terminal-view.css（vite.config test.css）。
+    expect(getComputedStyle(span).whiteSpace).toBe('pre');
+    expect(getComputedStyle(span).flexShrink).toBe('0');
+    expect(getComputedStyle(span).flexGrow).toBe('0');
+    expect(getComputedStyle(span).flexBasis).toBe('auto');
+  });
+
+  it('row box width stays 100% (background coverage) with overflow visible (propagation)', () => {
+    // .terminal-line 由引擎内联 width:100%（行背景/选中高亮铺满视口宽），overflow
+    // 保持 visible——超宽 span 的盒子才能把溢出传播到 .terminal-view 滚动容器。
+    const wide = 'Y'.repeat(400);
+    fill(buf, [wide]);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const row = container.querySelector('.terminal-line') as HTMLElement;
+    expect(row.style.width).toBe('100%');
+    expect(getComputedStyle(row).overflowX).toBe('visible');
+    expect(getComputedStyle(row).overflowY).toBe('visible');
   });
 });
