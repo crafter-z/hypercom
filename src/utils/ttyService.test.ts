@@ -101,6 +101,9 @@ describe('ttyService — batched write', () => {
 
 describe('ttyService — queue cap before attach', () => {
   it('buffers into the queue while unattached, replaying on attach', () => {
+    // issue #11：仅在端口有标签页时「未 attach 入队、attach replay」（挂载前首帧
+    // 窗口）；无标签页（标签已关闭、端口仍连接）时数据必须丢弃。
+    useAppStore.getState().openTab('P1');
     // 未 attach：term 为 null → 只入队不调度
     for (let i = 0; i < 3; i++) ttyService.feed('P1', [0x41]); // 'AAA'
     expect(ttyService.get('P1')?.queue).toEqual(['A', 'A', 'A']);
@@ -111,9 +114,11 @@ describe('ttyService — queue cap before attach', () => {
     expect(write).toHaveBeenCalledWith('AAA');
     expect(ttyService.get('P1')?.queue).toEqual([]);
     ttyService.detach('P1');
+    useAppStore.getState().closeTab('P1');
   });
 
   it('drops the oldest entries beyond MAX_TTY_QUEUE', () => {
+    useAppStore.getState().openTab('P1');
     // 前 5 条 'X'（最旧），随后灌满队列 'Y'
     for (let i = 0; i < 5; i++) ttyService.feed('P1', [0x58]);
     for (let i = 0; i < MAX_TTY_QUEUE; i++) ttyService.feed('P1', [0x59]);
@@ -125,6 +130,20 @@ describe('ttyService — queue cap before attach', () => {
     expect(written.length).toBe(MAX_TTY_QUEUE);
     expect(written).toContain('Y');
     expect(written).not.toContain('X'); // 最旧的 X 已被丢弃
+    ttyService.detach('P1');
+    useAppStore.getState().closeTab('P1');
+  });
+
+  it('drops RX while the tab is closed even though the port stays connected (issue #11)', () => {
+    // 标签页关闭（无 tab + term 未 attach）后数据继续到达：必须丢弃——重开标签页
+    // 不 replay 关闭期间积压的数据（「重新开始新一轮输出」语义）。
+    ttyService.feed('P1', [0x41]); // 无 tab 无 term → 丢弃
+    expect(ttyService.get('P1')?.queue).toEqual([]);
+    // 有 tab（挂载前窗口）→ 正常入队等 attach replay
+    useAppStore.getState().openTab('P1');
+    ttyService.feed('P1', [0x42]);
+    expect(ttyService.get('P1')?.queue).toEqual(['B']);
+    useAppStore.getState().closeTab('P1');
     ttyService.detach('P1');
   });
 });

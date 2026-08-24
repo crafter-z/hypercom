@@ -186,6 +186,14 @@ export const ttyService = {
   feed(portId: string, bytes: number[] | Uint8Array): void {
     if (bytes.length === 0) return;
     const state = getPortState(portId);
+    // issue #11：标签页关闭（TtyView 卸载 → detach，term=null）后串口仍可能
+    // 保持连接、数据继续到达。除非端口有标签页（挂载前首帧窗口，等 attach
+    // replay），否则直接丢弃——否则重开标签页会 replay 关闭期间积压的数据，
+    // 违反「重新开始新一轮输出」的语义（TRX 侧 appendTerminalLines 同款丢弃）。
+    // 只在 term 为 null 时查 store：正常挂载（term 非 null）零额外开销。
+    if (state.term === null && !useAppStore.getState().tabs.some((t) => t.id === portId)) {
+      return;
+    }
     if (!state.decoder) {
       state.decoder = new TextDecoder('utf-8', { fatal: false });
     }

@@ -441,12 +441,21 @@ export function releaseViewportManager(portId: string): void {
 
 /** Append lines to a port's buffer (RxPipeline appendLines target). */
 export function appendTerminalLines(portId: string, lines: TerminalLine[]): boolean {
-  return getViewportManager(portId).appendLines(lines);
+  // issue #11：标签页关闭（releaseViewportManager）后端口仍可能保持连接、RX
+  // 数据继续到达——此时**不得复活** manager：关闭期间的数据会积压进新缓冲，
+  // 重新打开标签页时被 replay，违反「重新开始新一轮输出」的语义。仅在标签页
+  // 存在（manager 活着）时写入；无显示目标时静默丢弃（后端 RX 日志由
+  // LogManager 独立落盘，不受影响）。
+  const vm = managers.get(portId);
+  if (!vm) return false;
+  return vm.appendLines(lines);
 }
 
 /** Append one line (TX echo / tool output / log replay). */
 export function appendTerminalLine(portId: string, line: TerminalLine): void {
-  getViewportManager(portId).appendLines([line]);
+  const vm = managers.get(portId);
+  if (!vm) return;
+  vm.appendLines([line]);
 }
 
 /** Snapshot up to `cap` of the newest lines (popout history replay). */
@@ -459,7 +468,9 @@ export function snapshotTerminalLines(portId: string, cap = Number.MAX_SAFE_INTE
 
 /** Replace the whole buffer (popout snapshot receive / test reset). */
 export function replaceTerminalLines(portId: string, lines: TerminalLine[]): void {
-  getViewportManager(portId).replaceAll(lines);
+  const vm = managers.get(portId);
+  if (!vm) return;
+  vm.replaceAll(lines);
 }
 
 /** Clear a port's terminal (Ctrl+L / operation panel / mode switch). */

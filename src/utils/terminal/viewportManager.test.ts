@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TerminalLine } from '../../types';
-import { TerminalViewportManager, appendTerminalLines, clearTerminal, computeBufferLimits } from './viewportManager';
+import { TerminalViewportManager, appendTerminalLines, appendTerminalLine, clearTerminal, computeBufferLimits, getViewportManager, releaseViewportManager } from './viewportManager';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 
@@ -167,9 +167,19 @@ describe('TerminalViewportManager subscription', () => {
 });
 
 describe('viewportManager adapter functions', () => {
-  it('appendTerminalLines creates the manager and returns trim flag', () => {
+  it('appendTerminalLines drops lines when no manager exists (issue #11)', () => {
+    // 标签页关闭（releaseViewportManager）后端口仍可能连接、RX 数据继续到达——
+    // 无 manager 时**不得复活**（否则关闭期间数据积压进新缓冲，重开标签页被
+    // replay），静默丢弃并返回 false。
     expect(appendTerminalLines('COM2', [makeLine('a')])).toBe(false);
     expect(clearTerminal('COM2')).toBeUndefined(); // no-op on missing is fine
+    expect(appendTerminalLine('COM2', makeLine('b'))).toBeUndefined();
+    // manager 存在时正常写入（数据路径恢复）。
+    getViewportManager('COM2').clear();
+    expect(appendTerminalLines('COM2', [makeLine('a')])).toBe(false);
+    const vm = getViewportManager('COM2');
+    expect(vm.buffer.length).toBe(1);
+    releaseViewportManager('COM2');
   });
 
   it('computeBufferLimits reads the config budget', () => {

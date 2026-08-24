@@ -2,6 +2,8 @@ import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, collectLeaves } from '../../stores/useAppStore';
 import { releaseViewportManager } from '../../utils/terminal/viewportManager';
+import { getRxPipeline } from '../../utils/rxPipeline';
+import { ttyService } from '../../utils/ttyService';
 import { useSerialConnection, usePortToolActions } from '../../hooks';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
@@ -47,15 +49,19 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     disabled: !isMultiPane,
   });
 
-  // Shared per-tab close lifecycle: route connected ports through closePort()
-  // (stopLogging + status update) and free the terminal buffer. Used by both
-  // the single-tab close and the bulk-close wrappers below so bulk actions
-  // never bypass the closeTab lifecycle invariant (no log-handle/memory leak).
+  // Shared per-tab close lifecycle: free the terminal buffer + popout window,
+  // but KEEP the serial connection (issue #11: closing a tab must not close
+  // the port). The port keeps streaming — backend RX logs are written by
+  // LogManager independently of tabs — while the frontend drops all display
+  // state so reopening the tab starts a fresh session.
   const cleanupClosedTab = useCallback((tabId: string) => {
-    const port = ports.find(p => p.id === tabId);
-    if (port && port.status === 'connected') {
-      closePort(tabId).catch((e) => { console.debug('[MainDisplay] closePort failed:', e); notifyError(e); });
-    }
+    // issue #11：标签页关闭 = 前端显示目标销毁，但串口连接保留。清空该端口
+    // 的 RX 管线队列（flushTail+flushNow 排空 + 重置组装器/解码器）与 TTY
+    // 队列（detach 清 queue + decoder、保留尺寸），使重新打开标签页后从零
+    // 开始新一轮输出——appendTerminalLines 对无 manager 的端口静默丢弃，
+    // 关闭期间到达的数据不会积压进新缓冲。
+    getRxPipeline().disconnect(tabId);
+    ttyService.detach(tabId);
     // 标签若已弹出，连同其独立窗一起销毁，避免遗留孤儿窗口（关窗事件随后幂等清标记）。
     if (useAppStore.getState().tabs.find(t => t.id === tabId)?.poppedOut) {
       const label = popoutLabel('terminal', tabId);
@@ -63,7 +69,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     }
     // 方案B：释放环形缓冲区 + 渲染实例（标签关闭 = 缓冲销毁）。
     releaseViewportManager(tabId);
-  }, [ports, closePort]);
+  }, []);
 
   const closeTab = useCallback((tabId: string) => {
     cleanupClosedTab(tabId);
