@@ -18,7 +18,9 @@ v0.5.3+ (issue #12 自动更新)：**通道是运行时用户选择**（设置�
 
 v0.5.2 (issue #13 自定义背景图·全应用毛玻璃)：**四个新配置项**（`backgroundImage` 路径/'未设置'、`backgroundImageEnabled` 默认关、`backgroundImageOpacity` 0–100% 默认 50、`backgroundImageBlur` 0–64px 默认 0；Rust `AppConfig` serde 缺省回退 + `validate_and_clamp` 夹取 + TS 接口/`defaultConfig`/configMerge.test fixture 四侧同步）。**图片加载不走 asset protocol**（老 v1 实现裸 `url("C:\...")` 在硬化 webview 载不动，issue #3-5 因而删除）——新命令 `read_image_data_url`（`commands/file.rs`，`base64` crate）读文件为 `data:image/<mime>;base64,` data URL（dev/prod 一致），20MB 上限 + 扩展名白名单（png/jpg/jpeg/bmp/webp/gif/svg，纯函数 `image_mime_from_ext`）+ 文件缺失/超限静默 `Ok("")` + `log::warn!` 降级。**呈现**：`App.tsx` 首子元素 `<div class="app-background">`（fixed + `z-index:-1` 垫底）经 `ThemeProvider` 映射 CSS 变量（`--app-bg-image/-opacity/-blur` + `html[data-app-bg="on"]` 门控，异步读图带 cancelled 防竞态）；`styles/background.css` 在启用时把**全部 `--bg-*` 表面 token 换半透明 rgba**（终端区最深 0.72、浮层 0.90 保可读）实现全窗毛玻璃，并摘除 `.app-root` 自身底色防双重着色；亮/暗主题两套 alpha 值。**xterm 主题背景创建时快照**（TtyView 初始 `cssVar('--bg-primary')`）——切玻璃开关需活更新：TtyView 新 effect 按 config + `data-theme` 构造 rgba 写入 `term.options.theme`（不读 CSS 变量，避免与 ThemeProvider 父 effect 时序竞态）。设置 UI 在「显示与交互」页新增「背景图」区段（启用勾选 → 只读路径 + 浏览按钮（dialog 插件 png/jpg/jpeg/bmp/webp/gif 过滤器）→ 不透明度/模糊度 number input + `clampNumber`），i18n `displaySettings.background.*` 7 键双语。已知边界：弹出窗（独立 webview）不共享背景层。
 
-v0.6.0 (issue #14 终端显示引擎重构·方案B)：**TRX 行缓冲与渲染脱离 React 调度**——`TerminalBuffer`（环形缓冲区，O(1) 追加/裁剪 + 稳定 seq）+ `TerminalRenderer`（直接 DOM 引擎，rAF 驱动、节点池复用、固定行高零测量、同帧钉底）+ `TerminalViewportManager`（每端口枢纽：增量过滤/搜索 + rAF 调度 + 模块级实例注册表）。`useTerminalStore` 退化为**纯显示态**（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt，无行数组、无 Immer）；`TerminalLine` 删 `id`、`content` 改可选（RX 行只存 `rawData`，渲染/搜索/过滤经 `getLineText(line, encoding)` 惰性解码——内存减半）；`@tanstack/react-virtual` 卸载、`TerminalRow.tsx` 删除；`Pane` 对 TRX 标签**常驻挂载**（hidden prop display:none，缓冲跨标签切换保留，与 TTY 一致）。效果：跟随钉底从 4-5 帧降到同帧（0 延迟）、高吞吐不再逐批触发 React 重渲染、头部裁剪不重画存活行、内存上界由环形容量确定。文档见本文件「方案B 终端显示引擎」节与 `src/utils/terminal/AGENTS.md`。
+v0.6.3 (issue #10/#11/#12)：**① 缓冲裁剪 DOM 泄漏修复**（#10 输出区上下抖动根因）——head trim 前进 firstSeq 后 active 行 visIdx 字段停留在旧窗口值，stale 检查按字段判定永不回收 → DOM 行数无限增长（e2e 实测 6669 vs 正常 27）→ 每帧 O(n) 渲染 → 帧率暴跌抖动。修复：stale 判定改用**实时列表位置** `seqToVisIdx`（identity O(1)、过滤模式二分），越界即回收，DOM 恒 ≤ 窗口+overscan。**② 关闭标签页不再关闭串口**（#11）——`Pane.cleanupClosedTab` 移除 `closePort`（端口/日志保持连接），改 `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` 清前端管线；`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 语义改「manager 存在才写入」、无标签页时静默丢弃（重开标签页从零开始新一轮输出，后端 RX 日志独立落盘不受影响）；`ttyService.feed` 对「无标签页且未 attach」丢弃（挂载前首帧仍入队等 attach replay）。**③ 拖选滚动黑块修复**（#12）——拖选冻结期间允许物化**新**行（acquire+归位+写内容，新行不在活选区 Range 内安全），仅冻结已有行保护选区锚点。e2e 新增 3 例（#11 关标签 keep 连接+重开从零、#10 trim 期 DOM ≤40+scrollTop 单调、#12 拖选滚动视口行有内容）。
+
+## STRUCTURE
 
 ## STRUCTURE
 
@@ -431,14 +433,17 @@ TRX 终端的行缓冲与渲染**脱离 React 调度**。数据路径：`serial:
 |`TerminalBuffer`|`src/utils/terminal/TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量 + `maxBytes` 字节预算（超限裁到 ≤50%）、`snapshot`/`replaceAll`/`clear`/`setLimits`|
 |`TerminalRenderer`|`src/utils/terminal/TerminalRenderer.ts`|直接 DOM 引擎：节点池复用（recycle 从 DOM 移除→acquire 重新挂载，插入统一走 **insertRowInOrder 按 visIdx 归位**——DOM 顺序 == 视觉顺序，否则跨行拖拽选择中间行被跳过）、固定行高零测量、`visibleSeqsOffset` 惰性压缩、同帧钉底（followEnabled && !gestureActive 时 scrollTop 在 render() 内设置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化（`Number.MAX_SAFE_INTEGER` 防 `seq > null` 误判）|
 |`TerminalViewportManager`|`src/utils/terminal/viewportManager.ts`|每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）|
-|适配面|`viewportManager.ts` 模块级函数|`appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`releaseViewportManager`/`getViewportManager`——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键）一律走这里，**不再碰 useTerminalStore 的行 API**|
+|适配面|`viewportManager.ts` 模块级函数|`appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`releaseViewportManager`/`getViewportManager`——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键）一律走这里，**不再碰 useTerminalStore 的行 API**。**issue #11**：`appendTerminalLine(s)`/`replaceTerminalLines` 是「manager 存在才写入」——标签关闭（releaseViewportManager）后端口仍连接、RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始|
 
 关键不变式：
 - **React 不渲染行**：contentLayer 是命令式 DOM，TerminalView 壳重渲染不会触碰它（React 不管理非 JSX 子节点）。
 - **标签切换保留缓冲**：Pane 对 TRX 标签常驻挂载（hidden prop → display:none），viewportManager 模块注册表持有实例；关闭标签/TRX→TTY 切换才 `releaseViewportManager`。
+- **关闭标签页 = 前端显示目标销毁、串口连接保留（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `getRxPipeline().disconnect(tabId)`（清管线队列/组装器/解码器）+ `ttyService.detach(tabId)`（清 TTY 队列）+ `releaseViewportManager`——重开标签页从零开始新一轮输出；`ttyService.feed` 对「无标签页且未 attach」丢弃（挂载前首帧窗口仍入队等 attach replay）。
 - **惰性解码**：RX 行只存 `rawData`，`getLineText(line, encoding)`（`src/utils/lineText.ts`，模块级 TextDecoder 缓存）按当前编码解码；编码切换 = 重渲染，无 store 遍历。
 - **内存预算**：`computeBufferLimits()`（`memoryPerPortBudgetMb`×500 行 + ×1MB 字节）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits` 同步到现存实例。
 - **渲染正确性陷阱**：frozen 参数为 null 时必须归一化为 `Number.MAX_SAFE_INTEGER`（原始 `seq > null` 会把所有行判为隐藏）；`visibleSeqsOffset` 是过滤列表的惰性裁剪头（append O(1) 摊还）。
+- **stale 判定用实时列表位置（issue #10）**：head trim 前进 firstSeq（及 filtered.offset）后，active 行缓存的 visIdx 字段整体过期——stale 检查若按字段判定，被裁行/幸存行永不回收 → DOM 行数无限增长、每帧 O(n) 渲染 → 输出区抖动。`seqToVisIdx`（identity O(1)、过滤模式二分）是每帧 stale 检查的唯一判定来源，越界即回收。
+- **拖选冻结只保护已有行（issue #12）**：selecting 期间**新**行照常物化（acquire + `insertRowInOrder` + 写内容）——滚动新进视口的行必须可见可选；仅**已有**行冻结（不回收/不重写 innerHTML，保浏览器选区 Range 锚点）。
 
 ## Pane tree (2026-07 refactor)
 

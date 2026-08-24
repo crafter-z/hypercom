@@ -6,6 +6,20 @@
 
 当前无未修复缺陷。
 
+## 已修复 (2026-08-24 issue #10/#11/#12：缓冲裁剪 DOM 泄漏抖动 · 关标签页不关串口 · 拖选滚动黑块)
+
+> 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 659/659 (37 files), `cargo check` 0 错, `npx playwright test` 19/19。
+
+| 严重度 | 文件 | 问题 | 修复 |
+|--------|------|------|------|
+| HIGH | `TerminalRenderer.ts` | 高频输出下输出区**上下抖动约一行、一秒多后自行恢复**（issue #10）：缓冲 head trim（容量/内存预算裁剪）前进 firstSeq 后，active 行的 **visIdx 字段停留在旧窗口值**——stale 检查仅按字段判定，被裁行（seq<firstSeq）与幸存行（实际位置平移）的字段恰好落在新窗口内 → 永不回收 → 每帧 append+trim 都新建窗口行、旧行残留 → **DOM 行数无限增长**（e2e 实测 6669 行 vs 正常 27）→ 每帧 O(n) 渲染 → 帧率暴跌。数据突发填满缓冲 → trim 风暴 → 抖动 → 突发结束「自行恢复」 | stale 判定改用**实时列表位置**（`seqToVisIdx`：identity O(1)、过滤模式**二分**替代 indexOf——该函数现被每帧每个 active 行调用）：越界（被裁/冻结外）即回收。修复后 DOM 行数恒 ≤ 窗口+overscan（e2e 断言 ≤40） |
+| HIGH | `Pane.tsx` `cleanupClosedTab` + `viewportManager.ts` + `ttyService.ts` | 关闭标签页**同时关闭串口**（issue #11）：① 旧 `cleanupClosedTab` 对 connected 端口调 `closePort`——标签页生命周期与串口连接耦合，误关端口、停日志；② `appendTerminalLines/appendTerminalLine` 用 `getViewportManager`（**创建**）——标签关闭（releaseViewportManager）后 RX 数据继续到达会**复活 manager** 积压进新缓冲，重开标签页 replay 旧数据；③ ttyService 无标签页期间入队积压，attach 时 replay | ① `cleanupClosedTab` **不再调 closePort**（端口/日志保持连接），改为 `getRxPipeline().disconnect(tabId)`（清管线队列+组装器/解码器）+ `ttyService.detach(tabId)`（清 TTY 队列）+ `releaseViewportManager`；② `appendTerminalLines/appendTerminalLine/replaceTerminalLines` 改 `managers.get`（无 manager **静默丢弃**，不创建）；③ `ttyService.feed`：`term===null && 无该端口标签页` → 丢弃（挂载前首帧窗口仍入队等 attach replay）。后端 RX 日志由 LogManager 独立落盘，关标签页不受影响 |
+| HIGH | `TerminalRenderer.ts` | 输出区**拖选文字同时向上滚动，上方黑色未渲染、选不到**（issue #12）：拖选冻结（selecting）期间 `if (selecting) continue` **跳过新行创建**——滚动新进视口的行不物化 → 黑块；释放后依赖 dirty 检查补齐但拖选过程中不可见不可选 | 冻结期间**允许物化新行**（acquire + `insertRowInOrder` + 写内容）：新行不在任何活选区 Range 端点内，创建安全；仅**已有**行冻结（不回收/不重写 innerHTML，保 Range 锚点）。新增 `isNew` 判定：`isNew \|\| (!selecting && dirty)` 才写内容 |
+
+架构变化：`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 语义由「get-or-create」改「manager 存在才写入」——标签关闭（releaseViewportManager）后端口仍连接时 RX 数据静默丢弃；`seqToVisIdx` 过滤模式 indexOf→二分（每帧 stale 检查逐行调用）。
+
+测试新增：TerminalRenderer 2（#12 拖选滚动物化新行+冻结行保留；#10 head trim 回收被裁行、DOM 有界）；viewportManager 1（#11 append 无 manager 丢弃 + manager 存在时写入）；ttyService 1（#11 无标签页丢弃、有标签页入队 replay）；e2e 3（#11 关标签 keep 连接+重开从零、#10 trim 期 DOM ≤40+scrollTop 单调、#12 拖选滚动视口行有内容）。
+
 ## 已修复 (2026-08-15 issue #12 自动更新复审：workflow NSIS 产物偏好 · 安装 TOCTOU · 下载中可关弹窗 · 清账副作用边界 · configReady 信号 · 死代码清理)
 
 > 验证: `npx tsc --noEmit` 0 错, `npm run test:run` 587/587 (30 files), `cargo check` 0 错 0 警告, `cargo test --lib` 136/136。
