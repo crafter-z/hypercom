@@ -21,6 +21,22 @@ const triggerAlertThrottle = new Map<string, number>();
 let lastTriggerEvalErrorLog = 0;
 
 /**
+ * 连接成功（后端 `serial:status` connected）→ 自动为该端口打开标签页（v0.6.1）。
+ *
+ * 后端对 open（真实串口 / SIM:Loopback / GIT:BASH）与自动重连统一发 connected
+ * 事件——这是「真正连接成功」的唯一权威信号（失败只发 error 或 nothing），
+ * 放置于此天然覆盖全部连接路径，无需在 openPort / runReconnectLoop 分别接线。
+ *
+ * 直接复用 `openTab`（手动「新建标签页」同一动作，语义完全一致）：
+ * - tab id 恒等于 portId → 幂等：已有标签页则激活、没有则创建；
+ * - 新标签页落在 `focusedPaneId` 所在叶子（多 Pane 递归树行为与手动一致）并激活；
+ * - 关闭串口不受影响——closePort 只改端口状态，本函数不处理 disconnected。
+ */
+export function openTabForConnectedPort(portId: string): void {
+  useAppStore.getState().openTab(portId);
+}
+
+/**
  * Hook: 串口数据接收（事件监听生命周期）
  * 监听 Tauri 的 onSerialData / onSerialStatus 事件，将接收到的数据写入终端，
  * 并在后端上报端口状态变化时同步到 app store。
@@ -169,6 +185,8 @@ export function useSerialReceive() {
         // hides as soon as the port is back up.
         if (event.status === 'connected') {
           lostPortIds.delete(event.port_id);
+          // v0.6.1：连接成功 → 自动打开/激活该端口的标签页（幂等，见上方函数注释）。
+          openTabForConnectedPort(event.port_id);
           // issue #11：连接后把 xterm 尺寸再同步一次到后端 pty（覆盖「spawn 后
           // 容器才完成布局」的边角时序；非 GIT: 端口 / 无尺寸时为 no-op）。
           ttyService.resync(event.port_id);
