@@ -1,3 +1,12 @@
+# HyperCom v0.6.2
+
+## Bugfix
+- 修复 0.6.1 超宽行横向滚动失效（issue #15）：行内容 span 是 `.terminal-line`（flex）的 flex item，其内联 `overflow:hidden`（垂直裁剪内嵌 \n 的第二视觉行）触发 flexbox §4.5「overflow ≠ visible 时自动最小尺寸（min-width:auto）归零」——默认 `flex-shrink:1` 会把 span 压到行宽，超宽内容在 span 内部被裁掉、溢出到不了 `.terminal-view`，横向滚动条不出现、shift+滚轮无物可滚。修复：`.terminal-content` 加 `flex: none`（0 0 auto）把 span 钉在内容实际宽度（max-content），超宽部分以盒子溢出形式传播到 `.terminal-view { overflow-x: auto }`；垂直方向仍由内联 `max-height + overflow:hidden` 裁剪，固定行高格子不变
+
+## 其他
+- 测试：vitest 652 → **656** 例（37 文件，新增「flex 不收缩契约」「`.terminal-line` overflow visible 传播链」与超宽行结构测试 4 例）、cargo test 157 例全绿、tsc 0 诊断
+- 修复仅一行 CSS（`.terminal-content` 加 `flex: none`），渲染引擎几何不变式（固定行高、零测量）不变，未触碰引擎核心
+
 # HyperCom v0.6.1
 
 ## 新特性
