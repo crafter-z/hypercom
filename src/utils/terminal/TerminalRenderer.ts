@@ -265,10 +265,20 @@ export class TerminalRenderer {
     //    the live selection range breaks the native cross-row Range.
     const selecting = this.isSelecting;
     for (const [seq, row] of this.active) {
+      // issue #10：stale 判定用**实时**列表位置而非缓存的 visIdx 字段——head trim
+      // （内存预算/容量裁剪）前进 firstSeq（及 filtered.offset）后，行的实际位置
+      // 整体平移，缓存的 visIdx 停在旧窗口值 → 仅按字段判定 stale 永不触发 →
+      // 每帧 append+trim 都新建窗口行、旧行残留 → active 无限增长、DOM 行数爆炸
+      // （e2e 实测 6669 行 vs 正常 27）、每帧 O(n) 渲染 → 高频数据下帧率暴跌、
+      // 输出区上下抖动（数据突发填满缓冲 → trim 风暴 → 抖动 → 突发结束恢复）。
+      // 实时位置：identity 模式 O(1)，过滤模式二分 O(log n)；越界（被裁/冻结外）
+      // 返回 null → 回收。
+      const visIdx = this.seqToVisIdx(seq, view, buffer, frozen);
       const stale =
+        visIdx === null ||
         row.version !== this.filterVersion ||
-        row.visIdx < firstVisIdx ||
-        row.visIdx > lastVisIdx;
+        visIdx < firstVisIdx ||
+        visIdx > lastVisIdx;
       if (stale && !selecting) {
         this.recycle(row);
         this.active.delete(seq);
@@ -426,7 +436,10 @@ export class TerminalRenderer {
 
   /** Filtered/identity list position of a seq, or null if hidden.
    *  `frozen` null = no cap (normalized to MAX_SAFE_INTEGER — a raw null
-   *  comparison would coerce it to 0 and wrongly hide every seq). */
+   *  comparison would coerce it to 0 and wrongly hide every seq).
+   *
+   *  Filtered list is ascending — binary search instead of indexOf (called
+   *  per active row every frame from the stale check). */
   private seqToVisIdx(
     seq: number,
     view: TerminalViewState,
@@ -436,8 +449,16 @@ export class TerminalRenderer {
     const fz = frozen ?? Number.MAX_SAFE_INTEGER;
     if (seq > fz || seq < buffer.firstSeq || seq > buffer.lastSeq) return null;
     if (view.visibleSeqs === null) return seq - buffer.firstSeq;
-    const idx = view.visibleSeqs.indexOf(seq);
-    return idx >= view.visibleSeqsOffset ? idx - view.visibleSeqsOffset : null;
+    const list = view.visibleSeqs;
+    let lo = view.visibleSeqsOffset;
+    let hi = list.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid] === seq) return mid - view.visibleSeqsOffset;
+      if (list[mid] < seq) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return null;
   }
 
   /** Seq at a filtered/identity list position, or null. */

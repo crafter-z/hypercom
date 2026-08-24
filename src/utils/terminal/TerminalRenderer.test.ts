@@ -212,6 +212,34 @@ describe('TerminalRenderer dirty tracking', () => {
     expect(nodeSeq15After).not.toBeNull();
     expect(nodeSeq15After).toBe(nodeSeq15);
   });
+
+  it('head trim recycles trimmed rows — no DOM leak (issue #10)', () => {
+    // 高频数据填满缓冲后每帧 trim：被裁行（seq < firstSeq）的 visIdx 字段停在
+    // 旧窗口值，仅按 visIdx 判定 stale 永不触发 → 旧行残留、每帧新建窗口行 →
+    // DOM 行数无限增长（e2e 实测 6669 行 vs 正常 27）→ 每帧 O(n) 渲染 → 输出
+    // 区抖动。seq 窗口边界检查必须回收被裁行。
+    const small = new TerminalBuffer({ maxLines: 20, maxBytes: 0 });
+    fill(small, Array.from({ length: 20 }, (_, i) => String(i)));
+    // 底部窗口（follow）渲染 20 行。
+    renderer.render(small, identityView({ followEnabled: true }));
+    const domCountBefore = container.querySelectorAll('.terminal-line').length;
+    expect(domCountBefore).toBeLessThanOrEqual(20);
+
+    // 持续 append 触发持续 head trim——每次 append 5 行、head 前进 5。
+    for (let round = 0; round < 10; round++) {
+      fill(small, Array.from({ length: 5 }, (_, i) => `r${round}-${i}`));
+      renderer.render(small, identityView({ followEnabled: true }));
+    }
+    // DOM 行数必须保持有界（窗口 + overscan，远小于累计 append 的 70 行）。
+    const domCountAfter = container.querySelectorAll('.terminal-line').length;
+    expect(domCountAfter).toBeLessThanOrEqual(domCountBefore + 2);
+    expect(domCountAfter).toBeLessThan(40);
+    // 被裁的早期 seq 必须已从 DOM 移除。
+    expect(container.querySelector('[data-seq="0"]')).toBeNull();
+    // 最新行仍在。
+    const lastSeq = small.lastSeq;
+    expect(container.querySelector(`[data-seq="${lastSeq}"]`)).not.toBeNull();
+  });
 });
 
 describe('TerminalRenderer filtered rendering', () => {
