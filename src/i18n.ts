@@ -180,6 +180,7 @@ const resources = {
       'sendSection.input.placeholder.noPort': '未选择串口',
       'sendSection.sendButton': '发送',
       'sendSection.clearAfterSend': '发送后清空',
+      'op.send.bytesLabel': 'B',
       'op.send.hexSuffixLabel': '末尾追加:',
       'sendSection.hexLabel': 'HEX',
       'sendSection.lineEnding.crlf': '\\r\\n',
@@ -800,6 +801,7 @@ const resources = {
       'sendSection.input.placeholder.noPort': 'No port selected',
       'sendSection.sendButton': 'Send',
       'sendSection.clearAfterSend': 'Clear after send',
+      'op.send.bytesLabel': 'B',
       'op.send.hexSuffixLabel': 'Suffix:',
       'sendSection.hexLabel': 'HEX',
       'sendSection.lineEnding.crlf': '\\r\\n',
@@ -854,6 +856,7 @@ const resources = {
 
       'statusBar.highLoad': 'High Load',
       'statusBar.normal': 'Normal',
+      'statusBar.connectedCount': '{{count}} Connected',
       'statusBar.noPortSelected': 'No port selected',
       'statusBar.jsHeap': 'JS',
       'statusBar.processMem': 'proc',

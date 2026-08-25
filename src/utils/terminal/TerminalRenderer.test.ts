@@ -497,6 +497,46 @@ describe('TerminalRenderer scroll + recycling', () => {
     renderer.render(buf, identityView());
     expect(container.querySelectorAll('.terminal-line').length).toBe(0);
   });
+
+  it('survives a large head trim without stacked/overlapping rows (issue #14)', () => {
+    // 复现 issue #14：一次 append 可裁掉缓冲半数（byte-budget drain），firstSeq
+    // 大幅前移。旧行缓存的 visIdx 停在旧窗口值——若 1b 排序/insertRowInOrder
+    // 仍信缓存值，trim 后渲染可能出现同 Y 重叠或 DOM 顺序错乱。本用例构造一个
+    // 容量受限的 buffer，先填满并渲染（窗口在底部），再触发一次大 trim，然后
+    // 向上滚动露出裁后头部，断言：所有 active 行 translateY 唯一 + DOM order
+    // == seq 升序。
+    const small = new TerminalBuffer({ maxLines: 60, maxBytes: 0 });
+    fill(small, Array.from({ length: 60 }, (_, i) => String(i)));
+    // 渲染到底部（follow），窗口覆盖最新 ~24 行。
+    renderer.render(small, identityView({ followEnabled: true }));
+    const domBefore = container.querySelectorAll('.terminal-line').length;
+    expect(domBefore).toBeGreaterThan(0);
+
+    // 构造大 trim：继续 append 30 行 → head 前进 30（容量 60，覆盖最旧 30）。
+    fill(small, Array.from({ length: 30 }, (_, i) => String(60 + i)));
+    expect(small.firstSeq).toBe(30); // head 前移 30
+    renderer.render(small, identityView({ followEnabled: true }));
+
+    // 向上滚到裁后缓冲的头部，触发 recycle + 新行物化（insertRowInOrder 路径）。
+    container.scrollTop = 0;
+    renderer.render(small, identityView({ followEnabled: false }));
+    const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
+    expect(rows.length).toBeGreaterThan(10);
+
+    // (a) translateY 唯一——无重叠/堆叠
+    const tops = rows.map((r) => Number(/translateY\(([-\d.]+)px\)/.exec(r.style.transform)?.[1]));
+    const uniqueTops = new Set(tops);
+    expect(uniqueTops.size).toBe(tops.length);
+    // (b) DOM 顺序 == seq 升序 == 视觉顺序
+    const seqs = rows.map((r) => Number(r.dataset.seq));
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+    }
+    // (c) 每行的 visIdx（seq - firstSeq）与 translateY 一致
+    for (let i = 0; i < rows.length; i++) {
+      expect(tops[i]).toBe((Number(rows[i].dataset.seq) - small.firstSeq) * ROW_HEIGHT);
+    }
+  });
 });
 
 describe('TerminalRenderer.seqFromEventTarget', () => {

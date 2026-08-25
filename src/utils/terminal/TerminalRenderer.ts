@@ -290,14 +290,19 @@ export class TerminalRenderer {
     //     so the browser's native cross-row selection walks the correct
     //     document order. Skipped during drag-selection (moving nodes would
     //     break the live Range).
+    //     issue #14：用**实时** seqToVisIdx 排序，不信缓存的 row.visIdx——
+    //     head trim 后缓存值过期（整体平移，相对顺序碰巧不变但非设计保证）。
     if (!selecting) {
-      const sorted = Array.from(this.active.values()).sort((a, b) => a.visIdx - b.visIdx);
+      const sorted = Array.from(this.active.entries())
+        .map(([seq, row]) => ({ node: row.node, visIdx: this.seqToVisIdx(seq, view, buffer, frozen) }))
+        .filter((r): r is { node: HTMLDivElement; visIdx: number } => r.visIdx !== null)
+        .sort((a, b) => a.visIdx - b.visIdx);
       let prev: HTMLDivElement | null = null;
-      for (const row of sorted) {
-        if (prev !== null && row.node.previousSibling !== prev) {
-          layer.insertBefore(row.node, prev.nextSibling);
+      for (const { node } of sorted) {
+        if (prev !== null && node.previousSibling !== prev) {
+          layer.insertBefore(node, prev.nextSibling);
         }
-        prev = row.node;
+        prev = node;
       }
     }
 
@@ -322,7 +327,7 @@ export class TerminalRenderer {
         // DOM 顺序 = 视觉顺序：池复用/新建节点默认在 contentLayer 末尾，必须
         // 按 visIdx 归位——否则向上滚动补位时 DOM 顺序颠倒，跨行拖拽选择时
         // 浏览器按 DOM 顺序拼接选区，视觉中间的行被跳过（issue #14 回归）。
-        this.insertRowInOrder(row.node, visIdx);
+        this.insertRowInOrder(row.node, visIdx, view, buffer, frozen);
       }
       row.seq = seq;
       row.visIdx = visIdx;
@@ -510,21 +515,28 @@ export class TerminalRenderer {
   /** Insert the node keeping contentLayer children sorted by visIdx (DOM
    *  order == visual order). No-op when already in place.
    *
-   *  Must find the row with the SMALLEST visIdx > current — not the first
-   *  in Map iteration order. Map preserves insertion order, which diverges
-   *  from visIdx order after recycles/re-acquires; taking the first match
-   *  inserts the node before the wrong sibling, scrambling DOM order. The
-   *  browser's native cross-row selection walks DOM document order, so a
-   *  scrambled order makes drag-select skip rows (issue #14). */
-  private insertRowInOrder(node: HTMLDivElement, visIdx: number): void {
+   *  issue #14：用**实时** seqToVisIdx 计算候选行的位置，不信缓存的
+   *  `row.visIdx`——head trim 后存活行的缓存 visIdx 停在旧窗口值（整体平移），
+   *  虽然相对顺序碰巧不变，但用旧值属于"碰巧对"而非"设计上对"；一旦出现
+   *  非均匀位置变化（过滤列表重算、setLimits 不均匀裁剪）就会乱序/堆叠。
+   *  新行的 visIdx 由调用方传入（本帧刚算出），候选行用实时位置比较。 */
+  private insertRowInOrder(
+    node: HTMLDivElement,
+    visIdx: number,
+    view: TerminalViewState,
+    buffer: TerminalBuffer,
+    frozen: number,
+  ): void {
     const layer = this.contentLayer;
     if (!layer) return;
     let target: HTMLDivElement | null = null;
     let targetVisIdx = Infinity;
-    for (const row of this.active.values()) {
-      if (row.node !== node && row.visIdx > visIdx && row.visIdx < targetVisIdx) {
+    for (const [seq, row] of this.active) {
+      if (row.node === node) continue;
+      const rVisIdx = this.seqToVisIdx(seq, view, buffer, frozen);
+      if (rVisIdx !== null && rVisIdx > visIdx && rVisIdx < targetVisIdx) {
         target = row.node;
-        targetVisIdx = row.visIdx;
+        targetVisIdx = rVisIdx;
       }
     }
     if (target === null) {
