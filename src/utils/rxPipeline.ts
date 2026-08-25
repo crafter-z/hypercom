@@ -25,7 +25,7 @@ import { RxLineAssembler } from './rxAssembler';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { useToastStore } from '../stores/useToastStore';
-import { appendTerminalLines } from './terminal/viewportManager';
+import { appendTerminalLines, evaluateSoftBackstop } from './terminal/viewportManager';
 import i18n from '../i18n';
 
 /** 每端口内存裁剪 toast 节流：同一端口在窗口内至多提示一次，避免高频 RX 刷屏。 */
@@ -406,9 +406,14 @@ export function getRxPipeline(): RxPipeline {
     rxPipelineSingleton = new RxPipeline({
       appendLines: (portId, lines) => {
         // 方案B（issue #14）：批写入环形缓冲区；返回 true 表示缓冲区丢弃过
-        // 最旧行（内存预算裁剪），接线层负责弹「因内存限制清屏」的通知。
+        // 最旧行（每端口硬约束裁剪），接线层负责弹「因内存限制清屏」的通知。
         const trimmed = appendTerminalLines(portId, lines);
         if (trimmed) notifyMemoryTrim(portId);
+        // issue #14：应用级软兜底——前端 JS 堆超 memoryLimitMb 时，对候选
+        // 端口裁半（双闸：bytes > maxBytes/2 + 10s 冷却）。硬约束管单端口上限，
+        // 软兜底管应用级总上限（方案B 重构时丢失、此处恢复）。
+        const softTrimmed = evaluateSoftBackstop();
+        for (const pid of softTrimmed) notifyMemoryTrim(pid);
       },
       getEncodingLabel: (portId) => {
         const encoding = useTerminalStore.getState().terminals[portId]?.encoding || 'UTF-8';

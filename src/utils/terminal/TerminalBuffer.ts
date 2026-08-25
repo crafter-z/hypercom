@@ -120,29 +120,30 @@ export class TerminalBuffer {
   /**
    * Adjust the limits live (config change). Shrinking maxLines drops the
    * oldest lines; the byte budget is then re-applied. Keeps the newest lines.
+   *
+   * issue #14：无论 count 是否超过 newMax，只要 maxLines 变化就重建 slots 数组
+   * 到新尺寸——否则收缩时旧槽位（newMax..oldSize）残留对已不可达行的引用，
+   * 既不归还内存又干扰后续 modulo 运算的语义清晰性。
    */
   setLimits(opts: Partial<TerminalBufferOptions>): void {
     if (opts.maxLines !== undefined) {
       const newMax = Math.max(1, Math.floor(opts.maxLines));
       if (newMax !== this.maxLinesValue) {
-        // Extract the kept lines with the CURRENT geometry first (getBySeq's
-        // modulo uses the still-old maxLinesValue), then resize the slots.
-        if (this.count > newMax) {
-          const keep = newMax;
-          const kept: TerminalLine[] = [];
-          for (let i = this.count - keep; i < this.count; i++) {
-            const line = this.getBySeq(this.firstSeq + i);
-            if (line) kept.push(line);
-          }
-          this.totalBytes = 0;
-          this.slots = new Array<TerminalLine | null>(newMax).fill(null);
-          for (let i = 0; i < kept.length; i++) {
-            this.slots[i] = kept[i];
-            this.totalBytes += lineBytes(kept[i]);
-          }
-          this.head = 0;
-          this.count = kept.length;
+        // 用**当前**几何（旧 maxLinesValue 的 modulo）提取要保留的最新行。
+        const keep = Math.min(this.count, newMax);
+        const kept: TerminalLine[] = [];
+        for (let i = this.count - keep; i < this.count; i++) {
+          const line = this.getBySeq(this.firstSeq + i);
+          if (line) kept.push(line);
         }
+        this.totalBytes = 0;
+        this.slots = new Array<TerminalLine | null>(newMax).fill(null);
+        for (let i = 0; i < kept.length; i++) {
+          this.slots[i] = kept[i];
+          this.totalBytes += lineBytes(kept[i]);
+        }
+        this.head = 0;
+        this.count = kept.length;
         this.maxLinesValue = newMax;
       }
     }
@@ -155,6 +156,23 @@ export class TerminalBuffer {
         this.dropHead();
       }
     }
+  }
+
+  /**
+   * 软兜底裁剪（issue #14）：drop 最旧行直到 count 减半。与硬约束的 byte-budget
+   * drain 不同——这是应用级总内存超限时的主动收缩，由 viewportManager 接线层
+   * 在 `performance.memory.usedJSHeapSize > memoryLimitMb` 时按端口触发（双闸：
+   * 只裁 `bytes > maxBytes/2` 的端口 + 10s 冷却）。返回是否实际裁剪。
+   */
+  trimToHalf(): boolean {
+    if (this.count <= 1) return false;
+    const target = Math.max(1, Math.floor(this.count / 2));
+    let trimmed = false;
+    while (this.count > target) {
+      this.dropHead();
+      trimmed = true;
+    }
+    return trimmed;
   }
 
   /** Oldest live seq (inclusive); equals nextSeq when empty. */

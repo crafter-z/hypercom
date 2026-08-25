@@ -157,6 +157,22 @@ export class TerminalViewportManager {
     this.requestRender();
   }
 
+  /**
+   * 软兜底裁剪（issue #14）：应用级 JS 堆超 memoryLimitMb 时，由模块级
+   * `evaluateSoftBackstop` 对每个候选端口调用——drop 缓冲到半，同步裁掉
+   * 过滤/搜索列表中已不可达的 seq，并重渲染。调用方负责双闸（候选判定 +
+   * 冷却）与 toast。返回是否实际裁剪。
+   */
+  softTrim(): boolean {
+    if (this.destroyed) return false;
+    const trimmed = this.buffer.trimToHalf();
+    if (trimmed) {
+      this.pruneTrimmed();
+      this.requestRender();
+    }
+    return trimmed;
+  }
+
   // ==================== Filter ====================
 
   /** Set direction/keyword filter (debounced by the caller). */
@@ -435,6 +451,56 @@ export function releaseViewportManager(portId: string): void {
     vm.dispose();
     managers.delete(portId);
   }
+}
+
+// ==================== App-level soft backstop (issue #14) ====================
+
+/** 软兜底每端口冷却：RSS/JS 堆超限会持续满足，无冷却则每个 append 批都裁半，
+ *  高频接收下用户视野里"刚加载的半页又被前半页顶掉"。与 toast 节流同量级。 */
+const SOFT_TRIM_COOLDOWN_MS = 10_000;
+const lastSoftTrimAt = new Map<string, number>();
+
+/** 前端 V8 JS 堆占用（字节）。Chromium/WebView2 专属 `performance.memory` —
+ *  量的是软件逻辑真实持有（缓冲/行对象/字符串），清屏/GC 后会回落，比进程
+ *  RSS 更能反映"我们控的内存"。不存在时返回 0（降级为只有硬约束）。 */
+function readJsHeapBytes(): number {
+  const perf = performance as Performance & { memory?: { usedJSHeapSize?: number } };
+  return perf.memory?.usedJSHeapSize ?? 0;
+}
+
+/**
+ * 应用级软兜底评估（issue #14）：前端 JS 堆超过 `memoryLimitMb` 时，对每个
+ * 「缓冲已可观（bytes > maxBytes/2）」且「冷却窗口外」的端口执行 `softTrim`
+ * （裁半 + 同步过滤/搜索列表 + 重渲染）。返回被裁的 portId 列表——调用方
+ * （RxPipeline 接线层）据此弹 toast。
+ *
+ * 双闸照搬旧设计（commit 9f6d56a，方案B重构时丢失、此处恢复）：
+ *  1. 只裁 bytes > maxBytes/2 的端口——小缓冲不是超限元凶，裁它只会让用户
+ *     看到"半页就被刷掉"。
+ *  2. 每端口 10s 冷却——RSS/堆采样超限后持续满足，无冷却则每批裁半。
+ *
+ * 与每端口硬约束（TerminalBuffer.append 内 maxBytes/maxLines）互补：硬约束
+ * 无条件立即裁、管单端口上限；软兜底有冷却、管应用级总上限。
+ */
+export function evaluateSoftBackstop(): string[] {
+  const limitMb = useAppStore.getState().config.memoryLimitMb;
+  if (limitMb <= 0) return [];
+  const heapBytes = readJsHeapBytes();
+  if (heapBytes <= 0 || heapBytes <= limitMb * 1024 * 1024) return [];
+
+  const now = Date.now();
+  const trimmed: string[] = [];
+  for (const [portId, vm] of managers) {
+    // 候选闸：只裁缓冲已可观的端口
+    if (vm.buffer.bytes <= vm.buffer.maxBytes / 2) continue;
+    // 冷却闸
+    if (now - (lastSoftTrimAt.get(portId) ?? 0) < SOFT_TRIM_COOLDOWN_MS) continue;
+    if (vm.softTrim()) {
+      lastSoftTrimAt.set(portId, now);
+      trimmed.push(portId);
+    }
+  }
+  return trimmed;
 }
 
 // ==================== Adapter surface (non-React callers) ====================

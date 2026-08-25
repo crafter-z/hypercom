@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { TerminalLine } from '../../types';
 import { TerminalBuffer } from './TerminalBuffer';
+import { lineBytes } from '../lineText';
 
 const makeLine = (tag: string, size = 2): TerminalLine => ({
   timestamp: 0,
@@ -74,23 +75,27 @@ describe('TerminalBuffer capacity trim', () => {
     expect(b.getBySeq(1)?.rawData?.[0]).toBe('b'.charCodeAt(0));
   });
 });
-
 describe('TerminalBuffer byte budget', () => {
+  // issue #14：lineBytes 现在按真实 V8 占用计（对象头 + 包装 + payload），
+  // 预算从 lineBytes 派生以保持测试意图（N 行触发裁剪到半）与记账解耦。
   it('drops oldest lines until totalBytes ≤ half the budget', () => {
-    // 5 lines × 4 bytes = 20 bytes; budget 16 → trim to ≤ 8 → keep 2 lines
-    const b = makeBuf(10, 16);
+    const perLine = lineBytes(makeLine('a', 4));
+    // 5 行 > 预算(4 行) → 裁到 ≤ 2 行
+    const b = makeBuf(10, 4 * perLine);
     for (const t of ['a', 'b', 'c', 'd', 'e']) b.append(makeLine(t, 4));
-    expect(b.bytes).toBeLessThanOrEqual(8);
+    expect(b.bytes).toBeLessThanOrEqual(2 * perLine);
     expect(b.length).toBe(2);
     expect(b.getBySeq(3)?.rawData?.[0]).toBe('d'.charCodeAt(0));
     expect(b.getBySeq(4)?.rawData?.[0]).toBe('e'.charCodeAt(0));
   });
 
   it('reports trimmed when byte budget forces drops', () => {
-    const b = makeBuf(10, 4);
-    expect(b.append(makeLine('a', 2)).trimmed).toBe(false); // 2 ≤ 4
-    expect(b.append(makeLine('b', 2)).trimmed).toBe(false); // 4 = 4 预算内
-    const r = b.append(makeLine('c', 2));                    // 6 > 4 → 裁到 ≤ 2
+    const perLine = lineBytes(makeLine('a', 2));
+    // 预算 = 2 行：前 2 行不裁，第 3 行触发裁到 1 行
+    const b = makeBuf(10, 2 * perLine);
+    expect(b.append(makeLine('a', 2)).trimmed).toBe(false);
+    expect(b.append(makeLine('b', 2)).trimmed).toBe(false);
+    const r = b.append(makeLine('c', 2));
     expect(r.trimmed).toBe(true);
     expect(b.length).toBe(1);
     expect(b.getBySeq(b.lastSeq)?.rawData?.[0]).toBe('c'.charCodeAt(0));
@@ -184,10 +189,11 @@ describe('TerminalBuffer setLimits', () => {
   });
 
   it('re-applies the byte budget after change', () => {
+    const perLine = lineBytes(makeLine('a', 4));
     const b = makeBuf(10, 0);
     for (const t of ['a', 'b', 'c', 'd']) b.append(makeLine(t, 4));
-    b.setLimits({ maxBytes: 16 });
-    // 16 bytes → keep ≤ 8 → 2 lines
+    // setLimits 无条件 drain 到 ≤ maxBytes/2：预算 4 行 → 留 2 行
+    b.setLimits({ maxBytes: 4 * perLine });
     expect(b.length).toBe(2);
   });
 
@@ -196,6 +202,32 @@ describe('TerminalBuffer setLimits', () => {
     b.append(makeLine('a'));
     b.setLimits({ maxLines: 0 });
     expect(b.maxLines).toBe(1);
+    expect(b.length).toBe(1);
+  });
+});
+
+describe('TerminalBuffer trimToHalf', () => {
+  it('drops oldest lines until count is halved', () => {
+    const b = makeBuf(10);
+    for (const t of ['a', 'b', 'c', 'd', 'e', 'f']) b.append(makeLine(t));
+    expect(b.trimToHalf()).toBe(true);
+    expect(b.length).toBe(3);
+    // 保留最新 3 行（d/e/f），seq 不复用
+    expect(b.getBySeq(b.firstSeq)?.rawData?.[0]).toBe('d'.charCodeAt(0));
+    expect(b.getBySeq(b.lastSeq)?.rawData?.[0]).toBe('f'.charCodeAt(0));
+  });
+
+  it('returns false when count ≤ 1', () => {
+    const b = makeBuf(10);
+    b.append(makeLine('a'));
+    expect(b.trimToHalf()).toBe(false);
+    expect(b.length).toBe(1);
+  });
+
+  it('respects floor of 1 on odd counts', () => {
+    const b = makeBuf(10);
+    for (const t of ['a', 'b', 'c']) b.append(makeLine(t));
+    b.trimToHalf();
     expect(b.length).toBe(1);
   });
 });

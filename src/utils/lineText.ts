@@ -54,10 +54,28 @@ export function getLineText(line: TerminalLine, encoding: Encoding | string): st
   return '';
 }
 
-/** Line byte accounting: rawData length when present, else UTF-8 byte length
- *  of content, else 0. Used by the ring buffer's byte-budget trim. */
+/** Line memory accounting for the ring buffer's byte-budget trim.
+ *
+ *  Counts the **real V8 footprint**, not just payload bytes — the old version
+ *  only counted `rawData.length`, so small-line + protocol-parsed buffers held
+ *  far more memory than the budget implied (object headers + Uint8Array
+ *  wrappers + parsedFields were invisible to the trim gate, so byte budget
+ *  never fired and only maxLines capped — issue #14). Approximate is fine:
+ *  the budget just needs to reflect the right order of magnitude.
+ *
+ *  - Object header + property slots: ~128 B (V8 HiddenClass + 7 fields)
+ *  - Uint8Array wrapper: ~40 B + payload bytes
+ *  - JS string (content): UTF-16, ~2 B/char
+ *  - parsedFields: ~96 B/field (object + string fields) */
 export function lineBytes(line: TerminalLine): number {
-  if (line.rawData) return line.rawData.length;
-  if (line.content !== undefined) return new TextEncoder().encode(line.content).length;
-  return 0;
+  let bytes = 128; // object header + property slots
+  if (line.rawData) {
+    bytes += line.rawData.length + 40; // Uint8Array wrapper + payload
+  } else if (line.content !== undefined) {
+    bytes += line.content.length * 2; // JS string is UTF-16
+  }
+  if (line.parsedFields) {
+    bytes += line.parsedFields.length * 96; // per-field object overhead
+  }
+  return bytes;
 }

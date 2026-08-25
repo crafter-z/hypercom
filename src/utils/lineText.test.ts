@@ -79,15 +79,31 @@ describe('getLineText', () => {
 });
 
 describe('lineBytes', () => {
-  it('uses rawData length when present', () => {
-    expect(lineBytes(makeLine({ rawData: new Uint8Array([1, 2, 3]) }))).toBe(3);
+  // issue #14：lineBytes 现在估算 V8 真实占用（对象头 + Uint8Array 包装 +
+  // parsedFields），不再只算 payload 字节——让 byte-budget trim 反映真实量级。
+  it('counts object header + Uint8Array wrapper + payload for rawData', () => {
+    // 128 (header) + 3 (payload) + 40 (wrapper) = 171
+    expect(lineBytes(makeLine({ rawData: new Uint8Array([1, 2, 3]) }))).toBe(171);
   });
 
-  it('uses UTF-8 content byte length for multi-byte text', () => {
-    expect(lineBytes(makeLine({ content: '你好' }))).toBe(6);
+  it('counts object header + UTF-16 string for content', () => {
+    // 128 (header) + 2 chars * 2 B = 132
+    expect(lineBytes(makeLine({ content: '你好' }))).toBe(132);
   });
 
-  it('returns 0 when nothing is stored', () => {
-    expect(lineBytes(makeLine({ content: undefined }))).toBe(0);
+  it('counts only object header when nothing is stored', () => {
+    expect(lineBytes(makeLine({ content: undefined }))).toBe(128);
+  });
+
+  it('adds parsedFields overhead', () => {
+    const line = makeLine({
+      rawData: new Uint8Array([1, 2]),
+      parsedFields: [
+        { name: 'head', byteStart: 0, byteEnd: 1, color: '#f00' },
+        { name: 'len', byteStart: 1, byteEnd: 2, color: '#0f0' },
+      ],
+    });
+    // 128 + (2 + 40) + 2 * 96 = 362
+    expect(lineBytes(line)).toBe(362);
   });
 });
