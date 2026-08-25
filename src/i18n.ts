@@ -179,7 +179,7 @@ const resources = {
       'sendSection.input.placeholder.hex': 'HEX 字节，如 AA BB CC',
       'sendSection.input.placeholder.noPort': '未选择串口',
       'sendSection.sendButton': '发送',
-      'op.send.bytesLabel': 'B',
+      'sendSection.clearAfterSend': '发送后清空',
       'op.send.hexSuffixLabel': '末尾追加:',
       'sendSection.hexLabel': 'HEX',
       'sendSection.lineEnding.crlf': '\\r\\n',
@@ -236,7 +236,8 @@ const resources = {
       'statusBar.normal': '运行正常',
       'statusBar.connectedCount': '{{count}} 已连接',
       'statusBar.noPortSelected': '未选择串口',
-
+      'statusBar.jsHeap': 'JS堆',
+      'statusBar.processMem': '进程',
       'configModal.title': '设置',
       'configModal.nav.general': '通用设置',
       'configModal.nav.log': '日志设置',
@@ -798,7 +799,7 @@ const resources = {
       'sendSection.input.placeholder.hex': 'HEX bytes, e.g. AA BB CC',
       'sendSection.input.placeholder.noPort': 'No port selected',
       'sendSection.sendButton': 'Send',
-      'op.send.bytesLabel': 'B',
+      'sendSection.clearAfterSend': 'Clear after send',
       'op.send.hexSuffixLabel': 'Suffix:',
       'sendSection.hexLabel': 'HEX',
       'sendSection.lineEnding.crlf': '\\r\\n',
@@ -853,8 +854,9 @@ const resources = {
 
       'statusBar.highLoad': 'High Load',
       'statusBar.normal': 'Normal',
-      'statusBar.connectedCount': '{{count}} Connected',
       'statusBar.noPortSelected': 'No port selected',
+      'statusBar.jsHeap': 'JS',
+      'statusBar.processMem': 'proc',
 
       'configModal.title': 'Settings',
       'configModal.nav.general': 'General',

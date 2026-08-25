@@ -218,6 +218,9 @@ pub struct AppConfig {
     pub show_port_type: bool,
     #[serde(default = "default_send_on_enter")]
     pub send_on_enter: bool,
+    /// 点击发送后是否清空发送输入框（issue #13，默认保留）。
+    #[serde(default = "default_false")]
+    pub clear_send_input_after_send: bool,
     #[serde(default = "default_quick_send_inline_count")]
     pub quick_send_inline_count: u32,
     #[serde(default = "default_timestamp_format")]
@@ -371,6 +374,8 @@ impl Default for AppConfig {
             send_prefix: String::new(),
             show_port_type: true,
             send_on_enter: true,
+            // issue #13：默认发送后保留输入框内容。
+            clear_send_input_after_send: false,
             quick_send_inline_count: 6,
             timestamp_format: "absolute".to_string(),
             timestamp_mode: "perLine".to_string(),

@@ -33,6 +33,7 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   backgroundImageBlur: 0,
   showPortType: true,
   sendOnEnter: true,
+  clearSendInputAfterSend: false,
   quickSendInlineCount: 6,
   timestampMode: 'perLine',
   timestampFormat: 'absolute',

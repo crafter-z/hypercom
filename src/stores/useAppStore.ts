@@ -162,6 +162,8 @@ const defaultConfig: AppConfig = {
   sendPrefix: '',
   showPortType: true,
   sendOnEnter: true,
+  // issue #13：默认发送后保留输入框内容（用户决策）。
+  clearSendInputAfterSend: false,
   quickSendInlineCount: 6,
   timestampMode: 'perLine',
   timestampFormat: 'absolute',

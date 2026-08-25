@@ -68,10 +68,12 @@ const SendSection: React.FC<SendSectionProps> = ({
   const sendInput = useOperationStore(s => s.sendInput);
   const sendIsHex = useOperationStore(s => s.sendIsHex);
   const sendAppendLineEnding = useOperationStore(s => s.sendAppendLineEnding);
+  const setOpState = useOperationStore(s => s.setOpState);
   const sendOnEnter = useAppStore(s => s.config.sendOnEnter);
+  const clearSendInputAfterSend = useAppStore(s => s.config.clearSendInputAfterSend);
   const quickSendInlineCount = useAppStore(s => s.config.quickSendInlineCount);
   const encoding = useTerminalStore(s => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
-  const setOpState = useOperationStore(s => s.setOpState);
+  const setConfig = useAppStore(s => s.setConfig);
   // issue #12：循环发送为每端口独立状态——按钮按**当前聚焦端口**查询，切换
   // 标签后按钮自动反映该端口的循环运行态（切回正在循环的端口显示「停止」）。
   const cyclicLoops = useOperationStore(s => s.cyclicLoops);
@@ -208,11 +210,13 @@ const SendSection: React.FC<SendSectionProps> = ({
       .openPopout('quick-send')
       .catch((e) => console.debug('[SendSection] openPopout failed:', e));
   };
-
   const handleSend = async () => {
     if (!isPortActive || !sendInput.trim()) return;
     await sendData(activeTabId!, sendInput, sendIsHex, sendAppendLineEnding);
-    setOpState({ sendInput: '' });
+    // issue #13：默认保留输入框内容；仅在用户开启「发送后清空」时清空。
+    if (clearSendInputAfterSend) {
+      setOpState({ sendInput: '' });
+    }
   };
 
   // Send one command from the active set ONCE — each command carries its own
@@ -456,6 +460,14 @@ const SendSection: React.FC<SendSectionProps> = ({
                 onChange={e => handleToggleHex(e.target.checked)}
               />
               HEX
+            </label>
+            <label className="checkbox-wrapper op-checkbox-compact" title={t('sendSection.clearAfterSend')}>
+              <input
+                type="checkbox"
+                checked={clearSendInputAfterSend}
+                onChange={e => setConfig({ clearSendInputAfterSend: e.target.checked })}
+              />
+              {t('sendSection.clearAfterSend')}
             </label>
             <select
               className="select op-line-ending-select"

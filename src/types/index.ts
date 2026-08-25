@@ -286,6 +286,7 @@ export interface AppConfig {
   sendPrefix: string;      // 发送提示前缀，默认空（issue #7-3：终端已有 TX/RX 方向标识）
   showPortType: boolean;   // 显示串口类型
   sendOnEnter: boolean;     // 聚焦发送框时 Enter 是否直接发送
+  clearSendInputAfterSend: boolean; // 点击发送后是否清空输入框（issue #13，默认保留）
   quickSendInlineCount: number; // 快捷发送内联条显示条数（0 = 隐藏内联条，纯弹出窗模式）
 
   // 时间戳设置
