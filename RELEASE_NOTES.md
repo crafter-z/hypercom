@@ -110,7 +110,7 @@
 ## 其他
 
 - 测试扩充：vitest 567 → **589**（30 文件，updateService/channel 22），cargo test 128 → **134**（`find_latest_preview_tag` 5 + update_check_mode clamp 1），E2E 14 → **16**（更新弹窗冒烟 + 永不提醒同步断言）
-- 文档：`plans/12-autoupdate.md` 方案、`plans/09-release-workflow.md` preview 发版流程、各 AGENTS.md 同步
+- 文档：`docs/architecture/update.md` 方案、`docs/architecture/release.md` preview 发版流程、各 AGENTS.md 同步
 
 # HyperCom v0.5.2
 
@@ -314,7 +314,7 @@
 - **macOS (Intel)**：`hypercom_0.4.0_x64.dmg`
 - **Linux**：`hypercom_0.4.0_amd64.deb` / `hypercom-0.4.0-1.x86_64.rpm` / `hypercom_0.4.0_amd64.AppImage`
 
-> macOS 版本暂未做代码签名与公证，首次打开可能被 Gatekeeper 拦截，请在「系统设置 → 隐私与安全性」中允许运行。详见仓库 `plans/code-signing.md`。
+> macOS 版本暂未做代码签名与公证，首次打开可能被 Gatekeeper 拦截，请在「系统设置 → 隐私与安全性」中允许运行。
 
 ## 自动更新
 

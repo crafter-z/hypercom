@@ -89,7 +89,7 @@ export const updateTiming = {
 /** DEV 构建不检查（debug 走后端 Ok(None) 双保险）；macOS 平台不检查（未签名/公证）。 */
 export function isUpdateCheckEnabled(): boolean {
   // macOS 暂不支持自动更新（未签名/公证，Gatekeeper 拦截更新后 relaunch，
-  // plans/12 §9 已知边界）：不检查、不弹窗——避免把 macOS 用户引导到必然
+  // docs/architecture/update.md 关键事实 #7）：不检查、不弹窗——避免把 macOS 用户引导到必然
   // 失败的安装。未来签名/公证落地后移除该平台判断即可启用。
   return !import.meta.env.DEV && !isMacPlatform();
 }

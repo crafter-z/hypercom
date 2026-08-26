@@ -98,7 +98,7 @@ jobs:
             # 只取顶部**当前版本**章节（截至下一个 `# HyperCom v` 头之前）：
             # RELEASE_NOTES.md 是累积式（新章节加在顶部、旧版本保留），`cat` 全文件
             # 会把所有历史版本都带进 release 描述与 updater 弹窗（见
-            # plans/09-release-workflow.md「Release notes 与 updater 弹窗文案」）。
+            # docs/architecture/release.md「Release notes 与 updater 弹窗文案」）。
             awk '/^# HyperCom /{n++} n <= 1 {print} n > 1 {exit}' RELEASE_NOTES.md
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
@@ -117,13 +117,13 @@ jobs:
           # issue #12 复审：tauri-action 默认 false → MSI+NSIS 并存时 latest.json
           # 的 Windows 块指向 MSI。更新链路按 NSIS `/UPDATE` 流程设计与验收
           # （plugins.updater.windows.installMode=passive，installer 等应用退出再
-          # 替换文件并自重启）——必须显式优先 NSIS（plans/12 §5.5 决策项）。
+          # 替换文件并自重启）——必须显式优先 NSIS（docs/architecture/update.md 关键事实 #3）。
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
   # issue #12 二轮发版护栏③：latest.json 全平台键完整性门禁。
   # 矩阵部分失败（fail-fast:false）时 tauri-action 逐 job 覆盖 latest.json，
-  # 会产出**缺平台键**的清单——该平台 check() 直接报错（plans/12 §5.1）。
+  # 会产出**缺平台键**的清单——该平台 check() 直接报错（docs/architecture/update.md 关键事实 #1）。
   # 此 job 把静默损坏变成显式红叉。
   #
   # 触发时点修正（实测）：draft release 的资产**任何身份都取不到**——匿名

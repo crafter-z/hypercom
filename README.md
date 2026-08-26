@@ -4,7 +4,7 @@
 
 > 核心理念：**Rust 处理底层性能，React 负责 UI 交互**。
 
-![HyperCom UI](plans/UI.png)
+![HyperCom UI](docs/architecture/UI.png)
 
 > **Developer reference**: see [`AGENTS.md`](AGENTS.md) for architecture, code map, and gotchas.
 
@@ -159,7 +159,7 @@ npx playwright test                                    # E2E 冒烟 (16 tests)
 5. **规则**：配置弹窗 → 高亮/命令规则标签页 → config.json 持久化
 6. **日志**：连接即自动写日志；回放/另存/导出在 OperationPanel 顶栏
 
-详细数据流见 [`plans/04-data-flow.md`](plans/04-data-flow.md)。
+详细数据流见 [`docs/architecture/README.md`](docs/architecture/README.md)（按功能模块划分：串口管理/终端显示/数据收发/TTY/日志/配置/工作区/自动更新/发版/错误处理）。
 
 ---
 
