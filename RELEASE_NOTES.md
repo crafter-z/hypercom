@@ -1,3 +1,18 @@
+# HyperCom v0.6.3
+
+## 新特性
+- 发送后保留输入框内容（issue #13）：新增 `clearSendInputAfterSend` 设置（默认关闭 = 保留），发送区 options 行可勾选清空行为，便于重复发送/连续调试
+
+## Bugfix
+- 修复缓冲 head trim 后 DOM 行泄漏导致的高频输出抖动（issue #10）：行头裁剪前进 `firstSeq` 后，active 行 `visIdx` 字段停留在旧窗口值，stale 检查按字段判定永不回收 → DOM 行数无限增长（实测 6669 vs 正常 27）→ 每帧 O(n) 渲染 → 帧率暴跌。修复：stale 判定改用**实时列表位置** `seqToVisIdx`（identity O(1)、过滤模式二分），越界即回收，DOM 恒 ≤ 窗口+overscan
+- 关闭标签页不再关闭串口（issue #11）：关标签只清前端管线（`disconnect` + `detach`），端口/日志保持连接；重开标签页从零开始新一轮输出，后端 RX 日志独立落盘不受影响
+- 修复拖选滚动黑块（issue #12）：拖选冻结期间允许物化**新**行（新行不在活选区 Range 内安全），仅冻结已有行保护选区锚点
+- 终端内存裁剪机制重构（issue #14）：`lineBytes` 改 V8 真实占用估算（对象头 + Uint8Array 包装 + parsedFields），byte-budget trim 真实生效；恢复方案B重构时丢失的应用级软兜底（`performance.memory` JS 堆超预算时对候选端口裁半）；渲染器统一实时 `seqToVisIdx` 定位，消除 trim 后乱序/堆叠隐患；恢复前序提交误删的 5 个 i18n key
+
+## 其他
+- 测试：vitest 652 → **669** 例（37 文件，新增 trim 风暴回归：head 大前移 + 向上滚动断言 translateY 唯一 + DOM order == seq 升序、trim 期 DOM ≤ 窗口+overscan + scrollTop 单调、关标签 keep 连接 + 重开从零、拖选滚动视口行有内容等）、cargo test 157 例全绿、tsc 0 诊断
+- 修复集中在渲染引擎（方案B 几何不变式保持：固定行高、零测量）与管线生命周期，未触碰引擎核心
+
 # HyperCom v0.6.2
 
 ## Bugfix
