@@ -24,7 +24,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { linePassesFilter, type DirectionFilter } from '../lineFilter';
 import { getSearchableText } from '../../components/MainDisplay/terminalSearch';
-import { TerminalBuffer } from './TerminalBuffer';
+import { MAX_BYTE_DRAIN_PER_BATCH, TerminalBuffer } from './TerminalBuffer';
 import {
   TerminalRenderer,
   type RendererConfig,
@@ -103,7 +103,9 @@ export class TerminalViewportManager {
     const displayFormat = this.getDisplayFormat();
     for (const line of lines) {
       const beforeFirst = this.buffer.firstSeq;
-      const r = this.buffer.append(line);
+      // issue #10：字节预算 drain 限幅——一帧一批至多裁 MAX_BYTE_DRAIN_PER_BATCH
+      // 行，剩余留待后续帧，避免单帧 firstSeq 前移数十万行引发视口抖动。
+      const r = this.buffer.append(line, MAX_BYTE_DRAIN_PER_BATCH);
       if (r.trimmed) trimmed = true;
       // Incremental filter/search: match the new line once, extend the lists.
       if (this.filterActive) {
@@ -451,6 +453,8 @@ export function releaseViewportManager(portId: string): void {
     vm.dispose();
     managers.delete(portId);
   }
+  lastSoftTrimAt.delete(portId);
+  lastSoftTrimHeap.delete(portId);
 }
 
 // ==================== App-level soft backstop (issue #14) ====================
@@ -459,6 +463,10 @@ export function releaseViewportManager(portId: string): void {
  *  高频接收下用户视野里"刚加载的半页又被前半页顶掉"。与 toast 节流同量级。 */
 const SOFT_TRIM_COOLDOWN_MS = 10_000;
 const lastSoftTrimAt = new Map<string, number>();
+/** 软兜底裁剪时的 JS 堆占用基线（issue #10）：冷却期满后若堆仍未回升到该基线
+ *  以上（裁掉的内存还没被重新分配回来，或 GC 未回落），不再重复裁——否则
+ *  10s 冷却期满、堆仍超限时形成固定节律的周期抖动（每次软裁都让视口跳一次）。 */
+const lastSoftTrimHeap = new Map<string, number>();
 
 /** 前端 V8 JS 堆占用（字节）。Chromium/WebView2 专属 `performance.memory` —
  *  量的是软件逻辑真实持有（缓冲/行对象/字符串），清屏/GC 后会回落，比进程
@@ -495,8 +503,14 @@ export function evaluateSoftBackstop(): string[] {
     if (vm.buffer.bytes <= vm.buffer.maxBytes / 2) continue;
     // 冷却闸
     if (now - (lastSoftTrimAt.get(portId) ?? 0) < SOFT_TRIM_COOLDOWN_MS) continue;
+    // 回升闸（issue #10）：上次裁剪时的堆占用作为本次评估基线——堆未回升到
+    // 基线以上说明裁掉的内存还没被重新分配（或 GC 未回落），再裁只会制造
+    // 周期抖动；只有堆真正重新涨上去才继续裁。
+    const baseline = lastSoftTrimHeap.get(portId) ?? 0;
+    if (baseline > 0 && heapBytes <= baseline) continue;
     if (vm.softTrim()) {
       lastSoftTrimAt.set(portId, now);
+      lastSoftTrimHeap.set(portId, heapBytes);
       trimmed.push(portId);
     }
   }

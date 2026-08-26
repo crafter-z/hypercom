@@ -82,6 +82,33 @@ describe('TerminalRenderer lifecycle', () => {
     expect(container.querySelector('.terminal-content-layer')).toBeNull();
   });
 
+  it('re-attach after detach renders without throwing on orphaned rows (issue #15)', () => {
+    // 复现 splitPane 跨 Pane 位移：底部渲染（follow）后 active 持有窗口行
+    // （seqs 6..29）→ detach（旧容器）→ 不 render → 直接 attach 到新容器 →
+    // 置顶 render。新窗口（visIdx 0..24）与旧 active 部分重叠：seqs 0..5 是
+    // 新行，而 seqs 6..24 仍在 active（未达 stale 边界）——新行归位必须相对
+    // 这些**已脱链**的旧行插。修复前 detach 不清 active，insertRowInOrder 对
+    // 脱链 target 调 layer.insertBefore → DOMException（'node before which … is
+    // not a child of this node'）。修复后 detach 清空 active，全量重建。
+    fill(buf, Array.from({ length: 30 }, (_, i) => String(i)));
+    // 底部窗口：rowHeight 18、client 200 → scrollTop = 340 → 窗口 visIdx 6..29
+    renderer.render(buf, identityView({ followEnabled: true }));
+    expect(container.scrollTop).toBe(340);
+    expect(container.querySelector('[data-seq="6"]')).not.toBeNull();
+
+    renderer.detach();
+    const container2 = document.createElement('div');
+    Object.defineProperty(container2, 'clientHeight', { value: CLIENT_HEIGHT, configurable: true });
+    document.body.appendChild(container2);
+    renderer.attachToContainer(container2);
+    container2.scrollTop = 0;
+    expect(() => renderer.render(buf, identityView({ followEnabled: false }))).not.toThrow();
+    // 内容正确重建：头部行存在、行数有界。
+    expect(container2.querySelector('[data-seq="0"]')).not.toBeNull();
+    expect(container2.querySelectorAll('.terminal-line').length).toBeGreaterThan(0);
+    expect(container2.querySelectorAll('.terminal-line').length).toBeLessThan(40);
+  });
+
   it('clear empties the layer and resets height', () => {
     fill(buf, ['a', 'b', 'c']);
     renderer.render(buf, identityView());
@@ -536,6 +563,64 @@ describe('TerminalRenderer scroll + recycling', () => {
     for (let i = 0; i < rows.length; i++) {
       expect(tops[i]).toBe((Number(rows[i].dataset.seq) - small.firstSeq) * ROW_HEIGHT);
     }
+  });
+});
+
+describe('TerminalRenderer large-trim anchor (issue #10)', () => {
+  it('keeps the reading position across a large head trim (non-follow)', () => {
+    // 非 follow（用户上滚读历史）状态下，字节预算大 drain 单帧前移 firstSeq
+    // 数十万行：修复前 scrollTop 停在超界像素值（浏览器会把滚动位置夹到新内容
+    // 底），视口被甩走、阅读位置丢失。修复后按上一帧视口顶部 seq 恢复锚点。
+    const big = new TerminalBuffer({ maxLines: 500_000, maxBytes: 0 });
+    fill(big, Array.from({ length: 200_000 }, (_, i) => String(i)));
+    renderer.render(big, identityView({ followEnabled: false }));
+    container.scrollTop = 100_000 * ROW_HEIGHT;
+    renderer.render(big, identityView({ followEnabled: false }));
+    const anchorRow = container.querySelector('[data-seq="100000"]') as HTMLElement;
+    expect(anchorRow).not.toBeNull();
+    expect(anchorRow.style.transform).toBe(`translateY(${100_000 * ROW_HEIGHT}px)`);
+
+    // 大 drain：收缩容量使 head 前移 50_000（模拟字节预算裁到一半）。
+    big.setLimits({ maxLines: 150_000 });
+    expect(big.firstSeq).toBe(50_000);
+    renderer.render(big, identityView({ followEnabled: false }));
+
+    // 锚点行（seq 100000）仍存活且回到视口顶部；scrollTop 重算到新位置——
+    // 而不是停在超界值或浏览器夹取后的内容底部。
+    const still = container.querySelector('[data-seq="100000"]') as HTMLElement;
+    expect(still).not.toBeNull();
+    expect(still.style.transform).toBe(`translateY(${50_000 * ROW_HEIGHT}px)`);
+    expect(container.scrollTop).toBe(50_000 * ROW_HEIGHT);
+  });
+
+  it('clamps to the content top when the anchor row was trimmed (non-follow)', () => {
+    const big = new TerminalBuffer({ maxLines: 500_000, maxBytes: 0 });
+    fill(big, Array.from({ length: 200_000 }, (_, i) => String(i)));
+    renderer.render(big, identityView({ followEnabled: false }));
+    container.scrollTop = 100_000 * ROW_HEIGHT;
+    renderer.render(big, identityView({ followEnabled: false }));
+
+    // 锚点行（100000）被大 drain 裁掉：视口应停在内容头部而不是被夹到底部。
+    big.setLimits({ maxLines: 90_000 }); // firstSeq = 110_000 > anchor
+    renderer.render(big, identityView({ followEnabled: false }));
+    expect(container.scrollTop).toBe(0);
+    expect(container.querySelector('[data-seq="110000"]')).not.toBeNull();
+  });
+
+  it('follow re-pins one-shot to the new bottom after a large trim', () => {
+    const big = new TerminalBuffer({ maxLines: 500_000, maxBytes: 0 });
+    fill(big, Array.from({ length: 100_000 }, (_, i) => String(i)));
+    renderer.render(big, identityView({ followEnabled: true }));
+    expect(container.scrollTop).toBeGreaterThan(0);
+
+    // 大 trim 后：follow 直接按新 totalHeight 一次到位钉底（视口内容即最新行，
+    // 与 trim 前一致），不依赖逐帧回填。
+    big.setLimits({ maxLines: 40_000 });
+    renderer.render(big, identityView({ followEnabled: true }));
+    const expected = Math.max(0, (big.lastSeq - big.firstSeq + 1) * ROW_HEIGHT - CLIENT_HEIGHT);
+    expect(container.scrollTop).toBe(expected);
+    const lastRow = container.querySelector(`[data-seq="${big.lastSeq}"]`) as HTMLElement;
+    expect(lastRow).not.toBeNull();
   });
 });
 

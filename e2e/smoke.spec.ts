@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 /**
  * Mock `window.__TAURI_INTERNALS__` so the React layer renders without the
@@ -449,5 +449,177 @@ test.describe('HyperCom smoke tests', () => {
     });
     expect(visibleRows.length).toBeGreaterThan(5);
     for (const r of visibleRows) expect(r.hasContent).toBe(true);
+  });
+
+  // ==================== issue #15/#10：嵌套分屏位移 + 大 trim 视口锚点 ====================
+
+  /** 打开指定串口标签页（侧边栏双击端口行） */
+  async function openPortTab(page: Page, portId: string): Promise<void> {
+    await page.locator('.port-item-name', { hasText: portId }).dblclick();
+    await expect(page.locator('.tab-item', { hasText: portId })).toBeVisible();
+  }
+
+  /** 收集页面错误（未捕获异常 + console.error），断言为空 */
+  function collectErrors(page: Page): string[] {
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    page.on('console', (m) => {
+      if (m.type() === 'error') errors.push(m.text());
+    });
+    return errors;
+  }
+
+  test('splitPane nested-branch move does not crash the renderer (issue #15)', async ({ page }) => {
+    // 构造 issue #15 的嵌套分支场景：左右分屏后，左 Pane 持有两标签、右 Pane
+    // 一标签；聚焦左 Pane 的标签再次 split → 左 Pane 的叶子节点在树中位移
+    // （branch[branch'[leafA, newLeaf], leafB]）→ TerminalView 跨 Pane 重挂载。
+    // 修复前 detach 不清 active，旧行成为孤儿节点，新容器 render 的
+    // insertRowInOrder 对脱链 reference 调 insertBefore → DOMException。
+    // 关键：split 前把 COM1 滚到中部（解锁 follow）——重挂载后视口在顶部，
+    // 新窗口行与旧 active 不重叠，迫使 insertRowInOrder 必须相对孤儿行归位。
+    const errors = collectErrors(page);
+
+    // mock 后端：多返回两个端口（轮询 3s 后生效）
+    await page.evaluate(() => {
+      const original = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_available_ports') {
+          return ['COM1', 'COM2', 'COM3'].map((id) => ({
+            id, name: id, port_type: 'real', manufacturer: null, product: null,
+          }));
+        }
+        return original(cmd, args);
+      };
+    });
+    await expect(page.locator('.port-item-name', { hasText: 'COM2' })).toBeVisible({ timeout: 6000 });
+    await expect(page.locator('.port-item-name', { hasText: 'COM3' })).toBeVisible();
+
+    // ① 打开 COM1 + COM2（同在单 Pane）→ split 垂直 → [main(COM1), leafB(COM2)]
+    await openPortTab(page, 'COM1');
+    await openPortTab(page, 'COM2');
+    await page.locator('.pane-container-inner.pane-focused .tab-bar-split-group button:first-child').click();
+    await expect(page.locator('.pane-node')).toHaveCount(2);
+
+    // ② 给 COM1 灌数据并渲染（renderer 持有 active 行）
+    await dispatchSerialData(page, 'COM1', 'line-1\nline-2\nline-3\n'.repeat(15));
+    await expect(
+      page.locator('.pane-node:has(.tab-item:has-text("COM1")) .terminal-line'),
+    ).not.toHaveCount(0, { timeout: 5000 });
+
+    // ③ 滚到中部（解锁 follow）：旧 active 行在视口中部
+    const com1Terminal = page.locator(
+      '.pane-node:has(.tab-item:has-text("COM1")) .terminal-view',
+    );
+    await com1Terminal.hover();
+    await page.mouse.wheel(0, -300);
+    await page.waitForTimeout(400); // settle（120ms 手势静默）→ scrollLocked=false
+
+    // ④ 聚焦 COM1 → 打开 COM3 落左 Pane → 聚焦 COM1 → 再 split（嵌套位移）
+    await page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM1")').click();
+    await openPortTab(page, 'COM3');
+    await expect(page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM3")')).toBeVisible();
+    await page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM1")').click();
+    await page.locator('.pane-container-inner.pane-focused .tab-bar-split-group button:first-child').click();
+
+    // ⑤ 重挂载窗口期：不得抛 insertBefore DOMException；终端正常重建
+    await page.waitForTimeout(600);
+    // 只断言崩溃特征（insertBefore DOMException）——其余无关 console.error 噪音
+    // 不参与判定
+    expect(errors.filter((e) => e.includes('insertBefore'))).toEqual([]);
+    await expect(
+      page.locator('.pane-node:has(.tab-item:has-text("COM1")) .terminal-line'),
+    ).not.toHaveCount(0, { timeout: 5000 });
+    // 拆分后左 Pane（COM3）与右 Pane（COM2）仍各自渲染
+    await dispatchSerialData(page, 'COM3', 'after-split-com3\n');
+    await expect(
+      page.locator('.pane-node:has(.tab-item:has-text("COM3")) .terminal-line .terminal-content').first(),
+    ).toContainText('after-split-com3', { timeout: 5000 });
+    expect(errors.filter((e) => e.includes('insertBefore'))).toEqual([]);
+  });
+
+  test('high-rate RX with a small budget: large trim keeps the viewport anchored (issue #10)', async ({ page }) => {
+    // 字节预算大 drain（一次裁到半）单帧前移 firstSeq 数千行 → 非 follow 视口
+    // 停在超界像素值（浏览器夹到内容底）→ 阅读位置丢失、逐帧回填抖动。修复后
+    // renderer 检测大 trim 并按上一帧视口顶部 seq 恢复锚点；锚点被裁则停在
+    // 内容头部。本用例用小预算（memoryPerPortBudgetMb=40 → 40MB/2.7KB ≈ 1.5 万
+    // 行触发 drain、裁到 ~7400 行）在 e2e 时间尺度内触发大 drain。
+    // mock get_config：小预算（config 启动时加载，必须在 goto 前注入）
+    await page.addInitScript(() => {
+      const original = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+        if (cmd === 'get_config') return { memoryPerPortBudgetMb: 40 };
+        return original(cmd, args);
+      };
+    });
+    await page.goto('/');
+    await expect(page.locator('.app-root')).toBeVisible();
+    await openPortTab(page, 'COM1');
+
+    // ① 第一块数据（8000 行 × 2.5KB ≈ 21MB < 40MB 预算，不触发 drain）
+    const chunk1 = await page.evaluate(() => {
+      const line = 'A'.repeat(2560);
+      return Array.from({ length: 8000 }, () => line).join('\n') + '\n';
+    });
+    await dispatchSerialData(page, 'COM1', chunk1);
+    await page.waitForTimeout(1200); // 队列排空（2000 行/tick × 4）
+
+    // ② 滚离底部并解锁 follow（wheel → settle → scrollLocked=false）。
+    // 内容高 = 8000 行 × 21px（默认字号）≈ 168K px；一次 wheel -6000 移到
+    // 底部上方 ~6K px 处——只要不在底部 50px 容差内即解锁成功。
+    const view = page.locator('.terminal-view');
+    await view.hover();
+    await page.mouse.wheel(0, -6000);
+    await page.waitForTimeout(600); // settle
+    const before = await view.evaluate((el: HTMLElement) => {
+      const mid = el.scrollTop + el.clientHeight / 2;
+      let best: number | null = null;
+      let bestDist = Infinity;
+      for (const r of el.querySelectorAll('.terminal-line') as NodeListOf<HTMLElement>) {
+        const m = /translateY\((\d+)px\)/.exec(r.style.transform);
+        if (!m) continue;
+        const d = Math.abs(Number(m[1]) - mid);
+        if (d < bestDist) {
+          bestDist = d;
+          best = Number(r.dataset.seq);
+        }
+      }
+      return {
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        midSeq: best,
+      };
+    });
+    expect(before.scrollTop).toBeGreaterThan(0);
+    // 距底部至少 100px（50px 容差外 → settle 判定 atBottom=false → 解锁 follow）
+    expect(before.scrollTop).toBeLessThan(before.scrollHeight - before.clientHeight - 100);
+    expect(before.midSeq).not.toBeNull();
+
+    // ③ 第二块数据（+21MB → 总量 43MB > 40MB 预算 → 单帧大 drain：firstSeq
+    // 前移 ~7700 行）。修复后 renderer 按锚点恢复视口——视口中间行的 seq 保持
+    // 不变（阅读位置不丢）；修复前 scrollTop 停在超界像素值，视口内容被甩走
+    // ~7700 行。
+    await dispatchSerialData(page, 'COM1', chunk1);
+    await page.waitForTimeout(1200);
+    const after = await view.evaluate((el: HTMLElement) => {
+      const mid = el.scrollTop + el.clientHeight / 2;
+      let best: number | null = null;
+      let bestDist = Infinity;
+      for (const r of el.querySelectorAll('.terminal-line') as NodeListOf<HTMLElement>) {
+        const m = /translateY\((\d+)px\)/.exec(r.style.transform);
+        if (!m) continue;
+        const d = Math.abs(Number(m[1]) - mid);
+        if (d < bestDist) {
+          bestDist = d;
+          best = Number(r.dataset.seq);
+        }
+      }
+      return { scrollTop: el.scrollTop, rows: el.querySelectorAll('.terminal-line').length, midSeq: best };
+    });
+    expect(after.rows).toBeGreaterThan(0);
+    expect(after.midSeq).not.toBeNull();
+    // 大 drain 的视口位移必须远小于被裁行数（~7700 行）；容差 50 行只覆盖
+    // 锚点取整误差，修复前的 ~7700 行甩走会被捕获。
+    expect(Math.abs(after.midSeq! - before.midSeq!)).toBeLessThan(50);
   });
 });

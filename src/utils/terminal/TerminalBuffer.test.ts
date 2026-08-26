@@ -106,6 +106,28 @@ describe('TerminalBuffer byte budget', () => {
     for (let i = 0; i < 5; i++) b.append(makeLine(String(i), 100));
     expect(b.length).toBe(5);
   });
+
+  it('caps the byte-budget drain per call, resuming on later appends (issue #10)', () => {
+    // 单次 drain 上限：字节预算越限时每 append 至多裁 drainLimit 行——批写方
+    // （一帧一批）传上限把单帧 firstSeq 前移限幅，消除「一次裁半 → 视口暴跌」
+    // 的抖动；未再次超限前不再裁（外层闸保持）。
+    const perLine = lineBytes(makeLine('a', 4));
+    const b = makeBuf(100, 20 * perLine);
+    for (let i = 0; i < 20; i++) b.append(makeLine(String(i), 4)); // 20 行 = 预算
+    expect(b.length).toBe(20);
+    const r = b.append(makeLine('x', 4), 5); // 21 行 > 预算 → 上限 5
+    expect(r.trimmed).toBe(true);
+    expect(b.length).toBe(16); // 20+1-5（未一次裁到 ≤10）
+    // 外层闸：未再次超限前不再裁
+    b.append(makeLine('y', 4), 5);
+    expect(b.length).toBe(17);
+    // 不带上限（默认）→ 一次裁到 ≤ 半预算
+    const b2 = makeBuf(100, 20 * perLine);
+    for (let i = 0; i < 20; i++) b2.append(makeLine(String(i), 4));
+    const r2 = b2.append(makeLine('x', 4));
+    expect(r2.trimmed).toBe(true);
+    expect(b2.length).toBe(10);
+  });
 });
 
 describe('TerminalBuffer snapshot', () => {

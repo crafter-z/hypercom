@@ -20,7 +20,7 @@
  * the buffer + renderer instance survive tab switches — switching back just
  * re-runs the rAF render after the container gains real dimensions.
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
@@ -86,7 +86,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
   );
 
   // Attach the renderer to the container on mount (re-attach on pane move).
-  useEffect(() => {
+  // issue #15：useLayoutEffect 保证 attach/detach 在 React 提交阶段同步完成。
+  // 跨 Pane 位移（splitPane 嵌套分支）时旧 TerminalView 卸载的布局 cleanup
+  // （detachRenderer）在 mutation 阶段先于新实例的布局 create（attachRenderer）
+  // 执行——「先 detach 旧容器、再 attach 新容器」被确定性保证，rAF render 无法
+  // 插进双挂载窗口（提交全程同步，浏览器不在中途跑 rAF）。useEffect 的清理在
+  // passive 阶段、且时序不保证，attach/detach 交错会让渲染器在同一帧内对着
+  // 已移除的旧 layer 与新容器渲染（旧 active 行脱链 → insertBefore 崩溃）。
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     vm.attachRenderer(el, buildConfig());

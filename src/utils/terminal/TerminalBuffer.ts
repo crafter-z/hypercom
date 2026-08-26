@@ -28,6 +28,13 @@ export interface TerminalBufferOptions {
   maxBytes: number;
 }
 
+/** 每批 append 的字节预算 drain 上限（行）（issue #10）：字节预算越限时一次
+ *  裁到 ≤50% 会让 firstSeq 单帧前移数十万行 → 内容总高度骤降 → 非 follow 视口
+ *  被浏览器夹到内容底、follow 钉底目标暴跌 → 输出区抖动。批写方（viewportManager
+ *  appendLines，一帧一批）传入该上限把单帧 drain 限幅；其余调用方（replaceAll
+ *  等批量替换）不传则保持一次裁到半的旧语义。 */
+export const MAX_BYTE_DRAIN_PER_BATCH = 50_000;
+
 /** Result of a single append. `trimmed` = any oldest line was dropped. */
 export interface AppendResult {
   /** Monotonic sequence number assigned to the appended line. */
@@ -52,8 +59,12 @@ export class TerminalBuffer {
     this.slots = new Array<TerminalLine | null>(this.maxLinesValue).fill(null);
   }
 
-  /** Append one line; returns its assigned seq + whether a trim occurred. */
-  append(line: TerminalLine): AppendResult {
+  /** Append one line; returns its assigned seq + whether a trim occurred.
+   *  `drainLimit` caps the number of oldest lines the byte-budget drain may
+   *  drop in this single call (issue #10: bounds the single-frame head
+   *  advance; unlimited when omitted — the 50% target stays the drain goal,
+   *  the cap only slows how fast it is approached). */
+  append(line: TerminalLine, drainLimit?: number): AppendResult {
     let trimmed = false;
     const seq = this.nextSeq++;
     const added = lineBytes(line);
@@ -70,11 +81,13 @@ export class TerminalBuffer {
       trimmed = true;
     }
     this.totalBytes += added;
-    // Byte budget: drain oldest until ≤ half the budget.
+    // Byte budget: drain oldest until ≤ half the budget (or the per-call cap).
     if (this.maxBytesValue > 0 && this.totalBytes > this.maxBytesValue) {
-      while (this.count > 0 && this.totalBytes > this.maxBytesValue / 2) {
+      let budget = drainLimit ?? Infinity;
+      while (this.count > 0 && this.totalBytes > this.maxBytesValue / 2 && budget > 0) {
         this.dropHead();
         trimmed = true;
+        budget--;
       }
     }
     return { seq, trimmed };

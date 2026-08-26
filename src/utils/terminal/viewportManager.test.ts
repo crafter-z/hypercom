@@ -266,4 +266,49 @@ describe('evaluateSoftBackstop', () => {
       releaseViewportManager('COM2');
     }
   });
+
+  it('does not re-trim until the heap regrows past the post-trim baseline (issue #10)', () => {
+    // 冷却期满后若堆仍停留在上次裁剪时的占用（未重新涨上去），不再重复裁——
+    // 否则每 10s 冷却周期都裁一次半页，形成固定节律的视口抖动。
+    useAppStore.getState().setConfig({ memoryLimitMb: 1 });
+    const perf = performance as Performance & { memory?: { usedJSHeapSize?: number } };
+    Object.defineProperty(perf, 'memory', {
+      value: { usedJSHeapSize: 2 * 1024 * 1024 }, // 2MB > 1MB limit
+      configurable: true,
+    });
+    try {
+      const vm1 = getViewportManager('COM1');
+      vm1.buffer['maxBytesValue'] = 10_000_000;
+      for (let i = 0; i < 50; i++) vm1.appendLines([makeLine('x'.repeat(100))]);
+      // 候选闸要求 bytes > maxBytes/2：填完后把 maxBytes 调到刚好让条件在**裁后
+      // 仍成立**（bytes ≈ 50×268 = 13400；maxBytes = 13000 → maxBytes/2 = 6500
+      // < 13400 ✓，裁半后 25×268 = 6700 仍 > 6500 → 后续评估能走到冷却/回升闸）
+      vm1.buffer['maxBytesValue'] = 13_000;
+
+      const first = evaluateSoftBackstop();
+      expect(first).toContain('COM1');
+      expect(vm1.buffer.length).toBe(25);
+
+      // 冷却窗口内：不裁（原双闸）
+      expect(evaluateSoftBackstop()).toEqual([]);
+
+      // 冷却期满但堆未回升到基线（2MB）以上：不裁（修复前会再次裁半）
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_001);
+      expect(evaluateSoftBackstop()).toEqual([]);
+      expect(vm1.buffer.length).toBe(25);
+
+      // 堆回升到基线以上：继续裁（每端口仍受冷却约束）
+      Object.defineProperty(perf, 'memory', {
+        value: { usedJSHeapSize: 3 * 1024 * 1024 },
+        configurable: true,
+      });
+      const second = evaluateSoftBackstop();
+      expect(second).toContain('COM1');
+      expect(vm1.buffer.length).toBe(12); // floor(25/2)
+    } finally {
+      delete (perf as unknown as Record<string, unknown>).memory;
+      vi.restoreAllMocks();
+      releaseViewportManager('COM1');
+    }
+  });
 });

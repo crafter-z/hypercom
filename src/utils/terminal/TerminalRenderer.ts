@@ -82,6 +82,11 @@ export interface TerminalViewState {
 }
 
 const OVERSACAN_ROWS = 12;
+/** Head advance (in rows) between two renders that counts as a "large trim":
+ *  the byte-budget drain / soft-backstop trim drops ~half the buffer at once,
+ *  while normal capacity overwrite advances ≤ maxLinesPerTick (2000)/frame —
+ *  the anchor restores the reading position only for the former. */
+const LARGE_TRIM_ROWS = 2_500;
 /** Detached-node pool cap — bounds DOM churn during fast scrolls. */
 const POOL_CAP = 64;
 
@@ -102,6 +107,12 @@ export class TerminalRenderer {
   private pool: HTMLDivElement[] = [];
   /** Highest seq whose content has been written; higher seqs are dirty. */
   private lastRenderedSeq = -1;
+  /** firstSeq at the last completed render — a head advance between renders
+   *  signals a trim (capacity overwrite / byte-budget drain / soft backstop). */
+  private lastRenderedFirstSeq = -1;
+  /** Seq at the top of the viewport at the last render (non-follow only) —
+   *  restores the reading position across a large trim (issue #10). */
+  private anchorSeq: number | null = null;
   private fullRedraw = false;
   private filterVersion = 0;
   private onScrollHandler: (() => void) | null = null;
@@ -141,7 +152,8 @@ export class TerminalRenderer {
     this.fullRedraw = true;
   }
 
-  /** Detach from the container, keeping the node pool alive. */
+  /** Detach from the container. Active rows + pool are dropped — a subsequent
+   *  attach is a full rebuild (`attachToContainer` sets fullRedraw). */
   detach(): void {
     if (this.onScrollHandler && this.container) {
       this.container.removeEventListener('scroll', this.onScrollHandler);
@@ -154,6 +166,17 @@ export class TerminalRenderer {
       this.contentLayer = null;
     }
     this.container = null;
+    // issue #15：旧 active 行随旧 layer 一起从 DOM 移除（孤儿节点），但兄弟
+    // 指针仍链在旧 layer 上。若保留 active，跨 Pane 位移（splitPane 嵌套分支）
+    // 时新容器 attach 后的 render 会对已脱链的 reference 调 insertBefore →
+    // DOMException（'node before which … is not a child of this node'）。清空
+    // active 与池（含锚点状态），下一次 attach 全量重建。
+    this.active.clear();
+    this.pool = [];
+    this.lastRenderedSeq = -1;
+    this.lastRenderedFirstSeq = -1;
+    this.anchorSeq = null;
+    this.fullRedraw = true;
   }
 
   /** Drop all DOM rows (clear). Pool is discarded — seqs are invalid. */
@@ -161,6 +184,8 @@ export class TerminalRenderer {
     this.active.clear();
     this.pool = [];
     this.lastRenderedSeq = -1;
+    this.lastRenderedFirstSeq = -1;
+    this.anchorSeq = null;
     if (this.contentLayer) {
       this.contentLayer.innerHTML = '';
       this.contentLayer.style.height = '0px';
@@ -239,6 +264,8 @@ export class TerminalRenderer {
       layer.style.height = '0px';
       this.recycleAll();
       this.lastRenderedSeq = lastSeq;
+      this.anchorSeq = null;
+      this.lastRenderedFirstSeq = firstSeq;
       return;
     }
 
@@ -251,6 +278,21 @@ export class TerminalRenderer {
     // viewport rides the newest row — the pin target IS the scrollTop used
     // for the window computation, so rows are laid out for the pinned view.
     const follow = view.followEnabled && !view.gestureActive;
+    // issue #10：大 drain（字节预算裁半 / 软兜底 softTrim）单帧前移 firstSeq
+    // 数十万行 → 内容总高度骤降。follow 场景由下方同帧钉底一次到位处理（视口
+    // 内容即最新行，与 trim 前一致）；非 follow（用户上滚读历史）时浏览器会把
+    // 超界的 scrollTop 夹到新内容底——阅读位置瞬间丢失，随后逐帧回填产生
+    // 「内容上移/滚动条跳动」的抖动观感。这里检测到大 trim 时按上一帧视口
+    // 顶部的 seq 恢复锚点：锚点行仍存活则回到视口顶部，被裁则停在内容头部
+    // （而不是被夹到底部）。gesture / 拖选期间不干预（用户正在主动操作）。
+    const headAdvance = firstSeq - this.lastRenderedFirstSeq;
+    const anchorRestored =
+      headAdvance >= LARGE_TRIM_ROWS && !follow && !view.gestureActive && !this.isSelecting;
+    if (anchorRestored) {
+      const anchor = this.anchorSeq;
+      container.scrollTop =
+        anchor !== null && anchor >= firstSeq ? (anchor - firstSeq) * rowHeight : 0;
+    }
     const scrollTop = follow
       ? Math.max(0, totalHeight - container.clientHeight)
       : container.scrollTop;
@@ -300,7 +342,16 @@ export class TerminalRenderer {
       let prev: HTMLDivElement | null = null;
       for (const { node } of sorted) {
         if (prev !== null && node.previousSibling !== prev) {
-          layer.insertBefore(node, prev.nextSibling);
+          // issue #15 防御：跨容器位移 / attach-detach 交错的窗口期，reference
+          // 可能已脱链（旧 layer 移除后节点保留兄弟指针）——insertBefore 的
+          // reference 必须是 layer 的子孙节点，否则抛 DOMException。脱链时降级
+          // appendChild（视觉顺序由下一步物化循环的 insertRowInOrder 归位）。
+          const ref = prev.nextSibling;
+          if (ref !== null && layer.contains(ref)) {
+            layer.insertBefore(node, ref);
+          } else {
+            layer.appendChild(node);
+          }
         }
         prev = node;
       }
@@ -377,6 +428,18 @@ export class TerminalRenderer {
       const padBottom = parseFloat(cs.paddingBottom) || 0;
       container.scrollTop = Math.max(0, padTop + totalHeight + padBottom - container.clientHeight);
     }
+
+    // Record the trim anchor for the next render: the seq at the top of the
+    // viewport (non-follow only — follow re-pins every frame, no anchor
+    // needed). headAdvance is measured against this on the next render.
+    if (!follow && !view.gestureActive && !this.isSelecting) {
+      const topVisIdx = Math.min(
+        Math.floor(container.scrollTop / rowHeight),
+        Math.max(0, baseCount - 1),
+      );
+      this.anchorSeq = this.visIdxToSeq(topVisIdx, view, buffer, frozen);
+    }
+    this.lastRenderedFirstSeq = firstSeq;
   }
 
   /** Scroll so the given seq is visible at the requested alignment. */
@@ -542,7 +605,14 @@ export class TerminalRenderer {
     if (target === null) {
       layer.appendChild(node);
     } else if (node.nextSibling !== target) {
-      layer.insertBefore(node, target);
+      // issue #15 防御：target 可能已脱链（同排序循环的竞态窗口）——insertBefore
+      // 的 reference 必须是 layer 的子孙节点，否则抛 DOMException；脱链时降级
+      // appendChild（行仍在 layer 内、位置交给下一帧排序循环修正）。
+      if (layer.contains(target)) {
+        layer.insertBefore(node, target);
+      } else {
+        layer.appendChild(node);
+      }
     }
   }
 
