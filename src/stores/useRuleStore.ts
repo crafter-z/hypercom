@@ -4,9 +4,7 @@ import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig
 
 interface RuleState {
   highlightRuleSets: HighlightRuleSet[];
-  activeHighlightSetId: string | null;
   protocolTemplates: ProtocolTemplate[];
-  activeProtocolTemplateId: string | null;
   sendCommandSets: SendCommandSet[];
   activeSendCommandSetId: string | null;
   portToolConfigs: PortToolConfig[];
@@ -15,13 +13,11 @@ interface RuleState {
   addHighlightRuleSet: (set: HighlightRuleSet) => void;
   updateHighlightRuleSet: (setId: string, patch: Partial<HighlightRuleSet>) => void;
   removeHighlightRuleSet: (setId: string) => void;
-  setActiveHighlightSetId: (id: string | null) => void;
 
   setProtocolTemplates: (templates: ProtocolTemplate[]) => void;
   addProtocolTemplate: (template: ProtocolTemplate) => void;
   updateProtocolTemplate: (templateId: string, patch: Partial<ProtocolTemplate>) => void;
   removeProtocolTemplate: (templateId: string) => void;
-  setActiveProtocolTemplateId: (id: string | null) => void;
 
   setSendCommandSets: (sets: SendCommandSet[]) => void;
   addSendCommandSet: (set: SendCommandSet) => void;
@@ -46,9 +42,7 @@ interface RuleState {
 export const useRuleStore = create<RuleState>()(
   immer((set, get) => ({
     highlightRuleSets: [],
-    activeHighlightSetId: null,
     protocolTemplates: [],
-    activeProtocolTemplateId: null,
     sendCommandSets: [],
     activeSendCommandSetId: null,
     portToolConfigs: [],
@@ -61,11 +55,7 @@ export const useRuleStore = create<RuleState>()(
     }),
     removeHighlightRuleSet: (setId) => set((state) => {
       state.highlightRuleSets = state.highlightRuleSets.filter((r) => r.id !== setId);
-      if (state.activeHighlightSetId === setId) {
-        state.activeHighlightSetId = state.highlightRuleSets[0]?.id ?? null;
-      }
     }),
-    setActiveHighlightSetId: (id) => set((state) => { state.activeHighlightSetId = id; }),
 
     setProtocolTemplates: (templates) => set((state) => { state.protocolTemplates = templates; }),
     addProtocolTemplate: (template) => set((state) => { state.protocolTemplates.push(template); }),
@@ -76,7 +66,6 @@ export const useRuleStore = create<RuleState>()(
     removeProtocolTemplate: (templateId) => set((state) => {
       state.protocolTemplates = state.protocolTemplates.filter((t) => t.id !== templateId);
     }),
-    setActiveProtocolTemplateId: (id) => set((state) => { state.activeProtocolTemplateId = id; }),
 
     setSendCommandSets: (sets) => set((state) => {
       state.sendCommandSets = sets;

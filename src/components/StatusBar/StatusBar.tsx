@@ -5,6 +5,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
 import { useSystemStatus } from '../../hooks';
+import { readJsHeapMb } from '../../utils/jsHeap';
 import DisconnectBanner from './DisconnectBanner';
 import NotificationCenter from './NotificationCenter';
 
@@ -15,14 +16,6 @@ function formatRate(bytesPerSec: number): string {
   return `${Math.round(bytesPerSec)} B/s`;
 }
 
-/** 前端 V8 JS 堆占用（MB）。Chromium/WebView2 专属 performance.memory —
- *  反映软件逻辑真实持有（缓冲/行对象/字符串），清屏/GC 后会回落；进程 RSS
- *  是总足迹（含 WebView2 高水位，不随 GC 回落）。issue #14。 */
-function readJsHeapMb(): number {
-  const perf = performance as Performance & { memory?: { usedJSHeapSize?: number } };
-  const bytes = perf.memory?.usedJSHeapSize;
-  return bytes ? Math.round(bytes / (1024 * 1024)) : 0;
-}
 /** Format milliseconds as HH:MM:SS */
 function formatDuration(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000));

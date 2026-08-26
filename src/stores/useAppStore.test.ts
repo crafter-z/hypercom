@@ -27,7 +27,6 @@ beforeEach(() => {
   useTerminalStore.setState({ terminals: {} });
   useRuleStore.setState({
     highlightRuleSets: [],
-    activeHighlightSetId: null,
     sendCommandSets: [],
     activeSendCommandSetId: null,
   });
@@ -505,12 +504,6 @@ describe('Highlight Rule Set actions', () => {
     useRuleStore.getState().removeHighlightRuleSet('h1');
     expect(useRuleStore.getState().highlightRuleSets).toHaveLength(1);
     expect(useRuleStore.getState().highlightRuleSets[0].id).toBe('h2');
-  });
-
-  it('setActiveHighlightSetId updates active set', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().setActiveHighlightSetId('h1');
-    expect(useRuleStore.getState().activeHighlightSetId).toBe('h1');
   });
 });
 

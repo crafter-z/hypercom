@@ -6,12 +6,7 @@ import { notifyError } from '../../../stores/useToastStore';
 import type { SendCommandSet } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
-
-/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
-const clampNumber = (raw: string, min: number, max: number): number => {
-  const value = Number(raw);
-  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
-};
+import { clampNumber } from '../../../utils/clampNumber';
 
 const CommandSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -23,14 +18,19 @@ const CommandSettings: React.FC = () => {
   const [lastAddedCmdId, setLastAddedCmdId] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     storageService.loadCommandSets().then(sets => {
       // 无条件替换：空结果也要写入 store，否则「删光全部命令集」后重开弹窗
       // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
+      // 慢返回防护：加载期间用户已增删条目（store 已变）时不覆盖本地编辑。
+      if (cancelled) return;
+      if (useRuleStore.getState().sendCommandSets.length > 0) return;
       useRuleStore.getState().setSendCommandSets(sets);
     }).catch((e) => {
       console.warn('[ConfigModal] loadCommandSets failed:', e);
       notifyError(e);
     });
+    return () => { cancelled = true; };
   }, []);
 
   const handleRemoveCmdSet = async (setId: string) => {

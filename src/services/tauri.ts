@@ -178,10 +178,6 @@ export const configService = {
 // ==================== 日志命令 ====================
 
 export const logService = {
-  setLogDirectory: (path: string): Promise<void> => {
-    return invoke<void>('set_log_directory', { path });
-  },
-
   saveLogAs: (portId: string, path: string): Promise<void> => {
     return invoke<void>('save_log_as', { portId, path });
   },

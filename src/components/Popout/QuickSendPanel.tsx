@@ -373,7 +373,6 @@ const QuickSendPanel: React.FC = () => {
     [emitSendLine, config.isHex, config.lineEnding]
   );
 
-  const handleProgress = useCallback(() => {}, []);
   const handleRunError = useCallback((err: unknown) => notifyError(err), []);
   const handleInvalidHex = useCallback(() => notifyInfo('quickSend.invalidHex'), []);
 
@@ -386,7 +385,6 @@ const QuickSendPanel: React.FC = () => {
     startIndex: textCursorLine,
     isHex: config.isHex,
     onSend: handleSendLine,
-    onProgress: handleProgress,
     onError: handleRunError,
     onInvalidHex: handleInvalidHex,
   });

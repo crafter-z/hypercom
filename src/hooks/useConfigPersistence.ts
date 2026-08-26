@@ -11,7 +11,6 @@ import { notifyError } from '../stores/useToastStore';
 export function useConfigPersistence() {
   const setConfig = useAppStore((s) => s.setConfig);
   const setUIState = useAppStore((s) => s.setUIState);
-  const resetConfig = useAppStore((s) => s.resetConfig);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -36,16 +35,5 @@ export function useConfigPersistence() {
     }
   }, []);
 
-  const resetAndReload = useCallback(async () => {
-    try {
-      const defaultConfig = await configService.resetConfig();
-      resetConfig();
-      setConfig(defaultConfig);
-    } catch (err) {
-      console.error('[useConfigPersistence] Failed to reset config:', err);
-      notifyError(err);
-    }
-  }, [resetConfig, setConfig]);
-
-  return { loadConfig, saveConfig, resetAndReload };
+  return { loadConfig, saveConfig };
 }

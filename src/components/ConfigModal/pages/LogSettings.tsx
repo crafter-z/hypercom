@@ -5,12 +5,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { logService } from '../../../services/tauri';
 import { notifyError, useToastStore } from '../../../stores/useToastStore';
 import type { AppConfig } from '../../../types';
-
-/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
-const clampNumber = (raw: string, min: number, max: number): number => {
-  const value = Number(raw);
-  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
-};
+import { clampNumber } from '../../../utils/clampNumber';
 
 interface DirChangeDialogProps {
   oldDir: string;

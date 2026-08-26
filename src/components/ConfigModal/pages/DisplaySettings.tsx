@@ -3,12 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { AppConfig } from '../../../types';
-
-/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
-const clampNumber = (raw: string, min: number, max: number): number => {
-  const value = Number(raw);
-  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
-};
+import { clampNumber } from '../../../utils/clampNumber';
 
 const DisplaySettings: React.FC = () => {
   const { t } = useTranslation();
@@ -40,7 +35,7 @@ const DisplaySettings: React.FC = () => {
         <label>{t('displaySettings.defaultBaudRatesLabel')}</label>
         <input
           className="input"
-          value={defaultBaudRates.join(', ')}
+          value={defaultBaudRates.join(',')}
           onChange={(e) => setConfig({ defaultBaudRates: e.target.value.split(',').map(s => Number(s.trim())).filter(Boolean) })}
           style={{ flex: 1 }}
         />

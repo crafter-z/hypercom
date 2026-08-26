@@ -5,16 +5,11 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { configService, fileService } from '../../../services/tauri';
 import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
+import { clampNumber } from '../../../utils/clampNumber';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
 const BUNDLE_VERSION = 2;
-
-/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
-const clampNumber = (raw: string, min: number, max: number): number => {
-  const value = Number(raw);
-  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
-};
 
 /**
  * 配置导出 bundle 结构。

@@ -20,6 +20,7 @@
  * wiring layer owns the user-facing "buffer trimmed" toast.
  */
 import type { DisplayFormat, Encoding, TerminalLine } from '../../types';
+import { readJsHeapBytes } from '../jsHeap';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { linePassesFilter, type DirectionFilter } from '../lineFilter';
@@ -437,10 +438,6 @@ export function getViewportManager(portId: string): TerminalViewportManager {
   return vm;
 }
 
-export function hasViewportManager(portId: string): boolean {
-  return managers.has(portId);
-}
-
 /** Port ids with live managers (config-limit sync / tests). */
 export function getManagerPortIds(): string[] {
   return Array.from(managers.keys());
@@ -468,13 +465,7 @@ const lastSoftTrimAt = new Map<string, number>();
  *  10s 冷却期满、堆仍超限时形成固定节律的周期抖动（每次软裁都让视口跳一次）。 */
 const lastSoftTrimHeap = new Map<string, number>();
 
-/** 前端 V8 JS 堆占用（字节）。Chromium/WebView2 专属 `performance.memory` —
- *  量的是软件逻辑真实持有（缓冲/行对象/字符串），清屏/GC 后会回落，比进程
- *  RSS 更能反映"我们控的内存"。不存在时返回 0（降级为只有硬约束）。 */
-function readJsHeapBytes(): number {
-  const perf = performance as Performance & { memory?: { usedJSHeapSize?: number } };
-  return perf.memory?.usedJSHeapSize ?? 0;
-}
+/** 前端 V8 JS 堆占用（字节）——见 utils/jsHeap.ts 单一实现（软兜底评估用）。 */
 
 /**
  * 应用级软兜底评估（issue #14）：前端 JS 堆超过 `memoryLimitMb` 时，对每个

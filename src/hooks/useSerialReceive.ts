@@ -51,7 +51,6 @@ export function openTabForConnectedPort(portId: string): void {
  * 必须在应用根组件挂载一次（事件监听全局唯一）。
  */
 export function useSerialReceive() {
-  const setupPromiseRef = useRef<Promise<void> | null>(null);
   const reassemblersRef = useRef<Map<string, ProtocolFrameReassembler>>(new Map());
 
   useEffect(() => {
@@ -115,8 +114,10 @@ export function useSerialReceive() {
               } else if (rule.actionType === 'respond') {
                 // silent=true: sendToPort re-throws on failure so the caller
                 // can aggregate — swallow here to keep the RX loop alive.
-                sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true).catch(() => {
-                  // Respond failure is silent by design.
+                sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true).catch((e) => {
+                  // Respond failure is silent by design — but log it so a
+                  // misconfigured auto-reply isn't invisible in diag logs.
+                  console.debug('[useSerialReceive] trigger respond failed:', rule.id, e);
                 });
               }
             }
@@ -241,7 +242,7 @@ export function useSerialReceive() {
       cleanups.push(unlistenData, unlistenStatus);
     };
 
-    setupPromiseRef.current = setup().catch((e) => {
+    setup().catch((e) => {
       console.error('[useSerialReceive] Failed to subscribe to serial events:', e);
     });
 

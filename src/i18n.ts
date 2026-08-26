@@ -106,7 +106,6 @@ const resources = {
 
       'mainDisplay.toolbar.splitVertical': '左右分屏',
       'mainDisplay.toolbar.splitHorizontal': '上下分屏',
-      'mainDisplay.emptyState': '请从左侧选择一个串口打开标签页',
 
       'pane.toolbar.status.disconnected': 'disconnected',
       'pane.toolbar.encodingLabel': '编码:',
@@ -182,7 +181,6 @@ const resources = {
       'sendSection.clearAfterSend': '发送后清空',
       'op.send.bytesLabel': 'B',
       'op.send.hexSuffixLabel': '末尾追加:',
-      'sendSection.hexLabel': 'HEX',
       'sendSection.lineEnding.crlf': '\\r\\n',
       'sendSection.lineEnding.cr': '\\r',
       'sendSection.lineEnding.lf': '\\n',
@@ -201,7 +199,6 @@ const resources = {
       'params.mode.tty': 'TTY 终端',
       'paramsSection.scrollLock': '滚动锁定',
       'paramsSection.timestamp': '时间戳',
-      'paramsSection.displayLabel': '显示:',
       'paramsSection.displayFormat.hex': 'HEX',
       'paramsSection.displayFormat.string': '文本',
 'paramsSection.log.saveAs': '另存为',
@@ -223,7 +220,6 @@ const resources = {
       'paramsSection.preset.deleted': '预设已删除',
       'paramsSection.preset.save': '保存当前参数为预设',
       'paramsSection.preset.delete': '删除选中预设',
-      'paramsSection.fontSizeLabel': '字号:',
       'paramsSection.saveDialog.title': '另存日志',
       'paramsSection.saveDialog.filterName': '日志文件',
 
@@ -423,7 +419,6 @@ const resources = {
 
       'terminal.toolExitSuccess': '[工具] 进程正常退出 (code 0)，串口已重开',
       'terminal.toolExitCode': '[工具] 进程退出 (code {{code}})，串口已重开',
-      'terminal.direction.TOOL': 'TOOL',
 
       'ruleSetAccordion.saveToDb': '保存到数据库',
       'ruleSetAccordion.delete': '删除',
@@ -493,15 +488,6 @@ const resources = {
       'settings.reconnect.autoReconnect.label': '启用自动重连',
       'settings.reconnect.maxRetries.label': '最大重试次数',
 
-      'toast.error.serial': '串口错误',
-      'toast.error.config': '配置错误',
-      'toast.error.log': '日志错误',
-      'toast.error.storage': '存储错误',
-      'toast.error.system': '系统错误',
-      'toast.error.lock': '锁错误',
-      'toast.error.io': 'IO 错误',
-      'toast.error.other': '未知错误',
-
       'disconnect.banner.text': '{{count}} 个端口已断开',
       'disconnect.banner.view': '查看',
 
@@ -531,7 +517,6 @@ const resources = {
       'hotkeys.action': '功能',
       'hotkeys.close': '关闭',
 
-      'statusBar.duration.label': '⏱',
       'statusBar.rate.rx': '↓',
       'statusBar.rate.tx': '↑',
       'statusBar.rate.peak': '峰值',
@@ -543,7 +528,6 @@ const resources = {
       'general.configPath': '配置文件路径',
 
       'config.triggerSettings': '条件触发',
-      'trigger.name': '规则名称',
       'trigger.pattern': '匹配模式',
       'trigger.matchType': '匹配方式',
       'trigger.matchType.contains': '包含',
@@ -583,9 +567,7 @@ const resources = {
       'popout.terminalTitle': '终端',
       'popout.alwaysOnTop': '置顶',
       'popout.close': '关闭',
-      'popout.terminalPlaceholder': '终端弹出（Phase 3 实现）',
 
-      'terminalPopout.poppedOutPlaceholder': '该终端已弹出到独立窗口',
       'terminalPopout.poppedOutHint': '{{port}} 已弹出到独立窗口',
       'terminalPopout.reattach': '收回',
       'terminalPopout.popOut': '弹出到独立窗口',
@@ -727,7 +709,6 @@ const resources = {
 
       'mainDisplay.toolbar.splitVertical': 'Split Vertical',
       'mainDisplay.toolbar.splitHorizontal': 'Split Horizontal',
-      'mainDisplay.emptyState': 'Select a serial port from the sidebar to open a tab',
 
       'pane.toolbar.status.disconnected': 'disconnected',
       'pane.toolbar.encodingLabel': 'Encoding:',
@@ -803,7 +784,6 @@ const resources = {
       'sendSection.clearAfterSend': 'Clear after send',
       'op.send.bytesLabel': 'B',
       'op.send.hexSuffixLabel': 'Suffix:',
-      'sendSection.hexLabel': 'HEX',
       'sendSection.lineEnding.crlf': '\\r\\n',
       'sendSection.lineEnding.cr': '\\r',
       'sendSection.lineEnding.lf': '\\n',
@@ -819,7 +799,6 @@ const resources = {
       'paramsSection.cardTitle': 'Serial Parameters',
       'paramsSection.scrollLock': 'Scroll Lock',
       'paramsSection.timestamp': 'Timestamp',
-      'paramsSection.displayLabel': 'Display:',
       'paramsSection.displayFormat.hex': 'HEX',
       'paramsSection.displayFormat.string': 'Text',
 'paramsSection.log.saveAs': 'Save As',
@@ -843,8 +822,7 @@ const resources = {
       'paramsSection.preset.saved': 'Preset saved',
       'paramsSection.preset.deleted': 'Preset deleted',
       'paramsSection.preset.save': 'Save current params as preset',
-      'paramsSection.preset.delete': 'Delete selected preset',
-      'paramsSection.fontSizeLabel': 'Font Size:',
+      'paramsSection.preset.delete': 'Delete Selected Preset',
       'paramsSection.saveDialog.title': 'Save Log As',
       'paramsSection.saveDialog.filterName': 'Log Files',
 
@@ -1045,7 +1023,6 @@ const resources = {
 
       'terminal.toolExitSuccess': '[Tool] Process exited normally (code 0), port reopened',
       'terminal.toolExitCode': '[Tool] Process exited (code {{code}}), port reopened',
-      'terminal.direction.TOOL': 'TOOL',
 
       'ruleSetAccordion.saveToDb': 'Save to Database',
       'ruleSetAccordion.delete': 'Delete',
@@ -1115,15 +1092,6 @@ const resources = {
       'settings.reconnect.autoReconnect.label': 'Enable auto reconnect',
       'settings.reconnect.maxRetries.label': 'Max retries',
 
-      'toast.error.serial': 'Serial error',
-      'toast.error.config': 'Config error',
-      'toast.error.log': 'Log error',
-      'toast.error.storage': 'Storage error',
-      'toast.error.system': 'System error',
-      'toast.error.lock': 'Lock error',
-      'toast.error.io': 'IO error',
-      'toast.error.other': 'Unknown error',
-
       'disconnect.banner.text': '{{count}} port(s) disconnected',
       'disconnect.banner.view': 'View',
 
@@ -1153,7 +1121,6 @@ const resources = {
       'hotkeys.action': 'Action',
       'hotkeys.close': 'Close',
 
-      'statusBar.duration.label': '⏱',
       'statusBar.rate.rx': '↓',
       'statusBar.rate.tx': '↑',
       'statusBar.rate.peak': 'peak',
@@ -1165,7 +1132,6 @@ const resources = {
       'general.configPath': 'Config file path',
 
       'config.triggerSettings': 'Triggers',
-      'trigger.name': 'Rule Name',
       'trigger.pattern': 'Match Pattern',
       'trigger.matchType': 'Match Type',
       'trigger.matchType.contains': 'Contains',
@@ -1206,9 +1172,7 @@ const resources = {
       'popout.terminalTitle': 'Terminal',
       'popout.alwaysOnTop': 'Always on top',
       'popout.close': 'Close',
-      'popout.terminalPlaceholder': 'Terminal pop-out (Phase 3)',
 
-      'terminalPopout.poppedOutPlaceholder': 'This terminal is popped out to a separate window',
       'terminalPopout.poppedOutHint': '{{port}} popped out to a separate window',
       'terminalPopout.reattach': 'Reattach',
       'terminalPopout.popOut': 'Pop out to window',

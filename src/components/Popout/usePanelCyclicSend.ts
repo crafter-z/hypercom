@@ -18,8 +18,6 @@ export interface PanelCyclicSendOptions {
   isHex: boolean;
   /** 发送一行（await 完成后再排下一行，保序）。 */
   onSend: (line: string, index: number) => Promise<void> | void;
-  /** 当前行索引变化回调（null = 运行结束/停止）。 */
-  onProgress: (currentLine: number | null) => void;
   /** 发送失败：回调后中止本次运行（不重试，避免循环风暴）。 */
   onError: (err: unknown) => void;
   /** 被跳过的非法 HEX 行数（仅 HEX 模式；每次运行至多回调一次）。 */
@@ -91,7 +89,6 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
     }
     setRunning(false);
     setCurrentLine(null);
-    optsRef.current.onProgress(null);
     if (!r.invalidNotified && r.invalidCount > 0) {
       r.invalidNotified = true;
       optsRef.current.onInvalidHex?.(r.invalidCount);
@@ -108,7 +105,6 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
       if (o.mode === 'loop') {
         r.currentIdx = 0;
         setCurrentLine(0);
-        o.onProgress(0);
         r.nextFireAt = Date.now() + clampRoundInterval(o.roundIntervalMs);
         r.timeoutId = setTimeout(() => {
           void tick();
@@ -120,7 +116,6 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
     }
     r.currentIdx += 1;
     setCurrentLine(r.currentIdx);
-    o.onProgress(r.currentIdx);
     r.nextFireAt = Date.now() + clampInterval(o.sendIntervalMs);
     r.timeoutId = setTimeout(() => {
       void tick();
@@ -147,7 +142,6 @@ export function usePanelCyclicSend(options: PanelCyclicSendOptions): PanelCyclic
             ? Math.min(Math.max(0, o.startIndex), o.lines.length - 1)
             : 0;
         setCurrentLine(r.currentIdx);
-        o.onProgress(r.currentIdx);
       }
 
       const idx = r.currentIdx;

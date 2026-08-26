@@ -5,12 +5,7 @@ import { configService } from '../../../services/tauri';
 import { updateTiming } from '../../../utils/updateService';
 import type { AppConfig } from '../../../types';
 import type { UpdateCheckMode } from '../../../types';
-
-/** Clamp a numeric input to [min, max], falling back to min on NaN (e.g. a cleared field). */
-const clampNumber = (raw: string, min: number, max: number): number => {
-  const value = Number(raw);
-  return Number.isNaN(value) ? min : Math.max(min, Math.min(max, value));
-};
+import { clampNumber } from '../../../utils/clampNumber';
 
 const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();

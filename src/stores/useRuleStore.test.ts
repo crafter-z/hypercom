@@ -5,9 +5,7 @@ import type { HighlightRuleSet, SendCommandSet, ProtocolTemplate, PortToolConfig
 beforeEach(() => {
   useRuleStore.setState({
     highlightRuleSets: [],
-    activeHighlightSetId: null,
     protocolTemplates: [],
-    activeProtocolTemplateId: null,
     sendCommandSets: [],
     activeSendCommandSetId: null,
     portToolConfigs: [],
@@ -75,40 +73,10 @@ describe('Highlight Rule Set CRUD', () => {
     expect(sets[0].id).toBe('h2');
   });
 
-  it('removeHighlightRuleSet falls back activeHighlightSetId to first remaining', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h2'));
-    useRuleStore.getState().setActiveHighlightSetId('h1');
-    useRuleStore.getState().removeHighlightRuleSet('h1');
-    expect(useRuleStore.getState().activeHighlightSetId).toBe('h2');
-  });
-
-  it('removeHighlightRuleSet sets activeHighlightSetId to null when last removed', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().setActiveHighlightSetId('h1');
-    useRuleStore.getState().removeHighlightRuleSet('h1');
-    expect(useRuleStore.getState().activeHighlightSetId).toBeNull();
-  });
-
-  it('removeHighlightRuleSet does not change activeHighlightSetId if not removed', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h2'));
-    useRuleStore.getState().setActiveHighlightSetId('h2');
-    useRuleStore.getState().removeHighlightRuleSet('h1');
-    expect(useRuleStore.getState().activeHighlightSetId).toBe('h2');
-  });
-
   it('removeHighlightRuleSet is no-op for unknown id', () => {
     useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
     useRuleStore.getState().removeHighlightRuleSet('ghost');
     expect(useRuleStore.getState().highlightRuleSets).toHaveLength(1);
-  });
-
-  it('setActiveHighlightSetId updates active id', () => {
-    useRuleStore.getState().setActiveHighlightSetId('h1');
-    expect(useRuleStore.getState().activeHighlightSetId).toBe('h1');
-    useRuleStore.getState().setActiveHighlightSetId(null);
-    expect(useRuleStore.getState().activeHighlightSetId).toBeNull();
   });
 });
 
@@ -256,13 +224,6 @@ describe('Protocol Template CRUD', () => {
     useRuleStore.getState().addProtocolTemplate(makeProtocol('p1'));
     useRuleStore.getState().removeProtocolTemplate('ghost');
     expect(useRuleStore.getState().protocolTemplates).toHaveLength(1);
-  });
-
-  it('setActiveProtocolTemplateId updates active id', () => {
-    useRuleStore.getState().setActiveProtocolTemplateId('p1');
-    expect(useRuleStore.getState().activeProtocolTemplateId).toBe('p1');
-    useRuleStore.getState().setActiveProtocolTemplateId(null);
-    expect(useRuleStore.getState().activeProtocolTemplateId).toBeNull();
   });
 });
 
