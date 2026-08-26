@@ -167,6 +167,12 @@ export class RxPipeline {
    */
   feedBytes(portId: string, bytes: number[] | Uint8Array, timestamp: number): void {
     if (bytes.length === 0) return;
+    // NOTE: do NOT gate on tab existence here. The popout webview's store
+    // never populates `tabs` (TerminalPopout only setConfig), so such a guard
+    // would drop ALL live RX in the popout (snapshot-only display). Feeding a
+    // port whose manager was released is already a correct silent no-op
+    // (appendTerminalLines drops without resurrecting the manager) — the
+    // state rebuild here is bounded (queue cap 10000) and harmless.
     const state = this.getPortState(portId);
     state.lastEventTs = timestamp;
     const chunks = state.assembler.feed(bytes);
