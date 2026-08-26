@@ -6,13 +6,16 @@
  * 2. attach 后 feed → 批写（visibility-aware 调度 → node 环境走 setTimeout 兜底）；
  * 3. 队列上限：未 attach 时入队不丢、超 MAX_TTY_QUEUE 丢最旧；
  * 4. disconnect 同步 flush 且保留 term（视图跨重连挂载）；
- * 5. send 走 serialService 并更新流量统计；失败仅 console.error；
+ * 5. send 走 serialService 并更新流量统计（P0-2 合批：~10ms 窗口内按键合并为
+ *    一次 IPC，保留字节顺序；超单批上限立即发送；detach 收尾 flush）；失败仅
+ *    console.error；
  * 6. resize 仅对 GIT: 端口路由到后端 pty resize。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
 import { serialService, gitBashSimService } from '../services/tauri';
-import { ttyService, MAX_TTY_QUEUE } from './ttyService';
+import { ttyService, MAX_TTY_QUEUE, TX_COALESCE_MS, TX_MAX_BATCH_BYTES } from './ttyService';
+import { trafficStats } from './trafficStats';
 import type { Terminal } from '@xterm/xterm';
 
 vi.mock('../services/tauri', () => ({
@@ -208,23 +211,84 @@ describe('ttyService — disconnect / clear', () => {
   });
 });
 
-describe('ttyService — send (TX path)', () => {
-  it('encodes UTF-8 and routes through serialService, updating traffic stats', async () => {
+describe('ttyService — send (TX path, P0-2 合批)', () => {
+  /** 排空 mock IPC 的 promise 链（fake timers 下微任务不受影响）。 */
+  const drainMicrotasks = async (): Promise<void> => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+
+  it('does not invoke IPC until the silent window elapses', () => {
     vi.mocked(serialService.sendSerialData).mockResolvedValue(2);
-    await ttyService.send('COM1', 'ab');
+    ttyService.send('COM1', 'ab');
+    // 窗口内不逐键发送
+    expect(serialService.sendSerialData).not.toHaveBeenCalled();
+    expect(ttyService.get('COM1')?.txBuffer).toBe('ab');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces keystrokes within the window into one IPC call, preserving order', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(4);
+    ttyService.send('COM1', 'ab');
+    ttyService.send('COM1', 'cd'); // 10ms 内到达 → 并入同一批
+    ttyService.send('COM1', '\r'); // 回车（换行归一交给后端）
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
     expect(serialService.sendSerialData).toHaveBeenCalledWith({
       port_id: 'COM1',
-      data: 'ab',
+      data: 'abcd\r',
       is_hex: false,
       append_line_ending: 'None',
     });
-    expect(useAppStore.getState().trafficStats.COM1?.txTotal).toBe(2);
+    expect(ttyService.get('COM1')?.txBuffer).toBe('');
   });
 
-  it('accumulates txTotal across sends', async () => {
+  it('starts a new batch after the window (cross-batch order preserved)', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(2);
+    ttyService.send('COM1', 'ab');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    ttyService.send('COM1', 'cd');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls[0][0].data).toBe('ab');
+    expect(vi.mocked(serialService.sendSerialData).mock.calls[1][0].data).toBe('cd');
+  });
+
+  it('flushes immediately when the batch exceeds the per-batch cap', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(TX_MAX_BATCH_BYTES);
+    // 单次大粘贴超上限：立即发送，不滞留（无需等静默窗口）
+    const big = 'x'.repeat(TX_MAX_BATCH_BYTES);
+    const promise = ttyService.send('COM1', big);
+    await drainMicrotasks();
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls[0][0].data.length).toBe(TX_MAX_BATCH_BYTES);
+    await promise;
+  });
+
+  it('routes through serialService and updates traffic stats (aggregated)', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(2);
+    ttyService.send('COM1', 'ab');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    // P1-1：TX 统计经 1s 聚合器——flushNow 前 store 未更新
+    expect(useAppStore.getState().trafficStats.COM1).toBeUndefined();
+    trafficStats.flushNow();
+    expect(useAppStore.getState().trafficStats.COM1?.txTotal).toBe(2);
+    expect(useAppStore.getState().trafficStats.COM1?.rxTotal).toBe(0);
+  });
+
+  it('accumulates txTotal across batches (totals stay exact)', async () => {
     vi.mocked(serialService.sendSerialData).mockResolvedValue(3);
-    await ttyService.send('COM1', 'abc');
-    await ttyService.send('COM1', 'def');
+    ttyService.send('COM1', 'abc');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    ttyService.send('COM1', 'def');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    trafficStats.flushNow();
     expect(useAppStore.getState().trafficStats.COM1?.txTotal).toBe(6);
   });
 
@@ -232,13 +296,43 @@ describe('ttyService — send (TX path)', () => {
     vi.mocked(serialService.sendSerialData).mockRejectedValue(new Error('port closed'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(ttyService.send('COM1', 'x')).resolves.toBeUndefined();
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
     expect(errorSpy).toHaveBeenCalled();
+    // 失败后缓冲已清空——后续合批不受影响
+    expect(ttyService.get('COM1')?.txBuffer).toBe('');
     errorSpy.mockRestore();
   });
 
   it('no-ops on empty text', async () => {
     await ttyService.send('COM1', '');
     expect(serialService.sendSerialData).not.toHaveBeenCalled();
+  });
+
+  it('detach flushes pending TX (port may stay connected, keys must not be lost)', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(2);
+    ttyService.send('COM1', 'ab');
+    ttyService.detach('COM1');
+    await drainMicrotasks();
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    expect(serialService.sendSerialData).toHaveBeenCalledWith({
+      port_id: 'COM1',
+      data: 'ab',
+      is_hex: false,
+      append_line_ending: 'None',
+    });
+    // detach 后状态重建，TX 字段归零
+    expect(ttyService.get('COM1')?.txBuffer).toBe('');
+    expect(ttyService.get('COM1')?.txTimerId).toBeNull();
+  });
+
+  it('disconnect drops pending TX (port is gone, sending would only fail)', async () => {
+    ttyService.send('COM1', 'ab');
+    ttyService.disconnect('COM1');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    expect(serialService.sendSerialData).not.toHaveBeenCalled();
+    expect(ttyService.get('COM1')?.txBuffer).toBe('');
   });
 });
 
@@ -318,6 +412,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   ttyService.reset();
+  trafficStats.reset();
   useAppStore.setState({ trafficStats: {}, ports: [] });
 });
 

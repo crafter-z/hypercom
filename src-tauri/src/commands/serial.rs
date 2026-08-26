@@ -11,15 +11,27 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// 获取系统可用串口列表
 /// 前端调用: invoke('list_available_ports')
+///
+/// 同步命令在事件循环主线程执行——内部 `serialport::available_ports()` 是阻塞式
+/// 串口枚举，前端每 3s 轮询一次，高频数据会话下周期性阻塞主线程会拖慢 RX 分发
+/// 与重绘（TTY 卡顿根因 #1）。改 async + spawn_blocking（issue #6-1 同款）：
+/// 克隆 Arc 句柄，枚举挪到独立线程池，主线程立即返回。行为（返回结构/字段/
+/// 调用频率）不变。
 #[tauri::command]
-pub fn list_available_ports(state: State<AppState>) -> Result<Vec<serial::PortInfo>, CommandError> {
-    let manager = state
-        .serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .list_ports()
-        .map_err(|e| CommandError::Serial(e.to_string()))
+pub async fn list_available_ports(
+    state: State<'_, AppState>,
+) -> Result<Vec<serial::PortInfo>, CommandError> {
+    let serial_manager = state.serial_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        let manager = serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager
+            .list_ports()
+            .map_err(|e| CommandError::Serial(e.to_string()))
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("List ports task panicked: {e}")))?
 }
 
 /// 打开指定串口
@@ -158,7 +170,7 @@ pub async fn send_serial_data(
                 let mut port = write_port
                     .lock()
                     .map_err(|e| CommandError::Lock(e.to_string()))?;
-                serial::write_all_with_deadline(&mut **port, &bytes, serial::WRITE_TOTAL_DEADLINE)
+                serial::write_all_with_deadline(&port_id, &mut **port, &bytes, serial::WRITE_TOTAL_DEADLINE)
                     .map_err(|e| {
                         log::warn!("Failed to send data to {}: {}", port_id, e);
                         CommandError::Serial(e.to_string())
@@ -269,6 +281,7 @@ pub async fn send_file(
                         .lock()
                         .map_err(|e| CommandError::Lock(e.to_string()))?;
                     serial::write_all_with_deadline(
+                        &args.port_id,
                         &mut **port,
                         chunk,
                         serial::WRITE_TOTAL_DEADLINE,

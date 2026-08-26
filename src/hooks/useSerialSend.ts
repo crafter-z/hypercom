@@ -6,6 +6,7 @@ import type { SendHistoryEntry, LineEnding } from '../types';
 import { notifyError, useToastStore } from '../stores/useToastStore';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { isSendablePort } from '../utils/sendGuard';
+import { trafficStats } from '../utils/trafficStats';
 
 // ==================== Module-level in-memory send history ====================
 // Per-port send history lives ONLY in memory (user decision: history may
@@ -124,9 +125,9 @@ export async function sendToPort(
       append_line_ending: lineEnding,
     });
 
-    // Track TX bytes
-    const currentTx = state.trafficStats[portId]?.txTotal || 0;
-    state.setTrafficStats(portId, { txTotal: currentTx + bytesWritten });
+    // Track TX bytes（P1-1：经 1s 聚合器统一写 store——高频发送/触发自动回复
+    // 不再逐次 setTrafficStats 触发 Zustand 更新 + StatusBar 重渲染）
+    trafficStats.addTx(portId, bytesWritten);
 
     // Record send history in memory (per-port, capped)
     recordSendHistory(portId, data, isHex, lineEnding);

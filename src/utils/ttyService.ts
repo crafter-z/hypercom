@@ -25,11 +25,18 @@
 import type { Terminal } from '@xterm/xterm';
 import { serialService, gitBashSimService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
+import { trafficStats } from './trafficStats';
 
 /** 每端口等待批写的解码字符串队列上限（条）：超过即丢弃最旧（issue #6-10 同款策略）。 */
 export const MAX_TTY_QUEUE = 10_000;
 /** 页面隐藏（rAF 停摆）时的兜底批写周期（ms）。 */
 const FALLBACK_TICK_MS = 16;
+/** TX 合批静默窗口（ms）：首字节到达启动定时器，静默到期一次性合批发送（性能修复 P0-2）。
+ *  持续输入合为一批，输入停止后最多 ~10ms 内必发出最后一批（不滞留）；批量发送把
+ *  逐键 IPC invoke（每次 ~0.1-1ms 往返）降到每 ~10ms 一次，显著降低按键排队窗口。 */
+export const TX_COALESCE_MS = 10;
+/** TX 合批单批上限（字节）：超过立即发送，防止大粘贴无限滞留。 */
+export const TX_MAX_BATCH_BYTES = 64 * 1024;
 
 /** 每端口运行时状态 */
 export interface TtyPortState {
@@ -47,6 +54,12 @@ export interface TtyPortState {
    *  使 pty 以正确尺寸 spawn；连接后 resync 亦复用。 */
   lastCols: number | null;
   lastRows: number | null;
+  /** TX 合批：待发送文本缓冲（按到达顺序拼接，P0-2）。 */
+  txBuffer: string;
+  /** TX 合批：缓冲文本的 UTF-8 字节数（单批上限判断）。 */
+  txBufferBytes: number;
+  /** TX 合批静默定时器句柄（null = 无 pending 合批）。 */
+  txTimerId: number | null;
 }
 
 /** 每端口状态表（模块级单例） */
@@ -69,6 +82,45 @@ function cancelPending(state: TtyPortState): void {
   }
 }
 
+/** 取消 pending TX 合批定时器并丢弃缓冲（断线 / reset / dispose 用；detach 用
+ *  flushTx 收尾——端口可能仍连接，按键不应丢失）。 */
+function dropTxBuffer(state: TtyPortState): void {
+  if (state.txTimerId !== null) {
+    clearTimeout(state.txTimerId);
+    state.txTimerId = null;
+  }
+  state.txBuffer = '';
+  state.txBufferBytes = 0;
+}
+
+/**
+ * 把 TX 合批缓冲一次性发往串口（P0-2）。
+ * 发送前先取走缓冲（清空 + 取消定时器），再 await IPC——发送期间的按键进入
+ * 新一轮合批，字节顺序按批内到达顺序保持。失败仅 console.error（同原 send 语义）。
+ */
+async function flushTx(portId: string, state: TtyPortState): Promise<void> {
+  if (state.txTimerId !== null) {
+    clearTimeout(state.txTimerId);
+    state.txTimerId = null;
+  }
+  const text = state.txBuffer;
+  state.txBuffer = '';
+  state.txBufferBytes = 0;
+  if (!text) return;
+  try {
+    const bytesWritten = await serialService.sendSerialData({
+      port_id: portId,
+      data: text,
+      is_hex: false,
+      append_line_ending: 'None',
+    });
+    // P1-1：TX 统计经 1s 聚合器统一写 store（与 RX 侧同款降频）。
+    trafficStats.addTx(portId, bytesWritten);
+  } catch (err) {
+    console.error('[ttyService] send failed for', portId, err);
+  }
+}
+
 /** 取（或惰性创建）端口状态 */
 function getPortState(portId: string): TtyPortState {
   let state = ports.get(portId);
@@ -81,6 +133,9 @@ function getPortState(portId: string): TtyPortState {
       timerId: null,
       lastCols: null,
       lastRows: null,
+      txBuffer: '',
+      txBufferBytes: 0,
+      txTimerId: null,
     };
     ports.set(portId, state);
   }
@@ -167,6 +222,9 @@ export const ttyService = {
     const state = ports.get(portId);
     if (!state) return;
     cancelPending(state);
+    // P0-2：把 pending 合批的按键发出——issue #11 关标签页不断开串口，端口可能
+    // 仍连接，丢按键比晚 10ms 更糟（发送失败仅 console.error，无副作用）。
+    void flushTx(portId, state);
     ports.set(portId, {
       term: null,
       decoder: null,
@@ -175,6 +233,9 @@ export const ttyService = {
       timerId: null,
       lastCols: state.lastCols,
       lastRows: state.lastRows,
+      txBuffer: '',
+      txBufferBytes: 0,
+      txTimerId: null,
     });
   },
 
@@ -221,6 +282,8 @@ export const ttyService = {
     const state = ports.get(portId);
     if (!state) return;
     cancelPending(state);
+    // P0-2：断线后端口不可写——取消 pending 合批定时器并丢弃缓冲（发送只会失败）。
+    dropTxBuffer(state);
     if (state.queue.length > 0) {
       if (state.term) state.term.write(state.queue.join(''));
       state.queue.length = 0;
@@ -232,21 +295,31 @@ export const ttyService = {
    * TTY 的 TX 路径（xterm onData）：UTF-8 编码 → send_serial_data → 更新流量统计。
    * 刻意不经过 sendToPort（那是 TRX 管线：TX 回显 + 发送历史）。失败仅 console.error
    * 不弹 toast——按键高频，逐个 toast 全是噪音。
+   *
+   * 性能（P0-2）：按键合批——字节先入 per-port TX 缓冲，静默 TX_COALESCE_MS（10ms）
+   * 后一次性合批发送（「首字节到达启动定时器」模式：持续输入合为一批，输入停止
+   * 后最多 ~10ms 内必发出最后一批），**严格保持字节顺序**（vim/top 等全屏程序
+   * 依赖流序）；单批超 TX_MAX_BATCH_BYTES（64KB，大粘贴）立即发送，不滞留。
+   * 返回 Promise 仅为 API 兼容——实际 IPC 在合批 flush 时发出（TtyView 无需 await）。
    */
-  async send(portId: string, text: string): Promise<void> {
-    if (!text) return;
-    try {
-      const bytesWritten = await serialService.sendSerialData({
-        port_id: portId,
-        data: text,
-        is_hex: false,
-        append_line_ending: 'None',
-      });
-      const prev = useAppStore.getState().trafficStats[portId]?.txTotal ?? 0;
-      useAppStore.getState().setTrafficStats(portId, { txTotal: prev + bytesWritten });
-    } catch (err) {
-      console.error('[ttyService] send failed for', portId, err);
+  send(portId: string, text: string): Promise<void> {
+    if (!text) return Promise.resolve();
+    const state = getPortState(portId);
+    // 先入缓冲（拼接保持到达顺序），再按缓冲总量决定是否立即发送
+    state.txBuffer += text;
+    state.txBufferBytes += new TextEncoder().encode(text).length;
+    if (state.txBufferBytes >= TX_MAX_BATCH_BYTES) {
+      // 单批上限：立即发送，防止大粘贴无限滞留
+      return flushTx(portId, state);
     }
+    if (state.txTimerId === null) {
+      // 首字节到达启动静默定时器；窗口内到达的按键并入同一批
+      state.txTimerId = setTimeout(() => {
+        state.txTimerId = null;
+        void flushTx(portId, state);
+      }, TX_COALESCE_MS);
+    }
+    return Promise.resolve();
   },
 
   /**
@@ -296,13 +369,19 @@ export const ttyService = {
 
   /** 清空全部端口状态（测试用；应用生命周期内不得调用）。 */
   reset(): void {
-    for (const state of ports.values()) cancelPending(state);
+    for (const state of ports.values()) {
+      cancelPending(state);
+      dropTxBuffer(state);
+    }
     ports.clear();
   },
 
   /** 清空状态并移除 visibilitychange 监听（仅测试用）。 */
   dispose(): void {
-    for (const state of ports.values()) cancelPending(state);
+    for (const state of ports.values()) {
+      cancelPending(state);
+      dropTxBuffer(state);
+    }
     ports.clear();
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
       document.removeEventListener('visibilitychange', handleVisibilityChange);

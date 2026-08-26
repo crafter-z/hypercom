@@ -53,8 +53,15 @@ fn collect_app_pids(
     pids
 }
 
+/// 获取系统状态（内存、CPU）
+///
+/// 同步命令在事件循环主线程执行——内部 `refresh_processes_specifics(All, true, ..)`
+/// 是**全系统进程表**刷新（不是只刷本进程树），前端每 5s 轮询一次；高频数据会话
+/// 下周期性阻塞主线程会拖慢 RX 分发与重绘（TTY 卡顿根因 #1）。改 async +
+/// spawn_blocking（issue #6-1 `send_serial_data` 同款）：克隆 Arc 句柄，重活挪到
+/// 独立线程池，主线程发完命令立即返回。行为（返回结构/字段/语义/调用频率）不变。
 #[tauri::command]
-pub fn get_system_status(state: State<AppState>) -> Result<SystemStatus, CommandError> {
+pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, CommandError> {
     let memory_limit_mb = match state.config_manager.lock() {
         Ok(config_mgr) => config_mgr.get_config().memory_limit_mb as u64,
         Err(e) => {
@@ -62,42 +69,47 @@ pub fn get_system_status(state: State<AppState>) -> Result<SystemStatus, Command
             0
         }
     };
+    let system_info = state.system_info.clone();
 
-    // 增量刷新缓存的 System 实例。内存改为【应用进程级】：本进程 + 全部后代
-    // 进程（含 WebView2 子进程）的 RSS 之和。旧实现取系统级 used_memory——
-    // webview 是独立进程，系统级读数既不反映本软件占用，且永远大于总预算
-    // 导致状态恒为 high_load（issue #6-6）。CPU 仍取系统级（load_status 的
-    // 90% 阈值语义不变）。
-    let (app_memory_used, cpu_usage) = match state.system_info.lock() {
-        Ok(mut system) => {
-            // 进程级内存 + CPU 采样（跳过 disk/exe，避免无谓开销）
-            system.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::All,
-                true,
-                ProcessRefreshKind::nothing().with_memory().with_cpu(),
-            );
-            let app_pids = collect_app_pids(sysinfo::get_current_pid().ok(), system.processes());
-            let app_memory_bytes: u64 = system
-                .processes()
-                .iter()
-                .filter(|(pid, _)| app_pids.contains(pid))
-                .map(|(_, proc_)| proc_.memory())
-                .sum();
+    let (app_memory_used, cpu_usage) = tokio::task::spawn_blocking(move || {
+        // 增量刷新缓存的 System 实例。内存改为【应用进程级】：本进程 + 全部后代
+        // 进程（含 WebView2 子进程）的 RSS 之和。旧实现取系统级 used_memory——
+        // webview 是独立进程，系统级读数既不反映本软件占用，且永远大于总预算
+        // 导致状态恒为 high_load（issue #6-6）。CPU 仍取系统级（load_status 的
+        // 90% 阈值语义不变）。
+        match system_info.lock() {
+            Ok(mut system) => {
+                // 进程级内存 + CPU 采样（跳过 disk/exe，避免无谓开销）
+                system.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing().with_memory().with_cpu(),
+                );
+                let app_pids = collect_app_pids(sysinfo::get_current_pid().ok(), system.processes());
+                let app_memory_bytes: u64 = system
+                    .processes()
+                    .iter()
+                    .filter(|(pid, _)| app_pids.contains(pid))
+                    .map(|(_, proc_)| proc_.memory())
+                    .sum();
 
-            let cpu_usage = if system.cpus().is_empty() {
-                0.0
-            } else {
-                let total: f32 = system.cpus().iter().map(|c| c.cpu_usage()).sum();
-                total / system.cpus().len() as f32
-            };
+                let cpu_usage = if system.cpus().is_empty() {
+                    0.0
+                } else {
+                    let total: f32 = system.cpus().iter().map(|c| c.cpu_usage()).sum();
+                    total / system.cpus().len() as f32
+                };
 
-            (memory_used_mb(app_memory_bytes), cpu_usage)
+                (memory_used_mb(app_memory_bytes), cpu_usage)
+            }
+            Err(e) => {
+                log::warn!("system_info lock failed: {e}");
+                (0u64, 0.0f32)
+            }
         }
-        Err(e) => {
-            log::warn!("system_info lock failed: {e}");
-            (0u64, 0.0f32)
-        }
-    };
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("System status task panicked: {e}")))?;
 
     let status = load_status(cpu_usage, app_memory_used, memory_limit_mb).to_string();
 

@@ -48,8 +48,11 @@ pub struct AppState {
     pub log_manager: std::sync::Arc<std::sync::Mutex<logger::LogManager>>,
     /// 诊断日志器：应用自身维测日志（后端 `log::*` + 前端 `console.*` 转发，统一落盘+轮转）
     pub diag_logger: std::sync::Arc<diaglog::DiagLogger>,
-    /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）
-    pub system_info: std::sync::Mutex<sysinfo::System>,
+    /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）。
+    /// `Arc<Mutex<..>>`（issue #6-1 同款）：`get_system_status` 改 async +
+    /// spawn_blocking 后，需要从 State 克隆出 'static 句柄供阻塞线程使用；
+    /// `Deref<Target=Mutex<..>>` 使既有 `.lock()` 调用点（lib.rs CPU 预热）零改动。
+    pub system_info: std::sync::Arc<std::sync::Mutex<sysinfo::System>>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
     pub tool_processes: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
     /// 文件发送取消令牌（按 port_id 索引），供 cancel_file_send 置位
@@ -93,7 +96,7 @@ impl AppState {
             config_manager: std::sync::Mutex::new(config_manager),
             log_manager: std::sync::Arc::new(std::sync::Mutex::new(log_manager)),
             diag_logger,
-            system_info: std::sync::Mutex::new(sysinfo::System::new()),
+            system_info: std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),

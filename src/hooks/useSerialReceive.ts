@@ -6,6 +6,7 @@ import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { ttyService } from '../utils/ttyService';
+import { trafficStats } from '../utils/trafficStats';
 import { evaluateTriggers } from '../utils/triggerEngine';
 import { sendToPort } from './useSerialSend';
 import { useToastStore } from '../stores/useToastStore';
@@ -63,10 +64,10 @@ export function useSerialReceive() {
         if (cancelled) return;
         const portId = event.port_id;
         // Traffic stats ONCE per event for ALL paths (protocol + common)
-        const app = useAppStore.getState();
-        app.setTrafficStats(portId, {
-          rxTotal: (app.trafficStats[portId]?.rxTotal || 0) + event.data.length,
-        });
+        // P1-1：每事件 setTrafficStats 降频——字节先经 1s 聚合器累计，每秒统一写
+        // 一次 store（StatusBar 本就 1s 窗口差分算速率，总量语义不变；消除每事件
+        // Zustand 更新 + StatusBar 重渲染，TTY 卡顿根因 #3）。
+        trafficStats.addRx(portId, event.data.length);
 
         // TTY 模式（issue #11）：字节直喂 ttyService（xterm 渲染）。
         // 跳过触发引擎 / 协议解析 / RxPipeline 行组装——终端字节流没有「行」语义，
