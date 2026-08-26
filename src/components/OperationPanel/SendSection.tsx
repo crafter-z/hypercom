@@ -72,7 +72,10 @@ const SendSection: React.FC<SendSectionProps> = ({
   const sendOnEnter = useAppStore(s => s.config.sendOnEnter);
   const clearSendInputAfterSend = useAppStore(s => s.config.clearSendInputAfterSend);
   const quickSendInlineCount = useAppStore(s => s.config.quickSendInlineCount);
-  const encoding = useTerminalStore(s => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
+  // 选择器闭包引用 prop activeTabId（props 变化时组件重渲染、重新订阅）。
+  // 返回 undefined/字符串原语，zustand Object.is 比较安全——不会因选择器
+  // 构造新对象在每次 terminal store 更新时误重渲染。
+  const encoding = useTerminalStore((s) => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
   const setConfig = useAppStore(s => s.setConfig);
   // issue #12：循环发送为每端口独立状态——按钮按**当前聚焦端口**查询，切换
   // 标签后按钮自动反映该端口的循环运行态（切回正在循环的端口显示「停止」）。

@@ -118,3 +118,9 @@
 - xterm v6 异步分片解析：`node_modules/@xterm/xterm/lib/xterm.mjs`（WriteBuffer，El=12ms 预算 / bc=50 / setTimeout 续片；实测 1MB≈21ms）
 - 事件注入经 ExecuteScript：`tauri-2.11.1/src/event/mod.rs`（emit_js_script）、`wry-0.55.1/src/webview2/mod.rs:1321-1338`
 - 运行日志：`%APPDATA%/hypercom/diag/hypercom-debug.log`（08-08 有 GIT:BASH 发送失败记录；08-09 GIT:BASH 会话无发送失败；08-22 SIM 压测 100–200/s）
+
+---
+
+## 更新（2026-08-26，提交 4af76bf / 5803552 之后）
+
+本报告提出的异步化 / TX 合批 / 流量统计降频等建议已被 4af76bf 落地（后端轮询命令异步化 + TX 合批 + 流量统计降频），后续 5803552/89cd2cc 又修复了输出区抖动与 insertBefore 崩溃。本文档作为性能诊断历史记录保留，**建议清单已过时**——当前行为以代码与 AGENTS.md 版本章节为准。

@@ -1,12 +1,12 @@
 # src/components/ConfigModal/
 
-Multi-page settings modal. Split into `pages/` (7 settings), `editors/` (3 row form editors), and `RuleSetAccordion.tsx`.
+Multi-page settings modal. Split into `pages/` (9 settings), `editors/` (3 row form editors), and `RuleSetAccordion.tsx`.
 
 ## Files
 
 | File | Lines | Role |
 |------|------:|-----|
-| `ConfigModal.tsx` | 112 | tab switcher (7 pages) + dialog open/close |
+| `ConfigModal.tsx` | 180 | tab switcher (9 pages) + dialog open/close (pointerdown 记录起点，框选松手界外不关闭，issue #6-8) |
 | `RuleSetAccordion.tsx` | 78 | collapsed rule-set listing |
 | `pages/GeneralSettings.tsx` | ~230 | theme + language + ports refresh interval + 内存预算双配置（总/每端口）+ **自动更新三态 radio**（`updateCheckMode: none/stable/preview`，issue #12）。模式变更的清账副作用在 **`ConfigModal.handleSave` 保存边界**执行（`updateTiming.clearSnooze()+clearLastCheck()`，issue #12 复审——旧在 radio onChange，取消时配置回滚但 snooze 已清，副作用泄漏；清 lastCheckAt 使新通道立即生效）；**二轮**：保存后 mode 实际变化且非 none → `runAutoCheck` 后台立即首检（bypass 周期/snooze，有更新弹窗）；页面显示「上次自动检查」时间（localStorage 记账，挂载时读取） |
 | `pages/LogSettings.tsx` | ~195 | file path template, shard threshold, auto-start, encoding (ASCII/UTF-8/GBK/ISO-8859-1), **每次打开新建日志文件**（`logNewFilePerSession`，issue：不续写已有文件）, directory-change migration dialog (DirChangeDialog) |

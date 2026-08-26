@@ -1,6 +1,6 @@
 # src/hooks/
 
-13 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
+15 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
 
 ## File structure
 
@@ -8,18 +8,20 @@
 |------|---------|-----------|-----------|
 | `disconnectTracking.ts` | `userClosingPortIds`, `lostPortIds`, `isUserClosingPort()`, `isPortLost()` | shared by useSerialConnection + useSerialReceive | module-level Sets for session-aware disconnect tracking |
 | `useSerialPorts.ts` | `useSerialPorts(pollMs=3000)`, `mapPortInfo()`, `mergePorts()` | Sidebar | polling; `mapPortInfo`/`mergePorts` also used by useSimulation |
-| `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop |
+| `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop; per-port in-flight guard against concurrent open/close |
 | `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial:data` event listener + status handler (writes `lostPortIds` for DisconnectBanner); RX feeds `RxPipeline` (byte-level line aggregation + rAF-batched store writes), NOT direct per-event appends; TTY 端口（`mode==='tty'`）字节**直喂 `ttyService.feed`**（跳过触发引擎/协议解析/行组装），断线走 `ttyService.disconnect`（flush 队列、保留 xterm 实例跨重连） |
 | `useSerialSend.ts` | `useSerialSend()`, `sendToPort()` | OperationPanel (hook); `usePopoutBridge` (module fn) | action; module-level `sendToPort` owns the real send (backend call + TX echo + traffic stats + in-memory per-port history `Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite); the hook is a thin wrapper mirroring history into state for ↑/↓ recall; **TTY 分支**（`port.mode==='tty'`）跳过 TX 回显 + `flushNow`（无本地回显，仍走后端发送/流量统计/历史） |
 | `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | pop-out intent bus: listens `popout:send-command` (→ `sendToPort(activeTabId)`) / `popout:open-config` (→ ConfigModal page) / `popout:request-sync` (→ replay `active-tab:changed`); subscribes `useRuleStore.sendCommandSets` + `useAppStore.activeTabId` → emits `command-sets:changed` / `active-tab:changed` refresh signals |
 | `useConfigPersistence.ts` | `useConfigPersistence()` | `App.tsx` | load + save config |
 | `useSystemStatus.ts` | `useSystemStatus(pollMs=5000)` | StatusBar | polling |
-| `useAppInit.ts` | `useAppInit()` | App.tsx | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; restores `config.portGroups` into `useAppStore.groups` + backfills `ports.groupId`; restores `config.portMeta` (alias/isHidden) into ports (issue #4-9); debounced (500ms) auto-save of groups AND port meta on change (issue #2-3 / #4-9/10 — both write back into `config` so a full `set_config` never clobbers them); session restore via `configService.getSessionSnapshot()` |
+| `useAppInit.ts` | `useAppInit()` | App.tsx | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/preset/tool) from `config` into `useRuleStore`; restores `config.portGroups` into `useAppStore.groups` + backfills `ports.groupId`; restores `config.portMeta` (alias/isHidden/mode) into ports (issue #4-9/11); debounced (500ms) auto-save of groups AND port meta on change (issue #2-3 / #4-9/10 — both write back into `config` so a full `set_config` never clobbers them); session restore via `configService.getSessionSnapshot()` |
 | `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback virtual port toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts; **dev-only** — no-op when `DEV_FEATURES_ENABLED` is false (issue #2-9) |
 | `useGitBashSim.ts` | `useGitBashSim()` | Sidebar toolbar | debug-only GIT:BASH 模拟终端 toggle (issue #11); mirrors `useSimulation` dev gating (no-op when `DEV_FEATURES_ENABLED` false); local `useState` for the mode flag (no new store field) |
 | `useToolOutput.ts` | `useToolOutput()` | App.tsx **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
-| `useAutoUpdate.ts` | `useAutoUpdate()` | App.tsx **exactly once** | issue #12 自动更新评估：等 `ui.configReady`（`useConfigPersistence.loadConfig` 完成置位；复审替代旧 3s 启发式窗口——config 加载慢于 3s 会按默认 stable 误判用户设置的 none/preview；15s 兜底防信号失联）后按 `shouldAutoCheck`（7 天周期/snooze/首启立即；clock rollback 视为记账损坏放行）决定是否 `runAutoCheck`（检查+记账一体）；成功（有无更新同）记 lastCheckAt（**完成时刻**），失败静默（diagLog 落盘、不重置——下次启动重试）；有更新 → `setUIState({ isUpdateOpen, updateCandidate })`。**二轮：会话内每 6h 重评估**（`setInterval`，串口工具常驻挂机覆盖；门控在 shouldAutoCheck，未到期只读 localStorage）。DEV 构建短路（`isUpdateCheckEnabled`） |
-| `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool` |
+| `useAutoUpdate.ts` | `useAutoUpdate()` | App.tsx **exactly once** | issue #12 自动更新评估：等 `ui.configReady`（`useConfigPersistence.loadConfig` 完成置位；复审替代旧 3s 启发式窗口——config 加载慢于 3s 会按默认 stable 误判用户设置的 none/preview；15s 兜底防信号失联）后按 `shouldAutoCheck`（7 天周期/snooze/首启立即；clock rollback 视为记账损坏放行）决定是否 `runAutoCheck`（检查+记账一体，模块级 in-flight 锁防并发双弹窗）；成功（有无更新同）记 lastCheckAt（**完成时刻**），失败静默（diagLog 落盘、不重置——下次启动重试）；有更新 → `setUIState({ isUpdateOpen, updateCandidate })`。**二轮：会话内每 6h 重评估**（`setInterval`，串口工具常驻挂机覆盖；门控在 shouldAutoCheck，未到期只读 localStorage）。DEV 构建短路（`isUpdateCheckEnabled`） |
+| `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool`; group execution `runToolForGroup` (issue #5-7) |
+| `useHotkeys.ts` | `useHotkeys()` | App.tsx (once) | global keydown: Ctrl+L/K/B// + Escape; ignores non-Escape when focus is in a form field |
+| `usePowerManagement.ts` | `usePowerManagement()` | App.tsx (once) | mirrors `config.preventScreenOff` / `config.preventSleep` to the OS via backend commands |
 | `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
 
 ## Conventions (root covers lifecycle split rationale)

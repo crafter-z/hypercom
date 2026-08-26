@@ -319,3 +319,26 @@
 ## 自动更新
 
 v0.3.x 及更早版本用户将在应用内收到更新提示，更新弹窗会显示上述更新说明。
+
+# HyperCom v0.6.3+ 前端整理（2026-08-26，无版本号变更）
+
+## 重构与清理
+- 死代码删除：`useRuleStore.activeHighlightSetId`/`activeProtocolTemplateId` 及 setter（全仓零生产消费）、`useConfigPersistence.resetAndReload`（零消费）、`logService.setLogDirectory`（零消费，后端命令保留）、`useSerialReceive.setupPromiseRef`（死 ref）、`hasViewportManager` 导出、i18n 12 个零引用 key（550 键/侧）
+- 重复实现合并：`clampNumber` 5 份页内拷贝 → `utils/clampNumber.ts`；`performance.memory` 读取两份 → `utils/jsHeap.ts`；`usePanelCyclicSend.onProgress` 死参数回调删除
+- 文档对齐：AGENTS.md / hooks / ConfigModal / MainDisplay 计数断言全部修正（15 hooks / 11 域文件 / 16 CSS / 9 pages / 550 i18n 键），移除 MainDisplay 文档中已删的 TerminalRow.tsx 幽灵条目与 react-virtual 描述；ISSUES_ANALYSIS.md / TTY_PERF_INVESTIGATION.md 标注结论过时
+
+## Bugfix（异步时序）
+- 重连循环不再无视用户关闭意图：每轮退避前检查 `userClosingPortIds`，用户主动关闭后循环立即中止（此前会在下一次重试时悄悄重开；不能看 port.status——后端先发 disconnected 再发 reconnect_hint，attempt=0 时 store 已是 disconnected，会误杀循环）
+- `runAutoCheck` 加模块级 in-flight 锁：改通道保存触发首检与 6h 周期重评估并发时不再双弹窗/双记账
+- `usePopoutBridge` 全部 fire-and-forget emit 补 `.catch`：弹窗 webview 销毁时不再产生 unhandled rejection
+- `TerminalPopout` 快照 replaceAll 竞态修复：快照到达时若本窗缓冲已有实时行，改为「快照历史 + 现有行」合并，不丢新行
+- `rxPipeline.feedBytes` 保持原样：对已 release 的 manager 喂数据是静默 no-op（有界），不加 tab 门控（弹出窗 store 无 tabs，门控会丢光弹窗实时流）
+- `openPort`/`closePort` 加 per-port in-flight 守卫：同一事件循环内连点不再并发打开同一串口句柄
+- ThemeProvider 背景图 effect 拆分：opacity/blur 变化只改 CSS 变量，不再反复读盘（20MB 上限 IO）
+- 触发引擎 respond 失败补 debug 日志（此前完全静默）
+
+## 性能
+- OperationPanel / ParamsSection / SendSection 的 `ports.find(...)` / 整包 `config` 新引用选择器拆为原语选择器：3s 端口轮询与状态更新不再无条件重渲染操作面板与参数区
+
+## 验证
+- tsc 0 诊断、vitest 684 例全绿（38 文件）、cargo check 通过

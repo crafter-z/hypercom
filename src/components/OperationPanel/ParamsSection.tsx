@@ -27,17 +27,23 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const dtr = useOperationStore(s => s.dtr);
   const rts = useOperationStore(s => s.rts);
   const ignoreEmptyChars = useOperationStore(s => s.ignoreEmptyChars);
-  const config = useAppStore(s => s.config);
+  // 拆原语选择器：整包 `config` 订阅 + `ports.find(...)?.mode ?? 'trx'` 都返回
+  // 新引用，随 3s 端口轮询无条件重渲染参数区。defaultBaudRates 只在挂载时用
+  // 一次（getState 现取），常驻订阅只留模式态。
+  const defaultBaudRates = useAppStore(s => s.config.defaultBaudRates);
   const setOpState = useOperationStore(s => s.setOpState);
   // issue #11：端口工作模式切换（trx=传统收发 | tty=终端模式）
   const activeTabId = useAppStore(s => s.activeTabId);
   const setPortMode = useAppStore(s => s.setPortMode);
-  const portMode = useAppStore(s => s.ports.find(p => p.id === s.activeTabId)?.mode ?? 'trx');
+  const portMode = useAppStore((s) => {
+    const port = s.activeTabId ? s.ports.find((p) => p.id === s.activeTabId) : undefined;
+    return port?.mode ?? 'trx';
+  });
 
   // isCustomBaud 是显式用户意图：只由 select 的 onChange 写入（选「其他...」→ true，
   // 选预设 → false）。绝不从 baudRate 自动派生——否则键入到预设值瞬间输入框被卸载。
   // 挂载时按初始 store 值恢复一次自定义态（应用会话恢复的自定义波特率）。
-  const [isCustomBaud, setIsCustomBaud] = useState(!config.defaultBaudRates.includes(baudRate));
+  const [isCustomBaud, setIsCustomBaud] = useState(!defaultBaudRates.includes(baudRate));
   // 自定义波特率输入框的本地 draft：键入只改 draft 字符串，blur 时才解析提交，
   // 避免每个键都 setOpState（后端重配 + 整个面板重渲染导致卡顿/回弹）。
   const [customBaudInput, setCustomBaudInput] = useState(String(baudRate));
@@ -183,7 +189,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
               if (e.target.value === '__custom__') { setIsCustomBaud(true); }
               else { setIsCustomBaud(false); setOpState({ baudRate: Number(e.target.value) }); }
             }}>
-            {config.defaultBaudRates.map(rate => <option key={rate} value={rate}>{rate}</option>)}
+            {defaultBaudRates.map(rate => <option key={rate} value={rate}>{rate}</option>)}
             <option value="__custom__">{t('paramsSection.baudRate.custom')}</option>
           </select>
           {isCustomBaud && (

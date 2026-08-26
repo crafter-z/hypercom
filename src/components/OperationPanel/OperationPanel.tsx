@@ -36,10 +36,15 @@ const OperationPanel: React.FC = () => {
   const { isReplaying, startReplay, stopReplay } = useLogReplay(activeTabId ?? '');
   const [replaySpeed, setReplaySpeed] = useState(4);
 
-  const activePort = useAppStore(s => s.ports.find(p => p.id === s.activeTabId));
-  const isConnected = activePort?.status === 'connected';
-  const isConnecting = activePort?.status === 'connecting';
-  const isPortError = activePort?.status === 'error';
+  // 拆成两个原语选择器（zustand Object.is 比较）——`ports.find(...)` 每次返回
+  // 新对象引用，会随 3s 端口轮询/状态更新无条件重渲染整个面板。状态位足够
+  // 驱动按钮态，需要具体端口时用 getState() 现取。
+  const activePortStatus = useAppStore((s) =>
+    s.activeTabId ? s.ports.find((p) => p.id === s.activeTabId)?.status : undefined
+  );
+  const isConnected = activePortStatus === 'connected';
+  const isConnecting = activePortStatus === 'connecting';
+  const isPortError = activePortStatus === 'error';
   const isPortActive = !!activeTabId;
 
   // 每端口独立循环发送引擎（issue #12）：目标端口由 hook 内部绑定——在哪个

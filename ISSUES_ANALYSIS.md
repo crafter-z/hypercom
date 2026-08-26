@@ -235,3 +235,9 @@ serial:data → useSerialReceive → RxPipeline.feedBytes（切行 + 入队）
 2. **e2e 覆盖盲区**：30b6daf 只断言 DOM 有界 + scrollTop 单调，测不出「单调回填式抖动」；没有覆盖「嵌套分支内 Pane 位移 + 双挂载窗口」的渲染竞态。建议在 e2e 增加：① scrollTop 单帧跳变阈值断言；② splitPane 嵌套分支场景 + console error 监听；③ 高频 RX + 字节预算小值注入下的稳定性。
 3. **修复优先级**：#15 是崩溃（高优，0.5d 内可修）；#10 是体验问题（中优，根因 A1/A2 已定位，修复建议 1~2 工作量小）。
 4. **后续改动方向**：给 TerminalRenderer 增加「attach 归属」状态（记录当前 container id，render 前校验 layer 仍挂载、active 节点都在 layer 内，否则安全重初始化）——同时覆盖 #10 的几何抖动与 #15 的脱链崩溃。
+
+---
+
+## 更新（2026-08-26，提交 5803552 / 89cd2cc 之后）
+
+本报告的 #10/#15 OPEN 结论已被后续提交修复（5803552 fix(ui): 输出区上下抖动 + 分屏 insertBefore 渲染崩溃；89cd2cc 记录分析结论）。本文档作为历史诊断记录保留，**结论部分已过时**——当前实现以 `src/utils/terminal/` 方案B 渲染引擎与 AGENTS.md 版本章节为准。
