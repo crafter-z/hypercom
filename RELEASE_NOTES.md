@@ -1,3 +1,23 @@
+# HyperCom v0.6.4
+
+## 性能
+- TTY 模式交互卡顿修复（探查报告定位的三根因，P0/P1 四项）：
+  - `get_system_status` / `list_available_ports` 改 async + `spawn_blocking`——消除每 5s/3s 全系统进程表刷新与串口枚举对事件循环主线程的周期阻塞（根因 #1）
+  - TTY TX 逐键 invoke 改 ~10ms 合批（首字节启动定时器，64KB 上限，字节顺序严格保持，detach 收尾 flush / 断线丢弃缓冲）
+  - 流量统计降频：新增 `trafficStats` 1s 聚合器，RX/TX 三写点共用——消除每事件 Zustand 更新与 StatusBar 重渲染（根因 #3）
+  - `write_all_with_deadline` 新增耗时打点（单次 >100ms / 整批 >500ms `log::warn!`）
+- 操作面板/参数区/发送区选择器拆为原语选择器：3s 端口轮询与状态更新不再无条件重渲染（`ports.find(...)` / 整包 config 新引用替换）
+
+## Bugfix
+- 修复分屏嵌套渲染崩溃（issue #15）：`TerminalRenderer.detach` 清空 active/pool/锚点状态（跨 Pane 位移时旧 active 不再参与新容器 render 排序）；排序循环 insertBefore 加归属校验，脱链时降级 appendChild（崩溃变视觉降级）；TerminalView 双阶段 attach 消除竞态窗口
+- 修复输出区 trim 抖动（issue #10 残余）：大 drain（≥2500 行）非 follow 时按上一帧视口顶部 seq 恢复阅读位置、follow 同帧钉底——消除字节预算裁半导致的视口暴跌+逐帧回填；字节预算 drain 限幅（append 50000 行/批，50% 滞回渐进到达，硬上限语义不变）；软兜底回升闸（以裁后堆占用为基线，堆未回升不重复裁，消灭 10s 冷却周期抖动）
+- 异步时序与竞态修复：重连循环每轮退避前检查 `userClosingPortIds`（用户主动关闭后不再悄悄重开）；`runAutoCheck` in-flight 锁（改通道首检与 6h 周期并发不再双弹窗/双记账）；`usePopoutBridge` fire-and-forget emit 补 `.catch`；TerminalPopout 快照「历史 + 现有行」合并不丢新行；openPort/closePort per-port in-flight 守卫；ThemeProvider 背景图 effect 拆分（opacity/blur 只改 CSS 变量不再反复读盘）；触发 respond 失败补 debug 日志
+
+## 其他
+- 死代码与重复实现清理：删除零消费的 `activeHighlightSetId`/`activeProtocolTemplateId` 及 setter、`resetAndReload`、`logService.setLogDirectory`（后端命令保留）、`setupPromiseRef`、`hasViewportManager`、i18n 12 个零引用 key；`clampNumber` 5 份页内拷贝 → `utils/clampNumber.ts` 单一实现；`performance.memory` 两份读取 → `utils/jsHeap.ts`；`usePanelCyclicSend` 死参数 onProgress 删除
+- 文档重构：`plans/` 更名 `docs/`，架构文档按功能模块重排（串口管理/终端显示/数据收发/TTY/日志/配置/工作区/自动更新/发版/错误处理，见 `docs/architecture/README.md` 索引）；删除废弃的 code-signing / hardware-matrix / test-checklist；新增 `docs/userwiki/`（面向普通用户，暂空）
+- 测试：vitest **689** 例（新增 TTY 合批 4 / trafficStats 聚合 6 / 大 drain 锚点 2 / detach 重 attach / 回升闸 / 并发锁等）、playwright **21** 例（嵌套分屏位移无 console error、40MB 高频 RX 字节 drain 视口位移 <50 行）、cargo test 157 例全绿、tsc 0 诊断
+
 # HyperCom v0.6.3
 
 ## 新特性
