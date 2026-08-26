@@ -132,16 +132,27 @@ export async function runCheck(
  * ConfigModal「改通道保存后立即首检」共用）：成功（有无更新同）记
  * lastCheckAt 完成时刻；失败返回 null 不记账（调用方静默或提示自定）。
  *
+ * 并发防护：ConfigModal 保存改通道触发首检 + useAutoUpdate 的 6h 周期
+ * 重评估可能同时进入——加模块级 in-flight 锁，重入直接返回 null
+ * （检查结果由先到者处理，后到者不再弹窗/记账）。
+ *
  * @param enabledOverride 仅测试用：透传 runCheck 的 DEV 门控注入。生产不传。
  */
+let checkInFlight = false;
 export async function runAutoCheck(
   channel: 'stable' | 'preview',
   enabledOverride?: boolean,
 ): Promise<UpdatePayload | null> {
-  const outcome = await runCheck(channel, enabledOverride);
-  if (outcome.failed) return null;
-  updateTiming.markCheckedAt();
-  return outcome.update;
+  if (checkInFlight) return null;
+  checkInFlight = true;
+  try {
+    const outcome = await runCheck(channel, enabledOverride);
+    if (outcome.failed) return null;
+    updateTiming.markCheckedAt();
+    return outcome.update;
+  } finally {
+    checkInFlight = false;
+  }
 }
 
 /**

@@ -63,16 +63,19 @@ export function usePopoutBridge() {
     // 在首次变更信号到达前失真（命令集载荷含未保存编辑，弹窗无需回库重读）。
     popoutEventService
       .onRequestSync(() => {
-        void popoutEventService.emitActiveTabChanged({
-          portId: useAppStore.getState().activeTabId,
-        });
-        void popoutEventService.emitCommandSetsChanged(
-          useRuleStore.getState().sendCommandSets
-        );
+        // 弹窗可能已销毁（emit 在弹窗 webview 关闭时 reject）——全部静默降级。
+        popoutEventService
+          .emitActiveTabChanged({ portId: useAppStore.getState().activeTabId })
+          .catch((e) => console.debug('[usePopoutBridge] emitActiveTabChanged failed:', e));
+        popoutEventService
+          .emitCommandSetsChanged(useRuleStore.getState().sendCommandSets)
+          .catch((e) => console.debug('[usePopoutBridge] emitCommandSetsChanged failed:', e));
         // issue #7-5：回放全部串口连接状态，弹窗「发送到」提示灯打开即准确。
-        void popoutEventService.emitPortStatusesSync(
-          useAppStore.getState().ports.map((p) => ({ portId: p.id, status: p.status }))
-        );
+        popoutEventService
+          .emitPortStatusesSync(
+            useAppStore.getState().ports.map((p) => ({ portId: p.id, status: p.status }))
+          )
+          .catch((e) => console.debug('[usePopoutBridge] emitPortStatusesSync failed:', e));
       })
       .then((u) => {
         if (cancelled) u();
@@ -117,13 +120,17 @@ export function usePopoutBridge() {
     // 配置弹窗里未保存的编辑不在盘上——弹窗回库重读会漏掉这些编辑。
     const unsubscribeRules = useRuleStore.subscribe((state, prevState) => {
       if (state.sendCommandSets === prevState.sendCommandSets) return;
-      void popoutEventService.emitCommandSetsChanged(state.sendCommandSets);
+      popoutEventService
+        .emitCommandSetsChanged(state.sendCommandSets)
+        .catch((e) => console.debug('[usePopoutBridge] emitCommandSetsChanged failed:', e));
     });
 
     // 活动标签变更 → 广播新 portId，弹窗更新发送目标指示。
     const unsubscribeApp = useAppStore.subscribe((state, prevState) => {
       if (state.activeTabId === prevState.activeTabId) return;
-      void popoutEventService.emitActiveTabChanged({ portId: state.activeTabId });
+      popoutEventService
+        .emitActiveTabChanged({ portId: state.activeTabId })
+        .catch((e) => console.debug('[usePopoutBridge] emitActiveTabChanged failed:', e));
     });
 
     return () => {

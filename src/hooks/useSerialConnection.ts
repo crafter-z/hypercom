@@ -31,6 +31,15 @@ async function runReconnectLoop(portId: string) {
 
   let delayMs = 500;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    // User intent wins: a deliberate close (closePort) during backoff must
+    // abort the loop — otherwise the next attempt would re-open a port the
+    // user just closed. NOTE: do NOT check port.status here — the backend
+    // emits serial:status(disconnected) BEFORE serial:reconnect_hint, so at
+    // attempt=0 the store already reads 'disconnected' and this loop would
+    // never fire. userClosingPortIds is the only reliable user-intent signal.
+    if (userClosingPortIds.has(portId)) {
+      break;
+    }
     // First attempt runs immediately; backoff only applies between retries.
     if (attempt > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
@@ -84,6 +93,13 @@ let reconnectHintListenerCount = 0;
 let unlistenReconnectHint: (() => void) | null = null;
 let pendingReconnectHintUnlisten: Promise<() => void> | null = null;
 
+// Per-port in-flight guard: a rapid double-click on the connect button (or a
+// sidebar click + hotkey in the same tick) would otherwise issue two concurrent
+// openSerialPort calls for the same handle — the store's 'connecting' state is
+// written synchronously but toggleConnection reads a stale `ports` snapshot, so
+// the short-circuit never fires in the same event loop turn.
+const portOpInFlight = new Set<string>();
+
 export function useSerialConnection() {
   const updatePort = useAppStore((s) => s.updatePort);
   const ports = useAppStore((s) => s.ports);
@@ -122,14 +138,19 @@ export function useSerialConnection() {
   }, []);
 
   const openPort = useCallback(async (portId: string, _baudRate: number = 115200) => {
-    // Reconnecting overrides any prior user-initiated close mark so the
-    // DisconnectBanner / status toast resume normal unexpected-disconnect
-    // detection for this port.
-    userClosingPortIds.delete(portId);
-    // A deliberate (re)connect clears the lost mark — the banner must hide
-    // the moment the user retries a dropped port.
-    lostPortIds.delete(portId);
+    // In-flight guard: 同一事件循环内连点两次（Sidebar 按钮 / Ctrl+K / 批量开）
+    // 会并发 open 同一串口句柄——'connecting' 状态已同步写入但调用方的闭包
+    // 还是旧快照，短路不生效。in-flight 期间直接 no-op。
+    if (portOpInFlight.has(portId)) return;
+    portOpInFlight.add(portId);
     try {
+      // Reconnecting overrides any prior user-initiated close mark so the
+      // DisconnectBanner / status toast resume normal unexpected-disconnect
+      // detection for this port.
+      userClosingPortIds.delete(portId);
+      // A deliberate (re)connect clears the lost mark — the banner must hide
+      // the moment the user retries a dropped port.
+      lostPortIds.delete(portId);
       // Resolve connection params from the target port first (session restore
       // and per-port presets write per-port values that must win over the
       // global OperationPanel defaults), falling back to the operation store
@@ -180,19 +201,23 @@ export function useSerialConnection() {
       console.error('[useSerialConnection] Failed to open port:', err);
       notifyError(err);
       updatePort(portId, { status: 'error' });
+    } finally {
+      portOpInFlight.delete(portId);
     }
   }, [updatePort]);
 
   const closePort = useCallback(async (portId: string) => {
-    // Mark this port as user-initiated close so the serial:status event
-    // handler and DisconnectBanner suppress the "unexpected disconnect"
-    // toast/banner. The mark is PERSISTENT and cleared on the next reconnect
-    // (openPort) — a timer-based removal made the banner false-alarm on a
-    // deliberately disconnected port whose tab was still open.
-    userClosingPortIds.add(portId);
-    // User-initiated close is never "lost" — clear any stale mark.
-    lostPortIds.delete(portId);
+    if (portOpInFlight.has(portId)) return;
+    portOpInFlight.add(portId);
     try {
+      // Mark this port as user-initiated close so the serial:status event
+      // handler and DisconnectBanner suppress the "unexpected disconnect"
+      // toast/banner. The mark is PERSISTENT and cleared on the next reconnect
+      // (openPort) — a timer-based removal made the banner false-alarm on a
+      // deliberately disconnected port whose tab was still open.
+      userClosingPortIds.add(portId);
+      // User-initiated close is never "lost" — clear any stale mark.
+      lostPortIds.delete(portId);
       await serialService.closeSerialPort(portId);
       updatePort(portId, { status: 'disconnected' });
       // Auto-stop logging
@@ -201,6 +226,8 @@ export function useSerialConnection() {
       console.error('[useSerialConnection] Failed to close port:', err);
       notifyError(err);
       updatePort(portId, { status: 'error' });
+    } finally {
+      portOpInFlight.delete(portId);
     }
   }, [updatePort]);
 

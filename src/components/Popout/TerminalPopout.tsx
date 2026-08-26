@@ -11,7 +11,7 @@ import {
 } from '../../services/tauri';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import TerminalView from '../MainDisplay/TerminalView';
-import { replaceTerminalLines } from '../../utils/terminal/viewportManager';
+import { getViewportManager, replaceTerminalLines } from '../../utils/terminal/viewportManager';
 
 interface TerminalPopoutProps {
   portId: string;
@@ -73,7 +73,17 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
             const { lines, ...display } = payload.terminal;
             const t = useTerminalStore.getState();
             t.setTerminalConfig(portId, display);
-            replaceTerminalLines(portId, lines);
+            // 竞态防护：快照 request→reply 期间实时 RX 可能已先入队并 append 到
+            // 本窗缓冲——此时无条件 replaceAll 会把实时新行一并清掉（显示层丢行）。
+            // 快照是主窗发送时刻的历史，实时行严格更新：仅在缓冲仍为空（无新行
+            // 到达）时整体替换；否则把快照历史行插到现有内容之前（append 保持
+            // 流顺序），保留已到达的实时行。
+            const vm = getViewportManager(portId);
+            if (vm.buffer.length === 0) {
+              replaceTerminalLines(portId, lines);
+            } else if (lines.length > 0) {
+              replaceTerminalLines(portId, [...lines, ...vm.buffer.snapshot()]);
+            }
           }),
           // 实时流：广播按 portId 过滤，经 RxPipeline 完成字节级行聚合 +
           // rAF 批写。ignoreEmptyChars / 编码切换 / 静默 flush 全部管线内部处理。

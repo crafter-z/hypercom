@@ -45,7 +45,8 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
   // 自定义背景图（issue #13）：把配置映射到 CSS 变量 + html[data-app-bg] 门控。
   // 图片经后端 read_image_data_url 读为 base64 data URL（dev/prod 一致，无需 asset protocol）；
-  // 异步读取期间以 cancelled 防竞态；opacity/blur 前端再夹取一次（后端 set_config 已夹取）。
+  // 异步读取期间以 cancelled 防竞态。opacity/blur 只改 CSS 变量，不触发读盘——
+  // 拆成两个 effect，滑块连续拖动不会反复读图（每次读盘是 20MB 上限的 IO）。
   useEffect(() => {
     const root = document.documentElement;
     let cancelled = false;
@@ -74,7 +75,7 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     return () => {
       cancelled = true;
     };
-  }, [backgroundImage, backgroundImageEnabled, backgroundImageOpacity, backgroundImageBlur]);
+  }, [backgroundImage, backgroundImageEnabled]);
 
   return <>{children}</>;
 };

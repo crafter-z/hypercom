@@ -168,6 +168,18 @@ describe('runAutoCheck (issue #12 二轮：检查+记账一体)', () => {
     expect(updateTiming.getLastCheckAt()).not.toBeNull();
   });
 
+  it('concurrent call while check in flight → null (in-flight 锁防双弹窗)', async () => {
+    let resolveCheck: (v: UpdatePayload | null) => void = () => {};
+    vi.mocked(tauriUpdate.checkForUpdate).mockImplementation(
+      () => new Promise((resolve) => { resolveCheck = resolve; })
+    );
+    const first = runAutoCheck('stable', true);
+    const second = await runAutoCheck('stable', true);
+    expect(second).toBeNull(); // re-entrant call returns null immediately
+    resolveCheck(null);
+    await first;
+  });
+
   it('success (无更新) → still marks lastCheckAt', async () => {
     vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(null);
     const update = await runAutoCheck('preview', true);
