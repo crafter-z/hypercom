@@ -41,7 +41,7 @@ import { getLineText } from '../lineText';
 import { applyHighlightSets, escapeHtml } from '../highlightEngine';
 import { renderProtocolLine } from '../protocolRenderer';
 import { formatTerminalTimestampAdj, isSameRound } from '../timeFormat';
-import { markSearchMatchesInHtml } from '../../components/MainDisplay/terminalSearch';
+import { markSearchMatchesInHtml } from '../terminalSearch';
 
 export interface RendererConfig {
   rowHeight: number;
@@ -290,8 +290,14 @@ export class TerminalRenderer {
       headAdvance >= LARGE_TRIM_ROWS && !follow && !view.gestureActive && !this.isSelecting;
     if (anchorRestored) {
       const anchor = this.anchorSeq;
-      container.scrollTop =
-        anchor !== null && anchor >= firstSeq ? (anchor - firstSeq) * rowHeight : 0;
+      // 过滤模式下 scrollTop 空间按 visIdx 索引（baseCount 是过滤后计数），
+      // 不能用 identity 算式 (anchor - firstSeq)，须通过 seqToVisIdx 映射。
+      if (anchor !== null && anchor >= firstSeq) {
+        const visIdx = this.seqToVisIdx(anchor, view, buffer, frozen);
+        container.scrollTop = visIdx !== null ? visIdx * rowHeight : 0;
+      } else {
+        container.scrollTop = 0;
+      }
     }
     const scrollTop = follow
       ? Math.max(0, totalHeight - container.clientHeight)
@@ -637,7 +643,7 @@ export class TerminalRenderer {
     const c = this.config;
     let html: string;
     if (line.parsedFields && line.parsedFields.length > 0) {
-      html = renderProtocolLine(line);
+      html = renderProtocolLine(line, c.encoding);
     } else {
       const displayText =
         c.displayFormat === 'hex' && line.rawData

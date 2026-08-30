@@ -60,6 +60,12 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     try {
       const list = await storageService.loadPortPresets();
       setPresets(list);
+      // P0-1：预设只经 storageService 单条落盘，从不回写 useAppStore.config.portPresets。
+      // 全量保存（ConfigModal 保存 / 诊断日志开关 / 更新「不再提醒」）用 store.config
+      // 快照整体覆盖 config.json——若不回写，新建/删除的预设会被启动快照静默回滚，
+      // 重启后丢失（issue #5-2 陷阱在 portPresets 上的残留）。这里在每次加载后同步
+      // store.config，使全量保存快照与磁盘一致。
+      useAppStore.getState().setConfig({ portPresets: list });
     } catch (e) {
       console.warn('[ParamsSection] loadPortPresets failed:', e);
     }

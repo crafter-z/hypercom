@@ -3,9 +3,14 @@
  *
  * Extracted from TerminalView so search logic can be unit-tested under
  * vitest's `environment: 'node'` config (no jsdom required).
+ *
+ * P1-9：本文件原居 components/MainDisplay/，但它是零 React 依赖的纯文本工具，
+ * 却被 utils/terminal 渲染引擎（TerminalRenderer/viewportManager）反向 import，
+ * 造成 components↔utils 双向耦合。移入 utils/ 与 lineText/lineFilter 同层，
+ * 消除反向依赖（底层引擎不再依赖 UI 目录）。
  */
-import type { TerminalLine, DisplayFormat, Encoding } from '../../types';
-import { getLineText } from '../../utils/lineText';
+import type { TerminalLine, DisplayFormat, Encoding } from '../types';
+import { getLineText } from './lineText';
 
 export interface FindMatchesOptions {
   query: string;

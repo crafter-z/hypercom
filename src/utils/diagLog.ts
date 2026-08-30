@@ -62,17 +62,23 @@ function safeStringify(v: unknown): string {
   }
 }
 
+function armTimer(): void {
+  batchTimer = setTimeout(() => {
+    batchTimer = null;
+    flush();
+  }, 500);
+}
+
 function push(method: ConsoleMethod, args: unknown[]): void {
   if (!forwardEnabled) return;
   const message = args.map(safeStringify).join(' ');
   batch.push({ timestamp: now(), level: LEVEL_MAP[method], message });
   if (batch.length >= 50) {
     flush();
+    // flush() 在 flushing 时直接 return，该批会滞留；补一个定时器兜底重试。
+    if (flushing && !batchTimer) armTimer();
   } else if (!batchTimer) {
-    batchTimer = setTimeout(() => {
-      batchTimer = null;
-      flush();
-    }, 500);
+    armTimer();
   }
 }
 

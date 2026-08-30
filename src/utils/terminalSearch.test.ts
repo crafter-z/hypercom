@@ -7,7 +7,7 @@ import {
   formatLineForCopy,
   type MatchCache,
 } from './terminalSearch';
-import type { TerminalLine } from '../../types';
+import type { TerminalLine } from '../types';
 
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
   timestamp: 0,

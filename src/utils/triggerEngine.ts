@@ -70,7 +70,9 @@ export function evaluateTriggers(
 
       case 'regex':
         try {
-          matched = new RegExp(rule.pattern).test(content);
+          // ReDoS 防护：短模式也可能触发指数回溯（如 (a+)+$），仅对前 5000 字符 test
+          const safeContent = content.length > 5000 ? content.slice(0, 5000) : content;
+          matched = new RegExp(rule.pattern).test(safeContent);
         } catch {
           // 无效正则，跳过
           continue;

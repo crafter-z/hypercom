@@ -22,6 +22,59 @@ const triggerAlertThrottle = new Map<string, number>();
 let lastTriggerEvalErrorLog = 0;
 
 /**
+ * 行级触发器评估（P1-1）：在 RxPipeline 组装出的**完整行**上匹配触发规则，
+ * 而非旧的「按 serial:data 读事件块」匹配。读事件边界是任意的（OS 缓冲/时序），
+ * 一个完整行可能横跨多次事件 → 旧实现 contains/exact 跨块失效、exact 因块内
+ * 带 \r\n 几乎永不命中。改为行边界匹配后，contains/exact/regex 均按完整行文本。
+ * 由 RxPipeline 的 onLineAssembled 钩子逐行调用。
+ */
+function evaluateLineTriggers(portId: string, text: string, rawData: Uint8Array): void {
+  try {
+    const triggerRules = useRuleStore.getState().triggerRules;
+    if (triggerRules.length === 0) return;
+    // contains/exact/regex match against the decoded line text; hex matches
+    // against the raw bytes (handled inside evaluateTriggers).
+    const matched = evaluateTriggers(text, Array.from(rawData), triggerRules, portId);
+    for (const action of matched) {
+      const rule = action.rule;
+      if (rule.actionType === 'alert') {
+        // Throttle: don't re-toast the same rule within 1s.
+        const now = Date.now();
+        if (now - (triggerAlertThrottle.get(rule.id) ?? 0) < TRIGGER_ALERT_THROTTLE_MS) continue;
+        triggerAlertThrottle.set(rule.id, now);
+        // The alert must surface the rule's ACTION CONTENT, not a generic
+        // line (issue #5-3). Fall back to the generic message only when the
+        // rule has no content configured.
+        const generic = i18n.t('trigger.alertMessage', { port: portId, rule: rule.name });
+        const content = (rule.actionContent ?? '').trim();
+        useToastStore.getState().push({
+          severity: 'warning',
+          title: generic,
+          message: content || generic,
+          // issue #7-1：通知中心展示消息来源串口。
+          portId,
+          // Sticky: persists until dismissed/cleared (durationMs 0 = no timer).
+          durationMs: 0,
+        });
+      } else if (rule.actionType === 'respond') {
+        // silent=true: sendToPort re-throws on failure — swallow to keep the
+        // RX loop alive.
+        sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true).catch((e) => {
+          console.debug('[useSerialReceive] trigger respond failed:', rule.id, e);
+        });
+      }
+    }
+  } catch (e) {
+    // 触发引擎异常多在规则配置错误，随每次 RX 触发：限流到每 2s 至多一条。
+    const now = Date.now();
+    if (now - lastTriggerEvalErrorLog > 2000) {
+      lastTriggerEvalErrorLog = now;
+      console.error('[useSerialReceive] Trigger evaluation failed:', e);
+    }
+  }
+}
+
+/**
  * 连接成功（后端 `serial:status` connected）→ 自动为该端口打开标签页（v0.6.1）。
  *
  * 后端对 open（真实串口 / SIM:Loopback / GIT:BASH）与自动重连统一发 connected
@@ -47,6 +100,9 @@ export function openTabForConnectedPort(portId: string): void {
  * - 协议帧：ProtocolFrameReassembler 返回有序段，帧段经 enqueueLines 入队，
  *   裸段经 feedBytes 入队——两者共享队列，天然保流顺序
  *
+ * P1-1：条件触发器改在 RxPipeline 的 onLineAssembled 钩子（完整行边界）评估，
+ * 而非旧的「按 serial:data 读事件块」匹配——读事件边界任意，跨块模式会失效。
+ *
  * SRP：只负责事件订阅与数据入管线，不涉及任何用户主动发送动作。
  * 必须在应用根组件挂载一次（事件监听全局唯一）。
  */
@@ -57,6 +113,11 @@ export function useSerialReceive() {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
     const pipeline = getRxPipeline();
+
+    // P1-1：行级触发器——每条完整行组装完成时评估触发规则（行边界而非读事件块）。
+    pipeline.setOnLineAssembled((portId, line) => {
+      evaluateLineTriggers(portId, line.text, line.rawData);
+    });
 
     const setup = async () => {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
@@ -74,61 +135,6 @@ export function useSerialReceive() {
         if (useAppStore.getState().ports.find(p => p.id === portId)?.mode === 'tty') {
           ttyService.feed(portId, event.data);
           return;
-        }
-
-        // Conditional triggers: match RX against trigger rules. Rules are read
-        // live via getState() (never subscribe inside a callback) so store
-        // edits take effect on the next event. Exceptions here must not crash
-        // the RX loop — the pipeline below still needs this event.
-        try {
-          const triggerRules = useRuleStore.getState().triggerRules;
-          if (triggerRules.length > 0) {
-            // contains/exact/regex match against the decoded text; hex matches
-            // against the raw bytes (handled inside evaluateTriggers).
-            const decoded = pipeline.decodeText(portId, event.data);
-            const matched = evaluateTriggers(decoded, event.data, triggerRules, portId);
-            for (const action of matched) {
-              const rule = action.rule;
-              if (rule.actionType === 'alert') {
-                // Throttle: don't re-toast the same rule within 1s.
-                const now = Date.now();
-                if (now - (triggerAlertThrottle.get(rule.id) ?? 0) < TRIGGER_ALERT_THROTTLE_MS) continue;
-                triggerAlertThrottle.set(rule.id, now);
-                // The alert must surface the rule's ACTION CONTENT, not a
-                // generic line (issue #5-3). Fall back to the generic message
-                // only when the rule has no content configured.
-                const generic = i18n.t('trigger.alertMessage', { port: portId, rule: rule.name });
-                const content = (rule.actionContent ?? '').trim();
-                useToastStore.getState().push({
-                  severity: 'warning',
-                  // Title keeps the port/rule context in the notification
-                  // center; the live toast renders the message only.
-                  title: generic,
-                  message: content || generic,
-                  // issue #7-1：通知中心展示消息来源串口。
-                  portId,
-                  // Sticky: persists in the notification center until the
-                  // user dismisses or clears it (durationMs 0 = no timer).
-                  durationMs: 0,
-                });
-              } else if (rule.actionType === 'respond') {
-                // silent=true: sendToPort re-throws on failure so the caller
-                // can aggregate — swallow here to keep the RX loop alive.
-                sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true).catch((e) => {
-                  // Respond failure is silent by design — but log it so a
-                  // misconfigured auto-reply isn't invisible in diag logs.
-                  console.debug('[useSerialReceive] trigger respond failed:', rule.id, e);
-                });
-              }
-            }
-          }
-        } catch (e) {
-          // 触发引擎异常多在规则配置错误，随每次 RX 触发：限流到每 2s 至多一条，避免刷屏。
-          const now = Date.now();
-          if (now - lastTriggerEvalErrorLog > 2000) {
-            lastTriggerEvalErrorLog = now;
-            console.error('[useSerialReceive] Trigger evaluation failed:', e);
-          }
         }
 
         // Protocol-template path: port has a protocol template bound

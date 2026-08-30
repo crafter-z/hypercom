@@ -63,8 +63,14 @@ const ConfigModal: React.FC = () => {
   }, [isConfigOpen]);
 
   const handleCancel = () => {
-    if (configSnapshotRef.current) {
-      setConfig(configSnapshotRef.current);
+    // issue #6-8：弹窗打开后 useAppInit 的分组/元数据 500ms 防抖可能已把新
+    // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
+    // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
+    // portGroups/portMeta，只回滚其余字段。
+    const snap = configSnapshotRef.current;
+    if (snap) {
+      const cur = useAppStore.getState().config;
+      setConfig({ ...snap, portGroups: cur.portGroups, portMeta: cur.portMeta });
       configSnapshotRef.current = null;
     }
     toggleConfigModal(false);

@@ -4,8 +4,11 @@
 // toast (and the `lostPortIds` mark that drives DisconnectBanner) for
 // user-initiated disconnects.
 //
-// Entries are removed 3s after closePort resolves to tolerate late
-// `serial:status` events that arrive after the backend close response.
+// Entries persist until cleared by openPort / closePort / a successful
+// reconnect — they are NOT auto-removed after a fixed delay. (An earlier
+// timer-based 3s removal caused DisconnectBanner false-positives when the
+// backend close response raced a late `serial:status` event, so the mark is
+// now persistent and only cleared by an explicit connection-state transition.)
 export const userClosingPortIds = new Set<string>();
 
 /** Returns true if the given portId is currently being closed by the user. */

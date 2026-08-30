@@ -129,21 +129,29 @@ export function useAppInit() {
   // 本次保存的分组，导致重启后分组丢失。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    // issue #6-8：防抖 cleanup 原先只 clearTimeout，关窗/崩溃会丢最近 500ms 改动。
+    // 兜底 flush：cleanup 时若仍有待触发防抖，同步保存一次再 clear。
+    const flushGroups = () => {
+      const groups = useAppStore.getState().groups;
+      useAppStore.getState().setConfig({ portGroups: groups });
+      storageService.savePortGroups(groups).catch((e) => {
+        console.warn('[useAppInit] Failed to auto-save port groups:', e);
+      });
+    };
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
       if (state.groups === prevState.groups) return;
       if (timeoutId !== null) clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
         timeoutId = null;
-        const groups = useAppStore.getState().groups;
-        useAppStore.getState().setConfig({ portGroups: groups });
-        storageService.savePortGroups(groups).catch((e) => {
-          console.warn('[useAppInit] Failed to auto-save port groups:', e);
-        });
+        flushGroups();
       }, 500);
     });
     return () => {
       unsubscribe();
-      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        flushGroups();
+      }
     };
   }, []);
 
@@ -162,6 +170,18 @@ export function useAppInit() {
         .map((p) => `${p.id}\u0001${p.alias ?? ''}\u0001${p.isHidden ? '1' : '0'}\u0001${p.mode ?? 'trx'}`)
         .join('\u0002');
     lastSignature = computeSignature();
+    // issue #6-8：防抖 cleanup 兜底 flush（同分组 effect），关窗/崩溃不丢最近 500ms 改动。
+    const flushMeta = () => {
+      const state = useAppStore.getState();
+      const meta: PortMetaEntry[] = state.ports
+        .filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
+        // issue #11：meta 携带 mode——只有 tty 需要持久化（trx 是默认值，缺省即 trx）。
+        .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
+      state.setConfig({ portMeta: meta });
+      storageService.savePortMeta(meta).catch((e) => {
+        console.warn('[useAppInit] Failed to auto-save port meta:', e);
+      });
+    };
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
       // 端口数组引用未变（仅流量/UI 等其它字段更新）时跳过，避免每次 TX/RX
       // 统计都重算签名；3s 轮询会重建数组但这不携带 alias/isHidden 变化，
@@ -173,20 +193,15 @@ export function useAppInit() {
       if (timeoutId !== null) clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
         timeoutId = null;
-        const state = useAppStore.getState();
-        const meta: PortMetaEntry[] = state.ports
-          .filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
-          // issue #11：meta 携带 mode——只有 tty 需要持久化（trx 是默认值，缺省即 trx）。
-          .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
-        state.setConfig({ portMeta: meta });
-        storageService.savePortMeta(meta).catch((e) => {
-          console.warn('[useAppInit] Failed to auto-save port meta:', e);
-        });
+        flushMeta();
       }, 500);
     });
     return () => {
       unsubscribe();
-      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        flushMeta();
+      }
     };
   }, []);
 }

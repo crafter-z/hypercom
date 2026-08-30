@@ -5,23 +5,28 @@
 
 /**
  * Convert a space-separated hex string (e.g. "41 42 43") to a string ("ABC").
- * Empty / whitespace-only input yields "". Tokens that are not a valid single
- * byte (NaN or outside 0x00–0xFF) are skipped.
+ * Empty / whitespace-only input yields "". Tokens that don't match
+ * /^[0-9a-fA-F]{1,2}$/ are skipped. Bytes are decoded as UTF-8 so multi-byte
+ * sequences (e.g. "E4 B8 AD" -> "中") round-trip correctly.
  */
 export function hexToString(hex: string): string {
   const trimmed = hex.trim();
   if (trimmed.length === 0) return '';
-  const bytes = trimmed.split(/\s+/);
-  return bytes.map(b => {
-    const code = parseInt(b, 16);
-    if (isNaN(code) || code < 0 || code > 0xFF) return '';
-    return String.fromCharCode(code);
-  }).join('');
+  const bytes: number[] = [];
+  for (const token of trimmed.split(/\s+/)) {
+    if (!/^[0-9a-fA-F]{1,2}$/.test(token)) continue;
+    bytes.push(parseInt(token, 16));
+  }
+  if (bytes.length === 0) return '';
+  return new TextDecoder('utf-8').decode(Uint8Array.from(bytes));
 }
 
 /**
  * Convert a string to a space-separated uppercase hex string (e.g. "ABC" -> "41 42 43").
+ * Encodes as UTF-8 so non-Latin characters emit their multi-byte representation.
  */
 export function stringToHex(str: string): string {
-  return Array.from(str).map(c => c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')).join(' ');
+  return Array.from(new TextEncoder().encode(str))
+    .map(b => b.toString(16).toUpperCase().padStart(2, '0'))
+    .join(' ');
 }

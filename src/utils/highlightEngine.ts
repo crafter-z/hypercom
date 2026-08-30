@@ -34,9 +34,11 @@ export function applyHighlightSets(
       try {
         if (rule.isRegex) {
           if (rule.pattern.length > 200) continue;
+          // ReDoS 防护：短模式也可能触发指数回溯（如 (a+)+$），仅对前 5000 字符跑 exec
+          const safeText = text.length > 5000 ? text.slice(0, 5000) : text;
           const regex = new RegExp(rule.pattern, 'g');
           let match: RegExpExecArray | null;
-          while ((match = regex.exec(text)) !== null) {
+          while ((match = regex.exec(safeText)) !== null) {
             allMatches.push({
               start: match.index,
               end: match.index + match[0].length,
@@ -107,7 +109,7 @@ function buildStyle(rule: HighlightRule): string {
   const styles: string[] = [];
   if (rule.color) {
     // Only allow valid CSS color values (#hex, rgb, named colors)
-    if (/^#[0-9a-fA-F]{3,8}$/.test(rule.color) || /^(rgb|hsl)a?\(/.test(rule.color) || /^[a-z]+$/i.test(rule.color)) {
+    if (/^#[0-9a-fA-F]{3,8}$/.test(rule.color) || /^(rgb|hsl)a?\([^)]*\)$/.test(rule.color) || /^[a-z]+$/i.test(rule.color)) {
       styles.push(`color:${rule.color}`);
     }
   }

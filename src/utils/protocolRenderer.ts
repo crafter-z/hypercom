@@ -7,6 +7,7 @@
 
 import type { TerminalLine, ParsedField } from '../types';
 import { escapeHtml } from './highlightEngine';
+import { decodeBytes } from './lineText';
 
 /**
  * Validate that a color string is safe for CSS injection.
@@ -15,7 +16,7 @@ import { escapeHtml } from './highlightEngine';
 function isValidColor(color: string): boolean {
   return (
     /^#[0-9a-fA-F]{3,8}$/.test(color) ||
-    /^(rgb|hsl)a?\(/.test(color) ||
+    /^(rgb|hsl)a?\([^)]*\)$/.test(color) ||
     /^[a-z]+$/i.test(color)
   );
 }
@@ -60,11 +61,15 @@ function renderHexMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): s
 }
 
 /**
- * Render bytes in text mode: group consecutive bytes by field, decode as UTF-8, escapeHtml.
- * Field groups are wrapped in colored <span> tags.
+ * Render bytes in text mode: group consecutive bytes by field, decode under the
+ * port's current encoding, escapeHtml. Field groups wrapped in colored <span> tags.
  * Gap groups are rendered as plain escaped text.
  */
-function renderTextMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): string {
+function renderTextMode(
+  rawData: Uint8Array,
+  coverage: (ParsedField | null)[],
+  encoding: string,
+): string {
   const parts: string[] = [];
   let i = 0;
   while (i < rawData.length) {
@@ -74,7 +79,8 @@ function renderTextMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): 
       groupBytes.push(rawData[i]);
       i++;
     }
-    const decoded = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(groupBytes));
+    // 按端口当前编码解码（issue #14 / P2-2）：避免硬编码 UTF-8 导致 GBK 等字段乱码
+    const decoded = decodeBytes(new Uint8Array(groupBytes), encoding);
     const escaped = escapeHtml(decoded);
     if (currentField && isValidColor(currentField.color)) {
       parts.push(`<span style="color:${currentField.color}">${escaped}</span>`);
@@ -85,7 +91,6 @@ function renderTextMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): 
   }
   return parts.join('');
 }
-
 /**
  * Render a protocol-parsed terminal line as colored HTML.
  *
@@ -93,14 +98,16 @@ function renderTextMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): 
  * a colored `<span>`. Non-field gap bytes are rendered without color.
  *
  * @param line - The terminal line to render. Must have rawData and parsedFields.
+ * @param encoding - 端口当前编码（默认 'UTF-8'）：text 模式下按此编码解码字段字节，
+ *   避免硬编码 UTF-8 导致 GBK 等编码字段乱码（issue #14 / P2-2）。
  * @returns An HTML string suitable for dangerouslySetInnerHTML.
  *
  * - In hex mode (line.isHex === true): each byte → 2-char uppercase hex, spaced.
- * - In text mode (line.isHex === false): bytes decoded via UTF-8 TextDecoder.
+ * - In text mode (line.isHex === false): bytes decoded under the given encoding.
  *
  * Falls back to escapeHtml(line.content) if rawData or parsedFields are missing/empty.
  */
-export function renderProtocolLine(line: TerminalLine): string {
+export function renderProtocolLine(line: TerminalLine, encoding: string = 'UTF-8'): string {
   if (!line.rawData || !line.parsedFields || line.parsedFields.length === 0) {
     return escapeHtml(line.content ?? '');
   }
@@ -118,5 +125,5 @@ export function renderProtocolLine(line: TerminalLine): string {
   if (line.isHex) {
     return renderHexMode(rawData, coverage);
   }
-  return renderTextMode(rawData, coverage);
+  return renderTextMode(rawData, coverage, encoding);
 }

@@ -121,7 +121,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     for (const tab of useAppStore.getState().tabs) {
       const port = useAppStore.getState().ports.find(p => p.id === tab.id);
       if (!port || port.status === 'connected' || port.status === 'connecting') continue;
-      await openPort(tab.id, port.baudRate || 115200);
+      await openPort(tab.id);
       await new Promise(r => setTimeout(r, 100));
     }
   }, [openPort]);

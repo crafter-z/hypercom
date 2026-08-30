@@ -14,7 +14,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { logService } from '../../services/tauri';
 import { hexToString, stringToHex } from '../../utils/hexUtils';
 import { formatTerminalTimestamp } from '../../utils/timeFormat';
-import { formatLineForCopy } from './terminalSearch';
+import { formatLineForCopy } from '../../utils/terminalSearch';
 import { getLineText } from '../../utils/lineText';
 import { notifyError } from '../../stores/useToastStore';
 import { writeClipboardText } from '../../utils/clipboard';

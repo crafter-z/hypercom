@@ -45,13 +45,15 @@ describe('ProtocolFrameReassembler', () => {
     expect(result).toEqual([]);
   });
 
-  it('flushes a non-matching single byte when a header is required', () => {
+  it('retains a single byte that could be a partial header (P1-3)', () => {
+    // P1-3：header=AA BB，喂入单字节 [0x00] 不匹配 header 且 buffer.length(1)
+    // ≤ keep(headerLen-1=1) → 保留该字节等下一 feed，不冲掉（旧实现会冲掉整 buffer）。
+    // 若该字节恰好是 header 前缀（如 0xAA），下一 feed 带 0xBB 即可拼出 header。
     const reassembler = new ProtocolFrameReassembler(template());
 
     const result = reassembler.feed([0x00]);
-
     expect(extractFrames(result)).toHaveLength(0);
-    expect(extractRaw(result)).toEqual([0x00]);
+    expect(extractRaw(result)).toEqual([]); // 字节被保留，不作为 raw 冲掉
   });
 
   it('parses a complete frame from a single feed', () => {

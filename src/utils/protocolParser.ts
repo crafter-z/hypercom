@@ -392,9 +392,15 @@ export class ProtocolFrameReassembler {
         // Scan for header
         const headerPos = findHeader(this.buffer, headerBytes);
         if (headerPos === -1) {
-          // No header found — flush all buffer as non-frame bytes
-          emitRaw(this.buffer);
-          this.buffer = [];
+          // P1-3：无完整 header 时，不要冲掉整个 buffer——保留尾部 (headerLen-1)
+          // 字节：feed 边界可能落在 header 内部（如 header=AA 55，buffer 末尾恰为
+          // AA），下一 feed 带来 55 即可拼出 header。旧实现冲掉整个 buffer 会使
+          // 跨事件边界的帧永久降级为裸流（header 永不再相邻）。
+          const keep = headerBytes.length - 1;
+          if (this.buffer.length > keep) {
+            emitRaw(this.buffer.slice(0, this.buffer.length - keep));
+            this.buffer = this.buffer.slice(this.buffer.length - keep);
+          }
           break;
         }
         // Flush bytes before header match

@@ -125,8 +125,8 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
   }, [setPorts]);
 
   useEffect(() => {
-    refreshPorts();
     if (pollIntervalMs > 0) {
+      refreshPorts();
       const timer = setInterval(refreshPorts, pollIntervalMs);
       return () => clearInterval(timer);
     }

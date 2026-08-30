@@ -46,6 +46,12 @@ async function runReconnectLoop(portId: string) {
     }
     try {
       await serialService.attemptReconnect(portId);
+      // P0-2：attemptReconnect in-flight 期间用户可能点了「断开」——closePort 已执行
+      // 但本 await 才返回。若不复查，端口会被强行标回 connected、日志重启、弹「重连成功」，
+      // 与用户意图及后端实际状态背离。await 后再查一次用户关闭意图，命中则放弃本次重连。
+      if (userClosingPortIds.has(portId)) {
+        break;
+      }
       // Mirror openPort's post-connect side effects — attemptReconnect alone
       // leaves the store status stale and (with autoSaveLog on) silently
       // stops logging after a drop/reconnect cycle.
@@ -102,7 +108,8 @@ const portOpInFlight = new Set<string>();
 
 export function useSerialConnection() {
   const updatePort = useAppStore((s) => s.updatePort);
-  const ports = useAppStore((s) => s.ports);
+  // ports 仅在 toggleConnection 内用，订阅会使 App 根（经 useHotkeys→useSerialConnection）
+  // 每 3s 端口轮询重渲染。改为 getState() 实时读，不订阅。
 
   // 订阅一次重连提示事件（通过引用计数，避免 Sidebar/TabBar 多实例导致重复监听）
   useEffect(() => {
@@ -137,7 +144,7 @@ export function useSerialConnection() {
     };
   }, []);
 
-  const openPort = useCallback(async (portId: string, _baudRate: number = 115200) => {
+  const openPort = useCallback(async (portId: string) => {
     // In-flight guard: 同一事件循环内连点两次（Sidebar 按钮 / Ctrl+K / 批量开）
     // 会并发 open 同一串口句柄——'connecting' 状态已同步写入但调用方的闭包
     // 还是旧快照，短路不生效。in-flight 期间直接 no-op。
@@ -232,14 +239,14 @@ export function useSerialConnection() {
   }, [updatePort]);
 
   const toggleConnection = useCallback(async (portId: string) => {
-    const port = ports.find((p) => p.id === portId);
+    const port = useAppStore.getState().ports.find((p) => p.id === portId);
     if (!port || port.status === 'connecting') return;
     if (port.status === 'connected') {
       await closePort(portId);
     } else {
-      await openPort(portId, port.baudRate || 115200);
+      await openPort(portId);
     }
-  }, [ports, openPort, closePort]);
+  }, [openPort, closePort]);
 
   return { openPort, closePort, toggleConnection };
 }

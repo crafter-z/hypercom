@@ -34,6 +34,9 @@ export class RxLineAssembler {
   private pending: number[] = [];
   /** 上一个发射的分隔符是 CR：下一字节若是 LF 则视为 CRLF 对的后半，静默吞掉 */
   private pendingCR = false;
+  /** 刚做过强制发射（pending 达 maxPendingBytes）：紧跟的分隔符属于「已发射的行」，
+   *  不应再发射空块（否则产生幻影空行，issue #6-2 / P2-4）。任意后续字节后清除 */
+  private justForced = false;
 
   constructor(opts?: RxLineAssemblerOptions) {
     this.maxPendingBytes = opts?.maxPendingBytes ?? 4096;
@@ -58,15 +61,27 @@ export class RxLineAssembler {
       if (b === CR || b === LF) {
         // 分隔符：发射当前行（pending 为空时即空块 = 空行），重置 pending。
         // CR 额外置 pendingCR，用于识别跨 feed 的 CRLF 对。
+        if (this.justForced && this.pending.length === 0) {
+          // 强制发射后紧跟的分隔符：内容已在强制发射时落盘，此分隔符只终结
+          // 「已发射的行」，不应再发射空块（P2-4 幻影空行）。CR 仍置 pendingCR
+          // 以吞掉配对的 LF，使整段 CRLF 都归属于已发射行。
+          this.justForced = false;
+          if (b === CR) this.pendingCR = true;
+          continue;
+        }
         lines.push(this.pending);
         this.pending = [];
+        this.justForced = false;
         if (b === CR) this.pendingCR = true;
       } else {
         this.pending.push(b);
+        this.justForced = false;
         if (this.pending.length >= this.maxPendingBytes) {
           // 强制发射：防止无换行二进制流无界增长。发射后继续扫描本段剩余字节
           lines.push(this.pending);
           this.pending = [];
+          // 标记刚强制发射：紧跟的分隔符属于本行，不再发射空块（P2-4）
+          this.justForced = true;
         }
       }
     }
@@ -78,6 +93,7 @@ export class RxLineAssembler {
     const tail = this.pending;
     this.pending = [];
     this.pendingCR = false;
+    this.justForced = false;
     return tail;
   }
 
@@ -90,5 +106,6 @@ export class RxLineAssembler {
   reset(): void {
     this.pending = [];
     this.pendingCR = false;
+    this.justForced = false;
   }
 }
