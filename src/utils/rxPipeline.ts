@@ -24,30 +24,7 @@ import type { TerminalLine } from '../types';
 import { RxLineAssembler } from './rxAssembler';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
-import { useToastStore } from '../stores/useToastStore';
-import { appendTerminalLines, evaluateSoftBackstop } from './terminal/viewportManager';
-import i18n from '../i18n';
-
-/** 每端口内存裁剪 toast 节流：同一端口在窗口内至多提示一次，避免高频 RX 刷屏。 */
-const TRIM_TOAST_THROTTLE_MS = 10_000;
-const trimToastLastAt = new Map<string, number>();
-
-/**
- * 因内存限制清屏的通知（issue #6-2）。由 RxPipeline 接线层在 append 返回
- * trimmed=true 时触发（接线层保持纯净，避免 useToastStore→i18n→useAppStore
- * 的模块级循环依赖）。
- */
-function notifyMemoryTrim(portId: string): void {
-  const now = Date.now();
-  if (now - (trimToastLastAt.get(portId) ?? 0) >= TRIM_TOAST_THROTTLE_MS) {
-    trimToastLastAt.set(portId, now);
-    useToastStore.getState().push({
-      severity: 'warning',
-      message: i18n.t('toast.memoryTrim', { port: portId }),
-      durationMs: 5000,
-    });
-  }
-}
+import { appendTerminalLines } from './terminal/viewportManager';
 
 export interface RxPipelineOptions {
   /** 批量写入终端 store（每端口每 tick 一次） */
@@ -56,6 +33,10 @@ export interface RxPipelineOptions {
   getEncodingLabel: (portId: string) => string;
   /** 是否丢弃解码后 trim 为空（纯空白）的行 */
   getIgnoreEmptyChars: () => boolean;
+  /** 每端口每条**完整行**组装完成并解码后触发（issue #14 P1-1：触发器需在
+   *  行边界匹配而非读事件块边界）。rawData 为该行的原始字节，text 为当前
+   *  编码下的解码文本。在入队前调用，便于调用方做行级匹配。可选；不传则跳过。 */
+  onLineAssembled?: (portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }) => void;
   /** 静默 flush 超时（ms）：距上次事件这么久仍未终结的尾部会被冲刷。默认 250 */
   silenceFlushMs?: number;
   /** 转发给组装器的强制发射阈值（字节）。默认 4096 */
@@ -120,6 +101,10 @@ export class RxPipeline {
   private readonly scheduleFlush: (cb: () => void) => number;
   private readonly cancelFlush: (handle: number) => void;
   private readonly ports = new Map<string, PortRxState>();
+  /** 行级触发器钩子（P1-1）：由 useSerialReceive 在挂载时注入，每条完整行组装
+   *  完成后触发。可被覆盖（多次 set 取最后一次）。 */
+  private onLineAssembledCb?: (portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }) => void;
+
   /** 全管线唯一的批写 tick 句柄（非每端口一个） */
   private flushTickHandle: number | null = null;
 
@@ -143,12 +128,17 @@ export class RxPipeline {
         return setTimeout(cb, FALLBACK_TICK_MS);
       });
     this.cancelFlush = opts.cancelFlush ?? defaultCancelFlush;
+    this.onLineAssembledCb = opts.onLineAssembled;
     // issue #6-10 方案3：页面隐藏时 rAF 停摆，已调度的 rAF tick 永远不会触发——
     // 监听 visibilitychange，隐藏时把未触发的 tick 按当前调度器重排
     // （隐藏 → setTimeout 兜底排空；恢复可见 → 换回 rAF 更低延迟）。
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
     }
+  }
+  /** P1-1：注入/覆盖行级触发器钩子（useSerialReceive 挂载时调用）。 */
+  setOnLineAssembled(cb: (portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }) => void): void {
+    this.onLineAssembledCb = cb;
   }
 
   /** visibilitychange 处理：取消未触发的批写 tick，按当前可见性用默认调度器重排 */
@@ -184,8 +174,14 @@ export class RxPipeline {
         // issue #14：不再存解码后的 content 字符串（渲染/搜索/过滤按需惰性解码）。
         const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
         const text = this.decodeUnderCurrentLabel(state, portId, raw);
-        // ignoreEmptyChars 语义与旧路径一致：解码后 trim 为空（纯分隔/空白）的行丢弃
+        // ignoreEmptyChars 语义与旧路径一致：解码后 trim 为空（纯分隔/空白）的行丢弃。
+        // 空行也跳过触发器钩子（无内容可匹配），与旧实现行为一致。
         if (ignoreEmptyChars && !text.trim()) continue;
+        // P1-1：行级触发器钩子——在完整行入队前触发，调用方按行边界匹配
+        //（修复旧实现按读事件块匹配导致跨块模式失效 / exact 难命中的缺陷）。
+        if (this.onLineAssembledCb) {
+          this.onLineAssembledCb(portId, { rawData: raw, text, timestamp });
+        }
         state.queue.push({
           timestamp,
           direction: 'RX',
@@ -249,10 +245,15 @@ export class RxPipeline {
     if (!state) return;
     const tail = state.assembler.takeTail();
     if (tail.length === 0) return;
+    const raw = new Uint8Array(tail);
+    // issue #14 惰性解码：尾行按当前编码预解码并存入 content，避免随后编码切换
+    // 导致该行按新编码重新解码产生乱码（与 flushAndReset「按当前编码冲刷落盘」语义一致）。
+    const text = this.decodeUnderCurrentLabel(state, portId, raw);
     state.queue.push({
       timestamp: state.lastEventTs ?? Date.now(),
       direction: 'RX',
-      rawData: new Uint8Array(tail),
+      rawData: raw,
+      content: text,
       isHex: false,
     });
   }
@@ -411,15 +412,9 @@ export function getRxPipeline(): RxPipeline {
   if (!rxPipelineSingleton) {
     rxPipelineSingleton = new RxPipeline({
       appendLines: (portId, lines) => {
-        // 方案B（issue #14）：批写入环形缓冲区；返回 true 表示缓冲区丢弃过
-        // 最旧行（每端口硬约束裁剪），接线层负责弹「因内存限制清屏」的通知。
-        const trimmed = appendTerminalLines(portId, lines);
-        if (trimmed) notifyMemoryTrim(portId);
-        // issue #14：应用级软兜底——前端 JS 堆超 memoryLimitMb 时，对候选
-        // 端口裁半（双闸：bytes > maxBytes/2 + 10s 冷却）。硬约束管单端口上限，
-        // 软兜底管应用级总上限（方案B 重构时丢失、此处恢复）。
-        const softTrimmed = evaluateSoftBackstop();
-        for (const pid of softTrimmed) notifyMemoryTrim(pid);
+      // 方案B（issue #14）：批写入环形缓冲区（最大显示行数滚动窗口）。
+      // issue #16 改版后无内存预算 toast——逐行覆盖是常态滚动，非异常事件。
+      appendTerminalLines(portId, lines);
       },
       getEncodingLabel: (portId) => {
         const encoding = useTerminalStore.getState().terminals[portId]?.encoding || 'UTF-8';

@@ -15,17 +15,17 @@
  * Each webview (main window / popout) has its own module scope → its own
  * registry, preserving the existing isolation semantics.
  *
- * Trim semantics: the ring buffer's fixed capacity IS the per-port memory
- * budget. `appendLines` returns whether anything was dropped; the RxPipeline
- * wiring layer owns the user-facing "buffer trimmed" toast.
+ * Trim semantics (issue #16 redesign): the ring buffer is bounded by the
+ * user-configured 最大显示行数 (`maxDisplayLines` → `maxLines`) alone.
+ * Overflow evicts the oldest line — a plain rolling window. No byte budgets,
+ * no app-level soft backstop, no memory trim toast.
  */
 import type { DisplayFormat, Encoding, TerminalLine } from '../../types';
-import { readJsHeapBytes } from '../jsHeap';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { linePassesFilter, type DirectionFilter } from '../lineFilter';
-import { getSearchableText } from '../../components/MainDisplay/terminalSearch';
-import { MAX_BYTE_DRAIN_PER_BATCH, TerminalBuffer } from './TerminalBuffer';
+import { getSearchableText } from '../terminalSearch';
+import { TerminalBuffer } from './TerminalBuffer';
 import {
   TerminalRenderer,
   type RendererConfig,
@@ -35,14 +35,11 @@ import {
 /** Compact the lazy filter/search offset after this many logical drops. */
 const COMPACT_THRESHOLD = 4096;
 
-/** Config-derived line + byte budgets (mirror the old issue #6-2 defaults). */
-export function computeBufferLimits(): { maxLines: number; maxBytes: number } {
+/** Config-derived line budget (issue #16 redesign: 最大显示行数, no byte budget). */
+export function computeBufferLimits(): { maxLines: number } {
   const cfg = useAppStore.getState().config;
-  const budgetMb = cfg.memoryPerPortBudgetMb ?? 200;
-  return {
-    maxLines: Math.max(1000, Math.floor(budgetMb * 500)),
-    maxBytes: budgetMb * 1024 * 1024,
-  };
+  const maxDisplayLines = cfg.maxDisplayLines ?? 100000;
+  return { maxLines: Math.max(1000, Math.floor(maxDisplayLines)) };
 }
 
 interface SortedList {
@@ -79,7 +76,7 @@ export class TerminalViewportManager {
   private locked = true;
   private gestureActive = false;
 
-  constructor(portId: string, limits: { maxLines: number; maxBytes: number }) {
+  constructor(portId: string, limits: { maxLines: number }) {
     this.portId = portId;
     this.buffer = new TerminalBuffer(limits);
   }
@@ -95,8 +92,8 @@ export class TerminalViewportManager {
 
   // ==================== Data ingestion ====================
 
-  /** Append lines (RX batches / TX echo / tool output / replay). Returns true
-   *  when the buffer dropped oldest lines (memory-budget trim). */
+  /** Append lines (RX batches / TX echo / tool output / replay).
+   *  Returns true when the oldest line was evicted (capacity rolling window). */
   appendLines(lines: TerminalLine[]): boolean {
     if (this.destroyed) return false;
     let trimmed = false;
@@ -104,9 +101,7 @@ export class TerminalViewportManager {
     const displayFormat = this.getDisplayFormat();
     for (const line of lines) {
       const beforeFirst = this.buffer.firstSeq;
-      // issue #10：字节预算 drain 限幅——一帧一批至多裁 MAX_BYTE_DRAIN_PER_BATCH
-      // 行，剩余留待后续帧，避免单帧 firstSeq 前移数十万行引发视口抖动。
-      const r = this.buffer.append(line, MAX_BYTE_DRAIN_PER_BATCH);
+      const r = this.buffer.append(line);
       if (r.trimmed) trimmed = true;
       // Incremental filter/search: match the new line once, extend the lists.
       if (this.filterActive) {
@@ -119,8 +114,8 @@ export class TerminalViewportManager {
           this.matches.seqs.push(r.seq);
         }
       }
-      // The buffer may have dropped any number of oldest lines (capacity
-      // overwrite or byte-budget drain) — drop each from the sorted lists.
+      // The buffer may have evicted any number of oldest lines — drop each
+      // from the sorted lists.
       for (let s = beforeFirst; s < this.buffer.firstSeq; s++) {
         this.dropTrimmedSeq(s);
       }
@@ -154,26 +149,10 @@ export class TerminalViewportManager {
   }
 
   /** Live buffer-limit change (config edited while streaming). */
-  applyLimits(limits: { maxLines: number; maxBytes: number }): void {
+  applyLimits(limits: { maxLines: number }): void {
     this.buffer.setLimits(limits);
     this.pruneTrimmed();
     this.requestRender();
-  }
-
-  /**
-   * 软兜底裁剪（issue #14）：应用级 JS 堆超 memoryLimitMb 时，由模块级
-   * `evaluateSoftBackstop` 对每个候选端口调用——drop 缓冲到半，同步裁掉
-   * 过滤/搜索列表中已不可达的 seq，并重渲染。调用方负责双闸（候选判定 +
-   * 冷却）与 toast。返回是否实际裁剪。
-   */
-  softTrim(): boolean {
-    if (this.destroyed) return false;
-    const trimmed = this.buffer.trimToHalf();
-    if (trimmed) {
-      this.pruneTrimmed();
-      this.requestRender();
-    }
-    return trimmed;
   }
 
   // ==================== Filter ====================
@@ -219,7 +198,15 @@ export class TerminalViewportManager {
   }
 
   getMatchCount(): number {
-    return this.matches.seqs.length - this.matches.offset;
+    if (this.frozenSeq === null) {
+      return this.matches.seqs.length - this.matches.offset;
+    }
+    let n = 0;
+    for (let i = this.matches.offset; i < this.matches.seqs.length; i++) {
+      if (this.matches.seqs[i] > this.frozenSeq) break;
+      n++;
+    }
+    return n;
   }
 
   getCurrentMatchIndex(): number {
@@ -232,6 +219,7 @@ export class TerminalViewportManager {
     if (count === 0) return false;
     this.currentMatch = ((idx % count) + count) % count;
     const targetSeq = this.matches.seqs[this.matches.offset + this.currentMatch];
+    if (this.frozenSeq !== null && targetSeq > this.frozenSeq) return false;
     this.requestRender();
     this.scrollToSeq(targetSeq, 'center');
     return true;
@@ -450,67 +438,12 @@ export function releaseViewportManager(portId: string): void {
     vm.dispose();
     managers.delete(portId);
   }
-  lastSoftTrimAt.delete(portId);
-  lastSoftTrimHeap.delete(portId);
-}
-
-// ==================== App-level soft backstop (issue #14) ====================
-
-/** 软兜底每端口冷却：RSS/JS 堆超限会持续满足，无冷却则每个 append 批都裁半，
- *  高频接收下用户视野里"刚加载的半页又被前半页顶掉"。与 toast 节流同量级。 */
-const SOFT_TRIM_COOLDOWN_MS = 10_000;
-const lastSoftTrimAt = new Map<string, number>();
-/** 软兜底裁剪时的 JS 堆占用基线（issue #10）：冷却期满后若堆仍未回升到该基线
- *  以上（裁掉的内存还没被重新分配回来，或 GC 未回落），不再重复裁——否则
- *  10s 冷却期满、堆仍超限时形成固定节律的周期抖动（每次软裁都让视口跳一次）。 */
-const lastSoftTrimHeap = new Map<string, number>();
-
-/** 前端 V8 JS 堆占用（字节）——见 utils/jsHeap.ts 单一实现（软兜底评估用）。 */
-
-/**
- * 应用级软兜底评估（issue #14）：前端 JS 堆超过 `memoryLimitMb` 时，对每个
- * 「缓冲已可观（bytes > maxBytes/2）」且「冷却窗口外」的端口执行 `softTrim`
- * （裁半 + 同步过滤/搜索列表 + 重渲染）。返回被裁的 portId 列表——调用方
- * （RxPipeline 接线层）据此弹 toast。
- *
- * 双闸照搬旧设计（commit 9f6d56a，方案B重构时丢失、此处恢复）：
- *  1. 只裁 bytes > maxBytes/2 的端口——小缓冲不是超限元凶，裁它只会让用户
- *     看到"半页就被刷掉"。
- *  2. 每端口 10s 冷却——RSS/堆采样超限后持续满足，无冷却则每批裁半。
- *
- * 与每端口硬约束（TerminalBuffer.append 内 maxBytes/maxLines）互补：硬约束
- * 无条件立即裁、管单端口上限；软兜底有冷却、管应用级总上限。
- */
-export function evaluateSoftBackstop(): string[] {
-  const limitMb = useAppStore.getState().config.memoryLimitMb;
-  if (limitMb <= 0) return [];
-  const heapBytes = readJsHeapBytes();
-  if (heapBytes <= 0 || heapBytes <= limitMb * 1024 * 1024) return [];
-
-  const now = Date.now();
-  const trimmed: string[] = [];
-  for (const [portId, vm] of managers) {
-    // 候选闸：只裁缓冲已可观的端口
-    if (vm.buffer.bytes <= vm.buffer.maxBytes / 2) continue;
-    // 冷却闸
-    if (now - (lastSoftTrimAt.get(portId) ?? 0) < SOFT_TRIM_COOLDOWN_MS) continue;
-    // 回升闸（issue #10）：上次裁剪时的堆占用作为本次评估基线——堆未回升到
-    // 基线以上说明裁掉的内存还没被重新分配（或 GC 未回落），再裁只会制造
-    // 周期抖动；只有堆真正重新涨上去才继续裁。
-    const baseline = lastSoftTrimHeap.get(portId) ?? 0;
-    if (baseline > 0 && heapBytes <= baseline) continue;
-    if (vm.softTrim()) {
-      lastSoftTrimAt.set(portId, now);
-      lastSoftTrimHeap.set(portId, heapBytes);
-      trimmed.push(portId);
-    }
-  }
-  return trimmed;
 }
 
 // ==================== Adapter surface (non-React callers) ====================
 
-/** Append lines to a port's buffer (RxPipeline appendLines target). */
+/** Append lines to a port's buffer (RxPipeline appendLines target).
+ *  Returns true when the oldest line was evicted (rolling window). */
 export function appendTerminalLines(portId: string, lines: TerminalLine[]): boolean {
   // issue #11：标签页关闭（releaseViewportManager）后端口仍可能保持连接、RX
   // 数据继续到达——此时**不得复活** manager：关闭期间的数据会积压进新缓冲，

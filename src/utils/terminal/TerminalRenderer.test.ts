@@ -61,7 +61,7 @@ let container: HTMLDivElement;
 let renderer: TerminalRenderer;
 
 beforeEach(() => {
-  buf = new TerminalBuffer({ maxLines: 10_000, maxBytes: 0 });
+  buf = new TerminalBuffer({ maxLines: 10_000 });
   ({ container, renderer } = mount());
 });
 
@@ -224,7 +224,7 @@ describe('TerminalRenderer dirty tracking', () => {
   });
 
   it('head trim does not recreate surviving rows', () => {
-    const small = new TerminalBuffer({ maxLines: 20, maxBytes: 0 });
+    const small = new TerminalBuffer({ maxLines: 20 });
     fill(small, Array.from({ length: 20 }, (_, i) => String(i)));
     renderer.render(small, identityView({ followEnabled: false }));
     container.scrollTop = 0;
@@ -245,7 +245,7 @@ describe('TerminalRenderer dirty tracking', () => {
     // 旧窗口值，仅按 visIdx 判定 stale 永不触发 → 旧行残留、每帧新建窗口行 →
     // DOM 行数无限增长（e2e 实测 6669 行 vs 正常 27）→ 每帧 O(n) 渲染 → 输出
     // 区抖动。seq 窗口边界检查必须回收被裁行。
-    const small = new TerminalBuffer({ maxLines: 20, maxBytes: 0 });
+    const small = new TerminalBuffer({ maxLines: 20 });
     fill(small, Array.from({ length: 20 }, (_, i) => String(i)));
     // 底部窗口（follow）渲染 20 行。
     renderer.render(small, identityView({ followEnabled: true }));
@@ -532,7 +532,7 @@ describe('TerminalRenderer scroll + recycling', () => {
     // 容量受限的 buffer，先填满并渲染（窗口在底部），再触发一次大 trim，然后
     // 向上滚动露出裁后头部，断言：所有 active 行 translateY 唯一 + DOM order
     // == seq 升序。
-    const small = new TerminalBuffer({ maxLines: 60, maxBytes: 0 });
+    const small = new TerminalBuffer({ maxLines: 60 });
     fill(small, Array.from({ length: 60 }, (_, i) => String(i)));
     // 渲染到底部（follow），窗口覆盖最新 ~24 行。
     renderer.render(small, identityView({ followEnabled: true }));
@@ -571,7 +571,7 @@ describe('TerminalRenderer large-trim anchor (issue #10)', () => {
     // 非 follow（用户上滚读历史）状态下，字节预算大 drain 单帧前移 firstSeq
     // 数十万行：修复前 scrollTop 停在超界像素值（浏览器会把滚动位置夹到新内容
     // 底），视口被甩走、阅读位置丢失。修复后按上一帧视口顶部 seq 恢复锚点。
-    const big = new TerminalBuffer({ maxLines: 500_000, maxBytes: 0 });
+    const big = new TerminalBuffer({ maxLines: 500_000 });
     fill(big, Array.from({ length: 200_000 }, (_, i) => String(i)));
     renderer.render(big, identityView({ followEnabled: false }));
     container.scrollTop = 100_000 * ROW_HEIGHT;
@@ -594,7 +594,7 @@ describe('TerminalRenderer large-trim anchor (issue #10)', () => {
   });
 
   it('clamps to the content top when the anchor row was trimmed (non-follow)', () => {
-    const big = new TerminalBuffer({ maxLines: 500_000, maxBytes: 0 });
+    const big = new TerminalBuffer({ maxLines: 500_000 });
     fill(big, Array.from({ length: 200_000 }, (_, i) => String(i)));
     renderer.render(big, identityView({ followEnabled: false }));
     container.scrollTop = 100_000 * ROW_HEIGHT;
@@ -608,7 +608,7 @@ describe('TerminalRenderer large-trim anchor (issue #10)', () => {
   });
 
   it('follow re-pins one-shot to the new bottom after a large trim', () => {
-    const big = new TerminalBuffer({ maxLines: 500_000, maxBytes: 0 });
+    const big = new TerminalBuffer({ maxLines: 500_000 });
     fill(big, Array.from({ length: 100_000 }, (_, i) => String(i)));
     renderer.render(big, identityView({ followEnabled: true }));
     expect(container.scrollTop).toBeGreaterThan(0);

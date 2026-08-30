@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TerminalLine } from '../../types';
-import { TerminalViewportManager, appendTerminalLines, appendTerminalLine, clearTerminal, computeBufferLimits, evaluateSoftBackstop, getViewportManager, releaseViewportManager } from './viewportManager';
+import { TerminalViewportManager, appendTerminalLines, appendTerminalLine, clearTerminal, computeBufferLimits, getViewportManager, releaseViewportManager } from './viewportManager';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 
@@ -16,7 +16,7 @@ let vm: TerminalViewportManager;
 beforeEach(() => {
   // Reset the display store so the manager reads clean defaults.
   useTerminalStore.setState({ terminals: {} });
-  vm = new TerminalViewportManager('COM1', { maxLines: 100, maxBytes: 0 });
+  vm = new TerminalViewportManager('COM1', { maxLines: 100 });
 });
 
 describe('TerminalViewportManager appendLines', () => {
@@ -27,11 +27,17 @@ describe('TerminalViewportManager appendLines', () => {
     expect(vm.buffer.lastSeq).toBe(1);
   });
 
-  it('reports trimmed when the buffer drops oldest lines', () => {
-    const small = new TerminalViewportManager('COM1', { maxLines: 2, maxBytes: 0 });
+  it('reports trimmed when the oldest line is evicted at capacity', () => {
+    const small = new TerminalViewportManager('COM1', { maxLines: 2 });
     small.appendLines([makeLine('a'), makeLine('b')]);
     expect(small.appendLines([makeLine('c')])).toBe(true);
     expect(small.buffer.firstSeq).toBe(1);
+    expect(small.buffer.length).toBe(2);
+  });
+
+  it('reports no trim while under capacity', () => {
+    vm.appendLines([makeLine('a')]);
+    expect(vm.appendLines([makeLine('b')])).toBe(false);
   });
 });
 
@@ -67,14 +73,14 @@ describe('TerminalViewportManager filter', () => {
   });
 
   it('trims dropped seqs from the filtered list (O(1) offset)', () => {
-    const small = new TerminalViewportManager('COM1', { maxLines: 3, maxBytes: 0 });
+    const small = new TerminalViewportManager('COM1', { maxLines: 3 });
     small.setFilter('all', '');
     small.appendLines([makeLine('a'), makeLine('b'), makeLine('c')]);
     expect(small.getVisibleCount()).toBe(3);
-    small.appendLines([makeLine('d')]); // drops 'a'
+    small.appendLines([makeLine('d')]); // evicts 'a'
     expect(small.getVisibleCount()).toBe(3);
-    small.appendLines([makeLine('e')]); // drops 'b'
-    small.appendLines([makeLine('f')]); // drops 'c'
+    small.appendLines([makeLine('e')]); // evicts 'b'
+    small.appendLines([makeLine('f')]); // evicts 'c'
     expect(small.getVisibleCount()).toBe(3);
   });
 });
@@ -148,7 +154,7 @@ describe('TerminalViewportManager replaceAll / clear / applyLimits', () => {
 
   it('applyLimits shrinks the buffer to the new capacity', () => {
     vm.appendLines([makeLine('a'), makeLine('b'), makeLine('c')]);
-    vm.applyLimits({ maxLines: 2, maxBytes: 0 });
+    vm.applyLimits({ maxLines: 2 });
     expect(vm.buffer.length).toBe(2);
     expect(vm.buffer.firstSeq).toBe(1); // kept b, c
   });
@@ -182,133 +188,15 @@ describe('viewportManager adapter functions', () => {
     releaseViewportManager('COM2');
   });
 
-  it('computeBufferLimits reads the config budget', () => {
-    useAppStore.getState().setConfig({ memoryPerPortBudgetMb: 64 });
+  it('computeBufferLimits reads maxDisplayLines from config', () => {
+    useAppStore.getState().setConfig({ maxDisplayLines: 64000 });
     const limits = computeBufferLimits();
-    expect(limits.maxLines).toBe(32000);
-    expect(limits.maxBytes).toBe(64 * 1024 * 1024);
-  });
-});
-
-describe('TerminalViewportManager softTrim', () => {
-  it('drops the oldest half of the buffer', () => {
-    const b = new TerminalViewportManager('COM1', { maxLines: 100, maxBytes: 0 });
-    for (let i = 0; i < 6; i++) b.appendLines([makeLine(String(i))]);
-    expect(b.buffer.length).toBe(6);
-    expect(b.softTrim()).toBe(true);
-    expect(b.buffer.length).toBe(3);
-    // 保留最新 3 行（3/4/5）
-    expect(b.buffer.getBySeq(b.buffer.firstSeq)?.rawData?.[0]).toBe('3'.charCodeAt(0));
+    expect(limits.maxLines).toBe(64000);
   });
 
-  it('returns false when buffer has ≤ 1 line', () => {
-    const b = new TerminalViewportManager('COM1', { maxLines: 100, maxBytes: 0 });
-    b.appendLines([makeLine('a')]);
-    expect(b.softTrim()).toBe(false);
-    expect(b.buffer.length).toBe(1);
-  });
-});
-
-describe('evaluateSoftBackstop', () => {
-  beforeEach(() => {
-    useAppStore.getState().resetConfig();
-    useTerminalStore.setState({ terminals: {} });
-    // 清掉可能残留的模块级 manager（上一个测试可能 getViewportManager 过）
-    for (const pid of ['COM1', 'COM2']) releaseViewportManager(pid);
-  });
-
-  it('returns [] when JS heap is under the limit', () => {
-    // 默认 memoryLimitMb=2048；performance.memory 在 jsdom 不存在 → readJsHeapBytes=0
-    expect(evaluateSoftBackstop()).toEqual([]);
-  });
-
-  it('returns [] when limit is 0 (disabled)', () => {
-    useAppStore.getState().setConfig({ memoryLimitMb: 0 });
-    expect(evaluateSoftBackstop()).toEqual([]);
-  });
-  it('trims candidate ports when JS heap exceeds the limit', () => {
-    // 造两个端口 manager，填入数据。maxBytes 设大——硬约束 byte drain 不先裁，
-    // 靠软兜底触发；maxLines 100 足够装 50 行。
-    const vm1 = getViewportManager('COM1');
-    const vm2 = getViewportManager('COM2');
-    vm1.buffer['maxBytesValue'] = 10_000_000;
-    vm2.buffer['maxBytesValue'] = 10_000_000;
-    for (let i = 0; i < 50; i++) {
-      vm1.appendLines([makeLine('x'.repeat(100))]);
-      vm2.appendLines([makeLine('y'.repeat(100))]);
-    }
-    expect(vm1.buffer.length).toBe(50);
-    expect(vm2.buffer.length).toBe(50);
-    // 候选闸要求 bytes > maxBytes/2：填完后把 maxBytes 调到刚好让条件成立
-    // （bytes ≈ 50×272 = 13600；maxBytes = 20000 → maxBytes/2 = 10000 < 13600 ✓）
-    vm1.buffer['maxBytesValue'] = 20_000;
-    vm2.buffer['maxBytesValue'] = 20_000;
-
-
-    // 把 memoryLimitMb 压到 1，并 stub performance.memory 超 limit
-    useAppStore.getState().setConfig({ memoryLimitMb: 1 });
-    const perf = performance as Performance & { memory?: { usedJSHeapSize?: number } };
-    Object.defineProperty(perf, 'memory', {
-      value: { usedJSHeapSize: 2 * 1024 * 1024 }, // 2MB > 1MB limit
-      configurable: true,
-    });
-    try {
-      const trimmed = evaluateSoftBackstop();
-      expect(trimmed).toContain('COM1');
-      expect(trimmed).toContain('COM2');
-      expect(vm1.buffer.length).toBe(25);
-      expect(vm2.buffer.length).toBe(25);
-      // 冷却闸：立即再调不再裁
-      expect(evaluateSoftBackstop()).toEqual([]);
-    } finally {
-      delete (perf as unknown as Record<string, unknown>).memory;
-      releaseViewportManager('COM1');
-      releaseViewportManager('COM2');
-    }
-  });
-
-  it('does not re-trim until the heap regrows past the post-trim baseline (issue #10)', () => {
-    // 冷却期满后若堆仍停留在上次裁剪时的占用（未重新涨上去），不再重复裁——
-    // 否则每 10s 冷却周期都裁一次半页，形成固定节律的视口抖动。
-    useAppStore.getState().setConfig({ memoryLimitMb: 1 });
-    const perf = performance as Performance & { memory?: { usedJSHeapSize?: number } };
-    Object.defineProperty(perf, 'memory', {
-      value: { usedJSHeapSize: 2 * 1024 * 1024 }, // 2MB > 1MB limit
-      configurable: true,
-    });
-    try {
-      const vm1 = getViewportManager('COM1');
-      vm1.buffer['maxBytesValue'] = 10_000_000;
-      for (let i = 0; i < 50; i++) vm1.appendLines([makeLine('x'.repeat(100))]);
-      // 候选闸要求 bytes > maxBytes/2：填完后把 maxBytes 调到刚好让条件在**裁后
-      // 仍成立**（bytes ≈ 50×268 = 13400；maxBytes = 13000 → maxBytes/2 = 6500
-      // < 13400 ✓，裁半后 25×268 = 6700 仍 > 6500 → 后续评估能走到冷却/回升闸）
-      vm1.buffer['maxBytesValue'] = 13_000;
-
-      const first = evaluateSoftBackstop();
-      expect(first).toContain('COM1');
-      expect(vm1.buffer.length).toBe(25);
-
-      // 冷却窗口内：不裁（原双闸）
-      expect(evaluateSoftBackstop()).toEqual([]);
-
-      // 冷却期满但堆未回升到基线（2MB）以上：不裁（修复前会再次裁半）
-      vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_001);
-      expect(evaluateSoftBackstop()).toEqual([]);
-      expect(vm1.buffer.length).toBe(25);
-
-      // 堆回升到基线以上：继续裁（每端口仍受冷却约束）
-      Object.defineProperty(perf, 'memory', {
-        value: { usedJSHeapSize: 3 * 1024 * 1024 },
-        configurable: true,
-      });
-      const second = evaluateSoftBackstop();
-      expect(second).toContain('COM1');
-      expect(vm1.buffer.length).toBe(12); // floor(25/2)
-    } finally {
-      delete (perf as unknown as Record<string, unknown>).memory;
-      vi.restoreAllMocks();
-      releaseViewportManager('COM1');
-    }
+  it('computeBufferLimits defaults maxLines to 100000 when unset', () => {
+    useAppStore.getState().setConfig({ maxDisplayLines: undefined as unknown as number });
+    const limits = computeBufferLimits();
+    expect(limits.maxLines).toBe(100000);
   });
 });

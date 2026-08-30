@@ -4,42 +4,31 @@
  *
  * Replaces the store's plain array + Immer produce + trimIfOverBudget:
  * - O(1) append: head pointer advances, no array shifting
- * - O(1) trim: overwrites the oldest slot once `maxLines` is reached; when
- *   the byte budget (`maxBytes`) is exceeded, drops oldest lines until the
- *   buffer holds at most half the budget (preserves the issue #6-2 "trim to
- *   50%" semantics as an amortized O(1) drain instead of one O(n) splice)
+ * - Line-capacity eviction (issue #16 redesign): the terminal is bounded by
+ *   `maxLines` (user-configurable 最大显示行数) alone. Once full, each new
+ *   line overwrites the oldest — a plain rolling window, no byte budgets,
+ *   no half-trims, no memory toasts.
  * - Stable sequence numbers: `append` assigns monotonically increasing seqs;
  *   trimming only moves the [firstSeq, lastSeq] window — the seqs of
  *   surviving lines never change, so a renderer can skip redrawing rows it
  *   already drew (stable keys)
- * - Bounded memory: maxLines (hard line cap) + maxBytes (byte cap) make the
- *   upper bound deterministic with no O(n) recount
+ * - Bounded memory: maxLines makes the line-count upper bound deterministic;
+ *   byte memory is bounded only per-line (not tracked here)
  *
  * Pure logic: no React/store/DOM dependencies, unit-testable under node.
  */
 import type { TerminalLine } from '../../types';
-import { lineBytes } from '../lineText';
 
 export interface TerminalBufferOptions {
-  /** Hard line capacity. Trimmed lines are overwritten from the head. */
+  /** Hard line capacity. Overflow evicts the oldest line (rolling window). */
   maxLines: number;
-  /** Byte budget for the buffered payload. Exceeding it drops oldest lines
-   *   until totalBytes ≤ maxBytes / 2 (50% trim semantics). 0 disables. */
-  maxBytes: number;
 }
 
-/** 每批 append 的字节预算 drain 上限（行）（issue #10）：字节预算越限时一次
- *  裁到 ≤50% 会让 firstSeq 单帧前移数十万行 → 内容总高度骤降 → 非 follow 视口
- *  被浏览器夹到内容底、follow 钉底目标暴跌 → 输出区抖动。批写方（viewportManager
- *  appendLines，一帧一批）传入该上限把单帧 drain 限幅；其余调用方（replaceAll
- *  等批量替换）不传则保持一次裁到半的旧语义。 */
-export const MAX_BYTE_DRAIN_PER_BATCH = 50_000;
-
-/** Result of a single append. `trimmed` = any oldest line was dropped. */
+/** Result of a single append. `trimmed` = the oldest line was evicted. */
 export interface AppendResult {
   /** Monotonic sequence number assigned to the appended line. */
   seq: number;
-  /** True when an existing line was dropped (capacity overwrite or byte trim). */
+  /** True when an existing line was dropped (capacity eviction). */
   trimmed: boolean;
 }
 
@@ -49,46 +38,26 @@ export class TerminalBuffer {
   private count = 0;
   /** Next seq to assign. Monotonic across clear() — seqs never collide. */
   private nextSeq = 0;
-  private totalBytes = 0;
   private maxLinesValue: number;
-  private maxBytesValue: number;
 
   constructor(opts: TerminalBufferOptions) {
     this.maxLinesValue = Math.max(1, Math.floor(opts.maxLines));
-    this.maxBytesValue = Math.max(0, opts.maxBytes);
     this.slots = new Array<TerminalLine | null>(this.maxLinesValue).fill(null);
   }
 
-  /** Append one line; returns its assigned seq + whether a trim occurred.
-   *  `drainLimit` caps the number of oldest lines the byte-budget drain may
-   *  drop in this single call (issue #10: bounds the single-frame head
-   *  advance; unlimited when omitted — the 50% target stays the drain goal,
-   *  the cap only slows how fast it is approached). */
-  append(line: TerminalLine, drainLimit?: number): AppendResult {
+  /** Append one line; returns its assigned seq + whether the oldest was evicted. */
+  append(line: TerminalLine): AppendResult {
     let trimmed = false;
     const seq = this.nextSeq++;
-    const added = lineBytes(line);
     if (this.count < this.maxLinesValue) {
       const idx = (this.head + this.count) % this.maxLinesValue;
       this.slots[idx] = line;
       this.count++;
     } else {
-      // Overwrite the oldest slot — account its bytes out.
-      const old = this.slots[this.head];
-      if (old) this.totalBytes -= lineBytes(old);
+      // Rolling window: overwrite the oldest slot, advance the head.
       this.slots[this.head] = line;
       this.head = (this.head + 1) % this.maxLinesValue;
       trimmed = true;
-    }
-    this.totalBytes += added;
-    // Byte budget: drain oldest until ≤ half the budget (or the per-call cap).
-    if (this.maxBytesValue > 0 && this.totalBytes > this.maxBytesValue) {
-      let budget = drainLimit ?? Infinity;
-      while (this.count > 0 && this.totalBytes > this.maxBytesValue / 2 && budget > 0) {
-        this.dropHead();
-        trimmed = true;
-        budget--;
-      }
     }
     return { seq, trimmed };
   }
@@ -121,7 +90,6 @@ export class TerminalBuffer {
     this.slots.fill(null);
     this.head = 0;
     this.count = 0;
-    this.totalBytes = 0;
   }
 
   /** Replace the whole buffer (popout snapshot / replay reset). */
@@ -131,61 +99,31 @@ export class TerminalBuffer {
   }
 
   /**
-   * Adjust the limits live (config change). Shrinking maxLines drops the
-   * oldest lines; the byte budget is then re-applied. Keeps the newest lines.
+   * Adjust the limit live (config change). Shrinking maxLines drops the
+   * oldest lines; keeps the newest lines.
    *
    * issue #14：无论 count 是否超过 newMax，只要 maxLines 变化就重建 slots 数组
    * 到新尺寸——否则收缩时旧槽位（newMax..oldSize）残留对已不可达行的引用，
    * 既不归还内存又干扰后续 modulo 运算的语义清晰性。
    */
   setLimits(opts: Partial<TerminalBufferOptions>): void {
-    if (opts.maxLines !== undefined) {
-      const newMax = Math.max(1, Math.floor(opts.maxLines));
-      if (newMax !== this.maxLinesValue) {
-        // 用**当前**几何（旧 maxLinesValue 的 modulo）提取要保留的最新行。
-        const keep = Math.min(this.count, newMax);
-        const kept: TerminalLine[] = [];
-        for (let i = this.count - keep; i < this.count; i++) {
-          const line = this.getBySeq(this.firstSeq + i);
-          if (line) kept.push(line);
-        }
-        this.totalBytes = 0;
-        this.slots = new Array<TerminalLine | null>(newMax).fill(null);
-        for (let i = 0; i < kept.length; i++) {
-          this.slots[i] = kept[i];
-          this.totalBytes += lineBytes(kept[i]);
-        }
-        this.head = 0;
-        this.count = kept.length;
-        this.maxLinesValue = newMax;
-      }
+    if (opts.maxLines === undefined) return;
+    const newMax = Math.max(1, Math.floor(opts.maxLines));
+    if (newMax === this.maxLinesValue) return;
+    // 用**当前**几何（旧 maxLinesValue 的 modulo）提取要保留的最新行。
+    const keep = Math.min(this.count, newMax);
+    const kept: TerminalLine[] = [];
+    for (let i = this.count - keep; i < this.count; i++) {
+      const line = this.getBySeq(this.firstSeq + i);
+      if (line) kept.push(line);
     }
-    if (opts.maxBytes !== undefined) {
-      this.maxBytesValue = Math.max(0, opts.maxBytes);
+    this.slots = new Array<TerminalLine | null>(newMax).fill(null);
+    for (let i = 0; i < kept.length; i++) {
+      this.slots[i] = kept[i];
     }
-    // Re-apply the byte budget after any limit change.
-    if (this.maxBytesValue > 0) {
-      while (this.count > 0 && this.totalBytes > this.maxBytesValue / 2) {
-        this.dropHead();
-      }
-    }
-  }
-
-  /**
-   * 软兜底裁剪（issue #14）：drop 最旧行直到 count 减半。与硬约束的 byte-budget
-   * drain 不同——这是应用级总内存超限时的主动收缩，由 viewportManager 接线层
-   * 在 `performance.memory.usedJSHeapSize > memoryLimitMb` 时按端口触发（双闸：
-   * 只裁 `bytes > maxBytes/2` 的端口 + 10s 冷却）。返回是否实际裁剪。
-   */
-  trimToHalf(): boolean {
-    if (this.count <= 1) return false;
-    const target = Math.max(1, Math.floor(this.count / 2));
-    let trimmed = false;
-    while (this.count > target) {
-      this.dropHead();
-      trimmed = true;
-    }
-    return trimmed;
+    this.head = 0;
+    this.count = kept.length;
+    this.maxLinesValue = newMax;
   }
 
   /** Oldest live seq (inclusive); equals nextSeq when empty. */
@@ -202,25 +140,8 @@ export class TerminalBuffer {
     return this.count;
   }
 
-  get bytes(): number {
-    return this.totalBytes;
-  }
-
   /** Hard line capacity (adjustable via setLimits). */
   get maxLines(): number {
     return this.maxLinesValue;
-  }
-
-  /** Byte budget (adjustable via setLimits). */
-  get maxBytes(): number {
-    return this.maxBytesValue;
-  }
-
-  private dropHead(): void {
-    const old = this.slots[this.head];
-    if (old) this.totalBytes -= lineBytes(old);
-    this.slots[this.head] = null;
-    this.head = (this.head + 1) % this.maxLinesValue;
-    this.count--;
   }
 }
