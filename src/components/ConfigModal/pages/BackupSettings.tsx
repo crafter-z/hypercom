@@ -28,7 +28,7 @@ function validateConfigBundle(bundle: ConfigBundle): string | null {
   if (!bundle || typeof bundle !== 'object') return 'Invalid bundle format';
   if (bundle.config) {
     const c = bundle.config;
-    if (typeof c.memoryLimitMb !== 'number') return 'Invalid config: memoryLimitMb must be a number';
+    if (typeof c.maxDisplayLines !== 'number') return 'Invalid config: maxDisplayLines must be a number';
     if (typeof c.theme !== 'string') return 'Invalid config: theme must be a string';
     if (typeof c.language !== 'string') return 'Invalid config: language must be a string';
     if (c.terminalFontSize !== undefined && typeof c.terminalFontSize !== 'number') return 'Invalid config: terminalFontSize must be a number';

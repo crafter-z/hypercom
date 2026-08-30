@@ -12,8 +12,7 @@ import type { AppConfig } from '../types';
 
 const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   closeBehavior: 'minimize',
-  memoryLimitMb: 256,
-  memoryPerPortBudgetMb: 200,
+  maxDisplayLines: 100000,
   language: 'zh-CN',
   theme: 'dark',
   preventScreenOff: false,

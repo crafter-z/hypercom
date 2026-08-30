@@ -15,7 +15,6 @@ export function useSystemStatus(pollIntervalMs: number = 5000) {
         setSystemStatus({
           status: status.status,
           memoryUsedMb: status.memoryUsedMb,
-          memoryLimitMb: status.memoryLimitMb,
           cpuUsage: status.cpuUsage,
         });
       } catch (err) {

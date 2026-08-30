@@ -107,7 +107,6 @@ const resources = {
       'mainDisplay.toolbar.splitVertical': '左右分屏',
       'mainDisplay.toolbar.splitHorizontal': '上下分屏',
 
-      'pane.toolbar.status.disconnected': 'disconnected',
       'pane.toolbar.encodingLabel': '编码:',
       'pane.emptyState.dropToMove': '释放以移入选项卡',
       'pane.emptyState.dropOrDoubleClick': '拖入选项卡或双击左侧串口',
@@ -252,10 +251,8 @@ const resources = {
       'generalSettings.closeBehaviorLabel': '程序关闭行为:',
       'generalSettings.closeBehavior.minimize': '最小化到托盘',
       'generalSettings.closeBehavior.exit': '直接退出',
-      'generalSettings.memoryLimitLabel': '内存总预算 (MB):',
-      'generalSettings.memoryLimitHint': '整个软件（含 webview 占用）的内存总预算，超出后自动裁剪最早一半终端内容',
-      'generalSettings.memoryPerPortBudgetLabel': '每端口内存预算 (MB):',
-      'generalSettings.memoryPerPortBudgetHint': '单个串口终端缓冲区的内存上限，超出即裁剪该端口最早一半屏',
+      'generalSettings.maxDisplayLinesLabel': '最大显示行数:',
+      'generalSettings.maxDisplayLinesHint': '每个串口终端最多保留的行数，超过后最早的行被逐行顶掉',
       'generalSettings.languageLabel': '语言:',
       'generalSettings.language.zhCN': '简体中文',
       'generalSettings.language.enUS': 'English',
@@ -420,7 +417,7 @@ const resources = {
       'terminal.toolExitSuccess': '[工具] 进程正常退出 (code 0)，串口已重开',
       'terminal.toolExitCode': '[工具] 进程退出 (code {{code}})，串口已重开',
 
-      'ruleSetAccordion.saveToDb': '保存到数据库',
+      'ruleSetAccordion.saveToDb': '保存到配置',
       'ruleSetAccordion.delete': '删除',
 
       'highlightRuleEditor.namePlaceholder': '规则名称',
@@ -480,7 +477,6 @@ const resources = {
       'toast.fallback.operationFailed': '操作失败',
 
       'toast.disconnect.portLost': '{{port}} 已断开连接',
-      'toast.memoryTrim': '因内存限制已清除 {{port}} 最早一半的终端内容',
       'toast.reconnect.failed': '重连失败',
       'toast.reconnect.succeeded': '重连成功',
 
@@ -710,7 +706,6 @@ const resources = {
       'mainDisplay.toolbar.splitVertical': 'Split Vertical',
       'mainDisplay.toolbar.splitHorizontal': 'Split Horizontal',
 
-      'pane.toolbar.status.disconnected': 'disconnected',
       'pane.toolbar.encodingLabel': 'Encoding:',
       'pane.emptyState.dropToMove': 'Drop to move tab',
       'pane.emptyState.dropOrDoubleClick': 'Drop a tab or double-click a port',
@@ -856,10 +851,8 @@ const resources = {
       'generalSettings.closeBehaviorLabel': 'On Close:',
       'generalSettings.closeBehavior.minimize': 'Minimize to Tray',
       'generalSettings.closeBehavior.exit': 'Exit',
-      'generalSettings.memoryLimitLabel': 'Total Memory Budget (MB):',
-      'generalSettings.memoryLimitHint': 'Total memory budget for the whole app (including webview). When exceeded, the earliest half of terminal content is trimmed automatically',
-      'generalSettings.memoryPerPortBudgetLabel': 'Per-Port Memory Budget (MB):',
-      'generalSettings.memoryPerPortBudgetHint': 'Memory cap for one port\'s terminal buffer. When exceeded, the earliest half of that port\'s screen is trimmed',
+      'generalSettings.maxDisplayLinesLabel': 'Max Display Lines:',
+      'generalSettings.maxDisplayLinesHint': 'Maximum lines kept per port terminal; oldest lines are evicted one-by-one when exceeded',
       'generalSettings.languageLabel': 'Language:',
       'generalSettings.language.zhCN': '简体中文',
       'generalSettings.language.enUS': 'English',
@@ -1024,7 +1017,7 @@ const resources = {
       'terminal.toolExitSuccess': '[Tool] Process exited normally (code 0), port reopened',
       'terminal.toolExitCode': '[Tool] Process exited (code {{code}}), port reopened',
 
-      'ruleSetAccordion.saveToDb': 'Save to Database',
+      'ruleSetAccordion.saveToDb': 'Save to Config',
       'ruleSetAccordion.delete': 'Delete',
 
       'highlightRuleEditor.namePlaceholder': 'Rule Name',
@@ -1084,7 +1077,6 @@ const resources = {
       'toast.fallback.operationFailed': 'Operation failed',
 
       'toast.disconnect.portLost': '{{port}} disconnected',
-      'toast.memoryTrim': 'Terminal content of {{port}} trimmed by half due to memory limit',
       'toast.reconnect.failed': 'Reconnect failed',
       'toast.reconnect.succeeded': 'Reconnect succeeded',
 

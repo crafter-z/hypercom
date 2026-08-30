@@ -148,7 +148,7 @@ const StatusBar: React.FC = () => {
         <span className="statusbar-item" title={t('statusBar.processMem')}>
           <MemoryStick size={12} />
           {(() => { const jsHeap = readJsHeapMb(); return jsHeap > 0 ? `${t('statusBar.jsHeap')} ${jsHeap}MB · ` : ''; })()}
-          {t('statusBar.processMem')} {systemStatus.memoryUsedMb}MB / {systemStatus.memoryLimitMb}MB
+          {t('statusBar.processMem')} {systemStatus.memoryUsedMb}MB
         </span>
         <span className="statusbar-item">
           <Cpu size={12} />

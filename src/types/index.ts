@@ -254,10 +254,8 @@ export interface ProtocolTemplate {
 export interface AppConfig {
   // 通用设置
   closeBehavior: 'minimize' | 'exit';
-  /** 应用内存总预算（MB，含 webview 中本软件占用；issue #6-2 软兜底，默认 2048） */
-  memoryLimitMb: number;
-  /** 每端口终端缓冲区内存预算（MB；issue #6-2 硬约束，默认 200） */
-  memoryPerPortBudgetMb: number;
+  /** 每端口终端最大显示行数，超限逐行覆盖最旧（issue #16 改版，默认 100000） */
+  maxDisplayLines: number;
   language: 'zh-CN' | 'en-US';
   theme: 'light' | 'dark' | 'system';
   preventScreenOff: boolean;
@@ -391,7 +389,6 @@ export interface LogFileInfo {
 export interface SystemStatus {
   status: string;          // 运行状态文本
   memoryUsedMb: number;
-  memoryLimitMb: number;
   cpuUsage: number;        // CPU占用率 (%)
 }
 

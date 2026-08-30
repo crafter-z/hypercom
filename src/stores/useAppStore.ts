@@ -23,6 +23,8 @@ import { naturalCompare, sortPortsByNatural } from '../utils/portSort';
 
 // ==================== 分屏树辅助函数 ====================
 
+// 分屏节点 ID 自增计数器：与 Date.now() 组合，防同毫秒连点产生碰撞 ID（P2-20）
+let paneIdCounter = 0;
 /** 查找指定 ID 的叶子节点 */
 export function findLeafById(node: PaneNode, id: string): LeafPane | undefined {
   if (node.type === 'leaf') {
@@ -138,9 +140,8 @@ function pruneTree(tree: PaneNode): PaneNode {
 
 const defaultConfig: AppConfig = {
   closeBehavior: 'exit',
-  // issue #6-2：总预算默认 2048MB（含 webview 占用），每端口默认 200MB
-  memoryLimitMb: 2048,
-  memoryPerPortBudgetMb: 200,
+  // issue #16：每端口终端最大显示行数（超限逐行覆盖最旧），默认 100000
+  maxDisplayLines: 100000,
   language: 'zh-CN',
   theme: 'dark',
   preventScreenOff: false,
@@ -313,9 +314,8 @@ export const useAppStore = create<AppState>()(
     focusedPaneId: 'main',
     config: { ...defaultConfig },
     systemStatus: {
-      status: '运行正常',
+      status: '',
       memoryUsedMb: 0,
-      memoryLimitMb: 2048,
       cpuUsage: 0,
     },
     trafficStats: {},
@@ -423,7 +423,11 @@ openTab: (portId) => {
       if (state.activeTabId === tabId) {
         const remaining = state.tabs.length > 0 ? state.tabs[state.tabs.length - 1] : null;
         state.activeTabId = remaining?.id || null;
-        if (remaining) state.focusedPaneId = remaining.splitPaneId;
+        if (remaining) {
+          state.focusedPaneId = remaining.splitPaneId;
+          // 维护 isActive 不变量：被关闭的是活动 tab，需把新活动 tab 标记为活动。
+          state.tabs.forEach(t => { t.isActive = t.id === remaining.id; });
+        }
       }
       const leaves = collectLeaves(state.paneTree);
       if (!leaves.find(l => l.id === state.focusedPaneId)) {
@@ -451,6 +455,8 @@ openTab: (portId) => {
       if (state.activeTabId && removeSet.has(state.activeTabId)) {
         state.activeTabId = tabId;
         state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
+        // 维护 isActive 不变量：活动 tab 被右侧关闭波及，需把目标 tab 标记为活动。
+        state.tabs.forEach(t => { t.isActive = t.id === tabId; });
       }
       // Ensure focusedPaneId is valid after pruning
       const leaves = collectLeaves(state.paneTree);
@@ -479,6 +485,8 @@ openTab: (portId) => {
       if (state.activeTabId && removeSet.has(state.activeTabId)) {
         state.activeTabId = tabId;
         state.focusedPaneId = state.tabs.find(t => t.id === tabId)?.splitPaneId || collectLeaves(state.paneTree)[0]?.id || 'main';
+        // 维护 isActive 不变量：活动 tab 被左侧关闭波及，需把目标 tab 标记为活动。
+        state.tabs.forEach(t => { t.isActive = t.id === tabId; });
       }
       // Ensure focusedPaneId is valid after pruning
       const leaves = collectLeaves(state.paneTree);
@@ -499,6 +507,8 @@ closeOtherTabs: (tabId) => set((state) => {
         state.tabs = state.tabs.filter(t => t.id === tabId || t.isPinned);
         state.activeTabId = tabId;
         state.focusedPaneId = target.splitPaneId;
+        // 维护 isActive 不变量：关闭其它 tab 后目标 tab 为唯一活动 tab。
+        state.tabs.forEach(t => { t.isActive = t.id === tabId; });
         // Ensure focusedPaneId is valid after pruning (target.splitPaneId may
         // reference a leaf that no longer exists in a degraded/inconsistent tree)
         const leaves = collectLeaves(state.paneTree);
@@ -564,7 +574,7 @@ closeOtherTabs: (tabId) => set((state) => {
       if (!sourceLeaf) return;
 
       const originalSize = sourceLeaf.size;
-      const newLeafId = `pane-${Date.now()}`;
+      const newLeafId = `pane-${Date.now()}-${paneIdCounter++}`;
 
       // Move active tab from source leaf to new leaf
       if (activeTab) {
@@ -581,7 +591,7 @@ closeOtherTabs: (tabId) => set((state) => {
       };
 
       const newBranch: BranchPane = {
-        id: `branch-${Date.now()}`,
+        id: `branch-${Date.now()}-${paneIdCounter++}`,
         type: 'branch',
         direction,
         children: [sourceLeaf, newLeaf],

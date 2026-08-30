@@ -116,13 +116,13 @@ const App: React.FC = () => {
 
   // 方案B（issue #14）：内存预算由每端口环形缓冲区容量承载。配置变更时把
   // 新上限同步到所有已存在的端口实例（尚未创建的实例在创建时读取最新配置）。
-  const memoryPerPortBudgetMb = useAppStore((s) => s.config.memoryPerPortBudgetMb);
+  const maxDisplayLines = useAppStore((s) => s.config.maxDisplayLines);
   useEffect(() => {
     const limits = computeBufferLimits();
     for (const portId of getManagerPortIds()) {
       getViewportManager(portId).applyLimits(limits);
     }
-  }, [memoryPerPortBudgetMb]);
+  }, [maxDisplayLines]);
 
   return (
     <AppErrorBoundary>

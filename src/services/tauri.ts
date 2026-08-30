@@ -62,7 +62,6 @@ export interface SendDataParams {
 export interface SystemStatusResult {
   status: string;
   memoryUsedMb: number;
-  memoryLimitMb: number;
   cpuUsage: number;
 }
 

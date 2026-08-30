@@ -446,20 +446,19 @@ describe('Misc actions', () => {
 
 describe('Config actions', () => {
   it('setConfig updates individual fields without affecting others', () => {
-    useAppStore.getState().setConfig({ memoryLimitMb: 2048 });
+    useAppStore.getState().setConfig({ maxDisplayLines: 50000 });
     const c = useAppStore.getState().config;
-    expect(c.memoryLimitMb).toBe(2048);
+    expect(c.maxDisplayLines).toBe(50000);
     expect(c.theme).toBe('dark'); // unchanged
   });
 
   it('resetConfig restores all defaults', () => {
-    useAppStore.getState().setConfig({ theme: 'light', memoryLimitMb: 500, memoryPerPortBudgetMb: 50 });
+    useAppStore.getState().setConfig({ theme: 'light', maxDisplayLines: 5000 });
     useAppStore.getState().resetConfig();
     const c = useAppStore.getState().config;
     expect(c.theme).toBe('dark');
-    // issue #6-2：总预算默认 2048，每端口默认 200
-    expect(c.memoryLimitMb).toBe(2048);
-    expect(c.memoryPerPortBudgetMb).toBe(200);
+    // issue #16：每端口终端最大显示行数默认 100000
+    expect(c.maxDisplayLines).toBe(100000);
   });
 
   it('terminalFontSize config is persisted after setConfig', () => {
@@ -606,8 +605,8 @@ describe('Simulation Mode', () => {
 // ==================== Group K: Edge Cases ====================
 
 describe('Edge cases', () => {
-  it('openTab still creates a tab when memoryPerPortBudgetMb=0', () => {
-    useAppStore.getState().setConfig({ memoryPerPortBudgetMb: 0 });
+  it('openTab still creates a tab when maxDisplayLines=0', () => {
+    useAppStore.getState().setConfig({ maxDisplayLines: 0 });
     useAppStore.setState({ ports: [makePort('COM1')] });
     useAppStore.getState().openTab('COM1');
     // Terminal display state is now in useTerminalStore; openTab still creates the tab
