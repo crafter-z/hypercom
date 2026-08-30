@@ -11,7 +11,6 @@ use crate::AppState;
 pub struct SystemStatus {
     pub status: String,
     pub memory_used_mb: u64,
-    pub memory_limit_mb: u64,
     pub cpu_usage: f32,
 }
 
@@ -20,9 +19,9 @@ fn memory_used_mb(used_bytes: u64) -> u64 {
     used_bytes / (1024 * 1024)
 }
 
-/// 依据 CPU / 内存阈值判定负载状态（与历史阈值完全一致）
-fn load_status(cpu: f32, used_mb: u64, limit_mb: u64) -> &'static str {
-    if cpu > 90.0 || used_mb > limit_mb {
+/// 依据 CPU 阈值判定负载状态（与历史阈值完全一致）
+fn load_status(cpu: f32) -> &'static str {
+    if cpu > 90.0 {
         "high_load"
     } else {
         "normal"
@@ -62,13 +61,6 @@ fn collect_app_pids(
 /// 独立线程池，主线程发完命令立即返回。行为（返回结构/字段/语义/调用频率）不变。
 #[tauri::command]
 pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, CommandError> {
-    let memory_limit_mb = match state.config_manager.lock() {
-        Ok(config_mgr) => config_mgr.get_config().memory_limit_mb as u64,
-        Err(e) => {
-            log::warn!("config_manager lock failed: {e}");
-            0
-        }
-    };
     let system_info = state.system_info.clone();
 
     let (app_memory_used, cpu_usage) = tokio::task::spawn_blocking(move || {
@@ -111,12 +103,11 @@ pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatu
     .await
     .map_err(|e| CommandError::Other(format!("System status task panicked: {e}")))?;
 
-    let status = load_status(cpu_usage, app_memory_used, memory_limit_mb).to_string();
+    let status = load_status(cpu_usage).to_string();
 
     Ok(SystemStatus {
         status,
         memory_used_mb: app_memory_used,
-        memory_limit_mb,
         cpu_usage: (cpu_usage * 10.0).round() / 10.0,
     })
 }
@@ -166,32 +157,17 @@ mod tests {
 
     #[test]
     fn load_status_cpu_above_threshold_is_high_load() {
-        assert_eq!(load_status(90.1, 0, 1024), "high_load");
+        assert_eq!(load_status(90.1), "high_load");
     }
 
     #[test]
     fn load_status_cpu_exactly_at_threshold_is_normal() {
-        assert_eq!(load_status(90.0, 0, 1024), "normal");
+        assert_eq!(load_status(90.0), "normal");
     }
 
     #[test]
-    fn load_status_memory_above_limit_is_high_load() {
-        assert_eq!(load_status(0.0, 1025, 1024), "high_load");
-    }
-
-    #[test]
-    fn load_status_memory_exactly_at_limit_is_normal() {
-        assert_eq!(load_status(0.0, 1024, 1024), "normal");
-    }
-
-    #[test]
-    fn load_status_memory_over_zero_limit_is_high_load() {
-        assert_eq!(load_status(0.0, 1, 0), "high_load");
-    }
-
-    #[test]
-    fn load_status_both_below_thresholds_is_normal() {
-        assert_eq!(load_status(50.0, 512, 1024), "normal");
+    fn load_status_cpu_below_threshold_is_normal() {
+        assert_eq!(load_status(50.0), "normal");
     }
 
     // ===== issue #6-6：进程级内存的 PID 收集 =====

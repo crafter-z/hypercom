@@ -179,13 +179,10 @@ pub struct AppConfig {
 
     // --- 通用设置 ---
     pub close_behavior: String, // "minimize" | "exit"
-    /// 整个应用（含 webview 中本软件占用部分）的内存总预算（MB）。
-    /// issue #6-2：语义从「单端口行数上限」改为「总预算软兜底」，默认 2048MB。
-    pub memory_limit_mb: u32,
-    /// 每端口终端缓冲区（rawData 字节）内存预算（MB）。
-    /// issue #6-2：硬约束，任一端口超过即裁剪该端口最早一半屏，默认 200MB。
-    #[serde(default = "default_memory_per_port_budget_mb")]
-    pub memory_per_port_budget_mb: u32,
+    /// 终端缓冲区最大显示行数（超限时逐行覆盖最旧行）。
+    /// 取代旧版内存预算字段（memoryLimitMb / memoryPerPortBudgetMb）。
+    #[serde(default = "default_max_display_lines")]
+    pub max_display_lines: u32,
     pub language: String, // "zh-CN" | "en-US"
     pub theme: String,    // "light" | "dark" | "system"
     pub prevent_screen_off: bool,
@@ -318,9 +315,9 @@ fn default_quick_send_inline_count() -> u32 {
     6
 }
 
-/// issue #6-2：每端口内存预算默认 200MB（总预算的软兜底为 memory_limit_mb）。
-fn default_memory_per_port_budget_mb() -> u32 {
-    200
+/// 终端缓冲区最大显示行数默认 100000 行（超限逐行覆盖最旧）。
+fn default_max_display_lines() -> u32 {
+    100000
 }
 
 fn default_timestamp_format() -> String {
@@ -351,9 +348,8 @@ impl Default for AppConfig {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
             close_behavior: "exit".to_string(),
-            // issue #6-2：总预算默认从 1024 提升到 2048MB（含 webview 占用）。
-            memory_limit_mb: 2048,
-            memory_per_port_budget_mb: 200,
+            // 终端缓冲区最大显示行数默认 100000 行。
+            max_display_lines: 100000,
             language: "zh-CN".to_string(),
             theme: "dark".to_string(),
             prevent_screen_off: false,
@@ -408,6 +404,21 @@ impl Default for AppConfig {
     }
 }
 
+/// 升级剥离：旧 config.json 的 memoryLimitMb / memoryPerPortBudgetMb 已由
+/// maxDisplayLines 取代。serde 对未知字段会静默丢弃，但为让下次 save 落盘
+/// 即物理移除旧 key，这里在解析前于 Value 层显式删除。非合法 JSON 返回 None。
+fn strip_legacy_memory_budget_keys(raw: &str) -> Option<serde_json::Value> {
+    let mut value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if let Some(obj) = value.as_object_mut() {
+        let removed = obj.remove("memoryLimitMb").is_some()
+            || obj.remove("memoryPerPortBudgetMb").is_some();
+        if removed {
+            log::info!("Migrated config: removed legacy memoryLimitMb/memoryPerPortBudgetMb");
+        }
+    }
+    Some(value)
+}
+
 // ==================== ConfigManager ====================
 
 pub struct ConfigManager {
@@ -456,14 +467,22 @@ impl ConfigManager {
 
         let mut config = if config_path.exists() {
             let content = fs::read_to_string(&config_path)?;
-            match serde_json::from_str::<AppConfig>(&content) {
+            // 升级兼容：旧 config.json 的 memoryLimitMb / memoryPerPortBudgetMb 已由
+            // maxDisplayLines 取代——解析前在 Value 层显式剥离，下次 save 落盘即无旧 key。
+            let stripped = strip_legacy_memory_budget_keys(&content);
+            let result = stripped
+                .ok_or_else(|| anyhow::anyhow!("config.json is not valid JSON"))
+                .and_then(|v| serde_json::from_value::<AppConfig>(v).map_err(anyhow::Error::from));
+            match result {
                 Ok(cfg) => cfg,
                 Err(e) => {
                     log::warn!("Config file corrupt ({}), attempting .bak recovery", e);
                     let bak_path = config_path.with_extension("json.bak");
                     if bak_path.exists() {
                         let bak_content = fs::read_to_string(&bak_path)?;
-                        serde_json::from_str(&bak_content).unwrap_or_default()
+                        strip_legacy_memory_budget_keys(&bak_content)
+                            .and_then(|v| serde_json::from_value::<AppConfig>(v).ok())
+                            .unwrap_or_default()
                     } else {
                         log::warn!("No .bak available, using defaults");
                         AppConfig::default()
@@ -517,9 +536,8 @@ impl ConfigManager {
     fn validate_and_clamp(config: &mut AppConfig) {
         config.terminal_font_size = config.terminal_font_size.clamp(8, 48);
         config.ui_font_size = config.ui_font_size.clamp(8, 48);
-        config.memory_limit_mb = config.memory_limit_mb.clamp(64, 8192);
-        // issue #6-2：每端口预算边界 [16, 2048]MB，非法值收敛到范围内。
-        config.memory_per_port_budget_mb = config.memory_per_port_budget_mb.clamp(16, 2048);
+        // maxDisplayLines 边界 [1000, 1_000_000]，非法值收敛到范围内。
+        config.max_display_lines = config.max_display_lines.clamp(1000, 1_000_000);
         config.max_retries = config.max_retries.clamp(1, 10);
         config.log_split_size_mb = config.log_split_size_mb.clamp(1, 10240);
         config.backup_interval = config.backup_interval.clamp(1, 720);
@@ -655,9 +673,8 @@ mod tests {
         assert_eq!(cfg.config_version, 1);
         assert_eq!(cfg.quick_send_inline_count, 6);
         assert_eq!(cfg.close_behavior, "exit");
-        // issue #6-2：总预算默认 2048MB（含 webview 占用），每端口默认 200MB
-        assert_eq!(cfg.memory_limit_mb, 2048);
-        assert_eq!(cfg.memory_per_port_budget_mb, 200);
+        // 终端缓冲区最大显示行数默认 100000 行。
+        assert_eq!(cfg.max_display_lines, 100000);
         assert_eq!(cfg.language, "zh-CN");
         assert_eq!(cfg.theme, "dark");
         assert!(!cfg.prevent_screen_off);
@@ -703,8 +720,7 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.close_behavior, cfg.close_behavior);
-        assert_eq!(parsed.memory_limit_mb, cfg.memory_limit_mb);
-        assert_eq!(parsed.memory_per_port_budget_mb, cfg.memory_per_port_budget_mb);
+        assert_eq!(parsed.max_display_lines, cfg.max_display_lines);
         assert_eq!(parsed.language, cfg.language);
         assert_eq!(parsed.auto_save_log, cfg.auto_save_log);
         assert_eq!(parsed.log_encoding, cfg.log_encoding);
@@ -715,7 +731,7 @@ mod tests {
         let cfg = AppConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         for key in [
-            "closeBehavior", "memoryLimitMb", "memoryPerPortBudgetMb", "autoSaveLog", "logFormat",
+            "closeBehavior", "maxDisplayLines", "autoSaveLog", "logFormat",
             "logEncoding", "terminalFontSize", "autoReconnect", "maxRetries",
             "restoreSession", "quickSendInlineCount",
             "sendCommandSets", "highlightRuleSets", "protocolTemplates",
@@ -860,17 +876,15 @@ mod tests {
         let mut cfg = AppConfig {
             quick_send_inline_count: 99,
             terminal_font_size: 200,
-            memory_limit_mb: 0,
-            // issue #6-2：每端口预算非法值收敛到 [16, 2048]
-            memory_per_port_budget_mb: 9999,
+            // maxDisplayLines 非法值收敛到 [1000, 1_000_000]
+            max_display_lines: 0,
             max_retries: 0,
             ..AppConfig::default()
         };
         ConfigManager::validate_and_clamp(&mut cfg);
         assert_eq!(cfg.quick_send_inline_count, 20);
         assert_eq!(cfg.terminal_font_size, 48);
-        assert_eq!(cfg.memory_limit_mb, 64);
-        assert_eq!(cfg.memory_per_port_budget_mb, 2048);
+        assert_eq!(cfg.max_display_lines, 1000);
         assert_eq!(cfg.max_retries, 1);
     }
 
@@ -907,8 +921,10 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_per_port_budget_defaults_when_absent() {
-        // issue #6-2：旧 config.json 无 memoryPerPortBudgetMb → 反序列化回退默认 200。
+    fn test_max_display_lines_defaults_when_absent() {
+        // 旧 config.json 无 maxDisplayLines → serde(default) 回退默认 100000。
+        // fixture 保留 legacy memoryLimitMb：未知字段被 serde 静默丢弃，
+        // 反序列化必须成功且 maxDisplayLines 取默认值。
         let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
             "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
             "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
@@ -920,9 +936,32 @@ mod tests {
             "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
             "backupDirectory":"","restoreSession":true}"#;
         let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
-        assert_eq!(cfg.memory_per_port_budget_mb, 200);
-        // 旧值 memoryLimitMb=1024 保留（前端默认 2048 只影响全新安装）
-        assert_eq!(cfg.memory_limit_mb, 1024);
+        assert_eq!(cfg.max_display_lines, 100000);
+    }
+
+    #[test]
+    fn test_legacy_memory_budget_keys_are_stripped() {
+        // 升级兼容：含 memoryLimitMb / memoryPerPortBudgetMb 的旧 config.json
+        // 走剥离逻辑后，AppConfig 不再携带这两个字段，maxDisplayLines 回退默认。
+        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
+            "memoryPerPortBudgetMb":200,
+            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
+            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
+            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
+            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
+            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
+            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
+            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
+            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
+            "backupDirectory":"","restoreSession":true}"#;
+        let value = strip_legacy_memory_budget_keys(old_json)
+            .expect("legacy JSON must parse as Value");
+        let parsed: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.max_display_lines, 100000);
+        // 序列化结果不含旧 key（剥离后物理移除，下次 save 落盘即无）
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(!serialized.contains("memoryLimitMb"), "got: {serialized}");
+        assert!(!serialized.contains("memoryPerPortBudgetMb"), "got: {serialized}");
     }
 
     #[test]
