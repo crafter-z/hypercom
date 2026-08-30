@@ -6,7 +6,7 @@ TRX 终端的行缓冲与渲染层。**React 不渲染行**——数据到达后
 
 |文件|职责|测试|
 |---|---|---|
-|`TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq、`maxLines` + `maxBytes` 双预算（超限裁到 ≤50%）、`snapshot`/`replaceAll`/`clear`/`setLimits`|`TerminalBuffer.test.ts`|
+|`TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits`|`TerminalBuffer.test.ts`|
 |`TerminalRenderer.ts`|直接 DOM 渲染：节点池复用、固定行高零测量、`visibleSeqsOffset`、同帧钉底、过滤/搜索/选区类名|`TerminalRenderer.test.ts`（jsdom）|
 |`viewportManager.ts`|每端口枢纽：缓冲 + renderer 生命周期 + 增量过滤/搜索 + rAF 调度 + 模块级实例注册表 + 非 React 适配函数|`viewportManager.test.ts`|
 
@@ -52,6 +52,15 @@ TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同
    用它刷新 FilterBar 计数/搜索读数——不要轮询 store。
 9. **测试环境**：TerminalRenderer 测试需 jsdom（文件头 `@vitest-environment jsdom`）；
    Buffer/Manager 是纯逻辑，node 环境即可。
+
+10. **裁剪语义（issue #16 改版）**：终端缓冲只由用户配置的**最大显示行数**
+    （`maxDisplayLines` → `maxLines`）约束。`append` 返回 `{seq, trimmed}`——
+    满 `maxLines` 后每 append **逐行覆盖最旧一条**（滚动窗口，`trimmed=true`）。
+    无字节预算、无 half-trim、无应用级软兜底、无「因内存限制清屏」toast
+    （逐行覆盖是常态滚动，不是异常事件）。`viewportManager.appendLines` /
+    `appendTerminalLines` 返回 boolean（是否发生覆盖），RxPipeline 不再消费该
+    返回值弹通知。`computeBufferLimits()` 从 `config.maxDisplayLines` 派生
+    `{ maxLines }`（缺省 100000，下限 1000）。
 
 ## 编辑纪律
 

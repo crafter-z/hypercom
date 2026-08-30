@@ -6,7 +6,7 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 
 | 模块 | 文件 | 职责 |
 |---|---|---|
-| `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量 + `maxBytes` 字节预算（超限裁到 ≤50%）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
+| `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
 | `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎：节点池复用（recycle 从 DOM 移除→acquire 重新挂载，插入统一走 **insertRowInOrder 按 visIdx 归位**——DOM 顺序 == 视觉顺序，否则跨行拖拽选择中间行被跳过）、固定行高零测量、`visibleSeqsOffset` 惰性压缩、同帧钉底（followEnabled && !gestureActive 时 scrollTop 在 render() 内设置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化（`Number.MAX_SAFE_INTEGER` 防 `seq > null` 误判） |
 | `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数） |
 | 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`releaseViewportManager`/`getViewportManager`——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键）一律走这里，**不再碰 useTerminalStore 的行 API** |
@@ -17,7 +17,7 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 - **标签切换保留缓冲**：Pane 对 TRX 标签常驻挂载（hidden prop → display:none），viewportManager 模块注册表持有实例；关闭标签/TRX→TTY 切换才 `releaseViewportManager`。
 - **关闭标签页 = 前端显示目标销毁、串口连接保留（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager`；`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 是「manager 存在才写入」——标签关闭后 RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始。
 - **惰性解码**：RX 行只存 `rawData`（`Uint8Array`），`getLineText(line, encoding)`（`src/utils/lineText.ts`，模块级 TextDecoder 缓存）按当前编码解码；编码切换 = 重渲染，无 store 遍历。
-- **内存预算**：`computeBufferLimits()`（`memoryPerPortBudgetMb`×500 行 + ×1MB 字节）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits` 同步到现存实例。
+- **内存上限**：`computeBufferLimits()`（从 `config.maxDisplayLines` 派生 `{ maxLines }`，缺省 100000、下限 1000）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits({maxLines})` 同步到现存实例。
 
 ## 渲染正确性陷阱（历史缺陷 → 现状约束）
 
@@ -52,13 +52,11 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 - 匹配计算**仅搜索栏打开时进行**；`findMatchesIncremental` 前缀收窄（继续输入只重扫「旧匹配 ∪ 新增行」）。
 - 已知边界：关闭搜索栏期间按 F3 重新打开时首次导航需再按一次（匹配在打开后才计算——「不后台全缓冲扫描」的代价）。
 
-## 双层内存预算（issue #6-2 / #12）
+## 最大显示行数（issue #16 改版）
 
-- `memoryLimitMb` = 整个应用（含 webview）内存总预算**软兜底**（默认 2048MB，clamp [64,8192]）。
-- `memoryPerPortBudgetMb` = 每端口**硬约束**（默认 200MB，clamp [16,2048]；`maxLines = 预算×500`）。
-- `appendTerminalLine(s)` 返回 boolean（true=触发裁剪），超预算**一次性裁到 50%**；「因内存限制清屏」toast（`toast.memoryTrim`，每端口 10s 节流）由 **RxPipeline 接线层**在 store 返回 true 时弹出（store 保持纯净）。
-- 触发优先级：每端口硬约束（无条件立即裁）优先、总预算软兜底（`systemStatus.memoryUsedMb` 应用进程树级内存超总预算时裁）——**软兜底有双闸**（issue #12）：只裁 `totalBytes > maxBytes/2` 的端口 + 每端口 10s 冷却（模块级 `lastSoftTrimAt`），否则 RSS 超限期间每个 append 批都裁半（多串口压测「半页刷屏」根因）。
-
+- `maxDisplayLines` = 每端口终端最大显示行数（默认 100000，clamp [1000,1000000]；Rust `max_display_lines` + `#[serde(default)]` 缺省回退）。**删除** `memoryLimitMb`/`memoryPerPortBudgetMb` 双内存预算——升级时 `ConfigManager::new` 的 `strip_legacy_memory_budget_keys` 显式剥离旧配置项。
+- 缓冲超限**逐行覆盖最旧一条**（滚动窗口，firstSeq 每 append +1）；`appendLines`/`appendTerminalLines` 返回 boolean；**无「因内存限制清屏」toast**（逐行覆盖是常态滚动，不是异常事件——issue #16 曾整夜误报的根因）。
+- 状态栏内存显示「JS堆 XMB · 进程 YMB」（无总预算分母）；`load_status` 只按 CPU>90 判 high_load。
 ## 显示态归属
 
 - 每端口显示态（`scrollLocked`/`displayFormat`/`encoding`/`showTimestamp`）在 `useTerminalStore`，**不在** `useOperationStore`。显示控件（TerminalFilterBar、编码下拉）经 `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding` 写入。行缓冲在 `TerminalViewportManager` 环形缓冲区，store 无行数组、无 Immer、不随数据更新。

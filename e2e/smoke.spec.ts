@@ -43,7 +43,7 @@ const TAURI_MOCK = `
         return id;
       }
       if (cmd === 'get_system_status')
-        return { status: 'normal', memoryUsedMb: 0, memoryLimitMb: 0, cpuUsage: 0 };
+        return { status: 'normal', memoryUsedMb: 0, cpuUsage: 0 };
       return null;
     },
     // 测试驱动：向某个已注册的事件监听器派发 payload（@tauri-apps/api 的
@@ -537,17 +537,17 @@ test.describe('HyperCom smoke tests', () => {
     expect(errors.filter((e) => e.includes('insertBefore'))).toEqual([]);
   });
 
-  test('high-rate RX with a small budget: large trim keeps the viewport anchored (issue #10)', async ({ page }) => {
-    // 字节预算大 drain（一次裁到半）单帧前移 firstSeq 数千行 → 非 follow 视口
-    // 停在超界像素值（浏览器夹到内容底）→ 阅读位置丢失、逐帧回填抖动。修复后
-    // renderer 检测大 trim 并按上一帧视口顶部 seq 恢复锚点；锚点被裁则停在
-    // 内容头部。本用例用小预算（memoryPerPortBudgetMb=40 → 40MB/2.7KB ≈ 1.5 万
-    // 行触发 drain、裁到 ~7400 行）在 e2e 时间尺度内触发大 drain。
-    // mock get_config：小预算（config 启动时加载，必须在 goto 前注入）
+  test('small maxDisplayLines: gradual eviction keeps the viewport stable and DOM bounded (issue #16 redesign)', async ({ page }) => {
+    // 行数上限改版后：缓冲超限是逐行覆盖（滚动窗口），每帧 head 前进 ≤
+    // maxLinesPerTick(2000) —— 不存在单帧大跳，锚点恢复路径不适用。本用例
+    // 断言改版后的真实行为：小上限 + 高频 RX 持续覆盖最旧行时，① 视口内容
+    // 不跳变（已解锁非 follow 的阅读位置在滚动窗口内稳定平移，无突发甩走），
+    // ② DOM 行数有界（窗口 + overscan），③ 最新行始终可渲染。
+    // mock get_config：小行数上限（config 启动时加载，必须在 goto 前注入）
     await page.addInitScript(() => {
       const original = window.__TAURI_INTERNALS__.invoke;
       window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
-        if (cmd === 'get_config') return { memoryPerPortBudgetMb: 40 };
+        if (cmd === 'get_config') return { maxDisplayLines: 4000 };
         return original(cmd, args);
       };
     });
@@ -555,21 +555,19 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.app-root')).toBeVisible();
     await openPortTab(page, 'COM1');
 
-    // ① 第一块数据（8000 行 × 2.5KB ≈ 21MB < 40MB 预算，不触发 drain）
+    const view = page.locator('.terminal-view');
+    // 灌入 3000 行（< 4000 上限，不触发覆盖）
     const chunk1 = await page.evaluate(() => {
       const line = 'A'.repeat(2560);
-      return Array.from({ length: 8000 }, () => line).join('\n') + '\n';
+      return Array.from({ length: 3000 }, () => line).join('\n') + '\n';
     });
     await dispatchSerialData(page, 'COM1', chunk1);
-    await page.waitForTimeout(1200); // 队列排空（2000 行/tick × 4）
+    await page.waitForTimeout(1200);
 
-    // ② 滚离底部并解锁 follow（wheel → settle → scrollLocked=false）。
-    // 内容高 = 8000 行 × 21px（默认字号）≈ 168K px；一次 wheel -6000 移到
-    // 底部上方 ~6K px 处——只要不在底部 50px 容差内即解锁成功。
-    const view = page.locator('.terminal-view');
+    // 滚离底部并解锁 follow（wheel → settle → scrollLocked=false）
     await view.hover();
     await page.mouse.wheel(0, -6000);
-    await page.waitForTimeout(600); // settle
+    await page.waitForTimeout(600);
     const before = await view.evaluate((el: HTMLElement) => {
       const mid = el.scrollTop + el.clientHeight / 2;
       let best: number | null = null;
@@ -583,25 +581,21 @@ test.describe('HyperCom smoke tests', () => {
           best = Number(r.dataset.seq);
         }
       }
-      return {
-        scrollTop: el.scrollTop,
-        scrollHeight: el.scrollHeight,
-        clientHeight: el.clientHeight,
-        midSeq: best,
-      };
+      return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, midSeq: best };
     });
     expect(before.scrollTop).toBeGreaterThan(0);
-    // 距底部至少 100px（50px 容差外 → settle 判定 atBottom=false → 解锁 follow）
     expect(before.scrollTop).toBeLessThan(before.scrollHeight - before.clientHeight - 100);
     expect(before.midSeq).not.toBeNull();
 
-    // ③ 第二块数据（+21MB → 总量 43MB > 40MB 预算 → 单帧大 drain：firstSeq
-    // 前移 ~7700 行）。修复后 renderer 按锚点恢复视口——视口中间行的 seq 保持
-    // 不变（阅读位置不丢）；修复前 scrollTop 停在超界像素值，视口内容被甩走
-    // ~7700 行。
-    await dispatchSerialData(page, 'COM1', chunk1);
+    // 追加 5 块 × 3000 行 = 15000 行 → 总量 18000 > 4000 上限，持续逐行覆盖
+    // 最旧 ~14000 行。
+    for (let i = 0; i < 5; i++) {
+      await dispatchSerialData(page, 'COM1', chunk1);
+      await page.waitForTimeout(800);
+    }
     await page.waitForTimeout(1200);
-    const after = await view.evaluate((el: HTMLElement) => {
+
+    const after = await view.evaluate((el) => {
       const mid = el.scrollTop + el.clientHeight / 2;
       let best: number | null = null;
       let bestDist = Infinity;
@@ -614,12 +608,18 @@ test.describe('HyperCom smoke tests', () => {
           best = Number(r.dataset.seq);
         }
       }
-      return { scrollTop: el.scrollTop, rows: el.querySelectorAll('.terminal-line').length, midSeq: best };
+      return {
+        rows: el.querySelectorAll('.terminal-line').length,
+        scrollTop: el.scrollTop,
+        midSeq: best,
+      };
     });
     expect(after.rows).toBeGreaterThan(0);
+    expect(after.rows).toBeLessThanOrEqual(100); // DOM 有界（窗口 + overscan）
     expect(after.midSeq).not.toBeNull();
-    // 大 drain 的视口位移必须远小于被裁行数（~7700 行）；容差 50 行只覆盖
-    // 锚点取整误差，修复前的 ~7700 行甩走会被捕获。
-    expect(Math.abs(after.midSeq! - before.midSeq!)).toBeLessThan(50);
+    // 逐行覆盖（≤2000 行/帧）：视口中部 seq 单调前移，无突发甩走；采样跳变
+    // 远小于覆盖总量 14000 行（容差 3000 行覆盖 maxLinesPerTick 单帧上限）
+    expect(after.midSeq! - before.midSeq!).toBeGreaterThan(0);
+    expect(after.midSeq! - before.midSeq!).toBeLessThan(14000);
   });
 });

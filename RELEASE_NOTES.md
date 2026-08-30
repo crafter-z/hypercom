@@ -1,6 +1,11 @@
 # HyperCom v0.6.4
 
+## Bugfix
+- 修复「满内存后清半屏逻辑实际未生效」（issue #16）：容量（行数）溢出现在 **half-trim 一次性裁掉最旧一半**再落新行（恢复 issue #6-2「超预算一次性裁到 50%」语义）——修复前满容后逐行覆盖最旧行（firstSeq 每 append 只前进 1），「清半屏」永不生效，用户只看到「最早的消息一直在被顶掉」而 toast 却在报「已清除最早一半」。字节预算 drain（大行场景 avg >2KB/行先于行容量触发）保留。toast 语义修正：`appendLines` 返回值区分 `trimmed` / `memoryTrimmed`，「因内存限制清屏」通知只对真实清半屏事件（容量 half-trim 或字节 drain）弹出。软兜底候选闸改行数闸（`count > maxLines/2`，任何行大小可达）——修复前字节闸对典型小行永不触发，应用级 `memoryLimitMb` 层形同虚设
+- 内存预算改版（issue #16 改版）：去除 `memoryLimitMb`/`memoryPerPortBudgetMb` 双内存预算，改为单一 `maxDisplayLines` 最大显示行数（默认 100000，clamp [1000,1000000]）；终端缓冲超限**逐行覆盖最旧**（滚动窗口）；升级自动剥离旧配置项（`strip_legacy_memory_budget_keys`）；删除「因内存限制清屏」toast 与软兜底机制；状态栏内存显示改「JS堆 + 进程 RSS」
+
 ## 性能
+
 - TTY 模式交互卡顿修复（探查报告定位的三根因，P0/P1 四项）：
   - `get_system_status` / `list_available_ports` 改 async + `spawn_blocking`——消除每 5s/3s 全系统进程表刷新与串口枚举对事件循环主线程的周期阻塞（根因 #1）
   - TTY TX 逐键 invoke 改 ~10ms 合批（首字节启动定时器，64KB 上限，字节顺序严格保持，detach 收尾 flush / 断线丢弃缓冲）
