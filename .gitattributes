@@ -1,13 +1,20 @@
-# 统一换行符策略（2026-08-05）
+# 统一换行符策略（2026-08-05 初版；2026-08-30 修订为强制 CRLF）
 #
 # 原则：仓库内统一存储 LF（跨平台差分的正确格式），
-#       checkout 到工作区时按平台转换 —— Windows 上为 CRLF（Windows 风格）。
+#       checkout 到工作区时【所有平台】一律 CRLF（Windows 风格，项目统一）。
 #
-# 依赖：配合 `core.autocrlf=true` 生效。任何编辑工具写入 LF 都不会再产生
-#       "假修改"（git 会按本规则计价行尾差异）。
+# 修订记录：原策略为 `* text=auto` + 依赖 core.autocrlf=true，只在
+#       Windows 上检出 CRLF、其它平台检出 LF，且被工具写成 LF 的工作区
+#       文件不会被 git 纠正 —— 导致工作区 LF/CRLF 混用无法根治（git
+#       只在 stat refresh 后才如实报告差异，出现"假修改"标记）。
+#       现改为 `* text eol=crlf`：任何平台 checkout 都固定 CRLF，编辑器
+#       写 LF 也不会产生假修改（add 时按 eol=crlf 归一化为 LF 入索引）。
+#       core.autocrlf=true 仍可配合（Windows 上再转回 CRLF，幂等）。
 
-# 全部文本文件：自动检测，仓库存 LF，检出时按平台转换（Windows=CRLF）
-* text=auto
+# 全部文本文件：仓库存 LF，检出强制 CRLF（所有平台）
+* text eol=crlf
+# 策略文件自身：保持 LF（attribute 模式行带尾部 CR 会破坏解析）
+/.gitattributes text eol=lf
 
 # 显式声明常见文本类型，确保不被误判为二进制
 *.ts        text
@@ -30,8 +37,9 @@
 *.cfg       text
 
 # 脚本类：shebang / 跨平台执行必须保持 LF，禁止 CRLF
-*.sh        text eol=lf
-*.py        text eol=lf
+# （仓库内当前无被跟踪的 .sh/.py；如未来加入，取消注释以下两行）
+#*.sh        text eol=lf
+#*.py        text eol=lf
 
 # 二进制文件：绝不触碰
 *.png       binary
