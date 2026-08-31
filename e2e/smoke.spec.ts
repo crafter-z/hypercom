@@ -486,20 +486,25 @@ test.describe('HyperCom smoke tests', () => {
     await page.mouse.down();
     await page.mouse.move(startX, startY + 8 * 16, { steps: 5 });
 
-    // 拖选期间滚轮向上滚动 —— 起点行滚出视口（issue #17 场景）
-    for (let i = 0; i < 30; i++) {
+    // 拖选期间滚轮向上滚动 —— 起点行滚出视口（issue #17 场景）。
+    // 滚动量须保持选区 ≤ MAX_PINNED_ROWS(600)：15 × 400px ≈ 375 行，
+    // 超限是渲染器的设计上限（pin 集合主动放弃 → 选区随之消亡）。
+    for (let i = 0; i < 15; i++) {
       await page.mouse.wheel(0, -400);
       await page.waitForTimeout(16);
     }
     // 松开鼠标结束拖选
     await page.mouse.up();
-    await page.waitForTimeout(300);
 
-    // 浏览器原生选区必须仍存在，且起点行号**精确等于**拖选起点（修复前：
-    // release 后回收滚出视口的起点行 → 选区清空/漂移，起点无法定位）。
+    await page.waitForTimeout(300);
+    // 原生选区必须仍存在（pin 机制：滚出视口的行被 park 保留，display:none
+    // 但不脱离 DOM —— 修复前回收起点行 → 选区清空/漂移）。
+    // 注意：本场景拖选向下延伸 + 滚轮向上滚 → 选中行全部位于窗口下方并被
+    // park 隐藏，Chromium 的 Selection.toString() 不计 display:none 内容，
+    // 存活判定必须基于 Range 端点（节点存在 + 未折叠），不能用 toString()。
     const selInfo = await page.evaluate(() => {
       const sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return { ok: false, anchor: null, focus: null };
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return { ok: false, anchor: null, focus: null, anchorText: '' };
       const r = sel.getRangeAt(0);
       const findRow = (n: Node | null): HTMLElement | null => {
         let el: Element | null = n instanceof Element ? n : (n?.parentElement ?? null);
@@ -509,10 +514,14 @@ test.describe('HyperCom smoke tests', () => {
         }
         return null;
       };
+      const anchorRow = findRow(r.startContainer);
+      const rowText = (row: HTMLElement | null): string =>
+        row?.querySelector('.terminal-content')?.textContent ?? '';
       return {
-        ok: sel.toString().length > 0,
-        anchor: findRow(r.startContainer)?.getAttribute('data-seq') ?? null,
+        ok: true,
+        anchor: anchorRow?.getAttribute('data-seq') ?? null,
         focus: findRow(r.endContainer)?.getAttribute('data-seq') ?? null,
+        anchorText: rowText(anchorRow),
       };
     });
 
@@ -520,8 +529,17 @@ test.describe('HyperCom smoke tests', () => {
     expect(selInfo.anchor).not.toBeNull();
     expect(selInfo.focus).not.toBeNull();
     expect(Number(selInfo.anchor)).toBeLessThan(Number(selInfo.focus));
-    // 锚点必须精确定位到拖选起点行（不漂移）
-    expect(Number(selInfo.anchor)).toBe(startSeq);
+    // 锚点行仍挂在 DOM 中：窗口内为普通流行，窗口外为 parked（display:none）
+    // 但必须是 .terminal-content-layer 的子节点
+    const anchorState = await page.evaluate((seq) => {
+      const layer = document.querySelector('.terminal-content-layer');
+      const row = layer?.querySelector(`[data-seq="${seq}"]`) ?? null;
+      if (!row) return { present: false, parked: false };
+      return { present: true, parked: (row as HTMLElement).style.display === 'none' };
+    }, Number(selInfo.anchor));
+    expect(anchorState.present).toBe(true);
+    // 选区文本仍包含起点行的内容前缀（pinned 行内容不被重写）
+    expect(selInfo.anchorText.startsWith('chunk-')).toBe(true);
   });
 
   test('selection endpoint anchored on a fresh row survives release (issue #17)', async ({ page }) => {
@@ -546,8 +564,8 @@ test.describe('HyperCom smoke tests', () => {
     await page.mouse.down();
     await page.mouse.move(startX, box.y + box.height - 4, { steps: 5 });
 
-    // 拖选期间灌新数据：新行物化+写入（isNew 路径），终点行可能落在
-    // 冻结期内到达的新行上——release 后不得重写/回收它，否则选区终点漂移
+    // 拖选期间灌新数据：终点行可能落在拖选期间到达的新行上——pin 规则
+    // 下该行不会被回收/重写，release 后选区终点不得漂移
     for (let i = 0; i < 15; i++) {
       await page.evaluate((i) => {
         const bytes = Array.from(new TextEncoder().encode(`fresh-${i}-${'z'.repeat(40)}\n`.repeat(8)));
@@ -587,7 +605,8 @@ test.describe('HyperCom smoke tests', () => {
     const delayed = await readSel();
     expect(immediate.ok).toBe(true);
     expect(delayed.ok).toBe(true);
-    // 焦点行不得漂移（release 后渲染不得重写/回收冻结期物化的新行）
+    // 焦点行不得漂移：pin 规则下 focus 行（即使已 park 为 display:none）
+    // 不被回收/重写，选区端点在 release 后保持稳定
     expect(delayed.focus).toBe(immediate.focus);
     expect(delayed.focus).not.toBeNull();
   });
@@ -710,19 +729,17 @@ test.describe('HyperCom smoke tests', () => {
     await page.mouse.wheel(0, -6000);
     await page.waitForTimeout(600);
     const before = await view.evaluate((el: HTMLElement) => {
-      const mid = el.scrollTop + el.clientHeight / 2;
-      let best: number | null = null;
-      let bestDist = Infinity;
-      for (const r of el.querySelectorAll('.terminal-line') as NodeListOf<HTMLElement>) {
-        const m = /translateY\((\d+)px\)/.exec(r.style.transform);
-        if (!m) continue;
-        const d = Math.abs(Number(m[1]) - mid);
-        if (d < bestDist) {
-          bestDist = d;
-          best = Number(r.dataset.seq);
-        }
-      }
-      return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, midSeq: best };
+      // issue #18 flow layout: rows are normal flow divs (no transform) —
+      // the row nearest the viewport center is the middle child's data-seq.
+      const rows = el.querySelectorAll('.terminal-line:not([style*="display: none"])');
+      const mid = Math.floor(rows.length / 2);
+      const row = rows[mid] as HTMLElement | undefined;
+      return {
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        midSeq: row ? Number(row.dataset.seq) : null,
+      };
     });
     expect(before.scrollTop).toBeGreaterThan(0);
     expect(before.scrollTop).toBeLessThan(before.scrollHeight - before.clientHeight - 100);
@@ -736,23 +753,14 @@ test.describe('HyperCom smoke tests', () => {
     }
     await page.waitForTimeout(1200);
 
-    const after = await view.evaluate((el) => {
-      const mid = el.scrollTop + el.clientHeight / 2;
-      let best: number | null = null;
-      let bestDist = Infinity;
-      for (const r of el.querySelectorAll('.terminal-line') as NodeListOf<HTMLElement>) {
-        const m = /translateY\((\d+)px\)/.exec(r.style.transform);
-        if (!m) continue;
-        const d = Math.abs(Number(m[1]) - mid);
-        if (d < bestDist) {
-          bestDist = d;
-          best = Number(r.dataset.seq);
-        }
-      }
+    const after = await view.evaluate((el: HTMLElement) => {
+      const rows = el.querySelectorAll('.terminal-line:not([style*="display: none"])');
+      const mid = Math.floor(rows.length / 2);
+      const row = rows[mid] as HTMLElement | undefined;
       return {
-        rows: el.querySelectorAll('.terminal-line').length,
+        rows: el.querySelectorAll('.terminal-line:not([style*="display: none"])').length,
         scrollTop: el.scrollTop,
-        midSeq: best,
+        midSeq: row ? Number(row.dataset.seq) : null,
       };
     });
     expect(after.rows).toBeGreaterThan(0);
