@@ -145,6 +145,7 @@ export class TerminalViewportManager {
     this.filtered = { seqs: [], offset: 0 };
     this.matches = { seqs: [], offset: 0 };
     this.currentMatch = 0;
+    this.matchSetCache = null;
     this.renderer?.clear();
   }
 
@@ -232,13 +233,6 @@ export class TerminalViewportManager {
     this.requestRender();
   }
 
-  /** Forward drag-selection guard to the renderer (freezes row DOM mid-drag
-   *  so the native cross-row selection survives; release triggers a full
-   *  redraw). */
-  setSelecting(active: boolean): void {
-    this.renderer?.setSelecting(active);
-    if (!active) this.requestRender();
-  }
 
   setLocked(locked: boolean): void {
     this.locked = locked;
@@ -325,7 +319,7 @@ export class TerminalViewportManager {
       visibleSeqs: this.filterActive ? this.filtered.seqs : null,
       visibleSeqsOffset: this.filterActive ? this.filtered.offset : 0,
       frozenSeq: this.frozenSeq,
-      matchSet: searchActive ? new Set(this.matches.seqs.slice(this.matches.offset)) : null,
+      matchSet: searchActive ? this.cachedMatchSet() : null,
       currentMatchSeq: searchActive ? this.matches.seqs[this.matches.offset + this.currentMatch] ?? -1 : -1,
       searchQuery: this.searchOpen ? this.searchQuery : '',
       searchCaseSensitive: this.searchCaseSensitive,
@@ -334,6 +328,21 @@ export class TerminalViewportManager {
       gestureActive: this.gestureActive,
       followEnabled: this.locked && !this.searchOpen,
     };
+  }
+
+  /** matchSet is read by every render pass (applyRowClasses + <mark> paint);
+   *  rebuilding a potentially 50k-entry Set per frame is pure GC churn. The
+   *  cache key is (offset, length, currentMatch) — matches mutate only via
+   *  push (append), offset bump (trim) and recompute (new query). */
+  private matchSetCache: Set<number> | null = null;
+  private matchSetCacheKey = '';
+  private cachedMatchSet(): Set<number> {
+    const key = `${this.matches.offset}:${this.matches.seqs.length}:${this.currentMatch}`;
+    if (this.matchSetCache === null || key !== this.matchSetCacheKey) {
+      this.matchSetCache = new Set(this.matches.seqs.slice(this.matches.offset));
+      this.matchSetCacheKey = key;
+    }
+    return this.matchSetCache;
   }
 
   private recomputeFilter(): void {
@@ -353,6 +362,9 @@ export class TerminalViewportManager {
   private recomputeSearch(): void {
     this.matches = { seqs: [], offset: 0 };
     this.currentMatch = 0;
+    // The cache key (offset:length:currentMatch) carries no query identity —
+    // a new query hitting the same count must not reuse the stale Set.
+    this.matchSetCache = null;
     if (!this.searchOpen || !this.searchQuery) return;
     const encoding = this.getEncoding();
     const displayFormat = this.getDisplayFormat();

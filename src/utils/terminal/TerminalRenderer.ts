@@ -1,31 +1,45 @@
 /**
  * TerminalRenderer — direct-DOM rendering engine for the TRX terminal
- * (方案B, issue #14).
+ * (方案B engine, issue #14; flow-layout + selection-pin redesign, issue #18).
  *
- * Replaces the React + @tanstack/react-virtual row pipeline with a
- * rAF-driven engine that owns the row DOM directly:
- * - O(visible rows) per frame: a pool of absolutely-positioned row divs is
- *   reused; only NEW lines get their content written (`innerHTML`), existing
- *   lines are only re-positioned (transform), never re-created
- * - Stable seq keys: rows are keyed by the buffer's absolute seq — head
- *   trimming never re-renders surviving rows (the old virtualizer re-keyed
- *   every visible row on each trim)
- * - Fixed row height: monospace font ⇒ rowHeight = fontSize × lineHeight;
- *   content height is `count × rowHeight`, zero DOM measurement
- * - Same-frame pin: when follow is engaged, `scrollTop` is set inside
- *   `render()` — the follow path is one rAF, not the old effect + double-rAF
- *   chain
- * - DOM order == visual order: newly acquired rows are inserted at their
- *   visIdx position (`insertRowInOrder`), NOT appended to the tail — a
- *   reversed DOM order makes cross-row drag selection skip rows (the browser
- *   walks the selection by DOM order)
- * - DOM structure mirrors the old TerminalRow output exactly (`.terminal-line`
- *   with `.terminal-timestamp` / `.terminal-direction` / `.terminal-content`
- *   spans), so the existing CSS needs no changes
+ * Layout — document flow + spacers:
+ * - The content layer is `[headSpacer][rows…][tailSpacer]`. Rows are normal
+ *   flow children (fixed rowHeight); spacers carry the off-screen space:
+ *   head = firstVisIdx × rowHeight, tail = the space after the last window
+ *   row. DOM order == visual order BY CONSTRUCTION — the old absolute/
+ *   translateY lattice and its whole order-maintenance machinery
+ *   (insertRowInOrder, per-frame sort repair, detached-reference defenses —
+ *   issues #14/#15 class) are structurally gone.
+ * - New rows insert relative to the permanent spacers or the first visible
+ *   row with a larger visIdx (walk skips parked rows); no node is ever moved
+ *   once placed, so insertBefore references are always live children.
  *
- * The renderer is presentation-only: the viewport manager owns the buffer,
- * filter/search state and render scheduling, and hands the renderer a
- * `TerminalViewState` describing which seqs to show.
+ * Selection — pin rule instead of freeze:
+ * - A native cross-row selection Range is anchored to live row nodes.
+ *   Chromium semantics (probed, issue #18): re-parenting an anchored node
+ *   discards/clips the range; deleting a NON-endpoint row only clips it.
+ *   Therefore selected rows are never re-parented — they "park" in place:
+ *   - Row inside the window: normal flow row (its correct slot).
+ *   - Row outside the window: `display:none` (zero flow impact, same parent,
+ *     style-only transitions — re-entering the window just clears the style,
+ *     no node move). Chromium keeps the Range and its text across
+ *     display:none.
+ * - Unpinned rows recycle/rewrite freely even mid-drag — no global freeze,
+ *   no fullRedraw suppression, no setSelecting API.
+ * - `document.selectionchange` (watcher installed while pins exist) clears
+ *   dead selections → next render recycles parked rows. Head-trimmed pinned
+ *   rows park with frozen content until the selection clears (self-limiting
+ *   via MAX_PINNED_ROWS).
+ *
+ * Unchanged invariants:
+ * - O(visible rows + parked) per frame; only new/dirty rows get content.
+ * - Stable seq keys; stale detection via REAL-TIME seqToVisIdx (issue #10 —
+ *   cached visIdx fields are never trusted).
+ * - Large-trim reading-position anchor (headAdvance ≥ LARGE_TRIM_ROWS —
+ *   reachable via setLimits shrink; issue #10).
+ * - Fixed row height, zero measurement, padding-aware same-frame follow pin.
+ * - DOM structure mirrors TerminalRow (`.terminal-line` with
+ *   `.terminal-timestamp` / `.terminal-direction` / `.terminal-content`).
  *
  * DOM-dependent — tests run under jsdom (`@vitest-environment jsdom`).
  */
@@ -52,6 +66,13 @@ export interface RendererConfig {
   timestampMode: 'perLine' | 'perRound';
   highlightRuleSets: HighlightRuleSet[];
   connectedAt: number | null;
+}
+
+/** One live selection range translated into the buffer's seq space
+ *  (startSeq ≤ endSeq, inclusive — the whole span holds selected text). */
+interface SelectionSeqSpan {
+  startSeq: number;
+  endSeq: number;
 }
 
 /** Per-render view description, built by the viewport manager. */
@@ -81,12 +102,17 @@ export interface TerminalViewState {
   followEnabled: boolean;
 }
 
-const OVERSACAN_ROWS = 12;
+const OVERSCAN_ROWS = 12;
 /** Head advance (in rows) between two renders that counts as a "large trim":
- *  the byte-budget drain / soft-backstop trim drops ~half the buffer at once,
- *  while normal capacity overwrite advances ≤ maxLinesPerTick (2000)/frame —
- *  the anchor restores the reading position only for the former. */
+ *  normal capacity overwrite advances ≤ maxLinesPerTick (2000)/frame, while
+ *  a setLimits shrink can move the head arbitrarily far — the anchor restores
+ *  the reading position only for the latter (issue #10). */
 const LARGE_TRIM_ROWS = 2_500;
+/** Cap on pinned rows: a selection spanning more rows than this breaks its
+ *  own pins (rows recycle) instead of pinning unbounded DOM. Chromium's
+ *  wheel-during-drag extends the range, so this is reachable; 600 rows of
+ *  continuously selected content is far beyond any plausible reading use. */
+const MAX_PINNED_ROWS = 600;
 /** Detached-node pool cap — bounds DOM churn during fast scrolls. */
 const POOL_CAP = 64;
 
@@ -101,12 +127,14 @@ interface ActiveRow {
 
 export class TerminalRenderer {
   private container: HTMLDivElement | null = null;
+  private headSpacer: HTMLDivElement | null = null;
+  private tailSpacer: HTMLDivElement | null = null;
   private contentLayer: HTMLDivElement | null = null;
   private readonly config: RendererConfig;
   private active = new Map<number, ActiveRow>();
   private pool: HTMLDivElement[] = [];
   /** firstSeq at the last completed render — a head advance between renders
-   *  signals a trim (capacity overwrite / byte-budget drain / soft backstop). */
+   *  signals a trim (capacity overwrite / setLimits shrink). */
   private lastRenderedFirstSeq = -1;
   /** Seq at the top of the viewport at the last render (non-follow only) —
    *  restores the reading position across a large trim (issue #10). */
@@ -115,10 +143,12 @@ export class TerminalRenderer {
   private filterVersion = 0;
   private onScrollHandler: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
-  /** Drag-selection in progress: render freezes structural DOM changes so the
-   *  browser's native cross-row selection (anchored to live nodes) is not
-   *  broken by recycle/rewrite. Restored via a full redraw on release. */
-  private isSelecting = false;
+  /** Live native selection → seq spans ("pins"). Pinned rows are never
+   *  re-parented: they stay flow rows in-window, or park (display:none)
+   *  outside it. See class doc. */
+  private selectionSpans: SelectionSeqSpan[] | null = null;
+  /** document.selectionchange watcher (installed on first pin). */
+  private selectionWatcher: (() => void) | null = null;
 
   /** Set by the manager: (re)schedule a rAF render (coalesces scroll/resize). */
   onRenderNeeded: (() => void) | null = null;
@@ -136,9 +166,12 @@ export class TerminalRenderer {
     this.container = container;
     const layer = document.createElement('div');
     layer.className = 'terminal-content-layer';
-    layer.style.position = 'relative';
-    layer.style.width = '100%';
-    layer.style.height = '0px';
+    this.headSpacer = document.createElement('div');
+    this.headSpacer.style.height = '0px';
+    this.tailSpacer = document.createElement('div');
+    this.tailSpacer.style.height = '0px';
+    layer.appendChild(this.headSpacer);
+    layer.appendChild(this.tailSpacer);
     container.appendChild(layer);
     this.contentLayer = layer;
     this.onScrollHandler = () => this.onRenderNeeded?.();
@@ -164,15 +197,15 @@ export class TerminalRenderer {
       this.contentLayer = null;
     }
     this.container = null;
-    // issue #15：旧 active 行随旧 layer 一起从 DOM 移除（孤儿节点），但兄弟
-    // 指针仍链在旧 layer 上。若保留 active，跨 Pane 位移（splitPane 嵌套分支）
-    // 时新容器 attach 后的 render 会对已脱链的 reference 调 insertBefore →
-    // DOMException（'node before which … is not a child of this node'）。清空
-    // active 与池（含锚点状态），下一次 attach 全量重建。
+    this.headSpacer = null;
+    this.tailSpacer = null;
+    // Rows live inside the removed layer — dropping active is safe here
+    // (the selection dies with the layer; parked rows are cleared too).
     this.active.clear();
     this.pool = [];
     this.lastRenderedFirstSeq = -1;
     this.anchorSeq = null;
+    this.clearPins();
     this.fullRedraw = true;
   }
 
@@ -182,16 +215,21 @@ export class TerminalRenderer {
     this.pool = [];
     this.lastRenderedFirstSeq = -1;
     this.anchorSeq = null;
-    if (this.contentLayer) {
-      this.contentLayer.innerHTML = '';
-      this.contentLayer.style.height = '0px';
+    this.clearPins();
+    const layer = this.contentLayer;
+    if (layer && this.headSpacer && this.tailSpacer) {
+      while (layer.firstChild) layer.removeChild(layer.firstChild);
+      // Same spacer nodes go back — layer children stay [head, tail].
+      layer.appendChild(this.headSpacer);
+      layer.appendChild(this.tailSpacer);
+      this.headSpacer.style.height = '0px';
+      this.tailSpacer.style.height = '0px';
     }
     this.fullRedraw = true;
   }
 
   dispose(): void {
     this.detach();
-    this.clear();
   }
 
   /** Mark every row dirty (config change / buffer replacement). */
@@ -199,9 +237,12 @@ export class TerminalRenderer {
     this.fullRedraw = true;
   }
 
-  /** Invalidate cached visIdx positions (filter/search list changed). */
+  /** Invalidate cached visIdx positions (filter/search list changed).
+   *  A view change underneath a live selection invalidates it — pins are
+   *  dropped (matches Chromium's own clipping semantics on structure change). */
   bumpFilterVersion(): void {
     this.filterVersion++;
+    this.clearPins();
     this.fullRedraw = true;
   }
 
@@ -218,28 +259,115 @@ export class TerminalRenderer {
     this.fullRedraw = true;
   }
 
-  /** Drag-selection guard: while active, render() keeps the row DOM
-   *  structurally frozen (no recycle/acquire/innerHTML) so the browser's
-   *  native cross-row selection stays anchored. Release schedules ONE
-   *  render (NOT a full redraw) — already-rendered rows keep their text
-   *  nodes (selection survives), while rows that arrived or were skipped
-   *  during the freeze are picked up by the normal dirty check. */
-  setSelecting(active: boolean): void {
-    if (this.isSelecting === active) return;
-    this.isSelecting = active;
-    if (!active) {
-      // Do NOT set fullRedraw here — a full redraw rewrites every row's
-      // innerHTML, replacing the text nodes the browser's live selection
-      // Range is anchored to. The selection would silently empty, making
-      // all selection-based copy menu items read blank. Instead just
-      // schedule one render: rows already written (renderedSeq === seq)
-      // are skipped, new/skipped rows are picked up via the dirty check.
-      this.onRenderNeeded?.();
+  getConfig(): Readonly<RendererConfig> {
+    return this.config;
+  }
+
+  // ==================== Selection pins ====================
+
+  /** Refresh the pin set from the browser's live selection. Rows intersected
+   *  by any live range are protected (see class doc). Called at the top of
+   *  every render pass. */
+  private syncPins(): void {
+    this.selectionSpans = this.captureSelectionSeqSpans();
+    this.ensureWatcher();
+    if (this.selectionSpans !== null) {
+      let pinnedRows = 0;
+      for (const span of this.selectionSpans) pinnedRows += span.endSeq - span.startSeq + 1;
+      if (pinnedRows > MAX_PINNED_ROWS) this.clearPins();
     }
   }
 
-  getConfig(): Readonly<RendererConfig> {
-    return this.config;
+  /** Drop all pins (and the watcher). Parked rows recycle on the next stale
+   *  pass; the visual `.selected` path (shift+click) is pin-independent. */
+  clearPins(): void {
+    this.selectionSpans = null;
+    if (this.selectionWatcher) {
+      document.removeEventListener('selectionchange', this.selectionWatcher);
+      this.selectionWatcher = null;
+    }
+  }
+
+  /** Test/dev hook: number of active rows currently pinned. */
+  pinnedCount(): number {
+    if (this.selectionSpans === null) return 0;
+    let n = 0;
+    for (const seq of this.active.keys()) {
+      if (this.seqInSelection(seq)) n++;
+    }
+    return n;
+  }
+
+  /** Install the document-level watcher once a pin exists: the moment the
+   *  browser drops the selection (click elsewhere, Esc, programmatic clear),
+   *  schedule a render so parked rows recycle on the next pass. */
+  private ensureWatcher(): void {
+    if (this.selectionWatcher || typeof document === 'undefined') return;
+    this.selectionWatcher = () => {
+      if (this.selectionSpans === null) return;
+      if (this.hasLiveSelection()) return;
+      this.clearPins();
+      this.onRenderNeeded?.();
+    };
+    document.addEventListener('selectionchange', this.selectionWatcher);
+  }
+
+  private hasLiveSelection(): boolean {
+    const sel = window.getSelection?.();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    const layer = this.contentLayer;
+    if (!layer) return false;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      if (r.collapsed) continue;
+      if (layer.contains(r.startContainer) || layer.contains(r.endContainer)) return true;
+    }
+    return false;
+  }
+
+  /** Translate the live browser selection into pinned seq spans. Whole-layer
+   *  selections (Select-All — endpoints on the container/layer) are excluded:
+   *  they do not anchor on row nodes and would pin the entire DOM. */
+  private captureSelectionSeqSpans(): SelectionSeqSpan[] | null {
+    const sel = window.getSelection?.();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const container = this.container;
+    const layer = this.contentLayer;
+    if (!container || !layer) return null;
+    const spans: SelectionSeqSpan[] = [];
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      if (r.collapsed) continue;
+      if (r.startContainer === container || r.endContainer === container) continue;
+      if (r.startContainer === layer || r.endContainer === layer) continue;
+      if (!layer.contains(r.startContainer) && !layer.contains(r.endContainer)) continue;
+      const a = this.seqFromNode(r.startContainer);
+      const b = this.seqFromNode(r.endContainer);
+      if (a === null || b === null) continue;
+      spans.push({ startSeq: Math.min(a, b), endSeq: Math.max(a, b) });
+    }
+    return spans.length > 0 ? spans : null;
+  }
+
+  /** Closest row seq for any node inside a row (or null outside rows). */
+  private seqFromNode(node: Node): number | null {
+    let el: Element | null = node instanceof Element ? node : node.parentElement;
+    while (el && el !== this.contentLayer) {
+      if (el.hasAttribute?.('data-seq')) {
+        const n = Number(el.getAttribute('data-seq'));
+        return Number.isFinite(n) ? n : null;
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  private seqInSelection(seq: number): boolean {
+    if (this.selectionSpans === null) return false;
+    for (const s of this.selectionSpans) {
+      if (seq >= s.startSeq && seq <= s.endSeq) return true;
+    }
+    return false;
   }
 
   // ==================== Main render pass ====================
@@ -251,13 +379,20 @@ export class TerminalRenderer {
   render(buffer: TerminalBuffer, view: TerminalViewState): void {
     const layer = this.contentLayer;
     const container = this.container;
-    if (!layer || !container) return;
+    const headSpacer = this.headSpacer;
+    const tailSpacer = this.tailSpacer;
+    if (!layer || !container || !headSpacer || !tailSpacer) return;
+
+    // Refresh pin state from the live selection every pass (cheap; keeps
+    // pins honest even if a selectionchange was coalesced away).
+    if (this.hasLiveSelection()) this.syncPins();
 
     const rowHeight = this.config.rowHeight;
     const firstSeq = buffer.firstSeq;
     const lastSeq = buffer.lastSeq;
     if (buffer.length === 0 || lastSeq < firstSeq) {
-      layer.style.height = '0px';
+      headSpacer.style.height = '0px';
+      tailSpacer.style.height = '0px';
       this.recycleAll();
       this.anchorSeq = null;
       this.lastRenderedFirstSeq = firstSeq;
@@ -267,22 +402,17 @@ export class TerminalRenderer {
     const frozen = view.frozenSeq !== null ? Math.min(view.frozenSeq, lastSeq) : lastSeq;
     const baseCount = this.computeVisibleCount(view, buffer, frozen);
     const totalHeight = baseCount * rowHeight;
-    layer.style.height = `${totalHeight}px`;
+
 
     // Follow pin: when follow is engaged and no gesture is active, the
-    // viewport rides the newest row — the pin target IS the scrollTop used
-    // for the window computation, so rows are laid out for the pinned view.
+    // viewport rides the newest row — compute it before the window so rows
+    // are laid out for the pinned view. (#10) A large head advance with a
+    // non-follow viewport restores the reading position from the anchor seq
+    // instead of letting the browser clamp it to the new content bottom.
     const follow = view.followEnabled && !view.gestureActive;
-    // issue #10：大 drain（字节预算裁半 / 软兜底 softTrim）单帧前移 firstSeq
-    // 数十万行 → 内容总高度骤降。follow 场景由下方同帧钉底一次到位处理（视口
-    // 内容即最新行，与 trim 前一致）；非 follow（用户上滚读历史）时浏览器会把
-    // 超界的 scrollTop 夹到新内容底——阅读位置瞬间丢失，随后逐帧回填产生
-    // 「内容上移/滚动条跳动」的抖动观感。这里检测到大 trim 时按上一帧视口
-    // 顶部的 seq 恢复锚点：锚点行仍存活则回到视口顶部，被裁则停在内容头部
-    // （而不是被夹到底部）。gesture / 拖选期间不干预（用户正在主动操作）。
     const headAdvance = firstSeq - this.lastRenderedFirstSeq;
     const anchorRestored =
-      headAdvance >= LARGE_TRIM_ROWS && !follow && !view.gestureActive && !this.isSelecting;
+      headAdvance >= LARGE_TRIM_ROWS && !follow && !view.gestureActive && this.selectionSpans === null;
     if (anchorRestored) {
       const anchor = this.anchorSeq;
       // 过滤模式下 scrollTop 空间按 visIdx 索引（baseCount 是过滤后计数），
@@ -298,135 +428,76 @@ export class TerminalRenderer {
       ? Math.max(0, totalHeight - container.clientHeight)
       : container.scrollTop;
 
-    const firstVisIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSACAN_ROWS);
+    const firstVisIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
     const lastVisIdx = Math.min(
       baseCount - 1,
-      Math.ceil((scrollTop + container.clientHeight) / rowHeight) + OVERSACAN_ROWS,
+      Math.ceil((scrollTop + container.clientHeight) / rowHeight) + OVERSCAN_ROWS,
     );
 
-    //    Frozen during drag-selection: removing a node whose text is inside
-    //    the live selection range breaks the native cross-row Range.
-    const selecting = this.isSelecting;
-    // issue #17：release 后（selecting=false）的回收会 `recycle()` 滚出视口的
-    // 行——若该行是浏览器活选区 Range 的锚定节点（拖选起点行），node.remove()
-    // 会让 Chromium 清空/漂移选区，起点无法定位。有活选区时跳过被命中的行；
-    // 用户点击别处清选区后下一帧自然回收（自限）。仅 !selecting 时需要检查
-    // （selecting 期间本就不回收）。
-    const liveRanges = selecting ? null : this.captureLiveSelectionRanges();
+    // 2. Spacers carry the off-screen space; hidden parked rows contribute
+    //    zero flow height, so the spacers alone define the geometry.
+    headSpacer.style.height = `${firstVisIdx * rowHeight}px`;
+    tailSpacer.style.height = `${Math.max(0, (baseCount - 1 - lastVisIdx) * rowHeight)}px`;
+
+    // 3. Stale pass (window bounds are now final): rows outside the window
+    //    or behind the filter version recycle — unless pinned, in which case
+    //    they park (display:none, same parent).
     for (const [seq, row] of this.active) {
-      // issue #10：stale 判定用**实时**列表位置而非缓存的 visIdx 字段——head trim
-      // （内存预算/容量裁剪）前进 firstSeq（及 filtered.offset）后，行的实际位置
-      // 整体平移，缓存的 visIdx 停在旧窗口值 → 仅按字段判定 stale 永不触发 →
-      // 每帧 append+trim 都新建窗口行、旧行残留 → active 无限增长、DOM 行数爆炸
-      // （e2e 实测 6669 行 vs 正常 27）、每帧 O(n) 渲染 → 高频数据下帧率暴跌、
-      // 输出区上下抖动（数据突发填满缓冲 → trim 风暴 → 抖动 → 突发结束恢复）。
-      // 实时位置：identity 模式 O(1)，过滤模式二分 O(log n)；越界（被裁/冻结外）
-      // 返回 null → 回收。
       const visIdx = this.seqToVisIdx(seq, view, buffer, frozen);
       const stale =
         visIdx === null ||
         row.version !== this.filterVersion ||
         visIdx < firstVisIdx ||
         visIdx > lastVisIdx;
-      if (stale && !selecting && !this.rowInLiveSelection(row.node, liveRanges)) {
+      if (!stale) continue;
+      if (this.seqInSelection(seq)) {
+        row.node.style.display = 'none';
+      } else {
         this.recycle(row);
         this.active.delete(seq);
       }
     }
 
-    // 1b. Ensure DOM order matches visIdx order for surviving rows. Past
-    //     insertRowInOrder bugs may have left the DOM scrambled; fix it now
-    //     so the browser's native cross-row selection walks the correct
-    //     document order. Skipped during drag-selection (moving nodes would
-    //     break the live Range).
-    //     issue #14：用**实时** seqToVisIdx 排序，不信缓存的 row.visIdx——
-    //     head trim 后缓存值过期（整体平移，相对顺序碰巧不变但非设计保证）。
-    if (!selecting) {
-      const sorted = Array.from(this.active.entries())
-        .map(([seq, row]) => ({ node: row.node, visIdx: this.seqToVisIdx(seq, view, buffer, frozen) }))
-        .filter((r): r is { node: HTMLDivElement; visIdx: number } => r.visIdx !== null)
-        .sort((a, b) => a.visIdx - b.visIdx);
-      let prev: HTMLDivElement | null = null;
-      for (const { node } of sorted) {
-        if (prev !== null && node.previousSibling !== prev) {
-          // issue #15 防御：跨容器位移 / attach-detach 交错的窗口期，reference
-          // 可能已脱链（旧 layer 移除后节点保留兄弟指针）——insertBefore 的
-          // reference 必须是 layer 的子孙节点，否则抛 DOMException。脱链时降级
-          // appendChild（视觉顺序由下一步物化循环的 insertRowInOrder 归位）。
-          const ref = prev.nextSibling;
-          if (ref !== null && layer.contains(ref)) {
-            layer.insertBefore(node, ref);
-          } else {
-            layer.appendChild(node);
-          }
-        }
-        prev = node;
-      }
-    }
-
-    // 2. Ensure + update visible rows.
+    // 4. Materialize the window rows in flow order. New rows insert before
+    //    the first visible row with a larger visIdx (or the tail spacer);
+    //    parked rows re-entering the window just clear display:none — their
+    //    parked flow slot IS their correct slot, no node move.
     for (let visIdx = firstVisIdx; visIdx <= lastVisIdx; visIdx++) {
       const seq = this.visIdxToSeq(visIdx, view, buffer, frozen);
       if (seq === null) continue;
       const line = buffer.getBySeq(seq);
       if (!line) continue;
-
       let row = this.active.get(seq);
       const isNew = !row;
       if (!row) {
-        // issue #12：拖选冻结期间也物化**新**行——滚动（含拖选边缘的浏览器
-        // auto-scroll）新进视口的行与冻结期间新到达的数据行必须出现在 DOM 里，
-        // 否则露出区域一片黑且选不到。冻结只保护**已有**行（浏览器原生选区
-        // Range 锚定的节点）不被回收/重写；新行不在任何活 Range 端点内，
-        // acquire + 按 visIdx 归位 + 写内容都安全（池节点已从 DOM 移除，
-        // 重插不会回移已有节点的 Range）。
         row = this.acquireRow();
         this.active.set(seq, row);
-        // DOM 顺序 = 视觉顺序：池复用/新建节点默认在 contentLayer 末尾，必须
-        // 按 visIdx 归位——否则向上滚动补位时 DOM 顺序颠倒，跨行拖拽选择时
-        // 浏览器按 DOM 顺序拼接选区，视觉中间的行被跳过（issue #14 回归）。
-        this.insertRowInOrder(row.node, visIdx, view, buffer, frozen);
+        row.node.style.height = `${this.config.rowHeight}px`;
+        const anchor = this.findFlowAnchor(visIdx, view, buffer, frozen);
+        layer.insertBefore(row.node, anchor);
       }
       row.seq = seq;
       row.visIdx = visIdx;
       row.version = this.filterVersion;
-      const node = row.node;
-      node.style.transform = `translateY(${visIdx * rowHeight}px)`;
-      node.dataset.seq = String(seq);
-
-      // A row is dirty when it's new (seq beyond the last written one), the
-      // node was recycled from another seq, or a full redraw is pending.
-      // Content is frozen during drag-selection **for existing rows only**:
-      // innerHTML replacement rebuilds the text node the Range endpoint
-      // points at, silently dropping the selected text from the highlight.
-      // New rows (isNew) get their content written even mid-drag — they are
-      // not part of any live Range yet (issue #12: scrolling during a drag
-      // must show the newly exposed rows, not black space).
+      row.node.style.display = '';
+      row.node.dataset.seq = String(seq);
+      // Pinned rows skip content rewrites while the selection lives: any
+      // innerHTML replacement rebuilds the anchor text node and kills the
+      // Range. Content refreshes on the pass after the selection clears.
       if (
-        isNew ||
-        (!selecting &&
-          (this.fullRedraw || node.dataset.renderedSeq !== String(seq)))
+        !this.seqInSelection(seq) &&
+        (isNew || this.fullRedraw || row.node.dataset.renderedSeq !== String(seq))
       ) {
-        this.writeRowContent(node, line, seq, buffer, view);
-        node.dataset.renderedSeq = String(seq);
+        this.writeRowContent(row.node, line, seq, buffer, view);
+        row.node.dataset.renderedSeq = String(seq);
       }
-      this.applyRowClasses(node, seq, view);
+      this.applyRowClasses(row.node, seq, view);
     }
-    // Don't clear fullRedraw during drag-selection: freezing it lets the
-    // post-release dirty check distinguish "rows already rendered before the
-    // freeze" (renderedSeq === seq → not dirty → text nodes survive) from
-    // "rows that arrived or were skipped during the freeze" (renderedSeq
-    // mismatch or not yet materialized → dirty → written). This preserves the
-    // browser selection Range across the freeze-release cycle.
-    if (!selecting) {
-      this.fullRedraw = false;
-    }
+    this.fullRedraw = false;
 
-    // 3. Follow pin — same frame, zero latency. Account for the container's
+    // 5. Follow pin — same frame, zero latency. Account for the container's
     //    padding (8px top/bottom on .terminal-view) so the last row is fully
-    //    visible. The old `totalHeight - clientHeight` left ~8px unscrolled,
-    //    cutting off the bottom third of the last row. getComputedStyle is
-    //    read only when following; jsdom has no layout (padding 0 → old formula).
+    //    visible. getComputedStyle is read only when following.
     if (follow) {
       const cs = getComputedStyle(container);
       const padTop = parseFloat(cs.paddingTop) || 0;
@@ -437,7 +508,7 @@ export class TerminalRenderer {
     // Record the trim anchor for the next render: the seq at the top of the
     // viewport (non-follow only — follow re-pins every frame, no anchor
     // needed). headAdvance is measured against this on the next render.
-    if (!follow && !view.gestureActive && !this.isSelecting) {
+    if (!follow && !view.gestureActive) {
       const topVisIdx = Math.min(
         Math.floor(container.scrollTop / rowHeight),
         Math.max(0, baseCount - 1),
@@ -445,6 +516,38 @@ export class TerminalRenderer {
       this.anchorSeq = this.visIdxToSeq(topVisIdx, view, buffer, frozen);
     }
     this.lastRenderedFirstSeq = firstSeq;
+  }
+
+  /** First visible sibling that should come AFTER a row at `visIdx` — the
+   *  insertBefore anchor that keeps flow order == visual order. Walks layer
+   *  children (≈ window + parked rows). Parked (display:none) rows still
+   *  hold their flow slot and MUST be considered as anchors; only rows
+   *  whose seq no longer maps (seqToVisIdx null — head-trimmed out of the
+   *  buffer) are legitimately skipped. */
+  private findFlowAnchor(
+    visIdx: number,
+    view: TerminalViewState,
+    buffer: TerminalBuffer,
+    frozen: number,
+  ): HTMLDivElement | null {
+    const layer = this.contentLayer;
+    const tail = this.tailSpacer;
+    if (!layer || !tail) return null;
+    let child = layer.firstElementChild;
+    while (child && child !== tail) {
+      if (
+        child instanceof HTMLDivElement &&
+        child.hasAttribute('data-seq')
+      ) {
+        const seq = Number(child.getAttribute('data-seq'));
+        if (Number.isFinite(seq)) {
+          const childVis = this.seqToVisIdx(seq, view, buffer, frozen);
+          if (childVis !== null && childVis > visIdx) return child;
+        }
+      }
+      child = child.nextElementSibling;
+    }
+    return tail;
   }
 
   /** Scroll so the given seq is visible at the requested alignment. */
@@ -491,46 +594,6 @@ export class TerminalRenderer {
     if (raw === null || raw === undefined) return null;
     const n = Number(raw);
     return Number.isFinite(n) ? n : null;
-  }
-
-  /** Snapshot the browser's live selection ranges (issue #17). Returns null
-   *  when no selection or only a collapsed caret — a collapsed range has no
-   *  anchor text to protect. Whole-container selections (Select All) are
-   *  excluded: their endpoints sit on the container, not on row nodes, so
-   *  protecting every row would pin the whole DOM. */
-  private captureLiveSelectionRanges(): Range[] | null {
-    const sel = window.getSelection?.();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
-    const container = this.container;
-    if (!container) return null;
-    const ranges: Range[] = [];
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const r = sel.getRangeAt(i);
-      if (r.collapsed) continue;
-      if (r.startContainer === container || r.endContainer === container) continue;
-      // Only ranges anchored inside this renderer's content layer matter —
-      // selections from other DOM areas (inputs, other panes) must not pin rows.
-      const layer = this.contentLayer;
-      if (layer && !layer.contains(r.startContainer) && !layer.contains(r.endContainer)) continue;
-      ranges.push(r);
-    }
-    return ranges.length > 0 ? ranges : null;
-  }
-
-  /** Whether a row node is touched by any live selection range (issue #17).
-   *  Row nodes are pinned while the browser selection references them —
-   *  removing the anchor node empties/relocates the selection. */
-  private rowInLiveSelection(node: HTMLDivElement, ranges: Range[] | null): boolean {
-    if (!ranges) return false;
-    for (const r of ranges) {
-      try {
-        if (r.intersectsNode(node)) return true;
-      } catch {
-        // A range may have been invalidated (node detached / selection reset)
-        // between capture and use — treat as not intersecting.
-      }
-    }
-    return false;
   }
 
   // ==================== Internals ====================
@@ -601,9 +664,6 @@ export class TerminalRenderer {
     if (!node) {
       node = this.createRowNode();
     } else {
-      // Pooled nodes were removed from the DOM on recycle — reset display so
-      // the row becomes visible again. DOM insertion is deferred to
-      // `insertRowInOrder` (the caller keeps DOM order == visual order).
       node.style.display = '';
     }
     return { node, seq: -1, visIdx: -1, version: -1 };
@@ -612,58 +672,14 @@ export class TerminalRenderer {
   private createRowNode(): HTMLDivElement {
     const node = document.createElement('div');
     node.className = 'terminal-line';
-    node.style.position = 'absolute';
-    node.style.top = '0';
-    node.style.left = '0';
-    node.style.width = '100%';
-    node.style.height = `${this.config.rowHeight}px`;
     return node;
-  }
-
-  /** Insert the node keeping contentLayer children sorted by visIdx (DOM
-   *  order == visual order). No-op when already in place.
-   *
-   *  issue #14：用**实时** seqToVisIdx 计算候选行的位置，不信缓存的
-   *  `row.visIdx`——head trim 后存活行的缓存 visIdx 停在旧窗口值（整体平移），
-   *  虽然相对顺序碰巧不变，但用旧值属于"碰巧对"而非"设计上对"；一旦出现
-   *  非均匀位置变化（过滤列表重算、setLimits 不均匀裁剪）就会乱序/堆叠。
-   *  新行的 visIdx 由调用方传入（本帧刚算出），候选行用实时位置比较。 */
-  private insertRowInOrder(
-    node: HTMLDivElement,
-    visIdx: number,
-    view: TerminalViewState,
-    buffer: TerminalBuffer,
-    frozen: number,
-  ): void {
-    const layer = this.contentLayer;
-    if (!layer) return;
-    let target: HTMLDivElement | null = null;
-    let targetVisIdx = Infinity;
-    for (const [seq, row] of this.active) {
-      if (row.node === node) continue;
-      const rVisIdx = this.seqToVisIdx(seq, view, buffer, frozen);
-      if (rVisIdx !== null && rVisIdx > visIdx && rVisIdx < targetVisIdx) {
-        target = row.node;
-        targetVisIdx = rVisIdx;
-      }
-    }
-    if (target === null) {
-      layer.appendChild(node);
-    } else if (node.nextSibling !== target) {
-      // issue #15 防御：target 可能已脱链（同排序循环的竞态窗口）——insertBefore
-      // 的 reference 必须是 layer 的子孙节点，否则抛 DOMException；脱链时降级
-      // appendChild（行仍在 layer 内、位置交给下一帧排序循环修正）。
-      if (layer.contains(target)) {
-        layer.insertBefore(node, target);
-      } else {
-        layer.appendChild(node);
-      }
-    }
   }
 
   private recycle(row: ActiveRow): void {
     const node = row.node;
     node.remove();
+    node.style.display = '';
+    delete node.dataset.renderedSeq;
     if (this.pool.length < POOL_CAP) this.pool.push(node);
   }
 
@@ -718,10 +734,9 @@ export class TerminalRenderer {
     const dirColor = this.directionColor(line.direction, line.toolStream);
     const dirClass = line.direction === 'TOOL' ? ' terminal-direction-tool' : '';
     const dirHtml = `<span class="terminal-direction${dirClass}" style="color:${dirColor}">${line.direction}</span>`;
-    // issue #9：行高固定（rowHeight）而内容 span 在 .terminal-content 的
-    // white-space: pre 下不再被容器宽度换行——但 TX 多行输入等内嵌 \n 仍会画出
-    // 第二视觉行并叠到下一行上，这里把内容裁剪在固定行盒内（横向不裁：span 宽度
-    // 随内容撑开，超宽部分由 .terminal-view 的 overflow-x 横向滚动查看）。
+    // 行高固定（rowHeight）而内容 span 在 .terminal-content 的 white-space: pre
+    // 下不被容器宽度换行——内嵌 \n 的第二视觉行被裁剪在固定行盒内（横向不裁：
+    // span 宽度随内容撑开，超宽部分由 .terminal-view 的 overflow-x 横向滚动）。
     node.innerHTML = `${tsHtml}${dirHtml}<span class="terminal-content" style="max-height:${c.rowHeight}px;overflow:hidden">${html}</span>`;
   }
 

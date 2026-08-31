@@ -89,6 +89,28 @@
   display: flex;
   gap: var(--space-2);
   padding: 1px 0; /* optical row breathing — deliberately below the 4px scale */
+  flex: none; /* flow layout (issue #18): rows are block-flow children of
+                 .terminal-content-layer; flex:none keeps them unsqueezed if
+                 an ancestor turns the layer into a flex container. */
+}
+
+/* issue #18 flow layout: the renderer's content layer is
+   [headSpacer][rows…][tailSpacer]. Spacers carry the off-screen vertical
+   space (heights set inline by the engine); they must never grow/shrink or
+   wrap around — fixed heights, zero content. overflow-anchor: none stops
+   Chrome's native scroll anchoring from fighting the engine's scrollTop
+   management (spacer height changes look like content shifts to it). */
+.terminal-content-layer {
+  width: 100%;
+  overflow-anchor: none;
+}
+
+.terminal-content-layer > div:first-child,
+.terminal-content-layer > div:last-child {
+  flex: none;
+  width: 100%;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .terminal-timestamp {

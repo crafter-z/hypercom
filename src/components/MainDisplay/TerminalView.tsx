@@ -194,17 +194,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         vm.beginGesture();
         clearTimeout(settleTimerRef.current);
       }
-      // Left-button drag on a row starts a native cross-row text selection —
-      // freeze renderer structural DOM changes until release so the selection
-      // Range stays anchored to live nodes. Scrollbar presses hit the
-      // container itself (no data-seq) and never freeze.
+      // Left-button drag on a row starts a native cross-row text selection.
+      // The renderer pins rows the live Range anchors to (selectionchange +
+      // per-render syncPins) — no freeze protocol. Clear any stale selection
+      // first so pins never outlive their browser Range. Scrollbar presses
+      // hit the container itself (no data-seq) and don't touch pins.
       if (e.button === 0 && TerminalRenderer.seqFromEventTarget(e.target) !== null) {
-        vm.setSelecting(true);
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) sel.removeAllRanges();
         // 拖选 = 主动浏览/选择历史数据：脱离滚动锁定。否则 follow pin 在
-        // 数据快速刷新时每帧把 scrollTop 钉在增长中的底部，冻结的 active
-        // 行停在旧位置被甩出视口 → 输出区空白。解锁后视口固定，冻结行
-        // 保持原位，选择范围稳定；settle 不参与拖选（非 gesture 路径），
-        // 用户停在哪锁定就保持在哪，点底部按钮可重新跟随。
+        // 数据快速刷新时每帧把 scrollTop 钉在增长中的底部，被选中行随内容
+        // 增长滚出视口 → 输出区空白。解锁后视口固定，选区稳定；settle 不
+        // 参与拖选（非 gesture 路径），用户停在哪锁定就保持在哪，点底部
+        // 按钮可重新跟随。
         if (useTerminalStore.getState().terminals[portId]?.scrollLocked) {
           useTerminalStore.getState().setTerminalConfig(portId, { scrollLocked: false });
         }
@@ -213,20 +215,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
     },
     [vm],
   );
-
-  // Release the selection freeze anywhere (mouseup may happen off-container).
-  const handleSelectionEnd = useCallback(() => {
-    vm.setSelecting(false);
-  }, [vm]);
-
-  useEffect(() => {
-    window.addEventListener('pointerup', handleSelectionEnd);
-    window.addEventListener('pointercancel', handleSelectionEnd);
-    return () => {
-      window.removeEventListener('pointerup', handleSelectionEnd);
-      window.removeEventListener('pointercancel', handleSelectionEnd);
-    };
-  }, [handleSelectionEnd]);
 
   const handlePointerUp = useCallback(() => {
     clearTimeout(settleTimerRef.current);

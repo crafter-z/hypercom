@@ -46,6 +46,31 @@ export interface TerminalContextMenuData {
   onSelectAll: () => void;
 }
 
+/**
+ * Selection text that ignores layout visibility.
+ *
+ * `Selection.toString()` walks the LAYOUT — content inside display:none
+ * (rows the renderer parks while their selection is pinned, issue #18)
+ * is omitted, so copying a selection whose rows scrolled out of the
+ * viewport would yield ''. Cloning each range's subtree instead copies
+ * every text node the Range anchors, parked or not. Line boundaries are
+ * preserved because each row is a block-level div.
+ */
+export function selectionText(): string {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return '';
+  const parts: string[] = [];
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const r = sel.getRangeAt(i);
+    if (r.collapsed) continue;
+    const div = document.createElement('div');
+    div.appendChild(r.cloneContents());
+    const text = div.textContent ?? '';
+    if (text) parts.push(text);
+  }
+  return parts.join('\n');
+}
+
 export function buildTerminalContextMenuItems(
   data: TerminalContextMenuData
 ): ContextMenuEntry[] {
@@ -71,9 +96,13 @@ export function buildTerminalContextMenuItems(
     if (text) void writeClipboardText(text);
   };
 
+  // issue #18: Chromium's Selection.toString() serializes by LAYOUT
+  // visibility — rows the renderer parks (display:none, selection pinned)
+  // drop out of it. Range.cloneContents() is a pure tree clone and keeps
+  // parked rows' text, so copy what the Range anchors, not what is visible.
   const copyBrowserSelection = () => {
-    const sel = window.getSelection();
-    if (sel && sel.toString()) void writeClipboardText(sel.toString());
+    const text = selectionText();
+    if (text) void writeClipboardText(text);
   };
 
   const exportLines = async (ext: 'txt' | 'csv') => {
@@ -108,12 +137,12 @@ export function buildTerminalContextMenuItems(
     { label: t('terminalView.contextMenu.copy'), onClick: copyBrowserSelection },
     { type: 'separator' },
     { label: t('terminalView.contextMenu.copyAsHex'), onClick: () => {
-      const sel = window.getSelection();
-      if (sel && sel.toString()) void writeClipboardText(stringToHex(sel.toString()));
+      const text = selectionText();
+      if (text) void writeClipboardText(stringToHex(text));
     }},
     { label: t('terminalView.contextMenu.hexToText'), onClick: () => {
-      const sel = window.getSelection();
-      if (sel && sel.toString()) void writeClipboardText(hexToString(sel.toString()));
+      const text = selectionText();
+      if (text) void writeClipboardText(hexToString(text));
     }},
     { type: 'separator' },
     { label: t('terminalView.contextMenu.exportTxt'), onClick: () => { void exportLines('txt'); } },
