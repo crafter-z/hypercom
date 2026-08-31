@@ -431,15 +431,15 @@ scope: ui | backend | store | hooks | docs
 - **发送提示前缀默认空（issue #7-3）**：`sendPrefix` 默认 `''`（TS `useAppStore.defaultConfig` + Rust `AppConfig::default` 两侧同步）；终端 TX 行已有方向标识，前缀只是可选的附加提示。
 - **TTY 模式（issue #11）**：TTY 端口（`mode:'tty'`）由 xterm.js 渲染完整终端流——**无本地 TX 回显**（对端 shell 会 echo，本地再插一条 TX 行既重复又破坏终端流），`sendToPort` TTY 分支跳过 TX 回显 + `flushNow`（仍走后端发送/流量统计/历史，快捷发送/命令面板在 TTY 下可复用）；**TTY 写 pty 做过回车归一**（`SerialManager::send_data` GIT: 分支 `normalize_tty_line_ending`）：pty 行规程（ICRNL）把 `\r` 转成 `\n`，`\r\n` 会变成两个换行——快捷发送后多执行一行空命令，故 `\r\n` 统一归一为单个 `\r`（真实终端 Enter），`\r`/`\n`/`None` 原样保留；`useSerialReceive` 对 TTY 端口**跳过触发引擎/协议解析/RxPipeline 行组装**（字节流没有「行」语义，交给 xterm 的 ANSI/光标/备用屏幕）直喂 `ttyService.feed`；RX 解码**仅 UTF-8**（`TextDecoder('utf-8',{stream:true})`，无 GBK）——TRX 的多编码切换不适用于 TTY；**弹出窗不支持 TTY**（`Pane.handlePopOut` 阻止 detach 并提示 `tty.popoutUnsupported`，弹出窗是独立 webview 不共享 ttyService/xterm 实例）；**标签切换保留会话**（TTY 标签在 Pane 内常驻挂载、非活动 `display:none` 隐藏 `.tty-view-hidden`，恢复可见 re-fit——xterm 缓冲在实例内，切标签销毁实例即丢会话；仅模式切换/关闭标签/跨 Pane 拖拽销毁，见 §TTY 视图/渲染分流）；**切换模式清空缓冲区**（`ParamsSection.handleModeChange` 清 TerminalStore + `flushAndReset` + `ttyService.clear`，避免旧模式 buffered 数据混入新模式首屏）；`ttyService` 队列上限 `MAX_TTY_QUEUE`（10000）超限丢最旧；`ttyService`/`getRxPipeline` 的 `dispose()`/`reset()` 仅测试用，应用生命周期不得调用（同款模块单例纪律）。
 
-## 方案B 终端显示引擎（issue #14, v0.6.0）
+## 方案B 终端显示引擎（issue #14 v0.6.0；issue #18 流式布局 + 选区钉住重构）
 
 TRX 终端的行缓冲与渲染**脱离 React 调度**。数据路径：`serial:data` → `RxPipeline`（字节级行聚合 + rAF 批写）→ `viewportManager.appendTerminalLines` → `TerminalBuffer`（环形缓冲区）→ 同一 rAF 内 `TerminalRenderer.render`（直接 DOM）。
 
 |模块|文件|职责|
 |---|---|---|
 |`TerminalBuffer`|`src/utils/terminal/TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版；`append` 返回 `{seq, trimmed}`）、`snapshot`/`replaceAll`/`clear`/`setLimits`|
-|`TerminalRenderer`|`src/utils/terminal/TerminalRenderer.ts`|直接 DOM 引擎：节点池复用（recycle 从 DOM 移除→acquire 重新挂载，插入统一走 **insertRowInOrder 按 visIdx 归位**——DOM 顺序 == 视觉顺序，否则跨行拖拽选择中间行被跳过）、固定行高零测量、`visibleSeqsOffset` 惰性压缩、同帧钉底（followEnabled && !gestureActive 时 scrollTop 在 render() 内设置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化（`Number.MAX_SAFE_INTEGER` 防 `seq > null` 误判）|
-|`TerminalViewportManager`|`src/utils/terminal/viewportManager.ts`|每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）|
+|`TerminalRenderer`|`src/utils/terminal/TerminalRenderer.ts`|直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（固定行高），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与 insertRowInOrder/每帧排序修复/脱链防御整套机制结构性删除）；新行经 `findFlowAnchor` 只相对 spacer 或更大 visIdx 的行插入（**停车行也是锚点候选**，只跳过已被裁出缓冲的行）；**选区钉住**：活选区触及的行永不回收/不重写/不换父——窗内=文档流行、窗外=**原地停车**（`display:none` 同父；Chromium 探针证实换父即丢 Range），`selectionchange` 清选区后自动回收，`MAX_PINNED_ROWS=600` 超限优雅放弃；同帧钉底、大 trim 锚点恢复（`LARGE_TRIM_ROWS`，`setLimits` 收缩触发）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化（`Number.MAX_SAFE_INTEGER` 防 `seq > null` 误判）全部保留|
+|`TerminalViewportManager`|`src/utils/terminal/viewportManager.ts`|每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）+ matchSet 按 (offset,length,currentMatch) 缓存（免每帧 new Set）|
 |适配面|`viewportManager.ts` 模块级函数|`appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`releaseViewportManager`/`getViewportManager`——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键）一律走这里，**不再碰 useTerminalStore 的行 API**。**issue #11**：`appendTerminalLine(s)`/`replaceTerminalLines` 是「manager 存在才写入」——标签关闭（releaseViewportManager）后端口仍连接、RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始|
 
 关键不变式：
@@ -450,7 +450,7 @@ TRX 终端的行缓冲与渲染**脱离 React 调度**。数据路径：`serial:
 - **内存上限**：`computeBufferLimits()`（从 `config.maxDisplayLines` 派生 `{ maxLines }`，缺省 100000、下限 1000）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits({maxLines})` 同步到现存实例。**裁剪语义（issue #16 改版）**：满 `maxLines` 后每 append **逐行覆盖最旧一条**（滚动窗口）——无字节预算、无 half-trim、无应用级软兜底、无内存裁剪 toast。
 - **渲染正确性陷阱**：frozen 参数为 null 时必须归一化为 `Number.MAX_SAFE_INTEGER`（原始 `seq > null` 会把所有行判为隐藏）；`visibleSeqsOffset` 是过滤列表的惰性裁剪头（append O(1) 摊还）。
 - **stale 判定用实时列表位置（issue #10）**：head trim 前进 firstSeq（及 filtered.offset）后，active 行缓存的 visIdx 字段整体过期——stale 检查若按字段判定，被裁行/幸存行永不回收 → DOM 行数无限增长、每帧 O(n) 渲染 → 输出区抖动。`seqToVisIdx`（identity O(1)、过滤模式二分）是每帧 stale 检查的唯一判定来源，越界即回收。
-- **拖选冻结只保护已有行（issue #12）**：selecting 期间**新**行照常物化（acquire + `insertRowInOrder` + 写内容）——滚动新进视口的行必须可见可选；仅**已有**行冻结（不回收/不重写 innerHTML，保浏览器选区 Range 锚点）。
+- **选区钉住替代全局冻结（issue #18）**：旧 `isSelecting` 全局冻结 + `setSelecting` API 已删。活选区触及的行（`captureSelectionSeqSpans` 映射 Range 端点到 seq 区间）永不回收/不重写/不换父；窗外停车 `display:none`（同父）；`selectionchange` 清选区后下一帧回收；**停车行占真实文档流槽位**——`findFlowAnchor` 必须把停车行当插入锚点候选（曾漏 → 可见 DOM 乱序 [30..35, 8..29, 36..44]），只跳过 `seqToVisIdx` 为 null（已被裁出缓冲）的行；**`Selection.toString()` 按布局可见性序列化**（Chromium）——停车行文本从中消失，复制路径用 `selectionText()`（`Range.cloneContents`，`terminalContextMenu.ts`）；soak 测试（`TerminalRenderer.soak.test.ts`）随机操作序列断言五条不变式。
 
 ## Pane tree (2026-07 refactor)
 

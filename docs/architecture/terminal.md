@@ -7,8 +7,8 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
-| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎：节点池复用（recycle 从 DOM 移除→acquire 重新挂载，插入统一走 **insertRowInOrder 按 visIdx 归位**——DOM 顺序 == 视觉顺序，否则跨行拖拽选择中间行被跳过）、固定行高零测量、`visibleSeqsOffset` 惰性压缩、同帧钉底（followEnabled && !gestureActive 时 scrollTop 在 render() 内设置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化（`Number.MAX_SAFE_INTEGER` 防 `seq > null` 误判） |
-| `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数） |
+| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（固定行高），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、大 trim 锚点恢复（`setLimits` 收缩触发，`LARGE_TRIM_ROWS`）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
+| `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）+ matchSet 按 (offset,length,currentMatch) 缓存（免每帧 new Set） |
 | 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`releaseViewportManager`/`getViewportManager`——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键）一律走这里，**不再碰 useTerminalStore 的行 API** |
 
 ## 关键不变式
@@ -23,7 +23,7 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 
 - **frozen 归一化**：frozen 参数为 null 时必须归一化为 `Number.MAX_SAFE_INTEGER`（原始 `seq > null` 会把所有行判为隐藏）。
 - **stale 判定用实时列表位置（issue #10）**：head trim 前进 firstSeq（及 filtered.offset）后，active 行缓存的 visIdx 字段整体过期——stale 检查若按字段判定，被裁行/幸存行永不回收 → **DOM 行数无限增长**（e2e 实测 6669 vs 正常 27）、每帧 O(n) 渲染 → 输出区上下抖动。`seqToVisIdx`（identity O(1)、过滤模式**二分**）是每帧 stale 检查的唯一判定来源，越界即回收。修复后 DOM 恒 ≤ 窗口+overscan（e2e 断言 ≤40）。
-- **拖选冻结只保护已有行（issue #12）**：selecting 期间**新**行照常物化（acquire + `insertRowInOrder` + 写内容）——滚动新进视口的行必须可见可选；仅**已有**行冻结（不回收/不重写 innerHTML，保浏览器选区 Range 锚点）。
+- **选区钉住替代全局冻结（issue #18）**：旧 `isSelecting` 全局冻结（拖选期间停一切回收/重写）+ `setSelecting` API 已删。新语义：活选区触及的行（`captureSelectionSeqSpans` 把 Range 端点映射到 seq 区间）**永不回收、永不重写、永不换父**——窗外停车 `display:none`（同父，Chromium 探针证实 remove+换父即丢 Range，删除非端点行只裁剪）；`document.selectionchange` 监听器在选区消失时清 pins 并调度渲染；**停车行占真实文档流槽位**——`findFlowAnchor` 必须把停车行当插入锚点候选（曾漏 → 复现乱序 [30..35, 8..29, 36..44]），只跳过 seqToVisIdx 为 null（已被裁出缓冲）的行；**`Selection.toString()` 按布局可见性序列化**（Chromium）——停车行文本会从中消失，右键菜单复制路径用 `selectionText()`（`Range.cloneContents` 纯树克隆，`terminalContextMenu.ts` 导出）；`MAX_PINNED_ROWS=600` 超限（拖选+滚轮延伸）优雅放弃 pins。soak 测试（`TerminalRenderer.soak.test.ts`）随机操作序列断言五条不变式（DOM 有界/可见行 seq 升序/seq 在窗内或停车/spacer 对齐/data-seq 唯一）。
 
 ## 滚动锁定 / 快捷跳转
 
