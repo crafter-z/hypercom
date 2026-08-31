@@ -1,3 +1,17 @@
+# HyperCom v0.6.5
+
+## 新特性
+- 内存预算改版（issue #16 改版）：去除 `memoryLimitMb`/`memoryPerPortBudgetMb` 双内存预算，改为单一 `maxDisplayLines` 最大显示行数（默认 100000，clamp [1000,1000000]）；终端缓冲超限**逐行覆盖最旧**（滚动窗口）；升级自动剥离旧配置项（`strip_legacy_memory_budget_keys`）；删除「因内存限制清屏」toast 与软兜底机制；状态栏内存显示改「JS堆 + 进程 RSS」
+- 行级触发器引擎（P1-1）：`useSerialReceive` 接入 RxPipeline `onLineAssembled` 钩子，条件触发评估粒度从批量降到行级
+- ReDoS 防护：triggerEngine / highlightEngine 正则匹配前 5000 字符截断
+- protocolParser（P1-3）：无完整 header 时保留尾部字节不冲 buffer；rxAssembler（P2-4）：强制发射后紧跟分隔符不产幻影空行
+- terminalSearch 从 MainDisplay/ 迁移到 utils/（引用同步），ConfigModal 回滚保留新分组/元数据
+
+## 其他
+- 统一换行符策略为强制 CRLF（eol=crlf + 自引用豁免）
+- 测试：vitest **673** 例（逐行覆盖语义 + maxDisplayLines 派生重写）、cargo test **155** 例全绿、tsc 0 诊断
+- e2e：大 trim 锚点测试改为「小 maxDisplayLines 下逐行覆盖视口稳定 + DOM 有界」（原场景在逐行覆盖下不存在）
+
 # HyperCom v0.6.4
 
 ## Bugfix
