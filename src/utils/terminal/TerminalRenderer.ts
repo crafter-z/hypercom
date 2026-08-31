@@ -105,8 +105,6 @@ export class TerminalRenderer {
   private readonly config: RendererConfig;
   private active = new Map<number, ActiveRow>();
   private pool: HTMLDivElement[] = [];
-  /** Highest seq whose content has been written; higher seqs are dirty. */
-  private lastRenderedSeq = -1;
   /** firstSeq at the last completed render — a head advance between renders
    *  signals a trim (capacity overwrite / byte-budget drain / soft backstop). */
   private lastRenderedFirstSeq = -1;
@@ -173,7 +171,6 @@ export class TerminalRenderer {
     // active 与池（含锚点状态），下一次 attach 全量重建。
     this.active.clear();
     this.pool = [];
-    this.lastRenderedSeq = -1;
     this.lastRenderedFirstSeq = -1;
     this.anchorSeq = null;
     this.fullRedraw = true;
@@ -183,7 +180,6 @@ export class TerminalRenderer {
   clear(): void {
     this.active.clear();
     this.pool = [];
-    this.lastRenderedSeq = -1;
     this.lastRenderedFirstSeq = -1;
     this.anchorSeq = null;
     if (this.contentLayer) {
@@ -263,7 +259,6 @@ export class TerminalRenderer {
     if (buffer.length === 0 || lastSeq < firstSeq) {
       layer.style.height = '0px';
       this.recycleAll();
-      this.lastRenderedSeq = lastSeq;
       this.anchorSeq = null;
       this.lastRenderedFirstSeq = firstSeq;
       return;
@@ -312,6 +307,12 @@ export class TerminalRenderer {
     //    Frozen during drag-selection: removing a node whose text is inside
     //    the live selection range breaks the native cross-row Range.
     const selecting = this.isSelecting;
+    // issue #17：release 后（selecting=false）的回收会 `recycle()` 滚出视口的
+    // 行——若该行是浏览器活选区 Range 的锚定节点（拖选起点行），node.remove()
+    // 会让 Chromium 清空/漂移选区，起点无法定位。有活选区时跳过被命中的行；
+    // 用户点击别处清选区后下一帧自然回收（自限）。仅 !selecting 时需要检查
+    // （selecting 期间本就不回收）。
+    const liveRanges = selecting ? null : this.captureLiveSelectionRanges();
     for (const [seq, row] of this.active) {
       // issue #10：stale 判定用**实时**列表位置而非缓存的 visIdx 字段——head trim
       // （内存预算/容量裁剪）前进 firstSeq（及 filtered.offset）后，行的实际位置
@@ -327,7 +328,7 @@ export class TerminalRenderer {
         row.version !== this.filterVersion ||
         visIdx < firstVisIdx ||
         visIdx > lastVisIdx;
-      if (stale && !selecting) {
+      if (stale && !selecting && !this.rowInLiveSelection(row.node, liveRanges)) {
         this.recycle(row);
         this.active.delete(seq);
       }
@@ -404,23 +405,21 @@ export class TerminalRenderer {
       if (
         isNew ||
         (!selecting &&
-          (this.fullRedraw || seq > this.lastRenderedSeq || node.dataset.renderedSeq !== String(seq)))
+          (this.fullRedraw || node.dataset.renderedSeq !== String(seq)))
       ) {
         this.writeRowContent(node, line, seq, buffer, view);
         node.dataset.renderedSeq = String(seq);
       }
       this.applyRowClasses(node, seq, view);
     }
-    // Don't advance lastRenderedSeq or clear fullRedraw during drag-selection:
-    // freezing them lets the post-release dirty check distinguish "rows that
-    // were already rendered before the freeze" (renderedSeq === seq, seq <=
-    // lastRenderedSeq → not dirty → text nodes survive) from "rows that
-    // arrived or were skipped during the freeze" (seq > lastRenderedSeq or
-    // renderedSeq mismatch → dirty → written). This preserves the browser
-    // selection Range across the freeze-release cycle.
+    // Don't clear fullRedraw during drag-selection: freezing it lets the
+    // post-release dirty check distinguish "rows already rendered before the
+    // freeze" (renderedSeq === seq → not dirty → text nodes survive) from
+    // "rows that arrived or were skipped during the freeze" (renderedSeq
+    // mismatch or not yet materialized → dirty → written). This preserves the
+    // browser selection Range across the freeze-release cycle.
     if (!selecting) {
       this.fullRedraw = false;
-      this.lastRenderedSeq = lastSeq;
     }
 
     // 3. Follow pin — same frame, zero latency. Account for the container's
@@ -492,6 +491,46 @@ export class TerminalRenderer {
     if (raw === null || raw === undefined) return null;
     const n = Number(raw);
     return Number.isFinite(n) ? n : null;
+  }
+
+  /** Snapshot the browser's live selection ranges (issue #17). Returns null
+   *  when no selection or only a collapsed caret — a collapsed range has no
+   *  anchor text to protect. Whole-container selections (Select All) are
+   *  excluded: their endpoints sit on the container, not on row nodes, so
+   *  protecting every row would pin the whole DOM. */
+  private captureLiveSelectionRanges(): Range[] | null {
+    const sel = window.getSelection?.();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const container = this.container;
+    if (!container) return null;
+    const ranges: Range[] = [];
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      if (r.collapsed) continue;
+      if (r.startContainer === container || r.endContainer === container) continue;
+      // Only ranges anchored inside this renderer's content layer matter —
+      // selections from other DOM areas (inputs, other panes) must not pin rows.
+      const layer = this.contentLayer;
+      if (layer && !layer.contains(r.startContainer) && !layer.contains(r.endContainer)) continue;
+      ranges.push(r);
+    }
+    return ranges.length > 0 ? ranges : null;
+  }
+
+  /** Whether a row node is touched by any live selection range (issue #17).
+   *  Row nodes are pinned while the browser selection references them —
+   *  removing the anchor node empties/relocates the selection. */
+  private rowInLiveSelection(node: HTMLDivElement, ranges: Range[] | null): boolean {
+    if (!ranges) return false;
+    for (const r of ranges) {
+      try {
+        if (r.intersectsNode(node)) return true;
+      } catch {
+        // A range may have been invalidated (node detached / selection reset)
+        // between capture and use — treat as not intersecting.
+      }
+    }
+    return false;
   }
 
   // ==================== Internals ====================

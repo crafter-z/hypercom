@@ -388,6 +388,72 @@ describe('TerminalRenderer scroll + recycling', () => {
     expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
   });
 
+  it('keeps rows the live selection anchors to after release (issue #17)', () => {
+    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const anchor = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(anchor).not.toBeNull();
+    const anchorContent = anchor.querySelector('.terminal-content') as HTMLElement;
+
+    // 浏览器原生选区：起点锚在 seq=100 行、终点在 seq=105 行。
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    const range = document.createRange();
+    range.setStart(anchorContent.firstChild!, 0);
+    const end = container.querySelector('[data-seq="105"] .terminal-content') as HTMLElement;
+    range.setEnd(end.firstChild!, 1);
+    sel.addRange(range);
+    expect(sel.toString()).toBeTruthy();
+
+    // 拖选 + 释放（release 后正常回收路径）——但窗口移到远处，seq=100 行
+    // 已滚出视口。修复前：recycle() 移除 Range 锚定节点 → Chromium 清空选区
+    // （issue #17）。修复后：被活选区命中的行保留，未命中的行回收。
+    renderer.setSelecting(true);
+    renderer.setSelecting(false); // 释放
+    container.scrollTop = 300 * ROW_HEIGHT; // 窗口移走
+    renderer.render(buf, identityView({ followEnabled: false }));
+
+    // 选区命中的行保留（DOM 仍在），选区文本不丢
+    const kept = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(kept).not.toBeNull();
+    expect(kept).toBe(anchor);
+    expect(sel.toString()).toBeTruthy();
+
+    // 未命中的视口外行正常回收（如 seq=90）
+    expect(container.querySelector('[data-seq="90"]')).toBeNull();
+
+    // 用户点击别处清选区 → 下一帧正常回收（自限）
+    sel.removeAllRanges();
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(container.querySelector('[data-seq="100"]')).toBeNull();
+  });
+
+
+  it('does not rewrite rows materialized during the freeze on release (issue #17)', () => {
+    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+
+    // 冻结期内灌入新数据 + 滚动到新行区域：新行以 isNew 路径物化+写入
+    // （renderedSeq 已设），窗口也覆盖新行——它们是潜在 Range 锚点。
+    renderer.setSelecting(true);
+    fill(buf, Array.from({ length: 50 }, (_, i) => String(200 + i))); // 200..249
+    container.scrollTop = 210 * ROW_HEIGHT; // 视口顶对齐 seq 210（visIdx=210，firstSeq=0）
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const freshRow = container.querySelector('[data-seq="210"]') as HTMLElement;
+    expect(freshRow).not.toBeNull();
+    const freshHtml = freshRow.innerHTML;
+
+    // 释放后渲染：冻结期已写行（renderedSeq === seq）不得被重写——重写会
+    // 替换文本节点、破坏 Range 锚点。旧实现靠 `seq > lastRenderedSeq`
+    // 误判（lastRenderedSeq 冻结在旧 lastSeq）导致无谓重写。
+    renderer.setSelecting(false);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const after = container.querySelector('[data-seq="210"]') as HTMLElement;
+    expect(after).not.toBeNull();
+    expect(after.innerHTML).toBe(freshHtml); // 文本节点未被替换
+  });
   it('materializes newly visible rows during drag-selection scroll (issue #12)', () => {
     fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
     container.scrollTop = 100 * ROW_HEIGHT;

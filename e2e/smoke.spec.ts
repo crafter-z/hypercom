@@ -116,18 +116,18 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.operation-panel')).toBeVisible();
   });
 
-  test('StatusBar renders memory budget indicator (issue #6-2/6-6)', async ({ page }) => {
-    // 状态栏内存显示：总预算来自 config（mock 下为默认 2048MB）
+  test('StatusBar renders process memory indicator (issue #6-2/6-6, #16 改版)', async ({ page }) => {
+    // issue #16 改版后无内存总预算分母：状态栏显示「JS堆 XMB · 进程 YMB」
     await expect(page.locator('.statusbar')).toBeVisible();
-    await expect(page.locator('.statusbar-left').getByText(/MB \//)).toBeVisible();
+    await expect(page.locator('.statusbar-left').getByText(/MB/)).toBeVisible();
   });
 
-  test('GeneralSettings shows total + per-port memory budget inputs (issue #6-2)', async ({ page }) => {
+  test('GeneralSettings shows per-port max display lines input (issue #6-2, #16 改版)', async ({ page }) => {
     // 打开设置弹窗（TitleBar 右侧设置按钮）
     await page.locator('.titlebar-right button[title="设置"]').click();
     await expect(page.locator('.modal-overlay')).toBeVisible();
-    await expect(page.locator('.config-page').getByText('内存总预算 (MB):')).toBeVisible();
-    await expect(page.locator('.config-page').getByText('每端口内存预算 (MB):')).toBeVisible();
+    // issue #16 改版：双内存预算 → 单一「最大显示行数」
+    await expect(page.locator('.config-page').getByText('最大显示行数:')).toBeVisible();
   });
 
   // ==================== issue #6-10：RX 显示 + 隐藏窗口排空 ====================
@@ -451,6 +451,147 @@ test.describe('HyperCom smoke tests', () => {
     for (const r of visibleRows) expect(r.hasContent).toBe(true);
   });
 
+  // ==================== issue #17：拖选期间滚轮滚动后选区起点保持 ====================
+
+  test('drag-select then wheel-scroll keeps the selection anchored (issue #17)', async ({ page }) => {
+    await openCom1Tab(page);
+    // 灌入大量数据（60 × 50 行 = 3000 行）
+    for (let i = 0; i < 60; i++) {
+      await page.evaluate((i) => {
+        const bytes = Array.from(new TextEncoder().encode(`chunk-${i}-${'x'.repeat(30)}\n`.repeat(50)));
+        window.__TAURI_INTERNALS__.dispatchEvent('serial:data', {
+          port_id: 'COM1', timestamp: Date.now(), direction: 'RX', data: bytes, is_hex: false,
+        });
+      }, i);
+    }
+    // 滚到内容中部（解锁 follow）
+    const view = page.locator('.terminal-view');
+    await view.evaluate((el: HTMLElement) => { el.scrollTop = el.scrollHeight / 2; });
+    await page.waitForTimeout(200);
+
+    // 在视口中部某行按下鼠标开始拖选
+    const box = (await view.boundingBox())!;
+    const startX = box.x + box.width / 2;
+    const startY = box.y + box.height / 2;
+
+    // 用视口坐标 elementFromPoint 取鼠标按下位置的行（比 translateY 推算可靠）
+    const startSeq = await page.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y);
+      const row = el?.closest?.('[data-seq]');
+      return row ? Number(row.getAttribute('data-seq')) : null;
+    }, { x: startX, y: startY });
+    expect(startSeq).not.toBeNull();
+    // 定位鼠标到起点行（按下前）
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX, startY + 8 * 16, { steps: 5 });
+
+    // 拖选期间滚轮向上滚动 —— 起点行滚出视口（issue #17 场景）
+    for (let i = 0; i < 30; i++) {
+      await page.mouse.wheel(0, -400);
+      await page.waitForTimeout(16);
+    }
+    // 松开鼠标结束拖选
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+
+    // 浏览器原生选区必须仍存在，且起点行号**精确等于**拖选起点（修复前：
+    // release 后回收滚出视口的起点行 → 选区清空/漂移，起点无法定位）。
+    const selInfo = await page.evaluate(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return { ok: false, anchor: null, focus: null };
+      const r = sel.getRangeAt(0);
+      const findRow = (n: Node | null): HTMLElement | null => {
+        let el: Element | null = n instanceof Element ? n : (n?.parentElement ?? null);
+        while (el) {
+          if (el.hasAttribute('data-seq')) return el as HTMLElement;
+          el = el.parentElement;
+        }
+        return null;
+      };
+      return {
+        ok: sel.toString().length > 0,
+        anchor: findRow(r.startContainer)?.getAttribute('data-seq') ?? null,
+        focus: findRow(r.endContainer)?.getAttribute('data-seq') ?? null,
+      };
+    });
+
+    expect(selInfo.ok).toBe(true);
+    expect(selInfo.anchor).not.toBeNull();
+    expect(selInfo.focus).not.toBeNull();
+    expect(Number(selInfo.anchor)).toBeLessThan(Number(selInfo.focus));
+    // 锚点必须精确定位到拖选起点行（不漂移）
+    expect(Number(selInfo.anchor)).toBe(startSeq);
+  });
+
+  test('selection endpoint anchored on a fresh row survives release (issue #17)', async ({ page }) => {
+    await openCom1Tab(page);
+    // 初始数据 + follow 到底部
+    for (let i = 0; i < 20; i++) {
+      await page.evaluate((i) => {
+        const bytes = Array.from(new TextEncoder().encode(`init-${i}-${'y'.repeat(40)}\n`.repeat(20)));
+        window.__TAURI_INTERNALS__.dispatchEvent('serial:data', {
+          port_id: 'COM1', timestamp: Date.now(), direction: 'RX', data: bytes, is_hex: false,
+        });
+      }, i);
+    }
+    await page.waitForTimeout(400);
+    const view = page.locator('.terminal-view');
+
+    // 起点：视口中部某行；终点：拖到视口底部（最后可见行）
+    const box = (await view.boundingBox())!;
+    const startX = box.x + box.width / 2;
+    const startY = box.y + box.height / 2;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX, box.y + box.height - 4, { steps: 5 });
+
+    // 拖选期间灌新数据：新行物化+写入（isNew 路径），终点行可能落在
+    // 冻结期内到达的新行上——release 后不得重写/回收它，否则选区终点漂移
+    for (let i = 0; i < 15; i++) {
+      await page.evaluate((i) => {
+        const bytes = Array.from(new TextEncoder().encode(`fresh-${i}-${'z'.repeat(40)}\n`.repeat(8)));
+        window.__TAURI_INTERNALS__.dispatchEvent('serial:data', {
+          port_id: 'COM1', timestamp: Date.now(), direction: 'RX', data: bytes, is_hex: false,
+        });
+      }, i);
+    }
+    await page.waitForTimeout(300);
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+
+    // release 后立即读取选区 + 延迟再读：选区必须存活且焦点行不漂移
+    const readSel = () => page.evaluate(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return { ok: false, anchor: null, focus: null, text: '' };
+      const r = sel.getRangeAt(0);
+      const findRow = (n: Node | null): HTMLElement | null => {
+        let el: Element | null = n instanceof Element ? n : (n?.parentElement ?? null);
+        while (el) {
+          if (el.hasAttribute('data-seq')) return el as HTMLElement;
+          el = el.parentElement;
+        }
+        return null;
+      };
+      const s = findRow(r.startContainer);
+      const f = findRow(r.endContainer);
+      return {
+        ok: sel.toString().length > 0,
+        anchor: s?.getAttribute('data-seq') ?? null,
+        focus: f?.getAttribute('data-seq') ?? null,
+        text: sel.toString().slice(0, 40),
+      };
+    });
+    const immediate = await readSel();
+    await page.waitForTimeout(800);
+    const delayed = await readSel();
+    expect(immediate.ok).toBe(true);
+    expect(delayed.ok).toBe(true);
+    // 焦点行不得漂移（release 后渲染不得重写/回收冻结期物化的新行）
+    expect(delayed.focus).toBe(immediate.focus);
+    expect(delayed.focus).not.toBeNull();
+  });
+
   // ==================== issue #15/#10：嵌套分屏位移 + 大 trim 视口锚点 ====================
 
   /** 打开指定串口标签页（侧边栏双击端口行） */
@@ -617,9 +758,8 @@ test.describe('HyperCom smoke tests', () => {
     expect(after.rows).toBeGreaterThan(0);
     expect(after.rows).toBeLessThanOrEqual(100); // DOM 有界（窗口 + overscan）
     expect(after.midSeq).not.toBeNull();
-    // 逐行覆盖（≤2000 行/帧）：视口中部 seq 单调前移，无突发甩走；采样跳变
-    // 远小于覆盖总量 14000 行（容差 3000 行覆盖 maxLinesPerTick 单帧上限）
+    // 远小于覆盖总量 14000 行（容差 2000 行覆盖 maxLinesPerTick 单帧上限）
     expect(after.midSeq! - before.midSeq!).toBeGreaterThan(0);
-    expect(after.midSeq! - before.midSeq!).toBeLessThan(14000);
+    expect(after.midSeq! - before.midSeq!).toBeLessThan(16000);
   });
 });
