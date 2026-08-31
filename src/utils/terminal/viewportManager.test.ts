@@ -119,6 +119,24 @@ describe('TerminalViewportManager search', () => {
     vm.setSearch(false, '', false);
     expect(vm.getMatchCount()).toBe(0);
   });
+  it('matchSet is rebuilt when a new query hits the same count (cache-key regression)', () => {
+    // 缓存键 (offset:length:currentMatch) 不含查询身份：两个不同查询若命中
+    // 数恰好相同，不得复用旧 Set——否则渲染层 <mark> 按 seq 判中错位。
+    vm.setSearch(true, 'row-1', false);
+    vm.appendLines(Array.from({ length: 29 }, (_, i) => makeLine(`row-${i + 1}`)));
+    // row-1 与 row-10..row-19 都包含 "row-1" → 11 行命中。
+    expect(vm.getMatchCount()).toBe(11);
+    vm.setSearch(true, 'row-2', false);
+    // row-2 与 row-20..row-29 包含 "row-2" → 同样 11 行命中，键 (0:11:0) 相同。
+    expect(vm.getMatchCount()).toBe(11);
+    // buildView 的 matchSet 必须反映新查询的 seq 集（row-1 不再命中）。
+    const view = (vm as unknown as { buildView(): { matchSet: Set<number> | null } }).buildView();
+    expect(view.matchSet).not.toBeNull();
+    expect(view.matchSet!.size).toBe(11);
+    // seq 0 = "row-1"：旧 Set 含它，新 Set 不含；seq 1 = "row-2"：新 Set 含。
+    expect(view.matchSet!.has(0)).toBe(false);
+    expect(view.matchSet!.has(1)).toBe(true);
+  });
 
   it('jumpToMatch wraps and returns false when empty', () => {
     expect(vm.jumpToMatch(0)).toBe(false);

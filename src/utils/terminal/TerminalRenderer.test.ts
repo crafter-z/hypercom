@@ -56,6 +56,41 @@ const fill = (b: TerminalBuffer, tags: string[]) => {
   for (const t of tags) b.append(makeLine(t));
 };
 
+const range1000 = (from: number): string[] =>
+  Array.from({ length: 1000 }, (_, i) => String(from + i));
+
+/** Build a live browser selection anchored to rows [a..b] (must be in DOM). */
+function selectRows(a: number, b: number): Selection {
+  const sel = window.getSelection()!;
+  sel.removeAllRanges();
+  const range = document.createRange();
+  const startEl = container.querySelector(`[data-seq="${a}"] .terminal-content`) as HTMLElement;
+  const endEl = container.querySelector(`[data-seq="${b}"] .terminal-content`) as HTMLElement;
+  range.setStart(startEl.firstChild!, 0);
+  range.setEnd(endEl.firstChild!, 1);
+  sel.addRange(range);
+  return sel;
+}
+
+/** Clear the selection and fire the event jsdom never dispatches itself. */
+function clearSelection() {
+  window.getSelection()!.removeAllRanges();
+  document.dispatchEvent(new Event('selectionchange'));
+}
+
+const rowSeqs = (root: ParentNode): number[] =>
+  Array.from(root.querySelectorAll('.terminal-line')).map((n) =>
+    Number((n as HTMLElement).dataset.seq),
+  );
+
+/** Flow layer children are [headSpacer][rows…][tailSpacer] — spacers are
+ *  the permanent first/last children of the layer. */
+const layerSpacers = (root: ParentNode): [HTMLElement, HTMLElement] => {
+  const layer = root.querySelector('.terminal-content-layer') as HTMLElement;
+  const children = Array.from(layer.children) as HTMLElement[];
+  return [children[0], children[children.length - 1]];
+};
+
 let buf: TerminalBuffer;
 let container: HTMLDivElement;
 let renderer: TerminalRenderer;
@@ -85,11 +120,8 @@ describe('TerminalRenderer lifecycle', () => {
   it('re-attach after detach renders without throwing on orphaned rows (issue #15)', () => {
     // 复现 splitPane 跨 Pane 位移：底部渲染（follow）后 active 持有窗口行
     // （seqs 6..29）→ detach（旧容器）→ 不 render → 直接 attach 到新容器 →
-    // 置顶 render。新窗口（visIdx 0..24）与旧 active 部分重叠：seqs 0..5 是
-    // 新行，而 seqs 6..24 仍在 active（未达 stale 边界）——新行归位必须相对
-    // 这些**已脱链**的旧行插。修复前 detach 不清 active，insertRowInOrder 对
-    // 脱链 target 调 layer.insertBefore → DOMException（'node before which … is
-    // not a child of this node'）。修复后 detach 清空 active，全量重建。
+    // 置顶 render。detach 清空 active，全量重建（flow 布局下 insertBefore
+    // 锚点永远活着，此路径不再有脱链风险，保留为回归防线）。
     fill(buf, Array.from({ length: 30 }, (_, i) => String(i)));
     // 底部窗口：rowHeight 18、client 200 → scrollTop = 340 → 窗口 visIdx 6..29
     renderer.render(buf, identityView({ followEnabled: true }));
@@ -109,52 +141,61 @@ describe('TerminalRenderer lifecycle', () => {
     expect(container2.querySelectorAll('.terminal-line').length).toBeLessThan(40);
   });
 
-  it('clear empties the layer and resets height', () => {
+  it('clear empties the layer leaving only the two spacers', () => {
     fill(buf, ['a', 'b', 'c']);
     renderer.render(buf, identityView());
     expect(container.querySelectorAll('.terminal-line').length).toBeGreaterThan(0);
     renderer.clear();
     expect(container.querySelectorAll('.terminal-line').length).toBe(0);
-    expect((container.querySelector('.terminal-content-layer') as HTMLElement).style.height).toBe('0px');
+    // Flow layout: layer height is no longer set; spacers reset to 0.
+    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
+    expect(layer.style.height).toBe('');
+    const spacers = Array.from(layer.children) as HTMLElement[];
+    expect(spacers.length).toBe(2);
+    expect(spacers[0].style.height).toBe('0px');
+    expect(spacers[1].style.height).toBe('0px');
   });
 });
 
 describe('TerminalRenderer identity rendering', () => {
-  it('renders the pinned bottom window with correct transforms', () => {
+  it('renders the pinned bottom window with flow spacers', () => {
     fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
     renderer.render(buf, identityView());
-    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
-    expect(layer.style.height).toBe('1800px'); // 100 × 18
     // locked + followEnabled → scrollTop = 1800 - 200 = 1600 → rows 76..99
     expect(container.scrollTop).toBe(1600);
+    // Window: firstVisIdx = floor(1600/18) - 12 = 76, lastVisIdx = min(99, 111) = 99.
+    const [head, tail] = layerSpacers(container);
+    expect(head.style.height).toBe(`${76 * ROW_HEIGHT}px`); // 1368px
+    expect(tail.style.height).toBe('0px');
+    expect(
+      (container.querySelector('.terminal-content-layer') as HTMLElement).style.height,
+    ).toBe(''); // not set in flow layout
     const rows = container.querySelectorAll('.terminal-line');
     expect(rows.length).toBe(24);
     const last = rows[rows.length - 1] as HTMLElement;
     expect(last.dataset.seq).toBe('99');
-    expect(last.style.transform).toBe('translateY(1782px)');
+    // Flow rows carry no positioning styles.
+    expect(last.style.transform).toBe('');
+    expect(last.style.top).toBe('');
+    expect(last.style.left).toBe('');
+    expect(last.style.width).toBe('');
   });
 
-  it('keeps a fixed-height lattice for over-wide lines (issue #9)', () => {
+  it('keeps one fixed-height row per line for over-wide lines (issue #9)', () => {
     // An over-wide line must stay ONE fixed-height row: with CSS wrapping the
     // row painted a second visual line over the next row (fixed rowHeight +
-    // pre-wrap). The lattice below is what makes overlap impossible.
+    // pre-wrap). Flow layout + the clipped content span make overlap impossible.
     const long = 'X'.repeat(5000);
     fill(buf, ['a', long, 'b', 'c']);
     renderer.render(buf, identityView({ followEnabled: false }));
     const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
     expect(rows.length).toBe(4); // exactly one row per line — no wrapped rows
-    const tops = rows.map((n) => {
-      const m = n.style.transform.match(/translateY\(([-\d.]+)px\)/);
-      return m ? Number(m[1]) : NaN;
-    });
-    for (let i = 1; i < tops.length; i++) {
-      expect(tops[i] - tops[i - 1]).toBe(ROW_HEIGHT); // strict lattice — no overlap
-    }
+    // Flow order == seq order, one row per line.
+    expect(rows.map((r) => Number(r.dataset.seq))).toEqual([0, 1, 2, 3]);
     for (const row of rows) {
       expect(row.style.height).toBe(`${ROW_HEIGHT}px`);
+      expect(row.style.transform).toBe('');
     }
-    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
-    expect(layer.style.height).toBe(`${4 * ROW_HEIGHT}px`);
     // Full text survives (selection/copy/search still see the whole line).
     expect(rows[1].querySelector('.terminal-content')?.textContent).toBe(long);
   });
@@ -243,8 +284,7 @@ describe('TerminalRenderer dirty tracking', () => {
   it('head trim recycles trimmed rows — no DOM leak (issue #10)', () => {
     // 高频数据填满缓冲后每帧 trim：被裁行（seq < firstSeq）的 visIdx 字段停在
     // 旧窗口值，仅按 visIdx 判定 stale 永不触发 → 旧行残留、每帧新建窗口行 →
-    // DOM 行数无限增长（e2e 实测 6669 行 vs 正常 27）→ 每帧 O(n) 渲染 → 输出
-    // 区抖动。seq 窗口边界检查必须回收被裁行。
+    // DOM 行数无限增长。seq 窗口边界检查必须回收被裁行。
     const small = new TerminalBuffer({ maxLines: 20 });
     fill(small, Array.from({ length: 20 }, (_, i) => String(i)));
     // 底部窗口（follow）渲染 20 行。
@@ -270,29 +310,28 @@ describe('TerminalRenderer dirty tracking', () => {
 });
 
 describe('TerminalRenderer filtered rendering', () => {
-  it('renders only the surviving seqs, positioned by list index', () => {
+  it('renders only the surviving seqs in flow order', () => {
     fill(buf, Array.from({ length: 10 }, (_, i) => String(i)));
     renderer.render(buf, identityView({ visibleSeqs: [0, 2, 4, 6], followEnabled: false }));
     const rows = container.querySelectorAll('.terminal-line');
     expect(rows.length).toBe(4);
+    // Flow layout: DOM order == list order, no transform positioning.
     const seqs = Array.from(rows).map((n) => (n as HTMLElement).dataset.seq);
     expect(seqs).toEqual(['0', '2', '4', '6']);
-    const transforms = Array.from(rows).map((n) => (n as HTMLElement).style.transform);
-    expect(transforms).toEqual([
-      'translateY(0px)',
-      'translateY(18px)',
-      'translateY(36px)',
-      'translateY(54px)',
-    ]);
+    for (const n of rows) {
+      expect((n as HTMLElement).style.transform).toBe('');
+    }
   });
 
   it('caps the rendered window at frozenSeq when paused', () => {
     fill(buf, Array.from({ length: 10 }, (_, i) => String(i)));
     renderer.render(buf, identityView({ frozenSeq: 4, followEnabled: false }));
-    const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
-    expect(layer.style.height).toBe('90px'); // 5 rows × 18
     const maxSeq = Math.max(...Array.from(container.querySelectorAll('.terminal-line')).map((n) => Number((n as HTMLElement).dataset.seq)));
     expect(maxSeq).toBeLessThanOrEqual(4);
+    // Spacers: 5 rows × 18 → tail = 0, head = 0 (all rows visible in window).
+    const [head, tail] = layerSpacers(container);
+    expect(head.style.height).toBe('0px');
+    expect(tail.style.height).toBe('0px');
   });
 });
 
@@ -325,6 +364,225 @@ describe('TerminalRenderer search + selection', () => {
   });
 });
 
+describe('TerminalRenderer selection pins (issue #18)', () => {
+  it('pins rows under a live selection: not recycled, not rewritten, unpinned rows recycle', () => {
+    fill(buf, range1000(0));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+
+    // Live Range anchored to rows 100..105.
+    const sel = selectRows(100, 105);
+    expect(sel.toString()).toBeTruthy();
+    renderer.render(buf, identityView({ followEnabled: false })); // syncPins
+    expect(renderer.pinnedCount()).toBe(6);
+    const pinned = Array.from({ length: 6 }, (_, i) =>
+      container.querySelector(`[data-seq="${100 + i}"]`) as HTMLElement,
+    );
+    const pinnedHtml = pinned.map((n) => n.innerHTML);
+
+    // Drag-selection in progress: data keeps flowing and the viewport moves,
+    // but pinned rows must NOT be recycled, re-acquired or rewritten.
+    fill(buf, Array.from({ length: 400 }, (_, i) => String(1000 + i)));
+    container.scrollTop = 300 * ROW_HEIGHT; // window shifted far away
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // Rows 100..105 still in DOM with node identity intact (parked).
+    for (let i = 0; i < 6; i++) {
+      const node = container.querySelector(`[data-seq="${100 + i}"]`) as HTMLElement;
+      expect(node).toBe(pinned[i]);
+      expect(node.style.display).toBe('none'); // parked outside the window
+      expect(node.innerHTML).toBe(pinnedHtml[i]); // content untouched while pinned
+    }
+    // Unpinned rows (e.g. 90) recycled when the window moved away.
+    expect(container.querySelector('[data-seq="90"]')).toBeNull();
+
+    // Release: clear the selection + fire the event jsdom doesn't auto-fire,
+    // then render — parked rows recycle (row 100 gone from the DOM).
+    clearSelection();
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(container.querySelector('[data-seq="100"]')).toBeNull();
+    expect(container.querySelector('[data-seq="105"]')).toBeNull();
+    // New window rows materialize.
+    const centerSeq = Math.floor((300 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+    expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
+  });
+
+  it('keeps rows the live selection anchors to after release (issue #17)', () => {
+    fill(buf, range1000(0));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const anchor = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(anchor).not.toBeNull();
+
+    // 浏览器原生选区：起点锚在 seq=100 行、终点在 seq=105 行。
+    const sel = selectRows(100, 105);
+    expect(sel.toString()).toBeTruthy();
+    renderer.render(buf, identityView({ followEnabled: false })); // syncPins
+
+    // 释放路径（清选区前的最后一帧）：窗口移到远处，seq=100 行已滚出视口。
+    // 修复前：recycle() 移除 Range 锚定节点 → Chromium 清空选区（issue #17）。
+    // 修复后：被活选区命中的行保留（parked），未命中的行回收。
+    container.scrollTop = 300 * ROW_HEIGHT; // 窗口移走
+    renderer.render(buf, identityView({ followEnabled: false }));
+
+    // 选区命中的行保留（DOM 仍在，parked），选区文本不丢
+    const kept = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(kept).not.toBeNull();
+    expect(kept).toBe(anchor);
+    expect(kept.style.display).toBe('none');
+    expect(sel.toString()).toBeTruthy();
+
+    // 未命中的视口外行正常回收（如 seq=90）
+    expect(container.querySelector('[data-seq="90"]')).toBeNull();
+
+    // 用户点击别处清选区 + selectionchange → 下一帧正常回收（自限）
+    clearSelection();
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(container.querySelector('[data-seq="100"]')).toBeNull();
+  });
+
+  it('materializes newly visible rows during selection scroll (issue #12)', () => {
+    fill(buf, range1000(0));
+    container.scrollTop = 100 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // 选区进行中向上滚动——新进视口的行（未 pin）必须正常物化且带内容；
+    // 无全局冻结。pin 住的行保持内容。
+    selectRows(100, 102);
+    renderer.render(buf, identityView({ followEnabled: false })); // syncPins
+    container.scrollTop = 50 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    const centerSeq = Math.floor((50 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+    const newRow = container.querySelector(`[data-seq="${centerSeq}"]`) as HTMLElement;
+    expect(newRow).not.toBeNull();
+    expect(newRow.querySelector('.terminal-content')?.textContent).toBe(String(centerSeq));
+    // Pin 住的行未被重写（innerHTML 不变）。
+    const pinned = container.querySelector('[data-seq="100"]') as HTMLElement;
+    expect(pinned).not.toBeNull();
+    const pinnedHtml = pinned.innerHTML;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect((container.querySelector('[data-seq="100"]') as HTMLElement).innerHTML).toBe(pinnedHtml);
+    // 选区清除后：pin 住的窗口外行回收。
+    clearSelection();
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(container.querySelector('[data-seq="100"]')).toBeNull();
+  });
+
+  it('drag-select keeps the viewport put while data streams (follow disengage)', () => {
+    // Renderer-side contract: with locked=false + followEnabled=false the
+    // viewport never rides the growing bottom while rows stream in. (The
+    // setSelecting call itself lives in TerminalView now — pin-based.)
+    fill(buf, Array.from({ length: 500 }, (_, i) => String(i)));
+    // Follow locked at the bottom.
+    renderer.render(buf, identityView({ followEnabled: true, locked: true }));
+    const pinnedTop = container.scrollTop;
+    expect(pinnedTop).toBeGreaterThan(0);
+    const anchorSeq = Math.floor((pinnedTop + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
+    const anchorRow = container.querySelector(`[data-seq="${anchorSeq}"]`) as HTMLElement;
+    expect(anchorRow).not.toBeNull();
+    const anchorHtml = anchorRow.innerHTML;
+
+    // User drag-selects a row (live selection) and follow disengages.
+    selectRows(anchorSeq, anchorSeq + 2);
+    renderer.render(buf, identityView({ followEnabled: false, locked: false })); // syncPins
+    // Stream more data at high rate while the user reads/drags.
+    fill(buf, Array.from({ length: 3000 }, (_, i) => String(3500 + i)));
+    for (let i = 0; i < 5; i++) {
+      renderer.render(buf, identityView({ followEnabled: false, locked: false }));
+    }
+    // Viewport did NOT ride down — rows stayed in place, selection intact.
+    expect(container.scrollTop).toBe(pinnedTop);
+    const still = container.querySelector(`[data-seq="${anchorSeq}"]`) as HTMLElement;
+    expect(still).toBe(anchorRow); // same live node
+    expect(still.innerHTML).toBe(anchorHtml); // pinned → not rewritten
+    // The viewport still shows rows (not blank).
+    const visible = Array.from(container.querySelectorAll('.terminal-line')).filter(
+      (r) => (r as HTMLElement).style.display !== 'none',
+    );
+    expect(visible.length).toBeGreaterThan(0);
+  });
+
+  it('pinned row head-trimmed out of the buffer parks with stale content until the selection clears', () => {
+    const small = new TerminalBuffer({ maxLines: 40 });
+    fill(small, Array.from({ length: 40 }, (_, i) => String(i)));
+    container.scrollTop = 0;
+    renderer.render(small, identityView({ followEnabled: false }));
+
+    // Pin rows 5..8 (in window).
+    selectRows(5, 8);
+    renderer.render(small, identityView({ followEnabled: false }));
+    expect(renderer.pinnedCount()).toBe(4);
+    const parkedNode = container.querySelector('[data-seq="5"]') as HTMLElement;
+    expect(parkedNode).not.toBeNull();
+
+    // Append past capacity → head trim evicts seqs 0..4 (and more later).
+    fill(small, Array.from({ length: 40 }, (_, i) => String(40 + i)));
+    renderer.render(small, identityView({ followEnabled: false }));
+    // seq 5 < firstSeq now; the pinned node must still be in the DOM (parked,
+    // display:none) with its stale content — never re-parented mid-selection.
+    const parked = container.querySelector('[data-seq="5"]') as HTMLElement;
+    expect(parked).toBe(parkedNode);
+    expect(parked.style.display).toBe('none');
+    expect(parked.textContent).toContain('5');
+
+    // Selection clears → parked rows recycle on the next pass.
+    clearSelection();
+    renderer.render(small, identityView({ followEnabled: false }));
+    expect(container.querySelector('[data-seq="5"]')).toBeNull();
+  });
+
+  it('clears pins when the selection spans more than MAX_PINNED_ROWS (600)', () => {
+    fill(buf, range1000(0));
+    container.scrollTop = 0;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // Build a live selection anchored at row 0. Then scroll far and extend
+    // the range's endpoint to a row whose seq makes the span 0..630 = 631
+    // rows > 600 → the renderer must drop pins entirely (rows recycle
+    // normally). Chromium's wheel-during-drag extends the range the same way.
+    const sel = window.getSelection()!;
+    const range = document.createRange();
+    const a = container.querySelector('[data-seq="0"] .terminal-content') as HTMLElement;
+    const b = container.querySelector('[data-seq="10"] .terminal-content') as HTMLElement;
+    range.setStart(a.firstChild!, 0);
+    range.setEnd(b.firstChild!, 1);
+    sel.addRange(range);
+    renderer.render(buf, identityView({ followEnabled: false })); // syncPins: 0..10
+    expect(renderer.pinnedCount()).toBe(11);
+
+    container.scrollTop = 620 * ROW_HEIGHT;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // Row 0 is parked (pinned); re-anchor the range end deep below.
+    const c = container.querySelector('[data-seq="630"] .terminal-content') as HTMLElement;
+    range.setEnd(c.firstChild!, 1);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    // Span 0..630 = 631 rows > 600 → pins cleared entirely.
+    expect(renderer.pinnedCount()).toBe(0);
+    // Rows recycle normally: nothing parked.
+    const parked = Array.from(container.querySelectorAll('.terminal-line')).filter(
+      (r) => (r as HTMLElement).style.display === 'none',
+    );
+    expect(parked.length).toBe(0);
+    // And a normal selection still pins afterwards.
+    clearSelection();
+    renderer.render(buf, identityView({ followEnabled: false }));
+    selectRows(620, 625);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(renderer.pinnedCount()).toBe(6);
+  });
+
+  it('pinnedCount reflects the active pinned rows and drops to zero after clear', () => {
+    fill(buf, Array.from({ length: 50 }, (_, i) => String(i)));
+    container.scrollTop = 0;
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(renderer.pinnedCount()).toBe(0);
+    selectRows(3, 9);
+    renderer.render(buf, identityView({ followEnabled: false }));
+    expect(renderer.pinnedCount()).toBe(7);
+    renderer.clearPins();
+    expect(renderer.pinnedCount()).toBe(0);
+  });
+});
+
 describe('TerminalRenderer scroll + recycling', () => {
   it('scrollToSeq centers the target row', () => {
     fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
@@ -352,193 +610,16 @@ describe('TerminalRenderer scroll + recycling', () => {
     }
   });
 
-  it('freezes row nodes during drag-selection and restores on release', () => {
-    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
-    container.scrollTop = 100 * ROW_HEIGHT;
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const before = container.querySelector('[data-seq="100"]') as HTMLElement;
-    expect(before).not.toBeNull();
-    const beforeHtml = before.innerHTML;
-
-    // Drag-selection in progress: data keeps flowing and the viewport moves
-    // (auto-scroll at the selection edge), but render() must NOT recycle,
-    // re-acquire or rewrite the rows the live Range anchors to.
-    renderer.setSelecting(true);
-    fill(buf, Array.from({ length: 400 }, (_, i) => String(200 + i))); // append 200..599
-    container.scrollTop = 300 * ROW_HEIGHT; // window shifted far away
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const during = container.querySelector('[data-seq="100"]') as HTMLElement;
-    expect(during).toBe(before); // same live node — selection Range intact
-    expect(during.innerHTML).toBe(beforeHtml); // content untouched mid-drag
-    // Window moved: rows outside it were not materialized while frozen, but
-    // the rows that exist keep their positions.
-    expect(during.style.transform).toBe(`translateY(${100 * ROW_HEIGHT}px)`);
-
-    // Release: NO fullRedraw — rows that were already rendered (renderedSeq
-    // === seq, seq <= lastRenderedSeq) keep their text nodes so a browser
-    // selection Range anchored on them survives. New/skipped rows are picked
-    // up by the dirty check. This is what makes selection-based copy work.
-    renderer.setSelecting(false);
-    renderer.render(buf, identityView({ followEnabled: false }));
-    // The row at seq=100 was in the active set during freeze and is now stale
-    // (window moved far away) — it should be recycled.
-    expect(container.querySelector('[data-seq="100"]')).toBeNull(); // recycled
-    // New window rows materialize.
-    const centerSeq = Math.floor((300 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
-    expect(container.querySelector(`[data-seq="${centerSeq}"]`)).not.toBeNull();
-  });
-
-  it('keeps rows the live selection anchors to after release (issue #17)', () => {
-    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
-    container.scrollTop = 100 * ROW_HEIGHT;
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const anchor = container.querySelector('[data-seq="100"]') as HTMLElement;
-    expect(anchor).not.toBeNull();
-    const anchorContent = anchor.querySelector('.terminal-content') as HTMLElement;
-
-    // 浏览器原生选区：起点锚在 seq=100 行、终点在 seq=105 行。
-    const sel = window.getSelection()!;
-    sel.removeAllRanges();
-    const range = document.createRange();
-    range.setStart(anchorContent.firstChild!, 0);
-    const end = container.querySelector('[data-seq="105"] .terminal-content') as HTMLElement;
-    range.setEnd(end.firstChild!, 1);
-    sel.addRange(range);
-    expect(sel.toString()).toBeTruthy();
-
-    // 拖选 + 释放（release 后正常回收路径）——但窗口移到远处，seq=100 行
-    // 已滚出视口。修复前：recycle() 移除 Range 锚定节点 → Chromium 清空选区
-    // （issue #17）。修复后：被活选区命中的行保留，未命中的行回收。
-    renderer.setSelecting(true);
-    renderer.setSelecting(false); // 释放
-    container.scrollTop = 300 * ROW_HEIGHT; // 窗口移走
-    renderer.render(buf, identityView({ followEnabled: false }));
-
-    // 选区命中的行保留（DOM 仍在），选区文本不丢
-    const kept = container.querySelector('[data-seq="100"]') as HTMLElement;
-    expect(kept).not.toBeNull();
-    expect(kept).toBe(anchor);
-    expect(sel.toString()).toBeTruthy();
-
-    // 未命中的视口外行正常回收（如 seq=90）
-    expect(container.querySelector('[data-seq="90"]')).toBeNull();
-
-    // 用户点击别处清选区 → 下一帧正常回收（自限）
-    sel.removeAllRanges();
-    renderer.render(buf, identityView({ followEnabled: false }));
-    expect(container.querySelector('[data-seq="100"]')).toBeNull();
-  });
-
-
-  it('does not rewrite rows materialized during the freeze on release (issue #17)', () => {
-    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
-    container.scrollTop = 100 * ROW_HEIGHT;
-    renderer.render(buf, identityView({ followEnabled: false }));
-
-    // 冻结期内灌入新数据 + 滚动到新行区域：新行以 isNew 路径物化+写入
-    // （renderedSeq 已设），窗口也覆盖新行——它们是潜在 Range 锚点。
-    renderer.setSelecting(true);
-    fill(buf, Array.from({ length: 50 }, (_, i) => String(200 + i))); // 200..249
-    container.scrollTop = 210 * ROW_HEIGHT; // 视口顶对齐 seq 210（visIdx=210，firstSeq=0）
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const freshRow = container.querySelector('[data-seq="210"]') as HTMLElement;
-    expect(freshRow).not.toBeNull();
-    const freshHtml = freshRow.innerHTML;
-
-    // 释放后渲染：冻结期已写行（renderedSeq === seq）不得被重写——重写会
-    // 替换文本节点、破坏 Range 锚点。旧实现靠 `seq > lastRenderedSeq`
-    // 误判（lastRenderedSeq 冻结在旧 lastSeq）导致无谓重写。
-    renderer.setSelecting(false);
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const after = container.querySelector('[data-seq="210"]') as HTMLElement;
-    expect(after).not.toBeNull();
-    expect(after.innerHTML).toBe(freshHtml); // 文本节点未被替换
-  });
-  it('materializes newly visible rows during drag-selection scroll (issue #12)', () => {
-    fill(buf, Array.from({ length: 200 }, (_, i) => String(i)));
-    container.scrollTop = 100 * ROW_HEIGHT;
-    renderer.render(buf, identityView({ followEnabled: false }));
-    // 拖选冻结进行中，向上滚动——新进视口的行必须物化且带内容。旧实现
-    // `if (selecting) continue` 跳过创建 → 上方露出区域一片黑、选不到。
-    renderer.setSelecting(true);
-    container.scrollTop = 50 * ROW_HEIGHT;
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const centerSeq = Math.floor((50 * ROW_HEIGHT + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
-    const newRow = container.querySelector(`[data-seq="${centerSeq}"]`) as HTMLElement;
-    expect(newRow).not.toBeNull();
-    expect(newRow.querySelector('.terminal-content')?.textContent).toBe(String(centerSeq));
-    // 冻结的已有行（选区 Range 锚点）未被回收/重写。
-    const anchor = container.querySelector('[data-seq="100"]') as HTMLElement;
-    expect(anchor).not.toBeNull();
-    const anchorHtml = anchor.innerHTML;
-    const anchorTransform = anchor.style.transform;
-    renderer.render(buf, identityView({ followEnabled: false }));
-    expect(anchor.innerHTML).toBe(anchorHtml);
-    expect(anchor.style.transform).toBe(anchorTransform);
-    // 释放：不设 fullRedraw——已物化行（renderedSeq === seq）文本节点保留，
-    // 期间跳过/新增的行由 dirty 检查补齐；窗口外行被回收。
-    renderer.setSelecting(false);
-    renderer.render(buf, identityView({ followEnabled: false }));
-    const still = container.querySelector(`[data-seq="${centerSeq}"]`) as HTMLElement;
-    expect(still).not.toBeNull();
-    expect(still.querySelector('.terminal-content')?.textContent).toBe(String(centerSeq));
-    expect(container.querySelector('[data-seq="100"]')).toBeNull(); // stale → recycled
-  });
-
-  it('drag-select disengages follow: viewport stays put while data streams (blank-output fix)', () => {
-    fill(buf, Array.from({ length: 500 }, (_, i) => String(i)));
-    // Follow locked at the bottom.
-    renderer.render(buf, identityView({ followEnabled: true, locked: true }));
-    const pinnedTop = container.scrollTop;
-    expect(pinnedTop).toBeGreaterThan(0);
-    const anchorSeq = Math.floor((pinnedTop + CLIENT_HEIGHT / 2) / ROW_HEIGHT);
-    const anchorRow = container.querySelector(`[data-seq="${anchorSeq}"]`) as HTMLElement;
-    expect(anchorRow).not.toBeNull();
-    const anchorTransform = anchorRow.style.transform;
-    const anchorHtml = anchorRow.innerHTML;
-
-    // User starts a drag-select on a row. TerminalView calls setSelecting(true)
-    // AND setLocked(false) — the drag must disengage follow so the frozen
-    // viewport does not ride the growing content (old behavior: scrollTop
-    // pinned to the growing bottom each frame, frozen rows left behind →
-    // blank output).
-    renderer.setSelecting(true);
-    renderer.render(buf, identityView({ followEnabled: false, locked: false }));
-    // Stream more data at high rate while frozen.
-    fill(buf, Array.from({ length: 3000 }, (_, i) => String(500 + i)));
-    for (let i = 0; i < 5; i++) {
-      renderer.render(buf, identityView({ followEnabled: false, locked: false }));
-    }
-    // Viewport did NOT ride down — rows stayed in place, selection intact.
-    expect(container.scrollTop).toBe(pinnedTop);
-    const still = container.querySelector(`[data-seq="${anchorSeq}"]`) as HTMLElement;
-    expect(still).toBe(anchorRow); // same live node
-    expect(still.style.transform).toBe(anchorTransform);
-    expect(still.innerHTML).toBe(anchorHtml);
-    // The viewport still shows rows (not blank).
-    const visible = Array.from(container.querySelectorAll('.terminal-line')).filter(
-      (r) => {
-        const top = Number(/translateY\((\d+)px\)/.exec((r as HTMLElement).style.transform)?.[1]);
-        return top >= container.scrollTop && top < container.scrollTop + CLIENT_HEIGHT;
-      },
-    );
-    expect(visible.length).toBeGreaterThan(0);
-  });
-
-  it('maintains DOM order == visIdx order after alternating scroll (insertRowInOrder min-visIdx fix)', () => {
+  it('maintains DOM order == visIdx order after alternating scroll', () => {
+    // Flow layout makes this structural; kept as a cheap sanity check.
     fill(buf, Array.from({ length: 3000 }, (_, i) => String(i)));
-    // Scroll down, up, down, up — this jumbles the Map iteration order
-    // (recycles delete middle entries, re-acquires append to Map end).
-    // The old insertRowInOrder took the first Map-order match, not the
-    // minimum visIdx, so DOM order diverged from visual order.
     const jumps = [200, 1000, 500, 1500, 300, 2000, 100, 2500, 50, 1800];
     for (const top of jumps) {
       container.scrollTop = top * ROW_HEIGHT;
       renderer.render(buf, identityView({ followEnabled: false }));
     }
-    const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
-    expect(rows.length).toBeGreaterThan(10);
-    const seqs = rows.map((r) => Number(r.dataset.seq));
+    const seqs = rowSeqs(container);
+    expect(seqs.length).toBeGreaterThan(10);
     for (let i = 1; i < seqs.length; i++) {
       expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
     }
@@ -548,41 +629,31 @@ describe('TerminalRenderer scroll + recycling', () => {
     fill(buf, Array.from({ length: 500 }, (_, i) => String(i)));
     renderer.render(buf, identityView({ followEnabled: true }));
     // The last row must be fully inside the viewport — scrollTop + clientHeight
-    // must reach the bottom of the content (including padding). The old
-    // `totalHeight - clientHeight` left ~8px unscrolled, cutting off ~1/3 of
-    // the last row.
+    // must reach the bottom of the content (including padding). jsdom computes
+    // padding = 0, so scrollTop = totalHeight - clientHeight exactly; the last
+    // row's bottom edge must be reachable.
     const lastSeq = buf.lastSeq;
     const lastRow = container.querySelector(`[data-seq="${lastSeq}"]`) as HTMLElement;
     expect(lastRow).not.toBeNull();
-    const lastRowTop = Number(/translateY\((\d+)px\)/.exec(lastRow.style.transform)?.[1]);
-    const lastRowBottom = lastRowTop + ROW_HEIGHT;
     const viewportBottom = container.scrollTop + container.clientHeight;
-    // viewport bottom must reach at least the last row's bottom edge.
-    expect(viewportBottom).toBeGreaterThanOrEqual(lastRowBottom);
+    const totalHeight = buf.length * ROW_HEIGHT;
+    expect(viewportBottom).toBeGreaterThanOrEqual(totalHeight);
   });
 
-  it('keeps DOM order == visual order when scrolling up (drag-select fix)', () => {
+  it('keeps DOM order == visual order when scrolling up', () => {
     fill(buf, Array.from({ length: 2000 }, (_, i) => String(i)));
-    // Land deep in the buffer (rows ~900..980 in view), then scroll UP so the
-    // recycle/acquire pattern pulls head rows from the pool — the bug appends
-    // them at the contentLayer tail, reversing DOM order vs visual order.
+    // Land deep in the buffer (rows ~900..980 in view), then scroll UP —
+    // flow layout makes DOM order == seq order structural; sanity check.
     container.scrollTop = 900 * ROW_HEIGHT;
     renderer.render(buf, identityView({ followEnabled: false }));
     container.scrollTop = 700 * ROW_HEIGHT;
     renderer.render(buf, identityView({ followEnabled: false }));
     container.scrollTop = 500 * ROW_HEIGHT;
     renderer.render(buf, identityView({ followEnabled: false }));
-    // Every visible row's translateY must be monotonically increasing and the
-    // DOM children must be sorted by their seq (== visual top-to-bottom).
-    const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
-    expect(rows.length).toBeGreaterThan(10);
-    const seqs = rows.map((r) => Number(r.dataset.seq));
+    const seqs = rowSeqs(container);
+    expect(seqs.length).toBeGreaterThan(10);
     for (let i = 1; i < seqs.length; i++) {
       expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
-    }
-    const tops = rows.map((r) => Number(/translateY\((\d+)px\)/.exec(r.style.transform)?.[1]));
-    for (let i = 1; i < tops.length; i++) {
-      expect(tops[i]).toBeGreaterThan(tops[i - 1]);
     }
   });
 
@@ -592,43 +663,39 @@ describe('TerminalRenderer scroll + recycling', () => {
   });
 
   it('survives a large head trim without stacked/overlapping rows (issue #14)', () => {
-    // 复现 issue #14：一次 append 可裁掉缓冲半数（byte-budget drain），firstSeq
-    // 大幅前移。旧行缓存的 visIdx 停在旧窗口值——若 1b 排序/insertRowInOrder
-    // 仍信缓存值，trim 后渲染可能出现同 Y 重叠或 DOM 顺序错乱。本用例构造一个
-    // 容量受限的 buffer，先填满并渲染（窗口在底部），再触发一次大 trim，然后
-    // 向上滚动露出裁后头部，断言：所有 active 行 translateY 唯一 + DOM order
-    // == seq 升序。
+    // Flow layout: no transforms to overlap — assert DOM order == seq order,
+    // no duplicates after trim + scroll, spacers consistent with the window.
     const small = new TerminalBuffer({ maxLines: 60 });
     fill(small, Array.from({ length: 60 }, (_, i) => String(i)));
     // 渲染到底部（follow），窗口覆盖最新 ~24 行。
     renderer.render(small, identityView({ followEnabled: true }));
-    const domBefore = container.querySelectorAll('.terminal-line').length;
-    expect(domBefore).toBeGreaterThan(0);
+    expect(container.querySelectorAll('.terminal-line').length).toBeGreaterThan(0);
 
     // 构造大 trim：继续 append 30 行 → head 前进 30（容量 60，覆盖最旧 30）。
     fill(small, Array.from({ length: 30 }, (_, i) => String(60 + i)));
     expect(small.firstSeq).toBe(30); // head 前移 30
     renderer.render(small, identityView({ followEnabled: true }));
 
-    // 向上滚到裁后缓冲的头部，触发 recycle + 新行物化（insertRowInOrder 路径）。
+    // 向上滚到裁后缓冲的头部，触发 recycle + 新行物化。
     container.scrollTop = 0;
     renderer.render(small, identityView({ followEnabled: false }));
     const rows = Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
     expect(rows.length).toBeGreaterThan(10);
 
-    // (a) translateY 唯一——无重叠/堆叠
-    const tops = rows.map((r) => Number(/translateY\(([-\d.]+)px\)/.exec(r.style.transform)?.[1]));
-    const uniqueTops = new Set(tops);
-    expect(uniqueTops.size).toBe(tops.length);
-    // (b) DOM 顺序 == seq 升序 == 视觉顺序
+    // (a) DOM 顺序 == seq 升序 == 视觉顺序（flow 布局的结构保证）
     const seqs = rows.map((r) => Number(r.dataset.seq));
     for (let i = 1; i < seqs.length; i++) {
       expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
     }
-    // (c) 每行的 visIdx（seq - firstSeq）与 translateY 一致
-    for (let i = 0; i < rows.length; i++) {
-      expect(tops[i]).toBe((Number(rows[i].dataset.seq) - small.firstSeq) * ROW_HEIGHT);
-    }
+    // (b) 无重复 seq
+    expect(new Set(seqs).size).toBe(seqs.length);
+    // (c) spacer 高度与窗口一致：scrollTop 0 → firstVisIdx 0 → head 0px；
+    //     tail = (count - 1 - lastVisIdx) × rowHeight
+    const [head, tail] = layerSpacers(container);
+    expect(head.style.height).toBe('0px');
+    const count = small.lastSeq - small.firstSeq + 1; // 90
+    const lastVisIdx = Math.min(count - 1, Math.ceil((0 + CLIENT_HEIGHT) / ROW_HEIGHT) + 12);
+    expect(tail.style.height).toBe(`${(count - 1 - lastVisIdx) * ROW_HEIGHT}px`);
   });
 });
 
@@ -642,9 +709,7 @@ describe('TerminalRenderer large-trim anchor (issue #10)', () => {
     renderer.render(big, identityView({ followEnabled: false }));
     container.scrollTop = 100_000 * ROW_HEIGHT;
     renderer.render(big, identityView({ followEnabled: false }));
-    const anchorRow = container.querySelector('[data-seq="100000"]') as HTMLElement;
-    expect(anchorRow).not.toBeNull();
-    expect(anchorRow.style.transform).toBe(`translateY(${100_000 * ROW_HEIGHT}px)`);
+    expect(container.querySelector('[data-seq="100000"]')).not.toBeNull();
 
     // 大 drain：收缩容量使 head 前移 50_000（模拟字节预算裁到一半）。
     big.setLimits({ maxLines: 150_000 });
@@ -653,9 +718,7 @@ describe('TerminalRenderer large-trim anchor (issue #10)', () => {
 
     // 锚点行（seq 100000）仍存活且回到视口顶部；scrollTop 重算到新位置——
     // 而不是停在超界值或浏览器夹取后的内容底部。
-    const still = container.querySelector('[data-seq="100000"]') as HTMLElement;
-    expect(still).not.toBeNull();
-    expect(still.style.transform).toBe(`translateY(${50_000 * ROW_HEIGHT}px)`);
+    expect(container.querySelector('[data-seq="100000"]')).not.toBeNull();
     expect(container.scrollTop).toBe(50_000 * ROW_HEIGHT);
   });
 
@@ -714,14 +777,17 @@ describe('TerminalRenderer updateConfig', () => {
     expect(contentAfter).toBe('41 42');
   });
 
-  it('row height change repositions rows', () => {
+  it('row height change re-lays rows via row height and spacers', () => {
     fill(buf, Array.from({ length: 5 }, (_, i) => String(i)));
     renderer.render(buf, identityView({ followEnabled: false }));
     renderer.updateConfig({ rowHeight: 36 });
     renderer.render(buf, identityView({ followEnabled: false }));
     const row4 = container.querySelector('[data-seq="4"]') as HTMLElement;
-    expect(row4.style.transform).toBe('translateY(144px)');
     expect(row4.style.height).toBe('36px');
+    expect(row4.style.transform).toBe('');
+    // 5 rows × 36 = 180 total; scrollTop 0 → all 5 in window → tail 0.
+    const [, tail] = layerSpacers(container);
+    expect(tail.style.height).toBe('0px');
   });
 });
 
@@ -748,13 +814,15 @@ describe('TerminalRenderer over-wide lines (issue #15)', () => {
   });
 
   it('row box width stays 100% (background coverage) with overflow visible (propagation)', () => {
-    // .terminal-line 由引擎内联 width:100%（行背景/选中高亮铺满视口宽），overflow
+    // .terminal-line 由 CSS width:100%（行背景/选中高亮铺满视口宽），overflow
     // 保持 visible——超宽 span 的盒子才能把溢出传播到 .terminal-view 滚动容器。
+    // Flow layout (issue #18): createRowNode no longer sets width inline —
+    // width comes from the stylesheet (terminalNoWrap.test.ts pins that CSS).
     const wide = 'Y'.repeat(400);
     fill(buf, [wide]);
     renderer.render(buf, identityView({ followEnabled: false }));
     const row = container.querySelector('.terminal-line') as HTMLElement;
-    expect(row.style.width).toBe('100%');
+    expect(row.style.width).toBe('');
     expect(getComputedStyle(row).overflowX).toBe('visible');
     expect(getComputedStyle(row).overflowY).toBe('visible');
   });
