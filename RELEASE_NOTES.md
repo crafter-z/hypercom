@@ -1,3 +1,18 @@
+# HyperCom v0.6.6
+
+## 新特性
+- 终端引擎改流式布局（issue #18）：`contentLayer` 改为 `[headSpacer][行][tailSpacer]` 文档流，**DOM 顺序 == 视觉顺序**由结构保证；`insertRowInOrder` / 每帧排序修复 / 脱链防御整体删除，渲染路径大幅简化
+- 选区钉住替代 isSelecting 全局冻结（issue #18）：活选区触及的行**永不回收/重写/换父**，滚出视口原地停车 `display:none`，`selectionchange` 自动回收，`MAX_PINNED_ROWS` 上限自限——删除 `setSelecting` API 链（renderer/manager/TerminalView 三层）
+- 复制路径改 `selectionText()`（Range.cloneContents 纯树克隆）：`Selection.toString()` 按布局可见性序列化、停车行文本会消失，新路径不受影响
+
+## Bugfix
+- 修复拖选期间滚动后选区起点丢失（issue #17）：release 后渲染正常回收滚出视口的行，若该行是浏览器原生选区 Range 的锚定节点（拖选起点行），`node.remove()` 会让 Chromium 清空/漂移选区。修复：回收分支跳过被活选区 Range 命中的行（`captureLiveSelectionRanges` + `intersectsNode`），用户点击清选区后下一帧自然回收；全选（Range 端点=容器）除外避免钉住整个 DOM
+
+## 其他
+- 搜索匹配缓存：`matchSet` 按 `(offset,length,currentMatch)` 缓存免每帧 `new Set`，`recomputeSearch`/`clear` 显式失效（同命中数换查询不再复用旧 Set）
+- 测试：vitest **680** 例（渲染器测试迁移到流式布局+钉住语义，新增 soak 不变量测试 360 行）、cargo test **155** 例全绿、tsc 0 诊断
+- e2e：**22** 例——选区用例改钉住语义（真实浏览器拖选+滚轮+断言选区存活与行号），issue #16 用例适配流式布局，顺带修正 issue #16 改版遗留的过时断言与测试边界容差
+
 # HyperCom v0.6.5
 
 ## 新特性
