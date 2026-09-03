@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod diaglog;
 mod logger;
+mod plugin;
 mod serial;
 mod system;
 
@@ -227,6 +228,14 @@ pub fn run() {
             // ===== 自动更新命令（issue #12）=====
             commands::check_for_update,
             commands::download_and_install_update,
+            // ===== 插件命令（issue #17）=====
+            commands::list_plugins,
+            commands::install_plugin,
+            commands::uninstall_plugin,
+            commands::set_plugin_enabled,
+            commands::set_plugin_permissions,
+            commands::read_plugin_asset,
+            commands::write_plugin_asset,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();
