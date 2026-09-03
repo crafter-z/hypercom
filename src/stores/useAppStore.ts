@@ -194,6 +194,8 @@ const defaultConfig: AppConfig = {
   portToolConfigs: [],
   portGroups: [],
   portMeta: [],
+  // issue #17：插件状态（仅状态，KV 不落 config）。
+  pluginConfigs: [],
 };
 
 const defaultUIState: UIState = {

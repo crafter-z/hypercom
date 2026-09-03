@@ -62,6 +62,7 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   portToolConfigs: [],
   portGroups: [],
   portMeta: [],
+  pluginConfigs: [],
   ...overrides,
 });
 

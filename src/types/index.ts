@@ -123,7 +123,9 @@ export interface ParsedField {
 /** 单行终端数据（方案B：行流存储层重构，issue #14） */
 export interface TerminalLine {
   timestamp: number;       // 时间戳
-  direction: 'RX' | 'TX' | 'TOOL';
+  /** 行方向：RX=接收 / TX=发送回显 / TOOL=外部工具输出 / NOTE=插件旁注行
+   *   （issue #17：插件 terminal.append 写旁注，非 TX——不进流量统计/历史）。 */
+  direction: 'RX' | 'TX' | 'TOOL' | 'NOTE';
   /** 文本内容（TX/TOOL/回放行）。RX 行**省略**——由 `getLineText` 按
    *   rawData + 当前编码惰性解码（省内存：不再冗余存一份解码字符串）。 */
   content?: string;
@@ -327,6 +329,8 @@ export interface AppConfig {
   portToolConfigs: PortToolConfig[];
   portGroups: PortGroup[];   // 串口分组布局（issue #2-3 起 config.json 持久化 + 自动保存）
   portMeta: PortMetaEntry[]; // 串口备注名/隐藏状态（issue #4-9 起 config.json 持久化 + 自动保存）
+  /** 插件状态实体（issue #17 第 9 类）：仅状态（enabled/授予权限），KV 不落 config。 */
+  pluginConfigs: PluginConfigEntry[];
 }
 
 /** 日志保存的子目录策略（issue #5-10）。 */
