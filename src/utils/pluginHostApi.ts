@@ -180,18 +180,28 @@ function requireString(args: unknown, field: string): string {
   return v;
 }
 
-/** RX 观察装配辅助（供 usePlugins hook 调用）——把插件会话的 rx 订阅
- *  接到 pluginObserver 总线；批转发成 worker 事件 `rx.line`（worker 侧经
- *  `plugin.on('rx.line', cb)` 收行，评审 v2 D4 批转发）。返回注销函数。 */
+/** session.post 签名（transfer 支持 ArrayBuffer 零拷贝）。 */
+export type HostPost = (
+  m: { type: string; payload?: unknown },
+  transfer?: Transferable[],
+) => void;
+
 export function attachRxObserver(
   session: {
-    post: (m: { type: string; payload?: unknown }) => void;
+    post: HostPost;
   },
   onDetached?: (e: RxDetachedEvent) => void,
 ): () => void {
   const unsubObserver = addPluginRxObserver({
     onRxLines: (lines) => {
-      // 批转发给 worker（transfer rawData 零拷贝）。
+      // 批转发给 worker：**结构化克隆**（不带 transfer）。
+      //
+      // 不能 transfer rawData.buffer：该 Uint8Array 与 rxPipeline 终端路径共享
+      // 同一实例——行既进 terminal 队列/TerminalBuffer（渲染时惰性解码），
+      // 又被 pluginObserver 原样转发；transfer 会永久 detach 缓冲，使终端所有
+      // RX 行渲染为空、同一批的第二个观察者拿到空数据（评审 P12 曾想零拷贝，
+      // 但零拷贝必须先 slice 出副本再 transfer——v1 保正确性用结构化克隆，
+      // 复制成本在交付路径本就存在；实测高频卡顿再优化）。
       session.post({ type: 'rx.line', payload: lines });
     },
     onRxDetached: (e) => {

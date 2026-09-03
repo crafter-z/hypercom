@@ -14,7 +14,7 @@ import UpdateDialog from './components/shared/UpdateDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUpdate } from './hooks';
+import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUpdate, usePluginHost } from './hooks';
 import { useHotkeys } from './hooks/useHotkeys';
 import { usePowerManagement } from './hooks/usePowerManagement';
 import { useAppStore } from './stores/useAppStore';
@@ -71,6 +71,8 @@ const App: React.FC = () => {
   usePowerManagement();
   // issue #12：启动自动更新检查（仅主窗）。
   useAutoUpdate();
+  // issue #17：插件宿主装配（主窗单例——worker 生命周期 + RX 批转发 + config 同步）。
+  usePluginHost();
   // issue #7-10：全局自定义右键菜单——可编辑元素（输入框/文本域/可编辑区）显示
   // 应用自己的 剪切/复制/粘贴/全选 菜单（替代 webview 原生菜单），其余元素一律
   // 屏蔽原生菜单。取代了旧版"仅屏蔽非输入元素"的 contextmenu effect。
