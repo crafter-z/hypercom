@@ -160,13 +160,45 @@ pub fn list_plugins(state: State<AppState>) -> Result<Vec<PluginView>, CommandEr
     Ok(views)
 }
 
-/// 安装插件（目录路径）。校验 manifest（Rust 权威点）后把目录**复制**进
-/// `<plugins_dir>/<id>/`（源目录保留——安装语义是「注册副本」，非移动）。
+/// 安装插件。`source_path` 可为插件**目录**（复制注册，源保留）或插件 **zip 包**
+/// （内含 `<id>/…` 顶层插件目录；安全解压，zip slip 防护见 `extract_plugin_zip`）。
 /// 已存在同 id → 版本比较：更高则覆盖（保留 data/），否则报错（评审 v2 D6）。
 #[tauri::command]
-pub fn install_plugin(dir_path: String, state: State<AppState>) -> Result<String, CommandError> {
-    let src = Path::new(&dir_path);
-    let manifest = plugin::load_manifest_from_dir(src)
+pub fn install_plugin(source_path: String, state: State<AppState>) -> Result<String, CommandError> {
+    let src = Path::new(&source_path);
+
+    // --- 阶段 1：把源归一化为「插件目录」引用 ---
+    // zip 源：解到系统临时目录（独立命名防冲突），定位顶层插件目录。
+    // TempDirGuard RAII 保证失败路径也清理临时目录。
+    let tmp_holder: Option<std::path::PathBuf> = if src.is_file()
+        && src
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false)
+    {
+        let tmp_root = std::env::temp_dir().join(format!(
+            "hypercom_plugin_install_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&tmp_root)
+            .map_err(|e| CommandError::Io(format!("创建临时目录失败: {e}")))?;
+        plugin::extract_plugin_zip(src, &tmp_root)
+            .map_err(|e| CommandError::Other(format!("解压插件 zip 失败: {e}")))?;
+        Some(tmp_root)
+    } else {
+        None
+    };
+
+    let _cleanup = tmp_holder.as_ref().map(|p| TempDirGuard(p.clone()));
+
+    // 源插件目录：zip 源 = 临时目录下唯一顶层插件目录；目录源 = 用户路径本身。
+    let src_plugin_dir: std::path::PathBuf = if let Some(tmp) = &tmp_holder {
+        find_single_plugin_dir(tmp)?
+    } else {
+        src.to_path_buf()
+    };
+
+    let manifest = plugin::load_manifest_from_dir(&src_plugin_dir)
         .map_err(|e| CommandError::Other(format!("插件目录校验失败: {e}")))?;
 
     let mut manager = state
@@ -197,20 +229,21 @@ pub fn install_plugin(dir_path: String, state: State<AppState>) -> Result<String
         }
     }
 
-    copy_dir_recursive(src, &dest)
+    copy_dir_recursive(&src_plugin_dir, &dest)
         .map_err(|e| CommandError::Io(format!("复制插件目录失败: {e}")))?;
 
     // 记录/更新状态实体（保留既有 enabled/grantedPermissions——覆盖安装不清授权）。
     let cfg = manager.get_config_mut();
+    let source_label = if tmp_holder.is_some() { "zip" } else { "dir" };
     if let Some(existing) = cfg.plugin_configs.iter_mut().find(|p| p.id == manifest.id) {
-        existing.source = Some("dir".into());
+        existing.source = Some(source_label.into());
     } else {
         cfg.plugin_configs.push(config::PluginConfigEntry {
             id: manifest.id.clone(),
             enabled: false,
             granted_permissions: Vec::new(),
             installed_at: Some(now_unix_secs()),
-            source: Some("dir".into()),
+            source: Some(source_label.into()),
         });
     }
     manager
@@ -219,6 +252,41 @@ pub fn install_plugin(dir_path: String, state: State<AppState>) -> Result<String
 
     log::info!("Plugin installed: {} v{} -> {:?}", manifest.id, manifest.version, dest);
     Ok(manifest.id)
+}
+
+/// RAII：离开作用域即删除临时目录（zip 解压暂存区）。
+struct TempDirGuard(std::path::PathBuf);
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 在解压后的临时根里定位唯一插件目录（zip 含 `<id>/…` 顶层）。
+/// 容错：允许根下直接是 manifest（无顶层包裹）或恰好一个子目录。
+fn find_single_plugin_dir(root: &Path) -> Result<std::path::PathBuf, CommandError> {
+    // 直接是插件目录？
+    if root.join("manifest.json").is_file() {
+        return Ok(root.to_path_buf());
+    }
+    // 恰好一个子目录（顶层包裹 `<id>/`）？
+    let mut dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    match dirs.len() {
+        1 => Ok(dirs.remove(0)),
+        0 => Err(CommandError::Other(
+            "zip 内未找到插件目录（缺 manifest.json 顶层或子目录）".into(),
+        )),
+        _ => Err(CommandError::Other(
+            "zip 内含多个顶层目录，无法确定插件根（应打包为单个 <id>/ 目录）".into(),
+        )),
+    }
 }
 
 /// 卸载插件：删除目录 + 移除 config 状态实体。

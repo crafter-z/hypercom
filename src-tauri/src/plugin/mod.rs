@@ -316,6 +316,62 @@ pub fn scan_plugins(plugins_root: &Path) -> Vec<InstalledPlugin> {
     out
 }
 
+/// 把插件 zip 安全解压到 `dest_dir`（评审 v2 D7/D11：zip slip 防护）。
+///
+/// 安全规则（逐条目独立校验，与 manifest entry/assets 前缀检查分开实现/测试）：
+/// - 条目名经 `sanitize_plugin_rel_path`——拒绝 `../` 穿越 / 绝对路径 /
+///   Windows 盘符 / UNC；
+/// - 目录条目直接 create_dir；文件条目先确保父目录存在再流式写（`by_name`
+///   的 `read` 流不整包载入内存——def late 压缩按需解压）；
+/// - 符号链接/设备条目（unix 文件模式非普通文件）拒绝（链接可指向目录外）。
+///
+/// zip 结构约定：条目以 `<pluginId>/…` 为前缀（zip 内含顶层插件目录）——
+/// 安装到 plugins_root 时剥掉顶层。`install_plugin(zip)` 命令负责该语义：
+/// 本函数收 zip 文件路径 + 解压目标（已建好），不做顶层剥除。
+pub fn extract_plugin_zip(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("读取 zip 失败（损坏或非 zip）: {e}"))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取 zip 条目失败: {e}"))?;
+
+        // 目录条目名以 '/' 结尾——先归一化路径（sanitize 拒绝 .. / 绝对路径）。
+        let raw_name = entry.name().to_string();
+        let is_dir_entry = raw_name.ends_with('/');
+        let rel = sanitize_plugin_rel_path(&raw_name)
+            .map_err(|e| format!("zip 条目非法（{}）: {raw_name}", e))?;
+
+        // 符号链接/非普通文件拒绝：unix_mode 0 = 无模式信息（Windows zip 常见），
+        // 放行；有模式信息且非普通文件/目录 → 拒绝。
+        if let Some(mode) = entry.unix_mode() {
+            let is_file = mode & 0o170000 == 0o100000;
+            let is_dir_mode = mode & 0o170000 == 0o040000;
+            if !is_file && !is_dir_mode {
+                return Err(format!("zip 条目含非常规文件（链接/设备），拒绝: {raw_name}"));
+            }
+        }
+
+        let target = dest_dir.join(&rel);
+        if is_dir_entry {
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("创建目录失败 {}: {e}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("创建父目录失败 {}: {e}", parent.display()))?;
+        }
+        let mut out = fs::File::create(&target)
+            .map_err(|e| format!("创建文件失败 {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("解压条目失败 {raw_name}: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,5 +531,100 @@ mod tests {
         assert!(bad.manifest.is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 构造一个内存 zip 写入临时文件。entries: (name, content)。
+    fn write_test_zip(path: &Path, entries: &[(&str, &str)]) {
+        let file = fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, content) in entries {
+            if *name == "__DIR__" {
+                // 目录占位：真实 zip 用带尾斜杠条目
+                continue;
+            }
+            w.start_file(*name, opts).unwrap();
+            use std::io::Write;
+            w.write_all(content.as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_zip_ok_regular_layout() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_ok_{}", uuid::Uuid::new_v4()));
+        let zip_path = dir.join("pkg.zip");
+        fs::create_dir_all(&dir).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("com.example.demo/manifest.json", valid_manifest_json().as_str()),
+                ("com.example.demo/main.js", "console.log('hi')"),
+            ],
+        );
+        let dest = dir.join("out");
+        extract_plugin_zip(&zip_path, &dest).unwrap();
+        assert!(dest.join("com.example.demo/manifest.json").exists());
+        assert_eq!(
+            fs::read_to_string(dest.join("com.example.demo/main.js")).unwrap(),
+            "console.log('hi')"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_rejects_traversal_entry() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_slip_{}", uuid::Uuid::new_v4()));
+        let zip_path = dir.join("pkg.zip");
+        fs::create_dir_all(&dir).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("com.example.demo/manifest.json", valid_manifest_json().as_str()),
+                ("../evil.txt", "pwned"),
+            ],
+        );
+        let dest = dir.join("out");
+        let err = extract_plugin_zip(&zip_path, &dest).unwrap_err();
+        assert!(err.contains("非法") || err.contains("穿越"), "err: {err}");
+        // 无害条目可能已写入，但越界条目必须失败——断言没有文件逃逸出 dest。
+        assert!(!dir.join("evil.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_rejects_absolute_entry() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_abs_{}", uuid::Uuid::new_v4()));
+        let zip_path = dir.join("pkg.zip");
+        fs::create_dir_all(&dir).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("/etc/passwd", "root:x"),
+            ],
+        );
+        let dest = dir.join("out");
+        let err = extract_plugin_zip(&zip_path, &dest).unwrap_err();
+        assert!(err.contains("绝对路径"), "err: {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_non_utf8_or_duplicate_names_handled() {
+        // zip 条目名非 UTF-8 时 zip crate 的 name() 会怎样——确保不 panic。
+        // 用 Windows 反斜杠分隔（winzip 常见）也应归一化成功。
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_bs_{}", uuid::Uuid::new_v4()));
+        let zip_path = dir.join("pkg.zip");
+        fs::create_dir_all(&dir).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("com.example.demo\\manifest.json", valid_manifest_json().as_str()),
+            ],
+        );
+        let dest = dir.join("out");
+        extract_plugin_zip(&zip_path, &dest).unwrap();
+        assert!(dest.join("com.example.demo/manifest.json").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
