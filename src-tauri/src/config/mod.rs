@@ -167,6 +167,31 @@ pub struct PortMetaEntry {
     pub mode: Option<String>,
 }
 
+/// 插件状态（issue #17 第 9 类 config 实体）。
+/// **仅存状态**：`{id, enabled, grantedPermissions}`（+ 可选安装元数据）。
+/// 插件私有 KV 存 `<plugins_dir>/<id>/data/state.json`，**不落 config.json**
+/// （评审 v2 P2：KV 是高频可变数据，进 config 会掉进启动快照陷阱 + 污染 .bak）。
+/// `enabled`/`granted_permissions` 是纯 UI 状态（用户手动开/关/授权），
+/// 变更走「整体替换 + 防抖自动保存」，镜像 `port_groups`/`port_meta` 先例。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfigEntry {
+    /// 插件 id（反向域名，manifest 必填，唯一）
+    pub id: String,
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    /// 用户显式授予的权限（manifest `permissions` 是「可授予上限」；
+    /// 桥侧**调用时**按此集校验，撤销即时生效——评审 v2 P7）
+    #[serde(default)]
+    pub granted_permissions: Vec<String>,
+    /// 安装时间（unix 秒），可选元数据
+    #[serde(default)]
+    pub installed_at: Option<i64>,
+    /// 安装来源描述（zip 路径 / 目录 / "manual"），可选元数据
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 // ==================== AppConfig ====================
 
 /// 应用全局配置
@@ -288,6 +313,11 @@ pub struct AppConfig {
     /// 串口备注名 / 隐藏状态（issue #4-9）：随 config.json 持久化。
     #[serde(default)]
     pub port_meta: Vec<PortMetaEntry>,
+    /// 插件状态（issue #17 第 9 类实体）：`#[serde(default)]` 使旧版 config.json
+    /// （无此字段）反序列化为空列表。仅状态（id/enabled/grantedPermissions），
+    /// KV 不落 config（评审 v2 P2）。
+    #[serde(default)]
+    pub plugin_configs: Vec<PluginConfigEntry>,
 }
 
 fn default_restore_session() -> bool {
@@ -400,6 +430,7 @@ impl Default for AppConfig {
             port_tool_configs: Vec::new(),
             port_groups: Vec::new(),
             port_meta: Vec::new(),
+            plugin_configs: Vec::new(),
         }
     }
 }
@@ -426,6 +457,9 @@ pub struct ConfigManager {
     config_path: PathBuf,
     /// 会话快照独立存储路径（config.json 同目录下 session.json）
     session_path: PathBuf,
+    /// 插件根目录（与 config.json 同根：<config_dir>/plugins，issue #17 D6）。
+    /// 跟随 config_path 的路径解析（custom/env/portable/default 全场景一致）。
+    plugins_dir: PathBuf,
 }
 
 impl ConfigManager {
@@ -501,10 +535,19 @@ impl ConfigManager {
             }
         }
 
+        // 插件根目录与 config.json 同根：<config_dir>/plugins。
+        // 不在此 create_dir_all——PluginManager 首次扫描/安装时才建，
+        // 避免未用插件功能的用户在配置目录留下空 plugins/。
+        let plugins_dir = config_path
+            .parent()
+            .map(|p| p.join("plugins"))
+            .unwrap_or_else(|| PathBuf::from("plugins"));
+
         Ok(Self {
             config,
             config_path,
             session_path,
+            plugins_dir,
         })
     }
 
@@ -520,6 +563,11 @@ impl ConfigManager {
     /// 当前配置文件路径
     pub fn config_path(&self) -> &std::path::Path {
         &self.config_path
+    }
+
+    /// 插件根目录（<config_dir>/plugins）。目录可能尚不存在（首次安装前）。
+    pub fn plugins_dir(&self) -> &std::path::Path {
+        &self.plugins_dir
     }
 
     /// 获取当前配置
@@ -1110,6 +1158,7 @@ mod tests {
             config: AppConfig::default(),
             config_path: config_path.clone(),
             session_path: session_path.clone(),
+            plugins_dir: dir.join("plugins"),
         };
 
         // 初始为空
