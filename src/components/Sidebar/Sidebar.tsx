@@ -9,8 +9,10 @@ import {
   PlugZap, Pencil, Unplug, ExternalLink, GripVertical, Trash2,
   Wrench, TerminalSquare, FolderPlus, FolderInput, FolderMinus,
   Terminal,
+  type LucideIcon,
 } from 'lucide-react';
 import { useSerialPorts, useSerialConnection, useSimulation, usePortToolActions, useGitBashSim } from '../../hooks';
+import { useToolbarPluginButtons, usePortPluginMenuItems, dispatchPluginUiClick } from '../../hooks/usePluginUi';
 import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import {
   DndContext,
@@ -29,6 +31,27 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+
+/** lucide 图标名 → 组件 映射（manifest ui.icon 白名单，评审 v2 D2）。
+ *  未知名回退 Plug 图标。随 Sidebar 实际使用图标扩充。 */
+const PLUGIN_ICONS: Record<string, LucideIcon> = {
+  Search: Search,
+  Wrench: Wrench,
+  Play: Play,
+  Square: Square,
+  Terminal: Terminal,
+  RefreshCw: RefreshCw,
+  Eye: Eye,
+  EyeOff: EyeOff,
+  ArrowUpDown: ArrowUpDown,
+  Zap: PlugZap,
+  Send: PlugZap,
+};
+
+function pluginIcon(name: string | undefined, size = 13): React.ReactElement {
+  const Cmp = (name && PLUGIN_ICONS[name]) || PlugZap;
+  return <Cmp size={size} />;
+}
 
 /**
  * Sidebar toolbar — the rack's control strip.
@@ -55,6 +78,8 @@ const SidebarToolbar: React.FC<{
 }> = ({ showHidden, onToggleHidden, onRefresh, simulationMode, simulationAvailable, onToggleSimulation, gitBashMode, gitBashAvailable, onToggleGitBash, onOpenAll, onCloseAll, onSortByPort }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
+  // issue #17：插件声明式工具栏按钮（manifest ui.buttons target=sidebar）。
+  const pluginButtons = useToolbarPluginButtons();
 
   const overflowItems: ContextMenuEntry[] = [
     {
@@ -88,6 +113,21 @@ const SidebarToolbar: React.FC<{
             <Terminal size={14} />
           </button>
         )}
+        {/* issue #17：插件声明式按钮（点击 → worker ui.buttonClick） */}
+        {pluginButtons.length > 0 && <span className="toolbar-sep" />}
+        {pluginButtons.map((reg) => {
+          const btn = reg.buttons[reg.buttonIndex];
+          return (
+            <button
+              key={`${reg.pluginId}:${btn.id}`}
+              className="icon-btn"
+              title={`${reg.pluginName}: ${btn.label}`}
+              onClick={() => dispatchPluginUiClick(reg, btn.id)}
+            >
+              {pluginIcon(btn.icon, 14)}
+            </button>
+          );
+        })}
         <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
           <RefreshCw size={14} />
         </button>
@@ -164,6 +204,8 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
+  // issue #17：插件声明式端口菜单项（manifest ui.menuItems target=port-context）。
+  const pluginMenuItems = usePortPluginMenuItems();
   // issue #6-5：分组控制需要实时读 groups 与 store actions（菜单项在渲染时构建）
   const groups = useAppStore((s) => s.groups);
   const movePortToGroup = useAppStore((s) => s.movePortToGroup);
@@ -242,7 +284,17 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({
     { label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: onConfigTool },
     { type: 'separator' },
     ...groupControlItems,
-    { type: 'separator' },
+    // issue #17：插件声明式端口菜单项（点击 → worker ui.buttonClick + portId 上下文）
+    ...(pluginMenuItems.length > 0 ? [{ type: 'separator' } as ContextMenuEntry] : []),
+    ...pluginMenuItems.map((reg) => {
+      const item = reg.menuItems[reg.itemIndex];
+      return {
+        label: `${reg.pluginName}: ${item.label}`,
+        icon: pluginIcon(undefined),
+        onClick: () => dispatchPluginUiClick(reg, item.id, { portId: port.id }),
+      } as ContextMenuEntry;
+    }),
+    ...(pluginMenuItems.length > 0 ? [{ type: 'separator' } as ContextMenuEntry] : []),
     port.isHidden
       ? { label: t('sidebar.port.contextMenu.unhide'), icon: <Eye size={14} />, onClick: () => onShowPort(port.id) }
       : { label: t('sidebar.port.contextMenu.hide'), icon: <EyeOff size={14} />, onClick: () => onHidePort(port.id) },

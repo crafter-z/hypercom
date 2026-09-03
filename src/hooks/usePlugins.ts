@@ -14,6 +14,7 @@ import { pluginService } from '../services/tauri';
 import { pluginHost } from '../utils/pluginHost';
 import { attachRxObserver } from '../utils/pluginHostApi';
 import { pluginKv } from '../utils/pluginKv';
+import { rebuildPluginUi } from '../utils/pluginUiRegistry';
 import { useAppStore } from '../stores/useAppStore';
 import { notifyError, notifySuccess } from '../stores/useToastStore';
 import type { PluginView } from '../types';
@@ -38,7 +39,9 @@ export function usePluginHost(): void {
 
     const refresh = async (): Promise<void> => {
       try {
-        await pluginService.listPlugins();
+        const list = await pluginService.listPlugins();
+        // 重建声明式 UI 注册表（Sidebar 扩展点渲染数据源）。
+        rebuildPluginUi(list);
       } catch (e) {
         console.error('[usePluginHost] list failed:', e);
       }
