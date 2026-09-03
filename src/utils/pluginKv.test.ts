@@ -6,7 +6,6 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginKv, invalidate } from './pluginKv';
-import { pluginService } from '../services/tauri';
 import {
   rebuildPluginUi,
   subscribePluginUi,
