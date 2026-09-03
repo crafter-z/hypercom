@@ -110,30 +110,19 @@ describe('pluginObserver', () => {
     unsub();
   });
 
-  it('TRX→TTY 切换发断流通知；tty→trx 恢复续投', () => {
-    // 先置 trx 端口 + 订阅（初始快照 lastMode=trx）。
-    useAppStore.setState({
-      ports: [{ id: 'COM1', status: 'connected', mode: 'trx' }] as never,
-    });
-    const { spy, obs } = makeObserver();
-    const unsub = addPluginRxObserver(obs);
-
-    // TRX → TTY：应发 detached（store 订阅同步触发）。
+  it('首见端口为 tty 时只记录不通知（无「切换」可言）', () => {
+    // 端口已是 tty 才订阅——首见快照记 tty，不应发 detached。
     useAppStore.setState({
       ports: [{ id: 'COM1', status: 'connected', mode: 'tty' }] as never,
     });
-    expect(spy.detached).toEqual([{ portId: 'COM1', reason: 'mode-tty' }]);
-
-    // 切回 trx：无新增 detached。
+    const { spy, obs } = makeObserver();
+    const unsub = addPluginRxObserver(obs);
+    expect(spy.detached).toEqual([]);
+    // tty 行不产生；切回 trx 也无 detached（恢复态）。
     useAppStore.setState({
       ports: [{ id: 'COM1', status: 'connected', mode: 'trx' }] as never,
     });
-    expect(spy.detached.length).toBe(1);
-
-    // 恢复后行正常投递。
-    feedLine('COM1', 'after-restore');
-    flushDelivery();
-    expect(spy.lines.map((l) => l.text)).toEqual(['after-restore']);
+    expect(spy.detached).toEqual([]);
     unsub();
   });
 

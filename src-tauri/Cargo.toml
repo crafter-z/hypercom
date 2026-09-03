@@ -64,9 +64,12 @@ tauri-plugin-clipboard-manager = "2"
 # 插件 URL 白名单 glob → 正则（issue #17；regex 是 reqwest 传递依赖，显式声明）
 regex = "1"
 
-# 插件 zip 安装解压（issue #17）。用默认 features——裁剪 features 会触发整棵
-# 依赖树重新求解，把 tauri 可选传递依赖（clipboard 等）剪掉导致 capabilities
-# ACL 失配（tauri-build 报 permission not found）。
+# 插件 HTTP 流式读响应体（issue #17；reqwest bytes_stream 需要）
+futures-util = "0.3"
+
+# 插件 zip 安装解压（issue #17）。默认 features——我们只解压（deflate/stored），
+# 但裁剪 features 会触发整棵依赖树重新求解、扰动既有 lock（曾致 capabilities
+# ACL 漂移的误诊），故不裁剪、接受多余压缩后端编译成本。
 zip = "2"
 
 [profile.release]

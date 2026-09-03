@@ -169,7 +169,11 @@ pub fn install_plugin(source_path: String, state: State<AppState>) -> Result<Str
 
     // --- 阶段 1：把源归一化为「插件目录」引用 ---
     // zip 源：解到系统临时目录（独立命名防冲突），定位顶层插件目录。
-    // TempDirGuard RAII 保证失败路径也清理临时目录。
+    // **guard 在 create_dir_all 成功后立即绑定**——extract_plugin_zip 及其后
+    // 任何 `?` 失败路径（find_single_plugin_dir / manifest 校验）都经 RAII 清理，
+    // 不泄漏 uuid 临时目录（advisory B：晚绑定会让解压失败泄漏）。
+    // `_tmp_guard` 下划线前缀：赋值后不读（RAII drop 即清理），豁免 unused 告警。
+    let mut _tmp_guard: Option<TempDirGuard> = None;
     let tmp_holder: Option<std::path::PathBuf> = if src.is_file()
         && src
             .extension()
@@ -182,14 +186,14 @@ pub fn install_plugin(source_path: String, state: State<AppState>) -> Result<Str
         ));
         std::fs::create_dir_all(&tmp_root)
             .map_err(|e| CommandError::Io(format!("创建临时目录失败: {e}")))?;
+        // 立即绑定 guard：目录一建好就纳入 RAII 清理范围。
+        _tmp_guard = Some(TempDirGuard(tmp_root.clone()));
         plugin::extract_plugin_zip(src, &tmp_root)
             .map_err(|e| CommandError::Other(format!("解压插件 zip 失败: {e}")))?;
         Some(tmp_root)
     } else {
         None
     };
-
-    let _cleanup = tmp_holder.as_ref().map(|p| TempDirGuard(p.clone()));
 
     // 源插件目录：zip 源 = 临时目录下唯一顶层插件目录；目录源 = 用户路径本身。
     let src_plugin_dir: std::path::PathBuf = if let Some(tmp) = &tmp_holder {
@@ -620,6 +624,10 @@ pub async fn plugin_http(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout))
         // 无凭据注入：不设 cookie store / 不继承系统代理凭据。
+        // **禁止自动重定向**（评审 v2 D5 安全补强）：urlWhitelist 只校验初始 URL，
+        // 白名单主机的开放重定向可把请求转发到任意内网目标——每个跳转都须由
+        // 插件经 plugin_http 重新发起，逐跳过白名单闸门。
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
 
@@ -644,16 +652,26 @@ pub async fn plugin_http(
         .map_err(|e| CommandError::Other(format!("HTTP 请求失败: {e}")))?;
     let status = resp.status().as_u16();
 
-    // 响应体截断：bytes() 载入后手动截断到上限（reqwest 会按内容长度缓冲整个
-    // 响应——上限保护针对超大响应，防其进入插件内存/前端）。
-    let full = resp
-        .bytes()
-        .await
-        .map_err(|e| CommandError::Other(format!("读取响应失败: {e}")))?;
-    let truncated = full.len() > PLUGIN_HTTP_MAX_BODY;
-    let body_bytes = &full[..full.len().min(PLUGIN_HTTP_MAX_BODY)];
+    // 响应体**流式**读 + 截断：chunk 逐段累积到上限即停——峰值内存 ≤ 上限 + 单
+    // chunk（不整包载入，防恶意超大响应打爆内存；1MB 上限同时约束下载量与保留量）。
+    let mut body_bytes: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    {
+        use futures_util::StreamExt;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| CommandError::Other(format!("读取响应失败: {e}")))?;
+            let remaining = PLUGIN_HTTP_MAX_BODY.saturating_sub(body_bytes.len());
+            if chunk.len() >= remaining {
+                body_bytes.extend_from_slice(&chunk[..remaining]);
+                truncated = true;
+                break;
+            }
+            body_bytes.extend_from_slice(&chunk);
+        }
+    }
 
-    let body = String::from_utf8_lossy(body_bytes).into_owned();
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
     Ok(PluginHttpResponse {
         status,
         body,

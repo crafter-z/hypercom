@@ -161,14 +161,16 @@ function deliverPort(portId: string): void {
   }
 }
 
-/** 端口 mode 变化检测：trx → tty 断流通知；tty → trx 恢复（无需动作，下条行自然续投）。 */
+/** 端口 mode 变化检测：trx → tty 断流通知；tty → trx 恢复（无需动作，下条行自然续投）。
+ *  首见端口只记录不通知（评审 v2 D4 语义：订阅者加入时从当前状态开始，无「切换」可言）。 */
 function checkModeTransition(): void {
   const ports = useAppStore.getState().ports;
   for (const port of ports) {
     const mode = port.mode ?? 'trx';
     const prev = observedModes.get(port.id);
     observedModes.set(port.id, mode);
-    if (prev !== 'tty' && mode === 'tty') {
+    // 仅「已知 trx → tty」的真实切换才通知；首见（prev undefined）只记录。
+    if (prev !== undefined && prev !== 'tty' && mode === 'tty') {
       // TRX → TTY：断流 + 清该端口遗留队列（TTY 行不产生，遗留队列丢给插件也无意义）。
       const state = portStates.get(port.id);
       if (state) {
