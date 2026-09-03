@@ -471,3 +471,61 @@ export interface TriggerRule {
   /** 仅对该串口生效；空/缺省 = 全部端口（issue #3-1） */
   portId?: string;
 }
+
+// ==================== 插件相关（issue #17）====================
+
+/** 插件 manifest 的 wire 视图（与后端 PluginManifestView 对齐）。 */
+export interface PluginManifestView {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  apiVersion: string;
+  entry: string;
+  permissions: string[];
+  http?: { urlWhitelist: string[] };
+  shell?: { executableWhitelist: string[] };
+  ui?: {
+    buttons: { id: string; label: string; icon?: string; target?: string }[];
+    menuItems: { id: string; label: string; target?: string }[];
+  };
+}
+
+/** 单插件完整视图（后端 PluginView，camelCase wire 对齐）。
+ *  manifest 损坏时（manifest_error 非空）仍列出，前端显示「校验失败」。 */
+export interface PluginView {
+  id: string;
+  dir: string;
+  enabled: boolean;
+  grantedPermissions: string[];
+  declaredPermissions: string[];
+  knownPermissions: string[];
+  manifest: PluginManifestView | null;
+  manifestError: string | null;
+  installedAt: number | null;
+}
+
+/** 插件 HTTP 请求参数（后端 PluginHttpRequest）。 */
+export interface PluginHttpRequest {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeout?: number;
+}
+
+/** 插件 HTTP 响应（后端 PluginHttpResponse）。 */
+export interface PluginHttpResponse {
+  status: number;
+  body: string;
+  truncated: boolean;
+}
+
+/** config.json 插件状态实体（仅状态——enabled/权限；KV 存插件目录 data/）。 */
+export interface PluginConfigEntry {
+  id: string;
+  enabled: boolean;
+  grantedPermissions: string[];
+  installedAt?: number | null;
+  source?: string | null;
+}

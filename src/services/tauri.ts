@@ -20,6 +20,9 @@ import type {
   PortToolConfig,
   PortGroup,
   PortMetaEntry,
+  PluginView,
+  PluginHttpRequest,
+  PluginHttpResponse,
   UpdatePayload,
   UpdateProgressPayload,
 } from '../types';
@@ -421,6 +424,40 @@ export const diagLogService = {
   /** 追加一批前端 `console.*` 日志到诊断日志文件。 */
   appendDiagLog: (entries: DiagLogEntry[]): Promise<void> =>
     invoke<void>('append_diag_log', { entries }),
+};
+
+// ==================== 插件命令（issue #17） ====================
+
+export const pluginService = {
+  listPlugins: (): Promise<PluginView[]> => invoke<PluginView[]>('list_plugins'),
+
+  installPlugin: (sourcePath: string): Promise<string> =>
+    invoke<string>('install_plugin', { sourcePath }),
+
+  uninstallPlugin: (id: string): Promise<void> =>
+    invoke<void>('uninstall_plugin', { id }),
+
+  setPluginEnabled: (id: string, enabled: boolean): Promise<void> =>
+    invoke<void>('set_plugin_enabled', { id, enabled }),
+
+  setPluginPermissions: (id: string, permissions: string[]): Promise<void> =>
+    invoke<void>('set_plugin_permissions', { id, permissions }),
+
+  /** 读取插件资产（main.js / assets 内文本），供 worker 加载。 */
+  readPluginAsset: (id: string, relPath: string): Promise<string> =>
+    invoke<string>('read_plugin_asset', { id, relPath }),
+
+  /** 写入插件私有区（data/ 子目录，storage 权限）。 */
+  writePluginAsset: (id: string, relPath: string, content: string): Promise<void> =>
+    invoke<void>('write_plugin_asset', { id, relPath, content }),
+
+  /** 插件 HTTP 转发（唯一出站通道，权限+白名单后端校验）。 */
+  pluginHttp: (pluginId: string, request: PluginHttpRequest): Promise<PluginHttpResponse> =>
+    invoke<PluginHttpResponse>('plugin_http', { pluginId, request }),
+
+  /** 插件打开外部 URL（协议白名单 http/https/mailto）。 */
+  pluginOpenExternal: (url: string): Promise<void> =>
+    invoke<void>('plugin_open_external', { url }),
 };
 
 // ==================== 外部工具命令 ====================

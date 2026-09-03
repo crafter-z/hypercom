@@ -261,6 +261,13 @@ export class RxPipeline {
     return this.decodeUnderCurrentLabel(state, portId, bytes);
   }
 
+  /** 当前 per-port 编码 label（归一化小写，如 utf-8 / gbk）。
+   *  插件观察者经此拿编码（评审 v2 P1b：行载荷给未解码字节 + 编码，宿主不强制
+   *  解码选择）。不创建端口状态——纯读 opts 注入的查询。 */
+  getPortEncodingLabel(portId: string): string {
+    return this.opts.getEncodingLabel(portId);
+  }
+
   /**
    * 同步排空该端口队列（写入 store）。发送 TX 回显前调用以恢复收发时序。
    *
