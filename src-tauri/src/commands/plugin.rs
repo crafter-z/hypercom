@@ -512,3 +512,274 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+// ==================== 插件 HTTP 外联（评审 v2 D5/D8） ====================
+
+/// 插件 HTTP 请求参数（wire 与前端 TS 对齐）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHttpRequest {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    /// 超时秒数（≤15，服务端钳制）。
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+/// 插件 HTTP 响应。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHttpResponse {
+    pub status: u16,
+    /// 响应体 UTF-8 文本（截断到上限，防恶意大响应打爆内存）。
+    pub body: String,
+    /// 是否因超限截断。
+    pub truncated: bool,
+}
+
+/// HTTP 响应体截断上限（1MB——插件外联是轻量 API 调用，非文件下载）。
+const PLUGIN_HTTP_MAX_BODY: usize = 1024 * 1024;
+/// 插件外联超时上限（对齐 update.rs 惯例）。
+const PLUGIN_HTTP_MAX_TIMEOUT_SECS: u64 = 15;
+
+/// 插件 HTTP 转发（唯一合法出站通道——生产 CSP `connect-src 'self'` 关死
+/// worker 直连 fetch，评审 v2 D8）。
+///
+/// 安全（评审 v2 D5「无凭据注入」+ D3「权限调用时校验」）：
+/// 1. 插件必须已授予 `http:request`（config 实体，调用时校验——撤销即时生效）；
+/// 2. manifest `http.urlWhitelist` glob 必须匹配请求 URL（声明即白名单）；
+/// 3. 不注入任何宿主凭据/Cookie（干净 reqwest client）；
+/// 4. 超时钳制 ≤15s；响应体截断 1MB。
+#[tauri::command]
+pub async fn plugin_http(
+    plugin_id: String,
+    request: PluginHttpRequest,
+    state: State<'_, AppState>,
+) -> Result<PluginHttpResponse, CommandError> {
+    // --- 权限 + 白名单校验（锁内只读，克隆后释放）---
+    let (url_whitelist,) = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let cfg = manager.get_config();
+        let entry = cfg
+            .plugin_configs
+            .iter()
+            .find(|p| p.id == plugin_id)
+            .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
+        if !entry.enabled {
+            return Err(CommandError::Other(format!("插件未启用: {plugin_id}")));
+        }
+        if !entry
+            .granted_permissions
+            .iter()
+            .any(|p| p == "http:request")
+        {
+            return Err(CommandError::Other(format!(
+                "插件未授予 http:request 权限: {plugin_id}"
+            )));
+        }
+        // manifest 白名单（声明即上限）。
+        let root = manager.plugins_dir().to_path_buf();
+        let manifest = crate::plugin::load_manifest_from_dir(&root.join(&plugin_id))
+            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+        let whitelist = manifest
+            .http
+            .map(|h| h.url_whitelist)
+            .unwrap_or_default();
+        (whitelist,)
+    };
+
+    // URL glob 匹配：逐条 glob 匹配（`*` 单段 / `**` 跨段 / 其余字面量）。
+    let parsed_url = url::Url::parse(&request.url)
+        .map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
+    let matched = url_whitelist
+        .iter()
+        .any(|pat| url_glob_match(pat, &request.url));
+    if !matched {
+        return Err(CommandError::Other(format!(
+            "URL 不在插件 http.urlWhitelist 内: {}",
+            request.url
+        )));
+    }
+    // 仅允许 http/https。
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(CommandError::Other(format!(
+            "仅允许 http/https 协议，收到: {}",
+            parsed_url.scheme()
+        )));
+    }
+
+    // --- 转发 ---
+    let timeout = request.timeout.unwrap_or(10).min(PLUGIN_HTTP_MAX_TIMEOUT_SECS);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        // 无凭据注入：不设 cookie store / 不继承系统代理凭据。
+        .build()
+        .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
+
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|e| CommandError::Other(format!("非法 HTTP 方法: {e}")))?;
+
+    let mut builder = client.request(method, &request.url);
+    for (k, v) in &request.headers {
+        // 防 header 注入：拒绝换行字符（reqwest 会拒绝，这里前置报错更友好）。
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+            return Err(CommandError::Other("HTTP header 含非法换行".into()));
+        }
+        builder = builder.header(k, v);
+    }
+    if let Some(body) = &request.body {
+        builder = builder.body(body.clone());
+    }
+
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| CommandError::Other(format!("HTTP 请求失败: {e}")))?;
+    let status = resp.status().as_u16();
+
+    // 响应体截断：bytes() 载入后手动截断到上限（reqwest 会按内容长度缓冲整个
+    // 响应——上限保护针对超大响应，防其进入插件内存/前端）。
+    let full = resp
+        .bytes()
+        .await
+        .map_err(|e| CommandError::Other(format!("读取响应失败: {e}")))?;
+    let truncated = full.len() > PLUGIN_HTTP_MAX_BODY;
+    let body_bytes = &full[..full.len().min(PLUGIN_HTTP_MAX_BODY)];
+
+    let body = String::from_utf8_lossy(body_bytes).into_owned();
+    Ok(PluginHttpResponse {
+        status,
+        body,
+        truncated,
+    })
+}
+
+/// URL glob 匹配（评审 v2 D3 `http.urlWhitelist`）。
+/// 规则（纯函数，独立测试）：
+/// - `**` 跨 `/` 段匹配（贪婪）；
+/// - `*` 匹配单段内任意字符（不含 `/`）；
+/// - 其余字符字面量（大小写敏感——URL 的 scheme/host 惯例小写，保持字面比较）。
+/// 实现：把 glob 转成正则。空白名单 → 恒 false（无匹配即拒绝）。
+fn url_glob_match(pattern: &str, url: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    let mut regex = String::from("^");
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                // `**` → 跨段；`*` → 单段内。
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    regex.push_str(".*");
+                    i += 2;
+                } else {
+                    regex.push_str("[^/]*");
+                    i += 1;
+                }
+            }
+            '?' => {
+                regex.push_str("[^/]");
+                i += 1;
+            }
+            // 正则元字符转义。
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
+                regex.push('\\');
+                regex.push(chars[i]);
+                i += 1;
+            }
+            c => {
+                regex.push(c);
+                i += 1;
+            }
+        }
+    }
+    regex.push('$');
+    // glob 转正则后匹配。预编译不划算（白名单短、低频），直接每次编译。
+    match regex::Regex::new(&regex) {
+        Ok(re) => re.is_match(url),
+        Err(_) => false,
+    }
+}
+
+// ==================== 插件 Shell（v1：openExternal + 白名单骨架） ====================
+
+/// 插件打开外部 URL（经宿主 `shell:allow-open` 权限——capabilities 已有）。
+/// 安全：仅 http/https/mailto 协议；不做任意协议跳转（防 file:// 读本地）。
+/// openExternal 的 per-plugin URL 限制在实施时评估（评审 v2 §8）——v1 先做
+/// 协议白名单（宿主既有 shell:allow-open 全局授权，协议限制是底线）。
+#[tauri::command]
+pub async fn plugin_open_external(
+    url: String,
+    app: tauri::AppHandle,
+) -> Result<(), CommandError> {
+    use tauri_plugin_shell::ShellExt;
+    let parsed = url::Url::parse(&url)
+        .map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
+        return Err(CommandError::Other(format!(
+            "openExternal 仅允许 http/https/mailto，收到: {}",
+            parsed.scheme()
+        )));
+    }
+    #[allow(deprecated)] // tauri-plugin-shell open 已 deprecated（官方建议 tauri-plugin-opener）；v1 沿用 shell 插件（capabilities 已有 shell:allow-open），opener 迁移在评审 §11 开放问题实施时评估
+    app.shell()
+        .open(url, None)
+        .map_err(|e| CommandError::Other(format!("打开 URL 失败: {e}")))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_glob_match;
+
+    #[test]
+    fn glob_matches_literal_prefix() {
+        assert!(url_glob_match(
+            "https://symbols.example.com/**",
+            "https://symbols.example.com/v1/symbol"
+        ));
+        assert!(!url_glob_match(
+            "https://symbols.example.com/**",
+            "https://evil.example.com/v1/symbol"
+        ));
+    }
+
+    #[test]
+    fn glob_star_single_segment() {
+        // `*` 不跨 `/`
+        assert!(url_glob_match("https://a.com/*", "https://a.com/x"));
+        assert!(!url_glob_match("https://a.com/*", "https://a.com/x/y"));
+    }
+
+    #[test]
+    fn glob_double_star_crosses_segments() {
+        assert!(url_glob_match("https://a.com/**", "https://a.com/x/y/z"));
+        assert!(url_glob_match("https://a.com/api/**", "https://a.com/api/v1/users"));
+        assert!(!url_glob_match("https://a.com/api/**", "https://a.com/other"));
+    }
+
+    #[test]
+    fn glob_empty_or_bad_never_matches() {
+        assert!(!url_glob_match("", "https://a.com/x"));
+        // 正则元字符字面量：`(` 转义后字面匹配 `(x`
+        assert!(url_glob_match("https://a.com/(x", "https://a.com/(x"));
+        assert!(!url_glob_match("https://a.com/(x", "https://a.com/x"));
+        assert!(url_glob_match("https://a.com/x", "https://a.com/x"));
+    }
+
+    #[test]
+    fn glob_regex_metachars_literal() {
+        // `+`、`.` 等应字面匹配
+        assert!(url_glob_match("https://a.com/v1.2", "https://a.com/v1.2"));
+        assert!(!url_glob_match("https://a.com/v1.2", "https://a.com/v1x2"));
+    }
+}

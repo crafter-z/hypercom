@@ -61,6 +61,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 url = "2"
 tauri-plugin-clipboard-manager = "2"
 
+# 插件 URL 白名单 glob → 正则（issue #17；regex 是 reqwest 传递依赖，显式声明）
+regex = "1"
+
 # 插件 zip 安装解压（issue #17）。用默认 features——裁剪 features 会触发整棵
 # 依赖树重新求解，把 tauri 可选传递依赖（clipboard 等）剪掉导致 capabilities
 # ACL 失配（tauri-build 报 permission not found）。

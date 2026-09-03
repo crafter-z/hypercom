@@ -236,6 +236,8 @@ pub fn run() {
             commands::set_plugin_permissions,
             commands::read_plugin_asset,
             commands::write_plugin_asset,
+            commands::plugin_http,
+            commands::plugin_open_external,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();

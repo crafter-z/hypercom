@@ -1686,6 +1686,7 @@ dependencies = [
  "encoding_rs",
  "log",
  "portable-pty",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
