@@ -26,6 +26,19 @@ import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { appendTerminalLines } from './terminal/viewportManager';
 
+/** 一条组装完成的 RX 完整行（行级钩子载荷，issue #14 P1-1）。
+ *  rawData 为原始字节（未解码）；text 为当前 per-port 编码下的解码文本——
+ *  观察者（触发引擎/插件）按需取用。评审 v2 P1b：插件观察者需要未解码字节 +
+ *  编码 label 时用 rawData 自解码，宿主不强制编码选择。 */
+export interface AssembledLine {
+  rawData: Uint8Array;
+  text: string;
+  timestamp: number;
+}
+
+/** 行级钩子回调签名（主触发器 + 附加观察者共用）。 */
+export type AssembledLineCallback = (portId: string, line: AssembledLine) => void;
+
 export interface RxPipelineOptions {
   /** 批量写入终端 store（每端口每 tick 一次） */
   appendLines: (portId: string, lines: TerminalLine[]) => void;
@@ -33,10 +46,11 @@ export interface RxPipelineOptions {
   getEncodingLabel: (portId: string) => string;
   /** 是否丢弃解码后 trim 为空（纯空白）的行 */
   getIgnoreEmptyChars: () => boolean;
-  /** 每端口每条**完整行**组装完成并解码后触发（issue #14 P1-1：触发器需在
-   *  行边界匹配而非读事件块边界）。rawData 为该行的原始字节，text 为当前
-   *  编码下的解码文本。在入队前调用，便于调用方做行级匹配。可选；不传则跳过。 */
-  onLineAssembled?: (portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }) => void;
+  /** 主行级触发器（issue #14 P1-1）：完整行边界匹配而非读事件块边界。
+   *  注入/覆盖经 `setOnLineAssembled`（多次 set 取最后一次——触发器唯一）。
+   *  附加观察者（插件 rx.onLine，评审 v2 P1）经
+   *  `addOnLineAssembledListener`/`removeOnLineAssembledListener` 注册，二者并存。 */
+  onLineAssembled?: AssembledLineCallback;
   /** 静默 flush 超时（ms）：距上次事件这么久仍未终结的尾部会被冲刷。默认 250 */
   silenceFlushMs?: number;
   /** 转发给组装器的强制发射阈值（字节）。默认 4096 */
@@ -101,9 +115,12 @@ export class RxPipeline {
   private readonly scheduleFlush: (cb: () => void) => number;
   private readonly cancelFlush: (handle: number) => void;
   private readonly ports = new Map<string, PortRxState>();
-  /** 行级触发器钩子（P1-1）：由 useSerialReceive 在挂载时注入，每条完整行组装
-   *  完成后触发。可被覆盖（多次 set 取最后一次）。 */
-  private onLineAssembledCb?: (portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }) => void;
+  /** 主行级触发器（P1-1）：由 useSerialReceive 在挂载时注入，每条完整行组装
+   *  完成后触发。唯一（多次 set 取最后一次）——见 `setOnLineAssembled`。 */
+  private onLineAssembledCb?: AssembledLineCallback;
+  /** 附加行级观察者（评审 v2 P1：插件 rx.onLine 等多播注册）。
+   *  与主触发器并存；add/remove 管理，不覆盖触发器。 */
+  private readonly extraOnLineAssembledCbs = new Set<AssembledLineCallback>();
 
   /** 全管线唯一的批写 tick 句柄（非每端口一个） */
   private flushTickHandle: number | null = null;
@@ -136,9 +153,22 @@ export class RxPipeline {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
     }
   }
-  /** P1-1：注入/覆盖行级触发器钩子（useSerialReceive 挂载时调用）。 */
-  setOnLineAssembled(cb: (portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }) => void): void {
+  /** P1-1：注入/覆盖主行级触发器（useSerialReceive 挂载时调用）。
+   *  多次 set 取最后一次——触发器唯一，不叠加。 */
+  setOnLineAssembled(cb: AssembledLineCallback): void {
     this.onLineAssembledCb = cb;
+  }
+
+  /** 注册附加行级观察者（评审 v2 P1：插件 rx.onLine）。与主触发器并存，
+   *  互不覆盖；返回注销函数。同一回调重复 add 幂等（Set 语义）。 */
+  addOnLineAssembledListener(cb: AssembledLineCallback): () => void {
+    this.extraOnLineAssembledCbs.add(cb);
+    return () => this.removeOnLineAssembledListener(cb);
+  }
+
+  /** 注销附加行级观察者。 */
+  removeOnLineAssembledListener(cb: AssembledLineCallback): void {
+    this.extraOnLineAssembledCbs.delete(cb);
   }
 
   /** visibilitychange 处理：取消未触发的批写 tick，按当前可见性用默认调度器重排 */
@@ -179,8 +209,22 @@ export class RxPipeline {
         if (ignoreEmptyChars && !text.trim()) continue;
         // P1-1：行级触发器钩子——在完整行入队前触发，调用方按行边界匹配
         //（修复旧实现按读事件块匹配导致跨块模式失效 / exact 难命中的缺陷）。
+        const line: AssembledLine = { rawData: raw, text, timestamp };
+        // 主触发器（唯一，触发引擎）先于附加观察者（插件 rx.onLine）调用；
+        // 任一观察者抛错不得中断行写入（try 隔离——观察者是可选第三方代码）。
         if (this.onLineAssembledCb) {
-          this.onLineAssembledCb(portId, { rawData: raw, text, timestamp });
+          try {
+            this.onLineAssembledCb(portId, line);
+          } catch (e) {
+            console.error('[rxPipeline] onLineAssembled trigger failed:', e);
+          }
+        }
+        for (const cb of this.extraOnLineAssembledCbs) {
+          try {
+            cb(portId, line);
+          } catch (e) {
+            console.error('[rxPipeline] onLineAssembled observer failed:', e);
+          }
         }
         state.queue.push({
           timestamp,
