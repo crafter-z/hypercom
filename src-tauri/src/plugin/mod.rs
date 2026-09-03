@@ -627,4 +627,60 @@ mod tests {
         assert!(dest.join("com.example.demo/manifest.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn install_dir_scan_roundtrip_detects_and_validates() {
+        // 模拟「安装目录 → 扫描」闭环（install_plugin 的核心校验链：
+        // 复制目录 + scan_plugins 发现 + manifest 权威校验）。
+        let dir = std::env::temp_dir().join(format!("hypercom_install_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // 源插件目录（含 manifest + 入口 + 资产）。
+        let src = dir.join("src_plugin");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("manifest.json"), valid_manifest_json()).unwrap();
+        fs::write(src.join("main.js"), "console.log('hi')").unwrap();
+        fs::create_dir_all(src.join("assets")).unwrap();
+        fs::write(src.join("assets/symbols.map"), "map").unwrap();
+
+        // 目标 plugins 根（模拟 <config_dir>/plugins）。
+        let plugins_root = dir.join("plugins");
+        fs::create_dir_all(&plugins_root).unwrap();
+        let dest = plugins_root.join("com.example.symresolve");
+        copy_dir_tree_for_test(&src, &dest);
+
+        // scan 发现并校验通过。
+        let found = scan_plugins(&plugins_root);
+        assert_eq!(found.len(), 1);
+        let manifest = found[0].manifest.as_ref().unwrap();
+        assert_eq!(manifest.id, "com.example.symresolve");
+        assert_eq!(manifest.entry, "main.js");
+        assert_eq!(manifest.permissions.len(), 2);
+
+        // entry 资产可读（read_plugin_asset 语义的路径解析）。
+        let entry_rel = sanitize_plugin_rel_path(&manifest.entry).unwrap();
+        let entry_path = dest.join(entry_rel);
+        assert_eq!(fs::read_to_string(entry_path).unwrap(), "console.log('hi')");
+        // 资产在插件目录内可读、目录外拒绝。
+        let ok_rel = sanitize_plugin_rel_path("assets/symbols.map").unwrap();
+        assert!(dest.join(ok_rel).is_file());
+        assert!(sanitize_plugin_rel_path("../outside").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 测试用递归复制（生产用 commands/plugin.rs 的 copy_dir_recursive——命令层
+    /// 依赖 Tauri State 不便单测，此处独立实现等价语义）。
+    fn copy_dir_tree_for_test(src: &std::path::Path, dest: &std::path::Path) {
+        fs::create_dir_all(dest).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let t = dest.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_tree_for_test(&entry.path(), &t);
+            } else {
+                fs::copy(entry.path(), &t).unwrap();
+            }
+        }
+    }
 }

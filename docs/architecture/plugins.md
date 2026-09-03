@@ -1,6 +1,17 @@
 # 插件系统设计方案（issue #17 提案）
 
-**日期：2026-09-01 · 状态：提案（2026-09-02 修订：按评审 v2 修正 D4 观察点 / D8 CSP / 配置模型，详见 §12 修订记录） · 适用版本：0.7.0 起**
+**日期：2026-09-01 · 状态：实施中（2026-09-03 起在 `feat/plugin-system` 分支落地，见下方「实现进度」） · 适用版本：0.7.0 起**
+
+> **实现进度（2026-09-03，分支 feat/plugin-system）**：M1–M4 核心已落地——
+> 后端 config 第 9 类实体 + plugin 纯函数层（manifest 校验权威点/路径防护/zip slip）
+> + commands/plugin.rs（12 域：CRUD/资产/http/openExternal）+ 前端 rxPipeline 行钩子
+> 多播化 + pluginObserver 旁路总线 + pluginHost Worker 宿主/RPC 桥/调用时权限 +
+> pluginBridge/pluginKv/pluginRpc + usePluginHost/usePluginList + PluginSettings 设置页 +
+> Sidebar 声明式 UI 扩展点 + CSP 硬化（csp/devCsp）。**与方案的已决差异**：
+> ① `plugin_shell` 仅 openExternal（executable 白名单执行留待评估——评审 §11 开放问题 1）；
+> ② `shell.execute`/`fs.list`/`events.*`/`ports.onChange` 宿主 API 未实现（v1 骨架，后续增量）；
+> ③ 崩溃处置已按 P5 阈值实现；④ RX 批转发结构化克隆（transfer 会 detach 共享终端缓冲，
+> 见 pluginHostApi 注释——零拷贝留待 slice 副本优化）。
 
 ## 1. 结论
 
