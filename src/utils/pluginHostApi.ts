@@ -21,6 +21,9 @@ import { addPluginRxObserver } from './pluginObserver';
 import type { RxDetachedEvent } from './pluginObserver';
 import { appendTerminalLine } from './terminal/viewportManager';
 import { pluginKv } from './pluginKv';
+import { checkPortScope, OP_PERMISSIONS } from './pluginRpc';
+import { PluginLogQuota } from './pluginLogQuota';
+import type { PluginManifestView } from '../types';
 
 /** 插件可见的端口摘要（避免把内部字段全量暴露给插件）。 */
 export interface PluginPortView {
@@ -50,11 +53,32 @@ function portView(port: {
   };
 }
 
+/** notify 时长夹取上下限（评审复审：插件不得传 0 制造粘滞 toast 刷屏）。 */
+const NOTIFY_MIN_DURATION_MS = 2000;
+const NOTIFY_MAX_DURATION_MS = 30000;
+
+/** notify 的 level → toast severity 映射（设计 §5 notify({level})）。 */
+function notifySeverity(level: unknown): 'info' | 'warning' | 'error' {
+  if (level === 'warn' || level === 'warning') return 'warning';
+  if (level === 'error') return 'error';
+  return 'info';
+}
+
+/** 每插件日志配额实例（P13：令牌桶，见 pluginLogQuota.ts）。 */
+const logQuotas = new Map<string, PluginLogQuota>();
+
 /**
  * 执行一次宿主 API 调用。返回结果（JSON 可序列化）。
  * 权限已在调用前过滤（本层不做权限判断——由 PluginSession 负责，评审 v2 P7）。
+ * `manifest` 是该插件的 wire 视图（PluginSession 启动时缓存）——port/URL 作用域
+ * 校验（P10）在此消费；manifest 不可得时按 null 处理（作用域声明不存在 = 不限制）。
  */
-export async function executeHostApi(pluginId: string, op: string, args: unknown): Promise<unknown> {
+export async function executeHostApi(
+  pluginId: string,
+  op: string,
+  args: unknown,
+  manifest: PluginManifestView | null = null,
+): Promise<unknown> {
   switch (op) {
     case 'ports.list': {
       const ports = useAppStore.getState().ports;
@@ -80,6 +104,11 @@ export async function executeHostApi(pluginId: string, op: string, args: unknown
     case 'serial.send': {
       const a = requireObject(args);
       const portId = requireString(a, 'portId');
+      // per-port 作用域（评审 v2 P10）：manifest `serial.portWhitelist` 调用时
+      // 校验——在 sendToPort **之前**拒绝；插件触达串口的唯一通道就是本桥
+      // （worker 零特权无 invoke），宿主内部 TX 路径不经此、无需校验。
+      const scopeDenied = checkPortScope(manifest, portId);
+      if (scopeDenied) throw new Error(scopeDenied);
       const data = requireString(a, 'data');
       const isHex = Boolean(a.isHex);
       const lineEnding = typeof a.lineEnding === 'string' ? a.lineEnding : 'None';
@@ -116,11 +145,12 @@ export async function executeHostApi(pluginId: string, op: string, args: unknown
     }
     case 'notify': {
       const a = requireObject(args);
+      const requested = typeof a.durationMs === 'number' ? a.durationMs : 4000;
       useToastStore.getState().push({
-        severity: 'info',
+        severity: notifySeverity(a.level),
         message: typeof a.body === 'string' ? a.body : String(a.title ?? ''),
         title: typeof a.title === 'string' ? a.title : pluginId,
-        durationMs: typeof a.durationMs === 'number' ? a.durationMs : 4000,
+        durationMs: Math.min(NOTIFY_MAX_DURATION_MS, Math.max(NOTIFY_MIN_DURATION_MS, requested)),
       });
       return null;
     }
@@ -128,6 +158,22 @@ export async function executeHostApi(pluginId: string, op: string, args: unknown
       const a = requireObject(args);
       const level = typeof a.level === 'string' ? a.level : 'info';
       const msg = typeof a.msg === 'string' ? a.msg : String(a.msg ?? '');
+      // P13 配额：令牌桶限流（突发 20 条 / 回填 4 条每秒），坏插件不再把
+      // diaglog 512KB 轮转窗口刷掉；超限丢弃，每 5s 窗口首次丢弃告警一次。
+      let quota = logQuotas.get(pluginId);
+      if (!quota) {
+        quota = new PluginLogQuota();
+        logQuotas.set(pluginId, quota);
+      }
+      const verdict = quota.tryConsume(Date.now());
+      if (!verdict.allowed) {
+        if (verdict.warn) {
+          console.warn(
+            `[pluginHost] ${pluginId} log 配额超限，已累计丢弃 ${verdict.droppedTotal} 条`,
+          );
+        }
+        return null;
+      }
       // 插件日志进宿主 console（经 setupDiagLogCapture 落 diaglog）；前缀插件 id。
       // eslint-disable-next-line no-console
       console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](
@@ -158,6 +204,12 @@ export async function executeHostApi(pluginId: string, op: string, args: unknown
       // 不经 RPC——防御性拒绝（见装配层 attachRxObserver / usePlugins）。
       throw new Error(`${op} 由宿主装配层提供，不经 RPC`);
     default:
+      // 已登记权限点但 v1 未实现（shell.execute/fs.list/ports.onChange/
+      // rx.getBuffer/events.*，见 plugins.md「实现进度」②）→ 明确「未实现」；
+      // 其余才是真正的未知 API。二者都拒绝，语义不再混同。
+      if (op in OP_PERMISSIONS) {
+        throw new Error(`宿主 API 未实现（v1 骨架，见 plugins.md 实现进度②）: ${op}`);
+      }
       throw new Error(`未知宿主 API: ${op}`);
   }
 }

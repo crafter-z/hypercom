@@ -7,11 +7,22 @@
 > + commands/plugin.rs（12 域：CRUD/资产/http/openExternal）+ 前端 rxPipeline 行钩子
 > 多播化 + pluginObserver 旁路总线 + pluginHost Worker 宿主/RPC 桥/调用时权限 +
 > pluginBridge/pluginKv/pluginRpc + usePluginHost/usePluginList + PluginSettings 设置页 +
-> Sidebar 声明式 UI 扩展点 + CSP 硬化（csp/devCsp）。**与方案的已决差异**：
-> ① `plugin_shell` 仅 openExternal（executable 白名单执行留待评估——评审 §11 开放问题 1）；
-> ② `shell.execute`/`fs.list`/`events.*`/`ports.onChange` 宿主 API 未实现（v1 骨架，后续增量）；
-> ③ 崩溃处置已按 P5 阈值实现；④ RX 批转发结构化克隆（transfer 会 detach 共享终端缓冲，
-> 见 pluginHostApi 注释——零拷贝留待 slice 副本优化）。
+> Sidebar 声明式 UI 扩展点 + CSP 硬化（csp/devCsp）。**复审补强落地（2026-09-04）**：
+> ⑥ `serial.send` per-port 白名单（P10）——manifest `serial.portWhitelist`，桥侧
+> 调用时校验（声明且非空=仅白名单；空数组=全拒；未声明=不限）；⑦ 敏感权限首次
+> 启用确认框（D3，原生 confirm 列声明与风险）；⑧ 插件日志配额（P13）——`log` op
+> 按插件令牌桶限流（突发 20/回填 4 每秒，pluginLogQuota.ts），超限丢弃 + 5s 窗口
+> 告警一次，不再挤占 diaglog；⑨ `rx.detached` 补断线场景（`reason:'port-disconnected'`，
+> useSerialReceive 断线分支触发）；⑩ 重 IO 命令（install/uninstall/read/write/list
+> 资产）改 **async + spawn_blocking**（issue #6-1 同源教训）；⑪ 覆盖安装改
+> **staging 复制 + 原子换名**（data/ 保留、旧版孤儿文件清除）；⑫ HTTP 白名单匹配
+> **Url::parse 规范化串**（大小写/尾点/相对段不再误拒）；⑬ zip 解压条目数/总量上限
+> （zip bomb 加固）；⑭ notify level→severity 映射 + durationMs 夹取 [2s,30s]。
+> **与方案的已决差异**：① `plugin_shell` 仅 openExternal（executable 白名单执行
+> 留待评估——评审 §11 开放问题 1）；② `shell.execute`/`fs.list`/`events.*`/
+> `ports.onChange` 宿主 API 未实现（v1 骨架——调用报「未实现」而非「未知」）；
+> ③ 崩溃处置已按 P5 阈值实现；④ RX 批转发结构化克隆（transfer 会 detach 共享
+> 终端缓冲，见 pluginHostApi 注释——零拷贝留待 slice 副本优化）。
 
 ## 1. 结论
 
@@ -73,7 +84,7 @@
 - manifest 声明 `ui: { buttons: [{id, label, icon, target}], menuItems: [...] }`；icon 用 lucide-react 图标名（宿主已有该依赖）。
 - 宿主在固定扩展点渲染：Sidebar 工具栏、端口右键菜单（`sidebar.port.contextMenu` 同层）、设置页「插件」分页。
 - 点击 → `host.ui.buttonClick` 消息 → worker；插件经 `api.ui.panel` 写专属输出面板 / `api.terminal.append` 写终端 / `api.notify` 发通知。
-- **插件零 DOM 权限**是本模型的安全核心：恶意插件最多画错输出，不能伪造界面钓鱼。
+- 可选权限参数：`http.urlWhitelist`（glob）、`shell.executableWhitelist`——声明即白名单，运行时校验。**`serial.send` per-port 白名单已实现（P10，v1 用 manifest 声明）**：`serial: { portWhitelist: ["COM3"] }`——桥侧调用时校验（声明且非空=仅白名单；空数组=全部拒绝；未声明=不做端口作用域），在 `sendToPort` 之前拒绝；「首次授权时用户选端口」留增量。
 - **插件 label 不做宿主翻译（P8）**：manifest 的 label/描述是第三方字符串，宿主原样显示；如需双语，作者可提供 `{zh, en}` 双字段（v1 允许、文档给出格式即可），宿主按当前语言取。
 - **扩展点渲染范围 v1 = 主窗（P14）**：弹窗（quick-send / terminal-*，独立 webview、独立模块作用域）**不加载插件 UI/worker**——插件宿主是主窗单例；弹窗内的端口发送仍走既有 popout 意图桥（`sendToPort` 管线），与插件无交集。避免跨窗 RPC 与多 worker 实例一致性负担（v2 再评估）。
 
@@ -81,24 +92,23 @@
 
 - manifest 声明 `permissions: string[]`；桥侧按「已授予权限集」在**每次调用时校验**（非注入时过滤）——撤销即时生效，worker 内旧 API 引用不因注入时点残留权限（P7）。manifest permissions 只是「可授予上限」。
 - **出站双关**：`http:request` 是唯一合法出站通道——manifest 白名单 + 用户授予 + 生产 CSP `connect-src 'self'`（D8）三层；插件内直连 `fetch` 被 CSP 关死，不走桥即无权限可言。
-- 敏感权限（`serial:send`/`http:request`/`shell:execute`）首次启用时弹确认框，列出 manifest 声明与风险说明；设置页可逐权限撤销。
-- 可选权限参数：`http.urlWhitelist`（glob）、`shell.executableWhitelist`——声明即白名单，运行时校验。**`serial.send` 支持 per-port 白名单**（manifest 声明或首次授权时用户选择端口），对齐 triggerEngine 的 per-port 语义（P10）。
+- 敏感权限（`serial:send`/`http:request`/`shell:execute`）首次启用时弹确认框（**已实现**：PluginSettings 原生 confirm 列声明与风险说明），设置页可逐权限撤销。
+- 可选权限参数：`http.urlWhitelist`（glob）、`shell.executableWhitelist`、`serial.portWhitelist`——声明即白名单，运行时校验。**`serial.send` per-port 白名单已实现（P10，v1 用 manifest 声明）**：`serial: { portWhitelist: ["COM3"] }`——桥侧调用时校验（声明且非空=仅白名单；空数组=全部拒绝；未声明=不做端口作用域），在 `sendToPort` 之前拒绝；「首次授权时用户选端口」留增量。
 - 权限是**静态 per-plugin**、用户显式授予；与浏览器扩展一致的信任模型（恶意插件需用户先批准，批准后责任在用户）。
-
 ### D4 RX 数据接入：旁路观察者（行组装层，RX 专属）
 
 - 新模块 `src/utils/pluginObserver.ts`：注册到 RxPipeline 的**行组装层钩子**（`onLineAssembled` 同层——每条完整 RX 行组装完成、解码后入队前触发，rxPipeline.ts:182），**不消费、不修改**数据流。
 - **为什么是行组装层而非批写层（P1）**：TX 回显、TOOL 输出、日志回放走 viewportManager 单行 `appendTerminalLine`（useSerialSend/useToolOutput/useLogReplay），**不经过 RxPipeline**——挂管线内即天然只见纯 RX 行（后端 `serial:data` direction="RX"，serial/mod.rs:49）。挂 rAF 批写层或终端写口才会混入非 RX 行，故不采用。
-- **多播注册（关键实现约束）**：行级钩子现状是**单回调可覆盖**（`setOnLineAssembled`，触发引擎已占用，rxPipeline.ts:140）。插件观察须把钩子升级为**多播注册表**（宿主触发器 + N 个插件观察者并存），插件**不得**再 set 覆盖触发引擎；或为插件另设独立多播旁路。禁止沿用 serial:data 块级订阅——P1-1 已证明读事件块边界任意、跨块匹配失效，行语义必须在组装层。
+- **多播注册（关键实现约束，已实现）**：行级钩子已升级为多播——`setOnLineAssembled` 主触发器（触发引擎，唯一）+ `addOnLineAssembledListener` 附加观察者（插件 rx.onLine）并存互不覆盖，任一观察者抛错 try 隔离不断行写入（rxPipeline.ts）。禁止沿用 serial:data 块级订阅——P1-1 已证明读事件块边界任意、跨块匹配失效，行语义必须在组装层。
+- **TRX/TTY 模式切换断流通知（已实现）**：插件启用期间端口切到 `tty` → 行观察器对该端口断流；宿主向插件发 `rx.detached({portId, reason:'mode-tty'})`，切回 TRX 恢复。**端口断线同为断流**：useSerialReceive 断线分支发 `rx.detached({reason:'port-disconnected'})`——插件可区分「无数据」与「端口没了」；关标签页不清端口状态、不发 detached。v1 仅 TRX 行；TTY 原始字节订阅留 v2。
 - 批转发：每帧至多一条 postMessage 携带 N 行（`ArrayBuffer` transfer 零拷贝）；**宿主侧 per-frame 行数 + 字节数设上限**（对齐 `maxLinesPerTick`/`maxQueuedLines` 纪律），超限丢最旧并告警（插件可见）（P12）。
 - 仅在**已启用插件且订阅 rx** 时激活总线；零插件时路径上无任何额外分支开销。
 - **回调载荷给未解码字节 + 编码 label（P1b）**：`{portId, seq, rawData: Uint8Array, encoding, ts}`——端口设 GBK 时宿主预解码文本会强加编码选择；文本由插件自行按需解码（栈帧地址等 ASCII 子串不受影响，中文路径/符号由插件决定）。
-- **TRX/TTY 模式切换断流通知**：插件启用期间端口切到 `tty` → 行观察器对该端口断流；宿主向插件发 `rx.detached({portId, reason:'mode-tty'})`，切回 TRX 恢复。v1 仅 TRX 行；TTY 原始字节订阅留 v2。
 
 ### D5 后端形态
 
 - 新增 `commands/plugin.rs`（第 12 域）+ `AppState.plugin_manager: Arc<Mutex<PluginManager>>`。
-- 命令：`list_plugins` / `install_plugin(zipPath|dirPath)` / `uninstall_plugin(id)` / `set_plugin_enabled(id, enabled)` / `set_plugin_permissions(id, perms)` / `read_plugin_asset(id, relPath)` / `write_plugin_asset(id, relPath)` / `plugin_http(request)` / `plugin_shell(request)`。
+- 命令：`list_plugins`（返回 UI 视图 + **权威 `plugin_configs` 数组**——前端以命令返回值写回 store，见 D6 复审修复）/ `install_plugin(zipPath|dirPath)` / `uninstall_plugin(id)` / `set_plugin_enabled(id, enabled)` / `set_plugin_permissions(id, perms)` / `read_plugin_asset(id, relPath)` / `write_plugin_asset(id, relPath, content)` / `plugin_http(request)` / `plugin_open_external(url)`。**四个变更命令均返回变更后的全量 `plugin_configs` 数组**；install/uninstall/read/write/list 为 **async + spawn_blocking**（zip 解压/目录复制/换名/资产读是秒级磁盘 IO，同步命令跑事件循环主线程会卡 UI——issue #6-1 同源教训）。
 - `read/write_plugin_asset`：**路径规范化 + 前缀校验**（`canonicalize` 后必须落在 `<plugins_dir>/<id>/` 内），防 `../` 穿越；`write` 仅 `storage` 权限授予后可用（限制写入 `data/` 子目录）。
 - `plugin_http`：复用 `reqwest 0.13`；超时 15s（对齐 update.rs 惯例）；无凭据注入。
 - `plugin_shell`：v1 仅 `openExternal` + 白名单可执行文件（`tauri-plugin-shell` 的 `Command` 或后端 `std::process`，取前者以复用现成 scope 校验）；`shell:allow-execute` 权限按需加进 capabilities。`openExternal` 的 per-plugin 限制（现 `shell:allow-open` 全局授权）实施时评估（见 §8）。
@@ -111,13 +121,13 @@
 - config.json 第 9 类实体 `plugin_configs: Vec<PluginConfigEntry>`：**仅存状态** `{id, enabled, grantedPermissions}`（+ 可选 `installedAt`/`source` 元数据）。**不含 `kv`**（P2）——插件私有 KV 存 `<plugin_dir>/data/state.json`，经 `storage.get/set` 权限 API 读写；卸载即随目录清理，config.json 不被高频 KV 写入污染，且避开「启动快照陷阱」（issue #5-2：全量保存会整体覆盖未并入的实体字段，portPresets 先例）。
 - **持久化审计**：所有全量 `set_config` 前必须把活插件状态并入 `mergeLiveRuleEntities`——现状该函数已合并 **5 个实体**（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs），插件为**第 6 个合并源**。
 - 插件状态变更 500ms 防抖自动保存（镜像 groups/portMeta 模式）。
-- 卸载/更新时清理：卸载删除目录（含 data/）；重装覆盖保留还是重置 data/ 由插件 `version` 比较决定，v1 默认**保留 data/**（KV 生命周期长于插件代码，除非作者显式要求重置）。
+- 卸载/更新时清理：卸载删除目录（含 data/）；重装覆盖**staging 复制 + 原子换名（已实现）**——data/ 私有区先备份、换名后归位，旧版孤儿文件不再残留；v1 默认**保留 data/**（KV 生命周期长于插件代码，除非作者显式要求重置）。
 
 ### D7 分发与验证
 
 - 目录即插件格式；zip 用于安装（`install_plugin` 解压 → 校验 → 落目录）。
 - manifest 校验（纯函数，vitest）：必填 `id`（反向域名）/`name`/`version`/`apiVersion`/`entry`/`permissions`；`entry` 与 `assets` 路径必须指向插件目录内；`apiVersion` 与宿主兼容（宿主 API semver，`requiresApi >= 1.0`）。
-- **zip 解压路径穿越（zip slip）单独防护（P11）**：解压阶段逐条目校验相对路径（拒绝 `../`、绝对路径、符号链接），与 manifest `entry`/`assets` 前缀检查分开实现、分开测试。
+- **zip 解压路径穿越（zip slip）单独防护（P11，已实现）**：解压阶段逐条目校验相对路径（拒绝 `../`、绝对路径、符号链接），与 manifest `entry`/`assets` 前缀检查分开实现、分开测试。**zip bomb 上限（已实现）**：条目数 ≤ 2000、解压总量 ≤ 64MB（超限拒绝，`extract_plugin_zip_limited` 上限可注入便于测试）。
 - 签名：可选 minisign（复用 updater 公钥体系），无签名 = 「未验证」标记 + 安装提示；v1 不强制。
 - 插件更新：v1 手动（重装 zip/覆盖目录）；v2 可挂 update.rs 通道模型。
 
@@ -186,9 +196,9 @@ fs.read(rel) / fs.list(rel) / fs.write(rel, data)   // 限定插件目录；writ
 http.request({method, url, headers, body, timeout}) // 后端转发，15s 上限；urlWhitelist glob 校验
 shell.execute(exec, args, opts) / shell.openExternal(url)  // executableWhitelist；openExternal per-plugin 限制实施时评估
 clipboard.readText() / clipboard.writeText(text)
-notify({title, body, level})
+notify({title, body, level})                          // level: info|warn|error → toast severity；durationMs 夹取 [2s, 30s]（插件不可造粘滞刷屏）
 storage.get(key) / storage.set(key, value)  // data/state.json（D6，不进 config.json）
-log(level, msg)                      // 插件日志独立通道 + 配额，不挤占 diaglog（P13）
+log(level, msg)                      // 令牌桶配额（突发 20/回填 4 每秒，pluginLogQuota）+ console→diaglog；独立文件通道留增量（P13）
 events.on(event, cb) / events.emit(event, payload)
 ```
 
@@ -262,11 +272,11 @@ ui.buttonClick({buttonId, context})  // context = 端口等
 
 ## 9. 测试与验证策略
 
-- 纯函数单测（vitest）：manifest 校验、路径穿越防护、**权限过滤矩阵（含撤销后旧引用被拒的调用时校验用例）、RPC 桥（fake worker）、RX 旁路总线（注入假管线，断言纯 RX 无 TX/TOOL 混入）**——桥侧调用时权限校验是方案核心，纯函数矩阵测试必须覆盖。
-- 后端单测（cargo test）：`read/write_plugin_asset` 穿越用例、**zip 解压条目穿越（zip slip：`../`/绝对路径/符号链接）用例**、`plugin_http` 参数校验（不触 serialport FFI，Windows 全平台可跑）；**manifest 校验权威点在 Rust**——`install_plugin` 对畸形 manifest（缺字段/`apiVersion` 不兼容/`entry` 越目录）拒绝安装的用例必须在后端测，TS 预检结果不可信。
-- CSP 回归（e2e + 手动清单）：设 prod `csp` + dev `devCsp` 后背景图加载、xterm 渲染、TTY 会话、弹窗 webview、dev HMR（ws + refresh preamble）均正常；**e2e 断言基于生产 csp 的构建**；插件直连 fetch 被拒（插件内 `fetch` 抛出 CSP 错误）作为安全断言。
-- e2e（playwright + DEV 构建）：安装示例插件 → 启用 → 注入 RX 行 → 断言翻译输出；权限拒绝路径（未授权 API → reject）；**端口切 TTY 后观察器断流 + `rx.detached` 通知**。
-- 性能冒烟：SIM:Loopback 高频下启用 rx 观察插件，断言帧率无劣化。
+- 纯函数单测（vitest）：manifest 校验、路径穿越防护、**权限过滤矩阵（含撤销后旧引用被拒的调用时校验用例）、RPC 桥（fake worker）、RX 旁路总线（注入假管线，断言纯 RX 无 TX/TOOL 混入）、serial 端口作用域（checkPortScope 三态）、日志配额（pluginLogQuota 令牌桶）、KV 并发首载去重**——桥侧调用时权限校验是方案核心，纯函数矩阵测试必须覆盖。
+- 后端单测（cargo test）：`read/write_plugin_asset` 穿越用例、**zip 解压条目穿越（zip slip）+ zip bomb 上限用例**、`plugin_http` 参数校验（不触 serialport FFI，Windows 全平台可跑）；**manifest 校验权威点在 Rust**——`install_plugin` 对畸形 manifest（缺字段/`apiVersion` 不兼容/`entry` 越目录/scope 空项）拒绝安装的用例必须在后端测，TS 预检结果不可信。
+- CSP 回归（e2e + 手动清单）：设 prod `csp` + dev `devCsp` 后背景图加载、xterm 渲染、TTY 会话、弹窗 webview、dev HMR（ws + refresh preamble）均正常；**e2e 断言基于生产 csp 的构建**；插件直连 fetch 被拒（插件内 `fetch` 抛出 CSP 错误）作为安全断言。**现状：生产构建 e2e 未落地**（本 harness 是 vite dev + mock 后端，生产 CSP 断言需 tauri 生产构建管线）——手动回归清单照旧执行。
+- e2e（playwright + DEV 构建，**已落地 `e2e/plugin.spec.ts`**）：mock `list_plugins`/`read_plugin_asset`，前端全链路真跑（pluginHost Worker + RPC 桥 + rxPipeline + pluginObserver）——启用插件 → RX 注入 → 断言插件翻译输出（PONG 旁注）；权限拒绝路径（未授予 → 无 rx 转发、旁注被拒）；端口断线 → `rx.detached(port-disconnected)`。安装对话框（原生 dialog）与 TTY 模式切换断流（TTY 切换由 pluginObserver 单测覆盖）不在 e2e 范围。
+- 性能冒烟：SIM:Loopback 高频下启用 rx 观察插件，断言帧率无劣化。**逻辑层冒烟已落地**（`pluginObserver.perf.test.ts`：1 万行经真实管线 + 观察器全量投递 < 2s、无丢行）；真实 UI 帧率需 `npm run tauri dev` + SIM 高频手测。
 
 ## 10. 对现有约定的影响
 

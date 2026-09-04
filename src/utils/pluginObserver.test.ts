@@ -13,6 +13,7 @@ import {
   resetPluginObserverForTest,
   hasPluginRxObservers,
   MAX_LINES_PER_DELIVERY,
+  notifyPortDisconnected,
 } from './pluginObserver';
 import { getRxPipeline } from './rxPipeline';
 import { useAppStore } from '../stores/useAppStore';
@@ -24,7 +25,7 @@ function feedLine(portId: string, text: string, ts = 1000): void {
 }
 
 interface ObserverSpy {
-  lines: Array<{ portId: string; text: string; encoding: string }>;
+  lines: Array<{ portId: string; text: string; encoding: string; seq: number }>;
   detached: Array<{ portId: string; reason: string }>;
 }
 
@@ -39,6 +40,7 @@ function makeObserver() {
           portId: l.portId,
           text: new TextDecoder().decode(l.rawData),
           encoding: l.encoding,
+          seq: l.seq,
         });
       }
     },
@@ -74,7 +76,7 @@ describe('pluginObserver', () => {
     flushDelivery();
 
     expect(spy.lines).toEqual([
-      { portId: 'COM1', text: 'hello', encoding: 'utf-8' },
+      { portId: 'COM1', text: 'hello', encoding: 'utf-8', seq: 0 },
     ]);
     unsub();
   });
@@ -151,6 +153,32 @@ describe('pluginObserver', () => {
     // 顺序保持（seq 单调 = 队列 FIFO）。
     expect(spy.lines[0].text).toBe('line0');
     expect(spy.lines[total - 1].text).toBe(`line${total - 1}`);
+    unsub();
+  });
+  it('notifyPortDisconnected：断流通知 + 队列清空（复审补强：断线场景）', () => {
+    const { spy, obs } = makeObserver();
+    const unsub = addPluginRxObserver(obs);
+    // 喂 3 行（未投递——fake timers 未推进，队列里挂着）。
+    feedLine('COM1', 'a');
+    feedLine('COM1', 'b');
+    feedLine('COM1', 'c');
+    notifyPortDisconnected('COM1');
+    // 断流通知立刻发出；队列已清，后续推进不再投递旧行。
+    expect(spy.detached).toEqual([{ portId: 'COM1', reason: 'port-disconnected' }]);
+    flushDelivery();
+    expect(spy.lines).toEqual([]);
+    // 重新连接后（同 id 新端口状态）行恢复投递、seq 从新会话重新计数。
+    feedLine('COM1', 'after');
+    flushDelivery();
+    expect(spy.lines.map((l) => l.text)).toEqual(['after']);
+    expect(spy.lines[0]?.seq).toBe(0);
+    unsub();
+  });
+  it('notifyPortDisconnected 对未知端口也通知（订阅者拿到 detached）', () => {
+    const { spy, obs } = makeObserver();
+    const unsub = addPluginRxObserver(obs);
+    notifyPortDisconnected('COM9');
+    expect(spy.detached).toEqual([{ portId: 'COM9', reason: 'port-disconnected' }]);
     unsub();
   });
 });

@@ -64,6 +64,8 @@ pub struct PluginManifestView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<plugin::ShellScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial: Option<plugin::SerialScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ui: Option<plugin::UiDecl>,
 }
 
@@ -79,6 +81,7 @@ impl From<&PluginManifest> for PluginManifestView {
             permissions: m.permissions.clone(),
             http: m.http.clone(),
             shell: m.shell.clone(),
+            serial: m.serial.clone(),
             ui: m.ui.clone(),
         }
     }
@@ -145,34 +148,107 @@ fn build_views(cfg: &config::AppConfig, root: &Path) -> Vec<PluginView> {
         .collect()
 }
 
-/// 列出已安装插件（磁盘扫描 + config 状态合并）。
+/// list_plugins 响应：UI 视图（磁盘扫描合并态）+ **权威插件状态数组**。
+/// `plugin_configs` 是 config.json 第 9 类实体的原样返回——前端把它写回
+/// store.config.pluginConfigs（issue #5-2 快照陷阱修复：以命令返回值为源，
+/// 不经 view 再加工，目录缺失/manifest 损坏也不丢状态）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginListResponse {
+    pub plugins: Vec<PluginView>,
+    pub plugin_configs: Vec<config::PluginConfigEntry>,
+}
+
+/// 列出已安装插件（磁盘扫描视图 + config 状态数组）。
+/// 扫描（read_dir + 逐目录 manifest 解析）在阻塞线程池执行——不占命令线程。
 #[tauri::command]
-pub fn list_plugins(state: State<AppState>) -> Result<Vec<PluginView>, CommandError> {
-    let (views, _) = {
+pub async fn list_plugins(state: State<'_, AppState>) -> Result<PluginListResponse, CommandError> {
+    let (root, cfg) = {
         let manager = state
             .config_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let root = manager.plugins_dir().to_path_buf();
-        let cfg = manager.get_config().clone();
-        (build_views(&cfg, &root), root)
+        (manager.plugins_dir().to_path_buf(), manager.get_config().clone())
     };
-    Ok(views)
+    let (plugins, plugin_configs) = {
+        tokio::task::spawn_blocking(move || {
+            let views = build_views(&cfg, &root);
+            (views, cfg.plugin_configs)
+        })
+        .await
+        .map_err(|e| CommandError::Other(format!("插件扫描 join 失败: {e}")))?
+    };
+    Ok(PluginListResponse { plugins, plugin_configs })
 }
 
 /// 安装插件。`source_path` 可为插件**目录**（复制注册，源保留）或插件 **zip 包**
 /// （内含 `<id>/…` 顶层插件目录；安全解压，zip slip 防护见 `extract_plugin_zip`）。
-/// 已存在同 id → 版本比较：更高则覆盖（保留 data/），否则报错（评审 v2 D6）。
+/// 已存在同 id → 版本比较：更高则覆盖（**data/ 私有区保留**，其余旧文件不残留
+/// ——staging 目录复制后原子换名，评审复审修复「覆盖安装孤儿文件」），
+/// 否则报错（评审 v2 D6）。
+/// 返回安装后的**全量插件状态数组**（前端写回 store.config.pluginConfigs，
+/// 不经 view 再加工——目录扫描态与 config 态解耦）。
+///
+/// **async + spawn_blocking**（issue #6-1 同源教训）：zip 解压 / 目录复制 /
+/// 换名都是可能秒级的磁盘 IO，同步命令跑在事件循环主线程会卡 UI。fs 全部
+/// 在阻塞线程池执行；仅末尾小 IO（config 实体更新 + save）留在命令线程。
 #[tauri::command]
-pub fn install_plugin(source_path: String, state: State<AppState>) -> Result<String, CommandError> {
-    let src = Path::new(&source_path);
+pub async fn install_plugin(
+    source_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
+    // plugins_root 先在锁内提取（锁不跨 await），fs 阶段在阻塞线程池执行。
+    let root = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.plugins_dir().to_path_buf()
+    };
+    let (plugin_id, plugin_version, source_label) =
+        tokio::task::spawn_blocking(move || install_plugin_fs_stage(&source_path, &root))
+            .await
+            .map_err(|e| CommandError::Other(format!("安装任务 join 失败: {e}")))??;
+
+    // 记录/更新状态实体（保留既有 enabled/grantedPermissions——覆盖安装不清授权）。
+    let mut manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let cfg = manager.get_config_mut();
+    if let Some(existing) = cfg.plugin_configs.iter_mut().find(|p| p.id == plugin_id) {
+        existing.source = Some(source_label.into());
+    } else {
+        cfg.plugin_configs.push(config::PluginConfigEntry {
+            id: plugin_id.clone(),
+            enabled: false,
+            granted_permissions: Vec::new(),
+            installed_at: Some(now_unix_secs()),
+            source: Some(source_label.into()),
+        });
+    }
+    let entries = cfg.plugin_configs.clone();
+    manager
+        .save()
+        .map_err(|e| CommandError::Config(format!("保存插件状态失败: {e}")))?;
+
+    log::info!("Plugin installed: {plugin_id} v{plugin_version} ({source_label})");
+    Ok(entries)
+}
+
+/// install_plugin 的 fs 阶段（阻塞线程池内执行，不触 Tauri State）。
+/// 返回 (插件 id, 版本, 来源标签)。
+fn install_plugin_fs_stage(
+    source_path: &str,
+    root: &std::path::Path,
+) -> Result<(String, String, &'static str), CommandError> {
+    let src = Path::new(source_path);
 
     // --- 阶段 1：把源归一化为「插件目录」引用 ---
     // zip 源：解到系统临时目录（独立命名防冲突），定位顶层插件目录。
     // **guard 在 create_dir_all 成功后立即绑定**——extract_plugin_zip 及其后
     // 任何 `?` 失败路径（find_single_plugin_dir / manifest 校验）都经 RAII 清理，
     // 不泄漏 uuid 临时目录（advisory B：晚绑定会让解压失败泄漏）。
-    // `_tmp_guard` 下划线前缀：赋值后不读（RAII drop 即清理），豁免 unused 告警。
     let mut _tmp_guard: Option<TempDirGuard> = None;
     let tmp_holder: Option<std::path::PathBuf> = if src.is_file()
         && src
@@ -204,13 +280,9 @@ pub fn install_plugin(source_path: String, state: State<AppState>) -> Result<Str
 
     let manifest = plugin::load_manifest_from_dir(&src_plugin_dir)
         .map_err(|e| CommandError::Other(format!("插件目录校验失败: {e}")))?;
+    let source_label: &'static str = if tmp_holder.is_some() { "zip" } else { "dir" };
 
-    let mut manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let root = manager.plugins_dir().to_path_buf();
-    std::fs::create_dir_all(&root)
+    std::fs::create_dir_all(root)
         .map_err(|e| CommandError::Io(format!("创建插件目录失败: {e}")))?;
 
     let dest = root.join(&manifest.id);
@@ -218,44 +290,56 @@ pub fn install_plugin(source_path: String, state: State<AppState>) -> Result<Str
     // 已存在：允许覆盖仅当源版本更高；同版本/更低 → 报错（防意外回滚）。
     if dest.exists() {
         let existing = plugin::load_manifest_from_dir(&dest);
-        match existing {
-            Ok(existing_m) => {
-                if !plugin::version_greater(&manifest.version, &existing_m.version) {
-                    return Err(CommandError::Other(format!(
-                        "插件 {} 已安装（版本 {}），覆盖需更高版本（源 {}）",
-                        manifest.id, existing_m.version, manifest.version
-                    )));
-                }
+        if let Ok(existing_m) = existing {
+            if !plugin::version_greater(&manifest.version, &existing_m.version) {
+                return Err(CommandError::Other(format!(
+                    "插件 {} 已安装（版本 {}），覆盖需更高版本（源 {}）",
+                    manifest.id, existing_m.version, manifest.version
+                )));
             }
-            Err(_) => {
-                // 已存在但 manifest 损坏：视为可覆盖（修复安装）。
-            }
+        }
+        // 已存在但 manifest 损坏：视为可覆盖（修复安装）。
+    }
+
+    // --- 阶段 2：staging 复制 + 原子换名（覆盖安装不再残留旧版孤儿文件）---
+    // staging 与 dest 同在 plugins_root 下（同一卷 → rename 原子）。data/ 私有区
+    // 先挪到备份位，换名后归位；中途失败尽最大努力恢复，备份残留路径进错误串。
+    let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+    copy_dir_recursive(&src_plugin_dir, &staging)
+        .map_err(|e| CommandError::Io(format!("复制插件目录失败: {e}")))?;
+
+    let mut data_backup: Option<std::path::PathBuf> = None;
+    if dest.exists() {
+        let data_dir = dest.join("data");
+        if data_dir.exists() {
+            let backup = root.join(format!(".data-bak-{}", uuid::Uuid::new_v4()));
+            std::fs::rename(&data_dir, &backup)
+                .map_err(|e| CommandError::Io(format!("备份 data/ 失败: {e}")))?;
+            data_backup = Some(backup);
+        }
+        if let Err(e) = std::fs::remove_dir_all(&dest) {
+            return Err(CommandError::Io(format!(
+                "删除旧插件目录失败: {e}（data/ 备份: {:?}）",
+                data_backup
+            )));
+        }
+    }
+    if let Err(e) = std::fs::rename(&staging, &dest) {
+        return Err(CommandError::Io(format!(
+            "安装换名失败: {e}（data/ 备份: {:?}）",
+            data_backup
+        )));
+    }
+    if let Some(backup) = data_backup {
+        if let Err(e) = std::fs::rename(&backup, dest.join("data")) {
+            return Err(CommandError::Io(format!(
+                "恢复 data/ 失败（数据在 {:?}）: {e}",
+                backup
+            )));
         }
     }
 
-    copy_dir_recursive(&src_plugin_dir, &dest)
-        .map_err(|e| CommandError::Io(format!("复制插件目录失败: {e}")))?;
-
-    // 记录/更新状态实体（保留既有 enabled/grantedPermissions——覆盖安装不清授权）。
-    let cfg = manager.get_config_mut();
-    let source_label = if tmp_holder.is_some() { "zip" } else { "dir" };
-    if let Some(existing) = cfg.plugin_configs.iter_mut().find(|p| p.id == manifest.id) {
-        existing.source = Some(source_label.into());
-    } else {
-        cfg.plugin_configs.push(config::PluginConfigEntry {
-            id: manifest.id.clone(),
-            enabled: false,
-            granted_permissions: Vec::new(),
-            installed_at: Some(now_unix_secs()),
-            source: Some(source_label.into()),
-        });
-    }
-    manager
-        .save()
-        .map_err(|e| CommandError::Config(format!("保存插件状态失败: {e}")))?;
-
-    log::info!("Plugin installed: {} v{} -> {:?}", manifest.id, manifest.version, dest);
-    Ok(manifest.id)
+    Ok((manifest.id, manifest.version, source_label))
 }
 
 /// RAII：离开作用域即删除临时目录（zip 解压暂存区）。
@@ -292,12 +376,16 @@ fn find_single_plugin_dir(root: &Path) -> Result<std::path::PathBuf, CommandErro
         )),
     }
 }
-
 /// 卸载插件：删除目录 + 移除 config 状态实体。
 /// **仅限 `<plugins_dir>/<id>` 子树**——目录名即插件 id（反向域名），
 /// 路径由 id 派生（不经用户任意路径），天然无穿越面。目录不存在视为已卸载（幂等）。
+/// 返回卸载后的**全量插件状态数组**（前端写回 store.config.pluginConfigs）。
+/// remove_dir_all（可能是大 data/）在阻塞线程池执行（issue #6-1 同源教训）。
 #[tauri::command]
-pub fn uninstall_plugin(id: String, state: State<AppState>) -> Result<(), CommandError> {
+pub async fn uninstall_plugin(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
     // id 格式白名单（与 manifest 校验一致：反向域名字符集）——防把任意串拼进路径。
     if !id
         .chars()
@@ -305,42 +393,58 @@ pub fn uninstall_plugin(id: String, state: State<AppState>) -> Result<(), Comman
     {
         return Err(CommandError::Other(format!("非法插件 id: {id}")));
     }
+    let root = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.plugins_dir().to_path_buf()
+    };
+    let id_for_fs = id.clone();
+    tokio::task::spawn_blocking(move || {
+        let dest = root.join(&id_for_fs);
+        // canonicalize 双保险：确认 dest 真实存在于 plugins 根内（防符号链接逃逸）。
+        if dest.exists() {
+            let canon_root = root
+                .canonicalize()
+                .map_err(|e| CommandError::Io(format!("插件根目录不可达: {e}")))?;
+            let canon_dest = dest
+                .canonicalize()
+                .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
+            if !canon_dest.starts_with(&canon_root) {
+                return Err(CommandError::Other("插件目录越界，拒绝卸载".into()));
+            }
+            std::fs::remove_dir_all(&canon_dest)
+                .map_err(|e| CommandError::Io(format!("删除插件目录失败: {e}")))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("卸载任务 join 失败: {e}")))??;
 
     let mut manager = state
         .config_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let root = manager.plugins_dir().to_path_buf();
-    let dest = root.join(&id);
-
-    // canonicalize 双保险：确认 dest 真实存在于 plugins 根内（防符号链接逃逸）。
-    if dest.exists() {
-        let canon_root = root
-            .canonicalize()
-            .map_err(|e| CommandError::Io(format!("插件根目录不可达: {e}")))?;
-        let canon_dest = dest
-            .canonicalize()
-            .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-        if !canon_dest.starts_with(&canon_root) {
-            return Err(CommandError::Other("插件目录越界，拒绝卸载".into()));
-        }
-        std::fs::remove_dir_all(&canon_dest)
-            .map_err(|e| CommandError::Io(format!("删除插件目录失败: {e}")))?;
-    }
-
     let cfg = manager.get_config_mut();
     cfg.plugin_configs.retain(|p| p.id != id);
+    let entries = cfg.plugin_configs.clone();
     manager
         .save()
         .map_err(|e| CommandError::Config(format!("保存插件状态失败: {e}")))?;
 
     log::info!("Plugin uninstalled: {id}");
-    Ok(())
+    Ok(entries)
 }
 
-/// 启用/禁用插件。
+/// 启用/禁用插件。返回变更后的**全量插件状态数组**（前端写回
+/// store.config.pluginConfigs——worker 启停与调用时权限校验的运行时源）。
 #[tauri::command]
-pub fn set_plugin_enabled(id: String, enabled: bool, state: State<AppState>) -> Result<(), CommandError> {
+pub fn set_plugin_enabled(
+    id: String,
+    enabled: bool,
+    state: State<AppState>,
+) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
     let mut manager = state
         .config_manager
         .lock()
@@ -352,22 +456,24 @@ pub fn set_plugin_enabled(id: String, enabled: bool, state: State<AppState>) -> 
         .find(|p| p.id == id)
         .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
     entry.enabled = enabled;
+    let entries = cfg.plugin_configs.clone();
     manager
         .save()
         .map_err(|e| CommandError::Config(format!("保存插件状态失败: {e}")))?;
     log::info!("Plugin {} {}", id, if enabled { "enabled" } else { "disabled" });
-    Ok(())
+    Ok(entries)
 }
 
 /// 设置插件授予权限（整体替换 granted_permissions）。
 /// 权限是 manifest 声明的子集——超出声明部分拒绝（声明即上限，评审 v2 D3）。
 /// 变更立即落盘，宿主桥侧「调用时校验」随 config 生效（撤销即时生效）。
+/// 返回变更后的**全量插件状态数组**（前端写回 store.config.pluginConfigs）。
 #[tauri::command]
 pub fn set_plugin_permissions(
     id: String,
     permissions: Vec<String>,
     state: State<AppState>,
-) -> Result<(), CommandError> {
+) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
     let mut manager = state
         .config_manager
         .lock()
@@ -394,60 +500,66 @@ pub fn set_plugin_permissions(
         .find(|p| p.id == id)
         .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
     entry.granted_permissions = permissions;
+    let entries = cfg.plugin_configs.clone();
     manager
         .save()
         .map_err(|e| CommandError::Config(format!("保存插件状态失败: {e}")))?;
     log::info!("Plugin {id} permissions updated");
-    Ok(())
+    Ok(entries)
 }
 
 /// 读取插件资产（`main.js` / `assets/` 内文件，供 worker 加载与资源读取）。
 /// 路径经 `sanitize_plugin_rel_path` 前缀校验，canonicalize 后必须落在
 /// `<plugins_dir>/<id>/` 内（评审 v2 D5 路径穿越防护）。
 /// 返回 UTF-8 文本内容（插件代码/文本资产均为文本；二进制资产走后续增量）。
+/// **async + spawn_blocking**：资产可能是数 MB 的符号表文件，且可被插件反复
+/// 调用——同步命令会卡主线程（issue #6-1 同源教训）。
 #[tauri::command]
-pub fn read_plugin_asset(
+pub async fn read_plugin_asset(
     id: String,
     rel_path: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
     let rel = plugin::sanitize_plugin_rel_path(&rel_path)
         .map_err(|e| CommandError::Other(format!("非法插件路径: {e}")))?;
-
-    let manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let root = manager.plugins_dir().to_path_buf();
-    let base = root.join(&id);
-    let target = base.join(&rel);
-
-    let canon_base = base
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-    let canon_target = target
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("资产文件不可读: {e}")))?;
-    if !canon_target.starts_with(&canon_base) {
-        return Err(CommandError::Other("资产路径越界，拒绝读取".into()));
-    }
-    if !canon_target.is_file() {
-        return Err(CommandError::Io("资产不是文件".into()));
-    }
-
-    std::fs::read_to_string(&canon_target)
-        .map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))
+    let root = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.plugins_dir().to_path_buf()
+    };
+    tokio::task::spawn_blocking(move || {
+        let base = root.join(&id);
+        let target = base.join(&rel);
+        let canon_base = base
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
+        let canon_target = target
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("资产文件不可读: {e}")))?;
+        if !canon_target.starts_with(&canon_base) {
+            return Err(CommandError::Other("资产路径越界，拒绝读取".into()));
+        }
+        if !canon_target.is_file() {
+            return Err(CommandError::Io("资产不是文件".into()));
+        }
+        std::fs::read_to_string(&canon_target)
+            .map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("读资产任务 join 失败: {e}")))?
 }
 
 /// 写入插件私有区（`data/` 子目录，storage 权限授予后）。
 /// 限制：rel_path 首段必须为 `data`——`fs:storage` 权限只覆盖插件私有 KV 区，
 /// 资产区（assets/ 与入口）对插件只读（评审 v2 D5）。
 #[tauri::command]
-pub fn write_plugin_asset(
+pub async fn write_plugin_asset(
     id: String,
     rel_path: String,
     content: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let rel = plugin::sanitize_plugin_rel_path(&rel_path)
         .map_err(|e| CommandError::Other(format!("非法插件路径: {e}")))?;
@@ -461,34 +573,39 @@ pub fn write_plugin_asset(
             "插件写入仅限 data/ 私有区（fs:storage 权限范围）".into(),
         ));
     }
+    let root = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.plugins_dir().to_path_buf()
+    };
+    tokio::task::spawn_blocking(move || {
+        let base = root.join(&id);
+        let target = base.join(&rel);
 
-    let manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let root = manager.plugins_dir().to_path_buf();
-    let base = root.join(&id);
-    let target = base.join(&rel);
+        let canon_base = base
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
+        // target 可能尚不存在（首次写）——canonicalize 父链后逐级落，再校验前缀。
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CommandError::Io(format!("创建目录失败: {e}")))?;
+        }
+        let canon_parent = target
+            .parent()
+            .ok_or_else(|| CommandError::Other("路径无父目录".into()))?
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
+        if !canon_parent.starts_with(&canon_base) {
+            return Err(CommandError::Other("写入路径越界，拒绝".into()));
+        }
 
-    let canon_base = base
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-    // target 可能尚不存在（首次写）——canonicalize 父链后逐级落，再校验前缀。
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CommandError::Io(format!("创建目录失败: {e}")))?;
-    }
-    let canon_parent = target
-        .parent()
-        .ok_or_else(|| CommandError::Other("路径无父目录".into()))?
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
-    if !canon_parent.starts_with(&canon_base) {
-        return Err(CommandError::Other("写入路径越界，拒绝".into()));
-    }
-
-    std::fs::write(&target, content.as_bytes())
-        .map_err(|e| CommandError::Io(format!("写入资产失败: {e}")))
+        std::fs::write(&target, content.as_bytes())
+            .map_err(|e| CommandError::Io(format!("写入资产失败: {e}")))
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("写资产任务 join 失败: {e}")))?
 }
 
 // ==================== 辅助 ====================
@@ -600,11 +717,16 @@ pub async fn plugin_http(
     };
 
     // URL glob 匹配：逐条 glob 匹配（`*` 单段 / `**` 跨段 / 其余字面量）。
+    // 匹配对象是 **Url::parse 规范化后的序列化串**（as_str：host 小写、path
+    // 归一、默认端口剥离、`..\` 解析消除）而非插件原始串——大小写/尾点/
+    // 相对段等畸形写法不再造成误拒，也不给「原始串匹配但实际解析到别处」
+    // 留语义缝隙（评审复审：原实现对 request.url 原始串匹配）。
     let parsed_url = url::Url::parse(&request.url)
         .map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
+    let normalized_url = parsed_url.as_str();
     let matched = url_whitelist
         .iter()
-        .any(|pat| url_glob_match(pat, &request.url));
+        .any(|pat| url_glob_match(pat, normalized_url));
     if !matched {
         return Err(CommandError::Other(format!(
             "URL 不在插件 http.urlWhitelist 内: {}",
@@ -803,5 +925,23 @@ mod tests {
         // `+`、`.` 等应字面匹配
         assert!(url_glob_match("https://a.com/v1.2", "https://a.com/v1.2"));
         assert!(!url_glob_match("https://a.com/v1.2", "https://a.com/v1x2"));
+    }
+    #[test]
+    fn glob_matches_normalized_url() {
+        // 评审复审补强：plugin_http 匹配 Url::parse 规范化串。此处验证
+        // 规范化语义与 glob 的组合行为（大小写 host、默认端口、相对段）。
+        // 大写 host → Url 小写化 → 与小写白名单匹配。
+        let upper = url::Url::parse("https://SYMBOLS.Example.COM/v1/symbol").unwrap();
+        assert!(url_glob_match("https://symbols.example.com/**", upper.as_str()));
+        // 默认端口剥离：443 在 https 下被 Url 规范化掉 → 前缀仍匹配。
+        let default_port = url::Url::parse("https://symbols.example.com:443/v1").unwrap();
+        assert!(url_glob_match("https://symbols.example.com/**", default_port.as_str()));
+        // 相对段消除：/a/../b → /b（原始串含 ..，归一后与白名单匹配）。
+        let dotdot = url::Url::parse("https://symbols.example.com/a/../v1").unwrap();
+        assert_eq!(dotdot.as_str(), "https://symbols.example.com/v1");
+        assert!(url_glob_match("https://symbols.example.com/**", dotdot.as_str()));
+        // 非默认端口保留：8443 不被剥离 → 不等于白名单前缀。
+        let custom_port = url::Url::parse("https://symbols.example.com:8443/v1").unwrap();
+        assert!(!url_glob_match("https://symbols.example.com/**", custom_port.as_str()));
     }
 }

@@ -627,7 +627,10 @@ const resources = {
       'plugins.permissionsSaved': '权限已保存',
       'plugins.granted': '已授予',
       'plugins.notGranted': '未授予',
-      'plugins.crashAutoDisabled': '插件 {{id}} 连续崩溃已自动禁用',
+      'plugins.refresh': '刷新',
+      'plugins.sensitiveConfirm': '插件「{{name}}」声明敏感权限：{{perms}}。启用后可在权限区逐项授予（撤销即时生效），敏感权限可发串口数据/外联网络/执行程序。仍要启用吗？',
+      'plugins.uninstallConfirm': '确定卸载插件「{{name}}」？其 data/ 私有数据将一并删除。',
+      'plugins.crashAutoDisabled': '插件 {{id}} 连续崩溃已自动禁用（最后一次: {{reason}}）',
     },
   },
   'en-US': {
@@ -1253,7 +1256,10 @@ const resources = {
       'plugins.permissionsSaved': 'Permissions saved',
       'plugins.granted': 'Granted',
       'plugins.notGranted': 'Not granted',
-      'plugins.crashAutoDisabled': 'Plugin {{id}} was disabled after repeated crashes',
+      'plugins.refresh': 'Refresh',
+      'plugins.sensitiveConfirm': 'Plugin "{{name}}" declares sensitive permissions: {{perms}}. After enabling, grant them individually in the permission grid (revocation takes effect immediately). Sensitive permissions can send serial data, reach the network, or run programs. Enable anyway?',
+      'plugins.uninstallConfirm': 'Uninstall plugin "{{name}}"? Its data/ private storage will be removed too.',
+      'plugins.crashAutoDisabled': 'Plugin {{id}} was disabled after repeated crashes (last error: {{reason}})',
     },
   },
 };

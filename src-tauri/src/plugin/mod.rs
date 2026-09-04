@@ -62,6 +62,16 @@ pub struct ShellScope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct SerialScope {
+    /// 发送目标端口白名单（`serial.portWhitelist`，评审 v2 P10）。
+    /// 语义与 HttpScope.url_whitelist 一致：声明且非空 → 仅白名单端口可发；
+    /// 声明为空数组 → 全部拒绝；未声明 → 不做端口作用域（仍需 `serial:send` 授权）。
+    #[serde(default)]
+    pub port_whitelist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct UiButton {
     pub id: String,
     pub label: String,
@@ -94,7 +104,7 @@ pub struct UiDecl {
 
 /// 插件 manifest（`manifest.json`）。
 /// 必填：`id`（反向域名）/`name`/`version`/`apiVersion`/`entry`/`permissions`。
-/// 可选：`description`/`http`/`shell`/`ui`。
+/// 可选：`description`/`http`/`shell`/`serial`/`ui`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -113,6 +123,9 @@ pub struct PluginManifest {
     pub http: Option<HttpScope>,
     #[serde(default)]
     pub shell: Option<ShellScope>,
+    /// 发送端口作用域（评审 v2 P10）。可选——桥侧 `serial.send` 调用时校验。
+    #[serde(default)]
+    pub serial: Option<SerialScope>,
     #[serde(default)]
     pub ui: Option<UiDecl>,
 }
@@ -190,6 +203,19 @@ impl PluginManifest {
                 return Err(format!("manifest permissions 重复声明: {p}"));
             }
         }
+        // scope 白名单条目非空（http/shell/serial 同规——空串条目无意义且易误配）。
+        for scope_items in [
+            self.http.as_ref().map(|h| &h.url_whitelist),
+            self.shell.as_ref().map(|s| &s.executable_whitelist),
+            self.serial.as_ref().map(|s| &s.port_whitelist),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if scope_items.iter().any(|item| item.trim().is_empty()) {
+                return Err("manifest scope 白名单含空项".into());
+            }
+        }
         Ok(())
     }
 
@@ -212,11 +238,10 @@ pub fn sanitize_plugin_rel_path(rel: &str) -> Result<PathBuf, String> {
     if rel.is_empty() {
         return Err("路径为空".into());
     }
-    if rel.contains('\\') && !rel.contains('/') && cfg!(not(windows)) {
-        // unix 上反斜杠是合法文件名字符，但插件路径约定统一 `/`——不误伤。
-        // 仅 windows 需要把 `\` 当分隔符（Path::components 在 windows 上会处理）。
-    }
     // 统一分隔符（windows + unix 双写兼容）：`\` → `/` 后再走 Path 组件。
+    // 已知副作用（接受）：unix 上文件名中的字面 `\` 会被归一化为分隔符——
+    // 插件内路径约定统一 `/`，字面反斜杠文件名不支持（评审复审：删除原空 if
+    // 死代码，注释与行为对齐）。
     let normalized = rel.replace('\\', "/");
     let path = Path::new(&normalized);
 
@@ -316,6 +341,11 @@ pub fn scan_plugins(plugins_root: &Path) -> Vec<InstalledPlugin> {
     out
 }
 
+/// zip 解压条目数上限（评审复审 zip bomb 加固：正常插件远小于此）。
+pub const MAX_ZIP_ENTRIES: usize = 2000;
+/// zip 解压总量（字节）上限。
+pub const MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+
 /// 把插件 zip 安全解压到 `dest_dir`（评审 v2 D7/D11：zip slip 防护）。
 ///
 /// 安全规则（逐条目独立校验，与 manifest entry/assets 前缀检查分开实现/测试）：
@@ -323,16 +353,36 @@ pub fn scan_plugins(plugins_root: &Path) -> Vec<InstalledPlugin> {
 ///   Windows 盘符 / UNC；
 /// - 目录条目直接 create_dir；文件条目先确保父目录存在再流式写（`by_name`
 ///   的 `read` 流不整包载入内存——def late 压缩按需解压）；
-/// - 符号链接/设备条目（unix 文件模式非普通文件）拒绝（链接可指向目录外）。
+/// - 符号链接/设备条目（unix 文件模式非普通文件）拒绝（链接可指向目录外）；
+/// - **zip bomb 上限**（评审复审补强）：条目数 ≤ [`MAX_ZIP_ENTRIES`]、
+///   解压总量 ≤ [`MAX_ZIP_UNCOMPRESSED_BYTES`]（超限即拒绝，防恶意压缩包
+///   把磁盘/内存打爆——用户主动安装，但值得设防）。
 ///
 /// zip 结构约定：条目以 `<pluginId>/…` 为前缀（zip 内含顶层插件目录）——
 /// 安装到 plugins_root 时剥掉顶层。`install_plugin(zip)` 命令负责该语义：
 /// 本函数收 zip 文件路径 + 解压目标（已建好），不做顶层剥除。
 pub fn extract_plugin_zip(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    extract_plugin_zip_limited(zip_path, dest_dir, MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED_BYTES)
+}
+
+/// 内部实现：上限可注入（测试用小上限覆盖 zip bomb 分支）。
+fn extract_plugin_zip_limited(
+    zip_path: &Path,
+    dest_dir: &Path,
+    max_entries: usize,
+    max_total_bytes: u64,
+) -> Result<(), String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败: {e}"))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("读取 zip 失败（损坏或非 zip）: {e}"))?;
+    if archive.len() > max_entries {
+        return Err(format!(
+            "zip 条目数 {} 超过上限 {max_entries}，疑似 zip bomb，拒绝",
+            archive.len()
+        ));
+    }
 
+    let mut total_written: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -366,8 +416,14 @@ pub fn extract_plugin_zip(zip_path: &Path, dest_dir: &Path) -> Result<(), String
         }
         let mut out = fs::File::create(&target)
             .map_err(|e| format!("创建文件失败 {}: {e}", target.display()))?;
-        std::io::copy(&mut entry, &mut out)
+        let written = std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("解压条目失败 {raw_name}: {e}"))?;
+        total_written += written;
+        if total_written > max_total_bytes {
+            return Err(format!(
+                "zip 解压总量超过上限 {max_total_bytes} 字节，疑似 zip bomb，拒绝"
+            ));
+        }
     }
     Ok(())
 }
@@ -626,6 +682,81 @@ mod tests {
         extract_plugin_zip(&zip_path, &dest).unwrap();
         assert!(dest.join("com.example.demo/manifest.json").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_rejects_entry_count_over_limit() {
+        // 条目数上限注入小值（2）——3 个文件即拒绝（真实上限 2000 太大不便于测）。
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_cnt_{}", uuid::Uuid::new_v4()));
+        let zip_path = dir.join("pkg.zip");
+        fs::create_dir_all(&dir).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("com.example.demo/manifest.json", valid_manifest_json().as_str()),
+                ("com.example.demo/a.js", "a"),
+                ("com.example.demo/b.js", "b"),
+            ],
+        );
+        let dest = dir.join("out");
+        let err = extract_plugin_zip_limited(&zip_path, &dest, 2, MAX_ZIP_UNCOMPRESSED_BYTES)
+            .unwrap_err();
+        assert!(err.contains("条目数"), "err: {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_rejects_total_uncompressed_over_limit() {
+        // 解压总量上限注入小值（10 字节）——20 字节条目拒绝（zip bomb 分支）。
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_bomb_{}", uuid::Uuid::new_v4()));
+        let zip_path = dir.join("pkg.zip");
+        fs::create_dir_all(&dir).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("com.example.demo/big.js", "0123456789ABCDEFGHIJKLMNOPQRSTUV"),
+            ],
+        );
+        let dest = dir.join("out");
+        let err = extract_plugin_zip_limited(&zip_path, &dest, MAX_ZIP_ENTRIES, 10).unwrap_err();
+        assert!(err.contains("总量"), "err: {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_serial_scope_validation() {
+        // serial.portWhitelist 正常声明 → 解析成功；空串条目 → 拒绝（scope 同规）。
+        let mut json = valid_manifest_json();
+        json = json.replacen(
+            r#""http": { "urlWhitelist": ["https://symbols.example.com/**"] },"#,
+            r#""http": { "urlWhitelist": ["https://symbols.example.com/**"] },
+            "serial": { "portWhitelist": ["COM3", "COM7"] },"#,
+            1,
+        );
+        let m = parse_manifest(&json).unwrap();
+        assert_eq!(
+            m.serial.unwrap().port_whitelist,
+            vec!["COM3", "COM7"]
+        );
+
+        let mut bad = valid_manifest_json();
+        bad = bad.replacen(
+            r#""http": { "urlWhitelist": ["https://symbols.example.com/**"] },"#,
+            r#""serial": { "portWhitelist": ["COM3", ""] },"#,
+            1,
+        );
+        let err = parse_manifest(&bad).unwrap_err();
+        assert!(err.contains("空项"), "err: {err}");
+    }
+
+    #[test]
+    fn manifest_scope_optional_absent_ok() {
+        // 不声明 serial/http/shell → 全部 None（向后兼容旧 manifest）。
+        let json = r#"{"id":"com.x.y","name":"X","version":"1.0.0","apiVersion":"1.0","entry":"main.js","permissions":["terminal:read"]}"#;
+        let m = parse_manifest(json).unwrap();
+        assert!(m.serial.is_none());
+        assert!(m.http.is_none());
+        assert!(m.shell.is_none());
     }
 
     #[test]

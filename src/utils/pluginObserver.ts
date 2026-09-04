@@ -227,6 +227,30 @@ export function addPluginRxObserver(obs: PluginRxObserver): () => void {
   };
 }
 
+/**
+ * 通知全部订阅者：端口已断线（评审复审补强——rx.detached 原只覆盖 TRX→TTY
+ * 模式切换；真实断线（读线程退出/hot-unplug）同样令观察器断流，插件需要
+ * 能区分「无数据」与「端口没了」）。由 useSerialReceive 的 disconnected
+ * 处理分支调用（管线 disconnect 的另一个调用方是关标签页——那不清端口
+ * 状态、不产生断流，不走这里）。清该端口队列与 mode/seq 状态。
+ */
+export function notifyPortDisconnected(portId: string): void {
+  const state = portStates.get(portId);
+  if (state) {
+    cancelDelivery(state);
+    state.queue.length = 0;
+    portStates.delete(portId);
+  }
+  observedModes.delete(portId);
+  for (const obs of observers) {
+    try {
+      obs.onRxDetached({ portId, reason: 'port-disconnected' });
+    } catch (e) {
+      console.error('[pluginObserver] observer onRxDetached failed:', e);
+    }
+  }
+}
+
 /** 是否已有订阅者（设置页/宿主桥查询用）。 */
 export function hasPluginRxObservers(): boolean {
   return observers.size > 0;

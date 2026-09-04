@@ -20,9 +20,10 @@ import type {
   PortToolConfig,
   PortGroup,
   PortMetaEntry,
-  PluginView,
   PluginHttpRequest,
   PluginHttpResponse,
+  PluginConfigEntry,
+  PluginListResponse,
   UpdatePayload,
   UpdateProgressPayload,
 } from '../types';
@@ -429,19 +430,22 @@ export const diagLogService = {
 // ==================== 插件命令（issue #17） ====================
 
 export const pluginService = {
-  listPlugins: (): Promise<PluginView[]> => invoke<PluginView[]>('list_plugins'),
+  /** 列表：UI 视图（磁盘扫描合并态）+ 权威插件状态数组（原样写回 store）。 */
+  listPlugins: (): Promise<PluginListResponse> => invoke<PluginListResponse>('list_plugins'),
 
-  installPlugin: (sourcePath: string): Promise<string> =>
-    invoke<string>('install_plugin', { sourcePath }),
+  /** 以下四个变更命令均返回**变更后的全量插件状态数组**（config.json 实体原样），
+   *  前端写回 store.config.pluginConfigs（issue #5-2 快照陷阱 + 运行时同步的源）。 */
+  installPlugin: (sourcePath: string): Promise<PluginConfigEntry[]> =>
+    invoke<PluginConfigEntry[]>('install_plugin', { sourcePath }),
 
-  uninstallPlugin: (id: string): Promise<void> =>
-    invoke<void>('uninstall_plugin', { id }),
+  uninstallPlugin: (id: string): Promise<PluginConfigEntry[]> =>
+    invoke<PluginConfigEntry[]>('uninstall_plugin', { id }),
 
-  setPluginEnabled: (id: string, enabled: boolean): Promise<void> =>
-    invoke<void>('set_plugin_enabled', { id, enabled }),
+  setPluginEnabled: (id: string, enabled: boolean): Promise<PluginConfigEntry[]> =>
+    invoke<PluginConfigEntry[]>('set_plugin_enabled', { id, enabled }),
 
-  setPluginPermissions: (id: string, permissions: string[]): Promise<void> =>
-    invoke<void>('set_plugin_permissions', { id, permissions }),
+  setPluginPermissions: (id: string, permissions: string[]): Promise<PluginConfigEntry[]> =>
+    invoke<PluginConfigEntry[]>('set_plugin_permissions', { id, permissions }),
 
   /** 读取插件资产（main.js / assets 内文本），供 worker 加载。 */
   readPluginAsset: (id: string, relPath: string): Promise<string> =>

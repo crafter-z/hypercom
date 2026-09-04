@@ -13,7 +13,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 ┌──────────▼──────────┐        ┌──────────▼──────────┐
 │    前端（React）      │        │    后端（Rust）      │
 │  4 Zustand stores    │        │  SerialManager      │
-│  15 hooks + 服务层   │◄──────►│  ConfigManager      │
+│  17 hooks + 服务层   │◄──────►│  ConfigManager      │
 │  方案B 终端引擎       │  IPC   │  LogManager         │
 │  rxPipeline/tty      │        │  diaglog            │
 └──────────────────────┘        └─────────────────────┘
@@ -31,6 +31,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 | [`config.md`](config.md) | 配置与状态 | config.json 实体/会话快照/4 stores 划分/规则实体 CRUD/持久化审计（mergeLiveRuleEntities）/分组/端口元数据 |
 | [`workspace.md`](workspace.md) | 工作区与通知 | paneTree 分屏/标签页/弹出体系（popout）/操作面板布局/侧边栏/通知中心/状态栏/自定义文本右键菜单 |
 | [`update.md`](update.md) | 自动更新 | preview/stable 双通道/检查周期/snooze/UpdateDialog/发版护栏 |
+| [`plugins.md`](plugins.md) | 插件系统 | JS 脚本插件（Web Worker 沙箱）/manifest 校验（Rust 权威点）/权限调用时校验/RX 旁路观察/声明式 UI 扩展点/zip 安装（zip slip 防护）/CSP 硬化 |
 | [`release.md`](release.md) | 发版与构建 | CI/CD 工作流/签名/密钥轮换/坏版本召回/RELEASE_NOTES 机制/故障排查 |
 | [`errors.md`](errors.md) | 错误处理 | CommandError 变体映射/触发条件/i18n key/错误处理约定 |
 

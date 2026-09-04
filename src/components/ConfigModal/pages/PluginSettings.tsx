@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { usePluginList } from '../../../hooks/usePlugins';
+import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
 
 const PluginSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -63,13 +64,26 @@ const PluginSettings: React.FC = () => {
     await grantPermissions(pluginId, next);
   };
 
+  /** 启用/禁用。敏感权限（设计 D3：serial:send/http:request/shell:execute）首次
+   *  启用时确认框列出声明与风险说明——v1 用原生 confirm（知情同意），授予仍在
+   *  权限区逐项进行（撤销即时生效）。 */
+  const handleToggleEnabled = (plugin: { id: string; name: string | null; declaredPermissions: string[]; enabled: boolean }): void => {
+    if (!plugin.enabled) {
+      const sensitive = plugin.declaredPermissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
+      if (sensitive.length > 0 && !window.confirm(t('plugins.sensitiveConfirm', { name: plugin.name ?? plugin.id, perms: sensitive.join(', ') }))) {
+        return;
+      }
+    }
+    void setEnabled(plugin.id, !plugin.enabled);
+  };
+
   return (
     <div className="plugin-settings">
       <div className="settings-section-header">
         <h3>{t('plugins.title')}</h3>
         <div className="plugin-settings-actions">
           <button className="btn-secondary" onClick={() => void refresh()} disabled={loading}>
-            <RefreshCw size={14} /> {t('configModal.nav.plugins')}
+            <RefreshCw size={14} /> {t('plugins.refresh')}
           </button>
           <button className="btn-primary" onClick={() => void handleInstall()} disabled={loading}>
             <FolderOpen size={14} /> {t('plugins.installButton')}
@@ -105,7 +119,14 @@ const PluginSettings: React.FC = () => {
                   <div className="plugin-card-controls">
                     <button
                       className={plugin.enabled ? 'btn-toggle-on' : 'btn-toggle'}
-                      onClick={() => void setEnabled(plugin.id, !plugin.enabled)}
+                      onClick={() =>
+                        handleToggleEnabled({
+                          id: plugin.id,
+                          name: plugin.manifest?.name ?? null,
+                          declaredPermissions: plugin.declaredPermissions,
+                          enabled: plugin.enabled,
+                        })
+                      }
                       disabled={!!plugin.manifestError}
                     >
                       <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
@@ -113,7 +134,7 @@ const PluginSettings: React.FC = () => {
                     <button
                       className="btn-danger-ghost"
                       onClick={() => {
-                        if (window.confirm(`Uninstall plugin ${plugin.manifest?.name ?? plugin.id}?`)) {
+                        if (window.confirm(t('plugins.uninstallConfirm', { name: plugin.manifest?.name ?? plugin.id }))) {
                           void uninstallPlugin(plugin.id);
                         }
                       }}

@@ -20,9 +20,11 @@
 import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useToastStore } from '../stores/useToastStore';
+import i18n from '../i18n';
 import { wrapPluginCode } from './pluginBridge';
 import { executeHostApi } from './pluginHostApi';
 import { checkOpAllowed, type HostRequest } from './pluginRpc';
+import type { PluginManifestView } from '../types';
 
 /** 单次 RPC 调用超时（同步桥调用；长任务经后端自带超时，见评审 v2 P13）。 */
 export const RPC_TIMEOUT_MS = 5000;
@@ -45,6 +47,8 @@ export interface PluginHostCallbacks {
 export class PluginSession {
   readonly pluginId: string;
   private worker: Worker | null = null;
+  /** 插件 manifest wire 视图（启动时缓存）——serial.send 端口作用域校验用（P10）。 */
+  private manifest: PluginManifestView | null = null;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private seq = 0;
   private crashCount = 0;
@@ -65,6 +69,15 @@ export class PluginSession {
   async start(callbacks?: PluginHostCallbacks): Promise<void> {
     if (this.worker) return;
     const userCode = await pluginService.readPluginAsset(this.pluginId, 'main.js');
+    // manifest 一次读入缓存（worker 加载时即确定；重装换 manifest = 停/启会话）。
+    // 供 executeHostApi 做端口作用域校验（评审 v2 P10）。读失败按 null（= 无作用域）。
+    try {
+      const raw = await pluginService.readPluginAsset(this.pluginId, 'manifest.json');
+      this.manifest = JSON.parse(raw) as PluginManifestView | null;
+    } catch (e) {
+      console.warn(`[pluginHost] ${this.pluginId} manifest 缓存失败（作用域不生效）:`, e);
+      this.manifest = null;
+    }
     // 包桥：worker 内 `self.plugin`（api 代理 + on）由桥注入（评审 v2 D1）。
     const blob = new Blob([wrapPluginCode(userCode)], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);
@@ -120,7 +133,7 @@ export class PluginSession {
         respond({ ok: false, error: denied });
         return;
       }
-      const result = await executeHostApi(this.pluginId, req.op, req.args);
+      const result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest);
       respond({ ok: true, result });
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
@@ -161,7 +174,7 @@ export class PluginSession {
         this.stop();
         useToastStore.getState().push({
           severity: 'warning',
-          message: `插件 ${this.pluginId} 连续崩溃已自动禁用（最后一次: ${reason}）`,
+          message: i18n.t('plugins.crashAutoDisabled', { id: this.pluginId, reason }),
         });
         callbacks?.onPluginCrashed?.(this.pluginId, reason);
       } catch (e) {

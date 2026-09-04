@@ -69,10 +69,13 @@ const ConfigModal: React.FC = () => {
     // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
     // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
     // portGroups/portMeta，只回滚其余字段。
+    // issue #17：pluginConfigs 同理——插件启用/授权经后端命令落盘 + refresh
+    // 写回 store（见 usePlugins.syncStorePluginConfigs），取消回滚到弹窗打开时
+    // 的快照会让 store 与 config.json 分叉（宿主会话/权限校验读到旧状态）。
     const snap = configSnapshotRef.current;
     if (snap) {
       const cur = useAppStore.getState().config;
-      setConfig({ ...snap, portGroups: cur.portGroups, portMeta: cur.portMeta });
+      setConfig({ ...snap, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs });
       configSnapshotRef.current = null;
     }
     toggleConfigModal(false);

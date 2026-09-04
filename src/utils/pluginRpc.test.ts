@@ -7,7 +7,7 @@
  * - 桥代码注入（wrapPluginCode 拼接 + 桥自包含）。
  */
 import { describe, expect, it } from 'vitest';
-import { checkOpAllowed, filterAllowedOps, OP_PERMISSIONS } from './pluginRpc';
+import { checkOpAllowed, filterAllowedOps, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS } from './pluginRpc';
 import { PLUGIN_BRIDGE_CODE, wrapPluginCode } from './pluginBridge';
 
 describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
@@ -70,6 +70,28 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(OP_PERMISSIONS['log']).toBeNull();
     expect(OP_PERMISSIONS['ports.list']).toBeNull();
     expect(OP_PERMISSIONS['notify']).toBe('notify');
+  });
+});
+
+describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () => {
+  it('未声明 serial scope → 任意端口放行（serial:send 授权与守卫仍生效）', () => {
+    expect(checkPortScope(null, 'COM1')).toBeNull();
+    expect(checkPortScope({}, 'COM1')).toBeNull();
+    expect(checkPortScope({ serial: undefined }, 'COM1')).toBeNull();
+  });
+
+  it('声明白名单：命中的端口放行、未命中拒绝', () => {
+    const m = { serial: { portWhitelist: ['COM3', 'COM7'] } };
+    expect(checkPortScope(m, 'COM3')).toBeNull();
+    expect(checkPortScope(m, 'COM9')).toContain('不在插件 serial.portWhitelist');
+  });
+
+  it('声明为空数组 → 全部拒绝（与 http.urlWhitelist 同规）', () => {
+    expect(checkPortScope({ serial: { portWhitelist: [] } }, 'COM1')).toContain('空数组');
+  });
+
+  it('敏感权限集是 D3 声明的三项（确认框消费）', () => {
+    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:execute']);
   });
 });
 

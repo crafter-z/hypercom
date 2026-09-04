@@ -489,6 +489,8 @@ export interface PluginManifestView {
   permissions: string[];
   http?: { urlWhitelist: string[] };
   shell?: { executableWhitelist: string[] };
+  /** 发送端口作用域（P10：声明且非空=仅白名单；空数组=全拒；未声明=不限）。 */
+  serial?: { portWhitelist: string[] };
   ui?: {
     buttons: { id: string; label: string; icon?: string; target?: string }[];
     menuItems: { id: string; label: string; target?: string }[];
@@ -507,6 +509,12 @@ export interface PluginView {
   manifest: PluginManifestView | null;
   manifestError: string | null;
   installedAt: number | null;
+}
+
+/** list_plugins 响应：UI 视图 + 权威插件状态数组（原样写回 store.config）。 */
+export interface PluginListResponse {
+  plugins: PluginView[];
+  pluginConfigs: PluginConfigEntry[];
 }
 
 /** 插件 HTTP 请求参数（后端 PluginHttpRequest）。 */

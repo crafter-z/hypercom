@@ -9,6 +9,7 @@ import { ttyService } from '../utils/ttyService';
 import { trafficStats } from '../utils/trafficStats';
 import { evaluateTriggers } from '../utils/triggerEngine';
 import { sendToPort } from './useSerialSend';
+import { notifyPortDisconnected } from '../utils/pluginObserver';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
 import type { PortStatus } from '../types';
@@ -236,6 +237,9 @@ export function useSerialReceive() {
           pipeline.disconnect(event.port_id);
           // TTY（issue #11）：flush 队列、保留 xterm 实例——视图跨重连保持挂载。
           ttyService.disconnect(event.port_id);
+          // 插件 RX 观察器断流通知（issue #17 复审补强：真实断线与 mode-tty
+          // 同为 rx.detached；关标签页不清端口状态、不走这里）。
+          notifyPortDisconnected(event.port_id);
         }
       });
 

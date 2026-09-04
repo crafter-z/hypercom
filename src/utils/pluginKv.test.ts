@@ -68,6 +68,25 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
     mockRead.mockResolvedValue(JSON.stringify({ saved: 'yes' }));
     expect(await pluginKv.get('com.example.test', 'saved')).toBe('yes');
   });
+  it('并发首载去重：两次并发 set 共享一次读盘，双键保全（复审竞态修复）', async () => {
+    // 首次读盘挂起——两个 set 并发到达，必须共享同一 Promise（一次 read）。
+    let releaseRead!: (v: string) => void;
+    mockRead.mockImplementation(
+      () => new Promise<string>((resolve) => { releaseRead = resolve; }),
+    );
+    const p1 = pluginKv.set('com.example.test', 'a', 1);
+    const p2 = pluginKv.set('com.example.test', 'b', 2);
+    releaseRead(JSON.stringify({}));
+    await Promise.all([p1, p2]);
+    expect(mockRead).toHaveBeenCalledTimes(1);
+    // 双键都在（旧实现：双读盘双 Map，后写盘者覆盖前者 → 丢键）。
+    expect(await pluginKv.get('com.example.test', 'a')).toBe(1);
+    expect(await pluginKv.get('com.example.test', 'b')).toBe(2);
+    // 写盘两次（各自 set 触发），最后一次 state 同时含两键。
+    expect(mockWrite).toHaveBeenCalledTimes(2);
+    const lastWrite = JSON.parse(mockWrite.mock.calls[1][2] as string);
+    expect(lastWrite).toEqual({ a: 1, b: 2 });
+  });
 });
 
 describe('pluginUiRegistry（评审 v2 D2）', () => {
