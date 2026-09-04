@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { usePluginList } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
+import { useAppStore } from '../../../stores/useAppStore';
 
 const PluginSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -32,6 +33,10 @@ const PluginSettings: React.FC = () => {
     setEnabled,
     grantPermissions,
   } = usePluginList();
+  // 插件出站代理（issue #17）：宿主显式配置，供 plugin_http 使用（不继承宿主系统代理）。
+  const pluginProxyEnabled = useAppStore((s) => s.config.pluginProxyEnabled);
+  const pluginProxy = useAppStore((s) => s.config.pluginProxy);
+  const setConfig = useAppStore((s) => s.setConfig);
   /** 安装：先选目录，再允许选 zip（dialog 过滤器）。 */
   const handleInstall = async (): Promise<void> => {
     try {
@@ -92,6 +97,32 @@ const PluginSettings: React.FC = () => {
       </div>
 
       <p className="settings-hint">{t('plugins.description')}</p>
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('plugins.proxy.sectionTitle')}</h4>
+
+      <label className="checkbox-wrapper">
+        <input
+          type="checkbox"
+          checked={pluginProxyEnabled}
+          onChange={(e) => setConfig({ pluginProxyEnabled: e.target.checked })}
+        />
+        {t('plugins.proxy.enable')}
+      </label>
+
+      {pluginProxyEnabled && (
+        <div className="config-row">
+          <label>{t('plugins.proxy.urlLabel')}</label>
+          <input
+            className="input"
+            value={pluginProxy}
+            placeholder={t('plugins.proxy.urlPlaceholder')}
+            onChange={(e) => setConfig({ pluginProxy: e.target.value })}
+            style={{ flex: 1 }}
+          />
+        </div>
+      )}
+      <p className="settings-hint">{t('plugins.proxy.hint')}</p>
 
       {plugins.length === 0 ? (
         <div className="plugin-empty">

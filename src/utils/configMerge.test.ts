@@ -54,6 +54,9 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   diagLogEnabled: true,
   // issue #12：updateCheckMode 必填字面量类型，fixture 补默认值
   updateCheckMode: 'stable',
+  // issue #17 插件代理（必填字面量类型，fixture 补默认值）
+  pluginProxy: '',
+  pluginProxyEnabled: false,
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],

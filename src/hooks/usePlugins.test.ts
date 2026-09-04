@@ -74,6 +74,8 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   restoreSession: true,
   diagLogEnabled: true,
   updateCheckMode: 'stable',
+  pluginProxy: '',
+  pluginProxyEnabled: false,
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],

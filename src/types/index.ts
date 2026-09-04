@@ -320,6 +320,11 @@ export interface AppConfig {
   // 自动更新（issue #12）
   updateCheckMode: UpdateCheckMode; // 自动检查更新模式：none | stable | preview
 
+  // 插件代理（issue #17）：宿主显式给插件出站配置的 HTTP 代理。
+  // 默认空串 + 关闭（D5 隔离优先）；开启且非空时 plugin_http 用该代理（不继承宿主系统代理）。
+  pluginProxy: string;          // http://[user:pass@]host:port，''=不设
+  pluginProxyEnabled: boolean;  // 是否启用插件代理
+
   // 设置实体（全部存入 config.json）
   sendCommandSets: SendCommandSet[];
   highlightRuleSets: HighlightRuleSet[];

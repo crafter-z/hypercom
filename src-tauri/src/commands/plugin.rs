@@ -682,7 +682,7 @@ pub async fn plugin_http(
     state: State<'_, AppState>,
 ) -> Result<PluginHttpResponse, CommandError> {
     // --- 权限 + 白名单校验（锁内只读，克隆后释放）---
-    let (url_whitelist,) = {
+    let (url_whitelist, plugin_proxy, plugin_proxy_enabled) = {
         let manager = state
             .config_manager
             .lock()
@@ -713,7 +713,7 @@ pub async fn plugin_http(
             .http
             .map(|h| h.url_whitelist)
             .unwrap_or_default();
-        (whitelist,)
+        (whitelist, cfg.plugin_proxy.clone(), cfg.plugin_proxy_enabled)
     };
 
     // URL glob 匹配：逐条 glob 匹配（`*` 单段 / `**` 跨段 / 其余字面量）。
@@ -743,17 +743,26 @@ pub async fn plugin_http(
 
     // --- 转发 ---
     let timeout = request.timeout.unwrap_or(10).min(PLUGIN_HTTP_MAX_TIMEOUT_SECS);
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout))
-        // 无凭据注入：不设 cookie store / **不继承任何代理**（`auto_sys_proxy`
-        // 默认会连环境变量与注册表系统代理都吃进来——插件流量不得骑宿主代理，
-        // 程序化强制隔离：环境变量 + 系统代理（Windows 注册表/macOS dynamic store）
-        // 两路一并关死。插件无法访问宿主网络，需代理时由插件自行配置其代理）。
         // **禁止自动重定向**（评审 v2 D5 安全补强）：urlWhitelist 只校验初始 URL，
         // 白名单主机的开放重定向可把请求转发到任意内网目标——每个跳转都须由
         // 插件经 plugin_http 重新发起，逐跳过白名单闸门。
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    // 代理（issue #17）：`plugin_http` 默认强制直连——不继承宿主代理/系统代理
+    // （评审 v2 D5「无凭据注入/干净 client」：`auto_sys_proxy` 默认会把环境变量
+    // 与注册表系统代理一并吃进插件 client，骑宿主代理即透传宿主代理凭据）。
+    // 宿主可经 config 显式给插件配置出站代理（plugin_proxy_enabled + plugin_proxy），
+    // 该代理由宿主声明、仅对插件出站生效，与宿主自身代理互不相干。
+    // 此处 `.proxy()`/`.no_proxy()` 二选一——两者互斥（proxy 设 auto_sys_proxy=false）。
+    if plugin_proxy_enabled && !plugin_proxy.is_empty() {
+        let proxy = reqwest::Proxy::all(&plugin_proxy)
+            .map_err(|e| CommandError::Other(format!("invalid plugin proxy: {e}")))?;
+        client_builder = client_builder.proxy(proxy);
+    } else {
+        client_builder = client_builder.no_proxy();
+    }
+    let client = client_builder
         .build()
         .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
 

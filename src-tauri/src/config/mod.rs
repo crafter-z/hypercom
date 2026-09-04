@@ -293,6 +293,16 @@ pub struct AppConfig {
     #[serde(default = "default_update_check_mode")]
     pub update_check_mode: String,
 
+    // --- 插件代理（issue #17）---
+    /// 插件出站 HTTP 代理（`http://[user:pass@]host:port`）。`plugin_http` 默认
+    /// 强制直连（评审 v2 D5「不骑宿主代理」）；此项为宿主显式给插件提供的代理，
+    /// 仅在 `plugin_proxy_enabled` 且非空时生效。默认空串 = 不设代理（直连）。
+    #[serde(default)]
+    pub plugin_proxy: String,
+    /// 是否启用上述插件代理。默认关（D5 隔离优先，显式开启才用代理）。
+    #[serde(default = "default_false")]
+    pub plugin_proxy_enabled: bool,
+
     // --- 设置实体（全部存入 config.json，单文件即可完整迁移）---
     #[serde(default)]
     pub send_command_sets: Vec<SendCommandSetEntry>,
@@ -422,6 +432,8 @@ impl Default for AppConfig {
             restore_session: true,
             diag_log_enabled: true,
             update_check_mode: "stable".to_string(),
+            plugin_proxy: String::new(),
+            plugin_proxy_enabled: false,
             send_command_sets: Vec::new(),
             highlight_rule_sets: Vec::new(),
             protocol_templates: Vec::new(),
@@ -620,6 +632,12 @@ impl ConfigManager {
         // issue #12：自动更新模式钳制——非法值（含旧版残留）收敛回 stable。
         if !["none", "stable", "preview"].contains(&config.update_check_mode.as_str()) {
             config.update_check_mode = "stable".to_string();
+        }
+        // issue #17 插件代理：trim 前后空白；开启但无有效 URL → 视为未设置（降级直连，
+        // 避免 plugin_http 用空串拼出非法代理报错）。
+        config.plugin_proxy = config.plugin_proxy.trim().to_string();
+        if config.plugin_proxy_enabled && config.plugin_proxy.is_empty() {
+            config.plugin_proxy_enabled = false;
         }
         if !["\\r\\n", "\\r", "\\n", "None"].contains(&config.default_line_ending.as_str()) {
             config.default_line_ending = "\\r\\n".to_string();
@@ -934,6 +952,38 @@ mod tests {
         assert_eq!(cfg.terminal_font_size, 48);
         assert_eq!(cfg.max_display_lines, 1000);
         assert_eq!(cfg.max_retries, 1);
+    }
+
+    #[test]
+    fn test_plugin_proxy_clamp() {
+        // issue #17：trim 前后空白；开启但无有效 URL → 视为未设置（降级直连），
+        // 避免 plugin_http 用空串拼出非法代理报错。
+        let mut cfg = AppConfig {
+            plugin_proxy_enabled: true,
+            plugin_proxy: "   ".to_string(),
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.plugin_proxy, "");
+        assert!(!cfg.plugin_proxy_enabled);
+
+        let mut cfg = AppConfig {
+            plugin_proxy_enabled: true,
+            plugin_proxy: "  http://user:pass@proxy:8080  ".to_string(),
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.plugin_proxy, "http://user:pass@proxy:8080");
+        assert!(cfg.plugin_proxy_enabled);
+
+        // 关闭态保留 URL（无害），不强制清空。
+        let mut cfg = AppConfig {
+            plugin_proxy_enabled: false,
+            plugin_proxy: "http://proxy:8080".to_string(),
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.plugin_proxy, "http://proxy:8080");
     }
 
     #[test]
