@@ -57,7 +57,9 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 
 # 自动更新：GitHub API 解析 preview 通道（issue #12）；版本对齐 tauri-plugin-updater 自带 reqwest
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# system-proxy：让 Rust reqwest 读取操作系统系统代理（Windows 注册表 ProxyEnable/ProxyServer、
+# macOS system config），否则仅默认读 HTTP(S)_PROXY 环境变量——公司内网只配系统代理时更新检查/下载直连失败。
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy"] }
 url = "2"
 tauri-plugin-clipboard-manager = "2"
 
