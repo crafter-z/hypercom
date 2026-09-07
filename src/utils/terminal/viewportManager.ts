@@ -24,6 +24,7 @@ import type { DisplayFormat, Encoding, TerminalLine } from '../../types';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { linePassesFilter, type DirectionFilter } from '../lineFilter';
+import { shouldFollow } from '../followLogic';
 import { getSearchableText } from '../terminalSearch';
 import { TerminalBuffer } from './TerminalBuffer';
 import {
@@ -326,7 +327,12 @@ export class TerminalViewportManager {
       selectedRange: this.selectedRange,
       locked: this.locked,
       gestureActive: this.gestureActive,
-      followEnabled: this.locked && !this.searchOpen,
+      followEnabled: shouldFollow(
+        this.frozenSeq !== null,
+        this.locked,
+        this.gestureActive,
+        this.searchOpen,
+      ),
     };
   }
 

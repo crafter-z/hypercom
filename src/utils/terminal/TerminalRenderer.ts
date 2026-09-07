@@ -409,10 +409,25 @@ export class TerminalRenderer {
     // are laid out for the pinned view. (#10) A large head advance with a
     // non-follow viewport restores the reading position from the anchor seq
     // instead of letting the browser clamp it to the new content bottom.
-    const follow = view.followEnabled && !view.gestureActive;
+    // Pause (frozenSeq) suppresses follow: the frozen viewport must stay put
+    // even though `locked` remains true (issue #18). followEnabled is already
+    // paused-aware, but the renderer also guards directly so a follow pin
+    // cannot fire while frozen.
+    const follow = view.followEnabled && !view.gestureActive && view.frozenSeq === null;
     const headAdvance = firstSeq - this.lastRenderedFirstSeq;
+    // Restore the reading position on ANY head trim (non-follow, no gesture,
+    // no live selection): a small rolling-window eviction advances firstSeq by
+    // ≤ maxLinesPerTick (2000)/frame — far below LARGE_TRIM_ROWS — so the old
+    // large-trim-only condition never fired and the viewport-top seq drifted
+    // with firstSeq each frame (issue #19). The LARGE_TRIM_ROWS branch stays:
+    // a setLimits shrink moves the head arbitrarily far, and there the anchor
+    // may already be trimmed (clamp to 0 / nearest surviving row).
     const anchorRestored =
-      headAdvance >= LARGE_TRIM_ROWS && !follow && !view.gestureActive && this.selectionSpans === null;
+      !follow &&
+      !view.gestureActive &&
+      this.selectionSpans === null &&
+      (headAdvance >= LARGE_TRIM_ROWS ||
+        (headAdvance > 0 && this.anchorSeq !== null && this.anchorSeq >= firstSeq));
     if (anchorRestored) {
       const anchor = this.anchorSeq;
       // 过滤模式下 scrollTop 空间按 visIdx 索引（baseCount 是过滤后计数），
