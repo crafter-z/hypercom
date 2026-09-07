@@ -40,6 +40,35 @@ pub fn read_text_file(path: String) -> Result<String, CommandError> {
         .map_err(|e| CommandError::Io(format!("Failed to read file '{path}': {e}")))
 }
 
+/// 读取文件原始字节（供插件 fs.openDialog 用，issue #17 能力补强）。
+/// 返回 base64 编码——绕过 `read_text_file` 的 UTF-8 严格性：中文 Windows
+/// 工具链产物（如 GBK/CP936 编码的编译 map 文件）用 `read_to_string` 会整体
+/// 硬失败（无效 UTF-8 序列抛错）。路径来自系统 open 对话框显式选择（即信任
+/// 边界，与 read_text_file 同模式），仅校验文件存在且可 canonicalize。
+/// 编码解码由宿主侧 `TextDecoder(encoding)` 完成（插件可传 encoding，默认 utf-8）。
+const MAX_PLUGIN_OPEN_FILE_BYTES: u64 = 64 * 1024 * 1024; // 64MB——编译 map 可能较大，但防失控读盘
+
+#[tauri::command]
+pub fn read_file_bytes(path: String) -> Result<String, CommandError> {
+    let target = Path::new(&path);
+    target
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("Cannot canonicalize path: {e}")))?;
+    let meta = std::fs::metadata(&target)
+        .map_err(|e| CommandError::Io(format!("Failed to stat file '{path}': {e}")))?;
+    if meta.len() > MAX_PLUGIN_OPEN_FILE_BYTES {
+        return Err(CommandError::Other(format!(
+            "文件过大（{} 字节，上限 {}）: {}",
+            meta.len(),
+            MAX_PLUGIN_OPEN_FILE_BYTES,
+            path
+        )));
+    }
+    let bytes = std::fs::read(&target)
+        .map_err(|e| CommandError::Io(format!("Failed to read file '{path}': {e}")))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// 背景图文件大小上限（20MB），超过即视为不可用。
 const MAX_BACKGROUND_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -137,7 +166,7 @@ mod tests {
 
     // 显式导入（镜像 serial/mod.rs 的测试约定，不用 `use super::*;`，
     // 避免 glob 把无关符号拖进测试二进制）。
-    use crate::commands::file::{image_mime_from_ext, read_image_data_url};
+    use crate::commands::file::{image_mime_from_ext, read_image_data_url, read_file_bytes, MAX_PLUGIN_OPEN_FILE_BYTES};
 
     /// 1x1 PNG 头部字节。函数不做 PNG 解析，仅验证 base64 往返一致。
     const TINY_PNG: &[u8] =
@@ -211,5 +240,38 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
         assert_eq!(decoded, TINY_PNG);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_bytes_roundtrips_non_utf8_content() {
+        // GBK/CP936 编码的编译 map 是中文 Windows 工具链常见产物——含非 UTF-8 字节。
+        // 函数不解析、不转码，仅 base64 往返一致（编码决策在宿主 TextDecoder）。
+        let path = unique_temp_path("map");
+        // 含非法 UTF-8 序列的字节（如 GBK 的 0x81 0x40）。
+        let content: &[u8] = b"\x81\x40\x81\x41abc\x0d\x0a";
+        std::fs::write(&path, content).unwrap();
+        let b64 = read_file_bytes(path.to_string_lossy().into_owned()).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        assert_eq!(decoded, content);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_bytes_rejects_over_64mb() {
+        let path = unique_temp_path("map");
+        // 写一个刚好超过上限的稀疏文件（不真正占 64MB 磁盘：set_len 扩展文件）。
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_PLUGIN_OPEN_FILE_BYTES + 1).unwrap();
+        drop(f);
+        let err = read_file_bytes(path.to_string_lossy().into_owned()).unwrap_err();
+        assert!(err.to_string().contains("文件过大"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_bytes_missing_path_is_error() {
+        let path = unique_temp_path("map");
+        let err = read_file_bytes(path.to_string_lossy().into_owned()).unwrap_err();
+        assert!(err.to_string().contains("Cannot canonicalize"));
     }
 }

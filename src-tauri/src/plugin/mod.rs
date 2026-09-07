@@ -30,8 +30,10 @@ pub const HOST_API_MAJOR: u32 = 1;
 pub const KNOWN_PERMISSIONS: &[&str] = &[
     "terminal:read",
     "terminal:write",
+    "rx:bytes",
     "fs:assets",
     "fs:storage",
+    "fs:open",
     "serial:send",
     "http:request",
     "shell:execute",

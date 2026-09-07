@@ -495,6 +495,12 @@ export const fileService = {
     return invoke<string>('read_text_file', { path });
   },
 
+  /** 读取文件原始字节（base64 返回，供插件 fs.openDialog 用——绕过 UTF-8 严格性，
+   *  GBK map 等由宿主 TextDecoder 按插件指定 encoding 解码）。路径来自 open() 对话框。 */
+  readFileBytes: (path: string): Promise<string> => {
+    return invoke<string>('read_file_bytes', { path });
+  },
+
   /** 读取图片文件为 base64 data URL（自定义背景图，issue #13）。失败/非图片 → ''。 */
   readImageDataUrl: (path: string): Promise<string> => {
     return invoke<string>('read_image_data_url', { path });

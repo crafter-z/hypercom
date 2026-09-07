@@ -636,6 +636,11 @@ const resources = {
       'plugins.sensitiveConfirm': '插件「{{name}}」声明敏感权限：{{perms}}。启用后可在权限区逐项授予（撤销即时生效），敏感权限可发串口数据/外联网络/执行程序。仍要启用吗？',
       'plugins.uninstallConfirm': '确定卸载插件「{{name}}」？其 data/ 私有数据将一并删除。',
       'plugins.crashAutoDisabled': '插件 {{id}} 连续崩溃已自动禁用（最后一次: {{reason}}）',
+      'plugins.panelTitle': '插件输出',
+      'plugins.panelPlugins': '{{count}} 个插件',
+      'plugins.panelCopy': '复制全部',
+      'plugins.panelClear': '清空',
+      'plugins.panelCopied': '已复制到剪贴板',
     },
   },
   'en-US': {
@@ -1270,6 +1275,11 @@ const resources = {
       'plugins.sensitiveConfirm': 'Plugin "{{name}}" declares sensitive permissions: {{perms}}. After enabling, grant them individually in the permission grid (revocation takes effect immediately). Sensitive permissions can send serial data, reach the network, or run programs. Enable anyway?',
       'plugins.uninstallConfirm': 'Uninstall plugin "{{name}}"? Its data/ private storage will be removed too.',
       'plugins.crashAutoDisabled': 'Plugin {{id}} was disabled after repeated crashes (last error: {{reason}})',
+      'plugins.panelTitle': 'Plugin Output',
+      'plugins.panelPlugins': '{{count}} plugin(s)',
+      'plugins.panelCopy': 'Copy all',
+      'plugins.panelClear': 'Clear',
+      'plugins.panelCopied': 'Copied to clipboard',
     },
   },
 };

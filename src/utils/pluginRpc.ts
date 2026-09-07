@@ -47,6 +47,8 @@ export const OP_PERMISSIONS: PermissionMap = {
   // RX 观察
   'rx.onLine': 'terminal:read',
   'rx.getBuffer': 'terminal:read',
+  // rx.onBytes 原始字节旁路（评审：字节级共享，需独立权限读原始流）
+  'rx.onBytes': 'rx:bytes',
   // 终端写（旁注行）
   'terminal.append': 'terminal:write',
   // 串口发送（敏感）
@@ -55,6 +57,9 @@ export const OP_PERMISSIONS: PermissionMap = {
   'fs.read': 'fs:assets',
   'fs.list': 'fs:assets',
   'fs.write': 'fs:storage',
+  // 用户经系统对话框显式选择的任意文件读取（死机日志 map 等；对话框即信任边界）。
+  // 单列 fs:open——与「仅读自身资产」的 fs:assets 语义分离，避免资产授权隐式升级。
+  'fs.openDialog': 'fs:open',
   // 出站（敏感，唯一合法通道）
   'http.request': 'http:request',
   // shell

@@ -48,8 +48,10 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
       'ports.list',
       'ports.status',
       'rx.onLine',
+      'rx.onBytes',
       'terminal.append',
       'serial.send',
+      'fs.openDialog',
       'fs.read',
       'fs.write',
       'http.request',
@@ -57,6 +59,9 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
       'clipboard.readText',
       'clipboard.writeText',
       'notify',
+      'ui.panel.append',
+      'ui.panel.clear',
+      'ui.panel.export',
       'storage.get',
       'storage.set',
       'log',
@@ -64,6 +69,17 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     for (const op of declaredOps) {
       expect(OP_PERMISSIONS[op], `op ${op} 缺权限映射`).toBeDefined();
     }
+  });
+
+  it('新增能力权限点：rx.onBytes 需 rx:bytes；fs.openDialog 需 fs:open（与 fs:assets 分离）', () => {
+    expect(OP_PERMISSIONS['rx.onBytes']).toBe('rx:bytes');
+    expect(checkOpAllowed('rx.onBytes', [])).toContain('rx:bytes');
+    expect(checkOpAllowed('rx.onBytes', ['rx:bytes'])).toBeNull();
+
+    expect(OP_PERMISSIONS['fs.openDialog']).toBe('fs:open');
+    // fs:assets（仅读自身资产）不得隐式覆盖任意文件打开。
+    expect(checkOpAllowed('fs.openDialog', ['fs:assets'])).not.toBeNull();
+    expect(checkOpAllowed('fs.openDialog', ['fs:open'])).toBeNull();
   });
 
   it('无权限要求的 op（log/ports）标记为 null 放行；notify 需权限', () => {

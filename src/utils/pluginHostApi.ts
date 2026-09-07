@@ -12,7 +12,8 @@
  * - 串口 RX 行经 pluginObserver 旁路总线接入（`rx.onLine` 订阅注册在
  *   pluginObserver 装配层，不在此层重复实现）。
  */
-import { pluginService } from '../services/tauri';
+import { pluginService, fileService } from '../services/tauri';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readText as clipboardReadText, writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { sendToPort } from '../hooks/useSerialSend';
 import { useAppStore } from '../stores/useAppStore';
@@ -21,6 +22,8 @@ import { addPluginRxObserver } from './pluginObserver';
 import type { RxDetachedEvent } from './pluginObserver';
 import { appendTerminalLine } from './terminal/viewportManager';
 import { pluginKv } from './pluginKv';
+import { appendPluginPanel, clearPluginPanel, getPluginPanelSnapshot } from './pluginPanelRegistry';
+import { addPluginBytesObserver } from './pluginBytesObserver';
 import { checkPortScope, OP_PERMISSIONS } from './pluginRpc';
 import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
@@ -115,6 +118,40 @@ export async function executeHostApi(
       const bytes = await sendToPort(portId, data, isHex, lineEnding, true); // silent: 插件发送不弹守卫 toast
       return { bytesWritten: bytes };
     }
+    case 'fs.openDialog': {
+      // 死机日志/任意 map 文件：文件必须经系统对话框由用户显式选择（即信任边界，
+      // 与 file.rs::read_text_file 同模式——对话框选择即授权，不做子树限制）。
+      // 插件不能按任意路径直接读盘——只有「用户点了对话框选中的文件」才合法。
+      // 权限点单列 `fs:open`（与「仅读自身资产」的 fs:assets 语义分离）。
+      const a = requireObject(args);
+      const encoding = typeof a.encoding === 'string' && a.encoding !== '' ? a.encoding : 'utf-8';
+      const filters = Array.isArray(a.filters) ? (a.filters as { name: string; extensions: string[] }[]) : undefined;
+      const multiple = Boolean(a.multiple);
+      const picked = await openDialog({ multiple, filters, title: typeof a.title === 'string' ? a.title : undefined });
+      if (picked === null) return { files: [] }; // 用户取消
+      // 经 read_file_bytes 读原始字节（base64）——绕过 read_text_file 的 UTF-8 严格性
+      //（GBK/CP936 编码的编译 map 文件是中文 Windows 工具链常见产物）。宿主侧按插件
+      // 指定 encoding 用 TextDecoder 解码（GBK 受浏览器支持）。解码失败降级 utf-8。
+      const paths = Array.isArray(picked) ? picked : [picked];
+      const files: Array<{ path: string; content: string }> = [];
+      for (const p of paths) {
+        try {
+          const b64 = await fileService.readFileBytes(p);
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+          let content: string;
+          try {
+            content = new TextDecoder(encoding, { fatal: false }).decode(bytes);
+          } catch {
+            content = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          }
+          files.push({ path: p, content });
+        } catch (e) {
+          console.error('[pluginHost] fs.openDialog read failed:', p, e);
+          files.push({ path: p, content: '' });
+        }
+      }
+      return { files };
+    }
     case 'fs.read': {
       const rel = requireString(args, 'rel');
       return pluginService.readPluginAsset(pluginId, rel);
@@ -196,11 +233,22 @@ export async function executeHostApi(
       await pluginKv.set(pluginId, requireString(a, 'key'), a.value);
       return null;
     }
+    case 'ui.panel.append': {
+      const a = requireObject(args);
+      const text = typeof a.text === 'string' ? a.text : String(a.text ?? '');
+      appendPluginPanel(pluginId, text);
+      return null;
+    }
+    case 'ui.panel.clear': {
+      clearPluginPanel(pluginId);
+      return null;
+    }
+    case 'ui.panel.export': {
+      // v1：返回当前面板内容供插件自行处理（如复制/导出）。宿主 UI 的导出是增量。
+      return getPluginPanelSnapshot()[pluginId]?.buffer ?? '';
+    }
     case 'rx.onLine':
-    case 'ui.panel.append':
-    case 'ui.panel.clear':
-    case 'ui.panel.export':
-      // 这些 op 由宿主装配层经事件通道实现（worker 内无法传回调/直接画 UI），
+      // rx.onLine/rx.onBytes 由宿主装配层经事件通道实现（worker 内无法传回调），
       // 不经 RPC——防御性拒绝（见装配层 attachRxObserver / usePlugins）。
       throw new Error(`${op} 由宿主装配层提供，不经 RPC`);
     default:
@@ -262,4 +310,21 @@ export function attachRxObserver(
     },
   });
   return unsubObserver;
+}
+
+/**
+ * 把 pluginBytesObserver 的 RX 原始字节批转发到某插件 worker 事件通道
+ * （rx.bytes）。与 attachRxObserver 同构：惰性查会话、字节批投递。
+ * 权限（rx:bytes）由装配资格（rxBytesEligiblePluginIds）把关，事件通道按
+ * 权限关闸（worker 内代码可重挂 self.onmessage 截获，未授权插件不得收到）。
+ *
+ * **结构化克隆**（不带 transfer）：字节块 Uint8Array 与新装的 worker 事件通道
+ * 独享，但后续插件可能存引用/派生——v1 保正确性，零拷贝留二进制优化。
+ */
+export function attachBytesObserver(session: { post: HostPost }): () => void {
+  return addPluginBytesObserver({
+    onRxBytes: (batch) => {
+      session.post({ type: 'rx.bytes', payload: batch });
+    },
+  });
 }

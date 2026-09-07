@@ -10,6 +10,7 @@ import { trafficStats } from '../utils/trafficStats';
 import { evaluateTriggers } from '../utils/triggerEngine';
 import { sendToPort } from './useSerialSend';
 import { notifyPortDisconnected } from '../utils/pluginObserver';
+import { feedPluginBytes, hasPluginBytesObservers, notifyBytesPortDisconnected } from '../utils/pluginBytesObserver';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
 import type { PortStatus } from '../types';
@@ -129,6 +130,12 @@ export function useSerialReceive() {
         // 一次 store（StatusBar 本就 1s 窗口差分算速率，总量语义不变；消除每事件
         // Zustand 更新 + StatusBar 重渲染，TTY 卡顿根因 #3）。
         trafficStats.addRx(portId, event.data.length);
+        // 插件 RX 原始字节旁路（issue #17 能力补强）：在 TTY 分流/协议解析/行组装
+        // **之前**把原始字节喂给插件字节观察者——字节流保真、不分 mode，供
+        // 插件把原始串口数据共享给第三方（HTTP 推送）。零订阅者时 O(1) 早退。
+        if (hasPluginBytesObservers()) {
+          feedPluginBytes(portId, event.data, event.timestamp);
+        }
 
         // TTY 模式（issue #11）：字节直喂 ttyService（xterm 渲染）。
         // 跳过触发引擎 / 协议解析 / RxPipeline 行组装——终端字节流没有「行」语义，
@@ -240,6 +247,8 @@ export function useSerialReceive() {
           // 插件 RX 观察器断流通知（issue #17 复审补强：真实断线与 mode-tty
           // 同为 rx.detached；关标签页不清端口状态、不走这里）。
           notifyPortDisconnected(event.port_id);
+          // 插件 RX 字节旁路断流：清该端口遗留字节队列（插件感知「字节流断了」）。
+          notifyBytesPortDisconnected(event.port_id);
         }
       });
 

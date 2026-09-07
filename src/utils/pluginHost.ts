@@ -24,6 +24,7 @@ import i18n from '../i18n';
 import { wrapPluginCode } from './pluginBridge';
 import { executeHostApi } from './pluginHostApi';
 import { checkOpAllowed, type HostRequest } from './pluginRpc';
+import { removePluginPanel } from './pluginPanelRegistry';
 import type { PluginManifestView } from '../types';
 
 /** 单次 RPC 调用超时（同步桥调用；长任务经后端自带超时，见评审 v2 P13）。 */
@@ -293,13 +294,14 @@ export class PluginHostManager {
     }
   }
 
-  /** 禁用插件：停止会话（worker terminate）。 */
+  /** 禁用插件：停止会话（worker terminate）+ 清理输出面板。 */
   disable(pluginId: string): void {
     const session = this.sessions.get(pluginId);
     if (session) {
       session.stop();
       this.sessions.delete(pluginId);
     }
+    removePluginPanel(pluginId);
   }
 
   /** 按 config 同步会话：启用的有会话，禁用的无。幂等，返回发生的变化数。 */
@@ -314,6 +316,7 @@ export class PluginHostManager {
       if (!enabledIds.has(id)) {
         session.stop();
         this.sessions.delete(id);
+        removePluginPanel(id);
         changes++;
       }
     }

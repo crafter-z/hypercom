@@ -11,6 +11,7 @@ import { useTextEditContextMenu } from './components/shared/TextEditContextMenu'
 import HotkeyHelpDialog from './components/shared/HotkeyHelpDialog';
 import AboutDialog from './components/shared/AboutDialog';
 import UpdateDialog from './components/shared/UpdateDialog';
+import PluginPanel from './components/shared/PluginPanel';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
@@ -145,6 +146,7 @@ const App: React.FC = () => {
               <MainDisplay />
               <OperationPanelResizeHandle />
               <OperationPanel />
+              <PluginPanel />
             </div>
           </div>
 

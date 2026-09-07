@@ -189,13 +189,16 @@ Worker 有原生 `fetch`——若不关死出站，`terminal:read` 权限下可�
 ```
 ports.list() / ports.status(portId) / ports.onChange(cb)
 rx.onLine(cb)                        // {portId, seq, rawData: Uint8Array, encoding, ts}——未解码字节 + 编码 label（D4/P1b）
+rx.onBytes(cb)                       // {portId, bytes: Uint8Array, ts}——原始字节旁路（serial:data 事件层，早于 TTY 分流/协议/行组装；不分 mode）。批投递，每帧 ≤ 256KB。
 rx.getBuffer(portId, {from, to})     // 只读快照，单次 ≤ 2000 行（行文本惰性解码同 terminal 语义）
 terminal.append(portId, text, opts)  // 旁注行，direction 显式（NOTE/INFO…）；不进流量统计/发送历史（P9）
 serial.send(portId, data, {isHex, lineEnding})  // 走 sendToPort 全管线；per-port 白名单约束（P10）
 fs.read(rel) / fs.list(rel) / fs.write(rel, data)   // 限定插件目录；write 仅 data/（storage 权限）
+fs.openDialog({filters, multiple, encoding})  // 用户经系统对话框显式选择任意文件（死机日志 map 等）；返回 {files:[{path,content}]}；GBK 由宿主 TextDecoder 按 encoding 解码；权限 fs:open
 http.request({method, url, headers, body, timeout}) // 后端转发，15s 上限；urlWhitelist glob 校验
 shell.execute(exec, args, opts) / shell.openExternal(url)  // executableWhitelist；openExternal per-plugin 限制实施时评估
 clipboard.readText() / clipboard.writeText(text)
+ui.panel.append(text) / ui.panel.clear() / ui.panel.export()  // 输出面板：聚合字符串（512KB 上限截断丢最旧 + droppedChars 计数）；panel 是插件专属输出区，零权限
 notify({title, body, level})                          // level: info|warn|error → toast severity；durationMs 夹取 [2s, 30s]（插件不可造粘滞刷屏）
 storage.get(key) / storage.set(key, value)  // data/state.json（D6，不进 config.json）
 log(level, msg)                      // 令牌桶配额（突发 20/回填 4 每秒，pluginLogQuota）+ console→diaglog；独立文件通道留增量（P13）
@@ -238,7 +241,7 @@ ui.buttonClick({buttonId, context})  // context = 端口等
 
 ## 6. 三个目标用例走查
 
-**① 解崩溃 trace**：插件启用后 `rx.onLine` 观察（行组装层，纯 RX；按 `encoding` 自解码）→ 行匹配栈帧模式（`triggerEngine` 同款 contains/regex）→ 命中行 → `fs.read("assets/symbols.map")` 建索引（首行懒加载）→ 翻译 → `terminal.append`（`direction:'NOTE'` 旁注样式）或 `ui.panel.append` 聚合结果。零侵入：原数据流不变，翻译行是新行，原始行保留。若端口处于 TTY 模式，观察器断流且收到 `rx.detached`——插件应提示用户该模式不支持行观察。
+**① 解崩溃 trace**：插件启用后 `rx.onLine` 观察（行组装层，纯 RX；按 `encoding` 自解码）→ 行匹配栈帧模式（`triggerEngine` 同款 contains/regex）→ 命中行 → **`fs.openDialog` 让用户手动选编译 map 文件**（任意路径，GBK 兼容）→ 建索引（首行懒加载）→ 翻译 → `terminal.append`（`direction:'NOTE'` 旁注样式）或 `ui.panel.append` 聚合结果。零侵入：原数据流不变，翻译行是新行，原始行保留。若端口处于 TTY 模式，观察器断流且收到 `rx.detached`——插件应提示用户该模式不支持行观察。
 
 **② 功能按钮**：manifest 声明 `ui.buttons` → Sidebar 工具栏渲染 → 点击 → `ui.buttonClick` → 插件执行（如「发送厂商握手序列」= `serial.send` × N 步（per-port 白名单内）+ 状态展示）。
 

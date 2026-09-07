@@ -14,7 +14,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { pluginService } from '../services/tauri';
 import { pluginHost } from '../utils/pluginHost';
-import { attachRxObserver } from '../utils/pluginHostApi';
+import { attachRxObserver, attachBytesObserver } from '../utils/pluginHostApi';
 import { pluginKv } from '../utils/pluginKv';
 import { rebuildPluginUi } from '../utils/pluginUiRegistry';
 import { useAppStore } from '../stores/useAppStore';
@@ -71,6 +71,17 @@ export function rxEligiblePluginIds(): Set<string> {
   );
 }
 
+/** RX 原始字节旁路装配资格：已启用**且**已授予 rx:bytes（issue #17 能力补强）。
+ * 字节流是原始串口数据，属敏感观察——未授权插件不得收到。 */
+export function rxBytesEligiblePluginIds(): Set<string> {
+  const cfg = useAppStore.getState().config;
+  return new Set(
+    (cfg.pluginConfigs ?? [])
+      .filter((p) => p.enabled && p.grantedPermissions.includes('rx:bytes'))
+      .map((p) => p.id),
+  );
+}
+
 /** 把 rx 装配同步到当前合格集（新合格 → attach；失格 → detach）。 */
 function syncRxAttachments(rxAttachments: Map<string, () => void>): void {
   const desired = rxEligiblePluginIds();
@@ -86,9 +97,35 @@ function syncRxAttachments(rxAttachments: Map<string, () => void>): void {
   }
 }
 
+/** 把 rx.bytes 装配同步到当前合格集（新合格 → attach；失格 → detach）。 */
+function syncByteAttachments(bytesAttachments: Map<string, () => void>): void {
+  const desired = rxBytesEligiblePluginIds();
+  for (const id of desired) {
+    if (!bytesAttachments.has(id)) {
+      bytesAttachments.set(
+        id,
+        attachBytesObserver({
+          post: (m, transfer) => {
+            const session = pluginHost.get(id);
+            if (session) session.post(m, transfer);
+          },
+        }),
+      );
+    }
+  }
+
+  for (const id of [...bytesAttachments.keys()]) {
+    if (!desired.has(id)) {
+      bytesAttachments.get(id)?.();
+      bytesAttachments.delete(id);
+    }
+  }
+}
+
 /** 主窗单例装配（App.tsx）。返回空——装配是副作用。 */
 export function usePluginHost(): void {
   const rxAttachmentsRef = useRef(new Map<string, () => void>());
+  const bytesAttachmentsRef = useRef(new Map<string, () => void>());
 
   useEffect(() => {
     // **StrictMode 安全**（镜像 usePopoutBridge 无 startedRef 守卫——守卫会让
@@ -107,10 +144,11 @@ export function usePluginHost(): void {
       }
     };
 
-    // 初始：sync 会话（拉 worker）+ 按合格集装配 rx + 刷新列表（写回 store）。
+    // 初始：sync 会话（拉 worker）+ 按合格集装配 rx/rx.bytes + 刷新列表（写回 store）。
     const boot = async (): Promise<void> => {
       pluginHost.syncWithConfig();
       syncRxAttachments(rxAttachmentsRef.current);
+      syncByteAttachments(bytesAttachmentsRef.current);
       await refresh();
     };
     void boot().catch((e) => console.error('[usePluginHost] boot failed:', e));
@@ -127,6 +165,7 @@ export function usePluginHost(): void {
       if (sig === lastSig) return;
       lastSig = sig;
       syncRxAttachments(rxAttachmentsRef.current);
+      syncByteAttachments(bytesAttachmentsRef.current);
       pluginHost.syncWithConfig();
     });
 
@@ -138,6 +177,10 @@ export function usePluginHost(): void {
         unsubRx();
       }
       rxAttachmentsRef.current.clear();
+      for (const unsubBytes of bytesAttachmentsRef.current.values()) {
+        unsubBytes();
+      }
+      bytesAttachmentsRef.current.clear();
       pluginHost.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

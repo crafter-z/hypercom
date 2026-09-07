@@ -215,6 +215,7 @@ pub fn run() {
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,
+            commands::read_file_bytes,
             commands::read_image_data_url,
             // ===== 诊断日志命令 =====
             commands::get_diag_log_path,
