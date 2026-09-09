@@ -1,3 +1,15 @@
+# HyperCom v0.6.7
+
+## Bugfix
+
+- 暂停后不再跟随钉底（issue #18）：暂停（`frozenSeq`）时禁止跟随，冻结视口不再随滚动窗口收缩而漂移。`viewportManager.buildView` 把 `frozenSeq` 纳入 `shouldFollow`，`TerminalRenderer.render` 的 follow 判定补 `frozenSeq === null` 双保险
+- 小步 head trim 下阅读锚定（issue #19）：非跟随满缓冲稳态下，逐行滚动窗口每帧 append + head trim（advance ≤ `maxLinesPerTick` 2000）远低于旧 `LARGE_TRIM_ROWS`(2500) 阈值，「仅大 trim 恢复」永不触发，视口顶 seq 随 firstSeq 每帧 +1 使阅读行被逐帧上顶。修复后任意 head trim（`headAdvance > 0` 且锚点行仍存活）均按 `anchorSeq` 恢复阅读位置；`setLimits` 收缩走原有大 trim 分支
+
+## 其他
+
+- 界面截图更新至 v0.6.6（`UI.png` 替换旧 v0.1.0）
+- 测试：vitest 新增「暂停不钉底」与「小步 head trim 视口顶 seq 不变」回归（TerminalRenderer / viewportManager）
+
 # HyperCom v0.6.6
 
 ## 新特性
