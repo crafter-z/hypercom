@@ -1,17 +1,16 @@
 import React, { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useRuleStore } from '../../stores/useRuleStore';
-import { useAppStore } from '../../stores/useAppStore';
-import {
-  popoutEventService,
-  eventService,
-  storageService,
-  configService,
-} from '../../services/tauri';
-import { getRxPipeline } from '../../utils/rxPipeline';
+import { popoutEventService, storageService } from '../../services/tauri';
+import { useConfigPersistence } from '../../hooks/useConfigPersistence';
+import { computeBufferLimits, getViewportManager, replaceTerminalLines } from '../../utils/terminal/viewportManager';
+import { usePortSerialFeed } from './usePortSerialFeed';
 import TerminalView from '../MainDisplay/TerminalView';
-import { getViewportManager, replaceTerminalLines } from '../../utils/terminal/viewportManager';
+
+/** 快照交接超时（ms）：超时无条件开闸，见 `openGate` 兜底说明。 */
+const SNAPSHOT_FALLBACK_MS = 1000;
 
 interface TerminalPopoutProps {
   portId: string;
@@ -24,16 +23,20 @@ interface TerminalPopoutProps {
  * 架构原则（贯穿柔性工作区）：弹窗与主窗不共享可变前端态，只交换意图/事件。
  * - 历史：终端行是主窗内存态（不在 SQLite）。mount 时发 `popout:terminal:request-snapshot`，
  *   主窗经 `popout:terminal:snapshot` 一次性回推当前缓冲 + 显示态（request→reply 避免竞态）。
- * - 实时：后端 `serial:data` 是广播，本窗直接订阅并按 portId 过滤，走与主窗相同的
- *   RxPipeline（字节级行聚合 + rAF 批写）。弹窗是独立 webview —— getRxPipeline()
- *   自然接线到本窗自己的 store。
+ * - 实时：后端 `serial:data` 是广播，字节经 `usePortSerialFeed` 交给本窗的 RxPipeline
+ *   （与主窗同一条既有管线，弹窗是独立 webview 故单例自然隔离）。
+ * - 配置：走主窗同一条 `useConfigPersistence.loadConfig`，不另开一份配置加载路径。
  *
- * v1 限制（已记录）：
- * - 协议帧重组（ProtocolFrameReassembler）不在弹窗复刻——绑定协议模板的端口在弹窗里
- *   按原始流解码显示（无字段着色）。快照里既有的 parsedFields 行仍按字段着色渲染。
+ * 能力缺口（S-I4，在面板顶部显式标注，不静默缺失）：
+ * - 协议帧重组不在弹窗复刻——绑定协议模板的端口在弹窗里按原始流解码显示（无字段着色）。
+ *   快照里既有的 parsedFields 行仍按字段着色渲染。
  * - TX 回显是主窗前端行为（后端不发 TX 事件），故弹窗只显示 RX（及环回模拟回声）。
  */
 const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
+  const { t } = useTranslation();
+  const { loadConfig } = useConfigPersistence();
+  const { openGate } = usePortSerialFeed(portId);
+
   useEffect(() => {
     // OS window title mirrors the main-window convention: "HyperCom — <portId>"
     // so the user can identify the window from the taskbar/Alt-Tab. Fire-and-forget;
@@ -41,78 +44,86 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
     getCurrentWindow()
       .setTitle(`HyperCom — ${portId}`)
       .catch((e) => console.debug('[TerminalPopout] setTitle failed:', e));
+  }, [portId]);
 
-    const store = useTerminalStore.getState();
-    store.ensureTerminal(portId);
+  useEffect(() => {
+    useTerminalStore.getState().ensureTerminal(portId);
 
-    // 视觉一致性：加载高亮规则 + 全局配置（时间戳格式/字体），使 detached 终端
-    // 与主窗观感一致。均为一次性只读，fire-and-forget；失败仅退化为无高亮/默认配置。
+    // 视觉一致性：与主窗同一份配置来源（时间戳格式/字体/最大行数）与同一份高亮
+    // 规则来源。均为一次性只读，fire-and-forget；失败仅退化为默认观感。
+    void loadConfig().then(() => {
+      // 缓冲上限来自 config.maxDisplayLines——配置到位后补一次，覆盖建实例时的默认值。
+      getViewportManager(portId).applyLimits(computeBufferLimits());
+    });
     storageService
       .loadHighlightSets()
       .then((sets) => useRuleStore.getState().setHighlightRuleSets(sets))
       .catch((e) => console.debug('[TerminalPopout] loadHighlightSets failed:', e));
-    configService
-      .getConfig()
-      .then((config) => useAppStore.getState().setConfig(config))
-      .catch((e) => console.debug('[TerminalPopout] getConfig failed:', e));
+  }, [portId, loadConfig]);
 
-    const unlisteners: Array<() => void> = [];
+  useEffect(() => {
     let cancelled = false;
-    // Pipeline singleton for THIS webview — separate module scope from the
-    // main window yields a separate instance wired to this window's stores.
-    const pipeline = getRxPipeline();
+    let unlisten: (() => void) | null = null;
+    let gateOpened = false;
+    const fallbackTimer = setTimeout(() => openSnapshot(null), SNAPSHOT_FALLBACK_MS);
+
+    /** 交接只做一次：快照到达或兜底超时，先到者胜。 */
+    function openSnapshot(lastTs: number | null) {
+      if (gateOpened) return;
+      gateOpened = true;
+      clearTimeout(fallbackTimer);
+      openGate(lastTs);
+    }
 
     void (async () => {
       try {
-        const [unSnapshot, unData] = await Promise.all([
-          // 主窗回推快照：套用显示态 + 灌入历史行。encoding 经 setTerminalConfig
-          // 直接赋值（**不**走 setTerminalEncoding）——快照行的 content 已按该编码
-          // 解码好，重解码既冗余又可能扰动。先设显示态（含 maxLines）再灌行。
-          popoutEventService.onTerminalSnapshot((payload) => {
-            if (payload.portId !== portId) return;
-            const { lines, ...display } = payload.terminal;
-            const t = useTerminalStore.getState();
-            t.setTerminalConfig(portId, display);
-            // 竞态防护：快照 request→reply 期间实时 RX 可能已先入队并 append 到
-            // 本窗缓冲——此时无条件 replaceAll 会把实时新行一并清掉（显示层丢行）。
-            // 快照是主窗发送时刻的历史，实时行严格更新：仅在缓冲仍为空（无新行
-            // 到达）时整体替换；否则把快照历史行插到现有内容之前（append 保持
-            // 流顺序），保留已到达的实时行。
-            const vm = getViewportManager(portId);
-            if (vm.buffer.length === 0) {
-              replaceTerminalLines(portId, lines);
-            } else if (lines.length > 0) {
-              replaceTerminalLines(portId, [...lines, ...vm.buffer.snapshot()]);
-            }
-          }),
-          // 实时流：广播按 portId 过滤，经 RxPipeline 完成字节级行聚合 +
-          // rAF 批写。ignoreEmptyChars / 编码切换 / 静默 flush 全部管线内部处理。
-          eventService.onSerialData((event) => {
-            if (event.port_id !== portId) return;
-            pipeline.feedBytes(portId, event.data, event.timestamp);
-          }),
-        ]);
+        // 监听器注册是异步的：必须 await 就绪后再请求快照，否则主窗的 reply
+        // 会早于监听器到达而丢失。
+        const u = await popoutEventService.onTerminalSnapshot((payload) => {
+          if (payload.portId !== portId) return;
+          const { lines, ...display } = payload.terminal;
+          const { encoding, ...patch } = display;
+          const terminal = useTerminalStore.getState();
+          // encoding 只经 setTerminalEncoding（store 契约禁止经 setTerminalConfig
+          // 写它——渲染器要靠这次切换重解码惰性行）。
+          terminal.setTerminalConfig(portId, patch);
+          if (encoding) terminal.setTerminalEncoding(portId, encoding);
+          // 闸门打开前管线没写过本窗缓冲，快照是唯一写入者 → 无条件替换。
+          replaceTerminalLines(portId, lines);
+          openSnapshot(lines.length > 0 ? lines[lines.length - 1].timestamp : null);
+        });
         if (cancelled) {
-          unSnapshot();
-          unData();
+          u();
           return;
         }
-        unlisteners.push(unSnapshot, unData);
-        // 监听器就绪后再请求快照，保证主窗 reply 不会早于监听器到达而丢失。
+        unlisten = u;
         await popoutEventService.emitTerminalRequestSnapshot({ portId });
       } catch (e) {
-        console.debug('[TerminalPopout] listener registration failed:', e);
+        console.debug('[TerminalPopout] snapshot handshake failed:', e);
       }
     })();
 
     return () => {
       cancelled = true;
-      unlisteners.forEach((u) => u());
-      // Do NOT dispose the pipeline singleton — it has app lifetime.
+      clearTimeout(fallbackTimer);
+      unlisten?.();
     };
-  }, [portId]);
+  }, [portId, openGate]);
 
-  return <TerminalView portId={portId} />;
+  return (
+    <div className="popout-terminal">
+      {/* S-I4：弹窗与主窗的能力差异显式可见（不新增 i18n key，全部用既有文案组合）。 */}
+      <div className="popout-capability-hint">
+        <span>{t('terminalPopout.poppedOutHint', { port: portId })}</span>
+        <span>
+          {t('terminalView.protocolLabel')}
+          {t('terminalView.protocolNone')}
+        </span>
+        <span>{t('terminal.filter.rxOnly')}</span>
+      </div>
+      <TerminalView portId={portId} />
+    </div>
+  );
 };
 
 export default TerminalPopout;

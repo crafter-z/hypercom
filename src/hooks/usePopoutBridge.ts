@@ -1,9 +1,11 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { popoutEventService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
+import { getRxPipeline } from '../utils/rxPipeline';
 import { snapshotTerminalLines } from '../utils/terminal/viewportManager';
 
 /**
@@ -18,9 +20,12 @@ const SNAPSHOT_LINE_CAP = 5000;
  * 弹出窗是独立 webview，与主窗不共享可变前端态，只交换意图/事件：
  * - 入站：`popout:send-command` → 经 `sendToPort` 走主窗既有发送管线
  *   （TX 回显 / 流量统计 / 发送历史因此与手动发送完全一致）；
- *   `popout:open-config` → 打开 ConfigModal 指定页。
- * - 出站：订阅 store，命令集 / 活动标签变化时广播"刷新信号"
- *   （不携带数据——弹窗收到信号后自己回 SQLite / 自行消费载荷）。
+ *   `popout:open-config` → 打开 ConfigModal 指定页；
+ *   `popout:command-set-updated` → 写回 `useRuleStore` 活实体（K6）；
+ *   `popout:request-sync` → 对表（活动标签 / 命令集 / 端口状态）；
+ *   `popout:terminal:request-snapshot` → 回推终端历史快照。
+ * - 出站：订阅 store，命令集 / 活动标签变化时广播**完整载荷**
+ *   （弹窗直接消费，不回库重读——未保存的编辑不在盘上）。
  *
  * 与 useSerialReceive 同属"App 级单例监听器"：重复调用会双重注册。
  */
@@ -49,15 +54,29 @@ export function usePopoutBridge() {
 
     popoutEventService
       .onOpenConfig((payload) => {
-        const store = useAppStore.getState();
-        store.setConfigActiveTab(payload.page);
-        store.toggleConfigModal(true);
+        const ui = useSystemStore.getState();
+        ui.setConfigActiveTab(payload.page);
+        ui.toggleConfigModal(true);
       })
       .then((u) => {
         if (cancelled) u();
         else unlisteners.push(u);
       })
       .catch((e) => console.debug('[usePopoutBridge] onOpenConfig failed:', e));
+
+    // K6：弹窗里编辑命令集后整集回传。主窗 useRuleStore 是唯一真相，必须在这里
+    // 落地——弹窗那份 store 是空的（独立 webview），写它就是 no-op；而主窗之后的
+    // 任何一次 save_config 都会拿自己 store 里的活实体覆盖 config.json，不落地就
+    // 等于把弹窗的编辑回滚掉。
+    popoutEventService
+      .onCommandSetUpdated((payload) => {
+        useRuleStore.getState().updateSendCommandSet(payload.set.id, payload.set);
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisteners.push(u);
+      })
+      .catch((e) => console.debug('[usePopoutBridge] onCommandSetUpdated failed:', e));
 
     // 弹窗挂载即请求对表：回放当前活动标签 + 当前命令集，避免指示器/命令列表
     // 在首次变更信号到达前失真（命令集载荷含未保存编辑，弹窗无需回库重读）。
@@ -93,6 +112,9 @@ export function usePopoutBridge() {
           // 弹窗在端口终端尚未建立时快照，属正常竞态分支，非错误，不记录。
           return;
         }
+        // 先把主窗管线队列里的整行冲进环形缓冲：快照必须覆盖主窗到此刻为止收到的
+        // 全部事件，弹窗才能用「时间戳晚于快照末行」判定哪些实时事件还没进快照。
+        getRxPipeline().flushNow(payload.portId);
         const lines = snapshotTerminalLines(payload.portId, SNAPSHOT_LINE_CAP);
         void popoutEventService
           .emitTerminalSnapshot({ portId: payload.portId, terminal: { ...terminal, lines } })

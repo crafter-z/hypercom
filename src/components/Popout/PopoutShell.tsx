@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { Pin, PinOff, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { popoutService } from '../../services/tauri';
-import { popoutLabel } from './popoutLabel';
 import { useTextEditContextMenu } from '../shared/TextEditContextMenu';
 import QuickSendPanel from './QuickSendPanel';
 import TerminalPopout from './TerminalPopout';
@@ -40,7 +39,6 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
   // issue #7-10：弹出窗是独立 webview，同样需要自定义右键菜单替换原生菜单。
   const { element: textEditMenuElement } = useTextEditContextMenu();
 
-  const label = popoutLabel(kind, targetId);
   // Terminal pop-out titles include the port id (e.g. "终端 — COM3") so users
   // can identify the window at a glance when multiple terminals are popped out.
   // Quick-send stays as-is (singleton, no target).
@@ -52,10 +50,11 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
         : kind;
 
   const handleTogglePin = () => {
-    if (label == null) return;
     const next = !pinned;
+    // label 由后端从 kind + targetId 算出：前端不持有 label 计算逻辑（未知 kind
+    // 由后端返回错误，走 catch 分支）。
     popoutService
-      .setAlwaysOnTop(label, next)
+      .setAlwaysOnTop(kind, targetId, next)
       .then(() => setPinned(next))
       .catch((e) => console.debug('[PopoutShell] set_popout_always_on_top failed:', e));
   };
