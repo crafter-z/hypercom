@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { Settings, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const TitleBar: React.FC = () => {
-  const toggleConfigModal = useAppStore((state) => state.toggleConfigModal);
-  const setUIState = useAppStore((state) => state.setUIState);
-  const sidebarCollapsed = useAppStore((state) => state.ui.sidebarCollapsed);
+  const toggleConfigModal = useSystemStore((state) => state.toggleConfigModal);
+  const setUIState = useSystemStore((state) => state.setUIState);
+  const sidebarCollapsed = useSystemStore((state) => state.ui.sidebarCollapsed);
   const [isMaximized, setIsMaximized] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
   const { t } = useTranslation();

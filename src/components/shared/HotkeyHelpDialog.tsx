@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { X } from 'lucide-react';
 
 interface ShortcutRow {
@@ -19,8 +19,8 @@ const SHORTCUTS: ShortcutRow[] = [
 
 const HotkeyHelpDialog: React.FC = () => {
   const { t } = useTranslation();
-  const isOpen = useAppStore((s) => s.ui.isHotkeyHelpOpen);
-  const setUIState = useAppStore((s) => s.setUIState);
+  const isOpen = useSystemStore((s) => s.ui.isHotkeyHelpOpen);
+  const setUIState = useSystemStore((s) => s.setUIState);
 
   if (!isOpen) return null;
 

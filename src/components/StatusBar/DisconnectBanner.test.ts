@@ -6,7 +6,6 @@ const makeTab = (id: string): TabItem => ({
   id,
   title: id,
   isPinned: false,
-  isActive: false,
   splitPaneId: 'main',
 });
 

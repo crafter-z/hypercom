@@ -1,11 +1,15 @@
 import { useCallback } from 'react';
 import type { DragEndEvent } from '@dnd-kit/core';
 import { useAppStore } from '../../../stores/useAppStore';
-import type { SerialPort, PortGroup } from '../../../types';
 
-export interface UsePortDragEndOptions {
-  groups: PortGroup[];
-  ports: SerialPort[];
+/**
+ * 组头 droppable 的 id 约定：`GroupItem` 用它注册落点，这里用它反解落点属于哪个
+ * 组。两侧共用同一份拼装函数，避免「注册用 droppable-、解析用 drop-」这类漂移。
+ */
+export const GROUP_DROPPABLE_PREFIX = 'droppable-';
+
+export function groupDroppableId(groupId: string): string {
+  return `${GROUP_DROPPABLE_PREFIX}${groupId}`;
 }
 
 /**
@@ -18,9 +22,7 @@ export interface UsePortDragEndOptions {
  * all port/group lookups — including post-mutation reads — so that
  * operations like `movePortToGroup` are reflected immediately.
  */
-export function usePortDragEnd(options: UsePortDragEndOptions): (event: DragEndEvent) => void {
-  const { ports, groups } = options;
-
+export function usePortDragEnd(): (event: DragEndEvent) => void {
   return useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -38,9 +40,9 @@ export function usePortDragEnd(options: UsePortDragEndOptions): (event: DragEndE
     if (overPort) {
       // Dropped onto a port — use that port's group
       overGroupId = overPort.groupId;
-    } else if (overId.startsWith('droppable-')) {
+    } else if (overId.startsWith(GROUP_DROPPABLE_PREFIX)) {
       // Dropped onto a group header droppable — use that group directly
-      overGroupId = overId.slice('droppable-'.length);
+      overGroupId = overId.slice(GROUP_DROPPABLE_PREFIX.length);
     } else {
       return; // Unknown target
     }
@@ -89,5 +91,5 @@ export function usePortDragEnd(options: UsePortDragEndOptions): (event: DragEndE
         useAppStore.getState().reorderPorts(newGlobalOldIdx, newGlobalOverIdx);
       }
     }
-  }, [ports, groups]);
+  }, []);
 }

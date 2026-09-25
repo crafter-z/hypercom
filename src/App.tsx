@@ -14,10 +14,9 @@ import UpdateDialog from './components/shared/UpdateDialog';
 import SidebarResizeHandle from './components/shared/SidebarResizeHandle';
 import OperationPanelResizeHandle from './components/shared/OperationPanelResizeHandle';
 import ThemeProvider from './components/shared/ThemeProvider';
-import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUpdate } from './hooks';
-import { useHotkeys } from './hooks/useHotkeys';
-import { usePowerManagement } from './hooks/usePowerManagement';
+import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUpdate, useHotkeys, usePowerManagement } from './hooks';
 import { useAppStore } from './stores/useAppStore';
+import { useSystemStore } from './stores/useSystemStore';
 import { saveSessionSnapshot } from './utils/sessionSnapshot';
 import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
 import { computeBufferLimits, getManagerPortIds, getViewportManager } from './utils/terminal/viewportManager';
@@ -75,8 +74,8 @@ const App: React.FC = () => {
   // 应用自己的 剪切/复制/粘贴/全选 菜单（替代 webview 原生菜单），其余元素一律
   // 屏蔽原生菜单。取代了旧版"仅屏蔽非输入元素"的 contextmenu effect。
   const { element: textEditMenuElement } = useTextEditContextMenu();
-  const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth);
-  const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed);
+  const sidebarWidth = useSystemStore((s) => s.ui.sidebarWidth);
+  const sidebarCollapsed = useSystemStore((s) => s.ui.sidebarCollapsed);
 
   // 诊断日志开关：随 config.diagLogEnabled 同步前端日志转发（issue #5-2 对齐 wire 名）。
   const diagLogEnabled = useAppStore((s) => s.config.diagLogEnabled);

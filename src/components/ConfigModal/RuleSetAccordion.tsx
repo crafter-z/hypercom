@@ -1,15 +1,11 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Check, Trash2 } from 'lucide-react';
+import { Check, ChevronRight, Plus, Trash2 } from 'lucide-react';
 
-/**
- * Generic accordion component for rule-set / command-set CRUD UI.
- * Eliminates the duplicated expand/collapse/save/delete structure
- * that was previously copy-pasted between HighlightSettings and CommandSettings.
- */
-interface RuleSetAccordionProps<TSet extends { id: string; name: string }> {
+export interface RuleSetAccordionProps<TSet extends { id: string; name: string }> {
   title: string;
-  description: string;
+  /** Page-level blurb; pages without one render no paragraph. */
+  description?: string;
   addLabel: string;
   emptyText: string;
   items: TSet[];
@@ -19,15 +15,28 @@ interface RuleSetAccordionProps<TSet extends { id: string; name: string }> {
   onDelete: (id: string) => void;
   onSave: (id: string) => void;
   onRename: (id: string, name: string) => void;
-  renderHeaderExtra: (set: TSet) => React.ReactNode;
+  /** Header slot right of the name field (enable checkbox, loop toggle, port chip…). */
+  renderHeaderExtra?: (set: TSet) => React.ReactNode;
   renderEditor: (set: TSet) => React.ReactNode;
-  countLabel: (set: TSet) => string;
-  addItemLabel: string;
-  onAddItem: (setId: string) => void;
-  itemCount: (set: TSet) => number;
-  emptyItemText: string;
+  /** Header count text; pages whose header carries no count omit it. */
+  countLabel?: (set: TSet) => string;
+  /** Child-entity CRUD. Omit for pages whose editor edits the set itself. */
+  addItemLabel?: string;
+  onAddItem?: (setId: string) => void;
+  itemCount?: (set: TSet) => number;
+  emptyItemText?: string;
 }
 
+/**
+ * One accordion row per entity: inline-renameable name field + header slot +
+ * ✓ save + delete, over a collapsible body holding the row editor.
+ *
+ * Purely presentational: the load / dirty / save / delete lifecycle lives in
+ * `useEntityPage`, so every settings page that manages a list of entities shares
+ * one skeleton. The arrow is the lucide chevron used elsewhere in the app rather
+ * than a text glyph, so the three pages that hand-rolled this markup look the
+ * same as the ones that did not.
+ */
 function RuleSetAccordion<TSet extends { id: string; name: string }>({
   title, description, addLabel, emptyText, items, selectedId, onSelect,
   onAdd, onDelete, onSave, onRename, renderHeaderExtra, renderEditor,
@@ -40,7 +49,7 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
         <h3 className="config-page-title" style={{ marginBottom: 0 }}>{title}</h3>
         <button className="btn btn-sm" onClick={onAdd}><Plus size={14} /> {addLabel}</button>
       </div>
-      <p className="config-page-desc">{description}</p>
+      {description && <p className="config-page-desc">{description}</p>}
 
       {items.length === 0 && <div className="config-placeholder">{emptyText}</div>}
 
@@ -50,7 +59,14 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
             style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'var(--bg-secondary)', cursor: 'pointer' }}
             onClick={() => onSelect(set.id)}
           >
-            <span>{selectedId === set.id ? '▼' : '▶'}</span>
+            <ChevronRight
+              size={12}
+              style={{
+                flexShrink: 0,
+                transform: selectedId === set.id ? 'rotate(90deg)' : 'none',
+                transition: 'transform 0.15s',
+              }}
+            />
             <input
               className="input"
               value={set.name}
@@ -58,8 +74,10 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
               onClick={e => e.stopPropagation()}
               style={{ border: 'none', background: 'transparent', fontWeight: 600, flex: 1, minWidth: 0 }}
             />
-            {renderHeaderExtra(set)}
-            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{countLabel(set)}</span>
+            {renderHeaderExtra?.(set)}
+            {countLabel && (
+              <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{countLabel(set)}</span>
+            )}
             <button className="btn btn-icon btn-sm" title={t('ruleSetAccordion.saveToDb')} onClick={e => { e.stopPropagation(); onSave(set.id); }}>
               <Check size={14} />
             </button>
@@ -70,11 +88,15 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
 
           {selectedId === set.id && (
             <div style={{ padding: 10 }}>
-              {itemCount(set) === 0 && <div className="config-placeholder" style={{ fontSize: 12 }}>{emptyItemText}</div>}
+              {onAddItem && itemCount && itemCount(set) === 0 && (
+                <div className="config-placeholder" style={{ fontSize: 12 }}>{emptyItemText}</div>
+              )}
               {renderEditor(set)}
-              <button className="btn btn-sm" onClick={() => onAddItem(set.id)} style={{ marginTop: 8 }}>
-                <Plus size={12} /> {addItemLabel}
-              </button>
+              {onAddItem && (
+                <button className="btn btn-sm" onClick={() => onAddItem(set.id)} style={{ marginTop: 8 }}>
+                  <Plus size={12} /> {addItemLabel}
+                </button>
+              )}
             </div>
           )}
         </div>

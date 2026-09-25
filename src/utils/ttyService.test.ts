@@ -13,6 +13,7 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { serialService, gitBashSimService } from '../services/tauri';
 import { ttyService, MAX_TTY_QUEUE, TX_COALESCE_MS, TX_MAX_BATCH_BYTES } from './ttyService';
 import { trafficStats } from './trafficStats';
@@ -236,10 +237,10 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     await drainMicrotasks();
     expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
     expect(serialService.sendSerialData).toHaveBeenCalledWith({
-      port_id: 'COM1',
+      portId: 'COM1',
       data: 'abcd\r',
-      is_hex: false,
-      append_line_ending: 'None',
+      isHex: false,
+      appendLineEnding: 'None',
     });
     expect(ttyService.get('COM1')?.txBuffer).toBe('');
   });
@@ -274,10 +275,10 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     vi.advanceTimersByTime(TX_COALESCE_MS);
     await drainMicrotasks();
     // P1-1：TX 统计经 1s 聚合器——flushNow 前 store 未更新
-    expect(useAppStore.getState().trafficStats.COM1).toBeUndefined();
+    expect(useSystemStore.getState().trafficStats.COM1).toBeUndefined();
     trafficStats.flushNow();
-    expect(useAppStore.getState().trafficStats.COM1?.txTotal).toBe(2);
-    expect(useAppStore.getState().trafficStats.COM1?.rxTotal).toBe(0);
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(2);
+    expect(useSystemStore.getState().trafficStats.COM1?.rxTotal).toBe(0);
   });
 
   it('accumulates txTotal across batches (totals stay exact)', async () => {
@@ -289,7 +290,7 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     vi.advanceTimersByTime(TX_COALESCE_MS);
     await drainMicrotasks();
     trafficStats.flushNow();
-    expect(useAppStore.getState().trafficStats.COM1?.txTotal).toBe(6);
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(6);
   });
 
   it('logs and swallows send errors (no toast / no throw)', async () => {
@@ -316,10 +317,10 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     await drainMicrotasks();
     expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
     expect(serialService.sendSerialData).toHaveBeenCalledWith({
-      port_id: 'COM1',
+      portId: 'COM1',
       data: 'ab',
-      is_hex: false,
-      append_line_ending: 'None',
+      isHex: false,
+      appendLineEnding: 'None',
     });
     // detach 后状态重建，TX 字段归零
     expect(ttyService.get('COM1')?.txBuffer).toBe('');
@@ -413,7 +414,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   ttyService.reset();
   trafficStats.reset();
-  useAppStore.setState({ trafficStats: {}, ports: [] });
+  useSystemStore.setState({ trafficStats: {} });
+  useAppStore.setState({ ports: [] });
 });
 
 afterEach(() => {

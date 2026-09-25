@@ -3,9 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { open } from '@tauri-apps/plugin-shell';
 import { useAppStore } from '../../stores/useAppStore';
-import { useRuleStore } from '../../stores/useRuleStore';
-import { configService, updateService } from '../../services/tauri';
-import { mergeLiveRuleEntities } from '../../utils/configMerge';
+import { useSystemStore } from '../../stores/useSystemStore';
+import { useConfigPersistence } from '../../hooks';
+import { updateService } from '../../services/tauri';
 import { notifyError, notifySuccess } from '../../stores/useToastStore';
 import { channelLabelKey, releaseUrl } from '../../utils/channel';
 import { parseChangelog, splitBold } from '../../utils/changelog';
@@ -37,9 +37,10 @@ const ChangelogBlocks: React.FC<{ notes: string }> = ({ notes }) => (
 /** 更新弹窗（issue #12）：展示版本/日期/changelog + 三动作决策流。 */
 const UpdateDialog: React.FC = () => {
   const { t } = useTranslation();
-  const isOpen = useAppStore((s) => s.ui.isUpdateOpen);
-  const candidate = useAppStore((s) => s.ui.updateCandidate);
-  const setUIState = useAppStore((s) => s.setUIState);
+  const isOpen = useSystemStore((s) => s.ui.isUpdateOpen);
+  const candidate = useSystemStore((s) => s.ui.updateCandidate);
+  const setUIState = useSystemStore((s) => s.setUIState);
+  const { saveConfig } = useConfigPersistence();
 
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<UpdateProgressPayload | null>(null);
@@ -69,18 +70,13 @@ const UpdateDialog: React.FC = () => {
 
   const close = () => setUIState({ isUpdateOpen: false, updateCandidate: null });
 
-  /** 同步「永不提醒」→ 设置项 updateCheckMode=none（全量保存，含活实体合并）。 */
+  /** 同步「永不提醒」→ 设置项 updateCheckMode=none。 */
   const disableAutoCheck = async () => {
-    const store = useAppStore.getState();
-    store.setConfig({ updateCheckMode: 'none' });
-    try {
-      await configService.setConfig(
-        mergeLiveRuleEntities(useAppStore.getState().config, useRuleStore.getState()),
-      );
-      notifySuccess('update.neverReminderDone');
-    } catch (e) {
-      notifyError(e);
-    }
+    useAppStore.getState().setConfig({ updateCheckMode: 'none' });
+    // Only this field is passed: the safe snapshot inside saveConfig supplies the
+    // entity arrays, so the startup config snapshot must not be handed over whole.
+    await saveConfig({ updateCheckMode: 'none' });
+    notifySuccess('update.neverReminderDone');
   };
 
   /** 立即更新：下载+安装 → relaunch（Windows 由 installer 重启，此调用无害）。 */

@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../../stores/useAppStore';
+import React from 'react';
+import { useSystemStore } from '../../stores/useSystemStore';
+import { useDragResize } from './useDragResize';
 
 const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 600;
@@ -12,38 +13,28 @@ const MAX_HEIGHT = 600;
  * `styles/operation-panel.css` (`.operation-panel-resize-handle`).
  */
 const OperationPanelResizeHandle: React.FC = () => {
-  const setUIState = useAppStore((s) => s.setUIState);
-  const [dragging, setDragging] = useState(false);
-  const start = useRef({ y: 0, height: 0 });
+  const setUIState = useSystemStore((s) => s.setUIState);
+  // Height at drag start — the hook reports pointer deltas, the clamped
+  // absolute height is this component's geometry, not a shared concern.
+  const startHeightRef = React.useRef(0);
 
-  useEffect(() => {
-    if (!dragging) return;
-    const handleMouseMove = (e: MouseEvent) => {
-      // Dragging up (clientY decreases) must grow the panel => positive delta.
-      const delta = start.current.y - e.clientY;
-      const next = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, start.current.height + delta));
+  const { dragging, onMouseDown } = useDragResize({
+    axis: 'y',
+    mode: 'delta',
+    invert: true,
+    onDragStart: () => {
+      startHeightRef.current = useSystemStore.getState().ui.operationPanelHeight;
+    },
+    onChange: (delta) => {
+      const next = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, startHeightRef.current + delta));
       setUIState({ operationPanelHeight: next, isOperationPanelCollapsed: false });
-    };
-    const handleMouseUp = () => setDragging(false);
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [dragging, setUIState]);
+    },
+  });
 
   return (
     <div
       className={`operation-panel-resize-handle${dragging ? ' dragging' : ''}`}
-      onMouseDown={(e) => {
-        e.preventDefault();
-        start.current = {
-          y: e.clientY,
-          height: useAppStore.getState().ui.operationPanelHeight,
-        };
-        setDragging(true);
-      }}
+      onMouseDown={onMouseDown}
     />
   );
 };

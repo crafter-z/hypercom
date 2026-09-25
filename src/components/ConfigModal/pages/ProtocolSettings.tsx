@@ -1,51 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
-import { notifyError } from '../../../stores/useToastStore';
 import type { ProtocolTemplate } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import ProtocolTemplateEditor from '../editors/ProtocolTemplateEditor';
+import { useEntityPage } from '../hooks/useEntityPage';
 
 const ProtocolSettings: React.FC = () => {
   const { t } = useTranslation();
   const protocolTemplates = useRuleStore((s) => s.protocolTemplates);
-  const addProtocolTemplate = useRuleStore((s) => s.addProtocolTemplate);
   const updateProtocolTemplate = useRuleStore((s) => s.updateProtocolTemplate);
-  const removeProtocolTemplate = useRuleStore((s) => s.removeProtocolTemplate);
-  const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
 
-  useEffect(() => {
-    storageService.loadProtocolTemplates().then(templates => {
-      // 无条件替换：空结果也要写入 store，否则「删光全部模板」后重开弹窗
-      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
-      useRuleStore.getState().setProtocolTemplates(templates);
-    }).catch((e) => {
-      console.warn('[ConfigModal] loadProtocolTemplates failed:', e);
-      notifyError(e);
-    });
-  }, []);
-
-  const handleRemoveSet = async (setId: string) => {
-    removeProtocolTemplate(setId);
-    try { await storageService.deleteProtocolTemplate(setId); } catch (e) { console.error('Failed to delete protocol template:', e); notifyError(e); }
-  };
-
-  const handleSaveSet = async (setId: string) => {
-    const template = useRuleStore.getState().protocolTemplates.find(t => t.id === setId);
-    if (!template) return;
-    try {
-      await storageService.saveProtocolTemplate(template);
-    } catch (err) {
-      console.error('Failed to save protocol template:', err);
-      notifyError(err);
-    }
-  };
+  const page = useEntityPage<ProtocolTemplate>({
+    items: protocolTemplates,
+    label: 'ProtocolSettings',
+    ops: {
+      load: () => storageService.loadProtocolTemplates(),
+      read: () => useRuleStore.getState().protocolTemplates,
+      replace: (items) => useRuleStore.getState().setProtocolTemplates(items),
+      add: (template) => useRuleStore.getState().addProtocolTemplate(template),
+      drop: (id) => useRuleStore.getState().removeProtocolTemplate(id),
+      persist: (template) => storageService.saveProtocolTemplate(template),
+      remove: (id) => storageService.deleteProtocolTemplate(id),
+    },
+  });
 
   const handleAddSet = () => {
-    const id = `proto-${Date.now()}`;
-    addProtocolTemplate({
-      id,
+    page.create({
+      id: `proto-${Date.now()}`,
       name: t('protocolSettings.addSet'),
       isEnabled: true,
       headerBytes: '',
@@ -62,10 +45,7 @@ const ProtocolSettings: React.FC = () => {
       colorChecksum: '#b5cea8',
       colorFooter: '#6a9955',
     });
-    setExpandedSetId(id);
   };
-
-  const handleSelect = (id: string) => setExpandedSetId(expandedSetId === id ? null : id);
 
   return (
     <RuleSetAccordion<ProtocolTemplate>
@@ -74,11 +54,11 @@ const ProtocolSettings: React.FC = () => {
       addLabel={t('protocolSettings.accordionAddLabel')}
       emptyText={t('protocolSettings.accordionEmptyText')}
       items={protocolTemplates}
-      selectedId={expandedSetId}
-      onSelect={handleSelect}
+      selectedId={page.expandedId}
+      onSelect={page.toggleExpanded}
       onAdd={handleAddSet}
-      onDelete={handleRemoveSet}
-      onSave={handleSaveSet}
+      onDelete={page.remove}
+      onSave={page.save}
       onRename={(id, name) => updateProtocolTemplate(id, { name })}
       renderHeaderExtra={(template) => (
         <label className="checkbox-wrapper" style={{ fontSize: 11 }} onClick={e => e.stopPropagation()}>
@@ -93,14 +73,9 @@ const ProtocolSettings: React.FC = () => {
         <ProtocolTemplateEditor
           template={template}
           onChange={(patch) => updateProtocolTemplate(template.id, patch)}
-          onDelete={() => handleRemoveSet(template.id)}
+          onDelete={() => page.remove(template.id)}
         />
       )}
-      countLabel={() => ''}
-      addItemLabel=""
-      onAddItem={() => {}}
-      itemCount={() => 0}
-      emptyItemText=""
     />
   );
 };

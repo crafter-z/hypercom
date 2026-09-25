@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../i18n';
 import { useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
 import { useSystemStatus } from '../../hooks';
@@ -40,8 +41,8 @@ interface RateDisplay {
 }
 
 const StatusBar: React.FC = () => {
-  const systemStatus = useAppStore((s) => s.systemStatus);
-  const trafficStats = useAppStore((s) => s.trafficStats);
+  const systemStatus = useSystemStore((s) => s.systemStatus);
+  const trafficStats = useSystemStore((s) => s.trafficStats);
   const activeTabId = useAppStore((s) => s.activeTabId);
   const ports = useAppStore((s) => s.ports);
   const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
@@ -83,7 +84,7 @@ const StatusBar: React.FC = () => {
         return;
       }
 
-      const stats = useAppStore.getState().trafficStats[portId];
+      const stats = useSystemStore.getState().trafficStats[portId];
       const rx = stats?.rxTotal ?? 0;
       const tx = stats?.txTotal ?? 0;
       const ts = Date.now();

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
 import { X, ExternalLink, ScrollText, Bug, Download } from 'lucide-react';
@@ -13,8 +13,8 @@ import type { ReleaseChannel } from '../../types';
 
 const AboutDialog: React.FC = () => {
   const { t } = useTranslation();
-  const isOpen = useAppStore((s) => s.ui.isAboutOpen);
-  const setUIState = useAppStore((s) => s.setUIState);
+  const isOpen = useSystemStore((s) => s.ui.isAboutOpen);
+  const setUIState = useSystemStore((s) => s.setUIState);
   const [version, setVersion] = useState('');
   const [showLicenses, setShowLicenses] = useState(false);
   const [showDiagLog, setShowDiagLog] = useState(false);
