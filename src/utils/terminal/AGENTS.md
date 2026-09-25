@@ -31,11 +31,13 @@ TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同
    存活行 seq 不变 → renderer 不重画未变行。`clear()` 不重置 nextSeq（seq 永不复用）。
 2. **frozen null 归一化**：`seqToVisIdx`/`visIdxToSeq` 收到 `frozen = null` 必须归一化为
    `Number.MAX_SAFE_INTEGER`——原生 `seq > null`（null→0）会把所有行判为隐藏。
-3. **节点池必须重新挂载 + DOM 顺序 == 视觉顺序**：`recycle` 把节点从 DOM 移除入池；
-   `acquire` 复用池节点时节点脱离文档，插入统一走 **`insertRowInOrder`（按 visIdx
-   归位）**——仅 appendChild 会把补位行堆到 contentLayer 末尾，向上滚动补位时 DOM
-   顺序颠倒，浏览器跨行拖拽选择按 DOM 顺序拼接选区 → 视觉中间的行被跳过（真实 bug，
-   回归测试 `keeps DOM order == visual order` 覆盖）。
+3. **流式布局：DOM 顺序 == 视觉顺序由结构保证（issue #18）**：contentLayer =
+   `[headSpacer][行…][tailSpacer]`，行是普通文档流子元素（固定行高），spacer 承载
+   屏外空间；新行插在「首个 visIdx 更大的可见行」之前（`findFlowAnchor`，停车行占
+   真实流槽位、必须作为锚点候选），**没有任何节点被移动**。旧 absolute+translateY
+   格子与 `insertRowInOrder`/每帧排序修复（issue #14/#15 一类 bug 的温床）已结构性
+   删除——浏览器按 DOM 顺序拼接跨行拖拽选区，顺序一乱视觉中间的行就被跳过。
+   `TerminalRenderer.ts` 文件头的 R1–R15 是完整契约清单。
 4. **`visibleSeqsOffset`**：过滤列表从头部被缓冲裁剪时只 bump offset（O(1)），
    超过 `COMPACT_THRESHOLD = 4096` 才 splice 压缩——append 摊还 O(1)。renderer 用
    offset 索引过滤列表，勿在 manager 外直接改 `filtered.seqs`。
@@ -62,8 +64,20 @@ TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同
     返回值弹通知。`computeBufferLimits()` 从 `config.maxDisplayLines` 派生
     `{ maxLines }`（缺省 100000，下限 1000）。
 
+11. **解码器单一来源（K8）**：`src/utils/lineText.ts` 是全仓唯一的 TextDecoder
+    工厂与缓存（`createDecoder` / `decodeBytes`，统一 `ignoreBOM: false` —— 行首
+    BOM 作为编码标记被剥离，不进入行文本/搜索/复制）。RxPipeline 的 per-port
+    缓存与 ttyService 的流式解码器都从这里取（流式实例持残字节，必须 per-port
+    独占，不能共用一份）。新增解码路径一律走它，不要再 `new TextDecoder`。
+
+12. **过滤/搜索只有一份实现**：`src/utils/lineFilter.ts` 只提供 `linePassesFilter`
+    谓词；命中列表（append 时增量匹配、`offset` 压缩、缓冲裁剪回退）只在
+    `viewportManager.recomputeFilter`/`recomputeSearch`。`TerminalRenderer.ts`
+    文件头是渲染契约清单（R1–R15），`TerminalRenderer.soak.test.ts` 按编号引用、
+    结构化断言 R1–R6；不要在别处再实现一份匹配扫描或变量子。
+
 ## 编辑纪律
 
 - 大块结构变更用整文件 `write`（edit 工具的多行块匹配在本目录多次损坏文件）。
-- 改动后先跑 `npx vitest run src/utils/terminal/`（58 测试）再跑全量。
+- 改动后先跑 `npx vitest run src/utils/terminal/`（101 测试）再跑全量。
 - 行为变化必须补测试：seq 稳定性、池复用、offset 压缩、frozen null、裁剪通知。

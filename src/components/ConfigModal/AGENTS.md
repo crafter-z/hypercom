@@ -1,37 +1,51 @@
 # src/components/ConfigModal/
 
-Multi-page settings modal. Split into `pages/` (9 settings), `editors/` (3 row form editors), and `RuleSetAccordion.tsx`.
+Multi-page settings modal. Split into `pages/` (9 settings pages), `editors/` (3 row form editors), `hooks/` (the shared entity-page contract), and `RuleSetAccordion.tsx` (the shared row shell).
 
 ## Files
 
-| File | Lines | Role |
-|------|------:|-----|
-| `ConfigModal.tsx` | 180 | tab switcher (9 pages) + dialog open/close (pointerdown 记录起点，框选松手界外不关闭，issue #6-8) |
-| `RuleSetAccordion.tsx` | 78 | collapsed rule-set listing |
-| `pages/GeneralSettings.tsx` | ~230 | theme + language + ports refresh interval + 内存预算双配置（总/每端口）+ **自动更新三态 radio**（`updateCheckMode: none/stable/preview`，issue #12）。模式变更的清账副作用在 **`ConfigModal.handleSave` 保存边界**执行（`updateTiming.clearSnooze()+clearLastCheck()`，issue #12 复审——旧在 radio onChange，取消时配置回滚但 snooze 已清，副作用泄漏；清 lastCheckAt 使新通道立即生效）；**二轮**：保存后 mode 实际变化且非 none → `runAutoCheck` 后台立即首检（bypass 周期/snooze，有更新弹窗）；页面显示「上次自动检查」时间（localStorage 记账，挂载时读取） |
-| `pages/LogSettings.tsx` | ~195 | file path template, shard threshold, auto-start, encoding (ASCII/UTF-8/GBK/ISO-8859-1), **每次打开新建日志文件**（`logNewFilePerSession`，issue：不续写已有文件）, directory-change migration dialog (DirChangeDialog) |
-| `pages/BackupSettings.tsx` | 33 | import/export config file |
-| `pages/DisplaySettings.tsx` | ~140 | 预设波特率 / 显示串口类型 / 默认换行 / 发送提示前缀 / 时间戳模式与格式；**背景图设置**（issue #13 区段：启用勾选 → 路径浏览（plugin-dialog 图片过滤器）→ 不透明度 0–100 / 模糊度 0–64 number input + `clampNumber`），写 `backgroundImage*` 四字段 |
-| `pages/HighlightSettings.tsx` | 126 | bind `useRuleStore` highlight sets + manage rules |
-| `pages/CommandSettings.tsx` | 142 | bind `useRuleStore` send-command sets + manage commands |
-| `pages/ProtocolSettings.tsx` | 132 | protocol templates: frame head/length/checksum/tail |
-| `pages/ToolSettings.tsx` | 100 | per-port external tool command template config (`{port}` placeholder) |
-| `pages/TriggerSettings.tsx` | ~200 | conditional trigger rules: pattern match → alert/auto-respond; optional per-port scoping (`portId` dropdown, empty=all) |
-| `editors/HighlightRuleEditor.tsx` | 35 | row form for highlight rule |
-| `editors/SendCmdEditor.tsx` | 30 | row form for send command |
-| `editors/ProtocolTemplateEditor.tsx` | 164 | field-by-field template form |
+| File | Role |
+|---|---|---|
+| `ConfigModal.tsx` | tab switcher (9 pages) + dialog open/close (pointerdown 记录起点，框选松手界外不关闭) + **save boundary** (update-channel bookkeeping, then `saveConfig`) |
+| `hooks/useEntityPage.ts` | **the** load / dirty / save / delete contract for every entity page (see below) |
+| `RuleSetAccordion.tsx` | presentational row shell: chevron + inline rename + header slot + ✓ save + delete, collapsible body. `description` / `countLabel` / `onAddItem` are optional so pages whose editor edits the entity itself render no child-CRUD furniture |
+| `pages/GeneralSettings.tsx` | close behavior + max display lines + language + theme + power flags + Enter semantics + reconnect retries + **auto-update tri-state radio** (`updateCheckMode: none/stable/preview`) + fonts + config path |
+| `pages/LogSettings.tsx` | file path template, shard threshold, per-session new file, directory-change migration dialog (DirChangeDialog), directory/subdir mode, timestamp/direction, format, encoding, split size |
+| `pages/BackupSettings.tsx` | backup interval/directory + import/export config bundle (`version: 2` = one embedded `AppConfig`) |
+| `pages/DisplaySettings.tsx` | preset baud rates / port type badge / default line ending / send prefix / timestamp mode+format; background image (enable → path → opacity / blur) |
+| `pages/HighlightSettings.tsx` | bind `useRuleStore` highlight sets + manage rules |
+| `pages/CommandSettings.tsx` | bind `useRuleStore` send-command sets + manage commands (loop toggle, loop delay, repeat count) |
+| `pages/ProtocolSettings.tsx` | protocol templates: frame head/length/checksum/tail |
+| `pages/ToolSettings.tsx` | per-port external tool command template (`{port}` placeholder) |
+| `pages/TriggerSettings.tsx` | conditional trigger rules: pattern match → alert/auto-respond; optional per-port scoping (`portId` dropdown, empty = all); the only auto-saved entity page |
+| `editors/HighlightRuleEditor.tsx` | row form for highlight rule |
+| `editors/SendCmdEditor.tsx` | row form for send command |
+| `editors/ProtocolTemplateEditor.tsx` | field-by-field template form |
+
+## Entity page contract (`hooks/useEntityPage.ts`)
+
+Five pages (highlight sets, command sets, protocol templates, tool configs, trigger rules) manage a list of entities. They all go through this hook — do **not** hand-roll a load/save/delete skeleton in a page:
+
+1. **Mount** → load the whole list and replace the store, *unless* the user mutated the store while the load was in flight (immer keeps the array reference stable until a mutation, so reference equality is the test). An empty backend result always replaces: skipping it resurrects entities the user deleted (they reappear on the next open and get written back to config.json).
+2. **Edits** mutate the store immediately; the store is the single source of truth for the whole-list save in `ConfigModal.handleSave`.
+3. **Persistence** is either manual (row ✓) or debounced-auto (`autoSaveDebounceMs`) — never both. Only trigger rules use `autoSaveDebounceMs: 300` (plus an unmount flush, so closing the dialog never drops the last keystroke); for auto-saved collections a newly created row is also persisted immediately, because a create must not depend on the debounce window.
+4. **Delete** = store drop + backend delete; a failed delete keeps the row gone from the store and toasts the error.
+
+Pages may only *extend* the contract through `autoSaveDebounceMs`; any other divergence is a bug. Row ✓ has no success toast (errors always toast).
 
 ## Conventions (root covers i18n rules)
 
-- All rule/command state lives in `useRuleStore` (highlight rule sets, send-command sets, protocol templates, trigger rules). Pages read via selectors; mutations route through store actions.
-- Persistence: `useEffect` onLoad reads via `storageService` (invoke → `commands/storage.rs`, which is config-backed — it mutates `AppConfig` entity arrays and writes config.json, NOT a database); saves happen on the action itself, not on unmount. Direct invoke from a page is forbidden — go through `src/services/tauri.ts`.
+- All rule/command state lives in `useRuleStore` (highlight rule sets, send-command sets, protocol templates, trigger rules, port tool configs). Pages read via selectors; mutations route through store actions; pages never write `useAppStore.config`'s entity arrays.
+- Persistence: entity CRUD is single-entity via `storageService` (invoke → `commands/storage.rs`, which mutates the `AppConfig` entity arrays and writes config.json — NOT a database); the whole-list write happens only at the modal's save boundary through `useConfigPersistence.saveConfig`, which builds a safe snapshot (live rule entities, `groups`, `ports`-derived `portMeta`, backend `portPresets`) instead of trusting the startup `config` snapshot. Direct invoke from a page is forbidden — go through `src/services/tauri.ts`.
+- Numeric inputs take their range from `CONFIG_BOUNDS` (`src/utils/bounds.ts`, the frontend's single source; the Rust side mirrors it and `bounds.test.ts` asserts the two tables match). Page-local ranges (e.g. a command set's `loopDelay`) are declared once per page as a `[min, max]` pair so the `clampNumber` arguments and the `min`/`max` attributes cannot drift.
 - Each row editor is a small presentational component declared at module level. NEVER inline `<Editor>` JSX inside a page body — rerender churn causes input focus loss.
-- Pages use `useTranslation()`'s `t()` for visible strings. Do not translate protocol vocabulary (`None/Even/Odd/Mark/Space`, `Xon/Xoff`, encoding names, units like `ms/px/MB`, acronyms `SIM/VCP/HEX/DTR/RTS`).
+- Pages use `useTranslation()`'s `t()` for visible strings. Do not translate protocol vocabulary (`None/Even/Odd`, `Xon/Xoff`, encoding names, units like `ms/px/MB`, acronyms `SIM/VCP/HEX/DTR/RTS`).
 
 ## Anti-patterns
 
 - Subscribing the whole `useRuleStore` — every CRUD action re-renders every page.
-- Storing rule state inside `useAppStore.config` — that store is for general user-side config; use the dedicated `useRuleStore`.
+- Storing rule state inside `useAppStore.config` — that store is a read-only startup snapshot; use `useRuleStore`.
 - Bypassing `storageService` and invoking Rust commands inline — they return `CommandError` and need typed mapping at the service layer.
 - Defining editor components inside page bodies — focus loss guaranteed.
 - Hard-coding strings instead of `t('namespace.key')` — page text won't switch with language toggle.
+- Adding a second persistence mechanism to a page (a bespoke debounce, a save-on-unmount, a manual ✓ handler) instead of `useEntityPage`.

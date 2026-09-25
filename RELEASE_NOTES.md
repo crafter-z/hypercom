@@ -391,7 +391,7 @@ v0.3.x 及更早版本用户将在应用内收到更新提示，更新弹窗会�
 ## 重构与清理
 - 死代码删除：`useRuleStore.activeHighlightSetId`/`activeProtocolTemplateId` 及 setter（全仓零生产消费）、`useConfigPersistence.resetAndReload`（零消费）、`logService.setLogDirectory`（零消费，后端命令保留）、`useSerialReceive.setupPromiseRef`（死 ref）、`hasViewportManager` 导出、i18n 12 个零引用 key（550 键/侧）
 - 重复实现合并：`clampNumber` 5 份页内拷贝 → `utils/clampNumber.ts`；`performance.memory` 读取两份 → `utils/jsHeap.ts`；`usePanelCyclicSend.onProgress` 死参数回调删除
-- 文档对齐：AGENTS.md / hooks / ConfigModal / MainDisplay 计数断言全部修正（15 hooks / 11 域文件 / 16 CSS / 9 pages / 550 i18n 键），移除 MainDisplay 文档中已删的 TerminalRow.tsx 幽灵条目与 react-virtual 描述；ISSUES_ANALYSIS.md / TTY_PERF_INVESTIGATION.md 标注结论过时
+- 文档对齐：AGENTS.md / hooks / ConfigModal / MainDisplay 计数断言全部修正（15 hooks / 11 域文件 / 16 CSS / 9 pages / 550 i18n 键），移除 MainDisplay 文档中已删的 TerminalRow.tsx 幽灵条目与 react-virtual 描述；结论已过时的排查报告 ISSUES_ANALYSIS.md / TTY_PERF_INVESTIGATION.md 删除（其结论已被本轮修复覆盖）
 
 ## Bugfix（异步时序）
 - 重连循环不再无视用户关闭意图：每轮退避前检查 `userClosingPortIds`，用户主动关闭后循环立即中止（此前会在下一次重试时悄悄重开；不能看 port.status——后端先发 disconnected 再发 reconnect_hint，attempt=0 时 store 已是 disconnected，会误杀循环）
