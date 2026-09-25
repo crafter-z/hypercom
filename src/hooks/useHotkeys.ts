@@ -12,6 +12,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { clearTerminal } from '../utils/terminal/viewportManager';
 import { useSerialConnection } from './useSerialConnection';
 
@@ -34,11 +35,11 @@ export function useHotkeys(): void {
 
       // Escape always works — close topmost modal/dialog
       if (e.key === 'Escape') {
-        const state = useAppStore.getState();
-        if (state.ui.isHotkeyHelpOpen) {
-          state.setUIState({ isHotkeyHelpOpen: false });
-        } else if (state.ui.isConfigOpen) {
-          state.toggleConfigModal(false);
+        const system = useSystemStore.getState();
+        if (system.ui.isHotkeyHelpOpen) {
+          system.setUIState({ isHotkeyHelpOpen: false });
+        } else if (system.ui.isConfigOpen) {
+          system.toggleConfigModal(false);
         }
         return;
       }
@@ -56,12 +57,12 @@ export function useHotkeys(): void {
         if (activeTabId) void toggleRef.current(activeTabId);
       } else if (ctrl && (e.key === 'b' || e.key === 'B')) {
         e.preventDefault();
-        const state = useAppStore.getState();
-        state.setUIState({ sidebarCollapsed: !state.ui.sidebarCollapsed });
+        const system = useSystemStore.getState();
+        system.setUIState({ sidebarCollapsed: !system.ui.sidebarCollapsed });
       } else if (ctrl && e.key === '/') {
         e.preventDefault();
-        const state = useAppStore.getState();
-        state.setUIState({ isHotkeyHelpOpen: !state.ui.isHotkeyHelpOpen });
+        const system = useSystemStore.getState();
+        system.setUIState({ isHotkeyHelpOpen: !system.ui.isHotkeyHelpOpen });
       }
       // Ctrl+F is intentionally not handled here — TerminalView owns it locally.
     };

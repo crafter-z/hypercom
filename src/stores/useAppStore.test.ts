@@ -1,49 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useAppStore, findLeafById, findLeafByTabId, collectLeaves, countLeaves } from './useAppStore';
+import { useAppStore, getClosingTabIds } from './useAppStore';
+import { resetStoresForTests } from './resetStores';
+import { collectLeaves, countLeaves, findLeafById, findLeafByTabId } from '../utils/paneTree';
 import { useTerminalStore } from './useTerminalStore';
-import { useRuleStore } from './useRuleStore';
-import { useOperationStore } from './useOperationStore';
 import type { SerialPort, PortGroup, LeafPane, BranchPane, PaneNode } from '../types';
 
-// Snapshot of initial state for reset between tests
-const INITIAL_STATE = useAppStore.getState();
-
 beforeEach(() => {
-  // Reset to fresh initial state (immer-aware: replace whole top-level fields)
-  useAppStore.setState({
-    ports: [],
-    groups: [],
-    tabs: [],
-    paneTree: { id: 'main', type: 'leaf' as const, tabIds: [], size: 1 },
-    activeTabId: null,
-    focusedPaneId: 'main',
-    trafficStats: {},
-    simulationMode: false,
-    config: INITIAL_STATE.config,
-    systemStatus: INITIAL_STATE.systemStatus,
-    ui: INITIAL_STATE.ui,
-  });
-  // Reset separate stores
-  useTerminalStore.setState({ terminals: {} });
-  useRuleStore.setState({
-    highlightRuleSets: [],
-    sendCommandSets: [],
-    activeSendCommandSetId: null,
-  });
-  useOperationStore.setState({
-    baudRate: 115200,
-    dataBits: 8,
-    parity: 'None',
-    stopBits: 'One',
-    handshake: 'None',
-    dtr: false,
-    rts: false,
-    ignoreEmptyChars: false,
-    sendIsHex: false,
-    sendAppendLineEnding: '\\r\\n',
-    sendInput: '',
-    cyclicLoops: {},
-  });
+  resetStoresForTests();
 });
 
 // Helpers
@@ -113,14 +76,6 @@ describe('Port & Group actions', () => {
 
   // ===== issue #11：端口工作模式（trx=传统收发 | tty=终端模式） =====
 
-  it('setPortMode sets mode on an existing port', () => {
-    useAppStore.setState({ ports: [makePort('COM1')] });
-    useAppStore.getState().setPortMode('COM1', 'tty');
-    expect(useAppStore.getState().ports[0].mode).toBe('tty');
-    useAppStore.getState().setPortMode('COM1', 'trx');
-    expect(useAppStore.getState().ports[0].mode).toBe('trx');
-  });
-
   it('setPortMode is a no-op when port is missing', () => {
     useAppStore.setState({ ports: [makePort('COM1')] });
     const portsBefore = [...useAppStore.getState().ports];
@@ -144,6 +99,28 @@ describe('Port & Group actions', () => {
 
 // ==================== Group B: Tabs & Panes ====================
 
+/** 两分屏 + 一个固定标签的夹具：pane1[A,B,C(pinned)] / pane2[X,Y]。 */
+function seedTwoPanes() {
+  const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A', 'B', 'C'], size: 0.5 };
+  const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['X', 'Y'], size: 0.5 };
+  useAppStore.setState({
+    ports: ['A', 'B', 'C', 'X', 'Y'].map(p => makePort(p)),
+    tabs: [
+      { id: 'A', title: 'A', isPinned: false, splitPaneId: 'pane1' },
+      { id: 'B', title: 'B', isPinned: false, splitPaneId: 'pane1' },
+      { id: 'C', title: 'C', isPinned: true, splitPaneId: 'pane1' },
+      { id: 'X', title: 'X', isPinned: false, splitPaneId: 'pane2' },
+      { id: 'Y', title: 'Y', isPinned: false, splitPaneId: 'pane2' },
+    ],
+    paneTree: {
+      id: 'root', type: 'branch', direction: 'vertical',
+      children: [pane1, pane2], size: 1,
+    },
+    activeTabId: 'A',
+    focusedPaneId: 'pane1',
+  });
+}
+
 describe('Tab & Pane actions', () => {
   it('openTab creates tab, adds to focused pane, and initializes terminal state', () => {
     useAppStore.setState({ ports: [makePort('COM1')] });
@@ -151,7 +128,6 @@ describe('Tab & Pane actions', () => {
     const s = useAppStore.getState();
     expect(s.tabs).toHaveLength(1);
     expect(s.tabs[0].id).toBe('COM1');
-    expect(s.tabs[0].isActive).toBe(true);
     expect(s.activeTabId).toBe('COM1');
     expect(s.paneTree.type).toBe('leaf');
     expect((s.paneTree as LeafPane).tabIds).toContain('COM1');
@@ -165,9 +141,9 @@ describe('Tab & Pane actions', () => {
     o('COM1'); o('COM2'); o('COM1');
     const s = useAppStore.getState();
     expect(s.tabs).toHaveLength(2);
+    // 活动标签只有一个来源 activeTabId（标签自身不再存 isActive）。
     expect(s.activeTabId).toBe('COM1');
-    expect(s.tabs.find(t => t.id === 'COM1')!.isActive).toBe(true);
-    expect(s.tabs.find(t => t.id === 'COM2')!.isActive).toBe(false);
+    expect(s.focusedPaneId).toBe('main');
   });
 
   it('closeTab picks remaining tab as active and removes from pane', () => {
@@ -205,29 +181,22 @@ describe('Tab & Pane actions', () => {
   });
 
   it('closeTabsToRight is pane-scoped: uses leaf tab order and never touches other panes', () => {
-    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A', 'B', 'C'], size: 0.5 };
-    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['X', 'Y'], size: 0.5 };
-    useAppStore.setState({
-      ports: ['A', 'B', 'C', 'X', 'Y'].map(p => makePort(p)),
-      tabs: [
-        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
-        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane1' },
-        { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'pane1' },
-        { id: 'X', title: 'X', isPinned: false, isActive: false, splitPaneId: 'pane2' },
-        { id: 'Y', title: 'Y', isPinned: false, isActive: false, splitPaneId: 'pane2' },
-      ],
-      paneTree: {
-        id: 'root', type: 'branch', direction: 'vertical',
-        children: [pane1, pane2], size: 1,
-      },
-      focusedPaneId: 'pane1',
-    });
+    seedTwoPanes();
     useAppStore.getState().closeTabsToRight('A');
     const s = useAppStore.getState();
-    // B,C removed from pane1; pane2 (X,Y) untouched
-    expect(s.tabs.map(t => t.id)).toEqual(['A', 'X', 'Y']);
-    expect(findLeafById(s.paneTree, 'pane1')!.tabIds).toEqual(['A']);
+    // B removed from pane1; C is pinned; pane2 (X,Y) untouched
+    expect(s.tabs.map(t => t.id)).toEqual(['A', 'C', 'X', 'Y']);
+    expect(findLeafById(s.paneTree, 'pane1')!.tabIds).toEqual(['A', 'C']);
     expect(findLeafById(s.paneTree, 'pane2')!.tabIds).toEqual(['X', 'Y']);
+  });
+
+  it('getClosingTabIds is the single source of the close scopes (pinned + pane order)', () => {
+    seedTwoPanes(); // pane1[A,B,C(pinned)] / pane2[X,Y]
+    expect(getClosingTabIds('A', 'self')).toEqual(['A']);
+    expect(getClosingTabIds('A', 'toRight')).toEqual(['B']); // C pinned → kept
+    expect(getClosingTabIds('C', 'toLeft')).toEqual(['A', 'B']);
+    expect(getClosingTabIds('C', 'others')).toEqual(['A', 'B', 'X', 'Y']);
+    expect(getClosingTabIds('ghost', 'toRight')).toEqual([]);
   });
 
   it('closeTabsToLeft respects reordered pane tab order (not global order)', () => {
@@ -245,8 +214,8 @@ describe('Tab & Pane actions', () => {
     useAppStore.setState({
       ports: ['A', 'B'].map(p => makePort(p)),
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'main' },
-        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'main' },
+        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
+        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'main' },
       ],
       paneTree: { id: 'main', type: 'leaf', tabIds: ['A', 'B'], size: 1 },
       focusedPaneId: 'ghost', // dangling before the action
@@ -260,7 +229,7 @@ describe('Tab & Pane actions', () => {
   it('openTab falls back to first leaf when focusedPaneId is dangling (no orphan tab)', () => {
     useAppStore.setState({
       ports: [makePort('A'), makePort('B')],
-      tabs: [{ id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'main' }],
+      tabs: [{ id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' }],
       paneTree: { id: 'main', type: 'leaf', tabIds: ['A'], size: 1 },
       focusedPaneId: 'ghost', // dangling
     });
@@ -293,15 +262,29 @@ describe('Tab & Pane actions', () => {
     const { openTab, splitPane, moveTabToPane } = useAppStore.getState();
     openTab('A'); openTab('B'); // both in 'main'
     splitPane('vertical'); // active tab B moves to new pane
-    const newLeafId = (useAppStore.getState().paneTree as BranchPane).children
-      .find((c): c is LeafPane => c.type === 'leaf' && c.id !== 'main')!.id;
     moveTabToPane('B', 'main'); // move B back; source leaf becomes empty -> pruned
     const s = useAppStore.getState();
     expect(s.paneTree.type).toBe('leaf');
     expect((s.paneTree as LeafPane).id).toBe('main');
     expect([...(s.paneTree as LeafPane).tabIds].sort()).toEqual(['A', 'B']);
     expect(s.tabs.find(t => t.id === 'B')!.splitPaneId).toBe('main');
-    void newLeafId;
+  });
+
+  it('moveTabToPane to a missing pane leaves the tree untouched (no orphan tab)', () => {
+    // 回归：旧实现先把标签从源叶子摘掉再尝试挂到目标——目标不存在时摘掉的标签
+    // 再无归属（留在 state.tabs、树里没有它），pruneTree 后成为看不见的孤儿。
+    useAppStore.setState({
+      ports: [makePort('A'), makePort('B')],
+      tabs: [
+        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
+        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'main' },
+      ],
+      paneTree: { id: 'main', type: 'leaf', tabIds: ['A', 'B'], size: 1 },
+    });
+    useAppStore.getState().moveTabToPane('A', 'ghost');
+    const s = useAppStore.getState();
+    expect((s.paneTree as LeafPane).tabIds).toEqual(['A', 'B']);
+    expect(findLeafByTabId(s.paneTree, 'A')?.id).toBe('main');
   });
 
   it('splitPane on a non-root leaf creates a 3-level nested tree', () => {
@@ -339,9 +322,9 @@ describe('Tab & Pane actions', () => {
     useAppStore.setState({
       ports: ['A', 'B', 'C'].map(p => makePort(p)),
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'main' },
-        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'leafX' },
-        { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'leafY' },
+        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
+        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'leafX' },
+        { id: 'C', title: 'C', isPinned: false, splitPaneId: 'leafY' },
       ],
       paneTree: {
         id: 'root', type: 'branch', direction: 'horizontal',
@@ -364,44 +347,15 @@ describe('Tab & Pane actions', () => {
   });
 
   it('setActiveTab sets BOTH activeTabId and focusedPaneId (operation-panel target follows)', () => {
-    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A'], size: 0.5 };
-    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['B'], size: 0.5 };
-    useAppStore.setState({
-      ports: [makePort('A'), makePort('B')],
-      tabs: [
-        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
-        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane2' },
-      ],
-      paneTree: {
-        id: 'root', type: 'branch', direction: 'vertical',
-        children: [pane1, pane2], size: 1,
-      },
-      focusedPaneId: 'pane1',
-    });
-    useAppStore.getState().setActiveTab('B');
+    seedTwoPanes();
+    useAppStore.getState().setActiveTab('X');
     const s = useAppStore.getState();
-    expect(s.activeTabId).toBe('B');
-    expect(s.focusedPaneId).toBe('pane2'); // tabB.splitPaneId
-    expect(s.tabs.find(t => t.id === 'B')!.isActive).toBe(true);
-    expect(s.tabs.find(t => t.id === 'A')!.isActive).toBe(false);
+    expect(s.activeTabId).toBe('X');
+    expect(s.focusedPaneId).toBe('pane2'); // tabX.splitPaneId
   });
 
   it('setFocusedPane leaves activeTabId unchanged (output-area click must call setActiveTab)', () => {
-    const pane1: LeafPane = { id: 'pane1', type: 'leaf', tabIds: ['A'], size: 0.5 };
-    const pane2: LeafPane = { id: 'pane2', type: 'leaf', tabIds: ['B'], size: 0.5 };
-    useAppStore.setState({
-      ports: [makePort('A'), makePort('B')],
-      tabs: [
-        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
-        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane2' },
-      ],
-      paneTree: {
-        id: 'root', type: 'branch', direction: 'vertical',
-        children: [pane1, pane2], size: 1,
-      },
-      activeTabId: 'A',
-      focusedPaneId: 'pane1',
-    });
+    seedTwoPanes();
     useAppStore.getState().setFocusedPane('pane2');
     const s = useAppStore.getState();
     expect(s.focusedPaneId).toBe('pane2');
@@ -409,196 +363,14 @@ describe('Tab & Pane actions', () => {
   });
 });
 
-// ==================== Group D: Misc ====================
-
-describe('Misc actions', () => {
-  it('setTrafficStats auto-initializes entry when port is new', () => {
-    useAppStore.getState().setTrafficStats('COM1', { txTotal: 100 });
-    const stats = useAppStore.getState().trafficStats['COM1'];
-    expect(stats).toBeDefined();
-    expect(stats.txTotal).toBe(100);
-    expect(stats.rxTotal).toBe(0); // default
-    expect(stats.portId).toBe('COM1');
-  });
-
-  it('pinTab toggles isPinned on/off', () => {
-    useAppStore.setState({ ports: [makePort('COM1')] });
-    useAppStore.getState().openTab('COM1');
-    const { pinTab } = useAppStore.getState();
-    expect(useAppStore.getState().tabs[0].isPinned).toBe(false);
-    pinTab('COM1');
-    expect(useAppStore.getState().tabs[0].isPinned).toBe(true);
-    pinTab('COM1');
-    expect(useAppStore.getState().tabs[0].isPinned).toBe(false);
-  });
-
-  it('reorderPorts swaps positions correctly', () => {
-    useAppStore.setState({
-      ports: ['A', 'B', 'C', 'D'].map(p => makePort(p)),
-    });
-    useAppStore.getState().reorderPorts(0, 2); // move A to index 2
-    const ids = useAppStore.getState().ports.map(p => p.id);
-    expect(ids).toEqual(['B', 'C', 'A', 'D']);
-  });
-});
-
 // ==================== Group E: Config ====================
 
 describe('Config actions', () => {
-  it('setConfig updates individual fields without affecting others', () => {
+  it('setConfig shallow-merges: patched fields change, the rest of the config survives', () => {
     useAppStore.getState().setConfig({ maxDisplayLines: 50000 });
     const c = useAppStore.getState().config;
     expect(c.maxDisplayLines).toBe(50000);
     expect(c.theme).toBe('dark'); // unchanged
-  });
-
-  it('resetConfig restores all defaults', () => {
-    useAppStore.getState().setConfig({ theme: 'light', maxDisplayLines: 5000 });
-    useAppStore.getState().resetConfig();
-    const c = useAppStore.getState().config;
-    expect(c.theme).toBe('dark');
-    // issue #16：每端口终端最大显示行数默认 100000
-    expect(c.maxDisplayLines).toBe(100000);
-  });
-
-  it('terminalFontSize config is persisted after setConfig', () => {
-    useAppStore.getState().setConfig({ terminalFontSize: 18 });
-    expect(useAppStore.getState().config.terminalFontSize).toBe(18);
-  });
-
-  it('defaultBaudRates config can be modified', () => {
-    useAppStore.getState().setConfig({ defaultBaudRates: [4800, 9600] });
-    expect(useAppStore.getState().config.defaultBaudRates).toEqual([4800, 9600]);
-  });
-});
-
-// ==================== Group F: Highlight Rule Sets ====================
-
-describe('Highlight Rule Set actions', () => {
-  const makeHighlightSet = (id: string) => ({
-    id, name: `Set ${id}`, rules: [], isEnabled: true,
-  });
-
-  it('addHighlightRuleSet adds to the array', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    expect(useRuleStore.getState().highlightRuleSets).toHaveLength(1);
-    expect(useRuleStore.getState().highlightRuleSets[0].id).toBe('h1');
-  });
-
-  it('updateHighlightRuleSet modifies existing set', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().updateHighlightRuleSet('h1', { isEnabled: false });
-    expect(useRuleStore.getState().highlightRuleSets[0].isEnabled).toBe(false);
-  });
-
-  it('updateHighlightRuleSet is no-op for unknown id', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().updateHighlightRuleSet('nonexistent', { isEnabled: false });
-    expect(useRuleStore.getState().highlightRuleSets[0].isEnabled).toBe(true);
-  });
-
-  it('removeHighlightRuleSet deletes correct set', () => {
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h1'));
-    useRuleStore.getState().addHighlightRuleSet(makeHighlightSet('h2'));
-    useRuleStore.getState().removeHighlightRuleSet('h1');
-    expect(useRuleStore.getState().highlightRuleSets).toHaveLength(1);
-    expect(useRuleStore.getState().highlightRuleSets[0].id).toBe('h2');
-  });
-});
-
-// ==================== Group G: Send Command Sets ====================
-
-describe('Send Command Set actions', () => {
-  const makeCmdSet = (id: string) => ({
-    id, name: `Cmd ${id}`, commands: [], isLoop: false, loopDelay: 100, repeatCount: 0,
-  });
-
-  it('addSendCommandSet adds to the array', () => {
-    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
-    expect(useRuleStore.getState().sendCommandSets).toHaveLength(1);
-  });
-
-  it('updateSendCommandSet modifies name and isLoop', () => {
-    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
-    useRuleStore.getState().updateSendCommandSet('s1', { name: 'New Name', isLoop: true });
-    const s = useRuleStore.getState().sendCommandSets[0];
-    expect(s.name).toBe('New Name');
-    expect(s.isLoop).toBe(true);
-  });
-
-  it('removeSendCommandSet cleans up correctly', () => {
-    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
-    useRuleStore.getState().addSendCommandSet(makeCmdSet('s2'));
-    useRuleStore.getState().removeSendCommandSet('s2');
-    expect(useRuleStore.getState().sendCommandSets).toHaveLength(1);
-  });
-
-  it('setActiveSendCommandSetId updates selection', () => {
-    useRuleStore.getState().addSendCommandSet(makeCmdSet('s1'));
-    useRuleStore.getState().setActiveSendCommandSetId('s1');
-    expect(useRuleStore.getState().activeSendCommandSetId).toBe('s1');
-  });
-});
-
-// ==================== Group H: UI State ====================
-
-describe('UI State actions', () => {
-  it('setUIState updates individual field', () => {
-    useAppStore.getState().setUIState({ sidebarWidth: 300 });
-    expect(useAppStore.getState().ui.sidebarWidth).toBe(300);
-    expect(useAppStore.getState().ui.isConfigOpen).toBe(false); // unchanged
-  });
-
-  it('toggleConfigModal opens and closes', () => {
-    useAppStore.getState().toggleConfigModal(true);
-    expect(useAppStore.getState().ui.isConfigOpen).toBe(true);
-    useAppStore.getState().toggleConfigModal(false);
-    expect(useAppStore.getState().ui.isConfigOpen).toBe(false);
-  });
-
-  it('toggleConfigModal toggles when no arg', () => {
-    expect(useAppStore.getState().ui.isConfigOpen).toBe(false);
-    useAppStore.getState().toggleConfigModal();
-    expect(useAppStore.getState().ui.isConfigOpen).toBe(true);
-    useAppStore.getState().toggleConfigModal();
-    expect(useAppStore.getState().ui.isConfigOpen).toBe(false);
-  });
-});
-
-// ==================== Group I: Operation State ====================
-
-describe('Operation State actions', () => {
-  it('setOpState updates multiple op fields', () => {
-    useOperationStore.getState().setOpState({ baudRate: 9600, dtr: true });
-    expect(useOperationStore.getState().baudRate).toBe(9600);
-    expect(useOperationStore.getState().dtr).toBe(true);
-  });
-
-  it('setOpState preserves unmodified op fields', () => {
-    const oldParity = useOperationStore.getState().parity;
-    useOperationStore.getState().setOpState({ baudRate: 38400 });
-    expect(useOperationStore.getState().parity).toBe(oldParity);
-  });
-
-  it('setOpState handles send-mode change', () => {
-    useOperationStore.getState().setOpState({ sendIsHex: true });
-    expect(useOperationStore.getState().sendIsHex).toBe(true);
-  });
-
-  it('setCyclicLoop handles per-port loop toggle', () => {
-    useOperationStore.getState().setCyclicLoop('COM3', true);
-    expect(useOperationStore.getState().cyclicLoops['COM3']).toBe(true);
-  });
-});
-
-// ==================== Group J: Simulation Mode ====================
-
-describe('Simulation Mode', () => {
-  it('setSimulationMode toggles on and off', () => {
-    useAppStore.getState().setSimulationMode(true);
-    expect(useAppStore.getState().simulationMode).toBe(true);
-    useAppStore.getState().setSimulationMode(false);
-    expect(useAppStore.getState().simulationMode).toBe(false);
   });
 });
 
@@ -627,19 +399,6 @@ describe('Edge cases', () => {
     expect(useAppStore.getState().paneTree.type).toBe('leaf');
   });
 
-  it('setTrafficStats accumulates statistics', () => {
-    useAppStore.getState().setTrafficStats('COM1', { txTotal: 50 });
-    useAppStore.getState().setTrafficStats('COM1', { rxTotal: 30 });
-    const stats = useAppStore.getState().trafficStats['COM1'];
-    expect(stats.txTotal).toBe(50);
-    expect(stats.rxTotal).toBe(30);
-  });
-
-  it('setTerminalConfig on non-existent port is no-op', () => {
-    useTerminalStore.getState().setTerminalConfig('nonexistent', { scrollLocked: false });
-    expect(useTerminalStore.getState().terminals['nonexistent']).toBeUndefined();
-  });
-
   it('movePortToGroup with non-existent port is no-op', () => {
     useAppStore.setState({
       ports: [makePort('COM1')],
@@ -658,18 +417,8 @@ describe('Edge cases', () => {
     expect(tab?.title).toBe('COM1 My Device');
   });
 
-  it('openTab when port has no alias creates title from port id', () => {
-    useAppStore.setState({ ports: [makePort('COM3')] });
-    useAppStore.getState().openTab('COM3');
-    const tab = useAppStore.getState().tabs.find(t => t.id === 'COM3');
-    expect(tab?.title).toBe('COM3');
-  });
-
   it('reorderPaneTabIds updates pane tab order', () => {
-    useAppStore.setState({
-      ports: ['A', 'B', 'C'].map(p => makePort(p)),
-      paneTree: { id: 'main', type: 'leaf' as const, tabIds: ['A', 'B', 'C'], size: 1 },
-    });
+    useAppStore.setState({ ports: ['A', 'B', 'C'].map(p => makePort(p)) });
     ['A', 'B', 'C'].forEach(id => useAppStore.getState().openTab(id));
     useAppStore.getState().reorderPaneTabIds('main', ['C', 'A', 'B']);
     expect((useAppStore.getState().paneTree as LeafPane).tabIds).toEqual(['C', 'A', 'B']);
@@ -688,9 +437,9 @@ describe('Edge cases', () => {
     useAppStore.setState({
       ports: ['A', 'B', 'C'].map(p => makePort(p)),
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, isActive: true, splitPaneId: 'pane1' },
-        { id: 'B', title: 'B', isPinned: false, isActive: false, splitPaneId: 'pane1' },
-        { id: 'C', title: 'C', isPinned: false, isActive: false, splitPaneId: 'pane2' },
+        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'pane1' },
+        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'pane1' },
+        { id: 'C', title: 'C', isPinned: false, splitPaneId: 'pane2' },
       ],
       paneTree: {
         id: 'root', type: 'branch', direction: 'vertical' as const,

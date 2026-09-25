@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { serialService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
 import { mapPortInfo, mergePorts } from './useSerialPorts';
@@ -16,8 +17,8 @@ import { DEV_FEATURES_ENABLED } from '../utils/devMode';
  * 这里再做一层兜底，任何调用路径在 release 构建下都是 no-op。
  */
 export function useSimulation() {
-  const simulationMode = useAppStore((s) => s.simulationMode);
-  const setSimulationMode = useAppStore((s) => s.setSimulationMode);
+  const simulationMode = useSystemStore((s) => s.simulationMode);
+  const setSimulationMode = useSystemStore((s) => s.setSimulationMode);
 
   const toggleSimulation = useCallback(async () => {
     if (!DEV_FEATURES_ENABLED) return;

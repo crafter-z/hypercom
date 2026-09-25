@@ -1,11 +1,11 @@
-import React, { useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { toolService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
 import { partitionGroupPorts } from '../utils/groupTool';
 import type { PortGroup, SerialPort } from '../types';
-import GroupToolDialog from '../components/shared/GroupToolDialog';
 
 /**
  * 外部工具动作（issue #2-2 / #5-7）：侧边栏端口/分组右键菜单与标签页右键菜单共用，
@@ -16,23 +16,37 @@ import GroupToolDialog from '../components/shared/GroupToolDialog';
  * - killTool：终止运行中的工具进程。
  * - configTool：打开配置弹窗「外部工具」页。
  * - runToolForGroup：整组执行（issue #5-7 / #7-9）——组内存在未正确配置（无配置或命令为空）
- *   的串口时弹出 GroupToolDialog 警告，用户可选择仅运行已配置的串口或先去配置；
- *   全部已配置则直接**并行**执行（issue #7-9，跳过运行中串口）。
+ *   的串口时把待确认内容写进 `toolDialog` 状态并由调用方渲染 GroupToolDialog，
+ *   用户可选择仅运行已配置的串口或先去配置；全部已配置则直接**并行**执行
+ *   （issue #7-9，跳过运行中串口）。
+ *
+ * 本 hook 只持有状态与动作，不 import 任何组件：弹窗由调用方渲染（Sidebar）。
  */
+
+/** `toolDialog` 非空时调用方渲染 `GroupToolDialog` 所需的全部数据。 */
+export interface GroupToolDialogState {
+  group: PortGroup;
+  configured: SerialPort[];
+  unconfigured: SerialPort[];
+}
+
+/** 跳到配置弹窗的「外部工具」页（未配置 / 配置按钮 / 组执行警告三处共用同一动作：
+ *  三处必须同时切页并开窗，漏一处就会打开在上一次的页签上）。 */
+function openToolConfigPage(): void {
+  const system = useSystemStore.getState();
+  system.setConfigActiveTab('tools');
+  system.toggleConfigModal(true);
+}
+
 export function usePortToolActions() {
   const updatePort = useAppStore((s) => s.updatePort);
-  const [groupToolState, setGroupToolState] = useState<{
-    group: PortGroup;
-    configured: SerialPort[];
-    unconfigured: SerialPort[];
-  } | null>(null);
+  const [groupToolState, setGroupToolState] = useState<GroupToolDialogState | null>(null);
 
   const runTool = useCallback(async (portId: string) => {
     const config = useRuleStore.getState().findToolConfigByPort(portId);
     if (!config) {
       // 未配置 → 跳转配置页
-      useAppStore.getState().setConfigActiveTab('tools');
-      useAppStore.getState().toggleConfigModal(true);
+      openToolConfigPage();
       return;
     }
     updatePort(portId, { toolRunning: true });
@@ -57,8 +71,7 @@ export function usePortToolActions() {
   }, []);
 
   const configTool = useCallback(() => {
-    useAppStore.getState().setConfigActiveTab('tools');
-    useAppStore.getState().toggleConfigModal(true);
+    openToolConfigPage();
   }, []);
 
   // issue #7-9：整组执行改为**并行**——组内每个已配置端口同时启动外部工具
@@ -92,25 +105,28 @@ export function usePortToolActions() {
     void runConfiguredPorts(configured);
   }, [runConfiguredPorts]);
 
-  // 本文件为 .ts（无 JSX 解析），弹窗元素用 createElement 构建。
-  const groupToolDialog = groupToolState
-    ? React.createElement(GroupToolDialog, {
-        group: groupToolState.group,
-        configured: groupToolState.configured,
-        unconfigured: groupToolState.unconfigured,
-        onRun: () => {
-          const configured = groupToolState.configured;
-          setGroupToolState(null);
-          void runConfiguredPorts(configured);
-        },
-        onConfigure: () => {
-          setGroupToolState(null);
-          useAppStore.getState().setConfigActiveTab('tools');
-          useAppStore.getState().toggleConfigModal(true);
-        },
-        onClose: () => setGroupToolState(null),
-      })
-    : null;
+  // 弹窗渲染交给调用方（Sidebar）：本 hook 只暴露待确认数据与三个动作，
+  // 避免 hook 层反向依赖组件层把 GroupToolDialog + i18n 拖进每个 leaf 消费方的依赖图。
+  const closeToolDialog = useCallback(() => setGroupToolState(null), []);
 
-  return { runTool, killTool, configTool, runToolForGroup, groupToolDialog };
+  const runToolDialogConfigured = useCallback(() => {
+    if (groupToolState) void runConfiguredPorts(groupToolState.configured);
+    setGroupToolState(null);
+  }, [groupToolState, runConfiguredPorts]);
+
+  const configureToolFromDialog = useCallback(() => {
+    setGroupToolState(null);
+    openToolConfigPage();
+  }, []);
+
+  return {
+    runTool,
+    killTool,
+    configTool,
+    runToolForGroup,
+    toolDialog: groupToolState,
+    closeToolDialog,
+    runToolDialogConfigured,
+    configureToolFromDialog,
+  };
 }

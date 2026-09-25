@@ -11,11 +11,6 @@
 // now persistent and only cleared by an explicit connection-state transition.)
 export const userClosingPortIds = new Set<string>();
 
-/** Returns true if the given portId is currently being closed by the user. */
-export function isUserClosingPort(portId: string): boolean {
-  return userClosingPortIds.has(portId);
-}
-
 // Tracks portIds that were CONNECTED this session and then dropped
 // unexpectedly (USB unplug, device reset). Session-restored tabs were never
 // connected this session, so they must never appear here — that is what

@@ -1,12 +1,12 @@
 import { useEffect } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { systemService } from '../services/tauri';
 
 /**
  * Hook: 系统状态轮询
  */
 export function useSystemStatus(pollIntervalMs: number = 5000) {
-  const setSystemStatus = useAppStore((s) => s.setSystemStatus);
+  const setSystemStatus = useSystemStore((s) => s.setSystemStatus);
 
   useEffect(() => {
     const poll = async () => {

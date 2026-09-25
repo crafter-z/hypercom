@@ -43,11 +43,11 @@ export interface SerialPort {
 /** 数据位 */
 export type DataBits = 5 | 6 | 7 | 8;
 
-/** 校验位 */
-export type Parity = 'None' | 'Even' | 'Odd' | 'Mark' | 'Space';
+/** 校验位（S-A2 后与后端一致：`parse_parity` 对未知值直接报错，serialport 也只支持这三种） */
+export type Parity = 'None' | 'Even' | 'Odd';
 
-/** 停止位 */
-export type StopBits = 'One' | 'Two' | 'OnePointFive';
+/** 停止位（S-A2 后与后端一致：serialport 只支持 One/Two） */
+export type StopBits = 'One' | 'Two';
 
 /** 握手协议 */
 export type Handshake = 'None' | 'XonXoff' | 'RequestToSend' | 'RequestToSendXonXoff';
@@ -82,7 +82,7 @@ export interface TabItem {
   id: string;              // 对应串口ID
   title: string;           // 显示标题
   isPinned: boolean;       // 是否固定
-  isActive: boolean;       // 是否当前激活
+  // 活动态不在标签上：渲染按 `activeTabId === id` 派生（见 useAppStore）。
   splitPaneId: string;     // 所属分屏区域ID
   poppedOut?: boolean;     // 终端已 detach 到独立弹出窗（主窗显示占位，关窗回贴）
 }
@@ -373,16 +373,6 @@ export interface PortMetaEntry {
   mode?: PortMode;
 }
 
-// ==================== 日志相关 ====================
-
-/** 日志文件信息 */
-export interface LogFileInfo {
-  path: string;
-  portId: string;
-  createdAt: number;
-  size: number;
-}
-
 // ==================== 系统状态相关 ====================
 
 /** 系统资源状态 */
@@ -417,36 +407,6 @@ export interface UIState {
   // config.json 加载完成信号（issue #12 复审）：useConfigPersistence.loadConfig
   // 结束（成功/失败同）置 true；useAutoUpdate 等它就绪再评估，替代 3s 启发式窗口。
   configReady: boolean;
-}
-
-// ==================== Tauri 命令参数/返回类型 ====================
-
-/** 打开串口参数 */
-export interface OpenPortParams {
-  portId: string;
-  baudRate: number;
-  dataBits: DataBits;
-  parity: Parity;
-  stopBits: StopBits;
-  handshake: Handshake;
-  dtr: boolean;
-  rts: boolean;
-  ignoreEmptyChars: boolean;
-}
-
-/** 发送数据参数 */
-export interface SendDataParams {
-  portId: string;
-  data: string;
-  isHex: boolean;
-  appendLineEnding: LineEnding;
-}
-
-/** 后端返回的可用串口列表项 */
-export interface AvailablePortInfo {
-  id: string;
-  name: string;
-  type: PortType; // "real" | "virtual" | "sim"
 }
 
 // ==================== 条件触发相关 ====================
