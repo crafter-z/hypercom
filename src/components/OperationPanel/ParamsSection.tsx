@@ -56,16 +56,13 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     setCustomBaudInput(String(baudRate));
   }, [baudRate]);
 
+  // 预设只经 storageService 单条落盘（保存即见效），不回写 useAppStore.config。
+  // K5 的安全快照改由后端读回 portPresets（`storageService.loadPortPresets()`），
+  // 全量保存不再依赖 store.config 里的那份副本，因此回写已无必要。
   const loadPresets = useCallback(async () => {
     try {
       const list = await storageService.loadPortPresets();
       setPresets(list);
-      // P0-1：预设只经 storageService 单条落盘，从不回写 useAppStore.config.portPresets。
-      // 全量保存（ConfigModal 保存 / 诊断日志开关 / 更新「不再提醒」）用 store.config
-      // 快照整体覆盖 config.json——若不回写，新建/删除的预设会被启动快照静默回滚，
-      // 重启后丢失（issue #5-2 陷阱在 portPresets 上的残留）。这里在每次加载后同步
-      // store.config，使全量保存快照与磁盘一致。
-      useAppStore.getState().setConfig({ portPresets: list });
     } catch (e) {
       console.warn('[ParamsSection] loadPortPresets failed:', e);
     }
@@ -94,7 +91,8 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const autoPresetName = useCallback(() => {
     const op = useOperationStore.getState();
     const parityChar = (op.parity ?? 'None')[0].toUpperCase();
-    const stopShort = op.stopBits === 'One' ? '1' : op.stopBits === 'OnePointFive' ? '1.5' : '2';
+    // StopBits 只有 One/Two（serialport 不支持 1.5 位停止位）。
+    const stopShort = op.stopBits === 'One' ? '1' : '2';
     return `${op.baudRate}-${op.dataBits}${parityChar}${stopShort}`;
   }, []);
 
@@ -221,14 +219,18 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.parityLabel')}</span>
+          {/* 只提供 serialport 实际支持的取值（None/Even/Odd）：后端参数解析对未知
+              取值返回 Err 而不是回落默认，列出 Mark/Space 会让「用户选了、打开时报警」
+              的错位成为常态。 */}
           <select className="select op-param-select" disabled={!isPortActive} value={parity} onChange={e => setOpState({ parity: e.target.value as Parity })}>
-            <option>None</option><option>Even</option><option>Odd</option><option>Mark</option><option>Space</option>
+            <option>None</option><option>Even</option><option>Odd</option>
           </select>
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.stopBitsLabel')}</span>
+          {/* 同上：serialport 只支持 One/Two，1.5 位停止位无法下发。 */}
           <select className="select op-param-select" disabled={!isPortActive} value={stopBits} onChange={e => setOpState({ stopBits: e.target.value as StopBits })}>
-            <option value="One">1</option><option value="OnePointFive">1.5</option><option value="Two">2</option>
+            <option value="One">1</option><option value="Two">2</option>
           </select>
         </div>
         <div className="op-param-item op-param-item-wide">

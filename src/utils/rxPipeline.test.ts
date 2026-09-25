@@ -3,7 +3,7 @@
  *
  * 覆盖：rAF 批写合并、端口隔离、静默 flush（时间戳 = 最后事件时间）、
  * 4096 强制发射集成、flushNow 同步排空、flushAndReset / disconnect 生命周期、
- * ignoreEmptyChars 过滤、enqueueLines 与 feedBytes 的相对顺序、BOM 保留。
+ * ignoreEmptyChars 过滤、enqueueLines 与 feedBytes 的相对顺序、BOM 剥离。
  *
  * 环境为 node（无 rAF / 无 DOM）：走 scheduleFlush 注入或 setTimeout 回退。
  */
@@ -14,10 +14,10 @@ import type { RxPipelineOptions } from './rxPipeline';
 
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
 
-/** RX 行不再带 content（方案B, issue #14）：按管线约定（ignoreBOM:true 保留
- *  行首 BOM）从 rawData 惰性解码出文本用于断言。 */
+/** RX 行不再带 content（方案B, issue #14）：从 rawData 惰性解码出文本用于断言。
+ *  解码口径与全仓唯一解码器（lineText，ignoreBOM:false）一致：行首 BOM 被剥离。 */
 const decodeLine = (line: TerminalLine, encoding = 'utf-8'): string =>
-  new TextDecoder(encoding, { fatal: false, ignoreBOM: true }).decode(line.rawData ?? new Uint8Array());
+  new TextDecoder(encoding, { fatal: false }).decode(line.rawData ?? new Uint8Array());
 const lineTexts = (lines: TerminalLine[], encoding = 'utf-8'): string[] =>
   lines.map((l) => decodeLine(l, encoding));
 
@@ -321,11 +321,16 @@ describe('RxPipeline — enqueueLines ordering', () => {
 });
 
 describe('RxPipeline — decoding', () => {
-  it('preserves a leading UTF-8 BOM in decoded content (ignoreBOM: true)', () => {
+  it('strips a leading UTF-8 BOM from the decoded line text (ignoreBOM: false)', () => {
     const h = makeHarness();
+    // 行文本（触发器匹配 / 搜索 haystack / 右键复制都用它）不含 BOM；
+    // rawData 仍保留线上原始字节，BOM 只是不进入解码结果。
+    const texts: string[] = [];
+    h.pipeline.setOnLineAssembled((_, line) => { texts.push(line.text); });
     h.pipeline.feedBytes('COM1', [0xef, 0xbb, 0xbf, 0x41, 0x0a], 1);
     runTick(h);
-    expect(decodeLine(h.appended[0]!.lines[0]!)).toBe('\uFEFFA');
+    expect(texts).toEqual(['A']);
+    expect(Array.from(h.appended[0]!.lines[0]!.rawData!)).toEqual([0xef, 0xbb, 0xbf, 0x41]);
   });
 
   it('decodes multibyte chars kept whole by byte-level line splitting', () => {

@@ -31,15 +31,80 @@
  *   rows park with frozen content until the selection clears (self-limiting
  *   via MAX_PINNED_ROWS).
  *
- * Unchanged invariants:
- * - O(visible rows + parked) per frame; only new/dirty rows get content.
- * - Stable seq keys; stale detection via REAL-TIME seqToVisIdx (issue #10 —
- *   cached visIdx fields are never trusted).
- * - Large-trim reading-position anchor (headAdvance ≥ LARGE_TRIM_ROWS —
- *   reachable via setLimits shrink; issue #10).
- * - Fixed row height, zero measurement, padding-aware same-frame follow pin.
- * - DOM structure mirrors TerminalRow (`.terminal-line` with
- *   `.terminal-timestamp` / `.terminal-direction` / `.terminal-content`).
+ * Contract list (each invariant: what / why / visible symptom when violated).
+ * `TerminalRenderer.soak.test.ts` checks R1–R6 structurally on every operation
+ * and R7–R15 through the operations that exercise them:
+ *
+ * R1  Flow order — layer children are [headSpacer][rows in visIdx order][tailSpacer];
+ *     DOM order == visual order by construction.
+ *     Why: the browser concatenates a cross-row drag selection in DOM order.
+ *     Symptom: rows visually in the middle get skipped by the selection.
+ * R2  Bounded DOM — at most window rows + OVERSCAN + parked pins (+ pool below
+ *     POOL_CAP); nothing accumulates per frame.
+ *     Why: rows are recycled, never appended forever.
+ *     Symptom: DOM/memory grows without bound on long sessions → per-frame jank.
+ * R3  Every row's `data-seq` is inside the live buffer window OR the row is
+ *     parked (display:none).
+ *     Why: a row whose line was head-trimmed has no data to show.
+ *     Symptom: ghost rows holding evicted content, or rows rendered from stale seqs.
+ * R4  Spacers carry the off-screen space: both ≥ 0, row-height aligned, both 0
+ *     when the buffer is empty; the layer's height is never set inline.
+ *     Why: flow geometry must come from spacers + rows alone.
+ *     Symptom: scrollbar length/scrollTop drift, unreachable content tails.
+ * R5  `data-seq` present, numeric and unique per layer row; empty buffer ⇒ zero rows.
+ *     Why: seq is the row identity for stale checks and selection capture.
+ *     Symptom: duplicate rows for one seq, or a row that can never be recycled.
+ * R6  With a filter list active, every *visible* seq is a member of that list
+ *     (parked pinned rows are exempt).
+ *     Why: the list is the visible set; the window indexes into it.
+ *     Symptom: filtered-out lines stay on screen / rows render at wrong offsets.
+ * R7  Stale detection uses REAL-TIME `seqToVisIdx` — cached `visIdx` fields are
+ *     never trusted (issue #10).
+ *     Why: a head trim shifts every row's list position at once.
+ *     Symptom: rows never recycle → DOM grows (measured 6669 rows vs ~27) and the
+ *     viewport jitters every frame.
+ * R8  `frozenSeq === null` normalizes to `Number.MAX_SAFE_INTEGER` before comparing.
+ *     Why: `seq > null` coerces null to 0 and hides every row.
+ *     Symptom: blank terminal while paused/frozen state is null.
+ * R9  Reading-position anchor: on any head advance with a non-follow, non-gesture,
+ *     selection-free viewport, scrollTop is restored from `anchorSeq`
+ *     (clamped/nearest when the anchor itself was trimmed).
+ *     Why: rolling-window eviction moves firstSeq every frame (issue #19).
+ *     Symptom: the viewport drifts to the new content bottom on its own.
+ * R10 Follow pin happens inside `render()` — same frame, before the browser
+ *     paints, padding-aware (container padding included).
+ *     Why: a follow correction in a later frame/effect shows one frame of lag.
+ *     Symptom: rows visibly lag/skip a frame while streaming with follow engaged.
+ * R11 Pause (`frozenSeq !== null`) suppresses the follow pin even though
+ *     `locked` stays true.
+ *     Why: pausing means "freeze this viewport", not "unlock scrolling".
+ *     Symptom: the frozen view is yanked to the newest row on the next append.
+ * R12 Selection pinning — a row touched by a live Range is never re-parented:
+ *     in-window it stays a flow row, out-of-window it parks (display:none, same
+ *     parent); `findFlowAnchor` MUST treat parked rows as anchor candidates.
+ *     Why: Chromium discards/clips a Range when an anchored node is re-parented.
+ *     Symptom: selection collapses mid-drag, or rows reorder after re-entering
+ *     the window ([30..35, 8..29, 36..44] style corruption).
+ * R13 Pinned rows skip content rewrites (innerHTML replacement rebuilds the anchor
+ *     text node and kills the Range); any structural change
+ *     (`bumpFilterVersion`/`invalidate`/`clear`/`detach`) clears pins; a pin set
+ *     beyond MAX_PINNED_ROWS drops itself instead of pinning unbounded DOM.
+ *     Why: Range anchors point at live text nodes.
+ *     Symptom: selection dies whenever data streams in, or Select-All pins the
+ *     entire DOM.
+ * R14 Fixed row height, zero measurement: geometry comes only from
+ *     `config.rowHeight` (live-updated on config change), and row content never
+ *     wraps (the row box clips vertically; wide lines scroll horizontally).
+ *     Why: measurement in the render loop is the classic jump/jitter source.
+ *     Symptom: scrollTop/spacer math off by the measured delta; rows overlapping.
+ *
+ * R15 Row DOM structure mirrors TerminalRow: `.terminal-line` containing an
+ *     optional `.terminal-timestamp`, a `.terminal-direction` and the
+ *     `.terminal-content` span; search/selection/export paths also select on
+ *     these class names.
+ *     Why: the stylesheet and the class-based row queries address rows this way.
+ *     Symptom: timestamps/direction colors disappear, or search-hit/selected
+ *     rows never get their classes.
  *
  * DOM-dependent — tests run under jsdom (`@vitest-environment jsdom`).
  */
@@ -51,6 +116,7 @@ import type {
   TimestampFormat,
 } from '../../types';
 import { TerminalBuffer } from './TerminalBuffer';
+import { bytesToSpacedHex } from '../hexFormat';
 import { getLineText } from '../lineText';
 import { applyHighlightSets, escapeHtml } from '../highlightEngine';
 import { renderProtocolLine } from '../protocolRenderer';
@@ -717,7 +783,7 @@ export class TerminalRenderer {
     } else {
       const displayText =
         c.displayFormat === 'hex' && line.rawData
-          ? Array.from(line.rawData, (b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')
+          ? bytesToSpacedHex(line.rawData)
           : getLineText(line, c.encoding);
       html = applyHighlightSets(displayText, c.highlightRuleSets);
     }

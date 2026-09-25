@@ -13,6 +13,12 @@ import '../../styles/terminal-view.css';
  * selection, clear) and after EVERY op the structural invariants are asserted
  * against the DOM — public API only, no renderer internals.
  *
+ * The asserted set is the structural half of the renderer's contract list
+ * (R1–R6 in `TerminalRenderer.ts`; INVn ↔ Rn labelled below). R7–R15 are
+ * behavioural and are covered by the targeted tests in
+ * `TerminalRenderer.test.ts` plus the ops the soak drives (scroll jumps,
+ * trim storms, live selection).
+ *
  * jsdom has no real layout: scrollHeight/client rectangles are unreliable, so
  * window sizes are computed structurally from rowHeight/clientHeight/spacers.
  */
@@ -68,7 +74,7 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-// ==================== Invariants ====================
+// ==================== Invariants (INVn ↔ Rn in TerminalRenderer.ts) ====================
 
 const rows = (container: HTMLElement): HTMLElement[] =>
   Array.from(container.querySelectorAll('.terminal-line')) as HTMLElement[];
@@ -96,7 +102,7 @@ function assertInvariants(
   const parked = parkedCount(container);
   const layer = container.querySelector('.terminal-content-layer') as HTMLElement;
 
-  // INV1: bounded DOM — window row estimate + parked + slack.
+  // INV1 (R2): bounded DOM — window row estimate + parked + slack.
   const windowRows = Math.ceil(CLIENT_HEIGHT / ROW_HEIGHT) + 2 * OVERSCAN;
   const bound = windowRows + parked + 2;
   if (all.length > bound) {
@@ -107,7 +113,7 @@ function assertInvariants(
     );
   }
 
-  // INV2: visible rows strictly ascending data-seq in DOM order (flow layout).
+  // INV2 (R1): visible rows strictly ascending data-seq in DOM order (flow layout).
   const visible = all.filter((r) => r.style.display !== 'none');
   for (let i = 1; i < visible.length; i++) {
     const prev = Number(visible[i - 1].dataset.seq);
@@ -120,7 +126,7 @@ function assertInvariants(
     }
   }
 
-  // INV3: every row's seq is within the live buffer window OR parked.
+  // INV3 (R3): every row's seq is within the live buffer window OR parked.
   for (const r of all) {
     const seq = Number(r.dataset.seq);
     const inBuffer = seq >= buf.firstSeq && seq <= buf.lastSeq;
@@ -133,7 +139,7 @@ function assertInvariants(
     }
   }
 
-  // INV4: spacers non-negative; empty buffer → both 0.
+  // INV4 (R4): spacers non-negative; empty buffer → both 0.
   const [headPx, tailPx] = spacerHeights(container);
   if (headPx < 0 || tailPx < 0) {
     throw new Error(`${ctx}: INV4 violated — negative spacer heights ${headPx}/${tailPx}.`);
@@ -149,7 +155,7 @@ function assertInvariants(
     );
   }
 
-  // INV5: data-seq present and unique across all layer rows.
+  // INV5 (R5): data-seq present and unique across all layer rows.
   const seqs = all.map((r) => r.dataset.seq);
   if (seqs.some((s) => s === undefined || s === null || !Number.isFinite(Number(s)))) {
     throw new Error(`${ctx}: INV5 violated — row without a valid data-seq.`);
@@ -168,8 +174,8 @@ function assertInvariants(
     throw new Error(`${ctx}: INV5 violated — empty buffer but ${all.length} rows in DOM.`);
   }
 
-  // Filter-mode consistency: with a filter list active, every visible seq is
-  // a member of the surviving list (pinned parked rows are exempt).
+  // Filter-mode consistency (R6): with a filter list active, every visible seq
+  // is a member of the surviving list (pinned parked rows are exempt).
   if (view.visibleSeqs !== null) {
     const set = new Set(view.visibleSeqs);
     for (const r of visible) {
@@ -324,8 +330,8 @@ describe('TerminalRenderer soak invariants (issue #18 flow + pins)', () => {
 
 
     // Stream data with continuous trims; the pinned span gets head-trimmed
-    // out of the buffer — rows must park (never re-parent, never rewritten)
-    // and invariants must keep holding.
+    // out of the buffer — rows must park (never re-parent, never rewritten —
+    // R12/R13) and invariants must keep holding.
     let next = 80;
     for (let i = 0; i < 60; i++) {
       const n = 1 + Math.floor(rng() * 20);
@@ -341,7 +347,7 @@ describe('TerminalRenderer soak invariants (issue #18 flow + pins)', () => {
         view,
         `pin-soak#${i} buffer=[${buf.firstSeq}..${buf.lastSeq}] top=${container.scrollTop}`,
       );
-      // Pinned rows that survive stay in the DOM with node identity.
+      // Pinned rows that survive stay in the DOM with node identity (R12).
       if (4 >= buf.firstSeq) {
         const parked = container.querySelector('[data-seq="4"]') as HTMLElement | null;
         expect(parked).not.toBeNull();

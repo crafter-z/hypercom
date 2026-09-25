@@ -1,5 +1,6 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { useAppStore, countLeaves } from '../../stores/useAppStore';
+import { useAppStore } from '../../stores/useAppStore';
+import { countLeaves } from '../../utils/paneTree';
 import type { PaneNode, BranchPane, SplitDirection } from '../../types';
 import {
   DndContext,
@@ -20,16 +21,6 @@ function flexDirectionFor(direction: SplitDirection): 'row' | 'column' {
   // 与历史行为一致：'horizontal' 元素在视觉上垂直堆叠（column），
   // 'vertical' 元素水平并排（row）。
   return direction === 'horizontal' ? 'column' : 'row';
-}
-
-/**
- * 分隔条方向与分屏方向一致：'vertical' 分屏（左右并排）用竖向分隔条
- * （width:5, col-resize, 拖 X）；'horizontal' 分屏（上下堆叠）用横向
- * 分隔条（height:5, row-resize, 拖 Y）。此前返回相反方向，导致并排
- * 分屏时分隔条渲染成 100% 宽的横条，整个显示区溢出错乱。
- */
-function resizeHandleDirection(direction: SplitDirection): 'horizontal' | 'vertical' {
-  return direction;
 }
 
 const MainDisplay: React.FC = () => {
@@ -85,7 +76,6 @@ const MainDisplay: React.FC = () => {
           <Pane
             paneId={node.id}
             tabIds={node.tabIds}
-            size={node.size}
             isFocused={node.id === focusedPaneId}
             isMultiPane={isMultiPane}
             onFocus={() => setFocusedPane(node.id)}
@@ -130,7 +120,10 @@ const MainDisplay: React.FC = () => {
               {renderNode(child, branch)}
               {idx < siblings.length - 1 && (
                 <ResizeHandle
-                  direction={resizeHandleDirection(branch.direction)}
+                  // 分隔条方向与分屏方向**同义**，直接透传：'vertical' 分屏
+                  // （左右并排）＝ 竖向手柄（col-resize / 拖 X）。此处曾取反，
+                  // 并排分屏渲染出满宽横条、显示区溢出错乱。
+                  direction={branch.direction}
                   onResize={handleResize}
                 />
               )}

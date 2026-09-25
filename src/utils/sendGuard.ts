@@ -25,9 +25,12 @@ export function portClosedReason(
 /**
  * True only when the port exists AND its status is exactly 'connected'.
  * `undefined` / `'disconnected'` / `'connecting'` / `'error'` all block sends.
+ *
+ * 声明为类型谓词（而不是返回 boolean）：调用方在守卫之后就要读该端口的字段
+ * （模式、id），否则每个调用点都得再写一次 `!` 断言或空值分支。
  */
-export function isSendablePort(
-  port: { id: string; status?: PortStatus } | undefined
-): boolean {
-  return portClosedReason(port) === null;
+export function isSendablePort<P extends { id: string; status?: PortStatus }>(
+  port: P | undefined
+): port is P {
+  return port !== undefined && port.status === 'connected';
 }

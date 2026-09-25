@@ -8,6 +8,7 @@
 import type { TerminalLine, ParsedField } from '../types';
 import { escapeHtml } from './highlightEngine';
 import { decodeBytes } from './lineText';
+import { hexByte } from './hexFormat';
 
 /**
  * Validate that a color string is safe for CSS injection.
@@ -46,7 +47,7 @@ function renderHexMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): s
     const currentField = coverage[i];
     const hexBytes: string[] = [];
     while (i < rawData.length && coverage[i] === currentField) {
-      hexBytes.push(rawData[i].toString(16).toUpperCase().padStart(2, '0'));
+      hexBytes.push(hexByte(rawData[i]));
       i++;
     }
     const hexStr = hexBytes.join(' ');

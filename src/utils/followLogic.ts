@@ -26,29 +26,11 @@ export function isAtBottom(
 }
 
 /**
- * The `scrollTop` value that pins the viewport flush to the bottom.
- * Clamped to 0 — when the content is shorter than the viewport the browser
- * would clamp an overshooting assignment anyway, so return the legal value.
- */
-export function computePinTarget(scrollHeight: number, clientHeight: number): number {
-  return Math.max(0, scrollHeight - clientHeight);
-}
-
-/**
- * Edge detection for the lock→engage transition.
- *
- * `prev === undefined` is the first observation (tab remount of an
- * already-locked tab) — treat the mount value as a transition so the view
- * jumps to the latest row immediately. Otherwise only the false→true
- * transition fires; true→true and true→false never pin.
- */
-export function becameLocked(prev: boolean | undefined, locked: boolean): boolean {
-  return prev === undefined ? locked : locked && !prev;
-}
-
-/**
  * Whether auto-follow may run: not paused (frozen view), follow engaged,
- * no active user gesture, and no open search bar.
+ * no active user gesture, and no open search bar. The follow *pin target*
+ * itself is computed inline in `TerminalRenderer.render` (padding-aware
+ * same-frame pin) — there is no pure-function indirection for it because the
+ * renderer already owns the container geometry at that point.
  */
 export function shouldFollow(
   paused: boolean,

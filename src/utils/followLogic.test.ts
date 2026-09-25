@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   isAtBottom,
-  computePinTarget,
-  becameLocked,
   shouldFollow,
   FOLLOW_TOLERANCE,
 } from './followLogic';
@@ -37,43 +35,6 @@ describe('isAtBottom', () => {
 
   it('exposes the default tolerance as a named constant', () => {
     expect(FOLLOW_TOLERANCE).toBe(50);
-  });
-});
-
-describe('computePinTarget', () => {
-  it('pins to the delta when content overflows the viewport', () => {
-    expect(computePinTarget(1000, 300)).toBe(700);
-    expect(computePinTarget(500, 200)).toBe(300);
-  });
-
-  it('returns 0 when content fits exactly', () => {
-    expect(computePinTarget(300, 300)).toBe(0);
-  });
-
-  it('clamps negative overflow (content shorter than viewport) to 0', () => {
-    expect(computePinTarget(200, 300)).toBe(0);
-    expect(computePinTarget(100, 500)).toBe(0);
-    expect(computePinTarget(0, 300)).toBe(0);
-  });
-});
-
-describe('becameLocked', () => {
-  it('treats first observation with locked=true as a transition (tab remount)', () => {
-    expect(becameLocked(undefined, true)).toBe(true);
-  });
-
-  it('treats first observation with locked=false as no-op', () => {
-    expect(becameLocked(undefined, false)).toBe(false);
-  });
-
-  it('fires only on the false→true transition', () => {
-    expect(becameLocked(false, true)).toBe(true);
-    expect(becameLocked(false, false)).toBe(false);
-  });
-
-  it('never re-fires while already locked, and never on unlock', () => {
-    expect(becameLocked(true, true)).toBe(false);
-    expect(becameLocked(true, false)).toBe(false);
   });
 });
 

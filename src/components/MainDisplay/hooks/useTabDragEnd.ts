@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import type { DragEndEvent } from '@dnd-kit/core';
-import { useAppStore, findLeafByTabId, findLeafById } from '../../../stores/useAppStore';
+import { useAppStore } from '../../../stores/useAppStore';
+import { findLeafByTabId, findLeafById } from '../../../utils/paneTree';
 
 interface UseTabDragEndOptions {
   moveTabToPane: (tabId: string, paneId: string) => void;

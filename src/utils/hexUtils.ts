@@ -2,6 +2,7 @@
  * Hex <-> String conversion utilities.
  * Shared across terminal display and operation panel.
  */
+import { bytesToSpacedHex } from './hexFormat';
 
 /**
  * Convert a space-separated hex string (e.g. "41 42 43") to a string ("ABC").
@@ -26,7 +27,5 @@ export function hexToString(hex: string): string {
  * Encodes as UTF-8 so non-Latin characters emit their multi-byte representation.
  */
 export function stringToHex(str: string): string {
-  return Array.from(new TextEncoder().encode(str))
-    .map(b => b.toString(16).toUpperCase().padStart(2, '0'))
-    .join(' ');
+  return bytesToSpacedHex(new TextEncoder().encode(str));
 }

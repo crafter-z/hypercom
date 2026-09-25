@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { clearTerminal } from '../../utils/terminal/viewportManager';
 import { useSerialSend, useSerialConnection } from '../../hooks';
@@ -16,8 +17,8 @@ import { useCyclicSend } from './hooks/useCyclicSend';
 const OperationPanel: React.FC = () => {
   const { t } = useTranslation();
   const activeTabId = useAppStore(s => s.activeTabId);
-  const collapsed = useAppStore(s => s.ui.isOperationPanelCollapsed);
-  const panelHeight = useAppStore(s => s.ui.operationPanelHeight);
+  const collapsed = useSystemStore(s => s.ui.isOperationPanelCollapsed);
+  const panelHeight = useSystemStore(s => s.ui.operationPanelHeight);
   const dataBits = useOperationStore(s => s.dataBits);
   const parity = useOperationStore(s => s.parity);
   const stopBits = useOperationStore(s => s.stopBits);
@@ -27,7 +28,7 @@ const OperationPanel: React.FC = () => {
   // 订阅 baudRate：自定义输入走 ParamsSection 本地 draft，opStore.baudRate 仅在
   // 预设选择 / 输入框失焦提交时更新，订阅不会在逐键输入时重渲染面板。
   const baudRate = useOperationStore(s => s.baudRate);
-  const setUIState = useAppStore(s => s.setUIState);
+  const setUIState = useSystemStore(s => s.setUIState);
   const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
   const setConfig = useAppStore(s => s.setConfig);
 

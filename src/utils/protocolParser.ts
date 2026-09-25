@@ -285,22 +285,6 @@ function parseFrameOutcome(
   };
 }
 
-/**
- * Attempt to parse a single complete frame from the START of `bytes`.
- * Returns null if not enough bytes for a complete frame, or if the frame is
- * corrupt (header/footer mismatch or invalid length).
- *
- * The length field value represents the frame size excluding the length field
- * bytes themselves: totalFrameLength = lengthValue - lengthAdjust + lengthFieldSize
- */
-export function parseFrameBytes(
-  bytes: number[],
-  template: ProtocolTemplate
-): ParsedFrame | null {
-  const outcome = parseFrameOutcome(bytes, template);
-  return outcome.status === 'complete' ? outcome.frame : null;
-}
-
 // ==================== Header search ====================
 
 /** Find the first occurrence of header pattern in buffer. Returns -1 if not found. */

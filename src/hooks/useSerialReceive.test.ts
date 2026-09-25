@@ -10,7 +10,8 @@
  * 及其依赖的 store 语义（tab id === portId，复用 `openTab` 手动建标签页动作）。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useAppStore, findLeafByTabId, findLeafById, collectLeaves } from '../stores/useAppStore';
+import { useAppStore } from '../stores/useAppStore';
+import { collectLeaves, findLeafById, findLeafByTabId } from '../utils/paneTree';
 import type { SerialPort, BranchPane } from '../types';
 import { openTabForConnectedPort } from './useSerialReceive';
 
@@ -48,7 +49,6 @@ describe('openTabForConnectedPort — 连接成功自动打开/激活标签页',
     openTabForConnectedPort('COM1');
     const s = useAppStore.getState();
     expect(s.tabs.map((t) => t.id)).toEqual(['COM1']);
-    expect(s.tabs[0].isActive).toBe(true);
     expect(s.activeTabId).toBe('COM1');
     // 标签页必须落在真实叶子（paneTree），不是仅挂在 state.tabs 的孤儿。
     const leaf = findLeafByTabId(s.paneTree, 'COM1');
@@ -63,9 +63,9 @@ describe('openTabForConnectedPort — 连接成功自动打开/激活标签页',
     openTabForConnectedPort('COM1'); // COM1 重连/再次连接
     const s = useAppStore.getState();
     expect(s.tabs).toHaveLength(2);
+    // 激活态由 activeTabId 单一表示（TabItem.isActive 已删除）：
+    // 重连只把焦点切回该端口的标签页，不新建第二个。
     expect(s.activeTabId).toBe('COM1');
-    expect(s.tabs.find((t) => t.id === 'COM1')!.isActive).toBe(true);
-    expect(s.tabs.find((t) => t.id === 'COM2')!.isActive).toBe(false);
   });
 
   it('多 Pane（递归 paneTree）下新标签页落在聚焦叶子，与手动建标签页一致', () => {

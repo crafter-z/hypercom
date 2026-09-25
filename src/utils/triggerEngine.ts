@@ -5,6 +5,7 @@
  */
 
 import type { TriggerRule } from '../types';
+import { bytesToSpacedHex } from './hexFormat';
 
 /** 触发匹配结果：匹配到的规则 + 匹配文本 */
 export interface TriggerAction {
@@ -14,14 +15,6 @@ export interface TriggerAction {
 
 /** 模式最大长度（ReDoS 防护，与 highlightEngine 一致） */
 const MAX_PATTERN_LENGTH = 200;
-
-/**
- * 将字节数组转为大写、空格分隔的 HEX 字符串
- * 例: [0xAA, 0x55] → "AA 55"
- */
-export function bytesToHexString(data: number[]): string {
-  return data.map((b) => (b & 0xff).toString(16).toUpperCase().padStart(2, '0')).join(' ');
-}
 
 /**
  * 规范化 HEX 模式字符串：去多余空格、转大写
@@ -81,7 +74,7 @@ export function evaluateTriggers(
 
       case 'hex': {
         if (!rawData || rawData.length === 0) continue;
-        const hexStr = bytesToHexString(rawData);
+        const hexStr = bytesToSpacedHex(rawData);
         const normalizedPattern = normalizeHexPattern(rule.pattern);
         matched = hexStr.includes(normalizedPattern);
         break;

@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { filterLines, type DirectionFilter } from './lineFilter';
+import { linePassesFilter, type DirectionFilter } from './lineFilter';
 import type { TerminalLine } from '../types';
 
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s);
 
-// RX 行不带 content（方案B, issue #14）：文本由 filterLines 内部经 getLineText
+// RX 行不带 content（方案B, issue #14）：文本由 linePassesFilter 内部经 getLineText
 // 按 rawData + encoding 惰性解码；TX 行保留 content。
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
   timestamp: 0,
@@ -14,101 +14,64 @@ const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
   ...overrides,
 });
 
-const sample = (): TerminalLine[] => [
-  makeLine({ direction: 'TX', content: 'AT+RESET' }),
-  makeLine({ direction: 'RX', rawData: bytes('OK') }),
-  makeLine({ direction: 'TX', content: 'AT+GMR' }),
-  makeLine({ direction: 'RX', rawData: bytes('error: timeout') }),
-  makeLine({ direction: 'RX', rawData: bytes('AT command echoed') }),
-];
+const passes = (
+  line: TerminalLine,
+  direction: DirectionFilter,
+  keyword = '',
+  encoding = 'UTF-8',
+): boolean => linePassesFilter(line, direction, keyword, encoding);
 
-describe('filterLines', () => {
-  it('returns null (implicit identity) when no filter is active', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: '' })).toBeNull();
+describe('linePassesFilter', () => {
+  it('passes every line when no filter is active', () => {
+    const lines = [
+      makeLine({ direction: 'TX', content: 'AT+RESET' }),
+      makeLine({ direction: 'RX', rawData: bytes('OK') }),
+    ];
+    expect(lines.every((l) => passes(l, 'all'))).toBe(true);
   });
 
-  it('returns empty array for empty input with an active filter', () => {
-    expect(filterLines([], { direction: 'TX', keyword: 'x' })).toEqual([]);
-  });
-
-  it('keeps only TX lines for direction TX', () => {
-    expect(filterLines(sample(), { direction: 'TX', keyword: '' })).toEqual([0, 2]);
-  });
-
-  it('keeps only RX lines for direction RX', () => {
-    expect(filterLines(sample(), { direction: 'RX', keyword: '' })).toEqual([1, 3, 4]);
+  it('keeps only the requested direction', () => {
+    const tx = makeLine({ direction: 'TX', content: 'AT+GMR' });
+    const rx = makeLine({ direction: 'RX', rawData: bytes('OK') });
+    expect(passes(tx, 'TX')).toBe(true);
+    expect(passes(tx, 'RX')).toBe(false);
+    expect(passes(rx, 'RX')).toBe(true);
+    expect(passes(rx, 'TX')).toBe(false);
   });
 
   it('matches keyword case-insensitively against content', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: 'at' })).toEqual([0, 2, 4]);
-    expect(filterLines(sample(), { direction: 'all', keyword: 'TIMEOUT' })).toEqual([3]);
+    const line = makeLine({ content: 'AT+RESET' });
+    expect(passes(line, 'all', 'at+res')).toBe(true);
+    expect(passes(line, 'all', 'RESET')).toBe(true);
+    expect(passes(line, 'all', 'zzz')).toBe(false);
   });
 
-  it('treats whitespace-only keyword as no keyword filter', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: '   ' })).toBeNull();
+  it('trims the keyword and treats whitespace-only as no keyword', () => {
+    const line = makeLine({ content: 'OK' });
+    expect(passes(line, 'all', '  ok  ')).toBe(true);
+    expect(passes(line, 'all', '   ')).toBe(true);
   });
 
-  it('trims keyword before matching', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: '  ok  ' })).toEqual([1]);
-  });
-
-  it('combines direction and keyword filters (AND semantics)', () => {
-    // 'at' appears in TX lines 0, 2 and RX line 4; TX-only narrows to 0, 2.
-    expect(filterLines(sample(), { direction: 'TX', keyword: 'at' })).toEqual([0, 2]);
-    expect(filterLines(sample(), { direction: 'RX', keyword: 'at' })).toEqual([4]);
-  });
-
-  it('returns empty when nothing matches the keyword', () => {
-    expect(filterLines(sample(), { direction: 'all', keyword: 'zzz' })).toEqual([]);
-  });
-
-  it('returns original indices, not re-numbered positions', () => {
-    const lines = [
-      makeLine({ direction: 'RX', rawData: bytes('skip') }),
-      makeLine({ direction: 'RX', rawData: bytes('keep') }),
-      makeLine({ direction: 'RX', rawData: bytes('skip') }),
-    ];
-    expect(filterLines(lines, { direction: 'all', keyword: 'keep' })).toEqual([1]);
+  it('combines direction and keyword (AND semantics)', () => {
+    const tx = makeLine({ direction: 'TX', content: 'AT+GMR' });
+    const rx = makeLine({ direction: 'RX', content: 'AT command echoed' });
+    expect(passes(tx, 'TX', 'at')).toBe(true);
+    expect(passes(tx, 'RX', 'at')).toBe(false);
+    expect(passes(rx, 'RX', 'at')).toBe(true);
+    expect(passes(rx, 'TX', 'at')).toBe(false);
   });
 
   it('decodes RX rawData lazily under the given encoding', () => {
-    // '你好' GBK = C4E3 BAC3：默认 UTF-8 解不出（得到替换符），显式传 encoding 才命中
-    const lines = [
-      makeLine({ direction: 'RX', rawData: new Uint8Array([0xc4, 0xe3, 0xba, 0xc3]) }),
-    ];
-    expect(filterLines(lines, { direction: 'all', keyword: '你好' })).toEqual([]);
-    expect(filterLines(lines, { direction: 'all', keyword: '你好', encoding: 'GBK' })).toEqual([0]);
+    // GBK: C4E3 BAC3 = 你好；UTF-8 下同一字节序列解不出该文本
+    const line = makeLine({ rawData: new Uint8Array([0xc4, 0xe3, 0xba, 0xc3]) });
+    expect(passes(line, 'all', '你好')).toBe(false);
+    expect(passes(line, 'all', '你好', 'GBK')).toBe(true);
   });
 
   it('accepts every DirectionFilter value', () => {
-    const lines = sample();
     const dirs: DirectionFilter[] = ['all', 'TX', 'RX'];
-    // null means implicit identity — count falls back to lines.length.
-    const counts = dirs.map((d) => filterLines(lines, { direction: d, keyword: '' })?.length ?? lines.length);
-    expect(counts).toEqual([5, 2, 3]);
-  });
-
-  describe('limit', () => {
-    it('stops scanning at limit for keyword filters', () => {
-      // 'at' matches indices 0, 2, 4 in the full sample; limit 2 scans 0..1.
-      expect(filterLines(sample(), { direction: 'all', keyword: 'at' }, 2)).toEqual([0]);
-    });
-
-    it('stops scanning at limit for direction filters', () => {
-      // RX lives at 1, 3, 4; limit 3 scans 0..2 → only index 1.
-      expect(filterLines(sample(), { direction: 'RX', keyword: '' }, 3)).toEqual([1]);
-    });
-
-    it('returns empty for limit 0 with an active filter', () => {
-      expect(filterLines(sample(), { direction: 'all', keyword: 'at' }, 0)).toEqual([]);
-    });
-
-    it('still returns null with no active filter regardless of limit', () => {
-      expect(filterLines(sample(), { direction: 'all', keyword: '' }, 2)).toBeNull();
-    });
-
-    it('treats limit beyond the buffer as the full buffer', () => {
-      expect(filterLines(sample(), { direction: 'RX', keyword: '' }, 99)).toEqual([1, 3, 4]);
-    });
+    const line = makeLine({ direction: 'RX', content: 'x' });
+    // 'all' 与 'RX' 放行，'TX' 拒绝
+    expect(dirs.map((d) => passes(line, d))).toEqual([true, false, true]);
   });
 });

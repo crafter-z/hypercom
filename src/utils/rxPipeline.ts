@@ -2,9 +2,10 @@
  * RxPipeline — 按端口聚合的 RX 批处理管线（RX 管线第二层）。
  *
  * 第一层 RxLineAssembler 把字节流切成「已完成行的字节块」；本层负责：
- * 1. 解码：每端口按编码 label 缓存一个 TextDecoder（ignoreBOM:true —— 非流式
- *    解码默认会剥掉行首的 UTF-8 BOM，必须显式保留；行已由字节级切分保证
- *    同一编码内多字节字符不跨行，故无需 {stream:true}）；
+ * 1. 解码：按端口当前编码 label 解码成完整行。解码器统一由 `lineText.ts`
+ *    缓存（K8；本层曾自持一份 per-port 缓存，`ignoreBOM` 与其它路径不一致）；
+ *    行已由字节级切分保证同一编码内多字节字符不跨行，故无需 {stream:true}；
+ *    行首 UTF-8 BOM 作为编码标记被剥离，不进入行文本（trigger/搜索/复制一致）；
  * 2. 批写：成行先入每端口队列，scheduleFlush 调度一个覆盖全管线的 tick
  *    （默认 rAF，node 环境回退 setTimeout 16ms），每帧对每端口只做一次
  *    appendLines——高频 RX 下把逐行 store 更新压成每帧一次；
@@ -22,6 +23,7 @@
 
 import type { TerminalLine } from '../types';
 import { RxLineAssembler } from './rxAssembler';
+import { decodeBytes } from './lineText';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { appendTerminalLines } from './terminal/viewportManager';
@@ -67,8 +69,6 @@ interface PortRxState {
   lastEventTs: number | null;
   /** 静默 flush 定时器 */
   silenceTimer: number | null;
-  /** 按 label 缓存的解码器：同一编码复用同一实例，避免每行 new TextDecoder */
-  decoders: Map<string, TextDecoder>;
 }
 
 const DEFAULT_SILENCE_FLUSH_MS = 250;
@@ -173,7 +173,7 @@ export class RxPipeline {
         // 解码又存进 rawData——比旧的「解码临时拷贝 + number[] 存 rawData」省一份。
         // issue #14：不再存解码后的 content 字符串（渲染/搜索/过滤按需惰性解码）。
         const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-        const text = this.decodeUnderCurrentLabel(state, portId, raw);
+        const text = this.decodeUnderCurrentLabel(portId, raw);
         // ignoreEmptyChars 语义与旧路径一致：解码后 trim 为空（纯分隔/空白）的行丢弃。
         // 空行也跳过触发器钩子（无内容可匹配），与旧实现行为一致。
         if (ignoreEmptyChars && !text.trim()) continue;
@@ -208,13 +208,11 @@ export class RxPipeline {
   }
 
   /**
-   * 用端口当前编码的缓存解码器解码一段字节（协议帧自成单元、不跨行，
-   * 用非流式解码即可）。对 label 变化自动切换解码器。
+   * 解码一段字节为文本（协议帧自成单元、不跨行，非流式即可）。
    * 输入可为 number[]（事件 payload / 协议帧）或 Uint8Array（feedBytes 已转换）。
    */
   decodeText(portId: string, bytes: number[] | Uint8Array): string {
-    const state = this.getPortState(portId);
-    return this.decodeUnderCurrentLabel(state, portId, bytes);
+    return this.decodeUnderCurrentLabel(portId, bytes);
   }
 
   /**
@@ -248,7 +246,7 @@ export class RxPipeline {
     const raw = new Uint8Array(tail);
     // issue #14 惰性解码：尾行按当前编码预解码并存入 content，避免随后编码切换
     // 导致该行按新编码重新解码产生乱码（与 flushAndReset「按当前编码冲刷落盘」语义一致）。
-    const text = this.decodeUnderCurrentLabel(state, portId, raw);
+    const text = this.decodeUnderCurrentLabel(portId, raw);
     state.queue.push({
       timestamp: state.lastEventTs ?? Date.now(),
       direction: 'RX',
@@ -259,8 +257,9 @@ export class RxPipeline {
   }
 
   /**
-   * 编码切换前调用：先把尾部按**当前**编码冲刷落盘，再重置组装器、
-   * 丢弃缓存解码器与静默定时器——旧编码 buffered 的字节不允许在新编码下复活。
+   * 编码切换前调用：先把尾部按**当前**编码冲刷落盘，再重置组装器与静默定时器——
+   * 旧编码 buffered 的字节不允许在新编码下复活。解码器由 `lineText.ts` 共享缓存，
+   * 非流式解码不留跨调用残字节，故这里无需（也无法）清理。
    */
   flushAndReset(portId: string): void {
     const state = this.ports.get(portId);
@@ -272,11 +271,10 @@ export class RxPipeline {
       state.silenceTimer = null;
     }
     state.assembler.reset();
-    state.decoders.clear();
   }
 
   /**
-   * 断线：冲刷尾部后丢弃该端口全部状态（组装器/解码器/定时器/队列），
+   * 断线：冲刷尾部后丢弃该端口全部状态（组装器/定时器/队列），
    * 重连必须从干净状态开始。
    */
   disconnect(portId: string): void {
@@ -327,32 +325,20 @@ export class RxPipeline {
         queue: [],
         lastEventTs: null,
         silenceTimer: null,
-        decoders: new Map(),
       };
       this.ports.set(portId, state);
     }
     return state;
   }
 
-  /** 按端口当前 label 取（或惰性创建）缓存解码器后解码 */
+  /** 按端口当前 label 解码一段字节（解码器由 `lineText.ts` 统一缓存）。 */
   private decodeUnderCurrentLabel(
-    state: PortRxState,
     portId: string,
     bytes: number[] | Uint8Array,
   ): string {
-    const label = this.opts.getEncodingLabel(portId);
-    let decoder = state.decoders.get(label);
-    if (!decoder) {
-      try {
-        decoder = new TextDecoder(label, { fatal: false, ignoreBOM: true });
-      } catch {
-        console.warn('[RxPipeline] TextDecoder failed for encoding:', label, 'falling back to utf-8');
-        decoder = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true });
-      }
-      state.decoders.set(label, decoder);
-    }
     // issue #6-2：已传 Uint8Array（feedBytes 转换的 raw）时不再次拷贝
-    return decoder.decode(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    return decodeBytes(raw, this.opts.getEncodingLabel(portId));
   }
 
   /** 调度全管线唯一的批写 tick；tick 内对每个有排队的端口各做一次 appendLines */

@@ -351,6 +351,20 @@ export class TerminalViewportManager {
     return this.matchSetCache;
   }
 
+  /**
+   * 过滤列表（以及紧随其后的搜索列表）的**条件变化**入口——唯一整缓冲重扫点。
+   *
+   * 增量语义：`appendLines` 里每条新行按当前条件匹配一次并入列，只有条件变化才
+   * 走到这里；因此「继续输入时收窄扫描范围」这层优化不需要单独实现——查询/关键字
+   * 一改就是全量重扫，而新行由 append 路径增量吸收，两者合起来覆盖了旧
+   * findMatchesIncremental 的「旧匹配 ∪ 新增行」语义，且少一份需要与主实现保持
+   * 同步的缓存状态。
+   *
+   * 裁剪回退：列表项存 **seq** 而非行下标，缓冲头部被裁只 `dropTrimmedSeq` 地
+   * bump `offset`（O(1)），不重扫也不失效索引；`offset` 增长过 COMPACT_THRESHOLD
+   * 才 splice 压缩一次（append 摊还 O(1)）——旧实现的「lineCount 回退即全量重扫」
+   * 在这里是结构性不需要的。
+   */
   private recomputeFilter(): void {
     const active = this.filterDirection !== 'all' || this.filterKeyword.trim().length > 0;
     this.filterActive = active;

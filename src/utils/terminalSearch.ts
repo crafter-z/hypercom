@@ -4,26 +4,23 @@
  * Extracted from TerminalView so search logic can be unit-tested under
  * vitest's `environment: 'node'` config (no jsdom required).
  *
+ * Scope: single-line searchable text + the character-level `<mark>` overlay.
+ * The **match list** (which line indices/seqs hit the query, and how it is kept
+ * up to date incrementally) lives in the viewport manager — the only
+ * production implementation (see `viewportManager.recomputeSearch`).
+ *
  * P1-9：本文件原居 components/MainDisplay/，但它是零 React 依赖的纯文本工具，
  * 却被 utils/terminal 渲染引擎（TerminalRenderer/viewportManager）反向 import，
  * 造成 components↔utils 双向耦合。移入 utils/ 与 lineText/lineFilter 同层，
  * 消除反向依赖（底层引擎不再依赖 UI 目录）。
  */
 import type { TerminalLine, DisplayFormat, Encoding } from '../types';
+import { bytesToSpacedHex } from './hexFormat';
 import { getLineText } from './lineText';
-
-export interface FindMatchesOptions {
-  query: string;
-  caseSensitive: boolean;
-  /** When 'hex', matches against the hex representation of rawData. */
-  displayFormat?: DisplayFormat;
-  /** Encoding for lazily decoding RX lines without `content` (issue #14). */
-  encoding?: Encoding | string;
-}
 
 /**
  * Returns the searchable text for a single terminal line, mirroring the
- * rendering branch in TerminalView (hex display falls back to rawData,
+ * rendering branch in TerminalRenderer (hex display falls back to rawData,
  * everything else uses content, lazily decoded from rawData when absent —
  * issue #14: RX lines carry no decoded string).
  */
@@ -33,84 +30,9 @@ export function getSearchableText(
   encoding?: Encoding | string
 ): string {
   if (displayFormat === 'hex' && line.rawData) {
-    return Array.from(line.rawData, (b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    return bytesToSpacedHex(line.rawData);
   }
   return getLineText(line, encoding ?? 'UTF-8');
-}
-
-/**
- * Returns the list of line indices whose searchable text contains `query`.
- * Empty query returns `[]`. Case-insensitive by default.
- */
-export function findMatches(
-  lines: TerminalLine[],
-  options: FindMatchesOptions
-): number[] {
-  const { query, caseSensitive, displayFormat, encoding } = options;
-  if (!query) return [];
-  const needle = caseSensitive ? query : query.toLowerCase();
-  const result: number[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const text = getSearchableText(lines[i], displayFormat, encoding);
-    const haystack = caseSensitive ? text : text.toLowerCase();
-    if (haystack.includes(needle)) result.push(i);
-  }
-  return result;
-}
-
-// ==================== 增量匹配（issue #2-8 性能）====================
-
-/** 上一次匹配计算的快照，供 findMatchesIncremental 做增量收窄。 */
-export interface MatchCache {
-  query: string;
-  caseSensitive: boolean;
-  displayFormat?: DisplayFormat;
-  encoding?: Encoding | string;
-  matches: number[];
-  /** 计算时缓冲区的行数（之后新增的行需要补扫）。 */
-  lineCount: number;
-}
-
-/**
- * 增量匹配：继续输入（新 query 以旧 query 为前缀）时，匹配结果只可能
- * 在「旧匹配 ∪ 新增行」中产生——扫描集从全缓冲缩到这两者，高频接收
- * 场景下每次按键的代价从 O(全部行) 降到 O(旧匹配数 + 新增行数)。
- * 前缀不成立（删字/改字）、大小写或显示格式或编码变化、缓冲被 maxLines
- * 裁剪（lineCount 回退）时自动退回全量 findMatches。
- */
-export function findMatchesIncremental(
-  lines: TerminalLine[],
-  options: FindMatchesOptions,
-  prev: MatchCache | null
-): number[] {
-  const { query, caseSensitive, displayFormat, encoding } = options;
-  if (!query) return [];
-  if (
-    prev &&
-    prev.query.length > 0 &&
-    query.startsWith(prev.query) &&
-    prev.caseSensitive === caseSensitive &&
-    prev.displayFormat === displayFormat &&
-    prev.encoding === encoding &&
-    prev.lineCount <= lines.length
-  ) {
-    const needle = caseSensitive ? query : query.toLowerCase();
-    const result: number[] = [];
-    // prev.matches 升序且全部 < prev.lineCount；新增行索引 >= prev.lineCount，
-    // 两者串接后依然升序，结果保持升序。
-    for (const i of prev.matches) {
-      const text = getSearchableText(lines[i], displayFormat, encoding);
-      const haystack = caseSensitive ? text : text.toLowerCase();
-      if (haystack.includes(needle)) result.push(i);
-    }
-    for (let i = prev.lineCount; i < lines.length; i++) {
-      const text = getSearchableText(lines[i], displayFormat, encoding);
-      const haystack = caseSensitive ? text : text.toLowerCase();
-      if (haystack.includes(needle)) result.push(i);
-    }
-    return result;
-  }
-  return findMatches(lines, options);
 }
 
 // ==================== 字符级高亮（issue #2-8）====================
