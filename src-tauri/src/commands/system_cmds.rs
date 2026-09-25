@@ -5,6 +5,35 @@ use sysinfo::ProcessRefreshKind;
 use super::CommandError;
 use crate::AppState;
 
+// ── 构建期能力门控（唯一实现，其它命令模块只调用这里）────────────────────────
+//
+// 为什么集中：模拟串口 / 模拟终端 / 自动更新三条能力与构建形态强相关（前两者只
+// 存在于开发构建，后者只存在于发布通道），此前每个命令各写一份 `#[cfg]` 分支，
+// 三种形状（体内双分支 / 体内早返回 / 命令级双实现）导致 release 下的行为各自
+// 漂移。现在命令体只有一份实现，构建差异只由这两个守卫决定。
+
+/// 调试能力守卫：debug 构建放行，release 构建拒绝。
+///
+/// 用于「只应存在于 debug 构建」的能力：release 安装包里 spawn 虚拟端口没有
+/// 意义、只是额外的攻击面。前端 UI 入口同样按 `import.meta.env.DEV` 隐藏，
+/// 这里是后端那一层——命令被直接 invoke 时仍然拒绝。
+pub(crate) fn dev_only(capability: &str) -> Result<(), CommandError> {
+    if cfg!(debug_assertions) {
+        return Ok(());
+    }
+    Err(CommandError::Serial(format!(
+        "{capability} is only available in debug builds"
+    )))
+}
+
+/// 是否处于 debug 构建（发布通道专属能力的短路条件，例如自动更新）。
+///
+/// 自动更新的两端点都指向 GitHub 发布产物，开发构建不在任何发布通道上：
+/// debug 下检查/安装直接短路为「无更新 / 已完成」，保持前端检查按钮可用。
+pub(crate) fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// 获取系统状态（内存、CPU）
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

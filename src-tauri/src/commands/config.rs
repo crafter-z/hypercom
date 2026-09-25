@@ -14,45 +14,27 @@ pub fn get_config(state: State<AppState>) -> Result<config::AppConfig, CommandEr
 }
 
 /// 更新应用配置。
-/// 写入 config.json 后自动同步日志设置到 LogManager、诊断日志开关到 DiagLogger
-///（消除双数据源）。
+///
+/// 落盘后把配置中属于「运行期镜像」的部分（日志设置 + 诊断日志开关）应用到
+/// `AppState::apply_runtime_config`——唯一同步入口。此前这里是逐字段手抄的
+/// setter 列表，与 `AppState::new` 的第二份列表并存，新增字段时必然漏同步一处。
 #[tauri::command]
 pub fn set_config(
     new_config: config::AppConfig,
     state: State<AppState>,
 ) -> Result<(), CommandError> {
-    // 先写配置
-    {
-        let mut manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .set_config(new_config.clone())
-            .map_err(|e| CommandError::Config(e.to_string()))?;
-    }
-    // 再同步 LogManager（锁顺序：config → log，与 start_logging 一致）
-    sync_log_manager_from_config(&state)?;
-    // 同步诊断日志开关（原子开关，无需锁）
-    state.diag_logger.set_enabled(new_config.diag_log_enabled);
-    Ok(())
-}
-
-/// 重置配置为默认值
-#[tauri::command]
-pub fn reset_config(state: State<AppState>) -> Result<config::AppConfig, CommandError> {
     let cfg = {
         let mut manager = state
             .config_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         manager
-            .reset_to_default()
-            .map_err(|e| CommandError::Config(e.to_string()))?
+            .set_config(new_config)
+            .map_err(|e| CommandError::Config(e.to_string()))?;
+        manager.get_config().clone()
     };
-    sync_log_manager_from_config(&state)?;
-    state.diag_logger.set_enabled(cfg.diag_log_enabled);
-    Ok(cfg)
+    state.apply_runtime_config(&cfg);
+    Ok(())
 }
 
 /// 保存会话快照到独立 session.json（不触发 config .bak 备份）
@@ -88,35 +70,4 @@ pub fn get_config_path(state: State<AppState>) -> Result<String, CommandError> {
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     Ok(manager.config_path().display().to_string())
-}
-
-/// 从 ConfigManager 当前配置同步全部日志设置到 LogManager。
-/// 锁顺序：先 config（只读）→ 再 log（写），与 start_logging 一致，不会死锁。
-fn sync_log_manager_from_config(state: &State<AppState>) -> Result<(), CommandError> {
-    let cfg = {
-        let mgr = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.get_config().clone()
-    };
-    let mut log_mgr = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    log_mgr.set_auto_save(cfg.auto_save_log);
-    log_mgr.set_default_encoding(&cfg.log_encoding);
-    log_mgr.set_filename_format(&cfg.log_filename_format);
-    log_mgr.set_split_size(cfg.log_split_size_mb);
-    log_mgr.set_split_enabled(cfg.log_split_enabled);
-    log_mgr.set_include_timestamp(cfg.log_include_timestamp);
-    log_mgr.set_include_direction(cfg.log_include_direction);
-    log_mgr.set_subdir_mode(&cfg.log_subdir_mode);
-    log_mgr.set_new_file_per_session(cfg.log_new_file_per_session);
-    if !cfg.log_directory.is_empty() {
-        if let Err(e) = log_mgr.set_directory(cfg.log_directory.clone()) {
-            log::warn!("Failed to set log directory '{}': {}", cfg.log_directory, e);
-        }
-    }
-    Ok(())
 }

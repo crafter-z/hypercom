@@ -14,6 +14,10 @@ mod system_cmds;
 mod tty_sim;
 mod update;
 
+// 命令参数 wire 形状守卫（纯测试模块）：钉住前端 invoke 的 key 与 Rust 反序列化字段名。
+#[cfg(test)]
+mod wire_shape;
+
 pub use config::*;
 pub use diag::*;
 pub use file::*;

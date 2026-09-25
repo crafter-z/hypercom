@@ -14,21 +14,16 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 ///
 /// 同步命令在事件循环主线程执行——内部 `serialport::available_ports()` 是阻塞式
 /// 串口枚举，前端每 3s 轮询一次，高频数据会话下周期性阻塞主线程会拖慢 RX 分发
-/// 与重绘（TTY 卡顿根因 #1）。改 async + spawn_blocking（issue #6-1 同款）：
-/// 克隆 Arc 句柄，枚举挪到独立线程池，主线程立即返回。行为（返回结构/字段/
-/// 调用频率）不变。
+/// 与重绘（TTY 卡顿根因 #1）。改 async + spawn_blocking：克隆 Arc 句柄，枚举挪到
+/// 独立线程池，主线程立即返回。`list_ports_blocking` 自身把枚举放在全局串口锁
+/// **之外**执行，轮询也不会阻塞发送/关闭命令。行为（返回结构/字段/调用频率）不变。
 #[tauri::command]
 pub async fn list_available_ports(
     state: State<'_, AppState>,
 ) -> Result<Vec<serial::PortInfo>, CommandError> {
     let serial_manager = state.serial_manager.clone();
     tokio::task::spawn_blocking(move || {
-        let manager = serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .list_ports()
-            .map_err(|e| CommandError::Serial(e.to_string()))
+        serial::list_ports_blocking(&serial_manager).map_err(|e| CommandError::Serial(e.to_string()))
     })
     .await
     .map_err(|e| CommandError::Other(format!("List ports task panicked: {e}")))?
@@ -45,9 +40,9 @@ pub struct OpenPortArgs {
     pub handshake: String,
     pub dtr: bool,
     pub rts: bool,
-    /// TTY 模拟终端（GIT:BASH）初始尺寸（issue #11）：前端 xterm fit() 后把当前
-    /// cols/rows 随打开请求带来，pty 以正确尺寸 spawn——否则 pty 固定 80×24，
-    /// vim/top 全屏应用按 80×24 渲染而 xterm 按自身尺寸显示，画面错乱。
+    /// TTY 模拟终端（GIT:BASH）初始尺寸：前端 xterm fit() 后把当前 cols/rows 随
+    /// 打开请求带来，pty 以正确尺寸 spawn——否则 pty 固定 80×24，vim/top 全屏
+    /// 应用按 80×24 渲染而 xterm 按自身尺寸显示，画面错乱。
     /// 真实串口忽略；缺省时 serde 回退默认值。
     #[serde(default = "default_tty_cols")]
     pub cols: u16,
@@ -63,16 +58,31 @@ fn default_tty_rows() -> u16 {
     24
 }
 
+/// 打开串口（真实 / SIM:Loopback / GIT:BASH 由 port_id 前缀决定）。
+///
+/// async + spawn_blocking：打开要做系统调用（CreateFile），热插拔幽灵句柄回收时
+/// 还要枚举端口并 join 旧读线程——全是阻塞操作，同步命令会在事件循环主线程执行
+/// 而卡住 UI。`serial::open_blocking` 自持/自放全局串口锁，阻塞阶段不挡其它串口
+/// 命令。
+///
+/// 帧格式/流控取值（parity / stop_bits / data_bits / handshake）在打开路径解析时
+/// 校验，未知取值直接报错——不再静默回落到默认帧格式。虚拟端口的能力门控也在
+/// `SerialManager::open_port` 内先于任何副作用执行。
 #[tauri::command]
-pub fn open_serial_port(args: OpenPortArgs, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.open_port(args.clone()).map_err(|e| {
-        log::warn!("Failed to open port {}: {}", args.port_id, e);
-        CommandError::Serial(e.to_string())
+pub async fn open_serial_port(
+    args: OpenPortArgs,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let serial_manager = state.serial_manager.clone();
+    let port_id = args.port_id.clone();
+    tokio::task::spawn_blocking(move || {
+        serial::open_blocking(&serial_manager, args).map_err(|e| {
+            log::warn!("Failed to open port {}: {}", port_id, e);
+            CommandError::Serial(e.to_string())
+        })
     })
+    .await
+    .map_err(|e| CommandError::Other(format!("Open port task panicked: {e}")))?
 }
 
 /// 关闭指定串口
@@ -92,9 +102,9 @@ pub async fn close_serial_port(
             CommandError::Serial(e.to_string())
         })?
     };
-    // issue #11：join 移到阻塞线程池执行，不占主线程——GIT:BASH 读线程需等
-    // ConPTY 关闭（close_port 已 drop master）后才退出；即使读线程异常不退，
-    // 同步 join 也不会再冻结整个应用 UI。
+    // join 移到阻塞线程池执行，不占主线程——GIT:BASH 读线程需等 ConPTY 关闭
+    // （close_port 已 drop master）后才退出；即使读线程异常不退，同步 join 也不会
+    // 再冻结整个应用 UI。
     if let Some(thread) = join_handle {
         let _ = tokio::task::spawn_blocking(move || {
             let _ = thread.join();
@@ -114,83 +124,87 @@ pub struct SendDataArgs {
     pub append_line_ending: String,
 }
 
-/// 向串口发送数据（异步非阻塞，issue #6-1）。
+/// 向串口发送数据（异步非阻塞）。返回实际写入端口的字节数。
 ///
-/// 旧实现是同步命令（pub fn）：Tauri 的同步命令在事件循环主线程上同步执行，
-/// 内部每次调用都无条件执行「拿 serial_manager 锁 → write_all+flush 写串口 →
-/// 拿 log_manager 锁 → BufWriter 写日志」。这些阻塞 IO 跑完前主线程无法处理
-/// 重绘/点击/RX 刷新——每次发送都无条件卡顿，长期占用主线程还会错过 tao 的
-/// RedrawEventsCleared 窗口，触发 NewEvents/RedrawEventsCleared 警告与白屏
-/// （与 RX 数据量无关，纯发送路径自身阻塞）。
+/// 旧实现是同步命令：Tauri 的同步命令在事件循环主线程上同步执行，内部每次调用都
+/// 无条件执行「拿 serial_manager 锁 → 写串口 → 拿 log_manager 锁 → 写日志」。
+/// 这些阻塞 IO 跑完前主线程无法处理重绘/点击/RX 刷新——每次发送都无条件卡顿，
+/// 长期占用主线程还会错过 tao 的 RedrawEventsCleared 窗口，触发
+/// NewEvents/RedrawEventsCleared 警告与白屏（与 RX 数据量无关，纯发送路径自身阻塞）。
 ///
 /// 修法：改 async fn（命令移到 tokio 运行时，不再占主线程），再经
 /// `spawn_blocking` 把串口 IO 与日志写放到独立线程池——主线程发完命令立即返回。
-/// `send_file` 本就是 async fn（tokio::fs::read + 分块间 yield），无同类主线程
-/// 阻塞点；其分块写入的阻塞上限是单块大小，可接受。
 #[tauri::command]
 pub async fn send_serial_data(
     args: SendDataArgs,
     state: State<'_, AppState>,
 ) -> Result<usize, CommandError> {
     // 从 State 克隆出 'static 的 Arc 句柄供 spawn_blocking 闭包使用
-    // （AppState 的 serial_manager / log_manager 是 Arc<Mutex<..>>）。
+    // （AppState 的 serial_manager / log_manager 是 Arc）。
     let serial_manager = state.serial_manager.clone();
     let log_manager = state.log_manager.clone();
-    let port_id = args.port_id.clone();
-    let data = args.data.clone();
-    let is_hex = args.is_hex;
-    let append_line_ending = args.append_line_ending.clone();
+    let SendDataArgs {
+        port_id,
+        data,
+        is_hex,
+        append_line_ending,
+    } = args;
 
     tokio::task::spawn_blocking(move || {
-        let n = {
+        let tx = {
             let manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            if port_id.starts_with("SIM:") || port_id.starts_with("GIT:") {
-                // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成即可
-                // （GIT: 模拟终端 pty stdin 写，issue #11）。
-                manager
-                    .send_data(&port_id, &data, is_hex, &append_line_ending)
-                    .map_err(|e| {
+            match serial::PortKind::of(&port_id) {
+                // 真实串口：**两段式**——全局锁内只做 HashMap 查找 + Arc 克隆写
+                // 句柄，立即释放全局锁，再只持 per-port 写锁执行带总期限的写入。
+                // 不再持全局 serial_manager 锁执行写：端口列表轮询 / 其它端口命令
+                // 不被慢发送拖死。
+                serial::PortKind::Real => {
+                    let write_port = manager.get_write_handle(&port_id).map_err(|e| {
                         log::warn!("Failed to send data to {}: {}", port_id, e);
                         CommandError::Serial(e.to_string())
-                    })?
-            } else {
-                // 真实串口（issue #6-10 方案2）：**两段式**——全局锁内只做
-                // HashMap 查找 + Arc 克隆写句柄，立即释放全局锁，再只持
-                // per-port 写锁执行带总期限的写入。不再持全局 serial_manager
-                // 锁执行写：端口列表轮询 / 其它端口命令不被慢发送拖死。
-                let write_port = manager.get_write_handle(&port_id).map_err(|e| {
-                    log::warn!("Failed to send data to {}: {}", port_id, e);
-                    CommandError::Serial(e.to_string())
-                })?;
-                let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
-                    .map_err(|e| CommandError::Serial(e.to_string()))?;
-                drop(manager); // 释放全局锁，写操作在锁外执行
-                let mut port = write_port
-                    .lock()
-                    .map_err(|e| CommandError::Lock(e.to_string()))?;
-                serial::write_all_with_deadline(&port_id, &mut **port, &bytes, serial::WRITE_TOTAL_DEADLINE)
+                    })?;
+                    let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
+                        .map_err(|e| CommandError::Serial(e.to_string()))?;
+                    drop(manager); // 释放全局锁，写操作在锁外执行
+                    let mut port = write_port
+                        .lock()
+                        .map_err(|e| CommandError::Lock(e.to_string()))?;
+                    serial::write_all_with_deadline(
+                        &port_id,
+                        &mut **port,
+                        &bytes,
+                        serial::WRITE_TOTAL_DEADLINE,
+                    )
                     .map_err(|e| {
                         log::warn!("Failed to send data to {}: {}", port_id, e);
                         CommandError::Serial(e.to_string())
                     })?;
-                bytes.len()
+                    serial::TxOutcome::sent(bytes)
+                }
+                // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成即可。
+                _ => manager
+                    .send_data(&port_id, &data, is_hex, &append_line_ending)
+                    .map_err(|e| {
+                        log::warn!("Failed to send data to {}: {}", port_id, e);
+                        CommandError::Serial(e.to_string())
+                    })?,
             }
         };
-        // Write TX data to log if a writer exists
-        let timestamp = chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S%.3f")
-            .to_string();
-        // 用与发送路径完全相同的 build_tx_bytes 还原写入串口的字节序列，
-        // 使日志 TX 字节 == 实际发送字节（消除 SIM / 文本带行结束符的三处字节数不一致）。
-        // 解析失败时仅记录文本字节；HEX 解析在前面 send_data 已成功，理论上不会失败。
-        let log_data = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
-            .unwrap_or_else(|_| data.as_bytes().to_vec());
-        if let Ok(mut log_mgr) = log_manager.lock() {
-            let _ = log_mgr.write(&port_id, &timestamp, "TX", &log_data);
+
+        // TX 日志只写 `tx.bytes`（实际送达端口的字节）：TTY 的行结束符归一、SIM
+        // 频率命令被控制通道吞掉、行结束符追加都只在这里体现一次。按入参重算日志
+        // 会让日志与线上字节不一致（记下发出去的字节数与线上不符）。
+        if !tx.bytes.is_empty() {
+            let timestamp = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
+            if let Err(e) = log_manager.write(&port_id, &timestamp, "TX", &tx.bytes) {
+                log::warn!("Failed to write TX log for {}: {}", port_id, e);
+            }
         }
-        Ok(n)
+        Ok(tx.written)
     })
     .await
     .map_err(|e| CommandError::Other(format!("Send task panicked: {e}")))?
@@ -249,6 +263,8 @@ pub async fn send_file(
         .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
     let total = data.len();
     let chunk_size = args.chunk_size.max(1);
+    // 端口类别在循环外判定一次：真实串口走两段式写，虚拟端口走各自的非阻塞写。
+    let is_real_port = serial::PortKind::of(&args.port_id) == serial::PortKind::Real;
     let mut sent = 0usize;
     let mut send_err: Option<CommandError> = None;
 
@@ -264,18 +280,11 @@ pub async fn send_file(
                     .serial_manager
                     .lock()
                     .map_err(|e| CommandError::Lock(e.to_string()))?;
-                if args.port_id.starts_with("SIM:") || args.port_id.starts_with("GIT:") {
-                    // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成
-                    // （GIT: 模拟终端 pty stdin 写，issue #11）。
-                    manager
-                        .write_raw(&args.port_id, chunk)
-                        .map_err(|e| CommandError::Serial(e.to_string()))
-                } else {
-                    // 真实串口（issue #6-10 方案2）：两段式——全局锁内只取写句柄
-                    // 克隆，释放全局锁后锁外写（不持全局锁执行写）。
-                    let write_port = manager.get_write_handle(&args.port_id).map_err(|e| {
-                        CommandError::Serial(e.to_string())
-                    })?;
+                if is_real_port {
+                    // 真实串口两段式：全局锁内只取写句柄克隆，释放全局锁后锁外写
+                    let write_port = manager
+                        .get_write_handle(&args.port_id)
+                        .map_err(|e| CommandError::Serial(e.to_string()))?;
                     drop(manager);
                     let mut port = write_port
                         .lock()
@@ -288,6 +297,11 @@ pub async fn send_file(
                     )
                     .map(|_| chunk.len())
                     .map_err(|e| CommandError::Serial(e.to_string()))
+                } else {
+                    // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成
+                    manager
+                        .write_raw(&args.port_id, chunk)
+                        .map_err(|e| CommandError::Serial(e.to_string()))
                 }
             } {
                 Ok(_) => {}
@@ -298,12 +312,15 @@ pub async fn send_file(
             }
             // 记录 TX 元信息（仅 chunk 序号与长度，不记录二进制内容本身）。
             // log_manager 锁在下方 await 之前释放，不跨 await 持有 MutexGuard。
-            if let Ok(mut log_mgr) = state.log_manager.lock() {
-                let timestamp = chrono::Local::now()
-                    .format("%Y-%m-%d %H:%M:%S%.3f")
-                    .to_string();
-                let log_data = format!("[FILE] chunk {} ({} bytes)", chunk_index, chunk.len());
-                let _ = log_mgr.write(&args.port_id, &timestamp, "TX", log_data.as_bytes());
+            let timestamp = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
+            let log_data = format!("[FILE] chunk {} ({} bytes)", chunk_index, chunk.len());
+            if let Err(e) = state
+                .log_manager
+                .write(&args.port_id, &timestamp, "TX", log_data.as_bytes())
+            {
+                log::warn!("Failed to write file-send log for {}: {}", args.port_id, e);
             }
             sent += chunk.len();
             let _ = app.emit(
@@ -389,32 +406,24 @@ pub fn set_serial_params(
 }
 
 /// 尝试重新连接指定串口（异常断线后的自动恢复）
+///
+/// 关闭残留句柄 → join 旧读线程 → 校验端口仍在系统中 → 以上次参数重开。
+/// 整个流程（含 join 与端口枚举）在 `serial::reconnect_blocking` 内分阶段完成：
+/// 阻塞操作全在全局串口锁之外，且整体跑在阻塞线程池上，不占事件循环主线程。
 #[tauri::command]
-pub fn attempt_reconnect(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
-    // 阶段 1：持锁关闭残留句柄，取出读取线程 JoinHandle 后释放锁
-    let join_handle = {
-        let mut manager = state
-            .serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .close_port(&port_id)
-            .map_err(|e| CommandError::Serial(e.to_string()))?
-    };
-    // 阶段 2：在锁外 join，避免阻塞其他串口命令；
-    // 也确保旧端口句柄已释放，后续 open_port 不会因端口被占用而失败
-    if let Some(thread) = join_handle {
-        let _ = thread.join();
-    }
-    // 阶段 3：重新持锁，校验端口并以上次参数打开
-    let mut manager = state
-        .serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.attempt_reconnect(&port_id).map_err(|e| {
-        log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
-        CommandError::Serial(e.to_string())
+pub async fn attempt_reconnect(
+    port_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let serial_manager = state.serial_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        serial::reconnect_blocking(&serial_manager, &port_id).map_err(|e| {
+            log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
+            CommandError::Serial(e.to_string())
+        })
     })
+    .await
+    .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?
 }
 
 /// 设置流控（DTR/RTS/握手协议）
@@ -486,7 +495,7 @@ pub async fn run_port_tool(
             .map_err(|e| CommandError::Serial(e.to_string()))?;
         (params, jh)
     };
-    // 在锁外 join：读线程最长约 100ms 退出，不能在全局串口锁内阻塞（与 close_serial_port 一致）。
+    // 在锁外 join：读线程最长约 100ms 退出，不能在全局串口锁内阻塞。
     if let Some(t) = join_handle {
         let _ = t.join();
     }
@@ -509,7 +518,7 @@ pub async fn run_port_tool(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if let Some(ref dir) = args.workdir {
+    if let Some(dir) = &args.workdir {
         command.current_dir(dir);
     }
 
@@ -615,22 +624,13 @@ pub async fn run_port_tool(
         },
     );
 
-    // 8. 立即重开串口（零延迟抢回 COM 口）
+    // 8. 立即重开串口（零延迟抢回 COM 口）。经 open_blocking：打开流程自持/自放全局
+    //    锁，端口枚举与幽灵句柄回收不会在锁内执行。
     if let Some(params) = last_params {
-        let mut mgr = state
-            .serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        if let Err(e) = mgr.open_port(params) {
+        if let Err(e) = serial::open_blocking(&state.serial_manager, params) {
             log::warn!("Failed to reopen port {} after tool exit: {}", args.port_id, e);
             // 重开失败不视为命令错误——工具已成功执行；但需通知 UI 反映重开失败状态。
-            let _ = app.emit(
-                "serial:status",
-                serial::SerialStatusEvent {
-                    port_id: args.port_id.clone(),
-                    status: "error".to_string(),
-                },
-            );
+            serial::emit_status(&app, &args.port_id, serial::PortStatus::Error);
         }
     }
 

@@ -44,8 +44,11 @@ pub struct AppState {
     pub serial_manager: std::sync::Arc<std::sync::Mutex<serial::SerialManager>>,
     /// 配置管理器：负责读写应用配置（含全部设置实体）
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
-    /// 日志管理器：负责日志文件的写入与管理（同 serial_manager 的 Arc 理由）
-    pub log_manager: std::sync::Arc<std::sync::Mutex<logger::LogManager>>,
+    /// 日志管理器：负责日志文件的写入与管理。
+    /// `Arc<LogManager>`（无外层 Mutex）：写路径已是 `&self` + 内部细粒度锁，
+    /// 再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与
+    /// 数据写入争同一把锁（高波特率下 RX 写入被拖住）。
+    pub log_manager: std::sync::Arc<logger::LogManager>,
     /// 诊断日志器：应用自身维测日志（后端 `log::*` + 前端 `console.*` 转发，统一落盘+轮转）
     pub diag_logger: std::sync::Arc<diaglog::DiagLogger>,
     /// 缓存的 sysinfo::System 实例（增量刷新，避免每次 new_all 的高开销）。
@@ -71,36 +74,35 @@ impl AppState {
             .and_then(|i| std::env::args().nth(i + 2))
             .map(std::path::PathBuf::from);
 
-        // 先建 ConfigManager，再用其配置初始化 LogManager（消除双数据源）
+        // 先建 ConfigManager，再用其配置初始化运行期镜像（消除双数据源）
         let config_manager = config::ConfigManager::new(config_arg)?;
-        let cfg = config_manager.get_config();
-        let mut log_manager = logger::LogManager::new();
-        log_manager.set_auto_save(cfg.auto_save_log);
-        log_manager.set_default_encoding(&cfg.log_encoding);
-        log_manager.set_filename_format(&cfg.log_filename_format);
-        log_manager.set_split_size(cfg.log_split_size_mb);
-        log_manager.set_split_enabled(cfg.log_split_enabled);
-        log_manager.set_subdir_mode(&cfg.log_subdir_mode);
-        log_manager.set_new_file_per_session(cfg.log_new_file_per_session);
-        if !cfg.log_directory.is_empty() {
-            if let Err(e) = log_manager.set_directory(cfg.log_directory.clone()) {
-                log::warn!("Failed to set log directory from config: {}", e);
-            }
-        }
+        let cfg = config_manager.get_config().clone();
 
-        // 用配置同步诊断日志开关。
-        diag_logger.set_enabled(cfg.diag_log_enabled);
-
-        Ok(Self {
+        let state = Self {
             serial_manager: std::sync::Arc::new(std::sync::Mutex::new(serial::SerialManager::new())),
             config_manager: std::sync::Mutex::new(config_manager),
-            log_manager: std::sync::Arc::new(std::sync::Mutex::new(log_manager)),
+            log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
-        })
+        };
+        // 启动时把配置里的日志设置同步到 LogManager（与 set_config 命令同一入口）。
+        state.apply_runtime_config(&cfg);
+        Ok(state)
+    }
+
+    /// 把配置中属于「运行期镜像」的设置应用到各管理器：日志设置 → `LogManager`，
+    /// 诊断日志开关 → `DiagLogger`。
+    ///
+    /// 这是**唯一**的同步入口（`AppState::new` 启动同步 与 `set_config` 命令两处共用）。
+    /// 此前两份逐字段手抄的 setter 列表（启动一份、set_config 一份）在新增设置项时
+    /// 必然漏掉一处，导致「配置改了但日志行为没变」。
+    pub fn apply_runtime_config(&self, cfg: &config::AppConfig) {
+        self.log_manager
+            .apply_settings(&logger::LogSettings::from_config(cfg));
+        self.diag_logger.set_enabled(cfg.diag_log_enabled);
     }
 }
 
@@ -163,22 +165,15 @@ pub fn run() {
             // ===== 配置相关命令 =====
             commands::get_config,
             commands::set_config,
-            commands::reset_config,
             commands::update_session_snapshot,
             commands::get_session_snapshot,
             commands::get_config_path,
             // ===== 日志相关命令 =====
-            commands::set_log_directory,
             commands::save_log_as,
             commands::export_terminal_log,
             commands::get_log_files,
             commands::start_logging,
             commands::stop_logging,
-            commands::set_log_split_size,
-            commands::set_log_split_enabled,
-            commands::set_log_filename_format,
-            commands::set_log_auto_save,
-            commands::set_log_encoding,
             commands::open_path,
             commands::open_log_directory,
             commands::migrate_log_directory,
@@ -281,12 +276,11 @@ pub fn run() {
                 let backtrace = Backtrace::force_capture();
 
                 // 尽最大努力 flush 日志，flush 失败不遮蔽原 panic。
-                // 用 try_lock 而非 lock：std::sync::Mutex 不可重入，若 panic 发生在
-                // 已持有 log_manager 锁的线程（如日志写入途中），lock() 会永久阻塞，
-                // 导致 process::abort() 永远无法到达。拿不到锁就跳过 flush——
-                // 崩溃报告比最后一批日志更重要。
-                if let Ok(mut log_mgr) = panic_app_handle.state::<AppState>().log_manager.try_lock() {
-                    let _ = log_mgr.flush_all();
+                // LogManager 自身的写锁是内部细粒度锁（非 &self 上的 Mutex），
+                // 这里直接调用；即使与某次写入并发，flush_all 也只做 best-effort。
+                let state = panic_app_handle.state::<AppState>();
+                if let Err(e) = state.log_manager.flush_all() {
+                    eprintln!("[panic hook] flush_all failed: {e}");
                 }
 
                 let report = format_crash_report(message, location, &backtrace);

@@ -8,6 +8,15 @@
  *
  * 会话快照（session_snapshot）独立存储在 session.json，不进入 config.json，
  * 避免高频快照写入破坏 .bak 备份语义。
+ *
+ * schema 迁移口径：没有 `configVersion` 字段，也没有版本分派。向前兼容只靠三件事——
+ * 1) serde：`AppConfig` 容器级 `#[serde(default)]`（缺字段取 `impl Default` 的值），
+ *    实体子结构再各自带字段级 `#[serde(default)]`；
+ * 2) 解析前的 `strip_legacy_memory_budget_keys`：在 Value 层物理删除已被取代的旧 key；
+ * 3) 解析后的 `normalize_legacy_serial_enums`：把持久化实体里已收窄的自由字符串枚举
+ *    （端口预设的帧格式）一次性收敛到合法取值，下次 save 落盘即已归一。
+ * 曾有的 `configVersion` 是「每次 set_config 无条件重写为 1」的装饰品——既不参与分派
+ * 也不影响解析（旧值只是被 serde 当未知字段丢弃），故删除。
  */
 use std::fs;
 use std::io::Write;
@@ -15,11 +24,39 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// 当前配置 schema 版本号。
-const CURRENT_CONFIG_VERSION: u32 = 1;
+/// 数值设置边界（唯一来源）。必须与前端 `src/utils/bounds.ts` 的 `CONFIG_BOUNDS` 逐项相等，
+/// 由 `src/utils/bounds.test.ts` 解析本常量断言——两侧漂移会让用户输入被静默丢弃
+/// （曾出现前端允许 8..96 而后端 clamp 到 8..48）。
+///
+/// 元组格式固定为 `("name", min, max)`：前端测试用正则按此解析，故数值不写下划线分隔符。
+pub const CONFIG_BOUNDS: &[(&str, i64, i64)] = &[
+    ("terminalFontSize", 8, 48),
+    ("uiFontSize", 8, 48),
+    ("maxDisplayLines", 1000, 1000000),
+    ("maxRetries", 1, 10),
+    ("logSplitSizeMb", 1, 10240),
+    ("backupInterval", 1, 720),
+    ("quickSendInlineCount", 0, 20),
+    ("backgroundImageOpacity", 0, 100),
+    ("backgroundImageBlur", 0, 64),
+];
 
-fn current_config_version() -> u32 {
-    CURRENT_CONFIG_VERSION
+/// 按名字查 `CONFIG_BOUNDS` 收敛数值。
+/// 名字缺失是编程错误（调用点与本表一一对应），直接 panic 而非静默不收敛——
+/// 静默不收敛正是「非法值落盘」这类缺陷的来源。
+fn clamp_bound(name: &str, value: i64) -> i64 {
+    let (_, min, max) = CONFIG_BOUNDS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .unwrap_or_else(|| panic!("CONFIG_BOUNDS is missing an entry for '{name}'"));
+    value.clamp(*min, *max)
+}
+
+/// 枚举字段收敛：值不在 `allowed` 内时替换为 `fallback`（该字段的默认值）。
+fn restrict(value: &mut String, allowed: &[&str], fallback: &str) {
+    if !allowed.contains(&value.as_str()) {
+        *value = fallback.to_string();
+    }
 }
 
 // ==================== 设置实体类型（全部存入 config.json，camelCase 与前端 store 对齐）====================
@@ -167,24 +204,56 @@ pub struct PortMetaEntry {
     pub mode: Option<String>,
 }
 
+// ==================== 设置实体集合 ====================
+
+/// 设置界面管理的实体集合。
+///
+/// `#[serde(flatten)]` 让这些数组在 config.json 里仍是**顶层 key**（线格式零变化），
+/// 同时把「实体列表」与「标量设置」分成两层：实体只有 CRUD 语义（`commands/storage.rs`），
+/// 标量只有收敛与默认值语义（`validate_and_clamp` / `impl Default`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Entities {
+    #[serde(default)]
+    pub send_command_sets: Vec<SendCommandSetEntry>,
+    #[serde(default)]
+    pub highlight_rule_sets: Vec<HighlightRuleSetEntry>,
+    #[serde(default)]
+    pub protocol_templates: Vec<ProtocolTemplateEntry>,
+    #[serde(default)]
+    pub trigger_rules: Vec<TriggerRuleEntry>,
+    #[serde(default)]
+    pub port_presets: Vec<PortPresetEntry>,
+    #[serde(default)]
+    pub port_tool_configs: Vec<PortToolConfigEntry>,
+    /// 串口分组布局（issue #2-3）：旧版 config.json（无此字段）反序列化为空列表。
+    #[serde(default)]
+    pub port_groups: Vec<PortGroupEntry>,
+    /// 串口备注名 / 隐藏状态（issue #4-9）：随 config.json 持久化。
+    #[serde(default)]
+    pub port_meta: Vec<PortMetaEntry>,
+}
+
 // ==================== AppConfig ====================
 
-/// 应用全局配置
+/// 应用全局配置。
+///
+/// 容器级 `#[serde(default)]`：任何缺失字段都取 `impl Default` 的值。这既是「旧
+/// config.json 缺新字段」的唯一迁移机制，也让默认值只有一个来源——字段级
+/// `#[serde(default = "...")]` 与 `impl Default` 两份手抄曾出现不一致而无任何编译错误。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
-    // --- schema 版本 ---
-    #[serde(default = "current_config_version")]
-    pub config_version: u32,
-
     // --- 通用设置 ---
-    pub close_behavior: String, // "minimize" | "exit"
+    /// "minimize"（最小化到托盘）| "exit"
+    pub close_behavior: String,
     /// 终端缓冲区最大显示行数（超限时逐行覆盖最旧行）。
     /// 取代旧版内存预算字段（memoryLimitMb / memoryPerPortBudgetMb）。
-    #[serde(default = "default_max_display_lines")]
     pub max_display_lines: u32,
-    pub language: String, // "zh-CN" | "en-US"
-    pub theme: String,    // "light" | "dark" | "system"
+    /// "zh-CN" | "en-US"
+    pub language: String,
+    /// "light" | "dark" | "system"
+    pub theme: String,
     pub prevent_screen_off: bool,
     pub prevent_sleep: bool,
 
@@ -199,154 +268,72 @@ pub struct AppConfig {
     pub ui_font_size: u32,
 
     // --- 背景图设置（自定义背景图片，issue #13）---
-    #[serde(default)]
     pub background_image: String,
-    #[serde(default = "default_false")]
     pub background_image_enabled: bool,
-    #[serde(default = "default_background_image_opacity")]
     pub background_image_opacity: u32,
-    #[serde(default = "default_background_image_blur")]
     pub background_image_blur: u32,
 
     // --- 串口默认设置 ---
     pub default_baud_rates: Vec<u32>,
-    pub default_line_ending: String, // "\\r\\n" | "\\r" | "\\n" | "None"
+    /// "\\r\\n" | "\\r" | "\\n" | "None"
+    pub default_line_ending: String,
     pub send_prefix: String,
     pub show_port_type: bool,
-    #[serde(default = "default_send_on_enter")]
     pub send_on_enter: bool,
     /// 点击发送后是否清空发送输入框（issue #13，默认保留）。
-    #[serde(default = "default_false")]
     pub clear_send_input_after_send: bool,
-    #[serde(default = "default_quick_send_inline_count")]
     pub quick_send_inline_count: u32,
-    #[serde(default = "default_timestamp_format")]
     pub timestamp_format: String,
 
     // --- 时间戳设置 ---
-    pub timestamp_mode: String, // "perLine" | "perRound"
+    /// "perLine" | "perRound"
+    pub timestamp_mode: String,
 
     // --- 日志设置 ---
     pub auto_save_log: bool,
     pub log_directory: String,
     pub log_filename_format: String,
-    pub log_format: String,   // "string" | "hex" | "binary"
-    pub log_encoding: String, // "ASCII" | "UTF-8" | "GBK" | "ISO-8859-1"
+    /// "string" | "hex" | "binary"
+    pub log_format: String,
+    /// "ASCII" | "UTF-8" | "GBK" | "ISO-8859-1"
+    pub log_encoding: String,
     pub log_split_enabled: bool,
     pub log_split_size_mb: u32,
     /// 日志行前缀是否包含时间戳（issue #3-4）
-    #[serde(default = "default_true")]
     pub log_include_timestamp: bool,
     /// 日志行前缀是否包含 RX/TX 方向标记（issue #3-4）
-    #[serde(default = "default_true")]
     pub log_include_direction: bool,
     /// 日志子目录策略（issue #5-10）："none"（直接存入日志目录）| "date"（按日期分文件夹）| "port"（按串口号分文件夹）
-    #[serde(default = "default_log_subdir_mode")]
     pub log_subdir_mode: String,
     /// 每次打开串口新建日志文件（不续写已有文件）：true 时每次连接都从空文件开始
-    #[serde(default = "default_false")]
     pub log_new_file_per_session: bool,
 
     // --- 备份设置 ---
     pub backup_enabled: bool,
-    pub backup_interval: u32, // 小时
+    /// 小时
+    pub backup_interval: u32,
     pub backup_directory: String,
 
     // --- 会话恢复 ---
-    #[serde(default = "default_restore_session")]
     pub restore_session: bool,
 
     // --- 诊断日志 ---
     /// 是否启用应用自身维测日志（前后端统一落盘到诊断日志文件）。
-    /// `#[serde(default = "default_diag_log_enabled")]` 兼容旧版 config.json。
-    #[serde(default = "default_diag_log_enabled")]
     pub diag_log_enabled: bool,
 
     // --- 自动更新（issue #12）---
     /// 自动检查更新模式：`"none"`（不检查）| `"stable"`（定期到正式版）| `"preview"`（定期到 preview）。
     /// 检查周期统一 7 天（前端 localStorage 记账 lastCheckAt/snoozeUntil）。
-    #[serde(default = "default_update_check_mode")]
     pub update_check_mode: String,
 
-    // --- 设置实体（全部存入 config.json，单文件即可完整迁移）---
-    #[serde(default)]
-    pub send_command_sets: Vec<SendCommandSetEntry>,
-    #[serde(default)]
-    pub highlight_rule_sets: Vec<HighlightRuleSetEntry>,
-    #[serde(default)]
-    pub protocol_templates: Vec<ProtocolTemplateEntry>,
-    #[serde(default)]
-    pub trigger_rules: Vec<TriggerRuleEntry>,
-    #[serde(default)]
-    pub port_presets: Vec<PortPresetEntry>,
-    #[serde(default)]
-    pub port_tool_configs: Vec<PortToolConfigEntry>,
-    /// 串口分组布局（issue #2-3）：`#[serde(default)]` 使旧版 config.json
-    /// （无此字段）反序列化为空列表。
-    #[serde(default)]
-    pub port_groups: Vec<PortGroupEntry>,
-    /// 串口备注名 / 隐藏状态（issue #4-9）：随 config.json 持久化。
-    #[serde(default)]
-    pub port_meta: Vec<PortMetaEntry>,
-}
-
-fn default_restore_session() -> bool {
-    true
-}
-
-fn default_diag_log_enabled() -> bool {
-    true
-}
-
-/// issue #12：自动更新默认「定期检查到正式版」（用户决策，2026-08-15）。
-fn default_update_check_mode() -> String {
-    "stable".to_string()
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_send_on_enter() -> bool {
-    true
-}
-
-fn default_quick_send_inline_count() -> u32 {
-    6
-}
-
-/// 终端缓冲区最大显示行数默认 100000 行（超限逐行覆盖最旧）。
-fn default_max_display_lines() -> u32 {
-    100000
-}
-
-fn default_timestamp_format() -> String {
-    "absolute".to_string()
-}
-
-/// issue #5-10：日志子目录策略默认按日期分文件夹（与前端 defaultConfig 一致）。
-fn default_log_subdir_mode() -> String {
-    "date".to_string()
-}
-
-fn default_false() -> bool {
-    false
-}
-
-/// issue #13：背景图默认不透明度 50%。
-fn default_background_image_opacity() -> u32 {
-    50
-}
-
-/// issue #13：背景图默认模糊半径 0（不模糊）。
-fn default_background_image_blur() -> u32 {
-    0
+    // --- 设置实体（config.json 顶层 key，见 Entities）---
+    #[serde(flatten)]
+    pub entities: Entities,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            config_version: CURRENT_CONFIG_VERSION,
             close_behavior: "exit".to_string(),
             // 终端缓冲区最大显示行数默认 100000 行。
             max_display_lines: 100000,
@@ -384,6 +371,7 @@ impl Default for AppConfig {
             log_split_size_mb: 100,
             log_include_timestamp: true,
             log_include_direction: true,
+            // issue #5-10：日志子目录策略默认按日期分文件夹。
             log_subdir_mode: "date".to_string(),
             log_new_file_per_session: false,
             backup_enabled: false,
@@ -391,15 +379,9 @@ impl Default for AppConfig {
             backup_directory: String::new(),
             restore_session: true,
             diag_log_enabled: true,
+            // issue #12：自动更新默认「定期检查到正式版」（用户决策，2026-08-15）。
             update_check_mode: "stable".to_string(),
-            send_command_sets: Vec::new(),
-            highlight_rule_sets: Vec::new(),
-            protocol_templates: Vec::new(),
-            trigger_rules: Vec::new(),
-            port_presets: Vec::new(),
-            port_tool_configs: Vec::new(),
-            port_groups: Vec::new(),
-            port_meta: Vec::new(),
+            entities: Entities::default(),
         }
     }
 }
@@ -417,6 +399,68 @@ fn strip_legacy_memory_budget_keys(raw: &str) -> Option<serde_json::Value> {
         }
     }
     Some(value)
+}
+
+/// 加载期归一化：把旧 config.json 里已收窄的串口帧格式自由字符串收敛到合法取值。
+///
+/// `PortPresetEntry` 的 parity / stop_bits / handshake 是自由字符串，旧版 UI 允许
+/// serialport 无法表达的取值（校验位 Mark/Space、停止位 OnePointFive）。本轮把这些
+/// 枚举收窄后 `serial::ports_real` 的 `parse_parity` / `parse_stop_bits` 对未知值返回
+/// Err——旧预设会在开串口时报 "Unsupported parity"，而 UI select 也显示不出来。
+/// 加载期一次性收敛，下次 save 落盘即已归一（与 `strip_legacy_memory_budget_keys`
+/// 同款口径）。**只处理持久化实体**（会话快照由前端恢复，不经过这里）。
+///
+/// 规则（左 = 非法，右 = 归一值）：
+/// - `parity`    不在 {None, Even, Odd} → None
+/// - `stop_bits` 不在 {One, Two} → One
+/// - `data_bits` 不在 {5, 6, 7, 8} → 8
+/// - `handshake` 不在 {None, XonXoff, RequestToSend, RequestToSendXonXoff} → None
+///
+/// 下面的集合必须与 `serial/ports_real.rs` 的 `parse_*` 接受集合逐项相等：归一化集合
+/// 比解析集合**窄**会把合法值误改成默认值（用户静默丢配置），比它**宽**则会放过非法值。
+/// 新增帧格式取值时两处一起改（parse_* 旁边有对应提示）。
+fn normalize_legacy_serial_enums(config: &mut AppConfig) {
+    // 与 `parse_parity` 接受集合逐项相等。
+    const PARITIES: &[&str] = &["None", "Even", "Odd"];
+    // 与 `parse_stop_bits` 接受集合逐项相等。
+    const STOP_BITS: &[&str] = &["One", "Two"];
+    // 与 `parse_flow_control` 接受集合逐项相等。
+    const HANDSHAKES: &[&str] = &["None", "XonXoff", "RequestToSend", "RequestToSendXonXoff"];
+
+    for preset in &mut config.entities.port_presets {
+        if !PARITIES.contains(&preset.parity.as_str()) {
+            log::info!(
+                "Migrated port preset {} parity '{}' -> None",
+                preset.id,
+                preset.parity
+            );
+            preset.parity = "None".to_string();
+        }
+        if !STOP_BITS.contains(&preset.stop_bits.as_str()) {
+            log::info!(
+                "Migrated port preset {} stop bits '{}' -> One",
+                preset.id,
+                preset.stop_bits
+            );
+            preset.stop_bits = "One".to_string();
+        }
+        if !matches!(preset.data_bits, 5 | 6 | 7 | 8) {
+            log::info!(
+                "Migrated port preset {} data bits {} -> 8",
+                preset.id,
+                preset.data_bits
+            );
+            preset.data_bits = 8;
+        }
+        if !HANDSHAKES.contains(&preset.handshake.as_str()) {
+            log::info!(
+                "Migrated port preset {} handshake '{}' -> None",
+                preset.id,
+                preset.handshake
+            );
+            preset.handshake = "None".to_string();
+        }
+    }
 }
 
 // ==================== ConfigManager ====================
@@ -493,6 +537,11 @@ impl ConfigManager {
             AppConfig::default()
         };
 
+        // 升级归一化：旧预设里的自由字符串帧格式（Mark / OnePointFive 等）收敛到
+        // 合法取值。放在 load 之后、任何返回之前，三条路径（正常解析 / .bak 恢复 /
+        // 默认）都覆盖；幂等，无旧值时不改动任何字段。
+        normalize_legacy_serial_enums(&mut config);
+
         // 空 log_directory 解析为默认路径，确保前端和 LogManager 拿到真实目录。
         if config.log_directory.is_empty() {
             if let Some(data_dir) = dirs::data_dir() {
@@ -533,51 +582,57 @@ impl ConfigManager {
     }
 
     /// 将配置值收敛到合法范围。每次 set_config 时调用。
+    /// 数值边界来自 `CONFIG_BOUNDS`（与前端 bounds.ts 同一张表），此处不写字面量。
     fn validate_and_clamp(config: &mut AppConfig) {
-        config.terminal_font_size = config.terminal_font_size.clamp(8, 48);
-        config.ui_font_size = config.ui_font_size.clamp(8, 48);
-        // maxDisplayLines 边界 [1000, 1_000_000]，非法值收敛到范围内。
-        config.max_display_lines = config.max_display_lines.clamp(1000, 1_000_000);
-        config.max_retries = config.max_retries.clamp(1, 10);
-        config.log_split_size_mb = config.log_split_size_mb.clamp(1, 10240);
-        config.backup_interval = config.backup_interval.clamp(1, 720);
-        config.quick_send_inline_count = config.quick_send_inline_count.clamp(0, 20);
-        // issue #13：背景图不透明度 [0,100]；模糊半径 [0,64]。
-        config.background_image_opacity = config.background_image_opacity.clamp(0, 100);
-        config.background_image_blur = config.background_image_blur.clamp(0, 64);
-        if !["minimize", "exit"].contains(&config.close_behavior.as_str()) {
-            config.close_behavior = "exit".to_string();
-        }
-        if !["light", "dark", "system"].contains(&config.theme.as_str()) {
-            config.theme = "dark".to_string();
-        }
-        if !["zh-CN", "en-US"].contains(&config.language.as_str()) {
-            config.language = "zh-CN".to_string();
-        }
-        if !["string", "hex", "binary"].contains(&config.log_format.as_str()) {
-            config.log_format = "string".to_string();
-        }
-        if !["perLine", "perRound"].contains(&config.timestamp_mode.as_str()) {
-            config.timestamp_mode = "perLine".to_string();
-        }
-        if !["absolute", "relative", "uptime"].contains(&config.timestamp_format.as_str()) {
-            config.timestamp_format = "absolute".to_string();
-        }
-        if !["ASCII", "UTF-8", "GBK", "ISO-8859-1"].contains(&config.log_encoding.as_str()) {
-            config.log_encoding = "UTF-8".to_string();
-        }
-        if !["none", "date", "port"].contains(&config.log_subdir_mode.as_str()) {
-            config.log_subdir_mode = "date".to_string();
-        }
+        config.terminal_font_size =
+            clamp_bound("terminalFontSize", config.terminal_font_size as i64) as u32;
+        config.ui_font_size = clamp_bound("uiFontSize", config.ui_font_size as i64) as u32;
+        config.max_display_lines =
+            clamp_bound("maxDisplayLines", config.max_display_lines as i64) as u32;
+        config.max_retries = clamp_bound("maxRetries", config.max_retries as i64) as u8;
+        config.log_split_size_mb =
+            clamp_bound("logSplitSizeMb", config.log_split_size_mb as i64) as u32;
+        config.backup_interval = clamp_bound("backupInterval", config.backup_interval as i64) as u32;
+        config.quick_send_inline_count =
+            clamp_bound("quickSendInlineCount", config.quick_send_inline_count as i64) as u32;
+        config.background_image_opacity =
+            clamp_bound("backgroundImageOpacity", config.background_image_opacity as i64) as u32;
+        config.background_image_blur =
+            clamp_bound("backgroundImageBlur", config.background_image_blur as i64) as u32;
+
+        restrict(&mut config.close_behavior, &["minimize", "exit"], "exit");
+        restrict(&mut config.theme, &["light", "dark", "system"], "dark");
+        restrict(&mut config.language, &["zh-CN", "en-US"], "zh-CN");
+        restrict(&mut config.log_format, &["string", "hex", "binary"], "string");
+        restrict(
+            &mut config.timestamp_mode,
+            &["perLine", "perRound"],
+            "perLine",
+        );
+        restrict(
+            &mut config.timestamp_format,
+            &["absolute", "relative", "uptime"],
+            "absolute",
+        );
+        restrict(
+            &mut config.log_encoding,
+            &["ASCII", "UTF-8", "GBK", "ISO-8859-1"],
+            "UTF-8",
+        );
+        restrict(&mut config.log_subdir_mode, &["none", "date", "port"], "date");
         // issue #12：自动更新模式钳制——非法值（含旧版残留）收敛回 stable。
-        if !["none", "stable", "preview"].contains(&config.update_check_mode.as_str()) {
-            config.update_check_mode = "stable".to_string();
-        }
-        if !["\\r\\n", "\\r", "\\n", "None"].contains(&config.default_line_ending.as_str()) {
-            config.default_line_ending = "\\r\\n".to_string();
-        }
+        restrict(
+            &mut config.update_check_mode,
+            &["none", "stable", "preview"],
+            "stable",
+        );
+        restrict(
+            &mut config.default_line_ending,
+            &["\\r\\n", "\\r", "\\n", "None"],
+            "\\r\\n",
+        );
         // issue #11：端口工作模式钳制——非法值（含旧版残留的任意字符串）收敛回 trx。
-        for meta in &mut config.port_meta {
+        for meta in &mut config.entities.port_meta {
             if let Some(mode) = &mut meta.mode {
                 if mode != "trx" && mode != "tty" {
                     *mode = "trx".to_string();
@@ -589,16 +644,8 @@ impl ConfigManager {
     /// 更新配置并持久化（写入前校验 + 收敛）
     pub fn set_config(&mut self, mut new_config: AppConfig) -> anyhow::Result<()> {
         Self::validate_and_clamp(&mut new_config);
-        new_config.config_version = CURRENT_CONFIG_VERSION;
         self.config = new_config;
         self.save()
-    }
-
-    /// 重置为默认配置
-    pub fn reset_to_default(&mut self) -> anyhow::Result<AppConfig> {
-        self.config = AppConfig::default();
-        self.save()?;
-        Ok(self.config.clone())
     }
 
     // ==================== 会话快照（独立 session.json）====================
@@ -637,43 +684,92 @@ impl ConfigManager {
 
     // ==================== 持久化 ====================
 
-/// 保存配置到文件（原子写入 + .bak 备份）。
-/// 失败时记录错误日志（诊断日志排查需要落盘根因，而非仅返回 Result）。
-pub fn save(&self) -> anyhow::Result<()> {
-    let result = (|| -> anyhow::Result<()> {
-        let content = serde_json::to_string_pretty(&self.config)?;
-        if self.config_path.exists() {
-            let bak_path = self.config_path.with_extension("json.bak");
-            let _ = fs::copy(&self.config_path, &bak_path);
+    /// 保存配置到文件（原子写入 + .bak 备份）。
+    /// 失败时记录错误日志（诊断日志排查需要落盘根因，而非仅返回 Result）。
+    pub fn save(&self) -> anyhow::Result<()> {
+        let result = (|| -> anyhow::Result<()> {
+            let content = serde_json::to_string_pretty(&self.config)?;
+            if self.config_path.exists() {
+                let bak_path = self.config_path.with_extension("json.bak");
+                let _ = fs::copy(&self.config_path, &bak_path);
+            }
+            let tmp_path = self.config_path.with_extension("json.tmp");
+            {
+                let mut file = fs::File::create(&tmp_path)?;
+                file.write_all(content.as_bytes())?;
+                file.sync_all()?;
+            }
+            fs::rename(&tmp_path, &self.config_path)?;
+            log::info!("Config saved to {:?}", self.config_path);
+            Ok(())
+        })();
+        if let Err(e) = &result {
+            log::error!("Failed to save config to {:?}: {}", self.config_path, e);
         }
-        let tmp_path = self.config_path.with_extension("json.tmp");
-        {
-            let mut file = fs::File::create(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-        }
-        fs::rename(&tmp_path, &self.config_path)?;
-        log::info!("Config saved to {:?}", self.config_path);
-        Ok(())
-    })();
-    if let Err(e) = &result {
-        log::error!("Failed to save config to {:?}: {}", self.config_path, e);
+        result
     }
-    result
-}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    /// 0.3.1 真实 schema 的 config.json 夹具（全仓唯一一份手抄）。
+    ///
+    /// 有意保留此后被删除/取代的遗留 key：`configVersion`、`memoryLimitMb`、
+    /// `memoryPerPortBudgetMb`、`hasSeenTour`；有意不含此后新增的字段
+    /// （logIncludeTimestamp / logIncludeDirection / logSubdirMode /
+    /// logNewFilePerSession / diagLogEnabled / portMeta / maxDisplayLines …）。
+    /// 因此每个「旧 JSON 仍能反序列化」用例都从它出发，只用自己的补丁表达差异。
+    const LEGACY_V0_CONFIG: &str = r#"{
+        "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
+        "memoryPerPortBudgetMb": 200,
+        "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
+        "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
+        "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
+        "uiFont": "Inter, sans-serif", "uiFontSize": 14,
+        "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
+        "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
+        "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
+        "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
+        "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
+        "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
+        "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
+        "hasSeenTour": false, "restoreSession": true,
+        "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
+        "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
+    }"#;
+
+    /// 在 `LEGACY_V0_CONFIG` 上做顶层浅合并补丁（`serde_json::json!` 增量）。
+    fn legacy_json(patch: serde_json::Value) -> serde_json::Value {
+        let mut base: serde_json::Value = serde_json::from_str(LEGACY_V0_CONFIG).unwrap();
+        let base_obj = base.as_object_mut().unwrap();
+        for (key, value) in patch.as_object().unwrap() {
+            base_obj.insert(key.clone(), value.clone());
+        }
+        base
+    }
+
+    /// 旧 JSON（+ 可选补丁）→ AppConfig。
+    fn legacy_config(patch: serde_json::Value) -> AppConfig {
+        serde_json::from_value(legacy_json(patch)).unwrap()
+    }
+
+    fn bound(name: &str) -> (i64, i64) {
+        let (_, min, max) = CONFIG_BOUNDS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .unwrap_or_else(|| panic!("missing bound {name}"));
+        (*min, *max)
+    }
 
     #[test]
     fn test_default_values() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.config_version, 1);
         assert_eq!(cfg.quick_send_inline_count, 6);
         assert_eq!(cfg.close_behavior, "exit");
-        // 终端缓冲区最大显示行数默认 100000 行。
+        // 终端缓冲区最大显示行数默认 100000 行，取代旧内存预算字段。
         assert_eq!(cfg.max_display_lines, 100000);
         assert_eq!(cfg.language, "zh-CN");
         assert_eq!(cfg.theme, "dark");
@@ -694,24 +790,24 @@ mod tests {
         assert_eq!(cfg.log_encoding, "UTF-8");
         assert!(cfg.log_split_enabled);
         assert_eq!(cfg.log_split_size_mb, 100);
-        // issue #3-4：日志行前缀开关默认开启（向后兼容旧行为）
-        assert!(cfg.log_include_timestamp);
-        assert!(cfg.log_include_direction);
         // issue #5-10：日志子目录策略默认按日期分文件夹
         assert_eq!(cfg.log_subdir_mode, "date");
-        // issue：每次打开新建日志文件默认关闭（保持旧续写行为）
-        assert!(!cfg.log_new_file_per_session);
         assert!(!cfg.backup_enabled);
         assert!(cfg.restore_session);
         assert!(cfg.diag_log_enabled);
-        assert!(cfg.send_command_sets.is_empty());
-        assert!(cfg.highlight_rule_sets.is_empty());
-        assert!(cfg.protocol_templates.is_empty());
-        assert!(cfg.trigger_rules.is_empty());
-        assert!(cfg.port_presets.is_empty());
-        assert!(cfg.port_tool_configs.is_empty());
-        assert!(cfg.port_groups.is_empty());
-        assert!(cfg.port_meta.is_empty());
+    }
+
+    #[test]
+    fn test_default_entities_are_empty() {
+        let cfg = AppConfig::default();
+        assert!(cfg.entities.send_command_sets.is_empty());
+        assert!(cfg.entities.highlight_rule_sets.is_empty());
+        assert!(cfg.entities.protocol_templates.is_empty());
+        assert!(cfg.entities.trigger_rules.is_empty());
+        assert!(cfg.entities.port_presets.is_empty());
+        assert!(cfg.entities.port_tool_configs.is_empty());
+        assert!(cfg.entities.port_groups.is_empty());
+        assert!(cfg.entities.port_meta.is_empty());
     }
 
     #[test]
@@ -727,102 +823,163 @@ mod tests {
     }
 
     #[test]
-    fn test_json_camel_case() {
+    fn test_json_camel_case_and_flat_entities() {
         let cfg = AppConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         for key in [
-            "closeBehavior", "maxDisplayLines", "autoSaveLog", "logFormat",
-            "logEncoding", "terminalFontSize", "autoReconnect", "maxRetries",
-            "restoreSession", "quickSendInlineCount",
-            "sendCommandSets", "highlightRuleSets", "protocolTemplates",
-            "triggerRules", "portPresets", "portToolConfigs", "portGroups",
-            "portMeta", // issue #4-9
-            "diagLogEnabled", // 诊断日志开关
-            "logIncludeTimestamp", "logIncludeDirection", // issue #3-4
-            "logSubdirMode", // issue #5-10
+            "closeBehavior",
+            "maxDisplayLines",
+            "autoSaveLog",
+            "logFormat",
+            "logEncoding",
+            "terminalFontSize",
+            "autoReconnect",
+            "maxRetries",
+            "restoreSession",
+            "quickSendInlineCount",
+            "diagLogEnabled",
+            "logIncludeTimestamp",
+            "logIncludeDirection",
+            "logSubdirMode",
         ] {
             assert!(json.contains(key), "missing {} in JSON", key);
         }
+        // 实体数组必须仍是顶层 key（#[serde(flatten)]）——嵌套会破坏 config.json 线格式。
+        for key in [
+            "sendCommandSets",
+            "highlightRuleSets",
+            "protocolTemplates",
+            "triggerRules",
+            "portPresets",
+            "portToolConfigs",
+            "portGroups",
+            "portMeta",
+        ] {
+            assert!(json.contains(key), "missing flattened entity key {} in JSON", key);
+        }
+        assert!(!json.contains("\"entities\""), "entities must be flattened: {json}");
+        // 实体数组形态（非嵌套对象）时值也是数组字面量。
+        assert!(json.contains("\"portGroups\":[]"), "got: {json}");
         // session_snapshot 不应出现在 config JSON 中
         assert!(!json.contains("sessionSnapshot"), "sessionSnapshot must not be in config.json");
+        // configVersion 已删除（迁移只靠 serde default + strip_legacy_*）
+        assert!(!json.contains("configVersion"), "configVersion must be gone: {json}");
     }
 
     #[test]
-    fn test_log_prefix_fields_default_when_absent() {
-        // issue #3-4：旧 config.json 没有 logIncludeTimestamp / logIncludeDirection，
-        // 反序列化必须回退到默认 true（serde(default = "default_true")）。
-        // 使用 0.3.1 真实 schema 的完整 JSON，仅省略这两个新字段。
-        let old_json = r#"{
-            "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
-            "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
-            "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
-            "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
-            "uiFont": "Inter, sans-serif", "uiFontSize": 14,
-            "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
-            "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
-            "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
-            "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
-            "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
-            "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
-            "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
-            "hasSeenTour": false, "restoreSession": true,
-            "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
-            "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
-        }"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
+    fn test_legacy_json_deserializes_with_defaults_for_new_fields() {
+        // 0.3.1 的真实 config.json（无本轮之后新增的任何字段）必须能完整反序列化，
+        // 且每个新字段回退到 impl Default 的值（容器级 #[serde(default)]）。
+        let cfg = legacy_config(serde_json::json!({}));
         assert!(cfg.log_include_timestamp);
         assert!(cfg.log_include_direction);
-    }
-
-    #[test]
-    fn test_log_subdir_mode_default_when_absent() {
-        // issue #5-10：旧 config.json 没有 logSubdirMode，
-        // 反序列化必须回退到默认 "date"（serde(default = "default_log_subdir_mode")）。
-        // 使用 0.3.1 真实 schema 的完整 JSON，仅省略新字段。
-        let old_json = r#"{
-            "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
-            "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
-            "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
-            "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
-            "uiFont": "Inter, sans-serif", "uiFontSize": 14,
-            "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
-            "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
-            "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
-            "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
-            "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
-            "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
-            "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
-            "hasSeenTour": false, "restoreSession": true,
-            "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
-            "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
-        }"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
         assert_eq!(cfg.log_subdir_mode, "date");
+        assert!(!cfg.log_new_file_per_session);
+        assert!(cfg.diag_log_enabled);
+        assert_eq!(cfg.update_check_mode, "stable");
+        // 旧 memoryLimitMb 被 maxDisplayLines 取代 → 取默认 100000
+        assert_eq!(cfg.max_display_lines, 100000);
+        // issue #13 背景图字段
+        assert!(!cfg.background_image_enabled);
+        assert_eq!(cfg.background_image_opacity, 50);
+        assert_eq!(cfg.background_image_blur, 0);
+        assert!(!cfg.clear_send_input_after_send);
+        // 旧 JSON 无 portMeta → 空列表
+        assert!(cfg.entities.port_meta.is_empty());
+        // 旧 JSON 的实体数组仍按顶层 key 反序列化（flatten 读路径）
+        assert!(cfg.entities.send_command_sets.is_empty());
+        assert!(cfg.entities.port_groups.is_empty());
     }
 
     #[test]
-    fn test_log_new_file_per_session_default_when_absent() {
-        // 旧 config.json 没有 logNewFilePerSession → 反序列化回退默认 false
-        // （保持旧续写行为）。使用 0.3.1 真实 schema 的完整 JSON，仅省略新字段。
-        let old_json = r#"{
-            "configVersion": 1, "closeBehavior": "exit", "memoryLimitMb": 1024,
-            "language": "zh-CN", "theme": "dark", "preventScreenOff": false,
-            "preventSleep": false, "autoReconnect": false, "maxRetries": 3,
-            "terminalFont": "Consolas, monospace", "terminalFontSize": 14,
-            "uiFont": "Inter, sans-serif", "uiFontSize": 14,
-            "defaultBaudRates": [9600, 19200, 38400, 57600, 115200, 921600],
-            "defaultLineEnding": "\\r\\n", "sendPrefix": "SEND", "showPortType": true,
-            "sendOnEnter": true, "quickSendInlineCount": 6, "timestampFormat": "absolute",
-            "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
-            "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
-            "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
-            "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
-            "hasSeenTour": false, "restoreSession": true,
-            "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
-            "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
-        }"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
-        assert!(!cfg.log_new_file_per_session);
+    fn test_legacy_json_with_patched_entities_roundtrips() {
+        // 补丁式增量：旧 JSON + 新增字段/新增实体，反序列化后逐项可用并在序列化时回到顶层。
+        let cfg = legacy_config(serde_json::json!({
+            "logSubdirMode": "port",
+            "logIncludeTimestamp": false,
+            "portMeta": [{"portId": "COM3", "alias": "温度计", "isHidden": true, "mode": "tty"}],
+            "portGroups": [{"id": "g1", "name": "开发板", "isExpanded": true,
+                            "portIds": ["COM1", "COM12"], "order": 0}],
+        }));
+        assert_eq!(cfg.log_subdir_mode, "port");
+        assert!(!cfg.log_include_timestamp);
+        assert_eq!(cfg.entities.port_meta[0].alias.as_deref(), Some("温度计"));
+        assert_eq!(cfg.entities.port_meta[0].mode.as_deref(), Some("tty"));
+        assert_eq!(cfg.entities.port_groups[0].port_ids.len(), 2);
+        let serialized = serde_json::to_value(&cfg).unwrap();
+        assert!(serialized.get("portMeta").is_some(), "got: {serialized}");
+        assert!(serialized.get("portGroups").is_some(), "got: {serialized}");
+        assert!(serialized.get("entities").is_none(), "got: {serialized}");
+    }
+
+    #[test]
+    fn test_legacy_memory_budget_keys_are_stripped() {
+        // 升级兼容：含 memoryLimitMb / memoryPerPortBudgetMb 的旧 config.json
+        // 走剥离逻辑后，AppConfig 不再携带这两个字段，maxDisplayLines 回退默认。
+        let value = strip_legacy_memory_budget_keys(LEGACY_V0_CONFIG)
+            .expect("legacy JSON must parse as Value");
+        let parsed: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.max_display_lines, 100000);
+        // 序列化结果不含旧 key（剥离后物理移除，下次 save 落盘即无）
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(!serialized.contains("memoryLimitMb"), "got: {serialized}");
+        assert!(!serialized.contains("memoryPerPortBudgetMb"), "got: {serialized}");
+        // 剥离逻辑对非 JSON 输入返回 None（调用方据此走 .bak 恢复）
+        assert!(strip_legacy_memory_budget_keys("not json").is_none());
+    }
+
+    #[test]
+    fn test_legacy_serial_enums_are_normalized_on_load() {
+        // 升级归一化：旧版 UI 允许 serialport 无法表达的帧格式（校验位 Mark/Space、
+        // 停止位 OnePointFive），本轮收窄枚举后这些值会让开串口直接报
+        // "Unsupported parity"。走真实加载路径（ConfigManager::new）断言：非法字段被
+        // 收敛到合法集合，而**同一实体与同一配置的其它字段一个都不许被改**。
+        let dir = std::env::temp_dir().join(format!(
+            "hypercom_test_legacy_serial_enums_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.json");
+        let legacy = legacy_json(serde_json::json!({
+            "closeBehavior": "minimize",
+            "portPresets": [
+                {"id": "p1", "name": "厂商默认", "baudRate": 9600, "dataBits": 9,
+                 "parity": "Mark", "stopBits": "OnePointFive", "handshake": "RTS",
+                 "dtr": true, "rts": false},
+                {"id": "p2", "name": "合法值不动", "baudRate": 115200, "dataBits": 7,
+                 "parity": "Even", "stopBits": "Two", "handshake": "XonXoff",
+                 "dtr": false, "rts": true}
+            ]
+        }));
+        fs::write(&config_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let mgr = ConfigManager::new(Some(config_path.clone())).unwrap();
+        let cfg = mgr.get_config();
+
+        let migrated = &cfg.entities.port_presets[0];
+        assert_eq!(migrated.parity, "None");
+        assert_eq!(migrated.stop_bits, "One");
+        assert_eq!(migrated.data_bits, 8);
+        assert_eq!(migrated.handshake, "None");
+        // 归一化只碰非法字段，其余原样保留
+        assert_eq!(migrated.id, "p1");
+        assert_eq!(migrated.name, "厂商默认");
+        assert_eq!(migrated.baud_rate, 9600);
+        assert!(migrated.dtr);
+        assert!(!migrated.rts);
+        // 标量设置不受影响
+        assert_eq!(cfg.close_behavior, "minimize");
+
+        // 已合法的一条逐字段原样（归一化幂等、不误伤合法取值，含非 8 的合法数据位）
+        let intact = &cfg.entities.port_presets[1];
+        assert_eq!(intact.parity, "Even");
+        assert_eq!(intact.stop_bits, "Two");
+        assert_eq!(intact.data_bits, 7);
+        assert_eq!(intact.handshake, "XonXoff");
+        assert_eq!(intact.baud_rate, 115200);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -852,6 +1009,7 @@ mod tests {
             default_line_ending: "BAD".to_string(),
             log_format: "xml".to_string(),
             log_subdir_mode: "monthly".to_string(),
+            close_behavior: "explode".to_string(),
             // issue #12：非法自动更新模式收敛回 stable
             update_check_mode: "beta".to_string(),
             ..AppConfig::default()
@@ -862,106 +1020,95 @@ mod tests {
         assert_eq!(cfg.log_format, "string");
         assert_eq!(cfg.log_subdir_mode, "date");
         assert_eq!(cfg.update_check_mode, "stable");
+        assert_eq!(cfg.close_behavior, "exit");
     }
 
     #[test]
-    fn test_default_update_check_mode_is_stable() {
-        // issue #12：用户决策默认「定期检查到正式版」。
-        let cfg = AppConfig::default();
-        assert_eq!(cfg.update_check_mode, "stable");
-    }
-
-    #[test]
-    fn test_validate_and_clamp_ranges() {
+    fn test_validate_and_clamp_uses_config_bounds_table() {
+        // 收敛结果必须等于 CONFIG_BOUNDS 里写的边界值本身——即边界只有一张表，
+        // 散落的 clamp 字面量被删除。越界输入（含 i64::MAX 级别的溢出边界）全部收敛。
         let mut cfg = AppConfig {
-            quick_send_inline_count: 99,
-            terminal_font_size: 200,
-            // maxDisplayLines 非法值收敛到 [1000, 1_000_000]
-            max_display_lines: 0,
-            max_retries: 0,
+            terminal_font_size: u32::MAX,
+            ui_font_size: 0,
+            max_display_lines: 1,
+            max_retries: u8::MAX,
+            log_split_size_mb: 0,
+            backup_interval: u32::MAX,
+            quick_send_inline_count: u32::MAX,
+            background_image_opacity: u32::MAX,
+            background_image_blur: u32::MAX,
             ..AppConfig::default()
         };
         ConfigManager::validate_and_clamp(&mut cfg);
-        assert_eq!(cfg.quick_send_inline_count, 20);
-        assert_eq!(cfg.terminal_font_size, 48);
-        assert_eq!(cfg.max_display_lines, 1000);
-        assert_eq!(cfg.max_retries, 1);
+        assert_eq!(cfg.terminal_font_size as i64, bound("terminalFontSize").1);
+        assert_eq!(cfg.ui_font_size as i64, bound("uiFontSize").0);
+        assert_eq!(cfg.max_display_lines as i64, bound("maxDisplayLines").0);
+        assert_eq!(cfg.max_retries as i64, bound("maxRetries").1);
+        assert_eq!(cfg.log_split_size_mb as i64, bound("logSplitSizeMb").0);
+        assert_eq!(cfg.backup_interval as i64, bound("backupInterval").1);
+        assert_eq!(cfg.quick_send_inline_count as i64, bound("quickSendInlineCount").1);
+        assert_eq!(cfg.background_image_opacity as i64, bound("backgroundImageOpacity").1);
+        assert_eq!(cfg.background_image_blur as i64, bound("backgroundImageBlur").1);
+    }
+
+    #[test]
+    fn test_config_bounds_shape() {
+        // 表形状：9 项、名字唯一、min <= max。前端 bounds.test.ts 按同一顺序逐项断言数值。
+        let names: Vec<&str> = CONFIG_BOUNDS.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(
+            names,
+            vec![
+                "terminalFontSize",
+                "uiFontSize",
+                "maxDisplayLines",
+                "maxRetries",
+                "logSplitSizeMb",
+                "backupInterval",
+                "quickSendInlineCount",
+                "backgroundImageOpacity",
+                "backgroundImageBlur",
+            ]
+        );
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(unique.len(), names.len(), "duplicate bound name");
+        for (name, min, max) in CONFIG_BOUNDS {
+            assert!(min <= max, "inverted bound for {name}");
+        }
     }
 
     #[test]
     fn test_validate_and_clamp_port_meta_mode() {
         // issue #11：合法模式保留，非法/残留值收敛回 trx。
         let mut cfg = AppConfig {
-            port_meta: vec![
-                PortMetaEntry {
-                    port_id: "COM1".into(),
-                    alias: None,
-                    is_hidden: false,
-                    mode: Some("tty".into()),
-                },
-                PortMetaEntry {
-                    port_id: "COM2".into(),
-                    alias: None,
-                    is_hidden: false,
-                    mode: Some("bogus".into()),
-                },
-                PortMetaEntry {
-                    port_id: "COM3".into(),
-                    alias: None,
-                    is_hidden: false,
-                    mode: None,
-                },
-            ],
+            entities: Entities {
+                port_meta: vec![
+                    PortMetaEntry {
+                        port_id: "COM1".into(),
+                        alias: None,
+                        is_hidden: false,
+                        mode: Some("tty".into()),
+                    },
+                    PortMetaEntry {
+                        port_id: "COM2".into(),
+                        alias: None,
+                        is_hidden: false,
+                        mode: Some("bogus".into()),
+                    },
+                    PortMetaEntry {
+                        port_id: "COM3".into(),
+                        alias: None,
+                        is_hidden: false,
+                        mode: None,
+                    },
+                ],
+                ..Entities::default()
+            },
             ..AppConfig::default()
         };
         ConfigManager::validate_and_clamp(&mut cfg);
-        assert_eq!(cfg.port_meta[0].mode.as_deref(), Some("tty"));
-        assert_eq!(cfg.port_meta[1].mode.as_deref(), Some("trx"));
-        assert_eq!(cfg.port_meta[2].mode, None);
-    }
-
-    #[test]
-    fn test_max_display_lines_defaults_when_absent() {
-        // 旧 config.json 无 maxDisplayLines → serde(default) 回退默认 100000。
-        // fixture 保留 legacy memoryLimitMb：未知字段被 serde 静默丢弃，
-        // 反序列化必须成功且 maxDisplayLines 取默认值。
-        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
-            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
-            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
-            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
-            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
-            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
-            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
-            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
-            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
-            "backupDirectory":"","restoreSession":true}"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
-        assert_eq!(cfg.max_display_lines, 100000);
-    }
-
-    #[test]
-    fn test_legacy_memory_budget_keys_are_stripped() {
-        // 升级兼容：含 memoryLimitMb / memoryPerPortBudgetMb 的旧 config.json
-        // 走剥离逻辑后，AppConfig 不再携带这两个字段，maxDisplayLines 回退默认。
-        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
-            "memoryPerPortBudgetMb":200,
-            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
-            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
-            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
-            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
-            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
-            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
-            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
-            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
-            "backupDirectory":"","restoreSession":true}"#;
-        let value = strip_legacy_memory_budget_keys(old_json)
-            .expect("legacy JSON must parse as Value");
-        let parsed: AppConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(parsed.max_display_lines, 100000);
-        // 序列化结果不含旧 key（剥离后物理移除，下次 save 落盘即无）
-        let serialized = serde_json::to_string(&parsed).unwrap();
-        assert!(!serialized.contains("memoryLimitMb"), "got: {serialized}");
-        assert!(!serialized.contains("memoryPerPortBudgetMb"), "got: {serialized}");
+        assert_eq!(cfg.entities.port_meta[0].mode.as_deref(), Some("tty"));
+        assert_eq!(cfg.entities.port_meta[1].mode.as_deref(), Some("trx"));
+        assert_eq!(cfg.entities.port_meta[2].mode, None);
     }
 
     #[test]
@@ -994,44 +1141,6 @@ mod tests {
         let json = serde_json::to_string(&preset).unwrap();
         assert!(json.contains("\"baudRate\""), "should be camelCase: {}", json);
         assert!(json.contains("\"dtr\":true"), "dtr should be bool: {}", json);
-    }
-
-    #[test]
-    fn test_diag_log_enabled_defaults_when_absent() {
-        // 旧版 config.json 无 diagLogEnabled 字段 → 反序列化回退默认 true。
-        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
-            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
-            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
-            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
-            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
-            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
-            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
-            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
-            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
-            "backupDirectory":"","restoreSession":true}"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
-        assert!(cfg.diag_log_enabled);
-    }
-
-    #[test]
-    fn test_missing_entity_fields_default_to_empty() {
-        // 模拟一个不含实体数组的 JSON（如全新安装）
-        let json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
-            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
-            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
-            "uiFont":"sans","uiFontSize":14,
-            "defaultBaudRates":[9600],"defaultLineEnding":"\\r\\n","sendPrefix":">>",
-            "showPortType":true,"sendOnEnter":true,"quickSendInlineCount":6,
-            "timestampFormat":"absolute","timestampMode":"perLine",
-            "autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
-            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
-            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
-            "backupDirectory":"","hasSeenTour":false,"restoreSession":true}"#;
-        let parsed: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(parsed.send_command_sets.is_empty());
-        assert!(parsed.highlight_rule_sets.is_empty());
-        assert!(parsed.port_presets.is_empty());
-        assert!(parsed.port_groups.is_empty());
     }
 
     #[test]
@@ -1081,20 +1190,6 @@ mod tests {
         let frontend_json = r#"{"portId":"GIT:BASH","isHidden":false,"mode":"tty"}"#;
         let from_frontend: PortMetaEntry = serde_json::from_str(frontend_json).unwrap();
         assert_eq!(from_frontend.mode.as_deref(), Some("tty"));
-
-        // 旧 config.json 无 portMeta 字段 → AppConfig 反序列化回退空 Vec。
-        let old_json = r#"{"configVersion":1,"closeBehavior":"exit","memoryLimitMb":1024,
-            "language":"zh-CN","theme":"dark","preventScreenOff":false,"preventSleep":false,
-            "autoReconnect":false,"maxRetries":3,"terminalFont":"mono","terminalFontSize":14,
-            "uiFont":"sans","uiFontSize":14,"defaultBaudRates":[9600],
-            "defaultLineEnding":"\\r\\n","sendPrefix":">>","showPortType":true,
-            "sendOnEnter":true,"quickSendInlineCount":6,"timestampFormat":"absolute",
-            "timestampMode":"perLine","autoSaveLog":true,"logDirectory":"","logFilenameFormat":"[com]",
-            "logFormat":"string","logEncoding":"UTF-8","logSplitEnabled":true,
-            "logSplitSizeMb":100,"backupEnabled":false,"backupInterval":24,
-            "backupDirectory":"","restoreSession":true}"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).unwrap();
-        assert!(cfg.port_meta.is_empty());
     }
 
     #[test]
@@ -1124,5 +1219,83 @@ mod tests {
         assert!(!config_path.exists()); // save_session_snapshot 不写 config
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 从 `lib.rs` 的 `generate_handler![...]` 列表解析已注册的命令名。
+    fn parse_registered_commands(lib_src: &str) -> BTreeSet<String> {
+        let start = lib_src
+            .find("generate_handler![")
+            .expect("lib.rs must contain generate_handler![")
+            + "generate_handler![".len();
+        let end = lib_src[start..]
+            .find("])")
+            .expect("generate_handler![ must be closed with ])")
+            + start;
+        lib_src[start..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .filter_map(|line| line.trim_end_matches(',').rsplit("::").next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// 从 `commands/*.rs` 解析带 `#[tauri::command]` 的函数名。
+    fn parse_declared_commands(commands_dir: &std::path::Path) -> BTreeSet<String> {
+        let mut declared = BTreeSet::new();
+        for entry in fs::read_dir(commands_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = fs::read_to_string(&path).unwrap();
+            let mut lines = source.lines().peekable();
+            while let Some(line) = lines.next() {
+                if line.trim() != "#[tauri::command]" {
+                    continue;
+                }
+                // 属性与 fn 之间可能还有别的属性行，跳过空行与属性行。
+                let fn_line = loop {
+                    let Some(candidate) = lines.next() else { break "" };
+                    let trimmed = candidate.trim();
+                    if trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("///") {
+                        continue;
+                    }
+                    break trimmed;
+                };
+                let after_fn = fn_line
+                    .split_once("fn ")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or_else(|| panic!("expected `fn` after #[tauri::command] in {:?}", path));
+                declared.insert(
+                    after_fn
+                        .split('(')
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .to_string(),
+                );
+            }
+        }
+        declared
+    }
+
+    #[test]
+    fn test_generate_handler_matches_tauri_command_attribute() {
+        // 注册漂移守卫：新增 #[tauri::command] 却忘了在 lib.rs 注册时，前端 invoke 会
+        // 报 "command not found"，而编译器不会提醒。这里解析两侧源文本强制相等。
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let lib_src = fs::read_to_string(src_dir.join("lib.rs")).unwrap();
+        let registered = parse_registered_commands(&lib_src);
+        let declared = parse_declared_commands(&src_dir.join("commands"));
+
+        let missing_registration: Vec<_> = declared.difference(&registered).cloned().collect();
+        let dangling_registration: Vec<_> = registered.difference(&declared).cloned().collect();
+        assert!(
+            missing_registration.is_empty() && dangling_registration.is_empty(),
+            "command registry drift:\n  declared but not registered: {missing_registration:?}\n  registered but not declared: {dangling_registration:?}"
+        );
+        assert!(!registered.is_empty(), "generate_handler! parsed to an empty set");
     }
 }

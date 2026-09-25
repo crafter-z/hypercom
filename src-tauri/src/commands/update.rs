@@ -13,42 +13,34 @@
  *   自动升级可用）。**preview 语义 = max(preview, stable)**（issue #12 二轮）：
  *   preview 检查同时查 stable，取 semver 大者的通道——preview 收尾发布 stable
  *   后用户自动晋升（含 stable 热修），preview 端点解析失败也降级到 stable。
- * - 双层门控：与 simulation.rs 同款三态——release 构建走真实逻辑；
- *   debug 构建（`cargo check`/`tauri dev`）命令直接返回 Ok(None)/Ok(())；
- *   纯解析函数 `#[cfg(any(test, not(debug_assertions)))]`（测试在 debug
- *   构建下也要能跑）。前端另有 `import.meta.env.DEV` 短路。
+ * - 构建门控：自动更新的两端点都指向 GitHub 发布产物，开发构建不在任何发布
+ *   通道上。两条命令的命令体只有一份实现（release 逻辑原地保留），入口由
+ *   `is_debug_build()` 守卫短路为「无更新 / 已完成」（唯一门控点，见
+ *   `commands::system_cmds`）；前端另有 `import.meta.env.DEV` 短路。
+ *   纯解析函数不再做 cfg 条件编译——它们在两种构建下都存在，测试直接覆盖。
  * - 下载进度经 `update:progress` 事件推给前端（Emitter::emit）。
  * - 复审加固：未知 channel 报错（不回退 stable）；GitHub API 请求 15s 超时；
  *   `download_and_install_update` 接受 `expected_version`——安装前重检查（设计
  *   使然，check/install 两次网络往返）若版本已变（弹窗展示后发布了新版）则报错
  *   拒绝安装，防「展示的 X、装的是 Y」TOCTOU。
  */
-use serde::Serialize;
-
-use crate::commands::CommandError;
-
-#[cfg(not(debug_assertions))]
 use std::time::Duration;
 
-#[cfg(not(debug_assertions))]
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-
-#[cfg(not(debug_assertions))]
 use tauri_plugin_updater::UpdaterExt;
+
+use super::{system_cmds::is_debug_build, CommandError};
 
 /// GitHub API 请求超时（issue #12 复审：`reqwest::Client::new()` 无超时，
 /// API 挂起会让手动检查按钮永久停在「正在检查...」）。
-#[cfg(not(debug_assertions))]
 const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// GitHub 仓库（owner/repo）
-#[cfg(not(debug_assertions))]
 const GITHUB_OWNER: &str = "crafter-z";
-#[cfg(not(debug_assertions))]
 const GITHUB_REPO: &str = "hypercom";
 
 /// stable 通道 endpoint：GitHub「最新非 prerelease」指针
-#[cfg(not(debug_assertions))]
 fn stable_endpoint() -> Result<url::Url, CommandError> {
     url::Url::parse(&format!(
         "https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/latest.json"
@@ -57,7 +49,6 @@ fn stable_endpoint() -> Result<url::Url, CommandError> {
 }
 
 /// preview 通道 endpoint：GitHub API 解析最新 preview tag → 该 tag 的 latest.json
-#[cfg(not(debug_assertions))]
 async fn preview_endpoint(client: &reqwest::Client) -> Result<url::Url, CommandError> {
     let api_url = format!(
         "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=100"
@@ -96,7 +87,6 @@ async fn preview_endpoint(client: &reqwest::Client) -> Result<url::Url, CommandE
 ///
 /// issue #12 复审：GitHub `/releases` 按创建时间倒序——为旧核心补发的 preview
 /// 会排在新核心 preview 之前。取 semver 最大（数值组比较）而非第一个命中。
-#[cfg(any(test, not(debug_assertions)))]
 pub fn find_latest_preview_tag(releases: &serde_json::Value) -> Option<String> {
     let arr = releases.as_array()?;
     arr.iter()
@@ -112,7 +102,6 @@ pub fn find_latest_preview_tag(releases: &serde_json::Value) -> Option<String> {
 }
 
 /// tag 是否匹配 `vX.Y.Z-preview.N`（如 `v0.6.0-preview.2`）
-#[cfg(any(test, not(debug_assertions)))]
 fn is_preview_tag(tag: &str) -> bool {
     let mut parts = tag.splitn(2, '-');
     let core = parts.next().unwrap_or("");
@@ -134,7 +123,6 @@ fn is_preview_tag(tag: &str) -> bool {
 
 /// 解析 preview tag 的数值四元组 `(major, minor, patch, preview_n)` 供比较。
 /// 调用方必须先经 `is_preview_tag` 校验（此处 parse 失败兜底 0，不会发生）。
-#[cfg(any(test, not(debug_assertions)))]
 fn parse_preview_tag(tag: &str) -> (u64, u64, u64, u64) {
     let without_v = tag.strip_prefix('v').unwrap_or(tag);
     let (core, suffix) = without_v.split_once('-').unwrap_or((without_v, ""));
@@ -153,7 +141,6 @@ fn parse_preview_tag(tag: &str) -> (u64, u64, u64, u64) {
 /// rank 语义与 semver precedence 一致：无后缀（stable）= `u64::MAX`
 /// （同核心号下 stable > preview.N），`preview.N` = N；其它后缀防御性取 0
 /// （发布纪律下不会出现 alpha/beta）。容忍可选 `v` 前缀。纯函数。
-#[cfg(any(test, not(debug_assertions)))]
 fn version_key(version: &str) -> (u64, u64, u64, u64) {
     let without_v = version.strip_prefix('v').unwrap_or(version);
     let (core, suffix) = without_v.split_once('-').unwrap_or((without_v, ""));
@@ -174,7 +161,6 @@ fn version_key(version: &str) -> (u64, u64, u64, u64) {
 
 /// 双通道候选版本中取 semver 大者的通道（issue #12 二轮 preview 语义）；
 /// 键相等（不应发生，防御）取 stable——正式形态优先。纯函数，便于单测。
-#[cfg(any(test, not(debug_assertions)))]
 fn newer_channel<'a>(
     preview_version: Option<&'a str>,
     stable_version: Option<&'a str>,
@@ -210,7 +196,6 @@ pub struct UpdatePayload {
 }
 
 /// `update:progress` 事件载荷
-#[cfg(not(debug_assertions))]
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProgressPayload {
@@ -222,7 +207,6 @@ pub struct UpdateProgressPayload {
     pub phase: String,
 }
 
-#[cfg(not(debug_assertions))]
 fn build_updater(
     app: &AppHandle,
     endpoint: url::Url,
@@ -235,7 +219,6 @@ fn build_updater(
 }
 
 /// 构造 payload（弹窗数据）
-#[cfg(not(debug_assertions))]
 fn to_payload(update: &tauri_plugin_updater::Update, channel: &str) -> UpdatePayload {
     UpdatePayload {
         version: update.version.clone(),
@@ -248,7 +231,6 @@ fn to_payload(update: &tauri_plugin_updater::Update, channel: &str) -> UpdatePay
 
 /// 按通道解析 endpoint（issue #12 复审：未知通道报错，不静默回退 stable——
 /// 通道名传错时静默查错通道比报错更糟）。
-#[cfg(not(debug_assertions))]
 async fn endpoint_for_channel(
     client: &reqwest::Client,
     channel: &str,
@@ -263,7 +245,6 @@ async fn endpoint_for_channel(
 }
 
 /// 按通道解析 endpoint 并构造 updater
-#[cfg(not(debug_assertions))]
 async fn updater_for_channel(
     app: &AppHandle,
     channel: &str,
@@ -277,7 +258,6 @@ async fn updater_for_channel(
 }
 
 /// 单 endpoint 检查（构造 updater + check 一次）
-#[cfg(not(debug_assertions))]
 async fn check_endpoint(
     app: &AppHandle,
     endpoint: url::Url,
@@ -289,7 +269,7 @@ async fn check_endpoint(
         .map_err(|e| CommandError::Other(format!("update check failed: {e}")))
 }
 
-/// 检查是否有更新（debug 构建直接返回「无更新」）。
+/// 检查是否有更新。
 ///
 /// **preview 通道语义 = max(preview, stable)**（issue #12 二轮）：preview 收尾
 /// 发布 stable 后，只查 preview 端点的用户永远收不到晋升与 stable 热修——
@@ -298,141 +278,135 @@ async fn check_endpoint(
 /// （API 限流/无 preview release）降级为仅 stable。
 #[tauri::command]
 pub async fn check_for_update(
-    app: tauri::AppHandle,
+    app: AppHandle,
     channel: String,
 ) -> Result<Option<UpdatePayload>, CommandError> {
-    #[cfg(debug_assertions)]
-    {
-        let _ = (&app, &channel);
+    // debug 构建不在发布通道上：短路为「无更新」而不是报错，保持开发期检查按钮可用。
+    if is_debug_build() {
         return Ok(None);
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let client = reqwest::Client::builder()
-            .timeout(GITHUB_API_TIMEOUT)
-            .build()
-            .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
 
-        match channel.as_str() {
-            "stable" => {
-                let update = check_endpoint(&app, stable_endpoint()?).await?;
-                Ok(update.map(|u| to_payload(&u, "stable")))
-            }
-            "preview" => {
-                let preview_result = async {
-                    let endpoint = preview_endpoint(&client).await?;
-                    check_endpoint(&app, endpoint).await
-                }
-                .await;
-                let stable_result = check_endpoint(&app, stable_endpoint()?).await;
+    let client = reqwest::Client::builder()
+        .timeout(GITHUB_API_TIMEOUT)
+        .build()
+        .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
 
-                match (preview_result, stable_result) {
-                    (Ok(preview), Ok(stable)) => {
-                        let chosen = newer_channel(
-                            preview.as_ref().map(|u| u.version.as_str()),
-                            stable.as_ref().map(|u| u.version.as_str()),
-                        );
-                        Ok(match chosen {
-                            Some("preview") => preview.map(|u| to_payload(&u, "preview")),
-                            Some("stable") => stable.map(|u| to_payload(&u, "stable")),
-                            // 防御：newer_channel 纯函数目前只返回 preview/stable/None；
-                            // 未来演进若出现意外值，不静默装错通道，记日志按无更新处理。
-                            Some(other) => {
-                                log::warn!("newer_channel returned unexpected channel: {other}");
-                                None
-                            }
-                            None => None,
-                        })
-                    }
-                    // 双通道之一失败：另一通道有更新就用它，否则把失败透出
-                    // （自动检查静默、手动检查 toast——不因半边失败丢可用更新）。
-                    (Ok(preview), Err(e)) => {
-                        if preview.is_some() {
-                            log::warn!("stable check failed, using preview result: {e}");
-                            Ok(preview.map(|u| to_payload(&u, "preview")))
-                        } else {
-                            Err(e)
-                        }
-                    }
-                    (Err(e), Ok(stable)) => {
-                        if stable.is_some() {
-                            log::warn!("preview resolution/check failed, falling back to stable: {e}");
-                            Ok(stable.map(|u| to_payload(&u, "stable")))
-                        } else {
-                            Err(e)
-                        }
-                    }
-                    (Err(e_preview), Err(_e_stable)) => Err(e_preview),
-                }
-            }
-            other => Err(CommandError::Other(format!(
-                "unknown update channel: {other}"
-            ))),
+    match channel.as_str() {
+        "stable" => {
+            let update = check_endpoint(&app, stable_endpoint()?).await?;
+            Ok(update.map(|u| to_payload(&u, "stable")))
         }
+        "preview" => {
+            let preview_result = async {
+                let endpoint = preview_endpoint(&client).await?;
+                check_endpoint(&app, endpoint).await
+            }
+            .await;
+            let stable_result = check_endpoint(&app, stable_endpoint()?).await;
+
+            match (preview_result, stable_result) {
+                (Ok(preview), Ok(stable)) => {
+                    let chosen = newer_channel(
+                        preview.as_ref().map(|u| u.version.as_str()),
+                        stable.as_ref().map(|u| u.version.as_str()),
+                    );
+                    Ok(match chosen {
+                        Some("preview") => preview.map(|u| to_payload(&u, "preview")),
+                        Some("stable") => stable.map(|u| to_payload(&u, "stable")),
+                        // 防御：newer_channel 纯函数目前只返回 preview/stable/None；
+                        // 未来演进若出现意外值，不静默装错通道，记日志按无更新处理。
+                        Some(other) => {
+                            log::warn!("newer_channel returned unexpected channel: {other}");
+                            None
+                        }
+                        None => None,
+                    })
+                }
+                // 双通道之一失败：另一通道有更新就用它，否则把失败透出
+                // （自动检查静默、手动检查 toast——不因半边失败丢可用更新）。
+                (Ok(preview), Err(e)) => {
+                    if preview.is_some() {
+                        log::warn!("stable check failed, using preview result: {e}");
+                        Ok(preview.map(|u| to_payload(&u, "preview")))
+                    } else {
+                        Err(e)
+                    }
+                }
+                (Err(e), Ok(stable)) => {
+                    if stable.is_some() {
+                        log::warn!("preview resolution/check failed, falling back to stable: {e}");
+                        Ok(stable.map(|u| to_payload(&u, "stable")))
+                    } else {
+                        Err(e)
+                    }
+                }
+                (Err(e_preview), Err(_e_stable)) => Err(e_preview),
+            }
+        }
+        other => Err(CommandError::Other(format!(
+            "unknown update channel: {other}"
+        ))),
     }
 }
 
-/// 下载并安装更新（debug 构建直接成功返回；错误由调用方按语义处理）。
+/// 下载并安装更新（错误由调用方按语义处理）。
 ///
 /// `expected_version`：弹窗展示的候选版本。安装前必须重检查（设计上 check/install
 /// 是两次独立往返），若服务器侧版本已变（展示后发布了新版）则拒绝安装——
 /// 前端重新检查即可，防「弹窗展示 X、实际装 Y」的 TOCTOU（issue #12 复审）。
 #[tauri::command]
 pub async fn download_and_install_update(
-    app: tauri::AppHandle,
+    app: AppHandle,
     channel: String,
     expected_version: Option<String>,
 ) -> Result<(), CommandError> {
-    #[cfg(debug_assertions)]
-    {
-        let _ = (&app, &channel, &expected_version);
+    // debug 构建不在发布通道上：短路为「已完成」，不报错（前端只按结果收尾）。
+    if is_debug_build() {
         return Ok(());
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let updater = updater_for_channel(&app, &channel).await?;
-        let update = updater
-            .check()
-            .await
-            .map_err(|e| CommandError::Other(format!("update check failed: {e}")))?
-            .ok_or_else(|| CommandError::Other("no update available".to_string()))?;
 
-        if let Some(expected) = &expected_version {
-            if update.version != *expected {
-                return Err(CommandError::Other(format!(
-                    "update changed since check: expected {expected}, found {} — re-check required",
-                    update.version
-                )));
-            }
+    let updater = updater_for_channel(&app, &channel).await?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| CommandError::Other(format!("update check failed: {e}")))?
+        .ok_or_else(|| CommandError::Other("no update available".to_string()))?;
+
+    if let Some(expected) = &expected_version {
+        if update.version != *expected {
+            return Err(CommandError::Other(format!(
+                "update changed since check: expected {expected}, found {} — re-check required",
+                update.version
+            )));
         }
-
-        let app2 = app.clone();
-        update
-            .download_and_install(
-                |downloaded, total| {
-                    let _ = app2.emit(
-                        "update:progress",
-                        UpdateProgressPayload {
-                            downloaded,
-                            total,
-                            phase: "download".to_string(),
-                        },
-                    );
-                },
-                || {
-                    let _ = app2.emit(
-                        "update:progress",
-                        UpdateProgressPayload {
-                            downloaded: 0,
-                            total: None,
-                            phase: "install".to_string(),
-                        },
-                    );
-                },
-            )
-            .await
-            .map_err(|e| CommandError::Other(format!("update install failed: {e}")))
     }
+
+    let app2 = app.clone();
+    update
+        .download_and_install(
+            |downloaded, total| {
+                let _ = app2.emit(
+                    "update:progress",
+                    UpdateProgressPayload {
+                        downloaded,
+                        total,
+                        phase: "download".to_string(),
+                    },
+                );
+            },
+            || {
+                let _ = app2.emit(
+                    "update:progress",
+                    UpdateProgressPayload {
+                        downloaded: 0,
+                        total: None,
+                        phase: "install".to_string(),
+                    },
+                );
+            },
+        )
+        .await
+        .map_err(|e| CommandError::Other(format!("update install failed: {e}")))
 }
 
 #[cfg(test)]

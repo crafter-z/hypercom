@@ -1,38 +1,50 @@
 /**
  * 串口管理模块 (Serial Manager)
- * 负责串口的枚举、打开/关闭、参数配置、数据收发
- * 使用 serialport-rs 库实现跨平台串口通信
+ * 负责串口的枚举、打开/关闭、参数配置、数据收发（serialport-rs，跨平台）。
  *
- * 架构设计:
- * - SerialManager: 管理所有已打开串口的集合（真实 + 模拟）
- * - SerialPortHandle: 真实串口句柄，包含读取线程
- * - SimPortHandle: 模拟串口句柄，支持回显 + 心跳
- * - 数据接收通过 AppHandle.emit() 推送给前端
- * - 模拟模式: 用于无硬件时的测试，提供 LOOP:Loopback 虚拟串口
+ * 结构（本文件只保留「注册表 + 策略」，每类端口的 I/O 各在自己的模块里）：
+ * - `codec`      ：HEX 解析 / TX 字节构造 / 带期限写入（纯逻辑，不碰 serialport）
+ * - `events`     ：前端事件载荷与派发助手
+ * - `ports_real` ：真实串口（句柄拆分、帧格式映射、热插拔幽灵句柄回收）
+ * - `ports_sim`  ：模拟串口 SIM:Loopback（回显 + 周期输出）
+ * - `ports_tty`  ：模拟终端 GIT:BASH（pty 包装；pty 细节在 `tty_sim`）
+ *
+ * 全局串口锁的纪律：`SerialManager` 的每个方法在**持有全局锁**时执行，因此它们
+ * 只做注册表操作与（打开/发送时的）单次系统调用，绝不做端口枚举与读线程 join。
+ * 需要这两者的完整流程见 `ports_real::open_blocking` / `reconnect_blocking` /
+ * `list_ports_blocking`：它们自持自放全局锁，把阻塞 IO 放在锁外的锁段之间。
  */
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
 use crate::commands::OpenPortArgs;
 
+pub(crate) mod codec;
+pub(crate) mod events;
+mod ports_real;
+mod ports_sim;
+mod ports_tty;
 pub(crate) mod tty_sim;
-use tty_sim::TtySimPortHandle;
 
-// ==================== 公共类型 ====================
+pub use codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
+pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status, PortStatus};
+pub use ports_real::{open_blocking, reconnect_blocking};
+
+/// 模拟串口 id 前缀（`PortKind` 的判定依据）
+pub(crate) const SIM_PORT_PREFIX: &str = "SIM:";
+/// 模拟终端（git bash pty）id 前缀（`PortKind` 的判定依据）
+pub(crate) const TTY_PORT_PREFIX: &str = "GIT:";
 
 /// 串口信息（返回给前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortInfo {
     pub id: String,
     pub name: String,
-    pub port_type: String, // "real" | "virtual"
+    pub port_type: String, // "real" | "sim"
     /// USB 厂商名（仅 USB 串口有值；PCI/蓝牙/模拟口为空，序列化时省略）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manufacturer: Option<String>,
@@ -41,373 +53,78 @@ pub struct PortInfo {
     pub product: Option<String>,
 }
 
-/// 串口数据事件（推送给前端）
-#[derive(Debug, Clone, Serialize)]
-pub struct SerialDataEvent {
-    pub port_id: String,
-    pub timestamp: i64,
-    pub direction: String, // "RX" | "TX"
-    pub data: Vec<u8>,
-    pub is_hex: bool,
-}
-
-/// 串口状态变化事件（推送给前端）
-#[derive(Debug, Clone, Serialize)]
-pub struct SerialStatusEvent {
-    pub port_id: String,
-    pub status: String,
-}
-
-/// 串口自动重连提示事件（推送给前端）
-#[derive(Debug, Clone, Serialize)]
-pub struct SerialReconnectHintEvent {
-    pub port_name: String,
-}
-
-// ==================== 真实串口 ====================
-
-/// 单个串口连接句柄。
+/// 端口类别：由 port_id 前缀决定（`GIT:` → Tty，`SIM:` → Sim，其余 → Real）。
 ///
-/// issue #6-10（方案1）：读写句柄经 `try_clone()` 拆分（Windows 上 =
-/// `DuplicateHandle`），读线程独占 `read_port`、发送路径独占 `write_port`。
-/// 拆分前读线程与 TX 写路径共享同一把 per-port `Mutex<Box<dyn SerialPort>>`：
-/// TX 的 write_all+flush 阻塞期间端口锁被 TX 独占，RX 读线程被饿死——设备
-/// 响应早已到达 OS 接收缓冲区，却直到 TX 释放锁才被读出来（"TX 后等一分钟
-/// 才收到响应"的根因）。拆分后 TX 再阻塞也影响不到 RX 读取。
-///
-/// 注意：不能对同一 COM 口二次 `CreateFile`（serialport crate 以
-/// `dwShareMode=0` 打开），`try_clone()` 是唯一拆分途径；DCB/COMMTIMEOUTS
-/// 是设备级状态、两个句柄共享，改参（set_params/set_flow_control）只在
-/// 写句柄上进行。
-pub struct SerialPortHandle {
-    /// 读句柄：读线程独占（只锁读）
-    pub read_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
-    /// 写句柄：发送路径独占（只锁写）
-    pub write_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
-    pub running: Arc<AtomicBool>,
-    pub read_thread: Option<thread::JoinHandle<()>>,
+/// 用户可见的 port_id 前缀是类别的唯一来源。历史上这三类在 8 处分派点各写一遍
+/// `starts_with`，漏改任何一处就会把虚拟端口当真实串口打开——在 release 构建下
+/// 等于绕过能力门控去 spawn 进程。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortKind {
+    Real,
+    Sim,
+    Tty,
 }
 
-// ==================== 模拟串口 ====================
-
-/// 模拟串口内部消息
-enum SimMessage {
-    Echo { data: String, is_hex: bool },
-    /// 设置周期输出频率（次/秒）；0 = 停止周期输出（issue #14 高吞吐验证）
-    SetRate { per_sec: u32 },
-    Stop,
-}
-
-/// 模拟串口连接句柄
-pub struct SimPortHandle {
-    pub running: Arc<AtomicBool>,
-    tx: mpsc::Sender<SimMessage>,
-    read_thread: Option<thread::JoinHandle<()>>,
-}
-
-// ==================== 模拟串口周期输出（issue #14 高吞吐验证） ====================
-
-/// 周期输出频率上限（次/秒）：10000/s 已远超真实串口吞吐（921600 baud ≈
-/// 92KB/s ≈ 数千行/s），防止 interval 截断为 0 导致忙循环。
-const MAX_SIM_RATE: u32 = 10_000;
-/// 单个 100ms 循环内最多补发行数：rate=10000 时每循环应发 1000，留 10× 余量
-/// 防极端追赶风暴把主线程打爆（emit + 日志在循环内同步执行）。
-const MAX_SIM_BURST: u32 = 10_000;
-
-/// 解析 SIM 频率命令：**文本模式**且 trim 后为纯数字 → `Some(rate)`（clamp 到
-/// `MAX_SIM_RATE`）；其它（HEX 模式 / 非数字 / 空）→ `None`（走回显路径）。
-/// 纯逻辑、不触碰 serialport FFI，Windows 测试可用。
-fn parse_sim_rate_command(data: &str, is_hex: bool) -> Option<u32> {
-    if is_hex {
-        return None;
-    }
-    let trimmed = data.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    trimmed.parse::<u32>().ok().map(|r| r.min(MAX_SIM_RATE))
-}
-
-/// 周期输出积分器：计算「应发而未发」的完整间隔数。返回 `(应发行数, 推进后的
-/// 下次发送时刻)`。`max` 限制单次补发上限（追赶风暴防护）；若因上限提前退出
-/// 仍落后（如长时间隐藏窗口积压），把 next 重置到 now，避免无限补发。
-fn sim_due_lines(
-    now: std::time::Instant,
-    mut next: std::time::Instant,
-    interval: std::time::Duration,
-    max: u32,
-) -> (u32, std::time::Instant) {
-    let mut due = 0u32;
-    while now >= next && due < max {
-        next += interval;
-        due += 1;
-    }
-    if now > next {
-        next = now;
-    }
-    (due, next)
-}
-
-// ==================== 参数解析 ====================
-
-/// 解析 HEX 字符串为字节数组。支持空格分隔（"48 65 6C"）或紧凑形式（"48656C"）。
-/// 暴露为 pub 以便日志层在写入 TX 字节时复用。
-pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
-    // 收集 (原始索引, 字节) 并跳过空白；保留原始索引使错误定位指向输入原文，
-    // 而非去空白后的字符串（"AA ZZ" 的坏对应报位置 3，而非 2）。
-    let hex_bytes: Vec<(usize, u8)> = data
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| !b.is_ascii_whitespace())
-        .map(|(i, b)| (i, *b))
-        .collect();
-    if !hex_bytes.len().is_multiple_of(2) {
-        return Err(anyhow::anyhow!(
-            "HEX string has odd length: {} hex chars",
-            hex_bytes.len()
-        ));
-    }
-    // 将单个 ASCII 十六进制字符解码为数值 0-15，非法字符返回 None。
-    let nibble = |b: u8| -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    };
-    let mut result = Vec::with_capacity(hex_bytes.len() / 2);
-    for pair in hex_bytes.chunks(2) {
-        let (hi_index, hi_byte) = pair[0];
-        let (_, lo_byte) = pair[1];
-        match (nibble(hi_byte), nibble(lo_byte)) {
-            (Some(hi), Some(lo)) => result.push((hi << 4) | lo),
-            _ => {
-                let hex_pair = String::from_utf8_lossy(&[hi_byte, lo_byte]).into_owned();
-                return Err(anyhow::anyhow!(
-                    "Invalid HEX byte at position {}: \"{}\"",
-                    hi_index,
-                    hex_pair
-                ));
-            }
-        }
-    }
-    Ok(result)
-}
-
-/// 模拟终端（git bash pty，issue #11）发送时的行结束符归一。
-///
-/// pty 行规程（ICRNL）会把输入里的 `\r` 转成 `\n`——因此对 TTY 类端口发送
-/// `\r\n` 会变成**两个**换行：bash 执行完命令后还多收到一个空行，表现为
-/// 「快捷发送后额外多执行一行空命令」。TTY 语义下回车统一为单个 `\r`
-/// （真实终端 Enter 发出的就是 `\r`）；`\r`/`\n`/`None` 原样保留。
-fn normalize_tty_line_ending(append_line_ending: &str) -> &str {
-    if append_line_ending == "\\r\\n" {
-        "\\r"
-    } else {
-        append_line_ending
-    }
-}
-
-/// 计算"实际写入串口"的字节序列——发送路径与日志路径的唯一事实来源。
-/// HEX 模式解析十六进制字符串（忽略行结束符）；文本模式附加行结束符。
-pub fn build_tx_bytes(
-    data: &str,
-    is_hex: bool,
-    append_line_ending: &str,
-) -> anyhow::Result<Vec<u8>> {
-    if is_hex {
-        return parse_hex_string(data);
-    }
-    let mut bytes = data.as_bytes().to_vec();
-    match append_line_ending {
-        "\\r\\n" => bytes.extend_from_slice(b"\r\n"),
-        "\\r" => bytes.push(b'\r'),
-        "\\n" => bytes.push(b'\n'),
-        _ => {}
-    }
-    Ok(bytes)
-}
-
-/// 发送写操作的总写入期限（issue #6-10，方案2）。
-///
-/// Windows 上每次 `write()`（WriteFile）受 `COMMTIMEOUTS` 约束
-/// （`.timeout(100ms)` → `WriteTotalTimeoutConstant: 100`，每次最多 ~100ms），
-/// 但超时不是错误——返回部分/零字节计数，`write_all` 以 ~100ms/次循环重试。
-/// 对端长时间不取走数据（流控卡住 / USB-UART FIFO 满）时，长 payload 的
-/// `write_all` 会无限循环；本常量作为总期限兜底，超时即报错而非无限等待。
-pub const WRITE_TOTAL_DEADLINE: Duration = Duration::from_millis(2000);
-
-/// 单次 WriteFile 慢阈值（ms）：超过即 `log::warn!`（性能修复 P1-2 打点）。
-/// Windows 上每次 WriteFile 受 `WriteTotalTimeoutConstant=100ms` 约束，驱动缓冲
-/// 满/流控卡死时单次写可被拖满——>100ms 即可视为异常，数据驱动确认根因 #2。
-const SINGLE_WRITE_WARN: Duration = Duration::from_millis(100);
-/// 整批写入总耗时慢阈值（ms）：正常批次远低于此值，超过即 `log::warn!`。
-const TOTAL_WRITE_WARN: Duration = Duration::from_millis(500);
-
-/// 带总写入期限的 `write_all`（issue #6-10，方案2）。
-///
-/// 替代 `std::io::Write::write_all`：
-/// - **不调用 `flush()`**——Windows 上 `flush()` = `FlushFileBuffers`，无超时、
-///   受流控约束，对端忙/CTS 拉低/XOFF 时**无界阻塞**（"TX 后长时间收不到
-///   响应"的根因；`write_all` 已把字节交给驱动，等物理发完对调试工具几乎
-///   无收益）。
-/// - `Ok(0)` 立即报错（`WriteZero` 语义：流控卡死时驱动缓冲不空，WriteFile
-///   超时返回零字节计数）。
-/// - `TimedOut`（WriteTotalTimeoutConstant 到期）重试到总期限；`Interrupted`
-///   直接继续。
-/// - 超过 `deadline` 仍未写完时报错，避免长 payload 以 ~100ms/次无限循环。
-///
-/// 性能打点（P1-2）：记录单次写与整批总耗时——单次 WriteFile 超 100ms 或
-/// 整批总耗时超 500ms 时 `log::warn!`（带端口标识/字节数/耗时）；正常路径
-/// 不打点，避免高频刷屏（写路径本身的高频已由 RX/TX 管线控制）。
-///
-/// 接受 `&mut dyn std::io::Write`（`serialport::SerialPort: io::Read + io::Write`），
-/// 测试可用纯 std mock writer，不触碰 serialport FFI。
-pub fn write_all_with_deadline(
-    port_id: &str,
-    port: &mut dyn std::io::Write,
-    bytes: &[u8],
-    deadline: Duration,
-) -> anyhow::Result<()> {
-    let start = std::time::Instant::now();
-    let mut written = 0usize;
-    while written < bytes.len() {
-        let write_start = std::time::Instant::now();
-        let before = written;
-        match port.write(&bytes[written..]) {
-            Ok(0) => {
-                return Err(anyhow::anyhow!(
-                    "Serial write returned 0 bytes (flow control stalled?)"
-                ));
-            }
-            Ok(n) => written += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            // 写超时（WriteTotalTimeoutConstant 到期，驱动缓冲未空）：重试，
-            // 由总期限兜底防止无限循环。
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(anyhow::anyhow!("Serial write error: {e}")),
-        }
-        // 单次 WriteFile 慢阈值打点（P1-2）：>100ms 视为流控/驱动异常。
-        let single_elapsed = write_start.elapsed();
-        if single_elapsed > SINGLE_WRITE_WARN {
-            log::warn!(
-                "Slow serial write to {}: {} bytes written in {}ms (batch {}/{} bytes)",
-                port_id,
-                written - before,
-                single_elapsed.as_millis(),
-                written,
-                bytes.len()
-            );
-        }
-        if written < bytes.len() && start.elapsed() >= deadline {
-            return Err(anyhow::anyhow!(
-                "Serial write timed out after {}ms ({} of {} bytes written)",
-                deadline.as_millis(),
-                written,
-                bytes.len()
-            ));
-        }
-    }
-    // 整批总耗时打点（P1-2）：>500ms 视为异常（正常批次微秒级）。
-    let total_elapsed = start.elapsed();
-    if total_elapsed > TOTAL_WRITE_WARN {
-        log::warn!(
-            "Slow serial batch write to {}: {} bytes in {}ms",
-            port_id,
-            bytes.len(),
-            total_elapsed.as_millis()
-        );
-    }
-    Ok(())
-}
-
-fn parse_data_bits(bits: u8) -> serialport::DataBits {
-    match bits {
-        5 => serialport::DataBits::Five,
-        6 => serialport::DataBits::Six,
-        7 => serialport::DataBits::Seven,
-        _ => serialport::DataBits::Eight,
-    }
-}
-
-fn parse_parity(parity: &str) -> serialport::Parity {
-    match parity {
-        "Even" => serialport::Parity::Even,
-        "Odd" => serialport::Parity::Odd,
-        _ => serialport::Parity::None,
-    }
-}
-
-fn parse_stop_bits(bits: &str) -> serialport::StopBits {
-    match bits {
-        "Two" => serialport::StopBits::Two,
-        _ => serialport::StopBits::One,
-    }
-}
-
-fn parse_flow_control(flow: &str) -> serialport::FlowControl {
-    match flow {
-        "XonXoff" => serialport::FlowControl::Software,
-        "RequestToSend" | "RequestToSendXonXoff" => serialport::FlowControl::Hardware,
-        _ => serialport::FlowControl::None,
-    }
-}
-
-// ==================== 数据事件辅助函数 ====================
-
-/// Emit a serial data event to the frontend and write to the log file.
-/// Called from spawned threads (real port reader, sim port echo, sim port heartbeat).
-/// `pub(crate)`：tty_sim 模拟终端读线程（issue #11）也经此派发 RX 事件。
-pub(crate) fn emit_data_event(
-    app_handle: &tauri::AppHandle,
-    port_id: &str,
-    direction: &str,
-    data: &[u8],
-    is_hex: bool,
-) {
-    // 只取一次当前时间：格式化字符串与毫秒时间戳同源，避免两次 now() 跨毫秒不一致。
-    let now = chrono::Local::now();
-    let timestamp_str = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    let timestamp_ms = now.timestamp_millis();
-    let event = SerialDataEvent {
-        port_id: port_id.to_string(),
-        timestamp: timestamp_ms,
-        direction: direction.to_string(),
-        data: data.to_vec(),
-        is_hex,
-    };
-    let _ = app_handle.emit("serial:data", event);
-    // Write to log if a writer exists.
-    // RX 走 write_rx（字节级行聚合，issue #5-9：完整行才落盘，跨事件的响应
-    // 不再被切成碎片行）；TX 保持 write()（每次发送自成一行，不参与聚合）。
-    if let Some(state) = app_handle.try_state::<crate::AppState>() {
-        if let Ok(mut log_mgr) = state.log_manager.lock() {
-            if direction == "RX" {
-                let _ = log_mgr.write_rx(port_id, &timestamp_str, data);
-            } else {
-                let _ = log_mgr.write(port_id, &timestamp_str, direction, data);
-            }
+impl PortKind {
+    /// 由 port_id 判定类别（前缀必须从头匹配，`XSIM:x` 属于真实端口）。
+    pub fn of(port_id: &str) -> Self {
+        if port_id.starts_with(TTY_PORT_PREFIX) {
+            PortKind::Tty
+        } else if port_id.starts_with(SIM_PORT_PREFIX) {
+            PortKind::Sim
+        } else {
+            PortKind::Real
         }
     }
 }
 
-// ==================== 串口管理器 ====================
-
-/// 串口管理器
-pub struct SerialManager {
-    /// 真实串口集合
-    ports: HashMap<String, SerialPortHandle>,
-    /// 模拟串口集合
-    pub sim_ports: HashMap<String, SimPortHandle>,
-    /// 模拟终端（git bash pty）集合，issue #11
-    pub tty_sim_ports: HashMap<String, TtySimPortHandle>,
-    /// 是否启用模拟模式
+/// 虚拟端口的能力门控：开关未启用时打开必须报错。
+///
+/// 这是「release 构建下 `open_serial_port {portId:'GIT:BASH'}` 不会 spawn 任何
+/// 进程」的唯一保证——命令层的 open 命令不区分端口类别，release 下
+/// `enable_simulation` / `enable_gitbash_sim` 又直接报错，两个开关恒为 false。
+/// 纯函数（不含状态），门控表在所有平台都可测试。
+fn check_virtual_enabled(
+    kind: PortKind,
     simulate: bool,
-    /// 是否启用模拟终端（git bash pty，仅 debug，issue #11）
+    gitbash_sim: bool,
+) -> anyhow::Result<()> {
+    match kind {
+        PortKind::Real => Ok(()),
+        PortKind::Sim if simulate => Ok(()),
+        PortKind::Sim => Err(anyhow::anyhow!(
+            "Simulation mode is not enabled (port ids must start with {})",
+            SIM_PORT_PREFIX
+        )),
+        PortKind::Tty if gitbash_sim => Ok(()),
+        PortKind::Tty => Err(anyhow::anyhow!(
+            "Git Bash simulation is not enabled (port ids must start with {})",
+            TTY_PORT_PREFIX
+        )),
+    }
+}
+
+/// 全局串口锁中毒（持锁线程 panic）时的统一错误文案。
+pub(super) fn lock_error<T>(e: PoisonError<T>) -> anyhow::Error {
+    anyhow::anyhow!("Lock error: {}", e)
+}
+
+/// 串口管理器：三类端口的注册表 + 能力开关 + 上次连接参数。
+///
+/// 句柄类型与读写拆分见 `ports_real::SerialPortHandle`、`ports_sim::SimPortHandle`、
+/// `tty_sim::TtySimPortHandle`。
+pub struct SerialManager {
+    /// 真实串口句柄
+    ports: HashMap<String, ports_real::SerialPortHandle>,
+    /// 模拟串口句柄。`pub`：`commands::simulation` 需要遍历 key 批量关闭。
+    pub sim_ports: HashMap<String, ports_sim::SimPortHandle>,
+    /// 模拟终端（git bash pty）句柄。`pub`：`commands::tty_sim` 需要遍历 key 批量关闭。
+    pub tty_sim_ports: HashMap<String, tty_sim::TtySimPortHandle>,
+    /// 是否启用模拟模式（SIM:Loopback）
+    simulate: bool,
+    /// 是否启用模拟终端（git bash pty）
     pub gitbash_sim: bool,
-    /// Tauri AppHandle，用于事件推送
+    /// Tauri AppHandle：事件推送与日志落盘的唯一入口
     app_handle: Option<AppHandle>,
     /// 上次成功连接的参数，用于自动重连
     last_params: HashMap<String, OpenPortArgs>,
@@ -436,596 +153,81 @@ impl SerialManager {
         self.simulate = on;
     }
 
-    /// 启用/禁用模拟终端（git bash pty，issue #11）。
+    /// 启用/禁用模拟终端（git bash pty）。
     /// 仅 debug 构建可用——命令层（commands/tty_sim.rs）已在 release 拒绝。
     pub fn set_gitbash_sim(&mut self, on: bool) {
         self.gitbash_sim = on;
     }
 
-    /// 枚举系统可用串口
-    pub fn list_ports(&self) -> anyhow::Result<Vec<PortInfo>> {
-        let mut result: Vec<PortInfo> = serialport::available_ports()?
-            .into_iter()
-            .map(|p| {
-                // USB 口从 UsbPortInfo 提取厂商/产品名；其它类型无此信息。
-                let (port_type, manufacturer, product) = match p.port_type {
-                    serialport::SerialPortType::UsbPort(info) => {
-                        ("real".to_string(), info.manufacturer, info.product)
-                    }
-                    serialport::SerialPortType::PciPort => ("real".to_string(), None, None),
-                    serialport::SerialPortType::BluetoothPort => ("real".to_string(), None, None),
-                    serialport::SerialPortType::Unknown => ("real".to_string(), None, None),
-                };
-                PortInfo {
-                    id: p.port_name.clone(),
-                    name: p.port_name,
-                    port_type,
-                    manufacturer,
-                    product,
-                }
-            })
-            .collect();
-
-        if self.simulate {
-            result.push(PortInfo {
-                id: "SIM:Loopback".to_string(),
-                name: "SIM:Loopback (模拟串口)".to_string(),
-                port_type: "sim".to_string(),
-                manufacturer: None,
-                product: None,
-            });
-        }
-
-        if self.gitbash_sim {
-            result.push(PortInfo {
-                id: "GIT:BASH".to_string(),
-                name: "GIT:BASH (git bash 模拟终端)".to_string(),
-                port_type: "sim".to_string(),
-                manufacturer: None,
-                product: None,
-            });
-        }
-
-        Ok(result)
-    }
-
-    /// 打开串口（自动判断真实/模拟）
+    /// 打开串口（按 `PortKind` 分派；虚拟端口先过能力门控）。
+    ///
+    /// 锁内执行：不枚举端口、不 join 读线程（两者都是阻塞操作）。需要这两种操作的
+    /// 完整打开流程见 `open_blocking`。
     pub fn open_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        if args.port_id.starts_with("GIT:") {
-            self.open_tty_sim_port(args)
-        } else if args.port_id.starts_with("SIM:") {
-            self.open_sim_port(args)
-        } else {
-            self.open_real_port(args)
+        let kind = PortKind::of(&args.port_id);
+        check_virtual_enabled(kind, self.simulate, self.gitbash_sim)?;
+        match kind {
+            PortKind::Real => ports_real::open(self, args),
+            PortKind::Sim => ports_sim::open(self, args),
+            PortKind::Tty => ports_tty::open(self, args),
         }
     }
 
-    /// 打开真实串口
-    fn open_real_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        let app_handle = self
-            .app_handle
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
-            .clone();
-
-        // 陈旧句柄守卫：若已有存活句柄则干净报错（避免 insert 泄漏游离读取线程）；
-        // 若仅有死线程的陈旧句柄则移除之，释放 OS 端口，重开不再 "access denied"。
-        // 热插拔（issue）：USB 拔出后读线程可能因空闲而永不报错（read 一直
-        // timeout），running 停在 true——此时若端口已从系统枚举消失，说明设备
-        // 已不在，句柄是幽灵活尸。继续报 "already open" 会让用户重插后永远开
-        // 不了（只能重启应用）。交叉核对系统枚举：设备已消失 → 当作陈旧句柄
-        // 回收而非报错；设备仍在系统里 → 才是真正的 "already open"。
-        let stale_alive = self
-            .ports
-            .get(&args.port_id)
-            .map(|h| h.running.load(Ordering::Relaxed))
-            .unwrap_or(false);
-        if stale_alive {
-            let device_still_present = self
-                .list_ports()?
-                .iter()
-                .any(|p| p.id == args.port_id);
-            if device_still_present {
-                return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
-            }
-            log::warn!(
-                "Port {} stale handle detected (device vanished from enumeration); recycling",
-                args.port_id
-            );
-            // 回收幽灵活尸：停线程（读线程会在下一次 read timeout（≤100ms）后
-            // 退出），join 确保 OS 端口句柄在该线程持有的 Arc 被释放后才重开——
-            // 否则旧读线程仍持句柄，紧接的 open() 会 "access denied"（串口 crate
-            // 以 dwShareMode=0 打开，同一 COM 不能二次打开）。join 受 read 超时
-            // 上界约束（≤100ms），且仅在此罕见的热插拔回收路径发生。
-            if let Some(mut h) = self.ports.remove(&args.port_id) {
-                h.running.store(false, Ordering::Relaxed);
-                if let Some(t) = h.read_thread.take() {
-                    let _ = t.join();
-                }
-            }
-        } else {
-            self.ports.remove(&args.port_id);
-        }
-
-        let mut port = serialport::new(&args.port_id, args.baud_rate)
-            .data_bits(parse_data_bits(args.data_bits))
-            .parity(parse_parity(&args.parity))
-            .stop_bits(parse_stop_bits(&args.stop_bits))
-            .flow_control(parse_flow_control(&args.handshake))
-            .timeout(Duration::from_millis(100))
-            .open()?;
-
-        // 设置 DTR/RTS：必须在 try_clone 之前、在 Arc<Mutex> 包装之前设置
-        // （open() 返回的是 Box<dyn SerialPort>，需可变引用）。
-        // DTR/RTS 是设备级状态、两个句柄共享，设一次即可。
-        port.write_data_terminal_ready(args.dtr)?;
-        port.write_request_to_send(args.rts)?;
-
-        // issue #6-10（方案1）：拆分读写句柄——读线程独占读句柄、发送路径独占
-        // 写句柄。try_clone() 在 Windows 上 = DuplicateHandle（唯一拆分途径，
-        // 不能对同一 COM 口二次 CreateFile）；DCB/COMMTIMEOUTS 是设备级状态，
-        // 两个句柄共享。原句柄作为读句柄，clone 出的作为写句柄。
-        let write_port = port.try_clone()?;
-        let read_port = port;
-
-        let read_port_arc = Arc::new(Mutex::new(read_port));
-        let write_port_arc = Arc::new(Mutex::new(write_port));
-        let running = Arc::new(AtomicBool::new(true));
-
-        let port_clone = Arc::clone(&read_port_arc);
-        let running_clone = Arc::clone(&running);
-        let thread_port_id = args.port_id.clone();
-        let app_handle_clone = app_handle.clone();
-
-        let read_thread = thread::spawn(move || {
-            // 读取循环单次读取的结果分类：把"读到数据" / "读超时" / "真实错误"分离，
-            // 以便在释放端口锁之后再派发事件，且超时路径不再跳过引脚轮询。
-            enum ReadOutcome {
-                Data(usize),
-                Timeout,
-                Error(std::io::Error),
-            }
-
-            let port_id = thread_port_id;
-            let mut buffer = [0u8; 1024];
-            let mut abnormal = false;
-
-            while running_clone.load(Ordering::Relaxed) {
-                // 仅在 read() 调用期间持有端口锁，读完立即释放。
-                // emit_data_event 会派发 Tauri 事件并同步写日志落盘，不能在持锁期间执行，
-                // 否则会阻塞 send_data / 流控设置，高波特率下还可能撑爆 OS 接收缓冲区。
-                let outcome = match port_clone.lock() {
-                    Ok(mut p) => match p.read(&mut buffer) {
-                        Ok(n) => ReadOutcome::Data(n),
-                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ReadOutcome::Timeout,
-                        Err(e) => ReadOutcome::Error(e),
-                    },
-                    Err(e) => {
-                        log::error!("Serial port lock error: {}", e);
-                        abnormal = true;
-                        break;
-                    }
-                };
-                // 端口 MutexGuard 在此处已释放
-
-                match outcome {
-                    ReadOutcome::Data(n) if n > 0 => {
-                        emit_data_event(&app_handle_clone, &port_id, "RX", &buffer[..n], false);
-                    }
-                    ReadOutcome::Data(_) | ReadOutcome::Timeout => {}
-                    ReadOutcome::Error(e) => {
-                        log::warn!("Serial read error on {}: {}", port_id, e);
-                        let status_event = SerialStatusEvent {
-                            port_id: port_id.clone(),
-                            status: "error".to_string(),
-                        };
-                        let _ = app_handle_clone.emit("serial:status", status_event);
-                        abnormal = true;
-                        break;
-                    }
-                }
-            }
-
-            // 读取线程退出时发送断开事件
-            let status_event = SerialStatusEvent {
-                port_id: port_id.clone(),
-                status: "disconnected".to_string(),
-            };
-            let _ = app_handle_clone.emit("serial:status", status_event);
-
-            // 异常退出时发送一次重连提示，避免每次轮询都产生噪音
-            if abnormal {
-                log::warn!("Serial port {} read thread exited abnormally (unplanned disconnect)", port_id);
-                let hint = SerialReconnectHintEvent {
-                    port_name: port_id,
-                };
-                let _ = app_handle_clone.emit("serial:reconnect_hint", hint);
-            }
-        });
-
-        let handle = SerialPortHandle {
-            read_port: read_port_arc,
-            write_port: write_port_arc,
-            running,
-            read_thread: Some(read_thread),
-        };
-
-        // 记录连接参数，用于自动重连
-        self.last_params.insert(args.port_id.clone(), args.clone());
-
-        // 发送连接成功事件
-        let status_event = SerialStatusEvent {
-            port_id: args.port_id.clone(),
-            status: "connected".to_string(),
-        };
-        let _ = app_handle.emit("serial:status", status_event);
-
-        let port_id = args.port_id.clone();
-        self.ports.insert(args.port_id, handle);
-        log::info!("Serial port opened: {}", port_id);
-        Ok(())
-    }
-
-    /// 打开模拟串口
-    fn open_sim_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        let app_handle = self
-            .app_handle
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
-            .clone();
-
-        // 陈旧句柄守卫（与 open_real_port 同形）：存活句柄报错，死线程句柄移除。
-        let stale_alive = self
-            .sim_ports
-            .get(&args.port_id)
-            .map(|h| h.running.load(Ordering::Relaxed))
-            .unwrap_or(false);
-        if stale_alive {
-            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
-        }
-        self.sim_ports.remove(&args.port_id);
-
-        let (tx, rx) = mpsc::channel::<SimMessage>();
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = Arc::clone(&running);
-        let port_id = args.port_id.clone();
-        let app_handle_clone = app_handle.clone();
-
-        let read_thread = thread::spawn(move || {
-            // 周期输出状态：默认 2/s（500ms，与旧心跳行为一致）；TX 纯数字可改。
-            let mut rate_per_sec: u32 = 2;
-            let mut next_send_at = std::time::Instant::now();
-            let mut line_seq: u64 = 0;
-            loop {
-                if !running_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                match rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(SimMessage::Echo { data, is_hex }) => {
-                        let echo_data = if is_hex {
-                            format!("[HEX] Received: {}\r\n", data)
-                        } else {
-                            format!("Received: {}\r\n", data)
-                        };
-                        emit_data_event(
-                            &app_handle_clone,
-                            &port_id,
-                            "RX",
-                            echo_data.as_bytes(),
-                            false,
-                        );
-                    }
-                    Ok(SimMessage::SetRate { per_sec }) => {
-                        // 频率命令：切换周期输出速率并重置节拍（首行立即发出，
-                        // 便于观察生效）。0 = 停止周期输出（只保留 Echo）。
-                        rate_per_sec = per_sec.min(MAX_SIM_RATE);
-                        next_send_at = std::time::Instant::now();
-                        log::debug!(
-                            "SIM:Loopback periodic rate set to {}/s",
-                            rate_per_sec
-                        );
-                    }
-                    Ok(SimMessage::Stop) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // 周期输出（旧"心跳"）：按 rate_per_sec 用积分器补发。
-                        // 100ms 循环节拍下高频率（如 10000/s）每循环应发 1000 行，
-                        // 积分器保证平均频率精确且不被节拍粒度限制。
-                        if rate_per_sec > 0 {
-                            let interval = std::time::Duration::from_micros(
-                                1_000_000 / rate_per_sec as u64,
-                            );
-                            let now = std::time::Instant::now();
-                            let (due, next) =
-                                sim_due_lines(now, next_send_at, interval, MAX_SIM_BURST);
-                            next_send_at = next;
-                            for _ in 0..due {
-                                line_seq += 1;
-                                let heartbeat =
-                                    format!("[SIM] Heartbeat #{}\r\n", line_seq);
-                                emit_data_event(
-                                    &app_handle_clone,
-                                    &port_id,
-                                    "RX",
-                                    heartbeat.as_bytes(),
-                                    false,
-                                );
-                            }
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-
-            // 读取线程退出时发送断开事件（与真实串口线程对齐的 parity 修复）
-            let _ = app_handle_clone.emit(
-                "serial:status",
-                SerialStatusEvent {
-                    port_id: port_id.clone(),
-                    status: "disconnected".to_string(),
-                },
-            );
-        });
-
-        let handle = SimPortHandle {
-            running,
-            tx,
-            read_thread: Some(read_thread),
-        };
-
-        // 发送连接成功事件
-        let status_event = SerialStatusEvent {
-            port_id: args.port_id.clone(),
-            status: "connected".to_string(),
-        };
-        let _ = app_handle.emit("serial:status", status_event);
-
-        self.sim_ports.insert(args.port_id, handle);
-        log::info!("Sim port opened: SIM:Loopback");
-        Ok(())
-    }
-
-    /// 打开模拟终端端口（git bash pty，issue #11）。
-    /// 仅 debug 构建可用（命令层已在 release 拒绝）；spawn_bash 失败（git bash
-    /// 未安装等）时干净报错，不在 tty_sim_ports 留下游离句柄。
-    fn open_tty_sim_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
-        let app_handle = self
-            .app_handle
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?
-            .clone();
-
-        // 陈旧句柄守卫（与 open_sim_port 同形）：存活句柄报错，死线程句柄移除。
-        let stale_alive = self
-            .tty_sim_ports
-            .get(&args.port_id)
-            .map(|h| h.running.load(Ordering::Relaxed))
-            .unwrap_or(false);
-        if stale_alive {
-            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
-        }
-        self.tty_sim_ports.remove(&args.port_id);
-
-        // issue #11：把前端 xterm 当前尺寸传给 pty（否则固定 80×24，vim/top 错乱）。
-        let handle = crate::serial::tty_sim::spawn_bash(&app_handle, &args.port_id, args.cols, args.rows)?;
-
-        // 发送连接成功事件
-        let status_event = SerialStatusEvent {
-            port_id: args.port_id.clone(),
-            status: "connected".to_string(),
-        };
-        let _ = app_handle.emit("serial:status", status_event);
-
-        self.tty_sim_ports.insert(args.port_id, handle);
-        log::info!("TTY sim port opened: GIT:BASH");
-        Ok(())
-    }
-
-    /// 关闭串口（真实或模拟）。
-    /// 停止读取线程并返回其 JoinHandle（若有），由调用方在释放 serial_manager
-    /// 锁之后 join——join 最长可阻塞约 100ms（读取超时），不能在持锁期间进行，
-    /// 否则会卡住所有其他串口命令。
+    /// 关闭串口（真实/模拟/模拟终端）。
+    ///
+    /// 锁内只停止读取线程并取出 JoinHandle；调用方必须在释放全局锁之后再 join
+    /// （真实串口读线程最长约 100ms 退出，模拟终端的 pty 读线程要等 ConPTY 关闭，
+    /// 持锁 join 会卡住所有其他串口命令）。
     pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<thread::JoinHandle<()>>> {
-        let join_handle = if port_id.starts_with("GIT:") {
-            // 模拟终端：kill bash + drop master（关闭 ConPTY → 读线程 EOF 退出）
-            if let Some(mut handle) = self.tty_sim_ports.remove(port_id) {
-                handle.running.store(false, Ordering::Relaxed);
-                handle.kill();
-                // issue #11（断线卡死修复）：drop master → 关闭 ConPTY
-                // （ClosePseudoConsole）→ 输出管道写端关闭 → 读线程 read() 解除
-                // 阻塞退出——否则读线程永久阻塞在 ConPTY 读上，close_serial_port
-                // 的 join 永不返回（同步命令在主线程执行 → 应用卡死）。
-                handle.master = None;
-                log::info!("TTY sim port closed: {}", port_id);
-                handle.read_thread.take()
-            } else {
-                None
-            }
-        } else if port_id.starts_with("SIM:") {
-            if let Some(mut handle) = self.sim_ports.remove(port_id) {
-                handle.running.store(false, Ordering::Relaxed);
-                let _ = handle.tx.send(SimMessage::Stop);
-                log::info!("Sim port closed: {}", port_id);
-                handle.read_thread.take()
-            } else {
-                None
-            }
-        } else if let Some(mut handle) = self.ports.remove(port_id) {
-            handle.running.store(false, Ordering::Relaxed);
-            log::info!("Serial port closed: {}", port_id);
-            handle.read_thread.take()
-        } else {
-            None
-        };
-        Ok(join_handle)
+        Ok(match PortKind::of(port_id) {
+            PortKind::Real => ports_real::close(self, port_id),
+            PortKind::Sim => ports_sim::close(self, port_id),
+            PortKind::Tty => ports_tty::close(self, port_id),
+        })
     }
 
-    /// 尝试重新连接指定串口。
-    /// 先关闭残留句柄并 join 读取线程，再校验系统端口列表中存在该端口，最后用上次成功的参数打开。
-    /// 注意：此方法会阻塞直到旧读取线程退出（最长约 100ms），不能在持有
-    /// serial_manager 锁时调用——调用方（commands/serial.rs）已在锁外 join。
-    pub fn attempt_reconnect(&mut self, port_id: &str) -> anyhow::Result<()> {
-        if port_id.starts_with("SIM:") || port_id.starts_with("GIT:") {
-            return Err(anyhow::anyhow!("Cannot reconnect simulation port"));
-        }
-
-        // 关闭残留句柄并 join 读取线程，确保旧端口句柄已释放。
-        // 不 join 就 open_port 会因端口被旧线程占用而失败。
-        if self.ports.contains_key(port_id) {
-            if let Some(thread) = self.close_port(port_id)? {
-                let _ = thread.join();
-            }
-        }
-
-        // 确认端口重新出现在系统列表中
-        let available = self.list_ports()?;
-        if !available.iter().any(|p| p.id == port_id) {
-            return Err(anyhow::anyhow!("Port {} is not available", port_id));
-        }
-
-        let params = self
-            .last_params
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("No previous connection params for {}", port_id))?
-            .clone();
-
-        self.open_port(params)
-    }
-
-    /// 向串口发送数据。
+    /// 向串口发送数据，返回**实际送达端口**的字节。
     ///
-    /// 真实串口路径（issue #6-10）：只用**写句柄**（读写句柄已 try_clone 拆分，
-    /// 不再与 RX 读线程争锁）；**摘除热路径 `flush()`**（FlushFileBuffers 无超时、
-    /// 受流控约束，是对端忙时无界阻塞的根因）；写入带总期限（`WRITE_TOTAL_DEADLINE`）
-    /// 兜底，避免长 payload 以 ~100ms/次无限循环。
+    /// 返回值 `TxOutcome` 是 TX 日志与前端字节数的唯一来源：TTY 的行结束符归一、
+    /// SIM 频率命令被吞、行结束符追加都只发生一次，日志不再按入参重算（否则
+    /// 会出现「日志记 7 字节、线上 6 字节」这类不一致）。
     ///
-    /// 注意：本方法在**调用方持有的 serial_manager 全局锁**内执行真实写。
-    /// commands/serial.rs 的 `send_serial_data` 为不拖死端口列表轮询/其它端口
-    /// 命令，改用 `get_write_handle` + `write_all_with_deadline` 的**两段式**
-    /// （锁内取句柄 → 锁外写）；此处保留完整 API 供测试与复用。
+    /// 注意：本方法在**调用方持有的全局锁**内执行真实写。`commands/serial.rs` 的
+    /// `send_serial_data` 对真实串口改用 `get_write_handle` + `write_all_with_deadline`
+    /// 的两段式（锁内取句柄 → 锁外写），以免慢发送拖死端口轮询与其它端口命令。
     pub fn send_data(
         &self,
         port_id: &str,
         data: &str,
         is_hex: bool,
         append_line_ending: &str,
-    ) -> anyhow::Result<usize> {
-        // 模拟终端（git bash pty）：直接写 pty stdin（writer 锁内完成，非阻塞）。
-        if port_id.starts_with("GIT:") {
-            let handle = self
-                .tty_sim_ports
-                .get(port_id)
-                .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
-            // issue #11：行结束符归一——pty 行规程（ICRNL）把 `\r` 转成 `\n`，
-            // `\r\n` 会变成两个换行（快捷发送后多执行一行空命令），统一为单个 `\r`。
-            let bytes = build_tx_bytes(data, is_hex, normalize_tty_line_ending(append_line_ending))?;
-            let n = handle.write(&bytes)?;
-            return Ok(n);
+    ) -> anyhow::Result<TxOutcome> {
+        match PortKind::of(port_id) {
+            PortKind::Real => ports_real::send(self, port_id, data, is_hex, append_line_ending),
+            PortKind::Sim => ports_sim::send(self, port_id, data, is_hex, append_line_ending),
+            PortKind::Tty => ports_tty::send(self, port_id, data, is_hex, append_line_ending),
         }
-        // 模拟串口：通过 channel 发送，由读取线程回显。
-        // issue #14：**文本模式且 trim 后为纯数字**的 TX 视为频率命令——切换
-        // 周期输出到每秒 N 次（0 = 停止），便于验证高吞吐；命令本身不回显
-        // （避免干扰行数统计）。其它数据（HEX 模式/非数字）保持回显。
-        if port_id.starts_with("SIM:") {
-            let handle = self
-                .sim_ports
-                .get(port_id)
-                .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
-            // 与真实串口路径共用 build_tx_bytes，使返回字节数 == 真实路径 == 日志。
-            let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
-            let msg = match parse_sim_rate_command(data, is_hex) {
-                Some(rate) => SimMessage::SetRate { per_sec: rate },
-                None => SimMessage::Echo {
-                    data: data.to_string(),
-                    is_hex,
-                },
-            };
-            handle
-                .tx
-                .send(msg)
-                .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
-            return Ok(bytes.len());
-        }
-
-        // 真实串口：只用写句柄写入（读写句柄分离，issue #6-10）
-        let handle = self
-            .ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-
-        let bytes = build_tx_bytes(data, is_hex, append_line_ending)?;
-
-        let mut port = handle
-            .write_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        // 带总写入期限的 write_all（摘除无界 flush，issue #6-10 方案2）
-        write_all_with_deadline(port_id, &mut **port, &bytes, WRITE_TOTAL_DEADLINE)?;
-
-        log::debug!("Sent {} bytes to {}", bytes.len(), port_id);
-        Ok(bytes.len())
     }
 
-    /// 取指定端口的**写句柄**克隆（issue #6-10 方案2 两段式的第一段）。
+    /// 向串口写入原始字节（不做 HEX 解析、不附加行结束符）。用于文件发送。
+    /// 真实串口路径与 `send_data` 同款：只用写句柄 + 去 flush + 总写入期限。
+    pub fn write_raw(&self, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
+        match PortKind::of(port_id) {
+            PortKind::Real => ports_real::write_raw(self, port_id, bytes),
+            PortKind::Sim => ports_sim::write_raw(self, port_id, bytes),
+            PortKind::Tty => ports_tty::write_raw(self, port_id, bytes),
+        }
+    }
+
+    /// 取指定端口的**写句柄**克隆（两段式发送的第一段）。
     ///
-    /// 必须在持有 serial_manager 全局锁时调用；返回后调用方应**立即释放全局锁**，
-    /// 再只持 per-port 写锁完成 `write_all_with_deadline`——写串口不占用全局锁，
-    /// 端口列表轮询/其它端口命令不被慢发送拖死。
+    /// 必须在持有全局锁时调用；返回后调用方应**立即释放全局锁**，再只持 per-port
+    /// 写锁完成 `write_all_with_deadline`。
     pub fn get_write_handle(
         &self,
         port_id: &str,
     ) -> anyhow::Result<Arc<Mutex<Box<dyn serialport::SerialPort>>>> {
-        let handle = self
-            .ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        Ok(Arc::clone(&handle.write_port))
-    }
-
-    /// 向串口写入原始字节（不做 HEX 解析、不附加行结束符）。用于文件发送。
-    /// SIM 端口将字节序列转为 HEX 字符串回显，便于无硬件测试。
-    /// 真实路径与 `send_data` 同款：只用写句柄 + 去 flush + 总写入期限。
-    /// 注意：真实路径在调用方持有的全局锁内写，commands/serial.rs 的
-    /// `send_file` 已改用 `get_write_handle` 两段式（锁外写）。
-    pub fn write_raw(&self, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
-        // 模拟终端（git bash pty）：直接写 pty stdin（原始字节，不做 HEX 解析）
-        if port_id.starts_with("GIT:") {
-            let handle = self
-                .tty_sim_ports
-                .get(port_id)
-                .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
-            let n = handle.write(bytes)?;
-            return Ok(n);
-        }
-        if port_id.starts_with("SIM:") {
-            let handle = self
-                .sim_ports
-                .get(port_id)
-                .ok_or_else(|| anyhow::anyhow!("Sim port not found: {}", port_id))?;
-            let hex_str = bytes
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            handle
-                .tx
-                .send(SimMessage::Echo {
-                    data: hex_str,
-                    is_hex: true,
-                })
-                .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
-            return Ok(bytes.len());
-        }
-
-        let handle = self
-            .ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        let mut port = handle
-            .write_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        write_all_with_deadline(port_id, &mut **port, bytes, WRITE_TOTAL_DEADLINE)?;
-        Ok(bytes.len())
+        ports_real::write_handle(self, port_id)
     }
 
     /// 修改串口参数（完整）
@@ -1038,71 +240,14 @@ impl SerialManager {
         stop_bits: &str,
         handshake: &str,
     ) -> anyhow::Result<()> {
-        let handle = self
-            .ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        // DCB/COMMTIMEOUTS 是设备级状态、两个句柄共享。改参是设备级操作：
-        // 同时锁住读写句柄，避免改参瞬间另一句柄正在 I/O（读线程单次
-        // read 最长 ~100ms，此锁最长阻塞 ~100ms，可接受）；参数只在写句柄
-        // 上应用（读句柄从不调用 set_*，其缓存的陈旧设置不会推给驱动）。
-        let _read_guard = handle
-            .read_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let mut port = handle
-            .write_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        port.set_baud_rate(baud_rate)?;
-        // 无条件应用帧格式与流控：仅在非默认值时才设置会导致无法从
-        // 7E1 / 硬件流控等配置改回 8N1 / None 默认值。
-        port.set_data_bits(parse_data_bits(data_bits))?;
-        port.set_parity(parse_parity(parity))?;
-        port.set_stop_bits(parse_stop_bits(stop_bits))?;
-        port.set_flow_control(parse_flow_control(handshake))?;
-        drop(port);
-
-        // 同步更新重连参数缓存
-        if let Some(params) = self.last_params.get_mut(port_id) {
-            params.baud_rate = baud_rate;
-            params.data_bits = data_bits;
-            params.parity = parity.to_string();
-            params.stop_bits = stop_bits.to_string();
-            params.handshake = handshake.to_string();
-        }
-
-        log::info!(
-            "Params set for {}: baud={}, data_bits={}, parity={}, stop_bits={}, handshake={}",
-            port_id,
-            baud_rate,
-            data_bits,
-            parity,
-            stop_bits,
-            handshake
-        );
-        Ok(())
+        ports_real::set_params(
+            self, port_id, baud_rate, data_bits, parity, stop_bits, handshake,
+        )
     }
 
     /// 设置流控（DTR/RTS）
     pub fn set_flow_control(&self, port_id: &str, dtr: bool, rts: bool) -> anyhow::Result<()> {
-        let handle = self
-            .ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        // DTR/RTS 是设备级状态、两句柄共享：同时锁读写句柄避免改参瞬间
-        // 另一句柄正在 I/O，DTR/RTS 在写句柄上应用。
-        let _read_guard = handle
-            .read_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let mut port = handle
-            .write_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        port.write_data_terminal_ready(dtr)?;
-        port.write_request_to_send(rts)?;
-        Ok(())
+        ports_real::set_flow_control(self, port_id, dtr, rts)
     }
 
     /// 获取指定端口上次成功连接的参数（用于外部工具执行后重开端口）。
@@ -1110,15 +255,34 @@ impl SerialManager {
         self.last_params.get(port_id).cloned()
     }
 
-    /// 调整模拟终端（git bash pty）的尺寸（issue #11）。
-    /// 前端 TTY 视图（xterm.js）随容器 fit() 后调用，全屏应用据此重绘。
+    /// 调整模拟终端（git bash pty）的尺寸。
     pub fn resize_tty_sim(&self, port_id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
-        let handle = self
-            .tty_sim_ports
-            .get(port_id)
-            .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
-        handle.resize(cols, rows)
+        ports_tty::resize(self, port_id, cols, rows)
     }
+
+    /// 把已启用的虚拟端口条目追加到系统端口列表之后。
+    fn append_virtual_ports(&self, out: &mut Vec<PortInfo>) {
+        if self.simulate {
+            out.push(ports_sim::virtual_port_info());
+        }
+        if self.gitbash_sim {
+            out.push(ports_tty::virtual_port_info());
+        }
+    }
+}
+
+/// 枚举可用端口（真实 + 已启用的虚拟端口），供命令层调用。
+///
+/// 系统枚举是阻塞 IO：在**锁外**执行，锁内只读能力开关并拼接虚拟条目——否则
+/// 前端每 3s 一次的轮询会在持有全局串口锁期间阻塞发送/关闭命令。调用方必须从
+/// 阻塞线程池调用（同步命令会在事件循环主线程上执行，把 UI 卡住）。
+pub fn list_ports_blocking(manager: &Mutex<SerialManager>) -> anyhow::Result<Vec<PortInfo>> {
+    let mut ports = ports_real::enumerate_system_ports()?;
+    manager
+        .lock()
+        .map_err(lock_error)?
+        .append_virtual_ports(&mut ports);
+    Ok(ports)
 }
 
 impl Drop for SerialManager {
@@ -1126,15 +290,14 @@ impl Drop for SerialManager {
         // 尽最大努力通知所有读取线程退出（应用退出时）。
         // 只发信号、不 join——进程退出会回收线程，join 可能阻塞约 100ms。
         for h in self.ports.values() {
-            h.running.store(false, Ordering::Relaxed);
+            h.request_stop();
         }
         for h in self.sim_ports.values() {
-            h.running.store(false, Ordering::Relaxed);
-            let _ = h.tx.send(SimMessage::Stop);
+            h.stop();
         }
         // 模拟终端：kill bash 子进程，让读线程在 pty 关闭后退出（进程退出回收线程）
         for h in self.tty_sim_ports.values_mut() {
-            h.running.store(false, Ordering::Relaxed);
+            h.running.store(false, std::sync::atomic::Ordering::Relaxed);
             h.kill();
         }
     }
@@ -1142,275 +305,52 @@ impl Drop for SerialManager {
 
 #[cfg(test)]
 mod tests {
-    // 显式导入而非 `use super::*`：通配导入会把整个 serial 模块（含 serialport FFI
-    // 路径）拉进 *测试* 二进制的链接闭包，导致 Windows 上 cargo test 的 harness
-    // 因缺少应用清单而 0xc0000139 加载失败。这里仅按需导入：纯函数测试在 Windows
-    // 也能跑；引用 serialport 类型 / 管理器的测试所需导入随测试本身仅在非 Windows 启用。
-    use super::{
-        build_tx_bytes, normalize_tty_line_ending, parse_hex_string, parse_sim_rate_command,
-        sim_due_lines, write_all_with_deadline, MAX_SIM_RATE,
-    };
-    use std::time::Duration;
+    // 显式导入而非 `use super::*`：通配导入会把整个串口模块（含 serialport FFI
+    // 路径）拉进 *测试* 二进制的链接闭包，Windows 上 harness 因缺少应用清单而以
+    // 0xc0000139 加载失败。引用 serialport 类型 / `SerialManager` 的测试因此只在
+    // 非 Windows 运行（CI 的 Linux/macOS 覆盖）；纯函数测试在所有平台运行。
+    use super::{check_virtual_enabled, PortKind};
+
+    // ---------- PortKind（纯函数，所有平台）----------
+
+    #[test]
+    fn port_kind_is_decided_by_id_prefix() {
+        assert_eq!(PortKind::of("COM3"), PortKind::Real);
+        assert_eq!(PortKind::of("/dev/ttyUSB0"), PortKind::Real);
+        assert_eq!(PortKind::of("SIM:Loopback"), PortKind::Sim);
+        assert_eq!(PortKind::of("GIT:BASH"), PortKind::Tty);
+        // 前缀必须从头匹配：包含 "SIM:" 的真实端口名不算虚拟端口
+        assert_eq!(PortKind::of("XSIM:Loopback"), PortKind::Real);
+    }
+
+    // ---------- 虚拟端口能力门控（纯函数，所有平台）----------
+
+    #[test]
+    fn virtual_port_gate_requires_capability_flag() {
+        // 真实串口不受开关影响
+        assert!(check_virtual_enabled(PortKind::Real, false, false).is_ok());
+        // 开关开启才放行
+        assert!(check_virtual_enabled(PortKind::Sim, true, false).is_ok());
+        assert!(check_virtual_enabled(PortKind::Tty, false, true).is_ok());
+        // 开关关闭一律报错（release 构建下两个开关恒为 false）
+        let sim_err = check_virtual_enabled(PortKind::Sim, false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(sim_err.contains("Simulation"), "{sim_err}");
+        let tty_err = check_virtual_enabled(PortKind::Tty, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(tty_err.contains("Git Bash"), "{tty_err}");
+    }
+
+    // ---------- 管理器（引用 serialport 类型，仅非 Windows）----------
+
     #[cfg(not(target_os = "windows"))]
-    use super::{
-        parse_data_bits, parse_flow_control, parse_parity, parse_stop_bits, SerialManager,
-    };
+    use super::{list_ports_blocking, SerialManager};
     #[cfg(not(target_os = "windows"))]
     use crate::commands::OpenPortArgs;
-
-    // ---------- parse_hex_string ----------
-
-    #[test]
-    fn parse_hex_accepts_space_separated_compact_and_mixed() {
-        assert_eq!(parse_hex_string("48 65 6C").unwrap(), vec![0x48, 0x65, 0x6C]);
-        assert_eq!(parse_hex_string("48656c").unwrap(), vec![0x48, 0x65, 0x6C]);
-        assert_eq!(parse_hex_string("48 656C").unwrap(), vec![0x48, 0x65, 0x6C]);
-    }
-
-    #[test]
-    fn parse_hex_accepts_lowercase_and_boundary_values() {
-        assert_eq!(parse_hex_string("aF").unwrap(), vec![0xAF]);
-        assert_eq!(parse_hex_string("FF 00").unwrap(), vec![255, 0]);
-    }
-
-    #[test]
-    fn parse_hex_empty_and_whitespace_only_yield_empty() {
-        assert_eq!(parse_hex_string("").unwrap(), Vec::<u8>::new());
-        assert_eq!(parse_hex_string("  ").unwrap(), Vec::<u8>::new());
-    }
-
-    #[test]
-    fn parse_hex_rejects_odd_length() {
-        assert!(parse_hex_string("486").is_err());
-    }
-
-    #[test]
-    fn parse_hex_rejects_invalid_nibbles() {
-        assert!(parse_hex_string("4Z").is_err());
-    }
-
-    #[test]
-    fn parse_hex_error_reports_original_index_of_bad_pair() {
-        // "AA ZZ": 空格在原始索引 2，坏对 "ZZ" 从原始索引 3 开始（证明位置修复）。
-        let err = parse_hex_string("AA ZZ").unwrap_err().to_string();
-        assert!(err.contains('3'), "error should contain original index 3: {err}");
-    }
-
-    // ---------- build_tx_bytes ----------
-
-    #[test]
-    fn build_tx_bytes_text_appends_line_endings() {
-        assert_eq!(build_tx_bytes("hi", false, "\\r\\n").unwrap(), b"hi\r\n");
-        assert_eq!(build_tx_bytes("hi", false, "\\r").unwrap(), b"hi\r");
-        assert_eq!(build_tx_bytes("hi", false, "\\n").unwrap(), b"hi\n");
-        assert_eq!(build_tx_bytes("hi", false, "None").unwrap(), b"hi");
-        assert_eq!(build_tx_bytes("", false, "None").unwrap(), b"");
-    }
-
-    #[test]
-    fn build_tx_bytes_hex_ignores_line_ending_and_validates() {
-        assert_eq!(build_tx_bytes("48 65", true, "\\r\\n").unwrap(), vec![0x48, 0x65]);
-        assert!(build_tx_bytes("4", true, "None").is_err());
-    }
-
-    // ---------- normalize_tty_line_ending（issue #11：快捷发送后多执行一行空命令）----------
-
-    #[test]
-    fn tty_line_ending_crlf_normalizes_to_single_cr() {
-        // pty 行规程（ICRNL）把 \r 转成 \n：`\r\n` 会变成两个换行 → bash 多执行
-        // 一行空命令。TTY 发送 `\r\n` 必须归一为单个 `\r`（真实终端 Enter）。
-        assert_eq!(normalize_tty_line_ending("\\r\\n"), "\\r");
-        assert_eq!(normalize_tty_line_ending("\\r"), "\\r");
-        assert_eq!(normalize_tty_line_ending("\\n"), "\\n");
-        assert_eq!(normalize_tty_line_ending("None"), "None");
-    }
-
-    #[test]
-    fn tty_send_bytes_after_normalization_are_single_terminated() {
-        // 归一后的实际写入字节：`echo hi\r\n` → `echo hi\r`（一个回车，不再双换行）。
-        let bytes = build_tx_bytes("echo hi", false, normalize_tty_line_ending("\\r\\n")).unwrap();
-        assert_eq!(bytes, b"echo hi\r");
-        // `\n` 与 `None` 不受归一影响。
-        assert_eq!(
-            build_tx_bytes("echo hi", false, normalize_tty_line_ending("\\n")).unwrap(),
-            b"echo hi\n"
-        );
-        assert_eq!(
-            build_tx_bytes("echo hi", false, normalize_tty_line_ending("None")).unwrap(),
-            b"echo hi"
-        );
-    }
-
-    // ---------- write_all_with_deadline（纯 std mock，Windows 亦可运行）----------
-    //
-    // 这些测试只用 std::io::Write 的 mock writer，不触碰 serialport FFI，
-    // 因此不受 Windows 测试二进制缺应用清单（0xc0000139）的限制。
-
-    struct ZeroWriter;
-    impl std::io::Write for ZeroWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Ok(0)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// 模拟 WriteTotalTimeoutConstant 到期：WriteFile 超时返回 TimedOut。
-    struct AlwaysTimeoutWriter;
-    impl std::io::Write for AlwaysTimeoutWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// 每次调用至多写 max 字节的部分写 writer：模拟驱动缓冲不空时
-    /// WriteFile 返回部分字节计数的场景。
-    struct PartialWriter {
-        max: usize,
-        buf: Vec<u8>,
-    }
-    impl std::io::Write for PartialWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let n = buf.len().min(self.max);
-            self.buf.extend_from_slice(&buf[..n]);
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// 第一次 write 返回 Interrupted，之后正常写入。
-    struct InterruptedOnceWriter {
-        buf: Vec<u8>,
-        interrupted: bool,
-    }
-    impl std::io::Write for InterruptedOnceWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if !self.interrupted {
-                self.interrupted = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "interrupted",
-                ));
-            }
-            self.buf.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn write_all_with_deadline_writes_all_bytes_to_a_normal_writer() {
-        let mut buf = Vec::new();
-        write_all_with_deadline("test", &mut buf, b"hello", Duration::from_secs(1)).unwrap();
-        assert_eq!(buf, b"hello");
-    }
-
-    #[test]
-    fn write_all_with_deadline_handles_partial_writes() {
-        let mut w = PartialWriter {
-            max: 2,
-            buf: Vec::new(),
-        };
-        write_all_with_deadline("test", &mut w, b"abcdef", Duration::from_secs(1)).unwrap();
-        assert_eq!(w.buf, b"abcdef");
-    }
-
-    #[test]
-    fn write_all_with_deadline_errors_on_zero_byte_write() {
-        let mut w = ZeroWriter;
-        let err = write_all_with_deadline("test", &mut w, b"x", Duration::from_secs(1))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("returned 0 bytes"), "{err}");
-    }
-
-    #[test]
-    fn write_all_with_deadline_times_out_when_writes_never_progress() {
-        let mut w = AlwaysTimeoutWriter;
-        let err = write_all_with_deadline("test", &mut w, b"payload", Duration::from_millis(1))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("timed out"), "{err}");
-    }
-
-    #[test]
-    fn write_all_with_deadline_retries_interrupted_writes() {
-        let mut w = InterruptedOnceWriter {
-            buf: Vec::new(),
-            interrupted: false,
-        };
-        write_all_with_deadline("test", &mut w, b"abc", Duration::from_secs(1)).unwrap();
-        assert_eq!(w.buf, b"abc");
-    }
-
-    #[test]
-    fn write_all_with_deadline_empty_payload_is_a_noop() {
-        let mut w = ZeroWriter; // 即使 writer 恒返回 0，空 payload 也不该报错
-        write_all_with_deadline("test", &mut w, b"", Duration::from_secs(1)).unwrap();
-    }
-
-    // ---------- 参数映射（模块内私有函数）----------
-    // 这些测试引用 serialport 的枚举类型；为与下方管理器测试一致、并彻底避免在
-    // Windows 测试二进制中拉入 serialport FFI（见上方说明），同样仅在非 Windows 运行。
-
     #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn parse_data_bits_maps_values_and_defaults_to_eight() {
-        assert!(matches!(parse_data_bits(5), serialport::DataBits::Five));
-        assert!(matches!(parse_data_bits(6), serialport::DataBits::Six));
-        assert!(matches!(parse_data_bits(7), serialport::DataBits::Seven));
-        assert!(matches!(parse_data_bits(8), serialport::DataBits::Eight));
-        assert!(matches!(parse_data_bits(9), serialport::DataBits::Eight));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn parse_parity_maps_values_and_defaults_to_none() {
-        assert!(matches!(parse_parity("Even"), serialport::Parity::Even));
-        assert!(matches!(parse_parity("Odd"), serialport::Parity::Odd));
-        assert!(matches!(parse_parity("None"), serialport::Parity::None));
-        assert!(matches!(parse_parity("bogus"), serialport::Parity::None));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn parse_stop_bits_maps_values_and_defaults_to_one() {
-        assert!(matches!(parse_stop_bits("Two"), serialport::StopBits::Two));
-        assert!(matches!(parse_stop_bits("One"), serialport::StopBits::One));
-        assert!(matches!(parse_stop_bits("bogus"), serialport::StopBits::One));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn parse_flow_control_maps_values_and_defaults_to_none() {
-        assert!(matches!(parse_flow_control("XonXoff"), serialport::FlowControl::Software));
-        assert!(matches!(parse_flow_control("RequestToSend"), serialport::FlowControl::Hardware));
-        assert!(matches!(
-            parse_flow_control("RequestToSendXonXoff"),
-            serialport::FlowControl::Hardware
-        ));
-        assert!(matches!(parse_flow_control("None"), serialport::FlowControl::None));
-        assert!(matches!(parse_flow_control("bogus"), serialport::FlowControl::None));
-    }
-
-    // ---------- 管理器错误路径（app_handle = None，无硬件、不 panic）----------
-    //
-    // 注意：open_port / attempt_reconnect / list_ports 三个测试（及其 open_args
-    // 辅助函数）在 Windows 上被排除。原因：它们的函数体静态引用了 serialport 的
-    // 自由函数（serialport::new / available_ports），会把串口 FFI 拉进 *测试* 二
-    // 进制的导入表；而 cargo test 的 harness 不像应用二进制那样内嵌 Tauri/Windows
-    // 清单，导致该 Windows 主机上加载器解析不到某个入口点（0xc0000139，
-    // STATUS_ENTRYPOINT_NOT_FOUND）。其余仅经 dyn 派发 / 自有函数访问串口的错误
-    // 路径测试不含此类静态引用，可在 Windows 运行。被排除的测试在非 Windows
-    // （CI 的 Linux/macOS）上照常编译运行。
+    use std::sync::Mutex;
 
     #[cfg(not(target_os = "windows"))]
     fn open_args(port_id: &str) -> OpenPortArgs {
@@ -1428,6 +368,32 @@ mod tests {
         }
     }
 
+    // ---------- 打开路径：门控与缺失 AppHandle 的错误 ----------
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn open_port_rejects_virtual_ports_until_capability_enabled() {
+        let mut m = SerialManager::new();
+        let sim_err = m.open_port(open_args("SIM:Loopback")).unwrap_err().to_string();
+        assert!(sim_err.contains("Simulation"), "{sim_err}");
+        let tty_err = m.open_port(open_args("GIT:BASH")).unwrap_err().to_string();
+        assert!(tty_err.contains("Git Bash"), "{tty_err}");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn open_port_requires_app_handle_when_capability_enabled() {
+        let mut m = SerialManager::new();
+        m.set_simulate(true);
+        m.set_gitbash_sim(true);
+        for port_id in ["COM1", "SIM:Loopback", "GIT:BASH"] {
+            let err = m.open_port(open_args(port_id)).unwrap_err().to_string();
+            assert!(err.contains("AppHandle not initialized"), "{port_id}: {err}");
+        }
+    }
+
+    // ---------- 收发路径的缺失端口错误 ----------
+
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn send_data_errors_on_missing_ports() {
@@ -1436,6 +402,8 @@ mod tests {
         assert!(real_err.contains("Port not found"), "{real_err}");
         let sim_err = m.send_data("SIM:x", "x", false, "None").unwrap_err().to_string();
         assert!(sim_err.contains("Sim port not found"), "{sim_err}");
+        let tty_err = m.send_data("GIT:BASH", "x", false, "None").unwrap_err().to_string();
+        assert!(tty_err.contains("TTY sim port not found"), "{tty_err}");
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1446,194 +414,90 @@ mod tests {
         assert!(real_err.contains("Port not found"), "{real_err}");
         let sim_err = m.write_raw("SIM:x", b"x").unwrap_err().to_string();
         assert!(sim_err.contains("Sim port not found"), "{sim_err}");
+        let tty_err = m.write_raw("GIT:BASH", b"x").unwrap_err().to_string();
+        assert!(tty_err.contains("TTY sim port not found"), "{tty_err}");
     }
 
-    // ---------- 模拟终端错误路径（issue #11）----------
+    // ---------- 关闭 / 改参 / 句柄的错误路径 ----------
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn send_data_errors_on_missing_git_port() {
-        let m = SerialManager::new();
-        let err = m
-            .send_data("GIT:BASH", "x", false, "None")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("TTY sim port not found"), "{err}");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn write_raw_errors_on_missing_git_port() {
-        let m = SerialManager::new();
-        let err = m.write_raw("GIT:BASH", b"x").unwrap_err().to_string();
-        assert!(err.contains("TTY sim port not found"), "{err}");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn resize_tty_sim_errors_on_missing_port() {
-        let m = SerialManager::new();
-        let err = m
-            .resize_tty_sim("GIT:BASH", 80, 24)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("TTY sim port not found"), "{err}");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn close_port_is_idempotent_on_missing_git_port() {
+    fn close_port_is_idempotent_on_missing_ports() {
         let mut m = SerialManager::new();
-        assert!(m.close_port("GIT:BASH").unwrap().is_none());
+        for port_id in ["COM1", "SIM:Loopback", "GIT:BASH"] {
+            assert!(m.close_port(port_id).unwrap().is_none(), "{port_id}");
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn get_write_handle_errors_on_missing_port() {
-        let m = SerialManager::new();
-        let err = m.get_write_handle("COM1").unwrap_err().to_string();
-        assert!(err.contains("Port not found"), "{err}");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn set_flow_control_errors_on_missing_port() {
-        let m = SerialManager::new();
+    fn port_mutating_commands_error_on_missing_ports() {
+        let mut m = SerialManager::new();
+        assert!(m.get_write_handle("COM1").is_err());
         assert!(m.set_flow_control("COM1", true, true).is_err());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn set_params_errors_on_missing_port() {
-        let mut m = SerialManager::new();
         assert!(m.set_params("COM1", 9600, 8, "None", "One", "None").is_err());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn close_port_is_idempotent_on_missing_port() {
-        let mut m = SerialManager::new();
-        assert!(m.close_port("COM1").unwrap().is_none());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn get_last_params_is_none_for_unknown_port() {
-        let m = SerialManager::new();
+        assert!(m.resize_tty_sim("GIT:BASH", 80, 24).is_err());
         assert!(m.get_last_params("COM1").is_none());
     }
 
+    // ---------- 自动重连 ----------
+
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn attempt_reconnect_rejects_simulation_port() {
-        let mut m = SerialManager::new();
-        let err = m.attempt_reconnect("SIM:Loopback").unwrap_err().to_string();
-        assert!(err.contains("Cannot reconnect"), "{err}");
+    fn reconnect_rejects_simulation_ports() {
+        let m = Mutex::new(SerialManager::new());
+        for port_id in ["SIM:Loopback", "GIT:BASH"] {
+            let err = super::reconnect_blocking(&m, port_id).unwrap_err().to_string();
+            assert!(err.contains("Cannot reconnect"), "{port_id}: {err}");
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn open_port_errors_without_app_handle() {
-        let mut m = SerialManager::new();
-        let real_err = m.open_port(open_args("COM1")).unwrap_err().to_string();
-        assert!(real_err.contains("AppHandle not initialized"), "{real_err}");
-        let sim_err = m.open_port(open_args("SIM:x")).unwrap_err().to_string();
-        assert!(sim_err.contains("AppHandle not initialized"), "{sim_err}");
+    fn reconnect_reports_missing_params_for_unknown_real_port() {
+        // 系统里不存在该端口 → 走到「不可用」，不进入打开路径（无硬件依赖）
+        let mut inner = SerialManager::new();
+        inner.last_params.insert("COM_NOT_PRESENT".to_string(), open_args("COM_NOT_PRESENT"));
+        let m = Mutex::new(inner);
+        let err = super::reconnect_blocking(&m, "COM_NOT_PRESENT")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not available"), "{err}");
     }
 
-    // ---------- list_ports 模拟开关 ----------
+    // ---------- 端口列表的虚拟条目 ----------
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn list_ports_shows_sim_entry_only_when_simulate_enabled() {
-        let mut m = SerialManager::new();
-        // 仅断言 SIM 条目，不对真实端口列表长度做任何假设。
-        assert!(!m.list_ports().unwrap().iter().any(|p| p.id == "SIM:Loopback"));
-        m.set_simulate(true);
-        let sim = m
-            .list_ports()
+    fn list_ports_exposes_virtual_entries_only_when_enabled() {
+        let m = Mutex::new(SerialManager::new());
+        // 只断言虚拟条目，不对真实端口列表长度做任何假设。
+        let ids = |m: &Mutex<SerialManager>| -> Vec<String> {
+            list_ports_blocking(m)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect()
+        };
+        assert!(!ids(&m).iter().any(|id| id == "SIM:Loopback"));
+        assert!(!ids(&m).iter().any(|id| id == "GIT:BASH"));
+
+        {
+            let mut guard = m.lock().unwrap();
+            guard.set_simulate(true);
+            guard.set_gitbash_sim(true);
+        }
+        let ids = ids(&m);
+        assert!(ids.iter().any(|id| id == "SIM:Loopback"), "{ids:?}");
+        assert!(ids.iter().any(|id| id == "GIT:BASH"), "{ids:?}");
+
+        // 虚拟条目必须标记为 sim 类（前端据此启用模拟相关 UI）
+        let port_type = list_ports_blocking(&m)
             .unwrap()
             .into_iter()
             .find(|p| p.id == "SIM:Loopback")
+            .map(|p| p.port_type)
             .expect("SIM:Loopback entry should exist when simulate is enabled");
-        assert_eq!(sim.port_type, "sim");
-    }
-
-    // ---------- SIM 频率命令（issue #14，纯函数，Windows 亦可运行） ----------
-
-    #[test]
-    fn parse_sim_rate_command_accepts_pure_numbers() {
-        assert_eq!(parse_sim_rate_command("100", false), Some(100));
-        assert_eq!(parse_sim_rate_command("0", false), Some(0));
-        assert_eq!(parse_sim_rate_command("2", false), Some(2));
-    }
-
-    #[test]
-    fn parse_sim_rate_command_trims_whitespace_and_line_endings() {
-        assert_eq!(parse_sim_rate_command(" 100 ", false), Some(100));
-        assert_eq!(parse_sim_rate_command("100\r\n", false), Some(100));
-        assert_eq!(parse_sim_rate_command("\t500\t", false), Some(500));
-    }
-
-    #[test]
-    fn parse_sim_rate_command_rejects_non_numeric() {
-        assert_eq!(parse_sim_rate_command("", false), None);
-        assert_eq!(parse_sim_rate_command("   ", false), None);
-        assert_eq!(parse_sim_rate_command("abc", false), None);
-        assert_eq!(parse_sim_rate_command("100x", false), None);
-        assert_eq!(parse_sim_rate_command("-5", false), None);
-        assert_eq!(parse_sim_rate_command("3.5", false), None);
-        // u32 溢出
-        assert_eq!(parse_sim_rate_command("99999999999999", false), None);
-    }
-
-    #[test]
-    fn parse_sim_rate_command_rejects_hex_mode() {
-        // HEX 模式发"100"是字节 31 30 30，不是频率命令
-        assert_eq!(parse_sim_rate_command("100", true), None);
-    }
-
-    #[test]
-    fn parse_sim_rate_command_clamps_to_max_rate() {
-        assert_eq!(parse_sim_rate_command("50000", false), Some(MAX_SIM_RATE));
-        assert_eq!(parse_sim_rate_command("4294967295", false), Some(MAX_SIM_RATE));
-    }
-
-    #[test]
-    fn sim_due_lines_counts_full_intervals() {
-        let t0 = std::time::Instant::now();
-        let interval = Duration::from_millis(10);
-        // 尚未到期
-        assert_eq!(sim_due_lines(t0, t0 + Duration::from_millis(5), interval, 100).0, 0);
-        // now == next：到期边界立即发一行（SetRate 重置后首行马上发出）
-        assert_eq!(
-            sim_due_lines(t0, t0, interval, 100),
-            (1, t0 + Duration::from_millis(10))
-        );
-        // now 恰好在某边界上：该边界也到期（>= 语义）→ 2 行
-        assert_eq!(
-            sim_due_lines(t0 + Duration::from_millis(10), t0, interval, 100),
-            (2, t0 + Duration::from_millis(20))
-        );
-        // 2 个完整间隔 + 0.5 残差 → 3 行（t0/+10/+20），next 推进到 30ms
-        assert_eq!(
-            sim_due_lines(t0 + Duration::from_millis(25), t0, interval, 100),
-            (3, t0 + Duration::from_millis(30))
-        );
-        // 恰好一个完整间隔（now 落在区间内）→ 1 行
-        assert_eq!(
-            sim_due_lines(t0 + Duration::from_millis(5), t0, interval, 100),
-            (1, t0 + Duration::from_millis(10))
-        );
-    }
-
-    #[test]
-    fn sim_due_lines_caps_burst_and_resets_when_lagging() {
-        let t0 = std::time::Instant::now();
-        let interval = Duration::from_millis(1);
-        // 积压远超 max → 只发 max 个，next 落后时重置到 now（防无限补发）
-        let (due, next) = sim_due_lines(t0 + Duration::from_millis(50_000), t0, interval, 100);
-        assert_eq!(due, 100);
-        assert_eq!(next, t0 + Duration::from_millis(50_000));
+        assert_eq!(port_type, "sim");
     }
 }

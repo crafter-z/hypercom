@@ -44,7 +44,7 @@ pub fn read_text_file(path: String) -> Result<String, CommandError> {
 const MAX_BACKGROUND_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 根据文件扩展名推断 MIME 类型（小写匹配）。
-/// 不支持的扩展名返回 `None`；匹配 update.rs 的"不可用时静默返回空"风格。
+/// 不支持的扩展名返回 `None`（调用方据此走软失败路径，见 `read_image_data_url`）。
 pub fn image_mime_from_ext(ext: &str) -> Option<&'static str> {
     match ext.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
@@ -58,9 +58,12 @@ pub fn image_mime_from_ext(ext: &str) -> Option<&'static str> {
 }
 
 /// 读取图片文件为 data URL（自定义背景图，issue #13）。
-/// 返回 `data:image/<mime>;base64,<...>`；路径为空/文件不存在/扩展名不支持/
-/// 超过 `MAX_BACKGROUND_IMAGE_BYTES` 上限时返回空字符串（前端静默视为无背景图），
-/// 仅记录 warn 日志。匹配 update.rs 的"不可用时静默返回空"风格。
+/// 返回 `data:image/<mime>;base64,<...>`。
+///
+/// **软失败契约**：路径为空 / 文件不存在 / 扩展名不支持 / 超过
+/// `MAX_BACKGROUND_IMAGE_BYTES` 上限 / 读取失败，一律返回**空字符串**并记 warn。
+/// 背景图是纯装饰：它的缺失不该让设置页弹错误、也不该中断启动流程，前端按「空串
+/// = 无背景图」判定，因此这些分支不得改成 `Err`。单测钉住的就是这条契约。
 #[tauri::command]
 pub fn read_image_data_url(path: String) -> Result<String, CommandError> {
     let trimmed = path.trim();

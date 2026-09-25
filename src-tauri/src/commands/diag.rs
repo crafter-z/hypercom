@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use serde::Deserialize;
 use tauri::State;
 
 use super::CommandError;
-use crate::{AppState, diaglog::DiagLogger};
+use crate::AppState;
 
 /// 前端 `console.*` 转发来的日志条目（由前端诊断日志捕获器批量上报）。
 #[derive(Debug, Deserialize)]
@@ -17,11 +15,7 @@ pub struct DiagLogEntry {
 /// 返回诊断日志文件路径（活跃文件）。
 #[tauri::command]
 pub fn get_diag_log_path(state: State<AppState>) -> Result<String, CommandError> {
-    Ok(state
-        .diag_logger
-        .file_path()
-        .display()
-        .to_string())
+    Ok(state.diag_logger.file_path().display().to_string())
 }
 
 /// 读取最近 `limit` 行诊断日志（缺省 2000）。
@@ -47,9 +41,10 @@ pub fn append_diag_log(
     state: State<AppState>,
     entries: Vec<DiagLogEntry>,
 ) -> Result<(), CommandError> {
-    let logger: Arc<DiagLogger> = state.diag_logger.clone();
-    for entry in entries {
-        logger.append_external(&entry.timestamp, &entry.level, &entry.message);
+    for entry in &entries {
+        state
+            .diag_logger
+            .append_external(&entry.timestamp, &entry.level, &entry.message);
     }
     Ok(())
 }
