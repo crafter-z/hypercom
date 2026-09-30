@@ -33,6 +33,7 @@ function validateConfigBundle(bundle: ConfigBundle): string | null {
     if (typeof c.theme !== 'string') return 'Invalid config: theme must be a string';
     if (typeof c.language !== 'string') return 'Invalid config: language must be a string';
     if (c.terminalFontSize !== undefined && typeof c.terminalFontSize !== 'number') return 'Invalid config: terminalFontSize must be a number';
+    if (c.uiScalePercent !== undefined && typeof c.uiScalePercent !== 'number') return 'Invalid config: uiScalePercent must be a number';
     if (c.autoSaveLog !== undefined && typeof c.autoSaveLog !== 'boolean') return 'Invalid config: autoSaveLog must be a boolean';
   }
   return null;

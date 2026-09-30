@@ -8,6 +8,7 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:webview:allow-set-webview-zoom",
     "shell:allow-open",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",

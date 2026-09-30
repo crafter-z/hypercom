@@ -21,6 +21,7 @@ import { useSystemStore } from './stores/useSystemStore';
 import { saveSessionSnapshot } from './utils/sessionSnapshot';
 import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
 import { computeBufferLimits, getManagerPortIds, getViewportManager } from './utils/terminal/viewportManager';
+import { applyUiScale } from './utils/uiScale';
 
 // 模块加载即安装前端 console 捕获（幂等），尽早收集前端诊断日志。
 setupDiagLogCapture();
@@ -79,6 +80,12 @@ const App: React.FC = () => {
   const { element: textEditMenuElement } = useTextEditContextMenu();
   const sidebarWidth = useSystemStore((s) => s.ui.sidebarWidth);
   const sidebarCollapsed = useSystemStore((s) => s.ui.sidebarCollapsed);
+  const configReady = useSystemStore((s) => s.ui.configReady);
+  // ConfigModal edits the store as a draft. Only apply the loaded value here;
+  // saved changes are applied after a successful save in ConfigModal.
+  useEffect(() => {
+    if (configReady) void applyUiScale(useAppStore.getState().config.uiScalePercent);
+  }, [configReady]);
 
   // 诊断日志开关：随 config.diagLogEnabled 同步前端日志转发（issue #5-2 对齐 wire 名）。
   const diagLogEnabled = useAppStore((s) => s.config.diagLogEnabled);

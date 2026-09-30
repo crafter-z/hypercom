@@ -51,6 +51,7 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   terminalFontSize: 14,
   uiFont: 'Inter, sans-serif',
   uiFontSize: 14,
+  uiScalePercent: 100,
   defaultBaudRates: [9600, 19200],
   defaultLineEnding: '\\r\\n',
   sendPrefix: '',

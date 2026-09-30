@@ -266,6 +266,9 @@ const resources = {
       'generalSettings.fontSectionTitle': '字体设置',
       'generalSettings.terminalFontLabel': '终端字体:',
       'generalSettings.uiFontLabel': 'UI字体:',
+      'generalSettings.uiScaleSectionTitle': '界面缩放',
+      'generalSettings.uiScaleLabel': '软件界面缩放:',
+      'generalSettings.uiScaleHint': '只缩放软件界面，不改变终端字体大小。',
       'generalSettings.pxUnit': 'px',
 
       // issue #12：自动更新设置
@@ -898,6 +901,9 @@ const resources = {
       'generalSettings.fontSectionTitle': 'Font Settings',
       'generalSettings.terminalFontLabel': 'Terminal Font:',
       'generalSettings.uiFontLabel': 'UI Font:',
+      'generalSettings.uiScaleSectionTitle': 'UI Scale',
+      'generalSettings.uiScaleLabel': 'Software UI scale:',
+      'generalSettings.uiScaleHint': 'Scales the software interface without changing terminal font size.',
       'generalSettings.pxUnit': 'px',
 
       // issue #12：自动更新设置

@@ -11,6 +11,7 @@
 export const CONFIG_BOUNDS = {
   terminalFontSize: [8, 48],
   uiFontSize: [8, 48],
+  uiScalePercent: [80, 200],
   maxDisplayLines: [1000, 1_000_000],
   maxRetries: [1, 10],
   logSplitSizeMb: [1, 10_240],

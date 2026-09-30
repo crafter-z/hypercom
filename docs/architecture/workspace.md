@@ -58,6 +58,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 | `popout:terminal:closed` | 后端 → 主窗 | `portId` | 弹窗销毁回贴：清除标签 detach 标记（见通用弹出管线） |
 | `popout:open-config` | 弹窗 → 主窗 | `{page}` | 弹窗请求主窗打开 ConfigModal 指定页 |
 | `popout:request-sync` | 弹窗 → 主窗 | 无 | 弹窗监听器**注册就绪后**请求对表，主窗回放 active-tab + command-sets + port-statuses |
+| `ui-scale:changed` | 主窗 → 已打开弹窗 | `{percent}` | 设置保存成功后同步软件 UI 缩放；弹窗自己启动时先读 config.json 并缩放各自 WebView |
 
 - 发送：弹窗直接 `invoke('send_data')` → 共享 AppState → 后端 emit serial:data → 主窗 useSerialReceive 自动写终端——**发送→回显链路天然跨窗口**。弹窗发送经 `popout:send-command` → 主窗 `sendToPort(payload.portId ?? activeTabId)`（显式 portId 优先；模块级 sendToPort，TX echo/流量/历史工作）。
 - `usePopoutBridge` 全部 fire-and-forget emit 补 `.catch`（弹窗销毁时 rejection 不再 unhandled）。

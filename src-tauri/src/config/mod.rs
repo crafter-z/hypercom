@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub const CONFIG_BOUNDS: &[(&str, i64, i64)] = &[
     ("terminalFontSize", 8, 48),
     ("uiFontSize", 8, 48),
+    ("uiScalePercent", 80, 200),
     ("maxDisplayLines", 1000, 1000000),
     ("maxRetries", 1, 10),
     ("logSplitSizeMb", 1, 10240),
@@ -279,6 +280,7 @@ pub struct AppConfig {
     pub terminal_font_size: u32,
     pub ui_font: String,
     pub ui_font_size: u32,
+    pub ui_scale_percent: u32,
 
     // --- 背景图设置（自定义背景图片，issue #13）---
     pub background_image: String,
@@ -364,6 +366,7 @@ impl Default for AppConfig {
             terminal_font_size: 14,
             ui_font: "Inter, sans-serif".to_string(),
             ui_font_size: 14,
+            ui_scale_percent: 100,
             background_image: String::new(),
             background_image_enabled: false,
             background_image_opacity: 50,
@@ -623,6 +626,8 @@ impl ConfigManager {
         config.terminal_font_size =
             clamp_bound("terminalFontSize", config.terminal_font_size as i64) as u32;
         config.ui_font_size = clamp_bound("uiFontSize", config.ui_font_size as i64) as u32;
+        config.ui_scale_percent =
+            clamp_bound("uiScalePercent", config.ui_scale_percent as i64) as u32;
         config.max_display_lines =
             clamp_bound("maxDisplayLines", config.max_display_lines as i64) as u32;
         config.max_retries = clamp_bound("maxRetries", config.max_retries as i64) as u8;
@@ -844,6 +849,7 @@ mod tests {
         assert!(!cfg.auto_reconnect);
         assert_eq!(cfg.max_retries, 3);
         assert_eq!(cfg.terminal_font_size, 14);
+        assert_eq!(cfg.ui_scale_percent, 100);
         assert_eq!(
             cfg.default_baud_rates,
             vec![9600, 19200, 38400, 57600, 115200, 921600]
@@ -900,6 +906,7 @@ mod tests {
             "logFormat",
             "logEncoding",
             "terminalFontSize",
+            "uiScalePercent",
             "autoReconnect",
             "maxRetries",
             "restoreSession",
@@ -940,6 +947,7 @@ mod tests {
         // 且每个新字段回退到 impl Default 的值（容器级 #[serde(default)]）。
         let cfg = legacy_config(serde_json::json!({}));
         assert_eq!(cfg.revision, 0);
+        assert_eq!(cfg.ui_scale_percent, 100);
         assert!(cfg.entities.plugin_configs.is_empty());
         assert!(cfg.log_include_timestamp);
         assert!(cfg.log_include_direction);
@@ -1100,6 +1108,7 @@ mod tests {
         let mut cfg = AppConfig {
             terminal_font_size: u32::MAX,
             ui_font_size: 0,
+            ui_scale_percent: u32::MAX,
             max_display_lines: 1,
             max_retries: u8::MAX,
             log_split_size_mb: 0,
@@ -1112,6 +1121,7 @@ mod tests {
         ConfigManager::validate_and_clamp(&mut cfg);
         assert_eq!(cfg.terminal_font_size as i64, bound("terminalFontSize").1);
         assert_eq!(cfg.ui_font_size as i64, bound("uiFontSize").0);
+        assert_eq!(cfg.ui_scale_percent as i64, bound("uiScalePercent").1);
         assert_eq!(cfg.max_display_lines as i64, bound("maxDisplayLines").0);
         assert_eq!(cfg.max_retries as i64, bound("maxRetries").1);
         assert_eq!(cfg.log_split_size_mb as i64, bound("logSplitSizeMb").0);
@@ -1123,13 +1133,14 @@ mod tests {
 
     #[test]
     fn test_config_bounds_shape() {
-        // 表形状：9 项、名字唯一、min <= max。前端 bounds.test.ts 按同一顺序逐项断言数值。
+        // 表形状：10 项、名字唯一、min <= max。前端 bounds.test.ts 按同一顺序逐项断言数值。
         let names: Vec<&str> = CONFIG_BOUNDS.iter().map(|(n, _, _)| *n).collect();
         assert_eq!(
             names,
             vec![
                 "terminalFontSize",
                 "uiFontSize",
+                "uiScalePercent",
                 "maxDisplayLines",
                 "maxRetries",
                 "logSplitSizeMb",

@@ -51,7 +51,7 @@ src/
 ├── stores/                   # 6 个 store 模块 + releaseTerminalState.ts + resetStores.ts
 ├── utils/                    # 纯函数与引擎（highlightEngine / protocolParser / triggerEngine / rxAssembler / rxPipeline /
 │                             # lineText / hexFormat / hexUtils / sendUtils / sendStrip / textSend / sendGuard / followLogic /
-│                             # lineFilter / terminalSearch / paneTree / bounds / sequential / clampNumber / jsHeap / portSort /
+│                             # lineFilter / terminalSearch / paneTree / bounds / uiScale / sequential / clampNumber / jsHeap / portSort /
 │                             # groupTool / trafficStats / logReplay / sessionSnapshot / diagLog / devMode / updateService / channel / changelog）
 │   └── terminal/             # 方案B 引擎：TerminalBuffer / TerminalRenderer / viewportManager（见子目录 AGENTS.md）
 ├── types/index.ts
@@ -65,6 +65,7 @@ src/
 | `utils/paneTree.ts` | `PaneNode` 树算法：`newPaneId` / `findLeafById` / `findLeafByTabId` / `findBranchById` / `findParentBranch` / `collectLeaves` / `countLeaves` / `pruneTree`。store 只留 action；`useAppStore` 另导出 `getClosingTabIds(tabId, scope)` 供批量关闭取与 store 关闭动作同一集合 |
 | `utils/hexFormat.ts` | `hexByte` / `bytesToSpacedHex`——**bytes→HEX 的唯一实现**（terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用） |
 | `utils/bounds.ts` | `CONFIG_BOUNDS` / `BoundedNumericSetting`——数值边界的前端镜像 |
+| `utils/uiScale.ts` | `normalizeUiScalePercent` / `applyUiScale`——按当前 WebView 应用持久化 UI 缩放；调用 Tauri `getCurrentWebview().setZoom(percent / 100)` |
 | `utils/sequential.ts` | `runSequential<T>`——串行发送/循环的通用次序原语 |
 | `stores/useSystemStore.ts` | `systemStatus` / `trafficStats` / `simulationMode` / `ui` + `setSystemStatus` / `setTrafficStats` / `clearTrafficStats` / `setSimulationMode` / `setUIState` / `toggleConfigModal` / `setConfigActiveTab`——**从 `useAppStore` 拆出** |
 | `stores/releaseTerminalState.ts` | `releaseTerminalState(portId)`：统一回收该端口的 terminals / trafficStats / TX 历史（`useTerminalStore.releaseTerminal` 只应由它调用） |
@@ -78,7 +79,8 @@ src/
 
 | 对象 | 唯一来源 | 守卫 |
 |---|---|---|
-| 数值边界（字号/行数上限/分片大小/图片不透明度…） | Rust `config/mod.rs` 的 `pub const CONFIG_BOUNDS: &[(&str, i64, i64)]`；`validate_and_clamp` 经 `clamp_bound(name, …)` 查表（散落的 clamp 字面量已删） | 前端 `src/utils/bounds.ts` 镜像；`src/utils/bounds.test.ts` 用 `?raw` 解析 Rust 源文本，断言两侧键集合与数值逐项相等 |
+| 数值边界（字号/行数上限/分片大小/图片不透明度…） | Rust `config/mod.rs` 的 `pub const CONFIG_BOUNDS: &[(&str, i64, i64)]`；`validate_and_clamp` 经 `clamp_bound(name, …)` 查表（散落的 clamp 字面量已删） | 前端 `src/utils/bounds.ts` 镜像；`src/utils/bounds.test.ts` 用 `?raw` 解析 Rust 源文本，断言两侧键集合与数值逐项相等；`uiScalePercent` 范围 80–200、默认 100 |
+| UI 缩放 | `AppConfig.ui_scale_percent` / `CONFIG_BOUNDS`；前端 `src/utils/uiScale.ts` | `applyUiScale` 对当前 WebView 调用 `setZoom(uiScalePercent / 100)`；与 `terminalFontSize` / `uiFontSize` 分离，无 CSS transform；已打开 popout 经 `ui-scale:changed` 更新 |
 | 全量配置保存 | `useConfigPersistence.saveConfig(patch?)` 以最新后端 `revision` + 活实体生成候选快照；后端 `set_config_if_revision` 在配置锁内 CAS 冲突拒绝并重试重组 | 规则 CRUD 及插件授权落盘不会被跨异步旧快照回滚，五次失败返回 false、不关闭设置窗 |
 | 插件授权与启用态 | `ConfigManager` 的 `entities.plugin_configs`；`set_config` 在 `plugin_io` 锁内保留当前后端数组，唯备份导入显式 `restorePluginConfigs: true` 整体恢复 | `utils/pluginConfigSnapshot.ts` 的 `syncStorePluginConfigs` 更新运行镜像并使旧列表失效；升级禁用并清授权，KV 在插件私有文件 |
 | 日志设置 | `LogSettings::from_config` + `LogManager::apply_settings` | 无第二条同步路径 |
@@ -95,6 +97,7 @@ src/
 5. **全量保存走安全快照 + CAS**：`saveConfig(patch?)` 每轮读后端 `revision` / `portPresets`，从 `useAppStore`（标量 + groups）+ `useRuleStore`（5 个活实体）+ `collectPortMeta(ports)` 拼装；同一 id 的后端独立 CRUD 若晚于启动快照则保留权威已保存值，本地未保存的其它 id 草稿仍保留。`set_config` 在配置锁中以 `expectedRevision` 防并发旧数组覆盖并最多重试 5 次。旧 `mergeLiveRuleEntities` / `utils/configMerge.ts` 已删。
 6. **TTY 无本地回显**：`sendToPort` 的 TTY 分支跳过 TX 回显与 `flushNow`（仍走后端发送/流量统计/历史）；pty 写做回车归一（`\r\n` → 单个 `\r`）。
 7. **关闭标签页保留串口连接**：`Pane.cleanupClosedTab` → `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)`；批量关闭先用 `getClosingTabIds(tabId, scope)` 取同一集合，两处不会漂移。
+8. **持久化 UI 缩放**：`uiScalePercent` 默认 100%，范围 80–200%，独立于 `terminalFontSize` / `uiFontSize`。`App.tsx` 在 `configReady` 后、`PopoutShell.tsx` 从 config.json 加载配置后分别调用 `utils/uiScale.ts` 的 `applyUiScale`；`ConfigModal.handleSave` 只有 `saveConfig` 成功才应用新值，并经 `ui-scale:changed` 同步已打开的弹出窗。原生 `getCurrentWebview().setZoom(percent / 100)` 只改变当前 WebView，不使用 CSS transform。
 
 ## STRUCTURE
 
@@ -146,6 +149,7 @@ hypercom/
 | Pane tree traversal | `src/utils/paneTree.ts`（`findLeafById` … `countLeaves`；批量关闭集合 `useAppStore.getClosingTabIds`） | do not hand-roll tree walks |
 | Highlight engine | `src/utils/highlightEngine.ts` + tests | state in `useRuleStore`, persisted via `storageService` |
 | ConfigModal page edit | `src/components/ConfigModal/pages/*.tsx` + `hooks/useEntityPage.ts` | rule state in `useRuleStore`; persisted via config.json (`storageService` wraps config-backed commands) |
+| UI 缩放设置 | `src/components/ConfigModal/pages/GeneralSettings.tsx` + `src/utils/uiScale.ts` + `App.tsx` + `Popout/PopoutShell.tsx` | config.json 持久化 `uiScalePercent`；主窗与 popout 分别加载配置并对各自 WebView 应用，成功保存后通过 `ui-scale:changed` 同步已打开的弹出窗 |
 | Cyclic send | `src/components/OperationPanel/hooks/{useCyclicSend,useSequentialSend}.ts` | reads `useRuleStore.sendCommandSets` via `getState`；每端口运行开关 `useOperationStore.cyclicLoops` + `setCyclicLoop`; timing via per-command `delay` + set `loopDelay` only |
 | 命令发送区 / 快捷发送条 / 命令面板 | `OperationPanel/SendSection.tsx` + `Popout/QuickSendPanel.tsx` + `hooks/useSerialSend.ts` | 快捷条 pill 两行显示（`.op-quick-cmd-name-row` 在上、`.op-quick-cmd-content` 在下）、宽度自适应（`utils/sendStrip.ts` `computeFitCount`）、首槽固定「打开命令面板」按钮（accent 填充按压按钮 + `quickSend.openPanelShort`）；`quickSendInlineCount` 仅 0=隐藏条；QuickSendPanel 双模式（列表+行内编辑 / 文本逐行发送，运行方式由 `useSequentialSend` 统一驱动）；目标串口下拉只显示串口号；底栏「发送到」灯订阅 `serial:status` + `port-statuses:sync` 对表；`sendToPort` 经 `utils/sendGuard.ts` 守卫未打开端口 |
 | Cross-platform power | `src-tauri/src/system.rs` | 共享状态机 + `win32_backend`（`SetThreadExecutionState` FFI）/ `child_process_backend`（`caffeinate` / `systemd-inhibit` 抑制子进程） |
@@ -208,11 +212,12 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | `ttyService` | `src/utils/ttyService.ts` | module singleton | TTY 模式 RX/TX 服务：流式 UTF-8 解码（`lineText.createDecoder`）+ 每端口队列 + visibility-aware 批写 `term.write`；`attach`/`detach`/`feed`/`clear`/`disconnect`/`send`/`resize`；队列上限 `MAX_TTY_QUEUE`；TX 刻意不走 `sendToPort`（无本地回显） |
 | `TtyView` | `src/components/MainDisplay/TtyView.tsx` | component | TTY 端口 xterm 宿主：Terminal + FitAddon fit（ResizeObserver + rAF 防抖）、onData→`ttyService.send`、onResize→`ttyService.resize`；`hidden` prop = 非活动标签（`.tty-view-hidden` display:none，恢复可见显式 re-fit，**会话跨标签保留**）；字体/字号经 `term.options` 活更新不重建；Ctrl+滚轮缩放；Terminal 实例由本组件拥有，卸载时 dispose（`ttyService.detach` 不清实例） |
 | `ReassemblerSegment` | `src/utils/protocolParser.ts` | type | `ProtocolFrameReassembler.feed()` 返回有序段数组（frame/raw 按流顺序），不再是 `{frames, flushedBytes}` |
-| Pop-out intent bridge | `src/hooks/usePopoutBridge.ts` + `services/popout.ts` | pop-outs are separate webviews: exchange intents (`popout:send-command` / `popout:open-config` / `popout:request-sync` / `popout:command-set-updated`) + refresh signals (`command-sets:changed` / `active-tab:changed`), never shared mutable state; sends route through module-level `sendToPort` so TX echo/traffic/history work |
+| Pop-out intent bridge | `src/hooks/usePopoutBridge.ts` + `services/popout.ts` | pop-outs are separate webviews: exchange intents (`popout:send-command` / `popout:open-config` / `popout:request-sync` / `popout:command-set-updated`) + refresh signals (`command-sets:changed` / `active-tab:changed` / `ui-scale:changed`), never shared mutable state; sends route through module-level `sendToPort` so TX echo/traffic/history work |
 | `evaluateTriggers` | `src/utils/triggerEngine.ts` | pure fn | conditional trigger matching engine (contains/exact/regex/hex) |
 | `hexFormat` | `src/utils/hexFormat.ts` | pure fns | `hexByte` / `bytesToSpacedHex`——bytes→HEX 唯一实现 |
 | `lineText` | `src/utils/lineText.ts` | pure fns | 全仓唯一 TextDecoder 工厂（`createDecoder` 缓存 / `decodeBytes` / `getLineText`，`ignoreBOM: false`） |
 | `CONFIG_BOUNDS` | `src/utils/bounds.ts` | const | 数值边界（镜像 Rust；由 `bounds.test.ts` 断言） |
+| `normalizeUiScalePercent` / `applyUiScale` | `src/utils/uiScale.ts` | runtime | 80–200% 收敛 / Tauri `getCurrentWebview().setZoom(percent / 100)`；每个 WebView 独立应用 |
 | `runSequential` | `src/utils/sequential.ts` | pure fn | 串行执行原语（循环发送/批量开关） |
 | `pluginHost` / `pluginObserver` / `pluginBytesObserver` / `pluginKv` | `src/utils/plugin*.ts` | runtime | Worker 调用时权限、RX 行/字节有界旁路、逐插件 KV 串行落盘（详 `docs/architecture/plugins.md`） |
 | `tauri` service modules | `src/services/tauri.ts` (barrel) + `src/services/*.ts` | service | wrapped `invoke` calls（12 域 + barrel，插件域 `src/services/plugin.ts`） |
@@ -223,7 +228,7 @@ Backend:
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
 | All Tauri commands (12 domain files, 74 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | `AppConfig` = 45 标量（含保存冲突用 `revision`）+ `#[serde(flatten)] entities`；`Entities` = 9 个实体 `Vec`（含 `pluginConfigs`，顶层 JSON key）+ session.json + 校验/路径/备份 + `CONFIG_BOUNDS` |
+| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | `AppConfig` = 46 标量（含 `revision` / `uiScalePercent`）+ `#[serde(flatten)] entities`；`Entities` = 9 个实体 `Vec`（含 `pluginConfigs`，顶层 JSON key）+ session.json + 校验/路径/备份 + `CONFIG_BOUNDS` |
 | `AppState` | `src-tauri/src/lib.rs` | struct | `serial_manager: Arc<Mutex<..>>`、`config_manager: Mutex<..>`、`plugin_io: tokio::sync::Mutex<()>`（插件磁盘/状态操作互斥）、`log_manager: Arc<LogManager>`、`diag_logger: Arc<..>`、`system_info: Arc<Mutex<..>>`、`tool_processes`/`file_send_cancel`/`popouts` |
 | `SerialPortHandle` | `src-tauri/src/serial/ports_real.rs` | struct | `read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>` 句柄；`open_real_port` 内 DTR/RTS 设置（clone 前，设备级共享）后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享） |
 | `PortKind` / `check_virtual_enabled` | `src-tauri/src/serial/mod.rs` | enum / fn | 端口类别唯一分派 + 虚拟端口分派前门控 |

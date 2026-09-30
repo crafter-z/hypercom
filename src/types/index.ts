@@ -274,6 +274,7 @@ export interface AppConfig {
   terminalFontSize: number;
   uiFont: string;
   uiFontSize: number;
+  uiScalePercent: number;
 
   // 背景图设置（自定义背景图片，issue #13）：全应用毛玻璃——启用后各面板表面
   // 变为半透明，露出全局背景图（不透明度/模糊度可调）。

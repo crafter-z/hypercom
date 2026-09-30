@@ -6,7 +6,7 @@ config.json 实体模型与向前兼容口径、会话快照、6 个 Zustand sto
 
 SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体）的唯一事实来源**。
 
-`AppConfig` 共 **43 个字段 = 42 个标量 + `#[serde(flatten)] entities: Entities`**（整体 `#[serde(rename_all = "camelCase")]`）。`Entities` 是 **8 个 `Vec` 实体数组**；`#[serde(flatten)]` 保证 **config.json 线格式零变化**：8 个实体仍是 config.json 的**顶层 key**。
+`AppConfig` 共 **47 个字段 = 46 个标量 + `#[serde(flatten)] entities: Entities`**（整体 `#[serde(rename_all = "camelCase")]`）。`Entities` 是 **9 个 `Vec` 实体数组**；`#[serde(flatten)]` 保证 **config.json 线格式零变化**：9 个实体仍是 config.json 的**顶层 key**。
 
 | 实体 | `Entities` 字段 | config.json 顶层 key | 前端对应 |
 |---|---|---|---|
@@ -18,8 +18,9 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 | PortToolConfigEntry | `port_tool_configs` | `portToolConfigs` | 外部工具配置 |
 | PortGroupEntry | `port_groups` | `portGroups` | 串口分组（issue #2-3，整体替换） |
 | PortMetaEntry | `port_meta` | `portMeta` | 端口元数据：备注名/隐藏/mode（issue #4-9，整体替换） |
+| PluginConfigEntry | `plugin_configs` | `pluginConfigs` | 插件启用态 / 授权（插件私有 KV 独立存放） |
 
-42 个标量（`updateCheckMode`、`diagLogEnabled`、`language`、`theme`、`backgroundImage*`、`quickSendInlineCount` 等）与 `entities` 同层，随 `...config` 展开流过全量保存。两层各自只有一种语义：实体只有 CRUD（`commands/storage.rs`），标量只有默认值 + 收敛（`impl Default` / `validate_and_clamp`）。
+46 个标量（`updateCheckMode`、`diagLogEnabled`、`language`、`theme`、`uiScalePercent`、`backgroundImage*`、`quickSendInlineCount` 等）与 `entities` 同层，随 `...config` 展开流过全量保存。两层各自只有一种语义：实体只有 CRUD（`commands/storage.rs`），标量只有默认值 + 收敛（`impl Default` / `validate_and_clamp`）。
 
 ### 向前兼容与 schema：没有版本字段
 
@@ -38,7 +39,7 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 
 ### 数值边界：`CONFIG_BOUNDS` 是唯一来源
 
-- **Rust**：`pub const CONFIG_BOUNDS: &[(&str, i64, i64)]`（`src-tauri/src/config/mod.rs`）是数值范围的唯一来源。`validate_and_clamp` 经 `clamp_bound(name, value)` 查表收敛，**调用点不写 clamp 字面量**；名字缺失直接 panic（静默不收敛正是「非法值落盘」的来源）。
+- **Rust**：`pub const CONFIG_BOUNDS: &[(&str, i64, i64)]`（`src-tauri/src/config/mod.rs`）是数值范围的唯一来源。`validate_and_clamp` 经 `clamp_bound(name, value)` 查表收敛，**调用点不写 clamp 字面量**；名字缺失直接 panic（静默不收敛正是「非法值落盘」的来源）。其中 `uiScalePercent` 的边界为 **80–200**。
 - **前端**：镜像表在 `src/utils/bounds.ts`（导出 `CONFIG_BOUNDS` 与 `BoundedNumericSetting` 类型）。
 - **跨语言契约测试**：`src/utils/bounds.test.ts` 用 `?raw` 导入 Rust 源文本、正则逐项解析 `CONFIG_BOUNDS`，断言**两侧键集合相同且每个键的 min/max 相等**——任一侧改了未同步另一侧立即红（曾出现前端允许 8..96 而后端收敛到 8..48，用户输入被静默丢弃；备份间隔 1..8760 vs 1..720 同款）。
 - **枚举字段**走 `restrict(field, &[...], fallback)`：`closeBehavior` / `theme` / `language` / `logFormat` / `timestampMode` / `timestampFormat` / `logEncoding` / `logSubdirMode`（非法值回 `date`）/ `updateCheckMode`（非法值含旧版残留回 `stable`）/ `defaultLineEnding`，以及 `entities.port_meta[*].mode`（非 `trx`/`tty` 收敛回 `trx`，issue #11）。
@@ -46,9 +47,15 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 ### 会话快照
 
 - `update_session_snapshot` / `get_session_snapshot` 读写**独立**的 `session.json`（格式 `{"snapshot": "..."}`），与 config.json 分开——高频快照写入**不触发** config 的 `.bak` churn。
-- `ui.configReady`（`useSystemStore`，`loadConfig` 完成后置位；加载失败保留默认值也置位）供自动更新等待配置就绪，替代旧的固定超时启发式（config 加载超过阈值会按默认 stable 误判用户设置的 none/preview）。它**不进**会话快照。
+- `ui.configReady`（`useSystemStore`，`loadConfig` 完成后置位；加载失败保留默认值也置位）供主窗/弹出窗按加载后的配置应用 WebView 缩放，也供自动更新等待配置就绪，替代旧的固定超时启发式（config 加载超过阈值会按默认 stable 误判用户设置的 none/preview）。它**不进**会话快照。
 
-### 命令
+### 前端 WebView 缩放
+
+- `uiScalePercent` 是持久化的 UI 缩放百分比，默认 **100%**，由 `CONFIG_BOUNDS` 约束为 **80–200%**；它使用原生 WebView 缩放，不是 CSS transform，也不等同于 `terminalFontSize` / `uiFontSize`（后两者仍是字体设置）。
+- `src/utils/uiScale.ts` 的 `applyUiScale` 调用 Tauri `getCurrentWebview().setZoom(percent / 100)`；缩放按 WebView 实例分别应用。主窗在 `configReady` 后应用已加载值，弹出窗（Popout）启动时读同一 config.json 后应用；独立窗口互不共享运行态。
+- `ConfigModal` 只有在 `saveConfig()` 成功后才调用 `applyUiScale(current.uiScalePercent)` 并通过 `ui-scale:changed` 通知已打开的弹出窗；取消或保存失败不会把未落盘的缩放应用到 WebView。
+
+## 命令
 
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
@@ -103,10 +110,12 @@ await configService.setConfig({
   → ConfigManager.get_config() → 剥离旧 key + 反序列化 → useAppStore.setConfig(config)
     → useRuleStore 灌入 5 组活实体（setGroups 须在分组自动保存订阅注册之前执行）
     → useSystemStore.setUIState({ configReady: true })
+    → 主窗（或弹出窗）`applyUiScale(config.uiScalePercent)`，缩放当前 WebView
 
 用户保存 → ConfigModal.handleSave → saveConfig()（内部构造安全快照）
   → invoke set_config → ConfigManager.set_config()（validate_and_clamp → 原子写 + .bak）
-  → AppState::apply_runtime_config(cfg)（日志设置 + 诊断开关 → 运行期镜像）
+    → AppState::apply_runtime_config(cfg)（日志设置 + 诊断开关 → 后端运行期镜像）
+  → 保存成功后当前 WebView `applyUiScale(current.uiScalePercent)`，并广播 `ui-scale:changed` 给已打开的弹出窗；失败则不应用未落盘值
 
 分组 / 端口元数据变更 → useAppInit 500ms 防抖 → save_port_groups / save_port_meta（整组替换）
 ```

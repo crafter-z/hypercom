@@ -24,6 +24,7 @@ const GeneralSettings: React.FC = () => {
   const terminalFontSize = useAppStore(s => s.config.terminalFontSize);
   const uiFont = useAppStore(s => s.config.uiFont);
   const uiFontSize = useAppStore(s => s.config.uiFontSize);
+  const uiScalePercent = useAppStore(s => s.config.uiScalePercent);
   const updateCheckMode = useAppStore(s => s.config.updateCheckMode);
   const setConfig = useAppStore((s) => s.setConfig);
 
@@ -189,6 +190,16 @@ const GeneralSettings: React.FC = () => {
         <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
         <input className="input" type="number" value={uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, CONFIG_BOUNDS.uiFontSize[0], CONFIG_BOUNDS.uiFontSize[1]) })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
+      </div>
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('generalSettings.uiScaleSectionTitle')}</h4>
+      <div className="config-row" title={t('generalSettings.uiScaleHint')}>
+        <label>{t('generalSettings.uiScaleLabel')}</label>
+        <select className="select" value={uiScalePercent} onChange={(e) => setConfig({ uiScalePercent: Number(e.target.value) })}>
+          {[80, 90, 100, 110, 120, 125, 130, 140, 150, 175, 200].map((percent) => (
+            <option key={percent} value={percent}>{percent}%</option>
+          ))}
+        </select>
       </div>
 
       <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>

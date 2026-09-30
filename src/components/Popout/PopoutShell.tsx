@@ -1,8 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pin, PinOff, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { popoutService } from '../../services/tauri';
+import { configService, popoutEventService, popoutService } from '../../services/tauri';
+import { useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
+import { applyUiScale } from '../../utils/uiScale';
 import { useTextEditContextMenu } from '../shared/TextEditContextMenu';
 import QuickSendPanel from './QuickSendPanel';
 import TerminalPopout from './TerminalPopout';
@@ -36,6 +39,45 @@ const PopoutContent: React.FC<{ kind: string; targetId: string | null }> = ({ ki
 const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
   const { t } = useTranslation();
   const [pinned, setPinned] = useState(true); // 建窗默认 always_on_top(true)
+  const configReady = useSystemStore((s) => s.ui.configReady);
+  const liveScale = useRef<number | null>(null);
+  const appliedScale = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    void configService.getConfig().then((config) => {
+      if (cancelled) return;
+      useAppStore.getState().setConfig(config);
+      useSystemStore.getState().setUIState({ configReady: true });
+    }).catch((error) => {
+      console.warn('[PopoutShell] Failed to load config, using defaults:', error);
+      if (!cancelled) useSystemStore.getState().setUIState({ configReady: true });
+    });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (configReady && !appliedScale.current) {
+      appliedScale.current = true;
+      void applyUiScale(liveScale.current ?? useAppStore.getState().config.uiScalePercent);
+    }
+  }, [configReady]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void popoutEventService.onUiScaleChanged(({ percent }) => {
+      if (!cancelled) {
+        liveScale.current = percent;
+        void applyUiScale(percent);
+      }
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    }).catch((error) => console.debug('[PopoutShell] Failed to listen for UI scale:', error));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // issue #7-10：弹出窗是独立 webview，同样需要自定义右键菜单替换原生菜单。
   const { element: textEditMenuElement } = useTextEditContextMenu();
 

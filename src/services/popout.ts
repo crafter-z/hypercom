@@ -88,6 +88,11 @@ export interface PortStatusSyncItem {
   status: string;
 }
 
+/** 主窗保存软件界面缩放后，通知已打开的独立 WebView。 */
+export interface UiScaleChangedPayload {
+  percent: number;
+}
+
 export const popoutEventService = {
   /** 弹窗 → 主窗：请求发送。 */
   onSendCommand: (callback: (payload: PopoutSendCommandPayload) => void) => {
@@ -159,6 +164,12 @@ export const popoutEventService = {
     });
   },
 
+  onUiScaleChanged: (callback: (payload: UiScaleChangedPayload) => void) => {
+    return listen<UiScaleChangedPayload>('ui-scale:changed', (event) => {
+      callback(event.payload);
+    });
+  },
+
   emitSendCommand: (payload: PopoutSendCommandPayload): Promise<void> => {
     return emit('popout:send-command', payload);
   },
@@ -197,5 +208,9 @@ export const popoutEventService = {
   /** 主窗 → 弹窗：回放全部串口连接状态（issue #7-5）。 */
   emitPortStatusesSync: (payload: PortStatusSyncItem[]): Promise<void> => {
     return emit('port-statuses:sync', payload);
+  },
+
+  emitUiScaleChanged: (percent: number): Promise<void> => {
+    return emit('ui-scale:changed', { percent });
   },
 };

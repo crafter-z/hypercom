@@ -53,6 +53,7 @@ const defaultConfig: AppConfig = {
   terminalFontSize: 14,
   uiFont: 'Inter, sans-serif',
   uiFontSize: 14,
+  uiScalePercent: 100,
   // 背景图（issue #13）：默认关闭；启用后全窗毛玻璃（透明度 50%，模糊 0px 起步）。
   backgroundImage: '',
   backgroundImageEnabled: false,

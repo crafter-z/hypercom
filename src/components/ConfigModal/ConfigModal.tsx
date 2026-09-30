@@ -2,8 +2,10 @@ import React, { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
+import { popoutEventService } from '../../services/tauri';
 import { useConfigPersistence } from '../../hooks';
 import { updateTiming, runAutoCheck } from '../../utils/updateService';
+import { applyUiScale } from '../../utils/uiScale';
 import type { AppConfig } from '../../types';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X,
@@ -90,6 +92,9 @@ const ConfigModal: React.FC = () => {
     const snapshot = configSnapshotRef.current;
     const modeChanged = snapshot !== null && snapshot.updateCheckMode !== current.updateCheckMode;
     if (!(await saveConfig(current))) return;
+    void applyUiScale(current.uiScalePercent);
+    void popoutEventService.emitUiScaleChanged(current.uiScalePercent)
+      .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
     if (modeChanged) {
       // Channel bookkeeping is committed only after settings actually reach disk.
       updateTiming.clearSnooze();

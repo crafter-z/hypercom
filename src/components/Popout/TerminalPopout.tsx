@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { popoutEventService, storageService } from '../../services/tauri';
-import { useConfigPersistence } from '../../hooks/useConfigPersistence';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { computeBufferLimits, getViewportManager, replaceTerminalLines } from '../../utils/terminal/viewportManager';
 import { usePortSerialFeed } from './usePortSerialFeed';
 import TerminalView from '../MainDisplay/TerminalView';
@@ -34,7 +34,7 @@ interface TerminalPopoutProps {
  */
 const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
   const { t } = useTranslation();
-  const { loadConfig } = useConfigPersistence();
+  // PopoutShell loads the shared config once for this WebView.
   const { openGate } = usePortSerialFeed(portId);
 
   useEffect(() => {
@@ -48,18 +48,26 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
 
   useEffect(() => {
     useTerminalStore.getState().ensureTerminal(portId);
-
-    // 视觉一致性：与主窗同一份配置来源（时间戳格式/字体/最大行数）与同一份高亮
-    // 规则来源。均为一次性只读，fire-and-forget；失败仅退化为默认观感。
-    void loadConfig().then(() => {
-      // 缓冲上限来自 config.maxDisplayLines——配置到位后补一次，覆盖建实例时的默认值。
-      getViewportManager(portId).applyLimits(computeBufferLimits());
+    let cancelled = false;
+    const applyLimits = () => {
+      if (!cancelled) getViewportManager(portId).applyLimits(computeBufferLimits());
+    };
+    const unsubscribe = useSystemStore.subscribe((state) => {
+      if (state.ui.configReady) {
+        applyLimits();
+        unsubscribe();
+      }
     });
+    if (useSystemStore.getState().ui.configReady) {
+      applyLimits();
+      unsubscribe();
+    }
     storageService
       .loadHighlightSets()
-      .then((sets) => useRuleStore.getState().setHighlightRuleSets(sets))
+      .then((sets) => { if (!cancelled) useRuleStore.getState().setHighlightRuleSets(sets); })
       .catch((e) => console.debug('[TerminalPopout] loadHighlightSets failed:', e));
-  }, [portId, loadConfig]);
+    return () => { cancelled = true; unsubscribe(); };
+  }, [portId]);
 
   useEffect(() => {
     let cancelled = false;
