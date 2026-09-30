@@ -87,6 +87,20 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
     const lastWrite = JSON.parse(mockWrite.mock.calls[1][2] as string);
     expect(lastWrite).toEqual({ a: 1, b: 2 });
   });
+  it('serializes disk snapshots even when the first backend write is delayed', async () => {
+    mockRead.mockRejectedValue(new Error('no file'));
+    let releaseFirst!: () => void;
+    mockWrite.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    mockWrite.mockResolvedValue(undefined);
+    const first = pluginKv.set('com.example.test', 'a', 1);
+    await vi.waitFor(() => expect(mockWrite).toHaveBeenCalledTimes(1));
+    const second = pluginKv.set('com.example.test', 'b', 2);
+    await Promise.resolve();
+    expect(mockWrite).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(JSON.parse(mockWrite.mock.calls[1][2] as string)).toEqual({ a: 1, b: 2 });
+  });
 });
 
 describe('pluginUiRegistry（评审 v2 D2）', () => {
@@ -132,6 +146,23 @@ describe('pluginUiRegistry（评审 v2 D2）', () => {
     expect(snap.portMenuItems).toHaveLength(0);
   });
 
+  it('excludes declarations aimed at different host extension points', () => {
+    rebuildPluginUi([{
+      id: 'com.example.ui', enabled: true,
+      manifest: { name: 'UI Plugin', ui: {
+        buttons: [
+          { id: 'toolbar', label: 'Toolbar', target: 'sidebar' },
+          { id: 'wrong', label: 'Wrong', target: 'port-context' },
+        ],
+        menuItems: [
+          { id: 'menu', label: 'Menu', target: 'port-context' },
+          { id: 'wrong', label: 'Wrong', target: 'sidebar' },
+        ],
+      } },
+    }]);
+    expect(getPluginUiSnapshot().toolbarButtons[0].buttons.map((button) => button.id)).toEqual(['toolbar']);
+    expect(getPluginUiSnapshot().portMenuItems[0].menuItems.map((item) => item.id)).toEqual(['menu']);
+  });
   it('rebuild 触发订阅者通知', () => {
     const listener = vi.fn();
     const unsub = subscribePluginUi(listener);

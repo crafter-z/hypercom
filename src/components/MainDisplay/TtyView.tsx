@@ -20,6 +20,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { useAppStore } from '../../stores/useAppStore';
+import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { ttyService } from '../../utils/ttyService';
 
 interface TtyViewProps {
@@ -34,10 +35,6 @@ function cssVar(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
 }
-
-/** 字体缩放夹取区间（与 TerminalView 的 Ctrl+wheel 一致）。 */
-const FONT_MIN = 8;
-const FONT_MAX = 48;
 
 const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const { t } = useTranslation();
@@ -195,14 +192,15 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     return () => cancelAnimationFrame(raf);
   }, [hidden]);
 
-  // Ctrl+滚轮缩放（镜像 TerminalView：8–48px，同步 config + CSS 变量）。
+  // Ctrl+滚轮缩放（镜像 TerminalView：同步 config + CSS 变量）。上下限取自
+  // CONFIG_BOUNDS（数值边界的唯一来源，K2）——本地再抄一份 8/48 会在调边界时漂移。
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
     const store = useAppStore.getState();
     const current = store.config.terminalFontSize;
     const delta = e.deltaY > 0 ? -1 : 1;
-    const next = Math.max(FONT_MIN, Math.min(FONT_MAX, current + delta));
+    const next = Math.max(CONFIG_BOUNDS.terminalFontSize[0], Math.min(CONFIG_BOUNDS.terminalFontSize[1], current + delta));
     if (next !== current) {
       document.documentElement.style.setProperty('--font-size-terminal', `${next}px`);
       store.setConfig({ terminalFontSize: next });

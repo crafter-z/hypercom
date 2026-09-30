@@ -34,6 +34,8 @@ export interface ObservedRxBytes {
 export interface PluginBytesObserver {
   /** 批量投递（每帧至多 MAX_BYTES_PER_DELIVERY 字节）。插件侧自行节流/转发。 */
   onRxBytes(batch: ObservedRxBytes[]): void;
+  onRxDetached?(event: { portId: string; reason: 'port-disconnected' }): void;
+  onRxDropped?(event: { portId: string; reason: 'queue-overflow'; count: number }): void;
 }
 
 /** 每端口转发状态。 */
@@ -41,6 +43,7 @@ interface PortBytesState {
   queue: ObservedRxBytes[];
   /** 当前排队总字节数（快速容量判定，避免每次 O(n) 求和）。 */
   queuedBytes: number;
+  droppedBytes: number;
   rafId: number | null;
   timerId: number | null;
 }
@@ -82,32 +85,51 @@ function scheduleDelivery(state: PortBytesState, deliver: () => void): void {
   }
 }
 
-/** 修剪每端口队列到字节上限（丢最旧）。 */
+/** Trim oldest bytes, including prefixes of a chunk larger than the cap. */
 function enforceQueueCap(state: PortBytesState): void {
-  while (state.queuedBytes > MAX_OBSERVER_QUEUE_BYTES && state.queue.length > 0) {
-    const dropped = state.queue.shift();
-    if (dropped) state.queuedBytes -= dropped.bytes.length;
+  while (state.queuedBytes > MAX_OBSERVER_QUEUE_BYTES) {
+    const first = state.queue[0];
+    const overflow = state.queuedBytes - MAX_OBSERVER_QUEUE_BYTES;
+    if (first.bytes.length <= overflow) {
+      state.queue.shift();
+      state.queuedBytes -= first.bytes.length;
+      state.droppedBytes += first.bytes.length;
+    } else {
+      state.queue[0] = { ...first, bytes: first.bytes.slice(overflow) };
+      state.queuedBytes -= overflow;
+      state.droppedBytes += overflow;
+    }
   }
 }
 
 /** 向全部订阅者投递某端口排队的字节（每订阅者最多 MAX_BYTES_PER_DELIVERY 字节）。 */
 function deliverPort(portId: string): void {
   const state = portStates.get(portId);
-  if (!state || state.queue.length === 0) return;
-  // 收集不超过字节上限的批次。
+  if (!state) return;
+  if (state.droppedBytes > 0) {
+    const count = state.droppedBytes;
+    state.droppedBytes = 0;
+    for (const obs of observers) {
+      try {
+        obs.onRxDropped?.({ portId, reason: 'queue-overflow', count });
+      } catch (e) {
+        console.error('[pluginBytesObserver] observer onRxDropped failed:', e);
+      }
+    }
+  }
+  if (state.queue.length === 0) return;
   let takeBytes = 0;
   const batch: ObservedRxBytes[] = [];
-  let take = 0;
-  for (; take < state.queue.length; take++) {
-    if (take > 0 && takeBytes + state.queue[take].bytes.length > MAX_BYTES_PER_DELIVERY) break;
-    takeBytes += state.queue[take].bytes.length;
-    batch.push(state.queue[take]);
+  while (state.queue.length > 0 && takeBytes < MAX_BYTES_PER_DELIVERY) {
+    const first = state.queue[0];
+    const count = Math.min(first.bytes.length, MAX_BYTES_PER_DELIVERY - takeBytes);
+    batch.push({ ...first, bytes: first.bytes.subarray(0, count) });
+    takeBytes += count;
+    state.queuedBytes -= count;
+    if (count === first.bytes.length) state.queue.shift();
+    else state.queue[0] = { ...first, bytes: first.bytes.subarray(count) };
   }
-  state.queue.splice(0, take);
-  state.queuedBytes -= takeBytes;
-  if (state.queue.length > 0) {
-    scheduleDelivery(state, () => deliverPort(portId));
-  }
+  if (state.queue.length > 0) scheduleDelivery(state, () => deliverPort(portId));
   for (const obs of observers) {
     try {
       obs.onRxBytes(batch);
@@ -126,7 +148,7 @@ export function feedPluginBytes(portId: string, bytes: number[] | Uint8Array, ts
   if (bytes.length === 0) return;
   let state = portStates.get(portId);
   if (!state) {
-    state = { queue: [], queuedBytes: 0, rafId: null, timerId: null };
+    state = { queue: [], queuedBytes: 0, droppedBytes: 0, rafId: null, timerId: null };
     portStates.set(portId, state);
   }
   const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -160,6 +182,13 @@ export function notifyBytesPortDisconnected(portId: string): void {
     state.queue.length = 0;
     state.queuedBytes = 0;
     portStates.delete(portId);
+  }
+  for (const observer of observers) {
+    try {
+      observer.onRxDetached?.({ portId, reason: 'port-disconnected' });
+    } catch (error) {
+      console.error('[pluginBytesObserver] observer onRxDetached failed:', error);
+    }
   }
 }
 

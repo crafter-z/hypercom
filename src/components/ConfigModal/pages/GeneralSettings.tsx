@@ -6,6 +6,7 @@ import { updateTiming } from '../../../utils/updateService';
 import type { AppConfig } from '../../../types';
 import type { UpdateCheckMode } from '../../../types';
 import { clampNumber } from '../../../utils/clampNumber';
+import { CONFIG_BOUNDS } from '../../../utils/bounds';
 
 const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -57,9 +58,9 @@ const GeneralSettings: React.FC = () => {
           className="input"
           type="number"
           value={maxDisplayLines}
-          onChange={(e) => setConfig({ maxDisplayLines: clampNumber(e.target.value, 1000, 1000000) })}
-          min={1000}
-          max={1000000}
+          onChange={(e) => setConfig({ maxDisplayLines: clampNumber(e.target.value, CONFIG_BOUNDS.maxDisplayLines[0], CONFIG_BOUNDS.maxDisplayLines[1]) })}
+          min={CONFIG_BOUNDS.maxDisplayLines[0]}
+          max={CONFIG_BOUNDS.maxDisplayLines[1]}
           step={1000}
         />
       </div>
@@ -135,9 +136,9 @@ const GeneralSettings: React.FC = () => {
           className="input"
           type="number"
           value={maxRetries}
-          onChange={(e) => setConfig({ maxRetries: clampNumber(e.target.value, 1, 10) })}
-          min={1}
-          max={10}
+          onChange={(e) => setConfig({ maxRetries: clampNumber(e.target.value, CONFIG_BOUNDS.maxRetries[0], CONFIG_BOUNDS.maxRetries[1]) })}
+          min={CONFIG_BOUNDS.maxRetries[0]}
+          max={CONFIG_BOUNDS.maxRetries[1]}
           step={1}
           style={{ width: 80 }}
         />
@@ -179,14 +180,14 @@ const GeneralSettings: React.FC = () => {
       <div className="config-row">
         <label>{t('generalSettings.terminalFontLabel')}</label>
         <input className="input" value={terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
-        <input className="input" type="number" value={terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
+        <input className="input" type="number" value={terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: clampNumber(e.target.value, CONFIG_BOUNDS.terminalFontSize[0], CONFIG_BOUNDS.terminalFontSize[1]) })} min={CONFIG_BOUNDS.terminalFontSize[0]} max={CONFIG_BOUNDS.terminalFontSize[1]} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('generalSettings.uiFontLabel')}</label>
         <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
-        <input className="input" type="number" value={uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, 8, 96) })} min={8} max={96} style={{ width: 60 }} />
+        <input className="input" type="number" value={uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, CONFIG_BOUNDS.uiFontSize[0], CONFIG_BOUNDS.uiFontSize[1]) })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 

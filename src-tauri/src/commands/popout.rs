@@ -6,8 +6,10 @@
  *   - 快捷发送 = `"quick-send"`（单例）
  *   - 终端     = `"terminal-{safe_id}"`（safe_id 由 `sanitize` 净化 portId 得到）
  *
- * 前端 `src/components/Popout/popoutLabel.ts` 持有完全一致的 label/sanitize
- * 逻辑——两侧必须同步修改，否则置顶/关闭命令会找不到窗口。
+ * **label 规则的权威实现是本文件的 `sanitize` / `compute_label`**：命令只接受
+ * 业务语义参数（kind + target_id），label 一律由 Rust 计算，前端不再复制这套
+ * 映射——两侧各写一份必然漂移，而漂移的症状是置顶/关闭命令找不到窗口（静默
+ * 失效，没有报错）。src 侧只传 kind 与 targetId。
  */
 use tauri::{AppHandle, Manager, State};
 
@@ -25,7 +27,7 @@ pub struct PopoutMeta {
 
 /// 将任意字符串净化为窗口 label 安全的标识符：
 /// 非 `[A-Za-z0-9_-]` 字符一律替换为 `_`。
-/// 与前端 `popoutLabel.ts` 的 `sanitize` 保持逐字符一致。
+/// 这是 label 净化的唯一实现（前端不得再复刻一份，见文件头）。
 fn sanitize(id: &str) -> String {
     id.chars()
         .map(|c| {
@@ -122,12 +124,15 @@ pub async fn open_popout(
 }
 
 /// 关闭弹出窗并从注册表移除。窗口已不存在时仅清理注册表。
+/// label 由 `compute_label` 从 kind + target_id 计算（前端不持有 label 规则）。
 #[tauri::command]
 pub fn close_popout(
     app: AppHandle,
     state: State<AppState>,
-    label: String,
+    kind: String,
+    target_id: Option<String>,
 ) -> Result<(), CommandError> {
+    let label = compute_label(&kind, target_id.as_deref())?;
     if let Some(window) = app.get_webview_window(&label) {
         window
             .destroy()
@@ -140,13 +145,15 @@ pub fn close_popout(
     Ok(())
 }
 
-/// 切换弹出窗置顶状态。label 不存在时返回 Err。
+/// 切换弹出窗置顶状态。窗口（由 kind + target_id 算出 label）不存在时返回 Err。
 #[tauri::command]
 pub fn set_popout_always_on_top(
     app: AppHandle,
-    label: String,
+    kind: String,
+    target_id: Option<String>,
     on: bool,
 ) -> Result<(), CommandError> {
+    let label = compute_label(&kind, target_id.as_deref())?;
     let window = app
         .get_webview_window(&label)
         .ok_or_else(|| CommandError::Other(format!("Pop-out window not found: {}", label)))?;

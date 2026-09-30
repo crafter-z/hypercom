@@ -1,81 +1,70 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
-import { notifyError } from '../../../stores/useToastStore';
 import type { SendCommandSet } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
+import { useEntityPage } from '../hooks/useEntityPage';
 import { clampNumber } from '../../../utils/clampNumber';
+
+/**
+ * Command-set fields are not app settings, so their input range is local —
+ * the shared `CONFIG_BOUNDS` table only covers `AppConfig` numbers that the Rust
+ * side also clamps. Kept as one pair per field so the `clampNumber` bounds and
+ * the `min`/`max` attributes can never drift apart.
+ */
+const LOOP_DELAY_MS = [0, 3_600_000] as const;
+const REPEAT_COUNT = [0, 1_000_000] as const;
 
 const CommandSettings: React.FC = () => {
   const { t } = useTranslation();
   const sendCommandSets = useRuleStore((s) => s.sendCommandSets);
-  const addSendCommandSet = useRuleStore((s) => s.addSendCommandSet);
   const updateSendCommandSet = useRuleStore((s) => s.updateSendCommandSet);
-  const removeSendCommandSet = useRuleStore((s) => s.removeSendCommandSet);
-  const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
   const [lastAddedCmdId, setLastAddedCmdId] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    storageService.loadCommandSets().then(sets => {
-      // 无条件替换：空结果也要写入 store，否则「删光全部命令集」后重开弹窗
-      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
-      // 慢返回防护：加载期间用户已增删条目（store 已变）时不覆盖本地编辑。
-      if (cancelled) return;
-      if (useRuleStore.getState().sendCommandSets.length > 0) return;
-      useRuleStore.getState().setSendCommandSets(sets);
-    }).catch((e) => {
-      console.warn('[ConfigModal] loadCommandSets failed:', e);
-      notifyError(e);
-    });
-    return () => { cancelled = true; };
-  }, []);
-
-  const handleRemoveCmdSet = async (setId: string) => {
-    removeSendCommandSet(setId);
-    try { await storageService.deleteCommandSet(setId); } catch (e) { console.error('Failed to delete command set:', e); notifyError(e); }
-  };
-
-  const handleSaveSet = async (setId: string) => {
-    const set = useRuleStore.getState().sendCommandSets.find(s => s.id === setId);
-    if (!set) return;
-    try {
-      await storageService.saveCommandSet(set);
-    } catch (err) {
-      console.error('Failed to save command set:', err);
-      notifyError(err);
-    }
-  };
+  const page = useEntityPage<SendCommandSet>({
+    items: sendCommandSets,
+    label: 'CommandSettings',
+    ops: {
+      load: () => storageService.loadCommandSets(),
+      read: () => useRuleStore.getState().sendCommandSets,
+      replace: (items) => useRuleStore.getState().setSendCommandSets(items),
+      add: (set) => useRuleStore.getState().addSendCommandSet(set),
+      drop: (id) => useRuleStore.getState().removeSendCommandSet(id),
+      persist: (set) => storageService.saveCommandSet(set),
+      remove: (id) => storageService.deleteCommandSet(id),
+    },
+  });
 
   const handleAddSet = () => {
-    const id = `cmd-${Date.now()}`;
-    addSendCommandSet({ id, name: t('commandSettings.addSet'), commands: [], isLoop: false, loopDelay: 1000, repeatCount: 0 });
-    setExpandedSetId(id);
+    page.create({
+      id: `cmd-${Date.now()}`,
+      name: t('commandSettings.addSet'),
+      commands: [],
+      isLoop: false,
+      loopDelay: 1000,
+      repeatCount: 0,
+    });
   };
 
   const handleAddCmd = (setId: string) => {
+    const set = useRuleStore.getState().sendCommandSets.find(s => s.id === setId);
+    if (!set) return;
     const cmdId = `scmd-${Date.now()}`;
     setLastAddedCmdId(cmdId);
-    const sets = useRuleStore.getState().sendCommandSets;
-    const set = sets.find(s => s.id === setId);
-    if (set) {
-      updateSendCommandSet(setId, {
-        commands: [...set.commands, {
-          id: cmdId,
-          name: t('commandSettings.defaultCommandName', { index: set.commands.length + 1 }),
-          order: set.commands.length,
-          delay: 100,
-          type: 'string',
-          content: '',
-          appendLineEnding: '\\r\\n',
-        }]
-      });
-    }
+    updateSendCommandSet(setId, {
+      commands: [...set.commands, {
+        id: cmdId,
+        name: t('commandSettings.defaultCommandName', { index: set.commands.length + 1 }),
+        order: set.commands.length,
+        delay: 100,
+        type: 'string',
+        content: '',
+        appendLineEnding: '\\r\\n',
+      }],
+    });
   };
-
-  const handleSelect = (id: string) => setExpandedSetId(expandedSetId === id ? null : id);
 
   return (
     <RuleSetAccordion<SendCommandSet>
@@ -84,11 +73,11 @@ const CommandSettings: React.FC = () => {
       addLabel={t('commandSettings.accordionAddLabel')}
       emptyText={t('commandSettings.accordionEmptyText')}
       items={sendCommandSets}
-      selectedId={expandedSetId}
-      onSelect={handleSelect}
+      selectedId={page.expandedId}
+      onSelect={page.toggleExpanded}
       onAdd={handleAddSet}
-      onDelete={handleRemoveCmdSet}
-      onSave={handleSaveSet}
+      onDelete={page.remove}
+      onSave={page.save}
       onRename={(id, name) => updateSendCommandSet(id, { name })}
       renderHeaderExtra={(set) => (
         <>
@@ -104,10 +93,10 @@ const CommandSettings: React.FC = () => {
               className="input"
               type="number"
               value={set.loopDelay}
-              onChange={e => updateSendCommandSet(set.id, { loopDelay: clampNumber(e.target.value, 0, 3600000) })}
+              onChange={e => updateSendCommandSet(set.id, { loopDelay: clampNumber(e.target.value, LOOP_DELAY_MS[0], LOOP_DELAY_MS[1]) })}
               onClick={e => e.stopPropagation()}
-              min={0}
-              max={3600000}
+              min={LOOP_DELAY_MS[0]}
+              max={LOOP_DELAY_MS[1]}
               style={{ width: 60, fontSize: 11 }}
               placeholder="ms"
               title={t('commandSettings.loopDelayTooltip')}
@@ -120,10 +109,10 @@ const CommandSettings: React.FC = () => {
             className="input"
             type="number"
             value={set.repeatCount ?? 0}
-            onChange={e => updateSendCommandSet(set.id, { repeatCount: clampNumber(e.target.value, 0, 1000000) })}
+            onChange={e => updateSendCommandSet(set.id, { repeatCount: clampNumber(e.target.value, REPEAT_COUNT[0], REPEAT_COUNT[1]) })}
             onClick={e => e.stopPropagation()}
-            min={0}
-            max={1000000}
+            min={REPEAT_COUNT[0]}
+            max={REPEAT_COUNT[1]}
             style={{ width: 52, fontSize: 11 }}
             title={t('commandSettings.repeatTooltip')}
           />

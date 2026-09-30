@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * usePlugins 辅助函数回归测试（issue #17 复审补强）。
  *
@@ -13,9 +14,15 @@
  *   「宿主 → 插件事件」rx.line 权限契约——未授权插件不得收到 RX 字节）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { createRoot } from 'react-dom/client';
+import { act } from 'react';
+import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
-import { rxEligiblePluginIds, syncStorePluginConfigs } from './usePlugins';
+import { rxEligiblePluginIds, usePluginList, type PluginListApi } from './usePlugins';
+import { syncStorePluginConfigs } from '../utils/pluginConfigSnapshot';
 import type { AppConfig, PluginConfigEntry } from '../types';
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('../services/tauri', () => ({
   pluginService: {
@@ -90,6 +97,8 @@ const makeConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
 
 beforeEach(() => {
   useAppStore.setState({ config: makeConfig() });
+  vi.mocked(pluginService.listPlugins).mockReset();
+  vi.mocked(pluginService.setPluginPermissions).mockReset();
 });
 
 describe('syncStorePluginConfigs（issue #5-2 快照陷阱 + 运行时同步的源）', () => {
@@ -160,5 +169,59 @@ describe('rxEligiblePluginIds（rx.line 需 terminal:read 的权限门控）', (
       ],
     });
     expect(rxEligiblePluginIds()).toEqual(new Set());
+  });
+});
+
+describe('rapid permission toggles', () => {
+  it('serializes both clicks against the latest server response', async () => {
+    const id = 'com.example.demo';
+    syncStorePluginConfigs([{ id, enabled: true, grantedPermissions: [] }]);
+    vi.mocked(pluginService.listPlugins).mockImplementation(async () => ({
+      plugins: [], pluginConfigs: useAppStore.getState().config.pluginConfigs,
+    }));
+    let release!: (entries: PluginConfigEntry[]) => void;
+    vi.mocked(pluginService.setPluginPermissions).mockImplementationOnce(() => new Promise((resolve) => {
+      release = resolve;
+    })).mockImplementationOnce(async (_id, permissions) => [{ id, enabled: true, grantedPermissions: permissions }]);
+    let api!: PluginListApi;
+    const root = createRoot(document.createElement('div'));
+    function Probe() { api = usePluginList(); return null; }
+    await act(async () => { root.render(createElement(Probe)); });
+    const first = api.togglePermission(id, 'terminal:read');
+    const second = api.togglePermission(id, 'rx:bytes');
+    await vi.waitFor(() => expect(pluginService.setPluginPermissions).toHaveBeenCalledTimes(1));
+    release([{ id, enabled: true, grantedPermissions: ['terminal:read'] }]);
+    await act(async () => { await Promise.all([first, second]); });
+    expect(vi.mocked(pluginService.setPluginPermissions).mock.calls.map((args) => args[1])).toEqual([
+      ['terminal:read'], ['terminal:read', 'rx:bytes'],
+    ]);
+    expect(useAppStore.getState().config.pluginConfigs[0].grantedPermissions).toEqual(['terminal:read', 'rx:bytes']);
+    await act(async () => { root.unmount(); });
+  });
+
+  it('does not restore a revoked grant from a list response started before the mutation', async () => {
+    const id = 'com.example.demo';
+    const old: PluginConfigEntry = { id, enabled: true, grantedPermissions: ['serial:send'] };
+    const revoked: PluginConfigEntry = { id, enabled: true, grantedPermissions: [] };
+    syncStorePluginConfigs([old]);
+    vi.mocked(pluginService.listPlugins).mockResolvedValueOnce({ plugins: [], pluginConfigs: [old] });
+    vi.mocked(pluginService.listPlugins).mockResolvedValue({ plugins: [], pluginConfigs: [revoked] });
+    vi.mocked(pluginService.setPluginPermissions).mockResolvedValue([revoked]);
+    let api!: PluginListApi;
+    const root = createRoot(document.createElement('div'));
+    function Probe() { api = usePluginList(); return null; }
+    await act(async () => { root.render(createElement(Probe)); });
+    let deliverOld!: (response: { plugins: []; pluginConfigs: PluginConfigEntry[] }) => void;
+    vi.mocked(pluginService.listPlugins).mockImplementationOnce(() => new Promise((resolve) => {
+      deliverOld = resolve;
+    }));
+    const pendingOldList = api.refresh();
+    await act(async () => { await api.togglePermission(id, 'serial:send'); });
+    await act(async () => {
+      deliverOld({ plugins: [], pluginConfigs: [old] });
+      await pendingOldList;
+    });
+    expect(useAppStore.getState().config.pluginConfigs[0].grantedPermissions).toEqual([]);
+    await act(async () => { root.unmount(); });
   });
 });

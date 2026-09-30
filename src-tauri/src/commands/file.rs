@@ -8,9 +8,10 @@
  * 核心用途就是把配置搬到任意位置（桌面、U 盘、另一台机器），子树限制会使其失效。
  * 仅做基本有效性校验：写入确认父目录存在，读取确认文件可 canonicalize。
  */
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
+use tauri::Manager;
 
 use crate::commands::CommandError;
 
@@ -40,40 +41,142 @@ pub fn read_text_file(path: String) -> Result<String, CommandError> {
         .map_err(|e| CommandError::Io(format!("Failed to read file '{path}': {e}")))
 }
 
-/// 读取文件原始字节（供插件 fs.openDialog 用，issue #17 能力补强）。
-/// 返回 base64 编码——绕过 `read_text_file` 的 UTF-8 严格性：中文 Windows
-/// 工具链产物（如 GBK/CP936 编码的编译 map 文件）用 `read_to_string` 会整体
-/// 硬失败（无效 UTF-8 序列抛错）。路径来自系统 open 对话框显式选择（即信任
-/// 边界，与 read_text_file 同模式），仅校验文件存在且可 canonicalize。
-/// 编码解码由宿主侧 `TextDecoder(encoding)` 完成（插件可传 encoding，默认 utf-8）。
-const MAX_PLUGIN_OPEN_FILE_BYTES: u64 = 64 * 1024 * 1024; // 64MB——编译 map 可能较大，但防失控读盘
+/// 插件只能读取宿主原生对话框选中的文件；路径从不由 Worker/前端传入。
+/// 此命令在阻塞线程中弹出文件选择器并读取有大小限制的内容，避免 JS
+/// `open()` → `read_file_bytes(path)` 之间出现可伪造的任意路径读取入口。
+const MAX_PLUGIN_OPEN_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PLUGIN_PICK_FILES: usize = 8;
+const MAX_PLUGIN_PICK_TOTAL_BYTES: u64 = MAX_PLUGIN_OPEN_FILE_BYTES;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFileFilter {
+    name: String,
+    extensions: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPickOptions {
+    multiple: bool,
+    filters: Option<Vec<PluginFileFilter>>,
+    title: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPickedFile {
+    path: String,
+    base64: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct PluginPickedFiles {
+    files: Vec<PluginPickedFile>,
+}
+
+fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
+    let file = std::fs::File::open(&path)
+        .map_err(|e| CommandError::Io(format!("Cannot open selected file: {e}")))?;
+    let metadata = file.metadata()
+        .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?;
+    if !metadata.is_file() || metadata.len() > MAX_PLUGIN_OPEN_FILE_BYTES {
+        return Err(CommandError::Other("选择的文件不是普通文件或超过 64MB".into()));
+    }
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PLUGIN_OPEN_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| CommandError::Io(format!("Cannot read selected file: {e}")))?;
+    if bytes.len() as u64 > MAX_PLUGIN_OPEN_FILE_BYTES {
+        return Err(CommandError::Other("选择的文件超过 64MB".into()));
+    }
+    Ok(PluginPickedFile {
+        path: path.display().to_string(),
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
 
 #[tauri::command]
-pub fn read_file_bytes(path: String) -> Result<String, CommandError> {
-    let target = Path::new(&path);
-    target
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("Cannot canonicalize path: {e}")))?;
-    let meta = std::fs::metadata(&target)
-        .map_err(|e| CommandError::Io(format!("Failed to stat file '{path}': {e}")))?;
-    if meta.len() > MAX_PLUGIN_OPEN_FILE_BYTES {
-        return Err(CommandError::Other(format!(
-            "文件过大（{} 字节，上限 {}）: {}",
-            meta.len(),
-            MAX_PLUGIN_OPEN_FILE_BYTES,
-            path
-        )));
+pub async fn plugin_pick_files(
+    plugin_id: String,
+    options: PluginPickOptions,
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<PluginPickedFiles, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件文件选择仅允许主窗口调用".into()));
     }
-    let bytes = std::fs::read(&target)
-        .map_err(|e| CommandError::Io(format!("Failed to read file '{path}': {e}")))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    crate::plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+    let installed_at = {
+        let manager = state.config_manager.lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let entry = manager.get_config().entities.plugin_configs.iter()
+            .find(|item| item.id == plugin_id)
+            .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
+        if !entry.enabled || !entry.granted_permissions.iter().any(|perm| perm == "fs:open") {
+            return Err(CommandError::Other("插件未启用或未授予 fs:open".into()));
+        }
+        let manifest = crate::plugin::load_manifest_from_dir(&manager.plugins_dir().join(&plugin_id))
+            .map_err(CommandError::Other)?;
+        if manifest.id != plugin_id || !manifest.permissions.iter().any(|perm| perm == "fs:open") {
+            return Err(CommandError::Other("插件未声明 fs:open".into()));
+        }
+        entry.installed_at
+    };
+    tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let mut dialog = app.dialog().file();
+        if let Some(title) = options.title { dialog = dialog.set_title(title); }
+        if let Some(filters) = options.filters {
+            for filter in filters {
+                let exts: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
+                dialog = dialog.add_filter(filter.name, &exts);
+            }
+        }
+        let paths = if options.multiple {
+            dialog.blocking_pick_files().unwrap_or_default()
+        } else {
+            dialog.blocking_pick_file().into_iter().collect()
+        };
+        // The dialog may have been open while the user revoked the permission.
+        let manager = app.state::<crate::AppState>();
+        let manager = manager.config_manager.lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let permitted = manager.get_config().entities.plugin_configs.iter().any(|entry| {
+            entry.id == plugin_id && entry.installed_at == installed_at && entry.enabled
+                && entry.granted_permissions.iter().any(|perm| perm == "fs:open")
+        });
+        if !permitted {
+            return Err(CommandError::Other("插件文件读取权限已撤销".into()));
+        }
+        drop(manager);
+        if paths.len() > MAX_PLUGIN_PICK_FILES {
+            return Err(CommandError::Other("单次最多选择 8 个文件".into()));
+        }
+        let mut total_bytes = 0u64;
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let file_path = path.into_path()
+                .map_err(|e| CommandError::Other(format!("选择的文件路径不可用: {e}")))?;
+            let size = std::fs::metadata(&file_path)
+                .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?.len();
+            total_bytes = total_bytes.saturating_add(size);
+            if total_bytes > MAX_PLUGIN_PICK_TOTAL_BYTES {
+                return Err(CommandError::Other("本次选择的文件总量超过 64MB".into()));
+            }
+            files.push(read_picked_file(file_path)?);
+        }
+        Ok(PluginPickedFiles { files })
+    }).await.map_err(|e| CommandError::Other(format!("文件选择任务失败: {e}")))?
 }
 
 /// 背景图文件大小上限（20MB），超过即视为不可用。
 const MAX_BACKGROUND_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 根据文件扩展名推断 MIME 类型（小写匹配）。
-/// 不支持的扩展名返回 `None`；匹配 update.rs 的"不可用时静默返回空"风格。
+/// 不支持的扩展名返回 `None`（调用方据此走软失败路径，见 `read_image_data_url`）。
 pub fn image_mime_from_ext(ext: &str) -> Option<&'static str> {
     match ext.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
@@ -87,9 +190,12 @@ pub fn image_mime_from_ext(ext: &str) -> Option<&'static str> {
 }
 
 /// 读取图片文件为 data URL（自定义背景图，issue #13）。
-/// 返回 `data:image/<mime>;base64,<...>`；路径为空/文件不存在/扩展名不支持/
-/// 超过 `MAX_BACKGROUND_IMAGE_BYTES` 上限时返回空字符串（前端静默视为无背景图），
-/// 仅记录 warn 日志。匹配 update.rs 的"不可用时静默返回空"风格。
+/// 返回 `data:image/<mime>;base64,<...>`。
+///
+/// **软失败契约**：路径为空 / 文件不存在 / 扩展名不支持 / 超过
+/// `MAX_BACKGROUND_IMAGE_BYTES` 上限 / 读取失败，一律返回**空字符串**并记 warn。
+/// 背景图是纯装饰：它的缺失不该让设置页弹错误、也不该中断启动流程，前端按「空串
+/// = 无背景图」判定，因此这些分支不得改成 `Err`。单测钉住的就是这条契约。
 #[tauri::command]
 pub fn read_image_data_url(path: String) -> Result<String, CommandError> {
     let trimmed = path.trim();
@@ -166,7 +272,7 @@ mod tests {
 
     // 显式导入（镜像 serial/mod.rs 的测试约定，不用 `use super::*;`，
     // 避免 glob 把无关符号拖进测试二进制）。
-    use crate::commands::file::{image_mime_from_ext, read_image_data_url, read_file_bytes, MAX_PLUGIN_OPEN_FILE_BYTES};
+    use crate::commands::file::{image_mime_from_ext, read_image_data_url, read_picked_file, MAX_PLUGIN_OPEN_FILE_BYTES};
 
     /// 1x1 PNG 头部字节。函数不做 PNG 解析，仅验证 base64 往返一致。
     const TINY_PNG: &[u8] =
@@ -243,35 +349,31 @@ mod tests {
     }
 
     #[test]
-    fn read_file_bytes_roundtrips_non_utf8_content() {
-        // GBK/CP936 编码的编译 map 是中文 Windows 工具链常见产物——含非 UTF-8 字节。
-        // 函数不解析、不转码，仅 base64 往返一致（编码决策在宿主 TextDecoder）。
+    fn picked_file_roundtrips_non_utf8_content() {
         let path = unique_temp_path("map");
-        // 含非法 UTF-8 序列的字节（如 GBK 的 0x81 0x40）。
         let content: &[u8] = b"\x81\x40\x81\x41abc\x0d\x0a";
         std::fs::write(&path, content).unwrap();
-        let b64 = read_file_bytes(path.to_string_lossy().into_owned()).unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        let picked = read_picked_file(path.clone()).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(picked.base64).unwrap();
         assert_eq!(decoded, content);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn read_file_bytes_rejects_over_64mb() {
+    fn picked_file_rejects_over_64mb() {
         let path = unique_temp_path("map");
-        // 写一个刚好超过上限的稀疏文件（不真正占 64MB 磁盘：set_len 扩展文件）。
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_PLUGIN_OPEN_FILE_BYTES + 1).unwrap();
         drop(f);
-        let err = read_file_bytes(path.to_string_lossy().into_owned()).unwrap_err();
-        assert!(err.to_string().contains("文件过大"));
+        let err = read_picked_file(path.clone()).err().unwrap();
+        assert!(err.to_string().contains("超过 64MB"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn read_file_bytes_missing_path_is_error() {
+    fn picked_file_missing_path_is_error() {
         let path = unique_temp_path("map");
-        let err = read_file_bytes(path.to_string_lossy().into_owned()).unwrap_err();
-        assert!(err.to_string().contains("Cannot canonicalize"));
+        let err = read_picked_file(path).err().unwrap();
+        assert!(err.to_string().contains("Cannot open selected file"));
     }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProtocolTemplate } from '../types';
-import { ProtocolFrameReassembler, crc8, parseFrameBytes, sum8, xor8 } from './protocolParser';
+import { ProtocolFrameReassembler, crc8, sum8, xor8 } from './protocolParser';
 import type { ParsedFrame, ReassemblerSegment } from './protocolParser';
 
 /** 从有序段数组中提取帧（保持流顺序） */
@@ -169,6 +169,16 @@ describe('ProtocolFrameReassembler', () => {
     expect(payload).toMatchObject({ byteStart: 3, byteEnd: 5 });
   });
 
+  it('marks a checksum-mismatched frame invalid with a red checksum field', () => {
+    const reassembler = new ProtocolFrameReassembler(template({ checksumAlgorithm: 'sum8' }));
+    const result = reassembler.feed([0xaa, 0xbb, 0x07, 0x01, 0x02, 0x00, 0x0d, 0x0a]);
+    const frame = extractFrames(result)[0];
+    const checksum = frame?.fields.find((field) => field.name === 'Checksum');
+
+    expect(frame?.isValid).toBe(false);
+    expect(checksum).toMatchObject({ color: '#f48771' });
+  });
+
   it('emits raw bytes BEFORE the frame that follows them (stream order)', () => {
     const reassembler = new ProtocolFrameReassembler(template());
     // 垃圾字节 [0xff, 0xfe] 在前，帧在后
@@ -192,24 +202,5 @@ describe('protocol checksum functions', () => {
 
   it('computes the CRC-8-MAXIM check value for 123456789', () => {
     expect(crc8([0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39])).toBe(0xa1);
-  });
-});
-
-describe('parseFrameBytes', () => {
-  it('parses a complete frame without reassembler state', () => {
-    const bytes = [0xaa, 0xbb, 0x06, 0x01, 0x02, 0x0d, 0x0a];
-
-    const result = parseFrameBytes(bytes, template());
-
-    expect(result?.bytes).toEqual(bytes);
-    expect(result?.fields.map((field) => field.name)).toEqual(['Header', 'Length', 'Payload', 'Footer']);
-  });
-
-  it('returns checksum-mismatched frames with a red checksum field', () => {
-    const result = parseFrameBytes([0xaa, 0xbb, 0x07, 0x01, 0x02, 0x00, 0x0d, 0x0a], template({ checksumAlgorithm: 'sum8' }));
-    const checksum = result?.fields.find((field) => field.name === 'Checksum');
-
-    expect(result?.isValid).toBe(false);
-    expect(checksum).toMatchObject({ color: '#f48771' });
   });
 });

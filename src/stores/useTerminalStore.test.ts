@@ -104,3 +104,25 @@ describe('setTerminalConnectedAt', () => {
     expect(useTerminalStore.getState().terminals['GHOST']).toBeUndefined();
   });
 });
+
+// ==================== releaseTerminal（关闭端口后回收）====================
+
+describe('releaseTerminal', () => {
+  it('drops only the released port, leaving other ports untouched', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().ensureTerminal('COM2');
+    useTerminalStore.getState().setTerminalConfig('COM2', { scrollLocked: false });
+
+    useTerminalStore.getState().releaseTerminal('COM1');
+
+    const terminals = useTerminalStore.getState().terminals;
+    expect(terminals['COM1']).toBeUndefined();
+    expect(terminals['COM2'].scrollLocked).toBe(false);
+  });
+
+  it('is no-op for a port without display state', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    useTerminalStore.getState().releaseTerminal('GHOST');
+    expect(Object.keys(useTerminalStore.getState().terminals)).toEqual(['COM1']);
+  });
+});

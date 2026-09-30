@@ -1,9 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
-import { useRuleStore } from '../../stores/useRuleStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { useConfigPersistence } from '../../hooks';
-import { mergeLiveRuleEntities } from '../../utils/configMerge';
 import { updateTiming, runAutoCheck } from '../../utils/updateService';
 import type { AppConfig } from '../../types';
 import {
@@ -41,20 +40,23 @@ const navItems: NavItem[] = [
 
 const ConfigModal: React.FC = () => {
   const { t } = useTranslation();
-  const isConfigOpen = useAppStore((s) => s.ui.isConfigOpen);
-  const configActiveTab = useAppStore((s) => s.ui.configActiveTab);
-  const toggleConfigModal = useAppStore((s) => s.toggleConfigModal);
-  const setConfigActiveTab = useAppStore((s) => s.setConfigActiveTab);
+  const isConfigOpen = useSystemStore((s) => s.ui.isConfigOpen);
+  const configActiveTab = useSystemStore((s) => s.ui.configActiveTab);
+  const toggleConfigModal = useSystemStore((s) => s.toggleConfigModal);
+  const setConfigActiveTab = useSystemStore((s) => s.setConfigActiveTab);
   const setConfig = useAppStore((s) => s.setConfig);
   const { saveConfig } = useConfigPersistence();
+  // The pages edit `useAppStore.config` directly, so "the draft" is the store
+  // itself. This ref only remembers the value at open time, to roll the session
+  // back on cancel and to detect an update-channel change on save.
   const configSnapshotRef = useRef<AppConfig | null>(null);
-  // issue #6-8：overlay 点击关闭只应响应「按下和松开都在遮罩上」的点击。
-  // 框选文字时按下在弹窗内、松开在弹窗外——mouseup 落在遮罩上会合成一次
-  // overlay click 导致设置界面误关闭。用 pointerdown 记录起点是否在弹窗内。
+  // Overlay click must only close on a click whose press *and* release were both
+  // on the overlay: dragging a text selection that starts inside the dialog and
+  // ends over the overlay synthesises a click there, which used to dismiss the
+  // dialog mid-selection.
   const dialogRef = useRef<HTMLDivElement>(null);
   const mouseDownInsideDialogRef = useRef(false);
 
-  // Save snapshot when modal opens
   useEffect(() => {
     if (isConfigOpen && !configSnapshotRef.current) {
       configSnapshotRef.current = { ...useAppStore.getState().config };
@@ -69,9 +71,8 @@ const ConfigModal: React.FC = () => {
     // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
     // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
     // portGroups/portMeta，只回滚其余字段。
-    // issue #17：pluginConfigs 同理——插件启用/授权经后端命令落盘 + refresh
-    // 写回 store（见 usePlugins.syncStorePluginConfigs），取消回滚到弹窗打开时
-    // 的快照会让 store 与 config.json 分叉（宿主会话/权限校验读到旧状态）。
+    // 插件授权已由后端命令单独落盘；取消仅回滚普通设置，保留
+    // `utils/pluginConfigSnapshot.ts` 同步的当前 pluginConfigs 镜像。
     const snap = configSnapshotRef.current;
     if (snap) {
       const cur = useAppStore.getState().config;
@@ -82,30 +83,26 @@ const ConfigModal: React.FC = () => {
   };
 
   const handleSave = async () => {
-    // `useAppStore.config` 的实体数组是启动时的快照：规则页里的单条 ✓ 保存
-    // 直接经 storageService 落盘 config.json，从不回写 store.config。这里若
-    // 直接全量保存会用过期快照整体替换后端刚写入的实体（issue #5-2）——
-    // 先合并 useRuleStore 的实时实体再保存。
-    // issue #12 复审：更新模式变更的副作用挪到**保存边界**（旧实现放 radio
-    // onChange——用户点「取消」时配置回滚、snooze 却已清，副作用泄漏）。
-    // 清 snooze + lastCheckAt 使新通道立即生效：lastCheckAt 不分通道，
-    // 旧通道的 7 天周期会推迟新通道首检。
-    const snapshot = configSnapshotRef.current;
+    // The entity arrays are owned by `useRuleStore` / the live store fields, so
+    // `saveConfig` builds its own safe snapshot instead of trusting this draft
+    // wholesale (`set_config` replaces config.json entirely).
     const current = useAppStore.getState().config;
+    const snapshot = configSnapshotRef.current;
     const modeChanged = snapshot !== null && snapshot.updateCheckMode !== current.updateCheckMode;
+    if (!(await saveConfig(current))) return;
     if (modeChanged) {
+      // Channel bookkeeping is committed only after settings actually reach disk.
       updateTiming.clearSnooze();
       updateTiming.clearLastCheck();
     }
-    await saveConfig(mergeLiveRuleEntities(current, useRuleStore.getState()));
     configSnapshotRef.current = null;
     toggleConfigModal(false);
-    // issue #12 二轮：改通道保存后立即首检（不等下次启动）——bypass 周期/snooze
-    // 语义同手动检查；DEV 短路在 runCheck 内部。后台执行，有更新则弹窗。
+    // Re-check right away instead of waiting for the next startup; this runs in
+    // the background and surfaces the update dialog if one is found.
     if (modeChanged && current.updateCheckMode !== 'none') {
       void runAutoCheck(current.updateCheckMode).then((update) => {
         if (update) {
-          useAppStore.getState().setUIState({ isUpdateOpen: true, updateCandidate: update });
+          useSystemStore.getState().setUIState({ isUpdateOpen: true, updateCandidate: update });
         }
       });
     }
@@ -129,16 +126,16 @@ const ConfigModal: React.FC = () => {
     }
   };
 
+  const activeNav = navItems.find(n => n.id === configActiveTab);
+
   return (
     <div
       className="modal-overlay animate-fade-in"
       onPointerDown={(e) => {
-        // 记录按下起点是否在弹窗内部：仅当起点在遮罩上才允许点击关闭
         mouseDownInsideDialogRef.current =
           dialogRef.current?.contains(e.target as Node) ?? false;
       }}
       onClick={() => {
-        // issue #6-8：框选文字（按下在弹窗内、松开在遮罩上）不触发关闭
         if (mouseDownInsideDialogRef.current) {
           mouseDownInsideDialogRef.current = false;
           return;
@@ -168,7 +165,7 @@ const ConfigModal: React.FC = () => {
         <div className="modal-content-area">
           <div className="modal-content-header">
             <span className="modal-content-title">
-              {navItems.find(n => n.id === configActiveTab)?.labelKey ? t(navItems.find(n => n.id === configActiveTab)!.labelKey) : ''}
+              {activeNav ? t(activeNav.labelKey) : ''}
             </span>
             <button className="btn btn-icon" onClick={handleCancel} title={t('configModal.close')}>
               <X size={16} />

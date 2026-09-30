@@ -2,7 +2,7 @@
  * 插件 RPC 契约 + 权限过滤（issue #17，评审 v2 D3/P7）
  *
  * 纯函数层（无 DOM/worker 依赖，vitest 可测）：
- * - RPC 消息类型（宿主 ↔ worker 双向 `{seq, op, args}` + 响应 `{seq, ok, result|error}`）
+ * - worker → 宿主 API 请求 `{seq, op, args}` + 响应 `{seq, ok, result|error}`。
  * - `filterAllowedOps`：按「插件当前已授予权限」过滤宿主 API 调用——
  *   **调用时校验**（评审 v2 P7：撤销即时生效，worker 内旧引用不因注入时点残留权限）。
  *
@@ -10,28 +10,6 @@
  * 本层是执行点——每次 RPC 按当前 grantedPermissions 决定放行/拒绝。
  */
 
-/** 宿主 → worker 的 API 调用请求。 */
-export interface HostRequest {
-  seq: number;
-  op: string;
-  args?: unknown;
-}
-
-/** worker → 宿主 的响应。 */
-export interface HostResponse {
-  seq: number;
-  ok: boolean;
-  /** ok=true 时的结果。 */
-  result?: unknown;
-  /** ok=false 时的错误串（进 diaglog / 插件 reject）。 */
-  error?: string;
-}
-
-/** worker → 宿主的异步事件/请求（插件主动发起：事件订阅等）。 */
-export interface PluginEvent {
-  type: string;
-  payload?: unknown;
-}
 
 /** 权限点定义：op → 所需权限。无权限要求的 op 用 null（放行）。 */
 export interface PermissionMap {
@@ -43,11 +21,9 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 只读端口信息（无需敏感权限——端口列表/状态是 UI 可见信息）
   'ports.list': null,
   'ports.status': null,
-  'ports.onChange': null,
   // RX 观察
+  // Worker subscriptions use plugin.rx.onLine/onBytes(callback). These RPC names reject callbacks.
   'rx.onLine': 'terminal:read',
-  'rx.getBuffer': 'terminal:read',
-  // rx.onBytes 原始字节旁路（评审：字节级共享，需独立权限读原始流）
   'rx.onBytes': 'rx:bytes',
   // 终端写（旁注行）
   'terminal.append': 'terminal:write',
@@ -55,7 +31,6 @@ export const OP_PERMISSIONS: PermissionMap = {
   'serial.send': 'serial:send',
   // 资产读写
   'fs.read': 'fs:assets',
-  'fs.list': 'fs:assets',
   'fs.write': 'fs:storage',
   // 用户经系统对话框显式选择的任意文件读取（死机日志 map 等；对话框即信任边界）。
   // 单列 fs:open——与「仅读自身资产」的 fs:assets 语义分离，避免资产授权隐式升级。
@@ -64,7 +39,6 @@ export const OP_PERMISSIONS: PermissionMap = {
   'http.request': 'http:request',
   // shell
   'shell.openExternal': 'shell:open',
-  'shell.execute': 'shell:execute',
   // 剪贴板
   'clipboard.readText': 'clipboard',
   'clipboard.writeText': 'clipboard',
@@ -73,11 +47,6 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 插件私有 KV
   'storage.get': 'storage',
   'storage.set': 'storage',
-  // 事件
-  'events.on': 'events',
-  'events.emit': 'events',
-  // 日志（放行。v1 直接进宿主 console→diaglog——P13 独立通道+配额未实现，
-  // 已记入 plugins.md「实现进度」⑤；坏插件高频 log 可挤占 diaglog 轮转窗口）
   log: null,
   // UI（放行——面板是插件自己的输出区，权限模型核心是「零 DOM」，面板写不越权）
   'ui.panel.append': null,
@@ -90,13 +59,10 @@ export const OP_PERMISSIONS: PermissionMap = {
  * @returns 错误串（拒绝原因）或 null（放行）。
  */
 export function checkOpAllowed(op: string, grantedPermissions: string[]): string | null {
+  if (!Object.prototype.hasOwnProperty.call(OP_PERMISSIONS, op)) return `未知 API: ${op}`;
   const required = OP_PERMISSIONS[op];
-  if (required === undefined) {
-    return `未知 API: ${op}`;
-  }
-  if (required === null) {
-    return null; // 无权限要求
-  }
+  if (required === null) return null;
+  if (op === 'fs.read' && grantedPermissions.includes('fs:storage')) return null;
   return grantedPermissions.includes(required)
     ? null
     : `插件未授予 ${required} 权限（当前授予: ${grantedPermissions.join(', ') || '无'}）`;
@@ -106,7 +72,7 @@ export function checkOpAllowed(op: string, grantedPermissions: string[]): string
 export const SENSITIVE_PERMISSIONS: readonly string[] = [
   'serial:send',
   'http:request',
-  'shell:execute',
+  'shell:open',
 ];
 
 /**
@@ -122,11 +88,11 @@ export function checkPortScope(
   manifest: { serial?: { portWhitelist: string[] } } | null | undefined,
   portId: string,
 ): string | null {
-  const whitelist = manifest?.serial?.portWhitelist;
-  if (whitelist === undefined) return null; // 未声明 → 无端口作用域
-  if (whitelist.length === 0) {
-    return `serial.portWhitelist 为空数组，全部端口拒绝`;
-  }
+  if (!manifest) return '插件 manifest 不可用，端口作用域无法验证';
+  const whitelist = manifest.serial?.portWhitelist;
+  if (whitelist === undefined) return null;
+  if (!Array.isArray(whitelist)) return 'serial.portWhitelist 无效';
+  if (whitelist.length === 0) return 'serial.portWhitelist 为空数组，全部端口拒绝';
   if (!whitelist.includes(portId)) {
     return `端口 ${portId} 不在插件 serial.portWhitelist 内（${whitelist.join(', ')}）`;
   }

@@ -1,9 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
-import { useRuleStore } from '../../stores/useRuleStore';
 import { useConfigPersistence } from '../../hooks';
-import { mergeLiveRuleEntities } from '../../utils/configMerge';
 import { diagLogService, fileService } from '../../services/tauri';
 import { save } from '@tauri-apps/plugin-dialog';
 import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
@@ -75,9 +73,9 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
   const handleToggleDiag = async (checked: boolean) => {
     setConfig({ diagLogEnabled: checked });
-    // 与 ConfigModal 页脚 Save 同款问题（issue #5-2）：全量保存必须携带
-    // useRuleStore 的实时实体，否则用启动快照整体替换掉刚保存的规则。
-    await saveConfig(mergeLiveRuleEntities(useAppStore.getState().config, useRuleStore.getState()));
+    // No patch: the toggle already wrote the store, and saveConfig's safe
+    // snapshot supplies every entity array the startup snapshot would clobber.
+    await saveConfig();
   };
 
   const handleClear = async () => {

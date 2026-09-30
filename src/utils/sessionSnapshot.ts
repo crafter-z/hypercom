@@ -1,4 +1,4 @@
-import { useAppStore } from '../stores/useAppStore';
+import { useAppStore, type AppStoreState } from '../stores/useAppStore';
 import { configService } from '../services/tauri';
 
 // ==================== Session snapshot persistence (F.3) ====================
@@ -7,7 +7,7 @@ import { configService } from '../services/tauri';
  * Build the session snapshot JSON from the current app state.
  * Returns null when session restore is disabled.
  */
-export function buildSessionSnapshot(state: ReturnType<typeof useAppStore.getState>): string | null {
+export function buildSessionSnapshot(state: AppStoreState): string | null {
   if (!state.config.restoreSession) return null;
   return JSON.stringify({
     paneTree: state.paneTree,

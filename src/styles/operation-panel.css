@@ -348,6 +348,15 @@
   min-height: 52px;
 }
 
+/* HEX-mode rejection (C4/K7): the byte-count chip must never print a bogus
+ * "N B" for input the backend will reject — it carries the reason instead and
+ * has to read as a warning, not as a count. */
+.op-send-input.is-error,
+.op-send-byte-chip.is-error {
+  border-color: var(--text-error);
+  color: var(--text-error);
+}
+
 /* Byte-count readout — rides the .chip primitive; pinned to the top of
  * the compose row so it never stretches with the textarea. */
 .op-send-byte-chip {

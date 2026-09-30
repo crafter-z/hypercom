@@ -9,10 +9,11 @@
  */
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PanelBottomClose, PanelBottomOpen, X, Copy } from 'lucide-react';
+import { PanelBottomClose, PanelBottomOpen, X, Copy, Download } from 'lucide-react';
 import { usePluginPanel } from '../../hooks/usePluginPanel';
 import { clearPluginPanel } from '../../utils/pluginPanelRegistry';
-import { notifyInfo } from '../../stores/useToastStore';
+import { exportPluginPanel } from '../../utils/pluginPanelExport';
+import { notifyError, notifyInfo } from '../../stores/useToastStore';
 
 const PluginPanel: React.FC = () => {
   const { t } = useTranslation();
@@ -53,6 +54,13 @@ const PluginPanel: React.FC = () => {
                     onClick={() => copyAll(pluginId)}
                   >
                     <Copy size={13} />
+                  </button>
+                  <button
+                    className="icon-btn"
+                    title={t('plugins.panelExport')}
+                    onClick={() => void exportPluginPanel(pluginId, p.buffer).catch(notifyError)}
+                  >
+                    <Download size={13} />
                   </button>
                   <button
                     className="icon-btn"

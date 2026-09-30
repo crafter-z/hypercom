@@ -7,8 +7,11 @@
  *
  * 架构镜像 `getRxPipeline()` 的模块单例模式：
  * 1. 每 webview 一个模块级单例；弹出窗是独立 webview（独立模块作用域），自然隔离；
- * 2. 流式解码：每端口缓存一个 `TextDecoder('utf-8', { stream: true })`——多字节
- *    UTF-8 字符跨事件分片时由解码器内部缓冲，两段 feed 拼回完整字符；
+ * 2. 流式解码：每端口一个 UTF-8 解码器（`decode(..., { stream: true })`）——多字节
+ *    UTF-8 字符跨事件分片时由解码器内部缓冲，两段 feed 拼回完整字符。实例经
+ *    `lineText.createDecoder` 构建（K8：全仓唯一解码器工厂；`ignoreBOM:false`
+ *    剥离行首 BOM，与 TRX 路径同口径）——流式解码器持残字节，故必须 per-port，
+ *    不能共用一份；
  * 3. 批写：解码结果先入每端口队列，scheduleFlush 调度 flush（页面可见 rAF、
  *    隐藏/无 rAF 时 setTimeout(16ms) 兜底——镜像 rxPipeline 的 visibility-aware
  *    调度），flush = join 队列 + `term.write(text)`；
@@ -26,6 +29,7 @@ import type { Terminal } from '@xterm/xterm';
 import { serialService, gitBashSimService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { trafficStats } from './trafficStats';
+import { createDecoder } from './lineText';
 
 /** 每端口等待批写的解码字符串队列上限（条）：超过即丢弃最旧（issue #6-10 同款策略）。 */
 export const MAX_TTY_QUEUE = 10_000;
@@ -42,7 +46,8 @@ export const TX_MAX_BATCH_BYTES = 64 * 1024;
 export interface TtyPortState {
   /** xterm 实例（由 TtyView 创建并 attach；TtyView 拥有 dispose） */
   term: Terminal | null;
-  /** UTF-8 流式解码器（{stream:true}，跨 feed 缓存多字节字符） */
+  /** UTF-8 流式解码器（`lineText.createDecoder` 建；decode 时 {stream:true}，
+   *  跨 feed 缓存多字节字符；per-port 独占，不共享） */
   decoder: TextDecoder | null;
   /** 解码后等待批写的字符串（按流顺序） */
   queue: string[];
@@ -109,10 +114,10 @@ async function flushTx(portId: string, state: TtyPortState): Promise<void> {
   if (!text) return;
   try {
     const bytesWritten = await serialService.sendSerialData({
-      port_id: portId,
+      portId,
       data: text,
-      is_hex: false,
-      append_line_ending: 'None',
+      isHex: false,
+      appendLineEnding: 'None',
     });
     // P1-1：TX 统计经 1s 聚合器统一写 store（与 RX 侧同款降频）。
     trafficStats.addTx(portId, bytesWritten);
@@ -256,7 +261,7 @@ export const ttyService = {
       return;
     }
     if (!state.decoder) {
-      state.decoder = new TextDecoder('utf-8', { fatal: false });
+      state.decoder = createDecoder('UTF-8');
     }
     const text = state.decoder.decode(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes), {
       stream: true,

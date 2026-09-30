@@ -28,9 +28,11 @@ import type { PortMode } from '../types';
 
 /** 每订阅者每帧最多投递行数（评审 v2 P12 额度，镜像 maxLinesPerTick=2000）。 */
 export const MAX_LINES_PER_DELIVERY = 2000;
+export const MAX_BYTES_PER_DELIVERY = 256 * 1024;
 /** 每端口排队转发上限（行）：超过丢最旧（对齐 maxQueuedLines=10000 精神，但
  *  插件侧消费慢——放宽到同一数量级即可，隐藏窗口防无界积压）。 */
 export const MAX_OBSERVER_QUEUE = 10_000;
+export const MAX_OBSERVER_QUEUE_BYTES = 1024 * 1024;
 /** 页面隐藏时兜底转发周期（ms，镜像 rxPipeline FALLBACK_TICK_MS）。 */
 const FALLBACK_TICK_MS = 16;
 
@@ -39,7 +41,7 @@ export interface ObservedRxLine {
   portId: string;
   /** 行序号（每端口单调递增，宿主分配；跨标签重开从 0 起新一轮）。 */
   seq: number;
-  /** 未解码原始字节（postMessage transfer 零拷贝）。 */
+  /** 未解码原始字节（送 worker 时结构化克隆，不 detach 终端行）。 */
   rawData: Uint8Array;
   /** 当前 per-port 编码 label（小写，如 utf-8 / gbk）——插件按需自解码。 */
   encoding: string;
@@ -50,7 +52,7 @@ export interface ObservedRxLine {
 /** 断流通知载荷（TRX→TTY 切换等）。 */
 export interface RxDetachedEvent {
   portId: string;
-  reason: 'mode-tty' | string;
+  reason: 'mode-tty' | 'port-disconnected';
 }
 
 /** 观察者接口（一个启用插件 = 一个订阅者）。 */
@@ -59,12 +61,16 @@ export interface PluginRxObserver {
   onRxLines(lines: ObservedRxLine[]): void;
   /** 断流通知（如端口切到 TTY）。 */
   onRxDetached(event: RxDetachedEvent): void;
+  onRxDropped?(event: { portId: string; reason: 'oversized-frame' | 'queue-overflow'; count: number }): void;
 }
 
 /** 每端口转发状态。 */
 interface PortObserverState {
   seq: number;
   queue: ObservedRxLine[];
+  queuedBytes: number;
+  droppedLines: number;
+  droppedOversized: number;
   /** rAF 投递句柄。 */
   rafId: number | null;
   /** setTimeout 兜底投递句柄（页面隐藏）。 */
@@ -125,14 +131,26 @@ function scheduleDelivery(state: PortObserverState, deliver: () => void): void {
 function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }): void {
   let state = portStates.get(portId);
   if (!state) {
-    state = { seq: 0, queue: [], rafId: null, timerId: null };
+    state = { seq: 0, queue: [], queuedBytes: 0, droppedLines: 0, droppedOversized: 0, rafId: null, timerId: null };
     portStates.set(portId, state);
   }
-  if (state.queue.length >= MAX_OBSERVER_QUEUE) {
-    // 超限丢最旧（对齐 maxQueuedLines 纪律）。
-    const overflow = state.queue.length - MAX_OBSERVER_QUEUE + 1;
-    state.queue.splice(0, overflow);
+  if (line.rawData.byteLength > MAX_BYTES_PER_DELIVERY) {
+    state.seq++;
+    state.droppedLines++;
+    state.droppedOversized++;
+    scheduleDelivery(state, () => deliverPort(portId));
+    return;
   }
+  let dropped = 0;
+  while (state.queue.length >= MAX_OBSERVER_QUEUE ||
+    state.queuedBytes + line.rawData.byteLength > MAX_OBSERVER_QUEUE_BYTES) {
+    const discarded = state.queue.shift();
+    if (discarded) {
+      state.queuedBytes -= discarded.rawData.byteLength;
+      dropped++;
+    }
+  }
+  if (dropped > 0) state.droppedLines += dropped;
   state.queue.push({
     portId,
     seq: state.seq++,
@@ -140,14 +158,45 @@ function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: 
     encoding: getRxPipeline().getPortEncodingLabel(portId),
     ts: line.timestamp,
   });
+  state.queuedBytes += line.rawData.byteLength;
   scheduleDelivery(state, () => deliverPort(portId));
+}
+
+/** Protocol frames bypass the line assembler; deliver them through the same bounded RX bus. */
+export function feedPluginProtocolFrame(portId: string, rawData: Uint8Array, ts: number): void {
+  if (observers.size === 0 || rawData.length === 0) return;
+  handleAssembledLine(portId, { rawData, text: '', timestamp: ts });
 }
 
 /** 向全部订阅者投递某端口排队的行（每订阅者最多 MAX_LINES_PER_DELIVERY）。 */
 function deliverPort(portId: string): void {
   const state = portStates.get(portId);
-  if (!state || state.queue.length === 0) return;
-  const batch = state.queue.splice(0, MAX_LINES_PER_DELIVERY);
+  if (!state) return;
+  if (state.droppedLines > 0) {
+    const lost = state.droppedLines;
+    const oversized = state.droppedOversized;
+    state.droppedLines = 0;
+    state.droppedOversized = 0;
+    for (const obs of observers) {
+      try {
+        if (oversized) obs.onRxDropped?.({ portId, reason: 'oversized-frame', count: oversized });
+        if (lost > oversized) obs.onRxDropped?.({ portId, reason: 'queue-overflow', count: lost - oversized });
+      } catch (e) {
+        console.error('[pluginObserver] observer onRxDropped failed:', e);
+      }
+    }
+  }
+  if (state.queue.length === 0) return;
+  let count = 0;
+  let bytes = 0;
+  while (count < state.queue.length && count < MAX_LINES_PER_DELIVERY) {
+    const nextBytes = state.queue[count].rawData.byteLength;
+    if (count > 0 && bytes + nextBytes > MAX_BYTES_PER_DELIVERY) break;
+    bytes += nextBytes;
+    count++;
+  }
+  const batch = state.queue.splice(0, count);
+  state.queuedBytes -= bytes;
   if (state.queue.length > 0) {
     // 剩余行顺延下一帧续投。
     scheduleDelivery(state, () => deliverPort(portId));
@@ -176,6 +225,7 @@ function checkModeTransition(): void {
       if (state) {
         cancelDelivery(state);
         state.queue.length = 0;
+        state.queuedBytes = 0;
       }
       for (const obs of observers) {
         try {
@@ -239,6 +289,7 @@ export function notifyPortDisconnected(portId: string): void {
   if (state) {
     cancelDelivery(state);
     state.queue.length = 0;
+    state.queuedBytes = 0;
     portStates.delete(portId);
   }
   observedModes.delete(portId);

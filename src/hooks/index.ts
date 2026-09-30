@@ -12,4 +12,6 @@ export { useToolOutput } from './useToolOutput';
 export { usePortToolActions } from './usePortToolActions';
 export { useAutoUpdate } from './useAutoUpdate';
 export { usePluginHost, usePluginList } from './usePlugins';
-export { isUserClosingPort, isPortLost } from './disconnectTracking';
+export { useHotkeys } from './useHotkeys';
+export { usePowerManagement } from './usePowerManagement';
+export { isPortLost } from './disconnectTracking';

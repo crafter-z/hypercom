@@ -6,6 +6,7 @@ import { configService, fileService } from '../../../services/tauri';
 import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { clampNumber } from '../../../utils/clampNumber';
+import { CONFIG_BOUNDS } from '../../../utils/bounds';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
@@ -90,8 +91,8 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(t('backupSettings.importInvalid')));
         return;
       }
-      // 全量写回 config.json（含全部设置实体），set_config 内部会校验收敛并同步 LogManager。
-      await configService.setConfig(bundle.config);
+      // 备份恢复刻意整体替换插件授权；普通设置保存则在 Rust 侧保留权威状态。
+      await configService.setConfig(bundle.config, true);
       useAppStore.getState().setConfig(bundle.config);
       notifySuccess('backupSettings.importSuccess');
       // 重载让 useAppInit 从 config.json 重新加载实体到各 store。
@@ -114,7 +115,7 @@ const BackupSettings: React.FC = () => {
         <>
           <div className="config-row">
             <label>{t('backupSettings.intervalLabel')}</label>
-            <input className="input" type="number" value={backupInterval} onChange={(e) => setConfig({ backupInterval: clampNumber(e.target.value, 1, 8760) })} min={1} max={8760} />
+            <input className="input" type="number" value={backupInterval} onChange={(e) => setConfig({ backupInterval: clampNumber(e.target.value, CONFIG_BOUNDS.backupInterval[0], CONFIG_BOUNDS.backupInterval[1]) })} min={CONFIG_BOUNDS.backupInterval[0]} max={CONFIG_BOUNDS.backupInterval[1]} />
           </div>
           <div className="config-row">
             <label>{t('backupSettings.directoryLabel')}</label>

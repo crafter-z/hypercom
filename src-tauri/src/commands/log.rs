@@ -5,18 +5,6 @@ use tauri::State;
 use super::CommandError;
 use crate::{logger, AppState};
 
-/// 设置日志存储目录
-#[tauri::command]
-pub fn set_log_directory(path: String, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .set_directory(path)
-        .map_err(|e| CommandError::Log(e.to_string()))
-}
-
 /// 手动另存当前日志
 #[tauri::command]
 pub fn save_log_as(
@@ -32,11 +20,8 @@ pub fn save_log_as(
         .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path}")))?
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
-    let mut manager = state
+    state
         .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
         .save_log_as(&port_id, &path)
         .map_err(|e| CommandError::Log(e.to_string()))
 }
@@ -63,76 +48,17 @@ pub fn export_terminal_log(
 /// 获取日志文件列表
 #[tauri::command]
 pub fn get_log_files(state: State<AppState>) -> Result<Vec<logger::LogFileInfo>, CommandError> {
-    let manager = state
+    state
         .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
         .list_files()
         .map_err(|e| CommandError::Log(e.to_string()))
-}
-
-/// 设置日志分片大小 (MB)
-#[tauri::command]
-pub fn set_log_split_size(mb: u32, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_split_size(mb);
-    Ok(())
-}
-
-/// 设置日志按大小自动分片开关。前端在 set_config 时调用以同步状态。
-#[tauri::command]
-pub fn set_log_split_enabled(enabled: bool, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_split_enabled(enabled);
-    Ok(())
-}
-
-/// 设置日志文件名格式
-#[tauri::command]
-pub fn set_log_filename_format(format: String, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_filename_format(&format);
-    Ok(())
-}
-
-/// 设置日志自动保存开关。前端在 set_config 时调用以同步状态。
-#[tauri::command]
-pub fn set_log_auto_save(enabled: bool, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_auto_save(enabled);
-    Ok(())
-}
-
-/// 设置日志默认编码 (UTF-8 / GBK / ISO-8859-1 / ASCII)。
-/// 已存在的 writer 不受影响 — encoding 在 create_writer 时锁定。
-#[tauri::command]
-pub fn set_log_encoding(encoding: String, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_default_encoding(&encoding);
-    Ok(())
 }
 
 /// 开始记录日志
 #[tauri::command]
 pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
     // 从配置读取 log_format 和 log_encoding，确保 writer 使用用户配置的格式与编码，
-    // 而非依赖 set_log_encoding 是否已在前端同步（消除启动时序窗口的不一致）。
+    // 而非依赖配置同步的时序窗口（LogManager 的编码只影响新建 writer）。
     let (format, encoding) = {
         let config_mgr = state
             .config_manager
@@ -141,11 +67,8 @@ pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), Comm
         let cfg = config_mgr.get_config();
         (cfg.log_format.clone(), cfg.log_encoding.clone())
     };
-    let mut manager = state
+    state
         .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
         .create_writer_with_encoding(&port_id, &format, &encoding)
         .map_err(|e| CommandError::Log(e.to_string()))
 }
@@ -153,11 +76,8 @@ pub fn start_logging(port_id: String, state: State<AppState>) -> Result<(), Comm
 /// 停止记录日志
 #[tauri::command]
 pub fn stop_logging(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
-    let mut manager = state
+    state
         .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
         .close_writer(&port_id)
         .map_err(|e| CommandError::Log(e.to_string()))
 }
@@ -168,13 +88,7 @@ pub fn stop_logging(port_id: String, state: State<AppState>) -> Result<(), Comma
 pub fn open_path(path: String, state: State<AppState>) -> Result<(), CommandError> {
     // 作用域校验 (defects #54): 仅允许打开 LogManager 的 log_directory 子树下的路径。
     // 防止前端任意 invoke 让后端打开 C:\Windows\System32 等敏感路径。
-    let log_dir = {
-        let mgr = state
-            .log_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.get_directory().clone()
-    };
+    let log_dir = state.log_manager.get_directory();
     let canonical_target = Path::new(&path)
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("Cannot canonicalize path: {e}")))?;
@@ -223,13 +137,11 @@ pub fn open_path(path: String, state: State<AppState>) -> Result<(), CommandErro
 /// 打开当前的日志目录（按当前 LogManager 配置）。
 #[tauri::command]
 pub fn open_log_directory(state: State<AppState>) -> Result<(), CommandError> {
-    let dir = {
-        let mgr = state
-            .log_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.get_directory().to_string_lossy().to_string()
-    };
+    let dir = state
+        .log_manager
+        .get_directory()
+        .to_string_lossy()
+        .to_string();
     open_path(dir, state)
 }
 
@@ -277,14 +189,10 @@ pub fn migrate_log_directory(
     }
 
     // 更新 LogManager 的目录指向
-    {
-        let mut mgr = state
-            .log_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.set_directory(new_dir.clone())
-            .map_err(|e| CommandError::Log(e.to_string()))?;
-    }
+    state
+        .log_manager
+        .set_directory(new_dir.clone())
+        .map_err(|e| CommandError::Log(e.to_string()))?;
 
     log::info!(
         "Migrated {} log files from {} to {}",

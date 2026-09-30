@@ -2,8 +2,8 @@ import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
-import type { PaneNode, SerialPort, PortMetaEntry } from '../types';
-import { useConfigPersistence } from './useConfigPersistence';
+import type { PaneNode, SerialPort } from '../types';
+import { collectPortMeta, useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
 
 /** Validate a deserialized PaneNode tree structure (F.3 session restore). */
@@ -124,17 +124,14 @@ export function useAppInit() {
   // 由后端 ConfigManager.save() 保证）。替代旧的「保存布局」手动按钮。
   // 与 App.tsx 会话快照订阅同款防抖写法；后台持久化失败只记日志不弹 toast，
   // 避免高频操作期间的重复打扰。
-  // issue #4-10：落盘前同步回写 store.config.portGroups——否则 ConfigModal /
-  // 主题切换等「全量保存 config」路径会用陈旧的 config.portGroups 覆盖掉
-  // 本次保存的分组，导致重启后分组丢失。
+  // 这里**不**回写 store.config.portGroups：全量保存（saveConfig）从 store.groups
+  // 取实时分组，不再依赖启动快照，回写反而多一条会分叉的写路径。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     // issue #6-8：防抖 cleanup 原先只 clearTimeout，关窗/崩溃会丢最近 500ms 改动。
     // 兜底 flush：cleanup 时若仍有待触发防抖，同步保存一次再 clear。
     const flushGroups = () => {
-      const groups = useAppStore.getState().groups;
-      useAppStore.getState().setConfig({ portGroups: groups });
-      storageService.savePortGroups(groups).catch((e) => {
+      storageService.savePortGroups(useAppStore.getState().groups).catch((e) => {
         console.warn('[useAppInit] Failed to auto-save port groups:', e);
       });
     };
@@ -158,27 +155,18 @@ export function useAppInit() {
   // 端口元数据自动保存（备注名 / 隐藏状态，issue #4-9）：与分组同款防抖 +
   // 整体替换落盘。订阅用「别名/隐藏 签名」比较而非数组引用，因为 3s 端口轮询
   // 每次都会重建 ports 数组，但 mergePorts 保留了 alias/isHidden 值，签名不变
-  // 就不会误触发。同样同步回写 store.config.portMeta，防全量保存覆盖。
+  // 就不会误触发。
+  // 同样不回写 store.config.portMeta：全量保存（saveConfig）由 ports 现推，
+  // 见 useConfigPersistence.collectPortMeta。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let lastSignature = '';
-    const computeSignature = () =>
-      useAppStore
-        .getState()
-        .ports.filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
-        // issue #11：签名纳入 mode，工厂 reset 或合并回 'trx' 时能正确触发回写。
-        .map((p) => `${p.id}\u0001${p.alias ?? ''}\u0001${p.isHidden ? '1' : '0'}\u0001${p.mode ?? 'trx'}`)
-        .join('\u0002');
-    lastSignature = computeSignature();
+    // 签名即投影后的 portMeta 序列化——与落盘内容同源，不会出现「签名字段与
+    // 实际落盘字段不一致」的漏保存。
+    const computeSignature = () => JSON.stringify(collectPortMeta(useAppStore.getState().ports));
+    let lastSignature = computeSignature();
     // issue #6-8：防抖 cleanup 兜底 flush（同分组 effect），关窗/崩溃不丢最近 500ms 改动。
     const flushMeta = () => {
-      const state = useAppStore.getState();
-      const meta: PortMetaEntry[] = state.ports
-        .filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
-        // issue #11：meta 携带 mode——只有 tty 需要持久化（trx 是默认值，缺省即 trx）。
-        .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
-      state.setConfig({ portMeta: meta });
-      storageService.savePortMeta(meta).catch((e) => {
+      storageService.savePortMeta(collectPortMeta(useAppStore.getState().ports)).catch((e) => {
         console.warn('[useAppInit] Failed to auto-save port meta:', e);
       });
     };

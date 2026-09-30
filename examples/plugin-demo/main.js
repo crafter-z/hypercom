@@ -38,10 +38,10 @@ self.plugin.on('rx.detached', function (e) {
 
 // 用例②：声明式 UI 按钮 → 宿主推送 ui.buttonClick。
 self.plugin.on('ui.buttonClick', function (payload) {
-  self.plugin.api['terminal.append']({
-    portId: (payload && payload.context && payload.context.portId) || '',
-    text: '[demo] 已观察 ' + lineCount + ' 行 RX（按钮 ' + ((payload && payload.buttonId) || '?') + '）',
-  });
+  var portId = payload && payload.context && payload.context.portId;
+  var text = '[demo] 已观察 ' + lineCount + ' 行 RX（按钮 ' + ((payload && payload.buttonId) || '?') + '）';
+  if (portId) self.plugin.api['terminal.append']({ portId: portId, text: text });
+  else self.plugin.api['ui.panel.append']({ text: text + '\n' });
 });
 
 // 用例③：serial 作用域演示——manifest 声明 portWhitelist: ["COM9"]，

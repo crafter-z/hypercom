@@ -31,47 +31,26 @@ const PluginSettings: React.FC = () => {
     installPlugin,
     uninstallPlugin,
     setEnabled,
-    grantPermissions,
+    togglePermission,
   } = usePluginList();
   // 插件出站代理（issue #17）：宿主显式配置，供 plugin_http 使用（不继承宿主系统代理）。
   const pluginProxyEnabled = useAppStore((s) => s.config.pluginProxyEnabled);
   const pluginProxy = useAppStore((s) => s.config.pluginProxy);
   const setConfig = useAppStore((s) => s.setConfig);
-  /** 安装：先选目录，再允许选 zip（dialog 过滤器）。 */
-  const handleInstall = async (): Promise<void> => {
+  const handleInstall = async (source: 'directory' | 'zip'): Promise<void> => {
     try {
-      // 目录选择（插件目录含 manifest.json）
-      const dir = await open({ directory: true, multiple: false, title: 'Select plugin directory' });
-      if (typeof dir === 'string') {
-        await installPlugin(dir);
-        return;
-      }
-      // zip 选择
-      const file = await open({
-        multiple: false,
-        filters: [{ name: 'Plugin archive', extensions: ['zip'] }],
-        title: 'Select plugin .zip',
-      });
-      if (typeof file === 'string') {
-        await installPlugin(file);
-      }
-    } catch (e) {
-      // usePlugins 已 notifyError；此处吞掉用户取消（dialog 返回 null 正常流）。
-      console.debug('[PluginSettings] install dialog cancelled or failed:', e);
+      const selected = source === 'directory'
+        ? await open({ directory: true, multiple: false, title: t('plugins.installDirectory') })
+        : await open({ multiple: false, filters: [{ name: 'Plugin archive', extensions: ['zip'] }], title: t('plugins.installZip') });
+      if (typeof selected === 'string') await installPlugin(selected);
+    } catch (error) {
+      // usePluginList reports installation failures. Closing the native picker returns null.
+      console.debug('[PluginSettings] install failed:', error);
     }
   };
 
-  /** 权限勾选切换：整体替换 grantedPermissions。 */
-  const handleTogglePermission = async (pluginId: string, perm: string, granted: string[]): Promise<void> => {
-    const next = granted.includes(perm)
-      ? granted.filter((p) => p !== perm)
-      : [...granted, perm];
-    await grantPermissions(pluginId, next);
-  };
 
-  /** 启用/禁用。敏感权限（设计 D3：serial:send/http:request/shell:execute）首次
-   *  启用时确认框列出声明与风险说明——v1 用原生 confirm（知情同意），授予仍在
-   *  权限区逐项进行（撤销即时生效）。 */
+  /** 启用时提示当前可授予的敏感权限；未实现能力不列入风险确认。 */
   const handleToggleEnabled = (plugin: { id: string; name: string | null; declaredPermissions: string[]; enabled: boolean }): void => {
     if (!plugin.enabled) {
       const sensitive = plugin.declaredPermissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
@@ -87,11 +66,14 @@ const PluginSettings: React.FC = () => {
       <div className="settings-section-header">
         <h3>{t('plugins.title')}</h3>
         <div className="plugin-settings-actions">
-          <button className="btn-secondary" onClick={() => void refresh()} disabled={loading}>
+          <button className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
             <RefreshCw size={14} /> {t('plugins.refresh')}
           </button>
-          <button className="btn-primary" onClick={() => void handleInstall()} disabled={loading}>
-            <FolderOpen size={14} /> {t('plugins.installButton')}
+          <button className="btn btn-primary btn-sm" onClick={() => void handleInstall('directory')} disabled={loading}>
+            <FolderOpen size={14} /> {t('plugins.installDirectory')}
+          </button>
+          <button className="btn btn-sm" onClick={() => void handleInstall('zip')} disabled={loading}>
+            <FolderOpen size={14} /> {t('plugins.installZip')}
           </button>
         </div>
       </div>
@@ -112,13 +94,13 @@ const PluginSettings: React.FC = () => {
 
       {pluginProxyEnabled && (
         <div className="config-row">
-          <label>{t('plugins.proxy.urlLabel')}</label>
+          <label htmlFor="plugin-proxy-url">{t('plugins.proxy.urlLabel')}</label>
           <input
+            id="plugin-proxy-url"
             className="input"
             value={pluginProxy}
             placeholder={t('plugins.proxy.urlPlaceholder')}
             onChange={(e) => setConfig({ pluginProxy: e.target.value })}
-            style={{ flex: 1 }}
           />
         </div>
       )}
@@ -133,7 +115,8 @@ const PluginSettings: React.FC = () => {
       ) : (
         <div className="plugin-list">
           {plugins.map((plugin) => {
-            const declared = plugin.manifest?.permissions ?? [];
+            const declared = (plugin.manifest?.permissions ?? [])
+              .filter((permission) => plugin.knownPermissions.includes(permission));
             const granted = plugin.grantedPermissions;
             return (
               <div key={plugin.id} className={`plugin-card ${plugin.manifestError ? 'plugin-card-error' : ''}`}>
@@ -149,12 +132,12 @@ const PluginSettings: React.FC = () => {
                   </div>
                   <div className="plugin-card-controls">
                     <button
-                      className={plugin.enabled ? 'btn-toggle-on' : 'btn-toggle'}
+                      className={`btn btn-sm${plugin.enabled ? ' active' : ''}`}
                       onClick={() =>
                         handleToggleEnabled({
                           id: plugin.id,
                           name: plugin.manifest?.name ?? null,
-                          declaredPermissions: plugin.declaredPermissions,
+                          declaredPermissions: declared,
                           enabled: plugin.enabled,
                         })
                       }
@@ -163,7 +146,7 @@ const PluginSettings: React.FC = () => {
                       <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
                     </button>
                     <button
-                      className="btn-danger-ghost"
+                      className="btn btn-danger btn-sm"
                       onClick={() => {
                         if (window.confirm(t('plugins.uninstallConfirm', { name: plugin.manifest?.name ?? plugin.id }))) {
                           void uninstallPlugin(plugin.id);
@@ -200,7 +183,7 @@ const PluginSettings: React.FC = () => {
                                 type="checkbox"
                                 checked={granted.includes(perm)}
                                 disabled={!plugin.enabled}
-                                onChange={() => void handleTogglePermission(plugin.id, perm, granted)}
+                                onChange={() => void togglePermission(plugin.id, perm)}
                               />
                               <code>{perm}</code>
                               <span className="plugin-perm-state">

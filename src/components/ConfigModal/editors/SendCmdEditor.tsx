@@ -2,6 +2,7 @@ import React, { useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2 } from 'lucide-react';
 import type { SendCommand } from '../../../types';
+import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils';
 
 interface SendCmdEditorProps {
   cmd: SendCommand;
@@ -33,10 +34,9 @@ const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, on
           <option value="hex">HEX</option>
         </select>
         <select className="select" value={cmd.appendLineEnding} onChange={e => onChange({ appendLineEnding: e.target.value as SendCommand['appendLineEnding'] })} style={{ width: 70 }}>
-          <option value={'\r\n'}>\r\n</option>
-          <option value={'\r'}>\r</option>
-          <option value={'\n'}>\n</option>
-          <option value="None">{t('sendCmdEditor.lineEnding.none')}</option>
+          {LINE_ENDING_VALUES.map(v => (
+            <option key={v} value={v}>{t(lineEndingLabelKey(v, 'sendCmdEditor'))}</option>
+          ))}
         </select>
         <button className="btn btn-icon btn-sm" onClick={onDelete} title={t('sendCmdEditor.delete')}><Trash2 size={12} /></button>
       </div>

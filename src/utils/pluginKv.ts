@@ -13,6 +13,9 @@ import { pluginService } from '../services/tauri';
 
 /** 内存缓存：pluginId → Map<key, value>（读盘后缓存；写盘后更新）。 */
 const cache = new Map<string, Map<string, unknown>>();
+/** Disk snapshots must be serialized: overlapping write_plugin_asset calls can finish out of order. */
+const writes = new Map<string, Promise<void>>();
+const generations = new Map<string, number>();
 
 const STATE_FILE = 'data/state.json';
 
@@ -24,13 +27,23 @@ export async function get(pluginId: string, key: string): Promise<unknown> {
 
 /** 写入插件 KV 值（value 必须 JSON 可序列化）。写盘整体替换。 */
 export async function set(pluginId: string, key: string, value: unknown): Promise<void> {
+  const generation = generations.get(pluginId) ?? 0;
   const m = await load(pluginId);
-  if (value === undefined) {
-    m.delete(key);
-  } else {
-    m.set(key, value);
+  if (generation !== (generations.get(pluginId) ?? 0)) throw new Error('plugin storage invalidated');
+  if (value === undefined) m.delete(key);
+  else m.set(key, value);
+  const snapshot = JSON.stringify(Object.fromEntries(m), null, 2);
+  const previous = writes.get(pluginId) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(() => {
+    if (generation !== (generations.get(pluginId) ?? 0)) throw new Error('plugin storage invalidated');
+    return pluginService.writePluginAsset(pluginId, STATE_FILE, snapshot);
+  });
+  writes.set(pluginId, next);
+  try {
+    await next;
+  } finally {
+    if (writes.get(pluginId) === next) writes.delete(pluginId);
   }
-  await persist(pluginId, m);
 }
 
 /** 读入插件 KV（缓存命中直接返回；读盘失败/无 state.json → 空 Map）。
@@ -44,6 +57,7 @@ async function load(pluginId: string): Promise<Map<string, unknown>> {
   if (cached) return cached;
   const pending = inflight.get(pluginId);
   if (pending) return pending;
+  const generation = generations.get(pluginId) ?? 0;
   const promise = (async (): Promise<Map<string, unknown>> => {
     let raw: string;
     try {
@@ -51,7 +65,7 @@ async function load(pluginId: string): Promise<Map<string, unknown>> {
     } catch {
       // 无 state.json（首次）——空 Map。
       const empty = new Map<string, unknown>();
-      cache.set(pluginId, empty);
+      if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, empty);
       return empty;
     }
     let parsed: Record<string, unknown>;
@@ -61,27 +75,24 @@ async function load(pluginId: string): Promise<Map<string, unknown>> {
       parsed = {}; // 损坏的 state.json 降级为空（插件数据非关键）。
     }
     const m = new Map<string, unknown>(Object.entries(parsed));
-    cache.set(pluginId, m);
+    if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, m);
     return m;
   })();
   inflight.set(pluginId, promise);
   try {
     return await promise;
   } finally {
-    inflight.delete(pluginId);
+    if (inflight.get(pluginId) === promise) inflight.delete(pluginId);
   }
 }
 
-/** 整体写盘（state.json，data/ 区——后端限 storage 权限写入）。 */
-async function persist(pluginId: string, m: Map<string, unknown>): Promise<void> {
-  const obj = Object.fromEntries(m.entries());
-  await pluginService.writePluginAsset(pluginId, STATE_FILE, JSON.stringify(obj, null, 2));
-}
-/** 测试/卸载用：清内存缓存与 in-flight 读盘（应用内卸载插件时调用，
- *  防跨插件残留 + 挂起读盘把已删插件的缓存复活）。 */
+/** Uninstall/reinstall invalidates cached reads and prevents queued writes from starting.
+ * An already-running backend write cannot be cancelled here. */
 export function invalidate(pluginId: string): void {
   cache.delete(pluginId);
   inflight.delete(pluginId);
+  generations.set(pluginId, (generations.get(pluginId) ?? 0) + 1);
+  writes.delete(pluginId);
 }
 
 export const pluginKv = { get, set, invalidate };

@@ -1,3 +1,56 @@
+# HyperCom v0.6.8
+
+## Bugfix
+
+- **快捷发送弹窗里改的命令不再丢失**：弹窗是独立窗口，其内存中的规则集是空实例，此前「编辑命令」写的是一个恒为空操作的对象——编辑虽然落了盘，但之后任何一次全量保存（设置弹窗保存 / 诊断日志开关 / 更新「不再提醒」）都会用主窗的旧数据把它覆盖回去。现在弹窗把整组命令回传主窗由主窗定案落库
+- **日志行前缀开关重启后不再失效**：「包含时间戳」/「包含方向」此前只在保存设置时才同步到后端，重启后日志又按默认值输出。日志设置已收敛为单一入口，启动、保存两条路径同源
+- **字号与备份间隔不再被静默改回**：设置页允许输入字号 8–96、备份间隔 1–8760，而后端实际边界是 8–48 / 1–720，保存后重启即被改回。现在两侧共用同一张边界表，并有跨语言测试钉住一致性
+- **HEX 输入不再「假可用」**：奇数个十六进制位此前被前端自动补零并显示「N B」，而后端会直接拒绝。现在输入非法时明确提示原因并禁用发送
+- **关闭标签页后重开不再残留旧状态**：关闭标签时一并回收该端口的显示状态、流量统计与发送历史（串口连接与后端日志照旧保留）
+- **侧边栏整组「全部连接 / 断开」改为顺序执行**：原并行触发会争抢同一串口句柄
+- **终端弹窗明确标注能力范围**：该窗口只渲染 RX、不做协议解析（此前是静默缺失）
+- 日志分片失败、配置文件写入失败等场景不再静默：错误向上传播并留痕于诊断日志
+
+## 兼容性
+
+- 旧串口参数预设里的非受支持取值（如 `Mark` / `Space` / `1.5` 位）在加载时自动归一化为受支持的取值，不再在打开串口时报错
+- TRX 终端行首的 UTF-8 BOM 不再作为内容显示
+- 旧 `config.json` 继续兼容（已废弃的 `configVersion` 与双内存预算字段自动忽略）
+
+## 其他
+
+- 新增 push / PR 质量门（类型检查 + 单测 + 生产构建 + release-profile 编译检查 + 端到端测试），不再只在打 tag 发版时才校验
+- 内部重构：Rust 侧串口与日志模块按职责拆分并引入端口类型枚举；前端拆分全局 store、服务层与快捷发送面板；删除 7 个前端不可达的后端命令与一批死代码
+- 文档按当前实现重新对齐，并移除易腐的行号断言
+
+# HyperCom v0.7.0
+
+## 新特性
+
+- **插件系统**：支持目录 / ZIP 安装、Web Worker 插件宿主、声明式 Sidebar 与端口菜单、插件输出面板、RX 行 / 原始字节旁路、端口作用域发送、HTTP 白名单外联、原生文件选择、私有 KV 与外部 URL 打开。
+
+## 安全与可靠性
+
+- 严格反向域名插件 ID、ZIP slip / ZIP bomb / 目录源容量防护、安装升级 staging 与回滚、用户 `data/` 保留、原子资产写入、主窗口命令边界与调用时权限校验。
+- 插件升级默认清空启用状态与旧授权；未实现权限不可授予；撤权、卸载、Worker 崩溃、RX 背压和插件列表迟到响应均有明确处理。
+- 配置全量保存增加 revision CAS；并发实体 CRUD 不再被旧快照覆盖，保存冲突重组重试，失败不关闭设置弹窗。
+
+## 验证
+
+- Vitest 759 tests、Rust 245 tests、Playwright 26 tests、TypeScript 检查和生产前端构建通过；生产 Tauri CSP / 原生安装升级仍需发布环境手工回归。
+
+# HyperCom v0.6.7
+
+## Bugfix
+
+- 暂停后不再跟随钉底（issue #18）：暂停（`frozenSeq`）时禁止跟随，冻结视口不再随滚动窗口收缩而漂移。`viewportManager.buildView` 把 `frozenSeq` 纳入 `shouldFollow`，`TerminalRenderer.render` 的 follow 判定补 `frozenSeq === null` 双保险
+- 小步 head trim 下阅读锚定（issue #19）：非跟随满缓冲稳态下，逐行滚动窗口每帧 append + head trim（advance ≤ `maxLinesPerTick` 2000）远低于旧 `LARGE_TRIM_ROWS`(2500) 阈值，「仅大 trim 恢复」永不触发，视口顶 seq 随 firstSeq 每帧 +1 使阅读行被逐帧上顶。修复后任意 head trim（`headAdvance > 0` 且锚点行仍存活）均按 `anchorSeq` 恢复阅读位置；`setLimits` 收缩走原有大 trim 分支
+
+## 其他
+
+- 界面截图更新至 v0.6.6（`UI.png` 替换旧 v0.1.0）
+- 测试：vitest 新增「暂停不钉底」与「小步 head trim 视口顶 seq 不变」回归（TerminalRenderer / viewportManager）
+
 # HyperCom v0.6.6
 
 ## 新特性
@@ -379,7 +432,7 @@ v0.3.x 及更早版本用户将在应用内收到更新提示，更新弹窗会�
 ## 重构与清理
 - 死代码删除：`useRuleStore.activeHighlightSetId`/`activeProtocolTemplateId` 及 setter（全仓零生产消费）、`useConfigPersistence.resetAndReload`（零消费）、`logService.setLogDirectory`（零消费，后端命令保留）、`useSerialReceive.setupPromiseRef`（死 ref）、`hasViewportManager` 导出、i18n 12 个零引用 key（550 键/侧）
 - 重复实现合并：`clampNumber` 5 份页内拷贝 → `utils/clampNumber.ts`；`performance.memory` 读取两份 → `utils/jsHeap.ts`；`usePanelCyclicSend.onProgress` 死参数回调删除
-- 文档对齐：AGENTS.md / hooks / ConfigModal / MainDisplay 计数断言全部修正（15 hooks / 11 域文件 / 16 CSS / 9 pages / 550 i18n 键），移除 MainDisplay 文档中已删的 TerminalRow.tsx 幽灵条目与 react-virtual 描述；ISSUES_ANALYSIS.md / TTY_PERF_INVESTIGATION.md 标注结论过时
+- 文档对齐：AGENTS.md / hooks / ConfigModal / MainDisplay 计数断言全部修正（15 hooks / 11 域文件 / 16 CSS / 9 pages / 550 i18n 键），移除 MainDisplay 文档中已删的 TerminalRow.tsx 幽灵条目与 react-virtual 描述；结论已过时的排查报告 ISSUES_ANALYSIS.md / TTY_PERF_INVESTIGATION.md 删除（其结论已被本轮修复覆盖）
 
 ## Bugfix（异步时序）
 - 重连循环不再无视用户关闭意图：每轮退避前检查 `userClosingPortIds`，用户主动关闭后循环立即中止（此前会在下一次重试时悄悄重开；不能看 port.status——后端先发 disconnected 再发 reconnect_hint，attempt=0 时 store 已是 disconnected，会误杀循环）

@@ -5,7 +5,8 @@ import { serialService } from '../services/tauri';
 import type { SendHistoryEntry, LineEnding } from '../types';
 import { notifyError, useToastStore } from '../stores/useToastStore';
 import { getRxPipeline } from '../utils/rxPipeline';
-import { isSendablePort } from '../utils/sendGuard';
+import { isSendablePort, portClosedReason } from '../utils/sendGuard';
+import { hexInputError, parseHexBytes } from '../utils/sendUtils';
 import { trafficStats } from '../utils/trafficStats';
 
 // ==================== Module-level in-memory send history ====================
@@ -35,13 +36,23 @@ function recordSendHistory(portId: string, data: string, isHex: boolean, lineEnd
 }
 
 /**
+ * 释放某端口的发送历史（标签页 / 端口关闭时由 `releaseTerminalState` 调用）。
+ * 模块级函数：清理入口不能依赖 hook 实例——关闭发生在组件卸载前后皆可能。
+ */
+export function releaseSendHistory(portId: string): void {
+  sendHistoryMap.delete(portId);
+}
+
+/**
  * 发送核心（模块级，无 hook 依赖）——TX 回显 / 流量统计 / 发送历史的唯一实现。
  *
  * 后端 `send_serial_data` 不发 TX 事件：终端 TX 行、TX 流量、发送历史全部由这里
  * 在前端产生。弹出窗经意图事件（`popout:send-command`）回到主窗调用本函数，
  * 从而复用同一条发送管线——弹窗自己直连后端会丢掉 TX 回显与统计。
  *
- * `silent`（循环发送用）出错时原样抛出由调用方聚合；否则 toast 提示并返回 0。
+ * `silent`（循环发送 / 触发自动回复用）出错时原样抛出由调用方聚合；否则 toast
+ * 提示并返回 0。**静默的是提示，不是错误**：两种拒绝路径都留 warn 日志，后端失败
+ * 在 silent 下仍然抛出。
  */
 export async function sendToPort(
   portId: string,
@@ -51,6 +62,24 @@ export async function sendToPort(
   silent = false
 ): Promise<number> {
   const state = useAppStore.getState();
+
+  // HEX 契约（C4 / K7）：与后端 `parse_hex_string` 同尺子——非法输入（奇数个
+  // 半字节 / 非 HEX 字符）后端必然 Err。提前拦掉，前端绝不发出后端会拒绝的东西。
+  if (isHex) {
+    const hexError = hexInputError(data);
+    if (hexError !== null) {
+      console.warn('[sendToPort] Refusing to send invalid HEX input:', data);
+      if (!silent) {
+        useToastStore.getState().push({
+          severity: 'warning',
+          messageKey: hexError,
+          portId,
+        });
+      }
+      return 0;
+    }
+  }
+
   // Closed-port guard (issue #5-4-7): a tab can exist while its port is
   // disconnected, so the send button stays enabled — the guard belongs HERE,
   // at the single sendToPort chokepoint (manual send / pop-out bridge /
@@ -59,6 +88,9 @@ export async function sendToPort(
   // return 0 without touching the backend, the TX echo, history or stats.
   const port = state.ports.find((p) => p.id === portId);
   if (!isSendablePort(port)) {
+    // 静默分支也要留痕：循环发送靠「返回 0 不抛错」保持节奏，但端口为何被拒
+    // （未枚举 vs 未连接）必须可观测，不能连日志都没有。
+    console.warn('[sendToPort] Send blocked:', portClosedReason(port), portId);
     if (!silent) {
       useToastStore.getState().push({
         severity: 'warning',
@@ -74,7 +106,7 @@ export async function sendToPort(
   // TTY 模式（issue #11）：无本地回显——对端 shell 会把命令 echo 回来，本地再
   // 插一条 TX 行既重复又破坏终端流。因此 TTY 下跳过 TX 回显与 RX 队列排空，
   // 仍走「后端发送 + 流量统计 + 发送历史」（快捷发送/命令面板在 TTY 下可复用）。
-  const isTty = port?.mode === 'tty';
+  const isTty = port.mode === 'tty';
 
   if (!isTty) {
     const prefix = sendPrefix ? `${sendPrefix} ` : '';
@@ -85,14 +117,7 @@ export async function sendToPort(
     //  - string: UTF-8 bytes of `data` WITHOUT the cosmetic sendPrefix
     // issue #6-2：存 Uint8Array（与 RX 行一致，省内存、类型统一）
     const txRawData: Uint8Array = isHex
-      ? Uint8Array.from(
-          data
-            .trim()
-            .split(/\s+/)
-            .filter((tok) => tok.length > 0)
-            .map((tok) => parseInt(tok, 16))
-            .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 255)
-        )
+      ? Uint8Array.from(parseHexBytes(data))
       : new TextEncoder().encode(data);
 
     // Drain any pending RX lines from the pipeline queue BEFORE appending the
@@ -119,10 +144,10 @@ export async function sendToPort(
 
   try {
     const bytesWritten = await serialService.sendSerialData({
-      port_id: portId,
+      portId,
       data,
-      is_hex: isHex,
-      append_line_ending: lineEnding,
+      isHex,
+      appendLineEnding: lineEnding,
     });
 
     // Track TX bytes（P1-1：经 1s 聚合器统一写 store——高频发送/触发自动回复
@@ -195,11 +220,5 @@ export function useSerialSend() {
     return null;
   }, [sendHistory]);
 
-  const clearHistory = useCallback((portId: string) => {
-    sendHistoryMap.delete(portId);
-    setSendHistory([]);
-    historyIndexRef.current = -1;
-  }, []);
-
-  return { sendData, sendHistory, historyUp, historyDown, clearHistory };
+  return { sendData, sendHistory, historyUp, historyDown };
 }

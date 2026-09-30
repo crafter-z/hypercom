@@ -3,6 +3,7 @@
  * DOM-free so they can be unit-tested under vitest's `environment: 'node'`.
  */
 import type { Encoding, LineEnding } from '../types';
+import { bytesToSpacedHex } from './hexFormat';
 
 /**
  * Return the raw bytes represented by a line-ending selector value.
@@ -22,39 +23,56 @@ export function getLineEndingBytes(lineEnding: LineEnding): number[] {
 }
 
 /**
+ * HEX 输入非法时返回的 i18n key（合法 / 空输入 → null）。
+ *
+ * 契约来源是后端 `parse_hex_string`（src-tauri/src/serial/codec.rs）：忽略空白后
+ * 要求「半字节个数为偶数 且 全为 0-9a-fA-F」，否则返回 Err。前端必须用同一把尺子
+ * 判定可发送性——旧实现给奇数位补零，于是发送区为一个后端**必然拒绝**的输入
+ * 显示「N B」，用户看到的是假可用状态。两侧同尺由 `src/utils/hexContract.test.ts`
+ * 解析 Rust 源文本断言。
+ */
+export const HEX_INPUT_ERROR_KEY = 'sendSection.hexInput.invalid';
+
+/** HEX 输入是否可发送：合法 / 空输入 → null，否则返回 {@link HEX_INPUT_ERROR_KEY}。 */
+export function hexInputError(input: string): string | null {
+  const cleaned = input.replace(/\s+/g, '');
+  if (cleaned.length === 0) return null;
+  if (cleaned.length % 2 !== 0) return HEX_INPUT_ERROR_KEY;
+  return /^[0-9a-fA-F]+$/.test(cleaned) ? null : HEX_INPUT_ERROR_KEY;
+}
+
+/**
  * Parse a space-separated or compact HEX string into a byte array.
- * Invalid / incomplete bytes are skipped so the live counter stays useful.
+ *
+ * Strict, mirroring the backend: odd nibble counts and non-HEX characters yield `[]`
+ * (no zero-padding, no skipping) — callers gate on {@link hexInputError} and must
+ * never fabricate bytes the backend would reject.
  */
 export function parseHexBytes(input: string): number[] {
+  if (hexInputError(input) !== null) return [];
   const cleaned = input.replace(/\s+/g, '');
-  if (cleaned.length === 0) return [];
-  // Pad the trailing nibble with a leading zero when the cleaned length is odd,
-  // so e.g. "C" → "0C" and "486" → "4806" rather than silently dropping input.
-  const even = cleaned.length % 2 === 0
-    ? cleaned
-    : `${cleaned.slice(0, -1)}0${cleaned.slice(-1)}`;
   const bytes: number[] = [];
-  for (let i = 0; i < even.length; i += 2) {
-    const byte = parseInt(even.slice(i, i + 2), 16);
-    if (!Number.isNaN(byte)) {
-      bytes.push(byte);
-    }
+  for (let i = 0; i < cleaned.length; i += 2) {
+    bytes.push(parseInt(cleaned.slice(i, i + 2), 16));
   }
   return bytes;
 }
 
 export interface ByteCountResult {
   count: number;
-  /** Ready-to-display label, e.g. "42 B" or "3 chars · ? bytes". */
+  /** Ready-to-display label, e.g. "42 B" or "3 chars · ? bytes". Empty when `errorKey` is set. */
   label: string;
   /** Optional tooltip for ambiguous encodings. */
   tooltip?: string;
+  /** Set when the input cannot be sent (HEX mode) — UI renders the error instead of a count. */
+  errorKey?: string;
 }
 
 /**
  * Compute the byte count for the current send input.
  *
- * - HEX mode: parsed byte count + line-ending suffix bytes.
+ * - HEX mode: parsed byte count + line-ending suffix bytes; invalid HEX yields
+ *   `errorKey` and an empty label (never a bogus count).
  * - UTF-8 / ASCII text: `TextEncoder` byte count + suffix.
  * - GBK / ISO-8859-1 text: shows character count with a "? bytes" hint,
  *   because the final byte length depends on the backend encoding_rs pass.
@@ -68,8 +86,9 @@ export function computeByteCount(
   const suffixLen = getLineEndingBytes(lineEnding).length;
 
   if (isHex) {
-    const bytes = parseHexBytes(input);
-    const count = bytes.length + suffixLen;
+    const errorKey = hexInputError(input);
+    if (errorKey !== null) return { count: 0, label: '', errorKey };
+    const count = parseHexBytes(input).length + suffixLen;
     return { count, label: `${count} B` };
   }
 
@@ -94,20 +113,17 @@ export function computeByteCount(
 export function formatLineEndingHex(lineEnding: LineEnding): string | null {
   const bytes = getLineEndingBytes(lineEnding);
   if (bytes.length === 0) return null;
-  return bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+  return bytesToSpacedHex(bytes);
 }
 
 /** Convert plain text to a spaced uppercase HEX byte preview (UTF-8 bytes). '' → ''. */
 export function textToHexPreview(text: string): string {
   if (!text) return '';
-  return Array.from(new TextEncoder().encode(text))
-    .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
-    .join(' ');
+  return bytesToSpacedHex(new TextEncoder().encode(text));
 }
 
-/** Decode a HEX byte string back to text (UTF-8, non-fatal). Empty/whitespace → ''. */
+/** Decode a HEX byte string back to text (UTF-8, non-fatal). Invalid HEX / empty → ''. */
 export function hexToTextPreview(hex: string): string {
-  if (!hex.trim()) return '';
   const bytes = parseHexBytes(hex);
   if (bytes.length === 0) return '';
   return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));

@@ -4,11 +4,11 @@
  * 覆盖：
  * - 权限过滤矩阵：无权限 / 部分权限 / 撤销后旧 op 被拒（调用时校验语义）；
  * - 未知 op 拒绝；
- * - 桥代码注入（wrapPluginCode 拼接 + 桥自包含）。
+ * - Worker 桥事件注册与调用语义。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { checkOpAllowed, filterAllowedOps, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS } from './pluginRpc';
-import { PLUGIN_BRIDGE_CODE, wrapPluginCode } from './pluginBridge';
+import { PLUGIN_BRIDGE_CODE } from './pluginBridge';
 
 describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
   it('无权限：敏感 op 全拒，只读 op 放行', () => {
@@ -81,6 +81,11 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(checkOpAllowed('fs.openDialog', ['fs:assets'])).not.toBeNull();
     expect(checkOpAllowed('fs.openDialog', ['fs:open'])).toBeNull();
   });
+  it('fs:storage grants reading own data, but never reading declared package assets', () => {
+    expect(checkOpAllowed('fs.read', ['fs:storage'])).toBeNull();
+    expect(checkOpAllowed('fs.read', ['fs:assets'])).toBeNull();
+    expect(checkOpAllowed('fs.read', [])).not.toBeNull();
+  });
 
   it('无权限要求的 op（log/ports）标记为 null 放行；notify 需权限', () => {
     expect(OP_PERMISSIONS['log']).toBeNull();
@@ -91,7 +96,7 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
 
 describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () => {
   it('未声明 serial scope → 任意端口放行（serial:send 授权与守卫仍生效）', () => {
-    expect(checkPortScope(null, 'COM1')).toBeNull();
+    expect(checkPortScope(null, 'COM1')).toContain('manifest 不可用');
     expect(checkPortScope({}, 'COM1')).toBeNull();
     expect(checkPortScope({ serial: undefined }, 'COM1')).toBeNull();
   });
@@ -106,28 +111,42 @@ describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () 
     expect(checkPortScope({ serial: { portWhitelist: [] } }, 'COM1')).toContain('空数组');
   });
 
-  it('敏感权限集是 D3 声明的三项（确认框消费）', () => {
-    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:execute']);
+  it('敏感确认仅列出已交付的三项能力', () => {
+    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:open']);
   });
 });
 
-describe('pluginBridge（评审 v2 D1/P6）', () => {
-  it('wrapPluginCode 拼接桥 + 用户代码', () => {
-    const user = "self.plugin.api.ports.list();";
-    const wrapped = wrapPluginCode(user);
-    expect(wrapped.startsWith(PLUGIN_BRIDGE_CODE)).toBe(true);
-    expect(wrapped.endsWith(user)).toBe(true);
+describe('plugin worker event registration contract', () => {
+  it('registers RX event handlers, unsubscribes, and acknowledges only after async handlers settle', async () => {
+    const posted: unknown[] = [];
+    let release!: () => void;
+    const worker = {
+      postMessage: (message: unknown) => posted.push(message),
+      addEventListener: () => {},
+    } as { postMessage: (message: unknown) => void; addEventListener: () => void; onmessage?: (event: { data: unknown }) => void; plugin?: { rx: { onLine: (handler: (payload: unknown) => Promise<void>) => () => void } } };
+    new Function('self', PLUGIN_BRIDGE_CODE)(worker);
+    const handled: unknown[] = [];
+    const unsubscribe = worker.plugin!.rx.onLine((payload) => new Promise<void>((resolve) => {
+      handled.push(payload);
+      release = resolve;
+    }));
+    worker.onmessage!({ data: { type: 'rx.line', payload: [{ seq: 1 }], eventId: 5 } });
+    expect(handled).toEqual([[{ seq: 1 }]]);
+    expect(posted).not.toContainEqual({ eventAck: 5 });
+    release();
+    await vi.waitFor(() => expect(posted).toContainEqual({ eventAck: 5 }));
+    unsubscribe();
+    worker.onmessage!({ data: { type: 'rx.line', payload: [], eventId: 6 } });
+    await vi.waitFor(() => expect(posted).toContainEqual({ eventAck: 6 }));
+    expect(handled).toHaveLength(1);
   });
-
-  it('桥代码自包含（无 import/require/外部依赖）', () => {
-    expect(PLUGIN_BRIDGE_CODE).not.toContain('import ');
-    expect(PLUGIN_BRIDGE_CODE).not.toContain('require(');
-    expect(PLUGIN_BRIDGE_CODE).toContain('self.plugin');
-    expect(PLUGIN_BRIDGE_CODE).toContain('self.postMessage');
-  });
-
-  it('桥提供 api 代理与 on 订阅（字符串级断言）', () => {
-    expect(PLUGIN_BRIDGE_CODE).toContain('self.plugin = { api: api, on: on }');
-    expect(PLUGIN_BRIDGE_CODE).toContain('new Proxy');
+  it('rejects unknown bridge event handlers instead of silently claiming subscriptions', () => {
+    const worker = { postMessage: vi.fn(), addEventListener: vi.fn() } as {
+      postMessage: (message: unknown) => void;
+      addEventListener: (type: string, handler: (event: unknown) => void) => void;
+      plugin?: { rx: { onLine: (handler: unknown) => () => void } };
+    };
+    new Function('self', PLUGIN_BRIDGE_CODE)(worker);
+    expect(() => worker.plugin?.rx.onLine('not-a-function')).toThrow('event callback required');
   });
 });

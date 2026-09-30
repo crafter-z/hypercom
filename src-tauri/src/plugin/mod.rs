@@ -15,6 +15,7 @@
  * 路径前缀检查）。前端结果不可信，前端校验失败 ≠ 后端拒绝。
  */
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -23,10 +24,8 @@ use serde::{Deserialize, Serialize};
 /// （semver：主版本不兼容视为不可用，次版本向后兼容放行）。
 pub const HOST_API_MAJOR: u32 = 1;
 
-/// 已知权限集（v1）。manifest 声明的未知权限在桥侧不会被授予
-/// （manifest permissions 只是「可授予上限」，评审 v2 P7），此处不拒绝未知权限，
-/// 只做格式校验——未知权限静默不授予比拒绝安装对生态更友好。
-/// 此表供前端设置页展示与默认授权提示使用（经 list 命令透出）。
+/// 已交付的可授予权限。manifest 可以声明未来权限，但当前不得授予或显示成可用能力。
+/// 此集合在 `set_plugin_permissions` 后端命令中校验，并通过列表返回设置页。
 pub const KNOWN_PERMISSIONS: &[&str] = &[
     "terminal:read",
     "terminal:write",
@@ -36,12 +35,10 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "fs:open",
     "serial:send",
     "http:request",
-    "shell:execute",
     "shell:open",
     "clipboard",
     "notify",
     "storage",
-    "events",
 ];
 
 // ==================== Manifest 结构 ====================
@@ -153,20 +150,7 @@ pub fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, String> {
 impl PluginManifest {
     /// 结构校验（纯函数，无 IO）。任一步失败返回带上下文的错误串。
     pub fn validate(&self) -> Result<(), String> {
-        // id：反向域名格式——非空、小写字母/数字/`.`/`-`/`_`，至少一段。
-        if self.id.is_empty() {
-            return Err("manifest 缺少必填字段 id（反向域名）".into());
-        }
-        if !self
-            .id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_')
-        {
-            return Err(format!("manifest id 含非法字符: {}", self.id));
-        }
-        if !self.id.contains('.') {
-            return Err(format!("manifest id 应为反向域名（含至少一个 .）: {}", self.id));
-        }
+        validate_plugin_id(&self.id)?;
 
         if self.name.trim().is_empty() {
             return Err("manifest 缺少必填字段 name".into());
@@ -195,7 +179,7 @@ impl PluginManifest {
         sanitize_plugin_rel_path(&self.entry)
             .map_err(|e| format!("manifest entry 非法: {e}"))?;
 
-        // permissions 去重校验（内容校验在桥侧做，未知权限静默不授予）。
+        // 声明未知权限可兼容未来版本，但授予命令仅允许当前 KNOWN_PERMISSIONS。
         let mut seen = std::collections::HashSet::new();
         for p in &self.permissions {
             if p.trim().is_empty() {
@@ -228,6 +212,21 @@ impl PluginManifest {
 }
 
 // ==================== 路径防护 ====================
+
+/// A plugin id is exactly one safe directory name, with nonempty reverse-domain labels.
+pub fn validate_plugin_id(id: &str) -> Result<(), String> {
+    if id.split('.').count() < 2
+        || id.split('.').any(|label| {
+            label.is_empty()
+                || !label.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                })
+        })
+    {
+        return Err(format!("非法插件 id（须为反向域名且每段非空）: {id}"));
+    }
+    Ok(())
+}
 
 /// 规范化插件内相对路径并校验其停留在插件目录内（防 `../` 穿越 / 绝对路径 /
 /// Windows 盘符 / 空路径）。返回规范化后的相对 PathBuf。
@@ -331,10 +330,18 @@ pub fn scan_plugins(plugins_root: &Path) -> Vec<InstalledPlugin> {
     if let Ok(entries) = fs::read_dir(plugins_root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
-                continue; // 跳过松散文件（用户可能放 README 等）
+            let name = entry.file_name();
+            let Some(id) = name.to_str() else { continue };
+            if validate_plugin_id(id).is_err() || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue; // staging/backup directories and symlinks are not installed plugins
             }
-            let manifest = load_manifest_from_dir(&path);
+            let manifest = load_manifest_from_dir(&path).and_then(|manifest| {
+                if manifest.id == id {
+                    Ok(manifest)
+                } else {
+                    Err(format!("manifest id 与目录名不一致: {} != {id}", manifest.id))
+                }
+            });
             out.push(InstalledPlugin { dir: path, manifest });
         }
     }
@@ -386,7 +393,7 @@ fn extract_plugin_zip_limited(
 
     let mut total_written: u64 = 0;
     for i in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(i)
             .map_err(|e| format!("读取 zip 条目失败: {e}"))?;
 
@@ -416,16 +423,18 @@ fn extract_plugin_zip_limited(
             fs::create_dir_all(parent)
                 .map_err(|e| format!("创建父目录失败 {}: {e}", parent.display()))?;
         }
-        let mut out = fs::File::create(&target)
+        let mut out = fs::OpenOptions::new().write(true).create_new(true).open(&target)
             .map_err(|e| format!("创建文件失败 {}: {e}", target.display()))?;
-        let written = std::io::copy(&mut entry, &mut out)
+        // Do not rely on ZIP metadata: a forged size must not allow an oversized write.
+        let remaining = max_total_bytes.saturating_sub(total_written);
+        let written = std::io::copy(&mut entry.take(remaining + 1), &mut out)
             .map_err(|e| format!("解压条目失败 {raw_name}: {e}"))?;
-        total_written += written;
-        if total_written > max_total_bytes {
+        if written > remaining {
             return Err(format!(
                 "zip 解压总量超过上限 {max_total_bytes} 字节，疑似 zip bomb，拒绝"
             ));
         }
+        total_written += written;
     }
     Ok(())
 }
@@ -573,7 +582,7 @@ mod tests {
     fn scan_skips_non_dirs_and_reports_bad_manifest() {
         let root = std::env::temp_dir().join(format!("hypercom_scan_{}", uuid::Uuid::new_v4()));
         let _ = fs::create_dir_all(&root);
-        let good_dir = root.join("com.example.good");
+        let good_dir = root.join("com.example.symresolve");
         fs::create_dir_all(&good_dir).unwrap();
         fs::write(good_dir.join("manifest.json"), valid_manifest_json()).unwrap();
         let bad_dir = root.join("com.example.bad");
@@ -583,7 +592,7 @@ mod tests {
 
         let found = scan_plugins(&root);
         assert_eq!(found.len(), 2);
-        let good = found.iter().find(|p| p.dir.file_name().unwrap() == "com.example.good").unwrap();
+        let good = found.iter().find(|p| p.dir.file_name().unwrap() == "com.example.symresolve").unwrap();
         assert!(good.manifest.is_ok());
         let bad = found.iter().find(|p| p.dir.file_name().unwrap() == "com.example.bad").unwrap();
         assert!(bad.manifest.is_err());
@@ -724,6 +733,28 @@ mod tests {
         assert!(err.contains("总量"), "err: {err}");
         let _ = fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn zip_limit_applies_during_each_copy() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_bound_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("pkg.zip");
+        write_test_zip(&zip_path, &[("com.example.demo/first", "12345678"),
+            ("com.example.demo/second", "abcdefghijk")]);
+        let out = dir.join("out");
+        assert!(extract_plugin_zip_limited(&zip_path, &out, MAX_ZIP_ENTRIES, 10).is_err());
+        assert_eq!(fs::metadata(out.join("com.example.demo/first")).unwrap().len(), 8);
+        assert!(fs::metadata(out.join("com.example.demo/second")).unwrap().len() <= 3);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn manifest_rejects_dangerous_id_segments() {
+        for id in [".", "..", "com..example", ".com", "com.", "com/example", "COM.example"] {
+            assert!(validate_plugin_id(id).is_err(), "{id}");
+            assert!(parse_manifest(&valid_manifest_json().replace("com.example.symresolve", id)).is_err(), "{id}");
+        }
+    }
+
 
     #[test]
     fn manifest_serial_scope_validation() {

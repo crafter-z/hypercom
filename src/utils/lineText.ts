@@ -10,34 +10,54 @@
  *
  * TX/TOOL/replay lines carry `content` directly and return it unchanged.
  *
- * Pure logic + a module-level TextDecoder cache (GBK construction is not
- * free); no React/store/DOM dependencies, unit-testable under node.
+ * This file is the **single TextDecoder factory + cache of the app** (K8):
+ * the RxPipeline decoded every line with its own per-port cache and ttyService
+ * built its own streaming decoder — three construction sites, two of which
+ * passed `ignoreBOM: true`. That made "does the line text start with a U+FEFF"
+ * depend on which path the bytes took. Decoders now always use
+ * `ignoreBOM: false`: a BOM is an encoding marker, not content, and leaking it
+ * into the decoded string pollutes the rendered row, the search haystack and
+ * the right-click copy.
+ *
+ * Pure logic + a module-level decoder cache (GBK construction is not free);
+ * no React/store/DOM dependencies, unit-testable under node.
  */
 import type { Encoding, TerminalLine } from '../types';
 
 /** Encoding label normalization: ASCII → utf-8 (TextDecoder has no 'ascii'
- *  label), everything else lowercased. Matches the pipeline's convention. */
+ *  label), everything else lowercased. Single normalization for every caller
+ *  (the pipeline used to normalize again on its way in). */
 export function normalizeEncodingLabel(encoding: Encoding | string): string {
   const lower = encoding.toLowerCase();
   return lower === 'ascii' ? 'utf-8' : lower;
 }
 
-/** Module-level decoder cache: reuse one TextDecoder per label. */
+/**
+ * Build a decoder for a label. Invalid labels fall back to utf-8 (never
+ * throws). Callers that need `{ stream: true }` decode-time buffering (xterm
+ * RX across event splits) call this per port — a streaming decoder holds
+ * partial bytes, so instances MUST NOT be shared between ports.
+ */
+export function createDecoder(encoding: Encoding | string): TextDecoder {
+  try {
+    return new TextDecoder(normalizeEncodingLabel(encoding), { fatal: false, ignoreBOM: false });
+  } catch {
+    return new TextDecoder('utf-8', { fatal: false, ignoreBOM: false });
+  }
+}
+
+/** Non-streaming decoder cache: one instance per label, reused. Decoding a
+ *  whole line never needs stream state, so sharing across ports is safe. */
 const decoderCache = new Map<string, TextDecoder>();
 
 /**
- * Decode raw bytes under the given encoding. Invalid labels fall back to
- * utf-8 (never throws) — mirrors the pipeline's TextDecoder handling.
+ * Decode raw bytes under the given encoding (non-streaming).
  */
 export function decodeBytes(bytes: Uint8Array, encoding: Encoding | string): string {
   const label = normalizeEncodingLabel(encoding);
   let decoder = decoderCache.get(label);
   if (!decoder) {
-    try {
-      decoder = new TextDecoder(label, { fatal: false, ignoreBOM: true });
-    } catch {
-      decoder = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true });
-    }
+    decoder = createDecoder(label);
     decoderCache.set(label, decoder);
   }
   return decoder.decode(bytes);
@@ -52,30 +72,4 @@ export function getLineText(line: TerminalLine, encoding: Encoding | string): st
   if (line.content !== undefined) return line.content;
   if (line.rawData) return decodeBytes(line.rawData, encoding);
   return '';
-}
-
-/** Line memory accounting for the ring buffer's byte-budget trim.
- *
- *  Counts the **real V8 footprint**, not just payload bytes — the old version
- *  only counted `rawData.length`, so small-line + protocol-parsed buffers held
- *  far more memory than the budget implied (object headers + Uint8Array
- *  wrappers + parsedFields were invisible to the trim gate, so byte budget
- *  never fired and only maxLines capped — issue #14). Approximate is fine:
- *  the budget just needs to reflect the right order of magnitude.
- *
- *  - Object header + property slots: ~128 B (V8 HiddenClass + 7 fields)
- *  - Uint8Array wrapper: ~40 B + payload bytes
- *  - JS string (content): UTF-16, ~2 B/char
- *  - parsedFields: ~96 B/field (object + string fields) */
-export function lineBytes(line: TerminalLine): number {
-  let bytes = 128; // object header + property slots
-  if (line.rawData) {
-    bytes += line.rawData.length + 40; // Uint8Array wrapper + payload
-  } else if (line.content !== undefined) {
-    bytes += line.content.length * 2; // JS string is UTF-16
-  }
-  if (line.parsedFields) {
-    bytes += line.parsedFields.length * 96; // per-field object overhead
-  }
-  return bytes;
 }

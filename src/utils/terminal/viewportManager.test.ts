@@ -95,6 +95,21 @@ describe('TerminalViewportManager pause', () => {
     vm.setPaused(false);
     expect(vm.getVisibleCount()).toBe(3);
   });
+
+  it('disables followEnabled while paused and restores it after (issue #18)', () => {
+    // buildView() is private; cast vm once to a named boundary const (subset
+    // shape) so the read is checked and `this` binding is preserved.
+    const typed = vm as unknown as { buildView(): { followEnabled: boolean } };
+    vm.appendLines([makeLine('a'), makeLine('b'), makeLine('c')]);
+    // 未暂停且 locked → follow 允许。
+    expect(typed.buildView().followEnabled).toBe(true);
+    // 暂停（frozenSeq 非 null）→ 禁止跟随。
+    vm.setPaused(true);
+    expect(typed.buildView().followEnabled).toBe(false);
+    // 恢复 → follow 重新允许。
+    vm.setPaused(false);
+    expect(typed.buildView().followEnabled).toBe(true);
+  });
 });
 
 describe('TerminalViewportManager search', () => {

@@ -61,14 +61,16 @@ export function rebuildPluginUi(
   for (const v of views) {
     if (!v.enabled || !v.manifest?.ui) continue;
     const ui = v.manifest.ui;
+    const buttons = (ui.buttons ?? []).filter((button) => button.target === undefined || button.target === 'sidebar');
+    const menuItems = (ui.menuItems ?? []).filter((item) => item.target === undefined || item.target === 'port-context');
     const reg: RegisteredPluginUi = {
       pluginId: v.id,
       pluginName: v.manifest.name ?? v.id,
-      buttons: ui.buttons ?? [],
-      menuItems: ui.menuItems ?? [],
+      buttons,
+      menuItems,
     };
-    if (reg.buttons.length > 0) next.toolbarButtons.push(reg);
-    if (reg.menuItems.length > 0) next.portMenuItems.push(reg);
+    if (buttons.length > 0) next.toolbarButtons.push(reg);
+    if (menuItems.length > 0) next.portMenuItems.push(reg);
   }
   snapshot = next;
   for (const l of listeners) l();

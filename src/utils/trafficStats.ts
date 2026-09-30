@@ -14,7 +14,7 @@
  *   同一聚合器与同一 1s 定时器，避免各写点重复实现。
  */
 
-import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 
 /** 聚合窗口（ms）：窗口内字节本地累计，到期统一写 store。 */
 export const TRAFFIC_AGGREGATE_MS = 1000;
@@ -39,7 +39,7 @@ function ensureTimer(): void {
 function flush(): void {
   timer = null;
   if (accum.size === 0) return;
-  const app = useAppStore.getState();
+  const app = useSystemStore.getState();
   const stats = app.trafficStats;
   for (const [portId, acc] of accum) {
     const prev = stats[portId];
@@ -73,6 +73,16 @@ export const trafficStats = {
   /** 立即把 pending 累计写入 store（测试用；断线收尾时亦可保证总量即时）。 */
   flushNow(): void {
     flush();
+  },
+
+  /**
+   * 端口关闭后的回收入口（`releaseTerminalState` 调用）：丢弃该端口尚未 flush
+   * 的累计值并清掉 store 条目。**不能**只调 flush——那会把已关闭端口的字节
+   * 又写回刚清理过的 store，留下幽灵条目。
+   */
+  release(portId: string): void {
+    accum.delete(portId);
+    useSystemStore.getState().clearTrafficStats(portId);
   },
 
   /** 清空累计与定时器（仅测试用；应用生命周期内不得调用）。 */

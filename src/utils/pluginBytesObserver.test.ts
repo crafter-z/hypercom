@@ -103,6 +103,34 @@ describe('pluginBytesObserver', () => {
     expect(last.bytes[0]).toBe(Math.max(...spy.batches.map((x) => x.bytes[0])));
   });
 
+  it('single oversized read is trimmed to last queue cap and split into strictly bounded deliveries', () => {
+    const batches: number[] = [];
+    const contents: number[] = [];
+    addPluginBytesObserver({ onRxBytes: (batch) => {
+      batches.push(batch.reduce((sum, part) => sum + part.bytes.length, 0));
+      for (const part of batch) contents.push(part.bytes[0]);
+    } });
+    const bytes = new Uint8Array(2 * 1024 * 1024);
+    bytes.fill(7, 1024 * 1024);
+    feedPluginBytes('COM1', bytes, 1);
+    vi.advanceTimersByTime(100);
+    expect(batches.reduce((sum, size) => sum + size, 0)).toBe(1024 * 1024);
+    expect(batches.every((size) => size <= MAX_BYTES_PER_DELIVERY)).toBe(true);
+    expect(contents.every((value) => value === 7)).toBe(true);
+  });
+  it('reports trimmed byte count to a bytes-only observer', () => {
+    const dropped = vi.fn();
+    addPluginBytesObserver({ onRxBytes: () => {}, onRxDropped: dropped });
+    feedPluginBytes('COM1', new Uint8Array(2 * 1024 * 1024), 1);
+    flushDelivery();
+    expect(dropped).toHaveBeenCalledWith({ portId: 'COM1', reason: 'queue-overflow', count: 1024 * 1024 });
+  });
+  it('notifies bytes-only subscriber when the port disconnects', () => {
+    const detached = vi.fn();
+    addPluginBytesObserver({ onRxBytes: () => {}, onRxDetached: detached });
+    notifyBytesPortDisconnected('COM9');
+    expect(detached).toHaveBeenCalledWith({ portId: 'COM9', reason: 'port-disconnected' });
+  });
   it('断流清队列：notifyBytesPortDisconnected 后该端口残留字节丢弃', () => {
     const { spy, obs } = makeObserver();
     addPluginBytesObserver(obs);

@@ -2,14 +2,15 @@
 /**
  * issue #9 regression guard — terminal rows must never wrap.
  *
- * The 方案B renderer (v0.6.0) positions rows on a fixed-height lattice
- * (translateY(visIdx × rowHeight), zero DOM measurement). CSS wrapping
+ * The 方案B renderer positions rows at a fixed height (v0.6.0: absolute
+ * translateY lattice; issue #18: document flow where the spacers carry
+ * `visIdx × rowHeight` — either way **zero DOM measurement**). CSS wrapping
  * (white-space: pre-wrap + word-break: break-all) made an over-wide line
  * paint a second visual line OVER the next row — the reported overlap bug
  * (v0.5.x didn't overlap because @tanstack/react-virtual measured real row
- * heights; the fixed-lattice engine cannot).
+ * heights; a fixed-row-height engine cannot).
  *
- * These assertions pin the CSS contract that keeps the lattice valid:
+ * These assertions pin the CSS contract that keeps the geometry valid:
  * .terminal-content never wraps at the container edge, and .terminal-view
  * scrolls horizontally so over-wide lines stay fully readable. The import
  * injects the stylesheet into the jsdom document (vite.config test.css),

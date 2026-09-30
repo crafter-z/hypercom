@@ -1,6 +1,12 @@
 import React, { useEffect } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { fileService } from '../../services/tauri';
+import { CONFIG_BOUNDS } from '../../utils/bounds';
+
+/** 把已在 store 里的值收敛到配置边界（来源见 `CONFIG_BOUNDS`，与设置页同一张表）。 */
+function clampToBounds(value: number, bounds: readonly [number, number]): number {
+  return Math.max(bounds[0], Math.min(bounds[1], value));
+}
 
 /**
  * Applies presentation concerns to `<html>`:
@@ -51,8 +57,8 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     const root = document.documentElement;
     let cancelled = false;
     const active = backgroundImageEnabled && backgroundImage !== '';
-    root.style.setProperty('--app-bg-opacity', String(Math.max(0, Math.min(100, backgroundImageOpacity)) / 100));
-    root.style.setProperty('--app-bg-blur', `${Math.max(0, Math.min(64, backgroundImageBlur))}px`);
+    root.style.setProperty('--app-bg-opacity', String(clampToBounds(backgroundImageOpacity, CONFIG_BOUNDS.backgroundImageOpacity) / 100));
+    root.style.setProperty('--app-bg-blur', `${clampToBounds(backgroundImageBlur, CONFIG_BOUNDS.backgroundImageBlur)}px`);
     if (!active) {
       root.removeAttribute('data-app-bg');
       root.style.removeProperty('--app-bg-image');

@@ -7,16 +7,20 @@
 //! TTY 前端（xterm.js）的交互式渲染。ConPTY 是 Windows Terminal / VS Code
 //! 跑 bash 的方式，portable-pty 是 wezterm/alacritty 同款封装。
 //!
-//! 门控方式与 SIM:Loopback 完全一致：命令层 `cfg(not(debug_assertions))` 报错 +
-//! 前端 `import.meta.env.DEV` 隐藏 UI，双层门控；本模块本身不 gate（release
-//! 编译但不暴露入口，命令层已拒绝）。
+//! 门控收敛在命令层一处：`commands/tty_sim.rs` 的三个命令都由 `dev_only` 守卫
+//! 在入口拒绝 release 构建（守卫实现见 `commands::system_cmds::dev_only`），
+//! 前端 `import.meta.env.DEV` 同时隐藏 UI。本模块自身不 gate：release 编译但
+//! 无入口。
+//!
+//! 端口可用性还有一道运行时门（契约，实现在 `serial/mod.rs` 的
+//! `SerialManager::open_port`）：按 `PortKind::of(port_id)` 分派，GIT: 端口要求
+//! `gitbash_sim` 能力开关已启用，否则返回错误且**不 spawn 任何进程**——因此
+//! 即使 `enable_gitbash_sim` 被绕过（或处于 release 构建），也不会凭空起 pty。
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-
-use tauri::Emitter;
 
 /// 模拟终端（git bash pty）端口句柄。
 ///
@@ -171,7 +175,7 @@ pub(crate) fn spawn_bash(
                 Ok(0) => break, // EOF（bash 退出 / pty 关闭）
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    crate::serial::emit_data_event(&app_handle_clone, &port_id, "RX", chunk, false);
+                    crate::serial::emit_rx_event(&app_handle_clone, &port_id, chunk);
                     // DSR 应答（issue #11）：bash/readline 启动时查询光标位置
                     // （\x1b[6n）并阻塞等待应答——TRX 模式没有终端模拟器，后端必须
                     // 应答否则 bash 永不处理输入（发送面板命令全部无响应）。应答
@@ -195,12 +199,10 @@ pub(crate) fn spawn_bash(
         }
 
         // 读取线程退出时发送断开事件（前端依赖此事件，与真实/模拟串口线程对齐）
-        let _ = app_handle_clone.emit(
-            "serial:status",
-            crate::serial::SerialStatusEvent {
-                port_id: port_id.clone(),
-                status: "disconnected".to_string(),
-            },
+        crate::serial::emit_status(
+            &app_handle_clone,
+            &port_id,
+            crate::serial::PortStatus::Disconnected,
         );
     });
 
@@ -306,7 +308,7 @@ mod tests {
         assert!(tail.len() <= 3, "tail 最多保留 3 字节：{:?}", tail);
     }
 
-#[test]
+    #[test]
     fn scan_dsr_keeps_at_most_three_tail_bytes() {
         let mut tail = Vec::new();
         for i in 0..10u8 {

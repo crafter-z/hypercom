@@ -17,9 +17,11 @@ import { pluginHost } from '../utils/pluginHost';
 import { attachRxObserver, attachBytesObserver } from '../utils/pluginHostApi';
 import { pluginKv } from '../utils/pluginKv';
 import { rebuildPluginUi } from '../utils/pluginUiRegistry';
+import { pluginMutationGeneration, syncStorePluginConfigs } from '../utils/pluginConfigSnapshot';
 import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { notifyError, notifySuccess } from '../stores/useToastStore';
-import type { AppConfig, PluginConfigEntry, PluginView } from '../types';
+import type { AppConfig, PluginView } from '../types';
 
 /**
  * 把 pluginObserver RX 行批转发到某插件 worker 事件通道（rx.line/rx.detached）。
@@ -31,24 +33,10 @@ import type { AppConfig, PluginConfigEntry, PluginView } from '../types';
 function attachRxForPlugin(pluginId: string): () => void {
   return attachRxObserver({
     post: (m, transfer) => {
-      const session = pluginHost.get(pluginId);
-      if (session) session.post(m, transfer);
+      if (!rxEligiblePluginIds().has(pluginId)) return;
+      pluginHost.get(pluginId)?.post(m, transfer);
     },
   });
-}
-/**
- * 把后端返回的**权威插件状态数组**原样写回 store.config.pluginConfigs（issue #17
- * 复审修复，镜像 useAppInit 的 portGroups/portMeta #4-10 模式）：
- * - store.config 实体数组是启动快照——插件启用/权限变更走后端命令落盘，
- *   不回写则全量 set_config（ConfigModal 保存、诊断日志开关、更新弹窗）会用
- *   陈旧快照覆盖后端刚写入的启用/授权状态（issue #5-2 同源陷阱）；
- * - usePluginHost 的 store 订阅（worker 启停 + rx 装配）与 PluginSession 的
- *   调用时权限校验都读 store——不回写则启用/授权在运行时永不生效（重启才见）。
- * 数据源是 list_plugins / 四个变更命令的返回值（config.json 实体**原样**），
- * 不经 PluginView 再加工——目录缺失/manifest 损坏不丢已装插件的状态。
- */
-export function syncStorePluginConfigs(entries: PluginConfigEntry[]): void {
-  useAppStore.getState().setConfig({ pluginConfigs: entries });
 }
 
 /** pluginConfigs 值签名（订阅守卫用——setConfig 原地合并使 ref 比较失效）。 */
@@ -106,8 +94,9 @@ function syncByteAttachments(bytesAttachments: Map<string, () => void>): void {
         id,
         attachBytesObserver({
           post: (m, transfer) => {
-            const session = pluginHost.get(id);
-            if (session) session.post(m, transfer);
+            if (!rxBytesEligiblePluginIds().has(id)) return;
+            if (m.type === 'rx.detached' && rxEligiblePluginIds().has(id)) return;
+            pluginHost.get(id)?.post(m, transfer);
           },
         }),
       );
@@ -132,26 +121,32 @@ export function usePluginHost(): void {
     // 「mount→cleanup→effect」序列的第二次 effect 全部跳过，订阅/boot 丢失，
     // 复审 e2e 实测 worker 永不启动）：每次 effect 全量注册，cleanup 全量拆除。
 
+    let active = true;
+    let refreshVersion = 0;
     const refresh = async (): Promise<void> => {
+      const version = ++refreshVersion;
+      const mutation = pluginMutationGeneration();
       try {
         const res = await pluginService.listPlugins();
-        // 写回权威状态数组（issue #5-2 陷阱 + 运行时同步的源），
-        // 再重建声明式 UI 注册表（Sidebar 扩展点渲染数据源）。
+        if (!active || version !== refreshVersion || mutation !== pluginMutationGeneration()) return;
         syncStorePluginConfigs(res.pluginConfigs);
         rebuildPluginUi(res.plugins);
       } catch (e) {
-        console.error('[usePluginHost] list failed:', e);
+        if (active) console.error('[usePluginHost] list failed:', e);
       }
     };
 
-    // 初始：sync 会话（拉 worker）+ 按合格集装配 rx/rx.bytes + 刷新列表（写回 store）。
-    const boot = async (): Promise<void> => {
+    const boot = (): void => {
+      if (!active || !useSystemStore.getState().ui.configReady) return;
       pluginHost.syncWithConfig();
       syncRxAttachments(rxAttachmentsRef.current);
       syncByteAttachments(bytesAttachmentsRef.current);
-      await refresh();
+      void refresh();
     };
-    void boot().catch((e) => console.error('[usePluginHost] boot failed:', e));
+    const unsubReady = useSystemStore.subscribe((state, prev) => {
+      if (state.ui.configReady && !prev.ui.configReady) boot();
+    });
+    boot();
 
     // config.pluginConfigs 变化（启用/权限/安装——含 refresh 写回自身）→
     // 按合格集同步 rx 装配 + sync 会话（worker 启停）。
@@ -164,14 +159,16 @@ export function usePluginHost(): void {
       const sig = pluginConfigsSig(state.config);
       if (sig === lastSig) return;
       lastSig = sig;
+      if (!useSystemStore.getState().ui.configReady) return;
       syncRxAttachments(rxAttachmentsRef.current);
       syncByteAttachments(bytesAttachmentsRef.current);
       pluginHost.syncWithConfig();
     });
-
     pluginHost.setCallbacks({ onPluginCrashed: () => void refresh() });
 
     return () => {
+      active = false;
+      unsubReady();
       unsub();
       for (const unsubRx of rxAttachmentsRef.current.values()) {
         unsubRx();
@@ -191,14 +188,19 @@ export function usePluginHost(): void {
 export function usePluginList() {
   const [plugins, setPlugins] = useState<PluginView[]>([]);
   const [loading, setLoading] = useState(false);
+  const listRefreshVersion = useRef(0);
+  const permissionsInFlight = useRef(new Map<string, Promise<void>>());
 
-  /** 刷新插件列表（磁盘扫描 + config 状态），并写回 store.config.pluginConfigs
-   *  （issue #5-2 陷阱：所有插件状态命令成功后都经此路径，见 syncStorePluginConfigs）。 */
+  /** Refresh the plugin list and the host UI registration snapshot. */
   const refresh = useCallback(async () => {
+    const version = ++listRefreshVersion.current;
+    const mutation = pluginMutationGeneration();
     try {
       const res = await pluginService.listPlugins();
+      if (version !== listRefreshVersion.current || mutation !== pluginMutationGeneration()) return;
       setPlugins(res.plugins);
       syncStorePluginConfigs(res.pluginConfigs);
+      rebuildPluginUi(res.plugins);
     } catch (e) {
       console.error('[usePluginList] list failed:', e);
       notifyError(e);
@@ -215,7 +217,15 @@ export function usePluginList() {
     async (sourcePath: string) => {
       setLoading(true);
       try {
+        const previous = useAppStore.getState().config.pluginConfigs ?? [];
         const entries = await pluginService.installPlugin(sourcePath);
+        for (const entry of entries) {
+          const old = previous.find((p) => p.id === entry.id);
+          if (!old || old.installedAt !== entry.installedAt) {
+            pluginKv.invalidate(entry.id);
+            pluginHost.disable(entry.id);
+          }
+        }
         syncStorePluginConfigs(entries);
         notifySuccess('plugins.installed');
         await refresh();
@@ -235,8 +245,8 @@ export function usePluginList() {
     async (pluginId: string) => {
       setLoading(true);
       try {
-        pluginKv.invalidate(pluginId);
         const entries = await pluginService.uninstallPlugin(pluginId);
+        pluginKv.invalidate(pluginId);
         syncStorePluginConfigs(entries);
         notifySuccess('plugins.uninstalled');
         await refresh();
@@ -266,21 +276,30 @@ export function usePluginList() {
     [refresh],
   );
 
-  /** 授予/撤销权限（整体替换；manifest 声明是上限，后端校验子集）。 */
-  const grantPermissions = useCallback(
-    async (pluginId: string, permissions: string[]) => {
-      try {
-        const entries = await pluginService.setPluginPermissions(pluginId, permissions);
-        syncStorePluginConfigs(entries);
-        notifySuccess('plugins.permissionsSaved');
-        await refresh();
-      } catch (e) {
-        console.error('[usePluginList] grantPermissions failed:', e);
-        notifyError(e);
-      }
-    },
-    [refresh],
-  );
+  /** Toggle against the latest authoritative grants after preceding mutations settle. */
+  const togglePermission = useCallback((pluginId: string, permission: string): Promise<void> => {
+    const previous = permissionsInFlight.current.get(pluginId) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+      const entry = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === pluginId);
+      if (!entry) throw new Error(`plugin ${pluginId} not installed`);
+      const permissions = entry.grantedPermissions.includes(permission)
+        ? entry.grantedPermissions.filter((p) => p !== permission)
+        : [...entry.grantedPermissions, permission];
+      const entries = await pluginService.setPluginPermissions(pluginId, permissions);
+      ++listRefreshVersion.current;
+      syncStorePluginConfigs(entries);
+      await refresh();
+    }).catch((e: unknown) => {
+      console.error('[usePluginList] togglePermission failed:', e);
+      notifyError(e);
+    });
+    permissionsInFlight.current.set(pluginId, next);
+    void next.finally(() => {
+      if (permissionsInFlight.current.get(pluginId) === next) permissionsInFlight.current.delete(pluginId);
+    });
+    return next;
+  }, [refresh]);
+
 
   const api: PluginListApi = {
     plugins,
@@ -289,7 +308,7 @@ export function usePluginList() {
     installPlugin,
     uninstallPlugin,
     setEnabled,
-    grantPermissions,
+    togglePermission,
   };
   return api;
 }
@@ -302,5 +321,5 @@ export interface PluginListApi {
   installPlugin: (sourcePath: string) => Promise<void>;
   uninstallPlugin: (pluginId: string) => Promise<void>;
   setEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
-  grantPermissions: (pluginId: string, permissions: string[]) => Promise<void>;
+  togglePermission: (pluginId: string, permission: string) => Promise<void>;
 }

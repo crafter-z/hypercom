@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { TerminalLine } from '../types';
-import { decodeBytes, getLineText, lineBytes, normalizeEncodingLabel } from './lineText';
+import { decodeBytes, getLineText, normalizeEncodingLabel } from './lineText';
 
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
   timestamp: 0,
@@ -36,11 +36,19 @@ describe('decodeBytes', () => {
     expect(decodeBytes(new Uint8Array([72, 105]), 'INVALID' as never)).toBe('Hi');
   });
 
-  it('reuses cached decoder instances for the same label', () => {
-    // No observable API — smoke: repeated decodes are stable
-    const bytes = new Uint8Array([65, 66]);
-    expect(decodeBytes(bytes, 'UTF-8')).toBe('AB');
-    expect(decodeBytes(bytes, 'UTF-8')).toBe('AB');
+  it('keeps cached decoders isolated per label (interleaved use)', () => {
+    // 缓存实例按 label 共享；同一实例被不同编码复用时结果会互相污染，
+    // 交错解码必须各自正确（ASCII 归一化到 utf-8 亦然）。
+    const gbk = new Uint8Array([0xc4, 0xe3, 0xba, 0xc3]);
+    expect(decodeBytes(gbk, 'UTF-8')).not.toBe('你好');
+    expect(decodeBytes(gbk, 'GBK')).toBe('你好');
+    expect(decodeBytes(new Uint8Array([0x41]), 'ASCII')).toBe('A');
+    expect(decodeBytes(gbk, 'GBK')).toBe('你好');
+  });
+
+  it('strips a leading UTF-8 BOM (ignoreBOM: false)', () => {
+    // BOM 是编码标记而非内容：进入行文本会污染渲染、搜索 haystack 与右键复制。
+    expect(decodeBytes(new Uint8Array([0xef, 0xbb, 0xbf, 0x41]), 'UTF-8')).toBe('A');
   });
 });
 
@@ -75,35 +83,5 @@ describe('getLineText', () => {
       rawData: new TextEncoder().encode('fresh'),
     });
     expect(getLineText(line, 'UTF-8')).toBe('stale');
-  });
-});
-
-describe('lineBytes', () => {
-  // issue #14：lineBytes 现在估算 V8 真实占用（对象头 + Uint8Array 包装 +
-  // parsedFields），不再只算 payload 字节——让 byte-budget trim 反映真实量级。
-  it('counts object header + Uint8Array wrapper + payload for rawData', () => {
-    // 128 (header) + 3 (payload) + 40 (wrapper) = 171
-    expect(lineBytes(makeLine({ rawData: new Uint8Array([1, 2, 3]) }))).toBe(171);
-  });
-
-  it('counts object header + UTF-16 string for content', () => {
-    // 128 (header) + 2 chars * 2 B = 132
-    expect(lineBytes(makeLine({ content: '你好' }))).toBe(132);
-  });
-
-  it('counts only object header when nothing is stored', () => {
-    expect(lineBytes(makeLine({ content: undefined }))).toBe(128);
-  });
-
-  it('adds parsedFields overhead', () => {
-    const line = makeLine({
-      rawData: new Uint8Array([1, 2]),
-      parsedFields: [
-        { name: 'head', byteStart: 0, byteEnd: 1, color: '#f00' },
-        { name: 'len', byteStart: 1, byteEnd: 2, color: '#0f0' },
-      ],
-    });
-    // 128 + (2 + 40) + 2 * 96 = 362
-    expect(lineBytes(line)).toBe(362);
   });
 });

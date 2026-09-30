@@ -13,46 +13,62 @@ pub fn get_config(state: State<AppState>) -> Result<config::AppConfig, CommandEr
     Ok(manager.get_config().clone())
 }
 
-/// 更新应用配置。
-/// 写入 config.json 后自动同步日志设置到 LogManager、诊断日志开关到 DiagLogger
-///（消除双数据源）。
-#[tauri::command]
-pub fn set_config(
-    new_config: config::AppConfig,
-    state: State<AppState>,
-) -> Result<(), CommandError> {
-    // 先写配置
-    {
-        let mut manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .set_config(new_config.clone())
-            .map_err(|e| CommandError::Config(e.to_string()))?;
+fn preserve_plugin_configs(
+    new_config: &mut config::AppConfig,
+    current: &config::AppConfig,
+    restore_plugin_configs: bool,
+) {
+    if !restore_plugin_configs {
+        new_config.entities.plugin_configs = current.entities.plugin_configs.clone();
     }
-    // 再同步 LogManager（锁顺序：config → log，与 start_logging 一致）
-    sync_log_manager_from_config(&state)?;
-    // 同步诊断日志开关（原子开关，无需锁）
-    state.diag_logger.set_enabled(new_config.diag_log_enabled);
-    Ok(())
 }
 
-/// 重置配置为默认值
+/// 更新应用配置。
+///
+/// 落盘后把配置中属于「运行期镜像」的部分（日志设置 + 诊断日志开关）应用到
+/// `AppState::apply_runtime_config`——唯一同步入口。此前这里是逐字段手抄的
+/// setter 列表，与 `AppState::new` 的第二份列表并存，新增字段时必然漏同步一处。
 #[tauri::command]
-pub fn reset_config(state: State<AppState>) -> Result<config::AppConfig, CommandError> {
-    let cfg = {
+pub async fn set_config(
+    mut new_config: config::AppConfig,
+    expected_revision: Option<u64>,
+    restore_plugin_configs: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<bool, CommandError> {
+    let _plugin_io = state.plugin_io.lock().await;
+    let (saved, cfg) = {
         let mut manager = state
             .config_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .reset_to_default()
-            .map_err(|e| CommandError::Config(e.to_string()))?
+        // Backup import deliberately replaces the entire configuration. Ordinary saves
+        // need the revision observed before collecting their frontend snapshot.
+        let restore = restore_plugin_configs.unwrap_or(false);
+        let saved = if restore {
+            // Import is an intentional full replacement, including plugin grants.
+            manager.set_config(new_config)
+                .map_err(|e| CommandError::Config(e.to_string()))?;
+            true
+        } else {
+            let expected = expected_revision.ok_or_else(|| {
+                CommandError::Config("Normal config saves require expectedRevision".into())
+            })?;
+            if manager.get_config().revision != expected {
+                false
+            } else {
+                // The revision check, plugin grant preservation, and disk write all
+                // happen under the same config_manager lock.
+                preserve_plugin_configs(&mut new_config, manager.get_config(), false);
+                manager.set_config_if_revision(new_config, expected)
+                    .map_err(|e| CommandError::Config(e.to_string()))?
+            }
+        };
+        (saved, saved.then(|| manager.get_config().clone()))
     };
-    sync_log_manager_from_config(&state)?;
-    state.diag_logger.set_enabled(cfg.diag_log_enabled);
-    Ok(cfg)
+    if let Some(cfg) = cfg {
+        state.apply_runtime_config(&cfg);
+    }
+    Ok(saved)
 }
 
 /// 保存会话快照到独立 session.json（不触发 config .bak 备份）
@@ -90,33 +106,32 @@ pub fn get_config_path(state: State<AppState>) -> Result<String, CommandError> {
     Ok(manager.config_path().display().to_string())
 }
 
-/// 从 ConfigManager 当前配置同步全部日志设置到 LogManager。
-/// 锁顺序：先 config（只读）→ 再 log（写），与 start_logging 一致，不会死锁。
-fn sync_log_manager_from_config(state: &State<AppState>) -> Result<(), CommandError> {
-    let cfg = {
-        let mgr = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        mgr.get_config().clone()
-    };
-    let mut log_mgr = state
-        .log_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    log_mgr.set_auto_save(cfg.auto_save_log);
-    log_mgr.set_default_encoding(&cfg.log_encoding);
-    log_mgr.set_filename_format(&cfg.log_filename_format);
-    log_mgr.set_split_size(cfg.log_split_size_mb);
-    log_mgr.set_split_enabled(cfg.log_split_enabled);
-    log_mgr.set_include_timestamp(cfg.log_include_timestamp);
-    log_mgr.set_include_direction(cfg.log_include_direction);
-    log_mgr.set_subdir_mode(&cfg.log_subdir_mode);
-    log_mgr.set_new_file_per_session(cfg.log_new_file_per_session);
-    if !cfg.log_directory.is_empty() {
-        if let Err(e) = log_mgr.set_directory(cfg.log_directory.clone()) {
-            log::warn!("Failed to set log directory '{}': {}", cfg.log_directory, e);
-        }
+#[cfg(test)]
+mod tests {
+    use crate::commands::config::preserve_plugin_configs;
+    use crate::config::{AppConfig, PluginConfigEntry};
+
+    #[test]
+    fn normal_config_save_keeps_current_plugin_authorization() {
+        let mut current = AppConfig::default();
+        current.entities.plugin_configs.push(PluginConfigEntry {
+            id: "com.example.plugin".into(),
+            enabled: false,
+            granted_permissions: Vec::new(),
+            installed_at: None,
+            source: None,
+        });
+        let mut old_draft = current.clone();
+        old_draft.entities.plugin_configs[0].enabled = true;
+        old_draft.entities.plugin_configs[0].granted_permissions.push("serial:send".into());
+
+        preserve_plugin_configs(&mut old_draft, &current, false);
+        assert!(!old_draft.entities.plugin_configs[0].enabled);
+        assert!(old_draft.entities.plugin_configs[0].granted_permissions.is_empty());
+
+        let mut restore = old_draft.clone();
+        restore.entities.plugin_configs[0].enabled = true;
+        preserve_plugin_configs(&mut restore, &current, true);
+        assert!(restore.entities.plugin_configs[0].enabled);
     }
-    Ok(())
 }

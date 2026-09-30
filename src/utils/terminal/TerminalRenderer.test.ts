@@ -753,6 +753,54 @@ describe('TerminalRenderer large-trim anchor (issue #10)', () => {
   });
 });
 
+describe('TerminalRenderer pause (frozenSeq) does not follow-pin (issue #18)', () => {
+  it('suppresses the follow pin while frozen even when locked/followEnabled stay true', () => {
+    // 暂停只写 frozenSeq，`locked` 仍 true → 旧代码 `follow = followEnabled &&
+    // !gestureActive` 每帧钉底，而 baseCount 随 head trim 收缩 → totalHeight
+    // 逐帧变小 → 钉底目标逐帧上移 → 视口 churn。修复后 renderer 直接以
+    // frozenSeq 约束 follow，暂停时 scrollTop 保持不动。
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: true, frozenSeq: null }));
+    const pinned = container.scrollTop;
+    expect(pinned).toBeGreaterThan(0);
+
+    // Pause: frozenSeq = 90（locked / followEnabled 均不改变——模拟真实暂停）。
+    renderer.render(buf, identityView({ followEnabled: true, frozenSeq: 90 }));
+    // 不得被钉到冻结窗口底 (= (90-0+1)*18 - client)。
+    const frozenBottom = Math.max(0, 91 * ROW_HEIGHT - CLIENT_HEIGHT);
+    expect(container.scrollTop).not.toBe(frozenBottom);
+    // 且视口位置未被重置——冻结视图应停留在暂停前的位置。
+    expect(container.scrollTop).toBe(pinned);
+  });
+});
+
+describe('TerminalRenderer small-trim reading anchor (issue #19)', () => {
+  it('keeps the reading row at the viewport top across per-frame head eviction', () => {
+    // 非跟随、满缓冲稳态：逐行滚动窗口每帧 append + head trim（advance ≤
+    // maxLinesPerTick 2000）< LARGE_TRIM_ROWS(2500) → 旧「仅大 trim 恢复」永不触发，
+    // 视口顶 seq 随 firstSeq 每帧 +1，阅读行被逐帧上顶。修复后小步 head trim
+    // 也按 anchorSeq 恢复阅读位置。
+    const small = new TerminalBuffer({ maxLines: 1000 });
+    fill(small, Array.from({ length: 1000 }, (_, i) => String(i)));
+    renderer.render(small, identityView({ followEnabled: false }));
+
+    // 定位阅读行：视口顶放在 seq 400（非底部）。
+    container.scrollTop = 400 * ROW_HEIGHT;
+    renderer.render(small, identityView({ followEnabled: false }));
+    expect(container.scrollTop).toBe(400 * ROW_HEIGHT);
+
+    // 连续多帧小步追加（每帧 5 行 → head 前进 5），阅读行必须保持 seq 400 在顶。
+    for (let round = 0; round < 4; round++) {
+      fill(small, Array.from({ length: 5 }, (_, i) => `r${round}-${i}`));
+      renderer.render(small, identityView({ followEnabled: false }));
+      const expectedTop = (400 - small.firstSeq) * ROW_HEIGHT;
+      expect(container.scrollTop).toBe(expectedTop);
+      // 阅读行仍在视口顶部（seq 400 已落到 firstSeq+395）。
+      expect(small.getBySeq(400)).not.toBeNull();
+    }
+  });
+});
+
 describe('TerminalRenderer.seqFromEventTarget', () => {
   it('extracts the seq from a nested row child', () => {
     fill(buf, Array.from({ length: 5 }, (_, i) => String(i)));

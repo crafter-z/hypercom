@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { AppConfig } from '../../../types';
 import { clampNumber } from '../../../utils/clampNumber';
+import { CONFIG_BOUNDS } from '../../../utils/bounds';
 
 const DisplaySettings: React.FC = () => {
   const { t } = useTranslation();
@@ -88,8 +89,8 @@ const DisplaySettings: React.FC = () => {
               className="input"
               type="number"
               value={backgroundImageOpacity}
-              onChange={(e) => setConfig({ backgroundImageOpacity: clampNumber(e.target.value, 0, 100) })}
-              min={0} max={100} step={1}
+              onChange={(e) => setConfig({ backgroundImageOpacity: clampNumber(e.target.value, CONFIG_BOUNDS.backgroundImageOpacity[0], CONFIG_BOUNDS.backgroundImageOpacity[1]) })}
+              min={CONFIG_BOUNDS.backgroundImageOpacity[0]} max={CONFIG_BOUNDS.backgroundImageOpacity[1]} step={1}
               style={{ width: 80 }}
             />
             <span>%</span>
@@ -101,8 +102,8 @@ const DisplaySettings: React.FC = () => {
               className="input"
               type="number"
               value={backgroundImageBlur}
-              onChange={(e) => setConfig({ backgroundImageBlur: clampNumber(e.target.value, 0, 64) })}
-              min={0} max={64} step={1}
+              onChange={(e) => setConfig({ backgroundImageBlur: clampNumber(e.target.value, CONFIG_BOUNDS.backgroundImageBlur[0], CONFIG_BOUNDS.backgroundImageBlur[1]) })}
+              min={CONFIG_BOUNDS.backgroundImageBlur[0]} max={CONFIG_BOUNDS.backgroundImageBlur[1]} step={1}
               style={{ width: 80 }}
             />
             <span>px</span>

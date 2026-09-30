@@ -1,13 +1,15 @@
 import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore, collectLeaves } from '../../stores/useAppStore';
+import { useAppStore, getClosingTabIds, type CloseScope } from '../../stores/useAppStore';
+import { releaseTerminalState } from '../../stores/releaseTerminalState';
+import { collectLeaves } from '../../utils/paneTree';
+import { runSequential } from '../../utils/sequential';
 import { releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
 import { useSerialConnection, usePortToolActions } from '../../hooks';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
-import { popoutLabel } from '../Popout/popoutLabel';
 import TabBar from './TabBar';
 import TerminalView from './TerminalView';
 import TtyView from './TtyView';
@@ -17,7 +19,6 @@ import { useDroppable } from '@dnd-kit/core';
 interface PaneProps {
   paneId: string;
   tabIds: string[];
-  size: number;
   isFocused: boolean;
   isMultiPane: boolean;
   onFocus: () => void;
@@ -56,19 +57,21 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   // state so reopening the tab starts a fresh session.
   const cleanupClosedTab = useCallback((tabId: string) => {
     // issue #11：标签页关闭 = 前端显示目标销毁，但串口连接保留。清空该端口
-    // 的 RX 管线队列（flushTail+flushNow 排空 + 重置组装器/解码器）与 TTY
-    // 队列（detach 清 queue + decoder、保留尺寸），使重新打开标签页后从零
-    // 开始新一轮输出——appendTerminalLines 对无 manager 的端口静默丢弃，
+    // 的 RX 管线队列（flushTail+flushNow 排空 + 重置组装器）与 TTY 队列
+    // （detach 清 queue + decoder、保留尺寸），使重新打开标签页后从零开始
+    // 新一轮输出——appendTerminalLines 对无 manager 的端口静默丢弃，
     // 关闭期间到达的数据不会积压进新缓冲。
     getRxPipeline().disconnect(tabId);
     ttyService.detach(tabId);
     // 标签若已弹出，连同其独立窗一起销毁，避免遗留孤儿窗口（关窗事件随后幂等清标记）。
     if (useAppStore.getState().tabs.find(t => t.id === tabId)?.poppedOut) {
-      const label = popoutLabel('terminal', tabId);
-      if (label) popoutService.closePopout(label).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
+      popoutService.closePopout('terminal', tabId).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
     }
     // 方案B：释放环形缓冲区 + 渲染实例（标签关闭 = 缓冲销毁）。
     releaseViewportManager(tabId);
+    // store 侧的每端口条目（terminals / trafficStats / 发送历史）同一入口回收，
+    // 否则关闭标签只销毁 DOM，store 里会永久留下该端口的数据。
+    releaseTerminalState(tabId);
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
@@ -76,63 +79,49 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     storeCloseTab(tabId);
   }, [cleanupClosedTab, storeCloseTab]);
 
-  // Bulk-close wrappers: run the close lifecycle for EACH tab about to be
-  // closed, computing the close set the SAME way the store action does.
-  // close-to-right/left are pane-scoped (this leaf's tabIds order); the store
-  // action is invoked afterwards to mutate state.
+  // Bulk-close: run the close lifecycle for exactly the set the store action is
+  // about to close. `getClosingTabIds` is the store's own selector (leaf tabIds
+  // order, pinned tabs exempt) — Pane used to re-derive that slice + pinned
+  // filter locally, which is one edit away from cleaning up a different set than
+  // the one actually closed (leaked buffers, or a released tab that stays open).
+  const runCloseLifecycle = useCallback((tabId: string, scope: CloseScope) => {
+    for (const id of getClosingTabIds(tabId, scope)) cleanupClosedTab(id);
+  }, [cleanupClosedTab]);
+
   const handleCloseToRight = useCallback((tabId: string) => {
-    const idx = tabIds.indexOf(tabId);
-    if (idx >= 0) {
-      for (const id of tabIds.slice(idx + 1)) {
-        const tab = tabs.find(t => t.id === id);
-        if (!tab || tab.isPinned) continue;
-        cleanupClosedTab(id);
-      }
-    }
+    runCloseLifecycle(tabId, 'toRight');
     closeTabsToRight(tabId);
-  }, [tabIds, tabs, cleanupClosedTab, closeTabsToRight]);
+  }, [runCloseLifecycle, closeTabsToRight]);
 
   const handleCloseToLeft = useCallback((tabId: string) => {
-    const idx = tabIds.indexOf(tabId);
-    if (idx > 0) {
-      for (const id of tabIds.slice(0, idx)) {
-        const tab = tabs.find(t => t.id === id);
-        if (!tab || tab.isPinned) continue;
-        cleanupClosedTab(id);
-      }
-    }
+    runCloseLifecycle(tabId, 'toLeft');
     closeTabsToLeft(tabId);
-  }, [tabIds, tabs, cleanupClosedTab, closeTabsToLeft]);
+  }, [runCloseLifecycle, closeTabsToLeft]);
 
-  // close-others is global in the store (keeps only target + pinned across all
-  // panes), so run the lifecycle for every non-pinned tab except the target.
   const handleCloseOthers = useCallback((tabId: string) => {
-    for (const tab of tabs) {
-      if (tab.id === tabId || tab.isPinned) continue;
-      cleanupClosedTab(tab.id);
-    }
+    runCloseLifecycle(tabId, 'others');
     closeOtherTabs(tabId);
-  }, [tabs, cleanupClosedTab, closeOtherTabs]);
+  }, [runCloseLifecycle, closeOtherTabs]);
 
   // 批量打开/断开「所有标签页」对应的串口（issue #2-1）——作用于全局 tabs
-  // （跨分屏、含已弹出标签），而非仅本 pane。与侧边栏一键开/关同款
-  // 100ms 节流，避免并发 open/close 在后端抢串口句柄。
+  // （跨分屏、含已弹出标签），而非仅本 pane。串行 + 条目间隔是**后端约束**：
+  // 并发 open/close 会在后端抢同一个串口句柄，节流实现与 Sidebar 一键开/关
+  // 共用 `runSequential`（唯一实现，100ms 默认间隔）。
   const handleConnectAllTabs = useCallback(async () => {
-    for (const tab of useAppStore.getState().tabs) {
-      const port = useAppStore.getState().ports.find(p => p.id === tab.id);
-      if (!port || port.status === 'connected' || port.status === 'connecting') continue;
-      await openPort(tab.id);
-      await new Promise(r => setTimeout(r, 100));
-    }
+    const { tabs: allTabs, ports: allPorts } = useAppStore.getState();
+    const targets = allTabs.filter((tab) => {
+      const port = allPorts.find((p) => p.id === tab.id);
+      return port && port.status !== 'connected' && port.status !== 'connecting';
+    });
+    await runSequential(targets, (tab) => openPort(tab.id));
   }, [openPort]);
 
   const handleDisconnectAllTabs = useCallback(async () => {
-    for (const tab of useAppStore.getState().tabs) {
-      const port = useAppStore.getState().ports.find(p => p.id === tab.id);
-      if (!port || port.status !== 'connected') continue;
-      await closePort(tab.id);
-      await new Promise(r => setTimeout(r, 100));
-    }
+    const { tabs: allTabs, ports: allPorts } = useAppStore.getState();
+    const targets = allTabs.filter(
+      (tab) => allPorts.find((p) => p.id === tab.id)?.status === 'connected',
+    );
+    await runSequential(targets, (tab) => closePort(tab.id));
   }, [closePort]);
 
   // paneTabs must follow the pane's tabIds order, not the global tabs array order.
@@ -193,8 +182,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   // 回贴：乐观清标记 + 关窗。Rust 关窗事件亦会清标记（幂等），先后顺序无关。
   const handleReattach = useCallback((tabId: string) => {
     setTabPoppedOut(tabId, false);
-    const label = popoutLabel('terminal', tabId);
-    if (label) popoutService.closePopout(label).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
+    popoutService.closePopout('terminal', tabId).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
   }, [setTabPoppedOut]);
 
   const handleMoveTabToPane = useCallback((tabId: string, targetPaneId: string) => {

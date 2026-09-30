@@ -9,7 +9,7 @@ import { ttyService } from '../utils/ttyService';
 import { trafficStats } from '../utils/trafficStats';
 import { evaluateTriggers } from '../utils/triggerEngine';
 import { sendToPort } from './useSerialSend';
-import { notifyPortDisconnected } from '../utils/pluginObserver';
+import { feedPluginProtocolFrame, notifyPortDisconnected } from '../utils/pluginObserver';
 import { feedPluginBytes, hasPluginBytesObservers, notifyBytesPortDisconnected } from '../utils/pluginBytesObserver';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
@@ -167,6 +167,7 @@ export function useSerialReceive() {
                 // Frames are self-contained — a fresh per-frame decode is
                 // correct here (no char can straddle two frames).
                 const frameBytes = new Uint8Array(seg.frame.bytes);
+                feedPluginProtocolFrame(portId, frameBytes, event.timestamp);
                 const frameText = pipeline.decodeText(portId, frameBytes);
                 pipeline.enqueueLines(portId, [{
                   timestamp: event.timestamp,

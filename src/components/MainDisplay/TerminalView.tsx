@@ -28,6 +28,7 @@ import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getViewportManager } from '../../utils/terminal/viewportManager';
 import { TerminalRenderer, type RendererConfig } from '../../utils/terminal/TerminalRenderer';
+import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { isAtBottom } from '../../utils/followLogic';
 import { isSameRound } from '../../utils/timeFormat';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
@@ -44,8 +45,6 @@ interface TerminalViewProps {
 }
 
 const SETTLE_MS = 120;
-const FONT_MIN = 8;
-const FONT_MAX = 48;
 
 const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
   const { t } = useTranslation();
@@ -168,7 +167,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
   // Cleanup settle timer on unmount.
   useEffect(() => () => clearTimeout(settleTimerRef.current), []);
 
-  // Ctrl+wheel font zoom (8–48px, mirrored to the --font-size-terminal var).
+  // Ctrl+wheel font zoom, mirrored to the --font-size-terminal var. Bounds come
+  // from CONFIG_BOUNDS (the single source of numeric limits, K2) — a local 8/48
+  // copy silently drifts the moment the real bounds move.
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       beginGesture();
@@ -177,7 +178,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
       const store = useAppStore.getState();
       const current = store.config.terminalFontSize;
       const delta = e.deltaY > 0 ? -1 : 1;
-      const next = Math.max(FONT_MIN, Math.min(FONT_MAX, current + delta));
+      const next = Math.max(
+        CONFIG_BOUNDS.terminalFontSize[0],
+        Math.min(CONFIG_BOUNDS.terminalFontSize[1], current + delta),
+      );
       if (next !== current) {
         document.documentElement.style.setProperty('--font-size-terminal', `${next}px`);
         store.setConfig({ terminalFontSize: next });

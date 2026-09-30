@@ -18,7 +18,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -29,6 +29,10 @@ const MAX_FILE_SIZE: u64 = 512 * 1024;
 const MAX_BACKUPS: usize = 3;
 /// 诊断日志文件名（当前活跃文件）。
 const ACTIVE_FILENAME: &str = "hypercom-debug.log";
+/// I/O 失败报告节流：诊断日志器位于 `log` 全局路径上，失败时不能用 `log::*`
+/// （会把错误再喂回自己），只能写 stderr；而写失败常成批出现（磁盘满 / 权限），
+/// 只报第 1 次与之后每 N 次，避免 stderr 洪水拖慢进程。
+const FAILURE_REPORT_INTERVAL: usize = 1000;
 
 /// 诊断日志器。写入运行日志到旋转文件，是 `log::Log` 的实际实现。
 pub struct DiagLogger {
@@ -38,6 +42,8 @@ pub struct DiagLogger {
     file: Mutex<Option<fs::File>>,
     /// 是否启用（随配置 `diagnostic_log_enabled` 同步）。
     enabled: AtomicBool,
+    /// 累计 I/O 失败次数，供 `report_failure` 节流。
+    failures: AtomicUsize,
 }
 
 impl DiagLogger {
@@ -49,6 +55,7 @@ impl DiagLogger {
             path,
             file: Mutex::new(None),
             enabled: AtomicBool::new(true),
+            failures: AtomicUsize::new(0),
         })
     }
 
@@ -65,6 +72,31 @@ impl DiagLogger {
     /// 设置启用开关（随配置同步）。
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 报告一次 I/O 失败（节流）。诊断日志器不能调用 `log::*`——那是它自己。
+    fn report_failure(&self, what: &str, err: &std::io::Error) {
+        let count = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if count == 1 || count % FAILURE_REPORT_INTERVAL == 0 {
+            eprintln!(
+                "[diaglog] {what} failed: {err} (failure #{count}; reporting every {FAILURE_REPORT_INTERVAL})"
+            );
+        }
+    }
+
+    /// 惰性打开活跃文件；失败返回 None 并报告一次。
+    fn open_active(&self) -> Option<fs::File> {
+        match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            Ok(f) => Some(f),
+            Err(e) => {
+                self.report_failure("open active log file", &e);
+                None
+            }
+        }
     }
 
     /// 按轮转序号解析备份文件路径（1..=MAX_BACKUPS）。
@@ -90,33 +122,30 @@ impl DiagLogger {
             Err(_) => return,
         };
         if file.is_none() {
-            *file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-                .ok();
+            *file = self.open_active();
         }
         // 写入前检查大小：当前文件已满则先轮转拿到新活跃文件，再写入新行，
         // 保证新日志始终落在活跃文件（而非刚被轮转走的备份）里。
         if let Some(f) = file.as_ref() {
             let full = f.metadata().map(|m| m.len() >= MAX_FILE_SIZE).unwrap_or(false);
             if full {
-                if file.take().is_some() {
-                    self.rotate();
-                }
-                *file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)
-                    .ok();
+                // 关闭句柄后再轮转（Windows 下被占用的文件 rename 不掉）。
+                let _ = file.take();
+                self.rotate();
+                *file = self.open_active();
             }
         }
         let Some(f) = file.as_mut() else {
             return;
         };
         let line = format!("{timestamp} [{level}] [{target}] {msg}\n");
-        let _ = f.write_all(line.as_bytes());
-        let _ = f.flush();
+        if let Err(e) = f.write_all(line.as_bytes()) {
+            self.report_failure("write log line", &e);
+            return;
+        }
+        if let Err(e) = f.flush() {
+            self.report_failure("flush log line", &e);
+        }
     }
 
     /// 轮转：`.N-1 → .N` 依次后移，活跃文件 → `.1`，最旧备份删除。
@@ -125,10 +154,14 @@ impl DiagLogger {
             let from = self.backup_path(i);
             let to = self.backup_path(i + 1);
             if from.exists() {
-                let _ = fs::rename(&from, &to);
+                if let Err(e) = fs::rename(&from, &to) {
+                    self.report_failure("rotate backup file", &e);
+                }
             }
         }
-        let _ = fs::rename(&self.path, self.backup_path(1));
+        if let Err(e) = fs::rename(&self.path, self.backup_path(1)) {
+            self.report_failure("rotate active log file", &e);
+        }
     }
 
     /// 追加一条来自前端的日志（`console.*` 转发而来）。
@@ -158,28 +191,31 @@ impl DiagLogger {
 
     /// 清空全部诊断日志（活跃文件 + 所有备份）。
     pub fn clear(&self) {
-        {
-            let mut file = match self.file.lock() {
-                Ok(f) => f,
-                Err(_) => return,
-            };
-            if file.take().is_some() {
-                // 关闭句柄后再删，Windows 下避免占用。
-            }
+        // 先释放文件句柄再删/截断：Windows 下被占用的文件删不掉，
+        // 且未关闭的句柄可能在下一次写入时把旧内容追加回来。
+        if let Ok(mut file) = self.file.lock() {
+            let _ = file.take();
         }
         for i in 1..=MAX_BACKUPS {
             let p = self.backup_path(i);
             if p.exists() {
-                let _ = fs::remove_file(&p);
+                if let Err(e) = fs::remove_file(&p) {
+                    self.report_failure("remove log backup", &e);
+                }
             }
         }
-        let _ = fs::write(&self.path, "");
+        if let Err(e) = fs::write(&self.path, "") {
+            self.report_failure("truncate active log file", &e);
+        }
     }
 }
 
 impl Log for DiagLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Debug
+        // 必须尊重 `enabled` 原子开关：`Log::enabled` 是 `log::*` 宏在**格式化参数之前**
+        // 的短路点，恒返回 true 会让关闭诊断日志后仍付出全部参数格式化开销
+        // （高频 RX 路径尤甚）。
+        self.is_enabled() && metadata.level() <= Level::Debug
     }
 
     fn log(&self, record: &Record) {
@@ -285,6 +321,22 @@ mod tests {
         logger.write("ts", "WARN", "t", "should not appear");
         assert_eq!(logger.is_enabled(), false);
         assert_eq!(logger.read(100), "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_enabled_query_respects_the_switch() {
+        // `Log::enabled` 是 log::* 宏的短路点：关闭后必须为 false，
+        // 否则关闭诊断日志的进程仍在为每条日志格式化参数。
+        let dir = temp_dir("enabled_gate");
+        let logger = DiagLogger::new(dir.clone()).unwrap();
+        let metadata = Metadata::builder()
+            .level(Level::Info)
+            .target("gate")
+            .build();
+        assert!(logger.enabled(&metadata));
+        logger.set_enabled(false);
+        assert!(!logger.enabled(&metadata));
         let _ = fs::remove_dir_all(&dir);
     }
 

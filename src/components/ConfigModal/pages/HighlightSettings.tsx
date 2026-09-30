@@ -1,73 +1,50 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { storageService } from '../../../services/tauri';
-import { notifyError } from '../../../stores/useToastStore';
 import type { HighlightRuleSet } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import HighlightRuleEditor from '../editors/HighlightRuleEditor';
+import { useEntityPage } from '../hooks/useEntityPage';
 
 const HighlightSettings: React.FC = () => {
   const { t } = useTranslation();
   const highlightRuleSets = useRuleStore((s) => s.highlightRuleSets);
-  const addHighlightRuleSet = useRuleStore((s) => s.addHighlightRuleSet);
   const updateHighlightRuleSet = useRuleStore((s) => s.updateHighlightRuleSet);
-  const removeHighlightRuleSet = useRuleStore((s) => s.removeHighlightRuleSet);
-  const [expandedSetId, setExpandedSetId] = useState<string | null>(null);
 
-  useEffect(() => {
-    storageService.loadHighlightSets().then(sets => {
-      // 无条件替换：空结果也要写入 store，否则「删光全部规则集」后重开弹窗
-      // 会复活幽灵条目并随 ✓ 保存重新落盘（issue #5-2）。
-      useRuleStore.getState().setHighlightRuleSets(sets);
-    }).catch((e) => {
-      console.warn('[ConfigModal] loadHighlightSets failed:', e);
-      notifyError(e);
-    });
-  }, []);
-
-  const handleRemoveSet = async (setId: string) => {
-    removeHighlightRuleSet(setId);
-    try { await storageService.deleteHighlightSet(setId); } catch (e) { console.error('Failed to delete highlight set:', e); notifyError(e); }
-  };
-
-  const handleSaveSet = async (setId: string) => {
-    const set = useRuleStore.getState().highlightRuleSets.find(s => s.id === setId);
-    if (!set) return;
-    try {
-      await storageService.saveHighlightSet(set);
-    } catch (err) {
-      console.error('Failed to save highlight set:', err);
-      notifyError(err);
-    }
-  };
+  const page = useEntityPage<HighlightRuleSet>({
+    items: highlightRuleSets,
+    label: 'HighlightSettings',
+    ops: {
+      load: () => storageService.loadHighlightSets(),
+      read: () => useRuleStore.getState().highlightRuleSets,
+      replace: (items) => useRuleStore.getState().setHighlightRuleSets(items),
+      add: (set) => useRuleStore.getState().addHighlightRuleSet(set),
+      drop: (id) => useRuleStore.getState().removeHighlightRuleSet(id),
+      persist: (set) => storageService.saveHighlightSet(set),
+      remove: (id) => storageService.deleteHighlightSet(id),
+    },
+  });
 
   const handleAddSet = () => {
-    const id = `hl-${Date.now()}`;
-    addHighlightRuleSet({ id, name: t('highlightSettings.addSet'), rules: [], isEnabled: true });
-    setExpandedSetId(id);
+    page.create({ id: `hl-${Date.now()}`, name: t('highlightSettings.addSet'), rules: [], isEnabled: true });
   };
 
   const handleAddRule = (setId: string) => {
-    const ruleId = `rule-${Date.now()}`;
-    const sets = useRuleStore.getState().highlightRuleSets;
-    const set = sets.find(s => s.id === setId);
-    if (set) {
-      updateHighlightRuleSet(setId, {
-        rules: [...set.rules, {
-          id: ruleId,
-          name: t('highlightSettings.defaultRuleName', { index: set.rules.length + 1 }),
-          pattern: '',
-          isRegex: false,
-          color: '#ff6b6b',
-          bold: false,
-          italic: false,
-        }]
-      });
-    }
+    const set = useRuleStore.getState().highlightRuleSets.find(s => s.id === setId);
+    if (!set) return;
+    updateHighlightRuleSet(setId, {
+      rules: [...set.rules, {
+        id: `rule-${Date.now()}`,
+        name: t('highlightSettings.defaultRuleName', { index: set.rules.length + 1 }),
+        pattern: '',
+        isRegex: false,
+        color: '#ff6b6b',
+        bold: false,
+        italic: false,
+      }],
+    });
   };
-
-  const handleSelect = (id: string) => setExpandedSetId(expandedSetId === id ? null : id);
 
   return (
     <RuleSetAccordion<HighlightRuleSet>
@@ -76,11 +53,11 @@ const HighlightSettings: React.FC = () => {
       addLabel={t('highlightSettings.accordionAddLabel')}
       emptyText={t('highlightSettings.accordionEmptyText')}
       items={highlightRuleSets}
-      selectedId={expandedSetId}
-      onSelect={handleSelect}
+      selectedId={page.expandedId}
+      onSelect={page.toggleExpanded}
       onAdd={handleAddSet}
-      onDelete={handleRemoveSet}
-      onSave={handleSaveSet}
+      onDelete={page.remove}
+      onSave={page.save}
       onRename={(id, name) => updateHighlightRuleSet(id, { name })}
       renderHeaderExtra={(set) => (
         <label className="checkbox-wrapper" style={{ fontSize: 11 }} onClick={e => e.stopPropagation()}>

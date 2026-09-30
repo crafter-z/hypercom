@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bell, Pin, Trash2 } from 'lucide-react';
 import type { ToastItem } from '../../stores/useToastStore';
 import { useToastStore } from '../../stores/useToastStore';
+import { useOutsideDismiss } from '../shared/useOutsideDismiss';
 
 /** Badge caps at 99+ so the status bar chip never blows out. */
 const MAX_BADGE_COUNT = 99;
@@ -41,26 +42,10 @@ const NotificationCenter: React.FC = () => {
   const all: ToastItem[] = [...stashed, ...toasts].sort((a, b) => b.createdAt - a.createdAt);
   const count = all.length;
 
-  // Outside click / Escape closes the panel (mirrors ContextMenu).
-  useEffect(() => {
-    if (!centerOpen) return;
-    const onMouseDown = (e: MouseEvent) => {
-      // The bell button lives inside wrapRef, so clicking it never fires this
-      // handler — the button's own onClick toggles instead.
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setCenterOpen(false);
-      }
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setCenterOpen(false);
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [centerOpen, setCenterOpen]);
+  // Outside click / Escape closes the panel. The bell button lives inside
+  // wrapRef, so clicking it never dismisses — the button's own onClick toggles.
+  const closeCenter = useCallback(() => setCenterOpen(false), [setCenterOpen]);
+  useOutsideDismiss(wrapRef, closeCenter, centerOpen);
 
   return (
     <div className="notify-wrap" ref={wrapRef}>

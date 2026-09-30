@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ClipboardPaste, Copy, Redo, Scissors, SquareDashed, Undo } from 'lucide-react';
+import { useMenuPlacement } from './menuPlacement';
+import { useOutsideDismiss } from './useOutsideDismiss';
 
 /**
  * Custom text-edit context menu (issue #7-10).
@@ -110,38 +112,8 @@ interface TextEditContextMenuProps {
 
 const TextEditContextMenu: React.FC<TextEditContextMenuProps> = ({ x, y, target, snapshot, savedRange, onClose }) => {
   const { t } = useTranslation();
-  const [pos, setPos] = useState({ x, y });
-  const menuRef = React.useRef<HTMLDivElement>(null);
-
-  // Keep the menu on-screen (mirrors the shared ContextMenu positioning).
-  useEffect(() => {
-    if (!menuRef.current) return;
-    const rect = menuRef.current.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let nx = x;
-    let ny = y;
-    if (rect.width + x > vw - 8) nx = vw - rect.width - 8;
-    if (rect.height + y > vh - 8) ny = vh - rect.height - 8;
-    if (nx < 0) nx = 0;
-    if (ny < 0) ny = 0;
-    if (nx !== x || ny !== y) setPos({ x: nx, y: ny });
-  }, [x, y]);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('mousedown', handler);
-    document.addEventListener('keydown', keyHandler);
-    return () => {
-      document.removeEventListener('mousedown', handler);
-      document.removeEventListener('keydown', keyHandler);
-    };
-  }, [onClose]);
+  const { ref, pos } = useMenuPlacement(x, y);
+  useOutsideDismiss(ref, onClose);
 
   const hasSelection = snapshot ? snapshot.start !== snapshot.end : savedRange != null;
 
@@ -154,7 +126,7 @@ const TextEditContextMenu: React.FC<TextEditContextMenuProps> = ({ x, y, target,
   const itemClass = (disabled: boolean) => `context-menu-item${disabled ? ' disabled' : ''}`;
 
   return (
-    <div ref={menuRef} className="context-menu animate-fade-in" style={{ left: pos.x, top: pos.y }}>
+    <div ref={ref} className="context-menu animate-fade-in" style={{ left: pos.x, top: pos.y }}>
       <div className="context-menu-item" onClick={action('undo')}>
         <span className="context-menu-icon"><Undo size={14} /></span>
         <span>{t('contextMenu.undo')}</span>

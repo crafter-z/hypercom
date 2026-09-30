@@ -13,14 +13,14 @@ com.example.hypercom-demo/     # 目录名 = manifest id
 
 ## 使用
 
-1. 把整个 `plugin-demo/` 目录复制到应用插件目录
-   （Windows: `%APPDATA%/hypercom/plugins/`，与 config.json 同根；或打包为含
-   `<插件id>/` 顶层目录的 zip，从设置 → 插件 → 安装插件导入）。
-2. 设置 → 插件 → 启用（本示例声明了敏感权限 `serial:send`，启用会弹确认框）。
-3. 在权限区勾选 `terminal:read` / `terminal:write`（`serial:send` 可选——只影响
-   作用域演示，不勾选时 `serial.send` 被权限层拒绝）。
-4. 打开任意 TRX 端口标签页，发送含 `PING` 的数据 → 终端出现 `PONG<...>` 旁注行；
-   点击侧边栏工具栏「统计行数」按钮 → 终端出现统计旁注。
+1. 设置 → 插件 → “安装目录…”选择 `plugin-demo/`；或把插件打包为含
+   `<插件id>/` 顶层目录的 ZIP，点击“安装 ZIP…”选择归档。安装后目录由宿主复制
+   到 config.json 同目录的 `plugins/<id>/`；不要手动复制文件取代安装步骤。
+2. 设置 → 插件 → 启用（本示例声明敏感权限 `serial:send`，启用时弹确认框）。
+3. 在权限区勾选 `terminal:read` / `terminal:write`（`serial:send` 可选，仅用于
+   端口作用域演示）。
+4. 打开任意 TRX 端口标签页，发送含 `PING` 的数据，终端会出现 `PONG<...>`；
+   点击工具栏“统计行数”会在活动端口追加旁注，无活动端口则写入插件输出面板。
 
 ## 行为说明
 

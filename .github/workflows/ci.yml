@@ -1,0 +1,114 @@
+name: 'ci'
+
+# 日常质量门：与发版流（publish.yml / publish-preview.yml）保持同一口径
+# （tsc + vitest + cargo test --lib + playwright），但提前到每次 push / PR——
+# 发版门禁报红时 tag 已经打完，回滚代价高。步骤与发版流逐条对应，便于对照排查。
+#
+# branches 过滤而非裸 push：tag push 由发版流自己跑同一套门禁，CI 再跑一遍
+# 只是重复占 runner（排除 tag = 只留分支）。
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch: {}
+
+# 同一 PR 的旧运行被新提交取代；分支上的 push 不取消，避免发布前门禁被中断。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend:
+    name: frontend (tsc + vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: 'npm'
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      - name: typecheck (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: unit tests (vitest)
+        run: npm run test:run
+
+      # `build` = `tsc && vite build`，也是 tauri.conf.json 的 beforeBuildCommand。
+      # 发版流只在 tag 上跑 tauri 打包；平时的 bundling/resolution 错误（如新增依赖
+      # 未正确 externalize）没人拦，这里用同一命令提前兜住。
+      - name: production build (vite build)
+        run: npm run build
+
+  rust:
+    name: rust (cargo test --lib)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install dependencies (ubuntu only)
+        run: |
+          sudo apt-get update
+          # 与发版流的清单一致；唯一差异是 appindicator：发版流跑 ubuntu-22.04 用
+          # libappindicator3-dev，而 ubuntu-latest(24.04) 只保留继任者
+          # libayatana-appindicator3-dev（libappindicator-sys 优先探测
+          # ayatana-appindicator3-0.1，两者提供同一 pkg-config 依赖）。
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils libudev-dev
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # tauri-build 在 test profile 下仍会读 tauri.conf.json，前端依赖先就位
+      - name: setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: 'npm'
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      # --lib 在 Linux 上会执行 #[cfg(not(target_os = "windows"))] 的串口/TTY 测试，
+      # Windows 本地开发环境跑不到——把 Windows-only 之外的分支纳入回归是本 job 的目的。
+      - name: cargo test
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+
+      # `cargo check` 默认只在 debug profile 编译，`cfg(not(debug_assertions))` 与
+      # release 专属路径（如 updater 的真实 endpoint）平时永远不编译；发版前必须
+      # 在 release profile 上过一遍类型检查。
+      - name: cargo check (release)
+        run: cargo check --release --lib --manifest-path src-tauri/Cargo.toml
+
+  e2e:
+    name: e2e (playwright chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: 'npm'
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      # e2e 用 mock IPC（e2e/smoke.spec.ts 注入 window.__TAURI_INTERNALS__），
+      # 不需要 Rust 侧与 webkit2gtk；playwright.config.ts 的 webServer 会自行
+      # 拉起 vite dev server（1420）；CI 下 reuseExistingServer=false。
+      - name: install playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: playwright test
+        run: npx playwright test

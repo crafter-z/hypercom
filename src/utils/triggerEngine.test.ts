@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evaluateTriggers, bytesToHexString, normalizeHexPattern } from './triggerEngine';
+import { evaluateTriggers, normalizeHexPattern } from './triggerEngine';
 import type { TriggerRule } from '../types';
 
 function makeRule(overrides: Partial<TriggerRule> = {}): TriggerRule {
@@ -16,20 +16,6 @@ function makeRule(overrides: Partial<TriggerRule> = {}): TriggerRule {
     ...overrides,
   };
 }
-
-describe('bytesToHexString', () => {
-  it('converts bytes to uppercase space-separated hex', () => {
-    expect(bytesToHexString([0xaa, 0x55, 0x0f])).toBe('AA 55 0F');
-  });
-
-  it('handles empty array', () => {
-    expect(bytesToHexString([])).toBe('');
-  });
-
-  it('masks values to single byte', () => {
-    expect(bytesToHexString([256, 255])).toBe('00 FF');
-  });
-});
 
 describe('normalizeHexPattern', () => {
   it('uppercases and collapses whitespace', () => {
@@ -109,6 +95,14 @@ describe('evaluateTriggers', () => {
       const rule = makeRule({ pattern: 'FF FF', matchType: 'hex' });
       const result = evaluateTriggers('', [0xaa, 0x55], [rule], undefined);
       expect(result).toHaveLength(0);
+    });
+
+    it('masks out-of-range byte values to one byte when rendering HEX', () => {
+      // hexFormat.hexByte 的 & 0xff 语义在 HEX 匹配路径上必须仍然可见：
+      // 越界值不得渲染成 3 个字符（"100"）而真字节 0x00 匹配不上。
+      const rule = makeRule({ pattern: '00 FF', matchType: 'hex' });
+      const result = evaluateTriggers('', [256, 255], [rule], undefined);
+      expect(result).toHaveLength(1);
     });
 
     it('skips hex match when rawData is undefined', () => {

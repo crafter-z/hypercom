@@ -6,6 +6,7 @@ import { logService } from '../../../services/tauri';
 import { notifyError, useToastStore } from '../../../stores/useToastStore';
 import type { AppConfig } from '../../../types';
 import { clampNumber } from '../../../utils/clampNumber';
+import { CONFIG_BOUNDS } from '../../../utils/bounds';
 
 interface DirChangeDialogProps {
   oldDir: string;
@@ -179,7 +180,7 @@ const LogSettings: React.FC = () => {
       {logSplitEnabled && (
         <div className="config-row">
           <label>{t('logSettings.splitSizeLabel')}</label>
-          <input className="input" type="number" value={logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: clampNumber(e.target.value, 1, 10240) })} min={1} max={10240} />
+          <input className="input" type="number" value={logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: clampNumber(e.target.value, CONFIG_BOUNDS.logSplitSizeMb[0], CONFIG_BOUNDS.logSplitSizeMb[1]) })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
         </div>
       )}
 

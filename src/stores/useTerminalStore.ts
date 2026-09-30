@@ -26,6 +26,10 @@ export interface TerminalStoreState {
   /** Switch the encoding label; the renderer re-decodes visible rows on the
    *  next redraw (no store-side buffer walk — issue #14). */
   setTerminalEncoding: (portId: string, encoding: Encoding) => void;
+  /** Drop a port's display state. Only `releaseTerminalState` should call this:
+   *  the entry must disappear together with the port's traffic stats and TX
+   *  history, otherwise a reopened port inherits stale display state. */
+  releaseTerminal: (portId: string) => void;
 }
 
 const DEFAULT_TERMINAL_STATE = (): TerminalState => ({
@@ -64,5 +68,12 @@ export const useTerminalStore = create<TerminalStoreState>((set) => ({
       const term = state.terminals[portId];
       if (!term || term.encoding === encoding) return {};
       return { terminals: { ...state.terminals, [portId]: { ...term, encoding } } };
+    }),
+
+  releaseTerminal: (portId) =>
+    set((state) => {
+      if (state.terminals[portId] === undefined) return {};
+      const { [portId]: _released, ...rest } = state.terminals;
+      return { terminals: rest };
     }),
 }));

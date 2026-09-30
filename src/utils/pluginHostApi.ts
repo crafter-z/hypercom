@@ -13,7 +13,6 @@
  *   pluginObserver 装配层，不在此层重复实现）。
  */
 import { pluginService, fileService } from '../services/tauri';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readText as clipboardReadText, writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { sendToPort } from '../hooks/useSerialSend';
 import { useAppStore } from '../stores/useAppStore';
@@ -27,6 +26,7 @@ import { addPluginBytesObserver } from './pluginBytesObserver';
 import { checkPortScope, OP_PERMISSIONS } from './pluginRpc';
 import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
+import { exportPluginPanel } from './pluginPanelExport';
 
 /** 插件可见的端口摘要（避免把内部字段全量暴露给插件）。 */
 export interface PluginPortView {
@@ -119,41 +119,33 @@ export async function executeHostApi(
       return { bytesWritten: bytes };
     }
     case 'fs.openDialog': {
-      // 死机日志/任意 map 文件：文件必须经系统对话框由用户显式选择（即信任边界，
-      // 与 file.rs::read_text_file 同模式——对话框选择即授权，不做子树限制）。
-      // 插件不能按任意路径直接读盘——只有「用户点了对话框选中的文件」才合法。
-      // 权限点单列 `fs:open`（与「仅读自身资产」的 fs:assets 语义分离）。
       const a = requireObject(args);
       const encoding = typeof a.encoding === 'string' && a.encoding !== '' ? a.encoding : 'utf-8';
       const filters = Array.isArray(a.filters) ? (a.filters as { name: string; extensions: string[] }[]) : undefined;
       const multiple = Boolean(a.multiple);
-      const picked = await openDialog({ multiple, filters, title: typeof a.title === 'string' ? a.title : undefined });
-      if (picked === null) return { files: [] }; // 用户取消
-      // 经 read_file_bytes 读原始字节（base64）——绕过 read_text_file 的 UTF-8 严格性
-      //（GBK/CP936 编码的编译 map 文件是中文 Windows 工具链常见产物）。宿主侧按插件
-      // 指定 encoding 用 TextDecoder 解码（GBK 受浏览器支持）。解码失败降级 utf-8。
-      const paths = Array.isArray(picked) ? picked : [picked];
-      const files: Array<{ path: string; content: string }> = [];
-      for (const p of paths) {
-        try {
-          const b64 = await fileService.readFileBytes(p);
-          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-          let content: string;
-          try {
-            content = new TextDecoder(encoding, { fatal: false }).decode(bytes);
-          } catch {
-            content = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          }
-          files.push({ path: p, content });
-        } catch (e) {
-          console.error('[pluginHost] fs.openDialog read failed:', p, e);
-          files.push({ path: p, content: '' });
-        }
-      }
-      return { files };
+      const selected = await fileService.pickPluginFiles(pluginId, {
+        multiple, filters, title: typeof a.title === 'string' ? a.title : undefined,
+      });
+      return {
+        files: selected.files.map(({ path, base64 }: { path: string; base64: string }) => {
+          const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+          return { path, content: new TextDecoder(encoding).decode(bytes) };
+        }),
+      };
     }
     case 'fs.read': {
       const rel = requireString(args, 'rel');
+      const granted = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === pluginId);
+      if (!granted?.enabled) throw new Error('plugin disabled');
+      const segments = rel.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
+      if (segments.includes('..')) throw new Error('非法插件路径');
+      const isData = segments[0] === 'data';
+      if (isData && !granted.grantedPermissions.includes('fs:storage')) {
+        throw new Error('插件未授予 fs:storage 权限');
+      }
+      if (!isData && !granted.grantedPermissions.includes('fs:assets')) {
+        throw new Error('插件未授予 fs:assets 权限');
+      }
       return pluginService.readPluginAsset(pluginId, rel);
     }
     case 'fs.write': {
@@ -177,7 +169,7 @@ export async function executeHostApi(
     }
     case 'shell.openExternal': {
       const url = requireString(args, 'url');
-      await pluginService.pluginOpenExternal(url);
+      await pluginService.pluginOpenExternal(pluginId, url);
       return null;
     }
     case 'notify': {
@@ -244,19 +236,15 @@ export async function executeHostApi(
       return null;
     }
     case 'ui.panel.export': {
-      // v1：返回当前面板内容供插件自行处理（如复制/导出）。宿主 UI 的导出是增量。
-      return getPluginPanelSnapshot()[pluginId]?.buffer ?? '';
+      await exportPluginPanel(pluginId, getPluginPanelSnapshot()[pluginId]?.buffer ?? '');
+      return null;
     }
     case 'rx.onLine':
-      // rx.onLine/rx.onBytes 由宿主装配层经事件通道实现（worker 内无法传回调），
-      // 不经 RPC——防御性拒绝（见装配层 attachRxObserver / usePlugins）。
-      throw new Error(`${op} 由宿主装配层提供，不经 RPC`);
+    case 'rx.onBytes':
+      throw new Error('请使用 plugin.rx.onLine/onBytes(callback) 订阅事件');
     default:
-      // 已登记权限点但 v1 未实现（shell.execute/fs.list/ports.onChange/
-      // rx.getBuffer/events.*，见 plugins.md「实现进度」②）→ 明确「未实现」；
-      // 其余才是真正的未知 API。二者都拒绝，语义不再混同。
-      if (op in OP_PERMISSIONS) {
-        throw new Error(`宿主 API 未实现（v1 骨架，见 plugins.md 实现进度②）: ${op}`);
+      if (Object.prototype.hasOwnProperty.call(OP_PERMISSIONS, op)) {
+        throw new Error(`宿主 API 不支持: ${op}`);
       }
       throw new Error(`未知宿主 API: ${op}`);
   }
@@ -304,6 +292,9 @@ export function attachRxObserver(
       // 复制成本在交付路径本就存在；实测高频卡顿再优化）。
       session.post({ type: 'rx.line', payload: lines });
     },
+    onRxDropped: (event) => {
+      session.post({ type: 'rx.dropped', payload: event });
+    },
     onRxDetached: (e) => {
       session.post({ type: 'rx.detached', payload: e });
       onDetached?.(e);
@@ -325,6 +316,12 @@ export function attachBytesObserver(session: { post: HostPost }): () => void {
   return addPluginBytesObserver({
     onRxBytes: (batch) => {
       session.post({ type: 'rx.bytes', payload: batch });
+    },
+    onRxDropped: (event) => {
+      session.post({ type: 'rx.dropped', payload: event });
+    },
+    onRxDetached: (event) => {
+      session.post({ type: 'rx.detached', payload: event });
     },
   });
 }

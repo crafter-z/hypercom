@@ -18,8 +18,6 @@ export const PLUGIN_PANEL_MAX_BUFFER = 512 * 1024;
 export interface PluginPanelState {
   /** 追加文本（尾部聚合，宿主按需分行渲染）。 */
   buffer: string;
-  /** 累计导出次数（宿主 UI 显示用）。 */
-  exportCount: number;
   /** 因超限截断而丢弃的字符数（宿主 UI 可显示「已截断」）。 */
   droppedChars: number;
 }
@@ -54,7 +52,7 @@ export function appendPluginPanel(pluginId: string, text: string): void {
   }
   snapshot = {
     ...snapshot,
-    [pluginId]: { buffer, exportCount: cur?.exportCount ?? 0, droppedChars },
+    [pluginId]: { buffer, droppedChars },
   };
   notify();
 }
@@ -63,7 +61,7 @@ export function appendPluginPanel(pluginId: string, text: string): void {
 export function clearPluginPanel(pluginId: string): void {
   const cur = snapshot[pluginId];
   if (!cur) return;
-  snapshot = { ...snapshot, [pluginId]: { buffer: '', exportCount: cur.exportCount, droppedChars: cur.droppedChars } };
+  snapshot = { ...snapshot, [pluginId]: { buffer: '', droppedChars: cur.droppedChars } };
   notify();
 }
 

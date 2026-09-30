@@ -13,6 +13,8 @@ import {
   resetPluginObserverForTest,
   hasPluginRxObservers,
   MAX_LINES_PER_DELIVERY,
+  MAX_BYTES_PER_DELIVERY,
+  feedPluginProtocolFrame,
   notifyPortDisconnected,
 } from './pluginObserver';
 import { getRxPipeline } from './rxPipeline';
@@ -153,6 +155,43 @@ describe('pluginObserver', () => {
     // 顺序保持（seq 单调 = 队列 FIFO）。
     expect(spy.lines[0].text).toBe('line0');
     expect(spy.lines[total - 1].text).toBe(`line${total - 1}`);
+    unsub();
+  });
+  it('protocol frames bypass line assembly and preserve original RX frame bytes', () => {
+    const seen: Uint8Array[] = [];
+    const unsub = addPluginRxObserver({
+      onRxLines: (lines) => seen.push(...lines.map((line) => line.rawData)),
+      onRxDetached: () => {},
+    });
+    feedPluginProtocolFrame('COM1', new Uint8Array([0, 255, 10]), 123);
+    flushDelivery();
+    expect(seen.map((bytes) => Array.from(bytes))).toEqual([[0, 255, 10]]);
+    unsub();
+  });
+
+  it('caps each delivery by real byte size without dropping queued lines', () => {
+    const batches: number[] = [];
+    const unsub = addPluginRxObserver({
+      onRxLines: (lines) => batches.push(lines.reduce((n, line) => n + line.rawData.length, 0)),
+      onRxDetached: () => {},
+    });
+    for (let i = 0; i < 3; i++) feedPluginProtocolFrame('COM1', new Uint8Array(120 * 1024), i);
+    flushDelivery();
+    flushDelivery();
+    expect(batches).toEqual([240 * 1024, 120 * 1024]);
+    expect(batches.every((size) => size <= MAX_BYTES_PER_DELIVERY)).toBe(true);
+    unsub();
+  });
+  it('reports oversized RX frame loss to subscribers', () => {
+    const dropped: Array<{ portId: string; count: number; reason: string }> = [];
+    const unsub = addPluginRxObserver({
+      onRxLines: () => {}, onRxDetached: () => {},
+      onRxDropped: (event) => { dropped.push(event); },
+    });
+    feedPluginProtocolFrame('COM1', new Uint8Array(MAX_BYTES_PER_DELIVERY + 1), 1);
+    feedPluginProtocolFrame('COM1', new Uint8Array(MAX_BYTES_PER_DELIVERY + 1), 2);
+    flushDelivery();
+    expect(dropped).toEqual([{ portId: 'COM1', reason: 'oversized-frame', count: 2 }]);
     unsub();
   });
   it('notifyPortDisconnected：断流通知 + 队列清空（复审补强：断线场景）', () => {

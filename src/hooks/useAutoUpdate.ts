@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
+import { useSystemStore } from '../stores/useSystemStore';
 import { updateTiming, shouldAutoCheck, isUpdateCheckEnabled, runAutoCheck } from '../utils/updateService';
 
 /** 就绪信号失联时的兜底等待上限（异常场景才走到，按当前 config 评估）。 */
@@ -46,7 +47,7 @@ export function useAutoUpdate(): void {
       if (cancelled) return;
 
       if (update) {
-        useAppStore.getState().setUIState({
+        useSystemStore.getState().setUIState({
           isUpdateOpen: true,
           updateCandidate: update,
         });
@@ -60,11 +61,11 @@ export function useAutoUpdate(): void {
     };
 
     // 等 config 就绪信号（false→true 跳变）；15s 兜底防信号失联。
-    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
-    const unsub = useAppStore.subscribe((state, prev) => {
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    const unsub = useSystemStore.subscribe((state, prev) => {
       if (state.ui.configReady && !prev.ui.configReady) {
         unsub();
-        if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+        clearTimeout(fallbackTimer);
         start();
       }
     });
@@ -73,20 +74,20 @@ export function useAutoUpdate(): void {
       start();
     }, CONFIG_READY_FALLBACK_MS);
     // 挂载时已就绪（未来挂载顺序变化时）→ 直接评估。
-    if (useAppStore.getState().ui.configReady) {
+    if (useSystemStore.getState().ui.configReady) {
       start();
     }
 
     // ---- 会话内周期重评估（issue #12 二轮：长期挂机场景）----
     const interval = setInterval(() => {
-      if (!useAppStore.getState().ui.configReady) return;
+      if (!useSystemStore.getState().ui.configReady) return;
       void evaluate();
     }, RECHECK_INTERVAL_MS);
 
     return () => {
       cancelled = true;
       unsub();
-      if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+      clearTimeout(fallbackTimer);
       clearInterval(interval);
     };
   }, []);

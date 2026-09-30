@@ -5,6 +5,8 @@ import { describe, it, expect } from 'vitest';
 import {
   getLineEndingBytes,
   parseHexBytes,
+  hexInputError,
+  HEX_INPUT_ERROR_KEY,
   computeByteCount,
   formatLineEndingHex,
   textToHexPreview,
@@ -32,20 +34,41 @@ describe('sendUtils', () => {
       expect(parseHexBytes('AABBCC')).toEqual([0xaa, 0xbb, 0xcc]);
     });
 
-    it('pads trailing nibble with leading zero after whitespace strip', () => {
-      // "48 6" → "486" (odd) → last nibble '6' is padded to '06'
-      expect(parseHexBytes('48 6')).toEqual([0x48, 0x06]);
+    it('accepts lowercase and mixed case', () => {
+      expect(parseHexBytes('aF')).toEqual([0xaf]);
+      expect(parseHexBytes('aF b0')).toEqual([0xaf, 0xb0]);
     });
 
-    it('pads single-nibble and odd-length compact input', () => {
-      expect(parseHexBytes('C')).toEqual([0x0c]);
-      expect(parseHexBytes('486')).toEqual([0x48, 0x06]);
-      expect(parseHexBytes('ABC')).toEqual([0xab, 0x0c]);
+    it('rejects odd nibble counts instead of zero-padding (backend rejects them)', () => {
+      expect(parseHexBytes('C')).toEqual([]);
+      expect(parseHexBytes('486')).toEqual([]);
+      expect(parseHexBytes('48 6')).toEqual([]);
     });
 
-    it('returns empty for empty input', () => {
+    it('returns empty for empty / whitespace-only input', () => {
       expect(parseHexBytes('')).toEqual([]);
       expect(parseHexBytes('   ')).toEqual([]);
+    });
+
+    it('rejects non-hex characters', () => {
+      expect(parseHexBytes('4Z')).toEqual([]);
+      expect(parseHexBytes('GG')).toEqual([]);
+    });
+  });
+
+  describe('hexInputError', () => {
+    it('returns null for sendable hex and for empty input', () => {
+      expect(hexInputError('48 65 6C')).toBeNull();
+      expect(hexInputError('48656c')).toBeNull();
+      expect(hexInputError('aF')).toBeNull();
+      expect(hexInputError('')).toBeNull();
+      expect(hexInputError('  ')).toBeNull();
+    });
+
+    it('flags odd nibble counts and non-hex characters', () => {
+      expect(hexInputError('48 6')).toBe(HEX_INPUT_ERROR_KEY);
+      expect(hexInputError('C')).toBe(HEX_INPUT_ERROR_KEY);
+      expect(hexInputError('4Z')).toBe(HEX_INPUT_ERROR_KEY);
     });
   });
 
@@ -54,6 +77,24 @@ describe('sendUtils', () => {
       const result = computeByteCount('48 65 6C', true, 'ASCII', '\\r\\n');
       expect(result.count).toBe(5);
       expect(result.label).toBe('5 B');
+    });
+
+    it('reports an error key instead of a bogus count for unsendable hex', () => {
+      // 后端 parse_hex_string 必然拒绝奇数位输入——显示 "N B" 会误导用户。
+      const odd = computeByteCount('48 6', true, 'ASCII', '\\r\\n');
+      expect(odd.errorKey).toBe(HEX_INPUT_ERROR_KEY);
+      expect(odd.label).toBe('');
+      expect(odd.count).toBe(0);
+
+      const bad = computeByteCount('4Z', true, 'ASCII', 'None');
+      expect(bad.errorKey).toBe(HEX_INPUT_ERROR_KEY);
+    });
+
+    it('keeps counting line-ending bytes for empty hex input', () => {
+      const result = computeByteCount('', true, 'ASCII', '\\n');
+      expect(result.count).toBe(1);
+      expect(result.label).toBe('1 B');
+      expect(result.errorKey).toBeUndefined();
     });
 
     it('counts UTF-8 text bytes plus suffix', () => {
