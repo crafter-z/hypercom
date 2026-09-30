@@ -468,4 +468,64 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// CRUD committed while the frontend waits or while invoke is in flight
+    /// must invalidate an older whole-config snapshot.
+    #[test]
+    fn stale_full_config_cannot_replace_newer_crud_write() {
+        let path = temp_config_path();
+        let dir = path.parent().expect("temp dir").to_path_buf();
+        let mut manager = ConfigManager::new(Some(path.clone())).expect("open temp config");
+        let mut stale = manager.get_config().clone();
+        let before = stale.revision;
+        mutate(&mut manager, |cfg| {
+            upsert(command_sets(cfg), command_set("rule-1", "newer"))
+        }).expect("save rule during preset load");
+
+        stale.theme = "light".into();
+        assert!(!manager.set_config_if_revision(stale.clone(), before).unwrap());
+        assert_eq!(manager.get_config().revision, before + 1);
+
+        stale.entities.send_command_sets = manager.get_config().entities.send_command_sets.clone();
+        let next = manager.get_config().revision;
+        mutate(&mut manager, |cfg| {
+            upsert(command_sets(cfg), command_set("rule-1", "newest"))
+        }).expect("save rule after invoke");
+        assert!(!manager.set_config_if_revision(stale, next).unwrap());
+
+        let mut recomposed = manager.get_config().clone();
+        recomposed.theme = "light".into();
+        let expected = manager.get_config().revision;
+        assert!(manager.set_config_if_revision(recomposed, expected).unwrap());
+        let reloaded = ConfigManager::new(Some(path)).expect("reload accepted save");
+        assert_eq!(reloaded.get_config().entities.send_command_sets[0].name, "newest");
+        assert_eq!(reloaded.get_config().theme, "light");
+        assert_eq!(reloaded.get_config().revision, before + 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Old backup replaces all entities, while advancing revision prevents a
+    /// pending normal settings save from undoing the restore.
+    #[test]
+    fn backup_replacement_advances_revision_past_pending_save() {
+        let path = temp_config_path();
+        let dir = path.parent().expect("temp dir").to_path_buf();
+        let mut manager = ConfigManager::new(Some(path.clone())).expect("open temp config");
+        mutate(&mut manager, |cfg| {
+            upsert(command_sets(cfg), command_set("current", "latest"))
+        }).expect("save current rule");
+        let pending = manager.get_config().clone();
+        let before = pending.revision;
+        let mut backup = manager.get_config().clone();
+        backup.revision = 0;
+        backup.entities.send_command_sets = vec![command_set("backup", "restored")];
+        manager.set_config(backup).expect("restore backup");
+
+        assert!(!manager.set_config_if_revision(pending, before).unwrap());
+        let reloaded = ConfigManager::new(Some(path)).expect("reload restored backup");
+        assert_eq!(ids(&reloaded.get_config().entities.send_command_sets), vec!["backup"]);
+        assert_eq!(reloaded.get_config().revision, before + 1);
+        assert_eq!(serde_json::to_value(reloaded.get_config()).unwrap()["revision"], before + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

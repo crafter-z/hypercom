@@ -123,7 +123,9 @@ export interface ParsedField {
 /** 单行终端数据（方案B：行流存储层重构，issue #14） */
 export interface TerminalLine {
   timestamp: number;       // 时间戳
-  direction: 'RX' | 'TX' | 'TOOL';
+  /** 行方向：RX=接收 / TX=发送回显 / TOOL=外部工具输出 / NOTE=插件旁注行
+   *   （issue #17：插件 terminal.append 写旁注，非 TX——不进流量统计/历史）。 */
+  direction: 'RX' | 'TX' | 'TOOL' | 'NOTE';
   /** 文本内容（TX/TOOL/回放行）。RX 行**省略**——由 `getLineText` 按
    *   rawData + 当前编码惰性解码（省内存：不再冗余存一份解码字符串）。 */
   content?: string;
@@ -252,6 +254,8 @@ export interface ProtocolTemplate {
 
 /** 应用程序全局配置 */
 export interface AppConfig {
+  /** Backend config.json revision; absent only from legacy/hand-built frontend snapshots. */
+  revision?: number;
   // 通用设置
   closeBehavior: 'minimize' | 'exit';
   /** 每端口终端最大显示行数，超限逐行覆盖最旧（issue #16 改版，默认 100000） */
@@ -318,6 +322,11 @@ export interface AppConfig {
   // 自动更新（issue #12）
   updateCheckMode: UpdateCheckMode; // 自动检查更新模式：none | stable | preview
 
+  // 插件代理（issue #17）：宿主显式给插件出站配置的 HTTP 代理。
+  // 默认空串 + 关闭（D5 隔离优先）；开启且非空时 plugin_http 用该代理（不继承宿主系统代理）。
+  pluginProxy: string;          // http://[user:pass@]host:port，''=不设
+  pluginProxyEnabled: boolean;  // 是否启用插件代理
+
   // 设置实体（全部存入 config.json）
   sendCommandSets: SendCommandSet[];
   highlightRuleSets: HighlightRuleSet[];
@@ -327,6 +336,8 @@ export interface AppConfig {
   portToolConfigs: PortToolConfig[];
   portGroups: PortGroup[];   // 串口分组布局（issue #2-3 起 config.json 持久化 + 自动保存）
   portMeta: PortMetaEntry[]; // 串口备注名/隐藏状态（issue #4-9 起 config.json 持久化 + 自动保存）
+  /** 插件状态实体（issue #17 第 9 类）：仅状态（enabled/授予权限），KV 不落 config。 */
+  pluginConfigs: PluginConfigEntry[];
 }
 
 /** 日志保存的子目录策略（issue #5-10）。 */
@@ -430,4 +441,70 @@ export interface TriggerRule {
   isEnabled: boolean;
   /** 仅对该串口生效；空/缺省 = 全部端口（issue #3-1） */
   portId?: string;
+}
+
+// ==================== 插件相关（issue #17）====================
+
+/** 插件 manifest 的 wire 视图（与后端 PluginManifestView 对齐）。 */
+export interface PluginManifestView {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  apiVersion: string;
+  entry: string;
+  permissions: string[];
+  http?: { urlWhitelist: string[] };
+  shell?: { executableWhitelist: string[] };
+  /** 发送端口作用域（P10：声明且非空=仅白名单；空数组=全拒；未声明=不限）。 */
+  serial?: { portWhitelist: string[] };
+  ui?: {
+    buttons: { id: string; label: string; icon?: string; target?: string }[];
+    menuItems: { id: string; label: string; target?: string }[];
+  };
+}
+
+/** 单插件完整视图（后端 PluginView，camelCase wire 对齐）。
+ *  manifest 损坏时（manifest_error 非空）仍列出，前端显示「校验失败」。 */
+export interface PluginView {
+  id: string;
+  dir: string;
+  enabled: boolean;
+  grantedPermissions: string[];
+  declaredPermissions: string[];
+  knownPermissions: string[];
+  manifest: PluginManifestView | null;
+  manifestError: string | null;
+  installedAt: number | null;
+}
+
+/** list_plugins 响应：UI 视图 + 权威插件状态数组（原样写回 store.config）。 */
+export interface PluginListResponse {
+  plugins: PluginView[];
+  pluginConfigs: PluginConfigEntry[];
+}
+
+/** 插件 HTTP 请求参数（后端 PluginHttpRequest）。 */
+export interface PluginHttpRequest {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeout?: number;
+}
+
+/** 插件 HTTP 响应（后端 PluginHttpResponse）。 */
+export interface PluginHttpResponse {
+  status: number;
+  body: string;
+  truncated: boolean;
+}
+
+/** config.json 插件状态实体（仅状态——enabled/权限；KV 存插件目录 data/）。 */
+export interface PluginConfigEntry {
+  id: string;
+  enabled: boolean;
+  grantedPermissions: string[];
+  installedAt?: number | null;
+  source?: string | null;
 }

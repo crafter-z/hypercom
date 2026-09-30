@@ -4,6 +4,8 @@ import { useAppStore } from '../../stores/useAppStore';
 import type { SerialPort } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import { useSidebarActions } from './SidebarActions';
+import { usePortPluginMenuItems, dispatchPluginUiClick } from '../../hooks/usePluginUi';
+import { pluginIcon } from './pluginIcon';
 import {
   Play, Square, Eye, EyeOff, PlugZap, Pencil, Unplug, ExternalLink, GripVertical,
   Wrench, TerminalSquare, FolderPlus, FolderInput, FolderMinus,
@@ -35,6 +37,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
   const { t } = useTranslation();
   const actions = useSidebarActions();
   const { show, element } = useContextMenu();
+  const pluginMenuItems = usePortPluginMenuItems();
   // 分组控制菜单在渲染时构建，需要实时读 groups。
   const groups = useAppStore((s) => s.groups);
   const {
@@ -100,6 +103,15 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
     { label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: actions.configTool },
     { type: 'separator' },
     ...groupControlItems,
+    ...(pluginMenuItems.length > 0 ? [{ type: 'separator' } as ContextMenuEntry] : []),
+    ...pluginMenuItems.map((reg): ContextMenuEntry => {
+      const item = reg.menuItems[reg.itemIndex];
+      return {
+        label: `${reg.pluginName}: ${item.label}`,
+        icon: pluginIcon(undefined),
+        onClick: () => dispatchPluginUiClick(reg, item.id, { portId: port.id }),
+      };
+    }),
     { type: 'separator' },
     port.isHidden
       ? { label: t('sidebar.port.contextMenu.unhide'), icon: <Eye size={14} />, onClick: () => actions.showPort(port.id) }

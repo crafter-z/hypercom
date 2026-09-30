@@ -2,7 +2,7 @@
  * Tauri 后端命令调用层（barrel）。
  *
  * 实现按域拆在 `./serial` `./config` `./log` `./storage` `./popout` `./update`
- * `./system` `./diag` `./file` `./tool` `./event`；本文件只做重新导出——
+ * `./system` `./diag` `./file` `./tool` `./event` `./plugin`；本文件只做重新导出——
  * `import { serialService } from '../services/tauri'` 这类既有路径与导出名不变。
  *
  * ## 参数约定（唯一一种写法，新增命令照此办理）
@@ -30,3 +30,4 @@ export * from './diag';
 export * from './file';
 export * from './tool';
 export * from './event';
+export * from './plugin';

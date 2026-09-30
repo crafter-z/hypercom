@@ -6,7 +6,7 @@ import { useConfigPersistence } from '../../hooks';
 import { updateTiming, runAutoCheck } from '../../utils/updateService';
 import type { AppConfig } from '../../types';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, X,
+  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X,
 } from 'lucide-react';
 import GeneralSettings from './pages/GeneralSettings';
 import LogSettings from './pages/LogSettings';
@@ -17,6 +17,7 @@ import CommandSettings from './pages/CommandSettings';
 import ProtocolSettings from './pages/ProtocolSettings';
 import ToolSettings from './pages/ToolSettings';
 import TriggerSettings from './pages/TriggerSettings';
+import PluginSettings from './pages/PluginSettings';
 
 interface NavItem {
   id: string;
@@ -34,6 +35,7 @@ const navItems: NavItem[] = [
   { id: 'protocol', labelKey: 'configModal.nav.protocol', icon: <Code2 size={16} /> },
   { id: 'tools', labelKey: 'configModal.nav.tools', icon: <Wrench size={16} /> },
   { id: 'triggers', labelKey: 'config.triggerSettings', icon: <Zap size={16} /> },
+  { id: 'plugins', labelKey: 'configModal.nav.plugins', icon: <Plug size={16} /> },
 ];
 
 const ConfigModal: React.FC = () => {
@@ -65,9 +67,16 @@ const ConfigModal: React.FC = () => {
   }, [isConfigOpen]);
 
   const handleCancel = () => {
+    // issue #6-8：弹窗打开后 useAppInit 的分组/元数据 500ms 防抖可能已把新
+    // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
+    // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
+    // portGroups/portMeta，只回滚其余字段。
+    // 插件授权已由后端命令单独落盘；取消仅回滚普通设置，保留
+    // `utils/pluginConfigSnapshot.ts` 同步的当前 pluginConfigs 镜像。
     const snap = configSnapshotRef.current;
     if (snap) {
-      setConfig(snap);
+      const cur = useAppStore.getState().config;
+      setConfig({ ...snap, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs });
       configSnapshotRef.current = null;
     }
     toggleConfigModal(false);
@@ -80,16 +89,12 @@ const ConfigModal: React.FC = () => {
     const current = useAppStore.getState().config;
     const snapshot = configSnapshotRef.current;
     const modeChanged = snapshot !== null && snapshot.updateCheckMode !== current.updateCheckMode;
+    if (!(await saveConfig(current))) return;
     if (modeChanged) {
-      // Update-channel bookkeeping belongs at the save boundary, not on the
-      // radio's onChange: cancelling the dialog rolls the config back, so a
-      // side effect fired at change time would leak. Clearing the snooze and the
-      // last-check stamp (which is not per-channel) makes the new channel due
-      // immediately.
+      // Channel bookkeeping is committed only after settings actually reach disk.
       updateTiming.clearSnooze();
       updateTiming.clearLastCheck();
     }
-    await saveConfig(current);
     configSnapshotRef.current = null;
     toggleConfigModal(false);
     // Re-check right away instead of waiting for the next startup; this runs in
@@ -116,6 +121,7 @@ const ConfigModal: React.FC = () => {
       case 'protocol': return <ProtocolSettings />;
       case 'tools': return <ToolSettings />;
       case 'triggers': return <TriggerSettings />;
+      case 'plugins': return <PluginSettings />;
       default: return <GeneralSettings />;
     }
   };

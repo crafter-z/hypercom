@@ -13,13 +13,13 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 ┌──────────▼──────────┐        ┌──────────▼──────────┐
 │    前端（React）      │        │    后端（Rust）      │
 │  6 Zustand stores    │        │  SerialManager      │
-│  15 hooks + 12 svc   │◄──────►│  ConfigManager      │
+│  15 hooks + 13 svc   │◄──────►│  ConfigManager      │
 │  方案B 终端引擎       │  IPC   │  logger/LogManager  │
 │  rxPipeline/ttySvc   │        │  diaglog/DiagLogger │
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端计数口径：`src/stores/` 6 个 store 模块（`useAppStore` / `useOperationStore` / `useTerminalStore` / `useRuleStore` / `useSystemStore` / `useToastStore`）；`src/services/` 12 个文件 = `tauri.ts`（barrel，按域 `export *`）+ 11 个域文件（serial / config / log / storage / popout / update / system / diag / file / tool / event）；`src/hooks/` 15 个 hook。后端 `logger/` 目录导出 `LogManager` 门面，`diaglog.rs` 导出应用诊断日志 `DiagLogger`；`lib.rs::AppState` 另持有 `ConfigManager` / `SerialManager`。
+> 前端计数口径：`src/stores/` 6 个 store 模块；`src/services/` 13 个文件 = `tauri.ts` barrel + 12 个域文件（serial / config / log / storage / popout / update / system / diag / file / tool / event / plugin）；`src/hooks/` 15 个既有 hook 加 `usePlugins` / `usePluginPanel` / `usePluginUi` 三个插件 hook 文件。后端增加 `commands/plugin.rs` 与纯函数模块 `plugin/mod.rs`，插件状态在 `ConfigManager` 的第 9 类展平实体中。
 
 ## 文档清单
 
@@ -30,9 +30,10 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 | [`tty.md`](tty.md) | TTY 终端 | xterm.js 完整交互终端/ttyService 管线/TRX↔TTY 切换/模拟终端（git bash pty）/会话跨标签保留 |
 | [`transmission.md`](transmission.md) | 数据收发 | RX 管线（字节组装/rAF 批写/visibility）/TX 发送（回显/时序/守卫）/循环发送（状态机合一 `useSequentialSend`）/快捷发送/命令面板/文件发送/触发引擎 |
 | [`logging.md`](logging.md) | 日志 | RX 落盘日志（行组装/分片/子目录/编码/每会话新文件）/日志设置单一入口（`LogSettings::from_config` + `LogManager::apply_settings`，经 `AppState::apply_runtime_config` 由启动与 `set_config` 共用；无逐字段 `set_log_*` 命令）/应用诊断日志（diaglog） |
-| [`config.md`](config.md) | 配置与状态 | config.json 实体（`Entities` 8 个 `Vec` 数组）/会话快照/6 个 store 划分/规则实体 CRUD/安全保存快照（`saveConfig(patch?)`）/`CONFIG_BOUNDS` 跨语言契约（前端镜像 `utils/bounds.ts`）/分组与端口元数据 |
+| [`config.md`](config.md) | 配置与状态 | config.json 实体（`Entities` 9 个 `Vec` 数组，含插件状态）/会话快照/6 个 store 划分/规则实体 CRUD/安全保存快照（`saveConfig(patch?)`）/`CONFIG_BOUNDS` 跨语言契约/分组与端口元数据 |
 | [`workspace.md`](workspace.md) | 工作区与通知 | paneTree 分屏（树算法在 `utils/paneTree.ts`）/标签页/弹出体系（popout）/操作面板布局/侧边栏/通知中心/状态栏/自定义文本右键菜单 |
 | [`update.md`](update.md) | 自动更新 | preview/stable 双通道/检查链路（GitHub API + endpoint 解析）/6h 重评估与 7 天 snooze/UpdateDialog/失败分类 |
+| [`plugins.md`](plugins.md) | 插件系统 | Web Worker 宿主/权限边界/旁路 RX/安装升级回滚/插件 API 与已知限制 |
 | [`release.md`](release.md) | 发版与构建 | CI/CD 工作流/签名/密钥轮换/坏版本召回/RELEASE_NOTES 机制/故障排查 |
 | [`errors.md`](errors.md) | 错误处理 | `CommandError` 7 个变体定义与映射表（触发条件 = 命令/文件归属）/无按变体的 `toast.error.*` key（i18n 只有 `toast.severity.*` 与 `toast.fallback.operationFailed`）/消费路径（`extractErrorMessage` + `notifyError`） |
 

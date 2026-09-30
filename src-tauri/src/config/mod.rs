@@ -204,13 +204,24 @@ pub struct PortMetaEntry {
     pub mode: Option<String>,
 }
 
+/// 插件状态（config.json 顶层实体；私有 KV 保存在插件目录 data/state.json）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfigEntry {
+    pub id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub granted_permissions: Vec<String>,
+    #[serde(default)]
+    pub installed_at: Option<i64>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 // ==================== 设置实体集合 ====================
 
-/// 设置界面管理的实体集合。
-///
-/// `#[serde(flatten)]` 让这些数组在 config.json 里仍是**顶层 key**（线格式零变化），
-/// 同时把「实体列表」与「标量设置」分成两层：实体只有 CRUD 语义（`commands/storage.rs`），
-/// 标量只有收敛与默认值语义（`validate_and_clamp` / `impl Default`）。
+/// 设置界面管理的实体集合。顶层 JSON 格式由 flatten 保持不变。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Entities {
@@ -226,12 +237,12 @@ pub struct Entities {
     pub port_presets: Vec<PortPresetEntry>,
     #[serde(default)]
     pub port_tool_configs: Vec<PortToolConfigEntry>,
-    /// 串口分组布局（issue #2-3）：旧版 config.json（无此字段）反序列化为空列表。
     #[serde(default)]
     pub port_groups: Vec<PortGroupEntry>,
-    /// 串口备注名 / 隐藏状态（issue #4-9）：随 config.json 持久化。
     #[serde(default)]
     pub port_meta: Vec<PortMetaEntry>,
+    #[serde(default)]
+    pub plugin_configs: Vec<PluginConfigEntry>,
 }
 
 // ==================== AppConfig ====================
@@ -244,6 +255,8 @@ pub struct Entities {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
+    /// Persisted monotonic revision used to reject stale whole-config saves.
+    pub revision: u64,
     // --- 通用设置 ---
     /// "minimize"（最小化到托盘）| "exit"
     pub close_behavior: String,
@@ -325,6 +338,9 @@ pub struct AppConfig {
     /// 自动检查更新模式：`"none"`（不检查）| `"stable"`（定期到正式版）| `"preview"`（定期到 preview）。
     /// 检查周期统一 7 天（前端 localStorage 记账 lastCheckAt/snoozeUntil）。
     pub update_check_mode: String,
+    /// 插件 HTTP 出站代理；未显式启用时强制直连。
+    pub plugin_proxy: String,
+    pub plugin_proxy_enabled: bool,
 
     // --- 设置实体（config.json 顶层 key，见 Entities）---
     #[serde(flatten)]
@@ -334,6 +350,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            revision: 0,
             close_behavior: "exit".to_string(),
             // 终端缓冲区最大显示行数默认 100000 行。
             max_display_lines: 100000,
@@ -381,6 +398,8 @@ impl Default for AppConfig {
             diag_log_enabled: true,
             // issue #12：自动更新默认「定期检查到正式版」（用户决策，2026-08-15）。
             update_check_mode: "stable".to_string(),
+            plugin_proxy: String::new(),
+            plugin_proxy_enabled: false,
             entities: Entities::default(),
         }
     }
@@ -470,6 +489,9 @@ pub struct ConfigManager {
     config_path: PathBuf,
     /// 会话快照独立存储路径（config.json 同目录下 session.json）
     session_path: PathBuf,
+    /// 插件根目录（与 config.json 同根：<config_dir>/plugins，issue #17 D6）。
+    /// 跟随 config_path 的路径解析（custom/env/portable/default 全场景一致）。
+    plugins_dir: PathBuf,
 }
 
 impl ConfigManager {
@@ -550,10 +572,19 @@ impl ConfigManager {
             }
         }
 
+        // 插件根目录与 config.json 同根：<config_dir>/plugins。
+        // 不在此 create_dir_all——PluginManager 首次扫描/安装时才建，
+        // 避免未用插件功能的用户在配置目录留下空 plugins/。
+        let plugins_dir = config_path
+            .parent()
+            .map(|p| p.join("plugins"))
+            .unwrap_or_else(|| PathBuf::from("plugins"));
+
         Ok(Self {
             config,
             config_path,
             session_path,
+            plugins_dir,
         })
     }
 
@@ -569,6 +600,11 @@ impl ConfigManager {
     /// 当前配置文件路径
     pub fn config_path(&self) -> &std::path::Path {
         &self.config_path
+    }
+
+    /// 插件根目录（<config_dir>/plugins）。目录可能尚不存在（首次安装前）。
+    pub fn plugins_dir(&self) -> &std::path::Path {
+        &self.plugins_dir
     }
 
     /// 获取当前配置
@@ -626,6 +662,10 @@ impl ConfigManager {
             &["none", "stable", "preview"],
             "stable",
         );
+        config.plugin_proxy = config.plugin_proxy.trim().to_string();
+        if config.plugin_proxy.is_empty() {
+            config.plugin_proxy_enabled = false;
+        }
         restrict(
             &mut config.default_line_ending,
             &["\\r\\n", "\\r", "\\n", "None"],
@@ -644,8 +684,28 @@ impl ConfigManager {
     /// 更新配置并持久化（写入前校验 + 收敛）
     pub fn set_config(&mut self, mut new_config: AppConfig) -> anyhow::Result<()> {
         Self::validate_and_clamp(&mut new_config);
-        self.config = new_config;
-        self.save()
+        // Even a backup restore cannot reset the revision and revive a pending save.
+        new_config.revision = self.config.revision;
+        let previous = std::mem::replace(&mut self.config, new_config);
+        if let Err(error) = self.save() {
+            self.config = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// A normal settings save may replace a snapshot only if no entity CRUD (or
+    /// another settings save) committed since that snapshot was read.
+    pub fn set_config_if_revision(
+        &mut self,
+        new_config: AppConfig,
+        expected_revision: u64,
+    ) -> anyhow::Result<bool> {
+        if self.config.revision != expected_revision {
+            return Ok(false);
+        }
+        self.set_config(new_config)?;
+        Ok(true)
     }
 
     // ==================== 会话快照（独立 session.json）====================
@@ -686,7 +746,10 @@ impl ConfigManager {
 
     /// 保存配置到文件（原子写入 + .bak 备份）。
     /// 失败时记录错误日志（诊断日志排查需要落盘根因，而非仅返回 Result）。
-    pub fn save(&self) -> anyhow::Result<()> {
+    pub fn save(&mut self) -> anyhow::Result<()> {
+        let next_revision = self.config.revision.checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Config revision overflow"))?;
+        self.config.revision = next_revision;
         let result = (|| -> anyhow::Result<()> {
             let content = serde_json::to_string_pretty(&self.config)?;
             if self.config_path.exists() {
@@ -705,6 +768,9 @@ impl ConfigManager {
         })();
         if let Err(e) = &result {
             log::error!("Failed to save config to {:?}: {}", self.config_path, e);
+        }
+        if result.is_err() {
+            self.config.revision -= 1;
         }
         result
     }
@@ -808,6 +874,7 @@ mod tests {
         assert!(cfg.entities.port_tool_configs.is_empty());
         assert!(cfg.entities.port_groups.is_empty());
         assert!(cfg.entities.port_meta.is_empty());
+        assert!(cfg.entities.plugin_configs.is_empty());
     }
 
     #[test]
@@ -854,6 +921,7 @@ mod tests {
             "portToolConfigs",
             "portGroups",
             "portMeta",
+            "pluginConfigs",
         ] {
             assert!(json.contains(key), "missing flattened entity key {} in JSON", key);
         }
@@ -871,6 +939,8 @@ mod tests {
         // 0.3.1 的真实 config.json（无本轮之后新增的任何字段）必须能完整反序列化，
         // 且每个新字段回退到 impl Default 的值（容器级 #[serde(default)]）。
         let cfg = legacy_config(serde_json::json!({}));
+        assert_eq!(cfg.revision, 0);
+        assert!(cfg.entities.plugin_configs.is_empty());
         assert!(cfg.log_include_timestamp);
         assert!(cfg.log_include_direction);
         assert_eq!(cfg.log_subdir_mode, "date");
@@ -1077,6 +1147,38 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_proxy_clamp() {
+        // issue #17：trim 前后空白；开启但无有效 URL → 视为未设置（降级直连），
+        // 避免 plugin_http 用空串拼出非法代理报错。
+        let mut cfg = AppConfig {
+            plugin_proxy_enabled: true,
+            plugin_proxy: "   ".to_string(),
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.plugin_proxy, "");
+        assert!(!cfg.plugin_proxy_enabled);
+
+        let mut cfg = AppConfig {
+            plugin_proxy_enabled: true,
+            plugin_proxy: "  http://user:pass@proxy:8080  ".to_string(),
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.plugin_proxy, "http://user:pass@proxy:8080");
+        assert!(cfg.plugin_proxy_enabled);
+
+        // 关闭态保留 URL（无害），不强制清空。
+        let mut cfg = AppConfig {
+            plugin_proxy_enabled: false,
+            plugin_proxy: "http://proxy:8080".to_string(),
+            ..AppConfig::default()
+        };
+        ConfigManager::validate_and_clamp(&mut cfg);
+        assert_eq!(cfg.plugin_proxy, "http://proxy:8080");
+    }
+
+    #[test]
     fn test_validate_and_clamp_port_meta_mode() {
         // issue #11：合法模式保留，非法/残留值收敛回 trx。
         let mut cfg = AppConfig {
@@ -1205,6 +1307,7 @@ mod tests {
             config: AppConfig::default(),
             config_path: config_path.clone(),
             session_path: session_path.clone(),
+            plugins_dir: dir.join("plugins"),
         };
 
         // 初始为空

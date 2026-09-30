@@ -17,9 +17,8 @@
  *  (b) 参数形状：本次重构改过的调用点，解析**实际传的 key 集合**并与 Rust 结构体
  *      字段名对照（wire 名 = Rust 字段名，snake_case；顶层形参 camelCase）。
  *
- * 关于反向白名单：当前 `generate_handler!` 里 64 条命令**全部**有前端调用方，故
- * 白名单为空。机制保留：将来后端新增命令却暂无前端调用时，必须在此逐条登记一句
- * 「谁在用 / 为何保留」，否则反向断言报红——避免长列表无脑堆积掩盖真实漂移。
+ * 关于反向白名单：当前 `generate_handler!` 的命令全部有前端调用方，故
+ * 白名单为空。后端新增暂未接线的命令必须登记原因，否则反向断言报红。
  */
 import { describe, it, expect } from 'vitest';
 import libSource from '../../src-tauri/src/lib.rs?raw';
@@ -235,8 +234,8 @@ function parseStructFields(source: string, name: string): string[] {
 /**
  * 「已注册但前端暂无调用方」的合法命令 → 理由。
  *
- * 当前为空：下面的断言统计出 generate_handler! 的 64 条命令全部有前端调用方。
- * 新增命令若暂时只注册不接线，在此登记一句理由（谁在用 / 为何保留）。
+ * 当前为空：所有已注册命令均有前端调用方。
+ * 新增命令若暂时只注册不接线，在此登记一句理由。
  */
 const FRONTEND_RETENTION_WHITELIST: Readonly<Record<string, string>> = {};
 
@@ -308,6 +307,11 @@ describe('invoke 命令名 ↔ generate_handler! 双向一致', () => {
 describe('本次重构后的参数形状（key 集合与 Rust 结构体对照）', () => {
   // 顶层形参 camelCase（Tauri 把 camelCase 键映射到 Rust 的 snake_case 形参，
   // 见 src/services/tauri.ts 文件头第 1 条）；嵌套结构体载荷用 Rust 字段名。
+  it('set_config sends the optimistic revision and explicit backup-restore flag', () => {
+    expect([...keysOf(expectSingleCall('set_config').body!)].sort())
+      .toEqual(['expectedRevision', 'newConfig', 'restorePluginConfigs']);
+  });
+
   it('close_popout 顶层 = { kind, targetId }', () => {
     const keys = keysOf(expectSingleCall('close_popout').body!);
     expect([...keys].sort()).toEqual(['kind', 'targetId']);

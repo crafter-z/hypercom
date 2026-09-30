@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod diaglog;
 mod logger;
+mod plugin;
 mod serial;
 mod system;
 
@@ -44,6 +45,8 @@ pub struct AppState {
     pub serial_manager: std::sync::Arc<std::sync::Mutex<serial::SerialManager>>,
     /// 配置管理器：负责读写应用配置（含全部设置实体）
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
+    /// 插件安装、卸载及私有资产写入共享的异步闸门；覆盖 fs 与状态提交整个事务。
+    pub plugin_io: tokio::sync::Mutex<()>,
     /// 日志管理器：负责日志文件的写入与管理。
     /// `Arc<LogManager>`（无外层 Mutex）：写路径已是 `&self` + 内部细粒度锁，
     /// 再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与
@@ -81,6 +84,7 @@ impl AppState {
         let state = Self {
             serial_manager: std::sync::Arc::new(std::sync::Mutex::new(serial::SerialManager::new())),
             config_manager: std::sync::Mutex::new(config_manager),
+            plugin_io: tokio::sync::Mutex::new(()),
             log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
@@ -209,6 +213,7 @@ pub fn run() {
             // ===== 通用文件命令 =====
             commands::write_text_file,
             commands::read_text_file,
+            commands::plugin_pick_files,
             commands::read_image_data_url,
             // ===== 诊断日志命令 =====
             commands::get_diag_log_path,
@@ -222,6 +227,16 @@ pub fn run() {
             // ===== 自动更新命令（issue #12）=====
             commands::check_for_update,
             commands::download_and_install_update,
+            // ===== 插件命令（issue #17）=====
+            commands::list_plugins,
+            commands::install_plugin,
+            commands::uninstall_plugin,
+            commands::set_plugin_enabled,
+            commands::set_plugin_permissions,
+            commands::read_plugin_asset,
+            commands::write_plugin_asset,
+            commands::plugin_http,
+            commands::plugin_open_external,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();

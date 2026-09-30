@@ -1,0 +1,15 @@
+{
+  "id": "com.example.hypercom-demo",
+  "name": "HyperCom Demo",
+  "version": "1.0.0",
+  "description": "示例插件：观察 RX 行，命中 PING 回写 PONG 旁注；工具栏按钮统计行数。演示 rx.onLine / terminal.append / 声明式 UI / serial 端口作用域。",
+  "apiVersion": "1.0",
+  "entry": "main.js",
+  "permissions": ["terminal:read", "terminal:write", "serial:send"],
+  "serial": { "portWhitelist": ["COM9"] },
+  "ui": {
+    "buttons": [
+      { "id": "line-count", "label": "统计行数", "icon": "Search", "target": "sidebar" }
+    ]
+  }
+}

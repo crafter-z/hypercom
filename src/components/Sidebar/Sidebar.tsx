@@ -5,6 +5,7 @@ import { Plus } from 'lucide-react';
 import {
   useSerialPorts, useSerialConnection, useSimulation, usePortToolActions, useGitBashSim,
 } from '../../hooks';
+import { useToolbarPluginButtons, dispatchPluginUiClick } from '../../hooks/usePluginUi';
 import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import { runSequential } from '../../utils/sequential';
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -25,6 +26,7 @@ import { usePortDragEnd } from './hooks/usePortDragEnd';
  * `SidebarActionsProvider`（取代原先逐层透传的 10 个回调）、把列表切成
  * 「分组 / 未分组 / 隐藏」三段。工具栏、搜索框、端口行、组头各自成文件。
  */
+
 const Sidebar: React.FC = () => {
   const { t } = useTranslation();
   const ports = useAppStore((s) => s.ports);
@@ -43,6 +45,7 @@ const Sidebar: React.FC = () => {
   } = usePortToolActions();
 
   const [showHidden, setShowHidden] = useState(false);
+  const pluginButtons = useToolbarPluginButtons();
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
 
@@ -159,6 +162,8 @@ const Sidebar: React.FC = () => {
           onOpenAll={handleOpenAll}
           onCloseAll={handleCloseAll}
           onSortByPort={handleSortByPort}
+          pluginButtons={pluginButtons}
+          onPluginClick={(reg, buttonId) => dispatchPluginUiClick(reg, buttonId, { portId: useAppStore.getState().activeTabId ?? undefined })}
         />
         <SearchBox value={search} onChange={setSearch} />
 

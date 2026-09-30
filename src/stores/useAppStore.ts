@@ -87,6 +87,9 @@ const defaultConfig: AppConfig = {
   diagLogEnabled: true,
   // issue #12：默认「定期检查到正式版」（用户决策，2026-08-15）。
   updateCheckMode: 'stable',
+  // issue #17 插件代理：默认不启用（D5 隔离，插件出站直连）。
+  pluginProxy: '',
+  pluginProxyEnabled: false,
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],
@@ -95,6 +98,8 @@ const defaultConfig: AppConfig = {
   portToolConfigs: [],
   portGroups: [],
   portMeta: [],
+  // issue #17：插件状态（仅状态，KV 不落 config）。
+  pluginConfigs: [],
 };
 
 // ==================== Store 状态定义 ====================

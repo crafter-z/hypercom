@@ -1,6 +1,6 @@
 # src-tauri/src/commands/
 
-11 domain files + `mod.rs` re-export hub. All Tauri commands return `Result<T, CommandError>`.
+12 domain files + `mod.rs` re-export hub. All Tauri commands return `Result<T, CommandError>`.
 
 ## Where to look
 
@@ -14,7 +14,8 @@
 | `storage.rs` | settings entities CRUD (command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs) + `save_port_groups` (whole-list replace of port groups, issue #2-3 — read back via `get_config` 的 `AppConfig.entities.port_groups`, no separate load command) + `save_port_meta` (whole-list replace of port meta `{portId, alias, isHidden}`, issue #4-9 — read back via `AppConfig.entities.port_meta`)。20 个命令均由 `save_entity` / `read_config` / `delete_entity` 三个助手 + 实体访问器生成，命令体只指明实体。Synchronous ConfigManager operations — lock `config_manager`, mutate the entity Vec in `AppConfig.entities`, save config.json. NO SQLite/async/transactions. |
 | `diag.rs` | `get_diag_log_path`, `read_diag_log(limit?)`, `clear_diag_log`, `append_diag_log(entries)` — 应用自身维测日志的读取/清空 + 前端 `console.*` 转发追加；底层由 `crate::diaglog::DiagLogger`（全局 logger，落盘 + 轮转）提供 |
 | `system_cmds.rs` | `get_system_status`, `prevent_sleep`, `prevent_screen_off` |
-| `file.rs` | `write_text_file`, `read_text_file`（配置导入导出路径经用户 save/open 对话框显式选择，仅校验父目录/文件存在）, `read_image_data_url`（背景图读为 base64 data URL，issue #13：20MB 上限 + 扩展名白名单 + 静默降级 `Ok("")`） |
+| `file.rs` | `write_text_file`, `read_text_file`（配置导入导出路径经用户 save/open 对话框显式选择）, `read_image_data_url`（背景图 20MB 上限 + 扩展名白名单）, `plugin_pick_files`（主窗口后端原生文件选择器，授权及版本复核后读取，单次最多 8 文件/64MiB） |
+| `plugin.rs` | `list_plugins` / `install_plugin` / `uninstall_plugin` / `set_plugin_enabled` / `set_plugin_permissions` / `read_plugin_asset` / `write_plugin_asset` / `plugin_http` / `plugin_open_external`。只允许主窗口；插件目录和状态经严格 id 与权限检查；升级清空旧授权，磁盘换名备份和失败回滚，私有 `data/` 保留。 |
 | `popout.rs` | `open_popout(kind, target_id)`, `close_popout(kind, target_id)`, `set_popout_always_on_top(kind, target_id, on)` — 弹出窗建/关/置顶。**label 规则（`sanitize` / `compute_label`）权威实现在本文件**：命令只收业务语义参数，label 一律由 Rust 计算，前端只传 `kind` + `targetId`（src 侧不再有副本）。`open_popout` 为 async（Windows/Webview2 下从同步命令建窗会死锁）。 |
 | `update.rs` | `check_for_update`, `download_and_install_update`（自动更新，issue #12）。**通道是运行时参数**：JS `check()` 无法指定 endpoint → 本模块经 `app.updater_builder().endpoints(vec![url])` 按 channel 选 endpoint——`stable` 直连 `releases/latest/download/latest.json`（GitHub「最新非 prerelease」指针）；`preview` 先经 GitHub API（`api.github.com/releases?per_page=100`，未认证限流 60/h/IP 超限静默降级）用纯函数 `find_latest_preview_tag` 取**版本号最大**的 `vX.Y.Z-preview.N` tag（`parse_preview_tag` 数值四元组比较；复审：API 是创建时间序，补发旧核心 preview 会乱序）再 tag-pinned URL。**构建门控方向相反**：入口 `system_cmds::is_debug_build()` 守卫，debug 短路为 Ok(None)/Ok(())，release 执行真实逻辑（命令体只有一份，release 逻辑不再 cfg 条件编译；前端 `import.meta.env.DEV` 自动短路外另有前端 `manualCheck` 不过门控——显式意图，依赖本层 debug 兜底）。**复审加固**：未知 channel 报错（不静默回退 stable）；GitHub API 请求 15s 超时（`GITHUB_API_TIMEOUT`，防手动检查按钮永久「正在检查」）；`download_and_install_update` 带 `expected_version` 参数——安装前重检查（设计上 check/install 两次往返），服务器侧版本与弹窗候选不一致则拒绝安装（防「展示 X 装 Y」TOCTOU，前端重新检查即可）。**二轮**：preview 通道语义 = max(preview, stable)——`check_for_update("preview")` 双检查 preview 与 stable endpoint，纯函数 `newer_channel`/`version_key`（数值四元组，stable rank=u64::MAX 保证同核心 preview<stable）取 semver 大者，`payload.channel` 反映更新实际来源（安装按该通道解析 endpoint）；preview 端点解析失败（API 限流/无 preview release）降级仅 stable；一边失败另一边有更新则用有更新的一边（不丢可用更新）。下载进度经 `Emitter` 发 `update:progress` 事件（`UpdateProgressPayload` camelCase：downloaded/total/phase）。错误统一 `CommandError::Other`。 |
 | `mod.rs` | `CommandError` enum (thiserror) + `pub use domain::*;` re-exports |
@@ -33,5 +34,5 @@
 - Returning `Result<T, String>` — frontend no longer parses raw strings; serialization contract is broken.
 - Holding a `std::sync::MutexGuard` on `state.serial_manager` / `state.logger` / `state.config_manager` across `.await` — `MutexGuard` is `!Send`, the Tauri future must be `Send`. Pattern: extract + clone, drop guard, then `.await`. See `log.rs`.
 - `eprintln!` for error logging — use the `log` crate (`error!` / `warn!`). Backend uses `log` → `diaglog::DiagLogger` (全局 logger，落盘 + 轮转，替换原 env_logger), not print macros.
-- Adding a 7th domain file without classifying its failure mode in `CommandError`.
+- Registering commands without updating `lib.rs::generate_handler!`; the config test detects drift.
 - Bypassing the `tauri` service module in the frontend and calling `invoke('<cmd>', ...)` directly.

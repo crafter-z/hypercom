@@ -24,7 +24,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; connect-src 'self' ws://localhost:1420; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'"
     }
   },
   "bundle": {

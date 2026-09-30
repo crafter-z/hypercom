@@ -11,6 +11,7 @@ export { useGitBashSim } from './useGitBashSim';
 export { useToolOutput } from './useToolOutput';
 export { usePortToolActions } from './usePortToolActions';
 export { useAutoUpdate } from './useAutoUpdate';
+export { usePluginHost, usePluginList } from './usePlugins';
 export { useHotkeys } from './useHotkeys';
 export { usePowerManagement } from './usePowerManagement';
 export { isPortLost } from './disconnectTracking';

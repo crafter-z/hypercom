@@ -91,8 +91,8 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(t('backupSettings.importInvalid')));
         return;
       }
-      // 全量写回 config.json（含全部设置实体），set_config 内部会校验收敛并同步 LogManager。
-      await configService.setConfig(bundle.config);
+      // 备份恢复刻意整体替换插件授权；普通设置保存则在 Rust 侧保留权威状态。
+      await configService.setConfig(bundle.config, true);
       useAppStore.getState().setConfig(bundle.config);
       notifySuccess('backupSettings.importSuccess');
       // 重载让 useAppInit 从 config.json 重新加载实体到各 store。

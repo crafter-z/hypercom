@@ -15,8 +15,10 @@ export const configService = {
     return invoke<AppConfig>('get_config');
   },
 
-  setConfig: (config: AppConfig): Promise<void> => {
-    return invoke<void>('set_config', { newConfig: config });
+  // A normal whole-config save must supply the revision read before composing its
+  // snapshot; false means a concurrent writer won, so the caller must recompose.
+  setConfig: (config: AppConfig, restorePluginConfigs = false, expectedRevision?: number): Promise<boolean> => {
+    return invoke<boolean>('set_config', { newConfig: config, restorePluginConfigs, expectedRevision });
   },
 
   updateSessionSnapshot: (snapshot: string): Promise<void> => {

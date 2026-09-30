@@ -4,6 +4,8 @@ import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
   Eye, EyeOff, ArrowUpDown, RefreshCw, Play, Square, FlaskConical, Ellipsis, Terminal,
 } from 'lucide-react';
+import type { RegisteredPluginUi } from '../../utils/pluginUiRegistry';
+import { pluginIcon } from './pluginIcon';
 
 interface SidebarToolbarProps {
   showHidden: boolean;
@@ -18,6 +20,8 @@ interface SidebarToolbarProps {
   onOpenAll: () => void;
   onCloseAll: () => void;
   onSortByPort: () => void;
+  pluginButtons: Array<RegisteredPluginUi & { buttonIndex: number }>;
+  onPluginClick: (reg: RegisteredPluginUi, buttonId: string) => void;
 }
 
 /**
@@ -32,7 +36,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
   showHidden, onToggleHidden, onRefresh,
   simulationMode, simulationAvailable, onToggleSimulation,
   gitBashMode, gitBashAvailable, onToggleGitBash,
-  onOpenAll, onCloseAll, onSortByPort,
+  onOpenAll, onCloseAll, onSortByPort, pluginButtons, onPluginClick,
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
@@ -69,6 +73,19 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
             <Terminal size={14} />
           </button>
         )}
+        {pluginButtons.map((reg) => {
+          const button = reg.buttons[reg.buttonIndex];
+          return (
+            <button
+              key={`${reg.pluginId}:${button.id}`}
+              className="icon-btn"
+              title={`${reg.pluginName}: ${button.label}`}
+              onClick={() => onPluginClick(reg, button.id)}
+            >
+              {pluginIcon(button.icon, 14)}
+            </button>
+          );
+        })}
         <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
           <RefreshCw size={14} />
         </button>

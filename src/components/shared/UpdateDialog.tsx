@@ -75,8 +75,9 @@ const UpdateDialog: React.FC = () => {
     useAppStore.getState().setConfig({ updateCheckMode: 'none' });
     // Only this field is passed: the safe snapshot inside saveConfig supplies the
     // entity arrays, so the startup config snapshot must not be handed over whole.
-    await saveConfig({ updateCheckMode: 'none' });
-    notifySuccess('update.neverReminderDone');
+    if (await saveConfig({ updateCheckMode: 'none' })) {
+      notifySuccess('update.neverReminderDone');
+    }
   };
 
   /** 立即更新：下载+安装 → relaunch（Windows 由 installer 重启，此调用无害）。 */

@@ -20,6 +20,25 @@ export function collectPortMeta(ports: SerialPort[]): PortMetaEntry[] {
     .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
 }
 
+/** Preserve local edits on untouched entities; a newer backend CRUD change
+ * to the same ID wins instead of being silently reverted by full save. */
+function reconcileEntities<T>(live: T[], initial: T[], persisted: T[], id: (item: T) => string): T[] {
+  const old = new Map(initial.map((item) => [id(item), item]));
+  const current = new Map(persisted.map((item) => [id(item), item]));
+  const result = live.flatMap((item) => {
+    const fromDisk = current.get(id(item));
+    return JSON.stringify(old.get(id(item))) !== JSON.stringify(fromDisk)
+      ? (fromDisk ? [fromDisk] : []) : [item];
+  });
+  const seen = new Set(live.map(id));
+  for (const item of persisted) {
+    if (!seen.has(id(item)) && JSON.stringify(old.get(id(item))) !== JSON.stringify(item)) {
+      result.push(item);
+    }
+  }
+  return result;
+}
+
 /**
  * Hook: 配置持久化
  * 从后端加载配置、保存配置到后端
@@ -53,26 +72,43 @@ export function useConfigPersistence() {
    */
   const saveConfig = useCallback(async (patch?: Partial<AppConfig>) => {
     try {
-      const state = useAppStore.getState();
-      const rules = useRuleStore.getState();
-      // 预设没有活镜像（唯一写路径是 storageService.savePortPresets），只能从后端
-      // 读回；读不到就不写——宁可不保存，也不能用陈旧快照覆盖磁盘。
-      const portPresets = await storageService.loadPortPresets();
-      await configService.setConfig({
-        ...state.config,
-        ...patch,
-        sendCommandSets: rules.sendCommandSets,
-        highlightRuleSets: rules.highlightRuleSets,
-        protocolTemplates: rules.protocolTemplates,
-        triggerRules: rules.triggerRules,
-        portToolConfigs: rules.portToolConfigs,
-        portGroups: state.groups,
-        portMeta: collectPortMeta(state.ports),
-        portPresets,
-      });
+      // Retry reads fresh backend state and current live stores each time.
+      // Read the backend revision BEFORE any async entity load. A CRUD write
+      // during that wait (or while invoke is in flight) must invalidate the
+      // snapshot, not be overwritten by the later full replacement.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const persisted = await configService.getConfig();
+        const { revision } = persisted;
+        if (revision === undefined) throw new Error('Backend config revision is missing');
+        // Presets have no frontend live mirror. A failed read must abort the save.
+        const portPresets = await storageService.loadPortPresets();
+        // These stores are read AFTER the await on every attempt, never from a
+        // snapshot captured when the save began.
+        const state = useAppStore.getState();
+        const rules = useRuleStore.getState();
+        const initial = state.config;
+        // Plugin authorizations are preserved by set_config under plugin_io.
+        const candidate: AppConfig = {
+          ...state.config,
+          ...patch,
+          sendCommandSets: reconcileEntities(rules.sendCommandSets, initial.sendCommandSets, persisted.sendCommandSets, (item) => item.id),
+          highlightRuleSets: reconcileEntities(rules.highlightRuleSets, initial.highlightRuleSets, persisted.highlightRuleSets, (item) => item.id),
+          protocolTemplates: reconcileEntities(rules.protocolTemplates, initial.protocolTemplates, persisted.protocolTemplates, (item) => item.id),
+          triggerRules: reconcileEntities(rules.triggerRules, initial.triggerRules, persisted.triggerRules, (item) => item.id),
+          portToolConfigs: reconcileEntities(rules.portToolConfigs, initial.portToolConfigs, persisted.portToolConfigs, (item) => item.id),
+          portGroups: state.groups,
+          portMeta: reconcileEntities(collectPortMeta(state.ports), initial.portMeta, persisted.portMeta,
+            (item) => item.portId),
+          portPresets,
+        };
+        const saved = await configService.setConfig(candidate, false, revision);
+        if (saved) return true;
+      }
+      throw new Error('Config changed during save; please try again');
     } catch (err) {
       console.error('[useConfigPersistence] Failed to save config:', err);
       notifyError(err);
+      return false;
     }
   }, []);
 
