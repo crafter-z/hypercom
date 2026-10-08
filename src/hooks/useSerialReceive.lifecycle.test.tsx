@@ -7,6 +7,7 @@ import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { getRxPipeline } from '../utils/rxPipeline';
+import { addPluginRxObserver, resetPluginObserverForTest } from '../utils/pluginObserver';
 import type { RxPipeline, RxPipelineOptions } from '../utils/rxPipeline';
 import { lostPortIds } from './disconnectTracking';
 import { useSerialReceive } from './useSerialReceive';
@@ -40,7 +41,6 @@ vi.mock('../utils/rxPipeline', async (importOriginal) => {
 });
 vi.mock('../utils/ttyService', () => ({ ttyService: { feed: vi.fn(), disconnect: vi.fn(), resync: vi.fn() } }));
 vi.mock('../utils/trafficStats', () => ({ trafficStats: { addRx: vi.fn() } }));
-vi.mock('../utils/pluginObserver', () => ({ feedPluginProtocolFrame: vi.fn(), notifyPortDisconnected: vi.fn() }));
 vi.mock('../utils/pluginBytesObserver', () => ({ hasPluginBytesObservers: () => false, feedPluginBytes: vi.fn(), notifyBytesPortDisconnected: vi.fn() }));
 vi.mock('../utils/triggerEngine', () => ({ evaluateTriggers: vi.fn(() => []) }));
 vi.mock('./useSerialSend', () => ({ sendToPort: vi.fn() }));
@@ -63,6 +63,7 @@ const Probe = () => { useSerialReceive(); return null; };
 
 beforeEach(async () => {
   output.rows.length = 0;
+  resetPluginObserverForTest();
   lostPortIds.delete('COM1');
   useAppStore.setState({ ports: [port()], tabs: [], paneTree: { id: 'main', type: 'leaf', tabIds: [], size: 1 }, activeTabId: null, focusedPaneId: 'main' });
   useRuleStore.getState().setProtocolTemplates([template('A', 'AA BB'), template('B', 'CC DD')]);
@@ -73,6 +74,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await act(async () => { root.unmount(); });
   getRxPipeline().disconnect('COM1');
+  resetPluginObserverForTest();
   vi.clearAllMocks();
 });
 
@@ -131,6 +133,41 @@ describe('useSerialReceive protocol lifecycle', () => {
     expect(output.rows).toHaveLength(1);
     expect(output.rows[0]!.parsedFields).toBeDefined();
     remove();
+  });
+
+  it('delivers each protocol frame once through the real RX observer bus, preserving bytes and order without replay events', () => {
+    vi.useFakeTimers();
+    const lines: Array<{ rawData: number[]; encoding: string; seq: number; ts: number }> = [];
+    const detached = vi.fn();
+    const dropped = vi.fn();
+    const unsubscribe = addPluginRxObserver({
+      onRxLines: (batch) => lines.push(...batch.map(({ rawData, encoding, seq, ts }) => ({
+        rawData: Array.from(rawData), encoding, seq, ts,
+      }))),
+      onRxDetached: detached,
+      onRxDropped: dropped,
+    });
+    try {
+      useAppStore.getState().updatePort('COM1', { protocolTemplateId: 'A' });
+      const firstFrame = [0xaa, 0xbb, 0x06, 0xff, 0x80, 13, 10];
+      const secondFrame = [0xaa, 0xbb, 0x06, 0x01, 0x02, 13, 10];
+      receive([0x78, 10, ...firstFrame, 0x79, 10, ...secondFrame]);
+      getRxPipeline().enqueueLines('COM1', [{
+        timestamp: 42, direction: 'RX', content: 'replay', rawData: new Uint8Array([0x72]), isHex: false,
+      }]);
+      vi.advanceTimersByTime(20);
+      expect(lines).toEqual([
+        { rawData: [0x78], encoding: 'utf-8', seq: 0, ts: 42 },
+        { rawData: firstFrame, encoding: 'utf-8', seq: 1, ts: 42 },
+        { rawData: [0x79], encoding: 'utf-8', seq: 2, ts: 42 },
+        { rawData: secondFrame, encoding: 'utf-8', seq: 3, ts: 42 },
+      ]);
+      expect(detached).not.toHaveBeenCalled();
+      expect(dropped).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
   });
 
   it('tool-owned disconnect suppresses lost banner while still draining RX', () => {

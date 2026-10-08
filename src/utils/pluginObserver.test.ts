@@ -14,7 +14,6 @@ import {
   hasPluginRxObservers,
   MAX_LINES_PER_DELIVERY,
   MAX_BYTES_PER_DELIVERY,
-  feedPluginProtocolFrame,
   notifyPortDisconnected,
 } from './pluginObserver';
 import { getRxPipeline } from './rxPipeline';
@@ -157,15 +156,19 @@ describe('pluginObserver', () => {
     expect(spy.lines[total - 1].text).toBe(`line${total - 1}`);
     unsub();
   });
-  it('protocol frames bypass line assembly and preserve original RX frame bytes', () => {
-    const seen: Uint8Array[] = [];
+  it('protocol frames reach the RX bus through enqueueFrame with original bytes and encoding', () => {
+    const seen: Array<{ bytes: number[]; encoding: string; ts: number; seq: number }> = [];
     const unsub = addPluginRxObserver({
-      onRxLines: (lines) => seen.push(...lines.map((line) => line.rawData)),
+      onRxLines: (lines) => seen.push(...lines.map((line) => ({
+        bytes: Array.from(line.rawData), encoding: line.encoding, ts: line.ts, seq: line.seq,
+      }))),
       onRxDetached: () => {},
     });
-    feedPluginProtocolFrame('COM1', new Uint8Array([0, 255, 10]), 123);
+    getRxPipeline().enqueueFrame('COM1', {
+      timestamp: 123, direction: 'RX', content: '', rawData: new Uint8Array([0, 255, 10]), isHex: false,
+    });
     flushDelivery();
-    expect(seen.map((bytes) => Array.from(bytes))).toEqual([[0, 255, 10]]);
+    expect(seen).toEqual([{ bytes: [0, 255, 10], encoding: 'utf-8', ts: 123, seq: 0 }]);
     unsub();
   });
 
@@ -175,7 +178,9 @@ describe('pluginObserver', () => {
       onRxLines: (lines) => batches.push(lines.reduce((n, line) => n + line.rawData.length, 0)),
       onRxDetached: () => {},
     });
-    for (let i = 0; i < 3; i++) feedPluginProtocolFrame('COM1', new Uint8Array(120 * 1024), i);
+    for (let i = 0; i < 3; i++) getRxPipeline().enqueueFrame('COM1', {
+      timestamp: i, direction: 'RX', content: '', rawData: new Uint8Array(120 * 1024), isHex: false,
+    });
     flushDelivery();
     flushDelivery();
     expect(batches).toEqual([240 * 1024, 120 * 1024]);
@@ -188,8 +193,9 @@ describe('pluginObserver', () => {
       onRxLines: () => {}, onRxDetached: () => {},
       onRxDropped: (event) => { dropped.push(event); },
     });
-    feedPluginProtocolFrame('COM1', new Uint8Array(MAX_BYTES_PER_DELIVERY + 1), 1);
-    feedPluginProtocolFrame('COM1', new Uint8Array(MAX_BYTES_PER_DELIVERY + 1), 2);
+    for (let i = 1; i <= 2; i++) getRxPipeline().enqueueFrame('COM1', {
+      timestamp: i, direction: 'RX', content: '', rawData: new Uint8Array(MAX_BYTES_PER_DELIVERY + 1), isHex: false,
+    });
     flushDelivery();
     expect(dropped).toEqual([{ portId: 'COM1', reason: 'oversized-frame', count: 2 }]);
     unsub();

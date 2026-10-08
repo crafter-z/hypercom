@@ -17,6 +17,13 @@ const pluginId = 'com.example.worker';
 const manifest = { id: pluginId, name: 'Worker', entry: 'dist/entry.js', permissions: [], serial: { portWhitelist: [] } };
 const entry = { id: pluginId, enabled: true, grantedPermissions: [] as string[] };
 
+// tsconfig targets ES2020, before Promise.withResolvers is typed.
+function deferredResult<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 class TestWorker {
   static created: TestWorker[] = [];
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -31,6 +38,8 @@ beforeEach(() => {
   TestWorker.created = [];
   readAsset.mockReset();
   disable.mockReset();
+  vi.mocked(executeHostApi).mockReset();
+  vi.mocked(executeHostApi).mockResolvedValue('response');
   vi.stubGlobal('Worker', TestWorker);
   vi.stubGlobal('URL', {
     createObjectURL: vi.fn(() => 'blob:plugin'),
@@ -92,6 +101,100 @@ describe('PluginSession worker lifetime', () => {
     await Promise.resolve();
     expect(oldWorker.postMessage).not.toHaveBeenCalledWith({ seq: 3, ok: true, result: 'response' });
     expect(TestWorker.created[1].postMessage).not.toHaveBeenCalledWith({ seq: 3, ok: true, result: 'response' });
+    session.stop();
+  });
+
+  it('retires timed-out host slots without cancelling backend work or replying twice', async () => {
+    vi.useFakeTimers();
+    const deferred = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation(() => deferred.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    for (let seq = 1; seq <= MAX_PENDING_MESSAGES; seq++) worker.emit({ seq, op: 'ports.list' });
+    worker.emit({ seq: 100, op: 'ports.list' });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 100, ok: false, error: 'plugin RPC capacity exceeded' });
+    expect(executeHostApi).toHaveBeenCalledTimes(MAX_PENDING_MESSAGES);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: false, error: 'plugin RPC timed out' });
+    worker.emit({ seq: 101, op: 'ports.list' });
+    expect(executeHostApi).toHaveBeenCalledTimes(MAX_PENDING_MESSAGES + 1);
+    deferred.resolve('late');
+    await Promise.resolve();
+    expect(worker.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result: 'late' });
+    session.stop();
+  });
+
+  it('keeps a deferred HTTP operation and a user-controlled file dialog alive', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request', 'fs:open'] }] });
+    const http = deferredResult<unknown>();
+    const dialog = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation((_id, op) => op === 'http.request' ? http.promise : dialog.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'http.request', args: {} });
+    worker.emit({ seq: 2, op: 'fs.openDialog', args: {} });
+    await vi.advanceTimersByTimeAsync(15_500);
+    http.resolve('http success');
+    await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: true, result: 'http success' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    dialog.resolve('selected');
+    await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: 'selected' });
+    session.stop();
+  });
+
+  it('reclaims slots at stop and never forwards a prior worker response after restart', async () => {
+    const deferred = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementationOnce(() => deferred.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const oldWorker = TestWorker.created[0];
+    oldWorker.emit({ seq: 1, op: 'ports.list' });
+    session.stop();
+    await session.start();
+    const current = TestWorker.created[1];
+    for (let seq = 1; seq <= MAX_PENDING_MESSAGES; seq++) current.emit({ seq, op: 'ports.list' });
+    await Promise.resolve();
+    expect(current.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ error: 'plugin RPC capacity exceeded' }));
+    deferred.resolve('obsolete');
+    await Promise.resolve();
+    expect(current.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result: 'obsolete' });
+    expect(oldWorker.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result: 'obsolete' });
+    session.stop();
+  });
+
+  it('retires a crashed worker’s deferred RPC before automatic restart', async () => {
+    vi.useFakeTimers();
+    const deferred = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementationOnce(() => deferred.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const oldWorker = TestWorker.created[0];
+    oldWorker.emit({ seq: 1, op: 'ports.list' });
+    oldWorker.onerror?.({ message: 'worker error' });
+    await vi.advanceTimersByTimeAsync(101);
+    const replacement = TestWorker.created[1];
+    for (let seq = 1; seq <= MAX_PENDING_MESSAGES; seq++) replacement.emit({ seq, op: 'ports.list' });
+    await Promise.resolve();
+    expect(replacement.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ error: 'plugin RPC capacity exceeded' }));
+    deferred.resolve('obsolete');
+    await Promise.resolve();
+    expect(replacement.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result: 'obsolete' });
+    session.stop();
+  });
+
+  it('distinguishes disabled from timeout even for a permissionless operation', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, enabled: false }] });
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 4, op: 'ports.list' });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 4, ok: false, error: 'plugin disabled' });
+    expect(executeHostApi).not.toHaveBeenCalled();
     session.stop();
   });
 

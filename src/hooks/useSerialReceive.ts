@@ -10,7 +10,7 @@ import { ttyService } from '../utils/ttyService';
 import { trafficStats } from '../utils/trafficStats';
 import { evaluateTriggers } from '../utils/triggerEngine';
 import { sendToPort } from './useSerialSend';
-import { feedPluginProtocolFrame, notifyPortDisconnected } from '../utils/pluginObserver';
+import { notifyPortDisconnected } from '../utils/pluginObserver';
 import { feedPluginBytes, hasPluginBytesObservers, notifyBytesPortDisconnected } from '../utils/pluginBytesObserver';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
@@ -100,7 +100,7 @@ export function openTabForConnectedPort(portId: string): void {
  *
  * RX 路径走 RxPipeline（字节级行聚合 + rAF 批写）：
  * - 普通流：pipeline.feedBytes → 组装器切行 → 解码 → 入队 → rAF 批写
- * - 协议帧：ProtocolFrameReassembler 返回有序段，帧段经 enqueueLines 入队，
+ * - 协议帧：ProtocolFrameReassembler 返回有序段，帧段经 enqueueFrame 入队并通知 RX 观察者，
  *   裸段经 feedBytes 入队——两者共享队列，天然保流顺序
  *
  * P1-1：条件触发器改在 RxPipeline 的 onLineAssembled 钩子（完整行边界）评估，
@@ -203,7 +203,6 @@ export function useSerialReceive() {
                 isHex: event.is_hex,
                 parsedFields: seg.frame.fields,
               });
-              feedPluginProtocolFrame(portId, frameBytes, event.timestamp);
             } else {
               pipeline.feedBytes(portId, seg.bytes, event.timestamp);
             }

@@ -58,11 +58,21 @@ export const OP_PERMISSIONS: PermissionMap = {
  * 按已授予权限过滤一次 op 调用。
  * @returns 错误串（拒绝原因）或 null（放行）。
  */
-export function checkOpAllowed(op: string, grantedPermissions: string[]): string | null {
+export function checkOpAllowed(op: string, grantedPermissions: string[], args?: unknown): string | null {
   if (!Object.prototype.hasOwnProperty.call(OP_PERMISSIONS, op)) return `未知 API: ${op}`;
+  if (op === 'fs.read') {
+    // data/ is private storage; other package files require fs:assets.
+    // Malformed paths must fail before checking either grant.
+    const rel = args && typeof args === 'object' && !Array.isArray(args) && 'rel' in args
+      ? args.rel : undefined;
+    if (typeof rel !== 'string' || !rel) return '插件资产路径无效';
+    const segments = rel.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
+    if (segments.includes('..')) return '插件资产路径无效';
+    const required = segments[0] === 'data' ? 'fs:storage' : 'fs:assets';
+    return grantedPermissions.includes(required) ? null : `插件未授予 ${required} 权限`;
+  }
   const required = OP_PERMISSIONS[op];
   if (required === null) return null;
-  if (op === 'fs.read' && grantedPermissions.includes('fs:storage')) return null;
   return grantedPermissions.includes(required)
     ? null
     : `插件未授予 ${required} 权限（当前授予: ${grantedPermissions.join(', ') || '无'}）`;
@@ -97,21 +107,4 @@ export function checkPortScope(
     return `端口 ${portId} 不在插件 serial.portWhitelist 内（${whitelist.join(', ')}）`;
   }
   return null;
-}
-
-/** 权限过滤矩阵（测试用）：给定授予集，断言哪些 op 放行/拒绝。 */
-export function filterAllowedOps(
-  ops: string[],
-  grantedPermissions: string[],
-): { allowed: string[]; denied: string[] } {
-  const allowed: string[] = [];
-  const denied: string[] = [];
-  for (const op of ops) {
-    if (checkOpAllowed(op, grantedPermissions) === null) {
-      allowed.push(op);
-    } else {
-      denied.push(op);
-    }
-  }
-  return { allowed, denied };
 }

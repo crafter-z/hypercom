@@ -1,13 +1,13 @@
 /**
  * pluginObserver — 插件 RX 旁路观察者总线（issue #17，评审 v2 D4/P1/P12）
  *
- * 职责：把 RxPipeline 行组装层产出的**纯 RX 完整行**批转发给已订阅的插件，
+ * 职责：把 RxPipeline 产出的**纯 RX 完整行与协议帧**批转发给已订阅的插件，
  * 并处理 TRX/TTY 模式切换的断流通知。
  *
  * 架构要点（评审 v2）：
- * - **行组装层旁路**：经 `getRxPipeline().addOnLineAssembledListener` 注册到
- *   多播钩子（rxPipeline.ts，行级——非 serial:data 块级；TX 回显/TOOL/回放
- *   走 viewportManager 单行入口不经管线，故本总线天然纯 RX）。
+ * - **RX 管线旁路**：经 `getRxPipeline().addOnLineAssembledListener` 注册到
+ *   多播钩子（rxPipeline.ts，组装行与 enqueueFrame 各通知一次；TX 回显/TOOL/回放
+ *   不触发此钩子，故本总线天然纯 RX）。
  * - **不消费、不修改**：观察者只读行数据，不碰队列/缓冲/触发引擎。
  * - **批转发 + 额度**：每端口入队，rAF tick 每帧至多向每个订阅者投递
  *   `MAX_LINES_PER_DELIVERY` 行（含字节上限），超限丢**最旧**并告警——对齐
@@ -160,12 +160,6 @@ function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: 
   });
   state.queuedBytes += line.rawData.byteLength;
   scheduleDelivery(state, () => deliverPort(portId));
-}
-
-/** Protocol frames bypass the line assembler; deliver them through the same bounded RX bus. */
-export function feedPluginProtocolFrame(portId: string, rawData: Uint8Array, ts: number): void {
-  if (observers.size === 0 || rawData.length === 0) return;
-  handleAssembledLine(portId, { rawData, text: '', timestamp: ts });
 }
 
 /** 向全部订阅者投递某端口排队的行（每订阅者最多 MAX_LINES_PER_DELIVERY）。 */

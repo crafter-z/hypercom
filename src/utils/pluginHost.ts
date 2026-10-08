@@ -21,7 +21,7 @@ import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
-import { wrapPluginCode } from './pluginBridge';
+import { PLUGIN_HTTP_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
 import { executeHostApi } from './pluginHostApi';
 import { checkOpAllowed } from './pluginRpc';
 import { removePluginPanel } from './pluginPanelRegistry';
@@ -57,7 +57,8 @@ export class PluginSession {
   private crashCount = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private crashWindowStart = 0;
-  private requestsInFlight = 0;
+  /** Retirement callbacks for this worker's RPC slots; backend operations may continue after retirement. */
+  private readonly retireRequests = new Set<() => void>();
 
   constructor(pluginId: string) {
     this.pluginId = pluginId;
@@ -135,34 +136,51 @@ export class PluginSession {
     }
   }
 
-  /** worker → 宿主 API 请求处理：调用时权限校验 → 执行 → 响应。 */
+  /** Worker → host RPC: deadlines retire reply slots, not already-started backend I/O. */
   private async handleWorkerRequest(worker: Worker, req: { seq: number; op: string; args?: unknown }): Promise<void> {
-    if (!Number.isSafeInteger(req.seq)) return;
+    if (!Number.isSafeInteger(req.seq) || this.worker !== worker) return;
     const respond = (payload: { ok: boolean; result?: unknown; error?: string }): void => {
       if (this.worker === worker) worker.postMessage({ seq: req.seq, ...payload });
     };
-    if (this.worker !== worker) return;
-    if (this.requestsInFlight >= MAX_PENDING_MESSAGES) {
+    if (this.retireRequests.size >= MAX_PENDING_MESSAGES) {
       respond({ ok: false, error: 'plugin RPC capacity exceeded' });
       return;
     }
-    this.requestsInFlight++;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true;
+    const retire = (): boolean => {
+      if (!active) return false;
+      active = false;
+      clearTimeout(timer);
+      this.retireRequests.delete(retire);
+      return true;
+    };
+    this.retireRequests.add(retire);
+    // File picker waits for explicit user action. HTTP's backend timeout is 15s.
+    if (req.op !== 'fs.openDialog') {
+      timer = setTimeout(() => {
+        if (retire()) respond({ ok: false, error: 'plugin RPC timed out' });
+      }, req.op === 'http.request' ? PLUGIN_HTTP_RPC_TIMEOUT_MS : PLUGIN_RPC_TIMEOUT_MS);
+    }
     try {
-      // 调用时权限校验（评审 v2 P7：撤销即时生效）。
-      const granted = this.currentGrantedPermissions();
-      const denied = checkOpAllowed(req.op, granted);
+      // Permission is checked at call time, including disabled plugins with permissionless ops.
+      const config = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === this.pluginId);
+      if (!config?.enabled) {
+        if (retire()) respond({ ok: false, error: 'plugin disabled' });
+        return;
+      }
+      const denied = checkOpAllowed(req.op, config.grantedPermissions, req.args);
       if (denied) {
-        respond({ ok: false, error: denied });
+        if (retire()) respond({ ok: false, error: denied });
         return;
       }
       const result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest);
-      respond({ ok: true, result });
+      if (retire()) respond({ ok: true, result });
     } catch (e) {
+      if (!active) return;
       const errMsg = e instanceof Error ? e.message : String(e);
       console.error(`[pluginHost] ${this.pluginId} api ${req.op} failed:`, errMsg);
-      respond({ ok: false, error: errMsg });
-    } finally {
-      this.requestsInFlight--;
+      if (retire()) respond({ ok: false, error: errMsg });
     }
   }
 
@@ -178,6 +196,8 @@ export class PluginSession {
       this.worker.terminate();
       this.worker = null;
     }
+    // Stop retires old worker's slots now; a late backend completion cannot reply to a new worker.
+    for (const retire of this.retireRequests) retire();
     this.manifest = null;
     this.eventsInFlight.clear();
     this.eventBytes = 0;
@@ -255,11 +275,6 @@ export class PluginSession {
     }
   }
 
-  /** 当前 config 里的授予权限（实时读，不缓存——撤销即时生效）。 */
-  private currentGrantedPermissions(): string[] {
-    const entry = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === this.pluginId);
-    return entry?.enabled ? entry.grantedPermissions : [];
-  }
 }
 
 /**

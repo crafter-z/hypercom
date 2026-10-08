@@ -7,17 +7,18 @@
  * - Worker 桥事件注册与调用语义。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { checkOpAllowed, filterAllowedOps, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS } from './pluginRpc';
+import { checkOpAllowed, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS } from './pluginRpc';
 import { PLUGIN_BRIDGE_CODE } from './pluginBridge';
 
 describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
   it('无权限：敏感 op 全拒，只读 op 放行', () => {
-    const { allowed, denied } = filterAllowedOps(
-      ['ports.list', 'ports.status', 'serial.send', 'http.request', 'fs.read', 'log', 'notify'],
-      [],
-    );
-    expect(allowed.sort()).toEqual(['log', 'ports.list', 'ports.status']);
-    expect(denied.sort()).toEqual(['fs.read', 'http.request', 'notify', 'serial.send']);
+    expect(checkOpAllowed('ports.list', [])).toBeNull();
+    expect(checkOpAllowed('ports.status', [])).toBeNull();
+    expect(checkOpAllowed('log', [])).toBeNull();
+    expect(checkOpAllowed('serial.send', [])).not.toBeNull();
+    expect(checkOpAllowed('http.request', [])).not.toBeNull();
+    expect(checkOpAllowed('fs.read', [], { rel: 'assets/help.txt' })).not.toBeNull();
+    expect(checkOpAllowed('notify', [])).not.toBeNull();
   });
 
   it('部分授予：仅授予的敏感 op 放行', () => {
@@ -81,10 +82,14 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(checkOpAllowed('fs.openDialog', ['fs:assets'])).not.toBeNull();
     expect(checkOpAllowed('fs.openDialog', ['fs:open'])).toBeNull();
   });
-  it('fs:storage grants reading own data, but never reading declared package assets', () => {
-    expect(checkOpAllowed('fs.read', ['fs:storage'])).toBeNull();
-    expect(checkOpAllowed('fs.read', ['fs:assets'])).toBeNull();
-    expect(checkOpAllowed('fs.read', [])).not.toBeNull();
+  it('fs.read grants only the requested data or package path', () => {
+    expect(checkOpAllowed('fs.read', ['fs:storage'], { rel: 'data/state.json' })).toBeNull();
+    expect(checkOpAllowed('fs.read', ['fs:storage'], { rel: 'assets/help.txt' })).toContain('fs:assets');
+    expect(checkOpAllowed('fs.read', ['fs:assets'], { rel: 'assets/help.txt' })).toBeNull();
+    expect(checkOpAllowed('fs.read', ['fs:assets'], { rel: 'data/state.json' })).toContain('fs:storage');
+    expect(checkOpAllowed('fs.read', ['fs:storage'], { rel: 'data\\settings.json' })).toBeNull();
+    expect(checkOpAllowed('fs.read', ['fs:assets'], { rel: 'data/../assets/help.txt' })).not.toBeNull();
+    expect(checkOpAllowed('fs.read', ['fs:assets'])).not.toBeNull();
   });
 
   it('无权限要求的 op（log/ports）标记为 null 放行；notify 需权限', () => {

@@ -21,6 +21,8 @@
 
 插件侧桥对象为 `self.plugin`，`plugin.api['op.name'](args)` 返回 Promise；事件处理用 `plugin.on(type, callback)` 或 `plugin.rx.onLine/onBytes/onDetached/onDropped(callback)`（返回注销函数）。RX、字节事件按批传输，因此回调收到数组，非单条记录。
 
+RPC 生命周期：普通操作在宿主 10 秒内结算，`http.request` 预留 20 秒（后端请求最多 15 秒），Worker 桥仅在宿主迟到或失联时再多等 1 秒后拒绝；超时后的迟到回复会被忽略。原生 `fs.openDialog` 由用户控制选取时长，不按固定秒数取消，但受每插件最多 32 个在飞请求的额度约束。停用或崩溃立即释放旧 Worker 的 RPC 槽位及计时器，旧异步操作即使完成也不向新 Worker 回复；已发起的后端 IO **不因超时自动取消**。
+
 | 接口 / 事件 | 权限与语义 |
 |---|---|
 | `ports.list` / `ports.status` | 只读端口摘要，不暴露完整 store |
@@ -30,7 +32,7 @@
 | `plugin.rx.onDropped(cb)` | 观察器队列溢出、超大帧或 Worker 背压造成数据缺口时送 `rx.dropped`；观察器给端口及丢失量，Worker 背压给原因 |
 | `terminal.append` | `terminal:write`；写 NOTE 旁注，不进入 TX 统计及历史 |
 | `serial.send` | `serial:send`；调用时按 manifest `serial.portWhitelist` 检查端口，再走 `sendToPort` |
-| `fs.read` / `fs.write` | `fs:assets` 读资产；`fs:storage` 读写 `data/`；路径由 Rust 规范化校验 |
+| `fs.read` / `fs.write` | `fs.read({rel})` 按路径选择授权：读取 `data/` 需要 `fs:storage`，读取包内资产需要 `fs:assets`；`fs.write` 仅写 `data/` 且需要 `fs:storage`。路径还由 Rust 规范化校验。 |
 | `fs.openDialog` | `fs:open`；由宿主原生对话框显式选文件，返回 `{files:[{path,content}]}` |
 | `http.request` | `http:request` + `http.urlWhitelist`；Rust 转发、最长 15s、响应正文最多 1 MiB |
 | `shell.openExternal` | `shell:open`；后端限制 `http/https/mailto`，校验插件已启用和授权 |
@@ -44,7 +46,7 @@
 
 ## RX 性能边界与验证
 
-`pluginObserver` 在 `RxPipeline` 行组装钩子订阅；协议帧绕过行组装时在 `useSerialReceive` 显式喂给观察器。`pluginBytesObserver` 在 serial:data 层旁路，保留 TTY 字节。无订阅时不建立队列；每端口队列按行数、字节数受限，可见页按 rAF、隐藏页按 timer 递送。每个 Worker 的待确认事件数及字节数也有上限；传输采用结构化克隆，不能 transfer 与终端缓冲共享的 `rawData.buffer`。
+`pluginObserver` 仅通过 `RxPipeline` 的行级多播钩子订阅；协议帧由 `enqueueFrame` 进入同一入口，和普通 TRX RX 行一样只投递一次，回放/TX 不触发该钩子。`pluginBytesObserver` 在 serial:data 层旁路，保留 TTY 字节。无订阅时不建立队列；每端口队列按行数、字节数受限，可见页按 rAF、隐藏页按 timer 递送。每个 Worker 的待确认事件数及字节数也有上限；传输采用结构化克隆，不能 transfer 与终端缓冲共享的 `rawData.buffer`。
 
 - Rust 测试：ID 穿越、ZIP 限额、安装更新及回滚、卸载备份、资产替换、HTTP glob；`cargo test --lib --manifest-path src-tauri/Cargo.toml`。
 - 前端 Vitest：权限、KV 并发、RX/字节旁路、UI 注册表和 Worker 生命周期。`npx tsc --noEmit` 与 `npm run test:run`。
