@@ -9,7 +9,7 @@
  */
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +18,112 @@ use tauri::AppHandle;
 use super::codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
 use super::{emit_reconnect_hint, emit_rx_event, emit_status, lock_error, PortInfo, PortKind, PortStatus, SerialManager};
 use crate::commands::OpenPortArgs;
+
+/// A write lease is acquired while the manager still owns the port. Closing waits for
+/// every lease (including a sender waiting for the per-port write lock) to finish.
+pub(super) struct CloseBarrier {
+    done: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl CloseBarrier {
+    pub(super) fn new() -> Self {
+        Self { done: Mutex::new(false), ready: Condvar::new() }
+    }
+
+    pub(super) fn completed(&self) -> bool {
+        *self.done.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn wait(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        while !*done {
+            done = self.ready.wait(done).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn finish(&self) {
+        *self.done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ready.notify_all();
+    }
+}
+
+struct WriterLeases {
+    count: Mutex<usize>,
+    empty: Condvar,
+}
+
+pub struct RealWriteHandle {
+    port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    leases: Arc<WriterLeases>,
+}
+
+impl std::ops::Deref for RealWriteHandle {
+    type Target = Mutex<Box<dyn serialport::SerialPort>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.port
+    }
+}
+
+impl Drop for RealWriteHandle {
+    fn drop(&mut self) {
+        let mut count = self.leases.count.lock().unwrap_or_else(|e| e.into_inner());
+        *count -= 1;
+        if *count == 0 {
+            self.leases.empty.notify_all();
+        }
+    }
+}
+
+/// The close operation owns both OS handles until the read thread and all TX leases
+/// are finished. Call `join` only after releasing the global manager lock.
+pub struct PortClose {
+    read_thread: Option<thread::JoinHandle<()>>,
+    write_port: Option<Arc<Mutex<Box<dyn serialport::SerialPort>>>>,
+    leases: Option<Arc<WriterLeases>>,
+    completion: Option<Arc<CloseBarrier>>,
+    waiting: Option<Arc<CloseBarrier>>,
+}
+
+impl PortClose {
+    pub(super) fn thread(read_thread: thread::JoinHandle<()>) -> Self {
+        Self { read_thread: Some(read_thread), write_port: None, leases: None, completion: None, waiting: None }
+    }
+
+    pub(super) fn waiting(barrier: Arc<CloseBarrier>) -> Self {
+        Self { read_thread: None, write_port: None, leases: None, completion: None, waiting: Some(barrier) }
+    }
+
+    pub fn join(mut self) -> thread::Result<()> {
+        if let Some(pending) = self.waiting.take() {
+            pending.wait();
+        }
+        let result = match self.read_thread.take() {
+            Some(thread) => thread.join(),
+            None => Ok(()),
+        };
+        if let Some(leases) = self.leases.take() {
+            let mut count = leases.count.lock().unwrap_or_else(|e| e.into_inner());
+            while *count != 0 {
+                count = leases.empty.wait(count).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        // The last write handle is released only after the writers have finished.
+        drop(self.write_port.take());
+        if let Some(completion) = self.completion.take() {
+            completion.finish();
+        }
+        result
+    }
+}
+
+impl PortClose {
+    pub(super) fn with_completion(mut self, barrier: Arc<CloseBarrier>) -> Self {
+        self.completion = Some(barrier);
+        self
+    }
+}
 
 /// 单个真实串口连接句柄。
 ///
@@ -36,6 +142,7 @@ pub(super) struct SerialPortHandle {
     read_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     /// 写句柄：发送路径独占（只锁写）
     write_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    leases: Arc<WriterLeases>,
     running: Arc<AtomicBool>,
     read_thread: Option<thread::JoinHandle<()>>,
 }
@@ -86,6 +193,10 @@ fn system_port_present(port_id: &str) -> anyhow::Result<bool> {
 /// 调用，不得在异步运行时线程或事件循环主线程上直接调用。
 pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyhow::Result<()> {
     if PortKind::of(&args.port_id) == PortKind::Real {
+        let pending = manager.lock().map_err(lock_error)?.pending_real_closes.get(&args.port_id).cloned();
+        if let Some(pending) = pending {
+            pending.wait();
+        }
         let live = manager
             .lock()
             .map_err(lock_error)?
@@ -96,29 +207,28 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
         // 存活句柄 + 设备已从系统枚举消失 = USB 拔出留下的幽灵句柄：读线程可能因
         // 空闲而永不报错（read 一直 timeout），running 停在 true，继续报
         // "already open" 会让用户重插后永远开不了（只能重启应用）。
-        if live && !system_port_present(&args.port_id)? {
-            log::warn!(
-                "Port {} stale handle detected (device vanished from enumeration); recycling",
-                args.port_id
-            );
-            let stale = manager
-                .lock()
-                .map_err(lock_error)?
-                .ports
-                .remove(&args.port_id);
-            if let Some(mut handle) = stale {
-                handle.request_stop();
-                // 必须在重新 open 之前 join：旧读线程持有的 COM 句柄要等它退出并
-                // 释放 Arc 后才归还系统，否则紧接的 open 会撞 "access denied"
-                // （串口以 dwShareMode=0 打开，同一 COM 不能二次打开）。线程受
-                // read 超时（≤100ms）上界约束，且仅在这条罕见的热插拔路径发生。
-                if let Some(t) = handle.read_thread.take() {
-                    let _ = t.join();
-                }
+        if !live || !system_port_present(&args.port_id)? {
+            if live {
+                log::warn!("Port {} stale handle detected (device vanished from enumeration); recycling", args.port_id);
+            }
+            let close = manager.lock().map_err(lock_error)?.close_port(&args.port_id)?;
+            if let Some(close) = close {
+                let _ = close.join();
             }
         }
     }
-    manager.lock().map_err(lock_error)?.open_port(args)
+    // The final barrier check and opening are under the same manager lock: a close
+    // cannot remove a handle between checking the barrier and CreateFile.
+    loop {
+        let mut guard = manager.lock().map_err(lock_error)?;
+        let pending = guard.pending_real_closes.get(&args.port_id).cloned();
+        if let Some(pending) = pending.filter(|barrier| !barrier.completed()) {
+            drop(guard);
+            pending.wait();
+            continue;
+        }
+        return guard.open_port(args);
+    }
 }
 
 /// 自动重连：关闭残留句柄 → 锁外 join → 锁外确认设备仍在 → 重新打开。
@@ -143,12 +253,10 @@ pub fn reconnect_blocking(manager: &Mutex<SerialManager>, port_id: &str) -> anyh
     if !system_port_present(port_id)? {
         return Err(anyhow::anyhow!("Port {} is not available", port_id));
     }
-    // 阶段 4（锁内）：以上次成功的参数打开（此时必无残留句柄）
-    let mut guard = manager.lock().map_err(lock_error)?;
-    let params = guard
+    let params = manager.lock().map_err(lock_error)?
         .get_last_params(port_id)
         .ok_or_else(|| anyhow::anyhow!("No previous connection params for {}", port_id))?;
-    guard.open_port(params)
+    open_blocking(manager, params)
 }
 
 /// 打开真实串口（锁内、不枚举端口、不 join 读线程）。
@@ -170,14 +278,10 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     let stop_bits = parse_stop_bits(&args.stop_bits)?;
     let flow_control = parse_flow_control(&args.handshake)?;
 
-    // 同端口残留句柄：存活句柄意味着 COM 口仍被本进程占用（二次 CreateFile 必
-    // 失败），报错而不是覆盖——覆盖会让旧读线程游离在外继续持有句柄。已死线程的
-    // 句柄直接摘除，避免 insert 覆盖后泄漏读线程。
-    if let Some(handle) = manager.ports.get(&args.port_id) {
-        if handle.running.load(Ordering::Relaxed) {
-            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
-        }
-        manager.ports.remove(&args.port_id);
+    // Any residual handle (even one whose reader exited) must be closed and joined
+    // through `open_blocking`, not dropped while the manager lock is held.
+    if manager.ports.contains_key(&args.port_id) {
+        return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
     }
 
     let mut port = serialport::new(&args.port_id, args.baud_rate)
@@ -200,6 +304,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
 
     let read_port_arc = Arc::new(Mutex::new(read_port));
     let write_port_arc = Arc::new(Mutex::new(write_port));
+    let leases = Arc::new(WriterLeases { count: Mutex::new(0), empty: Condvar::new() });
     let running = Arc::new(AtomicBool::new(true));
 
     let thread_port_id = args.port_id.clone();
@@ -221,6 +326,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
         SerialPortHandle {
             read_port: read_port_arc,
             write_port: write_port_arc,
+            leases,
             running,
             read_thread: Some(read_thread),
         },
@@ -229,12 +335,18 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     Ok(())
 }
 
-/// 关闭真实串口：停止读线程并返回其 JoinHandle，由调用方在释放全局锁之后 join。
-pub(super) fn close(manager: &mut SerialManager, port_id: &str) -> Option<thread::JoinHandle<()>> {
+/// 关闭真实串口：读线程和写句柄的所有借用都由锁外 `join()` 等待并释放。
+pub(super) fn close(manager: &mut SerialManager, port_id: &str) -> Option<PortClose> {
     let mut handle = manager.ports.remove(port_id)?;
     handle.request_stop();
     log::info!("Serial port closed: {}", port_id);
-    handle.read_thread.take()
+    Some(PortClose {
+        read_thread: handle.read_thread.take(),
+        write_port: Some(handle.write_port),
+        leases: Some(handle.leases),
+        completion: None,
+        waiting: None,
+    })
 }
 
 /// 向真实串口发送数据：只锁写句柄，写入带总期限，日志与返回字节数取自
@@ -280,12 +392,14 @@ pub(super) fn write_raw(manager: &SerialManager, port_id: &str, bytes: &[u8]) ->
 pub(super) fn write_handle(
     manager: &SerialManager,
     port_id: &str,
-) -> anyhow::Result<Arc<Mutex<Box<dyn serialport::SerialPort>>>> {
-    manager
+) -> anyhow::Result<RealWriteHandle> {
+    let handle = manager
         .ports
         .get(port_id)
-        .map(|h| Arc::clone(&h.write_port))
-        .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))
+        .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
+    let mut count = handle.leases.count.lock().map_err(lock_error)?;
+    *count += 1;
+    Ok(RealWriteHandle { port: Arc::clone(&handle.write_port), leases: Arc::clone(&handle.leases) })
 }
 
 /// 修改串口参数（完整）。
@@ -424,6 +538,7 @@ fn read_loop(
             }
         }
     }
+    running.store(false, Ordering::Relaxed);
 
     // 读取线程退出时发送断开事件
     emit_status(&app_handle, &port_id, PortStatus::Disconnected);
@@ -558,4 +673,20 @@ mod tests {
         ));
         assert!(parse_flow_control("bogus").is_err());
     }
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn duplicate_close_waits_for_first_completion() {
+        let completion = std::sync::Arc::new(super::CloseBarrier::new());
+        let duplicate = super::PortClose::waiting(std::sync::Arc::clone(&completion));
+        let (ready, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            duplicate.join().unwrap();
+            ready.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(20)).is_err());
+        completion.finish();
+        rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        thread.join().unwrap();
+    }
+
 }

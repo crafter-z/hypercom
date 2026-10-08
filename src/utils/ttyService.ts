@@ -65,6 +65,10 @@ export interface TtyPortState {
   txBufferBytes: number;
   /** TX 合批静默定时器句柄（null = 无 pending 合批）。 */
   txTimerId: number | null;
+  /** 当前连接的最后一个 TX 批次；settle 后释放，不跨 disconnect 沿用。 */
+  txPending: Promise<void> | null;
+  /** 断线 / reset 后令旧连接已排队但未开始的批次失效。 */
+  txGeneration: number;
 }
 
 /** 每端口状态表（模块级单例） */
@@ -98,12 +102,9 @@ function dropTxBuffer(state: TtyPortState): void {
   state.txBufferBytes = 0;
 }
 
-/**
- * 把 TX 合批缓冲一次性发往串口（P0-2）。
- * 发送前先取走缓冲（清空 + 取消定时器），再 await IPC——发送期间的按键进入
- * 新一轮合批，字节顺序按批内到达顺序保持。失败仅 console.error（同原 send 语义）。
- */
-async function flushTx(portId: string, state: TtyPortState): Promise<void> {
+/** 取走 TX 缓冲并串行发送：每个端口只在上一批 IPC settle 后启动下一批。
+ * detach 仍排空缓冲；disconnect 则使旧连接尚未启动的批次失效。 */
+function flushTx(portId: string, state: TtyPortState): Promise<void> {
   if (state.txTimerId !== null) {
     clearTimeout(state.txTimerId);
     state.txTimerId = null;
@@ -111,19 +112,31 @@ async function flushTx(portId: string, state: TtyPortState): Promise<void> {
   const text = state.txBuffer;
   state.txBuffer = '';
   state.txBufferBytes = 0;
-  if (!text) return;
-  try {
-    const bytesWritten = await serialService.sendSerialData({
-      portId,
-      data: text,
-      isHex: false,
-      appendLineEnding: 'None',
-    });
-    // P1-1：TX 统计经 1s 聚合器统一写 store（与 RX 侧同款降频）。
-    trafficStats.addTx(portId, bytesWritten);
-  } catch (err) {
-    console.error('[ttyService] send failed for', portId, err);
-  }
+  if (!text) return Promise.resolve();
+  const generation = state.txGeneration;
+  const sendBatch = async (): Promise<void> => {
+    if (generation !== state.txGeneration) return;
+    try {
+      const bytesWritten = await serialService.sendSerialData({
+        portId,
+        data: text,
+        isHex: false,
+        appendLineEnding: 'None',
+      });
+      // P1-1：TX 统计经 1s 聚合器统一写 store（与 RX 侧同款降频）。
+      trafficStats.addTx(portId, bytesWritten);
+    } catch (err) {
+      console.error('[ttyService] send failed for', portId, err);
+    }
+  };
+  // 不为首次发送增加微任务延迟；后续批次严格等待此端口上一批完成。
+  const previous = state.txPending;
+  const pending = previous ? previous.then(sendBatch) : sendBatch();
+  state.txPending = pending;
+  void pending.then(() => {
+    if (state.txPending === pending) state.txPending = null;
+  });
+  return pending;
 }
 
 /** 取（或惰性创建）端口状态 */
@@ -141,6 +154,8 @@ function getPortState(portId: string): TtyPortState {
       txBuffer: '',
       txBufferBytes: 0,
       txTimerId: null,
+      txPending: null,
+      txGeneration: 0,
     };
     ports.set(portId, state);
   }
@@ -218,30 +233,17 @@ export const ttyService = {
     }
   },
 
-  /**
-   * TtyView 卸载时移除端口运行时状态（含 pending 批写）。不 dispose Terminal（视图拥有）。
-   * 仅保留最近一次尺寸（lastCols/lastRows）——同端口再次挂载/打开 GIT:BASH 时
-   * 仍能以正确尺寸 spawn pty（否则切走标签再重开会回退 80×24 首帧错乱）。
-   */
+  /** TtyView 卸载时释放终端/RX 状态（Terminal 由视图拥有），保留尺寸与
+   * 当前连接的 TX 顺序：标签页关闭不等于串口断开，pending 按键必须送达。 */
   detach(portId: string): void {
     const state = ports.get(portId);
     if (!state) return;
     cancelPending(state);
-    // P0-2：把 pending 合批的按键发出——issue #11 关标签页不断开串口，端口可能
-    // 仍连接，丢按键比晚 10ms 更糟（发送失败仅 console.error，无副作用）。
+    // 标签页关闭不断开串口：待发送合批与已有 IPC 保持原顺序。
     void flushTx(portId, state);
-    ports.set(portId, {
-      term: null,
-      decoder: null,
-      queue: [],
-      rafId: null,
-      timerId: null,
-      lastCols: state.lastCols,
-      lastRows: state.lastRows,
-      txBuffer: '',
-      txBufferBytes: 0,
-      txTimerId: null,
-    });
+    state.term = null;
+    state.decoder = null;
+    state.queue.length = 0;
   },
 
   /**
@@ -289,6 +291,8 @@ export const ttyService = {
     cancelPending(state);
     // P0-2：断线后端口不可写——取消 pending 合批定时器并丢弃缓冲（发送只会失败）。
     dropTxBuffer(state);
+    state.txGeneration++;
+    state.txPending = null;
     if (state.queue.length > 0) {
       if (state.term) state.term.write(state.queue.join(''));
       state.queue.length = 0;
@@ -377,6 +381,8 @@ export const ttyService = {
     for (const state of ports.values()) {
       cancelPending(state);
       dropTxBuffer(state);
+      state.txGeneration++;
+      state.txPending = null;
     }
     ports.clear();
   },
@@ -386,6 +392,8 @@ export const ttyService = {
     for (const state of ports.values()) {
       cancelPending(state);
       dropTxBuffer(state);
+      state.txGeneration++;
+      state.txPending = null;
     }
     ports.clear();
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {

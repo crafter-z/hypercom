@@ -74,7 +74,7 @@ openPort(portId, baud)
 ### 关闭
 
 - `closePort(portId)` 路由经 `useSerialConnection`：调 `stopLogging` 更新端口状态 → `close_serial_port`。
-- `close_serial_port` 是 async + `spawn_blocking` join（读线程永久阻塞时也不冻结 UI）。
+- `close_serial_port` 在全局 manager 锁外等待读线程和已经取出的真实串口写入租约，待最后的写句柄释放后才返回；关闭期间同端口重开等待完成信号，不再与仍在飞的发送抢独占 COM 句柄。异步 join/等待由阻塞线程池承载，其他端口命令不被全局锁拖住。
 - **标签页关闭 ≠ 端口关闭（issue #11）**：关闭标签只销毁前端显示目标（`Pane.cleanupClosedTab` → `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)` 回收该端口的终端显示态/流量统计/TX 历史），串口连接与后端日志保持。批量关闭先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合再逐个走该生命周期。重开标签页从零开始新一轮输出。
 
 ## 参数与流控
@@ -90,7 +90,7 @@ openPort(portId, baud)
 1. 读写共用同一把 per-port 锁——TX 的 write_all+flush 阻塞时读线程拿不到锁，响应到了 OS 接收缓冲也读不走；
 2. 热路径 `flush()`（Windows = FlushFileBuffers）无超时、受流控约束（对端 CTS 拉低/XOFF 时无界阻塞）。
 
-修复：`SerialPortHandle` try_clone 拆 read/write 双句柄；读线程只锁读、发送只锁写；热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 重试到总期限、Interrupted 继续）。发送改**两段式**：全局锁内 `get_write_handle` 只做 HashMap 查找 + Arc 克隆（SIM 走 channel 发送）→ 释放全局锁 → 锁外只持 per-port 写锁写——不再持全局 serial_manager 锁执行写，端口列表轮询/其它端口命令不被 TX 阻塞拖死。每次 WriteFile 受 `.timeout(100ms)` 约束 ≈100ms，per-port 写锁单次持有上限 = 总期限 2s（极端场景），RX 最坏延迟从分钟级降为百毫秒级（读写锁分离后 RX 根本不再被 TX 锁饿死）。
+修复：`SerialPortHandle` try_clone 拆 read/write 双句柄；读线程只锁读、发送只锁写；热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 重试到总期限、Interrupted 继续）。发送改**两段式**：全局锁内 `get_write_handle` 查找并取得写租约 → 释放全局锁 → 锁外只持 per-port 写锁写；关闭先从注册表摘除端口、停止读线程，再锁外等待所有已取得的写租约完成并释放写句柄。端口列表轮询/其它端口命令不被 TX 阻塞拖死；当前端口快速关闭/重开不会冲撞仍被 TX 占用的独占句柄。
 
 ## 虚拟端口（SIM:Loopback）
 
@@ -102,7 +102,7 @@ openPort(portId, baud)
 
 - `run_port_tool` / `kill_port_tool`（`commands/serial.rs`）+ `useToolOutput` hook + ToolSettings 页。
 - close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单。
-- `run_port_tool` 在**全局串口锁外** join 读线程；stdout/stderr 按字节读（`read_until(b'\n')` + `from_utf8_lossy`）；重开端口失败补发 `serial:status error`。
+- `run_port_tool` 在全局串口锁外等待读线程和写租约；正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。
 - 分组整组执行（issue #5-7）：`usePortToolActions.runToolForGroup` + `GroupToolDialog`——严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。
 - 标签页菜单与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key。
 

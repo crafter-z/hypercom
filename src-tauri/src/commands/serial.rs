@@ -228,6 +228,32 @@ pub struct SendFileArgs {
     pub delay_ms: u64,
 }
 
+// Register atomically: a second send must not replace the first send's cancellation token.
+fn register_file_send(
+    sends: &std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    port_id: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), CommandError> {
+    let mut m = sends.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    if m.contains_key(port_id) {
+        return Err(CommandError::Serial(format!("File send already in progress for {port_id}")));
+    }
+    m.insert(port_id.to_owned(), Arc::clone(cancel));
+    Ok(())
+}
+
+fn unregister_file_send(
+    sends: &std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    port_id: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), CommandError> {
+    let mut m = sends.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    if m.get(port_id).is_some_and(|registered| Arc::ptr_eq(registered, cancel)) {
+        m.remove(port_id);
+    }
+    Ok(())
+}
+
 /// 发送文件内容到串口（分块发送 + 进度事件 + 间隔延时）
 #[tauri::command]
 pub async fn send_file(
@@ -249,26 +275,19 @@ pub async fn send_file(
     }
     // 注册取消令牌：前端调用 cancel_file_send 置位后，发送循环在下一块退出。
     let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mut m = state
-            .file_send_cancel
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        m.insert(args.port_id.clone(), cancel.clone());
-    }
+    register_file_send(&state.file_send_cancel, &args.port_id, &cancel)?;
 
-    // 异步读取文件，避免在异步命令中阻塞运行时线程。
-    let data = tokio::fs::read(&args.path)
-        .await
-        .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
-    let total = data.len();
-    let chunk_size = args.chunk_size.max(1);
-    // 端口类别在循环外判定一次：真实串口走两段式写，虚拟端口走各自的非阻塞写。
-    let is_real_port = serial::PortKind::of(&args.port_id) == serial::PortKind::Real;
     let mut sent = 0usize;
-    let mut send_err: Option<CommandError> = None;
+    let mut total = 0usize;
+    let result = async {
+        // Async read and every later fallible operation share the terminal cleanup below.
+        let data = tokio::fs::read(&args.path)
+            .await
+            .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
+        total = data.len();
+        let chunk_size = args.chunk_size.max(1);
+        let is_real_port = serial::PortKind::of(&args.port_id) == serial::PortKind::Real;
 
-    if total > 0 {
         for (chunk_index, chunk) in data.chunks(chunk_size).enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 break;
@@ -289,14 +308,16 @@ pub async fn send_file(
                     let mut port = write_port
                         .lock()
                         .map_err(|e| CommandError::Lock(e.to_string()))?;
-                    serial::write_all_with_deadline(
+                    let mut written = 0;
+                    let result = serial::write_with_deadline_progress(
                         &args.port_id,
                         &mut **port,
                         chunk,
                         serial::WRITE_TOTAL_DEADLINE,
-                    )
-                    .map(|_| chunk.len())
-                    .map_err(|e| CommandError::Serial(e.to_string()))
+                        &mut written,
+                    );
+                    sent += written;
+                    result.map(|_| 0).map_err(|e| CommandError::Serial(e.to_string()))
                 } else {
                     // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成
                     manager
@@ -304,11 +325,8 @@ pub async fn send_file(
                         .map_err(|e| CommandError::Serial(e.to_string()))
                 }
             } {
-                Ok(_) => {}
-                Err(e) => {
-                    send_err = Some(e);
-                    break;
-                }
+                Ok(n) => sent += n,
+                Err(e) => return Err(e),
             }
             // 记录 TX 元信息（仅 chunk 序号与长度，不记录二进制内容本身）。
             // log_manager 锁在下方 await 之前释放，不跨 await 持有 MutexGuard。
@@ -322,7 +340,7 @@ pub async fn send_file(
             {
                 log::warn!("Failed to write file-send log for {}: {}", args.port_id, e);
             }
-            sent += chunk.len();
+            // `sent` counts only bytes confirmed written by this chunk.
             let _ = app.emit(
                 "serial:file_progress",
                 FileProgressPayload {
@@ -339,13 +357,13 @@ pub async fn send_file(
                 tokio::task::yield_now().await;
             }
         }
+        Ok(sent)
     }
+    .await;
 
-    // 无条件清理取消令牌并发出终结事件——正常完成 / 取消 / 写错误 / 空文件
-    // 四条路径都保证 done:true 触发，前端进度条不会卡住。
-    if let Ok(mut m) = state.file_send_cancel.lock() {
-        m.remove(&args.port_id);
-    }
+    // All post-registration failures, including failed async reads and lock errors,
+    // pass through this path. Never erase another invocation's token.
+    let cleanup = unregister_file_send(&state.file_send_cancel, &args.port_id, &cancel);
     let _ = app.emit(
         "serial:file_progress",
         FileProgressPayload {
@@ -355,19 +373,10 @@ pub async fn send_file(
             done: true,
         },
     );
-    match send_err {
-        Some(e) => {
-            log::warn!(
-                "File send failed for {} (sent {} of {} bytes): {}",
-                args.port_id,
-                sent,
-                total,
-                e
-            );
-            Err(e)
-        }
-        None => Ok(sent),
+    if let Err(e) = &result {
+        log::warn!("File send failed for {} (sent {} of {} bytes): {}", args.port_id, sent, total, e);
     }
+    result.and(cleanup.map(|_| sent))
 }
 
 /// 设置串口参数（波特率、数据位等）
@@ -473,6 +482,30 @@ pub struct RunPortToolArgs {
     pub workdir: Option<String>,
 }
 
+/// Preserve tool outcome on normal exits, but never hide a failure that occurred
+/// after closing the port (and include any failed recovery in that error).
+fn finish_port_tool<F>(
+    outcome: Result<i32, CommandError>,
+    params: Option<OpenPortArgs>,
+    reopen: F,
+) -> (Result<i32, CommandError>, bool)
+where
+    F: FnOnce(OpenPortArgs) -> anyhow::Result<()>,
+{
+    let recovery = params.map(reopen).unwrap_or(Ok(()));
+    let reopen_failed = recovery.is_err();
+    let result = match (outcome, recovery) {
+        (Ok(code), Ok(())) => Ok(code),
+        (Ok(code), Err(e)) => {
+            log::warn!("Failed to reopen port after tool exit (code {code}): {e}");
+            Ok(code)
+        }
+        (Err(e), Ok(())) => Err(e),
+        (Err(e), Err(recovery)) => Err(CommandError::Other(format!("{e}; port recovery failed: {recovery}"))),
+    };
+    (result, reopen_failed)
+}
+
 /// 执行外部工具：关闭串口 → 运行命令 → 流式输出 → 命令退出 → 立即重开串口。
 ///
 /// 整个 close→run→reopen 闭环在后端一次完成，步骤 5→6（进程退出→串口重开）
@@ -500,7 +533,7 @@ pub async fn run_port_tool(
         let _ = t.join();
     }
 
-    // 2. 替换命令模板中的 {port} 占位符
+    let outcome = async {
     let cmd = args.command.replace("{port}", &args.port_id);
 
     // 3. 构建子进程
@@ -515,6 +548,7 @@ pub async fn run_port_tool(
     command.args(["-c", &cmd]);
 
     command
+        .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -526,13 +560,11 @@ pub async fn run_port_tool(
         .spawn()
         .map_err(|e| CommandError::Io(format!("Failed to spawn tool process: {}", e)))?;
 
-    // 4. 取出 stdout/stderr 句柄后将 Child 存入 AppState（供 kill_port_tool 使用）
+    // kill_on_drop reaps a child abandoned by an output capture or lock failure.
     let stdout = child.stdout.take().ok_or_else(|| CommandError::Io("Failed to capture stdout".into()))?;
     let stderr = child.stderr.take().ok_or_else(|| CommandError::Io("Failed to capture stderr".into()))?;
     {
-        let mut procs = state
-            .tool_processes
-            .lock()
+        let mut procs = state.tool_processes.lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         procs.insert(args.port_id.clone(), child);
     }
@@ -615,7 +647,7 @@ pub async fn run_port_tool(
         None => -1,
     };
 
-    // 7. 推送退出事件
+    // Notify the UI before reclaiming the port on normal tool completion.
     let _ = app.emit(
         "tool:exit",
         ToolExitPayload {
@@ -623,18 +655,19 @@ pub async fn run_port_tool(
             code: exit_code,
         },
     );
-
-    // 8. 立即重开串口（零延迟抢回 COM 口）。经 open_blocking：打开流程自持/自放全局
-    //    锁，端口枚举与幽灵句柄回收不会在锁内执行。
-    if let Some(params) = last_params {
-        if let Err(e) = serial::open_blocking(&state.serial_manager, params) {
-            log::warn!("Failed to reopen port {} after tool exit: {}", args.port_id, e);
-            // 重开失败不视为命令错误——工具已成功执行；但需通知 UI 反映重开失败状态。
-            serial::emit_status(&app, &args.port_id, serial::PortStatus::Error);
-        }
-    }
-
     Ok(exit_code)
+    }
+    .await;
+
+    // Reopen on every post-close exit (invalid workdir/spawn/capture/wait included).
+    // open_blocking performs its blocking work outside the manager lock.
+    let (result, reopen_failed) = finish_port_tool(outcome, last_params, |params| {
+        serial::open_blocking(&state.serial_manager, params)
+    });
+    if reopen_failed {
+        serial::emit_status(&app, &args.port_id, serial::PortStatus::Error);
+    }
+    result
 }
 
 /// 终止正在运行的外部工具进程。
@@ -666,4 +699,44 @@ pub fn cancel_file_send(port_id: String, state: State<AppState>) -> Result<(), C
         flag.store(true, Ordering::Relaxed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finish_port_tool, register_file_send, unregister_file_send, CommandError};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn concurrent_file_send_cannot_replace_or_remove_first_cancel_token() {
+        let sends = Mutex::new(HashMap::new());
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        register_file_send(&sends, "COM3", &first).unwrap();
+        assert!(register_file_send(&sends, "COM3", &second).is_err());
+        unregister_file_send(&sends, "COM3", &second).unwrap();
+        let token = sends.lock().unwrap().get("COM3").unwrap().clone();
+        token.store(true, Ordering::Relaxed);
+        assert!(first.load(Ordering::Relaxed));
+        assert!(!second.load(Ordering::Relaxed));
+        unregister_file_send(&sends, "COM3", &first).unwrap();
+        assert!(sends.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tool_failure_preserves_original_error_and_recovery_failure() {
+        let params = super::OpenPortArgs {
+            port_id: "COM3".into(), baud_rate: 9600, data_bits: 8,
+            parity: "None".into(), stop_bits: "One".into(), handshake: "None".into(),
+            dtr: true, rts: true, cols: 80, rows: 24,
+        };
+        let (result, failed) = finish_port_tool(Err(CommandError::Io("invalid workdir".into())), Some(params), |_| {
+            Err(anyhow::anyhow!("device unavailable"))
+        });
+        assert!(failed);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("invalid workdir"), "{error}");
+        assert!(error.contains("device unavailable"), "{error}");
+    }
 }

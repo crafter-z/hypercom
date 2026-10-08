@@ -21,17 +21,17 @@
 
 - **单例范围**：`getRxPipeline()` 主窗与弹出窗各持一个。弹窗是独立 webview（独立模块作用域与 store 实例），在那里的调用自然接线到本窗自己的 store——绝不跨窗共享。
 - `RxLineAssembler`（`utils/rxAssembler.ts`）：0x0A/0x0D 在全部四种受支持编码（ASCII/UTF-8/GBK/ISO-8859-1）中都不可能出现在多字节序列内部，故按字节切行安全；跨两次 feed 的 CRLF 用 `pendingCR` 识别为**一个**分隔符；待定缓冲达 `maxPendingBytes`（默认 4096）时无分隔符强制发射，`justForced` 抑制「强制发射点紧跟的分隔符」产生的幻影空行。
-- **解码**：行字节由 `utils/lineText.ts` 的共享 TextDecoder 缓存按端口当前编码解码（`ignoreBOM:false`，行首 BOM 是编码标记、被剥离，不进入行文本/搜索/复制）；字节级切行保证同一编码内多字节字符不跨行，故无需 `{stream:true}`。**行不再携带解码后的 `content`**——渲染/搜索/过滤按需惰性解码，行只带 `rawData`。
-- **rAF 批写**：全管线只有一个批写 tick 句柄；tick 内对每个有排队的端口各做一次 `appendTerminalLines`。每端口每帧最多写 `maxLinesPerTick`（默认 2000）行，超出顺延下一帧；`flushNow(portId)` 同步排空（单次同样最多 `maxLinesPerTick` 行，其余交回 tick 续写，避免一次 append 数千行阻塞主线程）。
+- **解码**：行字节由 `utils/lineText.ts` 的共享 TextDecoder 缓存按端口当前编码解码（`ignoreBOM:false`，行首 BOM 剥离）；字节级切行保证同一编码内多字节字符不跨行。通常 RX 行只保存 `rawData` 并在渲染/搜索时惰性解码；编码切换前的待写行和尾行会冻结旧 label 下的 `content`，协议帧也携带已解码 `content`，避免跨编码边界误解码。
+- **rAF 批写**：全管线只有一个批写 tick 句柄；tick 内对每个有排队的端口各做一次 `appendTerminalLines`，每端口每帧最多写 `maxLinesPerTick`（默认 2000）行。`flushNow(portId)` 仍只写一批；发送 TX 回显、弹窗快照以及断线/编码切换边界用 `flushBeforeSend(portId)` 完整排空已有队列（按 `maxLinesPerTick` 分批写），保证 RX 不丢失、不越过 TX 或快照边界。
 - **静默 flush**：feed 后组装器仍有未终结尾部时（重新）武装 250ms 定时器，超时取尾部成行并入队，行时间戳沿用该端口**最后一次事件时间**（从未 feed 过才退回 `Date.now()`）。
 - **队列上限**：`maxQueuedLines`（默认 10000）超限丢弃**最旧**的行——排空跟不上入队时（隐藏窗口 rAF 停摆 / 主线程忙）最旧的行最无价值。
 - **visibility-aware 排空（issue #6-10）**：默认调度器在页面可见且 rAF 可用时走 rAF，否则（页面隐藏 / 无 rAF）走 `setTimeout(cb, 16)` 兜底。构造函数注册 `visibilitychange`：变 hidden → 取消未触发的 tick 并按当前可见性重排（自然落到 setTimeout）；变 visible → 同样重排回 rAF（更低延迟）。`dispose()` 移除该监听。
-- **断线 / 编码切换**：`disconnect(portId)` 冲刷尾部后丢弃该端口全部状态（组装器/定时器/队列）；`flushAndReset(portId)` 在编码切换前按**当前**编码冲刷尾部再重置组装器。
-- **协议帧 / 日志回放**：已构造好的行（协议模板帧段、回放）经 `pipeline.enqueueLines` 直接入队，与 `feedBytes` 产出的行共享同一队列，天然保流顺序；帧文本用 `pipeline.decodeText`（帧自成单元、不跨行，非流式即可）。
-- **行级触发器钩子**：`setOnLineAssembled` 由 `useSerialReceive` 注入，每条完整行入队前触发（见「触发引擎」）。
+- **断线 / 编码切换**：`disconnect(portId)` 先冲刷尾部、写完全部队列，再删除该端口状态；`flushAndReset(portId)` 在编码切换前冻结队列中 RX 行的旧编码文本、完整排空后重置组装器，旧编码字节不会按新 label 显示。尾部与已解析协议帧也经统一的 RX 行观察入口通知触发器/插件，不遗漏无换行尾行。
+- **协议帧 / 日志回放**：协议解析帧走 `pipeline.enqueueFrame`，与普通 RX 行共享队列和观察者；日志回放等已构造行仍经 `enqueueLines` 入队（不冒充新 RX 触发）。模板切换/编辑及工作模式切换会重置解析器，旧帧前缀不与新模板的字节拼接。
+- **行级触发器钩子**：`setOnLineAssembled` 由 `useSerialReceive` 注入；完整 RX 行（含静默尾行、协议帧）先入队再通知观察者，自动回复调用 `sendToPort` 时先排空此前 RX，再追加 TX 回显。
 - **流量统计**：RX 字节在 `useSerialReceive` 的事件处理器顶部经 `trafficStats.addRx` 计入，**1s 聚合**后统一写 store（`utils/trafficStats.ts`，字段仍是 `rxTotal`/`txTotal`）——不再每事件 `setTrafficStats`，消除高频 RX 下的 Zustand 重渲染。
 - **不得**在 hook/弹窗 cleanup 里 `dispose()` 单例（单例与应用同寿命）；`feedBytes` 不加 tab 存在性门控（弹窗 store 从不填充 tabs，门控会丢光弹窗实时流；对已 release 的 manager 喂数据本就是静默 no-op）。
-- `sendToPort` 在 TX 回显前 `flushNow` 排空队列保收发时序。
+- `sendToPort` 在 TX 回显前用 `flushBeforeSend` 排空已有 RX 队列；`flushNow` 的每帧限量语义不承担时序边界。
 
 ## TX 发送
 
@@ -44,8 +44,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
   → 守卫：isSendablePort（utils/sendGuard.ts）——端口缺失/断开/连接中/错误时
         非静默 → toast sendSection.portClosedWarning + 返回 0；silent → 静默返回 0
   → TTY 分支（port.mode === 'tty'）：跳过 TX 回显与 flushNow
-  → 非 TTY：getRxPipeline().flushNow(portId)（排空 RX 队列，恢复「发送前 RX 先于 TX、
-        TX 先于其响应」时序）
+  → 非 TTY：getRxPipeline().flushBeforeSend(portId)（完整排空先到 RX，恢复「发送前 RX 先于 TX、TX 先于其响应」时序）
         → TX 行在调用后端**之前**同步追加（先算 displayText/txRawData 再 appendTerminalLine）
   → serialService.sendSerialData（invoke send_serial_data）
   → 成功后才记流量统计（trafficStats.addTx）/ 发送历史
@@ -93,9 +92,9 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 文件发送
 
-- `send_file`（`commands/serial.rs`：async + `spawn_blocking`，`tokio::fs::read` 后按 `chunk_size` 分块写）；`delay_ms==0` 时 `tokio::task::yield_now().await` 让出（曾饿死其它异步任务）。
-- **可取消**：per-port 取消令牌（`AppState.file_send_cancel`）+ `cancel_file_send` 命令；循环每块前检查令牌。
-- 循环后**无条件**清理令牌并发 `serial:file_progress{done:true}`（正常/取消/写错/空文件四路径都触发）——发送区文件按钮在传输中兼作**取消**按钮。
+- `send_file`（`commands/serial.rs`：async，`tokio::fs::read` 后按 `chunk_size` 分块写；真实串口沿用总写期限并累计已确认写出的部分字节）；`delay_ms==0` 时 `tokio::task::yield_now().await` 让出。
+- **可取消 / 单飞**：每端口同一时刻仅允许一次 `send_file`；已在发送时拒绝另一份文件，取消令牌不会被覆盖。取消命令置位该端口令牌，发送循环下一块前退出。
+- **统一收尾**：注册令牌后，无论正常、取消、读文件失败、串口写错或空文件，都清理本次令牌并发 `serial:file_progress{done:true}`；前端进度条不会因读取阶段提前失败卡住。
 - **前端 `useFileSend`（`components/OperationPanel/hooks/useFileSend.ts`）收口三个不变量**：
   1. **守卫在弹文件框之前**：`startFileSend` 先查 `isSendablePort`，不可发送直接 toast `sendSection.portClosedWarning` 返回——不该让用户先挑完文件再被告知端口没连（旧实现绕过守卫，未连接端口也能选文件、只在后端报错）。
   2. **按增量计入 TX 流量**：进度事件里 `sent_bytes` 是本次运行累计值，与 `countedBytesRef` 比出差量，正增量才 `trafficStats.addTx`；`done` 时归零，下一次运行重新计数（旧实现文件发几 MB 而 TX 计数器纹丝不动）。

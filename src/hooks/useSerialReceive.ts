@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
+import type { ProtocolTemplate } from '../types';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { ttyService } from '../utils/ttyService';
 import { trafficStats } from '../utils/trafficStats';
@@ -109,12 +110,41 @@ export function openTabForConnectedPort(portId: string): void {
  * 必须在应用根组件挂载一次（事件监听全局唯一）。
  */
 export function useSerialReceive() {
-  const reassemblersRef = useRef<Map<string, ProtocolFrameReassembler>>(new Map());
 
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
     const pipeline = getRxPipeline();
+    // Only the current binding per port is retained. Changing a template (even
+    // A → B → A), editing it or disabling it must never revive historical bytes.
+    const reassemblers = new Map<string, {
+      template: ProtocolTemplate;
+      parser: ProtocolFrameReassembler;
+      lastEventTs: number;
+    }>();
+    const retire = (portId: string, keepOutput: boolean): void => {
+      const previous = reassemblers.get(portId);
+      if (!previous) return;
+      reassemblers.delete(portId);
+      const pending = previous.parser.drain();
+      if (keepOutput && pending.length > 0) pipeline.feedBytes(portId, pending, previous.lastEventTs);
+      if (keepOutput) pipeline.flushAndReset(portId);
+    };
+    const bindingFor = (portId: string): ProtocolTemplate | undefined => {
+      const port = useAppStore.getState().ports.find(p => p.id === portId);
+      if (!port || port.mode === 'tty' || !port.protocolTemplateId) return undefined;
+      return useRuleStore.getState().protocolTemplates.find(
+        t => t.id === port.protocolTemplateId && t.isEnabled,
+      );
+    };
+    const syncBindings = (): void => {
+      for (const [portId, previous] of reassemblers) {
+        const tabOpen = useAppStore.getState().tabs.some(t => t.id === portId);
+        if (!tabOpen || previous.template !== bindingFor(portId)) retire(portId, tabOpen);
+      }
+    };
+    const unsubscribeApp = useAppStore.subscribe(syncBindings);
+    const unsubscribeRules = useRuleStore.subscribe(syncBindings);
 
     // P1-1：行级触发器——每条完整行组装完成时评估触发规则（行边界而非读事件块）。
     pipeline.setOnLineAssembled((portId, line) => {
@@ -140,52 +170,45 @@ export function useSerialReceive() {
         // TTY 模式（issue #11）：字节直喂 ttyService（xterm 渲染）。
         // 跳过触发引擎 / 协议解析 / RxPipeline 行组装——终端字节流没有「行」语义，
         // 由 xterm.js 完整终端模拟（ANSI 颜色、光标寻址、备用屏幕、CR 覆写）接管。
-        if (useAppStore.getState().ports.find(p => p.id === portId)?.mode === 'tty') {
+        const port = useAppStore.getState().ports.find(p => p.id === portId);
+        if (port?.mode === 'tty') {
           ttyService.feed(portId, event.data);
           return;
         }
 
-        // Protocol-template path: port has a protocol template bound
-        const port = useAppStore.getState().ports.find(p => p.id === portId);
-        const templateId = port?.protocolTemplateId;
-        if (templateId) {
-          const template = useRuleStore.getState().protocolTemplates.find(t => t.id === templateId && t.isEnabled);
-          if (template) {
-            // Key by port + template so switching the port's protocol
-            // template naturally creates a fresh reassembler (the stale one,
-            // with its old header/checksum framing, is left to GC).
-            const reassemblerKey = `${portId}:${templateId}`;
-            let reassembler = reassemblersRef.current.get(reassemblerKey);
-            if (!reassembler) {
-              reassembler = new ProtocolFrameReassembler(template);
-              reassemblersRef.current.set(reassemblerKey, reassembler);
-            }
-            // Ordered segments: raw bytes before frames maintain stream order
-            const segments = reassembler.feed(event.data);
-            for (const seg of segments) {
-              if (seg.kind === 'frame') {
-                // Frames are self-contained — a fresh per-frame decode is
-                // correct here (no char can straddle two frames).
-                const frameBytes = new Uint8Array(seg.frame.bytes);
-                feedPluginProtocolFrame(portId, frameBytes, event.timestamp);
-                const frameText = pipeline.decodeText(portId, frameBytes);
-                pipeline.enqueueLines(portId, [{
-                  timestamp: event.timestamp,
-                  direction: event.direction as 'RX' | 'TX',
-                  content: frameText,
-                  // issue #6-2：rawData 存 Uint8Array（省内存 + 免解码临时拷贝）
-                  rawData: frameBytes,
-                  isHex: event.is_hex,
-                  parsedFields: seg.frame.fields,
-                }]);
-              } else {
-                // Raw (non-frame) bytes — feed through the pipeline for
-                // line aggregation + batched store writes
-                pipeline.feedBytes(portId, seg.bytes, event.timestamp);
-              }
-            }
-            return;
+        // Check every event as well as store transitions, including edits and
+        // enabling/disabling a template with the same id.
+        syncBindings();
+        const template = bindingFor(portId);
+        // Closing a tab retires its parser. While the serial port remains open,
+        // feed the common path without recreating protocol state until reopened.
+        if (template && useAppStore.getState().tabs.some(t => t.id === portId)) {
+          let binding = reassemblers.get(portId);
+          if (!binding) {
+            binding = { template, parser: new ProtocolFrameReassembler(template), lastEventTs: event.timestamp };
+            reassemblers.set(portId, binding);
           }
+          binding.lastEventTs = event.timestamp;
+          const segments = binding.parser.feed(event.data);
+          for (const seg of segments) {
+            if (seg.kind === 'frame') {
+              // Raw bytes without a delimiter precede this complete frame.
+              pipeline.flushTail(portId);
+              const frameBytes = new Uint8Array(seg.frame.bytes);
+              pipeline.enqueueFrame(portId, {
+                timestamp: event.timestamp,
+                direction: event.direction as 'RX' | 'TX',
+                content: pipeline.decodeText(portId, frameBytes),
+                rawData: frameBytes,
+                isHex: event.is_hex,
+                parsedFields: seg.frame.fields,
+              });
+              feedPluginProtocolFrame(portId, frameBytes, event.timestamp);
+            } else {
+              pipeline.feedBytes(portId, seg.bytes, event.timestamp);
+            }
+          }
+          return;
         }
         // Common non-protocol path: byte-level line aggregation + batched writes
         pipeline.feedBytes(portId, event.data, event.timestamp);
@@ -213,7 +236,7 @@ export function useSerialReceive() {
         // closes are tracked in `userClosingPortIds` and suppressed.
         if (event.status === 'disconnected' && !userClosingPortIds.has(event.port_id)) {
           const prevPort = useAppStore.getState().ports.find(p => p.id === event.port_id);
-          if (prevPort && prevPort.status === 'connected') {
+          if (prevPort && prevPort.status === 'connected' && !prevPort.toolRunning) {
             // Mark lost so DisconnectBanner shows; only a real
             // connected→disconnected transition this session lands here.
             lostPortIds.add(event.port_id);
@@ -227,21 +250,12 @@ export function useSerialReceive() {
             });
           }
         }
+        // Retire while the port is still bound to its old template/mode.
+        if (event.status === 'disconnected') retire(event.port_id, true);
         useAppStore.getState().updatePort(event.port_id, {
           status: statusMap[event.status] || 'disconnected',
         });
         if (event.status === 'disconnected') {
-          // Reassemblers are keyed `${portId}:${templateId}` — drop every
-          // entry for this port regardless of suffix so a reconnect starts
-          // with clean state.
-          const prefix = `${event.port_id}:`;
-          for (const key of reassemblersRef.current.keys()) {
-            if (key.startsWith(prefix)) {
-              reassemblersRef.current.delete(key);
-            }
-          }
-          // Pipeline: flush tail + discard ALL per-port state (assembler,
-          // decoders, timers, queue) — reconnect starts from scratch.
           pipeline.disconnect(event.port_id);
           // TTY（issue #11）：flush 队列、保留 xterm 实例——视图跨重连保持挂载。
           ttyService.disconnect(event.port_id);
@@ -269,9 +283,10 @@ export function useSerialReceive() {
     return () => {
       cancelled = true;
       cleanups.forEach((fn) => fn());
+      unsubscribeApp();
+      unsubscribeRules();
+      reassemblers.clear();
     };
-    // No store selector subscriptions — pipeline is a module singleton;
-    // effect deps are empty so listeners register exactly once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Event listeners and store subscriptions are owned by this one app-root effect.
   }, []);
 }

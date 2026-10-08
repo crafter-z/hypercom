@@ -189,6 +189,14 @@ describe('ProtocolFrameReassembler', () => {
     expect(result[0]).toEqual({ kind: 'raw', bytes: [0xff, 0xfe] });
     expect(result[1]?.kind).toBe('frame');
   });
+
+  it('drains incomplete prefix exactly once before a template is retired', () => {
+    const parser = new ProtocolFrameReassembler(template());
+    parser.feed([0xaa, 0xbb, 0x06]);
+    expect(parser.drain()).toEqual([0xaa, 0xbb, 0x06]);
+    expect(parser.drain()).toEqual([]);
+    expect(extractFrames(parser.feed([0x01, 0x02, 0x0d, 0x0a]))).toHaveLength(0);
+  });
 });
 
 describe('protocol checksum functions', () => {

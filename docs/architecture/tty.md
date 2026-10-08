@@ -25,7 +25,7 @@ serial:data（TTY 端口，useSerialReceive 分流）
   → visibility-aware 批写 term.write（页面可见 rAF、隐藏 setTimeout(16ms) 兜底）
 ```
 
-API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term 跨重连）/`send`（onData→按键合批：`TX_COALESCE_MS` 静默窗口、单批上限 `TX_MAX_BATCH_BYTES`，严格保序后经 `send_serial_data`，失败仅 console.error 不弹 toast）/`resize`（仅 GIT: 走后端 pty resize）/`resync`（连接后重推已知尺寸，见下）。
+API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term 跨重连）/`send`（onData→10ms 按键合批、64KiB 单批上限；同端口上一批 IPC 完成后才发下一批，跨端口独立，失败后后续批次仍可发送）/`resize`（仅 GIT: 走后端 pty resize）/`resync`（连接后重推已知尺寸，见下）。`detach` 发送残留按键并保留当前连接写入顺序；`disconnect` 丢弃未发出的旧连接批次，不让旧队列阻塞重连。
 
 - `disconnect` **重建 decoder**（断线残留的半截多字节字符会在重连后与首字节拼错）；`detach` **保留 lastCols/lastRows**（切走标签再重开不再回退 80×24）。
 - `feed` 对「无标签页且未 attach」丢弃（挂载前首帧窗口仍入队等 attach replay）。

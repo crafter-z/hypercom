@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
 import type { PaneNode, SerialPort } from '../types';
-import { collectPortMeta, useConfigPersistence } from './useConfigPersistence';
+import { collectPortMeta, saveCurrentPortMeta, useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
 
 /** Validate a deserialized PaneNode tree structure (F.3 session restore). */
@@ -152,21 +152,17 @@ export function useAppInit() {
     };
   }, []);
 
-  // 端口元数据自动保存（备注名 / 隐藏状态，issue #4-9）：与分组同款防抖 +
-  // 整体替换落盘。订阅用「别名/隐藏 签名」比较而非数组引用，因为 3s 端口轮询
-  // 每次都会重建 ports 数组，但 mergePorts 保留了 alias/isHidden 值，签名不变
-  // 就不会误触发。
-  // 同样不回写 store.config.portMeta：全量保存（saveConfig）由 ports 现推，
-  // 见 useConfigPersistence.collectPortMeta。
+  // 端口元数据自动保存（备注名 / 隐藏状态 / 工作模式）：比较投影签名，
+  // 避免 3s 端口轮询重建数组时无意义回写。写入时以最新后端快照为底，
+  // 保留离线端口元数据，并与全量保存串行化，避免旧写入覆盖较新的清空操作。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    // 签名即投影后的 portMeta 序列化——与落盘内容同源，不会出现「签名字段与
-    // 实际落盘字段不一致」的漏保存。
+    // 签名只包含在线端口的元数据；端口移除也触发保存，但不会删除其后端条目。
     const computeSignature = () => JSON.stringify(collectPortMeta(useAppStore.getState().ports));
     let lastSignature = computeSignature();
-    // issue #6-8：防抖 cleanup 兜底 flush（同分组 effect），关窗/崩溃不丢最近 500ms 改动。
+    // Cleanup 若仍有待触发防抖，同样将最新端口状态排入写队列。
     const flushMeta = () => {
-      storageService.savePortMeta(collectPortMeta(useAppStore.getState().ports)).catch((e) => {
+      saveCurrentPortMeta().catch((e) => {
         console.warn('[useAppInit] Failed to auto-save port meta:', e);
       });
     };

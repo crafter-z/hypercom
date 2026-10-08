@@ -2,11 +2,11 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AppConfig, SendCommandSet } from '../types';
+import type { AppConfig, PortMetaEntry, SendCommandSet, SerialPort } from '../types';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
-import { useConfigPersistence } from './useConfigPersistence';
+import { useConfigPersistence, saveCurrentPortMeta } from './useConfigPersistence';
 
 vi.mock('../services/tauri', () => ({
   configService: { getConfig: vi.fn(), setConfig: vi.fn() },
@@ -26,6 +26,10 @@ const rule = (name: string): SendCommandSet => ({
   id: 'rule-1', name, isLoop: false, loopDelay: 0, repeatCount: 0, commands: [],
 });
 
+const port = (id: string, extras: Partial<SerialPort> = {}): SerialPort => ({
+  id, name: id, type: 'real', status: 'disconnected', isHidden: false, ...extras,
+});
+
 let root: Root;
 let container: HTMLDivElement;
 let save!: (patch?: Partial<AppConfig>) => Promise<boolean>;
@@ -39,10 +43,10 @@ function Probe() {
 }
 
 beforeEach(async () => {
-  backend = { ...useAppStore.getState().config, sendCommandSets: [rule('old')] };
+  backend = { ...useAppStore.getState().config, sendCommandSets: [rule('old')], portMeta: [] };
   revision = 0;
   writes = [];
-  useAppStore.setState({ config: { ...backend, revision: 0 } });
+  useAppStore.setState({ config: { ...backend, revision: 0 }, ports: [] });
   useRuleStore.getState().setSendCommandSets([rule('old')]);
   vi.mocked(configService.getConfig).mockImplementation(async () => ({ ...backend, revision }));
   vi.mocked(configService.setConfig).mockImplementation(async (candidate, restore, expected) => {
@@ -170,5 +174,74 @@ describe('whole-config saves versus independently persisted rules', () => {
     expect(await save({ theme: 'light' })).toBe(false);
     expect(configService.setConfig).toHaveBeenCalledTimes(5);
     expect(backend.theme).not.toBe('light');
+  });
+});
+
+describe('metadata persistence with absent ports', () => {
+  const offline: PortMetaEntry = { portId: 'COM9', alias: 'offline', isHidden: true, mode: 'tty' };
+  const online: PortMetaEntry = { portId: 'COM1', alias: 'online', isHidden: true, mode: 'tty' };
+
+  it('retains offline aliases, hidden and TTY when an online port changes via auto and full save', async () => {
+    backend = { ...backend, portMeta: [offline, online] };
+    useAppStore.setState({ ports: [port('COM1', { alias: 'changed', isHidden: true, mode: 'tty' })] });
+
+    await saveCurrentPortMeta();
+    expect(backend.portMeta).toEqual([offline, { ...online, alias: 'changed' }]);
+    expect(await save({ theme: 'light' })).toBe(true);
+    expect(backend.portMeta).toEqual([offline, { ...online, alias: 'changed' }]);
+  });
+
+  it('keeps startup metadata for an absent port during a full save without auto-save', async () => {
+    backend = { ...backend, portMeta: [offline, online] };
+    useAppStore.getState().setConfig({ portMeta: [offline, online] });
+    useAppStore.setState({ ports: [port('COM1', { alias: 'changed', isHidden: true, mode: 'tty' })] });
+
+    expect(await save({ theme: 'light' })).toBe(true);
+    expect(backend.portMeta).toEqual([offline, { ...online, alias: 'changed' }]);
+  });
+
+  it('honors online clearing of alias, hide and TTY during a full save without auto-save', async () => {
+    backend = { ...backend, portMeta: [offline, online] };
+    useAppStore.getState().setConfig({ portMeta: [offline, online] });
+    useAppStore.setState({ ports: [port('COM1', { mode: 'trx' })] });
+
+    expect(await save({ theme: 'light' })).toBe(true);
+    expect(backend.portMeta).toEqual([offline]);
+  });
+
+  it('removes all metadata for an explicitly reset online port without reviving old values', async () => {
+    backend = { ...backend, portMeta: [offline, online] };
+    useAppStore.setState({ ports: [port('COM1', { alias: 'online', isHidden: true, mode: 'tty' })] });
+    useAppStore.getState().updatePort('COM1', { alias: undefined, isHidden: false, mode: 'trx' });
+
+    await saveCurrentPortMeta();
+    expect(backend.portMeta).toEqual([offline]);
+    expect(await save({ theme: 'light' })).toBe(true);
+    expect(backend.portMeta).toEqual([offline]);
+  });
+
+  it('serializes pending metadata writes so an earlier snapshot cannot revive a cleared alias', async () => {
+    const firstInvoke = deferred<boolean>();
+    backend = { ...backend, portMeta: [online] };
+    useAppStore.setState({ ports: [port('COM1', { alias: 'online', isHidden: true, mode: 'tty' })] });
+    vi.mocked(configService.setConfig).mockImplementationOnce(async (candidate, _, expected) => {
+      const accepted = await firstInvoke.promise;
+      if (accepted && expected === revision) {
+        backend = candidate;
+        revision++;
+      }
+      return accepted;
+    });
+
+    const oldWrite = saveCurrentPortMeta();
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledTimes(1));
+    useAppStore.getState().updatePort('COM1', { alias: undefined, isHidden: false, mode: 'trx' });
+    const clear = saveCurrentPortMeta();
+    expect(configService.setConfig).toHaveBeenCalledTimes(1);
+    firstInvoke.resolve(true);
+    await oldWrite;
+    expect(backend.portMeta).toEqual([online]);
+    await clear;
+    expect(backend.portMeta).toEqual([]);
   });
 });

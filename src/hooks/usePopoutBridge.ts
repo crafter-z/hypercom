@@ -114,7 +114,7 @@ export function usePopoutBridge() {
         }
         // 先把主窗管线队列里的整行冲进环形缓冲：快照必须覆盖主窗到此刻为止收到的
         // 全部事件，弹窗才能用「时间戳晚于快照末行」判定哪些实时事件还没进快照。
-        getRxPipeline().flushNow(payload.portId);
+        getRxPipeline().flushBeforeSend(payload.portId);
         const lines = snapshotTerminalLines(payload.portId, SNAPSHOT_LINE_CAP);
         void popoutEventService
           .emitTerminalSnapshot({ portId: payload.portId, terminal: { ...terminal, lines } })

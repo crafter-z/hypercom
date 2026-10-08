@@ -258,6 +258,118 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     expect(vi.mocked(serialService.sendSerialData).mock.calls[1][0].data).toBe('cd');
   });
 
+  it('waits for the previous IPC before sending another batch, without blocking other ports', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>((resolve) => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ portId, data }) =>
+      portId === 'COM1' && data === 'first' ? first : Promise.resolve(data.length));
+
+    ttyService.send('COM1', 'first');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['first']);
+
+    ttyService.send('COM1', 'second');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    ttyService.send('COM2', 'other');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) =>
+      [args.portId, args.data])).toEqual([['COM1', 'first'], ['COM2', 'other']]);
+
+    finishFirst(5);
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) =>
+      [args.portId, args.data])).toEqual([
+      ['COM1', 'first'], ['COM2', 'other'], ['COM1', 'second'],
+    ]);
+    trafficStats.flushNow();
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(11);
+    expect(useSystemStore.getState().trafficStats.COM2?.txTotal).toBe(5);
+    expect(ttyService.get('COM1')?.txPending).toBeNull();
+  });
+
+  it('continues ordered batches after a failed IPC without unhandled rejections', async () => {
+    let failFirst!: (reason: Error) => void;
+    const first = new Promise<number>((_, reject) => { failFirst = reject; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'first' ? first : Promise.resolve(data.length));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    ttyService.send('COM1', 'first');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    ttyService.send('COM1', 'second');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    failFirst(new Error('port closed'));
+    await drainMicrotasks();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
+      .toEqual(['first', 'second']);
+    trafficStats.flushNow();
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(6);
+    errorSpy.mockRestore();
+  });
+
+  it('sends detach tail only after an in-flight batch settles', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>((resolve) => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'first' ? first : Promise.resolve(data.length));
+    ttyService.send('COM1', 'first');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    ttyService.send('COM1', 'tail');
+    ttyService.detach('COM1');
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    expect(ttyService.get('COM1')?.txBuffer).toBe('');
+    finishFirst(5);
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
+      .toEqual(['first', 'tail']);
+  });
+
+  it('keeps detached batches ordered but lets a reconnect bypass old pending IPC', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>((resolve) => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'first' ? first : Promise.resolve(data.length));
+    ttyService.send('COM1', 'first');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    ttyService.send('COM1', 'detached');
+    ttyService.detach('COM1');
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    ttyService.send('COM1', 'queued');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+
+    ttyService.disconnect('COM1');
+    ttyService.send('COM1', 'fresh');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
+      .toEqual(['first', 'fresh']);
+    finishFirst(5);
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
+      .toEqual(['first', 'fresh']);
+    expect(ttyService.get('COM1')?.txPending).toBeNull();
+  });
+
+  it('drains an immediate 64KiB batch behind an unfinished IPC without waiting another 10ms', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>((resolve) => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'first' ? first : Promise.resolve(data.length));
+    ttyService.send('COM1', 'first');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    const big = 'x'.repeat(TX_MAX_BATCH_BYTES);
+    const sent = ttyService.send('COM1', big);
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    expect(ttyService.get('COM1')?.txTimerId).toBeNull();
+    finishFirst(5);
+    await sent;
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
+      .toEqual(['first', big]);
+  });
+
   it('flushes immediately when the batch exceeds the per-batch cap', async () => {
     vi.mocked(serialService.sendSerialData).mockResolvedValue(TX_MAX_BATCH_BYTES);
     // 单次大粘贴超上限：立即发送，不滞留（无需等静默窗口）

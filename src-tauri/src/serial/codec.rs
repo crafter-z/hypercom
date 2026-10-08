@@ -137,7 +137,7 @@ const SINGLE_WRITE_WARN: Duration = Duration::from_millis(100);
 /// 整批写入总耗时慢阈值：正常批次远低于此值，超过即 `log::warn!`。
 const TOTAL_WRITE_WARN: Duration = Duration::from_millis(500);
 
-/// 带总写入期限的 `write_all`。
+/// 带总写入期限的 `write_all`，并在失败时通过 `written` 保留已确认写入字节数。
 ///
 /// 替代 `std::io::Write::write_all`：
 /// - **不调用 `flush()`**——Windows 上 `flush()` = `FlushFileBuffers`，无超时、
@@ -155,62 +155,47 @@ const TOTAL_WRITE_WARN: Duration = Duration::from_millis(500);
 ///
 /// 接受 `&mut dyn std::io::Write`（`serialport::SerialPort: io::Read + io::Write`），
 /// 测试可用纯 std mock writer，不触碰 serialport FFI。
+pub fn write_with_deadline_progress(
+    port_id: &str,
+    port: &mut dyn std::io::Write,
+    bytes: &[u8],
+    deadline: Duration,
+    written: &mut usize,
+) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+    while *written < bytes.len() {
+        let write_start = std::time::Instant::now();
+        let before = *written;
+        match port.write(&bytes[*written..]) {
+            Ok(0) => return Err(anyhow::anyhow!("Serial write returned 0 bytes (flow control stalled?)")),
+            Ok(n) => *written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {},
+            Err(e) => return Err(anyhow::anyhow!("Serial write error: {e}")),
+        }
+        let single_elapsed = write_start.elapsed();
+        if single_elapsed > SINGLE_WRITE_WARN {
+            log::warn!("Slow serial write to {}: {} bytes written in {}ms (batch {}/{} bytes)", port_id, *written - before, single_elapsed.as_millis(), *written, bytes.len());
+        }
+        if *written < bytes.len() && start.elapsed() >= deadline {
+            return Err(anyhow::anyhow!("Serial write timed out after {}ms ({} of {} bytes written)", deadline.as_millis(), *written, bytes.len()));
+        }
+    }
+    let total_elapsed = start.elapsed();
+    if total_elapsed > TOTAL_WRITE_WARN {
+        log::warn!("Slow serial batch write to {}: {} bytes in {}ms", port_id, bytes.len(), total_elapsed.as_millis());
+    }
+    Ok(())
+}
+
+/// 带总写入期限的 `write_all`，失败时保留原有错误语义。
 pub fn write_all_with_deadline(
     port_id: &str,
     port: &mut dyn std::io::Write,
     bytes: &[u8],
     deadline: Duration,
 ) -> anyhow::Result<()> {
-    let start = std::time::Instant::now();
-    let mut written = 0usize;
-    while written < bytes.len() {
-        let write_start = std::time::Instant::now();
-        let before = written;
-        match port.write(&bytes[written..]) {
-            Ok(0) => {
-                return Err(anyhow::anyhow!(
-                    "Serial write returned 0 bytes (flow control stalled?)"
-                ));
-            }
-            Ok(n) => written += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            // 写超时（WriteTotalTimeoutConstant 到期，驱动缓冲未空）：重试，
-            // 由总期限兜底防止无限循环。
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(anyhow::anyhow!("Serial write error: {e}")),
-        }
-        // 单次 WriteFile 慢阈值打点：>100ms 视为流控/驱动异常。
-        let single_elapsed = write_start.elapsed();
-        if single_elapsed > SINGLE_WRITE_WARN {
-            log::warn!(
-                "Slow serial write to {}: {} bytes written in {}ms (batch {}/{} bytes)",
-                port_id,
-                written - before,
-                single_elapsed.as_millis(),
-                written,
-                bytes.len()
-            );
-        }
-        if written < bytes.len() && start.elapsed() >= deadline {
-            return Err(anyhow::anyhow!(
-                "Serial write timed out after {}ms ({} of {} bytes written)",
-                deadline.as_millis(),
-                written,
-                bytes.len()
-            ));
-        }
-    }
-    // 整批总耗时打点：>500ms 视为异常（正常批次微秒级）。
-    let total_elapsed = start.elapsed();
-    if total_elapsed > TOTAL_WRITE_WARN {
-        log::warn!(
-            "Slow serial batch write to {}: {} bytes in {}ms",
-            port_id,
-            bytes.len(),
-            total_elapsed.as_millis()
-        );
-    }
-    Ok(())
+    write_with_deadline_progress(port_id, port, bytes, deadline, &mut 0)
 }
 
 #[cfg(test)]
@@ -220,6 +205,7 @@ mod tests {
     // 本模块只用 std，故这些测试在所有平台都能跑。
     use super::{
         build_tx_bytes, normalize_tty_line_ending, parse_hex_string, write_all_with_deadline,
+        write_with_deadline_progress,
     };
     use std::time::Duration;
 
@@ -418,4 +404,25 @@ mod tests {
         let mut w = ZeroWriter; // 即使 writer 恒返回 0，空 payload 也不该报错
         write_all_with_deadline("test", &mut w, b"", Duration::from_secs(1)).unwrap();
     }
+    #[test]
+    fn write_progress_preserves_bytes_before_a_later_failure() {
+        struct PartialThenError(bool);
+        impl std::io::Write for PartialThenError {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    Err(std::io::Error::other("driver failed"))
+                } else {
+                    self.0 = true;
+                    Ok(bytes.len().min(2))
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+
+        let mut confirmed = 0;
+        let err = write_with_deadline_progress("COM3", &mut PartialThenError(false), b"abcdef", Duration::from_secs(1), &mut confirmed).unwrap_err();
+        assert!(err.to_string().contains("driver failed"));
+        assert_eq!(confirmed, 2);
+    }
+
 }

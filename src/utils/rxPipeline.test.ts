@@ -418,6 +418,66 @@ describe('RxPipeline — maxLinesPerTick write limit (issue #6-2)', () => {
     expect(h.pendingTick).toBeNull();
   });
 
+  it('disconnect writes every queued row before discarding state despite the per-tick cap', () => {
+    const h = makeHarness({ maxLinesPerTick: 2 });
+    h.pipeline.feedBytes('COM1', bytes('a\nb\nc\nd\ntail'), 1);
+    h.pipeline.disconnect('COM1');
+    expect(h.appended.flatMap(a => lineTexts(a.lines))).toEqual(['a', 'b', 'c', 'd', 'tail']);
+    runTick(h);
+    expect(h.appended.flatMap(a => lineTexts(a.lines))).toEqual(['a', 'b', 'c', 'd', 'tail']);
+  });
+
+  it('flushBeforeSend writes the whole backlog before the TX echo without changing flushNow limit', () => {
+    const h = makeHarness({ maxLinesPerTick: 2 });
+    h.pipeline.feedBytes('COM1', bytes('a\nb\nc\nd\n'), 1);
+    h.pipeline.flushBeforeSend('COM1');
+    expect(h.appended.map(a => lineTexts(a.lines))).toEqual([['a', 'b'], ['c', 'd']]);
+  });
+
+  it('flushAndReset writes pre-switch queued rows and freezes old-label tail', () => {
+    let label = 'gbk';
+    const h = makeHarness({ maxLinesPerTick: 2, getEncodingLabel: () => label });
+    h.pipeline.feedBytes('COM1', [0xc4, 0xe3, 10, 0xc4, 0xe3, 10, 0xc4, 0xe3], 1);
+    h.pipeline.flushAndReset('COM1');
+    label = 'utf-8';
+    h.pipeline.feedBytes('COM1', bytes('new\n'), 2);
+    runTick(h);
+    const rows = h.appended.flatMap(a => a.lines);
+    expect(rows.slice(0, 3).map(row => row.content ?? decodeLine(row, 'gbk'))).toEqual(['你', '你', '你']);
+    expect(rows[2]!.content).toBe('你');
+    expect(decodeLine(rows[3]!)).toBe('new');
+  });
+
+  it('enqueues a completed line before its trigger and notifies silence/disconnect tails once', () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ maxLinesPerTick: 2, scheduleFlush: undefined, cancelFlush: undefined, silenceFlushMs: 50 });
+    const observed: string[] = [];
+    h.pipeline.setOnLineAssembled((portId, line) => {
+      observed.push(line.text);
+      h.pipeline.flushBeforeSend(portId);
+    });
+    h.pipeline.feedBytes('COM1', bytes('one\ntwo'), 1);
+    vi.advanceTimersByTime(50);
+    h.pipeline.feedBytes('COM1', bytes('three'), 2);
+    h.pipeline.disconnect('COM1');
+    expect(observed).toEqual(['one', 'two', 'three']);
+    expect(h.appended.flatMap(a => lineTexts(a.lines))).toEqual(observed);
+  });
+
+  it('notifies once for each protocol frame and filters empty frame/raw/tail consistently', () => {
+    const h = makeHarness({ getIgnoreEmptyChars: () => true });
+    const observed: string[] = [];
+    h.pipeline.setOnLineAssembled((_, line) => observed.push(line.text));
+    const frame = (s: string): TerminalLine => ({ timestamp: 1, direction: 'RX', rawData: bytes(s), isHex: true });
+    h.pipeline.feedBytes('COM1', bytes(' \n'), 1);
+    h.pipeline.enqueueFrame('COM1', frame(' '));
+    h.pipeline.enqueueFrame('COM1', frame('frame'));
+    h.pipeline.feedBytes('COM1', bytes('  '), 2);
+    h.pipeline.disconnect('COM1');
+    expect(observed).toEqual(['frame']);
+    expect(h.appended.flatMap(a => lineTexts(a.lines))).toEqual(['frame']);
+  });
+
   it('per-port limits are independent (each port capped separately per tick)', () => {
     const h = makeHarness({ maxLinesPerTick: 2 });
     h.pipeline.feedBytes('COM1', bytes('a\nb\nc\n'), 1);

@@ -424,6 +424,13 @@ export class ProtocolFrameReassembler {
     this.buffer = [];
   }
 
+  /** Return any incomplete frame/header bytes as raw stream bytes on binding teardown. */
+  drain(): number[] {
+    const pending = this.buffer;
+    this.buffer = [];
+    return pending;
+  }
+
   /** Get the current number of buffered bytes */
   getBufferedLength(): number {
     return this.buffer.length;

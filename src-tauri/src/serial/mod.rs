@@ -16,7 +16,6 @@
  */
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -30,9 +29,9 @@ mod ports_sim;
 mod ports_tty;
 pub(crate) mod tty_sim;
 
-pub use codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
+pub use codec::{build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome, WRITE_TOTAL_DEADLINE};
 pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status, PortStatus};
-pub use ports_real::{open_blocking, reconnect_blocking};
+pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
 pub(crate) const SIM_PORT_PREFIX: &str = "SIM:";
@@ -116,6 +115,8 @@ pub(super) fn lock_error<T>(e: PoisonError<T>) -> anyhow::Error {
 pub struct SerialManager {
     /// 真实串口句柄
     ports: HashMap<String, ports_real::SerialPortHandle>,
+    /// Most recent real-port close; open waits outside this lock until OS handles are gone.
+    pending_real_closes: HashMap<String, Arc<ports_real::CloseBarrier>>,
     /// 模拟串口句柄。`pub`：`commands::simulation` 需要遍历 key 批量关闭。
     pub sim_ports: HashMap<String, ports_sim::SimPortHandle>,
     /// 模拟终端（git bash pty）句柄。`pub`：`commands::tty_sim` 需要遍历 key 批量关闭。
@@ -134,6 +135,7 @@ impl SerialManager {
     pub fn new() -> Self {
         Self {
             ports: HashMap::new(),
+            pending_real_closes: HashMap::new(),
             sim_ports: HashMap::new(),
             tty_sim_ports: HashMap::new(),
             simulate: false,
@@ -175,14 +177,23 @@ impl SerialManager {
 
     /// 关闭串口（真实/模拟/模拟终端）。
     ///
-    /// 锁内只停止读取线程并取出 JoinHandle；调用方必须在释放全局锁之后再 join
-    /// （真实串口读线程最长约 100ms 退出，模拟终端的 pty 读线程要等 ConPTY 关闭，
-    /// 持锁 join 会卡住所有其他串口命令）。
-    pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<thread::JoinHandle<()>>> {
+    /// 锁内只停止读取线程并取出关闭令牌；调用方必须在释放全局锁之后调用
+    /// `join()`，等待读线程及所有在途真实端口写句柄释放，再返回给用户。
+    /// 持锁 join 会卡住所有其他串口命令。
+    pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<PortClose>> {
         Ok(match PortKind::of(port_id) {
-            PortKind::Real => ports_real::close(self, port_id),
-            PortKind::Sim => ports_sim::close(self, port_id),
-            PortKind::Tty => ports_tty::close(self, port_id),
+            PortKind::Real => {
+                if let Some(closed) = ports_real::close(self, port_id) {
+                    let barrier = Arc::new(ports_real::CloseBarrier::new());
+                    self.pending_real_closes.insert(port_id.to_owned(), Arc::clone(&barrier));
+                    Some(closed.with_completion(barrier))
+                } else {
+                    self.pending_real_closes.get(port_id).filter(|barrier| !barrier.completed())
+                        .map(|barrier| PortClose::waiting(Arc::clone(barrier)))
+                }
+            }
+            PortKind::Sim => ports_sim::close(self, port_id).map(PortClose::thread),
+            PortKind::Tty => ports_tty::close(self, port_id).map(PortClose::thread),
         })
     }
 
@@ -219,14 +230,12 @@ impl SerialManager {
         }
     }
 
-    /// 取指定端口的**写句柄**克隆（两段式发送的第一段）。
-    ///
-    /// 必须在持有全局锁时调用；返回后调用方应**立即释放全局锁**，再只持 per-port
-    /// 写锁完成 `write_all_with_deadline`。
+    /// 在全局锁内领取写句柄租约；释放锁后仅锁 per-port 写句柄执行写入。
+    /// 关闭会在锁外等所有租约释放后才结束。
     pub fn get_write_handle(
         &self,
         port_id: &str,
-    ) -> anyhow::Result<Arc<Mutex<Box<dyn serialport::SerialPort>>>> {
+    ) -> anyhow::Result<RealWriteHandle> {
         ports_real::write_handle(self, port_id)
     }
 

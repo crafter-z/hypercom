@@ -120,14 +120,9 @@ export async function sendToPort(
       ? Uint8Array.from(parseHexBytes(data))
       : new TextEncoder().encode(data);
 
-    // Drain any pending RX lines from the pipeline queue BEFORE appending the
-    // TX echo. With RX now batched up to one animation frame, a zero-delay
-    // cyclic send would otherwise render TX1,TX2,RX1 instead of the natural
-    // TX1,RX1,TX2 order. RX that physically arrived before this send but
-    // hasn't flushed yet would render AFTER the TX line without this drain.
-    // Synchronously flushing here restores the "TX precedes its own response"
-    // invariant — the response arrives during the await below, not before.
-    getRxPipeline().flushNow(portId);
+    // Preserve RX-before-TX ordering even when more than one frame of RX is queued.
+    // flushNow has a per-tick limit and cannot establish this send boundary.
+    getRxPipeline().flushBeforeSend(portId);
 
     // Append the TX echo BEFORE the backend call. The sim port's read thread
     // emits the loopback RX during the await below; appending TX only after the

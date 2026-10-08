@@ -20,6 +20,37 @@ export function collectPortMeta(ports: SerialPort[]): PortMetaEntry[] {
     .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
 }
 
+/** An absent port cannot be edited from this window. Keep its latest persisted
+ * metadata; ports currently in the list are authoritative, including clearing
+ * alias/hidden/TTY (which removes their entry altogether). */
+export function mergePortMeta(ports: SerialPort[], persisted: PortMetaEntry[]): PortMetaEntry[] {
+  const present = new Set(ports.map((port) => port.id));
+  return [...persisted.filter((entry) => !present.has(entry.portId)), ...collectPortMeta(ports)];
+}
+
+// Serialize metadata and full-config writes from this webview. In particular, a
+// debounced older snapshot must not finish after a newer clear and restore it.
+let lastConfigWrite: Promise<void> = Promise.resolve();
+function enqueueConfigWrite<T>(work: () => Promise<T>): Promise<T> {
+  const result = lastConfigWrite.then(work);
+  lastConfigWrite = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+/** Auto-save only the metadata while preserving backend-owned config fields.
+ * The backend's revision check retries if another writer commits in flight. */
+export function saveCurrentPortMeta(): Promise<void> {
+  return enqueueConfigWrite(async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const persisted = await configService.getConfig();
+      if (persisted.revision === undefined) throw new Error('Backend config revision is missing');
+      const portMeta = mergePortMeta(useAppStore.getState().ports, persisted.portMeta);
+      if (await configService.setConfig({ ...persisted, portMeta }, false, persisted.revision)) return;
+    }
+    throw new Error('Config changed during port metadata save; please try again');
+  });
+}
+
 /** Preserve local edits on untouched entities; a newer backend CRUD change
  * to the same ID wins instead of being silently reverted by full save. */
 function reconcileEntities<T>(live: T[], initial: T[], persisted: T[], id: (item: T) => string): T[] {
@@ -70,7 +101,7 @@ export function useConfigPersistence() {
    * useRuleStore / storageService，从不回写 store.config）。直接整体替换会把用户
    * 刚保存的规则、分组、预设静默回滚成启动时的样子。
    */
-  const saveConfig = useCallback(async (patch?: Partial<AppConfig>) => {
+  const saveConfig = useCallback((patch?: Partial<AppConfig>) => enqueueConfigWrite(async () => {
     try {
       // Retry reads fresh backend state and current live stores each time.
       // Read the backend revision BEFORE any async entity load. A CRUD write
@@ -97,8 +128,7 @@ export function useConfigPersistence() {
           triggerRules: reconcileEntities(rules.triggerRules, initial.triggerRules, persisted.triggerRules, (item) => item.id),
           portToolConfigs: reconcileEntities(rules.portToolConfigs, initial.portToolConfigs, persisted.portToolConfigs, (item) => item.id),
           portGroups: state.groups,
-          portMeta: reconcileEntities(collectPortMeta(state.ports), initial.portMeta, persisted.portMeta,
-            (item) => item.portId),
+          portMeta: mergePortMeta(state.ports, persisted.portMeta),
           portPresets,
         };
         const saved = await configService.setConfig(candidate, false, revision);
@@ -110,7 +140,7 @@ export function useConfigPersistence() {
       notifyError(err);
       return false;
     }
-  }, []);
+  }), []);
 
   return { loadConfig, saveConfig };
 }

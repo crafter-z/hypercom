@@ -58,8 +58,8 @@ export interface RxPipelineOptions {
   /** 转发给组装器的强制发射阈值（字节）。默认 4096 */
   maxPendingBytes?: number;
   /** 每端口每 tick 最多写入 store 的行数（issue #6-2 写量限制）。
-   *  超出部分留在队列里，下一帧继续写——避免高频大缓冲一次性 append 阻塞
-   *  主线程（tao 事件循环错过 RedrawEventsCleared 的同类根因）。默认 2000 */
+   * 超出部分留在队列里，下一帧继续写；仅显式 TX precedence / 生命周期
+   * 排空可同步多批写入。默认 2000 */
   maxLinesPerTick?: number;
   /** 每端口队列上限（行）（issue #6-10 方案3）：入队后超过该上限丢弃**最旧**的
    *  行——隐藏窗口长时间积压时最旧的行最无价值，防无界增长。默认 10000 */
@@ -187,62 +187,29 @@ export class RxPipeline {
    */
   feedBytes(portId: string, bytes: number[] | Uint8Array, timestamp: number): void {
     if (bytes.length === 0) return;
-    // NOTE: do NOT gate on tab existence here. The popout webview's store
-    // never populates `tabs` (TerminalPopout only setConfig), so such a guard
-    // would drop ALL live RX in the popout (snapshot-only display). Feeding a
-    // port whose manager was released is already a correct silent no-op
-    // (appendTerminalLines drops without resurrecting the manager) — the
-    // state rebuild here is bounded (queue cap 10000) and harmless.
+    // Do not gate on tab existence: popouts have a separate store without tabs.
     const state = this.getPortState(portId);
     state.lastEventTs = timestamp;
     const chunks = state.assembler.feed(bytes);
-    if (chunks.length > 0) {
-      const ignoreEmptyChars = this.opts.getIgnoreEmptyChars();
-      for (const chunk of chunks) {
-        // issue #6-2 内存瘦身：chunk（number[]）转 Uint8Array 后**同一份**既用于
-        // 解码又存进 rawData——比旧的「解码临时拷贝 + number[] 存 rawData」省一份。
-        // issue #14：不再存解码后的 content 字符串（渲染/搜索/过滤按需惰性解码）。
-        const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-        const text = this.decodeUnderCurrentLabel(portId, raw);
-        // ignoreEmptyChars 语义与旧路径一致：解码后 trim 为空（纯分隔/空白）的行丢弃。
-        // 空行也跳过触发器钩子（无内容可匹配），与旧实现行为一致。
-        if (ignoreEmptyChars && !text.trim()) continue;
-        // P1-1：行级触发器钩子——在完整行入队前触发，调用方按行边界匹配
-        //（修复旧实现按读事件块匹配导致跨块模式失效 / exact 难命中的缺陷）。
-        const line: AssembledLine = { rawData: raw, text, timestamp };
-        // 主触发器（唯一，触发引擎）先于附加观察者（插件 rx.onLine）调用；
-        // 任一观察者抛错不得中断行写入（try 隔离——观察者是可选第三方代码）。
-        if (this.onLineAssembledCb) {
-          try {
-            this.onLineAssembledCb(portId, line);
-          } catch (e) {
-            console.error('[rxPipeline] onLineAssembled trigger failed:', e);
-          }
-        }
-        for (const cb of this.extraOnLineAssembledCbs) {
-          try {
-            cb(portId, line);
-          } catch (e) {
-            console.error('[rxPipeline] onLineAssembled observer failed:', e);
-          }
-        }
-        state.queue.push({
-          timestamp,
-          direction: 'RX',
-          rawData: raw,
-          isHex: false,
-        });
-      }
-      this.scheduleTick();
+    for (const chunk of chunks) {
+      const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      this.enqueueRxLine(portId, state, raw, timestamp);
     }
+    if (chunks.length > 0) this.scheduleTick();
     this.armSilenceTimer(portId, state);
     this.enforceQueueCap(state);
   }
 
-  /**
-   * 直接入队已构造好的行（协议帧、日志回放等）——绕过组装器，
-   * 与 feedBytes 产出的行共享同一队列，天然保持流顺序。
-   */
+  /** Add a protocol frame to the RX queue and notify observers exactly once.
+   * Other externally constructed lines bypass RX observers via enqueueLines. */
+  enqueueFrame(portId: string, line: TerminalLine): void {
+    const state = this.getPortState(portId);
+    this.enqueueRxLine(portId, state, line.rawData!, line.timestamp, line);
+    this.enforceQueueCap(state);
+    this.scheduleTick();
+  }
+
+  /** Enqueue externally constructed rows (e.g. replay) without RX callbacks. */
   enqueueLines(portId: string, lines: TerminalLine[]): void {
     if (lines.length === 0) return;
     const state = this.getPortState(portId);
@@ -267,11 +234,9 @@ export class RxPipeline {
   }
 
   /**
-   * 同步排空该端口队列（写入 store）。发送 TX 回显前调用以恢复收发时序。
-   *
-   * issue #6-2 写量限制：单次同步最多写 maxLinesPerTick 行，超出部分留在队列
-   * 里由 rAF 续写——高频大缓冲下 flushNow 不再一次性阻塞主线程（旧实现同步
-   * 全排空是 TX 卡顿/tao 警告的另一同源根因）。
+   * Bounded synchronous write (at most maxLinesPerTick per call). The remaining
+   * queue is written on future ticks. For a TX echo or lifecycle boundary use
+   * flushBeforeSend to guarantee all earlier RX is written first.
    */
   flushNow(portId: string): void {
     const state = this.ports.get(portId);
@@ -285,26 +250,33 @@ export class RxPipeline {
     }
   }
 
-  /**
-   * 把未终结尾部取出来成行入队（不排空）：时间戳沿用最后一次事件时间
-   * （从未 feed 过才退回 Date.now()），由调用方随后 flushNow 落盘。
-   */
+  /** Synchronously write every queued RX row before a TX echo or a lifecycle boundary.
+   * Normal flushNow and animation ticks remain bounded to maxLinesPerTick. */
+  flushBeforeSend(portId: string): void {
+    const state = this.ports.get(portId);
+    if (!state) return;
+    while (state.queue.length > 0) this.flushNow(portId);
+  }
+
+  /** Flush an unterminated tail into the queue with its last event timestamp.
+   * The caller chooses when to write it to the terminal. */
   flushTail(portId: string): void {
     const state = this.ports.get(portId);
     if (!state) return;
     const tail = state.assembler.takeTail();
     if (tail.length === 0) return;
     const raw = new Uint8Array(tail);
-    // issue #14 惰性解码：尾行按当前编码预解码并存入 content，避免随后编码切换
-    // 导致该行按新编码重新解码产生乱码（与 flushAndReset「按当前编码冲刷落盘」语义一致）。
-    const text = this.decodeUnderCurrentLabel(portId, raw);
-    state.queue.push({
-      timestamp: state.lastEventTs ?? Date.now(),
-      direction: 'RX',
-      rawData: raw,
-      content: text,
-      isHex: false,
+    const timestamp = state.lastEventTs ?? Date.now();
+    // Freeze the current encoding for this seam even when the display label changes.
+    this.enqueueRxLine(portId, state, raw, timestamp, {
+      timestamp, direction: 'RX', rawData: raw,
+      content: this.decodeUnderCurrentLabel(portId, raw), isHex: false,
     });
+    this.enforceQueueCap(state);
+    if (state.silenceTimer !== null) {
+      clearTimeout(state.silenceTimer);
+      state.silenceTimer = null;
+    }
   }
 
   /**
@@ -316,7 +288,14 @@ export class RxPipeline {
     const state = this.ports.get(portId);
     if (!state) return;
     this.flushTail(portId);
-    this.flushNow(portId);
+    // Queued rows are normally decoded lazily, but the encoding switch is an
+    // explicit boundary: rows written before the switch retain their old label.
+    for (const line of state.queue) {
+      if (line.direction === 'RX' && line.content === undefined && line.rawData) {
+        line.content = this.decodeUnderCurrentLabel(portId, line.rawData);
+      }
+    }
+    this.flushBeforeSend(portId);
     if (state.silenceTimer !== null) {
       clearTimeout(state.silenceTimer);
       state.silenceTimer = null;
@@ -332,7 +311,7 @@ export class RxPipeline {
     const state = this.ports.get(portId);
     if (!state) return;
     this.flushTail(portId);
-    this.flushNow(portId);
+    this.flushBeforeSend(portId);
     if (state.silenceTimer !== null) clearTimeout(state.silenceTimer);
     this.ports.delete(portId);
   }
@@ -382,6 +361,30 @@ export class RxPipeline {
     return state;
   }
 
+  /** Enqueue before notifying observers: auto-response TX echoes must follow the RX row. */
+  private enqueueRxLine(
+    portId: string, state: PortRxState, raw: Uint8Array, timestamp: number,
+    assembled?: TerminalLine,
+  ): void {
+    const text = assembled?.content ?? this.decodeUnderCurrentLabel(portId, raw);
+    if (this.opts.getIgnoreEmptyChars() && !text.trim()) return;
+    state.queue.push(assembled ?? { timestamp, direction: 'RX', rawData: raw, isHex: false });
+    const line: AssembledLine = { rawData: raw, text, timestamp };
+    if (this.onLineAssembledCb) {
+      try {
+        this.onLineAssembledCb(portId, line);
+      } catch (e) {
+        console.error('[rxPipeline] onLineAssembled trigger failed:', e);
+      }
+    }
+    for (const cb of this.extraOnLineAssembledCbs) {
+      try {
+        cb(portId, line);
+      } catch (e) {
+        console.error('[rxPipeline] onLineAssembled observer failed:', e);
+      }
+    }
+  }
   /** 按端口当前 label 解码一段字节（解码器由 `lineText.ts` 统一缓存）。 */
   private decodeUnderCurrentLabel(
     portId: string,

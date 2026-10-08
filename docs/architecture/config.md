@@ -17,7 +17,7 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 | PortPresetEntry | `port_presets` | `portPresets` | 串口参数预设 |
 | PortToolConfigEntry | `port_tool_configs` | `portToolConfigs` | 外部工具配置 |
 | PortGroupEntry | `port_groups` | `portGroups` | 串口分组（issue #2-3，整体替换） |
-| PortMetaEntry | `port_meta` | `portMeta` | 端口元数据：备注名/隐藏/mode（issue #4-9，整体替换） |
+| PortMetaEntry | `port_meta` | `portMeta` | 端口元数据：备注名/隐藏/mode；当前枚举端口的编辑覆盖其条目，未插入设备的条目保留 |
 | PluginConfigEntry | `plugin_configs` | `pluginConfigs` | 插件启用态 / 授权（插件私有 KV 独立存放） |
 
 46 个标量（`updateCheckMode`、`diagLogEnabled`、`language`、`theme`、`uiScalePercent`、`backgroundImage*`、`quickSendInlineCount` 等）与 `entities` 同层，随 `...config` 展开流过全量保存。两层各自只有一种语义：实体只有 CRUD（`commands/storage.rs`），标量只有默认值 + 收敛（`impl Default` / `validate_and_clamp`）。
@@ -81,25 +81,10 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 
 后端 `set_config` 是**整体替换**，所以调用方不能把 `useAppStore.config` 直接交出去：那是启动时读入的快照，而各实体数组有各自的权威来源（规则页单条保存只写 `useRuleStore` / `storageService`，从不回写 `store.config`）。直接整体替换会把用户刚保存的规则、分组、预设静默回滚成启动时的样子（**曾清空用户编辑**）。
 
-现方案：`useConfigPersistence.saveConfig(patch?)` **内部始终构造安全快照**——调用方不必也无法自己合并实体数组，`patch` 只用来覆盖本次调用关心的普通字段（如更新模式）：
-
-```ts
-await configService.setConfig({
-  ...state.config,                          // 标量：store 草稿
-  ...patch,                                 // 本次调用关心的普通字段
-  sendCommandSets:   rules.sendCommandSets, // ↓ useRuleStore 的 5 组活实体
-  highlightRuleSets: rules.highlightRuleSets,
-  protocolTemplates: rules.protocolTemplates,
-  triggerRules:      rules.triggerRules,
-  portToolConfigs:   rules.portToolConfigs,
-  portGroups: state.groups,                 // 分组实时态
-  portMeta:   collectPortMeta(state.ports), // 从端口列表现推，不回写 store.config
-  portPresets,                              // 无活镜像：保存前从后端读回
-});
-```
+现方案：`useConfigPersistence.saveConfig(patch?)` **内部始终构造安全快照**，调用方不自行合并实体数组；`patch` 仅覆盖本次关心的普通字段。每轮先读取后端配置的 `revision` 与预设，再从实时 store 取标量草稿、5 类规则实体和分组；规则按 id 对比启动快照与后端状态，保留尚未保存的本地编辑，同时让更新较晚的独立 CRUD 写入获胜。`portMeta` 由当前端口实时态与后端已有的离线端口条目合并；最后以 `setConfig(candidate, false, revision)` 做 CAS，冲突则重新读取并组装。
 
 - `portPresets` **没有** store 镜像（唯一写路径是 `storageService.savePortPresets`），保存前 `loadPortPresets()` 读回；读不到就不写——宁可不保存，也不能用陈旧快照覆盖磁盘。
-- `collectPortMeta(ports)` 从端口列表现推 `portMeta`（备注名 / 隐藏 / `tty` 模式只存在于端口列表，枚举产生的端口项不携带它们）；`saveConfig` 与 `useAppInit` 的自动保存**共用**它，避免两处各写一遍过滤条件后悄悄漂移（漏一项就会被全量保存静默抹掉）。
+- `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。
 - 已接线处：`ConfigModal.handleSave`、`DiagnosticLogDialog` 的诊断开关（改 store 后 `saveConfig()`）。**新增全量保存点照抄此模式**——调 `saveConfig`，不要自己拼实体数组。
 - 实体页的**单条**保存（✓）不走全量保存：`src/components/ConfigModal/hooks/useEntityPage.ts` 是 5 个实体页共用的「load / dirty-track / save / delete」契约。要点：挂载即全量加载并替换 store（**除非**加载期间用户已改动；后端返回空列表也替换——跳过它正是「用户删过的实体在下次打开弹窗时复活并再次写回 config.json」的成因）；删除 = store 掉 + 后端删，失败必 toast；`savedSnapshotRef` 记录最后已知持久化态，只在写成功后推进，写失败保持 dirty 并由下次编辑重试。
 
@@ -117,7 +102,7 @@ await configService.setConfig({
     → AppState::apply_runtime_config(cfg)（日志设置 + 诊断开关 → 后端运行期镜像）
   → 保存成功后当前 WebView `applyUiScale(current.uiScalePercent)`，并广播 `ui-scale:changed` 给已打开的弹出窗；失败则不应用未落盘值
 
-分组 / 端口元数据变更 → useAppInit 500ms 防抖 → save_port_groups / save_port_meta（整组替换）
+分组变更 → `useAppInit` 500ms 防抖 → `save_port_groups`；端口元数据变更 → 500ms 防抖 → `saveCurrentPortMeta`（取最新配置 + 保留离线端口元数据 + revision CAS 保存）。
 ```
 
 ## 规则实体激活语义
