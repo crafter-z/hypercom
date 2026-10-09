@@ -1697,7 +1697,10 @@ dependencies = [
  "dirs 5.0.1",
  "encoding_rs",
  "futures-util",
+ "http",
+ "hyper-util",
  "log",
+ "parking_lot",
  "portable-pty",
  "regex",
  "reqwest",
@@ -1716,6 +1719,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zip 2.4.2",
 ]
 

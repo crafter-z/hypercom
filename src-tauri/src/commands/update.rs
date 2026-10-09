@@ -18,23 +18,19 @@
  *   `is_debug_build()` 守卫短路为「无更新 / 已完成」（唯一门控点，见
  *   `commands::system_cmds`）；前端另有 `import.meta.env.DEV` 短路。
  *   纯解析函数不再做 cfg 条件编译——它们在两种构建下都存在，测试直接覆盖。
- * - 下载进度经 `update:progress` 事件推给前端（Emitter::emit）。
- * - 复审加固：未知 channel 报错（不回退 stable）；GitHub API 请求 15s 超时；
+ * - 下载进度为累计字节；download 返回前验签，成功后才发 install 阶段。
+ * - UpdateNetwork 统一系统/环境代理与连接、检查、空闲读取和下载总期限；
+ *   未知 channel 报错（不回退 stable）；
  *   `download_and_install_update` 接受 `expected_version`——安装前重检查（设计
  *   使然，check/install 两次网络往返）若版本已变（弹窗展示后发布了新版）则报错
  *   拒绝安装，防「展示的 X、装的是 Y」TOCTOU。
  */
-use std::time::Duration;
-
+use crate::update_network::{UpdateNetwork, CHECK_TIMEOUT, DOWNLOAD_TIMEOUT};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
 use super::{system_cmds::is_debug_build, CommandError};
-
-/// GitHub API 请求超时（issue #12 复审：`reqwest::Client::new()` 无超时，
-/// API 挂起会让手动检查按钮永久停在「正在检查...」）。
-const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// GitHub 仓库（owner/repo）
 const GITHUB_OWNER: &str = "crafter-z";
@@ -49,12 +45,19 @@ fn stable_endpoint() -> Result<url::Url, CommandError> {
 }
 
 /// preview 通道 endpoint：GitHub API 解析最新 preview tag → 该 tag 的 latest.json
-async fn preview_endpoint(client: &reqwest::Client) -> Result<url::Url, CommandError> {
-    let api_url = format!(
+async fn preview_endpoint(network: &UpdateNetwork) -> Result<url::Url, CommandError> {
+    let api_url = url::Url::parse(&format!(
         "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=100"
-    );
-    let resp = client
-        .get(&api_url)
+    ))
+    .map_err(|e| CommandError::Other(format!("invalid GitHub API URL: {e}")))?;
+    network
+        .prepare(&api_url)
+        .await
+        .map_err(CommandError::Other)?;
+    let resp = network
+        .check_client()
+        .map_err(CommandError::Other)?
+        .get(api_url)
         .header(reqwest::header::USER_AGENT, "hypercom-updater")
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
@@ -71,9 +74,8 @@ async fn preview_endpoint(client: &reqwest::Client) -> Result<url::Url, CommandE
         .json()
         .await
         .map_err(|e| CommandError::Other(format!("GitHub API parse failed: {e}")))?;
-    let tag = find_latest_preview_tag(&releases).ok_or_else(|| {
-        CommandError::Other("no preview release found on GitHub".to_string())
-    })?;
+    let tag = find_latest_preview_tag(&releases)
+        .ok_or_else(|| CommandError::Other("no preview release found on GitHub".to_string()))?;
     url::Url::parse(&format!(
         "https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{tag}/latest.json"
     ))
@@ -92,7 +94,10 @@ pub fn find_latest_preview_tag(releases: &serde_json::Value) -> Option<String> {
     arr.iter()
         .filter(|r| {
             let draft = r.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
-            let pre = r.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false);
+            let pre = r
+                .get("prerelease")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             !draft && pre
         })
         .filter_map(|r| r.get("tag_name").and_then(|v| v.as_str()))
@@ -207,11 +212,18 @@ pub struct UpdateProgressPayload {
     pub phase: String,
 }
 
-fn build_updater(
+async fn build_updater(
     app: &AppHandle,
     endpoint: url::Url,
+    network: UpdateNetwork,
 ) -> Result<tauri_plugin_updater::Updater, CommandError> {
+    network
+        .prepare(&endpoint)
+        .await
+        .map_err(CommandError::Other)?;
     app.updater_builder()
+        .timeout(CHECK_TIMEOUT)
+        .configure_client(move |client| network.configure(client))
         .endpoints(vec![endpoint])
         .map_err(|e| CommandError::Other(format!("updater builder: {e}")))?
         .build()
@@ -232,12 +244,12 @@ fn to_payload(update: &tauri_plugin_updater::Update, channel: &str) -> UpdatePay
 /// 按通道解析 endpoint（issue #12 复审：未知通道报错，不静默回退 stable——
 /// 通道名传错时静默查错通道比报错更糟）。
 async fn endpoint_for_channel(
-    client: &reqwest::Client,
+    network: &UpdateNetwork,
     channel: &str,
 ) -> Result<url::Url, CommandError> {
     match channel {
         "stable" => stable_endpoint(),
-        "preview" => preview_endpoint(client).await,
+        "preview" => preview_endpoint(network).await,
         other => Err(CommandError::Other(format!(
             "unknown update channel: {other}"
         ))),
@@ -248,21 +260,19 @@ async fn endpoint_for_channel(
 async fn updater_for_channel(
     app: &AppHandle,
     channel: &str,
+    network: &UpdateNetwork,
 ) -> Result<tauri_plugin_updater::Updater, CommandError> {
-    let client = reqwest::Client::builder()
-        .timeout(GITHUB_API_TIMEOUT)
-        .build()
-        .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
-    let endpoint = endpoint_for_channel(&client, channel).await?;
-    build_updater(app, endpoint)
+    let endpoint = endpoint_for_channel(network, channel).await?;
+    build_updater(app, endpoint, network.clone()).await
 }
 
 /// 单 endpoint 检查（构造 updater + check 一次）
 async fn check_endpoint(
     app: &AppHandle,
     endpoint: url::Url,
+    network: &UpdateNetwork,
 ) -> Result<Option<tauri_plugin_updater::Update>, CommandError> {
-    let updater = build_updater(app, endpoint)?;
+    let updater = build_updater(app, endpoint, network.clone()).await?;
     updater
         .check()
         .await
@@ -286,23 +296,20 @@ pub async fn check_for_update(
         return Ok(None);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(GITHUB_API_TIMEOUT)
-        .build()
-        .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
+    let network = UpdateNetwork::new().await.map_err(CommandError::Other)?;
 
     match channel.as_str() {
         "stable" => {
-            let update = check_endpoint(&app, stable_endpoint()?).await?;
+            let update = check_endpoint(&app, stable_endpoint()?, &network).await?;
             Ok(update.map(|u| to_payload(&u, "stable")))
         }
         "preview" => {
             let preview_result = async {
-                let endpoint = preview_endpoint(&client).await?;
-                check_endpoint(&app, endpoint).await
+                let endpoint = preview_endpoint(&network).await?;
+                check_endpoint(&app, endpoint, &network).await
             }
             .await;
-            let stable_result = check_endpoint(&app, stable_endpoint()?).await;
+            let stable_result = check_endpoint(&app, stable_endpoint()?, &network).await;
 
             match (preview_result, stable_result) {
                 (Ok(preview), Ok(stable)) => {
@@ -365,8 +372,9 @@ pub async fn download_and_install_update(
         return Ok(());
     }
 
-    let updater = updater_for_channel(&app, &channel).await?;
-    let update = updater
+    let network = UpdateNetwork::new().await.map_err(CommandError::Other)?;
+    let updater = updater_for_channel(&app, &channel, &network).await?;
+    let mut update = updater
         .check()
         .await
         .map_err(|e| CommandError::Other(format!("update check failed: {e}")))?
@@ -381,11 +389,18 @@ pub async fn download_and_install_update(
         }
     }
 
-    let app2 = app.clone();
-    update
-        .download_and_install(
-            |downloaded, total| {
-                let _ = app2.emit(
+    network
+        .prepare(&update.download_url)
+        .await
+        .map_err(CommandError::Other)?;
+    // The plugin does not propagate builder.timeout into Update.timeout.
+    update.timeout = Some(DOWNLOAD_TIMEOUT);
+    let mut downloaded = 0usize;
+    let bytes = update
+        .download(
+            |chunk, total| {
+                downloaded += chunk;
+                let _ = app.emit(
                     "update:progress",
                     UpdateProgressPayload {
                         downloaded,
@@ -394,24 +409,28 @@ pub async fn download_and_install_update(
                     },
                 );
             },
-            || {
-                let _ = app2.emit(
-                    "update:progress",
-                    UpdateProgressPayload {
-                        downloaded: 0,
-                        total: None,
-                        phase: "install".to_string(),
-                    },
-                );
-            },
+            || {},
         )
         .await
+        .map_err(|e| CommandError::Other(format!("update download/verification failed: {e}")))?;
+    // download() verifies the signature before returning; never show install
+    // or launch an installer for bytes that have not passed verification.
+    let _ = app.emit(
+        "update:progress",
+        UpdateProgressPayload {
+            downloaded: bytes.len(),
+            total: Some(bytes.len() as u64),
+            phase: "install".to_string(),
+        },
+    );
+    update
+        .install(bytes)
         .map_err(|e| CommandError::Other(format!("update install failed: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{find_latest_preview_tag, is_preview_tag, newer_channel, version_key};
 
     #[test]
     fn parses_preview_tag_from_api_response() {
@@ -503,7 +522,10 @@ mod tests {
         // 容忍 v 前缀
         assert_eq!(version_key("v0.6.0"), version_key("0.6.0"));
         // 相等
-        assert_eq!(version_key("0.6.0-preview.2"), version_key("v0.6.0-preview.2"));
+        assert_eq!(
+            version_key("0.6.0-preview.2"),
+            version_key("v0.6.0-preview.2")
+        );
     }
 
     #[test]
@@ -524,7 +546,10 @@ mod tests {
             Some("stable")
         );
         // 单边候选 / 无候选
-        assert_eq!(newer_channel(Some("0.6.0-preview.1"), None), Some("preview"));
+        assert_eq!(
+            newer_channel(Some("0.6.0-preview.1"), None),
+            Some("preview")
+        );
         assert_eq!(newer_channel(None, Some("0.5.3")), Some("stable"));
         assert_eq!(newer_channel(None, None), None);
         // 相等（防御）→ stable 优先

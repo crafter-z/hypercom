@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "~2.10.1"
 tauri-plugin-process = "2"
 
 # 序列化
@@ -56,10 +56,11 @@ uuid = { version = "1", features = ["v4"] }
 # 背景图 data URL 编码（issue #13）
 base64 = "0.22"
 
-# 自动更新：GitHub API 解析 preview 通道（issue #12）；版本对齐 tauri-plugin-updater 自带 reqwest
-# system-proxy：让 Rust reqwest 读取操作系统系统代理（Windows 注册表 ProxyEnable/ProxyServer、
-# macOS system config），否则仅默认读 HTTP(S)_PROXY 环境变量——公司内网只配系统代理时更新检查/下载直连失败。
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy"] }
+# 更新客户端：系统代理、SOCKS 与插件共享同一 reqwest 版本。
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy", "socks"] }
+http = "1"
+hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
+parking_lot = "0.12"
 url = "2"
 tauri-plugin-clipboard-manager = "2"
 
@@ -73,6 +74,9 @@ futures-util = "0.3"
 # 但裁剪 features 会触发整棵依赖树重新求解、扰动既有 lock（曾致 capabilities
 # ACL 漂移的误诊），故不裁剪、接受多余压缩后端编译成本。
 zip = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
 
 [profile.release]
 opt-level = 3

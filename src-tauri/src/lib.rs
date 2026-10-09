@@ -9,6 +9,7 @@ mod logger;
 mod plugin;
 mod serial;
 mod system;
+mod update_network;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
