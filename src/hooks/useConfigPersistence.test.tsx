@@ -7,6 +7,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
 import { useConfigPersistence, saveCurrentPortMeta } from './useConfigPersistence';
+import { commitUpdateMode, getCommittedUpdateMode, updateTiming } from '../utils/updateService';
 
 vi.mock('../services/tauri', () => ({
   configService: { getConfig: vi.fn(), setConfig: vi.fn() },
@@ -15,6 +16,13 @@ vi.mock('../services/tauri', () => ({
 vi.mock('../stores/useToastStore', () => ({ notifyError: vi.fn() }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+const testStorage = new Map<string, string>();
+vi.stubGlobal('localStorage', {
+  getItem: (key: string) => testStorage.get(key) ?? null,
+  setItem: (key: string, value: string) => { testStorage.set(key, String(value)); },
+  removeItem: (key: string) => { testStorage.delete(key); },
+  clear: () => testStorage.clear(),
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -32,18 +40,21 @@ const port = (id: string, extras: Partial<SerialPort> = {}): SerialPort => ({
 
 let root: Root;
 let container: HTMLDivElement;
-let save!: (patch?: Partial<AppConfig>) => Promise<boolean>;
+let save!: (patch?: Partial<AppConfig>, fieldOnly?: boolean) => Promise<boolean>;
+let load!: () => Promise<void>;
 let backend: AppConfig;
 let revision: number;
 let writes: number[];
 
 function Probe() {
-  save = useConfigPersistence().saveConfig;
+  ({ saveConfig: save, loadConfig: load } = useConfigPersistence());
   return null;
 }
 
 beforeEach(async () => {
-  backend = { ...useAppStore.getState().config, sendCommandSets: [rule('old')], portMeta: [] };
+  localStorage.clear();
+  commitUpdateMode('stable');
+  backend = { ...useAppStore.getState().config, updateCheckMode: 'stable', sendCommandSets: [rule('old')], portMeta: [] };
   revision = 0;
   writes = [];
   useAppStore.setState({ config: { ...backend, revision: 0 }, ports: [] });
@@ -174,6 +185,46 @@ describe('whole-config saves versus independently persisted rules', () => {
     expect(await save({ theme: 'light' })).toBe(false);
     expect(configService.setConfig).toHaveBeenCalledTimes(5);
     expect(backend.theme).not.toBe('light');
+  });
+});
+
+describe('committed update mode persistence', () => {
+  it('loads persisted mode without discarding a snooze and ignores later draft edits', async () => {
+    backend = { ...backend, updateCheckMode: 'preview' };
+    updateTiming.setSnooze(7, 1750000000000);
+    await act(async () => { await load(); });
+    expect(getCommittedUpdateMode()).toBe('preview');
+    expect(updateTiming.getSnoozeUntil()).toBe(1750000000000 + 7 * 24 * 60 * 60 * 1000);
+    useAppStore.getState().setConfig({ updateCheckMode: 'none' });
+    expect(getCommittedUpdateMode()).toBe('preview');
+  });
+
+  it('changes committed mode and resets timing only after successful save', async () => {
+    useAppStore.getState().setConfig({ updateCheckMode: 'preview' });
+    updateTiming.markCheckedAt(1750000000000);
+    updateTiming.setSnooze(7, 1750000000000);
+    vi.mocked(configService.setConfig).mockRejectedValueOnce(new Error('disk full'));
+    expect(await save()).toBe(false);
+    expect(getCommittedUpdateMode()).toBe('stable');
+    expect(updateTiming.getLastCheckAt()).toBe(1750000000000);
+    expect(updateTiming.getSnoozeUntil()).not.toBeNull();
+    expect(await save()).toBe(true);
+    expect(getCommittedUpdateMode()).toBe('preview');
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+    expect(updateTiming.getSnoozeUntil()).toBeNull();
+  });
+
+  it('never-remind field-only CAS preserves persisted settings and rules instead of stale drafts', async () => {
+    const persistedTheme = backend.theme;
+    useAppStore.getState().setConfig({ theme: persistedTheme === 'light' ? 'dark' : 'light', updateCheckMode: 'preview' });
+    useRuleStore.getState().setSendCommandSets([rule('unsaved draft')]);
+    backend = { ...backend, sendCommandSets: [rule('already persisted elsewhere')] };
+    revision++;
+    expect(await save({ updateCheckMode: 'none' }, true)).toBe(true);
+    expect(backend.updateCheckMode).toBe('none');
+    expect(backend.theme).toBe(persistedTheme);
+    expect(backend.sendCommandSets).toEqual([rule('already persisted elsewhere')]);
+    expect(getCommittedUpdateMode()).toBe('none');
   });
 });
 

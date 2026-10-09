@@ -23,12 +23,18 @@ export const updateService = {
 
   /** 订阅下载/安装进度。返回取消订阅函数。 */
   onProgress: (callback: (payload: UpdateProgressPayload) => void): (() => void) => {
-    const unlisten = listen<UpdateProgressPayload>('update:progress', (event) => {
-      callback(event.payload);
-    });
-    // listen 在 Tauri v2 返回 Promise<UnlistenFn>，调用方 await 不强求
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listen<UpdateProgressPayload>('update:progress', (event) => {
+      if (!disposed) callback(event.payload);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch((error) => console.debug('[update] progress listener failed:', error));
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      stop?.();
+      stop = undefined;
     };
   },
 };

@@ -1,9 +1,8 @@
 import { useEffect } from 'react';
-import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
-import { updateTiming, shouldAutoCheck, isUpdateCheckEnabled, runAutoCheck } from '../utils/updateService';
+import { updateTiming, shouldAutoCheck, isUpdateCheckEnabled, runAutoCheck, getCommittedUpdateMode } from '../utils/updateService';
 
-/** 就绪信号失联时的兜底等待上限（异常场景才走到，按当前 config 评估）。 */
+/** 就绪信号失联时的兜底等待上限；仍仅评估已提交模式。 */
 const CONFIG_READY_FALLBACK_MS = 15_000;
 
 /**
@@ -34,24 +33,14 @@ export function useAutoUpdate(): void {
     let started = false;
 
     const evaluate = async () => {
-      const { config } = useAppStore.getState();
-      const mode = config.updateCheckMode;
+      const mode = getCommittedUpdateMode();
       const now = Date.now();
 
       if (!shouldAutoCheck(mode, now, updateTiming.getLastCheckAt(), updateTiming.getSnoozeUntil())) {
         return;
       }
 
-      const channel = mode === 'preview' ? 'preview' : 'stable';
-      const update = await runAutoCheck(channel);
-      if (cancelled) return;
-
-      if (update) {
-        useSystemStore.getState().setUIState({
-          isUpdateOpen: true,
-          updateCandidate: update,
-        });
-      }
+      if (!cancelled) await runAutoCheck();
     };
 
     const start = () => {

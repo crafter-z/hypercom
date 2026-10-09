@@ -27,31 +27,45 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 
 **二轮修正（preview 语义 = max(preview, stable)）**：preview 收尾发布 stable 后只查 preview 端点的用户永远收不到晋升与后续 stable 热修——`check_for_update("preview")` 改为**双检查**：preview 与 stable endpoint 都查，纯函数 `version_key`（数值四元组，stable rank=u64::MAX 保证同核心 preview<stable）+ `newer_channel` 取 semver 大者；`payload.channel` 反映更新**实际来源**（徽标显示「正式版」，安装按该通道解析 endpoint）。preview 端点解析失败降级仅 stable；双通道一边失败另一边有更新则用有更新的一边。
 
-**安装**：`download_and_install_update(channel, expected_version)`——重解析 endpoint → `update.download_and_install(|evt| emit "update:progress")`；Windows 插件 ShellExecuteW 拉起 NSIS（`/UPDATE`）后进程 exit(0)，installer 负责重启；macOS/Linux 安装完成后前端 `relaunch()`。
+**安装**：`download_and_install_update(channel, expected_version)` 重解析 endpoint 并核对版本 → `update.download`（累计 `update:progress.downloaded`，返回前验签）→ 发 `install` 阶段 → `update.install`。Windows 插件拉起 NSIS（`/UPDATE`）后进程 exit(0)，installer 负责重启；Linux 安装完成后前端 `relaunch()`。macOS 仍禁用自动更新。
 
 **复审加固**：
 - `expected_version` 安装前重检查版本比对（防「展示 X 装 Y」TOCTOU——弹窗展示版本 X 后发布新版 Y，装的是 Y）；不一致报错拒绝安装。
 - 未知 channel 报错（`unknown update channel: {other}`，不静默回退 stable）。
-- GitHub API `GITHUB_API_TIMEOUT = 15s`（曾无超时——API 挂起时手动检查按钮永久「正在检查」）。
+- `UpdateNetwork`：API/清单请求总期限 15s、连接期限 10s；下载空闲读取期限 30s、总期限 15min。插件不继承 builder timeout 到下载对象，因此安装命令显式设置 `Update.timeout`。
 - **构建门控**：两条命令体只有一份实现（release 逻辑原地保留），入口由 `system_cmds::is_debug_build()` 短路——`check_for_update` 返回 `Ok(None)`、`download_and_install_update` 返回 `Ok(())`，保持开发期检查/安装按钮可用（E2E 可在 dev server 上 mock 驱动）。调试能力门控的**唯一实现**在 `commands/system_cmds.rs`（`dev_only()` / `is_debug_build()`）；命令体不得再写 `#[cfg(debug_assertions)]` 双主体，纯解析函数（`find_latest_preview_tag` / `version_key` 等）也不做条件编译——两种构建下都存在，测试直接覆盖。自动检查前端另有 `import.meta.env.DEV` 短路；**手动检查不过 DEV 门控**——显式用户意图，靠后端 `is_debug_build()` 兜底。
+
+## 系统代理与网络边界
+
+- `src-tauri/src/update_network.rs` 是升级专用客户端策略，API、清单、下载共用；TLS 证书/主机名验证保持启用，HTTPS 重定向不得降级到 HTTP。
+- Windows `update_network/windows.rs` 读取当前活动用户 WinINet 配置；手动代理支持单地址、`http=...;https=...` 与 SOCKS，绕过支持 Windows 通配符、端口及 `<local>`。
+- 明确的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 优先于对应系统代理；`NO_PROXY` 使用环境变量域名/IP规则。不向客户端内置 GitHub Token。
+- PAC/WPAD 通过 `WinHttpGetProxyForUrlEx` 按完整初始/重定向 URL 解析，10s 等待上限、关闭异步 resolver 取消。整数上下文注册表避免迟到回调访问已释放内存。尊重 Windows 对 HTTPS PAC URL 的隐私限制。
+- PAC 列表按顺序消费、跳过不支持协议；多代理列表用有界 TCP 可达性探测选择首个可连接代理，只有列表明确含 DIRECT 才可直连。代理已可连接但拒绝认证/握手时仍报错，不承诺应用层认证故障的自动备用切换。
+- reqwest 自定义代理回调只有 origin，因此每次请求前准备路由、重定向前重新解析，并禁用 Windows 升级客户端空闲连接复用，避免旧连接绕过新路由。每个检查/安装创建独立策略实例。
+- 自动解析失败时可使用已配置手动代理；仅 WPAD 未发现且无手动/PAC配置时直连。显式 PAC 失败且无手动代理时报错，不静默绕开。
+- 非 Windows 保持 reqwest 平台/环境策略；Linux 桌面代理须通过环境变量提供。企业集成认证代理不是当前 reqwest 的自动登录能力。
+- 新发布清单只包含 tag-pinned 公开下载 URL，不再把安装包下载放在匿名 REST API 配额内；preview 发现仍受 GitHub API 配额限制，按既有双通道规则降级。
+
 
 ## 前端决策流
 
 - `useAutoUpdate`（`hooks/useAutoUpdate.ts`，App.tsx 挂一次）：先过 `isUpdateCheckEnabled()`（DEV 构建与 macOS 直接不检查），再等 `ui.configReady` 信号（`useConfigPersistence.loadConfig` 完成置位，15s 兜底）后评估——复审替代旧 3s 启发式窗口（config 加载慢于 3s 会按默认模式误判）。**会话内每 6h 重评估**（setInterval，门控在 shouldAutoCheck，常驻挂机覆盖）。
-- `shouldAutoCheck` 纯函数（`utils/updateService.ts`）：7 天周期 + snooze 暂停 + 首启立即；**成功完成检查（含无更新）才记 lastCheckAt（完成时刻）**，失败静默不重置——下次启动重试；**时钟回拨防护**（now < lastCheckAt 视为记账损坏放行）。
+- `shouldAutoCheck`：先检查 `none` 与有效 snooze，再判断首启、时钟回拨与 7 天周期；即使自动检查账为空，手动检查后的延期也生效。仅当前意图下成功完成的自动检查记 `lastCheckAt`。
 - localStorage 记账：`hypercom.update.lastCheckAt` / `hypercom.update.snoozeUntil`（`updateTiming` 读写，非法值解析为 null；per-install，不随配置导出）。
-- `runCheck` 是自动/手动共用的检查入口（失败返回 `failed=true`，提示层级由调用方定）；`runAutoCheck` = 检查 + 成功记账，带模块级 in-flight 锁（改通道首检与 6h 周期并发不再双弹窗/双记账）；`manualCheck` bypass 周期/snooze、不过 DEV 门控、不记账。
-- 改通道保存后：`ConfigModal.handleSave` 检测 mode 实际变化 → `updateTiming.clearLastCheck()+clearSnooze()`（旧通道周期会推迟新通道首检）+ mode 非 `none` 时立即 `runAutoCheck`；设置页（`GeneralSettings`）挂载时读 `updateTiming.getLastCheckAt()` 显示「上次自动检查」。
+- `utils/updateService.ts` 的 `getCommittedUpdateMode` / `commitUpdateMode` 管理已提交模式，与设置页 `useAppStore.config` 草稿分离。加载/成功保存使旧 generation 失效，取消设置不会触发升级副作用。
+- `runAutoCheck()` 读取已提交模式，同 generation 去重；切新通道可在旧检查未完成时启动，旧结果不发布、不记账。`manualCheck(channel)` 绕过周期/none/DEV，推进发布意图使更早自动结果失效，并走同一发布守卫；失效结果返回 `discarded`。
+- 成功保存改变模式才清除 `lastCheckAt` / snooze；`ConfigModal.handleSave` 关闭设置后立即 `runAutoCheck()`。设置页显示最后成功自动检查时间。
 - 版本号约定：stable `0.x.y`、preview `0.x.y-preview.N`（属于下一核心，同核心 preview<stable 晋升自洽——semver 免费降级保护）。
 
 ## UpdateDialog
 
 三动作：
-- **立即更新**：`downloadAndInstall(candidate.channel, candidate.version)`（进度经 `update:progress` 事件 → 进度条）；下载中遮罩/X/按钮均不可关闭（曾遮罩可关——关闭后后端装完无预警 relaunch）。成功后 `clearSnooze()` + `relaunch()`（Windows 由 installer 重启，该调用无害）。
-- **7 天后提醒**：`snoozeUntil = now + 7d`；关闭弹窗（X/遮罩）默认等同。
-- **永不提醒**：`disableAutoCheck` → `setConfig({ updateCheckMode: 'none' })` + `saveConfig({ updateCheckMode: 'none' })`（只传该字段，实体数组由 `saveConfig` 内部的安全快照补齐）+ 关闭弹窗。
+- **立即更新**：`beginUpdateInstall()` 快照候选并置 `ui.isUpdateInstalling`；参数、版本、通道及日志不受迟到检查覆盖。下载/安装中遮罩、X、决策按钮不可关闭。失败 `finishUpdateInstall()` 恢复原候选供重试，不重启；成功清 snooze 并重启。
+- **7 天后提醒**：`dismissUpdate()` 统一处理按钮、X、遮罩，写 `snoozeUntil = now + 7d` 并使在途结果失效；安装中不执行。
+- **永不提醒**：`saveConfig({ updateCheckMode: 'none' }, true)` 在新鲜后端快照上仅补该字段并 CAS 保存，保留其他设置草稿和实体。成功才提交模式/更新内存/关闭；失败保持原模式及弹窗，可重试。
 
-弹窗内容：通道徽标 + 版本 + 日期 + changelog + 「查看发布页」链接（`releaseUrl(version)`，tag 约定 `v<version>`）+ 进度 + 失败分支（**应用不退出**）。changelog 轻量 Markdown 渲染（`utils/changelog.ts`：heading/bullet/bold 纯函数解析，非 dangerouslySetInnerHTML）；通道徽标文案与发布页地址在 `utils/channel.ts`（`channelLabelKey` / `releaseUrl`；`UpdatePayload.channel` 由后端给出，前端不按版本号后缀猜通道）。
+弹窗内容：通道徽标、冻结候选版本、日期、changelog、发布页链接、累计下载进度与错误。下载/验签失败不退出；Windows 插件安装器启动失败的原生退出/重启边界仍需真实发行环境验证。changelog 以 React 文本节点渲染，不使用 dangerouslySetInnerHTML。
 
 ## 失败分类
 
@@ -61,7 +75,7 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 
 1. **先导校验**：manifest 反序列化**先于**版本比较——`latest.json` 缺平台键（矩阵部分失败）会让 `check()` 直接报错而非忽略。
 2. **同版本永不重装**：强行重推必须 bump 版本。
-3. **`updaterJsonPreferNsis` 默认 false**：MSI+NSIS 并存默认 MSI 写进 latest.json；两条发版流均显式 `true`（NSIS passive `/UPDATE` 流程是验收路径）。
+3. **清单由唯一发布汇总生成**：`scripts/release.mjs` 明确令 Windows 默认键选择 NSIS，并保留 `-nsis` / `-msi` 等 installer-specific 键；矩阵 `uploadUpdaterJson: false`，不并行读改写 latest.json。
 4. **endpoint 数组是 fallback 不是协商器**：第一有效 2XX 即定——每端点只喂一个 URL（通道协商由 `newer_channel` 在命令层完成，不靠 `endpoints` 数组）。
 5. **DEV 短路（双层）**：前端 `import.meta.env.DEV`（`isUpdateCheckEnabled()`）+ 后端 `commands::system_cmds::is_debug_build()`——调试能力门控的唯一实现处（与 `dev_only()` 同文件），`update.rs` 命令体不再写 `#[cfg(debug_assertions)]` 双主体。
 6. **更新检查只挂主窗** App.tsx；弹出窗不挂（沿用一次性纪律）。
@@ -69,7 +83,7 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 
 ## 依赖
 
-- Rust：`tauri-plugin-process`（relaunch）+ `reqwest 0.13(rustls) + url`（GitHub API）。`tauri-plugin-updater` 已注册（lib.rs）。
+- Rust：`tauri-plugin-updater ~2.10.1`（配置 reqwest 客户端接口需锁 minor）+ `reqwest 0.13`（rustls / system-proxy / socks）+ Windows WinHTTP 接口；`tauri-plugin-process` 负责 Linux relaunch。
 - 前端：`@tauri-apps/plugin-process`（`relaunch`）。
 - capabilities：`process:default`（relaunch 必需）；`updater:default` 已移除（JS updater IPC 零使用）。
-- 验证基线（2026-09-25）：tsc 0 错 · vitest 42 files / 652 用例 · cargo test --lib 178 用例 · playwright 23 用例。
+- 升级回归覆盖已提交通道失效、空账 snooze、保存失败重试、候选冻结、原生 PAC 路由与取消；测试数量以实际运行输出为准。

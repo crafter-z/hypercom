@@ -9,7 +9,7 @@ import { updateService } from '../../services/tauri';
 import { notifyError, notifySuccess } from '../../stores/useToastStore';
 import { channelLabelKey, releaseUrl } from '../../utils/channel';
 import { parseChangelog, splitBold } from '../../utils/changelog';
-import { updateTiming } from '../../utils/updateService';
+import { updateTiming, beginUpdateInstall, finishUpdateInstall, dismissUpdate } from '../../utils/updateService';
 import type { UpdateProgressPayload } from '../../types';
 import { X, Download, Clock, Ban, ExternalLink } from 'lucide-react';
 
@@ -42,7 +42,9 @@ const UpdateDialog: React.FC = () => {
   const setUIState = useSystemStore((s) => s.setUIState);
   const { saveConfig } = useConfigPersistence();
 
-  const [downloading, setDownloading] = useState(false);
+  const downloading = useSystemStore((s) => s.ui.isUpdateInstalling);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [progress, setProgress] = useState<UpdateProgressPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
@@ -50,7 +52,9 @@ const UpdateDialog: React.FC = () => {
   // 订阅下载进度（仅弹窗打开时）
   useEffect(() => {
     if (!isOpen) return;
-    unlistenRef.current = updateService.onProgress((p) => setProgress(p));
+    unlistenRef.current = updateService.onProgress((p) => {
+      if (useSystemStore.getState().ui.isUpdateInstalling) setProgress(p);
+    });
     return () => {
       unlistenRef.current?.();
       unlistenRef.current = null;
@@ -60,7 +64,6 @@ const UpdateDialog: React.FC = () => {
   // 关闭时复位状态
   useEffect(() => {
     if (!isOpen) {
-      setDownloading(false);
       setProgress(null);
       setError(null);
     }
@@ -68,49 +71,52 @@ const UpdateDialog: React.FC = () => {
 
   if (!isOpen || !candidate) return null;
 
-  const close = () => setUIState({ isUpdateOpen: false, updateCandidate: null });
-
-  /** 同步「永不提醒」→ 设置项 updateCheckMode=none。 */
-  const disableAutoCheck = async () => {
-    useAppStore.getState().setConfig({ updateCheckMode: 'none' });
-    // Only this field is passed: the safe snapshot inside saveConfig supplies the
-    // entity arrays, so the startup config snapshot must not be handed over whole.
-    if (await saveConfig({ updateCheckMode: 'none' })) {
-      notifySuccess('update.neverReminderDone');
-    }
+  const busy = downloading || saving;
+  const remindLater = () => {
+    if (!savingRef.current) dismissUpdate();
   };
 
   /** 立即更新：下载+安装 → relaunch（Windows 由 installer 重启，此调用无害）。 */
   const installNow = async () => {
+    if (savingRef.current) return;
+    const installing = beginUpdateInstall();
+    if (!installing) return;
     setError(null);
-    setDownloading(true);
     setProgress({ downloaded: 0, total: null, phase: 'download' });
     try {
       // 传候选版本做 TOCTOU 防护：安装前重检查若版本已变（展示后发布了新版），
       // 后端拒绝安装并报错——重新检查即可（issue #12 复审）。
-      await updateService.downloadAndInstall(candidate.channel, candidate.version);
+      await updateService.downloadAndInstall(installing.channel, installing.version);
       // 安装完成后清除 snooze（用户已主动更新）
       updateTiming.clearSnooze();
       await relaunch();
+      setUIState({ isUpdateOpen: false, updateCandidate: null });
     } catch (e) {
       console.error('[UpdateDialog] install failed:', e);
       setError(t('update.installFailed'));
-      setDownloading(false);
       setProgress(null);
       notifyError(e, 'update.installFailed');
+    } finally {
+      finishUpdateInstall();
+      setProgress(null);
     }
-  };
-
-  /** 7 天后提醒：记 snooze，关闭弹窗。 */
-  const remindLater = () => {
-    updateTiming.setSnooze(7);
-    close();
   };
 
   /** 不更新（永不提醒）：同步设置项 + 关闭弹窗。 */
   const neverRemind = async () => {
-    await disableAutoCheck();
-    close();
+    if (savingRef.current || useSystemStore.getState().ui.isUpdateInstalling) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      // CAS reads fresh disk state; do not commit an unrelated Settings draft.
+      if (!(await saveConfig({ updateCheckMode: 'none' }, true))) return;
+      useAppStore.getState().setConfig({ updateCheckMode: 'none' });
+      notifySuccess('update.neverReminderDone');
+      setUIState({ isUpdateOpen: false, updateCandidate: null });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   const channelKey = channelLabelKey(candidate.channel);
@@ -123,11 +129,11 @@ const UpdateDialog: React.FC = () => {
   return (
     // issue #12 复审：下载中遮罩点击不可关闭——X 与三个动作按钮都 disabled，
     // 遮罩是同一意图的漏网之口（否则点外面关弹窗，后台装完仍无预警 relaunch）。
-    <div className="modal-overlay" onClick={downloading ? undefined : close}>
+    <div className="modal-overlay" onClick={busy ? undefined : remindLater}>
       <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('update.title')}</h3>
-          <button className="btn btn-icon btn-sm" onClick={close} title={t('hotkeys.close')} disabled={downloading}>
+          <button className="btn btn-icon btn-sm" onClick={remindLater} title={t('hotkeys.close')} disabled={busy}>
             <X size={14} />
           </button>
         </div>
@@ -175,15 +181,15 @@ const UpdateDialog: React.FC = () => {
             <ExternalLink size={14} />
             {t('update.viewRelease')}
           </button>
-          <button className="btn" onClick={remindLater} disabled={downloading}>
+          <button className="btn" onClick={remindLater} disabled={busy}>
             <Clock size={14} />
             {t('update.later')}
           </button>
-          <button className="btn" onClick={neverRemind} disabled={downloading}>
+          <button className="btn" onClick={neverRemind} disabled={busy}>
             <Ban size={14} />
             {t('update.never')}
           </button>
-          <button className="btn btn-primary" onClick={installNow} disabled={downloading}>
+          <button className="btn btn-primary" onClick={installNow} disabled={busy}>
             <Download size={14} />
             {t('update.installNow')}
           </button>

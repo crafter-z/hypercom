@@ -4,7 +4,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { popoutEventService } from '../../services/tauri';
 import { useConfigPersistence } from '../../hooks';
-import { updateTiming, runAutoCheck } from '../../utils/updateService';
+import { getCommittedUpdateMode, runAutoCheck } from '../../utils/updateService';
 import { applyUiScale } from '../../utils/uiScale';
 import type { AppConfig } from '../../types';
 import {
@@ -49,8 +49,7 @@ const ConfigModal: React.FC = () => {
   const setConfig = useAppStore((s) => s.setConfig);
   const { saveConfig } = useConfigPersistence();
   // The pages edit `useAppStore.config` directly, so "the draft" is the store
-  // itself. This ref only remembers the value at open time, to roll the session
-  // back on cancel and to detect an update-channel change on save.
+  // itself. This ref remembers the value at open time for cancel rollback.
   const configSnapshotRef = useRef<AppConfig | null>(null);
   // Overlay click must only close on a click whose press *and* release were both
   // on the overlay: dragging a text selection that starts inside the dialog and
@@ -89,27 +88,17 @@ const ConfigModal: React.FC = () => {
     // `saveConfig` builds its own safe snapshot instead of trusting this draft
     // wholesale (`set_config` replaces config.json entirely).
     const current = useAppStore.getState().config;
-    const snapshot = configSnapshotRef.current;
-    const modeChanged = snapshot !== null && snapshot.updateCheckMode !== current.updateCheckMode;
+    const modeChanged = getCommittedUpdateMode() !== current.updateCheckMode;
     if (!(await saveConfig(current))) return;
     void applyUiScale(current.uiScalePercent);
     void popoutEventService.emitUiScaleChanged(current.uiScalePercent)
       .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
-    if (modeChanged) {
-      // Channel bookkeeping is committed only after settings actually reach disk.
-      updateTiming.clearSnooze();
-      updateTiming.clearLastCheck();
-    }
     configSnapshotRef.current = null;
     toggleConfigModal(false);
     // Re-check right away instead of waiting for the next startup; this runs in
     // the background and surfaces the update dialog if one is found.
-    if (modeChanged && current.updateCheckMode !== 'none') {
-      void runAutoCheck(current.updateCheckMode).then((update) => {
-        if (update) {
-          useSystemStore.getState().setUIState({ isUpdateOpen: true, updateCandidate: update });
-        }
-      });
+    if (modeChanged && getCommittedUpdateMode() !== 'none') {
+      void runAutoCheck();
     }
   };
 

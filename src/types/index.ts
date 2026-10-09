@@ -361,6 +361,7 @@ export interface UpdatePayload {
 
 /** `update:progress` 事件载荷（Rust `UpdateProgressPayload`）。 */
 export interface UpdateProgressPayload {
+  /** Cumulative downloaded bytes, not the latest chunk size. */
   downloaded: number;
   total: number | null;
   phase: 'download' | 'install';
@@ -416,6 +417,7 @@ export interface UIState {
   // 更新弹窗（issue #12）：isUpdateOpen + 待展示的更新载荷（null = 仅提示无更新）
   isUpdateOpen: boolean;
   updateCandidate: UpdatePayload | null;
+  isUpdateInstalling: boolean;
   // config.json 加载完成信号（issue #12 复审）：useConfigPersistence.loadConfig
   // 结束（成功/失败同）置 true；useAutoUpdate 等它就绪再评估，替代 3s 启发式窗口。
   configReady: boolean;

@@ -11,6 +11,7 @@
  */
 import type { UpdateCheckMode, UpdatePayload } from '../types';
 import { updateService as tauriUpdate } from '../services/tauri';
+import { useSystemStore } from '../stores/useSystemStore';
 
 /** 自动检查周期：统一 7 天（用户决策，2026-08-15）。 */
 export const CHECK_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
@@ -24,13 +25,15 @@ export interface CheckOutcome {
   update: UpdatePayload | null;
   /** 检查是否失败（网络/API 异常；失败不重置 lastCheckAt） */
   failed: boolean;
+  /** Invalidated completion: callers must not show stale success/error UI. */
+  discarded?: boolean;
 }
 
 /**
  * 纯函数：此刻是否应触发自动检查。
  * - `mode === 'none'` → 永远 false
- * - 从未成功检查过（lastCheckAt === null）→ true（首次启动立即检查，用户决策）
- * - snooze 未到期 → false（「7 天后提醒」期间暂停，含周期已到情形）
+ * - snooze 未到期 → false，包括首次检查与时钟回拨
+ * - 从未成功检查过（lastCheckAt === null）→ true（首次启动立即检查）
  * - 距上次成功检查 ≥ 7 天 → true
  */
 export function shouldAutoCheck(
@@ -40,11 +43,9 @@ export function shouldAutoCheck(
   snoozeUntil: number | null,
 ): boolean {
   if (mode === 'none') return false;
-  if (lastCheckAt === null) return true;
-  // 时钟回拨防护（issue #12 二轮）：now 早于 lastCheckAt 视为记账损坏直接放行
-  // （否则 now-lastCheckAt 恒为负、永远到不了周期阈值，回拨后永不检查）。
-  if (now < lastCheckAt) return true;
+  // Explicit dismissal wins over an empty ledger and a rolled-back clock.
   if (snoozeUntil !== null && now < snoozeUntil) return false;
+  if (lastCheckAt === null || now < lastCheckAt) return true;
   return now - lastCheckAt >= CHECK_PERIOD_MS;
 }
 
@@ -105,7 +106,7 @@ export function isMacPlatform(platform?: string): boolean {
 /**
  * 执行一次通道检查（自动与手动共用）。
  * 返回 outcome；失败时 `failed=true`（调用方决定提示层级：自动静默 / 手动 toast）。
- * 自动调用的调用方负责在成功后修 lastCheckAt、在「7 天后」/「永不」动作后记账。
+ * runAutoCheck owns success bookkeeping; dialog actions own snooze.
  *
  * @param enabledOverride 仅测试用：绕过 DEV 门控注入「可用」状态（vitest 中
  *   import.meta.env.DEV 被静态替换为 true，无法 stubEnv）。生产调用不传。
@@ -127,46 +128,97 @@ export async function runCheck(
   }
 }
 
-/**
- * 执行一次自动检查并记账（issue #12 二轮提取，useAutoUpdate 与
- * ConfigModal「改通道保存后立即首检」共用）：成功（有无更新同）记
- * lastCheckAt 完成时刻；失败返回 null 不记账（调用方静默或提示自定）。
- *
- * 并发防护：ConfigModal 保存改通道触发首检 + useAutoUpdate 的 6h 周期
- * 重评估可能同时进入——加模块级 in-flight 锁，重入直接返回 null
- * （检查结果由先到者处理，后到者不再弹窗/记账）。
- *
- * @param enabledOverride 仅测试用：透传 runCheck 的 DEV 门控注入。生产不传。
- */
-let checkInFlight = false;
-export async function runAutoCheck(
-  channel: 'stable' | 'preview',
-  enabledOverride?: boolean,
-): Promise<UpdatePayload | null> {
-  if (checkInFlight) return null;
-  checkInFlight = true;
-  try {
-    const outcome = await runCheck(channel, enabledOverride);
-    if (outcome.failed) return null;
-    updateTiming.markCheckedAt();
-    return outcome.update;
-  } finally {
-    checkInFlight = false;
+// Committed intent is deliberately independent of the settings store's draft.
+let committedMode: UpdateCheckMode = 'stable';
+let intentGeneration = 0;
+let publicationEpoch = 0;
+const autoFlights = new Set<number>();
+
+export function getCommittedUpdateMode(): UpdateCheckMode {
+  return committedMode;
+}
+
+/** Loaded settings invalidate work without resetting the persistent ledger.
+ * Successful saves pass resetTiming=true so a changed channel checks immediately. */
+export function commitUpdateMode(mode: UpdateCheckMode, resetTiming = false): void {
+  const changed = committedMode !== mode;
+  committedMode = mode;
+  intentGeneration++;
+  publicationEpoch++;
+  if (changed) {
+    if (resetTiming) {
+      updateTiming.clearLastCheck();
+      updateTiming.clearSnooze();
+    }
+    if (!useSystemStore.getState().ui.isUpdateInstalling) {
+      useSystemStore.getState().setUIState({ isUpdateOpen: false, updateCandidate: null });
+    }
   }
 }
 
-/**
- * 手动检查（About 对话框）：bypass 周期/snooze，且**不过 DEV 门控**——
- * 手动检查是显式用户意图（点「检查更新」即触发），后端 debug 构建另有
- * `#[cfg(debug_assertions)]` 返回 Ok(None) 的双保险（开发时点按钮显示"已是最新"，
- * 不触网）。这样 E2E 也能在 dev server 上 mock `check_for_update` 驱动弹窗。
- */
-export async function manualCheck(channel: 'stable' | 'preview'): Promise<CheckOutcome> {
-  try {
-    const update = await tauriUpdate.checkForUpdate(channel);
-    return { update, failed: false };
-  } catch (e) {
-    console.debug('[update] manual check failed:', e);
-    return { update: null, failed: true };
+
+/** Every automatic/manual result passes this same transaction guard. */
+function publishCandidate(update: UpdatePayload | null, generation: number, epoch: number): boolean {
+  if (generation !== intentGeneration || epoch !== publicationEpoch
+    || useSystemStore.getState().ui.isUpdateInstalling) return false;
+  if (update) {
+    useSystemStore.getState().setUIState({ isUpdateOpen: true, updateCandidate: update });
   }
+  return true;
+}
+
+/** Check the committed channel; same-generation callers cannot duplicate publication. */
+export async function runAutoCheck(enabledOverride?: boolean): Promise<UpdatePayload | null> {
+  const channel = committedMode;
+  const generation = intentGeneration;
+  const epoch = publicationEpoch;
+  if (channel === 'none' || !(enabledOverride ?? isUpdateCheckEnabled())
+    || autoFlights.has(generation) || useSystemStore.getState().ui.isUpdateInstalling) return null;
+  autoFlights.add(generation);
+  try {
+    const outcome = await runCheck(channel, enabledOverride);
+    if (outcome.failed || !publishCandidate(outcome.update, generation, epoch)) return null;
+    updateTiming.markCheckedAt();
+    return outcome.update;
+  } finally {
+    autoFlights.delete(generation);
+  }
+}
+
+/** Manual intent bypasses none, period, snooze and DEV; macOS remains unsupported. */
+export async function manualCheck(channel: 'stable' | 'preview'): Promise<CheckOutcome> {
+  if (isMacPlatform() || useSystemStore.getState().ui.isUpdateInstalling) {
+    return { update: null, failed: false, discarded: true };
+  }
+  const generation = intentGeneration;
+  // Explicit channel choice supersedes any older background publication.
+  const epoch = ++publicationEpoch;
+  const outcome = await runCheck(channel, true);
+  if (!publishCandidate(outcome.update, generation, epoch)) {
+    return { update: null, failed: false, discarded: true };
+  }
+  return outcome;
+}
+
+/** Freeze the candidate before invoking installation; reject checks until it finishes. */
+export function beginUpdateInstall(): UpdatePayload | null {
+  const { ui, setUIState } = useSystemStore.getState();
+  if (!ui.isUpdateOpen || !ui.updateCandidate || ui.isUpdateInstalling) return null;
+  publicationEpoch++;
+  const candidate = { ...ui.updateCandidate };
+  setUIState({ updateCandidate: candidate, isUpdateInstalling: true });
+  return candidate;
+}
+
+export function finishUpdateInstall(): void {
+  publicationEpoch++;
+  useSystemStore.getState().setUIState({ isUpdateInstalling: false });
+}
+
+/** X, overlay and Later all mean a seven-day dismissal, never during installation. */
+export function dismissUpdate(): void {
+  if (useSystemStore.getState().ui.isUpdateInstalling) return;
+  publicationEpoch++;
+  updateTiming.setSnooze(7);
+  useSystemStore.getState().setUIState({ isUpdateOpen: false, updateCandidate: null });
 }

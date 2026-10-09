@@ -6,11 +6,18 @@ import {
   runAutoCheck,
   shouldAutoCheck,
   updateTiming,
-    manualCheck,
+  manualCheck,
+  commitUpdateMode,
+  getCommittedUpdateMode,
+  beginUpdateInstall,
+  finishUpdateInstall,
+  dismissUpdate,
   isMacPlatform,
 } from './updateService';
 import { updateService as tauriUpdate } from '../services/tauri';
 import type { UpdatePayload } from '../types';
+import { useSystemStore } from '../stores/useSystemStore';
+import { useAppStore } from '../stores/useAppStore';
 
 // mock services/tauri 模块：runCheck 只依赖 updateService（tauri 包装）。
 // DEV 门控经 runCheck 的 enabledOverride 参数控制（vitest 中 import.meta.env.DEV
@@ -26,6 +33,9 @@ vi.mock('../services/tauri', () => ({
 // vitest 默认 environment=node：无 localStorage——提供最小 polyfill（仅记账测试用）
 const storage = new Map<string, string>();
 beforeEach(() => {
+  vi.stubGlobal('navigator', { platform: 'Win32' });
+  useSystemStore.getState().setUIState({ isUpdateOpen: false, updateCandidate: null, isUpdateInstalling: false });
+  commitUpdateMode('stable');
   storage.clear();
 });
 vi.stubGlobal('localStorage', {
@@ -65,16 +75,19 @@ describe('shouldAutoCheck (issue #12, 7 天周期)', () => {
     // snooze 到期后恢复检查
     expect(shouldAutoCheck('stable', NOW + 8 * DAY, NOW - 30 * DAY, snooze)).toBe(true);
   });
+  it('snooze blocks a first check with no success ledger', () => {
+    expect(shouldAutoCheck('stable', NOW, null, NOW + 7 * DAY)).toBe(false);
+    expect(shouldAutoCheck('stable', NOW + 7 * DAY, null, NOW + 7 * DAY)).toBe(true);
+  });
+
 
   it('snooze in the past does not block', () => {
     expect(shouldAutoCheck('stable', NOW, NOW - 30 * DAY, NOW - 1)).toBe(true);
   });
 
-  it('clock rollback treated as corrupted ledger → check anyway (issue #12 二轮)', () => {
-    // now 早于 lastCheckAt（用户回拨系统时钟）→ 负差值永远到不了周期阈值，
-    // 视为记账损坏放行（含 snooze 也在未来时）
+  it('clock rollback recovers the period but never overrides an explicit snooze', () => {
     expect(shouldAutoCheck('stable', NOW, NOW + 5 * DAY, null)).toBe(true);
-    expect(shouldAutoCheck('stable', NOW, NOW + DAY, NOW + 2 * DAY)).toBe(true);
+    expect(shouldAutoCheck('stable', NOW, NOW + DAY, NOW + 2 * DAY)).toBe(false);
   });
 });
 
@@ -163,7 +176,7 @@ describe('runAutoCheck (issue #12 二轮：检查+记账一体)', () => {
       channel: 'stable',
     };
     vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(payload);
-    const update = await runAutoCheck('stable', true);
+    const update = await runAutoCheck(true);
     expect(update).toEqual(payload);
     expect(updateTiming.getLastCheckAt()).not.toBeNull();
   });
@@ -173,8 +186,8 @@ describe('runAutoCheck (issue #12 二轮：检查+记账一体)', () => {
     vi.mocked(tauriUpdate.checkForUpdate).mockImplementation(
       () => new Promise((resolve) => { resolveCheck = resolve; })
     );
-    const first = runAutoCheck('stable', true);
-    const second = await runAutoCheck('stable', true);
+    const first = runAutoCheck(true);
+    const second = await runAutoCheck(true);
     expect(second).toBeNull(); // re-entrant call returns null immediately
     resolveCheck(null);
     await first;
@@ -182,16 +195,107 @@ describe('runAutoCheck (issue #12 二轮：检查+记账一体)', () => {
 
   it('success (无更新) → still marks lastCheckAt', async () => {
     vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(null);
-    const update = await runAutoCheck('preview', true);
+    commitUpdateMode('preview');
+    const update = await runAutoCheck(true);
     expect(update).toBeNull();
     expect(updateTiming.getLastCheckAt()).not.toBeNull();
   });
 
   it('failure → null without marking (下次启动重试)', async () => {
     vi.mocked(tauriUpdate.checkForUpdate).mockRejectedValue(new Error('network down'));
-    const update = await runAutoCheck('stable', true);
+    const update = await runAutoCheck(true);
     expect(update).toBeNull();
     expect(updateTiming.getLastCheckAt()).toBeNull();
+  });
+
+  it('starts a newly committed channel while the old channel is pending, discarding the old completion', async () => {
+    let resolveStable!: (update: UpdatePayload | null) => void;
+    let resolvePreview!: (update: UpdatePayload | null) => void;
+    vi.mocked(tauriUpdate.checkForUpdate).mockImplementation((channel) => new Promise((resolve) => {
+      if (channel === 'stable') resolveStable = resolve;
+      else resolvePreview = resolve;
+    }));
+    const old = runAutoCheck(true);
+    commitUpdateMode('preview');
+    const current = runAutoCheck(true);
+    expect(tauriUpdate.checkForUpdate).toHaveBeenNthCalledWith(1, 'stable');
+    expect(tauriUpdate.checkForUpdate).toHaveBeenNthCalledWith(2, 'preview');
+    resolveStable({ version: 'old', currentVersion: '0.5.2', date: null, notes: null, channel: 'stable' });
+    expect(await old).toBeNull();
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+    expect(useSystemStore.getState().ui.updateCandidate).toBeNull();
+    const preview: UpdatePayload = { version: 'new', currentVersion: '0.5.2', date: null, notes: null, channel: 'preview' };
+    resolvePreview(preview);
+    expect(await current).toEqual(preview);
+    expect(useSystemStore.getState().ui.updateCandidate).toEqual(preview);
+  });
+
+  it.each(['none', 'stable'] as const)('invalidates pending completion on committing %s, even with the same channel', async (mode) => {
+    let complete!: (update: UpdatePayload | null) => void;
+    vi.mocked(tauriUpdate.checkForUpdate).mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+    const pending = runAutoCheck(true);
+    commitUpdateMode(mode);
+    complete({ version: 'old', currentVersion: '0.5.2', date: null, notes: null, channel: 'stable' });
+    expect(await pending).toBeNull();
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+    expect(useSystemStore.getState().ui.updateCandidate).toBeNull();
+  });
+
+  it('does not treat an unsaved settings draft as committed mode', async () => {
+    useAppStore.getState().setConfig({ updateCheckMode: 'preview' });
+    vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(null);
+    expect(getCommittedUpdateMode()).toBe('stable');
+    await runAutoCheck(true);
+    expect(tauriUpdate.checkForUpdate).toHaveBeenCalledWith('stable');
+  });
+
+  it('does not record disabled checks as successful network checks', async () => {
+    await runAutoCheck(false);
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+  });
+
+  it('dismissal invalidates a pending completion without recording it', async () => {
+    let complete!: (update: UpdatePayload | null) => void;
+    vi.mocked(tauriUpdate.checkForUpdate).mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+    const pending = runAutoCheck(true);
+    dismissUpdate();
+    complete({ version: 'old', currentVersion: '0.5.2', date: null, notes: null, channel: 'stable' });
+    expect(await pending).toBeNull();
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+    expect(updateTiming.getSnoozeUntil()).not.toBeNull();
+  });
+
+  it('freezes candidate and rejects auto/manual completions even after installation failure recovery', async () => {
+    const shown: UpdatePayload = { version: 'shown', currentVersion: '0.5.2', date: null, notes: 'original', channel: 'stable' };
+    useSystemStore.getState().setUIState({ isUpdateOpen: true, updateCandidate: shown });
+    const completions: Array<(value: UpdatePayload | null) => void> = [];
+    vi.mocked(tauriUpdate.checkForUpdate).mockImplementation(() => new Promise((resolve) => { completions.push(resolve); }));
+    const auto = runAutoCheck(true);
+    const manual = manualCheck('preview');
+    expect(beginUpdateInstall()).toEqual(shown);
+    expect(beginUpdateInstall()).toBeNull();
+    commitUpdateMode('none', true);
+    dismissUpdate();
+    expect(useSystemStore.getState().ui.updateCandidate).toEqual(shown);
+    expect(useSystemStore.getState().ui.isUpdateOpen).toBe(true);
+    expect(useSystemStore.getState().ui.isUpdateInstalling).toBe(true);
+    expect(updateTiming.getSnoozeUntil()).toBeNull();
+    finishUpdateInstall();
+    completions.forEach((resolve) => resolve({ ...shown, version: 'replacement', channel: 'preview' }));
+    expect(await auto).toBeNull();
+    expect((await manual).discarded).toBe(true);
+    expect(useSystemStore.getState().ui.updateCandidate).toEqual(shown);
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+    expect(beginUpdateInstall()).toEqual(shown);
+    finishUpdateInstall();
+  });
+
+  it('loading a persisted channel preserves an existing snooze across sessions', () => {
+    updateTiming.setSnooze(7, NOW);
+    updateTiming.markCheckedAt(NOW);
+    commitUpdateMode('preview');
+    expect(updateTiming.getSnoozeUntil()).toBe(NOW + 7 * DAY);
+    expect(updateTiming.getLastCheckAt()).toBe(NOW);
   });
 });
 
@@ -209,6 +313,9 @@ describe('manualCheck (issue #12: 显式意图，不过 DEV 门控)', () => {
       channel: 'preview' as const,
     };
     vi.mocked(tauriUpdate.checkForUpdate).mockResolvedValue(payload);
+    commitUpdateMode('none');
+    updateTiming.markCheckedAt(NOW);
+    updateTiming.setSnooze(7, NOW);
     const outcome = await manualCheck('preview');
     expect(outcome.failed).toBe(false);
     expect(outcome.update).toEqual(payload);
@@ -220,6 +327,30 @@ describe('manualCheck (issue #12: 显式意图，不过 DEV 门控)', () => {
     const outcome = await manualCheck('stable');
     expect(outcome.failed).toBe(true);
     expect(outcome.update).toBeNull();
+  });
+
+  it('keeps a manual preview result when an older automatic stable check completes later', async () => {
+    let resolveStable!: (value: UpdatePayload | null) => void;
+    let resolvePreview!: (value: UpdatePayload | null) => void;
+    vi.mocked(tauriUpdate.checkForUpdate).mockImplementation((channel) => new Promise((resolve) => {
+      if (channel === 'stable') resolveStable = resolve;
+      else resolvePreview = resolve;
+    }));
+    const automatic = runAutoCheck(true);
+    const manual = manualCheck('preview');
+    const preview: UpdatePayload = { version: '0.7.0-preview.1', currentVersion: '0.6.8', date: null, notes: 'manual preview', channel: 'preview' };
+    resolvePreview(preview);
+    expect((await manual).update).toEqual(preview);
+    resolveStable({ ...preview, version: '0.6.9', channel: 'stable' });
+    expect(await automatic).toBeNull();
+    expect(useSystemStore.getState().ui.updateCandidate).toEqual(preview);
+    expect(updateTiming.getLastCheckAt()).toBeNull();
+  });
+
+  it('does not invoke the unsupported macOS updater even for manual intent', async () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel' });
+    expect((await manualCheck('stable')).discarded).toBe(true);
+    expect(tauriUpdate.checkForUpdate).not.toHaveBeenCalled();
   });
 });
 

@@ -288,29 +288,49 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.update-actions button', { hasText: '不更新（永不提醒）' })).toBeVisible();
   });
 
-  test('Update dialog never-remind syncs updateCheckMode=none (issue #12)', async ({ page }) => {
-    // mock：每次 stable 检查都有新版本 → 手动检查 → 永不提醒 → 设置项同步
-    await page.evaluate(() => {
-      const original = window.__TAURI_INTERNALS__.invoke;
-      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: { channel?: string }) => {
-        if (cmd === 'check_for_update' && args?.channel === 'stable') {
-          return {
-            version: '0.6.1',
-            currentVersion: '0.5.2',
-            date: 1750000000,
-            notes: 'notes',
-            channel: 'stable',
-          };
-        }
-        return original(cmd, args as never);
+  test('Update dialog never-remind persists none and reloads it (issue #12)', async ({ page }) => {
+    // Seed a complete config and revision, not the generic mock's null response.
+    // Browser-realm store cannot be statically imported into the Playwright Node process.
+    await page.evaluate(async (modulePath) => {
+      const { useAppStore } = await import(modulePath);
+      localStorage.setItem('smoke.update.config', JSON.stringify({ ...useAppStore.getState().config, updateCheckMode: 'stable', revision: 0 }));
+    }, '/src/stores/useAppStore.ts');
+    await page.addInitScript(() => {
+      let internals = window.__TAURI_INTERNALS__;
+      const wrap = (api: typeof internals) => {
+        const original = api.invoke;
+        api.invoke = async (cmd: string, args?: { channel?: string; newConfig?: Record<string, unknown>; expectedRevision?: number }) => {
+          const config = JSON.parse(localStorage.getItem('smoke.update.config')!);
+          if (cmd === 'get_config') return config;
+          if (cmd === 'set_config') {
+            if (args?.expectedRevision !== config.revision) return false;
+            localStorage.setItem('smoke.update.config', JSON.stringify({ ...args.newConfig, revision: config.revision + 1 }));
+            return true;
+          }
+          if (cmd === 'check_for_update' && args?.channel === 'stable') {
+            return { version: '0.6.1', currentVersion: '0.5.2', date: 1750000000, notes: 'notes', channel: 'stable' };
+          }
+          return original(cmd, args as never);
+        };
+        return api;
       };
+      // Playwright does not guarantee ordering between different init scripts.
+      Object.defineProperty(window, '__TAURI_INTERNALS__', {
+        configurable: true,
+        get: () => internals,
+        set: (api: typeof internals) => { internals = wrap(api); },
+      });
+      if (internals) internals = wrap(internals);
     });
+    await page.reload();
     // About → 手动检查 → 永不提醒
     await page.locator('.titlebar-right button[title="关于"]').click();
     await page.locator('.about-actions button', { hasText: '检查正式版更新' }).click();
     await page.locator('.update-actions button', { hasText: '不更新（永不提醒）' }).click();
     await expect(page.locator('.update-dialog-meta')).toHaveCount(0);
-    // 打开设置弹窗 → 自动更新 radio「不自动检查更新」应被选中
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('smoke.update.config')!).updateCheckMode)).toBe('none');
+    // Reload from the mocked backend to assert durability, not just a local radio.
+    await page.reload();
     await page.locator('.titlebar-right button[title="设置"]').click();
     await expect(page.locator('.config-page').getByText('不自动检查更新')).toBeVisible();
     const radio = page.locator('input[name="updateCheckMode"][value="none"]');

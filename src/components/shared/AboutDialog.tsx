@@ -49,12 +49,12 @@ const AboutDialog: React.FC = () => {
       // 手动检查不过 DEV 门控：显式用户意图，后端 debug 构建返回 Ok(None)
       // 双保险（开发时不触网）。E2E 在 dev server 上 mock check_for_update 驱动。
       const outcome = await manualCheck(channel);
+      if (outcome.discarded) return;
       if (outcome.failed) {
         // 固定文案用 messageKey（notifyError 的 raw 优先会吞掉 fallbackKey）
         useToastStore.getState().push({ severity: 'error', messageKey: 'update.checkFailed' });
       } else if (outcome.update) {
         setUIState({ isAboutOpen: false });
-        setUIState({ isUpdateOpen: true, updateCandidate: outcome.update });
       } else {
         // manualNoUpdate 带 {{channel}} 插值，经 t() 渲染后以 message 投递
         useToastStore.getState().push({

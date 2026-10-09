@@ -21,6 +21,7 @@ src-tauri/src/
 ├── main.rs / lib.rs      # entrypoint；lib.rs = AppState + generate_handler!（74 命令）+ setup
 ├── system.rs             # 跨平台电源管理：共享状态机骨架 + win32_backend / child_process_backend
 ├── diaglog.rs            # 应用自身诊断日志（512KB 轮转 × 3 份）
+├── update_network.rs     # 升级专用HTTP期限与路由；update_network/windows.rs = WinHTTP异步PAC/WPAD + 环境/手动代理
 ├── serial/               # mod.rs（SerialManager 注册表 + 策略）/ codec.rs（TX 编码 + build_tx_bytes）
 │                         # events.rs / ports_real.rs / ports_sim.rs（SIM:Loopback）/ ports_tty.rs（GIT: 路由）
 │                         # tty_sim.rs（portable-pty，Windows = ConPTY）
@@ -168,7 +169,7 @@ hypercom/
 | 通知中心 / toast | `src/stores/useToastStore.ts` + `src/components/StatusBar/NotificationCenter.tsx` | `durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列不丢弃；`clearAll()` / `setCenterOpen` + `centerOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`，外点/Escape 关闭，样式 `notification-center.css`；`ToastItem.portId?`——串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行显示 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳 |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...)；`src/i18n.test.ts` 断言双侧键集合相等、顺序镜像、无重复、非空、占位符一致 |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
-| 自动更新（issue #12） | `commands/update.rs` + `hooks/useAutoUpdate.ts` + `utils/updateService.ts` + `utils/channel.ts` + `shared/UpdateDialog.tsx` | **通道是运行时用户选择**：`updateCheckMode: none/stable/preview`（config.json，默认 stable；About 手动检查可选通道且不过 DEV 门控）。JS `check()` 无运行时 endpoint → 命令走 Rust `updater_builder().endpoints(vec![..])`：stable 直连 `releases/latest/download/latest.json`（GitHub「最新非 prerelease」指针，永不泄漏 preview）；preview 先 `api.github.com/releases?per_page=100` 解析**版本号最大**的 `vX.Y.Z-preview.N` tag（纯函数 `find_latest_preview_tag`，数值四元组比较；未认证限流 60/h/IP 超限静默降级）再 tag-pinned，并取 max(preview, stable)。自动检查：`useAutoUpdate` 等 `ui.configReady` 信号（`useConfigPersistence.loadConfig` 完成置位，15s 兜底）后评估——替代旧 3s 启发式窗口；7 天周期 + `shouldAutoCheck` 纯函数（首启立即/snooze 暂停/成功才记 lastCheckAt（完成时刻），localStorage 记账）；会话内每 6h 重评估；`UpdateDialog` 三动作（立即更新进度+relaunch/7 天后写 snooze/永不提醒同步 mode=none 全量保存；下载中遮罩/X/按钮均不可关闭）。`commands/update.rs` 在 debug 构建经 `is_debug_build()` 返回 `Ok(None)`（自动检查前端另有 `import.meta.env.DEV` 短路；**手动检查不过 DEV 门控**——显式意图）。详 `docs/architecture/update.md` |
+| 自动更新（issue #12） | `commands/update.rs` + `update_network.rs` / `update_network/windows.rs` + `hooks/useAutoUpdate.ts` + `utils/updateService.ts` + `shared/UpdateDialog.tsx` | stable GitHub latest；preview=max(preview, stable)。`getCommittedUpdateMode` / `commitUpdateMode` 与设置草稿隔离，generation/epoch拒绝迟到结果，`runAutoCheck()`同意图去重、新通道不被旧请求吞掉；7天周期与snooze（空账也暂停），6h重评估。`beginUpdateInstall`冻结候选，下载累计字节、验签后才install；X/遮罩/稍后统一延期，永不提醒仅后端CAS单字段保存成功才提交/关闭。API/清单15s、连接10s、下载空闲30s/总15min；Windows逐URL WinHTTP PAC/WPAD10s取消、手动分协议/SOCKS/环境代理/绕过，TLS验证不关闭。发布两流预建draft，矩阵只上传资产，`scripts/release.mjs`唯一汇总真实验签并写公开下载URL清单；preview验收后公开、stable验收后人工Publish。macOS仍禁用自动更新。详 `docs/architecture/update.md` / `release.md`。 |
 | External tool (flasher) | `commands/serial.rs` `run_port_tool`/`kill_port_tool` + `useToolOutput` hook + `ToolSettings` page | close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单 |
 | 分组整组执行外部工具 | `Sidebar.tsx` 分组右键菜单 + `shared/GroupToolDialog.tsx` + `usePortToolActions.runToolForGroup` | 分组菜单 `sidebar.group.contextMenu.runTool` → 对话框列出配置/未配置端口（Cancel / Configure Missing / Run Configured Only）；严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。`usePortToolActions` 返回 `runTool` / `killTool` / `configTool` / `runToolForGroup` / `toolDialog` / `closeToolDialog` / `runToolDialogConfigured` / `configureToolFromDialog`（不返回组件） |
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `useSystemStore` `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 280px, clamp [160,600] |
@@ -422,13 +423,13 @@ The full hook set in `src/hooks/` (17 hooks, individual files):
 | `useSerialConnection` | open/close port, routes through `closePort()` (stops logging) | Sidebar / TabBar |
 | `useSerialReceive` | `serial:data` event listener → `RxPipeline` (byte-level line aggregation + rAF batch → viewportManager; TTY 端口字节直喂 `ttyService.feed`，跳过触发/协议/行组装) + status handler (`lostPortIds` for DisconnectBanner; 断线走 `pipeline.disconnect` + `ttyService.disconnect`) | App.tsx (once) |
 | `useSerialSend` | Send action; `sendToPort` TTY 分支跳过 TX 回显 + `flushNow`（保留后端发送/流量统计/历史）；TX 回显经 viewportManager `appendTerminalLine` | OperationPanel |
-| `useConfigPersistence` | `loadConfig` / `saveConfig(patch?)`（安全快照的唯一实现；`loadConfig` 完成时置位 `ui.configReady`） | App.tsx |
+| `useConfigPersistence` | `loadConfig` / `saveConfig(patch?, fieldOnly?)`；全量安全快照或后端新鲜快照单字段CAS，成功后 `commitUpdateMode`，加载后置 `ui.configReady` | App.tsx / 配置与升级动作 |
 | `useSystemStatus` | Polls CPU/memory every 5s → `useSystemStore` | StatusBar |
 | `useAppInit` | One-shot app bootstrap（含分组/端口元数据恢复 + 防抖自动保存） | App.tsx |
 | `useSimulation` | Toggle SIM:Loopback virtual port | Sidebar toolbar |
 | `useGitBashSim` | Debug-only GIT:BASH 模拟终端 toggle (mirrors `useSimulation` dev gating) | Sidebar toolbar |
 | `useToolOutput` | `tool:output` / `tool:exit` event listeners | App.tsx (once) |
-| `useAutoUpdate` | 启动自动更新评估：等 `ui.configReady` 后 `shouldAutoCheck`（7 天周期/snooze/首启立即）→ `runAutoCheck` → 有更新开 UpdateDialog；成功记 lastCheckAt，失败静默；会话内每 6h 重评估；DEV 构建短路 | App.tsx (once) |
+| `useAutoUpdate` | configReady后与6h周期读取已提交通道，shouldAutoCheck→runAutoCheck；当前意图成功才记账/发布候选，设置草稿不触发网络、旧结果失效；DEV/macOS短路 | App.tsx (once) |
 | `usePopoutBridge` | pop-out intent bus: `popout:send-command` → `sendToPort(activeTabId)`, `popout:open-config` → ConfigModal page, `popout:request-sync` → replay `active-tab:changed`, `popout:command-set-updated` → 写回 `useRuleStore`；broadcasts `command-sets:changed` / `active-tab:changed` | App.tsx (once) |
 | `usePortToolActions` | 侧边栏/标签页外部工具菜单共享动作（`runTool`/`killTool`/`configTool`/`runToolForGroup` + 对话框状态与动作） | Sidebar / TabBar / Pane |
 | `useHotkeys` | 全局快捷键 | App.tsx |

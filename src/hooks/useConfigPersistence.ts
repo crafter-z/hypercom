@@ -5,6 +5,7 @@ import { useSystemStore } from '../stores/useSystemStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
+import { commitUpdateMode } from '../utils/updateService';
 
 /**
  * 端口备注名 / 隐藏状态 / tty 模式 → config.portMeta 条目。
@@ -82,6 +83,7 @@ export function useConfigPersistence() {
     try {
       const config = await configService.getConfig();
       setConfig(config);
+      commitUpdateMode(config.updateCheckMode);
     } catch (err) {
       console.warn('[useConfigPersistence] Failed to load config, using defaults:', err);
     } finally {
@@ -93,6 +95,8 @@ export function useConfigPersistence() {
   }, [setConfig, setUIState]);
 
   /**
+   * `fieldOnly=true` applies just the patch to a fresh backend config (dialog actions),
+   * preserving unrelated settings drafts and independently persisted entities.
    * 全量保存配置。`patch` 只用来覆盖**本次调用关心的普通字段**（如更新模式）；
    * 实体数组一律不取入参，见下方快照来源。
    *
@@ -101,7 +105,7 @@ export function useConfigPersistence() {
    * useRuleStore / storageService，从不回写 store.config）。直接整体替换会把用户
    * 刚保存的规则、分组、预设静默回滚成启动时的样子。
    */
-  const saveConfig = useCallback((patch?: Partial<AppConfig>) => enqueueConfigWrite(async () => {
+  const saveConfig = useCallback((patch?: Partial<AppConfig>, fieldOnly = false) => enqueueConfigWrite(async () => {
     try {
       // Retry reads fresh backend state and current live stores each time.
       // Read the backend revision BEFORE any async entity load. A CRUD write
@@ -112,14 +116,16 @@ export function useConfigPersistence() {
         const { revision } = persisted;
         if (revision === undefined) throw new Error('Backend config revision is missing');
         // Presets have no frontend live mirror. A failed read must abort the save.
-        const portPresets = await storageService.loadPortPresets();
+        const portPresets = fieldOnly ? persisted.portPresets : await storageService.loadPortPresets();
         // These stores are read AFTER the await on every attempt, never from a
         // snapshot captured when the save began.
         const state = useAppStore.getState();
         const rules = useRuleStore.getState();
         const initial = state.config;
         // Plugin authorizations are preserved by set_config under plugin_io.
-        const candidate: AppConfig = {
+        // A dialog's single-field write must preserve persisted settings/entities,
+        // not commit an unrelated open Settings draft.
+        const candidate: AppConfig = fieldOnly ? { ...persisted, ...patch } : {
           ...state.config,
           ...patch,
           sendCommandSets: reconcileEntities(rules.sendCommandSets, initial.sendCommandSets, persisted.sendCommandSets, (item) => item.id),
@@ -132,7 +138,10 @@ export function useConfigPersistence() {
           portPresets,
         };
         const saved = await configService.setConfig(candidate, false, revision);
-        if (saved) return true;
+        if (saved) {
+          commitUpdateMode(candidate.updateCheckMode, true);
+          return true;
+        }
       }
       throw new Error('Config changed during save; please try again');
     } catch (err) {
