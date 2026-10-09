@@ -352,6 +352,8 @@ pub fn scan_plugins(plugins_root: &Path) -> Vec<InstalledPlugin> {
 
 /// zip 解压条目数上限（评审复审 zip bomb 加固：正常插件远小于此）。
 pub const MAX_ZIP_ENTRIES: usize = 2000;
+/// 目录/zip 源的递归深度上限，避免深目录耗尽栈与路径处理资源。
+pub const MAX_PLUGIN_SOURCE_DEPTH: usize = 32;
 /// zip 解压总量（字节）上限。
 pub const MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -402,6 +404,9 @@ fn extract_plugin_zip_limited(
         let is_dir_entry = raw_name.ends_with('/');
         let rel = sanitize_plugin_rel_path(&raw_name)
             .map_err(|e| format!("zip 条目非法（{}）: {raw_name}", e))?;
+        if rel.components().count() > MAX_PLUGIN_SOURCE_DEPTH {
+            return Err(format!("zip 条目递归深度超过上限 {MAX_PLUGIN_SOURCE_DEPTH}: {raw_name}"));
+        }
 
         // 符号链接/非普通文件拒绝：unix_mode 0 = 无模式信息（Windows zip 常见），
         // 放行；有模式信息且非普通文件/目录 → 拒绝。
@@ -744,6 +749,18 @@ mod tests {
         assert!(extract_plugin_zip_limited(&zip_path, &out, MAX_ZIP_ENTRIES, 10).is_err());
         assert_eq!(fs::metadata(out.join("com.example.demo/first")).unwrap().len(), 8);
         assert!(fs::metadata(out.join("com.example.demo/second")).unwrap().len() <= 3);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn extract_zip_rejects_excessive_path_depth() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_depth_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("pkg.zip");
+        let name = std::iter::repeat("x").take(MAX_PLUGIN_SOURCE_DEPTH + 1).collect::<Vec<_>>().join("/");
+        write_test_zip(&zip_path, &[(name.as_str(), "")]);
+        let error = extract_plugin_zip(&zip_path, &dir.join("out")).unwrap_err();
+        assert!(error.contains("深度"));
         fs::remove_dir_all(dir).unwrap();
     }
 
