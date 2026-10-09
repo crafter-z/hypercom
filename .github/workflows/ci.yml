@@ -39,6 +39,9 @@ jobs:
       - name: unit tests (vitest)
         run: npm run test:run
 
+      - name: release gate behavior tests
+        run: node --test scripts/release.test.mjs
+
       # `build` = `tsc && vite build`，也是 tauri.conf.json 的 beforeBuildCommand。
       # 发版流只在 tag 上跑 tauri 打包；平时的 bundling/resolution 错误（如新增依赖
       # 未正确 externalize）没人拦，这里用同一命令提前兜住。
