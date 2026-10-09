@@ -146,6 +146,25 @@ describe('pluginUiRegistry（评审 v2 D2）', () => {
     expect(snap.portMenuItems).toHaveLength(0);
   });
 
+  it('uses the default extension points for null and omitted targets', () => {
+    rebuildPluginUi([{
+      id: 'com.example.ui', enabled: true,
+      manifest: { ui: {
+        buttons: [
+          { id: 'null-button', label: 'Null', icon: null, target: null },
+          { id: 'default-button', label: 'Default' },
+        ],
+        menuItems: [
+          { id: 'null-menu', label: 'Null', target: null },
+          { id: 'default-menu', label: 'Default' },
+        ],
+      } },
+    }]);
+    expect(getPluginUiSnapshot().toolbarButtons[0].buttons.map((button) => button.id)).toEqual(['null-button', 'default-button']);
+    expect(getPluginUiSnapshot().portMenuItems[0].menuItems.map((item) => item.id)).toEqual(['null-menu', 'default-menu']);
+    expect(getPluginUiSnapshot().toolbarButtons[0].buttons[0].icon).toBeUndefined();
+  });
+
   it('excludes declarations aimed at different host extension points', () => {
     rebuildPluginUi([{
       id: 'com.example.ui', enabled: true,

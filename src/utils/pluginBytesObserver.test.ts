@@ -14,6 +14,7 @@ import {
   feedPluginBytes,
   notifyBytesPortDisconnected,
   MAX_BYTES_PER_DELIVERY,
+  type ObservedRxBytes,
 } from './pluginBytesObserver';
 
 interface BytesSpy {
@@ -45,6 +46,7 @@ beforeEach(() => {
 afterEach(() => {
   resetPluginBytesObserverForTest();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('pluginBytesObserver', () => {
@@ -71,6 +73,113 @@ describe('pluginBytesObserver', () => {
 
     unsub();
     expect(hasPluginBytesObservers()).toBe(false);
+  });
+
+  it('reschedules pending rAF on hide and pending timers on visibility restoration', () => {
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    const removeListener = vi.spyOn(page, 'removeEventListener');
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal('document', page);
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    }));
+    const cancelFrame = vi.fn((id: number) => { frames.delete(id); });
+    vi.stubGlobal('cancelAnimationFrame', cancelFrame);
+    const { spy, obs } = makeObserver();
+    const unsub = addPluginBytesObserver(obs);
+
+    feedPluginBytes('COM1', [1], 100);
+    expect(frames.size).toBe(1);
+    page.visibilityState = 'hidden';
+    page.dispatchEvent(new Event('visibilitychange'));
+    expect(cancelFrame).toHaveBeenCalledWith(1);
+    expect(frames.size).toBe(0);
+    vi.advanceTimersByTime(16);
+    expect(spy.batches).toEqual([{ portId: 'COM1', bytes: [1], ts: 100 }]);
+
+    feedPluginBytes('COM1', [2], 200);
+    page.visibilityState = 'visible';
+    page.dispatchEvent(new Event('visibilitychange'));
+    expect(vi.getTimerCount()).toBe(0);
+    expect(frames.size).toBe(1);
+    vi.advanceTimersByTime(16);
+    expect(spy.batches).toHaveLength(1);
+    const callbacks = [...frames.values()];
+    frames.clear();
+    for (const callback of callbacks) callback(0);
+    expect(spy.batches[1]).toEqual({ portId: 'COM1', bytes: [2], ts: 200 });
+
+    feedPluginBytes('COM1', [3], 300);
+    unsub();
+    expect(frames.size).toBe(0);
+    expect(removeListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    page.visibilityState = 'hidden';
+    page.dispatchEvent(new Event('visibilitychange'));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('last unsubscribe cancels timers and discards queued bytes and loss from the old lifecycle', () => {
+    const oldDelivery = vi.fn();
+    const oldUnsub = addPluginBytesObserver({ onRxBytes: oldDelivery });
+    feedPluginBytes('COM1', new Uint8Array(2 * 1024 * 1024), 1);
+    expect(vi.getTimerCount()).toBe(1);
+    oldUnsub();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(hasPluginBytesObservers()).toBe(false);
+
+    const onRxBytes = vi.fn();
+    const onRxDropped = vi.fn();
+    const unsub = addPluginBytesObserver({ onRxBytes, onRxDropped });
+    flushDelivery();
+    expect(oldDelivery).not.toHaveBeenCalled();
+    expect(onRxBytes).not.toHaveBeenCalled();
+    feedPluginBytes('COM1', [9], 2);
+    flushDelivery();
+    expect(onRxBytes).toHaveBeenCalledExactlyOnceWith([{ portId: 'COM1', bytes: new Uint8Array([9]), ts: 2 }]);
+    expect(onRxDropped).not.toHaveBeenCalled();
+    unsub();
+  });
+
+  it('keeps a pending delivery when another subscriber remains', () => {
+    const first = makeObserver();
+    const second = makeObserver();
+    const unsub = addPluginBytesObserver(first.obs);
+    addPluginBytesObserver(second.obs);
+    feedPluginBytes('COM1', [8], 1);
+    unsub();
+    flushDelivery();
+    expect(first.spy.batches).toEqual([]);
+    expect(second.spy.batches).toEqual([{ portId: 'COM1', bytes: [8], ts: 1 }]);
+  });
+
+  it('delivers independent exact-length buffers for input views and split chunks in timestamp order', () => {
+    const delivered: ObservedRxBytes[] = [];
+    addPluginBytesObserver({ onRxBytes: (batch) => { delivered.push(...batch); } });
+    const backing = new Uint8Array([90, 1, 2, 91]);
+    const large = new Uint8Array(MAX_BYTES_PER_DELIVERY + 3).fill(7);
+    large.set([8, 9, 10], MAX_BYTES_PER_DELIVERY);
+    feedPluginBytes('COM1', backing.subarray(1, 3), 10);
+    flushDelivery();
+    feedPluginBytes('COM1', large, 20);
+    vi.advanceTimersByTime(32);
+
+    expect(delivered.map((part) => [part.portId, part.bytes.length, part.ts])).toEqual([
+      ['COM1', 2, 10], ['COM1', MAX_BYTES_PER_DELIVERY, 20], ['COM1', 3, 20],
+    ]);
+    expect(Array.from(delivered[0].bytes)).toEqual([1, 2]);
+    expect(delivered[1].bytes.every((value) => value === 7)).toBe(true);
+    expect(Array.from(delivered[2].bytes)).toEqual([8, 9, 10]);
+    for (const part of delivered) {
+      expect(part.bytes.byteOffset).toBe(0);
+      expect(part.bytes.buffer.byteLength).toBe(part.bytes.byteLength);
+      expect(part.bytes.buffer).not.toBe(backing.buffer);
+      expect(part.bytes.buffer).not.toBe(large.buffer);
+      const cloned = structuredClone(part.bytes);
+      expect(cloned.buffer.byteLength).toBe(part.bytes.byteLength);
+    }
+    expect(delivered[1].bytes.buffer).not.toBe(delivered[2].bytes.buffer);
   });
 
   it('队列字节超限：丢最旧（保留最新）', () => {

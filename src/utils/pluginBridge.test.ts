@@ -2,9 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PLUGIN_HTTP_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
 
 type RpcReply = { seq: number; ok: boolean; result?: unknown; error?: string };
+type HostEvent = { type: string; payload?: unknown; eventId?: number };
 type WorkerScope = {
-  plugin?: { api: Record<string, (args?: unknown) => Promise<unknown>> };
-  onmessage?: (event: { data: RpcReply }) => void;
+  plugin?: {
+    api: Record<string, (args?: unknown) => Promise<unknown>>;
+    on: (type: string, callback: (payload: unknown) => unknown) => () => void;
+  };
+  onmessage?: (event: { data: RpcReply | HostEvent }) => void;
   postMessage: (message: unknown) => void;
   addEventListener: (type: string, handler: (event: { reason: unknown }) => void) => void;
   request?: Promise<unknown>;
@@ -17,7 +21,7 @@ function wrappedWorker(source: string) {
     addEventListener: () => {},
   };
   new Function('self', wrapPluginCode(source))(scope);
-  const reply = (message: RpcReply) => scope.onmessage?.({ data: message });
+  const reply = (message: RpcReply | HostEvent) => scope.onmessage?.({ data: message });
   return { scope, sent, reply };
 }
 
@@ -50,9 +54,57 @@ describe('wrapped worker RPC lifecycle', () => {
     await expect(dialog).resolves.toBe('selected');
   });
 
+  it('leaves user-controlled panel export pending until the host finishes', async () => {
+    vi.useFakeTimers();
+    const worker = wrappedWorker('self.request = self.plugin.api["ui.panel.export"]();');
+    const outcome = vi.fn();
+    const request = worker.scope.request!.then(outcome, outcome);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(outcome).not.toHaveBeenCalled();
+    worker.reply({ seq: 1, ok: true, result: 'exported' });
+    await request;
+    expect(outcome).toHaveBeenCalledWith('exported');
+  });
+
   it('rejects immediately when posting cannot clone arguments', async () => {
     const worker = wrappedWorker('');
     worker.scope.postMessage = () => { throw new Error('clone failed'); };
     await expect(worker.scope.plugin!.api.log({ value: () => {} })).rejects.toThrow('clone failed');
+  });
+});
+
+describe('wrapped worker event delivery', () => {
+  it('dispatches a handler snapshot so self-unsubscription does not skip the next callback', async () => {
+    const worker = wrappedWorker('');
+    const second = vi.fn();
+    const calls: string[] = [];
+    const unsubscribe = worker.scope.plugin!.on('ui.buttonClick', () => {
+      calls.push('first');
+      unsubscribe();
+    });
+    worker.scope.plugin!.on('ui.buttonClick', second);
+    worker.reply({ type: 'ui.buttonClick', payload: 'clicked', eventId: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(['first']);
+    expect(second).toHaveBeenCalledWith('clicked');
+    expect(worker.sent).toContainEqual({ eventAck: 1 });
+    worker.reply({ type: 'ui.buttonClick', payload: 'again', eventId: 2 });
+    expect(calls).toEqual(['first']);
+    expect(second).toHaveBeenCalledTimes(2);
+  });
+
+  it('acknowledges only after every async handler in the snapshot settles', async () => {
+    const worker = wrappedWorker('');
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    worker.scope.plugin!.on('rx.detached', () => pending);
+    worker.reply({ type: 'rx.detached', eventId: 1 });
+    await Promise.resolve();
+    expect(worker.sent).not.toContainEqual({ eventAck: 1 });
+    finish();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(worker.sent).toContainEqual({ eventAck: 1 });
   });
 });

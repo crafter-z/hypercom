@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
-import { PluginSession, MAX_PENDING_MESSAGES } from './pluginHost';
+import { PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CONTROL_MESSAGES, MAX_PENDING_EVENT_BYTES } from './pluginHost';
 import { executeHostApi } from './pluginHostApi';
 
 const readAsset = vi.fn();
@@ -76,6 +76,50 @@ describe('PluginSession worker lifetime', () => {
     expect(TestWorker.created).toHaveLength(0);
   });
 
+  it.each([
+    { entry: './dist//entry.js', serial: null, http: null, shell: null, ui: null },
+    { entry: '.\\dist\\\\entry.js', serial: undefined, http: undefined, shell: undefined },
+    { entry: 'dist/./entry.js', serial: {}, http: {}, shell: {}, ui: {} },
+    { entry: 'dist/entry.js', serial: { portWhitelist: ['COM1'] }, http: { urlWhitelist: ['https://example.com/*'] },
+      shell: { executableWhitelist: ['tool'] }, ui: { buttons: [{ id: 'button', label: 'Button', icon: null, target: null }] } },
+  ])('accepts Rust-legal path/scope variants: %j', async (variant) => {
+    readAsset.mockResolvedValueOnce(JSON.stringify({ ...manifest, ...variant }));
+    const session = new PluginSession(pluginId);
+    await session.start();
+    expect(readAsset).toHaveBeenLastCalledWith(pluginId, 'dist/entry.js');
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'ports.list' });
+    const normalized = vi.mocked(executeHostApi).mock.calls[0][3];
+    expect(normalized?.serial).toEqual(variant.serial == null ? undefined : { portWhitelist: 'portWhitelist' in variant.serial ? variant.serial.portWhitelist : [] });
+    expect(normalized?.http).toEqual(variant.http == null ? undefined : { urlWhitelist: 'urlWhitelist' in variant.http ? variant.http.urlWhitelist : [] });
+    expect(normalized?.shell).toEqual(variant.shell == null ? undefined : { executableWhitelist: 'executableWhitelist' in variant.shell ? variant.shell.executableWhitelist : [] });
+    if (variant.ui === null) expect(normalized?.ui).toBeUndefined();
+    if (variant.ui && 'buttons' in variant.ui) {
+      expect(normalized?.ui).toEqual({
+        buttons: [{ id: 'button', label: 'Button', icon: undefined, target: undefined }], menuItems: [],
+      });
+    }
+    session.stop();
+  });
+
+  it.each([
+    { entry: '' }, { entry: ' ' }, { entry: '././' }, { entry: '/dist/entry.js' },
+    { entry: '\\dist\\entry.js' }, { entry: 'C:\\dist\\entry.js' }, { entry: 'C:entry.js' },
+    { entry: 'dist/../entry.js' }, { entry: 'dist\\..\\entry.js' }, { entry: 5 },
+    { permissions: {} }, { permissions: [5] }, { serial: [] },
+    { serial: { portWhitelist: [5] } }, { http: { urlWhitelist: null } },
+    { http: { urlWhitelist: [''] } },
+    { shell: 'invalid' }, { ui: [] }, { ui: { buttons: null } },
+    { ui: { buttons: [{ id: 'button', label: 'Button', target: 3 }] } },
+    { ui: { buttons: [{ id: 3, label: 'Button' }] } },
+    { ui: { buttons: [{ id: 'button', label: 'Button', icon: 3 }] } },
+  ])('rejects malformed or unsafe manifest variants: %j', async (variant) => {
+    readAsset.mockResolvedValueOnce(JSON.stringify({ ...manifest, ...variant }));
+    await expect(new PluginSession(pluginId).start()).rejects.toThrow('invalid plugin manifest');
+    expect(readAsset).toHaveBeenCalledTimes(1);
+    expect(TestWorker.created).toHaveLength(0);
+  });
+
   it('does not construct a worker after stop cancels an in-flight manifest read', async () => {
     let resolveManifest!: (value: string) => void;
     readAsset.mockImplementationOnce(() => new Promise<string>((resolve) => { resolveManifest = resolve; }));
@@ -147,6 +191,22 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
+  it('keeps user-controlled panel export pending past the ordinary RPC deadline', async () => {
+    vi.useFakeTimers();
+    const exported = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementationOnce(() => exported.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'ui.panel.export' });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 1 }));
+    exported.resolve(null);
+    await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: true, result: null });
+    session.stop();
+  });
+
   it('reclaims slots at stop and never forwards a prior worker response after restart', async () => {
     const deferred = deferredResult<unknown>();
     vi.mocked(executeHostApi).mockImplementationOnce(() => deferred.promise);
@@ -198,20 +258,82 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
-  it('bounds unacknowledged events and releases capacity only on worker acknowledgement', async () => {
+  it('reserves control capacity when RX is full and reports drops after acknowledgement', async () => {
     const session = new PluginSession(pluginId);
     await session.start();
-    for (let i = 1; i < MAX_PENDING_MESSAGES; i++) expect(session.post({ type: 'rx.bytes' })).toBe(true);
+    const worker = TestWorker.created[0];
+    for (let i = 0; i < MAX_PENDING_MESSAGES; i++) expect(session.post({ type: 'rx.bytes' })).toBe(true);
     expect(session.post({ type: 'rx.bytes' })).toBe(false);
-    expect(TestWorker.created[0].postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rx.dropped' }), []);
-    TestWorker.created[0].emit({ eventAck: 1 });
-    const notice = TestWorker.created[0].postMessage.mock.calls
-      .map(([message]) => message as { type: string; eventId: number; payload?: unknown })
-      .find((message) => message.type === 'rx.dropped');
-    expect(notice?.payload).toEqual({ reason: 'worker-backpressure' });
-    // The loss notice itself consumes the newly released slot until acknowledged.
-    TestWorker.created[0].emit({ eventAck: notice!.eventId });
+    expect(session.post({ type: 'rx.detached', payload: { portId: 'COM1' } })).toBe(true);
+    expect(session.post({ type: 'ui.buttonClick', payload: { id: 'button' } })).toBe(true);
+    expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'rx.detached' }), []);
+    expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'ui.buttonClick' }), []);
+    worker.emit({ eventAck: 1 });
+    expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'rx.dropped', payload: { reason: 'worker-backpressure' },
+    }), []);
+    // A control ACK never releases an RX slot.
+    expect(session.post({ type: 'rx.bytes' })).toBe(false);
+    worker.emit({ eventAck: 2 });
     expect(session.post({ type: 'rx.bytes' })).toBe(true);
+    session.stop();
+  });
+
+  it('queues control events in order and retries a loss notice when both control bounds are full', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    for (let i = 1; i < MAX_PENDING_CONTROL_MESSAGES; i++) {
+      expect(session.post({ type: 'ui.buttonClick', payload: i })).toBe(true);
+    }
+    expect(session.post({ type: 'rx.detached', payload: 'queued-detach' })).toBe(true);
+    for (let i = 1; i < MAX_PENDING_CONTROL_MESSAGES; i++) {
+      expect(session.post({ type: 'ui.buttonClick', payload: `queued-${i}` })).toBe(true);
+    }
+    expect(session.post({ type: 'ui.buttonClick', payload: 'overflow' })).toBe(false);
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ payload: 'queued-detach' }), []);
+    for (let i = 0; i < MAX_PENDING_MESSAGES; i++) expect(session.post({ type: 'rx.bytes' })).toBe(true);
+    expect(session.post({ type: 'rx.bytes' })).toBe(false);
+    // RX ACK cannot release control capacity, so the internally retained loss notice waits.
+    worker.emit({ eventAck: MAX_PENDING_CONTROL_MESSAGES + 1 });
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rx.dropped' }), []);
+    worker.emit({ eventAck: 1 });
+    expect(worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ payload: 'queued-detach' }), []);
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rx.dropped' }), []);
+    // The first control ACK queues the loss notice; draining the earlier controls eventually sends it.
+    for (let eventAck = 2; eventAck <= MAX_PENDING_CONTROL_MESSAGES; eventAck++) worker.emit({ eventAck });
+    const detach = worker.postMessage.mock.calls
+      .map(([message]) => message as { type: string; payload?: unknown; eventId: number })
+      .find((message) => message.payload === 'queued-detach')!;
+    worker.emit({ eventAck: detach.eventId });
+    const controls = worker.postMessage.mock.calls.map(([message]) => message as { type: string; payload?: unknown });
+    const detachIndex = controls.findIndex((message) => message.payload === 'queued-detach');
+    const droppedIndex = controls.findIndex((message) => message.type === 'rx.dropped');
+    expect(detachIndex).toBeGreaterThan(-1);
+    expect(droppedIndex).toBeGreaterThan(detachIndex);
+    expect(controls.filter((message) => message.type === 'rx.dropped')).toHaveLength(1);
+    session.stop();
+  });
+
+  it('reserves control capacity even when the RX byte limit is exhausted', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    expect(session.post({ type: 'rx.bytes', payload: [{ bytes: new Uint8Array(MAX_PENDING_EVENT_BYTES) }] })).toBe(true);
+    expect(session.post({ type: 'rx.bytes', payload: [{ bytes: new Uint8Array(1) }] })).toBe(false);
+    expect(session.post({ type: 'rx.detached' })).toBe(true);
+    expect(session.post({ type: 'ui.buttonClick' })).toBe(true);
+    session.stop();
+  });
+
+  it('clears pending controls at stop instead of delivering them to a replacement worker', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    for (let i = 1; i < MAX_PENDING_CONTROL_MESSAGES; i++) session.post({ type: 'ui.buttonClick' });
+    expect(session.post({ type: 'rx.detached', payload: 'old-worker' })).toBe(true);
+    session.stop();
+    await session.start();
+    TestWorker.created[1].emit({ eventAck: MAX_PENDING_CONTROL_MESSAGES + 1 });
+    expect(TestWorker.created[1].postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ payload: 'old-worker' }), []);
     session.stop();
   });
 

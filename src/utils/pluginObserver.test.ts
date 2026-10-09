@@ -66,6 +66,7 @@ beforeEach(() => {
 afterEach(() => {
   resetPluginObserverForTest();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('pluginObserver', () => {
@@ -136,6 +137,81 @@ describe('pluginObserver', () => {
     expect(hasPluginRxObservers()).toBe(true);
     unsub();
     expect(hasPluginRxObservers()).toBe(false);
+  });
+
+  it('reschedules pending observer rAF on hide and restores rAF when visible', () => {
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    const removeListener = vi.spyOn(page, 'removeEventListener');
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal('document', page);
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    }));
+    const cancelFrame = vi.fn((id: number) => { frames.delete(id); });
+    vi.stubGlobal('cancelAnimationFrame', cancelFrame);
+    const { spy, obs } = makeObserver();
+    const unsub = addPluginRxObserver(obs);
+    const enqueue = (text: string, timestamp: number): void => {
+      getRxPipeline().enqueueFrame('COM1', {
+        timestamp, direction: 'RX', content: '', rawData: new TextEncoder().encode(text), isHex: false,
+      });
+    };
+
+    enqueue('before hide', 1);
+    // Observer schedules first; the pipeline may also have its own pending rAF.
+    const observerFrame = [...frames.keys()][0];
+    expect(observerFrame).toBeDefined();
+    page.visibilityState = 'hidden';
+    page.dispatchEvent(new Event('visibilitychange'));
+    expect(cancelFrame).toHaveBeenCalledWith(observerFrame);
+    vi.advanceTimersByTime(16);
+    expect(spy.lines.map((line) => line.text)).toEqual(['before hide']);
+
+    enqueue('visible again', 2);
+    page.visibilityState = 'visible';
+    page.dispatchEvent(new Event('visibilitychange'));
+    expect(frames.size).toBeGreaterThan(0);
+    vi.advanceTimersByTime(16);
+    expect(spy.lines).toHaveLength(1);
+    const callbacks = [...frames.values()];
+    frames.clear();
+    for (const callback of callbacks) callback(0);
+    expect(spy.lines.map((line) => line.text)).toEqual(['before hide', 'visible again']);
+
+    enqueue('discarded', 3);
+    const pendingObserverFrame = [...frames.keys()][0];
+    unsub();
+    expect(cancelFrame).toHaveBeenCalledWith(pendingObserverFrame);
+    expect(removeListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    page.visibilityState = 'hidden';
+    page.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(16);
+    const remainingCallbacks = [...frames.values()];
+    frames.clear();
+    for (const callback of remainingCallbacks) callback(0);
+    expect(spy.lines).toHaveLength(2);
+  });
+
+  it('last unsubscribe discards pending lines and mode snapshots before a new lifecycle', () => {
+    useAppStore.setState({ ports: [{ id: 'COM1', status: 'connected', mode: 'trx' }] as never });
+    const first = makeObserver();
+    const unsub = addPluginRxObserver(first.obs);
+    feedLine('COM1', 'old');
+    unsub();
+    useAppStore.setState({ ports: [{ id: 'COM1', status: 'connected', mode: 'tty' }] as never });
+    const second = makeObserver();
+    const unsubSecond = addPluginRxObserver(second.obs);
+    flushDelivery();
+    expect(first.spy.lines).toEqual([]);
+    expect(second.spy.lines).toEqual([]);
+    expect(second.spy.detached).toEqual([]);
+    useAppStore.setState({ ports: [{ id: 'COM1', status: 'connected', mode: 'trx' }] as never });
+    feedLine('COM1', 'new');
+    flushDelivery();
+    expect(second.spy.lines).toEqual([{ portId: 'COM1', text: 'new', encoding: 'utf-8', seq: 0 }]);
+    unsubSecond();
   });
 
   it('超单帧投递上限的行顺延续投（不丢，队列额度内全投完）', () => {
