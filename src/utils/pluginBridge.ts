@@ -42,7 +42,7 @@ export const PLUGIN_BRIDGE_CODE = `
       }
     } else if (typeof msg.type === 'string') {
       // Acknowledge after all handlers (including async forwarding) settle.
-      var hs = handlers[msg.type];
+      var hs = handlers[msg.type] && handlers[msg.type].slice();
       var jobs = [];
       if (hs) {
         for (var i = 0; i < hs.length; i++) {
@@ -64,8 +64,8 @@ export const PLUGIN_BRIDGE_CODE = `
         var id = ++seq;
         // Worker runtimes on older WebView2 releases lack Promise.withResolvers.
         return new Promise(function (resolve, reject) {
-          // Native file selection may remain open for as long as the user needs.
-          var timeout = op === 'fs.openDialog' ? 0 :
+          // Native file selection/export may remain open for as long as the user needs.
+          var timeout = op === 'fs.openDialog' || op === 'ui.panel.export' ? 0 :
             op === 'http.request' ? ${PLUGIN_HTTP_RPC_TIMEOUT_MS + 1000} : ${PLUGIN_RPC_TIMEOUT_MS + 1000};
           var timer = timeout && setTimeout(function () {
             delete pending[id];

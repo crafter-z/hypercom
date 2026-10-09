@@ -35,6 +35,57 @@ export const CRASH_WINDOW_MS = 10_000;
 /** Maximum unacknowledged events and their total RX payload bytes per worker. */
 export const MAX_PENDING_MESSAGES = 32;
 export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
+/** Control traffic has its own acknowledgement slots and bounded overflow queue, independent of RX. */
+export const MAX_PENDING_CONTROL_MESSAGES = 32;
+
+/** Normalize the raw manifest using Rust's relative-path and optional-scope wire conventions. */
+function normalizeManifest(value: unknown, pluginId: string): PluginManifestView {
+  const invalid = (): never => { throw new Error('invalid plugin manifest'); };
+  const isObject = (item: unknown): item is Record<string, unknown> =>
+    item !== null && typeof item === 'object' && !Array.isArray(item);
+  const strings = (items: unknown): items is string[] =>
+    Array.isArray(items) && items.every((item) => typeof item === 'string');
+  if (!isObject(value) || value.id !== pluginId || typeof value.entry !== 'string' ||
+    !value.entry.trim() || !strings(value.permissions)) return invalid();
+  const path = value.entry.replace(/\\/g, '/');
+  if (path.startsWith('/') || /^[a-z]:/i.test(path)) return invalid();
+  const parts = path.split('/');
+  if (parts.includes('..')) return invalid();
+  const entry = parts.filter((part) => part !== '' && part !== '.').join('/');
+  if (!entry) return invalid();
+  const normalized: Record<string, unknown> = { ...value, entry };
+  for (const [scope, member] of [
+    ['serial', 'portWhitelist'], ['http', 'urlWhitelist'], ['shell', 'executableWhitelist'],
+  ]) {
+    const raw = value[scope];
+    if (raw == null) {
+      normalized[scope] = undefined;
+    } else {
+      if (!isObject(raw)) return invalid();
+      const items = raw[member] === undefined ? [] : raw[member];
+      if (!strings(items) || items.some((item) => !item.trim())) return invalid();
+      normalized[scope] = { ...raw, [member]: items };
+    }
+  }
+  if (value.ui == null) {
+    normalized.ui = undefined;
+  } else {
+    if (!isObject(value.ui)) return invalid();
+    const ui: Record<string, unknown> = { ...value.ui };
+    for (const key of ['buttons', 'menuItems']) {
+      const items = value.ui[key] === undefined ? [] : value.ui[key];
+      if (!Array.isArray(items)) return invalid();
+      ui[key] = items.map((item: unknown) => {
+        if (!isObject(item) || typeof item.id !== 'string' || typeof item.label !== 'string' ||
+          (item.target != null && typeof item.target !== 'string') ||
+          (key === 'buttons' && item.icon != null && typeof item.icon !== 'string')) return invalid();
+        return { ...item, target: item.target ?? undefined, ...(key === 'buttons' ? { icon: item.icon ?? undefined } : {}) };
+      });
+    }
+    normalized.ui = ui;
+  }
+  return normalized as unknown as PluginManifestView;
+}
 /** 插件宿主可执行动作集合——供宿主 UI 调用的回调。 */
 export interface PluginHostCallbacks {
   /** 插件崩溃/自动禁用时通知 UI（设置页刷新列表）。 */
@@ -50,6 +101,8 @@ export class PluginSession {
   private generation = 0;
   private starting: Promise<void> | null = null;
   private readonly eventsInFlight = new Map<number, number>();
+  private readonly controlsInFlight = new Set<number>();
+  private readonly pendingControls: Array<{ message: { type: string; payload?: unknown }; transfer?: Transferable[] }> = [];
   private eventSeq = 0;
   private eventBytes = 0;
   private lastBackpressureNotice = 0;
@@ -77,15 +130,7 @@ export class PluginSession {
     const start = async (): Promise<void> => {
       const raw = await pluginService.readPluginAsset(this.pluginId, 'manifest.json');
       if (generation !== this.generation) return;
-      const manifest = JSON.parse(raw) as PluginManifestView;
-      if (!manifest || manifest.id !== this.pluginId || typeof manifest.entry !== 'string' ||
-        !manifest.entry || manifest.entry.startsWith('/') || manifest.entry.includes('\\') ||
-        manifest.entry.split('/').some((part) => part === '' || part === '.' || part === '..') ||
-        !Array.isArray(manifest.permissions) ||
-        (manifest.serial !== undefined &&
-          (!manifest.serial || !Array.isArray(manifest.serial.portWhitelist)))) {
-        throw new Error('invalid plugin manifest');
-      }
+      const manifest = normalizeManifest(JSON.parse(raw), this.pluginId);
       const userCode = await pluginService.readPluginAsset(this.pluginId, manifest.entry);
       if (generation !== this.generation) return;
       const blob = new Blob([wrapPluginCode(userCode)], { type: 'application/javascript' });
@@ -111,9 +156,10 @@ export class PluginSession {
           if (bytes !== undefined) {
             this.eventsInFlight.delete(msg.eventAck);
             this.eventBytes -= bytes;
-            if (this.droppedRxEvents) {
+            this.controlsInFlight.delete(msg.eventAck);
+            this.flushControls();
+            if (this.droppedRxEvents && this.post({ type: 'rx.dropped', payload: { reason: 'worker-backpressure' } })) {
               this.droppedRxEvents = false;
-              this.post({ type: 'rx.dropped', payload: { reason: 'worker-backpressure' } });
             }
           }
         } else if (typeof msg.op === 'string') {
@@ -156,8 +202,8 @@ export class PluginSession {
       return true;
     };
     this.retireRequests.add(retire);
-    // File picker waits for explicit user action. HTTP's backend timeout is 15s.
-    if (req.op !== 'fs.openDialog') {
+    // Native file selection/export waits for explicit user action. HTTP's backend timeout is 15s.
+    if (req.op !== 'fs.openDialog' && req.op !== 'ui.panel.export') {
       timer = setTimeout(() => {
         if (retire()) respond({ ok: false, error: 'plugin RPC timed out' });
       }, req.op === 'http.request' ? PLUGIN_HTTP_RPC_TIMEOUT_MS : PLUGIN_RPC_TIMEOUT_MS);
@@ -200,6 +246,8 @@ export class PluginSession {
     for (const retire of this.retireRequests) retire();
     this.manifest = null;
     this.eventsInFlight.clear();
+    this.controlsInFlight.clear();
+    this.pendingControls.length = 0;
     this.eventBytes = 0;
     this.droppedRxEvents = false;
   }
@@ -240,17 +288,25 @@ export class PluginSession {
     if (this.crashCount >= MAX_CRASHES_BEFORE_DISABLE) callbacks?.onPluginCrashed?.(this.pluginId, reason);
   }
 
-  /** Bounded host → worker event delivery. Ack releases capacity after worker handlers settle. */
+  /** Bounded delivery: RX may drop; control events reserve independent slots and queue until ACK. */
   post(message: { type: string; payload?: unknown }, transfer?: Transferable[]): boolean {
-    const worker = this.worker;
-    if (!worker) return false;
+    if (!this.worker) return false;
+    const isRx = message.type === 'rx.line' || message.type === 'rx.bytes';
+    if (!isRx) {
+      if (this.controlsInFlight.size >= MAX_PENDING_CONTROL_MESSAGES) {
+        if (this.pendingControls.length >= MAX_PENDING_CONTROL_MESSAGES) return false;
+        this.pendingControls.push({ message, transfer });
+        return true;
+      }
+      return this.sendEvent(message, 0, true, transfer);
+    }
     let bytes = 0;
     if (message.type === 'rx.line' && Array.isArray(message.payload)) {
       bytes = message.payload.reduce((sum: number, line: { rawData?: Uint8Array }) => sum + (line.rawData?.byteLength ?? 0), 0);
     } else if (message.type === 'rx.bytes' && Array.isArray(message.payload)) {
       bytes = message.payload.reduce((sum: number, chunk: { bytes?: Uint8Array }) => sum + (chunk.bytes?.byteLength ?? 0), 0);
     }
-    if (this.eventsInFlight.size >= MAX_PENDING_MESSAGES ||
+    if (this.eventsInFlight.size - this.controlsInFlight.size >= MAX_PENDING_MESSAGES ||
       this.eventBytes + bytes > MAX_PENDING_EVENT_BYTES) {
       if (message.type === 'rx.line' || message.type === 'rx.bytes') {
         this.droppedRxEvents = true;
@@ -262,14 +318,31 @@ export class PluginSession {
       }
       return false;
     }
+    return this.sendEvent(message, bytes, false, transfer);
+  }
+
+  private flushControls(): void {
+    while (this.worker && this.pendingControls.length > 0 &&
+      this.controlsInFlight.size < MAX_PENDING_CONTROL_MESSAGES) {
+      const next = this.pendingControls.shift()!;
+      this.sendEvent(next.message, 0, true, next.transfer);
+    }
+  }
+
+  private sendEvent(message: { type: string; payload?: unknown }, bytes: number, control: boolean,
+    transfer?: Transferable[]): boolean {
+    const worker = this.worker;
+    if (!worker) return false;
     const eventId = ++this.eventSeq;
     this.eventsInFlight.set(eventId, bytes);
+    if (control) this.controlsInFlight.add(eventId);
     this.eventBytes += bytes;
     try {
       worker.postMessage({ ...message, eventId }, transfer ?? []);
       return true;
     } catch (e) {
       this.eventsInFlight.delete(eventId);
+      this.controlsInFlight.delete(eventId);
       this.eventBytes -= bytes;
       throw e;
     }

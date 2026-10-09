@@ -15,14 +15,14 @@
 export interface PluginUiButton {
   id: string;
   label: string;
-  icon?: string; // lucide-react 图标名
-  target?: string; // 'sidebar'
+  icon?: string | null; // lucide-react 图标名; null means no icon
+  target?: string | null; // 'sidebar'; null/omitted use the default extension point
 }
 
 export interface PluginUiMenuItem {
   id: string;
   label: string;
-  target?: string; // 'port-context'
+  target?: string | null; // 'port-context'; null/omitted use the default extension point
 }
 
 export interface PluginUiDecl {
@@ -34,7 +34,7 @@ export interface PluginUiDecl {
 export interface RegisteredPluginUi {
   pluginId: string;
   pluginName: string;
-  buttons: PluginUiButton[];
+  buttons: Array<Omit<PluginUiButton, 'icon'> & { icon?: string }>;
   menuItems: PluginUiMenuItem[];
 }
 
@@ -54,15 +54,16 @@ export function rebuildPluginUi(
   views: Array<{
     id: string;
     enabled: boolean;
-    manifest: { name?: string; ui?: PluginUiDecl } | null;
+    manifest: { name?: string; ui?: PluginUiDecl | null } | null;
   }>,
 ): void {
   const next: PluginUiSnapshot = { toolbarButtons: [], portMenuItems: [] };
   for (const v of views) {
     if (!v.enabled || !v.manifest?.ui) continue;
     const ui = v.manifest.ui;
-    const buttons = (ui.buttons ?? []).filter((button) => button.target === undefined || button.target === 'sidebar');
-    const menuItems = (ui.menuItems ?? []).filter((item) => item.target === undefined || item.target === 'port-context');
+    const buttons = (ui.buttons ?? []).filter((button) => button.target == null || button.target === 'sidebar')
+      .map((button) => ({ ...button, icon: button.icon ?? undefined }));
+    const menuItems = (ui.menuItems ?? []).filter((item) => item.target == null || item.target === 'port-context');
     const reg: RegisteredPluginUi = {
       pluginId: v.id,
       pluginName: v.manifest.name ?? v.id,

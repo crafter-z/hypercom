@@ -123,6 +123,16 @@ function scheduleDelivery(state: PortObserverState, deliver: () => void): void {
   }
 }
 
+/** 已排 tick 随可见性切换调度器，避免隐藏后 rAF 停摆。 */
+function handleVisibilityChange(): void {
+  for (const [portId, state] of portStates) {
+    if (state.rafId !== null || state.timerId !== null) {
+      cancelDelivery(state);
+      scheduleDelivery(state, () => deliverPort(portId));
+    }
+  }
+}
+
 /**
  * 把 pipeline 行级钩子回调接入本总线：按端口入队 + 调度投递。
  * encoding 经 pipeline 公开查询（内部已归一 ascii→utf-8）——每行查一次
@@ -244,12 +254,21 @@ function ensureWired(): void {
     if (state.ports !== prev.ports) checkModeTransition();
   });
 
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  }
+
   unwire = () => {
     unsubLine();
     unsubStore();
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }
+    for (const state of portStates.values()) cancelDelivery(state);
     wired = false;
     unwire = null;
     portStates.clear();
+    observedModes.clear();
   };
 }
 

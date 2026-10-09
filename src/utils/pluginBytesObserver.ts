@@ -85,6 +85,16 @@ function scheduleDelivery(state: PortBytesState, deliver: () => void): void {
   }
 }
 
+/** 已排 tick 随可见性切换调度器，避免隐藏后 rAF 停摆。 */
+function handleVisibilityChange(): void {
+  for (const [portId, state] of portStates) {
+    if (state.rafId !== null || state.timerId !== null) {
+      cancelDelivery(state);
+      scheduleDelivery(state, () => deliverPort(portId));
+    }
+  }
+}
+
 /** Trim oldest bytes, including prefixes of a chunk larger than the cap. */
 function enforceQueueCap(state: PortBytesState): void {
   while (state.queuedBytes > MAX_OBSERVER_QUEUE_BYTES) {
@@ -123,7 +133,8 @@ function deliverPort(portId: string): void {
   while (state.queue.length > 0 && takeBytes < MAX_BYTES_PER_DELIVERY) {
     const first = state.queue[0];
     const count = Math.min(first.bytes.length, MAX_BYTES_PER_DELIVERY - takeBytes);
-    batch.push({ ...first, bytes: first.bytes.subarray(0, count) });
+    // 跨 Worker 结构化克隆会复制整个 backing buffer；投递必须独立且精确长度。
+    batch.push({ ...first, bytes: first.bytes.slice(0, count) });
     takeBytes += count;
     state.queuedBytes -= count;
     if (count === first.bytes.length) state.queue.shift();
@@ -164,8 +175,18 @@ export function feedPluginBytes(portId: string, bytes: number[] | Uint8Array, ts
  */
 export function addPluginBytesObserver(obs: PluginBytesObserver): () => void {
   observers.add(obs);
+  if (observers.size === 1 && typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  }
   return () => {
     observers.delete(obs);
+    if (observers.size === 0) {
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+      for (const state of portStates.values()) cancelDelivery(state);
+      portStates.clear();
+    }
   };
 }
 
@@ -194,6 +215,9 @@ export function notifyBytesPortDisconnected(portId: string): void {
 
 /** 测试用：清空状态（应用生命周期不调用）。 */
 export function resetPluginBytesObserverForTest(): void {
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }
   for (const state of portStates.values()) {
     cancelDelivery(state);
   }

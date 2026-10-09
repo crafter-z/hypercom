@@ -28,15 +28,18 @@ export async function get(pluginId: string, key: string): Promise<unknown> {
 /** 写入插件 KV 值（value 必须 JSON 可序列化）。写盘整体替换。 */
 export async function set(pluginId: string, key: string, value: unknown): Promise<void> {
   const generation = generations.get(pluginId) ?? 0;
-  const m = await load(pluginId);
+  const loaded = await load(pluginId);
   if (generation !== (generations.get(pluginId) ?? 0)) throw new Error('plugin storage invalidated');
-  if (value === undefined) m.delete(key);
-  else m.set(key, value);
-  const snapshot = JSON.stringify(Object.fromEntries(m), null, 2);
   const previous = writes.get(pluginId) ?? Promise.resolve();
-  const next = previous.catch(() => {}).then(() => {
+  const next = previous.catch(() => {}).then(async () => {
     if (generation !== (generations.get(pluginId) ?? 0)) throw new Error('plugin storage invalidated');
-    return pluginService.writePluginAsset(pluginId, STATE_FILE, snapshot);
+    const current = cache.get(pluginId) ?? loaded;
+    const candidate = new Map(current);
+    if (value === undefined) candidate.delete(key);
+    else candidate.set(key, value);
+    const snapshot = JSON.stringify(Object.fromEntries(candidate), null, 2);
+    await pluginService.writePluginAsset(pluginId, STATE_FILE, snapshot);
+    if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, candidate);
   });
   writes.set(pluginId, next);
   try {

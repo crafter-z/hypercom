@@ -95,7 +95,7 @@ export const SENSITIVE_PERMISSIONS: readonly string[] = [
  * 不经过本函数也不需要（宿主是可信方）。
  */
 export function checkPortScope(
-  manifest: { serial?: { portWhitelist: string[] } } | null | undefined,
+  manifest: { serial?: { portWhitelist: string[] } | null } | null | undefined,
   portId: string,
 ): string | null {
   if (!manifest) return '插件 manifest 不可用，端口作用域无法验证';

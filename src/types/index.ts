@@ -455,14 +455,14 @@ export interface PluginManifestView {
   apiVersion: string;
   entry: string;
   permissions: string[];
-  http?: { urlWhitelist: string[] };
-  shell?: { executableWhitelist: string[] };
+  http?: { urlWhitelist: string[] } | null;
+  shell?: { executableWhitelist: string[] } | null;
   /** 发送端口作用域（P10：声明且非空=仅白名单；空数组=全拒；未声明=不限）。 */
-  serial?: { portWhitelist: string[] };
+  serial?: { portWhitelist: string[] } | null;
   ui?: {
-    buttons: { id: string; label: string; icon?: string; target?: string }[];
-    menuItems: { id: string; label: string; target?: string }[];
-  };
+    buttons: { id: string; label: string; icon?: string | null; target?: string | null }[];
+    menuItems: { id: string; label: string; target?: string | null }[];
+  } | null;
 }
 
 /** 单插件完整视图（后端 PluginView，camelCase wire 对齐）。
