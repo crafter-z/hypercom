@@ -59,6 +59,8 @@ Worker close是优先生命周期通道，释放已退休实例事件记账与�
 
 `PluginViewSurface` 提供宿主工具条和native内容矩形。原生控件按layoutRevision只处理最新几何，统一CSS px、主WebView zoom与窗口DPI；clip到client范围。几何变化不重新绑定端口或重建Worker。
 
+Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry 子 WebView 的父窗口只能是该容器，不能直接使用 Tauri 主窗口。Wry 0.55.1 的 child drop 仍会移除父窗口的 resize/focus subclass；直接挂在主窗口会使关闭、禁用或创建失败后的宿主 WebView 停留在旧尺寸，放大出现黑边、缩小不重排。容器与 WebView 共用可见性，容器按主窗 client 坐标定位并保持在宿主 WebView 上方，WebView 使用容器内 `(0, 0)`；销毁顺序为 WebView → 容器，不重装或替换主窗事件回调。
+
 原生child不参与DOM z-index。`usePluginViewOverlay` 先等待控件隐藏再绘制宿主modal/context menu/通知；嵌套guard共享完成Promise。页面隐藏/拖拽也抑制控件。解除只恢复当前有效可见会话，过期rect不能重现已销毁UI。
 
 故障/禁用/必要撤权/代次变化：serial替换回原始，plugin标签保留宿主不可用页/重试/关闭。不展示冻结模型伪装实时。Worker故障处理其所有实例，单UI异常不拖累健康页面。现有桌面弹出入口不支持插件页面，明确提示，不偷偷打开普通终端代替。
@@ -80,5 +82,9 @@ serial替换偏好 displayView保存在portMeta，走已有CAS安全元数据保
 ## 验证边界
 
 单测覆盖类型化标签/旧快照迁移、独立输入/trigger租约、JSON边界、动作去重/票据/关闭、串行输入/退休及Rust资源/权限/几何验证。Playwright浏览器mock只证明前端工作区/Worker/终端，不证明native隔离。
+
+Windows 原生回归 `retiring_plugin_children_preserves_host_resize` 需安装 WebView2 Runtime，以 `cargo test --lib --manifest-path src-tauri/Cargo.toml retiring_plugin_children_preserves_host_resize -- --ignored` 显式运行；连续销毁插件 child 后，放大/缩小宿主仍须把 WebView2 bounds 同步为最新 client rect。默认单测跳过该原生环境依赖用例。
+
+2026-10-10 resize 修复另以真实 Windows debug 应用 + Vite 前端、隔离临时配置实跑系统窗口边框拖拽：插件显示、关闭、禁用及重建后均能放大/缩小；最终构建销毁插件后 client/宿主 WebView 同步为 1330×840、1220×769，DOM 根随 viewport 重排。桌面截图确认插件内容可见且贴合内容区，宿主设置弹窗期间容器隐藏。此验证不替代 release 安装包与原生安全发布门。
 
 本次Windows真实debug可执行文件（生产前端资产）已观察到：独立settings保存经Worker写KV；独立table从SIM原始RX解析持续更新，排序/筛选及后台开波形动作可用，关闭原始后仍更新且实例保持。分屏、宿主设置遮挡恢复、无端口页禁用发送、撤权/禁用不关闭串口，以及清理调试scaffold后的替换→返回原始终端均实跑；TTY探针观察到xterm实例及提示屏跨分屏保留。Child诊断观察到无Tauri globals、网络/主窗/本机/未声明资源访问拒绝、popup及程序化clipboard read拒绝、Worker执行及frame拒绝；恶意导航使页面退休为错误，而非打开外站。临时端口/配置已清理。完整发版仍需最终release安装包和支持平台逐项验收，不能把debug探针或部分负向场景当作全部安全证明。

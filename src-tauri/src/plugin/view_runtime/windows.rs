@@ -1,6 +1,6 @@
 //! All native policies are installed on an empty raw Wry control, before Navigate.
 //! No Tauri WebView builder, initialization script, host object or invoke transport.
-use std::{cell::{Cell, RefCell}, collections::HashMap, path::PathBuf, rc::Rc, sync::{Arc, atomic::Ordering}};
+use std::{cell::{Cell, RefCell}, collections::HashMap, num::NonZeroIsize, path::PathBuf, rc::Rc, sync::{Arc, atomic::Ordering}};
 use tauri::Manager;
 use webview2_com::{
     Microsoft::Web::WebView2::Win32::*,
@@ -10,16 +10,51 @@ use webview2_com::{
     PermissionRequestedEventHandler, ProcessFailedEventHandler,
     WebResourceRequestedEventHandler,
 };
-use windows::{core::{HSTRING, Interface, PWSTR}, Win32::{System::Com::CoTaskMemFree, UI::{Shell::SHCreateMemStream, Input::KeyboardAndMouse::GetKeyState}}};
-use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
+use windows::{core::{w, HSTRING, Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND, System::Com::CoTaskMemFree, UI::{Shell::SHCreateMemStream, Input::KeyboardAndMouse::GetKeyState, WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SetWindowPos, ShowWindow, HWND_TOP, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS}}}};
+use wry::{raw_window_handle::{HandleError, HasWindowHandle, Win32WindowHandle, WindowHandle}, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
 use super::{resources::Resource, Rect, Session};
 
 struct EphemeralDirectory(PathBuf);
 impl Drop for EphemeralDirectory {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
 }
+// Wry 0.55.1 removes its parent's resize/focus subclass even for child views.
+// Never make the Tauri window that parent: retiring a plugin would detach the
+// main WebView's subclass. This private HWND owns only this plugin's child.
+struct ViewParent(HWND);
+impl ViewParent {
+    fn new(parent: HWND) -> Result<Self, String> {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("STATIC"), PCWSTR::null(),
+                WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                0, 0, 0, 0, Some(parent), None, None, None,
+            )
+        }.map_err(|e| e.to_string())?;
+        Ok(Self(hwnd))
+    }
+    fn set_bounds(&self, x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+        unsafe { SetWindowPos(self.0, Some(HWND_TOP), x, y, width, height, SWP_NOACTIVATE) }
+            .map_err(|e| e.to_string())
+    }
+    fn set_visible(&self, visible: bool) {
+        let _ = unsafe { ShowWindow(self.0, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+    }
+}
+impl HasWindowHandle for ViewParent {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let hwnd = NonZeroIsize::new(self.0.0 as isize).ok_or(HandleError::Unavailable)?;
+        // Created and used on the UI thread; this borrow cannot outlive its owner.
+        Ok(unsafe { WindowHandle::borrow_raw(Win32WindowHandle::new(hwnd).into()) })
+    }
+}
+impl Drop for ViewParent {
+    fn drop(&mut self) { let _ = unsafe { DestroyWindow(self.0) }; }
+}
 struct Control {
     webview: WebView,
+    // Field order keeps the private parent alive until Wry has been dropped.
+    parent: ViewParent,
     _context: wry::WebContext,
     _directory: EphemeralDirectory,
     session: Arc<Session>,
@@ -47,6 +82,7 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
     let browser_args = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-blink-features=FileSystemAccess,FileSystemAccessLocal,FileSystemAccessOriginPrivate,FileSystem,WebUSB,WebHID,Serial,WebBluetooth,PaymentRequest,SharedWorker --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-background-networking --proxy-server=http://127.0.0.1:9 --proxy-bypass-list=<-loopback> --host-resolver-rules=\"MAP * ~NOTFOUND\"";
     // Wry with no URL/HTML starts with an empty document. Plugin assets are not
     // reachable until every required native policy and CDP operation succeeds.
+    let parent = ViewParent::new(HWND(window.hwnd().map_err(|e| e.to_string())?.0))?;
     let webview = WebViewBuilder::new_with_web_context(&mut context)
         .with_visible(false)
         .with_incognito(true)
@@ -59,7 +95,7 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
         .with_ipc_handler(move |request| {
             if request.uri().to_string() == ipc_shell { super::receive(&ipc_app, &ipc_session, request.body()); }
         })
-        .build_as_child(window).map_err(|e| { let _ = std::fs::remove_dir_all(&directory); e.to_string() })?;
+        .build_as_child(&parent).map_err(|e| e.to_string())?;
     let core = webview.webview();
     let env = webview.environment();
     let styles = declaration.styles.iter().map(|path| format!("<link rel=\"stylesheet\" href=\"/{path}\">" )).collect::<String>();
@@ -182,7 +218,7 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
     cdp(&core, "Network.enable", "{}")?;
     cdp(&core, "Network.emulateNetworkConditions", "{\"offline\":true,\"latency\":0,\"downloadThroughput\":0,\"uploadThroughput\":0}")?;
     cdp(&core, "Network.setBlockedURLs", "{\"urls\":[\"http://*\",\"ws://*\",\"wss://*\",\"file://*\",\"ftp://*\",\"tauri://*\",\"ipc://*\",\"asset://*\"]}")?;
-    let control = Control { webview, _context: context, _directory: directory_guard, session: session.clone(), revision: None };
+    let control = Control { webview, parent, _context: context, _directory: directory_guard, session: session.clone(), revision: None };
     if !session.alive.load(Ordering::Acquire) { return Err("视图创建期间已退休".into()); }
     unsafe { core.Navigate(&HSTRING::from(shell_url)).map_err(|e| e.to_string())?; }
     CONTROLS.with(|controls| { controls.borrow_mut().insert(session.binding.view_instance_id.clone(), control); });
@@ -224,12 +260,18 @@ pub fn update(window: &tauri::Window, id: &str, rect: Rect, visible: bool, revis
         let top = (rect.y * factor).clamp(0.0, size.height as f64);
         let right = ((rect.x + rect.width) * factor).clamp(left, size.width as f64);
         let bottom = ((rect.y + rect.height) * factor).clamp(top, size.height as f64);
+        let width = (right - left).round() as i32;
+        let height = (bottom - top).round() as i32;
+        control.parent.set_bounds(left.round() as i32, top.round() as i32, width, height)?;
         control.webview.set_bounds(wry::Rect {
-            position: wry::dpi::PhysicalPosition::new(left.round() as i32, top.round() as i32).into(),
-            size: wry::dpi::PhysicalSize::new((right - left).round() as u32, (bottom - top).round() as u32).into(),
+            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+            size: wry::dpi::PhysicalSize::new(width as u32, height as u32).into(),
         }).map_err(|e| e.to_string())?;
         control.webview.zoom(rect.zoom_percent / 100.0).map_err(|e| e.to_string())?;
-        control.webview.set_visible(visible && right > left && bottom > top && window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true)).map_err(|e| e.to_string())
+        let visible = visible && width > 0 && height > 0 && window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true);
+        control.webview.set_visible(visible).map_err(|e| e.to_string())?;
+        control.parent.set_visible(visible);
+        Ok(())
     })
 }
 pub fn send(id: &str, source: &str) -> Result<(), String> {
@@ -242,3 +284,37 @@ pub fn send(id: &str, source: &str) -> Result<(), String> {
 }
 pub fn destroy(id: &str) { CONTROLS.with(|controls| { controls.borrow_mut().remove(id); }); }
 pub fn clear() { CONTROLS.with(|controls| { controls.borrow_mut().clear(); }); }
+
+#[cfg(test)]
+mod tests {
+    use super::{EphemeralDirectory, ViewParent};
+    use windows::{core::{w, PCWSTR}, Win32::{Foundation::RECT, UI::WindowsAndMessaging::{CreateWindowExW, GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW}}};
+    use wry::{WebContext, WebViewBuilder, WebViewExtWindows};
+
+    #[test]
+    #[ignore = "requires the native Windows WebView2 runtime"]
+    fn retiring_plugin_children_preserves_host_resize() {
+        let directory = EphemeralDirectory(std::env::temp_dir().join(format!("hypercom-resize-test-{}", uuid::Uuid::new_v4())));
+        let mut context = WebContext::new(Some(directory.0.clone()));
+        let host = ViewParent(unsafe {
+            CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), PCWSTR::null(), WS_OVERLAPPEDWINDOW, 0, 0, 800, 600, None, None, None, None).unwrap()
+        });
+        let webview = WebViewBuilder::new_with_web_context(&mut context).with_visible(false).build(&host).unwrap();
+        for (width, height) in [(1000, 700), (600, 400), (1100, 800)] {
+            // Covers retirement and dropping a child before the host commits
+            // it (e.g. when installing a required native policy fails).
+            let parent = ViewParent::new(host.0).unwrap();
+            let child = WebViewBuilder::new_with_web_context(&mut context).with_visible(false).build_as_child(&parent).unwrap();
+            drop(child);
+            drop(parent);
+            unsafe {
+                SetWindowPos(host.0, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+                let mut client = RECT::default();
+                let mut bounds = RECT::default();
+                GetClientRect(host.0, &mut client).unwrap();
+                webview.controller().Bounds(&mut bounds).unwrap();
+                assert_eq!((bounds.left, bounds.top, bounds.right, bounds.bottom), (0, 0, client.right, client.bottom));
+            }
+        }
+    }
+}
