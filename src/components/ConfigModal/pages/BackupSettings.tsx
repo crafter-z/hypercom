@@ -2,11 +2,12 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { configService, fileService } from '../../../services/tauri';
+import { configService, fileService, pluginService } from '../../../services/tauri';
 import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { clampNumber } from '../../../utils/clampNumber';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
+import { syncPluginListSnapshot } from '../../../utils/pluginConfigSnapshot';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
@@ -92,9 +93,12 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(t('backupSettings.importInvalid')));
         return;
       }
-      // 备份恢复刻意整体替换插件授权；普通设置保存则在 Rust 侧保留权威状态。
+      // Only the backend can decide whether backed-up grants still name installed code.
       await configService.setConfig(bundle.config, true);
-      useAppStore.getState().setConfig(bundle.config);
+      const restored = await configService.getConfig();
+      const current = useAppStore.getState().config;
+      useAppStore.getState().setConfig({ ...restored, revision: Math.max(restored.revision ?? 0, current.revision ?? 0), pluginConfigs: current.pluginConfigs });
+      syncPluginListSnapshot(await pluginService.listPlugins());
       notifySuccess('backupSettings.importSuccess');
       // 重载让 useAppInit 从 config.json 重新加载实体到各 store。
       setTimeout(() => window.location.reload(), 1200);

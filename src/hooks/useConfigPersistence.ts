@@ -16,9 +16,8 @@ import { commitUpdateMode } from '../utils/updateService';
  */
 export function collectPortMeta(ports: SerialPort[]): PortMetaEntry[] {
   return ports
-    .filter((p) => p.alias != null || p.isHidden || p.mode === 'tty')
-    // issue #11：只有 tty 需要持久化（trx 是默认值，缺省即 trx）。
-    .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode }));
+    .filter((p) => p.alias != null || p.isHidden || p.mode === 'tty' || p.displayView != null)
+    .map((p) => ({ portId: p.id, alias: p.alias, isHidden: p.isHidden, mode: p.mode, displayView: p.displayView }));
 }
 
 /** An absent port cannot be edited from this window. Keep its latest persisted

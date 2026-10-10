@@ -6,6 +6,7 @@ import { diagLogService, fileService } from '../../services/tauri';
 import { save } from '@tauri-apps/plugin-dialog';
 import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
 import { dropDiagLogPending, parseDiagLogLine } from '../../utils/diagLog';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 type LevelFilter = 'all' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -33,6 +34,7 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const [diagPath, setDiagPath] = useState('');
   const [busy, setBusy] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+  const overlayReady = usePluginViewOverlay();
 
   const refresh = useCallback(async () => {
     try {
@@ -113,6 +115,7 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
     .split('\n')
     .map(parseDiagLogLine)
     .filter((l) => levelFilter === 'all' || l.level === levelFilter);
+  if (!overlayReady) return null;
 
   return (
     <div className="modal-overlay" onClick={onClose}>

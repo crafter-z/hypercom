@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../../stores/useAppStore';
+import { getActivePortId, findSerialTabByPortId, useAppStore } from '../../stores/useAppStore';
 import { Plus } from 'lucide-react';
 import {
   useSerialPorts, useSerialConnection, useSimulation, usePortToolActions, useGitBashSim,
@@ -50,7 +50,8 @@ const Sidebar: React.FC = () => {
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
 
   const handleOpenTab = useCallback((portId: string) => {
-    if (useAppStore.getState().activeTabId === portId) return;
+    const state = useAppStore.getState();
+    if (findSerialTabByPortId(state, portId)?.id === state.activeTabId) return;
     // Defer openTab to next microtask to decouple from @dnd-kit event processing.
     queueMicrotask(() => openTab(portId));
   }, [openTab]);
@@ -163,7 +164,7 @@ const Sidebar: React.FC = () => {
           onCloseAll={handleCloseAll}
           onSortByPort={handleSortByPort}
           pluginButtons={pluginButtons}
-          onPluginClick={(reg, buttonId) => dispatchPluginUiClick(reg, buttonId, { portId: useAppStore.getState().activeTabId ?? undefined })}
+          onPluginClick={(reg, buttonId) => dispatchPluginUiClick(reg, buttonId, { portId: getActivePortId(useAppStore.getState()) ?? undefined })}
         />
         <SearchBox value={search} onChange={setSearch} />
 

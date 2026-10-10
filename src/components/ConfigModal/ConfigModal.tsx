@@ -21,6 +21,7 @@ import ToolSettings from './pages/ToolSettings';
 import TriggerSettings from './pages/TriggerSettings';
 import PluginSettings from './pages/PluginSettings';
 
+import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 interface NavItem {
   id: string;
   labelKey: string;
@@ -44,6 +45,7 @@ const ConfigModal: React.FC = () => {
   const { t } = useTranslation();
   const isConfigOpen = useSystemStore((s) => s.ui.isConfigOpen);
   const configActiveTab = useSystemStore((s) => s.ui.configActiveTab);
+  const overlayReady = usePluginViewOverlay(isConfigOpen);
   const toggleConfigModal = useSystemStore((s) => s.toggleConfigModal);
   const setConfigActiveTab = useSystemStore((s) => s.setConfigActiveTab);
   const setConfig = useAppStore((s) => s.setConfig);
@@ -77,7 +79,7 @@ const ConfigModal: React.FC = () => {
     const snap = configSnapshotRef.current;
     if (snap) {
       const cur = useAppStore.getState().config;
-      setConfig({ ...snap, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs });
+      setConfig({ ...snap, revision: cur.revision, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs });
       configSnapshotRef.current = null;
     }
     toggleConfigModal(false);
@@ -102,7 +104,7 @@ const ConfigModal: React.FC = () => {
     }
   };
 
-  if (!isConfigOpen) return null;
+  if (!isConfigOpen || !overlayReady) return null;
 
   const renderContent = () => {
     switch (configActiveTab) {

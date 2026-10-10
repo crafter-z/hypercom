@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle } from 'lucide-react';
-import { useAppStore } from '../../stores/useAppStore';
+import { getTabPortId, useAppStore } from '../../stores/useAppStore';
 import { isPortLost } from '../../hooks';
 import type { TabItem } from '../../types';
 
@@ -19,7 +19,13 @@ export function filterLostTabIds(
   tabs: TabItem[],
   isLost: (id: string) => boolean,
 ): string[] {
-  return tabs.filter((t) => isLost(t.id)).map((t) => t.id);
+  const seen = new Set<string>();
+  return tabs.filter((tab) => {
+    const portId = getTabPortId(tab);
+    if (!portId || seen.has(portId) || !isLost(portId)) return false;
+    seen.add(portId);
+    return true;
+  }).map((tab) => tab.id);
 }
 
 /**

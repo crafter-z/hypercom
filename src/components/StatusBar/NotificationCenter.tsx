@@ -4,6 +4,7 @@ import { Bell, Pin, Trash2 } from 'lucide-react';
 import type { ToastItem } from '../../stores/useToastStore';
 import { useToastStore } from '../../stores/useToastStore';
 import { useOutsideDismiss } from '../shared/useOutsideDismiss';
+import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 
 /** Badge caps at 99+ so the status bar chip never blows out. */
 const MAX_BADGE_COUNT = 99;
@@ -33,6 +34,7 @@ const NotificationCenter: React.FC = () => {
   const setCenterOpen = useToastStore((s) => s.setCenterOpen);
   const clearAll = useToastStore((s) => s.clearAll);
   const dismiss = useToastStore((s) => s.dismiss);
+  const overlayReady = usePluginViewOverlay(centerOpen);
 
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -63,7 +65,7 @@ const NotificationCenter: React.FC = () => {
         )}
       </button>
 
-      {centerOpen && (
+      {centerOpen && overlayReady && (
         <div className="notify-panel" role="dialog" aria-label={t('notify.title')}>
           <div className="notify-header">
             <span className="notify-title">{t('notify.title')}</span>

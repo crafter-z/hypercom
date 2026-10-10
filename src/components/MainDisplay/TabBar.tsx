@@ -10,7 +10,7 @@ import {
   horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { useAppStore } from '../../stores/useAppStore';
+import { useAppStore, getTabPortId } from '../../stores/useAppStore';
 
 interface TabBarProps {
   tabs: TabItem[];
@@ -55,11 +55,12 @@ const tabItemClassName = (tab: TabItem, isActive: boolean): string =>
  * the single source of truth for what a tab looks like. */
 const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, onTabClose }) => (
   <>
-    <span className="tab-status-dot" />
+    {getTabPortId(tab) !== null && <span className="tab-status-dot" />}
     {isPortDisconnected && (
       <AlertTriangle size={12} className="tab-warning-icon" />
     )}
     <span className="tab-title">{tab.title}</span>
+    {tab.kind === 'plugin' && <span className="tab-plugin-source" title={tab.pluginId}>{tab.pluginId}</span>}
     {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
     {!tab.isPinned && (
       <span
@@ -152,10 +153,10 @@ const TabBar: React.FC<TabBarProps> = ({
     const portMap = new Map(ports.map(p => [p.id, p]));
     const set = new Set<string>();
     for (const tab of tabs) {
-      const port = portMap.get(tab.id);
-      if (!port || port.status === 'disconnected') {
-        set.add(tab.id);
-      }
+      const portId = getTabPortId(tab);
+      if (!portId) continue;
+      const port = portMap.get(portId);
+      if (!port || port.status === 'disconnected') set.add(tab.id);
     }
     return set;
   }, [ports, tabs]);
@@ -176,7 +177,7 @@ const TabBar: React.FC<TabBarProps> = ({
     ];
 
     // 弹出入口：仅未弹出时提供（弹出后主窗内容区为占位，标签右键不再给此项）。
-    if (onPopOut && !tab?.poppedOut) {
+    if (onPopOut && tab?.kind === 'serial' && !tab.poppedOut) {
       items.push({
         label: t('terminalPopout.popOut'),
         icon: <ExternalLink size={14} />,
@@ -187,10 +188,11 @@ const TabBar: React.FC<TabBarProps> = ({
     // 批量连接/断开所有标签页对应的串口（issue #2-1）。
     if (onConnectAllTabs || onDisconnectAllTabs) {
       const hasConnectable = allTabs.some(tb => {
-        const port = portMap.get(tb.id);
+        const portId = getTabPortId(tb);
+        const port = portId ? portMap.get(portId) : undefined;
         return !!port && port.status !== 'connected' && port.status !== 'connecting';
       });
-      const hasDisconnectable = allTabs.some(tb => portMap.get(tb.id)?.status === 'connected');
+      const hasDisconnectable = allTabs.some(tb => { const id = getTabPortId(tb); return id !== null && portMap.get(id)?.status === 'connected'; });
       items.push(
         { type: 'separator' },
         { label: t('tabBar.contextMenu.openAll'), icon: <PlugZap size={14} />, onClick: () => onConnectAllTabs?.(), disabled: !hasConnectable },
@@ -200,14 +202,15 @@ const TabBar: React.FC<TabBarProps> = ({
 
     // 外部工具：与侧边栏端口右键菜单同文案同行为（issue #2-2）。
     // 执行入口始终可见；未配置时点击跳转配置页。运行中显示终止。
-    if (onRunTool || onConfigTool) {
-      const toolRunning = portMap.get(tabId)?.toolRunning === true;
+    const targetPortId = getTabPortId(tab);
+    if (targetPortId && (onRunTool || onConfigTool)) {
+      const toolRunning = portMap.get(targetPortId)?.toolRunning === true;
       items.push({ type: 'separator' });
       if (onRunTool) {
         items.push(
           toolRunning
-            ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool?.(tabId), danger: true }
-            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(tabId) },
+            ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool?.(targetPortId), danger: true }
+            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(targetPortId) },
         );
       }
       if (onConfigTool) {

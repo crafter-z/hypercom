@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 interface LicenseRow {
   name: string;
@@ -23,6 +24,9 @@ const FRONTEND_LICENSES: LicenseRow[] = [
 
 const BACKEND_LICENSES: LicenseRow[] = [
   { name: 'tauri (v2)', license: 'Apache-2.0 OR MIT' },
+  { name: 'wry', license: 'Apache-2.0 OR MIT' },
+  { name: 'webview2-com', license: 'MIT' },
+  { name: 'windows', license: 'MIT OR Apache-2.0' },
   { name: 'serialport', license: 'MIT OR Apache-2.0' },
   { name: 'tokio', license: 'MIT' },
   { name: 'serde / serde_json', license: 'MIT OR Apache-2.0' },
@@ -57,6 +61,8 @@ interface LicensesDialogProps {
 
 const LicensesDialog: React.FC<LicensesDialogProps> = ({ onClose }) => {
   const { t } = useTranslation();
+  const overlayReady = usePluginViewOverlay();
+  if (!overlayReady) return null;
 
   return (
     <div className="modal-overlay" onClick={onClose}>

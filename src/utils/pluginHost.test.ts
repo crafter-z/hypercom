@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
-import { PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CONTROL_MESSAGES, MAX_PENDING_EVENT_BYTES } from './pluginHost';
+import { PluginHostManager, PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CONTROL_MESSAGES, MAX_PENDING_EVENT_BYTES } from './pluginHost';
 import { executeHostApi } from './pluginHostApi';
+import { resetPluginSnapshotForTest, syncStorePluginConfigs } from './pluginConfigSnapshot';
 
 const readAsset = vi.fn();
 const disable = vi.fn();
@@ -15,7 +16,7 @@ vi.mock('./pluginHostApi', () => ({ executeHostApi: vi.fn().mockResolvedValue('r
 
 const pluginId = 'com.example.worker';
 const manifest = { id: pluginId, name: 'Worker', entry: 'dist/entry.js', permissions: [], serial: { portWhitelist: [] } };
-const entry = { id: pluginId, enabled: true, grantedPermissions: [] as string[] };
+const entry = { id: pluginId, installGeneration: 'install-a', enabled: true, grantedPermissions: [] as string[] };
 
 // tsconfig targets ES2020, before Promise.withResolvers is typed.
 function deferredResult<T>() {
@@ -36,6 +37,7 @@ class TestWorker {
 
 beforeEach(() => {
   TestWorker.created = [];
+  resetPluginSnapshotForTest();
   readAsset.mockReset();
   disable.mockReset();
   vi.mocked(executeHostApi).mockReset();
@@ -45,7 +47,7 @@ beforeEach(() => {
     createObjectURL: vi.fn(() => 'blob:plugin'),
     revokeObjectURL: vi.fn(),
   });
-  useAppStore.getState().setConfig({ pluginConfigs: [entry] });
+  useAppStore.getState().setConfig({ revision: 0, pluginConfigs: [entry] });
   readAsset.mockImplementation((_id: string, path: string) =>
     Promise.resolve(path === 'manifest.json' ? JSON.stringify(manifest) : 'self.plugin.on("rx.line", () => {});'));
 });
@@ -94,11 +96,6 @@ describe('PluginSession worker lifetime', () => {
     expect(normalized?.http).toEqual(variant.http == null ? undefined : { urlWhitelist: 'urlWhitelist' in variant.http ? variant.http.urlWhitelist : [] });
     expect(normalized?.shell).toEqual(variant.shell == null ? undefined : { executableWhitelist: 'executableWhitelist' in variant.shell ? variant.shell.executableWhitelist : [] });
     if (variant.ui === null) expect(normalized?.ui).toBeUndefined();
-    if (variant.ui && 'buttons' in variant.ui) {
-      expect(normalized?.ui).toEqual({
-        buttons: [{ id: 'button', label: 'Button', icon: undefined, target: undefined }], menuItems: [],
-      });
-    }
     session.stop();
   });
 
@@ -339,7 +336,7 @@ describe('PluginSession worker lifetime', () => {
 
   it('retries worker crashes then persists disabled after repeated failures', async () => {
     vi.useFakeTimers();
-    disable.mockResolvedValue([{ ...entry, enabled: false }]);
+    disable.mockResolvedValue({ revision: 1, pluginConfigs: [{ ...entry, enabled: false }] });
     const session = new PluginSession(pluginId);
     await session.start();
     for (let i = 0; i < 3; i++) {
@@ -354,5 +351,104 @@ describe('PluginSession worker lifetime', () => {
     await Promise.resolve();
     expect(disable).toHaveBeenCalledOnce();
     expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(false);
+  });
+});
+
+describe('PluginHostManager startup recovery', () => {
+  it('recovers an initial busy read without requiring a config change', async () => {
+    vi.useFakeTimers();
+    readAsset.mockRejectedValueOnce(new Error('plugin disk gate busy'));
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    expect(manager.get(pluginId)?.loaded).toBe(false);
+    await vi.advanceTimersByTimeAsync(501);
+    expect(manager.get(pluginId)?.loaded).toBe(true);
+    expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(true);
+    expect(disable).not.toHaveBeenCalled();
+    manager.dispose();
+  });
+
+  it('counts concurrent starts as one failed attempt rather than prematurely disabling', async () => {
+    vi.useFakeTimers();
+    readAsset.mockRejectedValueOnce(new Error('busy'));
+    const manager = new PluginHostManager();
+    await Promise.all([manager.enable(pluginId), manager.enable(pluginId), manager.enable(pluginId)]);
+    await vi.advanceTimersByTimeAsync(501);
+    expect(manager.get(pluginId)?.loaded).toBe(true);
+    expect(disable).not.toHaveBeenCalled();
+    manager.dispose();
+  });
+
+  it('turns repeated initial failure into a persisted disabled state, not an enabled idle plugin', async () => {
+    vi.useFakeTimers();
+    readAsset.mockRejectedValue(new Error('unreadable entry'));
+    disable.mockResolvedValue({ revision: 1, pluginConfigs: [{ ...entry, enabled: false }] });
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(false);
+    expect(disable).toHaveBeenCalledWith(pluginId, false, 'install-a');
+    expect(TestWorker.created).toEqual([]);
+    manager.dispose();
+  });
+
+  it('cancels startup retry when the installation is disabled', async () => {
+    vi.useFakeTimers();
+    readAsset.mockRejectedValueOnce(new Error('busy'));
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    syncStorePluginConfigs({ revision: 1, pluginConfigs: [{ ...entry, enabled: false }] });
+    manager.syncWithConfig();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(manager.get(pluginId)).toBeNull();
+    expect(TestWorker.created).toEqual([]);
+    manager.dispose();
+  });
+
+  it('replaces the old worker when code identity changes even if both states are enabled', async () => {
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    const old = TestWorker.created[0];
+    syncStorePluginConfigs({ revision: 1, pluginConfigs: [{ ...entry, installGeneration: 'install-b' }] });
+    manager.syncWithConfig();
+    await vi.waitFor(() => expect(manager.get(pluginId)?.loaded).toBe(true));
+    expect(old.terminate).toHaveBeenCalledOnce();
+    expect(manager.get(pluginId)?.installGeneration).toBe('install-b');
+    manager.dispose();
+  });
+
+  it('does not disable replacement code from an old worker crash', async () => {
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    const old = TestWorker.created[0];
+    syncStorePluginConfigs({ revision: 1, pluginConfigs: [{ ...entry, installGeneration: 'install-b' }] });
+    manager.syncWithConfig();
+    await vi.waitFor(() => expect(manager.get(pluginId)?.loaded).toBe(true));
+    old.onerror?.({ message: 'late old crash' });
+    expect(manager.get(pluginId)?.loaded).toBe(true);
+    expect(disable).not.toHaveBeenCalled();
+    manager.dispose();
+  });
+
+  it('fails closed for a confirmed absent entry instead of running an empty script', async () => {
+    readAsset.mockImplementation((_id: string, path: string) => Promise.resolve(path === 'manifest.json' ? JSON.stringify(manifest) : null));
+    const session = new PluginSession(pluginId);
+    await expect(session.start()).rejects.toThrow('entry missing');
+    expect(TestWorker.created).toEqual([]);
+  });
+
+  it('manual refresh retries a stopped session after the bounded disable command failed', async () => {
+    vi.useFakeTimers();
+    readAsset.mockRejectedValue(new Error('busy'));
+    disable.mockRejectedValue(new Error('temporary config write failure'));
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(manager.get(pluginId)?.loaded).toBe(false);
+    readAsset.mockImplementation((_id: string, path: string) => Promise.resolve(path === 'manifest.json' ? JSON.stringify(manifest) : ''));
+    manager.syncWithConfig(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(manager.get(pluginId)?.loaded).toBe(true);
+    manager.dispose();
   });
 });

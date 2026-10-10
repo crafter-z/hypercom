@@ -10,7 +10,8 @@ import { getRxPipeline } from '../utils/rxPipeline';
 import { addPluginRxObserver, resetPluginObserverForTest } from '../utils/pluginObserver';
 import type { RxPipeline, RxPipelineOptions } from '../utils/rxPipeline';
 import { lostPortIds } from './disconnectTracking';
-import { useSerialReceive } from './useSerialReceive';
+import { useSerialReceive, openTabForConnectedPort } from './useSerialReceive';
+import { subscribePluginViewInput } from '../utils/pluginViewInput';
 
 const eventHandlers = vi.hoisted(() => ({
   data: null as ((event: SerialDataEvent) => void) | null,
@@ -40,10 +41,10 @@ vi.mock('../utils/rxPipeline', async (importOriginal) => {
   };
 });
 vi.mock('../utils/ttyService', () => ({ ttyService: { feed: vi.fn(), disconnect: vi.fn(), resync: vi.fn() } }));
-vi.mock('../utils/trafficStats', () => ({ trafficStats: { addRx: vi.fn() } }));
-vi.mock('../utils/pluginBytesObserver', () => ({ hasPluginBytesObservers: () => false, feedPluginBytes: vi.fn(), notifyBytesPortDisconnected: vi.fn() }));
+vi.mock('../utils/trafficStats', () => ({ trafficStats: { addRx: vi.fn(), release: vi.fn() } }));
+vi.mock('../utils/pluginBytesObserver', () => ({ hasPluginBytesObservers: () => false, feedPluginBytes: vi.fn(), notifyBytesPortDisconnected: vi.fn(), discardPluginBytesPortInput: vi.fn() }));
 vi.mock('../utils/triggerEngine', () => ({ evaluateTriggers: vi.fn(() => []) }));
-vi.mock('./useSerialSend', () => ({ sendToPort: vi.fn() }));
+vi.mock('./useSerialSend', () => ({ sendToPort: vi.fn(), releaseSendHistory: vi.fn() }));
 
 const template = (id: string, header: string): ProtocolTemplate => ({
   id, name: id, isEnabled: true, headerBytes: header,
@@ -67,6 +68,7 @@ beforeEach(async () => {
   lostPortIds.delete('COM1');
   useAppStore.setState({ ports: [port()], tabs: [], paneTree: { id: 'main', type: 'leaf', tabIds: [], size: 1 }, activeTabId: null, focusedPaneId: 'main' });
   useRuleStore.getState().setProtocolTemplates([template('A', 'AA BB'), template('B', 'CC DD')]);
+  useRuleStore.getState().setTriggerRules([]);
   useAppStore.getState().openTab('COM1');
   root = createRoot(document.createElement('div'));
   await act(async () => { root.render(createElement(Probe)); });
@@ -105,7 +107,7 @@ describe('useSerialReceive protocol lifecycle', () => {
     useAppStore.getState().updatePort('COM1', { mode: 'tty' });
     useAppStore.getState().updatePort('COM1', { mode: 'trx' });
     receive([0xaa, 0xcc]);
-    useAppStore.getState().closeTab('COM1');
+    useAppStore.getState().closeTab(useAppStore.getState().tabs.find(tab => tab.kind === 'serial' && tab.portId === 'COM1')!.id);
     receive([0xaa, 0xcc]);
     expect(texts()).toContain('plain');
     expect(output.rows.filter(row => row.parsedFields)).toHaveLength(0);
@@ -137,6 +139,7 @@ describe('useSerialReceive protocol lifecycle', () => {
 
   it('delivers each protocol frame once through the real RX observer bus, preserving bytes and order without replay events', () => {
     vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
     const lines: Array<{ rawData: number[]; encoding: string; seq: number; ts: number }> = [];
     const detached = vi.fn();
     const dropped = vi.fn();
@@ -166,6 +169,62 @@ describe('useSerialReceive protocol lifecycle', () => {
       expect(dropped).not.toHaveBeenCalled();
     } finally {
       unsubscribe();
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps protocol state for independent line leases after the serial UUID tab closes', () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const onInput = vi.fn();
+    const unsubscribe = subscribePluginViewInput({
+      pluginId: 'p', installGeneration: 'g', viewId: 'plot', placement: 'workspace-tab',
+      tabId: 'plugin-tab', tabSessionId: 'session', viewInstanceId: 'instance',
+      workerEpoch: 1, streamEpoch: 1, boundPortId: 'COM1', portMode: 'trx',
+    }, 'lines', { onInput, onDiscontinuity: vi.fn(), onStatus: vi.fn() });
+    try {
+      useAppStore.getState().updatePort('COM1', { protocolTemplateId: 'A' });
+      receive([0xaa, 0xbb, 0x06]);
+      const serialTab = useAppStore.getState().tabs.find(tab => tab.kind === 'serial' && tab.portId === 'COM1')!;
+      useAppStore.getState().closeTab(serialTab.id);
+      receive([1, 2, 13, 10]);
+      vi.advanceTimersByTime(20);
+      expect(onInput).toHaveBeenCalledWith([expect.objectContaining({ rawData: new Uint8Array([0xaa, 0xbb, 0x06, 1, 2, 13, 10]) })], 1, false);
+      openTabForConnectedPort('COM1');
+      expect(useAppStore.getState().tabs).toHaveLength(0);
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+      visibility.mockRestore();
+    }
+  });
+
+  it('keeps trigger-only assembly without tabs and releases partial input when the last applicable rule is disabled', () => {
+    vi.useFakeTimers();
+    const rule = { id: 'trigger', name: 'Trigger', pattern: 'ready', isRegex: false, matchType: 'contains' as const,
+      actionType: 'alert' as const, actionContent: 'ready', actionIsHex: false, isEnabled: true, portId: 'COM1' };
+    const assembled = vi.fn();
+    const remove = getRxPipeline().addOnLineAssembledListener(assembled);
+    try {
+      const tabId = useAppStore.getState().tabs[0].id;
+      useRuleStore.getState().setTriggerRules([rule]);
+      useAppStore.getState().closeTab(tabId);
+      receive(utf8('rea'));
+      receive(utf8('dy\n'));
+      expect(assembled).toHaveBeenCalledWith('COM1', expect.objectContaining({ text: 'ready' }));
+      receive(utf8('discard'));
+      useRuleStore.getState().updateTriggerRule('trigger', { isEnabled: false });
+      expect(vi.getTimerCount()).toBe(0);
+      useRuleStore.getState().updateTriggerRule('trigger', { isEnabled: true, portId: 'COM2' });
+      receive(utf8('ignored'));
+      expect(vi.getTimerCount()).toBe(0);
+      useRuleStore.getState().updateTriggerRule('trigger', { portId: undefined });
+      receive(utf8('fresh\n'));
+      expect(assembled).toHaveBeenLastCalledWith('COM1', expect.objectContaining({ text: 'fresh' }));
+    } finally {
+      remove();
+      useRuleStore.getState().setTriggerRules([]);
       vi.useRealTimers();
     }
   });

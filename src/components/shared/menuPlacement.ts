@@ -16,7 +16,7 @@ interface MenuPosition {
  * otherwise overflow the window. Shared by ContextMenu and
  * TextEditContextMenu, which carried byte-identical copies of this effect.
  */
-export function useMenuPlacement(x: number, y: number) {
+export function useMenuPlacement(x: number, y: number, ready = true) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<MenuPosition>({ x, y });
 
@@ -35,7 +35,7 @@ export function useMenuPlacement(x: number, y: number) {
     if (nx < 0) nx = 0;
     if (ny < 0) ny = 0;
     if (nx !== x || ny !== y) setPos({ x: nx, y: ny });
-  }, [x, y]);
+  }, [x, y, ready]);
 
   return { ref, pos };
 }

@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { useAppStore } from '../../../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../../../stores/useAppStore';
 import { notifyError, notifySuccess, useToastStore } from '../../../stores/useToastStore';
 import { eventService, serialService } from '../../../services/tauri';
 import type { FileProgressPayload } from '../../../services/tauri';
@@ -80,7 +80,7 @@ export function useFileSend(portId: string | null): FileSendControls {
   }, []);
 
   const startFileSend = useCallback(async () => {
-    const id = portIdRef.current;
+    const id = getActivePortId(useAppStore.getState());
     if (!id) return;
     // 守卫在弹文件选择框之前：不该让用户先挑完文件再被告知端口没连。
     if (!isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) {
@@ -93,6 +93,7 @@ export function useFileSend(portId: string | null): FileSendControls {
     }
     const path = await open({ multiple: false });
     if (!path || typeof path !== 'string') return;
+    if (getActivePortId(useAppStore.getState()) !== id || !isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) return;
     try {
       setProgress({ sent: 0, total: 0 });
       await serialService.sendFile({ portId: id, path, chunkSize: 1024, delayMs: 10 });
@@ -107,7 +108,7 @@ export function useFileSend(portId: string | null): FileSendControls {
   // 取消正在进行的文件发送：置位后端 per-port 取消标志，读循环在下一块前退出，
   // 随后后端必发 done 事件清除进度条（取消不弹成功提示）。
   const cancelFileSend = useCallback(() => {
-    const id = portIdRef.current;
+    const id = getActivePortId(useAppStore.getState());
     if (!id) return;
     serialService
       .cancelFileSend(id)

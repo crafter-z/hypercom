@@ -1,0 +1,12 @@
+.plugin-view-tab { flex: 1; min-height: 0; min-width: 0; flex-direction: column; overflow: hidden; }
+.plugin-view-toolbar { display: flex; align-items: center; gap: 8px; padding: 5px 8px; flex-shrink: 0; min-height: 30px; border-bottom: 1px solid var(--border-color); background: var(--bg-secondary); font-size: 12px; }
+.plugin-view-toolbar select { max-width: 280px; min-width: 100px; }
+.plugin-view-source { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-view-error-inline { color: var(--warning-color); }
+.plugin-view-body { flex: 1; min-height: 0; min-width: 0; position: relative; overflow: hidden; }
+.plugin-view-placeholder { display: flex; height: 100%; align-items: center; justify-content: center; flex-direction: column; gap: 12px; padding: 20px; color: var(--text-secondary); }
+.plugin-view-placeholder p { max-width: 600px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-tab-launcher { align-self: flex-end; max-width: 320px; margin: 4px 8px; }
+.serial-content-host { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
+.serial-content-layer { position: absolute; min-height: 0; min-width: 0; flex-direction: column; overflow: hidden; pointer-events: auto; background: var(--bg-primary); }
+.tab-plugin-source { max-width: 110px; overflow: hidden; text-overflow: ellipsis; font-size: 10px; color: var(--text-secondary); margin-left: 5px; }

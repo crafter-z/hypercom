@@ -27,7 +27,7 @@
 
 import type { Terminal } from '@xterm/xterm';
 import { serialService, gitBashSimService } from '../services/tauri';
-import { useAppStore } from '../stores/useAppStore';
+import { findSerialTabByPortId, useAppStore } from '../stores/useAppStore';
 import { trafficStats } from './trafficStats';
 import { createDecoder } from './lineText';
 
@@ -259,7 +259,7 @@ export const ttyService = {
     // replay），否则直接丢弃——否则重开标签页会 replay 关闭期间积压的数据，
     // 违反「重新开始新一轮输出」的语义（TRX 侧 appendTerminalLines 同款丢弃）。
     // 只在 term 为 null 时查 store：正常挂载（term 非 null）零额外开销。
-    if (state.term === null && !useAppStore.getState().tabs.some((t) => t.id === portId)) {
+    if (state.term === null && !findSerialTabByPortId(useAppStore.getState(), portId)) {
       return;
     }
     if (!state.decoder) {

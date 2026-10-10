@@ -2,6 +2,9 @@
  * HyperCom 串口调试工具 - 全局类型定义
  * 涵盖串口、配置、日志、UI状态等所有核心数据结构
  */
+import type { PluginViewDeclaration, PluginViewPreference } from './pluginViews';
+export * from './pluginViews';
+
 
 // ==================== 串口相关 ====================
 
@@ -38,6 +41,7 @@ export interface SerialPort {
   toolRunning?: boolean;
   // 端口工作模式：trx=传统收发 | tty=终端模式（issue #11）
   mode?: PortMode;
+  displayView?: PluginViewPreference | null;
 }
 
 /** 数据位 */
@@ -77,15 +81,30 @@ export interface PortGroup {
 
 // ==================== 标签页相关 ====================
 
-/** 主窗口标签页 */
-export interface TabItem {
-  id: string;              // 对应串口ID
-  title: string;           // 显示标题
-  isPinned: boolean;       // 是否固定
-  // 活动态不在标签上：渲染按 `activeTabId === id` 派生（见 useAppStore）。
-  splitPaneId: string;     // 所属分屏区域ID
-  poppedOut?: boolean;     // 终端已 detach 到独立弹出窗（主窗显示占位，关窗回贴）
+interface WorkspaceTabItem {
+  id: string;
+  title: string;
+  isPinned: boolean;
+  splitPaneId: string;
 }
+
+export interface SerialTabItem extends WorkspaceTabItem {
+  kind: 'serial';
+  portId: string;
+  poppedOut?: boolean;
+}
+
+export interface PluginTabItem extends WorkspaceTabItem {
+  kind: 'plugin';
+  pluginId: string;
+  installGeneration: string;
+  viewId: string;
+  boundPortId: string | null;
+  instanceKey: string;
+  restoreOnStartup: boolean;
+}
+
+export type TabItem = SerialTabItem | PluginTabItem;
 
 /** 分屏方向 */
 export type SplitDirection = 'horizontal' | 'vertical';
@@ -384,6 +403,7 @@ export interface PortMetaEntry {
   alias?: string;
   isHidden: boolean;
   mode?: PortMode;
+  displayView?: PluginViewPreference | null;
 }
 
 // ==================== 系统状态相关 ====================
@@ -457,6 +477,7 @@ export interface PluginManifestView {
   apiVersion: string;
   entry: string;
   permissions: string[];
+  requires?: string[];
   http?: { urlWhitelist: string[] } | null;
   shell?: { executableWhitelist: string[] } | null;
   /** 发送端口作用域（P10：声明且非空=仅白名单；空数组=全拒；未声明=不限）。 */
@@ -464,6 +485,7 @@ export interface PluginManifestView {
   ui?: {
     buttons: { id: string; label: string; icon?: string | null; target?: string | null }[];
     menuItems: { id: string; label: string; target?: string | null }[];
+    views?: PluginViewDeclaration[];
   } | null;
 }
 
@@ -479,12 +501,19 @@ export interface PluginView {
   manifest: PluginManifestView | null;
   manifestError: string | null;
   installedAt: number | null;
+  /** Identity of the installed code reviewed by the user; changes on every install. */
+  installGeneration: string;
 }
 
-/** list_plugins 响应：UI 视图 + 权威插件状态数组（原样写回 store.config）。 */
-export interface PluginListResponse {
-  plugins: PluginView[];
+/** Authoritative plugin state, ordered by the backend configuration revision. */
+export interface PluginStateSnapshot {
+  revision: number;
   pluginConfigs: PluginConfigEntry[];
+}
+
+/** list_plugins adds scanned manifests to the same ordered state snapshot. */
+export interface PluginListResponse extends PluginStateSnapshot {
+  plugins: PluginView[];
 }
 
 /** 插件 HTTP 请求参数（后端 PluginHttpRequest）。 */
@@ -506,6 +535,7 @@ export interface PluginHttpResponse {
 /** config.json 插件状态实体（仅状态——enabled/权限；KV 存插件目录 data/）。 */
 export interface PluginConfigEntry {
   id: string;
+  installGeneration: string;
   enabled: boolean;
   grantedPermissions: string[];
   installedAt?: number | null;

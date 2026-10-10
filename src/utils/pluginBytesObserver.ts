@@ -32,18 +32,21 @@ export interface ObservedRxBytes {
 
 /** 观察者接口（一个启用且授予 rx:bytes 的插件 = 一个订阅者）。 */
 export interface PluginBytesObserver {
+  /** A fixed view binding; omitted for legacy all-port observers. */
+  portId?: string;
   /** 批量投递（每帧至多 MAX_BYTES_PER_DELIVERY 字节）。插件侧自行节流/转发。 */
-  onRxBytes(batch: ObservedRxBytes[]): void;
+  onRxBytes(batch: ObservedRxBytes[], gapBefore?: boolean): void;
   onRxDetached?(event: { portId: string; reason: 'port-disconnected' }): void;
   onRxDropped?(event: { portId: string; reason: 'queue-overflow'; count: number }): void;
 }
 
 /** 每端口转发状态。 */
 interface PortBytesState {
-  queue: ObservedRxBytes[];
+  queue: Array<ObservedRxBytes & { order: number }>;
   /** 当前排队总字节数（快速容量判定，避免每次 O(n) 求和）。 */
   queuedBytes: number;
   droppedBytes: number;
+  gapBefore: boolean;
   rafId: number | null;
   timerId: number | null;
 }
@@ -53,6 +56,8 @@ const portStates = new Map<string, PortBytesState>();
 
 /** 已注册订阅者。 */
 const observers = new Set<PluginBytesObserver>();
+let nextOrder = 0;
+const observerStart = new WeakMap<PluginBytesObserver, number>();
 
 /** 页面隐藏判断（镜像 rxPipeline）。 */
 function isDocumentHidden(): boolean {
@@ -110,6 +115,7 @@ function enforceQueueCap(state: PortBytesState): void {
       state.droppedBytes += overflow;
     }
   }
+  if (state.droppedBytes > 0) state.gapBefore = true;
 }
 
 /** 向全部订阅者投递某端口排队的字节（每订阅者最多 MAX_BYTES_PER_DELIVERY 字节）。 */
@@ -120,6 +126,7 @@ function deliverPort(portId: string): void {
     const count = state.droppedBytes;
     state.droppedBytes = 0;
     for (const obs of observers) {
+      if (obs.portId !== undefined && obs.portId !== portId) continue;
       try {
         obs.onRxDropped?.({ portId, reason: 'queue-overflow', count });
       } catch (e) {
@@ -128,13 +135,15 @@ function deliverPort(portId: string): void {
     }
   }
   if (state.queue.length === 0) return;
+  const gapBefore = state.gapBefore;
+  state.gapBefore = false;
   let takeBytes = 0;
-  const batch: ObservedRxBytes[] = [];
+  const batch: Array<ObservedRxBytes & { order: number }> = [];
   while (state.queue.length > 0 && takeBytes < MAX_BYTES_PER_DELIVERY) {
     const first = state.queue[0];
     const count = Math.min(first.bytes.length, MAX_BYTES_PER_DELIVERY - takeBytes);
     // 跨 Worker 结构化克隆会复制整个 backing buffer；投递必须独立且精确长度。
-    batch.push({ ...first, bytes: first.bytes.slice(0, count) });
+    batch.push({ ...first, bytes: first.bytes.subarray(0, count) });
     takeBytes += count;
     state.queuedBytes -= count;
     if (count === first.bytes.length) state.queue.shift();
@@ -142,8 +151,15 @@ function deliverPort(portId: string): void {
   }
   if (state.queue.length > 0) scheduleDelivery(state, () => deliverPort(portId));
   for (const obs of observers) {
+    if (portStates.get(portId) !== state) break;
+    if (obs.portId !== undefined && obs.portId !== portId) continue;
     try {
-      obs.onRxBytes(batch);
+      const selected = obs.portId === undefined ? batch : batch.filter(item => item.order >= (observerStart.get(obs) ?? 0));
+      if (selected.length > 0) {
+        const delivery = selected.map(({ order: _order, ...item }) => ({ ...item, bytes: item.bytes.slice() }));
+        if (obs.portId === undefined) obs.onRxBytes(delivery);
+        else obs.onRxBytes(delivery, gapBefore && selected[0] === batch[0]);
+      }
     } catch (e) {
       console.error('[pluginBytesObserver] observer onRxBytes failed:', e);
     }
@@ -155,15 +171,15 @@ function deliverPort(portId: string): void {
  * 零订阅者时 O(1) 早退——无插件不产生开销。
  */
 export function feedPluginBytes(portId: string, bytes: number[] | Uint8Array, ts: number): void {
-  if (observers.size === 0) return;
+  if (!hasPluginBytesObservers(portId)) return;
   if (bytes.length === 0) return;
   let state = portStates.get(portId);
   if (!state) {
-    state = { queue: [], queuedBytes: 0, droppedBytes: 0, rafId: null, timerId: null };
+    state = { queue: [], queuedBytes: 0, droppedBytes: 0, gapBefore: false, rafId: null, timerId: null };
     portStates.set(portId, state);
   }
-  const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  state.queue.push({ portId, bytes: raw, ts });
+  const raw = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  state.queue.push({ portId, bytes: raw, ts, order: nextOrder++ });
   state.queuedBytes += raw.length;
   enforceQueueCap(state);
   scheduleDelivery(state, () => deliverPort(portId));
@@ -174,12 +190,16 @@ export function feedPluginBytes(portId: string, bytes: number[] | Uint8Array, ts
  * 首个订阅者触发接线（零订阅者不产生任何开销——feedPluginBytes 早退）。
  */
 export function addPluginBytesObserver(obs: PluginBytesObserver): () => void {
+  observerStart.set(obs, nextOrder);
   observers.add(obs);
   if (observers.size === 1 && typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', handleVisibilityChange);
   }
   return () => {
     observers.delete(obs);
+    for (const portId of portStates.keys()) {
+      if (!hasPluginBytesObservers(portId)) discardPluginBytesPortInput(portId);
+    }
     if (observers.size === 0) {
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -191,8 +211,19 @@ export function addPluginBytesObserver(obs: PluginBytesObserver): () => void {
 }
 
 /** 是否已有订阅者（设置页/宿主桥查询用）。 */
-export function hasPluginBytesObservers(): boolean {
-  return observers.size > 0;
+export function hasPluginBytesObservers(portId?: string): boolean {
+  if (portId === undefined) return observers.size > 0;
+  for (const observer of observers) {
+    if (observer.portId === undefined || observer.portId === portId) return true;
+  }
+  return false;
+}
+
+/** Clear pending data without inventing a physical disconnect. */
+export function discardPluginBytesPortInput(portId: string): void {
+  const state = portStates.get(portId);
+  if (state) cancelDelivery(state);
+  portStates.delete(portId);
 }
 
 /** 端口断线：清该端口遗留队列（断流，插件可感知——字节流没了）。 */
@@ -205,6 +236,7 @@ export function notifyBytesPortDisconnected(portId: string): void {
     portStates.delete(portId);
   }
   for (const observer of observers) {
+    if (observer.portId !== undefined && observer.portId !== portId) continue;
     try {
       observer.onRxDetached?.({ portId, reason: 'port-disconnected' });
     } catch (error) {

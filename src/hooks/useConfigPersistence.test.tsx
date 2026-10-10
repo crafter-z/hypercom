@@ -232,6 +232,20 @@ describe('metadata persistence with absent ports', () => {
   const offline: PortMetaEntry = { portId: 'COM9', alias: 'offline', isHidden: true, mode: 'tty' };
   const online: PortMetaEntry = { portId: 'COM1', alias: 'online', isHidden: true, mode: 'tty' };
 
+  it('preserves offline display preferences, updates online choices and persists clearing', async () => {
+    const displayView = { pluginId: 'sensor', installGeneration: 'g1', viewId: 'table' };
+    const offlineView = { portId: 'COM9', isHidden: false, displayView };
+    backend = { ...backend, portMeta: [offlineView] };
+    useAppStore.setState({ ports: [port('COM1', { displayView })] });
+    await saveCurrentPortMeta();
+    expect(backend.portMeta).toEqual([offlineView, { portId: 'COM1', isHidden: false, displayView }]);
+    expect(await save()).toBe(true);
+    expect(backend.portMeta).toEqual([offlineView, { portId: 'COM1', isHidden: false, displayView }]);
+    useAppStore.getState().updatePort('COM1', { displayView: null });
+    await saveCurrentPortMeta();
+    expect(backend.portMeta).toEqual([offlineView]);
+  });
+
   it('retains offline aliases, hidden and TTY when an online port changes via auto and full save', async () => {
     backend = { ...backend, portMeta: [offline, online] };
     useAppStore.setState({ ports: [port('COM1', { alias: 'changed', isHidden: true, mode: 'tty' })] });

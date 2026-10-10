@@ -1,6 +1,7 @@
 import React from 'react';
 import { useToastStore } from '../../../stores/useToastStore';
 import Toast from './Toast';
+import { usePluginViewOverlay } from '../usePluginViewOverlay';
 
 /**
  * Toast container — mount ONCE at the app root (see App.tsx).
@@ -16,6 +17,8 @@ import Toast from './Toast';
  */
 const ToastContainer: React.FC = () => {
   const toasts = useToastStore((s) => s.toasts);
+  const overlayReady = usePluginViewOverlay(toasts.length > 0);
+  if (toasts.length > 0 && !overlayReady) return null;
 
   return (
     <div className="toast-container" aria-live="polite">

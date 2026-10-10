@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useAppStore } from '../../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { clearTerminal, releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { useTranslation } from 'react-i18next';
@@ -33,10 +33,11 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const defaultBaudRates = useAppStore(s => s.config.defaultBaudRates);
   const setOpState = useOperationStore(s => s.setOpState);
   // issue #11：端口工作模式切换（trx=传统收发 | tty=终端模式）
-  const activeTabId = useAppStore(s => s.activeTabId);
+  const activePortId = useAppStore(s => getActivePortId(s));
   const setPortMode = useAppStore(s => s.setPortMode);
   const portMode = useAppStore((s) => {
-    const port = s.activeTabId ? s.ports.find((p) => p.id === s.activeTabId) : undefined;
+    const portId = getActivePortId(s);
+    const port = s.ports.find((p) => p.id === portId);
     return port?.mode ?? 'trx';
   });
 
@@ -133,16 +134,17 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   // 避免旧模式 buffered 的数据混入新模式首屏。TRX 侧清 viewport buffer + 冲刷
   // RxPipeline（切 TTY 时销毁 TRX 缓冲）；TTY 侧清 ttyService 屏幕（若已挂 TTY 视图）。
   const handleModeChange = useCallback((mode: PortMode) => {
-    if (!activeTabId) return;
-    setPortMode(activeTabId, mode);
-    clearTerminal(activeTabId);
+    const activePortId = getActivePortId(useAppStore.getState());
+    if (!activePortId) return;
+    setPortMode(activePortId, mode);
+    clearTerminal(activePortId);
     if (mode === 'tty') {
       // TRX 缓冲销毁；切回 TRX 时 TerminalView 挂载会重建 manager
-      releaseViewportManager(activeTabId);
+      releaseViewportManager(activePortId);
     }
-    getRxPipeline().flushAndReset(activeTabId);
-    ttyService.clear(activeTabId);
-  }, [activeTabId, setPortMode]);
+    getRxPipeline().flushAndReset(activePortId);
+    ttyService.clear(activePortId);
+  }, [activePortId, setPortMode]);
 
   return (
     <div className="op-section op-section-params">

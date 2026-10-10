@@ -2,6 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { X } from 'lucide-react';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 interface ShortcutRow {
   keys: string;
@@ -21,8 +22,9 @@ const HotkeyHelpDialog: React.FC = () => {
   const { t } = useTranslation();
   const isOpen = useSystemStore((s) => s.ui.isHotkeyHelpOpen);
   const setUIState = useSystemStore((s) => s.setUIState);
+  const overlayReady = usePluginViewOverlay(isOpen);
 
-  if (!isOpen) return null;
+  if (!isOpen || !overlayReady) return null;
 
   const close = () => setUIState({ isHotkeyHelpOpen: false });
 

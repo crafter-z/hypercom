@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { Settings, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -14,22 +14,22 @@ const TitleBar: React.FC = () => {
   const { t } = useTranslation();
 
   // F.5: derive active port info with primitive selectors (no unnecessary re-renders)
-  const activeTabId = useAppStore((s) => s.activeTabId);
+  const activePortId = useAppStore((s) => getActivePortId(s));
   const activePortStatus = useAppStore((s) => {
-    if (!s.activeTabId) return 'none';
-    return s.ports.find((p) => p.id === s.activeTabId)?.status ?? 'none';
+    const portId = getActivePortId(s);
+    return s.ports.find((p) => p.id === portId)?.status ?? 'none';
   });
   const activePortBaudRate = useAppStore((s) => {
-    if (!s.activeTabId) return null;
-    return s.ports.find((p) => p.id === s.activeTabId)?.baudRate ?? null;
+    const portId = getActivePortId(s);
+    return s.ports.find((p) => p.id === portId)?.baudRate ?? null;
   });
 
   const titleText = useMemo(() => {
-    if (activeTabId && activePortStatus === 'connected' && activePortBaudRate != null) {
-      return `${activeTabId} (${activePortBaudRate}) — HyperCom`;
+    if (activePortId && activePortStatus === 'connected' && activePortBaudRate != null) {
+      return `${activePortId} (${activePortBaudRate}) — HyperCom`;
     }
     return 'HyperCom';
-  }, [activeTabId, activePortStatus, activePortBaudRate]);
+  }, [activePortId, activePortStatus, activePortBaudRate]);
 
   // F.5: sync OS-level window title
   useEffect(() => {

@@ -18,6 +18,7 @@ vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }));
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }));
 vi.mock('../../stores/useToastStore', () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, args?: { percent?: number }) => args?.percent === undefined ? key : `${key}:${args.percent}` }) }));
+vi.mock('./usePluginViewOverlay', () => ({ usePluginViewOverlay: (open = true) => open }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const testStorage = new Map<string, string>();

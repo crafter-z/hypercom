@@ -11,10 +11,11 @@
  * 焦点在 input/textarea/select 时忽略除 Escape 外的所有快捷键。
  */
 import { useEffect, useRef } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { clearTerminal } from '../utils/terminal/viewportManager';
 import { useSerialConnection } from './useSerialConnection';
+import { isRawSerialDisplay } from '../utils/pluginViewRuntime';
 
 function isFormField(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
@@ -49,12 +50,13 @@ export function useHotkeys(): void {
 
       if (ctrl && (e.key === 'l' || e.key === 'L')) {
         e.preventDefault();
-        const { activeTabId } = useAppStore.getState();
-        if (activeTabId) clearTerminal(activeTabId);
+        const state = useAppStore.getState();
+        const tab = state.tabs.find((item) => item.id === state.activeTabId);
+        if (tab?.kind === 'serial' && isRawSerialDisplay(tab)) clearTerminal(tab.portId);
       } else if (ctrl && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
-        const { activeTabId } = useAppStore.getState();
-        if (activeTabId) void toggleRef.current(activeTabId);
+        const portId = getActivePortId(useAppStore.getState());
+        if (portId) void toggleRef.current(portId);
       } else if (ctrl && (e.key === 'b' || e.key === 'B')) {
         e.preventDefault();
         const system = useSystemStore.getState();

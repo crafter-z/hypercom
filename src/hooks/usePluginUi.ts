@@ -13,6 +13,8 @@ import {
   getPluginUiSnapshot,
   type RegisteredPluginUi,
 } from '../utils/pluginUiRegistry';
+import { useAppStore } from '../stores/useAppStore';
+import { issuePluginActionToken } from '../utils/pluginViewRuntime';
 
 /** 订阅注册表快照（React 重渲染驱动）。 */
 export function usePluginUi() {
@@ -24,15 +26,17 @@ export function dispatchPluginUiClick(
   reg: RegisteredPluginUi,
   buttonId: string,
   context?: { portId?: string },
+  origin: 'sidebar' | 'port-context' = 'sidebar',
 ): void {
   const session = pluginHost.get(reg.pluginId);
   if (!session) {
     console.warn(`[usePluginUi] plugin ${reg.pluginId} 未启用，无法分发点击`);
     return;
   }
+  const actionToken = issuePluginActionToken(reg.pluginId, origin === 'port-context' ? context?.portId ?? null : null, useAppStore.getState().focusedPaneId);
   session.post({
     type: 'ui.buttonClick',
-    payload: { buttonId, context },
+    payload: { buttonId, context, actionToken },
   });
 }
 

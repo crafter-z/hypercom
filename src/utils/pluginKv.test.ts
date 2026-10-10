@@ -33,14 +33,17 @@ afterEach(() => {
 });
 
 describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）', () => {
-  it('get 无 state.json 时返回 undefined（读失败降级空）', async () => {
-    mockRead.mockRejectedValue(new Error('no file'));
+  it('initializes only a backend-confirmed absent state file', async () => {
+    mockRead.mockResolvedValue(null);
     expect(await pluginKv.get('com.example.test', 'key')).toBeUndefined();
+    await pluginKv.set('com.example.test', 'created', true);
     expect(mockRead).toHaveBeenCalledWith('com.example.test', 'data/state.json');
+    expect(mockRead).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockWrite.mock.calls[0][2] as string)).toEqual({ created: true });
   });
 
   it('set 后 get 命中缓存并写盘', async () => {
-    mockRead.mockRejectedValue(new Error('no file')); // 首次读失败
+    mockRead.mockResolvedValue(null);
     await pluginKv.set('com.example.test', 'baud', 115200);
     expect(mockWrite).toHaveBeenCalledWith(
       'com.example.test',
@@ -53,21 +56,68 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
   });
 
   it('set undefined 删除 key', async () => {
-    mockRead.mockRejectedValue(new Error('no file'));
+    mockRead.mockResolvedValue(null);
     await pluginKv.set('com.example.test', 'a', 1);
     await pluginKv.set('com.example.test', 'a', undefined);
     expect(await pluginKv.get('com.example.test', 'a')).toBeUndefined();
-  });
-
-  it('损坏的 state.json 降级为空（不炸）', async () => {
-    mockRead.mockResolvedValue('not json{{{');
-    expect(await pluginKv.get('com.example.test', 'x')).toBeUndefined();
   });
 
   it('读回已有 state.json 内容', async () => {
     mockRead.mockResolvedValue(JSON.stringify({ saved: 'yes' }));
     expect(await pluginKv.get('com.example.test', 'saved')).toBe('yes');
   });
+
+  it('retries a busy read before a subsequent set and preserves existing disk keys', async () => {
+    let disk = JSON.stringify({ saved: 'private data', count: 2 });
+    mockRead.mockRejectedValueOnce(new Error('plugin IO busy'));
+    mockRead.mockImplementation(async () => disk);
+    mockWrite.mockImplementation(async (_id: string, _path: string, content: string) => { disk = content; });
+    await expect(pluginKv.get('com.example.test', 'saved')).rejects.toThrow('plugin IO busy');
+    expect(mockWrite).not.toHaveBeenCalled();
+    await pluginKv.set('com.example.test', 'added', 3);
+    expect(mockRead).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(disk)).toEqual({ saved: 'private data', count: 2, added: 3 });
+    expect(await pluginKv.get('com.example.test', 'saved')).toBe('private data');
+  });
+
+  it.each(['permission denied', 'read IO failure'])('propagates %s without caching empty state', async (message) => {
+    mockRead.mockRejectedValue(new Error(message));
+    await expect(pluginKv.get('com.example.test', 'saved')).rejects.toThrow(message);
+    await expect(pluginKv.set('com.example.test', 'added', 3)).rejects.toThrow(message);
+    expect(mockRead).toHaveBeenCalledTimes(2);
+    expect(mockWrite).not.toHaveBeenCalled();
+  });
+
+  it.each(['not json{{{', 'null', '[]', '42', '"text"', 'true'])(
+    'does not cache or overwrite invalid persisted state %s', async (disk) => {
+      mockRead.mockResolvedValue(disk);
+      await expect(pluginKv.get('com.example.test', 'saved')).rejects.toBeInstanceOf(Error);
+      await expect(pluginKv.set('com.example.test', 'added', 3)).rejects.toBeInstanceOf(Error);
+      expect(mockRead).toHaveBeenCalledTimes(2);
+      expect(mockWrite).not.toHaveBeenCalled();
+      mockRead.mockResolvedValue('{"repaired":true}');
+      await pluginKv.set('com.example.test', 'added', 3);
+      expect(JSON.parse(mockWrite.mock.calls[0][2] as string)).toEqual({ repaired: true, added: 3 });
+    },
+  );
+
+  it('deduplicates failed first reads and lets the next call retry the disk state', async () => {
+    let rejectRead!: (error: Error) => void;
+    mockRead.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { rejectRead = reject; }));
+    const outcomes = Promise.allSettled([
+      pluginKv.get('com.example.test', 'saved'),
+      pluginKv.set('com.example.test', 'added', true),
+    ]);
+    expect(mockRead).toHaveBeenCalledTimes(1);
+    rejectRead(new Error('plugin IO busy'));
+    expect((await outcomes).every((result) => result.status === 'rejected')).toBe(true);
+    expect(mockWrite).not.toHaveBeenCalled();
+    mockRead.mockResolvedValue('{"saved":true}');
+    await pluginKv.set('com.example.test', 'added', true);
+    expect(mockRead).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(mockWrite.mock.calls[0][2] as string)).toEqual({ saved: true, added: true });
+  });
+
   it('并发首载去重：两次并发 set 共享一次读盘，双键保全（复审竞态修复）', async () => {
     // 首次读盘挂起——两个 set 并发到达，必须共享同一 Promise（一次 read）。
     let releaseRead!: (v: string) => void;
@@ -88,7 +138,7 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
     expect(lastWrite).toEqual({ a: 1, b: 2 });
   });
   it('serializes disk snapshots even when the first backend write is delayed', async () => {
-    mockRead.mockRejectedValue(new Error('no file'));
+    mockRead.mockResolvedValue(null);
     let releaseFirst!: () => void;
     mockWrite.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }));
     mockWrite.mockResolvedValue(undefined);
@@ -100,6 +150,60 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
     releaseFirst();
     await Promise.all([first, second]);
     expect(JSON.parse(mockWrite.mock.calls[1][2] as string)).toEqual({ a: 1, b: 2 });
+  });
+
+  it('does not cache an old inflight read after invalidation', async () => {
+    let release!: (value: string) => void;
+    mockRead.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    const oldRead = pluginKv.get('com.example.test', 'old');
+    const rejected = expect(oldRead).rejects.toThrow('plugin storage invalidated');
+    invalidate('com.example.test');
+    mockRead.mockResolvedValue('{"new":true}');
+    expect(await pluginKv.get('com.example.test', 'new')).toBe(true);
+    release('{"old":true}');
+    await rejected;
+    expect(await pluginKv.get('com.example.test', 'old')).toBeUndefined();
+    expect(mockRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a set invalidated during its first read without writing', async () => {
+    let release!: (value: string) => void;
+    mockRead.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    const pending = pluginKv.set('com.example.test', 'old', true);
+    const rejected = expect(pending).rejects.toThrow('plugin storage invalidated');
+    invalidate('com.example.test');
+    release('{}');
+    await rejected;
+    expect(mockWrite).not.toHaveBeenCalled();
+  });
+
+  it('invalidates queued writes while keeping new writes behind a running disk write', async () => {
+    mockRead.mockResolvedValue('{}');
+    let release!: () => void;
+    mockWrite.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const running = pluginKv.set('com.example.test', 'running', true);
+    await vi.waitFor(() => expect(mockWrite).toHaveBeenCalledTimes(1));
+    const queued = pluginKv.set('com.example.test', 'queued', true);
+    await Promise.resolve();
+    const rejected = expect(queued).rejects.toThrow('plugin storage invalidated');
+    invalidate('com.example.test');
+    mockRead.mockResolvedValue('{"reinstalled":true}');
+    const fresh = pluginKv.set('com.example.test', 'fresh', true);
+    await Promise.resolve();
+    expect(mockWrite).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([running, rejected, fresh]);
+    expect(mockWrite).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(mockWrite.mock.calls[1][2] as string)).toEqual({ reinstalled: true, fresh: true });
+  });
+
+  it('keeps the last committed snapshot after a failed write and continues the queue', async () => {
+    mockRead.mockResolvedValue('{"saved":true}');
+    mockWrite.mockRejectedValueOnce(new Error('disk full'));
+    await expect(pluginKv.set('com.example.test', 'lost', true)).rejects.toThrow('disk full');
+    await pluginKv.set('com.example.test', 'next', true);
+    expect(JSON.parse(mockWrite.mock.calls[1][2] as string)).toEqual({ saved: true, next: true });
+    expect(await pluginKv.get('com.example.test', 'lost')).toBeUndefined();
   });
 });
 

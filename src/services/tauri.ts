@@ -31,3 +31,4 @@ export * from './file';
 export * from './tool';
 export * from './event';
 export * from './plugin';
+export * from './pluginView';

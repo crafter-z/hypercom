@@ -12,6 +12,7 @@ import { parseChangelog, splitBold } from '../../utils/changelog';
 import { updateTiming, beginUpdateInstall, finishUpdateInstall, dismissUpdate } from '../../utils/updateService';
 import type { UpdateProgressPayload } from '../../types';
 import { X, Download, Clock, Ban, ExternalLink } from 'lucide-react';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 /** changelog 块 → React 节点（issue #12 二轮：Markdown 轻量渲染替代 <pre> 原文）。 */
 const ChangelogBlocks: React.FC<{ notes: string }> = ({ notes }) => (
@@ -39,6 +40,7 @@ const UpdateDialog: React.FC = () => {
   const { t } = useTranslation();
   const isOpen = useSystemStore((s) => s.ui.isUpdateOpen);
   const candidate = useSystemStore((s) => s.ui.updateCandidate);
+  const overlayReady = usePluginViewOverlay(isOpen && candidate !== null);
   const setUIState = useSystemStore((s) => s.setUIState);
   const { saveConfig } = useConfigPersistence();
 
@@ -69,7 +71,7 @@ const UpdateDialog: React.FC = () => {
     }
   }, [isOpen]);
 
-  if (!isOpen || !candidate) return null;
+  if (!isOpen || !candidate || !overlayReady) return null;
 
   const busy = downloading || saving;
   const remindLater = () => {

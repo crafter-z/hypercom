@@ -19,6 +19,8 @@ import type {
   SerialPort,
   PortGroup,
   TabItem,
+  SerialTabItem,
+  PluginTabItem,
   PaneNode,
   LeafPane,
   BranchPane,
@@ -139,7 +141,9 @@ export interface AppStoreState {
   movePortToGroup: (portId: string, groupId: string | undefined) => void;
 
   // 标签页管理
-  openTab: (portId: string) => void;
+  openTab: (portId: string) => string;
+  addPluginTab: (input: Omit<PluginTabItem, 'id' | 'splitPaneId' | 'isPinned'>, options?: { paneId?: string; activate?: boolean }) => string;
+  setTabTitle: (tabId: string, title: string) => void;
   closeTab: (tabId: string) => void;
   closeTabsToRight: (tabId: string) => void;
   closeTabsToLeft: (tabId: string) => void;
@@ -168,8 +172,20 @@ export interface AppStoreState {
   // 会话恢复
   restoreSessionSnapshot: (snapshot: {
     paneTree: PaneNode;
-    tabs: Array<{ id: string; title: string; splitPaneId: string; isPinned: boolean }>;
+    tabs: TabItem[];
   }) => void;
+}
+
+export function getTabPortId(tab: TabItem | undefined): string | null {
+  return tab?.kind === 'serial' ? tab.portId : tab?.boundPortId ?? null;
+}
+
+export function getActivePortId(state: Pick<AppStoreState, 'tabs' | 'activeTabId'>): string | null {
+  return getTabPortId(state.tabs.find((tab) => tab.id === state.activeTabId));
+}
+
+export function findSerialTabByPortId(state: Pick<AppStoreState, 'tabs'>, portId: string): SerialTabItem | undefined {
+  return state.tabs.find((tab): tab is SerialTabItem => tab.kind === 'serial' && tab.portId === portId);
 }
 
 // ==================== 标签页关闭 / 焦点修复 ====================
@@ -283,7 +299,7 @@ export const useAppStore = create<AppStoreState>()(
         Object.assign(port, patch);
         // Update tab title when alias changes
         if ('alias' in patch || 'name' in patch) {
-          const tab = state.tabs.find(t => t.id === portId);
+          const tab = findSerialTabByPortId(state, portId);
           if (tab) {
             tab.title = `${port.id} ${port.alias || ''}`.trim();
           }
@@ -333,31 +349,50 @@ export const useAppStore = create<AppStoreState>()(
 
     openTab: (portId) => {
       useTerminalStore.getState().ensureTerminal(portId);
+      let tabId = '';
       set((state) => {
-        // Harden against a dangling focusedPaneId: verify it still exists in the
-        // tree, otherwise fall back to the first leaf. Trusting a stale id would
-        // push the tab to state.tabs without adding it to any leaf → orphan tab.
-        const focusedLeaf = findLeafById(state.paneTree, state.focusedPaneId);
-        const targetPaneId = focusedLeaf?.id ?? collectLeaves(state.paneTree)[0]?.id ?? 'main';
-        const existing = state.tabs.find(t => t.id === portId);
+        const existing = findSerialTabByPortId(state, portId);
         if (existing) {
-          state.activeTabId = portId;
+          tabId = existing.id;
+          state.activeTabId = existing.id;
           state.focusedPaneId = existing.splitPaneId;
           revalidateFocus(state);
           return;
         }
-        const port = state.ports.find(p => p.id === portId);
-        const tab: TabItem = {
-          id: portId,
+        revalidateFocus(state);
+        const port = state.ports.find((p) => p.id === portId);
+        tabId = crypto.randomUUID();
+        state.tabs.push({
+          kind: 'serial', id: tabId, portId,
           title: port ? `${port.id} ${port.alias || ''}`.trim() : portId,
-          isPinned: false,
-          splitPaneId: targetPaneId,
-        };
-        state.tabs.push(tab);
-        state.activeTabId = portId;
-        findLeafById(state.paneTree, targetPaneId)?.tabIds.push(portId);
+          isPinned: false, splitPaneId: state.focusedPaneId,
+        });
+        findLeafById(state.paneTree, state.focusedPaneId)?.tabIds.push(tabId);
+        state.activeTabId = tabId;
       });
+      return tabId;
     },
+
+    addPluginTab: (input, options) => {
+      const tabId = crypto.randomUUID();
+      set((state) => {
+        revalidateFocus(state);
+        const paneId = options?.paneId && findLeafById(state.paneTree, options.paneId)
+          ? options.paneId : state.focusedPaneId;
+        state.tabs.push({ ...input, kind: 'plugin', id: tabId, splitPaneId: paneId, isPinned: false });
+        findLeafById(state.paneTree, paneId)?.tabIds.push(tabId);
+        if (options?.activate !== false) {
+          state.activeTabId = tabId;
+          state.focusedPaneId = paneId;
+        }
+      });
+      return tabId;
+    },
+
+    setTabTitle: (tabId, title) => set((state) => {
+      const tab = state.tabs.find((item) => item.id === tabId);
+      if (tab) tab.title = title;
+    }),
 
     closeTab: (tabId) => set((state) => closeTabsImpl(state, tabId, 'self')),
 
@@ -383,7 +418,7 @@ export const useAppStore = create<AppStoreState>()(
     // 幂等——弹出窗关闭事件与主窗"收回"按钮都会调用，重复设置无副作用。
     setTabPoppedOut: (tabId, poppedOut) => set((state) => {
       const tab = state.tabs.find(t => t.id === tabId);
-      if (tab) tab.poppedOut = poppedOut;
+      if (tab?.kind === 'serial') tab.poppedOut = poppedOut;
     }),
 
     moveTabToPane: (tabId, paneId) => set((state) => {
@@ -552,15 +587,10 @@ export const useAppStore = create<AppStoreState>()(
 
     restoreSessionSnapshot: (snapshot) => {
       for (const tab of snapshot.tabs) {
-        useTerminalStore.getState().ensureTerminal(tab.id);
+        if (tab.kind === 'serial') useTerminalStore.getState().ensureTerminal(tab.portId);
       }
       set((state) => {
-        state.tabs = snapshot.tabs.map((t) => ({
-          id: t.id,
-          title: t.title,
-          splitPaneId: t.splitPaneId,
-          isPinned: t.isPinned,
-        }));
+        state.tabs = snapshot.tabs.map((tab) => ({ ...tab }));
 
         // Sanitize restored tree: each leaf's tabIds must only reference
         // tabs present in the restored array. pruneTree then drops any

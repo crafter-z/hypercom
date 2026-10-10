@@ -22,6 +22,8 @@ import { saveSessionSnapshot } from './utils/sessionSnapshot';
 import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
 import { computeBufferLimits, getManagerPortIds, getViewportManager } from './utils/terminal/viewportManager';
 import { applyUiScale } from './utils/uiScale';
+import { startPluginViewRuntime } from './utils/pluginViewRuntime';
+import { startPluginViewOverlayGuard } from './utils/pluginViewOverlay';
 
 // 模块加载即安装前端 console 捕获（幂等），尽早收集前端诊断日志。
 setupDiagLogCapture();
@@ -74,6 +76,11 @@ const App: React.FC = () => {
   useAutoUpdate();
   // issue #17：插件宿主装配（主窗单例——worker 生命周期 + RX 批转发 + config 同步）。
   usePluginHost();
+  useEffect(() => {
+    const stop = startPluginViewRuntime();
+    const stopOverlayGuard = startPluginViewOverlayGuard();
+    return () => { stopOverlayGuard(); stop(); };
+  }, []);
   // issue #7-10：全局自定义右键菜单——可编辑元素（输入框/文本域/可编辑区）显示
   // 应用自己的 剪切/复制/粘贴/全选 菜单（替代 webview 原生菜单），其余元素一律
   // 屏蔽原生菜单。取代了旧版"仅屏蔽非输入元素"的 contextmenu effect。

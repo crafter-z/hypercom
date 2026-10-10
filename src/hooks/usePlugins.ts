@@ -9,11 +9,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { pluginService } from '../services/tauri';
 import { pluginHost } from '../utils/pluginHost';
 import { attachRxObserver, attachBytesObserver } from '../utils/pluginHostApi';
-import { pluginKv } from '../utils/pluginKv';
-import { rebuildPluginUi } from '../utils/pluginUiRegistry';
 import {
   getPluginViews,
-  pluginMutationGeneration,
   subscribePluginViews,
   syncPluginListSnapshot,
   syncStorePluginConfigs,
@@ -101,12 +98,11 @@ export function usePluginHost(): void {
     let refreshVersion = 0;
     const refresh = async (): Promise<void> => {
       const version = ++refreshVersion;
-      const mutation = pluginMutationGeneration();
+      // Backend revisions order both reads and writes; request order only handles page lifetime.
       try {
         const result = await pluginService.listPlugins();
-        if (!active || version !== refreshVersion || mutation !== pluginMutationGeneration()) return;
-        syncPluginListSnapshot(result.plugins, result.pluginConfigs);
-        rebuildPluginUi(result.plugins);
+        if (!active || version !== refreshVersion) return;
+        if (syncPluginListSnapshot(result)) pluginHost.syncWithConfig();
       } catch (error) {
         if (active) console.error('[usePluginHost] list failed:', error);
       }
@@ -157,12 +153,10 @@ export function usePluginList() {
 
   const refresh = useCallback(async () => {
     const version = ++listRefreshVersion.current;
-    const mutation = pluginMutationGeneration();
     try {
       const result = await pluginService.listPlugins();
-      if (version !== listRefreshVersion.current || mutation !== pluginMutationGeneration()) return;
-      syncPluginListSnapshot(result.plugins, result.pluginConfigs);
-      rebuildPluginUi(result.plugins);
+      if (version !== listRefreshVersion.current) return;
+      if (syncPluginListSnapshot(result) && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
     } catch (error) {
       console.error('[usePluginList] list failed:', error);
       notifyError(error);
@@ -176,16 +170,8 @@ export function usePluginList() {
   const installPlugin = useCallback(async (sourcePath: string) => {
     setLoading(true);
     try {
-      const previous = useAppStore.getState().config.pluginConfigs ?? [];
-      const entries = await pluginService.installPlugin(sourcePath);
-      for (const entry of entries) {
-        const old = previous.find((plugin) => plugin.id === entry.id);
-        if (!old || old.installedAt !== entry.installedAt) {
-          pluginKv.invalidate(entry.id);
-          pluginHost.disable(entry.id);
-        }
-      }
-      syncStorePluginConfigs(entries);
+      const snapshot = await pluginService.installPlugin(sourcePath);
+      syncStorePluginConfigs(snapshot);
       notifySuccess('plugins.installed');
       await refresh();
     } catch (error) {
@@ -200,9 +186,8 @@ export function usePluginList() {
   const uninstallPlugin = useCallback(async (pluginId: string) => {
     setLoading(true);
     try {
-      const entries = await pluginService.uninstallPlugin(pluginId);
-      pluginKv.invalidate(pluginId);
-      syncStorePluginConfigs(entries);
+      const snapshot = await pluginService.uninstallPlugin(pluginId);
+      syncStorePluginConfigs(snapshot);
       notifySuccess('plugins.uninstalled');
       await refresh();
     } catch (error) {
@@ -213,10 +198,11 @@ export function usePluginList() {
     }
   }, [refresh]);
 
-  const setEnabled = useCallback(async (pluginId: string, enabled: boolean) => {
+  const setEnabled = useCallback(async (pluginId: string, enabled: boolean, expectedGeneration: string) => {
     try {
-      const entries = await pluginService.setPluginEnabled(pluginId, enabled);
-      syncStorePluginConfigs(entries);
+      await permissionQueues.get(pluginId);
+      const snapshot = await pluginService.setPluginEnabled(pluginId, enabled, expectedGeneration);
+      syncStorePluginConfigs(snapshot);
       notifySuccess(enabled ? 'plugins.enabled' : 'plugins.disabled');
       await refresh();
     } catch (error) {
@@ -225,17 +211,17 @@ export function usePluginList() {
     }
   }, [refresh]);
 
-  const togglePermission = useCallback((pluginId: string, permission: string): Promise<void> => {
+  const togglePermission = useCallback((pluginId: string, permission: string, expectedGeneration: string): Promise<void> => {
     const previous = permissionQueues.get(pluginId) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
       const entry = useAppStore.getState().config.pluginConfigs?.find((plugin) => plugin.id === pluginId);
-      if (!entry) throw new Error(`plugin ${pluginId} not installed`);
+      if (!entry || entry.installGeneration !== expectedGeneration) throw new Error(`plugin ${pluginId} installation changed; refresh before granting permissions`);
       const permissions = entry.grantedPermissions.includes(permission)
         ? entry.grantedPermissions.filter((item) => item !== permission)
         : [...entry.grantedPermissions, permission];
-      const entries = await pluginService.setPluginPermissions(pluginId, permissions);
+      const snapshot = await pluginService.setPluginPermissions(pluginId, permissions, expectedGeneration);
       ++listRefreshVersion.current;
-      syncStorePluginConfigs(entries);
+      syncStorePluginConfigs(snapshot);
       await refresh();
     }).catch((error: unknown) => {
       console.error('[usePluginList] togglePermission failed:', error);
@@ -257,6 +243,6 @@ export interface PluginListApi {
   refresh: () => Promise<void>;
   installPlugin: (sourcePath: string) => Promise<void>;
   uninstallPlugin: (pluginId: string) => Promise<void>;
-  setEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
-  togglePermission: (pluginId: string, permission: string) => Promise<void>;
+  setEnabled: (pluginId: string, enabled: boolean, expectedGeneration: string) => Promise<void>;
+  togglePermission: (pluginId: string, permission: string, expectedGeneration: string) => Promise<void>;
 }

@@ -3,6 +3,8 @@ import { filterLostTabIds } from './DisconnectBanner';
 import type { TabItem } from '../../types';
 
 const makeTab = (id: string): TabItem => ({
+  kind: 'serial',
+  portId: id,
   id,
   title: id,
   isPinned: false,
@@ -33,5 +35,16 @@ describe('filterLostTabIds', () => {
   it('returns all ids when every tab is lost', () => {
     const tabs = [makeTab('COM3'), makeTab('COM4')];
     expect(filterLostTabIds(tabs, () => true)).toEqual(['COM3', 'COM4']);
+  });
+
+  it('uses explicit bindings, counts a shared lost port once and excludes unbound tools', () => {
+    const plugin = { kind: 'plugin' as const, pluginId: 'sensor', installGeneration: 'g1', viewId: 'table', instanceKey: '', restoreOnStartup: true, title: 'table', isPinned: false, splitPaneId: 'main' };
+    const tabs: TabItem[] = [
+      { ...makeTab('COM3'), id: 'serial-workspace' },
+      { ...plugin, id: 'bound-workspace', boundPortId: 'COM3' },
+      { ...plugin, id: 'other-workspace', boundPortId: 'COM5' },
+      { ...plugin, id: 'tool-workspace', boundPortId: null },
+    ];
+    expect(filterLostTabIds(tabs, (portId) => portId === 'COM3' || portId === 'COM5')).toEqual(['serial-workspace', 'other-workspace']);
   });
 });

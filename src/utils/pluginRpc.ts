@@ -52,6 +52,13 @@ export const OP_PERMISSIONS: PermissionMap = {
   'ui.panel.append': null,
   'ui.panel.clear': null,
   'ui.panel.export': null,
+  'view.publish': 'ui:view',
+  'view.sendSerial': 'ui:view',
+  'tabs.open': 'ui:tabs',
+  'tabs.activate': 'ui:tabs',
+  'tabs.close': 'ui:tabs',
+  'tabs.setTitle': 'ui:tabs',
+  'tabs.list': 'ui:tabs',
 };
 
 /**

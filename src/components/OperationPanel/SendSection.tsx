@@ -1,7 +1,7 @@
 import React, { useMemo, useRef } from 'react';
 import { useOperationStore } from '../../stores/useOperationStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { useAppStore } from '../../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { Send, Edit3, Play, Square } from 'lucide-react';
@@ -15,7 +15,7 @@ import { LineEndingSelect } from './components/LineEndingSelect';
 import { FileSendProgress, SendFileButton } from './components/SendFileControls';
 
 export interface SendSectionProps {
-  activeTabId: string | null;
+  activePortId: string | null;
   isPortActive: boolean;
   isConnected: boolean;
   sendData: (portId: string, data: string, isHex: boolean, lineEnding: string) => Promise<number>;
@@ -24,7 +24,7 @@ export interface SendSectionProps {
 }
 
 const SendSection: React.FC<SendSectionProps> = ({
-  activeTabId,
+  activePortId,
   isPortActive,
   isConnected,
   sendData,
@@ -38,16 +38,16 @@ const SendSection: React.FC<SendSectionProps> = ({
   const setOpState = useOperationStore((s) => s.setOpState);
   const sendOnEnter = useAppStore((s) => s.config.sendOnEnter);
   const clearSendInputAfterSend = useAppStore((s) => s.config.clearSendInputAfterSend);
-  // 选择器闭包引用 prop activeTabId（props 变化时组件重渲染、重新订阅）。
+  // 选择器闭包引用 prop activePortId（props 变化时组件重渲染、重新订阅）。
   // 返回 undefined/字符串原语，zustand Object.is 比较安全——不会因选择器
   // 构造新对象在每次 terminal store 更新时误重渲染。
-  const encoding = useTerminalStore((s) => (activeTabId ? s.terminals[activeTabId]?.encoding : undefined));
+  const encoding = useTerminalStore((s) => (activePortId ? s.terminals[activePortId]?.encoding : undefined));
   const setConfig = useAppStore((s) => s.setConfig);
   // issue #12：循环发送为每端口独立状态——按钮按**当前聚焦端口**查询，切换
   // 标签后按钮自动反映该端口的循环运行态（切回正在循环的端口显示「停止」）。
   const cyclicLoops = useOperationStore((s) => s.cyclicLoops);
   const setCyclicLoop = useOperationStore((s) => s.setCyclicLoop);
-  const isLoopSending = activeTabId ? !!cyclicLoops[activeTabId] : false;
+  const isLoopSending = activePortId ? !!cyclicLoops[activePortId] : false;
   const sendCommandSets = useRuleStore((s) => s.sendCommandSets);
   const activeSendCommandSetId = useRuleStore((s) => s.activeSendCommandSetId);
   const setActiveSendCommandSetId = useRuleStore((s) => s.setActiveSendCommandSetId);
@@ -63,7 +63,7 @@ const SendSection: React.FC<SendSectionProps> = ({
     encoding: encoding ?? 'ASCII',
   });
   const { recallUp, recallDown } = useSendHistoryRecall(historyUp, historyDown);
-  const { progress, startFileSend, cancelFileSend } = useFileSend(activeTabId);
+  const { progress, startFileSend, cancelFileSend } = useFileSend(activePortId);
 
   // Quick-send is driven by the ACTIVE send-command set — the same sets the
   // loop-send system uses. quickSendInlineCount only gates strip visibility
@@ -80,8 +80,9 @@ const SendSection: React.FC<SendSectionProps> = ({
   };
 
   const handleSend = async () => {
-    if (!isPortActive || !sendInput.trim() || inputErrorKey !== null) return;
-    await sendData(activeTabId!, sendInput, sendIsHex, sendAppendLineEnding);
+    const portId = getActivePortId(useAppStore.getState());
+    if (!portId || !sendInput.trim() || inputErrorKey !== null) return;
+    await sendData(portId, sendInput, sendIsHex, sendAppendLineEnding);
     // issue #13：默认保留输入框内容；仅在用户开启「发送后清空」时清空。
     if (clearSendInputAfterSend) {
       setOpState({ sendInput: '' });
@@ -91,22 +92,24 @@ const SendSection: React.FC<SendSectionProps> = ({
   // Send one command from the active set ONCE — each command carries its own
   // type (string/hex) and line ending, independent of the compose-row options.
   const handleQuickCommand = async (cmd: SendCommand) => {
-    if (!isPortActive || !activeTabId || !cmd.content) return;
-    await sendData(activeTabId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
+    const portId = getActivePortId(useAppStore.getState());
+    if (!portId || !cmd.content) return;
+    await sendData(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
   };
 
   // 循环发送开关（issue #12）：按**当前聚焦端口**启停该端口的独立循环——
   // 启动前若未选中命令集则自动选首个可用集（与快捷发送共用同一激活集）；
   // 停止只影响当前聚焦端口，其它端口已运行的循环不受影响。
   const handleToggleLoop = () => {
-    if (!activeTabId) return;
-    if (isLoopSending) {
-      setCyclicLoop(activeTabId, false);
+    const activePortId = getActivePortId(useAppStore.getState());
+    if (!activePortId) return;
+    if (useOperationStore.getState().cyclicLoops[activePortId]) {
+      setCyclicLoop(activePortId, false);
     } else {
       if (!sendCommandSets.find((s) => s.id === activeSendCommandSetId) && sendCommandSets.length > 0) {
         setActiveSendCommandSetId(sendCommandSets[0].id);
       }
-      setCyclicLoop(activeTabId, true);
+      setCyclicLoop(activePortId, true);
     }
   };
 
@@ -259,7 +262,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   );
 };
 
-// memo：props 均稳定（activeTabId 字符串 / 布尔原语 / sendData·historyUp·historyDown
+// memo：props 均稳定（activePortId 字符串 / 布尔原语 / sendData·historyUp·historyDown
 // 均为 useCallback 返回），OperationPanel 重渲染时不再拖累发送区。
 // historyUp/Down 仅在发送历史变化（即一次真实发送）后更换引用，此时重渲染是合理的。
 export default React.memo(SendSection);

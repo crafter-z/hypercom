@@ -108,3 +108,52 @@ describe('wrapped worker event delivery', () => {
     expect(worker.sent).toContainEqual({ eventAck: 1 });
   });
 });
+
+describe('isolated view Worker processing', () => {
+  it('resets a gapped stream before retained bytes and serializes async input batches', async () => {
+    vi.useFakeTimers();
+    const worker = wrappedWorker(`
+      self.order = [];
+      self.plugin.views.onOpen(function(view) {
+        view.onDiscontinuity(function() { self.order.push('gap'); });
+        view.onInput(async function(batch) {
+          self.order.push('start-' + batch[0].value);
+          await new Promise(function(done) { setTimeout(done, 10); });
+          self.order.push('end-' + batch[0].value);
+        });
+      });
+    `);
+    worker.reply({ type: 'view.open', eventId: 1, payload: { context: { viewInstanceId: 'view-a' } } });
+    worker.reply({ type: 'view.input', eventId: 2, payload: { instanceId: 'view-a', streamEpoch: 2, gapBefore: true, batch: [{ value: 1 }] } });
+    worker.reply({ type: 'view.input', eventId: 3, payload: { instanceId: 'view-a', streamEpoch: 2, gapBefore: false, batch: [{ value: 2 }] } });
+    await vi.advanceTimersByTimeAsync(25);
+    expect((worker.scope as WorkerScope & { order: string[] }).order).toEqual(['gap', 'start-1', 'end-1', 'start-2', 'end-2']);
+    expect(worker.sent).toContainEqual({ eventAck: 2 });
+    expect(worker.sent).toContainEqual({ eventAck: 3 });
+    worker.reply({ type: 'view.close', eventId: 4, payload: { instanceId: 'view-a' } });
+    worker.reply({ type: 'view.input', eventId: 5, payload: { instanceId: 'view-a', batch: [{ value: 3 }] } });
+    await vi.advanceTimersByTimeAsync(20);
+    expect((worker.scope as WorkerScope & { order: string[] }).order).not.toContain('start-3');
+  });
+
+  it('closes and releases queued deliveries without waiting for stalled initialization', async () => {
+    const worker = wrappedWorker(`
+      self.closed = [];
+      self.plugin.views.onOpen(function(view) {
+        return new Promise(function(done) { self.finishOpen = done; });
+      });
+      self.plugin.views.onClose(function(event) { self.closed.push(event.view.context.viewInstanceId); });
+    `);
+    worker.reply({ type: 'view.open', eventId: 10, payload: { context: { viewInstanceId: 'stalled' } } });
+    await Promise.resolve();
+    worker.reply({ type: 'view.input', eventId: 11, payload: { instanceId: 'stalled', batch: [{ value: 1 }] } });
+    worker.reply({ type: 'view.close', eventId: 12, payload: { instanceId: 'stalled' } });
+    expect((worker.scope as WorkerScope & { closed: string[] }).closed).toEqual(['stalled']);
+    expect(worker.sent).toContainEqual({ eventAck: 10 });
+    expect(worker.sent).toContainEqual({ eventAck: 11 });
+    (worker.scope as WorkerScope & { finishOpen: () => void }).finishOpen();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(worker.sent).not.toContainEqual({ type: '__plugin_view_ready', payload: { instanceId: 'stalled' } });
+  });
+});

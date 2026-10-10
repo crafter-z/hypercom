@@ -463,6 +463,11 @@ export function getManagerPortIds(): string[] {
   return Array.from(managers.keys());
 }
 
+/** Query display ownership without creating a manager or allocating a key list. */
+export function hasViewportManager(portId: string): boolean {
+  return managers.has(portId);
+}
+
 /** Destroy the manager (tab close / TRX→TTY mode switch). */
 export function releaseViewportManager(portId: string): void {
   const vm = managers.get(portId);

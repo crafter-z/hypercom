@@ -16,6 +16,7 @@ import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
 import type { PortStatus } from '../types';
 import { userClosingPortIds, lostPortIds } from './disconnectTracking';
+import { hasPortDisplayConsumers, hasPortLineConsumers, notifyPluginViewPortStatus, subscribePortInputConsumersChanged } from '../utils/pluginViewInput';
 
 // Alert toast throttle: same rule re-matched within this window (ms) must
 // not spam toasts — module-level so it survives the empty-deps effect.
@@ -85,12 +86,15 @@ function evaluateLineTriggers(portId: string, text: string, rawData: Uint8Array)
  * 放置于此天然覆盖全部连接路径，无需在 openPort / runReconnectLoop 分别接线。
  *
  * 直接复用 `openTab`（手动「新建标签页」同一动作，语义完全一致）：
- * - tab id 恒等于 portId → 幂等：已有标签页则激活、没有则创建；
+ * - serial tabs are found by kind + portId; workspace ids remain independent;
  * - 新标签页落在 `focusedPaneId` 所在叶子（多 Pane 递归树行为与手动一致）并激活；
  * - 关闭串口不受影响——closePort 只改端口状态，本函数不处理 disconnected。
  */
 export function openTabForConnectedPort(portId: string): void {
-  useAppStore.getState().openTab(portId);
+  const state = useAppStore.getState();
+  // Reconnecting an independently bound view must not resurrect its closed raw tab.
+  if (hasPortDisplayConsumers(portId) && !state.tabs.some(tab => tab.kind === 'serial' && tab.portId === portId)) return;
+  state.openTab(portId);
 }
 
 /**
@@ -115,6 +119,9 @@ export function useSerialReceive() {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
     const pipeline = getRxPipeline();
+    pipeline.setLineConsumerQuery(hasPortLineConsumers);
+    const modes = new Map<string, string>();
+    for (const port of useAppStore.getState().ports) modes.set(port.id, port.mode ?? 'trx');
     // Only the current binding per port is retained. Changing a template (even
     // A → B → A), editing it or disabling it must never revive historical bytes.
     const reassemblers = new Map<string, {
@@ -139,12 +146,25 @@ export function useSerialReceive() {
     };
     const syncBindings = (): void => {
       for (const [portId, previous] of reassemblers) {
-        const tabOpen = useAppStore.getState().tabs.some(t => t.id === portId);
-        if (!tabOpen || previous.template !== bindingFor(portId)) retire(portId, tabOpen);
+        const port = useAppStore.getState().ports.find(item => item.id === portId);
+        const modeChanged = modes.get(portId) !== (port?.mode ?? 'trx');
+        const retained = hasPortLineConsumers(portId);
+        if (modeChanged || !retained || previous.template !== bindingFor(portId)) retire(portId, retained && !modeChanged);
+      }
+      for (const port of useAppStore.getState().ports) {
+        const mode = port.mode ?? 'trx';
+        if (modes.get(port.id) !== undefined && modes.get(port.id) !== mode) {
+          // Preserve completed output, but never carry a partial row into the new mode.
+          pipeline.flushBeforeSend(port.id);
+          pipeline.releasePort(port.id);
+        }
+        modes.set(port.id, mode);
+        if (!hasPortLineConsumers(port.id)) pipeline.releasePort(port.id);
       }
     };
     const unsubscribeApp = useAppStore.subscribe(syncBindings);
     const unsubscribeRules = useRuleStore.subscribe(syncBindings);
+    const unsubscribeConsumers = subscribePortInputConsumersChanged(syncBindings);
 
     // P1-1：行级触发器——每条完整行组装完成时评估触发规则（行边界而非读事件块）。
     pipeline.setOnLineAssembled((portId, line) => {
@@ -159,11 +179,11 @@ export function useSerialReceive() {
         // P1-1：每事件 setTrafficStats 降频——字节先经 1s 聚合器累计，每秒统一写
         // 一次 store（StatusBar 本就 1s 窗口差分算速率，总量语义不变；消除每事件
         // Zustand 更新 + StatusBar 重渲染，TTY 卡顿根因 #3）。
-        trafficStats.addRx(portId, event.data.length);
+        if (hasPortDisplayConsumers(portId)) trafficStats.addRx(portId, event.data.length);
         // 插件 RX 原始字节旁路（issue #17 能力补强）：在 TTY 分流/协议解析/行组装
         // **之前**把原始字节喂给插件字节观察者——字节流保真、不分 mode，供
         // 插件把原始串口数据共享给第三方（HTTP 推送）。零订阅者时 O(1) 早退。
-        if (hasPluginBytesObservers()) {
+        if (hasPluginBytesObservers(portId)) {
           feedPluginBytes(portId, event.data, event.timestamp);
         }
 
@@ -180,9 +200,12 @@ export function useSerialReceive() {
         // enabling/disabling a template with the same id.
         syncBindings();
         const template = bindingFor(portId);
-        // Closing a tab retires its parser. While the serial port remains open,
-        // feed the common path without recreating protocol state until reopened.
-        if (template && useAppStore.getState().tabs.some(t => t.id === portId)) {
+        // Protocol parser lifetime follows line consumers, not the raw tab.
+        if (!hasPortLineConsumers(portId)) {
+          pipeline.releasePort(portId);
+          return;
+        }
+        if (template) {
           let binding = reassemblers.get(portId);
           if (!binding) {
             binding = { template, parser: new ProtocolFrameReassembler(template), lastEventTs: event.timestamp };
@@ -250,12 +273,14 @@ export function useSerialReceive() {
           }
         }
         // Retire while the port is still bound to its old template/mode.
-        if (event.status === 'disconnected') retire(event.port_id, true);
+        if (event.status === 'disconnected') {
+          retire(event.port_id, true);
+          pipeline.disconnect(event.port_id);
+        }
         useAppStore.getState().updatePort(event.port_id, {
           status: statusMap[event.status] || 'disconnected',
         });
         if (event.status === 'disconnected') {
-          pipeline.disconnect(event.port_id);
           // TTY（issue #11）：flush 队列、保留 xterm 实例——视图跨重连保持挂载。
           ttyService.disconnect(event.port_id);
           // 插件 RX 观察器断流通知（issue #17 复审补强：真实断线与 mode-tty
@@ -263,7 +288,9 @@ export function useSerialReceive() {
           notifyPortDisconnected(event.port_id);
           // 插件 RX 字节旁路断流：清该端口遗留字节队列（插件感知「字节流断了」）。
           notifyBytesPortDisconnected(event.port_id);
+          notifyPluginViewPortStatus(event.port_id, event.status);
         }
+        if (event.status !== 'disconnected') notifyPluginViewPortStatus(event.port_id, event.status);
       });
 
       if (cancelled) {
@@ -284,6 +311,7 @@ export function useSerialReceive() {
       cleanups.forEach((fn) => fn());
       unsubscribeApp();
       unsubscribeRules();
+      unsubscribeConsumers();
       reassemblers.clear();
     };
     // Event listeners and store subscriptions are owned by this one app-root effect.

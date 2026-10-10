@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../i18n';
-import { useAppStore } from '../../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
@@ -43,9 +43,9 @@ interface RateDisplay {
 const StatusBar: React.FC = () => {
   const systemStatus = useSystemStore((s) => s.systemStatus);
   const trafficStats = useSystemStore((s) => s.trafficStats);
-  const activeTabId = useAppStore((s) => s.activeTabId);
+  const activePortId = useAppStore((s) => getActivePortId(s));
   const ports = useAppStore((s) => s.ports);
-  const activeTraffic = activeTabId ? trafficStats[activeTabId] : null;
+  const activeTraffic = activePortId ? trafficStats[activePortId] : null;
   const connectedCount = ports.filter(p => p.status === 'connected').length;
   const { t } = useTranslation();
 
@@ -58,14 +58,19 @@ const StatusBar: React.FC = () => {
   const rateWindowRef = useRef<RateSnapshot[]>([]);
   const peakRef = useRef<{ rx: number; tx: number }>({ rx: 0, tx: 0 });
   const prevConnectedAtRef = useRef<number | null>(null);
+  const prevRatePortRef = useRef<string | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
       setNow(new Date());
 
-      const portId = useAppStore.getState().activeTabId;
+      const portId = getActivePortId(useAppStore.getState());
       if (!portId) {
         setRateDisplay(null);
+        prevRatePortRef.current = null;
+        prevConnectedAtRef.current = null;
+        rateWindowRef.current = [];
+        peakRef.current = { rx: 0, tx: 0 };
         return;
       }
 
@@ -73,7 +78,8 @@ const StatusBar: React.FC = () => {
       const connectedAt = term?.connectedAt ?? null;
 
       // Reset window + peak on reconnect or port change
-      if (connectedAt !== prevConnectedAtRef.current) {
+      if (portId !== prevRatePortRef.current || connectedAt !== prevConnectedAtRef.current) {
+        prevRatePortRef.current = portId;
         prevConnectedAtRef.current = connectedAt;
         rateWindowRef.current = [];
         peakRef.current = { rx: 0, tx: 0 };
@@ -143,8 +149,8 @@ const StatusBar: React.FC = () => {
             {t('statusBar.connectedCount', { count: connectedCount })}
           </span>
         )}
-        {activeTabId && (
-          <span className="statusbar-item statusbar-value">{activeTabId}</span>
+        {activePortId && (
+          <span className="statusbar-item statusbar-value">{activePortId}</span>
         )}
         <span className="statusbar-item" title={t('statusBar.processMem')}>
           <MemoryStick size={12} />

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ClipboardPaste, Copy, Redo, Scissors, SquareDashed, Undo } from 'lucide-react';
 import { useMenuPlacement } from './menuPlacement';
 import { useOutsideDismiss } from './useOutsideDismiss';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 /**
  * Custom text-edit context menu (issue #7-10).
@@ -112,8 +113,10 @@ interface TextEditContextMenuProps {
 
 const TextEditContextMenu: React.FC<TextEditContextMenuProps> = ({ x, y, target, snapshot, savedRange, onClose }) => {
   const { t } = useTranslation();
-  const { ref, pos } = useMenuPlacement(x, y);
+  const overlayReady = usePluginViewOverlay();
+  const { ref, pos } = useMenuPlacement(x, y, overlayReady);
   useOutsideDismiss(ref, onClose);
+  if (!overlayReady) return null;
 
   const hasSelection = snapshot ? snapshot.start !== snapshot.end : savedRange != null;
 

@@ -72,6 +72,7 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
         toolRunning: prev.toolRunning,
         // issue #11：保留持久化的工作模式，否则每 3s 轮询会把 TTY 重置回 TRX。
         mode: prev.mode,
+        displayView: prev.displayView,
       });
       seen.add(prev.id);
     } else if (prev.status === 'connected' || prev.status === 'connecting') {
@@ -96,7 +97,10 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
   }
   // 2) Genuinely new ports append at the end in enumeration order.
   for (const p of incoming) {
-    if (!seen.has(p.id)) merged.push(p);
+    if (!seen.has(p.id)) {
+      const meta = useAppStore.getState().config.portMeta?.find((entry) => entry.portId === p.id);
+      merged.push(meta ? { ...p, alias: meta.alias, isHidden: meta.isHidden, mode: meta.mode ?? 'trx', displayView: meta.displayView } : p);
+    }
   }
   return merged;
 }

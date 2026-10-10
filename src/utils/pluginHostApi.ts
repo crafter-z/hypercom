@@ -27,6 +27,7 @@ import { checkPortScope, OP_PERMISSIONS } from './pluginRpc';
 import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
 import { exportPluginPanel } from './pluginPanelExport';
+import { executePluginViewApi } from './pluginViewRuntime';
 
 /** 插件可见的端口摘要（避免把内部字段全量暴露给插件）。 */
 export interface PluginPortView {
@@ -56,10 +57,6 @@ function portView(port: {
   };
 }
 
-/** notify 时长夹取上下限（评审复审：插件不得传 0 制造粘滞 toast 刷屏）。 */
-const NOTIFY_MIN_DURATION_MS = 2000;
-const NOTIFY_MAX_DURATION_MS = 30000;
-
 /** notify 的 level → toast severity 映射（设计 §5 notify({level})）。 */
 function notifySeverity(level: unknown): 'info' | 'warning' | 'error' {
   if (level === 'warn' || level === 'warning') return 'warning';
@@ -83,6 +80,14 @@ export async function executeHostApi(
   manifest: PluginManifestView | null = null,
 ): Promise<unknown> {
   switch (op) {
+    case 'view.publish':
+    case 'view.sendSerial':
+    case 'tabs.open':
+    case 'tabs.activate':
+    case 'tabs.close':
+    case 'tabs.setTitle':
+    case 'tabs.list':
+      return executePluginViewApi(pluginId, op, args, manifest);
     case 'ports.list': {
       const ports = useAppStore.getState().ports;
       return ports.map(portView);
@@ -146,7 +151,9 @@ export async function executeHostApi(
       if (!isData && !granted.grantedPermissions.includes('fs:assets')) {
         throw new Error('插件未授予 fs:assets 权限');
       }
-      return pluginService.readPluginAsset(pluginId, rel);
+      const content = await pluginService.readPluginAsset(pluginId, rel);
+      if (content === null) throw new Error('plugin file not found');
+      return content;
     }
     case 'fs.write': {
       const a = requireObject(args);
@@ -174,12 +181,11 @@ export async function executeHostApi(
     }
     case 'notify': {
       const a = requireObject(args);
-      const requested = typeof a.durationMs === 'number' ? a.durationMs : 4000;
-      useToastStore.getState().push({
+      useToastStore.getState().pushPlugin(pluginId, {
         severity: notifySeverity(a.level),
-        message: typeof a.body === 'string' ? a.body : String(a.title ?? ''),
+        message: typeof a.body === 'string' ? a.body : typeof a.title === 'string' ? a.title : '',
         title: typeof a.title === 'string' ? a.title : pluginId,
-        durationMs: Math.min(NOTIFY_MAX_DURATION_MS, Math.max(NOTIFY_MIN_DURATION_MS, requested)),
+        durationMs: typeof a.durationMs === 'number' ? a.durationMs : undefined,
       });
       return null;
     }

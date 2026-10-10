@@ -25,6 +25,8 @@
 import { getRxPipeline } from './rxPipeline';
 import { useAppStore } from '../stores/useAppStore';
 import type { PortMode } from '../types';
+import { releaseUnusedPortState } from '../stores/releaseTerminalState';
+import { hasPortLineConsumers } from './pluginViewInput';
 
 /** 每订阅者每帧最多投递行数（评审 v2 P12 额度，镜像 maxLinesPerTick=2000）。 */
 export const MAX_LINES_PER_DELIVERY = 2000;
@@ -39,7 +41,7 @@ const FALLBACK_TICK_MS = 16;
 /** 观察者收到的单行载荷（插件 rx.onLine 参数）。 */
 export interface ObservedRxLine {
   portId: string;
-  /** 行序号（每端口单调递增，宿主分配；跨标签重开从 0 起新一轮）。 */
+  /** Per-port sequence; retained view input survives raw serial tab retirement. */
   seq: number;
   /** 未解码原始字节（送 worker 时结构化克隆，不 detach 终端行）。 */
   rawData: Uint8Array;
@@ -57,8 +59,10 @@ export interface RxDetachedEvent {
 
 /** 观察者接口（一个启用插件 = 一个订阅者）。 */
 export interface PluginRxObserver {
+  /** Fixed view binding; omitted for legacy observers of every port. */
+  portId?: string;
   /** 批量投递（每帧至多 MAX_LINES_PER_DELIVERY 行）。插件侧自行节流/丢弃。 */
-  onRxLines(lines: ObservedRxLine[]): void;
+  onRxLines(lines: ObservedRxLine[], gapBefore?: boolean): void;
   /** 断流通知（如端口切到 TTY）。 */
   onRxDetached(event: RxDetachedEvent): void;
   onRxDropped?(event: { portId: string; reason: 'oversized-frame' | 'queue-overflow'; count: number }): void;
@@ -67,10 +71,11 @@ export interface PluginRxObserver {
 /** 每端口转发状态。 */
 interface PortObserverState {
   seq: number;
-  queue: ObservedRxLine[];
+  queue: Array<ObservedRxLine & { gapBefore?: boolean; order: number }>;
   queuedBytes: number;
   droppedLines: number;
   droppedOversized: number;
+  gapPending: boolean;
   /** rAF 投递句柄。 */
   rafId: number | null;
   /** setTimeout 兜底投递句柄（页面隐藏）。 */
@@ -86,6 +91,8 @@ const observedModes = new Map<string, PortMode>();
 
 /** 已注册订阅者。 */
 const observers = new Set<PluginRxObserver>();
+let nextOrder = 0;
+const observerStart = new WeakMap<PluginRxObserver, number>();
 
 /** 是否已接线到 pipeline 多播钩子 + store 订阅。 */
 let wired = false;
@@ -139,15 +146,17 @@ function handleVisibilityChange(): void {
  * 开销可忽略（编码切换低频，行级查询保证切换后立即生效）。
  */
 function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }): void {
+  if (!hasPluginRxObservers(portId)) return;
   let state = portStates.get(portId);
   if (!state) {
-    state = { seq: 0, queue: [], queuedBytes: 0, droppedLines: 0, droppedOversized: 0, rafId: null, timerId: null };
+    state = { seq: 0, queue: [], queuedBytes: 0, droppedLines: 0, droppedOversized: 0, gapPending: false, rafId: null, timerId: null };
     portStates.set(portId, state);
   }
   if (line.rawData.byteLength > MAX_BYTES_PER_DELIVERY) {
     state.seq++;
     state.droppedLines++;
     state.droppedOversized++;
+    state.gapPending = true;
     scheduleDelivery(state, () => deliverPort(portId));
     return;
   }
@@ -160,14 +169,21 @@ function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: 
       dropped++;
     }
   }
-  if (dropped > 0) state.droppedLines += dropped;
+  if (dropped > 0) {
+    state.droppedLines += dropped;
+    if (state.queue.length > 0) state.queue[0].gapBefore = true;
+    else state.gapPending = true;
+  }
   state.queue.push({
+    gapBefore: state.gapPending,
+    order: nextOrder++,
     portId,
     seq: state.seq++,
     rawData: line.rawData,
     encoding: getRxPipeline().getPortEncodingLabel(portId),
     ts: line.timestamp,
   });
+  state.gapPending = false;
   state.queuedBytes += line.rawData.byteLength;
   scheduleDelivery(state, () => deliverPort(portId));
 }
@@ -182,6 +198,7 @@ function deliverPort(portId: string): void {
     state.droppedLines = 0;
     state.droppedOversized = 0;
     for (const obs of observers) {
+      if (obs.portId !== undefined && obs.portId !== portId) continue;
       try {
         if (oversized) obs.onRxDropped?.({ portId, reason: 'oversized-frame', count: oversized });
         if (lost > oversized) obs.onRxDropped?.({ portId, reason: 'queue-overflow', count: lost - oversized });
@@ -191,9 +208,11 @@ function deliverPort(portId: string): void {
     }
   }
   if (state.queue.length === 0) return;
+  const gapBefore = state.queue[0].gapBefore === true;
   let count = 0;
   let bytes = 0;
   while (count < state.queue.length && count < MAX_LINES_PER_DELIVERY) {
+    if (count > 0 && state.queue[count].gapBefore) break;
     const nextBytes = state.queue[count].rawData.byteLength;
     if (count > 0 && bytes + nextBytes > MAX_BYTES_PER_DELIVERY) break;
     bytes += nextBytes;
@@ -206,8 +225,15 @@ function deliverPort(portId: string): void {
     scheduleDelivery(state, () => deliverPort(portId));
   }
   for (const obs of observers) {
+    if (portStates.get(portId) !== state) break;
+    if (obs.portId !== undefined && obs.portId !== portId) continue;
     try {
-      obs.onRxLines(batch);
+      const selected = obs.portId === undefined ? batch : batch.filter(line => line.order >= (observerStart.get(obs) ?? 0));
+      if (selected.length > 0) {
+        const delivery = selected.map(({ order: _order, gapBefore: _gap, ...line }) => ({ ...line, rawData: line.rawData.slice() }));
+        if (obs.portId === undefined) obs.onRxLines(delivery);
+        else obs.onRxLines(delivery, gapBefore && selected[0] === batch[0]);
+      }
     } catch (e) {
       console.error('[pluginObserver] observer onRxLines failed:', e);
     }
@@ -225,13 +251,9 @@ function checkModeTransition(): void {
     // 仅「已知 trx → tty」的真实切换才通知；首见（prev undefined）只记录。
     if (prev !== undefined && prev !== 'tty' && mode === 'tty') {
       // TRX → TTY：断流 + 清该端口遗留队列（TTY 行不产生，遗留队列丢给插件也无意义）。
-      const state = portStates.get(port.id);
-      if (state) {
-        cancelDelivery(state);
-        state.queue.length = 0;
-        state.queuedBytes = 0;
-      }
+      discardPluginLinePortInput(port.id);
       for (const obs of observers) {
+        if (obs.portId !== undefined && obs.portId !== port.id) continue;
         try {
           obs.onRxDetached({ portId: port.id, reason: 'mode-tty' });
         } catch (e) {
@@ -247,6 +269,7 @@ function ensureWired(): void {
   if (wired) return;
   wired = true;
   const pipeline = getRxPipeline();
+  pipeline.setLineConsumerQuery(hasPortLineConsumers);
   const unsubLine = pipeline.addOnLineAssembledListener(handleAssembledLine);
 
   // mode 变化订阅：useAppStore ports 数组变化时检查（含 mode 切换）。
@@ -277,17 +300,31 @@ function ensureWired(): void {
  * 首个订阅者触发接线（零订阅者不接线——零插件零开销）。
  */
 export function addPluginRxObserver(obs: PluginRxObserver): () => void {
+  observerStart.set(obs, nextOrder);
   observers.add(obs);
   if (observers.size === 1) ensureWired();
   // 初始 mode 快照（迟到的订阅者从当前状态开始）。
   checkModeTransition();
   return () => {
     observers.delete(obs);
+    for (const portId of portStates.keys()) {
+      if (!hasPluginRxObservers(portId)) {
+        discardPluginLinePortInput(portId);
+        releaseUnusedPortState(portId);
+      }
+    }
     if (observers.size === 0) {
       // 无订阅者：解线（释放钩子与 store 订阅），零开销回到无插件态。
       unwire?.();
     }
   };
+}
+
+/** Drop queued input without issuing a physical disconnect notification. */
+export function discardPluginLinePortInput(portId: string): void {
+  const state = portStates.get(portId);
+  if (state) cancelDelivery(state);
+  portStates.delete(portId);
 }
 
 /**
@@ -307,6 +344,7 @@ export function notifyPortDisconnected(portId: string): void {
   }
   observedModes.delete(portId);
   for (const obs of observers) {
+    if (obs.portId !== undefined && obs.portId !== portId) continue;
     try {
       obs.onRxDetached({ portId, reason: 'port-disconnected' });
     } catch (e) {
@@ -316,8 +354,12 @@ export function notifyPortDisconnected(portId: string): void {
 }
 
 /** 是否已有订阅者（设置页/宿主桥查询用）。 */
-export function hasPluginRxObservers(): boolean {
-  return observers.size > 0;
+export function hasPluginRxObservers(portId?: string): boolean {
+  if (portId === undefined) return observers.size > 0;
+  for (const observer of observers) {
+    if (observer.portId === undefined || observer.portId === portId) return true;
+  }
+  return false;
 }
 
 /** 测试用：清空状态（应用生命周期不调用）。 */

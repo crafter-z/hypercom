@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { findSerialTabByPortId, getActivePortId, useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
@@ -39,7 +39,7 @@ export function usePopoutBridge() {
       .onSendCommand((payload) => {
         // 显式目标端口优先（issue #5-4-6）：弹窗携带 portId 时发送到该端口，
         // 否则退回活动标签。端口已关闭时 sendToPort 内部守卫负责 toast/静默。
-        const portId = payload.portId ?? useAppStore.getState().activeTabId;
+        const portId = payload.portId ?? getActivePortId(useAppStore.getState());
         if (!portId) {
           // 无活动标签是正常控制流分支（弹窗发送无目标），非错误，不记录。
           return;
@@ -84,7 +84,7 @@ export function usePopoutBridge() {
       .onRequestSync(() => {
         // 弹窗可能已销毁（emit 在弹窗 webview 关闭时 reject）——全部静默降级。
         popoutEventService
-          .emitActiveTabChanged({ portId: useAppStore.getState().activeTabId })
+          .emitActiveTabChanged({ portId: getActivePortId(useAppStore.getState()) })
           .catch((e) => console.debug('[usePopoutBridge] emitActiveTabChanged failed:', e));
         popoutEventService
           .emitCommandSetsChanged(useRuleStore.getState().sendCommandSets)
@@ -129,7 +129,9 @@ export function usePopoutBridge() {
     // 终端弹出窗关闭（Rust on_window_event 探测）→ 回贴标签，主窗恢复终端显示。
     popoutEventService
       .onTerminalClosed((payload) => {
-        useAppStore.getState().setTabPoppedOut(payload.portId, false);
+        const state = useAppStore.getState();
+        const tab = findSerialTabByPortId(state, payload.portId);
+        if (tab) state.setTabPoppedOut(tab.id, false);
       })
       .then((u) => {
         if (cancelled) u();
@@ -149,9 +151,9 @@ export function usePopoutBridge() {
 
     // 活动标签变更 → 广播新 portId，弹窗更新发送目标指示。
     const unsubscribeApp = useAppStore.subscribe((state, prevState) => {
-      if (state.activeTabId === prevState.activeTabId) return;
+      if (getActivePortId(state) === getActivePortId(prevState)) return;
       popoutEventService
-        .emitActiveTabChanged({ portId: state.activeTabId })
+        .emitActiveTabChanged({ portId: getActivePortId(state) })
         .catch((e) => console.debug('[usePopoutBridge] emitActiveTabChanged failed:', e));
     });
 

@@ -66,6 +66,7 @@ const MOCK = `
     },
     manifestError: null,
     installedAt: 1,
+    installGeneration: 'e2e-install',
   });
 
   window.__PLUGIN_E2E__ = state;
@@ -86,10 +87,12 @@ const MOCK = `
       if (cmd === 'list_plugins') {
         const view = PLUGIN_VIEW();
         return {
+          revision: 1,
           plugins: [view],
           pluginConfigs: [
             {
               id: '${PLUGIN_ID}',
+              installGeneration: 'e2e-install',
               enabled: state.enabled,
               grantedPermissions: [...state.granted],
               installedAt: 1,
@@ -101,7 +104,7 @@ const MOCK = `
       if (cmd === 'read_plugin_asset') {
         if (args && args.relPath === 'main.js') return ${JSON.stringify(DEMO_WORKER)};
         if (args && args.relPath === 'manifest.json') return JSON.stringify(PLUGIN_VIEW().manifest);
-        return '';
+        return null;
       }
       if (cmd === 'list_available_ports') {
         return [{ id: 'COM1', name: 'COM1', port_type: 'real', manufacturer: null, product: null }];

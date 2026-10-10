@@ -27,6 +27,9 @@ export const PLUGIN_BRIDGE_CODE = `
 
   // 宿主 → 插件事件处理器（plugin.on）
   var handlers = Object.create(null);
+  var viewSessions = Object.create(null);
+  var viewQueues = Object.create(null);
+  var viewDeliveries = Object.create(null);
 
   self.onmessage = function (ev) {
     var msg = ev.data;
@@ -41,15 +44,43 @@ export const PLUGIN_BRIDGE_CODE = `
         else p.reject(new Error(msg.error || 'plugin api failed'));
       }
     } else if (typeof msg.type === 'string') {
-      // Acknowledge after all handlers (including async forwarding) settle.
-      var hs = handlers[msg.type] && handlers[msg.type].slice();
-      var jobs = [];
-      if (hs) {
-        for (var i = 0; i < hs.length; i++) {
-          try { jobs.push(Promise.resolve(hs[i](msg.payload))); }
-          catch (e) { console.error('[plugin] handler', msg.type, e); }
+      if (msg.type.indexOf('view.') === 0) {
+        var instanceId = msg.type === 'view.open' ? msg.payload.context.viewInstanceId : msg.payload.instanceId;
+        if (msg.type === 'view.close') {
+          var oldSession = viewSessions[instanceId];
+          if (oldSession) { oldSession.retired = true; delete viewSessions[instanceId]; }
+          var deliveries = viewDeliveries[instanceId] || [];
+          deliveries.forEach(function (delivery) {
+            if (typeof delivery.eventId === 'number') self.postMessage({ eventAck: delivery.eventId });
+            delivery.message = null;
+          });
+          delete viewDeliveries[instanceId]; delete viewQueues[instanceId];
+          if (oldSession) Promise.all(runHandlers('view.close', { view: oldSession.view, reason: msg.payload.reason })).catch(function (error) { console.error('[plugin] close handler', error); });
+          if (typeof msg.eventId === 'number') self.postMessage({ eventAck: msg.eventId });
+          return;
         }
+        var delivery = { message: msg, eventId: msg.eventId };
+        var list = viewDeliveries[instanceId] || (viewDeliveries[instanceId] = []);
+        list.push(delivery);
+        var queue = viewQueues[instanceId] || Promise.resolve();
+        var next = queue.then(function () {
+          var message = delivery.message; delivery.message = null;
+          return message ? dispatchView(message) : undefined;
+        });
+        viewQueues[instanceId] = next.catch(function (error) {
+          console.error('[plugin] view handler', error);
+          self.postMessage({ type: '__plugin_view_error', payload: {
+            instanceId: instanceId, error: String(error && error.message || error)
+          } });
+        });
+        next.finally(function () {
+          if (typeof delivery.eventId === 'number') self.postMessage({ eventAck: delivery.eventId });
+          var currentList = viewDeliveries[instanceId];
+          if (currentList) { var index = currentList.indexOf(delivery); if (index >= 0) currentList.splice(index, 1); }
+        }).catch(function () {});
+        return;
       }
+      var jobs = runHandlers(msg.type, msg.payload);
       if (typeof msg.eventId === 'number') {
         Promise.allSettled(jobs).then(function () { self.postMessage({ eventAck: msg.eventId }); });
       }
@@ -95,6 +126,89 @@ export const PLUGIN_BRIDGE_CODE = `
     };
   }
 
+  function runHandlers(type, payload) {
+    var hs = handlers[type] && handlers[type].slice();
+    var jobs = [];
+    if (hs) hs.forEach(function (handler) {
+      try { jobs.push(Promise.resolve(handler(payload))); }
+      catch (error) { jobs.push(Promise.reject(error)); }
+    });
+    return jobs;
+  }
+
+  function viewOn(session, type, callback) {
+    if (typeof callback !== 'function') throw new TypeError('view callback required');
+    var list = session.handlers[type] || (session.handlers[type] = []);
+    list.push(callback);
+    return function () { var index = list.indexOf(callback); if (index >= 0) list.splice(index, 1); };
+  }
+  function dispatchView(message) {
+    var payload = message.payload;
+    var id = message.type === 'view.open' ? payload.context.viewInstanceId : payload.instanceId;
+    if (message.type === 'view.open') {
+      var session = { handlers: Object.create(null), context: Object.freeze(payload.context), streamEpoch: payload.context.streamEpoch || 0, gapEpoch: -1, retired: false };
+      var view = {
+        context: session.context,
+        params: payload.params,
+        onInput: function (cb) { return viewOn(session, 'input', cb); },
+        onDiscontinuity: function (cb) { return viewOn(session, 'discontinuity', cb); },
+        onStatus: function (cb) { return viewOn(session, 'status', cb); },
+        onMessage: function (cb) { return viewOn(session, 'message', cb); },
+        publish: function (snapshot) { return session.retired ? Promise.reject(new Error('view session retired')) : api['view.publish']({ instanceId: id, snapshot: snapshot }); },
+        sendSerial: function (args) { return session.retired ? Promise.reject(new Error('view session retired')) : api['view.sendSerial'](Object.assign({}, args, { instanceId: id })); }
+      };
+      session.view = Object.freeze(view);
+      viewSessions[id] = session;
+      return Promise.all(runHandlers('view.open', session.view)).then(function () {
+        if (!session.retired) self.postMessage({ type: '__plugin_view_ready', payload: { instanceId: id } });
+      });
+    }
+    var current = viewSessions[id];
+    if (!current) return Promise.resolve();
+    if (message.type === 'view.close') {
+      delete viewSessions[id];
+      return Promise.all(runHandlers('view.close', { view: current.view, reason: payload.reason }));
+    }
+    var type = message.type.slice(5);
+    var callbacks = current.handlers[type] || [];
+    if (typeof payload.streamEpoch === 'number') {
+      if (payload.streamEpoch < current.streamEpoch) return Promise.resolve();
+      current.streamEpoch = payload.streamEpoch;
+    }
+    if (type === 'discontinuity') current.gapEpoch = payload.streamEpoch;
+    var jobs = [];
+    if (type === 'input' && payload.gapBefore && current.gapEpoch !== payload.streamEpoch) {
+      current.gapEpoch = payload.streamEpoch;
+      jobs = (current.handlers.discontinuity || []).map(function (cb) {
+        return Promise.resolve().then(function () { if (!current.retired) return cb({ reason: 'input-gap', streamEpoch: payload.streamEpoch }); });
+      });
+    }
+    return Promise.all(jobs).then(function () {
+      if (current.retired) return;
+      return Promise.all(callbacks.slice().map(function (cb) {
+        return Promise.resolve().then(function () {
+          if (current.retired) return;
+          return cb(type === 'input' ? payload.batch : payload);
+        });
+      }));
+    }).then(function () {
+      if (!current.retired && type === 'message') return Promise.all(runHandlers('view.message', { view: current.view, type: payload.type, payload: payload.payload }));
+    });
+  }
+
+  var views = {
+    onOpen: function (cb) { return on('view.open', cb); },
+    onClose: function (cb) { return on('view.close', cb); },
+    onMessage: function (cb) { return on('view.message', cb); }
+  };
+  var tabs = {
+    open: function (args) { return api['tabs.open'](args); },
+    activate: function (args) { return api['tabs.activate'](args); },
+    close: function (args) { return api['tabs.close'](args); },
+    setTitle: function (args) { return api['tabs.setTitle'](args); },
+    list: function () { return api['tabs.list'](); }
+  };
+
   var rx = {
     onLine: function (cb) { return on('rx.line', cb); },
     onBytes: function (cb) { return on('rx.bytes', cb); },
@@ -102,7 +216,7 @@ export const PLUGIN_BRIDGE_CODE = `
     onDropped: function (cb) { return on('rx.dropped', cb); }
   };
 
-  self.plugin = { api: api, on: on, rx: rx };
+  self.plugin = { api: api, on: on, rx: rx, views: views, tabs: tabs };
 
   self.addEventListener('unhandledrejection', function (event) {
     var reason = event.reason;

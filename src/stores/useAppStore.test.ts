@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useAppStore, getClosingTabIds } from './useAppStore';
+import { useAppStore, getClosingTabIds, findSerialTabByPortId, getActivePortId, getTabPortId } from './useAppStore';
 import { resetStoresForTests } from './resetStores';
 import { collectLeaves, countLeaves, findLeafById, findLeafByTabId } from '../utils/paneTree';
 import { useTerminalStore } from './useTerminalStore';
@@ -106,11 +106,11 @@ function seedTwoPanes() {
   useAppStore.setState({
     ports: ['A', 'B', 'C', 'X', 'Y'].map(p => makePort(p)),
     tabs: [
-      { id: 'A', title: 'A', isPinned: false, splitPaneId: 'pane1' },
-      { id: 'B', title: 'B', isPinned: false, splitPaneId: 'pane1' },
-      { id: 'C', title: 'C', isPinned: true, splitPaneId: 'pane1' },
-      { id: 'X', title: 'X', isPinned: false, splitPaneId: 'pane2' },
-      { id: 'Y', title: 'Y', isPinned: false, splitPaneId: 'pane2' },
+      { kind: 'serial', portId: 'A', id: 'A', title: 'A', isPinned: false, splitPaneId: 'pane1' },
+      { kind: 'serial', portId: 'B', id: 'B', title: 'B', isPinned: false, splitPaneId: 'pane1' },
+      { kind: 'serial', portId: 'C', id: 'C', title: 'C', isPinned: true, splitPaneId: 'pane1' },
+      { kind: 'serial', portId: 'X', id: 'X', title: 'X', isPinned: false, splitPaneId: 'pane2' },
+      { kind: 'serial', portId: 'Y', id: 'Y', title: 'Y', isPinned: false, splitPaneId: 'pane2' },
     ],
     paneTree: {
       id: 'root', type: 'branch', direction: 'vertical',
@@ -124,13 +124,14 @@ function seedTwoPanes() {
 describe('Tab & Pane actions', () => {
   it('openTab creates tab, adds to focused pane, and initializes terminal state', () => {
     useAppStore.setState({ ports: [makePort('COM1')] });
-    useAppStore.getState().openTab('COM1');
+    const tabId = useAppStore.getState().openTab('COM1');
     const s = useAppStore.getState();
     expect(s.tabs).toHaveLength(1);
-    expect(s.tabs[0].id).toBe('COM1');
-    expect(s.activeTabId).toBe('COM1');
+    expect(s.tabs[0]).toMatchObject({ kind: 'serial', portId: 'COM1', id: tabId });
+    expect(tabId).not.toBe('COM1');
+    expect(s.activeTabId).toBe(tabId);
     expect(s.paneTree.type).toBe('leaf');
-    expect((s.paneTree as LeafPane).tabIds).toContain('COM1');
+    expect((s.paneTree as LeafPane).tabIds).toContain(tabId);
     expect(useTerminalStore.getState().terminals['COM1']).toBeDefined();
     expect(useTerminalStore.getState().terminals['COM1'].scrollLocked).toBe(true);
   });
@@ -142,42 +143,73 @@ describe('Tab & Pane actions', () => {
     const s = useAppStore.getState();
     expect(s.tabs).toHaveLength(2);
     // 活动标签只有一个来源 activeTabId（标签自身不再存 isActive）。
-    expect(s.activeTabId).toBe('COM1');
+    expect(s.activeTabId).toBe(findSerialTabByPortId(s, 'COM1')!.id);
     expect(s.focusedPaneId).toBe('main');
+  });
+
+  it('resolves bound plugin targets but never reuses the previous port for an unbound tool', () => {
+    const store = useAppStore.getState();
+    const serialId = store.openTab('COM1');
+    const boundId = store.addPluginTab({ kind: 'plugin', title: 'table', pluginId: 'sensor', installGeneration: 'g1', viewId: 'table', boundPortId: 'COM1', instanceKey: '', restoreOnStartup: true });
+    expect(getActivePortId(useAppStore.getState())).toBe('COM1');
+    const toolId = store.addPluginTab({ kind: 'plugin', title: 'settings', pluginId: 'sensor', installGeneration: 'g1', viewId: 'settings', boundPortId: null, instanceKey: '', restoreOnStartup: true });
+    expect(getActivePortId(useAppStore.getState())).toBeNull();
+    expect(store.openTab('COM1')).toBe(serialId);
+    expect(useAppStore.getState().tabs).toHaveLength(3);
+    expect(findSerialTabByPortId(useAppStore.getState(), 'COM1')!.id).not.toBe(boundId);
+    store.setActiveTab(toolId);
+    store.setTabTitle(toolId, 'renamed');
+    expect(getActivePortId(useAppStore.getState())).toBeNull();
+    expect(useAppStore.getState().tabs.find((tab) => tab.id === toolId)?.title).toBe('renamed');
+  });
+
+  it('keeps mixed pinned tabs during bulk close and background opens do not steal focus', () => {
+    const store = useAppStore.getState();
+    const serialId = store.openTab('COM1');
+    const pluginId = store.addPluginTab({ kind: 'plugin', title: 'table', pluginId: 'sensor', installGeneration: 'g1', viewId: 'table', boundPortId: 'COM1', instanceKey: '', restoreOnStartup: true }, { activate: false });
+    expect(useAppStore.getState().activeTabId).toBe(serialId);
+    store.pinTab(pluginId);
+    store.openTab('COM2');
+    store.closeOtherTabs(serialId);
+    expect(useAppStore.getState().tabs.map((tab) => tab.id)).toEqual([serialId, pluginId]);
+    store.closeTab(serialId);
+    expect(getActivePortId(useAppStore.getState())).toBe('COM1');
+    expect(findSerialTabByPortId(useAppStore.getState(), 'COM1')).toBeUndefined();
   });
 
   it('closeTab picks remaining tab as active and removes from pane', () => {
     useAppStore.setState({ ports: [makePort('COM1'), makePort('COM2')] });
     const { openTab, closeTab } = useAppStore.getState();
-    openTab('COM1'); openTab('COM2');
-    closeTab('COM2');
+    const firstId = openTab('COM1');
+    const secondId = openTab('COM2');
+    closeTab(secondId);
     const s = useAppStore.getState();
     expect(s.tabs).toHaveLength(1);
-    expect(s.tabs[0].id).toBe('COM1');
-    expect(s.activeTabId).toBe('COM1');
+    expect(s.tabs[0].id).toBe(firstId);
+    expect(s.activeTabId).toBe(firstId);
     expect(s.paneTree.type).toBe('leaf');
-    expect((s.paneTree as LeafPane).tabIds).toEqual(['COM1']);
+    expect((s.paneTree as LeafPane).tabIds).toEqual([firstId]);
   });
 
   it('closeTabsToRight preserves pinned tabs to the right of target', () => {
     useAppStore.setState({ ports: ['A', 'B', 'C', 'D'].map(p => makePort(p)) });
     const { openTab, pinTab, closeTabsToRight } = useAppStore.getState();
-    openTab('A'); openTab('B'); openTab('C'); openTab('D');
-    pinTab('D'); // D is now pinned
-    closeTabsToRight('B'); // should remove C but keep D
+    openTab('A'); const b = openTab('B'); openTab('C'); const d = openTab('D');
+    pinTab(d);
+    closeTabsToRight(b);
     const s = useAppStore.getState();
-    expect(s.tabs.map(t => t.id)).toEqual(['A', 'B', 'D']);
+    expect(s.tabs.map(getTabPortId)).toEqual(['A', 'B', 'D']);
   });
 
   it('closeOtherTabs preserves only the target and pinned tabs', () => {
     useAppStore.setState({ ports: ['A', 'B', 'C'].map(p => makePort(p)) });
     const { openTab, pinTab, closeOtherTabs } = useAppStore.getState();
-    openTab('A'); openTab('B'); openTab('C');
-    pinTab('A');
-    closeOtherTabs('C');
+    const a = openTab('A'); openTab('B'); const c = openTab('C');
+    pinTab(a);
+    closeOtherTabs(c);
     const s = useAppStore.getState();
-    expect(s.tabs.map(t => t.id).sort()).toEqual(['A', 'C']);
-    expect(s.activeTabId).toBe('C');
+    expect(s.tabs.map(getTabPortId).sort()).toEqual(['A', 'C']);
+    expect(s.activeTabId).toBe(c);
   });
 
   it('closeTabsToRight is pane-scoped: uses leaf tab order and never touches other panes', () => {
@@ -202,20 +234,20 @@ describe('Tab & Pane actions', () => {
   it('closeTabsToLeft respects reordered pane tab order (not global order)', () => {
     useAppStore.setState({ ports: ['A', 'B', 'C'].map(p => makePort(p)) });
     const { openTab, reorderPaneTabIds, closeTabsToLeft } = useAppStore.getState();
-    openTab('A'); openTab('B'); openTab('C'); // main leaf: [A,B,C]
-    reorderPaneTabIds('main', ['C', 'A', 'B']);
-    closeTabsToLeft('A'); // left of A in pane order is only [C]
+    const a = openTab('A'); const b = openTab('B'); const c = openTab('C');
+    reorderPaneTabIds('main', [c, a, b]);
+    closeTabsToLeft(a);
     const s = useAppStore.getState();
-    expect(s.tabs.map(t => t.id).sort()).toEqual(['A', 'B']);
-    expect((s.paneTree as LeafPane).tabIds).toEqual(['A', 'B']);
+    expect(s.tabs.map(getTabPortId).sort()).toEqual(['A', 'B']);
+    expect((s.paneTree as LeafPane).tabIds).toEqual([a, b]);
   });
 
   it('closeTabsToRight repairs a dangling focusedPaneId', () => {
     useAppStore.setState({
       ports: ['A', 'B'].map(p => makePort(p)),
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
-        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'main' },
+        { kind: 'serial', portId: 'A', id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
+        { kind: 'serial', portId: 'B', id: 'B', title: 'B', isPinned: false, splitPaneId: 'main' },
       ],
       paneTree: { id: 'main', type: 'leaf', tabIds: ['A', 'B'], size: 1 },
       focusedPaneId: 'ghost', // dangling before the action
@@ -229,20 +261,20 @@ describe('Tab & Pane actions', () => {
   it('openTab falls back to first leaf when focusedPaneId is dangling (no orphan tab)', () => {
     useAppStore.setState({
       ports: [makePort('A'), makePort('B')],
-      tabs: [{ id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' }],
+      tabs: [{ kind: 'serial', portId: 'A', id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' }],
       paneTree: { id: 'main', type: 'leaf', tabIds: ['A'], size: 1 },
       focusedPaneId: 'ghost', // dangling
     });
-    useAppStore.getState().openTab('B');
+    const tabId = useAppStore.getState().openTab('B');
     const s = useAppStore.getState();
     // B must land in a real leaf, not just in state.tabs
-    expect(s.tabs.find(t => t.id === 'B')!.splitPaneId).toBe('main');
-    expect(findLeafById(s.paneTree, 'main')!.tabIds).toContain('B');
+    expect(findSerialTabByPortId(s, 'B')!.splitPaneId).toBe('main');
+    expect(findLeafById(s.paneTree, 'main')!.tabIds).toContain(tabId);
   });
 
   it('splitPane sets source size to 0.5, creates new pane with active tab', () => {
     useAppStore.setState({ ports: [makePort('A')] });
-    useAppStore.getState().openTab('A');
+    const tabId = useAppStore.getState().openTab('A');
     useAppStore.getState().splitPane('horizontal');
     const s = useAppStore.getState();
     expect(s.paneTree.type).toBe('branch');
@@ -252,22 +284,22 @@ describe('Tab & Pane actions', () => {
     const newLeaf = branch.children.find((c): c is LeafPane => c.type === 'leaf' && c.id !== 'main')!;
     expect(main.size).toBe(0.5);
     expect(newLeaf.size).toBe(0.5);
-    expect(newLeaf.tabIds).toEqual(['A']);
+    expect(newLeaf.tabIds).toEqual([tabId]);
     expect(main.tabIds).toEqual([]);
-    expect(s.tabs.find(t => t.id === 'A')!.splitPaneId).toBe(newLeaf.id);
+    expect(findSerialTabByPortId(s, 'A')!.splitPaneId).toBe(newLeaf.id);
   });
 
   it('moveTabToPane removes empty source pane and migrates active state', () => {
     useAppStore.setState({ ports: [makePort('A'), makePort('B')] });
     const { openTab, splitPane, moveTabToPane } = useAppStore.getState();
-    openTab('A'); openTab('B'); // both in 'main'
-    splitPane('vertical'); // active tab B moves to new pane
-    moveTabToPane('B', 'main'); // move B back; source leaf becomes empty -> pruned
+    const a = openTab('A'); const b = openTab('B');
+    splitPane('vertical');
+    moveTabToPane(b, 'main');
     const s = useAppStore.getState();
     expect(s.paneTree.type).toBe('leaf');
     expect((s.paneTree as LeafPane).id).toBe('main');
-    expect([...(s.paneTree as LeafPane).tabIds].sort()).toEqual(['A', 'B']);
-    expect(s.tabs.find(t => t.id === 'B')!.splitPaneId).toBe('main');
+    expect([...(s.paneTree as LeafPane).tabIds].sort()).toEqual([a, b].sort());
+    expect(findSerialTabByPortId(s, 'B')!.splitPaneId).toBe('main');
   });
 
   it('moveTabToPane to a missing pane leaves the tree untouched (no orphan tab)', () => {
@@ -276,8 +308,8 @@ describe('Tab & Pane actions', () => {
     useAppStore.setState({
       ports: [makePort('A'), makePort('B')],
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
-        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'main' },
+        { kind: 'serial', portId: 'A', id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
+        { kind: 'serial', portId: 'B', id: 'B', title: 'B', isPinned: false, splitPaneId: 'main' },
       ],
       paneTree: { id: 'main', type: 'leaf', tabIds: ['A', 'B'], size: 1 },
     });
@@ -322,9 +354,9 @@ describe('Tab & Pane actions', () => {
     useAppStore.setState({
       ports: ['A', 'B', 'C'].map(p => makePort(p)),
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
-        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'leafX' },
-        { id: 'C', title: 'C', isPinned: false, splitPaneId: 'leafY' },
+        { kind: 'serial', portId: 'A', id: 'A', title: 'A', isPinned: false, splitPaneId: 'main' },
+        { kind: 'serial', portId: 'B', id: 'B', title: 'B', isPinned: false, splitPaneId: 'leafX' },
+        { kind: 'serial', portId: 'C', id: 'C', title: 'C', isPinned: false, splitPaneId: 'leafY' },
       ],
       paneTree: {
         id: 'root', type: 'branch', direction: 'horizontal',
@@ -382,7 +414,7 @@ describe('Edge cases', () => {
     useAppStore.setState({ ports: [makePort('COM1')] });
     useAppStore.getState().openTab('COM1');
     // Terminal display state is now in useTerminalStore; openTab still creates the tab
-    expect(useAppStore.getState().tabs.find(t => t.id === 'COM1')).toBeDefined();
+    expect(findSerialTabByPortId(useAppStore.getState(), 'COM1')).toBeDefined();
   });
 
   it('closeTab on non-existent tab is no-op', () => {
@@ -413,15 +445,15 @@ describe('Edge cases', () => {
     useAppStore.setState({ ports: [makePort('COM1')] });
     useAppStore.getState().openTab('COM1');
     useAppStore.getState().updatePort('COM1', { alias: 'My Device' });
-    const tab = useAppStore.getState().tabs.find(t => t.id === 'COM1');
+    const tab = findSerialTabByPortId(useAppStore.getState(), 'COM1');
     expect(tab?.title).toBe('COM1 My Device');
   });
 
   it('reorderPaneTabIds updates pane tab order', () => {
     useAppStore.setState({ ports: ['A', 'B', 'C'].map(p => makePort(p)) });
-    ['A', 'B', 'C'].forEach(id => useAppStore.getState().openTab(id));
-    useAppStore.getState().reorderPaneTabIds('main', ['C', 'A', 'B']);
-    expect((useAppStore.getState().paneTree as LeafPane).tabIds).toEqual(['C', 'A', 'B']);
+    const ids = ['A', 'B', 'C'].map((portId) => useAppStore.getState().openTab(portId));
+    useAppStore.getState().reorderPaneTabIds('main', [ids[2], ids[0], ids[1]]);
+    expect((useAppStore.getState().paneTree as LeafPane).tabIds).toEqual([ids[2], ids[0], ids[1]]);
   });
 
   it('reorderPaneTabIds on non-existent pane is no-op', () => {
@@ -437,9 +469,9 @@ describe('Edge cases', () => {
     useAppStore.setState({
       ports: ['A', 'B', 'C'].map(p => makePort(p)),
       tabs: [
-        { id: 'A', title: 'A', isPinned: false, splitPaneId: 'pane1' },
-        { id: 'B', title: 'B', isPinned: false, splitPaneId: 'pane1' },
-        { id: 'C', title: 'C', isPinned: false, splitPaneId: 'pane2' },
+        { kind: 'serial', portId: 'A', id: 'A', title: 'A', isPinned: false, splitPaneId: 'pane1' },
+        { kind: 'serial', portId: 'B', id: 'B', title: 'B', isPinned: false, splitPaneId: 'pane1' },
+        { kind: 'serial', portId: 'C', id: 'C', title: 'C', isPinned: false, splitPaneId: 'pane2' },
       ],
       paneTree: {
         id: 'root', type: 'branch', direction: 'vertical' as const,

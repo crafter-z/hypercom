@@ -49,7 +49,7 @@ export async function set(pluginId: string, key: string, value: unknown): Promis
   }
 }
 
-/** 读入插件 KV（缓存命中直接返回；读盘失败/无 state.json → 空 Map）。
+/** 读入插件 KV（缓存命中直接返回；仅后端确认 state.json 不存在时初始化）。
  *  **in-flight 去重**（评审复审修复并发首载竞态）：缓存未命中时并发调用方
  *  共享同一次读盘 Promise——旧实现双读盘各自建 Map、后写盘者整体覆盖前者的
  *  set（丢键）。 */
@@ -62,23 +62,15 @@ async function load(pluginId: string): Promise<Map<string, unknown>> {
   if (pending) return pending;
   const generation = generations.get(pluginId) ?? 0;
   const promise = (async (): Promise<Map<string, unknown>> => {
-    let raw: string;
-    try {
-      raw = await pluginService.readPluginAsset(pluginId, STATE_FILE);
-    } catch {
-      // 无 state.json（首次）——空 Map。
-      const empty = new Map<string, unknown>();
-      if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, empty);
-      return empty;
-    }
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      parsed = {}; // 损坏的 state.json 降级为空（插件数据非关键）。
+    const raw = await pluginService.readPluginAsset(pluginId, STATE_FILE);
+    let parsed: unknown = {};
+    if (raw !== null) parsed = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('plugin storage must contain a JSON object');
     }
     const m = new Map<string, unknown>(Object.entries(parsed));
-    if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, m);
+    if (generation !== (generations.get(pluginId) ?? 0)) throw new Error('plugin storage invalidated');
+    cache.set(pluginId, m);
     return m;
   })();
   inflight.set(pluginId, promise);
@@ -90,12 +82,12 @@ async function load(pluginId: string): Promise<Map<string, unknown>> {
 }
 
 /** Uninstall/reinstall invalidates cached reads and prevents queued writes from starting.
- * An already-running backend write cannot be cancelled here. */
+ * An already-running backend write cannot be cancelled here; its write barrier
+ * remains so a fresh generation cannot race it on disk. */
 export function invalidate(pluginId: string): void {
   cache.delete(pluginId);
   inflight.delete(pluginId);
   generations.set(pluginId, (generations.get(pluginId) ?? 0) + 1);
-  writes.delete(pluginId);
 }
 
 export const pluginKv = { get, set, invalidate };

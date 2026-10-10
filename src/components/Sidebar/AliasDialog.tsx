@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 
 export interface AliasDialogProps {
   portId: string;
@@ -16,6 +17,8 @@ const AliasDialog: React.FC<AliasDialogProps> = ({
 }) => {
   const [value, setValue] = useState(currentAlias);
   const { t } = useTranslation();
+  const overlayReady = usePluginViewOverlay();
+  if (!overlayReady) return null;
 
   return (
     <div className="modal-overlay" onClick={onCancel}>

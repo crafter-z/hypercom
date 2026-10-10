@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { useMenuPlacement } from './menuPlacement';
 import { useOutsideDismiss } from './useOutsideDismiss';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 export interface ContextMenuItem {
   label: string;
@@ -26,8 +27,10 @@ interface ContextMenuProps {
 }
 
 const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
-  const { ref, pos } = useMenuPlacement(x, y);
+  const overlayReady = usePluginViewOverlay();
+  const { ref, pos } = useMenuPlacement(x, y, overlayReady);
   useOutsideDismiss(ref, onClose);
+  if (!overlayReady) return null;
 
   return (
     <div

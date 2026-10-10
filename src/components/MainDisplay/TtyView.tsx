@@ -89,10 +89,8 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     });
 
     term.open(container);
-    try {
-      fitAddon.fit();
-    } catch {
-      // 容器尺寸为 0（隐藏/未布局）时 fit 抛错——交给 ResizeObserver 稍后重试
+    if (container.clientWidth > 0 && container.clientHeight > 0) {
+      try { fitAddon.fit(); } catch { /* A layout transition may retire the geometry. */ }
     }
     // 兜底：无论初始 fit 是否触发 onResize，显式上报当前尺寸（term.cols/rows
     // 即当前实际值）。**隐藏挂载**（display:none → 容器 0 尺寸）时 fit 未生效、
@@ -110,7 +108,7 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     if (typeof document !== 'undefined' && document.fonts?.ready) {
       document.fonts.ready
         .then(() => {
-          if (cancelled) return;
+          if (cancelled || container.clientWidth === 0 || container.clientHeight === 0) return;
           fontRaf = requestAnimationFrame(() => {
             try {
               fitAddon.fit();
@@ -127,9 +125,10 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     // 容器尺寸变化 → 防抖 fit（rAF 合并同帧多次 ResizeObserver 回调）。
     let rafId = 0;
     const ro = new ResizeObserver(() => {
-      if (rafId) cancelAnimationFrame(rafId);
+      cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         rafId = 0;
+        if (container.clientWidth === 0 || container.clientHeight === 0) return;
         try {
           fitAddon.fit();
         } catch {
@@ -145,8 +144,8 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
       onDataDisposable.dispose();
       onResizeDisposable.dispose();
       ro.disconnect();
-      if (rafId) cancelAnimationFrame(rafId);
-      if (fontRaf) cancelAnimationFrame(fontRaf);
+      cancelAnimationFrame(rafId);
+      cancelAnimationFrame(fontRaf);
       termRef.current = null;
       fitRef.current = null;
       term.dispose();

@@ -7,10 +7,10 @@
  * 实现：`useSerialReceive` 的 `serial:status` handler 在 connected 分支调用
  * 模块级函数 `openTabForConnectedPort(portId)`（后端对 open 与自动重连统一发
  * connected，是「真正连接成功」的权威信号）。本文件按项目惯例直接测该纯函数
- * 及其依赖的 store 语义（tab id === portId，复用 `openTab` 手动建标签页动作）。
+ * 及其依赖的显式串口到工作区映射（复用 `openTab` 手动建标签页动作）。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useAppStore } from '../stores/useAppStore';
+import { findSerialTabByPortId, getActivePortId, getTabPortId, useAppStore } from '../stores/useAppStore';
 import { collectLeaves, findLeafById, findLeafByTabId } from '../utils/paneTree';
 import type { SerialPort, BranchPane } from '../types';
 import { openTabForConnectedPort } from './useSerialReceive';
@@ -48,12 +48,12 @@ describe('openTabForConnectedPort — 连接成功自动打开/激活标签页',
   it('open 成功（connected 事件）→ 为该端口创建并激活标签页', () => {
     openTabForConnectedPort('COM1');
     const s = useAppStore.getState();
-    expect(s.tabs.map((t) => t.id)).toEqual(['COM1']);
-    expect(s.activeTabId).toBe('COM1');
+    expect(s.tabs.map(getTabPortId)).toEqual(['COM1']);
+    expect(getActivePortId(s)).toBe('COM1');
     // 标签页必须落在真实叶子（paneTree），不是仅挂在 state.tabs 的孤儿。
-    const leaf = findLeafByTabId(s.paneTree, 'COM1');
+    const leaf = findLeafByTabId(s.paneTree, s.tabs[0].id);
     expect(leaf).toBeDefined();
-    expect(leaf!.tabIds).toContain('COM1');
+    expect(leaf!.tabIds).toContain(s.tabs[0].id);
   });
 
   it('该端口已有标签页 → 仅激活，不重复创建', () => {
@@ -65,7 +65,7 @@ describe('openTabForConnectedPort — 连接成功自动打开/激活标签页',
     expect(s.tabs).toHaveLength(2);
     // 激活态由 activeTabId 单一表示（TabItem.isActive 已删除）：
     // 重连只把焦点切回该端口的标签页，不新建第二个。
-    expect(s.activeTabId).toBe('COM1');
+    expect(s.activeTabId).toBe(findSerialTabByPortId(s, 'COM1')!.id);
   });
 
   it('多 Pane（递归 paneTree）下新标签页落在聚焦叶子，与手动建标签页一致', () => {
@@ -79,8 +79,9 @@ describe('openTabForConnectedPort — 连接成功自动打开/激活标签页',
     openTabForConnectedPort('COM2');
     const s2 = useAppStore.getState();
     expect(s2.tabs).toHaveLength(2);
-    expect(s2.tabs.find((t) => t.id === 'COM2')!.splitPaneId).toBe(s2.focusedPaneId);
-    expect(findLeafById(s2.paneTree, s2.focusedPaneId)!.tabIds).toContain('COM2');
+    const tab = findSerialTabByPortId(s2, 'COM2')!;
+    expect(tab.splitPaneId).toBe(s2.focusedPaneId);
+    expect(findLeafById(s2.paneTree, s2.focusedPaneId)!.tabIds).toContain(tab.id);
   });
 
   it('关闭串口（disconnected）不影响标签页——标签页保留可回看/重连', () => {
@@ -88,8 +89,8 @@ describe('openTabForConnectedPort — 连接成功自动打开/激活标签页',
     // closePort 的 store 侧效果只有状态更新；标签页必须原样保留。
     useAppStore.getState().updatePort('COM1', { status: 'disconnected' });
     const s = useAppStore.getState();
-    expect(s.tabs.map((t) => t.id)).toEqual(['COM1']);
-    expect(s.activeTabId).toBe('COM1');
-    expect(findLeafByTabId(s.paneTree, 'COM1')).toBeDefined();
+    expect(s.tabs.map(getTabPortId)).toEqual(['COM1']);
+    expect(getActivePortId(s)).toBe('COM1');
+    expect(findLeafByTabId(s.paneTree, s.tabs[0].id)).toBeDefined();
   });
 });

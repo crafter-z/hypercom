@@ -484,15 +484,21 @@ test.describe('HyperCom smoke tests', () => {
         });
       }, i);
     }
-    // 滚到内容中部（解锁 follow）
-    const view = page.locator('.terminal-view');
+    // Unlock follow through the same wheel gesture as a user before positioning
+    // the reading viewport; programmatic scrollTop alone does not unlock it.
+    const view = page.locator('.serial-content-layer[data-port-id="COM1"] .terminal-view');
+    await view.hover();
+    await page.mouse.wheel(0, -100);
+    await page.waitForTimeout(200);
     await view.evaluate((el: HTMLElement) => { el.scrollTop = el.scrollHeight / 2; });
     await page.waitForTimeout(200);
 
     // 在视口中部某行按下鼠标开始拖选
     const box = (await view.boundingBox())!;
     const startX = box.x + box.width / 2;
-    const startY = box.y + box.height / 2;
+    const startY = box.y + box.height / 4;
+    const rowHeight = await view.locator('.terminal-line:not([style*="display: none"])').first().evaluate((row) => row.getBoundingClientRect().height);
+    const endY = Math.min(startY + 6 * rowHeight, box.y + box.height - rowHeight * 2);
 
     // 用视口坐标 elementFromPoint 取鼠标按下位置的行（比 translateY 推算可靠）
     const startSeq = await page.evaluate(({ x, y }) => {
@@ -501,10 +507,16 @@ test.describe('HyperCom smoke tests', () => {
       return row ? Number(row.getAttribute('data-seq')) : null;
     }, { x: startX, y: startY });
     expect(startSeq).not.toBeNull();
+    const endSeq = await page.evaluate(({ x, y }) => {
+      const row = document.elementFromPoint(x, y)?.closest('[data-seq]');
+      return row ? Number(row.getAttribute('data-seq')) : null;
+    }, { x: startX, y: endY });
+    expect(endSeq).not.toBeNull();
+    expect(endSeq!).toBeGreaterThan(startSeq!);
     // 定位鼠标到起点行（按下前）
     await page.mouse.move(startX, startY);
     await page.mouse.down();
-    await page.mouse.move(startX, startY + 8 * 16, { steps: 5 });
+    await page.mouse.move(startX, endY, { steps: 5 });
 
     // 拖选期间滚轮向上滚动 —— 起点行滚出视口（issue #17 场景）。
     // 滚动量须保持选区 ≤ MAX_PINNED_ROWS(600)：15 × 400px ≈ 375 行，
@@ -652,11 +664,10 @@ test.describe('HyperCom smoke tests', () => {
   test('splitPane nested-branch move does not crash the renderer (issue #15)', async ({ page }) => {
     // 构造 issue #15 的嵌套分支场景：左右分屏后，左 Pane 持有两标签、右 Pane
     // 一标签；聚焦左 Pane 的标签再次 split → 左 Pane 的叶子节点在树中位移
-    // （branch[branch'[leafA, newLeaf], leafB]）→ TerminalView 跨 Pane 重挂载。
-    // 修复前 detach 不清 active，旧行成为孤儿节点，新容器 render 的
-    // insertRowInOrder 对脱链 reference 调 insertBefore → DOMException。
-    // 关键：split 前把 COM1 滚到中部（解锁 follow）——重挂载后视口在顶部，
-    // 新窗口行与旧 active 不重叠，迫使 insertRowInOrder 必须相对孤儿行归位。
+    // （branch[branch'[leafA, newLeaf], leafB]）。稳定内容宿主必须保留
+    // 同一个 TerminalView DOM / renderer，而不是因 Pane 位移重挂载。
+    // 旧实现 detach 不清 active，重挂载后相对孤儿节点 insertBefore 会崩溃；
+    // 仍保留滚动、嵌套位移及连续接收场景，并额外验证 DOM 身份连续性。
     const errors = collectErrors(page);
 
     // mock 后端：多返回两个端口（轮询 3s 后生效）
@@ -683,16 +694,18 @@ test.describe('HyperCom smoke tests', () => {
     // ② 给 COM1 灌数据并渲染（renderer 持有 active 行）
     await dispatchSerialData(page, 'COM1', 'line-1\nline-2\nline-3\n'.repeat(15));
     await expect(
-      page.locator('.pane-node:has(.tab-item:has-text("COM1")) .terminal-line'),
+      page.locator('.serial-content-layer[data-port-id="COM1"] .terminal-line'),
     ).not.toHaveCount(0, { timeout: 5000 });
 
     // ③ 滚到中部（解锁 follow）：旧 active 行在视口中部
     const com1Terminal = page.locator(
-      '.pane-node:has(.tab-item:has-text("COM1")) .terminal-view',
+      '.serial-content-layer[data-port-id="COM1"] .terminal-view',
     );
     await com1Terminal.hover();
     await page.mouse.wheel(0, -300);
     await page.waitForTimeout(400); // settle（120ms 手势静默）→ scrollLocked=false
+    const originalTerminal = await com1Terminal.elementHandle();
+    expect(originalTerminal).not.toBeNull();
 
     // ④ 聚焦 COM1 → 打开 COM3 落左 Pane → 聚焦 COM1 → 再 split（嵌套位移）
     await page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM1")').click();
@@ -701,18 +714,20 @@ test.describe('HyperCom smoke tests', () => {
     await page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM1")').click();
     await page.locator('.pane-container-inner.pane-focused .tab-bar-split-group button:first-child').click();
 
-    // ⑤ 重挂载窗口期：不得抛 insertBefore DOMException；终端正常重建
+    // ⑤ 布局位移窗口期：不得抛 insertBefore DOMException；终端保持原实例
     await page.waitForTimeout(600);
     // 只断言崩溃特征（insertBefore DOMException）——其余无关 console.error 噪音
     // 不参与判定
     expect(errors.filter((e) => e.includes('insertBefore'))).toEqual([]);
     await expect(
-      page.locator('.pane-node:has(.tab-item:has-text("COM1")) .terminal-line'),
+      page.locator('.serial-content-layer[data-port-id="COM1"] .terminal-line'),
     ).not.toHaveCount(0, { timeout: 5000 });
+    expect(await originalTerminal!.evaluate((element) => element === document.querySelector('.serial-content-layer[data-port-id="COM1"] .terminal-view'))).toBe(true);
+    await originalTerminal!.dispose();
     // 拆分后左 Pane（COM3）与右 Pane（COM2）仍各自渲染
     await dispatchSerialData(page, 'COM3', 'after-split-com3\n');
     await expect(
-      page.locator('.pane-node:has(.tab-item:has-text("COM3")) .terminal-line .terminal-content').first(),
+      page.locator('.serial-content-layer[data-port-id="COM3"] .terminal-line .terminal-content').first(),
     ).toContainText('after-split-com3', { timeout: 5000 });
     expect(errors.filter((e) => e.includes('insertBefore'))).toEqual([]);
   });

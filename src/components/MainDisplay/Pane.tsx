@@ -1,18 +1,18 @@
 import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore, getClosingTabIds, type CloseScope } from '../../stores/useAppStore';
-import { releaseTerminalState } from '../../stores/releaseTerminalState';
+import { useAppStore, getClosingTabIds, getTabPortId, type CloseScope } from '../../stores/useAppStore';
+import { releaseUnusedPortState } from '../../stores/releaseTerminalState';
 import { collectLeaves } from '../../utils/paneTree';
 import { runSequential } from '../../utils/sequential';
 import { releaseViewportManager } from '../../utils/terminal/viewportManager';
+import { getTabViewPreference, getPluginViewState, dismissPluginTab } from '../../utils/pluginViewRuntime';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
 import { useSerialConnection, usePortToolActions } from '../../hooks';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
 import TabBar from './TabBar';
-import TerminalView from './TerminalView';
-import TtyView from './TtyView';
+import PluginViewSurface from './PluginViewSurface';
 import { X, Cable } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
 
@@ -27,7 +27,6 @@ interface PaneProps {
 const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onFocus }) => {
   const tabs = useAppStore((s) => s.tabs);
   const activeTabId = useAppStore((s) => s.activeTabId);
-  const ports = useAppStore((s) => s.ports);
   const paneTree = useAppStore((s) => s.paneTree);
   const { t } = useTranslation();
   const setActiveTab = useAppStore((s) => s.setActiveTab);
@@ -50,78 +49,57 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     disabled: !isMultiPane,
   });
 
-  // Shared per-tab close lifecycle: free the terminal buffer + popout window,
-  // but KEEP the serial connection (issue #11: closing a tab must not close
-  // the port). The port keeps streaming — backend RX logs are written by
-  // LogManager independently of tabs — while the frontend drops all display
-  // state so reopening the tab starts a fresh session.
   const cleanupClosedTab = useCallback((tabId: string) => {
-    // issue #11：标签页关闭 = 前端显示目标销毁，但串口连接保留。清空该端口
-    // 的 RX 管线队列（flushTail+flushNow 排空 + 重置组装器）与 TTY 队列
-    // （detach 清 queue + decoder、保留尺寸），使重新打开标签页后从零开始
-    // 新一轮输出——appendTerminalLines 对无 manager 的端口静默丢弃，
-    // 关闭期间到达的数据不会积压进新缓冲。
-    getRxPipeline().disconnect(tabId);
-    ttyService.detach(tabId);
-    // 标签若已弹出，连同其独立窗一起销毁，避免遗留孤儿窗口（关窗事件随后幂等清标记）。
-    if (useAppStore.getState().tabs.find(t => t.id === tabId)?.poppedOut) {
-      popoutService.closePopout('terminal', tabId).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
+    const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
+    dismissPluginTab(tabId);
+    if (tab?.kind === 'serial') {
+      ttyService.detach(tab.portId);
+      if (tab.poppedOut) void popoutService.closePopout('terminal', tab.portId).catch(error => console.debug('[MainDisplay] closePopout', error));
+      releaseViewportManager(tab.portId);
+      getRxPipeline().discardTerminalQueue(tab.portId);
     }
-    // 方案B：释放环形缓冲区 + 渲染实例（标签关闭 = 缓冲销毁）。
-    releaseViewportManager(tabId);
-    // store 侧的每端口条目（terminals / trafficStats / 发送历史）同一入口回收，
-    // 否则关闭标签只销毁 DOM，store 里会永久留下该端口的数据。
-    releaseTerminalState(tabId);
+    return tab ? getTabPortId(tab) : null;
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
-    cleanupClosedTab(tabId);
+    const portId = cleanupClosedTab(tabId);
     storeCloseTab(tabId);
+    if (portId) releaseUnusedPortState(portId);
   }, [cleanupClosedTab, storeCloseTab]);
 
-  // Bulk-close: run the close lifecycle for exactly the set the store action is
-  // about to close. `getClosingTabIds` is the store's own selector (leaf tabIds
-  // order, pinned tabs exempt) — Pane used to re-derive that slice + pinned
-  // filter locally, which is one edit away from cleaning up a different set than
-  // the one actually closed (leaked buffers, or a released tab that stays open).
-  const runCloseLifecycle = useCallback((tabId: string, scope: CloseScope) => {
-    for (const id of getClosingTabIds(tabId, scope)) cleanupClosedTab(id);
-  }, [cleanupClosedTab]);
-
-  const handleCloseToRight = useCallback((tabId: string) => {
-    runCloseLifecycle(tabId, 'toRight');
-    closeTabsToRight(tabId);
-  }, [runCloseLifecycle, closeTabsToRight]);
-
-  const handleCloseToLeft = useCallback((tabId: string) => {
-    runCloseLifecycle(tabId, 'toLeft');
-    closeTabsToLeft(tabId);
-  }, [runCloseLifecycle, closeTabsToLeft]);
-
-  const handleCloseOthers = useCallback((tabId: string) => {
-    runCloseLifecycle(tabId, 'others');
-    closeOtherTabs(tabId);
-  }, [runCloseLifecycle, closeOtherTabs]);
+  const closeScope = useCallback((tabId: string, scope: CloseScope) => {
+    const portsToRelease = new Set<string>();
+    for (const id of getClosingTabIds(tabId, scope)) {
+      const portId = cleanupClosedTab(id);
+      if (portId) portsToRelease.add(portId);
+    }
+    if (scope === 'toRight') closeTabsToRight(tabId);
+    else if (scope === 'toLeft') closeTabsToLeft(tabId);
+    else closeOtherTabs(tabId);
+    for (const portId of portsToRelease) releaseUnusedPortState(portId);
+  }, [cleanupClosedTab, closeTabsToRight, closeTabsToLeft, closeOtherTabs]);
+  const handleCloseToRight = useCallback((tabId: string) => closeScope(tabId, 'toRight'), [closeScope]);
+  const handleCloseToLeft = useCallback((tabId: string) => closeScope(tabId, 'toLeft'), [closeScope]);
+  const handleCloseOthers = useCallback((tabId: string) => closeScope(tabId, 'others'), [closeScope]);
 
   // 批量打开/断开「所有标签页」对应的串口（issue #2-1）——作用于全局 tabs
   // （跨分屏、含已弹出标签），而非仅本 pane。串行 + 条目间隔是**后端约束**：
   // 并发 open/close 会在后端抢同一个串口句柄，节流实现与 Sidebar 一键开/关
   // 共用 `runSequential`（唯一实现，100ms 默认间隔）。
   const handleConnectAllTabs = useCallback(async () => {
-    const { tabs: allTabs, ports: allPorts } = useAppStore.getState();
-    const targets = allTabs.filter((tab) => {
-      const port = allPorts.find((p) => p.id === tab.id);
+    const state = useAppStore.getState();
+    const portIds = [...new Set(state.tabs.map(getTabPortId).filter((id): id is string => id !== null))];
+    const targets = portIds.filter(id => {
+      const port = state.ports.find(item => item.id === id);
       return port && port.status !== 'connected' && port.status !== 'connecting';
     });
-    await runSequential(targets, (tab) => openPort(tab.id));
+    await runSequential(targets, openPort);
   }, [openPort]);
 
   const handleDisconnectAllTabs = useCallback(async () => {
-    const { tabs: allTabs, ports: allPorts } = useAppStore.getState();
-    const targets = allTabs.filter(
-      (tab) => allPorts.find((p) => p.id === tab.id)?.status === 'connected',
-    );
-    await runSequential(targets, (tab) => closePort(tab.id));
+    const state = useAppStore.getState();
+    const portIds = [...new Set(state.tabs.map(getTabPortId).filter((id): id is string => id !== null))];
+    await runSequential(portIds.filter(id => state.ports.find(port => port.id === id)?.status === 'connected'), closePort);
   }, [closePort]);
 
   // paneTabs must follow the pane's tabIds order, not the global tabs array order.
@@ -129,7 +107,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const paneTabs = tabIds.map(id => tabs.find(t => t.id === id)!).filter(Boolean);
   // visibleTabs: Chrome-style detach — popped-out tabs vanish from the main window's
   // TabBar but stay in the data model (tabs + paneTree.tabIds) for reattach-on-close.
-  const visibleTabs = paneTabs.filter(t => !t.poppedOut);
+  const visibleTabs = paneTabs.filter(tab => tab.kind !== 'serial' || !tab.poppedOut);
   const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);
   // displayTabId is always a visible (non-popped) tab or null — popped tabs never
   // render their terminal content in the main pane.
@@ -154,35 +132,32 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   // 若弹出的标签是当前活动/显示标签，焦点迁移到下一个可见（非弹出）标签，
   // 使主窗内容区不会停留在"已被弹出"的空洞状态。
   const handlePopOut = useCallback((tabId: string) => {
-    // issue #11：TTY 模式暂不支持弹出窗（弹出窗是快照式独立 webview，不共享
-    // ttyService/xterm 实例）——阻止 detach 并提示，避免主窗出现空洞。
-    const ttyPort = useAppStore.getState().ports.find(p => p.id === tabId);
-    if (ttyPort?.mode === 'tty') {
-      notifyInfo('tty.popoutUnsupported');
+    const state = useAppStore.getState();
+    const tab = state.tabs.find(item => item.id === tabId);
+    if (!tab) return;
+    if (tab.kind === 'plugin' || (getTabViewPreference(tab) && getPluginViewState(tab.id).status !== 'unavailable')) {
+      notifyInfo('pluginViews.popoutUnsupported');
       return;
     }
+    const portId = getTabPortId(tab);
+    if (!portId) return;
+    if (state.ports.find(port => port.id === portId)?.mode === 'tty') { notifyInfo('tty.popoutUnsupported'); return; }
     setTabPoppedOut(tabId, true);
-    const currentActiveId = useAppStore.getState().activeTabId;
-    if (currentActiveId === tabId) {
-      const stateTabs = useAppStore.getState().tabs;
-      const nextVisible = tabIds.find(
-        id => id !== tabId && !stateTabs.find(t => t.id === id)?.poppedOut,
-      );
-      if (nextVisible) {
-        setActiveTab(nextVisible);
-        setLocalActiveTabId(nextVisible);
-      }
+    if (state.activeTabId === tabId) {
+      const next = tabIds.find(id => id !== tabId && state.tabs.some(item => item.id === id && (item.kind !== 'serial' || !item.poppedOut)));
+      if (next) { setActiveTab(next); setLocalActiveTabId(next); }
     }
-    popoutService.openPopout('terminal', tabId).catch((e) => {
-      console.debug('[MainDisplay] openPopout failed:', e);
-      notifyError(e);
+    void popoutService.openPopout('terminal', portId).catch(error => {
+      setTabPoppedOut(tabId, false);
+      notifyError(error);
     });
   }, [setTabPoppedOut, tabIds, setActiveTab]);
 
-  // 回贴：乐观清标记 + 关窗。Rust 关窗事件亦会清标记（幂等），先后顺序无关。
   const handleReattach = useCallback((tabId: string) => {
+    const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
+    if (tab?.kind !== 'serial') return;
     setTabPoppedOut(tabId, false);
-    popoutService.closePopout('terminal', tabId).catch((e) => console.debug('[MainDisplay] closePopout failed:', e));
+    void popoutService.closePopout('terminal', tab.portId).catch(error => console.debug('[MainDisplay] closePopout', error));
   }, [setTabPoppedOut]);
 
   const handleMoveTabToPane = useCallback((tabId: string, targetPaneId: string) => {
@@ -241,21 +216,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             }
           }}
         >
-          {/* issue #11/#14：TTY 与 TRX 标签都**常驻挂载**——TTY 的 xterm 缓冲在
-              实例内、TRX 的环形缓冲在 viewportManager 内，切走再切回都必须保留。
-              非活动标签以 display:none 隐藏（`.tty-view-hidden` / TerminalView 的
-              hidden prop），恢复可见时自动 re-render/re-fit。已知限制：跨 Pane
-              拖拽/关闭标签仍会销毁实例（会话随实例释放）。 */}
-          {visibleTabs
-            .filter((tab) => ports.find((p) => p.id === tab.id)?.mode === 'tty')
-            .map((tab) => (
-              <TtyView key={tab.id} portId={tab.id} hidden={tab.id !== displayTabId} />
-            ))}
-          {visibleTabs
-            .filter((tab) => ports.find((p) => p.id === tab.id)?.mode !== 'tty')
-            .map((tab) => (
-              <TerminalView key={tab.id} portId={tab.id} hidden={tab.id !== displayTabId} />
-            ))}
+          {visibleTabs.map(tab => <PluginViewSurface key={tab.id} tab={tab} hidden={tab.id !== displayTabId} />)}
         </div>
       ) : paneTabs.length > 0 ? (
         // All tabs in this pane are popped out — Chrome-style detach: content area
@@ -263,7 +224,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
         // avoids the misleading "double-click to add port" generic empty state.
         <div className="terminal-empty-state">
           <Cable size={30} strokeWidth={1.5} className="empty-state-icon" />
-          {paneTabs.filter(pt => pt.poppedOut).map((pt) => (
+          {paneTabs.filter(tab => tab.kind === 'serial' && tab.poppedOut).map(pt => (
             <div key={pt.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
               <span className="empty-state-text">
                 {t('terminalPopout.poppedOutHint', { port: pt.title || pt.id })}

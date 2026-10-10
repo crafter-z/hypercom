@@ -26,7 +26,8 @@ import { RxLineAssembler } from './rxAssembler';
 import { decodeBytes } from './lineText';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { useOperationStore } from '../stores/useOperationStore';
-import { appendTerminalLines } from './terminal/viewportManager';
+import { appendTerminalLines, hasViewportManager } from './terminal/viewportManager';
+import { useAppStore } from '../stores/useAppStore';
 
 /** 一条组装完成的 RX 完整行（行级钩子载荷，issue #14 P1-1）。
  *  rawData 为原始字节（未解码）；text 为当前 per-port 编码下的解码文本——
@@ -44,6 +45,9 @@ export type AssembledLineCallback = (portId: string, line: AssembledLine) => voi
 export interface RxPipelineOptions {
   /** 批量写入终端 store（每端口每 tick 一次） */
   appendLines: (portId: string, lines: TerminalLine[]) => void;
+  /** Optional consumer gates; omitted for standalone/popout pipeline callers. */
+  hasLineConsumers?: (portId: string) => boolean;
+  hasTerminalTarget?: (portId: string) => boolean;
   /** 读取端口当前编码 label（调用方已做 ascii→utf-8 归一与小写化） */
   getEncodingLabel: (portId: string) => string;
   /** 是否丢弃解码后 trim 为空（纯空白）的行 */
@@ -153,6 +157,11 @@ export class RxPipeline {
       document.addEventListener('visibilitychange', this.handleVisibilityChange);
     }
   }
+
+  /** Inject shared leases without importing the observer graph into this pipeline. */
+  setLineConsumerQuery(query: (portId: string) => boolean): void {
+    this.opts.hasLineConsumers = (portId) => hasViewportManager(portId) || query(portId);
+  }
   /** P1-1：注入/覆盖主行级触发器（useSerialReceive 挂载时调用）。
    *  多次 set 取最后一次——触发器唯一，不叠加。 */
   setOnLineAssembled(cb: AssembledLineCallback): void {
@@ -187,6 +196,10 @@ export class RxPipeline {
    */
   feedBytes(portId: string, bytes: number[] | Uint8Array, timestamp: number): void {
     if (bytes.length === 0) return;
+    if (this.opts.hasLineConsumers && !this.opts.hasLineConsumers(portId)) {
+      this.releasePort(portId);
+      return;
+    }
     // Do not gate on tab existence: popouts have a separate store without tabs.
     const state = this.getPortState(portId);
     state.lastEventTs = timestamp;
@@ -203,6 +216,7 @@ export class RxPipeline {
   /** Add a protocol frame to the RX queue and notify observers exactly once.
    * Other externally constructed lines bypass RX observers via enqueueLines. */
   enqueueFrame(portId: string, line: TerminalLine): void {
+    if (this.opts.hasLineConsumers && !this.opts.hasLineConsumers(portId)) return;
     const state = this.getPortState(portId);
     this.enqueueRxLine(portId, state, line.rawData!, line.timestamp, line);
     this.enforceQueueCap(state);
@@ -212,6 +226,7 @@ export class RxPipeline {
   /** Enqueue externally constructed rows (e.g. replay) without RX callbacks. */
   enqueueLines(portId: string, lines: TerminalLine[]): void {
     if (lines.length === 0) return;
+    if (this.opts.hasTerminalTarget && !this.opts.hasTerminalTarget(portId)) return;
     const state = this.getPortState(portId);
     state.queue.push(...lines);
     this.enforceQueueCap(state);
@@ -316,6 +331,27 @@ export class RxPipeline {
     this.ports.delete(portId);
   }
 
+  /** Reclaim a consumer lease without flushing or reporting a fake disconnect. */
+  releasePort(portId: string): void {
+    const state = this.ports.get(portId);
+    if (state?.silenceTimer !== null && state?.silenceTimer !== undefined) clearTimeout(state.silenceTimer);
+    this.ports.delete(portId);
+    this.cancelEmptyTick();
+  }
+
+  /** Drop stock output only; other views keep the very same line assembler. */
+  discardTerminalQueue(portId: string): void {
+    const state = this.ports.get(portId);
+    if (state) state.queue.length = 0;
+    this.cancelEmptyTick();
+  }
+
+  private cancelEmptyTick(): void {
+    for (const state of this.ports.values()) if (state.queue.length > 0) return;
+    if (this.flushTickHandle !== null) this.cancelFlush(this.flushTickHandle);
+    this.flushTickHandle = null;
+  }
+
   /** 取消未触发的批写 tick 与所有静默定时器（实例销毁时用） */
   dispose(): void {
     if (this.flushTickHandle !== null) {
@@ -368,7 +404,9 @@ export class RxPipeline {
   ): void {
     const text = assembled?.content ?? this.decodeUnderCurrentLabel(portId, raw);
     if (this.opts.getIgnoreEmptyChars() && !text.trim()) return;
-    state.queue.push(assembled ?? { timestamp, direction: 'RX', rawData: raw, isHex: false });
+    if (!this.opts.hasTerminalTarget || this.opts.hasTerminalTarget(portId)) {
+      state.queue.push(assembled ?? { timestamp, direction: 'RX', rawData: raw, isHex: false });
+    }
     const line: AssembledLine = { rawData: raw, text, timestamp };
     if (this.onLineAssembledCb) {
       try {
@@ -397,6 +435,11 @@ export class RxPipeline {
 
   /** 调度全管线唯一的批写 tick；tick 内对每个有排队的端口各做一次 appendLines */
   private scheduleTick(): void {
+    let queued = false;
+    for (const state of this.ports.values()) {
+      if (state.queue.length > 0) { queued = true; break; }
+    }
+    if (!queued) return;
     if (this.flushTickHandle !== null) return;
     this.flushTickHandle = this.scheduleFlush(() => {
       this.flushTickHandle = null;
@@ -451,6 +494,8 @@ let rxPipelineSingleton: RxPipeline | null = null;
 export function getRxPipeline(): RxPipeline {
   if (!rxPipelineSingleton) {
     rxPipelineSingleton = new RxPipeline({
+      hasLineConsumers: (portId) => hasViewportManager(portId) || useAppStore.getState().tabs.some(tab => tab.kind === 'serial' && tab.portId === portId),
+      hasTerminalTarget: hasViewportManager,
       appendLines: (portId, lines) => {
       // 方案B（issue #14）：批写入环形缓冲区（最大显示行数滚动窗口）。
       // issue #16 改版后无内存预算 toast——逐行覆盖是常态滚动，非异常事件。

@@ -2,25 +2,10 @@ import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
-import type { PaneNode, SerialPort } from '../types';
+import { parseSessionSnapshot } from '../utils/sessionSnapshot';
 import { collectPortMeta, saveCurrentPortMeta, useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
 
-/** Validate a deserialized PaneNode tree structure (F.3 session restore). */
-function isValidPaneNode(node: unknown): node is PaneNode {
-  if (typeof node !== 'object' || node === null) return false;
-  const obj = node as Record<string, unknown>;
-  if (typeof obj.id !== 'string' || typeof obj.size !== 'number') return false;
-  if (obj.type === 'leaf') return Array.isArray(obj.tabIds);
-  if (obj.type === 'branch') {
-    return (
-      (obj.direction === 'horizontal' || obj.direction === 'vertical') &&
-      Array.isArray(obj.children) &&
-      (obj.children as unknown[]).every(isValidPaneNode)
-    );
-  }
-  return false;
-}
 
 /**
  * Hook: 应用初始化
@@ -69,6 +54,7 @@ export function useAppInit() {
           alias: meta.alias,
           isHidden: meta.isHidden,
           mode: meta.mode,
+          displayView: meta.displayView,
         });
       }
 
@@ -77,38 +63,12 @@ export function useAppInit() {
         try {
           const sessionSnapshot = await configService.getSessionSnapshot();
           if (sessionSnapshot) {
-            const snapshot = JSON.parse(sessionSnapshot) as {
-              paneTree?: unknown;
-              tabs?: Array<{ id: string; title: string; splitPaneId: string; isPinned: boolean }>;
-              portConfigs?: Record<string, { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string }>;
-            };
-            const availablePortIds = new Set(useAppStore.getState().ports.map((p) => p.id));
-            const validTabs = (snapshot.tabs ?? []).filter((t) => availablePortIds.has(t.id));
-
-            if (validTabs.length > 0) {
-              // Apply saved port configs (baud rate etc.) without connecting
-              for (const tab of validTabs) {
-                const pc = snapshot.portConfigs?.[tab.id];
-                if (pc) {
-                  useAppStore.getState().updatePort(tab.id, {
-                    baudRate: pc.baudRate,
-                    dataBits: pc.dataBits as SerialPort['dataBits'],
-                    parity: pc.parity as SerialPort['parity'],
-                    stopBits: pc.stopBits as SerialPort['stopBits'],
-                    handshake: pc.handshake as SerialPort['handshake'],
-                  });
-                }
-              }
-
-              // Validate and restore paneTree; fall back to default if corrupt
-              let tree: PaneNode;
-              if (isValidPaneNode(snapshot.paneTree)) {
-                tree = snapshot.paneTree;
-              } else {
-                tree = { id: 'main', type: 'leaf', tabIds: validTabs.map((t) => t.id), size: 1 };
-              }
-
-              useAppStore.getState().restoreSessionSnapshot({ paneTree: tree, tabs: validTabs });
+            const snapshot = parseSessionSnapshot(JSON.parse(sessionSnapshot), new Set(useAppStore.getState().ports.map((port) => port.id)));
+            for (const [portId, patch] of Object.entries(snapshot.portConfigs)) {
+              useAppStore.getState().updatePort(portId, patch);
+            }
+            if (snapshot.tabs.length > 0) {
+              useAppStore.getState().restoreSessionSnapshot(snapshot);
             }
           }
         } catch (e) {

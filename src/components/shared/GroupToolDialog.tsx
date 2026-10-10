@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PortGroup, SerialPort } from '../../types';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 export interface GroupToolDialogProps {
   group: PortGroup;
@@ -25,6 +26,8 @@ const GroupToolDialog: React.FC<GroupToolDialogProps> = ({
 }) => {
   const { t } = useTranslation();
   const hasUnconfigured = unconfigured.length > 0;
+  const overlayReady = usePluginViewOverlay();
+  if (!overlayReady) return null;
 
   return (
     <div className="modal-overlay" onClick={onClose}>

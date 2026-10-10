@@ -10,10 +10,12 @@ import { manualCheck, isMacPlatform } from '../../utils/updateService';
 import { useToastStore } from '../../stores/useToastStore';
 import { channelLabelKey, GITHUB_REPO_URL } from '../../utils/channel';
 import type { ReleaseChannel } from '../../types';
+import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 const AboutDialog: React.FC = () => {
   const { t } = useTranslation();
   const isOpen = useSystemStore((s) => s.ui.isAboutOpen);
+  const overlayReady = usePluginViewOverlay(isOpen);
   const setUIState = useSystemStore((s) => s.setUIState);
   const [version, setVersion] = useState('');
   const [showLicenses, setShowLicenses] = useState(false);
@@ -28,7 +30,7 @@ const AboutDialog: React.FC = () => {
       .catch((e) => console.debug('[AboutDialog] getVersion failed:', e));
   }, [isOpen]);
 
-  if (!isOpen) return null;
+  if (!isOpen || !overlayReady) return null;
 
   const close = () => setUIState({ isAboutOpen: false });
 

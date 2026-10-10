@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { getActivePortId, useAppStore } from '../stores/useAppStore';
 import { appendTerminalLine } from '../utils/terminal/viewportManager';
 import { serialService } from '../services/tauri';
 import type { SendHistoryEntry, LineEnding } from '../types';
@@ -171,21 +171,21 @@ export async function sendToPort(
  * SRP：只负责"发送"这一个用户动作 + 发送历史，不订阅任何事件。
  */
 export function useSerialSend() {
-  const activeTabId = useAppStore((s) => s.activeTabId);
+  const activePortId = useAppStore((s) => getActivePortId(s));
   const [sendHistory, setSendHistory] = useState<SendHistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
 
   // Mirror the active port's in-memory history into state synchronously.
   useEffect(() => {
-    setSendHistory(activeTabId ? (sendHistoryMap.get(activeTabId) ?? []) : []);
+    setSendHistory(activePortId ? (sendHistoryMap.get(activePortId) ?? []) : []);
     historyIndexRef.current = -1;
-  }, [activeTabId]);
+  }, [activePortId]);
 
   const sendData = useCallback(
     async (portId: string, data: string, isHex: boolean, lineEnding: string, silent = false) => {
       const bytesWritten = await sendToPort(portId, data, isHex, lineEnding, silent);
       // Mirror the just-updated in-memory history for Up/Down recall.
-      setSendHistory(sendHistoryMap.get(portId) ?? []);
+      if (getActivePortId(useAppStore.getState()) === portId) setSendHistory(sendHistoryMap.get(portId) ?? []);
       return bytesWritten;
     },
     []

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mergePorts, mapPortInfo } from './useSerialPorts';
+import { useAppStore } from '../stores/useAppStore';
 import type { SerialPort } from '../types';
 
 const makePort = (id: string, overrides?: Partial<SerialPort>): SerialPort => ({
@@ -40,6 +41,23 @@ describe('mergePorts', () => {
       baudRate: 9600,
       dataBits: 7,
     });
+  });
+
+  it('preserves explicit display preferences across enumeration polls', () => {
+    const displayView = { pluginId: 'sensor', installGeneration: 'g1', viewId: 'table' };
+    expect(mergePorts([makePort('COM1')], [makePort('COM1', { displayView })])[0].displayView).toEqual(displayView);
+    expect(mergePorts([makePort('COM1')], [makePort('COM1', { displayView: null })])[0].displayView).toBeNull();
+  });
+
+  it('restores the preference of an offline port when it reappears', () => {
+    const previous = useAppStore.getState().config.portMeta;
+    const displayView = { pluginId: 'sensor', installGeneration: 'g1', viewId: 'table' };
+    useAppStore.getState().setConfig({ portMeta: [{ portId: 'COM1', isHidden: false, displayView }] });
+    try {
+      expect(mergePorts([makePort('COM1')], [])[0].displayView).toEqual(displayView);
+    } finally {
+      useAppStore.getState().setConfig({ portMeta: previous });
+    }
   });
 
   it('unions back a connected port that transiently vanished from enumeration', () => {

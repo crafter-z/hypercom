@@ -109,7 +109,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
       return {
         label: `${reg.pluginName}: ${item.label}`,
         icon: pluginIcon(undefined),
-        onClick: () => dispatchPluginUiClick(reg, item.id, { portId: port.id }),
+        onClick: () => dispatchPluginUiClick(reg, item.id, { portId: port.id }, 'port-context'),
       };
     }),
     { type: 'separator' },

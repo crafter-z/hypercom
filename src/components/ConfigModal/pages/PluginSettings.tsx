@@ -51,14 +51,14 @@ const PluginSettings: React.FC = () => {
 
 
   /** 启用时提示当前可授予的敏感权限；未实现能力不列入风险确认。 */
-  const handleToggleEnabled = (plugin: { id: string; name: string | null; declaredPermissions: string[]; enabled: boolean }): void => {
+  const handleToggleEnabled = (plugin: { id: string; installGeneration: string; name: string | null; declaredPermissions: string[]; enabled: boolean }): void => {
     if (!plugin.enabled) {
       const sensitive = plugin.declaredPermissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
       if (sensitive.length > 0 && !window.confirm(t('plugins.sensitiveConfirm', { name: plugin.name ?? plugin.id, perms: sensitive.join(', ') }))) {
         return;
       }
     }
-    void setEnabled(plugin.id, !plugin.enabled);
+    void setEnabled(plugin.id, !plugin.enabled, plugin.installGeneration);
   };
 
   return (
@@ -136,17 +136,19 @@ const PluginSettings: React.FC = () => {
                       onClick={() =>
                         handleToggleEnabled({
                           id: plugin.id,
+                          installGeneration: plugin.installGeneration,
                           name: plugin.manifest?.name ?? null,
                           declaredPermissions: declared,
                           enabled: plugin.enabled,
                         })
                       }
-                      disabled={!!plugin.manifestError}
+                      disabled={loading || !!plugin.manifestError}
                     >
                       <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
                     </button>
                     <button
                       className="btn btn-danger btn-sm"
+                      disabled={loading}
                       onClick={() => {
                         if (window.confirm(t('plugins.uninstallConfirm', { name: plugin.manifest?.name ?? plugin.id }))) {
                           void uninstallPlugin(plugin.id);
@@ -182,8 +184,8 @@ const PluginSettings: React.FC = () => {
                               <input
                                 type="checkbox"
                                 checked={granted.includes(perm)}
-                                disabled={!plugin.enabled}
-                                onChange={() => void togglePermission(plugin.id, perm)}
+                                disabled={loading || !!plugin.manifestError}
+                                onChange={() => void togglePermission(plugin.id, perm, plugin.installGeneration)}
                               />
                               <code>{perm}</code>
                               <span className="plugin-perm-state">
