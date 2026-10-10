@@ -1699,8 +1699,10 @@ dependencies = [
  "futures-util",
  "http",
  "hyper-util",
+ "libc",
  "log",
  "parking_lot",
+ "percent-encoding",
  "portable-pty",
  "regex",
  "reqwest",
@@ -1719,7 +1721,10 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "webview2-com",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
+ "wry",
  "zip 2.4.2",
 ]
 

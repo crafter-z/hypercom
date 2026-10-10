@@ -20,7 +20,7 @@
  */
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -186,6 +186,14 @@ pub struct PortGroupEntry {
     pub order: i32,
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayView {
+    pub plugin_id: String,
+    pub install_generation: String,
+    pub view_id: String,
+}
 /// 串口元数据（备注名 / 隐藏状态 / 工作模式，issue #4-9；模式字段 issue #11）。
 /// 备注名与隐藏状态是端口级 UI 状态，此前仅存内存、重启即丢；
 /// 现在随 config.json 持久化，启动时按 `port_id` 回填到端口列表。
@@ -203,6 +211,8 @@ pub struct PortMetaEntry {
     /// serde 静默丢弃未知字段，TTY 模式重启即丢（曾为此缺陷）。
     #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_view: Option<DisplayView>,
 }
 
 /// 插件状态（config.json 顶层实体；私有 KV 保存在插件目录 data/state.json）。
@@ -210,6 +220,9 @@ pub struct PortMetaEntry {
 #[serde(rename_all = "camelCase")]
 pub struct PluginConfigEntry {
     pub id: String,
+    /// Unique identity of this installed code; timestamps are not identities.
+    #[serde(default)]
+    pub install_generation: String,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -583,12 +596,28 @@ impl ConfigManager {
             .map(|p| p.join("plugins"))
             .unwrap_or_else(|| PathBuf::from("plugins"));
 
-        Ok(Self {
+        let mut manager = Self {
             config,
             config_path,
             session_path,
             plugins_dir,
-        })
+        };
+        if fs::symlink_metadata(manager.config_path.with_file_name("plugin-transaction.json")).is_ok() {
+            manager.save_safe_backup()?;
+        }
+        crate::plugin::transaction::recover(&manager.plugins_dir, &manager.config)?;
+        let mut migrated = false;
+        for entry in &mut manager.config.entities.plugin_configs {
+            if entry.install_generation.is_empty() {
+                entry.install_generation = uuid::Uuid::new_v4().to_string();
+                migrated = true;
+            }
+        }
+        if migrated {
+            manager.save()?;
+            manager.save_safe_backup()?;
+        }
+        Ok(manager)
     }
 
     /// 默认配置路径：%APPDATA%/hypercom/config.json
@@ -749,6 +778,23 @@ impl ConfigManager {
 
     // ==================== 持久化 ====================
 
+    /// Persist the current trust state as the corruption-recovery fallback.
+    pub(crate) fn save_safe_backup(&self) -> anyhow::Result<()> {
+        let backup = self.config_path.with_extension("json.bak");
+        let temporary = self.config_path.with_extension(format!("{}.bak.tmp", uuid::Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        let result = (|| -> anyhow::Result<()> {
+            serde_json::to_writer_pretty(&mut file, &self.config)?;
+            file.flush()?;
+            file.sync_all()?;
+            crate::plugin::transaction::replace_file(&temporary, &backup)?;
+            crate::plugin::transaction::sync_dir(self.config_path.parent().unwrap_or_else(|| Path::new(".")))?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = fs::remove_file(temporary); }
+        result
+    }
+
     /// 保存配置到文件（原子写入 + .bak 备份）。
     /// 失败时记录错误日志（诊断日志排查需要落盘根因，而非仅返回 Result）。
     pub fn save(&mut self) -> anyhow::Result<()> {
@@ -767,7 +813,8 @@ impl ConfigManager {
                 file.write_all(content.as_bytes())?;
                 file.sync_all()?;
             }
-            fs::rename(&tmp_path, &self.config_path)?;
+            crate::plugin::transaction::replace_file(&tmp_path, &self.config_path)?;
+            crate::plugin::transaction::sync_dir(self.config_path.parent().unwrap_or_else(|| Path::new(".")))?;
             log::info!("Config saved to {:?}", self.config_path);
             Ok(())
         })();
@@ -785,6 +832,27 @@ impl ConfigManager {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn legacy_plugin_generation_migrates_durably_with_revision() {
+        let root = std::env::temp_dir().join(format!("plugin_generation_migration_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        fs::write(&path, r#"{"revision":9,"pluginConfigs":[{"id":"com.example.old","enabled":true,"grantedPermissions":["storage"]}]}"#).unwrap();
+        let manager = ConfigManager::new(Some(path.clone())).unwrap();
+        let generation = manager.get_config().entities.plugin_configs[0].install_generation.clone();
+        assert!(uuid::Uuid::parse_str(&generation).is_ok());
+        assert_eq!(manager.get_config().revision, 10);
+        drop(manager);
+        let second = ConfigManager::new(Some(path.clone())).unwrap();
+        assert_eq!(second.get_config().entities.plugin_configs[0].install_generation, generation);
+        assert_eq!(second.get_config().revision, 10);
+        drop(second);
+        fs::write(&path, "corrupt").unwrap();
+        let fallback = ConfigManager::new(Some(path)).unwrap();
+        assert_eq!(fallback.get_config().entities.plugin_configs[0].install_generation, generation);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// 0.3.1 真实 schema 的 config.json 夹具（全仓唯一一份手抄）。
     ///
@@ -1200,18 +1268,21 @@ mod tests {
                         alias: None,
                         is_hidden: false,
                         mode: Some("tty".into()),
+                        display_view: None,
                     },
                     PortMetaEntry {
                         port_id: "COM2".into(),
                         alias: None,
                         is_hidden: false,
                         mode: Some("bogus".into()),
+                        display_view: None,
                     },
                     PortMetaEntry {
                         port_id: "COM3".into(),
                         alias: None,
                         is_hidden: false,
                         mode: None,
+                        display_view: None,
                     },
                 ],
                 ..Entities::default()
@@ -1282,6 +1353,7 @@ mod tests {
             alias: Some("温度计".into()),
             is_hidden: true,
             mode: Some("tty".into()),
+            display_view: Some(DisplayView { plugin_id: "com.example.view".into(), install_generation: "generation-1".into(), view_id: "table".into() }),
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(json.contains("\"portId\":\"COM3\""), "got: {}", json);
@@ -1293,11 +1365,14 @@ mod tests {
         assert_eq!(parsed.alias.as_deref(), Some("温度计"));
         assert!(parsed.is_hidden);
         assert_eq!(parsed.mode.as_deref(), Some("tty"));
+        assert_eq!(parsed.display_view, meta.display_view);
+        assert!(json.contains("\"displayView\""));
 
         // 旧版 config.json 缺 mode 字段 → 反序列化回退 None（= trx）。
         let legacy_json = r#"{"portId":"COM3","alias":"温度计","isHidden":true}"#;
         let legacy: PortMetaEntry = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(legacy.mode, None);
+        assert_eq!(legacy.display_view, None);
 
         // 前端发送的 mode 携带来回往返不丢（修复前 serde 静默丢弃未知字段）。
         let frontend_json = r#"{"portId":"GIT:BASH","isHidden":false,"mode":"tty"}"#;

@@ -20,6 +20,12 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod transaction;
+pub(crate) mod view_runtime;
+
+/// Manifests are UTF-8 regular files, bounded to 1 MiB before parsing.
+pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+
 /// 宿主 API 版本。插件 manifest `apiVersion` 的主版本必须等于它
 /// （semver：主版本不兼容视为不可用，次版本向后兼容放行）。
 pub const HOST_API_MAJOR: u32 = 1;
@@ -39,6 +45,8 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "clipboard",
     "notify",
     "storage",
+    "ui:view",
+    "ui:tabs",
 ];
 
 // ==================== Manifest 结构 ====================
@@ -93,12 +101,32 @@ pub struct UiMenuItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiView {
+    pub id: String,
+    pub label: String,
+    pub entry: String,
+    #[serde(default)]
+    pub styles: Vec<String>,
+    #[serde(default)]
+    pub assets: Vec<String>,
+    pub modes: Vec<String>,
+    pub input: String,
+    pub placements: Vec<String>,
+    pub port_binding: String,
+    #[serde(default)]
+    pub restore_on_startup: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UiDecl {
     #[serde(default)]
     pub buttons: Vec<UiButton>,
     #[serde(default)]
     pub menu_items: Vec<UiMenuItem>,
+    #[serde(default)]
+    pub views: Vec<UiView>,
 }
 
 /// 插件 manifest（`manifest.json`）。
@@ -118,6 +146,8 @@ pub struct PluginManifest {
     pub entry: String,
     /// 声明的权限（「可授予上限」）。
     pub permissions: Vec<String>,
+    #[serde(default)]
+    pub requires: Vec<String>,
     #[serde(default)]
     pub http: Option<HttpScope>,
     #[serde(default)]
@@ -139,12 +169,55 @@ pub fn parse_manifest(json: &str) -> Result<PluginManifest, String> {
     Ok(manifest)
 }
 
-/// 从插件目录读取并校验 manifest.json。目录缺失/非目录 → Err。
+/// Read a regular, unlinked manifest with both metadata and streaming bounds.
 pub fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, String> {
+    let directory = fs::symlink_metadata(dir).map_err(|e| format!("插件目录不可读: {e}"))?;
+    if !directory.is_dir() || directory.file_type().is_symlink() {
+        return Err("插件目录必须是普通目录".into());
+    }
     let manifest_path = dir.join("manifest.json");
-    let content = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("读取 manifest.json 失败 ({})", e))?;
-    parse_manifest(&content)
+    let metadata = fs::symlink_metadata(&manifest_path).map_err(|e| format!("manifest 不可读: {e}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_MANIFEST_BYTES {
+        return Err("manifest 必须是普通文件且不超过 1 MiB".into());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&manifest_path).map_err(|e| format!("manifest 不可读: {e}"))?;
+    let opened = file.metadata().map_err(|e| format!("manifest 不可读: {e}"))?;
+    if !opened.is_file() || opened.file_type().is_symlink() || opened.len() > MAX_MANIFEST_BYTES {
+        return Err("manifest 必须是普通文件且不超过 1 MiB".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if opened.file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("manifest 不得是链接或重解析点".into());
+        }
+    }
+    let bytes = read_manifest_bytes(file, opened.len())?;
+    let content = String::from_utf8(bytes).map_err(|e| format!("manifest 不是 UTF-8: {e}"))?;
+    let manifest = parse_manifest(&content)?;
+    view_runtime::resources::validate_files(dir, &manifest)?;
+    Ok(manifest)
+}
+
+fn read_manifest_bytes(reader: impl Read, reported_size: u64) -> Result<Vec<u8>, String> {
+    if reported_size > MAX_MANIFEST_BYTES { return Err("manifest 超过 1 MiB".into()); }
+    let mut bytes = Vec::with_capacity(reported_size as usize);
+    reader.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes)
+        .map_err(|e| format!("manifest 读取失败: {e}"))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES { return Err("manifest 超过 1 MiB".into()); }
+    Ok(bytes)
 }
 
 impl PluginManifest {
@@ -202,6 +275,63 @@ impl PluginManifest {
                 return Err("manifest scope 白名单含空项".into());
             }
         }
+        let mut capabilities = std::collections::HashSet::new();
+        for required in &self.requires {
+            if !["isolated-tab-view@1", "plugin-workspace-tabs@1"].contains(&required.as_str())
+                || !capabilities.insert(required) {
+                return Err(format!("未知或重复的必需能力: {required}"));
+            }
+        }
+        let mut ids = std::collections::HashSet::new();
+        let views = self.ui.as_ref().map(|ui| ui.views.as_slice()).unwrap_or_default();
+        if views.len() > 32 { return Err("每插件最多声明 32 个视图".into()); }
+        if !views.is_empty() && (!self.permissions.iter().any(|p| p == "ui:view")
+            || !self.requires.iter().any(|r| r == "isolated-tab-view@1")) {
+            return Err("视图须声明 ui:view 和 isolated-tab-view@1".into());
+        }
+        for view in views {
+            if view.id.is_empty() || view.id.len() > 128
+                || !view.id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                || !ids.insert(&view.id) || view.label.trim().is_empty() || view.label.chars().count() > 128 {
+                return Err("视图 id/label 非法或重复".into());
+            }
+            if view.styles.len() + view.assets.len() > 256 { return Err("视图资源数超过上限".into()); }
+            for path in std::iter::once(&view.entry).chain(&view.styles).chain(&view.assets) {
+                validate_view_resource_path(path)?;
+                if path.starts_with("__host/") { return Err("视图资源不得覆盖宿主命名空间".into()); }
+            }
+            if !view.entry.ends_with(".js") || view.styles.iter().any(|p| !p.ends_with(".css")) {
+                return Err("视图 entry/styles 必须为 JS/CSS".into());
+            }
+            if view.modes.is_empty() || view.modes.len() > 2
+                || view.modes.iter().any(|m| !["trx", "tty"].contains(&m.as_str()))
+                || (view.modes.len() == 2 && view.modes[0] == view.modes[1]) {
+                return Err("视图 modes 非法".into());
+            }
+            let input_permission = match view.input.as_str() {
+                "bytes" => Some("rx:bytes"),
+                "lines" if view.modes.iter().all(|m| m == "trx") => Some("terminal:read"),
+                "none" => None,
+                _ => return Err("视图 input 非法，lines 仅支持 TRX".into()),
+            };
+            if input_permission.is_some_and(|permission| !self.permissions.iter().any(|p| p == permission)) {
+                return Err("视图未声明输入权限".into());
+            }
+            if !["required", "optional", "none"].contains(&view.port_binding.as_str())
+                || (view.input != "none" && view.port_binding == "none") {
+                return Err("视图 portBinding 与 input 不兼容".into());
+            }
+            if view.placements.is_empty() || view.placements.len() > 2
+                || view.placements.iter().any(|p| !["serial-content", "workspace-tab"].contains(&p.as_str()))
+                || (view.placements.len() == 2 && view.placements[0] == view.placements[1])
+                || (view.placements.iter().any(|p| p == "serial-content") && view.port_binding == "none") {
+                return Err("视图 placements 非法".into());
+            }
+            if view.placements.iter().any(|p| p == "workspace-tab")
+                && !self.requires.iter().any(|r| r == "plugin-workspace-tabs@1") {
+                return Err("独立标签须声明 plugin-workspace-tabs@1".into());
+            }
+        }
         Ok(())
     }
 
@@ -209,6 +339,15 @@ impl PluginManifest {
     pub fn api_major(&self) -> u32 {
         semver_major(&self.api_version)
     }
+}
+
+pub fn validate_view_resource_path(path: &str) -> Result<(), String> {
+    if path.len() > 512 || path.contains(['\\', ':', '%', '?', '#', '\0', '"', '\'', '<', '>', '&']) || path.chars().any(|c| c.is_control())
+        || path.split('/').any(|s| s.is_empty() || s == "." || s == ".." || s.ends_with(['.', ' ']))
+        || path.split('/').next().is_some_and(|s| s.eq_ignore_ascii_case("data")) {
+        return Err(format!("视图资源路径非法: {path}"));
+    }
+    sanitize_plugin_rel_path(path).map(|_| ())
 }
 
 // ==================== 路径防护 ====================
@@ -478,6 +617,68 @@ mod tests {
         let ui = m.ui.unwrap();
         assert_eq!(ui.buttons.len(), 1);
         assert_eq!(ui.menu_items[0].target.as_deref(), Some("port-context"));
+    }
+
+    #[test]
+    fn view_contract_validates_capabilities_permissions_and_bindings() {
+        let mut value: serde_json::Value = serde_json::from_str(&valid_manifest_json()).unwrap();
+        value["permissions"] = serde_json::json!(["ui:view", "rx:bytes"]);
+        value["requires"] = serde_json::json!(["isolated-tab-view@1", "plugin-workspace-tabs@1"]);
+        value["ui"]["views"] = serde_json::json!([{"id":"table","label":"Table","entry":"ui/main.js","styles":["ui/main.css"],"assets":["ui/a.png"],"modes":["trx","tty"],"input":"bytes","placements":["workspace-tab"],"portBinding":"required"}]);
+        let valid = serde_json::to_string(&value).unwrap();
+        let parsed = parse_manifest(&valid).unwrap();
+        assert!(!parsed.ui.unwrap().views[0].restore_on_startup);
+        value["requires"] = serde_json::json!(["unknown@1"]);
+        assert!(parse_manifest(&value.to_string()).is_err());
+        value = serde_json::from_str(&valid).unwrap();
+        value["ui"]["views"][0]["entry"] = "data/private.js".into();
+        assert!(parse_manifest(&value.to_string()).is_err());
+        value = serde_json::from_str(&valid).unwrap();
+        value["ui"]["views"][0]["input"] = "lines".into();
+        assert!(parse_manifest(&value.to_string()).is_err());
+        value = serde_json::from_str(&valid).unwrap();
+        value["ui"]["views"][0]["portBinding"] = "none".into();
+        assert!(parse_manifest(&value.to_string()).is_err());
+        value = serde_json::from_str(&valid).unwrap();
+        let duplicate = value["ui"]["views"][0].clone();
+        value["ui"]["views"].as_array_mut().unwrap().push(duplicate);
+        assert!(parse_manifest(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn manifest_read_bounds_metadata_stream_and_exact_boundary() {
+        let root = std::env::temp_dir().join(format!("manifest_bounds_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut json = valid_manifest_json();
+        json.push_str(&" ".repeat(MAX_MANIFEST_BYTES as usize - json.len()));
+        fs::write(root.join("manifest.json"), &json).unwrap();
+        assert!(load_manifest_from_dir(&root).is_ok());
+        json.push(' ');
+        fs::write(root.join("manifest.json"), &json).unwrap();
+        assert!(load_manifest_from_dir(&root).is_err());
+        // A growing source must still be bounded even when metadata was smaller.
+        assert!(read_manifest_bytes(json.as_bytes(), 0).is_err());
+        fs::write(root.join("manifest.json"), [255]).unwrap();
+        assert!(load_manifest_from_dir(&root).is_err());
+        fs::remove_file(root.join("manifest.json")).unwrap();
+        fs::create_dir(root.join("manifest.json")).unwrap();
+        assert!(load_manifest_from_dir(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_rejects_linked_file_and_directory() {
+        let root = std::env::temp_dir().join(format!("manifest_links_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::write(root.join("real.json"), valid_manifest_json()).unwrap();
+        std::os::unix::fs::symlink(root.join("real.json"), root.join("source/manifest.json")).unwrap();
+        assert!(load_manifest_from_dir(&root.join("source")).is_err());
+        fs::remove_file(root.join("source/manifest.json")).unwrap();
+        fs::write(root.join("source/manifest.json"), valid_manifest_json()).unwrap();
+        std::os::unix::fs::symlink(root.join("source"), root.join("linked")).unwrap();
+        assert!(load_manifest_from_dir(&root.join("linked")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

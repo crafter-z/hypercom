@@ -238,6 +238,10 @@ pub fn run() {
             commands::write_plugin_asset,
             commands::plugin_http,
             commands::plugin_open_external,
+            commands::create_plugin_view,
+            commands::update_plugin_view,
+            commands::send_plugin_view_message,
+            commands::destroy_plugin_view,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();
@@ -384,6 +388,9 @@ pub fn run() {
                         api.prevent_close();
                         let _ = window.hide();
                     }
+                }
+                if let tauri::WindowEvent::Destroyed = event {
+                    plugin::view_runtime::clear_all();
                 }
             }
 

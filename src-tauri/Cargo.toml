@@ -62,6 +62,7 @@ http = "1"
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
 parking_lot = "0.12"
 url = "2"
+percent-encoding = "2"
 tauri-plugin-clipboard-manager = "2"
 
 # 插件 URL 白名单 glob → 正则（issue #17；regex 是 reqwest 传递依赖，显式声明）
@@ -75,8 +76,14 @@ futures-util = "0.3"
 # ACL 漂移的误诊），故不裁剪、接受多余压缩后端编译成本。
 zip = "2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
+wry = "=0.55.1"
+webview2-com = "=0.38.2"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 opt-level = 3

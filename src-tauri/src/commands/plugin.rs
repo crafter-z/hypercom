@@ -17,7 +17,7 @@
  */
 use std::path::Path;
 
-use tauri::State;
+use tauri::{Manager, State};
 
 use super::CommandError;
 use crate::config;
@@ -38,6 +38,7 @@ const PLUGIN_DATA_MAX_FILES: usize = 1024;
 pub struct PluginView {
     pub id: String,
     pub dir: String,
+    pub install_generation: String,
     pub enabled: bool,
     /// 用户已授予权限（config 实体）。manifest 声明是上限，此处是实际授予。
     pub granted_permissions: Vec<String>,
@@ -63,6 +64,7 @@ pub struct PluginManifestView {
     pub api_version: String,
     pub entry: String,
     pub permissions: Vec<String>,
+    pub requires: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<plugin::HttpScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +85,7 @@ impl From<&PluginManifest> for PluginManifestView {
             api_version: m.api_version.clone(),
             entry: m.entry.clone(),
             permissions: m.permissions.clone(),
+            requires: m.requires.clone(),
             http: m.http.clone(),
             shell: m.shell.clone(),
             serial: m.serial.clone(),
@@ -113,6 +116,7 @@ fn build_views_from_scan(cfg: &config::AppConfig, scanned: Vec<plugin::Installed
             match sp.manifest {
                 Ok(manifest) => PluginView {
                     id: manifest.id.clone(),
+                    install_generation: state.map(|s| s.install_generation.clone()).unwrap_or_default(),
                     dir: dir_str,
                     enabled: state.map(|s| s.enabled).unwrap_or(false),
                     granted_permissions: state
@@ -135,6 +139,7 @@ fn build_views_from_scan(cfg: &config::AppConfig, scanned: Vec<plugin::Installed
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| "unknown".into()),
                     dir: dir_str,
+                    install_generation: String::new(),
                     enabled: false,
                     granted_permissions: Vec::new(),
                     declared_permissions: Vec::new(),
@@ -158,8 +163,29 @@ fn build_views_from_scan(cfg: &config::AppConfig, scanned: Vec<plugin::Installed
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginListResponse {
+    pub revision: u64,
     pub plugins: Vec<PluginView>,
     pub plugin_configs: Vec<config::PluginConfigEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStateSnapshot {
+    pub revision: u64,
+    pub plugin_configs: Vec<config::PluginConfigEntry>,
+}
+
+fn snapshot(manager: &config::ConfigManager) -> PluginStateSnapshot {
+    let cfg = manager.get_config();
+    PluginStateSnapshot { revision: cfg.revision, plugin_configs: cfg.entities.plugin_configs.clone() }
+}
+
+fn require_generation(cfg: &config::AppConfig, id: &str, expected: &str) -> Result<(), CommandError> {
+    let entry = state_of(cfg, id).ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+    if expected.is_empty() || entry.install_generation != expected {
+        return Err(CommandError::Other("插件安装版本已变化，请重新检查插件后操作".into()));
+    }
+    Ok(())
 }
 
 /// 列出已安装插件（磁盘扫描视图 + config 状态数组）。
@@ -167,6 +193,7 @@ pub struct PluginListResponse {
 #[tauri::command]
 pub async fn list_plugins(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<PluginListResponse, CommandError> {
     require_main_window(&window)?;
+    let _plugin_io = state.plugin_io.lock().await;
     let root = {
         let manager = state.config_manager.lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -182,7 +209,7 @@ pub async fn list_plugins(window: tauri::WebviewWindow, state: State<'_, AppStat
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     let cfg = manager.get_config();
     let plugins = build_views_from_scan(cfg, scanned);
-    Ok(PluginListResponse { plugins, plugin_configs: cfg.entities.plugin_configs.clone() })
+    Ok(PluginListResponse { revision: cfg.revision, plugins, plugin_configs: cfg.entities.plugin_configs.clone() })
 }
 
 /// 安装插件。`source_path` 可为插件**目录**（复制注册，源保留）或插件 **zip 包**
@@ -190,8 +217,7 @@ pub async fn list_plugins(window: tauri::WebviewWindow, state: State<'_, AppStat
 /// 已存在同 id → 版本比较：更高则覆盖（**data/ 私有区保留**，其余旧文件不残留
 /// ——staging 目录复制后原子换名，评审复审修复「覆盖安装孤儿文件」），
 /// 否则报错（评审 v2 D6）。
-/// 返回安装后的**全量插件状态数组**（前端写回 store.config.pluginConfigs，
-/// 不经 view 再加工——目录扫描态与 config 态解耦）。
+/// 返回保存后的 revision + 全量 pluginConfigs 权威快照。
 ///
 /// Preparation runs in spawn_blocking without touching installed files. After
 /// preparation, a non-cancellable blocking section persists disabled/no-grants
@@ -201,7 +227,7 @@ pub async fn install_plugin(
     source_path: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
+) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     let _plugin_io = state.plugin_io.lock().await;
     let root = state.config_manager.lock()
@@ -209,6 +235,7 @@ pub async fn install_plugin(
         .plugins_dir().to_path_buf();
     let prepared = tokio::task::spawn_blocking(move || prepare_plugin_install(&source_path, &root))
         .await.map_err(|e| CommandError::Other(format!("安装暂存 join 失败: {e}")))??;
+    plugin::view_runtime::retire_plugin(window.app_handle(), &prepared.manifest.id).await?;
     // No await after persisting the trust reset: cancellation must not drop the
     // IO gate while a detached blocking task is still replacing executable code.
     tokio::task::block_in_place(|| {
@@ -229,11 +256,13 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
     if let Some(existing) = cfg.entities.plugin_configs.iter_mut().find(|p| p.id == id) {
         existing.enabled = false;
         existing.granted_permissions.clear();
+        existing.install_generation = uuid::Uuid::new_v4().to_string();
         existing.installed_at = Some(now_unix_secs().max(existing.installed_at.unwrap_or(0).saturating_add(1)));
         existing.source = Some(source_label.into());
     } else {
         cfg.entities.plugin_configs.push(config::PluginConfigEntry {
             id: id.into(), enabled: false, granted_permissions: Vec::new(),
+            install_generation: uuid::Uuid::new_v4().to_string(),
             installed_at: Some(now_unix_secs()), source: Some(source_label.into()),
         });
     }
@@ -245,24 +274,13 @@ fn restore_install_config(manager: &mut config::ConfigManager, old: config::AppC
 }
 
 fn persist_install_trust_reset(manager: &mut config::ConfigManager) -> Result<(), CommandError> {
-    use std::io::Write;
     manager.save().map_err(|e| CommandError::Config(format!("安装前清除插件授权失败: {e}")))?;
-    // The ordinary .bak copy is best-effort and contains prior trust. Explicitly
-    // persist a safe fallback before changing code so corrupt-config startup
-    // recovery cannot revive the old enabled/grants.
-    let safe = serde_json::to_vec_pretty(manager.get_config())
-        .map_err(|e| CommandError::Config(e.to_string()))?;
-    let backup = manager.config_path().with_extension("json.bak");
-    let mut file = std::fs::File::create(backup)
-        .map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))?;
-    file.write_all(&safe).and_then(|_| file.sync_all())
-        .map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))
+    manager.save_safe_backup().map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))
 }
 
 fn install_prepared(manager: &mut config::ConfigManager, mut prepared: PreparedPluginInstall)
-    -> Result<Vec<config::PluginConfigEntry>, CommandError> {
+    -> Result<PluginStateSnapshot, CommandError> {
     let old = manager.get_config().clone();
-    let old_manifest = plugin::load_manifest_from_dir(&prepared.dest).ok();
     reset_install_trust(manager.get_config_mut(), &prepared.manifest.id, prepared.source_label);
     // The durable disabled/no-grants state precedes the first rename. Restart
     // after any later interruption therefore cannot trust either code version.
@@ -276,25 +294,15 @@ fn install_prepared(manager: &mut config::ConfigManager, mut prepared: PreparedP
         }
         return Err(error);
     }
-    let backup = match commit_plugin_install(&mut prepared) {
-        Ok(backup) => backup,
-        Err(error) => {
-            // A successful rollback is checked against the exact old manifest;
-            // otherwise leave persisted and in-memory authorization fail-closed.
-            if plugin::load_manifest_from_dir(&prepared.dest).ok() == old_manifest
-                && (old_manifest.is_some() || !prepared.dest.exists()) {
-                restore_install_config(manager, old)?;
-            }
-            return Err(error);
-        }
-    };
-    if let Some(backup) = backup {
-        if let Err(e) = std::fs::remove_dir_all(&backup) {
-            log::warn!("Old plugin backup remains at {}: {e}", backup.display());
-        }
+    if let Err(error) = commit_plugin_install(&mut prepared, manager.get_config().revision) {
+        plugin::transaction::recover(manager.plugins_dir(), manager.get_config())
+            .map_err(|e| CommandError::Io(format!("安装恢复失败，保留事务: {e}")))?;
+        return Err(error);
     }
+    plugin::transaction::recover(manager.plugins_dir(), manager.get_config())
+        .map_err(|e| CommandError::Io(format!("安装清理失败，保留事务: {e}")))?;
     log::info!("Plugin installed: {} v{} ({})", prepared.manifest.id, prepared.manifest.version, prepared.source_label);
-    Ok(manager.get_config().entities.plugin_configs.clone())
+    Ok(snapshot(manager))
 }
 
 
@@ -401,48 +409,44 @@ fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPlug
     Ok(PreparedPluginInstall { manifest, source_label, dest, stage_guard })
 }
 
-fn commit_plugin_install(prepared: &mut PreparedPluginInstall) -> Result<Option<std::path::PathBuf>, CommandError> {
+fn commit_plugin_install(prepared: &mut PreparedPluginInstall, revision: u64)
+    -> Result<(Option<std::path::PathBuf>, plugin::transaction::Transaction), CommandError> {
     let dest = prepared.dest.clone();
     let staging = prepared.stage_guard.0.clone();
     let root = dest.parent().unwrap();
-    let mut committed_backup = None;
-    if dest.exists() {
-        let backup = root.join(format!(".backup-{}", uuid::Uuid::new_v4()));
-        // The previous private tree is restored into staging only after backing up old code.
-        if dest.join("data").exists() {
-            let data_meta = std::fs::symlink_metadata(dest.join("data"))
-                .map_err(|e| CommandError::Io(format!("检查旧版 data/ 失败: {e}")))?;
-            if !data_meta.is_dir() || data_meta.file_type().is_symlink() {
-                return Err(CommandError::Other("旧版 data/ 不是普通目录".into()));
+    let mut transaction = plugin::transaction::Transaction::install(root, &prepared.manifest.id, &staging, revision)
+        .map_err(|e| CommandError::Io(format!("持久化安装事务失败: {e}")))?;
+    prepared.stage_guard.0.clear();
+    let result = (|| -> std::io::Result<Option<std::path::PathBuf>> {
+        let backup = transaction.backup(root);
+        let old = dest.exists();
+        if old {
+            if let Ok(meta) = std::fs::symlink_metadata(dest.join("data")) {
+                if !meta.is_dir() || meta.file_type().is_symlink() {
+                    return Err(std::io::Error::other("旧版 data/ 不是普通目录"));
+                }
+            }
+            transaction.phase(root, "backup")?;
+            plugin::transaction::rename(root, &dest, &backup)?;
+            if backup.join("data").exists() {
+                transaction.phase(root, "private-data")?;
+                plugin::transaction::rename(root, &backup.join("data"), &staging.join("data"))?;
             }
         }
-        std::fs::rename(&dest, &backup)
-            .map_err(|e| CommandError::Io(format!("备份旧插件目录失败: {e}")))?;
-        let old_data = backup.join("data");
-        let moved_data = old_data.exists();
-        if moved_data {
-            if let Err(e) = std::fs::rename(&old_data, staging.join("data")) {
-                return Err(rollback_upgrade(&backup, &dest, None, e, &mut prepared.stage_guard));
-            }
-        }
-        if let Err(e) = std::fs::rename(&staging, &dest) {
-            return Err(rollback_upgrade(&backup, &dest,
-                moved_data.then(|| staging.join("data")), e, &mut prepared.stage_guard));
-        }
-        committed_backup = Some(backup);
-    } else {
-        std::fs::rename(&staging, &dest)
-            .map_err(|e| CommandError::Io(format!("安装换名失败: {e}")))?;
-    }
-
-    Ok(committed_backup)
+        transaction.phase(root, "publish")?;
+        plugin::transaction::rename(root, &staging, &dest)?;
+        transaction.phase(root, "published")?;
+        Ok(old.then_some(backup))
+    })();
+    Ok((result.map_err(|e| CommandError::Io(format!("安装事务失败: {e}")))?, transaction))
 }
 
 #[cfg(test)]
 fn install_plugin_fs_stage(source_path: &str, root: &Path)
     -> Result<(String, String, &'static str, Option<std::path::PathBuf>), CommandError> {
     let mut prepared = prepare_plugin_install(source_path, root)?;
-    let backup = commit_plugin_install(&mut prepared)?;
+    let (backup, transaction) = commit_plugin_install(&mut prepared, 0)?;
+    transaction.finish(root).map_err(|e| CommandError::Io(e.to_string()))?;
     Ok((prepared.manifest.id.clone(), prepared.manifest.version.clone(), prepared.source_label, backup))
 }
 
@@ -485,78 +489,81 @@ fn find_single_plugin_dir(root: &Path) -> Result<std::path::PathBuf, CommandErro
 /// 卸载插件：删除目录 + 移除 config 状态实体。
 /// **仅限 `<plugins_dir>/<id>` 子树**——目录名即插件 id（反向域名），
 /// 路径由 id 派生（不经用户任意路径），天然无穿越面。目录不存在视为已卸载（幂等）。
-/// 返回卸载后的**全量插件状态数组**（前端写回 store.config.pluginConfigs）。
-/// remove_dir_all（可能是大 data/）在阻塞线程池执行（issue #6-1 同源教训）。
+/// 返回保存后的 revision + 全量 pluginConfigs；阻塞事务无取消换名窗口。
 #[tauri::command]
 pub async fn uninstall_plugin(
     id: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
+) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
-    let root = {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager.plugins_dir().to_path_buf()
-    };
-    let id_for_fs = id.clone();
-    let (dest, backup) = tokio::task::spawn_blocking(move || {
-        stage_uninstall_fs(&root, &id_for_fs)
-    })
-    .await
-    .map_err(|e| CommandError::Other(format!("卸载任务 join 失败: {e}")))??;
-
-    let entries = {
+    plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
+    tokio::task::block_in_place(|| {
         let mut manager = state.config_manager.lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let old_config = manager.get_config().clone();
-        let cfg = manager.get_config_mut();
-        cfg.entities.plugin_configs.retain(|p| p.id != id);
-        let entries = cfg.entities.plugin_configs.clone();
-        if let Err(e) = manager.save() {
-            *manager.get_config_mut() = old_config;
-            if let Some(backup) = &backup {
-                if let Err(restore_error) = std::fs::rename(backup, &dest) {
-                    return Err(CommandError::Config(format!("保存卸载状态失败: {e}; 旧版备份位于 {}; 恢复失败: {restore_error}", backup.display())));
-                }
-            }
-            return Err(CommandError::Config(format!("保存卸载状态失败，插件已恢复: {e}")));
-        }
-        entries
-    };
-    if let Some(backup) = backup {
-        // Disk deletion can be slow; config already records authoritative absence.
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = std::fs::remove_dir_all(&backup) {
-                log::warn!("Uninstalled plugin backup remains at {}: {e}", backup.display());
-            }
-        }).await.map_err(|e| CommandError::Other(format!("卸载清理任务 join 失败: {e}")))?;
-    }
-
-    log::info!("Plugin uninstalled: {id}");
-    Ok(entries)
+        uninstall_with_manager(&mut manager, &id)
+    })
 }
 
-/// 启用/禁用插件。返回变更后的**全量插件状态数组**（前端写回
-/// store.config.pluginConfigs——worker 启停与调用时权限校验的运行时源）。
+fn uninstall_with_manager(manager: &mut config::ConfigManager, id: &str) -> Result<PluginStateSnapshot, CommandError> {
+    let root = manager.plugins_dir().to_path_buf();
+    std::fs::create_dir_all(&root).map_err(|e| CommandError::Io(e.to_string()))?;
+    let dest = plugin_dir(&root, id)?;
+    let revision = manager.get_config().revision.checked_add(1)
+        .ok_or_else(|| CommandError::Config("Config revision overflow".into()))?;
+    let mut transaction = plugin::transaction::Transaction::uninstall(&root, id, revision)
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+    let old_config = manager.get_config().clone();
+    let result = (|| -> Result<(), CommandError> {
+        transaction.phase(&root, "remove").map_err(|e| CommandError::Io(e.to_string()))?;
+        if dest.exists() {
+            plugin::transaction::rename(&root, &dest, &transaction.backup(&root))
+                .map_err(|e| CommandError::Io(e.to_string()))?;
+        }
+        transaction.phase(&root, "config-commit").map_err(|e| CommandError::Io(e.to_string()))?;
+        manager.get_config_mut().entities.plugin_configs.retain(|entry| entry.id != id);
+        if let Err(error) = manager.save() {
+            *manager.get_config_mut() = old_config;
+            return Err(CommandError::Config(error.to_string()));
+        }
+        manager.save_safe_backup().map_err(|e| CommandError::Config(e.to_string()))?;
+        Ok(())
+    })();
+    if result.is_err() && manager.get_config().revision >= revision {
+        // Config commit succeeded but the safe fallback did not. Preserve the
+        // private backup and journal until startup can sync the fallback.
+        return result.map(|_| snapshot(manager));
+    }
+    plugin::transaction::recover(&root, manager.get_config())
+        .map_err(|e| CommandError::Io(format!("卸载恢复失败，保留事务: {e}")))?;
+    result?;
+    Ok(snapshot(manager))
+}
+
+/// 启用/禁用插件。expectedGeneration 必须匹配，返回保存后的权威快照。
 #[tauri::command]
 pub async fn set_plugin_enabled(
     id: String,
     enabled: bool,
+    expected_generation: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
+) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
+    {
+        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+    }
+    if !enabled { plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?; }
     let mut manager = state
         .config_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
+    require_generation(manager.get_config(), &id, &expected_generation)?;
     if enabled {
         let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
             .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
@@ -571,33 +578,39 @@ pub async fn set_plugin_enabled(
         .find(|p| p.id == id)
         .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
     entry.enabled = enabled;
-    let entries = cfg.entities.plugin_configs.clone();
     if let Err(e) = manager.save() {
         *manager.get_config_mut() = old_config;
         return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
     }
     log::info!("Plugin {} {}", id, if enabled { "enabled" } else { "disabled" });
-    Ok(entries)
+    Ok(snapshot(&manager))
 }
 
 /// 设置插件授予权限（整体替换 granted_permissions）。
 /// 权限是 manifest 声明的子集——超出声明部分拒绝（声明即上限，评审 v2 D3）。
 /// 变更立即落盘，宿主桥侧「调用时校验」随 config 生效（撤销即时生效）。
-/// 返回变更后的**全量插件状态数组**（前端写回 store.config.pluginConfigs）。
+/// expectedGeneration 必须匹配（包括撤销请求），返回保存后的权威快照。
 #[tauri::command]
 pub async fn set_plugin_permissions(
     id: String,
     permissions: Vec<String>,
+    expected_generation: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-) -> Result<Vec<config::PluginConfigEntry>, CommandError> {
+) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
+    {
+        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+    }
+    plugin::view_runtime::retire_denied(window.app_handle(), &id, &permissions).await?;
     let mut manager = state
         .config_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
+    require_generation(manager.get_config(), &id, &expected_generation)?;
 
     // manifest 权威点：读取声明权限做子集校验。
     let root = manager.plugins_dir().to_path_buf();
@@ -626,32 +639,35 @@ pub async fn set_plugin_permissions(
         .find(|p| p.id == id)
         .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
     entry.granted_permissions = permissions;
-    let entries = cfg.entities.plugin_configs.clone();
     if let Err(e) = manager.save() {
         *manager.get_config_mut() = old_config;
         return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
     }
     log::info!("Plugin {id} permissions updated");
-    Ok(entries)
+    Ok(snapshot(&manager))
 }
 
 /// 读取插件资产（`main.js` / `assets/` 内文件，供 worker 加载与资源读取）。
 /// 路径经 `sanitize_plugin_rel_path` 前缀校验，canonicalize 后必须落在
 /// `<plugins_dir>/<id>/` 内（评审 v2 D5 路径穿越防护）。
 /// 返回 UTF-8 文本内容（插件代码/文本资产均为文本；二进制资产走后续增量）。
-/// Bounded ordinary IO uses a non-queued gate and a non-cancellable blocking
-/// section: control operations get the next lock rather than an IO backlog.
+/// FIFO admission avoids failing valid simultaneous startup/KV reads. The wait is
+/// bounded; timed-out requests leave the queue and cannot build an infinite backlog.
+async fn lock_asset_io(gate: &tokio::sync::Mutex<()>) -> Result<tokio::sync::MutexGuard<'_, ()>, CommandError> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.lock()).await
+        .map_err(|_| CommandError::Other("插件磁盘操作等待超时，请稍后重试".into()))
+}
+
 #[tauri::command]
 pub async fn read_plugin_asset(
     id: String,
     rel_path: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-) -> Result<String, CommandError> {
+) -> Result<Option<String>, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.try_lock()
-        .map_err(|_| CommandError::Other("插件正在执行控制或资产操作，请稍后重试".into()))?;
+    let _plugin_io = lock_asset_io(&state.plugin_io).await?;
     let rel = sanitize_asset_path(&rel_path)?;
     let root = {
         let manager = state.config_manager.lock()
@@ -683,25 +699,7 @@ pub async fn read_plugin_asset(
     };
     tokio::task::block_in_place(move || {
         let base = plugin_dir(&root, &id)?;
-        let target = base.join(&rel);
-        if is_data_path(&rel) {
-            check_data_write_quota(&base.join("data"), &target, 0)?;
-        }
-        ensure_regular_asset_path(&base, &rel)?;
-        let canon_base = base
-            .canonicalize()
-            .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-        let canon_target = target
-            .canonicalize()
-            .map_err(|e| CommandError::Io(format!("资产文件不可读: {e}")))?;
-        if !canon_target.starts_with(&canon_base) {
-            return Err(CommandError::Other("资产路径越界，拒绝读取".into()));
-        }
-        if !canon_target.is_file() {
-            return Err(CommandError::Io("资产不是文件".into()));
-        }
-        let limit = if is_data_path(&rel) { PLUGIN_DATA_MAX_FILE_BYTES } else { plugin::MAX_ZIP_UNCOMPRESSED_BYTES };
-        read_asset_limited(&canon_target, limit)
+        read_authorized_asset(&base, &rel)
     })
 }
 
@@ -721,8 +719,7 @@ pub async fn write_plugin_asset(
     if content.len() as u64 > PLUGIN_DATA_MAX_FILE_BYTES {
         return Err(CommandError::Other("插件 data 单文件超过 16 MiB 上限".into()));
     }
-    let _plugin_io = state.plugin_io.try_lock()
-        .map_err(|_| CommandError::Other("插件正在执行控制或资产操作，请稍后重试".into()))?;
+    let _plugin_io = lock_asset_io(&state.plugin_io).await?;
     let rel = sanitize_asset_path(&rel_path)?;
     let first = rel.components().next().and_then(|c| c.as_os_str().to_str()).unwrap_or("");
     if first != "data" {
@@ -809,17 +806,29 @@ fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
     Ok(out)
 }
 
-fn ensure_regular_asset_path(base: &Path, rel: &Path) -> Result<(), CommandError> {
+/// Called only after authorization and the non-queued IO gate have succeeded.
+fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, CommandError> {
+    let canon_base = base.canonicalize().map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
+    if is_data_path(rel) { check_data_write_quota(&base.join("data"), &base.join(rel), 0)?; }
     let mut current = base.to_path_buf();
-    for component in rel.components() {
+    let count = rel.components().count();
+    for (index, component) in rel.components().enumerate() {
         current.push(component);
-        let meta = std::fs::symlink_metadata(&current)
-            .map_err(|e| CommandError::Io(format!("资产不可达: {e}")))?;
-        if meta.file_type().is_symlink() || !(meta.is_dir() || meta.is_file()) {
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(CommandError::Io(format!("资产不可达: {e}"))),
+        };
+        if metadata.file_type().is_symlink()
+            || (index + 1 < count && !metadata.is_dir())
+            || (index + 1 == count && !metadata.is_file()) {
             return Err(CommandError::Other("资产路径含链接或非常规文件".into()));
         }
     }
-    Ok(())
+    let target = current.canonicalize().map_err(|e| CommandError::Io(format!("资产不可达: {e}")))?;
+    if !target.starts_with(canon_base) { return Err(CommandError::Other("资产路径越界".into())); }
+    let limit = if is_data_path(rel) { PLUGIN_DATA_MAX_FILE_BYTES } else { plugin::MAX_ZIP_UNCOMPRESSED_BYTES };
+    read_asset_limited(&target, limit).map(Some)
 }
 
 fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
@@ -877,13 +886,29 @@ fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), C
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
         Err(e) => return Err(CommandError::Io(e.to_string())),
     }
+    let relative = target.strip_prefix(data)
+        .map_err(|_| CommandError::Other("写入目标不在 data/ 内".into()))?;
+    if relative.components().count() > plugin::MAX_PLUGIN_SOURCE_DEPTH {
+        return Err(CommandError::Other("插件 data 深度超过上限".into()));
+    }
+    let mut missing_parents = 0usize;
+    let mut parent = data.to_path_buf();
+    for component in relative.parent().unwrap_or_else(|| Path::new("")).components() {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {},
+            Ok(_) => return Err(CommandError::Other("写入目录含链接或非目录".into())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing_parents += 1,
+            Err(e) => return Err(CommandError::Io(e.to_string())),
+        }
+    }
     let old_size = match std::fs::symlink_metadata(target) {
         Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => Some(meta.len()),
         Ok(_) => return Err(CommandError::Other("写入目标不是普通文件".into())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(CommandError::Io(e.to_string())),
     };
-    if entries + usize::from(old_size.is_none()) > plugin::MAX_ZIP_ENTRIES
+    if entries + missing_parents + usize::from(old_size.is_none()) > plugin::MAX_ZIP_ENTRIES
         || files + usize::from(old_size.is_none()) > PLUGIN_DATA_MAX_FILES
         || bytes.saturating_sub(old_size.unwrap_or(0)).saturating_add(size) > PLUGIN_DATA_MAX_TOTAL_BYTES {
         return Err(CommandError::Other("插件 data 文件数或总量超过上限".into()));
@@ -895,36 +920,15 @@ fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::
     use std::io::Write;
     let temporary = parent.join(format!(".write-{}", uuid::Uuid::new_v4()));
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
-    let write_result = file.write_all(content);
-    drop(file);
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(e);
-    }
-    #[cfg(windows)]
-    let prior = if std::fs::symlink_metadata(target).is_ok() {
-        let backup = parent.join(format!(".write-backup-{}", uuid::Uuid::new_v4()));
-        if let Err(e) = std::fs::rename(target, &backup) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(e);
-        }
-        Some(backup)
-    } else {
-        None
-    };
-    if let Err(e) = std::fs::rename(&temporary, target) {
-        let _ = std::fs::remove_file(&temporary);
-        #[cfg(windows)]
-        if let Some(backup) = prior {
-            std::fs::rename(&backup, target)?;
-        }
-        return Err(e);
-    }
-    #[cfg(windows)]
-    if let Some(backup) = prior {
-        let _ = std::fs::remove_file(backup);
-    }
-    Ok(())
+    let result = (|| {
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        plugin::transaction::replace_file(&temporary, target)?;
+        plugin::transaction::sync_dir(parent)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    result
 }
 
 fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
@@ -932,6 +936,26 @@ fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), CommandError
         return Err(CommandError::Other("插件命令仅允许主窗口调用".into()));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn create_plugin_view(source: tauri::Webview, state: State<'_, AppState>, binding: plugin::view_runtime::Binding) -> Result<(), CommandError> {
+    plugin::view_runtime::create(source, &state, binding).await
+}
+
+#[tauri::command]
+pub async fn update_plugin_view(source: tauri::Webview, instance_id: String, rect: plugin::view_runtime::Rect, visible: bool, layout_revision: u64) -> Result<(), CommandError> {
+    plugin::view_runtime::update(source, instance_id, rect, visible, layout_revision).await
+}
+
+#[tauri::command]
+pub async fn send_plugin_view_message(source: tauri::Webview, instance_id: String, message: serde_json::Value) -> Result<(), CommandError> {
+    plugin::view_runtime::send(source, instance_id, message).await
+}
+
+#[tauri::command]
+pub async fn destroy_plugin_view(source: tauri::Webview, instance_id: String) -> Result<(), CommandError> {
+    plugin::view_runtime::destroy(source, instance_id).await
 }
 
 // ==================== 辅助 ====================
@@ -956,14 +980,15 @@ fn plugin_dir(root: &Path, id: &str) -> Result<std::path::PathBuf, CommandError>
     Ok(dest)
 }
 
+#[cfg(test)]
 fn stage_uninstall_fs(root: &Path, id: &str) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), CommandError> {
     let dest = plugin_dir(root, id)?;
-    if !dest.exists() {
-        return Ok((dest, None));
-    }
-    let backup = root.join(format!(".backup-{}", uuid::Uuid::new_v4()));
-    std::fs::rename(&dest, &backup)
-        .map_err(|e| CommandError::Io(format!("备份卸载插件失败: {e}")))?;
+    if !dest.exists() { return Ok((dest, None)); }
+    let transaction = plugin::transaction::Transaction::uninstall(root, id, 1)
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+    let backup = transaction.backup(root);
+    plugin::transaction::rename(root, &dest, &backup).map_err(|e| CommandError::Io(e.to_string()))?;
+    transaction.finish(root).map_err(|e| CommandError::Io(e.to_string()))?;
     Ok((dest, Some(backup)))
 }
 
@@ -976,20 +1001,6 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn rollback_upgrade(backup: &Path, dest: &Path, moved_data: Option<std::path::PathBuf>,
-    cause: std::io::Error, stage_guard: &mut TempDirGuard) -> CommandError {
-    if let Some(data) = moved_data {
-        if let Err(e) = std::fs::rename(&data, backup.join("data")) {
-            stage_guard.0.clear();
-            return CommandError::Io(format!("升级失败: {cause}; data 回滚失败: {e}; 备份: {}; 暂存: {}",
-                backup.display(), data.display()));
-        }
-    }
-    if let Err(e) = std::fs::rename(backup, dest) {
-        return CommandError::Io(format!("升级失败: {cause}; 旧版恢复失败: {e}; 备份: {}", backup.display()));
-    }
-    CommandError::Io(format!("升级失败，旧版已恢复: {cause}"))
-}
 
 /// Directory sources obey the same cumulative uncompressed limit as zip sources.
 fn copy_dir_recursive(src: &Path, dest: &Path, budget: &mut u64) -> std::io::Result<()> {
@@ -1240,12 +1251,8 @@ fn url_glob_match(pattern: &str, url: &str) -> bool {
                     i += 1;
                 }
             }
-            '?' => {
-                regex.push_str("[^/]");
-                i += 1;
-            }
             // 正则元字符转义。
-            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
+            '?' | '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
                 regex.push('\\');
                 regex.push(chars[i]);
                 i += 1;
@@ -1313,6 +1320,7 @@ pub async fn plugin_open_external(
 mod tests {
     use super::*;
     use std::fs;
+    use std::future::Future;
 
     fn manifest(version: &str) -> String {
         format!(r#"{{"id":"com.example.test","name":"Test","version":"{version}","apiVersion":"1.0","entry":"main.js","permissions":[]}}"#)
@@ -1330,6 +1338,7 @@ mod tests {
         let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         manager.get_config_mut().entities.plugin_configs.push(config::PluginConfigEntry {
             id: "com.example.test".into(), enabled: true,
+            install_generation: "old-generation".into(),
             granted_permissions: vec!["fs:storage".into()], installed_at: Some(1), source: Some("dir".into()),
         });
         manager.save().unwrap();
@@ -1354,7 +1363,7 @@ mod tests {
         assert!(!before_swap.get_config().entities.plugin_configs[0].enabled);
         assert_eq!(fs::read_to_string(before_swap.plugins_dir().join("com.example.test/main.js")).unwrap(), "1.0.0");
         drop(before_swap);
-        commit_plugin_install(&mut prepared).unwrap();
+        commit_plugin_install(&mut prepared, manager.get_config().revision).unwrap();
         // Model process death before any response/cleanup and fresh startup.
         drop(manager);
         let reloaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
@@ -1372,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_commit_restores_old_authorization_and_code() {
+    fn failed_commit_keeps_old_code_but_remains_fail_closed() {
         let root = std::env::temp_dir().join(format!("plugin_state_rollback_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
@@ -1383,9 +1392,9 @@ mod tests {
         assert!(install_prepared(&mut manager, prepared).is_err());
         let reloaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         let entry = &reloaded.get_config().entities.plugin_configs[0];
-        assert!(entry.enabled);
-        assert_eq!(entry.granted_permissions, vec!["fs:storage"]);
-        assert_eq!(entry.installed_at, Some(1));
+        assert!(!entry.enabled);
+        assert!(entry.granted_permissions.is_empty());
+        assert_ne!(entry.install_generation, "old-generation");
         assert_eq!(fs::read_to_string(reloaded.plugins_dir().join("com.example.test/main.js")).unwrap(), "1.0.0");
         fs::remove_dir_all(root).unwrap();
     }
@@ -1441,22 +1450,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_control_lock_is_not_starved_by_ordinary_io() {
-        use std::future::Future;
+    async fn ordinary_io_waits_for_active_work_without_overtaking_control() {
         let gate = tokio::sync::Mutex::new(());
-        let active_data = gate.try_lock().unwrap();
+        let active = gate.lock().await;
         let mut control = std::pin::pin!(gate.lock());
+        let mut read = std::pin::pin!(lock_asset_io(&gate));
         let waker = futures_util::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
         assert!(control.as_mut().poll(&mut context).is_pending());
-        drop(active_data);
-        // try_lock does not jump ahead of a FIFO control waiter, nor create a
-        // new data waiter that can delay a following control-plane request.
-        assert!(gate.try_lock().is_err());
+        assert!(read.as_mut().poll(&mut context).is_pending());
+        drop(active);
         let control_guard = control.await;
-        assert!(gate.try_lock().is_err());
+        assert!(read.as_mut().poll(&mut context).is_pending());
         drop(control_guard);
+        let read_guard = read.await.unwrap();
+        drop(read_guard);
         assert!(gate.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn timed_out_asset_waiter_releases_its_queue_position() {
+        let gate = tokio::sync::Mutex::new(());
+        let active = gate.lock().await;
+        assert!(lock_asset_io(&gate).await.is_err());
+        drop(active);
+        assert!(gate.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn queued_old_control_intent_is_rejected_after_install_gate() {
+        let gate = tokio::sync::Mutex::new(());
+        let installing = gate.lock().await;
+        let mut cfg = config::AppConfig::default();
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        let captured = cfg.entities.plugin_configs[0].install_generation.clone();
+        let mut queued = std::pin::pin!(gate.lock());
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(queued.as_mut().poll(&mut context).is_pending());
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        drop(installing);
+        let _control = queued.await;
+        // Both commands check before modifying even a revoke or crash-disable.
+        assert!(require_generation(&cfg, "com.example.test", &captured).is_err());
+        assert!(!cfg.entities.plugin_configs[0].enabled);
+        assert!(cfg.entities.plugin_configs[0].granted_permissions.is_empty());
     }
 
     #[test]
@@ -1635,26 +1673,211 @@ mod tests {
     }
 
     #[test]
-    fn failed_upgrade_after_backup_restores_old_tree_and_data() {
-        let root = std::env::temp_dir().join(format!("plugin_rollback_{}", uuid::Uuid::new_v4()));
-        let plugins = root.join("plugins");
-        let src = source(&root, "1.0.0");
-        install_plugin_fs_stage(src.to_str().unwrap(), &plugins).unwrap();
-        let dest = plugins.join("com.example.test");
-        fs::create_dir_all(dest.join("data")).unwrap();
-        fs::write(dest.join("data/keep"), "user").unwrap();
-        let backup = plugins.join(".backup-test");
-        fs::rename(&dest, &backup).unwrap();
-        let stage = plugins.join(".stage-test");
-        fs::create_dir_all(&stage).unwrap();
-        fs::rename(backup.join("data"), stage.join("data")).unwrap();
-        let mut stage_guard = TempDirGuard(stage.clone());
-        let result = rollback_upgrade(&backup, &dest, Some(stage.join("data")),
-            std::io::Error::other("simulated commit failure"), &mut stage_guard);
-        assert!(format!("{result:?}").contains("旧版已恢复"));
-        assert_eq!(fs::read_to_string(dest.join("main.js")).unwrap(), "1.0.0");
-        assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "user");
+    fn interrupted_upgrade_recovers_each_rename_boundary_idempotently() {
+        for boundary in 0..=3 {
+            let root = std::env::temp_dir().join(format!("plugin_boundary_{}", uuid::Uuid::new_v4()));
+            let old_source = source(&root, "1.0.0");
+            let new_source = source(&root, "2.0.0");
+            let mut manager = trusted_manager(&root);
+            install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            let plugins = manager.plugins_dir().to_path_buf();
+            let dest = plugins.join("com.example.test");
+            fs::create_dir(dest.join("data")).unwrap();
+            fs::write(dest.join("data/keep"), "private").unwrap();
+            let mut prepared = prepare_plugin_install(new_source.to_str().unwrap(), &plugins).unwrap();
+            reset_install_trust(manager.get_config_mut(), "com.example.test", "dir");
+            persist_install_trust_reset(&mut manager).unwrap();
+            let stage = prepared.stage_guard.0.clone();
+            let mut tx = plugin::transaction::Transaction::install(&plugins, "com.example.test", &stage,
+                manager.get_config().revision).unwrap();
+            prepared.stage_guard.0.clear();
+            if boundary >= 1 {
+                tx.phase(&plugins, "backup").unwrap();
+                plugin::transaction::rename(&plugins, &dest, &tx.backup(&plugins)).unwrap();
+            }
+            if boundary >= 2 {
+                tx.phase(&plugins, "private-data").unwrap();
+                plugin::transaction::rename(&plugins, &tx.backup(&plugins).join("data"), &stage.join("data")).unwrap();
+            }
+            if boundary >= 3 {
+                tx.phase(&plugins, "publish").unwrap();
+                plugin::transaction::rename(&plugins, &stage, &dest).unwrap();
+            }
+            // No rollback code or guard runs: startup sees exactly the killed-process disk state.
+            drop(manager);
+            for _ in 0..2 {
+                let loaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
+                assert!(!loaded.get_config().entities.plugin_configs[0].enabled);
+                assert!(loaded.get_config().entities.plugin_configs[0].granted_permissions.is_empty());
+                assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "private");
+                assert_eq!(fs::read_to_string(dest.join("main.js")).unwrap(),
+                    if boundary == 3 { "2.0.0" } else { "1.0.0" });
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn interrupted_uninstall_uses_durable_config_commit() {
+        for boundary in 0..=2 {
+            let root = std::env::temp_dir().join(format!("plugin_uninstall_boundary_{}", uuid::Uuid::new_v4()));
+            let src = source(&root, "1.0.0");
+            let mut manager = trusted_manager(&root);
+            install_plugin_fs_stage(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            let plugins = manager.plugins_dir().to_path_buf();
+            let dest = plugins.join("com.example.test");
+            fs::create_dir(dest.join("data")).unwrap();
+            fs::write(dest.join("data/keep"), "private").unwrap();
+            let tx = plugin::transaction::Transaction::uninstall(&plugins, "com.example.test", manager.get_config().revision + 1).unwrap();
+            if boundary >= 1 { plugin::transaction::rename(&plugins, &dest, &tx.backup(&plugins)).unwrap(); }
+            if boundary == 2 {
+                manager.get_config_mut().entities.plugin_configs.clear();
+                manager.save().unwrap();
+                manager.save_safe_backup().unwrap();
+            }
+            drop(manager);
+            for _ in 0..2 {
+                let loaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
+                assert_eq!(loaded.get_config().entities.plugin_configs.is_empty(), boundary == 2);
+                if boundary == 2 { assert!(!dest.exists()); }
+                else { assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "private"); }
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn generation_rejects_queued_edits_and_never_repeats_after_reinstall() {
+        let mut cfg = config::AppConfig::default();
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        let first = cfg.entities.plugin_configs[0].install_generation.clone();
+        assert!(require_generation(&cfg, "com.example.test", &first).is_ok());
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        let second = cfg.entities.plugin_configs[0].install_generation.clone();
+        assert!(require_generation(&cfg, "com.example.test", &first).is_err());
+        assert!(require_generation(&cfg, "com.example.test", "").is_err());
+        cfg.entities.plugin_configs.clear();
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        assert_ne!(cfg.entities.plugin_configs[0].install_generation, first);
+        assert_ne!(cfg.entities.plugin_configs[0].install_generation, second);
+    }
+
+    #[test]
+    fn snapshot_revision_is_captured_after_save() {
+        let root = std::env::temp_dir().join(format!("plugin_snapshot_{}", uuid::Uuid::new_v4()));
+        let mut manager = trusted_manager(&root);
+        let before = snapshot(&manager).revision;
+        manager.save().unwrap();
+        assert_eq!(snapshot(&manager).revision, before + 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_install_update_uninstall_reinstall_returns_fresh_identity() {
+        let root = std::env::temp_dir().join(format!("plugin_identity_cycle_{}", uuid::Uuid::new_v4()));
+        let src1 = source(&root, "1.0.0");
+        let src2 = source(&root, "2.0.0");
+        let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
+        let prepared = prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let first = install_prepared(&mut manager, prepared).unwrap();
+        let prepared = prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let second = install_prepared(&mut manager, prepared).unwrap();
+        assert_ne!(first.plugin_configs[0].install_generation, second.plugin_configs[0].install_generation);
+        assert!(second.revision > first.revision);
+        let removed = uninstall_with_manager(&mut manager, "com.example.test").unwrap();
+        assert!(removed.plugin_configs.is_empty());
+        assert!(removed.revision > second.revision);
+        let prepared = prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let reinstalled = install_prepared(&mut manager, prepared).unwrap();
+        assert_ne!(reinstalled.plugin_configs[0].install_generation, first.plugin_configs[0].install_generation);
+        assert_ne!(reinstalled.plugin_configs[0].install_generation, second.plugin_configs[0].install_generation);
+        assert!(!reinstalled.plugin_configs[0].enabled);
+        assert!(reinstalled.plugin_configs[0].granted_permissions.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_asset_does_not_hide_linked_parent_or_data_corruption() {
+        let root = std::env::temp_dir().join(format!("plugin_missing_corrupt_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::create_dir(root.join("outside")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("data/link")).unwrap();
+        assert!(read_authorized_asset(&root, Path::new("data/state.json")).is_err());
+        std::os::unix::fs::symlink(root.join("outside"), root.join("linked")).unwrap();
+        assert!(read_authorized_asset(&root, Path::new("linked/missing")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_first_install_is_disabled_or_absent_without_package_data() {
+        for published in [false, true] {
+            let root = std::env::temp_dir().join(format!("plugin_first_boundary_{}", uuid::Uuid::new_v4()));
+            let src = source(&root, "1.0.0");
+            fs::create_dir(src.join("data")).unwrap();
+            fs::write(src.join("data/injected"), "package").unwrap();
+            let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
+            let mut prepared = prepare_plugin_install(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            reset_install_trust(manager.get_config_mut(), "com.example.test", "dir");
+            persist_install_trust_reset(&mut manager).unwrap();
+            let plugins = manager.plugins_dir().to_path_buf();
+            let stage = prepared.stage_guard.0.clone();
+            let tx = plugin::transaction::Transaction::install(&plugins, "com.example.test", &stage,
+                manager.get_config().revision).unwrap();
+            prepared.stage_guard.0.clear();
+            if published { plugin::transaction::rename(&plugins, &stage, &tx.dest(&plugins)).unwrap(); }
+            drop(manager);
+            let loaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
+            assert!(!loaded.get_config().entities.plugin_configs[0].enabled);
+            assert!(loaded.get_config().entities.plugin_configs[0].granted_permissions.is_empty());
+            assert_eq!(tx.dest(&plugins).exists(), published);
+            assert!(!tx.dest(&plugins).join("data/injected").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn data_quota_budgets_all_new_parent_directories_without_mutation() {
+        let root = std::env::temp_dir().join(format!("plugin_parent_budget_{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let mut accepted = 0;
+        for index in 0..65 {
+            let mut parent = data.clone();
+            for depth in 0..30 { parent.push(format!("p{index}-{depth}")); }
+            let target = parent.join("key");
+            if check_data_write_quota(&data, &target, 0).is_ok() {
+                fs::create_dir_all(&parent).unwrap();
+                fs::write(target, "").unwrap();
+                accepted += 1;
+            } else { assert!(!data.join(format!("p{index}-0")).exists()); }
+        }
+        assert_eq!(accepted, plugin::MAX_ZIP_ENTRIES / 31);
+        assert!(check_data_write_quota(&data, &data.join("p0-0/p0-1/p0-2/p0-3/p0-4/p0-5/p0-6/p0-7/p0-8/p0-9/p0-10/p0-11/p0-12/p0-13/p0-14/p0-15/p0-16/p0-17/p0-18/p0-19/p0-20/p0-21/p0-22/p0-23/p0-24/p0-25/p0-26/p0-27/p0-28/p0-29/key"), 0).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_asset_is_distinct_from_type_encoding_and_limit_errors() {
+        let root = std::env::temp_dir().join(format!("plugin_missing_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_authorized_asset(&root, Path::new("data/state.json")).unwrap(), None);
+        fs::create_dir(root.join("directory")).unwrap();
+        assert!(read_authorized_asset(&root, Path::new("directory")).is_err());
+        fs::write(root.join("binary"), [255]).unwrap();
+        assert!(read_authorized_asset(&root, Path::new("binary")).is_err());
+        fs::write(root.join("file"), "hello").unwrap();
+        assert_eq!(read_authorized_asset(&root, Path::new("file")).unwrap(), Some("hello".into()));
+        assert!(read_authorized_asset(&root, Path::new("file/child")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn glob_query_separator_is_literal() {
+        let pattern = "https://a.com/v1?token=x";
+        assert!(url_glob_match(pattern, pattern));
+        assert!(!url_glob_match(pattern, "https://a.com/v1Xtoken=x"));
+        assert!(!url_glob_match(pattern, "https://a.com/v1token=x"));
     }
 
 

@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Manager, State};
 
 use super::CommandError;
 use crate::{config, AppState};
@@ -20,6 +20,22 @@ fn preserve_plugin_configs(
 ) {
     if !restore_plugin_configs {
         new_config.entities.plugin_configs = current.entities.plugin_configs.clone();
+    } else {
+        let imported = std::mem::take(&mut new_config.entities.plugin_configs);
+        // Restore grants only for the exact installed code originally reviewed.
+        new_config.entities.plugin_configs = current.entities.plugin_configs.iter().map(|entry| {
+            let mut restored = entry.clone();
+            if let Some(saved) = imported.iter().find(|saved| saved.id == entry.id
+                && !saved.install_generation.is_empty()
+                && saved.install_generation == entry.install_generation) {
+                restored.enabled = saved.enabled;
+                restored.granted_permissions = saved.granted_permissions.clone();
+            } else if imported.iter().any(|saved| saved.id == entry.id) {
+                restored.enabled = false;
+                restored.granted_permissions.clear();
+            }
+            restored
+        }).collect();
     }
 }
 
@@ -33,9 +49,22 @@ pub async fn set_config(
     mut new_config: config::AppConfig,
     expected_revision: Option<u64>,
     restore_plugin_configs: Option<bool>,
+    source: tauri::Webview,
     state: State<'_, AppState>,
 ) -> Result<bool, CommandError> {
     let _plugin_io = state.plugin_io.lock().await;
+    crate::plugin::view_runtime::require_main(&source)?;
+    if restore_plugin_configs.unwrap_or(false) {
+        let restored = {
+            let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+            preserve_plugin_configs(&mut new_config, manager.get_config(), true);
+            new_config.entities.plugin_configs.clone()
+        };
+        for entry in restored {
+            if !entry.enabled { crate::plugin::view_runtime::retire_plugin(source.app_handle(), &entry.id).await?; }
+            else { crate::plugin::view_runtime::retire_denied(source.app_handle(), &entry.id, &entry.granted_permissions).await?; }
+        }
+    }
     let (saved, cfg) = {
         let mut manager = state
             .config_manager
@@ -45,7 +74,7 @@ pub async fn set_config(
         // need the revision observed before collecting their frontend snapshot.
         let restore = restore_plugin_configs.unwrap_or(false);
         let saved = if restore {
-            // Import is an intentional full replacement, including plugin grants.
+            preserve_plugin_configs(&mut new_config, manager.get_config(), true);
             manager.set_config(new_config)
                 .map_err(|e| CommandError::Config(e.to_string()))?;
             true
@@ -116,6 +145,7 @@ mod tests {
         let mut current = AppConfig::default();
         current.entities.plugin_configs.push(PluginConfigEntry {
             id: "com.example.plugin".into(),
+            install_generation: "test-generation".into(),
             enabled: false,
             granted_permissions: Vec::new(),
             installed_at: None,
@@ -133,5 +163,22 @@ mod tests {
         restore.entities.plugin_configs[0].enabled = true;
         preserve_plugin_configs(&mut restore, &current, true);
         assert!(restore.entities.plugin_configs[0].enabled);
+    }
+
+    #[test]
+    fn import_cannot_revive_prior_install_identity_or_grants() {
+        let mut current = AppConfig::default();
+        current.entities.plugin_configs.push(PluginConfigEntry {
+            id: "com.example.plugin".into(), install_generation: "new".into(),
+            enabled: false, granted_permissions: Vec::new(), installed_at: None, source: None,
+        });
+        let mut imported = current.clone();
+        imported.entities.plugin_configs[0].install_generation = "old".into();
+        imported.entities.plugin_configs[0].enabled = true;
+        imported.entities.plugin_configs[0].granted_permissions.push("serial:send".into());
+        preserve_plugin_configs(&mut imported, &current, true);
+        assert_eq!(imported.entities.plugin_configs[0].install_generation, "new");
+        assert!(!imported.entities.plugin_configs[0].enabled);
+        assert!(imported.entities.plugin_configs[0].granted_permissions.is_empty());
     }
 }

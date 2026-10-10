@@ -109,7 +109,7 @@ pub async fn plugin_pick_files(
         return Err(CommandError::Other("插件文件选择仅允许主窗口调用".into()));
     }
     crate::plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
-    let installed_at = {
+    let install_generation = {
         let manager = state.config_manager.lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let entry = manager.get_config().entities.plugin_configs.iter()
@@ -123,7 +123,7 @@ pub async fn plugin_pick_files(
         if manifest.id != plugin_id || !manifest.permissions.iter().any(|perm| perm == "fs:open") {
             return Err(CommandError::Other("插件未声明 fs:open".into()));
         }
-        entry.installed_at
+        entry.install_generation.clone()
     };
     tokio::task::spawn_blocking(move || {
         use tauri_plugin_dialog::DialogExt;
@@ -145,7 +145,7 @@ pub async fn plugin_pick_files(
         let manager = manager.config_manager.lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let permitted = manager.get_config().entities.plugin_configs.iter().any(|entry| {
-            entry.id == plugin_id && entry.installed_at == installed_at && entry.enabled
+            entry.id == plugin_id && entry.install_generation == install_generation && entry.enabled
                 && entry.granted_permissions.iter().any(|perm| perm == "fs:open")
         });
         if !permitted {
