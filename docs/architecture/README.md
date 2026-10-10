@@ -13,15 +13,17 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 ┌──────────▼──────────┐        ┌──────────▼──────────┐
 │    前端（React）      │        │    后端（Rust）      │
 │  6 Zustand stores    │        │  SerialManager      │
-│  15 hooks + 13 svc   │◄──────►│  ConfigManager      │
+│  18 hook files       │◄──────►│  ConfigManager      │
 │  方案B 终端引擎       │  IPC   │  logger/LogManager  │
 │  rxPipeline/ttySvc   │        │  diaglog/DiagLogger │
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端计数口径：`src/stores/` 6 个 store 模块；`src/services/` 13 个文件 = `tauri.ts` barrel + 12 个域文件（serial / config / log / storage / popout / update / system / diag / file / tool / event / plugin）；`src/hooks/` 15 个既有 hook 加 `usePlugins` / `usePluginPanel` / `usePluginUi` 三个插件 hook 文件。后端增加 `commands/plugin.rs` 与纯函数模块 `plugin/mod.rs`，插件状态在 `ConfigManager` 的第 9 类展平实体中。
+> 前端计数口径：`src/stores/` 6 个 store；`src/services/` 14 个生产文件 = tauri.ts barrel + 13 域（含 plugin / pluginView）；`src/hooks/` 18 个 hook 文件，不含测试/barrel/辅助模块，native遮挡 hook 在 shared。后端78命令、12域；插件校验在 plugin/mod.rs，磁盘事务在 transaction.rs，隔离原生承载在 view_runtime/，状态仍为ConfigManager第9类实体。
 
 ## 文档清单
+
+插件作者的入口是独立的[插件开发指南](../plugin-development.md)（创建、manifest、Worker API、调试、打包）；下表的插件架构文档面向维护宿主实现，两者职责分开。
 
 | 文档 | 功能模块 | 核心内容 |
 |------|---------|---------|
@@ -33,7 +35,8 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 | [`config.md`](config.md) | 配置与状态 | config.json 实体（`Entities` 9 个 `Vec` 数组，含插件状态）/会话快照/6 个 store 划分/规则实体 CRUD/安全保存快照（`saveConfig(patch?)`）/`CONFIG_BOUNDS` 跨语言契约/分组与端口元数据 |
 | [`workspace.md`](workspace.md) | 工作区与通知 | paneTree 分屏（树算法在 `utils/paneTree.ts`）/标签页/弹出体系（popout）/操作面板布局/侧边栏/通知中心/状态栏/自定义文本右键菜单 |
 | [`update.md`](update.md) | 自动更新 | preview/stable 双通道/检查链路（GitHub API + endpoint 解析）/6h 重评估与 7 天 snooze/UpdateDialog/失败分类 |
-| [`plugins.md`](plugins.md) | 插件系统 | Web Worker 宿主/权限边界/旁路 RX/安装升级回滚/插件 API 与已知限制 |
+| [`plugins.md`](plugins.md) | 插件宿主内部架构 | 安装身份/revision 授权一致性、原生 IPC、Worker 派发、RX 旁路及磁盘中断恢复；作者 API 见[开发指南](../plugin-development.md) |
+| [`plugin-views.md`](plugin-views.md) | 插件隔离 UI 与工作区标签 | 原生隔离子 WebView、终端替换/额外插件标签、动作打开；安全、输入消费者与生命周期契约，Windows 已实现/其他平台门控 |
 | [`release.md`](release.md) | 发版与构建 | CI/CD 工作流/签名/密钥轮换/坏版本召回/RELEASE_NOTES 机制/故障排查 |
 | [`errors.md`](errors.md) | 错误处理 | `CommandError` 7 个变体定义与映射表（触发条件 = 命令/文件归属）/无按变体的 `toast.error.*` key（i18n 只有 `toast.severity.*` 与 `toast.fallback.operationFailed`）/消费路径（`extractErrorMessage` + `notifyError`） |
 
@@ -44,4 +47,5 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 - **跨 `.await` 锁纪律**：`MutexGuard` 是 `!Send`，async 命令必须「提取 + clone + drop 锁」后再 `.await`。反证见 `AppState.log_manager`——它是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），因此日志写入不需要持锁跨 `.await`，`save_log_as` 的拷贝 / `list_files` 递归 / 数据写入不争同一把锁。
 - **命令返回**：一律 `Result<T, CommandError>`，不得返回 `String`。
 - **DEV 门控**：模拟串口/模拟终端/自动更新等调试能力的后端门控**只有一处实现**——`commands/system_cmds.rs` 的 `dev_only(capability)` / `is_debug_build()`（命令体不得再自带 `#[cfg(debug_assertions)]` 双主体）；前端以 `import.meta.env.DEV`（`utils/devMode.ts` 的 `DEV_FEATURES_ENABLED`）隐藏 UI。两层都要有：release 构建下后端函数直接返回错误，前端同时不渲染入口。
-- **配置持久化审计**：全量 `set_config` 一律经 `saveConfig(patch?)`（`useConfigPersistence`）——它内部始终构造安全快照：`patch` 只覆盖本次关心的普通字段，实体数组分别取权威来源（`useRuleStore` 活实体 / `store.groups` / `collectPortMeta(ports)` / `loadPortPresets()` 回读），绝不用启动快照 `store.config` 整体替换，否则 config.json 被陈旧数据覆盖（曾清空用户编辑）。唯一例外是备份导入（`BackupSettings.handleImport` 刻意整体替换 `bundle.config` 后重载应用）。
+- **配置持久化审计**：普通全量 `set_config` 经 `saveConfig(patch?)` 组装安全快照并以 revision CAS 保存，绝不用启动实体快照覆盖后端。备份导入是显式恢复边界，但插件授权只能恢复到同一 `installGeneration`；`BackupSettings.handleImport` 读回后端权威配置与插件列表后重载，不发布导入文件中的旧权限。
+- **插件运行与发布证据**：安装身份、权限和 IO 契约见 [`plugins.md`](plugins.md)；最终安装包的原生 Worker/CSP、文件选择器与跨平台验收见 [`release.md`](release.md#插件发版验收门)。用户安装、授权、升级和卸载步骤见[使用手册](../userwiki/设置.md#插件)。

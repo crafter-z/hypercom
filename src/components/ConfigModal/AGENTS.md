@@ -6,19 +6,19 @@ Multi-page settings modal. Split into `pages/` (10 settings pages), `editors/` (
 
 | File | Role |
 |---|---|---|
-| `ConfigModal.tsx` | tab switcher (10 pages) + dialog open/close + **save boundary** (`saveConfig`); cancel keeps plugin authorization already persisted during the dialog session |
+| `ConfigModal.tsx` | tab switcher (10 pages) + dialog open/close + save boundary (`saveConfig`); cancel keeps independently persisted plugin state and current revision |
 | `hooks/useEntityPage.ts` | **the** load / dirty / save / delete contract for every entity page (see below) |
 | `RuleSetAccordion.tsx` | presentational row shell: chevron + inline rename + header slot + ✓ save + delete, collapsible body. `description` / `countLabel` / `onAddItem` are optional so pages whose editor edits the entity itself render no child-CRUD furniture |
 | `pages/GeneralSettings.tsx` | close behavior + max display lines + language + theme + power flags + Enter semantics + reconnect retries + **auto-update tri-state radio** (`updateCheckMode: none/stable/preview`) + fonts + config path |
 | `pages/LogSettings.tsx` | file path template, shard threshold, per-session new file, directory-change migration dialog (DirChangeDialog), directory/subdir mode, timestamp/direction, format, encoding, split size |
-| `pages/BackupSettings.tsx` | backup interval/directory + import/export config bundle (`version: 2` = one embedded `AppConfig`) |
+| `pages/BackupSettings.tsx` | config bundle import/export (`version: 2`); no plugin code/private data; import reads back backend-authoritative state and only restores grants for the same installation identity |
 | `pages/DisplaySettings.tsx` | preset baud rates / port type badge / default line ending / send prefix / timestamp mode+format; background image (enable → path → opacity / blur) |
 | `pages/HighlightSettings.tsx` | bind `useRuleStore` highlight sets + manage rules |
 | `pages/CommandSettings.tsx` | bind `useRuleStore` send-command sets + manage commands (loop toggle, loop delay, repeat count) |
 | `pages/ProtocolSettings.tsx` | protocol templates: frame head/length/checksum/tail |
 | `pages/ToolSettings.tsx` | per-port external tool command template (`{port}` placeholder) |
 | `pages/TriggerSettings.tsx` | conditional trigger rules: pattern match → alert/auto-respond; optional per-port scoping (`portId` dropdown, empty = all); the only auto-saved entity page |
-| `pages/PluginSettings.tsx` | scanned plugin views, install/upgrade/uninstall, permission toggles, explicit outbound proxy; runtime and authoritative state synchronized by `usePluginList` |
+| `pages/PluginSettings.tsx` | directory/ZIP install, upgrade, uninstall, pregrant while disabled, enable after queued grants persist; actions bind reviewed installGeneration, snapshots order by revision; proxy uses normal footer save |
 | `editors/HighlightRuleEditor.tsx` | row form for highlight rule |
 | `editors/SendCmdEditor.tsx` | row form for send command |
 | `editors/ProtocolTemplateEditor.tsx` | field-by-field template form |
@@ -37,7 +37,7 @@ Pages may only *extend* the contract through `autoSaveDebounceMs`; any other div
 ## Conventions (root covers i18n rules)
 
 - All rule/command state lives in `useRuleStore` (highlight rule sets, send-command sets, protocol templates, trigger rules, port tool configs). Pages read via selectors; mutations route through store actions; pages never write `useAppStore.config`'s entity arrays.
-- Persistence: entity CRUD goes through `storageService` (single-entity backend write); footer `saveConfig(patch?)` composes live rules/groups/portMeta/presets, compares backend revision under `config_manager` lock and retries with fresh data on concurrent CRUD. The modal stays open if all retries fail. Plugin grants are independently persisted and protected by backend `set_config` CAS + plugin_io lock; backup import is the deliberate full replacement. Pages never invoke backend directly; use `src/services/tauri.ts`.
+- Persistence: rule CRUD goes through `storageService`; footer `saveConfig(patch?)` composes live rules/groups/portMeta/presets and revision CAS. Plugin actions use `pluginService` and ordered `pluginConfigSnapshot`, not `useEntityPage`. Backup import is explicit restore, but cannot restore a different installation's grants; read the backend result before publishing state. Never invoke Rust directly from pages.
 - Numeric inputs take their range from `CONFIG_BOUNDS` (`src/utils/bounds.ts`, the frontend's single source; the Rust side mirrors it and `bounds.test.ts` asserts the two tables match). Page-local ranges (e.g. a command set's `loopDelay`) are declared once per page as a `[min, max]` pair so the `clampNumber` arguments and the `min`/`max` attributes cannot drift.
 - Each row editor is a small presentational component declared at module level. NEVER inline `<Editor>` JSX inside a page body — rerender churn causes input focus loss.
 - Pages use `useTranslation()`'s `t()` for visible strings. Do not translate protocol vocabulary (`None/Even/Odd`, `Xon/Xoff`, encoding names, units like `ms/px/MB`, acronyms `SIM/VCP/HEX/DTR/RTS`).

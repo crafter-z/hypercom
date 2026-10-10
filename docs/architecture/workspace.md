@@ -22,10 +22,25 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## 标签页
 
-- TabBar 右键菜单：批量开关串口（「打开/断开所有标签页」遍历全局 tabs 逐个 open/close，100ms 节流，issue #2-1）、外部工具（与侧边栏同源 `usePortToolActions`）。
-- **关闭标签页 ≠ 关闭串口（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（端口/日志保持连接），改 `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)`——重开标签页从零开始新一轮输出。批量关闭先用 `getClosingTabIds(tabId, scope)` 取出 store 关闭动作**同一集合**，再逐个跑同一条清理链。
-- `releaseTerminalState(portId)`（`src/stores/releaseTerminalState.ts`）是关标签 / 关端口的**统一回收入口**：一次清掉 `useTerminalStore.terminals` 条目、该端口的 `useSystemStore.trafficStats`（经聚合器的 `release`，连同尚未 flush 的本地累计）、`useSerialSend` 的 per-port TX 历史。关闭路径有多条（单个关闭、关闭左/右/其它），任何一条漏调都会留下幽灵端口——放在 store 层而非组件里，让「标签消失 = 三处数据一起消失」成为不变量。触发点是**关标签**而非断连：断连后标签仍在，编码/滚动锁要跨重连保留。
-- **TTY 标签常驻挂载**：Pane 对当前 Pane 内所有 TTY 标签各渲染一个 TtyView（非活动 `display:none`），TRX 标签照旧只在展示时挂载（缓冲在 manager，无实例生命周期）——见 tty.md。
+- `TabItem = SerialTabItem | PluginTabItem`：公共 `id` 是工作区 UUID，`paneTree`、`activeTabId`、拖拽、固定和关闭动作都引用这个 UUID，不再把端口号当作标签身份。串口标签为 `{ kind: 'serial', portId, ... }`；插件标签为 `{ kind: 'plugin', pluginId, installGeneration, viewId, boundPortId, instanceKey, restoreOnStartup, ... }`，其中 `boundPortId` 可为 `null`。
+- `openTab(portId)` 只查找或创建该端口的串口标签，并返回工作区 UUID；额外插件标签不占用这个串口标签身份。串口连接、收发管线、TTY、流量和发送历史仍按 `portId` 索引。显式目标用目标端口；活动目标由 `getActivePortId` / `getTabPortId` 解析，无端口工具页返回 `null`，绝不回退到上一次活动串口。
+- TabBar 右键菜单的「打开/断开所有标签页」解析全局标签的端口并去重，跳过无端口工具页，顺序执行并按 100ms 节流；外部工具入口与侧边栏共用 `usePortToolActions`。
+- **关闭标签页 ≠ 关闭串口**：关闭一个插件标签只退休该视图实例与输入订阅，不关闭原始串口标签、同端口其他插件标签或物理连接；关闭原始串口标签也不终止仍在消费该端口的插件视图。后端日志独立于标签继续运行。批量关闭用 `getClosingTabIds(tabId, scope)` 取得与 store 动作一致的集合。
+- 串口标签关闭时 `Pane.cleanupClosedTab` 按 `portId` detach TTY、释放 viewport 并丢弃原始终端待显示队列；移除标签后经 `releaseUnusedPortState(portId)` 检查剩余消费者。只有没有串口标签、绑定视图或相关行消费者时，才回收该端口的终端显示状态、流量累计与 TX 历史；不会因关掉一个视图破坏其他消费者。断开串口不是同一回收动作，仍存标签的编码等显示态可跨重连保留。
+- **TRX 与 TTY 都由稳定的 `SerialContentHost` 持有**：宿主在变化的 Pane 树之外，按串口标签 UUID 渲染 `TerminalView` / `TtyView`；Pane 中的 `PluginViewSurface` 只上报内容区坐标与可见性。切标签、分屏拖动或选择插件显示时隐藏原始内容层，不因 Pane 的挂载变化重建串口组件；关闭标签、弹出或切换 TRX/TTY 模式仍可能结束相应实例。
+
+### 插件显示与独立工作区标签
+
+- 串口标签顶部「显示方式」可选「原始终端」或声明了 `serial-content` 的插件视图，只替换内容区，不改变端口参数与串口标签身份。顶部「在新标签中打开…」可创建声明了 `workspace-tab` 的独立视图，固定绑定当前明确端口，允许原始终端与表格、波形同时存在。
+- 主显示区的「打开插件工具页…」列出可无端口运行的工作区视图；这类标签不隐式绑定当前或最近端口。插件侧边栏按钮、端口菜单也可经 Worker 请求打开视图。
+- 插件标签标题旁显示宿主提供的插件 ID，内容工具栏显示插件 ID 与绑定端口（如有）；选择器以插件名与视图名标明来源。插件 HTML 不注入主窗口，而在独立原生 WebView 内运行；一个插件仍只有一个业务 Worker，各视图有独立会话与输入租约。
+- Worker `tabs.open` 按 `(pluginId, installGeneration, viewId, boundPortId, instanceKey)` 去重，重复打开返回已有标签。默认后台打开不抢焦点；请求前台打开或激活必须消费真实宿主用户操作产生的短时、单次、作用域匹配令牌。用户直接使用宿主选择器则直接前台打开；宿主创建入口不要求 `ui:tabs`，插件 Worker 自主管理标签才要求该权限。用户关闭的同一实例键不能被后台请求立即重新打开，显式用户打开或有效前台动作可以再打开。
+- 禁用、撤权、升级、缺失端口、模式不兼容或 UI/Worker 错误时，**独立插件标签**保留带来源与错误的不可用占位，可重试或关闭；**串口内容替换**回退原始终端并显示不可用提示与重试按钮，保留用户原选择供排错。切回「原始终端」才显式清除该偏好。
+- 串口显示偏好落在 `config.portMeta[].displayView`，内容仅为 `{ pluginId, installGeneration, viewId }`，随端口元数据自动保存，和会话恢复开关独立。额外插件标签只在开启「启动时恢复上次会话」且声明允许恢复时，把标签描述符与 Pane 布局写入会话快照；不保存解析模型、输入历史、打开参数、操作令牌或原生句柄。启动恢复重新核对安装代次、授权、视图和端口，不能恢复授权，不能自动连接串口。
+- 插件工作区标签与生效中的插件串口显示均禁止弹出；回退或手动切回原始 TRX 终端后，可按既有终端弹出规则操作，TTY 仍禁止弹出。
+- 当前只有 **Windows 原生适配器**实现隔离视图；其他平台在原生创建入口明确拒绝，不使用 iframe 或主窗口 HTML 降级。跨平台隔离策略验收仍是开放对应平台的发布门禁，不代表已完成全平台或完整安全验收。
+
+用户操作见[设置：插件视图与工具标签](../userwiki/设置.md#插件视图与工具标签)，作者 API 见[插件开发指南](../plugin-development.md)，可运行示例见[Sensor Workspace](../../examples/plugin-views-demo/README.md)。
 
 ## 弹出体系（popout，issue #10）
 
@@ -50,7 +65,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 |---|---|---|---|
 | `command-sets:changed` | 主窗 → 快捷发送窗 | **完整 `SendCommandSet[]`** | 命令集改动后弹窗直接 `setSets(载荷)`（曾是无载荷信号回库重读——未保存编辑只存在于主窗 store，弹窗读不到；改为主窗 store 是唯一真相） |
 | `popout:command-set-updated` | 弹窗 → 主窗 | `{ set: SendCommandSet }`（整集） | 弹窗里改了命令集则**整集回传**，主窗写回 `useRuleStore` 活实体（弹窗本地不持有可写副本；主窗之后经 `command-sets:changed` 广播回所有弹窗） |
-| `active-tab:changed` | 主窗 → 快捷发送窗 | `portId` | 弹窗知道发送到哪个端口 |
+| `active-tab:changed` | 主窗 → 快捷发送窗 | `portId: string \| null` | 弹窗知道发送到哪个明确端口；无端口工具页为 `null`，不沿用旧目标 |
 | `port-statuses:sync` | 主窗 → 弹窗 | 全部端口连接状态 | 对表时全量回放（实时增量走 `serial:status` 广播），弹窗在已连接状态下打开时提示灯即刻准确 |
 | `serial:data` | 后端 → 所有窗 | 字节流 | 终端弹窗订阅（主窗与弹出窗各自模块单例） |
 | `popout:terminal:request-snapshot` | 弹窗 → 主窗 | `portId` | 终端弹窗挂载时请求历史（request → reply，避免竞态） |
@@ -60,7 +75,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 | `popout:request-sync` | 弹窗 → 主窗 | 无 | 弹窗监听器**注册就绪后**请求对表，主窗回放 active-tab + command-sets + port-statuses |
 | `ui-scale:changed` | 主窗 → 已打开弹窗 | `{percent}` | 设置保存成功后同步软件 UI 缩放；弹窗自己启动时先读 config.json 并缩放各自 WebView |
 
-- 发送：弹窗直接 `invoke('send_data')` → 共享 AppState → 后端 emit serial:data → 主窗 useSerialReceive 自动写终端——**发送→回显链路天然跨窗口**。弹窗发送经 `popout:send-command` → 主窗 `sendToPort(payload.portId ?? activeTabId)`（显式 portId 优先；模块级 sendToPort，TX echo/流量/历史工作）。
+- 发送：弹窗直接 `invoke('send_data')` → 共享 AppState → 后端 emit serial:data → 主窗 useSerialReceive 自动写终端——**发送→回显链路天然跨窗口**。快捷发送弹窗经 `popout:send-command` → 主窗 `sendToPort(payload.portId ?? getActivePortId(state))`（显式端口优先；解析结果为空时不发送；TX echo/流量/历史仍按端口处理）。
 - `usePopoutBridge` 全部 fire-and-forget emit 补 `.catch`（弹窗销毁时 rejection 不再 unhandled）。
 - 主窗在 store 变更时广播 `command-sets:changed` / `active-tab:changed`；对表必须等监听器注册完成后再发 `popout:request-sync`，否则回放会早于监听器到达而丢失（指示器失真）。
 
@@ -86,9 +101,10 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## 通知中心 / toast
 
-- `useToastStore` + `StatusBar/NotificationCenter.tsx`：`durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列（**不丢弃**，面板按 `createdAt` 倒序合并展示 toasts + stashed）；`clearAll()` / `setCenterOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`（badge 上限 99+），外点 / Escape 关闭由共享 `shared/useOutsideDismiss` 提供。
+- `useToastStore` + `StatusBar/NotificationCenter.tsx`：宿主 `push` 的 `durationMs === 0` 为粘滞（Toast.tsx 跳过自动关闭计时）；可见栈最多 5 条，已接纳通知超出后进入 `stashed`，面板按 `createdAt` 倒序合并展示。`clearAll()` 清空两队列；铃铛 badge 上限 99+，外点 / Escape 关闭由共享 `useOutsideDismiss` 提供。
 - `ToastItem.portId?`（issue #7-1）：串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行渲染 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳（`createdAt` push 时打点）。
-- 面板尺寸：`.notify-panel` 360×400px（issue #6-7）。
+- 插件通知必须经 `pushPlugin(pluginId, input)`，不能借宿主 `push` 绕过配额；`ToastItem.pluginId` 由宿主赋值，不接受插件伪造。插件速率、文本和积压上限见[开发指南](../plugin-development.md#限制与错误处理)；超额静默丢弃，不逐条生成错误通知。宿主/串口粘滞记录不因插件配额被移除。
+- 面板几何以 `styles/notification-center.css` 的 `.notify-panel` 为准：宽 360px、最大高度 400px，不是固定高度。
 
 ## 状态栏
 

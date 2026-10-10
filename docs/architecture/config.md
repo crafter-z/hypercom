@@ -4,9 +4,9 @@ config.json 实体模型与向前兼容口径、会话快照、6 个 Zustand sto
 
 ## config.json（单一事实来源，2026-08 迁移）
 
-SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体）的唯一事实来源**。
+SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体）的持久化事实来源**。会话快照独立保存在 `session.json`，插件私有 KV 独立保存在 `plugins/<id>/data/state.json`，二者不属于配置导出 bundle。
 
-`AppConfig` 共 **47 个字段 = 46 个标量 + `#[serde(flatten)] entities: Entities`**（整体 `#[serde(rename_all = "camelCase")]`）。`Entities` 是 **9 个 `Vec` 实体数组**；`#[serde(flatten)]` 保证 **config.json 线格式零变化**：9 个实体仍是 config.json 的**顶层 key**。
+`AppConfig` 共 **47 个字段 = 46 个普通配置字段 + `#[serde(flatten)] entities: Entities`**（整体 `#[serde(rename_all = "camelCase")]`）。`Entities` 是 **9 个 `Vec` 实体数组**；`#[serde(flatten)]` 使这些实体作为 config.json 的**顶层 key**，而非嵌套在 `entities` 对象中。普通字段包含数值、字符串、布尔值和预设波特率数组。
 
 | 实体 | `Entities` 字段 | config.json 顶层 key | 前端对应 |
 |---|---|---|---|
@@ -18,23 +18,25 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 | PortToolConfigEntry | `port_tool_configs` | `portToolConfigs` | 外部工具配置 |
 | PortGroupEntry | `port_groups` | `portGroups` | 串口分组（issue #2-3，整体替换） |
 | PortMetaEntry | `port_meta` | `portMeta` | 端口元数据：备注名/隐藏/mode；当前枚举端口的编辑覆盖其条目，未插入设备的条目保留 |
-| PluginConfigEntry | `plugin_configs` | `pluginConfigs` | 插件启用态 / 授权（插件私有 KV 独立存放） |
+| PluginConfigEntry | `plugin_configs` | `pluginConfigs` | 插件安装身份 `installGeneration` / 启用态 / 授权（插件私有 KV 独立存放） |
 
-46 个标量（`updateCheckMode`、`diagLogEnabled`、`language`、`theme`、`uiScalePercent`、`backgroundImage*`、`quickSendInlineCount` 等）与 `entities` 同层，随 `...config` 展开流过全量保存。两层各自只有一种语义：实体只有 CRUD（`commands/storage.rs`），标量只有默认值 + 收敛（`impl Default` / `validate_and_clamp`）。
+46 个普通配置字段与实体数组同层。默认值和范围收敛位于 `config/mod.rs`；规则实体 CRUD 位于 `commands/storage.rs`，插件安装、启停和授权另由 `commands/plugin.rs` 管理，不能按普通规则实体写入插件状态。
 
 ### 向前兼容与 schema：没有版本字段
 
-**没有版本字段，也没有版本分派**。曾有一个「每次保存都无条件重写为 1」的版本字段，它既不参与分派也不影响解析（旧值被 serde 当未知字段丢弃），已删除。向前兼容只靠两件事：
+**没有 `configVersion` 字段，也没有版本分派**。兼容旧配置分三类处理：
 
-1. **serde 容器级 `#[serde(default)]`**：`AppConfig` 与 `Entities` 都带（缺字段取 `impl Default` 的值），实体子结构再各自带字段级 `#[serde(default)]`——这是「旧文件缺新字段」的唯一迁移机制，也让默认值只有一个来源（字段级 `#[serde(default = "...")]` 与 `impl Default` 两份手抄曾不一致且无任何编译错误）。
-2. **解析前 `strip_legacy_memory_budget_keys`**：在 `serde_json::Value` 层**物理删除**已被取代的旧内存预算 key（`memoryLimitMb` / `memoryPerPortBudgetMb`）——纯粹的**升级兼容**，首次保存落盘后旧 key 即消失。输入非合法 JSON 时返回 `None`，调用方据此走 `.bak` 恢复。
+1. **缺字段**：`AppConfig` / `Entities` 的容器级 `#[serde(default)]` 和实体字段缺省提供默认值，不需要配置版本号。
+2. **废弃字段**：解析前由 `strip_legacy_memory_budget_keys` 物理剥离旧内存预算 key；非法 JSON 走 `.bak` 恢复。
+3. **插件安装身份**：`ConfigManager::new` 在磁盘事务恢复后，为缺失的 `installGeneration` 分配 UUID，保存配置并同步安全 `.bak`；这项一次性身份迁移会推进 revision，与缺字段取默认值不是同一种处理。
 
 ### 生命周期
 
 - 首启 `ConfigManager::new` 构造默认 `AppConfig`（空实体数组）；无数据库。
 - **配置文件路径解析顺序**（`ConfigManager::new`）：CLI `--config <path>` → `HYPERCOM_CONFIG` 环境变量 → 便携模式（可执行文件同目录下**已存在**的 `config.json`）→ 默认 `%APPDATA%/hypercom/config.json`（`dirs::config_dir`）。会话快照路径恒为配置文件同目录的 `session.json`。
 - 读取：先 `strip_legacy_memory_budget_keys`，再反序列化。失败则 `log::warn` 并回退 `.json.bak`（同样先剥离旧 key）；`.bak` 也不可用才用默认值——corrupt JSON 自动恢复。
-- `save()` **原子写**：tmp + rename；写前若目标文件已存在，先复制出 `.json.bak`。
+- 在插件 Worker 启动前恢复 `plugin-transaction.json` 所属磁盘事务；旧插件条目缺少 `installGeneration` 时分配 UUID、保存并同步安全 `.bak`。这是安装身份迁移，不是配置版本分派。
+- `save()`：计算下一 revision → 序列化并同步临时文件 → 单操作替换配置文件 → 同步父目录；失败不保留推进的内存 revision。普通保存先尽力复制旧配置到 `.json.bak`；插件安装清权、身份迁移及事务恢复另用 `save_safe_backup` 同步安全恢复副本，避免旧授权借配置损坏恢复。
 - `set_config()` = `validate_and_clamp()` → 替换内存 → `save()`；`get_config_mut()` 供 CRUD 命令直接改实体数组（同样落盘）。
 
 ### 数值边界：`CONFIG_BOUNDS` 是唯一来源
@@ -60,18 +62,18 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。
-- **注册漂移守卫**：`src-tauri/src/config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 解析 `lib.rs` 的 `generate_handler![...]` 命令名集合与全仓所有 `#[tauri::command]` 函数名比对，漏注册/多注册即失败。当前 `generate_handler!` 注册 **64** 个命令（本模块占 `config.rs` 5 + `storage.rs` 20）。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 的 `generate_handler!` 与命令定义，漏注册/多注册即失败。当前注册 **74** 个命令；配置域 5 个、规则存储域 20 个，插件域另有 9 个（含安装、启停、权限及 IO），契约见[插件模块](plugins.md#宿主命令与状态快照)。
 
 ## 6 个 Zustand Store
 
 | Store | 职责 | 纪律 |
 |---|---|---|
-| `useAppStore` | tabs / ports / `paneTree` / config / groups | config 实体数组是**启动快照**；树算法不在 store 内（已移到 `src/utils/paneTree.ts`，store 只留 action） |
+| `useAppStore` | tabs / ports / `paneTree` / config / groups | 规则实体数组是启动快照，普通设置是草稿；`pluginConfigs` 由后端 revision 排序快照刷新；树算法在 `src/utils/paneTree.ts` |
 | `useSystemStore` | `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`（含 `configReady`）+ `clearTrafficStats` | 高频写点集中地（5s 系统轮询 / 每端口 1s 流量 flush / 拖拽 resize），故必须与 `useAppStore` 分开 |
 | `useOperationStore` | serial params + send（**无 `op` 前缀**、无显示态字段）+ `cyclicLoops: Record<portId, boolean>` | 显示态不在此 |
 | `useTerminalStore` | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt） | 行缓冲在 viewportManager 环形缓冲区；无行数组、无 Immer、不随数据更新 |
 | `useRuleStore` | highlightRuleSets / sendCommandSets / protocolTemplates / triggerRules / portToolConfigs + CRUD | 规则编辑**实时态**（活实体，全量保存的权威来源） |
-| `useToastStore` | 通知队列（toasts / stashed + `notifyError` / `notifySuccess` / `notifyInfo`） | 全局通知出口，持久化失败经此上报 |
+| `useToastStore` | 通知队列（toasts / stashed） | 宿主走 `push` 保留通知；插件走 `pushPlugin`，身份由宿主赋值并应用速率/文本/积压限额，见[通知模块](workspace.md#通知中心--toast) |
 
 `useSystemStore` 由 `useAppStore` **拆出**（`systemStatus` / `trafficStats` / `simulationMode` / `ui`）：这些字段与端口/标签页的订阅者无关，混在一起会让每次流量 flush 都唤醒 Pane / OperationPanel / Sidebar 重跑选择器。另有 `releaseTerminalState.ts`（统一回收某端口的 terminals / trafficStats / TX 历史）与 `resetStores.ts`（测试用整份复位）。
 
@@ -87,6 +89,7 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 - `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。
 - 已接线处：`ConfigModal.handleSave`、`DiagnosticLogDialog` 的诊断开关（改 store 后 `saveConfig()`）。**新增全量保存点照抄此模式**——调 `saveConfig`，不要自己拼实体数组。
 - 实体页的**单条**保存（✓）不走全量保存：`src/components/ConfigModal/hooks/useEntityPage.ts` 是 5 个实体页共用的「load / dirty-track / save / delete」契约。要点：挂载即全量加载并替换 store（**除非**加载期间用户已改动；后端返回空列表也替换——跳过它正是「用户删过的实体在下次打开弹窗时复活并再次写回 config.json」的成因）；删除 = store 掉 + 后端删，失败必 toast；`savedSnapshotRef` 记录最后已知持久化态，只在写成功后推进，写失败保持 dirty 并由下次编辑重试。
+- 插件不是五类规则页的实体：启停与权限动作立即独立持久化，取消设置仅回滚普通草稿，保留当前插件状态及 revision。备份导入只覆盖同安装身份的授权；导入中同 ID 不同身份清权禁用、未提及的当前插件保留，且不安装代码或迁移 KV。
 
 ## 配置读取/保存数据流
 
@@ -119,6 +122,7 @@ SQLite 层已整体移除——**config.json 是全部设置（标量 + 实体�
 |---|---|---|
 | `serial_manager` | `Arc<Mutex<SerialManager>>` | 异步命令经 `spawn_blocking` 时需从 State 克隆出 `'static` 句柄 |
 | `config_manager` | `Mutex<ConfigManager>` | 配置读写（含全部实体） |
+| `plugin_io` | `tokio::sync::Mutex<()>` | 串行化安装、卸载、授权、启停和一致列表扫描；普通资产 IO 以 FIFO 最多等待 2 秒，授权后再访问磁盘 |
 | `log_manager` | **`Arc<LogManager>`（无外层 `Mutex`）** | 写路径是 `&self` + 内部细粒度锁；再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与数据写入争同一把锁（高波特率下 RX 写入被拖住） |
 | `diag_logger` | `Arc<DiagLogger>` | 应用自身诊断日志（512KB 轮转、保留 3 份），开关取 `config.diagLogEnabled` |
 | `system_info` | `Arc<Mutex<sysinfo::System>>` | 增量刷新，避免 `new_all` 的每次高开销 |

@@ -22,7 +22,7 @@
 | `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool`; group execution `runToolForGroup` (issue #5-7). **Imports no components** (hook must not depend on the component layer): when a group has unconfigured ports it fills `toolDialog` state instead of rendering, and the caller (Sidebar) renders `GroupToolDialog` wired to `closeToolDialog` / `runToolDialogConfigured` / `configureToolFromDialog` |
 | `useHotkeys.ts` | `useHotkeys()` | App.tsx (once) | global keydown: Ctrl+L/K/B// + Escape; ignores non-Escape when focus is in a form field |
 | `usePowerManagement.ts` | `usePowerManagement()` | App.tsx (once) | mirrors `config.preventScreenOff` / `config.preventSleep` to the OS via backend commands |
-| `usePlugins.ts` | `usePluginHost()`, `usePluginList()` | App.tsx（宿主一次）/ PluginSettings | 等 `ui.configReady` 后从后端权威列表装配 Worker、RX 权限观察与启停；设置页逐插件串行权限切换、安装/升级刷新 UI 注册表。 |
+| `usePlugins.ts` | `usePluginHost()`, `usePluginList()` | App.tsx（宿主一次）/ PluginSettings | 等 `ui.configReady` 后装配安装身份绑定的 Worker、RX 权限观察与启停；快照按后端 revision 排序，权限点击绑定实际审阅的安装身份并逐插件串行，启用等待授权落盘；初次加载失败有界重试，刷新可恢复未运行会话。 |
 | `usePluginPanel.ts` / `usePluginUi.ts` | 面板与声明式 UI 订阅、`dispatchPluginUiClick` | PluginPanel / SidebarToolbar / SortablePortItem | 主窗 `useSyncExternalStore`，插件 UI 不进入 popout；工具栏与端口菜单点击发送 Worker 消息。 |
 | `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
 

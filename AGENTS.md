@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE — HyperCom
 
-**Generated:** 2026-08-06 · **Aligned to code:** 2026-09-25（重构后全量复核）· **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
+**Generated:** 2026-08-06 · **Aligned to code:** 2026-09-25（重构全量复核）；2026-10-10（插件契约与文档计数复核）· **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
 
 > **引用纪律**：本文只写「文件 + 符号名」，**不写行号**。行号随每次重构必然腐化，是上一轮审计整片漂移的根因。
 > **数字断言**（命令数 / 配置字段数 / i18n 键数 / hook 数 / store 数 / services 文件数）以代码为准；改动后需同步本文件。
@@ -8,7 +8,7 @@
 
 ## OVERVIEW
 
-HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。**6 个 Zustand store**；`src/hooks/` 有 **18 个 hook 文件**（15 个既有文件 + `usePlugins` / `usePluginPanel` / `usePluginUi`；另有 barrel `index.ts` 与 `disconnectTracking.ts`）。后端 **12 个命令域文件 + `CommandError`**，`lib.rs` 注册 **74 个命令**。`paneTree: PaneNode` 树算法在 `src/utils/paneTree.ts`；每标签显示态在 `useTerminalStore`。插件由主窗 `usePluginHost` 驱动 Worker，经调用时权限检查及后端路径防护访问宿主能力；交付契约见 `docs/architecture/plugins.md`。
+HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。**6 个 Zustand store**；`src/hooks/` 有 **18 个 hook 文件**（15 个既有文件 + `usePlugins` / `usePluginPanel` / `usePluginUi`；另有 barrel `index.ts` 与 `disconnectTracking.ts`；新 `usePluginViewOverlay` 位于 `components/shared/`，不计入此数）。后端 **12 个命令域文件 + `CommandError`**，`lib.rs` 注册 **78 个命令**。`paneTree: PaneNode` 树算法在 `src/utils/paneTree.ts`；端口显示态在 `useTerminalStore`。工作区标签为 UUID 标识的 serial/plugin 联合类型，不是端口 ID。插件由主窗 `usePluginHost` 驱动 Worker，原生视图由 `pluginViewRuntime` 管理；权限与平台验收边界见 `docs/architecture/plugins.md`。
 
 ## 当前架构
 
@@ -18,7 +18,7 @@ HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。**6 个 Zu
 
 ```
 src-tauri/src/
-├── main.rs / lib.rs      # entrypoint；lib.rs = AppState + generate_handler!（74 命令）+ setup
+├── main.rs / lib.rs      # entrypoint；lib.rs = AppState + generate_handler!（78 命令）+ setup
 ├── system.rs             # 跨平台电源管理：共享状态机骨架 + win32_backend / child_process_backend
 ├── diaglog.rs            # 应用自身诊断日志（512KB 轮转 × 3 份）
 ├── update_network.rs     # 升级专用HTTP期限与路由；update_network/windows.rs = WinHTTP异步PAC/WPAD + 环境/手动代理
@@ -29,8 +29,9 @@ src-tauri/src/
 │                         # naming.rs（路径模板/子目录/唯一化 allocate_file）/ assembler.rs（LogLineAssembler）
 │                         # writer.rs（PortLogWriter + 分片 decode_bytes）/ manager.rs（LogManager::apply_settings）
 ├── config/               # mod.rs（AppConfig + Entities(9) + CONFIG_BOUNDS + 插件路径/备份/会话快照）
-├── plugin/               # mod.rs（manifest 权威校验 / ID 和资产路径边界 / ZIP 限额）
-└── commands/             # mod.rs（CommandError）+ 12 个域文件
+├── plugin/               # mod.rs（有界 manifest / 路径边界 / ZIP 限额）+ transaction.rs（持久化事务及启动恢复）
+│   └── view_runtime/     # mod.rs（原生视图身份/授权/生命周期）/ resources.rs（声明资产快照）/ windows.rs（raw Wry）/ sdk.js
+└── commands/             # mod.rs（CommandError）+ 12 个域文件 + wire_shape.rs（纯测试契约）
 ```
 
 - **端口类别分派只有一个入口**：`serial::PortKind::of(port_id)`（`Real` / `Sim` / `Tty`）——Rust 侧**没有** `starts_with("GIT:")` 字符串分派（前端仅两处按 `portId.startsWith('GIT:')` 判定是否走 pty 路径：`ttyService.resize`/`resync` 推 pty 尺寸、`TtyView` 过滤 xterm 的 DSR 应答）。
@@ -46,8 +47,8 @@ src-tauri/src/
 ```
 src/
 ├── main.tsx / App.tsx        # entrypoints（App.tsx = AppInit + SerialReceive + 全局自定义文本右键菜单）
-├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），575 键 × zh-CN/en-US
-├── services/                 # 13 文件：tauri.ts barrel + 12 域（含 plugin）
+├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），586 键 × zh-CN/en-US
+├── services/                 # 14 个非测试文件：tauri.ts barrel + 13 域（含 plugin / pluginView）
 ├── hooks/                    # 18 个 hook 文件 + barrel index.ts + disconnectTracking.ts
 ├── stores/                   # 6 个 store 模块 + releaseTerminalState.ts + resetStores.ts
 ├── utils/                    # 纯函数与引擎（highlightEngine / protocolParser / triggerEngine / rxAssembler / rxPipeline /
@@ -69,12 +70,15 @@ src/
 | `utils/uiScale.ts` | `normalizeUiScalePercent` / `applyUiScale`——按当前 WebView 应用持久化 UI 缩放；调用 Tauri `getCurrentWebview().setZoom(percent / 100)` |
 | `utils/sequential.ts` | `runSequential<T>`——串行发送/循环的通用次序原语 |
 | `stores/useSystemStore.ts` | `systemStatus` / `trafficStats` / `simulationMode` / `ui` + `setSystemStatus` / `setTrafficStats` / `clearTrafficStats` / `setSimulationMode` / `setUIState` / `toggleConfigModal` / `setConfigActiveTab`——**从 `useAppStore` 拆出** |
-| `stores/releaseTerminalState.ts` | `releaseTerminalState(portId)`：统一回收该端口的 terminals / trafficStats / TX 历史（`useTerminalStore.releaseTerminal` 只应由它调用） |
+| `stores/releaseTerminalState.ts` | `releaseUnusedPortState(portId)`：最后一个显示/行消费者退休后才回收 terminals / trafficStats / TX 历史；`releaseTerminalState` 委托同一守卫 |
 | `ConfigModal/hooks/useEntityPage.ts` | 5 个实体页（高亮/命令集/协议模板/工具配置/触发规则）共用的 load / dirty-track / save / delete 契约（挂载全量加载并替换 store，除非加载期间用户已改动；`savedSnapshotRef` 为最后已知持久化态） |
 | `OperationPanel/hooks/useSequentialSend.ts` | **循环发送两套状态机合一**（原弹窗侧与面板侧的分叉已消除） |
 | `OperationPanel/hooks/{useHexCompose,useFileSend,useQuickStripLayout,useSendHistoryRecall}.ts` | HEX 组包 / 文件发送（守卫 + TX 统计）/ 快捷条宽度自适应（`utils/sendStrip.ts` `computeFitCount`）/ 发送历史回溯 |
 | `shared/{useOutsideDismiss,useDragResize,menuPlacement}.ts` | 三个共享交互原语：外点关闭 / 拖拽调整尺寸 / 菜单定位（勿在各组件内手写第五份） |
 | `Popout/{usePopoutSync,usePanelTextConfig,usePortSerialFeed}.ts` | 弹窗↔主窗同步（命令集/活动标签/端口状态事件总线）/ 面板文本配置 / 终端弹窗 RX 喂入（快照交接 + 时间戳闸门防重复） |
+| `shared/usePluginViewOverlay.ts` + `utils/pluginViewOverlay.ts` | `usePluginViewOverlay` / `acquirePluginViewOverlay`：先等待原生子视图隐藏，再显示宿主 DOM 浮层；不属于 `src/hooks/` 的 18 个 hook 文件 |
+| `MainDisplay/SerialContentHost.tsx` + `utils/tabContentPlacement.ts` | 原始 TRX/TTY 实例由分屏树之外的稳定宿主拥有，按 workspace tab UUID 保持身份；切标签、跨分屏移动与插件替换只改变位置/可见性 |
+| `utils/pluginViewRuntime.ts` / `pluginViewInput.ts` / `pluginViewJson.ts` | 原生视图会话、Worker/UI 状态 ACK、固定端口输入租约与有界 JSON；`services/pluginView.ts` 为四个原生命令及消息事件的 IPC 门面 |
 
 ### 单一来源（single source of truth）
 
@@ -83,7 +87,7 @@ src/
 | 数值边界（字号/行数上限/分片大小/图片不透明度…） | Rust `config/mod.rs` 的 `pub const CONFIG_BOUNDS: &[(&str, i64, i64)]`；`validate_and_clamp` 经 `clamp_bound(name, …)` 查表（散落的 clamp 字面量已删） | 前端 `src/utils/bounds.ts` 镜像；`src/utils/bounds.test.ts` 用 `?raw` 解析 Rust 源文本，断言两侧键集合与数值逐项相等；`uiScalePercent` 范围 80–200、默认 100 |
 | UI 缩放 | `AppConfig.ui_scale_percent` / `CONFIG_BOUNDS`；前端 `src/utils/uiScale.ts` | `applyUiScale` 对当前 WebView 调用 `setZoom(uiScalePercent / 100)`；与 `terminalFontSize` / `uiFontSize` 分离，无 CSS transform；已打开 popout 经 `ui-scale:changed` 更新 |
 | 全量配置保存 | `useConfigPersistence.saveConfig(patch?)` 以最新后端 `revision` + 活实体生成候选快照；后端 `set_config_if_revision` 在配置锁内 CAS 冲突拒绝并重试重组 | 规则 CRUD 及插件授权落盘不会被跨异步旧快照回滚，五次失败返回 false、不关闭设置窗 |
-| 插件授权与启用态 | `ConfigManager` 的 `entities.plugin_configs`；`set_config` 在 `plugin_io` 锁内保留当前后端数组，唯备份导入显式 `restorePluginConfigs: true` 整体恢复 | `utils/pluginConfigSnapshot.ts` 的 `syncStorePluginConfigs` 更新运行镜像并使旧列表失效；升级禁用并清授权，KV 在插件私有文件 |
+| 插件授权与启用态 | `ConfigManager.entities.plugin_configs`；`installGeneration` 唯一标识已安装代码，启用/授权需 `expectedGeneration` | 变更和列表返回 `{revision, pluginConfigs}`，`pluginConfigSnapshot` 拒绝旧响应；升级禁用清授权，备份仅同安装身份可恢复权限，KV 读失败不覆盖数据 |
 | 日志设置 | `LogSettings::from_config` + `LogManager::apply_settings` | 无第二条同步路径 |
 | 解码（bytes→文本） | `src/utils/lineText.ts` 的 `createDecoder` / `decodeBytes`（唯一 TextDecoder 工厂 + 模块级按 label 缓存，`ignoreBOM: false`） | `ttyService` 的流式解码器由同一工厂构建（持残字节故 per-port 独占） |
 | bytes→HEX | `src/utils/hexFormat.ts` | 全仓唯一实现 |
@@ -97,8 +101,12 @@ src/
 4. **弹窗改命令集经 `popout:command-set-updated` 整集回传主窗**，写回 `useRuleStore` 活实体。
 5. **全量保存走安全快照 + CAS**：`saveConfig(patch?)` 每轮读后端 `revision` / `portPresets`，从 `useAppStore`（标量 + groups）+ `useRuleStore`（5 个活实体）+ `mergePortMeta(ports, persisted.portMeta)` 拼装；在线端口编辑权威，离线端口原有备注/隐藏/TTY 设置保留；自动保存 `saveCurrentPortMeta` 同样以最新后端配置做 revision CAS，并与本窗全量保存串行化。规则 CRUD 的后端更新不被旧快照回滚，五次冲突后返回 false。旧 `mergeLiveRuleEntities` / `utils/configMerge.ts` 已删。
 6. **TTY 无本地回显**：`sendToPort` 的 TTY 分支跳过 TX 回显与 `flushNow`（仍走后端发送/流量统计/历史）；pty 写做回车归一（`\r\n` → 单个 `\r`）。
-7. **关闭标签页保留串口连接**：`Pane.cleanupClosedTab` → `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)`；批量关闭先用 `getClosingTabIds(tabId, scope)` 取同一集合，两处不会漂移。
+7. **关闭标签页保留串口连接**：`Pane.cleanupClosedTab` 先 `dismissPluginTab(tabId)`；serial 标签按 `tab.portId` detach TTY、释放 stock viewport 并 `discardTerminalQueue`。store 移除标签后调用 `releaseUnusedPortState(portId)`，仅最后一个显示/行消费者退休才回收共享元数据与行管线；不伪造断线。批量关闭用 `getClosingTabIds(tabId, scope)` 取同一集合。
 8. **持久化 UI 缩放**：`uiScalePercent` 默认 100%，范围 80–200%，独立于 `terminalFontSize` / `uiFontSize`。`App.tsx` 在 `configReady` 后、`PopoutShell.tsx` 从 config.json 加载配置后分别调用 `utils/uiScale.ts` 的 `applyUiScale`；`ConfigModal.handleSave` 只有 `saveConfig` 成功才应用新值，并经 `ui-scale:changed` 同步已打开的弹出窗。原生 `getCurrentWebview().setZoom(percent / 100)` 只改变当前 WebView，不使用 CSS transform。
+9. **工作区身份与发送目标分离**：`TabItem = SerialTabItem | PluginTabItem`，两类 `id` 均为 UUID；serial 的 `portId`、plugin 的固定 `boundPortId` 才是端口身份。`getTabPortId` / `getActivePortId` 显式解析，未绑定插件标签返回 null，绝无“上次串口”回退。普通发送使用显式端口；循环启动时固定目标，不随聚焦漂移；视图 `view.sendSerial` 仅发送到绑定端口并检查 `serial:send` / whitelist。
+10. **输入消费者决定行处理生命周期**：`pluginViewInput` 的独立租约与 legacy RX observer、serial 标签、启用的端口触发规则共同决定 `hasPortLineConsumers`。仅有触发规则时仍处理完整行/协议帧但不创建 stock viewport 队列；无行消费者则回收尾部定时器/解析器。退休一份租约不移除其他订阅，断线/模式变化通过 stream epoch 表达。
+11. **可选显示偏好**：`SerialPort.displayView` / `PortMetaEntry.displayView` 持久化插件身份、安装代次与 view；缺失/null 仍为原始终端。插件 workspace tab 的恢复受声明与安装身份约束，偏好不是授权，也不代替当前可用性检查。
+12. **原生平台与剪贴板边界**：当前仅 Windows `plugin/view_runtime/windows.rs` 实现 raw Wry 子控件；无 Tauri 初始化/IPC、独立临时浏览器上下文。其他平台明确拒绝创建，须完成原始发布门再开放，禁止 iframe 回退。允许真实用户原生 copy/cut 是已批准的例外；直接异步 clipboard read 仍拒绝，通用 Worker clipboard 宿主 API 的授权规则不变。实现存在不等于安全验收完成或可发布；原生安全矩阵仍是发布门。
 
 ## STRUCTURE
 
@@ -106,8 +114,8 @@ src/
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
-│   ├── i18n.ts                   # 575 keys × zh-CN/en-US
-│   ├── services/                 # tauri.ts barrel + 12 domain files
+│   ├── i18n.ts                   # 586 keys × zh-CN/en-US
+│   ├── services/                 # 14 non-test files = tauri.ts barrel + 13 domain files
 │   ├── hooks/                    # 18 hook files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 6 store modules (no god store; useTerminalStore 已去 Immer)
 │   │   ├── useAppStore.ts        # tabs / ports / paneTree / config / groups + actions（无树算法、无 system/ui 状态）
@@ -126,14 +134,14 @@ hypercom/
 │   ├── main.rs, lib.rs           # entrypoint + AppState + command registration + setup
 │   ├── system.rs                 # 电源管理共享骨架 + win32_backend / child_process_backend
 │   ├── diaglog.rs                # 应用自身诊断日志（全局 log::Log，落盘 + 轮转 + 读/清/追加）
-│   ├── commands/                 # 12 domain files + mod.rs (CommandError enum + re-exports)
+│   ├── commands/                 # 12 command domains + mod.rs + test-only wire_shape.rs
 │   ├── serial/                   # mod / codec / events / ports_real / ports_sim / ports_tty / tty_sim
 │   ├── logger/                   # mod / settings / naming / assembler / writer / manager
-│   ├── plugin/mod.rs             # manifest / zip 校验、安装目录边界
+│   ├── plugin/                   # mod.rs / transaction.rs + view_runtime/{mod.rs,resources.rs,windows.rs,sdk.js}
 │   └── config/mod.rs             # config.json + Entities(9 数组) + CONFIG_BOUNDS + session.json
 ├── docs/                         # design & architecture docs (see "Key design reference" below)
-│   ├── architecture/             # README 索引 + serial/terminal/tty/transmission/logging/config/workspace/update/release/errors
-│   └── userwiki/                 # 面向普通用户的说明文件（暂空）
+│   ├── architecture/             # 功能模块索引、插件契约、发布验收及其他架构说明
+│   └── userwiki/                 # 面向用户的快速入门、功能手册和插件操作说明
 └── .github/workflows/            # ci.yml（push/PR 质量门）+ publish.yml + publish-preview.yml
 ```
 
@@ -144,7 +152,7 @@ hypercom/
 | Add frontend state field | `src/stores/use{App,Operation,Terminal,Rule,System}Store.ts` | pick correct store only; god store is deprecated |
 | Add Tauri command | `src-tauri/src/commands/<domain>.rs` + register in `lib.rs` `generate_handler!` | return `Result<T, CommandError>`, NOT `String`；漂移守卫测试会核对注册 |
 | Cross `.await` lock | extract + clone + drop the `MutexGuard` first | see pattern in `commands/log.rs`；`log_manager` 是 `Arc<LogManager>`，不需要锁 |
-| Add serial hook | `src/hooks/<hookName>.ts` + export from `index.ts` | 15-hook 家族 + 各自的清理生命周期；do not revive `useSerialData`-style |
+| Add serial hook | `src/hooks/<hookName>.ts` + export from `index.ts` | 18 个 hook 文件各自拥有生命周期（含 3 个插件 hook 文件）；do not revive `useSerialData`-style |
 | 应用自身诊断日志 | `src-tauri/src/diaglog.rs` + `commands/diag.rs` + `src/utils/diagLog.ts` + `shared/DiagnosticLogDialog.tsx` | 后端 `log::*` + 前端 `console.*`（`setupDiagLogCapture` 拦截转发）统一落盘 `%APPDATA%/hypercom/diag/hypercom-debug.log`（512KB 轮转保留 3 份）；查看入口在「关于 → 诊断日志」，开关 `config.diagLogEnabled` |
 | Split pane recursively | `useAppStore.splitPane` action | NO flat `state.panes` anywhere |
 | Pane tree traversal | `src/utils/paneTree.ts`（`findLeafById` … `countLeaves`；批量关闭集合 `useAppStore.getClosingTabIds`） | do not hand-roll tree walks |
@@ -158,7 +166,7 @@ hypercom/
 | Multi-encoding | backend `encoding_rs::GBK`（**仅日志文件写出编码**）, frontend `src/utils/lineText.ts` + `setTerminalEncoding` | `serial:data` 载**原始字节**（`Vec<u8>`），前端按 encoding label 惰性解码：RX 行只存 `rawData`，渲染/搜索/过滤/复制在读取该行时才解码（`ignoreBOM: false`）。切换编码只改 label，无存量行遍历、无需清解码器缓存 |
 | RX 高频接收管线 | `src/utils/rxAssembler.ts` + `rxPipeline.ts` | 字节级行聚合（CR/LF/跨事件 CRLF/4KB 强制发射）+ rAF 批写 + 250ms 静默 flush（时间戳=最后事件时间）+ `maxLinesPerTick`（每端口每帧最多 2000 行；`flushNow` 单次最多一批）+ `flushBeforeSend` 时序/断线/编码边界完整排空 + visibility-aware 排空（隐藏时 setTimeout 兜底）+ 每端口队列上限 10000；尾行/协议帧也通知 RX 行触发器；`getRxPipeline()` 每 webview 单例，cleanup 不得 dispose |
 | TTY 模式管线 | `src/utils/ttyService.ts` + `TtyView.tsx` | 流式 UTF-8 解码 → 每端口有界队列 → visibility-aware 批写 xterm；TTY TX 10ms/64KiB 合批，**按端口上一批 IPC 完成后再发送下一批**，跨端口独立，detach 收尾、disconnect 使未发旧批失效；TX 不经 `sendToPort`（无本地回显） |
-| TTY 视图 / 渲染分流 | `TtyView.tsx` + `Pane.tsx` | `Pane` 对当前 Pane 内**所有 TTY 标签常驻挂载** TtyView（xterm + FitAddon，ResizeObserver + rAF 防抖 fit，onData→`ttyService.send`、onResize→`ttyService.resize`），非活动标签传 `hidden` → `.tty-view-hidden`（display:none），恢复可见显式 re-fit——**会话跨标签切换保留**；TRX 标签照旧只在展示时挂载 TerminalView；`displayPort?.mode !== 'tty'` 才渲染 TerminalView；TTY 端口阻止弹出窗（`Pane.handlePopOut` 提示 `tty.popoutUnsupported`，弹出窗是独立 webview 不共享 ttyService/xterm 实例） |
+| TTY 视图 / 渲染分流 | `TtyView.tsx` + `SerialContentHost.tsx` + `PluginViewSurface.tsx` | TRX/TTY 原始实例由分屏树外 `SerialContentHost` 常驻拥有，按 tab UUID 定位；非活动或插件替换时 hidden，恢复可见 re-fit，跨分屏移动不重建实例。TTY 仍不支持终端 popout（独立 webview 不共享 ttyService/xterm） |
 | 模式开关（TRX/TTY） | `OperationPanel/ParamsSection.tsx` + `useAppStore.setPortMode` | 分段控件写 `port.mode`（经 `port_meta` 持久化）；切换副作用=清 TerminalStore + `getRxPipeline().flushAndReset` + `ttyService.clear`，避免旧模式 buffered 数据混入新模式首屏 |
 | 内存上限 / 终端缓冲裁剪 | `utils/terminal/TerminalBuffer.ts` + `viewportManager.ts` + `config.maxDisplayLines` + `rxPipeline.ts` | `maxDisplayLines`=每端口终端最大显示行数（默认 100000，由 `CONFIG_BOUNDS` clamp [1000,1000000]）；缓冲超限**逐行覆盖最旧**（滚动窗口）；无字节预算/软兜底/内存裁剪 toast。前端 `defaultConfig.maxDisplayLines` 与 Rust `AppConfig::default` 两侧同步 |
 |日志保存子目录 / RX 日志行组装|`logger/manager.rs` + `logger/assembler.rs` + `logger/naming.rs` `subdir_component` + `config/mod.rs` `log_subdir_mode` + `LogSettings.tsx`|`logSubdirMode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 date）→ 路径 join（create_dir_all）+ `LogManager::list_files` 递归（`MAX_LIST_DEPTH`）；RX 日志经 `LogManager::write_rx` + `LogLineAssembler` 字节级组行（镜像前端 rxAssembler，250ms 陈旧尾 flush），不再按读取块一行 |
@@ -166,7 +174,7 @@ hypercom/
 | 滚动锁定 / 快捷跳转 | `TerminalView.tsx` + `utils/followLogic.ts` + `.terminal-jump-btn` | `scrollLocked` 仅由图钉按钮/跳转按钮/手势 settle 写入，**无 onScroll 隐式解锁**；跟随路径由 `TerminalRenderer` **同帧钉底**（render() 内写 scrollTop，无 React effect、无双 rAF 链；搜索栏打开时 followEnabled=false 抑制）；settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom` / `shouldFollow`（钉底目标值在 renderer 内联计算，无第二份纯函数拷贝）；到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)` / `scrollToBottom()`（方案B 已无第三方虚拟化）；跳转按钮钉在滚动条两端（到顶解锁、到底锁定跟随） |
 | DisconnectBanner | `src/components/StatusBar/DisconnectBanner.tsx` + `hooks/disconnectTracking.ts` `isPortLost`/`filterLostTabIds` | suppresses startup false alarm for session-restored tabs |
 | Conditional triggers | `src/utils/triggerEngine.ts` + `useRuleStore.triggerRules` + `ConfigModal/pages/TriggerSettings.tsx` + `StatusBar/NotificationCenter.tsx` | pattern match (contains/exact/regex/hex) → alert/auto-respond; per-port via `portId` (empty=all); **wired in `useSerialReceive`**; alert 是 sticky toast 显示 `rule.actionContent`（`durationMs:0` 不自动关闭，标题带端口/规则上下文）；规则 300ms 防抖逐条自动落盘 |
-| 通知中心 / toast | `src/stores/useToastStore.ts` + `src/components/StatusBar/NotificationCenter.tsx` | `durationMs === 0` = 粘滞（Toast.tsx 跳过自动关闭计时）；超过 `MAX_VISIBLE=5` 进 `stashed` 溢出队列不丢弃；`clearAll()` / `setCenterOpen` + `centerOpen`；铃铛+badge 挂 StatusBar `.statusbar-right`，外点/Escape 关闭，样式 `notification-center.css`；`ToastItem.portId?`——串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行显示 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳 |
+| 通知中心 / toast | `src/stores/useToastStore.ts` + `StatusBar/NotificationCenter.tsx` | 宿主 push 保留粘滞/溢出通知，插件只能走 pushPlugin（宿主赋 pluginId 并施加速率、文本及积压限额）；详情见 `docs/architecture/plugins.md`。串口来源带 portId，面板显示时间戳与端口 chip |
 | Add translation | `src/i18n.ts` | add key under `zh-CN` and `en-US`; don't translate protocol acronyms (None/Even/Xon/RTS/GBK/...)；`src/i18n.test.ts` 断言双侧键集合相等、顺序镜像、无重复、非空、占位符一致 |
 | Loopback virtual port | `useSimulation` hook + `commands/simulation.rs` | flask icon in sidebar toolbar |
 | 自动更新（issue #12） | `commands/update.rs` + `update_network.rs` / `update_network/windows.rs` + `hooks/useAutoUpdate.ts` + `utils/updateService.ts` + `shared/UpdateDialog.tsx` | stable GitHub latest；preview=max(preview, stable)。`getCommittedUpdateMode` / `commitUpdateMode` 与设置草稿隔离，generation/epoch拒绝迟到结果，`runAutoCheck()`同意图去重、新通道不被旧请求吞掉；7天周期与snooze（空账也暂停），6h重评估。`beginUpdateInstall`冻结候选，下载累计字节、验签后才install；X/遮罩/稍后统一延期，永不提醒仅后端CAS单字段保存成功才提交/关闭。API/清单15s、连接10s、下载空闲30s/总15min；Windows逐URL WinHTTP PAC/WPAD10s取消、手动分协议/SOCKS/环境代理/绕过，TLS验证不关闭。发布两流预建draft，矩阵只上传资产，`scripts/release.mjs`唯一汇总真实验签并写公开下载URL清单；preview验收后公开、stable验收后人工Publish。macOS仍禁用自动更新。详 `docs/architecture/update.md` / `release.md`。 |
@@ -182,7 +190,7 @@ hypercom/
 | 模拟终端 git bash | `src-tauri/src/serial/tty_sim.rs` + `serial/ports_tty.rs` + `commands/tty_sim.rs` + `hooks/useGitBashSim.ts` | 调试专用 GIT:BASH 虚拟串口——portable-pty（Windows = ConPTY）spawn 本地 git bash pty，pty stdout→`serial:data`（RX）、`send_serial_data`→pty stdin（TX）；`find_bash`/`spawn_bash`/`TtySimPortHandle`（writer/master/child/读线程）；`SerialManager` `gitbash_sim`/`tty_sim_ports` 字段 + `PortKind::Tty` 路由（open/send/write_raw/close/resize）；**打开时携带前端 xterm 尺寸**（`OpenPortArgs.cols/rows`，spawn 即正确尺寸，否则 pty 固定 80×24 致 vim/top 全屏错乱）+ 连接后 `ttyService.resync` 保险；**读线程应答 DSR**（`\x1b[6n`→`\x1b[1;1R`，`scan_dsr` 跨 chunk 检测）——bash/readline 启动时阻塞等终端应答，TRX 模式无终端模拟器，后端不应答则命令全部不执行；应答 **`\x1b[1;1R`（新建会话真实光标位置）而非终端尺寸**——按尺寸应答会把提示符画到右下角「命令行未正确显示」；TTY 模式由 xterm 自动应答，前端 TtyView 对 GIT: 端口过滤 xterm 应答防双响应；**断线关闭 drop master**（ClosePseudoConsole → 读线程解除阻塞）+ `close_serial_port` 异步 join（读线程永久阻塞时也不冻结 UI）；门控走 `dev_only()` / `is_debug_build()` + 前端 `import.meta.env.DEV` |
 | 终端搜索字符级高亮 | `terminalSearch.ts` `markSearchMatchesInHtml` | HTML tag/实体感知的 `<mark>` 叠加层，只在命中行应用；匹配计算**仅搜索栏打开时进行**，唯一实现在 `viewportManager.recomputeSearch`（新行 append 时匹配一次并入列，查询/编码变化才整缓冲重扫；头部裁剪只 bump offset）——无增量前缀缓存 |
 | First-run config creation | `config/mod.rs` `ConfigManager::new` | config.json created on first run with default `AppConfig` (empty entity arrays); no database |
-| Config schema & migration | `config/mod.rs`（容器级 `#[serde(default)]` + `strip_legacy_memory_budget_keys`） | **无 `configVersion` 字段、无版本分派**；旧 config.json 缺新字段 → 取 `impl Default`；已废的内存预算 key 在解析前物理删除 |
+| Config schema & migration | `config/mod.rs` `ConfigManager::new` / `strip_legacy_memory_budget_keys` | 无 configVersion / 版本分派；缺普通字段取默认值，废弃内存 key 解析前剥离；插件先恢复磁盘事务，再持久化补齐缺失 installGeneration |
 | Config path customization | CLI `--config` / `HYPERCOM_CONFIG` env / portable mode | resolution order in `ConfigManager::new` |
 | Config validation | `config/mod.rs` `validate_and_clamp()` + `CONFIG_BOUNDS` | runs on `set_config` to enforce bounds（边界只有一张表） |
 | Config backup / recovery | `config/mod.rs` `save()` writes `.bak` / `new()` falls back to `.bak` | corrupt JSON auto-recovered |
@@ -191,8 +199,8 @@ hypercom/
 | ConfigModal 框选不关闭 | `ConfigModal.tsx` | overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭（框选文字松手界外不再误关） |
 | 通知中心面板 / 快捷发送 pill 样式 | `notification-center.css` + `operation-panel.css` | `.notify-panel` 加宽加高；`.op-quick-cmd` flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称）在上、`.op-quick-cmd-content` 在下；`.notify-row-port`/`.notify-row-time`；`.op-quick-panel-btn` accent 填充按压按钮 + `.op-quick-panel-btn-label` |
 | 自定义文本右键菜单 | `src/components/shared/TextEditContextMenu.tsx` + `App.tsx` / `PopoutShell.tsx` | 输入框/文本域/可编辑区右键显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选，`contextMenu.*` i18n）；`useTextEditContextMenu()` document 级拦截——可编辑目标 `preventDefault` + 弹自定义菜单（右键时快照选区，点击项先恢复焦点+选区再 `document.execCommand`），非可编辑目标一律 `preventDefault`；App 根 + PopoutShell 各挂一次；组件级 `onContextMenu`（stopPropagation 的终端行/侧边栏/标签页）不受影响 |
-| 配置持久化审计（全量保存不丢实体） | `hooks/useConfigPersistence.ts` `saveConfig(patch?)` + `mergePortMeta` | `useAppStore.config` 的实体数组是启动快照；全量保存从活规则、实时分组、最新后端预设与离线端口元数据组成安全快照。`saveCurrentPortMeta` 自动保存只覆盖当前枚举端口、保留未插入设备条目，且与本窗全量保存串行化并走后端 revision CAS。普通全量保存必须走 `saveConfig()`；备份导入按恢复语义整体覆盖。 |
-| CI / 质量门 | `.github/workflows/ci.yml` | `push`（所有分支）/ `pull_request` / `workflow_dispatch`；job `frontend`（`npm ci` → `npx tsc --noEmit` → `npm run test:run`）+ job `rust`（装 webkit2gtk/appindicator 依赖 → `cargo test --lib --manifest-path src-tauri/Cargo.toml`，Linux 上会跑 Windows 本地跑不到的 `#[cfg(not(target_os = "windows"))]` 串口/TTY 测试）+ e2e。口径与发版流逐条对应，提前到每次 push/PR |
+| 配置持久化审计（全量保存不丢实体） | `hooks/useConfigPersistence.ts` `saveConfig(patch?)` + `mergePortMeta` | 规则实体启动快照与活 store 分离；普通保存组装安全快照并 revision CAS。插件镜像独立排序；备份导入的插件授权仍受安装身份约束 |
+| CI / 质量门 | `.github/workflows/ci.yml` | 分支 push/PR/manual：前端类型检查、Vitest、release 脚本测试与生产构建；Rust 单测与 release-profile 编译检查；mock IPC Playwright。实际命令和发版流差异见 `docs/architecture/release.md`，自动化不代替原生插件验收 |
 
 ## CODE MAP
 
@@ -202,11 +210,12 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 |--------|------|------|------|
 | `useAppStore` | `src/stores/useAppStore.ts` | Zustand store | tabs / ports / `paneTree` / config / groups + `sortPortsByNumber`；**不持有** systemStatus/trafficStats/simulationMode/ui（见 `useSystemStore`），无树算法（见 `utils/paneTree.ts`） |
 | `getClosingTabIds` | `src/stores/useAppStore.ts` | pure fn | 批量关闭（toLeft/toRight/others）的标签集合，供 `Pane` 的 cleanup 与 store 关闭动作取同一集合 |
+| `getTabPortId` / `getActivePortId` / `findSerialTabByPortId` | `src/stores/useAppStore.ts` | pure fns | 显式 workspace→端口解析；plugin 可绑定 null，无 last-port 回退；串口引擎始终按 portId 索引 |
 | `useOperationStore` | `src/stores/useOperationStore.ts` | Zustand store | serial params + send (NO `op` prefix; NO display state); `cyclicLoops: Record<portId, boolean>` 每端口循环发送开关（`setCyclicLoop` 逐端口启停，替代旧全局 `isLoopSending`） |
 | `useTerminalStore` | `src/stores/useTerminalStore.ts` | Zustand store | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt）；`ensureTerminal` / `setTerminalConfig` / `setTerminalEncoding` / `setTerminalConnectedAt` / `releaseTerminal`；**无行数组、无 Immer**（行缓冲在 viewportManager 环形缓冲区） |
 | `useRuleStore` | `src/stores/useRuleStore.ts` | Zustand store | `highlightRuleSets` / `protocolTemplates` / `sendCommandSets` + `activeSendCommandSetId` / `portToolConfigs` / `triggerRules` + CRUD（`activeHighlightSetId` / `activeProtocolTemplateId` 及其 setter 已删——零生产消费） |
 | `useSystemStore` | `src/stores/useSystemStore.ts` | Zustand store | systemStatus / trafficStats / simulationMode / ui（+ `clearTrafficStats`） |
-| `releaseTerminalState` | `src/stores/releaseTerminalState.ts` | pure fn | 关闭端口/标签时统一回收 terminals + trafficStats + TX 历史 |
+| `releaseUnusedPortState` / `releaseTerminalState` | `src/stores/releaseTerminalState.ts` | pure fns | 最后一份显示/行消费者释放后统一回收 terminals + trafficStats + TX 历史，保留其他插件租约的共享状态 |
 | `paneTree` helpers | `src/utils/paneTree.ts` | pure fns | recursive `PaneNode` tree traversal（`findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` / `pruneTree` / `newPaneId`） |
 | 18 hook files: 15 个既有 hook + `usePlugins` / `usePluginUi` / `usePluginPanel` | `src/hooks/*.ts` + barrel `index.ts` | hooks | 插件宿主在主窗 `usePluginHost` 一次装配；设置页 `usePluginList` 用后端权威状态；Sidebar/UI 面板用外部 store 订阅。串口与工具 hook 仍遵循原生命周期（详 `src/hooks/AGENTS.md`）。 |
 | `RxLineAssembler` / `RxPipeline` / `getRxPipeline` | `src/utils/rxAssembler.ts`, `src/utils/rxPipeline.ts` | RX 管线 | 字节级行聚合 + rAF 批写（目标=viewportManager 环形缓冲区）+ 静默/断线/编码切换 flush + `maxLinesPerTick` 写量限制 + visibility-aware 调度 + 每端口队列上限 `maxQueuedLines`（默认 10000，超限丢最旧）；主窗与弹出窗各自模块单例（裁剪是常态滚动，不弹通知） |
@@ -221,15 +230,15 @@ Frontend (manual review; TypeScript LSP unavailable in this environment):
 | `normalizeUiScalePercent` / `applyUiScale` | `src/utils/uiScale.ts` | runtime | 80–200% 收敛 / Tauri `getCurrentWebview().setZoom(percent / 100)`；每个 WebView 独立应用 |
 | `runSequential` | `src/utils/sequential.ts` | pure fn | 串行执行原语（循环发送/批量开关） |
 | `pluginHost` / `pluginObserver` / `pluginBytesObserver` / `pluginKv` | `src/utils/plugin*.ts` | runtime | Worker 调用时权限、RX 行/字节有界旁路、逐插件 KV 串行落盘（详 `docs/architecture/plugins.md`） |
-| `tauri` service modules | `src/services/tauri.ts` (barrel) + `src/services/*.ts` | service | wrapped `invoke` calls（12 域 + barrel，插件域 `src/services/plugin.ts`） |
+| `tauri` service modules | `src/services/tauri.ts` (barrel) + `src/services/*.ts` | service | 14 个非测试文件（13 域 + barrel）；插件域 `plugin.ts`、原生视图域 `pluginView.ts` |
 
 Backend:
 
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (12 domain files, 74 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | `AppConfig` = 46 标量（含 `revision` / `uiScalePercent`）+ `#[serde(flatten)] entities`；`Entities` = 9 个实体 `Vec`（含 `pluginConfigs`，顶层 JSON key）+ session.json + 校验/路径/备份 + `CONFIG_BOUNDS` |
+| All Tauri commands (12 domain files, 78 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | 47 字段 = 46 个普通配置字段 + flatten entities；9 类实体数组含 pluginConfigs。普通字段含 defaultBaudRates 数组，不统称标量；插件安装身份迁移/磁盘恢复先于 Worker 启动 |
 | `AppState` | `src-tauri/src/lib.rs` | struct | `serial_manager: Arc<Mutex<..>>`、`config_manager: Mutex<..>`、`plugin_io: tokio::sync::Mutex<()>`（插件磁盘/状态操作互斥）、`log_manager: Arc<LogManager>`、`diag_logger: Arc<..>`、`system_info: Arc<Mutex<..>>`、`tool_processes`/`file_send_cancel`/`popouts` |
 | `SerialPortHandle` | `src-tauri/src/serial/ports_real.rs` | struct | `read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>` 句柄；`open_real_port` 内 DTR/RTS 设置（clone 前，设备级共享）后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享） |
 | `PortKind` / `check_virtual_enabled` | `src-tauri/src/serial/mod.rs` | enum / fn | 端口类别唯一分派 + 虚拟端口分派前门控 |
@@ -344,7 +353,7 @@ const addHighlightRuleSet = useRuleStore(s => s.addHighlightRuleSet);
 ### useToastStore — 通知队列
 
 ```tsx
-useToastStore.getState().push({ message, durationMs: 0 });   // 0 = sticky
+useToastStore.getState().push({ severity: 'info', message, durationMs: 0 }); // host sticky notification
 const centerOpen = useToastStore(s => s.centerOpen);
 ```
 
@@ -415,7 +424,7 @@ The old `useSerialData` hook was split into two hooks with different lifecycles:
 
 Both hooks write to the terminal store through `getState()` to avoid re-rendering the hook owner on every line.
 
-The full hook set in `src/hooks/` (17 hooks, individual files):
+The hook modules in `src/hooks/` (18 files; `usePlugins.ts` exports host/list hooks; barrel and disconnect helper excluded):
 
 | Hook | Purpose | Called in |
 |------|---------|-----------|
@@ -434,6 +443,9 @@ The full hook set in `src/hooks/` (17 hooks, individual files):
 | `usePortToolActions` | 侧边栏/标签页外部工具菜单共享动作（`runTool`/`killTool`/`configTool`/`runToolForGroup` + 对话框状态与动作） | Sidebar / TabBar / Pane |
 | `useHotkeys` | 全局快捷键 | App.tsx |
 | `usePowerManagement` | 电源抑制（防休眠/防关屏）随 config 生效 | App.tsx |
+| `usePluginHost` / `usePluginList` | Worker 安装身份绑定、revision 有序快照、RX 观察/启动重试；设置页先授权再启用、立即持久化插件动作 | App.tsx（宿主一次）/ PluginSettings |
+| `usePluginPanel` | 插件输出面板订阅 | PluginPanel |
+| `usePluginUi` | 声明式按钮/菜单订阅及 Worker 点击派发 | Sidebar / SortablePortItem |
 
 ## Rust backend: CommandError and commands/ split
 
@@ -461,7 +473,7 @@ pub enum CommandError {
 
 It implements `serde::Serialize` manually so the frontend receives the error string via `invoke`.
 
-Commands are split into 12 domain files under `src-tauri/src/commands/`; `lib.rs` 的 `generate_handler!` 注册 **74** 个命令（`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 守卫注册漂移）：
+Commands are split into 12 domain files under `src-tauri/src/commands/`; `lib.rs` 的 `generate_handler!` 注册 **78** 个命令（`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 守卫注册漂移）：
 
 | File | Domain |
 |------|--------|
@@ -473,7 +485,7 @@ Commands are split into 12 domain files under `src-tauri/src/commands/`; `lib.rs
 | `log.rs`（8） | save_log_as, export_terminal_log, get_log_files, start_logging, stop_logging, open_path, open_log_directory, migrate_log_directory（**逐字段 `set_log_*` 已全部删除**——日志设置改走 `set_config`） |
 | `storage.rs`（20） | 6 类实体 CRUD（command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs，各 save/load/delete）+ save_port_groups + save_port_meta — synchronous ConfigManager operations on config.json；内部共享 `read_config` / `save_entity` / `delete_entity` + `entity_accessors!` / `impl_entity_id!` 宏访问器 |
 | `file.rs`（4） | write_text_file, read_text_file（配置导入导出）, read_image_data_url（背景图）, plugin_pick_files（后端原生选择后读取，拒绝前端任意路径） |
-| `plugin.rs`（9） | list_plugins, install_plugin, uninstall_plugin, set_plugin_enabled, set_plugin_permissions, read_plugin_asset, write_plugin_asset, plugin_http, plugin_open_external；仅主窗、授权/目录边界与可回滚升级 |
+| `plugin.rs`（13） | list_plugins, install_plugin, uninstall_plugin, set_plugin_enabled, set_plugin_permissions, read_plugin_asset, write_plugin_asset, plugin_http, plugin_open_external, create_plugin_view, update_plugin_view, send_plugin_view_message, destroy_plugin_view；expectedGeneration / revision / 有界 IO / 持久化事务及原生视图契约见 `docs/architecture/plugins.md` |
 | `popout.rs`（3） | open_popout(kind, target_id), close_popout(kind, target_id), set_popout_always_on_top(kind, target_id, on)（label 只在 Rust 计算） |
 | `system_cmds.rs`（3） | get_system_status, prevent_sleep, prevent_screen_off（+ 门控助手 `dev_only` / `is_debug_build`） |
 | `update.rs`（2） | check_for_update, download_and_install_update（自动更新；debug 构建返回 Ok(None)） |
@@ -491,7 +503,7 @@ Commands are split into 12 domain files under `src-tauri/src/commands/`; `lib.rs
 
 ## 标签页关闭生命周期
 
-- **关闭标签页 ≠ 关闭串口**：`Pane.cleanupClosedTab` 只销毁前端显示目标——`getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)`；端口保持连接、后端日志由 `LogManager` 独立落盘，重开标签页从零开始新一轮输出。
+- **关闭标签页 ≠ 关闭串口**：`Pane.cleanupClosedTab` 按 workspace tab ID 退休插件视图，serial 标签按 `portId` detach TTY、释放 stock viewport、丢弃 stock 队列；标签移除后 `releaseUnusedPortState(portId)` 按剩余显示/行消费者决定回收。插件行租约或触发器仍在时不得重置共享解析器/编码；端口与后端日志保持独立运行。
 - 批量关闭（左/右/其它）先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再对每个 id 跑同一套 cleanup。
 - **真正断开**才走 `useSerialConnection.closePort()`（停日志 + 更新端口状态 + 回收)；不要绕过它直接改 store，否则日志句柄泄漏、端口状态停在 "connected"。
 
@@ -512,6 +524,7 @@ scope: ui | backend | store | hooks | docs
 - `docs/architecture/transmission.md` — 数据收发（RX 管线/TX/循环/快捷/触发）
 - `docs/architecture/tty.md` — TTY 终端（xterm/ttyService/模拟终端）
 - `docs/architecture/logging.md` / `config.md` / `workspace.md` / `update.md` / `release.md` / `errors.md` / `plugins.md`
+- `docs/plugin-development.md` — 独立插件作者指南：manifest、权限、Worker API、`plugin.views` / `plugin.tabs`、隔离 UI 的 `self.view`、调试与 ZIP 交付；作者接口只维护这一处，`architecture/plugins.md` 保留宿主内部 IPC/生命周期/事务。隔离视图实现与平台发布门见 `docs/architecture/plugin-views.md`。
 
 ## Other gotchas
 
@@ -521,12 +534,12 @@ scope: ui | backend | store | hooks | docs
 - **RX 管线**：`serial:data` → `RxLineAssembler`（CR/LF/跨事件 CRLF/4KB 强制发射）→ 每端口队列 → rAF tick 每端口一批追加到 viewportManager；250ms 静默尾行与协议帧也进入同一 RX 行观察者（先入队后触发自动回复）。`flushNow` 每次最多写 `maxLinesPerTick` 行，`sendToPort` TX 回显前及弹窗快照用 `flushBeforeSend` 完整排空队列；断线/编码切换也完整排空并清旧状态，编码切换前冻结旧 RX 队列的解码文本。协议解析器按端口只保留当前绑定，模板切换、编辑、禁用、模式切换和关标签时退出旧解析器并冲刷残留，不复活旧帧前缀。隐藏页面以 setTimeout 兜底，队列上限 `maxQueuedLines` 丢最旧；不得在 hook cleanup 里 dispose 单例。
 - **滚动锁定**：`scrollLocked` 只由显式意图写入——图钉按钮、`.terminal-jump-btn` 跳转按钮（滚动条两端：到顶解锁、到底锁定并点亮）、手势 settle（滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定）。`TerminalRenderer` 的 scroll 监听只驱动可见窗口重算（不碰锁定状态）；搜索栏打开时抑制跟随，关闭时若锁定则滚回最新。
 - ConfigModal's rule/command editors save to config.json via `storageService` (which wraps config-backed commands). Load on mount via `useEntityPage`. Rule state lives in `useRuleStore`.
-- **config.json settings entities**：`AppConfig.entities` 展平 9 类 `Vec`（既有 8 类 + `PluginConfigEntry`）；插件 KV 独立存 `<plugins_dir>/<id>/data/state.json`。普通全量保存走 `useConfigPersistence.saveConfig(patch?)`，后端 revision CAS 拒绝陈旧全量快照且在 `plugin_io` 锁内保留当前权威插件状态；备份导入明确 `restorePluginConfigs: true`。`list_plugins` / 变更命令的 `pluginConfigs` 返回数组只负责刷新前端运行镜像；升级禁用插件并清除旧权限。
+- **config.json settings entities**：`AppConfig.entities` 展平 9 类 `Vec`（含 `PluginConfigEntry`）；插件 KV 独立存 `<plugins_dir>/<id>/data/state.json`。普通全量保存经 revision CAS 并在 `plugin_io` 锁内保留权威插件状态；备份导入只有相同 `installGeneration` 可恢复授权。四个插件变更及列表响应携带 revision，运行镜像拒绝旧响应。设置页先授权再启用，后端安装代次校验拒绝升级期间排队的旧操作；`plugin/transaction.rs` 在启动前恢复安装/卸载中断数据；manifest 限 1 MiB；通知每插件/全插件积压上限为 20/100，宿主粘滞通知不受影响。
 - ConfigModal pages use **per-field selectors** instead of subscribing to the whole config — this prevents unnecessary re-renders when unrelated config fields change.
 - SIM:Loopback virtual port is available when `enable_simulation` is called (flask icon in sidebar toolbar)。**周期输出频率命令**：向 SIM:Loopback 发送**文本模式纯数字**（trim 后为数字，如 `100`）即把周期输出频率切到每秒 N 次（0 = 停止；上限 `MAX_SIM_RATE = 10000`，超限 clamp），命令本身不回显——输出为 `[SIM] Heartbeat #<seq>` 序号行，积分器补发保证平均频率精确（`sim_due_lines` 纯函数，100ms 循环节拍不限制高频）。HEX 模式/非数字 TX 保持原回显。默认 2/s。
-- CSS is split across `src/styles/` (`base.css` + 16 component CSS files; UpdateDialog styles live in `update-dialog.css`). `src/styles.css` is just an `@import` entry point, not the main stylesheet.
+- CSS is split across `src/styles/` (`base.css` + 17 component CSS files, including plugin-panel.css). `src/styles.css` is the import entry point, not the main stylesheet.
 - `src/utils/hexUtils.ts` provides `hexToString` and `stringToHex` for HEX send/parse; `src/utils/hexFormat.ts` 是 bytes→HEX 的唯一格式化实现。
-- ConfigModal split into: `ConfigModal.tsx`, `RuleSetAccordion.tsx`, `pages/` (9 settings pages), `editors/` (HighlightRuleEditor, ProtocolTemplateEditor, SendCmdEditor), `hooks/useEntityPage.ts`.
+- ConfigModal split into `ConfigModal.tsx`, `RuleSetAccordion.tsx`, 10 settings pages (including PluginSettings), 3 editors, and `hooks/useEntityPage.ts`. Plugin actions use their own backend-authoritative lifecycle, not the five-rule-page entity contract.
 - OperationPanel split into section components: `OperationPanel.tsx`, `SendSection.tsx`, `ParamsSection.tsx` (the old `RulesSection.tsx` was removed — its command-set select + loop toggle merged into `SendSection`'s compact header, its highlight dropdown was a dead control). The compose-row file button doubles as a **cancel** button while a transfer is in progress (`serialService.cancelFileSend` → backend `cancel_file_send`); the success toast is driven by the `serial:file_progress` `done` event (`sent>=total>0`), so cancel / empty clear the bar silently.
 - Serial backend hardening (see `src-tauri/src/commands/AGENTS.md`): `send_file` 每端口单飞，取消令牌在读取/发送的任意结束路径只释放本次持有者并发 `done:true`；真实串口 close 在全局锁外等待读线程和已取得的写租约结束，完成后才释放独占句柄；外部工具启动失败也尝试用原连接参数恢复串口，失败时保留两种错误。`serial/codec.rs` 的 `build_tx_bytes` 是线上 TX 字节唯一来源。
 - Serial unit tests use **explicit** imports — never `use super::*;`: the glob drags the `serialport` FFI into the test binary and the Windows `cargo test` harness then fails to load with `0xc0000139` (no embedded app manifest, unlike the app binary). Tests that touch `serialport` types / `SerialManager` are `#[cfg(not(target_os = "windows"))]` and run on Linux/macOS CI; the FFI-free hex-parser / `build_tx_bytes` tests run everywhere.
@@ -538,7 +551,7 @@ scope: ui | backend | store | hooks | docs
 - **发送守卫**：`sendToPort` 非静默发送前检查 `utils/sendGuard.ts` `isSendablePort`——端口缺失/断开/连接中/错误时推 `sendSection.portClosedWarning` toast 并返回 0；循环发送与触发自动回复的静默发送（`silent=true`）静默返回 0 不打扰用户。**文件发送同样过守卫**（`useFileSend`：不可发送连文件框都不弹）并把每轮字节增量计入 `trafficStats` TX。新增发送逻辑若绕过 `sendToPort` 直连后端，会失去该守卫与 TX 回显/历史管线。
 - **config 实体快照陷阱**：`useAppStore.config` 的实体数组（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs/portPresets）是**启动快照**，不会自动跟随 `useRuleStore`。任何全量保存**必须**走 `useConfigPersistence.saveConfig(patch?)`——它内部现场拼装安全快照（标量 + `useRuleStore` 活实体 + `state.groups` + `collectPortMeta(state.ports)` + 后端读回的 `portPresets`；`portPresets` 读不到就不写，宁可不保存也不用陈旧快照覆盖磁盘）。旧 `utils/configMerge.ts` / `mergeLiveRuleEntities` 已删——**不要**再手写「合并后 set_config」的调用点。
 - **跟随钉底**：跟随路径由 `TerminalRenderer.render` 内联计算目标值并同帧写 scrollTop（padding 感知、无 React effect、无双 rAF 链、无第三方虚拟化）。`utils/followLogic.ts` 只剩 `isAtBottom` / `shouldFollow` 两个纯函数；到顶/搜索跳转走 `viewportManager.scrollToSeq` / `scrollToBottom`。
-- **通知中心**：`durationMs === 0` 的 toast 是粘滞的（Toast.tsx 不启动自动关闭计时）；超过 `MAX_VISIBLE=5` 的 toast 进 `stashed` 队列（不是丢弃），可经 NotificationCenter 查看/逐条关闭/清空。串口来源的 toast 必须带 `portId`（触发告警/断线/发送目标关闭/重连失败已接），时间戳取 `createdAt`。
+- **通知中心**：宿主 push 的粘滞/溢出记录保留，已接纳通知超过 5 条进入 stashed；插件走 pushPlugin，超额度静默丢弃而非无限积压。串口来源必须带 portId，时间戳取 createdAt；插件来源由宿主赋 pluginId。限额唯一实现与文档见 `useToastStore.ts` / `docs/architecture/plugins.md`。
 - **触发规则自动持久化**：TriggerSettings 编辑触发规则 300ms 防抖逐条保存（`savedSnapshotRef` 与当前 rules diff），关闭弹窗时 flush 窗口内未保存编辑；新增/修改规则应走 `storageService.saveTriggerRule`，勿绕过。
 - **日志 RX 组装与子目录**：`logger/assembler.rs` 的 `LogLineAssembler`（字节级 CR/LF/CRLF 合并 / pendingCR / 4096 强制 flush / take_tail / `just_forced`，镜像前端 rxAssembler）+ `LogManager::write_rx`（RX 方向组行落盘，TX 保持直写 `write`）+ `subdir_component`（`none`/`date`/`port`，默认 `date`，非法值 clamp 回 date，路径 join 处 create_dir_all，`LogManager::list_files` 递归 `MAX_LIST_DEPTH`）。改日志路径/分片/子目录相关代码要同时看这里。
 - **日志空行不落盘**：`write_line` 顶部 `data.is_empty()` 直接返回 Ok；string 格式 decode 后 `trim_end_matches(['\r','\n'])` 为空（只含行结束符的 TX）同样跳过——`write_rx` 对连续分隔符/行首行尾分隔符产出的**空块**因此天然不落盘。`close_writer` 关闭时 `current_size==0` 且磁盘 0 字节 → 删除空文件。新增日志写入路径时不要绕过这两个守卫（组装器仍会产出空块，这是刻意的行边界语义）。
@@ -618,7 +631,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## i18n (2026-07 基础设施)
 
-- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**575 keys × zh-CN/en-US**（`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符）
+- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**586 keys × zh-CN/en-US**（本次每侧新增 8 个插件视图键；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符）
 - `main.tsx` 顶层 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`

@@ -53,14 +53,24 @@ flowchart TD
 
 ## 日常质量门（ci.yml）
 
-与发版流**同一套质量门**（`tsc` + vitest + `cargo test --lib`，步骤逐条对应，便于对照排查），但提前到每次 push / PR——发版门禁报红时 tag 已经打完，回滚代价高。此外 `ci.yml` 独有 `e2e` job（playwright）：两条发版流都不跑 e2e。
+日常 CI 与两条发版流共享部分检查，但**并非逐步骤相同**。以下按当前 workflow 的实际命令区分；生产构建、release-profile 检查与浏览器 e2e 不应推断为所有工作流都独立执行。
 
 - **触发**：`push`（`branches: ['**']`，覆盖所有分支）、`pull_request`、`workflow_dispatch`。分支过滤而非裸 `push`：tag push 已由发版流自己的质量门（tsc + vitest + `cargo test --lib`）覆盖，CI 再跑一遍只是重复占 runner。
 - **concurrency**：`group: ci-${{ github.workflow }}-${{ github.ref }}`；`cancel-in-progress` 仅对 `pull_request` 为真——同一 PR 的旧运行被新提交取代，分支 push 不取消（避免发布前门禁被中断）。
-- **job `frontend`**（ubuntu-latest）：`npm ci` → `npx tsc --noEmit` → `npm run test:run`。
-- **job `rust`**（ubuntu-latest）：装 `libwebkit2gtk-4.1-dev` / `libayatana-appindicator3-dev` / `librsvg2-dev` / `patchelf` / `xdg-utils` / `libudev-dev` → Rust stable + rust-cache → `npm ci`（tauri-build 在 test profile 下仍读 `tauri.conf.json`，前端依赖先就位）→ `cargo test --lib --manifest-path src-tauri/Cargo.toml`。`--lib` 在 Linux 上会执行 `#[cfg(not(target_os = "windows"))]` 的串口/TTY 测试，Windows 本地开发环境跑不到——把 Windows-only 之外的分支纳入回归是本 job 的目的。
-  - 与发版流的**唯一依赖差异**：发版流跑 ubuntu-22.04 用 `libappindicator3-dev`，本 job 跑 ubuntu-latest（24.04）只能装继任者 `libayatana-appindicator3-dev`（`libappindicator-sys` 优先探测 `ayatana-appindicator3-0.1`，两者提供同一 pkg-config 依赖）。
-- **job `e2e`**（ubuntu-latest）：`npx playwright install --with-deps chromium` → `npx playwright test`。e2e 用 mock IPC（`e2e/smoke.spec.ts` 注入 `window.__TAURI_INTERNALS__`），不需要 Rust 侧与 webkit2gtk；`playwright.config.ts` 的 `webServer` 自行拉起 vite dev server（1420），CI 下 `reuseExistingServer=false`。
+- **job `frontend`**（ubuntu-latest）：`npm ci` → `npx tsc --noEmit` → `npm run test:run` → `node --test scripts/release.test.mjs` → `npm run build`（`tsc && vite build`，生产前端产物）。
+- **job `rust`**（ubuntu-latest）：装 `libwebkit2gtk-4.1-dev` / `libayatana-appindicator3-dev` / `librsvg2-dev` / `patchelf` / `xdg-utils` / `libudev-dev` → Rust stable + rust-cache → `npm ci`（tauri-build 在 test profile 下仍读 `tauri.conf.json`，前端依赖先就位）→ `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `cargo check --release --lib --manifest-path src-tauri/Cargo.toml`。后者检查 release 专属编译路径，不运行 release 程序。`--lib` 在 Linux 上会执行 `#[cfg(not(target_os = "windows"))]` 的串口/TTY 测试，Windows 本地开发环境跑不到。
+  - 系统依赖差异：发版流跑 ubuntu-22.04 用 `libappindicator3-dev`，本 job 跑 ubuntu-latest（24.04）用 `libayatana-appindicator3-dev`（两者提供所需 pkg-config 依赖）；这不是两套工作流的唯一步骤差异。
+- **job `e2e`**（ubuntu-latest）：`npm ci` → `npx playwright install --with-deps chromium` → `npx playwright test`。e2e 用 mock IPC（`e2e/smoke.spec.ts` 注入 `window.__TAURI_INTERNALS__`），不需要 Rust 侧与 webkit2gtk；`playwright.config.ts` 的 `webServer` 自行拉起 vite dev server（1420），CI 下 `reuseExistingServer=false`。
+
+两条发版流的 tag 构建分别执行：
+
+| 阶段 | stable（publish.yml） | preview（publish-preview.yml） |
+|---|---|---|
+| `prepare-release` | `node --test scripts/release.test.mjs` → `node scripts/release.mjs prepare stable "$RELEASE_TAG"` | 同一脚本测试 → `node scripts/release.mjs prepare preview "$RELEASE_TAG"` |
+| 每个构建矩阵项 | `npm ci` → `npx tsc --noEmit` → `npm run test:run` → `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `tauri-apps/tauri-action@v1` 打包 | 相同检查命令与打包 action，但矩阵参数按上文区分 |
+| `finalize-release` | `node scripts/release.mjs finalize stable "$RELEASE_TAG" "$RELEASE_ID"` | `node scripts/release.mjs finalize preview "$RELEASE_TAG" "$RELEASE_ID"` |
+
+发版矩阵没有独立 `npm run build` / `cargo check --release --lib` 步骤；生产前端构建由 Tauri 打包的 `beforeBuildCommand` 执行，release Rust 编译由打包执行。两条发版流均不跑 Playwright。stable 的已发布只读验证另行执行 `node ../scripts/release.mjs verify stable "$RELEASE_TAG"`（在 `released-source` 中，使用默认分支 verifier 与所选 tag 的公钥）。
 
 ## 发版操作步骤
 
@@ -111,6 +121,25 @@ GitHub 网页 release 说明与 updater 弹窗更新说明是**两份独立内�
 
 本地验证：`node --test scripts/release.test.mjs`；`node scripts/release.mjs preflight stable v<version>`。`local` 命令可在隔离资产目录生成/验签完整清单，无 GitHub 修改；真实 Publish、安装及重启仍需发行环境验收。
 
+### 插件发版验收门
+
+插件基础契约以 [`plugins.md`](plugins.md) 为准，隔离视图/工作区标签以 [`plugin-views.md`](plugin-views.md) 为准。自动化绿灯、Windows debug 原生 smoke 与最终安装包验收是不同证据，不可互相替代；**当前自动化 CI 不运行真实原生插件生命周期或 WebView CSP 验收**，mock IPC 的 Playwright 也不证明这些行为。
+
+截至 2026-10-10，已有证据来自此前修复验证（本次文档更新未重跑）：896 项 Vitest、278 项 Rust、26 项 Playwright，以及 TypeScript 检查、生产前端构建与 release Cargo 检查。另在 Windows **debug 原生可执行文件加载生产 assets/CSP** 的环境下，验证了禁用时预授权/启用、通知突发上限、query 作用域、目录配额下覆盖已有文件、ZIP 旧安装代授权拒绝、KV 保留、4 插件并发初始化，以及 5 个中断状态的磁盘恢复 fixture。恢复 fixture 并非实际 kill 或断电测试；该 debug 原生证据也不是最终发行包验收签署。
+
+本次隔离视图与工作区实现的新增自动化/原生结果另见 [`plugin-views.md`](plugin-views.md#验证边界) 和 RELEASE_NOTES 的对应记录；不修改上述历史验证数字，也不把新debug结果当作最终发布签收。
+
+发行维护者仍须在目标版本、最终打包并安装的产物上记录下列人工结果；当前这些检查**尚未完成**：
+
+- Windows 安装后及重启后，确认实际 bundled assets/CSP 下 classic Worker 与插件生命周期正常；通过真实原生 picker 选择目录/ZIP 安装，验证新装/升级默认禁用且无授权、按用户审阅的安装代授权与启用、卸载/重装、错误反馈与私有数据边界。
+- 按插件契约复核备份导入后的后端状态、同代/异代授权、权限撤销、存储/通知/HTTP 边界与失败关闭；不能仅依据 mock UI 的表现判定通过。
+- 对真实进程中断与重启恢复进行受控验收并记录结果，区分于现有磁盘 fixture；不要将 fixture 描述为掉电持久性保证。
+- 在实际交付的 Linux、macOS 架构安装包上检查 picker、Worker/CSP、权限及生命周期行为，并记录平台差异；Windows debug smoke 不提供跨平台结论。
+- 新隔离视图：Windows 最终安装包验证 raw Wry 页面的原生/API/资源/导航拒绝，native文件选择/设备权限和独立存储，用户复制/剪切的明确例外；没有支持 adapter 的平台必须明确拒绝，不能降级主窗 iframe。最终打包界面没有临时 CDP 端口或 smoke override。
+- 工作区验收：替换原始/新建关联/无端口工具，按钮/菜单/后台动作去重和票据，焦点/收发目标，原始关闭后解析继续，跨Pane及TTY连续性，宿主modal/菜单/通知遮挡、DPI/zoom，多视图慢ACK/隐藏不积压，撤权/升级/故障及时错误/原始回退。
+
+stable 人工 Publish 前应完成以上适用验收；preview 会在 finalize 后自动公开，须在打 tag 前安排候选产物的人工验收，并对最终公开产物补做安装复核。工作流的资产验签门只证明交付资产与签名/清单一致，不自动签署插件功能验收。
+
 ## 故障排查
 
 | 症状 | 原因 | 解决 |
@@ -149,7 +178,7 @@ updater **先验签名再安装**——直接换 pubkey 会让旧客户端对新
 
 | 文件 | 作用 |
 |------|------|
-| `.github/workflows/ci.yml` | 日常质量门（`push` 所有分支 / `pull_request` / `workflow_dispatch`；`frontend` + `rust` + `e2e` 三个 job，前两者与发版流同口径，`e2e` 为 ci 独有；tag push 不跑） |
+| `.github/workflows/ci.yml` | 日常质量门（分支 push / PR / 手动；frontend 含生产构建与 release 脚本测试，rust 含 release-profile 类型检查，e2e 为 mock IPC Playwright；tag push 不跑） |
 | `.github/workflows/publish.yml` | stable：预检→draft→矩阵→finalize 验签/单写清单→人工发布；发布后补充只读验证 |
 | `.github/workflows/publish-preview.yml` | preview：相同门禁，finalize 成功后自动公开 prerelease |
 | `scripts/release.mjs` / `release.test.mjs` | 共享预检、draft 事务、真实 minisign 验签与公开下载清单；离线消费行为回归 |

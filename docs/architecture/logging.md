@@ -21,7 +21,7 @@
 
 `LogSettings::from_config(&AppConfig)` + `LogManager::apply_settings(&LogSettings)` 是日志设置的**唯一**入口，两者经 `AppState::apply_runtime_config` 串联（`AppState::new` 与 `set_config` 命令共用）。因此 **`set_config` 是唯一同步点**，前端不再手动同步。
 
-- 旧的逐字段 `set_log_*` 命令（`set_log_split_size` / `set_log_split_enabled` / `set_log_filename_format` / `set_log_auto_save` / `set_log_encoding` 等 6 个）、`sync_log_manager_from_config` 与前端 `syncLogSettingsToBackend` **全部已删除**；命令总数 71 → **64**。
+- 旧的逐字段 `set_log_*` 命令（`set_log_split_size` / `set_log_split_enabled` / `set_log_filename_format` / `set_log_auto_save` / `set_log_encoding` 等 6 个）、`sync_log_manager_from_config` 与前端 `syncLogSettingsToBackend` 已删除。当前命令总量及注册守卫见[配置模块](config.md#命令)，不在日志模块维护第二份总数。
 - `log_format`（string/hex/binary）**不属于** `LogSettings`——同一时刻不同端口可用不同格式，由 `start_logging` 命令按端口逐次传入。
 - `apply_settings` 对空 `log_directory` 有守卫：空串不覆盖当前根（首次启动 config.json 的 `logDirectory` 可能为空）；换目录会显式收尾活动 writer 并在新根下重开，失败则把快照目录回滚，绝不留下「UI 列 A、实际写 B」的撕裂状态。
 

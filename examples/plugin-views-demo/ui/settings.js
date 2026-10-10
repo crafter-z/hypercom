@@ -1,0 +1,11 @@
+const root = document.getElementById('plugin-root');
+const title = document.createElement('h2'); title.textContent = 'Sensor settings';
+const description = document.createElement('p'); description.textContent = 'This tool tab has no bound port. Saving changes only plugin-private settings.';
+const label = document.createElement('label'); label.textContent = 'Temperature alert threshold °C ';
+const input = document.createElement('input'); input.type = 'number'; input.min = '-100'; input.max = '200'; input.step = '0.1'; label.append(input);
+const save = document.createElement('button'); save.textContent = 'Save';
+save.onclick = () => { const threshold = Number(input.value); if (Number.isFinite(threshold)) view.send('save-threshold', { threshold }); };
+const status = document.createElement('p'); status.className = 'status';
+root.append(title, description, label, save, status);
+view.onState(snapshot => { input.value = String(snapshot.threshold); status.textContent = `Saved threshold: ${snapshot.threshold} °C`; });
+view.onEnvironment(environment => { document.documentElement.dataset.theme = environment.theme; });

@@ -1,0 +1,19 @@
+{
+  "id": "com.example.sensor-views",
+  "name": "Sensor Workspace",
+  "version": "1.0.0",
+  "description": "Isolated table, waveform and tool tabs with a bounded live parser.",
+  "apiVersion": "1.0",
+  "entry": "main.js",
+  "requires": ["isolated-tab-view@1", "plugin-workspace-tabs@1"],
+  "permissions": ["rx:bytes", "ui:view", "ui:tabs", "storage"],
+  "ui": {
+    "buttons": [{"id": "open-settings", "label": "Sensor settings", "icon": "Settings", "target": "sidebar"}],
+    "menuItems": [{"id": "open-table", "label": "Open sensor table", "target": "port-context"}, {"id": "open-wave", "label": "Open sensor waveform", "target": "port-context"}],
+    "views": [
+      {"id": "table", "label": "Sensor table", "entry": "ui/table.js", "styles": ["ui/view.css"], "assets": [], "modes": ["trx", "tty"], "input": "bytes", "placements": ["serial-content", "workspace-tab"], "portBinding": "required", "restoreOnStartup": true},
+      {"id": "wave", "label": "Sensor waveform", "entry": "ui/wave.js", "styles": ["ui/view.css"], "assets": [], "modes": ["trx", "tty"], "input": "bytes", "placements": ["workspace-tab"], "portBinding": "required", "restoreOnStartup": true},
+      {"id": "settings", "label": "Sensor settings", "entry": "ui/settings.js", "styles": ["ui/view.css"], "assets": [], "modes": ["trx", "tty"], "input": "none", "placements": ["workspace-tab"], "portBinding": "none", "restoreOnStartup": true}
+    ]
+  }
+}
