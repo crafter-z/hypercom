@@ -20,7 +20,7 @@
 ```
 
 - **单例范围**：`getRxPipeline()` 主窗与弹出窗各持一个。弹窗是独立 webview（独立模块作用域与 store 实例），在那里的调用自然接线到本窗自己的 store——绝不跨窗共享。
-- `RxLineAssembler`（`utils/rxAssembler.ts`）：0x0A/0x0D 在全部四种受支持编码（ASCII/UTF-8/GBK/ISO-8859-1）中都不可能出现在多字节序列内部，故按字节切行安全；跨两次 feed 的 CRLF 用 `pendingCR` 识别为**一个**分隔符；待定缓冲达 `maxPendingBytes`（默认 4096）时无分隔符强制发射，`justForced` 抑制「强制发射点紧跟的分隔符」产生的幻影空行。
+- `RxLineAssembler`（`utils/rxAssembler.ts`）：0x0A/0x0D 在全部四种受支持编码（ASCII/UTF-8/GBK/ISO-8859-1）中都不可能出现在多字节序列内部，故按字节切行安全；跨两次 feed 的 CRLF 用 `pendingCR` 识别为**一个**分隔符。待定缓冲达 `maxPendingBytes`（默认 4096）时强制发射，但 UTF-8/GBK 多字节字符尚未完成时最多延迟 3 字节；畸形流仍受该硬边界约束。`justForced` 抑制紧跟强制发射点的分隔符产生幻影空行。
 - **解码**：行字节由 `utils/lineText.ts` 的共享 TextDecoder 缓存按端口当前编码解码（`ignoreBOM:false`，行首 BOM 剥离）；字节级切行保证同一编码内多字节字符不跨行。通常 RX 行只保存 `rawData` 并在渲染/搜索时惰性解码；编码切换前的待写行和尾行会冻结旧 label 下的 `content`，协议帧也携带已解码 `content`，避免跨编码边界误解码。
 - **rAF 批写**：全管线只有一个批写 tick 句柄；tick 内对每个有排队的端口各做一次 `appendTerminalLines`，每端口每帧最多写 `maxLinesPerTick`（默认 2000）行。`flushNow(portId)` 仍只写一批；发送 TX 回显、弹窗快照以及断线/编码切换边界用 `flushBeforeSend(portId)` 完整排空已有队列（按 `maxLinesPerTick` 分批写），保证 RX 不丢失、不越过 TX 或快照边界。
 - **静默 flush**：feed 后组装器仍有未终结尾部时（重新）武装 250ms 定时器，超时取尾部成行并入队，行时间戳沿用该端口**最后一次事件时间**（从未 feed 过才退回 `Date.now()`）。
@@ -31,6 +31,7 @@
 - **行级触发器钩子**：`setOnLineAssembled` 由 `useSerialReceive` 注入；完整 RX 行（含静默尾行、协议帧）先入队再通知观察者，自动回复调用 `sendToPort` 时先排空此前 RX，再追加 TX 回显。
 - **流量统计**：RX 字节在 `useSerialReceive` 的事件处理器顶部经 `trafficStats.addRx` 计入，**1s 聚合**后统一写 store（`utils/trafficStats.ts`，字段仍是 `rxTotal`/`txTotal`）——不再每事件 `setTrafficStats`，消除高频 RX 下的 Zustand 重渲染。
 - **不得**在 hook/弹窗 cleanup 里 `dispose()` 单例（单例与应用同寿命）；`feedBytes` 不加 tab 存在性门控（弹窗 store 从不填充 tabs，门控会丢光弹窗实时流；对已 release 的 manager 喂数据本就是静默 no-op）。
+- 事件订阅按获取顺序登记 cleanup；后续状态/工具退出订阅失败会释放已取得的数据/工具输出监听。重连提示的迟到注册只能释放自身，不能覆盖重挂载后的活监听；重连退避结束及失败返回均复查用户关闭意图，后端取消令牌承担在飞重连取消。
 - `sendToPort` 在 TX 回显前用 `flushBeforeSend` 排空已有 RX 队列；`flushNow` 的每帧限量语义不承担时序边界。
 
 ## TX 发送
@@ -43,14 +44,15 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
         （非静默再 toast sendSection.hexInput.invalid），绝不发出后端必然拒绝的输入
   → 守卫：isSendablePort（utils/sendGuard.ts）——端口缺失/断开/连接中/错误时
         非静默 → toast sendSection.portClosedWarning + 返回 0；silent → 静默返回 0
-  → TTY 分支（port.mode === 'tty'）：跳过 TX 回显与 flushNow
+  → TTY 分支（port.mode === 'tty'）：跳过 TX 回显，经 ttyService.sendData 排空先前按键并进入同端口有序写入队列
   → 非 TTY：getRxPipeline().flushBeforeSend(portId)（完整排空先到 RX，恢复「发送前 RX 先于 TX、TX 先于其响应」时序）
         → TX 行在调用后端**之前**同步追加（先算 displayText/txRawData 再 appendTerminalLine）
-  → serialService.sendSerialData（invoke send_serial_data）
+  → 非 TTY 直接 serialService.sendSerialData；TTY 的同一 IPC 由 ttyService 写入队列调用
   → 成功后才记流量统计（trafficStats.addTx）/ 发送历史
 ```
 
-- **TTY 分支**（`port.mode === 'tty'`）：跳过 TX 回显与 `flushNow`——无本地回显（对端 shell 会把命令 echo 回来，本地再插一条 TX 行既重复又破坏终端流），仍走后端发送/流量统计/发送历史（快捷发送/命令面板在 TTY 下可复用）。
+- **TTY 分支**（`port.mode === 'tty'`）：无本地回显，先排空 10ms 合批窗口内已有按键，再将快捷命令加入 `ttyService` 的同端口写入队列；后续按键不能越过命令。TTY 统计由有序写入入口成功后计入一次，`sendToPort` 仍记录发送历史并保留既有错误提示策略。
+- **开始副作用前守卫**：`sendToPort` 可接收宿主提供的第六参数 `beforeSend`。TRX 在同步 TX 回显前执行；TTY 排队不算已开始 I/O，直到该批次通过连接代际检查、即将调用 `sendSerialData` 时，重新检查端口连接状态并同步执行 `beforeSend`。插件宿主在该回调内复查 RPC/Worker 身份、安装代际、授权与视图绑定，撤权/关视图/超时后尚未开始的批次不得发出；拒绝不会阻塞后续正常批次。
 - **TX 行在 await 前追加**：模拟端口的读线程会在下面的 `await` 期间 emit 回显 RX；先追加 TX 行保证终端顺序恒为「TX 先于其响应」。
 - **rawData 语义**：HEX 模式 = `parseHexBytes(data)` 得到的实际字节；字符串模式 = 不含 `sendPrefix` 的 UTF-8 字节。两者都存 `Uint8Array`（与 RX 行统一）。
 - **发送历史**：模块级 `Map<portId, SendHistoryEntry[]>`（仅内存，应用关闭即失），上限 50 条、按「内容 + 格式」去重；`releaseSendHistory(portId)` 由 `releaseTerminalState` 调用。
@@ -102,7 +104,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 触发引擎（条件触发，issue #3-1）
 
-- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test（ReDoS 防护），模式长度上限 200；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`。
+- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式长度上限 200；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，归一化后为空的模式不派发动作。
 - **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。
 - **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
 - 规则编辑 **300ms 防抖逐条自动落盘**：`TriggerSettings` 经 `useEntityPage` 传 `autoSaveDebounceMs: 300`，`savedSnapshotRef`（最后已知持久化态）用于 diff 出改动项；关闭配置弹窗时有 unmount flush，不会丢最后一次按键。

@@ -25,7 +25,8 @@ serial:data（TTY 端口，useSerialReceive 分流）
   → visibility-aware 批写 term.write（页面可见 rAF、隐藏 setTimeout(16ms) 兜底）
 ```
 
-API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term 跨重连）/`send`（onData→10ms 按键合批、64KiB 单批上限；同端口上一批 IPC 完成后才发下一批，跨端口独立，失败后后续批次仍可发送）/`resize`（仅 GIT: 走后端 pty resize）/`resync`（连接后重推已知尺寸，见下）。`detach` 发送残留按键并保留当前连接写入顺序；`disconnect` 丢弃未发出的旧连接批次，不让旧队列阻塞重连。
+API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term 跨重连）/`send`（onData→10ms 按键合批、64KiB 单批上限）/`sendData`（`sendToPort` 的显式命令入口，先排空已有按键）/`resize`/`resync`。按键与显式命令共用同端口写入队列：上一批 IPC settle 后才发下一批，跨端口独立，失败后后续批次仍可发送；TX 统计只在该入口成功后计入一次。`detach` 发送残留按键并保留当前连接写入顺序；`disconnect` 丢弃未发出的旧连接批次，不让旧队列阻塞重连。
+- 显式命令排队期间不视为已开始 I/O；连接代际检查后、IPC 调用前执行 `sendToPort` 的端口连接复查及 `beforeSend` 宿主授权回调，插件撤权或会话失效可取消尚未开始的命令，已开始的后端写入不追溯撤销。
 
 - `disconnect` **重建 decoder**（断线残留的半截多字节字符会在重连后与首字节拼错）；`detach` **保留 lastCols/lastRows**（切走标签再重开不再回退 80×24）。
 - `feed` 对「无标签页且未 attach」丢弃（挂载前首帧窗口仍入队等 attach replay）。
@@ -43,7 +44,7 @@ API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term �
 ## TX 路径
 
 - 手动输入：`term.onData` → 字节发送（UTF-8；xterm 已按标准映射 Ctrl+C 等特殊字节）。**无本地回显**——对端 shell echo，本地再插 TX 行既重复又破坏终端流。
-- 快捷发送/命令面板/循环在 TTY 下可复用：`sendToPort` TTY 分支跳过 TX 回显与 `flushNow`（仍走后端发送/流量统计/历史）；命令 `appendLineEnding` 由命令集配置，但**后端做回车归一**（见下）。
+- 快捷发送/命令面板/循环在 TTY 下可复用：`sendToPort` TTY 分支跳过 TX 回显，经 `ttyService.sendData` 与按键保持同一流顺序（统计由 service 计入，历史由 sendToPort 记录）；命令 `appendLineEnding` 由命令集配置，但**后端做回车归一**（见下）。
 
 ## 回车归一（GIT:BASH 快捷发送多执行一行空命令）
 
@@ -75,5 +76,6 @@ pty 行规程（ICRNL）把 `\r` 转成 `\n`，`\r\n` 会变成两个换行—�
 ## 已知边界（文档化而非缺陷）
 
 - RX 解码仅 UTF-8（TRX 的 GBK 等多编码切换不适用于 TTY 字节流）。
+- 模拟bash自行退出后ConPTY读管道可能在master仍持有时不产EOF。再次打开先用child.try_wait确认退出，再回收旧master/writer，不以读线程running标志永久拒绝重开；正常存活会话仍拒绝重复open。
 - 残余销毁场景：模式切换/关闭标签/跨 Pane 拖拽仍销毁 xterm 实例（open() 一次性）。
 - 日志：TTY 端口 RX 若沿用 LogLineAssembler（CR 当换行）会剁碎终端序列——当前按既有日志管线落盘，原始字节保真回放尚未实现。

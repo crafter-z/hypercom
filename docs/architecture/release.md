@@ -97,7 +97,7 @@ flowchart TD
 GitHub 网页 release 说明与 updater 弹窗更新说明是**两份独立内容**，但本工作流让它们来自同一个文件 `RELEASE_NOTES.md`，避免不一致：
 
 - `scripts/release.mjs::preflight` 提取顶部当前版本章节并核对触发 tag；`prepare` 将其写入 draft release body。
-- `finalize` 从 release body 写 `latest.json.notes`，两者同源；矩阵不再写 release body 或清单。
+- `finalize` 再次核对 draft release body 与触发 tag 的 notes 首节完全一致，拒绝 prepare 后的文案漂移，再从 body 写 `latest.json.notes`；矩阵不再写 release body 或清单。
 - `RELEASE_NOTES.md` 是累积式——旧版本章节保留为**历史归档**，不进入 release 描述与弹窗（0.5.1 及更早版本曾 `cat` 全文件受影响）。
 - 版本守卫同时核对严格通道 tag、npm/Tauri/Cargo 源版本、npm 锁顶层/根包、Cargo 锁根包和 notes 首节；误推 tag 不会覆盖别的已发布版本。
 - notes 在打 tag 前完成；已发布 release 的内容与资产不由构建流程重写，修正须发更高版本。
@@ -114,7 +114,7 @@ GitHub 网页 release 说明与 updater 弹窗更新说明是**两份独立内�
 2. 矩阵：既有 tsc/vitest/Rust 质量门后只上传安装包与 `.sig`，不读改写 `latest.json`。同 tag workflow 串行，失败不取消其他平台。
 3. `finalize-release`：即使依赖失败也运行状态检查；只有 prepare/矩阵全部成功才允许发布路径，否则报错并保持 draft。
 4. 唯一汇总 `scripts/release.mjs`：使用工作流 token 读取 draft 资产，下载实际安装包与签名，用配置公钥校验 minisign `Ed`/`ED` 签名与 trusted comment；检查四平台、稳定版 MSI、版本、上传状态、大小、签名配对及 tag-pinned `browser_download_url`。
-5. 生成 OS/arch 默认键与 installer-specific 键，Windows 默认 NSIS；安装包 URL 使用公开发布下载地址，客户端不消耗资产 REST API 配额。清单上传一次并下载回读验证。
+5. 生成 OS/arch 默认键与 installer-specific 键，Windows 默认 NSIS；安装包 URL 使用公开发布下载地址，客户端不消耗资产 REST API 配额。清单上传一次并下载回读验证，同时要求 notes 与 release body 一致、`pub_date` 是有效 RFC 3339 时间，避免资产验签通过但客户端无法解析清单。
 6. stable 维持 draft 等待人工 Publish；preview 只有门禁通过才公开。发布后的只读验证是补充，不能替代 finalize。
 
 匿名无法读 draft；工作流 token 的认证 asset API 用于发布前验签。认证失败时门禁失败、不提前发布。不得以历史某次 401 推断所有身份都无法读取 draft。
@@ -128,6 +128,8 @@ GitHub 网页 release 说明与 updater 弹窗更新说明是**两份独立内�
 截至 2026-10-10，已有证据来自此前修复验证（本次文档更新未重跑）：896 项 Vitest、278 项 Rust、26 项 Playwright，以及 TypeScript 检查、生产前端构建与 release Cargo 检查。另在 Windows **debug 原生可执行文件加载生产 assets/CSP** 的环境下，验证了禁用时预授权/启用、通知突发上限、query 作用域、目录配额下覆盖已有文件、ZIP 旧安装代授权拒绝、KV 保留、4 插件并发初始化，以及 5 个中断状态的磁盘恢复 fixture。恢复 fixture 并非实际 kill 或断电测试；该 debug 原生证据也不是最终发行包验收签署。
 
 本次隔离视图与工作区实现的新增自动化/原生结果另见 [`plugin-views.md`](plugin-views.md#验证边界) 和 RELEASE_NOTES 的对应记录；不修改上述历史验证数字，也不把新debug结果当作最终发布签收。
+
+2026-10-10全项目维护执行：975项Vitest、32项mock IPC Chromium Playwright、309项Windows Rust单测（另1项原生环境用例默认跳过）、类型检查、生产前端构建、release-profile Cargo检查、15项离线release回归及当前`v0.6.8` preflight通过。显式运行真实WebView2 child退休后host resize用例通过。Windows debug可执行文件加载生产资产/CSP，实际运行目录安装/授权/Worker、ZIP升级清权换代、超额条目拒绝、UTF-8长尾日志导出、SIM收发/搜索、ConPTY自行exit后重开及正常宿主遮挡恢复；raw Wry工具页有桌面视觉证据。npm生产依赖上游audit未报告已知漏洞。最终发行包、完整安全矩阵及跨平台验收仍按下列清单，不把debug或mock结果签作已发布产物验收。
 
 发行维护者仍须在目标版本、最终打包并安装的产物上记录下列人工结果；当前这些检查**尚未完成**：
 

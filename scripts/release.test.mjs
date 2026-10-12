@@ -4,8 +4,10 @@ import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { promisify } from 'node:util';
 import { assertRelease, buildManifest, preflight, requiredPlatforms, verifyManifest, verifySignature, versionForTag } from './release.mjs';
 
 const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, 7)]), format: 'der', type: 'pkcs8' });
@@ -121,6 +123,18 @@ test('complete stable manifest verifies actual signatures and keeps NSIS default
   assert.throws(() => verifyManifest(wrong, manifest), /version/);
 });
 
+test('manifest verification rejects unreadable dates and notes from a different release', async (t) => {
+  const { options } = await fixture(t);
+  const expected = await buildManifest(options);
+  for (const pub_date of ['not-a-date', '', '2026-01-01', '2026-02-30T00:00:00Z', '2026-01-01T24:00:00Z']) {
+    assert.throws(() => verifyManifest({ ...expected, pub_date }, expected), /pub_date/);
+  }
+  assert.throws(() => verifyManifest({ ...expected, notes: 'Old release notes' }, expected), /notes/);
+  assert.throws(() => verifyManifest({ ...expected, notes: undefined }, expected), /notes/);
+  // Draft generation predates publishing; its valid timestamp need not equal published_at.
+  verifyManifest({ ...expected, pub_date: '2025-12-31T23:59:00.123Z' }, expected);
+});
+
 test('complete preview needs no MSI but all four platforms', async (t) => {
   const { options } = await fixture(t, 'preview');
   const manifest = await buildManifest(options);
@@ -189,7 +203,7 @@ test('offline CLI smoke generates complete latest.json and rejects later binary 
   assert.equal(complete.status, 0, complete.stderr);
   const manifest = JSON.parse(await readFile(join(root, 'latest.json'), 'utf8'));
   for (const platform of requiredPlatforms) assert.ok(manifest.platforms[platform]);
-  verifyManifest(manifest, await buildManifest(options));
+  verifyManifest(manifest, await buildManifest({ ...options, notes: (await preflight(root, 'stable', 'v1.2.3')).body }));
   await writeFile(join(path, options.assets[0].name), 'tampered after signing');
   const tampered = run();
   assert.equal(tampered.status, 1);
@@ -222,4 +236,25 @@ test('stable requires MSI in addition to NSIS; preview refuses MSI assets', asyn
   const assets = [...preview.options.assets];
   for (const [assetName, size] of [[name, data.length], [name + '.sig', signature.length]]) assets.push({ name: assetName, state: 'uploaded', size, browser_download_url: `https://github.com/example/hypercom/releases/download/v1.2.3-preview.1/${assetName}` });
   await assert.rejects(buildManifest({ ...preview.options, assets }), /Preview must contain NSIS only, not MSI/);
+});
+
+test('finalize refuses draft body drift before reading assets or mutating the release', async (t) => {
+  const root = await source(t);
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ id: 123, tag_name: 'v1.2.3', draft: true, prerelease: false, body: '# HyperCom v1.2.2\n\nOld notes' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const script = fileURLToPath(new URL('./release.mjs', import.meta.url));
+  await assert.rejects(promisify(execFile)(process.execPath, [script, 'finalize', 'stable', 'v1.2.3', '123'], {
+    cwd: root,
+    env: { ...process.env, GITHUB_TOKEN: 'offline-fixture-token', GITHUB_REPOSITORY: 'example/hypercom', GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, PREPARE_RESULT: 'success', MATRIX_RESULT: 'success' },
+  }), (error) => {
+    assert.match(error.stderr, /Draft release body differs/);
+    return true;
+  });
+  assert.deepEqual(requests, ['GET /repos/example/hypercom/releases/123']);
 });

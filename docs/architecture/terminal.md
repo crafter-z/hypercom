@@ -59,19 +59,19 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 ## 多编码
 
 - RX 切行/解码/批写统一走 `RxPipeline`；解码器**单一来源** `src/utils/lineText.ts`（`decodeBytes` 模块级按 label 缓存 `ignoreBOM: false` —— 行首 BOM 是编码标记，被剥离，不进入行文本/搜索/复制；ttyService 的流式解码器由同一个 `createDecoder` 工厂构建，因持残字节而 per-port 独占）；GBK 后端 `encoding_rs::GBK`，前端 `TextDecoder` + `setTerminalEncoding`。
-- 切换编码：`setTerminalEncoding` 只更新 label——RX 行只存 `rawData`，渲染/搜索/过滤/复制在下次读该行时按新 label 惰性解码（**无**存量行遍历）。
+- 切换编码：`setTerminalEncoding` 只更新 label——RX 行只存 `rawData`，渲染/复制按新 label 惰性解码，不重写存量行；manager 的 `updateConfig` 在编码变化时重算过滤/搜索列表，HEX/字符串切换时重算搜索，列表与可见文本保持一致。
 - 编码切换前必须 `flushAndReset`（旧编码冲刷尾部落盘 + 重置组装器），否则尾字节被新 label 直接解码、缝合处乱码（GBK 尾字节被当 UTF-8 首字节）。解码器是共享缓存且非流式、不留残字节，故无需清理。
 
 ## 语法高亮与协议字段着色
 
 - **高亮引擎**：`src/utils/highlightEngine.ts`（纯函数）+ `useRuleStore.highlightRuleSets`。按集 `isEnabled` 过滤，遍历规则（isRegex → RegExp exec / 关键词 → indexOf 循环），收集 HighlightMatch[] 按位置排序去重（优先最长匹配），构建 `<span style="color:...">` HTML——`escapeHtml` 防 XSS + `dangerouslySetInnerHTML` 注入。**从不读 `activeHighlightSetId`**（RulesSection 移除后该字段已删）。
-- **协议解析**：`src/utils/protocolParser.ts`——`ProtocolFrameReassembler.feed()` 返回**有序段数组**（`ReassemblerSegment[]`，`{kind:'frame'|'raw'}`，相邻 raw 合并），不再是 `{frames, flushedBytes}`（帧前裸字节曾排在所有帧之后渲染，字节流顺序错乱）。帧解析：验证帧头/读取长度字段（totalFrameLength = lengthValue - adjust + fieldSize）/验证帧尾/计算校验和（sum8/xor8/crc8）→ 构建 ParsedField[]（Header/Length/Payload/Checksum/Footer + 颜色）。per-port reassembler 存 useRef Map，端口断开清理。
-- 渲染：`line.parsedFields` 存在 → `renderProtocolLine`（hex 模式每字段字节 → 2 字符 hex；text 模式 TextDecoder 解码 + escapeHtml）；否则 `applyHighlightSets` 原路径。
+- **协议解析**：`src/utils/protocolParser.ts`——`ProtocolFrameReassembler.feed()` 返回**有序段数组**（`ReassemblerSegment[]`，`{kind:'frame'|'raw'}`，相邻 raw 合并），帧前裸字节不会排到所有帧之后。帧解析：验证帧头/读取长度字段（totalFrameLength = lengthValue - adjust + fieldSize）/验证帧尾/计算校验和（sum8/xor8/crc8）→ 构建 ParsedField[]；声明长度小于帧头/长度字段/帧尾所需空间或超过 65536 时按损坏帧重同步。per-port reassembler 由接收 effect 持有，模板编辑/切换、模式切换、消费者释放与断线统一退役。
+- 渲染：`line.parsedFields` 存在 → `renderProtocolLine`，显示格式由当前终端 `displayFormat` 决定，不依赖 RX 事件的 `isHex`；text 模式整行共用流式解码器，跨字段的多字节字符归入完成它的字段，不会变成替换字符；否则走 `applyHighlightSets`。
 
 ## 终端搜索
 
 - `terminalSearch.ts` `markSearchMatchesInHtml`：HTML tag/实体感知的 `<mark>` 叠加层，只在命中行（每屏 ~50 行）应用，兼容用户高亮 span 与协议着色（跨界匹配自动拆段），当前匹配行 current 加强样式。
-- 匹配计算**仅搜索栏打开时进行**，且只有一份实现（`viewportManager.recomputeSearch`）：新行在 append 时匹配一次并入列，查询/编码变化才整缓冲重扫；缓冲头部裁剪只 bump 列表 offset——不需要「前缀收窄」缓存，也没有需要校验的 lineCount。
+- 匹配计算**仅搜索栏打开时进行**，且只有一份实现（`viewportManager.recomputeSearch`）：新行在 append 时匹配一次并入列，查询/编码/显示格式变化才整缓冲重扫；缓冲头部裁剪只 bump 列表 offset，同时保持当前匹配指向仍存活的行，目标被裁则钳制到有效索引。导航更新旧/新当前行的字符级 mark；清屏会调度订阅通知，空过滤结果清零 spacer，不保留无内容的滚动空间。
 - `terminalSearch.ts` 只负责单行搜索文本（HEX 显示走 `hexFormat.bytesToSpacedHex`）与 `markSearchMatchesInHtml` 字符级叠加，不再提供第二套匹配扫描。
 - 已知边界：关闭搜索栏期间按 F3 重新打开时首次导航需再按一次（匹配在打开后才计算——「不后台全缓冲扫描」的代价）。
 

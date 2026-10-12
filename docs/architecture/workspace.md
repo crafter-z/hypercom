@@ -49,8 +49,8 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 ### 通用弹出管线（Rust `commands/popout.rs`）
 
 - 窗口注册表 `AppState.popouts: Mutex<HashMap<String, PopoutMeta>>`，key 为窗口 label，value 记 `{kind, target_id}`；label 约定：快捷发送 = `"quick-send"`（单例）、终端 = `"terminal-{safe_id}"`（每端口一个）。
-- **label 只由 Rust 计算**：`sanitize`（portId 安全化）+ `compute_label`（按 kind + target_id 拼 label，未知 kind 返回 Err）是唯一实现；三个命令只收业务语义参数，前端不复制这套规则（前端 `Popout/popoutLabel.ts` 已删除）。
-- `open_popout(kind, target_id)`（**async**——Windows/Webview2 下同步命令建窗会死锁）：label 已存在 → `show()` + `set_focus()` 拉起；否则 WebviewWindowBuilder 新建。URL `index.html?popout={kind}&id={target_id}`；`.decorations(false)` + `.always_on_top(true)` + `.skip_taskbar(true)` + `.parent(&main)`（owner 语义：随主窗最小化/销毁、恒在主窗之上）+ 按 kind 取默认尺寸（快捷发送 280×640 / 终端 720×480）。
+- **label仅由Rust计算**：`sanitize`将非ASCII字母数字/`-`的UTF-8字节编码为`_HH`（包括下划线本身），不同端口不会因替换字符碰撞；`compute_label`按kind/target_id派生，前端不复制规则。
+- `open_popout` 为async，存在则show/focus，否则建独立owner窗口。`popout_url` 使用 `url::form_urlencoded` 编码query，端口中的`+`、`&`、`#`及非ASCII不会改变目标。窗口不装饰、置顶、跳过任务栏并parent(main)，按kind取默认尺寸。
 - `close_popout(kind, target_id)` / `set_popout_always_on_top(kind, target_id, on)`（窗口由 kind + target_id 算出，不存在时返回 Err）。弹窗位置/尺寸**不跨会话持久化**，每次新建都取默认尺寸。
 - 终端弹窗销毁由 `lib.rs::on_window_event` 的 `Destroyed` 分支感知（X 按钮与 `close_popout` 两条路径都恰好触发一次）：先从注册表移除，再 emit `popout:terminal:closed`——主窗据此清除标签的 detach 标记、恢复终端显示。
 
@@ -64,7 +64,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 | 事件 | 方向 | 载荷 | 用途 |
 |---|---|---|---|
 | `command-sets:changed` | 主窗 → 快捷发送窗 | **完整 `SendCommandSet[]`** | 命令集改动后弹窗直接 `setSets(载荷)`（曾是无载荷信号回库重读——未保存编辑只存在于主窗 store，弹窗读不到；改为主窗 store 是唯一真相） |
-| `popout:command-set-updated` | 弹窗 → 主窗 | `{ set: SendCommandSet }`（整集） | 弹窗里改了命令集则**整集回传**，主窗写回 `useRuleStore` 活实体（弹窗本地不持有可写副本；主窗之后经 `command-sets:changed` 广播回所有弹窗） |
+| `popout:command-set-updated` | 弹窗 → 主窗 | `{ set: SendCommandSet }` | 主窗更新活实体并落盘、成功推进基线；之后广播完整集合。弹窗不重复写入后端。 |
 | `active-tab:changed` | 主窗 → 快捷发送窗 | `portId: string \| null` | 弹窗知道发送到哪个明确端口；无端口工具页为 `null`，不沿用旧目标 |
 | `port-statuses:sync` | 主窗 → 弹窗 | 全部端口连接状态 | 对表时全量回放（实时增量走 `serial:status` 广播），弹窗在已连接状态下打开时提示灯即刻准确 |
 | `serial:data` | 后端 → 所有窗 | 字节流 | 终端弹窗订阅（主窗与弹出窗各自模块单例） |
@@ -75,7 +75,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 | `popout:request-sync` | 弹窗 → 主窗 | 无 | 弹窗监听器**注册就绪后**请求对表，主窗回放 active-tab + command-sets + port-statuses |
 | `ui-scale:changed` | 主窗 → 已打开弹窗 | `{percent}` | 设置保存成功后同步软件 UI 缩放；弹窗自己启动时先读 config.json 并缩放各自 WebView |
 
-- 发送：弹窗直接 `invoke('send_data')` → 共享 AppState → 后端 emit serial:data → 主窗 useSerialReceive 自动写终端——**发送→回显链路天然跨窗口**。快捷发送弹窗经 `popout:send-command` → 主窗 `sendToPort(payload.portId ?? getActivePortId(state))`（显式端口优先；解析结果为空时不发送；TX echo/流量/历史仍按端口处理）。
+- 发送必须经 `popout:send-command` → 主窗 `sendToPort`，不直接invoke串口写入。面板每个意图携带明确端口，文本顺序/循环启动时冻结目标；主窗焦点或下拉变化不使运行中目标漂移。记住的手选端口暂不可用时保留，不自动回退到另一设备；后端/发送守卫处理不可用端口。
 - `usePopoutBridge` 全部 fire-and-forget emit 补 `.catch`（弹窗销毁时 rejection 不再 unhandled）。
 - 主窗在 store 变更时广播 `command-sets:changed` / `active-tab:changed`；对表必须等监听器注册完成后再发 `popout:request-sync`，否则回放会早于监听器到达而丢失（指示器失真）。
 
@@ -94,9 +94,11 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 - OperationPanel 分区：`OperationPanel.tsx` + `SendSection.tsx` + `ParamsSection.tsx`（旧 `RulesSection.tsx` 已删——命令集选择+循环开关收进 SendSection 紧凑头部 `.op-send-header`，高亮下拉是死控件）。**组件定义在模块级**（父组件内定义子组件会因函数身份变化导致 DOM 销毁/输入失焦）。
 - Resize：`OperationPanelResizeHandle.tsx`（共享 `useDragResize`，`mode:'delta'` + `invert`：hook 只报累计拖动位移，组件以拖拽起始高度加位移、clamp [160,600] 后写 `useSystemStore.ui.operationPanelHeight`，默认 280px；开始拖动同时展开折叠的面板）。
+- 串口参数同步签名包含DTR/RTS；仅切换控制线也触发300ms防抖后端更新，不与当前值自比较而误跳过。
 - 布局防线：`.op-section > * { flex-shrink: 0 }`（面板变矮时发送键不被压塌叠压）；`.op-section-params` `max-width: 300px` 封顶（宽窗口参数栏不挤占发送区）。
 - Sidebar：`Sidebar.tsx` + `AliasDialog.tsx`；端口右键菜单分组控制（见 serial.md）。侧边栏宽度由 `App.tsx` 渲染的 `shared/SidebarResizeHandle.tsx` 调整（共享 `useDragResize`，clamp [200,400]，写 `useSystemStore.ui.sidebarWidth`）。
 - 设置弹窗 ConfigModal 框选文字松手界外不关闭（issue #6-8）：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭。
+- 设置的取消、X、遮罩与Escape均经同一普通草稿回滚；已独立持久化的规则基线和插件状态保留。
 - **UI 运行态与系统态都在 `useSystemStore`**（`src/stores/useSystemStore.ts`），`useAppStore` **不再持有** `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`：`ui.*`（`sidebarWidth` / `sidebarCollapsed` / `operationPanelHeight` / `isConfigOpen` / `configActiveTab` / `configReady` 等）写入口是 `setUIState` / `toggleConfigModal` / `setConfigActiveTab`，流量回收是 `clearTrafficStats`。这些字段写点密集（5s 系统轮询、每端口 1s 流量 flush、拖拽 resize），与端口/标签数据分开后各自订阅面互不干扰。
 
 ## 通知中心 / toast

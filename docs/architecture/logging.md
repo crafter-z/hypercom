@@ -27,8 +27,10 @@
 
 ### RX 日志行组装（issue #5-9/10）
 
-- `LogLineAssembler`（`assembler.rs`）：字节级 CR/LF/CRLF 合并（跨两次 feed 的 CRLF 对识别为**一个**分隔符）、`pending_cr` 标记、4096 字节无分隔符**强制 flush**（防无换行二进制流撑爆缓冲）、`take_tail`；强制发射后**紧跟**的分隔符经 `just_forced` 只终结已发射的行、不再凭空多出幻影空行。**镜像前端 `rxAssembler`**。
+- `LogLineAssembler`（`assembler.rs`）：CR/LF/跨事件CRLF组行与`pending_cr`/`just_forced`边界语义。4096字节无分隔符强制flush按writer锁定的UTF-8/GBK字符边界最多延迟3字节，避免字符被拆成替换符；畸形流仍有4099字节硬边界，单字节编码按原阈值。与前端`rxAssembler`保持同一切分口径。
 - `LogManager::write_rx`：RX 方向组行落盘（不再按读取块一行）；TX 保持直写 `write`。RX 尾部滞留 ≥250ms（`RX_TAIL_SILENCE_FLUSH`）时，下一个事件先经 `flush_stale_rx_tail` 把尾部冲刷成行，长停顿的半行不会无限滞留。
+- `close_writer`、writer 替换、`flush_all`（崩溃收尾）和活动日志 `save_log_as` 都先把尚未终结的 RX 尾部写成最后一行，再 flush/sync；仅刷 `BufWriter` 不会触及组装器内的半行。分片滚动保留组装器，跨片尾部不会被清空。
+- 续写模式替换同端口 writer 时，如果新旧路径相同，该文件仍归新 writer 所有；旧 writer 收尾不得将它当作空日志删除，否则 Unix 下后续写入会落到已解除链接的句柄。
 - 空行不落盘守卫：`PortLogWriter::write_line` 顶部 `data.is_empty()` 直接返 `Ok`；string 格式 decode 后 `trim_end_matches(['\r','\n'])` 为空（只含行结束符的内容）同样跳过（issue #12：日志空行不落盘）。`close_writer` 收尾时 0 字节文件经 `retire_path` **删除**（有内容的文件登记进会话反查表）。
 - 新增日志写入路径不要绕过这两个守卫（组装器仍会产出空块，这是刻意的行边界语义）。
 
@@ -36,6 +38,7 @@
 
 - `log_split_enabled` / `log_split_size_mb`：`LogManager::maybe_split` → `PortLogWriter::needs_split`（阈值判定 `should_split` + 分片失败 5s 退避）超阈值自动分片；**split 续片经 `PortLogWriter::rotate(force_new_file=true)` 强制唯一化（与 `logNewFilePerSession` 开关无关）**——粗粒度模板（`[com]`/`[com]-[date]`）下 append 重开刚关闭的超阈值文件会令 `current_size` 从超阈值初始化、每写必分片（死循环）。`rotate` 先把新文件开好再替换，失败时旧 writer 原封不动继续可用。
 - `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：`naming::allocate_file` 按策略 join 子目录（`create_dir_all`）；`list_files` 经 `collect_log_files` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。
+- 文件名模板替换完成后，最终 stem 与端口名一样经过 `sanitize_filename_component`：模板中的绝对路径、路径分隔符和 `..` 不得把日志带出根目录；子目录布局只由 `logSubdirMode` 控制。
 - `log_include_timestamp` / `log_include_direction`（缺省 true）：控制 `PortLogWriter::write_line` 是否 emit `[timestamp] ` / `RX|TX ` 前缀；两者都关 → 裸数据行。它们与 `format` / `encoding` 一样锁于 `create_writer` 时（`WriterSpec`），后续重开沿用创建时锁定的值。
 - `log_encoding`：`create_writer_with_encoding` 按编码解码（GBK 等，`decode_bytes`）。
 - `log_new_file_per_session`（默认关，保持续写）：每次 `create_writer`（打开串口/重连）用 `FileMode::Unique` 经 `naming::open_unique` 以 `create_new(true)` 原子分配**不存在**的文件（同名冲突依次 `name-1.log`/`name-2.log`…，数字插扩展名前），绝不续写。
@@ -52,6 +55,7 @@
 - 后端 `diaglog.rs` 的 `DiagLogger`：后端 `log::*` + 前端 `console.*`（`utils/diagLog.ts` 的 `setupDiagLogCapture` 拦截转发）统一落盘 `%APPDATA%/hypercom/diag/hypercom-debug.log`（512KB 轮转，保留 3 份）。
 - 开关 `config.diagLogEnabled`（Rust 序列化名，`AppState::apply_runtime_config` 里经 `DiagLogger::set_enabled` 同步）；查看入口「关于 → 诊断日志」（`shared/DiagnosticLogDialog.tsx`）。
 - 命令（`commands/diag.rs`，4 个）：`get_diag_log_path` / `read_diag_log` / `clear_diag_log` / `append_diag_log`。
+- `clear` 从释放活跃句柄直到删除备份、截断文件都持有同一把写入/轮转锁；并发追加只能完整发生在清空前或后，不会在清空中途重开句柄或搬回旧备份。
 - 自动更新失败/静默降级等诊断路径写入这里。
 
 ## 数据流速查

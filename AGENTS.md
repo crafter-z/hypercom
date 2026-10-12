@@ -47,7 +47,7 @@ src-tauri/src/
 ```
 src/
 ├── main.tsx / App.tsx        # entrypoints（App.tsx = AppInit + SerialReceive + 全局自定义文本右键菜单）
-├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），586 键 × zh-CN/en-US
+├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），583 键 × zh-CN/en-US
 ├── services/                 # 14 个非测试文件：tauri.ts barrel + 13 域（含 plugin / pluginView）
 ├── hooks/                    # 18 个 hook 文件 + barrel index.ts + disconnectTracking.ts
 ├── stores/                   # 6 个 store 模块 + releaseTerminalState.ts + resetStores.ts
@@ -98,8 +98,8 @@ src/
 1. **HEX 输入奇数位是错误态**：`sendUtils` 的 `sanitizeHexInput` / `parseHexBytes` 为严格模式——奇数位 nibble 与非 HEX 字符一律产出空（**不再补零**），与后端拒绝口径一致。
 2. **解码统一 `ignoreBOM: false`**：行首 BOM 被剥离（它是编码标记，不是内容），不进入行文本/搜索/复制。
 3. **文件发送走 `isSendablePort` 守卫**（不可发送连文件框都不弹）且**按增量计入 `trafficStats` TX**；成功 toast 只在 `done` 事件 `sent >= total > 0` 时弹，取消/空文件静默清条。
-4. **弹窗改命令集经 `popout:command-set-updated` 整集回传主窗**，写回 `useRuleStore` 活实体。
-5. **全量保存走安全快照 + CAS**：`saveConfig(patch?)` 每轮读后端 `revision` / `portPresets`，从 `useAppStore`（标量 + groups）+ `useRuleStore`（5 个活实体）+ `mergePortMeta(ports, persisted.portMeta)` 拼装；在线端口编辑权威，离线端口原有备注/隐藏/TTY 设置保留；自动保存 `saveCurrentPortMeta` 同样以最新后端配置做 revision CAS，并与本窗全量保存串行化。规则 CRUD 的后端更新不被旧快照回滚，五次冲突后返回 false。旧 `mergeLiveRuleEntities` / `utils/configMerge.ts` 已删。
+4. **弹窗改命令集经 `popout:command-set-updated` 整集回传主窗**，主窗更新 `useRuleStore` 活实体并落盘，不由两个窗口重复写入。
+5. **全量保存走安全快照 + CAS**：`saveConfig(patch?)` 每轮读后端 `revision` / `portPresets`，从普通设置草稿、5 类活规则、groups 与 `mergePortMeta` 拼装。规则与最后确认持久化基线比较；`storageService` 成功加载/CRUD 与全量保存后推进基线，失败不推进，取消设置保留它。其他窗口较新 CRUD 获胜，本窗已保存后继续编辑不会被启动快照误判并丢弃。端口元数据保留离线条目；自动保存与全量保存串行并 revision CAS，五次冲突返回 false。
 6. **TTY 无本地回显**：`sendToPort` 的 TTY 分支跳过 TX 回显与 `flushNow`（仍走后端发送/流量统计/历史）；pty 写做回车归一（`\r\n` → 单个 `\r`）。
 7. **关闭标签页保留串口连接**：`Pane.cleanupClosedTab` 先 `dismissPluginTab(tabId)`；serial 标签按 `tab.portId` detach TTY、释放 stock viewport 并 `discardTerminalQueue`。store 移除标签后调用 `releaseUnusedPortState(portId)`，仅最后一个显示/行消费者退休才回收共享元数据与行管线；不伪造断线。批量关闭用 `getClosingTabIds(tabId, scope)` 取同一集合。
 8. **持久化 UI 缩放**：`uiScalePercent` 默认 100%，范围 80–200%，独立于 `terminalFontSize` / `uiFontSize`。`App.tsx` 在 `configReady` 后、`PopoutShell.tsx` 从 config.json 加载配置后分别调用 `utils/uiScale.ts` 的 `applyUiScale`；`ConfigModal.handleSave` 只有 `saveConfig` 成功才应用新值，并经 `ui-scale:changed` 同步已打开的弹出窗。原生 `getCurrentWebview().setZoom(percent / 100)` 只改变当前 WebView，不使用 CSS transform。
@@ -114,7 +114,7 @@ src/
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
-│   ├── i18n.ts                   # 586 keys × zh-CN/en-US
+│   ├── i18n.ts                   # 583 keys × zh-CN/en-US
 │   ├── services/                 # 14 non-test files = tauri.ts barrel + 13 domain files
 │   ├── hooks/                    # 18 hook files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 6 store modules (no god store; useTerminalStore 已去 Immer)
@@ -199,7 +199,7 @@ hypercom/
 | ConfigModal 框选不关闭 | `ConfigModal.tsx` | overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭（框选文字松手界外不再误关） |
 | 通知中心面板 / 快捷发送 pill 样式 | `notification-center.css` + `operation-panel.css` | `.notify-panel` 加宽加高；`.op-quick-cmd` flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称）在上、`.op-quick-cmd-content` 在下；`.notify-row-port`/`.notify-row-time`；`.op-quick-panel-btn` accent 填充按压按钮 + `.op-quick-panel-btn-label` |
 | 自定义文本右键菜单 | `src/components/shared/TextEditContextMenu.tsx` + `App.tsx` / `PopoutShell.tsx` | 输入框/文本域/可编辑区右键显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选，`contextMenu.*` i18n）；`useTextEditContextMenu()` document 级拦截——可编辑目标 `preventDefault` + 弹自定义菜单（右键时快照选区，点击项先恢复焦点+选区再 `document.execCommand`），非可编辑目标一律 `preventDefault`；App 根 + PopoutShell 各挂一次；组件级 `onContextMenu`（stopPropagation 的终端行/侧边栏/标签页）不受影响 |
-| 配置持久化审计（全量保存不丢实体） | `hooks/useConfigPersistence.ts` `saveConfig(patch?)` + `mergePortMeta` | 规则实体启动快照与活 store 分离；普通保存组装安全快照并 revision CAS。插件镜像独立排序；备份导入的插件授权仍受安装身份约束 |
+| 配置持久化审计（全量保存不丢实体） | `hooks/useConfigPersistence.ts` `saveConfig(patch?)` + `mergePortMeta` + `services/storage.ts` | 活编辑与最后确认的规则持久化基线分离；成功读取/CRUD/全量保存推进基线，普通保存 revision CAS；插件镜像独立排序，备份导入授权受安装身份约束 |
 | CI / 质量门 | `.github/workflows/ci.yml` | 分支 push/PR/manual：前端类型检查、Vitest、release 脚本测试与生产构建；Rust 单测与 release-profile 编译检查；mock IPC Playwright。实际命令和发版流差异见 `docs/architecture/release.md`，自动化不代替原生插件验收 |
 
 ## CODE MAP
@@ -547,9 +547,9 @@ scope: ui | backend | store | hooks | docs
 - Sidebar split into: `Sidebar.tsx`, `AliasDialog.tsx`, `GroupItem.tsx`, `GuideCard.tsx`, `SearchBox.tsx`, `SidebarActions.tsx`, `SidebarToolbar.tsx`, `SortablePortItem.tsx`, `groupActions.ts`, `hooks/usePortDragEnd.ts`.
 - Per-tab display state (`scrollLocked`, `displayFormat`, `encoding`, `showTimestamp`) lives in `useTerminalStore`, NOT in `useOperationStore`. Display controls (TerminalFilterBar, encoding select) must write via `useTerminalStore.getState().setTerminalConfig(portId, ...)` or `setTerminalEncoding(portId, encoding)`. Never reintroduce global display fields in `useOperationStore`.
 - `src/utils/sendUtils.ts` provides `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` / `computeByteCount` / `parseHexBytes` / `getLineEndingBytes` / `LINE_ENDING_VALUES` / `lineEndingLabelKey` for HEX send/parse (pure, unit-tested)。行结束符下拉统一从 `LINE_ENDING_VALUES` 取（见下条）。
-- **JSX 属性字符串不转义**：`<option value="\r\n">` 里 `\r\n` 不会按转义处理，运行时值是 6 字符字面量 `\\r\\n`，与域值 4 字符 `\r\n` 不等 → `formatLineEndingHex`/`getLineEndingBytes` 落到默认分支，行尾提示/字节数/发送字节全错。行结束符选项必须用表达式字面量 `value={'\r\n'}`，label 走 `lineEndingLabelKey(v, ns)`。
+- **行尾域值是反斜杠字符串**：`LineEnding` 为 `'\\r\\n' | '\\r' | '\\n' | 'None'`，不是实际 CR/LF 控制字符。所有选项从 `sendUtils.LINE_ENDING_VALUES` 生成，label走 `lineEndingLabelKey`；不要手写 JSX 字符串或表达式，避免保存后后端收敛回默认值。
 - **发送守卫**：`sendToPort` 非静默发送前检查 `utils/sendGuard.ts` `isSendablePort`——端口缺失/断开/连接中/错误时推 `sendSection.portClosedWarning` toast 并返回 0；循环发送与触发自动回复的静默发送（`silent=true`）静默返回 0 不打扰用户。**文件发送同样过守卫**（`useFileSend`：不可发送连文件框都不弹）并把每轮字节增量计入 `trafficStats` TX。新增发送逻辑若绕过 `sendToPort` 直连后端，会失去该守卫与 TX 回显/历史管线。
-- **config 实体快照陷阱**：`useAppStore.config` 的实体数组（sendCommandSets/highlightRuleSets/protocolTemplates/triggerRules/portToolConfigs/portPresets）是**启动快照**，不会自动跟随 `useRuleStore`。任何全量保存**必须**走 `useConfigPersistence.saveConfig(patch?)`——它内部现场拼装安全快照（标量 + `useRuleStore` 活实体 + `state.groups` + `collectPortMeta(state.ports)` + 后端读回的 `portPresets`；`portPresets` 读不到就不写，宁可不保存也不用陈旧快照覆盖磁盘）。旧 `utils/configMerge.ts` / `mergeLiveRuleEntities` 已删——**不要**再手写「合并后 set_config」的调用点。
+- **config 实体基线**：`useAppStore.config` 的五类规则数组是最后确认的持久化基线，不是活编辑。`storageService` 仅成功读取/CRUD 后推进它；全量保存成功也推进，取消设置保留。活规则在 `useRuleStore`，预设无活镜像须从后端读回；所有全量保存走 `useConfigPersistence.saveConfig(patch?)` 的安全快照 + revision CAS，禁止直接交启动配置或手写第二份合并写入。
 - **跟随钉底**：跟随路径由 `TerminalRenderer.render` 内联计算目标值并同帧写 scrollTop（padding 感知、无 React effect、无双 rAF 链、无第三方虚拟化）。`utils/followLogic.ts` 只剩 `isAtBottom` / `shouldFollow` 两个纯函数；到顶/搜索跳转走 `viewportManager.scrollToSeq` / `scrollToBottom`。
 - **通知中心**：宿主 push 的粘滞/溢出记录保留，已接纳通知超过 5 条进入 stashed；插件走 pushPlugin，超额度静默丢弃而非无限积压。串口来源必须带 portId，时间戳取 createdAt；插件来源由宿主赋 pluginId。限额唯一实现与文档见 `useToastStore.ts` / `docs/architecture/plugins.md`。
 - **触发规则自动持久化**：TriggerSettings 编辑触发规则 300ms 防抖逐条保存（`savedSnapshotRef` 与当前 rules diff），关闭弹窗时 flush 窗口内未保存编辑；新增/修改规则应走 `storageService.saveTriggerRule`，勿绕过。
@@ -631,7 +631,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## i18n (2026-07 基础设施)
 
-- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**586 keys × zh-CN/en-US**（本次每侧新增 8 个插件视图键；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符）
+- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**583 keys × zh-CN/en-US**（默认行尾复用发送区键，删3个重复键；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符）
 - `main.tsx` 顶层 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`

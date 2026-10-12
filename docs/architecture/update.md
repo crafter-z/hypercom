@@ -50,7 +50,7 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 
 ## 前端决策流
 
-- `useAutoUpdate`（`hooks/useAutoUpdate.ts`，App.tsx 挂一次）：先过 `isUpdateCheckEnabled()`（DEV 构建与 macOS 直接不检查），再等 `ui.configReady` 信号（`useConfigPersistence.loadConfig` 完成置位，15s 兜底）后评估——复审替代旧 3s 启发式窗口（config 加载慢于 3s 会按默认模式误判）。**会话内每 6h 重评估**（setInterval，门控在 shouldAutoCheck，常驻挂机覆盖）。
+- `useAutoUpdate`（`hooks/useAutoUpdate.ts`，App.tsx 挂一次）：先过 `isUpdateCheckEnabled()`（DEV 构建与 macOS 直接不检查），再等 `ui.configReady` 信号（`useConfigPersistence.loadConfig` 成功或失败后均置位）后评估。没有超时抢跑：慢启动期间不能用默认 stable 覆盖尚未加载的持久化 none/preview；就绪后立即按已提交模式检查。**会话内每 6h 重评估**（setInterval，门控在 shouldAutoCheck，常驻挂机覆盖）。
 - `shouldAutoCheck`：先检查 `none` 与有效 snooze，再判断首启、时钟回拨与 7 天周期；即使自动检查账为空，手动检查后的延期也生效。仅当前意图下成功完成的自动检查记 `lastCheckAt`。
 - localStorage 记账：`hypercom.update.lastCheckAt` / `hypercom.update.snoozeUntil`（`updateTiming` 读写，非法值解析为 null；per-install，不随配置导出）。
 - `utils/updateService.ts` 的 `getCommittedUpdateMode` / `commitUpdateMode` 管理已提交模式，与设置页 `useAppStore.config` 草稿分离。加载/成功保存使旧 generation 失效，取消设置不会触发升级副作用。

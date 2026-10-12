@@ -75,6 +75,7 @@ openPort(portId, baud)
 
 - `closePort(portId)` 路由经 `useSerialConnection`：调 `stopLogging` 更新端口状态 → `close_serial_port`。
 - `close_serial_port` 在全局 manager 锁外等待读线程和已经取出的真实串口写入租约，待最后的写句柄释放后才返回；关闭期间同端口重开等待完成信号，不再与仍在飞的发送抢独占 COM 句柄。异步 join/等待由阻塞线程池承载，其他端口命令不被全局锁拖住。
+- `attempt_reconnect` 在进入阻塞线程池前登记每端口意图令牌；用户关闭、显式打开或较新的重连会取消旧令牌。旧尝试在摘除句柄前与最终打开前都于 manager 锁内复查，锁外枚举/join 期间发生关闭也不能重新打开端口或发出新的 connected；旧任务结束不会删除较新的令牌。公开 invoke 参数不变。
 - **标签页关闭 ≠ 端口关闭（issue #11）**：关闭标签只销毁前端显示目标（`Pane.cleanupClosedTab` → `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)` 回收该端口的终端显示态/流量统计/TX 历史），串口连接与后端日志保持。批量关闭先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合再逐个走该生命周期。重开标签页从零开始新一轮输出。
 
 ## 参数与流控
@@ -90,13 +91,14 @@ openPort(portId, baud)
 1. 读写共用同一把 per-port 锁——TX 的 write_all+flush 阻塞时读线程拿不到锁，响应到了 OS 接收缓冲也读不走；
 2. 热路径 `flush()`（Windows = FlushFileBuffers）无超时、受流控约束（对端 CTS 拉低/XOFF 时无界阻塞）。
 
-修复：`SerialPortHandle` try_clone 拆 read/write 双句柄；读线程只锁读、发送只锁写；热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 重试到总期限、Interrupted 继续）。发送改**两段式**：全局锁内 `get_write_handle` 查找并取得写租约 → 释放全局锁 → 锁外只持 per-port 写锁写；关闭先从注册表摘除端口、停止读线程，再锁外等待所有已取得的写租约完成并释放写句柄。端口列表轮询/其它端口命令不被 TX 阻塞拖死；当前端口快速关闭/重开不会冲撞仍被 TX 占用的独占句柄。
+修复：`SerialPortHandle` try_clone 拆 read/write 双句柄；读线程只锁读、发送只锁写；热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 与 Interrupted 都重试至总期限）。发送改**两段式**：全局锁内 `get_write_handle` 查找并取得写租约 → 释放全局锁 → 锁外只持 per-port 写锁写；关闭先从注册表摘除端口、停止读线程，再锁外等待所有已取得的写租约完成并释放写句柄。端口列表轮询/其它端口命令不被 TX 阻塞拖死；当前端口快速关闭/重开不会冲撞仍被 TX 占用的独占句柄。
 
 ## 虚拟端口（SIM:Loopback）
 
 - `enable_simulation` / `disable_simulation`（`commands/simulation.rs`）创建虚拟串口，flask 图标在侧边栏工具栏（`useSimulation` hook）。
 - **能力门控（仅 debug 构建可用）**：前端 `DEV_FEATURES_ENABLED = import.meta.env.DEV`（`utils/devMode.ts`）隐藏全部 SIM UI 并在 hook 内兜底 no-op；后端命令入口由 `commands/system_cmds.rs` 的 **`dev_only(capability)`** 守卫拒绝 release 构建——**`dev_only()` / `is_debug_build()` 是构建期能力门控的唯一实现**，命令体只有一份实现，不得再写 `#[cfg(debug_assertions)]` 双主体。端口层另有第二道门 `check_virtual_enabled`（见「模块布局与端口类别分派」）；仅 `npm run tauri dev` 可用。
 - **周期输出频率命令**：向 SIM:Loopback 发送**文本模式纯数字**（trim 后为数字，如 `100`）即把周期输出频率切到每秒 N 次（0 = 停止；上限 `MAX_SIM_RATE = 10000`，超限 clamp），命令本身不回显——输出为 `[SIM] Heartbeat #<seq>` 序号行，积分器补发保证平均频率精确（`sim_due_lines` 纯函数，100ms 循环节拍不限制高频）。HEX 模式/非数字 TX 保持原回显。默认 2/s。
+- GIT:BASH 读线程在 EOF/错误/正常停止后先把 `running` 置 false，再发 disconnected；bash 自行 `exit` 后可以重新打开，不会把已退出会话误判为存活句柄。
 
 ## 外部工具（flasher）
 

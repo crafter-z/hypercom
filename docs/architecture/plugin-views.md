@@ -43,6 +43,8 @@
 
 Binding 区分 tabSessionId、viewInstanceId、workerEpoch、streamEpoch和installGeneration。关闭重开、切换视图或故障重试创建新实例；隐藏、焦点及分屏移动保留。原生 ready 和 Worker 初始化完成必须同时满足，才显示页面/发布模型；各自期限和 ACK失败产生可观察的错误。
 
+主窗 runtime 的原生监听注册也绑定启动代次：停止后迟到的注册立即解除，旧回调和重复 cleanup 不得操作后续 runtime。React StrictMode 的启动→停止→启动不能留下第二条可用原生消息通道。
+
 ## 输入与回收
 
 `pluginViewInput` 按固定端口注册 bytes/lines/none 租约；工具页没有 RX 状态。输入旁路有界，gapBefore与streamEpoch在存活批次之前进入串行解析，重连/模式切换/裁剪/Worker拒绝都会清残帧边界。新会话实时开始，不补历史。
@@ -53,6 +55,8 @@ line 租约复用 RxPipeline/RxLineAssembler及协议绑定；没有原始终端
 
 Worker close是优先生命周期通道，释放已退休实例事件记账与排队数据，不排在 stalled async 回调后等待。迟到初始化不宣布ready，迟到副作用调用拒绝；已经开始的外部副作用不假装可撤销。
 
+TTY 同端口发送串行排队时，插件请求必须在实际发送开始前同步复核 Worker/请求仍存活、安装代次和当前授权；视图发送还复核原实例/标签/输入资格，绑定目标不变。停止、超时、升级、撤权或关闭发生在排队期间会拒绝尚未开始的发送，已开始的后端 I/O 仍不假装撤销。
+
 ## 布局、原始连续性与错误页
 
 `SerialContentHost` 在Pane树外稳定持有TRX/TTY实例，`tabContentPlacement` 提供布局。跨Pane移动不换组件所有者，原始缓冲/xterm保持；选择插件只隐藏原始显示，输入继续，TTY隐藏不fit零尺寸。
@@ -62,6 +66,8 @@ Worker close是优先生命周期通道，释放已退休实例事件记账与�
 Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry 子 WebView 的父窗口只能是该容器，不能直接使用 Tauri 主窗口。Wry 0.55.1 的 child drop 仍会移除父窗口的 resize/focus subclass；直接挂在主窗口会使关闭、禁用或创建失败后的宿主 WebView 停留在旧尺寸，放大出现黑边、缩小不重排。容器与 WebView 共用可见性，容器按主窗 client 坐标定位并保持在宿主 WebView 上方，WebView 使用容器内 `(0, 0)`；销毁顺序为 WebView → 容器，不重装或替换主窗事件回调。
 
 原生child不参与DOM z-index。`usePluginViewOverlay` 先等待控件隐藏再绘制宿主modal/context menu/通知；嵌套guard共享完成Promise。页面隐藏/拖拽也抑制控件。解除只恢复当前有效可见会话，过期rect不能重现已销毁UI。
+
+隐藏更新失败时，退休页面并等待 native destroy 完成后才允许宿主遮挡层绘制；destroy 同样失败则 handshake 拒绝，不把“已发起销毁”当作“控件已隐藏”。正常关闭仍异步回收，不延长其他健康页面的生命周期。
 
 故障/禁用/必要撤权/代次变化：serial替换回原始，plugin标签保留宿主不可用页/重试/关闭。不展示冻结模型伪装实时。Worker故障处理其所有实例，单UI异常不拖累健康页面。现有桌面弹出入口不支持插件页面，明确提示，不偷偷打开普通终端代替。
 
@@ -88,3 +94,10 @@ Windows 原生回归 `retiring_plugin_children_preserves_host_resize` 需安装 
 2026-10-10 resize 修复另以真实 Windows debug 应用 + Vite 前端、隔离临时配置实跑系统窗口边框拖拽：插件显示、关闭、禁用及重建后均能放大/缩小；最终构建销毁插件后 client/宿主 WebView 同步为 1330×840、1220×769，DOM 根随 viewport 重排。桌面截图确认插件内容可见且贴合内容区，宿主设置弹窗期间容器隐藏。此验证不替代 release 安装包与原生安全发布门。
 
 本次Windows真实debug可执行文件（生产前端资产）已观察到：独立settings保存经Worker写KV；独立table从SIM原始RX解析持续更新，排序/筛选及后台开波形动作可用，关闭原始后仍更新且实例保持。分屏、宿主设置遮挡恢复、无端口页禁用发送、撤权/禁用不关闭串口，以及清理调试scaffold后的替换→返回原始终端均实跑；TTY探针观察到xterm实例及提示屏跨分屏保留。Child诊断观察到无Tauri globals、网络/主窗/本机/未声明资源访问拒绝、popup及程序化clipboard read拒绝、Worker执行及frame拒绝；恶意导航使页面退休为错误，而非打开外站。临时端口/配置已清理。完整发版仍需最终release安装包和支持平台逐项验收，不能把debug探针或部分负向场景当作全部安全证明。
+
+### 2026-10-10 发版前代码审查补充
+
+- 已审查 Worker 启动取消、installGeneration/epoch 身份、当前授权过滤、RPC 超时/stop 后迟到响应、优先 close 与控制/RX 背压；视图 open/ready/retire/retry、固定端口输入租约/断流、状态合并/ACK/隐藏恢复；raw Wry child 销毁顺序、资源只读内存快照、主窗来源与固定绑定发送目标。原同步 `sendToPort` 探针观察到 backend send 先于随后撤权启动；集成新增 TTY ordered lane 后存在真实排队边界，因此通过 beforeSend 在 serial IPC 前重新执行请求/实例授权。backend 资产读写在有界 FIFO gate 后检查当前授权，文件选择在对话框返回后复核安装代次。已开始副作用仍不宣称可撤销。
+- 修复监听注册竞态：停止首轮、立即启动第二轮，再完成两次原生 listen 注册的独立运行探针，修复前观测两条注册但 cleanup 只解除第二条，首条泄漏。回归场景要求旧消息不能使新实例退休、两条注册都解除，旧 cleanup 不能停止新 runtime。
+- 修复遮挡握手过早完成：可见页面 hide 拒绝、destroy 保持 pending 的独立运行探针，修复前观测 `update-true → update-false → destroy-start → overlay-ready`，未等到实际 destroy。回归场景覆盖 destroy 完成后才 ready，以及 destroy 拒绝时不 ready。observer、pointer/visibility 和 release 的内部更新显式记录拒绝，不产生未处理 Promise；显式 guard.ready 仍保留拒绝语义，不把失败转成 ready。此探针只证明宿主 Promise 顺序，不证明原生 HWND 的隔离或可见性。
+- 本轮集成执行975项Vitest、309项Windows Rust（另1项默认跳过）、32项mock IPC Playwright及显式WebView2 child退休resize用例，通过。生产资产/CSP的真实debug应用打开raw Wry工具页并有桌面截图，正常宿主设置遮挡/恢复已观察；故障hide/destroy与队列撤权由行为回归覆盖，未伪称原生故障注入。最终release安装包仍须完整原生安全矩阵和支持平台逐项验收。

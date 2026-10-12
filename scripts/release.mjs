@@ -146,6 +146,11 @@ export async function buildManifest({ channel, tag, repository, server = 'https:
 export function verifyManifest(actual, expected) {
   const errors = [];
   if (actual.version !== expected.version) errors.push(`manifest version ${actual.version} != ${expected.version}`);
+  if (actual.notes !== expected.notes) errors.push('manifest notes do not match the release body');
+  if (typeof actual.pub_date !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(actual.pub_date)
+    || !Number.isFinite(Date.parse(actual.pub_date))
+    || new Date(`${actual.pub_date.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) !== actual.pub_date.slice(0, 10)) errors.push('manifest pub_date must be a valid RFC 3339 timestamp');
   for (const key of Object.keys(expected.platforms)) {
     if (actual.platforms?.[key]?.url !== expected.platforms[key].url || actual.platforms?.[key]?.signature !== expected.platforms[key].signature) errors.push(`Manifest missing/mismatched verified installer: ${key}`);
   }
@@ -244,6 +249,7 @@ async function main() {
     : await client.json(`/releases/tags/${encodeURIComponent(tag)}`);
   assertRelease(release, channel, tag, command === 'finalize');
   const info = command === 'finalize' ? await preflight(root, channel, tag) : { pubkey: JSON.parse(await readFile(join(root, 'src-tauri/tauri.conf.json'), 'utf8')).plugins.updater.pubkey };
+  if (command === 'finalize' && release.body !== info.body) throw new Error('Draft release body differs from the triggering RELEASE_NOTES section; restore the notes before finalizing');
   const directory = await mkdtemp(join(tmpdir(), 'hypercom-release-'));
   try {
     const { manifest, assets, readAsset } = await remoteManifest(client, release, channel, tag, info.pubkey, directory);

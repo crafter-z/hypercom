@@ -16,11 +16,12 @@ HyperCom 基于以下开源项目构建。本页列出各技术栈依赖及其�
 | `zustand` | ^5.0.13 | MIT |
 | `immer` | ^11.1.6 | MIT |
 | `@dnd-kit/core` / `sortable` / `utilities` | ^6.3.1 / ^10.0.0 / ^3.2.2 | MIT |
-| `@tanstack/react-virtual` | ^3.13.15 | MIT |
 | `@tauri-apps/api` | ^2.0.0 | Apache-2.0 OR MIT |
 | `@tauri-apps/plugin-dialog` | ^2.7.1 | Apache-2.0 OR MIT |
 | `@tauri-apps/plugin-shell` | ^2.0.0 | Apache-2.0 OR MIT |
-| `@tauri-apps/plugin-updater` | ^2.10.1 | Apache-2.0 OR MIT |
+| `@tauri-apps/plugin-process` | ^2.3.1 | Apache-2.0 OR MIT |
+| `@tauri-apps/plugin-clipboard-manager` | ^2.3.2 | Apache-2.0 OR MIT |
+| `@xterm/xterm` / `@xterm/addon-fit` | ^6.0.0 / ^0.11.0 | MIT |
 | `@tauri-apps/cli` | ^2.0.0 | Apache-2.0 OR MIT |
 | `i18next` | ^26.3.4 | MIT |
 | `react-i18next` | ^17.0.8 | MIT |
@@ -45,9 +46,12 @@ HyperCom 基于以下开源项目构建。本页列出各技术栈依赖及其�
 | `thiserror` | 1 | MIT OR Apache-2.0 |
 | `anyhow` | 1 | MIT OR Apache-2.0 |
 | `log` | 0.4 | MIT OR Apache-2.0 |
-| `env_logger` | 0.11 | MIT OR Apache-2.0 |
 | `sysinfo` | 0.33 | MIT |
 | `base64` | 0.22 | MIT OR Apache-2.0 |
+| `portable-pty` | 0.9 | MIT |
+| `reqwest` | 0.13 | MIT OR Apache-2.0 |
+| `url` / `parking_lot` / `libc` | 2 / 0.12 / 0.2 | MIT OR Apache-2.0 |
+| `zip` | 2 | MIT |
 
 ## 许可证说明
 

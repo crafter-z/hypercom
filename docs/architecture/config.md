@@ -36,8 +36,8 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - **配置文件路径解析顺序**（`ConfigManager::new`）：CLI `--config <path>` → `HYPERCOM_CONFIG` 环境变量 → 便携模式（可执行文件同目录下**已存在**的 `config.json`）→ 默认 `%APPDATA%/hypercom/config.json`（`dirs::config_dir`）。会话快照路径恒为配置文件同目录的 `session.json`。
 - 读取：先 `strip_legacy_memory_budget_keys`，再反序列化。失败则 `log::warn` 并回退 `.json.bak`（同样先剥离旧 key）；`.bak` 也不可用才用默认值——corrupt JSON 自动恢复。
 - 在插件 Worker 启动前恢复 `plugin-transaction.json` 所属磁盘事务；旧插件条目缺少 `installGeneration` 时分配 UUID、保存并同步安全 `.bak`。这是安装身份迁移，不是配置版本分派。
-- `save()`：计算下一 revision → 序列化并同步临时文件 → 单操作替换配置文件 → 同步父目录；失败不保留推进的内存 revision。普通保存先尽力复制旧配置到 `.json.bak`；插件安装清权、身份迁移及事务恢复另用 `save_safe_backup` 同步安全恢复副本，避免旧授权借配置损坏恢复。
-- `set_config()` = `validate_and_clamp()` → 替换内存 → `save()`；`get_config_mut()` 供 CRUD 命令直接改实体数组（同样落盘）。
+- `save()`：计算下一 revision → 序列化并同步临时文件 → 单操作替换配置文件 → 同步父目录；失败不保留推进的内存 revision。普通备份只复制加载时已确认有效的主档；从 `.bak` 恢复期间不以坏主档覆盖有效备份，成功替换后主档才标为有效。插件清权/身份迁移/事务恢复仍独立调用 `save_safe_backup`。
+- `set_config()` 与规则 CRUD 都在写入失败时恢复完整旧 `AppConfig`（包括实体与 revision），失败修改不会夹带进下一次无关保存。
 
 ### 数值边界：`CONFIG_BOUNDS` 是唯一来源
 
@@ -45,6 +45,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - **前端**：镜像表在 `src/utils/bounds.ts`（导出 `CONFIG_BOUNDS` 与 `BoundedNumericSetting` 类型）。
 - **跨语言契约测试**：`src/utils/bounds.test.ts` 用 `?raw` 导入 Rust 源文本、正则逐项解析 `CONFIG_BOUNDS`，断言**两侧键集合相同且每个键的 min/max 相等**——任一侧改了未同步另一侧立即红（曾出现前端允许 8..96 而后端收敛到 8..48，用户输入被静默丢弃；备份间隔 1..8760 vs 1..720 同款）。
 - **枚举字段**走 `restrict(field, &[...], fallback)`：`closeBehavior` / `theme` / `language` / `logFormat` / `timestampMode` / `timestampFormat` / `logEncoding` / `logSubdirMode`（非法值回 `date`）/ `updateCheckMode`（非法值含旧版残留回 `stable`）/ `defaultLineEnding`，以及 `entities.port_meta[*].mode`（非 `trx`/`tty` 收敛回 `trx`，issue #11）。
+- 默认行尾设置复用 `sendUtils.LINE_ENDING_VALUES` 与 `lineEndingLabelKey`，保存的是反斜杠域值（`'\\r\\n'` / `'\\r'` / `'\\n'` / `'None'`），不是实际换行控制字符。
 
 ### 会话快照
 
@@ -62,13 +63,13 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。
-- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 的 `generate_handler!` 与命令定义，漏注册/多注册即失败。当前注册 **74** 个命令；配置域 5 个、规则存储域 20 个，插件域另有 9 个（含安装、启停、权限及 IO），契约见[插件模块](plugins.md#宿主命令与状态快照)。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **78** 个命令；配置域5个、规则存储域20个、插件域13个（含4个原生视图命令），契约见[插件模块](plugins.md#宿主命令与状态快照)。
 
 ## 6 个 Zustand Store
 
 | Store | 职责 | 纪律 |
 |---|---|---|
-| `useAppStore` | tabs / ports / `paneTree` / config / groups | 规则实体数组是启动快照，普通设置是草稿；`pluginConfigs` 由后端 revision 排序快照刷新；树算法在 `src/utils/paneTree.ts` |
+| `useAppStore` | tabs / ports / `paneTree` / config / groups | 五类规则数组是最后确认的持久化基线，普通设置是草稿；插件镜像由后端 revision 排序刷新，树算法在 `utils/paneTree.ts` |
 | `useSystemStore` | `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`（含 `configReady`）+ `clearTrafficStats` | 高频写点集中地（5s 系统轮询 / 每端口 1s 流量 flush / 拖拽 resize），故必须与 `useAppStore` 分开 |
 | `useOperationStore` | serial params + send（**无 `op` 前缀**、无显示态字段）+ `cyclicLoops: Record<portId, boolean>` | 显示态不在此 |
 | `useTerminalStore` | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt） | 行缓冲在 viewportManager 环形缓冲区；无行数组、无 Immer、不随数据更新 |
@@ -81,9 +82,9 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 ## 配置持久化：安全快照（issue #5-2）
 
-后端 `set_config` 是**整体替换**，所以调用方不能把 `useAppStore.config` 直接交出去：那是启动时读入的快照，而各实体数组有各自的权威来源（规则页单条保存只写 `useRuleStore` / `storageService`，从不回写 `store.config`）。直接整体替换会把用户刚保存的规则、分组、预设静默回滚成启动时的样子（**曾清空用户编辑**）。
+后端 `set_config` 是**整体替换**，不能直接提交 `useAppStore.config`：五类规则数组记录最后确认的持久化基线，活编辑在 `useRuleStore`；分组/端口和预设也各有权威来源。直接提交基线会丢弃活编辑。
 
-现方案：`useConfigPersistence.saveConfig(patch?)` **内部始终构造安全快照**，调用方不自行合并实体数组；`patch` 仅覆盖本次关心的普通字段。每轮先读取后端配置的 `revision` 与预设，再从实时 store 取标量草稿、5 类规则实体和分组；规则按 id 对比启动快照与后端状态，保留尚未保存的本地编辑，同时让更新较晚的独立 CRUD 写入获胜。`portMeta` 由当前端口实时态与后端已有的离线端口条目合并；最后以 `setConfig(candidate, false, revision)` 做 CAS，冲突则重新读取并组装。
+`useConfigPersistence.saveConfig(patch?)` 内部构造安全快照，普通设置补丁不替代活实体。每轮先读取后端 revision与预设，再读取当前普通草稿、五类活规则和分组。规则按ID比较最后确认基线与后端快照：外部较新CRUD获胜，本窗基线未变的ID保留本地编辑。`storageService` 成功加载/upsert/delete后推进对应基线，失败不推进；全量保存成功后也推进，并采用后端赢家，但不覆盖invoke期间新发生的编辑。取消/X/Escape统一回滚普通草稿，保留已确认实体基线。`portMeta` 合并在线编辑与离线条目，最后revision CAS，冲突重新组装；不是永久使用启动快照。
 
 - `portPresets` **没有** store 镜像（唯一写路径是 `storageService.savePortPresets`），保存前 `loadPortPresets()` 读回；读不到就不写——宁可不保存，也不能用陈旧快照覆盖磁盘。
 - `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。
@@ -112,7 +113,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 - `useRuleStore.setSendCommandSets` / `addSendCommandSet` 建立不变量「有命令集时 `activeSendCommandSetId` 必指向有效集」：保留仍有效的激活集、否则回退首个；`removeSendCommandSet` 对称回退（曾因启动加载/新建集从不设置激活集，导致配置了命令集但操作面板快捷区/循环发送无反应）。
 - 高亮引擎按各集 `isEnabled` 过滤（不读激活集 id——操作面板的规则分区已移除，该字段随之删除）。
-- 弹窗（Popout）修改命令集后经 `popout:command-set-updated` 把**整集**回传主窗，写回 `useRuleStore` 的活实体，从而进入下一条全量保存的安全快照。
+- 弹窗编辑经 `popout:command-set-updated` 整集回传主窗，主窗更新活规则并持久化，成功后推进持久化基线。弹窗不重复落库。
 
 ## AppState 运行期状态（配置的镜像）
 

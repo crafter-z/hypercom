@@ -60,6 +60,8 @@ impl serde::Serialize for CommandError {
 ## 消费路径
 
 - `CommandError` 手动序列化为普通字符串，前端收到形如 `"Serial error: Port COM3 is not available"` 的消息。
+- 旧 `attempt_reconnect` 被用户关闭、显式打开或新重连取消时，返回 `Serial` 域取消消息，不再在关闭之后重开端口；调用方应按用户当前意图退出重试，不做会误关较新连接的补偿 close。
+- 规则实体 CRUD 落盘失败返回 `Config` 域错误，并回退整份内存配置与 revision；`get_config` 不得在未推进 revision 时暴露失败修改，后续无关保存也不得夹带该修改。
 - `src/services/*.ts` 各域 service 只转发 `invoke`，不做错误包装、也不做前缀解析——**不存在统一的 `CommandError` 解析约定**。调用方 `catch` 后交 `src/stores/useToastStore.ts`：
   - `extractErrorMessage(e)`：字符串原样返回；`Error` 取 `message`；对象取 `message` 字段；其余 `String(e)`。
   - `notifyError(e, fallbackKey = 'toast.fallback.operationFailed')`：提取并 `trim`，为空则用翻译后的 fallback，再以 `severity: 'error'` 推入 toast（`notifySuccess` / `notifyInfo` 同理，但收的是 i18n key）。
