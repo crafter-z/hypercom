@@ -107,7 +107,7 @@ impl PortLogWriter {
             writer: BufWriter::new(file),
             current_size: existing_size,
             spec: spec.clone(),
-            assembler: LogLineAssembler::new(),
+            assembler: LogLineAssembler::new(&spec.encoding),
             rx_pending_since: None,
             split_backoff_until: None,
         })

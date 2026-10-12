@@ -117,6 +117,8 @@ pub struct SerialManager {
     ports: HashMap<String, ports_real::SerialPortHandle>,
     /// Most recent real-port close; open waits outside this lock until OS handles are gone.
     pending_real_closes: HashMap<String, Arc<ports_real::CloseBarrier>>,
+    /// In-flight reconnect intent; user close/open invalidates even a queued attempt.
+    reconnect_attempts: HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
     /// 模拟串口句柄。`pub`：`commands::simulation` 需要遍历 key 批量关闭。
     pub sim_ports: HashMap<String, ports_sim::SimPortHandle>,
     /// 模拟终端（git bash pty）句柄。`pub`：`commands::tty_sim` 需要遍历 key 批量关闭。
@@ -136,6 +138,7 @@ impl SerialManager {
         Self {
             ports: HashMap::new(),
             pending_real_closes: HashMap::new(),
+            reconnect_attempts: HashMap::new(),
             sim_ports: HashMap::new(),
             tty_sim_ports: HashMap::new(),
             simulate: false,
@@ -161,6 +164,25 @@ impl SerialManager {
         self.gitbash_sim = on;
     }
 
+    pub(crate) fn begin_reconnect(&mut self, port_id: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        self.cancel_reconnect(port_id);
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.reconnect_attempts.insert(port_id.to_owned(), Arc::clone(&token));
+        token
+    }
+
+    pub(crate) fn cancel_reconnect(&mut self, port_id: &str) {
+        if let Some(token) = self.reconnect_attempts.remove(port_id) {
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn finish_reconnect(&mut self, port_id: &str, token: &Arc<std::sync::atomic::AtomicBool>) {
+        if self.reconnect_attempts.get(port_id).is_some_and(|current| Arc::ptr_eq(current, token)) {
+            self.reconnect_attempts.remove(port_id);
+        }
+    }
+
     /// 打开串口（按 `PortKind` 分派；虚拟端口先过能力门控）。
     ///
     /// 锁内执行：不枚举端口、不 join 读线程（两者都是阻塞操作）。需要这两种操作的
@@ -181,6 +203,12 @@ impl SerialManager {
     /// `join()`，等待读线程及所有在途真实端口写句柄释放，再返回给用户。
     /// 持锁 join 会卡住所有其他串口命令。
     pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<PortClose>> {
+        self.cancel_reconnect(port_id);
+        self.close_port_inner(port_id)
+    }
+
+    /// Internal recycling must not cancel the reconnect that owns the operation.
+    fn close_port_inner(&mut self, port_id: &str) -> anyhow::Result<Option<PortClose>> {
         Ok(match PortKind::of(port_id) {
             PortKind::Real => {
                 if let Some(closed) = ports_real::close(self, port_id) {
@@ -456,7 +484,7 @@ mod tests {
     fn reconnect_rejects_simulation_ports() {
         let m = Mutex::new(SerialManager::new());
         for port_id in ["SIM:Loopback", "GIT:BASH"] {
-            let err = super::reconnect_blocking(&m, port_id).unwrap_err().to_string();
+            let err = super::reconnect_blocking(&m, port_id, &std::sync::atomic::AtomicBool::new(false)).unwrap_err().to_string();
             assert!(err.contains("Cannot reconnect"), "{port_id}: {err}");
         }
     }
@@ -468,7 +496,7 @@ mod tests {
         let mut inner = SerialManager::new();
         inner.last_params.insert("COM_NOT_PRESENT".to_string(), open_args("COM_NOT_PRESENT"));
         let m = Mutex::new(inner);
-        let err = super::reconnect_blocking(&m, "COM_NOT_PRESENT")
+        let err = super::reconnect_blocking(&m, "COM_NOT_PRESENT", &std::sync::atomic::AtomicBool::new(false))
             .unwrap_err()
             .to_string();
         assert!(err.contains("is not available"), "{err}");

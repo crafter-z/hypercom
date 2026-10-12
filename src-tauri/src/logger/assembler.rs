@@ -27,6 +27,9 @@
 /// 无分隔符强制发射阈值（与前端 RxLineAssembler 默认一致）
 const RX_LINE_MAX_PENDING_BYTES: usize = 4096;
 
+#[derive(Clone, Copy)]
+enum CharacterEncoding { Utf8, Gbk, SingleByte }
+
 pub(super) struct LogLineAssembler {
     /// 尚未终结的行字节（不含分隔符）
     pending: Vec<u8>,
@@ -37,11 +40,19 @@ pub(super) struct LogLineAssembler {
     just_forced: bool,
     /// 强制发射阈值（字节）：`pending` 达到该长度即无分隔符发射。默认 4096
     max_pending_bytes: usize,
+    encoding: CharacterEncoding,
+    character_bytes_remaining: u8,
 }
 
 impl LogLineAssembler {
-    pub(super) fn new() -> Self {
-        Self::with_max_pending(RX_LINE_MAX_PENDING_BYTES)
+    pub(super) fn new(encoding: &str) -> Self {
+        let mut assembler = Self::with_max_pending(RX_LINE_MAX_PENDING_BYTES);
+        assembler.encoding = if encoding.eq_ignore_ascii_case("GBK") || encoding.eq_ignore_ascii_case("GB2312") || encoding.eq_ignore_ascii_case("GB18030") {
+            CharacterEncoding::Gbk
+        } else if encoding.eq_ignore_ascii_case("ISO-8859-1") || encoding.eq_ignore_ascii_case("LATIN1") {
+            CharacterEncoding::SingleByte
+        } else { CharacterEncoding::Utf8 };
+        assembler
     }
 
     /// 自定义强制发射阈值（测试注入用）
@@ -51,6 +62,8 @@ impl LogLineAssembler {
             pending_cr: false,
             just_forced: false,
             max_pending_bytes,
+            encoding: CharacterEncoding::Utf8,
+            character_bytes_remaining: 0,
         }
     }
 
@@ -68,6 +81,7 @@ impl LogLineAssembler {
                 // 非 LF：标记已清除，按普通字节继续处理
             }
             if b == b'\r' || b == b'\n' {
+                self.character_bytes_remaining = 0;
                 if self.just_forced && self.pending.is_empty() {
                     // 强制发射后紧跟的分隔符：内容已在强制发射时成为一行，此分隔符
                     // 只终结那个已发射的行。CR 仍置 pending_cr 以吞掉配对的 LF，
@@ -87,10 +101,13 @@ impl LogLineAssembler {
                 }
             } else {
                 self.pending.push(b);
+                self.track_character(b);
                 self.just_forced = false;
-                if self.pending.len() >= self.max_pending_bytes {
+                if self.pending.len() >= self.max_pending_bytes &&
+                    (self.character_bytes_remaining == 0 || self.pending.len() >= self.max_pending_bytes.saturating_add(3)) {
                     // 强制发射：防止无换行二进制流无界增长。发射后继续扫描本段剩余字节
                     lines.push(std::mem::take(&mut self.pending));
+                    self.character_bytes_remaining = 0;
                     self.just_forced = true;
                 }
             }
@@ -103,6 +120,7 @@ impl LogLineAssembler {
     pub(super) fn take_tail(&mut self) -> Option<Vec<u8>> {
         self.pending_cr = false;
         self.just_forced = false;
+        self.character_bytes_remaining = 0;
         let tail = std::mem::take(&mut self.pending);
         if tail.is_empty() {
             None
@@ -114,6 +132,24 @@ impl LogLineAssembler {
     /// 是否存在未终结的尾部字节
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn track_character(&mut self, byte: u8) {
+        match self.encoding {
+            CharacterEncoding::SingleByte => {},
+            CharacterEncoding::Gbk => {
+                self.character_bytes_remaining = if self.character_bytes_remaining > 0 && (0x40..=0xfe).contains(&byte) && byte != 0x7f {
+                    0
+                } else if (0x81..=0xfe).contains(&byte) { 1 } else { 0 };
+            },
+            CharacterEncoding::Utf8 => {
+                if self.character_bytes_remaining > 0 && (0x80..=0xbf).contains(&byte) {
+                    self.character_bytes_remaining -= 1;
+                } else {
+                    self.character_bytes_remaining = match byte { 0xc2..=0xdf => 1, 0xe0..=0xef => 2, 0xf0..=0xf4 => 3, _ => 0 };
+                }
+            },
+        }
     }
 }
 
@@ -136,28 +172,28 @@ mod tests {
 
     #[test]
     fn feed_empty_returns_nothing() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert!(asm.feed(b"").is_empty());
         assert!(!asm.has_pending());
     }
 
     #[test]
     fn feed_lf_terminated_line() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"hello\n"), vec![bytes("hello")]);
         assert!(!asm.has_pending());
     }
 
     #[test]
     fn feed_cr_terminated_line() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"hello\r"), vec![bytes("hello")]);
         assert!(!asm.has_pending());
     }
 
     #[test]
     fn feed_keeps_line_free_of_separator_bytes() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         let lines = asm.feed(&[0x41, 0x0a, 0x42, 0x0d]);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], vec![0x41]);
@@ -167,7 +203,7 @@ mod tests {
 
     #[test]
     fn feed_handles_full_binary_byte_range() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(
             asm.feed(&[0x00, 0x7f, 0x80, 0xff, 0x0a]),
             vec![vec![0x00, 0x7f, 0x80, 0xff]]
@@ -178,13 +214,13 @@ mod tests {
 
     #[test]
     fn feed_crlf_pair_within_one_feed_is_one_separator() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"AB\r\nCD\n"), vec![bytes("AB"), bytes("CD")]);
     }
 
     #[test]
     fn feed_crlf_pair_split_across_two_feeds_is_one_separator() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"AB\r"), vec![bytes("AB")]);
         // LF 是上一 feed CR 的后半：必须被静默吞掉，不能产生空行
         assert_eq!(asm.feed(b"\nCD\n"), vec![bytes("CD")]);
@@ -192,7 +228,7 @@ mod tests {
 
     #[test]
     fn feed_crlf_pair_straddling_two_feeds_then_more_data() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert!(asm.feed(b"hel").is_empty());
         assert_eq!(asm.feed(b"lo\r\nX"), vec![bytes("hello")]);
         assert!(asm.has_pending());
@@ -201,7 +237,7 @@ mod tests {
 
     #[test]
     fn feed_does_not_swallow_non_lf_after_cr_across_feeds() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"X\r"), vec![bytes("X")]);
         // 下一段以 'Y' 开头：pending_cr 被清除，Y 正常进入下一行
         assert_eq!(asm.feed(b"YZ\n"), vec![bytes("YZ")]);
@@ -209,7 +245,7 @@ mod tests {
 
     #[test]
     fn feed_emits_empty_line_for_bare_crlf_between_text_lines() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(
             asm.feed(b"a\r\n\r\nb\n"),
             vec![bytes("a"), empty_line(), bytes("b")]
@@ -218,7 +254,7 @@ mod tests {
 
     #[test]
     fn feed_clears_pending_cr_after_normal_byte() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         asm.feed(b"a\r");
         asm.feed(b"b");
         // CR 后的字节已正常处理；此时到来的 LF 是**新的**分隔符
@@ -229,7 +265,7 @@ mod tests {
 
     #[test]
     fn feed_emits_one_empty_chunk_per_consecutive_lf() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(
             asm.feed(b"\n\n\n"),
             vec![empty_line(), empty_line(), empty_line()]
@@ -238,19 +274,19 @@ mod tests {
 
     #[test]
     fn feed_emits_one_empty_chunk_per_consecutive_cr() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"\r\r"), vec![empty_line(), empty_line()]);
     }
 
     #[test]
     fn feed_emits_one_empty_chunk_per_crlf_pair_in_separator_only_feed() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"\r\n\r\n"), vec![empty_line(), empty_line()]);
     }
 
     #[test]
     fn feed_handles_interleaved_cr_lf_crlf_separators() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(
             asm.feed(b"a\rb\nc\r\nd\n"),
             vec![bytes("a"), bytes("b"), bytes("c"), bytes("d")]
@@ -261,7 +297,7 @@ mod tests {
 
     #[test]
     fn feed_keeps_unterminated_tail_pending_until_next_separator() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert!(asm.feed(b"hel").is_empty());
         assert!(asm.has_pending());
         assert_eq!(asm.feed(b"lo\n"), vec![bytes("hello")]);
@@ -271,7 +307,7 @@ mod tests {
     #[test]
     fn feed_fragmented_response_matches_single_feed() {
         // 跨事件的 "H" + "ello\r\n" 必须聚合成一行 "Hello"
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert!(asm.feed(b"H").is_empty());
         assert_eq!(asm.feed(b"ello\r\n"), vec![bytes("Hello")]);
         assert!(!asm.has_pending());
@@ -280,10 +316,10 @@ mod tests {
     #[test]
     fn feed_byte_by_byte_matches_whole_feed() {
         let stream = b"hello\r\nworld\rend\nlast\n";
-        let mut whole = LogLineAssembler::new();
+        let mut whole = LogLineAssembler::new("UTF-8");
         let expected = whole.feed(stream);
 
-        let mut stepwise = LogLineAssembler::new();
+        let mut stepwise = LogLineAssembler::new("UTF-8");
         let mut collected: Vec<Vec<u8>> = Vec::new();
         for &c in stream {
             collected.extend(stepwise.feed(&[c]));
@@ -300,7 +336,7 @@ mod tests {
     fn feed_handles_split_at_every_byte_of_lf_stream() {
         let stream = b"ab\ncd\n";
         for split_at in 0..=stream.len() {
-            let mut asm = LogLineAssembler::new();
+            let mut asm = LogLineAssembler::new("UTF-8");
             let mut out: Vec<Vec<u8>> = Vec::new();
             out.extend(asm.feed(&stream[..split_at]));
             out.extend(asm.feed(&stream[split_at..]));
@@ -312,7 +348,7 @@ mod tests {
     fn feed_handles_split_at_every_byte_of_crlf_stream() {
         let stream = b"ab\r\ncd\r\n";
         for split_at in 0..=stream.len() {
-            let mut asm = LogLineAssembler::new();
+            let mut asm = LogLineAssembler::new("UTF-8");
             let mut out: Vec<Vec<u8>> = Vec::new();
             out.extend(asm.feed(&stream[..split_at]));
             out.extend(asm.feed(&stream[split_at..]));
@@ -322,7 +358,7 @@ mod tests {
 
     #[test]
     fn feed_returns_independent_line_buffers() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         let input = bytes("ab\ncd\n");
         let lines = asm.feed(&input);
         assert_eq!(lines, vec![bytes("ab"), bytes("cd")]);
@@ -331,6 +367,30 @@ mod tests {
     }
 
     // ---------- 强制发射 ----------
+
+    #[test]
+    fn forced_boundaries_preserve_split_utf8_and_gbk_characters() {
+        for (encoding, character) in [("UTF-8", vec![0xe4, 0xbd, 0xa0]), ("GBK", vec![0xc4, 0xe3])] {
+            let mut stream = vec![b'A'; 4095];
+            stream.extend_from_slice(&character);
+            for split in 4095..=stream.len() {
+                let mut assembler = LogLineAssembler::new(encoding);
+                let mut rows = assembler.feed(&stream[..split]);
+                rows.extend(assembler.feed(&stream[split..]));
+                rows.extend(assembler.feed(b"\n"));
+                assert_eq!(rows, vec![stream.clone()], "{encoding} split {split}");
+                assert!(!assembler.has_pending());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_multibyte_stream_stays_bounded() {
+        let mut assembler = LogLineAssembler::new("UTF-8");
+        let rows = assembler.feed(&vec![0xe4; 8200]);
+        assert!(rows.iter().all(|row| row.len() <= 4099));
+        assert_eq!(rows.iter().map(Vec::len).sum::<usize>() + assembler.take_tail().unwrap().len(), 8200);
+    }
 
     #[test]
     fn feed_force_flushes_at_custom_threshold_without_separator() {
@@ -369,7 +429,7 @@ mod tests {
 
     #[test]
     fn feed_uses_default_4096_threshold() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         let bulk = vec![0x61u8; 4096];
         assert_eq!(asm.feed(&bulk), vec![vec![0x61u8; 4096]]);
         // 再多 1 字节不会触发第二次发射（未达阈值），留在 pending
@@ -434,7 +494,7 @@ mod tests {
 
     #[test]
     fn take_tail_returns_pending_bytes() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         asm.feed(b"partial");
         assert_eq!(asm.take_tail(), Some(bytes("partial")));
         assert!(!asm.has_pending());
@@ -442,14 +502,14 @@ mod tests {
 
     #[test]
     fn take_tail_returns_none_when_nothing_pending() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         asm.feed(b"done\n");
         assert_eq!(asm.take_tail(), None);
     }
 
     #[test]
     fn take_tail_resets_state_so_next_feed_starts_fresh_line() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         asm.feed(b"old");
         assert!(asm.take_tail().is_some());
         assert_eq!(asm.feed(b"new\n"), vec![bytes("new")]);
@@ -457,7 +517,7 @@ mod tests {
 
     #[test]
     fn take_tail_clears_pending_cr_so_following_lf_is_real_separator() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert_eq!(asm.feed(b"a\r"), vec![bytes("a")]);
         asm.take_tail(); // 清除 pending_cr
         // LF 不再是「CRLF 后半」，而是新行的分隔符 → 发射空行
@@ -466,7 +526,7 @@ mod tests {
 
     #[test]
     fn has_pending_reflects_buffer_state_across_feeds() {
-        let mut asm = LogLineAssembler::new();
+        let mut asm = LogLineAssembler::new("UTF-8");
         assert!(!asm.has_pending());
         asm.feed(b"x");
         assert!(asm.has_pending());

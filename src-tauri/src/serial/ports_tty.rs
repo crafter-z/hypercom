@@ -38,9 +38,13 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
         .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?;
 
     // 陈旧句柄守卫：存活句柄报错，死线程句柄移除（避免 insert 覆盖后泄漏读线程）。
-    if let Some(handle) = manager.tty_sim_ports.get(&args.port_id) {
+    if let Some(handle) = manager.tty_sim_ports.get_mut(&args.port_id) {
         if handle.running.load(Ordering::Relaxed) {
-            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
+            // ConPTY output can remain open after bash exits while the master
+            // is retained. Child status, not blocked reader EOF, is authoritative.
+            let exited = handle.child.as_mut().map(|child| child.try_wait()).transpose()?.flatten().is_some();
+            if !exited { return Err(anyhow::anyhow!("Port {} is already open", args.port_id)); }
+            handle.running.store(false, Ordering::Relaxed);
         }
     }
     manager.tty_sim_ports.remove(&args.port_id);

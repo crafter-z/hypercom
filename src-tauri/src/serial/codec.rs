@@ -169,7 +169,7 @@ pub fn write_with_deadline_progress(
         match port.write(&bytes[*written..]) {
             Ok(0) => return Err(anyhow::anyhow!("Serial write returned 0 bytes (flow control stalled?)")),
             Ok(n) => *written += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {},
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {},
             Err(e) => return Err(anyhow::anyhow!("Serial write error: {e}")),
         }
@@ -423,6 +423,25 @@ mod tests {
         let err = write_with_deadline_progress("COM3", &mut PartialThenError(false), b"abcdef", Duration::from_secs(1), &mut confirmed).unwrap_err();
         assert!(err.to_string().contains("driver failed"));
         assert_eq!(confirmed, 2);
+    }
+
+    #[test]
+    fn repeated_interruptions_obey_total_deadline_and_keep_progress() {
+        struct InterruptionsAfterProgress(bool);
+        impl std::io::Write for InterruptionsAfterProgress {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    return Ok(1);
+                }
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut written = 0;
+        let result = write_with_deadline_progress("COM3", &mut InterruptionsAfterProgress(false), b"ab", Duration::from_millis(1), &mut written);
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert_eq!(written, 1);
     }
 
 }

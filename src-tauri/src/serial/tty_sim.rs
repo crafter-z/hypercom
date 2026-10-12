@@ -197,6 +197,7 @@ pub(crate) fn spawn_bash(
                 }
             }
         }
+        running_clone.store(false, Ordering::Relaxed);
 
         // 读取线程退出时发送断开事件（前端依赖此事件，与真实/模拟串口线程对齐）
         crate::serial::emit_status(

@@ -211,7 +211,7 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
             if live {
                 log::warn!("Port {} stale handle detected (device vanished from enumeration); recycling", args.port_id);
             }
-            let close = manager.lock().map_err(lock_error)?.close_port(&args.port_id)?;
+            let close = manager.lock().map_err(lock_error)?.close_port_inner(&args.port_id)?;
             if let Some(close) = close {
                 let _ = close.join();
             }
@@ -235,28 +235,48 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
 ///
 /// 与 `open_blocking` 同因：join 旧读线程与端口枚举都是阻塞操作，不能在持有
 /// 全局串口锁时执行（调用方命令层因此在锁外 join 后再重新持锁打开）。
-pub fn reconnect_blocking(manager: &Mutex<SerialManager>, port_id: &str) -> anyhow::Result<()> {
+pub fn reconnect_blocking(manager: &Mutex<SerialManager>, port_id: &str, cancel: &AtomicBool) -> anyhow::Result<()> {
+    reconnect_with_probe(manager, port_id, cancel, system_port_present)
+}
+
+fn reconnect_with_probe(
+    manager: &Mutex<SerialManager>,
+    port_id: &str,
+    cancel: &AtomicBool,
+    present: impl FnOnce(&str) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
     if PortKind::of(port_id) != PortKind::Real {
         return Err(anyhow::anyhow!("Cannot reconnect simulation port"));
     }
 
-    // 阶段 1（锁内、仅内存）：摘除残留句柄并取出读线程
-    let join_handle = manager
-        .lock()
-        .map_err(lock_error)?
-        .close_port(port_id)?;
+    // Check and detach atomically: a cancelled queued attempt cannot close a newer session.
+    let join_handle = {
+        let mut guard = manager.lock().map_err(lock_error)?;
+        check_reconnect(cancel)?;
+        guard.close_port_inner(port_id)?
+    };
     // 阶段 2（锁外）：join 确保旧 COM 句柄已释放，否则 open 会因端口被旧线程占用而失败
     if let Some(thread) = join_handle {
         let _ = thread.join();
     }
     // 阶段 3（锁外）：确认端口重新出现在系统列表中（阻塞枚举）
-    if !system_port_present(port_id)? {
+    if !present(port_id)? {
         return Err(anyhow::anyhow!("Port {} is not available", port_id));
     }
-    let params = manager.lock().map_err(lock_error)?
-        .get_last_params(port_id)
+    // Check intent and open under the same lock as user close/open cancellation.
+    // close_port_inner registered a barrier above; join has completed it already.
+    let mut guard = manager.lock().map_err(lock_error)?;
+    check_reconnect(cancel)?;
+    let params = guard.get_last_params(port_id)
         .ok_or_else(|| anyhow::anyhow!("No previous connection params for {}", port_id))?;
-    open_blocking(manager, params)
+    guard.open_port(params)
+}
+
+fn check_reconnect(cancel: &AtomicBool) -> anyhow::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("Reconnect cancelled by a newer port operation");
+    }
+    Ok(())
 }
 
 /// 打开真实串口（锁内、不枚举端口、不 join 读线程）。
@@ -618,6 +638,37 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     use super::{parse_data_bits, parse_flow_control, parse_parity, parse_stop_bits};
 
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn close_during_reconnect_probe_prevents_reopening() {
+        let manager = std::sync::Mutex::new(super::SerialManager::new());
+        let token = manager.lock().unwrap().begin_reconnect("COM3");
+        let result = super::reconnect_with_probe(&manager, "COM3", &token, |_| {
+            // The real command can close while the blocking system enumeration runs.
+            manager.lock().unwrap().close_port("COM3")?;
+            Ok(true)
+        });
+        assert!(result.unwrap_err().to_string().contains("Reconnect cancelled"));
+        // Without the final intent check this reaches the missing-param/open path.
+        assert!(manager.lock().unwrap().ports.is_empty());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn superseded_reconnect_never_recycles_or_probes() {
+        let manager = std::sync::Mutex::new(super::SerialManager::new());
+        let old = manager.lock().unwrap().begin_reconnect("COM3");
+        let current = manager.lock().unwrap().begin_reconnect("COM3");
+        let result = super::reconnect_with_probe(&manager, "COM3", &old, |_| {
+            panic!("cancelled queued reconnect must not enumerate devices")
+        });
+        assert!(result.unwrap_err().to_string().contains("Reconnect cancelled"));
+        manager.lock().unwrap().finish_reconnect("COM3", &old);
+        assert!(!current.load(std::sync::atomic::Ordering::Relaxed));
+        manager.lock().unwrap().close_port("COM3").unwrap();
+        assert!(current.load(std::sync::atomic::Ordering::Relaxed));
+    }
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_data_bits_accepts_supported_widths_only() {

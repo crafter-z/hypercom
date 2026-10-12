@@ -25,19 +25,27 @@ pub struct PopoutMeta {
     pub target_id: Option<String>,
 }
 
-/// 将任意字符串净化为窗口 label 安全的标识符：
-/// 非 `[A-Za-z0-9_-]` 字符一律替换为 `_`。
-/// 这是 label 净化的唯一实现（前端不得再复刻一份，见文件头）。
+/// Encode UTF-8 bytes injectively into the window label's safe alphabet.
+/// Escape '_' too so a literal escape-like id cannot collide with another port.
 fn sanitize(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    use std::fmt::Write;
+    let mut safe = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' {
+            safe.push(char::from(byte));
+        } else {
+            let _ = write!(&mut safe, "_{byte:02X}");
+        }
+    }
+    safe
+}
+
+fn popout_url(kind: &str, target_id: Option<&str>) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("popout", kind)
+        .append_pair("id", target_id.unwrap_or_default())
+        .finish();
+    format!("index.html?{query}")
 }
 
 /// 按 kind + target_id 计算窗口 label。未知 kind 返回 Err。
@@ -75,8 +83,7 @@ pub async fn open_popout(
         return Ok(());
     }
 
-    let id_query = target_id.clone().unwrap_or_default();
-    let url = format!("index.html?popout={}&id={}", kind, id_query);
+    let url = popout_url(&kind, target_id.as_deref());
 
     // 按 kind 取默认标题与尺寸。
     let (title, width, height) = match kind.as_str() {
@@ -168,12 +175,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sanitize_replaces_unsafe_chars_with_underscore() {
-        assert_eq!(sanitize("COM3"), "COM3");
-        assert_eq!(sanitize("COM-3_x"), "COM-3_x");
-        assert_eq!(sanitize("COM 3"), "COM_3");
-        assert_eq!(sanitize("/dev/ttyUSB0"), "_dev_ttyUSB0");
-        assert_eq!(sanitize("a.b:c"), "a_b_c");
+    fn terminal_labels_keep_distinct_port_ids_distinct() {
+        let ids = ["COM3", "COM-3_x", "COM 3", "/dev/ttyUSB0", "a.b:c", "a_b_c", "a_2Eb_3Ac", "端口"];
+        let labels: std::collections::HashSet<_> = ids.iter()
+            .map(|id| compute_label("terminal", Some(id)).unwrap()).collect();
+        assert_eq!(labels.len(), ids.len());
+        assert!(labels.iter().all(|label| label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')));
+    }
+
+    #[test]
+    fn popout_query_roundtrips_special_port_id() {
+        let id = "/dev/tty+usb&name=#端口";
+        let route = popout_url("terminal", Some(id));
+        let parsed = url::Url::parse(&format!("https://localhost/{route}")).unwrap();
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(query.get("id").unwrap(), id);
+        assert_eq!(query.get("popout").unwrap(), "terminal");
     }
 
     #[test]
@@ -187,11 +204,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_label_terminal_uses_sanitized_target_id() {
+    fn test_compute_label_terminal_uses_encoded_target_id() {
         assert_eq!(compute_label("terminal", Some("COM3")).unwrap(), "terminal-COM3");
         assert_eq!(
             compute_label("terminal", Some("/dev/ttyUSB0")).unwrap(),
-            "terminal-_dev_ttyUSB0"
+            "terminal-_2Fdev_2FttyUSB0"
         );
         assert_eq!(compute_label("terminal", None).unwrap(), "terminal-");
     }

@@ -75,6 +75,8 @@ pub async fn open_serial_port(
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
     let port_id = args.port_id.clone();
+    serial_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?
+        .cancel_reconnect(&port_id);
     tokio::task::spawn_blocking(move || {
         serial::open_blocking(&serial_manager, args).map_err(|e| {
             log::warn!("Failed to open port {}: {}", port_id, e);
@@ -425,14 +427,23 @@ pub async fn attempt_reconnect(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
-    tokio::task::spawn_blocking(move || {
-        serial::reconnect_blocking(&serial_manager, &port_id).map_err(|e| {
+    // Capture intent before queuing blocking work; a close can cancel a queued attempt too.
+    let cancel = serial_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?
+        .begin_reconnect(&port_id);
+    let cleanup_token = Arc::clone(&cancel);
+    let cleanup_port = port_id.clone();
+    let worker_manager = serial_manager.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        serial::reconnect_blocking(&worker_manager, &port_id, &cancel).map_err(|e| {
             log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
             CommandError::Serial(e.to_string())
         })
     })
     .await
-    .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?
+    .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?;
+    serial_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?
+        .finish_reconnect(&cleanup_port, &cleanup_token);
+    result
 }
 
 /// 设置流控（DTR/RTS/握手协议）

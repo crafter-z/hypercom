@@ -15,8 +15,9 @@
  * 路径前缀检查）。前端结果不可信，前端校验失败 ≠ 后端拒绝。
  */
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -495,6 +496,216 @@ pub const MAX_ZIP_ENTRIES: usize = 2000;
 pub const MAX_PLUGIN_SOURCE_DEPTH: usize = 32;
 /// zip 解压总量（字节）上限。
 pub const MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+/// Central-directory limits are checked before `zip::ZipArchive::new`: zip 2.x
+/// materializes its index eagerly, so trusting its deduplicated `len()` is too late.
+const MAX_ZIP_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ZIP_ENTRY_METADATA_BYTES: u64 = 64 * 1024;
+/// Immutable input budget, checked before central-directory parsing.
+pub const MAX_ZIP_ARCHIVE_BYTES: u64 = 96 * 1024 * 1024;
+
+// zip 2.x retries earlier footer signatures after malformed metadata. Its
+// indexing pass sees only our verified canonical footer; extraction then reads
+// the unchanged compressed snapshot. Masking is allocation-free per read.
+struct ValidatedZipReader {
+    bytes: Vec<u8>,
+    position: u64,
+    footer_start: usize,
+    indexing: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl Read for ValidatedZipReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let start = usize::try_from(self.position).unwrap_or(usize::MAX);
+        if start >= self.bytes.len() { return Ok(0); }
+        let count = out.len().min(self.bytes.len() - start);
+        out[..count].copy_from_slice(&self.bytes[start..start + count]);
+        if self.indexing.get() {
+            for offset in start.saturating_sub(3)..(start + count).min(self.footer_start) {
+                if offset + 4 <= self.footer_start && matches!(&self.bytes[offset..offset + 4], [0x50, 0x4b, 0x05, 0x06] | [0x50, 0x4b, 0x06, 0x06] | [0x50, 0x4b, 0x06, 0x07]) {
+                    for absolute in offset.max(start)..(offset + 4).min(start + count) { out[absolute - start] = 0; }
+                }
+            }
+        }
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
+impl Seek for ValidatedZipReader {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let next = match from {
+            SeekFrom::Start(value) => value as i128,
+            SeekFrom::End(delta) => self.bytes.len() as i128 + delta as i128,
+            SeekFrom::Current(delta) => self.position as i128 + delta as i128,
+        };
+        self.position = u64::try_from(next).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ZIP seek overflow"))?;
+        Ok(self.position)
+    }
+}
+
+fn read_le_u16(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+
+fn read_le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+fn read_le_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+/// Validate the bounded, physical central-directory representation without
+/// allocating anything according to attacker-controlled entry counts.  In
+/// particular, count every record and reject duplicate raw names before the
+/// zip crate gets a chance to build its eager index.
+fn validate_zip_metadata(file: &mut std::io::Cursor<Vec<u8>>, max_entries: usize) -> Result<(usize, usize, u16), String> {
+    const EOCD_SIGNATURE: u32 = 0x0605_4b50;
+    const ZIP64_EOCD_SIGNATURE: u32 = 0x0606_4b50;
+    const ZIP64_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
+    const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
+    const EOCD_LEN: u64 = 22;
+    const MAX_COMMENT: u64 =  u16::MAX as u64;
+
+    let file_len = file.get_ref().len() as u64;
+    if file_len < EOCD_LEN {
+        return Err("zip 结构无效：缺少 EOCD".to_string());
+    }
+    let tail_len = file_len.min(EOCD_LEN + MAX_COMMENT);
+    file.seek(SeekFrom::Start(file_len - tail_len))
+        .map_err(|e| format!("定位 zip EOCD 失败: {e}"))?;
+    let mut tail = vec![0u8; tail_len as usize];
+    file.read_exact(&mut tail)
+        .map_err(|e| format!("读取 zip EOCD 失败: {e}"))?;
+    let eocd_rel = tail
+        .windows(4)
+        .enumerate()
+        .rev()
+        .filter(|(_, sig)| u32::from_le_bytes((*sig).try_into().unwrap()) == EOCD_SIGNATURE)
+        .find_map(|(at, _)| {
+            (tail.len() - at >= EOCD_LEN as usize)
+                .then(|| read_le_u16(&tail, at + 20) as u64)
+                .filter(|&comment_len| at as u64 + EOCD_LEN + comment_len == tail_len)
+                .map(|_| at)
+        })
+        .ok_or_else(|| "zip 结构无效：找不到有效 EOCD".to_string())?;
+    let eocd_offset = file_len - tail_len + eocd_rel as u64;
+    let eocd = &tail[eocd_rel..eocd_rel + EOCD_LEN as usize];
+    let disk = read_le_u16(eocd, 4);
+    let cd_disk = read_le_u16(eocd, 6);
+    let disk_count = read_le_u16(eocd, 8);
+    let total_count = read_le_u16(eocd, 10);
+    if disk != 0 || cd_disk != 0 || disk_count != total_count {
+        return Err("zip 结构无效：不支持多磁盘归档".to_string());
+    }
+
+    let (entry_count, cd_size, cd_offset, cd_end_limit) =
+        if total_count == u16::MAX || read_le_u32(eocd, 12) == u32::MAX || read_le_u32(eocd, 16) == u32::MAX {
+            if eocd_offset < 20 {
+                return Err("zip 结构无效：缺少 ZIP64 locator".to_string());
+            }
+            file.seek(SeekFrom::Start(eocd_offset - 20))
+                .map_err(|e| format!("定位 ZIP64 locator 失败: {e}"))?;
+            let mut locator = [0u8; 20];
+            file.read_exact(&mut locator)
+                .map_err(|e| format!("读取 ZIP64 locator 失败: {e}"))?;
+            if read_le_u32(&locator, 0) != ZIP64_LOCATOR_SIGNATURE
+                || read_le_u32(&locator, 4) != 0
+                || read_le_u32(&locator, 16) != 1
+            {
+                return Err("zip 结构无效：ZIP64 locator 不受支持".to_string());
+            }
+            let zip64_offset = read_le_u64(&locator, 8);
+            if zip64_offset.checked_add(56).is_none() || zip64_offset + 56 > file_len {
+                return Err("zip 结构无效：ZIP64 EOCD 越界".to_string());
+            }
+            file.seek(SeekFrom::Start(zip64_offset))
+                .map_err(|e| format!("定位 ZIP64 EOCD 失败: {e}"))?;
+            let mut zip64_fixed = [0u8; 56];
+            file.read_exact(&mut zip64_fixed)
+                .map_err(|e| format!("读取 ZIP64 EOCD 失败: {e}"))?;
+            if read_le_u32(&zip64_fixed, 0) != ZIP64_EOCD_SIGNATURE
+                || read_le_u64(&zip64_fixed, 4) < 44
+                || read_le_u32(&zip64_fixed, 16) != 0
+                || read_le_u32(&zip64_fixed, 20) != 0
+                || read_le_u64(&zip64_fixed, 24) != read_le_u64(&zip64_fixed, 32)
+            {
+                return Err("zip 结构无效：ZIP64 EOCD 字段错误".to_string());
+            }
+            (
+                read_le_u64(&zip64_fixed, 32),
+                read_le_u64(&zip64_fixed, 40),
+                read_le_u64(&zip64_fixed, 48),
+                zip64_offset,
+            )
+        } else {
+            (
+                total_count as u64,
+                read_le_u32(eocd, 12) as u64,
+                read_le_u32(eocd, 16) as u64,
+                eocd_offset,
+            )
+        };
+    if entry_count > max_entries as u64 {
+        return Err(format!(
+            "zip 条目数 {entry_count} 超过上限 {max_entries}，疑似 zip bomb，拒绝"
+        ));
+    }
+    if cd_size > MAX_ZIP_CENTRAL_DIRECTORY_BYTES {
+        return Err(format!(
+            "zip 中央目录 {} 字节超过上限 {}，拒绝",
+            cd_size, MAX_ZIP_CENTRAL_DIRECTORY_BYTES
+        ));
+    }
+    let cd_end = cd_offset
+        .checked_add(cd_size)
+        .ok_or_else(|| "zip 结构无效：中央目录溢出".to_string())?;
+    if cd_offset > cd_end_limit || cd_end > cd_end_limit || cd_end > file_len {
+        return Err("zip 结构无效：中央目录越界".to_string());
+    }
+    file.seek(SeekFrom::Start(cd_offset))
+        .map_err(|e| format!("定位 zip 中央目录失败: {e}"))?;
+    let mut central = vec![0u8; cd_size as usize];
+    file.read_exact(&mut central)
+        .map_err(|e| format!("读取 zip 中央目录失败: {e}"))?;
+    let mut names = HashSet::<Vec<u8>>::with_capacity(entry_count as usize);
+    let mut cursor = 0usize;
+    let mut physical_count = 0u64;
+    while cursor < central.len() {
+        if central.len() - cursor < 46 || read_le_u32(&central, cursor) != CENTRAL_SIGNATURE {
+            return Err("zip 结构无效：中央目录记录损坏".to_string());
+        }
+        let name_len = read_le_u16(&central, cursor + 28) as usize;
+        let extra_len = read_le_u16(&central, cursor + 30) as usize;
+        let comment_len = read_le_u16(&central, cursor + 32) as usize;
+        let metadata_len = name_len as u64 + extra_len as u64 + comment_len as u64;
+        if metadata_len > MAX_ZIP_ENTRY_METADATA_BYTES {
+            return Err("zip 条目元数据过大，拒绝".to_string());
+        }
+        let record_len = 46usize
+            .checked_add(name_len)
+            .and_then(|n| n.checked_add(extra_len))
+            .and_then(|n| n.checked_add(comment_len))
+            .ok_or_else(|| "zip 结构无效：中央目录记录溢出".to_string())?;
+        if record_len > central.len() - cursor {
+            return Err("zip 结构无效：中央目录记录截断".to_string());
+        }
+        let name_start = cursor + 46;
+        if !names.insert(central[name_start..name_start + name_len].to_vec()) {
+            return Err("zip 结构无效：重复条目名，拒绝".to_string());
+        }
+        physical_count += 1;
+        if physical_count > entry_count {
+            return Err("zip 结构无效：中央目录条目数与 EOCD 不一致".to_string());
+        }
+        cursor += record_len;
+    }
+    if physical_count != entry_count {
+        return Err("zip 结构无效：中央目录条目数与 EOCD 不一致".to_string());
+    }
+    Ok((cd_offset as usize, cd_end as usize, entry_count as u16))
+}
+
 
 /// 把插件 zip 安全解压到 `dest_dir`（评审 v2 D7/D11：zip slip 防护）。
 ///
@@ -523,14 +734,33 @@ fn extract_plugin_zip_limited(
     max_total_bytes: u64,
 ) -> Result<(), String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败: {e}"))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("读取 zip 失败（损坏或非 zip）: {e}"))?;
-    if archive.len() > max_entries {
-        return Err(format!(
-            "zip 条目数 {} 超过上限 {max_entries}，疑似 zip bomb，拒绝",
-            archive.len()
-        ));
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() { return Err("ZIP 源必须是普通文件".into()); }
+    if metadata.len() > MAX_ZIP_ARCHIVE_BYTES { return Err("ZIP 压缩包超过 96 MiB 上限".into()); }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_ZIP_ARCHIVE_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_ZIP_ARCHIVE_BYTES { return Err("ZIP 压缩包超过 96 MiB 上限".into()); }
+    let mut snapshot = std::io::Cursor::new(bytes);
+    let (central_start, central_end, entries) = validate_zip_metadata(&mut snapshot, max_entries)?;
+    let mut bytes = snapshot.into_inner();
+    bytes.truncate(central_end);
+    if bytes[central_start..].windows(4).any(|marker| matches!(marker, [0x50, 0x4b, 0x05, 0x06] | [0x50, 0x4b, 0x06, 0x06] | [0x50, 0x4b, 0x06, 0x07])) {
+        return Err("ZIP 中央目录包含歧义结束标记".into());
     }
+    // Even ZIP64 packages fit classic footer fields within our input/count
+    // budgets. Per-entry ZIP64 extra fields are retained without conversion.
+    let mut footer = [0u8; 22];
+    footer[..4].copy_from_slice(&[0x50, 0x4b, 0x05, 0x06]);
+    footer[8..10].copy_from_slice(&entries.to_le_bytes());
+    footer[10..12].copy_from_slice(&entries.to_le_bytes());
+    footer[12..16].copy_from_slice(&((central_end - central_start) as u32).to_le_bytes());
+    footer[16..20].copy_from_slice(&(central_start as u32).to_le_bytes());
+    bytes.extend_from_slice(&footer);
+    let indexing = std::rc::Rc::new(std::cell::Cell::new(true));
+    let reader = ValidatedZipReader { bytes, position: 0, footer_start: central_end, indexing: indexing.clone() };
+    let mut archive = zip::ZipArchive::with_config(zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) }, reader)
+        .map_err(|e| format!("读取 zip 失败（损坏或非 zip）: {e}"))?;
+    indexing.set(false);
 
     let mut total_written: u64 = 0;
     for i in 0..archive.len() {
@@ -846,6 +1076,121 @@ mod tests {
     }
 
     #[test]
+    fn zip64_footer_and_embedded_comment_signature_extract_normally() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip64_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.zip");
+        write_test_zip(&path, &[("com.example.demo/main.js", "payload")]);
+        let mut bytes = fs::read(&path).unwrap();
+        let footer_at = bytes.len() - 22;
+        let mut footer = bytes.split_off(footer_at);
+        let count = read_le_u16(&footer, 10) as u64;
+        let size = read_le_u32(&footer, 12) as u64;
+        let offset = read_le_u32(&footer, 16) as u64;
+        let mut zip64 = [0u8; 56];
+        zip64[..4].copy_from_slice(&[0x50, 0x4b, 0x06, 0x06]);
+        zip64[4..12].copy_from_slice(&44u64.to_le_bytes());
+        zip64[12..14].copy_from_slice(&45u16.to_le_bytes());
+        zip64[14..16].copy_from_slice(&45u16.to_le_bytes());
+        zip64[24..32].copy_from_slice(&count.to_le_bytes());
+        zip64[32..40].copy_from_slice(&count.to_le_bytes());
+        zip64[40..48].copy_from_slice(&size.to_le_bytes());
+        zip64[48..56].copy_from_slice(&offset.to_le_bytes());
+        bytes.extend_from_slice(&zip64);
+        bytes.extend_from_slice(&[0x50, 0x4b, 0x06, 0x07]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(footer_at as u64).to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        footer[8..12].fill(0xff); footer[12..20].fill(0xff);
+        let comment = b"normal comment PK\x05\x06 tail";
+        footer[20..22].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&footer); bytes.extend_from_slice(comment);
+        fs::write(&path, bytes).unwrap();
+        extract_plugin_zip(&path, &dir.join("out")).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("out/com.example.demo/main.js")).unwrap(), "payload");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn genuine_zip64_entry_extra_fields_are_supported() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("hypercom_zip64_entry_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        writer.set_zip64_comment(Some("bounded"));
+        writer.start_file("com.example.demo/main.js", zip::write::SimpleFileOptions::default().large_file(true)).unwrap();
+        writer.write_all(b"real ZIP64 payload").unwrap(); writer.finish().unwrap();
+        extract_plugin_zip(&path, &dir.join("out")).unwrap();
+        assert_eq!(fs::read(dir.join("out/com.example.demo/main.js")).unwrap(), b"real ZIP64 payload");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forged_count_and_duplicate_physical_records_are_rejected_before_extracting() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_metadata_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.zip");
+        write_test_zip(&path, &[("com.example.demo/aa.js", "first"), ("com.example.demo/bb.js", "second")]);
+        let original = fs::read(&path).unwrap();
+        let footer = original.len() - 22;
+        let mut forged = original.clone();
+        forged[footer + 8..footer + 12].fill(0);
+        fs::write(&path, &forged).unwrap();
+        assert!(extract_plugin_zip(&path, &dir.join("bad-count")).unwrap_err().contains("条目数"));
+        let mut duplicate = original.clone();
+        let central = read_le_u32(&duplicate, footer + 16) as usize;
+        let first_len = 46 + read_le_u16(&duplicate, central + 28) as usize + read_le_u16(&duplicate, central + 30) as usize + read_le_u16(&duplicate, central + 32) as usize;
+        let second_name = central + first_len + 46;
+        duplicate[second_name..second_name + "com.example.demo/aa.js".len()].copy_from_slice(b"com.example.demo/aa.js");
+        fs::write(&path, duplicate).unwrap();
+        assert!(extract_plugin_zip(&path, &dir.join("duplicates")).unwrap_err().contains("重复"));
+        assert!(!dir.join("bad-count").exists());
+        assert!(!dir.join("duplicates").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_input_and_central_metadata_have_preparse_budgets() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_budget_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.zip");
+        fs::File::create(&path).unwrap().set_len(MAX_ZIP_ARCHIVE_BYTES + 1).unwrap();
+        assert!(extract_plugin_zip(&path, &dir.join("oversize")).unwrap_err().contains("96 MiB"));
+        write_test_zip(&path, &[("com.example.demo/main.js", "payload")]);
+        let mut bytes = fs::read(&path).unwrap();
+        let footer = bytes.len() - 22;
+        bytes[footer + 12..footer + 16].copy_from_slice(&((MAX_ZIP_CENTRAL_DIRECTORY_BYTES + 1) as u32).to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(extract_plugin_zip(&path, &dir.join("metadata")).unwrap_err().contains("中央目录"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parser_cannot_fall_back_to_an_unvalidated_earlier_footer() {
+        let dir = std::env::temp_dir().join(format!("hypercom_zip_footer_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.zip");
+        use std::io::Write;
+        let mut fake = [0u8; 22]; fake[..4].copy_from_slice(&[0x50, 0x4b, 0x05, 0x06]);
+        fake[8..10].copy_from_slice(&60000u16.to_le_bytes());
+        fake[10..12].copy_from_slice(&60000u16.to_le_bytes());
+        let mut writer = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        writer.start_file("com.example.demo/main.js", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        writer.write_all(&fake).unwrap(); writer.finish().unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        let footer = bytes.len() - 22;
+        let central = read_le_u32(&bytes, footer + 16) as usize;
+        // Fail after indexing starts, which normally makes zip 2.x retry the
+        // attacker footer embedded in stored payload and allocate its count.
+        bytes[central + 42..central + 46].copy_from_slice(&(central as u32).to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(extract_plugin_zip(&path, &dir.join("out")).is_err());
+        assert!(!dir.join("out").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn extract_zip_rejects_traversal_entry() {
         let dir = std::env::temp_dir().join(format!("hypercom_zip_slip_{}", uuid::Uuid::new_v4()));
         let zip_path = dir.join("pkg.zip");
@@ -1010,59 +1355,4 @@ mod tests {
         assert!(m.shell.is_none());
     }
 
-    #[test]
-    fn install_dir_scan_roundtrip_detects_and_validates() {
-        // 模拟「安装目录 → 扫描」闭环（install_plugin 的核心校验链：
-        // 复制目录 + scan_plugins 发现 + manifest 权威校验）。
-        let dir = std::env::temp_dir().join(format!("hypercom_install_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-
-        // 源插件目录（含 manifest + 入口 + 资产）。
-        let src = dir.join("src_plugin");
-        fs::create_dir_all(&src).unwrap();
-        fs::write(src.join("manifest.json"), valid_manifest_json()).unwrap();
-        fs::write(src.join("main.js"), "console.log('hi')").unwrap();
-        fs::create_dir_all(src.join("assets")).unwrap();
-        fs::write(src.join("assets/symbols.map"), "map").unwrap();
-
-        // 目标 plugins 根（模拟 <config_dir>/plugins）。
-        let plugins_root = dir.join("plugins");
-        fs::create_dir_all(&plugins_root).unwrap();
-        let dest = plugins_root.join("com.example.symresolve");
-        copy_dir_tree_for_test(&src, &dest);
-
-        // scan 发现并校验通过。
-        let found = scan_plugins(&plugins_root);
-        assert_eq!(found.len(), 1);
-        let manifest = found[0].manifest.as_ref().unwrap();
-        assert_eq!(manifest.id, "com.example.symresolve");
-        assert_eq!(manifest.entry, "main.js");
-        assert_eq!(manifest.permissions.len(), 2);
-
-        // entry 资产可读（read_plugin_asset 语义的路径解析）。
-        let entry_rel = sanitize_plugin_rel_path(&manifest.entry).unwrap();
-        let entry_path = dest.join(entry_rel);
-        assert_eq!(fs::read_to_string(entry_path).unwrap(), "console.log('hi')");
-        // 资产在插件目录内可读、目录外拒绝。
-        let ok_rel = sanitize_plugin_rel_path("assets/symbols.map").unwrap();
-        assert!(dest.join(ok_rel).is_file());
-        assert!(sanitize_plugin_rel_path("../outside").is_err());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// 测试用递归复制（生产用 commands/plugin.rs 的 copy_dir_recursive——命令层
-    /// 依赖 Tauri State 不便单测，此处独立实现等价语义）。
-    fn copy_dir_tree_for_test(src: &std::path::Path, dest: &std::path::Path) {
-        fs::create_dir_all(dest).unwrap();
-        for entry in fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            let t = dest.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_dir_tree_for_test(&entry.path(), &t);
-            } else {
-                fs::copy(entry.path(), &t).unwrap();
-            }
-        }
-    }
 }

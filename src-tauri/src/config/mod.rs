@@ -503,6 +503,8 @@ fn normalize_legacy_serial_enums(config: &mut AppConfig) {
 pub struct ConfigManager {
     config: AppConfig,
     config_path: PathBuf,
+    /// A corrupt primary must not overwrite the recovery backup before its first successful repair.
+    primary_valid: bool,
     /// 会话快照独立存储路径（config.json 同目录下 session.json）
     session_path: PathBuf,
     /// 插件根目录（与 config.json 同根：<config_dir>/plugins，issue #17 D6）。
@@ -546,6 +548,7 @@ impl ConfigManager {
         };
 
         let session_path = config_path.with_file_name("session.json");
+        let mut primary_valid = false;
 
         let mut config = if config_path.exists() {
             let content = fs::read_to_string(&config_path)?;
@@ -556,7 +559,10 @@ impl ConfigManager {
                 .ok_or_else(|| anyhow::anyhow!("config.json is not valid JSON"))
                 .and_then(|v| serde_json::from_value::<AppConfig>(v).map_err(anyhow::Error::from));
             match result {
-                Ok(cfg) => cfg,
+                Ok(cfg) => {
+                    primary_valid = true;
+                    cfg
+                }
                 Err(e) => {
                     log::warn!("Config file corrupt ({}), attempting .bak recovery", e);
                     let bak_path = config_path.with_extension("json.bak");
@@ -599,6 +605,7 @@ impl ConfigManager {
         let mut manager = Self {
             config,
             config_path,
+            primary_valid,
             session_path,
             plugins_dir,
         };
@@ -803,7 +810,8 @@ impl ConfigManager {
         self.config.revision = next_revision;
         let result = (|| -> anyhow::Result<()> {
             let content = serde_json::to_string_pretty(&self.config)?;
-            if self.config_path.exists() {
+            // Never replace a usable recovery backup with the corrupt primary we loaded around.
+            if self.primary_valid && self.config_path.exists() {
                 let bak_path = self.config_path.with_extension("json.bak");
                 let _ = fs::copy(&self.config_path, &bak_path);
             }
@@ -814,6 +822,7 @@ impl ConfigManager {
                 file.sync_all()?;
             }
             crate::plugin::transaction::replace_file(&tmp_path, &self.config_path)?;
+            self.primary_valid = true;
             crate::plugin::transaction::sync_dir(self.config_path.parent().unwrap_or_else(|| Path::new(".")))?;
             log::info!("Config saved to {:?}", self.config_path);
             Ok(())
@@ -851,6 +860,41 @@ mod tests {
         fs::write(&path, "corrupt").unwrap();
         let fallback = ConfigManager::new(Some(path)).unwrap();
         assert_eq!(fallback.get_config().entities.plugin_configs[0].install_generation, generation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_save_after_recovery_preserves_the_valid_backup() {
+        let root = std::env::temp_dir().join(format!("hypercom_recovery_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let backup = path.with_extension("json.bak");
+        let original = serde_json::json!({"theme": "light", "revision": 8});
+        fs::write(&backup, serde_json::to_string(&original).unwrap()).unwrap();
+        fs::write(&path, "corrupt primary").unwrap();
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        assert_eq!(manager.get_config().theme, "light");
+        // Fail the first post-recovery write too: neither recovery nor failure may ruin .bak.
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(manager.save().is_err());
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&backup).unwrap()).unwrap(), original);
+        fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        manager.save().unwrap();
+        fs::write(&path, "corrupt again").unwrap();
+        let recovered = ConfigManager::new(Some(path)).unwrap();
+        assert_eq!(recovered.get_config().theme, "light");
+        assert_eq!(recovered.get_config().revision, 8);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_snapshot_replaces_an_existing_snapshot() {
+        let root = std::env::temp_dir().join(format!("hypercom_session_replace_{}", uuid::Uuid::new_v4()));
+        let manager = ConfigManager::new(Some(root.join("config.json"))).unwrap();
+        manager.save_session_snapshot("first").unwrap();
+        manager.save_session_snapshot("second").unwrap();
+        assert_eq!(manager.load_session_snapshot(), "second");
+        assert!(!root.join("session.json.tmp").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1392,6 +1436,7 @@ mod tests {
         let mgr = ConfigManager {
             config: AppConfig::default(),
             config_path: config_path.clone(),
+            primary_valid: false,
             session_path: session_path.clone(),
             plugins_dir: dir.join("plugins"),
         };

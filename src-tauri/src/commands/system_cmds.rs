@@ -106,6 +106,7 @@ pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatu
                     true,
                     ProcessRefreshKind::nothing().with_memory().with_cpu(),
                 );
+                system.refresh_cpu_all();
                 let app_pids = collect_app_pids(sysinfo::get_current_pid().ok(), system.processes());
                 let app_memory_bytes: u64 = system
                     .processes()

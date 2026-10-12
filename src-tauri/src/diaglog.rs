@@ -193,9 +193,13 @@ impl DiagLogger {
     pub fn clear(&self) {
         // 先释放文件句柄再删/截断：Windows 下被占用的文件删不掉，
         // 且未关闭的句柄可能在下一次写入时把旧内容追加回来。
-        if let Ok(mut file) = self.file.lock() {
-            let _ = file.take();
-        }
+        let mut file = match self.file.lock() {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        let _ = file.take();
+        // Keep the write/rotation lock through deletion and truncation: a concurrent
+        // append must not reopen or rotate the file halfway through clearing it.
         for i in 1..=MAX_BACKUPS {
             let p = self.backup_path(i);
             if p.exists() {
@@ -370,5 +374,27 @@ mod tests {
         let text = logger.read(100);
         assert!(text.contains("[frontend] console.log msg"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_append_and_clear_leave_a_usable_clean_logger() {
+        let dir = temp_dir("concurrent_clear");
+        let logger = DiagLogger::new(dir.clone()).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..100 {
+                    logger.append_external("ts", "INFO", &"old".repeat(2048));
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..100 { logger.clear(); }
+            });
+        });
+        logger.clear();
+        logger.append_external("ts", "INFO", "after clear");
+        assert_eq!(logger.read(100), "ts [INFO] [frontend] after clear\n");
+        assert!((1..=MAX_BACKUPS).all(|n| !logger.backup_path(n).exists()));
+        drop(logger);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

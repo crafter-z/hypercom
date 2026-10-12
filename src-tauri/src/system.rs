@@ -28,13 +28,22 @@ pub fn prevent_sleep(enable: bool) -> Result<(), String> {
 
 /// 更新期望状态的一半，再把**完整**状态交给当前平台后端应用。
 fn apply_state(update: impl FnOnce(&mut (bool, bool))) -> Result<(), String> {
-    let desired = {
-        let mut guard = DESIRED_STATE
-            .lock()
-            .map_err(|e| format!("Failed to lock power state: {}", e))?;
-        update(&mut guard);
-        *guard
-    };
+    apply_state_with(&DESIRED_STATE, update, apply_backend)
+}
+
+fn apply_state_with(
+    state: &Mutex<(bool, bool)>,
+    update: impl FnOnce(&mut (bool, bool)),
+    apply: impl FnOnce((bool, bool)) -> Result<(), String>,
+) -> Result<(), String> {
+    // Keep the state lock until the complete snapshot has reached the backend.
+    // Otherwise a later update can apply first and then be overwritten by this one.
+    let mut guard = state.lock().map_err(|e| format!("Failed to lock power state: {}", e))?;
+    update(&mut guard);
+    apply(*guard)
+}
+
+fn apply_backend(desired: (bool, bool)) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
@@ -217,6 +226,36 @@ mod child_process_backend {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn concurrent_half_updates_apply_in_snapshot_order() {
+        let state = Mutex::new((false, false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (applied_tx, applied_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let state_ref = &state;
+            let second_tx = applied_tx.clone();
+            let first = scope.spawn(move || apply_state_with(state_ref, |s| s.0 = true, |snapshot| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                applied_tx.send(snapshot).unwrap();
+                Ok(())
+            }));
+            entered_rx.recv().unwrap();
+            let second = scope.spawn(move || apply_state_with(state_ref, |s| s.1 = true, |snapshot| {
+                second_tx.send(snapshot).unwrap();
+                Ok(())
+            }));
+            let premature = applied_rx.recv_timeout(std::time::Duration::from_millis(20));
+            release_tx.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+            assert!(premature.is_err(), "new snapshot applied before the older one completed");
+            assert_eq!(applied_rx.recv().unwrap(), (true, false));
+            assert_eq!(applied_rx.recv().unwrap(), (true, true));
+        });
+    }
     #[test]
     fn prevent_screen_off_roundtrip() {
         assert!(prevent_screen_off(true).is_ok());

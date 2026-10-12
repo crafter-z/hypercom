@@ -29,11 +29,11 @@ pub(super) fn sanitize_filename_component(input: &str) -> String {
 /// [com] → port_id, [datetime] → 20260101_120000, [date] → 2026-01-01, [time] → 12-00-00
 pub(super) fn format_filename(template: &str, port_id: &str) -> String {
     let now = chrono::Local::now();
-    template
+    sanitize_filename_component(&template
         .replace("[com]", &sanitize_filename_component(port_id))
         .replace("[datetime]", &now.format("%Y%m%d_%H%M%S").to_string())
         .replace("[date]", &now.format("%Y-%m-%d").to_string())
-        .replace("[time]", &now.format("%H-%M-%S").to_string())
+        .replace("[time]", &now.format("%H-%M-%S").to_string()))
 }
 
 /// 计算子目录名：
@@ -176,5 +176,17 @@ mod tests {
         let (path, _f, _) = allocate_file(&dir, "port", "[com]", "COM7", FileMode::Append).unwrap();
         assert_eq!(path.parent().unwrap(), dir.join("COM7"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filename_templates_cannot_escape_the_log_root() {
+        let root = test_dir("template_scope");
+        for template in ["../[com]", "../../outside/[com]", "/[com]", "C:\\outside\\[com]"] {
+            let (path, file, _) = allocate_file(&root, "none", template, "COM3", FileMode::Unique).unwrap();
+            assert_eq!(path.parent(), Some(root.as_path()));
+            assert!(path.is_file());
+            drop(file);
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -82,10 +82,12 @@ fn mutate<T>(
     manager: &mut config::ConfigManager,
     change: impl FnOnce(&mut config::AppConfig) -> T,
 ) -> Result<T, CommandError> {
+    let previous = manager.get_config().clone();
     let out = change(manager.get_config_mut());
-    manager
-        .save()
-        .map_err(|e| CommandError::Config(e.to_string()))?;
+    if let Err(error) = manager.save() {
+        *manager.get_config_mut() = previous;
+        return Err(CommandError::Config(error.to_string()));
+    }
     Ok(out)
 }
 
@@ -502,6 +504,27 @@ mod tests {
         assert_eq!(reloaded.get_config().theme, "light");
         assert_eq!(reloaded.get_config().revision, before + 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_crud_save_keeps_committed_snapshot_and_revision() {
+        let path = temp_config_path();
+        let dir = path.parent().unwrap().to_path_buf();
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        mutate(&mut manager, |cfg| upsert(command_sets(cfg), command_set("rule", "committed"))).unwrap();
+        let committed = serde_json::to_value(manager.get_config()).unwrap();
+        // A directory at the temporary file path makes the disk write fail on all platforms.
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        let result = mutate(&mut manager, |cfg| upsert(command_sets(cfg), command_set("rule", "rejected")));
+        assert!(result.is_err());
+        assert_eq!(serde_json::to_value(manager.get_config()).unwrap(), committed);
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        // An unrelated later commit must not smuggle the rejected entity edit onto disk.
+        mutate(&mut manager, |cfg| cfg.theme = "light".into()).unwrap();
+        let reloaded = ConfigManager::new(Some(path)).unwrap();
+        assert_eq!(reloaded.get_config().entities.send_command_sets[0].name, "committed");
+        assert_eq!(reloaded.get_config().theme, "light");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Old backup replaces all entities, while advancing revision prevents a

@@ -322,7 +322,11 @@ fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPlug
             .map(|e| e.eq_ignore_ascii_case("zip"))
             .unwrap_or(false)
     {
-        let tmp_root = std::env::temp_dir().join(format!(
+        // This is our trusted extraction location, not the user's chosen
+        // directory source. Resolve OS temp aliases before no-follow traversal.
+        let tmp_parent = std::env::temp_dir().canonicalize()
+            .map_err(|e| CommandError::Io(format!("系统临时目录不可达: {e}")))?;
+        let tmp_root = tmp_parent.join(format!(
             "hypercom_plugin_install_{}",
             uuid::Uuid::new_v4()
         ));
@@ -332,7 +336,8 @@ fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPlug
         _tmp_guard = Some(TempDirGuard(tmp_root.clone()));
         plugin::extract_plugin_zip(src, &tmp_root)
             .map_err(|e| CommandError::Other(format!("解压插件 zip 失败: {e}")))?;
-        Some(tmp_root)
+        Some(tmp_root.canonicalize()
+            .map_err(|e| CommandError::Io(format!("插件解压目录不可达: {e}")))?)
     } else {
         None
     };
@@ -1001,42 +1006,334 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
-
 /// Directory sources obey the same cumulative uncompressed limit as zip sources.
 fn copy_dir_recursive(src: &Path, dest: &Path, budget: &mut u64) -> std::io::Result<()> {
     let mut entries = 0usize;
     copy_dir_recursive_inner(src, dest, budget, 0, &mut entries)
 }
 
+// The source side of this copier is deliberately handle-based.  A pathname
+// checked with symlink_metadata is not a stable object: an untrusted source
+// directory can replace it before File::open follows the path.  Unix walks
+// from an O_NOFOLLOW directory handle and Windows verifies every final handle
+// against the already-opened source root.  Both paths reject links and all
+// non-regular objects before any bytes are read.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
 fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: usize, entries: &mut usize) -> std::io::Result<()> {
-    if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH {
-        return Err(std::io::Error::other("插件目录递归深度超过上限"));
+    use std::ffi::{CStr, CString, OsString};
+    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::MetadataExt;
+
+    fn invalid(message: &str) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, message)
     }
-    std::fs::create_dir_all(dest)?;
-    for entry in std::fs::read_dir(src)? {
-        *entries = (*entries).saturating_add(1);
-        if *entries > plugin::MAX_ZIP_ENTRIES {
-            return Err(std::io::Error::other("插件目录条目数超过上限"));
+
+    fn open_flags() -> libc::c_int {
+        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK
+    }
+
+    fn open_root(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut current = if path.is_absolute() {
+            let root = CString::new("/").unwrap();
+            let fd = unsafe { libc::open(root.as_ptr(), open_flags() | libc::O_DIRECTORY) };
+            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            unsafe { std::fs::File::from_raw_fd(fd) }
+        } else {
+            let dot = CString::new(".").unwrap();
+            let fd = unsafe { libc::open(dot.as_ptr(), open_flags() | libc::O_DIRECTORY) };
+            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            unsafe { std::fs::File::from_raw_fd(fd) }
+        };
+        for component in path.components() {
+            let name = match component {
+                std::path::Component::RootDir | std::path::Component::CurDir => continue,
+                std::path::Component::Normal(name) => CString::new(name.as_bytes())
+                    .map_err(|_| invalid("源目录名称包含 NUL"))?,
+                std::path::Component::ParentDir => return Err(invalid("源目录不得包含 ..")),
+                std::path::Component::Prefix(_) => return Err(invalid("不支持的源目录前缀")),
+            };
+            let fd = unsafe {
+                libc::openat(current.as_raw_fd(), name.as_ptr(), open_flags() | libc::O_DIRECTORY)
+            };
+            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            current = unsafe { std::fs::File::from_raw_fd(fd) };
         }
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if depth + 1 > plugin::MAX_PLUGIN_SOURCE_DEPTH {
-            return Err(std::io::Error::other("插件目录递归深度超过上限"));
-        }
-        let target = dest.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive_inner(&entry.path(), &target, budget, depth + 1, entries)?;
-        } else if file_type.is_file() {
-            let mut input = std::fs::File::open(entry.path())?;
-            let mut output = std::fs::File::create(target)?;
-            let written = std::io::copy(&mut std::io::Read::take(&mut input, *budget + 1), &mut output)?;
-            if written > *budget {
-                return Err(std::io::Error::other("插件目录超过 64 MiB 大小上限"));
+        let metadata = current.metadata()?;
+        if !metadata.is_dir() { return Err(invalid("插件源根目录必须是目录")); }
+        Ok(current)
+    }
+
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+    }
+    impl DirectoryStream {
+        fn open(dir: RawFd) -> std::io::Result<Self> {
+            let duplicate = unsafe { libc::fcntl(dir, libc::F_DUPFD_CLOEXEC, 0) };
+            if duplicate < 0 { return Err(std::io::Error::last_os_error()); }
+            let stream = unsafe { libc::fdopendir(duplicate) };
+            if stream.is_null() {
+                let error = std::io::Error::last_os_error();
+                unsafe { libc::close(duplicate); }
+                return Err(error);
             }
-            *budget -= written;
+            Ok(Self(stream))
         }
-        // Do not follow source symlinks.
+        fn next_name(&mut self) -> std::io::Result<Option<OsString>> {
+            loop {
+                // readdir uses null for both EOF and errors. Clear errno before
+                // the call so unreadable/changing directories fail closed.
+                #[cfg(target_os = "linux")]
+                let errno = unsafe { libc::__errno_location() };
+                #[cfg(target_os = "android")]
+                let errno = unsafe { libc::__errno() };
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                let errno = unsafe { libc::__error() };
+                unsafe { *errno = 0; }
+                let item = unsafe { libc::readdir(self.0) };
+                if item.is_null() {
+                    let error = unsafe { *errno };
+                    return if error == 0 { Ok(None) } else { Err(std::io::Error::from_raw_os_error(error)) };
+                }
+                let bytes = unsafe { CStr::from_ptr((*item).d_name.as_ptr()) }.to_bytes();
+                if bytes == b"." || bytes == b".." { continue; }
+                return Ok(Some(OsString::from_vec(bytes.to_vec())));
+            }
+        }
     }
+
+    fn copy_dir_fd(
+        dir: &std::fs::File,
+        dest: &Path,
+        budget: &mut u64,
+        depth: usize,
+        entries: &mut usize,
+    ) -> std::io::Result<()> {
+        if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH {
+            return Err(invalid("插件目录递归深度超过上限"));
+        }
+        std::fs::create_dir_all(dest)?;
+        let mut stream = DirectoryStream::open(dir.as_raw_fd())?;
+        while let Some(name) = stream.next_name()? {
+            *entries = (*entries).saturating_add(1);
+            if *entries > plugin::MAX_ZIP_ENTRIES {
+                return Err(invalid("插件目录条目数超过上限"));
+            }
+            if depth + 1 > plugin::MAX_PLUGIN_SOURCE_DEPTH {
+                return Err(invalid("插件目录递归深度超过上限"));
+            }
+            let name_bytes = name.as_os_str().as_bytes();
+            let c_name = CString::new(name_bytes).map_err(|_| invalid("插件源名称包含 NUL"))?;
+            let mut before: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstatat(dir.as_raw_fd(), c_name.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let target = dest.join(&name);
+            let mode = before.st_mode as libc::mode_t;
+            let is_dir = (mode & libc::S_IFMT) == libc::S_IFDIR;
+            let is_file = (mode & libc::S_IFMT) == libc::S_IFREG;
+            if !is_dir && !is_file {
+                return Err(invalid("插件源不得包含符号链接或特殊文件"));
+            }
+            #[cfg(test)]
+            directory_copy_test_hook(DirectoryCopyStep::BeforeOpen, &target);
+            let flags = open_flags() | if is_dir { libc::O_DIRECTORY } else { 0 };
+            let fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
+            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            let opened = unsafe { std::fs::File::from_raw_fd(fd) };
+            let metadata = opened.metadata()?;
+            if is_dir {
+                if !metadata.is_dir() { return Err(invalid("插件源目录类型在打开期间变化")); }
+                #[cfg(test)]
+                directory_copy_test_hook(DirectoryCopyStep::DirectoryOpened, &target);
+                copy_dir_fd(&opened, &target, budget, depth + 1, entries)?;
+            } else {
+                if !metadata.is_file() || metadata.nlink() != 1 {
+                    return Err(invalid("插件源必须是未链接的普通文件"));
+                }
+                let mut output = std::fs::File::create(target)?;
+                let written = std::io::copy(&mut std::io::Read::take(opened, *budget + 1), &mut output)?;
+                if written > *budget { return Err(invalid("插件目录超过 64 MiB 大小上限")); }
+                *budget -= written;
+            }
+        }
+        Ok(())
+    }
+
+    let root = open_root(src)?;
+    copy_dir_fd(&root, dest, budget, depth, entries)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")))]
+fn copy_dir_recursive_inner(_: &Path, _: &Path, _: &mut u64, _: usize, _: &mut usize) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "此平台不支持安全目录插件安装"))
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryCopyStep { BeforeOpen, DirectoryOpened }
+
+#[cfg(test)]
+type DirectoryCopyHook = Box<dyn FnMut(DirectoryCopyStep, &Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_COPY_HOOK: std::cell::RefCell<Option<DirectoryCopyHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn directory_copy_test_hook(step: DirectoryCopyStep, target: &Path) {
+    DIRECTORY_COPY_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() { hook(step, target); }
+    });
+}
+
+#[cfg(windows)]
+fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: usize, entries: &mut usize) -> std::io::Result<()> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE, FILE_TYPE_DISK, VOLUME_NAME_DOS,
+    };
+
+    fn invalid(message: &str) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+    }
+    fn final_path(file: &std::fs::File) -> std::io::Result<std::path::PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        let mut buffer = vec![0u16; 32768];
+        let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) };
+        if length == 0 || length as usize >= buffer.len() { return Err(std::io::Error::last_os_error()); }
+        Ok(std::ffi::OsString::from_wide(&buffer[..length as usize]).into())
+    }
+    fn validate_opened(file: std::fs::File, directory: bool) -> std::io::Result<std::fs::File> {
+        if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK {
+            return Err(invalid("插件源必须是磁盘上的普通文件或目录"));
+        }
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 { return Err(invalid("插件源不得包含重解析点")); }
+        if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+            return Err(invalid("插件源对象类型在打开期间变化"));
+        }
+        Ok(file)
+    }
+    fn open_anchor(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+        validate_opened(options.open(path)?, true)
+    }
+    fn open_relative(parent: &std::fs::File, name: &std::ffi::OsStr, directory: bool, pinned: bool) -> std::io::Result<std::fs::File> {
+        use std::os::windows::ffi::OsStrExt;
+        // NtCreateFile is the Windows openat equivalent. Only a single name is
+        // supplied, so intermediate components cannot be re-resolved by Win32.
+        #[repr(C)]
+        struct UnicodeString { length: u16, maximum_length: u16, buffer: *mut u16 }
+        #[repr(C)]
+        struct ObjectAttributes { length: u32, root: *mut std::ffi::c_void, name: *mut UnicodeString, attributes: u32, security: *mut std::ffi::c_void, quality: *mut std::ffi::c_void }
+        #[repr(C)]
+        struct IoStatus { status: usize, information: usize }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtCreateFile(handle: *mut *mut std::ffi::c_void, access: u32, attributes: *mut ObjectAttributes, status: *mut IoStatus, size: *mut i64, file_attributes: u32, share: u32, disposition: u32, options: u32, ea: *mut std::ffi::c_void, ea_length: u32) -> i32;
+            fn RtlNtStatusToDosError(status: i32) -> u32;
+        }
+        let mut wide: Vec<u16> = name.encode_wide().collect();
+        if wide.is_empty() || wide.len() > (u16::MAX as usize / 2) || wide.iter().any(|c| matches!(*c, 0 | 47 | 92 | 58)) {
+            return Err(invalid("插件源组件名称无效"));
+        }
+        let mut unicode = UnicodeString { length: (wide.len() * 2) as u16, maximum_length: (wide.len() * 2) as u16, buffer: wide.as_mut_ptr() };
+        let mut attributes = ObjectAttributes { length: std::mem::size_of::<ObjectAttributes>() as u32, root: parent.as_raw_handle(), name: &mut unicode, attributes: 0x40 | 0x1000, security: std::ptr::null_mut(), quality: std::ptr::null_mut() }; // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+        let mut status = IoStatus { status: 0, information: 0 };
+        let mut handle = std::ptr::null_mut();
+        let share = if pinned { FILE_SHARE_READ } else { FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE };
+        let options = 0x00200000 | 0x20 | if directory { 1 } else { 0x40 }; // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | DIRECTORY/NON_DIRECTORY
+        let result = unsafe { NtCreateFile(&mut handle, 0x00120089, &mut attributes, &mut status, std::ptr::null_mut(), 0, share, 1, options, std::ptr::null_mut(), 0) }; // FILE_GENERIC_READ, FILE_OPEN
+        if result < 0 { return Err(std::io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32)); }
+        validate_opened(unsafe { std::fs::File::from_raw_handle(handle) }, directory)
+    }
+    fn pin_root(src: &Path) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+        let absolute = if src.is_absolute() { src.to_path_buf() } else { std::env::current_dir()?.join(src) };
+        let mut anchor = std::path::PathBuf::new();
+        let mut names = Vec::new();
+        for component in absolute.components() {
+            match component {
+                std::path::Component::Prefix(prefix) => {
+                    use std::path::Prefix;
+                    if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _)) {
+                        return Err(invalid("插件源不得使用设备路径"));
+                    }
+                    anchor.push(prefix.as_os_str());
+                }
+                std::path::Component::RootDir => anchor.push(component.as_os_str()),
+                std::path::Component::CurDir => {},
+                std::path::Component::Normal(name) => names.push(name),
+                std::path::Component::ParentDir => return Err(invalid("源目录不得包含 ..")),
+            }
+        }
+        if names.is_empty() { return Err(invalid("插件源必须是非卷根目录")); }
+        let mut current = open_anchor(&anchor)?;
+        for (index, name) in names.iter().enumerate() {
+            current = open_relative(&current, name, true, index + 1 == names.len())?;
+        }
+        let root = final_path(&current)?;
+        Ok((current, root))
+    }
+    fn copy_dir_path(dir: &std::fs::File, path: &Path, root: &Path, dest: &Path, budget: &mut u64, depth: usize, entries: &mut usize) -> std::io::Result<()> {
+        if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH { return Err(invalid("插件目录递归深度超过上限")); }
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            *entries = (*entries).saturating_add(1);
+            if *entries > plugin::MAX_ZIP_ENTRIES { return Err(invalid("插件目录条目数超过上限")); }
+            if depth + 1 > plugin::MAX_PLUGIN_SOURCE_DEPTH { return Err(invalid("插件目录递归深度超过上限")); }
+            let candidate = entry.path();
+            let link_meta = std::fs::symlink_metadata(&candidate)?;
+            if link_meta.file_type().is_symlink() || link_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(invalid("插件源不得包含链接或重解析点"));
+            }
+            let name = entry.file_name();
+            let text = name.to_str().ok_or_else(|| invalid("插件源名称必须是 UTF-8"))?;
+            let stem = text.split('.').next().unwrap_or("").to_ascii_uppercase();
+            if text.ends_with(['.', ' ']) || text.contains(':') || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && matches!(stem.as_bytes()[3], b'1'..=b'9')) {
+                return Err(invalid("插件源名称含 Windows 设备或路径别名"));
+            }
+            let target = dest.join(&name);
+            #[cfg(test)]
+            directory_copy_test_hook(DirectoryCopyStep::BeforeOpen, &target);
+            if link_meta.is_dir() {
+                let opened = open_relative(dir, &name, true, true)?;
+                let child = final_path(&opened)?;
+                if child.parent() != Some(path) || !child.starts_with(root) { return Err(invalid("插件源越过选定目录")); }
+                #[cfg(test)]
+                directory_copy_test_hook(DirectoryCopyStep::DirectoryOpened, &target);
+                copy_dir_path(&opened, &child, root, &target, budget, depth + 1, entries)?;
+                drop(opened);
+            } else if link_meta.is_file() {
+                let input = open_relative(dir, &name, false, true)?;
+                let opened_path = final_path(&input)?;
+                if opened_path.parent() != Some(path) || !opened_path.starts_with(root) { return Err(invalid("插件源越过选定目录")); }
+                let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+                if unsafe { GetFileInformationByHandle(input.as_raw_handle(), &mut information) } == 0 { return Err(std::io::Error::last_os_error()); }
+                if information.nNumberOfLinks != 1 { return Err(invalid("插件源必须是未链接的普通文件")); }
+                let mut output = std::fs::File::create(target)?;
+                let written = std::io::copy(&mut std::io::Read::take(input, *budget + 1), &mut output)?;
+                if written > *budget { return Err(invalid("插件目录超过 64 MiB 大小上限")); }
+                *budget -= written;
+            } else {
+                return Err(invalid("插件源不得包含特殊文件"));
+            }
+        }
+        Ok(())
+    }
+
+    let (opened, root) = pin_root(src)?;
+    copy_dir_path(&opened, &root, &root, dest, budget, depth, entries)?;
+    drop(opened);
     Ok(())
 }
 
@@ -1322,6 +1619,31 @@ mod tests {
     use std::fs;
     use std::future::Future;
 
+    fn canonical_test_temp_dir() -> std::path::PathBuf {
+        // macOS /var and /tmp can be aliases; fixtures must exercise copying
+        // real directories rather than the intentional ancestor-link rejection.
+        std::env::temp_dir().canonicalize().unwrap()
+    }
+
+    #[test]
+    fn zip_install_uses_canonical_internal_extraction_directory() {
+        let root = canonical_test_temp_dir().join(format!("plugin_zip_temp_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("plugin.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        use std::io::Write;
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(manifest("1.0.0").as_bytes()).unwrap();
+        zip.start_file("main.js", options).unwrap();
+        zip.write_all(b"ordinary").unwrap();
+        zip.finish().unwrap();
+        let prepared = prepare_plugin_install(archive.to_str().unwrap(), &root.join("plugins")).unwrap();
+        assert_eq!(fs::read_to_string(prepared.stage_guard.0.join("main.js")).unwrap(), "ordinary");
+        drop(prepared);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn manifest(version: &str) -> String {
         format!(r#"{{"id":"com.example.test","name":"Test","version":"{version}","apiVersion":"1.0","entry":"main.js","permissions":[]}}"#)
     }
@@ -1347,7 +1669,7 @@ mod tests {
 
     #[test]
     fn upgrade_crash_after_code_swap_reloads_without_trust() {
-        let root = std::env::temp_dir().join(format!("plugin_crash_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_crash_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
@@ -1382,7 +1704,7 @@ mod tests {
 
     #[test]
     fn failed_commit_keeps_old_code_but_remains_fail_closed() {
-        let root = std::env::temp_dir().join(format!("plugin_state_rollback_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_state_rollback_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
@@ -1401,7 +1723,7 @@ mod tests {
 
     #[test]
     fn failed_precommit_save_never_changes_code_or_memory_trust() {
-        let root = std::env::temp_dir().join(format!("plugin_save_fail_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_save_fail_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
@@ -1417,7 +1739,7 @@ mod tests {
 
     #[test]
     fn failed_backup_persistence_never_swaps_executable_code() {
-        let root = std::env::temp_dir().join(format!("plugin_backup_save_fail_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_backup_save_fail_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
@@ -1432,9 +1754,295 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    struct DirectoryCopyHookGuard;
+    impl Drop for DirectoryCopyHookGuard {
+        fn drop(&mut self) { DIRECTORY_COPY_HOOK.with(|hook| *hook.borrow_mut() = None); }
+    }
+    fn with_directory_copy_hook(hook: impl FnMut(DirectoryCopyStep, &Path) + 'static, run: impl FnOnce()) {
+        DIRECTORY_COPY_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let _guard = DirectoryCopyHookGuard;
+        run();
+    }
+
+    #[test]
+    fn directory_copy_keeps_regular_tree_and_streaming_budget() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_regular_{}", uuid::Uuid::new_v4()));
+        let src = source(&root, "1.0.0");
+        fs::create_dir(src.join("nested")).unwrap();
+        fs::write(src.join("nested/asset.txt"), "asset").unwrap();
+        let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+        copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+        assert_eq!(fs::read_to_string(root.join("out/nested/asset.txt")).unwrap(), "asset");
+        let bytes = manifest("1.0.0").len() as u64 + 5 + 5;
+        assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES - bytes);
+        let mut tiny = 1;
+        assert!(copy_dir_recursive(&src, &root.join("too-large"), &mut tiny).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_copy_rejects_hardlinked_source_bytes() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_hardlink_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(root.join("private"), "private bytes").unwrap();
+        fs::hard_link(root.join("private"), src.join("asset")).unwrap();
+        let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+        assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+        assert!(!root.join("out/asset").exists());
+        assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_rejects_symlink_file_and_source_ancestors() {
+        use std::os::unix::fs::symlink;
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_links_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(root.join("private"), "private bytes").unwrap();
+        symlink(root.join("private"), src.join("asset")).unwrap();
+        let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+        assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+        assert!(!root.join("out/asset").exists());
+        fs::remove_file(src.join("asset")).unwrap();
+        fs::write(src.join("asset"), "ordinary").unwrap();
+        symlink(&src, root.join("alias")).unwrap();
+        assert!(copy_dir_recursive(&root.join("alias"), &root.join("alias-out"), &mut budget).is_err());
+        symlink(&root, root.join("ancestor")).unwrap();
+        assert!(copy_dir_recursive(&root.join("ancestor/src"), &root.join("ancestor-out"), &mut budget).is_err());
+        fs::remove_file(root.join("ancestor")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_rejects_symlink_swapped_after_type_check() {
+        use std::os::unix::fs::symlink;
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_file_swap_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("asset"), "ordinary").unwrap();
+        fs::write(root.join("private"), "private bytes").unwrap();
+        let attack = root.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                fs::remove_file(attack.join("src/asset")).unwrap();
+                symlink(attack.join("private"), attack.join("src/asset")).unwrap();
+            }
+        }, || {
+            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+            assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+            assert!(!root.join("out/asset").exists());
+            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_uses_opened_ancestor_after_path_replacement() {
+        use std::os::unix::fs::symlink;
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_ancestor_swap_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::create_dir(root.join("private")).unwrap();
+        fs::write(src.join("nested/asset"), "ordinary").unwrap();
+        fs::write(root.join("private/asset"), "private bytes").unwrap();
+        let attack = root.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::DirectoryOpened && target.file_name().unwrap() == "nested" {
+                fs::rename(attack.join("src/nested"), attack.join("retained")).unwrap();
+                symlink(attack.join("private"), attack.join("src/nested")).unwrap();
+            }
+        }, || {
+            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+            copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+            assert_eq!(fs::read_to_string(root.join("out/nested/asset")).unwrap(), "ordinary");
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_rejects_fifo_before_and_after_type_check() {
+        use std::os::unix::ffi::OsStrExt;
+        fn fifo(path: &Path) {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_fifo_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fifo(&src.join("asset"));
+        let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+        assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+        fs::remove_file(src.join("asset")).unwrap();
+        fs::write(src.join("asset"), "ordinary").unwrap();
+        let attack = root.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                fs::remove_file(attack.join("src/asset")).unwrap();
+                fifo(&attack.join("src/asset"));
+            }
+        }, || {
+            assert!(copy_dir_recursive(&src, &root.join("swapped-out"), &mut budget).is_err());
+            assert!(!root.join("swapped-out/asset").exists());
+            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn directory_copy_junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link).arg(target).output().unwrap();
+        assert!(output.status.success(), "junction fixture: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_copy_rejects_junction_source_and_ancestors() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_junction_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir(root.join("private")).unwrap();
+        fs::write(root.join("private/asset"), "private bytes").unwrap();
+        directory_copy_junction(&src.join("nested"), &root.join("private"));
+        let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+        assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+        assert!(!root.join("out/nested/asset").exists());
+        directory_copy_junction(&root.join("alias"), &src);
+        assert!(copy_dir_recursive(&root.join("alias"), &root.join("alias-out"), &mut budget).is_err());
+        directory_copy_junction(&root.join("ancestor"), &root);
+        assert!(copy_dir_recursive(&root.join("ancestor/src"), &root.join("ancestor-out"), &mut budget).is_err());
+        fs::remove_dir(src.join("nested")).unwrap();
+        fs::remove_dir(root.join("alias")).unwrap();
+        fs::remove_dir(root.join("ancestor")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_copy_rejects_junction_swapped_after_type_check() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_junction_swap_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::create_dir(root.join("private")).unwrap();
+        fs::write(root.join("private/asset"), "private bytes").unwrap();
+        let attack = root.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "nested" {
+                fs::remove_dir(attack.join("src/nested")).unwrap();
+                directory_copy_junction(&attack.join("src/nested"), &attack.join("private"));
+            }
+        }, || {
+            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+            assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+            assert!(!root.join("out/nested/asset").exists());
+            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+        });
+        fs::remove_dir(src.join("nested")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_copy_rejects_hardlink_swapped_after_type_check() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_hardlink_swap_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("asset"), "ordinary").unwrap();
+        fs::write(root.join("private"), "private bytes").unwrap();
+        let attack = root.clone();
+        let outcome = std::rc::Rc::new(std::cell::Cell::new(None));
+        let attack_outcome = outcome.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                fs::remove_file(attack.join("src/asset")).unwrap();
+                match fs::hard_link(attack.join("private"), attack.join("src/asset")) {
+                    Ok(()) => attack_outcome.set(Some(false)),
+                    Err(error) => {
+                        // Windows may reject the mutation itself because the
+                        // selected source directory is pinned without WRITE.
+                        assert_eq!(error.raw_os_error(), Some(32));
+                        assert!(!attack.join("src/asset").exists());
+                        attack_outcome.set(Some(true));
+                    }
+                }
+            }
+        }, || {
+            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+            assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+            assert!(!root.join("out/asset").exists());
+            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+            assert!(outcome.get().is_some(), "swap hook must execute");
+            assert_eq!(fs::read_to_string(root.join("private")).unwrap(), "private bytes");
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_copy_rejects_device_namespace_before_open() {
+        let out = canonical_test_temp_dir().join(format!("plugin_copy_device_{}", uuid::Uuid::new_v4()));
+        let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+        assert!(copy_dir_recursive(Path::new(r"\\.\pipe\hypercom-never-open"), &out, &mut budget).is_err());
+        assert!(!out.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_copy_does_not_lock_unrelated_ancestor_children() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_sibling_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("asset"), "ordinary").unwrap();
+        fs::write(root.join("outside"), "sibling").unwrap();
+        let sibling = root.join("plugins/com.example.keep");
+        fs::create_dir_all(sibling.join("data")).unwrap();
+        fs::write(sibling.join("data/keep"), "user").unwrap();
+        let attack = root.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                fs::hard_link(attack.join("outside"), attack.join("outside-link")).unwrap();
+                let (dest, backup) = stage_uninstall_fs(&attack.join("plugins"), "com.example.keep").unwrap();
+                fs::rename(backup.unwrap(), dest).unwrap();
+            }
+        }, || {
+            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+            copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+            assert_eq!(fs::read_to_string(root.join("out/asset")).unwrap(), "ordinary");
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_copy_pins_opened_ancestor_against_rename() {
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_pin_{}", uuid::Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::write(src.join("nested/asset"), "ordinary").unwrap();
+        let attack = root.clone();
+        with_directory_copy_hook(move |step, target| {
+            if step == DirectoryCopyStep::DirectoryOpened && target.file_name().unwrap() == "nested" {
+                let error = fs::rename(attack.join("src/nested"), attack.join("moved")).unwrap_err();
+                assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+            }
+        }, || {
+            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+            copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+            assert_eq!(fs::read_to_string(root.join("out/nested/asset")).unwrap(), "ordinary");
+        });
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn directory_copy_rejects_empty_file_count_and_depth() {
-        let root = std::env::temp_dir().join(format!("plugin_copy_limits_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_copy_limits_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("empty"), "").unwrap();
@@ -1514,7 +2122,7 @@ mod tests {
 
     #[test]
     fn data_quota_rejects_single_file_total_and_file_count() {
-        let root = std::env::temp_dir().join(format!("plugin_data_limits_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_data_limits_{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         fs::create_dir_all(&data).unwrap();
         let target = data.join("new");
@@ -1535,7 +2143,7 @@ mod tests {
 
     #[test]
     fn asset_reads_enforce_limit_including_exact_boundary() {
-        let root = std::env::temp_dir().join(format!("plugin_read_limits_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_read_limits_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let file = root.join("text");
         fs::write(&file, "1234").unwrap();
@@ -1562,7 +2170,7 @@ mod tests {
 
     #[test]
     fn invalid_ids_cannot_delete_root_or_siblings() {
-        let root = std::env::temp_dir().join(format!("plugin_id_test_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_id_test_{}", uuid::Uuid::new_v4()));
         let sibling = root.join("com.example.keep");
         fs::create_dir_all(&sibling).unwrap();
         fs::write(sibling.join("keep"), "intact").unwrap();
@@ -1574,7 +2182,7 @@ mod tests {
     }
     #[test]
     fn uninstall_backup_can_restore_private_data_after_save_failure() {
-        let root = std::env::temp_dir().join(format!("plugin_uninstall_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_uninstall_{}", uuid::Uuid::new_v4()));
         let plugin_dir = root.join("com.example.keep");
         fs::create_dir_all(plugin_dir.join("data")).unwrap();
         fs::write(plugin_dir.join("data/keep"), "user").unwrap();
@@ -1589,7 +2197,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces_existing_content() {
-        let root = std::env::temp_dir().join(format!("plugin_write_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_write_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let target = root.join("key");
         atomic_write_asset(&root, &target, b"old").unwrap();
@@ -1601,7 +2209,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn atomic_write_does_not_follow_target_symlink() {
-        let root = std::env::temp_dir().join(format!("plugin_write_link_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_write_link_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let outside = root.join("outside");
         fs::write(&outside, "safe").unwrap();
@@ -1616,7 +2224,7 @@ mod tests {
 
     #[test]
     fn upgrade_preserves_old_data_and_removes_old_code() {
-        let root = std::env::temp_dir().join(format!("plugin_upgrade_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_upgrade_{}", uuid::Uuid::new_v4()));
         let src1 = source(&root, "1.0.0");
         let src2 = source(&root, "2.0.0");
         let plugins = root.join("plugins");
@@ -1638,7 +2246,7 @@ mod tests {
 
     #[test]
     fn missing_upgrade_entry_preserves_existing_plugin_and_data() {
-        let root = std::env::temp_dir().join(format!("plugin_missing_entry_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_missing_entry_{}", uuid::Uuid::new_v4()));
         let original = source(&root, "1.0.0");
         let upgrade = source(&root, "2.0.0");
         let plugins = root.join("plugins");
@@ -1656,7 +2264,7 @@ mod tests {
 
     #[test]
     fn failed_upgrade_keeps_old_code_and_private_data() {
-        let root = std::env::temp_dir().join(format!("plugin_failed_upgrade_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_failed_upgrade_{}", uuid::Uuid::new_v4()));
         let src1 = source(&root, "1.0.0");
         let src2 = source(&root, "2.0.0");
         let plugins = root.join("plugins");
@@ -1675,7 +2283,7 @@ mod tests {
     #[test]
     fn interrupted_upgrade_recovers_each_rename_boundary_idempotently() {
         for boundary in 0..=3 {
-            let root = std::env::temp_dir().join(format!("plugin_boundary_{}", uuid::Uuid::new_v4()));
+            let root = canonical_test_temp_dir().join(format!("plugin_boundary_{}", uuid::Uuid::new_v4()));
             let old_source = source(&root, "1.0.0");
             let new_source = source(&root, "2.0.0");
             let mut manager = trusted_manager(&root);
@@ -1720,7 +2328,7 @@ mod tests {
     #[test]
     fn interrupted_uninstall_uses_durable_config_commit() {
         for boundary in 0..=2 {
-            let root = std::env::temp_dir().join(format!("plugin_uninstall_boundary_{}", uuid::Uuid::new_v4()));
+            let root = canonical_test_temp_dir().join(format!("plugin_uninstall_boundary_{}", uuid::Uuid::new_v4()));
             let src = source(&root, "1.0.0");
             let mut manager = trusted_manager(&root);
             install_plugin_fs_stage(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
@@ -1764,7 +2372,7 @@ mod tests {
 
     #[test]
     fn snapshot_revision_is_captured_after_save() {
-        let root = std::env::temp_dir().join(format!("plugin_snapshot_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_snapshot_{}", uuid::Uuid::new_v4()));
         let mut manager = trusted_manager(&root);
         let before = snapshot(&manager).revision;
         manager.save().unwrap();
@@ -1774,7 +2382,7 @@ mod tests {
 
     #[test]
     fn successful_install_update_uninstall_reinstall_returns_fresh_identity() {
-        let root = std::env::temp_dir().join(format!("plugin_identity_cycle_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_identity_cycle_{}", uuid::Uuid::new_v4()));
         let src1 = source(&root, "1.0.0");
         let src2 = source(&root, "2.0.0");
         let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
@@ -1799,7 +2407,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn missing_asset_does_not_hide_linked_parent_or_data_corruption() {
-        let root = std::env::temp_dir().join(format!("plugin_missing_corrupt_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_missing_corrupt_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("data")).unwrap();
         fs::create_dir(root.join("outside")).unwrap();
         std::os::unix::fs::symlink(root.join("outside"), root.join("data/link")).unwrap();
@@ -1812,7 +2420,7 @@ mod tests {
     #[test]
     fn interrupted_first_install_is_disabled_or_absent_without_package_data() {
         for published in [false, true] {
-            let root = std::env::temp_dir().join(format!("plugin_first_boundary_{}", uuid::Uuid::new_v4()));
+            let root = canonical_test_temp_dir().join(format!("plugin_first_boundary_{}", uuid::Uuid::new_v4()));
             let src = source(&root, "1.0.0");
             fs::create_dir(src.join("data")).unwrap();
             fs::write(src.join("data/injected"), "package").unwrap();
@@ -1838,7 +2446,7 @@ mod tests {
 
     #[test]
     fn data_quota_budgets_all_new_parent_directories_without_mutation() {
-        let root = std::env::temp_dir().join(format!("plugin_parent_budget_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_parent_budget_{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         fs::create_dir_all(&data).unwrap();
         let mut accepted = 0;
@@ -1859,7 +2467,7 @@ mod tests {
 
     #[test]
     fn missing_asset_is_distinct_from_type_encoding_and_limit_errors() {
-        let root = std::env::temp_dir().join(format!("plugin_missing_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!("plugin_missing_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         assert_eq!(read_authorized_asset(&root, Path::new("data/state.json")).unwrap(), None);
         fs::create_dir(root.join("directory")).unwrap();

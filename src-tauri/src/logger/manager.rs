@@ -193,13 +193,20 @@ impl LogManager {
             let (old_path, old_size) = {
                 let mut old = lock_mutex(&old);
                 let old_path = old.file_path().to_path_buf();
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                if let Err(e) = old.flush_rx_tail(&now) {
+                    log::warn!("Log RX tail flush failed on writer replacement ({port_id}): {e}");
+                }
                 let old_size = old.current_size();
                 if let Err(e) = old.flush_and_sync() {
                     log::warn!("Log final flush failed on writer replacement ({port_id}): {e}");
                 }
                 (old_path, old_size)
             };
-            self.retire_path(old_path, port_id, old_size);
+            // Append mode may reopen the same empty file; it is still owned by the new writer.
+            if old_path != path {
+                self.retire_path(old_path, port_id, old_size);
+            }
         }
         Ok(())
     }
@@ -301,6 +308,10 @@ impl LogManager {
     pub fn flush_all(&self) -> anyhow::Result<()> {
         for (port_id, handle) in self.writer_snapshot() {
             let mut writer = lock_mutex(&handle);
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            if let Err(e) = writer.flush_rx_tail(&now) {
+                log::warn!("Failed to flush RX tail for {port_id}: {e}");
+            }
             if let Err(e) = writer.flush_and_sync() {
                 log::warn!("Failed to sync log writer for {port_id}: {e}");
             }
@@ -370,6 +381,8 @@ impl LogManager {
         if let Some(handle) = self.writer_handle(port_id) {
             let source = {
                 let mut writer = lock_mutex(&handle);
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                writer.flush_rx_tail(&now)?;
                 writer.flush_and_sync()?;
                 writer.file_path().to_path_buf()
             };
@@ -764,6 +777,54 @@ mod tests {
         assert!(fs::read_to_string(&path).unwrap().contains("buffered"));
         mgr.close_writer("COM1").unwrap();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forced_flush_and_save_as_include_unterminated_rx_data() {
+        let dir = test_dir("rx_tail_force_flush");
+        let mgr = LogManager::for_test(&dir);
+        open_writer(&mgr, "COM3", "string");
+        mgr.write_rx("COM3", "10:00:00", b"before flush").unwrap();
+        let source = mgr.writer_path("COM3").unwrap();
+        mgr.flush_all().unwrap();
+        assert!(fs::read_to_string(&source).unwrap().contains("before flush"));
+        mgr.write_rx("COM3", "10:00:01", b"before export").unwrap();
+        let exported = dir.join("exported.log");
+        mgr.save_log_as("COM3", &exported.to_string_lossy()).unwrap();
+        assert!(fs::read_to_string(exported).unwrap().contains("before export"));
+        mgr.close_writer("COM3").unwrap();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writer_replacement_preserves_unterminated_rx_tail() {
+        let dir = test_dir("rx_tail_replace");
+        let mgr = LogManager::for_test(&dir);
+        mgr.test_settings(|s| s.new_file_per_session = true);
+        open_writer(&mgr, "COM3", "string");
+        let first = mgr.writer_path("COM3").unwrap();
+        mgr.write_rx("COM3", "10:00:00", b"last response").unwrap();
+        open_writer(&mgr, "COM3", "string");
+        assert!(fs::read_to_string(first).unwrap().contains("last response"));
+        mgr.close_writer("COM3").unwrap();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replacing_empty_append_writer_keeps_the_active_file() {
+        let dir = test_dir("empty_append_replace");
+        let mgr = LogManager::for_test(&dir);
+        mgr.test_settings(|s| {
+            s.subdir_mode = "none".into();
+            s.filename_format = "[com]".into();
+        });
+        open_writer(&mgr, "COM3", "string");
+        open_writer(&mgr, "COM3", "string");
+        let path = mgr.writer_path("COM3").unwrap();
+        mgr.write("COM3", "ts", "TX", b"after replacement").unwrap();
+        mgr.close_writer("COM3").unwrap();
+        assert!(fs::read_to_string(path).unwrap().contains("after replacement"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     // ---------- 覆盖已有 writer / 目录切换 / 并发 ----------
