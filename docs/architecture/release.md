@@ -23,7 +23,7 @@ flowchart TD
 | `push` tag 匹配 `v*`（如 `git push origin v0.x.0`） | stable 流 `publish.yml` 的**构建**触发；`v*-preview*` 经同过滤器 `!` 否定排除（GitHub Actions 禁止 tags 与 tags-ignore 同事件共存，由 preview 流负责） |
 | `push` tag 匹配 `v*-preview*`（如 `git push origin v0.x.y-preview.N`） | **preview 流**（`publish-preview.yml`）：每版独立唯一 tag，`prerelease: true`。该流**仅**由此事件触发 |
 | release **published** | stable 的补充只读 `verify-release`，不是发布前门禁；使用该 tag 源码的 updater 公钥验证已公开资产 |
-| `workflow_dispatch` | stable 输入明确已发布 tag 做只读验证，不重建、不修改 release；preview 无手动入口 |
+| `workflow_dispatch` | stable 输入明确已发布 tag 做只读验证；独立 `recover-preview.yml` 可对未发布 draft 重做 finalize，输入原 tag 与失败的源流水线 ID，不重建或移动 tag |
 
 ## Stable 与 Preview 流差异
 
@@ -113,13 +113,23 @@ GitHub 网页 release 说明与 updater 弹窗更新说明是**两份独立内�
 1. `prepare-release`：严格 tag/版本/notes 预检，拒绝复用已发布 release；创建或恢复唯一、通道标记正确的 draft，并清除旧 draft 清单。
 2. 矩阵：既有 tsc/vitest/Rust 质量门后只上传安装包与 `.sig`，不读改写 `latest.json`。同 tag workflow 串行，失败不取消其他平台。
 3. `finalize-release`：即使依赖失败也运行状态检查；只有 prepare/矩阵全部成功才允许发布路径，否则报错并保持 draft。
-4. 唯一汇总 `scripts/release.mjs`：使用工作流 token 读取 draft 资产，下载实际安装包与签名，用配置公钥校验 minisign `Ed`/`ED` 签名与 trusted comment；检查四平台、稳定版 MSI、版本、上传状态、大小、签名配对及 tag-pinned `browser_download_url`。
-5. 生成 OS/arch 默认键与 installer-specific 键，Windows 默认 NSIS；安装包 URL 使用公开发布下载地址，客户端不消耗资产 REST API 配额。清单上传一次并下载回读验证，同时要求 notes 与 release body 一致、`pub_date` 是有效 RFC 3339 时间，避免资产验签通过但客户端无法解析清单。
+4. 唯一汇总 `scripts/release.mjs`：使用工作流 token 读取 draft 资产，下载实际安装包与签名，用配置公钥校验 minisign `Ed`/`ED` 签名与 trusted comment；检查四平台、稳定版 MSI、版本、上传状态、大小及签名配对。draft 允许同仓库、同文件名的 `untagged-*` 临时下载地址；已发布资产仍必须是严格 tag 地址，其他源/仓库/路径一律拒绝。
+5. 生成 OS/arch 默认键与 installer-specific 键，Windows 默认 NSIS；安装包 URL 按已核对的 repository/tag/文件名构造公开下载地址，不把 draft 临时地址或资产 API 地址写入清单。清单上传一次并认证下载回读验证，同时要求 notes 与 release body 一致、`pub_date` 是有效 RFC 3339 时间，避免资产验签通过但客户端无法解析清单。
 6. stable 维持 draft 等待人工 Publish；preview 只有门禁通过才公开。发布后的只读验证是补充，不能替代 finalize。
 
 匿名无法读 draft；工作流 token 的认证 asset API 用于发布前验签。认证失败时门禁失败、不提前发布。不得以历史某次 401 推断所有身份都无法读取 draft。
 
 本地验证：`node --test scripts/release.test.mjs`；`node scripts/release.mjs preflight stable v<version>`。`local` 命令可在隔离资产目录生成/验签完整清单，无 GitHub 修改；真实 Publish、安装及重启仍需发行环境验收。
+
+### 未发布 preview 的 finalize 恢复
+
+`recover-preview.yml` 使用当前分支修复后的门禁脚本与原 tag 的配置、公钥和 notes。只接受同仓库、原 tag 未移动、已完成且失败的 `publish-preview.yml` push 流水线；prepare 和四个指定平台构建必须全部成功，仅 finalize 失败。随后重新下载真实资产、完整验签、上传并回读清单后公开 prerelease，再执行公开版只读验证。已发布 release 不可恢复；不设置伪造的矩阵状态，不复用或强推 tag。
+
+```bash
+gh workflow run recover-preview.yml --ref main -f tag=v1.0.0-preview.1 -f source_run=38191639582
+gh run watch <recovery-run-id> --compact --exit-status
+```
+
 
 ### 插件发版验收门
 
@@ -183,6 +193,7 @@ updater **先验签名再安装**——直接换 pubkey 会让旧客户端对新
 | `.github/workflows/ci.yml` | 日常质量门（分支 push / PR / 手动；frontend 含生产构建与 release 脚本测试，rust 含 release-profile 类型检查，e2e 为 mock IPC Playwright；tag push 不跑） |
 | `.github/workflows/publish.yml` | stable：预检→draft→矩阵→finalize 验签/单写清单→人工发布；发布后补充只读验证 |
 | `.github/workflows/publish-preview.yml` | preview：相同门禁，finalize 成功后自动公开 prerelease |
+| `.github/workflows/recover-preview.yml` | 未发布 preview 的受控 finalize 恢复；核对原构建与不变 tag，再完整验签、发布及只读验证 |
 | `scripts/release.mjs` / `release.test.mjs` | 共享预检、draft 事务、真实 minisign 验签与公开下载清单；离线消费行为回归 |
 | `RELEASE_NOTES.md` | 本次发版说明，构建时写入网页 notes 与 latest.json.notes |
 | `src-tauri/tauri.conf.json` | bundle + updater 配置（pubkey / endpoint / installMode passive） |

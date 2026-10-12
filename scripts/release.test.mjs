@@ -8,7 +8,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
-import { assertRelease, buildManifest, preflight, requiredPlatforms, verifyManifest, verifySignature, versionForTag } from './release.mjs';
+import { assertRecoveryRun, assertRelease, buildManifest, preflight, requiredPlatforms, verifyManifest, verifySignature, versionForTag } from './release.mjs';
 
 const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, 7)]), format: 'der', type: 'pkcs8' });
 const publicBytes = createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).subarray(-32);
@@ -106,6 +106,35 @@ test('prepare/finalize release identity guard refuses published releases or wron
   assert.throws(() => assertRelease({ ...draft, tag_name: 'v1.2.2' }, 'stable', 'v1.2.3', true), /refusing/);
 });
 
+test('recovery requires the unchanged tag and every successful source build', () => {
+  const repository = 'example/hypercom';
+  const tag = 'v1.2.3-preview.1';
+  const sha = 'a'.repeat(40);
+  const run = { event: 'push', status: 'completed', conclusion: 'failure', head_branch: tag, head_sha: sha, head_repository: { full_name: repository }, path: '.github/workflows/publish-preview.yml' };
+  const jobs = [
+    'prepare-release',
+    'publish-preview-tauri (windows-latest, --bundles nsis)',
+    'publish-preview-tauri (ubuntu-22.04)',
+    'publish-preview-tauri (macos-latest, --target aarch64-apple-darwin)',
+    'publish-preview-tauri (macos-latest, --target x86_64-apple-darwin)',
+  ].map((name) => ({ name, status: 'completed', conclusion: 'success' }));
+  jobs.push({ name: 'verify complete manifest, then publish preview', status: 'completed', conclusion: 'failure' });
+  assertRecoveryRun(run, jobs, repository, tag, sha);
+  for (const patch of [
+    { event: 'pull_request' }, { status: 'in_progress' }, { conclusion: 'success' },
+    { head_branch: 'v1.2.2-preview.1' }, { head_sha: 'b'.repeat(40) },
+    { head_repository: { full_name: 'attacker/hypercom' } }, { path: '.github/workflows/ci.yml' },
+  ]) assert.throws(() => assertRecoveryRun({ ...run, ...patch }, jobs, repository, tag, sha), /unchanged release tag/);
+  for (const conclusion of ['failure', 'cancelled', 'skipped']) {
+    for (let i = 0; i < jobs.length - 1; i++) {
+      assert.throws(() => assertRecoveryRun(run, jobs.map((job, index) => index === i ? { ...job, conclusion } : job), repository, tag, sha), /successful source job/);
+    }
+  }
+  assert.throws(() => assertRecoveryRun(run, jobs.slice(1), repository, tag, sha), /successful source job/);
+  assert.throws(() => assertRecoveryRun(run, [...jobs, jobs[0]], repository, tag, sha), /successful source job/);
+  assert.throws(() => assertRecoveryRun(run, jobs.slice(0, -1), repository, tag, sha), /failed source finalize/);
+});
+
 test('complete stable manifest verifies actual signatures and keeps NSIS default plus installer keys', async (t) => {
   const { options } = await fixture(t, 'stable', true);
   const manifest = await buildManifest(options);
@@ -141,6 +170,26 @@ test('complete preview needs no MSI but all four platforms', async (t) => {
   for (const platform of requiredPlatforms) assert.ok(manifest.platforms[platform]);
   assert.equal(manifest.platforms['windows-x86_64-msi'], undefined);
   assert.equal(manifest.version, '1.2.3-preview.1');
+});
+
+test('draft temporary URLs produce tag-bound manifests without weakening published checks', async (t) => {
+  const { path, options } = await fixture(t, 'preview');
+  const assets = options.assets.map((asset) => ({ ...asset, browser_download_url: asset.browser_download_url.replace(`/${options.tag}/`, '/untagged-12691bc04e0635ba45f7/') }));
+  const draft = { ...options, assets, draft: true };
+  const expected = await buildManifest(options);
+  assert.deepEqual(await buildManifest(draft), expected);
+  await assert.rejects(buildManifest({ ...options, assets }), /tag-bound/);
+  for (const url of [
+    assets[0].browser_download_url.replace('github.com/', 'github.com.evil/'),
+    assets[0].browser_download_url.replace('example/hypercom/', 'example/other/'),
+    assets[0].browser_download_url.replace('/untagged-12691bc04e0635ba45f7/', '/v1.2.2/'),
+    assets[0].browser_download_url + '?download=1',
+    'https://api.github.com/repos/example/hypercom/releases/assets/1',
+  ]) {
+    await assert.rejects(buildManifest({ ...draft, assets: assets.map((asset, i) => i ? asset : { ...asset, browser_download_url: url }) }), /tag-bound/);
+  }
+  await writeFile(join(path, assets[0].name), 'tampered draft executable');
+  await assert.rejects(buildManifest(draft), /artifact signature verification failed/);
 });
 
 test('missing binaries/signatures and incomplete upload metadata produce actionable errors', async (t) => {

@@ -1,0 +1,49 @@
+name: 'recover-preview'
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Unpublished preview tag (unchanged)'
+        required: true
+        type: string
+      source_run:
+        description: 'Failed publish-preview run with successful prepare and all four builds'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  recover-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          path: released-source
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      - name: release gate behavior tests
+        run: node --test scripts/release.test.mjs
+      - name: Verify source builds, verify signatures and publish complete preview
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SOURCE_DIR: released-source
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: node scripts/release.mjs recover preview "$RELEASE_TAG" "$SOURCE_RUN"
+      - name: Verify published release assets and manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SOURCE_DIR: released-source
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release.mjs verify preview "$RELEASE_TAG"

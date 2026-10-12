@@ -90,6 +90,25 @@ export function assertRelease(release, channel, tag, draft) {
   }
 }
 
+export function assertRecoveryRun(run, jobs, repository, tag, sourceSha) {
+  const required = [
+    'prepare-release',
+    'publish-preview-tauri (windows-latest, --bundles nsis)',
+    'publish-preview-tauri (ubuntu-22.04)',
+    'publish-preview-tauri (macos-latest, --target aarch64-apple-darwin)',
+    'publish-preview-tauri (macos-latest, --target x86_64-apple-darwin)',
+  ];
+  if (run.event !== 'push' || run.status !== 'completed' || run.conclusion !== 'failure'
+    || run.head_branch !== tag || run.head_sha !== sourceSha || run.head_repository?.full_name !== repository
+    || run.path !== '.github/workflows/publish-preview.yml') throw new Error('Recovery requires the completed failed preview run for the unchanged release tag');
+  for (const name of required) {
+    const matches = jobs.filter((job) => job.name === name);
+    if (matches.length !== 1 || matches[0].status !== 'completed' || matches[0].conclusion !== 'success') throw new Error(`Recovery requires successful source job: ${name}`);
+  }
+  const finalize = jobs.filter((job) => job.name === 'verify complete manifest, then publish preview');
+  if (finalize.length !== 1 || finalize[0].status !== 'completed' || finalize[0].conclusion !== 'failure') throw new Error('Recovery requires a failed source finalize job');
+}
+
 function assetKind(name) {
   if (/_x64-setup\.exe$/.test(name)) return ['windows-x86_64', 'nsis'];
   if (/_x64[^/]*\.msi$/.test(name)) return ['windows-x86_64', 'msi'];
@@ -101,15 +120,19 @@ function assetKind(name) {
   return null;
 }
 
-export async function buildManifest({ channel, tag, repository, server = 'https://github.com', assets, pubkey, notes = '', readAsset, binaryPath, publishedAt }) {
+export async function buildManifest({ channel, tag, repository, server = 'https://github.com', assets, pubkey, notes = '', readAsset, binaryPath, publishedAt, draft = false }) {
   const version = versionForTag(channel, tag);
   const errors = [];
   const byName = new Map();
-  const prefix = `${server.replace(/\/$/, '')}/${repository}/releases/download/${encodeURIComponent(tag)}/`;
+  const downloadRoot = `${server.replace(/\/$/, '')}/${repository}/releases/download/`;
+  const prefix = `${downloadRoot}${encodeURIComponent(tag)}/`;
   for (const asset of assets) {
     if (byName.has(asset.name)) errors.push(`Duplicate asset: ${asset.name}`);
     byName.set(asset.name, asset);
-    if (asset.browser_download_url !== prefix + encodeURIComponent(asset.name)) errors.push(`Asset URL must be tag-bound browser_download_url: ${asset.name}`);
+    const publicUrl = prefix + encodeURIComponent(asset.name);
+    const temporary = typeof asset.browser_download_url === 'string' && asset.browser_download_url.startsWith(downloadRoot)
+      ? asset.browser_download_url.slice(downloadRoot.length).match(/^untagged-[A-Za-z0-9-]+\/([^/?#]+)$/) : null;
+    if (asset.browser_download_url !== publicUrl && !(draft && temporary?.[1] === encodeURIComponent(asset.name))) errors.push(`Asset URL must be tag-bound browser_download_url (or a draft temporary URL): ${asset.name}`);
     if (asset.state !== 'uploaded' || !Number.isSafeInteger(asset.size) || asset.size <= 0) errors.push(`Asset not completely uploaded: ${asset.name}`);
     if (asset.name !== 'latest.json' && !asset.name.includes(`_${version}_`) && !asset.name.includes(`-${version}-`)) errors.push(`Asset version mismatch: ${asset.name}; expected ${version}`);
     if (asset.name.endsWith('.sig') && !assets.some((binary) => binary.name === asset.name.slice(0, -4))) errors.push(`Orphan signature without binary: ${asset.name}`);
@@ -134,7 +157,7 @@ export async function buildManifest({ channel, tag, repository, server = 'https:
     try {
       const signature = (await readAsset(signatureAsset)).toString('utf8').trim();
       await verifySignature(await binaryPath(asset), signature, pubkey);
-      const entry = { signature, url: asset.browser_download_url };
+      const entry = { signature, url: prefix + encodeURIComponent(asset.name) };
       platforms[key] = entry;
       if (['nsis', 'appimage', 'app'].includes(installer)) platforms[platform] = entry;
     } catch (error) { errors.push(`${key}: ${error.message}`); }
@@ -173,7 +196,8 @@ function githubClient() {
   async function pages(path) {
     const all = [];
     for (let page = 1; ; page++) {
-      const values = await json(`${path}?per_page=100&page=${page}`);
+      const result = await json(`${path}?per_page=100&page=${page}`);
+      const values = Array.isArray(result) ? result : result.jobs;
       all.push(...values);
       if (values.length < 100) return all;
     }
@@ -200,13 +224,13 @@ async function remoteManifest(client, release, channel, tag, pubkey, directory) 
     return paths.get(asset.id);
   }
   const readAsset = async (asset) => readFile(await download(asset));
-  const manifest = await buildManifest({ channel, tag, repository: client.repository, server: process.env.GITHUB_SERVER_URL, assets, pubkey, notes: release.body ?? '', publishedAt: release.published_at ?? undefined, readAsset, binaryPath: download });
+  const manifest = await buildManifest({ channel, tag, repository: client.repository, server: process.env.GITHUB_SERVER_URL, assets, pubkey, notes: release.body ?? '', publishedAt: release.published_at ?? undefined, draft: release.draft, readAsset, binaryPath: download });
   return { manifest, assets, readAsset };
 }
 
 async function main() {
   const [command, channel, tag, argument] = process.argv.slice(2);
-  const root = process.cwd();
+  const root = resolve(process.env.RELEASE_SOURCE_DIR ?? process.cwd());
   if (command === 'preflight') {
     const result = await preflight(root, channel, tag);
     console.log(`Preflight OK: ${result.tag}`);
@@ -239,17 +263,35 @@ async function main() {
     console.log(`Prepared draft ${release.html_url}; never publish until finalize succeeds`);
     return;
   }
-  if (!['finalize', 'verify'].includes(command)) throw new Error('Usage: node scripts/release.mjs preflight|prepare|finalize|verify|local stable|preview vVERSION [releaseId|metadata.json]');
+  if (!['finalize', 'recover', 'verify'].includes(command)) throw new Error('Usage: node scripts/release.mjs preflight|prepare|finalize|recover|verify|local stable|preview vVERSION [releaseId|sourceRunId|metadata.json]');
+  const finalizing = command === 'finalize' || command === 'recover';
   const statuses = { prepare: process.env.PREPARE_RESULT, matrix: process.env.MATRIX_RESULT };
   if (command === 'finalize' && (statuses.prepare !== 'success' || statuses.matrix !== 'success')) {
     throw new Error(`Release remains draft; cannot finalize: prepare=${statuses.prepare}, matrix=${statuses.matrix}. Inspect failed/cancelled matrix jobs, rerun the failed jobs or the tag workflow; all four platforms (and stable MSI) must succeed before publishing.`);
   }
-  const release = command === 'finalize'
-    ? await client.json(`/releases/${argument}`)
-    : await client.json(`/releases/tags/${encodeURIComponent(tag)}`);
-  assertRelease(release, channel, tag, command === 'finalize');
-  const info = command === 'finalize' ? await preflight(root, channel, tag) : { pubkey: JSON.parse(await readFile(join(root, 'src-tauri/tauri.conf.json'), 'utf8')).plugins.updater.pubkey };
-  if (command === 'finalize' && release.body !== info.body) throw new Error('Draft release body differs from the triggering RELEASE_NOTES section; restore the notes before finalizing');
+  if (command === 'recover') {
+    if (channel !== 'preview' || !/^[1-9][0-9]*$/.test(argument ?? '')) throw new Error('Recovery requires preview channel and a source workflow run ID');
+    versionForTag(channel, tag);
+    const run = await client.json(`/actions/runs/${argument}`);
+    const jobs = await client.pages(`/actions/runs/${argument}/jobs`);
+    let object = (await client.json(`/git/ref/tags/${encodeURIComponent(tag)}`)).object;
+    while (object.type === 'tag') object = (await client.json(`/git/tags/${object.sha}`)).object;
+    if (object.type !== 'commit') throw new Error('Release tag must resolve to a commit');
+    assertRecoveryRun(run, jobs, client.repository, tag, object.sha);
+  }
+  let release;
+  if (command === 'recover') {
+    const matches = (await client.pages('/releases')).filter((item) => item.tag_name === tag);
+    if (matches.length !== 1) throw new Error(`Recovery requires exactly one draft release for ${tag}`);
+    release = matches[0];
+  } else {
+    release = command === 'finalize'
+      ? await client.json(`/releases/${argument}`)
+      : await client.json(`/releases/tags/${encodeURIComponent(tag)}`);
+  }
+  assertRelease(release, channel, tag, finalizing);
+  const info = finalizing ? await preflight(root, channel, tag) : { pubkey: JSON.parse(await readFile(join(root, 'src-tauri/tauri.conf.json'), 'utf8')).plugins.updater.pubkey };
+  if (finalizing && release.body !== info.body) throw new Error('Draft release body differs from the triggering RELEASE_NOTES section; restore the notes before finalizing');
   const directory = await mkdtemp(join(tmpdir(), 'hypercom-release-'));
   try {
     const { manifest, assets, readAsset } = await remoteManifest(client, release, channel, tag, info.pubkey, directory);
