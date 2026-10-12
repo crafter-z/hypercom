@@ -51,8 +51,8 @@ export function saveCurrentPortMeta(): Promise<void> {
   });
 }
 
-/** Preserve local edits on untouched entities; a newer backend CRUD change
- * to the same ID wins instead of being silently reverted by full save. */
+/** Preserve local edits since the last confirmed persistence; a newer backend
+ * CRUD change to the same ID wins instead of being reverted by full save. */
 function reconcileEntities<T>(live: T[], initial: T[], persisted: T[], id: (item: T) => string): T[] {
   const old = new Map(initial.map((item) => [id(item), item]));
   const current = new Map(persisted.map((item) => [id(item), item]));
@@ -99,10 +99,9 @@ export function useConfigPersistence() {
    * 全量保存配置。`patch` 只用来覆盖**本次调用关心的普通字段**（如更新模式）；
    * 实体数组一律不取入参，见下方快照来源。
    *
-   * 后端 `set_config` 是整体替换，所以调用方不能直接把 `useAppStore.config` 交出去：
-   * 那是启动时读入的快照，而各实体数组有各自的权威来源（规则页的单条 ✓ 保存只写
-   * useRuleStore / storageService，从不回写 store.config）。直接整体替换会把用户
-   * 刚保存的规则、分组、预设静默回滚成启动时的样子。
+   * 后端整体替换配置，不能直接提交 config 中的实体基线。五类规则活编辑在
+   * useRuleStore，groups/ports/预设各有权威来源；这里按已确认基线与新鲜后端
+   * 状态协调实体并 revision CAS，避免丢活编辑或回滚其他窗口的 CRUD。
    */
   const saveConfig = useCallback((patch?: Partial<AppConfig>, fieldOnly = false) => enqueueConfigWrite(async () => {
     try {
@@ -138,6 +137,24 @@ export function useConfigPersistence() {
         };
         const saved = await configService.setConfig(candidate, false, revision);
         if (saved) {
+          if (!fieldOnly) {
+            const entities = {
+              sendCommandSets: candidate.sendCommandSets,
+              highlightRuleSets: candidate.highlightRuleSets,
+              protocolTemplates: candidate.protocolTemplates,
+              triggerRules: candidate.triggerRules,
+              portToolConfigs: candidate.portToolConfigs,
+            };
+            useAppStore.getState().setConfig(entities);
+            // Adopt concurrent backend winners, but never erase an editor change
+            // made while this successful invoke was in flight.
+            const live = useRuleStore.getState();
+            if (live.sendCommandSets === rules.sendCommandSets) live.setSendCommandSets(entities.sendCommandSets);
+            if (live.highlightRuleSets === rules.highlightRuleSets) live.setHighlightRuleSets(entities.highlightRuleSets);
+            if (live.protocolTemplates === rules.protocolTemplates) live.setProtocolTemplates(entities.protocolTemplates);
+            if (live.triggerRules === rules.triggerRules) live.setTriggerRules(entities.triggerRules);
+            if (live.portToolConfigs === rules.portToolConfigs) live.setPortToolConfigs(entities.portToolConfigs);
+          }
           commitUpdateMode(candidate.updateCheckMode, true);
           return true;
         }

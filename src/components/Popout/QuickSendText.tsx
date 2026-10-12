@@ -18,8 +18,9 @@ interface QuickSendTextProps {
   onTextChange: (text: string) => void;
   config: TextSendConfig;
   canSend: boolean;
+  targetPortId: string | null;
   /** 发送一行（拒绝 = 发送失败），顺序执行靠它 await 保序。 */
-  onSendLine: (content: string, isHex: boolean, lineEnding: LineEnding) => Promise<void>;
+  onSendLine: (content: string, isHex: boolean, lineEnding: LineEnding, portId: string) => Promise<void>;
 }
 
 /**
@@ -37,6 +38,7 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
   onTextChange,
   config,
   canSend,
+  targetPortId,
   onSendLine,
 }) => {
   const { t } = useTranslation();
@@ -60,6 +62,8 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
   cursorLineRef.current = cursorLine;
   const sendRef = useRef(onSendLine);
   sendRef.current = onSendLine;
+  const runEpochRef = useRef(0);
+  const runTargetRef = useRef<string | null>(null);
   const runRef = useRef({
     mode: 'all' as PanelRunMode,
     /** 下一次迭代才解析起始行——start() 时 configRef 还是旧值。 */
@@ -111,6 +115,7 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
     // 运行中文本被编辑 → 自动停止（行索引与内容错位后继续发送会串行）。
     autoStopOnChange: lines,
     step: async () => {
+      const epoch = runEpochRef.current;
       const run = runRef.current;
       const ls = linesRef.current;
       const cfg = configRef.current;
@@ -131,7 +136,10 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
         if (invalidHex) run.invalidCount += 1;
         return advance();
       }
-      await sendRef.current(line, cfg.isHex, cfg.lineEnding);
+      const portId = runTargetRef.current;
+      if (!portId) return null;
+      await sendRef.current(line, cfg.isHex, cfg.lineEnding, portId);
+      if (epoch !== runEpochRef.current) return null;
       return advance();
     },
     onStepError: (err) => {
@@ -140,6 +148,7 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
       return null;
     },
     onStop: () => {
+      runEpochRef.current += 1;
       setRunning(false);
       setRunLine(null);
       reportInvalidHex();
@@ -150,9 +159,12 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
     const run = runRef.current;
     if (loop.isRunning()) return;
     const ls = linesRef.current;
+    if (!targetPortId) return;
+    runTargetRef.current = targetPortId;
     const cfg = configRef.current;
     // 无可发送行（全空 / HEX 模式全非法）时不动状态，按钮语义等同禁用。
     if (!ls.some((l) => l.trim() !== '' && (!cfg.isHex || isValidHexLine(l)))) return;
+    runEpochRef.current += 1;
     run.mode = mode;
     run.pendingStart = true;
     run.invalidCount = 0;
@@ -196,7 +208,7 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
    * 只写一遍。
    */
   const runCurrentLine = (advanceCursor: boolean) => {
-    if (running || !canSend) return;
+    if (running || !canSend || !targetPortId) return;
     const idx = Math.min(cursorLine, Math.max(lines.length - 1, 0));
     const line = lines[idx];
     if (!line || line.trim() === '') {
@@ -208,7 +220,7 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
       return;
     }
     flashLineAt(idx);
-    void onSendLine(line, config.isHex, config.lineEnding).catch((e) => notifyError(e));
+    void onSendLine(line, config.isHex, config.lineEnding, targetPortId).catch((e) => notifyError(e));
     if (advanceCursor) moveCursorToNextLine();
   };
 

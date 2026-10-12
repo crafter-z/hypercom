@@ -76,10 +76,15 @@ export class TerminalViewportManager {
   private selectedRange: { start: number; end: number } | null = null;
   private locked = true;
   private gestureActive = false;
+  /** Labels used by the current match lists, not a second display-state source. */
+  private matchedEncoding: Encoding;
+  private matchedDisplayFormat: DisplayFormat;
 
   constructor(portId: string, limits: { maxLines: number }) {
     this.portId = portId;
     this.buffer = new TerminalBuffer(limits);
+    this.matchedEncoding = this.getEncoding();
+    this.matchedDisplayFormat = this.getDisplayFormat();
   }
 
   /** Port's current encoding (read live from the store — lazy-decode aware). */
@@ -148,6 +153,7 @@ export class TerminalViewportManager {
     this.currentMatch = 0;
     this.matchSetCache = null;
     this.renderer?.clear();
+    this.requestRender();
   }
 
   /** Live buffer-limit change (config edited while streaming). */
@@ -263,6 +269,17 @@ export class TerminalViewportManager {
   }
 
   updateConfig(patch: Partial<RendererConfig>): void {
+    const encoding = this.getEncoding();
+    const displayFormat = this.getDisplayFormat();
+    const encodingChanged = encoding !== this.matchedEncoding;
+    const displayChanged = displayFormat !== this.matchedDisplayFormat;
+    this.matchedEncoding = encoding;
+    this.matchedDisplayFormat = displayFormat;
+    if (encodingChanged) this.recomputeFilter();
+    if (encodingChanged || displayChanged) {
+      this.recomputeSearch();
+      this.renderer?.bumpFilterVersion();
+    }
     this.renderer?.updateConfig(patch);
     this.requestRender();
   }
@@ -403,8 +420,10 @@ export class TerminalViewportManager {
       this.compact(this.filtered);
     }
     if (this.matches.seqs.length > this.matches.offset && this.matches.seqs[this.matches.offset] === seq) {
+      this.currentMatch = Math.max(0, this.currentMatch - 1);
       this.matches.offset++;
       this.compact(this.matches);
+      this.currentMatch = Math.min(this.currentMatch, Math.max(0, this.getMatchCount() - 1));
     }
   }
 
@@ -425,12 +444,17 @@ export class TerminalViewportManager {
     ) {
       this.filtered.offset++;
     }
+    const previousOffset = this.matches.offset;
     while (
       this.matches.offset < this.matches.seqs.length &&
       this.matches.seqs[this.matches.offset] < first
     ) {
       this.matches.offset++;
     }
+    this.currentMatch = Math.min(
+      Math.max(0, this.currentMatch - (this.matches.offset - previousOffset)),
+      Math.max(0, this.getMatchCount() - 1),
+    );
     this.compact(this.filtered);
     this.compact(this.matches);
   }

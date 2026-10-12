@@ -67,6 +67,7 @@ export function createSendLoop(options: SendLoopOptions): SendLoop {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let nextFireAt = 0;
   let onStopFired = false;
+  let generation = 0;
 
   const clearTimer = () => {
     if (timeoutId === null) return;
@@ -80,11 +81,13 @@ export function createSendLoop(options: SendLoopOptions): SendLoop {
     onStopFired = true;
     stopped = true;
     clearTimer();
+    generation += 1;
     onStop?.();
   };
 
   const schedule = (delayMs: number) => {
     if (stopped) return;
+    clearTimer();
     nextFireAt = Date.now() + delayMs;
     timeoutId = setTimeout(() => {
       void tick();
@@ -95,14 +98,21 @@ export function createSendLoop(options: SendLoopOptions): SendLoop {
     if (stopped || busy) return;
     // 消费定时器句柄：可见性补发可能与本次迭代竞争，句柄置空后补发不再重复触发。
     clearTimer();
+    const runGeneration = generation;
     busy = true;
     let nextDelay: number | null;
     try {
       nextDelay = await step();
     } catch (err) {
-      nextDelay = onStepError ? onStepError(err) : null;
+      nextDelay = runGeneration === generation && onStepError ? onStepError(err) : null;
     } finally {
       busy = false;
+    }
+    // A stopped run may finish after start() has begun a newer run. Its result
+    // must neither stop that run nor schedule an obsolete continuation.
+    if (runGeneration !== generation) {
+      if (!stopped) schedule(Math.max(0, nextFireAt - Date.now()));
+      return;
     }
     if (stopped) return; // step 内部可能已 stop()（端口关闭 / 用户停止）
     if (nextDelay === null) {
@@ -117,6 +127,7 @@ export function createSendLoop(options: SendLoopOptions): SendLoop {
       if (!stopped) return;
       stopped = false;
       onStopFired = false;
+      generation += 1;
       schedule(firstTickMs);
     },
     stop() {

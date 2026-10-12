@@ -64,7 +64,7 @@ const OperationPanel: React.FC = () => {
   // 「切换标签」与「参数变更」——切换标签时把该端口的已存参数载入操作面板；
   // 参数变更时实时应用到后端（已连接）+ 回写端口字段同步显示 + 供重连使用。
   const paramsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastAppliedRef = useRef<{ portId: string; frameKey: string } | null>(null);
+  const lastAppliedRef = useRef<{ portId: string; frameKey: string; fullKey: string } | null>(null);
 
   useEffect(() => {
     if (paramsSyncTimerRef.current) {
@@ -90,16 +90,17 @@ const OperationPanel: React.FC = () => {
       lastAppliedRef.current = {
         portId: activePortId,
         frameKey: `${loaded.baudRate}-${loaded.dataBits}-${loaded.parity}-${loaded.stopBits}-${loaded.handshake}`,
+        fullKey: `${loaded.baudRate}-${loaded.dataBits}-${loaded.parity}-${loaded.stopBits}-${loaded.handshake}-${dtr}-${rts}`,
       };
       return;
     }
-    if (fullKey === `${lastAppliedRef.current.frameKey}-${dtr}-${rts}`) return;
+    if (fullKey === lastAppliedRef.current.fullKey) return;
 
     // 帧参数变化 → 回写端口字段（侧边栏 / 标题栏同步显示；重连时 openPort 读到最新值）。
     if (frameKey !== lastAppliedRef.current.frameKey) {
-      lastAppliedRef.current = { portId: activePortId, frameKey };
       useAppStore.getState().updatePort(activePortId, { baudRate, dataBits, parity, stopBits, handshake });
     }
+    lastAppliedRef.current = { portId: activePortId, frameKey, fullKey };
 
     // 已连接时实时应用（防抖 300ms 合并连续输入为一次后端调用）。
     if (!isConnected) return;

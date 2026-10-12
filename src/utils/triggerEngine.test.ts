@@ -91,6 +91,11 @@ describe('evaluateTriggers', () => {
       expect(result).toHaveLength(1);
     });
 
+    it('does not dispatch a HEX response for a whitespace-only pattern', () => {
+      const rule = makeRule({ pattern: '  \t ', matchType: 'hex', actionType: 'respond' });
+      expect(evaluateTriggers('A', [0x41], [rule], 'COM1')).toEqual([]);
+    });
+
     it('does not match when hex pattern absent', () => {
       const rule = makeRule({ pattern: 'FF FF', matchType: 'hex' });
       const result = evaluateTriggers('', [0xaa, 0x55], [rule], undefined);

@@ -18,6 +18,7 @@ import { serialService, gitBashSimService } from '../services/tauri';
 import { ttyService, MAX_TTY_QUEUE, TX_COALESCE_MS, TX_MAX_BATCH_BYTES } from './ttyService';
 import { trafficStats } from './trafficStats';
 import type { Terminal } from '@xterm/xterm';
+import { sendToPort } from '../hooks/useSerialSend';
 
 vi.mock('../services/tauri', () => ({
   serialService: {
@@ -286,6 +287,48 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(11);
     expect(useSystemStore.getState().trafficStats.COM2?.txTotal).toBe(5);
     expect(ttyService.get('COM1')?.txPending).toBeNull();
+  });
+
+  it('orders quick commands between earlier and later keyboard batches without double-counting TX', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>((resolve) => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'typed' ? first : Promise.resolve(data.length));
+    useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'connected', mode: 'tty', type: 'real', isHidden: false }] });
+    void ttyService.send('COM1', 'typed');
+    const quick = sendToPort('COM1', 'quick', false, 'None');
+    void ttyService.send('COM1', 'after');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['typed']);
+    finishFirst(5);
+    expect(await quick).toBe(5);
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['typed', 'quick', 'after']);
+    trafficStats.flushNow();
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(15);
+  });
+
+  it('rechecks explicit send authority before queued I/O starts without stalling later input', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>((resolve) => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'typed' ? first : Promise.resolve(data.length));
+    useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'connected', mode: 'tty', type: 'real', isHidden: false }] });
+    let authorized = true;
+    void ttyService.send('COM1', 'typed');
+    const quick = sendToPort('COM1', 'quick', false, 'None', true, () => {
+      if (!authorized) throw new Error('permission revoked');
+    });
+    const rejected = expect(quick).rejects.toThrow('permission revoked');
+    void ttyService.send('COM1', 'after');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    authorized = false;
+    finishFirst(5);
+    await rejected;
+    await drainMicrotasks();
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['typed', 'after']);
+    trafficStats.flushNow();
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(10);
   });
 
   it('continues ordered batches after a failed IPC without unhandled rejections', async () => {

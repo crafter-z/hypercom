@@ -16,19 +16,23 @@ function update(): Promise<void> {
   return suppressionPending;
 }
 
+function updateObservedOverlay(): void {
+  void update().catch(error => console.error('[pluginView] overlay suppression', error));
+}
+
 /** Hide native children before allowing an overlay component to become visible. */
 export function acquirePluginViewOverlay(): { ready: Promise<void>; release: () => void } {
   activeGuards++;
   const ready = update();
   let released = false;
-  return { ready, release: () => { if (released) return; released = true; activeGuards--; void update(); } };
+  return { ready, release: () => { if (released) return; released = true; activeGuards--; updateObservedOverlay(); } };
 }
 
 /** Catch host-local overlays and pointer drags; explicit overlay components use the handshake above. */
 export function startPluginViewOverlayGuard(): () => void {
   const refresh = () => {
     overlayCount = document.querySelectorAll(overlaySelector).length;
-    void update();
+    updateObservedOverlay();
   };
   const observer = new MutationObserver(refresh);
   observer.observe(document.body, { childList: true, subtree: true });
@@ -36,11 +40,11 @@ export function startPluginViewOverlayGuard(): () => void {
     const target = event.target;
     if (!(target instanceof Element)) return;
     if (target.closest('.pane-resize-handle, .operation-panel-resize-handle, .sidebar-resize-handle, .tab-item')) {
-      dragActive = true; void update();
+      dragActive = true; updateObservedOverlay();
     }
   };
-  const up = () => { dragActive = false; void update(); };
-  const visibility = () => { void update(); };
+  const up = () => { dragActive = false; updateObservedOverlay(); };
+  const visibility = () => { updateObservedOverlay(); };
   document.addEventListener('pointerdown', down, true);
   document.addEventListener('pointerup', up, true);
   document.addEventListener('pointercancel', up, true);

@@ -257,18 +257,16 @@ export class PluginSession {
       }, req.op === 'http.request' ? PLUGIN_HTTP_RPC_TIMEOUT_MS : PLUGIN_RPC_TIMEOUT_MS);
     }
     try {
-      // Permission is checked at call time, including disabled plugins with permissionless ops.
-      const config = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === this.pluginId);
-      if (!config?.enabled || config.installGeneration !== this.installGeneration) {
-        if (retire()) respond({ ok: false, error: 'plugin disabled' });
-        return;
-      }
-      const denied = checkOpAllowed(req.op, config.grantedPermissions, req.args);
-      if (denied) {
-        if (retire()) respond({ ok: false, error: denied });
-        return;
-      }
-      const result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest);
+      // Admission and queued TTY effects share the same live worker/grant authority.
+      const beforeSend = (): void => {
+        if (!active || this.worker !== worker) throw new Error('plugin request retired');
+        const config = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === this.pluginId);
+        if (!config?.enabled || config.installGeneration !== this.installGeneration) throw new Error('plugin disabled');
+        const denied = checkOpAllowed(req.op, config.grantedPermissions, req.args);
+        if (denied) throw new Error(denied);
+      };
+      beforeSend();
+      const result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest, beforeSend);
       if (retire()) respond({ ok: true, result });
     } catch (e) {
       if (!active) return;

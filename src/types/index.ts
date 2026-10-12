@@ -386,7 +386,7 @@ export interface UpdateProgressPayload {
   phase: 'download' | 'install';
 }
 
-/** 快捷发送面板·文本模式的发送参数（面板内本地态，不持久化，issue #5-4-6）。 */
+/** 快捷发送面板参数，按弹窗 localStorage 持久化；顺序运行另冻结目标端口。 */
 export interface TextSendConfig {
   portId: string;          // 目标串口（空 = 跟随主窗活动标签）
   lineEnding: LineEnding;

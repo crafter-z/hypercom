@@ -8,6 +8,7 @@ import { getRxPipeline } from '../utils/rxPipeline';
 import { isSendablePort, portClosedReason } from '../utils/sendGuard';
 import { hexInputError, parseHexBytes } from '../utils/sendUtils';
 import { trafficStats } from '../utils/trafficStats';
+import { ttyService } from '../utils/ttyService';
 
 // ==================== Module-level in-memory send history ====================
 // Per-port send history lives ONLY in memory (user decision: history may
@@ -59,7 +60,8 @@ export async function sendToPort(
   data: string,
   isHex: boolean,
   lineEnding: string,
-  silent = false
+  silent = false,
+  beforeSend?: () => void,
 ): Promise<number> {
   const state = useAppStore.getState();
 
@@ -108,7 +110,15 @@ export async function sendToPort(
   // 仍走「后端发送 + 流量统计 + 发送历史」（快捷发送/命令面板在 TTY 下可复用）。
   const isTty = port.mode === 'tty';
 
+  // Queued TTY commands have not started I/O until their lane dispatches.
+  // Re-check port ownership and caller authority at that exact boundary.
+  const authorizeSend = (): void => {
+    const currentPort = useAppStore.getState().ports.find((item) => item.id === portId);
+    if (!isSendablePort(currentPort)) throw new Error(`Send blocked: ${portClosedReason(currentPort)}`);
+    beforeSend?.();
+  };
   if (!isTty) {
+    beforeSend?.();
     const prefix = sendPrefix ? `${sendPrefix} ` : '';
     const displayText = `${prefix}${data}`;
     // rawData must reflect the ACTUAL transmitted bytes (drives the
@@ -138,16 +148,18 @@ export async function sendToPort(
   }
 
   try {
-    const bytesWritten = await serialService.sendSerialData({
-      portId,
-      data,
-      isHex,
-      appendLineEnding: lineEnding,
-    });
+    const bytesWritten = isTty
+      ? await ttyService.sendData(portId, data, isHex, lineEnding, authorizeSend)
+      : await serialService.sendSerialData({
+        portId,
+        data,
+        isHex,
+        appendLineEnding: lineEnding,
+      });
 
     // Track TX bytes（P1-1：经 1s 聚合器统一写 store——高频发送/触发自动回复
     // 不再逐次 setTrafficStats 触发 Zustand 更新 + StatusBar 重渲染）
-    trafficStats.addTx(portId, bytesWritten);
+    if (!isTty) trafficStats.addTx(portId, bytesWritten);
 
     // Record send history in memory (per-port, capped)
     recordSendHistory(portId, data, isHex, lineEnding);

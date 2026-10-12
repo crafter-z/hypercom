@@ -180,6 +180,42 @@ describe('whole-config saves versus independently persisted rules', () => {
     expect(backend.theme).toBe('light');
   });
 
+  it('keeps later local edits across consecutive successful full saves', async () => {
+    useRuleStore.getState().setSendCommandSets([rule('first edit')]);
+    expect(await save()).toBe(true);
+    useRuleStore.getState().setSendCommandSets([rule('later edit')]);
+    expect(await save()).toBe(true);
+    expect(backend.sendCommandSets).toEqual([rule('later edit')]);
+  });
+
+  it('adopts a remote winner and permits editing it after the successful save', async () => {
+    backend = { ...backend, sendCommandSets: [rule('remote winner')] };
+    revision++;
+    expect(await save()).toBe(true);
+    expect(useRuleStore.getState().sendCommandSets).toEqual([rule('remote winner')]);
+    useRuleStore.getState().setSendCommandSets([rule('edited winner')]);
+    expect(await save()).toBe(true);
+    expect(backend.sendCommandSets).toEqual([rule('edited winner')]);
+  });
+
+  it('does not erase edits made while an accepted full save is in flight', async () => {
+    const accepted = deferred<boolean>();
+    vi.mocked(configService.setConfig).mockImplementationOnce(async (candidate) => {
+      await accepted.promise;
+      backend = candidate;
+      revision++;
+      return true;
+    });
+    useRuleStore.getState().setSendCommandSets([rule('saved draft')]);
+    const saving = save();
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledTimes(1));
+    useRuleStore.getState().setSendCommandSets([rule('edited during save')]);
+    accepted.resolve(true);
+    expect(await saving).toBe(true);
+    expect(useRuleStore.getState().sendCommandSets).toEqual([rule('edited during save')]);
+    expect(await save()).toBe(true);
+    expect(backend.sendCommandSets).toEqual([rule('edited during save')]);
+  });
   it('returns failure instead of confirming settings after repeated conflicts', async () => {
     vi.mocked(configService.setConfig).mockResolvedValue(false);
     expect(await save({ theme: 'light' })).toBe(false);

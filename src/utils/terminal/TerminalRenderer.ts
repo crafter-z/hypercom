@@ -215,6 +215,9 @@ export class TerminalRenderer {
   private selectionSpans: SelectionSeqSpan[] | null = null;
   /** document.selectionchange watcher (installed on first pin). */
   private selectionWatcher: (() => void) | null = null;
+  private renderedSearchQuery = '';
+  private renderedSearchCaseSensitive = false;
+  private renderedCurrentMatchSeq = -1;
 
   /** Set by the manager: (re)schedule a rAF render (coalesces scroll/resize). */
   onRenderNeeded: (() => void) | null = null;
@@ -467,6 +470,19 @@ export class TerminalRenderer {
 
     const frozen = view.frozenSeq !== null ? Math.min(view.frozenSeq, lastSeq) : lastSeq;
     const baseCount = this.computeVisibleCount(view, buffer, frozen);
+    if (baseCount === 0) {
+      headSpacer.style.height = '0px';
+      tailSpacer.style.height = '0px';
+      this.recycleAll();
+      this.clearPins();
+      this.anchorSeq = null;
+      this.lastRenderedFirstSeq = firstSeq;
+      return;
+    }
+    const searchChanged =
+      view.searchQuery !== this.renderedSearchQuery ||
+      view.searchCaseSensitive !== this.renderedSearchCaseSensitive;
+    const currentMatchChanged = view.currentMatchSeq !== this.renderedCurrentMatchSeq;
     const totalHeight = baseCount * rowHeight;
 
 
@@ -567,7 +583,9 @@ export class TerminalRenderer {
       // Range. Content refreshes on the pass after the selection clears.
       if (
         !this.seqInSelection(seq) &&
-        (isNew || this.fullRedraw || row.node.dataset.renderedSeq !== String(seq))
+        (isNew || this.fullRedraw || searchChanged ||
+          (currentMatchChanged && (seq === this.renderedCurrentMatchSeq || seq === view.currentMatchSeq)) ||
+          row.node.dataset.renderedSeq !== String(seq))
       ) {
         this.writeRowContent(row.node, line, seq, buffer, view);
         row.node.dataset.renderedSeq = String(seq);
@@ -575,6 +593,9 @@ export class TerminalRenderer {
       this.applyRowClasses(row.node, seq, view);
     }
     this.fullRedraw = false;
+    this.renderedSearchQuery = view.searchQuery;
+    this.renderedSearchCaseSensitive = view.searchCaseSensitive;
+    this.renderedCurrentMatchSeq = view.currentMatchSeq;
 
     // 5. Follow pin — same frame, zero latency. Account for the container's
     //    padding (8px top/bottom on .terminal-view) so the last row is fully
@@ -779,7 +800,7 @@ export class TerminalRenderer {
     const c = this.config;
     let html: string;
     if (line.parsedFields && line.parsedFields.length > 0) {
-      html = renderProtocolLine(line, c.encoding);
+      html = renderProtocolLine(line, c.encoding, c.displayFormat === 'hex');
     } else {
       const displayText =
         c.displayFormat === 'hex' && line.rawData

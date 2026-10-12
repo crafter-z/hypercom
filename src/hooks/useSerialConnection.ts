@@ -101,10 +101,12 @@ async function runReconnectLoop(portId: string): Promise<void> {
       // First attempt runs immediately; backoff only applies between retries.
       if (attempt > 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        if (userClosingPortIds.has(portId)) break;
       }
       try {
         await serialService.attemptReconnect(portId);
       } catch (err) {
+        if (userClosingPortIds.has(portId)) break;
         useToastStore.getState().push({
           severity: 'error',
           messageKey: 'toast.reconnect.failed',
@@ -139,11 +141,17 @@ async function runReconnectLoop(portId: string): Promise<void> {
 function acquireReconnectHintListener(): () => void {
   state.hintSubscribers += 1;
   if (state.hintSubscribers === 1) {
-    state.hintRegistering = eventService.onSerialReconnectHint((event: SerialReconnectHintEvent) => {
-      runReconnectLoop(event.port_name);
+    const registration = eventService.onSerialReconnectHint((event: SerialReconnectHintEvent) => {
+      if (state.hintRegistering !== registration || state.hintSubscribers === 0) return;
+      void runReconnectLoop(event.port_name);
     });
-    state.hintRegistering
+    state.hintRegistering = registration;
+    registration
       .then((unlisten) => {
+        if (state.hintRegistering !== registration || state.hintSubscribers === 0) {
+          unlisten();
+          return;
+        }
         state.hintUnlisten = unlisten;
       })
       .catch((e) => {
@@ -156,9 +164,6 @@ function acquireReconnectHintListener(): () => void {
     if (state.hintUnlisten) {
       state.hintUnlisten();
       state.hintUnlisten = null;
-    } else if (state.hintRegistering) {
-      // 所有订阅者在注册 resolve 之前就卸载了——注册一到手就注销，否则泄漏。
-      state.hintRegistering.then((unlisten) => unlisten()).catch(() => {});
     }
     state.hintRegistering = null;
   };
@@ -236,6 +241,12 @@ async function toggleConnection(portId: string): Promise<void> {
   }
 }
 
+export interface SerialConnectionActions {
+  openPort: (portId: string) => Promise<void>;
+  closePort: (portId: string) => Promise<void>;
+  toggleConnection: (portId: string) => Promise<void>;
+}
+
 /**
  * Hook: 串口连接/断开操作
  *
@@ -243,7 +254,7 @@ async function toggleConnection(portId: string): Promise<void> {
  * 订阅重连提示监听的生命周期。返回签名与调用点（Sidebar / Pane /
  * OperationPanel / useHotkeys）保持不变。
  */
-export function useSerialConnection() {
+export function useSerialConnection(): SerialConnectionActions {
   // 订阅一次重连提示事件（引用计数，避免多实例重复监听）
   useEffect(() => acquireReconnectHintListener(), []);
 

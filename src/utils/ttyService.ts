@@ -102,6 +102,30 @@ function dropTxBuffer(state: TtyPortState): void {
   state.txBufferBytes = 0;
 }
 
+/** Keyboard batches and explicit commands share this one per-port write lane. */
+function sendOrdered(
+  portId: string, state: TtyPortState, data: string, isHex: boolean, lineEnding: string,
+  beforeSend?: () => void,
+): Promise<number> {
+  const generation = state.txGeneration;
+  const sendBatch = async (): Promise<number> => {
+    if (generation !== state.txGeneration) return 0;
+    beforeSend?.();
+    const bytesWritten = await serialService.sendSerialData({
+      portId, data, isHex, appendLineEnding: lineEnding,
+    });
+    trafficStats.addTx(portId, bytesWritten);
+    return bytesWritten;
+  };
+  const pending = state.txPending ? state.txPending.then(sendBatch) : sendBatch();
+  const settled = pending.then(() => {}, () => {});
+  state.txPending = settled;
+  void settled.then(() => {
+    if (state.txPending === settled) state.txPending = null;
+  });
+  return pending;
+}
+
 /** 取走 TX 缓冲并串行发送：每个端口只在上一批 IPC settle 后启动下一批。
  * detach 仍排空缓冲；disconnect 则使旧连接尚未启动的批次失效。 */
 function flushTx(portId: string, state: TtyPortState): Promise<void> {
@@ -113,30 +137,9 @@ function flushTx(portId: string, state: TtyPortState): Promise<void> {
   state.txBuffer = '';
   state.txBufferBytes = 0;
   if (!text) return Promise.resolve();
-  const generation = state.txGeneration;
-  const sendBatch = async (): Promise<void> => {
-    if (generation !== state.txGeneration) return;
-    try {
-      const bytesWritten = await serialService.sendSerialData({
-        portId,
-        data: text,
-        isHex: false,
-        appendLineEnding: 'None',
-      });
-      // P1-1：TX 统计经 1s 聚合器统一写 store（与 RX 侧同款降频）。
-      trafficStats.addTx(portId, bytesWritten);
-    } catch (err) {
-      console.error('[ttyService] send failed for', portId, err);
-    }
-  };
-  // 不为首次发送增加微任务延迟；后续批次严格等待此端口上一批完成。
-  const previous = state.txPending;
-  const pending = previous ? previous.then(sendBatch) : sendBatch();
-  state.txPending = pending;
-  void pending.then(() => {
-    if (state.txPending === pending) state.txPending = null;
+  return sendOrdered(portId, state, text, false, 'None').then(() => {}, (err) => {
+    console.error('[ttyService] send failed for', portId, err);
   });
-  return pending;
 }
 
 /** 取（或惰性创建）端口状态 */
@@ -329,6 +332,16 @@ export const ttyService = {
       }, TX_COALESCE_MS);
     }
     return Promise.resolve();
+  },
+
+  /** Explicit sends drain earlier keystrokes and join the same connection lane.
+   * Unlike onData sends, failures propagate to sendToPort's existing UI policy. */
+  sendData(
+    portId: string, data: string, isHex: boolean, lineEnding: string, beforeSend?: () => void,
+  ): Promise<number> {
+    const state = getPortState(portId);
+    void flushTx(portId, state);
+    return sendOrdered(portId, state, data, isHex, lineEnding, beforeSend);
   },
 
   /**

@@ -172,7 +172,10 @@ function parseFrameOutcome(
 
   // totalFrameLength = lengthValue - lengthAdjust + lengthFieldSize
   const totalFrameLength = lengthValue - template.lengthAdjust + template.lengthFieldSize;
-  if (totalFrameLength <= 0) return { status: 'corrupt', skip: skipPastHeader };
+  const minimumFrameLength = Math.max(headerLength, lengthFieldEnd) + footerLength;
+  if (totalFrameLength < minimumFrameLength || totalFrameLength > MAX_FRAME_SIZE) {
+    return { status: 'corrupt', skip: skipPastHeader };
+  }
 
   // Check if we have enough bytes for the complete frame
   if (bytes.length < totalFrameLength) return { status: 'incomplete' };

@@ -20,6 +20,7 @@ const EMPTY_STATE: PluginViewState = { status: 'unavailable', error: null, insta
 const listeners = new Set<() => void>();
 let states: Record<string, PluginViewState> = {};
 let started = false;
+let runtimeGeneration = 0;
 let reconcileQueued = false;
 let overlayBlocked = false;
 let nativeUnlisten: (() => void) | null = null;
@@ -39,6 +40,7 @@ interface ViewRecord {
   nativeReady: boolean;
   nativeInitializing: boolean;
   workerReady: boolean;
+  retirement: Promise<void> | null;
   visible: boolean;
   rect: PluginViewRect | null;
   layoutRevision: number;
@@ -144,7 +146,8 @@ function retire(record: ViewRecord, reason: string | null): void {
     pluginHost.disable(record.binding.pluginId);
   }
   records.delete(record.binding.tabId);
-  void pluginViewService.destroy(record.binding.viewInstanceId).catch(error => console.debug('[pluginView] destroy', error));
+  record.retirement = pluginViewService.destroy(record.binding.viewInstanceId);
+  void record.retirement.catch(error => console.debug('[pluginView] destroy', error));
   record.latest = null; record.retained = null; record.inFlight = null;
   if (reason) {
     const tab = useAppStore.getState().tabs.find(item => item.id === record.binding.tabId);
@@ -211,7 +214,7 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
   const tabSessionId = tabSessions.get(tab.id) ?? crypto.randomUUID(); tabSessions.set(tab.id, tabSessionId);
   const portId = getTabPortId(tab);
   const binding: PluginViewBinding = { ...preference, tabId: tab.id, placement: tab.kind === 'serial' ? 'serial-content' : 'workspace-tab', boundPortId: portId, portMode: portId ? useAppStore.getState().ports.find(port => port.id === portId)?.mode ?? 'trx' : null, tabSessionId, viewInstanceId: crypto.randomUUID(), workerEpoch: worker.epoch, streamEpoch: 0 };
-  const record: ViewRecord = { binding, declaration: view, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: false, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastEnvironment: '' };
+  const record: ViewRecord = { binding, declaration: view, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: false, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastEnvironment: '' };
   records.set(tab.id, record); setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId });
   try {
     await pluginViewService.create(binding);
@@ -294,7 +297,11 @@ export async function suppressPluginViews(suppressed: boolean): Promise<void> {
   overlayBlocked = suppressed;
   await Promise.all([...records.values()].map(async record => {
     if (suppressed) clearTimer(record, 'ackTimer'); else { armAck(record); flush(record); }
-    try { await place(record); await sendEnvironment(record); } catch (error) { fail(record, error); }
+    try { await place(record); await sendEnvironment(record); } catch (error) {
+      fail(record, error);
+      // A failed hide cannot authorize DOM overlays until the child is actually destroyed.
+      if (suppressed) await record.retirement;
+    }
   }));
 }
 export function retryPluginView(tabId: string): void {
@@ -407,7 +414,7 @@ function ownedRecord(pluginId: string, args: unknown): { record: ViewRecord; obj
   if (pluginHost.get(pluginId)?.epoch !== record.binding.workerEpoch) throw new Error('plugin Worker changed');
   return { record, object };
 }
-export async function executePluginViewApi(pluginId: string, op: string, args: unknown, manifest: PluginManifestView | null): Promise<unknown> {
+export async function executePluginViewApi(pluginId: string, op: string, args: unknown, manifest: PluginManifestView | null, beforeSend?: () => void): Promise<unknown> {
   if (op === 'tabs.open') return openTabFor(pluginId, requireObject(args) as unknown as PluginTabOpenOptions, false);
   if (op === 'tabs.list') { currentPlugin(pluginId); return useAppStore.getState().tabs.filter(tab => tab.kind === 'plugin' && tab.pluginId === pluginId).map(tab => ({ tabId: tab.id, title: tab.title, portId: getTabPortId(tab), state: getPluginViewState(tab.id).status })); }
   if (op.startsWith('tabs.')) {
@@ -431,12 +438,17 @@ export async function executePluginViewApi(pluginId: string, op: string, args: u
     record.latest = record.retained; flush(record); return null;
   }
   if (op === 'view.sendSerial') {
-    const config = useAppStore.getState().config.pluginConfigs.find(entry => entry.id === pluginId);
-    if (!config?.grantedPermissions.includes('serial:send')) throw new Error('plugin requires serial:send');
     const portId = record.binding.boundPortId; if (!portId) throw new Error('view has no bound port');
-    const denied = checkPortScope(manifest, portId); if (denied) throw new Error(denied);
+    const authorizeSend = (): void => {
+      beforeSend?.();
+      ownedRecord(pluginId, args);
+      const config = useAppStore.getState().config.pluginConfigs.find(entry => entry.id === pluginId);
+      if (!config?.grantedPermissions.includes('serial:send')) throw new Error('plugin requires serial:send');
+      const denied = checkPortScope(manifest, portId); if (denied) throw new Error(denied);
+    };
+    authorizeSend();
     const data = requireString(object, 'data', 65536);
-    const bytesWritten = await sendToPort(portId, data, object.isHex === true, typeof object.lineEnding === 'string' ? object.lineEnding : 'None', true);
+    const bytesWritten = await sendToPort(portId, data, object.isHex === true, typeof object.lineEnding === 'string' ? object.lineEnding : 'None', true, authorizeSend);
     return { bytesWritten };
   }
   throw new Error('unknown plugin view operation');
@@ -478,11 +490,17 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
 export function startPluginViewRuntime(): () => void {
   if (started) throw new Error('plugin view runtime already started');
   started = true;
+  const generation = ++runtimeGeneration;
   const unsubscribers = [subscribePluginViews(queueReconcile), subscribePluginSessions(queueReconcile), useAppStore.subscribe((state, previous) => {
     if (state.tabs !== previous.tabs || state.ports !== previous.ports || state.config !== previous.config || state.activeTabId !== previous.activeTabId) queueReconcile();
   }), useSystemStore.subscribe((state, previous) => { if (state.ui.configReady !== previous.ui.configReady) queueReconcile(); })];
-  void pluginViewService.onMessage(message => { void handleNative(message); }).then(unlisten => { if (started) { nativeUnlisten = unlisten; queueReconcile(); } else unlisten(); }).catch(error => { console.error('[pluginView] event listener', error); });
+  void pluginViewService.onMessage(message => {
+    if (started && runtimeGeneration === generation) void handleNative(message);
+  }).then(unlisten => {
+    if (started && runtimeGeneration === generation) { nativeUnlisten = unlisten; queueReconcile(); } else unlisten();
+  }).catch(error => { console.error('[pluginView] event listener', error); });
   return () => {
+    if (!started || runtimeGeneration !== generation) return;
     started = false; for (const unsubscribe of unsubscribers) unsubscribe(); nativeUnlisten?.(); nativeUnlisten = null;
     for (const record of [...records.values()]) retire(record, null);
     states = {}; failures.clear(); tabSessions.clear(); openParams.clear(); dismissed.clear(); rates.clear(); actionTokens.clear(); emit();

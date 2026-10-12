@@ -38,9 +38,8 @@ export function useHotkeys(): void {
       if (e.key === 'Escape') {
         const system = useSystemStore.getState();
         if (system.ui.isHotkeyHelpOpen) {
+          e.preventDefault();
           system.setUIState({ isHotkeyHelpOpen: false });
-        } else if (system.ui.isConfigOpen) {
-          system.toggleConfigModal(false);
         }
         return;
       }

@@ -9,6 +9,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   HighlightRuleSet,
+  AppConfig,
   PortGroup,
   PortMetaEntry,
   PortPreset,
@@ -17,54 +18,83 @@ import type {
   SendCommandSet,
   TriggerRule,
 } from '../types';
+import { useAppStore } from '../stores/useAppStore';
+
+type RuleEntityKey = 'sendCommandSets' | 'highlightRuleSets' | 'protocolTemplates' | 'triggerRules' | 'portToolConfigs';
+
+// Keep the last confirmed persisted entities separate from live editor drafts.
+// Full-config reconciliation must recognize this window's own successful CRUD
+// rather than mistake every change since startup for a competing writer.
+async function loadRuleEntities<K extends RuleEntityKey>(key: K, pending: Promise<AppConfig[K]>): Promise<AppConfig[K]> {
+  const baseline = useAppStore.getState().config[key];
+  const items = await pending;
+  if (useAppStore.getState().config[key] === baseline) useAppStore.getState().setConfig({ [key]: items });
+  return items;
+}
+
+async function saveRuleEntity<K extends RuleEntityKey>(key: K, args: AppConfig[K][number], pending: Promise<string>): Promise<string> {
+  const id = await pending;
+  const saved = { ...args, id };
+  const baseline = useAppStore.getState().config[key];
+  const items = baseline.filter((item) => item.id !== id);
+  const index = baseline.findIndex((item) => item.id === id);
+  items.splice(index < 0 ? items.length : index, 0, saved);
+  useAppStore.getState().setConfig({ [key]: items });
+  return id;
+}
+
+async function deleteRuleEntity<K extends RuleEntityKey>(key: K, id: string, pending: Promise<void>): Promise<void> {
+  await pending;
+  useAppStore.getState().setConfig({ [key]: useAppStore.getState().config[key].filter((item) => item.id !== id) });
+}
 
 export const storageService = {
   saveCommandSet: (args: SendCommandSet): Promise<string> => {
-    return invoke<string>('save_command_set', { args });
+    return saveRuleEntity('sendCommandSets', args, invoke<string>('save_command_set', { args }));
   },
 
   loadCommandSets: (): Promise<SendCommandSet[]> => {
-    return invoke<SendCommandSet[]>('load_command_sets');
+    return loadRuleEntities('sendCommandSets', invoke<SendCommandSet[]>('load_command_sets'));
   },
 
   deleteCommandSet: (setId: string): Promise<void> => {
-    return invoke<void>('delete_command_set', { setId });
+    return deleteRuleEntity('sendCommandSets', setId, invoke<void>('delete_command_set', { setId }));
   },
 
   saveHighlightSet: (args: HighlightRuleSet): Promise<string> => {
-    return invoke<string>('save_highlight_set', { args });
+    return saveRuleEntity('highlightRuleSets', args, invoke<string>('save_highlight_set', { args }));
   },
 
   loadHighlightSets: (): Promise<HighlightRuleSet[]> => {
-    return invoke<HighlightRuleSet[]>('load_highlight_sets');
+    return loadRuleEntities('highlightRuleSets', invoke<HighlightRuleSet[]>('load_highlight_sets'));
   },
 
   deleteHighlightSet: (setId: string): Promise<void> => {
-    return invoke<void>('delete_highlight_set', { setId });
+    return deleteRuleEntity('highlightRuleSets', setId, invoke<void>('delete_highlight_set', { setId }));
   },
 
   saveProtocolTemplate: (args: ProtocolTemplate): Promise<string> => {
-    return invoke<string>('save_protocol_template', { args });
+    return saveRuleEntity('protocolTemplates', args, invoke<string>('save_protocol_template', { args }));
   },
 
   loadProtocolTemplates: (): Promise<ProtocolTemplate[]> => {
-    return invoke<ProtocolTemplate[]>('load_protocol_templates');
+    return loadRuleEntities('protocolTemplates', invoke<ProtocolTemplate[]>('load_protocol_templates'));
   },
 
   deleteProtocolTemplate: (setId: string): Promise<void> => {
-    return invoke<void>('delete_protocol_template', { setId });
+    return deleteRuleEntity('protocolTemplates', setId, invoke<void>('delete_protocol_template', { setId }));
   },
 
   saveTriggerRule: (args: TriggerRule): Promise<string> => {
-    return invoke<string>('save_trigger_rule', { args });
+    return saveRuleEntity('triggerRules', args, invoke<string>('save_trigger_rule', { args }));
   },
 
   loadTriggerRules: (): Promise<TriggerRule[]> => {
-    return invoke<TriggerRule[]>('load_trigger_rules');
+    return loadRuleEntities('triggerRules', invoke<TriggerRule[]>('load_trigger_rules'));
   },
 
   deleteTriggerRule: (ruleId: string): Promise<void> => {
-    return invoke<void>('delete_trigger_rule', { ruleId });
+    return deleteRuleEntity('triggerRules', ruleId, invoke<void>('delete_trigger_rule', { ruleId }));
   },
 
   savePortPreset: (args: PortPreset): Promise<string> => {
@@ -80,15 +110,15 @@ export const storageService = {
   },
 
   savePortToolConfig: (args: PortToolConfig): Promise<string> => {
-    return invoke<string>('save_port_tool_config', { args });
+    return saveRuleEntity('portToolConfigs', args, invoke<string>('save_port_tool_config', { args }));
   },
 
   loadPortToolConfigs: (): Promise<PortToolConfig[]> => {
-    return invoke<PortToolConfig[]>('load_port_tool_configs');
+    return loadRuleEntities('portToolConfigs', invoke<PortToolConfig[]>('load_port_tool_configs'));
   },
 
   deletePortToolConfig: (configId: string): Promise<void> => {
-    return invoke<void>('delete_port_tool_config', { configId });
+    return deleteRuleEntity('portToolConfigs', configId, invoke<void>('delete_port_tool_config', { configId }));
   },
 
   /** 整体替换保存串口分组布局（issue #2-3，前端分组变更后防抖调用）。

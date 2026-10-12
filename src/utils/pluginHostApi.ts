@@ -78,6 +78,7 @@ export async function executeHostApi(
   op: string,
   args: unknown,
   manifest: PluginManifestView | null = null,
+  beforeSend?: () => void,
 ): Promise<unknown> {
   switch (op) {
     case 'view.publish':
@@ -87,7 +88,7 @@ export async function executeHostApi(
     case 'tabs.close':
     case 'tabs.setTitle':
     case 'tabs.list':
-      return executePluginViewApi(pluginId, op, args, manifest);
+      return executePluginViewApi(pluginId, op, args, manifest, beforeSend);
     case 'ports.list': {
       const ports = useAppStore.getState().ports;
       return ports.map(portView);
@@ -120,7 +121,7 @@ export async function executeHostApi(
       const data = requireString(a, 'data');
       const isHex = Boolean(a.isHex);
       const lineEnding = typeof a.lineEnding === 'string' ? a.lineEnding : 'None';
-      const bytes = await sendToPort(portId, data, isHex, lineEnding, true); // silent: 插件发送不弹守卫 toast
+      const bytes = await sendToPort(portId, data, isHex, lineEnding, true, beforeSend); // silent: 插件发送不弹守卫 toast
       return { bytesWritten: bytes };
     }
     case 'fs.openDialog': {

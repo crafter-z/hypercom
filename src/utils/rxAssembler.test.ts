@@ -205,6 +205,14 @@ describe('RxLineAssembler — force flush', () => {
     expect(asm.feed([0x62])).toEqual([]);
     expect(asm.takeTail()).toEqual([0x62]);
   });
+
+  it('bounds forced output even when malformed input keeps starting new characters', () => {
+    const asm = new RxLineAssembler({ maxPendingBytes: 4 });
+    const output = asm.feed(Array.from({ length: 100 }, () => 0xe4));
+    expect(output.length).toBeGreaterThan(0);
+    expect(output.every(block => block.length <= 7)).toBe(true);
+    expect(asm.takeTail().length).toBeLessThan(7);
+  });
 });
 
 describe('RxLineAssembler — takeTail / reset', () => {

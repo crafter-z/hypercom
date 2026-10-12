@@ -3,10 +3,11 @@ import { findSerialTabByPortId, getActivePortId, useAppStore } from '../stores/u
 import { useRuleStore } from '../stores/useRuleStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { popoutEventService } from '../services/tauri';
+import { popoutEventService, storageService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { snapshotTerminalLines } from '../utils/terminal/viewportManager';
+import { notifyError } from '../stores/useToastStore';
 
 /**
  * 终端快照行数上限（R3）：缓冲接近 memoryLimitMb 时整包快照载荷过大，
@@ -71,6 +72,7 @@ export function usePopoutBridge() {
     popoutEventService
       .onCommandSetUpdated((payload) => {
         useRuleStore.getState().updateSendCommandSet(payload.set.id, payload.set);
+        void storageService.saveCommandSet(payload.set).catch((error) => notifyError(error));
       })
       .then((u) => {
         if (cancelled) u();

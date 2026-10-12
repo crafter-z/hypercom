@@ -255,6 +255,32 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
+  it.each(['revoke', 'stop', 'upgrade', 'timeout'])('blocks a queued serial effect after %s before it starts', async transition => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['serial:send'] }] });
+    const queued = deferredResult<void>();
+    const send = vi.fn();
+    vi.mocked(executeHostApi).mockImplementationOnce(async (_id, _op, _args, _manifest, beforeSend) => {
+      await queued.promise;
+      beforeSend!();
+      send();
+      return { bytesWritten: 4 };
+    });
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'serial.send', args: { portId: 'COM3', data: 'PING' } });
+    if (transition === 'revoke') useAppStore.getState().setConfig({ pluginConfigs: [entry] });
+    else if (transition === 'stop') session.stop();
+    else if (transition === 'upgrade') useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, installGeneration: 'install-b', grantedPermissions: ['serial:send'] }] });
+    else await vi.advanceTimersByTimeAsync(10_000);
+    queued.resolve(undefined);
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(send).not.toHaveBeenCalled();
+    expect(worker.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result: { bytesWritten: 4 } });
+    session.stop();
+  });
+
   it('reserves control capacity when RX is full and reports drops after acknowledgement', async () => {
     const session = new PluginSession(pluginId);
     await session.start();

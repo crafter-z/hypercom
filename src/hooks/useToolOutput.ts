@@ -26,6 +26,11 @@ export function useToolOutput() {
           toolStream: event.stream as 'stdout' | 'stderr',
         });
       });
+      if (cancelled) {
+        unlistenOutput();
+        return;
+      }
+      cleanups.push(unlistenOutput);
 
       const unlistenExit = await eventService.onToolExit((event) => {
         if (cancelled) return;
@@ -45,14 +50,14 @@ export function useToolOutput() {
       });
 
       if (cancelled) {
-        unlistenOutput();
         unlistenExit();
         return;
       }
-      cleanups.push(unlistenOutput, unlistenExit);
+      cleanups.push(unlistenExit);
     };
 
     setup().catch((e) => {
+      cleanups.splice(0).forEach((fn) => fn());
       console.error('[useToolOutput] Failed to subscribe to tool events:', e);
     });
 

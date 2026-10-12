@@ -2,9 +2,6 @@ import { useEffect } from 'react';
 import { useSystemStore } from '../stores/useSystemStore';
 import { updateTiming, shouldAutoCheck, isUpdateCheckEnabled, runAutoCheck, getCommittedUpdateMode } from '../utils/updateService';
 
-/** 就绪信号失联时的兜底等待上限；仍仅评估已提交模式。 */
-const CONFIG_READY_FALLBACK_MS = 15_000;
-
 /**
  * 会话内周期重评估间隔（issue #12 二轮）：串口工具常驻运行，「启动评估一次」
  * 覆盖不了挂机数天不重启的用户。评估本身经 shouldAutoCheck 门控（7 天周期 +
@@ -14,10 +11,10 @@ const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * 自动更新生命周期（issue #12）
- * - config 就绪（`ui.configReady`，useConfigPersistence.loadConfig 完成置位）后
+ * - config 就绪（`ui.configReady`，useConfigPersistence.loadConfig 成功或失败后置位）后
  *   首次评估：模式 none → 跳过；否则按「周期 7 天 + snooze + 首启立即」决定
- *   是否检查（纯函数 shouldAutoCheck）。复审修复：替代旧 3s 启发式窗口——
- *   config 加载慢于 3s 时旧实现按默认模式误判。
+ *   是否检查（纯函数 shouldAutoCheck）。配置仍在加载时不按默认 stable 发请求，
+ *   避免慢启动覆盖用户已持久化的 none/preview 意图。
  * - **会话内每 6h 重评估**（二轮）：覆盖长期挂机场景。检查成功（有无更新同）
  *   经 runAutoCheck 记 lastCheckAt 完成时刻；失败静默不记账——下次启动/下个
  *   周期重试（console/debug 由 diagLog 落盘，不打扰用户）。
@@ -49,19 +46,10 @@ export function useAutoUpdate(): void {
       void evaluate();
     };
 
-    // 等 config 就绪信号（false→true 跳变）；15s 兜底防信号失联。
-    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    // Keep listening until loading settles; a timeout cannot establish user intent.
     const unsub = useSystemStore.subscribe((state, prev) => {
-      if (state.ui.configReady && !prev.ui.configReady) {
-        unsub();
-        clearTimeout(fallbackTimer);
-        start();
-      }
+      if (state.ui.configReady && !prev.ui.configReady) start();
     });
-    fallbackTimer = setTimeout(() => {
-      unsub();
-      start();
-    }, CONFIG_READY_FALLBACK_MS);
     // 挂载时已就绪（未来挂载顺序变化时）→ 直接评估。
     if (useSystemStore.getState().ui.configReady) {
       start();
@@ -76,7 +64,6 @@ export function useAutoUpdate(): void {
     return () => {
       cancelled = true;
       unsub();
-      clearTimeout(fallbackTimer);
       clearInterval(interval);
     };
   }, []);

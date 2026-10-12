@@ -191,6 +191,30 @@ describe('RxPipeline — force flush via assembler', () => {
     // issue #6-2：rawData 现为 Uint8Array
     expect(h.appended[0]!.lines[0]!.rawData).toEqual(new Uint8Array([1, 2, 3, 4]));
   });
+
+  it('keeps UTF-8 characters intact when a forced-output threshold lands inside them', () => {
+    const h = makeHarness({ maxPendingBytes: 4 });
+    const assembled: string[] = [];
+    h.pipeline.setOnLineAssembled((_portId, line) => assembled.push(line.text));
+    h.pipeline.feedBytes('COM1', bytes('AAA'), 1);
+    h.pipeline.feedBytes('COM1', [0xe4], 2);
+    expect(h.appended).toHaveLength(0);
+    h.pipeline.feedBytes('COM1', [0xbd, 0xa0, 0x0a], 3);
+    runTick(h);
+    expect(lineTexts(h.appended[0]!.lines)).toEqual(['AAA你']);
+    expect(assembled).toEqual(['AAA你']);
+  });
+
+  it('keeps GBK lead and trail bytes together at a forced-output threshold', () => {
+    const h = makeHarness({ maxPendingBytes: 4, getEncodingLabel: () => 'gbk' });
+    const assembled: string[] = [];
+    h.pipeline.setOnLineAssembled((_portId, line) => assembled.push(line.text));
+    h.pipeline.feedBytes('COM1', [0x41, 0x41, 0x41, 0xc4], 1);
+    h.pipeline.feedBytes('COM1', [0xe3, 0x0a], 2);
+    runTick(h);
+    expect(lineTexts(h.appended[0]!.lines, 'gbk')).toEqual(['AAA你']);
+    expect(assembled).toEqual(['AAA你']);
+  });
 });
 
 describe('RxPipeline — flushNow / flushAndReset / disconnect', () => {

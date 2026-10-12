@@ -235,6 +235,11 @@ export function useSerialReceive() {
         // Common non-protocol path: byte-level line aggregation + batched writes
         pipeline.feedBytes(portId, event.data, event.timestamp);
       });
+      if (cancelled) {
+        unlistenData();
+        return;
+      }
+      cleanups.push(unlistenData);
 
       const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
         if (cancelled) return;
@@ -294,15 +299,15 @@ export function useSerialReceive() {
       });
 
       if (cancelled) {
-        unlistenData();
         unlistenStatus();
         return;
       }
 
-      cleanups.push(unlistenData, unlistenStatus);
+      cleanups.push(unlistenStatus);
     };
 
     setup().catch((e) => {
+      cleanups.splice(0).forEach((fn) => fn());
       console.error('[useSerialReceive] Failed to subscribe to serial events:', e);
     });
 

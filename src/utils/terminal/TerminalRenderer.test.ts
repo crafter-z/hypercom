@@ -333,6 +333,16 @@ describe('TerminalRenderer filtered rendering', () => {
     expect(head.style.height).toBe('0px');
     expect(tail.style.height).toBe('0px');
   });
+
+  it('removes stale scroll geometry when filtering every row out', () => {
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView());
+    renderer.render(buf, identityView({ visibleSeqs: [], followEnabled: false }));
+    const [head, tail] = layerSpacers(container);
+    expect(head.style.height).toBe('0px');
+    expect(tail.style.height).toBe('0px');
+    expect(container.querySelectorAll('.terminal-line')).toHaveLength(0);
+  });
 });
 
 describe('TerminalRenderer search + selection', () => {
@@ -353,6 +363,24 @@ describe('TerminalRenderer search + selection', () => {
     expect(row2.className).toContain('current-match');
     const row1 = container.querySelector('[data-seq="1"]') as HTMLElement;
     expect(row1.querySelector('.terminal-search-mark')).toBeNull();
+  });
+
+  it('moves the current character mark when navigating between already rendered matches', () => {
+    fill(buf, ['hello one', 'hello two']);
+    const view = identityView({ matchSet: new Set([0, 1]), currentMatchSeq: 0, searchQuery: 'hello', followEnabled: false });
+    renderer.render(buf, view);
+    renderer.render(buf, { ...view, currentMatchSeq: 1 });
+    expect(container.querySelector('[data-seq="0"] .terminal-search-mark.current')).toBeNull();
+    expect(container.querySelector('[data-seq="1"] .terminal-search-mark.current')?.textContent).toBe('hello');
+  });
+
+  it('uses the current display format for parsed protocol frames and search marks', () => {
+    buf.append({ timestamp: 0, direction: 'RX', rawData: new Uint8Array([0x41, 0x42]), isHex: false,
+      parsedFields: [{ name: 'Payload', byteStart: 0, byteEnd: 2, color: '#112233' }] });
+    renderer.updateConfig({ displayFormat: 'hex' });
+    renderer.render(buf, identityView({ matchSet: new Set([0]), currentMatchSeq: 0, searchQuery: '41 42', followEnabled: false }));
+    expect(container.querySelector('.terminal-content')?.textContent).toBe('41 42');
+    expect(container.querySelector('.terminal-search-mark.current')?.textContent).toBe('41 42');
   });
 
   it('renders hex display from rawData', () => {

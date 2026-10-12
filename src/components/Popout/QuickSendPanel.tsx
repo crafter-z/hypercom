@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { popoutEventService, storageService } from '../../services/tauri';
-import { notifyError } from '../../stores/useToastStore';
+import { popoutEventService } from '../../services/tauri';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { clampInterval, clampRoundInterval } from '../../utils/textSend';
 import { usePopoutSync } from './usePopoutSync';
@@ -52,12 +51,6 @@ const QuickSendPanel: React.FC = () => {
     [sets, selectedSetId],
   );
 
-  // 持久化的 portId 已不存在（端口拔出/改名）→ 回退到跟随主窗活动标签。
-  useEffect(() => {
-    if (config.portId && !ports.some((p) => p.id === config.portId)) {
-      patchConfig({ portId: '' });
-    }
-  }, [ports, config.portId, patchConfig]);
 
   useEffect(
     () => () => {
@@ -70,16 +63,13 @@ const QuickSendPanel: React.FC = () => {
   const effectivePortId = config.portId || activePortId;
   const canSend = effectivePortId != null;
 
-  /** 唯一的发送意图出口（两种模式共用；portId 缺省时主窗发送到自己的活动标签）。 */
+  /** Each intent carries an explicit target; a text sequence freezes it at start. */
   const emitSendIntent = useCallback(
-    (content: string, isHex: boolean, lineEnding: LineEnding) =>
-      popoutEventService.emitSendCommand({
-        content,
-        isHex,
-        lineEnding,
-        portId: config.portId || undefined,
-      }),
-    [config.portId],
+    (content: string, isHex: boolean, lineEnding: LineEnding, portId = effectivePortId) => {
+      if (!portId) return Promise.reject(new Error('No serial target selected'));
+      return popoutEventService.emitSendCommand({ content, isHex, lineEnding, portId });
+    },
+    [effectivePortId],
   );
 
   /** 行内闪烁反馈。 */
@@ -113,7 +103,6 @@ const QuickSendPanel: React.FC = () => {
     void popoutEventService
       .emitCommandSetUpdated(set)
       .catch((e) => console.debug('[QuickSendPanel] emitCommandSetUpdated failed:', e));
-    void storageService.saveCommandSet(set).catch((e) => notifyError(e));
   }, []);
 
   return (
@@ -154,6 +143,9 @@ const QuickSendPanel: React.FC = () => {
             <option value="">
               {ports.length === 0 ? t('quickSend.noPorts') : activePortId ?? t('quickSend.noActivePort')}
             </option>
+            {config.portId && !ports.some((port) => port.id === config.portId) && (
+              <option value={config.portId}>{config.portId}</option>
+            )}
             {ports.map((p) => (
               <option key={p.id} value={p.id}>
                 {/* issue #7-4：去掉无意义的「· REAL/VIRTUAL」类型后缀，只显示串口号 */}
@@ -253,6 +245,7 @@ const QuickSendPanel: React.FC = () => {
           onTextChange={setText}
           config={config}
           canSend={canSend}
+          targetPortId={effectivePortId}
           onSendLine={emitSendIntent}
         />
       )}

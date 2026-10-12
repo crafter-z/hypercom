@@ -84,6 +84,27 @@ describe('renderProtocolLine', () => {
     expect(result).toContain('<span style="color:#00ff00">你好</span>');
   });
 
+  it('uses the current display format independently of the receive event mode', () => {
+    const line = makeLine({
+      rawData: new Uint8Array([0x41, 0x42]),
+      parsedFields: [makeField({ byteEnd: 2 })],
+    });
+    expect(renderProtocolLine(line, 'UTF-8', true)).toContain('41 42');
+    expect(renderProtocolLine(line, 'UTF-8', false)).toContain('AB');
+  });
+
+  it.each([
+    ['UTF-8', [0xE4, 0xBD, 0xA0]],
+    ['GBK', [0xC4, 0xE3]],
+  ] as const)('preserves a %s character split across protocol fields', (encoding, bytes) => {
+    const line = makeLine({
+      rawData: new Uint8Array(bytes),
+      parsedFields: [makeField(), makeField({ byteStart: 1, byteEnd: bytes.length, color: '#00ff00' })],
+    });
+    const html = renderProtocolLine(line, encoding);
+    expect(html).toContain('<span style="color:#00ff00">你</span>');
+    expect(html.replace(/<[^>]*>/g, '')).toBe('你');
+  });
   // ==================== Edge cases ====================
 
   it('returns empty string when rawData is empty and parsedFields is empty', () => {

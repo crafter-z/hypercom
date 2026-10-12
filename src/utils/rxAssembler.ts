@@ -11,8 +11,8 @@
  *   是其它字节则照常处理（标记随之清除）。
  * - 单独的 CR 也是分隔符（classic Mac 风格 / 部分设备）。
  * - 连续分隔符发射空块（[]）表示空行；是否过滤空行由上层（wrapper）决定。
- * - pending 达到 maxPendingBytes 时无分隔符强制发射——防止无换行的
- *   二进制流让缓冲无限增长。
+ * - pending 达到 maxPendingBytes 时在完整字符边界强制发射；UTF-8/GBK
+ *   最多延迟三字节，畸形二进制流仍受该上限约束，缓冲不会无限增长。
  *
  * 0x0A/0x0D 不可能出现在 UTF-8 / GBK 的多字节序列内部（ISO-8859-1 与
  * ASCII 本就是单字节），因此字节级切分对全部四种受支持编码都安全。
@@ -24,7 +24,7 @@ const LF = 0x0a;
 const CR = 0x0d;
 
 export interface RxLineAssemblerOptions {
-  /** 强制发射阈值（字节）：pending 达到该长度即无分隔符发射。默认 4096 */
+  /** 强制发射阈值（字节），完成 UTF-8/GBK 字符时最多延迟三字节。默认 4096 */
   maxPendingBytes?: number;
 }
 
@@ -37,6 +37,8 @@ export class RxLineAssembler {
   /** 刚做过强制发射（pending 达 maxPendingBytes）：紧跟的分隔符属于「已发射的行」，
    *  不应再发射空块（否则产生幻影空行，issue #6-2 / P2-4）。任意后续字节后清除 */
   private justForced = false;
+  /** Bytes still needed to finish a character at a forced-output boundary. */
+  private characterBytesRemaining = 0;
 
   constructor(opts?: RxLineAssemblerOptions) {
     this.maxPendingBytes = opts?.maxPendingBytes ?? 4096;
@@ -46,8 +48,9 @@ export class RxLineAssembler {
    * 喂入一段字节，返回按流顺序完成的行字节块（块内容不含分隔符）。
    * 输入可为任意 ArrayLike<number>（number[] / Uint8Array），不会被修改。
    */
-  feed(bytes: ArrayLike<number>): number[][] {
+  feed(bytes: ArrayLike<number>, encodingLabel = 'utf-8'): number[][] {
     const lines: number[][] = [];
+    const encoding = encodingLabel.toLowerCase();
     for (let i = 0; i < bytes.length; i++) {
       const b = (bytes[i] ?? 0) & 0xff;
       if (this.pendingCR) {
@@ -59,6 +62,7 @@ export class RxLineAssembler {
         // 非 LF：标记已清除，按普通字节继续处理
       }
       if (b === CR || b === LF) {
+        this.characterBytesRemaining = 0;
         // 分隔符：发射当前行（pending 为空时即空块 = 空行），重置 pending。
         // CR 额外置 pendingCR，用于识别跨 feed 的 CRLF 对。
         if (this.justForced && this.pending.length === 0) {
@@ -75,11 +79,14 @@ export class RxLineAssembler {
         if (b === CR) this.pendingCR = true;
       } else {
         this.pending.push(b);
+        this.trackCharacterBoundary(b, encoding);
         this.justForced = false;
-        if (this.pending.length >= this.maxPendingBytes) {
+        if (this.pending.length >= this.maxPendingBytes &&
+          (this.characterBytesRemaining === 0 || this.pending.length >= this.maxPendingBytes + 3)) {
           // 强制发射：防止无换行二进制流无界增长。发射后继续扫描本段剩余字节
           lines.push(this.pending);
           this.pending = [];
+          this.characterBytesRemaining = 0;
           // 标记刚强制发射：紧跟的分隔符属于本行，不再发射空块（P2-4）
           this.justForced = true;
         }
@@ -94,6 +101,7 @@ export class RxLineAssembler {
     this.pending = [];
     this.pendingCR = false;
     this.justForced = false;
+    this.characterBytesRemaining = 0;
     return tail;
   }
 
@@ -107,5 +115,27 @@ export class RxLineAssembler {
     this.pending = [];
     this.pendingCR = false;
     this.justForced = false;
+    this.characterBytesRemaining = 0;
+  }
+
+  /** A force threshold may wait at most three UTF-8 bytes or one GBK byte.
+   * Invalid sequences still terminate normally; delimiters always win. */
+  private trackCharacterBoundary(byte: number, encoding: string): void {
+    if (encoding === 'gbk') {
+      if (this.characterBytesRemaining > 0 && byte >= 0x40 && byte <= 0xfe && byte !== 0x7f) {
+        this.characterBytesRemaining = 0;
+      } else {
+        this.characterBytesRemaining = byte >= 0x81 && byte <= 0xfe ? 1 : 0;
+      }
+      return;
+    }
+    if (encoding !== 'utf-8' && encoding !== 'utf8' && encoding !== 'ascii') return;
+    if (this.characterBytesRemaining > 0 && byte >= 0x80 && byte <= 0xbf) {
+      this.characterBytesRemaining--;
+    } else {
+      this.characterBytesRemaining = byte >= 0xc2 && byte <= 0xdf ? 1
+        : byte >= 0xe0 && byte <= 0xef ? 2
+          : byte >= 0xf0 && byte <= 0xf4 ? 3 : 0;
+    }
   }
 }

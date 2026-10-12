@@ -76,6 +76,7 @@ export function evaluateTriggers(
         if (!rawData || rawData.length === 0) continue;
         const hexStr = bytesToSpacedHex(rawData);
         const normalizedPattern = normalizeHexPattern(rule.pattern);
+        if (!normalizedPattern) continue;
         matched = hexStr.includes(normalizedPattern);
         break;
       }

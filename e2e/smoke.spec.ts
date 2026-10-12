@@ -805,4 +805,143 @@ test.describe('HyperCom smoke tests', () => {
     expect(after.midSeq! - before.midSeq!).toBeGreaterThan(0);
     expect(after.midSeq! - before.midSeq!).toBeLessThan(16000);
   });
+  test('default line ending settings use backend domain values', async ({ page }) => {
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await page.locator('.modal-nav-item', { hasText: '显示与交互' }).click();
+    const ending = page.locator('.config-page select').first();
+    await expect(ending).toHaveValue('\\r\\n');
+    await ending.selectOption('\\n');
+    await expect(ending).toHaveValue('\\n');
+    await ending.selectOption('None');
+    await expect(ending).toHaveValue('None');
+  });
+  test('Escape cancels the settings draft just like Cancel', async ({ page }) => {
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    const font = page.locator('.config-page input:not([type])').first();
+    const original = await font.inputValue();
+    await font.fill('QualityDraftFont');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.modal-dialog')).not.toBeVisible();
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await expect(font).toHaveValue(original);
+  });
+
+  test('reopening terminal search restores matches for the unchanged query', async ({ page }) => {
+    await openCom1Tab(page);
+    await dispatchSerialData(page, 'COM1', 'quality-needle\n');
+    await page.locator('.terminal-view').click();
+    await page.keyboard.press('Control+f');
+    const query = page.locator('.terminal-search-input');
+    await query.fill('quality-needle');
+    await expect(page.locator('.terminal-search-counter')).toHaveText('1/1');
+    await page.locator('button[title="关闭搜索"]').click();
+    await page.locator('.terminal-view').click();
+    await page.keyboard.press('Control+f');
+    await expect(query).toHaveValue('quality-needle');
+    await expect(page.locator('.terminal-search-counter')).toHaveText('1/1');
+  });
+
+  test('editing a row after its own save survives full save and Cancel', async ({ page }) => {
+    await page.addInitScript(TAURI_MOCK + `
+      (() => {
+        const api = window.__TAURI_INTERNALS__;
+        const original = api.invoke;
+        const backend = { revision: 0, sendCommandSets: [], highlightRuleSets: [], protocolTemplates: [], triggerRules: [], portToolConfigs: [], portPresets: [], portGroups: [], portMeta: [] };
+        api.invoke = async (command, args) => {
+          if (command === 'get_config') return structuredClone(backend);
+          if (command === 'load_command_sets') return structuredClone(backend.sendCommandSets);
+          if (command === 'save_command_set') {
+            backend.sendCommandSets = backend.sendCommandSets.filter(set => set.id !== args.args.id).concat(structuredClone(args.args));
+            backend.revision++;
+            return args.args.id;
+          }
+          if (command === 'set_config') {
+            if (args.expectedRevision !== backend.revision) return false;
+            Object.assign(backend, structuredClone(args.newConfig), { revision: backend.revision + 1 });
+            return true;
+          }
+          return original(command, args);
+        };
+      })();
+    `);
+    await page.goto('/');
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await page.locator('.modal-nav-item', { hasText: '发送命令规则' }).click();
+    await page.locator('.config-page > div > button').first().click();
+    const name = page.locator('.config-page input:not([type])').first();
+    await name.fill('saved-once');
+    await page.locator('button[title="保存到配置"]').click();
+    await page.locator('.modal-content-footer .btn:not(.btn-primary)').click();
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await expect(name).toHaveValue('saved-once');
+    await name.fill('latest-edit');
+    await page.locator('.modal-content-footer .btn-primary').click();
+    await expect(page.locator('.modal-dialog')).not.toBeVisible();
+    await page.locator('.titlebar-right button[title="设置"]').click();
+    await expect(name).toHaveValue('latest-edit');
+  });
+
+  test('popout remembers an explicit target and freezes sequential sends across focus changes', async ({ page }) => {
+    await page.addInitScript(TAURI_MOCK + `
+      (() => {
+        localStorage.setItem('hypercom.quickSend.textConfig', JSON.stringify({ portId: 'COM2', sendIntervalMs: 200 }));
+        const api = window.__TAURI_INTERNALS__;
+        const original = api.invoke;
+        const sends = [];
+        api.invoke = async (command, args) => {
+          if (command === 'list_available_ports') return ['COM1','COM2'].map(id => ({ id, name: id, port_type: 'real' }));
+          if (command === 'plugin:event|emit') {
+            if (args.event === 'popout:request-sync') api.dispatchEvent('active-tab:changed', { portId: 'COM1' });
+            if (args.event === 'popout:send-command') {
+              sends.push(args.payload);
+              localStorage.setItem('quality.sequence.sends', JSON.stringify(sends));
+              if (sends.length === 1) api.dispatchEvent('active-tab:changed', { portId: 'COM2' });
+            }
+            return null;
+          }
+          return original(command, args);
+        };
+      })();
+    `);
+    await page.goto('/?popout=quick-send');
+    await expect(page.locator('.quicksend-target-port')).toHaveText('COM2');
+    await expect(page.locator('select[title="目标串口"]')).toHaveValue('COM2');
+    await page.locator('select[title="目标串口"]').selectOption('');
+    await page.getByRole('tab', { name: '文本模式' }).click();
+    await page.locator('.quicksend-textarea').fill('first\nsecond');
+    await page.locator('button[title="顺序完整执行"]').click();
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('quality.sequence.sends') ?? '[]'))).toEqual([
+      { content: 'first', isHex: false, lineEnding: '\\r\\n', portId: 'COM1' },
+      { content: 'second', isHex: false, lineEnding: '\\r\\n', portId: 'COM1' },
+    ]);
+  });
+  test('DTR and RTS changes on an open port update hardware flow control', async ({ page }) => {
+    await page.evaluate(() => {
+      const api = window.__TAURI_INTERNALS__;
+      const original = api.invoke;
+      const flow: Array<{ portId: string; dtr: boolean; rts: boolean }> = [];
+      api.invoke = async (command: string, args?: unknown) => {
+        if (command === 'open_serial_port') {
+          api.dispatchEvent('serial:status', { port_id: 'COM1', status: 'connected' });
+          return null;
+        }
+        if (command === 'set_flow_control') {
+          flow.push(args as { portId: string; dtr: boolean; rts: boolean });
+          localStorage.setItem('quality.flow-control', JSON.stringify(flow));
+          return null;
+        }
+        return original(command, args);
+      };
+    });
+    await openCom1Tab(page);
+    await page.locator('button[title="连接串口"]').click();
+    await page.getByRole('checkbox', { name: 'DTR', exact: true }).check();
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('quality.flow-control') ?? '[]'))).toEqual([
+      { portId: 'COM1', dtr: true, rts: false },
+    ]);
+    await page.getByRole('checkbox', { name: 'RTS', exact: true }).check();
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('quality.flow-control') ?? '[]').at(-1))).toEqual(
+      { portId: 'COM1', dtr: true, rts: true },
+    );
+  });
 });

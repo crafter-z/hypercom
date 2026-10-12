@@ -6,9 +6,9 @@
  * 与本 store 的订阅者（每个 Pane、OperationPanel、Sidebar）无关，混在一起会让
  * 每次流量 flush 都唤醒全部订阅者重跑选择器。
  *
- * `config` 是**启动时读入的只读快照**：实体数组（规则/命令集/预设/分组/元数据）的
- * 权威分别是 `useRuleStore`、后端 config.json 与 `groups` / `ports`，写路径统一走
- * `useConfigPersistence.saveConfig`（它负责拼装安全快照），不要在这里补实体回写。
+ * `config` 的规则实体数组记录最后确认的持久化基线；活编辑在 `useRuleStore`，
+ * 分组/端口权威在 `groups` / `ports`，普通字段是设置草稿。全量写路径统一走
+ * `useConfigPersistence.saveConfig`，实体基线只在读取/写入成功后推进。
  *
  * 分屏树算法在 `src/utils/paneTree.ts`，此处只做状态编排。
  */
@@ -123,7 +123,7 @@ export interface AppStoreState {
   activeTabId: string | null;
   focusedPaneId: string;
 
-  // --- 配置（只读快照）---
+  // --- 配置（普通设置草稿 + 已确认的规则持久化基线）---
   config: AppConfig;
 
   // ==================== Actions ====================

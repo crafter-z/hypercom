@@ -107,6 +107,22 @@ describe('ProtocolFrameReassembler', () => {
     expect(frames[0]?.bytes).toEqual([0xaa, 0x03, 0x01, 0x02]);
   });
 
+  it('rejects a declared frame shorter than its header and length field, then resynchronizes', () => {
+    const parser = new ProtocolFrameReassembler(template({ footerBytes: '' }));
+    const valid = [0xaa, 0xbb, 0x03, 0x41];
+    const result = parser.feed([0xaa, 0xbb, 0x00, ...valid]);
+    expect(extractFrames(result).map(frame => frame.bytes)).toEqual([valid]);
+    expect(extractRaw(result)).toEqual([0xaa, 0xbb, 0x00]);
+  });
+
+  it('resynchronizes immediately after an impossible oversized length', () => {
+    const parser = new ProtocolFrameReassembler(template({ footerBytes: '', lengthAdjust: -65536 }));
+    const bytes = [0xaa, 0xbb, 0x03];
+    expect(extractFrames(parser.feed(bytes))).toEqual([]);
+    expect(parser.getBufferedLength()).toBeLessThan(bytes.length);
+    expect([...parser.drain()].length).toBeLessThan(bytes.length);
+  });
+
   it('validates a sum8 checksum in a frame', () => {
     const reassembler = new ProtocolFrameReassembler(template({ checksumAlgorithm: 'sum8' }));
     const frameWithoutChecksum = [0xaa, 0xbb, 0x07, 0x01, 0x02];

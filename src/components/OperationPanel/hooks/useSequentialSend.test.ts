@@ -213,4 +213,35 @@ describe('createSendLoop', () => {
     expect(started).toBe(2);
     loop.stop();
   });
+  it.each(['finish', 'delay', 'reject'] as const)('isolates an in-flight old step on stop/restart (%s)', async (result) => {
+    let resolve!: (delay: number | null) => void;
+    let reject!: (error: Error) => void;
+    let starts = 0;
+    const onStop = vi.fn();
+    const onStepError = vi.fn(() => 10);
+    const loop = createSendLoop({
+      firstTickMs: 0,
+      step: () => {
+        starts += 1;
+        return starts === 1 ? new Promise<number | null>((done, fail) => { resolve = done; reject = fail; }) : null;
+      },
+      onStop,
+      onStepError,
+    });
+    loop.start();
+    await vi.advanceTimersByTimeAsync(0);
+    loop.stop();
+    loop.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(starts).toBe(1);
+    if (result === 'reject') reject(new Error('retired run'));
+    else resolve(result === 'finish' ? null : 500);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(starts).toBe(2);
+    expect(onStepError).not.toHaveBeenCalled();
+    expect(onStop).toHaveBeenCalledTimes(2);
+    expect(loop.isRunning()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(starts).toBe(2);
+  });
 });

@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { executePluginViewApi, issuePluginActionToken, openPluginTabForUser, dismissPluginTab, getAvailablePluginViews, startPluginViewRuntime, selectSerialPluginView, getTabViewPreference, isRawSerialDisplay } from './pluginViewRuntime';
+import { executePluginViewApi, issuePluginActionToken, openPluginTabForUser, dismissPluginTab, getAvailablePluginViews, startPluginViewRuntime, selectSerialPluginView, getTabViewPreference, isRawSerialDisplay, getPluginViewState, markPluginViewWorkerReady, placePluginView, suppressPluginViews } from './pluginViewRuntime';
 import { useAppStore, getActivePortId } from '../stores/useAppStore';
 import { resetStoresForTests } from '../stores/resetStores';
 import { resetPluginSnapshotForTest, syncPluginListSnapshot } from './pluginConfigSnapshot';
 import type { PluginView } from '../types';
+import { pluginViewService } from '../services/pluginView';
+import { pluginHost, type PluginSession } from './pluginHost';
+import { useSystemStore } from '../stores/useSystemStore';
+import type { PluginNativeMessage } from '../types/pluginViews';
+import { sendToPort } from '../hooks/useSerialSend';
 
 vi.mock('../services/pluginView', () => ({ pluginViewService: { create: vi.fn(), destroy: vi.fn(), send: vi.fn(), update: vi.fn(), onMessage: vi.fn(async () => () => {}) } }));
 vi.mock('../hooks/useSerialSend', () => ({ sendToPort: vi.fn() }));
@@ -29,7 +34,7 @@ beforeEach(() => {
   useAppStore.getState().setPorts([{ id: 'COM3', name: 'COM3', status: 'connected', type: 'real', isHidden: false, mode: 'trx' }, { id: 'COM4', name: 'COM4', status: 'connected', type: 'real', isHidden: false, mode: 'trx' }]);
   syncPluginListSnapshot({ revision: 0, plugins: [plugin], pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions }] });
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 async function open(options: object) { return await executePluginViewApi(plugin.id, 'tabs.open', options, plugin.manifest) as { tabId: string; created: boolean }; }
 
@@ -87,5 +92,120 @@ describe('plugin workspace tab authority', () => {
     expect(getTabViewPreference(tab)).toBeNull();
     expect(isRawSerialDisplay(tab)).toBe(true);
     expect(useAppStore.getState().ports.find(port => port.id === 'COM3')?.displayView).toBeNull();
+  });
+});
+
+describe('native view lifecycle handshakes', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  async function settle() { for (let index = 0; index < 10; index++) await Promise.resolve(); }
+
+  function enableWorker() {
+    // Native runtime uses the browser timer surface; these cases otherwise run in node.
+    vi.stubGlobal('window', globalThis);
+    vi.spyOn(pluginHost, 'get').mockReturnValue({ loaded: true, epoch: 1, post: () => true } as unknown as PluginSession);
+    useSystemStore.getState().setUIState({ configReady: true });
+    vi.mocked(pluginViewService.create).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.update).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.send).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.destroy).mockResolvedValue(undefined);
+  }
+
+  it('ignores native events from a stopped startup and releases both late listener registrations', async () => {
+    enableWorker();
+    const firstListener = deferred<() => void>();
+    const secondListener = deferred<() => void>();
+    let obsoleteMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage)
+      .mockImplementationOnce(callback => { obsoleteMessage = callback; return firstListener.promise; })
+      .mockImplementationOnce(() => secondListener.promise);
+    const stopFirst = startPluginViewRuntime(); stopFirst();
+    const stopSecond = startPluginViewRuntime();
+    const unlistenFirst = vi.fn(); const unlistenSecond = vi.fn();
+    try {
+      firstListener.resolve(unlistenFirst); secondListener.resolve(unlistenSecond);
+      const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null);
+      await settle();
+      expect(getPluginViewState(tabId).error).toBeNull();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      obsoleteMessage({ instanceId, type: 'error', error: 'obsolete native event' });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('loading');
+      expect(unlistenFirst).toHaveBeenCalledOnce();
+      stopFirst();
+      expect(getPluginViewState(tabId).instanceId).toBe(instanceId);
+    } finally { stopSecond(); }
+    expect(unlistenSecond).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('waits for actual destruction after a native hide fails (destroy rejection: %s)', async rejectDestroy => {
+    enableWorker();
+    let nativeMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async callback => { nativeMessage = callback; return () => {}; });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null);
+      await settle();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      nativeMessage({ instanceId, type: 'ready' }); markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      placePluginView(tabId, { x: 0, y: 0, width: 100, height: 100, zoomPercent: 100 }, true);
+      await settle();
+      expect(getPluginViewState(tabId).error).toBeNull();
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      const destroyed = deferred<void>();
+      vi.mocked(pluginViewService.update).mockRejectedValueOnce(new Error('native hide failed'));
+      vi.mocked(pluginViewService.destroy).mockReturnValueOnce(destroyed.promise);
+      const ready = vi.fn();
+      const suppression = suppressPluginViews(true);
+      void suppression.then(ready, () => {});
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('unavailable');
+      expect(ready).not.toHaveBeenCalled();
+      if (rejectDestroy) {
+        const outcome = expect(suppression).rejects.toThrow('native destroy failed');
+        destroyed.reject(new Error('native destroy failed')); await outcome;
+        expect(ready).not.toHaveBeenCalled();
+      } else {
+        destroyed.resolve(undefined); await suppression;
+        expect(ready).toHaveBeenCalledOnce();
+      }
+      const updates = vi.mocked(pluginViewService.update).mock.calls.length;
+      await suppressPluginViews(false); await settle();
+      expect(pluginViewService.update).toHaveBeenCalledTimes(updates);
+      expect(getPluginViewState(tabId).status).toBe('unavailable');
+    } finally { await suppressPluginViews(false); stop(); }
+  });
+
+  it.each(['revoke', 'close', 'worker'])('blocks a queued bound send after %s before serial I/O', async transition => {
+    enableWorker();
+    const grants = [...plugin.grantedPermissions, 'serial:send'];
+    useAppStore.getState().setConfig({ pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: grants }] });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'table' }, 'COM3');
+      await settle();
+      expect(getPluginViewState(tabId).error).toBeNull();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      const queued = deferred<void>();
+      const send = vi.fn();
+      vi.mocked(sendToPort).mockImplementationOnce(async (_port, _data, _hex, _ending, _silent, beforeSend) => {
+        await queued.promise;
+        beforeSend!(); send(); return 4;
+      });
+      const request = executePluginViewApi(plugin.id, 'view.sendSerial', { instanceId, data: 'PING' }, plugin.manifest);
+      const rejected = expect(request).rejects.toThrow();
+      if (transition === 'revoke') useAppStore.getState().setConfig({ pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions }] });
+      else if (transition === 'close') { dismissPluginTab(tabId); useAppStore.getState().closeTab(tabId); }
+      else vi.mocked(pluginHost.get).mockReturnValue({ loaded: true, epoch: 2, post: () => true } as unknown as PluginSession);
+      queued.resolve(undefined); await rejected;
+      expect(send).not.toHaveBeenCalled();
+      expect(sendToPort).toHaveBeenCalledWith('COM3', 'PING', false, 'None', true, expect.any(Function));
+    } finally { stop(); }
   });
 });

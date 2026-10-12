@@ -203,7 +203,7 @@ export class RxPipeline {
     // Do not gate on tab existence: popouts have a separate store without tabs.
     const state = this.getPortState(portId);
     state.lastEventTs = timestamp;
-    const chunks = state.assembler.feed(bytes);
+    const chunks = state.assembler.feed(bytes, this.opts.getEncodingLabel(portId));
     for (const chunk of chunks) {
       const raw = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
       this.enqueueRxLine(portId, state, raw, timestamp);

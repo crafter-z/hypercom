@@ -153,6 +153,46 @@ describe('TerminalViewportManager search', () => {
     expect(view.matchSet!.has(1)).toBe(true);
   });
 
+  it('recomputes HEX search when the display format changes', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    vm.appendLines([makeLine('A')]);
+    vm.setSearch(true, '41', false);
+    expect(vm.getMatchCount()).toBe(0);
+    useTerminalStore.getState().setTerminalConfig('COM1', { displayFormat: 'hex' });
+    vm.updateConfig({ displayFormat: 'hex' });
+    expect(vm.getMatchCount()).toBe(1);
+    useTerminalStore.getState().setTerminalConfig('COM1', { displayFormat: 'string' });
+    vm.updateConfig({ displayFormat: 'string' });
+    expect(vm.getMatchCount()).toBe(0);
+  });
+
+  it('recomputes keyword filtering and search when the encoding changes', () => {
+    useTerminalStore.getState().ensureTerminal('COM1');
+    vm.appendLines([{ timestamp: 0, direction: 'RX', rawData: new Uint8Array([0xc4, 0xe3]), isHex: false }]);
+    vm.setFilter('all', '你');
+    vm.setSearch(true, '你', false);
+    expect(vm.getVisibleCount()).toBe(0);
+    expect(vm.getMatchCount()).toBe(0);
+    useTerminalStore.getState().setTerminalEncoding('COM1', 'GBK');
+    vm.updateConfig({ encoding: 'GBK' });
+    expect(vm.getVisibleCount()).toBe(1);
+    expect(vm.getMatchCount()).toBe(1);
+  });
+
+  it('keeps navigation on the same surviving match during rolling eviction', () => {
+    const small = new TerminalViewportManager('COM1', { maxLines: 3 });
+    small.appendLines([makeLine('a1'), makeLine('a2'), makeLine('a3')]);
+    small.setSearch(true, 'a', false);
+    small.jumpToMatch(2);
+    small.appendLine(makeLine('a4'));
+    expect(small.getMatchCount()).toBe(3);
+    expect(small.getCurrentMatchIndex()).toBe(1);
+    small.applyLimits({ maxLines: 1 });
+    expect(small.getMatchCount()).toBe(1);
+    expect(small.getCurrentMatchIndex()).toBe(0);
+    expect(small.jumpToMatch(small.getCurrentMatchIndex())).toBe(true);
+  });
+
   it('jumpToMatch wraps and returns false when empty', () => {
     expect(vm.jumpToMatch(0)).toBe(false);
     vm.setSearch(true, 'a', false);

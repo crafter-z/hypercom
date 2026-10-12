@@ -47,10 +47,9 @@ export function useTerminalSearch({ vm }: UseTerminalSearchOptions) {
   const toggleSearch = useCallback(() => setSearchOpen((prev) => !prev), []);
   const toggleCase = useCallback(() => setCaseSensitive((v) => !v), []);
   const closeSearch = useCallback(() => {
-    // Keep the query so re-opening restores it; clear the debounced value so
-    // the manager drops the stale match set immediately.
+    // Closing clears manager matches through setSearch(false, ...), not the
+    // retained debounced query needed when the unchanged query is reopened.
     setSearchOpen(false);
-    setDebouncedQuery('');
   }, []);
 
   const nextMatch = useCallback(() => {

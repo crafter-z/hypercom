@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
@@ -69,7 +69,7 @@ const ConfigModal: React.FC = () => {
     }
   }, [isConfigOpen]);
 
-  const handleCancel = () => {
+  const handleCancel = useCallback(() => {
     // issue #6-8：弹窗打开后 useAppInit 的分组/元数据 500ms 防抖可能已把新
     // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
     // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
@@ -79,11 +79,26 @@ const ConfigModal: React.FC = () => {
     const snap = configSnapshotRef.current;
     if (snap) {
       const cur = useAppStore.getState().config;
-      setConfig({ ...snap, revision: cur.revision, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs });
+      setConfig({
+        ...snap, revision: cur.revision, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs,
+        sendCommandSets: cur.sendCommandSets, highlightRuleSets: cur.highlightRuleSets,
+        protocolTemplates: cur.protocolTemplates, triggerRules: cur.triggerRules, portToolConfigs: cur.portToolConfigs,
+      });
       configSnapshotRef.current = null;
     }
     toggleConfigModal(false);
-  };
+  }, [setConfig, toggleConfigModal]);
+
+  useEffect(() => {
+    if (!isConfigOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || useSystemStore.getState().ui.isHotkeyHelpOpen) return;
+      event.preventDefault();
+      handleCancel();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isConfigOpen, handleCancel]);
 
   const handleSave = async () => {
     // The entity arrays are owned by `useRuleStore` / the live store fields, so

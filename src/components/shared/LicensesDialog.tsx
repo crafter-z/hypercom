@@ -16,6 +16,7 @@ const FRONTEND_LICENSES: LicenseRow[] = [
   { name: 'zustand', license: 'MIT' },
   { name: 'immer', license: 'MIT' },
   { name: '@dnd-kit (core / sortable / utilities)', license: 'MIT' },
+  { name: '@xterm/xterm / @xterm/addon-fit', license: 'MIT' },
   { name: '@tauri-apps/* (api / plugins / cli)', license: 'Apache-2.0 OR MIT' },
   { name: 'i18next / react-i18next', license: 'MIT' },
   { name: 'lucide-react', license: 'ISC' },
@@ -35,8 +36,11 @@ const BACKEND_LICENSES: LicenseRow[] = [
   { name: 'dirs', license: 'MIT OR Apache-2.0' },
   { name: 'uuid', license: 'Apache-2.0 OR MIT' },
   { name: 'thiserror / anyhow', license: 'MIT OR Apache-2.0' },
-  { name: 'log / env_logger', license: 'MIT OR Apache-2.0' },
+  { name: 'log', license: 'MIT OR Apache-2.0' },
   { name: 'sysinfo', license: 'MIT' },
+  { name: 'portable-pty', license: 'MIT' },
+  { name: 'base64 / reqwest / url / parking_lot / libc', license: 'MIT OR Apache-2.0' },
+  { name: 'zip', license: 'MIT' },
 ];
 
 const LicenseTable: React.FC<{ title: string; rows: LicenseRow[] }> = ({ title, rows }) => (

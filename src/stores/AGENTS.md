@@ -27,8 +27,8 @@ Six Zustand stores, no god store. Split by domain so a write in one domain canno
 - `pruneTree` auto-runs after every tree mutation: ① drops non-root empty leaves → ② collapses single-child branches (size inherits) → ③ empty root branch → degenerate `'main'` leaf.
 - `focusedPaneId` references a LEAF ID in the tree (never a flat array index). 任何改动 `paneTree` 的动作收尾都要 `revalidateFocus`：悬空 id 会让 `openTab` 把标签推进 `state.tabs` 却挂不到任何叶子（孤儿标签）。
 - Tree mutation actions: `splitPane`, `closeTab`, `resizeChildren(branchId, childIndex, deltaFraction)`. Use these — never write tree state by hand.
-- **全量保存配置走 `useConfigPersistence.saveConfig(patch?)`**：内部从活数据源拼安全快照（`useRuleStore` 实体 + `useAppStore.groups` + 由 `ports` 派生的 `portMeta` + 后端读回的 `portPresets`），因为 `set_config` 是整体替换。不要在别处回写 `store.config` 的实体数组来「防覆盖」。
-- 插件镜像只接受 `pluginConfigSnapshot` 的后端 `{revision, pluginConfigs}` 快照，旧响应不能恢复权限；安装身份变化使旧 KV 缓存失效。不要把规则实体启动快照的约定套到 pluginConfigs，也不要直接发布备份中的旧授权。
+- **全量保存走 `useConfigPersistence.saveConfig(patch?)`**：活规则 + groups + 在线/离线 portMeta + 后端预设组成安全快照并 revision CAS。五类规则的 `store.config` 数组是最后确认的持久化基线；只由 `storageService` 成功读取/CRUD 和成功全量保存推进，不同步未保存的活编辑；取消设置保留基线。
+- 插件镜像只接受 `pluginConfigSnapshot` 的后端 `{revision, pluginConfigs}` 快照，旧响应不能恢复权限；安装身份变化使旧 KV 缓存失效。不要用规则实体基线直接发布插件状态或备份中的旧授权。
 - 插件通知只能走 `pushPlugin(pluginId, input)`；不能走宿主 `push` 绕过限额。作者 API 与数值见 `docs/plugin-development.md`；宿主实现见 `docs/architecture/plugins.md`，宿主/串口粘滞记录不因插件配额被移除。
 - 测试用 `resetStoresForTests()`（`resetStores.ts`）而不是手抄每个 store 的默认字段；它按模块加载时的快照整份替换。
 - In callbacks/effects needing latest value without subscribing: `useXStore.getState().y`.
