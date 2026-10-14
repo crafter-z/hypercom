@@ -13,7 +13,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
+use serialport::SerialPort;
 use tauri::AppHandle;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
 
 use super::codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
 use super::{emit_reconnect_hint, emit_rx_event, emit_status, lock_error, PortInfo, PortKind, PortStatus, SerialManager};
@@ -54,7 +61,7 @@ struct WriterLeases {
 }
 
 pub struct RealWriteHandle {
-    port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    port: Option<Arc<Mutex<Box<dyn serialport::SerialPort>>>>,
     leases: Arc<WriterLeases>,
 }
 
@@ -62,12 +69,18 @@ impl std::ops::Deref for RealWriteHandle {
     type Target = Mutex<Box<dyn serialport::SerialPort>>;
 
     fn deref(&self) -> &Self::Target {
-        &self.port
+        self.port
+            .as_deref()
+            .expect("write lease port must remain present while borrowed")
     }
 }
 
 impl Drop for RealWriteHandle {
     fn drop(&mut self) {
+        // Release the actual OS-handle reference before advertising that the
+        // lease is gone. Otherwise close can observe zero leases and reopen
+        // the COM port while this Arc is still alive until drop glue runs.
+        drop(self.port.take());
         let mut count = self.leases.count.lock().unwrap_or_else(|e| e.into_inner());
         *count -= 1;
         if *count == 0 {
@@ -180,6 +193,19 @@ fn system_port_present(port_id: &str) -> anyhow::Result<bool> {
     Ok(serialport::available_ports()?
         .iter()
         .any(|p| p.port_name == port_id))
+}
+
+#[cfg(windows)]
+fn make_handle_non_inheritable(port: &serialport::COMPort) -> anyhow::Result<()> {
+    let handle = port.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let result = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    if result == 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to disable inheritance for serial port handle: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// 打开端口的完整流程（含真实串口的热插拔幽灵句柄回收），自持/自放全局串口锁。
@@ -304,22 +330,40 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
         return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
     }
 
-    let mut port = serialport::new(&args.port_id, args.baud_rate)
+    let builder = serialport::new(&args.port_id, args.baud_rate)
         .data_bits(data_bits)
         .parity(parity)
         .stop_bits(stop_bits)
         .flow_control(flow_control)
-        .timeout(Duration::from_millis(100))
-        .open()?;
+        .timeout(Duration::from_millis(100));
+    #[cfg(windows)]
+    let mut port = builder.open_native()?;
+    #[cfg(not(windows))]
+    let mut port = builder.open()?;
 
-    // 设置 DTR/RTS：必须在 try_clone 之前、在 Arc<Mutex> 包装之前设置
-    // （open() 返回的是 Box<dyn SerialPort>，需可变引用）。DTR/RTS 是设备级状态、
-    // 两个句柄共享，设一次即可。
+    // The serialport Windows backend duplicates the write handle with
+    // bInheritHandle=TRUE. Clear inheritance on both handles before any tool
+    // process can be spawned; otherwise a sibling tool can keep this COM port
+    // exclusively owned after HyperCom closes its own references.
+    #[cfg(windows)]
+    make_handle_non_inheritable(&port)?;
+
+    // 设置 DTR/RTS：两个句柄共享设备级状态，只设置一次即可。
     port.write_data_terminal_ready(args.dtr)?;
     port.write_request_to_send(args.rts)?;
 
     // 原句柄作为读句柄，clone 出的作为写句柄（见 SerialPortHandle 文档）。
+    #[cfg(windows)]
+    let write_port = {
+        let cloned = port.try_clone_native()?;
+        make_handle_non_inheritable(&cloned)?;
+        Box::new(cloned) as Box<dyn serialport::SerialPort>
+    };
+    #[cfg(not(windows))]
     let write_port = port.try_clone()?;
+    #[cfg(windows)]
+    let read_port = Box::new(port) as Box<dyn serialport::SerialPort>;
+    #[cfg(not(windows))]
     let read_port = port;
 
     let read_port_arc = Arc::new(Mutex::new(read_port));
@@ -419,7 +463,7 @@ pub(super) fn write_handle(
         .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
     let mut count = handle.leases.count.lock().map_err(lock_error)?;
     *count += 1;
-    Ok(RealWriteHandle { port: Arc::clone(&handle.write_port), leases: Arc::clone(&handle.leases) })
+    Ok(RealWriteHandle { port: Some(Arc::clone(&handle.write_port)), leases: Arc::clone(&handle.leases) })
 }
 
 /// 修改串口参数（完整）。

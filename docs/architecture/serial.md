@@ -104,7 +104,7 @@ openPort(portId, baud)
 
 - `run_port_tool` / `kill_port_tool`（`commands/serial.rs`）+ `useToolOutput` hook + ToolSettings 页。
 - close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单。
-- `run_port_tool` 在全局串口锁外等待读线程和写租约；正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。
+- `run_port_tool` 在全局串口锁外等待读线程和写租约；真实串口的 Windows 写克隆句柄必须清除 `HANDLE_FLAG_INHERIT`，否则并行启动的兄弟工具可能继承尚未关闭的 COM 句柄，导致 HyperCom 关闭后仍由子进程占有端口。写租约在释放实际 Arc 句柄后才通知关闭完成。正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。
 - 分组整组执行（issue #5-7）：`usePortToolActions.runToolForGroup` + `GroupToolDialog`——严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。
 - 标签页菜单与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key。
 
