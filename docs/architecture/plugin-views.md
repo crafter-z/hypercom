@@ -62,6 +62,7 @@ TTY 同端口发送串行排队时，插件请求必须在实际发送开始前�
 `SerialContentHost` 在Pane树外稳定持有TRX/TTY实例，`tabContentPlacement` 提供布局。跨Pane移动不换组件所有者，原始缓冲/xterm保持；选择插件只隐藏原始显示，输入继续，TTY隐藏不fit零尺寸。
 
 `PluginViewSurface` 提供宿主工具条和native内容矩形。原生控件按layoutRevision只处理最新几何，统一CSS px、主WebView zoom与窗口DPI；clip到client范围。几何变化不重新绑定端口或重建Worker。
+插件视图宿主入口统一由 `shared/PluginViewPicker.tsx` 提供：主显示区的工具入口、串口标签的显示方式、独立工具标签入口均使用自定义浮层，不使用原生 `<select>`，以保证 `bg-elevated` 层级、暗/亮主题和键盘导航一致。浮层打开时必须经 `usePluginViewOverlay` 隐藏 native child，不能依靠 DOM `z-index` 覆盖原生控件。
 
 Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry 子 WebView 的父窗口只能是该容器，不能直接使用 Tauri 主窗口。Wry 0.55.1 的 child drop 仍会移除父窗口的 resize/focus subclass；直接挂在主窗口会使关闭、禁用或创建失败后的宿主 WebView 停留在旧尺寸，放大出现黑边、缩小不重排。容器与 WebView 共用可见性，容器按主窗 client 坐标定位并保持在宿主 WebView 上方，WebView 使用容器内 `(0, 0)`；销毁顺序为 WebView → 容器，不重装或替换主窗事件回调。
 

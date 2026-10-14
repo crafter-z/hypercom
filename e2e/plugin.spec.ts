@@ -53,8 +53,8 @@ const MOCK = `
     id: '${PLUGIN_ID}',
     dir: 'C:/mock/plugins/${PLUGIN_ID}',
     enabled: state.enabled,
-    declaredPermissions: ['terminal:read', 'terminal:write'],
-    knownPermissions: ['terminal:read', 'terminal:write'],
+    declaredPermissions: ['terminal:read', 'terminal:write', 'ui:view'],
+    knownPermissions: ['terminal:read', 'terminal:write', 'ui:view'],
     manifest: {
       id: '${PLUGIN_ID}',
       name: 'E2E Demo',
@@ -62,7 +62,12 @@ const MOCK = `
       description: 'e2e demo',
       apiVersion: '1.0',
       entry: 'main.js',
-      permissions: ['terminal:read', 'terminal:write'],
+      permissions: ['terminal:read', 'terminal:write', 'ui:view'],
+      ui: {
+        buttons: [],
+        menuItems: [],
+        views: [{ id: 'tool', label: 'E2E Tool', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false }],
+      },
     },
     manifestError: null,
     installedAt: 1,
@@ -210,5 +215,16 @@ test.describe('插件系统（issue #17）', () => {
       window.__TAURI_INTERNALS__.dispatchEvent('serial:status', { port_id: 'COM1', status: 'disconnected' });
     });
     await expect(page.locator('.terminal-line .terminal-content').filter({ hasText: 'RX-DETACHED:port-disconnected' })).toBeVisible();
+  });
+  test('插件工具入口使用宿主浮层而非原生下拉框', async ({ page }) => {
+    await openApp(page, ['ui:view']);
+    const launcher = page.locator('.plugin-tab-launcher .plugin-view-picker-trigger');
+    await expect(launcher).toBeVisible();
+    await expect(page.locator('.plugin-tab-launcher select')).toHaveCount(0);
+    await launcher.click();
+    await expect(page.getByRole('listbox', { name: '打开插件工具页…' })).toBeVisible();
+    await expect(page.locator('.plugin-view-picker-option-label').filter({ hasText: 'E2E Tool' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('listbox', { name: '打开插件工具页…' })).toHaveCount(0);
   });
 });

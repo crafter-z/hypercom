@@ -47,7 +47,7 @@ src-tauri/src/
 ```
 src/
 ├── main.tsx / App.tsx        # entrypoints（App.tsx = AppInit + SerialReceive + 全局自定义文本右键菜单）
-├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），583 键 × zh-CN/en-US
+├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），589 键 × zh-CN/en-US
 ├── services/                 # 14 个非测试文件：tauri.ts barrel + 13 域（含 plugin / pluginView）
 ├── hooks/                    # 18 个 hook 文件 + barrel index.ts + disconnectTracking.ts
 ├── stores/                   # 6 个 store 模块 + releaseTerminalState.ts + resetStores.ts
@@ -74,7 +74,7 @@ src/
 | `ConfigModal/hooks/useEntityPage.ts` | 5 个实体页（高亮/命令集/协议模板/工具配置/触发规则）共用的 load / dirty-track / save / delete 契约（挂载全量加载并替换 store，除非加载期间用户已改动；`savedSnapshotRef` 为最后已知持久化态） |
 | `OperationPanel/hooks/useSequentialSend.ts` | **循环发送两套状态机合一**（原弹窗侧与面板侧的分叉已消除） |
 | `OperationPanel/hooks/{useHexCompose,useFileSend,useQuickStripLayout,useSendHistoryRecall}.ts` | HEX 组包 / 文件发送（守卫 + TX 统计）/ 快捷条宽度自适应（`utils/sendStrip.ts` `computeFitCount`）/ 发送历史回溯 |
-| `shared/{useOutsideDismiss,useDragResize,menuPlacement}.ts` | 三个共享交互原语：外点关闭 / 拖拽调整尺寸 / 菜单定位（勿在各组件内手写第五份） |
+| `shared/{useOutsideDismiss,useDragResize,menuPlacement}.ts` + `shared/PluginViewPicker.tsx` | 三个共享交互原语：外点关闭 / 拖拽调整尺寸 / 菜单定位；PluginViewPicker 统一插件视图自定义选择浮层（勿在各组件内手写第五份） |
 | `Popout/{usePopoutSync,usePanelTextConfig,usePortSerialFeed}.ts` | 弹窗↔主窗同步（命令集/活动标签/端口状态事件总线）/ 面板文本配置 / 终端弹窗 RX 喂入（快照交接 + 时间戳闸门防重复） |
 | `shared/usePluginViewOverlay.ts` + `utils/pluginViewOverlay.ts` | `usePluginViewOverlay` / `acquirePluginViewOverlay`：先等待原生子视图隐藏，再显示宿主 DOM 浮层；不属于 `src/hooks/` 的 18 个 hook 文件 |
 | `MainDisplay/SerialContentHost.tsx` + `utils/tabContentPlacement.ts` | 原始 TRX/TTY 实例由分屏树之外的稳定宿主拥有，按 workspace tab UUID 保持身份；切标签、跨分屏移动与插件替换只改变位置/可见性 |

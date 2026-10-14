@@ -10,6 +10,7 @@ import {
 import { subscribePluginViews, getPluginViews } from '../../utils/pluginConfigSnapshot';
 import { removeTabContentPlacement, setTabContentPlacement } from '../../utils/tabContentPlacement';
 import { notifyError } from '../../stores/useToastStore';
+import PluginViewPicker, { type PluginViewChoice } from '../shared/PluginViewPicker';
 
 interface Props { tab: TabItem; hidden: boolean; }
 const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
@@ -53,36 +54,49 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
     };
   }, [tab.id, hidden, stockVisible, pluginEffective, state.instanceId, zoomPercent]);
 
-  const choose = (value: string) => {
-    try {
-      const choice = replacements.find(item => `${item.preference.pluginId}/${item.preference.viewId}` === value);
-      selectSerialPluginView(tab.id, choice?.preference ?? null);
-    } catch (error) { notifyError(error); }
+  const choose = (choice: PluginViewChoice | null) => {
+    try { selectSerialPluginView(tab.id, choice?.preference ?? null); }
+    catch (error) { notifyError(error); }
   };
-  const openSeparate = (value: string) => {
-    const choice = separate.find(item => `${item.preference.pluginId}/${item.preference.viewId}` === value);
+  const openSeparate = (choice: PluginViewChoice | null) => {
     if (!choice) return;
     try { openPluginTabForUser(choice.preference, portId); } catch (error) { notifyError(error); }
   };
+  const unavailablePreference = preference && !replacements.some(item => `${item.preference.pluginId}/${item.preference.viewId}` === selected)
+    ? { key: selected, label: `${preference.pluginId}: ${preference.viewId}` }
+    : undefined;
   return <div className="plugin-view-tab" style={{ display: hidden ? 'none' : 'flex' }}>
     <div className="plugin-view-toolbar">
-      {tab.kind === 'serial' ? <>
-        <label>{t('pluginViews.display')}</label>
-        <select value={selected} onChange={event => choose(event.target.value)}>
-          <option value="">{t('pluginViews.rawTerminal')}</option>
-          {preference && !replacements.some(item => `${item.preference.pluginId}/${item.preference.viewId}` === selected) &&
-            <option value={selected}>{preference.pluginId}: {preference.viewId}</option>}
-          {replacements.map(item => <option key={`${item.preference.pluginId}/${item.preference.viewId}`} value={`${item.preference.pluginId}/${item.preference.viewId}`}>
-            {item.pluginName}: {item.declaration.label}
-          </option>)}
-        </select>
-      </> : <span className="plugin-view-source">{tab.pluginId}{portId ? ` · ${portId}` : ''}</span>}
-      {separate.length > 0 && <select aria-label={t('pluginViews.openTab')} value="" onChange={event => openSeparate(event.target.value)}>
-        <option value="">{t('pluginViews.openTab')}</option>
-        {separate.map(item => <option key={`${item.preference.pluginId}/${item.preference.viewId}`} value={`${item.preference.pluginId}/${item.preference.viewId}`}>
-          {item.pluginName}: {item.declaration.label}
-        </option>)}
-      </select>}
+      {tab.kind === 'serial' ? (
+        <PluginViewPicker
+          choices={replacements}
+          value={selected}
+          rawOption={{ key: '', label: t('pluginViews.rawTerminal') }}
+          fallbackOption={unavailablePreference}
+          triggerLabel={t('pluginViews.display')}
+          title={t('pluginViews.display')}
+          ariaLabel={t('pluginViews.display')}
+          onSelect={choose}
+        />
+      ) : (
+        <span className="plugin-view-source">
+          <span className="plugin-view-source-name">{tab.pluginId}</span>
+          {portId && <span className="plugin-view-source-port">· {portId}</span>}
+        </span>
+      )}
+      <span className="plugin-view-toolbar-spacer" />
+      {separate.length > 0 && (
+        <PluginViewPicker
+          choices={separate}
+          value=""
+          variant="toolbar"
+          className="plugin-view-picker-new-tab"
+          triggerLabel={t('pluginViews.newToolTab')}
+          title={t('pluginViews.newToolTab')}
+          ariaLabel={t('pluginViews.newToolTab')}
+          onSelect={openSeparate}
+        />
+      )}
       {preference && state.status === 'unavailable' && <>
         <span className="plugin-view-error-inline" title={state.error ?? ''}>{t('pluginViews.unavailable')}</span>
         <button className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>
