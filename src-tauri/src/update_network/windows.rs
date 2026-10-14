@@ -253,41 +253,37 @@ fn select_route(mut routes: Vec<Option<url::Url>>, timeout: Duration) -> Route {
     if routes.len() == 1 {
         return Ok(routes.remove(0));
     }
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let deadline = Instant::now() + timeout;
-        let result = (|| {
-            for route in routes {
-                let Some(proxy) = route else {
-                    return Ok(None);
-                };
-                let Some(host) = proxy.host_str() else {
-                    continue;
-                };
-                let port = proxy.port_or_known_default().unwrap_or(1080);
-                let addresses = match (host, port).to_socket_addrs() {
-                    Ok(addresses) => addresses,
-                    Err(_) => continue,
-                };
-                for address in addresses {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err("PAC proxy selection timed out".into());
-                    }
-                    if TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(2)))
-                        .is_ok()
-                    {
-                        return Ok(Some(proxy));
-                    }
-                }
+    // `prepare` already runs in `spawn_blocking` (see update_network.rs). Keep
+    // the DNS/socket probe in that owned task instead of detaching a thread:
+    // a timeout may return to the caller, but a detached resolver would still
+    // retain route data and continue probing after its operation lost ownership.
+    let deadline = Instant::now() + timeout;
+    for route in routes {
+        let Some(proxy) = route else {
+            return Ok(None);
+        };
+        let Some(host) = proxy.host_str() else {
+            continue;
+        };
+        if Instant::now() >= deadline {
+            return Err("PAC proxy selection timed out".into());
+        }
+        let port = proxy.port_or_known_default().unwrap_or(1080);
+        let addresses = match (host, port).to_socket_addrs() {
+            Ok(addresses) => addresses,
+            Err(_) => continue,
+        };
+        for address in addresses {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("PAC proxy selection timed out".into());
             }
-            Err("all PAC proxy routes are unavailable".into())
-        })();
-        let _ = sender.send(result);
-    });
-    receiver
-        .recv_timeout(timeout)
-        .map_err(|_| "PAC proxy selection timed out".to_string())?
+            if TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(2))).is_ok() {
+                return Ok(Some(proxy));
+            }
+        }
+    }
+    Err("all PAC proxy routes are unavailable".into())
 }
 
 unsafe extern "system" fn proxy_callback(

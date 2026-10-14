@@ -2,31 +2,27 @@ import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useOperationStore } from '../stores/useOperationStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { serialService, eventService, logService } from '../services/tauri';
+import { serialService, eventService } from '../services/tauri';
 import type { SerialReconnectHintEvent } from '../services/tauri';
 import { notifyError, notifySuccess, extractErrorMessage, useToastStore } from '../stores/useToastStore';
 import { userClosingPortIds, lostPortIds } from './disconnectTracking';
 import { ttyService } from '../utils/ttyService';
 
-/**
- * 每端口连接状态机 + 全应用唯一的「重连提示」监听登记。
- *
- * 这四类状态原先散落在 4 个各自独立的模块级变量里（`reconnectingPorts` /
- * `reconnectHintListenerCount` / `pendingReconnectHintUnlisten` / `portOpInFlight`），
- * 谁都能读写，于是先后长出「同一端口并发 open」「监听器泄漏」「重连循环双开」
- * 这类只能靠 review 发现的缺陷。现在它们收在一个 state 对象里，只由本文件的
- * 函数触碰；「连接成功后的副作用」也只有一份实现（手动 open 与自动重连共用）。
- */
+/** 连接状态机与重连提示监听的模块级共享状态。 */
+type PortIntent = 'open' | 'close' | 'reconnect' | 'terminal';
+interface PortOperation {
+  generation: number;
+  intent: PortIntent;
+  queue: Promise<void>;
+  active: boolean;
+}
 const state = {
-  /** 每端口在飞的连接操作：同一事件循环内连点两次不得并发 open 同一句柄。 */
-  opsInFlight: new Set<string>(),
-  /** 正在退避重连的端口（同一端口不叠加第二套循环）。 */
+  portOps: new Map<string, PortOperation>(),
   reconnecting: new Set<string>(),
-  /** 重连提示监听的订阅者数（Sidebar / Pane / OperationPanel 各调一次 hook）。 */
   hintSubscribers: 0,
   hintUnlisten: null as (() => void) | null,
-  /** 注册仍在飞（异步 listen）时的句柄，卸载竞态下用它补注销。 */
   hintRegistering: null as Promise<() => void> | null,
+  hintRetryTimer: null as number | null,
 };
 
 /** 重连退避：翻倍增长，上限 5s。 */
@@ -50,34 +46,54 @@ function resolveConnectionParams(portId: string) {
   };
 }
 
-/**
- * 连接成功后的统一副作用（手动 open 与自动重连共用一份）。
- *
- * 后端「已连接」是既成事实，store 的 status 与日志生命周期必须跟上：漏掉这里
- * 会让 status 停在与后端不一致的状态（TabBar/按钮显示成未连接），且
- * `autoSaveLog` 开启时掉线重连后日志静默不再落盘。
- */
+/** 连接成功后的统一副作用；日志由后端连接生命周期管理。 */
 function applyConnectedSideEffects(portId: string): void {
   const params = resolveConnectionParams(portId);
   useAppStore.getState().updatePort(portId, { status: 'connected', ...params });
   useTerminalStore.getState().setTerminalConnectedAt(portId, Date.now());
-  if (useAppStore.getState().config.autoSaveLog) {
-    logService.startLogging(portId).catch((e) => {
-      console.debug('[useSerialConnection] startLogging failed:', e);
-      notifyError(e);
-    });
-  }
 }
 
-/** 连接操作（open/close）的并发保护：同一端口在飞期间后续调用直接 no-op。 */
-async function runPortOp(portId: string, op: () => Promise<void>): Promise<void> {
-  if (state.opsInFlight.has(portId)) return;
-  state.opsInFlight.add(portId);
-  try {
-    await op();
-  } finally {
-    state.opsInFlight.delete(portId);
+/** 将所有端口意图排入同一串行 lane；新意图会使排队的旧完成结果失效。 */
+function enqueuePortOp(portId: string, intent: Exclude<PortIntent, 'terminal'>, op: (generation: number) => Promise<void>): Promise<void> {
+  const previous = state.portOps.get(portId);
+  if (previous?.active && previous.intent === intent) return previous.queue;
+  const generation = (previous?.generation ?? 0) + 1;
+  const prior = previous?.queue ?? Promise.resolve();
+  const queued = prior.catch(() => undefined).then(async () => {
+    const current = state.portOps.get(portId);
+    if (!current || current.generation !== generation) return;
+    await op(generation);
+  });
+  state.portOps.set(portId, { generation, intent, queue: queued, active: true });
+  void queued.then(
+    () => { const current = state.portOps.get(portId); if (current?.generation === generation && current.queue === queued) current.active = false; },
+    () => { const current = state.portOps.get(portId); if (current?.generation === generation && current.queue === queued) current.active = false; },
+  );
+  return queued;
+}
+
+function isCurrentOperation(portId: string, generation: number): boolean {
+  return state.portOps.get(portId)?.generation === generation;
+}
+
+/** 状态事件是终态权威；它使在飞 open/reconnect 完成不能覆盖断线。 */
+export function acceptSerialStatus(portId: string, status: string): boolean {
+  const current = state.portOps.get(portId);
+  const port = useAppStore.getState().ports.find((item) => item.id === portId);
+  if (status === 'connected' && (current?.intent === 'close' || (current?.intent === 'terminal' && !port?.toolRunning))) return false;
+  if (status === 'connected' && current?.intent === 'terminal' && port?.toolRunning) {
+    state.portOps.set(portId, { ...current, intent: 'open' });
   }
+  if (status === 'disconnected' || status === 'error') {
+    const generation = (current?.generation ?? 0) + 1;
+    state.portOps.set(portId, {
+      generation,
+      intent: 'terminal',
+      queue: current?.queue ?? Promise.resolve(),
+      active: false,
+    });
+  }
+  return true;
 }
 
 /**
@@ -89,43 +105,44 @@ async function runPortOp(portId: string, op: () => Promise<void>): Promise<void>
  * 也会在用户手动断开后把刚关掉的端口重新打开。
  */
 async function runReconnectLoop(portId: string): Promise<void> {
-  if (state.reconnecting.has(portId)) return; // 同一端口不并行两套循环
+  if (state.reconnecting.has(portId)) return;
   const { autoReconnect, maxRetries } = useAppStore.getState().config;
   if (!autoReconnect) return;
   state.reconnecting.add(portId);
-
   let delayMs = 500;
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (userClosingPortIds.has(portId)) break;
-      // First attempt runs immediately; backoff only applies between retries.
       if (attempt > 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
         if (userClosingPortIds.has(portId)) break;
       }
+      let succeeded = false;
       try {
-        await serialService.attemptReconnect(portId);
+        await enqueuePortOp(portId, 'reconnect', async (generation) => {
+          await serialService.attemptReconnect(portId);
+          if (!isCurrentOperation(portId, generation) || userClosingPortIds.has(portId)) return;
+          applyConnectedSideEffects(portId);
+          lostPortIds.delete(portId);
+          succeeded = true;
+        });
       } catch (err) {
-        if (userClosingPortIds.has(portId)) break;
+        if (!isCurrentOperation(portId, state.portOps.get(portId)?.generation ?? -1) || userClosingPortIds.has(portId)) break;
         useToastStore.getState().push({
           severity: 'error',
           messageKey: 'toast.reconnect.failed',
           message: extractErrorMessage(err),
-          // issue #7-1：通知中心展示消息来源串口。
           portId,
         });
         if (attempt >= maxRetries - 1) break;
         delayMs = nextReconnectDelay(delayMs);
         continue;
       }
-      // P0-2：attemptReconnect 在飞期间用户可能点了「断开」——closePort 已执行
-      // 但本 await 才返回。若不复查，端口会被强行标回 connected、日志重启、弹
-      // 「重连成功」，与用户意图及后端实际状态背离。
-      if (userClosingPortIds.has(portId)) break;
-      applyConnectedSideEffects(portId);
-      // Reconnected — the port is no longer lost; hide the banner.
-      lostPortIds.delete(portId);
-      notifySuccess('toast.reconnect.succeeded');
+      if (succeeded) {
+        notifySuccess('toast.reconnect.succeeded');
+        break;
+      }
+      // A newer manual open/close or terminal status owns the port now.
       break;
     }
   } finally {
@@ -138,29 +155,43 @@ async function runReconnectLoop(portId: string): Promise<void> {
  * 都会调用 `useSerialConnection()`，但事件监听只能有一份（重复注册会让一次
  * 重连提示触发多套循环）。
  */
+function ensureReconnectHintListener(): void {
+  if (state.hintSubscribers === 0 || state.hintUnlisten || state.hintRegistering) return;
+  const registration = eventService.onSerialReconnectHint((event: SerialReconnectHintEvent) => {
+    if (state.hintRegistering !== registration || state.hintSubscribers === 0) return;
+    void runReconnectLoop(event.port_name);
+  });
+  state.hintRegistering = registration;
+  registration.then((unlisten) => {
+    if (state.hintRegistering !== registration || state.hintSubscribers === 0) {
+      unlisten();
+      return;
+    }
+    state.hintUnlisten = unlisten;
+  }).catch((e) => {
+    if (state.hintRegistering !== registration) return;
+    state.hintRegistering = null;
+    console.debug('[useSerialConnection] Failed to register reconnect hint listener:', e);
+      state.hintRetryTimer = window.setTimeout(() => {
+        state.hintRetryTimer = null;
+        ensureReconnectHintListener();
+      }, 250);
+  });
+}
+
 function acquireReconnectHintListener(): () => void {
   state.hintSubscribers += 1;
-  if (state.hintSubscribers === 1) {
-    const registration = eventService.onSerialReconnectHint((event: SerialReconnectHintEvent) => {
-      if (state.hintRegistering !== registration || state.hintSubscribers === 0) return;
-      void runReconnectLoop(event.port_name);
-    });
-    state.hintRegistering = registration;
-    registration
-      .then((unlisten) => {
-        if (state.hintRegistering !== registration || state.hintSubscribers === 0) {
-          unlisten();
-          return;
-        }
-        state.hintUnlisten = unlisten;
-      })
-      .catch((e) => {
-        console.debug('[useSerialConnection] Failed to register reconnect hint listener:', e);
-      });
-  }
+  ensureReconnectHintListener();
+  let released = false;
   return () => {
-    state.hintSubscribers -= 1;
+    if (released) return;
+    released = true;
+    state.hintSubscribers = Math.max(0, state.hintSubscribers - 1);
     if (state.hintSubscribers > 0) return;
+    if (state.hintRetryTimer) {
+      clearTimeout(state.hintRetryTimer);
+      state.hintRetryTimer = null;
+    }
     if (state.hintUnlisten) {
       state.hintUnlisten();
       state.hintUnlisten = null;
@@ -169,26 +200,17 @@ function acquireReconnectHintListener(): () => void {
   };
 }
 
-/** 打开端口：置 connecting → 后端 open（TTY 端口带上当前 xterm 尺寸）→ 连接后副作用。 */
+/** 打开端口：置 connecting → 后端 open → 连接后副作用。 */
 async function openPort(portId: string): Promise<void> {
-  await runPortOp(portId, async () => {
-    // Reconnecting overrides any prior user-initiated close mark so the
-    // DisconnectBanner / status toast resume normal unexpected-disconnect
-    // detection for this port, and a deliberate (re)connect clears the lost
-    // mark so the banner hides the moment the user retries a dropped port.
-    userClosingPortIds.delete(portId);
-    lostPortIds.delete(portId);
-
+  userClosingPortIds.delete(portId);
+  lostPortIds.delete(portId);
+  await enqueuePortOp(portId, 'open', async (generation) => {
     const params = resolveConnectionParams(portId);
     useAppStore.getState().updatePort(portId, { status: 'connecting' });
-    // issue #11：TTY 模拟终端（GIT:BASH）打开时带上当前 xterm 尺寸——pty 以
-    // 正确尺寸 spawn，vim/top 全屏应用才按真实显示尺寸渲染（否则 pty 固定
-    // 80×24，画面错乱）。无 TTY 状态/未 fit 时省略参数，后端回退 80×24。
     const ttyState = ttyService.get(portId);
-    const ttySize =
-      ttyState?.lastCols != null && ttyState.lastRows != null
-        ? { cols: ttyState.lastCols, rows: ttyState.lastRows }
-        : {};
+    const ttySize = ttyState?.lastCols != null && ttyState.lastRows != null
+      ? { cols: ttyState.lastCols, rows: ttyState.lastRows }
+      : {};
     try {
       await serialService.openSerialPort({
         portId,
@@ -197,8 +219,9 @@ async function openPort(portId: string): Promise<void> {
         rts: useOperationStore.getState().rts,
         ...ttySize,
       });
-      applyConnectedSideEffects(portId);
+      if (isCurrentOperation(portId, generation)) applyConnectedSideEffects(portId);
     } catch (err) {
+      if (!isCurrentOperation(portId, generation)) return;
       console.error('[useSerialConnection] Failed to open port:', err);
       notifyError(err);
       useAppStore.getState().updatePort(portId, { status: 'error' });
@@ -206,24 +229,18 @@ async function openPort(portId: string): Promise<void> {
   });
 }
 
-/** 关闭端口：标记用户主动关闭（抑制掉线告警）→ 后端 close → 停日志。 */
+/** 关闭端口：用户意图优先于在飞重连，日志由后端连接生命周期管理。 */
 async function closePort(portId: string): Promise<void> {
-  await runPortOp(portId, async () => {
-    // Mark this port as user-initiated close so the serial:status event
-    // handler and DisconnectBanner suppress the "unexpected disconnect"
-    // toast/banner. The mark is PERSISTENT and cleared on the next reconnect
-    // (openPort) — a timer-based removal made the banner false-alarm on a
-    // deliberately disconnected port whose tab was still open.
-    userClosingPortIds.add(portId);
-    // User-initiated close is never "lost" — clear any stale mark.
-    lostPortIds.delete(portId);
+  userClosingPortIds.add(portId);
+  lostPortIds.delete(portId);
+  await enqueuePortOp(portId, 'close', async (generation) => {
     try {
       await serialService.closeSerialPort(portId);
-      useAppStore.getState().updatePort(portId, { status: 'disconnected' });
-      logService.stopLogging(portId).catch((e) =>
-        console.debug('[useSerialConnection] stopLogging failed:', e)
-      );
+      if (isCurrentOperation(portId, generation)) {
+        useAppStore.getState().updatePort(portId, { status: 'disconnected' });
+      }
     } catch (err) {
+      if (!isCurrentOperation(portId, generation)) return;
       console.error('[useSerialConnection] Failed to close port:', err);
       notifyError(err);
       useAppStore.getState().updatePort(portId, { status: 'error' });

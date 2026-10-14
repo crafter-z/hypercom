@@ -118,13 +118,7 @@ pub async fn open_popout(
         .popouts
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    popouts.insert(
-        label,
-        PopoutMeta {
-            kind,
-            target_id,
-        },
-    );
+    popouts.insert(label, PopoutMeta { kind, target_id });
 
     log::info!("Pop-out window opened");
     Ok(())
@@ -140,14 +134,27 @@ pub fn close_popout(
     target_id: Option<String>,
 ) -> Result<(), CommandError> {
     let label = compute_label(&kind, target_id.as_deref())?;
-    if let Some(window) = app.get_webview_window(&label) {
+    let removed = state
+        .popouts
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?
+        .remove(&label);
+    let destroy_result = if let Some(window) = app.get_webview_window(&label) {
         window
             .destroy()
-            .map_err(|e| CommandError::System(e.to_string()))?;
+            .map_err(|e| CommandError::System(e.to_string()))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = destroy_result {
+        if let Some(meta) = removed {
+            if let Ok(mut popouts) = state.popouts.lock() {
+                popouts.insert(label, meta);
+            }
+        }
+        return Err(error);
     }
-    if let Ok(mut popouts) = state.popouts.lock() {
-        popouts.remove(&label);
-    }
+    // Remove metadata before destroy: Destroyed only reports user-closed windows.
     log::info!("Pop-out window closed");
     Ok(())
 }
@@ -176,11 +183,24 @@ mod tests {
 
     #[test]
     fn terminal_labels_keep_distinct_port_ids_distinct() {
-        let ids = ["COM3", "COM-3_x", "COM 3", "/dev/ttyUSB0", "a.b:c", "a_b_c", "a_2Eb_3Ac", "端口"];
-        let labels: std::collections::HashSet<_> = ids.iter()
-            .map(|id| compute_label("terminal", Some(id)).unwrap()).collect();
+        let ids = [
+            "COM3",
+            "COM-3_x",
+            "COM 3",
+            "/dev/ttyUSB0",
+            "a.b:c",
+            "a_b_c",
+            "a_2Eb_3Ac",
+            "端口",
+        ];
+        let labels: std::collections::HashSet<_> = ids
+            .iter()
+            .map(|id| compute_label("terminal", Some(id)).unwrap())
+            .collect();
         assert_eq!(labels.len(), ids.len());
-        assert!(labels.iter().all(|label| label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')));
+        assert!(labels.iter().all(|label| label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')));
     }
 
     #[test]
@@ -205,7 +225,10 @@ mod tests {
 
     #[test]
     fn test_compute_label_terminal_uses_encoded_target_id() {
-        assert_eq!(compute_label("terminal", Some("COM3")).unwrap(), "terminal-COM3");
+        assert_eq!(
+            compute_label("terminal", Some("COM3")).unwrap(),
+            "terminal-COM3"
+        );
         assert_eq!(
             compute_label("terminal", Some("/dev/ttyUSB0")).unwrap(),
             "terminal-_2Fdev_2FttyUSB0"

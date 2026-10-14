@@ -22,27 +22,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-/// 模拟终端（git bash pty）端口句柄。
-///
-/// 与真实串口 `SerialPortHandle` 的读写拆分同构：pty master 的 writer 供
-/// TX 独占（`take_writer()` 只能调用一次，必须在此处取好存起来）；master
-/// 自身另存一份供 `resize()` 使用（resize 方法在 MasterPty 上，writer 上没有）。
-/// 读线程持有 reader（`try_clone_reader()` 的克隆），独占 master 的读端。
-pub struct TtySimPortHandle {
-    /// 读线程运行标志（false 时线程在下一次循环退出）
+pub struct TtyWriteHandle {
+    pub writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
     pub running: Arc<AtomicBool>,
-    /// 写句柄（pty master 的 writer，TX 路径独占；锁内 write）
-    pub writer: Option<Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
-    /// pty master 自身（writer 已 take 走，master 只用 resize；锁内 resize）。
-    /// 关闭端口时置 None → drop 该 Arc → ConPTY 关闭（ClosePseudoConsole）→
-    /// 输出管道写端关闭 → 读线程 read() 解除阻塞退出（断线卡死修复，issue #11）。
-    pub master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
-    /// bash 子进程（kill 时 drop 并终止）
-    pub child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
-    /// 读线程（pty stdout → serial:data，退出时发 disconnected）
-    pub read_thread: Option<thread::JoinHandle<()>>,
 }
 
+/// 模拟终端（git bash pty）端口句柄。
+pub struct TtySimPortHandle {
+    pub running: Arc<AtomicBool>,
+    pub ready: Arc<AtomicBool>,
+    pub emit_disconnect: Arc<AtomicBool>,
+    pub writer: Option<Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
+    pub master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
+    pub child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    pub read_thread: Option<thread::JoinHandle<()>>,
+}
 impl TtySimPortHandle {
     /// 向 pty stdin 写入字节（TX）。锁 writer 后循环 write，处理 Interrupted。
     pub fn write(&self, bytes: &[u8]) -> anyhow::Result<usize> {
@@ -90,6 +84,56 @@ impl TtySimPortHandle {
             }
         }
     }
+    pub fn write_handle(&self) -> anyhow::Result<TtyWriteHandle> {
+        Ok(TtyWriteHandle {
+            writer: Arc::clone(
+                self.writer
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("TTY sim port not open"))?,
+            ),
+            running: Arc::clone(&self.running),
+        })
+    }
+
+    pub fn shutdown(mut self) {
+        self.emit_disconnect.store(false, Ordering::Release);
+        self.running.store(false, Ordering::Release);
+        if let Some(mut child) = self.child.take() {
+            if let Err(e) = child.kill() {
+                log::warn!("Failed to kill TTY sim child: {}", e);
+            }
+            if let Err(e) = child.wait() {
+                log::warn!("Failed to reap TTY sim child: {}", e);
+            }
+        }
+        self.master = None;
+        self.writer = None;
+        if let Some(thread) = self.read_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl TtyWriteHandle {
+    pub fn write(&self, bytes: &[u8]) -> anyhow::Result<usize> {
+        let mut w = self
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut written = 0usize;
+        while written < bytes.len() {
+            if !self.running.load(Ordering::Acquire) {
+                return Err(anyhow::anyhow!("TTY sim port is closing"));
+            }
+            match w.write(&bytes[written..]) {
+                Ok(0) => return Err(anyhow::anyhow!("TTY sim write returned 0 bytes")),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(anyhow::anyhow!("TTY sim write error: {}", e)),
+            }
+        }
+        Ok(written)
+    }
 }
 
 /// 定位 git bash 可执行文件。
@@ -131,6 +175,7 @@ pub(crate) fn spawn_bash(
     port_id: &str,
     cols: u16,
     rows: u16,
+    generation: u64,
 ) -> anyhow::Result<TtySimPortHandle> {
     let bash = find_bash()
         .ok_or_else(|| anyhow::anyhow!("git bash not found — install Git for Windows"))?;
@@ -157,15 +202,21 @@ pub(crate) fn spawn_bash(
     let writer_arc = Arc::new(Mutex::new(writer));
 
     let running = Arc::new(AtomicBool::new(true));
+    let ready = Arc::new(AtomicBool::new(false));
+    let emit_disconnect = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
+    let ready_clone = Arc::clone(&ready);
+    let emit_disconnect_clone = Arc::clone(&emit_disconnect);
     let thread_port_id = port_id.to_string();
     let app_handle_clone = app_handle.clone();
     let writer_clone = Arc::clone(&writer_arc);
 
     let read_thread = thread::spawn(move || {
         let port_id = thread_port_id;
+        while running_clone.load(Ordering::Acquire) && !ready_clone.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
         let mut buf = [0u8; 4096];
-        // DSR 序列跨 chunk 的残片缓冲（\x1b[6n 占 4 字节，可能被事件切分）
         let mut dsr_tail: Vec<u8> = Vec::new();
         loop {
             if !running_clone.load(Ordering::Relaxed) {
@@ -199,16 +250,20 @@ pub(crate) fn spawn_bash(
         }
         running_clone.store(false, Ordering::Relaxed);
 
-        // 读取线程退出时发送断开事件（前端依赖此事件，与真实/模拟串口线程对齐）
-        crate::serial::emit_status(
-            &app_handle_clone,
-            &port_id,
-            crate::serial::PortStatus::Disconnected,
-        );
+        if emit_disconnect_clone.load(Ordering::Acquire) {
+            crate::serial::emit_status_if_current(
+                &app_handle_clone,
+                &port_id,
+                crate::serial::PortStatus::Disconnected,
+                generation,
+            );
+        }
     });
 
     Ok(TtySimPortHandle {
         running,
+        ready,
+        emit_disconnect,
         writer: Some(writer_arc),
         master: Some(master_arc),
         child: Some(child),
@@ -247,6 +302,8 @@ mod tests {
     fn empty_handle() -> TtySimPortHandle {
         TtySimPortHandle {
             running: Arc::new(AtomicBool::new(true)),
+            ready: Arc::new(AtomicBool::new(false)),
+            emit_disconnect: Arc::new(AtomicBool::new(false)),
             writer: None,
             master: None,
             child: None,
@@ -317,5 +374,4 @@ mod tests {
             assert!(tail.len() <= 3, "tail 不应超过 3 字节（第 {} 次）", i);
         }
     }
-
 }

@@ -8,12 +8,29 @@
  * 核心用途就是把配置搬到任意位置（桌面、U 盘、另一台机器），子树限制会使其失效。
  * 仅做基本有效性校验：写入确认父目录存在，读取确认文件可 canonicalize。
  */
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use base64::Engine as _;
 use tauri::Manager;
+use tokio::sync::Semaphore;
 
 use crate::commands::CommandError;
+
+static PLUGIN_DIALOG_BUDGETS: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const MAX_LIVE_PLUGIN_DIALOGS: usize = 8;
+
+fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError> {
+    let mut budgets = PLUGIN_DIALOG_BUDGETS
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    Ok(budgets
+        .entry(plugin_id.to_string())
+        .or_insert_with(|| Arc::new(Semaphore::new(MAX_LIVE_PLUGIN_DIALOGS)))
+        .clone())
+}
 
 /// 将文本内容写入指定路径（配置导出）。
 /// 目标路径由用户通过系统 save 对话框显式选择，仅校验父目录有效。
@@ -78,10 +95,13 @@ pub struct PluginPickedFiles {
 fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
     let file = std::fs::File::open(&path)
         .map_err(|e| CommandError::Io(format!("Cannot open selected file: {e}")))?;
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?;
     if !metadata.is_file() || metadata.len() > MAX_PLUGIN_OPEN_FILE_BYTES {
-        return Err(CommandError::Other("选择的文件不是普通文件或超过 64MB".into()));
+        return Err(CommandError::Other(
+            "选择的文件不是普通文件或超过 64MB".into(),
+        ));
     }
     use std::io::Read;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
@@ -110,25 +130,43 @@ pub async fn plugin_pick_files(
     }
     crate::plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
     let install_generation = {
-        let manager = state.config_manager.lock()
+        let manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let entry = manager.get_config().entities.plugin_configs.iter()
+        let entry = manager
+            .get_config()
+            .entities
+            .plugin_configs
+            .iter()
             .find(|item| item.id == plugin_id)
             .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
-        if !entry.enabled || !entry.granted_permissions.iter().any(|perm| perm == "fs:open") {
+        if !entry.enabled
+            || !entry
+                .granted_permissions
+                .iter()
+                .any(|perm| perm == "fs:open")
+        {
             return Err(CommandError::Other("插件未启用或未授予 fs:open".into()));
         }
-        let manifest = crate::plugin::load_manifest_from_dir(&manager.plugins_dir().join(&plugin_id))
-            .map_err(CommandError::Other)?;
+        let manifest =
+            crate::plugin::load_manifest_from_dir(&manager.plugins_dir().join(&plugin_id))
+                .map_err(CommandError::Other)?;
         if manifest.id != plugin_id || !manifest.permissions.iter().any(|perm| perm == "fs:open") {
             return Err(CommandError::Other("插件未声明 fs:open".into()));
         }
         entry.install_generation.clone()
     };
+    let dialog_permit = plugin_dialog_budget(&plugin_id)?
+        .try_acquire_owned()
+        .map_err(|_| CommandError::Other("插件文件选择资源已达上限".into()))?;
     tokio::task::spawn_blocking(move || {
+        let _dialog_permit = dialog_permit;
         use tauri_plugin_dialog::DialogExt;
         let mut dialog = app.dialog().file();
-        if let Some(title) = options.title { dialog = dialog.set_title(title); }
+        if let Some(title) = options.title {
+            dialog = dialog.set_title(title);
+        }
         if let Some(filters) = options.filters {
             for filter in filters {
                 let exts: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
@@ -142,12 +180,24 @@ pub async fn plugin_pick_files(
         };
         // The dialog may have been open while the user revoked the permission.
         let manager = app.state::<crate::AppState>();
-        let manager = manager.config_manager.lock()
+        let manager = manager
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let permitted = manager.get_config().entities.plugin_configs.iter().any(|entry| {
-            entry.id == plugin_id && entry.install_generation == install_generation && entry.enabled
-                && entry.granted_permissions.iter().any(|perm| perm == "fs:open")
-        });
+        let permitted = manager
+            .get_config()
+            .entities
+            .plugin_configs
+            .iter()
+            .any(|entry| {
+                entry.id == plugin_id
+                    && entry.install_generation == install_generation
+                    && entry.enabled
+                    && entry
+                        .granted_permissions
+                        .iter()
+                        .any(|perm| perm == "fs:open")
+            });
         if !permitted {
             return Err(CommandError::Other("插件文件读取权限已撤销".into()));
         }
@@ -158,10 +208,12 @@ pub async fn plugin_pick_files(
         let mut total_bytes = 0u64;
         let mut files = Vec::with_capacity(paths.len());
         for path in paths {
-            let file_path = path.into_path()
+            let file_path = path
+                .into_path()
                 .map_err(|e| CommandError::Other(format!("选择的文件路径不可用: {e}")))?;
             let size = std::fs::metadata(&file_path)
-                .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?.len();
+                .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?
+                .len();
             total_bytes = total_bytes.saturating_add(size);
             if total_bytes > MAX_PLUGIN_PICK_TOTAL_BYTES {
                 return Err(CommandError::Other("本次选择的文件总量超过 64MB".into()));
@@ -169,7 +221,9 @@ pub async fn plugin_pick_files(
             files.push(read_picked_file(file_path)?);
         }
         Ok(PluginPickedFiles { files })
-    }).await.map_err(|e| CommandError::Other(format!("文件选择任务失败: {e}")))?
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("文件选择任务失败: {e}")))?
 }
 
 /// 背景图文件大小上限（20MB），超过即视为不可用。
@@ -210,10 +264,7 @@ pub fn read_image_data_url(path: String) -> Result<String, CommandError> {
         }
     };
     if !target.is_file() {
-        log::warn!(
-            "read_image_data_url: not a file: '{}'",
-            target.display()
-        );
+        log::warn!("read_image_data_url: not a file: '{}'", target.display());
         return Ok(String::new());
     }
     let Some(ext) = target.extension().and_then(|e| e.to_str()) else {
@@ -272,7 +323,9 @@ mod tests {
 
     // 显式导入（镜像 serial/mod.rs 的测试约定，不用 `use super::*;`，
     // 避免 glob 把无关符号拖进测试二进制）。
-    use crate::commands::file::{image_mime_from_ext, read_image_data_url, read_picked_file, MAX_PLUGIN_OPEN_FILE_BYTES};
+    use crate::commands::file::{
+        image_mime_from_ext, read_image_data_url, read_picked_file, MAX_PLUGIN_OPEN_FILE_BYTES,
+    };
 
     /// 1x1 PNG 头部字节。函数不做 PNG 解析，仅验证 base64 往返一致。
     const TINY_PNG: &[u8] =
@@ -343,7 +396,9 @@ mod tests {
         let result = read_image_data_url(path.to_string_lossy().into_owned()).unwrap();
         assert!(result.starts_with("data:image/png;base64,"));
         let encoded = result.split(',').nth(1).unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
         assert_eq!(decoded, TINY_PNG);
         let _ = std::fs::remove_file(&path);
     }
@@ -354,7 +409,9 @@ mod tests {
         let content: &[u8] = b"\x81\x40\x81\x41abc\x0d\x0a";
         std::fs::write(&path, content).unwrap();
         let picked = read_picked_file(path.clone()).unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD.decode(picked.base64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(picked.base64)
+            .unwrap();
         assert_eq!(decoded, content);
         let _ = std::fs::remove_file(&path);
     }

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
@@ -41,6 +41,11 @@ const navItems: NavItem[] = [
   { id: 'plugins', labelKey: 'configModal.nav.plugins', icon: <Plug size={16} /> },
 ];
 
+const independentlyPersisted: Partial<Record<keyof AppConfig, true>> = {
+  revision: true, portGroups: true, portMeta: true, pluginConfigs: true, portPresets: true,
+  sendCommandSets: true, highlightRuleSets: true, protocolTemplates: true, triggerRules: true, portToolConfigs: true,
+};
+
 const ConfigModal: React.FC = () => {
   const { t } = useTranslation();
   const isConfigOpen = useSystemStore((s) => s.ui.isConfigOpen);
@@ -59,6 +64,27 @@ const ConfigModal: React.FC = () => {
   // dialog mid-selection.
   const dialogRef = useRef<HTMLDivElement>(null);
   const mouseDownInsideDialogRef = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const sessionRef = useRef(0);
+  const mountedRef = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    const unsubscribe = useSystemStore.subscribe((state, previous) => {
+      if (state.ui.isConfigOpen === previous.ui.isConfigOpen) return;
+      sessionRef.current++;
+      configSnapshotRef.current = state.ui.isConfigOpen ? { ...useAppStore.getState().config } : null;
+    });
+    return () => {
+      mountedRef.current = false;
+      sessionRef.current++;
+      unsubscribe();
+    };
+  }, []);
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.inert = saving;
+  }, [saving, isConfigOpen, overlayReady]);
 
   useEffect(() => {
     if (isConfigOpen && !configSnapshotRef.current) {
@@ -70,6 +96,7 @@ const ConfigModal: React.FC = () => {
   }, [isConfigOpen]);
 
   const handleCancel = useCallback(() => {
+    if (savingRef.current) return;
     // issue #6-8：弹窗打开后 useAppInit 的分组/元数据 500ms 防抖可能已把新
     // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
     // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
@@ -101,21 +128,29 @@ const ConfigModal: React.FC = () => {
   }, [isConfigOpen, handleCancel]);
 
   const handleSave = async () => {
-    // The entity arrays are owned by `useRuleStore` / the live store fields, so
-    // `saveConfig` builds its own safe snapshot instead of trusting this draft
-    // wholesale (`set_config` replaces config.json entirely).
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    const session = sessionRef.current;
     const current = useAppStore.getState().config;
     const modeChanged = getCommittedUpdateMode() !== current.updateCheckMode;
-    if (!(await saveConfig(current))) return;
-    void applyUiScale(current.uiScalePercent);
-    void popoutEventService.emitUiScaleChanged(current.uiScalePercent)
-      .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
-    configSnapshotRef.current = null;
-    toggleConfigModal(false);
-    // Re-check right away instead of waiting for the next startup; this runs in
-    // the background and surfaces the update dialog if one is found.
-    if (modeChanged && getCommittedUpdateMode() !== 'none') {
-      void runAutoCheck();
+    try {
+      // Compose from live stores at dispatch; never patch with an old full draft.
+      if (!(await saveConfig())) return;
+      if (!mountedRef.current || session !== sessionRef.current || !useSystemStore.getState().ui.isConfigOpen) return;
+      const latest = useAppStore.getState().config;
+      // External updates can still arrive while controls are frozen. Keep the
+      // newer draft open rather than representing an older snapshot as saved.
+      if ((Object.keys(current) as Array<keyof AppConfig>).some(key => !independentlyPersisted[key] && current[key] !== latest[key])) return;
+      void applyUiScale(current.uiScalePercent);
+      void popoutEventService.emitUiScaleChanged(current.uiScalePercent)
+        .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
+      configSnapshotRef.current = null;
+      toggleConfigModal(false);
+      if (modeChanged && getCommittedUpdateMode() !== 'none') void runAutoCheck();
+    } finally {
+      savingRef.current = false;
+      if (mountedRef.current) setSaving(false);
     }
   };
 
@@ -164,7 +199,7 @@ const ConfigModal: React.FC = () => {
               <div
                 key={item.id}
                 className={`modal-nav-item${configActiveTab === item.id ? ' active' : ''}`}
-                onClick={() => setConfigActiveTab(item.id)}
+                onClick={() => { if (!savingRef.current) setConfigActiveTab(item.id); }}
               >
                 <span className="modal-nav-icon">{item.icon}</span>
                 {t(item.labelKey)}
@@ -178,18 +213,20 @@ const ConfigModal: React.FC = () => {
             <span className="modal-content-title">
               {activeNav ? t(activeNav.labelKey) : ''}
             </span>
-            <button className="btn btn-icon" onClick={handleCancel} title={t('configModal.close')}>
+            <button className="btn btn-icon" disabled={saving} onClick={handleCancel} title={t('configModal.close')}>
               <X size={16} />
             </button>
           </div>
 
-          <div className="modal-content-body">
+          <div className="modal-content-body" ref={contentRef} aria-busy={saving}
+            onClickCapture={(event) => { if (savingRef.current) { event.preventDefault(); event.stopPropagation(); } }}
+            onChangeCapture={(event) => { if (savingRef.current) event.stopPropagation(); }}>
             {renderContent()}
           </div>
 
           <div className="modal-content-footer">
-            <button className="btn" onClick={handleCancel}>{t('configModal.cancel')}</button>
-            <button className="btn btn-primary" onClick={handleSave}>{t('configModal.save')}</button>
+            <button className="btn" disabled={saving} onClick={handleCancel}>{t('configModal.cancel')}</button>
+            <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{t('configModal.save')}</button>
           </div>
         </div>
       </div>

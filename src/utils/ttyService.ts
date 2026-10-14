@@ -28,7 +28,7 @@
 import type { Terminal } from '@xterm/xterm';
 import { serialService, gitBashSimService } from '../services/tauri';
 import { findSerialTabByPortId, useAppStore } from '../stores/useAppStore';
-import { trafficStats } from './trafficStats';
+import { trafficStats, type PortTrafficLease } from './trafficStats';
 import { createDecoder } from './lineText';
 
 /** 每端口等待批写的解码字符串队列上限（条）：超过即丢弃最旧（issue #6-10 同款策略）。 */
@@ -63,9 +63,11 @@ export interface TtyPortState {
   txBuffer: string;
   /** TX 合批：缓冲文本的 UTF-8 字节数（单批上限判断）。 */
   txBufferBytes: number;
+  /** Ownership captured at the first keystroke, not when its timer dispatches. */
+  txLease: PortTrafficLease | null;
   /** TX 合批静默定时器句柄（null = 无 pending 合批）。 */
   txTimerId: number | null;
-  /** 当前连接的最后一个 TX 批次；settle 后释放，不跨 disconnect 沿用。 */
+  /** Last TX batch; retain the barrier across disconnect until I/O settles. */
   txPending: Promise<void> | null;
   /** 断线 / reset 后令旧连接已排队但未开始的批次失效。 */
   txGeneration: number;
@@ -100,12 +102,14 @@ function dropTxBuffer(state: TtyPortState): void {
   }
   state.txBuffer = '';
   state.txBufferBytes = 0;
+  state.txLease = null;
 }
 
 /** Keyboard batches and explicit commands share this one per-port write lane. */
 function sendOrdered(
   portId: string, state: TtyPortState, data: string, isHex: boolean, lineEnding: string,
   beforeSend?: () => void,
+  lease: PortTrafficLease = trafficStats.capture(portId),
 ): Promise<number> {
   const generation = state.txGeneration;
   const sendBatch = async (): Promise<number> => {
@@ -114,7 +118,7 @@ function sendOrdered(
     const bytesWritten = await serialService.sendSerialData({
       portId, data, isHex, appendLineEnding: lineEnding,
     });
-    trafficStats.addTx(portId, bytesWritten);
+    trafficStats.addTx(portId, bytesWritten, lease);
     return bytesWritten;
   };
   const pending = state.txPending ? state.txPending.then(sendBatch) : sendBatch();
@@ -134,10 +138,12 @@ function flushTx(portId: string, state: TtyPortState): Promise<void> {
     state.txTimerId = null;
   }
   const text = state.txBuffer;
+  const lease = state.txLease;
+  state.txLease = null;
   state.txBuffer = '';
   state.txBufferBytes = 0;
-  if (!text) return Promise.resolve();
-  return sendOrdered(portId, state, text, false, 'None').then(() => {}, (err) => {
+  if (!text || !lease) return Promise.resolve();
+  return sendOrdered(portId, state, text, false, 'None', undefined, lease).then(() => {}, (err) => {
     console.error('[ttyService] send failed for', portId, err);
   });
 }
@@ -156,6 +162,7 @@ function getPortState(portId: string): TtyPortState {
       lastRows: null,
       txBuffer: '',
       txBufferBytes: 0,
+      txLease: null,
       txTimerId: null,
       txPending: null,
       txGeneration: 0,
@@ -220,6 +227,18 @@ const handleVisibilityChange = (): void => {
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
   document.addEventListener('visibilitychange', handleVisibilityChange);
 }
+
+// A mode change retires old keyboard work before TtyView's detach can flush it.
+useAppStore.subscribe((current, previous) => {
+  if (current.ports === previous.ports) return;
+  for (const [portId, state] of ports) {
+    const oldMode = previous.ports.find(port => port.id === portId)?.mode;
+    const newMode = current.ports.find(port => port.id === portId)?.mode;
+    if (oldMode === newMode) continue;
+    dropTxBuffer(state);
+    state.txGeneration++;
+  }
+});
 
 export const ttyService = {
   /**
@@ -295,7 +314,6 @@ export const ttyService = {
     // P0-2：断线后端口不可写——取消 pending 合批定时器并丢弃缓冲（发送只会失败）。
     dropTxBuffer(state);
     state.txGeneration++;
-    state.txPending = null;
     if (state.queue.length > 0) {
       if (state.term) state.term.write(state.queue.join(''));
       state.queue.length = 0;
@@ -317,6 +335,8 @@ export const ttyService = {
   send(portId: string, text: string): Promise<void> {
     if (!text) return Promise.resolve();
     const state = getPortState(portId);
+    if (state.txLease && !trafficStats.isCurrent(portId, state.txLease)) dropTxBuffer(state);
+    state.txLease ??= trafficStats.capture(portId);
     // 先入缓冲（拼接保持到达顺序），再按缓冲总量决定是否立即发送
     state.txBuffer += text;
     state.txBufferBytes += new TextEncoder().encode(text).length;

@@ -14,10 +14,83 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import type { SendCommandSet, TerminalLine, TerminalState } from '../types';
 
+
+interface PopoutLane {
+  desiredOpen: boolean;
+  revision: number;
+  closing: boolean;
+  ignoreNativeClose: boolean;
+  pending: Promise<void> | null;
+}
+const lanes = new Map<string, PopoutLane>();
+
+/** Desired state changes immediately; one lane owns native open/close order. */
+function transitionPopout(kind: string, targetId: string | null, open: boolean, isDesired?: () => boolean): Promise<void> {
+  const key = JSON.stringify([kind, kind === 'quick-send' ? null : targetId]);
+  let lane = lanes.get(key);
+  if (!lane) {
+    lane = { desiredOpen: open, revision: 0, closing: false, ignoreNativeClose: !open, pending: null };
+    lanes.set(key, lane);
+  }
+  lane.desiredOpen = open;
+  if (!open) lane.ignoreNativeClose = true;
+  lane.revision++;
+  if (lane.pending) return lane.pending;
+
+  const owner = lane;
+  const run = async (): Promise<void> => {
+    for (;;) {
+      const revision = owner.revision;
+      const desiredOpen = owner.desiredOpen;
+      if (desiredOpen) {
+        if (isDesired && !isDesired()) {
+          owner.desiredOpen = false;
+          continue;
+        }
+        try {
+          await invoke<void>('open_popout', { kind, targetId });
+        } catch (error) {
+          if (revision !== owner.revision) continue;
+          owner.desiredOpen = false;
+          throw error;
+        }
+      } else {
+        owner.closing = true;
+        try {
+          await invoke<void>('close_popout', { kind, targetId });
+        } catch (error) {
+          if (revision !== owner.revision) continue;
+          throw error;
+        } finally {
+          owner.closing = false;
+        }
+      }
+
+      if (revision === owner.revision && owner.desiredOpen === desiredOpen &&
+        (!desiredOpen || !isDesired || isDesired())) {
+        if (desiredOpen) owner.ignoreNativeClose = false;
+        owner.pending = null;
+        if (!owner.desiredOpen) lanes.delete(key);
+        return;
+      }
+      // A newer desired state arrived while native work was pending. Loop
+      // without exposing the intermediate close/open completion to callers.
+    }
+  };
+  const pending = run();
+  owner.pending = pending;
+  void pending.then(() => {}, () => {}).finally(() => {
+    if (owner.pending === pending) {
+      owner.pending = null;
+      if (!owner.desiredOpen) lanes.delete(key);
+    }
+  });
+  return pending;
+}
 export const popoutService = {
   /** 打开（或聚焦已存在的）弹出窗。kind: "quick-send" | "terminal"。 */
-  openPopout: (kind: string, targetId?: string | null): Promise<void> => {
-    return invoke<void>('open_popout', { kind, targetId: targetId ?? null });
+  openPopout: (kind: string, targetId?: string | null, isDesired?: () => boolean): Promise<void> => {
+    return transitionPopout(kind, targetId ?? null, true, isDesired);
   },
 
   /**
@@ -25,7 +98,19 @@ export const popoutService = {
    * （唯一权威，前端不复刻 sanitize——复制一份迟早与后端漂移，命令就会找不到窗口）。
    */
   closePopout: (kind: string, targetId?: string | null): Promise<void> => {
-    return invoke<void>('close_popout', { kind, targetId: targetId ?? null });
+    return transitionPopout(kind, targetId ?? null, false);
+  },
+
+  /** Native close signals from our own teardown must not retire a newer open. */
+  terminalClosed(portId: string): boolean {
+    const key = JSON.stringify(['terminal', portId]);
+    const lane = lanes.get(key);
+    if (!lane) return true;
+    if (lane.closing || lane.ignoreNativeClose) return false;
+    lane.desiredOpen = false;
+    lane.revision++;
+    if (!lane.pending) lanes.delete(key);
+    return true;
   },
 
   /** 切换弹出窗置顶（label 同上由后端计算）。 */

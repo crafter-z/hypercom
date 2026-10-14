@@ -29,8 +29,11 @@ mod ports_sim;
 mod ports_tty;
 pub(crate) mod tty_sim;
 
-pub use codec::{build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome, WRITE_TOTAL_DEADLINE};
-pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status, PortStatus};
+pub use codec::{
+    build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome,
+    WRITE_TOTAL_DEADLINE,
+};
+pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status_if_current, PortStatus};
 pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
@@ -83,11 +86,7 @@ impl PortKind {
 /// 进程」的唯一保证——命令层的 open 命令不区分端口类别，release 下
 /// `enable_simulation` / `enable_gitbash_sim` 又直接报错，两个开关恒为 false。
 /// 纯函数（不含状态），门控表在所有平台都可测试。
-fn check_virtual_enabled(
-    kind: PortKind,
-    simulate: bool,
-    gitbash_sim: bool,
-) -> anyhow::Result<()> {
+fn check_virtual_enabled(kind: PortKind, simulate: bool, gitbash_sim: bool) -> anyhow::Result<()> {
     match kind {
         PortKind::Real => Ok(()),
         PortKind::Sim if simulate => Ok(()),
@@ -127,12 +126,15 @@ pub struct SerialManager {
     simulate: bool,
     /// 是否启用模拟终端（git bash pty）
     pub gitbash_sim: bool,
+    /// Monotonic connection identity per port; transfers and stale readers bind to it.
+    connection_generations: HashMap<String, u64>,
+    /// Once set, no new serial work may be admitted.
+    shutting_down: bool,
     /// Tauri AppHandle：事件推送与日志落盘的唯一入口
     app_handle: Option<AppHandle>,
     /// 上次成功连接的参数，用于自动重连
     last_params: HashMap<String, OpenPortArgs>,
 }
-
 impl SerialManager {
     pub fn new() -> Self {
         Self {
@@ -143,6 +145,8 @@ impl SerialManager {
             tty_sim_ports: HashMap::new(),
             simulate: false,
             gitbash_sim: false,
+            connection_generations: HashMap::new(),
+            shutting_down: false,
             app_handle: None,
             last_params: HashMap::new(),
         }
@@ -167,7 +171,8 @@ impl SerialManager {
     pub(crate) fn begin_reconnect(&mut self, port_id: &str) -> Arc<std::sync::atomic::AtomicBool> {
         self.cancel_reconnect(port_id);
         let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.reconnect_attempts.insert(port_id.to_owned(), Arc::clone(&token));
+        self.reconnect_attempts
+            .insert(port_id.to_owned(), Arc::clone(&token));
         token
     }
 
@@ -177,24 +182,85 @@ impl SerialManager {
         }
     }
 
-    pub(crate) fn finish_reconnect(&mut self, port_id: &str, token: &Arc<std::sync::atomic::AtomicBool>) {
-        if self.reconnect_attempts.get(port_id).is_some_and(|current| Arc::ptr_eq(current, token)) {
+    pub(crate) fn finish_reconnect(
+        &mut self,
+        port_id: &str,
+        token: &Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        if self
+            .reconnect_attempts
+            .get(port_id)
+            .is_some_and(|current| Arc::ptr_eq(current, token))
+        {
             self.reconnect_attempts.remove(port_id);
         }
     }
 
+    pub fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+        for token in self.reconnect_attempts.values() {
+            token.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.reconnect_attempts.clear();
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+    }
+
+    pub fn connection_generation(&self, port_id: &str) -> Option<u64> {
+        match PortKind::of(port_id) {
+            PortKind::Real if self.ports.contains_key(port_id) => {
+                self.connection_generations.get(port_id).copied()
+            }
+            PortKind::Sim if self.sim_ports.contains_key(port_id) => {
+                self.connection_generations.get(port_id).copied()
+            }
+            PortKind::Tty if self.tty_sim_ports.contains_key(port_id) => {
+                self.connection_generations.get(port_id).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// Generation used for terminal status events, including a session that is
+    /// in the detached-close window. A stale reader can therefore be rejected
+    /// after a replacement session advances this value, while the owner close
+    /// may still publish its terminal event for the old generation.
+    pub fn status_generation(&self, port_id: &str) -> Option<u64> {
+        self.connection_generations.get(port_id).copied()
+    }
+
+    pub fn connection_matches(&self, port_id: &str, generation: u64) -> bool {
+        self.connection_generation(port_id) == Some(generation)
+    }
     /// 打开串口（按 `PortKind` 分派；虚拟端口先过能力门控）。
     ///
     /// 锁内执行：不枚举端口、不 join 读线程（两者都是阻塞操作）。需要这两种操作的
     /// 完整打开流程见 `open_blocking`。
     pub fn open_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
+        if self.shutting_down {
+            return Err(anyhow::anyhow!("Serial manager is shutting down"));
+        }
         let kind = PortKind::of(&args.port_id);
         check_virtual_enabled(kind, self.simulate, self.gitbash_sim)?;
-        match kind {
+        let port_id = args.port_id.clone();
+        let previous = self.connection_generations.get(&port_id).copied();
+        self.connection_generations
+            .insert(port_id.clone(), previous.unwrap_or(0).wrapping_add(1));
+        let result = match kind {
             PortKind::Real => ports_real::open(self, args),
             PortKind::Sim => ports_sim::open(self, args),
             PortKind::Tty => ports_tty::open(self, args),
+        };
+        if result.is_err() {
+            if let Some(old) = previous {
+                self.connection_generations.insert(port_id, old);
+            } else {
+                self.connection_generations.remove(&port_id);
+            }
         }
+        result
     }
 
     /// 关闭串口（真实/模拟/模拟终端）。
@@ -213,10 +279,13 @@ impl SerialManager {
             PortKind::Real => {
                 if let Some(closed) = ports_real::close(self, port_id) {
                     let barrier = Arc::new(ports_real::CloseBarrier::new());
-                    self.pending_real_closes.insert(port_id.to_owned(), Arc::clone(&barrier));
+                    self.pending_real_closes
+                        .insert(port_id.to_owned(), Arc::clone(&barrier));
                     Some(closed.with_completion(barrier))
                 } else {
-                    self.pending_real_closes.get(port_id).filter(|barrier| !barrier.completed())
+                    self.pending_real_closes
+                        .get(port_id)
+                        .filter(|barrier| !barrier.completed())
                         .map(|barrier| PortClose::waiting(Arc::clone(barrier)))
                 }
             }
@@ -260,10 +329,7 @@ impl SerialManager {
 
     /// 在全局锁内领取写句柄租约；释放锁后仅锁 per-port 写句柄执行写入。
     /// 关闭会在锁外等所有租约释放后才结束。
-    pub fn get_write_handle(
-        &self,
-        port_id: &str,
-    ) -> anyhow::Result<RealWriteHandle> {
+    pub fn get_write_handle(&self, port_id: &str) -> anyhow::Result<RealWriteHandle> {
         ports_real::write_handle(self, port_id)
     }
 
@@ -295,6 +361,29 @@ impl SerialManager {
     /// 调整模拟终端（git bash pty）的尺寸。
     pub fn resize_tty_sim(&self, port_id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
         ports_tty::resize(self, port_id, cols, rows)
+    }
+
+    pub fn get_tty_write_handle(&self, port_id: &str) -> anyhow::Result<tty_sim::TtyWriteHandle> {
+        ports_tty::write_handle(self, port_id)
+    }
+
+    pub fn cleanup_real_close(&mut self, port_id: &str) {
+        if self
+            .pending_real_closes
+            .get(port_id)
+            .is_some_and(|barrier| barrier.completed())
+        {
+            self.pending_real_closes.remove(port_id);
+        }
+    }
+
+    pub fn active_port_ids(&self) -> Vec<String> {
+        self.ports
+            .keys()
+            .chain(self.sim_ports.keys())
+            .chain(self.tty_sim_ports.keys())
+            .cloned()
+            .collect()
     }
 
     /// 把已启用的虚拟端口条目追加到系统端口列表之后。
@@ -411,7 +500,10 @@ mod tests {
     #[test]
     fn open_port_rejects_virtual_ports_until_capability_enabled() {
         let mut m = SerialManager::new();
-        let sim_err = m.open_port(open_args("SIM:Loopback")).unwrap_err().to_string();
+        let sim_err = m
+            .open_port(open_args("SIM:Loopback"))
+            .unwrap_err()
+            .to_string();
         assert!(sim_err.contains("Simulation"), "{sim_err}");
         let tty_err = m.open_port(open_args("GIT:BASH")).unwrap_err().to_string();
         assert!(tty_err.contains("Git Bash"), "{tty_err}");
@@ -425,7 +517,10 @@ mod tests {
         m.set_gitbash_sim(true);
         for port_id in ["COM1", "SIM:Loopback", "GIT:BASH"] {
             let err = m.open_port(open_args(port_id)).unwrap_err().to_string();
-            assert!(err.contains("AppHandle not initialized"), "{port_id}: {err}");
+            assert!(
+                err.contains("AppHandle not initialized"),
+                "{port_id}: {err}"
+            );
         }
     }
 
@@ -435,11 +530,20 @@ mod tests {
     #[test]
     fn send_data_errors_on_missing_ports() {
         let m = SerialManager::new();
-        let real_err = m.send_data("COM1", "x", false, "None").unwrap_err().to_string();
+        let real_err = m
+            .send_data("COM1", "x", false, "None")
+            .unwrap_err()
+            .to_string();
         assert!(real_err.contains("Port not found"), "{real_err}");
-        let sim_err = m.send_data("SIM:x", "x", false, "None").unwrap_err().to_string();
+        let sim_err = m
+            .send_data("SIM:x", "x", false, "None")
+            .unwrap_err()
+            .to_string();
         assert!(sim_err.contains("Sim port not found"), "{sim_err}");
-        let tty_err = m.send_data("GIT:BASH", "x", false, "None").unwrap_err().to_string();
+        let tty_err = m
+            .send_data("GIT:BASH", "x", false, "None")
+            .unwrap_err()
+            .to_string();
         assert!(tty_err.contains("TTY sim port not found"), "{tty_err}");
     }
 
@@ -472,7 +576,9 @@ mod tests {
         let mut m = SerialManager::new();
         assert!(m.get_write_handle("COM1").is_err());
         assert!(m.set_flow_control("COM1", true, true).is_err());
-        assert!(m.set_params("COM1", 9600, 8, "None", "One", "None").is_err());
+        assert!(m
+            .set_params("COM1", 9600, 8, "None", "One", "None")
+            .is_err());
         assert!(m.resize_tty_sim("GIT:BASH", 80, 24).is_err());
         assert!(m.get_last_params("COM1").is_none());
     }
@@ -484,7 +590,10 @@ mod tests {
     fn reconnect_rejects_simulation_ports() {
         let m = Mutex::new(SerialManager::new());
         for port_id in ["SIM:Loopback", "GIT:BASH"] {
-            let err = super::reconnect_blocking(&m, port_id, &std::sync::atomic::AtomicBool::new(false)).unwrap_err().to_string();
+            let err =
+                super::reconnect_blocking(&m, port_id, &std::sync::atomic::AtomicBool::new(false))
+                    .unwrap_err()
+                    .to_string();
             assert!(err.contains("Cannot reconnect"), "{port_id}: {err}");
         }
     }
@@ -494,11 +603,17 @@ mod tests {
     fn reconnect_reports_missing_params_for_unknown_real_port() {
         // 系统里不存在该端口 → 走到「不可用」，不进入打开路径（无硬件依赖）
         let mut inner = SerialManager::new();
-        inner.last_params.insert("COM_NOT_PRESENT".to_string(), open_args("COM_NOT_PRESENT"));
+        inner
+            .last_params
+            .insert("COM_NOT_PRESENT".to_string(), open_args("COM_NOT_PRESENT"));
         let m = Mutex::new(inner);
-        let err = super::reconnect_blocking(&m, "COM_NOT_PRESENT", &std::sync::atomic::AtomicBool::new(false))
-            .unwrap_err()
-            .to_string();
+        let err = super::reconnect_blocking(
+            &m,
+            "COM_NOT_PRESENT",
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("is not available"), "{err}");
     }
 

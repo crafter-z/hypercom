@@ -75,6 +75,20 @@ describe('pluginBytesObserver', () => {
     expect(hasPluginBytesObservers()).toBe(false);
   });
 
+  it('cuts off pending data for a newly subscribed all-port byte observer', () => {
+    const first = makeObserver();
+    const second = makeObserver();
+    const unsubFirst = addPluginBytesObserver(first.obs);
+    feedPluginBytes('COM1', [1], 1);
+    const unsubSecond = addPluginBytesObserver(second.obs);
+    feedPluginBytes('COM1', [2], 2);
+    flushDelivery();
+    expect(first.spy.batches.map((batch) => batch.bytes)).toEqual([[1], [2]]);
+    expect(second.spy.batches.map((batch) => batch.bytes)).toEqual([[2]]);
+    unsubFirst();
+    unsubSecond();
+  });
+
   it('reschedules pending rAF on hide and pending timers on visibility restoration', () => {
     const page = Object.assign(new EventTarget(), { visibilityState: 'visible' });
     const removeListener = vi.spyOn(page, 'removeEventListener');

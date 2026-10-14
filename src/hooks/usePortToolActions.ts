@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { toolService } from '../services/tauri';
+import { waitForToolOutputListener } from './useToolOutput';
 import { notifyError } from '../stores/useToastStore';
 import { partitionGroupPorts } from '../utils/groupTool';
 import type { PortGroup, SerialPort } from '../types';
@@ -38,27 +39,35 @@ function openToolConfigPage(): void {
   system.toggleConfigModal(true);
 }
 
+/** 进程命令尚未返回时也视为占用，防止双击在后端预留前重复启动。 */
+const toolRunsInFlight = new Set<string>();
+
 export function usePortToolActions() {
   const updatePort = useAppStore((s) => s.updatePort);
   const [groupToolState, setGroupToolState] = useState<GroupToolDialogState | null>(null);
-
   const runTool = useCallback(async (portId: string) => {
+    if (toolRunsInFlight.has(portId) || useAppStore.getState().ports.find((p) => p.id === portId)?.toolRunning) return;
     const config = useRuleStore.getState().findToolConfigByPort(portId);
     if (!config) {
       // 未配置 → 跳转配置页
       openToolConfigPage();
       return;
     }
+    toolRunsInFlight.add(portId);
     updatePort(portId, { toolRunning: true });
     try {
+      await waitForToolOutputListener();
       await toolService.runPortTool({
         portId,
         command: config.command,
         workdir: config.workdir || undefined,
       });
     } catch (err) {
-      updatePort(portId, { toolRunning: false });
       notifyError(err);
+    } finally {
+      toolRunsInFlight.delete(portId);
+      // Backend owns recovery; finally also handles fast completion/listener races.
+      updatePort(portId, { toolRunning: false });
     }
   }, [updatePort]);
 

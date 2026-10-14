@@ -73,14 +73,20 @@ export const serialService = {
     }});
   },
 
-  /** 分块发送文件内容到串口，进度经 serial:file_progress 事件推送 */
-  sendFile: (params: { portId: string; path: string; chunkSize: number; delayMs: number }): Promise<number> => {
+  /** 分块发送文件内容，进度经 serial:file_progress 事件推送。 */
+  sendFile: (params: { portId: string; transferId: string; path: string; chunkSize: number; delayMs: number }): Promise<number> => {
     return invoke<number>('send_file', { args: {
       port_id: params.portId,
+      transfer_id: params.transferId,
       path: params.path,
       chunk_size: params.chunkSize,
       delay_ms: params.delayMs,
     }});
+  },
+
+  /** 取消指定文件传输；transferId 防止取消同端口的新传输。 */
+  cancelFileSend: (portId: string, transferId: string): Promise<void> => {
+    return invoke<void>('cancel_file_send', { portId, transferId });
   },
 
   setSerialParams: (portId: string, params: { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string }) => {
@@ -111,10 +117,6 @@ export const serialService = {
     return invoke<void>('disable_simulation');
   },
 
-  /** 取消正在进行的文件发送（置位后端 per-port 取消标志；读循环在下一块前退出）。 */
-  cancelFileSend: (portId: string): Promise<void> => {
-    return invoke<void>('cancel_file_send', { portId });
-  },
 };
 
 // ==================== 模拟终端（git bash，仅 debug，issue #11）====================

@@ -95,28 +95,26 @@ impl From<&PluginManifest> for PluginManifestView {
 }
 
 /// 从 config 实体取插件状态（不可变借用）。无实体 = 未安装态（默认值）。
-fn state_of<'a>(
-    cfg: &'a config::AppConfig,
-    id: &str,
-) -> Option<&'a config::PluginConfigEntry> {
+fn state_of<'a>(cfg: &'a config::AppConfig, id: &str) -> Option<&'a config::PluginConfigEntry> {
     cfg.entities.plugin_configs.iter().find(|p| p.id == id)
 }
 
 /// 合并磁盘扫描结果 + config 状态为完整视图列表。
-fn build_views_from_scan(cfg: &config::AppConfig, scanned: Vec<plugin::InstalledPlugin>) -> Vec<PluginView> {
+fn build_views_from_scan(
+    cfg: &config::AppConfig,
+    scanned: Vec<plugin::InstalledPlugin>,
+) -> Vec<PluginView> {
     scanned
         .into_iter()
         .map(|sp| {
             let dir_str = sp.dir.display().to_string();
-            let state = sp
-                .manifest
-                .as_ref()
-                .ok()
-                .and_then(|m| state_of(cfg, &m.id));
+            let state = sp.manifest.as_ref().ok().and_then(|m| state_of(cfg, &m.id));
             match sp.manifest {
                 Ok(manifest) => PluginView {
                     id: manifest.id.clone(),
-                    install_generation: state.map(|s| s.install_generation.clone()).unwrap_or_default(),
+                    install_generation: state
+                        .map(|s| s.install_generation.clone())
+                        .unwrap_or_default(),
                     dir: dir_str,
                     enabled: state.map(|s| s.enabled).unwrap_or(false),
                     granted_permissions: state
@@ -177,13 +175,23 @@ pub struct PluginStateSnapshot {
 
 fn snapshot(manager: &config::ConfigManager) -> PluginStateSnapshot {
     let cfg = manager.get_config();
-    PluginStateSnapshot { revision: cfg.revision, plugin_configs: cfg.entities.plugin_configs.clone() }
+    PluginStateSnapshot {
+        revision: cfg.revision,
+        plugin_configs: cfg.entities.plugin_configs.clone(),
+    }
 }
 
-fn require_generation(cfg: &config::AppConfig, id: &str, expected: &str) -> Result<(), CommandError> {
-    let entry = state_of(cfg, id).ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+fn require_generation(
+    cfg: &config::AppConfig,
+    id: &str,
+    expected: &str,
+) -> Result<(), CommandError> {
+    let entry =
+        state_of(cfg, id).ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
     if expected.is_empty() || entry.install_generation != expected {
-        return Err(CommandError::Other("插件安装版本已变化，请重新检查插件后操作".into()));
+        return Err(CommandError::Other(
+            "插件安装版本已变化，请重新检查插件后操作".into(),
+        ));
     }
     Ok(())
 }
@@ -191,25 +199,34 @@ fn require_generation(cfg: &config::AppConfig, id: &str, expected: &str) -> Resu
 /// 列出已安装插件（磁盘扫描视图 + config 状态数组）。
 /// 扫描（read_dir + 逐目录 manifest 解析）在阻塞线程池执行——不占命令线程。
 #[tauri::command]
-pub async fn list_plugins(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<PluginListResponse, CommandError> {
+pub async fn list_plugins(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<PluginListResponse, CommandError> {
     require_main_window(&window)?;
     let _plugin_io = state.plugin_io.lock().await;
     let root = {
-        let manager = state.config_manager.lock()
+        let manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         manager.plugins_dir().to_path_buf()
     };
-    let scanned = tokio::task::spawn_blocking(move || {
-        plugin::scan_plugins(&root)
-    })
+    let scanned = tokio::task::spawn_blocking(move || plugin::scan_plugins(&root))
         .await
         .map_err(|e| CommandError::Other(format!("插件扫描 join 失败: {e}")))?;
     // Scan may take seconds; never return a permission snapshot captured before it.
-    let manager = state.config_manager.lock()
+    let manager = state
+        .config_manager
+        .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     let cfg = manager.get_config();
     let plugins = build_views_from_scan(cfg, scanned);
-    Ok(PluginListResponse { revision: cfg.revision, plugins, plugin_configs: cfg.entities.plugin_configs.clone() })
+    Ok(PluginListResponse {
+        revision: cfg.revision,
+        plugins,
+        plugin_configs: cfg.entities.plugin_configs.clone(),
+    })
 }
 
 /// 安装插件。`source_path` 可为插件**目录**（复制注册，源保留）或插件 **zip 包**
@@ -230,16 +247,22 @@ pub async fn install_plugin(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     let _plugin_io = state.plugin_io.lock().await;
-    let root = state.config_manager.lock()
+    let root = state
+        .config_manager
+        .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?
-        .plugins_dir().to_path_buf();
+        .plugins_dir()
+        .to_path_buf();
     let prepared = tokio::task::spawn_blocking(move || prepare_plugin_install(&source_path, &root))
-        .await.map_err(|e| CommandError::Other(format!("安装暂存 join 失败: {e}")))??;
+        .await
+        .map_err(|e| CommandError::Other(format!("安装暂存 join 失败: {e}")))??;
     plugin::view_runtime::retire_plugin(window.app_handle(), &prepared.manifest.id).await?;
     // No await after persisting the trust reset: cancellation must not drop the
     // IO gate while a detached blocking task is still replacing executable code.
     tokio::task::block_in_place(|| {
-        let mut manager = state.config_manager.lock()
+        let mut manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         install_prepared(&mut manager, prepared)
     })
@@ -257,31 +280,49 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
         existing.enabled = false;
         existing.granted_permissions.clear();
         existing.install_generation = uuid::Uuid::new_v4().to_string();
-        existing.installed_at = Some(now_unix_secs().max(existing.installed_at.unwrap_or(0).saturating_add(1)));
+        existing.installed_at =
+            Some(now_unix_secs().max(existing.installed_at.unwrap_or(0).saturating_add(1)));
         existing.source = Some(source_label.into());
     } else {
         cfg.entities.plugin_configs.push(config::PluginConfigEntry {
-            id: id.into(), enabled: false, granted_permissions: Vec::new(),
+            id: id.into(),
+            enabled: false,
+            granted_permissions: Vec::new(),
             install_generation: uuid::Uuid::new_v4().to_string(),
-            installed_at: Some(now_unix_secs()), source: Some(source_label.into()),
+            installed_at: Some(now_unix_secs()),
+            source: Some(source_label.into()),
         });
     }
 }
 
-fn restore_install_config(manager: &mut config::ConfigManager, old: config::AppConfig) -> Result<(), CommandError> {
-    manager.set_config(old)
+fn restore_install_config(
+    manager: &mut config::ConfigManager,
+    old: config::AppConfig,
+) -> Result<(), CommandError> {
+    manager
+        .set_config(old)
         .map_err(|e| CommandError::Config(format!("恢复插件状态失败，保持禁用: {e}")))
 }
 
 fn persist_install_trust_reset(manager: &mut config::ConfigManager) -> Result<(), CommandError> {
-    manager.save().map_err(|e| CommandError::Config(format!("安装前清除插件授权失败: {e}")))?;
-    manager.save_safe_backup().map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))
+    manager
+        .save()
+        .map_err(|e| CommandError::Config(format!("安装前清除插件授权失败: {e}")))?;
+    manager
+        .save_safe_backup()
+        .map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))
 }
 
-fn install_prepared(manager: &mut config::ConfigManager, mut prepared: PreparedPluginInstall)
-    -> Result<PluginStateSnapshot, CommandError> {
+fn install_prepared(
+    manager: &mut config::ConfigManager,
+    mut prepared: PreparedPluginInstall,
+) -> Result<PluginStateSnapshot, CommandError> {
     let old = manager.get_config().clone();
-    reset_install_trust(manager.get_config_mut(), &prepared.manifest.id, prepared.source_label);
+    reset_install_trust(
+        manager.get_config_mut(),
+        &prepared.manifest.id,
+        prepared.source_label,
+    );
     // The durable disabled/no-grants state precedes the first rename. Restart
     // after any later interruption therefore cannot trust either code version.
     if let Err(error) = persist_install_trust_reset(manager) {
@@ -301,13 +342,20 @@ fn install_prepared(manager: &mut config::ConfigManager, mut prepared: PreparedP
     }
     plugin::transaction::recover(manager.plugins_dir(), manager.get_config())
         .map_err(|e| CommandError::Io(format!("安装清理失败，保留事务: {e}")))?;
-    log::info!("Plugin installed: {} v{} ({})", prepared.manifest.id, prepared.manifest.version, prepared.source_label);
+    log::info!(
+        "Plugin installed: {} v{} ({})",
+        prepared.manifest.id,
+        prepared.manifest.version,
+        prepared.source_label
+    );
     Ok(snapshot(manager))
 }
 
-
 /// Fully validate/copy before changing either installed code or its trust state.
-fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPluginInstall, CommandError> {
+fn prepare_plugin_install(
+    source_path: &str,
+    root: &Path,
+) -> Result<PreparedPluginInstall, CommandError> {
     let src = Path::new(source_path);
 
     // --- 阶段 1：把源归一化为「插件目录」引用 ---
@@ -324,20 +372,21 @@ fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPlug
     {
         // This is our trusted extraction location, not the user's chosen
         // directory source. Resolve OS temp aliases before no-follow traversal.
-        let tmp_parent = std::env::temp_dir().canonicalize()
+        let tmp_parent = std::env::temp_dir()
+            .canonicalize()
             .map_err(|e| CommandError::Io(format!("系统临时目录不可达: {e}")))?;
-        let tmp_root = tmp_parent.join(format!(
-            "hypercom_plugin_install_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp_root = tmp_parent.join(format!("hypercom_plugin_install_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_root)
             .map_err(|e| CommandError::Io(format!("创建临时目录失败: {e}")))?;
         // 立即绑定 guard：目录一建好就纳入 RAII 清理范围。
         _tmp_guard = Some(TempDirGuard(tmp_root.clone()));
         plugin::extract_plugin_zip(src, &tmp_root)
             .map_err(|e| CommandError::Other(format!("解压插件 zip 失败: {e}")))?;
-        Some(tmp_root.canonicalize()
-            .map_err(|e| CommandError::Io(format!("插件解压目录不可达: {e}")))?)
+        Some(
+            tmp_root
+                .canonicalize()
+                .map_err(|e| CommandError::Io(format!("插件解压目录不可达: {e}")))?,
+        )
     } else {
         None
     };
@@ -356,12 +405,16 @@ fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPlug
     std::fs::create_dir_all(root)
         .map_err(|e| CommandError::Io(format!("创建插件目录失败: {e}")))?;
     if tmp_holder.is_none() {
-        let canonical_source = src_plugin_dir.canonicalize()
+        let canonical_source = src_plugin_dir
+            .canonicalize()
             .map_err(|e| CommandError::Io(format!("源插件目录不可达: {e}")))?;
-        let canonical_root = root.canonicalize()
+        let canonical_root = root
+            .canonicalize()
             .map_err(|e| CommandError::Io(format!("插件根目录不可达: {e}")))?;
         if canonical_root.starts_with(&canonical_source) {
-            return Err(CommandError::Other("源插件目录不能包含插件安装根目录".into()));
+            return Err(CommandError::Other(
+                "源插件目录不能包含插件安装根目录".into(),
+            ));
         }
     }
 
@@ -391,36 +444,54 @@ fn prepare_plugin_install(source_path: &str, root: &Path) -> Result<PreparedPlug
     let staged_manifest = plugin::load_manifest_from_dir(&staging)
         .map_err(|e| CommandError::Other(format!("暂存 manifest 校验失败: {e}")))?;
     if staged_manifest != manifest {
-        return Err(CommandError::Other("复制期间插件 manifest 已变化，拒绝安装".into()));
+        return Err(CommandError::Other(
+            "复制期间插件 manifest 已变化，拒绝安装".into(),
+        ));
     }
     let entry_rel = sanitize_asset_path(&manifest.entry)?;
     let staged_entry = staging.join(&entry_rel);
-    let staged_root = staging.canonicalize()
+    let staged_root = staging
+        .canonicalize()
         .map_err(|e| CommandError::Io(format!("暂存目录不可达: {e}")))?;
-    let staged_entry_canon = staged_entry.canonicalize()
+    let staged_entry_canon = staged_entry
+        .canonicalize()
         .map_err(|e| CommandError::Other(format!("manifest entry 不存在: {e}")))?;
     if !staged_entry_canon.starts_with(&staged_root)
         || !staged_entry_canon.is_file()
-        || std::fs::symlink_metadata(&staged_entry).map(|m| m.file_type().is_symlink()).unwrap_or(true)
+        || std::fs::symlink_metadata(&staged_entry)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
     {
-        return Err(CommandError::Other("manifest entry 必须是暂存目录内的普通文件".into()));
+        return Err(CommandError::Other(
+            "manifest entry 必须是暂存目录内的普通文件".into(),
+        ));
     }
     if is_data_path(&entry_rel) {
-        return Err(CommandError::Other("manifest entry 不得位于 data/ 私有区".into()));
+        return Err(CommandError::Other(
+            "manifest entry 不得位于 data/ 私有区".into(),
+        ));
     }
     // Private storage is exclusively owned by the user, even on first install.
     remove_path_if_exists(&staging.join("data"))
         .map_err(|e| CommandError::Io(format!("移除安装包 data/ 失败: {e}")))?;
-    Ok(PreparedPluginInstall { manifest, source_label, dest, stage_guard })
+    Ok(PreparedPluginInstall {
+        manifest,
+        source_label,
+        dest,
+        stage_guard,
+    })
 }
 
-fn commit_plugin_install(prepared: &mut PreparedPluginInstall, revision: u64)
-    -> Result<(Option<std::path::PathBuf>, plugin::transaction::Transaction), CommandError> {
+fn commit_plugin_install(
+    prepared: &mut PreparedPluginInstall,
+    revision: u64,
+) -> Result<(Option<std::path::PathBuf>, plugin::transaction::Transaction), CommandError> {
     let dest = prepared.dest.clone();
     let staging = prepared.stage_guard.0.clone();
     let root = dest.parent().unwrap();
-    let mut transaction = plugin::transaction::Transaction::install(root, &prepared.manifest.id, &staging, revision)
-        .map_err(|e| CommandError::Io(format!("持久化安装事务失败: {e}")))?;
+    let mut transaction =
+        plugin::transaction::Transaction::install(root, &prepared.manifest.id, &staging, revision)
+            .map_err(|e| CommandError::Io(format!("持久化安装事务失败: {e}")))?;
     prepared.stage_guard.0.clear();
     let result = (|| -> std::io::Result<Option<std::path::PathBuf>> {
         let backup = transaction.backup(root);
@@ -443,16 +514,28 @@ fn commit_plugin_install(prepared: &mut PreparedPluginInstall, revision: u64)
         transaction.phase(root, "published")?;
         Ok(old.then_some(backup))
     })();
-    Ok((result.map_err(|e| CommandError::Io(format!("安装事务失败: {e}")))?, transaction))
+    Ok((
+        result.map_err(|e| CommandError::Io(format!("安装事务失败: {e}")))?,
+        transaction,
+    ))
 }
 
 #[cfg(test)]
-fn install_plugin_fs_stage(source_path: &str, root: &Path)
-    -> Result<(String, String, &'static str, Option<std::path::PathBuf>), CommandError> {
+fn install_plugin_fs_stage(
+    source_path: &str,
+    root: &Path,
+) -> Result<(String, String, &'static str, Option<std::path::PathBuf>), CommandError> {
     let mut prepared = prepare_plugin_install(source_path, root)?;
     let (backup, transaction) = commit_plugin_install(&mut prepared, 0)?;
-    transaction.finish(root).map_err(|e| CommandError::Io(e.to_string()))?;
-    Ok((prepared.manifest.id.clone(), prepared.manifest.version.clone(), prepared.source_label, backup))
+    transaction
+        .finish(root)
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+    Ok((
+        prepared.manifest.id.clone(),
+        prepared.manifest.version.clone(),
+        prepared.source_label,
+        backup,
+    ))
 }
 
 /// RAII：离开作用域即删除临时目录（zip 解压暂存区）。
@@ -506,34 +589,52 @@ pub async fn uninstall_plugin(
     let _plugin_io = state.plugin_io.lock().await;
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
     tokio::task::block_in_place(|| {
-        let mut manager = state.config_manager.lock()
+        let mut manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         uninstall_with_manager(&mut manager, &id)
     })
 }
 
-fn uninstall_with_manager(manager: &mut config::ConfigManager, id: &str) -> Result<PluginStateSnapshot, CommandError> {
+fn uninstall_with_manager(
+    manager: &mut config::ConfigManager,
+    id: &str,
+) -> Result<PluginStateSnapshot, CommandError> {
     let root = manager.plugins_dir().to_path_buf();
     std::fs::create_dir_all(&root).map_err(|e| CommandError::Io(e.to_string()))?;
     let dest = plugin_dir(&root, id)?;
-    let revision = manager.get_config().revision.checked_add(1)
+    let revision = manager
+        .get_config()
+        .revision
+        .checked_add(1)
         .ok_or_else(|| CommandError::Config("Config revision overflow".into()))?;
     let mut transaction = plugin::transaction::Transaction::uninstall(&root, id, revision)
         .map_err(|e| CommandError::Io(e.to_string()))?;
     let old_config = manager.get_config().clone();
     let result = (|| -> Result<(), CommandError> {
-        transaction.phase(&root, "remove").map_err(|e| CommandError::Io(e.to_string()))?;
+        transaction
+            .phase(&root, "remove")
+            .map_err(|e| CommandError::Io(e.to_string()))?;
         if dest.exists() {
             plugin::transaction::rename(&root, &dest, &transaction.backup(&root))
                 .map_err(|e| CommandError::Io(e.to_string()))?;
         }
-        transaction.phase(&root, "config-commit").map_err(|e| CommandError::Io(e.to_string()))?;
-        manager.get_config_mut().entities.plugin_configs.retain(|entry| entry.id != id);
+        transaction
+            .phase(&root, "config-commit")
+            .map_err(|e| CommandError::Io(e.to_string()))?;
+        manager
+            .get_config_mut()
+            .entities
+            .plugin_configs
+            .retain(|entry| entry.id != id);
         if let Err(error) = manager.save() {
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(error.to_string()));
         }
-        manager.save_safe_backup().map_err(|e| CommandError::Config(e.to_string()))?;
+        manager
+            .save_safe_backup()
+            .map_err(|e| CommandError::Config(e.to_string()))?;
         Ok(())
     })();
     if result.is_err() && manager.get_config().revision >= revision {
@@ -560,10 +661,15 @@ pub async fn set_plugin_enabled(
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
     {
-        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
     }
-    if !enabled { plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?; }
+    if !enabled {
+        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
+    }
     let mut manager = state
         .config_manager
         .lock()
@@ -578,7 +684,9 @@ pub async fn set_plugin_enabled(
     }
     let old_config = manager.get_config().clone();
     let cfg = manager.get_config_mut();
-    let entry = cfg.entities.plugin_configs
+    let entry = cfg
+        .entities
+        .plugin_configs
         .iter_mut()
         .find(|p| p.id == id)
         .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
@@ -587,7 +695,11 @@ pub async fn set_plugin_enabled(
         *manager.get_config_mut() = old_config;
         return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
     }
-    log::info!("Plugin {} {}", id, if enabled { "enabled" } else { "disabled" });
+    log::info!(
+        "Plugin {} {}",
+        id,
+        if enabled { "enabled" } else { "disabled" }
+    );
     Ok(snapshot(&manager))
 }
 
@@ -607,7 +719,10 @@ pub async fn set_plugin_permissions(
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
     {
-        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
     }
     plugin::view_runtime::retire_denied(window.app_handle(), &id, &permissions).await?;
@@ -624,8 +739,7 @@ pub async fn set_plugin_permissions(
     if manifest.id != id {
         return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
     }
-    let declared: std::collections::HashSet<String> =
-        manifest.permissions.into_iter().collect();
+    let declared: std::collections::HashSet<String> = manifest.permissions.into_iter().collect();
     for p in &permissions {
         if !declared.contains(p) {
             return Err(CommandError::Other(format!(
@@ -633,13 +747,17 @@ pub async fn set_plugin_permissions(
             )));
         }
         if !plugin::KNOWN_PERMISSIONS.contains(&p.as_str()) {
-            return Err(CommandError::Other(format!("宿主尚未实现权限 {p}，拒绝授予")));
+            return Err(CommandError::Other(format!(
+                "宿主尚未实现权限 {p}，拒绝授予"
+            )));
         }
     }
 
     let old_config = manager.get_config().clone();
     let cfg = manager.get_config_mut();
-    let entry = cfg.entities.plugin_configs
+    let entry = cfg
+        .entities
+        .plugin_configs
         .iter_mut()
         .find(|p| p.id == id)
         .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
@@ -658,8 +776,11 @@ pub async fn set_plugin_permissions(
 /// 返回 UTF-8 文本内容（插件代码/文本资产均为文本；二进制资产走后续增量）。
 /// FIFO admission avoids failing valid simultaneous startup/KV reads. The wait is
 /// bounded; timed-out requests leave the queue and cannot build an infinite backlog.
-async fn lock_asset_io(gate: &tokio::sync::Mutex<()>) -> Result<tokio::sync::MutexGuard<'_, ()>, CommandError> {
-    tokio::time::timeout(std::time::Duration::from_secs(2), gate.lock()).await
+async fn lock_asset_io(
+    gate: &tokio::sync::Mutex<()>,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, CommandError> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.lock())
+        .await
         .map_err(|_| CommandError::Other("插件磁盘操作等待超时，请稍后重试".into()))
 }
 
@@ -675,7 +796,9 @@ pub async fn read_plugin_asset(
     let _plugin_io = lock_asset_io(&state.plugin_io).await?;
     let rel = sanitize_asset_path(&rel_path)?;
     let root = {
-        let manager = state.config_manager.lock()
+        let manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let root = manager.plugins_dir().to_path_buf();
         let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
@@ -683,7 +806,11 @@ pub async fn read_plugin_asset(
         if manifest.id != id {
             return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
         }
-        let entry = manager.get_config().entities.plugin_configs.iter()
+        let entry = manager
+            .get_config()
+            .entities
+            .plugin_configs
+            .iter()
             .find(|p| p.id == id)
             .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
         if !entry.enabled {
@@ -691,14 +818,21 @@ pub async fn read_plugin_asset(
         }
         let in_data = is_data_path(&rel);
         let boot_file = rel == Path::new("manifest.json")
-            || rel == plugin::sanitize_plugin_rel_path(&manifest.entry).map_err(CommandError::Other)?;
+            || rel
+                == plugin::sanitize_plugin_rel_path(&manifest.entry)
+                    .map_err(CommandError::Other)?;
         let permission = if in_data { "fs:storage" } else { "fs:assets" };
         let kv_allowed = rel == Path::new("data/state.json")
             && entry.granted_permissions.iter().any(|p| p == "storage")
             && manifest.permissions.iter().any(|p| p == "storage");
-        if !(boot_file && !in_data) && !kv_allowed && (!entry.granted_permissions.iter().any(|p| p == permission)
-            || !manifest.permissions.iter().any(|p| p == permission)) {
-            return Err(CommandError::Other(format!("插件未授予 {permission}: {id}")));
+        if !(boot_file && !in_data)
+            && !kv_allowed
+            && (!entry.granted_permissions.iter().any(|p| p == permission)
+                || !manifest.permissions.iter().any(|p| p == permission))
+        {
+            return Err(CommandError::Other(format!(
+                "插件未授予 {permission}: {id}"
+            )));
         }
         root
     };
@@ -722,21 +856,35 @@ pub async fn write_plugin_asset(
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     if content.len() as u64 > PLUGIN_DATA_MAX_FILE_BYTES {
-        return Err(CommandError::Other("插件 data 单文件超过 16 MiB 上限".into()));
+        return Err(CommandError::Other(
+            "插件 data 单文件超过 16 MiB 上限".into(),
+        ));
     }
     let _plugin_io = lock_asset_io(&state.plugin_io).await?;
     let rel = sanitize_asset_path(&rel_path)?;
-    let first = rel.components().next().and_then(|c| c.as_os_str().to_str()).unwrap_or("");
+    let first = rel
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .unwrap_or("");
     if first != "data" {
-        return Err(CommandError::Other("插件写入仅限 data/ 私有区（fs:storage 权限范围）".into()));
+        return Err(CommandError::Other(
+            "插件写入仅限 data/ 私有区（fs:storage 权限范围）".into(),
+        ));
     }
     let root = {
-        let manager = state.config_manager.lock()
+        let manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let root = manager.plugins_dir().to_path_buf();
         let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
             .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-        let entry = manager.get_config().entities.plugin_configs.iter()
+        let entry = manager
+            .get_config()
+            .entities
+            .plugin_configs
+            .iter()
             .find(|p| p.id == id)
             .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
         let storage_allowed = entry.granted_permissions.iter().any(|p| p == "fs:storage")
@@ -745,7 +893,9 @@ pub async fn write_plugin_asset(
             && entry.granted_permissions.iter().any(|p| p == "storage")
             && manifest.permissions.iter().any(|p| p == "storage");
         if manifest.id != id || !entry.enabled || !(storage_allowed || kv_allowed) {
-            return Err(CommandError::Other(format!("插件未启用或未授予存储权限: {id}")));
+            return Err(CommandError::Other(format!(
+                "插件未启用或未授予存储权限: {id}"
+            )));
         }
         root
     };
@@ -771,7 +921,8 @@ pub async fn write_plugin_asset(
                 Err(e) => return Err(CommandError::Io(format!("目录不可达: {e}"))),
             }
         }
-        let canon_parent = parent.canonicalize()
+        let canon_parent = parent
+            .canonicalize()
             .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
         if !canon_parent.starts_with(&canon_base) {
             return Err(CommandError::Other("写入路径越界，拒绝".into()));
@@ -788,8 +939,11 @@ pub async fn write_plugin_asset(
 }
 
 fn is_data_path(rel: &Path) -> bool {
-    rel.components().next().and_then(|c| c.as_os_str().to_str())
-        .map(|first| first.eq_ignore_ascii_case("data")).unwrap_or(false)
+    rel.components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|first| first.eq_ignore_ascii_case("data"))
+        .unwrap_or(false)
 }
 
 fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
@@ -798,12 +952,18 @@ fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
     // data's case so DATA/state.json cannot be classified as a public asset.
     let mut out = std::path::PathBuf::new();
     for (index, component) in rel.components().enumerate() {
-        let name = component.as_os_str().to_str()
+        let name = component
+            .as_os_str()
+            .to_str()
             .ok_or_else(|| CommandError::Other("插件路径必须是 UTF-8".into()))?;
         if name.ends_with(['.', ' ']) || name.contains(':') || (index == 0 && name.contains('~')) {
             return Err(CommandError::Other("插件路径含 Windows 路径别名".into()));
         }
-        out.push(if index == 0 && name.eq_ignore_ascii_case("data") { "data" } else { name });
+        out.push(if index == 0 && name.eq_ignore_ascii_case("data") {
+            "data"
+        } else {
+            name
+        });
     }
     if out.components().count() > plugin::MAX_PLUGIN_SOURCE_DEPTH {
         return Err(CommandError::Other("插件资产路径深度超过上限".into()));
@@ -813,8 +973,12 @@ fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
 
 /// Called only after authorization and the non-queued IO gate have succeeded.
 fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, CommandError> {
-    let canon_base = base.canonicalize().map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-    if is_data_path(rel) { check_data_write_quota(&base.join("data"), &base.join(rel), 0)?; }
+    let canon_base = base
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
+    if is_data_path(rel) {
+        check_data_write_quota(&base.join("data"), &base.join(rel), 0)?;
+    }
     let mut current = base.to_path_buf();
     let count = rel.components().count();
     for (index, component) in rel.components().enumerate() {
@@ -826,25 +990,41 @@ fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, Comm
         };
         if metadata.file_type().is_symlink()
             || (index + 1 < count && !metadata.is_dir())
-            || (index + 1 == count && !metadata.is_file()) {
+            || (index + 1 == count && !metadata.is_file())
+        {
             return Err(CommandError::Other("资产路径含链接或非常规文件".into()));
         }
     }
-    let target = current.canonicalize().map_err(|e| CommandError::Io(format!("资产不可达: {e}")))?;
-    if !target.starts_with(canon_base) { return Err(CommandError::Other("资产路径越界".into())); }
-    let limit = if is_data_path(rel) { PLUGIN_DATA_MAX_FILE_BYTES } else { plugin::MAX_ZIP_UNCOMPRESSED_BYTES };
+    let target = current
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("资产不可达: {e}")))?;
+    if !target.starts_with(canon_base) {
+        return Err(CommandError::Other("资产路径越界".into()));
+    }
+    let limit = if is_data_path(rel) {
+        PLUGIN_DATA_MAX_FILE_BYTES
+    } else {
+        plugin::MAX_ZIP_UNCOMPRESSED_BYTES
+    };
     read_asset_limited(&target, limit).map(Some)
 }
 
 fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))?;
-    let meta = file.metadata().map_err(|e| CommandError::Io(e.to_string()))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| CommandError::Io(e.to_string()))?;
     if !meta.is_file() || meta.len() > limit {
-        return Err(CommandError::Other("插件资产读取超过大小上限或不是普通文件".into()));
+        return Err(CommandError::Other(
+            "插件资产读取超过大小上限或不是普通文件".into(),
+        ));
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(limit + 1).read_to_end(&mut bytes).map_err(|e| CommandError::Io(e.to_string()))?;
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| CommandError::Io(e.to_string()))?;
     if bytes.len() as u64 > limit {
         return Err(CommandError::Other("插件资产读取超过大小上限".into()));
     }
@@ -852,7 +1032,13 @@ fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
 }
 
 fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), CommandError> {
-    fn scan(path: &Path, depth: usize, entries: &mut usize, files: &mut usize, bytes: &mut u64) -> Result<(), CommandError> {
+    fn scan(
+        path: &Path,
+        depth: usize,
+        entries: &mut usize,
+        files: &mut usize,
+        bytes: &mut u64,
+    ) -> Result<(), CommandError> {
         if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH {
             return Err(CommandError::Other("插件 data 深度超过上限".into()));
         }
@@ -862,7 +1048,8 @@ fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), C
                 return Err(CommandError::Other("插件 data 条目数超过上限".into()));
             }
             let entry = entry.map_err(|e| CommandError::Io(e.to_string()))?;
-            let meta = std::fs::symlink_metadata(entry.path()).map_err(|e| CommandError::Io(e.to_string()))?;
+            let meta = std::fs::symlink_metadata(entry.path())
+                .map_err(|e| CommandError::Io(e.to_string()))?;
             if meta.file_type().is_symlink() || !(meta.is_file() || meta.is_dir()) {
                 return Err(CommandError::Other("插件 data 含链接或非常规文件".into()));
             }
@@ -886,22 +1073,29 @@ fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), C
     }
     let (mut entries, mut files, mut bytes) = (0, 0, 0u64);
     match std::fs::symlink_metadata(data) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => scan(data, 0, &mut entries, &mut files, &mut bytes)?,
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            scan(data, 0, &mut entries, &mut files, &mut bytes)?
+        }
         Ok(_) => return Err(CommandError::Other("插件 data 不是普通目录".into())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(CommandError::Io(e.to_string())),
     }
-    let relative = target.strip_prefix(data)
+    let relative = target
+        .strip_prefix(data)
         .map_err(|_| CommandError::Other("写入目标不在 data/ 内".into()))?;
     if relative.components().count() > plugin::MAX_PLUGIN_SOURCE_DEPTH {
         return Err(CommandError::Other("插件 data 深度超过上限".into()));
     }
     let mut missing_parents = 0usize;
     let mut parent = data.to_path_buf();
-    for component in relative.parent().unwrap_or_else(|| Path::new("")).components() {
+    for component in relative
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .components()
+    {
         parent.push(component);
         match std::fs::symlink_metadata(&parent) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {},
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
             Ok(_) => return Err(CommandError::Other("写入目录含链接或非目录".into())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing_parents += 1,
             Err(e) => return Err(CommandError::Io(e.to_string())),
@@ -915,7 +1109,11 @@ fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), C
     };
     if entries + missing_parents + usize::from(old_size.is_none()) > plugin::MAX_ZIP_ENTRIES
         || files + usize::from(old_size.is_none()) > PLUGIN_DATA_MAX_FILES
-        || bytes.saturating_sub(old_size.unwrap_or(0)).saturating_add(size) > PLUGIN_DATA_MAX_TOTAL_BYTES {
+        || bytes
+            .saturating_sub(old_size.unwrap_or(0))
+            .saturating_add(size)
+            > PLUGIN_DATA_MAX_TOTAL_BYTES
+    {
         return Err(CommandError::Other("插件 data 文件数或总量超过上限".into()));
     }
     Ok(())
@@ -924,7 +1122,10 @@ fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), C
 fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let temporary = parent.join(format!(".write-{}", uuid::Uuid::new_v4()));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let result = (|| {
         file.write_all(content)?;
         file.sync_all()?;
@@ -932,7 +1133,9 @@ fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::
         plugin::transaction::replace_file(&temporary, target)?;
         plugin::transaction::sync_dir(parent)
     })();
-    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
     result
 }
 
@@ -944,22 +1147,39 @@ fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), CommandError
 }
 
 #[tauri::command]
-pub async fn create_plugin_view(source: tauri::Webview, state: State<'_, AppState>, binding: plugin::view_runtime::Binding) -> Result<(), CommandError> {
+pub async fn create_plugin_view(
+    source: tauri::Webview,
+    state: State<'_, AppState>,
+    binding: plugin::view_runtime::Binding,
+) -> Result<(), CommandError> {
     plugin::view_runtime::create(source, &state, binding).await
 }
 
 #[tauri::command]
-pub async fn update_plugin_view(source: tauri::Webview, instance_id: String, rect: plugin::view_runtime::Rect, visible: bool, layout_revision: u64) -> Result<(), CommandError> {
+pub async fn update_plugin_view(
+    source: tauri::Webview,
+    instance_id: String,
+    rect: plugin::view_runtime::Rect,
+    visible: bool,
+    layout_revision: u64,
+) -> Result<(), CommandError> {
     plugin::view_runtime::update(source, instance_id, rect, visible, layout_revision).await
 }
 
 #[tauri::command]
-pub async fn send_plugin_view_message(source: tauri::Webview, instance_id: String, message: serde_json::Value) -> Result<(), CommandError> {
+pub async fn send_plugin_view_message(
+    source: tauri::Webview,
+    instance_id: String,
+    message: serde_json::Value,
+) -> Result<(), CommandError> {
     plugin::view_runtime::send(source, instance_id, message).await
 }
 
 #[tauri::command]
-pub async fn destroy_plugin_view(source: tauri::Webview, instance_id: String) -> Result<(), CommandError> {
+pub async fn destroy_plugin_view(
+    source: tauri::Webview,
+    instance_id: String,
+) -> Result<(), CommandError> {
     plugin::view_runtime::destroy(source, instance_id).await
 }
 
@@ -976,8 +1196,9 @@ fn plugin_dir(root: &Path, id: &str) -> Result<std::path::PathBuf, CommandError>
     plugin::validate_plugin_id(id).map_err(CommandError::Other)?;
     let dest = root.join(id);
     match std::fs::symlink_metadata(&dest) {
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() =>
-            return Err(CommandError::Other(format!("插件目录不是普通目录: {id}"))),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err(CommandError::Other(format!("插件目录不是普通目录: {id}")))
+        }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(CommandError::Io(format!("插件目录不可达: {e}"))),
@@ -986,20 +1207,30 @@ fn plugin_dir(root: &Path, id: &str) -> Result<std::path::PathBuf, CommandError>
 }
 
 #[cfg(test)]
-fn stage_uninstall_fs(root: &Path, id: &str) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), CommandError> {
+fn stage_uninstall_fs(
+    root: &Path,
+    id: &str,
+) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), CommandError> {
     let dest = plugin_dir(root, id)?;
-    if !dest.exists() { return Ok((dest, None)); }
+    if !dest.exists() {
+        return Ok((dest, None));
+    }
     let transaction = plugin::transaction::Transaction::uninstall(root, id, 1)
         .map_err(|e| CommandError::Io(e.to_string()))?;
     let backup = transaction.backup(root);
-    plugin::transaction::rename(root, &dest, &backup).map_err(|e| CommandError::Io(e.to_string()))?;
-    transaction.finish(root).map_err(|e| CommandError::Io(e.to_string()))?;
+    plugin::transaction::rename(root, &dest, &backup)
+        .map_err(|e| CommandError::Io(e.to_string()))?;
+    transaction
+        .finish(root)
+        .map_err(|e| CommandError::Io(e.to_string()))?;
     Ok((dest, Some(backup)))
 }
 
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => std::fs::remove_dir_all(path),
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path)
+        }
         Ok(_) => std::fs::remove_file(path),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -1018,8 +1249,19 @@ fn copy_dir_recursive(src: &Path, dest: &Path, budget: &mut u64) -> std::io::Res
 // from an O_NOFOLLOW directory handle and Windows verifies every final handle
 // against the already-opened source root.  Both paths reject links and all
 // non-regular objects before any bytes are read.
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
-fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: usize, entries: &mut usize) -> std::io::Result<()> {
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+fn copy_dir_recursive_inner(
+    src: &Path,
+    dest: &Path,
+    budget: &mut u64,
+    depth: usize,
+    entries: &mut usize,
+) -> std::io::Result<()> {
     use std::ffi::{CStr, CString, OsString};
     use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -1037,45 +1279,66 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
         let mut current = if path.is_absolute() {
             let root = CString::new("/").unwrap();
             let fd = unsafe { libc::open(root.as_ptr(), open_flags() | libc::O_DIRECTORY) };
-            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             unsafe { std::fs::File::from_raw_fd(fd) }
         } else {
             let dot = CString::new(".").unwrap();
             let fd = unsafe { libc::open(dot.as_ptr(), open_flags() | libc::O_DIRECTORY) };
-            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             unsafe { std::fs::File::from_raw_fd(fd) }
         };
         for component in path.components() {
             let name = match component {
                 std::path::Component::RootDir | std::path::Component::CurDir => continue,
-                std::path::Component::Normal(name) => CString::new(name.as_bytes())
-                    .map_err(|_| invalid("源目录名称包含 NUL"))?,
+                std::path::Component::Normal(name) => {
+                    CString::new(name.as_bytes()).map_err(|_| invalid("源目录名称包含 NUL"))?
+                }
                 std::path::Component::ParentDir => return Err(invalid("源目录不得包含 ..")),
                 std::path::Component::Prefix(_) => return Err(invalid("不支持的源目录前缀")),
             };
             let fd = unsafe {
-                libc::openat(current.as_raw_fd(), name.as_ptr(), open_flags() | libc::O_DIRECTORY)
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    open_flags() | libc::O_DIRECTORY,
+                )
             };
-            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             current = unsafe { std::fs::File::from_raw_fd(fd) };
         }
         let metadata = current.metadata()?;
-        if !metadata.is_dir() { return Err(invalid("插件源根目录必须是目录")); }
+        if !metadata.is_dir() {
+            return Err(invalid("插件源根目录必须是目录"));
+        }
         Ok(current)
     }
 
     struct DirectoryStream(*mut libc::DIR);
     impl Drop for DirectoryStream {
-        fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
     }
     impl DirectoryStream {
         fn open(dir: RawFd) -> std::io::Result<Self> {
             let duplicate = unsafe { libc::fcntl(dir, libc::F_DUPFD_CLOEXEC, 0) };
-            if duplicate < 0 { return Err(std::io::Error::last_os_error()); }
+            if duplicate < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             let stream = unsafe { libc::fdopendir(duplicate) };
             if stream.is_null() {
                 let error = std::io::Error::last_os_error();
-                unsafe { libc::close(duplicate); }
+                unsafe {
+                    libc::close(duplicate);
+                }
                 return Err(error);
             }
             Ok(Self(stream))
@@ -1090,14 +1353,22 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
                 let errno = unsafe { libc::__errno() };
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let errno = unsafe { libc::__error() };
-                unsafe { *errno = 0; }
+                unsafe {
+                    *errno = 0;
+                }
                 let item = unsafe { libc::readdir(self.0) };
                 if item.is_null() {
                     let error = unsafe { *errno };
-                    return if error == 0 { Ok(None) } else { Err(std::io::Error::from_raw_os_error(error)) };
+                    return if error == 0 {
+                        Ok(None)
+                    } else {
+                        Err(std::io::Error::from_raw_os_error(error))
+                    };
                 }
                 let bytes = unsafe { CStr::from_ptr((*item).d_name.as_ptr()) }.to_bytes();
-                if bytes == b"." || bytes == b".." { continue; }
+                if bytes == b"." || bytes == b".." {
+                    continue;
+                }
                 return Ok(Some(OsString::from_vec(bytes.to_vec())));
             }
         }
@@ -1126,7 +1397,15 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
             let name_bytes = name.as_os_str().as_bytes();
             let c_name = CString::new(name_bytes).map_err(|_| invalid("插件源名称包含 NUL"))?;
             let mut before: libc::stat = unsafe { std::mem::zeroed() };
-            if unsafe { libc::fstatat(dir.as_raw_fd(), c_name.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+            if unsafe {
+                libc::fstatat(
+                    dir.as_raw_fd(),
+                    c_name.as_ptr(),
+                    &mut before,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
                 return Err(std::io::Error::last_os_error());
             }
             let target = dest.join(&name);
@@ -1140,11 +1419,15 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
             directory_copy_test_hook(DirectoryCopyStep::BeforeOpen, &target);
             let flags = open_flags() | if is_dir { libc::O_DIRECTORY } else { 0 };
             let fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
-            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             let opened = unsafe { std::fs::File::from_raw_fd(fd) };
             let metadata = opened.metadata()?;
             if is_dir {
-                if !metadata.is_dir() { return Err(invalid("插件源目录类型在打开期间变化")); }
+                if !metadata.is_dir() {
+                    return Err(invalid("插件源目录类型在打开期间变化"));
+                }
                 #[cfg(test)]
                 directory_copy_test_hook(DirectoryCopyStep::DirectoryOpened, &target);
                 copy_dir_fd(&opened, &target, budget, depth + 1, entries)?;
@@ -1153,8 +1436,11 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
                     return Err(invalid("插件源必须是未链接的普通文件"));
                 }
                 let mut output = std::fs::File::create(target)?;
-                let written = std::io::copy(&mut std::io::Read::take(opened, *budget + 1), &mut output)?;
-                if written > *budget { return Err(invalid("插件目录超过 64 MiB 大小上限")); }
+                let written =
+                    std::io::copy(&mut std::io::Read::take(opened, *budget + 1), &mut output)?;
+                if written > *budget {
+                    return Err(invalid("插件目录超过 64 MiB 大小上限"));
+                }
                 *budget -= written;
             }
         }
@@ -1165,14 +1451,32 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
     copy_dir_fd(&root, dest, budget, depth, entries)
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")))]
-fn copy_dir_recursive_inner(_: &Path, _: &Path, _: &mut u64, _: usize, _: &mut usize) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "此平台不支持安全目录插件安装"))
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+fn copy_dir_recursive_inner(
+    _: &Path,
+    _: &Path,
+    _: &mut u64,
+    _: usize,
+    _: &mut usize,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "此平台不支持安全目录插件安装",
+    ))
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DirectoryCopyStep { BeforeOpen, DirectoryOpened }
+enum DirectoryCopyStep {
+    BeforeOpen,
+    DirectoryOpened,
+}
 
 #[cfg(test)]
 type DirectoryCopyHook = Box<dyn FnMut(DirectoryCopyStep, &Path)>;
@@ -1185,18 +1489,27 @@ thread_local! {
 #[cfg(test)]
 fn directory_copy_test_hook(step: DirectoryCopyStep, target: &Path) {
     DIRECTORY_COPY_HOOK.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() { hook(step, target); }
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(step, target);
+        }
     });
 }
 
 #[cfg(windows)]
-fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: usize, entries: &mut usize) -> std::io::Result<()> {
+fn copy_dir_recursive_inner(
+    src: &Path,
+    dest: &Path,
+    budget: &mut u64,
+    depth: usize,
+    entries: &mut usize,
+) -> std::io::Result<()> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE, FILE_TYPE_DISK, VOLUME_NAME_DOS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_TYPE_DISK, VOLUME_NAME_DOS,
     };
 
     fn invalid(message: &str) -> std::io::Error {
@@ -1205,8 +1518,17 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
     fn final_path(file: &std::fs::File) -> std::io::Result<std::path::PathBuf> {
         use std::os::windows::ffi::OsStringExt;
         let mut buffer = vec![0u16; 32768];
-        let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) };
-        if length == 0 || length as usize >= buffer.len() { return Err(std::io::Error::last_os_error()); }
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+        if length == 0 || length as usize >= buffer.len() {
+            return Err(std::io::Error::last_os_error());
+        }
         Ok(std::ffi::OsString::from_wide(&buffer[..length as usize]).into())
     }
     fn validate_opened(file: std::fs::File, directory: bool) -> std::io::Result<std::fs::File> {
@@ -1214,7 +1536,9 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
             return Err(invalid("插件源必须是磁盘上的普通文件或目录"));
         }
         let metadata = file.metadata()?;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 { return Err(invalid("插件源不得包含重解析点")); }
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(invalid("插件源不得包含重解析点"));
+        }
         if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
             return Err(invalid("插件源对象类型在打开期间变化"));
         }
@@ -1222,59 +1546,143 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
     }
     fn open_anchor(path: &Path) -> std::io::Result<std::fs::File> {
         let mut options = std::fs::OpenOptions::new();
-        options.read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
         validate_opened(options.open(path)?, true)
     }
-    fn open_relative(parent: &std::fs::File, name: &std::ffi::OsStr, directory: bool, pinned: bool) -> std::io::Result<std::fs::File> {
+    fn open_relative(
+        parent: &std::fs::File,
+        name: &std::ffi::OsStr,
+        directory: bool,
+        pinned: bool,
+    ) -> std::io::Result<std::fs::File> {
         use std::os::windows::ffi::OsStrExt;
         // NtCreateFile is the Windows openat equivalent. Only a single name is
         // supplied, so intermediate components cannot be re-resolved by Win32.
         #[repr(C)]
-        struct UnicodeString { length: u16, maximum_length: u16, buffer: *mut u16 }
+        struct UnicodeString {
+            length: u16,
+            maximum_length: u16,
+            buffer: *mut u16,
+        }
         #[repr(C)]
-        struct ObjectAttributes { length: u32, root: *mut std::ffi::c_void, name: *mut UnicodeString, attributes: u32, security: *mut std::ffi::c_void, quality: *mut std::ffi::c_void }
+        struct ObjectAttributes {
+            length: u32,
+            root: *mut std::ffi::c_void,
+            name: *mut UnicodeString,
+            attributes: u32,
+            security: *mut std::ffi::c_void,
+            quality: *mut std::ffi::c_void,
+        }
         #[repr(C)]
-        struct IoStatus { status: usize, information: usize }
+        struct IoStatus {
+            status: usize,
+            information: usize,
+        }
         #[link(name = "ntdll")]
         extern "system" {
-            fn NtCreateFile(handle: *mut *mut std::ffi::c_void, access: u32, attributes: *mut ObjectAttributes, status: *mut IoStatus, size: *mut i64, file_attributes: u32, share: u32, disposition: u32, options: u32, ea: *mut std::ffi::c_void, ea_length: u32) -> i32;
+            fn NtCreateFile(
+                handle: *mut *mut std::ffi::c_void,
+                access: u32,
+                attributes: *mut ObjectAttributes,
+                status: *mut IoStatus,
+                size: *mut i64,
+                file_attributes: u32,
+                share: u32,
+                disposition: u32,
+                options: u32,
+                ea: *mut std::ffi::c_void,
+                ea_length: u32,
+            ) -> i32;
             fn RtlNtStatusToDosError(status: i32) -> u32;
         }
         let mut wide: Vec<u16> = name.encode_wide().collect();
-        if wide.is_empty() || wide.len() > (u16::MAX as usize / 2) || wide.iter().any(|c| matches!(*c, 0 | 47 | 92 | 58)) {
+        if wide.is_empty()
+            || wide.len() > (u16::MAX as usize / 2)
+            || wide.iter().any(|c| matches!(*c, 0 | 47 | 92 | 58))
+        {
             return Err(invalid("插件源组件名称无效"));
         }
-        let mut unicode = UnicodeString { length: (wide.len() * 2) as u16, maximum_length: (wide.len() * 2) as u16, buffer: wide.as_mut_ptr() };
-        let mut attributes = ObjectAttributes { length: std::mem::size_of::<ObjectAttributes>() as u32, root: parent.as_raw_handle(), name: &mut unicode, attributes: 0x40 | 0x1000, security: std::ptr::null_mut(), quality: std::ptr::null_mut() }; // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
-        let mut status = IoStatus { status: 0, information: 0 };
+        let mut unicode = UnicodeString {
+            length: (wide.len() * 2) as u16,
+            maximum_length: (wide.len() * 2) as u16,
+            buffer: wide.as_mut_ptr(),
+        };
+        let mut attributes = ObjectAttributes {
+            length: std::mem::size_of::<ObjectAttributes>() as u32,
+            root: parent.as_raw_handle(),
+            name: &mut unicode,
+            attributes: 0x40 | 0x1000,
+            security: std::ptr::null_mut(),
+            quality: std::ptr::null_mut(),
+        }; // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+        let mut status = IoStatus {
+            status: 0,
+            information: 0,
+        };
         let mut handle = std::ptr::null_mut();
-        let share = if pinned { FILE_SHARE_READ } else { FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE };
+        let share = if pinned {
+            FILE_SHARE_READ
+        } else {
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        };
         let options = 0x00200000 | 0x20 | if directory { 1 } else { 0x40 }; // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | DIRECTORY/NON_DIRECTORY
-        let result = unsafe { NtCreateFile(&mut handle, 0x00120089, &mut attributes, &mut status, std::ptr::null_mut(), 0, share, 1, options, std::ptr::null_mut(), 0) }; // FILE_GENERIC_READ, FILE_OPEN
-        if result < 0 { return Err(std::io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32)); }
+        let result = unsafe {
+            NtCreateFile(
+                &mut handle,
+                0x00120089,
+                &mut attributes,
+                &mut status,
+                std::ptr::null_mut(),
+                0,
+                share,
+                1,
+                options,
+                std::ptr::null_mut(),
+                0,
+            )
+        }; // FILE_GENERIC_READ, FILE_OPEN
+        if result < 0 {
+            return Err(std::io::Error::from_raw_os_error(
+                unsafe { RtlNtStatusToDosError(result) } as i32,
+            ));
+        }
         validate_opened(unsafe { std::fs::File::from_raw_handle(handle) }, directory)
     }
     fn pin_root(src: &Path) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
-        let absolute = if src.is_absolute() { src.to_path_buf() } else { std::env::current_dir()?.join(src) };
+        let absolute = if src.is_absolute() {
+            src.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(src)
+        };
         let mut anchor = std::path::PathBuf::new();
         let mut names = Vec::new();
         for component in absolute.components() {
             match component {
                 std::path::Component::Prefix(prefix) => {
                     use std::path::Prefix;
-                    if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _)) {
+                    if !matches!(
+                        prefix.kind(),
+                        Prefix::Disk(_)
+                            | Prefix::VerbatimDisk(_)
+                            | Prefix::UNC(_, _)
+                            | Prefix::VerbatimUNC(_, _)
+                    ) {
                         return Err(invalid("插件源不得使用设备路径"));
                     }
                     anchor.push(prefix.as_os_str());
                 }
                 std::path::Component::RootDir => anchor.push(component.as_os_str()),
-                std::path::Component::CurDir => {},
+                std::path::Component::CurDir => {}
                 std::path::Component::Normal(name) => names.push(name),
                 std::path::Component::ParentDir => return Err(invalid("源目录不得包含 ..")),
             }
         }
-        if names.is_empty() { return Err(invalid("插件源必须是非卷根目录")); }
+        if names.is_empty() {
+            return Err(invalid("插件源必须是非卷根目录"));
+        }
         let mut current = open_anchor(&anchor)?;
         for (index, name) in names.iter().enumerate() {
             current = open_relative(&current, name, true, index + 1 == names.len())?;
@@ -1282,24 +1690,47 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
         let root = final_path(&current)?;
         Ok((current, root))
     }
-    fn copy_dir_path(dir: &std::fs::File, path: &Path, root: &Path, dest: &Path, budget: &mut u64, depth: usize, entries: &mut usize) -> std::io::Result<()> {
-        if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH { return Err(invalid("插件目录递归深度超过上限")); }
+    fn copy_dir_path(
+        dir: &std::fs::File,
+        path: &Path,
+        root: &Path,
+        dest: &Path,
+        budget: &mut u64,
+        depth: usize,
+        entries: &mut usize,
+    ) -> std::io::Result<()> {
+        if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH {
+            return Err(invalid("插件目录递归深度超过上限"));
+        }
         std::fs::create_dir_all(dest)?;
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
             *entries = (*entries).saturating_add(1);
-            if *entries > plugin::MAX_ZIP_ENTRIES { return Err(invalid("插件目录条目数超过上限")); }
-            if depth + 1 > plugin::MAX_PLUGIN_SOURCE_DEPTH { return Err(invalid("插件目录递归深度超过上限")); }
+            if *entries > plugin::MAX_ZIP_ENTRIES {
+                return Err(invalid("插件目录条目数超过上限"));
+            }
+            if depth + 1 > plugin::MAX_PLUGIN_SOURCE_DEPTH {
+                return Err(invalid("插件目录递归深度超过上限"));
+            }
             let candidate = entry.path();
             let link_meta = std::fs::symlink_metadata(&candidate)?;
-            if link_meta.file_type().is_symlink() || link_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            if link_meta.file_type().is_symlink()
+                || link_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
                 return Err(invalid("插件源不得包含链接或重解析点"));
             }
             let name = entry.file_name();
-            let text = name.to_str().ok_or_else(|| invalid("插件源名称必须是 UTF-8"))?;
+            let text = name
+                .to_str()
+                .ok_or_else(|| invalid("插件源名称必须是 UTF-8"))?;
             let stem = text.split('.').next().unwrap_or("").to_ascii_uppercase();
-            if text.ends_with(['.', ' ']) || text.contains(':') || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && matches!(stem.as_bytes()[3], b'1'..=b'9')) {
+            if text.ends_with(['.', ' '])
+                || text.contains(':')
+                || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && stem.len() == 4
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            {
                 return Err(invalid("插件源名称含 Windows 设备或路径别名"));
             }
             let target = dest.join(&name);
@@ -1308,7 +1739,9 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
             if link_meta.is_dir() {
                 let opened = open_relative(dir, &name, true, true)?;
                 let child = final_path(&opened)?;
-                if child.parent() != Some(path) || !child.starts_with(root) { return Err(invalid("插件源越过选定目录")); }
+                if child.parent() != Some(path) || !child.starts_with(root) {
+                    return Err(invalid("插件源越过选定目录"));
+                }
                 #[cfg(test)]
                 directory_copy_test_hook(DirectoryCopyStep::DirectoryOpened, &target);
                 copy_dir_path(&opened, &child, root, &target, budget, depth + 1, entries)?;
@@ -1316,13 +1749,24 @@ fn copy_dir_recursive_inner(src: &Path, dest: &Path, budget: &mut u64, depth: us
             } else if link_meta.is_file() {
                 let input = open_relative(dir, &name, false, true)?;
                 let opened_path = final_path(&input)?;
-                if opened_path.parent() != Some(path) || !opened_path.starts_with(root) { return Err(invalid("插件源越过选定目录")); }
+                if opened_path.parent() != Some(path) || !opened_path.starts_with(root) {
+                    return Err(invalid("插件源越过选定目录"));
+                }
                 let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-                if unsafe { GetFileInformationByHandle(input.as_raw_handle(), &mut information) } == 0 { return Err(std::io::Error::last_os_error()); }
-                if information.nNumberOfLinks != 1 { return Err(invalid("插件源必须是未链接的普通文件")); }
+                if unsafe { GetFileInformationByHandle(input.as_raw_handle(), &mut information) }
+                    == 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if information.nNumberOfLinks != 1 {
+                    return Err(invalid("插件源必须是未链接的普通文件"));
+                }
                 let mut output = std::fs::File::create(target)?;
-                let written = std::io::copy(&mut std::io::Read::take(input, *budget + 1), &mut output)?;
-                if written > *budget { return Err(invalid("插件目录超过 64 MiB 大小上限")); }
+                let written =
+                    std::io::copy(&mut std::io::Read::take(input, *budget + 1), &mut output)?;
+                if written > *budget {
+                    return Err(invalid("插件目录超过 64 MiB 大小上限"));
+                }
                 *budget -= written;
             } else {
                 return Err(invalid("插件源不得包含特殊文件"));
@@ -1394,7 +1838,9 @@ pub async fn plugin_http(
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let cfg = manager.get_config();
-        let entry = cfg.entities.plugin_configs
+        let entry = cfg
+            .entities
+            .plugin_configs
             .iter()
             .find(|p| p.id == plugin_id)
             .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
@@ -1415,10 +1861,16 @@ pub async fn plugin_http(
         let manifest = crate::plugin::load_manifest_from_dir(&plugin_dir(&root, &plugin_id)?)
             .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
         if manifest.id != plugin_id || !manifest.permissions.iter().any(|p| p == "http:request") {
-            return Err(CommandError::Other(format!("插件未声明 http:request: {plugin_id}")));
+            return Err(CommandError::Other(format!(
+                "插件未声明 http:request: {plugin_id}"
+            )));
         }
         let whitelist = manifest.http.map(|h| h.url_whitelist).unwrap_or_default();
-        (whitelist, cfg.plugin_proxy.clone(), cfg.plugin_proxy_enabled)
+        (
+            whitelist,
+            cfg.plugin_proxy.clone(),
+            cfg.plugin_proxy_enabled,
+        )
     };
 
     // URL glob 匹配：逐条 glob 匹配（`*` 单段 / `**` 跨段 / 其余字面量）。
@@ -1426,8 +1878,8 @@ pub async fn plugin_http(
     // 归一、默认端口剥离、`..\` 解析消除）而非插件原始串——大小写/尾点/
     // 相对段等畸形写法不再造成误拒，也不给「原始串匹配但实际解析到别处」
     // 留语义缝隙（评审复审：原实现对 request.url 原始串匹配）。
-    let parsed_url = url::Url::parse(&request.url)
-        .map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
+    let parsed_url =
+        url::Url::parse(&request.url).map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
     let normalized_url = parsed_url.as_str();
     let matched = url_whitelist
         .iter()
@@ -1447,7 +1899,10 @@ pub async fn plugin_http(
     }
 
     // --- 转发 ---
-    let timeout = request.timeout.unwrap_or(10).min(PLUGIN_HTTP_MAX_TIMEOUT_SECS);
+    let timeout = request
+        .timeout
+        .unwrap_or(10)
+        .min(PLUGIN_HTTP_MAX_TIMEOUT_SECS);
     let mut client_builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout))
         // **禁止自动重定向**（评审 v2 D5 安全补强）：urlWhitelist 只校验初始 URL，
@@ -1584,29 +2039,41 @@ pub async fn plugin_open_external(
     require_main_window(&window)?;
     plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
     {
-        let manager = state.config_manager.lock()
+        let manager = state
+            .config_manager
+            .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let entry = manager.get_config().entities.plugin_configs.iter()
+        let entry = manager
+            .get_config()
+            .entities
+            .plugin_configs
+            .iter()
             .find(|p| p.id == plugin_id)
             .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
         if !entry.enabled || !entry.granted_permissions.iter().any(|p| p == "shell:open") {
-            return Err(CommandError::Other(format!("插件未启用或未授予 shell:open: {plugin_id}")));
+            return Err(CommandError::Other(format!(
+                "插件未启用或未授予 shell:open: {plugin_id}"
+            )));
         }
-        let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &plugin_id)?)
-            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+        let manifest =
+            plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &plugin_id)?)
+                .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
         if manifest.id != plugin_id || !manifest.permissions.iter().any(|p| p == "shell:open") {
-            return Err(CommandError::Other(format!("插件未声明 shell:open: {plugin_id}")));
+            return Err(CommandError::Other(format!(
+                "插件未声明 shell:open: {plugin_id}"
+            )));
         }
     }
-    let parsed = url::Url::parse(&url)
-        .map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
+    let parsed =
+        url::Url::parse(&url).map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
         return Err(CommandError::Other(format!(
             "openExternal 仅允许 http/https/mailto，收到: {}",
             parsed.scheme()
         )));
     }
-    #[allow(deprecated)] // tauri-plugin-shell open 已 deprecated（官方建议 tauri-plugin-opener）；v1 沿用 shell 插件（capabilities 已有 shell:allow-open），opener 迁移在评审 §11 开放问题实施时评估
+    #[allow(deprecated)]
+    // tauri-plugin-shell open 已 deprecated（官方建议 tauri-plugin-opener）；v1 沿用 shell 插件（capabilities 已有 shell:allow-open），opener 迁移在评审 §11 开放问题实施时评估
     app.shell()
         .open(url, None)
         .map_err(|e| CommandError::Other(format!("打开 URL 失败: {e}")))?;
@@ -1627,7 +2094,8 @@ mod tests {
 
     #[test]
     fn zip_install_uses_canonical_internal_extraction_directory() {
-        let root = canonical_test_temp_dir().join(format!("plugin_zip_temp_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_zip_temp_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let archive = root.join("plugin.zip");
         let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
@@ -1638,14 +2106,20 @@ mod tests {
         zip.start_file("main.js", options).unwrap();
         zip.write_all(b"ordinary").unwrap();
         zip.finish().unwrap();
-        let prepared = prepare_plugin_install(archive.to_str().unwrap(), &root.join("plugins")).unwrap();
-        assert_eq!(fs::read_to_string(prepared.stage_guard.0.join("main.js")).unwrap(), "ordinary");
+        let prepared =
+            prepare_plugin_install(archive.to_str().unwrap(), &root.join("plugins")).unwrap();
+        assert_eq!(
+            fs::read_to_string(prepared.stage_guard.0.join("main.js")).unwrap(),
+            "ordinary"
+        );
         drop(prepared);
         fs::remove_dir_all(root).unwrap();
     }
 
     fn manifest(version: &str) -> String {
-        format!(r#"{{"id":"com.example.test","name":"Test","version":"{version}","apiVersion":"1.0","entry":"main.js","permissions":[]}}"#)
+        format!(
+            r#"{{"id":"com.example.test","name":"Test","version":"{version}","apiVersion":"1.0","entry":"main.js","permissions":[]}}"#
+        )
     }
 
     fn source(root: &Path, version: &str) -> std::path::PathBuf {
@@ -1658,11 +2132,18 @@ mod tests {
 
     fn trusted_manager(root: &Path) -> config::ConfigManager {
         let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
-        manager.get_config_mut().entities.plugin_configs.push(config::PluginConfigEntry {
-            id: "com.example.test".into(), enabled: true,
-            install_generation: "old-generation".into(),
-            granted_permissions: vec!["fs:storage".into()], installed_at: Some(1), source: Some("dir".into()),
-        });
+        manager
+            .get_config_mut()
+            .entities
+            .plugin_configs
+            .push(config::PluginConfigEntry {
+                id: "com.example.test".into(),
+                enabled: true,
+                install_generation: "old-generation".into(),
+                granted_permissions: vec!["fs:storage".into()],
+                installed_at: Some(1),
+                source: Some("dir".into()),
+            });
         manager.save().unwrap();
         manager
     }
@@ -1674,16 +2155,26 @@ mod tests {
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
-        let mut prepared = prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
-        reset_install_trust(manager.get_config_mut(), &prepared.manifest.id, prepared.source_label);
+        let mut prepared =
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        reset_install_trust(
+            manager.get_config_mut(),
+            &prepared.manifest.id,
+            prepared.source_label,
+        );
         persist_install_trust_reset(&mut manager).unwrap();
         // During the old-worker/new-code window the live backend is already
         // disabled, not merely the config that will be read on next startup.
         assert!(!manager.get_config().entities.plugin_configs[0].enabled);
-        assert!(manager.get_config().entities.plugin_configs[0].granted_permissions.is_empty());
+        assert!(manager.get_config().entities.plugin_configs[0]
+            .granted_permissions
+            .is_empty());
         let before_swap = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         assert!(!before_swap.get_config().entities.plugin_configs[0].enabled);
-        assert_eq!(fs::read_to_string(before_swap.plugins_dir().join("com.example.test/main.js")).unwrap(), "1.0.0");
+        assert_eq!(
+            fs::read_to_string(before_swap.plugins_dir().join("com.example.test/main.js")).unwrap(),
+            "1.0.0"
+        );
         drop(before_swap);
         commit_plugin_install(&mut prepared, manager.get_config().revision).unwrap();
         // Model process death before any response/cleanup and fresh startup.
@@ -1693,23 +2184,30 @@ mod tests {
         assert!(!entry.enabled);
         assert!(entry.granted_permissions.is_empty());
         assert!(entry.installed_at.unwrap() > 1);
-        assert_eq!(fs::read_to_string(reloaded.plugins_dir().join("com.example.test/main.js")).unwrap(), "2.0.0");
+        assert_eq!(
+            fs::read_to_string(reloaded.plugins_dir().join("com.example.test/main.js")).unwrap(),
+            "2.0.0"
+        );
         drop(reloaded);
         fs::write(root.join("config.json"), "corrupt config").unwrap();
         let recovered = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         assert!(!recovered.get_config().entities.plugin_configs[0].enabled);
-        assert!(recovered.get_config().entities.plugin_configs[0].granted_permissions.is_empty());
+        assert!(recovered.get_config().entities.plugin_configs[0]
+            .granted_permissions
+            .is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn failed_commit_keeps_old_code_but_remains_fail_closed() {
-        let root = canonical_test_temp_dir().join(format!("plugin_state_rollback_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_state_rollback_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
-        let prepared = prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let prepared =
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         fs::remove_dir_all(&prepared.stage_guard.0).unwrap();
         assert!(install_prepared(&mut manager, prepared).is_err());
         let reloaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
@@ -1717,48 +2215,68 @@ mod tests {
         assert!(!entry.enabled);
         assert!(entry.granted_permissions.is_empty());
         assert_ne!(entry.install_generation, "old-generation");
-        assert_eq!(fs::read_to_string(reloaded.plugins_dir().join("com.example.test/main.js")).unwrap(), "1.0.0");
+        assert_eq!(
+            fs::read_to_string(reloaded.plugins_dir().join("com.example.test/main.js")).unwrap(),
+            "1.0.0"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn failed_precommit_save_never_changes_code_or_memory_trust() {
-        let root = canonical_test_temp_dir().join(format!("plugin_save_fail_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_save_fail_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
-        let prepared = prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let prepared =
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         // ConfigManager's atomic save cannot open a directory as its temp file.
         fs::create_dir(root.join("config.json.tmp")).unwrap();
         assert!(install_prepared(&mut manager, prepared).is_err());
         assert!(manager.get_config().entities.plugin_configs[0].enabled);
-        assert_eq!(fs::read_to_string(manager.plugins_dir().join("com.example.test/main.js")).unwrap(), "1.0.0");
+        assert_eq!(
+            fs::read_to_string(manager.plugins_dir().join("com.example.test/main.js")).unwrap(),
+            "1.0.0"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn failed_backup_persistence_never_swaps_executable_code() {
-        let root = canonical_test_temp_dir().join(format!("plugin_backup_save_fail_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_backup_save_fail_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
         let new_source = source(&root, "2.0.0");
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
-        let prepared = prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let prepared =
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let backup = root.join("config.json.bak");
-        if backup.exists() { fs::remove_file(&backup).unwrap(); }
+        if backup.exists() {
+            fs::remove_file(&backup).unwrap();
+        }
         fs::create_dir(&backup).unwrap();
         assert!(install_prepared(&mut manager, prepared).is_err());
-        assert_eq!(fs::read_to_string(manager.plugins_dir().join("com.example.test/main.js")).unwrap(), "1.0.0");
+        assert_eq!(
+            fs::read_to_string(manager.plugins_dir().join("com.example.test/main.js")).unwrap(),
+            "1.0.0"
+        );
         assert!(manager.get_config().entities.plugin_configs[0].enabled);
         fs::remove_dir_all(root).unwrap();
     }
 
     struct DirectoryCopyHookGuard;
     impl Drop for DirectoryCopyHookGuard {
-        fn drop(&mut self) { DIRECTORY_COPY_HOOK.with(|hook| *hook.borrow_mut() = None); }
+        fn drop(&mut self) {
+            DIRECTORY_COPY_HOOK.with(|hook| *hook.borrow_mut() = None);
+        }
     }
-    fn with_directory_copy_hook(hook: impl FnMut(DirectoryCopyStep, &Path) + 'static, run: impl FnOnce()) {
+    fn with_directory_copy_hook(
+        hook: impl FnMut(DirectoryCopyStep, &Path) + 'static,
+        run: impl FnOnce(),
+    ) {
         DIRECTORY_COPY_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
         let _guard = DirectoryCopyHookGuard;
         run();
@@ -1766,13 +2284,17 @@ mod tests {
 
     #[test]
     fn directory_copy_keeps_regular_tree_and_streaming_budget() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_regular_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_copy_regular_{}", uuid::Uuid::new_v4()));
         let src = source(&root, "1.0.0");
         fs::create_dir(src.join("nested")).unwrap();
         fs::write(src.join("nested/asset.txt"), "asset").unwrap();
         let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
         copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
-        assert_eq!(fs::read_to_string(root.join("out/nested/asset.txt")).unwrap(), "asset");
+        assert_eq!(
+            fs::read_to_string(root.join("out/nested/asset.txt")).unwrap(),
+            "asset"
+        );
         let bytes = manifest("1.0.0").len() as u64 + 5 + 5;
         assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES - bytes);
         let mut tiny = 1;
@@ -1782,7 +2304,8 @@ mod tests {
 
     #[test]
     fn directory_copy_rejects_hardlinked_source_bytes() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_hardlink_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_copy_hardlink_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(root.join("private"), "private bytes").unwrap();
@@ -1798,7 +2321,8 @@ mod tests {
     #[test]
     fn directory_copy_rejects_symlink_file_and_source_ancestors() {
         use std::os::unix::fs::symlink;
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_links_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_copy_links_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(root.join("private"), "private bytes").unwrap();
@@ -1809,9 +2333,16 @@ mod tests {
         fs::remove_file(src.join("asset")).unwrap();
         fs::write(src.join("asset"), "ordinary").unwrap();
         symlink(&src, root.join("alias")).unwrap();
-        assert!(copy_dir_recursive(&root.join("alias"), &root.join("alias-out"), &mut budget).is_err());
+        assert!(
+            copy_dir_recursive(&root.join("alias"), &root.join("alias-out"), &mut budget).is_err()
+        );
         symlink(&root, root.join("ancestor")).unwrap();
-        assert!(copy_dir_recursive(&root.join("ancestor/src"), &root.join("ancestor-out"), &mut budget).is_err());
+        assert!(copy_dir_recursive(
+            &root.join("ancestor/src"),
+            &root.join("ancestor-out"),
+            &mut budget
+        )
+        .is_err());
         fs::remove_file(root.join("ancestor")).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
@@ -1820,23 +2351,27 @@ mod tests {
     #[test]
     fn directory_copy_rejects_symlink_swapped_after_type_check() {
         use std::os::unix::fs::symlink;
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_file_swap_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_copy_file_swap_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("asset"), "ordinary").unwrap();
         fs::write(root.join("private"), "private bytes").unwrap();
         let attack = root.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
-                fs::remove_file(attack.join("src/asset")).unwrap();
-                symlink(attack.join("private"), attack.join("src/asset")).unwrap();
-            }
-        }, || {
-            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-            assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
-            assert!(!root.join("out/asset").exists());
-            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
-        });
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                    fs::remove_file(attack.join("src/asset")).unwrap();
+                    symlink(attack.join("private"), attack.join("src/asset")).unwrap();
+                }
+            },
+            || {
+                let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+                assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+                assert!(!root.join("out/asset").exists());
+                assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+            },
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1844,23 +2379,34 @@ mod tests {
     #[test]
     fn directory_copy_uses_opened_ancestor_after_path_replacement() {
         use std::os::unix::fs::symlink;
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_ancestor_swap_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!(
+            "plugin_copy_ancestor_swap_{}",
+            uuid::Uuid::new_v4()
+        ));
         let src = root.join("src");
         fs::create_dir_all(src.join("nested")).unwrap();
         fs::create_dir(root.join("private")).unwrap();
         fs::write(src.join("nested/asset"), "ordinary").unwrap();
         fs::write(root.join("private/asset"), "private bytes").unwrap();
         let attack = root.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::DirectoryOpened && target.file_name().unwrap() == "nested" {
-                fs::rename(attack.join("src/nested"), attack.join("retained")).unwrap();
-                symlink(attack.join("private"), attack.join("src/nested")).unwrap();
-            }
-        }, || {
-            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-            copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
-            assert_eq!(fs::read_to_string(root.join("out/nested/asset")).unwrap(), "ordinary");
-        });
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::DirectoryOpened
+                    && target.file_name().unwrap() == "nested"
+                {
+                    fs::rename(attack.join("src/nested"), attack.join("retained")).unwrap();
+                    symlink(attack.join("private"), attack.join("src/nested")).unwrap();
+                }
+            },
+            || {
+                let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+                copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+                assert_eq!(
+                    fs::read_to_string(root.join("out/nested/asset")).unwrap(),
+                    "ordinary"
+                );
+            },
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1872,7 +2418,8 @@ mod tests {
             let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
             assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         }
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_fifo_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_copy_fifo_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fifo(&src.join("asset"));
@@ -1881,16 +2428,19 @@ mod tests {
         fs::remove_file(src.join("asset")).unwrap();
         fs::write(src.join("asset"), "ordinary").unwrap();
         let attack = root.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
-                fs::remove_file(attack.join("src/asset")).unwrap();
-                fifo(&attack.join("src/asset"));
-            }
-        }, || {
-            assert!(copy_dir_recursive(&src, &root.join("swapped-out"), &mut budget).is_err());
-            assert!(!root.join("swapped-out/asset").exists());
-            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
-        });
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                    fs::remove_file(attack.join("src/asset")).unwrap();
+                    fifo(&attack.join("src/asset"));
+                }
+            },
+            || {
+                assert!(copy_dir_recursive(&src, &root.join("swapped-out"), &mut budget).is_err());
+                assert!(!root.join("swapped-out/asset").exists());
+                assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+            },
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1898,14 +2448,22 @@ mod tests {
     fn directory_copy_junction(link: &Path, target: &Path) {
         let output = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", "mklink", "/J"])
-            .arg(link).arg(target).output().unwrap();
-        assert!(output.status.success(), "junction fixture: {}", String::from_utf8_lossy(&output.stderr));
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction fixture: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn directory_copy_rejects_junction_source_and_ancestors() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_junction_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_copy_junction_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::create_dir(root.join("private")).unwrap();
@@ -1915,9 +2473,16 @@ mod tests {
         assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
         assert!(!root.join("out/nested/asset").exists());
         directory_copy_junction(&root.join("alias"), &src);
-        assert!(copy_dir_recursive(&root.join("alias"), &root.join("alias-out"), &mut budget).is_err());
+        assert!(
+            copy_dir_recursive(&root.join("alias"), &root.join("alias-out"), &mut budget).is_err()
+        );
         directory_copy_junction(&root.join("ancestor"), &root);
-        assert!(copy_dir_recursive(&root.join("ancestor/src"), &root.join("ancestor-out"), &mut budget).is_err());
+        assert!(copy_dir_recursive(
+            &root.join("ancestor/src"),
+            &root.join("ancestor-out"),
+            &mut budget
+        )
+        .is_err());
         fs::remove_dir(src.join("nested")).unwrap();
         fs::remove_dir(root.join("alias")).unwrap();
         fs::remove_dir(root.join("ancestor")).unwrap();
@@ -1927,23 +2492,30 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn directory_copy_rejects_junction_swapped_after_type_check() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_junction_swap_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!(
+            "plugin_copy_junction_swap_{}",
+            uuid::Uuid::new_v4()
+        ));
         let src = root.join("src");
         fs::create_dir_all(src.join("nested")).unwrap();
         fs::create_dir(root.join("private")).unwrap();
         fs::write(root.join("private/asset"), "private bytes").unwrap();
         let attack = root.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "nested" {
-                fs::remove_dir(attack.join("src/nested")).unwrap();
-                directory_copy_junction(&attack.join("src/nested"), &attack.join("private"));
-            }
-        }, || {
-            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-            assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
-            assert!(!root.join("out/nested/asset").exists());
-            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
-        });
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "nested"
+                {
+                    fs::remove_dir(attack.join("src/nested")).unwrap();
+                    directory_copy_junction(&attack.join("src/nested"), &attack.join("private"));
+                }
+            },
+            || {
+                let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+                assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+                assert!(!root.join("out/nested/asset").exists());
+                assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+            },
+        );
         fs::remove_dir(src.join("nested")).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
@@ -1951,7 +2523,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn directory_copy_rejects_hardlink_swapped_after_type_check() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_hardlink_swap_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir().join(format!(
+            "plugin_copy_hardlink_swap_{}",
+            uuid::Uuid::new_v4()
+        ));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("asset"), "ordinary").unwrap();
@@ -1959,44 +2534,57 @@ mod tests {
         let attack = root.clone();
         let outcome = std::rc::Rc::new(std::cell::Cell::new(None));
         let attack_outcome = outcome.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
-                fs::remove_file(attack.join("src/asset")).unwrap();
-                match fs::hard_link(attack.join("private"), attack.join("src/asset")) {
-                    Ok(()) => attack_outcome.set(Some(false)),
-                    Err(error) => {
-                        // Windows may reject the mutation itself because the
-                        // selected source directory is pinned without WRITE.
-                        assert_eq!(error.raw_os_error(), Some(32));
-                        assert!(!attack.join("src/asset").exists());
-                        attack_outcome.set(Some(true));
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                    fs::remove_file(attack.join("src/asset")).unwrap();
+                    match fs::hard_link(attack.join("private"), attack.join("src/asset")) {
+                        Ok(()) => attack_outcome.set(Some(false)),
+                        Err(error) => {
+                            // Windows may reject the mutation itself because the
+                            // selected source directory is pinned without WRITE.
+                            assert_eq!(error.raw_os_error(), Some(32));
+                            assert!(!attack.join("src/asset").exists());
+                            attack_outcome.set(Some(true));
+                        }
                     }
                 }
-            }
-        }, || {
-            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-            assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
-            assert!(!root.join("out/asset").exists());
-            assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
-            assert!(outcome.get().is_some(), "swap hook must execute");
-            assert_eq!(fs::read_to_string(root.join("private")).unwrap(), "private bytes");
-        });
+            },
+            || {
+                let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+                assert!(copy_dir_recursive(&src, &root.join("out"), &mut budget).is_err());
+                assert!(!root.join("out/asset").exists());
+                assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
+                assert!(outcome.get().is_some(), "swap hook must execute");
+                assert_eq!(
+                    fs::read_to_string(root.join("private")).unwrap(),
+                    "private bytes"
+                );
+            },
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
     fn directory_copy_rejects_device_namespace_before_open() {
-        let out = canonical_test_temp_dir().join(format!("plugin_copy_device_{}", uuid::Uuid::new_v4()));
+        let out =
+            canonical_test_temp_dir().join(format!("plugin_copy_device_{}", uuid::Uuid::new_v4()));
         let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-        assert!(copy_dir_recursive(Path::new(r"\\.\pipe\hypercom-never-open"), &out, &mut budget).is_err());
+        assert!(copy_dir_recursive(
+            Path::new(r"\\.\pipe\hypercom-never-open"),
+            &out,
+            &mut budget
+        )
+        .is_err());
         assert!(!out.exists());
     }
 
     #[cfg(windows)]
     #[test]
     fn directory_copy_does_not_lock_unrelated_ancestor_children() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_sibling_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_copy_sibling_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("asset"), "ordinary").unwrap();
@@ -2005,55 +2593,81 @@ mod tests {
         fs::create_dir_all(sibling.join("data")).unwrap();
         fs::write(sibling.join("data/keep"), "user").unwrap();
         let attack = root.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
-                fs::hard_link(attack.join("outside"), attack.join("outside-link")).unwrap();
-                let (dest, backup) = stage_uninstall_fs(&attack.join("plugins"), "com.example.keep").unwrap();
-                fs::rename(backup.unwrap(), dest).unwrap();
-            }
-        }, || {
-            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-            copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
-            assert_eq!(fs::read_to_string(root.join("out/asset")).unwrap(), "ordinary");
-        });
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::BeforeOpen && target.file_name().unwrap() == "asset" {
+                    fs::hard_link(attack.join("outside"), attack.join("outside-link")).unwrap();
+                    let (dest, backup) =
+                        stage_uninstall_fs(&attack.join("plugins"), "com.example.keep").unwrap();
+                    fs::rename(backup.unwrap(), dest).unwrap();
+                }
+            },
+            || {
+                let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+                copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+                assert_eq!(
+                    fs::read_to_string(root.join("out/asset")).unwrap(),
+                    "ordinary"
+                );
+            },
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
     #[test]
     fn directory_copy_pins_opened_ancestor_against_rename() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_pin_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_copy_pin_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(src.join("nested")).unwrap();
         fs::write(src.join("nested/asset"), "ordinary").unwrap();
         let attack = root.clone();
-        with_directory_copy_hook(move |step, target| {
-            if step == DirectoryCopyStep::DirectoryOpened && target.file_name().unwrap() == "nested" {
-                let error = fs::rename(attack.join("src/nested"), attack.join("moved")).unwrap_err();
-                assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
-            }
-        }, || {
-            let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-            copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
-            assert_eq!(fs::read_to_string(root.join("out/nested/asset")).unwrap(), "ordinary");
-        });
+        with_directory_copy_hook(
+            move |step, target| {
+                if step == DirectoryCopyStep::DirectoryOpened
+                    && target.file_name().unwrap() == "nested"
+                {
+                    let error =
+                        fs::rename(attack.join("src/nested"), attack.join("moved")).unwrap_err();
+                    assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+                }
+            },
+            || {
+                let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
+                copy_dir_recursive(&src, &root.join("out"), &mut budget).unwrap();
+                assert_eq!(
+                    fs::read_to_string(root.join("out/nested/asset")).unwrap(),
+                    "ordinary"
+                );
+            },
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn directory_copy_rejects_empty_file_count_and_depth() {
-        let root = canonical_test_temp_dir().join(format!("plugin_copy_limits_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_copy_limits_{}", uuid::Uuid::new_v4()));
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("empty"), "").unwrap();
         let mut count = plugin::MAX_ZIP_ENTRIES;
         let mut budget = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-        assert!(copy_dir_recursive_inner(&src, &root.join("out"), &mut budget, 0, &mut count).is_err());
+        assert!(
+            copy_dir_recursive_inner(&src, &root.join("out"), &mut budget, 0, &mut count).is_err()
+        );
         assert_eq!(budget, plugin::MAX_ZIP_UNCOMPRESSED_BYTES);
         fs::create_dir(src.join("nested")).unwrap();
         let mut count = 0;
-        assert!(copy_dir_recursive_inner(&src, &root.join("deep"), &mut budget,
-            plugin::MAX_PLUGIN_SOURCE_DEPTH, &mut count).is_err());
+        assert!(copy_dir_recursive_inner(
+            &src,
+            &root.join("deep"),
+            &mut budget,
+            plugin::MAX_PLUGIN_SOURCE_DEPTH,
+            &mut count
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2102,12 +2716,19 @@ mod tests {
         // Both commands check before modifying even a revoke or crash-disable.
         assert!(require_generation(&cfg, "com.example.test", &captured).is_err());
         assert!(!cfg.entities.plugin_configs[0].enabled);
-        assert!(cfg.entities.plugin_configs[0].granted_permissions.is_empty());
+        assert!(cfg.entities.plugin_configs[0]
+            .granted_permissions
+            .is_empty());
     }
 
     #[test]
     fn data_paths_classify_first_component_and_reject_windows_aliases() {
-        for raw in ["data/key", "DATA/key", "DaTa\\state.json", "./data/state.json"] {
+        for raw in [
+            "data/key",
+            "DATA/key",
+            "DaTa\\state.json",
+            "./data/state.json",
+        ] {
             let rel = sanitize_asset_path(raw).unwrap();
             assert!(is_data_path(&rel), "{raw}");
             assert!(rel.starts_with("data"));
@@ -2115,27 +2736,39 @@ mod tests {
         for raw in ["database/key", "datafile", "assets/data/key"] {
             assert!(!is_data_path(&sanitize_asset_path(raw).unwrap()), "{raw}");
         }
-        for raw in ["data./key", "data /key", "data:key", "data/key:stream", "DATA./state.json", "DATA~1/key"] {
+        for raw in [
+            "data./key",
+            "data /key",
+            "data:key",
+            "data/key:stream",
+            "DATA./state.json",
+            "DATA~1/key",
+        ] {
             assert!(sanitize_asset_path(raw).is_err(), "{raw}");
         }
     }
 
     #[test]
     fn data_quota_rejects_single_file_total_and_file_count() {
-        let root = canonical_test_temp_dir().join(format!("plugin_data_limits_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_data_limits_{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         fs::create_dir_all(&data).unwrap();
         let target = data.join("new");
         assert!(check_data_write_quota(&data, &target, PLUGIN_DATA_MAX_FILE_BYTES + 1).is_err());
         for index in 0..4 {
-            fs::File::create(data.join(format!("large-{index}"))).unwrap()
-                .set_len(PLUGIN_DATA_MAX_FILE_BYTES).unwrap();
+            fs::File::create(data.join(format!("large-{index}")))
+                .unwrap()
+                .set_len(PLUGIN_DATA_MAX_FILE_BYTES)
+                .unwrap();
         }
         assert!(check_data_write_quota(&data, &target, 1).is_err());
         assert!(check_data_write_quota(&data, &data.join("large-0"), 1).is_ok());
         fs::remove_dir_all(&data).unwrap();
         fs::create_dir(&data).unwrap();
-        for index in 0..PLUGIN_DATA_MAX_FILES { fs::write(data.join(index.to_string()), "").unwrap(); }
+        for index in 0..PLUGIN_DATA_MAX_FILES {
+            fs::write(data.join(index.to_string()), "").unwrap();
+        }
         assert!(check_data_write_quota(&data, &target, 0).is_err());
         assert!(check_data_write_quota(&data, &data.join("0"), 1).is_ok());
         fs::remove_dir_all(root).unwrap();
@@ -2143,7 +2776,8 @@ mod tests {
 
     #[test]
     fn asset_reads_enforce_limit_including_exact_boundary() {
-        let root = canonical_test_temp_dir().join(format!("plugin_read_limits_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_read_limits_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let file = root.join("text");
         fs::write(&file, "1234").unwrap();
@@ -2154,14 +2788,25 @@ mod tests {
 
     #[test]
     fn http_truncation_limit_minus_one_exact_and_plus_one() {
-        for size in [PLUGIN_HTTP_MAX_BODY - 1, PLUGIN_HTTP_MAX_BODY, PLUGIN_HTTP_MAX_BODY + 1] {
+        for size in [
+            PLUGIN_HTTP_MAX_BODY - 1,
+            PLUGIN_HTTP_MAX_BODY,
+            PLUGIN_HTTP_MAX_BODY + 1,
+        ] {
             let mut body = Vec::new();
             let chunk = vec![b'x'; size];
-            assert_eq!(append_http_chunk(&mut body, &chunk, PLUGIN_HTTP_MAX_BODY), size > PLUGIN_HTTP_MAX_BODY);
+            assert_eq!(
+                append_http_chunk(&mut body, &chunk, PLUGIN_HTTP_MAX_BODY),
+                size > PLUGIN_HTTP_MAX_BODY
+            );
             assert_eq!(body.len(), size.min(PLUGIN_HTTP_MAX_BODY));
         }
         let mut body = Vec::new();
-        assert!(!append_http_chunk(&mut body, &vec![b'x'; PLUGIN_HTTP_MAX_BODY - 1], PLUGIN_HTTP_MAX_BODY));
+        assert!(!append_http_chunk(
+            &mut body,
+            &vec![b'x'; PLUGIN_HTTP_MAX_BODY - 1],
+            PLUGIN_HTTP_MAX_BODY
+        ));
         assert!(!append_http_chunk(&mut body, b"x", PLUGIN_HTTP_MAX_BODY));
         assert!(!append_http_chunk(&mut body, b"", PLUGIN_HTTP_MAX_BODY));
         assert!(append_http_chunk(&mut body, b"x", PLUGIN_HTTP_MAX_BODY));
@@ -2170,11 +2815,20 @@ mod tests {
 
     #[test]
     fn invalid_ids_cannot_delete_root_or_siblings() {
-        let root = canonical_test_temp_dir().join(format!("plugin_id_test_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_id_test_{}", uuid::Uuid::new_v4()));
         let sibling = root.join("com.example.keep");
         fs::create_dir_all(&sibling).unwrap();
         fs::write(sibling.join("keep"), "intact").unwrap();
-        for id in [".", "..", "", "../com.example.keep", "com..bad", "com.", ".bad"] {
+        for id in [
+            ".",
+            "..",
+            "",
+            "../com.example.keep",
+            "com..bad",
+            "com.",
+            ".bad",
+        ] {
             assert!(stage_uninstall_fs(&root, id).is_err(), "{id}");
         }
         assert_eq!(fs::read_to_string(sibling.join("keep")).unwrap(), "intact");
@@ -2182,14 +2836,18 @@ mod tests {
     }
     #[test]
     fn uninstall_backup_can_restore_private_data_after_save_failure() {
-        let root = canonical_test_temp_dir().join(format!("plugin_uninstall_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_uninstall_{}", uuid::Uuid::new_v4()));
         let plugin_dir = root.join("com.example.keep");
         fs::create_dir_all(plugin_dir.join("data")).unwrap();
         fs::write(plugin_dir.join("data/keep"), "user").unwrap();
         let (dest, backup) = stage_uninstall_fs(&root, "com.example.keep").unwrap();
         let backup = backup.unwrap();
         assert!(!dest.exists());
-        assert_eq!(fs::read_to_string(backup.join("data/keep")).unwrap(), "user");
+        assert_eq!(
+            fs::read_to_string(backup.join("data/keep")).unwrap(),
+            "user"
+        );
         fs::rename(backup, &dest).unwrap();
         assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "user");
         fs::remove_dir_all(root).unwrap();
@@ -2209,7 +2867,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn atomic_write_does_not_follow_target_symlink() {
-        let root = canonical_test_temp_dir().join(format!("plugin_write_link_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_write_link_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let outside = root.join("outside");
         fs::write(&outside, "safe").unwrap();
@@ -2221,10 +2880,10 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn upgrade_preserves_old_data_and_removes_old_code() {
-        let root = canonical_test_temp_dir().join(format!("plugin_upgrade_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_upgrade_{}", uuid::Uuid::new_v4()));
         let src1 = source(&root, "1.0.0");
         let src2 = source(&root, "2.0.0");
         let plugins = root.join("plugins");
@@ -2235,7 +2894,10 @@ mod tests {
         fs::write(dest.join("legacy.js"), "old").unwrap();
         fs::create_dir_all(src2.join("data")).unwrap();
         fs::write(src2.join("data/keep"), "package").unwrap();
-        let backup = install_plugin_fs_stage(src2.to_str().unwrap(), &plugins).unwrap().3.unwrap();
+        let backup = install_plugin_fs_stage(src2.to_str().unwrap(), &plugins)
+            .unwrap()
+            .3
+            .unwrap();
         assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "user");
         assert_eq!(fs::read_to_string(dest.join("main.js")).unwrap(), "2.0.0");
         assert!(!dest.join("legacy.js").exists());
@@ -2246,7 +2908,8 @@ mod tests {
 
     #[test]
     fn missing_upgrade_entry_preserves_existing_plugin_and_data() {
-        let root = canonical_test_temp_dir().join(format!("plugin_missing_entry_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_missing_entry_{}", uuid::Uuid::new_v4()));
         let original = source(&root, "1.0.0");
         let upgrade = source(&root, "2.0.0");
         let plugins = root.join("plugins");
@@ -2257,14 +2920,21 @@ mod tests {
         fs::remove_file(upgrade.join("main.js")).unwrap();
 
         assert!(install_plugin_fs_stage(upgrade.to_str().unwrap(), &plugins).is_err());
-        assert_eq!(fs::read_to_string(destination.join("main.js")).unwrap(), "1.0.0");
-        assert_eq!(fs::read_to_string(destination.join("data/keep")).unwrap(), "saved");
+        assert_eq!(
+            fs::read_to_string(destination.join("main.js")).unwrap(),
+            "1.0.0"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("data/keep")).unwrap(),
+            "saved"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn failed_upgrade_keeps_old_code_and_private_data() {
-        let root = canonical_test_temp_dir().join(format!("plugin_failed_upgrade_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_failed_upgrade_{}", uuid::Uuid::new_v4()));
         let src1 = source(&root, "1.0.0");
         let src2 = source(&root, "2.0.0");
         let plugins = root.join("plugins");
@@ -2272,8 +2942,10 @@ mod tests {
         let dest = plugins.join("com.example.test");
         fs::create_dir_all(dest.join("data")).unwrap();
         fs::write(dest.join("data/keep"), "user").unwrap();
-        fs::File::create(src2.join("oversized.bin")).unwrap()
-            .set_len(plugin::MAX_ZIP_UNCOMPRESSED_BYTES + 1).unwrap();
+        fs::File::create(src2.join("oversized.bin"))
+            .unwrap()
+            .set_len(plugin::MAX_ZIP_UNCOMPRESSED_BYTES + 1)
+            .unwrap();
         assert!(install_plugin_fs_stage(src2.to_str().unwrap(), &plugins).is_err());
         assert_eq!(fs::read_to_string(dest.join("main.js")).unwrap(), "1.0.0");
         assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "user");
@@ -2283,7 +2955,8 @@ mod tests {
     #[test]
     fn interrupted_upgrade_recovers_each_rename_boundary_idempotently() {
         for boundary in 0..=3 {
-            let root = canonical_test_temp_dir().join(format!("plugin_boundary_{}", uuid::Uuid::new_v4()));
+            let root =
+                canonical_test_temp_dir().join(format!("plugin_boundary_{}", uuid::Uuid::new_v4()));
             let old_source = source(&root, "1.0.0");
             let new_source = source(&root, "2.0.0");
             let mut manager = trusted_manager(&root);
@@ -2292,12 +2965,18 @@ mod tests {
             let dest = plugins.join("com.example.test");
             fs::create_dir(dest.join("data")).unwrap();
             fs::write(dest.join("data/keep"), "private").unwrap();
-            let mut prepared = prepare_plugin_install(new_source.to_str().unwrap(), &plugins).unwrap();
+            let mut prepared =
+                prepare_plugin_install(new_source.to_str().unwrap(), &plugins).unwrap();
             reset_install_trust(manager.get_config_mut(), "com.example.test", "dir");
             persist_install_trust_reset(&mut manager).unwrap();
             let stage = prepared.stage_guard.0.clone();
-            let mut tx = plugin::transaction::Transaction::install(&plugins, "com.example.test", &stage,
-                manager.get_config().revision).unwrap();
+            let mut tx = plugin::transaction::Transaction::install(
+                &plugins,
+                "com.example.test",
+                &stage,
+                manager.get_config().revision,
+            )
+            .unwrap();
             prepared.stage_guard.0.clear();
             if boundary >= 1 {
                 tx.phase(&plugins, "backup").unwrap();
@@ -2305,7 +2984,12 @@ mod tests {
             }
             if boundary >= 2 {
                 tx.phase(&plugins, "private-data").unwrap();
-                plugin::transaction::rename(&plugins, &tx.backup(&plugins).join("data"), &stage.join("data")).unwrap();
+                plugin::transaction::rename(
+                    &plugins,
+                    &tx.backup(&plugins).join("data"),
+                    &stage.join("data"),
+                )
+                .unwrap();
             }
             if boundary >= 3 {
                 tx.phase(&plugins, "publish").unwrap();
@@ -2316,10 +3000,17 @@ mod tests {
             for _ in 0..2 {
                 let loaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
                 assert!(!loaded.get_config().entities.plugin_configs[0].enabled);
-                assert!(loaded.get_config().entities.plugin_configs[0].granted_permissions.is_empty());
-                assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "private");
-                assert_eq!(fs::read_to_string(dest.join("main.js")).unwrap(),
-                    if boundary == 3 { "2.0.0" } else { "1.0.0" });
+                assert!(loaded.get_config().entities.plugin_configs[0]
+                    .granted_permissions
+                    .is_empty());
+                assert_eq!(
+                    fs::read_to_string(dest.join("data/keep")).unwrap(),
+                    "private"
+                );
+                assert_eq!(
+                    fs::read_to_string(dest.join("main.js")).unwrap(),
+                    if boundary == 3 { "2.0.0" } else { "1.0.0" }
+                );
             }
             fs::remove_dir_all(root).unwrap();
         }
@@ -2328,7 +3019,10 @@ mod tests {
     #[test]
     fn interrupted_uninstall_uses_durable_config_commit() {
         for boundary in 0..=2 {
-            let root = canonical_test_temp_dir().join(format!("plugin_uninstall_boundary_{}", uuid::Uuid::new_v4()));
+            let root = canonical_test_temp_dir().join(format!(
+                "plugin_uninstall_boundary_{}",
+                uuid::Uuid::new_v4()
+            ));
             let src = source(&root, "1.0.0");
             let mut manager = trusted_manager(&root);
             install_plugin_fs_stage(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
@@ -2336,8 +3030,15 @@ mod tests {
             let dest = plugins.join("com.example.test");
             fs::create_dir(dest.join("data")).unwrap();
             fs::write(dest.join("data/keep"), "private").unwrap();
-            let tx = plugin::transaction::Transaction::uninstall(&plugins, "com.example.test", manager.get_config().revision + 1).unwrap();
-            if boundary >= 1 { plugin::transaction::rename(&plugins, &dest, &tx.backup(&plugins)).unwrap(); }
+            let tx = plugin::transaction::Transaction::uninstall(
+                &plugins,
+                "com.example.test",
+                manager.get_config().revision + 1,
+            )
+            .unwrap();
+            if boundary >= 1 {
+                plugin::transaction::rename(&plugins, &dest, &tx.backup(&plugins)).unwrap();
+            }
             if boundary == 2 {
                 manager.get_config_mut().entities.plugin_configs.clear();
                 manager.save().unwrap();
@@ -2346,9 +3047,18 @@ mod tests {
             drop(manager);
             for _ in 0..2 {
                 let loaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
-                assert_eq!(loaded.get_config().entities.plugin_configs.is_empty(), boundary == 2);
-                if boundary == 2 { assert!(!dest.exists()); }
-                else { assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "private"); }
+                assert_eq!(
+                    loaded.get_config().entities.plugin_configs.is_empty(),
+                    boundary == 2
+                );
+                if boundary == 2 {
+                    assert!(!dest.exists());
+                } else {
+                    assert_eq!(
+                        fs::read_to_string(dest.join("data/keep")).unwrap(),
+                        "private"
+                    );
+                }
             }
             fs::remove_dir_all(root).unwrap();
         }
@@ -2372,7 +3082,8 @@ mod tests {
 
     #[test]
     fn snapshot_revision_is_captured_after_save() {
-        let root = canonical_test_temp_dir().join(format!("plugin_snapshot_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_snapshot_{}", uuid::Uuid::new_v4()));
         let mut manager = trusted_manager(&root);
         let before = snapshot(&manager).revision;
         manager.save().unwrap();
@@ -2382,23 +3093,36 @@ mod tests {
 
     #[test]
     fn successful_install_update_uninstall_reinstall_returns_fresh_identity() {
-        let root = canonical_test_temp_dir().join(format!("plugin_identity_cycle_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_identity_cycle_{}", uuid::Uuid::new_v4()));
         let src1 = source(&root, "1.0.0");
         let src2 = source(&root, "2.0.0");
         let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
-        let prepared = prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let prepared =
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let first = install_prepared(&mut manager, prepared).unwrap();
-        let prepared = prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let prepared =
+            prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let second = install_prepared(&mut manager, prepared).unwrap();
-        assert_ne!(first.plugin_configs[0].install_generation, second.plugin_configs[0].install_generation);
+        assert_ne!(
+            first.plugin_configs[0].install_generation,
+            second.plugin_configs[0].install_generation
+        );
         assert!(second.revision > first.revision);
         let removed = uninstall_with_manager(&mut manager, "com.example.test").unwrap();
         assert!(removed.plugin_configs.is_empty());
         assert!(removed.revision > second.revision);
-        let prepared = prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
+        let prepared =
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let reinstalled = install_prepared(&mut manager, prepared).unwrap();
-        assert_ne!(reinstalled.plugin_configs[0].install_generation, first.plugin_configs[0].install_generation);
-        assert_ne!(reinstalled.plugin_configs[0].install_generation, second.plugin_configs[0].install_generation);
+        assert_ne!(
+            reinstalled.plugin_configs[0].install_generation,
+            first.plugin_configs[0].install_generation
+        );
+        assert_ne!(
+            reinstalled.plugin_configs[0].install_generation,
+            second.plugin_configs[0].install_generation
+        );
         assert!(!reinstalled.plugin_configs[0].enabled);
         assert!(reinstalled.plugin_configs[0].granted_permissions.is_empty());
         fs::remove_dir_all(root).unwrap();
@@ -2407,7 +3131,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn missing_asset_does_not_hide_linked_parent_or_data_corruption() {
-        let root = canonical_test_temp_dir().join(format!("plugin_missing_corrupt_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_missing_corrupt_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("data")).unwrap();
         fs::create_dir(root.join("outside")).unwrap();
         std::os::unix::fs::symlink(root.join("outside"), root.join("data/link")).unwrap();
@@ -2420,24 +3145,35 @@ mod tests {
     #[test]
     fn interrupted_first_install_is_disabled_or_absent_without_package_data() {
         for published in [false, true] {
-            let root = canonical_test_temp_dir().join(format!("plugin_first_boundary_{}", uuid::Uuid::new_v4()));
+            let root = canonical_test_temp_dir()
+                .join(format!("plugin_first_boundary_{}", uuid::Uuid::new_v4()));
             let src = source(&root, "1.0.0");
             fs::create_dir(src.join("data")).unwrap();
             fs::write(src.join("data/injected"), "package").unwrap();
             let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
-            let mut prepared = prepare_plugin_install(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            let mut prepared =
+                prepare_plugin_install(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
             reset_install_trust(manager.get_config_mut(), "com.example.test", "dir");
             persist_install_trust_reset(&mut manager).unwrap();
             let plugins = manager.plugins_dir().to_path_buf();
             let stage = prepared.stage_guard.0.clone();
-            let tx = plugin::transaction::Transaction::install(&plugins, "com.example.test", &stage,
-                manager.get_config().revision).unwrap();
+            let tx = plugin::transaction::Transaction::install(
+                &plugins,
+                "com.example.test",
+                &stage,
+                manager.get_config().revision,
+            )
+            .unwrap();
             prepared.stage_guard.0.clear();
-            if published { plugin::transaction::rename(&plugins, &stage, &tx.dest(&plugins)).unwrap(); }
+            if published {
+                plugin::transaction::rename(&plugins, &stage, &tx.dest(&plugins)).unwrap();
+            }
             drop(manager);
             let loaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
             assert!(!loaded.get_config().entities.plugin_configs[0].enabled);
-            assert!(loaded.get_config().entities.plugin_configs[0].granted_permissions.is_empty());
+            assert!(loaded.get_config().entities.plugin_configs[0]
+                .granted_permissions
+                .is_empty());
             assert_eq!(tx.dest(&plugins).exists(), published);
             assert!(!tx.dest(&plugins).join("data/injected").exists());
             fs::remove_dir_all(root).unwrap();
@@ -2446,19 +3182,24 @@ mod tests {
 
     #[test]
     fn data_quota_budgets_all_new_parent_directories_without_mutation() {
-        let root = canonical_test_temp_dir().join(format!("plugin_parent_budget_{}", uuid::Uuid::new_v4()));
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_parent_budget_{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         fs::create_dir_all(&data).unwrap();
         let mut accepted = 0;
         for index in 0..65 {
             let mut parent = data.clone();
-            for depth in 0..30 { parent.push(format!("p{index}-{depth}")); }
+            for depth in 0..30 {
+                parent.push(format!("p{index}-{depth}"));
+            }
             let target = parent.join("key");
             if check_data_write_quota(&data, &target, 0).is_ok() {
                 fs::create_dir_all(&parent).unwrap();
                 fs::write(target, "").unwrap();
                 accepted += 1;
-            } else { assert!(!data.join(format!("p{index}-0")).exists()); }
+            } else {
+                assert!(!data.join(format!("p{index}-0")).exists());
+            }
         }
         assert_eq!(accepted, plugin::MAX_ZIP_ENTRIES / 31);
         assert!(check_data_write_quota(&data, &data.join("p0-0/p0-1/p0-2/p0-3/p0-4/p0-5/p0-6/p0-7/p0-8/p0-9/p0-10/p0-11/p0-12/p0-13/p0-14/p0-15/p0-16/p0-17/p0-18/p0-19/p0-20/p0-21/p0-22/p0-23/p0-24/p0-25/p0-26/p0-27/p0-28/p0-29/key"), 0).is_ok());
@@ -2467,15 +3208,22 @@ mod tests {
 
     #[test]
     fn missing_asset_is_distinct_from_type_encoding_and_limit_errors() {
-        let root = canonical_test_temp_dir().join(format!("plugin_missing_{}", uuid::Uuid::new_v4()));
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_missing_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
-        assert_eq!(read_authorized_asset(&root, Path::new("data/state.json")).unwrap(), None);
+        assert_eq!(
+            read_authorized_asset(&root, Path::new("data/state.json")).unwrap(),
+            None
+        );
         fs::create_dir(root.join("directory")).unwrap();
         assert!(read_authorized_asset(&root, Path::new("directory")).is_err());
         fs::write(root.join("binary"), [255]).unwrap();
         assert!(read_authorized_asset(&root, Path::new("binary")).is_err());
         fs::write(root.join("file"), "hello").unwrap();
-        assert_eq!(read_authorized_asset(&root, Path::new("file")).unwrap(), Some("hello".into()));
+        assert_eq!(
+            read_authorized_asset(&root, Path::new("file")).unwrap(),
+            Some("hello".into())
+        );
         assert!(read_authorized_asset(&root, Path::new("file/child")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
@@ -2487,7 +3235,6 @@ mod tests {
         assert!(!url_glob_match(pattern, "https://a.com/v1Xtoken=x"));
         assert!(!url_glob_match(pattern, "https://a.com/v1token=x"));
     }
-
 
     #[test]
     fn glob_matches_literal_prefix() {
@@ -2511,8 +3258,14 @@ mod tests {
     #[test]
     fn glob_double_star_crosses_segments() {
         assert!(url_glob_match("https://a.com/**", "https://a.com/x/y/z"));
-        assert!(url_glob_match("https://a.com/api/**", "https://a.com/api/v1/users"));
-        assert!(!url_glob_match("https://a.com/api/**", "https://a.com/other"));
+        assert!(url_glob_match(
+            "https://a.com/api/**",
+            "https://a.com/api/v1/users"
+        ));
+        assert!(!url_glob_match(
+            "https://a.com/api/**",
+            "https://a.com/other"
+        ));
     }
 
     #[test]
@@ -2536,16 +3289,28 @@ mod tests {
         // 规范化语义与 glob 的组合行为（大小写 host、默认端口、相对段）。
         // 大写 host → Url 小写化 → 与小写白名单匹配。
         let upper = url::Url::parse("https://SYMBOLS.Example.COM/v1/symbol").unwrap();
-        assert!(url_glob_match("https://symbols.example.com/**", upper.as_str()));
+        assert!(url_glob_match(
+            "https://symbols.example.com/**",
+            upper.as_str()
+        ));
         // 默认端口剥离：443 在 https 下被 Url 规范化掉 → 前缀仍匹配。
         let default_port = url::Url::parse("https://symbols.example.com:443/v1").unwrap();
-        assert!(url_glob_match("https://symbols.example.com/**", default_port.as_str()));
+        assert!(url_glob_match(
+            "https://symbols.example.com/**",
+            default_port.as_str()
+        ));
         // 相对段消除：/a/../b → /b（原始串含 ..，归一后与白名单匹配）。
         let dotdot = url::Url::parse("https://symbols.example.com/a/../v1").unwrap();
         assert_eq!(dotdot.as_str(), "https://symbols.example.com/v1");
-        assert!(url_glob_match("https://symbols.example.com/**", dotdot.as_str()));
+        assert!(url_glob_match(
+            "https://symbols.example.com/**",
+            dotdot.as_str()
+        ));
         // 非默认端口保留：8443 不被剥离 → 不等于白名单前缀。
         let custom_port = url::Url::parse("https://symbols.example.com:8443/v1").unwrap();
-        assert!(!url_glob_match("https://symbols.example.com/**", custom_port.as_str()));
+        assert!(!url_glob_match(
+            "https://symbols.example.com/**",
+            custom_port.as_str()
+        ));
     }
 }

@@ -5,7 +5,7 @@ import { useConfigPersistence } from '../../hooks';
 import { diagLogService, fileService } from '../../services/tauri';
 import { save } from '@tauri-apps/plugin-dialog';
 import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
-import { dropDiagLogPending, parseDiagLogLine } from '../../utils/diagLog';
+import { clearDiagLog, parseDiagLogLine } from '../../utils/diagLog';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
 
 type LevelFilter = 'all' | 'INFO' | 'WARN' | 'ERROR';
@@ -83,8 +83,7 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const handleClear = async () => {
     setBusy(true);
     try {
-      dropDiagLogPending(); // 丢弃前端待刷缓冲，避免清完又回写
-      await diagLogService.clearDiagLog();
+      await clearDiagLog();
       await refresh();
     } catch (e) {
       console.debug('[DiagLog] clear failed:', e);

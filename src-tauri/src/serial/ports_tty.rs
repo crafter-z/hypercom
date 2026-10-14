@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 use super::codec::{build_tx_bytes, normalize_tty_line_ending, TxOutcome};
-use super::{emit_status, PortInfo, PortStatus, SerialManager};
+use super::{emit_status_if_current, PortInfo, PortStatus, SerialManager};
 use crate::commands::OpenPortArgs;
 
 /// 模拟终端的端口 id
@@ -37,41 +37,45 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
         .clone()
         .ok_or_else(|| anyhow::anyhow!("AppHandle not initialized"))?;
 
-    // 陈旧句柄守卫：存活句柄报错，死线程句柄移除（避免 insert 覆盖后泄漏读线程）。
-    if let Some(handle) = manager.tty_sim_ports.get_mut(&args.port_id) {
-        if handle.running.load(Ordering::Relaxed) {
-            // ConPTY output can remain open after bash exits while the master
-            // is retained. Child status, not blocked reader EOF, is authoritative.
-            let exited = handle.child.as_mut().map(|child| child.try_wait()).transpose()?.flatten().is_some();
-            if !exited { return Err(anyhow::anyhow!("Port {} is already open", args.port_id)); }
-            handle.running.store(false, Ordering::Relaxed);
+    if let Some(mut handle) = manager.tty_sim_ports.remove(&args.port_id) {
+        let exited = handle
+            .child
+            .as_mut()
+            .map(|child| child.try_wait())
+            .transpose()?
+            .flatten()
+            .is_some();
+        if handle.running.load(Ordering::Relaxed) && !exited {
+            manager.tty_sim_ports.insert(args.port_id.clone(), handle);
+            return Err(anyhow::anyhow!("Port {} is already open", args.port_id));
         }
+        // Reader/master/child teardown is never performed under SerialManager.
+        thread::spawn(move || handle.shutdown());
     }
-    manager.tty_sim_ports.remove(&args.port_id);
 
-    // 把前端 xterm 当前尺寸传给 pty（否则 pty 固定 80×24，vim/top 等全屏应用
-    // 按 80×24 渲染而 xterm 按自身尺寸显示，画面错乱）。
-    let handle = super::tty_sim::spawn_bash(&app_handle, &args.port_id, args.cols, args.rows)?;
-
-    emit_status(&app_handle, &args.port_id, PortStatus::Connected);
+    let generation = manager
+        .connection_generations
+        .get(&args.port_id)
+        .copied()
+        .unwrap_or_default();
+    let handle =
+        super::tty_sim::spawn_bash(&app_handle, &args.port_id, args.cols, args.rows, generation)?;
 
     let port_id = args.port_id.clone();
+    let ready = handle.ready.clone();
     manager.tty_sim_ports.insert(args.port_id, handle);
+    emit_status_if_current(&app_handle, &port_id, PortStatus::Connected, generation);
+    ready.store(true, Ordering::Release);
     log::info!("TTY sim port opened: {}", port_id);
     Ok(())
 }
 
-/// 关闭模拟终端：kill bash 子进程并关闭 ConPTY，返回读线程由调用方在锁外 join。
+/// 关闭模拟终端：只从注册表 detach；kill/master drop/join/reap 在锁外 cleanup 线程执行。
 pub(super) fn close(manager: &mut SerialManager, port_id: &str) -> Option<thread::JoinHandle<()>> {
-    let mut handle = manager.tty_sim_ports.remove(port_id)?;
-    handle.running.store(false, Ordering::Relaxed);
-    handle.kill();
-    // drop master → 关闭 ConPTY（ClosePseudoConsole）→ 输出管道写端关闭 →
-    // 读线程 read() 解除阻塞退出。否则读线程永久阻塞在 ConPTY 读上，
-    // close_serial_port 的 join 永不返回（命令在主线程执行 → 应用卡死）。
-    handle.master = None;
+    let handle = manager.tty_sim_ports.remove(port_id)?;
+    let thread = thread::spawn(move || handle.shutdown());
     log::info!("TTY sim port closed: {}", port_id);
-    handle.read_thread.take()
+    Some(thread)
 }
 
 /// 向 pty 发送数据（TX）。
@@ -120,4 +124,15 @@ pub(super) fn resize(
         .get(port_id)
         .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?;
     handle.resize(cols, rows)
+}
+
+pub(super) fn write_handle(
+    manager: &SerialManager,
+    port_id: &str,
+) -> anyhow::Result<super::tty_sim::TtyWriteHandle> {
+    manager
+        .tty_sim_ports
+        .get(port_id)
+        .ok_or_else(|| anyhow::anyhow!("TTY sim port not found: {}", port_id))?
+        .write_handle()
 }

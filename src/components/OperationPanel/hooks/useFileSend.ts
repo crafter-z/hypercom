@@ -9,12 +9,13 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { getActivePortId, useAppStore } from '../../../stores/useAppStore';
+import { useAppStore } from '../../../stores/useAppStore';
 import { notifyError, notifySuccess, useToastStore } from '../../../stores/useToastStore';
 import { eventService, serialService } from '../../../services/tauri';
 import type { FileProgressPayload } from '../../../services/tauri';
 import { isSendablePort } from '../../../utils/sendGuard';
 import { trafficStats } from '../../../utils/trafficStats';
+import type { PortTrafficLease } from '../../../utils/trafficStats';
 
 export interface FileSendProgress {
   sent: number;
@@ -27,92 +28,122 @@ export interface FileSendControls {
   cancelFileSend: () => void;
 }
 
+interface ActiveTransfer {
+  transferId: string;
+  portId: string;
+  lease: PortTrafficLease;
+  countedBytes: number;
+  generation: number;
+}
+
+function newTransferId(): string {
+  return crypto.randomUUID();
+}
+
 export function useFileSend(portId: string | null): FileSendControls {
   const [progress, setProgress] = useState<FileSendProgress | null>(null);
-  const portIdRef = useRef(portId);
-  portIdRef.current = portId;
-  /** 本端口已计入 TX 统计的字节数（进度事件是累计值，按差量入账）。 */
-  const countedBytesRef = useRef(0);
+  const activeRef = useRef<ActiveTransfer | null>(null);
+  const generationRef = useRef(0);
+  const listenerReadyRef = useRef<Promise<void> | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
-  // 切换标签/端口：清掉上一个端口残留的进度条与计数基线。进度事件按当前端口
-  // 过滤，若不清理，新端口会一直显示别的端口的进度；计数基线错位也会让本次
-  // 运行的增量算错。
   useEffect(() => {
+    const generation = ++generationRef.current;
+    const old = activeRef.current;
+    activeRef.current = null;
     setProgress(null);
-    countedBytesRef.current = 0;
+    if (old) {
+      void serialService.cancelFileSend(old.portId, old.transferId).catch(() => undefined);
+    }
+    return () => {
+      if (generationRef.current === generation) {
+        generationRef.current += 1;
+        const current = activeRef.current;
+        activeRef.current = null;
+        if (current) void serialService.cancelFileSend(current.portId, current.transferId).catch(() => undefined);
+      }
+    };
   }, [portId]);
 
-  // 进度事件订阅：挂载一次即可（用 ref 读当前端口），切换标签页不必重订阅。
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
     let cancelled = false;
-    eventService
-      .onFileProgress((p: FileProgressPayload) => {
-        const id = portIdRef.current;
-        // 别的端口的进度不得影响本面板的进度条与统计。
-        if (!id || p.port_id !== id) return;
-
-        const delta = p.sent_bytes - countedBytesRef.current;
-        if (delta > 0) trafficStats.addTx(p.port_id, delta);
-        // done 归零：下一次运行从 0 重新计数（后端每次 send_file 从头累计）。
-        countedBytesRef.current = p.done ? 0 : p.sent_bytes;
-
-        if (p.done) {
-          setProgress(null);
-          // 仅「真正发完」才提示成功；取消(sent<total)与空文件(total==0)静默清除
-          // 进度条，否则取消时误报「已发送」、空文件残留 0/0 进度条。
-          if (p.total_bytes > 0 && p.sent_bytes >= p.total_bytes) {
-            notifySuccess('sendSection.file.sent');
-          }
-        } else {
-          setProgress({ sent: p.sent_bytes, total: p.total_bytes });
-        }
-      })
-      .then((u) => {
-        if (cancelled) u();
-        else unlisten = u;
-      })
-      .catch((e) => console.debug('[useFileSend] onFileProgress failed:', e));
+    const setup = eventService.onFileProgress((payload: FileProgressPayload) => {
+      if (cancelled) return;
+      const active = activeRef.current;
+      if (!active || payload.transfer_id !== active.transferId || payload.port_id !== active.portId) return;
+      const delta = payload.sent_bytes - active.countedBytes;
+      if (delta > 0) trafficStats.addTx(active.portId, delta, active.lease);
+      active.countedBytes = payload.done ? 0 : Math.max(active.countedBytes, payload.sent_bytes);
+      if (payload.done) {
+        activeRef.current = null;
+        setProgress(null);
+        if (payload.total_bytes > 0 && payload.sent_bytes >= payload.total_bytes) notifySuccess('sendSection.file.sent');
+      } else {
+        setProgress({ sent: payload.sent_bytes, total: payload.total_bytes });
+      }
+    });
+    listenerReadyRef.current = setup.then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      unlistenRef.current = unlisten;
+    }).catch((e) => {
+      console.debug('[useFileSend] onFileProgress failed:', e);
+    });
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenRef.current?.();
+      unlistenRef.current = null;
     };
   }, []);
 
   const startFileSend = useCallback(async () => {
-    const id = getActivePortId(useAppStore.getState());
-    if (!id) return;
-    // 守卫在弹文件选择框之前：不该让用户先挑完文件再被告知端口没连。
+    const id = portId;
+    if (!id || activeRef.current) return;
     if (!isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) {
-      useToastStore.getState().push({
-        severity: 'warning',
-        messageKey: 'sendSection.portClosedWarning',
-        portId: id,
-      });
+      useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.portClosedWarning', portId: id });
       return;
     }
     const path = await open({ multiple: false });
     if (!path || typeof path !== 'string') return;
-    if (getActivePortId(useAppStore.getState()) !== id || !isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) return;
+    if (portId !== id || !isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) return;
+    const listenerReady = listenerReadyRef.current;
+    if (!listenerReady) return;
+    await listenerReady;
+    if (portId !== id) return;
+    const generation = generationRef.current;
+    const transfer: ActiveTransfer = {
+      transferId: newTransferId(),
+      portId: id,
+      lease: trafficStats.capture(id),
+      countedBytes: 0,
+      generation,
+    };
+    activeRef.current = transfer;
+    setProgress({ sent: 0, total: 0 });
     try {
-      setProgress({ sent: 0, total: 0 });
-      await serialService.sendFile({ portId: id, path, chunkSize: 1024, delayMs: 10 });
-      // 成功提示由 serial:file_progress 的 done 事件统一触发（见上方订阅），
-      // 此处不再 toast——否则取消或出错时也会误报「已发送」。
+      await serialService.sendFile({ portId: id, transferId: transfer.transferId, path, chunkSize: 1024, delayMs: 10 });
     } catch (e) {
-      setProgress(null);
-      notifyError(e);
+      if (activeRef.current?.generation === generation && activeRef.current.transferId === transfer.transferId) {
+        activeRef.current = null;
+        setProgress(null);
+        notifyError(e);
+      }
+    } finally {
+      if (activeRef.current?.generation === generation && activeRef.current.transferId === transfer.transferId) {
+        activeRef.current = null;
+        setProgress(null);
+      }
     }
-  }, []);
+  }, [portId]);
 
-  // 取消正在进行的文件发送：置位后端 per-port 取消标志，读循环在下一块前退出，
-  // 随后后端必发 done 事件清除进度条（取消不弹成功提示）。
   const cancelFileSend = useCallback(() => {
-    const id = getActivePortId(useAppStore.getState());
-    if (!id) return;
-    serialService
-      .cancelFileSend(id)
-      .catch((e) => console.debug('[useFileSend] cancelFileSend failed:', e));
+    const active = activeRef.current;
+    if (!active) return;
+    void serialService.cancelFileSend(active.portId, active.transferId).catch((e) =>
+      console.debug('[useFileSend] cancelFileSend failed:', e)
+    );
   }, []);
 
   return { progress, startFileSend, cancelFileSend };

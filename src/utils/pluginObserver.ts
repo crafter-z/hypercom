@@ -68,13 +68,14 @@ export interface PluginRxObserver {
   onRxDropped?(event: { portId: string; reason: 'oversized-frame' | 'queue-overflow'; count: number }): void;
 }
 
-/** 每端口转发状态。 */
 interface PortObserverState {
   seq: number;
   queue: Array<ObservedRxLine & { gapBefore?: boolean; order: number }>;
   queuedBytes: number;
   droppedLines: number;
   droppedOversized: number;
+  /** First discarded sample order for the current loss notification. */
+  droppedAtOrder: number | null;
   gapPending: boolean;
   /** rAF 投递句柄。 */
   rafId: number | null;
@@ -147,15 +148,24 @@ function handleVisibilityChange(): void {
  */
 function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: string; timestamp: number }): void {
   if (!hasPluginRxObservers(portId)) return;
-  let state = portStates.get(portId);
-  if (!state) {
-    state = { seq: 0, queue: [], queuedBytes: 0, droppedLines: 0, droppedOversized: 0, gapPending: false, rafId: null, timerId: null };
-    portStates.set(portId, state);
-  }
+  const existing = portStates.get(portId);
+  const state: PortObserverState = existing ?? {
+    seq: 0,
+    queue: [],
+    queuedBytes: 0,
+    droppedLines: 0,
+    droppedOversized: 0,
+    droppedAtOrder: null,
+    gapPending: false,
+    rafId: null,
+    timerId: null,
+  };
+  if (!existing) portStates.set(portId, state);
   if (line.rawData.byteLength > MAX_BYTES_PER_DELIVERY) {
     state.seq++;
     state.droppedLines++;
     state.droppedOversized++;
+    state.droppedAtOrder ??= nextOrder++;
     state.gapPending = true;
     scheduleDelivery(state, () => deliverPort(portId));
     return;
@@ -166,6 +176,7 @@ function handleAssembledLine(portId: string, line: { rawData: Uint8Array; text: 
     const discarded = state.queue.shift();
     if (discarded) {
       state.queuedBytes -= discarded.rawData.byteLength;
+      state.droppedAtOrder ??= discarded.order;
       dropped++;
     }
   }
@@ -195,10 +206,13 @@ function deliverPort(portId: string): void {
   if (state.droppedLines > 0) {
     const lost = state.droppedLines;
     const oversized = state.droppedOversized;
+    const droppedAtOrder = state.droppedAtOrder;
     state.droppedLines = 0;
     state.droppedOversized = 0;
+    state.droppedAtOrder = null;
     for (const obs of observers) {
       if (obs.portId !== undefined && obs.portId !== portId) continue;
+      if (droppedAtOrder === null || (observerStart.get(obs) ?? 0) > droppedAtOrder) continue;
       try {
         if (oversized) obs.onRxDropped?.({ portId, reason: 'oversized-frame', count: oversized });
         if (lost > oversized) obs.onRxDropped?.({ portId, reason: 'queue-overflow', count: lost - oversized });
@@ -207,6 +221,7 @@ function deliverPort(portId: string): void {
       }
     }
   }
+
   if (state.queue.length === 0) return;
   const gapBefore = state.queue[0].gapBefore === true;
   let count = 0;
@@ -228,7 +243,7 @@ function deliverPort(portId: string): void {
     if (portStates.get(portId) !== state) break;
     if (obs.portId !== undefined && obs.portId !== portId) continue;
     try {
-      const selected = obs.portId === undefined ? batch : batch.filter(line => line.order >= (observerStart.get(obs) ?? 0));
+      const selected = batch.filter(line => line.order >= (observerStart.get(obs) ?? 0));
       if (selected.length > 0) {
         const delivery = selected.map(({ order: _order, gapBefore: _gap, ...line }) => ({ ...line, rawData: line.rawData.slice() }));
         if (obs.portId === undefined) obs.onRxLines(delivery);

@@ -16,6 +16,10 @@
 | `logger/manager.rs` | `LogManager`——`apply_settings` / `write` / `write_rx` / `maybe_split` / `periodic_flush` / `list_files` / `retire_path` |
 
 `LogManager` 在 `AppState::new()` 经 `AppState::apply_runtime_config` 从 ConfigManager 初始化。`AppState.log_manager` 是 **`Arc<LogManager>`（无外层 Mutex）**：写路径全是 `&self` + 内部细粒度锁——`save_log_as` 的拷贝、`list_files` 的递归遍历与数据写入**不争同一把锁**（旧实现是单一全局 `Mutex`，一个大目录或一个正在落盘的端口就能把列表与其它端口写路径一起卡住）。
+- 连接 writer 跟随后端 `connection_generation`：Connected 先创建新 writer，Disconnected/Error/替换先冲刷 RX 尾部并 `flush_and_sync`，失败时保留 writer 所有权以便重试，不把半成品从 registry 丢掉。前端不再用迟到的 start/stop 调用跨越新旧会话。
+- 应用退出使用统一顺序：停止新串口工作准入 → 取消并等待工具/文件发送 → 关闭并 join reader/TTY child → `LogManager::close_all()` → 释放电源抑制 → flush 诊断日志。重复 shutdown 幂等。
+
+- `clear` 从释放活跃句柄直到删除备份、截断文件都持有同一把写入/轮转锁；前端 clear 与已在飞 append 按 epoch/队列串行化，并发追加只能完整发生在清空前或后，不会在清空中途重开句柄或搬回旧备份。诊断批次完成时若还有后续批次会继续排空，不会因 in-flight flush 丢调度。
 
 ### 日志设置的唯一入口
 

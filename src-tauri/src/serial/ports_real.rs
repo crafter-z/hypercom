@@ -23,7 +23,10 @@ use tauri::AppHandle;
 use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
 
 use super::codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
-use super::{emit_reconnect_hint, emit_rx_event, emit_status, lock_error, PortInfo, PortKind, PortStatus, SerialManager};
+use super::{
+    emit_reconnect_hint, emit_rx_event, emit_status_if_current, lock_error, PortInfo, PortKind,
+    PortStatus, SerialManager,
+};
 use crate::commands::OpenPortArgs;
 
 /// A write lease is acquired while the manager still owns the port. Closing waits for
@@ -35,7 +38,10 @@ pub(super) struct CloseBarrier {
 
 impl CloseBarrier {
     pub(super) fn new() -> Self {
-        Self { done: Mutex::new(false), ready: Condvar::new() }
+        Self {
+            done: Mutex::new(false),
+            ready: Condvar::new(),
+        }
     }
 
     pub(super) fn completed(&self) -> bool {
@@ -101,11 +107,23 @@ pub struct PortClose {
 
 impl PortClose {
     pub(super) fn thread(read_thread: thread::JoinHandle<()>) -> Self {
-        Self { read_thread: Some(read_thread), write_port: None, leases: None, completion: None, waiting: None }
+        Self {
+            read_thread: Some(read_thread),
+            write_port: None,
+            leases: None,
+            completion: None,
+            waiting: None,
+        }
     }
 
     pub(super) fn waiting(barrier: Arc<CloseBarrier>) -> Self {
-        Self { read_thread: None, write_port: None, leases: None, completion: None, waiting: Some(barrier) }
+        Self {
+            read_thread: None,
+            write_port: None,
+            leases: None,
+            completion: None,
+            waiting: Some(barrier),
+        }
     }
 
     pub fn join(mut self) -> thread::Result<()> {
@@ -219,25 +237,40 @@ fn make_handle_non_inheritable(port: &serialport::COMPort) -> anyhow::Result<()>
 /// 调用，不得在异步运行时线程或事件循环主线程上直接调用。
 pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyhow::Result<()> {
     if PortKind::of(&args.port_id) == PortKind::Real {
-        let pending = manager.lock().map_err(lock_error)?.pending_real_closes.get(&args.port_id).cloned();
+        let pending = manager
+            .lock()
+            .map_err(lock_error)?
+            .pending_real_closes
+            .get(&args.port_id)
+            .cloned();
         if let Some(pending) = pending {
             pending.wait();
         }
-        let live = manager
-            .lock()
-            .map_err(lock_error)?
-            .ports
-            .get(&args.port_id)
-            .map(|h| h.running.load(Ordering::Relaxed))
-            .unwrap_or(false);
-        // 存活句柄 + 设备已从系统枚举消失 = USB 拔出留下的幽灵句柄：读线程可能因
-        // 空闲而永不报错（read 一直 timeout），running 停在 true，继续报
-        // "already open" 会让用户重插后永远开不了（只能重启应用）。
-        if !live || !system_port_present(&args.port_id)? {
-            if live {
-                log::warn!("Port {} stale handle detected (device vanished from enumeration); recycling", args.port_id);
-            }
-            let close = manager.lock().map_err(lock_error)?.close_port_inner(&args.port_id)?;
+        let (live, observed_generation) = {
+            let guard = manager.lock().map_err(lock_error)?;
+            (
+                guard
+                    .ports
+                    .get(&args.port_id)
+                    .map(|h| h.running.load(Ordering::Acquire))
+                    .unwrap_or(false),
+                guard.connection_generations.get(&args.port_id).copied(),
+            )
+        };
+        let present = system_port_present(&args.port_id)?;
+        if !live || !present {
+            let close = {
+                let mut guard = manager.lock().map_err(lock_error)?;
+                // Do not let a stale enumeration remove a newer session.
+                if guard.connection_generations.get(&args.port_id).copied() != observed_generation {
+                    None
+                } else {
+                    if live {
+                        log::warn!("Port {} stale handle detected; recycling", args.port_id);
+                    }
+                    guard.close_port_inner(&args.port_id)?
+                }
+            };
             if let Some(close) = close {
                 let _ = close.join();
             }
@@ -247,11 +280,13 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
     // cannot remove a handle between checking the barrier and CreateFile.
     loop {
         let mut guard = manager.lock().map_err(lock_error)?;
-        let pending = guard.pending_real_closes.get(&args.port_id).cloned();
-        if let Some(pending) = pending.filter(|barrier| !barrier.completed()) {
-            drop(guard);
-            pending.wait();
-            continue;
+        if let Some(pending) = guard.pending_real_closes.get(&args.port_id).cloned() {
+            if !pending.completed() {
+                drop(guard);
+                pending.wait();
+                continue;
+            }
+            guard.pending_real_closes.remove(&args.port_id);
         }
         return guard.open_port(args);
     }
@@ -261,7 +296,11 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
 ///
 /// 与 `open_blocking` 同因：join 旧读线程与端口枚举都是阻塞操作，不能在持有
 /// 全局串口锁时执行（调用方命令层因此在锁外 join 后再重新持锁打开）。
-pub fn reconnect_blocking(manager: &Mutex<SerialManager>, port_id: &str, cancel: &AtomicBool) -> anyhow::Result<()> {
+pub fn reconnect_blocking(
+    manager: &Mutex<SerialManager>,
+    port_id: &str,
+    cancel: &AtomicBool,
+) -> anyhow::Result<()> {
     reconnect_with_probe(manager, port_id, cancel, system_port_present)
 }
 
@@ -293,7 +332,8 @@ fn reconnect_with_probe(
     // close_port_inner registered a barrier above; join has completed it already.
     let mut guard = manager.lock().map_err(lock_error)?;
     check_reconnect(cancel)?;
-    let params = guard.get_last_params(port_id)
+    let params = guard
+        .get_last_params(port_id)
         .ok_or_else(|| anyhow::anyhow!("No previous connection params for {}", port_id))?;
     guard.open_port(params)
 }
@@ -368,25 +408,37 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
 
     let read_port_arc = Arc::new(Mutex::new(read_port));
     let write_port_arc = Arc::new(Mutex::new(write_port));
-    let leases = Arc::new(WriterLeases { count: Mutex::new(0), empty: Condvar::new() });
+    let leases = Arc::new(WriterLeases {
+        count: Mutex::new(0),
+        empty: Condvar::new(),
+    });
     let running = Arc::new(AtomicBool::new(true));
-
+    let ready = Arc::new(AtomicBool::new(false));
+    let generation = manager
+        .connection_generations
+        .get(&args.port_id)
+        .copied()
+        .unwrap_or_default();
     let thread_port_id = args.port_id.clone();
     let read_thread = thread::spawn({
         let read_port = Arc::clone(&read_port_arc);
         let running = Arc::clone(&running);
+        let ready = Arc::clone(&ready);
         let app_handle = app_handle.clone();
-        move || read_loop(thread_port_id, read_port, running, app_handle)
+        move || {
+            read_loop(
+                thread_port_id,
+                read_port,
+                running,
+                ready,
+                generation,
+                app_handle,
+            )
+        }
     });
-
-    // 记录连接参数，用于自动重连
-    manager.last_params.insert(args.port_id.clone(), args.clone());
-
-    emit_status(&app_handle, &args.port_id, PortStatus::Connected);
-
     let port_id = args.port_id.clone();
     manager.ports.insert(
-        args.port_id,
+        args.port_id.clone(),
         SerialPortHandle {
             read_port: read_port_arc,
             write_port: write_port_arc,
@@ -395,6 +447,16 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
             read_thread: Some(read_thread),
         },
     );
+    manager
+        .last_params
+        .insert(args.port_id.clone(), args.clone());
+    emit_status_if_current(
+        &app_handle,
+        &args.port_id,
+        PortStatus::Connected,
+        generation,
+    );
+    ready.store(true, Ordering::Release);
     log::info!("Serial port opened: {}", port_id);
     Ok(())
 }
@@ -437,7 +499,11 @@ pub(super) fn send(
 }
 
 /// 向真实串口写入原始字节（不做 HEX 解析、不附加行结束符）。用于文件发送。
-pub(super) fn write_raw(manager: &SerialManager, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
+pub(super) fn write_raw(
+    manager: &SerialManager,
+    port_id: &str,
+    bytes: &[u8],
+) -> anyhow::Result<usize> {
     let handle = manager
         .ports
         .get(port_id)
@@ -463,7 +529,10 @@ pub(super) fn write_handle(
         .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
     let mut count = handle.leases.count.lock().map_err(lock_error)?;
     *count += 1;
-    Ok(RealWriteHandle { port: Some(Arc::clone(&handle.write_port)), leases: Arc::clone(&handle.leases) })
+    Ok(RealWriteHandle {
+        port: Some(Arc::clone(&handle.write_port)),
+        leases: Arc::clone(&handle.leases),
+    })
 }
 
 /// 修改串口参数（完整）。
@@ -560,6 +629,8 @@ fn read_loop(
     port_id: String,
     read_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     running: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    generation: u64,
     app_handle: AppHandle,
 ) {
     // 单次读取的结果分类：把「读到数据」/「读超时」/「真实错误」分离，以便在
@@ -571,6 +642,9 @@ fn read_loop(
     }
 
     let mut buffer = [0u8; 1024];
+    while running.load(Ordering::Acquire) && !ready.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
     let mut abnormal = false;
 
     while running.load(Ordering::Relaxed) {
@@ -596,7 +670,7 @@ fn read_loop(
             ReadOutcome::Data(_) | ReadOutcome::Timeout => {}
             ReadOutcome::Error(e) => {
                 log::warn!("Serial read error on {}: {}", port_id, e);
-                emit_status(&app_handle, &port_id, PortStatus::Error);
+                emit_status_if_current(&app_handle, &port_id, PortStatus::Error, generation);
                 abnormal = true;
                 break;
             }
@@ -605,7 +679,7 @@ fn read_loop(
     running.store(false, Ordering::Relaxed);
 
     // 读取线程退出时发送断开事件
-    emit_status(&app_handle, &port_id, PortStatus::Disconnected);
+    emit_status_if_current(&app_handle, &port_id, PortStatus::Disconnected, generation);
     // 异常退出时发送一次重连提示，避免每次轮询都产生噪音
     if abnormal {
         log::warn!(
@@ -682,7 +756,6 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     use super::{parse_data_bits, parse_flow_control, parse_parity, parse_stop_bits};
 
-
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn close_during_reconnect_probe_prevents_reopening() {
@@ -693,7 +766,10 @@ mod tests {
             manager.lock().unwrap().close_port("COM3")?;
             Ok(true)
         });
-        assert!(result.unwrap_err().to_string().contains("Reconnect cancelled"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Reconnect cancelled"));
         // Without the final intent check this reaches the missing-param/open path.
         assert!(manager.lock().unwrap().ports.is_empty());
     }
@@ -707,7 +783,10 @@ mod tests {
         let result = super::reconnect_with_probe(&manager, "COM3", &old, |_| {
             panic!("cancelled queued reconnect must not enumerate devices")
         });
-        assert!(result.unwrap_err().to_string().contains("Reconnect cancelled"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Reconnect cancelled"));
         manager.lock().unwrap().finish_reconnect("COM3", &old);
         assert!(!current.load(std::sync::atomic::Ordering::Relaxed));
         manager.lock().unwrap().close_port("COM3").unwrap();
@@ -718,8 +797,14 @@ mod tests {
     fn parse_data_bits_accepts_supported_widths_only() {
         assert!(matches!(parse_data_bits(5), Ok(serialport::DataBits::Five)));
         assert!(matches!(parse_data_bits(6), Ok(serialport::DataBits::Six)));
-        assert!(matches!(parse_data_bits(7), Ok(serialport::DataBits::Seven)));
-        assert!(matches!(parse_data_bits(8), Ok(serialport::DataBits::Eight)));
+        assert!(matches!(
+            parse_data_bits(7),
+            Ok(serialport::DataBits::Seven)
+        ));
+        assert!(matches!(
+            parse_data_bits(8),
+            Ok(serialport::DataBits::Eight)
+        ));
         assert!(parse_data_bits(9).is_err());
         assert!(parse_data_bits(0).is_err());
     }
@@ -740,8 +825,14 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_stop_bits_accepts_serialport_values_only() {
-        assert!(matches!(parse_stop_bits("One"), Ok(serialport::StopBits::One)));
-        assert!(matches!(parse_stop_bits("Two"), Ok(serialport::StopBits::Two)));
+        assert!(matches!(
+            parse_stop_bits("One"),
+            Ok(serialport::StopBits::One)
+        ));
+        assert!(matches!(
+            parse_stop_bits("Two"),
+            Ok(serialport::StopBits::Two)
+        ));
         // UI 里存在但 serialport 无法表达的 1.5 停止位不能静默降级成 One
         assert!(parse_stop_bits("OnePointFive").is_err());
         assert!(parse_stop_bits("bogus").is_err());
@@ -778,10 +869,11 @@ mod tests {
             duplicate.join().unwrap();
             ready.send(()).unwrap();
         });
-        assert!(rx.recv_timeout(std::time::Duration::from_millis(20)).is_err());
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(20))
+            .is_err());
         completion.finish();
         rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         thread.join().unwrap();
     }
-
 }

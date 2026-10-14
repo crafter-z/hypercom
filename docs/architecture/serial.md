@@ -66,10 +66,16 @@ openPort(portId, baud)
 ```
 
 - 打开时在 `ports_real::open` 内设置 DTR/RTS（clone 前，设备级共享），随后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）。
-- `SerialPortHandle`：`read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>`；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享）。
+- `SerialPortHandle`：`read_port`（读线程独占，只锁读）/`write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>`；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享）。
+- **陈旧句柄守卫**：异常断线后陈旧句柄留在 `ports`，`open_port` 通过 live/session generation 与系统枚举交叉核对；旧会话只在身份仍匹配时回收，避免并发打开误删新会话。
+- 每个成功打开会话分配单调 `connection_generation`。文件发送、读线程终态、TTY reader 和外部工具恢复都必须验证会话代次；旧 reader/旧工具不能覆盖新连接的 `connected` / `disconnected` / `error` 状态。
+- `send_serial_data` 的真实串口和 GIT:BASH 写入都在全局 `SerialManager` 锁外执行：锁内只领取 session-bound 写租约，关闭在锁外等待租约/reader/child 收尾。TTY 写入检查 `running`，关闭会 detach 句柄后再 kill、drop master、join 和 reap。
 - **发送异步化（issue #6-1）**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 是 `Arc<Mutex<SerialManager>>`、`log_manager` 是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），`spawn_blocking` 闭包克隆这两个 `Arc` 供 `'static` 使用。
-- `openPort`/`closePort` 有 per-port in-flight 守卫（`useSerialConnection` 模块级 `opsInFlight: Set<portId>`），同一事件循环连点不再并发 open 同一句柄。
-- **陈旧句柄守卫**：异常断线后陈旧句柄留在 `ports`，`open_port` 无守卫会报 OS「access denied」且 `insert` 可能丢弃存活句柄、泄漏游离读线程——守卫存活 → 干净报错「already open」；死线程 → 移除并释放 OS 端口。SIM 读线程退出补发 `serial:status disconnected`。
+- `openPort`/`closePort`/自动重连共用前端 per-port operation lane；迟到的 invoke 完成和 `serial:status` 事件按意图/代次丢弃，不再用旧结果覆盖手动关闭。
+- 关闭时由 `close_serial_port` 在全局 manager 锁外等待 reader、TTY child、真实写租约和关闭屏障；完成后清理已完成 barrier，避免按历史 portId 无限保留所有权记录。
+- 正常退出先关闭新串口工作准入，取消文件/工具任务，锁外 join/reap 所有会话，再 flush 日志和电源抑制；重复 shutdown 幂等。
+- 文件发送携带 `transfer_id`，每个传输绑定启动时的 connection generation；端口关闭/重开后剩余分块拒绝写入新会话，取消只作用于同一端口同一 transfer。
+- `SerialManager` 的 SIM/GIT:BASH 能力在 teardown 前先关闭，随后锁外销毁句柄；关闭期间不能重新打开一个最终会脱离枚举的虚拟端口。
 
 ### 关闭
 
@@ -103,7 +109,8 @@ openPort(portId, baud)
 ## 外部工具（flasher）
 
 - `run_port_tool` / `kill_port_tool`（`commands/serial.rs`）+ `useToolOutput` hook + ToolSettings 页。
-- close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；触发在侧边栏右键菜单。
+- close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；同一端口通过 owner token 单飞，旧调用不能替换或移除新调用的 child。
+- 工具 reader、子进程和串口恢复共享同一 owner；工具退出/恢复完成后才发 `tool:exit`，程序性关闭不触发错误的用户回贴。Windows 克隆句柄不继承到工具；Unix/Windows 进程树终止与 reader 收尾必须纳入 owner teardown。
 - `run_port_tool` 在全局串口锁外等待读线程和写租约；真实串口的 Windows 写克隆句柄必须清除 `HANDLE_FLAG_INHERIT`，否则并行启动的兄弟工具可能继承尚未关闭的 COM 句柄，导致 HyperCom 关闭后仍由子进程占有端口。写租约在释放实际 Arc 句柄后才通知关闭完成。正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。
 - 分组整组执行（issue #5-7）：`usePortToolActions.runToolForGroup` + `GroupToolDialog`——严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。
 - 标签页菜单与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key。

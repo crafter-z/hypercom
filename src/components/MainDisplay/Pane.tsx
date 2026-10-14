@@ -54,7 +54,7 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     dismissPluginTab(tabId);
     if (tab?.kind === 'serial') {
       ttyService.detach(tab.portId);
-      if (tab.poppedOut) void popoutService.closePopout('terminal', tab.portId).catch(error => console.debug('[MainDisplay] closePopout', error));
+      void popoutService.closePopout('terminal', tab.portId).catch(error => console.debug('[MainDisplay] closePopout', error));
       releaseViewportManager(tab.portId);
       getRxPipeline().discardTerminalQueue(tab.portId);
     }
@@ -147,7 +147,12 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
       const next = tabIds.find(id => id !== tabId && state.tabs.some(item => item.id === id && (item.kind !== 'serial' || !item.poppedOut)));
       if (next) { setActiveTab(next); setLocalActiveTabId(next); }
     }
-    void popoutService.openPopout('terminal', portId).catch(error => {
+    void popoutService.openPopout('terminal', portId, () => {
+      const current = useAppStore.getState().tabs.find(item => item.id === tabId);
+      return current?.kind === 'serial' && current.portId === portId && current.poppedOut === true;
+    }).catch(error => {
+      const current = useAppStore.getState().tabs.find(item => item.id === tabId);
+      if (current?.kind !== 'serial' || !current.poppedOut) return;
       setTabPoppedOut(tabId, false);
       notifyError(error);
     });

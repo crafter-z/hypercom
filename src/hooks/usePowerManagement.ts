@@ -3,28 +3,48 @@ import { useAppStore } from '../stores/useAppStore';
 import { systemService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
 
-/**
- * Mirrors the `preventScreenOff` / `preventSleep` config flags to the OS
- * (Win32 `SetThreadExecutionState` via the backend).
- *
- * Extracted from ThemeProvider: power management is a system concern, not a
- * presentation one. Call once at the app root.
- */
+type PowerSetting = 'preventScreenOff' | 'preventSleep';
+
+// Each setting has a single serialized lane. When a newer value arrives while
+// an invoke is pending, the lane replays the latest value after that invoke,
+// preventing an older completion from becoming the final OS state.
+const lanes: Record<PowerSetting, { running: boolean; pending: boolean; value: boolean }> = {
+  preventScreenOff: { running: false, pending: false, value: false },
+  preventSleep: { running: false, pending: false, value: false },
+};
+
+async function applyPowerSetting(setting: PowerSetting, value: boolean): Promise<void> {
+  const lane = lanes[setting];
+  lane.value = value;
+  lane.pending = true;
+  if (lane.running) return;
+  lane.running = true;
+  try {
+    while (lane.pending) {
+      lane.pending = false;
+      try {
+        if (setting === 'preventScreenOff') await systemService.preventScreenOff(lane.value);
+        else await systemService.preventSleep(lane.value);
+      } catch (e) {
+        console.debug(`[usePowerManagement] ${setting} failed:`, e);
+        notifyError(e);
+      }
+    }
+  } finally {
+    lane.running = false;
+  }
+}
+
+/** Mirrors power-prevention config flags to the OS through serialized lanes. */
 export function usePowerManagement(): void {
   const preventScreenOff = useAppStore((s) => s.config.preventScreenOff);
   const preventSleep = useAppStore((s) => s.config.preventSleep);
 
   useEffect(() => {
-    systemService.preventScreenOff(preventScreenOff).catch((e) => {
-      console.debug('[usePowerManagement] preventScreenOff failed:', e);
-      notifyError(e);
-    });
+    void applyPowerSetting('preventScreenOff', preventScreenOff);
   }, [preventScreenOff]);
 
   useEffect(() => {
-    systemService.preventSleep(preventSleep).catch((e) => {
-      console.debug('[usePowerManagement] preventSleep failed:', e);
-      notifyError(e);
-    });
+    void applyPowerSetting('preventSleep', preventSleep);
   }, [preventSleep]);
 }

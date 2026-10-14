@@ -28,6 +28,7 @@ import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
 import { exportPluginPanel } from './pluginPanelExport';
 import { executePluginViewApi } from './pluginViewRuntime';
+import { acquirePluginDialog } from './pluginDialogBudget';
 
 /** 插件可见的端口摘要（避免把内部字段全量暴露给插件）。 */
 export interface PluginPortView {
@@ -129,15 +130,21 @@ export async function executeHostApi(
       const encoding = typeof a.encoding === 'string' && a.encoding !== '' ? a.encoding : 'utf-8';
       const filters = Array.isArray(a.filters) ? (a.filters as { name: string; extensions: string[] }[]) : undefined;
       const multiple = Boolean(a.multiple);
-      const selected = await fileService.pickPluginFiles(pluginId, {
-        multiple, filters, title: typeof a.title === 'string' ? a.title : undefined,
-      });
-      return {
-        files: selected.files.map(({ path, base64 }: { path: string; base64: string }) => {
-          const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-          return { path, content: new TextDecoder(encoding).decode(bytes) };
-        }),
-      };
+      const releaseDialog = acquirePluginDialog(pluginId);
+      try {
+        const selected = await fileService.pickPluginFiles(pluginId, {
+          multiple, filters, title: typeof a.title === 'string' ? a.title : undefined,
+        });
+        beforeSend?.();
+        return {
+          files: selected.files.map(({ path, base64 }: { path: string; base64: string }) => {
+            const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+            return { path, content: new TextDecoder(encoding).decode(bytes) };
+          }),
+        };
+      } finally {
+        releaseDialog();
+      }
     }
     case 'fs.read': {
       const rel = requireString(args, 'rel');
@@ -229,7 +236,7 @@ export async function executeHostApi(
     }
     case 'storage.set': {
       const a = requireObject(args);
-      await pluginKv.set(pluginId, requireString(a, 'key'), a.value);
+      await pluginKv.set(pluginId, requireString(a, 'key'), a.value, beforeSend);
       return null;
     }
     case 'ui.panel.append': {
@@ -243,7 +250,7 @@ export async function executeHostApi(
       return null;
     }
     case 'ui.panel.export': {
-      await exportPluginPanel(pluginId, getPluginPanelSnapshot()[pluginId]?.buffer ?? '');
+      await exportPluginPanel(pluginId, getPluginPanelSnapshot()[pluginId]?.buffer ?? '', beforeSend);
       return null;
     }
     case 'rx.onLine':

@@ -61,7 +61,7 @@ pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
 /// `\r\n` 会变成**两个**换行：bash 执行完命令后还多收到一个空行，表现为
 /// 「快捷发送后额外多执行一行空命令」。TTY 语义下回车统一为单个 `\r`
 /// （真实终端 Enter 发出的就是 `\r`）；`\r`/`\n`/`None` 原样保留。
-pub(super) fn normalize_tty_line_ending(append_line_ending: &str) -> &str {
+pub(crate) fn normalize_tty_line_ending(append_line_ending: &str) -> &str {
     if append_line_ending == "\\r\\n" {
         "\\r"
     } else {
@@ -167,23 +167,44 @@ pub fn write_with_deadline_progress(
         let write_start = std::time::Instant::now();
         let before = *written;
         match port.write(&bytes[*written..]) {
-            Ok(0) => return Err(anyhow::anyhow!("Serial write returned 0 bytes (flow control stalled?)")),
+            Ok(0) => {
+                return Err(anyhow::anyhow!(
+                    "Serial write returned 0 bytes (flow control stalled?)"
+                ))
+            }
             Ok(n) => *written += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {},
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {},
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => return Err(anyhow::anyhow!("Serial write error: {e}")),
         }
         let single_elapsed = write_start.elapsed();
         if single_elapsed > SINGLE_WRITE_WARN {
-            log::warn!("Slow serial write to {}: {} bytes written in {}ms (batch {}/{} bytes)", port_id, *written - before, single_elapsed.as_millis(), *written, bytes.len());
+            log::warn!(
+                "Slow serial write to {}: {} bytes written in {}ms (batch {}/{} bytes)",
+                port_id,
+                *written - before,
+                single_elapsed.as_millis(),
+                *written,
+                bytes.len()
+            );
         }
         if *written < bytes.len() && start.elapsed() >= deadline {
-            return Err(anyhow::anyhow!("Serial write timed out after {}ms ({} of {} bytes written)", deadline.as_millis(), *written, bytes.len()));
+            return Err(anyhow::anyhow!(
+                "Serial write timed out after {}ms ({} of {} bytes written)",
+                deadline.as_millis(),
+                *written,
+                bytes.len()
+            ));
         }
     }
     let total_elapsed = start.elapsed();
     if total_elapsed > TOTAL_WRITE_WARN {
-        log::warn!("Slow serial batch write to {}: {} bytes in {}ms", port_id, bytes.len(), total_elapsed.as_millis());
+        log::warn!(
+            "Slow serial batch write to {}: {} bytes in {}ms",
+            port_id,
+            bytes.len(),
+            total_elapsed.as_millis()
+        );
     }
     Ok(())
 }
@@ -213,7 +234,10 @@ mod tests {
 
     #[test]
     fn parse_hex_accepts_space_separated_compact_and_mixed() {
-        assert_eq!(parse_hex_string("48 65 6C").unwrap(), vec![0x48, 0x65, 0x6C]);
+        assert_eq!(
+            parse_hex_string("48 65 6C").unwrap(),
+            vec![0x48, 0x65, 0x6C]
+        );
         assert_eq!(parse_hex_string("48656c").unwrap(), vec![0x48, 0x65, 0x6C]);
         assert_eq!(parse_hex_string("48 656C").unwrap(), vec![0x48, 0x65, 0x6C]);
     }
@@ -244,7 +268,10 @@ mod tests {
     fn parse_hex_error_reports_original_index_of_bad_pair() {
         // "AA ZZ": 空格在原始索引 2，坏对 "ZZ" 从原始索引 3 开始（证明位置修复）。
         let err = parse_hex_string("AA ZZ").unwrap_err().to_string();
-        assert!(err.contains('3'), "error should contain original index 3: {err}");
+        assert!(
+            err.contains('3'),
+            "error should contain original index 3: {err}"
+        );
     }
 
     // ---------- build_tx_bytes ----------
@@ -260,7 +287,10 @@ mod tests {
 
     #[test]
     fn build_tx_bytes_hex_ignores_line_ending_and_validates() {
-        assert_eq!(build_tx_bytes("48 65", true, "\\r\\n").unwrap(), vec![0x48, 0x65]);
+        assert_eq!(
+            build_tx_bytes("48 65", true, "\\r\\n").unwrap(),
+            vec![0x48, 0x65]
+        );
         assert!(build_tx_bytes("4", true, "None").is_err());
     }
 
@@ -416,11 +446,20 @@ mod tests {
                     Ok(bytes.len().min(2))
                 }
             }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
 
         let mut confirmed = 0;
-        let err = write_with_deadline_progress("COM3", &mut PartialThenError(false), b"abcdef", Duration::from_secs(1), &mut confirmed).unwrap_err();
+        let err = write_with_deadline_progress(
+            "COM3",
+            &mut PartialThenError(false),
+            b"abcdef",
+            Duration::from_secs(1),
+            &mut confirmed,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("driver failed"));
         assert_eq!(confirmed, 2);
     }
@@ -436,12 +475,19 @@ mod tests {
                 }
                 Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
             }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
         let mut written = 0;
-        let result = write_with_deadline_progress("COM3", &mut InterruptionsAfterProgress(false), b"ab", Duration::from_millis(1), &mut written);
+        let result = write_with_deadline_progress(
+            "COM3",
+            &mut InterruptionsAfterProgress(false),
+            b"ab",
+            Duration::from_millis(1),
+            &mut written,
+        );
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert_eq!(written, 1);
     }
-
 }

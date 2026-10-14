@@ -25,6 +25,19 @@ import type { AppConfig, PluginView } from '../types';
 // stale grant snapshot.
 const permissionQueues = new Map<string, Promise<void>>();
 
+async function reconcileMutationFailure(): Promise<void> {
+  try {
+    const result = await pluginService.listPlugins();
+    syncPluginListSnapshot(result);
+    if (useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
+  } catch (recoveryError) {
+    // An error after a durable trust mutation has no safe local interpretation.
+    // Retire every Worker until an authoritative snapshot can be obtained.
+    console.error('[usePluginList] authoritative plugin recovery failed:', recoveryError);
+    pluginHost.dispose();
+  }
+}
+
 function attachRxForPlugin(pluginId: string): () => void {
   return attachRxObserver({
     post: (message, transfer) => {
@@ -169,12 +182,17 @@ export function usePluginList() {
 
   const installPlugin = useCallback(async (sourcePath: string) => {
     setLoading(true);
+    // The source path does not identify its plugin until the backend validates it.
+    // Retire all workers before the backend can durably reset trust for an upgrade.
+    pluginHost.dispose();
     try {
       const snapshot = await pluginService.installPlugin(sourcePath);
       syncStorePluginConfigs(snapshot);
+      pluginHost.syncWithConfig(true);
       notifySuccess('plugins.installed');
       await refresh();
     } catch (error) {
+      await reconcileMutationFailure();
       console.error('[usePluginList] install failed:', error);
       notifyError(error);
       throw error;
@@ -185,12 +203,15 @@ export function usePluginList() {
 
   const uninstallPlugin = useCallback(async (pluginId: string) => {
     setLoading(true);
+    // Retire the affected Worker before configuration removal can commit.
+    pluginHost.disable(pluginId);
     try {
       const snapshot = await pluginService.uninstallPlugin(pluginId);
       syncStorePluginConfigs(snapshot);
       notifySuccess('plugins.uninstalled');
       await refresh();
     } catch (error) {
+      await reconcileMutationFailure();
       console.error('[usePluginList] uninstall failed:', error);
       notifyError(error);
     } finally {

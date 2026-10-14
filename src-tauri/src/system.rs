@@ -11,11 +11,14 @@
 //!   - `win32_backend`：专用线程调用 `SetThreadExecutionState`；
 //!   - `child_process_backend`：重启持有抑制的子进程（macOS / Linux）。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+/// Once shutdown starts, late frontend setting effects must not recreate the inhibitor.
+static POWER_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// 期望的 `(prevent_sleep, prevent_screen_off)` 状态。
 static DESIRED_STATE: Mutex<(bool, bool)> = Mutex::new((false, false));
-
 /// 开关防息屏。
 pub fn prevent_screen_off(enable: bool) -> Result<(), String> {
     apply_state(|state| state.1 = enable)
@@ -26,8 +29,25 @@ pub fn prevent_sleep(enable: bool) -> Result<(), String> {
     apply_state(|state| state.0 = enable)
 }
 
+/// Release any platform power inhibitor during coordinated application shutdown.
+/// This is idempotent and waits for child-process based inhibitors to be reaped.
+pub fn shutdown_power_inhibitor() -> Result<(), String> {
+    POWER_SHUTTING_DOWN.store(true, Ordering::Release);
+    apply_state_with(
+        &DESIRED_STATE,
+        |state| {
+            state.0 = false;
+            state.1 = false;
+        },
+        apply_backend,
+    )
+}
+
 /// 更新期望状态的一半，再把**完整**状态交给当前平台后端应用。
 fn apply_state(update: impl FnOnce(&mut (bool, bool))) -> Result<(), String> {
+    if POWER_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return Ok(());
+    }
     apply_state_with(&DESIRED_STATE, update, apply_backend)
 }
 
@@ -38,13 +58,14 @@ fn apply_state_with(
 ) -> Result<(), String> {
     // Keep the state lock until the complete snapshot has reached the backend.
     // Otherwise a later update can apply first and then be overwritten by this one.
-    let mut guard = state.lock().map_err(|e| format!("Failed to lock power state: {}", e))?;
+    let mut guard = state
+        .lock()
+        .map_err(|e| format!("Failed to lock power state: {}", e))?;
     update(&mut guard);
     apply(*guard)
 }
 
 fn apply_backend(desired: (bool, bool)) -> Result<(), String> {
-
     #[cfg(target_os = "windows")]
     {
         win32_backend::apply(desired.0, desired.1)
@@ -186,7 +207,10 @@ mod child_process_backend {
         match cmd.spawn() {
             Ok(child) => Ok(Some(child)),
             Err(e) => {
-                log::warn!("Failed to spawn systemd-inhibit (non-systemd system?): {}", e);
+                log::warn!(
+                    "Failed to spawn systemd-inhibit (non-systemd system?): {}",
+                    e
+                );
                 Ok(None)
             }
         }
@@ -226,7 +250,6 @@ mod child_process_backend {
 mod tests {
     use super::*;
 
-
     #[test]
     fn concurrent_half_updates_apply_in_snapshot_order() {
         let state = Mutex::new((false, false));
@@ -236,22 +259,37 @@ mod tests {
         std::thread::scope(|scope| {
             let state_ref = &state;
             let second_tx = applied_tx.clone();
-            let first = scope.spawn(move || apply_state_with(state_ref, |s| s.0 = true, |snapshot| {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                applied_tx.send(snapshot).unwrap();
-                Ok(())
-            }));
+            let first = scope.spawn(move || {
+                apply_state_with(
+                    state_ref,
+                    |s| s.0 = true,
+                    |snapshot| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        applied_tx.send(snapshot).unwrap();
+                        Ok(())
+                    },
+                )
+            });
             entered_rx.recv().unwrap();
-            let second = scope.spawn(move || apply_state_with(state_ref, |s| s.1 = true, |snapshot| {
-                second_tx.send(snapshot).unwrap();
-                Ok(())
-            }));
+            let second = scope.spawn(move || {
+                apply_state_with(
+                    state_ref,
+                    |s| s.1 = true,
+                    |snapshot| {
+                        second_tx.send(snapshot).unwrap();
+                        Ok(())
+                    },
+                )
+            });
             let premature = applied_rx.recv_timeout(std::time::Duration::from_millis(20));
             release_tx.send(()).unwrap();
             first.join().unwrap().unwrap();
             second.join().unwrap().unwrap();
-            assert!(premature.is_err(), "new snapshot applied before the older one completed");
+            assert!(
+                premature.is_err(),
+                "new snapshot applied before the older one completed"
+            );
             assert_eq!(applied_rx.recv().unwrap(), (true, false));
             assert_eq!(applied_rx.recv().unwrap(), (true, true));
         });
@@ -274,7 +312,10 @@ mod tests {
 
         #[test]
         fn caffeinate_args_screen_only() {
-            assert_eq!(child_process_backend::caffeinate_args(false, true), vec!["-d"]);
+            assert_eq!(
+                child_process_backend::caffeinate_args(false, true),
+                vec!["-d"]
+            );
         }
 
         #[test]
@@ -315,7 +356,10 @@ mod tests {
 
         #[test]
         fn inhibit_what_both() {
-            assert_eq!(child_process_backend::inhibit_what(true, true), "idle:sleep");
+            assert_eq!(
+                child_process_backend::inhibit_what(true, true),
+                "idle:sleep"
+            );
         }
 
         #[test]

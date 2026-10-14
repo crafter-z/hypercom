@@ -197,6 +197,24 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
     expect(JSON.parse(mockWrite.mock.calls[1][2] as string)).toEqual({ reinstalled: true, fresh: true });
   });
 
+  it('does not dispatch a queued write after its requester retires', async () => {
+    mockRead.mockResolvedValue('{}');
+    let releaseFirst!: () => void;
+    mockWrite.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    let retired = false;
+    const authority = (): void => {
+      if (retired) throw new Error('request retired');
+    };
+    const running = pluginKv.set('com.example.test', 'running', true, authority);
+    await vi.waitFor(() => expect(mockWrite).toHaveBeenCalledTimes(1));
+    const queued = pluginKv.set('com.example.test', 'queued', true, authority);
+    retired = true;
+    releaseFirst();
+    await running;
+    await expect(queued).rejects.toThrow('request retired');
+    expect(mockWrite).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the last committed snapshot after a failed write and continues the queue', async () => {
     mockRead.mockResolvedValue('{"saved":true}');
     mockWrite.mockRejectedValueOnce(new Error('disk full'));

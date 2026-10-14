@@ -3,7 +3,7 @@ import { findSerialTabByPortId, getActivePortId, useAppStore } from '../stores/u
 import { useRuleStore } from '../stores/useRuleStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { popoutEventService, storageService } from '../services/tauri';
+import { popoutEventService, popoutService, storageService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { snapshotTerminalLines } from '../utils/terminal/viewportManager';
@@ -38,6 +38,7 @@ export function usePopoutBridge() {
     // 异步注册竞态保护：参考 SendSection onFileProgress 模式。
     popoutEventService
       .onSendCommand((payload) => {
+        if (cancelled) return;
         // 显式目标端口优先（issue #5-4-6）：弹窗携带 portId 时发送到该端口，
         // 否则退回活动标签。端口已关闭时 sendToPort 内部守卫负责 toast/静默。
         const portId = payload.portId ?? getActivePortId(useAppStore.getState());
@@ -55,6 +56,7 @@ export function usePopoutBridge() {
 
     popoutEventService
       .onOpenConfig((payload) => {
+        if (cancelled) return;
         const ui = useSystemStore.getState();
         ui.setConfigActiveTab(payload.page);
         ui.toggleConfigModal(true);
@@ -71,8 +73,9 @@ export function usePopoutBridge() {
     // 等于把弹窗的编辑回滚掉。
     popoutEventService
       .onCommandSetUpdated((payload) => {
+        if (cancelled) return;
         useRuleStore.getState().updateSendCommandSet(payload.set.id, payload.set);
-        void storageService.saveCommandSet(payload.set).catch((error) => notifyError(error));
+        void storageService.saveCommandSet(payload.set).catch((error) => { if (!cancelled) notifyError(error); });
       })
       .then((u) => {
         if (cancelled) u();
@@ -84,6 +87,7 @@ export function usePopoutBridge() {
     // 在首次变更信号到达前失真（命令集载荷含未保存编辑，弹窗无需回库重读）。
     popoutEventService
       .onRequestSync(() => {
+        if (cancelled) return;
         // 弹窗可能已销毁（emit 在弹窗 webview 关闭时 reject）——全部静默降级。
         popoutEventService
           .emitActiveTabChanged({ portId: getActivePortId(useAppStore.getState()) })
@@ -109,6 +113,7 @@ export function usePopoutBridge() {
     // 快照仅含纯可序列化数据（lines + 显示态）；超长按 R3 截最近 N 行。
     popoutEventService
       .onTerminalRequestSnapshot((payload) => {
+        if (cancelled) return;
         const terminal = useTerminalStore.getState().terminals[payload.portId];
         if (!terminal) {
           // 弹窗在端口终端尚未建立时快照，属正常竞态分支，非错误，不记录。
@@ -131,6 +136,7 @@ export function usePopoutBridge() {
     // 终端弹出窗关闭（Rust on_window_event 探测）→ 回贴标签，主窗恢复终端显示。
     popoutEventService
       .onTerminalClosed((payload) => {
+        if (cancelled || !popoutService.terminalClosed(payload.portId)) return;
         const state = useAppStore.getState();
         const tab = findSerialTabByPortId(state, payload.portId);
         if (tab) state.setTabPoppedOut(tab.id, false);
@@ -145,7 +151,7 @@ export function usePopoutBridge() {
     // 携带载荷而非仅信号：主窗 useRuleStore 是唯一真相，config.json 异步落盘，
     // 配置弹窗里未保存的编辑不在盘上——弹窗回库重读会漏掉这些编辑。
     const unsubscribeRules = useRuleStore.subscribe((state, prevState) => {
-      if (state.sendCommandSets === prevState.sendCommandSets) return;
+      if (cancelled || state.sendCommandSets === prevState.sendCommandSets) return;
       popoutEventService
         .emitCommandSetsChanged(state.sendCommandSets)
         .catch((e) => console.debug('[usePopoutBridge] emitCommandSetsChanged failed:', e));
@@ -153,7 +159,7 @@ export function usePopoutBridge() {
 
     // 活动标签变更 → 广播新 portId，弹窗更新发送目标指示。
     const unsubscribeApp = useAppStore.subscribe((state, prevState) => {
-      if (getActivePortId(state) === getActivePortId(prevState)) return;
+      if (cancelled || getActivePortId(state) === getActivePortId(prevState)) return;
       popoutEventService
         .emitActiveTabChanged({ portId: getActivePortId(state) })
         .catch((e) => console.debug('[usePopoutBridge] emitActiveTabChanged failed:', e));

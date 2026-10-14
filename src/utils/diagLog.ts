@@ -34,6 +34,8 @@ let forwardEnabled = true;
 let batch: DiagLogEntry[] = [];
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing = false;
+let currentFlush: Promise<void> | null = null;
+let clearInProgress = false;
 
 function pad(n: number, len = 2): string {
   return String(n).padStart(len, '0');
@@ -83,18 +85,23 @@ function push(method: ConsoleMethod, args: unknown[]): void {
 }
 
 function flush(): void {
-  if (flushing || batch.length === 0) return;
+  if (clearInProgress || flushing || batch.length === 0) return;
   const entries = batch;
   batch = [];
   flushing = true;
-  diagLogService
-    .appendDiagLog(entries)
+  currentFlush = Promise.resolve()
+    .then(() => diagLogService.appendDiagLog(entries))
     .catch((e) => {
       // 用原始方法记录，避免递归进捕获链路。
       original.debug?.('[diagLog] append failed:', e);
     })
     .finally(() => {
       flushing = false;
+      currentFlush = null;
+      if (!clearInProgress && forwardEnabled && batch.length > 0) {
+        if (batch.length >= 50) flush();
+        else if (!batchTimer) armTimer();
+      }
     });
 }
 
@@ -114,9 +121,9 @@ export function setupDiagLogCapture(): void {
   }
 }
 
-/** 随配置同步是否转发前端日志。 */
 export function setDiagLogForwardEnabled(enabled: boolean): void {
   forwardEnabled = enabled;
+  if (!enabled) dropDiagLogPending();
 }
 
 /** 丢弃尚未 flush 的前端日志批次（清空诊断日志前调用，避免清完又回写）。 */
@@ -125,6 +132,20 @@ export function dropDiagLogPending(): void {
   if (batchTimer) {
     clearTimeout(batchTimer);
     batchTimer = null;
+  }
+}
+
+/** Clear only after all already-admitted appends have completed. */
+export async function clearDiagLog(): Promise<void> {
+  clearInProgress = true;
+  dropDiagLogPending();
+  const pending = currentFlush;
+  if (pending) await pending;
+  try {
+    await diagLogService.clearDiagLog();
+  } finally {
+    dropDiagLogPending();
+    clearInProgress = false;
   }
 }
 

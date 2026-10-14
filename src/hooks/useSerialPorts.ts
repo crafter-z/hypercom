@@ -6,6 +6,8 @@ import type { SerialPort, PortStatus } from '../types';
 
 /** 上一次端口列表刷新是否失败（用于连续失败时降级日志级别，避免 3s 轮询刷屏）。 */
 let lastListFailed = false;
+/** 所有 hook 实例共享的请求序号；旧轮询响应不得回写新枚举。 */
+let latestListRequest = 0;
 
 /**
  * 「幽灵」存活端口连续未出现在枚举中的次数（issue：串口热插拔后侧边栏状态
@@ -112,12 +114,15 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
   const setPorts = useAppStore((s) => s.setPorts);
 
   const refreshPorts = useCallback(async () => {
+    const requestId = ++latestListRequest;
     try {
       const list = await serialService.listAvailablePorts();
+      if (requestId !== latestListRequest) return;
       const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
       setPorts(merged);
       lastListFailed = false;
     } catch (err) {
+      if (requestId !== latestListRequest) return;
       // 轮询每 3s 一次：连续失败时只在首次告警，后续降为 debug，避免刷屏。
       if (!lastListFailed) {
         console.warn('[useSerialPorts] Failed to list ports:', err);

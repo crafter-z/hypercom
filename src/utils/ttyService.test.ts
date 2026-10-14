@@ -369,7 +369,7 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
       .toEqual(['first', 'tail']);
   });
 
-  it('keeps detached batches ordered but lets a reconnect bypass old pending IPC', async () => {
+  it('keeps reconnect behind pending I/O while dropping old queued batches', async () => {
     let finishFirst!: (bytes: number) => void;
     const first = new Promise<number>((resolve) => { finishFirst = resolve; });
     vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
@@ -388,12 +388,57 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
     vi.advanceTimersByTime(TX_COALESCE_MS);
     await drainMicrotasks();
     expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
-      .toEqual(['first', 'fresh']);
+      .toEqual(['first']);
     finishFirst(5);
     await drainMicrotasks();
     expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data))
       .toEqual(['first', 'fresh']);
-    expect(ttyService.get('COM1')?.txPending).toBeNull();
+  });
+
+  it('drops old keyboard buffers and queued commands on a mode change', async () => {
+    let finishFirst!: (bytes: number) => void;
+    const first = new Promise<number>(resolve => { finishFirst = resolve; });
+    vi.mocked(serialService.sendSerialData).mockImplementation(({ data }) =>
+      data === 'first' ? first : Promise.resolve(data.length));
+    useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'connected', mode: 'tty', type: 'real', isHidden: false }] });
+    ttyService.send('COM1', 'first');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    const queued = ttyService.sendData('COM1', 'queued', false, 'None');
+    ttyService.send('COM1', 'old keyboard');
+    useAppStore.getState().setPortMode('COM1', 'trx');
+    ttyService.detach('COM1');
+    useAppStore.getState().setPortMode('COM1', 'tty');
+    const fresh = ttyService.sendData('COM1', 'fresh', false, 'None');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    finishFirst(5);
+    expect(await queued).toBe(0);
+    expect(await fresh).toBe(5);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['first', 'fresh']);
+  });
+
+  it('does not recreate traffic when a keyboard send settles after release', async () => {
+    let finish!: (bytes: number) => void;
+    vi.mocked(serialService.sendSerialData).mockImplementationOnce(() => new Promise<number>(resolve => { finish = resolve; }));
+    ttyService.send('COM1', 'old');
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    trafficStats.release('COM1');
+    trafficStats.addTx('COM1', 7, trafficStats.capture('COM1'));
+    finish(3);
+    await drainMicrotasks();
+    trafficStats.flushNow();
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(7);
+  });
+
+  it('keeps a buffered keyboard batch on its original traffic owner until the coalescing timer fires', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(3);
+    ttyService.send('COM1', 'old');
+    trafficStats.release('COM1');
+    trafficStats.addTx('COM1', 7, trafficStats.capture('COM1'));
+    vi.advanceTimersByTime(TX_COALESCE_MS);
+    await drainMicrotasks();
+    trafficStats.flushNow();
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(7);
   });
 
   it('drains an immediate 64KiB batch behind an unfinished IPC without waiting another 10ms', async () => {

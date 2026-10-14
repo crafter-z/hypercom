@@ -99,6 +99,20 @@ describe('pluginObserver', () => {
     u2();
   });
 
+  it('cuts off pending data for a newly subscribed all-port observer', () => {
+    const first = makeObserver();
+    const second = makeObserver();
+    const unsubFirst = addPluginRxObserver(first.obs);
+    feedLine('COM1', 'old');
+    const unsubSecond = addPluginRxObserver(second.obs);
+    feedLine('COM1', 'new');
+    flushDelivery();
+    expect(first.spy.lines.map((line) => line.text)).toEqual(['old', 'new']);
+    expect(second.spy.lines.map((line) => line.text)).toEqual(['new']);
+    unsubFirst();
+    unsubSecond();
+  });
+
   it('多端口独立排队：端口间不串行', () => {
     const { spy, obs } = makeObserver();
     const unsub = addPluginRxObserver(obs);

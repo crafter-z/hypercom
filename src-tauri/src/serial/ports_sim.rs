@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 use super::codec::{build_tx_bytes, TxOutcome};
-use super::{emit_rx_event, emit_status, PortInfo, PortStatus, SerialManager};
+use super::{emit_rx_event, emit_status_if_current, PortInfo, PortStatus, SerialManager};
 use crate::commands::OpenPortArgs;
 
 /// 模拟串口的端口 id
@@ -42,7 +42,6 @@ enum SimMessage {
     Stop,
 }
 
-/// 模拟串口连接句柄
 pub struct SimPortHandle {
     running: Arc<AtomicBool>,
     tx: mpsc::Sender<SimMessage>,
@@ -85,16 +84,19 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
 
     let (tx, rx) = mpsc::channel::<SimMessage>();
     let running = Arc::new(AtomicBool::new(true));
+    let ready = Arc::new(AtomicBool::new(false));
+    let generation = manager
+        .connection_generations
+        .get(&args.port_id)
+        .copied()
+        .unwrap_or_default();
     let port_id = args.port_id.clone();
-
     let read_thread = thread::spawn({
         let running = Arc::clone(&running);
+        let ready = Arc::clone(&ready);
         let app_handle = app_handle.clone();
-        move || read_loop(port_id, rx, running, app_handle)
+        move || read_loop(port_id, rx, running, ready, generation, app_handle)
     });
-
-    emit_status(&app_handle, &args.port_id, PortStatus::Connected);
-
     let port_id = args.port_id.clone();
     manager.sim_ports.insert(
         args.port_id,
@@ -104,6 +106,8 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
             read_thread: Some(read_thread),
         },
     );
+    emit_status_if_current(&app_handle, &port_id, PortStatus::Connected, generation);
+    ready.store(true, Ordering::Release);
     log::info!("Sim port opened: {}", port_id);
     Ok(())
 }
@@ -153,7 +157,11 @@ pub(super) fn send(
 }
 
 /// 向模拟串口写入原始字节（文件发送）：字节序列转为 HEX 字符串回显，便于无硬件测试。
-pub(super) fn write_raw(manager: &SerialManager, port_id: &str, bytes: &[u8]) -> anyhow::Result<usize> {
+pub(super) fn write_raw(
+    manager: &SerialManager,
+    port_id: &str,
+    bytes: &[u8],
+) -> anyhow::Result<usize> {
     let handle = manager
         .sim_ports
         .get(port_id)
@@ -178,12 +186,17 @@ fn read_loop(
     port_id: String,
     rx: mpsc::Receiver<SimMessage>,
     running: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    generation: u64,
     app_handle: AppHandle,
 ) {
     // 周期输出状态：默认 2/s（500ms，与旧心跳行为一致）；TX 纯数字可改。
     let mut rate_per_sec: u32 = 2;
     let mut next_send_at = Instant::now();
     let mut line_seq: u64 = 0;
+    while running.load(Ordering::Acquire) && !ready.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
 
     loop {
         if !running.load(Ordering::Relaxed) {
@@ -226,7 +239,7 @@ fn read_loop(
     }
 
     // 读取线程退出时发送断开事件（与真实串口读线程对齐）
-    emit_status(&app_handle, &port_id, PortStatus::Disconnected);
+    emit_status_if_current(&app_handle, &port_id, PortStatus::Disconnected, generation);
 }
 
 /// 解析 SIM 频率命令：**文本模式**且 trim 后为纯数字 → `Some(rate)`（clamp 到
@@ -246,12 +259,7 @@ fn parse_sim_rate_command(data: &str, is_hex: bool) -> Option<u32> {
 /// 周期输出积分器：计算「应发而未发」的完整间隔数。返回 `(应发行数, 推进后的
 /// 下次发送时刻)`。`max` 限制单次补发上限（追赶风暴防护）；若因上限提前退出
 /// 仍落后（如长时间隐藏窗口积压），把 next 重置到 now，避免无限补发。
-fn sim_due_lines(
-    now: Instant,
-    mut next: Instant,
-    interval: Duration,
-    max: u32,
-) -> (u32, Instant) {
+fn sim_due_lines(now: Instant, mut next: Instant, interval: Duration, max: u32) -> (u32, Instant) {
     let mut due = 0u32;
     while now >= next && due < max {
         next += interval;
@@ -305,7 +313,10 @@ mod tests {
     #[test]
     fn parse_sim_rate_command_clamps_to_max_rate() {
         assert_eq!(parse_sim_rate_command("50000", false), Some(MAX_SIM_RATE));
-        assert_eq!(parse_sim_rate_command("4294967295", false), Some(MAX_SIM_RATE));
+        assert_eq!(
+            parse_sim_rate_command("4294967295", false),
+            Some(MAX_SIM_RATE)
+        );
     }
 
     #[test]
@@ -313,7 +324,10 @@ mod tests {
         let t0 = Instant::now();
         let interval = Duration::from_millis(10);
         // 尚未到期
-        assert_eq!(sim_due_lines(t0, t0 + Duration::from_millis(5), interval, 100).0, 0);
+        assert_eq!(
+            sim_due_lines(t0, t0 + Duration::from_millis(5), interval, 100).0,
+            0
+        );
         // now == next：到期边界立即发一行（SetRate 重置后首行马上发出）
         assert_eq!(
             sim_due_lines(t0, t0, interval, 100),

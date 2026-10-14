@@ -40,12 +40,13 @@ export interface PluginBytesObserver {
   onRxDropped?(event: { portId: string; reason: 'queue-overflow'; count: number }): void;
 }
 
-/** 每端口转发状态。 */
 interface PortBytesState {
   queue: Array<ObservedRxBytes & { order: number }>;
   /** 当前排队总字节数（快速容量判定，避免每次 O(n) 求和）。 */
   queuedBytes: number;
   droppedBytes: number;
+  /** First discarded sample order for the current loss notification. */
+  droppedAtOrder: number | null;
   gapBefore: boolean;
   rafId: number | null;
   timerId: number | null;
@@ -108,10 +109,12 @@ function enforceQueueCap(state: PortBytesState): void {
     if (first.bytes.length <= overflow) {
       state.queue.shift();
       state.queuedBytes -= first.bytes.length;
+      state.droppedAtOrder ??= first.order;
       state.droppedBytes += first.bytes.length;
     } else {
       state.queue[0] = { ...first, bytes: first.bytes.slice(overflow) };
       state.queuedBytes -= overflow;
+      state.droppedAtOrder ??= first.order;
       state.droppedBytes += overflow;
     }
   }
@@ -124,9 +127,12 @@ function deliverPort(portId: string): void {
   if (!state) return;
   if (state.droppedBytes > 0) {
     const count = state.droppedBytes;
+    const droppedAtOrder = state.droppedAtOrder;
     state.droppedBytes = 0;
+    state.droppedAtOrder = null;
     for (const obs of observers) {
       if (obs.portId !== undefined && obs.portId !== portId) continue;
+      if (droppedAtOrder === null || (observerStart.get(obs) ?? 0) > droppedAtOrder) continue;
       try {
         obs.onRxDropped?.({ portId, reason: 'queue-overflow', count });
       } catch (e) {
@@ -134,6 +140,7 @@ function deliverPort(portId: string): void {
       }
     }
   }
+
   if (state.queue.length === 0) return;
   const gapBefore = state.gapBefore;
   state.gapBefore = false;
@@ -154,7 +161,7 @@ function deliverPort(portId: string): void {
     if (portStates.get(portId) !== state) break;
     if (obs.portId !== undefined && obs.portId !== portId) continue;
     try {
-      const selected = obs.portId === undefined ? batch : batch.filter(item => item.order >= (observerStart.get(obs) ?? 0));
+      const selected = batch.filter(item => item.order >= (observerStart.get(obs) ?? 0));
       if (selected.length > 0) {
         const delivery = selected.map(({ order: _order, ...item }) => ({ ...item, bytes: item.bytes.slice() }));
         if (obs.portId === undefined) obs.onRxBytes(delivery);
@@ -173,11 +180,17 @@ function deliverPort(portId: string): void {
 export function feedPluginBytes(portId: string, bytes: number[] | Uint8Array, ts: number): void {
   if (!hasPluginBytesObservers(portId)) return;
   if (bytes.length === 0) return;
-  let state = portStates.get(portId);
-  if (!state) {
-    state = { queue: [], queuedBytes: 0, droppedBytes: 0, gapBefore: false, rafId: null, timerId: null };
-    portStates.set(portId, state);
-  }
+  const existing = portStates.get(portId);
+  const state: PortBytesState = existing ?? {
+    queue: [],
+    queuedBytes: 0,
+    droppedBytes: 0,
+    droppedAtOrder: null,
+    gapBefore: false,
+    rafId: null,
+    timerId: null,
+  };
+  if (!existing) portStates.set(portId, state);
   const raw = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
   state.queue.push({ portId, bytes: raw, ts, order: nextOrder++ });
   state.queuedBytes += raw.length;

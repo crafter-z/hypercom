@@ -3,7 +3,7 @@ import { useAppStore } from '../../../stores/useAppStore';
 import { useOperationStore } from '../../../stores/useOperationStore';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { notifyError } from '../../../stores/useToastStore';
-import { createSendLoop, type SendLoop } from './useSequentialSend';
+import { createSendLoop, type SendLoop, type SendLoopStepContext } from './useSequentialSend';
 
 /** 目标端口暂不可用（未连接）时的重试间隔——循环不终止，等端口恢复。 */
 const TARGET_WAIT_MS = 500;
@@ -45,10 +45,9 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
 
   const loopsRef = useRef<Map<string, SendLoop>>(new Map());
   const statesRef = useRef<Map<string, PortLoopState>>(new Map());
-  const cyclicLoops = useOperationStore((s) => s.cyclicLoops);
 
   /** 一个端口的一轮：返回下一次延迟，或 null 结束该端口循环。 */
-  const step = useCallback(async (portId: string, state: PortLoopState): Promise<number | null> => {
+  const step = useCallback(async (portId: string, state: PortLoopState, context: SendLoopStepContext): Promise<number | null> => {
     // 目标端口读取（端口固定、非活动标签）：端口不可用时跳过本次 tick
     // 并不推进索引，等下一轮重试——不终止循环（切聚焦/短暂断开皆不中断）。
     const port = useAppStore.getState().ports.find((p) => p.id === portId);
@@ -66,6 +65,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
 
     // silent：失败时由共享引擎的 onStepError 聚合为一条 toast，逐次发送不刷屏。
     await sendDataRef.current(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding, true);
+    if (!context.isCurrent()) return null;
 
     // 重复轮数优先：>0 时发送 N 轮后停止（覆盖命令集 isLoop）；
     // 0 时跟随命令集 isLoop（无限循环或单轮）。
@@ -103,7 +103,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     const state: PortLoopState = { currentCmdIdx: 0, completedRounds: 0, notified: false };
     statesRef.current.set(portId, state);
     const loop = createSendLoop({
-      step: () => step(portId, state),
+      step: (context) => step(portId, state, context),
       onStepError: (err) => {
         console.warn('[useCyclicSend] Cyclic send failed:', err);
         if (!state.notified) {
@@ -122,17 +122,22 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     loop.start();
   }, [step]);
 
-  // 运行开关（cyclicLoops）与 runtime 的同步：开启的端口没有 runtime → 启动；
-  // 已有 runtime 的端口开关被关/移除 → 停止。reconcile 幂等，重复执行无害。
+  // Observe intent transitions even if React batches stop and restart together.
   useEffect(() => {
-    for (const [portId, running] of Object.entries(cyclicLoops)) {
-      if (running) startLoop(portId);
-    }
-    // 快照键：stopLoop 的 onStop 会从 map 里删除条目，边遍历边删容易漏项。
-    for (const portId of [...loopsRef.current.keys()]) {
-      if (!cyclicLoops[portId]) stopLoop(portId);
-    }
-  }, [cyclicLoops, startLoop, stopLoop]);
+    const reconcile = (cyclicLoops: Record<string, boolean>) => {
+      for (const [portId, running] of Object.entries(cyclicLoops)) {
+        if (running) startLoop(portId);
+      }
+      for (const portId of [...loopsRef.current.keys()]) {
+        if (!cyclicLoops[portId]) stopLoop(portId);
+      }
+    };
+    const unsubscribe = useOperationStore.subscribe((state, previous) => {
+      if (state.cyclicLoops !== previous.cyclicLoops) reconcile(state.cyclicLoops);
+    });
+    reconcile(useOperationStore.getState().cyclicLoops);
+    return unsubscribe;
+  }, [startLoop, stopLoop]);
 
   // 焦点无关（可见性补发，issue #12）：窗口从隐藏/遮挡恢复可见时，若任意
   // 端口循环的 tick 已到期却尚未触发（隐藏窗口节流 setTimeout 链），立刻补发。

@@ -99,4 +99,15 @@ describe('trafficStats — 1s 聚合', () => {
     vi.advanceTimersByTime(TRAFFIC_AGGREGATE_MS);
     expect(useSystemStore.getState().trafficStats.COM1).toBeUndefined();
   });
+
+  it('rejects a retired async lease without invalidating the replacement', () => {
+    const old = trafficStats.capture('COM1');
+    trafficStats.release('COM1');
+    const current = trafficStats.capture('COM1');
+    trafficStats.addTx('COM1', 10, old);
+    trafficStats.addTx('COM1', 4, current);
+    trafficStats.flushNow();
+    expect(trafficStats.isCurrent('COM1', old)).toBe(false);
+    expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(4);
+  });
 });

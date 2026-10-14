@@ -104,6 +104,7 @@ export async function sendToPort(
     return 0;
   }
   const { sendPrefix } = state.config;
+  const lease = trafficStats.capture(portId);
 
   // TTY 模式（issue #11）：无本地回显——对端 shell 会把命令 echo 回来，本地再
   // 插一条 TX 行既重复又破坏终端流。因此 TTY 下跳过 TX 回显与 RX 队列排空，
@@ -113,6 +114,7 @@ export async function sendToPort(
   // Queued TTY commands have not started I/O until their lane dispatches.
   // Re-check port ownership and caller authority at that exact boundary.
   const authorizeSend = (): void => {
+    if (!trafficStats.isCurrent(portId, lease)) throw new Error('Send owner retired');
     const currentPort = useAppStore.getState().ports.find((item) => item.id === portId);
     if (!isSendablePort(currentPort)) throw new Error(`Send blocked: ${portClosedReason(currentPort)}`);
     beforeSend?.();
@@ -159,10 +161,10 @@ export async function sendToPort(
 
     // Track TX bytes（P1-1：经 1s 聚合器统一写 store——高频发送/触发自动回复
     // 不再逐次 setTrafficStats 触发 Zustand 更新 + StatusBar 重渲染）
-    if (!isTty) trafficStats.addTx(portId, bytesWritten);
-
-    // Record send history in memory (per-port, capped)
-    recordSendHistory(portId, data, isHex, lineEnding);
+    if (trafficStats.isCurrent(portId, lease) && bytesWritten > 0) {
+      if (!isTty) trafficStats.addTx(portId, bytesWritten, lease);
+      recordSendHistory(portId, data, isHex, lineEnding);
+    }
 
     return bytesWritten;
   } catch (err) {
@@ -175,6 +177,13 @@ export async function sendToPort(
   }
 }
 
+export interface SerialSendActions {
+  sendData(portId: string, data: string, isHex: boolean, lineEnding: string, silent?: boolean): Promise<number>;
+  sendHistory: SendHistoryEntry[];
+  historyUp(): SendHistoryEntry | null;
+  historyDown(): SendHistoryEntry | null;
+}
+
 /**
  * Hook: 串口数据发送（用户动作）
  * 返回 sendData 回调（`sendToPort` 的薄包装），并把发送历史镜像到本地 state，
@@ -182,10 +191,15 @@ export async function sendToPort(
  *
  * SRP：只负责"发送"这一个用户动作 + 发送历史，不订阅任何事件。
  */
-export function useSerialSend() {
+export function useSerialSend(): SerialSendActions {
   const activePortId = useAppStore((s) => getActivePortId(s));
   const [sendHistory, setSendHistory] = useState<SendHistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Mirror the active port's in-memory history into state synchronously.
   useEffect(() => {
@@ -197,7 +211,7 @@ export function useSerialSend() {
     async (portId: string, data: string, isHex: boolean, lineEnding: string, silent = false) => {
       const bytesWritten = await sendToPort(portId, data, isHex, lineEnding, silent);
       // Mirror the just-updated in-memory history for Up/Down recall.
-      if (getActivePortId(useAppStore.getState()) === portId) setSendHistory(sendHistoryMap.get(portId) ?? []);
+      if (mountedRef.current && getActivePortId(useAppStore.getState()) === portId) setSendHistory(sendHistoryMap.get(portId) ?? []);
       return bytesWritten;
     },
     []

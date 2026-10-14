@@ -53,8 +53,30 @@ impl PortStatus {
     }
 }
 
-/// 派发串口状态事件（前端据此更新端口状态）。
+/// 派发串口状态事件并维护该连接代次的日志 writer。
 pub(crate) fn emit_status(app_handle: &AppHandle, port_id: &str, status: PortStatus) {
+    if let Some(state) = app_handle.try_state::<crate::AppState>() {
+        match status {
+            PortStatus::Connected => {
+                let config = state.config_manager.lock();
+                if let Ok(config) = config {
+                    let cfg = config.get_config();
+                    if let Err(e) = state.log_manager.create_writer_with_encoding(
+                        port_id,
+                        &cfg.log_format,
+                        &cfg.log_encoding,
+                    ) {
+                        log::warn!("Failed to create log writer for {}: {}", port_id, e);
+                    }
+                }
+            }
+            PortStatus::Disconnected | PortStatus::Error => {
+                if let Err(e) = state.log_manager.close_writer(port_id) {
+                    log::warn!("Failed to close log writer for {}: {}", port_id, e);
+                }
+            }
+        }
+    }
     let _ = app_handle.emit(
         "serial:status",
         SerialStatusEvent {
@@ -62,6 +84,27 @@ pub(crate) fn emit_status(app_handle: &AppHandle, port_id: &str, status: PortSta
             status: status.as_str().to_string(),
         },
     );
+}
+
+pub(crate) fn emit_status_if_current(
+    app_handle: &AppHandle,
+    port_id: &str,
+    status: PortStatus,
+    generation: u64,
+) {
+    let allowed = app_handle
+        .try_state::<crate::AppState>()
+        .map(|state| {
+            state
+                .serial_manager
+                .lock()
+                .map(|manager| manager.status_generation(port_id) == Some(generation))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if allowed {
+        emit_status(app_handle, port_id, status);
+    }
 }
 
 /// 派发 RX 数据事件：推送给前端 + 写接收日志。

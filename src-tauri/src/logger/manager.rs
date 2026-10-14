@@ -16,7 +16,6 @@
  *   「尽力落盘」，因为别的线程 panic 而让后续写入连锁 panic（std 的 poison 传染）
  *   正好与这个职责相反。
  */
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -180,34 +179,39 @@ impl LogManager {
     ) -> anyhow::Result<()> {
         let settings = self.settings();
         let spec = WriterSpec::from_settings(&settings, format, encoding);
-        let writer = PortLogWriter::open(&spec, Path::new(&settings.directory), port_id, force_new_file)?;
+        let writer = PortLogWriter::open(
+            &spec,
+            Path::new(&settings.directory),
+            port_id,
+            force_new_file,
+        )?;
         let path = writer.file_path().to_path_buf();
         self.register_path(path.clone(), port_id);
-        let replaced = lock_mutex(&self.writers).insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
-        log::info!("Log writer created for {port_id} at {path:?} (encoding={encoding})");
 
-        // 覆盖已有 writer：显式 flush + sync 旧文件后收尾（S-B2）。不能依赖
-        // BufWriter::Drop 的隐式 flush——Drop 里的错误只能被丢弃，而且旧文件在被替换
-        // 的那一刻是否完整是调用方（另存/列举）能观察到的。
-        if let Some(old) = replaced {
-            let (old_path, old_size) = {
-                let mut old = lock_mutex(&old);
-                let old_path = old.file_path().to_path_buf();
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-                if let Err(e) = old.flush_rx_tail(&now) {
-                    log::warn!("Log RX tail flush failed on writer replacement ({port_id}): {e}");
-                }
-                let old_size = old.current_size();
-                if let Err(e) = old.flush_and_sync() {
-                    log::warn!("Log final flush failed on writer replacement ({port_id}): {e}");
-                }
-                (old_path, old_size)
-            };
+        // Keep the old writer registered until its final flush succeeds.  Holding the
+        // writers-table lock across this short finalization also prevents a concurrent
+        // write or replacement from racing the ownership transition.
+        let mut writers = lock_mutex(&self.writers);
+        if let Some(old_handle) = writers.get(port_id).cloned() {
+            let mut old = lock_mutex(&old_handle);
+            let old_path = old.file_path().to_path_buf();
+            let now = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
+            old.flush_rx_tail(&now)?;
+            let old_size = old.current_size();
+            old.flush_and_sync()?;
+            drop(old);
+            writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
+            drop(writers);
             // Append mode may reopen the same empty file; it is still owned by the new writer.
             if old_path != path {
                 self.retire_path(old_path, port_id, old_size);
             }
+        } else {
+            writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
         }
+        log::info!("Log writer created for {port_id} at {path:?} (encoding={encoding})");
         Ok(())
     }
 
@@ -279,7 +283,10 @@ impl LogManager {
                 log::error!("Log split failed for {port_id}: {e}; 继续写入旧文件");
                 e
             })?;
-        log::info!("Log split for {port_id}: {old_path:?} → {:?}", writer.file_path());
+        log::info!(
+            "Log split for {port_id}: {old_path:?} → {:?}",
+            writer.file_path()
+        );
         self.register_path(writer.file_path().to_path_buf(), port_id);
         self.register_path(old_path, port_id);
         Ok(())
@@ -308,7 +315,9 @@ impl LogManager {
     pub fn flush_all(&self) -> anyhow::Result<()> {
         for (port_id, handle) in self.writer_snapshot() {
             let mut writer = lock_mutex(&handle);
-            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            let now = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
             if let Err(e) = writer.flush_rx_tail(&now) {
                 log::warn!("Failed to flush RX tail for {port_id}: {e}");
             }
@@ -319,26 +328,46 @@ impl LogManager {
         Ok(())
     }
 
-    /// 关闭串口日志
+    /// 关闭串口日志。writer 只有在 RX 尾部与最终 flush/sync 全部成功后才从
+    /// registry 移除；失败时保持所有权，使调用方可以重试而后续写入不丢失。
     pub fn close_writer(&self, port_id: &str) -> anyhow::Result<()> {
-        let Some(handle) = lock_mutex(&self.writers).remove(port_id) else {
+        let mut writers = lock_mutex(&self.writers);
+        let Some(handle) = writers.get(port_id).cloned() else {
             return Ok(());
         };
         let mut writer = lock_mutex(&handle);
-        // 关闭前先把未终结的 RX 尾部作为最后一行冲刷落盘，避免半行在关闭瞬间被丢弃
-        // （时间戳取当前时间，此时没有事件时间可用）。
         let now = chrono::Local::now()
             .format("%Y-%m-%d %H:%M:%S%.3f")
             .to_string();
-        if let Err(e) = writer.flush_rx_tail(&now) {
-            log::warn!("Log RX tail flush failed for {port_id}: {e}");
-        }
+        writer.flush_rx_tail(&now)?;
         writer.flush_and_sync()?;
         let path = writer.file_path().to_path_buf();
         let written = writer.current_size();
-        drop(writer); // 文件系统操作（删除 / 登记）在端口锁外做
+        drop(writer);
+        // Keep the map lock until removal so no write/replacement can observe a closed handle.
+        writers.remove(port_id);
+        drop(writers);
         self.retire_path(path, port_id, written);
         Ok(())
+    }
+
+    /// Finalize every active writer. A failed writer remains registered for retry while
+    /// other ports are still drained.
+    pub fn close_all(&self) -> anyhow::Result<()> {
+        let port_ids: Vec<String> = lock_mutex(&self.writers).keys().cloned().collect();
+        let mut first_error = None;
+        for port_id in port_ids {
+            if let Err(error) = self.close_writer(&port_id) {
+                log::error!("Failed to close log writer for {port_id}: {error}");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// writer 退场后的收尾：0 字节文件直接删除（不给磁盘留空日志），
@@ -381,7 +410,9 @@ impl LogManager {
         if let Some(handle) = self.writer_handle(port_id) {
             let source = {
                 let mut writer = lock_mutex(&handle);
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                let now = chrono::Local::now()
+                    .format("%Y-%m-%d %H:%M:%S%.3f")
+                    .to_string();
                 writer.flush_rx_tail(&now)?;
                 writer.flush_and_sync()?;
                 writer.file_path().to_path_buf()
@@ -616,7 +647,10 @@ mod tests {
         mgr.close_writer("C1").unwrap();
         let content = read_log(&mgr, "C1");
         assert!(content.contains("[10:00:00] alpha"), "got: {content}");
-        assert!(!content.contains("RX"), "direction must be omitted: {content}");
+        assert!(
+            !content.contains("RX"),
+            "direction must be omitted: {content}"
+        );
         let _ = fs::remove_dir_all(&dir);
 
         // 仅方向（无时间戳）
@@ -628,7 +662,10 @@ mod tests {
         mgr.close_writer("C2").unwrap();
         let content = read_log(&mgr, "C2");
         assert!(content.contains("TX beta"), "got: {content}");
-        assert!(!content.contains("["), "timestamp must be omitted: {content}");
+        assert!(
+            !content.contains("["),
+            "timestamp must be omitted: {content}"
+        );
         let _ = fs::remove_dir_all(&dir);
 
         // 两者都关：纯数据行
@@ -787,11 +824,16 @@ mod tests {
         mgr.write_rx("COM3", "10:00:00", b"before flush").unwrap();
         let source = mgr.writer_path("COM3").unwrap();
         mgr.flush_all().unwrap();
-        assert!(fs::read_to_string(&source).unwrap().contains("before flush"));
+        assert!(fs::read_to_string(&source)
+            .unwrap()
+            .contains("before flush"));
         mgr.write_rx("COM3", "10:00:01", b"before export").unwrap();
         let exported = dir.join("exported.log");
-        mgr.save_log_as("COM3", &exported.to_string_lossy()).unwrap();
-        assert!(fs::read_to_string(exported).unwrap().contains("before export"));
+        mgr.save_log_as("COM3", &exported.to_string_lossy())
+            .unwrap();
+        assert!(fs::read_to_string(exported)
+            .unwrap()
+            .contains("before export"));
         mgr.close_writer("COM3").unwrap();
         let _ = fs::remove_dir_all(dir);
     }
@@ -823,7 +865,9 @@ mod tests {
         let path = mgr.writer_path("COM3").unwrap();
         mgr.write("COM3", "ts", "TX", b"after replacement").unwrap();
         mgr.close_writer("COM3").unwrap();
-        assert!(fs::read_to_string(path).unwrap().contains("after replacement"));
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .contains("after replacement"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -841,18 +885,22 @@ mod tests {
             s.new_file_per_session = true;
         });
         open_writer(&mgr, "COM1", "string");
-        mgr.write("COM1", "10:00:00", "TX", b"first session").unwrap();
+        mgr.write("COM1", "10:00:00", "TX", b"first session")
+            .unwrap();
         let first = mgr.writer_path("COM1").unwrap();
 
         open_writer(&mgr, "COM1", "string");
         let second = mgr.writer_path("COM1").unwrap();
         assert_ne!(first, second, "每次会话必须换文件");
         assert!(
-            fs::read_to_string(&first).unwrap().contains("first session"),
+            fs::read_to_string(&first)
+                .unwrap()
+                .contains("first session"),
             "被替换的旧文件必须已收尾落盘"
         );
 
-        mgr.write("COM1", "10:00:01", "TX", b"second session").unwrap();
+        mgr.write("COM1", "10:00:01", "TX", b"second session")
+            .unwrap();
         mgr.close_writer("COM1").unwrap();
         let second_content = fs::read_to_string(&second).unwrap();
         assert!(second_content.contains("second session"));
@@ -1006,7 +1054,9 @@ mod tests {
     fn test_save_log_as_no_writer_no_files() {
         let dir = test_dir("nowriter");
         let mgr = LogManager::for_test(&dir);
-        assert!(mgr.save_log_as("NONEXIST", "/tmp/hypercom-nonexistent.log").is_err());
+        assert!(mgr
+            .save_log_as("NONEXIST", "/tmp/hypercom-nonexistent.log")
+            .is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1016,7 +1066,8 @@ mod tests {
         let dir = test_dir("fallback");
         let mgr = LogManager::for_test(&dir);
         open_writer(&mgr, "COM4", "string");
-        mgr.write("COM4", "10:00:00", "RX", b"fallback data").unwrap();
+        mgr.write("COM4", "10:00:00", "RX", b"fallback data")
+            .unwrap();
         mgr.close_writer("COM4").unwrap();
         assert!(!mgr.has_writer("COM4"));
         let target = dir.join("fallback_saved.log");
@@ -1032,11 +1083,14 @@ mod tests {
         let dir = test_dir("save_subdir");
         let mgr = LogManager::for_test(&dir);
         open_writer(&mgr, "COM4", "string");
-        mgr.write("COM4", "10:00:00", "RX", b"fallback data").unwrap();
+        mgr.write("COM4", "10:00:00", "RX", b"fallback data")
+            .unwrap();
         mgr.close_writer("COM4").unwrap();
         let target = dir.join("saved.log");
         mgr.save_log_as("COM4", &target.to_string_lossy()).unwrap();
-        assert!(fs::read_to_string(&target).unwrap().contains("fallback data"));
+        assert!(fs::read_to_string(&target)
+            .unwrap()
+            .contains("fallback data"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1238,7 +1292,10 @@ mod tests {
         let content = read_log(&mgr, "COM1");
         assert_eq!(content.lines().count(), 1, "got: {content}");
         assert!(content.contains("real"), "got: {content}");
-        assert!(!content.contains("TX \n"), "empty TX line written: {content}");
+        assert!(
+            !content.contains("TX \n"),
+            "empty TX line written: {content}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1248,7 +1305,8 @@ mod tests {
         let mgr = LogManager::for_test(&dir);
         open_writer(&mgr, "COM1", "hex");
         mgr.write("COM1", "10:00:00.000", "TX", b"").unwrap();
-        mgr.write("COM1", "10:00:00.001", "TX", &[0x48, 0x49]).unwrap();
+        mgr.write("COM1", "10:00:00.001", "TX", &[0x48, 0x49])
+            .unwrap();
         mgr.close_writer("COM1").unwrap();
         let content = read_log(&mgr, "COM1");
         assert_eq!(content.lines().count(), 1, "got: {content}");
@@ -1279,7 +1337,11 @@ mod tests {
         mgr.write("COM1", "10:00:00.000", "TX", b"data").unwrap();
         mgr.close_writer("COM1").unwrap();
         let files = mgr.list_files().unwrap();
-        assert_eq!(files.len(), 1, "file with data must be kept, got: {files:?}");
+        assert_eq!(
+            files.len(),
+            1,
+            "file with data must be kept, got: {files:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1296,7 +1358,10 @@ mod tests {
             root.join(expected_sub),
             "log file must live in subdir '{expected_sub}', got parent {parent:?}"
         );
-        assert!(root.join(expected_sub).is_dir(), "subdir must exist on disk");
+        assert!(
+            root.join(expected_sub).is_dir(),
+            "subdir must exist on disk"
+        );
         assert_eq!(
             files[0].port_id, port_id,
             "port_id must resolve via the writer registry"
@@ -1370,7 +1435,11 @@ mod tests {
         let files = mgr.list_files().unwrap();
         assert_eq!(files.len(), 1);
         let p = PathBuf::from(&files[0].path);
-        assert_eq!(p.parent().unwrap(), dir.as_path(), "must be flat in log dir");
+        assert_eq!(
+            p.parent().unwrap(),
+            dir.as_path(),
+            "must be flat in log dir"
+        );
         mgr.close_writer("COM2").unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1495,7 +1564,11 @@ mod tests {
             s.new_file_per_session = true;
         });
         let mut paths = Vec::new();
-        for (ts, payload) in [("10:00:00", "one"), ("10:00:01", "two"), ("10:00:02", "three")] {
+        for (ts, payload) in [
+            ("10:00:00", "one"),
+            ("10:00:01", "two"),
+            ("10:00:02", "three"),
+        ] {
             open_writer(&mgr, "COM1", "string");
             mgr.write("COM1", ts, "TX", payload.as_bytes()).unwrap();
             paths.push(mgr.writer_path("COM1").unwrap());

@@ -24,6 +24,10 @@ interface PortAccum {
   tx: number;
 }
 
+/** Captured before async work; release retires it without leaving tombstones. */
+export interface PortTrafficLease { readonly identity: symbol }
+const leases = new Map<string, PortTrafficLease>();
+
 /** 每端口待写累计（仅内存，flush 后清空） */
 const accum = new Map<string, PortAccum>();
 /** 聚合定时器句柄（null = 无 pending 累计） */
@@ -52,6 +56,19 @@ function flush(): void {
 }
 
 export const trafficStats = {
+  capture(portId: string): PortTrafficLease {
+    let lease = leases.get(portId);
+    if (!lease) {
+      lease = { identity: Symbol(portId) };
+      leases.set(portId, lease);
+    }
+    return lease;
+  },
+
+  isCurrent(portId: string, lease: PortTrafficLease): boolean {
+    return leases.get(portId) === lease;
+  },
+
   /** 累计 RX 字节数（≤0 忽略，不启动定时器）。 */
   addRx(portId: string, bytes: number): void {
     if (bytes <= 0) return;
@@ -62,8 +79,8 @@ export const trafficStats = {
   },
 
   /** 累计 TX 字节数（≤0 忽略，不启动定时器）。 */
-  addTx(portId: string, bytes: number): void {
-    if (bytes <= 0) return;
+  addTx(portId: string, bytes: number, lease?: PortTrafficLease): void {
+    if (bytes <= 0 || (lease && !this.isCurrent(portId, lease))) return;
     const acc = accum.get(portId) ?? { rx: 0, tx: 0 };
     acc.tx += bytes;
     accum.set(portId, acc);
@@ -81,6 +98,7 @@ export const trafficStats = {
    * 又写回刚清理过的 store，留下幽灵条目。
    */
   release(portId: string): void {
+    leases.delete(portId);
     accum.delete(portId);
     useSystemStore.getState().clearTrafficStats(portId);
   },
@@ -92,5 +110,6 @@ export const trafficStats = {
       timer = null;
     }
     accum.clear();
+    leases.clear();
   },
 };

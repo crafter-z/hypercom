@@ -27,12 +27,17 @@ export const SEND_LOOP_FIRST_TICK_MS = 100;
  */
 export const SEND_LOOP_OVERDUE_MS = 100;
 
+export interface SendLoopStepContext {
+  /** False after stop/restart, even while this step's await is still pending. */
+  isCurrent(): boolean;
+}
+
 export interface SendLoopOptions {
   /**
    * 一次迭代：返回下一次迭代的延迟（ms），返回 `null` 结束循环。
    * 抛出的错误交给 `onStepError`（缺省 = 结束循环）。
    */
-  step: () => Promise<number | null> | number | null;
+  step: (context: SendLoopStepContext) => Promise<number | null> | number | null;
   /** `step` 抛错时的决策：返回下一次延迟继续（重试），或 `null` 结束。 */
   onStepError?: (err: unknown) => number | null;
   /** 首次迭代延迟，默认 {@link SEND_LOOP_FIRST_TICK_MS}。 */
@@ -102,7 +107,7 @@ export function createSendLoop(options: SendLoopOptions): SendLoop {
     busy = true;
     let nextDelay: number | null;
     try {
-      nextDelay = await step();
+      nextDelay = await step({ isCurrent: () => !stopped && runGeneration === generation });
     } catch (err) {
       nextDelay = runGeneration === generation && onStepError ? onStepError(err) : null;
     } finally {
@@ -174,7 +179,7 @@ export function useSequentialSend(options: UseSequentialSendOptions): UseSequent
   if (loopRef.current === null) {
     loopRef.current = createSendLoop({
       firstTickMs: options.firstTickMs,
-      step: () => optionsRef.current.step(),
+      step: (context) => optionsRef.current.step(context),
       onStepError: (err) => optionsRef.current.onStepError?.(err) ?? null,
       onStop: () => optionsRef.current.onStop?.(),
     });

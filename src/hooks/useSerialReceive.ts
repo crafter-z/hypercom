@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
+import { acceptSerialStatus } from './useSerialConnection';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
 import type { ProtocolTemplate } from '../types';
 import { getRxPipeline } from '../utils/rxPipeline';
@@ -242,7 +243,7 @@ export function useSerialReceive() {
       cleanups.push(unlistenData);
 
       const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
-        if (cancelled) return;
+        if (cancelled || !acceptSerialStatus(event.port_id, event.status)) return;
         const statusMap: Record<string, PortStatus> = {
           connected: 'connected',
           disconnected: 'disconnected',

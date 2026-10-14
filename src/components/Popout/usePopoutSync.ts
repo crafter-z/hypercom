@@ -58,33 +58,46 @@ export function usePopoutSync(): PopoutSync {
     };
   }, []);
 
-  // 窗口间事件总线。
+  // Keep each listener as soon as it resolves, including partial failures.
   useEffect(() => {
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
-    void (async () => {
-      try {
-        const [unSets, unActiveTab] = await Promise.all([
-          popoutEventService.onCommandSetsChanged((next) => {
-            liveRef.current = true;
-            setSets(next);
-          }),
-          popoutEventService.onActiveTabChanged((payload) => setActivePortId(payload.portId)),
-        ]);
-        if (cancelled) {
-          unSets();
-          unActiveTab();
-          return;
-        }
-        unlisteners.push(unSets, unActiveTab);
-        await popoutEventService.emitRequestSync();
-      } catch (e) {
-        console.debug('[usePopoutSync] event bus registration failed:', e);
-      }
-    })();
+    const retain = (unlisten: () => void) => {
+      if (cancelled) unlisten();
+      else unlisteners.push(unlisten);
+    };
+    void Promise.all([
+      popoutEventService.onCommandSetsChanged((next) => {
+        if (cancelled) return;
+        liveRef.current = true;
+        setSets(next);
+      }).then(retain),
+      popoutEventService.onActiveTabChanged((payload) => {
+        if (!cancelled) setActivePortId(payload.portId);
+      }).then(retain),
+      eventService.onSerialStatus((event) => {
+        if (cancelled) return;
+        setConnectedPortIds((prev) => {
+          const next = new Set(prev);
+          if (event.status === 'connected') next.add(event.port_id);
+          else next.delete(event.port_id);
+          return next;
+        });
+      }).then(retain),
+      popoutEventService.onPortStatusesSync((items) => {
+        if (cancelled) return;
+        setConnectedPortIds(new Set(items.filter(item => item.status === 'connected').map(item => item.portId)));
+      }).then(retain),
+    ]).then(async () => {
+      if (!cancelled) await popoutEventService.emitRequestSync();
+    }).catch((error) => {
+      cancelled = true;
+      unlisteners.splice(0).forEach(unlisten => unlisten());
+      console.debug('[usePopoutSync] event bus registration failed:', error);
+    });
     return () => {
       cancelled = true;
-      unlisteners.forEach((u) => u());
+      unlisteners.splice(0).forEach(unlisten => unlisten());
     };
   }, []);
 
@@ -102,41 +115,6 @@ export function usePopoutSync(): PopoutSync {
     };
   }, []);
 
-  // issue #7-5：「发送到」提示灯跟随串口真实连接状态。
-  useEffect(() => {
-    let cancelled = false;
-    let unlisteners: Array<() => void> = [];
-    Promise.all([
-      eventService.onSerialStatus((event) => {
-        if (cancelled) return;
-        setConnectedPortIds((prev) => {
-          const next = new Set(prev);
-          if (event.status === 'connected') next.add(event.port_id);
-          else next.delete(event.port_id);
-          return next;
-        });
-      }),
-      popoutEventService.onPortStatusesSync((items) => {
-        if (cancelled) return;
-        setConnectedPortIds(
-          new Set(items.filter((i) => i.status === 'connected').map((i) => i.portId)),
-        );
-      }),
-    ])
-      .then(([u1, u2]) => {
-        if (cancelled) {
-          u1();
-          u2();
-          return;
-        }
-        unlisteners = [u1, u2];
-      })
-      .catch((e) => console.debug('[usePopoutSync] status listeners failed:', e));
-    return () => {
-      cancelled = true;
-      unlisteners.forEach((u) => u());
-    };
-  }, []);
 
   const openSetEditor = useCallback(() => {
     void popoutEventService

@@ -29,6 +29,7 @@ export interface SerialReconnectHintEvent {
 /** 文件发送进度事件 payload */
 export interface FileProgressPayload {
   port_id: string;
+  transfer_id: string;
   sent_bytes: number;
   total_bytes: number;
   done: boolean;

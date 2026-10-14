@@ -37,14 +37,13 @@ pub fn enable_gitbash_sim(state: State<AppState>) -> Result<String, CommandError
 #[tauri::command]
 pub async fn disable_gitbash_sim(state: State<'_, AppState>) -> Result<(), CommandError> {
     dev_only("Git Bash sim terminal")?;
-
     let serial_manager = state.serial_manager.clone();
-    // 持锁期间遍历全部 GIT: 端口逐个 close_port（kill + drop master → ConPTY
-    // 关闭 → 读线程 read() 解除阻塞退出），取出 JoinHandle 后立即释放锁。
+
     let join_handles = {
         let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.set_gitbash_sim(false);
         let git_ids: Vec<String> = manager.tty_sim_ports.keys().cloned().collect();
         let mut handles = Vec::with_capacity(git_ids.len());
         for id in &git_ids {
@@ -64,14 +63,8 @@ pub async fn disable_gitbash_sim(state: State<'_, AppState>) -> Result<(), Comma
             let _ = thread.join();
         })
         .await
-        .map_err(|e| {
-            CommandError::Other(format!("disable git bash sim join task failed: {e}"))
-        })?;
+        .map_err(|e| CommandError::Other(format!("disable git bash sim join task failed: {e}")))?;
     }
-    let mut manager = serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_gitbash_sim(false);
     log::info!("Git Bash sim terminal disabled");
     Ok(())
 }

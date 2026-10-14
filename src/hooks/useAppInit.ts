@@ -1,11 +1,18 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
+import type { AppConfig } from '../types';
 import { configService, storageService } from '../services/tauri';
 import { parseSessionSnapshot } from '../utils/sessionSnapshot';
 import { collectPortMeta, saveCurrentPortMeta, useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
 
+interface StartupResult {
+  config: AppConfig;
+  sessionSnapshot: string | null;
+}
+let startupPromise: Promise<StartupResult> | null = null;
+let sessionRestoreClaimed = false;
 
 /**
  * Hook: 应用初始化
@@ -16,67 +23,64 @@ export function useAppInit() {
   const { refreshPorts } = useSerialPorts(0);
 
   useEffect(() => {
-    const init = async () => {
-      await loadConfig();
-
-      // Load persisted rule sets and command sets from config (entities now live in config.json)
-      const cfg = useAppStore.getState().config;
-      useRuleStore.getState().setSendCommandSets(cfg.sendCommandSets);
-      useRuleStore.getState().setHighlightRuleSets(cfg.highlightRuleSets);
-      useRuleStore.getState().setProtocolTemplates(cfg.protocolTemplates);
-      // 迁移旧版残留的 bookmark 动作（从未实现，issue #3-1）：归一为 alert。
-      // 旧 config.json 的 actionType 是任意字符串，用 String() 比较避免与
-      // TriggerActionType 联合类型（已移除 'bookmark'）的不重叠比较错误。
-      useRuleStore.getState().setTriggerRules(
-        cfg.triggerRules.map((r) => (String(r.actionType) === 'bookmark' ? { ...r, actionType: 'alert' } : r))
-      );
-      useRuleStore.getState().setPortToolConfigs(cfg.portToolConfigs);
-
-      // 串口分组恢复（issue #2-3）：分组布局持久化在 config.json。
-      // setGroups 必须在下方 groups 自动保存订阅注册**之前**执行，
-      // 否则启动载入本身会触发一次无意义的回写。
-      useAppStore.getState().setGroups(cfg.portGroups ?? []);
-
-      await refreshPorts();
-
-      // 按持久化的分组成员关系回填 ports.groupId（端口由枚举产生，
-      // 自身不记录分组；mergePorts 之后的每次轮询都会保留该字段）。
-      for (const group of useAppStore.getState().groups) {
-        for (const portId of group.portIds) {
-          useAppStore.getState().updatePort(portId, { groupId: group.id });
+    let cancelled = false;
+    const baseline = useAppStore.getState();
+    if (!startupPromise) {
+      startupPromise = (async (): Promise<StartupResult> => {
+        await loadConfig();
+        const cfg = useAppStore.getState().config;
+        useRuleStore.getState().setSendCommandSets(cfg.sendCommandSets);
+        useRuleStore.getState().setHighlightRuleSets(cfg.highlightRuleSets);
+        useRuleStore.getState().setProtocolTemplates(cfg.protocolTemplates);
+        useRuleStore.getState().setTriggerRules(
+          cfg.triggerRules.map((r) => (String(r.actionType) === 'bookmark' ? { ...r, actionType: 'alert' } : r))
+        );
+        useRuleStore.getState().setPortToolConfigs(cfg.portToolConfigs);
+        useAppStore.getState().setGroups(cfg.portGroups ?? []);
+        await refreshPorts();
+        for (const group of useAppStore.getState().groups) {
+          for (const portId of group.portIds) useAppStore.getState().updatePort(portId, { groupId: group.id });
         }
-      }
-
-      // 回填持久化的端口备注名 / 隐藏状态 / 工作模式（issue #4-9；模式 issue #11）：
-      // 端口由枚举产生，`mapPortInfo` 不携带 alias/isHidden/mode，需从 config.portMeta 恢复。
-      for (const meta of useAppStore.getState().config.portMeta ?? []) {
-        useAppStore.getState().updatePort(meta.portId, {
-          alias: meta.alias,
-          isHidden: meta.isHidden,
-          mode: meta.mode,
-          displayView: meta.displayView,
-        });
-      }
-
-      // F.3: Session restore — recreate tabs + paneTree from snapshot (no auto-connect)
-      if (cfg.restoreSession) {
-        try {
-          const sessionSnapshot = await configService.getSessionSnapshot();
-          if (sessionSnapshot) {
-            const snapshot = parseSessionSnapshot(JSON.parse(sessionSnapshot), new Set(useAppStore.getState().ports.map((port) => port.id)));
-            for (const [portId, patch] of Object.entries(snapshot.portConfigs)) {
-              useAppStore.getState().updatePort(portId, patch);
-            }
-            if (snapshot.tabs.length > 0) {
-              useAppStore.getState().restoreSessionSnapshot(snapshot);
-            }
+        for (const meta of useAppStore.getState().config.portMeta ?? []) {
+          useAppStore.getState().updatePort(meta.portId, {
+            alias: meta.alias,
+            isHidden: meta.isHidden,
+            mode: meta.mode,
+            displayView: meta.displayView,
+          });
+        }
+        let sessionSnapshot: string | null = null;
+        if (cfg.restoreSession) {
+          try {
+            sessionSnapshot = await configService.getSessionSnapshot();
+          } catch (e) {
+            console.warn('[useAppInit] Failed to restore session snapshot:', e);
           }
-        } catch (e) {
-          console.warn('[useAppInit] Failed to restore session snapshot:', e);
         }
+        return { config: cfg, sessionSnapshot };
+      })();
+    }
+    startupPromise.then(({ config: cfg, sessionSnapshot }) => {
+      if (cancelled || sessionRestoreClaimed || !cfg.restoreSession || !sessionSnapshot) return;
+      const current = useAppStore.getState();
+      if (current.tabs !== baseline.tabs || current.paneTree !== baseline.paneTree || current.activeTabId !== baseline.activeTabId || current.focusedPaneId !== baseline.focusedPaneId) return;
+      sessionRestoreClaimed = true;
+      try {
+        const snapshot = parseSessionSnapshot(JSON.parse(sessionSnapshot), new Set(current.ports.map((port) => port.id)));
+        for (const [portId, patch] of Object.entries(snapshot.portConfigs)) {
+          const baselinePort = baseline.ports.find((port) => port.id === portId);
+          const currentPort = useAppStore.getState().ports.find((port) => port.id === portId);
+          const unchanged = baselinePort && currentPort && Object.keys(patch).every((key) =>
+            (currentPort as unknown as Record<string, unknown>)[key] === (baselinePort as unknown as Record<string, unknown>)[key]
+          );
+          if (!baselinePort || unchanged) useAppStore.getState().updatePort(portId, patch);
+        }
+        if (snapshot.tabs.length > 0) useAppStore.getState().restoreSessionSnapshot(snapshot);
+      } catch (e) {
+        console.warn('[useAppInit] Failed to restore session snapshot:', e);
       }
-    };
-    init();
+    }).catch((e) => console.warn('[useAppInit] Initialization failed:', e));
+    return () => { cancelled = true; };
   }, [loadConfig, refreshPorts]);
 
   // 分组自动保存（issue #2-3）：分组增删 / 重命名 / 展开折叠 / 拖拽成员等

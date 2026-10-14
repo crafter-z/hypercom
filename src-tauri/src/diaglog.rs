@@ -107,13 +107,7 @@ impl DiagLogger {
     }
 
     /// 写入一条日志。层外层负责格式化时间戳；此处拼接统一行格式并落盘。
-    fn write(
-        &self,
-        timestamp: &str,
-        level: &str,
-        target: &str,
-        msg: &str,
-    ) {
+    fn write(&self, timestamp: &str, level: &str, target: &str, msg: &str) {
         if !self.is_enabled() {
             return;
         }
@@ -127,7 +121,10 @@ impl DiagLogger {
         // 写入前检查大小：当前文件已满则先轮转拿到新活跃文件，再写入新行，
         // 保证新日志始终落在活跃文件（而非刚被轮转走的备份）里。
         if let Some(f) = file.as_ref() {
-            let full = f.metadata().map(|m| m.len() >= MAX_FILE_SIZE).unwrap_or(false);
+            let full = f
+                .metadata()
+                .map(|m| m.len() >= MAX_FILE_SIZE)
+                .unwrap_or(false);
             if full {
                 // 关闭句柄后再轮转（Windows 下被占用的文件 rename 不掉）。
                 let _ = file.take();
@@ -211,6 +208,19 @@ impl DiagLogger {
         if let Err(e) = fs::write(&self.path, "") {
             self.report_failure("truncate active log file", &e);
         }
+    }
+
+    /// Flush and sync the active diagnostic file before coordinated exit.
+    pub fn flush(&self) -> std::io::Result<()> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| std::io::Error::other("diagnostic logger lock poisoned"))?;
+        if let Some(file) = file.as_mut() {
+            file.flush()?;
+            file.sync_all()?;
+        }
+        Ok(())
     }
 }
 
@@ -387,7 +397,9 @@ mod tests {
                 }
             });
             scope.spawn(|| {
-                for _ in 0..100 { logger.clear(); }
+                for _ in 0..100 {
+                    logger.clear();
+                }
             });
         });
         logger.clear();

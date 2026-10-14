@@ -1,7 +1,89 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use tokio::sync::Notify;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as UnixCommandExt;
+
+/// Shared admission/drain state for serial file and tool operations.
+/// Shutdown flips the gate once, then waits for the active count to reach zero.
+pub struct SerialWorkState {
+    pub(crate) shutting_down: AtomicBool,
+    pub(crate) active: AtomicUsize,
+    pub(crate) drained: Notify,
+}
+
+impl SerialWorkState {
+    pub fn new() -> Self {
+        Self {
+            shutting_down: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            drained: Notify::new(),
+        }
+    }
+
+    fn admit(self: &Arc<Self>) -> Option<SerialWorkGuard> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if self.shutting_down.load(Ordering::Acquire) {
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            self.drained.notify_waiters();
+            return None;
+        }
+        Some(SerialWorkGuard {
+            state: Arc::clone(self),
+        })
+    }
+
+    fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.drained.notify_waiters();
+    }
+}
+
+pub struct SerialWorkGuard {
+    state: Arc<SerialWorkState>,
+}
+
+impl Drop for SerialWorkGuard {
+    fn drop(&mut self) {
+        if self.state.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.state.drained.notify_waiters();
+        }
+    }
+}
+
 use serde::Deserialize;
+
+/// Owner-aware file transfer cancellation entry. The transfer UUID prevents a
+/// delayed cancel from affecting a later transfer on the same port.
+pub struct FileSendRegistration {
+    pub transfer_id: String,
+    pub cancel: Arc<AtomicBool>,
+}
+
+struct FileSendGuard<'a> {
+    sends: &'a std::sync::Mutex<std::collections::HashMap<String, FileSendRegistration>>,
+    port_id: String,
+    transfer_id: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for FileSendGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut sends) = self.sends.lock() {
+            if sends.get(&self.port_id).is_some_and(|entry| {
+                entry.transfer_id == self.transfer_id && Arc::ptr_eq(&entry.cancel, &self.cancel)
+            }) {
+                sends.remove(&self.port_id);
+            }
+        }
+    }
+}
+
 use tauri::{AppHandle, Emitter, State};
 
 use super::CommandError;
@@ -23,7 +105,8 @@ pub async fn list_available_ports(
 ) -> Result<Vec<serial::PortInfo>, CommandError> {
     let serial_manager = state.serial_manager.clone();
     tokio::task::spawn_blocking(move || {
-        serial::list_ports_blocking(&serial_manager).map_err(|e| CommandError::Serial(e.to_string()))
+        serial::list_ports_blocking(&serial_manager)
+            .map_err(|e| CommandError::Serial(e.to_string()))
     })
     .await
     .map_err(|e| CommandError::Other(format!("List ports task panicked: {e}")))?
@@ -75,7 +158,9 @@ pub async fn open_serial_port(
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
     let port_id = args.port_id.clone();
-    serial_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?
+    serial_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?
         .cancel_reconnect(&port_id);
     tokio::task::spawn_blocking(move || {
         serial::open_blocking(&serial_manager, args).map_err(|e| {
@@ -114,6 +199,10 @@ pub async fn close_serial_port(
         .await
         .map_err(|e| CommandError::Other(format!("close port join task failed: {e}")))?;
     }
+    serial_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?
+        .cleanup_real_close(&port_id);
     Ok(())
 }
 
@@ -141,6 +230,10 @@ pub async fn send_serial_data(
     args: SendDataArgs,
     state: State<'_, AppState>,
 ) -> Result<usize, CommandError> {
+    let _work = state
+        .serial_work
+        .admit()
+        .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
     // 从 State 克隆出 'static 的 Arc 句柄供 spawn_blocking 闭包使用
     // （AppState 的 serial_manager / log_manager 是 Arc）。
     let serial_manager = state.serial_manager.clone();
@@ -151,25 +244,20 @@ pub async fn send_serial_data(
         is_hex,
         append_line_ending,
     } = args;
-
     tokio::task::spawn_blocking(move || {
         let tx = {
             let manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            match serial::PortKind::of(&port_id) {
-                // 真实串口：**两段式**——全局锁内只做 HashMap 查找 + Arc 克隆写
-                // 句柄，立即释放全局锁，再只持 per-port 写锁执行带总期限的写入。
-                // 不再持全局 serial_manager 锁执行写：端口列表轮询 / 其它端口命令
-                // 不被慢发送拖死。
+            let kind = serial::PortKind::of(&port_id);
+            match kind {
                 serial::PortKind::Real => {
-                    let write_port = manager.get_write_handle(&port_id).map_err(|e| {
-                        log::warn!("Failed to send data to {}: {}", port_id, e);
-                        CommandError::Serial(e.to_string())
-                    })?;
+                    let write_port = manager
+                        .get_write_handle(&port_id)
+                        .map_err(|e| CommandError::Serial(e.to_string()))?;
                     let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
                         .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    drop(manager); // 释放全局锁，写操作在锁外执行
+                    drop(manager);
                     let mut port = write_port
                         .lock()
                         .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -179,25 +267,30 @@ pub async fn send_serial_data(
                         &bytes,
                         serial::WRITE_TOTAL_DEADLINE,
                     )
-                    .map_err(|e| {
-                        log::warn!("Failed to send data to {}: {}", port_id, e);
-                        CommandError::Serial(e.to_string())
-                    })?;
+                    .map_err(|e| CommandError::Serial(e.to_string()))?;
                     serial::TxOutcome::sent(bytes)
                 }
-                // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成即可。
-                _ => manager
+                serial::PortKind::Tty => {
+                    let writer = manager
+                        .get_tty_write_handle(&port_id)
+                        .map_err(|e| CommandError::Serial(e.to_string()))?;
+                    let bytes = serial::build_tx_bytes(
+                        &data,
+                        is_hex,
+                        serial::codec::normalize_tty_line_ending(&append_line_ending),
+                    )
+                    .map_err(|e| CommandError::Serial(e.to_string()))?;
+                    drop(manager);
+                    let written = writer
+                        .write(&bytes)
+                        .map_err(|e| CommandError::Serial(e.to_string()))?;
+                    serial::TxOutcome::sent(bytes[..written].to_vec())
+                }
+                serial::PortKind::Sim => manager
                     .send_data(&port_id, &data, is_hex, &append_line_ending)
-                    .map_err(|e| {
-                        log::warn!("Failed to send data to {}: {}", port_id, e);
-                        CommandError::Serial(e.to_string())
-                    })?,
+                    .map_err(|e| CommandError::Serial(e.to_string()))?,
             }
         };
-
-        // TX 日志只写 `tx.bytes`（实际送达端口的字节）：TTY 的行结束符归一、SIM
-        // 频率命令被控制通道吞掉、行结束符追加都只在这里体现一次。按入参重算日志
-        // 会让日志与线上字节不一致（记下发出去的字节数与线上不符）。
         if !tx.bytes.is_empty() {
             let timestamp = chrono::Local::now()
                 .format("%Y-%m-%d %H:%M:%S%.3f")
@@ -214,8 +307,10 @@ pub async fn send_serial_data(
 
 /// 文件发送进度事件 payload
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileProgressPayload {
     pub port_id: String,
+    pub transfer_id: String,
     pub sent_bytes: usize,
     pub total_bytes: usize,
     pub done: bool,
@@ -228,29 +323,46 @@ pub struct SendFileArgs {
     pub path: String,
     pub chunk_size: usize,
     pub delay_ms: u64,
+    pub transfer_id: String,
 }
 
 // Register atomically: a second send must not replace the first send's cancellation token.
 fn register_file_send(
-    sends: &std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    sends: &std::sync::Mutex<std::collections::HashMap<String, FileSendRegistration>>,
     port_id: &str,
+    transfer_id: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), CommandError> {
-    let mut m = sends.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    let mut m = sends
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
     if m.contains_key(port_id) {
-        return Err(CommandError::Serial(format!("File send already in progress for {port_id}")));
+        return Err(CommandError::Serial(format!(
+            "File send already in progress for {port_id}"
+        )));
     }
-    m.insert(port_id.to_owned(), Arc::clone(cancel));
+    m.insert(
+        port_id.to_owned(),
+        FileSendRegistration {
+            transfer_id: transfer_id.to_owned(),
+            cancel: Arc::clone(cancel),
+        },
+    );
     Ok(())
 }
 
 fn unregister_file_send(
-    sends: &std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    sends: &std::sync::Mutex<std::collections::HashMap<String, FileSendRegistration>>,
     port_id: &str,
+    transfer_id: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), CommandError> {
-    let mut m = sends.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
-    if m.get(port_id).is_some_and(|registered| Arc::ptr_eq(registered, cancel)) {
+    let mut m = sends
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    if m.get(port_id).is_some_and(|registered| {
+        registered.transfer_id == transfer_id && Arc::ptr_eq(&registered.cancel, cancel)
+    }) {
         m.remove(port_id);
     }
     Ok(())
@@ -263,46 +375,85 @@ pub async fn send_file(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<usize, CommandError> {
-    // 文件大小上限 100 MB：串口发送速率有限（115200 baud ≈ 11.5 KB/s），
-    // 超大文件发送不切实际，且 std::fs::read 会一次性加载到内存。
+    let _work = state
+        .serial_work
+        .admit()
+        .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    register_file_send(
+        &state.file_send_cancel,
+        &args.port_id,
+        &args.transfer_id,
+        &cancel,
+    )?;
+    let _registration = FileSendGuard {
+        sends: &state.file_send_cancel,
+        port_id: args.port_id.clone(),
+        transfer_id: args.transfer_id.clone(),
+        cancel: Arc::clone(&cancel),
+    };
     const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-    let metadata = std::fs::metadata(&args.path)
-        .map_err(|e| CommandError::Io(format!("Failed to stat file '{}': {}", args.path, e)))?;
+    let metadata = match std::fs::metadata(&args.path) {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            let _ = unregister_file_send(
+                &state.file_send_cancel,
+                &args.port_id,
+                &args.transfer_id,
+                &cancel,
+            );
+            return Err(CommandError::Io(format!(
+                "Failed to stat file '{}': {}",
+                args.path, e
+            )));
+        }
+    };
     if metadata.len() > MAX_FILE_SIZE {
+        let _ = unregister_file_send(
+            &state.file_send_cancel,
+            &args.port_id,
+            &args.transfer_id,
+            &cancel,
+        );
         return Err(CommandError::Io(format!(
             "File too large ({} bytes, max {} bytes)",
             metadata.len(),
             MAX_FILE_SIZE
         )));
     }
-    // 注册取消令牌：前端调用 cancel_file_send 置位后，发送循环在下一块退出。
-    let cancel = Arc::new(AtomicBool::new(false));
-    register_file_send(&state.file_send_cancel, &args.port_id, &cancel)?;
-
     let mut sent = 0usize;
     let mut total = 0usize;
     let result = async {
-        // Async read and every later fallible operation share the terminal cleanup below.
+        let generation = {
+            let manager = state
+                .serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            manager
+                .connection_generation(&args.port_id)
+                .ok_or_else(|| CommandError::Serial(format!("Port not found: {}", args.port_id)))?
+        };
         let data = tokio::fs::read(&args.path)
             .await
             .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
         total = data.len();
         let chunk_size = args.chunk_size.max(1);
         let is_real_port = serial::PortKind::of(&args.port_id) == serial::PortKind::Real;
-
         for (chunk_index, chunk) in data.chunks(chunk_size).enumerate() {
-            if cancel.load(Ordering::Relaxed) {
+            if cancel.load(Ordering::Acquire) {
                 break;
             }
-            // 锁作用域仅限写入本身：内层块返回 Result 后即释放 MutexGuard，
-            // 保证下方 await（sleep/yield）之前不持锁。
             match {
                 let manager = state
                     .serial_manager
                     .lock()
                     .map_err(|e| CommandError::Lock(e.to_string()))?;
+                if !manager.connection_matches(&args.port_id, generation) {
+                    return Err(CommandError::Serial(
+                        "Port connection changed during file send".into(),
+                    ));
+                }
                 if is_real_port {
-                    // 真实串口两段式：全局锁内只取写句柄克隆，释放全局锁后锁外写
                     let write_port = manager
                         .get_write_handle(&args.port_id)
                         .map_err(|e| CommandError::Serial(e.to_string()))?;
@@ -311,7 +462,7 @@ pub async fn send_file(
                         .lock()
                         .map_err(|e| CommandError::Lock(e.to_string()))?;
                     let mut written = 0;
-                    let result = serial::write_with_deadline_progress(
+                    let outcome = serial::write_with_deadline_progress(
                         &args.port_id,
                         &mut **port,
                         chunk,
@@ -319,9 +470,19 @@ pub async fn send_file(
                         &mut written,
                     );
                     sent += written;
-                    result.map(|_| 0).map_err(|e| CommandError::Serial(e.to_string()))
+                    outcome
+                        .map(|_| 0)
+                        .map_err(|e| CommandError::Serial(e.to_string()))
+                } else if serial::PortKind::of(&args.port_id) == serial::PortKind::Tty {
+                    let writer = manager
+                        .get_tty_write_handle(&args.port_id)
+                        .map_err(|e| CommandError::Serial(e.to_string()))?;
+                    drop(manager);
+                    writer
+                        .write(chunk)
+                        .map(|_| 0)
+                        .map_err(|e| CommandError::Serial(e.to_string()))
                 } else {
-                    // SIM / GIT 虚拟端口：channel / pty writer 写非阻塞，锁内完成
                     manager
                         .write_raw(&args.port_id, chunk)
                         .map_err(|e| CommandError::Serial(e.to_string()))
@@ -330,23 +491,22 @@ pub async fn send_file(
                 Ok(n) => sent += n,
                 Err(e) => return Err(e),
             }
-            // 记录 TX 元信息（仅 chunk 序号与长度，不记录二进制内容本身）。
-            // log_manager 锁在下方 await 之前释放，不跨 await 持有 MutexGuard。
             let timestamp = chrono::Local::now()
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string();
             let log_data = format!("[FILE] chunk {} ({} bytes)", chunk_index, chunk.len());
-            if let Err(e) = state
-                .log_manager
-                .write(&args.port_id, &timestamp, "TX", log_data.as_bytes())
+            if let Err(e) =
+                state
+                    .log_manager
+                    .write(&args.port_id, &timestamp, "TX", log_data.as_bytes())
             {
                 log::warn!("Failed to write file-send log for {}: {}", args.port_id, e);
             }
-            // `sent` counts only bytes confirmed written by this chunk.
             let _ = app.emit(
                 "serial:file_progress",
                 FileProgressPayload {
                     port_id: args.port_id.clone(),
+                    transfer_id: args.transfer_id.clone(),
                     sent_bytes: sent,
                     total_bytes: total,
                     done: false,
@@ -355,28 +515,36 @@ pub async fn send_file(
             if args.delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
             } else {
-                // 即使无延时也让出一点，避免长文件发送饿死其它异步任务。
                 tokio::task::yield_now().await;
             }
         }
         Ok(sent)
     }
     .await;
-
-    // All post-registration failures, including failed async reads and lock errors,
-    // pass through this path. Never erase another invocation's token.
-    let cleanup = unregister_file_send(&state.file_send_cancel, &args.port_id, &cancel);
+    let cleanup = unregister_file_send(
+        &state.file_send_cancel,
+        &args.port_id,
+        &args.transfer_id,
+        &cancel,
+    );
     let _ = app.emit(
         "serial:file_progress",
         FileProgressPayload {
             port_id: args.port_id.clone(),
+            transfer_id: args.transfer_id.clone(),
             sent_bytes: sent,
             total_bytes: total,
             done: true,
         },
     );
     if let Err(e) = &result {
-        log::warn!("File send failed for {} (sent {} of {} bytes): {}", args.port_id, sent, total, e);
+        log::warn!(
+            "File send failed for {} (sent {} of {} bytes): {}",
+            args.port_id,
+            sent,
+            total,
+            e
+        );
     }
     result.and(cleanup.map(|_| sent))
 }
@@ -428,7 +596,9 @@ pub async fn attempt_reconnect(
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
     // Capture intent before queuing blocking work; a close can cancel a queued attempt too.
-    let cancel = serial_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?
+    let cancel = serial_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?
         .begin_reconnect(&port_id);
     let cleanup_token = Arc::clone(&cancel);
     let cleanup_port = port_id.clone();
@@ -441,7 +611,9 @@ pub async fn attempt_reconnect(
     })
     .await
     .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?;
-    serial_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?
+    serial_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?
         .finish_reconnect(&cleanup_port, &cleanup_token);
     result
 }
@@ -458,12 +630,10 @@ pub fn set_flow_control(
         .serial_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .set_flow_control(&port_id, dtr, rts)
-        .map_err(|e| {
-            log::warn!("Failed to set flow control for {}: {}", port_id, e);
-            CommandError::Serial(e.to_string())
-        })
+    manager.set_flow_control(&port_id, dtr, rts).map_err(|e| {
+        log::warn!("Failed to set flow control for {}: {}", port_id, e);
+        CommandError::Serial(e.to_string())
+    })
 }
 
 // ==================== 外部工具执行 ====================
@@ -512,7 +682,9 @@ where
             Ok(code)
         }
         (Err(e), Ok(())) => Err(e),
-        (Err(e), Err(recovery)) => Err(CommandError::Other(format!("{e}; port recovery failed: {recovery}"))),
+        (Err(e), Err(recovery)) => Err(CommandError::Other(format!(
+            "{e}; port recovery failed: {recovery}"
+        ))),
     };
     (result, reopen_failed)
 }
@@ -527,17 +699,35 @@ pub async fn run_port_tool(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<i32, CommandError> {
-    // 1. 获取上次连接参数 + 关闭串口（一次锁完成），取出 JoinHandle 后释放锁
-    let (last_params, join_handle) = {
+    let _work = state
+        .serial_work
+        .admit()
+        .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
+    let owner = uuid::Uuid::new_v4().to_string();
+    {
+        let mut reservations = state
+            .tool_reservations
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        if reservations.contains_key(&args.port_id) {
+            return Err(CommandError::Serial(format!(
+                "Tool already running for {}",
+                args.port_id
+            )));
+        }
+        reservations.insert(args.port_id.clone(), owner.clone());
+    }
+    let (last_params, join_handle, tool_generation) = {
         let mut mgr = state
             .serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let params = mgr.get_last_params(&args.port_id);
+        let generation = mgr.status_generation(&args.port_id).unwrap_or_default();
         let jh = mgr
             .close_port(&args.port_id)
             .map_err(|e| CommandError::Serial(e.to_string()))?;
-        (params, jh)
+        (params, jh, generation)
     };
     // 在锁外 join：读线程最长约 100ms 退出，不能在全局串口锁内阻塞。
     if let Some(t) = join_handle {
@@ -545,138 +735,171 @@ pub async fn run_port_tool(
     }
 
     let outcome = async {
-    let cmd = args.command.replace("{port}", &args.port_id);
+        let cmd = args.command.replace("{port}", &args.port_id);
 
-    // 3. 构建子进程
-    #[cfg(target_os = "windows")]
-    let mut command = tokio::process::Command::new("cmd");
-    #[cfg(target_os = "windows")]
-    command.args(["/C", &cmd]);
+        // 3. 构建子进程
+        #[cfg(target_os = "windows")]
+        let mut command = tokio::process::Command::new("cmd");
+        #[cfg(target_os = "windows")]
+        command.args(["/C", &cmd]);
 
-    #[cfg(not(target_os = "windows"))]
-    let mut command = tokio::process::Command::new("sh");
-    #[cfg(not(target_os = "windows"))]
-    command.args(["-c", &cmd]);
+        #[cfg(not(target_os = "windows"))]
+        let mut command = tokio::process::Command::new("sh");
+        #[cfg(not(target_os = "windows"))]
+        command.args(["-c", &cmd]);
+        #[cfg(not(target_os = "windows"))]
+        command.process_group(0);
 
-    command
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        command
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
 
-    if let Some(dir) = &args.workdir {
-        command.current_dir(dir);
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|e| CommandError::Io(format!("Failed to spawn tool process: {}", e)))?;
-
-    // kill_on_drop reaps a child abandoned by an output capture or lock failure.
-    let stdout = child.stdout.take().ok_or_else(|| CommandError::Io("Failed to capture stdout".into()))?;
-    let stderr = child.stderr.take().ok_or_else(|| CommandError::Io("Failed to capture stderr".into()))?;
-    {
-        let mut procs = state.tool_processes.lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        procs.insert(args.port_id.clone(), child);
-    }
-
-    // 5. 并发读取 stdout/stderr，逐行推送 tool:output 事件
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
-
-    // 按字节读到 '\n' 为止，再用 from_utf8_lossy 转字符串：
-    // lines()/next_line() 遇到非法 UTF-8 会静默停止，截断二进制烧录器输出。
-    let tx_out = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut buf = Vec::new();
-        loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    let line = String::from_utf8_lossy(&buf)
-                        .trim_end_matches(|c| c == '\n' || c == '\r')
-                        .to_string();
-                    if tx_out.send(("stdout".to_string(), line)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
+        if let Some(dir) = &args.workdir {
+            command.current_dir(dir);
         }
-    });
 
-    let tx_err = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut buf = Vec::new();
-        loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    let line = String::from_utf8_lossy(&buf)
-                        .trim_end_matches(|c| c == '\n' || c == '\r')
-                        .to_string();
-                    if tx_err.send(("stderr".to_string(), line)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
+        let mut child = command
+            .spawn()
+            .map_err(|e| CommandError::Io(format!("Failed to spawn tool process: {}", e)))?;
+
+        // kill_on_drop reaps a child abandoned by an output capture or lock failure.
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CommandError::Io("Failed to capture stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| CommandError::Io("Failed to capture stderr".into()))?;
+        {
+            let mut procs = state
+                .tool_processes
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            procs.insert(args.port_id.clone(), child);
         }
-    });
 
-    drop(tx); // 两个 reader 任务结束后 channel 关闭，rx.recv() 返回 None
+        // 5. 并发读取 stdout/stderr，逐行推送 tool:output 事件
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
 
-    while let Some((stream, line)) = rx.recv().await {
-        let _ = app.emit(
-            "tool:output",
-            ToolOutputPayload {
-                port_id: args.port_id.clone(),
-                line,
-                stream,
-            },
-        );
-    }
+        // 按字节读到 '\n' 为止，再用 from_utf8_lossy 转字符串：
+        // lines()/next_line() 遇到非法 UTF-8 会静默停止，截断二进制烧录器输出。
+        let tx_out = tx.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf)
+                            .trim_end_matches(|c| c == '\n' || c == '\r')
+                            .to_string();
+                        if tx_out.send(("stdout".to_string(), line)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
-    // 6. 等待进程退出（先取出 Child 再 drop 锁，MutexGuard 不跨 await）
-    let child = {
-        let mut procs = state
-            .tool_processes
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        procs.remove(&args.port_id)
-    };
-    let exit_code = match child {
-        Some(mut c) => c
-            .wait()
-            .await
-            .map(|s| s.code().unwrap_or(-1))
-            .map_err(|e| CommandError::Io(format!("Failed to wait for tool process: {}", e)))?,
-        // 进程已被 kill_port_tool 移除并 wait，此处无法再 wait
-        None => -1,
-    };
+        let tx_err = tx.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf)
+                            .trim_end_matches(|c| c == '\n' || c == '\r')
+                            .to_string();
+                        if tx_err.send(("stderr".to_string(), line)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
-    // Notify the UI before reclaiming the port on normal tool completion.
-    let _ = app.emit(
-        "tool:exit",
-        ToolExitPayload {
-            port_id: args.port_id.clone(),
-            code: exit_code,
-        },
-    );
-    Ok(exit_code)
+        drop(tx); // 两个 reader 任务结束后 channel 关闭，rx.recv() 返回 None
+
+        while let Some((stream, line)) = rx.recv().await {
+            let _ = app.emit(
+                "tool:output",
+                ToolOutputPayload {
+                    port_id: args.port_id.clone(),
+                    line,
+                    stream,
+                },
+            );
+        }
+
+        // 6. 等待进程退出（先取出 Child 再 drop 锁，MutexGuard 不跨 await）
+        let child = {
+            let mut procs = state
+                .tool_processes
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            procs.remove(&args.port_id)
+        };
+        let exit_code = match child {
+            Some(mut c) => c
+                .wait()
+                .await
+                .map(|s| s.code().unwrap_or(-1))
+                .map_err(|e| CommandError::Io(format!("Failed to wait for tool process: {}", e)))?,
+            // 进程已被 kill_port_tool 移除并 wait，此处无法再 wait
+            None => -1,
+        };
+
+        Ok(exit_code)
     }
     .await;
 
     // Reopen on every post-close exit (invalid workdir/spawn/capture/wait included).
     // open_blocking performs its blocking work outside the manager lock.
-    let (result, reopen_failed) = finish_port_tool(outcome, last_params, |params| {
+    let recovery_params = if state
+        .serial_manager
+        .lock()
+        .map(|m| m.is_shutting_down())
+        .unwrap_or(true)
+    {
+        None
+    } else {
+        last_params
+    };
+    let (result, reopen_failed) = finish_port_tool(outcome, recovery_params, |params| {
         serial::open_blocking(&state.serial_manager, params)
     });
     if reopen_failed {
-        serial::emit_status(&app, &args.port_id, serial::PortStatus::Error);
+        serial::emit_status_if_current(
+            &app,
+            &args.port_id,
+            serial::PortStatus::Error,
+            tool_generation,
+        );
+    }
+    let code = result.as_ref().copied().unwrap_or(-1);
+    let _ = app.emit(
+        "tool:exit",
+        ToolExitPayload {
+            port_id: args.port_id.clone(),
+            code,
+        },
+    );
+    if let Ok(mut reservations) = state.tool_reservations.lock() {
+        if reservations
+            .get(&args.port_id)
+            .is_some_and(|current| current == &owner)
+        {
+            reservations.remove(&args.port_id);
+        }
     }
     result
 }
@@ -690,24 +913,111 @@ pub fn kill_port_tool(port_id: String, state: State<AppState>) -> Result<(), Com
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     if let Some(child) = procs.get_mut(&port_id) {
-        child
-            .start_kill()
-            .map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
+        let pid = child.id();
+        #[cfg(windows)]
+        if let Some(pid) = pid {
+            let status = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status()
+                .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {}", e)))?;
+            if !status.success() {
+                child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
+            }
+        } else {
+            child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = pid {
+            let result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+            if result != 0 { child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?; }
+        } else {
+            child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
+        }
+        #[cfg(not(any(windows, unix)))]
+        child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
     }
     Ok(())
 }
 
-/// 取消正在进行的文件发送。
-/// 置位取消令牌后 send_file 的发送循环在下一块退出，并发出 done:true 终结事件。
-/// 前端调用: invoke('cancel_file_send', { portId })
+/// 取消正在进行的文件发送；只允许同一 transfer UUID 取消其拥有的 entry。
 #[tauri::command]
-pub fn cancel_file_send(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
+pub fn cancel_file_send(
+    port_id: String,
+    transfer_id: String,
+    state: State<AppState>,
+) -> Result<(), CommandError> {
     let m = state
         .file_send_cancel
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    if let Some(flag) = m.get(&port_id) {
-        flag.store(true, Ordering::Relaxed);
+    if let Some(entry) = m.get(&port_id) {
+        if entry.transfer_id == transfer_id {
+            entry.cancel.store(true, Ordering::Release);
+        }
+    }
+    Ok(())
+}
+
+/// Idempotent backend serial shutdown. Admission closes first; blocking
+/// session teardown runs only after the manager lock is released.
+pub async fn shutdown_serial_work(
+    _app: AppHandle,
+    state: &crate::AppState,
+) -> Result<(), CommandError> {
+    state.serial_work.begin_shutdown();
+    {
+        let mut manager = state
+            .serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.begin_shutdown();
+    }
+    {
+        let map = state
+            .file_send_cancel
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        for entry in map.values() {
+            entry.cancel.store(true, Ordering::Release);
+        }
+    }
+    let children = {
+        let mut map = state
+            .tool_processes
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        map.drain()
+            .map(|(_, mut child)| async move {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            })
+            .collect::<Vec<_>>()
+    };
+    for child in children {
+        child.await;
+    }
+    let closes = {
+        let mut manager = state
+            .serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let ids = manager.active_port_ids();
+        ids.into_iter()
+            .filter_map(|id| manager.close_port(&id).ok().flatten())
+            .collect::<Vec<_>>()
+    };
+    for close in closes {
+        tokio::task::spawn_blocking(move || {
+            let _ = close.join();
+        })
+        .await
+        .map_err(|e| CommandError::Other(format!("serial shutdown join failed: {e}")))?;
+    }
+    loop {
+        if state.serial_work.active.load(Ordering::Acquire) == 0 {
+            break;
+        }
+        state.serial_work.drained.notified().await;
     }
     Ok(())
 }
@@ -724,27 +1034,36 @@ mod tests {
         let sends = Mutex::new(HashMap::new());
         let first = Arc::new(AtomicBool::new(false));
         let second = Arc::new(AtomicBool::new(false));
-        register_file_send(&sends, "COM3", &first).unwrap();
-        assert!(register_file_send(&sends, "COM3", &second).is_err());
-        unregister_file_send(&sends, "COM3", &second).unwrap();
-        let token = sends.lock().unwrap().get("COM3").unwrap().clone();
+        register_file_send(&sends, "COM3", "first", &first).unwrap();
+        assert!(register_file_send(&sends, "COM3", "second", &second).is_err());
+        unregister_file_send(&sends, "COM3", "second", &second).unwrap();
+        let token = sends.lock().unwrap().get("COM3").unwrap().cancel.clone();
         token.store(true, Ordering::Relaxed);
         assert!(first.load(Ordering::Relaxed));
         assert!(!second.load(Ordering::Relaxed));
-        unregister_file_send(&sends, "COM3", &first).unwrap();
+        unregister_file_send(&sends, "COM3", "first", &first).unwrap();
         assert!(sends.lock().unwrap().is_empty());
     }
 
     #[test]
     fn tool_failure_preserves_original_error_and_recovery_failure() {
         let params = super::OpenPortArgs {
-            port_id: "COM3".into(), baud_rate: 9600, data_bits: 8,
-            parity: "None".into(), stop_bits: "One".into(), handshake: "None".into(),
-            dtr: true, rts: true, cols: 80, rows: 24,
+            port_id: "COM3".into(),
+            baud_rate: 9600,
+            data_bits: 8,
+            parity: "None".into(),
+            stop_bits: "One".into(),
+            handshake: "None".into(),
+            dtr: true,
+            rts: true,
+            cols: 80,
+            rows: 24,
         };
-        let (result, failed) = finish_port_tool(Err(CommandError::Io("invalid workdir".into())), Some(params), |_| {
-            Err(anyhow::anyhow!("device unavailable"))
-        });
+        let (result, failed) = finish_port_tool(
+            Err(CommandError::Io("invalid workdir".into())),
+            Some(params),
+            |_| Err(anyhow::anyhow!("device unavailable")),
+        );
         assert!(failed);
         let error = result.unwrap_err().to_string();
         assert!(error.contains("invalid workdir"), "{error}");

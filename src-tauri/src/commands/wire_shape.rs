@@ -77,18 +77,19 @@ fn send_data_args_wire_keys_are_snake_case() {
     .is_err());
 }
 
-/// `src/services/serial.ts::sendFile` → `{ args: { port_id, path, chunk_size, delay_ms } }`。
+/// `src/services/serial.ts::sendFile` → `{ args: { port_id, path, chunk_size, delay_ms, transfer_id } }`。
 #[test]
 fn send_file_args_wire_keys_are_snake_case() {
     let args: SendFileArgs = serde_json::from_value(serde_json::json!({
-        "port_id": "COM3", "path": "C:\\fw.bin", "chunk_size": 1024, "delay_ms": 5,
+        "port_id": "COM3", "path": "C:\\fw.bin", "chunk_size": 1024, "delay_ms": 5, "transfer_id": "t1",
     }))
     .expect("frontend wire keys must deserialize");
     assert_eq!(args.chunk_size, 1024);
     assert_eq!(args.delay_ms, 5);
+    assert_eq!(args.transfer_id, "t1");
 
     assert!(serde_json::from_value::<SendFileArgs>(serde_json::json!({
-        "portId": "COM3", "path": "C:\\fw.bin", "chunkSize": 1024, "delayMs": 5,
+        "portId": "COM3", "path": "C:\\fw.bin", "chunkSize": 1024, "delayMs": 5, "transferId": "t1",
     }))
     .is_err());
 }

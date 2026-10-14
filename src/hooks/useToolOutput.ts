@@ -10,6 +10,12 @@ import i18n from '../i18n';
  * 并在工具退出时更新端口 toolRunning 状态。
  * 必须在 App.tsx 挂载一次（与 useSerialReceive 同级）。
  */
+let toolOutputReady: Promise<void> = Promise.resolve();
+
+export function waitForToolOutputListener(): Promise<void> {
+  return toolOutputReady;
+}
+
 export function useToolOutput() {
   useEffect(() => {
     let cancelled = false;
@@ -56,7 +62,7 @@ export function useToolOutput() {
       cleanups.push(unlistenExit);
     };
 
-    setup().catch((e) => {
+    toolOutputReady = setup().then(() => undefined).catch((e) => {
       cleanups.splice(0).forEach((fn) => fn());
       console.error('[useToolOutput] Failed to subscribe to tool events:', e);
     });

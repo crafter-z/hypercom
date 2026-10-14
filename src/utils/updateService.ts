@@ -56,18 +56,19 @@ export function parseStoredTs(raw: string | null): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// ==================== localStorage 记账 ====================
+// WebView has localStorage; Node/test workers may not. Missing storage means
+// no persistent ledger, not a lifecycle failure in the update flow.
 
 export const updateTiming = {
   getLastCheckAt(): number | null {
-    return parseStoredTs(localStorage.getItem(LS_LAST_CHECK));
+    return parseStoredTs((typeof localStorage === 'undefined' ? null : localStorage.getItem(LS_LAST_CHECK)) ?? null);
   },
   getSnoozeUntil(): number | null {
-    return parseStoredTs(localStorage.getItem(LS_SNOOZE));
+    return parseStoredTs((typeof localStorage === 'undefined' ? null : localStorage.getItem(LS_SNOOZE)) ?? null);
   },
   /** 成功完成一次自动检查后标记（无论有无更新） */
   markCheckedAt(now: number = Date.now()): void {
-    localStorage.setItem(LS_LAST_CHECK, String(now));
+    if (typeof localStorage !== 'undefined') localStorage.setItem(LS_LAST_CHECK, String(now));
   },
   /**
    * 清除检查时间记账（issue #12 复审：设置里改通道时与 clearSnooze 一并调用）。
@@ -75,15 +76,15 @@ export const updateTiming = {
    * 清掉使新意图立即生效（首启语义：lastCheckAt=null → 立即检查）。
    */
   clearLastCheck(): void {
-    localStorage.removeItem(LS_LAST_CHECK);
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_LAST_CHECK);
   },
   /** 「7 天后再次提醒」 */
   setSnooze(days: number = 7, now: number = Date.now()): void {
-    localStorage.setItem(LS_SNOOZE, String(now + days * 24 * 60 * 60 * 1000));
+    if (typeof localStorage !== 'undefined') localStorage.setItem(LS_SNOOZE, String(now + days * 24 * 60 * 60 * 1000));
   },
   /** 清除 snooze（设置变更/主动更新后） */
   clearSnooze(): void {
-    localStorage.removeItem(LS_SNOOZE);
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(LS_SNOOZE);
   },
 };
 

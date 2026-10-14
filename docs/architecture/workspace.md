@@ -50,9 +50,9 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 - 窗口注册表 `AppState.popouts: Mutex<HashMap<String, PopoutMeta>>`，key 为窗口 label，value 记 `{kind, target_id}`；label 约定：快捷发送 = `"quick-send"`（单例）、终端 = `"terminal-{safe_id}"`（每端口一个）。
 - **label仅由Rust计算**：`sanitize`将非ASCII字母数字/`-`的UTF-8字节编码为`_HH`（包括下划线本身），不同端口不会因替换字符碰撞；`compute_label`按kind/target_id派生，前端不复制规则。
+- `open_popout` / `close_popout` 经前端 per-target desired-state lane 串行化；同端口 close→open、迟到创建和标签删除会被补偿收敛，旧 close 不得关闭新窗口。Rust 程序性 close 在 destroy 前移除注册元数据，`Destroyed` 事件只代表用户关闭，避免旧事件回贴新标签。
 - `open_popout` 为async，存在则show/focus，否则建独立owner窗口。`popout_url` 使用 `url::form_urlencoded` 编码query，端口中的`+`、`&`、`#`及非ASCII不会改变目标。窗口不装饰、置顶、跳过任务栏并parent(main)，按kind取默认尺寸。
 - `close_popout(kind, target_id)` / `set_popout_always_on_top(kind, target_id, on)`（窗口由 kind + target_id 算出，不存在时返回 Err）。弹窗位置/尺寸**不跨会话持久化**，每次新建都取默认尺寸。
-- 终端弹窗销毁由 `lib.rs::on_window_event` 的 `Destroyed` 分支感知（X 按钮与 `close_popout` 两条路径都恰好触发一次）：先从注册表移除，再 emit `popout:terminal:closed`——主窗据此清除标签的 detach 标记、恢复终端显示。
 
 ### 前端路由分流（main.tsx）
 

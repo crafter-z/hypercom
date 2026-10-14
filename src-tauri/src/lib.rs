@@ -23,7 +23,9 @@ fn format_crash_report(
     location: Option<&std::panic::Location>,
     backtrace: &Backtrace,
 ) -> String {
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let timestamp = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string();
     let loc = location
         .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
         .unwrap_or_else(|| "unknown location".to_string());
@@ -60,11 +62,17 @@ pub struct AppState {
     /// spawn_blocking 后，需要从 State 克隆出 'static 句柄供阻塞线程使用；
     /// `Deref<Target=Mutex<..>>` 使既有 `.lock()` 调用点（lib.rs CPU 预热）零改动。
     pub system_info: std::sync::Arc<std::sync::Mutex<sysinfo::System>>,
+    /// Prevent duplicate asynchronous shutdown coordinators from racing exit.
+    pub shutdown_started: std::sync::atomic::AtomicBool,
+    /// Active serial/file/tool admission and coordinated shutdown gate.
+    pub serial_work: std::sync::Arc<commands::SerialWorkState>,
+    /// Active external-tool ownership tokens, keyed by port.
+    pub tool_reservations: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
     pub tool_processes: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
-    /// 文件发送取消令牌（按 port_id 索引），供 cancel_file_send 置位
+    /// File-send ownership and cancellation state, keyed by port.
     pub file_send_cancel:
-        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+        std::sync::Mutex<std::collections::HashMap<String, commands::FileSendRegistration>>,
     /// 弹出窗注册表：key 为窗口 label，value 记录 {kind, target_id}（Phase 1 柔性工作区）
     pub popouts: std::sync::Mutex<std::collections::HashMap<String, commands::PopoutMeta>>,
 }
@@ -83,14 +91,19 @@ impl AppState {
         let cfg = config_manager.get_config().clone();
 
         let state = Self {
-            serial_manager: std::sync::Arc::new(std::sync::Mutex::new(serial::SerialManager::new())),
+            serial_manager: std::sync::Arc::new(
+                std::sync::Mutex::new(serial::SerialManager::new()),
+            ),
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
             log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
+            serial_work: std::sync::Arc::new(commands::SerialWorkState::new()),
+            tool_reservations: std::sync::Mutex::new(std::collections::HashMap::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
+            shutdown_started: std::sync::atomic::AtomicBool::new(false),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
         // 启动时把配置里的日志设置同步到 LogManager（与 set_config 命令同一入口）。
@@ -109,6 +122,48 @@ impl AppState {
             .apply_settings(&logger::LogSettings::from_config(cfg));
         self.diag_logger.set_enabled(cfg.diag_log_enabled);
     }
+}
+
+/// Start one asynchronous shutdown drain. The UI remains alive until serial
+/// readers/work, RX log tails, power inhibitors, and diagnostic logs are finalized.
+fn request_shutdown(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if state
+        .shutdown_started
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Err(error) = commands::shutdown_serial_work(app.clone(), &state).await {
+            log::error!("Serial shutdown failed: {error}");
+        }
+        let logs = std::sync::Arc::clone(&state.log_manager);
+        let diag = std::sync::Arc::clone(&state.diag_logger);
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = logs.close_all() {
+                log::error!("Log shutdown failed: {error}");
+            }
+            if let Err(error) = system::shutdown_power_inhibitor() {
+                log::error!("Power inhibitor shutdown failed: {error}");
+            }
+            if let Err(error) = diag.flush() {
+                log::error!("Diagnostic log flush failed: {error}");
+            }
+        })
+        .await;
+        if let Err(error) = result {
+            log::error!("Shutdown finalizer failed: {error}");
+        }
+        app.exit(0);
+    });
 }
 
 /// 终端弹出窗关闭事件载荷（Rust → 主窗前端，触发 detach 标签回贴）。
@@ -251,7 +306,9 @@ pub fn run() {
             if let Ok(mut serial_mgr) = state.serial_manager.lock() {
                 serial_mgr.set_app_handle(app_handle.clone());
             } else {
-                log::error!("serial_manager mutex poisoned during setup; serial events will not be emitted");
+                log::error!(
+                    "serial_manager mutex poisoned during setup; serial events will not be emitted"
+                );
             }
             // drop(state) 对 borrow checker 有意义：State<'_, T> 是引用包装，
             // 显式 drop 确保 MutexGuard 临时值在 state 之前析构。
@@ -309,7 +366,9 @@ pub fn run() {
                     .join("hypercom")
                     .join("crash");
                 let _ = std::fs::create_dir_all(&crash_dir);
-                let filename = chrono::Local::now().format("crash-%Y%m%d-%H%M%S.txt").to_string();
+                let filename = chrono::Local::now()
+                    .format("crash-%Y%m%d-%H%M%S.txt")
+                    .to_string();
                 let crash_path = crash_dir.join(filename);
                 if let Err(e) = std::fs::write(&crash_path, &report) {
                     eprintln!("Failed to write crash report to {:?}: {}", crash_path, e);
@@ -321,7 +380,8 @@ pub fn run() {
 
             // ===== 系统托盘（最小化到托盘）=====
             // 菜单：显示窗口 / 退出；单击托盘图标亦显示窗口。
-            let show_item = MenuItem::with_id(_app, "tray.show", "Show HyperCom", true, None::<&str>)?;
+            let show_item =
+                MenuItem::with_id(_app, "tray.show", "Show HyperCom", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(_app, "tray.quit", "Quit", true, None::<&str>)?;
             let tray_menu = Menu::with_items(_app, &[&show_item, &quit_item])?;
             let mut tray_builder = TrayIconBuilder::new()
@@ -336,16 +396,9 @@ pub fn run() {
                         }
                     }
                     "tray.quit" => {
-                        // Destroy the (possibly tray-hidden) window BEFORE exit.
-                        // Otherwise its handle still exists during teardown and
-                        // WebView2/Chromium logs "Failed to unregister class
-                        // Chrome_WidgetWin_0 (Error 1411)". destroy() bypasses
-                        // CloseRequested, so the minimize-to-tray guard won't
-                        // re-hide it.
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.destroy();
-                        }
-                        app.exit(0);
+                        // Keep the main UI alive while the asynchronous shutdown
+                        // coordinator drains serial readers and log ownership.
+                        request_shutdown(app.clone());
                     }
                     _ => {}
                 })
@@ -353,7 +406,11 @@ pub fn run() {
                     // Only react to LEFT click. On Windows a right-click also
                     // fires TrayIconEvent::Click; calling set_focus() there
                     // steals focus from the native tray menu and dismisses it.
-                    if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
@@ -378,15 +435,23 @@ pub fn run() {
             // （旧实现未区分 label，closeBehavior=minimize 时弹窗会被 hide 而非关闭）。
             if label == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    let close_to_tray = window
-                        .state::<AppState>()
+                    let state = window.state::<AppState>();
+                    let closing = state
+                        .shutdown_started
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let close_to_tray = state
                         .config_manager
                         .lock()
                         .map(|mgr| mgr.get_config().close_behavior == "minimize")
                         .unwrap_or(false);
-                    if close_to_tray {
+                    if closing {
+                        api.prevent_close();
+                    } else if close_to_tray {
                         api.prevent_close();
                         let _ = window.hide();
+                    } else {
+                        api.prevent_close();
+                        request_shutdown(window.app_handle().clone());
                     }
                 }
                 if let tauri::WindowEvent::Destroyed = event {
@@ -408,18 +473,28 @@ pub fn run() {
                         .and_then(|mut popouts| popouts.remove(label))
                         .and_then(|meta| meta.target_id);
                     if let Some(port_id) = target {
-                        let _ = window.app_handle().emit(
-                            "popout:terminal:closed",
-                            TerminalClosedPayload { port_id },
-                        );
+                        let _ = window
+                            .app_handle()
+                            .emit("popout:terminal:closed", TerminalClosedPayload { port_id });
                     }
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let state = app.state::<AppState>();
+                if !state
+                    .shutdown_started
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    api.prevent_exit();
+                    request_shutdown(app.clone());
+                }
+            }
+        });
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,7 +502,11 @@ mod tests {
     #[test]
     fn test_format_crash_report_contains_timestamp_message_location_and_backtrace() {
         let backtrace = Backtrace::force_capture();
-        let report = format_crash_report("test panic message", Some(std::panic::Location::caller()), &backtrace);
+        let report = format_crash_report(
+            "test panic message",
+            Some(std::panic::Location::caller()),
+            &backtrace,
+        );
         assert!(report.contains("HyperCom Crash Report"));
         assert!(report.contains("test panic message"));
         assert!(report.contains("lib.rs"));
