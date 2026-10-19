@@ -1,3 +1,18 @@
+# HyperCom v1.0.0-preview.2
+
+## 修复与改进
+
+- **插件原生视图遮挡**：右键菜单、插件工具选择器和宿主浮层不再让 Sensor settings 等原生视图整体变空白；Windows 仅对实际覆盖的矩形让位，其他插件内容继续显示和交互。
+- **插件入口与实例复用**：Sensor settings 的标签栏加号和插件侧边栏入口复用同一设置页；普通 COM 标签的右上角加号提供 Sensor table，并固定绑定当前 COM 口。
+- **插件调试体验**：插件源目录变更、版本升级、私有数据保留和权限重新确认的边界已补充到用户手册；Sensor Workspace 示例升级为 1.0.1。
+- **串口连接**：修复打开串口时后端状态事件递归获取同一把锁导致命令不返回、前端永久停留在“连接中”的问题。
+
+## 验证
+
+- 前端构建、1009 项 Vitest、311 项 Rust 测试及 34 项 mock IPC Playwright 测试通过。
+- Windows 隔离测试桌面实测 Sensor settings、Sensor table、SIM 和 COM1 打开路径。
+
+
 # HyperCom v1.0.0-preview.1
 
 ## 新特性
