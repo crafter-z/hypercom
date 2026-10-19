@@ -1,6 +1,6 @@
 # HyperCom 插件开发指南
 
-面向编写和分发 JavaScript 插件的开发者。本文集中说明可用的 manifest、Worker API、开发流程和交付约束；宿主内部 IPC、授权一致性与磁盘事务实现见[插件架构](architecture/plugins.md)。只想安装插件的用户请看[设置 → 插件](userwiki/设置.md#插件)。
+面向编写和分发 JavaScript 插件的开发者。本文集中说明可用的 manifest、权限、Worker API、开发流程和交付约束；宿主内部 IPC、授权一致性与磁盘事务实现见[插件架构](architecture/plugins.md)。只想安装或使用插件的用户请看[插件使用](userwiki/插件.md)。
 
 ## 目录
 
@@ -81,7 +81,7 @@ api['ui.panel.append']({ text: 'Hello HyperCom ready\n' })
 ### 安装并观察
 
 1. 打开「设置 → 插件 → 安装目录…」，选择包含 manifest.json 的 `com.example.hello/`。
-2. 新装默认禁用、无授权。本例 `permissions: []`，直接启用即可；其他插件应**先授予初始化所需权限，再启用**。
+2. 安装完成后宿主会弹出权限确认。用户可以一次性授予 manifest 声明且宿主支持的全部权限并启用插件，也可以稍后在插件设置中逐项授权；取消确认会保留插件但不运行。
 3. 主窗口出现「插件输出」，包含 `Hello HyperCom ready`；点侧边栏的「问候」，依次出现 `Hello HyperCom #1`、`#2`。
 4. 此时计数只在 Worker 内存中。禁用或重启会重置；需要持久化时使用 storage。
 
@@ -321,6 +321,7 @@ self.plugin.on('ui.buttonClick', async function (event) {
 ```
 
 - `tabs.open({viewId,portId?,instanceKey?,params?,activation?,actionToken?})` 返回 `{tabId,created,state}`。默认 background，固定键 `(插件/安装代次/视图/端口/instanceKey)` 去重；已有页面不被新 params 重置，loading 不代表 ready。
+- 宿主加号未显式指定实例键时，会优先聚焦同插件/安装代次/视图/绑定端口的已有页面，再复用其 `instanceKey`；没有匹配才以 `default` 新建。希望插件按钮与宿主入口无论打开顺序都共用页面时，省略 `instanceKey`（同样取 `default`）；只有确实需要独立会话时才使用不同键。
 - foreground 及 `tabs.activate({tabId,actionToken})` 需要宿主单次动作票据（5 秒）。端口菜单票据限定端口，侧边栏票据仅插件/代次/pane；后台 RX/定时请求不能抢焦点。UI 自报 userGesture 不能产生票据，UI 按钮可请求后台打开。
 - `tabs.close({tabId})` 仅自身未固定标签；`tabs.setTitle({tabId,title})` 只改自身纯文本标题，保留宿主来源标识；`tabs.list()` 只返回自身有界摘要。
 - 用户关闭后，同键后台重开拒绝；明确用户打开可解除。新建不自动连接串口、不开原始终端、不发送数据；无端口页没有默认发送目标。
@@ -454,8 +455,8 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 
 ## 本地调试
 
-1. 保留独立的源目录；从设置安装其副本，先授权再启用。先验证输出面板和按钮，再接串口或网络。
-2. 修改 main.js 或 manifest 后递增 version，例如 1.0.0 → 1.0.1，再通过安装目录覆盖安装。每次成功升级都要重新授权并启用，旧 Worker 会被终止；升级保留 data/。
+1. 保留独立的源目录；从设置安装其副本，安装完成后在弹窗中授予 manifest 声明且宿主支持的全部权限并启用，或选择稍后处理后再逐项授权。先验证输出面板和按钮，再接串口或网络。
+2. 修改 main.js 或 manifest 后递增 version，例如 1.0.0 → 1.0.1，再通过安装目录覆盖安装。每次成功升级都会重新弹出权限确认，旧 Worker 会被终止；升级保留 data/。
 3. 同版本安装被拒绝不是热重载故障。想以原版本重装可先卸载，但**卸载删除全部私有数据**，不要把它当保数据的调试流程。
 4. 设置页「刷新」重新取得权威状态，可尝试恢复未运行会话；自动禁用后先定位错误、授权不足或初始化问题，再手动启用。刷新不会重新复制源代码。
 5. 用 ui.panel 输出插件可见结果；需要诊断记录时使用 api.log，并在「关于 → 诊断日志」查看/导出。直接 Worker console 输出不等于 api.log 已经写入宿主诊断文件。
@@ -473,7 +474,7 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | storage 读失败 | 保留错误和原数据；不要把损坏/暂时失败当首次使用覆盖 |
 | 改源码后没有变化 | 安装的是副本；提高 version 并重新安装、授权、启用 |
 
-遇到事务恢复失败时保留目录和 journal，不要手动删除恢复依据；按[用户故障处理](userwiki/设置.md#代理与故障处理)提供诊断信息。
+遇到事务恢复失败时保留目录和 journal，不要手动删除恢复依据；按[用户插件故障处理](userwiki/插件.md#故障处理)提供诊断信息。
 
 ## 打包与升级
 
@@ -493,9 +494,9 @@ Windows PowerShell 从该目录的父级执行：
 Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-1.0.0.zip -Force
 ```
 
-不要把 ZIP 输出放进插件源目录，不打包 node_modules、构建缓存、秘密或用户 data/。ZIP 名不参与插件身份或版本判断；真正依据是 manifest.id / version。用户用「安装 ZIP…」选择成品，先授权再启用。
+不要把 ZIP 输出放进插件源目录，不打包 node_modules、构建缓存、秘密或用户 data/。ZIP 名不参与插件身份或版本判断；真正依据是 manifest.id / version。用户用「安装 ZIP…」选择成品，安装完成后按弹窗决定授予权限并启用。
 
-升级保持相同 id 并严格提高 version；同版/降级拒绝（旧已安装 manifest 损坏时可走修复安装）。升级替换代码及资产、保留旧 data/，但禁用并清空授权；卸载再安装是新身份，私有数据不会自动恢复。配置备份不打包代码/KV，不能用旧备份代替新版授权。
+升级保持相同 id 并严格提高 version；同版/降级拒绝（旧已安装 manifest 损坏时可走修复安装）。升级替换代码及资产、保留旧 data/，但清空授权并重新弹出权限确认；卸载再安装是新身份，私有数据不会自动恢复。配置备份不打包代码/KV，不能用旧备份代替新版授权。
 
 如果持久数据结构随版本变化，插件负责自己的数据迁移：先成功读到旧对象，识别自己的数据格式，再提交迁移结果；读取或迁移失败时保留旧数据并报告，不能把宿主的 installGeneration 当插件数据 schema 版本。
 

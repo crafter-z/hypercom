@@ -39,6 +39,8 @@
 
 同插件/代次/view/绑定端口/instanceKey去重；并发重复请求不创建额外模型。open 返回 loading/ready/unavailable 描述，不能将 loading 当作渲染成功。foreground 和 activate 需插件/代次/pane/单次动作票据；端口菜单限定目标端口，侧边栏活动端口只是信息。后台事件不能抢焦点或移动既有页面。
 
+宿主加号/选择器未指定实例键时，优先激活同插件、代次、view、绑定端口的已打开标签（优先当前活动实例），复用 Worker 的实例键；没有匹配才使用 `default` 创建。Worker 显式不同 `instanceKey` 的多实例语义不变。示例 Sensor Workspace 的菜单和表格动作统一使用默认实例键，避免反向打开再次创建页面。
+
 用户关闭后同键后台重开拒绝；关闭记录有界，满额暂停后台新建而不是丢旧关闭意图。用户明确重新打开可解除。打开页面不连接/断开串口，也不自动发送。
 
 Binding 区分 tabSessionId、viewInstanceId、workerEpoch、streamEpoch和installGeneration。关闭重开、切换视图或故障重试创建新实例；隐藏、焦点及分屏移动保留。原生 ready 和 Worker 初始化完成必须同时满足，才显示页面/发布模型；各自期限和 ACK失败产生可观察的错误。
@@ -62,13 +64,15 @@ TTY 同端口发送串行排队时，插件请求必须在实际发送开始前�
 `SerialContentHost` 在Pane树外稳定持有TRX/TTY实例，`tabContentPlacement` 提供布局。跨Pane移动不换组件所有者，原始缓冲/xterm保持；选择插件只隐藏原始显示，输入继续，TTY隐藏不fit零尺寸。
 
 `PluginViewSurface` 提供宿主工具条和native内容矩形。原生控件按layoutRevision只处理最新几何，统一CSS px、主WebView zoom与窗口DPI；clip到client范围。几何变化不重新绑定端口或重建Worker。
-插件视图宿主入口统一由 `shared/PluginViewPicker.tsx` 提供：主显示区的工具入口、串口标签的显示方式、独立工具标签入口均使用自定义浮层，不使用原生 `<select>`，以保证 `bg-elevated` 层级、暗/亮主题和键盘导航一致。浮层打开时必须经 `usePluginViewOverlay` 隐藏 native child，不能依靠 DOM `z-index` 覆盖原生控件。
+插件视图宿主入口统一由 `shared/PluginViewPicker.tsx` 提供：主显示区的工具入口、串口标签的显示方式、独立工具标签入口均使用自定义浮层，不使用原生 `<select>`。选择器和共享 `ContextMenu` 通过 portal 挂到 `document.body`，避免标签栏/Pane 的裁剪与原始终端独立宿主的层叠遮挡；portal 事件仍通过共享外点关闭逻辑识别面板内点击。
 
 Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry 子 WebView 的父窗口只能是该容器，不能直接使用 Tauri 主窗口。Wry 0.55.1 的 child drop 仍会移除父窗口的 resize/focus subclass；直接挂在主窗口会使关闭、禁用或创建失败后的宿主 WebView 停留在旧尺寸，放大出现黑边、缩小不重排。容器与 WebView 共用可见性，容器按主窗 client 坐标定位并保持在宿主 WebView 上方，WebView 使用容器内 `(0, 0)`；销毁顺序为 WebView → 容器，不重装或替换主窗事件回调。
 
-原生child不参与DOM z-index。`usePluginViewOverlay` 先等待控件隐藏再绘制宿主modal/context menu/通知；嵌套guard共享完成Promise。页面隐藏/拖拽也抑制控件。解除只恢复当前有效可见会话，过期rect不能重现已销毁UI。
+原生 child 不参与 DOM z-index。菜单/选择器先挂载不可见的可测量面板，由 `usePluginViewOverlay` 提交覆盖矩形并等待原生完成后才显示。`update_plugin_view.occlusions` 至多 64 个 CSS viewport 矩形；Windows 将它们按主 WebView zoom × DPI 转为相对真实容器原点的物理坐标，向外取整并用 `SetWindowRgn` 的差集同时排除绘制和命中。仅菜单覆盖区域让位，未覆盖插件内容继续显示/更新；不使用截图冒充实时视图。布局/位置改变会更新矩形，关闭后移除，嵌套菜单互不清除对方区域。
 
-隐藏更新失败时，退休页面并等待 native destroy 完成后才允许宿主遮挡层绘制；destroy 同样失败则 handshake 拒绝，不把“已发起销毁”当作“控件已隐藏”。正常关闭仍异步回收，不延长其他健康页面的生命周期。
+模态层、通知、页面隐藏及拖拽仍整体抑制控件；嵌套 guard 保留其他层的抑制/裁剪。超过 64 个局部 guard 时退为整体隐藏，不发送越界列表。解除只恢复当前有效可见会话，过期 rect 不能重现已销毁 UI。
+
+隐藏或裁剪更新失败时，退休页面并等待 native destroy 完成后才允许宿主遮挡层绘制；destroy 同样失败则 handshake 拒绝，不把“已发起销毁”当作“已安全让位”。正常关闭仍异步回收，不延长其他健康页面的生命周期。
 
 故障/禁用/必要撤权/代次变化：serial替换回原始，plugin标签保留宿主不可用页/重试/关闭。不展示冻结模型伪装实时。Worker故障处理其所有实例，单UI异常不拖累健康页面。现有桌面弹出入口不支持插件页面，明确提示，不偷偷打开普通终端代替。
 
@@ -76,7 +80,7 @@ Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry �
 
 完整快照只有JSON模型。`boundedPluginViewJson` 拒绝ArrayBuffer/TypedArray/Map/Set/非有限数/循环或过深对象，并保留规范化JSON；不测JSON.stringify大小后再复制原始二进制对象。
 
-快照256KiB，native envelope264KiB；每页面一条在途、一条最新候选，全插件待发送1MiB、可见约30次/秒。ACK在UI回调Promise完成后发送。隐藏/宿主遮挡不重置真实数据，但停止显示发送；恢复重发当前模型，不排历史。
+快照256KiB，native envelope264KiB；每页面一条在途、一条最新候选，全插件待发送1MiB、可见约30次/秒。ACK在UI回调Promise完成后发送。整体隐藏不重置真实数据，但停止显示发送；恢复重发当前模型，不排历史。局部菜单裁剪不把整个页面视为隐藏。
 
 environment按值去重并在native SDK合并待处理最新变化，不因resize塞满state后面的队列。标签/实例每插件8、全应用16；UI JS8MiB、资源32MiB；交互16KiB及频率限制；tabs创建/管理令牌桶2/s、突发4；后台关闭键128。限额不宣称能够限制插件私自分配的内存。
 
@@ -93,6 +97,8 @@ serial替换偏好 displayView保存在portMeta，走已有CAS安全元数据保
 Windows 原生回归 `retiring_plugin_children_preserves_host_resize` 需安装 WebView2 Runtime，以 `cargo test --lib --manifest-path src-tauri/Cargo.toml retiring_plugin_children_preserves_host_resize -- --ignored` 显式运行；连续销毁插件 child 后，放大/缩小宿主仍须把 WebView2 bounds 同步为最新 client rect。默认单测跳过该原生环境依赖用例。
 
 2026-10-10 resize 修复另以真实 Windows debug 应用 + Vite 前端、隔离临时配置实跑系统窗口边框拖拽：插件显示、关闭、禁用及重建后均能放大/缩小；最终构建销毁插件后 client/宿主 WebView 同步为 1330×840、1220×769，DOM 根随 viewport 重排。桌面截图确认插件内容可见且贴合内容区，宿主设置弹窗期间容器隐藏。此验证不替代 release 安装包与原生安全发布门。
+
+2026-10-19 菜单与入口回归以真实 Windows debug 二进制、Vite 前端和隔离临时配置在独立测试桌面运行，未切换用户桌面或注入桌面输入。`PrintWindow` 截图确认 settings 标签右键菜单与剩余插件内容同时可见；原生容器保持 visible，菜单区域不在 HWND region 中，未覆盖区域仍在。宿主加号与侧边栏按钮聚焦同一 settings UUID；普通 COM1 标签加号列出 table/settings/wave，并成功显示绑定 COM1 的原生 Sensor table，端口保持 disconnected。构建、1009 项 Vitest、311 项 Rust（另 1 项跳过）及 34 项 mock IPC Playwright 通过；此验证不替代完整原生安全发布门。
 
 本次Windows真实debug可执行文件（生产前端资产）已观察到：独立settings保存经Worker写KV；独立table从SIM原始RX解析持续更新，排序/筛选及后台开波形动作可用，关闭原始后仍更新且实例保持。分屏、宿主设置遮挡恢复、无端口页禁用发送、撤权/禁用不关闭串口，以及清理调试scaffold后的替换→返回原始终端均实跑；TTY探针观察到xterm实例及提示屏跨分屏保留。Child诊断观察到无Tauri globals、网络/主窗/本机/未声明资源访问拒绝、popup及程序化clipboard read拒绝、Worker执行及frame拒绝；恶意导航使页面退休为错误，而非打开外站。临时端口/配置已清理。完整发版仍需最终release安装包和支持平台逐项验收，不能把debug探针或部分负向场景当作全部安全证明。
 

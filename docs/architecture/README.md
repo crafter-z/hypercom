@@ -48,4 +48,4 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 - **命令返回**：一律 `Result<T, CommandError>`，不得返回 `String`。
 - **DEV 门控**：模拟串口/模拟终端/自动更新等调试能力的后端门控**只有一处实现**——`commands/system_cmds.rs` 的 `dev_only(capability)` / `is_debug_build()`（命令体不得再自带 `#[cfg(debug_assertions)]` 双主体）；前端以 `import.meta.env.DEV`（`utils/devMode.ts` 的 `DEV_FEATURES_ENABLED`）隐藏 UI。两层都要有：release 构建下后端函数直接返回错误，前端同时不渲染入口。
 - **配置持久化审计**：普通全量 `set_config` 经 `saveConfig(patch?)` 组装安全快照并以 revision CAS 保存，绝不用启动实体快照覆盖后端。备份导入是显式恢复边界，但插件授权只能恢复到同一 `installGeneration`；`BackupSettings.handleImport` 读回后端权威配置与插件列表后重载，不发布导入文件中的旧权限。
-- **插件运行与发布证据**：安装身份、权限和 IO 契约见 [`plugins.md`](plugins.md)；最终安装包的原生 Worker/CSP、文件选择器与跨平台验收见 [`release.md`](release.md#插件发版验收门)。用户安装、授权、升级和卸载步骤见[使用手册](../userwiki/设置.md#插件)。
+- **插件运行与发布证据**：安装身份、权限和 IO 契约见 [`plugins.md`](plugins.md)；最终安装包的原生 Worker/CSP、文件选择器与跨平台验收见 [`release.md`](release.md#插件发版验收门)。用户安装、授权、升级和卸载步骤见[插件使用](../userwiki/插件.md)。

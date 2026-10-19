@@ -12,8 +12,8 @@
 - 主窗口 `usePluginHost` 在 `ui.configReady` 后同步插件状态；会话绑定 `installGeneration`，身份变化终止旧 Worker。失败计数窗口为 10 秒，窗口内累计三次启动或运行失败后尝试持久化禁用并通知；未达阈值时，加载失败按 500ms × 当前失败次数等待重试，Worker 异常重启等待 100ms。设置页刷新可重试未运行会话；若禁用状态保存失败，记录错误而不声称持久化成功。弹窗不加载插件宿主。
 - Worker 没有 DOM / `window.__TAURI__`；宿主和插件以 `postMessage` 通讯，宿主在每次 RPC 调用时检查当前安装身份及 `grantedPermissions`。`list_plugins` 在控制面闸门内取得一致的磁盘与配置快照；主窗 `pluginConfigSnapshot` 按后端 `revision` 拒绝迟到的列表和变更响应，防撤权后旧快照复活权限。插件安装与启用是用户信任决策，不是针对恶意主窗口脚本的强沙箱：能在主窗口执行的任意脚本仍可直接调用 Tauri 命令。后端对插件命令另做主窗口来源限制、已启用及权限验证，不把 Worker 中的 `pluginId` 当成不可伪造身份。
 - 生产 CSP 在 `src-tauri/tauri.conf.json` 中限制 `connect-src 'self'`，插件直连网络不可用；出站 HTTP 走 `plugin_http` 的已授权权限和规范化 URL 白名单，不自动跟随跳转，不继承系统代理。用户可单独配置插件代理。开发环境 `devCsp` 放行 Vite HMR。生产 Tauri CSP 未被 Vite mock e2e 覆盖，发布前必须单独检查。
-- 已安装插件的 manifest 正常时，同 ID 仅接受版本号严格更高的覆盖安装；同版/降级拒绝，旧 manifest 损坏时允许修复安装。成功安装或升级默认 **禁用并清空授权**，生成新的 UUID `installGeneration`；卸载重装不会复用身份。启用/授权命令携带用户实际审阅的 `expectedGeneration`，在取得闸门后校验，升级期间排队的旧授权、旧启用和旧 Worker 自动禁用不会作用于替换代码。`installedAt` 只是安装元数据，不参与身份判断。
-- 设置页允许在插件禁用时逐项授权；应先授予初始化所需权限再启用。权限整体替换按插件在模块级队列执行，启用等待当前授权队列落盘；安装/卸载进行时禁用设置页控制，但最终安全边界仍是后端安装身份检查。
+- 已安装插件的 manifest 正常时，同 ID 仅接受版本号严格更高的覆盖安装；同版/降级拒绝，旧 manifest 损坏时允许修复安装。成功安装或升级默认启用但不授予任何权限，生成新的 UUID `installGeneration`；设置页随后弹出一次性权限确认，用户确认后授予全部已声明且宿主支持的权限并保持启用，取消则保留已安装但禁用的插件，可在设置页逐项授权/启用。卸载重装不会复用身份。启用/授权命令携带用户实际审阅的 `expectedGeneration`，在取得闸门后校验，升级期间排队的旧授权、旧启用和旧 Worker 自动禁用不会作用于替换代码。`installedAt` 只是安装元数据，不参与身份判断。
+- 设置页允许在插件禁用时逐项授权；权限整体替换按插件在模块级队列执行，启用等待当前授权队列落盘；安装/卸载进行时禁用设置页控制，但最终安全边界仍是后端安装身份检查。
 - 安装/卸载在持久化禁用清权或配置提交后即使后续步骤失败，设置页也必须重新读取 `list_plugins` 权威快照；旧 Worker 先退休，快照读取失败时 fail-closed 停止宿主 Worker，不能继续按过期前端授权执行。
 - `fs.openDialog` 与 `ui.panel.export` 受跨 Worker generation 共享的 per-plugin dialog permit 限制；permit 由实际原生 picker/write 任务持有到终止，Worker 退休不会提前归还容量。KV 排队写在 dispatch 和真实写入前复核 RPC authority，旧请求不能影响新 Worker。
 
