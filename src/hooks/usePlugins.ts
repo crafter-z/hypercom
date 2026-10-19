@@ -164,15 +164,17 @@ export function usePluginList() {
 
   useEffect(() => subscribePluginViews(() => setPlugins(getPluginViews())), []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<PluginView[]> => {
     const version = ++listRefreshVersion.current;
     try {
       const result = await pluginService.listPlugins();
-      if (version !== listRefreshVersion.current) return;
+      if (version !== listRefreshVersion.current) return getPluginViews();
       if (syncPluginListSnapshot(result) && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
+      return result.plugins;
     } catch (error) {
       console.error('[usePluginList] list failed:', error);
       notifyError(error);
+      return getPluginViews();
     }
   }, []);
 
@@ -180,20 +182,39 @@ export function usePluginList() {
     void refresh();
   }, [refresh]);
 
-  const installPlugin = useCallback(async (sourcePath: string) => {
+  const installPlugin = useCallback(async (sourcePath: string): Promise<PluginView | null> => {
     setLoading(true);
-    // The source path does not identify its plugin until the backend validates it.
-    // Retire all workers before the backend can durably reset trust for an upgrade.
     pluginHost.dispose();
+    const previousGenerations = new Set(getPluginViews().map(plugin => `${plugin.id}:${plugin.installGeneration}`));
     try {
       const snapshot = await pluginService.installPlugin(sourcePath);
       syncStorePluginConfigs(snapshot);
-      pluginHost.syncWithConfig(true);
+      const refreshed = await refresh();
       notifySuccess('plugins.installed');
-      await refresh();
+      return refreshed.find(plugin => !previousGenerations.has(`${plugin.id}:${plugin.installGeneration}`)) ?? null;
     } catch (error) {
       await reconcileMutationFailure();
       console.error('[usePluginList] install failed:', error);
+      notifyError(error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }, [refresh]);
+
+  const grantAllAndEnable = useCallback(async (plugin: PluginView): Promise<void> => {
+    setLoading(true);
+    try {
+      const declared = plugin.declaredPermissions.filter(permission => plugin.knownPermissions.includes(permission));
+      const permissionsSnapshot = await pluginService.setPluginPermissions(plugin.id, declared, plugin.installGeneration);
+      syncStorePluginConfigs(permissionsSnapshot);
+      const enabledSnapshot = await pluginService.setPluginEnabled(plugin.id, true, plugin.installGeneration);
+      syncStorePluginConfigs(enabledSnapshot);
+      await refresh();
+      notifySuccess('plugins.enabled');
+    } catch (error) {
+      await reconcileMutationFailure();
+      console.error('[usePluginList] grant all permissions failed:', error);
       notifyError(error);
       throw error;
     } finally {
@@ -255,14 +276,15 @@ export function usePluginList() {
     return next;
   }, [refresh]);
 
-  return { plugins, loading, refresh, installPlugin, uninstallPlugin, setEnabled, togglePermission } satisfies PluginListApi;
+  return { plugins, loading, refresh, installPlugin, grantAllAndEnable, uninstallPlugin, setEnabled, togglePermission } satisfies PluginListApi;
 }
 
 export interface PluginListApi {
   plugins: PluginView[];
   loading: boolean;
-  refresh: () => Promise<void>;
-  installPlugin: (sourcePath: string) => Promise<void>;
+  refresh: () => Promise<PluginView[]>;
+  installPlugin: (sourcePath: string) => Promise<PluginView | null>;
+  grantAllAndEnable: (plugin: PluginView) => Promise<void>;
   uninstallPlugin: (pluginId: string) => Promise<void>;
   setEnabled: (pluginId: string, enabled: boolean, expectedGeneration: string) => Promise<void>;
   togglePermission: (pluginId: string, permission: string, expectedGeneration: string) => Promise<void>;

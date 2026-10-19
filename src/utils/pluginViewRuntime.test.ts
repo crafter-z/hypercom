@@ -48,6 +48,31 @@ describe('plugin workspace tab authority', () => {
     expect(useAppStore.getState().tabs.map(tab => tab.kind)).toEqual(['plugin', 'plugin']);
     expect(useAppStore.getState().activeTabId).toBeNull();
   });
+  it('reuses a Worker-keyed unbound tab when the host omits instanceKey', async () => {
+    const worker = await open({ viewId: 'tool', instanceKey: 'worker-tool' });
+    const host = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null);
+    expect(host).toBe(worker.tabId);
+    expect(useAppStore.getState().tabs.filter(tab => tab.kind === 'plugin')).toHaveLength(1);
+  });
+
+  it('reuses only the matching bound port and keeps explicit keys separate', async () => {
+    const com3 = await open({ viewId: 'table', portId: 'COM3', instanceKey: 'worker-com3' });
+    const reused = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'table' }, 'COM3');
+    const com4 = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'table' }, 'COM4');
+    const explicit = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'table' }, 'COM3', 'host-owned');
+    expect(reused).toBe(com3.tabId);
+    expect(com4).not.toBe(com3.tabId);
+    expect(explicit).not.toBe(com3.tabId);
+    expect(useAppStore.getState().tabs.filter(tab => tab.kind === 'plugin')).toHaveLength(3);
+  });
+
+  it('does not activate an existing host target after view permission revocation', async () => {
+    const worker = await open({ viewId: 'tool', instanceKey: 'worker-tool' });
+    useAppStore.getState().setConfig({ pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: ['ui:tabs', 'rx:bytes'] }] });
+    expect(() => openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null)).toThrow('permission');
+    expect(useAppStore.getState().activeTabId).toBeNull();
+    expect(useAppStore.getState().tabs.some(tab => tab.id === worker.tabId)).toBe(true);
+  });
 
   it('requires a scoped single-use action for foreground and rejects a replay', async () => {
     const serial = useAppStore.getState().openTab('COM4');
@@ -179,6 +204,35 @@ describe('native view lifecycle handshakes', () => {
       await suppressPluginViews(false); await settle();
       expect(pluginViewService.update).toHaveBeenCalledTimes(updates);
       expect(getPluginViewState(tabId).status).toBe('unavailable');
+    } finally { await suppressPluginViews(false); stop(); }
+  });
+  it('forwards current occlusions and waits for destruction after clipping fails', async () => {
+    enableWorker();
+    let nativeMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async callback => { nativeMessage = callback; return () => {}; });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null);
+      await settle();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      nativeMessage({ instanceId, type: 'ready' }); markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      placePluginView(tabId, { x: 0, y: 0, width: 100, height: 100, zoomPercent: 100 }, true);
+      await settle();
+      expect(vi.mocked(pluginViewService.update).mock.lastCall?.[4]).toEqual([]);
+      const occlusions = [{ x: 4, y: 8, width: 20, height: 12 }];
+      const destroyed = deferred<void>();
+      vi.mocked(pluginViewService.update).mockRejectedValueOnce(new Error('native clipping failed'));
+      vi.mocked(pluginViewService.destroy).mockReturnValueOnce(destroyed.promise);
+      let settled = false;
+      const suppression = suppressPluginViews(false, occlusions);
+      void suppression.then(() => { settled = true; });
+      await settle();
+      expect(vi.mocked(pluginViewService.update).mock.lastCall?.[4]).toEqual(occlusions);
+      expect(settled).toBe(false);
+      destroyed.resolve(undefined);
+      await suppression;
+      expect(settled).toBe(true);
     } finally { await suppressPluginViews(false); stop(); }
   });
 

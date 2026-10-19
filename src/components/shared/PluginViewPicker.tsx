@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, TerminalSquare, Wrench } from 'lucide-react';
 import { useOutsideDismiss } from './useOutsideDismiss';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
 import type { PluginViewDeclaration, PluginViewPreference } from '../../types/pluginViews';
@@ -32,6 +33,7 @@ interface PluginViewPickerProps {
   variant?: 'launcher' | 'toolbar';
   className?: string;
   showCount?: boolean;
+  triggerIcon?: React.ReactNode;
 }
 
 function choiceKey(choice: PluginViewChoice): string {
@@ -50,6 +52,7 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
   variant = 'toolbar',
   className = '',
   showCount = false,
+  triggerIcon,
 }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -59,7 +62,7 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const overlayReady = usePluginViewOverlay(open);
+  const overlayReady = usePluginViewOverlay(open, panelRef);
 
   const selectedChoice = choices.find(choice => choiceKey(choice) === value);
   const options: PickerOption[] = [
@@ -89,7 +92,7 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
     setOpen(false);
     requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
   }, []);
-  useOutsideDismiss(rootRef, close, open);
+  useOutsideDismiss(rootRef, close, open, panelRef);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -116,7 +119,7 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
   }, [open, selectedIndex, selectableIndices.length]);
 
   useLayoutEffect(() => {
-    if (!open || !overlayReady) return;
+    if (!open) return;
     updatePosition();
     const frame = requestAnimationFrame(() => {
       optionRefs.current[activeIndex]?.focus({ preventScroll: true });
@@ -192,31 +195,27 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
         onClick={() => setOpen(current => !current)}
         onKeyDown={handleTriggerKeyDown}
       >
-        <Wrench size={14} className="plugin-view-picker-trigger-icon" />
-        {variant === 'toolbar' && selectedChoice ? (
-          <>
-            <span className="plugin-view-picker-caption">{triggerLabel}</span>
-            <span className="plugin-view-picker-value">{currentLabel}</span>
-          </>
-        ) : (
-          <span className="plugin-view-picker-value">{variant === 'toolbar' ? currentLabel : triggerLabel}</span>
-        )}
+        {triggerIcon ?? ((rawOption && value === rawOption.key) ? <TerminalSquare size={14} className="plugin-view-picker-trigger-icon" /> : <Wrench size={14} className="plugin-view-picker-trigger-icon" />)}
+        {variant === 'toolbar' ? (
+          <span className="plugin-view-picker-value">{currentLabel}</span>
+        ) : null}
         {showCount && <span className="plugin-view-picker-count">{choices.length}</span>}
-        <ChevronDown size={13} className="plugin-view-picker-chevron" />
+        {variant !== 'launcher' && <ChevronDown size={13} className="plugin-view-picker-chevron" />}
       </button>
 
-      {open && overlayReady && (
+      {open && createPortal(
         <div
           ref={panelRef}
           className="plugin-view-picker-panel animate-fade-in"
-          style={{ left: position.left, top: position.top }}
+          style={{ left: position.left, top: position.top, visibility: overlayReady ? 'visible' : 'hidden' }}
           role="listbox"
           aria-label={title}
           onKeyDown={handlePanelKeyDown}
         >
           <div className="plugin-view-picker-heading">
-            <span className="eyebrow">{t('pluginViews.pickerViews')}</span>
+            <span className="eyebrow">{t('pluginViews.openToolShort')}</span>
             <strong>{title}</strong>
+            {variant === 'launcher' && <span className="plugin-view-picker-heading-hint">{t('pluginViews.pickerWorkspaceHint')}</span>}
           </div>
           <div className="plugin-view-picker-list">
             {rawOption && (
@@ -250,7 +249,7 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
 
             {options.some(option => option.kind === 'fallback' || option.kind === 'choice') && (
               <div className="plugin-view-picker-section">
-                <div className="plugin-view-picker-section-label">{t('pluginViews.pickerViews')}</div>
+                <div className="plugin-view-picker-section-label">{t('pluginViews.view')}</div>
                 {options.filter(option => option.kind === 'fallback' || option.kind === 'choice').map(option => {
                   const optionIndex = options.indexOf(option);
                   const active = optionIndex === activeIndex;
@@ -302,7 +301,7 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
             <div className="plugin-view-picker-empty">{t('pluginViews.pickerEmpty')}</div>
           )}
         </div>
-      )}
+      , document.body)}
     </div>
   );
 };

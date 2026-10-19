@@ -16,7 +16,6 @@ import Pane from './Pane';
 import ResizeHandle from './ResizeHandle';
 import { useTabDragEnd } from './hooks/useTabDragEnd';
 import SerialContentHost from './SerialContentHost';
-import PluginTabLauncher from './PluginTabLauncher';
 
 /** 方向映射：分支 direction → flex 容器 flexDirection */
 function flexDirectionFor(direction: SplitDirection): 'row' | 'column' {
@@ -144,7 +143,6 @@ const MainDisplay: React.FC = () => {
 
   return (
     <div className="main-display">
-      <PluginTabLauncher />
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}

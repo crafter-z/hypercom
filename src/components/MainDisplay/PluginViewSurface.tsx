@@ -4,7 +4,7 @@ import type { TabItem } from '../../types';
 import { useAppStore, getTabPortId } from '../../stores/useAppStore';
 import {
   getAvailablePluginViews, getPluginViewState, getTabViewPreference,
-  openPluginTabForUser, placePluginView, retryPluginView,
+  placePluginView, retryPluginView,
   selectSerialPluginView, subscribePluginViewState,
 } from '../../utils/pluginViewRuntime';
 import { subscribePluginViews, getPluginViews } from '../../utils/pluginConfigSnapshot';
@@ -23,10 +23,12 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   const bodyRef = useRef<HTMLDivElement>(null);
   const preference = getTabViewPreference(tab);
   const portId = getTabPortId(tab);
+  const pluginName = tab.kind === 'plugin'
+    ? (getPluginViews().find(plugin => plugin.id === tab.pluginId)?.manifest?.name ?? tab.pluginId)
+    : null;
   const pluginEffective = !!preference && state.status !== 'unavailable';
   const stockVisible = tab.kind === 'serial' && !pluginEffective;
   const replacements = tab.kind === 'serial' ? getAvailablePluginViews(portId, 'serial-content') : [];
-  const separate = getAvailablePluginViews(portId, 'workspace-tab');
   const selected = preference ? `${preference.pluginId}/${preference.viewId}` : '';
   useLayoutEffect(() => {
     const element = bodyRef.current;
@@ -58,50 +60,34 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
     try { selectSerialPluginView(tab.id, choice?.preference ?? null); }
     catch (error) { notifyError(error); }
   };
-  const openSeparate = (choice: PluginViewChoice | null) => {
-    if (!choice) return;
-    try { openPluginTabForUser(choice.preference, portId); } catch (error) { notifyError(error); }
-  };
   const unavailablePreference = preference && !replacements.some(item => `${item.preference.pluginId}/${item.preference.viewId}` === selected)
     ? { key: selected, label: `${preference.pluginId}: ${preference.viewId}` }
     : undefined;
   return <div className="plugin-view-tab" style={{ display: hidden ? 'none' : 'flex' }}>
-    <div className="plugin-view-toolbar">
+    {!stockVisible && <div className="plugin-view-toolbar">
       {tab.kind === 'serial' ? (
         <PluginViewPicker
           choices={replacements}
           value={selected}
-          rawOption={{ key: '', label: t('pluginViews.rawTerminal') }}
+          rawOption={{ key: '', label: t('pluginViews.terminal') }}
           fallbackOption={unavailablePreference}
-          triggerLabel={t('pluginViews.display')}
-          title={t('pluginViews.display')}
-          ariaLabel={t('pluginViews.display')}
+          triggerLabel={t('pluginViews.view')}
+          title={t('pluginViews.view')}
+          ariaLabel={t('pluginViews.view')}
           onSelect={choose}
         />
       ) : (
         <span className="plugin-view-source">
-          <span className="plugin-view-source-name">{tab.pluginId}</span>
+          <span className="plugin-view-source-name">{pluginName}</span>
           {portId && <span className="plugin-view-source-port">· {portId}</span>}
         </span>
       )}
       <span className="plugin-view-toolbar-spacer" />
-      {separate.length > 0 && (
-        <PluginViewPicker
-          choices={separate}
-          value=""
-          variant="toolbar"
-          className="plugin-view-picker-new-tab"
-          triggerLabel={t('pluginViews.newToolTab')}
-          title={t('pluginViews.newToolTab')}
-          ariaLabel={t('pluginViews.newToolTab')}
-          onSelect={openSeparate}
-        />
-      )}
       {preference && state.status === 'unavailable' && <>
         <span className="plugin-view-error-inline" title={state.error ?? ''}>{t('pluginViews.unavailable')}</span>
         <button className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>
       </>}
-    </div>
+    </div>}
     <div ref={bodyRef} className="plugin-view-body">
       {tab.kind === 'plugin' && state.status === 'unavailable' && <div className="plugin-view-placeholder">
         <strong>{t('pluginViews.unavailable')}</strong><p>{state.error}</p>

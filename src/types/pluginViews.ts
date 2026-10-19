@@ -42,11 +42,14 @@ export interface PluginViewEnvironment {
   portStatus: string | null;
 }
 
-export interface PluginViewRect {
+export interface PluginViewportRect {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+export interface PluginViewRect extends PluginViewportRect {
   zoomPercent: number;
 }
 

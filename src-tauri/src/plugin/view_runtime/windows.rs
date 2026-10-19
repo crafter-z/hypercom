@@ -10,11 +10,27 @@ use webview2_com::{
     PermissionRequestedEventHandler, ProcessFailedEventHandler,
     WebResourceRequestedEventHandler,
 };
-use windows::{core::{w, HSTRING, Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND, System::Com::CoTaskMemFree, UI::{Shell::SHCreateMemStream, Input::KeyboardAndMouse::GetKeyState, WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SetWindowPos, ShowWindow, HWND_TOP, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS}}}};
+use windows::{core::{w, Error, HSTRING, Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND, Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, HRGN, RGN_DIFF, RGN_ERROR, SetWindowRgn}, System::Com::CoTaskMemFree, UI::{Shell::SHCreateMemStream, Input::KeyboardAndMouse::GetKeyState, WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SetWindowPos, ShowWindow, HWND_TOP, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS}}}};
 use wry::{raw_window_handle::{HandleError, HasWindowHandle, Win32WindowHandle, WindowHandle}, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
-use super::{resources::Resource, Rect, Session};
+use super::{resources::Resource, OcclusionRect, Rect, Session};
+struct OwnedRegion(Option<HRGN>);
+impl OwnedRegion {
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Result<Self, String> {
+        let region = unsafe { CreateRectRgn(left, top, right, bottom) };
+        if region.is_invalid() { return Err(Error::from_win32().to_string()); }
+        Ok(Self(Some(region)))
+    }
+    fn raw(&self) -> HRGN { self.0.expect("owned region missing") }
+    fn take(&mut self) -> HRGN { self.0.take().expect("owned region missing") }
+}
+impl Drop for OwnedRegion {
+    fn drop(&mut self) {
+        if let Some(region) = self.0.take() { let _ = unsafe { DeleteObject(HGDIOBJ::from(region)) }; }
+    }
+}
 
 struct EphemeralDirectory(PathBuf);
+
 impl Drop for EphemeralDirectory {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
 }
@@ -246,7 +262,50 @@ unsafe fn take_string(value: PWSTR) -> String {
     result
 }
 
-pub fn update(window: &tauri::Window, id: &str, rect: Rect, visible: bool, revision: u64) -> Result<(), String> {
+fn clipped_occlusion(occlusion: &OcclusionRect, factor: f64, origin_x: i32, origin_y: i32, width: i32, height: i32) -> Option<(i32, i32, i32, i32)> {
+    let max_x = width as f64;
+    let max_y = height as f64;
+    let origin_x = origin_x as f64;
+    let origin_y = origin_y as f64;
+    let left = (occlusion.x * factor - origin_x).clamp(0.0, max_x);
+    let top = (occlusion.y * factor - origin_y).clamp(0.0, max_y);
+    let right = ((occlusion.x + occlusion.width) * factor - origin_x).clamp(0.0, max_x);
+    let bottom = ((occlusion.y + occlusion.height) * factor - origin_y).clamp(0.0, max_y);
+    if right <= left || bottom <= top { return None; }
+    let left = left.floor() as i32;
+    let top = top.floor() as i32;
+    let right = right.ceil() as i32;
+    let bottom = bottom.ceil() as i32;
+    (right > left && bottom > top).then_some((left, top, right, bottom))
+}
+
+fn clear_window_region(hwnd: HWND) -> Result<(), String> {
+    if unsafe { SetWindowRgn(hwnd, None, true) } == 0 { Err(Error::from_win32().to_string()) } else { Ok(()) }
+}
+
+fn apply_occlusions(hwnd: HWND, occlusions: Option<&[OcclusionRect]>, factor: f64, origin_x: i32, origin_y: i32, width: i32, height: i32) -> Result<(), String> {
+    if width <= 0 || height <= 0 { return clear_window_region(hwnd); }
+    let Some(occlusions) = occlusions else { return clear_window_region(hwnd); };
+    if occlusions.is_empty() { return clear_window_region(hwnd); }
+    let mut region = None;
+    for occlusion in occlusions {
+        let Some((left, top, right, bottom)) = clipped_occlusion(occlusion, factor, origin_x, origin_y, width, height) else { continue; };
+        if region.is_none() { region = Some(OwnedRegion::rect(0, 0, width, height)?); }
+        let base = region.as_ref().expect("region initialized");
+        let cut = OwnedRegion::rect(left, top, right, bottom)?;
+        let result = unsafe { CombineRgn(Some(base.raw()), Some(base.raw()), Some(cut.raw()), RGN_DIFF) };
+        if result == RGN_ERROR { return Err(Error::from_win32().to_string()); }
+    }
+    let Some(mut region) = region else { return clear_window_region(hwnd); };
+    let region = region.take();
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        let _ = unsafe { DeleteObject(HGDIOBJ::from(region)) };
+        return Err(Error::from_win32().to_string());
+    }
+    Ok(())
+}
+
+pub fn update(window: &tauri::Window, id: &str, rect: Rect, occlusions: Option<Vec<OcclusionRect>>, visible: bool, revision: u64) -> Result<(), String> {
     CONTROLS.with(|controls| {
         let mut controls = controls.borrow_mut();
         let control = controls.get_mut(id).ok_or("视图实例不存在")?;
@@ -262,12 +321,15 @@ pub fn update(window: &tauri::Window, id: &str, rect: Rect, visible: bool, revis
         let bottom = ((rect.y + rect.height) * factor).clamp(top, size.height as f64);
         let width = (right - left).round() as i32;
         let height = (bottom - top).round() as i32;
-        control.parent.set_bounds(left.round() as i32, top.round() as i32, width, height)?;
+        let origin_x = left.round() as i32;
+        let origin_y = top.round() as i32;
+        control.parent.set_bounds(origin_x, origin_y, width, height)?;
         control.webview.set_bounds(wry::Rect {
             position: wry::dpi::PhysicalPosition::new(0, 0).into(),
             size: wry::dpi::PhysicalSize::new(width as u32, height as u32).into(),
         }).map_err(|e| e.to_string())?;
         control.webview.zoom(rect.zoom_percent / 100.0).map_err(|e| e.to_string())?;
+        apply_occlusions(control.parent.0, occlusions.as_deref(), factor, origin_x, origin_y, width, height)?;
         let visible = visible && width > 0 && height > 0 && window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true);
         control.webview.set_visible(visible).map_err(|e| e.to_string())?;
         control.parent.set_visible(visible);
@@ -287,9 +349,20 @@ pub fn clear() { CONTROLS.with(|controls| { controls.borrow_mut().clear(); }); }
 
 #[cfg(test)]
 mod tests {
-    use super::{EphemeralDirectory, ViewParent};
+    use super::{clipped_occlusion, EphemeralDirectory, ViewParent};
+    use crate::plugin::view_runtime::OcclusionRect;
     use windows::{core::{w, PCWSTR}, Win32::{Foundation::RECT, UI::WindowsAndMessaging::{CreateWindowExW, GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW}}};
     use wry::{WebContext, WebViewBuilder, WebViewExtWindows};
+
+    #[test]
+    fn clips_occlusions_to_child_and_rounds_edges_outward() {
+        let fractional = OcclusionRect { x: 10.9, y: 20.9, width: 1.0, height: 1.0 };
+        assert_eq!(clipped_occlusion(&fractional, 1.5, 15, 30, 120, 100), Some((1, 1, 3, 3)));
+        let clipped_parent = OcclusionRect { x: 0.9, y: 0.9, width: 1.0, height: 1.0 };
+        assert_eq!(clipped_occlusion(&clipped_parent, 1.5, 0, 0, 120, 100), Some((1, 1, 3, 3)));
+        let outside = OcclusionRect { x: 500.0, y: 500.0, width: 5.0, height: 5.0 };
+        assert_eq!(clipped_occlusion(&outside, 1.5, 15, 30, 120, 100), None);
+    }
 
     #[test]
     #[ignore = "requires the native Windows WebView2 runtime"]

@@ -76,7 +76,7 @@ src/
 | `OperationPanel/hooks/{useHexCompose,useFileSend,useQuickStripLayout,useSendHistoryRecall}.ts` | HEX 组包 / 文件发送（守卫 + TX 统计）/ 快捷条宽度自适应（`utils/sendStrip.ts` `computeFitCount`）/ 发送历史回溯 |
 | `shared/{useOutsideDismiss,useDragResize,menuPlacement}.ts` + `shared/PluginViewPicker.tsx` | 三个共享交互原语：外点关闭 / 拖拽调整尺寸 / 菜单定位；PluginViewPicker 统一插件视图自定义选择浮层（勿在各组件内手写第五份） |
 | `Popout/{usePopoutSync,usePanelTextConfig,usePortSerialFeed}.ts` | 弹窗↔主窗同步（命令集/活动标签/端口状态事件总线）/ 面板文本配置 / 终端弹窗 RX 喂入（快照交接 + 时间戳闸门防重复） |
-| `shared/usePluginViewOverlay.ts` + `utils/pluginViewOverlay.ts` | `usePluginViewOverlay` / `acquirePluginViewOverlay`：先等待原生子视图隐藏，再显示宿主 DOM 浮层；不属于 `src/hooks/` 的 18 个 hook 文件 |
+| `shared/usePluginViewOverlay.ts` + `utils/pluginViewOverlay.ts` | `usePluginViewOverlay` / `acquirePluginViewOverlay`：菜单等待原生矩形裁剪，未覆盖内容保持可见；模态层等待原生子视图隐藏后显示；不属于 `src/hooks/` 的 18 个 hook 文件 |
 | `MainDisplay/SerialContentHost.tsx` + `utils/tabContentPlacement.ts` | 原始 TRX/TTY 实例由分屏树之外的稳定宿主拥有，按 workspace tab UUID 保持身份；切标签、跨分屏移动与插件替换只改变位置/可见性 |
 | `utils/pluginViewRuntime.ts` / `pluginViewInput.ts` / `pluginViewJson.ts` | 原生视图会话、Worker/UI 状态 ACK、固定端口输入租约与有界 JSON；`services/pluginView.ts` 为四个原生命令及消息事件的 IPC 门面 |
 
@@ -443,7 +443,7 @@ The hook modules in `src/hooks/` (18 files; `usePlugins.ts` exports host/list ho
 | `usePortToolActions` | 侧边栏/标签页外部工具菜单共享动作（`runTool`/`killTool`/`configTool`/`runToolForGroup` + 对话框状态与动作） | Sidebar / TabBar / Pane |
 | `useHotkeys` | 全局快捷键 | App.tsx |
 | `usePowerManagement` | 电源抑制（防休眠/防关屏）随 config 生效 | App.tsx |
-| `usePluginHost` / `usePluginList` | Worker 安装身份绑定、revision 有序快照、RX 观察/启动重试；设置页先授权再启用、立即持久化插件动作 | App.tsx（宿主一次）/ PluginSettings |
+| `usePluginHost` / `usePluginList` | Worker 安装身份绑定、revision 有序快照、RX 观察/启动重试；安装后弹出权限确认，可一次授予声明权限并启用，设置页仍支持逐项授权/撤权与立即持久化 | App.tsx（宿主一次）/ PluginSettings |
 | `usePluginPanel` | 插件输出面板订阅 | PluginPanel |
 | `usePluginUi` | 声明式按钮/菜单订阅及 Worker 点击派发 | Sidebar / SortablePortItem |
 
@@ -534,7 +534,7 @@ scope: ui | backend | store | hooks | docs
 - **RX 管线**：`serial:data` → `RxLineAssembler`（CR/LF/跨事件 CRLF/4KB 强制发射）→ 每端口队列 → rAF tick 每端口一批追加到 viewportManager；250ms 静默尾行与协议帧也进入同一 RX 行观察者（先入队后触发自动回复）。`flushNow` 每次最多写 `maxLinesPerTick` 行，`sendToPort` TX 回显前及弹窗快照用 `flushBeforeSend` 完整排空队列；断线/编码切换也完整排空并清旧状态，编码切换前冻结旧 RX 队列的解码文本。协议解析器按端口只保留当前绑定，模板切换、编辑、禁用、模式切换和关标签时退出旧解析器并冲刷残留，不复活旧帧前缀。隐藏页面以 setTimeout 兜底，队列上限 `maxQueuedLines` 丢最旧；不得在 hook cleanup 里 dispose 单例。
 - **滚动锁定**：`scrollLocked` 只由显式意图写入——图钉按钮、`.terminal-jump-btn` 跳转按钮（滚动条两端：到顶解锁、到底锁定并点亮）、手势 settle（滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定）。`TerminalRenderer` 的 scroll 监听只驱动可见窗口重算（不碰锁定状态）；搜索栏打开时抑制跟随，关闭时若锁定则滚回最新。
 - ConfigModal's rule/command editors save to config.json via `storageService` (which wraps config-backed commands). Load on mount via `useEntityPage`. Rule state lives in `useRuleStore`.
-- **config.json settings entities**：`AppConfig.entities` 展平 9 类 `Vec`（含 `PluginConfigEntry`）；插件 KV 独立存 `<plugins_dir>/<id>/data/state.json`。普通全量保存经 revision CAS 并在 `plugin_io` 锁内保留权威插件状态；备份导入只有相同 `installGeneration` 可恢复授权。四个插件变更及列表响应携带 revision，运行镜像拒绝旧响应。设置页先授权再启用，后端安装代次校验拒绝升级期间排队的旧操作；`plugin/transaction.rs` 在启动前恢复安装/卸载中断数据；manifest 限 1 MiB；通知每插件/全插件积压上限为 20/100，宿主粘滞通知不受影响。
+- **config.json settings entities**：`AppConfig.entities` 展平 9 类 `Vec`（含 `PluginConfigEntry`）；插件 KV 独立存 `<plugins_dir>/<id>/data/state.json`。普通全量保存经 revision CAS 并在 `plugin_io` 锁内保留权威插件状态；备份导入只有相同 `installGeneration` 可恢复授权。四个插件变更及列表响应携带 revision，运行镜像拒绝旧响应；安装完成后前端弹出一次性权限确认，授予全部声明权限后启用插件，取消则保留禁用状态，设置页仍可逐项授权；后端安装代次校验拒绝升级期间排队的旧操作；`plugin/transaction.rs` 在启动前恢复安装/卸载中断数据；manifest 限 1 MiB；通知每插件/全插件积压上限为 20/100，宿主粘滞通知不受影响。
 - ConfigModal pages use **per-field selectors** instead of subscribing to the whole config — this prevents unnecessary re-renders when unrelated config fields change.
 - SIM:Loopback virtual port is available when `enable_simulation` is called (flask icon in sidebar toolbar)。**周期输出频率命令**：向 SIM:Loopback 发送**文本模式纯数字**（trim 后为数字，如 `100`）即把周期输出频率切到每秒 N 次（0 = 停止；上限 `MAX_SIM_RATE = 10000`，超限 clamp），命令本身不回显——输出为 `[SIM] Heartbeat #<seq>` 序号行，积分器补发保证平均频率精确（`sim_due_lines` 纯函数，100ms 循环节拍不限制高频）。HEX 模式/非数字 TX 保持原回显。默认 2/s。
 - CSS is split across `src/styles/` (`base.css` + 17 component CSS files, including plugin-panel.css). `src/styles.css` is the import entry point, not the main stylesheet.

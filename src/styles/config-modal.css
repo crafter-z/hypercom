@@ -553,3 +553,29 @@
 .plugin-perm-state .not-granted {
   color: var(--text-secondary);
 }
+.plugin-permission-dialog {
+  width: min(460px, 90vw);
+  gap: var(--space-3);
+}
+.plugin-permission-dialog-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+.plugin-permission-dialog-list code {
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-terminal);
+  font-size: var(--text-xs);
+}
+.plugin-permission-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}

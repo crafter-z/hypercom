@@ -43,7 +43,7 @@ self.plugin.views.onOpen(async view => {
   view.onStatus(async status => { session.status = status.status; await view.publish(snapshot(session)); });
   view.onMessage(async message => {
     if (message.type === 'clear') { session.rows = []; await view.publish(snapshot(session)); }
-    if (message.type === 'open-wave') await self.plugin.tabs.open({ viewId: 'wave', portId: view.context.boundPortId, instanceKey: 'live', activation: 'background' });
+    if (message.type === 'open-wave') await self.plugin.tabs.open({ viewId: 'wave', portId: view.context.boundPortId, activation: 'background' });
   });
   view.onInput(async batch => {
     for (const chunk of batch) {
@@ -65,8 +65,8 @@ self.plugin.views.onOpen(async view => {
 self.plugin.views.onClose(({ view }) => sessions.delete(view.context.viewInstanceId));
 self.plugin.on('ui.buttonClick', async event => {
   if (event.buttonId === 'open-settings') {
-    await self.plugin.tabs.open({ viewId: 'settings', instanceKey: 'settings', activation: 'foreground', actionToken: event.actionToken });
+    await self.plugin.tabs.open({ viewId: 'settings', activation: 'foreground', actionToken: event.actionToken });
   } else if (event.context?.portId) {
-    await self.plugin.tabs.open({ viewId: event.buttonId === 'open-wave' ? 'wave' : 'table', portId: event.context.portId, instanceKey: 'live', activation: 'foreground', actionToken: event.actionToken });
+    await self.plugin.tabs.open({ viewId: event.buttonId === 'open-wave' ? 'wave' : 'table', portId: event.context.portId, activation: 'foreground', actionToken: event.actionToken });
   }
 });

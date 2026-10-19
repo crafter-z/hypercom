@@ -1160,10 +1160,11 @@ pub async fn update_plugin_view(
     source: tauri::Webview,
     instance_id: String,
     rect: plugin::view_runtime::Rect,
+    occlusions: Option<Vec<plugin::view_runtime::OcclusionRect>>,
     visible: bool,
     layout_revision: u64,
 ) -> Result<(), CommandError> {
-    plugin::view_runtime::update(source, instance_id, rect, visible, layout_revision).await
+    plugin::view_runtime::update(source, instance_id, rect, occlusions, visible, layout_revision).await
 }
 
 #[tauri::command]

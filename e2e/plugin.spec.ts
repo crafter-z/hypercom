@@ -53,8 +53,8 @@ const MOCK = `
     id: '${PLUGIN_ID}',
     dir: 'C:/mock/plugins/${PLUGIN_ID}',
     enabled: state.enabled,
-    declaredPermissions: ['terminal:read', 'terminal:write', 'ui:view'],
-    knownPermissions: ['terminal:read', 'terminal:write', 'ui:view'],
+    declaredPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view'],
+    knownPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view'],
     manifest: {
       id: '${PLUGIN_ID}',
       name: 'E2E Demo',
@@ -62,11 +62,14 @@ const MOCK = `
       description: 'e2e demo',
       apiVersion: '1.0',
       entry: 'main.js',
-      permissions: ['terminal:read', 'terminal:write', 'ui:view'],
+      permissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view'],
       ui: {
         buttons: [],
         menuItems: [],
-        views: [{ id: 'tool', label: 'E2E Tool', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false }],
+        views: [
+          { id: 'tool', label: 'E2E Tool', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false },
+          { id: 'table', label: 'Sensor table', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'bytes', placements: ['workspace-tab'], portBinding: 'required', restoreOnStartup: false },
+        ],
       },
     },
     manifestError: null,
@@ -216,15 +219,28 @@ test.describe('插件系统（issue #17）', () => {
     });
     await expect(page.locator('.terminal-line .terminal-content').filter({ hasText: 'RX-DETACHED:port-disconnected' })).toBeVisible();
   });
-  test('插件工具入口使用宿主浮层而非原生下拉框', async ({ page }) => {
+  test('插件工具入口位于标签栏并使用宿主浮层', async ({ page }) => {
     await openApp(page, ['ui:view']);
-    const launcher = page.locator('.plugin-tab-launcher .plugin-view-picker-trigger');
+    const launcher = page.locator('.tab-bar-actions .plugin-view-picker-trigger');
     await expect(launcher).toBeVisible();
-    await expect(page.locator('.plugin-tab-launcher select')).toHaveCount(0);
+    await expect(page.locator('.tab-bar-actions select')).toHaveCount(0);
     await launcher.click();
     await expect(page.getByRole('listbox', { name: '打开插件工具页…' })).toBeVisible();
     await expect(page.locator('.plugin-view-picker-option-label').filter({ hasText: 'E2E Tool' })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('listbox', { name: '打开插件工具页…' })).toHaveCount(0);
+  });
+
+  test('普通 COM 标签的加号可选择绑定当前端口的 Sensor table', async ({ page }) => {
+    await openApp(page, ['ui:view', 'rx:bytes']);
+    await openCom1Tab(page);
+    await page.locator('.tab-bar-actions .plugin-view-picker-trigger').click();
+    const table = page.getByRole('option', { name: 'Sensor table' });
+    await expect(table).toBeVisible();
+    await table.click();
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await expect(page.locator('.tab-item.active')).toContainText('Sensor table');
+    await expect(page.locator('.plugin-view-tab:visible .plugin-view-source-port')).toHaveText('· COM1');
+    await expect(page.locator('.tab-item').filter({ hasText: 'COM1' })).toBeVisible();
   });
 });

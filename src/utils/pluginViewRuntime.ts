@@ -1,7 +1,7 @@
 import { useAppStore, getTabPortId } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import type { PluginManifestView, PluginView, TabItem } from '../types';
-import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewPreference, PluginViewRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage } from '../types/pluginViews';
+import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage } from '../types/pluginViews';
 import { getPluginViews, subscribePluginViews } from './pluginConfigSnapshot';
 import { pluginHost, subscribePluginSessions } from './pluginHost';
 import { pluginViewService } from '../services/pluginView';
@@ -16,6 +16,8 @@ const MAX_PER_PLUGIN = 8;
 const MAX_ALL = 16;
 const MAX_SNAPSHOT_BYTES = 256 * 1024;
 const MAX_PLUGIN_PENDING_BYTES = 1024 * 1024;
+const MAX_OCCLUSIONS = 64;
+const MAX_OCCLUSION_SIZE = 1_000_000;
 const EMPTY_STATE: PluginViewState = { status: 'unavailable', error: null, instanceId: null };
 const listeners = new Set<() => void>();
 let states: Record<string, PluginViewState> = {};
@@ -23,6 +25,7 @@ let started = false;
 let runtimeGeneration = 0;
 let reconcileQueued = false;
 let overlayBlocked = false;
+let currentOcclusions: PluginViewportRect[] = [];
 let nativeUnlisten: (() => void) | null = null;
 const records = new Map<string, ViewRecord>();
 const failures = new Map<string, string>();
@@ -69,6 +72,16 @@ export function subscribePluginViewState(listener: () => void): () => void { lis
 export function getPluginViewState(tabId: string): PluginViewState { return states[tabId] ?? EMPTY_STATE; }
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function normalizeOcclusions(occlusions: PluginViewportRect[]): PluginViewportRect[] {
+  if (!Array.isArray(occlusions) || occlusions.length > MAX_OCCLUSIONS) throw new Error('invalid plugin view occlusions');
+  return occlusions.map((rect) => {
+    if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)
+      || rect.width < 0 || rect.height < 0 || rect.width > MAX_OCCLUSION_SIZE || rect.height > MAX_OCCLUSION_SIZE) {
+      throw new Error('invalid plugin view occlusion rectangle');
+    }
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  });
+}
 function jsonBytes(value: unknown, maximum: number): number {
   return boundedPluginViewJson(value, maximum).bytes;
 }
@@ -279,7 +292,7 @@ function reconcile(): void {
 }
 async function place(record: ViewRecord): Promise<void> {
   if (!live(record) || !record.nativeCreated || !record.rect) return;
-  await pluginViewService.update(record.binding.viewInstanceId, record.rect, record.visible && !overlayBlocked && record.nativeReady && record.workerReady, ++record.layoutRevision);
+  await pluginViewService.update(record.binding.viewInstanceId, record.rect, record.visible && !overlayBlocked && record.nativeReady && record.workerReady, ++record.layoutRevision, currentOcclusions);
 }
 export function placePluginView(tabId: string, rect: PluginViewRect, visible: boolean): void {
   const record = records.get(tabId);
@@ -293,14 +306,15 @@ export function placePluginView(tabId: string, rect: PluginViewRect, visible: bo
   void place(record).catch(error => fail(record, error));
   void sendEnvironment(record).catch(error => fail(record, error));
 }
-export async function suppressPluginViews(suppressed: boolean): Promise<void> {
+export async function suppressPluginViews(suppressed: boolean, occlusions: PluginViewportRect[] = []): Promise<void> {
+  currentOcclusions = normalizeOcclusions(occlusions);
   overlayBlocked = suppressed;
   await Promise.all([...records.values()].map(async record => {
     if (suppressed) clearTimer(record, 'ackTimer'); else { armAck(record); flush(record); }
     try { await place(record); await sendEnvironment(record); } catch (error) {
       fail(record, error);
-      // A failed hide cannot authorize DOM overlays until the child is actually destroyed.
-      if (suppressed) await record.retirement;
+      // A failed visibility or exclusion update cannot authorize host overlays until the child is destroyed.
+      await record.retirement;
     }
   }));
 }
@@ -383,9 +397,21 @@ function openTabFor(pluginId: string, options: PluginTabOpenOptions, user: boole
   openParams.set(tabId, initialParams); queueReconcile();
   return { tabId, created: true, state: 'loading' };
 }
-export function openPluginTabForUser(preference: PluginViewPreference, portId: string | null, instanceKey = 'default'): string {
-  if (currentPlugin(preference.pluginId, false).installGeneration !== preference.installGeneration) throw new Error('plugin installation changed');
-  return openTabFor(preference.pluginId, { viewId: preference.viewId, portId, instanceKey }, true).tabId;
+export function openPluginTabForUser(preference: PluginViewPreference, portId: string | null, instanceKey?: string): string {
+  const plugin = currentPlugin(preference.pluginId, false);
+  if (plugin.installGeneration !== preference.installGeneration) throw new Error('plugin installation changed');
+  let selectedInstanceKey = instanceKey;
+  if (selectedInstanceKey === undefined) {
+    const state = useAppStore.getState();
+    const matching = state.tabs.filter(tab => tab.kind === 'plugin'
+      && tab.pluginId === preference.pluginId
+      && tab.installGeneration === preference.installGeneration
+      && tab.viewId === preference.viewId
+      && tab.boundPortId === portId);
+    const existing = matching.find(tab => tab.id === state.activeTabId) ?? matching[0];
+    selectedInstanceKey = existing?.kind === 'plugin' ? existing.instanceKey : 'default';
+  }
+  return openTabFor(preference.pluginId, { viewId: preference.viewId, portId, instanceKey: selectedInstanceKey }, true).tabId;
 }
 export function dismissPluginTab(tabId: string): void {
   const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
@@ -503,6 +529,7 @@ export function startPluginViewRuntime(): () => void {
     if (!started || runtimeGeneration !== generation) return;
     started = false; for (const unsubscribe of unsubscribers) unsubscribe(); nativeUnlisten?.(); nativeUnlisten = null;
     for (const record of [...records.values()]) retire(record, null);
+    overlayBlocked = false; currentOcclusions = [];
     states = {}; failures.clear(); tabSessions.clear(); openParams.clear(); dismissed.clear(); rates.clear(); actionTokens.clear(); emit();
   };
 }

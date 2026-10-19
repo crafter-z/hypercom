@@ -40,6 +40,7 @@ interface TerminalFilterBarProps {
   showMatchCount: boolean; // true when the debounced keyword is non-empty
   paused: boolean;
   onTogglePause: () => void;
+  viewPicker?: React.ReactNode;
 }
 
 const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
@@ -56,6 +57,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
   showMatchCount,
   paused,
   onTogglePause,
+  viewPicker,
 }) => {
   const { t } = useTranslation();
 
@@ -81,6 +83,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
 
   return (
     <div className="terminal-filter-bar">
+      {viewPicker}
       <div className="segmented" role="group">
         {DIRECTION_OPTIONS.map((d) => (
           <button

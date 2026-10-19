@@ -20,11 +20,12 @@ export function useOutsideDismiss(
   ref: RefObject<HTMLElement | null>,
   onDismiss: () => void,
   active = true,
+  insideRef?: RefObject<HTMLElement | null>,
 ): void {
   useEffect(() => {
     if (!active) return;
     const onMouseDown = (e: MouseEvent) => {
-      if (!ref.current || ref.current.contains(e.target as Node)) return;
+      if (!ref.current || ref.current.contains(e.target as Node) || insideRef?.current?.contains(e.target as Node)) return;
       onDismiss();
     };
     const onKeyDown = (e: KeyboardEvent) => {
@@ -36,5 +37,5 @@ export function useOutsideDismiss(
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [ref, onDismiss, active]);
+  }, [ref, onDismiss, active, insideRef]);
 }

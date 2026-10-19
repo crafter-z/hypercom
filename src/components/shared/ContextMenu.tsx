@@ -1,4 +1,5 @@
 import React, { useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useMenuPlacement } from './menuPlacement';
 import { useOutsideDismiss } from './useOutsideDismiss';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
@@ -27,16 +28,16 @@ interface ContextMenuProps {
 }
 
 const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
-  const overlayReady = usePluginViewOverlay();
-  const { ref, pos } = useMenuPlacement(x, y, overlayReady);
+  const { ref, pos } = useMenuPlacement(x, y);
+  const overlayGuardReady = usePluginViewOverlay(true, ref);
   useOutsideDismiss(ref, onClose);
-  if (!overlayReady) return null;
 
-  return (
+  return createPortal(
     <div
       ref={ref}
       className="context-menu animate-fade-in"
-      style={{ left: pos.x, top: pos.y }}
+      data-plugin-view-cutout
+      style={{ left: pos.x, top: pos.y, visibility: overlayGuardReady ? 'visible' : 'hidden' }}
     >
       {items.map((item, idx) => {
         if ('type' in item && item.type === 'separator') {
@@ -60,7 +61,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
         );
       })}
     </div>
-  );
+  , document.body);
 };
 
 export default ContextMenu;

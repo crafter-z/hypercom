@@ -22,6 +22,10 @@ pub struct Binding {
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OcclusionRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rect { pub x: f64, pub y: f64, pub width: f64, pub height: f64, pub zoom_percent: f64 }
 
 pub struct Session {
@@ -132,15 +136,16 @@ async fn on_ui<T: Send + 'static>(app: &tauri::AppHandle, operation: impl FnOnce
     rx.await.map_err(|_| error("原生 UI 线程已退出"))?.map_err(error)
 }
 
-pub async fn update(source: tauri::Webview, id: String, rect: Rect, visible: bool, revision: u64) -> Result<(), CommandError> {
+pub async fn update(source: tauri::Webview, id: String, rect: Rect, occlusions: Option<Vec<OcclusionRect>>, visible: bool, revision: u64) -> Result<(), CommandError> {
     require_main(&source)?;
     let session = session(&id, source.app_handle())?;
     validate_rect(&rect).map_err(error)?;
+    validate_occlusions(occlusions.as_deref()).map_err(error)?;
     let app = source.app_handle().clone();
     on_ui(&app, move || {
         if !session.alive.load(Ordering::Acquire) { return Err("视图已退休".into()); }
-        #[cfg(windows)] { windows::update(&source.window(), &id, rect, visible, revision) }
-        #[cfg(not(windows))] { let _ = (source, id, rect, visible, revision); Err("不支持原生隔离视图".into()) }
+        #[cfg(windows)] { windows::update(&source.window(), &id, rect, occlusions, visible, revision) }
+        #[cfg(not(windows))] { let _ = (source, id, rect, occlusions, visible, revision); Err("不支持原生隔离视图".into()) }
     }).await
 }
 pub async fn send(source: tauri::Webview, id: String, mut message: Value) -> Result<(), CommandError> {
@@ -226,11 +231,28 @@ pub fn native_error(app: &tauri::AppHandle, session: &Session, message: &str) {
         let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({"instanceId":session.binding.view_instance_id,"type":"error","error":message}));
     }
 }
+const MAX_OCCLUSIONS: usize = 64;
+const MAX_GEOMETRY_COORD: f64 = 100_000.0;
+const MAX_OCCLUSION_SIZE: f64 = 1_000_000.0;
+
 fn validate_rect(rect: &Rect) -> Result<(), String> {
     if [rect.x, rect.y, rect.width, rect.height, rect.zoom_percent].iter().any(|v| !v.is_finite())
         || rect.width < 0.0 || rect.height < 0.0 || rect.zoom_percent < 25.0 || rect.zoom_percent > 500.0
-        || [rect.x.abs(), rect.y.abs(), rect.width, rect.height].iter().any(|v| *v > 100_000.0) {
+        || [rect.x.abs(), rect.y.abs(), rect.width, rect.height].iter().any(|v| *v > MAX_GEOMETRY_COORD) {
         return Err("视图矩形非法".into());
+    }
+    Ok(())
+}
+
+fn validate_occlusions(occlusions: Option<&[OcclusionRect]>) -> Result<(), String> {
+    let Some(occlusions) = occlusions else { return Ok(()); };
+    if occlusions.len() > MAX_OCCLUSIONS { return Err("视图遮挡矩形数量非法".into()); }
+    if occlusions.iter().any(|rect| {
+        [rect.x, rect.y, rect.width, rect.height].iter().any(|value| !value.is_finite())
+            || rect.width < 0.0 || rect.height < 0.0
+            || [rect.x.abs(), rect.y.abs(), rect.width, rect.height].iter().any(|value| *value > MAX_OCCLUSION_SIZE)
+    }) {
+        return Err("视图遮挡矩形非法".into());
     }
     Ok(())
 }
@@ -245,6 +267,18 @@ mod tests {
         rect.x = f64::NAN; assert!(validate_rect(&rect).is_err());
         rect.x = 0.0; rect.width = -1.0; assert!(validate_rect(&rect).is_err());
         rect.width = 200.0; rect.zoom_percent = 0.0; assert!(validate_rect(&rect).is_err());
+    }
+    #[test]
+    fn validates_occlusion_contract() {
+        let rect = OcclusionRect { x: -10.0, y: 20.0, width: 30.0, height: 40.0 };
+        assert!(validate_occlusions(Some(&[rect.clone()])).is_ok());
+        assert!(validate_occlusions(Some(&[OcclusionRect { width: -1.0, ..rect }])).is_err());
+        let rect = OcclusionRect { x: -10.0, y: 20.0, width: 30.0, height: 40.0 };
+        assert!(validate_occlusions(Some(&[OcclusionRect { x: f64::NAN, ..rect }])).is_err());
+        let rect = OcclusionRect { x: 0.0, y: 0.0, width: MAX_OCCLUSION_SIZE + 1.0, height: 1.0 };
+        assert!(validate_occlusions(Some(&[rect])).is_err());
+        let rect = OcclusionRect { x: -10.0, y: 20.0, width: 30.0, height: 40.0 };
+        assert!(validate_occlusions(Some(&(0..=MAX_OCCLUSIONS).map(|_| rect.clone()).collect::<Vec<_>>())).is_err());
     }
     #[test]
     fn validates_fixed_port_and_placement_contract() {

@@ -4,6 +4,7 @@ import type { TabItem, LeafPane } from '../../types';
 import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
 import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare } from 'lucide-react';
+import PluginTabLauncher from './PluginTabLauncher';
 import {
   SortableContext,
   useSortable,
@@ -60,7 +61,6 @@ const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, onTab
       <AlertTriangle size={12} className="tab-warning-icon" />
     )}
     <span className="tab-title">{tab.title}</span>
-    {tab.kind === 'plugin' && <span className="tab-plugin-source" title={tab.pluginId}>{tab.pluginId}</span>}
     {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
     {!tab.isPinned && (
       <span
@@ -145,6 +145,7 @@ const TabBar: React.FC<TabBarProps> = ({
   const ports = useAppStore((s) => s.ports);
   // 批量开/关针对**全部标签页**（跨分屏），禁用态按全局 tabs 计算。
   const allTabs = useAppStore((s) => s.tabs);
+  const pluginLauncherPortId = getTabPortId(tabs.find(tab => tab.id === activeTabId)) ?? null;
 
   // Lookup: portId → is disconnected (status 'disconnected' or port missing).
   // A missing port (USB unplug removed it from the list) is treated as
@@ -268,19 +269,24 @@ const TabBar: React.FC<TabBarProps> = ({
       strategy={horizontalListSortingStrategy}
     >
       <div className="tab-bar">
-        {tabs.map(renderTab)}
-        {onSplitVertical && onSplitHorizontal && (
-          <div className="tab-bar-split-group">
-            <button className="icon-btn" title={t('mainDisplay.toolbar.splitVertical')}
-              onClick={(e) => { e.stopPropagation(); onSplitVertical(); }}>
-              <Columns2 size={13} />
-            </button>
-            <button className="icon-btn" title={t('mainDisplay.toolbar.splitHorizontal')}
-              onClick={(e) => { e.stopPropagation(); onSplitHorizontal(); }}>
-              <Rows2 size={13} />
-            </button>
-          </div>
-        )}
+        <div className="tab-bar-tabs">
+          {tabs.map(renderTab)}
+        </div>
+        <div className="tab-bar-actions">
+          <PluginTabLauncher portId={pluginLauncherPortId} />
+          {onSplitVertical && onSplitHorizontal && (
+            <div className="tab-bar-split-group">
+              <button className="icon-btn" title={t('mainDisplay.toolbar.splitVertical')}
+                onClick={(e) => { e.stopPropagation(); onSplitVertical(); }}>
+                <Columns2 size={13} />
+              </button>
+              <button className="icon-btn" title={t('mainDisplay.toolbar.splitHorizontal')}
+                onClick={(e) => { e.stopPropagation(); onSplitHorizontal(); }}>
+                <Rows2 size={13} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {contextMenu && (

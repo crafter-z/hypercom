@@ -31,7 +31,10 @@ import { TerminalRenderer, type RendererConfig } from '../../utils/terminal/Term
 import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { isAtBottom } from '../../utils/followLogic';
 import { isSameRound } from '../../utils/timeFormat';
+import { getAvailablePluginViews, getTabViewPreference, selectSerialPluginView } from '../../utils/pluginViewRuntime';
+import { notifyError } from '../../stores/useToastStore';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
+import PluginViewPicker from '../shared/PluginViewPicker';
 import { buildTerminalContextMenuItems } from './terminalContextMenu';
 import { useTerminalDisplay } from './useTerminalDisplay';
 import { useTerminalSearch } from './useTerminalSearch';
@@ -393,6 +396,22 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         showMatchCount={debouncedKeyword.trim().length > 0}
         paused={paused}
         onTogglePause={togglePause}
+        viewPicker={(() => {
+          const tab = useAppStore.getState().tabs.find(item => item.kind === 'serial' && item.portId === portId);
+          const preference = tab ? getTabViewPreference(tab) : null;
+          const choices = getAvailablePluginViews(portId, 'serial-content');
+          return tab && (choices.length > 0 || preference) ? (
+            <PluginViewPicker
+              choices={choices}
+              value={preference ? `${preference.pluginId}/${preference.viewId}` : ''}
+              rawOption={{ key: '', label: t('pluginViews.terminal') }}
+              triggerLabel={t('pluginViews.view')}
+              title={t('pluginViews.view')}
+              ariaLabel={t('pluginViews.view')}
+              onSelect={choice => { try { selectSerialPluginView(tab.id, choice?.preference ?? null); } catch (error) { notifyError(error); } }}
+            />
+          ) : null;
+        })()}
       />
       {searchOpen && (
         <TerminalSearchBar

@@ -1,7 +1,7 @@
 {
   "id": "com.example.sensor-views",
   "name": "Sensor Workspace",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Isolated table, waveform and tool tabs with a bounded live parser.",
   "apiVersion": "1.0",
   "entry": "main.js",

@@ -21,6 +21,7 @@ import {
 import { usePluginList } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
 import { useAppStore } from '../../../stores/useAppStore';
+import type { PluginView } from '../../../types';
 
 const PluginSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -29,10 +30,12 @@ const PluginSettings: React.FC = () => {
     loading,
     refresh,
     installPlugin,
+    grantAllAndEnable,
     uninstallPlugin,
     setEnabled,
     togglePermission,
   } = usePluginList();
+  const [pendingGrant, setPendingGrant] = React.useState<PluginView | null>(null);
   // 插件出站代理（issue #17）：宿主显式配置，供 plugin_http 使用（不继承宿主系统代理）。
   const pluginProxyEnabled = useAppStore((s) => s.config.pluginProxyEnabled);
   const pluginProxy = useAppStore((s) => s.config.pluginProxy);
@@ -42,9 +45,10 @@ const PluginSettings: React.FC = () => {
       const selected = source === 'directory'
         ? await open({ directory: true, multiple: false, title: t('plugins.installDirectory') })
         : await open({ multiple: false, filters: [{ name: 'Plugin archive', extensions: ['zip'] }], title: t('plugins.installZip') });
-      if (typeof selected === 'string') await installPlugin(selected);
+      if (typeof selected !== 'string') return;
+      const installed = await installPlugin(selected);
+      if (installed) setPendingGrant(installed);
     } catch (error) {
-      // usePluginList reports installation failures. Closing the native picker returns null.
       console.debug('[PluginSettings] install failed:', error);
     }
   };
@@ -62,7 +66,8 @@ const PluginSettings: React.FC = () => {
   };
 
   return (
-    <div className="plugin-settings">
+    <>
+      <div className="plugin-settings">
       <div className="settings-section-header">
         <h3>{t('plugins.title')}</h3>
         <div className="plugin-settings-actions">
@@ -207,7 +212,29 @@ const PluginSettings: React.FC = () => {
           })}
         </div>
       )}
-    </div>
+      </div>
+    {pendingGrant && (
+      <div className="modal-overlay" onClick={() => setPendingGrant(null)}>
+        <div className="modal-dialog-compact plugin-permission-dialog animate-slide-up" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+          <h3 className="modal-dialog-title">{t('plugins.permissionPromptTitle', { name: pendingGrant.manifest?.name ?? pendingGrant.id })}</h3>
+          <p className="settings-hint">{t('plugins.permissionPromptDescription')}</p>
+          {pendingGrant.declaredPermissions.length > 0 ? (
+            <div className="plugin-permission-dialog-list">
+              {pendingGrant.declaredPermissions.filter(permission => pendingGrant.knownPermissions.includes(permission)).map(permission => (
+                <code key={permission}>{permission}</code>
+              ))}
+            </div>
+          ) : <p className="settings-hint">{t('plugins.noPermissions')}</p>}
+          <div className="plugin-permission-dialog-actions">
+            <button className="btn" onClick={() => setPendingGrant(null)}>{t('plugins.permissionPromptLater')}</button>
+            <button className="btn btn-primary" disabled={loading} onClick={() => {
+              void grantAllAndEnable(pendingGrant).then(() => setPendingGrant(null)).catch(() => {});
+            }}>{t('plugins.permissionPromptGrantAll')}</button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 
