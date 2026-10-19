@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 use super::codec::{build_tx_bytes, normalize_tty_line_ending, TxOutcome};
-use super::{emit_status_if_current, PortInfo, PortStatus, SerialManager};
+use super::{emit_status, PortInfo, PortStatus, SerialManager};
 use crate::commands::OpenPortArgs;
 
 /// 模拟终端的端口 id
@@ -64,7 +64,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     let port_id = args.port_id.clone();
     let ready = handle.ready.clone();
     manager.tty_sim_ports.insert(args.port_id, handle);
-    emit_status_if_current(&app_handle, &port_id, PortStatus::Connected, generation);
+    emit_status(&app_handle, &port_id, PortStatus::Connected);
     ready.store(true, Ordering::Release);
     log::info!("TTY sim port opened: {}", port_id);
     Ok(())

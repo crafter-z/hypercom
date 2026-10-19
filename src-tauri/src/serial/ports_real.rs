@@ -24,8 +24,8 @@ use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
 
 use super::codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
 use super::{
-    emit_reconnect_hint, emit_rx_event, emit_status_if_current, lock_error, PortInfo, PortKind,
-    PortStatus, SerialManager,
+    emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, lock_error,
+    PortInfo, PortKind, PortStatus, SerialManager,
 };
 use crate::commands::OpenPortArgs;
 
@@ -276,8 +276,9 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
             }
         }
     }
-    // The final barrier check and opening are under the same manager lock: a close
-    // cannot remove a handle between checking the barrier and CreateFile.
+    // Connected status is emitted by each port opener after registration. The
+    // opener uses the non-reentrant emitter because this function still owns the
+    // manager lock at that point.
     loop {
         let mut guard = manager.lock().map_err(lock_error)?;
         if let Some(pending) = guard.pending_real_closes.get(&args.port_id).cloned() {
@@ -288,7 +289,7 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
             }
             guard.pending_real_closes.remove(&args.port_id);
         }
-        return guard.open_port(args);
+        return guard.open_port(args.clone());
     }
 }
 
@@ -328,8 +329,6 @@ fn reconnect_with_probe(
     if !present(port_id)? {
         return Err(anyhow::anyhow!("Port {} is not available", port_id));
     }
-    // Check intent and open under the same lock as user close/open cancellation.
-    // close_port_inner registered a barrier above; join has completed it already.
     let mut guard = manager.lock().map_err(lock_error)?;
     check_reconnect(cancel)?;
     let params = guard
@@ -450,12 +449,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     manager
         .last_params
         .insert(args.port_id.clone(), args.clone());
-    emit_status_if_current(
-        &app_handle,
-        &args.port_id,
-        PortStatus::Connected,
-        generation,
-    );
+    emit_status(&app_handle, &args.port_id, PortStatus::Connected);
     ready.store(true, Ordering::Release);
     log::info!("Serial port opened: {}", port_id);
     Ok(())

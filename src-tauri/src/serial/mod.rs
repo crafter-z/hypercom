@@ -33,7 +33,7 @@ pub use codec::{
     build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome,
     WRITE_TOTAL_DEADLINE,
 };
-pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status_if_current, PortStatus};
+pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus};
 pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
@@ -234,7 +234,9 @@ impl SerialManager {
     pub fn connection_matches(&self, port_id: &str, generation: u64) -> bool {
         self.connection_generation(port_id) == Some(generation)
     }
-    /// 打开串口（按 `PortKind` 分派；虚拟端口先过能力门控）。
+    /// 打开串口（按 `PortKind` 分派；虚拟端口先过能力门控）。各端口 opener
+    /// 在注册句柄后使用不重新获取 `serial_manager` 的状态派发路径；不能在
+    /// `emit_status_if_current` 中从管理器锁内递归获取同一把锁。
     ///
     /// 锁内执行：不枚举端口、不 join 读线程（两者都是阻塞操作）。需要这两种操作的
     /// 完整打开流程见 `open_blocking`。

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 use super::codec::{build_tx_bytes, TxOutcome};
-use super::{emit_rx_event, emit_status_if_current, PortInfo, PortStatus, SerialManager};
+use super::{emit_rx_event, emit_status, emit_status_if_current, PortInfo, PortStatus, SerialManager};
 use crate::commands::OpenPortArgs;
 
 /// 模拟串口的端口 id
@@ -106,7 +106,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
             read_thread: Some(read_thread),
         },
     );
-    emit_status_if_current(&app_handle, &port_id, PortStatus::Connected, generation);
+    emit_status(&app_handle, &port_id, PortStatus::Connected);
     ready.store(true, Ordering::Release);
     log::info!("Sim port opened: {}", port_id);
     Ok(())
