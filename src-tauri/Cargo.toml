@@ -1,6 +1,6 @@
 [package]
 name = "hypercom"
-version = "1.0.0-preview.2"
+version = "1.0.0-preview.3"
 description = "A modern serial port debugging tool built with Tauri"
 authors = ["you"]
 edition = "2021"
