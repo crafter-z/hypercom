@@ -40,7 +40,7 @@ describe('parseLogLine', () => {
 });
 
 describe('parseLogContent', () => {
-  it('parses multiple lines in order, skipping invalid ones', () => {
+  it('parses multiple lines in order and keeps unformatted lines as RX', () => {
     const content = [
       '[2026-07-21 22:30:15.000] TX AT',
       'corrupted line without format',
@@ -49,10 +49,23 @@ describe('parseLogContent', () => {
       '[2026-07-21 22:30:15.200] RX DONE',
     ].join('\n');
     const lines = parseLogContent(content);
-    expect(lines).toHaveLength(3);
+    expect(lines).toHaveLength(4);
     expect(lines[0].content).toBe('AT');
-    expect(lines[1].content).toBe('OK');
-    expect(lines[2].content).toBe('DONE');
+    expect(lines[1]).toMatchObject({ time: 0, direction: 'RX', content: 'corrupted line without format' });
+    expect(lines[2].content).toBe('OK');
+    expect(lines[3].content).toBe('DONE');
+  });
+
+  it('parses logs without direction or timestamp prefixes', () => {
+    const content = [
+      '[2026-07-21 22:30:15.000] hello',
+      'RX world',
+      'plain bytes',
+    ].join('\n');
+    const lines = parseLogContent(content);
+    expect(lines[0]).toMatchObject({ direction: 'RX', content: 'hello' });
+    expect(lines[1]).toMatchObject({ time: 0, direction: 'RX', content: 'world' });
+    expect(lines[2]).toMatchObject({ time: 0, direction: 'RX', content: 'plain bytes' });
   });
 
   it('handles CRLF line endings', () => {

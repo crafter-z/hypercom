@@ -1,6 +1,6 @@
 use serde::Serialize;
-use tauri::State;
 use sysinfo::ProcessRefreshKind;
+use tauri::State;
 
 use super::CommandError;
 use crate::AppState;
@@ -107,7 +107,8 @@ pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatu
                     ProcessRefreshKind::nothing().with_memory().with_cpu(),
                 );
                 system.refresh_cpu_all();
-                let app_pids = collect_app_pids(sysinfo::get_current_pid().ok(), system.processes());
+                let app_pids =
+                    collect_app_pids(sysinfo::get_current_pid().ok(), system.processes());
                 let app_memory_bytes: u64 = system
                     .processes()
                     .iter()
@@ -122,16 +123,16 @@ pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatu
                     total / system.cpus().len() as f32
                 };
 
-                (memory_used_mb(app_memory_bytes), cpu_usage)
+                Ok((memory_used_mb(app_memory_bytes), cpu_usage))
             }
             Err(e) => {
                 log::warn!("system_info lock failed: {e}");
-                (0u64, 0.0f32)
+                Err(CommandError::Lock(e.to_string()))
             }
         }
     })
     .await
-    .map_err(|e| CommandError::Other(format!("System status task panicked: {e}")))?;
+    .map_err(|e| CommandError::Other(format!("System status task panicked: {e}")))??;
 
     let status = load_status(cpu_usage).to_string();
 

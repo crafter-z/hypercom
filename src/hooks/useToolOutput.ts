@@ -11,9 +11,12 @@ import i18n from '../i18n';
  * 必须在 App.tsx 挂载一次（与 useSerialReceive 同级）。
  */
 let toolOutputReady: Promise<void> = Promise.resolve();
+/** Registration is retried; if it ultimately fails, tool runs must fail loudly
+ *  instead of silently dropping every output/exit event. */
+let toolOutputError: unknown = null;
 
 export function waitForToolOutputListener(): Promise<void> {
-  return toolOutputReady;
+  return toolOutputError === null ? toolOutputReady : Promise.reject(toolOutputError);
 }
 
 export function useToolOutput() {
@@ -62,10 +65,27 @@ export function useToolOutput() {
       cleanups.push(unlistenExit);
     };
 
-    toolOutputReady = setup().then(() => undefined).catch((e) => {
-      cleanups.splice(0).forEach((fn) => fn());
-      console.error('[useToolOutput] Failed to subscribe to tool events:', e);
-    });
+    const setupWithRetry = async (): Promise<void> => {
+      let delayMs = 250;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (cancelled) return;
+        try {
+          await setup();
+          toolOutputError = null;
+          return;
+        } catch (e) {
+          cleanups.splice(0).forEach((fn) => fn());
+          if (attempt === 4) {
+            toolOutputError = e;
+            console.error('[useToolOutput] Failed to subscribe to tool events:', e);
+            return;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          delayMs = Math.min(delayMs * 2, 4000);
+        }
+      }
+    };
+    toolOutputReady = setupWithRetry();
 
     return () => {
       cancelled = true;

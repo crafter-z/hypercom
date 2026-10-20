@@ -108,7 +108,7 @@ fn upsert<T: Entity>(items: &mut Vec<T>, args: T) -> String {
 }
 
 fn save_entity<T: Entity>(
-    state: State<AppState>,
+    state: State<'_, AppState>,
     args: T,
     select: fn(&mut config::AppConfig) -> &mut Vec<T>,
 ) -> Result<String, CommandError> {
@@ -116,7 +116,7 @@ fn save_entity<T: Entity>(
 }
 
 fn delete_entity<T: Entity>(
-    state: State<AppState>,
+    state: State<'_, AppState>,
     id: &str,
     select: fn(&mut config::AppConfig) -> &mut Vec<T>,
 ) -> Result<(), CommandError> {
@@ -131,126 +131,126 @@ fn delete_by_id<T: Entity>(items: &mut Vec<T>, id: &str) {
 // ==================== 命令集 ====================
 
 #[tauri::command]
-pub fn save_command_set(
+pub async fn save_command_set(
     args: config::SendCommandSetEntry,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
-    save_entity(state, args, command_sets)
+    tokio::task::block_in_place(|| save_entity(state, args, command_sets))
 }
 
 #[tauri::command]
 pub fn load_command_sets(
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<config::SendCommandSetEntry>, CommandError> {
     read_config(&state, |cfg| cfg.entities.send_command_sets.clone())
 }
 
 #[tauri::command]
-pub fn delete_command_set(
+pub async fn delete_command_set(
     set_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_entity(state, &set_id, command_sets)
+    tokio::task::block_in_place(|| delete_entity(state, &set_id, command_sets))
 }
 
 // ==================== 高亮规则集 ====================
 
 #[tauri::command]
-pub fn save_highlight_set(
+pub async fn save_highlight_set(
     args: config::HighlightRuleSetEntry,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
-    save_entity(state, args, highlight_sets)
+    tokio::task::block_in_place(|| save_entity(state, args, highlight_sets))
 }
 
 #[tauri::command]
 pub fn load_highlight_sets(
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<config::HighlightRuleSetEntry>, CommandError> {
     read_config(&state, |cfg| cfg.entities.highlight_rule_sets.clone())
 }
 
 #[tauri::command]
-pub fn delete_highlight_set(
+pub async fn delete_highlight_set(
     set_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_entity(state, &set_id, highlight_sets)
+    tokio::task::block_in_place(|| delete_entity(state, &set_id, highlight_sets))
 }
 
 // ==================== 协议模板 ====================
 
 #[tauri::command]
-pub fn save_protocol_template(
+pub async fn save_protocol_template(
     args: config::ProtocolTemplateEntry,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
-    save_entity(state, args, protocol_templates)
+    tokio::task::block_in_place(|| save_entity(state, args, protocol_templates))
 }
 
 #[tauri::command]
 pub fn load_protocol_templates(
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<config::ProtocolTemplateEntry>, CommandError> {
     read_config(&state, |cfg| cfg.entities.protocol_templates.clone())
 }
 
 #[tauri::command]
-pub fn delete_protocol_template(
+pub async fn delete_protocol_template(
     set_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_entity(state, &set_id, protocol_templates)
+    tokio::task::block_in_place(|| delete_entity(state, &set_id, protocol_templates))
 }
 
 // ==================== 端口参数预设 ====================
 
 #[tauri::command]
-pub fn save_port_preset(
+pub async fn save_port_preset(
     args: config::PortPresetEntry,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
-    save_entity(state, args, port_presets)
+    tokio::task::block_in_place(|| save_entity(state, args, port_presets))
 }
 
 #[tauri::command]
 pub fn load_port_presets(
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<config::PortPresetEntry>, CommandError> {
     read_config(&state, |cfg| cfg.entities.port_presets.clone())
 }
 
 #[tauri::command]
-pub fn delete_port_preset(
+pub async fn delete_port_preset(
     preset_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_entity(state, &preset_id, port_presets)
+    tokio::task::block_in_place(|| delete_entity(state, &preset_id, port_presets))
 }
 
 // ==================== 外部工具配置 ====================
 
 #[tauri::command]
-pub fn save_port_tool_config(
+pub async fn save_port_tool_config(
     args: config::PortToolConfigEntry,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
-    save_entity(state, args, port_tool_configs)
+    tokio::task::block_in_place(|| save_entity(state, args, port_tool_configs))
 }
 
 #[tauri::command]
 pub fn load_port_tool_configs(
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<config::PortToolConfigEntry>, CommandError> {
     read_config(&state, |cfg| cfg.entities.port_tool_configs.clone())
 }
 
 #[tauri::command]
-pub fn delete_port_tool_config(
+pub async fn delete_port_tool_config(
     config_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_entity(state, &config_id, port_tool_configs)
+    tokio::task::block_in_place(|| delete_entity(state, &config_id, port_tool_configs))
 }
 
 // ==================== 串口分组 / 串口元数据 ====================
@@ -260,46 +260,46 @@ pub fn delete_port_tool_config(
 /// 拖拽成员）后防抖发送完整列表，这里一次替换并落盘。读取不需要专门命令——
 /// `get_config` 已随 `AppConfig.entities.port_groups` 返回。
 #[tauri::command]
-pub fn save_port_groups(
+pub async fn save_port_groups(
     args: Vec<config::PortGroupEntry>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_config(&state, |cfg| cfg.entities.port_groups = args)
+    tokio::task::block_in_place(|| mutate_config(&state, |cfg| cfg.entities.port_groups = args))
 }
 
 /// 整体替换保存全部串口元数据（备注名 / 隐藏状态 / 工作模式，issue #4-9）。
 /// 与 `save_port_groups` 同款整体替换语义。读取走 `AppConfig.entities.port_meta`。
 #[tauri::command]
-pub fn save_port_meta(
+pub async fn save_port_meta(
     args: Vec<config::PortMetaEntry>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_config(&state, |cfg| cfg.entities.port_meta = args)
+    tokio::task::block_in_place(|| mutate_config(&state, |cfg| cfg.entities.port_meta = args))
 }
 
 // ==================== 条件触发规则 ====================
 
 #[tauri::command]
-pub fn save_trigger_rule(
+pub async fn save_trigger_rule(
     args: config::TriggerRuleEntry,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
-    save_entity(state, args, trigger_rules)
+    tokio::task::block_in_place(|| save_entity(state, args, trigger_rules))
 }
 
 #[tauri::command]
 pub fn load_trigger_rules(
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<config::TriggerRuleEntry>, CommandError> {
     read_config(&state, |cfg| cfg.entities.trigger_rules.clone())
 }
 
 #[tauri::command]
-pub fn delete_trigger_rule(
+pub async fn delete_trigger_rule(
     rule_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    delete_entity(state, &rule_id, trigger_rules)
+    tokio::task::block_in_place(|| delete_entity(state, &rule_id, trigger_rules))
 }
 
 #[cfg(test)]

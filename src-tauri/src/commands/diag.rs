@@ -20,10 +20,7 @@ pub fn get_diag_log_path(state: State<AppState>) -> Result<String, CommandError>
 
 /// 读取最近 `limit` 行诊断日志（缺省 2000）。
 #[tauri::command]
-pub fn read_diag_log(
-    state: State<AppState>,
-    limit: Option<usize>,
-) -> Result<String, CommandError> {
+pub fn read_diag_log(state: State<AppState>, limit: Option<usize>) -> Result<String, CommandError> {
     let limit = limit.unwrap_or(2000).clamp(100, 20000);
     Ok(state.diag_logger.read(limit))
 }
@@ -41,10 +38,25 @@ pub fn append_diag_log(
     state: State<AppState>,
     entries: Vec<DiagLogEntry>,
 ) -> Result<(), CommandError> {
-    for entry in &entries {
+    // Bound one forwarded batch and strip embedded line breaks: a single
+    // console call must not forge multiple log lines or flood the 512 KiB
+    // rotating window.
+    const MAX_ENTRIES: usize = 256;
+    const MAX_MESSAGE_CHARS: usize = 8192;
+    for entry in entries.iter().take(MAX_ENTRIES) {
+        let clean = |value: &str, max: usize| -> String {
+            value
+                .chars()
+                .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+                .take(max)
+                .collect()
+        };
+        let timestamp = clean(&entry.timestamp, 64);
+        let level = clean(&entry.level, 16);
+        let message = clean(&entry.message, MAX_MESSAGE_CHARS);
         state
             .diag_logger
-            .append_external(&entry.timestamp, &entry.level, &entry.message);
+            .append_external(&timestamp, &level, &message);
     }
     Ok(())
 }

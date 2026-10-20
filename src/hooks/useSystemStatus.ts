@@ -9,9 +9,13 @@ export function useSystemStatus(pollIntervalMs: number = 5000) {
   const setSystemStatus = useSystemStore((s) => s.setSystemStatus);
 
   useEffect(() => {
+    let requestId = 0;
     const poll = async () => {
+      const id = ++requestId;
       try {
         const status = await systemService.getSystemStatus();
+        // A slow earlier poll must not overwrite the result of a newer one.
+        if (id !== requestId) return;
         setSystemStatus({
           status: status.status,
           memoryUsedMb: status.memoryUsedMb,
@@ -24,6 +28,9 @@ export function useSystemStatus(pollIntervalMs: number = 5000) {
 
     poll();
     const timer = setInterval(poll, pollIntervalMs);
-    return () => clearInterval(timer);
+    return () => {
+      requestId++;
+      clearInterval(timer);
+    };
   }, [setSystemStatus, pollIntervalMs]);
 }

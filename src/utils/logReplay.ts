@@ -24,12 +24,40 @@ export function parseLogLine(line: string): ParsedLogLine | null {
   return { time, direction: m[2] as 'RX' | 'TX', content: m[3] };
 }
 
-/** 解析整段日志内容，按原顺序返回有效日志行（跳过无法解析的行） */
+/** 解析整段日志内容，按原顺序返回日志行。
+ *
+ * 日志前缀的 时间戳/方向 是可选开关（`logIncludeTimestamp` /
+ * `logIncludeDirection`），所以除了严格格式，还要接受：
+ * - `[时间] 内容`（无方向 → RX）
+ * - `RX 内容`（无时间戳 → time 0）
+ * - 纯内容（binary/无前缀 → RX，time 0）
+ * 未格式化的续行不再被整体丢弃（旧实现遇到关闭前缀的日志会一行都回放不出来）。
+ */
 export function parseLogContent(content: string): ParsedLogLine[] {
   const result: ParsedLogLine[] = [];
+  const timestampOnly = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s?(.*)$/;
+  const directionOnly = /^(RX|TX)\s(.*)$/;
   for (const line of content.split(/\r?\n/)) {
-    const parsed = parseLogLine(line);
-    if (parsed) result.push(parsed);
+    if (line.length === 0) continue;
+    const strict = parseLogLine(line);
+    if (strict) {
+      result.push(strict);
+      continue;
+    }
+    const timestamp = timestampOnly.exec(line);
+    if (timestamp) {
+      const time = new Date(timestamp[1].replace(' ', 'T')).getTime();
+      if (!Number.isNaN(time)) {
+        result.push({ time, direction: 'RX', content: timestamp[2] });
+        continue;
+      }
+    }
+    const direction = directionOnly.exec(line);
+    if (direction) {
+      result.push({ time: 0, direction: direction[1] as 'RX' | 'TX', content: direction[2] });
+      continue;
+    }
+    result.push({ time: 0, direction: 'RX', content: line });
   }
   return result;
 }

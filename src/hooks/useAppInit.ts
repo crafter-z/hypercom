@@ -121,13 +121,33 @@ export function useAppInit() {
   // 保留离线端口元数据，并与全量保存串行化，避免旧写入覆盖较新的清空操作。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let retryId: ReturnType<typeof setTimeout> | null = null;
+    let pendingSignature: string | null = null;
+    const capture = () => {
+      const ports = useAppStore.getState().ports;
+      return { entries: collectPortMeta(ports), presentIds: ports.map((port) => port.id) };
+    };
     // 签名只包含在线端口的元数据；端口移除也触发保存，但不会删除其后端条目。
     const computeSignature = () => JSON.stringify(collectPortMeta(useAppStore.getState().ports));
     let lastSignature = computeSignature();
-    // Cleanup 若仍有待触发防抖，同样将最新端口状态排入写队列。
+    // Cleanup 若仍有待触发防抖，同样将最新端口状态排入写队列。签名只在
+    // 保存成功后推进：瞬时失败会保留脏状态并在 2s 后重试，而不是永久丢弃。
     const flushMeta = () => {
-      saveCurrentPortMeta().catch((e) => {
+      if (retryId !== null) {
+        clearTimeout(retryId);
+        retryId = null;
+      }
+      const signature = pendingSignature ?? computeSignature();
+      const snapshot = capture();
+      saveCurrentPortMeta(snapshot).then(() => {
+        lastSignature = signature;
+        if (pendingSignature === signature) pendingSignature = null;
+      }).catch((e) => {
         console.warn('[useAppInit] Failed to auto-save port meta:', e);
+        retryId = setTimeout(() => {
+          retryId = null;
+          if (pendingSignature !== null) flushMeta();
+        }, 2000);
       });
     };
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
@@ -137,7 +157,7 @@ export function useAppInit() {
       if (state.ports === prevState.ports) return;
       const sig = computeSignature();
       if (sig === lastSignature) return;
-      lastSignature = sig;
+      pendingSignature = sig;
       if (timeoutId !== null) clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
         timeoutId = null;
@@ -146,10 +166,9 @@ export function useAppInit() {
     });
     return () => {
       unsubscribe();
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-        flushMeta();
-      }
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (retryId !== null) clearTimeout(retryId);
+      if (pendingSignature !== null) flushMeta();
     };
   }, []);
 }

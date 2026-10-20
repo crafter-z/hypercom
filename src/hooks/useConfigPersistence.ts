@@ -5,7 +5,7 @@ import { useSystemStore } from '../stores/useSystemStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
-import { commitUpdateMode } from '../utils/updateService';
+import { commitUpdateMode, getCommittedUpdateMode } from '../utils/updateService';
 
 /**
  * 端口备注名 / 隐藏状态 / tty 模式 → config.portMeta 条目。
@@ -38,13 +38,22 @@ function enqueueConfigWrite<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /** Auto-save only the metadata while preserving backend-owned config fields.
- * The backend's revision check retries if another writer commits in flight. */
-export function saveCurrentPortMeta(): Promise<void> {
+ * The backend's revision check retries if another writer commits in flight.
+ * `snapshot` lets the debounced caller capture the edit-time state: a port
+ * unplugged inside the debounce window must not drop its just-edited metadata. */
+export function saveCurrentPortMeta(
+  snapshot?: { entries: PortMetaEntry[]; presentIds: string[] },
+): Promise<void> {
   return enqueueConfigWrite(async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       const persisted = await configService.getConfig();
       if (persisted.revision === undefined) throw new Error('Backend config revision is missing');
-      const portMeta = mergePortMeta(useAppStore.getState().ports, persisted.portMeta);
+      const current = snapshot ?? {
+        entries: collectPortMeta(useAppStore.getState().ports),
+        presentIds: useAppStore.getState().ports.map((port) => port.id),
+      };
+      const present = new Set(current.presentIds);
+      const portMeta = [...persisted.portMeta.filter((entry) => !present.has(entry.portId)), ...current.entries];
       if (await configService.setConfig({ ...persisted, portMeta }, false, persisted.revision)) return;
     }
     throw new Error('Config changed during port metadata save; please try again');
@@ -155,7 +164,12 @@ export function useConfigPersistence() {
             if (live.triggerRules === rules.triggerRules) live.setTriggerRules(entities.triggerRules);
             if (live.portToolConfigs === rules.portToolConfigs) live.setPortToolConfigs(entities.portToolConfigs);
           }
-          commitUpdateMode(candidate.updateCheckMode, true);
+          // Only a real channel change may invalidate in-flight update checks;
+          // bumping the generation on every unrelated settings save silently
+          // discarded an available update found at the same moment.
+          if (candidate.updateCheckMode !== getCommittedUpdateMode()) {
+            commitUpdateMode(candidate.updateCheckMode, true);
+          }
           return true;
         }
       }

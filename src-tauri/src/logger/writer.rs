@@ -250,7 +250,10 @@ impl PortLogWriter {
             .rx_pending_since
             .map(|since| since.elapsed() >= RX_TAIL_SILENCE_FLUSH)
             .unwrap_or(false);
-        if stale {
+        // A multi-byte character split across RX events with a long gap must
+        // not be flushed as a lossy partial line; keep the tail pending for the
+        // next event (or the final close flush).
+        if stale && !self.assembler.has_incomplete_character() {
             self.rx_pending_since = None;
             if let Some(tail) = self.assembler.take_tail() {
                 self.write_line(timestamp, "RX", &tail)?;
@@ -345,6 +348,28 @@ mod tests {
         writer.write_line("10:00:00", "TX", &vec![b'x'; 1024 * 1024]).unwrap();
         assert!(writer.should_split(1));
         assert!(writer.needs_split(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_tail_defers_flushing_an_incomplete_multibyte_character() {
+        let dir = test_dir("stale_multibyte");
+        let mut writer = PortLogWriter::open(&spec(), &dir, "COM1", false).unwrap();
+        // First two bytes of "中" (E4 B8 AD), then a >250ms gap.
+        assert!(writer.feed_rx(&[0xE4, 0xB8]).is_empty());
+        writer.update_rx_pending_since();
+        writer.rx_pending_since = Some(Instant::now() - Duration::from_millis(300));
+        writer.flush_stale_rx_tail("10:00:00").unwrap();
+        assert!(writer.assembler.has_pending());
+        assert!(writer.assembler.has_incomplete_character());
+
+        // Continuation byte completes the character; the next stale flush writes it.
+        assert!(writer.feed_rx(&[0xAD]).is_empty());
+        writer.rx_pending_since = Some(Instant::now() - Duration::from_millis(300));
+        writer.flush_stale_rx_tail("10:00:01").unwrap();
+        writer.flush_and_sync().unwrap();
+        let content = std::fs::read_to_string(writer.file_path()).unwrap();
+        assert!(content.contains('中'), "{content}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

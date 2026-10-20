@@ -186,30 +186,50 @@ impl LogManager {
             force_new_file,
         )?;
         let path = writer.file_path().to_path_buf();
-        self.register_path(path.clone(), port_id);
 
-        // Keep the old writer registered until its final flush succeeds.  Holding the
+        // Keep the old writer registered until its final flush succeeds. Holding the
         // writers-table lock across this short finalization also prevents a concurrent
-        // write or replacement from racing the ownership transition.
+        // close from removing the old handle between our read and replacement.
         let mut writers = lock_mutex(&self.writers);
-        if let Some(old_handle) = writers.get(port_id).cloned() {
+        let old_path_and_size = if let Some(old_handle) = writers.get(port_id).cloned() {
             let mut old = lock_mutex(&old_handle);
             let old_path = old.file_path().to_path_buf();
             let now = chrono::Local::now()
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string();
-            old.flush_rx_tail(&now)?;
+            if let Err(error) = old.flush_rx_tail(&now).and_then(|()| old.flush_and_sync()) {
+                drop(old);
+                // The replacement never became authoritative: delete the newly
+                // allocated empty file instead of leaving a phantom in list_files.
+                drop(writers);
+                drop(writer);
+                let _ = fs::remove_file(&path);
+                return Err(error.into());
+            }
             let old_size = old.current_size();
-            old.flush_and_sync()?;
             drop(old);
             writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
-            drop(writers);
+            Some((old_path, old_size))
+        } else {
+            writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
+            None
+        };
+        drop(writers);
+        // A concurrent directory change after the settings snapshot would leave
+        // this writer in the old root while get_directory() reports the new one.
+        if self.settings().directory != settings.directory {
+            let _ = self.close_writer(port_id);
+            let _ = fs::remove_file(&path);
+            return Err(anyhow::anyhow!(
+                "log directory changed while creating writer for {port_id}"
+            ));
+        }
+        self.register_path(path.clone(), port_id);
+        if let Some((old_path, old_size)) = old_path_and_size {
             // Append mode may reopen the same empty file; it is still owned by the new writer.
             if old_path != path {
                 self.retire_path(old_path, port_id, old_size);
             }
-        } else {
-            writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
         }
         log::info!("Log writer created for {port_id} at {path:?} (encoding={encoding})");
         Ok(())
@@ -328,6 +348,38 @@ impl LogManager {
         Ok(())
     }
 
+    /// Panic-path flush: never block on a lock the panicking thread may already
+    /// hold (the hook runs before unwinding releases guards). Skip such writers
+    /// instead of self-deadlocking the crash report.
+    pub fn flush_all_best_effort(&self) {
+        let handles: Vec<(String, Arc<Mutex<PortLogWriter>>)> = match self.writers.try_lock() {
+            Ok(writers) => writers
+                .iter()
+                .map(|(id, handle)| (id.clone(), Arc::clone(handle)))
+                .collect(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned
+                .into_inner()
+                .iter()
+                .map(|(id, handle)| (id.clone(), Arc::clone(handle)))
+                .collect(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                log::warn!("Panic flush skipped: log writer table is locked");
+                return;
+            }
+        };
+        for (port_id, handle) in handles {
+            let Ok(mut writer) = handle.try_lock() else {
+                log::warn!("Panic flush skipped busy writer for {port_id}");
+                continue;
+            };
+            let now = chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string();
+            let _ = writer.flush_rx_tail(&now);
+            let _ = writer.flush_and_sync();
+        }
+    }
+
     /// 关闭串口日志。writer 只有在 RX 尾部与最终 flush/sync 全部成功后才从
     /// registry 移除；失败时保持所有权，使调用方可以重试而后续写入不丢失。
     pub fn close_writer(&self, port_id: &str) -> anyhow::Result<()> {
@@ -407,6 +459,18 @@ impl LogManager {
     /// 尾部（拷贝的是「flush 那一刻之后 + 拷贝期间新增」的近似快照），这是可接受的：
     /// 阻塞落盘比多几行尾部数据严重得多。
     pub fn save_log_as(&self, port_id: &str, target_path: &str) -> anyhow::Result<()> {
+        let copy_to_target = |source: &Path| -> anyhow::Result<()> {
+            let source_canon = source.canonicalize()?;
+            // Copying a file onto itself truncates it before the copy reads it
+            // (Unix O_TRUNC), destroying the active log.
+            if let Ok(target_canon) = Path::new(target_path).canonicalize() {
+                if source_canon == target_canon {
+                    anyhow::bail!("Cannot save a log onto itself: {}", target_path);
+                }
+            }
+            fs::copy(source, target_path)?;
+            Ok(())
+        };
         if let Some(handle) = self.writer_handle(port_id) {
             let source = {
                 let mut writer = lock_mutex(&handle);
@@ -417,7 +481,7 @@ impl LogManager {
                 writer.flush_and_sync()?;
                 writer.file_path().to_path_buf()
             };
-            fs::copy(&source, target_path)?;
+            copy_to_target(&source)?;
             log::info!("Log saved from {source:?} to {target_path}");
             return Ok(());
         }
@@ -433,7 +497,7 @@ impl LogManager {
                 "No log file found for port '{port_id}'. Connect the port with auto-save logging enabled first."
             );
         };
-        fs::copy(&file_info.path, target_path)?;
+        copy_to_target(Path::new(&file_info.path))?;
         log::info!(
             "Log saved (fallback, no active writer) from {} to {target_path}",
             file_info.path
@@ -494,9 +558,24 @@ fn collect_log_files(
         }
     };
     for entry in entries {
-        let entry = entry?;
+        // Rotation/close may remove an entry between read_dir and metadata;
+        // skipping it keeps the rest of the listing usable.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::warn!("Failed to read log directory entry in {dir:?}: {e}");
+                continue;
+            }
+        };
         let path = entry.path();
-        let metadata = entry.metadata()?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                log::warn!("Failed to stat log entry {path:?}: {e}");
+                continue;
+            }
+        };
         if metadata.is_dir() {
             collect_log_files(&path, depth + 1, known, files)?;
         } else if metadata.is_file() {
@@ -1047,6 +1126,27 @@ mod tests {
         let target = dir.join("saved.log");
         mgr.save_log_as("COM9", &target.to_string_lossy()).unwrap();
         assert!(target.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_log_as_rejects_copying_the_active_file_onto_itself() {
+        let dir = test_dir("save_self");
+        let mgr = LogManager::for_test(&dir);
+        open_writer(&mgr, "COM9", "string");
+        mgr.write("COM9", "10:00:00", "RX", b"keep me").unwrap();
+        let source = mgr
+            .list_files()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.port_id == "COM9")
+            .expect("active log listed")
+            .path;
+        mgr.flush_all().unwrap();
+        let before = fs::read(&source).unwrap();
+        assert!(!before.is_empty());
+        assert!(mgr.save_log_as("COM9", &source).is_err());
+        assert_eq!(fs::read(&source).unwrap(), before);
         let _ = fs::remove_dir_all(&dir);
     }
 

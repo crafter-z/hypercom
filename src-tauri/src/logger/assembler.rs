@@ -134,6 +134,11 @@ impl LogLineAssembler {
         !self.pending.is_empty()
     }
 
+    /// 尾部是否停在一个未完成的多字节字符中间（静默冲刷需再等一拍）。
+    pub(super) fn has_incomplete_character(&self) -> bool {
+        self.character_bytes_remaining > 0
+    }
+
     fn track_character(&mut self, byte: u8) {
         match self.encoding {
             CharacterEncoding::SingleByte => {},

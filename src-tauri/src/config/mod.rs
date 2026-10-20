@@ -811,9 +811,24 @@ impl ConfigManager {
         let result = (|| -> anyhow::Result<()> {
             let content = serde_json::to_string_pretty(&self.config)?;
             // Never replace a usable recovery backup with the corrupt primary we loaded around.
+            // Copy through a unique temp + atomic replace: a failed/partial copy
+            // must not destroy the only good backup.
             if self.primary_valid && self.config_path.exists() {
                 let bak_path = self.config_path.with_extension("json.bak");
-                let _ = fs::copy(&self.config_path, &bak_path);
+                let temp = self.config_path.with_extension(format!(
+                    "{}.bak.tmp",
+                    uuid::Uuid::new_v4()
+                ));
+                let backup = (|| -> anyhow::Result<()> {
+                    fs::copy(&self.config_path, &temp)?;
+                    fs::OpenOptions::new().write(true).open(&temp)?.sync_all()?;
+                    crate::plugin::transaction::replace_file(&temp, &bak_path)?;
+                    Ok(())
+                })();
+                if let Err(error) = backup {
+                    let _ = fs::remove_file(&temp);
+                    return Err(error);
+                }
             }
             let tmp_path = self.config_path.with_extension("json.tmp");
             {

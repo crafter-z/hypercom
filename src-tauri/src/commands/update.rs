@@ -305,8 +305,14 @@ pub async fn check_for_update(
         }
         "preview" => {
             let preview_result = async {
-                let endpoint = preview_endpoint(&network).await?;
-                check_endpoint(&app, endpoint, &network).await
+                match preview_endpoint(&network).await {
+                    Ok(endpoint) => check_endpoint(&app, endpoint, &network).await,
+                    // "No preview release exists" is a healthy up-to-date state,
+                    // not a transport failure: fall through to the stable check
+                    // instead of reporting an error on every manual check.
+                    Err(e) if e.to_string().contains("no preview release found") => Ok(None),
+                    Err(e) => Err(e),
+                }
             }
             .await;
             let stable_result = check_endpoint(&app, stable_endpoint()?, &network).await;
