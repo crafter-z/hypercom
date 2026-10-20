@@ -116,7 +116,11 @@ function sendOrdered(
     if (generation !== state.txGeneration) return 0;
     beforeSend?.();
     const bytesWritten = await serialService.sendSerialData({
-      portId, data, isHex, appendLineEnding: lineEnding,
+      portId,
+      data,
+      isHex,
+      appendLineEnding: lineEnding,
+      expectedGeneration: useAppStore.getState().ports.find((port) => port.id === portId)?.connectionGeneration,
     });
     trafficStats.addTx(portId, bytesWritten, lease);
     return bytesWritten;

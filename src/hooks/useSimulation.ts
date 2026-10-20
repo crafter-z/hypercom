@@ -1,9 +1,8 @@
-import { useCallback } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { useCallback, useRef } from 'react';
 import { useSystemStore } from '../stores/useSystemStore';
 import { serialService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
-import { mapPortInfo, mergePorts } from './useSerialPorts';
+import { useSerialPorts } from './useSerialPorts';
 import { DEV_FEATURES_ENABLED } from '../utils/devMode';
 
 /**
@@ -19,9 +18,12 @@ import { DEV_FEATURES_ENABLED } from '../utils/devMode';
 export function useSimulation() {
   const simulationMode = useSystemStore((s) => s.simulationMode);
   const setSimulationMode = useSystemStore((s) => s.setSimulationMode);
+  const { refreshPorts } = useSerialPorts(0);
+  const inFlightRef = useRef(false);
 
   const toggleSimulation = useCallback(async () => {
-    if (!DEV_FEATURES_ENABLED) return;
+    if (!DEV_FEATURES_ENABLED || inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       if (simulationMode) {
         await serialService.disableSimulation();
@@ -30,15 +32,16 @@ export function useSimulation() {
         await serialService.enableSimulation();
         setSimulationMode(true);
       }
-      // 刷新串口列表以显示/隐藏模拟串口
-      const list = await serialService.listAvailablePorts();
-      const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
-      useAppStore.getState().setPorts(merged);
+      // Refresh through the shared request sequence so an earlier poll cannot
+      // resolve later and drop the just-enabled virtual port.
+      await refreshPorts();
     } catch (err) {
       console.error('[useSimulation] Failed to toggle simulation:', err);
       notifyError(err);
+    } finally {
+      inFlightRef.current = false;
     }
-  }, [simulationMode, setSimulationMode]);
+  }, [simulationMode, setSimulationMode, refreshPorts]);
 
   return { simulationMode, toggleSimulation };
 }

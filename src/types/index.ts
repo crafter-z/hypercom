@@ -42,6 +42,8 @@ export interface SerialPort {
   // 端口工作模式：trx=传统收发 | tty=终端模式（issue #11）
   mode?: PortMode;
   displayView?: PluginViewPreference | null;
+  /** Backend connection identity from the last connected status event. */
+  connectionGeneration?: number;
 }
 
 /** 数据位 */

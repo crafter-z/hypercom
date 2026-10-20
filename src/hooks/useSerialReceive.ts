@@ -243,7 +243,19 @@ export function useSerialReceive() {
       cleanups.push(unlistenData);
 
       const unlistenStatus = await eventService.onSerialStatus((event: SerialStatusEvent) => {
-        if (cancelled || !acceptSerialStatus(event.port_id, event.status)) return;
+        if (cancelled) return;
+        // Ignore a terminal status from an older session that raced a reopen.
+        const knownGeneration = useAppStore
+          .getState()
+          .ports.find((port) => port.id === event.port_id)?.connectionGeneration;
+        if (
+          knownGeneration !== undefined &&
+          event.generation != null &&
+          event.generation < knownGeneration
+        ) {
+          return;
+        }
+        if (!acceptSerialStatus(event.port_id, event.status)) return;
         const statusMap: Record<string, PortStatus> = {
           connected: 'connected',
           disconnected: 'disconnected',
@@ -253,6 +265,9 @@ export function useSerialReceive() {
         // hides as soon as the port is back up.
         if (event.status === 'connected') {
           lostPortIds.delete(event.port_id);
+          useAppStore.getState().updatePort(event.port_id, {
+            connectionGeneration: event.generation ?? undefined,
+          });
           // v0.6.1：连接成功 → 自动打开/激活该端口的标签页（幂等，见上方函数注释）。
           openTabForConnectedPort(event.port_id);
           // issue #11：连接后把 xterm 尺寸再同步一次到后端 pty（覆盖「spawn 后
@@ -285,6 +300,9 @@ export function useSerialReceive() {
         }
         useAppStore.getState().updatePort(event.port_id, {
           status: statusMap[event.status] || 'disconnected',
+          ...(event.status === 'connected'
+            ? { connectionGeneration: event.generation ?? undefined }
+            : { connectionGeneration: undefined }),
         });
         if (event.status === 'disconnected') {
           // TTY（issue #11）：flush 队列、保留 xterm 实例——视图跨重连保持挂载。
@@ -307,13 +325,25 @@ export function useSerialReceive() {
       cleanups.push(unlistenStatus);
     };
 
-    setup().catch((e) => {
-      cleanups.splice(0).forEach((fn) => fn());
-      console.error('[useSerialReceive] Failed to subscribe to serial events:', e);
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const startSetup = (attempt: number): void => {
+      void setup().catch((e) => {
+        cleanups.splice(0).forEach((fn) => fn());
+        console.error('[useSerialReceive] Failed to subscribe to serial events:', e);
+        // Serial events are the app's core input path: a transient listen()
+        // failure must not silence RX for the rest of the session.
+        if (cancelled || attempt >= 4) return;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          startSetup(attempt + 1);
+        }, Math.min(250 * 2 ** attempt, 4000));
+      });
+    };
+    startSetup(0);
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
       cleanups.forEach((fn) => fn());
       unsubscribeApp();
       unsubscribeRules();

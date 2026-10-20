@@ -26,7 +26,7 @@ pub fn enable_simulation(state: State<AppState>) -> Result<(), CommandError> {
 
 /// 禁用模拟模式（关闭所有模拟串口并从列表中移除）
 #[tauri::command]
-pub fn disable_simulation(state: State<AppState>) -> Result<(), CommandError> {
+pub async fn disable_simulation(state: State<'_, AppState>) -> Result<(), CommandError> {
     dev_only("Simulation")?;
 
     let sim_ids: Vec<String> = {

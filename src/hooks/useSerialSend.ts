@@ -157,6 +157,7 @@ export async function sendToPort(
         data,
         isHex,
         appendLineEnding: lineEnding,
+        expectedGeneration: port.connectionGeneration,
       });
 
     // Track TX bytes（P1-1：经 1s 聚合器统一写 store——高频发送/触发自动回复

@@ -44,7 +44,7 @@ enum SimMessage {
 
 pub struct SimPortHandle {
     running: Arc<AtomicBool>,
-    tx: mpsc::Sender<SimMessage>,
+    tx: mpsc::SyncSender<SimMessage>,
     read_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -52,7 +52,7 @@ impl SimPortHandle {
     /// 请求读线程退出（发 Stop 后线程在下一次 100ms 循环退出）。
     pub(super) fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
-        let _ = self.tx.send(SimMessage::Stop);
+        let _ = self.tx.try_send(SimMessage::Stop);
     }
 }
 
@@ -82,7 +82,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     }
     manager.sim_ports.remove(&args.port_id);
 
-    let (tx, rx) = mpsc::channel::<SimMessage>();
+    let (tx, rx) = mpsc::sync_channel::<SimMessage>(1024);
     let running = Arc::new(AtomicBool::new(true));
     let ready = Arc::new(AtomicBool::new(false));
     let generation = manager
@@ -106,7 +106,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
             read_thread: Some(read_thread),
         },
     );
-    emit_status(&app_handle, &port_id, PortStatus::Connected);
+    emit_status(&app_handle, &port_id, PortStatus::Connected, Some(generation));
     ready.store(true, Ordering::Release);
     log::info!("Sim port opened: {}", port_id);
     Ok(())
@@ -147,8 +147,8 @@ pub(super) fn send(
     let swallowed = matches!(&message, SimMessage::SetRate { .. });
     handle
         .tx
-        .send(message)
-        .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
+        .try_send(message)
+        .map_err(|e| anyhow::anyhow!("Sim port input queue is full or closed: {}", e))?;
     Ok(if swallowed {
         TxOutcome::consumed()
     } else {
@@ -173,11 +173,11 @@ pub(super) fn write_raw(
         .join(" ");
     handle
         .tx
-        .send(SimMessage::Echo {
+        .try_send(SimMessage::Echo {
             data: hex_str,
             is_hex: true,
         })
-        .map_err(|e| anyhow::anyhow!("Failed to send to sim port: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Sim port input queue is full or closed: {}", e))?;
     Ok(bytes.len())
 }
 
@@ -204,6 +204,9 @@ fn read_loop(
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(SimMessage::Echo { data, is_hex }) => {
+                if !running.load(Ordering::Acquire) {
+                    break;
+                }
                 let echo_data = if is_hex {
                     format!("[HEX] Received: {}\r\n", data)
                 } else {

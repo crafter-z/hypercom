@@ -19,6 +19,8 @@ export interface SerialDataEvent {
 export interface SerialStatusEvent {
   port_id: string;
   status: string;
+  /** Connection identity (absent from older backends). */
+  generation?: number | null;
 }
 
 /** 串口自动重连提示事件 payload */
@@ -26,12 +28,12 @@ export interface SerialReconnectHintEvent {
   port_name: string;
 }
 
-/** 文件发送进度事件 payload */
+/** 文件发送进度事件 payload（Rust 侧 `#[serde(rename_all = "camelCase")]` → camelCase wire 名）。 */
 export interface FileProgressPayload {
-  port_id: string;
-  transfer_id: string;
-  sent_bytes: number;
-  total_bytes: number;
+  portId: string;
+  transferId: string;
+  sentBytes: number;
+  totalBytes: number;
   done: boolean;
 }
 

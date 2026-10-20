@@ -1,7 +1,6 @@
-import { useCallback, useState } from 'react';
-import { gitBashSimService, serialService } from '../services/tauri';
-import { mapPortInfo, mergePorts } from './useSerialPorts';
-import { useAppStore } from '../stores/useAppStore';
+import { useCallback, useRef, useState } from 'react';
+import { gitBashSimService } from '../services/tauri';
+import { useSerialPorts } from './useSerialPorts';
 import { notifyError } from '../stores/useToastStore';
 import { DEV_FEATURES_ENABLED } from '../utils/devMode';
 
@@ -18,9 +17,12 @@ import { DEV_FEATURES_ENABLED } from '../utils/devMode';
  */
 export function useGitBashSim() {
   const [gitBashMode, setGitBashMode] = useState(false);
+  const { refreshPorts } = useSerialPorts(0);
+  const inFlightRef = useRef(false);
 
   const toggleGitBashSim = useCallback(async () => {
-    if (!DEV_FEATURES_ENABLED) return;
+    if (!DEV_FEATURES_ENABLED || inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       if (gitBashMode) {
         await gitBashSimService.disableGitBashSim();
@@ -29,15 +31,15 @@ export function useGitBashSim() {
         await gitBashSimService.enableGitBashSim();
         setGitBashMode(true);
       }
-      // 刷新串口列表以显示/隐藏 GIT:BASH 虚拟端口
-      const list = await serialService.listAvailablePorts();
-      const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
-      useAppStore.getState().setPorts(merged);
+      // Refresh through the shared request sequence (see useSimulation).
+      await refreshPorts();
     } catch (err) {
       console.error('[useGitBashSim] Failed to toggle git bash sim:', err);
       notifyError(err);
+    } finally {
+      inFlightRef.current = false;
     }
-  }, [gitBashMode]);
+  }, [gitBashMode, refreshPorts]);
 
   return { gitBashMode, toggleGitBashSim };
 }

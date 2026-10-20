@@ -64,7 +64,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     let port_id = args.port_id.clone();
     let ready = handle.ready.clone();
     manager.tty_sim_ports.insert(args.port_id, handle);
-    emit_status(&app_handle, &port_id, PortStatus::Connected);
+    emit_status(&app_handle, &port_id, PortStatus::Connected, Some(generation));
     ready.store(true, Ordering::Release);
     log::info!("TTY sim port opened: {}", port_id);
     Ok(())

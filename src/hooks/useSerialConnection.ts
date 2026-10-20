@@ -49,7 +49,13 @@ function resolveConnectionParams(portId: string) {
 /** 连接成功后的统一副作用；日志由后端连接生命周期管理。 */
 function applyConnectedSideEffects(portId: string): void {
   const params = resolveConnectionParams(portId);
-  useAppStore.getState().updatePort(portId, { status: 'connected', ...params });
+  useAppStore.getState().updatePort(portId, {
+    status: 'connected',
+    // Wait for the connected status event to carry the new generation; a
+    // stale value here would reject an immediate send after reconnect.
+    connectionGeneration: undefined,
+    ...params,
+  });
   useTerminalStore.getState().setTerminalConnectedAt(portId, Date.now());
 }
 
@@ -118,8 +124,10 @@ async function runReconnectLoop(portId: string): Promise<void> {
         if (userClosingPortIds.has(portId)) break;
       }
       let succeeded = false;
+      let opGeneration = -1;
       try {
         await enqueuePortOp(portId, 'reconnect', async (generation) => {
+          opGeneration = generation;
           await serialService.attemptReconnect(portId);
           if (!isCurrentOperation(portId, generation) || userClosingPortIds.has(portId)) return;
           applyConnectedSideEffects(portId);
@@ -127,7 +135,15 @@ async function runReconnectLoop(portId: string): Promise<void> {
           succeeded = true;
         });
       } catch (err) {
-        if (!isCurrentOperation(portId, state.portOps.get(portId)?.generation ?? -1) || userClosingPortIds.has(portId)) break;
+        // Compare against the generation this attempt actually ran with. The
+        // previous check compared the current generation with itself and was
+        // always true, so a manual open/close could not stop the retry loop.
+        if (
+          userClosingPortIds.has(portId) ||
+          opGeneration < 0 ||
+          !isCurrentOperation(portId, opGeneration) ||
+          state.portOps.get(portId)?.intent !== 'reconnect'
+        ) break;
         useToastStore.getState().push({
           severity: 'error',
           messageKey: 'toast.reconnect.failed',
@@ -205,6 +221,12 @@ async function openPort(portId: string): Promise<void> {
   userClosingPortIds.delete(portId);
   lostPortIds.delete(portId);
   await enqueuePortOp(portId, 'open', async (generation) => {
+    const live = useAppStore.getState().ports.find((p) => p.id === portId);
+    // A reconnect attempt may have opened the port after this open was queued;
+    // issuing open_serial_port again would produce "Port ... is already open".
+    if (!live || live.status === 'connected' || live.status === 'connecting') return;
+    // The backend owns the port while an external tool runs (close→spawn→reopen).
+    if (live.toolRunning) return;
     const params = resolveConnectionParams(portId);
     useAppStore.getState().updatePort(portId, { status: 'connecting' });
     const ttyState = ttyService.get(portId);
@@ -223,6 +245,12 @@ async function openPort(portId: string): Promise<void> {
     } catch (err) {
       if (!isCurrentOperation(portId, generation)) return;
       console.error('[useSerialConnection] Failed to open port:', err);
+      // A reconnect (or the backend itself) may have won the race to open the
+      // port. Reflect the live session instead of a sticky error state.
+      if (String(err).includes('is already open')) {
+        applyConnectedSideEffects(portId);
+        return;
+      }
       notifyError(err);
       useAppStore.getState().updatePort(portId, { status: 'error' });
     }

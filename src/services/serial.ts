@@ -38,6 +38,8 @@ export interface SendDataParams {
   isHex: boolean;
   /** 追加的行尾字面量（'None' / '\r\n' / '\n' / '\r'）。 */
   appendLineEnding: string;
+  /** Backend connection identity; rejects a send queued across reconnect. */
+  expectedGeneration?: number;
 }
 
 export const serialService = {
@@ -70,17 +72,19 @@ export const serialService = {
       data: params.data,
       is_hex: params.isHex,
       append_line_ending: params.appendLineEnding,
+      expected_generation: params.expectedGeneration,
     }});
   },
 
   /** 分块发送文件内容，进度经 serial:file_progress 事件推送。 */
-  sendFile: (params: { portId: string; transferId: string; path: string; chunkSize: number; delayMs: number }): Promise<number> => {
+  sendFile: (params: { portId: string; transferId: string; path: string; chunkSize: number; delayMs: number; expectedGeneration?: number }): Promise<number> => {
     return invoke<number>('send_file', { args: {
       port_id: params.portId,
       transfer_id: params.transferId,
       path: params.path,
       chunk_size: params.chunkSize,
       delay_ms: params.delayMs,
+      expected_generation: params.expectedGeneration,
     }});
   },
 

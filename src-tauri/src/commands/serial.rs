@@ -30,7 +30,7 @@ impl SerialWorkState {
         self.active.fetch_add(1, Ordering::AcqRel);
         if self.shutting_down.load(Ordering::Acquire) {
             self.active.fetch_sub(1, Ordering::AcqRel);
-            self.drained.notify_waiters();
+            self.drained.notify_one();
             return None;
         }
         Some(SerialWorkGuard {
@@ -40,7 +40,9 @@ impl SerialWorkState {
 
     fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
-        self.drained.notify_waiters();
+        // `notify_one` stores a permit when no waiter is registered yet; the
+        // shutdown loop can then observe it after checking `active`.
+        self.drained.notify_one();
     }
 }
 
@@ -51,7 +53,7 @@ pub struct SerialWorkGuard {
 impl Drop for SerialWorkGuard {
     fn drop(&mut self) {
         if self.state.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.state.drained.notify_waiters();
+            self.state.drained.notify_one();
         }
     }
 }
@@ -86,10 +88,32 @@ impl Drop for FileSendGuard<'_> {
 
 use tauri::{AppHandle, Emitter, State};
 
+/// Removes a tool reservation on every exit path (including the early `?`
+/// returns between insertion and the final cleanup). Previously those paths
+/// left the port permanently marked as "Tool already running".
+struct ToolReservation<'a> {
+    reservations: &'a std::sync::Mutex<std::collections::HashMap<String, String>>,
+    port_id: String,
+    owner: String,
+}
+
+impl Drop for ToolReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = self.reservations.lock() {
+            if reservations
+                .get(&self.port_id)
+                .is_some_and(|current| current == &self.owner)
+            {
+                reservations.remove(&self.port_id);
+            }
+        }
+    }
+}
+
 use super::CommandError;
 use crate::{serial, AppState};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 /// 获取系统可用串口列表
 /// 前端调用: invoke('list_available_ports')
@@ -213,6 +237,10 @@ pub struct SendDataArgs {
     pub data: String,
     pub is_hex: bool,
     pub append_line_ending: String,
+    /// Connection identity observed by the renderer; a send queued across a
+    /// reconnect is rejected instead of being written into the new session.
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
 }
 
 /// 向串口发送数据（异步非阻塞）。返回实际写入端口的字节数。
@@ -243,12 +271,20 @@ pub async fn send_serial_data(
         data,
         is_hex,
         append_line_ending,
+        expected_generation,
     } = args;
     tokio::task::spawn_blocking(move || {
         let tx = {
             let manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
+            if let Some(expected) = expected_generation {
+                if !manager.connection_matches(&port_id, expected) {
+                    return Err(CommandError::Serial(
+                        "Port connection changed before send".into(),
+                    ));
+                }
+            }
             let kind = serial::PortKind::of(&port_id);
             match kind {
                 serial::PortKind::Real => {
@@ -324,6 +360,8 @@ pub struct SendFileArgs {
     pub chunk_size: usize,
     pub delay_ms: u64,
     pub transfer_id: String,
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
 }
 
 // Register atomically: a second send must not replace the first send's cancellation token.
@@ -408,6 +446,18 @@ pub async fn send_file(
             )));
         }
     };
+    if !metadata.is_file() {
+        let _ = unregister_file_send(
+            &state.file_send_cancel,
+            &args.port_id,
+            &args.transfer_id,
+            &cancel,
+        );
+        return Err(CommandError::Io(format!(
+            "Not a regular file: '{}'",
+            args.path
+        )));
+    }
     if metadata.len() > MAX_FILE_SIZE {
         let _ = unregister_file_send(
             &state.file_send_cancel,
@@ -429,15 +479,37 @@ pub async fn send_file(
                 .serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            manager
+            let generation = manager
                 .connection_generation(&args.port_id)
-                .ok_or_else(|| CommandError::Serial(format!("Port not found: {}", args.port_id)))?
+                .ok_or_else(|| CommandError::Serial(format!("Port not found: {}", args.port_id)))?;
+            if args
+                .expected_generation
+                .is_some_and(|expected| generation != expected)
+            {
+                return Err(CommandError::Serial(
+                    "Port connection changed before file send".into(),
+                ));
+            }
+            generation
         };
-        let data = tokio::fs::read(&args.path)
+        // Bounded read: a FIFO/device or a file that grows after `stat` must
+        // not be read to EOF. `take` enforces the cap on the actual bytes.
+        let file = tokio::fs::File::open(&args.path)
+            .await
+            .map_err(|e| CommandError::Io(format!("Failed to open file '{}': {}", args.path, e)))?;
+        let mut data = Vec::with_capacity(metadata.len().min(MAX_FILE_SIZE) as usize);
+        file.take(MAX_FILE_SIZE + 1)
+            .read_to_end(&mut data)
             .await
             .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
+        if data.len() as u64 > MAX_FILE_SIZE {
+            return Err(CommandError::Io(format!(
+                "File exceeds the {} byte limit: '{}'",
+                MAX_FILE_SIZE, args.path
+            )));
+        }
         total = data.len();
-        let chunk_size = args.chunk_size.max(1);
+        let chunk_size = args.chunk_size.clamp(1, 1024 * 1024);
         let is_real_port = serial::PortKind::of(&args.port_id) == serial::PortKind::Real;
         for (chunk_index, chunk) in data.chunks(chunk_size).enumerate() {
             if cancel.load(Ordering::Acquire) {
@@ -480,7 +552,6 @@ pub async fn send_file(
                     drop(manager);
                     writer
                         .write(chunk)
-                        .map(|_| 0)
                         .map_err(|e| CommandError::Serial(e.to_string()))
                 } else {
                     manager
@@ -561,27 +632,31 @@ pub struct SetSerialParamsArgs {
 }
 
 #[tauri::command]
-pub fn set_serial_params(
+pub async fn set_serial_params(
     args: SetSerialParamsArgs,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let mut manager = state
-        .serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager
-        .set_params(
-            &args.port_id,
-            args.baud_rate,
-            args.data_bits,
-            &args.parity,
-            &args.stop_bits,
-            &args.handshake,
-        )
-        .map_err(|e| {
-            log::warn!("Failed to set params for {}: {}", args.port_id, e);
-            CommandError::Serial(e.to_string())
-        })
+    let serial_manager = state.serial_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut manager = serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager
+            .set_params(
+                &args.port_id,
+                args.baud_rate,
+                args.data_bits,
+                &args.parity,
+                &args.stop_bits,
+                &args.handshake,
+            )
+            .map_err(|e| {
+                log::warn!("Failed to set params for {}: {}", args.port_id, e);
+                CommandError::Serial(e.to_string())
+            })
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("Set params task panicked: {e}")))?
 }
 
 /// 尝试重新连接指定串口（异常断线后的自动恢复）
@@ -620,20 +695,24 @@ pub async fn attempt_reconnect(
 
 /// 设置流控（DTR/RTS/握手协议）
 #[tauri::command]
-pub fn set_flow_control(
+pub async fn set_flow_control(
     port_id: String,
     dtr: bool,
     rts: bool,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let manager = state
-        .serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    manager.set_flow_control(&port_id, dtr, rts).map_err(|e| {
-        log::warn!("Failed to set flow control for {}: {}", port_id, e);
-        CommandError::Serial(e.to_string())
+    let serial_manager = state.serial_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        let manager = serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        manager.set_flow_control(&port_id, dtr, rts).map_err(|e| {
+            log::warn!("Failed to set flow control for {}: {}", port_id, e);
+            CommandError::Serial(e.to_string())
+        })
     })
+    .await
+    .map_err(|e| CommandError::Other(format!("Set flow control task panicked: {e}")))?
 }
 
 // ==================== 外部工具执行 ====================
@@ -703,6 +782,31 @@ pub async fn run_port_tool(
         .serial_work
         .admit()
         .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
+    // Only a persisted tool configuration may be executed. Without this an
+    // XSS/compromised renderer could use this command as an arbitrary shell.
+    let configured = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let requested_workdir = args.workdir.as_deref().unwrap_or("").trim();
+        manager
+            .get_config()
+            .entities
+            .port_tool_configs
+            .iter()
+            .any(|entry| {
+                entry.port_id == args.port_id
+                    && entry.command.trim() == args.command.trim()
+                    && entry.workdir.trim() == requested_workdir
+            })
+    };
+    if !configured {
+        return Err(CommandError::Other(format!(
+            "No persisted external-tool configuration matches port {}",
+            args.port_id
+        )));
+    }
     let owner = uuid::Uuid::new_v4().to_string();
     {
         let mut reservations = state
@@ -717,6 +821,11 @@ pub async fn run_port_tool(
         }
         reservations.insert(args.port_id.clone(), owner.clone());
     }
+    let _reservation = ToolReservation {
+        reservations: &state.tool_reservations,
+        port_id: args.port_id.clone(),
+        owner: owner.clone(),
+    };
     let (last_params, join_handle, tool_generation) = {
         let mut mgr = state
             .serial_manager
@@ -893,48 +1002,61 @@ pub async fn run_port_tool(
             code,
         },
     );
-    if let Ok(mut reservations) = state.tool_reservations.lock() {
-        if reservations
-            .get(&args.port_id)
-            .is_some_and(|current| current == &owner)
-        {
-            reservations.remove(&args.port_id);
-        }
-    }
     result
 }
 
 /// 终止正在运行的外部工具进程。
 /// 进程被 kill 后 run_port_tool 的 wait() 会返回，自动触发串口重开。
 #[tauri::command]
-pub fn kill_port_tool(port_id: String, state: State<AppState>) -> Result<(), CommandError> {
+pub async fn kill_port_tool(
+    port_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    // Read the pid, release the map lock, then run the blocking process-tree
+    // kill on the blocking pool (this command previously blocked the event
+    // loop on `taskkill` while holding `tool_processes`).
+    let pid = {
+        let procs = state
+            .tool_processes
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        procs.get(&port_id).and_then(|child| child.id())
+    };
+    if let Some(pid) = pid {
+        let killed = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+            #[cfg(windows)]
+            {
+                let status = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .status()?;
+                Ok(status.success())
+            }
+            #[cfg(unix)]
+            {
+                let result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+                Ok(result == 0)
+            }
+            #[cfg(not(any(windows, unix)))]
+            {
+                let _ = pid;
+                Ok(false)
+            }
+        })
+        .await
+        .map_err(|e| CommandError::Other(format!("Kill tool task failed: {e}")))?
+        .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {e}")))?;
+        if killed {
+            return Ok(());
+        }
+    }
     let mut procs = state
         .tool_processes
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
     if let Some(child) = procs.get_mut(&port_id) {
-        let pid = child.id();
-        #[cfg(windows)]
-        if let Some(pid) = pid {
-            let status = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .status()
-                .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {}", e)))?;
-            if !status.success() {
-                child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
-            }
-        } else {
-            child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
-        }
-        #[cfg(unix)]
-        if let Some(pid) = pid {
-            let result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
-            if result != 0 { child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?; }
-        } else {
-            child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
-        }
-        #[cfg(not(any(windows, unix)))]
-        child.start_kill().map_err(|e| CommandError::Io(format!("Failed to kill tool process: {}", e)))?;
+        child
+            .start_kill()
+            .map_err(|e| CommandError::Io(format!("Failed to kill tool process: {e}")))?;
     }
     Ok(())
 }

@@ -24,8 +24,8 @@ use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
 
 use super::codec::{build_tx_bytes, write_all_with_deadline, TxOutcome, WRITE_TOTAL_DEADLINE};
 use super::{
-    emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, lock_error,
-    PortInfo, PortKind, PortStatus, SerialManager,
+    emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, lock_error, PortInfo,
+    PortKind, PortStatus, SerialManager,
 };
 use crate::commands::OpenPortArgs;
 
@@ -449,7 +449,7 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     manager
         .last_params
         .insert(args.port_id.clone(), args.clone());
-    emit_status(&app_handle, &args.port_id, PortStatus::Connected);
+    emit_status(&app_handle, &args.port_id, PortStatus::Connected, Some(generation));
     ready.store(true, Ordering::Release);
     log::info!("Serial port opened: {}", port_id);
     Ok(())
@@ -551,16 +551,15 @@ pub(super) fn set_params(
             .ports
             .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        // DCB/COMMTIMEOUTS 是设备级状态、两个句柄共享。改参是设备级操作：同时锁住
-        // 读写句柄，避免改参瞬间另一句柄正在 I/O（读线程单次 read 最长 ~100ms，
-        // 此锁最长阻塞 ~100ms，可接受）；参数只在写句柄上应用（读句柄从不调用
-        // set_*，其缓存的陈旧设置不会推给驱动）。
-        let _read_guard = handle
-            .read_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        // DCB/COMMTIMEOUTS 是设备级状态、两个句柄共享。先拿写句柄（可能等一次
+        // 在途 TX，最多 ~2s），再拿读句柄（读线程单次 read 最长 ~100ms）——
+        // 顺序不能反：先持读锁等写锁会把 RX 一起停住整个等待期。
         let mut port = handle
             .write_port
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let _read_guard = handle
+            .read_port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.set_baud_rate(baud_rate)?;
@@ -605,12 +604,13 @@ pub(super) fn set_flow_control(
         .ports
         .get(port_id)
         .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-    let _read_guard = handle
-        .read_port
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    // Write lock first: waiting for an in-flight TX must not park the reader.
     let mut port = handle
         .write_port
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    let _read_guard = handle
+        .read_port
         .lock()
         .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
     port.write_data_terminal_ready(dtr)?;
@@ -660,7 +660,11 @@ fn read_loop(
         // 端口 MutexGuard 在此处已释放
 
         match outcome {
-            ReadOutcome::Data(n) if n > 0 => emit_rx_event(&app_handle, &port_id, &buffer[..n]),
+            // Stop may have been signalled while read() was blocked; bytes read
+            // from a session being retired must not leak into the log/UI.
+            ReadOutcome::Data(n) if n > 0 && running.load(Ordering::Acquire) => {
+                emit_rx_event(&app_handle, &port_id, &buffer[..n])
+            }
             ReadOutcome::Data(_) | ReadOutcome::Timeout => {}
             ReadOutcome::Error(e) => {
                 log::warn!("Serial read error on {}: {}", port_id, e);

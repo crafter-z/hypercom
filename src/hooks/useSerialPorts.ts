@@ -72,6 +72,7 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
         handshake: prev.handshake,
         protocolTemplateId: prev.protocolTemplateId,
         toolRunning: prev.toolRunning,
+        connectionGeneration: prev.connectionGeneration,
         // issue #11：保留持久化的工作模式，否则每 3s 轮询会把 TTY 重置回 TRX。
         mode: prev.mode,
         displayView: prev.displayView,
@@ -100,8 +101,16 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
   // 2) Genuinely new ports append at the end in enumeration order.
   for (const p of incoming) {
     if (!seen.has(p.id)) {
-      const meta = useAppStore.getState().config.portMeta?.find((entry) => entry.portId === p.id);
-      merged.push(meta ? { ...p, alias: meta.alias, isHidden: meta.isHidden, mode: meta.mode ?? 'trx', displayView: meta.displayView } : p);
+      const state = useAppStore.getState();
+      const meta = state.config.portMeta?.find((entry) => entry.portId === p.id);
+      // groupId lives on groups[].portIds; a re-plugged port is "new" to this
+      // array but may still be a persisted group member. Without this backfill
+      // Sidebar renders it both inside the group (portIds) and as ungrouped
+      // (!port.groupId), producing duplicate dnd-kit ids.
+      const groupId = state.groups.find((group) => group.portIds.includes(p.id))?.id;
+      merged.push(meta
+        ? { ...p, alias: meta.alias, isHidden: meta.isHidden, mode: meta.mode ?? 'trx', displayView: meta.displayView, groupId }
+        : { ...p, groupId });
     }
   }
   return merged;

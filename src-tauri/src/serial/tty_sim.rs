@@ -109,7 +109,16 @@ impl TtySimPortHandle {
         self.master = None;
         self.writer = None;
         if let Some(thread) = self.read_thread.take() {
-            let _ = thread.join();
+            // A descendant process can keep the ConPTY slave open, leaving the
+            // reader blocked in `read()` forever. Join with a bound (the master
+            // was dropped, so a healthy reader exits immediately) instead of
+            // making close/shutdown hang the app.
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let _ = thread.join();
+                let _ = done_tx.send(());
+            });
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
         }
     }
 }
@@ -218,6 +227,9 @@ pub(crate) fn spawn_bash(
         }
         let mut buf = [0u8; 4096];
         let mut dsr_tail: Vec<u8> = Vec::new();
+        // At most one helper may wait for a busy writer; repeated DSR queries
+        // must not spawn an unbounded number of blocked threads.
+        let dsr_pending = Arc::new(AtomicBool::new(false));
         loop {
             if !running_clone.load(Ordering::Relaxed) {
                 break;
@@ -225,6 +237,9 @@ pub(crate) fn spawn_bash(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF（bash 退出 / pty 关闭）
                 Ok(n) => {
+                    if !running_clone.load(Ordering::Acquire) {
+                        break;
+                    }
                     let chunk = &buf[..n];
                     crate::serial::emit_rx_event(&app_handle_clone, &port_id, chunk);
                     // DSR 应答（issue #11）：bash/readline 启动时查询光标位置
@@ -235,8 +250,29 @@ pub(crate) fn spawn_bash(
                     // 自动应答，前端 TtyView 已对 GIT: 端口过滤 xterm 的应答，
                     // 保证 pty 输入只收到一次应答。
                     if scan_dsr(&mut dsr_tail, chunk) {
-                        if let Ok(mut w) = writer_clone.lock() {
-                            let _ = w.write_all(b"\x1b[1;1R");
+                        // Never block the RX loop on the TX writer: a large paste
+                        // can hold it while bash is waiting for this DSR reply.
+                        // Try once; a missed reply is preferable to freezing RX
+                        // (the session can still be closed, which unblocks TX).
+                        match writer_clone.try_lock() {
+                            Ok(mut w) => {
+                                let _ = w.write_all(b"\x1b[1;1R");
+                            }
+                            Err(_) => {
+                                // A large TX is holding the writer (possibly
+                                // while bash waits for this reply). Never block
+                                // the RX loop; let one helper wait it out.
+                                if !dsr_pending.swap(true, Ordering::AcqRel) {
+                                    let writer = Arc::clone(&writer_clone);
+                                    let pending = Arc::clone(&dsr_pending);
+                                    thread::spawn(move || {
+                                        if let Ok(mut w) = writer.lock() {
+                                            let _ = w.write_all(b"\x1b[1;1R");
+                                        }
+                                        pending.store(false, Ordering::Release);
+                                    });
+                                }
+                            }
                         }
                     }
                 }

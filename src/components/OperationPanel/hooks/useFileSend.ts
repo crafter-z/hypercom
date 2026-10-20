@@ -5,7 +5,7 @@
  * （未连接端口也能选文件、只在后端报错）且**不计入 TX 流量**——文件发送了
  * 几 MB，状态栏的 TX 计数器纹丝不动。两个不变量现在都在这里收口：
  * 1. 端口不可发送 → 直接告警返回，连文件选择框都不弹；
- * 2. 每块落盘后按增量累加 TX 字节（`sent_bytes` 是本次运行的累计值，取差量）。
+ * 2. 每块落盘后按增量累加 TX 字节（`sentBytes` 是本次运行的累计值，取差量）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -70,16 +70,16 @@ export function useFileSend(portId: string | null): FileSendControls {
     const setup = eventService.onFileProgress((payload: FileProgressPayload) => {
       if (cancelled) return;
       const active = activeRef.current;
-      if (!active || payload.transfer_id !== active.transferId || payload.port_id !== active.portId) return;
-      const delta = payload.sent_bytes - active.countedBytes;
+      if (!active || payload.transferId !== active.transferId || payload.portId !== active.portId) return;
+      const delta = payload.sentBytes - active.countedBytes;
       if (delta > 0) trafficStats.addTx(active.portId, delta, active.lease);
-      active.countedBytes = payload.done ? 0 : Math.max(active.countedBytes, payload.sent_bytes);
+      active.countedBytes = payload.done ? 0 : Math.max(active.countedBytes, payload.sentBytes);
       if (payload.done) {
         activeRef.current = null;
         setProgress(null);
-        if (payload.total_bytes > 0 && payload.sent_bytes >= payload.total_bytes) notifySuccess('sendSection.file.sent');
+        if (payload.totalBytes > 0 && payload.sentBytes >= payload.totalBytes) notifySuccess('sendSection.file.sent');
       } else {
-        setProgress({ sent: payload.sent_bytes, total: payload.total_bytes });
+        setProgress({ sent: payload.sentBytes, total: payload.totalBytes });
       }
     });
     listenerReadyRef.current = setup.then((unlisten) => {
@@ -123,11 +123,23 @@ export function useFileSend(portId: string | null): FileSendControls {
     activeRef.current = transfer;
     setProgress({ sent: 0, total: 0 });
     try {
-      await serialService.sendFile({ portId: id, transferId: transfer.transferId, path, chunkSize: 1024, delayMs: 10 });
+      await serialService.sendFile({
+        portId: id,
+        transferId: transfer.transferId,
+        path,
+        chunkSize: 1024,
+        delayMs: 10,
+        expectedGeneration: useAppStore.getState().ports.find((p) => p.id === id)?.connectionGeneration,
+      });
     } catch (e) {
-      if (activeRef.current?.generation === generation && activeRef.current.transferId === transfer.transferId) {
-        activeRef.current = null;
-        setProgress(null);
+      if (generationRef.current === generation) {
+        if (activeRef.current?.transferId === transfer.transferId) {
+          activeRef.current = null;
+          setProgress(null);
+        }
+        // The backend emits the final done event before the command returns Err;
+        // by then the listener has already cleared activeRef. Report the failure
+        // for the same generation regardless of that state.
         notifyError(e);
       }
     } finally {

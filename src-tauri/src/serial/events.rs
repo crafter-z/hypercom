@@ -25,6 +25,8 @@ pub struct SerialDataEvent {
 pub struct SerialStatusEvent {
     pub port_id: String,
     pub status: String,
+    /// Connection identity for stale-send rejection (optional for older frontends).
+    pub generation: Option<u64>,
 }
 
 /// 串口自动重连提示事件（推送给前端）
@@ -54,18 +56,28 @@ impl PortStatus {
 }
 
 /// 派发串口状态事件并维护该连接代次的日志 writer。
-pub(crate) fn emit_status(app_handle: &AppHandle, port_id: &str, status: PortStatus) {
+pub(crate) fn emit_status(
+    app_handle: &AppHandle,
+    port_id: &str,
+    status: PortStatus,
+    generation: Option<u64>,
+) {
     if let Some(state) = app_handle.try_state::<crate::AppState>() {
         match status {
             PortStatus::Connected => {
-                let config = state.config_manager.lock();
-                if let Ok(config) = config {
+                // Snapshot the two fields and release config_manager before the
+                // log manager touches the filesystem: this function is called
+                // while the serial manager lock is held, and a slow log volume
+                // must not block every other serial command.
+                let log_config = state.config_manager.lock().ok().map(|config| {
                     let cfg = config.get_config();
-                    if let Err(e) = state.log_manager.create_writer_with_encoding(
-                        port_id,
-                        &cfg.log_format,
-                        &cfg.log_encoding,
-                    ) {
+                    (cfg.log_format.clone(), cfg.log_encoding.clone())
+                });
+                if let Some((format, encoding)) = log_config {
+                    if let Err(e) = state
+                        .log_manager
+                        .create_writer_with_encoding(port_id, &format, &encoding)
+                    {
                         log::warn!("Failed to create log writer for {}: {}", port_id, e);
                     }
                 }
@@ -82,6 +94,7 @@ pub(crate) fn emit_status(app_handle: &AppHandle, port_id: &str, status: PortSta
         SerialStatusEvent {
             port_id: port_id.to_string(),
             status: status.as_str().to_string(),
+            generation,
         },
     );
 }
@@ -103,7 +116,7 @@ pub(crate) fn emit_status_if_current(
         })
         .unwrap_or(false);
     if allowed {
-        emit_status(app_handle, port_id, status);
+        emit_status(app_handle, port_id, status, Some(generation));
     }
 }
 
