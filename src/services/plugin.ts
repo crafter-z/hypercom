@@ -4,7 +4,8 @@ import type { PluginStateSnapshot, PluginHttpRequest, PluginHttpResponse, Plugin
 export const pluginService = {
   listPlugins: (): Promise<PluginListResponse> => invoke('list_plugins'),
   installPlugin: (sourcePath: string): Promise<PluginStateSnapshot> => invoke('install_plugin', { sourcePath }),
-  uninstallPlugin: (id: string): Promise<PluginStateSnapshot> => invoke('uninstall_plugin', { id }),
+  uninstallPlugin: (id: string, expectedGeneration: string): Promise<PluginStateSnapshot> =>
+    invoke('uninstall_plugin', { id, expectedGeneration }),
   setPluginEnabled: (id: string, enabled: boolean, expectedGeneration: string): Promise<PluginStateSnapshot> =>
     invoke('set_plugin_enabled', { id, enabled, expectedGeneration }),
   setPluginPermissions: (id: string, permissions: string[], expectedGeneration: string): Promise<PluginStateSnapshot> =>

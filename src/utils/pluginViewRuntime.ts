@@ -11,6 +11,7 @@ import { sendToPort } from '../hooks/useSerialSend';
 import { checkPortScope } from './pluginRpc';
 import { boundedPluginViewJson } from './pluginViewJson';
 import { releaseUnusedPortState } from '../stores/releaseTerminalState';
+import { collectPortMeta, saveCurrentPortMeta } from '../hooks/useConfigPersistence';
 
 const MAX_PER_PLUGIN = 8;
 const MAX_ALL = 16;
@@ -33,6 +34,7 @@ const tabSessions = new Map<string, string>();
 const openParams = new Map<string, unknown>();
 const dismissed = new Map<string, Set<string>>();
 const rates = new Map<string, { tokens: number; time: number }>();
+const viewRates = new Map<string, { tokens: number; time: number }>();
 const actionTokens = new Map<string, { pluginId: string; generation: string; portId: string | null; paneId: string; expires: number }>();
 
 interface ViewRecord {
@@ -220,7 +222,13 @@ function flush(record: ViewRecord): void {
 }
 async function createRecord(tab: TabItem, preference: PluginViewPreference, view: PluginViewDeclaration): Promise<void> {
   const worker = pluginHost.get(preference.pluginId);
-  if (!worker?.loaded) return;
+  if (!worker?.loaded) {
+    // Worker is restarting/disabled: never leave a stale `ready` state with a
+    // dead instance id (the stock terminal would stay hidden). Reconcile runs
+    // again when the session starts.
+    setState(tab.id, { status: 'unavailable', error: 'plugin Worker unavailable', instanceId: null });
+    return;
+  }
   if (records.size >= MAX_ALL || [...records.values()].filter(record => record.binding.pluginId === preference.pluginId).length >= MAX_PER_PLUGIN) {
     const reason = 'plugin view instance capacity exceeded'; failures.set(identity(tab, preference), reason); setState(tab.id, { status: 'unavailable', error: reason, instanceId: null }); return;
   }
@@ -336,10 +344,41 @@ export function selectSerialPluginView(tabId: string, preference: PluginViewPref
   }
   const record = records.get(tabId); if (record) retire(record, null);
   if (preference) failures.delete(identity(tab, preference));
-  useAppStore.getState().updatePort(tab.portId, { displayView: preference }); queueReconcile();
+  const store = useAppStore.getState();
+  if (store.ports.some(port => port.id === tab.portId)) {
+    store.updatePort(tab.portId, { displayView: preference });
+  } else {
+    // The tab outlives its port (unplugged / not re-enumerated). `updatePort`
+    // is a no-op then, so persist the choice in portMeta; the preference
+    // survives until the port reappears and drives the picker immediately.
+    const existing = store.config.portMeta.find(entry => entry.portId === tab.portId);
+    const entry = {
+      portId: tab.portId,
+      alias: existing?.alias,
+      isHidden: existing?.isHidden ?? false,
+      mode: existing?.mode,
+      displayView: preference,
+    };
+    store.setConfig({ portMeta: [...store.config.portMeta.filter(item => item.portId !== tab.portId), entry] });
+    const live = useAppStore.getState().ports;
+    void saveCurrentPortMeta({
+      entries: [...collectPortMeta(live), entry],
+      presentIds: [...live.map(port => port.id), tab.portId],
+    }).catch((error) => console.debug('[pluginViewRuntime] persist display view failed:', error));
+  }
+  queueReconcile();
   if (!preference) setState(tabId, EMPTY_STATE);
 }
 function openKey(pluginId: string, generation: string, viewId: string, portId: string | null, instanceKey: string): string { return JSON.stringify([pluginId, generation, viewId, portId, instanceKey]); }
+function rateLimitView(pluginId: string): void {
+  const now = Date.now();
+  const rate = viewRates.get(pluginId) ?? { tokens: 60, time: now };
+  rate.tokens = Math.min(60, rate.tokens + (now - rate.time) / 8); // ~120/s
+  rate.time = now;
+  if (rate.tokens < 1) throw new Error('plugin view publish rate exceeded');
+  rate.tokens--;
+  viewRates.set(pluginId, rate);
+}
 function rateLimit(pluginId: string): void {
   const now = Date.now(); const rate = rates.get(pluginId) ?? { tokens: 4, time: now };
   rate.tokens = Math.min(4, rate.tokens + (now - rate.time) / 500); rate.time = now;
@@ -458,6 +497,9 @@ export async function executePluginViewApi(pluginId: string, op: string, args: u
   }
   const { record, object } = ownedRecord(pluginId, args);
   if (op === 'view.publish') {
+    // Validate/parse before the frame throttle: bound the CPU spent on snapshots
+    // that the 34ms flush would coalesce away anyway.
+    rateLimitView(pluginId);
     const normalized = boundedPluginViewJson(object.snapshot, MAX_SNAPSHOT_BYTES);
     if (pendingBytes(pluginId) - (record.latest?.bytes ?? 0) + normalized.bytes > MAX_PLUGIN_PENDING_BYTES) throw new Error('plugin UI pending capacity exceeded');
     record.retained = { snapshot: normalized.value, bytes: normalized.bytes };

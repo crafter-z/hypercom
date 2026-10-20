@@ -482,6 +482,20 @@ fn prepare_plugin_install(
     })
 }
 
+/// Reject a symlink/junction/other non-directory that replaced the plugin root
+/// after `plugin_dir` validated it (same-user swap race before rename).
+fn ensure_ordinary_dir_if_present(path: &std::path::Path) -> Result<(), CommandError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && !plugin::is_link_or_reparse(&meta) => Ok(()),
+        Ok(_) => Err(CommandError::Other(format!(
+            "插件目录不是普通目录: {}",
+            path.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CommandError::Io(format!("插件目录不可达: {e}"))),
+    }
+}
+
 fn commit_plugin_install(
     prepared: &mut PreparedPluginInstall,
     revision: u64,
@@ -489,6 +503,7 @@ fn commit_plugin_install(
     let dest = prepared.dest.clone();
     let staging = prepared.stage_guard.0.clone();
     let root = dest.parent().unwrap();
+    ensure_ordinary_dir_if_present(&dest)?;
     let mut transaction =
         plugin::transaction::Transaction::install(root, &prepared.manifest.id, &staging, revision)
             .map_err(|e| CommandError::Io(format!("持久化安装事务失败: {e}")))?;
@@ -581,29 +596,40 @@ fn find_single_plugin_dir(root: &Path) -> Result<std::path::PathBuf, CommandErro
 #[tauri::command]
 pub async fn uninstall_plugin(
     id: String,
+    expected_generation: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
-    plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
-    tokio::task::block_in_place(|| {
+    let result = tokio::task::block_in_place(|| {
         let mut manager = state
             .config_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        uninstall_with_manager(&mut manager, &id)
-    })
+        uninstall_with_manager(&mut manager, &id, Some(&expected_generation))
+    });
+    // Retire views only after the transactional uninstall committed; a failed
+    // transaction must not destroy live native views.
+    if result.is_ok() {
+        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
+    }
+    result
 }
 
 fn uninstall_with_manager(
     manager: &mut config::ConfigManager,
     id: &str,
+    expected_generation: Option<&str>,
 ) -> Result<PluginStateSnapshot, CommandError> {
+    if let Some(expected) = expected_generation {
+        require_generation(manager.get_config(), id, expected)?;
+    }
     let root = manager.plugins_dir().to_path_buf();
     std::fs::create_dir_all(&root).map_err(|e| CommandError::Io(e.to_string()))?;
     let dest = plugin_dir(&root, id)?;
+    ensure_ordinary_dir_if_present(&dest)?;
     let revision = manager
         .get_config()
         .revision
@@ -667,40 +693,52 @@ pub async fn set_plugin_enabled(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
     }
-    if !enabled {
-        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
-    }
-    let mut manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    require_generation(manager.get_config(), &id, &expected_generation)?;
-    if enabled {
-        let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
-            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-        if manifest.id != id {
-            return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
+    let result = {
+        let mut manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+        if enabled {
+            let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
+                .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+            if manifest.id != id {
+                return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
+            }
         }
-    }
-    let old_config = manager.get_config().clone();
-    let cfg = manager.get_config_mut();
-    let entry = cfg
-        .entities
-        .plugin_configs
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
-    entry.enabled = enabled;
-    if let Err(e) = manager.save() {
-        *manager.get_config_mut() = old_config;
-        return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
+        let old_config = manager.get_config().clone();
+        let cfg = manager.get_config_mut();
+        let entry = cfg
+            .entities
+            .plugin_configs
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+        entry.enabled = enabled;
+        if let Err(e) = manager.save() {
+            *manager.get_config_mut() = old_config;
+            return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
+        }
+        // Keep the corruption-recovery fallback in sync with the committed trust
+        // state; otherwise a later config.json corruption restores the old grants.
+        if let Err(e) = manager.save_safe_backup() {
+            log::error!("Failed to update safe config backup after plugin state change: {e}");
+        }
+        snapshot(&manager)
+    };
+    // Retire only after the committed state is durable and visible: a rejected
+    // request or failed save must not destroy live native views.
+    if !enabled {
+        if let Err(e) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
+            log::warn!("Failed to retire disabled plugin views for {id}: {e}");
+        }
     }
     log::info!(
         "Plugin {} {}",
         id,
         if enabled { "enabled" } else { "disabled" }
     );
-    Ok(snapshot(&manager))
+    Ok(result)
 }
 
 /// 设置插件授予权限（整体替换 granted_permissions）。
@@ -725,49 +763,58 @@ pub async fn set_plugin_permissions(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
     }
-    plugin::view_runtime::retire_denied(window.app_handle(), &id, &permissions).await?;
-    let mut manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    require_generation(manager.get_config(), &id, &expected_generation)?;
+    let (result, committed_permissions) = {
+        let mut manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
 
-    // manifest 权威点：读取声明权限做子集校验。
-    let root = manager.plugins_dir().to_path_buf();
-    let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
-        .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-    if manifest.id != id {
-        return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
-    }
-    let declared: std::collections::HashSet<String> = manifest.permissions.into_iter().collect();
-    for p in &permissions {
-        if !declared.contains(p) {
-            return Err(CommandError::Other(format!(
-                "权限 {p} 不在插件声明列表内，拒绝授予"
-            )));
+        // manifest 权威点：读取声明权限做子集校验。
+        let root = manager.plugins_dir().to_path_buf();
+        let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
+            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+        if manifest.id != id {
+            return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
         }
-        if !plugin::KNOWN_PERMISSIONS.contains(&p.as_str()) {
-            return Err(CommandError::Other(format!(
-                "宿主尚未实现权限 {p}，拒绝授予"
-            )));
+        let declared: std::collections::HashSet<String> =
+            manifest.permissions.into_iter().collect();
+        for p in &permissions {
+            if !declared.contains(p) {
+                return Err(CommandError::Other(format!(
+                    "权限 {p} 不在插件声明列表内，拒绝授予"
+                )));
+            }
+            if !plugin::KNOWN_PERMISSIONS.contains(&p.as_str()) {
+                return Err(CommandError::Other(format!(
+                    "宿主尚未实现权限 {p}，拒绝授予"
+                )));
+            }
         }
-    }
 
-    let old_config = manager.get_config().clone();
-    let cfg = manager.get_config_mut();
-    let entry = cfg
-        .entities
-        .plugin_configs
-        .iter_mut()
-        .find(|p| p.id == id)
-        .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
-    entry.granted_permissions = permissions;
-    if let Err(e) = manager.save() {
-        *manager.get_config_mut() = old_config;
-        return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
-    }
+        let old_config = manager.get_config().clone();
+        let cfg = manager.get_config_mut();
+        let entry = cfg
+            .entities
+            .plugin_configs
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+        let committed_permissions = permissions.clone();
+        entry.granted_permissions = permissions;
+        if let Err(e) = manager.save() {
+            *manager.get_config_mut() = old_config;
+            return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
+        }
+        if let Err(e) = manager.save_safe_backup() {
+            log::error!("Failed to update safe config backup after permission change: {e}");
+        }
+        (snapshot(&manager), committed_permissions)
+    };
+    // Validate + commit first, then retire views based on committed grants.
+    plugin::view_runtime::retire_denied(window.app_handle(), &id, &committed_permissions).await?;
     log::info!("Plugin {id} permissions updated");
-    Ok(snapshot(&manager))
+    Ok(result)
 }
 
 /// 读取插件资产（`main.js` / `assets/` 内文件，供 worker 加载与资源读取）。
@@ -793,6 +840,9 @@ pub async fn read_plugin_asset(
 ) -> Result<Option<String>, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
+    if rel_path.len() > 4096 {
+        return Err(CommandError::Other("插件资产路径超长".into()));
+    }
     let _plugin_io = lock_asset_io(&state.plugin_io).await?;
     let rel = sanitize_asset_path(&rel_path)?;
     let root = {
@@ -855,6 +905,9 @@ pub async fn write_plugin_asset(
 ) -> Result<(), CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
+    if rel_path.len() > 4096 {
+        return Err(CommandError::Other("插件资产路径超长".into()));
+    }
     if content.len() as u64 > PLUGIN_DATA_MAX_FILE_BYTES {
         return Err(CommandError::Other(
             "插件 data 单文件超过 16 MiB 上限".into(),
@@ -956,9 +1009,7 @@ fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
             .as_os_str()
             .to_str()
             .ok_or_else(|| CommandError::Other("插件路径必须是 UTF-8".into()))?;
-        if name.ends_with(['.', ' ']) || name.contains(':') || (index == 0 && name.contains('~')) {
-            return Err(CommandError::Other("插件路径含 Windows 路径别名".into()));
-        }
+        plugin::validate_path_component(name).map_err(CommandError::Other)?;
         out.push(if index == 0 && name.eq_ignore_ascii_case("data") {
             "data"
         } else {
@@ -1011,15 +1062,48 @@ fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, Comm
 
 fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
     use std::io::Read;
-    let file =
-        std::fs::File::open(path).map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))?;
     let meta = file
         .metadata()
         .map_err(|e| CommandError::Io(e.to_string()))?;
-    if !meta.is_file() || meta.len() > limit {
+    if !meta.is_file() || plugin::is_link_or_reparse(&meta) || meta.len() > limit {
         return Err(CommandError::Other(
             "插件资产读取超过大小上限或不是普通文件".into(),
         ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return Err(CommandError::Other("插件资产不得是硬链接".into()));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0
+            || information.nNumberOfLinks != 1
+        {
+            return Err(CommandError::Other("插件资产不得是硬链接".into()));
+        }
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     file.take(limit + 1)
@@ -1164,7 +1248,15 @@ pub async fn update_plugin_view(
     visible: bool,
     layout_revision: u64,
 ) -> Result<(), CommandError> {
-    plugin::view_runtime::update(source, instance_id, rect, occlusions, visible, layout_revision).await
+    plugin::view_runtime::update(
+        source,
+        instance_id,
+        rect,
+        occlusions,
+        visible,
+        layout_revision,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1197,7 +1289,7 @@ fn plugin_dir(root: &Path, id: &str) -> Result<std::path::PathBuf, CommandError>
     plugin::validate_plugin_id(id).map_err(CommandError::Other)?;
     let dest = root.join(id);
     match std::fs::symlink_metadata(&dest) {
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+        Ok(meta) if plugin::is_link_or_reparse(&meta) || !meta.is_dir() => {
             return Err(CommandError::Other(format!("插件目录不是普通目录: {id}")))
         }
         Ok(_) => {}
@@ -1832,6 +1924,26 @@ pub async fn plugin_http(
 ) -> Result<PluginHttpResponse, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+    // Bounds before any clone/deserialization work: request bodies/headers are
+    // already in memory, but rejecting early keeps the outbound client safe.
+    if request.url.len() > 4096 {
+        return Err(CommandError::Other("插件 HTTP URL 超长".into()));
+    }
+    if request.headers.len() > 100 {
+        return Err(CommandError::Other("插件 HTTP 请求头数量超限".into()));
+    }
+    for (name, value) in &request.headers {
+        if name.len() > 256 || value.len() > 8192 {
+            return Err(CommandError::Other("插件 HTTP 请求头超限".into()));
+        }
+    }
+    if request
+        .body
+        .as_ref()
+        .is_some_and(|body| body.len() > PLUGIN_HTTP_MAX_BODY)
+    {
+        return Err(CommandError::Other("插件 HTTP 请求体超过 1MB".into()));
+    }
     // --- 权限 + 白名单校验（锁内只读，克隆后释放）---
     let (url_whitelist, plugin_proxy, plugin_proxy_enabled) = {
         let manager = state
@@ -3110,7 +3222,7 @@ mod tests {
             second.plugin_configs[0].install_generation
         );
         assert!(second.revision > first.revision);
-        let removed = uninstall_with_manager(&mut manager, "com.example.test").unwrap();
+        let removed = uninstall_with_manager(&mut manager, "com.example.test", None).unwrap();
         assert!(removed.plugin_configs.is_empty());
         assert!(removed.revision > second.revision);
         let prepared =

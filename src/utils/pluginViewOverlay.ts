@@ -18,7 +18,12 @@ function update(): Promise<void> {
   const layout = JSON.stringify([blocked, occlusions]);
   if (layout === observedLayout) return suppressionPending;
   observedLayout = layout;
-  suppressionPending = suppressPluginViews(blocked, occlusions);
+  suppressionPending = suppressPluginViews(blocked, occlusions).catch((error) => {
+    // Do not cache a rejected handshake for an unchanged layout: host modals
+    // would stay hidden forever after a transient native destroy failure.
+    if (observedLayout === layout) observedLayout = '';
+    throw error;
+  });
   return suppressionPending;
 }
 

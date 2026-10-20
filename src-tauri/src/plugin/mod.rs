@@ -173,7 +173,7 @@ pub fn parse_manifest(json: &str) -> Result<PluginManifest, String> {
 /// Read a regular, unlinked manifest with both metadata and streaming bounds.
 pub fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, String> {
     let directory = fs::symlink_metadata(dir).map_err(|e| format!("插件目录不可读: {e}"))?;
-    if !directory.is_dir() || directory.file_type().is_symlink() {
+    if !directory.is_dir() || is_link_or_reparse(&directory) {
         return Err("插件目录必须是普通目录".into());
     }
     let manifest_path = dir.join("manifest.json");
@@ -353,11 +353,64 @@ pub fn validate_view_resource_path(path: &str) -> Result<(), String> {
 
 // ==================== 路径防护 ====================
 
+/// Link or Windows reparse point (junction/symlink). `file_type().is_symlink()`
+/// alone does not report junctions, which are creatable without privileges.
+pub(crate) fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Windows device names / path aliases. Win32 strips trailing dots/spaces,
+/// resolves `:` as an ADS and treats CON/COM1… as devices, so a ZIP entry that
+/// only checks `..` can still escape or alias another path.
+pub(crate) fn is_reserved_windows_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// One shared component check for ZIP extraction, assets and data writes.
+pub(crate) fn validate_path_component(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("路径段为空".into());
+    }
+    if name.ends_with(['.', ' ']) || name.contains(':') || name.contains('~') {
+        return Err(format!("路径段含 Windows 路径别名: {name}"));
+    }
+    if name.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') {
+        return Err(format!("路径段含控制字符: {name}"));
+    }
+    if is_reserved_windows_name(name) {
+        return Err(format!("路径段是 Windows 设备名: {name}"));
+    }
+    Ok(())
+}
+
 /// A plugin id is exactly one safe directory name, with nonempty reverse-domain labels.
 pub fn validate_plugin_id(id: &str) -> Result<(), String> {
     if id.split('.').count() < 2
         || id.split('.').any(|label| {
             label.is_empty()
+                || is_reserved_windows_name(label)
                 || !label.chars().all(|c| {
                     c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
                 })
@@ -404,6 +457,7 @@ pub fn sanitize_plugin_rel_path(rel: &str) -> Result<PathBuf, String> {
                 if seg_str.is_empty() {
                     continue;
                 }
+                validate_path_component(&seg_str)?;
                 out.push(seg);
             }
             Component::CurDir => {}
@@ -989,6 +1043,29 @@ mod tests {
         assert!(sanitize_plugin_rel_path("C:\\windows").is_err());
         assert!(sanitize_plugin_rel_path("").is_err());
         assert!(sanitize_plugin_rel_path(".").is_err()); // 归一后为空
+    }
+
+    #[test]
+    fn sanitize_path_rejects_win32_aliases_and_device_names() {
+        // Win32 strips trailing dots/spaces and resolves colon as ADS.
+        assert!(sanitize_plugin_rel_path(".. /.. /evil.js").is_err());
+        assert!(sanitize_plugin_rel_path("assets/evil.js ").is_err());
+        assert!(sanitize_plugin_rel_path("assets/evil.js.").is_err());
+        assert!(sanitize_plugin_rel_path("assets/foo:bar").is_err());
+        assert!(sanitize_plugin_rel_path("assets/CON").is_err());
+        assert!(sanitize_plugin_rel_path("assets/com1.txt").is_err());
+        assert!(sanitize_plugin_rel_path("assets/state.json\0junk").is_err());
+        assert!(sanitize_plugin_rel_path("assets/PROGRA~1").is_err());
+        // Legitimate names still pass.
+        assert!(sanitize_plugin_rel_path("assets/console.js").is_ok());
+        assert!(sanitize_plugin_rel_path("assets/com10.txt").is_ok());
+    }
+
+    #[test]
+    fn plugin_id_rejects_windows_device_labels() {
+        assert!(validate_plugin_id("con.example").is_err());
+        assert!(validate_plugin_id("com1.example").is_err());
+        assert!(validate_plugin_id("com.example").is_ok());
     }
 
     #[test]

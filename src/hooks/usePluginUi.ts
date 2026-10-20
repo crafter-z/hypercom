@@ -34,10 +34,15 @@ export function dispatchPluginUiClick(
     return;
   }
   const actionToken = issuePluginActionToken(reg.pluginId, origin === 'port-context' ? context?.portId ?? null : null, useAppStore.getState().focusedPaneId);
-  session.post({
+  const posted = session.post({
     type: 'ui.buttonClick',
     payload: { buttonId, context, actionToken },
   });
+  if (!posted) {
+    // Control budget exhausted (plugin handlers/ACKs stalled): make the drop
+    // observable instead of silently discarding the click.
+    console.warn(`[usePluginUi] plugin ${reg.pluginId} control capacity exceeded; click dropped`);
+  }
 }
 
 /** 便捷：Sidebar 工具栏按钮渲染源（已 enabled 插件的 sidebar 按钮平铺）。 */

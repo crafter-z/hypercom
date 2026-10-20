@@ -68,6 +68,26 @@ function notifySeverity(level: unknown): 'info' | 'warning' | 'error' {
 /** 每插件日志配额实例（P13：令牌桶，见 pluginLogQuota.ts）。 */
 const logQuotas = new Map<string, PluginLogQuota>();
 
+/** Host-side payload bounds: Tauri deserializes arguments in Rust before the
+ *  backend's own checks, so a granted plugin must not be able to push an
+ *  unbounded string through the worker→host IPC bridge. */
+const MAX_TERMINAL_APPEND_CHARS = 64 * 1024;
+const MAX_SERIAL_SEND_CHARS = 1024 * 1024;
+const MAX_FS_WRITE_CHARS = 16 * 1024 * 1024;
+const MAX_HTTP_BODY_CHARS = 1024 * 1024;
+const MAX_HTTP_URL_CHARS = 4096;
+const MAX_HTTP_HEADERS = 100;
+const MAX_HTTP_HEADER_CHARS = 8192;
+const MAX_LOG_MESSAGE_CHARS = 64 * 1024;
+const MAX_PANEL_APPEND_CHARS = 64 * 1024;
+const MAX_CLIPBOARD_CHARS = 1024 * 1024;
+const PLUGIN_LINE_ENDINGS = new Set(['None', '\\r', '\\n', '\\r\\n']);
+
+function requireMaxChars(value: string, field: string, max: number): string {
+  if (value.length > max) throw new Error(`参数 ${field} 超过 ${max} 字符上限`);
+  return value;
+}
+
 /**
  * 执行一次宿主 API 调用。返回结果（JSON 可序列化）。
  * 权限已在调用前过滤（本层不做权限判断——由 PluginSession 负责，评审 v2 P7）。
@@ -102,7 +122,7 @@ export async function executeHostApi(
     case 'terminal.append': {
       const a = requireObject(args);
       const portId = requireString(a, 'portId');
-      const text = requireString(a, 'text');
+      const text = requireMaxChars(requireString(a, 'text'), 'text', MAX_TERMINAL_APPEND_CHARS);
       appendTerminalLine(portId, {
         timestamp: Date.now(),
         direction: 'NOTE', // 旁注行（非 TX——不进流量统计/发送历史，评审 v2 P9）
@@ -119,9 +139,12 @@ export async function executeHostApi(
       // （worker 零特权无 invoke），宿主内部 TX 路径不经此、无需校验。
       const scopeDenied = checkPortScope(manifest, portId);
       if (scopeDenied) throw new Error(scopeDenied);
-      const data = requireString(a, 'data');
+      const data = requireMaxChars(requireString(a, 'data'), 'data', MAX_SERIAL_SEND_CHARS);
       const isHex = Boolean(a.isHex);
       const lineEnding = typeof a.lineEnding === 'string' ? a.lineEnding : 'None';
+      if (!PLUGIN_LINE_ENDINGS.has(lineEnding)) {
+        throw new Error(`不支持的 lineEnding: ${lineEnding}`);
+      }
       const bytes = await sendToPort(portId, data, isHex, lineEnding, true, beforeSend); // silent: 插件发送不弹守卫 toast
       return { bytesWritten: bytes };
     }
@@ -147,7 +170,7 @@ export async function executeHostApi(
       }
     }
     case 'fs.read': {
-      const rel = requireString(args, 'rel');
+      const rel = requireMaxChars(requireString(args, 'rel'), 'rel', 4096);
       const granted = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === pluginId);
       if (!granted?.enabled) throw new Error('plugin disabled');
       const segments = rel.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
@@ -165,20 +188,29 @@ export async function executeHostApi(
     }
     case 'fs.write': {
       const a = requireObject(args);
-      const rel = requireString(a, 'rel');
-      const content = requireString(a, 'content');
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', 4096);
+      const content = requireMaxChars(requireString(a, 'content'), 'content', MAX_FS_WRITE_CHARS);
       await pluginService.writePluginAsset(pluginId, rel, content);
       return null;
     }
     case 'http.request': {
       const a = requireObject(args);
       const method = requireString(a, 'method');
-      const url = requireString(a, 'url');
+      const url = requireMaxChars(requireString(a, 'url'), 'url', MAX_HTTP_URL_CHARS);
       const headers =
         typeof a.headers === 'object' && a.headers !== null
           ? (a.headers as Record<string, string>)
           : {};
-      const body = typeof a.body === 'string' ? a.body : undefined;
+      const headerEntries = Object.entries(headers);
+      if (headerEntries.length > MAX_HTTP_HEADERS) throw new Error('请求头数量超限');
+      for (const [key, value] of headerEntries) {
+        if (typeof value !== 'string' || key.length > 256 || value.length > MAX_HTTP_HEADER_CHARS) {
+          throw new Error('请求头字段非法或超限');
+        }
+      }
+      const body = typeof a.body === 'string'
+        ? requireMaxChars(a.body, 'body', MAX_HTTP_BODY_CHARS)
+        : undefined;
       const timeout = typeof a.timeout === 'number' ? a.timeout : undefined;
       return pluginService.pluginHttp(pluginId, { method, url, headers, body, timeout });
     }
@@ -200,7 +232,7 @@ export async function executeHostApi(
     case 'log': {
       const a = requireObject(args);
       const level = typeof a.level === 'string' ? a.level : 'info';
-      const msg = typeof a.msg === 'string' ? a.msg : String(a.msg ?? '');
+      const msg = requireMaxChars(typeof a.msg === 'string' ? a.msg : String(a.msg ?? ''), 'msg', MAX_LOG_MESSAGE_CHARS);
       // P13 配额：令牌桶限流（突发 20 条 / 回填 4 条每秒），坏插件不再把
       // diaglog 512KB 轮转窗口刷掉；超限丢弃，每 5s 窗口首次丢弃告警一次。
       let quota = logQuotas.get(pluginId);
@@ -228,7 +260,7 @@ export async function executeHostApi(
       return clipboardReadText();
     }
     case 'clipboard.writeText': {
-      await clipboardWriteText(requireString(args, 'text'));
+      await clipboardWriteText(requireMaxChars(requireString(args, 'text'), 'text', MAX_CLIPBOARD_CHARS));
       return null;
     }
     case 'storage.get': {
@@ -241,7 +273,7 @@ export async function executeHostApi(
     }
     case 'ui.panel.append': {
       const a = requireObject(args);
-      const text = typeof a.text === 'string' ? a.text : String(a.text ?? '');
+      const text = requireMaxChars(typeof a.text === 'string' ? a.text : String(a.text ?? ''), 'text', MAX_PANEL_APPEND_CHARS);
       appendPluginPanel(pluginId, text);
       return null;
     }

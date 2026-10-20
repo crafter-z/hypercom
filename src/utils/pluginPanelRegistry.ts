@@ -28,12 +28,27 @@ export type PluginPanelSnapshot = Record<string, PluginPanelState>;
 let snapshot: PluginPanelSnapshot = {};
 const listeners = new Set<() => void>();
 
+/** Per-plugin append budget: bounds host React renders from a runaway plugin.
+ *  Burst 200, refill 200/s (the panel is a human-readable log, not a data bus). */
+const appendRates = new Map<string, { tokens: number; time: number }>();
+function allowAppend(pluginId: string): boolean {
+  const now = Date.now();
+  const rate = appendRates.get(pluginId) ?? { tokens: 200, time: now };
+  rate.tokens = Math.min(200, rate.tokens + (now - rate.time) / 5);
+  rate.time = now;
+  if (rate.tokens < 1) return false;
+  rate.tokens--;
+  appendRates.set(pluginId, rate);
+  return true;
+}
+
 function notify(): void {
   for (const l of listeners) l();
 }
 
 /** 追加文本到插件面板（超限截断丢最旧）。 */
 export function appendPluginPanel(pluginId: string, text: string): void {
+  if (!allowAppend(pluginId)) return;
   let buffer: string;
   let droppedChars = 0;
   const cur = snapshot[pluginId];
@@ -91,4 +106,5 @@ export function getPluginPanelSnapshot(): PluginPanelSnapshot {
 export function resetPluginPanelForTest(): void {
   snapshot = {};
   listeners.clear();
+  appendRates.clear();
 }

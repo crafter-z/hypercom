@@ -10,6 +10,7 @@
  * 内存 Map 避免每 get 一次 RPC；set 后同步写盘（防丢失）。
  */
 import { pluginService } from '../services/tauri';
+import { boundedPluginViewJson } from './pluginViewJson';
 
 /** 内存缓存：pluginId → Map<key, value>（读盘后缓存；写盘后更新）。 */
 const cache = new Map<string, Map<string, unknown>>();
@@ -18,6 +19,11 @@ const writes = new Map<string, Promise<void>>();
 const generations = new Map<string, number>();
 
 const STATE_FILE = 'data/state.json';
+/** Per-value / whole-file bounds: the backend accepts one 16 MiB write, and
+ *  storage must stay a JSON document rather than a serialized JS heap. */
+const MAX_KV_VALUE_BYTES = 256 * 1024;
+const MAX_KV_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_KV_KEY_CHARS = 512;
 
 /** 读取插件 KV 值（无 → undefined）。 */
 export async function get(pluginId: string, key: string): Promise<unknown> {
@@ -28,6 +34,11 @@ export async function get(pluginId: string, key: string): Promise<unknown> {
 /** 写入插件 KV（value 必须 JSON 可序列化）。写盘整体替换。 */
 export async function set(pluginId: string, key: string, value: unknown, beforeSend?: () => void): Promise<void> {
   beforeSend?.();
+  if (key.length === 0 || key.length > MAX_KV_KEY_CHARS) throw new Error('plugin storage key invalid');
+  // Structured clone lets Map/Set/Date/typed arrays through JSON.stringify as
+  // `{}`/index objects. Reject non-JSON values here so storage.get returns the
+  // same shape the plugin stored (documented contract).
+  const normalized = value === undefined ? undefined : boundedPluginViewJson(value, MAX_KV_VALUE_BYTES).value;
   const generation = generations.get(pluginId) ?? 0;
   const loaded = await load(pluginId);
   beforeSend?.();
@@ -39,8 +50,11 @@ export async function set(pluginId: string, key: string, value: unknown, beforeS
     const current = cache.get(pluginId) ?? loaded;
     const candidate = new Map(current);
     if (value === undefined) candidate.delete(key);
-    else candidate.set(key, value);
+    else candidate.set(key, normalized);
     const snapshot = JSON.stringify(Object.fromEntries(candidate), null, 2);
+    if (new TextEncoder().encode(snapshot).byteLength > MAX_KV_FILE_BYTES) {
+      throw new Error('plugin storage capacity exceeded');
+    }
     beforeSend?.();
     await pluginService.writePluginAsset(pluginId, STATE_FILE, snapshot);
     if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, candidate);

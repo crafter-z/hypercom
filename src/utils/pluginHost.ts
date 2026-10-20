@@ -25,6 +25,7 @@ import { PLUGIN_HTTP_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } fro
 import { executeHostApi } from './pluginHostApi';
 import { checkOpAllowed } from './pluginRpc';
 import { removePluginPanel } from './pluginPanelRegistry';
+import { PluginLogQuota } from './pluginLogQuota';
 import { syncStorePluginConfigs } from './pluginConfigSnapshot';
 import type { PluginManifestView } from '../types';
 
@@ -138,6 +139,9 @@ export class PluginSession {
   private crashWindowStart = 0;
   /** Retirement callbacks for this worker's RPC slots; backend operations may continue after retirement. */
   private readonly retireRequests = new Set<() => void>();
+  /** Host-side RPC error logging is plugin-triggerable; apply the same token
+   *  bucket as explicit log calls so a denied-op loop cannot flood diaglog. */
+  private readonly errorLogQuota = new PluginLogQuota();
 
   constructor(pluginId: string) {
     this.pluginId = pluginId;
@@ -271,7 +275,13 @@ export class PluginSession {
     } catch (e) {
       if (!active) return;
       const errMsg = e instanceof Error ? e.message : String(e);
-      console.error(`[pluginHost] ${this.pluginId} api ${req.op} failed:`, errMsg);
+      const verdict = this.errorLogQuota.tryConsume(Date.now());
+      if (verdict.allowed) {
+        const clean = (value: string): string => value.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 500);
+        console.error(`[pluginHost] ${this.pluginId} api ${clean(req.op)} failed:`, clean(errMsg));
+      } else if (verdict.warn) {
+        console.warn(`[pluginHost] ${this.pluginId} RPC 错误日志超限，已累计抑制 ${verdict.droppedTotal} 条`);
+      }
       if (retire()) respond({ ok: false, error: errMsg });
     }
   }

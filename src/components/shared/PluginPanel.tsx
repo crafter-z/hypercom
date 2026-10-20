@@ -26,7 +26,9 @@ const PluginPanel: React.FC = () => {
   const copyAll = (pluginId: string) => {
     const text = panels[pluginId]?.buffer ?? '';
     if (!text) return;
-    void navigator.clipboard.writeText(text).then(() => notifyInfo('plugins.panelCopied'));
+    void navigator.clipboard.writeText(text)
+      .then(() => notifyInfo('plugins.panelCopied'))
+      .catch((e) => notifyError(e));
   };
 
   return (

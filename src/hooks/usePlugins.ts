@@ -109,7 +109,7 @@ export function usePluginHost(): void {
   useEffect(() => {
     let active = true;
     let refreshVersion = 0;
-    const refresh = async (): Promise<void> => {
+    const refresh = async (attempt = 0): Promise<void> => {
       const version = ++refreshVersion;
       // Backend revisions order both reads and writes; request order only handles page lifetime.
       try {
@@ -117,7 +117,15 @@ export function usePluginHost(): void {
         if (!active || version !== refreshVersion) return;
         if (syncPluginListSnapshot(result)) pluginHost.syncWithConfig();
       } catch (error) {
-        if (active) console.error('[usePluginHost] list failed:', error);
+        if (!active) return;
+        // Initial manifest read can race app startup; retry with bounded
+        // backoff instead of leaving Worker/UI registries stale until restart.
+        if (attempt < 4) {
+          await new Promise<void>((resolve) => setTimeout(resolve, Math.min(250 * 2 ** attempt, 4000)));
+          if (active && version === refreshVersion) await refresh(attempt + 1);
+          return;
+        }
+        console.error('[usePluginHost] list failed:', error);
       }
     };
     const boot = (): void => {
@@ -169,8 +177,11 @@ export function usePluginList() {
     try {
       const result = await pluginService.listPlugins();
       if (version !== listRefreshVersion.current) return getPluginViews();
-      if (syncPluginListSnapshot(result) && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
-      return result.plugins;
+      const accepted = syncPluginListSnapshot(result);
+      if (accepted && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
+      // A revision-rejected response must not be treated as authoritative by
+      // callers (install handoff); expose the last accepted snapshot instead.
+      return getPluginViews();
     } catch (error) {
       console.error('[usePluginList] list failed:', error);
       notifyError(error);
@@ -185,13 +196,25 @@ export function usePluginList() {
   const installPlugin = useCallback(async (sourcePath: string): Promise<PluginView | null> => {
     setLoading(true);
     pluginHost.dispose();
-    const previousGenerations = new Set(getPluginViews().map(plugin => `${plugin.id}:${plugin.installGeneration}`));
+    // Identify the installed plugin from the authoritative install snapshot
+    // (id + installGeneration), never by diffing the renderer's manifest list:
+    // that list may be empty/stale and `find` would return an unrelated plugin,
+    // opening the grant-all dialog for the wrong plugin.
+    const previousGenerations = new Map(
+      (useAppStore.getState().config.pluginConfigs ?? []).map(entry => [entry.id, entry.installGeneration]),
+    );
     try {
       const snapshot = await pluginService.installPlugin(sourcePath);
+      const installedEntry = snapshot.pluginConfigs.find(
+        entry => previousGenerations.get(entry.id) !== entry.installGeneration,
+      );
       syncStorePluginConfigs(snapshot);
-      const refreshed = await refresh();
+      await refresh();
       notifySuccess('plugins.installed');
-      return refreshed.find(plugin => !previousGenerations.has(`${plugin.id}:${plugin.installGeneration}`)) ?? null;
+      if (!installedEntry) return null;
+      return getPluginViews().find(
+        plugin => plugin.id === installedEntry.id && plugin.installGeneration === installedEntry.installGeneration,
+      ) ?? null;
     } catch (error) {
       await reconcileMutationFailure();
       console.error('[usePluginList] install failed:', error);
@@ -227,7 +250,9 @@ export function usePluginList() {
     // Retire the affected Worker before configuration removal can commit.
     pluginHost.disable(pluginId);
     try {
-      const snapshot = await pluginService.uninstallPlugin(pluginId);
+      const entry = useAppStore.getState().config.pluginConfigs?.find((plugin) => plugin.id === pluginId);
+      if (!entry) throw new Error(`plugin ${pluginId} is not installed`);
+      const snapshot = await pluginService.uninstallPlugin(pluginId, entry.installGeneration);
       syncStorePluginConfigs(snapshot);
       notifySuccess('plugins.uninstalled');
       await refresh();
