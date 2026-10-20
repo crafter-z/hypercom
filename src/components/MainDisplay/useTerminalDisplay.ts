@@ -38,13 +38,14 @@ export function useTerminalDisplay({ vm }: UseTerminalDisplayOptions) {
   }, [directionFilter, debouncedKeyword]);
 
   // Pause freezes the rendered window at the current newest line; data keeps
-  // accumulating in the ring buffer.
-  const togglePause = useCallback(() => {
-    setPaused((prev) => {
-      vmRef.current.setPaused(!prev);
-      return !prev;
-    });
-  }, []);
+  // accumulating in the ring buffer. The manager state is pushed from an
+  // effect so a remount (pop-out reattach) re-syncs UI and manager instead of
+  // leaving a stale frozenSeq behind.
+  useEffect(() => {
+    vmRef.current.setPaused(paused);
+  }, [vm, paused]);
+
+  const togglePause = useCallback(() => setPaused((prev) => !prev), []);
 
   return {
     directionFilter,

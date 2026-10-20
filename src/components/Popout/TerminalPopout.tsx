@@ -5,7 +5,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { popoutEventService, storageService } from '../../services/tauri';
 import { useSystemStore } from '../../stores/useSystemStore';
-import { computeBufferLimits, getViewportManager, replaceTerminalLines } from '../../utils/terminal/viewportManager';
+import { computeBufferLimits, getViewportManager, normalizeReceivedTerminalLines, replaceTerminalLines, snapshotTerminalLines } from '../../utils/terminal/viewportManager';
 import { usePortSerialFeed } from './usePortSerialFeed';
 import TerminalView from '../MainDisplay/TerminalView';
 
@@ -89,16 +89,33 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
         // 会早于监听器到达而丢失。
         const u = await popoutEventService.onTerminalSnapshot((payload) => {
           if (payload.portId !== portId) return;
-          const { lines, ...display } = payload.terminal;
+          const { lines: wireLines, ...display } = payload.terminal;
+          // Tauri serializes Uint8Array as number[] on the event wire. Rebuild
+          // typed arrays before the buffer sees them: decode/render call
+          // TextDecoder.decode(rawData) and rawData.subarray(), both of which
+          // throw on a plain array.
+          const lines = normalizeReceivedTerminalLines(wireLines);
           const { encoding, ...patch } = display;
           const terminal = useTerminalStore.getState();
           // encoding 只经 setTerminalEncoding（store 契约禁止经 setTerminalConfig
           // 写它——渲染器要靠这次切换重解码惰性行）。
           terminal.setTerminalConfig(portId, patch);
           if (encoding) terminal.setTerminalEncoding(portId, encoding);
+          const lastTs = lines.length > 0 ? lines[lines.length - 1].timestamp : null;
+          if (gateOpened) {
+            // The fallback already opened the gate and live RX was written.
+            // Merge instead of replacing, keeping only live rows newer than
+            // the snapshot's last row (older ones are covered by the snapshot).
+            const live = snapshotTerminalLines(portId);
+            replaceTerminalLines(portId, [
+              ...lines,
+              ...(lastTs === null ? live : live.filter((line) => line.timestamp > lastTs)),
+            ]);
+            return;
+          }
           // 闸门打开前管线没写过本窗缓冲，快照是唯一写入者 → 无条件替换。
           replaceTerminalLines(portId, lines);
-          openSnapshot(lines.length > 0 ? lines[lines.length - 1].timestamp : null);
+          openSnapshot(lastTs);
         });
         if (cancelled) {
           u();

@@ -334,6 +334,25 @@ describe('TerminalRenderer filtered rendering', () => {
     expect(tail.style.height).toBe('0px');
   });
 
+  it('clamps a stale scrollTop when the filtered list shrinks', () => {
+    fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
+    renderer.render(buf, identityView({ followEnabled: false, locked: false }));
+    container.scrollTop = 90 * ROW_HEIGHT;
+    // Filter down to two rows while the old scrollTop points far beyond the
+    // new content height: the window start must clamp instead of rendering
+    // nothing (blank terminal).
+    renderer.render(buf, identityView({
+      visibleSeqs: [0, 1],
+      visibleSeqsOffset: 0,
+      followEnabled: false,
+      locked: false,
+    }));
+    const rows = container.querySelectorAll('.terminal-line');
+    expect(rows.length).toBe(2);
+    const [head] = layerSpacers(container);
+    expect(head.style.height).toBe('0px');
+  });
+
   it('removes stale scroll geometry when filtering every row out', () => {
     fill(buf, Array.from({ length: 100 }, (_, i) => String(i)));
     renderer.render(buf, identityView());

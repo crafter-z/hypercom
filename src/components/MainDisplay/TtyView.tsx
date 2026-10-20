@@ -44,6 +44,7 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const terminalFont = useAppStore((s) => s.config.terminalFont);
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const backgroundImageEnabled = useAppStore((s) => s.config.backgroundImageEnabled);
+  const theme = useAppStore((s) => s.config.theme);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -162,19 +163,39 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     term.options.fontSize = terminalFontSize;
   }, [terminalFont, terminalFontSize]);
 
-  // 背景图毛玻璃（issue #13）：xterm 主题背景在创建时快照，玻璃开关切换后需重绘。
-  // 直接按 config + 当前 data-theme 构造 rgba —— 不读 CSS 变量，避免与
-  // ThemeProvider 的 effect 执行顺序竞态（父 effect 晚于子 effect 跑）。
+  // xterm 主题在创建时快照 CSS 变量；主题/玻璃开关切换后需整体重绘。
+  // 子组件 effect 先于 ThemeProvider 的父 effect 执行，因此推迟一帧再读
+  // data-theme/CSS 变量，避免拿到旧主题的配色（只更新 background 曾导致
+  // 明暗切换后前景/光标/选区仍是旧色）。
   useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    const dark = document.documentElement.getAttribute('data-theme') !== 'light';
-    const [r, g, b] = dark ? [25, 26, 30] : [255, 255, 255];
-    const background = backgroundImageEnabled
-      ? `rgba(${r}, ${g}, ${b}, 0.72)`
-      : dark ? '#191a1e' : '#ffffff';
-    term.options.theme = { ...(term.options.theme ?? {}), background };
-  }, [backgroundImageEnabled]);
+    let frame = 0;
+    const apply = () => {
+      const term = termRef.current;
+      if (!term) return;
+      const dark = document.documentElement.getAttribute('data-theme') !== 'light';
+      const [r, g, b] = dark ? [25, 26, 30] : [255, 255, 255];
+      const background = backgroundImageEnabled
+        ? `rgba(${r}, ${g}, ${b}, 0.72)`
+        : cssVar('--bg-primary', dark ? '#191a1e' : '#ffffff');
+      term.options.theme = {
+        background,
+        foreground: cssVar('--text-primary', dark ? '#c9cdd6' : '#1f2328'),
+        cursor: cssVar('--accent-color', '#5eafff'),
+        selectionBackground: cssVar('--bg-active', 'rgba(94, 175, 255, 0.16)'),
+      };
+    };
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(apply);
+    };
+    schedule();
+    const media = theme === 'system' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    media?.addEventListener('change', schedule);
+    return () => {
+      cancelAnimationFrame(frame);
+      media?.removeEventListener('change', schedule);
+    };
+  }, [theme, backgroundImageEnabled]);
 
   // 隐藏（display:none → 容器 0 尺寸）恢复可见 → 显式 re-fit。ResizeObserver
   // 也会在 display:none→block 时触发，这里再补一次保证确定性（隐藏期间 fit 被

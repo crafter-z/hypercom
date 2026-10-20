@@ -205,6 +205,12 @@ export class TerminalRenderer {
   /** Seq at the top of the viewport at the last render (non-follow only) —
    *  restores the reading position across a large trim (issue #10). */
   private anchorSeq: number | null = null;
+  /** One-shot suppression: a programmatic scroll (scrollToSeq) must not be
+   *  undone by the anchor restore in the render it triggers. */
+  private suppressAnchorRestore = false;
+  /** Re-attach (popout / pane move): restore the saved reading anchor even
+   *  when no head trim happened while the DOM was detached. */
+  private restoreAnchorOnAttach = false;
   private fullRedraw = false;
   private filterVersion = 0;
   private onScrollHandler: (() => void) | null = null;
@@ -249,6 +255,9 @@ export class TerminalRenderer {
       this.resizeObserver = new ResizeObserver(() => this.onRenderNeeded?.());
       this.resizeObserver.observe(container);
     }
+    // The buffer outlives a detach (pop-out / pane move); restore the seq the
+    // viewport was reading instead of resetting to the top on the next render.
+    this.restoreAnchorOnAttach = this.anchorSeq !== null && this.lastRenderedFirstSeq >= 0;
     this.fullRedraw = true;
   }
 
@@ -270,10 +279,10 @@ export class TerminalRenderer {
     this.tailSpacer = null;
     // Rows live inside the removed layer — dropping active is safe here
     // (the selection dies with the layer; parked rows are cleared too).
+    // lastRenderedFirstSeq / anchorSeq stay: they are seq-space state and
+    // let a re-attach restore the reading position (see attachToContainer).
     this.active.clear();
     this.pool = [];
-    this.lastRenderedFirstSeq = -1;
-    this.anchorSeq = null;
     this.clearPins();
     this.fullRedraw = true;
   }
@@ -301,8 +310,10 @@ export class TerminalRenderer {
     this.detach();
   }
 
-  /** Mark every row dirty (config change / buffer replacement). */
+  /** Mark every row dirty (config change / buffer replacement). Structural
+   *  changes (R13) also drop selection pins — their anchors may be rewritten. */
   invalidate(): void {
+    this.clearPins();
     this.fullRedraw = true;
   }
 
@@ -339,12 +350,16 @@ export class TerminalRenderer {
    *  every render pass. */
   private syncPins(): void {
     this.selectionSpans = this.captureSelectionSeqSpans();
-    this.ensureWatcher();
-    if (this.selectionSpans !== null) {
-      let pinnedRows = 0;
-      for (const span of this.selectionSpans) pinnedRows += span.endSeq - span.startSeq + 1;
-      if (pinnedRows > MAX_PINNED_ROWS) this.clearPins();
+    if (this.selectionSpans === null) {
+      // Whole-layer selection (Select-All) has no row anchors: a previously
+      // installed watcher has nothing to protect and must not leak.
+      if (this.selectionWatcher) this.clearPins();
+      return;
     }
+    this.ensureWatcher();
+    let pinnedRows = 0;
+    for (const span of this.selectionSpans) pinnedRows += span.endSeq - span.startSeq + 1;
+    if (pinnedRows > MAX_PINNED_ROWS) this.clearPins();
   }
 
   /** Drop all pins (and the watcher). Parked rows recycle on the next stale
@@ -463,7 +478,9 @@ export class TerminalRenderer {
       headSpacer.style.height = '0px';
       tailSpacer.style.height = '0px';
       this.recycleAll();
+      this.clearPins();
       this.anchorSeq = null;
+      this.restoreAnchorOnAttach = false;
       this.lastRenderedFirstSeq = firstSeq;
       return;
     }
@@ -505,11 +522,15 @@ export class TerminalRenderer {
     // a setLimits shrink moves the head arbitrarily far, and there the anchor
     // may already be trimmed (clamp to 0 / nearest surviving row).
     const anchorRestored =
+      !this.suppressAnchorRestore &&
       !follow &&
       !view.gestureActive &&
       this.selectionSpans === null &&
-      (headAdvance >= LARGE_TRIM_ROWS ||
+      (this.restoreAnchorOnAttach ||
+        headAdvance >= LARGE_TRIM_ROWS ||
         (headAdvance > 0 && this.anchorSeq !== null && this.anchorSeq >= firstSeq));
+    this.restoreAnchorOnAttach = false;
+    this.suppressAnchorRestore = false;
     if (anchorRestored) {
       const anchor = this.anchorSeq;
       // 过滤模式下 scrollTop 空间按 visIdx 索引（baseCount 是过滤后计数），
@@ -525,10 +546,16 @@ export class TerminalRenderer {
       ? Math.max(0, totalHeight - container.clientHeight)
       : container.scrollTop;
 
-    const firstVisIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS);
+    // A shrinking visible list (filter/search) can leave scrollTop beyond the
+    // new content height. Clamp the window start as well as the end: otherwise
+    // firstVisIdx > lastVisIdx, the row loop renders nothing, and the head
+    // spacer keeps a huge empty scroll range (blank terminal until scrolled).
+    const maxVisIdx = Math.max(0, baseCount - 1);
+    const clampedScrollTop = Math.min(scrollTop, maxVisIdx * rowHeight);
+    const firstVisIdx = Math.min(maxVisIdx, Math.max(0, Math.floor(clampedScrollTop / rowHeight) - OVERSCAN_ROWS));
     const lastVisIdx = Math.min(
-      baseCount - 1,
-      Math.ceil((scrollTop + container.clientHeight) / rowHeight) + OVERSCAN_ROWS,
+      maxVisIdx,
+      Math.max(firstVisIdx, Math.ceil((clampedScrollTop + container.clientHeight) / rowHeight) + OVERSCAN_ROWS),
     );
 
     // 2. Spacers carry the off-screen space; hidden parked rows contribute
@@ -610,7 +637,7 @@ export class TerminalRenderer {
     // Record the trim anchor for the next render: the seq at the top of the
     // viewport (non-follow only — follow re-pins every frame, no anchor
     // needed). headAdvance is measured against this on the next render.
-    if (!follow && !view.gestureActive) {
+    if (!follow) {
       const topVisIdx = Math.min(
         Math.floor(container.scrollTop / rowHeight),
         Math.max(0, baseCount - 1),
@@ -670,7 +697,10 @@ export class TerminalRenderer {
     if (align === 'center') scrollTop = targetTop - (clientHeight - rowHeight) / 2;
     else if (align === 'end') scrollTop = targetTop - clientHeight + rowHeight;
     container.scrollTop = Math.max(0, scrollTop);
-    // Materialize the rows at the target immediately.
+    // Materialize the rows at the target immediately. The render below must
+    // not override the requested position with the stale reading anchor
+    // (next-match / quick-jump after a head trim).
+    this.suppressAnchorRestore = true;
     this.render(buffer, view);
   }
 

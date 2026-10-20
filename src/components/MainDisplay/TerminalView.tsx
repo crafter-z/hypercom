@@ -351,7 +351,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
 
   const jumpToTop = useCallback(() => {
     useTerminalStore.getState().setTerminalConfig(portId, { scrollLocked: false });
-    vm.scrollToSeq(vm.buffer.firstSeq, 'start');
+    // The store write above only reaches the manager on the next effect pass;
+    // update the manager synchronously or the render triggered by the jump
+    // still pins to the bottom (followEnabled was true in this pass).
+    vm.setLocked(false);
+    vm.scrollToTop();
   }, [portId, vm]);
 
   const jumpToBottom = useCallback(() => {

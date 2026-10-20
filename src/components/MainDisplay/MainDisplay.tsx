@@ -59,6 +59,10 @@ const MainDisplay: React.FC = () => {
   const renderNode = useCallback((
     node: PaneNode,
     parentBranch: BranchPane | null,
+    /** node.size relative to the whole MainDisplay container (product of all
+     *  ancestor sizes); the root is 1. Divider pixel deltas must be scaled by
+     *  this, not by the immediate parent's size. */
+    visibleFraction: number,
   ): React.ReactNode => {
     // flex-basis: 当节点处于分支内时按 size 比例展开；根节点 flex:1。
     // flex-shrink 取 1（而非 0）：兄弟节点之间还有 5px 分隔条，百分比
@@ -107,18 +111,17 @@ const MainDisplay: React.FC = () => {
               branch.direction === 'vertical'
                 ? rect.width    // row 布局 → 横向尺寸
                 : rect.height;  // column 布局 → 纵向尺寸
-            // branchVisible 是根容器的尺寸；子节点 size 之和应≈1
-            // deltaFraction = deltaPx / branchVisible * parentSizeFraction
-            // 父分支自身 size 占比（根为1）
-            const parentFraction = parentBranch ? parentBranch.size : 1;
-            const deltaFraction = (deltaPx / branchVisible) * parentFraction;
+            // branchVisible 是根容器的尺寸；branch 的可见尺寸还要乘以它
+            // 相对根节点的占比（祖先 size 的乘积）。直接拿 parentBranch.size
+            // 会在嵌套分屏里漏掉 branch 自身 size，导致拖动量成倍偏大。
+            const deltaFraction = (deltaPx / branchVisible) * visibleFraction;
             if (deltaFraction !== 0) {
               resizeChildren(branch.id, idx, deltaFraction);
             }
           };
           return (
             <React.Fragment key={child.id}>
-              {renderNode(child, branch)}
+              {renderNode(child, branch, visibleFraction * child.size)}
               {idx < siblings.length - 1 && (
                 <ResizeHandle
                   // 分隔条方向与分屏方向**同义**，直接透传：'vertical' 分屏
@@ -137,7 +140,7 @@ const MainDisplay: React.FC = () => {
 
   const panesLayout = (
     <div ref={containerRef} className="panes-layout">
-      {renderNode(paneTree, null)}
+      {renderNode(paneTree, null, 1)}
     </div>
   );
 
@@ -148,6 +151,7 @@ const MainDisplay: React.FC = () => {
         collisionDetection={closestCenter}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
+        onDragCancel={() => setDragTabId(null)}
       >
         {panesLayout}
         <DragOverlay dropAnimation={null}>

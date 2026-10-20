@@ -145,8 +145,11 @@ export class TerminalViewportManager {
 
   /** Ctrl+L / mode-switch clear. */
   clear(): void {
+    const wasPaused = this.frozenSeq !== null;
     this.buffer.clear();
-    this.frozenSeq = null;
+    // Keep the pause state aligned with the UI toggle: a paused view freezes
+    // at the (now empty) tail instead of silently resuming follow.
+    this.frozenSeq = wasPaused ? this.buffer.lastSeq : null;
     this.selectedRange = null;
     this.filtered = { seqs: [], offset: 0 };
     this.matches = { seqs: [], offset: 0 };
@@ -268,6 +271,15 @@ export class TerminalViewportManager {
     }
   }
 
+  /** Scroll to the first row of the currently visible list (filter-aware). */
+  scrollToTop(): void {
+    if (!this.renderer || this.buffer.length === 0) return;
+    const firstVisible = this.filterActive
+      ? this.filtered.seqs[this.filtered.offset] ?? this.buffer.firstSeq
+      : this.buffer.firstSeq;
+    this.renderer.scrollToSeq(firstVisible, 'start', this.buffer, this.buildView());
+  }
+
   updateConfig(patch: Partial<RendererConfig>): void {
     const encoding = this.getEncoding();
     const displayFormat = this.getDisplayFormat();
@@ -360,7 +372,9 @@ export class TerminalViewportManager {
   private matchSetCache: Set<number> | null = null;
   private matchSetCacheKey = '';
   private cachedMatchSet(): Set<number> {
-    const key = `${this.matches.offset}:${this.matches.seqs.length}:${this.currentMatch}`;
+    // currentMatch only changes the `current-match` class, not set membership —
+    // including it here rebuilt up to 50k entries on every F3/prev jump.
+    const key = `${this.matches.offset}:${this.matches.seqs.length}`;
     if (this.matchSetCache === null || key !== this.matchSetCacheKey) {
       this.matchSetCache = new Set(this.matches.seqs.slice(this.matches.offset));
       this.matchSetCacheKey = key;
@@ -529,6 +543,20 @@ export function snapshotTerminalLines(portId: string, cap = Number.MAX_SAFE_INTE
   if (!vm) return [];
   const start = Math.max(vm.buffer.firstSeq, vm.buffer.lastSeq - cap + 1);
   return vm.buffer.snapshot(start);
+}
+
+/** Tauri's JSON event IPC turns nested Uint8Array into number[]; rebuild the
+ *  typed arrays before a received snapshot enters the buffer (decode/render
+ *  call TextDecoder.decode(rawData) / rawData.subarray, both of which throw on
+ *  a plain array). */
+export function normalizeReceivedTerminalLines(lines: TerminalLine[]): TerminalLine[] {
+  return lines.map((line) => {
+    if (!line.rawData || line.rawData instanceof Uint8Array) return line;
+    return {
+      ...line,
+      rawData: Uint8Array.from(line.rawData as unknown as ArrayLike<number>),
+    };
+  });
 }
 
 /** Replace the whole buffer (popout snapshot receive / test reset). */

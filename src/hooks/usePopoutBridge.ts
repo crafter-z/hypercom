@@ -74,6 +74,15 @@ export function usePopoutBridge() {
     popoutEventService
       .onCommandSetUpdated((payload) => {
         if (cancelled) return;
+        // The set may have been deleted in this window after the popout loaded
+        // it. `updateSendCommandSet` would be a no-op, but saveCommandSet is an
+        // upsert and would resurrect the deleted set in config.json.
+        if (!useRuleStore.getState().sendCommandSets.some((set) => set.id === payload.set.id)) {
+          popoutEventService
+            .emitCommandSetsChanged(useRuleStore.getState().sendCommandSets)
+            .catch((e) => console.debug('[usePopoutBridge] refresh deleted set failed:', e));
+          return;
+        }
         useRuleStore.getState().updateSendCommandSet(payload.set.id, payload.set);
         void storageService.saveCommandSet(payload.set).catch((error) => { if (!cancelled) notifyError(error); });
       })
@@ -121,6 +130,10 @@ export function usePopoutBridge() {
         }
         // 先把主窗管线队列里的整行冲进环形缓冲：快照必须覆盖主窗到此刻为止收到的
         // 全部事件，弹窗才能用「时间戳晚于快照末行」判定哪些实时事件还没进快照。
+        // Flush both the batch queue and the unterminated assembler tail: the
+        // pop-out replaces its buffer with this snapshot, so bytes received
+        // before the request but not yet newline-terminated must be included.
+        getRxPipeline().flushTail(payload.portId);
         getRxPipeline().flushBeforeSend(payload.portId);
         const lines = snapshotTerminalLines(payload.portId, SNAPSHOT_LINE_CAP);
         void popoutEventService

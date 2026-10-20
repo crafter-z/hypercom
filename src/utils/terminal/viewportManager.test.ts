@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TerminalLine } from '../../types';
-import { TerminalViewportManager, appendTerminalLines, appendTerminalLine, clearTerminal, computeBufferLimits, getViewportManager, releaseViewportManager } from './viewportManager';
+import { TerminalViewportManager, appendTerminalLines, appendTerminalLine, clearTerminal, computeBufferLimits, getViewportManager, normalizeReceivedTerminalLines, releaseViewportManager } from './viewportManager';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 
@@ -271,5 +271,29 @@ describe('viewportManager adapter functions', () => {
     useAppStore.getState().setConfig({ maxDisplayLines: undefined as unknown as number });
     const limits = computeBufferLimits();
     expect(limits.maxLines).toBe(100000);
+  });
+});
+
+describe('normalizeReceivedTerminalLines', () => {
+  it('rebuilds number[] wire rawData into Uint8Array', () => {
+    const wire = [{
+      timestamp: 1,
+      direction: 'RX' as const,
+      rawData: [0x41, 0x42] as unknown as Uint8Array,
+      isHex: false,
+    }];
+    const [line] = normalizeReceivedTerminalLines(wire);
+    expect(line.rawData).toBeInstanceOf(Uint8Array);
+    expect(Array.from(line.rawData!)).toEqual([0x41, 0x42]);
+  });
+
+  it('keeps lines without rawData and existing typed arrays', () => {
+    const typed = new Uint8Array([1, 2]);
+    const [kept, same] = normalizeReceivedTerminalLines([
+      { timestamp: 1, direction: 'TX', content: 'x', isHex: false },
+      { timestamp: 2, direction: 'RX', rawData: typed, isHex: false },
+    ]);
+    expect(kept.rawData).toBeUndefined();
+    expect(same.rawData).toBe(typed);
   });
 });
