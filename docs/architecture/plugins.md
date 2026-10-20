@@ -39,7 +39,7 @@
 |---|---|---|
 | `list_plugins` | 无 | `PluginListResponse = {revision, pluginConfigs, plugins}`；一致扫描/状态快照，不修改配置 |
 | `install_plugin` | `{sourcePath}` | `PluginStateSnapshot = {revision, pluginConfigs}`；安装成功后禁用清权并分配新身份，保留升级前的用户 `data/` |
-| `uninstall_plugin` | `{id}` | `PluginStateSnapshot`；提交后删除该插件代码、状态及私有数据 |
+| `uninstall_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须匹配当前安装身份（防止升级期间排队的旧请求卸载新代码）；提交后删除该插件代码、状态及私有数据 |
 | `set_plugin_enabled` | `{id, enabled, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须为用户实际审阅的安装身份，旧身份拒绝 |
 | `set_plugin_permissions` | `{id, permissions, expectedGeneration}` | `PluginStateSnapshot`；整体替换当前支持且 manifest 已声明的权限；可在禁用时授权 |
 | `read_plugin_asset` | `{id, relPath}` | UTF-8 `string \| null`；仅已授权目标确实不存在为 null，空文件返回 `''`，其他失败 reject |

@@ -482,9 +482,9 @@ Commands are split into 12 domain files under `src-tauri/src/commands/`; `lib.rs
 | `tty_sim.rs`（3） | enable_gitbash_sim, disable_gitbash_sim, resize_gitbash_sim（模拟终端 git bash pty，调试专用） |
 | `config.rs`（5） | get_config, set_config, update_session_snapshot, get_session_snapshot, get_config_path（**无 reset_config**） |
 | `diag.rs`（4） | get_diag_log_path, read_diag_log, clear_diag_log, append_diag_log（应用自身诊断日志） |
-| `log.rs`（8） | save_log_as, export_terminal_log, get_log_files, start_logging, stop_logging, open_path, open_log_directory, migrate_log_directory（**逐字段 `set_log_*` 已全部删除**——日志设置改走 `set_config`） |
+| `log.rs`（7） | pick_and_save_log, get_log_files, start_logging, stop_logging, open_path, open_log_directory, migrate_log_directory（**逐字段 `set_log_*` 已全部删除**——日志设置改走 `set_config`；另存路径由宿主原生对话框选择） |
 | `storage.rs`（20） | 6 类实体 CRUD（command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs，各 save/load/delete）+ save_port_groups + save_port_meta — synchronous ConfigManager operations on config.json；内部共享 `read_config` / `save_entity` / `delete_entity` + `entity_accessors!` / `impl_entity_id!` 宏访问器 |
-| `file.rs`（4） | write_text_file, read_text_file（配置导入导出）, read_image_data_url（背景图）, plugin_pick_files（后端原生选择后读取，拒绝前端任意路径） |
+| `file.rs`（5） | pick_text_file_and_read / pick_text_file_and_write（宿主原生对话框，前端不传路径）, read_text_file（仅日志根内回放）, read_image_data_url（背景图）, plugin_pick_files（后端原生选择后读取） |
 | `plugin.rs`（13） | list_plugins, install_plugin, uninstall_plugin, set_plugin_enabled, set_plugin_permissions, read_plugin_asset, write_plugin_asset, plugin_http, plugin_open_external, create_plugin_view, update_plugin_view, send_plugin_view_message, destroy_plugin_view；expectedGeneration / revision / 有界 IO / 持久化事务及原生视图契约见 `docs/architecture/plugins.md` |
 | `popout.rs`（3） | open_popout(kind, target_id), close_popout(kind, target_id), set_popout_always_on_top(kind, target_id, on)（label 只在 Rust 计算） |
 | `system_cmds.rs`（3） | get_system_status, prevent_sleep, prevent_screen_off（+ 门控助手 `dev_only` / `is_debug_build`） |
@@ -568,6 +568,14 @@ scope: ui | backend | store | hooks | docs
 - **快捷发送 pill 两行**：`.op-quick-cmd` 为 flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称同行）在上、`.op-quick-cmd-content` 内容在下。
 - **自定义文本右键菜单**：`useTextEditContextMenu()` 是全局拦截（App 根 + PopoutShell 各挂一次）——可编辑目标右键 → 自定义菜单（`document.execCommand` 执行，右键时快照选区、点击项先 `focus({preventScroll:true})` + 恢复选区再执行）；非可编辑目标一律 `preventDefault`；组件级 `onContextMenu` 且 stopPropagation 的区域（终端行/侧边栏/标签页）不受影响。
 - **发送提示前缀默认空**：`sendPrefix` 默认 `''`（TS `defaultConfig` + Rust `AppConfig::default` 两侧同步）；终端 TX 行已有方向标识，前缀只是可选的附加提示。
+- **配置目录单实例锁**：`AppState::new` 在 `config.json` 同目录打开 `config.lock`（Windows `share_mode(0)` / Unix `flock`）；第二个实例初始化失败并退出，避免并发写 config/session 的固定临时文件与逐进程 revision CAS 互相覆盖。
+- **文件对话框由宿主拥有**：`pick_text_file_and_read` / `pick_text_file_and_write` / `pick_and_save_log` 在 Rust 里弹原生对话框，前端只传 title/defaultFileName/filters，不再传任意路径；`read_text_file` 仅用于日志回放且限定在配置的日志根内。
+- **数值输入用 draft 提交**：`shared/NumericInput.tsx` 在 blur/Enter 才 `clampNumber` 提交；禁止在 `onChange` 里逐键 clamp（键入 24 会被夹成 8→84）。
+- **发送绑定连接代次**：`serial:status` 带 `generation`；`sendToPort` / `ttyService` / 文件发送把 `expectedGeneration` 传给后端，跨重连排队的旧发送被拒绝而不是写进新会话。
+- **CSS 颜色是未信任输入**：规则/协议模板颜色进 `innerHTML` 的 `style="color:…"` 前必须经 `src/utils/cssColor.ts` 的 `safeCssColor`（唯一入口；拒绝引号/尖括号/`;`/`url()` 等属性逃逸形态）。`highlightEngine` 与 `protocolRenderer` 共用，禁止各自写正则。
+- **`serial:file_progress` 是 camelCase wire**：Rust `FileProgressPayload` 带 `#[serde(rename_all = "camelCase")]`（`{portId, transferId, sentBytes, totalBytes, done}`），与其它多数 snake_case 事件不同；`src/services/eventContract.test.ts` 从两侧源文本守卫字段名。
+- **插件 ZIP/资产路径组件统一校验**：`plugin::validate_path_component`（拒绝尾随点/空格、`:`、`~`、控制字符、Windows 设备名）同时用于 ZIP 解压、`sanitize_asset_path` 与插件 id 标签；不要只检查 `..`。
+- **TTY DSR 应答不得阻塞 RX**：`tty_sim` 读线程对 `\x1b[6n` 使用 `try_lock` 写 writer；writer 被大块 TX 占用时交给单个后台 helper 等待，避免 RX 与 TX 互锁。
 - **TTY 模式**：TTY 端口（`mode:'tty'`）由 xterm.js 渲染完整终端流——**无本地 TX 回显**（对端 shell 会 echo），`sendToPort` TTY 分支跳过 TX 回显 + `flushNow`；**TTY 写 pty 做过回车归一**（`normalize_tty_line_ending`）：pty 行规程（ICRNL）把 `\r` 转成 `\n`，`\r\n` 会变成两个换行——故 `\r\n` 统一归一为单个 `\r`，`\r`/`\n`/`None` 原样保留；`useSerialReceive` 对 TTY 端口**跳过触发引擎/协议解析/RxPipeline 行组装**直喂 `ttyService.feed`；RX 解码**仅 UTF-8**（流式，无 GBK）——TRX 的多编码切换不适用于 TTY；**弹出窗不支持 TTY**；**标签切换保留会话**（TTY 标签在 Pane 内常驻挂载、非活动 `display:none` 隐藏 `.tty-view-hidden`，恢复可见 re-fit）；**切换模式清空缓冲区**（`ParamsSection` 清 TerminalStore + `flushAndReset` + `ttyService.clear`）；`ttyService`/`getRxPipeline` 的 `dispose()`/`reset()` 仅测试用，应用生命周期不得调用（模块单例纪律）。
 
 ## 方案B 终端显示引擎（issue #14 v0.6.0；issue #18 流式布局 + 选区钉住重构）

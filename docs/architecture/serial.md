@@ -68,7 +68,7 @@ openPort(portId, baud)
 - 打开时在 `ports_real::open` 内设置 DTR/RTS（clone 前，设备级共享），随后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）。
 - `SerialPortHandle`：`read_port`（读线程独占，只锁读）/`write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>`；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享）。
 - **陈旧句柄守卫**：异常断线后陈旧句柄留在 `ports`，`open_port` 通过 live/session generation 与系统枚举交叉核对；旧会话只在身份仍匹配时回收，避免并发打开误删新会话。
-- 每个成功打开会话分配单调 `connection_generation`。文件发送、读线程终态、TTY reader 和外部工具恢复都必须验证会话代次；旧 reader/旧工具不能覆盖新连接的 `connected` / `disconnected` / `error` 状态。
+- 每个成功打开会话分配单调 `connection_generation`，`serial:status` 事件携带该值。文件发送、读线程终态、TTY reader 和外部工具恢复都必须验证会话代次；旧 reader/旧工具不能覆盖新连接的 `connected` / `disconnected` / `error` 状态。普通发送（`send_serial_data`）与文件发送还接受前端观察到的 `expected_generation`，排队跨重连的旧发送在校验写句柄前被拒绝。
 - `send_serial_data` 的真实串口和 GIT:BASH 写入都在全局 `SerialManager` 锁外执行：锁内只领取 session-bound 写租约，关闭在锁外等待租约/reader/child 收尾。TTY 写入检查 `running`，关闭会 detach 句柄后再 kill、drop master、join 和 reap。
 - **发送异步化（issue #6-1）**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 是 `Arc<Mutex<SerialManager>>`、`log_manager` 是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），`spawn_blocking` 闭包克隆这两个 `Arc` 供 `'static` 使用。
 - `openPort`/`closePort`/自动重连共用前端 per-port operation lane；迟到的 invoke 完成和 `serial:status` 事件按意图/代次丢弃，不再用旧结果覆盖手动关闭。

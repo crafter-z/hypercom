@@ -33,7 +33,7 @@
 
 - `LogLineAssembler`（`assembler.rs`）：CR/LF/跨事件CRLF组行与`pending_cr`/`just_forced`边界语义。4096字节无分隔符强制flush按writer锁定的UTF-8/GBK字符边界最多延迟3字节，避免字符被拆成替换符；畸形流仍有4099字节硬边界，单字节编码按原阈值。与前端`rxAssembler`保持同一切分口径。
 - `LogManager::write_rx`：RX 方向组行落盘（不再按读取块一行）；TX 保持直写 `write`。RX 尾部滞留 ≥250ms（`RX_TAIL_SILENCE_FLUSH`）时，下一个事件先经 `flush_stale_rx_tail` 把尾部冲刷成行，长停顿的半行不会无限滞留。
-- `close_writer`、writer 替换、`flush_all`（崩溃收尾）和活动日志 `save_log_as` 都先把尚未终结的 RX 尾部写成最后一行，再 flush/sync；仅刷 `BufWriter` 不会触及组装器内的半行。分片滚动保留组装器，跨片尾部不会被清空。
+- `close_writer`、writer 替换、`flush_all`（崩溃收尾）和活动日志 `save_log_as` 都先把尚未终结的 RX 尾部写成最后一行；250ms 静默冲刷遇到**未完成的多字节字符**会延后到下一个事件（避免把一个 UTF-8/GBK 字符拆成 U+FFFD + 续字节），关闭路径仍强制落盘，再 flush/sync；仅刷 `BufWriter` 不会触及组装器内的半行。分片滚动保留组装器，跨片尾部不会被清空。
 - 续写模式替换同端口 writer 时，如果新旧路径相同，该文件仍归新 writer 所有；旧 writer 收尾不得将它当作空日志删除，否则 Unix 下后续写入会落到已解除链接的句柄。
 - 空行不落盘守卫：`PortLogWriter::write_line` 顶部 `data.is_empty()` 直接返 `Ok`；string 格式 decode 后 `trim_end_matches(['\r','\n'])` 为空（只含行结束符的内容）同样跳过（issue #12：日志空行不落盘）。`close_writer` 收尾时 0 字节文件经 `retire_path` **删除**（有内容的文件登记进会话反查表）。
 - 新增日志写入路径不要绕过这两个守卫（组装器仍会产出空块，这是刻意的行边界语义）。
@@ -52,7 +52,7 @@
 
 ### 命令（commands/log.rs）
 
-`start_logging` / `stop_logging` / `save_log_as` / `export_terminal_log` / `get_log_files` / `open_path` / `open_log_directory` / `migrate_log_directory`（**无 `set_log_*`**）。跨 `.await` 锁纪律：提取 + clone + drop `MutexGuard` 再 await（`commands/log.rs` 是示范模式）。
+`start_logging` / `stop_logging` / `pick_and_save_log` / `get_log_files` / `open_path` / `open_log_directory` / `migrate_log_directory`（**无 `set_log_*`**；`save_log_as` 拒绝把活动文件拷到自身，`migrate_log_directory` 只接受当前活动日志根）。跨 `.await` 锁纪律：提取 + clone + drop `MutexGuard` 再 await（`commands/log.rs` 是示范模式）。
 
 ## 应用诊断日志（diaglog，issue #5-2）
 

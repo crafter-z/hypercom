@@ -100,12 +100,12 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 文件发送
 
-- `send_file`（`commands/serial.rs`：async，`tokio::fs::read` 后按 `chunk_size` 分块写；真实串口沿用总写期限并累计已确认写出的部分字节）；`delay_ms==0` 时 `tokio::task::yield_now().await` 让出。
+- `send_file`（`commands/serial.rs`：async，打开文件后以 `take(MAX+1)` 有界读取（拒绝 FIFO/设备与读取期间增长的文件），再按 `chunk_size`（clamp 1–1 MiB）分块写；真实串口沿用总写期限并累计已确认写出的部分字节）；`delay_ms==0` 时 `tokio::task::yield_now().await` 让出。
 - **可取消 / 单飞**：每端口同一时刻仅允许一次 `send_file`；已在发送时拒绝另一份文件，取消令牌不会被覆盖。取消命令置位该端口令牌，发送循环下一块前退出。
 - **统一收尾**：注册令牌后，无论正常、取消、读文件失败、串口写错或空文件，都清理本次令牌并发 `serial:file_progress{done:true}`；前端进度条不会因读取阶段提前失败卡住。
 - **前端 `useFileSend`（`components/OperationPanel/hooks/useFileSend.ts`）收口三个不变量**：
   1. **守卫在弹文件框之前**：`startFileSend` 先查 `isSendablePort`，不可发送直接 toast `sendSection.portClosedWarning` 返回——不该让用户先挑完文件再被告知端口没连（旧实现绕过守卫，未连接端口也能选文件、只在后端报错）。
-  2. **按增量计入 TX 流量**：进度事件里 `sent_bytes` 是本次运行累计值，与 `countedBytesRef` 比出差量，正增量才 `trafficStats.addTx`；`done` 时归零，下一次运行重新计数（旧实现文件发几 MB 而 TX 计数器纹丝不动）。
+  2. **按增量计入 TX 流量**：进度事件是 camelCase wire（`{portId, transferId, sentBytes, totalBytes, done}`）；`sentBytes` 是本次运行累计值，与 `countedBytesRef` 比出差量，正增量才 `trafficStats.addTx`；`done` 时归零，下一次运行重新计数（旧实现文件发几 MB 而 TX 计数器纹丝不动）。
   3. **成功 toast 只在真发完时弹**：`done && sent >= total > 0` 才 `notifySuccess('sendSection.file.sent')`；取消（`sent < total`）与空文件（`total == 0`）静默清进度条，否则取消时误报「已发送」、空文件残留 0/0 进度条。
 
 ## 触发引擎（条件触发，issue #3-1）
