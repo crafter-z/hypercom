@@ -6,7 +6,7 @@ import { clearTerminal } from '../../utils/terminal/viewportManager';
 import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { open } from '@tauri-apps/plugin-dialog';
 import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Square, Type } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
@@ -154,14 +154,11 @@ const OperationPanel: React.FC = () => {
     if (tab?.kind !== 'serial' || !isRawSerialDisplay(tab)) return;
     const portId = tab.portId;
     try {
-      const filePath = await save({
+      await logService.pickAndSaveLog(portId, {
         title: t('paramsSection.saveDialog.title'),
-        defaultPath: `${portId}.log`,
+        defaultFileName: `${portId}.log`,
         filters: [{ name: t('paramsSection.saveDialog.filterName'), extensions: ['log', 'txt'] }],
       });
-      const current = useAppStore.getState();
-      const currentTab = current.tabs.find((item) => item.id === current.activeTabId);
-      if (filePath && currentTab?.id === tab.id && isRawSerialDisplay(currentTab)) await logService.saveLogAs(portId, filePath);
     } catch (e) { console.error('Failed to save log:', e); notifyError(e); }
   };
 

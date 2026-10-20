@@ -14,12 +14,13 @@ export interface LogFileInfoResult {
 }
 
 export const logService = {
-  saveLogAs: (portId: string, path: string): Promise<void> => {
-    return invoke<void>('save_log_as', { portId, path });
-  },
-
-  exportTerminalLog: (path: string, content: string): Promise<void> => {
-    return invoke<void>('export_terminal_log', { path, content });
+  /** 宿主原生 save 对话框 + 当前端口日志另存；前端不提供路径。 */
+  pickAndSaveLog: (portId: string, options: {
+    title?: string;
+    defaultFileName?: string;
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }): Promise<boolean> => {
+    return invoke<boolean>('pick_and_save_log', { portId, options });
   },
 
   getLogFiles: (): Promise<LogFileInfoResult[]> => {

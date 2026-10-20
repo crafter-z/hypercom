@@ -5,13 +5,24 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 
+export interface TextFileDialogOptions {
+  title?: string;
+  defaultFileName?: string;
+  filters?: Array<{ name: string; extensions: string[] }>;
+}
+
 export const fileService = {
-  /** 将文本内容写入指定路径（配置导出）。路径来自 save() 对话框。 */
-  writeTextFile: (path: string, content: string): Promise<void> => {
-    return invoke<void>('write_text_file', { path, content });
+  /** 宿主原生 save 对话框 + 写入；前端不提供路径。取消返回 null。 */
+  pickTextFileAndWrite: (content: string, options: TextFileDialogOptions): Promise<string | null> => {
+    return invoke<string | null>('pick_text_file_and_write', { content, options });
   },
 
-  /** 读取文本文件内容（配置导入）。路径来自 open() 对话框。 */
+  /** 宿主原生 open 对话框 + 读取；前端不提供路径。取消返回 null。 */
+  pickTextFileAndRead: (options: TextFileDialogOptions): Promise<string | null> => {
+    return invoke<string | null>('pick_text_file_and_read', { options });
+  },
+
+  /** 读取应用日志文件回放（后端限定在配置的日志根目录内）。 */
   readTextFile: (path: string): Promise<string> => {
     return invoke<string>('read_text_file', { path });
   },

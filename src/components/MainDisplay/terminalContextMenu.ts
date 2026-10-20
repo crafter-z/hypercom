@@ -4,14 +4,13 @@
  * Builds the ContextMenuEntry[] for TerminalView: clipboard actions for the
  * resolved selection range, HEX <-> text conversions of the browser
  * selection, and TXT/CSV exports written to real files via the save()
- * dialog + Rust `std::fs::write` (logService.exportTerminalLog).
+ * host-owned save dialog + Rust `pick_text_file_and_write`.
  *
  * Receives exactly the data + callbacks it needs as arguments so it stays
  * unit-testable and free of component coupling.
  */
 import type { TFunction } from 'i18next';
-import { save } from '@tauri-apps/plugin-dialog';
-import { logService } from '../../services/tauri';
+import { fileService } from '../../services/tauri';
 import { hexToString, stringToHex } from '../../utils/hexUtils';
 import { formatTerminalTimestamp } from '../../utils/timeFormat';
 import { formatLineForCopy } from '../../utils/terminalSearch';
@@ -112,16 +111,15 @@ export function buildTerminalContextMenuItems(
       : 'timestamp,direction,content\n' + lines.map((l, idx) =>
           `"${lineTimestamp(idx)}","${l.direction}","${getLineText(l, enc).replace(/"/g, '""')}"`
         ).join('\n');
-    const filePath = await save({
-      title: t(ext === 'txt' ? 'terminalView.saveDialog.title.txt' : 'terminalView.saveDialog.title.csv'),
-      defaultPath: `${portId}-${exportTimestamp()}.${ext}`,
-      filters: ext === 'txt'
-        ? [{ name: t('terminalView.saveDialog.filterName'), extensions: ['txt'] }]
-        : [{ name: 'CSV', extensions: ['csv'] }],
-    });
-    if (filePath === null) return;
     try {
-      await logService.exportTerminalLog(filePath, body);
+      const saved = await fileService.pickTextFileAndWrite(body, {
+        title: t(ext === 'txt' ? 'terminalView.saveDialog.title.txt' : 'terminalView.saveDialog.title.csv'),
+        defaultFileName: `${portId}-${exportTimestamp()}.${ext}`,
+        filters: ext === 'txt'
+          ? [{ name: t('terminalView.saveDialog.filterName'), extensions: ['txt'] }]
+          : [{ name: 'CSV', extensions: ['csv'] }],
+      });
+      if (saved === null) return;
     } catch (err) {
       console.error(`Failed to export ${ext.toUpperCase()}:`, err);
       notifyError(err);

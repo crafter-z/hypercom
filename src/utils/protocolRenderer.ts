@@ -7,20 +7,10 @@
 
 import type { TerminalLine, ParsedField } from '../types';
 import { escapeHtml } from './highlightEngine';
+import { safeCssColor } from './cssColor';
 import { createDecoder } from './lineText';
 import { hexByte } from './hexFormat';
 
-/**
- * Validate that a color string is safe for CSS injection.
- * Accepts hex (#fff, #ffffff, #ffffffff), rgb/rgba/hsl/hsla functional notation, and named colors.
- */
-function isValidColor(color: string): boolean {
-  return (
-    /^#[0-9a-fA-F]{3,8}$/.test(color) ||
-    /^(rgb|hsl)a?\([^)]*\)$/.test(color) ||
-    /^[a-z]+$/i.test(color)
-  );
-}
 
 /**
  * Find the field that covers a given byte index.
@@ -51,8 +41,9 @@ function renderHexMode(rawData: Uint8Array, coverage: (ParsedField | null)[]): s
       i++;
     }
     const hexStr = hexBytes.join(' ');
-    if (currentField && isValidColor(currentField.color)) {
-      parts.push(`<span style="color:${currentField.color}">${hexStr}</span>`);
+    const color = currentField ? safeCssColor(currentField.color) : null;
+    if (color) {
+      parts.push(`<span style="color:${color}">${hexStr}</span>`);
     } else {
       // Gap byte or invalid color — no styling
       parts.push(hexStr);
@@ -79,8 +70,9 @@ function renderTextMode(
     while (i < rawData.length && coverage[i] === currentField) i++;
     const decoded = decoder.decode(rawData.subarray(start, i), { stream: i < rawData.length });
     const escaped = escapeHtml(decoded);
-    if (currentField && isValidColor(currentField.color)) {
-      parts.push(`<span style="color:${currentField.color}">${escaped}</span>`);
+    const color = currentField ? safeCssColor(currentField.color) : null;
+    if (color) {
+      parts.push(`<span style="color:${color}">${escaped}</span>`);
     } else {
       // Gap byte or invalid color — plain escaped text
       parts.push(escaped);

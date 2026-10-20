@@ -17,6 +17,7 @@ use tauri::Manager;
 use tokio::sync::Semaphore;
 
 use crate::commands::CommandError;
+use crate::AppState;
 
 static PLUGIN_DIALOG_BUDGETS: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -32,30 +33,146 @@ fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError>
         .clone())
 }
 
-/// 将文本内容写入指定路径（配置导出）。
-/// 目标路径由用户通过系统 save 对话框显式选择，仅校验父目录有效。
-#[tauri::command]
-pub fn write_text_file(path: String, content: String) -> Result<(), CommandError> {
-    let target = Path::new(&path);
-    target
-        .parent()
-        .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path}")))?
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
-    std::fs::write(target, content.as_bytes())
-        .map_err(|e| CommandError::Io(format!("Failed to write file '{path}': {e}")))
+/// Host-owned text-file dialogs. The renderer never supplies a path: it only
+/// supplies presentation options, so a compromised renderer cannot turn these
+/// commands into arbitrary file read/write primitives.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFileDialogOptions {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub default_file_name: Option<String>,
+    #[serde(default)]
+    pub filters: Option<Vec<PluginFileFilter>>,
 }
 
-/// 读取文本文件内容（配置导入）。
-/// 目标路径由用户通过系统 open 对话框显式选择，仅校验文件存在且可 canonicalize。
-#[tauri::command]
-pub fn read_text_file(path: String) -> Result<String, CommandError> {
-    let target = Path::new(&path);
-    target
+const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Show a file dialog on the calling window and return the chosen path.
+/// Blocking; call from `spawn_blocking`.
+pub(crate) fn pick_text_file_path(
+    window: &tauri::WebviewWindow,
+    options: &TextFileDialogOptions,
+    save: bool,
+) -> Option<PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = window.dialog().file();
+    if let Some(title) = options.title.as_ref() {
+        dialog = dialog.set_title(title);
+    }
+    if let Some(name) = options.default_file_name.as_ref() {
+        dialog = dialog.set_file_name(name);
+    }
+    if let Some(filters) = options.filters.as_ref() {
+        for filter in filters {
+            let exts: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(filter.name.clone(), &exts);
+        }
+    }
+    let picked = if save {
+        dialog.blocking_save_file()
+    } else {
+        dialog.blocking_pick_file()
+    };
+    picked.and_then(|path| path.into_path().ok())
+}
+
+fn read_text_file_limited(path: &Path) -> Result<String, CommandError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| CommandError::Io(format!("Failed to stat file: {e}")))?;
+    if !metadata.is_file() || metadata.len() > MAX_TEXT_FILE_BYTES {
+        return Err(CommandError::Other(
+            "File is not a regular file or exceeds the 64MB limit".into(),
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| CommandError::Io(format!("Failed to open file: {e}")))?;
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(metadata.len().min(MAX_TEXT_FILE_BYTES) as usize);
+    file.take(MAX_TEXT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| CommandError::Io(format!("Failed to read file: {e}")))?;
+    if bytes.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(CommandError::Other("File exceeds the 64MB limit".into()));
+    }
+    String::from_utf8(bytes).map_err(|e| CommandError::Io(format!("File is not UTF-8: {e}")))
+}
+
+fn write_text_file_limited(path: &Path, content: &str) -> Result<(), CommandError> {
+    if content.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(CommandError::Other("Content exceeds the 64MB limit".into()));
+    }
+    path.parent()
+        .ok_or_else(|| CommandError::Other(format!("Path has no parent directory: {path:?}")))?
         .canonicalize()
-        .map_err(|e| CommandError::Io(format!("Cannot canonicalize path: {e}")))?;
-    std::fs::read_to_string(target)
-        .map_err(|e| CommandError::Io(format!("Failed to read file '{path}': {e}")))
+        .map_err(|e| CommandError::Io(format!("Cannot canonicalize parent directory: {e}")))?;
+    std::fs::write(path, content.as_bytes())
+        .map_err(|e| CommandError::Io(format!("Failed to write file: {e}")))
+}
+
+/// Replay an application log file. The renderer may choose the path, but it
+/// must stay inside the configured log root (canonical containment).
+#[tauri::command]
+pub async fn read_text_file(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let root = state.log_manager.get_directory();
+    tokio::task::spawn_blocking(move || {
+        let target = Path::new(&path)
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("Cannot canonicalize path: {e}")))?;
+        let root = root
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("Cannot canonicalize log root: {e}")))?;
+        if !target.starts_with(&root) {
+            return Err(CommandError::Other(
+                "Log replay is restricted to the configured log directory".into(),
+            ));
+        }
+        read_text_file_limited(&target)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("File read task failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn pick_text_file_and_read(
+    options: TextFileDialogOptions,
+    window: tauri::WebviewWindow,
+) -> Result<Option<String>, CommandError> {
+    let dialog_window = window.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        pick_text_file_path(&dialog_window, &options, false)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("File dialog task failed: {e}")))?;
+    let Some(path) = path else { return Ok(None) };
+    tokio::task::spawn_blocking(move || read_text_file_limited(&path))
+        .await
+        .map_err(|e| CommandError::Other(format!("File read task failed: {e}")))?
+        .map(Some)
+}
+
+#[tauri::command]
+pub async fn pick_text_file_and_write(
+    content: String,
+    options: TextFileDialogOptions,
+    window: tauri::WebviewWindow,
+) -> Result<Option<String>, CommandError> {
+    let dialog_window = window.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        pick_text_file_path(&dialog_window, &options, true)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("File dialog task failed: {e}")))?;
+    let Some(path) = path else { return Ok(None) };
+    let display = path.display().to_string();
+    tokio::task::spawn_blocking(move || write_text_file_limited(&path, &content))
+        .await
+        .map_err(|e| CommandError::Other(format!("File write task failed: {e}")))??;
+    Ok(Some(display))
 }
 
 /// 插件只能读取宿主原生对话框选中的文件；路径从不由 Worker/前端传入。
@@ -85,6 +202,9 @@ pub struct PluginPickOptions {
 pub struct PluginPickedFile {
     path: String,
     base64: String,
+    /// Actual bytes read (not the pre-read stat); `skip` keeps the wire shape.
+    #[serde(skip)]
+    bytes: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -111,9 +231,11 @@ fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
     if bytes.len() as u64 > MAX_PLUGIN_OPEN_FILE_BYTES {
         return Err(CommandError::Other("选择的文件超过 64MB".into()));
     }
+    let bytes_len = bytes.len() as u64;
     Ok(PluginPickedFile {
         path: path.display().to_string(),
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        bytes: bytes_len,
     })
 }
 
@@ -211,14 +333,14 @@ pub async fn plugin_pick_files(
             let file_path = path
                 .into_path()
                 .map_err(|e| CommandError::Other(format!("选择的文件路径不可用: {e}")))?;
-            let size = std::fs::metadata(&file_path)
-                .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?
-                .len();
-            total_bytes = total_bytes.saturating_add(size);
+            let picked = read_picked_file(file_path)?;
+            // Budget the bytes actually read; the pre-read metadata can change
+            // between stat and read (and did not cover the earlier checks).
+            total_bytes = total_bytes.saturating_add(picked.bytes);
             if total_bytes > MAX_PLUGIN_PICK_TOTAL_BYTES {
                 return Err(CommandError::Other("本次选择的文件总量超过 64MB".into()));
             }
-            files.push(read_picked_file(file_path)?);
+            files.push(picked);
         }
         Ok(PluginPickedFiles { files })
     })
@@ -300,16 +422,30 @@ pub fn read_image_data_url(path: String) -> Result<String, CommandError> {
         );
         return Ok(String::new());
     }
-    let bytes = match std::fs::read(&target) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!(
-                "read_image_data_url: failed to read '{}': {e}",
-                target.display()
-            );
-            return Ok(String::new());
-        }
-    };
+    // Bounded read: the file may be replaced after `metadata()`, so enforce
+    // the cap on the bytes actually read, not only the pre-read length.
+    let mut bytes = Vec::with_capacity(meta.len().min(MAX_BACKGROUND_IMAGE_BYTES) as usize);
+    let read_result = std::fs::File::open(&target).and_then(|file| {
+        use std::io::Read as _;
+        file.take(MAX_BACKGROUND_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| ())
+    });
+    if let Err(e) = read_result {
+        log::warn!(
+            "read_image_data_url: failed to read '{}': {e}",
+            target.display()
+        );
+        return Ok(String::new());
+    }
+    if bytes.len() as u64 > MAX_BACKGROUND_IMAGE_BYTES {
+        log::warn!(
+            "read_image_data_url: file grew while reading (limit {}): '{}'",
+            MAX_BACKGROUND_IMAGE_BYTES,
+            target.display()
+        );
+        return Ok(String::new());
+    }
     Ok(format!(
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)

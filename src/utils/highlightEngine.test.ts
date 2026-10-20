@@ -227,4 +227,42 @@ describe('applyHighlightSets', () => {
     // Should not hang - just verify it completes
     expect(typeof result).toBe('string');
   });
+
+  // ==================== Safety / overlap / case folding ====================
+
+  it('rejects a color that can break out of the style attribute', () => {
+    const set = makeRuleSet({
+      rules: [makeRule({
+        pattern: 'bad',
+        isRegex: false,
+        color: 'rgb(0" onmouseover="alert(1)',
+      })],
+    });
+    const result = applyHighlightSets('bad', [set]);
+    expect(result).not.toContain('onmouseover');
+    expect(result).not.toContain('style="color:rgb(0"');
+  });
+
+  it('keeps the uncovered tail of an overlapping longer match', () => {
+    const set = makeRuleSet({
+      rules: [
+        makeRule({ id: 'short', pattern: 'ab', isRegex: false, color: '#ff0000' }),
+        makeRule({ id: 'long', pattern: 'bc', isRegex: false, color: '#00ff00' }),
+      ],
+    });
+    const result = applyHighlightSets('abc', [set]);
+    expect(result).toContain('color:#ff0000');
+    expect(result).toContain('color:#00ff00');
+    // "ab" is fully colored by the first rule; the second rule only owns "c".
+    expect(result).toContain('>ab</span>');
+    expect(result).toContain('>c</span>');
+  });
+
+  it('does not shift literal matches when lowercase changes length', () => {
+    const set = makeRuleSet({
+      rules: [makeRule({ pattern: 'stanbul', isRegex: false, color: '#ff0000' })],
+    });
+    const result = applyHighlightSets('İstanbul', [set]);
+    expect(result).toBe('İ<span style="color:#ff0000">stanbul</span>');
+  });
 });

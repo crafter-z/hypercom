@@ -163,4 +163,15 @@ describe('renderProtocolLine', () => {
     // Header still has its own color
     expect(result).toContain('<span style="color:#00ff00">AA BB</span>');
   });
+  it('rejects a field color that would break the style attribute', () => {
+    const line = makeLine({
+      isHex: false,
+      rawData: new TextEncoder().encode('AB'),
+      parsedFields: [makeField({ byteStart: 0, byteEnd: 2, color: 'rgb(0" onmouseover="alert(1)' })],
+    });
+    const html = renderProtocolLine(line);
+    expect(html).toContain('AB');
+    expect(html).not.toContain('onmouseover');
+    expect(html).not.toContain('style="color:rgb(0"');
+  });
 });

@@ -28,14 +28,19 @@ const MAX_FRAME_SIZE = 65536;
  * Returns empty array for empty or invalid input.
  */
 function parseHexString(hex: string): number[] {
-  const cleaned = hex.replace(/\s+/g, '').replace(/0x/gi, '');
-  if (cleaned.length === 0) return [];
-  if (cleaned.length % 2 !== 0) return [];
+  const nibbles: number[] = [];
+  for (const token of hex.split(/[ \t\n\r\v\f]+/)) {
+    if (token.length === 0) continue;
+    // Optional `0x` prefix is accepted per token, never embedded in the middle
+    // of a token (the old global replace turned "AA0xBB" into "AABB").
+    const digits = /^0x/i.test(token) ? token.slice(2) : token;
+    if (digits.length === 0 || !/^[0-9a-fA-F]+$/.test(digits)) return [];
+    for (const ch of digits) nibbles.push(parseInt(ch, 16));
+  }
+  if (nibbles.length === 0 || nibbles.length % 2 !== 0) return [];
   const result: number[] = [];
-  for (let i = 0; i < cleaned.length; i += 2) {
-    const byte = parseInt(cleaned.substr(i, 2), 16);
-    if (isNaN(byte)) return [];
-    result.push(byte);
+  for (let i = 0; i < nibbles.length; i += 2) {
+    result.push((nibbles[i] << 4) | nibbles[i + 1]);
   }
   return result;
 }

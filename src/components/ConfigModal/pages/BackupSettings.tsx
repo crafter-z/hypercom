@@ -1,12 +1,12 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { open } from '@tauri-apps/plugin-dialog';
 import { configService, fileService, pluginService } from '../../../services/tauri';
 import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
-import { clampNumber } from '../../../utils/clampNumber';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
+import { NumericInput } from '../../shared/NumericInput';
 import { syncPluginListSnapshot } from '../../../utils/pluginConfigSnapshot';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
@@ -59,12 +59,11 @@ const BackupSettings: React.FC = () => {
         exportedAt: new Date().toISOString(),
         config: currentConfig,
       };
-      const path = await save({
-        defaultPath: `hypercom-config-${new Date().toISOString().slice(0, 10)}.json`,
+      const saved = await fileService.pickTextFileAndWrite(JSON.stringify(bundle, null, 2), {
+        defaultFileName: `hypercom-config-${new Date().toISOString().slice(0, 10)}.json`,
         filters: [{ name: 'HyperCom Config', extensions: ['json'] }],
       });
-      if (!path) return;
-      await fileService.writeTextFile(path, JSON.stringify(bundle, null, 2));
+      if (saved === null) return;
       notifySuccess('backupSettings.exportSuccess');
     } catch (e) {
       notifyError(e);
@@ -73,12 +72,10 @@ const BackupSettings: React.FC = () => {
 
   const handleImport = async () => {
     try {
-      const path = await open({
-        multiple: false,
+      const content = await fileService.pickTextFileAndRead({
         filters: [{ name: 'HyperCom Config', extensions: ['json'] }],
       });
-      if (!path || typeof path !== 'string') return;
-      const content = await fileService.readTextFile(path);
+      if (content === null) return;
       const bundle = JSON.parse(content) as ConfigBundle;
       if (bundle.app !== BUNDLE_APP) {
         notifyError(new Error(t('backupSettings.importInvalid')));
@@ -120,13 +117,13 @@ const BackupSettings: React.FC = () => {
         <>
           <div className="config-row">
             <label>{t('backupSettings.intervalLabel')}</label>
-            <input className="input" type="number" value={backupInterval} onChange={(e) => setConfig({ backupInterval: clampNumber(e.target.value, CONFIG_BOUNDS.backupInterval[0], CONFIG_BOUNDS.backupInterval[1]) })} min={CONFIG_BOUNDS.backupInterval[0]} max={CONFIG_BOUNDS.backupInterval[1]} />
+            <NumericInput className="input" value={backupInterval} onCommit={(value) => setConfig({ backupInterval: value })} min={CONFIG_BOUNDS.backupInterval[0]} max={CONFIG_BOUNDS.backupInterval[1]} step={1} />
           </div>
           <div className="config-row">
             <label>{t('backupSettings.directoryLabel')}</label>
             <input className="input" value={backupDirectory} placeholder={t('backupSettings.directoryPlaceholder')} readOnly />
             <button className="btn btn-sm" onClick={async () => {
-              const result = await open({ directory: true });
+              const result = await open({ directory: true }).catch((e) => { console.debug('[BackupSettings] directory dialog failed:', e); return null; });
               if (result) setConfig({ backupDirectory: result });
             }}>{t('backupSettings.browseButton')}</button>
           </div>

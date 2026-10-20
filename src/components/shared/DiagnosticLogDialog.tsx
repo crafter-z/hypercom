@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks';
 import { diagLogService, fileService } from '../../services/tauri';
-import { save } from '@tauri-apps/plugin-dialog';
 import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
 import { clearDiagLog, parseDiagLogLine } from '../../utils/diagLog';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
@@ -95,14 +94,12 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const handleExport = async () => {
     setBusy(true);
     try {
-      const filePath = await save({
+      const saved = await fileService.pickTextFileAndWrite(logText, {
         title: t('diagLog.exportDialog.title'),
-        defaultPath: `hypercom-diag-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.log`,
+        defaultFileName: `hypercom-diag-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.log`,
         filters: [{ name: t('diagLog.exportDialog.filterName'), extensions: ['log', 'txt'] }],
       });
-      if (filePath) {
-        await fileService.writeTextFile(filePath, logText);
-      }
+      if (saved === null) return;
     } catch (e) {
       console.debug('[DiagLog] export failed:', e);
     } finally {

@@ -41,6 +41,8 @@ fn format_crash_report(
 /// 应用状态结构体
 /// 通过 Tauri State 在各命令间共享
 pub struct AppState {
+    /// Exclusive per-config-directory lock; dropped on process exit.
+    _instance_lock: std::fs::File,
     /// 串口管理器：负责串口的打开/关闭/数据收发。
     /// `Arc<Mutex<..>>`（issue #6-1）：异步命令经 spawn_blocking 把阻塞写
     /// 挪到独立线程时，需要从 State 克隆出 'static 句柄——Arc 允许克隆，
@@ -77,6 +79,43 @@ pub struct AppState {
     pub popouts: std::sync::Mutex<std::collections::HashMap<String, commands::PopoutMeta>>,
 }
 
+/// Try to take an exclusive lock next to config.json. Returns Err when another
+/// process already owns it (the caller exits rather than corrupting config).
+fn acquire_instance_lock(config_path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    let lock_path = config_path.with_extension("lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // No sharing: a second instance fails to open the same lock file.
+        options.share_mode(0);
+    }
+    let mut file = options
+        .open(&lock_path)
+        .map_err(|e| anyhow::anyhow!(
+            "Another HyperCom instance is using {} ({e})",
+            config_path.display()
+        ))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(anyhow::anyhow!(
+                "Another HyperCom instance is using {} ({})",
+                config_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    use std::io::Write;
+    let _ = file.set_len(0);
+    let _ = writeln!(file, "{}", std::process::id());
+    let _ = file.flush();
+    Ok(file)
+}
+
 impl AppState {
     pub fn new(diag_logger: std::sync::Arc<diaglog::DiagLogger>) -> anyhow::Result<Self> {
         // 解析 CLI `--config <path>` 参数，允许自定义配置文件路径
@@ -89,8 +128,12 @@ impl AppState {
         // 先建 ConfigManager，再用其配置初始化运行期镜像（消除双数据源）
         let config_manager = config::ConfigManager::new(config_arg)?;
         let cfg = config_manager.get_config().clone();
+        // One writer per config directory: concurrent instances otherwise race
+        // config.json/session.json (fixed temp names + per-process revision CAS).
+        let instance_lock = acquire_instance_lock(config_manager.config_path())?;
 
         let state = Self {
+            _instance_lock: instance_lock,
             serial_manager: std::sync::Arc::new(
                 std::sync::Mutex::new(serial::SerialManager::new()),
             ),
@@ -195,13 +238,22 @@ pub fn run() {
     };
     log::info!("HyperCom starting...");
 
+    let state = match AppState::new(diag_logger) {
+        Ok(state) => state,
+        Err(error) => {
+            log::error!("Failed to initialize app state: {error}");
+            eprintln!("Failed to initialize HyperCom: {error}");
+            std::process::exit(1);
+        }
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(AppState::new(diag_logger).expect("Failed to initialize app state"))
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
             // ===== 串口相关命令 =====
             commands::list_available_ports,
@@ -229,8 +281,7 @@ pub fn run() {
             commands::get_session_snapshot,
             commands::get_config_path,
             // ===== 日志相关命令 =====
-            commands::save_log_as,
-            commands::export_terminal_log,
+            commands::pick_and_save_log,
             commands::get_log_files,
             commands::start_logging,
             commands::stop_logging,
@@ -267,7 +318,8 @@ pub fn run() {
             commands::load_trigger_rules,
             commands::delete_trigger_rule,
             // ===== 通用文件命令 =====
-            commands::write_text_file,
+            commands::pick_text_file_and_write,
+            commands::pick_text_file_and_read,
             commands::read_text_file,
             commands::plugin_pick_files,
             commands::read_image_data_url,
@@ -356,9 +408,8 @@ pub fn run() {
                 // LogManager 自身的写锁是内部细粒度锁（非 &self 上的 Mutex），
                 // 这里直接调用；即使与某次写入并发，flush_all 也只做 best-effort。
                 let state = panic_app_handle.state::<AppState>();
-                if let Err(e) = state.log_manager.flush_all() {
-                    eprintln!("[panic hook] flush_all failed: {e}");
-                }
+                // Never block: the panicking thread may hold one of these locks.
+                state.log_manager.flush_all_best_effort();
 
                 let report = format_crash_report(message, location, &backtrace);
                 let crash_dir = dirs::data_dir()
