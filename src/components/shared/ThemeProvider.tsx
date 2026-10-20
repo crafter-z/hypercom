@@ -49,16 +49,21 @@ const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     document.documentElement.style.setProperty('--font-ui', uiFont);
   }, [terminalFontSize, terminalFont, uiFontSize, uiFont]);
 
+  // 不透明度 / 模糊度只改 CSS 变量：与读图分离，连续拖动滑块不会反复读盘
+  //（每次读盘是 20MB 上限的 IO）。
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--app-bg-opacity', String(clampToBounds(backgroundImageOpacity, CONFIG_BOUNDS.backgroundImageOpacity) / 100));
+    root.style.setProperty('--app-bg-blur', `${clampToBounds(backgroundImageBlur, CONFIG_BOUNDS.backgroundImageBlur)}px`);
+  }, [backgroundImageOpacity, backgroundImageBlur]);
+
   // 自定义背景图（issue #13）：把配置映射到 CSS 变量 + html[data-app-bg] 门控。
   // 图片经后端 read_image_data_url 读为 base64 data URL（dev/prod 一致，无需 asset protocol）；
-  // 异步读取期间以 cancelled 防竞态。opacity/blur 只改 CSS 变量，不触发读盘——
-  // 拆成两个 effect，滑块连续拖动不会反复读图（每次读盘是 20MB 上限的 IO）。
+  // 异步读取期间以 cancelled 防竞态。
   useEffect(() => {
     const root = document.documentElement;
     let cancelled = false;
     const active = backgroundImageEnabled && backgroundImage !== '';
-    root.style.setProperty('--app-bg-opacity', String(clampToBounds(backgroundImageOpacity, CONFIG_BOUNDS.backgroundImageOpacity) / 100));
-    root.style.setProperty('--app-bg-blur', `${clampToBounds(backgroundImageBlur, CONFIG_BOUNDS.backgroundImageBlur)}px`);
     if (!active) {
       root.removeAttribute('data-app-bg');
       root.style.removeProperty('--app-bg-image');

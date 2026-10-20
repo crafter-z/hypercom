@@ -18,9 +18,9 @@
  *
  * 局限（明确写出来，别把它当完整证明）：
  * 1. 这是**源文本级**契约，不是运行后端；只有上面三类判定与字符表被提取。
- * 2. 空白分隔类：Rust 用 `is_ascii_whitespace`（仅 ASCII 空白），前端用 `/\s+/`
- *    （JS 空白超集，另含 NBSP / U+FEFF 等）。二者对 ASCII 空白判定一致，本文件只用
- *    ASCII 空白做样例；该差异是前端更宽松，不影响上面四条口径。
+ * 2. 空白分隔类：Rust 用 `is_ascii_whitespace`（仅 ASCII 空白）；前端已对齐为
+ *    仅 ASCII 空白（`ASCII_WS`）。NBSP 等 Unicode 空白在两侧都算非法字符
+ *    （前端不再把它当分隔符），本文件用 NBSP 样例钉住该口径。
  * 3. 不覆盖解码后的 BOM / UTF-8 处理（那是 `ignoreBOM: false` 的另一条契约）。
  */
 import { describe, it, expect } from 'vitest';
@@ -115,6 +115,7 @@ const CASES: ReadonlyArray<[label: string, input: string]> = [
   ['two invalid pairs', '4G 5H'],
   ['0x prefix is not part of the alphabet', '0x41'],
   ['dash separator', '48-65'],
+  ['NBSP is not whitespace', 'AA\u00A0BB'],
 ];
 
 describe('HEX contract: frontend hexInputError/parseHexBytes ↔ Rust parse_hex_string', () => {

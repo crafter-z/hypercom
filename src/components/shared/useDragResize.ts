@@ -51,6 +51,12 @@ export function useDragResize(options: DragResizeOptions): {
     const axis = optionsRef.current.axis;
 
     const handleMouseMove = (e: MouseEvent) => {
+      // mouseup outside the WebView never reaches window: a buttonless move
+      // means the drag ended while the pointer was elsewhere.
+      if (e.buttons === 0) {
+        setDragging(false);
+        return;
+      }
       const o = optionsRef.current;
       if ((o.mode ?? 'absolute') === 'delta') {
         const delta = (axis === 'x' ? e.clientX : e.clientY) - startRef.current;
@@ -60,12 +66,15 @@ export function useDragResize(options: DragResizeOptions): {
       o.onChange(clampTo(axis === 'x' ? e.clientX : e.clientY, o.min, o.max));
     };
     const handleMouseUp = () => setDragging(false);
+    const handleBlur = () => setDragging(false);
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('blur', handleBlur);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('blur', handleBlur);
     };
   }, [dragging]);
 

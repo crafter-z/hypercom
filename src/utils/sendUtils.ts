@@ -33,9 +33,14 @@ export function getLineEndingBytes(lineEnding: LineEnding): number[] {
  */
 export const HEX_INPUT_ERROR_KEY = 'sendSection.hexInput.invalid';
 
+/** ASCII whitespace only — the exact set Rust `is_ascii_whitespace` accepts.
+ *  JS `\s` also matches NBSP/Unicode spaces, which the backend sees as
+ *  invalid (non-ASCII) HEX characters. */
+const ASCII_WS = /[ \t\n\r\v\f]+/g;
+
 /** HEX 输入是否可发送：合法 / 空输入 → null，否则返回 {@link HEX_INPUT_ERROR_KEY}。 */
 export function hexInputError(input: string): string | null {
-  const cleaned = input.replace(/\s+/g, '');
+  const cleaned = input.replace(ASCII_WS, '');
   if (cleaned.length === 0) return null;
   if (cleaned.length % 2 !== 0) return HEX_INPUT_ERROR_KEY;
   return /^[0-9a-fA-F]+$/.test(cleaned) ? null : HEX_INPUT_ERROR_KEY;
@@ -50,7 +55,7 @@ export function hexInputError(input: string): string | null {
  */
 export function parseHexBytes(input: string): number[] {
   if (hexInputError(input) !== null) return [];
-  const cleaned = input.replace(/\s+/g, '');
+  const cleaned = input.replace(ASCII_WS, '');
   const bytes: number[] = [];
   for (let i = 0; i < cleaned.length; i += 2) {
     bytes.push(parseInt(cleaned.slice(i, i + 2), 16));
@@ -88,7 +93,9 @@ export function computeByteCount(
   if (isHex) {
     const errorKey = hexInputError(input);
     if (errorKey !== null) return { count: 0, label: '', errorKey };
-    const count = parseHexBytes(input).length + suffixLen;
+    // HEX 模式由后端 `build_tx_bytes` 直接解析字节，**不追加**行结束符；
+    // 写入量与计数必须与线上一致（行尾选择器只对文本模式生效）。
+    const count = parseHexBytes(input).length;
     return { count, label: `${count} B` };
   }
 
@@ -131,7 +138,7 @@ export function hexToTextPreview(hex: string): string {
 
 /** Strip anything that isn't a HEX digit or whitespace (HEX-mode input guard). */
 export function sanitizeHexInput(input: string): string {
-  return input.replace(/[^0-9a-fA-F\s]/g, '');
+  return input.replace(/[^0-9a-fA-F \t\n\r\v\f]/g, '');
 }
 
 /**

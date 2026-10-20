@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { AppConfig } from '../../../types';
-import { clampNumber } from '../../../utils/clampNumber';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
+import { NumericInput } from '../../shared/NumericInput';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils';
 
 const DisplaySettings: React.FC = () => {
@@ -21,11 +21,28 @@ const DisplaySettings: React.FC = () => {
   const backgroundImageBlur = useAppStore(s => s.config.backgroundImageBlur);
   const setConfig = useAppStore((s) => s.setConfig);
 
+  // Raw text draft: committing on every keystroke turned a typed comma into
+  // `[9600, NaN] → [9600]`, rewriting the field and deleting the separator.
+  // Parse/commit on blur or Enter; mirror external (loaded) changes back.
+  const [baudDraft, setBaudDraft] = useState(defaultBaudRates.join(','));
+  useEffect(() => {
+    setBaudDraft(defaultBaudRates.join(','));
+  }, [defaultBaudRates]);
+  const commitBaudDraft = () => {
+    const rates = baudDraft
+      .split(',')
+      .map((part) => Number(part.trim()))
+      .filter((rate) => Number.isFinite(rate) && rate > 0)
+      .map((rate) => Math.round(rate));
+    setConfig({ defaultBaudRates: rates });
+    setBaudDraft(rates.join(','));
+  };
+
   const handleBrowseImage = async () => {
     const result = await open({
       multiple: false,
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'] }],
-    });
+    }).catch((e) => { console.debug('[DisplaySettings] image dialog failed:', e); return null; });
     if (result && typeof result === 'string') setConfig({ backgroundImage: result });
   };
 
@@ -37,8 +54,10 @@ const DisplaySettings: React.FC = () => {
         <label>{t('displaySettings.defaultBaudRatesLabel')}</label>
         <input
           className="input"
-          value={defaultBaudRates.join(',')}
-          onChange={(e) => setConfig({ defaultBaudRates: e.target.value.split(',').map(s => Number(s.trim())).filter(Boolean) })}
+          value={baudDraft}
+          onChange={(e) => setBaudDraft(e.target.value)}
+          onBlur={commitBaudDraft}
+          onKeyDown={(e) => { if (e.key === 'Enter') commitBaudDraft(); }}
           style={{ flex: 1 }}
         />
       </div>
@@ -86,11 +105,10 @@ const DisplaySettings: React.FC = () => {
 
           <div className="config-row">
             <label>{t('displaySettings.background.opacityLabel')}</label>
-            <input
+            <NumericInput
               className="input"
-              type="number"
               value={backgroundImageOpacity}
-              onChange={(e) => setConfig({ backgroundImageOpacity: clampNumber(e.target.value, CONFIG_BOUNDS.backgroundImageOpacity[0], CONFIG_BOUNDS.backgroundImageOpacity[1]) })}
+              onCommit={(value) => setConfig({ backgroundImageOpacity: value })}
               min={CONFIG_BOUNDS.backgroundImageOpacity[0]} max={CONFIG_BOUNDS.backgroundImageOpacity[1]} step={1}
               style={{ width: 80 }}
             />
@@ -99,11 +117,10 @@ const DisplaySettings: React.FC = () => {
 
           <div className="config-row">
             <label>{t('displaySettings.background.blurLabel')}</label>
-            <input
+            <NumericInput
               className="input"
-              type="number"
               value={backgroundImageBlur}
-              onChange={(e) => setConfig({ backgroundImageBlur: clampNumber(e.target.value, CONFIG_BOUNDS.backgroundImageBlur[0], CONFIG_BOUNDS.backgroundImageBlur[1]) })}
+              onCommit={(value) => setConfig({ backgroundImageBlur: value })}
               min={CONFIG_BOUNDS.backgroundImageBlur[0]} max={CONFIG_BOUNDS.backgroundImageBlur[1]} step={1}
               style={{ width: 80 }}
             />

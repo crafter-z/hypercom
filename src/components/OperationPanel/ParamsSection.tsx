@@ -55,7 +55,12 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   // 此 effect 不会触发，与用户输入天然无冲突。
   useEffect(() => {
     setCustomBaudInput(String(baudRate));
-  }, [baudRate]);
+    // External baud changes (session restore / preset application) can land
+    // outside the preset list after this component mounted. Typing only
+    // updates the local draft, so deriving custom mode here cannot unmount
+    // the input mid-edit.
+    setIsCustomBaud(!defaultBaudRates.includes(baudRate));
+  }, [baudRate, defaultBaudRates]);
 
   // 预设只经 storageService 单条落盘（保存即见效），不回写 useAppStore.config。
   // K5 的安全快照改由后端读回 portPresets（`storageService.loadPortPresets()`），
@@ -196,6 +201,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
               else { setIsCustomBaud(false); setOpState({ baudRate: Number(e.target.value) }); }
             }}>
             {defaultBaudRates.map(rate => <option key={rate} value={rate}>{rate}</option>)}
+            {!defaultBaudRates.includes(baudRate) && <option value={baudRate}>{baudRate}</option>}
             <option value="__custom__">{t('paramsSection.baudRate.custom')}</option>
           </select>
           {isCustomBaud && (

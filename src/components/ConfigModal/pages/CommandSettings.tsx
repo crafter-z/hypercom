@@ -6,7 +6,7 @@ import type { SendCommandSet } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
 import { useEntityPage } from '../hooks/useEntityPage';
-import { clampNumber } from '../../../utils/clampNumber';
+import { NumericInput } from '../../shared/NumericInput';
 
 /**
  * Command-set fields are not app settings, so their input range is local —
@@ -89,11 +89,10 @@ const CommandSettings: React.FC = () => {
             /> {t('commandSettings.loopCheckbox')}
           </label>
           {set.isLoop && (
-            <input
+            <NumericInput
               className="input"
-              type="number"
               value={set.loopDelay}
-              onChange={e => updateSendCommandSet(set.id, { loopDelay: clampNumber(e.target.value, LOOP_DELAY_MS[0], LOOP_DELAY_MS[1]) })}
+              onCommit={value => updateSendCommandSet(set.id, { loopDelay: value })}
               onClick={e => e.stopPropagation()}
               min={LOOP_DELAY_MS[0]}
               max={LOOP_DELAY_MS[1]}
@@ -105,11 +104,10 @@ const CommandSettings: React.FC = () => {
           <span style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
             {t('commandSettings.repeatLabel')}
           </span>
-          <input
+          <NumericInput
             className="input"
-            type="number"
             value={set.repeatCount ?? 0}
-            onChange={e => updateSendCommandSet(set.id, { repeatCount: clampNumber(e.target.value, REPEAT_COUNT[0], REPEAT_COUNT[1]) })}
+            onCommit={value => updateSendCommandSet(set.id, { repeatCount: value })}
             onClick={e => e.stopPropagation()}
             min={REPEAT_COUNT[0]}
             max={REPEAT_COUNT[1]}

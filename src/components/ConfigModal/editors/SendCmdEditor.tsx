@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Trash2 } from 'lucide-react';
 import type { SendCommand } from '../../../types';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils';
+import { NumericInput } from '../../shared/NumericInput';
 
 interface SendCmdEditorProps {
   cmd: SendCommand;
@@ -28,7 +29,7 @@ const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, on
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
         <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 20 }}>#{cmdIdx + 1}</span>
         <input className="input" value={cmd.name} onChange={e => onChange({ name: e.target.value })} placeholder={t('sendCmdEditor.namePlaceholder')} style={{ width: 80 }} />
-        <input className="input" value={String(cmd.delay)} onChange={e => onChange({ delay: Number(e.target.value) || 0 })} type="number" placeholder={t('sendCmdEditor.delayPlaceholder')} style={{ width: 80 }} />
+        <NumericInput className="input" value={cmd.delay} onCommit={value => onChange({ delay: value })} min={0} max={3_600_000} step={1} placeholder={t('sendCmdEditor.delayPlaceholder')} style={{ width: 80 }} />
         <select className="select" value={cmd.type} onChange={e => onChange({ type: e.target.value as 'string' | 'hex' })} style={{ width: 80 }}>
           <option value="string">{t('sendCmdEditor.type.string')}</option>
           <option value="hex">HEX</option>

@@ -2,6 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2 } from 'lucide-react';
 import type { ProtocolTemplate } from '../../../types';
+import { NumericInput } from '../../shared/NumericInput';
 
 /**
  * Protocol template editor form.
@@ -63,11 +64,13 @@ const ProtocolTemplateEditor: React.FC<{
         </div>
         <div style={rowStyle}>
           <label style={labelStyle}>{t('protocolEditor.lengthOffsetLabel')}</label>
-          <input
+          <NumericInput
             className="input"
-            type="number"
             value={template.lengthFieldOffset}
-            onChange={e => onChange({ lengthFieldOffset: parseInt(e.target.value) || 0 })}
+            onCommit={value => onChange({ lengthFieldOffset: value })}
+            min={0}
+            max={65535}
+            step={1}
             style={{ width: 80 }}
           />
           <label style={labelStyle}>{t('protocolEditor.lengthFieldSizeLabel')}</label>
@@ -93,11 +96,13 @@ const ProtocolTemplateEditor: React.FC<{
             <option value="big">{t('protocolEditor.lengthEndian.big')}</option>
           </select>
           <label style={labelStyle}>{t('protocolEditor.lengthAdjustLabel')}</label>
-          <input
+          <NumericInput
             className="input"
-            type="number"
             value={template.lengthAdjust}
-            onChange={e => onChange({ lengthAdjust: parseInt(e.target.value) || 0 })}
+            onCommit={value => onChange({ lengthAdjust: value })}
+            min={-65535}
+            max={65535}
+            step={1}
             style={{ width: 80 }}
           />
         </div>
@@ -130,11 +135,13 @@ const ProtocolTemplateEditor: React.FC<{
             <option value="crc8">CRC-8</option>
           </select>
           <label style={labelStyle}>{t('protocolEditor.checksumOffsetLabel')}</label>
-          <input
+          <NumericInput
             className="input"
-            type="number"
             value={template.checksumOffset}
-            onChange={e => onChange({ checksumOffset: parseInt(e.target.value) || 0 })}
+            onCommit={value => onChange({ checksumOffset: value })}
+            min={0}
+            max={65535}
+            step={1}
             style={{ width: 80 }}
           />
           <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('protocolEditor.checksumOffsetHint')}</span>

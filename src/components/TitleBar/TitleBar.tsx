@@ -64,15 +64,15 @@ const TitleBar: React.FC = () => {
   }, []);
 
   const handleMinimize = () => {
-    getCurrentWindow().minimize();
+    void getCurrentWindow().minimize().catch((e) => console.debug('[TitleBar] minimize failed:', e));
   };
 
   const handleMaximize = () => {
-    getCurrentWindow().toggleMaximize();
+    void getCurrentWindow().toggleMaximize().catch((e) => console.debug('[TitleBar] maximize failed:', e));
   };
 
   const handleClose = () => {
-    getCurrentWindow().close();
+    void getCurrentWindow().close().catch((e) => console.debug('[TitleBar] close failed:', e));
   };
 
   const handleTogglePin = () => {

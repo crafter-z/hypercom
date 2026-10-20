@@ -73,10 +73,10 @@ describe('sendUtils', () => {
   });
 
   describe('computeByteCount', () => {
-    it('counts parsed hex bytes plus line ending suffix', () => {
+    it('counts parsed hex bytes without a line-ending suffix', () => {
       const result = computeByteCount('48 65 6C', true, 'ASCII', '\\r\\n');
-      expect(result.count).toBe(5);
-      expect(result.label).toBe('5 B');
+      expect(result.count).toBe(3);
+      expect(result.label).toBe('3 B');
     });
 
     it('reports an error key instead of a bogus count for unsendable hex', () => {
@@ -90,10 +90,10 @@ describe('sendUtils', () => {
       expect(bad.errorKey).toBe(HEX_INPUT_ERROR_KEY);
     });
 
-    it('keeps counting line-ending bytes for empty hex input', () => {
+    it('does not count a line ending for empty hex input', () => {
       const result = computeByteCount('', true, 'ASCII', '\\n');
-      expect(result.count).toBe(1);
-      expect(result.label).toBe('1 B');
+      expect(result.count).toBe(0);
+      expect(result.label).toBe('0 B');
       expect(result.errorKey).toBeUndefined();
     });
 

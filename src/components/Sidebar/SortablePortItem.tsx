@@ -150,6 +150,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
           className={`icon-btn port-connect-btn${isConnected ? ' connected' : ''}`}
           title={isConnected ? t('sidebar.port.connectBtn.disconnect') : t('sidebar.port.connectBtn.connect')}
           onClick={(e) => { e.stopPropagation(); actions.toggleConnect(port.id); }}
+          onDoubleClick={(e) => e.stopPropagation()}
         >
           {isConnected ? <Square size={12} /> : <Play size={12} />}
         </button>

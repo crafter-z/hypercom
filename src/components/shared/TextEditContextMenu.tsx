@@ -46,6 +46,15 @@ interface TextEditMenuState {
   savedRange: Range | null;
 }
 
+/** Inputs whose value supports caret/selection APIs. Other types (`number`,
+ *  `date`, `range`, `color`…) throw InvalidStateError from setSelectionRange. */
+function supportsTextSelection(el: HTMLInputElement | HTMLTextAreaElement): boolean {
+  if (el.tagName === 'TEXTAREA') return true;
+  const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
+  return type === 'text' || type === 'search' || type === 'url' || type === 'tel'
+    || type === 'password' || type === 'email';
+}
+
 function isEditableTarget(t: EventTarget | null): t is HTMLElement {
   const el = t as HTMLElement | null;
   if (!el) return false;
@@ -58,7 +67,9 @@ function captureSelection(target: HTMLElement): Pick<TextEditMenuState, 'snapsho
   if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
     const el = target as HTMLInputElement | HTMLTextAreaElement;
     return {
-      snapshot: { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 },
+      snapshot: supportsTextSelection(el)
+        ? { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 }
+        : null,
       savedRange: null,
     };
   }
@@ -79,7 +90,8 @@ function runEditCommand(target: HTMLElement, snapshot: SelectionSnapshot | null,
 
   if (cmd === 'selectAll') {
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-      (target as HTMLInputElement | HTMLTextAreaElement).select();
+      const el = target as HTMLInputElement | HTMLTextAreaElement;
+      if (supportsTextSelection(el)) el.select();
     } else {
       const range = document.createRange();
       range.selectNodeContents(target);
@@ -91,7 +103,8 @@ function runEditCommand(target: HTMLElement, snapshot: SelectionSnapshot | null,
   }
 
   if (snapshot && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
-    (target as HTMLInputElement | HTMLTextAreaElement).setSelectionRange(snapshot.start, snapshot.end);
+    const el = target as HTMLInputElement | HTMLTextAreaElement;
+    if (supportsTextSelection(el)) el.setSelectionRange(snapshot.start, snapshot.end);
   } else if (savedRange) {
     const sel = window.getSelection();
     sel?.removeAllRanges();

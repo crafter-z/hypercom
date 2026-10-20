@@ -46,8 +46,9 @@ export function useHexCompose(args: {
   );
 
   const hexSuffix = useMemo(
-    () => formatLineEndingHex(sendAppendLineEnding),
-    [sendAppendLineEnding]
+    // 后端 HEX 发送不追加行结束符——提示也不能显示会误导的追加字节。
+    () => (isHex ? null : formatLineEndingHex(sendAppendLineEnding)),
+    [isHex, sendAppendLineEnding]
   );
 
   const toEditableValue = useCallback(

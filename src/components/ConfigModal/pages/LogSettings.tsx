@@ -5,8 +5,8 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { logService } from '../../../services/tauri';
 import { notifyError, useToastStore } from '../../../stores/useToastStore';
 import type { AppConfig } from '../../../types';
-import { clampNumber } from '../../../utils/clampNumber';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
+import { NumericInput } from '../../shared/NumericInput';
 
 interface DirChangeDialogProps {
   oldDir: string;
@@ -73,7 +73,7 @@ const LogSettings: React.FC = () => {
   const [migrating, setMigrating] = useState(false);
 
   const handleBrowse = async () => {
-    const result = await open({ directory: true });
+    const result = await open({ directory: true }).catch((e) => { console.debug('[LogSettings] directory dialog failed:', e); return null; });
     if (!result) return;
     // 目录未变化时直接跳过
     if (result === logDirectory) return;
@@ -180,7 +180,7 @@ const LogSettings: React.FC = () => {
       {logSplitEnabled && (
         <div className="config-row">
           <label>{t('logSettings.splitSizeLabel')}</label>
-          <input className="input" type="number" value={logSplitSizeMb} onChange={(e) => setConfig({ logSplitSizeMb: clampNumber(e.target.value, CONFIG_BOUNDS.logSplitSizeMb[0], CONFIG_BOUNDS.logSplitSizeMb[1]) })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
+          <NumericInput className="input" value={logSplitSizeMb} onCommit={(value) => setConfig({ logSplitSizeMb: value })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
         </div>
       )}
 

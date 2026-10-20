@@ -23,6 +23,15 @@ const AboutDialog: React.FC = () => {
   // issue #12：手动检查状态（checking → 已完成），disable 期间防重复点击
   const [checking, setChecking] = useState<ReleaseChannel | null>(null);
 
+  // The component stays mounted behind the early return: reset nested dialogs
+  // so reopening About never restores a previously open license/diag dialog.
+  useEffect(() => {
+    if (!isOpen) {
+      setShowLicenses(false);
+      setShowDiagLog(false);
+    }
+  }, [isOpen]);
+
   useEffect(() => {
     if (!isOpen) return;
     getVersion()

@@ -132,16 +132,23 @@ describe('evaluateTriggers', () => {
   });
 
   describe('pattern length limit', () => {
-    it('skips patterns longer than 200 chars', () => {
+    it('skips regex patterns longer than 200 chars', () => {
       const longPattern = 'A'.repeat(201);
-      const rule = makeRule({ pattern: longPattern, matchType: 'contains' });
+      const rule = makeRule({ pattern: longPattern, matchType: 'regex' });
       const result = evaluateTriggers(longPattern, undefined, [rule], undefined);
       expect(result).toHaveLength(0);
     });
 
-    it('allows patterns of exactly 200 chars', () => {
+    it('allows long literal patterns (only regex is capped)', () => {
+      const longPattern = 'A'.repeat(201);
+      const rule = makeRule({ pattern: longPattern, matchType: 'contains' });
+      const result = evaluateTriggers(longPattern, undefined, [rule], undefined);
+      expect(result).toHaveLength(1);
+    });
+
+    it('allows regex patterns of exactly 200 chars', () => {
       const pattern = 'A'.repeat(200);
-      const rule = makeRule({ pattern, matchType: 'contains' });
+      const rule = makeRule({ pattern, matchType: 'regex' });
       const result = evaluateTriggers(pattern, undefined, [rule], undefined);
       expect(result).toHaveLength(1);
     });

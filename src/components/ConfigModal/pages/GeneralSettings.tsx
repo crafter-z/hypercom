@@ -5,8 +5,8 @@ import { configService } from '../../../services/tauri';
 import { updateTiming } from '../../../utils/updateService';
 import type { AppConfig } from '../../../types';
 import type { UpdateCheckMode } from '../../../types';
-import { clampNumber } from '../../../utils/clampNumber';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
+import { NumericInput } from '../../shared/NumericInput';
 
 const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -55,11 +55,10 @@ const GeneralSettings: React.FC = () => {
       {/* issue #16：每端口终端最大显示行数，超限逐行覆盖最旧 */}
       <div className="config-row" title={t('generalSettings.maxDisplayLinesHint')}>
         <label>{t('generalSettings.maxDisplayLinesLabel')}</label>
-        <input
+        <NumericInput
           className="input"
-          type="number"
           value={maxDisplayLines}
-          onChange={(e) => setConfig({ maxDisplayLines: clampNumber(e.target.value, CONFIG_BOUNDS.maxDisplayLines[0], CONFIG_BOUNDS.maxDisplayLines[1]) })}
+          onCommit={(value) => setConfig({ maxDisplayLines: value })}
           min={CONFIG_BOUNDS.maxDisplayLines[0]}
           max={CONFIG_BOUNDS.maxDisplayLines[1]}
           step={1000}
@@ -133,11 +132,10 @@ const GeneralSettings: React.FC = () => {
 
       <div className="config-row">
         <label>{t('settings.reconnect.maxRetries.label')}:</label>
-        <input
+        <NumericInput
           className="input"
-          type="number"
           value={maxRetries}
-          onChange={(e) => setConfig({ maxRetries: clampNumber(e.target.value, CONFIG_BOUNDS.maxRetries[0], CONFIG_BOUNDS.maxRetries[1]) })}
+          onCommit={(value) => setConfig({ maxRetries: value })}
           min={CONFIG_BOUNDS.maxRetries[0]}
           max={CONFIG_BOUNDS.maxRetries[1]}
           step={1}
@@ -181,14 +179,14 @@ const GeneralSettings: React.FC = () => {
       <div className="config-row">
         <label>{t('generalSettings.terminalFontLabel')}</label>
         <input className="input" value={terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
-        <input className="input" type="number" value={terminalFontSize} onChange={(e) => setConfig({ terminalFontSize: clampNumber(e.target.value, CONFIG_BOUNDS.terminalFontSize[0], CONFIG_BOUNDS.terminalFontSize[1]) })} min={CONFIG_BOUNDS.terminalFontSize[0]} max={CONFIG_BOUNDS.terminalFontSize[1]} style={{ width: 60 }} />
+        <NumericInput className="input" value={terminalFontSize} onCommit={(value) => setConfig({ terminalFontSize: value })} min={CONFIG_BOUNDS.terminalFontSize[0]} max={CONFIG_BOUNDS.terminalFontSize[1]} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('generalSettings.uiFontLabel')}</label>
         <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
-        <input className="input" type="number" value={uiFontSize} onChange={(e) => setConfig({ uiFontSize: clampNumber(e.target.value, CONFIG_BOUNDS.uiFontSize[0], CONFIG_BOUNDS.uiFontSize[1]) })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
+        <NumericInput className="input" value={uiFontSize} onCommit={(value) => setConfig({ uiFontSize: value })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
         <span>{t('generalSettings.pxUnit')}</span>
       </div>
       <div className="divider-h" />

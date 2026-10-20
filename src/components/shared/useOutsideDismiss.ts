@@ -29,7 +29,13 @@ export function useOutsideDismiss(
       onDismiss();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onDismiss();
+      if (e.key === 'Escape') {
+        // Mark the key handled before asking the owner to dismiss: the
+        // ConfigModal window-level Escape handler closes (and rolls back) the
+        // whole settings draft unless defaultPrevented is set by a popover.
+        e.preventDefault();
+        onDismiss();
+      }
     };
     document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', onKeyDown);

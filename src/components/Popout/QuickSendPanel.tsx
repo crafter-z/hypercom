@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { popoutEventService } from '../../services/tauri';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { clampInterval, clampRoundInterval } from '../../utils/textSend';
+import { NumericInput } from '../shared/NumericInput';
 import { usePopoutSync } from './usePopoutSync';
 import { usePanelTextConfig } from './usePanelTextConfig';
 import QuickSendList from './QuickSendList';
@@ -189,40 +190,24 @@ const QuickSendPanel: React.FC = () => {
           <>
             <div className="quicksend-param-row">
               <label className="quicksend-param-label">{t('quickSend.sendInterval')}</label>
-              <input
-                type="number"
+              <NumericInput
                 className="input quicksend-param-number"
                 min={1}
                 max={SEND_INTERVAL_MAX}
                 step={1}
                 value={config.sendIntervalMs}
-                onChange={(e) =>
-                  patchConfig({
-                    sendIntervalMs: Math.min(
-                      SEND_INTERVAL_MAX,
-                      clampInterval(Number(e.target.value)),
-                    ),
-                  })
-                }
+                onCommit={(value) => patchConfig({ sendIntervalMs: clampInterval(value) })}
               />
             </div>
             <div className="quicksend-param-row">
               <label className="quicksend-param-label">{t('quickSend.roundInterval')}</label>
-              <input
-                type="number"
+              <NumericInput
                 className="input quicksend-param-number"
                 min={0}
                 max={ROUND_INTERVAL_MAX}
                 step={1}
                 value={config.roundIntervalMs}
-                onChange={(e) =>
-                  patchConfig({
-                    roundIntervalMs: Math.min(
-                      ROUND_INTERVAL_MAX,
-                      clampRoundInterval(Number(e.target.value)),
-                    ),
-                  })
-                }
+                onCommit={(value) => patchConfig({ roundIntervalMs: clampRoundInterval(value) })}
               />
             </div>
           </>

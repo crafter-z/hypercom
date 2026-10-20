@@ -82,9 +82,12 @@ const SendSection: React.FC<SendSectionProps> = ({
   const handleSend = async () => {
     const portId = getActivePortId(useAppStore.getState());
     if (!portId || !sendInput.trim() || inputErrorKey !== null) return;
-    await sendData(portId, sendInput, sendIsHex, sendAppendLineEnding);
+    const sentInput = sendInput;
+    const written = await sendData(portId, sentInput, sendIsHex, sendAppendLineEnding);
     // issue #13：默认保留输入框内容；仅在用户开启「发送后清空」时清空。
-    if (clearSendInputAfterSend) {
+    // 被守卫/后端拒绝（written === 0）不得清空用户输入；发送期间用户继续
+    // 输入的下一行也不能被这次迟到的清空抹掉。
+    if (clearSendInputAfterSend && written > 0 && useOperationStore.getState().sendInput === sentInput) {
       setOpState({ sendInput: '' });
     }
   };

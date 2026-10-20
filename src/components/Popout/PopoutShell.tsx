@@ -102,7 +102,7 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
   };
 
   const handleClose = () => {
-    getCurrentWindow().close();
+    void getCurrentWindow().close().catch((e) => console.debug('[PopoutShell] close failed:', e));
   };
 
   return (

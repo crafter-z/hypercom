@@ -46,7 +46,9 @@ export function evaluateTriggers(
   for (const rule of triggers) {
     if (!rule.isEnabled) continue;
     if (!rule.pattern) continue;
-    if (rule.pattern.length > MAX_PATTERN_LENGTH) continue;
+    // 长度上限只针对正则：contains/exact/hex 是线性匹配，长模式是合法输入
+    // （例如较长的 HEX 帧）。超过上限的正则跳过以限制 ReDoS 面。
+    if (rule.matchType === 'regex' && rule.pattern.length > MAX_PATTERN_LENGTH) continue;
     // 端口过滤：rule.portId 声明了具体串口时，仅匹配该端口的数据
     if (rule.portId && rule.portId !== portId) continue;
 
