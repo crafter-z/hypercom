@@ -2,7 +2,7 @@
 
 HyperCom 是一款串口调试工具。连接开发板、传感器等串口设备后，可以查看设备发来的数据、发送指令，并保存收发记录。
 
-![HyperCom 主界面](docs/architecture/UI.png)
+![HyperCom 主界面](docs/userwiki/images/overview.png)
 
 ## 特色功能
 

@@ -2,7 +2,7 @@
 
 HyperCom 可以连接串口设备、查看设备发来的数据，也可以向设备发送文字或十六进制数据。不知道从哪里开始？先看 [快速入门](快速入门.md)。
 
-![HyperCom 主界面](../architecture/UI.png)
+![HyperCom 主界面](images/overview.png)
 
 ## 界面怎么找
 
