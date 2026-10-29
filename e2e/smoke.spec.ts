@@ -815,16 +815,6 @@ test.describe('HyperCom smoke tests', () => {
     await ending.selectOption('None');
     await expect(ending).toHaveValue('None');
   });
-  test('Escape cancels the settings draft just like Cancel', async ({ page }) => {
-    await page.locator('.titlebar-right button[title="设置"]').click();
-    const font = page.locator('.config-page input:not([type])').first();
-    const original = await font.inputValue();
-    await font.fill('QualityDraftFont');
-    await page.keyboard.press('Escape');
-    await expect(page.locator('.modal-dialog')).not.toBeVisible();
-    await page.locator('.titlebar-right button[title="设置"]').click();
-    await expect(font).toHaveValue(original);
-  });
 
   test('reopening terminal search restores matches for the unchanged query', async ({ page }) => {
     await openCom1Tab(page);
@@ -841,45 +831,6 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.terminal-search-counter')).toHaveText('1/1');
   });
 
-  test('editing a row after its own save survives full save and Cancel', async ({ page }) => {
-    await page.addInitScript(TAURI_MOCK + `
-      (() => {
-        const api = window.__TAURI_INTERNALS__;
-        const original = api.invoke;
-        const backend = { revision: 0, sendCommandSets: [], highlightRuleSets: [], protocolTemplates: [], triggerRules: [], portToolConfigs: [], portPresets: [], portGroups: [], portMeta: [] };
-        api.invoke = async (command, args) => {
-          if (command === 'get_config') return structuredClone(backend);
-          if (command === 'load_command_sets') return structuredClone(backend.sendCommandSets);
-          if (command === 'save_command_set') {
-            backend.sendCommandSets = backend.sendCommandSets.filter(set => set.id !== args.args.id).concat(structuredClone(args.args));
-            backend.revision++;
-            return args.args.id;
-          }
-          if (command === 'set_config') {
-            if (args.expectedRevision !== backend.revision) return false;
-            Object.assign(backend, structuredClone(args.newConfig), { revision: backend.revision + 1 });
-            return true;
-          }
-          return original(command, args);
-        };
-      })();
-    `);
-    await page.goto('/');
-    await page.locator('.titlebar-right button[title="设置"]').click();
-    await page.locator('.modal-nav-item', { hasText: '发送命令规则' }).click();
-    await page.locator('.config-page > div > button').first().click();
-    const name = page.locator('.config-page input:not([type])').first();
-    await name.fill('saved-once');
-    await page.locator('button[title="保存到配置"]').click();
-    await page.locator('.modal-content-footer .btn:not(.btn-primary)').click();
-    await page.locator('.titlebar-right button[title="设置"]').click();
-    await expect(name).toHaveValue('saved-once');
-    await name.fill('latest-edit');
-    await page.locator('.modal-content-footer .btn-primary').click();
-    await expect(page.locator('.modal-dialog')).not.toBeVisible();
-    await page.locator('.titlebar-right button[title="设置"]').click();
-    await expect(name).toHaveValue('latest-edit');
-  });
 
   test('popout remembers an explicit target and freezes sequential sends across focus changes', async ({ page }) => {
     await page.addInitScript(TAURI_MOCK + `

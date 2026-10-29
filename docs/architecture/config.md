@@ -63,7 +63,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。
-- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **78** 个命令；配置域5个、规则存储域20个、插件域13个（含4个原生视图命令），契约见[插件模块](plugins.md#宿主命令与状态快照)。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **79** 个命令；新增系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
 
 ## 6 个 Zustand Store
 
@@ -73,7 +73,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 | `useSystemStore` | `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`（含 `configReady`）+ `clearTrafficStats` | 高频写点集中地（5s 系统轮询 / 每端口 1s 流量 flush / 拖拽 resize），故必须与 `useAppStore` 分开 |
 | `useOperationStore` | serial params + send（**无 `op` 前缀**、无显示态字段）+ `cyclicLoops: Record<portId, boolean>` | 显示态不在此 |
 | `useTerminalStore` | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt） | 行缓冲在 viewportManager 环形缓冲区；无行数组、无 Immer、不随数据更新 |
-| `useRuleStore` | highlightRuleSets / sendCommandSets / protocolTemplates / triggerRules / portToolConfigs + CRUD | 规则编辑**实时态**（活实体，全量保存的权威来源） |
+| `useRuleStore` | highlightRuleSets / sendCommandSets / protocolTemplates / triggerRules / portToolConfigs + CRUD | **已提交运行态**；编辑草稿由 `utils/entityEditor.ts` 管理，不新增 Zustand store |
 | `useToastStore` | 通知队列（toasts / stashed） | 宿主走 `push` 保留通知；插件走 `pushPlugin`，身份由宿主赋值并应用速率/文本/积压限额，见[通知模块](workspace.md#通知中心--toast) |
 
 `useSystemStore` 由 `useAppStore` **拆出**（`systemStatus` / `trafficStats` / `simulationMode` / `ui`）：这些字段与端口/标签页的订阅者无关，混在一起会让每次流量 flush 都唤醒 Pane / OperationPanel / Sidebar 重跑选择器。另有 `releaseTerminalState.ts`（统一回收某端口的 terminals / trafficStats / TX 历史）与 `resetStores.ts`（测试用整份复位）。
@@ -82,14 +82,15 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 ## 配置持久化：安全快照（issue #5-2）
 
-后端 `set_config` 是**整体替换**，不能直接提交 `useAppStore.config`：五类规则数组记录最后确认的持久化基线，活编辑在 `useRuleStore`；分组/端口和预设也各有权威来源。直接提交基线会丢弃活编辑。
+后端 `set_config` 是**整体替换**。`useAppStore.config` 的五类实体数组是最后确认的持久化基线，`useRuleStore` 是已保存运行态，`utils/entityEditor.ts` 单独拥有会话草稿；普通设置、分组、端口和预设仍各有原来的权威来源。
 
-`useConfigPersistence.saveConfig(patch?)` 内部构造安全快照，普通设置补丁不替代活实体。每轮先读取后端 revision与预设，再读取当前普通草稿、五类活规则和分组。规则按ID比较最后确认基线与后端快照：外部较新CRUD获胜，本窗基线未变的ID保留本地编辑。`storageService` 成功加载/upsert/delete后推进对应基线，失败不推进；全量保存成功后也推进，并采用后端赢家，但不覆盖invoke期间新发生的编辑。取消/X/Escape统一回滚普通草稿，保留已确认实体基线。`portMeta` 合并在线编辑与离线条目，最后revision CAS，冲突重新组装；不是永久使用启动快照。
+`useConfigPersistence.saveConfig(patch?)` 从五类草稿和普通设置构造安全快照，与最新后端 revision、实体基线协调后 CAS。未修改实体采用后端版本；同一实体两边均被修改时保留草稿并报告冲突，不静默选赢家。`utils/configWriteQueue.ts` 串行化全量、实体和元数据写入。保存成功才原子推进配置基线及运行数组；保存过程中产生的新编辑继续保持未保存。`utils/jsonEqual.ts` 忽略 JSON 对象属性顺序，避免 Rust 序列化顺序造成假脏状态或假冲突。
 
 - `portPresets` **没有** store 镜像（唯一写路径是 `storageService.savePortPresets`），保存前 `loadPortPresets()` 读回；读不到就不写——宁可不保存，也不能用陈旧快照覆盖磁盘。
 - `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。
 - 已接线处：`ConfigModal.handleSave`、`DiagnosticLogDialog` 的诊断开关（改 store 后 `saveConfig()`）。**新增全量保存点照抄此模式**——调 `saveConfig`，不要自己拼实体数组。
-- 实体页的**单条**保存（✓）不走全量保存：`src/components/ConfigModal/hooks/useEntityPage.ts` 是 5 个实体页共用的「load / dirty-track / save / delete」契约。要点：挂载即全量加载并替换 store（**除非**加载期间用户已改动；后端返回空列表也替换——跳过它正是「用户删过的实体在下次打开弹窗时复活并再次写回 config.json」的成因）；删除 = store 掉 + 后端删，失败必 toast；`savedSnapshotRef` 记录最后已知持久化态，只在写成功后推进，写失败保持 dirty 并由下次编辑重试。
+- 五类实体页统一使用 `useEntityPage({kind})`：挂载不重新加载并覆盖草稿；新增、删除、启用和排序均暂存。单条保存只提交该实体；页面保存提交整个集合及列表顺序；设置底部保存覆盖所有分类。校验和 CAS 失败保留草稿与错误。共享 `SortableEditorList` 提供专用手柄、键盘排序和插入；命令的数组顺序与连续 `order` 统一，协议/工具管理列表排序不增加执行优先级。
+- `utils/editorLeave.ts` 与 `shared/EditorLeaveDialog.tsx` 统一处理保存并关闭、放弃并关闭、继续编辑。设置 X/取消/Escape、独立窗口关闭及应用退出均等待处理；失败和保存期间的新编辑阻止关闭。主窗 Rust `editor:close-requested` 覆盖窗口关闭、托盘退出和 ExitRequested，前端通过 `complete_editor_close` 批准后才执行原关闭行为。备份导入先确认并处理草稿，安装更新在下载前处理草稿。
 - 插件不是五类规则页的实体：启停与权限动作立即独立持久化，取消设置仅回滚普通草稿，保留当前插件状态及 revision。备份导入只覆盖同安装身份的授权；导入中同 ID 不同身份清权禁用、未提及的当前插件保留，且不安装代码或迁移 KV。
 
 ## 配置读取/保存数据流
@@ -97,7 +98,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 ```
 应用启动 → useAppInit → useConfigPersistence.loadConfig → invoke get_config
   → ConfigManager.get_config() → 剥离旧 key + 反序列化 → useAppStore.setConfig(config)
-    → useRuleStore 灌入 5 组活实体（setGroups 须在分组自动保存订阅注册之前执行）
+    → useRuleStore 灌入 5 组已保存运行实体（setGroups 须在分组自动保存订阅注册之前执行）
     → useSystemStore.setUIState({ configReady: true })
     → 主窗（或弹出窗）`applyUiScale(config.uiScalePercent)`，缩放当前 WebView
 
@@ -113,7 +114,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 - `useRuleStore.setSendCommandSets` / `addSendCommandSet` 建立不变量「有命令集时 `activeSendCommandSetId` 必指向有效集」：保留仍有效的激活集、否则回退首个；`removeSendCommandSet` 对称回退（曾因启动加载/新建集从不设置激活集，导致配置了命令集但操作面板快捷区/循环发送无反应）。
 - 高亮引擎按各集 `isEnabled` 过滤（不读激活集 id——操作面板的规则分区已移除，该字段随之删除）。
-- 弹窗编辑经 `popout:command-set-updated` 整集回传主窗，主窗更新活规则并持久化，成功后推进持久化基线。弹窗不重复落库。
+- 命令面板通过 `popout:command-editor-request` 提交 sessionId/version 标识的草稿操作；主窗返回匹配 requestId 的 ACK 与权威快照。宿主重载换会话，面板接纳新会话并拒绝退役会话迟到响应；未确认输入遇冲突仍保留。`command-sets:changed` 只广播已提交运行态，保存 ACK 后才清除未保存状态。运行中的命令循环固定启动快照。
 
 ## AppState 运行期状态（配置的镜像）
 

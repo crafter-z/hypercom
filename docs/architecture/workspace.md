@@ -44,13 +44,13 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## 弹出体系（popout，issue #10）
 
-**核心架构原则**：弹出窗与主窗**不共享可变前端态**。后端 / config.json 是唯一持久真相，主窗的 `useRuleStore` / `useAppStore` 是唯一**活实体**来源；跨窗事件分两类——**意图**（弹窗 → 主窗请求动作，如 `popout:send-command` / `popout:open-config`）与**完整载荷广播**（主窗 → 弹窗，弹窗直接消费、不回库重读；盘上内容落后于未保存编辑，回库读会读到旧值）。
+**核心架构原则**：弹出窗与主窗不共享可变前端态。config.json 是持久化来源，主窗 `useRuleStore` 是已提交运行态，`entityEditor` 是权威会话草稿。跨窗使用带版本的编辑意图与 requestId ACK；草稿快照和运行配置广播严格分离。
 
 ### 通用弹出管线（Rust `commands/popout.rs`）
 
 - 窗口注册表 `AppState.popouts: Mutex<HashMap<String, PopoutMeta>>`，key 为窗口 label，value 记 `{kind, target_id}`；label 约定：快捷发送 = `"quick-send"`（单例）、终端 = `"terminal-{safe_id}"`（每端口一个）。
 - **label仅由Rust计算**：`sanitize`将非ASCII字母数字/`-`的UTF-8字节编码为`_HH`（包括下划线本身），不同端口不会因替换字符碰撞；`compute_label`按kind/target_id派生，前端不复制规则。
-- `open_popout` / `close_popout` 经前端 per-target desired-state lane 串行化；同端口 close→open、迟到创建和标签删除会被补偿收敛，旧 close 不得关闭新窗口。Rust 程序性 close 在 destroy 前移除注册元数据，`Destroyed` 事件只代表用户关闭，避免旧事件回贴新标签。
+- `open_popout` / `close_popout` 经前端 per-target desired-state lane 串行化。终端程序性 close 在 destroy 前移除注册元数据，`Destroyed` 通知回贴；命令面板 close 改走原生 CloseRequested，等待保存/放弃保护后才 destroy，不能直接销毁草稿窗口。
 - `open_popout` 为async，存在则show/focus，否则建独立owner窗口。`popout_url` 使用 `url::form_urlencoded` 编码query，端口中的`+`、`&`、`#`及非ASCII不会改变目标。窗口不装饰、置顶、跳过任务栏并parent(main)，按kind取默认尺寸。
 - `close_popout(kind, target_id)` / `set_popout_always_on_top(kind, target_id, on)`（窗口由 kind + target_id 算出，不存在时返回 Err）。弹窗位置/尺寸**不跨会话持久化**，每次新建都取默认尺寸。
 
@@ -63,8 +63,10 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 | 事件 | 方向 | 载荷 | 用途 |
 |---|---|---|---|
-| `command-sets:changed` | 主窗 → 快捷发送窗 | **完整 `SendCommandSet[]`** | 命令集改动后弹窗直接 `setSets(载荷)`（曾是无载荷信号回库重读——未保存编辑只存在于主窗 store，弹窗读不到；改为主窗 store 是唯一真相） |
-| `popout:command-set-updated` | 弹窗 → 主窗 | `{ set: SendCommandSet }` | 主窗更新活实体并落盘、成功推进基线；之后广播完整集合。弹窗不重复写入后端。 |
+| `command-sets:changed` | 主窗 → 消费窗 | `SendCommandSet[]` | 仅已保存运行态，不能携带未保存编辑 |
+| `popout:command-editor-request` / `command-editor:result` | 弹窗 ↔ 主窗 | sessionId、requestId、version、replace/save/discard、items/id；结果含 success/error/snapshot | 宿主重载生成新会话；退役会话和旧版本请求不能覆盖新配置，保存需真正确认 |
+| `command-editor:snapshot` | 主窗 → 命令面板 | items/version/dirty/dirtyIds/saving/error | 两处共享草稿；事件发送成功不等于保存成功 |
+| `command-editor:client-state` / `command-editor:client-leave` / `command-editor:client-result` | 双向 | 未确认本地状态 / 保存或放弃请求 / requestId ACK | 主窗退出必须等待面板尚未同步或冲突中的内容处理 |
 | `active-tab:changed` | 主窗 → 快捷发送窗 | `portId: string \| null` | 弹窗知道发送到哪个明确端口；无端口工具页为 `null`，不沿用旧目标 |
 | `port-statuses:sync` | 主窗 → 弹窗 | 全部端口连接状态 | 对表时全量回放（实时增量走 `serial:status` 广播），弹窗在已连接状态下打开时提示灯即刻准确 |
 | `serial:data` | 后端 → 所有窗 | 字节流 | 终端弹窗订阅（主窗与弹出窗各自模块单例） |

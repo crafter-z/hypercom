@@ -144,6 +144,35 @@ describe('retired frontend view work', () => {
     expect(snapshotTerminalLines('COM1')).toEqual([]);
   });
 
+  it('uses saved rank order and keeps the starting set, content and repeat count until restart', async () => {
+    const command = (id: string, order: number) => ({
+      id, name: id, content: id, order, delay: 25,
+      type: 'string' as const, appendLineEnding: 'None' as const,
+    });
+    const set = {
+      id: 'ordered', name: 'ordered', isLoop: false, loopDelay: 20, repeatCount: 2,
+      commands: [command('B', 1), command('A', 0)],
+    };
+    useRuleStore.getState().setSendCommandSets([set]);
+    await act(async () => {
+      useOperationStore.getState().setCyclicLoop('COM1', true);
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['A']);
+    // A save, deletion and active-set change must not splice an ongoing run.
+    useRuleStore.getState().setSendCommandSets([{ ...set, id: 'replacement', repeatCount: 1, commands: [command('NEW', 0)] }]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => [args.portId, args.data]))
+      .toEqual([['COM1', 'A'], ['COM1', 'B'], ['COM1', 'A'], ['COM1', 'B']]);
+    expect(Boolean(useOperationStore.getState().cyclicLoops.COM1)).toBe(false);
+    await act(async () => {
+      useOperationStore.getState().setCyclicLoop('COM1', true);
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['A', 'B', 'A', 'B', 'NEW']);
+    expect(Boolean(useOperationStore.getState().cyclicLoops.COM1)).toBe(false);
+  });
+
   it('keeps a replacement cyclic run alive after an old round-limit send settles', async () => {
     const old = deferred<number>();
     const replacement = deferred<number>();

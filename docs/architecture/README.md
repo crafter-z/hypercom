@@ -19,7 +19,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端计数口径：`src/stores/` 6 个 store；`src/services/` 14 个生产文件 = tauri.ts barrel + 13 域（含 plugin / pluginView）；`src/hooks/` 18 个 hook 文件，不含测试/barrel/辅助模块，native遮挡 hook 在 shared。后端78命令、12域；插件校验在 plugin/mod.rs，磁盘事务在 transaction.rs，隔离原生承载在 view_runtime/，状态仍为ConfigManager第9类实体。
+> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。后端79命令、12域；complete_editor_close 是主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
 
 ## 文档清单
 

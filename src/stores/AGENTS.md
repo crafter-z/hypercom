@@ -6,11 +6,11 @@ Six Zustand stores, no god store. Split by domain so a write in one domain canno
 
 | Store | File | Job |
 |-------|------|-----|
-| `useAppStore` | `useAppStore.ts` | ports / groups / tabs / paneTree / config. Rule entity arrays are startup snapshots, ordinary config is editable draft; pluginConfigs is a backend revision-ordered runtime mirror (`utils/pluginConfigSnapshot.ts`). Groups/port metadata follow `useAppInit` persistence; tree actions use paneTree helpers and `getClosingTabIds`. |
+| `useAppStore` | `useAppStore.ts` | ports/groups/tabs/paneTree/config; rule arrays are last confirmed persisted baselines, ordinary config is editable draft; pluginConfigs is backend revision-ordered. Groups/port metadata retain useAppInit persistence |
 | `useSystemStore` | `useSystemStore.ts` | 运行期系统态：`systemStatus`、`trafficStats`、`simulationMode`、`ui.*`（含 `configReady`）. 高频写点（5s 系统轮询 / 每端口 1s 流量 flush / 拖拽 resize）集中在这里，所以它必须与 `useAppStore` 分开，否则每次流量 flush 都会唤醒端口/标签订阅者。 |
 | `useOperationStore` | `useOperationStore.ts` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `cyclicLoops`（每端口循环发送开关 `Record<portId, boolean>`，issue #12；NO `op` prefix; NO `sendOnEnter`/`quickSendInlineCount` — those live in `useAppStore.config`; NO `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — those live per-tab in `useTerminalStore`; NO `loopRepeatCount` — repeat count is per-command-set `SendCommandSet.repeatCount`; 旧全局 `isLoopSending` 布尔已删除，改用 `setCyclicLoop(portId, running)` 逐端口启停） |
 | `useTerminalStore` | `useTerminalStore.ts` | pure display state (`scrollLocked`, `showTimestamp`, `displayFormat`, `encoding`, `connectedAt`) per port. 方案B（issue #14）：line buffer moved OUT into `TerminalViewportManager`'s ring buffer (`utils/terminal/viewportManager.ts`). Interface: `ensureTerminal` / `setTerminalConfig` / `setTerminalEncoding` / `setTerminalConnectedAt` / `releaseTerminal`. `setTerminalEncoding` updates `term.encoding`; re-decode is lazy (`getLineText` at render time) — no buffer walk. |
-| `useRuleStore` | `useRuleStore.ts` | highlight rule sets + send-command sets + protocol templates + trigger rules + port tool configs + CRUD + active-set ids. Entities persist in config.json (loaded at startup by `useAppInit` from `config`, saved via `storageService` config-backed commands). |
+| `useRuleStore` | `useRuleStore.ts` | committed highlight/command/protocol/trigger/tool runtime arrays and active command set. Forms use separate session drafts in utils/entityEditor; only accepted saves promote runtime |
 | `useToastStore` | `useToastStore.ts` | host `push` preserves overflow/sticky notifications; plugin `pushPlugin` assigns trusted source identity and enforces rate, text and pending limits. Both share max 5 visible + stashed; module helpers serve non-React callers. |
 
 ## Conventions (root covers selector discipline)
@@ -27,7 +27,7 @@ Six Zustand stores, no god store. Split by domain so a write in one domain canno
 - `pruneTree` auto-runs after every tree mutation: ① drops non-root empty leaves → ② collapses single-child branches (size inherits) → ③ empty root branch → degenerate `'main'` leaf.
 - `focusedPaneId` references a LEAF ID in the tree (never a flat array index). 任何改动 `paneTree` 的动作收尾都要 `revalidateFocus`：悬空 id 会让 `openTab` 把标签推进 `state.tabs` 却挂不到任何叶子（孤儿标签）。
 - Tree mutation actions: `splitPane`, `closeTab`, `resizeChildren(branchId, childIndex, deltaFraction)`. Use these — never write tree state by hand.
-- **全量保存走 `useConfigPersistence.saveConfig(patch?)`**：活规则 + groups + 在线/离线 portMeta + 后端预设组成安全快照并 revision CAS。五类规则的 `store.config` 数组是最后确认的持久化基线；只由 `storageService` 成功读取/CRUD 和成功全量保存推进，不同步未保存的活编辑；取消设置保留基线。
+- Full settings save composes entityEditor drafts + ordinary config/groups/portMeta/presets and revision CAS through configWriteQueue. Baseline, session drafts and runtime are separate; per-entity save preserves unrelated drafts, failures/late edits stay dirty. No page-level CRUD or auto-save may bypass this boundary.
 - 插件镜像只接受 `pluginConfigSnapshot` 的后端 `{revision, pluginConfigs}` 快照，旧响应不能恢复权限；安装身份变化使旧 KV 缓存失效。不要用规则实体基线直接发布插件状态或备份中的旧授权。
 - 插件通知只能走 `pushPlugin(pluginId, input)`；不能走宿主 `push` 绕过限额。作者 API 与数值见 `docs/plugin-development.md`；宿主实现见 `docs/architecture/plugins.md`，宿主/串口粘滞记录不因插件配额被移除。
 - 测试用 `resetStoresForTests()`（`resetStores.ts`）而不是手抄每个 store 的默认字段；它按模块加载时的快照整份替换。

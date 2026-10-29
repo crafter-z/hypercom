@@ -1,19 +1,21 @@
 // @vitest-environment jsdom
 import { act, createElement } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
+import type { Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig, PortMetaEntry, SendCommandSet, SerialPort } from '../types';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
-import { useConfigPersistence, saveCurrentPortMeta } from './useConfigPersistence';
+import { useConfigPersistence, saveCurrentPortMeta, resetOrdinaryConfigBaselineForTests, isOrdinaryConfigDirty } from './useConfigPersistence';
+import { getEntityEditorSnapshot, replaceEntityDraft, resetEntityEditorForTests } from '../utils/entityEditor';
 import { commitUpdateMode, getCommittedUpdateMode, updateTiming } from '../utils/updateService';
+import { resetStoresForTests } from '../stores/resetStores';
 
 vi.mock('../services/tauri', () => ({
   configService: { getConfig: vi.fn(), setConfig: vi.fn() },
   storageService: { loadPortPresets: vi.fn() },
 }));
-vi.mock('../stores/useToastStore', () => ({ notifyError: vi.fn() }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const testStorage = new Map<string, string>();
@@ -52,13 +54,17 @@ function Probe() {
 }
 
 beforeEach(async () => {
-  localStorage.clear();
+  resetStoresForTests();
   commitUpdateMode('stable');
+  resetEntityEditorForTests();
+  resetOrdinaryConfigBaselineForTests();
+  localStorage.clear();
   backend = { ...useAppStore.getState().config, updateCheckMode: 'stable', sendCommandSets: [rule('old')], portMeta: [] };
   revision = 0;
   writes = [];
   useAppStore.setState({ config: { ...backend, revision: 0 }, ports: [] });
   useRuleStore.getState().setSendCommandSets([rule('old')]);
+  replaceEntityDraft('sendCommandSets', [rule('old')]);
   vi.mocked(configService.getConfig).mockImplementation(async () => ({ ...backend, revision }));
   vi.mocked(configService.setConfig).mockImplementation(async (candidate, restore, expected) => {
     expect(restore).toBe(false);
@@ -83,6 +89,7 @@ afterEach(async () => {
 function persistRule(name: string) {
   backend = { ...backend, sendCommandSets: [rule(name)] };
   revision++;
+  useAppStore.getState().setConfig({ sendCommandSets: backend.sendCommandSets });
   useRuleStore.getState().setSendCommandSets([rule(name)]);
 }
 
@@ -124,7 +131,7 @@ describe('whole-config saves versus independently persisted rules', () => {
   });
 
   it('preserves an unsaved local draft for one ID while retaining backend CRUD for a different ID', async () => {
-    useRuleStore.getState().setSendCommandSets([rule('local draft')]);
+    replaceEntityDraft('sendCommandSets', [rule('local draft')]);
     backend = { ...backend, sendCommandSets: [rule('old'), { ...rule('remote'), id: 'rule-2' }] };
     revision++;
     await save({ theme: 'light' });
@@ -154,7 +161,7 @@ describe('whole-config saves versus independently persisted rules', () => {
       .mockResolvedValue([]);
     const saving = save({ theme: 'light' });
     await vi.waitFor(() => expect(storageService.loadPortPresets).toHaveBeenCalledTimes(1));
-    useRuleStore.getState().setSendCommandSets([rule('unsaved')]);
+    replaceEntityDraft('sendCommandSets', [rule('unsaved')]);
     backend = { ...backend, sendCommandSets: [rule('old'), { ...rule('remote'), id: 'rule-2' }] };
     revision++;
     firstLoad.resolve([]);
@@ -181,9 +188,9 @@ describe('whole-config saves versus independently persisted rules', () => {
   });
 
   it('keeps later local edits across consecutive successful full saves', async () => {
-    useRuleStore.getState().setSendCommandSets([rule('first edit')]);
+    replaceEntityDraft('sendCommandSets', [rule('first edit')]);
     expect(await save()).toBe(true);
-    useRuleStore.getState().setSendCommandSets([rule('later edit')]);
+    replaceEntityDraft('sendCommandSets', [rule('later edit')]);
     expect(await save()).toBe(true);
     expect(backend.sendCommandSets).toEqual([rule('later edit')]);
   });
@@ -193,7 +200,7 @@ describe('whole-config saves versus independently persisted rules', () => {
     revision++;
     expect(await save()).toBe(true);
     expect(useRuleStore.getState().sendCommandSets).toEqual([rule('remote winner')]);
-    useRuleStore.getState().setSendCommandSets([rule('edited winner')]);
+    replaceEntityDraft('sendCommandSets', [rule('edited winner')]);
     expect(await save()).toBe(true);
     expect(backend.sendCommandSets).toEqual([rule('edited winner')]);
   });
@@ -206,25 +213,35 @@ describe('whole-config saves versus independently persisted rules', () => {
       revision++;
       return true;
     });
-    useRuleStore.getState().setSendCommandSets([rule('saved draft')]);
+    replaceEntityDraft('sendCommandSets', [rule('saved draft')]);
     const saving = save();
     await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledTimes(1));
-    useRuleStore.getState().setSendCommandSets([rule('edited during save')]);
+    replaceEntityDraft('sendCommandSets', [rule('edited during save')]);
     accepted.resolve(true);
     expect(await saving).toBe(true);
-    expect(useRuleStore.getState().sendCommandSets).toEqual([rule('edited during save')]);
+    expect(useRuleStore.getState().sendCommandSets).toEqual([rule('saved draft')]);
+    expect(getEntityEditorSnapshot<SendCommandSet>('sendCommandSets').items).toEqual([rule('edited during save')]);
     expect(await save()).toBe(true);
     expect(backend.sendCommandSets).toEqual([rule('edited during save')]);
   });
   it('returns failure instead of confirming settings after repeated conflicts', async () => {
+    const themeBefore = backend.theme;
     vi.mocked(configService.setConfig).mockResolvedValue(false);
     expect(await save({ theme: 'light' })).toBe(false);
     expect(configService.setConfig).toHaveBeenCalledTimes(5);
-    expect(backend.theme).not.toBe('light');
+    expect(backend.theme).toBe(themeBefore);
   });
 });
 
 describe('committed update mode persistence', () => {
+  it('does not mark equivalent backend properties as edited merely because serialization reordered them', async () => {
+    backend = Object.fromEntries(Object.entries(backend).reverse()) as AppConfig;
+    await act(async () => { await load(); });
+    expect(isOrdinaryConfigDirty()).toBe(false);
+    useAppStore.getState().setConfig({ terminalFontSize: backend.terminalFontSize + 1 });
+    expect(isOrdinaryConfigDirty()).toBe(true);
+  });
+
   it('loads persisted mode without discarding a snooze and ignores later draft edits', async () => {
     backend = { ...backend, updateCheckMode: 'preview' };
     updateTiming.setSnooze(7, 1750000000000);
@@ -253,7 +270,7 @@ describe('committed update mode persistence', () => {
   it('never-remind field-only CAS preserves persisted settings and rules instead of stale drafts', async () => {
     const persistedTheme = backend.theme;
     useAppStore.getState().setConfig({ theme: persistedTheme === 'light' ? 'dark' : 'light', updateCheckMode: 'preview' });
-    useRuleStore.getState().setSendCommandSets([rule('unsaved draft')]);
+    replaceEntityDraft('sendCommandSets', [rule('unsaved draft')]);
     backend = { ...backend, sendCommandSets: [rule('already persisted elsewhere')] };
     revision++;
     expect(await save({ updateCheckMode: 'none' }, true)).toBe(true);

@@ -82,7 +82,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **共享调度引擎**：`components/OperationPanel/hooks/useSequentialSend.ts` 是「顺序 / 循环发送」的唯一调度实现（`createSendLoop` 纯调度 + `useSequentialSend` React 绑定）。计时器链、重入防护（任一次迭代最多在飞一个，防止可见性补发与到期定时器双触发）、可见性补发（`catchUpIfOverdue`，阈值 `SEND_LOOP_OVERDUE_MS`）、卸载自停、可选的变更自停都在引擎里；调用方只提供「一步做什么」的 `step`。**旧的循环发送状态机分叉已消除**：主窗命令集循环与弹窗文本逐行发送（`Popout/QuickSendText.tsx`）共用它——弹窗旧循环器 `Popout/usePanelCyclicSend.ts` 已删除。
 - **每端口一个 runtime**：`useCyclicSend`（`components/OperationPanel/hooks/useCyclicSend.ts`）为每个端口创建一条 `SendLoop`（`startLoop(portId)`），目标端口**永远绑定启动它的端口**——不跟随活动标签、不受窗口/标签聚焦切换影响（COM3 启动循环后切到 COM4，COM3 继续发）。
 - **运行开关**：`useOperationStore.cyclicLoops: Record<portId, boolean>` + `setCyclicLoop(portId, running)`（替代旧全局单例 `isLoopSending` 布尔）；SendSection 的按钮按**当前聚焦端口**查状态——切回 COM3 时按钮自然变回「停止」。reconcile effect 幂等：开启的端口没有 runtime → 启动；runtime 存在但开关被关/移除 → 停止。
-- **每 tick 实时读命令集**：从 `useRuleStore.getState()` 取 `sendCommandSets` 与 `activeSendCommandSetId`，命令集编辑即时生效；命令集缺失/为空 → 清该端口开关并停止。
+- **启动快照**：启动时从 `useRuleStore` 读取已保存命令集，使用 `utils/commandOrder.ts` 的 `orderedCommands` 固定顺序、内容和循环参数；之后编辑、保存、切换或删除命令集均不影响当前运行。重启循环才采用新版本。启动时命令集缺失/为空则清运行开关。
 - **静默发送**：逐条 `sendData(..., silent=true)`（循环 / 触发自动回复不打扰用户）；失败由引擎的 `onStepError` 聚合为一条 toast（`notified` 去重）并返回 `RETRY_MS`（500ms）重试，不推进索引、不终止循环。
 - **计时**：轮内用每命令 `delay`，仅轮间用集合级 `loopDelay`。轮次边界以「本条是否本轮最后一条」（`currentCmdIdx === commands.length - 1`）判定；曾用 `nextIdx >= length`，导致第二轮起每条都误用 `loopDelay`、`completedRounds` 按「条」而非「轮」累加而提前停发。重复轮数 `repeatCount` 是命令集自有字段（config.json），`>0` 时精确发满 N 轮停止，否则跟随集合的 `isLoop`。
 - **端口未连接**：跳过本次 tick 并不推进索引，`TARGET_WAIT_MS`（500ms）后重试（切聚焦 / 短暂断开皆不中断）。
@@ -94,7 +94,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - 快捷发送条：pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（`useQuickStripLayout` + ResizeObserver + 隐藏测量行，`utils/sendStrip.ts` 的 `computeFitCount` 算可见切片与溢出条数）、首槽固定「打开命令面板」按钮（`.op-quick-panel-btn`，issue #7-2）。
 - `quickSendInlineCount`（`useAppStore.config`）**只决定内联条是否挂载：仅 0 = 隐藏**，任何 `>0` 都显示；条内实际显示几条由实测宽度决定，不由该值直接切片。
 - QuickSendPanel 双模式：列表（整行可点即发、行内「修改」就地编辑）/ 文本逐行（`QuickSendText` + `useSequentialSend` 驱动，含「执行当前行并移至下一行」，issue #6-3）。
-- **弹窗 → 主窗写回命令集（K6）**：弹窗本地那套 store 是另一个 webview 的**空实例**，`updateSendCommandSet` 在里面恒为 no-op；命令集编辑必须经 `popout:command-set-updated` **整集回传主窗**，由 `usePopoutBridge` 写回 `useRuleStore` 活实体（并叠加存储层的 `saveCommandSet` 落盘）。弹窗列表刷新仍走主窗回的 `command-sets:changed`（同一路径，不另存可写副本）——只写本地副本会被主窗后续任何一次 `save_config` 用活实体覆盖回滚。
+- **面板编辑与主窗定案**：`popout:command-editor-request` 以 version 校验 replace/save/discard，主窗 `entityEditor` 管理权威草稿并返回 requestId 匹配的 ACK。`command-editor:snapshot` 与已提交 `command-sets:changed` 分离；面板串行发送草稿操作，失败/冲突保留输入，只有保存 ACK 才显示已保存。主窗退出另经 client-state/client-leave/client-result ACK 处理尚未同步的面板内容。列表和文本切换保留列表编辑器；编辑/脏命令集禁发，搜索时禁拖排序。
 - 目标串口下拉只显示串口号（去 `· REAL/VIRTUAL` 后缀，issue #7-4）；底栏「发送到」提示灯跟随真实连接状态——`usePopoutSync` 订阅 `serial:status` 广播 + `port-statuses:sync` 全量回放（绿=连接呼吸/灰=断开，issue #7-5）。
 - 弹出窗（popout）发送经 `popout:send-command` 意图 → 主窗 `sendToPort`（见 workspace.md）。
 
@@ -113,7 +113,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式长度上限 200；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，归一化后为空的模式不派发动作。
 - **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。
 - **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
-- 规则编辑 **300ms 防抖逐条自动落盘**：`TriggerSettings` 经 `useEntityPage` 传 `autoSaveDebounceMs: 300`，`savedSnapshotRef`（最后已知持久化态）用于 diff 出改动项；关闭配置弹窗时有 unmount flush，不会丢最后一次按键。
+- 规则统一**显式保存后生效**：提醒、自动回复与其他实体页共用 `useEntityPage({kind})` 会话草稿。取消 300ms 自动落盘及卸载 flush；新建、删除、启用和拖动排序也只改草稿。保存后按数组顺序评估所有匹配规则，不改为首条命中即停止。
 - 已知边界：触发匹配按**行**粒度（HEX 匹配按该行的原始字节 `rawData`）；行首 BOM 已在解码时剥离，不参与匹配。
 
 ## 数据流速查
@@ -124,4 +124,4 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 | RX | 读线程（100ms 读超时轮询）→ serial:data → useSerialReceive → RxPipeline（组装/队列/批写 tick）→ viewportManager.appendTerminalLines → TerminalRenderer（同帧 DOM） |
 | TX | SendSection.handleSend → sendToPort（HEX 校验 + 守卫 + flushNow + TX 回显）→ invoke send_serial_data → 写句柄 write_all_with_deadline |
 | 端口轮询 | useSerialPorts(3000) → list_available_ports → mapPortInfo → mergePorts（保序/保态/幽灵 3 轮） |
-| 循环 | setCyclicLoop(portId, true) → useCyclicSend startLoop → createSendLoop 每 tick 实时读 store 命令集 → sendToPort(silent) |
+| 循环 | setCyclicLoop(portId, true) → 捕获已保存命令集/顺序快照 → createSendLoop → sendToPort(silent) |
