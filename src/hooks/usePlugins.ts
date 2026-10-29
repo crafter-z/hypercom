@@ -15,15 +15,37 @@ import {
   syncPluginListSnapshot,
   syncStorePluginConfigs,
 } from '../utils/pluginConfigSnapshot';
+import { reloadPluginViews } from '../utils/pluginViewRuntime';
 import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
-import { notifyError, notifySuccess } from '../stores/useToastStore';
+import { extractErrorMessage, notifyError, notifySuccess } from '../stores/useToastStore';
 import type { AppConfig, PluginView } from '../types';
+
+// Backend refuses a same/lower-version install unless the caller explicitly
+// replaces it. The refusal is not a user-visible failure: the settings page
+// asks for confirmation and retries with replaceExisting. Keep the code in
+// sync with the Rust CommandError prefix.
+const REPLACE_CONFIRMATION_PREFIX = 'plugin_replace_confirmation_required';
+
+export function isPluginReplaceConfirmationError(error: unknown): boolean {
+  return extractErrorMessage(error).trim().startsWith(REPLACE_CONFIRMATION_PREFIX);
+}
 
 // Permission updates replace the complete grant array. Keep one queue per
 // plugin outside React component instances so page switches cannot resurrect a
 // stale grant snapshot.
 const permissionQueues = new Map<string, Promise<void>>();
+
+function queuePermissionMutation(pluginId: string, operation: () => Promise<void>): Promise<void> {
+  const previous = permissionQueues.get(pluginId) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  permissionQueues.set(pluginId, next);
+  const release = () => {
+    if (permissionQueues.get(pluginId) === next) permissionQueues.delete(pluginId);
+  };
+  void next.then(release, release);
+  return next;
+}
 
 async function reconcileMutationFailure(): Promise<void> {
   try {
@@ -193,7 +215,7 @@ export function usePluginList() {
     void refresh();
   }, [refresh]);
 
-  const installPlugin = useCallback(async (sourcePath: string): Promise<PluginView | null> => {
+  const installPlugin = useCallback(async (sourcePath: string, replaceExisting = false): Promise<PluginView | null> => {
     setLoading(true);
     pluginHost.dispose();
     // Identify the installed plugin from the authoritative install snapshot
@@ -204,7 +226,7 @@ export function usePluginList() {
       (useAppStore.getState().config.pluginConfigs ?? []).map(entry => [entry.id, entry.installGeneration]),
     );
     try {
-      const snapshot = await pluginService.installPlugin(sourcePath);
+      const snapshot = await pluginService.installPlugin(sourcePath, replaceExisting || undefined);
       const installedEntry = snapshot.pluginConfigs.find(
         entry => previousGenerations.get(entry.id) !== entry.installGeneration,
       );
@@ -216,6 +238,13 @@ export function usePluginList() {
         plugin => plugin.id === installedEntry.id && plugin.installGeneration === installedEntry.installGeneration,
       ) ?? null;
     } catch (error) {
+      if (!replaceExisting && isPluginReplaceConfirmationError(error)) {
+        // Expected same/lower-version refusal. Nothing changed on disk, so
+        // restore the workers suspended above and let the caller ask for an
+        // explicit replacement instead of showing a failure.
+        pluginHost.syncWithConfig(true);
+        throw error;
+      }
       await reconcileMutationFailure();
       console.error('[usePluginList] install failed:', error);
       notifyError(error);
@@ -225,7 +254,49 @@ export function usePluginList() {
     }
   }, [refresh]);
 
-  const grantAllAndEnable = useCallback(async (plugin: PluginView): Promise<void> => {
+  const reloadPlugin = useCallback((pluginId: string, expectedGeneration: string): Promise<void> =>
+    queuePermissionMutation(pluginId, async () => {
+      // Re-read inside the queue: a pending mutation may already have replaced
+      // the installation the caller reviewed.
+      const entry = useAppStore.getState().config.pluginConfigs?.find(plugin => plugin.id === pluginId);
+      if (!entry || entry.installGeneration !== expectedGeneration) {
+        const error = new Error(`plugin ${pluginId} installation changed; refresh before reloading`);
+        notifyError(error);
+        throw error;
+      }
+      if (!entry.enabled) {
+        const error = new Error(`plugin ${pluginId} is disabled; enable it before reloading`);
+        notifyError(error);
+        throw error;
+      }
+      setLoading(true);
+      try {
+        // Retire the old code before the backend reload so a fresh session can
+        // never be cancelled by the backend's own view/HTTP retirement.
+        pluginHost.disable(pluginId);
+        const snapshot = await pluginService.reloadPlugin(pluginId, expectedGeneration);
+        if (!syncStorePluginConfigs(snapshot)) {
+          throw new Error(`plugin ${pluginId} reload response was stale; refresh before relying on it`);
+        }
+        // Same installation identity: data, grants and web trust are untouched.
+        // reload() disables and re-enables the current config entry, resolving
+        // once the fresh session start attempt settles (pure-HTML stays Worker-free).
+        await pluginHost.reload(pluginId);
+        // Re-read the installed manifest/code listings before remounting views.
+        await refresh();
+        await reloadPluginViews(pluginId);
+        notifySuccess('plugins.reloaded');
+      } catch (error) {
+        await reconcileMutationFailure();
+        console.error('[usePluginList] reload failed:', error);
+        notifyError(error);
+        throw error;
+      } finally {
+        setLoading(false);
+      }
+    }), [refresh]);
+
+  const grantAllAndEnable = useCallback((plugin: PluginView): Promise<void> => queuePermissionMutation(plugin.id, async () => {
     setLoading(true);
     try {
       const declared = plugin.declaredPermissions.filter(permission => plugin.knownPermissions.includes(permission));
@@ -243,7 +314,7 @@ export function usePluginList() {
     } finally {
       setLoading(false);
     }
-  }, [refresh]);
+  }), [refresh]);
 
   const uninstallPlugin = useCallback(async (pluginId: string) => {
     setLoading(true);
@@ -265,9 +336,8 @@ export function usePluginList() {
     }
   }, [refresh]);
 
-  const setEnabled = useCallback(async (pluginId: string, enabled: boolean, expectedGeneration: string) => {
+  const setEnabled = useCallback((pluginId: string, enabled: boolean, expectedGeneration: string) => queuePermissionMutation(pluginId, async () => {
     try {
-      await permissionQueues.get(pluginId);
       const snapshot = await pluginService.setPluginEnabled(pluginId, enabled, expectedGeneration);
       syncStorePluginConfigs(snapshot);
       notifySuccess(enabled ? 'plugins.enabled' : 'plugins.disabled');
@@ -276,7 +346,7 @@ export function usePluginList() {
       console.error('[usePluginList] setEnabled failed:', error);
       notifyError(error);
     }
-  }, [refresh]);
+  }), [refresh]);
 
   const togglePermission = useCallback((pluginId: string, permission: string, expectedGeneration: string): Promise<void> => {
     const previous = permissionQueues.get(pluginId) ?? Promise.resolve();
@@ -301,16 +371,56 @@ export function usePluginList() {
     return next;
   }, [refresh]);
 
-  return { plugins, loading, refresh, installPlugin, grantAllAndEnable, uninstallPlugin, setEnabled, togglePermission } satisfies PluginListApi;
+  const setTrustedWeb = useCallback((pluginId: string, trusted: boolean, expectedGeneration: string): Promise<void> => queuePermissionMutation(pluginId, async () => {
+    setLoading(true);
+    if (!trusted) pluginHost.disable(pluginId);
+    try {
+      const entry = useAppStore.getState().config.pluginConfigs?.find(plugin => plugin.id === pluginId);
+      if (!entry || entry.installGeneration !== expectedGeneration) throw new Error(`plugin ${pluginId} installation changed; review the current version before trusting webpages`);
+      const snapshot = await pluginService.setPluginTrustedWeb(pluginId, trusted, expectedGeneration);
+      syncStorePluginConfigs(snapshot);
+      await refresh();
+    } catch (error) {
+      await reconcileMutationFailure();
+      notifyError(error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }), [refresh]);
+
+  const clearWebData = useCallback((pluginId: string, expectedGeneration: string): Promise<void> => queuePermissionMutation(pluginId, async () => {
+    setLoading(true);
+    pluginHost.disable(pluginId);
+    try {
+      const disabled = await pluginService.setPluginEnabled(pluginId, false, expectedGeneration);
+      syncStorePluginConfigs(disabled);
+      const cleared = await pluginService.clearPluginWebData(pluginId, expectedGeneration);
+      syncStorePluginConfigs(cleared);
+      await refresh();
+      notifySuccess('plugins.webDataCleared');
+    } catch (error) {
+      await reconcileMutationFailure();
+      notifyError(error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }), [refresh]);
+
+  return { plugins, loading, refresh, installPlugin, reloadPlugin, grantAllAndEnable, uninstallPlugin, setEnabled, togglePermission, setTrustedWeb, clearWebData } satisfies PluginListApi;
 }
 
 export interface PluginListApi {
   plugins: PluginView[];
   loading: boolean;
   refresh: () => Promise<PluginView[]>;
-  installPlugin: (sourcePath: string) => Promise<PluginView | null>;
+  installPlugin: (sourcePath: string, replaceExisting?: boolean) => Promise<PluginView | null>;
+  reloadPlugin: (pluginId: string, expectedGeneration: string) => Promise<void>;
   grantAllAndEnable: (plugin: PluginView) => Promise<void>;
   uninstallPlugin: (pluginId: string) => Promise<void>;
   setEnabled: (pluginId: string, enabled: boolean, expectedGeneration: string) => Promise<void>;
   togglePermission: (pluginId: string, permission: string, expectedGeneration: string) => Promise<void>;
+  setTrustedWeb: (pluginId: string, trusted: boolean, expectedGeneration: string) => Promise<void>;
+  clearWebData: (pluginId: string, expectedGeneration: string) => Promise<void>;
 }

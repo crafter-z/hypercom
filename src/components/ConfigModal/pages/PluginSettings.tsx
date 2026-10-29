@@ -18,10 +18,63 @@ import {
   Check,
   X,
 } from 'lucide-react';
-import { usePluginList } from '../../../hooks/usePlugins';
+import { usePluginList, isPluginReplaceConfirmationError } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { PluginView } from '../../../types';
+import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
+
+const hasTrustedViews = (plugin: PluginView): boolean =>
+  plugin.manifest?.ui?.views?.some(view => view.mode === 'trusted-web') === true;
+
+function TrustedWebDialog({ plugin, clearing, working, onCancel, onAccept }: {
+  plugin: PluginView; clearing: boolean; working: boolean; onCancel: () => void; onAccept: () => void;
+}) {
+  const { t } = useTranslation();
+  const ready = usePluginViewOverlay();
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!ready) return;
+    const previous = document.activeElement;
+    ref.current?.querySelector('button')?.focus();
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
+  }, [ready]);
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!working) onCancel();
+      } else if (event.key === 'Tab') {
+        const buttons = ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+        if (!buttons?.length) { event.preventDefault(); return; }
+        const first = buttons[0], last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onCancel, working]);
+  if (!ready) return null;
+  return <div className="modal-overlay" role="presentation" onClick={event => event.stopPropagation()}>
+    <div ref={ref} className="modal-dialog-compact plugin-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="trusted-web-title" aria-describedby="trusted-web-description">
+      <h3 id="trusted-web-title">{t(clearing ? 'plugins.clearWebDataTitle' : 'plugins.trustedWebTitle')}</h3>
+      <p><strong>{plugin.manifest?.name ?? plugin.id}</strong> · {plugin.manifest?.version}</p>
+      <p id="trusted-web-description">{t(clearing ? 'plugins.clearWebDataDescription' : 'plugins.trustedWebDescription')}</p>
+      {!clearing && <ul>
+        <li>{t('plugins.trustedWebNetwork')}</li>
+        <li>{t('plugins.trustedWebFiles')}</li>
+        <li>{t('plugins.trustedWebClipboard')}</li>
+        <li>{t('plugins.trustedWebStorage')}</li>
+      </ul>}
+      <div className="plugin-permission-dialog-actions">
+        <button className="btn" disabled={working} onClick={onCancel}>{t('plugins.trustedWebCancel')}</button>
+        <button className="btn btn-danger" disabled={working} onClick={onAccept}>{t(clearing ? 'plugins.clearWebData' : 'plugins.trustedWebAccept')}</button>
+      </div>
+    </div>
+  </div>;
+}
 
 const PluginSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -30,13 +83,19 @@ const PluginSettings: React.FC = () => {
     loading,
     refresh,
     installPlugin,
+    reloadPlugin,
     grantAllAndEnable,
     uninstallPlugin,
     setEnabled,
     togglePermission,
+    setTrustedWeb,
+    clearWebData,
   } = usePluginList();
   const [pendingGrant, setPendingGrant] = React.useState<PluginView | null>(null);
-  // 插件出站代理（issue #17）：宿主显式配置，供 plugin_http 使用（不继承宿主系统代理）。
+  const [pendingTrust, setPendingTrust] = React.useState<{ plugin: PluginView; install: boolean } | null>(null);
+  const [pendingClear, setPendingClear] = React.useState<PluginView | null>(null);
+  const [working, setWorking] = React.useState(false);
+  // 插件出站代理（issue #17）：宿主显式配置的代理优先；未配置时继承系统代理。
   const pluginProxyEnabled = useAppStore((s) => s.config.pluginProxyEnabled);
   const pluginProxy = useAppStore((s) => s.config.pluginProxy);
   const setConfig = useAppStore((s) => s.setConfig);
@@ -46,8 +105,20 @@ const PluginSettings: React.FC = () => {
         ? await open({ directory: true, multiple: false, title: t('plugins.installDirectory') })
         : await open({ multiple: false, filters: [{ name: 'Plugin archive', extensions: ['zip'] }], title: t('plugins.installZip') });
       if (typeof selected !== 'string') return;
-      const installed = await installPlugin(selected);
-      if (installed) setPendingGrant(installed);
+      let installed: PluginView | null;
+      try {
+        installed = await installPlugin(selected);
+      } catch (error) {
+        // Same/lower version: not a failure yet. Ask for an explicit
+        // replacement (data preserved, grants/trust reset) before retrying.
+        if (!isPluginReplaceConfirmationError(error)) return;
+        if (!window.confirm(t('plugins.replaceConfirm'))) return;
+        installed = await installPlugin(selected, true);
+      }
+      if (installed) {
+        if (hasTrustedViews(installed) && installed.trustedWebGranted !== true) setPendingTrust({ plugin: installed, install: true });
+        else setPendingGrant(installed);
+      }
     } catch (error) {
       console.debug('[PluginSettings] install failed:', error);
     }
@@ -55,10 +126,14 @@ const PluginSettings: React.FC = () => {
 
 
   /** 启用时提示当前可授予的敏感权限；未实现能力不列入风险确认。 */
-  const handleToggleEnabled = (plugin: { id: string; installGeneration: string; name: string | null; declaredPermissions: string[]; enabled: boolean }): void => {
+  const handleToggleEnabled = (plugin: PluginView): void => {
     if (!plugin.enabled) {
+      if (hasTrustedViews(plugin) && plugin.trustedWebGranted !== true) {
+        setPendingTrust({ plugin, install: false });
+        return;
+      }
       const sensitive = plugin.declaredPermissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
-      if (sensitive.length > 0 && !window.confirm(t('plugins.sensitiveConfirm', { name: plugin.name ?? plugin.id, perms: sensitive.join(', ') }))) {
+      if (sensitive.length > 0 && !window.confirm(t('plugins.sensitiveConfirm', { name: plugin.manifest?.name ?? plugin.id, perms: sensitive.join(', ') }))) {
         return;
       }
     }
@@ -134,19 +209,24 @@ const PluginSettings: React.FC = () => {
                         {t('plugins.apiVersion', { version: plugin.manifest.apiVersion })}
                       </span>
                     )}
+                    {hasTrustedViews(plugin) && <span className="plugin-card-version">{t(plugin.trustedWebGranted === true ? 'plugins.trustedWebBadge' : 'plugins.trustedWebPendingBadge')}</span>}
                   </div>
                   <div className="plugin-card-controls">
+                    {plugin.trustedWebGranted === true && <button className="btn btn-danger btn-sm" disabled={loading} onClick={() => {
+                      void setTrustedWeb(plugin.id, false, plugin.installGeneration).catch(() => {});
+                    }}>{t('plugins.revokeTrustedWeb')}</button>}
+                    {hasTrustedViews(plugin) && <button className="btn btn-sm" disabled={loading} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
+                    <button
+                      className="btn btn-sm"
+                      title={t('plugins.reloadCodeHint')}
+                      onClick={() => void reloadPlugin(plugin.id, plugin.installGeneration).catch(() => {})}
+                      disabled={loading || !plugin.enabled || !!plugin.manifestError}
+                    >
+                      <RefreshCw size={13} /> {t('plugins.reloadCode')}
+                    </button>
                     <button
                       className={`btn btn-sm${plugin.enabled ? ' active' : ''}`}
-                      onClick={() =>
-                        handleToggleEnabled({
-                          id: plugin.id,
-                          installGeneration: plugin.installGeneration,
-                          name: plugin.manifest?.name ?? null,
-                          declaredPermissions: declared,
-                          enabled: plugin.enabled,
-                        })
-                      }
+                      onClick={() => handleToggleEnabled(plugin)}
                       disabled={loading || !!plugin.manifestError}
                     >
                       <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
@@ -213,6 +293,28 @@ const PluginSettings: React.FC = () => {
         </div>
       )}
       </div>
+    {(pendingTrust || pendingClear) && <TrustedWebDialog
+      plugin={(pendingTrust?.plugin ?? pendingClear)!}
+      clearing={pendingClear !== null}
+      working={working || loading}
+      onCancel={() => { setPendingTrust(null); setPendingClear(null); }}
+      onAccept={() => {
+        if (working) return;
+        setWorking(true);
+        void (async () => {
+          if (pendingClear) {
+            await clearWebData(pendingClear.id, pendingClear.installGeneration);
+            setPendingClear(null);
+          } else if (pendingTrust) {
+            const { plugin, install } = pendingTrust;
+            await setTrustedWeb(plugin.id, true, plugin.installGeneration);
+            setPendingTrust(null);
+            if (install) setPendingGrant(plugin);
+            else handleToggleEnabled({ ...plugin, trustedWebGranted: true });
+          }
+        })().catch(() => {}).finally(() => setWorking(false));
+      }}
+    />}
     {pendingGrant && (
       <div className="modal-overlay" onClick={() => setPendingGrant(null)}>
         <div className="modal-dialog-compact plugin-permission-dialog animate-slide-up" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
@@ -228,6 +330,11 @@ const PluginSettings: React.FC = () => {
           <div className="plugin-permission-dialog-actions">
             <button className="btn" onClick={() => setPendingGrant(null)}>{t('plugins.permissionPromptLater')}</button>
             <button className="btn btn-primary" disabled={loading} onClick={() => {
+              if (hasTrustedViews(pendingGrant) && !plugins.some(plugin => plugin.id === pendingGrant.id && plugin.installGeneration === pendingGrant.installGeneration && plugin.trustedWebGranted === true)) {
+                setPendingTrust({ plugin: pendingGrant, install: true });
+                setPendingGrant(null);
+                return;
+              }
               void grantAllAndEnable(pendingGrant).then(() => setPendingGrant(null)).catch(() => {});
             }}>{t('plugins.permissionPromptGrantAll')}</button>
           </div>

@@ -5,7 +5,10 @@ import { createRoot } from 'react-dom/client';
 import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
-import { rxEligiblePluginIds, usePluginList, type PluginListApi } from './usePlugins';
+import { rxEligiblePluginIds, usePluginList, isPluginReplaceConfirmationError, type PluginListApi } from './usePlugins';
+import { pluginHost } from '../utils/pluginHost';
+import { reloadPluginViews } from '../utils/pluginViewRuntime';
+import { useToastStore } from '../stores/useToastStore';
 import {
   getPluginViews, resetPluginSnapshotForTest, syncPluginListSnapshot, syncStorePluginConfigs,
 } from '../utils/pluginConfigSnapshot';
@@ -15,11 +18,16 @@ import type { PluginConfigEntry, PluginListResponse, PluginStateSnapshot, Plugin
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock('../services/tauri', () => ({
   pluginService: {
-    listPlugins: vi.fn(), installPlugin: vi.fn(), uninstallPlugin: vi.fn(),
+    listPlugins: vi.fn(), installPlugin: vi.fn(), reloadPlugin: vi.fn(), uninstallPlugin: vi.fn(),
     setPluginEnabled: vi.fn(), setPluginPermissions: vi.fn(),
+    setPluginTrustedWeb: vi.fn(), clearPluginWebData: vi.fn(),
     readPluginAsset: vi.fn(), writePluginAsset: vi.fn(), pluginHttp: vi.fn(), pluginOpenExternal: vi.fn(),
   },
 }));
+vi.mock('../utils/pluginHost', () => ({
+  pluginHost: { dispose: vi.fn(), disable: vi.fn(), syncWithConfig: vi.fn(), reload: vi.fn(), enable: vi.fn(), get: vi.fn(() => null), setCallbacks: vi.fn() },
+}));
+vi.mock('../utils/pluginViewRuntime', () => ({ reloadPluginViews: vi.fn() }));
 
 const initialConfig = useAppStore.getState().config;
 const id = 'com.example.demo';
@@ -45,6 +53,9 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks();
   resetPluginSnapshotForTest();
+  useToastStore.getState().clearAll();
+  vi.mocked(pluginHost.reload).mockResolvedValue(undefined);
+  vi.mocked(pluginHost.syncWithConfig).mockReturnValue(0);
   useAppStore.setState({ config: { ...initialConfig, revision: 0, pluginConfigs: [] } });
   useSystemStore.getState().setUIState({ configReady: false });
   vi.mocked(pluginService.listPlugins).mockImplementation(async () => list({
@@ -173,6 +184,145 @@ describe('reviewed installation permission edits', () => {
     await act(async () => { await mounted.api.togglePermission(id, 'terminal:read', 'install-a'); });
     await act(async () => { resolve(list(authorized)); await pending; });
     expect(rxEligiblePluginIds().has(id)).toBe(false);
+    await mounted.unmount();
+  });
+});
+
+describe('trusted webpage authorization', () => {
+  it('rejects consent for an installation replaced while its dialog was open', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], false, 'install-b')]));
+    const mounted = await mountList();
+    await act(async () => {
+      await expect(mounted.api.setTrustedWeb(id, true, 'install-a')).rejects.toThrow();
+    });
+    expect(pluginService.setPluginTrustedWeb).not.toHaveBeenCalled();
+    expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(false);
+    await mounted.unmount();
+  });
+
+  it('disables before clearing web data and leaves the plugin disabled', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    const disabled = deferred<PluginStateSnapshot>();
+    vi.mocked(pluginService.setPluginEnabled).mockReturnValue(disabled.promise);
+    vi.mocked(pluginService.clearPluginWebData).mockResolvedValue(snapshot(3, [entry([], false)]));
+    const mounted = await mountList();
+    let clearing!: Promise<void>;
+    await act(async () => { clearing = mounted.api.clearWebData(id, 'install-a'); });
+    expect(pluginService.setPluginEnabled).toHaveBeenCalledWith(id, false, 'install-a');
+    expect(pluginService.clearPluginWebData).not.toHaveBeenCalled();
+    await act(async () => { disabled.resolve(snapshot(2, [entry([], false)])); await clearing; });
+    expect(pluginService.clearPluginWebData).toHaveBeenCalledWith(id, 'install-a');
+    expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(false);
+    await mounted.unmount();
+  });
+});
+
+const toastKeys = (): Array<string | undefined> => useToastStore.getState().toasts.map(toast => toast.messageKey);
+
+describe('reloading installed code', () => {
+  it('retires old code, reloads the backend, then restarts the Worker and remounts views without touching data or grants', async () => {
+    const installed = { ...entry(['terminal:read']), trustedWebGranted: true };
+    syncStorePluginConfigs(snapshot(1, [installed]));
+    const order: string[] = [];
+    vi.mocked(pluginHost.disable).mockImplementation(() => { order.push('stop'); });
+    vi.mocked(pluginService.reloadPlugin).mockImplementation(async () => {
+      order.push('backend');
+      return snapshot(2, [installed]);
+    });
+    vi.mocked(pluginHost.reload).mockImplementation(async () => { order.push('restart'); });
+    vi.mocked(reloadPluginViews).mockImplementation(() => { order.push('views'); });
+    const mounted = await mountList();
+    await act(async () => { await mounted.api.reloadPlugin(id, 'install-a'); });
+    expect(order).toEqual(['stop', 'backend', 'restart', 'views']);
+    expect(pluginService.reloadPlugin).toHaveBeenCalledWith(id, 'install-a');
+    expect(pluginHost.reload).toHaveBeenCalledWith(id);
+    expect(useAppStore.getState().config.pluginConfigs[0]).toMatchObject({
+      installGeneration: 'install-a', enabled: true, grantedPermissions: ['terminal:read'], trustedWebGranted: true,
+    });
+    expect(toastKeys()).toContain('plugins.reloaded');
+    await mounted.unmount();
+  });
+
+  it('leaves a stale installation untouched and reports no success', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], true, 'install-b')]));
+    const mounted = await mountList();
+    await act(async () => {
+      await expect(mounted.api.reloadPlugin(id, 'install-a')).rejects.toThrow(/installation changed/);
+    });
+    expect(pluginHost.disable).not.toHaveBeenCalled();
+    expect(pluginHost.reload).not.toHaveBeenCalled();
+    expect(pluginService.reloadPlugin).not.toHaveBeenCalled();
+    expect(toastKeys()).not.toContain('plugins.reloaded');
+    await mounted.unmount();
+  });
+
+  it('does not announce success when the backend reload fails', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    vi.mocked(pluginService.reloadPlugin).mockRejectedValue(new Error('generation mismatch'));
+    const mounted = await mountList();
+    await act(async () => {
+      await expect(mounted.api.reloadPlugin(id, 'install-a')).rejects.toThrow('generation mismatch');
+    });
+    expect(pluginHost.reload).not.toHaveBeenCalled();
+    expect(reloadPluginViews).not.toHaveBeenCalled();
+    expect(toastKeys()).not.toContain('plugins.reloaded');
+    expect(useToastStore.getState().toasts.some(toast => toast.severity === 'error' && toast.message === 'generation mismatch')).toBe(true);
+    expect(pluginHost.disable).toHaveBeenCalledWith(id);
+    await mounted.unmount();
+  });
+});
+
+describe('explicit replacement installs', () => {
+  const conflict = 'plugin_replace_confirmation_required: installed 1.0.0 is not lower than source 1.0.0';
+
+  it('surfaces the same/lower refusal as a confirmation signal instead of an error toast', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    vi.mocked(pluginService.installPlugin).mockRejectedValue(conflict);
+    const mounted = await mountList();
+    let caught: unknown;
+    await act(async () => {
+      caught = await mounted.api.installPlugin('/plugins/demo').catch(error => error);
+    });
+    expect(isPluginReplaceConfirmationError(caught)).toBe(true);
+    expect(toastKeys()).toEqual([]);
+    expect(pluginHost.syncWithConfig).toHaveBeenCalledWith(true);
+    await mounted.unmount();
+  });
+
+  it('retries with replaceExisting only when explicitly requested', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], true, 'install-a')]));
+    vi.mocked(pluginService.installPlugin).mockResolvedValue(snapshot(2, [entry([], true, 'install-b')]));
+    const mounted = await mountList();
+    await act(async () => { await mounted.api.installPlugin('/plugins/demo'); });
+    expect(pluginService.installPlugin).toHaveBeenLastCalledWith('/plugins/demo', undefined);
+    await act(async () => { await mounted.api.installPlugin('/plugins/demo', true); });
+    expect(pluginService.installPlugin).toHaveBeenLastCalledWith('/plugins/demo', true);
+    expect(useAppStore.getState().config.pluginConfigs[0].installGeneration).toBe('install-b');
+    await mounted.unmount();
+  });
+});
+
+describe('reload authorization guards', () => {
+  it('refuses to reload a disabled plugin without stopping running code', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], false)]));
+    const mounted = await mountList();
+    await act(async () => {
+      await expect(mounted.api.reloadPlugin(id, 'install-a')).rejects.toThrow(/disabled/);
+    });
+    expect(pluginHost.reload).not.toHaveBeenCalled();
+    expect(pluginService.reloadPlugin).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('does not announce success for a reload snapshot older than the accepted configuration', async () => {
+    syncStorePluginConfigs(snapshot(5, [entry()]));
+    vi.mocked(pluginService.reloadPlugin).mockResolvedValue(snapshot(4, [entry()]));
+    const mounted = await mountList();
+    await act(async () => {
+      await expect(mounted.api.reloadPlugin(id, 'install-a')).rejects.toThrow(/stale/);
+    });
+    expect(reloadPluginViews).not.toHaveBeenCalled();
+    expect(toastKeys()).not.toContain('plugins.reloaded');
     await mounted.unmount();
   });
 });
