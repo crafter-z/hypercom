@@ -3,6 +3,7 @@ pub(crate) mod resources;
 mod windows;
 
 use std::{collections::HashMap, sync::{Arc, Mutex, LazyLock, atomic::{AtomicBool, Ordering}}, time::Instant};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Emitter, Manager};
@@ -28,9 +29,26 @@ pub struct OcclusionRect { pub x: f64, pub y: f64, pub width: f64, pub height: f
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rect { pub x: f64, pub y: f64, pub width: f64, pub height: f64, pub zoom_percent: f64 }
 
+#[derive(Default)]
+struct DocumentState { current: Option<String> }
 pub struct Session {
     pub binding: Binding, pub alive: AtomicBool, permission: Option<&'static str>,
+    pub trusted_web: bool,
     rate: Mutex<(Instant, u32)>,
+    document: Mutex<DocumentState>,
+}
+impl Session {
+    /// Each top-level navigation retires the previous document identity before
+    /// any new page can report ready, so old ACKs/data can never initialize it.
+    pub fn begin_document(&self, id: &str) {
+        if let Ok(mut document) = self.document.lock() { document.current = Some(id.to_string()); }
+    }
+    pub fn current_document(&self) -> Option<String> {
+        self.document.lock().ok().and_then(|document| document.current.clone())
+    }
+    fn accepts_document(&self, id: &str) -> bool {
+        self.document.lock().map(|document| document.current.as_deref() == Some(id)).unwrap_or(false)
+    }
 }
 #[derive(Default)]
 struct Registry { live: HashMap<String, Arc<Session>> }
@@ -51,6 +69,7 @@ fn authorized(app: &tauri::AppHandle, session: &Session) -> bool {
     manager.get_config().entities.plugin_configs.iter().any(|entry| {
         entry.id == session.binding.plugin_id && entry.enabled
             && entry.install_generation == session.binding.install_generation
+            && (!session.trusted_web || entry.trusted_web_granted)
             && entry.granted_permissions.iter().any(|p| p == "ui:view")
             && session.permission.is_none_or(|permission| entry.granted_permissions.iter().any(|p| p == permission))
     })
@@ -68,7 +87,7 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     }
     plugin::validate_plugin_id(&binding.plugin_id).map_err(error)?;
     let _io = state.plugin_io.lock().await;
-    let (dir, declaration) = {
+    let (dir, declaration, web_data_dir) = {
         let manager = state.config_manager.lock().map_err(|e| error(e.to_string()))?;
         let config = manager.get_config();
         let entry = config.entities.plugin_configs.iter().find(|e| e.id == binding.plugin_id).ok_or_else(|| error("插件未安装"))?;
@@ -79,6 +98,9 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
         let manifest = plugin::load_manifest_from_dir(&dir).map_err(error)?;
         if manifest.id != binding.plugin_id { return Err(error("插件目录身份不匹配")); }
         let view = manifest.ui.as_ref().and_then(|ui| ui.views.iter().find(|v| v.id == binding.view_id)).ok_or_else(|| error("未声明视图"))?.clone();
+        if view.is_trusted_web() && !entry.trusted_web_granted {
+            return Err(error("可信网页尚未获得独立授权"));
+        }
         for permission in std::iter::once("ui:view").chain(input_permission(&view)) {
             if !manifest.permissions.iter().any(|p| p == permission) || !entry.granted_permissions.iter().any(|p| p == permission) {
                 return Err(error(format!("视图缺少权限 {permission}")));
@@ -89,7 +111,8 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
             let mode = binding.port_mode.as_deref().ok_or_else(|| error("视图缺少当前端口工作模式"))?;
             if !["trx", "tty"].contains(&mode) || !view.modes.iter().any(|m| m == mode) { return Err(error("视图不支持端口工作模式")); }
         } else if binding.port_mode.is_some() { return Err(error("无端口视图不得声明端口模式")); }
-        (dir, view)
+        let web_data_dir = view.is_trusted_web().then(|| plugin::web_data_dir(manager.plugins_dir(), &binding.plugin_id));
+        (dir, view, web_data_dir)
     };
     if let Some(port) = binding.bound_port_id.clone() {
         let manager = state.serial_manager.clone();
@@ -100,7 +123,7 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
         }
     }
     let resources = resources::snapshot(&dir, &declaration).map_err(error)?;
-    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)) });
+    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)), document: Mutex::new(DocumentState::default()) });
     {
         let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
         if registry.live.len() >= 16
@@ -114,9 +137,9 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     let app = source.app_handle().clone();
     let result = on_ui(&app, move || {
         #[cfg(windows)]
-        { windows::create(&source.window(), session, declaration, resources) }
+        { windows::create(&source.window(), session, declaration, resources, web_data_dir) }
         #[cfg(not(windows))]
-        { let _ = (source, session, declaration, resources); Err("此平台尚未通过原生隔离策略验收，不开放插件视图".into()) }
+        { let _ = (source, session, declaration, resources, web_data_dir); Err("此平台尚未通过原生隔离策略验收，不开放插件视图".into()) }
     }).await;
     if result.is_err() { retire_registry(Some(&id), None); }
     result
@@ -148,25 +171,69 @@ pub async fn update(source: tauri::Webview, id: String, rect: Rect, occlusions: 
         #[cfg(not(windows))] { let _ = (source, id, rect, occlusions, visible, revision); Err("不支持原生隔离视图".into()) }
     }).await
 }
+fn document_identity(message: &Value) -> Result<String, CommandError> {
+    message.get("documentId").and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .map(str::to_string)
+        .ok_or_else(|| error("视图消息缺少文档身份"))
+}
+fn bounded_text<'a>(message: &'a Value, key: &str, maximum: usize) -> Result<&'a str, String> {
+    message.get(key).and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= maximum)
+        .ok_or_else(|| format!("视图消息 {key} 非法"))
+}
+fn validate_binary_chunk(message: &Value) -> Result<(), String> {
+    bounded_text(message, "transferId", 128)?;
+    bounded_text(message, "transferType", 128)?;
+    message.get("seq").and_then(Value::as_u64).ok_or("视图二进制序号非法")?;
+    message.get("done").and_then(Value::as_bool).ok_or("视图二进制完成标记非法")?;
+    let data = message.get("data").and_then(Value::as_str).ok_or("视图二进制分片非法")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "视图二进制分片编码非法")?;
+    if bytes.len() > 8 * 1024 { return Err("视图二进制分片超过 8 KiB".into()); }
+    Ok(())
+}
+fn validate_binary_ack(message: &Value) -> Result<(), String> {
+    bounded_text(message, "transferId", 128)?;
+    message.get("seq").and_then(Value::as_u64).ok_or("视图二进制确认序号非法")?;
+    message.get("done").and_then(Value::as_bool).ok_or("视图二进制确认完成标记非法")?;
+    message.get("ok").and_then(Value::as_bool).ok_or("视图二进制确认状态非法")?;
+    if message.get("error").is_some_and(|value| !value.is_string() || value.as_str().is_some_and(|text| text.len() > 2048)) {
+        return Err("视图二进制确认错误文本非法".into());
+    }
+    Ok(())
+}
 pub async fn send(source: tauri::Webview, id: String, mut message: Value) -> Result<(), CommandError> {
     require_main(&source)?;
     let session = session(&id, source.app_handle())?;
-    if message["type"] == "init" {
-        message["context"] = serde_json::to_value(&session.binding).map_err(|e| error(e.to_string()))?;
+    let document_id = document_identity(&message)?;
+    if !session.accepts_document(&document_id) { return Err(error("视图文档身份已失效")); }
+    let message_type = message.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    match message_type.as_str() {
+        "init" => { message["context"] = serde_json::to_value(&session.binding).map_err(|e| error(e.to_string()))?; }
+        "state" | "environment" => {}
+        "binary-chunk" => validate_binary_chunk(&message).map_err(error)?,
+        "binary-ack" => validate_binary_ack(&message).map_err(error)?,
+        _ => return Err(error("视图消息类型或大小非法")),
     }
     let serialized = serde_json::to_string(&message).map_err(|e| error(e.to_string()))?;
-    let max_bytes = if message["type"] == "state" { MAX_MESSAGE_BYTES + 8 * 1024 } else { MAX_MESSAGE_BYTES };
-    if serialized.len() > max_bytes || !["init", "state", "environment"].contains(&message.get("type").and_then(Value::as_str).unwrap_or("")) {
-        return Err(error("视图消息类型或大小非法"));
-    }
-    if message["type"] == "state" && serde_json::to_vec(&message["snapshot"]).map_err(|e| error(e.to_string()))?.len() > MAX_MESSAGE_BYTES {
+    let max_bytes = match message_type.as_str() {
+        "state" => MAX_MESSAGE_BYTES + 8 * 1024,
+        "binary-chunk" | "binary-ack" => 16 * 1024,
+        _ => MAX_MESSAGE_BYTES,
+    };
+    if serialized.len() > max_bytes { return Err(error("视图消息类型或大小非法")); }
+    if message_type == "state" && serde_json::to_vec(&message["snapshot"]).map_err(|e| error(e.to_string()))?.len() > MAX_MESSAGE_BYTES {
         return Err(error("视图快照超过 256 KiB"));
     }
     // JSON is embedded as a string literal, never as plugin-provided JavaScript source.
     let literal = serde_json::to_string(&serialized).map_err(|e| error(e.to_string()))?;
     let app = source.app_handle().clone();
+    let sent_document = document_id.clone();
     on_ui(&app, move || {
+        // Navigation may have started between validation and this dispatch;
+        // never execute a stale document's message in its replacement.
         if !session.alive.load(Ordering::Acquire) { return Err("视图已退休".into()); }
+        if !session.accepts_document(&sent_document) { return Err("视图文档身份已失效".into()); }
         #[cfg(windows)] { windows::send(&id, &format!("globalThis.__hypercomViewDispatch(JSON.parse({literal}));")) }
         #[cfg(not(windows))] { let _ = (id, literal); Err("不支持原生隔离视图".into()) }
     }).await
@@ -180,6 +247,22 @@ fn retire_registry(id: Option<&str>, plugin: Option<&str>) -> Vec<String> {
 pub async fn retire_plugin(app: &tauri::AppHandle, plugin: &str) -> Result<(), CommandError> {
     let ids = retire_registry(None, Some(plugin));
     on_ui(app, move || { #[cfg(windows)] for id in ids { windows::destroy(&id); } #[cfg(not(windows))] let _ = ids; Ok(()) }).await
+}
+pub async fn clear_web_data(app: &tauri::AppHandle, directory: &std::path::Path) -> Result<(), CommandError> {
+    match std::fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(cause) => return Err(error(format!("无法读取网页数据目录: {cause}"))),
+        Ok(metadata) if !metadata.is_dir() || plugin::is_link_or_reparse(&metadata) => return Err(error("网页数据目录不是普通目录")),
+        Ok(_) => {}
+    }
+    let directory = directory.to_path_buf();
+    on_ui(app, move || {
+        #[cfg(windows)] { windows::clear_web_data(&directory) }
+        #[cfg(not(windows))] {
+            let _ = directory;
+            Err("此平台不支持可信网页数据管理".into())
+        }
+    }).await
 }
 pub async fn retire_denied(app: &tauri::AppHandle, plugin: &str, grants: &[String]) -> Result<(), CommandError> {
     let ids = {
@@ -202,33 +285,95 @@ pub fn clear_all() {
     #[cfg(windows)] windows::clear();
 }
 
+fn inbound_binary_chunk(value: &Value, mut event: Value) -> Option<Value> {
+    let transfer_id = bounded_text(value, "transferId", 128).ok()?;
+    let transfer_type = bounded_text(value, "transferType", 128).ok()?;
+    let seq = value.get("seq").and_then(Value::as_u64)?;
+    let done = value.get("done").and_then(Value::as_bool)?;
+    let data = value.get("data").and_then(Value::as_str)?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    if bytes.len() > 8 * 1024 { return None; }
+    event["type"] = "binary".into();
+    event["transferId"] = transfer_id.into();
+    event["transferType"] = transfer_type.into();
+    event["seq"] = seq.into();
+    event["done"] = done.into();
+    event["data"] = data.into();
+    Some(event)
+}
+fn inbound_binary_ack(value: &Value, mut event: Value) -> Option<Value> {
+    let transfer_id = bounded_text(value, "transferId", 128).ok()?;
+    let seq = value.get("seq").and_then(Value::as_u64)?;
+    let done = value.get("done").and_then(Value::as_bool)?;
+    let ok = value.get("ok").and_then(Value::as_bool)?;
+    event["type"] = "binary-ack".into();
+    event["transferId"] = transfer_id.into();
+    event["seq"] = seq.into();
+    event["done"] = done.into();
+    event["ok"] = ok.into();
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        event["error"] = error.chars().take(2048).collect::<String>().into();
+    }
+    Some(event)
+}
 pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
     if body.len() > 16 * 1024 || !authorized(app, session) { return; }
-    let Ok(mut rate) = session.rate.lock() else { return; };
-    if rate.0.elapsed().as_secs_f64() >= 1.0 { *rate = (Instant::now(), 0); }
-    rate.1 += 1;
-    if rate.1 > 64 { return; }
-    drop(rate);
     let Ok(value) = serde_json::from_str::<Value>(body) else { return; };
-    let mut event = serde_json::json!({"instanceId": session.binding.view_instance_id});
-    match value.get("type").and_then(Value::as_str) {
-        Some("ready") => event["type"] = "ready".into(),
-        Some("state-ack") if value.get("revision").and_then(Value::as_u64).is_some() => { event["type"] = "ack".into(); event["revision"] = value["revision"].clone(); },
-        Some("ui-message") if value.get("messageType").and_then(Value::as_str).is_some_and(|s| !s.is_empty() && s.len() <= 128) => {
-            event["type"] = "message".into(); event["messageType"] = value["messageType"].clone(); event["payload"] = value["payload"].clone();
+    let Some(document_id) = value.get("documentId").and_then(Value::as_str) else { return; };
+    if uuid::Uuid::parse_str(document_id).is_err() || !session.accepts_document(document_id) { return; }
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if event_type != "binary-chunk" && event_type != "binary-ack" {
+        // Binary backpressure is chunk ACKs; do not spend or drop it through the
+        // ordinary UI interaction bucket. Everything else stays rate limited.
+        let Ok(mut rate) = session.rate.lock() else { return; };
+        if rate.0.elapsed().as_secs_f64() >= 1.0 { *rate = (Instant::now(), 0); }
+        rate.1 += 1;
+        if rate.1 > 64 { return; }
+        drop(rate);
+    }
+    let base = serde_json::json!({"instanceId": session.binding.view_instance_id, "documentId": document_id});
+    let event = match event_type {
+        "ready" => { let mut event = base; event["type"] = "ready".into(); event },
+        "state-ack" if value.get("revision").and_then(Value::as_u64).is_some() => {
+            let mut event = base; event["type"] = "ack".into(); event["revision"] = value["revision"].clone(); event
         },
-        Some("error") => { event["type"] = "error".into(); event["error"] = value.get("error").and_then(Value::as_str).unwrap_or("插件 UI 错误").chars().take(2048).collect::<String>().into(); },
+        "ui-message" if value.get("messageType").and_then(Value::as_str).is_some_and(|s| !s.is_empty() && s.len() <= 128) => {
+            let mut event = base; event["type"] = "message".into(); event["messageType"] = value["messageType"].clone(); event["payload"] = value["payload"].clone(); event
+        },
+        "error" => {
+            let mut event = base; event["type"] = "error".into();
+            event["error"] = value.get("error").and_then(Value::as_str).unwrap_or("插件 UI 错误").chars().take(2048).collect::<String>().into();
+            event
+        },
+        "binary-chunk" => match inbound_binary_chunk(&value, base) { Some(event) => event, None => return },
+        "binary-ack" => match inbound_binary_ack(&value, base) { Some(event) => event, None => return },
         // DOM focus-intent is not a trusted native action or focus event.
         _ => return,
-    }
+    };
     let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", event);
 }
+pub fn native_document(app: &tauri::AppHandle, session: &Session, document_id: &str) {
+    if authorized(app, session) {
+        let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
+            "instanceId": session.binding.view_instance_id, "documentId": document_id, "type": "document",
+        }));
+    }
+}
+fn event_document(session: &Session) -> Value {
+    session.current_document().map(Value::String).unwrap_or(Value::Null)
+}
 pub fn native_focus(app: &tauri::AppHandle, session: &Session) {
-    if authorized(app, session) { let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({"instanceId": session.binding.view_instance_id, "type":"focus"})); }
+    if authorized(app, session) {
+        let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
+            "instanceId": session.binding.view_instance_id, "documentId": event_document(session), "type": "focus",
+        }));
+    }
 }
 pub fn native_error(app: &tauri::AppHandle, session: &Session, message: &str) {
     if authorized(app, session) {
-        let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({"instanceId":session.binding.view_instance_id,"type":"error","error":message}));
+        let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
+            "instanceId": session.binding.view_instance_id, "documentId": event_document(session), "type": "error", "error": message,
+        }));
     }
 }
 const MAX_OCCLUSIONS: usize = 64;
@@ -281,8 +426,26 @@ mod tests {
         assert!(validate_occlusions(Some(&(0..=MAX_OCCLUSIONS).map(|_| rect.clone()).collect::<Vec<_>>())).is_err());
     }
     #[test]
+    fn validates_binary_chunk_envelopes_and_roundtrips_exact_payloads() {
+        let payload = vec![0x5au8; 8 * 1024];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let chunk = serde_json::json!({
+            "type": "binary-chunk", "documentId": uuid::Uuid::new_v4().to_string(),
+            "transferId": "transfer", "transferType": "data", "seq": 0u64, "done": true, "data": encoded,
+        });
+        assert!(validate_binary_chunk(&chunk).is_ok());
+        let decoded = base64::engine::general_purpose::STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded, payload);
+        let oversized = serde_json::json!({
+            "transferId": "transfer", "transferType": "data", "seq": 0u64, "done": true,
+            "data": base64::engine::general_purpose::STANDARD.encode(vec![0u8; 8 * 1024 + 1]),
+        });
+        assert!(validate_binary_chunk(&oversized).is_err());
+        assert!(validate_binary_chunk(&serde_json::json!({"transferId": "", "transferType": "data", "seq": 0u64, "done": true, "data": ""})).is_err());
+    }
+    #[test]
     fn validates_fixed_port_and_placement_contract() {
-        let view = UiView { id: "table".into(), label: "Table".into(), entry: "ui/main.js".into(), styles: vec![], assets: vec![], modes: vec!["trx".into()], input: "bytes".into(), placements: vec!["workspace-tab".into()], port_binding: "required".into(), restore_on_startup: false };
+        let view = UiView { id: "table".into(), label: "Table".into(), mode: plugin::ViewMode::Isolated, worker: true, entry: "ui/main.js".into(), styles: vec![], assets: vec![], modes: vec!["trx".into()], input: "bytes".into(), placements: vec!["workspace-tab".into()], port_binding: "required".into(), restore_on_startup: false };
         let mut binding = Binding { plugin_id: "com.example.ui".into(), install_generation: "generation".into(), view_id: "table".into(), tab_id: uuid::Uuid::new_v4().to_string(), placement: "workspace-tab".into(), bound_port_id: Some("COM3".into()), tab_session_id: uuid::Uuid::new_v4().to_string(), view_instance_id: uuid::Uuid::new_v4().to_string(), port_mode: Some("trx".into()), worker_epoch: 1, stream_epoch: 0 };
         assert!(validate_binding(&binding, &view).is_ok());
         binding.bound_port_id = None; assert!(validate_binding(&binding, &view).is_err());

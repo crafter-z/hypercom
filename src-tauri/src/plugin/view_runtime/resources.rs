@@ -98,9 +98,10 @@ pub fn read_regular_resource(dir: &Path, relative: &str) -> Result<Vec<u8>, Stri
     Ok(bytes)
 }
 
-fn mime(path: &str) -> &'static str {
+pub fn mime(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
-        "js" => "text/javascript; charset=utf-8", "css" => "text/css; charset=utf-8",
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8", "css" => "text/css; charset=utf-8",
         "svg" => "image/svg+xml", "png" => "image/png", "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif", "webp" => "image/webp", "ico" => "image/x-icon",
         "woff" => "font/woff", "woff2" => "font/woff2", "ttf" => "font/ttf",
