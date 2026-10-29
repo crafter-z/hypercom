@@ -23,7 +23,7 @@ src-tauri/src/
 ├── diaglog.rs            # 应用自身诊断日志（512KB 轮转 × 3 份）
 ├── update_network.rs     # 升级专用HTTP期限与路由；update_network/windows.rs = WinHTTP异步PAC/WPAD + 环境/手动代理
 ├── serial/               # mod.rs（SerialManager 注册表 + 策略）/ codec.rs（TX 编码 + build_tx_bytes）
-│                         # events.rs / ports_real.rs / ports_sim.rs（SIM:Loopback）/ ports_tty.rs（GIT: 路由）
+│                         # events.rs / ports_real.rs / ports_windows.rs（注册表枚举顺序）/ ports_sim.rs（SIM:Loopback）/ ports_tty.rs（GIT: 路由）
 │                         # tty_sim.rs（portable-pty，Windows = ConPTY）
 ├── logger/               # mod.rs（门面 + LogFileInfo）/ settings.rs（LogSettings::from_config）
 │                         # naming.rs（路径模板/子目录/唯一化 allocate_file）/ assembler.rs（LogLineAssembler）
@@ -47,7 +47,7 @@ src-tauri/src/
 ```
 src/
 ├── main.tsx / App.tsx        # entrypoints（App.tsx = AppInit + SerialReceive + 全局自定义文本右键菜单）
-├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），616 键 × zh-CN/en-US
+├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），617 键 × zh-CN/en-US
 ├── services/                 # 14 个非测试文件：tauri.ts barrel + 13 域（含 plugin / pluginView）
 ├── hooks/                    # 18 个 hook 文件 + barrel index.ts + disconnectTracking.ts
 ├── stores/                   # 6 个 store 模块 + releaseTerminalState.ts + resetStores.ts
@@ -117,7 +117,7 @@ src/
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
-│   ├── i18n.ts                   # 616 keys × zh-CN/en-US
+│   ├── i18n.ts                   # 617 keys × zh-CN/en-US
 │   ├── services/                 # 14 non-test files = tauri.ts barrel + 13 domain files
 │   ├── hooks/                    # 18 hook files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 6 store modules (no god store; useTerminalStore 已去 Immer)
@@ -138,7 +138,7 @@ hypercom/
 │   ├── system.rs                 # 电源管理共享骨架 + win32_backend / child_process_backend
 │   ├── diaglog.rs                # 应用自身诊断日志（全局 log::Log，落盘 + 轮转 + 读/清/追加）
 │   ├── commands/                 # 12 command domains + mod.rs + test-only wire_shape.rs
-│   ├── serial/                   # mod / codec / events / ports_real / ports_sim / ports_tty / tty_sim
+│   ├── serial/                   # mod / codec / events / ports_real / ports_windows / ports_sim / ports_tty / tty_sim
 │   ├── logger/                   # mod / settings / naming / assembler / writer / manager
 │   ├── plugin/                   # mod.rs / transaction.rs + view_runtime/{mod.rs,resources.rs,windows.rs,sdk.js}
 │   └── config/mod.rs             # config.json + Entities(9 数组) + CONFIG_BOUNDS + session.json
@@ -186,7 +186,7 @@ hypercom/
 | Resize operation panel | `src/components/shared/OperationPanelResizeHandle.tsx` + `useSystemStore` `ui.operationPanelHeight` | vertical drag handle between MainDisplay and OperationPanel; default 280px, clamp [160,600] |
 | 标签页批量开关串口 / 标签外部工具菜单 | `TabBar.tsx` 右键菜单 + `Pane.tsx` 接线 + `usePortToolActions` | 「打开/断开所有标签页」遍历全局 tabs 逐个 open/close（`utils/sequential.ts` `runSequential`）；工具三入口与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key |
 | 串口分组持久化 | `config/mod.rs` `entities.port_groups` + `commands/storage.rs` `save_port_groups` + `useAppInit` | 分组是 config 实体之一；启动经 `get_config` 恢复并回填 `ports.groupId`；groups 变更 500ms 防抖自动保存（无手动「保存布局」按钮） |
-| 端口自然排序 | `src/utils/portSort.ts` + `useAppStore.sortPortsByNumber` | `naturalCompare` 数字段按数值比较（COM1<COM2<COM12）；排序是**一次性动作** `sortPortsByNumber()`（重排 ports + 各分组 portIds，幂等、不重置 groupId），Sidebar 无持久 sortMode 开关，拖拽/分组始终可用；组内顺序随 `save_port_groups` 持久化、未分组顺序不保存；`mergePorts` 按 existing 顺序合并，轮询不冲掉顺序 |
+| 端口默认与自然排序 | `serial/ports_windows.rs` + `useSerialPorts.mergePorts` + `useAppStore.portOrder` / `sortPortsByNumber` | 默认 `added` 按 Windows SERIALCOMM 注册表枚举顺序，与 SuperCom 对齐；「按添加顺序排序」切回默认并立即刷新。拖拽/端口号自然排序切到 `manual`，轮询保留 existing 顺序并追加新端口；端口号排序仍为一次性动作，拖拽/分组始终可用。排序意图仅本次会话，不新增配置字段 |
 | 串口右键菜单分组控制 | `Sidebar.tsx` + `useAppStore.ts` | 按端口分组态动态渲染菜单项：未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」；i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}` |
 | 发送异步化 | `commands/serial.rs` `send_serial_data` + `lib.rs` `AppState` | `send_serial_data` 是 async fn + `tokio::task::spawn_blocking`（原同步命令在事件循环主线程执行 write_all+日志写→每次 TX 卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏）；`AppState.serial_manager` 为 `Arc<Mutex<..>>`（Deref 使 `.lock()` 调用点零改动）；`send_file` 本就是 async（tokio::fs::read + 分块 yield）；**写路径读写句柄分离 + 无界 flush 摘除**：`SerialPortHandle` try_clone（Windows = DuplicateHandle）拆 read_port/write_port；热路径不再 `flush()`（FlushFileBuffers 无超时受流控约束）+ `write_all_with_deadline` 总写期限（2s）；两段式发送（全局锁内只取写句柄克隆，锁外只持 per-port 写锁写） |
 | 模拟串口仅调试模式 | `src/utils/devMode.ts` + `commands/simulation.rs` | 前端 `DEV_FEATURES_ENABLED = import.meta.env.DEV` 隐藏全部 SIM UI；后端经 `dev_only()` / `is_debug_build()` 拒绝（release）；仅 `npm run tauri dev` 可用 |
@@ -413,6 +413,8 @@ some_async_fn(&cfg).await;
 
 `useSerialPorts(3000)` polls every 3s. `mapPortInfo()` always sets `status: 'disconnected'`. Use `mergePorts()` to preserve existing port state (status, alias, group, baud rate, etc.) when refreshing the list.
 
+Default `portOrder='added'` follows each fresh enumeration (Windows uses `serial/ports_windows.rs` registry value order, matching SuperCom, not insertion timestamps). Explicit drag/numeric sorting switches to `manual` and preserves existing order; the peer “按添加顺序排序” action switches back and refreshes immediately. Missing live ports retain their existing grace period at the end of added-order lists.
+
 **Hot-plug 语义**：
 - fresh 枚举命中的端口保留 `connected`/`connecting`（真实会话），**但不保留 `error`**——重置为 `disconnected`，否则本次 open 失败的状态被每次轮询永久重建，刷新按钮（与轮询同一条 `refreshPorts`→`mergePorts` 链）永远救不回。
 - 从枚举消失的 `connected`/`connecting` 端口经 union-back 保留**最多 `MAX_MISSING_POLLS=3` 轮**（模块级 `ghostMissingPolls`），超限放弃——拔出后读线程可能永不发 `disconnected`（空闲），无上限保留会产生幽灵端口。
@@ -565,7 +567,7 @@ scope: ui | backend | store | hooks | docs
 - **RX 写量限制**：`maxLinesPerTick`（默认 2000）每端口每帧最多写 N 行；`flushNow` 单次最多一批，`flushBeforeSend` 只在 TX 回显、弹窗快照、断线及编码切换等必须完整排空的边界使用。
 - **发送异步化**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 为 `Arc<Mutex<..>>`（Deref 使 `.lock()` 调用点零改动）。`send_file` 本就是 async（tokio::fs::read + 分块 yield），无同类主线程阻塞。
 - **TX/RX 读写句柄拆分 + 无界 flush 摘除**：此前「TX 后等一分钟才收到响应」的根因有二——① 读写共用同一把 per-port 锁，TX 的 write_all+flush 阻塞时读线程拿不到锁；② 热路径 `flush()`（Windows = FlushFileBuffers）无超时、受流控约束。修复：`SerialPortHandle` try_clone（Windows = DuplicateHandle）拆 read_port/write_port 双句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开），try_clone 是唯一途径；读线程只锁读、发送只锁写，DCB/COMMTIMEOUTS 设备级、两句柄共享。热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 重试到总期限、Interrupted 继续）。发送改**两段式**：全局锁内只做 HashMap 查找 + Arc 克隆 → 释放全局锁 → 锁外只持 per-port 写锁调用 write_all_with_deadline。
-- **端口排序一次性动作**：`useAppStore.sortPortsByNumber()`（重排 ports + 各分组 portIds，自然序，幂等、不重置 groupId）；Sidebar 无持久 sortMode 开关，拖拽/分组始终可用。组内顺序随 `save_port_groups` 持久化、未分组顺序不保存。
+- **端口默认添加顺序 / 数值排序一次性动作**：`portOrder='added'` 默认跟随系统枚举；Windows `ports_windows::enumerate` 按 SERIALCOMM 注册表值顺序，与 SuperCom 对齐。`sortPortsByNumber()` / 拖拽切到 `manual`，轮询保留人工顺序；「按添加顺序排序」切回并刷新。选择不持久化，重启回到添加顺序，分组/隐藏/连接状态独立保留。
 - **串口右键菜单分组控制**：按端口分组态动态渲染——未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」。i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}`。
 - **ConfigModal 框选不关闭**：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭——只响应按下+松开都在遮罩上的点击。
 - **快捷发送 pill 两行**：`.op-quick-cmd` 为 flex column：`.op-quick-cmd-name-row`（HEX 徽标+名称同行）在上、`.op-quick-cmd-content` 内容在下。
@@ -642,7 +644,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## i18n (2026-07 基础设施)
 
-- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**616 keys × zh-CN/en-US**；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符。
+- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**617 keys × zh-CN/en-US**；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符。
 - `main.tsx` 顶层 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`

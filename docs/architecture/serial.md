@@ -28,6 +28,7 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► open_serial_
 | `serial/codec.rs` | TX 编码：`parse_hex_string` / `build_tx_bytes`（入参 → 字节的**唯一实现**）/ `normalize_tty_line_ending` / `write_all_with_deadline` + `WRITE_TOTAL_DEADLINE` / `TxOutcome`；纯逻辑，不碰 `serialport` |
 | `serial/events.rs` | 前端事件载荷与派发助手（`serial:data` / `serial:status` / `serial:reconnect_hint`）+ RX 数据落盘；`PortStatus` 枚举收口状态字符串 |
 | `serial/ports_real.rs` | 真实串口：`SerialPortHandle` 读写句柄拆分、帧格式映射、热插拔幽灵句柄回收、`open_blocking` / `reconnect_blocking` / `enumerate_system_ports` |
+| `serial/ports_windows.rs` | Windows 默认端口列表：按 `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM` 的值枚举顺序返回 COM 端口，与 SuperCom 的 .NET `SerialPort.GetPortNames()` 路径对齐；SetupAPI 仅补充 USB 元数据 |
 | `serial/ports_sim.rs` | 模拟串口 SIM:Loopback：回显 + 周期输出（`parse_sim_rate_command` / `sim_due_lines`） |
 | `serial/ports_tty.rs` | 模拟终端 GIT:BASH 的打开/关闭/读写路由与行结束符归一（pty 细节在 `tty_sim`） |
 | `serial/tty_sim.rs` | `TtySimPortHandle`：`portable-pty` 0.9（Windows = ConPTY）spawn 本地 git bash pty、DSR 应答、尺寸调整 |
@@ -40,7 +41,8 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► open_serial_
 ### 轮询与合并（`useSerialPorts` + `mergePorts`）
 
 - `useSerialPorts(3000)` 每 3s 轮询 `list_available_ports`；`mapPortInfo()` 恒置 `status:'disconnected'`。
-- `mergePorts(incoming, existing)` 按 **existing 顺序**合并（新端口按枚举顺序追加），保留既有端口的运行态（status/alias/isHidden/groupId/连接参数/`protocolTemplateId`/`toolRunning`/`mode`——`mode` 不保留会把每 3s 轮询变成 TTY→TRX 重置），手动排序/拖拽顺序不被轮询冲掉。
+- Windows 的 `enumerate_system_ports` 委托 `ports_windows::enumerate`，以注册表值顺序作为默认添加顺序，不按 COM 编号排序，也不读取设备添加时间。键不存在返回空列表；读取错误正常上报；元数据失败不改变端口顺序。其他平台沿用 `serialport::available_ports()`。
+- `mergePorts(incoming, existing, portOrder)` 独立合并运行态（status/alias/isHidden/groupId/连接参数/`protocolTemplateId`/`toolRunning`/`mode`/`displayView`/连接代次）。会话默认 `portOrder='added'`，每次刷新按本次枚举排列，暂时缺失的活动端口放在末尾并保留原有宽限期。拖拽或端口号排序切到 `manual`，保留现有顺序并追加新端口；选择「按添加顺序排序」切回 `added` 并立即刷新。响应完成时读取最新排序意图，迟到响应不会覆盖用户刚选的规则。
 
 ### 热插拔语义（issue #12）
 
@@ -118,6 +120,7 @@ openPort(portId, baud)
 ## 端口排序与分组
 
 - **排序一次性动作（issue #6-4）**：`sortPortsByNumber()`（重排 ports + 各分组 portIds，自然序）；Sidebar **无持久 sortMode 开关**，拖拽/分组始终可用。`naturalCompare`（`utils/portSort.ts`）数字段按数值比较（COM1<COM2<COM12）。组内顺序随 `save_port_groups` 持久化、未分组顺序不保存。
+- **添加顺序为默认**：「按添加顺序排序」与「按端口号排序」同级，当前添加顺序项高亮；选择后重新枚举，并在后续轮询中持续跟随。排序意图仅存在本次会话，不新增配置字段，重启回到添加顺序；分组成员及隐藏状态不受排序切换影响。
 - **分组控制（issue #6-5）**：按端口分组态动态渲染右键菜单项——未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」。i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}`。
 - 分组是第 7 类 config 实体（`PortGroupEntry`），启动经 `get_config` 恢复并回填 `ports.groupId`；变更 500ms 防抖自动保存（无手动「保存布局」按钮）。
 

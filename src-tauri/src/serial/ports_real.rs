@@ -185,25 +185,31 @@ impl SerialPortHandle {
     }
 }
 
-/// 枚举系统串口（阻塞 IO：必须在**锁外**调用，见 `list_ports_blocking` 的说明）。
+/// Enumerate system serial ports (blocking IO; call outside the manager lock).
 pub(super) fn enumerate_system_ports() -> anyhow::Result<Vec<PortInfo>> {
-    Ok(serialport::available_ports()?
-        .into_iter()
-        .map(|p| {
-            // USB 口从 UsbPortInfo 提取厂商/产品名；PCI/蓝牙/未知类型无此信息。
-            let (manufacturer, product) = match p.port_type {
-                serialport::SerialPortType::UsbPort(info) => (info.manufacturer, info.product),
-                _ => (None, None),
-            };
-            PortInfo {
-                id: p.port_name.clone(),
-                name: p.port_name,
-                port_type: "real".to_string(),
-                manufacturer,
-                product,
-            }
-        })
-        .collect())
+    #[cfg(windows)]
+    {
+        return super::ports_windows::enumerate();
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(serialport::available_ports()?
+            .into_iter()
+            .map(|p| {
+                let (manufacturer, product) = match p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => (info.manufacturer, info.product),
+                    _ => (None, None),
+                };
+                PortInfo {
+                    id: p.port_name.clone(),
+                    name: p.port_name,
+                    port_type: "real".to_string(),
+                    manufacturer,
+                    product,
+                }
+            })
+            .collect())
+    }
 }
 
 /// 端口是否仍在系统端口列表中（阻塞枚举；必须在锁外调用）。

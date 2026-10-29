@@ -1,7 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect } from 'vitest';
 import { mergePorts, mapPortInfo } from './useSerialPorts';
 import { useAppStore } from '../stores/useAppStore';
 import type { SerialPort } from '../types';
+import { resetStoresForTests } from '../stores/resetStores';
+
+beforeEach(resetStoresForTests);
 
 const makePort = (id: string, overrides?: Partial<SerialPort>): SerialPort => ({
   id,
@@ -13,18 +16,56 @@ const makePort = (id: string, overrides?: Partial<SerialPort>): SerialPort => ({
 });
 
 describe('mergePorts', () => {
+  it('follows fresh enumeration order by default while retaining state by port identity', () => {
+    const existing = [
+      makePort('COM10', { alias: '设备', status: 'connected', connectionGeneration: 7 }),
+      makePort('COM2'),
+      makePort('COM1', { status: 'error' }),
+    ];
+    const incoming = ['COM1', 'COM3', 'COM2', 'COM10'].map(id => makePort(id));
+    const merged = mergePorts(incoming, existing);
+    expect(merged.map(p => p.id)).toEqual(['COM1', 'COM3', 'COM2', 'COM10']);
+    expect(merged[0].status).toBe('disconnected');
+    expect(merged[3]).toMatchObject({ alias: '设备', status: 'connected', connectionGeneration: 7 });
+  });
+
+  it('preserves explicit numeric/drag order until the user switches back to added order', () => {
+    const incoming = ['COM10', 'COM2', 'COM1', 'COM3'].map(id => makePort(id));
+    useAppStore.getState().setPorts(incoming.slice(0, 3));
+    const poll = () => {
+      const state = useAppStore.getState();
+      state.setPorts(mergePorts(incoming, state.ports, state.portOrder));
+      return useAppStore.getState().ports.map(p => p.id);
+    };
+    useAppStore.getState().sortPortsByNumber();
+    expect(poll()).toEqual(['COM1', 'COM2', 'COM10', 'COM3']);
+    useAppStore.getState().setPortOrder('added');
+    expect(poll()).toEqual(['COM10', 'COM2', 'COM1', 'COM3']);
+    useAppStore.getState().reorderPorts(0, 2);
+    expect(poll()).toEqual(['COM2', 'COM1', 'COM10', 'COM3']);
+    useAppStore.getState().setPortOrder('added');
+    expect(poll()).toEqual(['COM10', 'COM2', 'COM1', 'COM3']);
+  });
+
+  it('places temporarily missing live ports after the current enumeration without losing them', () => {
+    const ghost = makePort('COM7', { status: 'connected' });
+    const merged = mergePorts([makePort('COM2'), makePort('COM1')], [ghost, makePort('COM1')]);
+    expect(merged.map(p => p.id)).toEqual(['COM2', 'COM1', 'COM7']);
+    expect(merged[2]).toBe(ghost);
+  });
+
   it('preserves the EXISTING order instead of resetting to enumeration order (issue #2-5)', () => {
     // 用户已把列表排成 COM2, COM1（拖拽或排序的结果）；
     // 轮询返回的枚举顺序是 COM1, COM2 —— 合并后顺序必须保持 COM2, COM1。
     const existing = [makePort('COM2'), makePort('COM1')];
     const incoming = [makePort('COM1'), makePort('COM2')];
-    expect(mergePorts(incoming, existing).map(p => p.id)).toEqual(['COM2', 'COM1']);
+    expect(mergePorts(incoming, existing, 'manual').map(p => p.id)).toEqual(['COM2', 'COM1']);
   });
 
   it('preserves manual order across a poll that also adds a new port (appended)', () => {
     const existing = [makePort('COM3'), makePort('COM1'), makePort('COM2')];
     const incoming = [makePort('COM1'), makePort('COM2'), makePort('COM3'), makePort('COM9')];
-    expect(mergePorts(incoming, existing).map(p => p.id)).toEqual(['COM3', 'COM1', 'COM2', 'COM9']);
+    expect(mergePorts(incoming, existing, 'manual').map(p => p.id)).toEqual(['COM3', 'COM1', 'COM2', 'COM9']);
   });
 
   it('keeps runtime state (status/alias/group/baud) of surviving ports', () => {

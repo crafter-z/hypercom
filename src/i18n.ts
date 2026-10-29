@@ -58,6 +58,7 @@ const resources = {
       'sidebar.toolbar.hideHidden': '隐藏已隐藏串口',
       'sidebar.toolbar.showHidden': '显示已隐藏串口',
       'sidebar.toolbar.sortByPort': '按端口号排序',
+      'sidebar.toolbar.sortByAdded': '按添加顺序排序',
       'sidebar.toolbar.refresh': '刷新串口列表',
       'sidebar.toolbar.more': '更多操作',
       // issue #11：GIT:BASH 模拟终端（仅 debug）
@@ -732,6 +733,7 @@ const resources = {
       'sidebar.toolbar.hideHidden': 'Hide Hidden Ports',
       'sidebar.toolbar.showHidden': 'Show Hidden Ports',
       'sidebar.toolbar.sortByPort': 'Sort by Port',
+      'sidebar.toolbar.sortByAdded': 'Sort by Added Order',
       'sidebar.toolbar.refresh': 'Refresh Ports',
       'sidebar.toolbar.more': 'More Actions',
       // issue #11: GIT:BASH sim terminal (debug only)

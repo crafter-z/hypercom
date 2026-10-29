@@ -1,5 +1,5 @@
 import { useEffect, useCallback } from 'react';
-import { useAppStore } from '../stores/useAppStore';
+import { useAppStore, type AppStoreState } from '../stores/useAppStore';
 import { serialService } from '../services/tauri';
 import type { AvailablePortInfo } from '../services/tauri';
 import type { SerialPort, PortStatus } from '../types';
@@ -38,17 +38,15 @@ export function mapPortInfo(info: AvailablePortInfo): SerialPort {
   };
 }
 
-export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): SerialPort[] {
+export function mergePorts(
+  incoming: SerialPort[],
+  existing: SerialPort[],
+  portOrder: AppStoreState['portOrder'] = 'added',
+): SerialPort[] {
   const incomingMap = new Map(incoming.map(p => [p.id, p]));
-  const merged: SerialPort[] = [];
-  const seen = new Set<string>();
-  // 1) Iterate EXISTING first so the previously established order survives the
-  //    poll (issue #2-5): manual «sort by port», drag reordering and group
-  //    membership would otherwise be reset to raw enumeration order every 3s.
-  //    Runtime state must still be preserved per port: status, alias, hidden,
-  //    group, connection params, tool flag, and the protocol-template binding
-  //    (TerminalView sets protocolTemplateId via updatePort; the poll must not
-  //    wipe it).
+  const merged = new Map<string, SerialPort>();
+  // Merge state independently of display order. Map insertion order preserves
+  // manual arrangements; the default path projects the current enumeration below.
   for (const prev of existing) {
     const fresh = incomingMap.get(prev.id);
     if (fresh) {
@@ -59,7 +57,7 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
       const status = prev.status === 'error' ? 'disconnected' : prev.status;
       // 端口仍在枚举中 → 幽灵计数清零
       ghostMissingPolls.delete(prev.id);
-      merged.push({
+      merged.set(prev.id, {
         ...fresh,
         status,
         alias: prev.alias,
@@ -77,7 +75,6 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
         mode: prev.mode,
         displayView: prev.displayView,
       });
-      seen.add(prev.id);
     } else if (prev.status === 'connected' || prev.status === 'connecting') {
       // Union back any live port that transiently vanished from the enumeration
       // (USB glitch / sleep-resume). Dropping a connected/connecting port while
@@ -89,8 +86,7 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
       const missing = (ghostMissingPolls.get(prev.id) ?? 0) + 1;
       if (missing <= MAX_MISSING_POLLS) {
         ghostMissingPolls.set(prev.id, missing);
-        merged.push(prev);
-        seen.add(prev.id);
+        merged.set(prev.id, prev);
       } else {
         // 超过宽限：放弃保留。端口从列表消失符合物理现实，重插 / 重启后
         // 会重新枚举出现。
@@ -98,9 +94,9 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
       }
     }
   }
-  // 2) Genuinely new ports append at the end in enumeration order.
+  // New ports recover persisted metadata and group membership in either order.
   for (const p of incoming) {
-    if (!seen.has(p.id)) {
+    if (!merged.has(p.id)) {
       const state = useAppStore.getState();
       const meta = state.config.portMeta?.find((entry) => entry.portId === p.id);
       // groupId lives on groups[].portIds; a re-plugged port is "new" to this
@@ -108,12 +104,23 @@ export function mergePorts(incoming: SerialPort[], existing: SerialPort[]): Seri
       // Sidebar renders it both inside the group (portIds) and as ungrouped
       // (!port.groupId), producing duplicate dnd-kit ids.
       const groupId = state.groups.find((group) => group.portIds.includes(p.id))?.id;
-      merged.push(meta
+      merged.set(p.id, meta
         ? { ...p, alias: meta.alias, isHidden: meta.isHidden, mode: meta.mode ?? 'trx', displayView: meta.displayView, groupId }
         : { ...p, groupId });
     }
   }
-  return merged;
+  if (portOrder === 'manual') return Array.from(merged.values());
+  const ordered: SerialPort[] = [];
+  for (const port of incoming) {
+    const current = merged.get(port.id);
+    if (current) {
+      ordered.push(current);
+      merged.delete(port.id);
+    }
+  }
+  // Temporarily missing live ports retain their grace period, after fresh ports.
+  ordered.push(...merged.values());
+  return ordered;
 }
 
 /**
@@ -127,7 +134,8 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
     try {
       const list = await serialService.listAvailablePorts();
       if (requestId !== latestListRequest) return;
-      const merged = mergePorts(list.map(mapPortInfo), useAppStore.getState().ports);
+      const state = useAppStore.getState();
+      const merged = mergePorts(list.map(mapPortInfo), state.ports, state.portOrder);
       setPorts(merged);
       lastListFailed = false;
     } catch (err) {

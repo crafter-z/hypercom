@@ -113,6 +113,8 @@ const defaultConfig: AppConfig = {
 export interface AppStoreState {
   // --- 串口数据 ---
   ports: SerialPort[];
+  /** 会话内排序意图：默认跟随枚举；拖拽/端口号排序后保留人工顺序。 */
+  portOrder: 'added' | 'manual';
   groups: PortGroup[];
 
   // --- 标签页与分屏 ---
@@ -130,6 +132,7 @@ export interface AppStoreState {
 
   // 串口管理
   setPorts: (ports: SerialPort[]) => void;
+  setPortOrder: (order: 'added' | 'manual') => void;
   updatePort: (portId: string, patch: Partial<SerialPort>) => void;
   /** issue #11：设置端口工作模式（trx=传统收发 | tty=终端模式）。 */
   setPortMode: (portId: string, mode: PortMode) => void;
@@ -282,6 +285,7 @@ export const useAppStore = create<AppStoreState>()(
   immer((set) => ({
     // --- 初始状态 ---
     ports: [],
+    portOrder: 'added',
     groups: [],
     tabs: [],
     paneTree: { id: 'main', type: 'leaf', tabIds: [], size: 1 },
@@ -292,6 +296,7 @@ export const useAppStore = create<AppStoreState>()(
     // --- Actions ---
 
     setPorts: (ports) => set((state) => { state.ports = ports; }),
+    setPortOrder: (order) => set((state) => { state.portOrder = order; }),
 
     updatePort: (portId, patch) => set((state) => {
       const port = state.ports.find(p => p.id === portId);
@@ -562,6 +567,8 @@ export const useAppStore = create<AppStoreState>()(
         fromIndex < 0 || fromIndex >= state.ports.length ||
         toIndex < 0 || toIndex >= state.ports.length
       ) return;
+      if (fromIndex === toIndex) return;
+      state.portOrder = 'manual';
       const [moved] = state.ports.splice(fromIndex, 1);
       state.ports.splice(toIndex, 0, moved);
     }),
@@ -570,6 +577,7 @@ export const useAppStore = create<AppStoreState>()(
     // 各分组 portIds（组内顺序随 save_port_groups 自动持久化）。排序后拖拽/分组
     // 操作照常可用（不再有 sortMode 禁用拖拽的窗口期）。
     sortPortsByNumber: () => set((state) => {
+      state.portOrder = 'manual';
       state.ports = sortPortsByNatural(state.ports);
       for (const group of state.groups) {
         group.portIds = [...group.portIds].sort(naturalCompare);

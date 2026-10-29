@@ -20,6 +20,8 @@ interface SidebarToolbarProps {
   onOpenAll: () => void;
   onCloseAll: () => void;
   onSortByPort: () => void;
+  onSortByAdded: () => void;
+  addedOrderActive: boolean;
   pluginButtons: Array<RegisteredPluginUi & { buttonIndex: number }>;
   onPluginClick: (reg: RegisteredPluginUi, buttonId: string) => void;
 }
@@ -36,7 +38,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
   showHidden, onToggleHidden, onRefresh,
   simulationMode, simulationAvailable, onToggleSimulation,
   gitBashMode, gitBashAvailable, onToggleGitBash,
-  onOpenAll, onCloseAll, onSortByPort, pluginButtons, onPluginClick,
+  onOpenAll, onCloseAll, onSortByPort, onSortByAdded, addedOrderActive, pluginButtons, onPluginClick,
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
@@ -47,8 +49,8 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
       icon: showHidden ? <Eye size={14} /> : <EyeOff size={14} />,
       onClick: onToggleHidden,
     },
-    // 排序是一次性动作（重排后仍可拖拽/分组），不是持久开关。
     { label: t('sidebar.toolbar.sortByPort'), icon: <ArrowUpDown size={14} />, onClick: onSortByPort },
+    { label: t('sidebar.toolbar.sortByAdded'), icon: <ArrowUpDown size={14} />, onClick: onSortByAdded, active: addedOrderActive },
   ];
 
   return (

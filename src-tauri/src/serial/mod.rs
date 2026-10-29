@@ -25,6 +25,8 @@ use crate::commands::OpenPortArgs;
 pub(crate) mod codec;
 pub(crate) mod events;
 mod ports_real;
+#[cfg(windows)]
+mod ports_windows;
 mod ports_sim;
 mod ports_tty;
 pub(crate) mod tty_sim;

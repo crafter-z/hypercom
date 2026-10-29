@@ -30,6 +30,7 @@ import { usePortDragEnd } from './hooks/usePortDragEnd';
 const Sidebar: React.FC = () => {
   const { t } = useTranslation();
   const ports = useAppStore((s) => s.ports);
+  const portOrder = useAppStore((s) => s.portOrder);
   const groups = useAppStore((s) => s.groups);
   const openTab = useAppStore((s) => s.openTab);
   const updatePort = useAppStore((s) => s.updatePort);
@@ -128,11 +129,15 @@ const Sidebar: React.FC = () => {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
-  // 排序是一次性动作：直接重排 store 的 ports 数组（含组内顺序），排序后拖拽/分组
-  // 照常可用；3s 轮询的 mergePorts 按 existing 顺序合并，不会冲掉排序结果。
+  // Numeric sorting is a one-shot action; polling preserves the selected order.
   const handleSortByPort = useCallback(() => {
     useAppStore.getState().sortPortsByNumber();
   }, []);
+
+  const handleSortByAdded = useCallback(() => {
+    useAppStore.getState().setPortOrder('added');
+    void refreshPorts();
+  }, [refreshPorts]);
 
   // 批量开/关：串行 + 100ms 间隔，避免并发 open/close 在后端抢串口句柄。
   const handleOpenAll = useCallback(() => {
@@ -163,6 +168,8 @@ const Sidebar: React.FC = () => {
           onOpenAll={handleOpenAll}
           onCloseAll={handleCloseAll}
           onSortByPort={handleSortByPort}
+          onSortByAdded={handleSortByAdded}
+          addedOrderActive={portOrder === 'added'}
           pluginButtons={pluginButtons}
           onPluginClick={(reg, buttonId) => dispatchPluginUiClick(reg, buttonId, { portId: getActivePortId(useAppStore.getState()) ?? undefined })}
         />
