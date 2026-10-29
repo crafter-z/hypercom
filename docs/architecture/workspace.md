@@ -40,7 +40,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - 插件工作区标签与生效中的插件串口显示均禁止弹出；回退或手动切回原始 TRX 终端后，可按既有终端弹出规则操作，TTY 仍禁止弹出。
 - 当前只有 **Windows 原生适配器**实现隔离视图；其他平台在原生创建入口明确拒绝，不使用 iframe 或主窗口 HTML 降级。跨平台隔离策略验收仍是开放对应平台的发布门禁，不代表已完成全平台或完整安全验收。
 
-用户操作见[设置：插件视图与工具标签](../userwiki/设置.md#插件视图与工具标签)，作者 API 见[插件开发指南](../plugin-development.md)，可运行示例见[Sensor Workspace](../../examples/plugin-views-demo/README.md)。
+用户操作见[插件使用：入口与串口关系](../userwiki/插件.md#插件入口和串口关系)，作者 API 见[插件开发指南](../plugin-development.md)，可运行示例见[Sensor Workspace](../../examples/plugin-views-demo/README.md)。
 
 ## 弹出体系（popout，issue #10）
 
@@ -102,6 +102,14 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - 设置弹窗 ConfigModal 框选文字松手界外不关闭（issue #6-8）：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭。
 - 设置的取消、X、遮罩与Escape均经同一普通草稿回滚；已独立持久化的规则基线和插件状态保留。
 - **UI 运行态与系统态都在 `useSystemStore`**（`src/stores/useSystemStore.ts`），`useAppStore` **不再持有** `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`：`ui.*`（`sidebarWidth` / `sidebarCollapsed` / `operationPanelHeight` / `isConfigOpen` / `configActiveTab` / `configReady` 等）写入口是 `setUIState` / `toggleConfigModal` / `setConfigActiveTab`，流量回收是 `clearTrafficStats`。这些字段写点密集（5s 系统轮询、每端口 1s 流量 flush、拖拽 resize），与端口/标签数据分开后各自订阅面互不干扰。
+
+## 主题与自定义背景图（issue #13）
+
+- 主题、字体与背景图由 `shared/ThemeProvider.tsx` 统一映射到 `<html>`：`data-theme`（`dark` / `light` / `system`，system 走 `matchMedia`）、`--font-*` 变量、`--app-bg-image/-opacity/-blur` 变量与 `data-app-bg` 门控。不透明度/模糊度只改 CSS 变量，与异步读图分离——连续拖动滑块不会反复读盘。
+- 配置四字段 `backgroundImage` / `backgroundImageEnabled` / `backgroundImageOpacity`（0–100，默认 50）/ `backgroundImageBlur`（0–64px，默认 0）存 config.json；其中不透明度与模糊度由 `CONFIG_BOUNDS` 收敛，路径与启用开关是普通字段（serde 缺省回退）。
+- 图片由 `commands/file.rs::read_image_data_url` 读为 `data:image/<mime>;base64,` data URL（**不走 asset protocol**，dev/prod 一致）；路径为空、文件缺失、扩展名不在白名单或超过大小上限（`MAX_BACKGROUND_IMAGE_BYTES`，20 MB）均为软失败返回空串，前端按「空串 = 无背景图」降级（见[错误处理](errors.md)）。
+- 呈现：`App.tsx` 首子元素 `<div class="app-background">` 垫底（`styles/background.css`，`z-index:-1`、`pointer-events:none`）；`html[data-app-bg="on"]` 时全部 `--bg-*` 表面 token 换半透明 rgba，实现全窗毛玻璃（终端/编辑器 alpha 最低，浮层接近不透明保可读性）。xterm 主题背景按 config + `data-theme` 活更新，不能只在创建时快照。
+- 已知边界：弹出窗（独立 WebView）不共享背景层。
 
 ## 通知中心 / toast
 

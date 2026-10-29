@@ -73,6 +73,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 ### 发送格式工具
 
 - `src/utils/sendUtils.ts`（纯函数，单测）：`getLineEndingBytes` / `hexInputError` + `HEX_INPUT_ERROR_KEY` / `parseHexBytes` / `computeByteCount` / `formatLineEndingHex` / `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` / `LINE_ENDING_VALUES` / `lineEndingLabelKey`。
+- `src/utils/hexUtils.ts`：`hexToString` / `stringToHex`（终端右键菜单的 HEX 复制/粘贴消费者是 `src/components/MainDisplay/terminalContextMenu.ts`；操作面板 HEX 转换走 `sendUtils` 的 `textToHexPreview` / `hexToTextPreview`）。
 - **bytes→HEX 唯一实现**：`src/utils/hexFormat.ts`（`hexByte` / `bytesToSpacedHex`）是全仓把字节格式化成空格分隔大写 HEX 的唯一实现，terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用——不要再各写一份 `toString(16).padStart(2,'0')`。
 - **HEX 输入严格模式（错误态，不再补零）**：`hexInputError` 忽略空白后要求「半字节个数为偶数且全为 0-9a-fA-F」，与后端 `parse_hex_string` / `build_tx_bytes` 同尺子；`parseHexBytes` 对非法输入返回 `[]`（不补零、不跳过）。发送区经 `useHexCompose` → `computeByteCount` 把奇数位 nubble 输入渲染为错误态（给 `errorKey`、不给字节数），`sendToPort` 也在入口拦掉——旧实现给奇数位补零，于是 UI 为一个后端**必然拒绝**的输入显示「N B」，是假可用状态。
 - **JSX 属性字符串不转义（issue #5-6）**：`<option value="\r\n">` 运行时值是 6 字符字面量 `\\r\\n`，与域值 4 字符 `\r\n` 不等。行结束符选项必须用表达式字面量 `value={'\r\n'}`，label 走 `lineEndingLabelKey(v, ns)`。

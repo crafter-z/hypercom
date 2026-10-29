@@ -19,7 +19,7 @@ Send area + serial params. Split into 2 view sections (send / params) plus the s
 | `hooks/useFileSend.ts` | 文件发送：**发送前经 `isSendablePort` 守卫**（不可发送直接告警、连文件框都不弹）、进度事件订阅（按 portId 过滤）、**按增量计入 `trafficStats` TX**、完成时成功提示、取消 |
 | `hooks/useSendHistoryRecall.ts` | ↑/↓ 历史回填（回填 `sendInput`/`sendIsHex`/`sendAppendLineEnding`；取不到则清空输入框），历史本体仍在 `useSerialSend` |
 
-## Conventions (root covers selector discipline)
+## Conventions (root covers selector discipline; 展开见 docs/architecture/conventions.md)
 
 - Operation fields live on `useOperationStore` with NO `op` prefix — selectors look like `s => s.baudRate`, not `s => s.opBaudRate`.
 - `useCyclicSend` reads committed `useRuleStore` once at start and uses `orderedCommands` from `utils/commandOrder`; never read session drafts or the active set again mid-run.

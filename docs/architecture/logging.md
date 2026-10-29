@@ -31,7 +31,7 @@
 
 ### RX 日志行组装（issue #5-9/10）
 
-- `LogLineAssembler`（`assembler.rs`）：CR/LF/跨事件CRLF组行与`pending_cr`/`just_forced`边界语义。4096字节无分隔符强制flush按writer锁定的UTF-8/GBK字符边界最多延迟3字节，避免字符被拆成替换符；畸形流仍有4099字节硬边界，单字节编码按原阈值。与前端`rxAssembler`保持同一切分口径。
+- `LogLineAssembler`（`assembler.rs`）：CR/LF/跨事件CRLF组行与`pending_cr`/`just_forced`边界语义；`take_tail` 取尾部未成行残字节。4096字节无分隔符强制flush按writer锁定的UTF-8/GBK字符边界最多延迟3字节，避免字符被拆成替换符；畸形流仍有4099字节硬边界，单字节编码按原阈值。与前端`rxAssembler`保持同一切分口径。
 - `LogManager::write_rx`：RX 方向组行落盘（不再按读取块一行）；TX 保持直写 `write`。RX 尾部滞留 ≥250ms（`RX_TAIL_SILENCE_FLUSH`）时，下一个事件先经 `flush_stale_rx_tail` 把尾部冲刷成行，长停顿的半行不会无限滞留。
 - `close_writer`、writer 替换、`flush_all`（崩溃收尾）和活动日志 `save_log_as` 都先把尚未终结的 RX 尾部写成最后一行；250ms 静默冲刷遇到**未完成的多字节字符**会延后到下一个事件（避免把一个 UTF-8/GBK 字符拆成 U+FFFD + 续字节），关闭路径仍强制落盘，再 flush/sync；仅刷 `BufWriter` 不会触及组装器内的半行。分片滚动保留组装器，跨片尾部不会被清空。
 - 续写模式替换同端口 writer 时，如果新旧路径相同，该文件仍归新 writer 所有；旧 writer 收尾不得将它当作空日志删除，否则 Unix 下后续写入会落到已解除链接的句柄。
@@ -41,7 +41,7 @@
 ### 分片 / 子目录 / 编码 / 每会话新文件
 
 - `log_split_enabled` / `log_split_size_mb`：`LogManager::maybe_split` → `PortLogWriter::needs_split`（阈值判定 `should_split` + 分片失败 5s 退避）超阈值自动分片；**split 续片经 `PortLogWriter::rotate(force_new_file=true)` 强制唯一化（与 `logNewFilePerSession` 开关无关）**——粗粒度模板（`[com]`/`[com]-[date]`）下 append 重开刚关闭的超阈值文件会令 `current_size` 从超阈值初始化、每写必分片（死循环）。`rotate` 先把新文件开好再替换，失败时旧 writer 原封不动继续可用。
-- `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：`naming::allocate_file` 按策略 join 子目录（`create_dir_all`）；`list_files` 经 `collect_log_files` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。
+- `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：`naming::subdir_component` 产出子目录、`naming::allocate_file` 按策略 join（`create_dir_all`）；`list_files` 经 `collect_log_files` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。
 - 文件名模板替换完成后，最终 stem 与端口名一样经过 `sanitize_filename_component`：模板中的绝对路径、路径分隔符和 `..` 不得把日志带出根目录；子目录布局只由 `logSubdirMode` 控制。
 - `log_include_timestamp` / `log_include_direction`（缺省 true）：控制 `PortLogWriter::write_line` 是否 emit `[timestamp] ` / `RX|TX ` 前缀；两者都关 → 裸数据行。它们与 `format` / `encoding` 一样锁于 `create_writer` 时（`WriterSpec`），后续重开沿用创建时锁定的值。
 - `log_encoding`：`create_writer_with_encoding` 按编码解码（GBK 等，`decode_bytes`）。

@@ -54,7 +54,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 ### 前端 WebView 缩放
 
-- `uiScalePercent` 是持久化的 UI 缩放百分比，默认 **100%**，由 `CONFIG_BOUNDS` 约束为 **80–200%**；它使用原生 WebView 缩放，不是 CSS transform，也不等同于 `terminalFontSize` / `uiFontSize`（后两者仍是字体设置）。
+- `uiScalePercent`（Rust `AppConfig.ui_scale_percent`）是持久化的 UI 缩放百分比，默认 **100%**，由 `CONFIG_BOUNDS` 约束为 **80–200%**；它使用原生 WebView 缩放，不是 CSS transform，也不等同于 `terminalFontSize` / `uiFontSize`（后两者仍是字体设置）。
 - `src/utils/uiScale.ts` 的 `applyUiScale` 调用 Tauri `getCurrentWebview().setZoom(percent / 100)`；缩放按 WebView 实例分别应用。主窗在 `configReady` 后应用已加载值，弹出窗（Popout）启动时读同一 config.json 后应用；独立窗口互不共享运行态。
 - `ConfigModal` 只有在 `saveConfig()` 成功后才调用 `applyUiScale(current.uiScalePercent)` 并通过 `ui-scale:changed` 通知已打开的弹出窗；取消或保存失败不会把未落盘的缩放应用到 WebView。
 
@@ -63,7 +63,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。
-- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **79** 个命令；新增系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **84** 个命令、**13** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
 
 ## 6 个 Zustand Store
 

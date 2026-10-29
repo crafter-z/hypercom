@@ -13,11 +13,13 @@ Recursive pane tree (2026-07 refactor). `MainDisplay` renders the tree; leaves w
 | `TerminalView.tsx` | 方案B 直接 DOM 渲染薄壳（issue #14）：hosts scroll container + `TerminalViewportManager` 渲染器 attach/detach（`useLayoutEffect`，issue #15 防跨 Pane 位移 insertBefore 崩溃）；同步显示配置（字体/格式/编码/时间戳/高亮规则）到 renderer；拥有 UI 局部交互态（过滤/搜索/选区/右键菜单/手势 scroll-lock/快速跳转按钮）；协议模板选择条。行渲染由 `TerminalRenderer` 直接操作 DOM，React 不参与行级渲染 |
 | `TerminalRenderer.ts` | direct-DOM 渲染引擎（`utils/terminal/`）：节点池复用 + 稳定 seq + 固定行高 + 同帧钉底 + 流式布局保 DOM 序 == 视觉序；文件头是渲染契约清单 R1–R15（soak 测试按编号引用）；search hit-rows 经 `markSearchMatchesInHtml` 叠加字符级 `<mark>`（`searchQuery`/`searchCaseSensitive` 来自 view state） |
 | `TerminalFilterBar.tsx` | direction/keyword filter + per-tab display controls (scroll-lock / show-timestamp / HEX-text segmented / encoding select); writes via `useTerminalStore.getState()` |
+| `TerminalSearchBar.tsx` | Ctrl+F 搜索条（纯展示组件；状态在 `useTerminalSearch`，字符级高亮由 `viewportManager.recomputeSearch` + `markSearchMatchesInHtml` 提供） |
+| `useTerminalDisplay.ts` | UI 局部显示管线 hook：方向/关键字过滤输入（防抖）与暂停开关，把值推给 `TerminalViewportManager`；该状态刻意不进 Zustand，标签重挂载即重置 |
 | `ResizeHandle.tsx` | drag handler → `resizeChildren(branchId, childIndex, delta)` store action; drag lifecycle from shared `shared/useDragResize`（`mode:'delta'`，逐事件增量由本组件对累计位移取差得出——store 动作是相对累加） |
 | `hooks/useTabDragEnd.ts` | end-of-drag move; uses `findLeafByTabId` / `findLeafById` from `useAppStore.ts` |
 | `hooks/useLogReplay.ts` | log replay (targets active tab); invoked from OperationPanel strip |
 
-## Conventions (root covers flexbox `min-height: 0` chain)
+## Conventions (root covers flexbox `min-height: 0` chain; 展开见 docs/architecture/conventions.md)
 
 - New pane split: find focused leaf → replace it in the parent branch's `children` array with a new branch `[source-leaf(0.5), new-leaf(0.5)]`. If focused leaf IS the root → replace the entire tree.
 - Split buttons live in `TabBar` (not in a separate toolbar). They accept `onSplitVertical`/`onSplitHorizontal` props. Click sequence: focus the pane (set `focusedPaneId`) → then call `splitPane`. The `.tab-bar-split-group` is sticky-pinned at the right end so it never scrolls away.

@@ -13,7 +13,7 @@ Six Zustand stores, no god store. Split by domain so a write in one domain canno
 | `useRuleStore` | `useRuleStore.ts` | committed highlight/command/protocol/trigger/tool runtime arrays and active command set. Forms use separate session drafts in utils/entityEditor; only accepted saves promote runtime |
 | `useToastStore` | `useToastStore.ts` | host `push` preserves overflow/sticky notifications; plugin `pushPlugin` assigns trusted source identity and enforces rate, text and pending limits. Both share max 5 visible + stashed; module helpers serve non-React callers. |
 
-## Conventions (root covers selector discipline)
+## Conventions (root covers selector discipline; 展开见 docs/architecture/conventions.md)
 
 - **活动标签只有一个来源**：`useAppStore.activeTabId`（渲染侧 `tab.id === activeTabId` 派生）。`TabItem` 没有 `isActive` —— 双表示会漂移，且切换要遍历整个 tabs 数组。
 - **关闭标签/端口后的回收走 `releaseTerminalState(portId)`**（`releaseTerminalState.ts`）：一次性清掉 `useTerminalStore.terminals` 条目、流量统计（含聚合器里未 flush 的字节）、以及 `useSerialSend` 的 per-port TX 历史。关闭路径有多条（关标签、批量关闭），任何一条漏调都会留下幽灵端口。触发点是**关标签**，不是断连——断连后标签仍在，终端显示态（滚动锁/编码）要跨重连保留。

@@ -28,7 +28,7 @@
 
 **文档生命周期**：允许相同时源内导航/刷新到声明过的 HTML（查询串与锚点参与 URL 但不参与资源路径）；外部 http/https 用户链接与新窗口交给系统浏览器且不获得 SDK，其他协议拒绝，iframe 不注入 SDK。每次顶层导航都使上一文档失效：原生在导航开始时即更换 `documentId`，前端清空在途 ACK、重放当前保留模型，并拒绝旧文档迟到的 ready/ACK/message/二进制块。普通资源错误与慢加载不退休页面，原生进程故障或文档加载失败才报告失败。
 
-**二进制通道**：`view.sendBinary(type, bytes)` / `view.onBinary(cb)` 在 Worker 与 UI 两侧对称，8 KiB 原始字节/块 base64 编码进现有 16 KiB 原生信封，逐块 ACK（异步回调完成后确认），总大小不设业务上限。传输绑定 `viewInstanceId + documentId + workerEpoch`：导航、关闭、换代会拒绝未完成发送、清空接收端半成品，并让迟到的确认无法影响新页面；已在执行的插件异步逻辑不假装被撤销。大块数据不进入实时状态 JSON 合并通道，`boundedPluginViewJson` 仍只用于模型快照。
+**二进制通道**：`view.sendBinary(type, bytes)` / `view.onBinary(cb)` 在 Worker 与 UI 两侧对称，8 KiB 原始字节/块 base64 编码进现有 16 KiB 原生信封，逐块 ACK（异步回调完成后确认），总大小不设业务上限。传输绑定 `viewInstanceId + documentId + workerEpoch`：导航、关闭、换代会拒绝未完成发送、清空接收端半成品（宿主入口 `cancelViewBinary`），并让迟到的确认无法影响新页面；已在执行的插件异步逻辑不假装被撤销。大块数据不进入实时状态 JSON 合并通道，`boundedPluginViewJson` 仍只用于模型快照。
 
 `PluginConfigEntry.trusted_web_granted` 默认 false，仅 `set_plugin_trusted_web` 主窗命令能够授予。启用与 create/消息均检查实际批准；普通权限不隐含网页信任。升级清除批准，配置恢复保持当前批准但不能新增或复活撤销的信任；撤销同时禁用并退休页面。所有变更复用 plugin_io、expectedGeneration 和 revision 快照。
 
@@ -69,7 +69,7 @@ Binding 区分 tabSessionId、viewInstanceId、workerEpoch、streamEpoch和insta
 
 line 租约复用 RxPipeline/RxLineAssembler及协议绑定；没有原始终端仍处理独立 line 输入，不复活 viewportManager 或积压 stock 行队列。字节租约在 serial:data 模式分流前观察，TTY也可用。启用且匹配端口的宿主 trigger rules 也是行消费者，关闭显示不停止既有告警/自动回复。
 
-原始、表格、波形分别持有会话，关闭一个只释放其资源。`releaseUnusedPortState` 保留仍有标签描述/输入消费者的编码/统计/TX历史，最后消费者退休才回收。serial关闭释放 stock viewport/TTY并 discardTerminalQueue，不能向别的视图伪造 disconnected。
+原始、表格、波形分别持有会话，关闭一个只释放其资源。`releaseUnusedPortState` 保留仍有标签描述/输入消费者的编码/统计/TX历史，最后消费者退休才回收（行消费者判定 `hasPortLineConsumers`）。serial关闭释放 stock viewport/TTY并 discardTerminalQueue，不能向别的视图伪造 disconnected。
 
 Worker close是优先生命周期通道，释放已退休实例事件记账与排队数据，不排在 stalled async 回调后等待。迟到初始化不宣布ready，迟到副作用调用拒绝；已经开始的外部副作用不假装可撤销。
 

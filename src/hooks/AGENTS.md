@@ -26,7 +26,7 @@
 | `usePluginPanel.ts` / `usePluginUi.ts` | 面板与声明式 UI 订阅、`dispatchPluginUiClick` | PluginPanel / SidebarToolbar / SortablePortItem | 主窗 `useSyncExternalStore`，插件 UI 不进入 popout；工具栏与端口菜单点击发送 Worker 消息。 |
 | `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
 
-## Conventions (root covers lifecycle split rationale)
+## Conventions (root covers lifecycle split rationale; 展开见 docs/architecture/conventions.md)
 
 - RX lines land via the app-lifetime `RxPipeline` singleton (line assembly, bounded rAF batches, 250ms tail flush). Single-line writers (`appendTerminalLine`) remain for TX echo, tool output and log replay. `sendToPort` MUST call `getRxPipeline().flushBeforeSend(portId)` BEFORE the TX echo: `flushNow` writes at most one batch and cannot establish RX-before-TX order when the queue is longer. Disconnect and encoding changes also drain the boundary before dropping/resetting state.
 - The pipeline singleton is app-lifetime per webview: neither `useSerialReceive` cleanup nor `TerminalPopout` cleanup may call `dispose()`. Disconnect cleanup goes through `pipeline.disconnect(portId)` (flush tail + drop per-port state) inside the status handler.

@@ -43,7 +43,7 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 | R10 | 跟随钉底在 `render()` 内同帧完成（padding 感知、浏览器绘制前）。 |
 | R11 | 暂停（`frozenSeq !== null`）抑制跟随钉底，`locked` 仍为 true。 |
 | R12 | 选区钉住：活 Range 触及的行永不换父；`findFlowAnchor` 必须把停车行当锚点候选。 |
-| R13 | 钉住行跳过内容重写；结构性变更清 pins；超 `MAX_PINNED_ROWS` 自弃（不钉住无界 DOM）。 |
+| R13 | 钉住行跳过内容重写；结构性变更（`bumpFilterVersion` / `invalidate` / `clear` / `detach`）清 pins；超 `MAX_PINNED_ROWS` 自弃（不钉住无界 DOM）。 |
 | R14 | 固定行高、零测量：几何只来自 `config.rowHeight`，行内容不换行（宽行横向滚动）。 |
 | R15 | 行 DOM 结构镜像 `TerminalRow`：`.terminal-line` + 可选 `.terminal-timestamp`、`.terminal-direction`、`.terminal-content`。 |
 

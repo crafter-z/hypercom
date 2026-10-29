@@ -33,7 +33,7 @@ Five entity pages use `useEntityPage<T>({kind})`; never create page-local persis
 4. Discard affects only its requested scope. Shared close guard awaits saves or remote discard ACKs; failure/new edits prevent closing.
 5. Use `SortableEditorList` for handle-only pointer/keyboard sorting; `commandOrder` normalizes command ranks. Array order is authoritative for other management lists. Object property order is not an edit (`jsonEqual`).
 
-## Conventions (root covers i18n rules)
+## Conventions (root covers i18n rules; 展开见 docs/architecture/conventions.md)
 
 - Runtime rules live in `useRuleStore`; pages use `useEntityPage` drafts, not runtime setters. `useAppStore.config` entity arrays are last persisted baseline.
 - `entityEditor` and `useConfigPersistence` serialize CAS writes through `configWriteQueue`; publish runtime only after acceptance. Plugin actions remain immediate/backend-authoritative. Backup import confirms destructive replacement, handles drafts, adopts backend state and reloads.
