@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE — HyperCom
 
-**Generated:** 2026-08-06 · **Aligned to code:** 2026-10-28（统一编辑草稿、拖排序与关闭审批）· **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
+**Generated:** 2026-08-06 · **Aligned to code:** 2026-10-29（可信网页模式）· **Stack:** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
 
 > **引用纪律**：本文只写「文件 + 符号名」，**不写行号**。行号随每次重构必然腐化，是上一轮审计整片漂移的根因。
 > **数字断言**（命令数 / 配置字段数 / i18n 键数 / hook 数 / store 数 / services 文件数）以代码为准；改动后需同步本文件。
@@ -8,7 +8,7 @@
 
 ## OVERVIEW
 
-HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。**6 个 Zustand store**；`src/hooks/` 有 **18 个 hook 文件**（另有 barrel 与 disconnectTracking；shared 下的 hook 不计入）。后端 **12 个命令域文件 + CommandError**，`lib.rs` 注册 **79 个命令**。工作区标签为 UUID 标识的 serial/plugin 联合类型，端口状态与标签身份分离。五类规则运行态在 `useRuleStore`，会话编辑草稿在 `utils/entityEditor.ts`；统一编辑与原生关闭审批见 `docs/architecture/config.md`。
+HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。**6 个 Zustand store**；`src/hooks/` 有 **18 个 hook 文件**（另有 barrel 与 disconnectTracking；shared 下的 hook 不计入）。后端 **13 个命令域文件 + CommandError**，`lib.rs` 注册 **84 个命令**。工作区标签为 UUID 标识的 serial/plugin 联合类型，端口状态与标签身份分离。五类规则运行态在 `useRuleStore`，会话编辑草稿在 `utils/entityEditor.ts`；统一编辑与原生关闭审批见 `docs/architecture/config.md`。
 
 ## 当前架构
 
@@ -18,7 +18,7 @@ HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。**6 个 Zu
 
 ```
 src-tauri/src/
-├── main.rs / lib.rs      # entrypoint；lib.rs = AppState + generate_handler!（79 命令）+ setup
+├── main.rs / lib.rs      # entrypoint；lib.rs = AppState + generate_handler!（84 命令）+ setup
 ├── system.rs             # 跨平台电源管理：共享状态机骨架 + win32_backend / child_process_backend
 ├── diaglog.rs            # 应用自身诊断日志（512KB 轮转 × 3 份）
 ├── update_network.rs     # 升级专用HTTP期限与路由；update_network/windows.rs = WinHTTP异步PAC/WPAD + 环境/手动代理
@@ -31,7 +31,7 @@ src-tauri/src/
 ├── config/               # mod.rs（AppConfig + Entities(9) + CONFIG_BOUNDS + 插件路径/备份/会话快照）
 ├── plugin/               # mod.rs（有界 manifest / 路径边界 / ZIP 限额）+ transaction.rs（持久化事务及启动恢复）
 │   └── view_runtime/     # mod.rs（原生视图身份/授权/生命周期）/ resources.rs（声明资产快照）/ windows.rs（raw Wry）/ sdk.js
-└── commands/             # mod.rs（CommandError）+ 12 个域文件 + wire_shape.rs（纯测试契约）
+└── commands/             # mod.rs（CommandError）+ 13 个域文件（含 plugin_http.rs 流式 HTTP）+ wire_shape.rs（纯测试契约）
 ```
 
 - **端口类别分派只有一个入口**：`serial::PortKind::of(port_id)`（`Real` / `Sim` / `Tty`）——Rust 侧**没有** `starts_with("GIT:")` 字符串分派（前端仅两处按 `portId.startsWith('GIT:')` 判定是否走 pty 路径：`ttyService.resize`/`resync` 推 pty 尺寸、`TtyView` 过滤 xterm 的 DSR 应答）。
@@ -47,7 +47,7 @@ src-tauri/src/
 ```
 src/
 ├── main.tsx / App.tsx        # entrypoints（App.tsx = AppInit + SerialReceive + 全局自定义文本右键菜单）
-├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），617 键 × zh-CN/en-US
+├── i18n.ts                   # i18next + react-i18next，扁平 dotted key（keySeparator:false），636 键 × zh-CN/en-US
 ├── services/                 # 14 个非测试文件：tauri.ts barrel + 13 域（含 plugin / pluginView）
 ├── hooks/                    # 18 个 hook 文件 + barrel index.ts + disconnectTracking.ts
 ├── stores/                   # 6 个 store 模块 + releaseTerminalState.ts + resetStores.ts
@@ -109,7 +109,12 @@ src/
 9. **工作区身份与发送目标分离**：`TabItem = SerialTabItem | PluginTabItem`，两类 `id` 均为 UUID；serial 的 `portId`、plugin 的固定 `boundPortId` 才是端口身份。`getTabPortId` / `getActivePortId` 显式解析，未绑定插件标签返回 null，绝无“上次串口”回退。普通发送使用显式端口；循环启动时固定目标，不随聚焦漂移；视图 `view.sendSerial` 仅发送到绑定端口并检查 `serial:send` / whitelist。
 10. **输入消费者决定行处理生命周期**：`pluginViewInput` 的独立租约与 legacy RX observer、serial 标签、启用的端口触发规则共同决定 `hasPortLineConsumers`。仅有触发规则时仍处理完整行/协议帧但不创建 stock viewport 队列；无行消费者则回收尾部定时器/解析器。退休一份租约不移除其他订阅，断线/模式变化通过 stream epoch 表达。
 11. **可选显示偏好**：`SerialPort.displayView` / `PortMetaEntry.displayView` 持久化插件身份、安装代次与 view；缺失/null 仍为原始终端。插件 workspace tab 的恢复受声明与安装身份约束，偏好不是授权，也不代替当前可用性检查。
-12. **原生平台与剪贴板边界**：当前仅 Windows `plugin/view_runtime/windows.rs` 实现 raw Wry 子控件；无 Tauri 初始化/IPC、独立临时浏览器上下文。其他平台明确拒绝创建，须完成原始发布门再开放，禁止 iframe 回退。允许真实用户原生 copy/cut 是已批准的例外；直接异步 clipboard read 仍拒绝，通用 Worker clipboard 宿主 API 的授权规则不变。实现存在不等于安全验收完成或可发布；原生安全矩阵仍是发布门。
+12. **原生平台与网页模式**：仅 Windows `plugin/view_runtime/windows.rs` 实现 raw Wry 子控件，无 Tauri 通用 IPC；其他平台明确拒绝。`UiView.mode` 缺省 isolated，临时 incognito、网络/文件选择/程序化剪贴板拒绝（真实 copy/cut 例外）；trusted-web 需 HTML 与独立批准，开放浏览器网络/选择器/下载/剪贴板及持久存储，仍无主窗权限，详 `docs/architecture/plugin-views.md`。实现不替代最终安装包平台验收。
+13. **可信网页授权与数据**：`PluginConfigEntry.trusted_web_granted` 默认 false；`set_plugin_trusted_web` 独立于普通权限，升级清除、备份不提权，撤销同时禁用。`plugin::web_data_dir` 指向配置目录旁 `plugin-web-data/<id>`，origin 按 pluginId/viewId 稳定；升级保留、清除/卸载等待原生 ClearBrowsingDataAll。待选下载由 Control 拥有，销毁完成 deferral，禁止析构访问另一个 thread_local 表。
+14. **插件文件读取**：`fs.read` / `fs.openDialog` 缺省 text，`format:'binary'` 返回 Uint8Array（选择器为 files[].bytes）；适用于普通 Worker，不要求 trusted-web。读取无扩展名/内容/大小/总量/多选数量限额，无 RPC deadline；文本非法字节替代解码。`read_plugin_asset` binary wire 为 base64，`PluginSession` 回复转移缓冲区。权限/路径守卫保留，data 写入及安装包/声明网页资源配额不可误套到文件读取。
+15. **插件文件与网络不再有业务配额**：`fs.write` 接受 `content`（可空）或 `bytes`，`data/` 无单文件/总量/文件数上限也不再全目录扫描；KV 只保留 JSON 语义（无键长/值/节点上限）；剪贴板可写空串。Worker HTTP 用 `plugin_http_open/read/cancel` 拉取：无 15 s/1 MiB 截断，`timeout` 缺省不设期限、`redirect` 默认 follow（≤10 跳）、`urlWhitelist` 缺失/空=不限制、默认继承系统代理；`http.*`/`fs.write`/`storage.set`/`view.sendBinary` 无通用 RPC deadline，`http.cancel` 在槽位饱和时仍可入队。
+16. **插件生命周期**：`__plugin_ready` 在入口脚本同步执行后发出；就绪后的未处理拒绝/运行错误只记诊断（限流），不重启不清内存；仅启动前失败进入重启与 10 s 三次熔断。`reload_plugin` 保留安装身份/授权/网页信任/数据，先退休视图与网络请求；同版/降级安装需 `replaceExisting`（错误前缀 `plugin_replace_confirmation_required:`）。`entry` 可省略或视图 `worker:false`（仅 trusted-web + input:none），此时 `workerEpoch=0`、不建 Worker。
+17. **视图文档与二进制**：可信本地 origin 内导航/刷新生成新 `documentId`，旧文档迟到 ready/ACK/message/二进制块一律丢弃；外部 http(s) 用户链接交系统浏览器且无 SDK，iframe 不注入。`view.sendBinary`/`onBinary` 双向 8 KiB 分块 + ACK 背压、总量不设业务上限，绑定 instance+document+epoch，导航/关闭取消未完成传输（`cancelViewBinary`）；不要把它塞进 256 KiB 实时状态 JSON。
 
 ## STRUCTURE
 
@@ -117,7 +122,7 @@ src/
 hypercom/
 ├── src/                          # React frontend
 │   ├── main.tsx, App.tsx         # entrypoints (App.tsx owns AppInit + SerialReceive + global custom text-edit context menu)
-│   ├── i18n.ts                   # 617 keys × zh-CN/en-US
+│   ├── i18n.ts                   # 636 keys × zh-CN/en-US
 │   ├── services/                 # 14 non-test files = tauri.ts barrel + 13 domain files
 │   ├── hooks/                    # 18 hook files + barrel index.ts + disconnectTracking.ts
 │   ├── stores/                   # 6 store modules (no god store; useTerminalStore 已去 Immer)
@@ -240,7 +245,7 @@ Backend:
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (12 domain files, 79 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| All Tauri commands (13 domain files, 84 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
 | `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | 47 字段 = 46 个普通配置字段 + flatten entities；9 类实体数组含 pluginConfigs。普通字段含 defaultBaudRates 数组，不统称标量；插件安装身份迁移/磁盘恢复先于 Worker 启动 |
 | `AppState` | `src-tauri/src/lib.rs` | struct | `serial_manager: Arc<Mutex<..>>`、`config_manager: Mutex<..>`、`plugin_io: tokio::sync::Mutex<()>`（插件磁盘/状态操作互斥）、`log_manager: Arc<LogManager>`、`diag_logger: Arc<..>`、`system_info: Arc<Mutex<..>>`、`tool_processes`/`file_send_cancel`/`popouts` |
 | `SerialPortHandle` | `src-tauri/src/serial/ports_real.rs` | struct | `read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>` 句柄；`open_real_port` 内 DTR/RTS 设置（clone 前，设备级共享）后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享） |
@@ -478,7 +483,7 @@ pub enum CommandError {
 
 It implements `serde::Serialize` manually so the frontend receives the error string via `invoke`.
 
-Commands are split into 12 domain files; `lib.rs` registers **79** commands, guarded by `test_generate_handler_matches_tauri_command_attribute`.
+Commands are split into 13 domain files; `lib.rs` registers **84** commands, guarded by `test_generate_handler_matches_tauri_command_attribute`.
 
 | File | Domain |
 |------|--------|
@@ -490,7 +495,8 @@ Commands are split into 12 domain files; `lib.rs` registers **79** commands, gua
 | `log.rs`（7） | pick_and_save_log, get_log_files, start_logging, stop_logging, open_path, open_log_directory, migrate_log_directory（**逐字段 `set_log_*` 已全部删除**——日志设置改走 `set_config`；另存路径由宿主原生对话框选择） |
 | `storage.rs`（20） | 6 类实体 CRUD（command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs，各 save/load/delete）+ save_port_groups + save_port_meta — synchronous ConfigManager operations on config.json；内部共享 `read_config` / `save_entity` / `delete_entity` + `entity_accessors!` / `impl_entity_id!` 宏访问器 |
 | `file.rs`（5） | pick_text_file_and_read / pick_text_file_and_write（宿主原生对话框，前端不传路径）, read_text_file（仅日志根内回放）, read_image_data_url（背景图）, plugin_pick_files（后端原生选择后读取） |
-| `plugin.rs`（13） | list_plugins, install_plugin, uninstall_plugin, set_plugin_enabled, set_plugin_permissions, read_plugin_asset, write_plugin_asset, plugin_http, plugin_open_external, create_plugin_view, update_plugin_view, send_plugin_view_message, destroy_plugin_view；expectedGeneration / revision / 有界 IO / 持久化事务及原生视图契约见 `docs/architecture/plugins.md` |
+| `plugin.rs`（15） | list_plugins, install_plugin（`replaceExisting` 同版/降级确认替换）, uninstall_plugin, reload_plugin, set_plugin_enabled, set_plugin_permissions, set_plugin_trusted_web, clear_plugin_web_data, read_plugin_asset, write_plugin_asset（content/base64 互斥、可空、无大小上限）, plugin_open_external, create_plugin_view, update_plugin_view, send_plugin_view_message, destroy_plugin_view；expectedGeneration / revision / 独立网页信任及原生视图契约见 `docs/architecture/plugins.md` |
+| `plugin_http.rs`（3） | plugin_http_open / plugin_http_read / plugin_http_cancel：requestId 同步准入 + 有界「先取消后打开」意图、每请求异步锁与 watch 取消、可选白名单与逐跳校验、默认继承系统代理、无隐式期限、单块 64 KiB 传输总量无上限；权限/代次在 open/read/交付前复核，禁用/撤权/卸载/重载取消 |
 | `popout.rs`（3） | open_popout(kind, target_id), close_popout(kind, target_id), set_popout_always_on_top(kind, target_id, on)（label 只在 Rust 计算） |
 | `system_cmds.rs`（4） | get_system_status, prevent_sleep, prevent_screen_off, complete_editor_close（主窗编辑审批后执行关闭；另有 dev_only/is_debug_build 门控助手） |
 | `update.rs`（2） | check_for_update, download_and_install_update（自动更新；debug 构建返回 Ok(None)） |
@@ -644,7 +650,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## i18n (2026-07 基础设施)
 
-- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**617 keys × zh-CN/en-US**；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符。
+- `src/i18n.ts` — i18next + react-i18next，扁平 dotted key（`keySeparator: false`），**636 keys × zh-CN/en-US**；`src/i18n.test.ts` 守护镜像顺序、集合、重复键和插值占位符。
 - `main.tsx` 顶层 `import './i18n'` 副作用初始化
 - `useAppStore.subscribe((state) => ...)` 监听 `config.language` 变化 → `i18n.changeLanguage`
 - 组件用：`import { useTranslation } from 'react-i18next'` + `const { t } = useTranslation()` + `{t('namespace.key')}` / `t('namespace.key', { var: value })`

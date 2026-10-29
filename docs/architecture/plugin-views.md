@@ -6,7 +6,7 @@
 
 - Windows 使用 `plugin/view_runtime/windows.rs` 的 raw Wry 子 WebView，嵌入主窗口标签内容矩形，不创建额外桌面窗。
 - 不经过 Tauri WebviewBuilder，不注入 Tauri 初始化脚本、invoke key、通用命令、事件或 channel-fetch。UI 仅有 host SDK `view` 和专用 IPC；后端由 native Session 闭包确定身份，不接受页面自报 pluginId。
-- 每控件独立临时目录/incognito 浏览器上下文，静态资源加载使用本实例随机 HTTPS origin 的原生内存响应，不放行网络 fallback。
+- `isolated` 控件使用独立临时目录/incognito 与随机 HTTPS origin；`trusted-web` 控件使用每插件持久浏览器目录及 pluginId/viewId 的稳定 SHA-256 HTTPS origin。静态资源仍由原生内存响应提供，缺失本地资源不走网络 fallback。
 - macOS/Linux 当前没有通过原生策略验收的 adapter，创建明确拒绝，不以主窗 iframe 或文本面板代替。原有 Worker/文本面板功能不受此平台门控影响。
 - 独立 DOM/来源/存储与原生能力不等于独立 OS 进程，也不是 CPU/堆内存硬配额。
 
@@ -16,11 +16,27 @@
 
 资源快照只包含 entry/styles/assets 及宿主 shell/SDK，拒绝 data/、保留命名空间、路径别名、链接/reparse/hardlinks、非普通文件及额度越界。插件脚本为普通 bundle，不直接拼入主窗 React DOM。Native send 只接收 init/state/environment JSON 并转义为 SDK dispatcher 的固定调用，不接受源码 eval。
 
-首文档加载前安装 WebView2 策略：一次宿主初始导航、后续顶层/子 frame 导航拒绝；全请求源拦截并静态响应；下载/新窗口/外部协议/拖入/浏览器权限拒绝；HTML 文件选择通过 acknowledged CDP interception 阻断；网络配置和 CSP 叠加防护。必需 COM/CDP 接口不可用时创建失败，不加载插件代码。
+隔离模式首文档加载前安装 WebView2 策略：一次宿主初始导航、后续顶层/子 frame 导航拒绝；全请求源拦截并静态响应；下载/新窗口/外部协议/拖入/浏览器权限拒绝；HTML 文件选择通过 acknowledged CDP interception 阻断；网络配置和 CSP 叠加防护。必需 COM/CDP 接口不可用时创建失败，不加载插件代码。
 
-**明确例外**：浏览器真实用户操作的原生复制/剪切可写系统剪贴板，这是用户选择的边界；程序化剪贴板读取及 Worker clipboard API仍分别受原生拒绝/已有权限约束。禁止宣称完全封锁所有剪贴板写入。
+**隔离模式明确例外**：浏览器真实用户操作的原生复制/剪切可写系统剪贴板，这是用户选择的边界；隔离页面程序化剪贴板读取及 Worker clipboard API 仍分别受原生拒绝/已有权限约束。可信网页边界见下节。
 
 安装/升级/卸载/禁用/必要撤权及配置备份恢复先使路由失效，控件销毁与代次提交协调，旧消息不能复活新代码。原生事件只定向 main，页面不能订阅全局串口事件。
+
+## 可信网页模式
+
+作者声明与能力说明只维护在[插件开发指南](../plugin-development.md#可信网页模式windows)。`UiView.mode` 缺省 `Isolated`；`TrustedWeb` 需要 HTML 入口和 `trusted-web-view@1`。HTML 字节原样返回，SDK 通过原生初始化脚本注入本地 origin 的顶层文档（非某个精确 URL），DOMContentLoaded 后由原生下发本次导航的 `documentId` 并宣布 native ready。入口 `entry` 可省略（纯网页插件）或视图声明 `worker:false`，此时 `workerEpoch=0`，不建 Worker、不订阅输入、不发布模型、不等待 Worker ACK；Worker ready 协议仅用于依附 Worker 的视图。
+
+**文档生命周期**：允许相同时源内导航/刷新到声明过的 HTML（查询串与锚点参与 URL 但不参与资源路径）；外部 http/https 用户链接与新窗口交给系统浏览器且不获得 SDK，其他协议拒绝，iframe 不注入 SDK。每次顶层导航都使上一文档失效：原生在导航开始时即更换 `documentId`，前端清空在途 ACK、重放当前保留模型，并拒绝旧文档迟到的 ready/ACK/message/二进制块。普通资源错误与慢加载不退休页面，原生进程故障或文档加载失败才报告失败。
+
+**二进制通道**：`view.sendBinary(type, bytes)` / `view.onBinary(cb)` 在 Worker 与 UI 两侧对称，8 KiB 原始字节/块 base64 编码进现有 16 KiB 原生信封，逐块 ACK（异步回调完成后确认），总大小不设业务上限。传输绑定 `viewInstanceId + documentId + workerEpoch`：导航、关闭、换代会拒绝未完成发送、清空接收端半成品，并让迟到的确认无法影响新页面；已在执行的插件异步逻辑不假装被撤销。大块数据不进入实时状态 JSON 合并通道，`boundedPluginViewJson` 仍只用于模型快照。
+
+`PluginConfigEntry.trusted_web_granted` 默认 false，仅 `set_plugin_trusted_web` 主窗命令能够授予。启用与 create/消息均检查实际批准；普通权限不隐含网页信任。升级清除批准，配置恢复保持当前批准但不能新增或复活撤销的信任；撤销同时禁用并退休页面。所有变更复用 plugin_io、expectedGeneration 和 revision 快照。
+
+Windows 可信分支不安装离线/CDP 网络阻断、黑洞代理/DNS、隔离 CSP 或文件选择拦截。仅虚拟本地 origin 被资源拦截，其他浏览器流量按标准 CORS/TLS 运行；Clipboard read 权限限当前存活可信来源，粘贴快捷键恢复，其他浏览器权限拒绝。新窗口/外部协议与离开入口的顶层导航仍拒绝，frames 不注入 SDK。网页不共享主窗权限或 DOM。
+
+`DownloadStarting` 默认取消并获取 deferral，异步原生另存为完成后才设置用户选择路径并放行；不显示自动打开下载的浏览器 UI。待选下载及运行下载由各 Control 拥有，退休取消并完成 deferral，迟到对话框不能写文件。Control 析构不能访问其他 thread_local 表，避免退出时表析构顺序导致崩溃；移除控件后在 RefCell 借用之外析构。
+
+持久目录由 `plugin::web_data_dir` 定位至 `<config_dir>/plugin-web-data/<pluginId>`，不在插件可写包树。升级保留，普通关闭不删除。清除/卸载先退休全部视图，再创建相同环境选项的隐藏维护控件，等待 Profile2.ClearBrowsingDataAll 完成后关闭；不直接删除浏览器仍占用的目录。全部站点数据被清除，空 profile 文件可保留。维护期间 plugin_io 阻止并发创建，清除失败如实返回。
 
 ## 工作区模型
 
@@ -108,3 +124,11 @@ Windows 原生回归 `retiring_plugin_children_preserves_host_resize` 需安装 
 - 修复监听注册竞态：停止首轮、立即启动第二轮，再完成两次原生 listen 注册的独立运行探针，修复前观测两条注册但 cleanup 只解除第二条，首条泄漏。回归场景要求旧消息不能使新实例退休、两条注册都解除，旧 cleanup 不能停止新 runtime。
 - 修复遮挡握手过早完成：可见页面 hide 拒绝、destroy 保持 pending 的独立运行探针，修复前观测 `update-true → update-false → destroy-start → overlay-ready`，未等到实际 destroy。回归场景覆盖 destroy 完成后才 ready，以及 destroy 拒绝时不 ready。observer、pointer/visibility 和 release 的内部更新显式记录拒绝，不产生未处理 Promise；显式 guard.ready 仍保留拒绝语义，不把失败转成 ready。此探针只证明宿主 Promise 顺序，不证明原生 HWND 的隔离或可见性。
 - 本轮集成执行975项Vitest、309项Windows Rust（另1项默认跳过）、32项mock IPC Playwright及显式WebView2 child退休resize用例，通过。生产资产/CSP的真实debug应用打开raw Wry工具页并有桌面截图，正常宿主设置遮挡/恢复已观察；故障hide/destroy与队列撤权由行为回归覆盖，未伪称原生故障注入。最终release安装包仍须完整原生安全矩阵和支持平台逐项验收。
+
+### 2026-10-29 可信网页原生验收
+
+Windows debug 二进制使用生产前端资产、独立配置与测试桌面实跑：独立确认/取消、未批准启用拒绝、HTML/模块/查询参数、localhost 8723 HTTP/SSE 与 8724 WebSocket、真实日志选择器、Clipboard API 读写、Blob 另存为与取消、重启 localStorage/IndexedDB 保留、同插件双原生控件、升级撤信任且保数据、旧代次授权拒绝、清数据及卸载重装后为空、撤信任后迟到下载不落盘。隔离视图仍拒绝 localhost 请求。发现并修复下载表 thread_local 析构依赖；可信和隔离控件存活时退出已观察进程码 0。该记录不代替最终安装包、真实模型端点或其他平台验收。
+
+### 2026-10-29 插件能力放宽原生验收
+
+Windows debug 二进制（生产前端资产）与独立配置、测试桌面、本机自带 HTTP 服务：普通 Worker 插件完成 17 MiB + 1 字节二进制私有写入/读回、5 MiB KV、空文件与空剪贴板；HTTP 完整响应 2 097 408 字节、1 MiB + 1 字节二进制请求/响应回声、`manual`/`error` 重定向、默认跟随重定向后 URL 正确、16 秒慢响应（无隐式 15 秒上限）、SSE 首块 3 ms 且逐事件到达、pending 连接 abort、迭代器 pending abort、提前 break 取消、显式 `timeout` 生效；`urlWhitelist` 非空时拒绝跳转出白名单。启动后未处理拒绝保留 Worker 内存状态（计数 41→42）。重载已安装代码后日志标记从 A 变为 B，安装代次/权限/网页信任与 17 MiB 数据保持不变且视图重建；同版本安装先被拒绝（`plugin_replace_confirmation_required`），显式替换后新代次、禁用、清权且数据保留。完全省略 `entry` 的纯 HTML 插件可打开，声明的第二页本地导航、刷新、localStorage 与 SDK 均正常；Worker 依附的可信页完成 1 MiB + 17 字节 UI→Worker→UI 双向二进制往返（逐字节校验）；隔离视图仍渲染 Worker 模型并拒绝网络。依赖视图与二进制传输存活时退出进程码 0。该记录不替代最终安装包、跨平台或无限内存/真实模型端点验收。
