@@ -176,11 +176,8 @@ pub async fn pick_text_file_and_write(
 }
 
 /// 插件只能读取宿主原生对话框选中的文件；路径从不由 Worker/前端传入。
-/// 此命令在阻塞线程中弹出文件选择器并读取有大小限制的内容，避免 JS
+/// 此命令在阻塞线程中弹出文件选择器并读取用户选择的原始字节，避免 JS
 /// `open()` → `read_file_bytes(path)` 之间出现可伪造的任意路径读取入口。
-const MAX_PLUGIN_OPEN_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_PLUGIN_PICK_FILES: usize = 8;
-const MAX_PLUGIN_PICK_TOTAL_BYTES: u64 = MAX_PLUGIN_OPEN_FILE_BYTES;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,9 +199,6 @@ pub struct PluginPickOptions {
 pub struct PluginPickedFile {
     path: String,
     base64: String,
-    /// Actual bytes read (not the pre-read stat); `skip` keeps the wire shape.
-    #[serde(skip)]
-    bytes: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -213,29 +207,11 @@ pub struct PluginPickedFiles {
 }
 
 fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
-    let file = std::fs::File::open(&path)
-        .map_err(|e| CommandError::Io(format!("Cannot open selected file: {e}")))?;
-    let metadata = file
-        .metadata()
-        .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?;
-    if !metadata.is_file() || metadata.len() > MAX_PLUGIN_OPEN_FILE_BYTES {
-        return Err(CommandError::Other(
-            "选择的文件不是普通文件或超过 64MB".into(),
-        ));
-    }
-    use std::io::Read;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_PLUGIN_OPEN_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
+    let bytes = std::fs::read(&path)
         .map_err(|e| CommandError::Io(format!("Cannot read selected file: {e}")))?;
-    if bytes.len() as u64 > MAX_PLUGIN_OPEN_FILE_BYTES {
-        return Err(CommandError::Other("选择的文件超过 64MB".into()));
-    }
-    let bytes_len = bytes.len() as u64;
     Ok(PluginPickedFile {
         path: path.display().to_string(),
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-        bytes: bytes_len,
     })
 }
 
@@ -295,6 +271,8 @@ pub async fn plugin_pick_files(
                 dialog = dialog.add_filter(filter.name, &exts);
             }
         }
+        // Filters are only chooser conveniences, never a restriction on readable formats.
+        dialog = dialog.add_filter("All files", &["*"]);
         let paths = if options.multiple {
             dialog.blocking_pick_files().unwrap_or_default()
         } else {
@@ -324,22 +302,12 @@ pub async fn plugin_pick_files(
             return Err(CommandError::Other("插件文件读取权限已撤销".into()));
         }
         drop(manager);
-        if paths.len() > MAX_PLUGIN_PICK_FILES {
-            return Err(CommandError::Other("单次最多选择 8 个文件".into()));
-        }
-        let mut total_bytes = 0u64;
         let mut files = Vec::with_capacity(paths.len());
         for path in paths {
             let file_path = path
                 .into_path()
                 .map_err(|e| CommandError::Other(format!("选择的文件路径不可用: {e}")))?;
             let picked = read_picked_file(file_path)?;
-            // Budget the bytes actually read; the pre-read metadata can change
-            // between stat and read (and did not cover the earlier checks).
-            total_bytes = total_bytes.saturating_add(picked.bytes);
-            if total_bytes > MAX_PLUGIN_PICK_TOTAL_BYTES {
-                return Err(CommandError::Other("本次选择的文件总量超过 64MB".into()));
-            }
             files.push(picked);
         }
         Ok(PluginPickedFiles { files })
@@ -460,7 +428,7 @@ mod tests {
     // 显式导入（镜像 serial/mod.rs 的测试约定，不用 `use super::*;`，
     // 避免 glob 把无关符号拖进测试二进制）。
     use crate::commands::file::{
-        image_mime_from_ext, read_image_data_url, read_picked_file, MAX_PLUGIN_OPEN_FILE_BYTES,
+        image_mime_from_ext, read_image_data_url, read_picked_file,
     };
 
     /// 1x1 PNG 头部字节。函数不做 PNG 解析，仅验证 base64 往返一致。
@@ -553,20 +521,27 @@ mod tests {
     }
 
     #[test]
-    fn picked_file_rejects_over_64mb() {
-        let path = unique_temp_path("map");
-        let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_PLUGIN_OPEN_FILE_BYTES + 1).unwrap();
-        drop(f);
-        let err = read_picked_file(path.clone()).err().unwrap();
-        assert!(err.to_string().contains("超过 64MB"));
-        let _ = std::fs::remove_file(&path);
+    fn picked_file_reads_past_old_limit_without_truncation() {
+        use std::io::{Seek, SeekFrom, Write};
+        let path = unique_temp_path("bin");
+        let size = 64 * 1024 * 1024 + 1;
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.set_len(size).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[255]).unwrap();
+        drop(file);
+        let picked = read_picked_file(path.clone()).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(picked.base64).unwrap();
+        assert_eq!(bytes.len(), size as usize);
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[bytes.len() - 1], 255);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn picked_file_missing_path_is_error() {
         let path = unique_temp_path("map");
         let err = read_picked_file(path).err().unwrap();
-        assert!(err.to_string().contains("Cannot open selected file"));
+        assert!(err.to_string().contains("Cannot read selected file"));
     }
 }

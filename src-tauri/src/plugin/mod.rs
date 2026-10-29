@@ -55,7 +55,8 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpScope {
-    /// URL 白名单 glob（`http.urlWhitelist`）。运行时逐条匹配，空数组 = 全部拒绝。
+    /// URL 白名单 glob（`http.urlWhitelist`）。可选作用域：
+    /// 缺失或空数组 = 不限制；非空时初始 URL 与每个重定向目标都必须匹配。
     #[serde(default)]
     pub url_whitelist: Vec<String>,
 }
@@ -72,8 +73,8 @@ pub struct ShellScope {
 #[serde(rename_all = "camelCase")]
 pub struct SerialScope {
     /// 发送目标端口白名单（`serial.portWhitelist`，评审 v2 P10）。
-    /// 语义与 HttpScope.url_whitelist 一致：声明且非空 → 仅白名单端口可发；
-    /// 声明为空数组 → 全部拒绝；未声明 → 不做端口作用域（仍需 `serial:send` 授权）。
+    /// 声明且非空 → 仅白名单端口可发；声明为空数组 → 全部拒绝；
+    /// 未声明 → 不做端口作用域（仍需 `serial:send` 授权）。
     #[serde(default)]
     pub port_whitelist: Vec<String>,
 }
@@ -101,12 +102,22 @@ pub struct UiMenuItem {
     pub target: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewMode {
+    #[default]
+    Isolated,
+    TrustedWeb,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiView {
     pub id: String,
     pub label: String,
     pub entry: String,
+    #[serde(default)]
+    pub mode: ViewMode,
     #[serde(default)]
     pub styles: Vec<String>,
     #[serde(default)]
@@ -117,6 +128,23 @@ pub struct UiView {
     pub port_binding: String,
     #[serde(default)]
     pub restore_on_startup: bool,
+    /// 是否依附插件的根 Worker。缺省 true；false 仅允许纯本地可信网页。
+    #[serde(default = "default_worker")]
+    pub worker: bool,
+}
+
+fn default_worker() -> bool {
+    true
+}
+
+impl UiView {
+    pub fn is_trusted_web(&self) -> bool { self.mode == ViewMode::TrustedWeb }
+}
+
+/// Browser profiles are outside plugin packages and plugin-writable private data.
+/// Callers must validate the plugin id before deriving this path.
+pub fn web_data_dir(plugins_dir: &Path, id: &str) -> std::path::PathBuf {
+    plugins_dir.parent().expect("plugins directory has a parent").join("plugin-web-data").join(id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -131,8 +159,9 @@ pub struct UiDecl {
 }
 
 /// 插件 manifest（`manifest.json`）。
-/// 必填：`id`（反向域名）/`name`/`version`/`apiVersion`/`entry`/`permissions`。
-/// 可选：`description`/`http`/`shell`/`serial`/`ui`。
+/// 必填：`id`（反向域名）/`name`/`version`/`apiVersion`/`permissions`。
+/// 可选：`description`/`entry`/`http`/`shell`/`serial`/`ui`。
+/// `entry` 缺省为空仅用于「纯本地可信网页」插件（无根 Worker）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -144,6 +173,8 @@ pub struct PluginManifest {
     /// 插件要求的最低宿主 API 版本（semver，如 "1.0"）。
     pub api_version: String,
     /// 入口文件（插件目录内相对路径，如 "main.js"）。
+    /// 缺省/空串表示没有根 Worker（仅当 ui.views 全为 trusted-web + input:none 时允许）。
+    #[serde(default)]
     pub entry: String,
     /// 声明的权限（「可授予上限」）。
     pub permissions: Vec<String>,
@@ -222,6 +253,10 @@ fn read_manifest_bytes(reader: impl Read, reported_size: u64) -> Result<Vec<u8>,
 }
 
 impl PluginManifest {
+    pub fn has_trusted_web_views(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.views.iter().any(UiView::is_trusted_web))
+    }
+
     /// 结构校验（纯函数，无 IO）。任一步失败返回带上下文的错误串。
     pub fn validate(&self) -> Result<(), String> {
         validate_plugin_id(&self.id)?;
@@ -247,11 +282,28 @@ impl PluginManifest {
         }
 
         if self.entry.trim().is_empty() {
-            return Err("manifest 缺少必填字段 entry".into());
+            // 纯 HTML 插件：没有根 Worker，但必须有独立的本地可信网页。
+            let ui = self
+                .ui
+                .as_ref()
+                .ok_or_else(|| "manifest 缺少 entry，且未声明纯网页 ui.views".to_string())?;
+            if !ui.buttons.is_empty() || !ui.menu_items.is_empty() {
+                return Err("manifest 缺少 entry 时不得声明 Worker 按钮/菜单".into());
+            }
+            if ui.views.is_empty()
+                || ui.views.iter().any(|view| {
+                    !view.is_trusted_web() || view.input != "none"
+                })
+            {
+                return Err(
+                    "manifest 缺少 entry 时 ui.views 必须非空且全部为 trusted-web、input:none".into(),
+                );
+            }
+        } else {
+            // entry 必须指向插件目录内（防越目录引用与解压后穿越）。
+            sanitize_plugin_rel_path(&self.entry)
+                .map_err(|e| format!("manifest entry 非法: {e}"))?;
         }
-        // entry 必须指向插件目录内（防越目录引用与解压后穿越）。
-        sanitize_plugin_rel_path(&self.entry)
-            .map_err(|e| format!("manifest entry 非法: {e}"))?;
 
         // 声明未知权限可兼容未来版本，但授予命令仅允许当前 KNOWN_PERMISSIONS。
         let mut seen = std::collections::HashSet::new();
@@ -278,7 +330,7 @@ impl PluginManifest {
         }
         let mut capabilities = std::collections::HashSet::new();
         for required in &self.requires {
-            if !["isolated-tab-view@1", "plugin-workspace-tabs@1"].contains(&required.as_str())
+            if !["isolated-tab-view@1", "trusted-web-view@1", "plugin-workspace-tabs@1"].contains(&required.as_str())
                 || !capabilities.insert(required) {
                 return Err(format!("未知或重复的必需能力: {required}"));
             }
@@ -286,11 +338,14 @@ impl PluginManifest {
         let mut ids = std::collections::HashSet::new();
         let views = self.ui.as_ref().map(|ui| ui.views.as_slice()).unwrap_or_default();
         if views.len() > 32 { return Err("每插件最多声明 32 个视图".into()); }
-        if !views.is_empty() && (!self.permissions.iter().any(|p| p == "ui:view")
-            || !self.requires.iter().any(|r| r == "isolated-tab-view@1")) {
-            return Err("视图须声明 ui:view 和 isolated-tab-view@1".into());
+        if !views.is_empty() && !self.permissions.iter().any(|p| p == "ui:view") {
+            return Err("视图须声明 ui:view".into());
         }
         for view in views {
+            let capability = if view.is_trusted_web() { "trusted-web-view@1" } else { "isolated-tab-view@1" };
+            if !self.requires.iter().any(|r| r == capability) {
+                return Err(format!("视图须声明 {capability}"));
+            }
             if view.id.is_empty() || view.id.len() > 128
                 || !view.id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
                 || !ids.insert(&view.id) || view.label.trim().is_empty() || view.label.chars().count() > 128 {
@@ -301,8 +356,15 @@ impl PluginManifest {
                 validate_view_resource_path(path)?;
                 if path.starts_with("__host/") { return Err("视图资源不得覆盖宿主命名空间".into()); }
             }
-            if !view.entry.ends_with(".js") || view.styles.iter().any(|p| !p.ends_with(".css")) {
+            if view.is_trusted_web() {
+                if !(view.entry.ends_with(".html") || view.entry.ends_with(".htm")) || !view.styles.is_empty() {
+                    return Err("可信网页 entry 必须为 HTML，styles 必须为空".into());
+                }
+            } else if !view.entry.ends_with(".js") || view.styles.iter().any(|p| !p.ends_with(".css")) {
                 return Err("视图 entry/styles 必须为 JS/CSS".into());
+            }
+            if !view.worker && !(view.is_trusted_web() && view.input == "none") {
+                return Err("worker:false 仅允许 trusted-web 且 input:none 的视图".into());
             }
             if view.modes.is_empty() || view.modes.len() > 2
                 || view.modes.iter().any(|m| !["trx", "tty"].contains(&m.as_str()))
@@ -904,6 +966,26 @@ mod tests {
     }
 
     #[test]
+    fn trusted_web_requires_explicit_mode_html_and_capability() {
+        let mut value: serde_json::Value = serde_json::from_str(&valid_manifest_json()).unwrap();
+        value["permissions"] = serde_json::json!(["ui:view"]);
+        value["requires"] = serde_json::json!(["trusted-web-view@1", "plugin-workspace-tabs@1"]);
+        value["ui"]["views"] = serde_json::json!([{"id":"web","label":"Web","entry":"ui/index.html","mode":"trusted-web","modes":["trx"],"input":"none","placements":["workspace-tab"],"portBinding":"none"}]);
+        assert!(parse_manifest(&value.to_string()).unwrap().has_trusted_web_views());
+        value["ui"]["views"][0]["entry"] = "ui/index.htm".into();
+        assert!(parse_manifest(&value.to_string()).is_ok());
+        value["ui"]["views"][0]["styles"] = serde_json::json!(["ui/main.css"]);
+        assert!(parse_manifest(&value.to_string()).is_err());
+        value["ui"]["views"][0]["styles"] = serde_json::json!([]);
+        value["ui"]["views"][0].as_object_mut().unwrap().remove("mode");
+        assert!(parse_manifest(&value.to_string()).is_err());
+        value["requires"] = serde_json::json!(["isolated-tab-view@1", "plugin-workspace-tabs@1"]);
+        value["ui"]["views"][0]["entry"] = "ui/main.js".into();
+        let parsed = parse_manifest(&value.to_string()).unwrap();
+        assert_eq!(parsed.ui.unwrap().views[0].mode, ViewMode::Isolated);
+    }
+
+    #[test]
     fn view_contract_validates_capabilities_permissions_and_bindings() {
         let mut value: serde_json::Value = serde_json::from_str(&valid_manifest_json()).unwrap();
         value["permissions"] = serde_json::json!(["ui:view", "rx:bytes"]);
@@ -979,6 +1061,47 @@ mod tests {
         // 缺 permissions（serde：非 Option 字段缺失 → JSON 层报错）
         let json = r#"{"id":"com.x.y","name":"X","version":"1.0.0","apiVersion":"1.0","entry":"main.js"}"#;
         assert!(parse_manifest(json).is_err());
+    }
+
+    #[test]
+    fn pure_html_manifest_requires_independent_readonly_trusted_views() {
+        let base = r#"{"id":"com.x.y","name":"X","version":"1.0.0","apiVersion":"1.0","permissions":["ui:view"],"requires":["trusted-web-view@1","plugin-workspace-tabs@1"],"ui":{"views":[{"id":"web","label":"Web","entry":"ui/index.html","mode":"trusted-web","modes":["trx"],"input":"none","placements":["workspace-tab"],"portBinding":"none"}]}}"#;
+        let parsed = parse_manifest(base).unwrap();
+        assert!(parsed.entry.is_empty());
+        assert!(parsed.ui.as_ref().unwrap().views[0].worker);
+
+        let worker_false = base.replace(
+            "\"portBinding\":\"none\"",
+            "\"portBinding\":\"none\",\"worker\":false",
+        );
+        assert!(!parse_manifest(&worker_false).unwrap().ui.unwrap().views[0].worker);
+
+        // Worker-only buttons/menu are forbidden when the root entry is absent.
+        let mut value: serde_json::Value = serde_json::from_str(base).unwrap();
+        value["ui"]["buttons"] = serde_json::json!([{"id":"b","label":"B"}]);
+        assert!(parse_manifest(&value.to_string()).is_err());
+
+        // input:bytes view depends on a Worker.
+        let mut value: serde_json::Value = serde_json::from_str(base).unwrap();
+        value["ui"]["views"][0]["input"] = "bytes".into();
+        assert!(parse_manifest(&value.to_string()).is_err());
+
+        // Isolated view depends on a Worker.
+        let mut value: serde_json::Value = serde_json::from_str(base).unwrap();
+        value["ui"]["views"][0]["mode"] = "isolated".into();
+        value["ui"]["views"][0]["entry"] = "ui/main.js".into();
+        value["requires"] =
+            serde_json::json!(["isolated-tab-view@1", "plugin-workspace-tabs@1"]);
+        assert!(parse_manifest(&value.to_string()).is_err());
+
+        // worker:false is only valid for trusted-web + input:none.
+        // (Root entry present so the empty-entry rule does not fire first.)
+        let mut value: serde_json::Value = serde_json::from_str(base).unwrap();
+        value["entry"] = "main.js".into();
+        value["ui"]["views"][0]["input"] = "bytes".into();
+        value["ui"]["views"][0]["worker"] = false.into();
+        let err = parse_manifest(&value.to_string()).unwrap_err();
+        assert!(err.contains("worker:false"), "err: {err}");
     }
 
     #[test]

@@ -16,6 +16,7 @@
  * zip 与目录安装都在 staging 中限制大小、验证路径；升级备份旧版直到状态保存成功。
  */
 use std::path::Path;
+use base64::Engine as _;
 
 use tauri::{Manager, State};
 
@@ -23,12 +24,6 @@ use super::CommandError;
 use crate::config;
 use crate::plugin::{self, PluginManifest};
 use crate::AppState;
-
-/// Private data quotas.  These bound both individual requests and accumulated
-/// state so a plugin cannot turn the worker bridge into an unbounded file store.
-const PLUGIN_DATA_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-const PLUGIN_DATA_MAX_TOTAL_BYTES: u64 = plugin::MAX_ZIP_UNCOMPRESSED_BYTES;
-const PLUGIN_DATA_MAX_FILES: usize = 1024;
 
 /// 单个插件的完整视图（前端设置页/宿主桥消费）。
 /// manifest = 磁盘权威（每次 list 现扫）；state = config 实体状态。
@@ -40,6 +35,7 @@ pub struct PluginView {
     pub dir: String,
     pub install_generation: String,
     pub enabled: bool,
+    pub trusted_web_granted: bool,
     /// 用户已授予权限（config 实体）。manifest 声明是上限，此处是实际授予。
     pub granted_permissions: Vec<String>,
     /// manifest 声明权限（未授予前不生效）——供前端授权对话框展示。
@@ -117,6 +113,7 @@ fn build_views_from_scan(
                         .unwrap_or_default(),
                     dir: dir_str,
                     enabled: state.map(|s| s.enabled).unwrap_or(false),
+                    trusted_web_granted: state.is_some_and(|s| s.trusted_web_granted),
                     granted_permissions: state
                         .map(|s| s.granted_permissions.clone())
                         .unwrap_or_default(),
@@ -139,6 +136,7 @@ fn build_views_from_scan(
                     dir: dir_str,
                     install_generation: String::new(),
                     enabled: false,
+                    trusted_web_granted: false,
                     granted_permissions: Vec::new(),
                     declared_permissions: Vec::new(),
                     known_permissions: plugin::KNOWN_PERMISSIONS
@@ -196,6 +194,13 @@ fn require_generation(
     Ok(())
 }
 
+fn require_trusted_web_consent(manifest: &PluginManifest, entry: &config::PluginConfigEntry) -> Result<(), CommandError> {
+    if manifest.has_trusted_web_views() && !entry.trusted_web_granted {
+        return Err(CommandError::Other("请先单独确认信任此插件的网页能力".into()));
+    }
+    Ok(())
+}
+
 /// 列出已安装插件（磁盘扫描视图 + config 状态数组）。
 /// 扫描（read_dir + 逐目录 manifest 解析）在阻塞线程池执行——不占命令线程。
 #[tauri::command]
@@ -229,11 +234,45 @@ pub async fn list_plugins(
     })
 }
 
+/// 重载已安装代码（不重新拷贝源、不改变安装身份/授权/私有数据）。
+/// 前端会先停掉旧 Worker，再调用本命令；后端在这里取消该插件的全部
+/// 流式网络请求并退役本机网页视图，随后由前端以权威快照重建。
+#[tauri::command]
+pub async fn reload_plugin(
+    id: String,
+    expected_generation: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<PluginStateSnapshot, CommandError> {
+    require_main_window(&window)?;
+    plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
+    let _plugin_io = state.plugin_io.lock().await;
+    let result = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+        let entry = state_of(manager.get_config(), &id).unwrap();
+        if !entry.enabled {
+            return Err(CommandError::Other(format!("插件未启用: {id}")));
+        }
+        // 重载前确认磁盘代码仍可校验通过；失败则保持旧 Worker/session 不动。
+        plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
+            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+        snapshot(&manager)
+    };
+    state.plugin_http.cancel_plugin(&id);
+    plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
+    log::info!("Plugin reloaded from installed code: {id}");
+    Ok(result)
+}
+
 /// 安装插件。`source_path` 可为插件**目录**（复制注册，源保留）或插件 **zip 包**
 /// （内含 `<id>/…` 顶层插件目录；安全解压，zip slip 防护见 `extract_plugin_zip`）。
-/// 已存在同 id → 版本比较：更高则覆盖（**data/ 私有区保留**，其余旧文件不残留
-/// ——staging 目录复制后原子换名，评审复审修复「覆盖安装孤儿文件」），
-/// 否则报错（评审 v2 D6）。
+/// 已存在同 id → 更高版本正常覆盖；同版本/降级仅在调用方显式
+/// `replace_existing=true` 时允许（先经用户确认）。替换保留 data/ 私有区，
+/// 但轮换 installGeneration 并重置授权/信任（与普通安装相同）。
 /// 返回保存后的 revision + 全量 pluginConfigs 权威快照。
 ///
 /// Preparation runs in spawn_blocking without touching installed files. After
@@ -242,6 +281,7 @@ pub async fn list_plugins(
 #[tauri::command]
 pub async fn install_plugin(
     source_path: String,
+    replace_existing: Option<bool>,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<PluginStateSnapshot, CommandError> {
@@ -253,9 +293,17 @@ pub async fn install_plugin(
         .map_err(|e| CommandError::Lock(e.to_string()))?
         .plugins_dir()
         .to_path_buf();
-    let prepared = tokio::task::spawn_blocking(move || prepare_plugin_install(&source_path, &root))
-        .await
-        .map_err(|e| CommandError::Other(format!("安装暂存 join 失败: {e}")))??;
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_plugin_install(
+            &source_path,
+            &root,
+            replace_existing.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("安装暂存 join 失败: {e}")))??;
+    // Replacement/new code invalidates every in-flight network request id.
+    state.plugin_http.cancel_plugin(&prepared.manifest.id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &prepared.manifest.id).await?;
     // No await after persisting the trust reset: cancellation must not drop the
     // IO gate while a detached blocking task is still replacing executable code.
@@ -278,6 +326,7 @@ struct PreparedPluginInstall {
 fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str) {
     if let Some(existing) = cfg.entities.plugin_configs.iter_mut().find(|p| p.id == id) {
         existing.enabled = false;
+        existing.trusted_web_granted = false;
         existing.granted_permissions.clear();
         existing.install_generation = uuid::Uuid::new_v4().to_string();
         existing.installed_at =
@@ -287,6 +336,7 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
         cfg.entities.plugin_configs.push(config::PluginConfigEntry {
             id: id.into(),
             enabled: false,
+            trusted_web_granted: false,
             granted_permissions: Vec::new(),
             install_generation: uuid::Uuid::new_v4().to_string(),
             installed_at: Some(now_unix_secs()),
@@ -355,6 +405,7 @@ fn install_prepared(
 fn prepare_plugin_install(
     source_path: &str,
     root: &Path,
+    replace_existing: bool,
 ) -> Result<PreparedPluginInstall, CommandError> {
     let src = Path::new(source_path);
 
@@ -420,13 +471,14 @@ fn prepare_plugin_install(
 
     let dest = plugin_dir(root, &manifest.id)?;
 
-    // 已存在：允许覆盖仅当源版本更高；同版本/更低 → 报错（防意外回滚）。
+    // 已存在：更高版本正常覆盖；同版本/更低必须由用户显式确认替换
+    // （`replace_existing=true`），错误串前缀供前端识别并弹确认。
     if std::fs::symlink_metadata(&dest).is_ok() {
         let existing = plugin::load_manifest_from_dir(&dest);
         if let Ok(existing_m) = existing {
-            if !plugin::version_greater(&manifest.version, &existing_m.version) {
+            if !plugin::version_greater(&manifest.version, &existing_m.version) && !replace_existing {
                 return Err(CommandError::Other(format!(
-                    "插件 {} 已安装（版本 {}），覆盖需更高版本（源 {}）",
+                    "plugin_replace_confirmation_required: 插件 {} 已安装（版本 {}），源版本 {} 不是更高版本；替换安装会保留私有数据但需要重新授权",
                     manifest.id, existing_m.version, manifest.version
                 )));
             }
@@ -448,28 +500,31 @@ fn prepare_plugin_install(
             "复制期间插件 manifest 已变化，拒绝安装".into(),
         ));
     }
-    let entry_rel = sanitize_asset_path(&manifest.entry)?;
-    let staged_entry = staging.join(&entry_rel);
-    let staged_root = staging
-        .canonicalize()
-        .map_err(|e| CommandError::Io(format!("暂存目录不可达: {e}")))?;
-    let staged_entry_canon = staged_entry
-        .canonicalize()
-        .map_err(|e| CommandError::Other(format!("manifest entry 不存在: {e}")))?;
-    if !staged_entry_canon.starts_with(&staged_root)
-        || !staged_entry_canon.is_file()
-        || std::fs::symlink_metadata(&staged_entry)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(true)
-    {
-        return Err(CommandError::Other(
-            "manifest entry 必须是暂存目录内的普通文件".into(),
-        ));
-    }
-    if is_data_path(&entry_rel) {
-        return Err(CommandError::Other(
-            "manifest entry 不得位于 data/ 私有区".into(),
-        ));
+    // 根入口可缺省（纯 HTML 插件）；只有声明了 entry 才要求文件存在。
+    if !manifest.entry.trim().is_empty() {
+        let entry_rel = sanitize_asset_path(&manifest.entry)?;
+        let staged_entry = staging.join(&entry_rel);
+        let staged_root = staging
+            .canonicalize()
+            .map_err(|e| CommandError::Io(format!("暂存目录不可达: {e}")))?;
+        let staged_entry_canon = staged_entry
+            .canonicalize()
+            .map_err(|e| CommandError::Other(format!("manifest entry 不存在: {e}")))?;
+        if !staged_entry_canon.starts_with(&staged_root)
+            || !staged_entry_canon.is_file()
+            || std::fs::symlink_metadata(&staged_entry)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(true)
+        {
+            return Err(CommandError::Other(
+                "manifest entry 必须是暂存目录内的普通文件".into(),
+            ));
+        }
+        if is_data_path(&entry_rel) {
+            return Err(CommandError::Other(
+                "manifest entry 不得位于 data/ 私有区".into(),
+            ));
+        }
     }
     // Private storage is exclusively owned by the user, even on first install.
     remove_path_if_exists(&staging.join("data"))
@@ -540,7 +595,7 @@ fn install_plugin_fs_stage(
     source_path: &str,
     root: &Path,
 ) -> Result<(String, String, &'static str, Option<std::path::PathBuf>), CommandError> {
-    let mut prepared = prepare_plugin_install(source_path, root)?;
+    let mut prepared = prepare_plugin_install(source_path, root, true)?;
     let (backup, transaction) = commit_plugin_install(&mut prepared, 0)?;
     transaction
         .finish(root)
@@ -603,6 +658,10 @@ pub async fn uninstall_plugin(
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
     let _plugin_io = state.plugin_io.lock().await;
+    {
+        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+    }
     let result = tokio::task::block_in_place(|| {
         let mut manager = state
             .config_manager
@@ -610,12 +669,26 @@ pub async fn uninstall_plugin(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         uninstall_with_manager(&mut manager, &id, Some(&expected_generation))
     });
-    // Retire views only after the transactional uninstall committed; a failed
-    // transaction must not destroy live native views.
-    if result.is_ok() {
-        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
+    // Even a backup/transaction-cleanup error may follow a durable uninstall.
+    // Retire native sessions and remove the browser profile whenever it committed.
+    let committed = {
+        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        state_of(manager.get_config(), &id).is_none()
+    };
+    if committed {
+        state.plugin_http.cancel_plugin(&id);
+        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
+            .map_err(|e| CommandError::Other(format!("插件已卸载，但关闭网页视图失败: {e}")))?;
+        let directory = {
+            let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+            plugin::web_data_dir(manager.plugins_dir(), &id)
+        };
+        plugin::view_runtime::clear_web_data(window.app_handle(), &directory).await
+            .map_err(|e| CommandError::Other(format!("插件已卸载，但网页数据清理失败: {e}")))?;
     }
-    result
+    result.map_err(|error| if committed {
+        CommandError::Other(format!("插件已卸载，但提交后清理失败: {error}"))
+    } else { error })
 }
 
 fn uninstall_with_manager(
@@ -705,6 +778,7 @@ pub async fn set_plugin_enabled(
             if manifest.id != id {
                 return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
             }
+            require_trusted_web_consent(&manifest, state_of(manager.get_config(), &id).unwrap())?;
         }
         let old_config = manager.get_config().clone();
         let cfg = manager.get_config_mut();
@@ -729,6 +803,7 @@ pub async fn set_plugin_enabled(
     // Retire only after the committed state is durable and visible: a rejected
     // request or failed save must not destroy live native views.
     if !enabled {
+        state.plugin_http.cancel_plugin(&id);
         if let Err(e) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
             log::warn!("Failed to retire disabled plugin views for {id}: {e}");
         }
@@ -738,6 +813,73 @@ pub async fn set_plugin_enabled(
         id,
         if enabled { "enabled" } else { "disabled" }
     );
+    Ok(result)
+}
+
+/// Separate consent is never inferred from ordinary permission grants.
+#[tauri::command]
+pub async fn set_plugin_trusted_web(
+    id: String,
+    trusted: bool,
+    expected_generation: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<PluginStateSnapshot, CommandError> {
+    require_main_window(&window)?;
+    plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
+    let _plugin_io = state.plugin_io.lock().await;
+    let (result, backup_error) = {
+        let mut manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+        if trusted {
+            let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
+                .map_err(CommandError::Other)?;
+            if manifest.id != id || !manifest.has_trusted_web_views() {
+                return Err(CommandError::Other("插件未声明可信网页视图".into()));
+            }
+        }
+        let old_config = manager.get_config().clone();
+        let entry = manager.get_config_mut().entities.plugin_configs.iter_mut().find(|p| p.id == id).unwrap();
+        entry.trusted_web_granted = trusted;
+        if !trusted { entry.enabled = false; }
+        if let Err(error) = manager.save() {
+            *manager.get_config_mut() = old_config;
+            return Err(CommandError::Config(format!("保存网页信任状态失败: {error}")));
+        }
+        let backup_error = manager.save_safe_backup().err().map(|e| e.to_string());
+        (snapshot(&manager), backup_error)
+    };
+    if !trusted {
+        state.plugin_http.cancel_plugin(&id);
+        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
+            .map_err(|e| CommandError::Other(format!("网页信任已撤销，但关闭视图失败: {e}")))?;
+    }
+    if let Some(error) = backup_error {
+        return Err(CommandError::Config(format!("网页信任状态已保存，但恢复备份更新失败: {error}")));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn clear_plugin_web_data(
+    id: String,
+    expected_generation: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<PluginStateSnapshot, CommandError> {
+    require_main_window(&window)?;
+    plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
+    let _plugin_io = state.plugin_io.lock().await;
+    let (directory, result) = {
+        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+        if state_of(manager.get_config(), &id).unwrap().enabled {
+            return Err(CommandError::Other("请先禁用插件再清除网页数据".into()));
+        }
+        (plugin::web_data_dir(manager.plugins_dir(), &id), snapshot(&manager))
+    };
+    plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
+    plugin::view_runtime::clear_web_data(window.app_handle(), &directory).await?;
     Ok(result)
 }
 
@@ -812,29 +954,37 @@ pub async fn set_plugin_permissions(
         (snapshot(&manager), committed_permissions)
     };
     // Validate + commit first, then retire views based on committed grants.
+    if !committed_permissions.iter().any(|p| p == "http:request") {
+        state.plugin_http.cancel_plugin(&id);
+    }
     plugin::view_runtime::retire_denied(window.app_handle(), &id, &committed_permissions).await?;
     log::info!("Plugin {id} permissions updated");
     Ok(result)
 }
 
-/// 读取插件资产（`main.js` / `assets/` 内文件，供 worker 加载与资源读取）。
-/// 路径经 `sanitize_plugin_rel_path` 前缀校验，canonicalize 后必须落在
-/// `<plugins_dir>/<id>/` 内（评审 v2 D5 路径穿越防护）。
-/// 返回 UTF-8 文本内容（插件代码/文本资产均为文本；二进制资产走后续增量）。
-/// FIFO admission avoids failing valid simultaneous startup/KV reads. The wait is
-/// bounded; timed-out requests leave the queue and cannot build an infinite backlog.
-async fn lock_asset_io(
-    gate: &tokio::sync::Mutex<()>,
-) -> Result<tokio::sync::MutexGuard<'_, ()>, CommandError> {
-    tokio::time::timeout(std::time::Duration::from_secs(2), gate.lock())
-        .await
-        .map_err(|_| CommandError::Other("插件磁盘操作等待超时，请稍后重试".into()))
+#[derive(Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginFileFormat {
+    #[default]
+    Text,
+    Binary,
 }
 
+fn encode_asset(bytes: Vec<u8>, format: PluginFileFormat) -> String {
+    match format {
+        PluginFileFormat::Binary => base64::engine::general_purpose::STANDARD.encode(bytes),
+        PluginFileFormat::Text => String::from_utf8(bytes)
+            .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned()),
+    }
+}
+
+/// Read authorized package/private files without format or size restrictions.
+/// Text is UTF-8 with replacement; binary is base64 on the JSON wire.
 #[tauri::command]
 pub async fn read_plugin_asset(
     id: String,
     rel_path: String,
+    format: Option<PluginFileFormat>,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, CommandError> {
@@ -843,7 +993,7 @@ pub async fn read_plugin_asset(
     if rel_path.len() > 4096 {
         return Err(CommandError::Other("插件资产路径超长".into()));
     }
-    let _plugin_io = lock_asset_io(&state.plugin_io).await?;
+    let _plugin_io = state.plugin_io.lock().await;
     let rel = sanitize_asset_path(&rel_path)?;
     let root = {
         let manager = state
@@ -868,9 +1018,10 @@ pub async fn read_plugin_asset(
         }
         let in_data = is_data_path(&rel);
         let boot_file = rel == Path::new("manifest.json")
-            || rel
-                == plugin::sanitize_plugin_rel_path(&manifest.entry)
-                    .map_err(CommandError::Other)?;
+            || (!manifest.entry.trim().is_empty()
+                && rel
+                    == plugin::sanitize_plugin_rel_path(&manifest.entry)
+                        .map_err(CommandError::Other)?);
         let permission = if in_data { "fs:storage" } else { "fs:assets" };
         let kv_allowed = rel == Path::new("data/state.json")
             && entry.granted_permissions.iter().any(|p| p == "storage")
@@ -888,18 +1039,21 @@ pub async fn read_plugin_asset(
     };
     tokio::task::block_in_place(move || {
         let base = plugin_dir(&root, &id)?;
-        read_authorized_asset(&base, &rel)
+        read_authorized_asset(&base, &rel).map(|bytes| bytes.map(|bytes| encode_asset(bytes, format.unwrap_or_default())))
     })
 }
 
 /// 写入插件私有区（`data/` 子目录，storage 权限授予后）。
 /// 限制：rel_path 首段必须为 `data`——`fs:storage` 权限只覆盖插件私有 KV 区，
 /// 资产区（assets/ 与入口）对插件只读（评审 v2 D5）。
+/// `content`（含空串）与 `base64`（原始字节）互斥；解码后立即落盘原子替换。
+/// 不做任何业务字节上限：大小由用户磁盘与插件自身决定。
 #[tauri::command]
 pub async fn write_plugin_asset(
     id: String,
     rel_path: String,
-    content: String,
+    content: Option<String>,
+    base64: Option<String>,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
@@ -908,12 +1062,23 @@ pub async fn write_plugin_asset(
     if rel_path.len() > 4096 {
         return Err(CommandError::Other("插件资产路径超长".into()));
     }
-    if content.len() as u64 > PLUGIN_DATA_MAX_FILE_BYTES {
-        return Err(CommandError::Other(
-            "插件 data 单文件超过 16 MiB 上限".into(),
-        ));
-    }
-    let _plugin_io = lock_asset_io(&state.plugin_io).await?;
+    let bytes = match (content, base64) {
+        (Some(_), Some(_)) => {
+            return Err(CommandError::Other(
+                "content 与 base64 不能同时提供".into(),
+            ));
+        }
+        (Some(content), None) => content.into_bytes(),
+        (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| CommandError::Other(format!("base64 非法: {e}")))?,
+        (None, None) => {
+            return Err(CommandError::Other(
+                "写入需要 content 或 base64（空内容也必须显式提供）".into(),
+            ));
+        }
+    };
+    let _plugin_io = state.plugin_io.lock().await;
     let rel = sanitize_asset_path(&rel_path)?;
     let first = rel
         .components()
@@ -955,7 +1120,6 @@ pub async fn write_plugin_asset(
     tokio::task::block_in_place(move || {
         let base = plugin_dir(&root, &id)?;
         let target = base.join(&rel);
-        check_data_write_quota(&base.join("data"), &target, content.len() as u64)?;
 
         let canon_base = base
             .canonicalize()
@@ -986,7 +1150,7 @@ pub async fn write_plugin_asset(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(CommandError::Io(format!("写入目标不可达: {e}"))),
         }
-        atomic_write_asset(&canon_parent, &target, content.as_bytes())
+        atomic_write_asset(&canon_parent, &target, &bytes)
             .map_err(|e| CommandError::Io(format!("写入资产失败: {e}")))
     })
 }
@@ -1022,14 +1186,11 @@ fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
     Ok(out)
 }
 
-/// Called only after authorization and the non-queued IO gate have succeeded.
-fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, CommandError> {
+/// Called only after authorization and acquisition of the IO gate.
+fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<Vec<u8>>, CommandError> {
     let canon_base = base
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-    if is_data_path(rel) {
-        check_data_write_quota(&base.join("data"), &base.join(rel), 0)?;
-    }
     let mut current = base.to_path_buf();
     let count = rel.components().count();
     for (index, component) in rel.components().enumerate() {
@@ -1039,7 +1200,7 @@ fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, Comm
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(CommandError::Io(format!("资产不可达: {e}"))),
         };
-        if metadata.file_type().is_symlink()
+        if plugin::is_link_or_reparse(&metadata)
             || (index + 1 < count && !metadata.is_dir())
             || (index + 1 == count && !metadata.is_file())
         {
@@ -1052,15 +1213,10 @@ fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<String>, Comm
     if !target.starts_with(canon_base) {
         return Err(CommandError::Other("资产路径越界".into()));
     }
-    let limit = if is_data_path(rel) {
-        PLUGIN_DATA_MAX_FILE_BYTES
-    } else {
-        plugin::MAX_ZIP_UNCOMPRESSED_BYTES
-    };
-    read_asset_limited(&target, limit).map(Some)
+    read_asset_bytes(&target).map(Some)
 }
 
-fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
+fn read_asset_bytes(path: &Path) -> Result<Vec<u8>, CommandError> {
     use std::io::Read;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -1074,16 +1230,14 @@ fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options
+    let mut file = options
         .open(path)
         .map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))?;
     let meta = file
         .metadata()
         .map_err(|e| CommandError::Io(e.to_string()))?;
-    if !meta.is_file() || plugin::is_link_or_reparse(&meta) || meta.len() > limit {
-        return Err(CommandError::Other(
-            "插件资产读取超过大小上限或不是普通文件".into(),
-        ));
+    if !meta.is_file() || plugin::is_link_or_reparse(&meta) {
+        return Err(CommandError::Other("插件资产路径不是普通文件".into()));
     }
     #[cfg(unix)]
     {
@@ -1105,102 +1259,10 @@ fn read_asset_limited(path: &Path, limit: u64) -> Result<String, CommandError> {
             return Err(CommandError::Other("插件资产不得是硬链接".into()));
         }
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
         .map_err(|e| CommandError::Io(e.to_string()))?;
-    if bytes.len() as u64 > limit {
-        return Err(CommandError::Other("插件资产读取超过大小上限".into()));
-    }
-    String::from_utf8(bytes).map_err(|e| CommandError::Io(format!("资产不是 UTF-8: {e}")))
-}
-
-fn check_data_write_quota(data: &Path, target: &Path, size: u64) -> Result<(), CommandError> {
-    fn scan(
-        path: &Path,
-        depth: usize,
-        entries: &mut usize,
-        files: &mut usize,
-        bytes: &mut u64,
-    ) -> Result<(), CommandError> {
-        if depth > plugin::MAX_PLUGIN_SOURCE_DEPTH {
-            return Err(CommandError::Other("插件 data 深度超过上限".into()));
-        }
-        for entry in std::fs::read_dir(path).map_err(|e| CommandError::Io(e.to_string()))? {
-            *entries += 1;
-            if *entries > plugin::MAX_ZIP_ENTRIES {
-                return Err(CommandError::Other("插件 data 条目数超过上限".into()));
-            }
-            let entry = entry.map_err(|e| CommandError::Io(e.to_string()))?;
-            let meta = std::fs::symlink_metadata(entry.path())
-                .map_err(|e| CommandError::Io(e.to_string()))?;
-            if meta.file_type().is_symlink() || !(meta.is_file() || meta.is_dir()) {
-                return Err(CommandError::Other("插件 data 含链接或非常规文件".into()));
-            }
-            if meta.is_dir() {
-                scan(&entry.path(), depth + 1, entries, files, bytes)?;
-            } else {
-                if meta.len() > PLUGIN_DATA_MAX_FILE_BYTES {
-                    return Err(CommandError::Other("插件 data 单文件超过上限".into()));
-                }
-                *files += 1;
-                *bytes = bytes.saturating_add(meta.len());
-                if *files > PLUGIN_DATA_MAX_FILES || *bytes > PLUGIN_DATA_MAX_TOTAL_BYTES {
-                    return Err(CommandError::Other("插件 data 文件数或总量超过上限".into()));
-                }
-            }
-        }
-        Ok(())
-    }
-    if size > PLUGIN_DATA_MAX_FILE_BYTES {
-        return Err(CommandError::Other("插件 data 单文件超过上限".into()));
-    }
-    let (mut entries, mut files, mut bytes) = (0, 0, 0u64);
-    match std::fs::symlink_metadata(data) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            scan(data, 0, &mut entries, &mut files, &mut bytes)?
-        }
-        Ok(_) => return Err(CommandError::Other("插件 data 不是普通目录".into())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(CommandError::Io(e.to_string())),
-    }
-    let relative = target
-        .strip_prefix(data)
-        .map_err(|_| CommandError::Other("写入目标不在 data/ 内".into()))?;
-    if relative.components().count() > plugin::MAX_PLUGIN_SOURCE_DEPTH {
-        return Err(CommandError::Other("插件 data 深度超过上限".into()));
-    }
-    let mut missing_parents = 0usize;
-    let mut parent = data.to_path_buf();
-    for component in relative
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .components()
-    {
-        parent.push(component);
-        match std::fs::symlink_metadata(&parent) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
-            Ok(_) => return Err(CommandError::Other("写入目录含链接或非目录".into())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing_parents += 1,
-            Err(e) => return Err(CommandError::Io(e.to_string())),
-        }
-    }
-    let old_size = match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => Some(meta.len()),
-        Ok(_) => return Err(CommandError::Other("写入目标不是普通文件".into())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(CommandError::Io(e.to_string())),
-    };
-    if entries + missing_parents + usize::from(old_size.is_none()) > plugin::MAX_ZIP_ENTRIES
-        || files + usize::from(old_size.is_none()) > PLUGIN_DATA_MAX_FILES
-        || bytes
-            .saturating_sub(old_size.unwrap_or(0))
-            .saturating_add(size)
-            > PLUGIN_DATA_MAX_TOTAL_BYTES
-    {
-        return Err(CommandError::Other("插件 data 文件数或总量超过上限".into()));
-    }
-    Ok(())
+    Ok(bytes)
 }
 
 fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -1223,7 +1285,7 @@ fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::
     result
 }
 
-fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
+pub(crate) fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
     if window.label() != "main" {
         return Err(CommandError::Other("插件命令仅允许主窗口调用".into()));
     }
@@ -1285,7 +1347,7 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn plugin_dir(root: &Path, id: &str) -> Result<std::path::PathBuf, CommandError> {
+pub(crate) fn plugin_dir(root: &Path, id: &str) -> Result<std::path::PathBuf, CommandError> {
     plugin::validate_plugin_id(id).map_err(CommandError::Other)?;
     let dest = root.join(id);
     match std::fs::symlink_metadata(&dest) {
@@ -1874,268 +1936,6 @@ fn copy_dir_recursive_inner(
     Ok(())
 }
 
-// ==================== 插件 HTTP 外联（评审 v2 D5/D8） ====================
-
-/// 插件 HTTP 请求参数（wire 与前端 TS 对齐）。
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginHttpRequest {
-    pub method: String,
-    pub url: String,
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    pub body: Option<String>,
-    /// 超时秒数（≤15，服务端钳制）。
-    #[serde(default)]
-    pub timeout: Option<u64>,
-}
-
-/// 插件 HTTP 响应。
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginHttpResponse {
-    pub status: u16,
-    /// 响应体 UTF-8 文本（截断到上限，防恶意大响应打爆内存）。
-    pub body: String,
-    /// 是否因超限截断。
-    pub truncated: bool,
-}
-
-/// HTTP 响应体截断上限（1MB——插件外联是轻量 API 调用，非文件下载）。
-const PLUGIN_HTTP_MAX_BODY: usize = 1024 * 1024;
-/// 插件外联超时上限（对齐 update.rs 惯例）。
-const PLUGIN_HTTP_MAX_TIMEOUT_SECS: u64 = 15;
-
-/// 插件 HTTP 转发（唯一合法出站通道——生产 CSP `connect-src 'self'` 关死
-/// worker 直连 fetch，评审 v2 D8）。
-///
-/// 安全（评审 v2 D5「无凭据注入」+ D3「权限调用时校验」）：
-/// 1. 插件必须已授予 `http:request`（config 实体，调用时校验——撤销即时生效）；
-/// 2. manifest `http.urlWhitelist` glob 必须匹配请求 URL（声明即白名单）；
-/// 3. 不注入任何宿主凭据/Cookie（干净 reqwest client）；
-/// 4. 超时钳制 ≤15s；响应体截断 1MB。
-#[tauri::command]
-pub async fn plugin_http(
-    plugin_id: String,
-    request: PluginHttpRequest,
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-) -> Result<PluginHttpResponse, CommandError> {
-    require_main_window(&window)?;
-    plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
-    // Bounds before any clone/deserialization work: request bodies/headers are
-    // already in memory, but rejecting early keeps the outbound client safe.
-    if request.url.len() > 4096 {
-        return Err(CommandError::Other("插件 HTTP URL 超长".into()));
-    }
-    if request.headers.len() > 100 {
-        return Err(CommandError::Other("插件 HTTP 请求头数量超限".into()));
-    }
-    for (name, value) in &request.headers {
-        if name.len() > 256 || value.len() > 8192 {
-            return Err(CommandError::Other("插件 HTTP 请求头超限".into()));
-        }
-    }
-    if request
-        .body
-        .as_ref()
-        .is_some_and(|body| body.len() > PLUGIN_HTTP_MAX_BODY)
-    {
-        return Err(CommandError::Other("插件 HTTP 请求体超过 1MB".into()));
-    }
-    // --- 权限 + 白名单校验（锁内只读，克隆后释放）---
-    let (url_whitelist, plugin_proxy, plugin_proxy_enabled) = {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let cfg = manager.get_config();
-        let entry = cfg
-            .entities
-            .plugin_configs
-            .iter()
-            .find(|p| p.id == plugin_id)
-            .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
-        if !entry.enabled {
-            return Err(CommandError::Other(format!("插件未启用: {plugin_id}")));
-        }
-        if !entry
-            .granted_permissions
-            .iter()
-            .any(|p| p == "http:request")
-        {
-            return Err(CommandError::Other(format!(
-                "插件未授予 http:request 权限: {plugin_id}"
-            )));
-        }
-        // manifest 白名单（声明即上限）。
-        let root = manager.plugins_dir().to_path_buf();
-        let manifest = crate::plugin::load_manifest_from_dir(&plugin_dir(&root, &plugin_id)?)
-            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-        if manifest.id != plugin_id || !manifest.permissions.iter().any(|p| p == "http:request") {
-            return Err(CommandError::Other(format!(
-                "插件未声明 http:request: {plugin_id}"
-            )));
-        }
-        let whitelist = manifest.http.map(|h| h.url_whitelist).unwrap_or_default();
-        (
-            whitelist,
-            cfg.plugin_proxy.clone(),
-            cfg.plugin_proxy_enabled,
-        )
-    };
-
-    // URL glob 匹配：逐条 glob 匹配（`*` 单段 / `**` 跨段 / 其余字面量）。
-    // 匹配对象是 **Url::parse 规范化后的序列化串**（as_str：host 小写、path
-    // 归一、默认端口剥离、`..\` 解析消除）而非插件原始串——大小写/尾点/
-    // 相对段等畸形写法不再造成误拒，也不给「原始串匹配但实际解析到别处」
-    // 留语义缝隙（评审复审：原实现对 request.url 原始串匹配）。
-    let parsed_url =
-        url::Url::parse(&request.url).map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
-    let normalized_url = parsed_url.as_str();
-    let matched = url_whitelist
-        .iter()
-        .any(|pat| url_glob_match(pat, normalized_url));
-    if !matched {
-        return Err(CommandError::Other(format!(
-            "URL 不在插件 http.urlWhitelist 内: {}",
-            request.url
-        )));
-    }
-    // 仅允许 http/https。
-    if !matches!(parsed_url.scheme(), "http" | "https") {
-        return Err(CommandError::Other(format!(
-            "仅允许 http/https 协议，收到: {}",
-            parsed_url.scheme()
-        )));
-    }
-
-    // --- 转发 ---
-    let timeout = request
-        .timeout
-        .unwrap_or(10)
-        .min(PLUGIN_HTTP_MAX_TIMEOUT_SECS);
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout))
-        // **禁止自动重定向**（评审 v2 D5 安全补强）：urlWhitelist 只校验初始 URL，
-        // 白名单主机的开放重定向可把请求转发到任意内网目标——每个跳转都须由
-        // 插件经 plugin_http 重新发起，逐跳过白名单闸门。
-        .redirect(reqwest::redirect::Policy::none());
-    // 代理（issue #17）：`plugin_http` 默认强制直连——不继承宿主代理/系统代理
-    // （评审 v2 D5「无凭据注入/干净 client」：`auto_sys_proxy` 默认会把环境变量
-    // 与注册表系统代理一并吃进插件 client，骑宿主代理即透传宿主代理凭据）。
-    // 宿主可经 config 显式给插件配置出站代理（plugin_proxy_enabled + plugin_proxy），
-    // 该代理由宿主声明、仅对插件出站生效，与宿主自身代理互不相干。
-    // 此处 `.proxy()`/`.no_proxy()` 二选一——两者互斥（proxy 设 auto_sys_proxy=false）。
-    if plugin_proxy_enabled && !plugin_proxy.is_empty() {
-        let proxy = reqwest::Proxy::all(&plugin_proxy)
-            .map_err(|e| CommandError::Other(format!("invalid plugin proxy: {e}")))?;
-        client_builder = client_builder.proxy(proxy);
-    } else {
-        client_builder = client_builder.no_proxy();
-    }
-    let client = client_builder
-        .build()
-        .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
-
-    let method = reqwest::Method::from_bytes(request.method.as_bytes())
-        .map_err(|e| CommandError::Other(format!("非法 HTTP 方法: {e}")))?;
-
-    let mut builder = client.request(method, &request.url);
-    for (k, v) in &request.headers {
-        // 防 header 注入：拒绝换行字符（reqwest 会拒绝，这里前置报错更友好）。
-        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
-            return Err(CommandError::Other("HTTP header 含非法换行".into()));
-        }
-        builder = builder.header(k, v);
-    }
-    if let Some(body) = &request.body {
-        builder = builder.body(body.clone());
-    }
-
-    let resp = builder
-        .send()
-        .await
-        .map_err(|e| CommandError::Other(format!("HTTP 请求失败: {e}")))?;
-    let status = resp.status().as_u16();
-
-    // Keep at most the limit. At exactly the limit continue to EOF or the next
-    // non-empty chunk; only observing an extra byte proves truncation.
-    let mut body_bytes: Vec<u8> = Vec::new();
-    let mut truncated = false;
-    {
-        use futures_util::StreamExt;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| CommandError::Other(format!("读取响应失败: {e}")))?;
-            if append_http_chunk(&mut body_bytes, &chunk, PLUGIN_HTTP_MAX_BODY) {
-                truncated = true;
-                break;
-            }
-        }
-    }
-
-    let body = String::from_utf8_lossy(&body_bytes).into_owned();
-    Ok(PluginHttpResponse {
-        status,
-        body,
-        truncated,
-    })
-}
-
-/// Return true only when bytes beyond the retained limit were observed.
-fn append_http_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
-    let remaining = limit.saturating_sub(body.len());
-    body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-    chunk.len() > remaining
-}
-
-/// URL glob 匹配（评审 v2 D3 `http.urlWhitelist`）。
-/// 规则（纯函数，独立测试）：
-/// - `**` 跨 `/` 段匹配（贪婪）；
-/// - `*` 匹配单段内任意字符（不含 `/`）；
-/// - 其余字符字面量（大小写敏感——URL 的 scheme/host 惯例小写，保持字面比较）。
-/// 实现：把 glob 转成正则。空白名单 → 恒 false（无匹配即拒绝）。
-fn url_glob_match(pattern: &str, url: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    let mut regex = String::from("^");
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '*' => {
-                // `**` → 跨段；`*` → 单段内。
-                if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    regex.push_str(".*");
-                    i += 2;
-                } else {
-                    regex.push_str("[^/]*");
-                    i += 1;
-                }
-            }
-            // 正则元字符转义。
-            '?' | '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
-                regex.push('\\');
-                regex.push(chars[i]);
-                i += 1;
-            }
-            c => {
-                regex.push(c);
-                i += 1;
-            }
-        }
-    }
-    regex.push('$');
-    // glob 转正则后匹配。预编译不划算（白名单短、低频），直接每次编译。
-    match regex::Regex::new(&regex) {
-        Ok(re) => re.is_match(url),
-        Err(_) => false,
-    }
-}
-
 // ==================== 插件 Shell（v1：openExternal + 白名单骨架） ====================
 
 /// 插件打开外部 URL；调用时检查插件启用、shell:open 授权及 manifest 声明。
@@ -2195,9 +1995,9 @@ pub async fn plugin_open_external(
 
 #[cfg(test)]
 mod tests {
+    use crate::commands::plugin_http::url_glob_match;
     use super::*;
     use std::fs;
-    use std::future::Future;
 
     fn canonical_test_temp_dir() -> std::path::PathBuf {
         // macOS /var and /tmp can be aliases; fixtures must exercise copying
@@ -2220,7 +2020,7 @@ mod tests {
         zip.write_all(b"ordinary").unwrap();
         zip.finish().unwrap();
         let prepared =
-            prepare_plugin_install(archive.to_str().unwrap(), &root.join("plugins")).unwrap();
+            prepare_plugin_install(archive.to_str().unwrap(), &root.join("plugins"), true).unwrap();
         assert_eq!(
             fs::read_to_string(prepared.stage_guard.0.join("main.js")).unwrap(),
             "ordinary"
@@ -2252,6 +2052,7 @@ mod tests {
             .push(config::PluginConfigEntry {
                 id: "com.example.test".into(),
                 enabled: true,
+                trusted_web_granted: true,
                 install_generation: "old-generation".into(),
                 granted_permissions: vec!["fs:storage".into()],
                 installed_at: Some(1),
@@ -2262,6 +2063,18 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_grants_never_replace_web_consent() {
+        let manifest = plugin::parse_manifest(r#"{"id":"com.example.test","name":"Test","version":"1.0.0","apiVersion":"1.0","entry":"main.js","permissions":["ui:view"],"requires":["trusted-web-view@1","plugin-workspace-tabs@1"],"ui":{"views":[{"id":"web","label":"Web","mode":"trusted-web","entry":"ui/index.html","modes":["trx"],"input":"none","placements":["workspace-tab"],"portBinding":"none"}]}}"#).unwrap();
+        let mut entry: config::PluginConfigEntry = serde_json::from_value(serde_json::json!({"id":"com.example.test","enabled":true,"grantedPermissions":plugin::KNOWN_PERMISSIONS})).unwrap();
+        assert!(!entry.trusted_web_granted);
+        assert!(require_trusted_web_consent(&manifest, &entry).is_err());
+        entry.trusted_web_granted = true;
+        assert!(require_trusted_web_consent(&manifest, &entry).is_ok());
+        entry.trusted_web_granted = false;
+        assert!(require_trusted_web_consent(&manifest, &entry).is_err());
+    }
+
+    #[test]
     fn upgrade_crash_after_code_swap_reloads_without_trust() {
         let root = canonical_test_temp_dir().join(format!("plugin_crash_{}", uuid::Uuid::new_v4()));
         let old_source = source(&root, "1.0.0");
@@ -2269,7 +2082,7 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let mut prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         reset_install_trust(
             manager.get_config_mut(),
             &prepared.manifest.id,
@@ -2279,6 +2092,7 @@ mod tests {
         // During the old-worker/new-code window the live backend is already
         // disabled, not merely the config that will be read on next startup.
         assert!(!manager.get_config().entities.plugin_configs[0].enabled);
+        assert!(!manager.get_config().entities.plugin_configs[0].trusted_web_granted);
         assert!(manager.get_config().entities.plugin_configs[0]
             .granted_permissions
             .is_empty());
@@ -2295,6 +2109,7 @@ mod tests {
         let reloaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         let entry = &reloaded.get_config().entities.plugin_configs[0];
         assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
         assert!(entry.granted_permissions.is_empty());
         assert!(entry.installed_at.unwrap() > 1);
         assert_eq!(
@@ -2305,6 +2120,7 @@ mod tests {
         fs::write(root.join("config.json"), "corrupt config").unwrap();
         let recovered = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         assert!(!recovered.get_config().entities.plugin_configs[0].enabled);
+        assert!(!recovered.get_config().entities.plugin_configs[0].trusted_web_granted);
         assert!(recovered.get_config().entities.plugin_configs[0]
             .granted_permissions
             .is_empty());
@@ -2320,7 +2136,7 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         fs::remove_dir_all(&prepared.stage_guard.0).unwrap();
         assert!(install_prepared(&mut manager, prepared).is_err());
         let reloaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
@@ -2344,7 +2160,7 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         // ConfigManager's atomic save cannot open a directory as its temp file.
         fs::create_dir(root.join("config.json.tmp")).unwrap();
         assert!(install_prepared(&mut manager, prepared).is_err());
@@ -2365,7 +2181,7 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         let backup = root.join("config.json.bak");
         if backup.exists() {
             fs::remove_file(&backup).unwrap();
@@ -2785,34 +2601,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_io_waits_for_active_work_without_overtaking_control() {
-        let gate = tokio::sync::Mutex::new(());
-        let active = gate.lock().await;
-        let mut control = std::pin::pin!(gate.lock());
-        let mut read = std::pin::pin!(lock_asset_io(&gate));
-        let waker = futures_util::task::noop_waker();
-        let mut context = std::task::Context::from_waker(&waker);
-        assert!(control.as_mut().poll(&mut context).is_pending());
-        assert!(read.as_mut().poll(&mut context).is_pending());
-        drop(active);
-        let control_guard = control.await;
-        assert!(read.as_mut().poll(&mut context).is_pending());
-        drop(control_guard);
-        let read_guard = read.await.unwrap();
-        drop(read_guard);
-        assert!(gate.try_lock().is_ok());
-    }
-
-    #[tokio::test]
-    async fn timed_out_asset_waiter_releases_its_queue_position() {
-        let gate = tokio::sync::Mutex::new(());
-        let active = gate.lock().await;
-        assert!(lock_asset_io(&gate).await.is_err());
-        drop(active);
-        assert!(gate.try_lock().is_ok());
-    }
-
-    #[tokio::test]
     async fn queued_old_control_intent_is_rejected_after_install_gate() {
         let gate = tokio::sync::Mutex::new(());
         let installing = gate.lock().await;
@@ -2820,9 +2608,11 @@ mod tests {
         reset_install_trust(&mut cfg, "com.example.test", "dir");
         let captured = cfg.entities.plugin_configs[0].install_generation.clone();
         let mut queued = std::pin::pin!(gate.lock());
-        let waker = futures_util::task::noop_waker();
-        let mut context = std::task::Context::from_waker(&waker);
-        assert!(queued.as_mut().poll(&mut context).is_pending());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut queued)
+                .await
+                .is_err()
+        );
         reset_install_trust(&mut cfg, "com.example.test", "dir");
         drop(installing);
         let _control = queued.await;
@@ -2862,68 +2652,21 @@ mod tests {
     }
 
     #[test]
-    fn data_quota_rejects_single_file_total_and_file_count() {
-        let root =
-            canonical_test_temp_dir().join(format!("plugin_data_limits_{}", uuid::Uuid::new_v4()));
-        let data = root.join("data");
-        fs::create_dir_all(&data).unwrap();
-        let target = data.join("new");
-        assert!(check_data_write_quota(&data, &target, PLUGIN_DATA_MAX_FILE_BYTES + 1).is_err());
-        for index in 0..4 {
-            fs::File::create(data.join(format!("large-{index}")))
-                .unwrap()
-                .set_len(PLUGIN_DATA_MAX_FILE_BYTES)
-                .unwrap();
-        }
-        assert!(check_data_write_quota(&data, &target, 1).is_err());
-        assert!(check_data_write_quota(&data, &data.join("large-0"), 1).is_ok());
-        fs::remove_dir_all(&data).unwrap();
-        fs::create_dir(&data).unwrap();
-        for index in 0..PLUGIN_DATA_MAX_FILES {
-            fs::write(data.join(index.to_string()), "").unwrap();
-        }
-        assert!(check_data_write_quota(&data, &target, 0).is_err());
-        assert!(check_data_write_quota(&data, &data.join("0"), 1).is_ok());
+    fn data_reads_return_large_private_files_exactly() {
+        use std::io::{Seek, SeekFrom, Write};
+        let root = canonical_test_temp_dir().join(format!("plugin_read_unlimited_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let size = 16 * 1024 * 1024 + 1;
+        let mut file = fs::File::create(root.join("data/large.bin")).unwrap();
+        file.set_len(size).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[255]).unwrap();
+        drop(file);
+        let bytes = read_authorized_asset(&root, Path::new("data/large.bin")).unwrap().unwrap();
+        assert_eq!(bytes.len(), size as usize);
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[bytes.len() - 1], 255);
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn asset_reads_enforce_limit_including_exact_boundary() {
-        let root =
-            canonical_test_temp_dir().join(format!("plugin_read_limits_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let file = root.join("text");
-        fs::write(&file, "1234").unwrap();
-        assert_eq!(read_asset_limited(&file, 4).unwrap(), "1234");
-        assert!(read_asset_limited(&file, 3).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn http_truncation_limit_minus_one_exact_and_plus_one() {
-        for size in [
-            PLUGIN_HTTP_MAX_BODY - 1,
-            PLUGIN_HTTP_MAX_BODY,
-            PLUGIN_HTTP_MAX_BODY + 1,
-        ] {
-            let mut body = Vec::new();
-            let chunk = vec![b'x'; size];
-            assert_eq!(
-                append_http_chunk(&mut body, &chunk, PLUGIN_HTTP_MAX_BODY),
-                size > PLUGIN_HTTP_MAX_BODY
-            );
-            assert_eq!(body.len(), size.min(PLUGIN_HTTP_MAX_BODY));
-        }
-        let mut body = Vec::new();
-        assert!(!append_http_chunk(
-            &mut body,
-            &vec![b'x'; PLUGIN_HTTP_MAX_BODY - 1],
-            PLUGIN_HTTP_MAX_BODY
-        ));
-        assert!(!append_http_chunk(&mut body, b"x", PLUGIN_HTTP_MAX_BODY));
-        assert!(!append_http_chunk(&mut body, b"", PLUGIN_HTTP_MAX_BODY));
-        assert!(append_http_chunk(&mut body, b"x", PLUGIN_HTTP_MAX_BODY));
-        assert_eq!(body.len(), PLUGIN_HTTP_MAX_BODY);
     }
 
     #[test]
@@ -3045,6 +2788,96 @@ mod tests {
     }
 
     #[test]
+    fn same_version_install_requires_explicit_replacement() {
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_replace_{}", uuid::Uuid::new_v4()));
+        let src = source(&root, "1.0.0");
+        let plugins = root.join("plugins");
+        install_plugin_fs_stage(src.to_str().unwrap(), &plugins).unwrap();
+        let dest = plugins.join("com.example.test");
+        fs::create_dir_all(dest.join("data")).unwrap();
+        fs::write(dest.join("data/keep"), "user").unwrap();
+
+        let err = prepare_plugin_install(src.to_str().unwrap(), &plugins, false)
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            err.starts_with("plugin_replace_confirmation_required:"),
+            "err: {err}"
+        );
+
+        let mut prepared = prepare_plugin_install(src.to_str().unwrap(), &plugins, true).unwrap();
+        let (backup, transaction) = commit_plugin_install(&mut prepared, 1).unwrap();
+        transaction.finish(&plugins).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("data/keep")).unwrap(), "user");
+        assert_eq!(fs::read_to_string(dest.join("main.js")).unwrap(), "1.0.0");
+        if let Some(backup) = backup {
+            fs::remove_dir_all(backup).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn pure_html_source(root: &Path, entry: &str) -> std::path::PathBuf {
+        let src = root.join(format!("html-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(src.join("ui")).unwrap();
+        let manifest = serde_json::json!({
+            "id": "com.example.html",
+            "name": "HTML",
+            "version": "1.0.0",
+            "apiVersion": "1.0",
+            "permissions": ["ui:view"],
+            "requires": ["trusted-web-view@1", "plugin-workspace-tabs@1"],
+            "ui": {"views": [{
+                "id": "web", "label": "Web", "entry": entry, "mode": "trusted-web",
+                "modes": ["trx"], "input": "none", "placements": ["workspace-tab"],
+                "portBinding": "none", "worker": false
+            }]}
+        });
+        fs::write(src.join("manifest.json"), manifest.to_string()).unwrap();
+        let file = src.join(entry);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "<!doctype html><html></html>").unwrap();
+        src
+    }
+
+    #[test]
+    fn missing_root_entry_allows_pure_trusted_html_plugins() {
+        let root =
+            canonical_test_temp_dir().join(format!("plugin_html_{}", uuid::Uuid::new_v4()));
+        let src = pure_html_source(&root, "ui/index.html");
+        let plugins = root.join("plugins");
+        let prepared = prepare_plugin_install(src.to_str().unwrap(), &plugins, false).unwrap();
+        assert!(prepared.stage_guard.0.join("ui/index.html").is_file());
+        assert!(prepared.manifest.entry.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_root_entry_rejects_worker_dependent_views() {
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_html_reject_{}", uuid::Uuid::new_v4()));
+        let src = pure_html_source(&root, "ui/index.html");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(src.join("manifest.json")).unwrap()).unwrap();
+        manifest["ui"]["views"][0]["mode"] = "isolated".into();
+        manifest["ui"]["views"][0]["entry"] = "ui/main.js".into();
+        manifest["requires"] = serde_json::json!(["isolated-tab-view@1", "plugin-workspace-tabs@1"]);
+        fs::write(src.join("manifest.json"), manifest.to_string()).unwrap();
+        fs::write(src.join("ui/main.js"), "").unwrap();
+        let err = prepare_plugin_install(
+            src.to_str().unwrap(),
+            &root.join("plugins"),
+            false,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("缺少 entry"), "err: {err}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn failed_upgrade_keeps_old_code_and_private_data() {
         let root = canonical_test_temp_dir()
             .join(format!("plugin_failed_upgrade_{}", uuid::Uuid::new_v4()));
@@ -3079,7 +2912,7 @@ mod tests {
             fs::create_dir(dest.join("data")).unwrap();
             fs::write(dest.join("data/keep"), "private").unwrap();
             let mut prepared =
-                prepare_plugin_install(new_source.to_str().unwrap(), &plugins).unwrap();
+                prepare_plugin_install(new_source.to_str().unwrap(), &plugins, true).unwrap();
             reset_install_trust(manager.get_config_mut(), "com.example.test", "dir");
             persist_install_trust_reset(&mut manager).unwrap();
             let stage = prepared.stage_guard.0.clone();
@@ -3212,10 +3045,10 @@ mod tests {
         let src2 = source(&root, "2.0.0");
         let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         let prepared =
-            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         let first = install_prepared(&mut manager, prepared).unwrap();
         let prepared =
-            prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         let second = install_prepared(&mut manager, prepared).unwrap();
         assert_ne!(
             first.plugin_configs[0].install_generation,
@@ -3226,7 +3059,7 @@ mod tests {
         assert!(removed.plugin_configs.is_empty());
         assert!(removed.revision > second.revision);
         let prepared =
-            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir()).unwrap();
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
         let reinstalled = install_prepared(&mut manager, prepared).unwrap();
         assert_ne!(
             reinstalled.plugin_configs[0].install_generation,
@@ -3243,13 +3076,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn missing_asset_does_not_hide_linked_parent_or_data_corruption() {
+    fn asset_reads_check_only_the_requested_path_not_unrelated_data_entries() {
         let root = canonical_test_temp_dir()
             .join(format!("plugin_missing_corrupt_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("data")).unwrap();
         fs::create_dir(root.join("outside")).unwrap();
         std::os::unix::fs::symlink(root.join("outside"), root.join("data/link")).unwrap();
-        assert!(read_authorized_asset(&root, Path::new("data/state.json")).is_err());
+        assert_eq!(read_authorized_asset(&root, Path::new("data/state.json")).unwrap(), None);
         std::os::unix::fs::symlink(root.join("outside"), root.join("linked")).unwrap();
         assert!(read_authorized_asset(&root, Path::new("linked/missing")).is_err());
         fs::remove_dir_all(root).unwrap();
@@ -3265,7 +3098,7 @@ mod tests {
             fs::write(src.join("data/injected"), "package").unwrap();
             let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
             let mut prepared =
-                prepare_plugin_install(src.to_str().unwrap(), manager.plugins_dir()).unwrap();
+                prepare_plugin_install(src.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
             reset_install_trust(manager.get_config_mut(), "com.example.test", "dir");
             persist_install_trust_reset(&mut manager).unwrap();
             let plugins = manager.plugins_dir().to_path_buf();
@@ -3294,33 +3127,7 @@ mod tests {
     }
 
     #[test]
-    fn data_quota_budgets_all_new_parent_directories_without_mutation() {
-        let root = canonical_test_temp_dir()
-            .join(format!("plugin_parent_budget_{}", uuid::Uuid::new_v4()));
-        let data = root.join("data");
-        fs::create_dir_all(&data).unwrap();
-        let mut accepted = 0;
-        for index in 0..65 {
-            let mut parent = data.clone();
-            for depth in 0..30 {
-                parent.push(format!("p{index}-{depth}"));
-            }
-            let target = parent.join("key");
-            if check_data_write_quota(&data, &target, 0).is_ok() {
-                fs::create_dir_all(&parent).unwrap();
-                fs::write(target, "").unwrap();
-                accepted += 1;
-            } else {
-                assert!(!data.join(format!("p{index}-0")).exists());
-            }
-        }
-        assert_eq!(accepted, plugin::MAX_ZIP_ENTRIES / 31);
-        assert!(check_data_write_quota(&data, &data.join("p0-0/p0-1/p0-2/p0-3/p0-4/p0-5/p0-6/p0-7/p0-8/p0-9/p0-10/p0-11/p0-12/p0-13/p0-14/p0-15/p0-16/p0-17/p0-18/p0-19/p0-20/p0-21/p0-22/p0-23/p0-24/p0-25/p0-26/p0-27/p0-28/p0-29/key"), 0).is_ok());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn missing_asset_is_distinct_from_type_encoding_and_limit_errors() {
+    fn missing_asset_is_distinct_from_binary_empty_and_path_errors() {
         let root =
             canonical_test_temp_dir().join(format!("plugin_missing_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -3330,13 +3137,13 @@ mod tests {
         );
         fs::create_dir(root.join("directory")).unwrap();
         assert!(read_authorized_asset(&root, Path::new("directory")).is_err());
-        fs::write(root.join("binary"), [255]).unwrap();
-        assert!(read_authorized_asset(&root, Path::new("binary")).is_err());
-        fs::write(root.join("file"), "hello").unwrap();
-        assert_eq!(
-            read_authorized_asset(&root, Path::new("file")).unwrap(),
-            Some("hello".into())
-        );
+        fs::write(root.join("binary"), [0, 255, 128, 13, 10]).unwrap();
+        let bytes = read_authorized_asset(&root, Path::new("binary")).unwrap().unwrap();
+        assert_eq!(bytes, [0, 255, 128, 13, 10]);
+        assert_eq!(encode_asset(bytes.clone(), PluginFileFormat::Binary), "AP+ADQo=");
+        assert_eq!(encode_asset(bytes, PluginFileFormat::Text), "\0\u{fffd}\u{fffd}\r\n");
+        fs::write(root.join("file"), "").unwrap();
+        assert_eq!(read_authorized_asset(&root, Path::new("file")).unwrap(), Some(Vec::new()));
         assert!(read_authorized_asset(&root, Path::new("file/child")).is_err());
         fs::remove_dir_all(root).unwrap();
     }

@@ -38,6 +38,7 @@ fn preserve_plugin_configs(
                     restored.granted_permissions = saved.granted_permissions.clone();
                 } else if imported.iter().any(|saved| saved.id == entry.id) {
                     restored.enabled = false;
+                    restored.trusted_web_granted = false;
                     restored.granted_permissions.clear();
                 }
                 restored
@@ -61,13 +62,6 @@ pub async fn set_config(
 ) -> Result<bool, CommandError> {
     let _plugin_io = state.plugin_io.lock().await;
     crate::plugin::view_runtime::require_main(&source)?;
-    if restore_plugin_configs.unwrap_or(false) {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        preserve_plugin_configs(&mut new_config, manager.get_config(), true);
-    }
     let (saved, cfg, restored_entries) = {
         let mut manager = state
             .config_manager
@@ -78,6 +72,15 @@ pub async fn set_config(
         let restore = restore_plugin_configs.unwrap_or(false);
         let saved = if restore {
             preserve_plugin_configs(&mut new_config, manager.get_config(), true);
+            // Imports may restore ordinary grants, but browser consent is live authority.
+            // Fail closed on unreadable manifests rather than starting unreviewed code.
+            for entry in &mut new_config.entities.plugin_configs {
+                if !entry.enabled || entry.trusted_web_granted { continue; }
+                let allowed = crate::plugin::validate_plugin_id(&entry.id).is_ok()
+                    && crate::plugin::load_manifest_from_dir(&manager.plugins_dir().join(&entry.id))
+                        .is_ok_and(|manifest| manifest.id == entry.id && !manifest.has_trusted_web_views());
+                if !allowed { entry.enabled = false; }
+            }
             manager
                 .set_config(new_config)
                 .map_err(|e| CommandError::Config(e.to_string()))?;
@@ -114,6 +117,11 @@ pub async fn set_config(
         // Log-directory switches do create_dir_all/allocation/fsync; keep
         // that filesystem work off the async worker's cooperative budget.
         tokio::task::block_in_place(|| state.apply_runtime_config(&cfg));
+    }
+    // An imported configuration can change any plugin's enablement/grants or
+    // install identity; in-flight network requests must not outlive that.
+    if saved && restore_plugin_configs.unwrap_or(false) {
+        state.plugin_http.cancel_all();
     }
     // Retire views only after the imported configuration committed.
     if let Some(entries) = restored_entries {
@@ -182,6 +190,7 @@ mod tests {
             id: "com.example.plugin".into(),
             install_generation: "test-generation".into(),
             enabled: false,
+            trusted_web_granted: false,
             granted_permissions: Vec::new(),
             installed_at: None,
             source: None,
@@ -202,6 +211,13 @@ mod tests {
         restore.entities.plugin_configs[0].enabled = true;
         preserve_plugin_configs(&mut restore, &current, true);
         assert!(restore.entities.plugin_configs[0].enabled);
+        restore.entities.plugin_configs[0].trusted_web_granted = true;
+        preserve_plugin_configs(&mut restore, &current, true);
+        assert!(!restore.entities.plugin_configs[0].trusted_web_granted);
+        current.entities.plugin_configs[0].trusted_web_granted = true;
+        restore.entities.plugin_configs[0].trusted_web_granted = false;
+        preserve_plugin_configs(&mut restore, &current, true);
+        assert!(restore.entities.plugin_configs[0].trusted_web_granted);
     }
 
     #[test]
@@ -211,11 +227,14 @@ mod tests {
             id: "com.example.plugin".into(),
             install_generation: "new".into(),
             enabled: false,
+            trusted_web_granted: false,
             granted_permissions: Vec::new(),
             installed_at: None,
             source: None,
         });
         let mut imported = current.clone();
+        current.entities.plugin_configs[0].trusted_web_granted = true;
+        imported.entities.plugin_configs[0].trusted_web_granted = true;
         imported.entities.plugin_configs[0].install_generation = "old".into();
         imported.entities.plugin_configs[0].enabled = true;
         imported.entities.plugin_configs[0]
@@ -227,6 +246,7 @@ mod tests {
             "new"
         );
         assert!(!imported.entities.plugin_configs[0].enabled);
+        assert!(!imported.entities.plugin_configs[0].trusted_web_granted);
         assert!(imported.entities.plugin_configs[0]
             .granted_permissions
             .is_empty());

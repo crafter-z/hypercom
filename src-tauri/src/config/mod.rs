@@ -226,6 +226,8 @@ pub struct PluginConfigEntry {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    pub trusted_web_granted: bool,
+    #[serde(default)]
     pub granted_permissions: Vec<String>,
     #[serde(default)]
     pub installed_at: Option<i64>,

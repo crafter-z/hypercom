@@ -52,6 +52,8 @@ pub struct AppState {
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
     /// 插件安装、卸载及私有资产写入共享的异步闸门；覆盖 fs 与状态提交整个事务。
     pub plugin_io: tokio::sync::Mutex<()>,
+    /// 插件 HTTP 流式请求注册表（按 requestId 绑定插件/安装版本，可取消）。
+    pub plugin_http: commands::PluginHttpRegistry,
     /// 日志管理器：负责日志文件的写入与管理。
     /// `Arc<LogManager>`（无外层 Mutex）：写路径已是 `&self` + 内部细粒度锁，
     /// 再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与
@@ -139,6 +141,7 @@ impl AppState {
             ),
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
+            plugin_http: commands::PluginHttpRegistry::new(),
             log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
@@ -354,9 +357,14 @@ pub fn run() {
             commands::uninstall_plugin,
             commands::set_plugin_enabled,
             commands::set_plugin_permissions,
+            commands::set_plugin_trusted_web,
+            commands::clear_plugin_web_data,
             commands::read_plugin_asset,
             commands::write_plugin_asset,
-            commands::plugin_http,
+            commands::reload_plugin,
+            commands::plugin_http_open,
+            commands::plugin_http_read,
+            commands::plugin_http_cancel,
             commands::plugin_open_external,
             commands::create_plugin_view,
             commands::update_plugin_view,
