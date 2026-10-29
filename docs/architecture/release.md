@@ -60,7 +60,7 @@ flowchart TD
 - **job `frontend`**（ubuntu-latest）：`npm ci` → `npx tsc --noEmit` → `npm run test:run` → `node --test scripts/release.test.mjs` → `npm run build`（`tsc && vite build`，生产前端产物）。
 - **job `rust`**（ubuntu-latest）：装 `libwebkit2gtk-4.1-dev` / `libayatana-appindicator3-dev` / `librsvg2-dev` / `patchelf` / `xdg-utils` / `libudev-dev` → Rust stable + rust-cache → `npm ci`（tauri-build 在 test profile 下仍读 `tauri.conf.json`，前端依赖先就位）→ `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `cargo check --release --lib --manifest-path src-tauri/Cargo.toml`。后者检查 release 专属编译路径，不运行 release 程序。`--lib` 在 Linux 上会执行 `#[cfg(not(target_os = "windows"))]` 的串口/TTY 测试，Windows 本地开发环境跑不到。
   - 系统依赖差异：发版流跑 ubuntu-22.04 用 `libappindicator3-dev`，本 job 跑 ubuntu-latest（24.04）用 `libayatana-appindicator3-dev`（两者提供所需 pkg-config 依赖）；这不是两套工作流的唯一步骤差异。
-- **job `e2e`**（ubuntu-latest）：`npm ci` → `npx playwright install --with-deps chromium` → `npx playwright test`。e2e 用 mock IPC（`e2e/smoke.spec.ts` 注入 `window.__TAURI_INTERNALS__`），不需要 Rust 侧与 webkit2gtk；`playwright.config.ts` 的 `webServer` 自行拉起 vite dev server（1420），CI 下 `reuseExistingServer=false`。
+- **job `e2e`**（ubuntu-latest）：`npm ci` → `npx playwright install --with-deps chromium` → `npx playwright test`。e2e 由 `e2e/smoke.spec.ts`、`e2e/plugin.spec.ts`、`e2e/editor.spec.ts` 三个 spec 组成，均通过注入 mock `window.__TAURI_INTERNALS__` 运行，不需要 Rust 侧与 webkit2gtk；`playwright.config.ts` 的 `webServer` 自行拉起 vite dev server（1420），CI 下 `reuseExistingServer=false`。
 
 两条发版流的 tag 构建分别执行：
 
@@ -80,7 +80,8 @@ flowchart TD
 #    - src-tauri/tauri.conf.json → "version": "0.x.0"
 #    - src-tauri/Cargo.toml → version = "0.x.0"
 #    另有两处版本号随工具链同步：src-tauri/Cargo.lock（cargo 生成）与
-#    package-lock.json（npm 生成）——触发 tag、五处版本与 notes 首节必须完全一致，
+#    package-lock.json（npm 生成，preflight 同时校验顶层 version 与 packages[""] 根包两项）
+#    ——触发 tag、五处版本与 notes 首节必须完全一致，
 #    scripts/release.mjs preflight 在任何 release 修改前拒绝不一致
 # 1b. 编辑 RELEASE_NOTES.md：顶部新章节 # HyperCom vX（本次更新说明；
 #     同时成为 GitHub 网页 release notes 和 updater 弹窗文案）

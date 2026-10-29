@@ -7,15 +7,15 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
-| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（固定行高），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、大 trim 锚点恢复（`setLimits` 收缩触发，`LARGE_TRIM_ROWS`）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
-| `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）+ matchSet 按 (offset,length,currentMatch) 缓存（免每帧 new Set） |
-| 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`releaseViewportManager`/`getViewportManager`——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键）一律走这里，**不再碰 useTerminalStore 的行 API** |
+| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（固定行高），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、head 前进即锚点恢复（issue #19；`LARGE_TRIM_ROWS` 只保留给 `setLimits` 收缩的大跳变，重新 attach（弹窗回贴/换容器）也按 `anchorSeq` 还原阅读位置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
+| `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）+ matchSet 按 **(offset, seqs.length)** 缓存（currentMatch 只影响 `current-match` 类，不重建 Set） |
+| 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`normalizeReceivedTerminalLines`/`releaseViewportManager`/`getViewportManager`，另有 `hasViewportManager`/`getManagerPortIds` 查询（不创建实例）——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键/配置限额同步）一律走这里，**不再碰 useTerminalStore 的行 API** |
 
 ## 关键不变式
 
 - **React 不渲染行**：contentLayer 是命令式 DOM，TerminalView 壳重渲染不会触碰它。
-- **标签切换保留缓冲**：Pane 对 TRX 标签常驻挂载（hidden prop → display:none），viewportManager 模块注册表持有实例；关闭标签/TRX→TTY 切换才 `releaseViewportManager`。
-- **关闭标签页 = 前端显示目标销毁、串口连接保留（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager(tabId)` + `releaseTerminalState(tabId)`（store 侧 terminals / trafficStats / TX 历史统一回收）；批量关闭（左/右/其它）先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再跑同一套 cleanup——两处不会漂移。`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 是「manager 存在才写入」——标签关闭后 RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始。
+- **标签切换保留缓冲**：主窗 `SerialContentHost` 在分屏树之外**全局常驻挂载**所有非弹出 serial 标签的 `TerminalView`，标签内容区位置/可见性由 `tabContentPlacement` 上报（`PluginViewSurface` 计量并 `display:none` 隐藏）；viewportManager 模块注册表持有实例，切换标签/跨 Pane 拖动都不销毁。仅关闭标签、TRX→TTY 切换才 `releaseViewportManager`。
+- **关闭标签页 = 前端显示目标销毁、串口连接保留（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `dismissPluginTab` + `ttyService.detach(portId)` + `popoutService.closePopout('terminal', portId)` + `releaseViewportManager(portId)` + `getRxPipeline().discardTerminalQueue(portId)`；随后 `closeTab` 再调 `releaseUnusedPortState(portId)`（无行消费者时释放 pipeline 端口租约；无显示/行消费者时统一回收 store 侧 terminals / trafficStats / TX 历史，`releaseTerminalState` 是它的同义别名）。批量关闭（左/右/其它）先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再跑同一套 cleanup——两处不会漂移。`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 是「manager 存在才写入」——标签关闭后 RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始。
 - **惰性解码**：RX 行只存 `rawData`（`Uint8Array`），`getLineText(line, encoding)`（`src/utils/lineText.ts`，全仓唯一的 TextDecoder 工厂 + 模块级缓存，`ignoreBOM:false`）按当前编码解码；编码切换 = 重渲染，无 store 遍历。
 - **内存上限**：`computeBufferLimits()`（从 `config.maxDisplayLines` 派生 `{ maxLines }`，缺省 100000、下限 1000）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits({maxLines})` 同步到现存实例。
 
@@ -44,15 +44,15 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 | R11 | 暂停（`frozenSeq !== null`）抑制跟随钉底，`locked` 仍为 true。 |
 | R12 | 选区钉住：活 Range 触及的行永不换父；`findFlowAnchor` 必须把停车行当锚点候选。 |
 | R13 | 钉住行跳过内容重写；结构性变更（`bumpFilterVersion` / `invalidate` / `clear` / `detach`）清 pins；超 `MAX_PINNED_ROWS` 自弃（不钉住无界 DOM）。 |
-| R14 | 固定行高、零测量：几何只来自 `config.rowHeight`，行内容不换行（宽行横向滚动）。 |
+| R14 | 固定行高、零测量：几何只来自 `config.rowHeight`（变更时 `updateConfig` 活更新现存行高，不重排节点），行内容不换行（固定行盒裁剪，宽行横向滚动）。 |
 | R15 | 行 DOM 结构镜像 `TerminalRow`：`.terminal-line` + 可选 `.terminal-timestamp`、`.terminal-direction`、`.terminal-content`。 |
 
 ## 滚动锁定 / 快捷跳转
 
-- `scrollLocked` 仅由图钉按钮/跳转按钮/手势 settle 写入，**无 onScroll 隐式解锁**。
+- `scrollLocked` 仅由显式意图写入：图钉按钮、`.terminal-jump-btn` 跳转按钮、手势 settle（120ms 静默后判定），拖选起点（按下行）也显式解锁；**无 onScroll 隐式解锁**。
 - 跟随路径由 `TerminalRenderer` **同帧钉底**（render() 内 scrollTop = totalHeight - clientHeight，无 React effect、无双 rAF 链；搜索栏打开时 followEnabled=false 抑制）。
 - settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`shouldFollow`（`utils/followLogic.ts`）；钉底目标值本身由 `TerminalRenderer.render` 内联计算（padding 感知、同帧写 scrollTop），不再有第二份纯函数拷贝。
-- 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToSeq(buffer.firstSeq, 'start')` 且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮）。
+- 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮）。
 - 手势 settle：滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定。
 - 已知平台降级：Linux WebKitGTK 原生滚动条可能不派发 pointerdown——滚动条拖拽解锁在该平台静默失效，滚轮/键盘/图钉不受影响。
 
@@ -64,8 +64,8 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 
 ## 语法高亮与协议字段着色
 
-- **高亮引擎**：`src/utils/highlightEngine.ts`（纯函数）+ `useRuleStore.highlightRuleSets`。按集 `isEnabled` 过滤，遍历规则（isRegex → RegExp exec / 关键词 → indexOf 循环），收集 HighlightMatch[] 按位置排序去重（优先最长匹配），构建 `<span style="color:...">` HTML——`escapeHtml` 防 XSS + `dangerouslySetInnerHTML` 注入。**从不读 `activeHighlightSetId`**（RulesSection 移除后该字段已删）。
-- **协议解析**：`src/utils/protocolParser.ts`——`ProtocolFrameReassembler.feed()` 返回**有序段数组**（`ReassemblerSegment[]`，`{kind:'frame'|'raw'}`，相邻 raw 合并），帧前裸字节不会排到所有帧之后。帧解析：验证帧头/读取长度字段（totalFrameLength = lengthValue - adjust + fieldSize）/验证帧尾/计算校验和（sum8/xor8/crc8）→ 构建 ParsedField[]；声明长度小于帧头/长度字段/帧尾所需空间或超过 65536 时按损坏帧重同步。per-port reassembler 由接收 effect 持有，模板编辑/切换、模式切换、消费者释放与断线统一退役。
+- **高亮引擎**：`src/utils/highlightEngine.ts`（纯函数）+ `useRuleStore.highlightRuleSets`。按集 `isEnabled` 过滤，遍历规则（isRegex → RegExp exec / 关键词 → indexOf 循环，大小写不敏感），收集 HighlightMatch[] 按位置排序、重叠时优先最长匹配并保留未覆盖尾部，构建 `<span style="color:...">`（颜色经 `safeCssColor` 校验）HTML——`escapeHtml` 防 XSS，由 `TerminalRenderer` 以 `innerHTML` 注入行内容。ReDoS 防护：正则模式 >200 字符跳过、exec 只跑前 5000 字符；非法正则按 pattern 去重只告警一次。**从不读 `activeHighlightSetId`**（RulesSection 移除后该字段已删）。
+- **协议解析**：`src/utils/protocolParser.ts`——`ProtocolFrameReassembler.feed()` 返回**有序段数组**（`ReassemblerSegment[]`，`{kind:'frame'|'raw'}`，相邻 raw 合并），帧前裸字节不会排到所有帧之后。帧解析：验证帧头/读取长度字段（totalFrameLength = lengthValue - adjust + fieldSize）/验证帧尾/计算校验和（`checksumAlgorithm` 取值 `sum8` / `xor` / `crc8`）→ 构建 ParsedField[]；声明长度小于帧头/长度字段/帧尾所需空间或超过 65536（`MAX_FRAME_SIZE`）时按损坏帧重同步（跳过已匹配帧头继续扫描，不卡住）。per-port reassembler 由接收 effect 持有，模板编辑/切换、模式切换、消费者释放与断线统一退役。
 - 渲染：`line.parsedFields` 存在 → `renderProtocolLine`，显示格式由当前终端 `displayFormat` 决定，不依赖 RX 事件的 `isHex`；text 模式整行共用流式解码器，跨字段的多字节字符归入完成它的字段，不会变成替换字符；否则走 `applyHighlightSets`。
 
 ## 终端搜索

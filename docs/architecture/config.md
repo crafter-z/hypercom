@@ -56,7 +56,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 - `uiScalePercent`（Rust `AppConfig.ui_scale_percent`）是持久化的 UI 缩放百分比，默认 **100%**，由 `CONFIG_BOUNDS` 约束为 **80–200%**；它使用原生 WebView 缩放，不是 CSS transform，也不等同于 `terminalFontSize` / `uiFontSize`（后两者仍是字体设置）。
 - `src/utils/uiScale.ts` 的 `applyUiScale` 调用 Tauri `getCurrentWebview().setZoom(percent / 100)`；缩放按 WebView 实例分别应用。主窗在 `configReady` 后应用已加载值，弹出窗（Popout）启动时读同一 config.json 后应用；独立窗口互不共享运行态。
-- `ConfigModal` 只有在 `saveConfig()` 成功后才调用 `applyUiScale(current.uiScalePercent)` 并通过 `ui-scale:changed` 通知已打开的弹出窗；取消或保存失败不会把未落盘的缩放应用到 WebView。
+- `ConfigModal` 只有在 `saveConfig()` 成功、且保存后没有残留草稿后才调用 `applyUiScale(current.uiScalePercent)` 并通过 `ui-scale:changed` 通知已打开的弹出窗；取消、保存失败或保存期间又产生新编辑都不会把未落盘的缩放应用到 WebView。
 
 ## 命令
 
@@ -84,14 +84,21 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 后端 `set_config` 是**整体替换**。`useAppStore.config` 的五类实体数组是最后确认的持久化基线，`useRuleStore` 是已保存运行态，`utils/entityEditor.ts` 单独拥有会话草稿；普通设置、分组、端口和预设仍各有原来的权威来源。
 
-`useConfigPersistence.saveConfig(patch?)` 从五类草稿和普通设置构造安全快照，与最新后端 revision、实体基线协调后 CAS。未修改实体采用后端版本；同一实体两边均被修改时保留草稿并报告冲突，不静默选赢家。`utils/configWriteQueue.ts` 串行化全量、实体和元数据写入。保存成功才原子推进配置基线及运行数组；保存过程中产生的新编辑继续保持未保存。`utils/jsonEqual.ts` 忽略 JSON 对象属性顺序，避免 Rust 序列化顺序造成假脏状态或假冲突。
+`useConfigPersistence.saveConfig(patch?)` 从五类草稿和普通设置构造安全快照，与最新后端 revision、实体基线协调后 CAS。未修改实体采用后端版本；同一实体两边均被修改时保留草稿并报告冲突，不静默选赢家。`utils/jsonEqual.ts` 忽略 JSON 对象属性顺序，避免 Rust 序列化顺序造成假脏状态或假冲突。
 
 - `portPresets` **没有** store 镜像（唯一写路径是 `storageService.savePortPresets`），保存前 `loadPortPresets()` 读回；读不到就不写——宁可不保存，也不能用陈旧快照覆盖磁盘。
-- `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。
-- 已接线处：`ConfigModal.handleSave`、`DiagnosticLogDialog` 的诊断开关（改 store 后 `saveConfig()`）。**新增全量保存点照抄此模式**——调 `saveConfig`，不要自己拼实体数组。
-- 五类实体页统一使用 `useEntityPage({kind})`：挂载不重新加载并覆盖草稿；新增、删除、启用和排序均暂存。单条保存只提交该实体；页面保存提交整个集合及列表顺序；设置底部保存覆盖所有分类。校验和 CAS 失败保留草稿与错误。共享 `SortableEditorList` 提供专用手柄、键盘排序和插入；命令的数组顺序与连续 `order` 统一，协议/工具管理列表排序不增加执行优先级。
-- `utils/editorLeave.ts` 与 `shared/EditorLeaveDialog.tsx` 统一处理保存并关闭、放弃并关闭、继续编辑。设置 X/取消/Escape、独立窗口关闭及应用退出均等待处理；失败和保存期间的新编辑阻止关闭。主窗 Rust `editor:close-requested` 覆盖窗口关闭、托盘退出和 ExitRequested，前端通过 `complete_editor_close` 批准后才执行原关闭行为。备份导入先确认并处理草稿，安装更新在下载前处理草稿。
+- `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。元数据保存最多尝试 5 次 CAS，失败由 `useAppInit` 记日志并延迟重试（不弹 toast）。
+- 已接线处：`ConfigModal.handleSave`、`DiagnosticLogDialog` 的诊断开关（改 store 后 `saveConfig()`）、`UpdateDialog` 的「不再提醒」（`saveConfig({ updateCheckMode: 'none' }, true)` 只 CAS 该普通字段，不提交任何草稿）。**新增全量保存点照抄此模式**——调 `saveConfig`，不要自己拼实体数组。
+- **会话草稿模型**（`utils/entityEditor.ts`）：五类实体各一份模块级状态（`baseline` / `draft` / `version` / `committed` / `conflicts` / `orderDirty`），由 `useSyncExternalStore` 暴露快照；草稿跨切页、关闭设置和组件卸载存活，保存成功与显式放弃分别推进/回退它，外部配置变化只会按下面的合并规则进入。`useAppStore.config` 与 `useRuleStore` 的外部变化经 store 订阅合并进草稿：本地未改的记录采用远端版本、远端新增追加、远端删除消失、本地新增保留；同一 id 两边都改则记入 `conflicts`（`editor.conflict`），在放弃该记录前保存继续报冲突、集合保存整体不放行。`version` 随每次草稿变更递增，跨窗命令草稿用它做乐观并发校验。
+- **保存作用域**：单条保存（`saveEntityDraft(kind, id)`）只把该实体合入最新后端快照，不影响同一集合里的其他改动、删除和顺序；集合保存（不带 id）提交整个数组与顺序；设置底部保存（`useConfigPersistence.saveConfig`）一次覆盖五类实体与普通设置（另按各自权威来源附带分组、端口元数据和预设）。三者都经 `configWriteQueue` 串行 + revision CAS，提交前重新读取后端快照；全量保存最多重试 5 轮、单实体保存单次 CAS 失败即报冲突；失败都保留草稿（全量保存另 `notifyError`）。保存成功才推进基线、`useRuleStore` 运行态和 `useAppStore.config`，保存期间产生的新编辑按 `expectedVersion` 保留为未保存（`commitEntityEditorDraft` 重组草稿），不会被这次成功抹掉。同一个 kind 已有在飞保存时再次保存复用同一 promise。
+- **提交前校验与放弃**：集合内 id 必须唯一、`id` 与 `name` 必须非空、正则必须可编译且长度 ≤ 200、HEX 字段必须是完整偶数半字节、协议偏移必须是非负整数；不合法只标错误，不写盘也不清草稿。放弃按作用域生效：单条放弃只把该行恢复为基线内容（新插入的行则移除）并清该 id 的冲突；集合放弃整体回到基线。重排在 id 集合不一致（重复、缺失）时静默忽略、不丢行。
+- 五类实体页统一使用 `useEntityPage({kind})`：挂载只读现有草稿、不重新加载覆盖；展开/选中项按 kind 记忆，切页或卸载后回来保持。新增默认追加末尾，「在上方插入 / 在下方插入」按相邻 id 插入并展开、聚焦新行名称。`shared/SortableEditorList` 只暴露专用手柄：指针需 6px 位移才激活，键盘 Space 拾起、方向键移动、Space 放下；保存中拖拽、增删和行内按钮禁用。命令集保存时按数组位置回写连续 `order`，快捷发送条、命令设置页、循环启动与命令面板共用 `utils/commandOrder.ts`，不再手写 order 排序。协议/工具管理列表的数组顺序只是管理顺序，不增加执行优先级。
+- **离开审批**（`utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx`）：参与者注册 `isDirty` / `save` / `discard` / `label`（设置普通草稿、五类实体草稿、主窗侧的命令面板未同步内容、独立窗口各自的草稿），决策只有保存并关闭 / 放弃并关闭 / 继续编辑。保存或放弃后再次复查脏状态：保存失败、或保存期间又产生编辑都不放行关闭，对话框保留并显示错误供重试；Escape 等价于继续编辑。对话框与设置/更新弹窗一样等原生插件视图让位后才显示（`usePluginViewOverlay`，见[插件视图](plugin-views.md)）。设置取消 / X / 遮罩 / Escape 只请求设置侧参与者（不处理独立命令面板的未同步内容），应用退出请求全部参与者；审批未决时收到范围更大的新请求（如设置关闭未决时托盘退出）会合并参与者复用同一决策，不叠加第二个对话框。
+- **原生关闭路径**：主窗 Rust `request_editor_close` 先 show/unminimize/focus 主窗再发 `editor:close-requested`（载荷 `force_exit`）；主窗 CloseRequested、托盘 Quit 与 `RunEvent::ExitRequested` 都先 `prevent_close` / `prevent_exit`，等前端审批。审批通过后前端调 `complete_editor_close`：非强制关闭且 `closeBehavior = minimize` 时只隐藏窗口，托盘 Quit / ExitRequested（`force_exit`）直接走 `request_shutdown`；该命令只接受主窗调用，其他窗口调用返回错误。独立窗口在 `PopoutShell` 里 `onCloseRequested` → `preventDefault` → 审批通过才 `destroy`；审批进行中重复的关闭请求不叠加。
+- **保存完成后的边界**：设置底部保存成功后才关闭弹窗并应用 UI 缩放；保存期间正文 `inert`、点击/输入被拦截且关闭按钮禁用；若弹窗已被外部关闭/重开，或保存后又出现新草稿，迟到的结果既不关闭弹窗也不应用未落盘缩放。
+- 备份导入在确认替换后走 `requestEditorLeave()`，导入成功后立即 reload（草稿随新基线丢弃）；更新安装在下载前走 `requestEditorLeave()`。
 - 插件不是五类规则页的实体：启停与权限动作立即独立持久化，取消设置仅回滚普通草稿，保留当前插件状态及 revision。备份导入只覆盖同安装身份的授权；导入中同 ID 不同身份清权禁用、未提及的当前插件保留，且不安装代码或迁移 KV。
+- **备份管理页的「日志库备份」三字段尚未接线**：`backupEnabled` / `backupInterval` / `backupDirectory`（`CONFIG_BOUNDS.backupInterval` 1–720 小时）只有配置模型、设置页读写与保存，前端与 Rust 都没有自动备份日志的消费者。日志备份目前需要用户手动复制日志目录（见[日志](logging.md)）；不要把这组字段当成已实现的定时备份，也不要据此在其它命令里推导备份行为。
 
 ## 配置读取/保存数据流
 
@@ -114,7 +121,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 - `useRuleStore.setSendCommandSets` / `addSendCommandSet` 建立不变量「有命令集时 `activeSendCommandSetId` 必指向有效集」：保留仍有效的激活集、否则回退首个；`removeSendCommandSet` 对称回退（曾因启动加载/新建集从不设置激活集，导致配置了命令集但操作面板快捷区/循环发送无反应）。
 - 高亮引擎按各集 `isEnabled` 过滤（不读激活集 id——操作面板的规则分区已移除，该字段随之删除）。
-- 命令面板通过 `popout:command-editor-request` 提交 sessionId/version 标识的草稿操作；主窗返回匹配 requestId 的 ACK 与权威快照。宿主重载换会话，面板接纳新会话并拒绝退役会话迟到响应；未确认输入遇冲突仍保留。`command-sets:changed` 只广播已提交运行态，保存 ACK 后才清除未保存状态。运行中的命令循环固定启动快照。
+- 命令面板通过 `popout:command-editor-request` 提交 sessionId/version 标识的草稿操作；请求方先注册结果监听再发送，只认匹配 requestId 的 ACK，15s（`COMMAND_EDITOR_TIMEOUT_MS`）无 ACK 按 `editor.saveFailed` 处理并退休迟到监听（协议细节见[工作区](workspace.md)）。宿主重载换会话，面板接纳新会话并拒绝退役会话迟到响应；未确认输入遇冲突仍保留。`command-sets:changed` 只广播已提交运行态，保存 ACK 后才清除未保存状态。运行中的命令循环固定启动快照。
 
 ## AppState 运行期状态（配置的镜像）
 
@@ -124,7 +131,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 |---|---|---|
 | `serial_manager` | `Arc<Mutex<SerialManager>>` | 异步命令经 `spawn_blocking` 时需从 State 克隆出 `'static` 句柄 |
 | `config_manager` | `Mutex<ConfigManager>` | 配置读写（含全部实体） |
-| `plugin_io` | `tokio::sync::Mutex<()>` | 串行化安装、卸载、授权、启停和一致列表扫描；普通资产 IO 以 FIFO 最多等待 2 秒，授权后再访问磁盘 |
+| `plugin_io` | `tokio::sync::Mutex<()>` | 插件磁盘/授权一致性串行闸门：安装、卸载、重载、启停、权限与网页信任变更、网页数据清理、一致列表扫描、资产读写、原生视图创建以及 `set_config`（含备份导入的整份替换）都 `lock().await` 排队；**等待没有固定期限**（旧 `lock_asset_io` 的 2 秒超时已移除），获得闸门后才读 manifest 与当前授权再访问磁盘 |
 | `log_manager` | **`Arc<LogManager>`（无外层 `Mutex`）** | 写路径是 `&self` + 内部细粒度锁；再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与数据写入争同一把锁（高波特率下 RX 写入被拖住） |
 | `diag_logger` | `Arc<DiagLogger>` | 应用自身诊断日志（512KB 轮转、保留 3 份），开关取 `config.diagLogEnabled` |
 | `system_info` | `Arc<Mutex<sysinfo::System>>` | 增量刷新，避免 `new_all` 的每次高开销 |

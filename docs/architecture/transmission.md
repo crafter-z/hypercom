@@ -83,7 +83,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **共享调度引擎**：`components/OperationPanel/hooks/useSequentialSend.ts` 是「顺序 / 循环发送」的唯一调度实现（`createSendLoop` 纯调度 + `useSequentialSend` React 绑定）。计时器链、重入防护（任一次迭代最多在飞一个，防止可见性补发与到期定时器双触发）、可见性补发（`catchUpIfOverdue`，阈值 `SEND_LOOP_OVERDUE_MS`）、卸载自停、可选的变更自停都在引擎里；调用方只提供「一步做什么」的 `step`。**旧的循环发送状态机分叉已消除**：主窗命令集循环与弹窗文本逐行发送（`Popout/QuickSendText.tsx`）共用它——弹窗旧循环器 `Popout/usePanelCyclicSend.ts` 已删除。
 - **每端口一个 runtime**：`useCyclicSend`（`components/OperationPanel/hooks/useCyclicSend.ts`）为每个端口创建一条 `SendLoop`（`startLoop(portId)`），目标端口**永远绑定启动它的端口**——不跟随活动标签、不受窗口/标签聚焦切换影响（COM3 启动循环后切到 COM4，COM3 继续发）。
 - **运行开关**：`useOperationStore.cyclicLoops: Record<portId, boolean>` + `setCyclicLoop(portId, running)`（替代旧全局单例 `isLoopSending` 布尔）；SendSection 的按钮按**当前聚焦端口**查状态——切回 COM3 时按钮自然变回「停止」。reconcile effect 幂等：开启的端口没有 runtime → 启动；runtime 存在但开关被关/移除 → 停止。
-- **启动快照**：启动时从 `useRuleStore` 读取已保存命令集，使用 `utils/commandOrder.ts` 的 `orderedCommands` 固定顺序、内容和循环参数；之后编辑、保存、切换或删除命令集均不影响当前运行。重启循环才采用新版本。启动时命令集缺失/为空则清运行开关。
+- **启动快照**：启动时从 `useRuleStore` 读取已保存命令集（不读 `entityEditor` 会话草稿），用 `utils/commandOrder.ts` 的 `orderedCommands` 固定顺序、内容和循环参数（`isLoop` / `loopDelay` / `repeatCount` 一并快照）；之后编辑、保存、切换或删除命令集均不影响当前运行，重启循环才采用新版本。启动时命令集缺失/为空则清运行开关；自然发满 `repeatCount` 轮或单轮非循环结束发完后同样清该端口运行开关。快捷发送条、命令设置页、命令面板与循环一律经 `orderedCommands` 排序，不再手写 `order` 比较。
 - **静默发送**：逐条 `sendData(..., silent=true)`（循环 / 触发自动回复不打扰用户）；失败由引擎的 `onStepError` 聚合为一条 toast（`notified` 去重）并返回 `RETRY_MS`（500ms）重试，不推进索引、不终止循环。
 - **计时**：轮内用每命令 `delay`，仅轮间用集合级 `loopDelay`。轮次边界以「本条是否本轮最后一条」（`currentCmdIdx === commands.length - 1`）判定；曾用 `nextIdx >= length`，导致第二轮起每条都误用 `loopDelay`、`completedRounds` 按「条」而非「轮」累加而提前停发。重复轮数 `repeatCount` 是命令集自有字段（config.json），`>0` 时精确发满 N 轮停止，否则跟随集合的 `isLoop`。
 - **端口未连接**：跳过本次 tick 并不推进索引，`TARGET_WAIT_MS`（500ms）后重试（切聚焦 / 短暂断开皆不中断）。
@@ -95,7 +95,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - 快捷发送条：pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（`useQuickStripLayout` + ResizeObserver + 隐藏测量行，`utils/sendStrip.ts` 的 `computeFitCount` 算可见切片与溢出条数）、首槽固定「打开命令面板」按钮（`.op-quick-panel-btn`，issue #7-2）。
 - `quickSendInlineCount`（`useAppStore.config`）**只决定内联条是否挂载：仅 0 = 隐藏**，任何 `>0` 都显示；条内实际显示几条由实测宽度决定，不由该值直接切片。
 - QuickSendPanel 双模式：列表（整行可点即发、行内「修改」就地编辑）/ 文本逐行（`QuickSendText` + `useSequentialSend` 驱动，含「执行当前行并移至下一行」，issue #6-3）。
-- **面板编辑与主窗定案**：`popout:command-editor-request` 以 version 校验 replace/save/discard，主窗 `entityEditor` 管理权威草稿并返回 requestId 匹配的 ACK。`command-editor:snapshot` 与已提交 `command-sets:changed` 分离；面板串行发送草稿操作，失败/冲突保留输入，只有保存 ACK 才显示已保存。主窗退出另经 client-state/client-leave/client-result ACK 处理尚未同步的面板内容。列表和文本切换保留列表编辑器；编辑/脏命令集禁发，搜索时禁拖排序。
+- **面板编辑与主窗定案**：`popout:command-editor-request` 以 version 校验 replace/save/discard，主窗 `entityEditor` 管理权威草稿并返回 requestId 匹配的 ACK；面板同一时刻只有一个 replace 在飞，期间输入排队，15s 无 ACK 按失败处理并保留文本（协议细节见[工作区](workspace.md)）。`command-editor:snapshot` 与已提交 `command-sets:changed` 分离；首个快照到达前列表不可编辑/发送，只有保存 ACK 且主窗确认落盘后才显示已保存，失败/冲突保留输入与错误。主窗退出另经 client-state/client-leave/client-result ACK 处理尚未同步的面板内容。列表和文本切换保留列表编辑器；列表模式下编辑中的行或脏命令集禁发，搜索时禁拖排序。
 - 目标串口下拉只显示串口号（去 `· REAL/VIRTUAL` 后缀，issue #7-4）；底栏「发送到」提示灯跟随真实连接状态——`usePopoutSync` 订阅 `serial:status` 广播 + `port-statuses:sync` 全量回放（绿=连接呼吸/灰=断开，issue #7-5）。
 - 弹出窗（popout）发送经 `popout:send-command` 意图 → 主窗 `sendToPort`（见 workspace.md）。
 
@@ -105,9 +105,9 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **可取消 / 单飞**：每端口同一时刻仅允许一次 `send_file`；已在发送时拒绝另一份文件，取消令牌不会被覆盖。取消命令置位该端口令牌，发送循环下一块前退出。
 - **统一收尾**：注册令牌后，无论正常、取消、读文件失败、串口写错或空文件，都清理本次令牌并发 `serial:file_progress{done:true}`；前端进度条不会因读取阶段提前失败卡住。
 - **前端 `useFileSend`（`components/OperationPanel/hooks/useFileSend.ts`）收口三个不变量**：
-  1. **守卫在弹文件框之前**：`startFileSend` 先查 `isSendablePort`，不可发送直接 toast `sendSection.portClosedWarning` 返回——不该让用户先挑完文件再被告知端口没连（旧实现绕过守卫，未连接端口也能选文件、只在后端报错）。
-  2. **按增量计入 TX 流量**：进度事件是 camelCase wire（`{portId, transferId, sentBytes, totalBytes, done}`）；`sentBytes` 是本次运行累计值，与 `countedBytesRef` 比出差量，正增量才 `trafficStats.addTx`；`done` 时归零，下一次运行重新计数（旧实现文件发几 MB 而 TX 计数器纹丝不动）。
-  3. **成功 toast 只在真发完时弹**：`done && sent >= total > 0` 才 `notifySuccess('sendSection.file.sent')`；取消（`sent < total`）与空文件（`total == 0`）静默清进度条，否则取消时误报「已发送」、空文件残留 0/0 进度条。
+  1. **守卫在弹文件框之前**：`startFileSend` 先查 `isSendablePort`，不可发送直接 toast `sendSection.portClosedWarning` 返回——不该让用户先挑完文件再被告知端口没连（旧实现绕过守卫，未连接端口也能选文件、只在后端报错）。选完文件后再校验一次（对话框期间端口可能断开或目标已切换），真正启动前把 `expectedGeneration` 绑定当前连接代次，进度只接受匹配 `transferId` 与 `portId` 的事件。
+  2. **按增量计入 TX 流量**：进度事件是 camelCase wire（`{portId, transferId, sentBytes, totalBytes, done}`）；`sentBytes` 是本次运行累计值，与 `ActiveTransfer.countedBytes` 比出差量，正增量才 `trafficStats.addTx(portId, delta, lease)`——`lease` 来自启动时的 `trafficStats.capture(portId)`，端口 `release` 后旧租约失效，迟到的进度不会污染该端口新的统计周期；`done` 时把 `countedBytes` 归零，下一次运行重新计数（旧实现文件发几 MB 而 TX 计数器纹丝不动）。
+  3. **成功 toast 只在真发完时弹**：`done && sentBytes >= totalBytes > 0` 才 `notifySuccess('sendSection.file.sent')`；取消（`sentBytes < totalBytes`）与空文件（`totalBytes == 0`）静默清进度条，否则取消时误报「已发送」、空文件残留 0/0 进度条。
 
 ## 触发引擎（条件触发，issue #3-1）
 
@@ -123,6 +123,6 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 |---|---|
 | 连接 | Sidebar.onToggleConnect → useSerialConnection.openPort → updatePort 乐观更新 → invoke open_serial_port → Rust 打开+读线程 → serial:status("connected") 事件双写回 store |
 | RX | 读线程（100ms 读超时轮询）→ serial:data → useSerialReceive → RxPipeline（组装/队列/批写 tick）→ viewportManager.appendTerminalLines → TerminalRenderer（同帧 DOM） |
-| TX | SendSection.handleSend → sendToPort（HEX 校验 + 守卫 + flushNow + TX 回显）→ invoke send_serial_data → 写句柄 write_all_with_deadline |
+| TX | SendSection.handleSend → sendToPort（HEX 校验 + 守卫 + flushBeforeSend + TX 回显）→ invoke send_serial_data → 写句柄 write_all_with_deadline |
 | 端口轮询 | useSerialPorts(3000) → list_available_ports → mapPortInfo → mergePorts（保序/保态/幽灵 3 轮） |
 | 循环 | setCyclicLoop(portId, true) → 捕获已保存命令集/顺序快照 → createSendLoop → sendToPort(silent) |

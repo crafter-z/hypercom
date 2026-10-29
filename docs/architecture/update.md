@@ -14,7 +14,9 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
             （GitHub 原生「最新非 prerelease」指针，永不泄漏 preview）
   preview → 双端点（preview 语义 = max(preview, stable)，见下）：preview_endpoint() + stable_endpoint() 各查一次
             preview_endpoint()：① GET api.github.com/repos/crafter-z/hypercom/releases?per_page=100
-                                  （含 prerelease；未认证限流 60/h/IP，超限静默降级）
+                                  （含 prerelease；未认证限流 60/h/IP。无 preview release 视为「无更新」继续查
+                                  stable；其它 API 失败（含 403 限流）按双通道合并规则处理——stable 有更新
+                                  则采用 stable，否则错误上抛。自动检查静默、手动检查 toast）
                                 ② find_latest_preview_tag：取**版本号最大**的 tag——纯函数 is_preview_tag
                                   严格匹配 ^v\d+\.\d+\.\d+-preview\.\d+$ 过滤，parse_preview_tag 数值四元组
                                   做 max_by_key（API 按创建时间倒序：补发旧核心 preview 会乱序，取最大而非
@@ -25,9 +27,9 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
   → Ok(Option<UpdatePayload{ version, currentVersion, date, notes, channel }>)
 ```
 
-**二轮修正（preview 语义 = max(preview, stable)）**：preview 收尾发布 stable 后只查 preview 端点的用户永远收不到晋升与后续 stable 热修——`check_for_update("preview")` 改为**双检查**：preview 与 stable endpoint 都查，纯函数 `version_key`（数值四元组，stable rank=u64::MAX 保证同核心 preview<stable）+ `newer_channel` 取 semver 大者；`payload.channel` 反映更新**实际来源**（徽标显示「正式版」，安装按该通道解析 endpoint）。preview 端点解析失败降级仅 stable；双通道一边失败另一边有更新则用有更新的一边。
+**二轮修正（preview 语义 = max(preview, stable)）**：preview 收尾发布 stable 后只查 preview 端点的用户永远收不到晋升与后续 stable 热修——`check_for_update("preview")` 改为**双检查**：preview 与 stable endpoint 都查，纯函数 `version_key`（数值四元组，stable rank=u64::MAX 保证同核心 preview<stable）+ `newer_channel` 取 semver 大者；`payload.channel` 反映更新**实际来源**（徽标显示「正式版」，安装按该通道解析 endpoint）。双通道合并规则：一边失败另一边**有更新**则用有更新的一边；两边都失败则透出 preview 侧错误；preview 端点解析失败且 stable 无更新时错误上抛（不回退成「无更新」）。
 
-**安装**：`download_and_install_update(channel, expected_version)` 重解析 endpoint 并核对版本 → `update.download`（累计 `update:progress.downloaded`，返回前验签）→ 发 `install` 阶段 → `update.install`。Windows 插件拉起 NSIS（`/UPDATE`）后进程 exit(0)，installer 负责重启；Linux 安装完成后前端 `relaunch()`。macOS 仍禁用自动更新。
+**安装**：`download_and_install_update(channel, expected_version)` 重解析 endpoint 并核对版本 → `update.download`（累计 `update:progress.downloaded`，返回前验签）→ 发 `install` 阶段 → `update.install`。Windows 由插件拉起 NSIS 安装器（`tauri.conf.json` 的 `plugins.updater.windows.installMode: passive`）后进程退出，安装器负责重启；Linux 安装完成后前端 `relaunch()`。macOS 仍禁用自动更新。
 
 **复审加固**：
 - `expected_version` 安装前重检查版本比对（防「展示 X 装 Y」TOCTOU——弹窗展示版本 X 后发布新版 Y，装的是 Y）；不一致报错拒绝安装。
@@ -55,13 +57,13 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 - localStorage 记账：`hypercom.update.lastCheckAt` / `hypercom.update.snoozeUntil`（`updateTiming` 读写，非法值解析为 null；per-install，不随配置导出）。
 - `utils/updateService.ts` 的 `getCommittedUpdateMode` / `commitUpdateMode` 管理已提交模式，与设置页 `useAppStore.config` 草稿分离。加载/成功保存使旧 generation 失效，取消设置不会触发升级副作用。
 - `runAutoCheck()` 读取已提交模式，同 generation 去重；切新通道可在旧检查未完成时启动，旧结果不发布、不记账。`manualCheck(channel)` 绕过周期/none/DEV，推进发布意图使更早自动结果失效，并走同一发布守卫；失效结果返回 `discarded`。
-- 成功保存改变模式才清除 `lastCheckAt` / snooze；`ConfigModal.handleSave` 关闭设置后立即 `runAutoCheck()`。设置页显示最后成功自动检查时间。
+- 成功保存改变模式才清除 `lastCheckAt` / snooze；`ConfigModal.handleSave` 在模式变化且新模式非 `none` 时关闭设置后立即 `runAutoCheck()`。设置页显示最后成功自动检查时间。
 - 版本号约定：stable `0.x.y`、preview `0.x.y-preview.N`（属于下一核心，同核心 preview<stable 晋升自洽——semver 免费降级保护）。
 
 ## UpdateDialog
 
 三动作：
-- **立即更新**：`beginUpdateInstall()` 快照候选并置 `ui.isUpdateInstalling`；参数、版本、通道及日志不受迟到检查覆盖。下载/安装中遮罩、X、决策按钮不可关闭。失败 `finishUpdateInstall()` 恢复原候选供重试，不重启；成功清 snooze 并重启。
+- **立即更新**：`beginUpdateInstall()` 快照候选并置 `ui.isUpdateInstalling`；参数、版本、通道及日志不受迟到检查覆盖。下载/安装中遮罩、X、决策按钮不可关闭。先等 `requestEditorLeave()` 关闭审批通过（未通过则直接收尾、不发起安装）。失败 `finishUpdateInstall()` 恢复原候选供重试，不重启；成功清 snooze 并重启。
 - **7 天后提醒**：`dismissUpdate()` 统一处理按钮、X、遮罩，写 `snoozeUntil = now + 7d` 并使在途结果失效；安装中不执行。
 - **永不提醒**：`saveConfig({ updateCheckMode: 'none' }, true)` 在新鲜后端快照上仅补该字段并 CAS 保存，保留其他设置草稿和实体。成功才提交模式/更新内存/关闭；失败保持原模式及弹窗，可重试。
 

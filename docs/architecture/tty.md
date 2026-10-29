@@ -12,7 +12,7 @@
 
 - `PortMode = 'trx' | 'tty'`，放 `useAppStore` 的 `Port.mode`，经 `port_meta`（config.json）持久化——Rust `PortMetaEntry` 必须带 `#[serde(default)] mode: Option<String>`（曾因缺字段被 serde 静默丢弃、重启全回退 TRX），`validate_and_clamp` 钳制非 trx/tty 值回 trx。
 - 切换控件：OperationPanel→ParamsSection 分段控件（`.segmented` 复刻 TerminalFilterBar），i18n `params.mode.*`。
-- **切换副作用**：清 TerminalStore + `releaseViewportManager`（销毁 TRX 缓冲，切回 TRX 时 TerminalView 挂载重建）+ `getRxPipeline().flushAndReset` + `ttyService.clear`——避免旧模式 buffered 数据混入新模式首屏。
+- **切换副作用**：`setPortMode` + `clearTerminal`（清 TRX 视口缓冲）+ 切 TTY 时 `releaseViewportManager`（销毁 TRX 缓冲，切回 TRX 时新挂载重建）+ `getRxPipeline().flushAndReset` + `ttyService.clear`——避免旧模式 buffered 数据混入新模式首屏。`ttyService` 另订阅 store：检测到端口 `mode` 变化即丢弃未发送的按键合批并递增 TX 代际，使旧连接已排队未开始的批次失效（模式切换不能把旧键盘工作带进新模式）。
 
 ## ttyService（模块单例，镜像 getRxPipeline 纪律）
 
@@ -28,17 +28,17 @@ serial:data（TTY 端口，useSerialReceive 分流）
 API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term 跨重连）/`send`（onData→10ms 按键合批、64KiB 单批上限）/`sendData`（`sendToPort` 的显式命令入口，先排空已有按键）/`resize`/`resync`。按键与显式命令共用同端口写入队列：上一批 IPC settle 后才发下一批，跨端口独立，失败后后续批次仍可发送；TX 统计只在该入口成功后计入一次。`detach` 发送残留按键并保留当前连接写入顺序；`disconnect` 丢弃未发出的旧连接批次，不让旧队列阻塞重连。
 - 显式命令排队期间不视为已开始 I/O；连接代际检查后、IPC 调用前执行 `sendToPort` 的端口连接复查及 `beforeSend` 宿主授权回调，插件撤权或会话失效可取消尚未开始的命令，已开始的后端写入不追溯撤销。
 
-- `disconnect` **重建 decoder**（断线残留的半截多字节字符会在重连后与首字节拼错）；`detach` **保留 lastCols/lastRows**（切走标签再重开不再回退 80×24）。
+- `disconnect` **重建 decoder**（断线残留的半截多字节字符会在重连后与首字节拼错）；`detach` 同样丢弃 decoder 与未写 RX 队列，但**保留 lastCols/lastRows**（切走标签再重开不再回退 80×24）。
 - `feed` 对「无标签页且未 attach」丢弃（挂载前首帧窗口仍入队等 attach replay）。
 - 生命周期纪律：`dispose()`/`reset()` 仅测试用，应用生命周期不得调用。
 
 ## TtyView（xterm 宿主）
 
-- Terminal + FitAddon fit（ResizeObserver + rAF 防抖）；onData→`ttyService.send`、onResize→`ttyService.resize`。
+- Terminal + FitAddon fit（ResizeObserver + rAF 防抖）；onData→`ttyService.send`、onResize→`ttyService.resize`。onResize 必须在 `open`/初始 fit **之前**注册——初始 fit 从默认 80×24 变到实际尺寸会触发一次 onResize，注册过晚该事件被漏掉，首帧尺寸从未上报（GIT:BASH 的 pty 会固定在 80×24）。初始 fit 后再显式 `ttyService.resize` 一次兜底；隐藏挂载（容器 0 尺寸）时跳过，避免用默认尺寸覆盖已记录的正确尺寸，恢复可见时显式 rAF re-fit 校正。字体异步加载完成后补一次 fit，覆盖首帧按错误 cell 尺寸测算的竞态。
 - **字体/字号经 `term.options` 活更新不重建 Terminal**（挂载 effect 依赖仅 `[portId]`；曾依赖含 terminalFont/Size 导致改动即 dispose 清空缓冲）。
-- Ctrl+滚轮缩放（8–48px，镜像 TerminalView）。
-- **会话跨标签保留**：Pane 对当前 Pane 内**所有 TTY 标签常驻挂载**（`key={tab.id}` 稳定），非活动标签传 `hidden` → `.tty-view-hidden`（display:none），恢复可见显式 rAF re-fit——xterm 缓冲在实例内，切标签销毁实例即丢会话。
-- **销毁时机（仍然销毁实例）**：模式切换、关闭标签、跨 Pane 拖拽（xterm `open()` 只能调用一次）。
+- Ctrl+滚轮缩放（上下限取 `CONFIG_BOUNDS.terminalFontSize`，当前 8–48px，镜像 TerminalView）。
+- **会话跨标签保留**：主窗 `SerialContentHost` 在分屏树之外**全局常驻挂载**所有非弹出 serial 标签内容（TTY 与 TRX 同层，`key={tab.id}` 稳定），标签内容区的位置/可见性由 `tabContentPlacement` 上报；非活动标签传 `hidden` → `.tty-view-hidden`（display:none），恢复可见显式 rAF re-fit——xterm 缓冲在实例内，切标签销毁实例即丢会话。
+- **销毁时机（仍然销毁实例）**：模式切换（TRX↔TTY 走不同组件）、关闭标签（tab 消失即卸载）、标签弹出（popout 过滤掉 `poppedOut` 标签；TTY 端口本就被禁止弹出）。跨 Pane 拖拽**不再销毁**——终端的宿主在分屏树之外，移动标签不改变 `key`，实例与其会话保持。
 - TTY 端口阻止弹出窗（`Pane.handlePopOut` 提示 `tty.popoutUnsupported`——弹出窗是独立 webview 不共享 ttyService/xterm 实例）。
 
 ## TX 路径
@@ -58,7 +58,7 @@ pty 行规程（ICRNL）把 `\r` 转成 `\n`，`\r\n` 会变成两个换行—�
 | RX 管线 | TTY 走 `ttyService`，不触碰 RxLineAssembler/rxPipeline | 零耦合 |
 | 渲染 | `TtyView` 独立组件，与 TerminalView 不共享状态 | 零耦合 |
 | 存储 | 模式在 `Port`（useAppStore）；xterm 实例由 `TtyView` 拥有、`ttyService` 仅持引用 | 低 |
-| **接缝（唯一耦合点）** | ① `useSerialReceive.onSerialData` 按 `port.mode` 分流到 rxPipeline 或 ttyService；② `sendToPort` 按模式回显/时序；③ Pane 渲染按模式渲染 TerminalView 或 TtyView | 薄适配层 |
+| **接缝（唯一耦合点）** | ① `useSerialReceive.onSerialData` 按 `port.mode` 分流到 rxPipeline 或 ttyService；② `sendToPort` 按模式回显/时序；③ `SerialContentHost` 按 `port.mode` 渲染 TerminalView 或 TtyView（Pane 只上报内容放置区，选中态由 `useAppStore.activeTabId` 派生） | 薄适配层 |
 
 ## 模拟终端（GIT:BASH，仅 debug）
 
@@ -77,5 +77,5 @@ pty 行规程（ICRNL）把 `\r` 转成 `\n`，`\r\n` 会变成两个换行—�
 
 - RX 解码仅 UTF-8（TRX 的 GBK 等多编码切换不适用于 TTY 字节流）。
 - 模拟bash自行退出后ConPTY读管道可能在master仍持有时不产EOF。再次打开先用child.try_wait确认退出，再回收旧master/writer，不以读线程running标志永久拒绝重开；正常存活会话仍拒绝重复open。
-- 残余销毁场景：模式切换/关闭标签/跨 Pane 拖拽仍销毁 xterm 实例（open() 一次性）。
+- 残余销毁场景：模式切换/关闭标签仍销毁 xterm 实例（`open()` 一次性）；跨 Pane 拖拽不再销毁（宿主 `SerialContentHost` 在分屏树之外，`key` 不变）。
 - 日志：TTY 端口 RX 若沿用 LogLineAssembler（CR 当换行）会剁碎终端序列——当前按既有日志管线落盘，原始字节保真回放尚未实现。
