@@ -1,315 +1,185 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pencil, Save, Search, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, Pencil, Plus, Save, Search, Trash2, Undo2 } from 'lucide-react';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
+import { orderedCommands, renumberCommands } from '../../utils/commandOrder';
+import SortableEditorList from '../shared/SortableEditorList';
+import { NumericInput } from '../shared/NumericInput';
 import type { LineEnding, SendCommand, SendCommandSet } from '../../types';
-
-interface EditDraft {
-  name: string;
-  content: string;
-  appendLineEnding: LineEnding;
-  type: 'string' | 'hex';
-}
 
 interface QuickSendListProps {
   sets: SendCommandSet[];
-  /** 已解析的有效选中集（失效回退由面板派生）。 */
+  active: boolean;
   selectedSet: SendCommandSet | null;
   onSelectSet: (setId: string) => void;
-  /** 刚发出那条命令的 id，用于行内闪烁反馈。 */
   flashingId: string | null;
   onSend: (cmd: SendCommand) => void;
   onOpenSetEditor: () => void;
-  /** 就地编辑保存：回传整集（面板负责回传主窗 + 落盘）。 */
-  onSaveSet: (set: SendCommandSet) => void;
+  ready: boolean;
+  dirty: boolean;
+  dirtyIds: ReadonlySet<string>;
+  pending: boolean;
+  saving: boolean;
+  error: string | null;
+  canSend: boolean;
+  onReplaceSets: (sets: SendCommandSet[]) => void;
+  onSave: () => Promise<boolean>;
+  onDiscard: () => Promise<boolean>;
 }
 
-/**
- * 快捷发送面板 · 命令列表模式。
- *
- * 整行可点 = 发送；行内「修改」按钮展开就地编辑器（名称/内容/行尾/STR·HEX），
- * 保存后整集回传主窗并持久化。
- *
- * 键盘流：`/` 聚焦搜索，`↑/↓` 移动光标，`Enter` 发送高亮命令。搜索框内只接管
- * ↑/↓（移入列表）与 Escape（清空）；编辑表单与其它输入框不接管。
- */
+/** Every field edits the session draft; only explicit, acknowledged Save persists. */
 const QuickSendList: React.FC<QuickSendListProps> = ({
-  sets,
-  selectedSet,
-  onSelectSet,
-  flashingId,
-  onSend,
-  onOpenSetEditor,
-  onSaveSet,
+  active, sets, selectedSet, onSelectSet, flashingId, onSend, onOpenSetEditor,
+  ready, dirty, dirtyIds, pending, saving, error, canSend, onReplaceSets, onSave, onDiscard,
 }) => {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
-
+  const [editingIds, setEditingIds] = useState<Record<string, boolean>>({});
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-
-  /** 选中集按 order 排序后按 名称+内容 模糊过滤（大小写不敏感）。 */
+  const commands = useMemo(() => orderedCommands(selectedSet?.commands ?? []), [selectedSet]);
   const filtered = useMemo(() => {
-    if (!selectedSet) return [];
-    const sorted = [...selectedSet.commands].sort((a, b) => a.order - b.order);
-    const q = query.trim().toLowerCase();
-    if (!q) return sorted;
-    return sorted.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.content.toLowerCase().includes(q),
-    );
-  }, [selectedSet, query]);
+    const search = query.trim().toLowerCase();
+    return search ? commands.filter(command => command.name.toLowerCase().includes(search) || command.content.toLowerCase().includes(search)) : commands;
+  }, [commands, query]);
+  const editable = ready && !saving;
+  const sendDisabled = !active || !canSend || !ready || saving || pending || commands.some(command => editingIds[command.id]) || !!selectedSet && dirtyIds.has(selectedSet.id);
 
-  // 列表收缩（过滤/切换命令集）时把光标夹回合法区间。
+  useEffect(() => { setCursor(value => Math.max(0, Math.min(value, filtered.length - 1))); }, [filtered.length]);
   useEffect(() => {
-    setCursor((c) => (filtered.length === 0 ? 0 : Math.min(c, filtered.length - 1)));
-  }, [filtered.length]);
-
-  // 光标高亮行保持可见。
-  useEffect(() => {
-    listRef.current?.querySelector('.quicksend-row.is-cursor')?.scrollIntoView({ block: 'nearest' });
+    listRef.current?.querySelector('.quicksend-row.is-cursor')?.scrollIntoView?.({ block: 'nearest' });
   }, [cursor, filtered.length]);
-
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const el = document.activeElement;
-      const isTyping =
-        el instanceof HTMLElement &&
-        (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-
-      if (e.key === '/') {
-        if (isTyping) return;
-        e.preventDefault();
-        searchRef.current?.focus();
-        return;
+    const onKey = (event: KeyboardEvent) => {
+      if (!active) return;
+      if (event.defaultPrevented) return;
+      const target = event.target instanceof HTMLElement ? event.target : document.activeElement;
+      const inSearch = target === searchRef.current;
+      // In particular, never let a sortable handle's Enter/Space/arrows send.
+      if (!inSearch && target instanceof HTMLElement && target.closest('input, textarea, select, button, summary, a, [contenteditable="true"]')) return;
+      if (event.key === '/' && !inSearch) {
+        event.preventDefault(); searchRef.current?.focus(); return;
       }
-
-      const inSearch = el === searchRef.current;
-      if (inSearch && e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-      if (el instanceof HTMLElement && (el.tagName === 'SELECT' || el.tagName === 'TEXTAREA')) return;
-      if (isTyping) return;
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
+      if (inSearch && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
         if (inSearch) searchRef.current?.blur();
-        setCursor((c) => Math.min(c + 1, Math.max(filtered.length - 1, 0)));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (inSearch) searchRef.current?.blur();
-        setCursor((c) => Math.max(c - 1, 0));
-      } else if (e.key === 'Enter') {
-        const cmd = filtered[cursor];
-        if (cmd) {
-          e.preventDefault();
-          onSend(cmd);
-        }
+        setCursor(value => Math.max(0, Math.min(value + (event.key === 'ArrowDown' ? 1 : -1), filtered.length - 1)));
+      } else if (event.key === 'Enter' && !sendDisabled && filtered[cursor]) {
+        event.preventDefault(); onSend(filtered[cursor]);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [filtered, cursor, onSend]);
+  }, [active, filtered, cursor, onSend, sendDisabled]);
 
-  const startEdit = (cmd: SendCommand) => {
-    setEditingId(cmd.id);
-    setEditDraft({
-      name: cmd.name,
-      content: cmd.content,
-      appendLineEnding: cmd.appendLineEnding,
-      type: cmd.type,
-    });
+  const updateSet = (patch: Partial<SendCommandSet>) => {
+    if (selectedSet && editable) onReplaceSets(sets.map(set => set.id === selectedSet.id ? { ...set, ...patch } : set));
+  };
+  const updateCommand = (id: string, patch: Partial<SendCommand>) => {
+    updateSet({ commands: renumberCommands(commands.map(command => command.id === id ? { ...command, ...patch } : command)) });
+  };
+  const insertCommand = (beforeId?: string) => {
+    const command: SendCommand = {
+      id: crypto.randomUUID(), name: t('commandSettings.defaultCommandName', { index: commands.length + 1 }),
+      content: '', type: 'string', appendLineEnding: 'None', delay: 0, order: commands.length,
+    };
+    const index = beforeId ? commands.findIndex(item => item.id === beforeId) : commands.length;
+    const next = [...commands];
+    next.splice(index < 0 ? next.length : index, 0, command);
+    updateSet({ commands: renumberCommands(next) });
+    setEditingIds(current => ({ ...current, [command.id]: true }));
+  };
+  const insertSet = (beforeId?: string) => {
+    const set: SendCommandSet = { id: crypto.randomUUID(), name: t('commandSettings.addSet'), commands: [], isLoop: false, loopDelay: 0, repeatCount: 0 };
+    const next = [...sets];
+    const index = beforeId ? sets.findIndex(item => item.id === beforeId) : next.length;
+    next.splice(index < 0 ? next.length : index, 0, set);
+    onReplaceSets(next);
+    onSelectSet(set.id);
   };
 
-  const cancelEdit = () => {
-    setEditingId(null);
-    setEditDraft(null);
-  };
-
-  const saveEdit = () => {
-    if (!selectedSet || !editDraft || editingId == null) return;
-    const commands = selectedSet.commands.map((c) =>
-      c.id === editingId ? { ...c, ...editDraft } : c,
-    );
-    onSaveSet({ ...selectedSet, commands });
-    cancelEdit();
-  };
-
-  const editSaveKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      saveEdit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelEdit();
-    }
-  };
-
-  const selectSet = (setId: string) => {
-    onSelectSet(setId);
-    setCursor(0);
-    cancelEdit();
-  };
-
-  return (
-    <>
-      <div className="quicksend-toolbar">
-        <div className="quicksend-search-wrap">
-          <Search size={12} className="quicksend-search-icon" />
-          <input
-            ref={searchRef}
-            className="input quicksend-search"
-            placeholder={t('quickSend.searchPlaceholder')}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setCursor(0);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') setQuery('');
-            }}
-          />
-        </div>
-        <div className="quicksend-set-row">
-          <select
-            className="select quicksend-set-select"
-            value={selectedSet?.id ?? ''}
-            onChange={(e) => selectSet(e.target.value)}
-            disabled={sets.length === 0}
-            title={t('quickSend.setLabel')}
-          >
-            {sets.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <button className="icon-btn" title={t('quickSend.editSet')} onClick={onOpenSetEditor}>
-            <Pencil size={13} />
-          </button>
-        </div>
+  return <>
+    <div className="quicksend-toolbar">
+      <div className="quicksend-search-wrap">
+        <Search size={12} className="quicksend-search-icon" />
+        <input ref={searchRef} className="input quicksend-search" placeholder={t('quickSend.searchPlaceholder')}
+          value={query} onChange={event => { setQuery(event.target.value); setCursor(0); }}
+          onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }} />
       </div>
-
-      <div className="quicksend-list" ref={listRef}>
-        {sets.length === 0 ? (
-          <div className="quicksend-empty">{t('quickSend.noSets')}</div>
-        ) : filtered.length === 0 ? (
-          <div className="quicksend-empty">{t('quickSend.empty')}</div>
-        ) : (
-          filtered.map((cmd, idx) => (
-            <div
-              key={cmd.id}
-              className={`quicksend-row${idx === cursor ? ' is-cursor' : ''}${
-                flashingId === cmd.id ? ' is-flash' : ''
-              }`}
-              onClick={() => onSend(cmd)}
-              onMouseEnter={() => setCursor(idx)}
-              title={cmd.content}
-            >
-              <span className="quicksend-row-head">
-                <span className="quicksend-name">{cmd.name || cmd.content}</span>
-                <span className={`quicksend-badge quicksend-badge-${cmd.type}`}>
-                  {cmd.type === 'hex' ? 'HEX' : 'STR'}
-                </span>
-                <span className="quicksend-le">
-                  {t(lineEndingLabelKey(cmd.appendLineEnding, 'sendSection'))}
-                </span>
-                <button
-                  type="button"
-                  className="icon-btn quicksend-edit-btn"
-                  title={t('quickSend.editHint')}
-                  aria-label={t('quickSend.editCommand')}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    startEdit(cmd);
-                  }}
-                >
-                  <Pencil size={12} />
-                </button>
-              </span>
-              {editingId === cmd.id && editDraft ? (
-                <div
-                  className="quicksend-edit-form"
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseEnter={() => setCursor(idx)}
-                >
-                  <input
-                    className="input quicksend-edit-input"
-                    value={editDraft.name}
-                    placeholder={t('quickSend.namePlaceholder')}
-                    onChange={(e) => setEditDraft((d) => (d ? { ...d, name: e.target.value } : d))}
-                    onKeyDown={editSaveKeyDown}
-                  />
-                  <input
-                    className="input quicksend-edit-input"
-                    value={editDraft.content}
-                    placeholder={t('quickSend.contentPlaceholder')}
-                    onChange={(e) =>
-                      setEditDraft((d) => (d ? { ...d, content: e.target.value } : d))
-                    }
-                    onKeyDown={editSaveKeyDown}
-                  />
-                  <div className="quicksend-edit-row">
-                    <select
-                      className="select quicksend-edit-select"
-                      value={editDraft.appendLineEnding}
-                      onChange={(e) =>
-                        setEditDraft((d) =>
-                          d ? { ...d, appendLineEnding: e.target.value as LineEnding } : d,
-                        )
-                      }
-                    >
-                      {LINE_ENDING_VALUES.map((v) => (
-                        <option key={v} value={v}>
-                          {t(lineEndingLabelKey(v, 'sendSection'))}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="quicksend-format-toggle">
-                      <button
-                        type="button"
-                        className={editDraft.type === 'string' ? 'active' : ''}
-                        onClick={() => setEditDraft((d) => (d ? { ...d, type: 'string' } : d))}
-                      >
-                        STR
-                      </button>
-                      <button
-                        type="button"
-                        className={editDraft.type === 'hex' ? 'active' : ''}
-                        onClick={() => setEditDraft((d) => (d ? { ...d, type: 'hex' } : d))}
-                      >
-                        HEX
-                      </button>
-                    </div>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      title={t('quickSend.editSave')}
-                      aria-label={t('quickSend.editSave')}
-                      onClick={saveEdit}
-                    >
-                      <Save size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      title={t('quickSend.editCancel')}
-                      aria-label={t('quickSend.editCancel')}
-                      onClick={cancelEdit}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <span className="quicksend-content">{cmd.content}</span>
-              )}
+      <div className="quicksend-set-row">
+        <select className="select quicksend-set-select" value={selectedSet?.id ?? ''} disabled={!sets.length}
+          title={t('quickSend.setLabel')} onChange={event => { onSelectSet(event.target.value); setCursor(0); }}>
+          {sets.map(set => <option key={set.id} value={set.id}>{set.name}{dirtyIds.has(set.id) ? ' *' : ''}</option>)}
+        </select>
+        <button type="button" className="icon-btn" title={t('quickSend.editSet')} onClick={onOpenSetEditor}><Pencil size={13} /></button>
+        <button type="button" className="icon-btn" title={t('commandSettings.addSet')} aria-label={t('commandSettings.addSet')}
+          disabled={!editable} onClick={() => insertSet()}><Plus size={13} /></button>
+      </div>
+      <div className="quicksend-draft-actions">
+        <span role="status">{t(!ready || saving || pending ? 'editor.saving' : dirty ? 'editor.unsaved' : 'editor.saved')}</span>
+        <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onSave().then(saved => { if (saved) setEditingIds({}); }); }}><Save size={12} />{t('editor.save')}</button>
+        <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
+      </div>
+      {error && <div className="quicksend-draft-error" role="alert">{error.startsWith('editor.') ? t(error) : error}</div>}
+      {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
+    </div>
+    <div className="quicksend-list" ref={listRef}>
+      <details className="quicksend-set-manager">
+        <summary>{t('quickSend.editSet')}</summary>
+        <SortableEditorList items={sets} disabled={!editable || !!query.trim()} onReorder={ids => onReplaceSets(ids.map(id => sets.find(set => set.id === id)!))}
+          renderItem={(set, index, handle) => <div className="quicksend-set-manager-row">
+            {handle}<button type="button" className="quicksend-set-name" onClick={() => onSelectSet(set.id)}>{set.name}</button>
+            <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={() => insertSet(set.id)}><ArrowUpToLine size={12} /></button>
+            <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={() => insertSet(sets[index + 1]?.id)}><ArrowDownToLine size={12} /></button>
+            <button type="button" className="icon-btn" disabled={!editable} title={t('ruleSetAccordion.delete')} aria-label={t('ruleSetAccordion.delete')} onClick={() => onReplaceSets(sets.filter(item => item.id !== set.id))}><Trash2 size={12} /></button>
+          </div>} />
+      </details>
+      {selectedSet && <fieldset className="quicksend-set-fields" disabled={!editable}>
+        <label>{t('editor.name')}<input className="input" value={selectedSet.name} onChange={event => updateSet({ name: event.target.value })} /></label>
+        <label className="quicksend-loop-label"><input type="checkbox" checked={selectedSet.isLoop} onChange={event => updateSet({ isLoop: event.target.checked })} />{t('commandSettings.loopCheckbox')}</label>
+        <label>{t('commandSettings.loopDelayTooltip')}<NumericInput className="input" min={0} max={3_600_000} value={selectedSet.loopDelay} onCommit={loopDelay => updateSet({ loopDelay })} /></label>
+        <label title={t('commandSettings.repeatTooltip')}>{t('commandSettings.repeatLabel')}<NumericInput className="input" min={0} max={1_000_000} value={selectedSet.repeatCount} onCommit={repeatCount => updateSet({ repeatCount })} /></label>
+      </fieldset>}
+      {!sets.length ? <div className="quicksend-empty">{t('quickSend.noSets')}</div> : !filtered.length ? <div className="quicksend-empty">{t('quickSend.empty')}</div> :
+        <SortableEditorList items={filtered} disabled={!editable || !!query.trim()}
+          onReorder={ids => updateSet({ commands: renumberCommands(ids.map(id => commands.find(command => command.id === id)!)) })}
+          renderItem={(command, index, handle) => <div
+            className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled ? ' is-send-disabled' : ''}`}
+            role="group" aria-label={command.name}
+            onMouseEnter={() => setCursor(index)} onClick={() => { if (!sendDisabled) onSend(command); }} title={command.content}>
+            <div className="quicksend-row-head">
+              {handle}<span className="quicksend-name">{command.name || command.content}</span>
+              <span className={`quicksend-badge quicksend-badge-${command.type}`}>{command.type === 'hex' ? 'HEX' : 'STR'}</span>
+              <span className="quicksend-le">{t(lineEndingLabelKey(command.appendLineEnding, 'sendSection'))}</span>
+              <button type="button" className="icon-btn quicksend-edit-btn" aria-expanded={!!editingIds[command.id]} title={t('quickSend.editHint')} aria-label={t('quickSend.editCommand')}
+                onClick={event => { event.stopPropagation(); setEditingIds(current => ({ ...current, [command.id]: !current[command.id] })); }}><Pencil size={12} /></button>
             </div>
-          ))
-        )}
-      </div>
-    </>
-  );
+            {editingIds[command.id] ? <fieldset className="quicksend-edit-form" disabled={!editable} onClick={event => event.stopPropagation()}>
+              <label>{t('quickSend.namePlaceholder')}<input className="input quicksend-edit-input" value={command.name} onChange={event => updateCommand(command.id, { name: event.target.value })} /></label>
+              <label>{t('quickSend.contentPlaceholder')}<textarea autoFocus className="input quicksend-edit-input" value={command.content} onChange={event => updateCommand(command.id, { content: event.target.value })} /></label>
+              <div className="quicksend-edit-row">
+                <span>{t('editor.order')}: {commands.findIndex(item => item.id === command.id) + 1}</span>
+                <label>{t('sendCmdEditor.delayPlaceholder')}<NumericInput className="input quicksend-param-number" min={0} max={3_600_000} value={command.delay}
+                  onCommit={delay => updateCommand(command.id, { delay })} /></label>
+                <select className="select quicksend-edit-select" aria-label={t('quickSend.format')} value={command.type} onChange={event => updateCommand(command.id, { type: event.target.value as SendCommand['type'] })}>
+                  <option value="string">STR</option><option value="hex">HEX</option>
+                </select>
+                <select className="select quicksend-edit-select" aria-label={t('quickSend.lineEnding')} value={command.appendLineEnding} onChange={event => updateCommand(command.id, { appendLineEnding: event.target.value as LineEnding })}>
+                  {LINE_ENDING_VALUES.map(value => <option key={value} value={value}>{t(lineEndingLabelKey(value, 'sendSection'))}</option>)}
+                </select>
+              </div>
+            </fieldset> : <span className="quicksend-content">{command.content}</span>}
+            <div className="quicksend-command-actions" onClick={event => event.stopPropagation()}>
+              <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={() => insertCommand(command.id)}><ArrowUpToLine size={12} /></button>
+              <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={() => insertCommand(commands[commands.findIndex(item => item.id === command.id) + 1]?.id)}><ArrowDownToLine size={12} /></button>
+              <button type="button" className="icon-btn" disabled={!editable} title={t('sendCmdEditor.delete')} aria-label={t('sendCmdEditor.delete')} onClick={() => updateSet({ commands: renumberCommands(commands.filter(item => item.id !== command.id)) })}><Trash2 size={12} /></button>
+            </div>
+          </div>} />}
+      {selectedSet && <button type="button" className="btn btn-sm quicksend-add-command" disabled={!editable} onClick={() => insertCommand()}><Plus size={12} />{t('commandSettings.addCommandButton')}</button>}
+    </div>
+  </>;
 };
 
 export default QuickSendList;

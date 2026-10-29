@@ -8,7 +8,7 @@ import { usePopoutSync } from './usePopoutSync';
 import { usePanelTextConfig } from './usePanelTextConfig';
 import QuickSendList from './QuickSendList';
 import QuickSendText from './QuickSendText';
-import type { LineEnding, SendCommand, SendCommandSet } from '../../types';
+import type { LineEnding, SendCommand } from '../../types';
 
 /** 发送成功的行内闪烁时长（与内联条共用"短促闪烁"反馈语言）。 */
 const FLASH_MS = 260;
@@ -21,9 +21,8 @@ const ROUND_INTERVAL_MAX = 600_000;
  * 快捷发送面板（瘦高独立窗内容，宿主无关组件，issue #5-4 双模式重构）。
  *
  * 架构原则：弹窗与主窗不共享可变前端态，只交换意图/事件。
- * - 数据：主窗 `useRuleStore` 是唯一真相——`usePopoutSync` 负责基线、事件总线与
- *   对表；命令集编辑经 `popout:command-set-updated` 整集回传主窗（K6），
- *   弹窗本地不再持有可写的命令集副本。
+ * - Main owns versioned command drafts; usePopoutSync retains local text until
+ *   replacement/save/discard is acknowledged. Only committed rows may send.
  * - 模式 A（命令列表）：整行可点 = 发送；行内「修改」展开就地编辑器。
  * - 模式 B（文本）：textarea 每行一条命令，当前行 / 顺序 / 从光标 / 循环四种执行
  *   方式由共享引擎驱动（见 QuickSendText）。
@@ -34,11 +33,12 @@ const ROUND_INTERVAL_MAX = 600_000;
  */
 const QuickSendPanel: React.FC = () => {
   const { t } = useTranslation();
-  const { sets, activePortId, ports, connectedPortIds, openSetEditor } = usePopoutSync();
+  const editor = usePopoutSync();
+  const { sets, activePortId, ports, connectedPortIds, openSetEditor } = editor;
   const { config, patchConfig } = usePanelTextConfig();
 
-  // 模式切换即卸载另一种模式的组件：文本模式的顺序执行随组件卸载自停（引擎的
-  // 卸载清理），不需要在这里额外协调 stop。
+  // Keep the list mounted so expanded editors/search survive mode switches.
+  // Text sequences still stop when their component unmounts.
   const [mode, setMode] = useState<'list' | 'text'>('list');
   const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
   const [flashingId, setFlashingId] = useState<string | null>(null);
@@ -83,28 +83,15 @@ const QuickSendPanel: React.FC = () => {
   /** 模式 A：发送 = 命令自身携带的类型/行尾；目标端口来自共享参数栏。 */
   const sendCommand = useCallback(
     (cmd: SendCommand) => {
-      if (!canSend) return;
+      if (!canSend || !selectedSet || !editor.ready || editor.saving || editor.pending || editor.dirtyIds.has(selectedSet.id)) return;
       void emitSendIntent(cmd.content, cmd.type === 'hex', cmd.appendLineEnding).catch((e) =>
         console.debug('[QuickSendPanel] emitSendCommand failed:', e),
       );
       flashRow(cmd.id);
     },
-    [canSend, emitSendIntent, flashRow],
+    [canSend, selectedSet, editor.ready, editor.saving, editor.pending, editor.dirtyIds, emitSendIntent, flashRow],
   );
 
-  /**
-   * 模式 A：就地编辑保存——整集回传主窗定案 + 落盘（K6）。
-   *
-   * 不能只写本地 store：弹窗那份 `useRuleStore` 是另一个 webview 的空实例，
-   * `updateSendCommandSet` 在里面恒为 no-op；而主窗之后的任何一次 save_config 都会
-   * 拿自己的活实体覆盖 config.json，主窗不知道这次编辑就等于被回滚。
-   * 列表刷新走主窗回的 `command-sets:changed`（与其它同步同一个路径，不另存副本）。
-   */
-  const saveSet = useCallback((set: SendCommandSet) => {
-    void popoutEventService
-      .emitCommandSetUpdated(set)
-      .catch((e) => console.debug('[QuickSendPanel] emitCommandSetUpdated failed:', e));
-  }, []);
 
   return (
     <div className="quicksend-panel">
@@ -214,17 +201,28 @@ const QuickSendPanel: React.FC = () => {
         )}
       </div>
 
-      {mode === 'list' ? (
+      <div style={{ display: mode === 'list' ? 'contents' : 'none' }}>
         <QuickSendList
+          active={mode === 'list'}
           sets={sets}
           selectedSet={selectedSet}
           onSelectSet={setSelectedSetId}
           flashingId={flashingId}
           onSend={sendCommand}
           onOpenSetEditor={openSetEditor}
-          onSaveSet={saveSet}
+          ready={editor.ready}
+          dirty={editor.dirty}
+          dirtyIds={editor.dirtyIds}
+          pending={editor.pending}
+          saving={editor.saving}
+          error={editor.error}
+          canSend={canSend}
+          onReplaceSets={editor.replaceSets}
+          onSave={editor.save}
+          onDiscard={editor.discard}
         />
-      ) : (
+      </div>
+      {mode === 'text' && (
         <QuickSendText
           text={text}
           onTextChange={setText}

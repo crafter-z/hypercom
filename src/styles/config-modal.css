@@ -579,3 +579,36 @@
   justify-content: flex-end;
   gap: var(--space-2);
 }
+
+/* Shared settings and command-panel editor controls. */
+.editor-page-heading,
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.editor-page-heading { justify-content: space-between; }
+.editor-page-heading .config-page-title { margin-bottom: 0; }
+.editor-status { flex-wrap: wrap; color: var(--text-secondary); font-size: 12px; }
+.editor-status > span { margin-right: auto; }
+.editor-error { color: var(--text-error); margin-bottom: 12px; white-space: pre-wrap; }
+.editor-accordion { border: 1px solid var(--border-color); border-radius: 6px; margin-bottom: 10px; }
+.editor-accordion-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 10px; background: var(--bg-secondary); border-radius: 6px; }
+.editor-accordion-header .editor-entity-name { border: none; background: transparent; font-weight: 600; flex: 1; min-width: 80px; }
+.editor-accordion-body { padding: 10px; }
+.editor-accordion-body > .btn:last-child { margin-top: 8px; }
+.editor-count { font-size: 10px; color: var(--text-secondary); }
+.editor-dirty-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-color); flex-shrink: 0; }
+.editor-drag-handle { cursor: grab; touch-action: none; flex-shrink: 0; }
+.editor-drag-handle:active { cursor: grabbing; }
+.editor-drag-handle:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+.editor-sortable-row.is-dragging { opacity: 0.65; }
+
+
+.editor-leave-overlay { z-index: 5000; }
+.editor-leave-dialog { width: min(480px, 90vw); min-width: 0; gap: 12px; }
+.editor-leave-dialog h2, .editor-leave-dialog p, .editor-leave-dialog ul { margin: 0; }
+.editor-leave-dialog ul { padding-left: 20px; }
+.editor-leave-dialog .modal-content-footer { padding: 12px 0 0; flex-wrap: wrap; }
+.editor-leave-dialog [role="alert"] { color: var(--text-error); }

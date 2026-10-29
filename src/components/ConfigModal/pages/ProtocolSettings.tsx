@@ -1,7 +1,5 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useRuleStore } from '../../../stores/useRuleStore';
-import { storageService } from '../../../services/tauri';
 import type { ProtocolTemplate } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import ProtocolTemplateEditor from '../editors/ProtocolTemplateEditor';
@@ -9,26 +7,12 @@ import { useEntityPage } from '../hooks/useEntityPage';
 
 const ProtocolSettings: React.FC = () => {
   const { t } = useTranslation();
-  const protocolTemplates = useRuleStore((s) => s.protocolTemplates);
-  const updateProtocolTemplate = useRuleStore((s) => s.updateProtocolTemplate);
+  const page = useEntityPage<ProtocolTemplate>({ kind: 'protocolTemplates' });
+  const updateProtocolTemplate = page.update;
 
-  const page = useEntityPage<ProtocolTemplate>({
-    items: protocolTemplates,
-    label: 'ProtocolSettings',
-    ops: {
-      load: () => storageService.loadProtocolTemplates(),
-      read: () => useRuleStore.getState().protocolTemplates,
-      replace: (items) => useRuleStore.getState().setProtocolTemplates(items),
-      add: (template) => useRuleStore.getState().addProtocolTemplate(template),
-      drop: (id) => useRuleStore.getState().removeProtocolTemplate(id),
-      persist: (template) => storageService.saveProtocolTemplate(template),
-      remove: (id) => storageService.deleteProtocolTemplate(id),
-    },
-  });
-
-  const handleAddSet = () => {
+  const handleAddSet = (beforeId?: string) => {
     page.create({
-      id: `proto-${Date.now()}`,
+      id: crypto.randomUUID(),
       name: t('protocolSettings.addSet'),
       isEnabled: true,
       headerBytes: '',
@@ -44,7 +28,7 @@ const ProtocolSettings: React.FC = () => {
       colorPayload: '#dcdcaa',
       colorChecksum: '#b5cea8',
       colorFooter: '#6a9955',
-    });
+    }, beforeId);
   };
 
   return (
@@ -53,10 +37,17 @@ const ProtocolSettings: React.FC = () => {
       description={t('protocolSettings.accordionDescription')}
       addLabel={t('protocolSettings.accordionAddLabel')}
       emptyText={t('protocolSettings.accordionEmptyText')}
-      items={protocolTemplates}
+      items={page.items}
       selectedId={page.expandedId}
       onSelect={page.toggleExpanded}
-      onAdd={handleAddSet}
+      onAdd={() => handleAddSet()}
+      onInsert={handleAddSet}
+      onReorder={page.reorder}
+      onDiscard={page.discard}
+      dirty={page.dirty}
+      isDirty={page.isDirty}
+      saving={page.saving}
+      error={page.error}
       onDelete={page.remove}
       onSave={page.save}
       onRename={(id, name) => updateProtocolTemplate(id, { name })}

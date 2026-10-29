@@ -1,6 +1,6 @@
 import React, { useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2 } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, Trash2 } from 'lucide-react';
 import type { SendCommand } from '../../../types';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils';
 import { NumericInput } from '../../shared/NumericInput';
@@ -11,9 +11,12 @@ interface SendCmdEditorProps {
   onChange: (patch: Partial<SendCommand>) => void;
   onDelete: () => void;
   autoFocus?: boolean;
+  handle?: React.ReactNode;
+  onInsert?: () => void;
+  onInsertBelow?: () => void;
 }
 
-const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, onDelete, autoFocus }) => {
+const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, onDelete, autoFocus, handle, onInsert, onInsertBelow }) => {
   const { t } = useTranslation();
   const contentRef = useRef<HTMLInputElement>(null);
 
@@ -26,7 +29,10 @@ const SendCmdEditor: React.FC<SendCmdEditorProps> = ({ cmd, cmdIdx, onChange, on
 
   return (
     <div style={{ background: 'var(--bg-secondary)', borderRadius: 4, padding: 8, marginBottom: 6 }}>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+        {handle}
+        {onInsert && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={onInsert}><ArrowUpToLine size={12} /></button>}
+        {onInsertBelow && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={onInsertBelow}><ArrowDownToLine size={12} /></button>}
         <span style={{ fontSize: 11, color: 'var(--text-secondary)', minWidth: 20 }}>#{cmdIdx + 1}</span>
         <input className="input" value={cmd.name} onChange={e => onChange({ name: e.target.value })} placeholder={t('sendCmdEditor.namePlaceholder')} style={{ width: 80 }} />
         <NumericInput className="input" value={cmd.delay} onCommit={value => onChange({ delay: value })} min={0} max={3_600_000} step={1} placeholder={t('sendCmdEditor.delayPlaceholder')} style={{ width: 80 }} />

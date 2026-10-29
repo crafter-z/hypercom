@@ -4,15 +4,16 @@
  * 弹出窗是独立 webview、自带 store 实例——窗口间不共享可变前端态，只交换
  * "意图/事件"。发送必须经 `popout:send-command` 回到主窗走 sendToPort 管线
  * （TX 回显 / 流量统计 / 发送历史全在主窗产生，弹窗直连后端会丢失它们）。
- * 命令集变更携带完整 `SendCommandSet` 载荷：主窗 `useRuleStore` 是唯一真相
- * （config.json 异步落盘，未保存的编辑不在盘上），弹窗直接消费载荷而非回库重读，
- * 否则配置弹窗里未点"保存"的编辑不会同步到快捷发送窗口。
+ * Committed command snapshots remain separate from the main-owned versioned
+ * editor draft. Editing requests are acknowledged only after main has applied
+ * the operation (and, for save, finished persistence).
  *
  * 参数约定见 `./tauri.ts` 文件头。
  */
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import type { SendCommandSet, TerminalLine, TerminalState } from '../types';
+import type { EntityEditorSnapshot } from '../utils/entityEditor';
 
 
 interface PopoutLane {
@@ -139,15 +140,54 @@ export interface ActiveTabChangedPayload {
   portId: string | null;
 }
 
-/**
- * 弹窗 → 主窗：命令集整集回传（K6）。
- *
- * 弹窗那份 store 是空的（独立 webview），写进去恒为 no-op——命令集的唯一真相
- * 在主窗 `useRuleStore`，所以编辑必须回传而非本地落库：主窗若不知道这次编辑，
- * 之后任何一次 save_config 都会用主窗自己的活实体把改动覆盖回去。
- */
-export interface PopoutCommandSetUpdatedPayload {
-  set: SendCommandSet;
+export type CommandEditorSnapshot = EntityEditorSnapshot<SendCommandSet> & { sessionId: string };
+
+export type CommandEditorAction = {
+  sessionId: string;
+  version: number;
+  id?: string;
+} & ({ action: 'replace'; items: SendCommandSet[] } | { action: 'save' | 'discard' });
+
+export type CommandEditorRequest = CommandEditorAction & { requestId: string };
+
+export interface CommandEditorResult {
+  requestId: string;
+  success: boolean;
+  error: string | null;
+  snapshot: CommandEditorSnapshot;
+}
+
+export interface CommandEditorClientRequest { requestId: string; action: 'save' | 'discard' }
+export interface CommandEditorClientResult { requestId: string; success: boolean; error: string | null }
+
+export const COMMAND_EDITOR_TIMEOUT_MS = 15_000;
+
+/** Register before emitting; late listener registration is retired on timeout. */
+function requestEditorEvent<Result extends { requestId: string }>(requestEvent: string, resultEvent: string, request: object): Promise<Result> {
+  const requestId = crypto.randomUUID();
+  // ES2020/WebView baseline does not guarantee Promise.withResolvers.
+  let resolve!: (result: Result) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<Result>((done, fail) => { resolve = done; reject = fail; });
+  let settled = false;
+  let unlisten: (() => void) | undefined;
+  const finish = (result?: Result, error?: unknown) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    unlisten?.();
+    if (result) resolve(result);
+    else reject(error);
+  };
+  const timer = setTimeout(() => finish(undefined, new Error('editor.saveFailed')), COMMAND_EDITOR_TIMEOUT_MS);
+  void listen<Result>(resultEvent, event => {
+    if (event.payload.requestId === requestId) finish(event.payload);
+  }).then(stop => {
+    if (settled) { stop(); return; }
+    unlisten = stop;
+    return emit(requestEvent, { ...request, requestId });
+  }).catch(error => finish(undefined, error));
+  return promise;
 }
 
 /** 终端弹窗 → 主窗：挂载完成，请求一次性历史快照（request→reply 避免竞态）。 */
@@ -193,12 +233,23 @@ export const popoutEventService = {
     });
   },
 
-  /** 弹窗 → 主窗：命令集编辑保存（整集回传，主窗写回 useRuleStore 活实体）。 */
-  onCommandSetUpdated: (callback: (payload: PopoutCommandSetUpdatedPayload) => void) => {
-    return listen<PopoutCommandSetUpdatedPayload>('popout:command-set-updated', (event) => {
-      callback(event.payload);
-    });
+  onCommandEditorRequest: (callback: (payload: CommandEditorRequest) => void) => {
+    return listen<CommandEditorRequest>('popout:command-editor-request', event => callback(event.payload));
   },
+
+  onCommandEditorSnapshot: (callback: (snapshot: CommandEditorSnapshot) => void) => {
+    return listen<CommandEditorSnapshot>('command-editor:snapshot', event => callback(event.payload));
+  },
+
+  requestCommandEditor: (request: CommandEditorAction) => requestEditorEvent<CommandEditorResult>('popout:command-editor-request', 'command-editor:result', request),
+  requestCommandEditorClientLeave: (action: 'save' | 'discard') => requestEditorEvent<CommandEditorClientResult>('command-editor:client-leave', 'command-editor:client-result', { action }),
+  onCommandEditorClientLeave: (callback: (request: CommandEditorClientRequest) => void) => listen<CommandEditorClientRequest>('command-editor:client-leave', event => callback(event.payload)),
+  emitCommandEditorClientResult: (result: CommandEditorClientResult): Promise<void> => emit('command-editor:client-result', result),
+  onCommandEditorClientState: (callback: (unresolved: boolean) => void) => listen<boolean>('command-editor:client-state', event => callback(event.payload)),
+  emitCommandEditorClientState: (unresolved: boolean): Promise<void> => emit('command-editor:client-state', unresolved),
+
+  emitCommandEditorSnapshot: (snapshot: CommandEditorSnapshot): Promise<void> => emit('command-editor:snapshot', snapshot),
+  emitCommandEditorResult: (result: CommandEditorResult): Promise<void> => emit('command-editor:result', result),
 
   /** 主窗 → 弹窗：命令集已变更（携带完整命令集载荷，弹窗直接消费）。 */
   onCommandSetsChanged: (callback: (sets: SendCommandSet[]) => void) => {
@@ -263,10 +314,7 @@ export const popoutEventService = {
     return emit('popout:open-config', payload);
   },
 
-  /** 弹窗 → 主窗：命令集编辑保存（整集，主窗按 set.id 覆盖活实体）。 */
-  emitCommandSetUpdated: (set: SendCommandSet): Promise<void> => {
-    return emit('popout:command-set-updated', { set });
-  },
+  /** Committed sets only; editor consumers use command-editor:snapshot. */
 
   emitCommandSetsChanged: (sets: SendCommandSet[]): Promise<void> => {
     return emit('command-sets:changed', sets);

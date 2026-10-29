@@ -1,50 +1,20 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useRuleStore } from '../../../stores/useRuleStore';
 import { useAppStore } from '../../../stores/useAppStore';
-import { storageService } from '../../../services/tauri';
 import type { TriggerMatchType, TriggerActionType, TriggerRule } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import { useEntityPage } from '../hooks/useEntityPage';
 import { Zap } from 'lucide-react';
 
-/**
- * Trigger edits auto-persist this long after the last change, so closing the
- * dialog never loses the final keystroke. This is the debounced-auto variant of
- * the shared entity-page contract (`useEntityPage`) — the only page that needs
- * it, because its body is a free-form rule editor where a per-row ✓ would be
- * redundant with the immediate feedback users expect from a matcher.
- */
-const SAVE_DEBOUNCE_MS = 300;
-
-/**
- * 条件触发配置页：管理触发规则（接收数据匹配模式时自动执行动作）。
- * 数据持久化到 config.json（config 实体，经 storageService 读写）。
- */
 const TriggerSettings: React.FC = () => {
   const { t } = useTranslation();
-  const triggerRules = useRuleStore((s) => s.triggerRules);
   const ports = useAppStore((s) => s.ports);
-  const updateTriggerRule = useRuleStore((s) => s.updateTriggerRule);
+  const page = useEntityPage<TriggerRule>({ kind: 'triggerRules' });
+  const updateTriggerRule = page.update;
 
-  const page = useEntityPage<TriggerRule>({
-    items: triggerRules,
-    label: 'TriggerSettings',
-    autoSaveDebounceMs: SAVE_DEBOUNCE_MS,
-    ops: {
-      load: () => storageService.loadTriggerRules(),
-      read: () => useRuleStore.getState().triggerRules,
-      replace: (items) => useRuleStore.getState().setTriggerRules(items),
-      add: (rule) => useRuleStore.getState().addTriggerRule(rule),
-      drop: (id) => useRuleStore.getState().removeTriggerRule(id),
-      persist: (rule) => storageService.saveTriggerRule(rule),
-      remove: (id) => storageService.deleteTriggerRule(id),
-    },
-  });
-
-  const handleAdd = () => {
+  const handleAdd = (beforeId?: string) => {
     page.create({
-      id: `trig-${Date.now()}`,
+      id: crypto.randomUUID(),
       name: t('trigger.addRule'),
       pattern: '',
       isRegex: false,
@@ -54,7 +24,7 @@ const TriggerSettings: React.FC = () => {
       actionIsHex: false,
       isEnabled: true,
       portId: undefined,
-    });
+    }, beforeId);
   };
 
   const matchTypeOptions: TriggerMatchType[] = ['contains', 'exact', 'regex', 'hex'];
@@ -65,10 +35,17 @@ const TriggerSettings: React.FC = () => {
       title={t('config.triggerSettings')}
       addLabel={t('trigger.addRule')}
       emptyText={t('trigger.empty')}
-      items={triggerRules}
+      items={page.items}
       selectedId={page.expandedId}
       onSelect={page.toggleExpanded}
-      onAdd={handleAdd}
+      onAdd={() => handleAdd()}
+      onInsert={handleAdd}
+      onReorder={page.reorder}
+      onDiscard={page.discard}
+      dirty={page.dirty}
+      isDirty={page.isDirty}
+      saving={page.saving}
+      error={page.error}
       onDelete={page.remove}
       onSave={page.save}
       onRename={(id, name) => updateTriggerRule(id, { name })}

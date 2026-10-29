@@ -565,3 +565,125 @@
   letter-spacing: 0.4px;
   user-select: none;
 }
+
+/* Draft controls remain separate from the command's send surface. */
+.quicksend-draft-actions,
+.quicksend-set-manager-row,
+.quicksend-command-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.quicksend-draft-actions {
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.quicksend-draft-actions > span {
+  flex: 1;
+}
+
+.quicksend-draft-error {
+  color: var(--text-error);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.quicksend-sort-notice {
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+}
+
+.quicksend-set-manager {
+  flex-shrink: 0;
+  padding: var(--space-1);
+  border-bottom: 1px solid var(--border-color);
+  font-size: var(--text-xs);
+}
+
+.quicksend-set-manager summary {
+  cursor: pointer;
+  padding: var(--space-1) 0;
+}
+
+.quicksend-set-name {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.quicksend-set-fields,
+.quicksend-edit-form {
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.quicksend-set-fields {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.quicksend-set-fields > label:first-child {
+  grid-column: 1 / -1;
+}
+
+.quicksend-set-fields label,
+.quicksend-edit-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+}
+
+.quicksend-set-fields .quicksend-loop-label {
+  flex-direction: row;
+  align-items: center;
+}
+
+.quicksend-set-fields .input {
+  width: 100%;
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+.quicksend-edit-row {
+  flex-wrap: wrap;
+}
+
+.quicksend-edit-form textarea {
+  min-height: 60px;
+  resize: vertical;
+}
+
+.quicksend-command-actions {
+  justify-content: flex-end;
+}
+
+.quicksend-row.is-send-disabled {
+  cursor: default;
+}
+
+.quicksend-row .editor-drag-handle {
+  flex-shrink: 0;
+}
+
+.quicksend-add-command {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin: var(--space-2);
+}

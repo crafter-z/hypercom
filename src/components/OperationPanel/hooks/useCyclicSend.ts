@@ -4,6 +4,8 @@ import { useOperationStore } from '../../../stores/useOperationStore';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { notifyError } from '../../../stores/useToastStore';
 import { createSendLoop, type SendLoop, type SendLoopStepContext } from './useSequentialSend';
+import type { SendCommandSet } from '../../../types';
+import { orderedCommands } from '../../../utils/commandOrder';
 
 /** 目标端口暂不可用（未连接）时的重试间隔——循环不终止，等端口恢复。 */
 const TARGET_WAIT_MS = 500;
@@ -17,6 +19,7 @@ export interface UseCyclicSendOptions {
 
 /** 单个端口循环的运行态（端口固定、聚焦无关）。 */
 interface PortLoopState {
+  commandSet: SendCommandSet;
   currentCmdIdx: number;
   completedRounds: number;
   /** 本次运行是否已弹过错误 toast（重试不刷屏）。 */
@@ -32,8 +35,7 @@ interface PortLoopState {
  * - 运行开关来自 `useOperationStore.cyclicLoops[portId]`（Record），SendSection
  *   的按钮按**当前聚焦端口**查状态——切回 COM3 时按钮自然变回「停止」。
  * - 多端口可并行：每个 runtime 独立的循环，互不干扰。
- * - 每 tick 实时读取活动命令集（useRuleStore.getState()），命令集编辑即时生效；
- *   命令集缺失/为空时自动停止该端口循环。
+ * - 启动时固定已保存命令集及其顺序；后续编辑、保存和切换命令集只影响下次启动。
  * - 目标端口未连接时跳过 tick 并不推进索引（等端口恢复自动续发）。
  * - 调度本身（计时器链 / 重入防护 / 可见性补发）来自共享引擎
  *   `useSequentialSend.createSendLoop`，与弹窗文本模式逐行发送同一实现。
@@ -53,15 +55,8 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     const port = useAppStore.getState().ports.find((p) => p.id === portId);
     if (!port || port.status !== 'connected') return TARGET_WAIT_MS;
 
-    // Re-read from store for freshness (same as original behaviour).
-    const store = useRuleStore.getState();
-    const currentSet = store.sendCommandSets.find((s) => s.id === store.activeSendCommandSetId);
-    if (!currentSet || currentSet.commands.length === 0) {
-      // 命令集缺失/为空：该端口循环没有可发内容，自动停止。
-      useOperationStore.getState().setCyclicLoop(portId, false);
-      return null;
-    }
-    const cmd = currentSet.commands[state.currentCmdIdx % currentSet.commands.length];
+    const currentSet = state.commandSet;
+    const cmd = currentSet.commands[state.currentCmdIdx];
 
     // silent：失败时由共享引擎的 onStepError 聚合为一条 toast，逐次发送不刷屏。
     await sendDataRef.current(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding, true);
@@ -100,7 +95,16 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
 
   const startLoop = useCallback((portId: string) => {
     if (loopsRef.current.has(portId)) return;
-    const state: PortLoopState = { currentCmdIdx: 0, completedRounds: 0, notified: false };
+    const rules = useRuleStore.getState();
+    const saved = rules.sendCommandSets.find(set => set.id === rules.activeSendCommandSetId);
+    if (!saved || saved.commands.length === 0) {
+      useOperationStore.getState().setCyclicLoop(portId, false);
+      return;
+    }
+    const state: PortLoopState = {
+      commandSet: { ...saved, commands: orderedCommands(saved.commands) },
+      currentCmdIdx: 0, completedRounds: 0, notified: false,
+    };
     statesRef.current.set(portId, state);
     const loop = createSendLoop({
       step: (context) => step(portId, state, context),

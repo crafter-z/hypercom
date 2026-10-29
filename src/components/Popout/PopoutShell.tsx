@@ -7,6 +7,7 @@ import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { applyUiScale } from '../../utils/uiScale';
 import { useTextEditContextMenu } from '../shared/TextEditContextMenu';
+import { EditorLeaveDialog, useEditorWindowClose } from '../shared/EditorLeaveDialog';
 import QuickSendPanel from './QuickSendPanel';
 import TerminalPopout from './TerminalPopout';
 
@@ -38,6 +39,7 @@ const PopoutContent: React.FC<{ kind: string; targetId: string | null }> = ({ ki
  */
 const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
   const { t } = useTranslation();
+  useEditorWindowClose();
   const [pinned, setPinned] = useState(true); // 建窗默认 always_on_top(true)
   const configReady = useSystemStore((s) => s.ui.configReady);
   const liveScale = useRef<number | null>(null);
@@ -128,6 +130,7 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
         <PopoutContent kind={kind} targetId={targetId} />
       </div>
       {textEditMenuElement}
+      <EditorLeaveDialog />
     </div>
   );
 };

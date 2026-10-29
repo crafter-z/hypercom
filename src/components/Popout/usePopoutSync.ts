@@ -1,65 +1,177 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  eventService,
-  popoutEventService,
-  serialService,
-  storageService,
-  type AvailablePortInfo,
-} from '../../services/tauri';
+import { useTranslation } from 'react-i18next';
+import { eventService, popoutEventService, serialService } from '../../services/tauri';
+import type { AvailablePortInfo, CommandEditorSnapshot } from '../../services/tauri';
+import { registerEditorParticipant } from '../../utils/editorLeave';
 import type { SendCommandSet } from '../../types';
 
+export const POPOUT_COMMAND_EDITOR_ID = 'popout:commands';
+const EMPTY_SNAPSHOT: CommandEditorSnapshot = {
+  items: [], sessionId: '', version: -1, dirty: false, dirtyIds: [], saving: false, error: null,
+};
+
 export interface PopoutSync {
-  /** 主窗命令集活实体（含未保存编辑）——弹窗的读侧唯一来源。 */
   sets: SendCommandSet[];
-  /** 主窗活动标签：弹窗未手选端口时的缺省发送目标。 */
+  ready: boolean;
+  dirty: boolean;
+  dirtyIds: ReadonlySet<string>;
+  pending: boolean;
+  saving: boolean;
+  error: string | null;
+  replaceSets: (items: SendCommandSet[]) => void;
+  save: () => Promise<boolean>;
+  discard: () => Promise<boolean>;
   activePortId: string | null;
-  /** 后端枚举出的串口（目标端口选择器的选项）。 */
   ports: AvailablePortInfo[];
-  /** 已连接端口集合（「发送到」提示灯跟随真实连接状态）。 */
   connectedPortIds: ReadonlySet<string>;
-  /** 请求主窗打开配置弹窗的命令集页（命令集的新建/删除/排序在那里）。 */
   openSetEditor: () => void;
 }
 
-/**
- * 快捷发送面板与主窗的同步（事件总线 + 基线）。
- *
- * 弹窗是独立 webview、自带 store 实例：命令集 / 活动标签 / 端口状态全部只能靠
- * 事件交换，本 hook 把这些订阅收在一处，面板组件只管渲染。
- *
- * - 命令集：mount 先读 `load_command_sets` 取持久化基线，随后
- *   `command-sets:changed` 携带主窗活实体（含未保存编辑）直接覆盖——不回库重读，
- *   否则配置弹窗里未点「保存」的编辑不会同步过来。
- * - 对表：监听器注册就绪后才 emit `popout:request-sync`，否则主窗回放的
- *   active-tab:changed 可能早于监听器到达而丢失（指示器失真）。
- * - 端口状态：`serial:status` 广播 + `port-statuses:sync` 全量回放，弹窗在已连接
- *   状态下打开时提示灯即刻准确。
- */
+/** Main owns drafts. Local text is retained until a matching versioned ACK. */
 export function usePopoutSync(): PopoutSync {
+  const { t } = useTranslation();
   const [sets, setSets] = useState<SendCommandSet[]>([]);
+  const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
+  const [pending, setPending] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [activePortId, setActivePortId] = useState<string | null>(null);
   const [ports, setPorts] = useState<AvailablePortInfo[]>([]);
   const [connectedPortIds, setConnectedPortIds] = useState<ReadonlySet<string>>(new Set());
+  const authority = useRef(EMPTY_SNAPSHOT);
+  const local = useRef<SendCommandSet[]>([]);
+  const baseVersion = useRef(-1);
+  const baseSession = useRef('');
+  const retiredSessions = useRef(new Set<string>());
+  const generation = useRef(0);
+  const acknowledged = useRef(0);
+  const work = useRef<Promise<boolean> | null>(null);
+  const operation = useRef<Promise<boolean> | null>(null);
+  const alive = useRef(true);
 
-  // 持久化基线：主窗的载荷到达前先显示盘上的内容。载荷是活实体（含未保存编辑），
-  // 一旦到达就不再让盘上快照覆盖它——SQLite 读有可能比事件回得晚，晚到的基线会把
-  // 刚拿到的活实体冲掉。
-  const liveRef = useRef(false);
-  useEffect(() => {
-    let cancelled = false;
-    storageService
-      .loadCommandSets()
-      .then((list) => {
-        if (!cancelled && !liveRef.current) setSets(list);
-      })
-      .catch((e) => console.debug('[usePopoutSync] loadCommandSets failed:', e));
-    return () => {
-      cancelled = true;
-    };
+  const receiveSnapshot = useCallback((next: CommandEditorSnapshot) => {
+    if (!alive.current || next.sessionId === authority.current.sessionId && next.version < authority.current.version) return;
+    if (retiredSessions.current.has(next.sessionId)) return;
+    if (authority.current.sessionId && next.sessionId !== authority.current.sessionId) retiredSessions.current.add(authority.current.sessionId);
+    authority.current = next;
+    setSnapshot(next);
+    if (generation.current === acknowledged.current && !work.current) {
+      local.current = next.items;
+      baseVersion.current = next.version;
+      baseSession.current = next.sessionId;
+      setSets(next.items);
+      setError(next.error);
+    }
   }, []);
 
-  // Keep each listener as soon as it resolves, including partial failures.
+  const flush = useCallback((): Promise<boolean> => {
+    if (work.current) return work.current;
+    if (generation.current === acknowledged.current) return Promise.resolve(true);
+    setPending(true);
+    const run = async () => {
+      try {
+        while (generation.current !== acknowledged.current) {
+          const sentGeneration = generation.current;
+          const result = await popoutEventService.requestCommandEditor({
+            action: 'replace', items: local.current, version: baseVersion.current, sessionId: baseSession.current,
+          });
+          receiveSnapshot(result.snapshot);
+          if (result.snapshot.sessionId !== authority.current.sessionId) { if (alive.current) setError('editor.conflict'); return false; }
+          if (!result.success) {
+            if (alive.current) setError(result.error ?? 'editor.saveFailed');
+            return false;
+          }
+          baseVersion.current = result.snapshot.version;
+          baseSession.current = result.snapshot.sessionId;
+          acknowledged.current = sentGeneration;
+          if (generation.current === sentGeneration) {
+            // A newer main edit can arrive before this ACK; it wins only after
+            // our submitted text has been acknowledged, never while pending.
+            local.current = authority.current.items;
+            baseVersion.current = authority.current.version;
+            baseSession.current = authority.current.sessionId;
+            if (alive.current) setSets(local.current);
+          }
+          if (alive.current) setError(null);
+        }
+        return true;
+      } catch (cause) {
+        if (alive.current) setError(cause instanceof Error ? cause.message : String(cause));
+        return false;
+      }
+    };
+    const task = run().finally(() => {
+      work.current = null;
+      if (alive.current) setPending(false);
+    });
+    work.current = task;
+    return task;
+  }, [receiveSnapshot]);
+
+  const replaceSets = useCallback((items: SendCommandSet[]) => {
+    if (baseVersion.current < 0 || operation.current) return;
+    local.current = items;
+    generation.current++;
+    setSets(items);
+    setError(null);
+    void flush();
+  }, [flush]);
+
+  const finishDraft = useCallback((action: 'save' | 'discard'): Promise<boolean> => {
+    if (operation.current) return operation.current;
+    setSaving(true);
+    const run = async () => {
+      try {
+        if (action === 'save' && !await flush()) return false;
+        if (action === 'discard' && work.current) await work.current;
+        const result = await popoutEventService.requestCommandEditor({
+          action, version: action === 'discard' ? authority.current.version : baseVersion.current,
+          sessionId: action === 'discard' ? authority.current.sessionId : baseSession.current,
+        });
+        receiveSnapshot(result.snapshot);
+        if (result.snapshot.sessionId !== authority.current.sessionId) { if (alive.current) setError('editor.conflict'); return false; }
+        if (!result.success) {
+          if (alive.current) setError(result.error ?? 'editor.saveFailed');
+          return false;
+        }
+        acknowledged.current = generation.current;
+        local.current = authority.current.items;
+        baseVersion.current = authority.current.version;
+        baseSession.current = authority.current.sessionId;
+        if (alive.current) { setSets(local.current); setError(null); }
+        return true;
+      } catch (cause) {
+        if (alive.current) setError(cause instanceof Error ? cause.message : String(cause));
+        return false;
+      }
+    };
+    const task = run().finally(() => {
+      operation.current = null;
+      if (alive.current) setSaving(false);
+    });
+    operation.current = task;
+    return task;
+  }, [flush, receiveSnapshot]);
+  const save = useCallback(() => finishDraft('save'), [finishDraft]);
+  const discard = useCallback(() => finishDraft('discard'), [finishDraft]);
+
+  useEffect(() => registerEditorParticipant(POPOUT_COMMAND_EDITOR_ID, {
+    isDirty: () => authority.current.dirty || generation.current !== acknowledged.current || !!work.current || !!operation.current || authority.current.saving,
+    save: () => save(),
+    discard: async () => { if (!await discard()) throw new Error('editor.saveFailed'); },
+    label: () => t('popout.quickSendTitle'),
+  }), [save, discard, t]);
+
+  const unresolved = generation.current !== acknowledged.current || pending || saving;
   useEffect(() => {
+    void popoutEventService.emitCommandEditorClientState(unresolved)
+      .catch(cause => console.debug('[usePopoutSync] client state failed:', cause));
+  }, [unresolved]);
+
+  // A single owned listener group: keep late registration cleanup even after a
+  // partial failure, and request the first snapshot only when every listener exists.
+  useEffect(() => {
+    alive.current = true;
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
     const retain = (unlisten: () => void) => {
@@ -67,60 +179,65 @@ export function usePopoutSync(): PopoutSync {
       else unlisteners.push(unlisten);
     };
     void Promise.all([
-      popoutEventService.onCommandSetsChanged((next) => {
+      popoutEventService.onCommandEditorSnapshot(next => { if (!cancelled) receiveSnapshot(next); }).then(retain),
+      popoutEventService.onCommandEditorClientLeave(request => {
         if (cancelled) return;
-        liveRef.current = true;
-        setSets(next);
+        void (request.action === 'save' ? save() : discard()).then(success => {
+          if (!cancelled) return popoutEventService.emitCommandEditorClientResult({
+            requestId: request.requestId, success, error: success ? null : 'editor.saveFailed',
+          });
+        }).catch(cause => console.debug('[usePopoutSync] client leave ACK failed:', cause));
       }).then(retain),
-      popoutEventService.onActiveTabChanged((payload) => {
-        if (!cancelled) setActivePortId(payload.portId);
-      }).then(retain),
-      eventService.onSerialStatus((event) => {
+      popoutEventService.onActiveTabChanged(payload => { if (!cancelled) setActivePortId(payload.portId); }).then(retain),
+      eventService.onSerialStatus(event => {
         if (cancelled) return;
-        setConnectedPortIds((prev) => {
+        setConnectedPortIds(prev => {
           const next = new Set(prev);
           if (event.status === 'connected') next.add(event.port_id);
           else next.delete(event.port_id);
           return next;
         });
       }).then(retain),
-      popoutEventService.onPortStatusesSync((items) => {
-        if (cancelled) return;
-        setConnectedPortIds(new Set(items.filter(item => item.status === 'connected').map(item => item.portId)));
+      popoutEventService.onPortStatusesSync(items => {
+        if (!cancelled) setConnectedPortIds(new Set(items.filter(item => item.status === 'connected').map(item => item.portId)));
       }).then(retain),
     ]).then(async () => {
       if (!cancelled) await popoutEventService.emitRequestSync();
-    }).catch((error) => {
+    }).catch(cause => {
       cancelled = true;
       unlisteners.splice(0).forEach(unlisten => unlisten());
-      console.debug('[usePopoutSync] event bus registration failed:', error);
+      if (alive.current) setError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => {
+      alive.current = false;
       cancelled = true;
       unlisteners.splice(0).forEach(unlisten => unlisten());
+      void popoutEventService.emitCommandEditorClientState(false)
+        .catch(cause => console.debug('[usePopoutSync] client state cleanup failed:', cause));
     };
-  }, []);
+  }, [receiveSnapshot, save, discard]);
 
-  // 端口列表：弹窗是独立 webview，无同步的 store——按需调用全局后端。
   useEffect(() => {
     let cancelled = false;
-    serialService
-      .listAvailablePorts()
-      .then((list) => {
-        if (!cancelled) setPorts(list);
-      })
-      .catch((e) => console.debug('[usePopoutSync] listAvailablePorts failed:', e));
-    return () => {
-      cancelled = true;
-    };
+    void serialService.listAvailablePorts().then(list => {
+      if (!cancelled) setPorts(list);
+    }).catch(cause => console.debug('[usePopoutSync] listAvailablePorts failed:', cause));
+    return () => { cancelled = true; };
   }, []);
-
 
   const openSetEditor = useCallback(() => {
-    void popoutEventService
-      .emitOpenConfig({ page: 'commands' })
-      .catch((e) => console.debug('[usePopoutSync] emitOpenConfig failed:', e));
+    void popoutEventService.emitOpenConfig({ page: 'commands' })
+      .catch(cause => console.debug('[usePopoutSync] emitOpenConfig failed:', cause));
   }, []);
-
-  return { sets, activePortId, ports, connectedPortIds, openSetEditor };
+  const dirtyIds = new Set(snapshot.dirtyIds);
+  if (generation.current !== acknowledged.current) {
+    for (const item of sets) {
+      if (JSON.stringify(item) !== JSON.stringify(snapshot.items.find(candidate => candidate.id === item.id))) dirtyIds.add(item.id);
+    }
+  }
+  return {
+    sets, ready: snapshot.version >= 0, dirty: snapshot.dirty || generation.current !== acknowledged.current,
+    dirtyIds, pending, saving: saving || snapshot.saving, error: error ?? snapshot.error,
+    replaceSets, save, discard, activePortId, ports, connectedPortIds, openSetEditor,
+  };
 }

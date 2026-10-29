@@ -1,20 +1,33 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2, GripVertical } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, Trash2 } from 'lucide-react';
 import type { HighlightRule } from '../../../types';
 
 const HighlightRuleEditor: React.FC<{
   rule: HighlightRule;
   onChange: (patch: Partial<HighlightRule>) => void;
   onDelete: () => void;
-}> = ({ rule, onChange, onDelete }) => {
+  handle?: React.ReactNode;
+  onInsert?: () => void;
+  onInsertBelow?: () => void;
+  autoFocus?: boolean;
+}> = ({ rule, onChange, onDelete, handle, onInsert, onInsertBelow, autoFocus }) => {
   const { t } = useTranslation();
+  const patternRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (autoFocus) {
+      patternRef.current?.focus();
+      patternRef.current?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [autoFocus]);
   return (
     <div style={{ background: 'var(--bg-secondary)', borderRadius: 4, padding: 8, marginBottom: 6 }}>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
-        <GripVertical size={12} style={{ opacity: 0.4 }} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+        {handle}
+        {onInsert && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={onInsert}><ArrowUpToLine size={12} /></button>}
+        {onInsertBelow && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={onInsertBelow}><ArrowDownToLine size={12} /></button>}
         <input className="input" value={rule.name} onChange={e => onChange({ name: e.target.value })} placeholder={t('highlightRuleEditor.namePlaceholder')} style={{ width: 100 }} />
-        <input className="input" value={rule.pattern} onChange={e => onChange({ pattern: e.target.value })} placeholder={t('highlightRuleEditor.patternPlaceholder')} style={{ flex: 1 }} />
+        <input ref={patternRef} className="input" value={rule.pattern} onChange={e => onChange({ pattern: e.target.value })} placeholder={t('highlightRuleEditor.patternPlaceholder')} style={{ flex: 1 }} />
         <label className="checkbox-wrapper" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
           <input type="checkbox" checked={rule.isRegex} onChange={e => onChange({ isRegex: e.target.checked })} />{t('highlightRuleEditor.regexLabel')}
         </label>

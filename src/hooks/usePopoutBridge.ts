@@ -1,19 +1,27 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { findSerialTabByPortId, getActivePortId, useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
-import { popoutEventService, popoutService, storageService } from '../services/tauri';
+import { popoutEventService, popoutService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { snapshotTerminalLines } from '../utils/terminal/viewportManager';
-import { notifyError } from '../stores/useToastStore';
+import { discardEntityDraft, getEntityEditorSnapshot, replaceEntityDraft, saveEntityDraft, subscribeEntityEditor } from '../utils/entityEditor';
+import type { SendCommandSet } from '../types';
+import type { CommandEditorSnapshot } from '../services/tauri';
+import { registerEditorParticipant } from '../utils/editorLeave';
 
 /**
  * 终端快照行数上限（R3）：缓冲接近 memoryLimitMb 时整包快照载荷过大，
  * 仅推最近 N 行——弹出窗是"实时监视器"，远古历史价值低。v1 取 5000。
  */
 const SNAPSHOT_LINE_CAP = 5000;
+const commandEditorSession = crypto.randomUUID();
+function commandEditorSnapshot(): CommandEditorSnapshot {
+  return { ...getEntityEditorSnapshot<SendCommandSet>('sendCommandSets'), sessionId: commandEditorSession };
+}
 
 /**
  * Hook: 弹出窗意图总线（主窗侧，`App.tsx` 中恰好调用一次）。
@@ -22,18 +30,40 @@ const SNAPSHOT_LINE_CAP = 5000;
  * - 入站：`popout:send-command` → 经 `sendToPort` 走主窗既有发送管线
  *   （TX 回显 / 流量统计 / 发送历史因此与手动发送完全一致）；
  *   `popout:open-config` → 打开 ConfigModal 指定页；
- *   `popout:command-set-updated` → 写回 `useRuleStore` 活实体（K6）；
- *   `popout:request-sync` → 对表（活动标签 / 命令集 / 端口状态）；
- *   `popout:terminal:request-snapshot` → 回推终端历史快照。
- * - 出站：订阅 store，命令集 / 活动标签变化时广播**完整载荷**
- *   （弹窗直接消费，不回库重读——未保存的编辑不在盘上）。
+ *   `popout:command-editor-request` → versioned main-owned draft/save/discard + ACK;
+ *   `popout:request-sync` → committed sets, editor snapshot, active port and status;
+ *   `popout:terminal:request-snapshot` → terminal history snapshot.
+ * - Outbound committed runtime sets and editor drafts are separate streams.
  *
  * 与 useSerialReceive 同属"App 级单例监听器"：重复调用会双重注册。
  */
 export function usePopoutBridge() {
+  const { t } = useTranslation();
+  const unresolvedClient = useRef(false);
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
+    // The client reports only unacknowledged local buffers; core guards drafts.
+    const unregisterClient = registerEditorParticipant('popout:pending-commands', {
+      isDirty: () => unresolvedClient.current,
+      save: async () => {
+        const result = await popoutEventService.requestCommandEditorClientLeave('save');
+        if (result.success) unresolvedClient.current = false;
+        return result.success;
+      },
+      discard: async () => {
+        const result = await popoutEventService.requestCommandEditorClientLeave('discard');
+        if (!result.success) throw new Error(result.error ?? 'editor.saveFailed');
+        unresolvedClient.current = false;
+      },
+      label: () => t('popout.quickSendTitle'),
+    });
+    void popoutEventService.onCommandEditorClientState(unresolved => {
+      if (!cancelled) unresolvedClient.current = unresolved;
+    }).then(stop => {
+      if (cancelled) stop();
+      else unlisteners.push(stop);
+    }).catch(error => console.debug('[usePopoutBridge] client state listener failed:', error));
 
     // 异步注册竞态保护：参考 SendSection onFileProgress 模式。
     popoutEventService
@@ -67,33 +97,53 @@ export function usePopoutBridge() {
       })
       .catch((e) => console.debug('[usePopoutBridge] onOpenConfig failed:', e));
 
-    // K6：弹窗里编辑命令集后整集回传。主窗 useRuleStore 是唯一真相，必须在这里
-    // 落地——弹窗那份 store 是空的（独立 webview），写它就是 no-op；而主窗之后的
-    // 任何一次 save_config 都会拿自己 store 里的活实体覆盖 config.json，不落地就
-    // 等于把弹窗的编辑回滚掉。
     popoutEventService
-      .onCommandSetUpdated((payload) => {
+      .onCommandEditorRequest((request) => {
         if (cancelled) return;
-        // The set may have been deleted in this window after the popout loaded
-        // it. `updateSendCommandSet` would be a no-op, but saveCommandSet is an
-        // upsert and would resurrect the deleted set in config.json.
-        if (!useRuleStore.getState().sendCommandSets.some((set) => set.id === payload.set.id)) {
-          popoutEventService
-            .emitCommandSetsChanged(useRuleStore.getState().sendCommandSets)
-            .catch((e) => console.debug('[usePopoutBridge] refresh deleted set failed:', e));
-          return;
-        }
-        useRuleStore.getState().updateSendCommandSet(payload.set.id, payload.set);
-        void storageService.saveCommandSet(payload.set).catch((error) => { if (!cancelled) notifyError(error); });
+        void (async () => {
+          let success = false;
+          let error: string | null = null;
+          try {
+            if (request.sessionId !== commandEditorSession) throw new Error('editor.conflict');
+            let current = getEntityEditorSnapshot<SendCommandSet>('sendCommandSets');
+            if (request.action !== 'replace' && current.saving) {
+              await saveEntityDraft('sendCommandSets');
+              if (cancelled) return;
+              current = getEntityEditorSnapshot<SendCommandSet>('sendCommandSets');
+            }
+            if (request.version !== current.version) throw new Error('editor.conflict');
+            if (request.action === 'replace') {
+              replaceEntityDraft('sendCommandSets', request.items, request.version);
+              success = true;
+            } else if (request.action === 'save') {
+              success = await saveEntityDraft('sendCommandSets', request.id);
+              const after = getEntityEditorSnapshot('sendCommandSets');
+              if (success && (request.id ? after.dirtyIds.includes(request.id) : after.dirty)) success = false;
+              if (!success) error = after.error ?? 'editor.saveFailed';
+            } else {
+              discardEntityDraft('sendCommandSets', request.id);
+              success = true;
+            }
+          } catch (cause) {
+            error = cause instanceof Error ? cause.message : String(cause);
+          }
+          if (!cancelled) await popoutEventService.emitCommandEditorResult({
+            requestId: request.requestId, success, error,
+            snapshot: commandEditorSnapshot(),
+          });
+        })().catch(error => console.debug('[usePopoutBridge] command editor ACK failed:', error));
       })
       .then((u) => {
         if (cancelled) u();
-        else unlisteners.push(u);
+        else {
+          unlisteners.push(u);
+          void popoutEventService.emitCommandEditorSnapshot(commandEditorSnapshot())
+            .catch(error => console.debug('[usePopoutBridge] initial editor snapshot failed:', error));
+        }
       })
-      .catch((e) => console.debug('[usePopoutBridge] onCommandSetUpdated failed:', e));
+      .catch((e) => console.debug('[usePopoutBridge] onCommandEditorRequest failed:', e));
 
-    // 弹窗挂载即请求对表：回放当前活动标签 + 当前命令集，避免指示器/命令列表
-    // 在首次变更信号到达前失真（命令集载荷含未保存编辑，弹窗无需回库重读）。
+    // Replay only after the popout has registered all snapshot listeners.
     popoutEventService
       .onRequestSync(() => {
         if (cancelled) return;
@@ -104,6 +154,8 @@ export function usePopoutBridge() {
         popoutEventService
           .emitCommandSetsChanged(useRuleStore.getState().sendCommandSets)
           .catch((e) => console.debug('[usePopoutBridge] emitCommandSetsChanged failed:', e));
+        void popoutEventService.emitCommandEditorSnapshot(commandEditorSnapshot())
+          .catch(error => console.debug('[usePopoutBridge] editor snapshot failed:', error));
         // issue #7-5：回放全部串口连接状态，弹窗「发送到」提示灯打开即准确。
         popoutEventService
           .emitPortStatusesSync(
@@ -160,14 +212,21 @@ export function usePopoutBridge() {
       })
       .catch((e) => console.debug('[usePopoutBridge] onTerminalClosed failed:', e));
 
-    // 命令集变更 → 广播完整命令集载荷（immer 变更后引用必变，引用比较即真值）。
-    // 携带载荷而非仅信号：主窗 useRuleStore 是唯一真相，config.json 异步落盘，
-    // 配置弹窗里未保存的编辑不在盘上——弹窗回库重读会漏掉这些编辑。
+    // Runtime consumers still receive committed sets, never unsaved drafts.
     const unsubscribeRules = useRuleStore.subscribe((state, prevState) => {
       if (cancelled || state.sendCommandSets === prevState.sendCommandSets) return;
       popoutEventService
         .emitCommandSetsChanged(state.sendCommandSets)
         .catch((e) => console.debug('[usePopoutBridge] emitCommandSetsChanged failed:', e));
+    });
+
+    let previousEditorSnapshot = getEntityEditorSnapshot<SendCommandSet>('sendCommandSets');
+    const unsubscribeEditor = subscribeEntityEditor(() => {
+      const snapshot = getEntityEditorSnapshot<SendCommandSet>('sendCommandSets');
+      if (cancelled || snapshot === previousEditorSnapshot) return;
+      previousEditorSnapshot = snapshot;
+      void popoutEventService.emitCommandEditorSnapshot({ ...snapshot, sessionId: commandEditorSession })
+        .catch(error => console.debug('[usePopoutBridge] editor snapshot failed:', error));
     });
 
     // 活动标签变更 → 广播新 portId，弹窗更新发送目标指示。
@@ -181,8 +240,10 @@ export function usePopoutBridge() {
     return () => {
       cancelled = true;
       unlisteners.forEach((u) => u());
+      unregisterClient();
       unsubscribeRules();
+      unsubscribeEditor();
       unsubscribeApp();
     };
-  }, []);
+  }, [t]);
 }

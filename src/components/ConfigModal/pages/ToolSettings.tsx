@@ -1,7 +1,5 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useRuleStore } from '../../../stores/useRuleStore';
-import { storageService } from '../../../services/tauri';
 import type { PortToolConfig } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import { useEntityPage } from '../hooks/useEntityPage';
@@ -14,25 +12,11 @@ import { Wrench } from 'lucide-react';
  */
 const ToolSettings: React.FC = () => {
   const { t } = useTranslation();
-  const configs = useRuleStore((s) => s.portToolConfigs);
-  const updateConfig = useRuleStore((s) => s.updatePortToolConfig);
+  const page = useEntityPage<PortToolConfig>({ kind: 'portToolConfigs' });
+  const updateConfig = page.update;
 
-  const page = useEntityPage<PortToolConfig>({
-    items: configs,
-    label: 'ToolSettings',
-    ops: {
-      load: () => storageService.loadPortToolConfigs(),
-      read: () => useRuleStore.getState().portToolConfigs,
-      replace: (items) => useRuleStore.getState().setPortToolConfigs(items),
-      add: (config) => useRuleStore.getState().addPortToolConfig(config),
-      drop: (id) => useRuleStore.getState().removePortToolConfig(id),
-      persist: (config) => storageService.savePortToolConfig(config),
-      remove: (id) => storageService.deletePortToolConfig(id),
-    },
-  });
-
-  const handleAdd = () => {
-    page.create({ id: `tool-${Date.now()}`, name: t('toolSettings.newConfig'), portId: '', command: '', workdir: '' });
+  const handleAdd = (beforeId?: string) => {
+    page.create({ id: crypto.randomUUID(), name: t('toolSettings.newConfig'), portId: '', command: '', workdir: '' }, beforeId);
   };
 
   return (
@@ -41,10 +25,17 @@ const ToolSettings: React.FC = () => {
       description={t('toolSettings.description')}
       addLabel={t('toolSettings.addLabel')}
       emptyText={t('toolSettings.emptyText')}
-      items={configs}
+      items={page.items}
       selectedId={page.expandedId}
       onSelect={page.toggleExpanded}
-      onAdd={handleAdd}
+      onAdd={() => handleAdd()}
+      onInsert={handleAdd}
+      onReorder={page.reorder}
+      onDiscard={page.discard}
+      dirty={page.dirty}
+      isDirty={page.isDirty}
+      saving={page.saving}
+      error={page.error}
       onDelete={page.remove}
       onSave={page.save}
       onRename={(id, name) => updateConfig(id, { name })}

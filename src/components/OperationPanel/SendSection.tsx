@@ -13,6 +13,7 @@ import { useSendHistoryRecall } from './hooks/useSendHistoryRecall';
 import { QuickSendStrip } from './components/QuickSendStrip';
 import { LineEndingSelect } from './components/LineEndingSelect';
 import { FileSendProgress, SendFileButton } from './components/SendFileControls';
+import { orderedCommands } from '../../utils/commandOrder';
 
 export interface SendSectionProps {
   activePortId: string | null;
@@ -71,7 +72,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   const activeCommands = useMemo(() => {
     const set = sendCommandSets.find((s) => s.id === activeSendCommandSetId);
     if (!set) return [];
-    return [...set.commands].sort((a, b) => a.order - b.order);
+    return orderedCommands(set.commands);
   }, [sendCommandSets, activeSendCommandSetId]);
 
   const openConfigToTab = (tab: string) => {
