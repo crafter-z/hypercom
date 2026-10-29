@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pin, PinOff, X } from 'lucide-react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { configService, popoutEventService, popoutService } from '../../services/tauri';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { applyUiScale } from '../../utils/uiScale';
@@ -102,26 +102,28 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
       .then(() => setPinned(next))
       .catch((e) => console.debug('[PopoutShell] set_popout_always_on_top failed:', e));
   };
-
   const handleClose = () => {
+    // Native close requests are handled by useEditorWindowClose, which keeps
+    // the save/discard guard in one path for the titlebar button and OS close.
     void getCurrentWindow().close().catch((e) => console.debug('[PopoutShell] close failed:', e));
   };
 
   return (
     <div className="popout-shell">
-      <div className="popout-titlebar" data-tauri-drag-region>
-        <span className="popout-title" data-tauri-drag-region>
-          {title}
-        </span>
-        <div className="popout-titlebar-actions">
+      <div className="popout-titlebar">
+        <div className="popout-titlebar-drag" data-tauri-drag-region>
+          <span className="popout-title">{title}</span>
+        </div>
+        <div className="popout-titlebar-actions" onPointerDown={(event) => event.stopPropagation()}>
           <button
+            type="button"
             className={`icon-btn${pinned ? ' active' : ''}`}
             title={t('popout.alwaysOnTop')}
             onClick={handleTogglePin}
           >
             {pinned ? <Pin size={14} /> : <PinOff size={14} />}
           </button>
-          <button className="icon-btn popout-close" title={t('popout.close')} onClick={handleClose}>
+          <button type="button" className="icon-btn popout-close" title={t('popout.close')} onClick={handleClose}>
             <X size={14} />
           </button>
         </div>

@@ -27,7 +27,15 @@
   box-shadow: var(--edge-top);
   user-select: none;
 }
-
+.popout-titlebar-drag {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
 .popout-title {
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
@@ -42,6 +50,8 @@
   align-items: center;
   gap: var(--space-1);
   flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 /* Close button warms to the error hue on hover, echoing the main titlebar. */

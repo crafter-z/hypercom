@@ -50,7 +50,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 - 窗口注册表 `AppState.popouts: Mutex<HashMap<String, PopoutMeta>>`，key 为窗口 label，value 记 `{kind, target_id}`；label 约定：快捷发送 = `"quick-send"`（单例）、终端 = `"terminal-{safe_id}"`（每端口一个）。
 - **label仅由Rust计算**：`sanitize`将非ASCII字母数字/`-`的UTF-8字节编码为`_HH`（包括下划线本身），不同端口不会因替换字符碰撞；`compute_label`按kind/target_id派生，前端不复制规则。
-- `open_popout` / `close_popout` 经前端 per-target desired-state lane 串行化。终端程序性 close 在 destroy 前移除注册元数据，`Destroyed` 通知回贴；命令面板 close 改走原生 CloseRequested，等待保存/放弃保护后才 destroy，不能直接销毁草稿窗口。
+- `open_popout` / `close_popout` 经前端 per-target desired-state lane 串行化。快捷命令面板和原生窗口 X 都走 `CloseRequested` 编辑审批；后端 `close_popout` 不绕过审批直接销毁快捷命令面板。终端程序性 close 在 destroy 前移除注册元数据，`Destroyed` 通知回贴。`PopoutShell` 的标题文字区域单独承担拖拽，置顶与关闭按钮位于拖拽区外并阻止指针事件冒泡，避免原生拖拽处理吞掉按钮点击。
 - `open_popout` 为async，存在则show/focus，否则建独立owner窗口。`popout_url` 使用 `url::form_urlencoded` 编码query，端口中的`+`、`&`、`#`及非ASCII不会改变目标。窗口不装饰、置顶、跳过任务栏并parent(main)，按kind取默认尺寸。
 - `close_popout(kind, target_id)` / `set_popout_always_on_top(kind, target_id, on)`（窗口由 kind + target_id 算出，不存在时返回 Err）。弹窗位置/尺寸**不跨会话持久化**，每次新建都取默认尺寸。
 

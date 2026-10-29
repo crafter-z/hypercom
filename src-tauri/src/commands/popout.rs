@@ -247,4 +247,24 @@ mod tests {
     fn test_compute_label_unknown_kind_errors() {
         assert!(compute_label("control-bar", None).is_err());
     }
+
+    #[test]
+    fn capability_keeps_window_drag_and_close_permissions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("capabilities")
+            .join("default.json");
+        let content = std::fs::read_to_string(path).expect("default capability must be readable");
+        let capability: serde_json::Value =
+            serde_json::from_str(&content).expect("default capability must be valid JSON");
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("default capability permissions must be an array");
+        for required in ["core:window:allow-start-dragging", "core:window:allow-destroy"] {
+            assert!(
+                permissions.iter().any(|permission| permission.as_str() == Some(required)),
+                "missing {required}"
+            );
+        }
+    }
+
 }
