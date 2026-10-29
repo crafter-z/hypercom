@@ -15,6 +15,8 @@ import { useRuleStore } from './useRuleStore';
 import { useSystemStore } from './useSystemStore';
 import { useTerminalStore } from './useTerminalStore';
 import { useToastStore } from './useToastStore';
+import { resetEntityEditorForTests } from '../utils/entityEditor';
+import { resetOrdinaryConfigBaselineForTests } from '../hooks/useConfigPersistence';
 
 const INITIAL_STATE = {
   app: useAppStore.getState(),
@@ -33,4 +35,6 @@ export function resetStoresForTests(): void {
   useRuleStore.setState(INITIAL_STATE.rule, true);
   useOperationStore.setState(INITIAL_STATE.operation, true);
   useToastStore.setState(INITIAL_STATE.toast, true);
+  resetEntityEditorForTests();
+  resetOrdinaryConfigBaselineForTests();
 }

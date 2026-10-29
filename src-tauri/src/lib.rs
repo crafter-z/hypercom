@@ -167,6 +167,18 @@ impl AppState {
     }
 }
 
+/// Route every destructive exit through the main editor's save/discard guard.
+fn request_editor_close(app: &tauri::AppHandle, force_exit: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        if let Err(error) = window.emit("editor:close-requested", force_exit) {
+            log::error!("Could not request editor close approval: {error}");
+        }
+    }
+}
+
 /// Start one asynchronous shutdown drain. The UI remains alive until serial
 /// readers/work, RX log tails, power inhibitors, and diagnostic logs are finalized.
 fn request_shutdown(app: tauri::AppHandle) {
@@ -292,6 +304,7 @@ pub fn run() {
             commands::get_system_status,
             commands::prevent_screen_off,
             commands::prevent_sleep,
+            commands::complete_editor_close,
             // ===== 存储相关命令 =====
             commands::save_command_set,
             commands::load_command_sets,
@@ -446,11 +459,7 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    "tray.quit" => {
-                        // Keep the main UI alive while the asynchronous shutdown
-                        // coordinator drains serial readers and log ownership.
-                        request_shutdown(app.clone());
-                    }
+                    "tray.quit" => request_editor_close(app, true),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -481,32 +490,25 @@ pub fn run() {
         .on_window_event(|window, event| {
             let label = window.label();
 
-            // 主窗关闭行为：config.closeBehavior == "minimize" 时拦截关闭、隐藏到托盘。
-            // 仅限主窗——弹出窗（quick-send / terminal-*）必须正常关闭，不能被托盘逻辑吞掉
-            // （旧实现未区分 label，closeBehavior=minimize 时弹窗会被 hide 而非关闭）。
+            // The frontend must approve save/discard before hiding or exiting.
+            // Popout windows use their own close-requested editor guard.
             if label == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    let state = window.state::<AppState>();
-                    let closing = state
-                        .shutdown_started
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let close_to_tray = state
-                        .config_manager
-                        .lock()
-                        .map(|mgr| mgr.get_config().close_behavior == "minimize")
-                        .unwrap_or(false);
-                    if closing {
-                        api.prevent_close();
-                    } else if close_to_tray {
-                        api.prevent_close();
-                        let _ = window.hide();
-                    } else {
-                        api.prevent_close();
-                        request_shutdown(window.app_handle().clone());
+                    api.prevent_close();
+                    if !window.state::<AppState>().shutdown_started.load(
+                        std::sync::atomic::Ordering::Acquire,
+                    ) {
+                        request_editor_close(window.app_handle(), false);
                     }
                 }
                 if let tauri::WindowEvent::Destroyed = event {
                     plugin::view_runtime::clear_all();
+                }
+            }
+
+            if label == "quick-send" && matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Ok(mut popouts) = window.state::<AppState>().popouts.lock() {
+                    popouts.remove(label);
                 }
             }
 
@@ -541,7 +543,7 @@ pub fn run() {
                     .load(std::sync::atomic::Ordering::Acquire)
                 {
                     api.prevent_exit();
-                    request_shutdown(app.clone());
+                    request_editor_close(app, true);
                 }
             }
         });

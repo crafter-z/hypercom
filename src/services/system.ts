@@ -13,6 +13,11 @@ export interface SystemStatusResult {
 }
 
 export const systemService = {
+  /** Finish a native close request after the editor guard succeeds. */
+  completeEditorClose: (forceExit: boolean): Promise<void> => {
+    return invoke<void>('complete_editor_close', { forceExit });
+  },
+
   getSystemStatus: (): Promise<SystemStatusResult> => {
     return invoke<SystemStatusResult>('get_system_status');
   },

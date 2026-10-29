@@ -1,13 +1,16 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, confirm } from '@tauri-apps/plugin-dialog';
 import { configService, fileService, pluginService } from '../../../services/tauri';
 import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
 import { NumericInput } from '../../shared/NumericInput';
 import { syncPluginListSnapshot } from '../../../utils/pluginConfigSnapshot';
+import { requestEditorLeave } from '../../../utils/editorLeave';
+import { adoptEntityEditorBaselineFromConfig } from '../../../utils/entityEditor';
+import { markOrdinaryConfigSaved } from '../../../hooks/useConfigPersistence';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
@@ -49,9 +52,7 @@ const BackupSettings: React.FC = () => {
 
   const handleExport = async () => {
     try {
-      // 从后端读取最新配置（config.json 是唯一数据源）。不能用前端 store 的
-      // config——设置页的规则 CRUD 只更新 useRuleStore + 后端 config.json，
-      // 不回写 store.config，直接读 store 会导出陈旧的实体数组。
+      // Export committed backend state, never unfinished editor drafts.
       const currentConfig = await configService.getConfig();
       const bundle: ConfigBundle = {
         app: BUNDLE_APP,
@@ -90,15 +91,19 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(t('backupSettings.importInvalid')));
         return;
       }
+      if (!(await confirm(t('backupSettings.importConfirm'), { title: t('backupSettings.importButton'), kind: 'warning' }))) return;
+      if (!(await requestEditorLeave())) return;
       // Only the backend can decide whether backed-up grants still name installed code.
       await configService.setConfig(bundle.config, true);
       const restored = await configService.getConfig();
       const current = useAppStore.getState().config;
       useAppStore.getState().setConfig({ ...restored, revision: Math.max(restored.revision ?? 0, current.revision ?? 0), pluginConfigs: current.pluginConfigs });
+      adoptEntityEditorBaselineFromConfig(restored);
+      markOrdinaryConfigSaved(useAppStore.getState().config);
       syncPluginListSnapshot(await pluginService.listPlugins());
       notifySuccess('backupSettings.importSuccess');
-      // 重载让 useAppInit 从 config.json 重新加载实体到各 store。
-      setTimeout(() => window.location.reload(), 1200);
+      // Reload immediately: a delayed reload would leave a window for new edits.
+      window.location.reload();
     } catch (e) {
       notifyError(e);
     }

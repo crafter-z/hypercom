@@ -3,10 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { popoutEventService } from '../../services/tauri';
-import { useConfigPersistence } from '../../hooks';
+import { useConfigPersistence, isOrdinaryConfigDirty, discardOrdinaryConfigDraft } from '../../hooks/useConfigPersistence';
 import { getCommittedUpdateMode, runAutoCheck } from '../../utils/updateService';
 import { applyUiScale } from '../../utils/uiScale';
-import type { AppConfig } from '../../types';
+import { listDirtyEntityKinds } from '../../utils/entityEditor';
+import { registerEditorParticipant, requestEditorLeave } from '../../utils/editorLeave';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X,
 } from 'lucide-react';
@@ -41,10 +42,6 @@ const navItems: NavItem[] = [
   { id: 'plugins', labelKey: 'configModal.nav.plugins', icon: <Plug size={16} /> },
 ];
 
-const independentlyPersisted: Partial<Record<keyof AppConfig, true>> = {
-  revision: true, portGroups: true, portMeta: true, pluginConfigs: true, portPresets: true,
-  sendCommandSets: true, highlightRuleSets: true, protocolTemplates: true, triggerRules: true, portToolConfigs: true,
-};
 
 const ConfigModal: React.FC = () => {
   const { t } = useTranslation();
@@ -53,11 +50,7 @@ const ConfigModal: React.FC = () => {
   const overlayReady = usePluginViewOverlay(isConfigOpen);
   const toggleConfigModal = useSystemStore((s) => s.toggleConfigModal);
   const setConfigActiveTab = useSystemStore((s) => s.setConfigActiveTab);
-  const setConfig = useAppStore((s) => s.setConfig);
   const { saveConfig } = useConfigPersistence();
-  // The pages edit `useAppStore.config` directly, so "the draft" is the store
-  // itself. This ref remembers the value at open time for cancel rollback.
-  const configSnapshotRef = useRef<AppConfig | null>(null);
   // Overlay click must only close on a click whose press *and* release were both
   // on the overlay: dragging a text selection that starts inside the dialog and
   // ends over the overlay synthesises a click there, which used to dismiss the
@@ -74,7 +67,6 @@ const ConfigModal: React.FC = () => {
     const unsubscribe = useSystemStore.subscribe((state, previous) => {
       if (state.ui.isConfigOpen === previous.ui.isConfigOpen) return;
       sessionRef.current++;
-      configSnapshotRef.current = state.ui.isConfigOpen ? { ...useAppStore.getState().config } : null;
     });
     return () => {
       mountedRef.current = false;
@@ -82,39 +74,24 @@ const ConfigModal: React.FC = () => {
       unsubscribe();
     };
   }, []);
+
+  useEffect(() => registerEditorParticipant('config-ordinary', {
+    isDirty: isOrdinaryConfigDirty,
+    save: () => saveConfig(),
+    discard: () => { discardOrdinaryConfigDraft(); },
+    label: () => 'configModal.title',
+  }), [saveConfig]);
   useEffect(() => {
     if (contentRef.current) contentRef.current.inert = saving;
   }, [saving, isConfigOpen, overlayReady]);
 
-  useEffect(() => {
-    if (isConfigOpen && !configSnapshotRef.current) {
-      configSnapshotRef.current = { ...useAppStore.getState().config };
-    }
-    if (!isConfigOpen) {
-      configSnapshotRef.current = null;
-    }
-  }, [isConfigOpen]);
-
   const handleCancel = useCallback(() => {
     if (savingRef.current) return;
-    // issue #6-8：弹窗打开后 useAppInit 的分组/元数据 500ms 防抖可能已把新
-    // 分组/元数据回写 store.config 并落盘；整体回滚会把这两项也回滚为旧值，
-    // 后续全量保存再把旧值写回磁盘 → 丢失。取消时保留当前 store.config 中的
-    // portGroups/portMeta，只回滚其余字段。
-    // 插件授权已由后端命令单独落盘；取消仅回滚普通设置，保留
-    // `utils/pluginConfigSnapshot.ts` 同步的当前 pluginConfigs 镜像。
-    const snap = configSnapshotRef.current;
-    if (snap) {
-      const cur = useAppStore.getState().config;
-      setConfig({
-        ...snap, revision: cur.revision, portGroups: cur.portGroups, portMeta: cur.portMeta, pluginConfigs: cur.pluginConfigs,
-        sendCommandSets: cur.sendCommandSets, highlightRuleSets: cur.highlightRuleSets,
-        protocolTemplates: cur.protocolTemplates, triggerRules: cur.triggerRules, portToolConfigs: cur.portToolConfigs,
-      });
-      configSnapshotRef.current = null;
-    }
-    toggleConfigModal(false);
-  }, [setConfig, toggleConfigModal]);
+    void requestEditorLeave(['config-ordinary', 'entity-editor']).then(allowed => {
+      if (!allowed || savingRef.current) return;
+      toggleConfigModal(false);
+    });
+  }, [toggleConfigModal]);
 
   useEffect(() => {
     if (!isConfigOpen) return;
@@ -135,17 +112,14 @@ const ConfigModal: React.FC = () => {
     const current = useAppStore.getState().config;
     const modeChanged = getCommittedUpdateMode() !== current.updateCheckMode;
     try {
-      // Compose from live stores at dispatch; never patch with an old full draft.
       if (!(await saveConfig())) return;
       if (!mountedRef.current || session !== sessionRef.current || !useSystemStore.getState().ui.isConfigOpen) return;
+      if (isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0) return;
       const latest = useAppStore.getState().config;
-      // External updates can still arrive while controls are frozen. Keep the
-      // newer draft open rather than representing an older snapshot as saved.
-      if ((Object.keys(current) as Array<keyof AppConfig>).some(key => !independentlyPersisted[key] && current[key] !== latest[key])) return;
-      void applyUiScale(current.uiScalePercent);
-      void popoutEventService.emitUiScaleChanged(current.uiScalePercent)
+      void applyUiScale(latest.uiScalePercent);
+      void popoutEventService.emitUiScaleChanged(latest.uiScalePercent)
         .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
-      configSnapshotRef.current = null;
+
       toggleConfigModal(false);
       if (modeChanged && getCommittedUpdateMode() !== 'none') void runAutoCheck();
     } finally {

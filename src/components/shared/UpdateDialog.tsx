@@ -13,6 +13,7 @@ import { updateTiming, beginUpdateInstall, finishUpdateInstall, dismissUpdate } 
 import type { UpdateProgressPayload } from '../../types';
 import { X, Download, Clock, Ban, ExternalLink } from 'lucide-react';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import { requestEditorLeave } from '../../utils/editorLeave';
 
 /** changelog 块 → React 节点（issue #12 二轮：Markdown 轻量渲染替代 <pre> 原文）。 */
 const ChangelogBlocks: React.FC<{ notes: string }> = ({ notes }) => (
@@ -86,6 +87,7 @@ const UpdateDialog: React.FC = () => {
     setError(null);
     setProgress({ downloaded: 0, total: null, phase: 'download' });
     try {
+      if (!(await requestEditorLeave())) return;
       // 传候选版本做 TOCTOU 防护：安装前重检查若版本已变（展示后发布了新版），
       // 后端拒绝安装并报错——重新检查即可（issue #12 复审）。
       await updateService.downloadAndInstall(installing.channel, installing.version);

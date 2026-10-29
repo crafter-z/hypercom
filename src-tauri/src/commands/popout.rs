@@ -134,6 +134,13 @@ pub fn close_popout(
     target_id: Option<String>,
 ) -> Result<(), CommandError> {
     let label = compute_label(&kind, target_id.as_deref())?;
+    // Quick-send contains session drafts: request its guarded close rather than
+    // destroying the WebView and bypassing save/discard confirmation.
+    if kind == "quick-send" {
+        if let Some(window) = app.get_webview_window(&label) {
+            return window.close().map_err(|error| CommandError::System(error.to_string()));
+        }
+    }
     let removed = state
         .popouts
         .lock()

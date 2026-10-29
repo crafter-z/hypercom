@@ -24,7 +24,7 @@ import { computeBufferLimits, getManagerPortIds, getViewportManager } from './ut
 import { applyUiScale } from './utils/uiScale';
 import { startPluginViewRuntime } from './utils/pluginViewRuntime';
 import { startPluginViewOverlayGuard } from './utils/pluginViewOverlay';
-
+import { EditorLeaveDialog, useEditorWindowClose } from './components/shared/EditorLeaveDialog';
 // 模块加载即安装前端 console 捕获（幂等），尽早收集前端诊断日志。
 setupDiagLogCapture();
 
@@ -63,6 +63,7 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
 }
 
 const App: React.FC = () => {
+  useEditorWindowClose();
   useAppInit();
   // Serial event listeners (onSerialData / onSerialStatus /
   // onSerialReconnectHint) are set up once at app root.
@@ -169,6 +170,7 @@ const App: React.FC = () => {
           <AboutDialog />
           <UpdateDialog />
           <ToastContainer />
+          <EditorLeaveDialog />
           {textEditMenuElement}
         </div>
       </ThemeProvider>

@@ -5,6 +5,28 @@ use tauri::State;
 use super::CommandError;
 use crate::AppState;
 
+/// Called only after the main WebView has resolved all unsaved editor work.
+#[tauri::command]
+pub fn complete_editor_close(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    force_exit: bool,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::System("Only the main window can approve app close".into()));
+    }
+    let close_to_tray = !force_exit && state.config_manager.lock()
+        .map_err(|error| CommandError::Lock(error.to_string()))?
+        .get_config().close_behavior == "minimize";
+    if close_to_tray {
+        window.hide().map_err(|error| CommandError::System(error.to_string()))?;
+    } else {
+        crate::request_shutdown(app);
+    }
+    Ok(())
+}
+
 // ── 构建期能力门控（唯一实现，其它命令模块只调用这里）────────────────────────
 //
 // 为什么集中：模拟串口 / 模拟终端 / 自动更新三条能力与构建形态强相关（前两者只
