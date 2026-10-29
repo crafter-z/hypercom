@@ -9,6 +9,7 @@ import { pluginHost, type PluginSession } from './pluginHost';
 import { useSystemStore } from '../stores/useSystemStore';
 import type { PluginNativeMessage } from '../types/pluginViews';
 import { sendToPort } from '../hooks/useSerialSend';
+import { VIEW_BINARY_CHUNK_BYTES, decodeViewBinaryBase64, encodeViewBinaryBase64 } from './pluginViewBinary';
 
 vi.mock('../services/pluginView', () => ({ pluginViewService: { create: vi.fn(), destroy: vi.fn(), send: vi.fn(), update: vi.fn(), onMessage: vi.fn(async () => () => {}) } }));
 vi.mock('../hooks/useSerialSend', () => ({ sendToPort: vi.fn() }));
@@ -141,6 +142,35 @@ describe('native view lifecycle handshakes', () => {
     vi.mocked(pluginViewService.destroy).mockResolvedValue(undefined);
   }
 
+  it('requires independent trust before opening and retires a ready page when trust is revoked', async () => {
+    enableWorker();
+    const trusted: PluginView = { ...plugin, manifest: { ...plugin.manifest!, ui: { buttons: [], menuItems: [], views: [{ ...declaration, id: 'web', mode: 'trusted-web', entry: 'ui/index.html', input: 'none', portBinding: 'none', placements: ['workspace-tab'] }] } } };
+    const config = { id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions };
+    syncPluginListSnapshot({ revision: 1, plugins: [trusted], pluginConfigs: [config] });
+    const preference = { pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'web' };
+    expect(getAvailablePluginViews(null, 'workspace-tab')).toEqual([]);
+    expect(() => openPluginTabForUser(preference, null)).toThrow('explicit approval');
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...config, trustedWebGranted: true }] });
+    let nativeMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async callback => { nativeMessage = callback; return () => {}; });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = openPluginTabForUser(preference, null);
+      await settle();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      nativeMessage({ instanceId, type: 'ready', documentId: 'doc-1' }); markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      useAppStore.getState().setConfig({ pluginConfigs: [{ ...config, trustedWebGranted: false }] });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('unavailable');
+      expect(getAvailablePluginViews(null, 'workspace-tab')).toEqual([]);
+      nativeMessage({ instanceId, type: 'ready', documentId: 'doc-1' });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('unavailable');
+    } finally { stop(); }
+  });
+
   it('ignores native events from a stopped startup and releases both late listener registrations', async () => {
     enableWorker();
     const firstListener = deferred<() => void>();
@@ -177,7 +207,7 @@ describe('native view lifecycle handshakes', () => {
       const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null);
       await settle();
       const instanceId = getPluginViewState(tabId).instanceId!;
-      nativeMessage({ instanceId, type: 'ready' }); markPluginViewWorkerReady(plugin.id, instanceId);
+      nativeMessage({ instanceId, type: 'ready', documentId: 'doc-1' }); markPluginViewWorkerReady(plugin.id, instanceId);
       await settle();
       placePluginView(tabId, { x: 0, y: 0, width: 100, height: 100, zoomPercent: 100 }, true);
       await settle();
@@ -215,7 +245,7 @@ describe('native view lifecycle handshakes', () => {
       const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'tool' }, null);
       await settle();
       const instanceId = getPluginViewState(tabId).instanceId!;
-      nativeMessage({ instanceId, type: 'ready' }); markPluginViewWorkerReady(plugin.id, instanceId);
+      nativeMessage({ instanceId, type: 'ready', documentId: 'doc-1' }); markPluginViewWorkerReady(plugin.id, instanceId);
       await settle();
       placePluginView(tabId, { x: 0, y: 0, width: 100, height: 100, zoomPercent: 100 }, true);
       await settle();
@@ -260,6 +290,162 @@ describe('native view lifecycle handshakes', () => {
       queued.resolve(undefined); await rejected;
       expect(send).not.toHaveBeenCalled();
       expect(sendToPort).toHaveBeenCalledWith('COM3', 'PING', false, 'None', true, expect.any(Function));
+    } finally { stop(); }
+  });
+});
+
+describe('independent pages, navigation documents and binary transport', () => {
+  async function settle(count = 20) { for (let index = 0; index < count; index++) await Promise.resolve(); }
+  function enableNative() {
+    vi.clearAllMocks();
+    vi.mocked(pluginViewService.create).mockReset();
+    vi.mocked(pluginViewService.update).mockReset();
+    vi.mocked(pluginViewService.send).mockReset();
+    vi.mocked(pluginViewService.destroy).mockReset();
+    vi.mocked(pluginViewService.onMessage).mockReset();
+    vi.stubGlobal('window', globalThis);
+    useSystemStore.getState().setUIState({ configReady: true });
+    vi.mocked(pluginViewService.create).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.update).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.send).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.destroy).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.onMessage).mockResolvedValue(() => {});
+  }
+  function workerSession(postViewBinary?: (payload: { bytes: Uint8Array }) => Promise<void>) {
+    const post = vi.fn(() => true);
+    const session = { loaded: true, epoch: 1, post, postViewBinary } as unknown as PluginSession;
+    vi.spyOn(pluginHost, 'get').mockReturnValue(session);
+    return session as PluginSession & { postViewBinary?: typeof postViewBinary };
+  }
+  function sentMessage(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' ? Object.fromEntries(Object.entries(value)) : null;
+  }
+  function isBinaryChunk(value: Record<string, unknown> | null): value is Record<string, unknown> & {
+    type: 'binary-chunk'; documentId: string; transferId: string; seq: number; done: boolean; data: string;
+  } {
+    return !!value && value.type === 'binary-chunk' && typeof value.documentId === 'string'
+      && typeof value.transferId === 'string' && typeof value.seq === 'number'
+      && typeof value.done === 'boolean' && typeof value.data === 'string';
+  }
+  function initDocument(value: Record<string, unknown> | null): string | null {
+    return value && value.type === 'init' && typeof value.documentId === 'string' ? value.documentId : null;
+  }
+  async function openNative(viewId: string, documentId = 'doc-1') {
+    let nativeMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async callback => { nativeMessage = callback; return () => {}; });
+    const stop = startPluginViewRuntime();
+    const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId }, null);
+    await settle();
+    const instanceId = getPluginViewState(tabId).instanceId!;
+    nativeMessage({ type: 'document', instanceId, documentId });
+    nativeMessage({ type: 'ready', instanceId, documentId });
+    await settle();
+    return { tabId, instanceId, nativeMessage, stop };
+  }
+
+  it('runs a pure HTML page without a Worker and survives a Worker restart', async () => {
+    enableNative();
+    const pure: PluginView = { ...plugin, manifest: { ...plugin.manifest!, entry: '', ui: { buttons: [], menuItems: [], views: [{ ...declaration, id: 'web', entry: 'ui/index.html', mode: 'trusted-web', worker: false, input: 'none', portBinding: 'none', placements: ['workspace-tab'] }] } } };
+    syncPluginListSnapshot({ revision: 2, plugins: [pure], pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions, trustedWebGranted: true }] });
+    const get = vi.spyOn(pluginHost, 'get');
+    const { tabId, nativeMessage, stop } = await openNative('web');
+    try {
+      expect(get).not.toHaveBeenCalled();
+      expect(pluginViewService.create).toHaveBeenCalledWith(expect.objectContaining({ workerEpoch: 0 }));
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      useAppStore.getState().setConfig({ pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions, trustedWebGranted: true }] });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      expect(pluginViewService.destroy).not.toHaveBeenCalled();
+      nativeMessage({ type: 'ready', instanceId: getPluginViewState(tabId).instanceId!, documentId: 'doc-1' });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      vi.advanceTimersByTime(6000);
+      expect(getPluginViewState(tabId).status).toBe('ready');
+    } finally { stop(); }
+  });
+
+  it('reinitializes a replacement document and ignores its predecessor ACK', async () => {
+    enableNative();
+    workerSession();
+    const { tabId, instanceId, nativeMessage, stop } = await openNative('tool');
+    try {
+      markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      const initDocuments = () => vi.mocked(pluginViewService.send).mock.calls
+        .map(call => initDocument(sentMessage(call[1])))
+        .filter((documentId): documentId is string => documentId !== null);
+      expect(initDocuments()).toEqual(['doc-1']);
+      nativeMessage({ type: 'document', instanceId, documentId: 'doc-2' });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('loading');
+      nativeMessage({ type: 'ready', instanceId, documentId: 'doc-2' });
+      await settle();
+      expect(initDocuments()).toEqual(['doc-1', 'doc-2']);
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      nativeMessage({ type: 'ack', instanceId, documentId: 'doc-1', revision: 1 });
+      nativeMessage({ type: 'ready', instanceId, documentId: 'doc-1' });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('ready');
+    } finally { stop(); }
+  });
+
+  it('round-trips more than 256 KiB in both directions with exact bytes', async () => {
+    enableNative();
+    const delivered: Uint8Array[] = [];
+    workerSession(async payload => { delivered.push(payload.bytes); });
+    const { instanceId, nativeMessage, stop } = await openNative('tool');
+    try {
+      markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      const payload = new Uint8Array(300 * 1024);
+      for (let index = 0; index < payload.length; index++) payload[index] = (index * 31 + 7) & 0xff;
+      const chunks: Array<{ documentId: string; transferId: string; seq: number; done: boolean; data: string }> = [];
+      vi.mocked(pluginViewService.send).mockImplementation(async (_id, message) => {
+        const value = sentMessage(message);
+        if (!isBinaryChunk(value)) return;
+        chunks.push(value);
+        queueMicrotask(() => nativeMessage({ type: 'binary-ack', instanceId, documentId: value.documentId, transferId: value.transferId, seq: value.seq, done: value.done, ok: true }));
+      });
+      await executePluginViewApi(plugin.id, 'view.sendBinary', { instanceId, type: 'upload', bytes: payload }, plugin.manifest);
+      expect(chunks.length).toBe(Math.ceil(payload.length / VIEW_BINARY_CHUNK_BYTES));
+      const joined = new Uint8Array(payload.length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        expect(chunk.documentId).toBe('doc-1');
+        const part = decodeViewBinaryBase64(chunk.data);
+        joined.set(part, offset); offset += part.length;
+      }
+      expect(offset).toBe(payload.length);
+      expect(joined).toEqual(payload);
+
+      const transferId = 'upload-1';
+      for (let seq = 0; seq * VIEW_BINARY_CHUNK_BYTES < payload.length; seq++) {
+        const start = seq * VIEW_BINARY_CHUNK_BYTES;
+        const end = Math.min(payload.length, start + VIEW_BINARY_CHUNK_BYTES);
+        nativeMessage({ type: 'binary', instanceId, documentId: 'doc-1', transferId, transferType: 'download', seq, done: end >= payload.length, data: encodeViewBinaryBase64(payload.subarray(start, end)) });
+        await settle();
+      }
+      expect(delivered[0]).toEqual(payload);
+    } finally { stop(); }
+  });
+
+  it('rejects a queued binary send when navigation replaces its document', async () => {
+    enableNative();
+    workerSession();
+    const { tabId, instanceId, nativeMessage, stop } = await openNative('tool');
+    try {
+      markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      const payload = new Uint8Array(VIEW_BINARY_CHUNK_BYTES * 2);
+      const request = executePluginViewApi(plugin.id, 'view.sendBinary', { instanceId, type: 'pending', bytes: payload }, plugin.manifest);
+      const rejected = expect(request).rejects.toThrow('document changed');
+      await settle();
+      nativeMessage({ type: 'document', instanceId, documentId: 'doc-2' });
+      await rejected;
+      nativeMessage({ type: 'binary-ack', instanceId, documentId: 'doc-1', transferId: 'late', seq: 0, done: false, ok: true });
+      await settle();
+      expect(getPluginViewState(tabId).status).toBe('loading');
     } finally { stop(); }
   });
 });

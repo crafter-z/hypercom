@@ -5,6 +5,9 @@ export interface PluginViewDeclaration {
   id: string;
   label: string;
   entry: string;
+  mode?: 'isolated' | 'trusted-web';
+  /** `false` marks a trusted local page that runs without a Worker session. */
+  worker?: boolean;
   styles: string[];
   assets: string[];
   modes: Array<'trx' | 'tty'>;
@@ -27,6 +30,7 @@ export interface PluginViewBinding extends PluginViewPreference {
   portMode: 'trx' | 'tty' | null;
   tabSessionId: string;
   viewInstanceId: string;
+  /** 0 means an independent local page: no Worker peer for this document. */
   workerEpoch: number;
   streamEpoch: number;
 }
@@ -53,14 +57,45 @@ export interface PluginViewRect extends PluginViewportRect {
   zoomPercent: number;
 }
 
+/** Native -> frontend view event. Every document-scoped event carries the
+ *  current `documentId`; `document` announces a new top-level document. */
 export interface PluginNativeMessage {
   instanceId: string;
-  type: 'ready' | 'ack' | 'message' | 'focus' | 'error';
+  type: 'ready' | 'ack' | 'message' | 'focus' | 'error' | 'document' | 'binary' | 'binary-ack';
+  documentId?: string;
   revision?: number;
   messageType?: string;
   payload?: unknown;
   error?: string;
+  transferId?: string;
+  transferType?: string;
+  seq?: number;
+  done?: boolean;
+  /** Base64-encoded raw chunk bytes (maximum 8 KiB per chunk). */
+  data?: string;
+  ok?: boolean;
 }
+
+/** Host -> native view message. Binary chunks never pass through the bounded
+ *  realtime state JSON; each envelope carries at most 8 KiB of raw bytes. */
+export interface PluginViewHostMessage {
+  type: 'init' | 'state' | 'environment' | 'binary-chunk' | 'binary-ack';
+  documentId: string;
+  context?: PluginViewBinding;
+  environment?: PluginViewEnvironment;
+  revision?: number;
+  snapshot?: unknown;
+  transferId?: string;
+  transferType?: string;
+  seq?: number;
+  done?: boolean;
+  data?: string;
+  ok?: boolean;
+  error?: string;
+}
+
+/** Raw bytes used by the bidirectional binary channel; total size is unbounded. */
+export type PluginViewBinaryBytes = Uint8Array | ArrayBuffer;
 
 export interface PluginTabOpenOptions {
   viewId: string;
