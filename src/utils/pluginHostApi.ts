@@ -6,8 +6,8 @@
  * 更外层（PluginSession 的调用时过滤）——本层只实现「有权限后做什么」。
  *
  * 实现原则：
- * - 每个 op 一个 async 函数，输入 args（插件传入），输出 JSON 可序列化结果
- *   （postMessage 结构化克隆）。
+ * - 每个 op 一个 async 函数，输入 args（插件传入），输出结构化克隆结果；
+ *   二进制文件用 Uint8Array，RPC 回复转移其底层缓冲区。
  * - 不信任插件参数：形状校验/边界钳制在此层（宿主侧最后防线）。
  * - 串口 RX 行经 pluginObserver 旁路总线接入（`rx.onLine` 订阅注册在
  *   pluginObserver 装配层，不在此层重复实现）。
@@ -28,7 +28,9 @@ import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
 import { exportPluginPanel } from './pluginPanelExport';
 import { executePluginViewApi } from './pluginViewRuntime';
+import { executePluginHttp } from './pluginHttp';
 import { acquirePluginDialog } from './pluginDialogBudget';
+import { decodeBytes } from './lineText';
 
 /** 插件可见的端口摘要（避免把内部字段全量暴露给插件）。 */
 export interface PluginPortView {
@@ -73,14 +75,8 @@ const logQuotas = new Map<string, PluginLogQuota>();
  *  unbounded string through the worker→host IPC bridge. */
 const MAX_TERMINAL_APPEND_CHARS = 64 * 1024;
 const MAX_SERIAL_SEND_CHARS = 1024 * 1024;
-const MAX_FS_WRITE_CHARS = 16 * 1024 * 1024;
-const MAX_HTTP_BODY_CHARS = 1024 * 1024;
-const MAX_HTTP_URL_CHARS = 4096;
-const MAX_HTTP_HEADERS = 100;
-const MAX_HTTP_HEADER_CHARS = 8192;
 const MAX_LOG_MESSAGE_CHARS = 64 * 1024;
 const MAX_PANEL_APPEND_CHARS = 64 * 1024;
-const MAX_CLIPBOARD_CHARS = 1024 * 1024;
 const PLUGIN_LINE_ENDINGS = new Set(['None', '\\r', '\\n', '\\r\\n']);
 
 function requireMaxChars(value: string, field: string, max: number): string {
@@ -88,8 +84,21 @@ function requireMaxChars(value: string, field: string, max: number): string {
   return value;
 }
 
+function binaryFileFormat(args: Record<string, unknown>): boolean {
+  if (args.format === undefined || args.format === 'text') return false;
+  if (args.format === 'binary') return true;
+  throw new Error('文件 format 必须为 text 或 binary');
+}
+
+function fileBytes(base64: string): Uint8Array {
+  const decoded = atob(base64);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index++) bytes[index] = decoded.charCodeAt(index);
+  return bytes;
+}
+
 /**
- * 执行一次宿主 API 调用。返回结果（JSON 可序列化）。
+ * 执行一次宿主 API 调用。返回结构化克隆结果（文件二进制为 Uint8Array）。
  * 权限已在调用前过滤（本层不做权限判断——由 PluginSession 负责，评审 v2 P7）。
  * `manifest` 是该插件的 wire 视图（PluginSession 启动时缓存）——port/URL 作用域
  * 校验（P10）在此消费；manifest 不可得时按 null 处理（作用域声明不存在 = 不限制）。
@@ -104,6 +113,7 @@ export async function executeHostApi(
   switch (op) {
     case 'view.publish':
     case 'view.sendSerial':
+    case 'view.sendBinary':
     case 'tabs.open':
     case 'tabs.activate':
     case 'tabs.close':
@@ -150,6 +160,7 @@ export async function executeHostApi(
     }
     case 'fs.openDialog': {
       const a = requireObject(args);
+      const binary = binaryFileFormat(a);
       const encoding = typeof a.encoding === 'string' && a.encoding !== '' ? a.encoding : 'utf-8';
       const filters = Array.isArray(a.filters) ? (a.filters as { name: string; extensions: string[] }[]) : undefined;
       const multiple = Boolean(a.multiple);
@@ -161,8 +172,8 @@ export async function executeHostApi(
         beforeSend?.();
         return {
           files: selected.files.map(({ path, base64 }: { path: string; base64: string }) => {
-            const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-            return { path, content: new TextDecoder(encoding).decode(bytes) };
+            const bytes = fileBytes(base64);
+            return binary ? { path, bytes } : { path, content: decodeBytes(bytes, encoding) };
           }),
         };
       } finally {
@@ -170,7 +181,9 @@ export async function executeHostApi(
       }
     }
     case 'fs.read': {
-      const rel = requireMaxChars(requireString(args, 'rel'), 'rel', 4096);
+      const a = requireObject(args);
+      const binary = binaryFileFormat(a);
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', 4096);
       const granted = useAppStore.getState().config.pluginConfigs?.find((p) => p.id === pluginId);
       if (!granted?.enabled) throw new Error('plugin disabled');
       const segments = rel.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
@@ -182,38 +195,35 @@ export async function executeHostApi(
       if (!isData && !granted.grantedPermissions.includes('fs:assets')) {
         throw new Error('插件未授予 fs:assets 权限');
       }
-      const content = await pluginService.readPluginAsset(pluginId, rel);
+      const content = binary
+        ? await pluginService.readPluginAsset(pluginId, rel, 'binary')
+        : await pluginService.readPluginAsset(pluginId, rel);
+      beforeSend?.();
       if (content === null) throw new Error('plugin file not found');
-      return content;
+      return binary ? fileBytes(content) : content;
     }
     case 'fs.write': {
       const a = requireObject(args);
       const rel = requireMaxChars(requireString(a, 'rel'), 'rel', 4096);
-      const content = requireMaxChars(requireString(a, 'content'), 'content', MAX_FS_WRITE_CHARS);
-      await pluginService.writePluginAsset(pluginId, rel, content);
+      const content = a.content;
+      const bytes = a.bytes;
+      if (content !== undefined && bytes !== undefined) {
+        throw new Error('fs.write 的 content 与 bytes 互斥');
+      }
+      if (typeof content === 'string') {
+        await pluginService.writePluginAsset(pluginId, rel, content);
+      } else if (content === undefined && bytes !== undefined) {
+        await pluginService.writePluginAsset(pluginId, rel, undefined, bytesToBase64(bytes));
+      } else {
+        throw new Error('fs.write 需要 content 字符串或 bytes 二进制');
+      }
       return null;
     }
-    case 'http.request': {
-      const a = requireObject(args);
-      const method = requireString(a, 'method');
-      const url = requireMaxChars(requireString(a, 'url'), 'url', MAX_HTTP_URL_CHARS);
-      const headers =
-        typeof a.headers === 'object' && a.headers !== null
-          ? (a.headers as Record<string, string>)
-          : {};
-      const headerEntries = Object.entries(headers);
-      if (headerEntries.length > MAX_HTTP_HEADERS) throw new Error('请求头数量超限');
-      for (const [key, value] of headerEntries) {
-        if (typeof value !== 'string' || key.length > 256 || value.length > MAX_HTTP_HEADER_CHARS) {
-          throw new Error('请求头字段非法或超限');
-        }
-      }
-      const body = typeof a.body === 'string'
-        ? requireMaxChars(a.body, 'body', MAX_HTTP_BODY_CHARS)
-        : undefined;
-      const timeout = typeof a.timeout === 'number' ? a.timeout : undefined;
-      return pluginService.pluginHttp(pluginId, { method, url, headers, body, timeout });
-    }
+    case 'http.request':
+    case 'http.open':
+    case 'http.read':
+    case 'http.cancel':
+      return executePluginHttp(pluginId, op, args, beforeSend);
     case 'shell.openExternal': {
       const url = requireString(args, 'url');
       await pluginService.pluginOpenExternal(pluginId, url);
@@ -260,7 +270,7 @@ export async function executeHostApi(
       return clipboardReadText();
     }
     case 'clipboard.writeText': {
-      await clipboardWriteText(requireMaxChars(requireString(args, 'text'), 'text', MAX_CLIPBOARD_CHARS));
+      await clipboardWriteText(requireText(args, 'text'));
       return null;
     }
     case 'storage.get': {
@@ -312,6 +322,32 @@ function requireString(args: unknown, field: string): string {
     throw new Error(`参数 ${field} 必须是非空字符串`);
   }
   return v;
+}
+
+/** 字符串字段，允许空串（clipboard.writeText 等空内容写入）。 */
+function requireText(args: unknown, field: string): string {
+  const obj = requireObject(args);
+  const v = obj[field];
+  if (typeof v !== 'string') throw new Error(`参数 ${field} 必须为字符串`);
+  return v;
+}
+
+/** 二进制写入接受 Uint8Array 或 ArrayBuffer（结构化克隆后仍是二者之一）。 */
+function bytesToBase64(value: unknown): string {
+  let bytes: Uint8Array;
+  if (value instanceof Uint8Array) {
+    bytes = value;
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value);
+  } else {
+    throw new Error('参数 bytes 必须为 Uint8Array 或 ArrayBuffer');
+  }
+  let binary = '';
+  // 分块避免大数组触发 String.fromCharCode 参数上限。
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
 }
 
 /** session.post 签名（transfer 支持 ArrayBuffer 零拷贝）。 */

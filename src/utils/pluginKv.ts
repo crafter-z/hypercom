@@ -6,11 +6,10 @@
  * 且避开「启动快照陷阱」issue #5-2）。经后端 `write_plugin_asset`（限 data/）/
  * `read_plugin_asset` 读写。
  *
- * v1 实现：整体读写 state.json（单文件，KV 量小；写时整体替换）。读缓存
- * 内存 Map 避免每 get 一次 RPC；set 后同步写盘（防丢失）。
+ * v1 实现：整体读写 state.json（写时整体替换）。读缓存内存 Map 避免每
+ * get 一次 RPC；set 后同步写盘（防丢失）。
  */
 import { pluginService } from '../services/tauri';
-import { boundedPluginViewJson } from './pluginViewJson';
 
 /** 内存缓存：pluginId → Map<key, value>（读盘后缓存；写盘后更新）。 */
 const cache = new Map<string, Map<string, unknown>>();
@@ -19,11 +18,72 @@ const writes = new Map<string, Promise<void>>();
 const generations = new Map<string, number>();
 
 const STATE_FILE = 'data/state.json';
-/** Per-value / whole-file bounds: the backend accepts one 16 MiB write, and
- *  storage must stay a JSON document rather than a serialized JS heap. */
-const MAX_KV_VALUE_BYTES = 256 * 1024;
-const MAX_KV_FILE_BYTES = 4 * 1024 * 1024;
-const MAX_KV_KEY_CHARS = 512;
+
+/**
+ * KV 仍只接受 JSON 值（storage.get 返回与 set 相同的形状）。但不设内容/节点/
+ * 键长上限——插件数据大小由用户/后端决定。这里只拒绝 JSON 无法无损表达的
+ * 值：非有限数字、函数/undefined/符号/BigInt、带 getter 的对象、循环引用。
+ * 用显式栈遍历，避免深层嵌套触发调用栈溢出。
+ */
+function assertJsonValue(root: unknown): void {
+  if (root === undefined) return;
+  const ancestors = new Set<object>();
+  type Frame = { value: unknown; exit: false } | { value: object; exit: true };
+  const stack: Frame[] = [{ value: root, exit: false }];
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    if (!frame) break;
+    if (frame.exit) {
+      ancestors.delete(frame.value);
+      continue;
+    }
+    const item = frame.value;
+    if (item === null || typeof item === 'boolean' || typeof item === 'string') continue;
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item)) throw new Error('plugin storage numbers must be finite');
+      continue;
+    }
+    if (typeof item !== 'object') throw new Error('plugin storage accepts JSON values only');
+    const object = item as object;
+    const prototype = Object.getPrototypeOf(object);
+    if (!Array.isArray(item) && prototype !== Object.prototype && prototype !== null) {
+      throw new Error('plugin storage accepts JSON values only');
+    }
+    // JSON.stringify invokes a callable toJSON and would change the stored
+    // shape; a non-callable toJSON is ordinary data and stays allowed.
+    const toJson = Object.getOwnPropertyDescriptor(object, 'toJSON');
+    if (toJson && (!('value' in toJson) || typeof toJson.value === 'function')) {
+      throw new Error('plugin storage must not contain callable toJSON');
+    }
+    if (ancestors.has(object)) throw new Error('plugin storage must not contain cycles');
+    ancestors.add(object);
+    stack.push({ value: object, exit: true });
+    if (Array.isArray(item)) {
+      for (let index = 0; index < item.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(item, index);
+        if (!descriptor) {
+          throw new Error('plugin storage accepts JSON values only');
+        }
+        if (!('value' in descriptor)) throw new Error('plugin storage must not contain getters');
+        stack.push({ value: descriptor.value, exit: false });
+      }
+    } else {
+      for (const key of Object.keys(object)) {
+        const descriptor = Object.getOwnPropertyDescriptor(object, key);
+        if (!descriptor) continue;
+        if (!('value' in descriptor)) throw new Error('plugin storage must not contain getters');
+        stack.push({ value: descriptor.value, exit: false });
+      }
+    }
+  }
+}
+
+/** 校验并归一化为持久化 JSON 形状（同一次 set 的 cache 与磁盘一致）。 */
+function normalizeKvValue(value: unknown): unknown {
+  assertJsonValue(value);
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
 
 /** 读取插件 KV 值（无 → undefined）。 */
 export async function get(pluginId: string, key: string): Promise<unknown> {
@@ -34,11 +94,11 @@ export async function get(pluginId: string, key: string): Promise<unknown> {
 /** 写入插件 KV（value 必须 JSON 可序列化）。写盘整体替换。 */
 export async function set(pluginId: string, key: string, value: unknown, beforeSend?: () => void): Promise<void> {
   beforeSend?.();
-  if (key.length === 0 || key.length > MAX_KV_KEY_CHARS) throw new Error('plugin storage key invalid');
-  // Structured clone lets Map/Set/Date/typed arrays through JSON.stringify as
-  // `{}`/index objects. Reject non-JSON values here so storage.get returns the
-  // same shape the plugin stored (documented contract).
-  const normalized = value === undefined ? undefined : boundedPluginViewJson(value, MAX_KV_VALUE_BYTES).value;
+  if (key.length === 0) throw new Error('plugin storage key invalid');
+  // JSON.stringify lets Map/Set/Date/typed arrays through as `{}`/index objects.
+  // Reject non-JSON values here so storage.get returns the same shape the
+  // plugin stored (documented contract).
+  const normalized = normalizeKvValue(value);
   const generation = generations.get(pluginId) ?? 0;
   const loaded = await load(pluginId);
   beforeSend?.();
@@ -52,9 +112,6 @@ export async function set(pluginId: string, key: string, value: unknown, beforeS
     if (value === undefined) candidate.delete(key);
     else candidate.set(key, normalized);
     const snapshot = JSON.stringify(Object.fromEntries(candidate), null, 2);
-    if (new TextEncoder().encode(snapshot).byteLength > MAX_KV_FILE_BYTES) {
-      throw new Error('plugin storage capacity exceeded');
-    }
     beforeSend?.();
     await pluginService.writePluginAsset(pluginId, STATE_FILE, snapshot);
     if (generation === (generations.get(pluginId) ?? 0)) cache.set(pluginId, candidate);

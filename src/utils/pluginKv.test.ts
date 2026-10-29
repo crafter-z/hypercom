@@ -215,6 +215,61 @@ describe('pluginKv（评审 v2 D6/P2：KV 存 data/state.json 不落 config）',
     expect(mockWrite).toHaveBeenCalledTimes(1);
   });
 
+  it('stores values and keys well beyond the old size limits without truncation', async () => {
+    mockRead.mockResolvedValue(null);
+    const key = 'k'.repeat(4096);
+    const large = '数'.repeat(4 * 1024 * 1024);
+    await pluginKv.set('com.example.test', key, { large, nested: { list: [1, 2, 3] } });
+    expect(await pluginKv.get('com.example.test', key)).toEqual({ large, nested: { list: [1, 2, 3] } });
+    const snapshot: unknown = JSON.parse(mockWrite.mock.calls[0][2] as string);
+    expect(snapshot).toEqual({ [key]: { large, nested: { list: [1, 2, 3] } } });
+  });
+
+  it.each([
+    ['Map', new Map([['a', 1]])],
+    ['Set', new Set([1])],
+    ['Date', new Date(0)],
+    ['Uint8Array', new Uint8Array([1, 2])],
+    ['function', () => 1],
+    ['nested undefined', { a: undefined }],
+    ['NaN', { n: Number.NaN }],
+    ['Infinity', [Number.POSITIVE_INFINITY]],
+    ['BigInt', { n: BigInt(1) }],
+    ['sparse array', new Array(2)],
+  ])('rejects non-JSON %s values without writing', async (_label, value) => {
+    mockRead.mockResolvedValue('{"saved":true}');
+    await expect(pluginKv.set('com.example.test', 'bad', value)).rejects.toThrow('plugin storage');
+    expect(mockWrite).not.toHaveBeenCalled();
+    expect(await pluginKv.get('com.example.test', 'saved')).toBe(true);
+  });
+
+  it('rejects cyclic values, getters and toJSON without writing', async () => {
+    mockRead.mockResolvedValue('{}');
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    await expect(pluginKv.set('com.example.test', 'cycle', cyclic)).rejects.toThrow('cycles');
+    const getter = {};
+    Object.defineProperty(getter, 'value', { enumerable: true, get: () => 1 });
+    await expect(pluginKv.set('com.example.test', 'getter', getter)).rejects.toThrow('getters');
+    await expect(pluginKv.set('com.example.test', 'toJSON', { toJSON: () => 1 })).rejects.toThrow('toJSON');
+    expect(mockWrite).not.toHaveBeenCalled();
+  });
+
+  it('accepts non-callable toJSON values as ordinary JSON data', async () => {
+    mockRead.mockResolvedValue(null);
+    const value = { toJSON: 'text', nested: { toJSON: 1 } };
+    await pluginKv.set('com.example.test', 'literal', value);
+    expect(await pluginKv.get('com.example.test', 'literal')).toEqual(value);
+    expect(mockWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a repeated, non-cyclic reference as a cycle', async () => {
+    mockRead.mockResolvedValue(null);
+    const shared = { value: 1 };
+    await pluginKv.set('com.example.test', 'shared', { left: shared, right: shared });
+    expect(await pluginKv.get('com.example.test', 'shared')).toEqual({ left: { value: 1 }, right: { value: 1 } });
+  });
+
   it('keeps the last committed snapshot after a failed write and continues the queue', async () => {
     mockRead.mockResolvedValue('{"saved":true}');
     mockWrite.mockRejectedValueOnce(new Error('disk full'));
