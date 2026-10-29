@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
 import { PluginHostManager, PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CONTROL_MESSAGES, MAX_PENDING_EVENT_BYTES } from './pluginHost';
 import { executeHostApi } from './pluginHostApi';
+import { cancelPluginHttp } from './pluginHttp';
 import { resetPluginSnapshotForTest, syncStorePluginConfigs } from './pluginConfigSnapshot';
 
 const readAsset = vi.fn();
@@ -13,6 +14,7 @@ vi.mock('../services/tauri', () => ({
   },
 }));
 vi.mock('./pluginHostApi', () => ({ executeHostApi: vi.fn().mockResolvedValue('response') }));
+vi.mock('./pluginHttp', () => ({ cancelPluginHttp: vi.fn() }));
 
 const pluginId = 'com.example.worker';
 const manifest = { id: pluginId, name: 'Worker', entry: 'dist/entry.js', permissions: [], serial: { portWhitelist: [] } };
@@ -42,6 +44,7 @@ beforeEach(() => {
   disable.mockReset();
   vi.mocked(executeHostApi).mockReset();
   vi.mocked(executeHostApi).mockResolvedValue('response');
+  vi.mocked(cancelPluginHttp).mockReset();
   vi.stubGlobal('Worker', TestWorker);
   vi.stubGlobal('URL', {
     createObjectURL: vi.fn(() => 'blob:plugin'),
@@ -166,25 +169,29 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
-  it('keeps a deferred HTTP operation and a user-controlled file dialog alive', async () => {
+  it('keeps slow file reads and user-controlled dialogs alive beyond ordinary deadlines', async () => {
     vi.useFakeTimers();
-    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request', 'fs:open'] }] });
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request', 'fs:open', 'fs:assets'] }] });
     const http = deferredResult<unknown>();
     const dialog = deferredResult<unknown>();
-    vi.mocked(executeHostApi).mockImplementation((_id, op) => op === 'http.request' ? http.promise : dialog.promise);
+    const read = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation((_id, op) => op === 'http.request' ? http.promise : op === 'fs.read' ? read.promise : dialog.promise);
     const session = new PluginSession(pluginId);
     await session.start();
     const worker = TestWorker.created[0];
     worker.emit({ seq: 1, op: 'http.request', args: {} });
     worker.emit({ seq: 2, op: 'fs.openDialog', args: {} });
+    worker.emit({ seq: 3, op: 'fs.read', args: { rel: 'assets/large.txt' } });
     await vi.advanceTimersByTimeAsync(15_500);
     http.resolve('http success');
     await Promise.resolve();
     expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: true, result: 'http success' });
     await vi.advanceTimersByTimeAsync(60_000);
-    dialog.resolve('selected');
+    dialog.resolve({ files: [] });
+    read.resolve('large file completed');
     await Promise.resolve();
-    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: 'selected' });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: { files: [] } });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 3, ok: true, result: 'large file completed' });
     session.stop();
   });
 
@@ -233,7 +240,8 @@ describe('PluginSession worker lifetime', () => {
     const oldWorker = TestWorker.created[0];
     oldWorker.emit({ seq: 1, op: 'ports.list' });
     oldWorker.onerror?.({ message: 'worker error' });
-    await vi.advanceTimersByTimeAsync(101);
+    await vi.runOnlyPendingTimersAsync();
+    await vi.advanceTimersByTimeAsync(0);
     const replacement = TestWorker.created[1];
     for (let seq = 1; seq <= MAX_PENDING_MESSAGES; seq++) replacement.emit({ seq, op: 'ports.list' });
     await Promise.resolve();
@@ -370,11 +378,12 @@ describe('PluginSession worker lifetime', () => {
       worker.onerror?.({ message: 'boom' });
       expect(worker.terminate).toHaveBeenCalledOnce();
       if (i < 2) {
-        await vi.advanceTimersByTimeAsync(101);
+        await vi.runOnlyPendingTimersAsync();
+        await vi.advanceTimersByTimeAsync(0);
         expect(TestWorker.created).toHaveLength(i + 2);
       }
     }
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     expect(disable).toHaveBeenCalledOnce();
     expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(false);
   });
@@ -476,5 +485,187 @@ describe('PluginHostManager startup recovery', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(manager.get(pluginId)?.loaded).toBe(true);
     manager.dispose();
+  });
+});
+
+describe('optional Worker and error grading', () => {
+  const trustedView = {
+    id: 'panel', label: 'Panel', entry: 'index.html', mode: 'trusted-web',
+    styles: [], assets: [], modes: ['trx'], placements: ['workspace-tab'],
+    input: 'none', portBinding: 'none', restoreOnStartup: false, worker: false,
+  };
+  const pureManifest = {
+    id: pluginId, name: 'Pure HTML', entry: '', permissions: [],
+    ui: { buttons: [], menuItems: [], views: [trustedView] },
+  };
+
+  it('never constructs a Worker for a manifest without an entry', async () => {
+    readAsset.mockImplementationOnce(() => Promise.resolve(JSON.stringify(pureManifest)));
+    const session = new PluginSession(pluginId);
+    await session.start();
+    expect(session.loaded).toBe(false);
+    expect(TestWorker.created).toEqual([]);
+    expect(readAsset).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an empty entry that still declares Worker-only UI', async () => {
+    readAsset.mockImplementationOnce(() => Promise.resolve(JSON.stringify({
+      ...pureManifest, ui: { buttons: [{ id: 'b', label: 'B' }], menuItems: [], views: [trustedView] },
+    })));
+    await expect(new PluginSession(pluginId).start()).rejects.toThrow('invalid plugin manifest');
+    expect(TestWorker.created).toEqual([]);
+  });
+
+  it('keeps the worker and its in-memory state after post-ready runtime errors', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ type: '__plugin_ready' });
+    worker.onerror?.({ message: 'async boom' });
+    worker.emit({ type: '__plugin_error', payload: { message: 'rejection boom' } });
+    expect(worker.terminate).not.toHaveBeenCalled();
+    expect(session.loaded).toBe(true);
+    expect(disable).not.toHaveBeenCalled();
+    session.stop();
+  });
+
+  it('cancels owned HTTP requests on stop', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    session.stop();
+    expect(cancelPluginHttp).toHaveBeenCalledWith(pluginId);
+  });
+});
+
+describe('PluginHostManager reload', () => {
+  it('restarts the current config with a strictly newer session epoch', async () => {
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    const oldSession = manager.get(pluginId)!;
+    const oldEpoch = oldSession.epoch;
+    const oldWorker = TestWorker.created[0];
+    const reloading = manager.reload(pluginId);
+    await vi.waitFor(() => expect(TestWorker.created).toHaveLength(2));
+    TestWorker.created[1].emit({ type: '__plugin_ready' });
+    await reloading;
+    expect(oldWorker.terminate).toHaveBeenCalledOnce();
+    expect(manager.get(pluginId)!.epoch).toBeGreaterThan(oldEpoch);
+    expect(manager.get(pluginId)!.loaded).toBe(true);
+    manager.dispose();
+  });
+
+  it('rejects an explicit reload when startup fails before ready', async () => {
+    const manager = new PluginHostManager();
+    await manager.enable(pluginId);
+    const reloading = manager.reload(pluginId);
+    await vi.waitFor(() => expect(TestWorker.created).toHaveLength(2));
+    TestWorker.created[1].onerror?.({ message: 'parse failed' });
+    await expect(reloading).rejects.toThrow('parse failed');
+    manager.dispose();
+  });
+
+  it('resolves a no-op reload for disabled plugins', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, enabled: false }] });
+    const manager = new PluginHostManager();
+    await expect(manager.reload(pluginId)).resolves.toBeUndefined();
+    expect(manager.get(pluginId)).toBeNull();
+    expect(TestWorker.created).toEqual([]);
+  });
+
+  it('resolves reload for pure-HTML plugins without constructing a Worker', async () => {
+    readAsset.mockImplementation(() => Promise.resolve(JSON.stringify({
+      id: pluginId, name: 'Pure HTML', entry: '', permissions: [],
+      ui: {
+        buttons: [], menuItems: [],
+        views: [{
+          id: 'panel', label: 'Panel', entry: 'index.html', mode: 'trusted-web',
+          styles: [], assets: [], modes: ['trx'], placements: ['workspace-tab'],
+          input: 'none', portBinding: 'none', restoreOnStartup: false, worker: false,
+        }],
+      },
+    })));
+    const manager = new PluginHostManager();
+    await expect(manager.reload(pluginId)).resolves.toBeUndefined();
+    expect(TestWorker.created).toEqual([]);
+    manager.dispose();
+  });
+});
+
+describe('PluginSession HTTP cancellation and binary view transport', () => {
+  it('admits http.cancel even when every ordinary RPC slot is occupied', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request'] }] });
+    vi.mocked(executeHostApi).mockImplementation(() => new Promise(() => {}));
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    for (let seq = 1; seq <= MAX_PENDING_MESSAGES; seq++) worker.emit({ seq, op: 'ports.list' });
+    worker.emit({ seq: 500, op: 'http.cancel', args: { requestId: 'request' } });
+    expect(worker.postMessage).not.toHaveBeenCalledWith({ seq: 500, ok: false, error: 'plugin RPC capacity exceeded' });
+    expect(vi.mocked(executeHostApi).mock.calls.some((call) => call[1] === 'http.cancel')).toBe(true);
+    session.stop();
+  });
+
+  it('resolves postViewBinary only after the bridge ack and rejects on handler error', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    const payload = {
+      instanceId: 'view-a', transferId: 't1', type: 'data',
+      bytes: new Uint8Array([4, 5]), documentId: 'doc-a',
+    };
+    const pending = session.postViewBinary(payload);
+    const sent = worker.postMessage.mock.calls
+      .map(([message]) => message as { type?: string; eventId?: number; payload?: unknown })
+      .find((message) => message.type === 'view.binary')!;
+    expect(sent.payload).toEqual(payload);
+    worker.emit({ eventAck: sent.eventId, ok: true });
+    await expect(pending).resolves.toBeUndefined();
+
+    const failing = session.postViewBinary({ ...payload, transferId: 't2' });
+    const binaryMessages = worker.postMessage.mock.calls
+      .map(([message]) => message as { type?: string; eventId?: number })
+      .filter((message) => message.type === 'view.binary');
+    const failedSent = binaryMessages[binaryMessages.length - 1];
+    worker.emit({ eventAck: failedSent.eventId, ok: false, error: 'ui handler failed' });
+    await expect(failing).rejects.toThrow('ui handler failed');
+    session.stop();
+  });
+
+  it('rejects pending binary sends when the worker stops', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const pending = session.postViewBinary({
+      instanceId: 'view-a', transferId: 't1', type: 'data',
+      bytes: new Uint8Array([1]), documentId: 'doc-a',
+    });
+    session.stop();
+    await expect(pending).rejects.toThrow('plugin worker stopped');
+  });
+});
+
+describe('PluginSession document-scoped binary cancellation', () => {
+  it('rejects only transfers of the replaced document and releases their slots', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    const oldDocument = session.postViewBinary({
+      instanceId: 'view-a', transferId: 'old', type: 'data',
+      bytes: new Uint8Array([1]), documentId: 'doc-old',
+    });
+    const newDocument = session.postViewBinary({
+      instanceId: 'view-a', transferId: 'new', type: 'data',
+      bytes: new Uint8Array([2]), documentId: 'doc-new',
+    });
+    const sent = worker.postMessage.mock.calls
+      .map(([message]) => message as { type?: string; eventId?: number; payload?: { documentId?: string } })
+      .filter((message) => message.type === 'view.binary');
+    const oldEvent = sent.find((message) => message.payload?.documentId === 'doc-old')!;
+    const newEvent = sent.find((message) => message.payload?.documentId === 'doc-new')!;
+    session.cancelViewBinary('view-a', 'doc-old');
+    await expect(oldDocument).rejects.toThrow('view document changed');
+    worker.emit({ eventAck: oldEvent.eventId, ok: true });
+    worker.emit({ eventAck: newEvent.eventId, ok: true });
+    await expect(newDocument).resolves.toBeUndefined();
+    session.stop();
   });
 });

@@ -35,8 +35,11 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 用户经系统对话框显式选择的任意文件读取（死机日志 map 等；对话框即信任边界）。
   // 单列 fs:open——与「仅读自身资产」的 fs:assets 语义分离，避免资产授权隐式升级。
   'fs.openDialog': 'fs:open',
-  // 出站（敏感，唯一合法通道）
+  // 出站（敏感，唯一合法通道）。open/read/cancel 是同一请求的拉取原语。
   'http.request': 'http:request',
+  'http.open': 'http:request',
+  'http.read': 'http:request',
+  'http.cancel': 'http:request',
   // shell
   'shell.openExternal': 'shell:open',
   // 剪贴板
@@ -54,6 +57,7 @@ export const OP_PERMISSIONS: PermissionMap = {
   'ui.panel.export': null,
   'view.publish': 'ui:view',
   'view.sendSerial': 'ui:view',
+  'view.sendBinary': 'ui:view',
   'tabs.open': 'ui:tabs',
   'tabs.activate': 'ui:tabs',
   'tabs.close': 'ui:tabs',

@@ -20,7 +20,7 @@ export function syncStorePluginConfigs(snapshot: PluginStateSnapshot): boolean {
   pluginViews = pluginViews.flatMap((view) => {
     const entry = snapshot.pluginConfigs.find((plugin) => plugin.id === view.id);
     if (!entry || entry.installGeneration !== view.installGeneration) return [];
-    return [{ ...view, enabled: entry.enabled, grantedPermissions: entry.grantedPermissions }];
+    return [{ ...view, enabled: entry.enabled, grantedPermissions: entry.grantedPermissions, trustedWebGranted: entry.trustedWebGranted === true }];
   });
   state.setConfig({ revision: snapshot.revision, pluginConfigs: snapshot.pluginConfigs });
   rebuildPluginUi(pluginViews);

@@ -21,8 +21,9 @@ import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
-import { PLUGIN_HTTP_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
+import { hasNoRpcDeadline, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
 import { executeHostApi } from './pluginHostApi';
+import { cancelPluginHttp } from './pluginHttp';
 import { checkOpAllowed } from './pluginRpc';
 import { removePluginPanel } from './pluginPanelRegistry';
 import { PluginLogQuota } from './pluginLogQuota';
@@ -38,6 +39,8 @@ export const MAX_PENDING_MESSAGES = 32;
 export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
 /** Control traffic has its own acknowledgement slots and bounded overflow queue, independent of RX. */
 export const MAX_PENDING_CONTROL_MESSAGES = 32;
+/** Process-wide epoch source so a reloaded session never reuses view epochs. */
+let workerEpochSeq = 0;
 
 const sessionListeners = new Set<() => void>();
 export function subscribePluginSessions(listener: () => void): () => void {
@@ -59,14 +62,17 @@ function normalizeManifest(value: unknown, pluginId: string): PluginManifestView
     item !== null && typeof item === 'object' && !Array.isArray(item);
   const strings = (items: unknown): items is string[] =>
     Array.isArray(items) && items.every((item) => typeof item === 'string');
-  if (!isObject(value) || value.id !== pluginId || typeof value.entry !== 'string' ||
-    !value.entry.trim() || !strings(value.permissions)) return invalid();
-  const path = value.entry.replace(/\\/g, '/');
-  if (path.startsWith('/') || /^[a-z]:/i.test(path)) return invalid();
-  const parts = path.split('/');
-  if (parts.includes('..')) return invalid();
-  const entry = parts.filter((part) => part !== '' && part !== '.').join('/');
-  if (!entry) return invalid();
+  if (!isObject(value) || value.id !== pluginId || !strings(value.permissions)) return invalid();
+  if (value.entry !== undefined && typeof value.entry !== 'string') return invalid();
+  let entry = '';
+  if (typeof value.entry === 'string' && value.entry.trim()) {
+    const path = value.entry.replace(/\\/g, '/');
+    if (path.startsWith('/') || /^[a-z]:/i.test(path)) return invalid();
+    const parts = path.split('/');
+    if (parts.includes('..')) return invalid();
+    entry = parts.filter((part) => part !== '' && part !== '.').join('/');
+    if (!entry) return invalid();
+  }
   const normalized: Record<string, unknown> = { ...value, entry };
   if (value.requires != null && !strings(value.requires)) return invalid();
   for (const [scope, member] of [
@@ -83,31 +89,53 @@ function normalizeManifest(value: unknown, pluginId: string): PluginManifestView
     }
   }
   if (value.ui == null) {
+    // No Worker requires an explicit nonempty trusted-web view set.
+    if (!entry) return invalid();
     normalized.ui = undefined;
   } else {
     if (!isObject(value.ui)) return invalid();
     const ui: Record<string, unknown> = { ...value.ui };
+    let workerOnlyUiCount = 0;
     for (const key of ['buttons', 'menuItems']) {
       const items = value.ui[key] === undefined ? [] : value.ui[key];
       if (!Array.isArray(items)) return invalid();
-      ui[key] = items.map((item: unknown) => {
+      const mapped = items.map((item: unknown) => {
         if (!isObject(item) || typeof item.id !== 'string' || typeof item.label !== 'string' ||
           (item.target != null && typeof item.target !== 'string') ||
           (key === 'buttons' && item.icon != null && typeof item.icon !== 'string')) return invalid();
         return { ...item, target: item.target ?? undefined, ...(key === 'buttons' ? { icon: item.icon ?? undefined } : {}) };
       });
+      workerOnlyUiCount += mapped.length;
+      ui[key] = mapped;
     }
     const views = value.ui.views ?? [];
     if (!Array.isArray(views)) return invalid();
-    ui.views = views.map((item: unknown) => {
+    const normalizedViews = views.map((item: unknown) => {
       if (!isObject(item) || typeof item.id !== 'string' || typeof item.label !== 'string' ||
         typeof item.entry !== 'string' || !strings(item.styles ?? []) || !strings(item.assets ?? []) ||
         !strings(item.modes) || !strings(item.placements) ||
         !['bytes', 'lines', 'none'].includes(String(item.input)) ||
-        !['required', 'optional', 'none'].includes(String(item.portBinding))) return invalid();
-      return { ...item, styles: item.styles ?? [], assets: item.assets ?? [], restoreOnStartup: item.restoreOnStartup === true };
+        !['required', 'optional', 'none'].includes(String(item.portBinding)) ||
+        (item.worker !== undefined && typeof item.worker !== 'boolean')) return invalid();
+      const mode = item.mode ?? 'isolated';
+      if (mode !== 'isolated' && mode !== 'trusted-web') return invalid();
+      // worker:false is only meaningful for an independent trusted-web page.
+      if (item.worker === false && (mode !== 'trusted-web' || item.input !== 'none')) return invalid();
+      return {
+        ...item, mode, input: item.input, portBinding: item.portBinding,
+        styles: item.styles ?? [], assets: item.assets ?? [],
+        restoreOnStartup: item.restoreOnStartup === true,
+        worker: item.worker === undefined ? undefined : item.worker === true,
+      };
     });
+    ui.views = normalizedViews;
     normalized.ui = ui;
+    if (!entry) {
+      // No Worker: only independent trusted-web pages may remain.
+      if (workerOnlyUiCount > 0) return invalid();
+      if (normalizedViews.length === 0 ||
+        normalizedViews.some((view) => view.mode !== 'trusted-web' || view.input !== 'none')) return invalid();
+    }
   }
   return normalized as unknown as PluginManifestView;
 }
@@ -126,6 +154,23 @@ export class PluginSession {
   private manifest: PluginManifestView | null = null;
   private generation = 0;
   private starting: Promise<void> | null = null;
+  /** Bridge posted __plugin_ready after synchronous user initialization. */
+  private ready = false;
+  /** Settles when the current start attempt reaches __plugin_ready (or fails). */
+  private readiness: Promise<void> | null = null;
+  private readyResolve: (() => void) | null = null;
+  private readyReject: ((error: Error) => void) | null = null;
+  /** Manifest declares no Worker entry (pure trusted-web plugin). */
+  private noWorker = false;
+  /** Host→Worker binary view transfers awaiting the bridge ack. */
+  private readonly pendingBinary = new Map<number, {
+    instanceId: string;
+    documentId: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }>();
+  /** Monotonic per-session epoch; a restart never reuses an old view's epoch. */
+  private readonly epochBase = ++workerEpochSeq;
   private readonly eventsInFlight = new Map<number, number>();
   private readonly controlsInFlight = new Set<number>();
   private readonly pendingControls: Array<{ message: { type: string; payload?: unknown }; transfer?: Transferable[] }> = [];
@@ -153,24 +198,67 @@ export class PluginSession {
     return this.worker !== null;
   }
 
-  get epoch(): number { return this.generation; }
+  get epoch(): number { return this.epochBase + this.generation; }
+
+  private settleReady(error?: Error): void {
+    const resolve = this.readyResolve;
+    const reject = this.readyReject;
+    this.readyResolve = null;
+    this.readyReject = null;
+    if (error) reject?.(error);
+    else resolve?.();
+  }
+
+  /**
+   * Start and wait for the current worker to finish synchronous initialization.
+   * Rejects on load/parse/startup failure instead of resolving into a scheduled
+   * retry; used by explicit reload.
+   */
+  async startReady(callbacks?: PluginHostCallbacks): Promise<void> {
+    await this.start(callbacks);
+    if (this.noWorker || this.ready) return;
+    if (!this.readiness) throw new Error('plugin worker not started');
+    await this.readiness;
+  }
 
   /** Enable and load the worker; every await checks whether this start was cancelled. */
   async start(callbacks?: PluginHostCallbacks): Promise<void> {
-    if (this.worker) return;
+    if (this.worker || this.noWorker) return;
     if (this.starting) return this.starting;
     if (this.restartTimer !== null) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
     const generation = ++this.generation;
+    this.readiness = new Promise<void>((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
+    });
+    // Normal enable does not await readiness; keep fatal settlement from surfacing
+    // as an unhandled rejection.
+    void this.readiness.catch(() => undefined);
     const start = async (): Promise<void> => {
+      try {
       const raw = await pluginService.readPluginAsset(this.pluginId, 'manifest.json');
-      if (generation !== this.generation || !this.isCurrentInstallation()) return;
+      if (generation !== this.generation || !this.isCurrentInstallation()) {
+        this.settleReady(new Error('plugin start cancelled'));
+        return;
+      }
       if (raw === null) throw new Error('plugin manifest missing');
       const manifest = normalizeManifest(JSON.parse(raw), this.pluginId);
+      if (!manifest.entry) {
+        // Pure trusted-web plugin: no fake/empty Worker is ever constructed.
+        this.manifest = manifest;
+        this.noWorker = true;
+        this.settleReady();
+        notifySessionListeners();
+        return;
+      }
       const userCode = await pluginService.readPluginAsset(this.pluginId, manifest.entry);
-      if (generation !== this.generation || !this.isCurrentInstallation()) return;
+      if (generation !== this.generation || !this.isCurrentInstallation()) {
+        this.settleReady(new Error('plugin start cancelled'));
+        return;
+      }
       if (userCode === null) throw new Error('plugin entry missing');
       const blob = new Blob([wrapPluginCode(userCode)], { type: 'application/javascript' });
       const url = URL.createObjectURL(blob);
@@ -182,15 +270,22 @@ export class PluginSession {
       }
       if (generation !== this.generation || !this.isCurrentInstallation()) {
         worker.terminate();
+        this.settleReady(new Error('plugin start cancelled'));
         return;
       }
       this.manifest = manifest;
+      this.ready = false;
       this.worker = worker;
       worker.onmessage = (ev: MessageEvent) => {
         if (this.worker !== worker) return;
-        const msg = ev.data as { seq?: number; op?: string; type?: string; payload?: unknown; eventAck?: number; args?: unknown };
+        const msg = ev.data as {
+          seq?: number; op?: string; type?: string; payload?: unknown;
+          eventAck?: number; args?: unknown; ok?: boolean; error?: string;
+        };
         if (!msg) return;
         if (typeof msg.eventAck === 'number') {
+          const binary = this.pendingBinary.get(msg.eventAck);
+          if (binary) this.pendingBinary.delete(msg.eventAck);
           const bytes = this.eventsInFlight.get(msg.eventAck);
           if (bytes !== undefined) {
             this.eventsInFlight.delete(msg.eventAck);
@@ -202,10 +297,23 @@ export class PluginSession {
               this.droppedRxEvents = false;
             }
           }
+          if (binary) {
+            if (msg.ok === false) binary.reject(new Error(msg.error || 'view binary transfer failed'));
+            else binary.resolve();
+          }
         } else if (typeof msg.op === 'string') {
           void this.handleWorkerRequest(worker, msg as { seq: number; op: string; args?: unknown });
-        } else if (msg.type === '__plugin_crash') {
-          void this.handleCrash(String(msg.payload ?? 'unhandled rejection'), callbacks);
+        } else if (msg.type === '__plugin_ready') {
+          this.ready = true;
+          this.settleReady();
+        } else if (msg.type === '__plugin_error') {
+          // Ordinary post-ready async failures are diagnostics; the session lives.
+          const reason = msg.payload;
+          this.reportRuntimeError(
+            reason !== null && typeof reason === 'object' && 'message' in reason
+              ? String(reason.message ?? 'unhandled rejection')
+              : String(reason ?? 'unhandled rejection'),
+          );
         } else if (msg.type === '__plugin_view_error') {
           const payload = msg.payload as { instanceId?: unknown; error?: unknown } | null;
           if (payload && typeof payload.instanceId === 'string') {
@@ -220,10 +328,22 @@ export class PluginSession {
         }
       };
       worker.onerror = (e) => {
-        if (this.worker === worker) void this.handleCrash(e.message || 'worker error', callbacks);
+        if (this.worker !== worker) return;
+        // Before __plugin_ready this is a fatal load/parse/startup failure; after
+        // it, an uncaught runtime error is reported without destroying the session.
+        if (this.ready) {
+          this.reportRuntimeError(e.message || 'worker error');
+        } else {
+          this.settleReady(new Error(e.message || 'worker error'));
+          void this.handleCrash(e.message || 'worker error', callbacks, true);
+        }
       };
       this.post({ type: 'lifecycle', payload: { state: 'enabled' } });
       notifySessionListeners();
+      } catch (error) {
+        this.settleReady(error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
     };
     const pending = start();
     this.starting = pending;
@@ -237,10 +357,15 @@ export class PluginSession {
   /** Worker → host RPC: deadlines retire reply slots, not already-started backend I/O. */
   private async handleWorkerRequest(worker: Worker, req: { seq: number; op: string; args?: unknown }): Promise<void> {
     if (!Number.isSafeInteger(req.seq) || this.worker !== worker) return;
-    const respond = (payload: { ok: boolean; result?: unknown; error?: string }): void => {
-      if (this.worker === worker) worker.postMessage({ seq: req.seq, ...payload });
+    const respond = (payload: { ok: boolean; result?: unknown; error?: string }, transfer?: Transferable[]): void => {
+      if (this.worker === worker) {
+        if (transfer) worker.postMessage({ seq: req.seq, ...payload }, transfer);
+        else worker.postMessage({ seq: req.seq, ...payload });
+      }
     };
-    if (this.retireRequests.size >= MAX_PENDING_MESSAGES) {
+    if (this.retireRequests.size >= MAX_PENDING_MESSAGES && req.op !== 'http.cancel') {
+      // Cancellation is the escape hatch for a saturated session; it must always
+      // be admitted so an aborted request cannot deadlock behind its own slots.
       respond({ ok: false, error: 'plugin RPC capacity exceeded' });
       return;
     }
@@ -254,11 +379,12 @@ export class PluginSession {
       return true;
     };
     this.retireRequests.add(retire);
-    // Native file selection/export waits for explicit user action. HTTP's backend timeout is 15s.
-    if (req.op !== 'fs.openDialog' && req.op !== 'ui.panel.export') {
+    // File reads have no size cap; native selection/export wait for the user, and
+    // HTTP waits on the network under the caller-supplied native timeout only.
+    if (!hasNoRpcDeadline(req.op)) {
       timer = setTimeout(() => {
         if (retire()) respond({ ok: false, error: 'plugin RPC timed out' });
-      }, req.op === 'http.request' ? PLUGIN_HTTP_RPC_TIMEOUT_MS : PLUGIN_RPC_TIMEOUT_MS);
+      }, PLUGIN_RPC_TIMEOUT_MS);
     }
     try {
       // Admission and queued TTY effects share the same live worker/grant authority.
@@ -271,7 +397,26 @@ export class PluginSession {
       };
       beforeSend();
       const result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest, beforeSend);
-      if (retire()) respond({ ok: true, result });
+      if (retire()) {
+        let transfer: Transferable[] | undefined;
+        if (req.op === 'fs.read' && result instanceof Uint8Array) {
+          transfer = [result.buffer];
+        } else if (req.op === 'http.read' && result !== null && typeof result === 'object' && 'bytes' in result) {
+          const { bytes } = result;
+          if (bytes instanceof Uint8Array) transfer = [bytes.buffer];
+        } else if (req.op === 'http.request' && result !== null && typeof result === 'object' && 'body' in result) {
+          const { body } = result;
+          if (body instanceof Uint8Array) transfer = [body.buffer];
+        } else if (req.op === 'fs.openDialog' && result !== null && typeof result === 'object' && 'files' in result &&
+          Array.isArray(result.files)) {
+          const files = result.files.filter(
+            (file): file is { bytes: Uint8Array } =>
+              file !== null && typeof file === 'object' && 'bytes' in file && file.bytes instanceof Uint8Array,
+          );
+          if (files.length > 0) transfer = files.map((file) => file.bytes.buffer);
+        }
+        respond({ ok: true, result }, transfer);
+      }
     } catch (e) {
       if (!active) return;
       const errMsg = e instanceof Error ? e.message : String(e);
@@ -286,7 +431,7 @@ export class PluginSession {
     }
   }
 
-  /** 停止并销毁 worker（禁用/卸载时）。 */
+  /** 停止并销毁 worker（禁用/卸载/重载时）。 */
   stop(): void {
     if (this.restartTimer !== null) {
       clearTimeout(this.restartTimer);
@@ -294,6 +439,9 @@ export class PluginSession {
     }
     this.starting = null;
     ++this.generation;
+    // Wake every native open/read owned by this session; fresh request IDs on the
+    // replacement generation are untouched.
+    cancelPluginHttp(this.pluginId);
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
@@ -301,6 +449,12 @@ export class PluginSession {
     // Stop retires old worker's slots now; a late backend completion cannot reply to a new worker.
     for (const retire of this.retireRequests) retire();
     this.manifest = null;
+    this.ready = false;
+    this.noWorker = false;
+    this.settleReady(new Error('plugin worker stopped'));
+    this.readiness = null;
+    for (const binary of this.pendingBinary.values()) binary.reject(new Error('plugin worker stopped'));
+    this.pendingBinary.clear();
     this.eventsInFlight.clear();
     this.viewEvents.clear();
     this.controlsInFlight.clear();
@@ -308,6 +462,17 @@ export class PluginSession {
     this.eventBytes = 0;
     this.droppedRxEvents = false;
     notifySessionListeners();
+  }
+
+  /** Post-ready runtime diagnostics are rate-limited and never terminate the worker. */
+  private reportRuntimeError(reason: string): void {
+    const verdict = this.errorLogQuota.tryConsume(Date.now());
+    const clean = reason.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 500);
+    if (verdict.allowed) {
+      console.error(`[pluginHost] ${this.pluginId} runtime error:`, clean);
+    } else if (verdict.warn) {
+      console.warn(`[pluginHost] ${this.pluginId} 运行时错误日志超限，已累计抑制 ${verdict.droppedTotal} 条`);
+    }
   }
 
   private isCurrentInstallation(): boolean {
@@ -358,10 +523,31 @@ export class PluginSession {
   /** Bounded delivery: RX may drop; control events reserve independent slots and queue until ACK. */
   post(message: { type: string; payload?: unknown }, transfer?: Transferable[]): boolean {
     if (!this.worker) return false;
+    if (message.type === 'view.document') {
+      // Tiny trusted control event: must never be dropped by control byte/count caps.
+      const payload = message.payload;
+      if (payload === null || typeof payload !== 'object' || !('instanceId' in payload) ||
+        !('documentId' in payload) || typeof payload.instanceId !== 'string' ||
+        typeof payload.documentId !== 'string' || !payload.instanceId) return false;
+      try {
+        return this.sendEvent(message, controlMessageBytes(message), true) !== null;
+      } catch {
+        return false;
+      }
+    }
     if (message.type === 'view.close') {
       const payload = message.payload as { instanceId?: string } | undefined;
       const instanceId = payload?.instanceId;
       if (!instanceId) return false;
+      for (const [eventId, binary] of [...this.pendingBinary]) {
+        if (binary.instanceId !== instanceId) continue;
+        this.pendingBinary.delete(eventId);
+        this.eventBytes -= this.eventsInFlight.get(eventId) ?? 0;
+        this.eventsInFlight.delete(eventId);
+        this.controlsInFlight.delete(eventId);
+        this.viewEvents.delete(eventId);
+        binary.reject(new Error('plugin view closed'));
+      }
       for (const [eventId, viewId] of this.viewEvents) {
         if (viewId !== instanceId) continue;
         this.eventBytes -= this.eventsInFlight.get(eventId) ?? 0;
@@ -384,7 +570,7 @@ export class PluginSession {
         this.pendingControls.push({ message, transfer });
         return true;
       }
-      return this.sendEvent(message, bytes, true, transfer);
+      return this.sendEvent(message, bytes, true, transfer) !== null;
     }
     let bytes = 0;
     if (message.type === 'rx.line' && Array.isArray(message.payload)) {
@@ -408,7 +594,76 @@ export class PluginSession {
       }
       return false;
     }
-    return this.sendEvent(message, bytes, false, transfer);
+    return this.sendEvent(message, bytes, false, transfer) !== null;
+  }
+
+  /**
+   * Host→Worker binary view transfer (Views-owned reassembly). Not subject to
+   * control/RX count or byte caps: the view runtime keeps one chunk in flight and
+   * waits for the bridge ack. Resolves only after async Worker binary handlers
+   * settle; rejects on handler error, view close, or worker stop.
+   */
+  postViewBinary(payload: {
+    instanceId: string;
+    transferId: string;
+    type: string;
+    bytes: Uint8Array;
+    documentId: string;
+  }): Promise<void> {
+    if (!this.worker) return Promise.reject(new Error('plugin worker not running'));
+    if (!(payload.bytes instanceof Uint8Array)) return Promise.reject(new TypeError('binary bytes required'));
+    const message = {
+      type: 'view.binary',
+      payload: {
+        instanceId: payload.instanceId,
+        transferId: payload.transferId,
+        type: payload.type,
+        bytes: payload.bytes,
+        documentId: payload.documentId,
+      },
+    };
+    const eventId = ++this.eventSeq;
+    let complete!: () => void;
+    let fail!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      complete = resolve;
+      fail = reject;
+    });
+    this.pendingBinary.set(eventId, {
+      instanceId: payload.instanceId,
+      documentId: payload.documentId,
+      resolve: complete,
+      reject: fail,
+    });
+    try {
+      // The runtime owns the reassembled buffer; transfer avoids a full-data copy.
+      const buffer = payload.bytes.buffer;
+      const transfer = buffer instanceof ArrayBuffer ? [buffer] : undefined;
+      if (this.sendEvent(message, payload.bytes.byteLength, true, transfer, eventId) === null) {
+        throw new Error('plugin worker not running');
+      }
+    } catch (error) {
+      this.pendingBinary.delete(eventId);
+      fail(error instanceof Error ? error : new Error(String(error)));
+    }
+    return promise;
+  }
+
+  /**
+   * Cancel host→Worker binary transfers for one view document (navigation /
+   * document replacement). Rejects their promises and releases event/RX slots;
+   * a late bridge ack for the retired event is ignored.
+   */
+  cancelViewBinary(instanceId: string, documentId: string): void {
+    for (const [eventId, binary] of [...this.pendingBinary]) {
+      if (binary.instanceId !== instanceId || binary.documentId !== documentId) continue;
+      this.pendingBinary.delete(eventId);
+      this.eventBytes -= this.eventsInFlight.get(eventId) ?? 0;
+      this.eventsInFlight.delete(eventId);
+      this.controlsInFlight.delete(eventId);
+      this.viewEvents.delete(eventId);
+      binary.reject(new Error('view document changed'));
+    }
   }
 
   private flushControls(): void {
@@ -425,10 +680,9 @@ export class PluginSession {
   }
 
   private sendEvent(message: { type: string; payload?: unknown }, bytes: number, control: boolean,
-    transfer?: Transferable[]): boolean {
+    transfer?: Transferable[], eventId = ++this.eventSeq): number | null {
     const worker = this.worker;
-    if (!worker) return false;
-    const eventId = ++this.eventSeq;
+    if (!worker) return null;
     this.eventsInFlight.set(eventId, bytes);
     if (message.type.startsWith('view.')) {
       const payload = message.payload as { instanceId?: string; context?: { viewInstanceId?: string } } | undefined;
@@ -439,7 +693,7 @@ export class PluginSession {
     this.eventBytes += bytes;
     try {
       worker.postMessage({ ...message, eventId }, transfer ?? []);
-      return true;
+      return eventId;
     } catch (e) {
       this.eventsInFlight.delete(eventId);
       this.viewEvents.delete(eventId);
@@ -471,6 +725,14 @@ export class PluginHostManager {
 
   /** 启用插件：建会话 + start（幂等——已启用则忽略）。 */
   async enable(pluginId: string): Promise<void> {
+    await this.startSession(pluginId, false);
+  }
+
+  /**
+   * `strict` (explicit reload) waits for Worker readiness and rejects on
+   * load/parse/startup failure instead of resolving into a scheduled retry.
+   */
+  private async startSession(pluginId: string, strict: boolean): Promise<void> {
     const pending = this.starts.get(pluginId);
     if (pending) return pending;
     let session = this.sessions.get(pluginId);
@@ -479,9 +741,11 @@ export class PluginHostManager {
       this.sessions.set(pluginId, session);
     }
     const current = session;
-    const start = current.start(this.callbacks).catch(async (error) => {
-      if (this.sessions.get(pluginId) === current) await current.recoverStartupFailure(String(error), this.callbacks);
-    });
+    const start = strict
+      ? current.startReady(this.callbacks)
+      : current.start(this.callbacks).catch(async (error) => {
+        if (this.sessions.get(pluginId) === current) await current.recoverStartupFailure(String(error), this.callbacks);
+      });
     this.starts.set(pluginId, start);
     try {
       await start;
@@ -499,6 +763,19 @@ export class PluginHostManager {
       this.starts.delete(pluginId);
     }
     removePluginPanel(pluginId);
+  }
+
+  /**
+   * Restart the current enabled configuration with a fresh Worker session.
+   * Backend reload has already retired native views/HTTP; the new session gets a
+   * new epoch. No-op (resolved) for disabled plugins; pure-HTML plugins start no
+   * Worker. Does not write config/grants.
+   */
+  async reload(pluginId: string): Promise<void> {
+    this.disable(pluginId);
+    const entry = useAppStore.getState().config.pluginConfigs?.find((plugin) => plugin.id === pluginId);
+    if (!entry?.enabled) return;
+    await this.startSession(pluginId, true);
   }
 
   /** Keep workers bound to code identity; grants may change without restarting them. */

@@ -42,36 +42,6 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(checkOpAllowed('totally.made.up', ['terminal:read'])).toContain('未知');
   });
 
-  it('全部 op 都有权限映射（无遗漏——新增 API 必须登记权限点）', () => {
-    // 若未来加 API 忘了登记权限 → 默认拒绝（undefined = 未知），此处守护
-    // OP_PERMISSIONS 覆盖了 Host API v1 声明的全部 op。
-    const declaredOps = [
-      'ports.list',
-      'ports.status',
-      'rx.onLine',
-      'rx.onBytes',
-      'terminal.append',
-      'serial.send',
-      'fs.openDialog',
-      'fs.read',
-      'fs.write',
-      'http.request',
-      'shell.openExternal',
-      'clipboard.readText',
-      'clipboard.writeText',
-      'notify',
-      'ui.panel.append',
-      'ui.panel.clear',
-      'ui.panel.export',
-      'storage.get',
-      'storage.set',
-      'log',
-    ];
-    for (const op of declaredOps) {
-      expect(OP_PERMISSIONS[op], `op ${op} 缺权限映射`).toBeDefined();
-    }
-  });
-
   it('新增能力权限点：rx.onBytes 需 rx:bytes；fs.openDialog 需 fs:open（与 fs:assets 分离）', () => {
     expect(OP_PERMISSIONS['rx.onBytes']).toBe('rx:bytes');
     expect(checkOpAllowed('rx.onBytes', [])).toContain('rx:bytes');

@@ -345,8 +345,8 @@ export interface AppConfig {
   updateCheckMode: UpdateCheckMode; // 自动检查更新模式：none | stable | preview
 
   // 插件代理（issue #17）：宿主显式给插件出站配置的 HTTP 代理。
-  // 默认空串 + 关闭（D5 隔离优先）；开启且非空时 plugin_http 用该代理（不继承宿主系统代理）。
-  pluginProxy: string;          // http://[user:pass@]host:port，''=不设
+  // 缺省空串 + 关闭：插件出站继承系统代理；开启且非空时用该代理覆盖系统代理。
+  pluginProxy: string;          // http://[user:pass@]host:port，''=不覆盖
   pluginProxyEnabled: boolean;  // 是否启用插件代理
 
   // 设置实体（全部存入 config.json）
@@ -477,7 +477,8 @@ export interface PluginManifestView {
   version: string;
   description: string;
   apiVersion: string;
-  entry: string;
+  /** Absent/empty means no Worker; only trusted-web `input: none` views may then exist. */
+  entry?: string;
   permissions: string[];
   requires?: string[];
   http?: { urlWhitelist: string[] } | null;
@@ -497,6 +498,7 @@ export interface PluginView {
   id: string;
   dir: string;
   enabled: boolean;
+  trustedWebGranted?: boolean;
   grantedPermissions: string[];
   declaredPermissions: string[];
   knownPermissions: string[];
@@ -518,20 +520,58 @@ export interface PluginListResponse extends PluginStateSnapshot {
   plugins: PluginView[];
 }
 
-/** 插件 HTTP 请求参数（后端 PluginHttpRequest）。 */
+/** Redirect handling for plugin HTTP requests (backend default: follow). */
+export type PluginHttpRedirect = 'follow' | 'manual' | 'error';
+
+/** Wire request for native plugin_http_open (raw bytes; no responseType on the wire). */
 export interface PluginHttpRequest {
-  method: string;
+  method?: string;
   url: string;
   headers?: Record<string, string>;
+  /** UTF-8 text body; mutually exclusive with bodyBase64. */
   body?: string;
+  /** Raw request bytes, base64-encoded; mutually exclusive with body. */
+  bodyBase64?: string;
+  /** Total deadline in seconds; absent or 0 means no total deadline. */
   timeout?: number;
+  redirect?: PluginHttpRedirect;
 }
 
-/** 插件 HTTP 响应（后端 PluginHttpResponse）。 */
+/** Response of native plugin_http_open (headers/status known before the body). */
+export interface PluginHttpHead {
+  requestId: string;
+  status: number;
+  headers: Record<string, string>;
+  url: string;
+}
+
+/** One pulled body chunk from native plugin_http_read. */
+export interface PluginHttpChunk {
+  base64: string;
+  done: boolean;
+}
+
+/** Fully accumulated plugin HTTP result exposed to Workers. */
 export interface PluginHttpResponse {
   status: number;
-  body: string;
-  truncated: boolean;
+  headers: Record<string, string>;
+  url: string;
+  body: string | Uint8Array;
+}
+
+/** Worker-facing options for plugin.http.request / plugin.api['http.request']. */
+export interface PluginHttpOptions {
+  method?: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string | Uint8Array | ArrayBuffer;
+  /** Seconds; absent/0 means no total deadline, positive is enforced natively. */
+  timeout?: number;
+  redirect?: PluginHttpRedirect;
+  /** Handled inside the Worker before structured cloning; never sent to the host. */
+  signal?: AbortSignal;
+  /** text (default) or binary; text decodes the complete body as UTF-8. */
+  responseType?: 'text' | 'binary';
 }
 
 /** config.json 插件状态实体（仅状态——enabled/权限；KV 存插件目录 data/）。 */
@@ -539,6 +579,7 @@ export interface PluginConfigEntry {
   id: string;
   installGeneration: string;
   enabled: boolean;
+  trustedWebGranted?: boolean;
   grantedPermissions: string[];
   installedAt?: number | null;
   source?: string | null;
