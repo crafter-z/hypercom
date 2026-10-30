@@ -27,7 +27,14 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
   const actions = useSidebarActions();
   // Exclude hidden ports so "hide" actually works for grouped ports too
   // (they reappear in the hidden section when toggled visible).
-  const groupPorts = ports.filter(p => group.portIds.includes(p.id) && !p.isHidden);
+  // Render in `group.portIds` order - that is the authoritative in-group order that
+  // drag-and-drop edits and `save_port_groups` persists. Global `ports` order only
+  // decides placement of ungrouped ports; filtering it here ignored every in-group
+  // reorder (the drop position was written but never rendered).
+  const byId = new Map(ports.map(p => [p.id, p] as const));
+  const groupPorts = group.portIds
+    .map(id => byId.get(id))
+    .filter((p): p is NonNullable<typeof p> => p !== undefined && !p.isHidden);
   const connectedCount = groupPorts.filter(p => p.status === 'connected').length;
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(group.name);

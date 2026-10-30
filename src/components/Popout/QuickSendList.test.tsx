@@ -50,6 +50,20 @@ beforeEach(() => {
 afterEach(() => { act(() => { root.unmount(); }); container.remove(); });
 
 describe('staged popout command list', () => {
+  it('flushes a numeric-only buffer before Save even when the published draft is clean', async () => {
+    const delay = container.querySelector<HTMLInputElement>('.quicksend-set-fields input[type="number"]')!;
+    act(() => { delay.focus(); type(delay, '500'); });
+    expect(current[0].loopDelay).toBe(0);
+    const saveButton = container.querySelector<HTMLButtonElement>('.quicksend-draft-actions button')!;
+    expect(saveButton.disabled).toBe(false);
+    save.mockImplementationOnce(async () => {
+      expect(current[0].loopDelay).toBe(500);
+      return false;
+    });
+    await act(async () => { saveButton.click(); });
+    expect(save).toHaveBeenCalledOnce();
+    expect(current[0].loopDelay).toBe(500);
+  });
   it('retains edited fields across set navigation, mode unmount and failed Save', async () => {
     act(() => { click('.quicksend-edit-btn'); });
     act(() => { type(container.querySelector('.quicksend-edit-form textarea') as HTMLTextAreaElement, 'unsaved text'); });

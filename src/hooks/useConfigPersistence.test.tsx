@@ -7,7 +7,7 @@ import type { AppConfig, PortMetaEntry, SendCommandSet, SerialPort } from '../ty
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { configService, storageService } from '../services/tauri';
-import { useConfigPersistence, saveCurrentPortMeta, resetOrdinaryConfigBaselineForTests, isOrdinaryConfigDirty } from './useConfigPersistence';
+import { useConfigPersistence, saveCurrentPortMeta, saveCurrentPortGroups, resetOrdinaryConfigBaselineForTests, isOrdinaryConfigDirty, discardOrdinaryConfigDraft } from './useConfigPersistence';
 import { getEntityEditorSnapshot, replaceEntityDraft, resetEntityEditorForTests } from '../utils/entityEditor';
 import { commitUpdateMode, getCommittedUpdateMode, updateTiming } from '../utils/updateService';
 import { resetStoresForTests } from '../stores/resetStores';
@@ -281,6 +281,155 @@ describe('committed update mode persistence', () => {
   });
 });
 
+describe('ordinary settings crash recovery', () => {
+  const recoveryKey = 'hypercom.editor-recovery.config';
+  it('restores only ordinary drafts against the latest baseline without committing update mode or backend settings', async () => {
+    await load();
+    const oldSize = backend.terminalFontSize;
+    useAppStore.getState().setConfig({ terminalFontSize: oldSize + 2, updateCheckMode: 'none' });
+    const recorded = JSON.parse(localStorage.getItem(recoveryKey)!);
+    for (const forbidden of ['pluginConfigs', 'sendCommandSets', 'portGroups', 'portMeta', 'portPresets', 'revision']) {
+      expect(recorded.payload.draft).not.toHaveProperty(forbidden);
+      expect(recorded.payload.baseline).not.toHaveProperty(forbidden);
+    }
+    resetOrdinaryConfigBaselineForTests(true);
+    backend = { ...backend, logDirectory: 'new backend logs', updateCheckMode: 'preview', revision: ++revision };
+    await load();
+    expect(useAppStore.getState().config.terminalFontSize).toBe(oldSize + 2);
+    expect(useAppStore.getState().config.logDirectory).toBe('new backend logs');
+    expect(useAppStore.getState().config.updateCheckMode).toBe('none');
+    expect(getCommittedUpdateMode()).toBe('preview');
+    expect(isOrdinaryConfigDirty()).toBe(true);
+    expect(configService.setConfig).not.toHaveBeenCalled();
+    expect(useRuleStore.getState().sendCommandSets).toEqual([rule('old')]);
+  });
+
+  it('retains conflicting recovered edits, blocks save, and discards to the new disk baseline', async () => {
+    await load();
+    useAppStore.getState().setConfig({ terminalFontSize: backend.terminalFontSize + 1 });
+    resetOrdinaryConfigBaselineForTests(true);
+    backend = { ...backend, terminalFontSize: backend.terminalFontSize + 3, revision: ++revision };
+    await load();
+    expect(useAppStore.getState().config.terminalFontSize).toBe(backend.terminalFontSize - 2);
+    expect(isOrdinaryConfigDirty()).toBe(true);
+    expect(await save()).toBe(false);
+    expect(configService.setConfig).not.toHaveBeenCalled();
+    discardOrdinaryConfigDraft();
+    expect(useAppStore.getState().config.terminalFontSize).toBe(backend.terminalFontSize);
+    expect(isOrdinaryConfigDirty()).toBe(false);
+    expect(localStorage.getItem(recoveryKey)).toBeNull();
+  });
+
+  it('permits an explicit new edit after a recovered conflict without silently picking the expired draft', async () => {
+    await load();
+    useAppStore.getState().setConfig({ terminalFontSize: backend.terminalFontSize + 1 });
+    resetOrdinaryConfigBaselineForTests(true);
+    backend = { ...backend, terminalFontSize: backend.terminalFontSize + 3, revision: ++revision };
+    await load();
+    useAppStore.getState().setConfig({ terminalFontSize: backend.terminalFontSize + 1 });
+    expect(await save()).toBe(true);
+    expect(isOrdinaryConfigDirty()).toBe(false);
+    expect(localStorage.getItem(recoveryKey)).toBeNull();
+  });
+
+  it('retains newer ordinary edits when an accepted save finishes, then clears recovery after their own save', async () => {
+    await load();
+    const firstSize = backend.terminalFontSize + 1;
+    useAppStore.getState().setConfig({ terminalFontSize: firstSize });
+    const accepted = deferred<boolean>();
+    vi.mocked(configService.setConfig).mockImplementationOnce(async candidate => {
+      await accepted.promise; backend = candidate; revision++; return true;
+    });
+    const saving = save();
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledOnce());
+    useAppStore.getState().setConfig({ terminalFontSize: firstSize + 1 });
+    accepted.resolve(true);
+    expect(await saving).toBe(true);
+    expect(JSON.parse(localStorage.getItem(recoveryKey)!).payload.draft.terminalFontSize).toBe(firstSize + 1);
+    expect(isOrdinaryConfigDirty()).toBe(true);
+    expect(await save()).toBe(true);
+    expect(localStorage.getItem(recoveryKey)).toBeNull();
+  });
+
+  it('does not consume recorded recovery when backend loading fails', async () => {
+    await load();
+    useAppStore.getState().setConfig({ terminalFontSize: backend.terminalFontSize + 2 });
+    const recorded = localStorage.getItem(recoveryKey);
+    resetOrdinaryConfigBaselineForTests(true);
+    vi.mocked(configService.getConfig).mockRejectedValueOnce(new Error('offline'));
+    await load();
+    expect(localStorage.getItem(recoveryKey)).toBe(recorded);
+  });
+
+  it.each(['{broken', JSON.stringify({ schema: 0, payload: {} }), JSON.stringify({ schema: 1, payload: {}, extra: true })])('ignores damaged/schema-mismatched recovery %s', async raw => {
+    localStorage.setItem(recoveryKey, raw);
+    await load();
+    expect(isOrdinaryConfigDirty()).toBe(false);
+    expect(configService.setConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects foreign fields in a well-formed recovery envelope rather than reviving permissions', async () => {
+    await load();
+    useAppStore.getState().setConfig({ terminalFontSize: backend.terminalFontSize + 2 });
+    const recorded = JSON.parse(localStorage.getItem(recoveryKey)!);
+    recorded.payload.draft.pluginConfigs = [{ id: 'malicious', permissions: ['all'] }];
+    localStorage.setItem(recoveryKey, JSON.stringify(recorded));
+    resetOrdinaryConfigBaselineForTests(true);
+    await load();
+    expect(useAppStore.getState().config.pluginConfigs).toEqual(backend.pluginConfigs);
+    expect(useAppStore.getState().config.terminalFontSize).toBe(backend.terminalFontSize);
+    expect(isOrdinaryConfigDirty()).toBe(false);
+  });
+});
+
+describe('group persistence queue', () => {
+  it('serializes with metadata saves and advances only committed baseline fields', async () => {
+    const firstInvoke = deferred<boolean>();
+    vi.mocked(configService.setConfig).mockImplementationOnce(async (candidate, _, expected) => {
+      await firstInvoke.promise;
+      expect(expected).toBe(revision);
+      backend = candidate;
+      revision++;
+      return true;
+    });
+    useAppStore.getState().setConfig({ theme: 'light' });
+    useAppStore.getState().setGroups([{ id: 'g1', name: 'new group', portIds: ['COM1'], isExpanded: true, order: 0 }]);
+    const meta = saveCurrentPortMeta();
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledTimes(1));
+    const groups = saveCurrentPortGroups();
+    expect(configService.setConfig).toHaveBeenCalledTimes(1);
+    firstInvoke.resolve(true);
+    await Promise.all([meta, groups]);
+    expect(writes).toEqual([1]);
+    expect(backend.portGroups).toEqual(useAppStore.getState().groups);
+    expect(useAppStore.getState().config.portGroups).toEqual(backend.portGroups);
+    expect(useAppStore.getState().config.revision).toBe(2);
+    expect(useAppStore.getState().config.theme).toBe('light');
+    expect(backend.theme).toBe('dark');
+  });
+
+  it('preserves a group edit made while an earlier save is in flight', async () => {
+    const accepted = deferred<boolean>();
+    const old = [{ id: 'g1', name: 'saved', portIds: [], isExpanded: true, order: 0 }];
+    useAppStore.getState().setGroups(old);
+    vi.mocked(configService.setConfig).mockImplementationOnce(async candidate => {
+      await accepted.promise;
+      backend = candidate;
+      revision++;
+      return true;
+    });
+    const saving = saveCurrentPortGroups();
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledTimes(1));
+    useAppStore.getState().updateGroup('g1', { name: 'later' });
+    accepted.resolve(true);
+    await saving;
+    expect(useAppStore.getState().groups[0].name).toBe('later');
+    expect(useAppStore.getState().config.portGroups).toEqual(old);
+    await saveCurrentPortGroups();
+    expect(backend.portGroups[0].name).toBe('later');
+  });
+});
+
 describe('metadata persistence with absent ports', () => {
   const offline: PortMetaEntry = { portId: 'COM9', alias: 'offline', isHidden: true, mode: 'tty' };
   const online: PortMetaEntry = { portId: 'COM1', alias: 'online', isHidden: true, mode: 'tty' };
@@ -305,6 +454,8 @@ describe('metadata persistence with absent ports', () => {
 
     await saveCurrentPortMeta();
     expect(backend.portMeta).toEqual([offline, { ...online, alias: 'changed' }]);
+    expect(useAppStore.getState().config.portMeta).toEqual(backend.portMeta);
+    expect(useAppStore.getState().config.revision).toBe(revision);
     expect(await save({ theme: 'light' })).toBe(true);
     expect(backend.portMeta).toEqual([offline, { ...online, alias: 'changed' }]);
   });

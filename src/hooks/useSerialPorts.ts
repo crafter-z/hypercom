@@ -35,6 +35,10 @@ export function mapPortInfo(info: AvailablePortInfo): SerialPort {
     groupId: undefined,
     // issue #11：枚举出的端口默认传统收发模式；持久化的 mode 由 mergePorts 回填。
     mode: 'trx' as const,
+    // USB 厂商/产品名（Windows 注册表/SetupAPI 友好名解析）：原样透传，
+    // 非 USB 端口后端省略字段 → 保持 undefined。
+    manufacturer: info.manufacturer,
+    product: info.product,
   };
 }
 
@@ -92,11 +96,19 @@ export function mergePorts(
         // 会重新枚举出现。
         ghostMissingPolls.delete(prev.id);
       }
+    } else {
+      // A disconnected/error port is no longer a retained live session. Do not
+      // let its previous grace count shorten a later connection's grace period.
+      ghostMissingPolls.delete(prev.id);
     }
   }
   // New ports recover persisted metadata and group membership in either order.
   for (const p of incoming) {
     if (!merged.has(p.id)) {
+      // 以「新端口」身份回填（从 portMeta 恢复，或端口被放弃后重新拔插回来）：
+      // 清掉可能残留的幽灵计数。否则陈旧计数会让下一次真正拔出的宽限期提前
+      // 耗尽，端口在不足 MAX_MISSING_POLLS 轮后就被错误丢弃。
+      ghostMissingPolls.delete(p.id);
       const state = useAppStore.getState();
       const meta = state.config.portMeta?.find((entry) => entry.portId === p.id);
       // groupId lives on groups[].portIds; a re-plugged port is "new" to this
@@ -129,17 +141,18 @@ export function mergePorts(
 export function useSerialPorts(pollIntervalMs: number = 3000) {
   const setPorts = useAppStore((s) => s.setPorts);
 
-  const refreshPorts = useCallback(async () => {
+  const refreshPorts = useCallback(async (): Promise<boolean> => {
     const requestId = ++latestListRequest;
     try {
       const list = await serialService.listAvailablePorts();
-      if (requestId !== latestListRequest) return;
+      if (requestId !== latestListRequest) return false;
       const state = useAppStore.getState();
       const merged = mergePorts(list.map(mapPortInfo), state.ports, state.portOrder);
       setPorts(merged);
       lastListFailed = false;
+      return true;
     } catch (err) {
-      if (requestId !== latestListRequest) return;
+      if (requestId !== latestListRequest) return false;
       // 轮询每 3s 一次：连续失败时只在首次告警，后续降为 debug，避免刷屏。
       if (!lastListFailed) {
         console.warn('[useSerialPorts] Failed to list ports:', err);
@@ -147,6 +160,7 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
         console.debug('[useSerialPorts] Port listing still failing:', err);
       }
       lastListFailed = true;
+      return false;
     }
   }, [setPorts]);
 

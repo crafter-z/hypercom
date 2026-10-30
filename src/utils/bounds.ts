@@ -15,7 +15,6 @@ export const CONFIG_BOUNDS = {
   maxDisplayLines: [1000, 1_000_000],
   maxRetries: [1, 10],
   logSplitSizeMb: [1, 10_240],
-  backupInterval: [1, 720],
   quickSendInlineCount: [0, 20],
   backgroundImageOpacity: [0, 100],
   backgroundImageBlur: [0, 64],

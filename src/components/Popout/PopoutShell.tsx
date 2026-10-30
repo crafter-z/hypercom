@@ -112,7 +112,7 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
     <div className="popout-shell">
       <div className="popout-titlebar">
         <div className="popout-titlebar-drag" data-tauri-drag-region>
-          <span className="popout-title">{title}</span>
+          <span className="popout-title" data-tauri-drag-region>{title}</span>
         </div>
         <div className="popout-titlebar-actions" onPointerDown={(event) => event.stopPropagation()}>
           <button

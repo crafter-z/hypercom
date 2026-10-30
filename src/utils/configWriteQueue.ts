@@ -6,7 +6,3 @@ export function enqueueConfigWrite<T>(work: () => Promise<T>): Promise<T> {
   lastConfigWrite = result.then(() => undefined, () => undefined);
   return result;
 }
-
-export function resetConfigWriteQueueForTests(): void {
-  lastConfigWrite = Promise.resolve();
-}

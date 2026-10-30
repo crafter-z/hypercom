@@ -1,12 +1,10 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
-import { open, confirm } from '@tauri-apps/plugin-dialog';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { configService, fileService, pluginService } from '../../../services/tauri';
 import type { AppConfig } from '../../../types';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
-import { CONFIG_BOUNDS } from '../../../utils/bounds';
-import { NumericInput } from '../../shared/NumericInput';
 import { syncPluginListSnapshot } from '../../../utils/pluginConfigSnapshot';
 import { requestEditorLeave } from '../../../utils/editorLeave';
 import { adoptEntityEditorBaselineFromConfig } from '../../../utils/entityEditor';
@@ -45,10 +43,6 @@ function validateConfigBundle(bundle: ConfigBundle): string | null {
 
 const BackupSettings: React.FC = () => {
   const { t } = useTranslation();
-  const backupEnabled = useAppStore(s => s.config.backupEnabled);
-  const backupInterval = useAppStore(s => s.config.backupInterval);
-  const backupDirectory = useAppStore(s => s.config.backupDirectory);
-  const setConfig = useAppStore((s) => s.setConfig);
 
   const handleExport = async () => {
     try {
@@ -112,28 +106,6 @@ const BackupSettings: React.FC = () => {
   return (
     <div className="config-page">
       <h3 className="config-page-title">{t('backupSettings.title')}</h3>
-
-      <label className="checkbox-wrapper">
-        <input type="checkbox" checked={backupEnabled} onChange={(e) => setConfig({ backupEnabled: e.target.checked })} />
-        {t('backupSettings.enabled')}
-      </label>
-
-      {backupEnabled && (
-        <>
-          <div className="config-row">
-            <label>{t('backupSettings.intervalLabel')}</label>
-            <NumericInput className="input" value={backupInterval} onCommit={(value) => setConfig({ backupInterval: value })} min={CONFIG_BOUNDS.backupInterval[0]} max={CONFIG_BOUNDS.backupInterval[1]} step={1} />
-          </div>
-          <div className="config-row">
-            <label>{t('backupSettings.directoryLabel')}</label>
-            <input className="input" value={backupDirectory} placeholder={t('backupSettings.directoryPlaceholder')} readOnly />
-            <button className="btn btn-sm" onClick={async () => {
-              const result = await open({ directory: true }).catch((e) => { console.debug('[BackupSettings] directory dialog failed:', e); return null; });
-              if (result) setConfig({ backupDirectory: result });
-            }}>{t('backupSettings.browseButton')}</button>
-          </div>
-        </>
-      )}
 
       <h3 className="config-page-title" style={{ marginTop: 20 }}>{t('backupSettings.exportImportTitle')}</h3>
       <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 12px' }}>

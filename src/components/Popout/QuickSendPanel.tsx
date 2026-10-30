@@ -216,10 +216,13 @@ const QuickSendPanel: React.FC = () => {
           pending={editor.pending}
           saving={editor.saving}
           error={editor.error}
+          conflict={editor.conflict}
           canSend={canSend}
           onReplaceSets={editor.replaceSets}
           onSave={editor.save}
           onDiscard={editor.discard}
+          onOverwriteHost={editor.overwriteHost}
+          onReloadHost={editor.reloadHost}
         />
       </div>
       {mode === 'text' && (

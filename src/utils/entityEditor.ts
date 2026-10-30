@@ -13,6 +13,8 @@ import { configService } from '../services/tauri';
 import { enqueueConfigWrite } from './configWriteQueue';
 import { normalizeCommandOrder } from './commandOrder';
 import { jsonEqual as same } from './jsonEqual';
+import { useSystemStore } from '../stores/useSystemStore';
+import { readEditorRecovery, recoverableEntityCollection, recoveryKeys, recoveryRecord, writeEditorRecovery } from './entityEditorRecovery';
 
 export type EntityKey =
   | 'sendCommandSets'
@@ -43,6 +45,9 @@ interface EditorState {
   orderDirty: boolean;
   committed: Entity[];
   savePromise: Promise<boolean> | null;
+  epoch: number;
+  prepared: { version: number; draft: Entity[] } | null;
+  awaitingRecoveryBaseline: boolean;
 }
 
 const states = new Map<EntityKey, EditorState>();
@@ -53,7 +58,7 @@ let publishingEntityCommit = false;
 function publishEntityCommit(kind: EntityKey, items: Entity[], revision?: number): void {
   publishingEntityCommit = true;
   try {
-    if (revision !== undefined) useAppStore.getState().setConfig({ [kind]: clone(items), revision } as Partial<AppConfig>);
+    useAppStore.getState().setConfig({ [kind]: clone(items), ...(revision !== undefined ? { revision } : {}) } as Partial<AppConfig>);
     setCommitted(kind, items);
   } finally {
     publishingEntityCommit = false;
@@ -116,6 +121,10 @@ function installExternalSubscriptions(): void {
       if (current !== prior && states.has(kind)) syncRemote(kind);
     }
   });
+  useSystemStore.subscribe((state, previous) => {
+    if (!state.ui.configReady || previous.ui.configReady) return;
+    for (const [kind, editor] of states) if (editor.awaitingRecoveryBaseline) syncRemote(kind);
+  });
 }
 
 function changedIds(base: readonly Entity[], draft: readonly Entity[]): Set<string> {
@@ -137,6 +146,13 @@ function updateSnapshot(kind: EntityKey): void {
   const state = states.get(kind);
   if (!state) return;
   const dirtyIds = dirtyIdsOf(state);
+  const previous = snapshots.get(kind);
+  // Status/baseline transitions are also authoritative snapshots. Give them a
+  // fresh version so a delayed saving/error/dirty snapshot cannot undo an ACK.
+  if (previous && previous.version === state.version && (
+    !same(previous.items, state.draft) || previous.dirty !== (dirtyIds.length > 0 || state.orderDirty) ||
+    !same(previous.dirtyIds, dirtyIds) || previous.saving !== state.saving || previous.error !== state.error
+  )) state.version++;
   snapshots.set(kind, {
     items: state.draft,
     version: state.version,
@@ -145,43 +161,62 @@ function updateSnapshot(kind: EntityKey): void {
     saving: state.saving,
     error: state.error,
   });
+  writeEditorRecovery(kind, dirtyIds.length > 0 || state.orderDirty || state.conflicts.size > 0 ? {
+    baseline: state.baseline, draft: state.draft, conflicts: [...state.conflicts],
+  } : null);
+}
+
+interface RecoveredDraft { baseline: Entity[]; draft: Entity[]; conflicts: string[] }
+function recoveredDraft(kind: EntityKey): RecoveredDraft | null {
+  return readEditorRecovery(kind, (value): value is RecoveredDraft => recoveryRecord(value) &&
+    recoveryKeys(value, ['baseline', 'draft', 'conflicts']) &&
+    recoverableEntityCollection(kind, value.baseline) && recoverableEntityCollection(kind, value.draft) &&
+    Array.isArray(value.conflicts) && value.conflicts.every(id => typeof id === 'string'));
 }
 
 function ensure(kind: EntityKey): EditorState {
   installExternalSubscriptions();
   let state = states.get(kind);
   if (state) return state;
-  const baseline = clone(appItems(kind));
+  const recovered = recoveredDraft(kind);
+  const baseline = clone(recovered?.baseline ?? appItems(kind));
   const committed = committedItems(kind);
   // During startup the config snapshot and runtime store are populated together.
   // Prefer the committed runtime list when it is intentionally different: it is
   // the only source available before configReady has delivered its first snapshot.
-  const draft = clone(committed.length > 0 || baseline.length === 0 ? committed : baseline);
+  const draft = clone(recovered?.draft ?? (committed.length > 0 || baseline.length === 0 ? committed : baseline));
   state = {
     kind,
     baseline,
     draft,
     version: 0,
     saving: false,
-    error: null,
-    conflicts: new Set(),
+    error: recovered?.conflicts.length ? 'editor.conflict' : null,
+    conflicts: new Set(recovered?.conflicts ?? []),
     orderDirty: orderChanged(baseline, draft),
     committed: clone(committed),
     savePromise: null,
+    epoch: 0,
+    prepared: null,
+    awaitingRecoveryBaseline: !!recovered && !useSystemStore.getState().ui.configReady,
   };
   states.set(kind, state);
   updateSnapshot(kind);
-  return state;
+  // The recovery baseline belongs to the previous process. Reconcile it with
+  // today's persisted config only after bootstrap has delivered that config.
+  return recovered && useSystemStore.getState().ui.configReady ? syncRemote(kind) : state;
 }
 
 /** Merge backend changes without replacing a dirty local draft. */
 function syncRemote(kind: EntityKey): EditorState {
   const state = ensure(kind);
+  if (state.awaitingRecoveryBaseline && !useSystemStore.getState().ui.configReady) return state;
+  state.awaitingRecoveryBaseline = false;
   const beforeDraft = clone(state.draft);
   const remote = clone(appItems(kind));
   if (same(remote, state.baseline)) {
     const committed = committedItems(kind);
-    if (!same(committed, state.committed) && dirtyIdsOf(state).length === 0) {
+    if (!same(committed, state.committed) && dirtyIdsOf(state).length === 0 && !state.orderDirty) {
       state.draft = clone(committed);
       state.baseline = clone(remote);
       state.committed = clone(committed);
@@ -247,22 +282,35 @@ function invalidHex(value: unknown): boolean {
   return compact.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(compact);
 }
 
+function validateIds(items: readonly Entity[]): string | null {
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (!item || typeof item.id !== 'string' || !item.id.trim() || seen.has(item.id)) return 'editor.invalidEntity';
+    seen.add(item.id);
+  }
+  return null;
+}
+
 function validateEntity(kind: EntityKey, item: Entity): string | null {
-  if (!item.id || typeof item.id !== 'string') return 'editor.invalidEntity';
+  if (!item || !item.id || typeof item.id !== 'string') return 'editor.invalidEntity';
   const value = item as Record<string, unknown>;
   if (typeof value.name !== 'string' || !value.name.trim()) return 'editor.invalidEntity';
   if (kind === 'highlightRuleSets') {
+    if (!Array.isArray(value.rules) || validateIds(value.rules as Entity[])) return 'editor.invalidEntity';
     for (const rule of ((value.rules as Array<Record<string, unknown>> | undefined) ?? [])) {
       if (rule.isRegex && (typeof rule.pattern !== 'string' || rule.pattern.length > 200)) return 'editor.invalidRegex';
       if (rule.isRegex) { try { new RegExp(String(rule.pattern)); } catch { return 'editor.invalidRegex'; } }
     }
   } else if (kind === 'sendCommandSets') {
+    if (!Array.isArray(value.commands) || validateIds(value.commands as Entity[])) return 'editor.invalidEntity';
     for (const command of ((value.commands as Array<Record<string, unknown>> | undefined) ?? [])) {
       if (command.type === 'hex' && invalidHex(command.content)) return 'editor.invalidHex';
     }
   } else if (kind === 'protocolTemplates') {
     if (invalidHex(value.headerBytes) || invalidHex(value.footerBytes)) return 'editor.invalidHex';
     if (!Number.isInteger(value.lengthFieldOffset) || Number(value.lengthFieldOffset) < 0) return 'editor.invalidProtocol';
+    if (value.lengthFieldSize !== 1 && value.lengthFieldSize !== 2) return 'editor.invalidProtocol';
+    if (!['none', 'sum8', 'xor', 'crc8'].includes(String(value.checksumAlgorithm))) return 'editor.invalidProtocol';
     if (!Number.isInteger(value.checksumOffset) || Number(value.checksumOffset) < 0) return 'editor.invalidProtocol';
   } else if (kind === 'triggerRules') {
     if ((value.matchType === 'regex' || value.isRegex) && (typeof value.pattern !== 'string' || value.pattern.length > 200)) return 'editor.invalidRegex';
@@ -274,10 +322,16 @@ function validateEntity(kind: EntityKey, item: Entity): string | null {
 }
 
 export function validateEntityDraft(kind: EntityKey, items: readonly Entity[]): string | null {
-  const seen = new Set<string>();
+  const invalidIds = validateIds(items);
+  if (invalidIds) return invalidIds;
+  const portIds = new Set<string>();
   for (const item of items) {
-    if (seen.has(item.id)) return 'editor.invalidEntity';
-    seen.add(item.id);
+    if (kind === 'portToolConfigs') {
+      const portId = (item as unknown as PortToolConfig).portId;
+      if (typeof portId !== 'string' || !portId.trim()) return 'editor.invalidEntity';
+      if (portIds.has(portId)) return 'editor.invalidEntity';
+      portIds.add(portId);
+    }
     const error = validateEntity(kind, item);
     if (error) return error;
   }
@@ -341,11 +395,13 @@ async function performSave(kind: EntityKey, id: string | undefined): Promise<boo
   const state = syncRemote(kind);
   const local = clone(state.draft);
   const baseline = clone(state.baseline);
+  const epoch = state.epoch;
+  const isCurrent = () => states.get(kind) === state && state.epoch === epoch;
   const localChanged = changedIds(baseline, local);
-  const validation = id === undefined ? validateEntityDraft(kind, local) : (() => {
+  const validation = validateIds(local) ?? (id === undefined ? validateEntityDraft(kind, local) : (() => {
     const item = local.find(entry => entry.id === id);
     return item ? validateEntity(kind, item) : null;
-  })();
+  })());
   if (validation) { markFailure(state, validation); return false; }
 
   state.saving = true;
@@ -354,32 +410,42 @@ async function performSave(kind: EntityKey, id: string | undefined): Promise<boo
   emit();
   try {
     const persisted = await configService.getConfig();
+    if (!isCurrent()) return false;
     if (persisted.revision === undefined) throw new Error('Backend config revision is missing');
     const remote: Entity[] = clone(persisted[kind]);
     const conflicts = remoteConflict(state, remote, id === undefined ? localChanged : new Set([id]));
     const blockedByExistingConflict = id === undefined
       ? state.conflicts.size > 0
       : state.conflicts.has(id);
-    if (blockedByExistingConflict || conflicts.size > 0) {
+    if (blockedByExistingConflict || (id === undefined ? conflicts.size > 0 : conflicts.has(id))) {
       state.conflicts = conflicts;
       throw new Error('editor.conflict');
     }
     const candidate = composeEntityCollection(kind, remote, local, baseline, id);
+    const candidateError = validateEntityDraft(kind, candidate);
+    if (candidateError) { markFailure(state, candidateError); return false; }
     const saved = await configService.setConfig(
       { ...persisted, [kind]: candidate },
       false,
       persisted.revision,
     );
+    if (!isCurrent()) return false;
     if (!saved) throw new Error('editor.conflict');
 
     const nextRevision = (persisted.revision ?? 0) + 1;
-    const retainedDraft = composeEntityCollection(kind, candidate, clone(state.draft), baseline);
+    // Reconcile late edits against what was submitted, not the old baseline: a
+    // user may intentionally revert a submitted value while persistence is slow.
+    const submitted = id === undefined ? local : composeEntityCollection(kind, baseline, local, baseline, id);
+    const retainedDraft = composeEntityCollection(kind, candidate, clone(state.draft), submitted);
     state.baseline = clone(candidate);
     state.draft = retainedDraft;
     state.committed = clone(candidate);
-    state.conflicts.clear();
+    // Only this save's records were reconciled with the backend; a targeted
+    // save must not hide conflicts still pending on other records.
+    if (id === undefined) state.conflicts.clear();
+    else state.conflicts.delete(id);
     state.orderDirty = orderChanged(state.baseline, state.draft);
-    state.error = null;
+    state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
     state.saving = false;
     state.savePromise = null;
     publishEntityCommit(kind, candidate, nextRevision);
@@ -388,6 +454,7 @@ async function performSave(kind: EntityKey, id: string | undefined): Promise<boo
     return true;
 
   } catch (error) {
+    if (!isCurrent()) return false;
     const message = error instanceof Error ? error.message : String(error);
     markFailure(state, message === 'editor.conflict' ? 'editor.conflict' : 'editor.saveFailed');
     return false;
@@ -414,7 +481,16 @@ export function prepareEntityCollectionForSave(kind: EntityKey, remote: readonly
     emit();
     throw new Error(validation);
   }
-  return { items: composeEntityCollection(kind, remote, local, baseline), version: state.version };
+  const items = composeEntityCollection(kind, remote, local, baseline);
+  const candidateError = validateEntityDraft(kind, items);
+  if (candidateError) {
+    state.error = candidateError;
+    updateSnapshot(kind);
+    emit();
+    throw new Error(candidateError);
+  }
+  state.prepared = { version: state.version, draft: local };
+  return { items, version: state.version };
 }
 
 
@@ -429,7 +505,7 @@ export function subscribeEntityEditor(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function replaceEntityDraft<T extends Entity>(kind: EntityKey, items: T[], expectedVersion?: number): void {
+export function replaceEntityDraft<T extends Entity>(kind: EntityKey, items: T[], expectedVersion?: number, resolveConflicts = false): void {
   const state = syncRemote(kind);
   if (expectedVersion !== undefined && expectedVersion !== state.version) {
     state.error = 'editor.conflict';
@@ -440,6 +516,10 @@ export function replaceEntityDraft<T extends Entity>(kind: EntityKey, items: T[]
   state.draft = clone(items);
   state.version++;
   state.error = null;
+  // Only the explicit conflict-resolution action may supersede remote conflicts;
+  // ordinary typing/replacements must not silently turn them into a save.
+  if (resolveConflicts) state.conflicts.clear();
+  state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
   state.orderDirty = orderChanged(state.baseline, state.draft);
   updateSnapshot(kind);
   emit();
@@ -450,7 +530,7 @@ export function updateEntityDraft<T extends Entity>(kind: EntityKey, id: string,
   if (!state.draft.some(item => item.id === id)) return;
   state.draft = state.draft.map(item => item.id === id ? { ...item, ...clone(patch), id } : item);
   state.version++;
-  state.error = null;
+  state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
   state.orderDirty = orderChanged(state.baseline, state.draft);
   updateSnapshot(kind);
   emit();
@@ -463,7 +543,7 @@ export function insertEntityDraft<T extends Entity>(kind: EntityKey, entity: T, 
   next.splice(index < 0 ? next.length : index, 0, clone(entity));
   state.draft = next;
   state.version++;
-  state.error = null;
+  state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
   state.orderDirty = orderChanged(state.baseline, state.draft);
   updateSnapshot(kind);
   emit();
@@ -473,7 +553,7 @@ export function removeEntityDraft(kind: EntityKey, id: string): void {
   const state = syncRemote(kind);
   state.draft = state.draft.filter(item => item.id !== id);
   state.version++;
-  state.error = null;
+  state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
   state.orderDirty = orderChanged(state.baseline, state.draft);
   updateSnapshot(kind);
   emit();
@@ -485,7 +565,7 @@ export function reorderEntityDraft(kind: EntityKey, ids: string[]): void {
   if (ids.length !== byId.size || new Set(ids).size !== byId.size || ids.some(id => !byId.has(id))) return;
   state.draft = ids.map(id => byId.get(id)!);
   state.version++;
-  state.error = null;
+  state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
   state.orderDirty = orderChanged(state.baseline, state.draft);
   updateSnapshot(kind);
   emit();
@@ -523,9 +603,30 @@ export function discardEntityDraft(kind: EntityKey, id?: string): void {
   state.version++;
   if (id !== undefined) state.conflicts.delete(id);
   else state.conflicts.clear();
-  state.error = null;
+  state.error = state.conflicts.size > 0 ? 'editor.conflict' : null;
   state.orderDirty = orderChanged(state.baseline, state.draft);
   updateSnapshot(kind);
+  emit();
+}
+
+/**
+ * Drop every unsaved entity draft (all kinds) and clear conflict/order state.
+ * Used by the close-approval escape hatch: the user chose to lose all edits.
+ */
+export function discardAllEditorDrafts(): void {
+  for (const kind of KEY_SET) {
+    const state = states.get(kind);
+    if (state) {
+      state.draft = clone(state.baseline);
+      state.conflicts.clear();
+      state.orderDirty = false;
+      state.error = null;
+      state.version++;
+      updateSnapshot(kind);
+    } else {
+      discardEntityDraft(kind);
+    }
+  }
   emit();
 }
 
@@ -542,7 +643,12 @@ export function adoptEntityEditorBaselineFromConfig(config: AppConfig = useAppSt
     state.conflicts.clear();
     state.error = null;
     state.orderDirty = false;
-    setCommitted(kind, items);
+    state.epoch++;
+    state.awaitingRecoveryBaseline = false;
+    state.prepared = null;
+    state.saving = false;
+    state.savePromise = null;
+    publishEntityCommit(kind, items, config.revision);
     updateSnapshot(kind);
   }
   emit();
@@ -555,11 +661,15 @@ export function listDirtyEntityKinds(): EntityKey[] {
 /** Mark a full-config candidate as persisted, retaining edits made while it was in flight. */
 export function commitEntityEditorDraft(kind: EntityKey, persisted: Entity[], expectedVersion?: number, revision?: number): void {
   const state = ensure(kind);
+  if (revision !== undefined && revision < (useAppStore.getState().config.revision ?? 0)) return;
   const oldBaseline = clone(state.baseline);
   const oldDraft = clone(state.draft);
+  const prepared = state.prepared;
+  const submitted = prepared && prepared.version === expectedVersion ? prepared.draft : oldBaseline;
+  state.prepared = null;
   const noLateEdits = expectedVersion === undefined || expectedVersion === state.version;
   state.baseline = clone(persisted);
-  state.draft = noLateEdits ? clone(persisted) : composeEntityCollection(kind, persisted, oldDraft, oldBaseline);
+  state.draft = noLateEdits ? clone(persisted) : composeEntityCollection(kind, persisted, oldDraft, submitted);
   state.committed = clone(persisted);
   state.conflicts.clear();
   state.orderDirty = orderChanged(state.baseline, state.draft);
@@ -569,7 +679,8 @@ export function commitEntityEditorDraft(kind: EntityKey, persisted: Entity[], ex
   emit();
 }
 
-export function resetEntityEditorForTests(): void {
+export function resetEntityEditorForTests(preserveRecovery = false): void {
+  if (!preserveRecovery) for (const kind of KEY_SET) writeEditorRecovery(kind, null);
   states.clear();
   snapshots.clear();
   emit();

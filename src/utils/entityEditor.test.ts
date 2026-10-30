@@ -29,6 +29,50 @@ beforeEach(() => {
 });
 
 describe('session entity drafts versus saved runtime', () => {
+  it('versions status-only save transitions so delayed saving snapshots cannot win', async () => {
+    updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'submitted' });
+    const before = draft();
+    let finish!: () => void;
+    vi.mocked(configService.setConfig).mockImplementationOnce(async candidate => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      backend = structuredClone(candidate);
+      revision++;
+      return true;
+    });
+    const saving = saveEntityDraft('sendCommandSets');
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledOnce());
+    const inFlight = draft();
+    expect(inFlight.saving).toBe(true);
+    expect(inFlight.version).toBeGreaterThan(before.version);
+    finish();
+    expect(await saving).toBe(true);
+    expect(draft().version).toBeGreaterThan(inFlight.version);
+    expect(draft()).toMatchObject({ dirty: false, saving: false });
+  });
+
+  it('retains same-record conflicts on ordinary replacement but permits explicit overwrite', async () => {
+    updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'local' });
+    backend = { ...backend, sendCommandSets: [set('one', 'remote'), set('two')] };
+    useAppStore.getState().setConfig({ sendCommandSets: backend.sendCommandSets });
+    replaceEntityDraft('sendCommandSets', draft().items, draft().version);
+    expect(await saveEntityDraft('sendCommandSets')).toBe(false);
+    expect(draft().error).toBe('editor.conflict');
+    replaceEntityDraft('sendCommandSets', draft().items, draft().version, true);
+    expect(await saveEntityDraft('sendCommandSets')).toBe(true);
+    expect(backend.sendCommandSets[0].name).toBe('local');
+  });
+
+  it('can save an unrelated record without clearing another record conflict', async () => {
+    updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'local one' });
+    backend = { ...backend, sendCommandSets: [set('one', 'remote one'), set('two')] };
+    useAppStore.getState().setConfig({ sendCommandSets: backend.sendCommandSets });
+    updateEntityDraft<SendCommandSet>('sendCommandSets', 'two', { name: 'saved two' });
+    expect(await saveEntityDraft('sendCommandSets', 'two')).toBe(true);
+    expect(backend.sendCommandSets.map(item => item.name)).toEqual(['remote one', 'saved two']);
+    expect(draft().items.map(item => item.name)).toEqual(['local one', 'saved two']);
+    expect(draft().error).toBe('editor.conflict');
+    expect(await saveEntityDraft('sendCommandSets')).toBe(false);
+  });
   it('saves just one entity without committing or losing other edits, additions, deletion or order', async () => {
     updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'saved one' });
     removeEntityDraft('sendCommandSets', 'two');

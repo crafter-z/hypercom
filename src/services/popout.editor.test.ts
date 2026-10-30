@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { emit, listen } from '@tauri-apps/api/event';
 import type { Event } from '@tauri-apps/api/event';
 import { COMMAND_EDITOR_TIMEOUT_MS, popoutEventService } from './popout';
-import type { CommandEditorResult } from './popout';
+import type { CommandEditorClientResult, CommandEditorResult } from './popout';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/event', () => ({ emit: vi.fn(), listen: vi.fn() }));
@@ -20,6 +20,46 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('command editor request/ACK transport', () => {
+  it('binds client leave ACKs to the targeted client, host session and observed sequence', async () => {
+    const stop = vi.fn();
+    let receive!: (event: Event<CommandEditorClientResult>) => void;
+    vi.mocked(listen).mockImplementationOnce((_name, callback) => { receive = callback; return Promise.resolve(stop); });
+    const identity = { clientId: 'current-panel', sessionId: 'host', sequence: 4 };
+    const pending = popoutEventService.requestCommandEditorClientLeave('save', identity);
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(emit).toHaveBeenCalledWith('command-editor:client-leave', expect.objectContaining({ action: 'save', ...identity }));
+    const requestId = (vi.mocked(emit).mock.calls[0][1] as { requestId: string }).requestId;
+    const ack = { requestId, success: true, error: null, unresolved: false, ...identity };
+    for (const payload of [
+      { ...ack, clientId: 'retired-panel' }, { ...ack, sessionId: 'retired-host' },
+      { ...ack, sequence: 3 }, { requestId, success: true, error: null },
+    ]) receive({ event: 'command-editor:client-result', id: 1, payload });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    receive({ event: 'command-editor:client-result', id: 1, payload: { ...ack, sequence: 5 } });
+    await expect(pending).resolves.toMatchObject({ clientId: 'current-panel', sequence: 5 });
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the unbound legacy client ACK transport compatible', async () => {
+    let receive!: (event: Event<CommandEditorClientResult>) => void;
+    vi.mocked(listen).mockImplementationOnce((_name, callback) => { receive = callback; return Promise.resolve(() => {}); });
+    const pending = popoutEventService.requestCommandEditorClientLeave('discard');
+    await Promise.resolve();
+    const requestId = (vi.mocked(emit).mock.calls[0][1] as { requestId: string }).requestId;
+    receive({ event: 'command-editor:client-result', id: 1, payload: { requestId, success: true, error: null } });
+    await expect(pending).resolves.toEqual({ requestId, success: true, error: null });
+  });
+
+  it('preserves structured client-state and sync identity on the wire', async () => {
+    const identity = { clientId: 'panel', sessionId: 'host', sequence: 12 };
+    await popoutEventService.emitRequestSync(identity);
+    await popoutEventService.emitCommandEditorClientState({ ...identity, sequence: 13, unresolved: true });
+    expect(emit).toHaveBeenCalledWith('popout:request-sync', identity);
+    expect(emit).toHaveBeenCalledWith('command-editor:client-state', { ...identity, sequence: 13, unresolved: true });
+  });
   it('registers before emit and waits for its matching persistence ACK', async () => {
     const registration = deferred<() => void>();
     const stop = vi.fn();

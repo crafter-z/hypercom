@@ -29,6 +29,18 @@ interface SortablePortItemProps {
 }
 
 /**
+ * 端口 USB 元数据（厂商 · 产品）的悬停提示。
+ * 去空、去重；两个字段都没有时返回 undefined（不渲染空 title 属性）。
+ */
+function portMetadataTitle(port: SerialPort): string | undefined {
+  const parts = [port.manufacturer, port.product]
+    .map((value) => value?.trim())
+    .filter((value): value is string => !!value);
+  const unique = [...new Set(parts)];
+  return unique.length > 0 ? unique.join(' · ') : undefined;
+}
+
+/**
  * One slot in the port rack: drag handle, pulsing status dot, name
  * (+alias/badges), a quiet monospace meta line, and the connect toggle.
  * Everything else lives in the right-click menu.
@@ -57,6 +69,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
 
   const statusKey = STATUS_LABEL_KEY[port.status];
   const label = statusKey ? t(statusKey) : port.status;
+  const metadataTitle = portMetadataTitle(port);
 
   // 串口分组控制：
   //  - 已在组里：移出分组
@@ -129,7 +142,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
           <GripVertical size={12} />
         </span>
         <span className={`status-dot ${port.status}`} />
-        <div className="port-item-info">
+        <div className="port-item-info" title={metadataTitle}>
           <div className="port-item-title">
             <span className="port-item-name">{port.id}</span>
             {port.alias && <span className="port-item-alias">{port.alias}</span>}

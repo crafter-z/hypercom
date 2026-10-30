@@ -83,9 +83,6 @@ const defaultConfig: AppConfig = {
   logIncludeDirection: true,
   logSubdirMode: 'date',
   logNewFilePerSession: false,
-  backupEnabled: false,
-  backupInterval: 24,
-  backupDirectory: '',
   restoreSession: true,
   diagLogEnabled: true,
   // issue #12：默认「定期检查到正式版」（用户决策，2026-08-15）。

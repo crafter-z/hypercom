@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
-import type { AppConfig } from '../types';
-import { configService, storageService } from '../services/tauri';
+import type { AppConfig, PortMetaEntry } from '../types';
+import { configService } from '../services/tauri';
 import { parseSessionSnapshot } from '../utils/sessionSnapshot';
-import { collectPortMeta, saveCurrentPortMeta, useConfigPersistence } from './useConfigPersistence';
+import { jsonEqual } from '../utils/jsonEqual';
+import { collectPortMeta, saveCurrentPortGroups, saveCurrentPortMeta, useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
 
 interface StartupResult {
@@ -32,9 +33,7 @@ export function useAppInit() {
         useRuleStore.getState().setSendCommandSets(cfg.sendCommandSets);
         useRuleStore.getState().setHighlightRuleSets(cfg.highlightRuleSets);
         useRuleStore.getState().setProtocolTemplates(cfg.protocolTemplates);
-        useRuleStore.getState().setTriggerRules(
-          cfg.triggerRules.map((r) => (String(r.actionType) === 'bookmark' ? { ...r, actionType: 'alert' } : r))
-        );
+        useRuleStore.getState().setTriggerRules(cfg.triggerRules);
         useRuleStore.getState().setPortToolConfigs(cfg.portToolConfigs);
         useAppStore.getState().setGroups(cfg.portGroups ?? []);
         await refreshPorts();
@@ -88,14 +87,13 @@ export function useAppInit() {
   // 由后端 ConfigManager.save() 保证）。替代旧的「保存布局」手动按钮。
   // 与 App.tsx 会话快照订阅同款防抖写法；后台持久化失败只记日志不弹 toast，
   // 避免高频操作期间的重复打扰。
-  // 这里**不**回写 store.config.portGroups：全量保存（saveConfig）从 store.groups
-  // 取实时分组，不再依赖启动快照，回写反而多一条会分叉的写路径。
+  // 与实体/全量保存共享写队列和 revision CAS；成功后只推进分组基线与 revision。
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     // issue #6-8：防抖 cleanup 原先只 clearTimeout，关窗/崩溃会丢最近 500ms 改动。
     // 兜底 flush：cleanup 时若仍有待触发防抖，同步保存一次再 clear。
     const flushGroups = () => {
-      storageService.savePortGroups(useAppStore.getState().groups).catch((e) => {
+      saveCurrentPortGroups().catch((e) => {
         console.warn('[useAppInit] Failed to auto-save port groups:', e);
       });
     };
@@ -123,6 +121,7 @@ export function useAppInit() {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let retryId: ReturnType<typeof setTimeout> | null = null;
     let pendingSignature: string | null = null;
+    let pendingSnapshot: { entries: PortMetaEntry[]; presentIds: string[] } | null = null;
     const capture = () => {
       const ports = useAppStore.getState().ports;
       return { entries: collectPortMeta(ports), presentIds: ports.map((port) => port.id) };
@@ -138,10 +137,13 @@ export function useAppInit() {
         retryId = null;
       }
       const signature = pendingSignature ?? computeSignature();
-      const snapshot = capture();
+      const snapshot = pendingSnapshot ?? capture();
       saveCurrentPortMeta(snapshot).then(() => {
         lastSignature = signature;
-        if (pendingSignature === signature) pendingSignature = null;
+        if (pendingSnapshot === snapshot) {
+          pendingSignature = null;
+          pendingSnapshot = null;
+        }
       }).catch((e) => {
         console.warn('[useAppInit] Failed to auto-save port meta:', e);
         retryId = setTimeout(() => {
@@ -155,8 +157,37 @@ export function useAppInit() {
       // 统计都重算签名；3s 轮询会重建数组但这不携带 alias/isHidden 变化，
       // 签名比较仍能正确去重。
       if (state.ports === prevState.ports) return;
+      if (pendingSnapshot) {
+        const previousIds = new Set(prevState.ports.map(port => port.id));
+        const pendingIds = new Set(pendingSnapshot.presentIds);
+        let restored = false;
+        const ports = state.ports.map(port => {
+          if (previousIds.has(port.id) || !pendingIds.has(port.id)) return port;
+          // mergePorts can only read the committed baseline. A very fast replug
+          // inside this debounce must instead recover our newer captured edit,
+          // including an explicit clearing that has no entry in the projection.
+          const meta = pendingSnapshot!.entries.find(entry => entry.portId === port.id);
+          const patch = { alias: meta?.alias, isHidden: meta?.isHidden ?? false, mode: meta?.mode ?? 'trx' as const, displayView: meta?.displayView };
+          if (jsonEqual(collectPortMeta([port]), collectPortMeta([{ ...port, ...patch }]))) return port;
+          restored = true;
+          return { ...port, ...patch };
+        });
+        if (restored) {
+          state.setPorts(ports);
+          return;
+        }
+      }
       const sig = computeSignature();
-      if (sig === lastSignature) return;
+      if (sig === lastSignature && pendingSignature === null) return;
+      const current = capture();
+      const present = new Set(current.presentIds);
+      // A port can disappear between an edit and the debounce firing. Carry its
+      // captured edit forward, while currently present ports (including explicit
+      // clearing) replace their earlier projection.
+      pendingSnapshot = {
+        entries: [...(pendingSnapshot?.entries ?? []).filter((entry) => !present.has(entry.portId)), ...current.entries],
+        presentIds: [...new Set([...(pendingSnapshot?.presentIds ?? []), ...current.presentIds])],
+      };
       pendingSignature = sig;
       if (timeoutId !== null) clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {

@@ -107,6 +107,20 @@ describe('mergePorts', () => {
     expect(mergePorts(incoming, existing).map(p => p.id)).toEqual(['COM1', 'COM2']);
   });
 
+  it('clears the old missing-poll grace count when a port is removed after disconnect', () => {
+    const id = 'COM-GRACE-RESET';
+    const live = makePort(id, { status: 'connected' });
+    expect(mergePorts([], [live])).toHaveLength(1);
+    expect(mergePorts([], [live])).toHaveLength(1);
+    expect(mergePorts([], [makePort(id)])).toEqual([]);
+    // A later active session starts its full grace period, even if it was added
+    // by a connection event rather than another successful enumeration.
+    expect(mergePorts([], [live])).toHaveLength(1);
+    expect(mergePorts([], [live])).toHaveLength(1);
+    expect(mergePorts([], [live])).toHaveLength(1);
+    expect(mergePorts([], [live])).toEqual([]);
+  });
+
   it('drops a disconnected port that vanished from enumeration', () => {
     const existing = [makePort('COM1'), makePort('COM2')];
     const incoming = [makePort('COM1')];
@@ -158,6 +172,75 @@ describe('mergePorts', () => {
     expect(existing.some(p => p.id === 'COM9')).toBe(true);
   });
 
+  it('keeps a connected port for exactly 3 missing rounds and drops it on the 4th', () => {
+    const ghost = makePort('COMG1', { status: 'connected' });
+    let existing = [ghost, makePort('COM1')];
+    for (let round = 1; round <= 4; round++) {
+      existing = mergePorts([makePort('COM1')], existing);
+      expect(existing.some(p => p.id === 'COMG1')).toBe(round <= 3);
+      if (round <= 3) expect(existing.find(p => p.id === 'COMG1')).toMatchObject({ status: 'connected' });
+    }
+  });
+
+  it('resets the counter on reappearance so a full grace period is available again', () => {
+    let existing = [makePort('COMG3', { status: 'connected' }), makePort('COM1')];
+    // 连续缺失 3 轮（宽限用满但仍保留）→ 计数为 3
+    for (let i = 0; i < 3; i++) {
+      existing = mergePorts([makePort('COM1')], existing);
+      expect(existing.some(p => p.id === 'COMG3')).toBe(true);
+    }
+    // 端口重新出现 → 计数必须清零
+    existing = mergePorts([makePort('COM1'), makePort('COMG3')], existing);
+    expect(existing.some(p => p.id === 'COMG3')).toBe(true);
+    // 再现后再次消失：完整 3 轮宽限重新生效（否则第 1 轮就会被丢）
+    for (let i = 0; i < 3; i++) {
+      existing = mergePorts([makePort('COM1')], existing);
+      expect(existing.some(p => p.id === 'COMG3')).toBe(true);
+    }
+  });
+
+  it('clears a stale missing counter when the port is backfilled as a new port', () => {
+    // 1) connected 端口连续缺失 2 轮；随后断开并彻底离开列表，计数残留在模块 Map 中
+    let existing = [makePort('COMG2', { status: 'connected' }), makePort('COM1')];
+    existing = mergePorts([makePort('COM1')], existing);
+    existing = mergePorts([makePort('COM1')], existing);
+    expect(existing.some(p => p.id === 'COMG2')).toBe(true);
+    existing = mergePorts([makePort('COM1')], [makePort('COMG2'), makePort('COM1')]);
+    expect(existing.some(p => p.id === 'COMG2')).toBe(false);
+    // 2) 端口重新枚举 → 以「新端口」身份回填；陈旧计数必须清零
+    existing = mergePorts([makePort('COM1'), makePort('COMG2')], existing);
+    existing = existing.map(p => (p.id === 'COMG2' ? { ...p, status: 'connected' as const } : p));
+    // 3) 再拔出：3 轮缺失仍保留，第 4 轮才丢弃（陈旧计数会让第 2 轮就丢）
+    for (let round = 1; round <= 4; round++) {
+      existing = mergePorts([makePort('COM1')], existing);
+      expect(existing.some(p => p.id === 'COMG2')).toBe(round <= 3);
+    }
+  });
+
+  it('drops a vanished `error` port instead of ghost-retaining it', () => {
+    const existing = [makePort('COM1'), makePort('COM6', { status: 'error' })];
+    expect(mergePorts([makePort('COM1')], existing).map(p => p.id)).toEqual(['COM1']);
+  });
+
+  it('refreshes manufacturer/product from the latest enumeration', () => {
+    const existing = [makePort('COM5', { status: 'connected', manufacturer: 'Old Vendor', product: 'Old Product' })];
+    const fresh = mapPortInfo({
+      id: 'COM5', name: 'COM5', port_type: 'real', manufacturer: 'New Vendor', product: 'New Product',
+    });
+    expect(mergePorts([fresh], existing)[0]).toMatchObject({
+      status: 'connected',
+      manufacturer: 'New Vendor',
+      product: 'New Product',
+    });
+  });
+
+  it('clears stale manufacturer/product when the fresh enumeration omits them', () => {
+    const existing = [makePort('COM5', { manufacturer: 'Old Vendor', product: 'Old Product' })];
+    const merged = mergePorts([makePort('COM5')], existing);
+    expect(merged[0].manufacturer).toBeUndefined();
+    expect(merged[0].product).toBeUndefined();
+  });
+
   it('returns incoming ports as-is when nothing exists yet', () => {
     const incoming = [makePort('COM1'), makePort('COM2')];
     expect(mergePorts(incoming, []).map(p => p.id)).toEqual(['COM1', 'COM2']);
@@ -173,5 +256,23 @@ describe('mapPortInfo', () => {
   it('maps the sim port type', () => {
     const mapped = mapPortInfo({ id: 'SIM:Loopback', name: 'SIM', port_type: 'sim' });
     expect(mapped.type).toBe('sim');
+  });
+
+  it('passes manufacturer/product through to SerialPort', () => {
+    const mapped = mapPortInfo({
+      id: 'COM3',
+      name: 'COM3',
+      port_type: 'real',
+      manufacturer: 'Silicon Labs',
+      product: 'CP2102 USB to UART Bridge',
+    });
+    expect(mapped.manufacturer).toBe('Silicon Labs');
+    expect(mapped.product).toBe('CP2102 USB to UART Bridge');
+  });
+
+  it('leaves manufacturer/product undefined when the backend omits them', () => {
+    const mapped = mapPortInfo({ id: 'COM4', name: 'COM4', port_type: 'real' });
+    expect(mapped.manufacturer).toBeUndefined();
+    expect(mapped.product).toBeUndefined();
   });
 });

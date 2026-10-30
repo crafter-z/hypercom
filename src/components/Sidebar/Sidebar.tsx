@@ -135,16 +135,18 @@ const Sidebar: React.FC = () => {
   }, []);
 
   const handleSortByAdded = useCallback(() => {
-    useAppStore.getState().setPortOrder('added');
-    void refreshPorts();
+    // Commit the intent only after a successful refresh: switching to `added`
+    // while enumeration fails would highlight "added order" while the list
+    // still shows the manual arrangement.
+    void refreshPorts().then((applied) => {
+      if (applied) useAppStore.getState().setPortOrder('added');
+    });
   }, [refreshPorts]);
-
   // 批量开/关：串行 + 100ms 间隔，避免并发 open/close 在后端抢串口句柄。
   const handleOpenAll = useCallback(() => {
     const pending = useAppStore.getState().ports.filter(p => p.status !== 'connected');
     void runSequential(pending, (p) => toggleConnection(p.id));
   }, [toggleConnection]);
-
   const handleCloseAll = useCallback(() => {
     const connected = useAppStore.getState().ports.filter(p => p.status === 'connected');
     void runSequential(connected, (p) => toggleConnection(p.id));

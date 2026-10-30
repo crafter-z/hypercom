@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { flushSync } from 'react-dom';
 import { ArrowDownToLine, ArrowUpToLine, Pencil, Plus, Save, Search, Trash2, Undo2 } from 'lucide-react';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { orderedCommands, renumberCommands } from '../../utils/commandOrder';
@@ -22,15 +23,19 @@ interface QuickSendListProps {
   saving: boolean;
   error: string | null;
   canSend: boolean;
+  conflict?: boolean;
   onReplaceSets: (sets: SendCommandSet[]) => void;
   onSave: () => Promise<boolean>;
   onDiscard: () => Promise<boolean>;
+  onOverwriteHost?: () => Promise<boolean>;
+  onReloadHost?: () => Promise<boolean>;
 }
 
 /** Every field edits the session draft; only explicit, acknowledged Save persists. */
 const QuickSendList: React.FC<QuickSendListProps> = ({
   active, sets, selectedSet, onSelectSet, flashingId, onSend, onOpenSetEditor,
-  ready, dirty, dirtyIds, pending, saving, error, canSend, onReplaceSets, onSave, onDiscard,
+  ready, dirty, dirtyIds, pending, saving, error, canSend, conflict, onReplaceSets, onSave, onDiscard,
+  onOverwriteHost, onReloadHost,
 }) => {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
@@ -73,6 +78,14 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [active, filtered, cursor, onSend, sendDisabled]);
+
+  const saveDraft = async () => {
+    // Commit a focused numeric buffer before the hook freezes edits for save.
+    // Save stays available even while the published draft is clean: the only
+    // change may still live inside that input's blur-committed text buffer.
+    flushSync(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
+    if (await onSave()) setEditingIds({});
+  };
 
   const updateSet = (patch: Partial<SendCommandSet>) => {
     if (selectedSet && editable) onReplaceSets(sets.map(set => set.id === selectedSet.id ? { ...set, ...patch } : set));
@@ -119,10 +132,18 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
       </div>
       <div className="quicksend-draft-actions">
         <span role="status">{t(!ready || saving || pending ? 'editor.saving' : dirty ? 'editor.unsaved' : 'editor.saved')}</span>
-        <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onSave().then(saved => { if (saved) setEditingIds({}); }); }}><Save size={12} />{t('editor.save')}</button>
+        <button type="button" className="btn btn-sm" disabled={!ready || saving} onClick={() => { void saveDraft(); }}><Save size={12} />{t('editor.save')}</button>
         <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
       </div>
-      {error && <div className="quicksend-draft-error" role="alert">{error.startsWith('editor.') ? t(error) : error}</div>}
+      {error && <div className="quicksend-draft-error" role="alert">
+        <span>{error.startsWith('editor.') ? t(error) : error}</span>
+        {conflict && onOverwriteHost && onReloadHost && <span className="quicksend-conflict-actions">
+          <button type="button" className="btn btn-sm" disabled={saving || pending}
+            onClick={() => { void onOverwriteHost(); }}>{t('editor.overwriteHostDraft')}</button>
+          <button type="button" className="btn btn-sm" disabled={saving || pending}
+            onClick={() => { void onReloadHost(); }}>{t('editor.reloadHostDraft')}</button>
+        </span>}
+      </div>}
       {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
     </div>
     <div className="quicksend-list" ref={listRef}>

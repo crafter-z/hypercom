@@ -6,6 +6,19 @@ export interface EditorParticipant {
 }
 
 type LeaveAction = 'save' | 'discard' | 'continue';
+
+/** A participant that never settles must not hang close approval forever. */
+export const EDITOR_LEAVE_SAVE_TIMEOUT_MS = 15_000;
+
+function withTimeout(action: () => boolean | void | Promise<boolean | void>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>(resolve => {
+    timer = setTimeout(() => resolve(false), EDITOR_LEAVE_SAVE_TIMEOUT_MS);
+  });
+  const work = Promise.resolve().then(action).then(result => result !== false);
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
 interface LeaveDialogState { open: boolean; labels: string[]; error: string | null }
 interface PendingLeave { ids: string[]; resolve: (allowed: boolean) => void; promise: Promise<boolean>; responding: boolean }
 
@@ -68,13 +81,18 @@ export async function respondEditorLeave(action: LeaveAction): Promise<void> {
   try {
     if (action === 'save') {
       for (const participant of selected) {
-        if (participant.isDirty() && !(await participant.save())) throw new Error('editor.saveFailed');
+        if (participant.isDirty() && !(await withTimeout(() => participant.save()))) throw new Error('editor.saveFailed');
+        if (pending !== active) return;
       }
     } else {
-      for (const participant of selected) await participant.discard();
+      for (const participant of selected) {
+        if (participant.isDirty() && !(await withTimeout(() => participant.discard()))) throw new Error('editor.saveFailed');
+        if (pending !== active) return;
+      }
     }
     if (active.ids.some(id => participants.get(id)?.isDirty())) throw new Error('editor.saveFailed');
   } catch (error) {
+    if (pending !== active) return;
     dialogState = { ...dialogState, open: true, error: error instanceof Error ? error.message : 'editor.saveFailed' };
     active.responding = false;
     notify();
@@ -84,4 +102,30 @@ export async function respondEditorLeave(action: LeaveAction): Promise<void> {
   dialogState = { open: false, labels: [], error: null };
   notify();
   active.resolve(true);
+}
+
+/**
+ * Escape hatch for a stuck approval: the user explicitly gives up every unsaved
+ * edit, so the pending request is resolved as "allowed" without another save
+ * attempt. Best-effort participant discard still runs so drafts do not survive
+ * into the next session; failures are ignored because the user already accepted
+ * the loss.
+ */
+export async function forceDiscardEditorLeave(): Promise<boolean> {
+  const active = pending;
+  if (!active) return true;
+  active.responding = true;
+  const selected = active.ids
+    .map(id => participants.get(id))
+    .filter((participant): participant is EditorParticipant => participant !== undefined);
+  for (const participant of selected) {
+    // Best effort only: both a thrown error and a promise that never settles
+    // must not re-block an explicit force-close. Keep this scoped to active.ids.
+    try { void Promise.resolve(participant.discard()).catch(() => {}); } catch { /* accepted loss */ }
+  }
+  pending = null;
+  dialogState = { open: false, labels: [], error: null };
+  notify();
+  active.resolve(true);
+  return true;
 }

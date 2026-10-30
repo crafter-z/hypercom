@@ -44,6 +44,9 @@ export interface SerialPort {
   displayView?: PluginViewPreference | null;
   /** Backend connection identity from the last connected status event. */
   connectionGeneration?: number;
+  /** USB metadata from the backend `PortInfo` (absent for non-USB ports). */
+  manufacturer?: string;
+  product?: string;
 }
 
 /** 数据位 */
@@ -330,11 +333,6 @@ export interface AppConfig {
   logSubdirMode: LogSubdirMode; // 日志子目录策略：none | date | port（issue #5-10，默认 date）
   logNewFilePerSession: boolean; // 每次打开串口新建日志文件（不续写已有文件）
   
-  // 备份设置
-  backupEnabled: boolean;
-  backupInterval: number;  // 备份周期 (小时)
-  backupDirectory: string;
-
   // 会话恢复
   restoreSession: boolean;   // 启动时是否恢复上次会话
 
@@ -565,6 +563,8 @@ export interface PluginHttpOptions {
   url: string;
   headers?: Record<string, string>;
   body?: string | Uint8Array | ArrayBuffer;
+  /** Raw bytes body, already base64-encoded; mutually exclusive with `body`. */
+  bodyBase64?: string;
   /** Seconds; absent/0 means no total deadline, positive is enforced natively. */
   timeout?: number;
   redirect?: PluginHttpRedirect;
@@ -572,6 +572,8 @@ export interface PluginHttpOptions {
   signal?: AbortSignal;
   /** text (default) or binary; text decodes the complete body as UTF-8. */
   responseType?: 'text' | 'binary';
+  /** Caller-chosen request id so it can be cancelled before `open` resolves. */
+  requestId?: string;
 }
 
 /** config.json 插件状态实体（仅状态——enabled/权限；KV 存插件目录 data/）。 */

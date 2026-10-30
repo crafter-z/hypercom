@@ -140,14 +140,27 @@ export interface ActiveTabChangedPayload {
   portId: string | null;
 }
 
-export type CommandEditorSnapshot = EntityEditorSnapshot<SendCommandSet> & { sessionId: string };
+export type CommandEditorSnapshot = EntityEditorSnapshot<SendCommandSet> & {
+  sessionId: string;
+  clientProtocol?: 2;
+  clientId?: string;
+  challengeId?: string;
+  syncRequestId?: string;
+};
 
 export type CommandEditorAction = {
   sessionId: string;
   version: number;
+  clientId?: string;
+  overwrite?: boolean;
   id?: string;
+  /**
+   * Command-set ids the panel actually changed. The host replays only these on
+   * discard; without them a panel discard would reset the whole collection and
+   * silently drop unsaved edits made in the main window.
+   */
+  ids?: string[];
 } & ({ action: 'replace'; items: SendCommandSet[] } | { action: 'save' | 'discard' });
-
 export type CommandEditorRequest = CommandEditorAction & { requestId: string };
 
 export interface CommandEditorResult {
@@ -157,13 +170,17 @@ export interface CommandEditorResult {
   snapshot: CommandEditorSnapshot;
 }
 
-export interface CommandEditorClientRequest { requestId: string; action: 'save' | 'discard' }
-export interface CommandEditorClientResult { requestId: string; success: boolean; error: string | null }
+export interface CommandEditorClientIdentity { clientId: string; sessionId: string; sequence: number }
+export interface CommandEditorClientState extends CommandEditorClientIdentity { unresolved: boolean }
+export interface CommandEditorSyncRequest extends CommandEditorClientIdentity { challengeId?: string; syncRequestId?: string; resetUndo?: boolean }
+// Optional identity is only for compatibility with legacy panels/test clients.
+export interface CommandEditorClientRequest extends Partial<CommandEditorClientIdentity> { requestId: string; action: 'save' | 'discard' }
+export interface CommandEditorClientResult extends Partial<CommandEditorClientState> { requestId: string; success: boolean; error: string | null }
 
 export const COMMAND_EDITOR_TIMEOUT_MS = 15_000;
 
 /** Register before emitting; late listener registration is retired on timeout. */
-function requestEditorEvent<Result extends { requestId: string }>(requestEvent: string, resultEvent: string, request: object): Promise<Result> {
+function requestEditorEvent<Result extends { requestId: string }>(requestEvent: string, resultEvent: string, request: object, accepts: (result: Result) => boolean = () => true): Promise<Result> {
   const requestId = crypto.randomUUID();
   // ES2020/WebView baseline does not guarantee Promise.withResolvers.
   let resolve!: (result: Result) => void;
@@ -181,7 +198,7 @@ function requestEditorEvent<Result extends { requestId: string }>(requestEvent: 
   };
   const timer = setTimeout(() => finish(undefined, new Error('editor.saveFailed')), COMMAND_EDITOR_TIMEOUT_MS);
   void listen<Result>(resultEvent, event => {
-    if (event.payload.requestId === requestId) finish(event.payload);
+    if (event.payload.requestId === requestId && accepts(event.payload)) finish(event.payload);
   }).then(stop => {
     if (settled) { stop(); return; }
     unlisten = stop;
@@ -242,11 +259,15 @@ export const popoutEventService = {
   },
 
   requestCommandEditor: (request: CommandEditorAction) => requestEditorEvent<CommandEditorResult>('popout:command-editor-request', 'command-editor:result', request),
-  requestCommandEditorClientLeave: (action: 'save' | 'discard') => requestEditorEvent<CommandEditorClientResult>('command-editor:client-leave', 'command-editor:client-result', { action }),
+  requestCommandEditorClientLeave: (action: 'save' | 'discard', identity?: CommandEditorClientIdentity) => requestEditorEvent<CommandEditorClientResult>(
+    'command-editor:client-leave', 'command-editor:client-result', { action, ...identity },
+    result => !identity || result.clientId === identity.clientId && result.sessionId === identity.sessionId &&
+      Number.isSafeInteger(result.sequence) && result.sequence! >= identity.sequence,
+  ),
   onCommandEditorClientLeave: (callback: (request: CommandEditorClientRequest) => void) => listen<CommandEditorClientRequest>('command-editor:client-leave', event => callback(event.payload)),
   emitCommandEditorClientResult: (result: CommandEditorClientResult): Promise<void> => emit('command-editor:client-result', result),
-  onCommandEditorClientState: (callback: (unresolved: boolean) => void) => listen<boolean>('command-editor:client-state', event => callback(event.payload)),
-  emitCommandEditorClientState: (unresolved: boolean): Promise<void> => emit('command-editor:client-state', unresolved),
+  onCommandEditorClientState: (callback: (state: CommandEditorClientState | boolean) => void) => listen<CommandEditorClientState | boolean>('command-editor:client-state', event => callback(event.payload)),
+  emitCommandEditorClientState: (state: CommandEditorClientState | boolean): Promise<void> => emit('command-editor:client-state', state),
 
   emitCommandEditorSnapshot: (snapshot: CommandEditorSnapshot): Promise<void> => emit('command-editor:snapshot', snapshot),
   emitCommandEditorResult: (result: CommandEditorResult): Promise<void> => emit('command-editor:result', result),
@@ -266,9 +287,9 @@ export const popoutEventService = {
   },
 
   /** 弹窗 → 主窗：挂载完成，请求一次状态对表（主窗回放 active-tab:changed）。 */
-  onRequestSync: (callback: () => void) => {
-    return listen<null>('popout:request-sync', () => {
-      callback();
+  onRequestSync: (callback: (request?: CommandEditorSyncRequest) => void) => {
+    return listen<CommandEditorSyncRequest | null>('popout:request-sync', event => {
+      callback(event.payload ?? undefined);
     });
   },
 
@@ -324,8 +345,8 @@ export const popoutEventService = {
     return emit('active-tab:changed', payload);
   },
 
-  emitRequestSync: (): Promise<void> => {
-    return emit('popout:request-sync');
+  emitRequestSync: (identity?: CommandEditorSyncRequest): Promise<void> => {
+    return identity ? emit('popout:request-sync', identity) : emit('popout:request-sync');
   },
 
   /** 终端弹窗 → 主窗：请求历史快照。 */

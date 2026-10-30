@@ -9,6 +9,11 @@ import { useRuleStore } from '../stores/useRuleStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { resetStoresForTests } from '../stores/resetStores';
 import { popoutEventService, popoutService, serialService } from '../services/tauri';
+import type { CommandEditorClientResult } from '../services/tauri';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { getEditorLeaveDialogState, requestEditorLeave, respondEditorLeave } from '../utils/editorLeave';
+
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: { getByLabel: vi.fn(async () => null) } }));
 
 vi.mock('../services/tauri', () => ({
   serialService: { sendSerialData: vi.fn(async () => 3) },
@@ -27,8 +32,17 @@ vi.mock('../services/tauri', () => ({
 let root: Root;
 let tabId: string;
 function Probe() { usePopoutBridge(); return null; }
+function activateClient(clientId: string, sessionId: string) {
+  const handshake = vi.mocked(popoutEventService.onRequestSync).mock.calls[0][0];
+  handshake({ clientId, sessionId, sequence: 0 });
+  const calls = vi.mocked(popoutEventService.emitCommandEditorSnapshot).mock.calls;
+  const challenge = calls[calls.length - 1][0];
+  expect(challenge).toMatchObject({ clientId, sessionId, challengeId: expect.any(String) });
+  handshake({ clientId, sessionId, sequence: 1, challengeId: challenge.challengeId });
+}
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(WebviewWindow.getByLabel).mockResolvedValue(null);
   resetStoresForTests();
   useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'connected', type: 'real', isHidden: false }] });
   tabId = useAppStore.getState().openTab('COM1');
@@ -43,9 +57,124 @@ beforeEach(() => {
   vi.mocked(popoutEventService.onTerminalClosed).mockResolvedValue(() => {});
   root = createRoot(document.createElement('div'));
 });
-afterEach(async () => { await act(async () => { root.unmount(); }); });
+afterEach(async () => { await respondEditorLeave('continue'); await act(async () => { root.unmount(); }); });
 
 describe('main popout bridge retirement', () => {
+  it('does not activate an unseen delayed client request without fresh live proof', async () => {
+    await act(async () => { root.render(createElement(Probe)); });
+    const calls = vi.mocked(popoutEventService.emitCommandEditorSnapshot).mock.calls;
+    const sessionId = calls[calls.length - 1][0].sessionId;
+    const handshake = vi.mocked(popoutEventService.onRequestSync).mock.calls[0][0];
+    const report = vi.mocked(popoutEventService.onCommandEditorClientState).mock.calls[0][0];
+    handshake({ clientId: 'unseen-old', sessionId, sequence: 0 });
+    const oldChallenge = calls[calls.length - 1][0].challengeId;
+    activateClient('current', sessionId);
+    report({ clientId: 'current', sessionId, sequence: 2, unresolved: true });
+    // An old proof issued before this handoff must itself be re-challenged.
+    handshake({ clientId: 'unseen-old', sessionId, sequence: 1, challengeId: oldChallenge });
+    report({ clientId: 'unseen-old', sessionId, sequence: 99, unresolved: false });
+    const leaving = requestEditorLeave(['popout:pending-commands']);
+    expect(getEditorLeaveDialogState().open).toBe(true);
+    await respondEditorLeave('continue');
+    expect(await leaving).toBe(false);
+    report({ clientId: 'current', sessionId, sequence: 3, unresolved: false });
+    const clean = requestEditorLeave(['popout:pending-commands']);
+    expect(getEditorLeaveDialogState().open).toBe(false);
+    expect(await clean).toBe(true);
+  });
+  it('rejects retired-client and out-of-order states including delayed cleanup false', async () => {
+    await act(async () => { root.render(createElement(Probe)); });
+    const snapshots = vi.mocked(popoutEventService.emitCommandEditorSnapshot).mock.calls;
+    const sessionId = snapshots[snapshots.length - 1][0].sessionId;
+    const handshake = vi.mocked(popoutEventService.onRequestSync).mock.calls[0][0];
+    const report = vi.mocked(popoutEventService.onCommandEditorClientState).mock.calls[0][0];
+    activateClient('old', sessionId);
+    report({ clientId: 'old', sessionId, sequence: 2, unresolved: true });
+    activateClient('new', sessionId);
+    report({ clientId: 'new', sessionId, sequence: 2, unresolved: true });
+    report({ clientId: 'old', sessionId, sequence: 99, unresolved: false });
+    report(false); // legacy cleanup cannot override modern state either
+    const dirty = requestEditorLeave(['popout:pending-commands']);
+    expect(getEditorLeaveDialogState().open).toBe(true);
+    await respondEditorLeave('continue');
+    expect(await dirty).toBe(false);
+    report({ clientId: 'new', sessionId, sequence: 3, unresolved: false });
+    report({ clientId: 'new', sessionId, sequence: 2, unresolved: true });
+    report({ clientId: 'old', sessionId, sequence: 100, unresolved: true });
+    handshake({ clientId: 'old', sessionId, sequence: 101 });
+    report(true);
+    const clean = requestEditorLeave(['popout:pending-commands']);
+    expect(getEditorLeaveDialogState().open).toBe(false);
+    expect(await clean).toBe(true);
+  });
+
+  it('ignores a prior host session even when its state sequence is higher', async () => {
+    await act(async () => { root.render(createElement(Probe)); });
+    const snapshots = vi.mocked(popoutEventService.emitCommandEditorSnapshot).mock.calls;
+    const sessionId = snapshots[snapshots.length - 1][0].sessionId;
+    activateClient('panel', sessionId);
+    const report = vi.mocked(popoutEventService.onCommandEditorClientState).mock.calls[0][0];
+    report({ clientId: 'panel', sessionId, sequence: 2, unresolved: true });
+    report({ clientId: 'panel', sessionId: 'retired-host', sequence: 100, unresolved: false });
+    const leaving = requestEditorLeave(['popout:pending-commands']);
+    expect(getEditorLeaveDialogState().open).toBe(true);
+    await respondEditorLeave('continue');
+    expect(await leaving).toBe(false);
+  });
+
+  it('does not let a retired client leave ACK approve a newer panel', async () => {
+    await act(async () => { root.render(createElement(Probe)); });
+    const snapshots = vi.mocked(popoutEventService.emitCommandEditorSnapshot).mock.calls;
+    const sessionId = snapshots[snapshots.length - 1][0].sessionId;
+    const report = vi.mocked(popoutEventService.onCommandEditorClientState).mock.calls[0][0];
+    activateClient('old', sessionId);
+    report({ clientId: 'old', sessionId, sequence: 2, unresolved: true });
+    vi.mocked(WebviewWindow.getByLabel).mockResolvedValue({} as WebviewWindow);
+    let finish!: (result: CommandEditorClientResult) => void;
+    vi.mocked(popoutEventService.requestCommandEditorClientLeave).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const leaving = requestEditorLeave(['popout:pending-commands']);
+    const response = respondEditorLeave('save');
+    await vi.waitFor(() => expect(popoutEventService.requestCommandEditorClientLeave).toHaveBeenCalledOnce());
+    expect(popoutEventService.requestCommandEditorClientLeave).toHaveBeenCalledWith('save', { clientId: 'old', sessionId, sequence: 2 });
+    activateClient('new', sessionId);
+    report({ clientId: 'new', sessionId, sequence: 2, unresolved: true });
+    finish({ requestId: 'old-request', clientId: 'old', sessionId, sequence: 3, unresolved: false, success: true, error: null });
+    await response;
+    expect(getEditorLeaveDialogState()).toMatchObject({ open: true, error: 'editor.saveFailed' });
+    vi.mocked(popoutEventService.requestCommandEditorClientLeave).mockResolvedValueOnce({
+      requestId: 'new-request', clientId: 'new', sessionId, sequence: 3, unresolved: false, success: true, error: null,
+    });
+    await respondEditorLeave('save');
+    expect(await leaving).toBe(true);
+  });
+  it('retires stale pending text after native destruction without asking a dead panel', async () => {
+    await act(async () => { root.render(createElement(Probe)); });
+    vi.mocked(popoutEventService.onCommandEditorClientState).mock.calls[0][0](true);
+    vi.mocked(WebviewWindow.getByLabel).mockResolvedValueOnce(null);
+    const leaving = requestEditorLeave(['popout:pending-commands']);
+    await respondEditorLeave('save');
+    expect(await leaving).toBe(true);
+    expect(WebviewWindow.getByLabel).toHaveBeenCalledWith('quick-send');
+    expect(popoutEventService.requestCommandEditorClientLeave).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a newer pending-state report when an earlier leave ACK succeeds', async () => {
+    await act(async () => { root.render(createElement(Probe)); });
+    const report = vi.mocked(popoutEventService.onCommandEditorClientState).mock.calls[0][0];
+    report(true);
+    vi.mocked(WebviewWindow.getByLabel).mockResolvedValueOnce({} as WebviewWindow);
+    let finish!: (result: { requestId: string; success: boolean; error: null }) => void;
+    vi.mocked(popoutEventService.requestCommandEditorClientLeave).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const leaving = requestEditorLeave(['popout:pending-commands']);
+    const response = respondEditorLeave('save');
+    await vi.waitFor(() => expect(popoutEventService.requestCommandEditorClientLeave).toHaveBeenCalledOnce());
+    report(true);
+    finish({ requestId: 'old', success: true, error: null });
+    await response;
+    expect(getEditorLeaveDialogState()).toMatchObject({ open: true, error: 'editor.saveFailed' });
+    await respondEditorLeave('continue');
+    expect(await leaving).toBe(false);
+  });
   it('rejects stale callbacks rather than mutating stores or sending', async () => {
     let finishRegistration!: (unlisten: () => void) => void;
     const unlisten = vi.fn();
