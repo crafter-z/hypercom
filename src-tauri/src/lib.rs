@@ -185,8 +185,32 @@ pub struct AppState {
     pub pending_close: std::sync::Mutex<Option<PendingClose>>,
 }
 
-/// Try to take an exclusive lock next to config.json. Returns Err when another
-/// process already owns it (the caller exits rather than corrupting config).
+/// Only a sharing violation proves that another process owns the Windows lock.
+/// PermissionDenied also covers ACL/token restrictions and must not be presented
+/// as a running instance (or advise the user to delete a live lock).
+fn instance_lock_open_error(
+    config_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    error: std::io::Error,
+) -> anyhow::Error {
+    #[cfg(windows)]
+    if error.raw_os_error()
+        == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)
+    {
+        return anyhow::anyhow!(
+            "Another HyperCom instance is using {} ({error})",
+            config_path.display()
+        );
+    }
+    anyhow::anyhow!(
+        "Failed to open HyperCom instance lock {} for {}: {error}. Check directory/file write permissions and process restrictions; this does not necessarily mean another instance is running",
+        lock_path.display(),
+        config_path.display()
+    )
+}
+
+/// Try to take an exclusive lock next to config.json. Contention and I/O failures
+/// both stop startup rather than allowing concurrent config writers.
 fn acquire_instance_lock(config_path: &std::path::Path) -> anyhow::Result<std::fs::File> {
     let lock_path = config_path.with_extension("lock");
     let mut options = std::fs::OpenOptions::new();
@@ -199,19 +223,23 @@ fn acquire_instance_lock(config_path: &std::path::Path) -> anyhow::Result<std::f
     }
     let mut file = options
         .open(&lock_path)
-        .map_err(|e| anyhow::anyhow!(
-            "Another HyperCom instance is using {} ({e})",
-            config_path.display()
-        ))?;
+        .map_err(|error| instance_lock_open_error(config_path, &lock_path, error))?;
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(anyhow::anyhow!(
+                    "Another HyperCom instance is using {} ({error})",
+                    config_path.display()
+                ));
+            }
             return Err(anyhow::anyhow!(
-                "Another HyperCom instance is using {} ({})",
-                config_path.display(),
-                std::io::Error::last_os_error()
+                "Failed to acquire HyperCom instance lock {} for {}: {error}",
+                lock_path.display(),
+                config_path.display()
             ));
         }
     }
@@ -845,6 +873,48 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_lock_permission_denied_is_not_reported_as_another_instance() {
+        let config = std::path::Path::new("settings/config.json");
+        let lock = config.with_extension("lock");
+        #[cfg(windows)]
+        let error = std::io::Error::from_raw_os_error(5);
+        #[cfg(not(windows))]
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let os_message = error.to_string();
+        let message = instance_lock_open_error(config, &lock, error).to_string();
+        assert!(message.contains("Failed to open HyperCom instance lock"));
+        assert!(message.contains(&lock.display().to_string()));
+        assert!(message.contains(&config.display().to_string()));
+        assert!(message.contains(&os_message));
+        assert!(!message.contains("Another HyperCom instance is using"));
+    }
+
+    #[test]
+    fn instance_lock_missing_directory_is_not_reported_as_another_instance() {
+        let config = std::env::temp_dir()
+            .join(format!("hypercom-missing-{}", uuid::Uuid::new_v4()))
+            .join("config.json");
+        let error = acquire_instance_lock(&config).unwrap_err().to_string();
+        assert!(error.contains("Failed to open HyperCom instance lock"));
+        assert!(!error.contains("Another HyperCom instance is using"));
+    }
+
+    #[test]
+    fn instance_lock_rejects_a_second_owner_and_releases_on_drop() {
+        let dir = std::env::temp_dir().join(format!("hypercom-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.json");
+        let first = acquire_instance_lock(&config).unwrap();
+        let error = acquire_instance_lock(&config).unwrap_err().to_string();
+        assert!(error.contains("Another HyperCom instance is using"), "{error}");
+        drop(first);
+        // A leftover lock file is not a live lock; no deletion is needed to restart.
+        let next = acquire_instance_lock(&config).unwrap();
+        drop(next);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn test_format_crash_report_contains_timestamp_message_location_and_backtrace() {

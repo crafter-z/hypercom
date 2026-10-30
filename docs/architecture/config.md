@@ -34,10 +34,26 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 - 首启 `ConfigManager::new` 构造默认 `AppConfig`（空实体数组）；无数据库。
 - **配置文件路径解析顺序**（`ConfigManager::new`）：CLI `--config <path>` → `HYPERCOM_CONFIG` 环境变量 → 便携模式（可执行文件同目录下**已存在**的 `config.json`）→ 默认 `%APPDATA%/hypercom/config.json`（`dirs::config_dir`）。会话快照路径恒为配置文件同目录的 `session.json`。
+- 实例锁：`lib.rs` 的 `acquire_instance_lock` 在配置旁打开 `config.lock`；Windows 用不共享的文件句柄，Unix 用非阻塞 `flock`，句柄随进程退出释放。遗留锁文件本身不会阻止重启，不应靠删除锁文件绕过活跃实例。只有 Windows sharing violation / Unix 锁竞争才报告另一个实例；打开锁文件的权限或其他 I/O 错误会显示锁文件路径及系统错误，需检查文件/目录写权限和启动进程的限制，而不是认定已有实例。
 - 读取：先 `strip_legacy_memory_budget_keys`，再反序列化。失败则 `log::warn` 并回退 `.json.bak`（同样先剥离旧 key）；`.bak` 也不可用才用默认值——corrupt JSON 自动恢复。
 - 在插件 Worker 启动前恢复 `plugin-transaction.json` 所属磁盘事务；旧插件条目缺少 `installGeneration` 时分配 UUID、保存并同步安全 `.bak`。这是安装身份迁移，不是配置版本分派。
 - `save()`：计算下一 revision → 序列化并同步临时文件 → 单操作替换配置文件 → 同步父目录；失败不保留推进的内存 revision。普通备份只复制加载时已确认有效的主档；从 `.bak` 恢复期间不以坏主档覆盖有效备份，成功替换后主档才标为有效。插件清权/身份迁移/事务恢复仍独立调用 `save_safe_backup`。
 - `set_config()` 与规则 CRUD 都在写入失败时恢复完整旧 `AppConfig`（包括实体与 revision），失败修改不会夹带进下一次无关保存。
+
+### Windows 开发启动：低完整性构建目录
+
+若工作区带有可继承的 `Low Mandatory Level` 标签，其下生成的可执行文件也会继承低完整性标签。即使从开始菜单打开普通 Terminal，运行这些产物时进程仍可能降至低完整性，无法写入普通完整性的 `%APPDATA%/hypercom`；表现为诊断日志及实例锁同时报 `os error 5`。用户的 DACL FullControl 不会绕过完整性级别限制，单独查看 `TokenHasRestrictions` 也不能区分普通 UAC 过滤与此问题。
+
+先用 `icacls` 检查工作区、构建输出目录与可执行文件的完整性标签。确认这一原因后，可在普通 Terminal 中将 Cargo 产物放到工作区之外的正常完整性目录；不需要修改 AppData 权限、删除配置或移除工作区的沙箱权限项。例如 PowerShell（环境变量只在当前终端及其子进程有效）：
+
+```powershell
+$env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'HyperComBuild\target'
+npm.cmd run tauri dev
+```
+
+若需要保持原来的 `npm run tauri dev` 命令，可在项目根目录的 `.cargo/config.toml` 中设置 `[build]` 的 `target-dir` 为上述外部目录的**绝对路径**（TOML 不展开 `%LOCALAPPDATA%`）。这种含本机路径的配置应加入 `.git/info/exclude`，不提交到仓库；Cargo 从 `src-tauri` 启动时也会向上发现此配置。已有 `CARGO_TARGET_DIR` 环境变量会优先于该设置。
+
+切换目录后首次启动会重新编译。应使用新目录的产物，不能复制回低完整性目录再运行。
 
 ### 数值边界：`CONFIG_BOUNDS` 是唯一来源
 
