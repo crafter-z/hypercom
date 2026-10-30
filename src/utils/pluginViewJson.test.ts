@@ -5,6 +5,20 @@ describe('plugin view JSON boundary', () => {
   it.each([new ArrayBuffer(1024 * 1024), new DataView(new ArrayBuffer(16)), new Map([['a', 1]]), new Set([1]), new Uint8Array([1]), new Date()])('rejects non-JSON containers rather than accounting them as an empty object', value => {
     expect(() => boundedPluginViewJson({ value }, 256 * 1024)).toThrow('JSON values only');
   });
+  it.each([false, true])('rejects lone surrogate values and object keys before the Rust wire, fallback: %s', fallback => {
+    const descriptor = Object.getOwnPropertyDescriptor(String.prototype, 'isWellFormed');
+    if (fallback) Object.defineProperty(String.prototype, 'isWellFormed', { value: undefined, configurable: true });
+    try {
+      for (const invalid of ['\ud800', '\udfff', 'a\ud800b', '\ud800\ud800']) {
+        expect(() => boundedPluginViewJson({ nested: [invalid] }, 1024)).toThrow('well-formed UTF-16');
+        expect(() => boundedPluginViewJson({ [invalid]: true }, 1024)).toThrow('well-formed UTF-16');
+      }
+      expect(boundedPluginViewJson({ emoji: '\ud83d\ude00' }, 1024).value).toEqual({ emoji: '\ud83d\ude00' });
+    } finally {
+      if (fallback && descriptor) Object.defineProperty(String.prototype, 'isWellFormed', descriptor);
+      else if (fallback) Reflect.deleteProperty(String.prototype, 'isWellFormed');
+    }
+  });
   it('retains only an independent normalized JSON value and charges UTF-8 bytes', () => {
     const original = { rows: [{ label: '温度', value: 26.3 }], paused: false };
     const normalized = boundedPluginViewJson(original, 256);

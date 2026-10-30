@@ -15,8 +15,12 @@ function assertAssetWriteContent(content: string | undefined, base64: string | u
 
 export const pluginService = {
   listPlugins: (): Promise<PluginListResponse> => invoke('list_plugins'),
-  installPlugin: (sourcePath: string, replaceExisting?: boolean): Promise<PluginStateSnapshot> =>
-    invoke('install_plugin', { sourcePath, replaceExisting }),
+  installPlugin: (
+    sourcePath: string,
+    replaceExisting?: boolean,
+    expectedGeneration?: string,
+  ): Promise<PluginStateSnapshot> =>
+    invoke('install_plugin', { sourcePath, replaceExisting, expectedGeneration }),
   /** Reload installed code in place; preserves installGeneration/consent/data. */
   reloadPlugin: (id: string, expectedGeneration: string): Promise<PluginStateSnapshot> =>
     invoke('reload_plugin', { id, expectedGeneration }),

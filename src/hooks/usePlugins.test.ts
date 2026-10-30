@@ -285,6 +285,7 @@ describe('explicit replacement installs', () => {
     });
     expect(isPluginReplaceConfirmationError(caught)).toBe(true);
     expect(toastKeys()).toEqual([]);
+    expect(pluginHost.dispose).not.toHaveBeenCalled();
     expect(pluginHost.syncWithConfig).toHaveBeenCalledWith(true);
     await mounted.unmount();
   });
@@ -298,6 +299,53 @@ describe('explicit replacement installs', () => {
     await act(async () => { await mounted.api.installPlugin('/plugins/demo', true); });
     expect(pluginService.installPlugin).toHaveBeenLastCalledWith('/plugins/demo', true);
     expect(useAppStore.getState().config.pluginConfigs[0].installGeneration).toBe('install-b');
+    await mounted.unmount();
+  });
+});
+
+describe('install session isolation and refresh failures', () => {
+  it('does not dispose unrelated Workers while an install is pending or completes', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    const pending = deferred<PluginStateSnapshot>();
+    vi.mocked(pluginService.installPlugin).mockReturnValue(pending.promise);
+    const mounted = await mountList();
+    let installing!: Promise<PluginView | null>;
+    await act(async () => { installing = mounted.api.installPlugin('/plugins/new'); });
+    expect(pluginHost.dispose).not.toHaveBeenCalled();
+    await act(async () => {
+      pending.resolve(snapshot(2, [entry(), { ...entry([], false, 'other-install'), id: 'com.example.other' }]));
+      await installing;
+    });
+    expect(pluginHost.dispose).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('applies an authoritative install snapshot even when the follow-up manifest list fails', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    const mounted = await mountList();
+    useSystemStore.getState().setUIState({ configReady: true });
+    vi.mocked(pluginService.installPlugin).mockResolvedValue(snapshot(2, [entry([], false, 'install-b')]));
+    vi.mocked(pluginService.listPlugins).mockRejectedValue(new Error('manifest scan failed'));
+    await act(async () => { await mounted.api.installPlugin('/plugins/demo'); });
+    expect(useAppStore.getState().config.pluginConfigs[0]).toMatchObject({
+      installGeneration: 'install-b', enabled: false,
+    });
+    expect(pluginHost.syncWithConfig).toHaveBeenCalledWith(true);
+    expect(pluginHost.dispose).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('does not remount views or report reload success when its manifest refresh fails', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    const mounted = await mountList();
+    vi.mocked(pluginService.reloadPlugin).mockResolvedValue(snapshot(2, [entry()]));
+    vi.mocked(pluginService.listPlugins).mockRejectedValue(new Error('manifest scan failed'));
+    await act(async () => {
+      await expect(mounted.api.reloadPlugin(id, 'install-a')).rejects.toThrow('manifest scan failed');
+    });
+    expect(reloadPluginViews).not.toHaveBeenCalled();
+    expect(toastKeys()).not.toContain('plugins.reloaded');
+    expect(pluginHost.dispose).toHaveBeenCalledOnce();
     await mounted.unmount();
   });
 });

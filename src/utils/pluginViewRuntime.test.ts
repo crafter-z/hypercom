@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { executePluginViewApi, issuePluginActionToken, openPluginTabForUser, dismissPluginTab, getAvailablePluginViews, startPluginViewRuntime, selectSerialPluginView, getTabViewPreference, isRawSerialDisplay, getPluginViewState, markPluginViewWorkerReady, placePluginView, suppressPluginViews } from './pluginViewRuntime';
+import { executePluginViewApi, issuePluginActionToken, openPluginTabForUser, dismissPluginTab, getAvailablePluginViews, startPluginViewRuntime, selectSerialPluginView, getTabViewPreference, isRawSerialDisplay, getPluginViewState, markPluginViewWorkerReady, placePluginView, suppressPluginViews, TRUSTED_READY_TIMEOUT_MS } from './pluginViewRuntime';
 import { useAppStore, getActivePortId } from '../stores/useAppStore';
 import { resetStoresForTests } from '../stores/resetStores';
 import { resetPluginSnapshotForTest, syncPluginListSnapshot } from './pluginConfigSnapshot';
@@ -362,6 +362,26 @@ describe('independent pages, navigation documents and binary transport', () => {
       expect(getPluginViewState(tabId).status).toBe('ready');
       vi.advanceTimersByTime(6000);
       expect(getPluginViewState(tabId).status).toBe('ready');
+    } finally { stop(); }
+  });
+
+  it.each([false, true])('starts the trusted ready watchdog only after load, and clears it on ready: %s', async becomesReady => {
+    enableNative();
+    const pure: PluginView = { ...plugin, manifest: { ...plugin.manifest!, entry: '', ui: { buttons: [], menuItems: [], views: [{ ...declaration, id: 'web', entry: 'ui/index.html', mode: 'trusted-web', worker: false, input: 'none', portBinding: 'none', placements: ['workspace-tab'] }] } } };
+    syncPluginListSnapshot({ revision: 2, plugins: [pure], pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions, trustedWebGranted: true }] });
+    let nativeMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async callback => { nativeMessage = callback; return () => {}; });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = openPluginTabForUser({ pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'web' }, null);
+      await settle(); const instanceId = getPluginViewState(tabId).instanceId!;
+      nativeMessage({ type: 'document', instanceId, documentId: 'doc-1' });
+      await vi.advanceTimersByTimeAsync(120_000); expect(getPluginViewState(tabId).status).toBe('loading');
+      nativeMessage({ type: 'navigation-complete', instanceId, documentId: 'doc-1' }); await settle();
+      if (becomesReady) { nativeMessage({ type: 'ready', instanceId, documentId: 'doc-1' }); await settle(); }
+      await vi.advanceTimersByTimeAsync(TRUSTED_READY_TIMEOUT_MS);
+      expect(getPluginViewState(tabId).status).toBe(becomesReady ? 'ready' : 'unavailable');
+      if (!becomesReady) expect(getPluginViewState(tabId).error).toContain('did not become ready');
     } finally { stop(); }
   });
 

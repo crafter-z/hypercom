@@ -58,10 +58,12 @@ export interface PluginViewRect extends PluginViewportRect {
 }
 
 /** Native -> frontend view event. Every document-scoped event carries the
- *  current `documentId`; `document` announces a new top-level document. */
+ *  current `documentId`; `document` announces a new top-level document, and
+ *  `navigation-complete` reports that the document finished loading (used for
+ *  the trusted-web ready watchdog). */
 export interface PluginNativeMessage {
   instanceId: string;
-  type: 'ready' | 'ack' | 'message' | 'focus' | 'error' | 'document' | 'binary' | 'binary-ack';
+  type: 'ready' | 'ack' | 'message' | 'focus' | 'error' | 'document' | 'navigation-complete' | 'binary' | 'binary-ack';
   documentId?: string;
   revision?: number;
   messageType?: string;
@@ -94,7 +96,7 @@ export interface PluginViewHostMessage {
   error?: string;
 }
 
-/** Raw bytes used by the bidirectional binary channel; total size is unbounded. */
+/** Raw bytes used by the bidirectional binary channel (256 MiB per transfer). */
 export type PluginViewBinaryBytes = Uint8Array | ArrayBuffer;
 
 export interface PluginTabOpenOptions {

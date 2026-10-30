@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
-import { cancelPluginHttp, executePluginHttp } from './pluginHttp';
+import { cancelPluginHttp, executePluginHttp, STREAM_IDLE_TIMEOUT_MS } from './pluginHttp';
 
 const open = vi.fn();
 const read = vi.fn();
@@ -52,6 +52,7 @@ beforeEach(() => {
 afterEach(() => {
   cancelPluginHttp(pluginId);
   cancelPluginHttp('com.example.other');
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -126,6 +127,49 @@ describe('full HTTP request accumulation', () => {
 });
 
 describe('pull primitives and cancellation', () => {
+  it('reclaims an open stream only while no caller is consuming it', async () => {
+    vi.useFakeTimers();
+    const head = await executePluginHttp(pluginId, 'http.open', { url: 'https://example.com/' }) as { requestId: string };
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_TIMEOUT_MS);
+    expect(cancel).toHaveBeenCalledWith(pluginId, 'install-a', head.requestId);
+    await expect(executePluginHttp(pluginId, 'http.read', { requestId: head.requestId }))
+      .rejects.toThrow('idle');
+  });
+
+  it('does not impose an idle deadline on a pending read and rearms only after data returns', async () => {
+    vi.useFakeTimers();
+    const head = await executePluginHttp(pluginId, 'http.open', { url: 'https://example.com/sse' }) as { requestId: string };
+    const pending = deferred<{ base64: string; done: boolean }>();
+    read.mockReturnValueOnce(pending.promise);
+    const reading = executePluginHttp(pluginId, 'http.read', { requestId: head.requestId });
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_TIMEOUT_MS * 3);
+    expect(cancel).not.toHaveBeenCalled();
+    pending.resolve({ base64: base64(new Uint8Array([7])), done: false });
+    await expect(reading).resolves.toEqual({ bytes: new Uint8Array([7]), done: false });
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_TIMEOUT_MS - 1);
+    expect(cancel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cancel).toHaveBeenCalledWith(pluginId, 'install-a', head.requestId);
+  });
+
+  it('does not rearm idle expiry while another concurrent native read is still pending', async () => {
+    vi.useFakeTimers();
+    const head = await executePluginHttp(pluginId, 'http.open', { url: 'https://example.com/sse' }) as { requestId: string };
+    const first = deferred<{ base64: string; done: boolean }>();
+    const second = deferred<{ base64: string; done: boolean }>();
+    read.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const readingFirst = executePluginHttp(pluginId, 'http.read', { requestId: head.requestId });
+    const readingSecond = executePluginHttp(pluginId, 'http.read', { requestId: head.requestId });
+    first.resolve({ base64: '', done: false });
+    await readingFirst;
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_TIMEOUT_MS * 2);
+    expect(cancel).not.toHaveBeenCalled();
+    second.resolve({ base64: '', done: true });
+    await expect(readingSecond).resolves.toMatchObject({ done: true });
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_TIMEOUT_MS);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it('keeps the stream registered after open and unregisters at done', async () => {
     const chunk = new Uint8Array([7, 8]);
     read
@@ -158,6 +202,22 @@ describe('pull primitives and cancellation', () => {
     pending.resolve({ status: 200, headers: {}, url: 'https://example.com/' });
     await expect(request).rejects.toMatchObject({ name: 'AbortError' });
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates repeated unknown-id cancels and bounds the reserved cancel budget', async () => {
+    const gate = deferred<void>();
+    cancel.mockReturnValue(gate.promise);
+    const duplicateA = executePluginHttp(pluginId, 'http.cancel', { requestId: 'duplicate-id' });
+    const duplicateB = executePluginHttp(pluginId, 'http.cancel', { requestId: 'duplicate-id' });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+    const flood = Array.from({ length: 32 }, (_, index) =>
+      executePluginHttp(pluginId, 'http.cancel', { requestId: `flood-${index}` }),
+    );
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(32));
+    await expect(executePluginHttp(pluginId, 'http.cancel', { requestId: 'flood-overflow' })).resolves.toBeNull();
+    expect(cancel).toHaveBeenCalledTimes(32);
+    gate.resolve();
+    await Promise.all([duplicateA, duplicateB, ...flood]);
   });
 
   it('refuses an open whose request was cancelled before it was registered', async () => {

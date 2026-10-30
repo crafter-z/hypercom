@@ -21,9 +21,10 @@ import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
-import { hasNoRpcDeadline, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
-import { executeHostApi } from './pluginHostApi';
+import { hasNoRpcDeadline, PLUGIN_BINARY_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
+import { cleanHostText, executeHostApi } from './pluginHostApi';
 import { cancelPluginHttp } from './pluginHttp';
+import { MAX_VIEW_BINARY_TRANSFER_BYTES, VIEW_BINARY_ACK_TIMEOUT_MS } from './pluginViewBinary';
 import { checkOpAllowed } from './pluginRpc';
 import { removePluginPanel } from './pluginPanelRegistry';
 import { PluginLogQuota } from './pluginLogQuota';
@@ -39,6 +40,21 @@ export const MAX_PENDING_MESSAGES = 32;
 export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
 /** Control traffic has its own acknowledgement slots and bounded overflow queue, independent of RX. */
 export const MAX_PENDING_CONTROL_MESSAGES = 32;
+/** How long a managed session may take to post __plugin_ready after its Worker starts. */
+export const PLUGIN_READY_TIMEOUT_MS = 10_000;
+/** Post-ready health probe cadence and consecutive unanswered probes that count as a crash. */
+export const PLUGIN_HEALTH_INTERVAL_MS = 30_000;
+export const PLUGIN_HEALTH_MAX_MISSES = 2;
+/**
+ * Host→Worker view binary transfers have their own byte budget. They only take a
+ * control slot; their payload must never consume the RX/control `eventBytes`
+ * budget (a slow Worker handler would otherwise starve button clicks and RX).
+ */
+export const MAX_PENDING_BINARY_BYTES = MAX_VIEW_BINARY_TRANSFER_BYTES;
+/** Concurrent host→Worker binary transfers allowed per view instance. */
+export const MAX_PENDING_BINARY_TRANSFERS_PER_VIEW = 4;
+/** `http.cancel` may bypass the ordinary RPC slot cap by at most this many entries. */
+export const MAX_CANCEL_RPC_BYPASS = 64;
 /** Process-wide epoch source so a reloaded session never reuses view epochs. */
 let workerEpochSeq = 0;
 
@@ -166,9 +182,13 @@ export class PluginSession {
   private readonly pendingBinary = new Map<number, {
     instanceId: string;
     documentId: string;
+    bytes: number;
     resolve: () => void;
     reject: (error: Error) => void;
   }>();
+  /** Independent byte budget for pending view binary transfers (not part of eventBytes). */
+  private binaryBytesInFlight = 0;
+  private readonly pendingBinaryPerInstance = new Map<string, number>();
   /** Monotonic per-session epoch; a restart never reuses an old view's epoch. */
   private readonly epochBase = ++workerEpochSeq;
   private readonly eventsInFlight = new Map<number, number>();
@@ -187,9 +207,17 @@ export class PluginSession {
   /** Host-side RPC error logging is plugin-triggerable; apply the same token
    *  bucket as explicit log calls so a denied-op loop cannot flood diaglog. */
   private readonly errorLogQuota = new PluginLogQuota();
+  /** Managed sessions (host-owned) arm the ready deadline and post-ready health probe. */
+  private readonly managed: boolean;
+  private callbacks: PluginHostCallbacks = {};
+  private readyTimer: ReturnType<typeof setTimeout> | null = null;
+  private healthTimer: ReturnType<typeof setTimeout> | null = null;
+  private healthPendingEventId: number | null = null;
+  private healthMisses = 0;
 
-  constructor(pluginId: string) {
+  constructor(pluginId: string, managed = false) {
     this.pluginId = pluginId;
+    this.managed = managed;
     this.installGeneration = useAppStore.getState().config.pluginConfigs?.find((entry) => entry.id === pluginId)?.installGeneration ?? '';
   }
 
@@ -200,7 +228,8 @@ export class PluginSession {
 
   get epoch(): number { return this.epochBase + this.generation; }
 
-  private settleReady(error?: Error): void {
+  private settleReady(error?: Error, generation = this.generation): void {
+    if (generation !== this.generation) return;
     const resolve = this.readyResolve;
     const reject = this.readyReject;
     this.readyResolve = null;
@@ -209,20 +238,86 @@ export class PluginSession {
     else resolve?.();
   }
 
+  private clearReadyTimer(): void {
+    if (this.readyTimer !== null) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = null;
+    }
+  }
+
+  /**
+   * Managed sessions must post __plugin_ready within PLUGIN_READY_TIMEOUT_MS.
+   * A Worker that never yields during synchronous initialization otherwise looks
+   * "loaded" forever and makes explicit reloads await readiness indefinitely.
+   */
+  private armReadyTimeout(worker: Worker, generation: number): void {
+    this.clearReadyTimer();
+    if (!this.managed) return;
+    this.readyTimer = setTimeout(() => {
+      this.readyTimer = null;
+      if (this.worker !== worker || this.generation !== generation || this.ready) return;
+      const error = new Error('plugin worker ready timed out');
+      this.settleReady(error);
+      void this.handleCrash(error.message);
+    }, PLUGIN_READY_TIMEOUT_MS);
+  }
+
+  private clearHealthTimer(): void {
+    if (this.healthTimer !== null) {
+      clearTimeout(this.healthTimer);
+      this.healthTimer = null;
+    }
+    this.healthPendingEventId = null;
+    this.healthMisses = 0;
+  }
+
+  private armHealthCheck(): void {
+    this.clearHealthTimer();
+    if (!this.managed) return;
+    this.healthTimer = setTimeout(() => this.healthTick(), PLUGIN_HEALTH_INTERVAL_MS);
+  }
+
+  /**
+   * A live Worker answers the bridge-generated event ack for `__plugin_health`.
+   * Consecutive unanswered probes mean the Worker scope died silently
+   * (`self.close()`, OOM kill, ...), which never fires `worker.onerror`.
+   */
+  private healthTick(): void {
+    this.healthTimer = null;
+    if (!this.worker || !this.ready) return;
+    if (this.healthPendingEventId === null) {
+      const eventId = this.sendEvent({ type: '__plugin_health' }, 0, true);
+      if (eventId === null) this.healthMisses += 1;
+      else this.healthPendingEventId = eventId;
+    } else {
+      this.healthMisses += 1;
+    }
+    if (this.healthMisses >= PLUGIN_HEALTH_MAX_MISSES) {
+      const reason = 'plugin worker stopped responding to health checks';
+      this.reportRuntimeError(reason);
+      void this.handleCrash(reason);
+      return;
+    }
+    this.healthTimer = setTimeout(() => this.healthTick(), PLUGIN_HEALTH_INTERVAL_MS);
+  }
+
   /**
    * Start and wait for the current worker to finish synchronous initialization.
    * Rejects on load/parse/startup failure instead of resolving into a scheduled
    * retry; used by explicit reload.
    */
   async startReady(callbacks?: PluginHostCallbacks): Promise<void> {
-    await this.start(callbacks);
-    if (this.noWorker || this.ready) return;
-    if (!this.readiness) throw new Error('plugin worker not started');
-    await this.readiness;
+    const starting = this.start(callbacks);
+    // Capture before awaiting disk I/O: stop/restart may replace this.readiness.
+    const readiness = this.readiness;
+    await starting;
+    if (!readiness) throw new Error('plugin worker not started');
+    await readiness;
   }
 
   /** Enable and load the worker; every await checks whether this start was cancelled. */
   async start(callbacks?: PluginHostCallbacks): Promise<void> {
+    if (callbacks) this.callbacks = callbacks;
     if (this.worker || this.noWorker) return;
     if (this.starting) return this.starting;
     if (this.restartTimer !== null) {
@@ -241,7 +336,7 @@ export class PluginSession {
       try {
       const raw = await pluginService.readPluginAsset(this.pluginId, 'manifest.json');
       if (generation !== this.generation || !this.isCurrentInstallation()) {
-        this.settleReady(new Error('plugin start cancelled'));
+        this.settleReady(new Error('plugin start cancelled'), generation);
         return;
       }
       if (raw === null) throw new Error('plugin manifest missing');
@@ -256,7 +351,7 @@ export class PluginSession {
       }
       const userCode = await pluginService.readPluginAsset(this.pluginId, manifest.entry);
       if (generation !== this.generation || !this.isCurrentInstallation()) {
-        this.settleReady(new Error('plugin start cancelled'));
+        this.settleReady(new Error('plugin start cancelled'), generation);
         return;
       }
       if (userCode === null) throw new Error('plugin entry missing');
@@ -270,7 +365,7 @@ export class PluginSession {
       }
       if (generation !== this.generation || !this.isCurrentInstallation()) {
         worker.terminate();
-        this.settleReady(new Error('plugin start cancelled'));
+        this.settleReady(new Error('plugin start cancelled'), generation);
         return;
       }
       this.manifest = manifest;
@@ -284,8 +379,15 @@ export class PluginSession {
         };
         if (!msg) return;
         if (typeof msg.eventAck === 'number') {
+          if (msg.eventAck === this.healthPendingEventId) {
+            this.healthPendingEventId = null;
+            this.healthMisses = 0;
+          }
           const binary = this.pendingBinary.get(msg.eventAck);
-          if (binary) this.pendingBinary.delete(msg.eventAck);
+          if (binary) {
+            this.pendingBinary.delete(msg.eventAck);
+            this.releaseBinaryBudget(binary.instanceId, binary.bytes);
+          }
           const bytes = this.eventsInFlight.get(msg.eventAck);
           if (bytes !== undefined) {
             this.eventsInFlight.delete(msg.eventAck);
@@ -304,8 +406,10 @@ export class PluginSession {
         } else if (typeof msg.op === 'string') {
           void this.handleWorkerRequest(worker, msg as { seq: number; op: string; args?: unknown });
         } else if (msg.type === '__plugin_ready') {
+          this.clearReadyTimer();
           this.ready = true;
           this.settleReady();
+          this.armHealthCheck();
         } else if (msg.type === '__plugin_error') {
           // Ordinary post-ready async failures are diagnostics; the session lives.
           const reason = msg.payload;
@@ -334,14 +438,17 @@ export class PluginSession {
         if (this.ready) {
           this.reportRuntimeError(e.message || 'worker error');
         } else {
+          this.clearReadyTimer();
           this.settleReady(new Error(e.message || 'worker error'));
-          void this.handleCrash(e.message || 'worker error', callbacks, true);
+          void this.handleCrash(e.message || 'worker error');
         }
       };
+      this.armReadyTimeout(worker, generation);
       this.post({ type: 'lifecycle', payload: { state: 'enabled' } });
       notifySessionListeners();
       } catch (error) {
-        this.settleReady(error instanceof Error ? error : new Error(String(error)));
+        if (generation === this.generation) this.clearReadyTimer();
+        this.settleReady(error instanceof Error ? error : new Error(String(error)), generation);
         throw error;
       }
     };
@@ -363,9 +470,11 @@ export class PluginSession {
         else worker.postMessage({ seq: req.seq, ...payload });
       }
     };
-    if (this.retireRequests.size >= MAX_PENDING_MESSAGES && req.op !== 'http.cancel') {
-      // Cancellation is the escape hatch for a saturated session; it must always
-      // be admitted so an aborted request cannot deadlock behind its own slots.
+    const atCapacity = this.retireRequests.size >= MAX_PENDING_MESSAGES;
+    if (atCapacity &&
+      (req.op !== 'http.cancel' || this.retireRequests.size >= MAX_PENDING_MESSAGES + MAX_CANCEL_RPC_BYPASS)) {
+      // Cancellation is the escape hatch for a saturated session, but the bypass
+      // itself is bounded so a cancel flood cannot grow the slot set without limit.
       respond({ ok: false, error: 'plugin RPC capacity exceeded' });
       return;
     }
@@ -384,7 +493,7 @@ export class PluginSession {
     if (!hasNoRpcDeadline(req.op)) {
       timer = setTimeout(() => {
         if (retire()) respond({ ok: false, error: 'plugin RPC timed out' });
-      }, PLUGIN_RPC_TIMEOUT_MS);
+      }, req.op === 'view.sendBinary' ? PLUGIN_BINARY_RPC_TIMEOUT_MS : PLUGIN_RPC_TIMEOUT_MS);
     }
     try {
       // Admission and queued TTY effects share the same live worker/grant authority.
@@ -422,8 +531,7 @@ export class PluginSession {
       const errMsg = e instanceof Error ? e.message : String(e);
       const verdict = this.errorLogQuota.tryConsume(Date.now());
       if (verdict.allowed) {
-        const clean = (value: string): string => value.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 500);
-        console.error(`[pluginHost] ${this.pluginId} api ${clean(req.op)} failed:`, clean(errMsg));
+        console.error(`[pluginHost] ${this.pluginId} api ${cleanHostText(req.op)} failed:`, cleanHostText(errMsg));
       } else if (verdict.warn) {
         console.warn(`[pluginHost] ${this.pluginId} RPC 错误日志超限，已累计抑制 ${verdict.droppedTotal} 条`);
       }
@@ -448,6 +556,8 @@ export class PluginSession {
     }
     // Stop retires old worker's slots now; a late backend completion cannot reply to a new worker.
     for (const retire of this.retireRequests) retire();
+    this.clearReadyTimer();
+    this.clearHealthTimer();
     this.manifest = null;
     this.ready = false;
     this.noWorker = false;
@@ -455,6 +565,8 @@ export class PluginSession {
     this.readiness = null;
     for (const binary of this.pendingBinary.values()) binary.reject(new Error('plugin worker stopped'));
     this.pendingBinary.clear();
+    this.binaryBytesInFlight = 0;
+    this.pendingBinaryPerInstance.clear();
     this.eventsInFlight.clear();
     this.viewEvents.clear();
     this.controlsInFlight.clear();
@@ -467,7 +579,7 @@ export class PluginSession {
   /** Post-ready runtime diagnostics are rate-limited and never terminate the worker. */
   private reportRuntimeError(reason: string): void {
     const verdict = this.errorLogQuota.tryConsume(Date.now());
-    const clean = reason.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 500);
+    const clean = cleanHostText(reason);
     if (verdict.allowed) {
       console.error(`[pluginHost] ${this.pluginId} runtime error:`, clean);
     } else if (verdict.warn) {
@@ -481,12 +593,12 @@ export class PluginSession {
   }
 
   /** Loading can fail transiently while another plugin owns the disk gate. */
-  async recoverStartupFailure(reason: string, callbacks?: PluginHostCallbacks): Promise<void> {
-    if (this.isCurrentInstallation()) await this.handleCrash(reason, callbacks, true);
+  async recoverStartupFailure(reason: string): Promise<void> {
+    if (this.isCurrentInstallation()) await this.handleCrash(reason);
   }
 
   /** 崩溃处理：计数窗口内连续崩溃达阈值 → 写 disabled + 通知。 */
-  private async handleCrash(reason: string, callbacks?: PluginHostCallbacks, startup = false): Promise<void> {
+  private async handleCrash(reason: string): Promise<void> {
     const now = Date.now();
     if (now - this.crashWindowStart > CRASH_WINDOW_MS) {
       this.crashCount = 0;
@@ -511,13 +623,13 @@ export class PluginSession {
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null;
         if (this.generation !== generation || !this.isCurrentInstallation()) return;
-        void this.start(callbacks).catch((e) => {
+        void this.start(this.callbacks).catch((e) => {
           console.error(`[pluginHost] restart ${this.pluginId} failed:`, e);
-          if (this.generation === generation + 1) void this.handleCrash(String(e), callbacks, true);
+          if (this.generation === generation + 1) void this.handleCrash(String(e));
         });
-      }, startup ? 500 * this.crashCount : 100);
+      }, 500 * this.crashCount);
     }
-    if (this.crashCount >= MAX_CRASHES_BEFORE_DISABLE) callbacks?.onPluginCrashed?.(this.pluginId, reason);
+    if (this.crashCount >= MAX_CRASHES_BEFORE_DISABLE) this.callbacks.onPluginCrashed?.(this.pluginId, reason);
   }
 
   /** Bounded delivery: RX may drop; control events reserve independent slots and queue until ACK. */
@@ -542,7 +654,7 @@ export class PluginSession {
       for (const [eventId, binary] of [...this.pendingBinary]) {
         if (binary.instanceId !== instanceId) continue;
         this.pendingBinary.delete(eventId);
-        this.eventBytes -= this.eventsInFlight.get(eventId) ?? 0;
+        this.releaseBinaryBudget(binary.instanceId, binary.bytes);
         this.eventsInFlight.delete(eventId);
         this.controlsInFlight.delete(eventId);
         this.viewEvents.delete(eventId);
@@ -564,8 +676,22 @@ export class PluginSession {
     const isRx = message.type === 'rx.line' || message.type === 'rx.bytes' || message.type === 'view.input';
     if (!isRx) {
       const bytes = controlMessageBytes(message);
-      if (bytes > 32 * 1024 || this.eventBytes + bytes > MAX_PENDING_EVENT_BYTES) return false;
+      if (bytes > 32 * 1024 || this.eventBytes + bytes > MAX_PENDING_EVENT_BYTES) {
+        // A lossy view.message must never be surfaced as "capacity exceeded" to
+        // pluginViewRuntime (it would retire an otherwise healthy view).
+        if (message.type === 'view.message') {
+          console.warn(`[pluginHost] ${this.pluginId} view message dropped: control byte budget full`);
+          return true;
+        }
+        return false;
+      }
+      // Preserve control ordering: older queued control events drain first.
+      this.flushControls();
       if (this.controlsInFlight.size >= MAX_PENDING_CONTROL_MESSAGES) {
+        if (message.type === 'view.message') {
+          console.warn(`[pluginHost] ${this.pluginId} view message dropped: control slots full`);
+          return true;
+        }
         if (this.pendingControls.length >= MAX_PENDING_CONTROL_MESSAGES) return false;
         this.pendingControls.push({ message, transfer });
         return true;
@@ -598,10 +724,11 @@ export class PluginSession {
   }
 
   /**
-   * Host→Worker binary view transfer (Views-owned reassembly). Not subject to
-   * control/RX count or byte caps: the view runtime keeps one chunk in flight and
-   * waits for the bridge ack. Resolves only after async Worker binary handlers
-   * settle; rejects on handler error, view close, or worker stop.
+   * Host→Worker binary view transfer (Views-owned reassembly). Bytes use the
+   * dedicated binary budget, not `eventBytes`: a slow Worker binary handler must
+   * not starve ordinary control events or RX delivery. Only control slots are
+   * shared. Resolves after async Worker binary handlers settle; rejects on
+   * handler error, view close, budget/slot exhaustion, or worker stop.
    */
   postViewBinary(payload: {
     instanceId: string;
@@ -612,6 +739,18 @@ export class PluginSession {
   }): Promise<void> {
     if (!this.worker) return Promise.reject(new Error('plugin worker not running'));
     if (!(payload.bytes instanceof Uint8Array)) return Promise.reject(new TypeError('binary bytes required'));
+    // Binary payloads use a separate byte ledger, but their acknowledgements
+    // still occupy ordinary control slots. Even empty transfers must be bounded.
+    this.flushControls();
+    if (this.controlsInFlight.size >= MAX_PENDING_CONTROL_MESSAGES) {
+      return Promise.reject(new Error('plugin view binary control capacity exceeded'));
+    }
+    if ((this.pendingBinaryPerInstance.get(payload.instanceId) ?? 0) >= MAX_PENDING_BINARY_TRANSFERS_PER_VIEW) {
+      return Promise.reject(new Error('plugin view binary transfer capacity exceeded'));
+    }
+    if (this.binaryBytesInFlight + payload.bytes.byteLength > MAX_PENDING_BINARY_BYTES) {
+      return Promise.reject(new Error('plugin view binary byte capacity exceeded'));
+    }
     const message = {
       type: 'view.binary',
       payload: {
@@ -625,45 +764,71 @@ export class PluginSession {
     const eventId = ++this.eventSeq;
     let complete!: () => void;
     let fail!: (error: Error) => void;
+    const timer = setTimeout(() => {
+      const binary = this.pendingBinary.get(eventId);
+      if (!binary) return;
+      this.pendingBinary.delete(eventId);
+      this.releaseBinaryBudget(binary.instanceId, binary.bytes);
+      this.eventsInFlight.delete(eventId); this.controlsInFlight.delete(eventId); this.viewEvents.delete(eventId);
+      binary.reject(new Error('plugin Worker binary ACK timed out'));
+      this.flushControls();
+    }, VIEW_BINARY_ACK_TIMEOUT_MS);
     const promise = new Promise<void>((resolve, reject) => {
-      complete = resolve;
-      fail = reject;
+      complete = () => { clearTimeout(timer); resolve(); };
+      fail = error => { clearTimeout(timer); reject(error); };
     });
     this.pendingBinary.set(eventId, {
       instanceId: payload.instanceId,
       documentId: payload.documentId,
+      bytes: payload.bytes.byteLength,
       resolve: complete,
       reject: fail,
     });
+    this.reserveBinaryBudget(payload.instanceId, payload.bytes.byteLength);
     try {
       // The runtime owns the reassembled buffer; transfer avoids a full-data copy.
       const buffer = payload.bytes.buffer;
       const transfer = buffer instanceof ArrayBuffer ? [buffer] : undefined;
-      if (this.sendEvent(message, payload.bytes.byteLength, true, transfer, eventId) === null) {
+      if (this.sendEvent(message, 0, true, transfer, eventId) === null) {
         throw new Error('plugin worker not running');
       }
     } catch (error) {
       this.pendingBinary.delete(eventId);
+      this.releaseBinaryBudget(payload.instanceId, payload.bytes.byteLength);
       fail(error instanceof Error ? error : new Error(String(error)));
     }
     return promise;
   }
 
+  private reserveBinaryBudget(instanceId: string, bytes: number): void {
+    this.binaryBytesInFlight += bytes;
+    this.pendingBinaryPerInstance.set(instanceId, (this.pendingBinaryPerInstance.get(instanceId) ?? 0) + 1);
+  }
+
+  private releaseBinaryBudget(instanceId: string, bytes: number): void {
+    this.binaryBytesInFlight = Math.max(0, this.binaryBytesInFlight - bytes);
+    const current = this.pendingBinaryPerInstance.get(instanceId) ?? 0;
+    if (current <= 1) this.pendingBinaryPerInstance.delete(instanceId);
+    else this.pendingBinaryPerInstance.set(instanceId, current - 1);
+  }
+
   /**
    * Cancel host→Worker binary transfers for one view document (navigation /
-   * document replacement). Rejects their promises and releases event/RX slots;
-   * a late bridge ack for the retired event is ignored.
+   * document replacement). Rejects their promises and releases control slots,
+   * byte budget, and any queued control events that can now be delivered.
    */
   cancelViewBinary(instanceId: string, documentId: string): void {
     for (const [eventId, binary] of [...this.pendingBinary]) {
       if (binary.instanceId !== instanceId || binary.documentId !== documentId) continue;
       this.pendingBinary.delete(eventId);
-      this.eventBytes -= this.eventsInFlight.get(eventId) ?? 0;
+      this.releaseBinaryBudget(binary.instanceId, binary.bytes);
       this.eventsInFlight.delete(eventId);
       this.controlsInFlight.delete(eventId);
       this.viewEvents.delete(eventId);
       binary.reject(new Error('view document changed'));
     }
+    // Freeing control slots must not strand or reorder the overflow queue.
+    this.flushControls();
   }
 
   private flushControls(): void {
@@ -737,14 +902,14 @@ export class PluginHostManager {
     if (pending) return pending;
     let session = this.sessions.get(pluginId);
     if (!session) {
-      session = new PluginSession(pluginId);
+      session = new PluginSession(pluginId, true);
       this.sessions.set(pluginId, session);
     }
     const current = session;
     const start = strict
       ? current.startReady(this.callbacks)
       : current.start(this.callbacks).catch(async (error) => {
-        if (this.sessions.get(pluginId) === current) await current.recoverStartupFailure(String(error), this.callbacks);
+        if (this.sessions.get(pluginId) === current) await current.recoverStartupFailure(String(error));
       });
     this.starts.set(pluginId, start);
     try {

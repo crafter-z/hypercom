@@ -1,10 +1,10 @@
 import { useAppStore, getTabPortId } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import type { PluginManifestView, PluginView, TabItem } from '../types';
-import type { PluginViewBinding, PluginViewBinaryBytes, PluginViewDeclaration, PluginViewEnvironment, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage } from '../types/pluginViews';
+import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage } from '../types/pluginViews';
 import { getPluginViews, subscribePluginViews } from './pluginConfigSnapshot';
 import { pluginHost, subscribePluginSessions, type PluginSession } from './pluginHost';
-import { ViewBinaryReceiver, ViewBinarySender } from './pluginViewBinary';
+import { ViewBinaryReceiver, ViewBinarySender, viewBinaryBudget, type ViewBinaryAbort } from './pluginViewBinary';
 import { pluginViewService } from '../services/pluginView';
 import { subscribePluginViewInput } from './pluginViewInput';
 import { collectLeaves, findLeafById } from './paneTree';
@@ -20,6 +20,10 @@ const MAX_SNAPSHOT_BYTES = 256 * 1024;
 const MAX_PLUGIN_PENDING_BYTES = 1024 * 1024;
 const MAX_OCCLUSIONS = 64;
 const MAX_OCCLUSION_SIZE = 1_000_000;
+/** Trusted documents only start this watchdog after a successful navigation:
+ *  slow loading itself is never failed by a fixed deadline. */
+export const TRUSTED_READY_TIMEOUT_MS = 30_000;
+const INTERACTION_DROP_WARN_MS = 5_000;
 const EMPTY_STATE: PluginViewState = { status: 'unavailable', error: null, instanceId: null };
 const listeners = new Set<() => void>();
 let states: Record<string, PluginViewState> = {};
@@ -67,6 +71,7 @@ interface ViewRecord {
   latest: { snapshot: unknown; bytes: number } | null;
   retained: { snapshot: unknown; bytes: number } | null;
   readyTimer: ReturnType<typeof setTimeout> | null;
+  navigationReadyTimer: ReturnType<typeof setTimeout> | null;
   ackTimer: ReturnType<typeof setTimeout> | null;
   flushTimer: ReturnType<typeof setTimeout> | null;
   workerReadyTimer: number | null;
@@ -74,6 +79,7 @@ interface ViewRecord {
   unsubscribeInput: (() => void) | null;
   interactionTokens: number;
   interactionTime: number;
+  lastInteractionDropWarn: number;
   lastEnvironment: string;
 }
 
@@ -160,7 +166,7 @@ function environment(record: ViewRecord): PluginViewEnvironment {
     portStatus: record.binding.boundPortId ? state.ports.find(port => port.id === record.binding.boundPortId)?.status ?? 'disconnected' : null,
   };
 }
-function clearTimer(record: ViewRecord, key: 'readyTimer' | 'ackTimer' | 'flushTimer' | 'workerReadyTimer'): void {
+function clearTimer(record: ViewRecord, key: 'readyTimer' | 'navigationReadyTimer' | 'ackTimer' | 'flushTimer' | 'workerReadyTimer'): void {
   clearTimeout(record[key] ?? undefined);
   record[key] = null;
 }
@@ -181,6 +187,7 @@ function beginDocument(record: ViewRecord, documentId: string): boolean {
   record.documentId = documentId;
   clearTimer(record, 'ackTimer');
   clearTimer(record, 'flushTimer');
+  clearTimer(record, 'navigationReadyTimer');
   record.inFlight = null;
   record.latest = null;
   record.nativeReady = false;
@@ -206,25 +213,64 @@ function binarySenderFor(record: ViewRecord): ViewBinarySender {
       documentId: () => (live(record) ? record.documentId : null),
       ready: () => live(record) && record.nativeReady && record.documentId !== null,
       send: message => pluginViewService.send(record.binding.viewInstanceId, message),
-    });
+    }, { budget: viewBinaryBudget, owner: record.binding.pluginId });
   }
   return record.binarySender;
 }
 
 function acknowledgeUiBinary(record: ViewRecord, message: PluginNativeMessage, ok: boolean, error?: string): void {
   if (!record.documentId || message.documentId !== record.documentId) return;
-  const ack: Record<string, unknown> = {
+  const ack: PluginViewHostMessage = {
     type: 'binary-ack', documentId: record.documentId,
     transferId: message.transferId, seq: message.seq, done: message.done === true, ok,
   };
   if (error) ack.error = error.slice(0, 2048);
   void pluginViewService.send(record.binding.viewInstanceId, ack).catch(cause => console.debug('[pluginView] binary ack', cause));
 }
+/** Receiver-side abort (idle/LRU): the page must learn its abandoned transfer
+ *  did not complete, otherwise its sendBinary promise would wait an ACK forever. */
+function acknowledgeBinaryAbort(record: ViewRecord, abort: ViewBinaryAbort): void {
+  acknowledgeUiBinary(record, {
+    instanceId: record.binding.viewInstanceId,
+    type: 'binary',
+    documentId: record.documentId ?? undefined,
+    transferId: abort.transferId,
+    seq: abort.seq,
+    done: abort.done,
+  }, false, abort.reason);
+}
+function binaryReceiverFor(record: ViewRecord): ViewBinaryReceiver {
+  if (!record.binaryReceiver) {
+    record.binaryReceiver = new ViewBinaryReceiver({
+      budget: viewBinaryBudget, owner: record.binding.pluginId,
+      abort: (abort) => acknowledgeBinaryAbort(record, abort),
+    });
+  }
+  return record.binaryReceiver;
+}
+/** Trusted pages have no fixed ready deadline while loading, but a document that
+ *  already finished navigating yet never reports `ready` must not stay loading
+ *  forever: arm a generous watchdog only after a successful navigation. */
+function armTrustedReadyWatchdog(record: ViewRecord, documentId: string): void {
+  if (record.declaration.mode !== 'trusted-web' || record.nativeReady) return;
+  clearTimer(record, 'navigationReadyTimer');
+  record.navigationReadyTimer = setTimeout(() => {
+    if (live(record) && record.documentId === documentId && !record.nativeReady) fail(record, 'plugin UI did not become ready');
+  }, TRUSTED_READY_TIMEOUT_MS);
+}
+/** Capacity backpressure must not kill a healthy view: drop the interaction and
+ *  warn at a bounded rate instead of turning it into a protocol/state failure. */
+function warnDroppedInteraction(record: ViewRecord): void {
+  const now = Date.now();
+  if (now - record.lastInteractionDropWarn < INTERACTION_DROP_WARN_MS) return;
+  record.lastInteractionDropWarn = now;
+  console.warn('[pluginView] interaction dropped: plugin Worker capacity exceeded');
+}
 function retire(record: ViewRecord, reason: string | null): void {
   if (!record.alive) return;
   record.alive = false;
   clearTimer(record, 'readyTimer'); clearTimer(record, 'ackTimer'); clearTimer(record, 'flushTimer');
-  clearTimer(record, 'workerReadyTimer');
+  clearTimer(record, 'workerReadyTimer'); clearTimer(record, 'navigationReadyTimer');
   record.unsubscribeInput?.(); record.unsubscribeInput = null;
   if (record.usesWorker && record.documentId) {
     (pluginHost.get(record.binding.pluginId) as ViewBinarySession | null)
@@ -325,7 +371,7 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
   const tabSessionId = tabSessions.get(tab.id) ?? crypto.randomUUID(); tabSessions.set(tab.id, tabSessionId);
   const portId = getTabPortId(tab);
   const binding: PluginViewBinding = { ...preference, tabId: tab.id, placement: tab.kind === 'serial' ? 'serial-content' : 'workspace-tab', boundPortId: portId, portMode: portId ? useAppStore.getState().ports.find(port => port.id === portId)?.mode ?? 'trx' : null, tabSessionId, viewInstanceId: crypto.randomUUID(), workerEpoch: usesWorker ? worker!.epoch : 0, streamEpoch: 0 };
-  const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastEnvironment: '' };
+  const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, navigationReadyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastInteractionDropWarn: 0, lastEnvironment: '' };
   records.set(tab.id, record); setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId });
   try {
     await pluginViewService.create(binding);
@@ -607,9 +653,13 @@ export async function executePluginViewApi(pluginId: string, op: string, args: u
   if (op === 'view.sendBinary') {
     if (!record.usesWorker) throw new Error('plugin view has no Worker binary peer');
     const type = requireString(object, 'type', 128);
-    const bytes = object.bytes as PluginViewBinaryBytes;
-    if (!(bytes instanceof Uint8Array) && !(bytes instanceof ArrayBuffer)) throw new Error('invalid binary view bytes');
-    return binarySenderFor(record).send(type, bytes);
+    if (object.documentId != null && object.documentId !== record.documentId) throw new Error('plugin view document changed');
+    if (!(object.bytes instanceof Uint8Array) && !(object.bytes instanceof ArrayBuffer)) throw new Error('invalid binary view bytes');
+    // RPC bytes already belong to this window: avoid retaining both the cloned
+    // request and a second full sender copy while waiting for page ACKs.
+    const sending = binarySenderFor(record).send(type, object.bytes, true);
+    object.bytes = null;
+    return sending;
   }
   if (op === 'view.publish') {
     if (!record.usesWorker) throw new Error('plugin view has no Worker binary peer');
@@ -656,6 +706,7 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
       if (record.nativeReady || record.nativeInitializing) return;
       record.nativeInitializing = true;
       clearTimer(record, 'readyTimer');
+      clearTimer(record, 'navigationReadyTimer');
       const initialEnvironment = environment(record);
       record.lastEnvironment = JSON.stringify(initialEnvironment);
       try {
@@ -680,6 +731,7 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
     // Every later event is scoped to the document that was initialized above;
     // ACKs, page messages and binary chunks from a replaced document are stale.
     if (!documentId || documentId !== record.documentId) return;
+    if (message.type === 'navigation-complete') { armTrustedReadyWatchdog(record, documentId); return; }
     if (message.type === 'ack') {
       if (!record.nativeReady || record.inFlight?.revision !== message.revision) return;
       clearTimer(record, 'ackTimer'); record.inFlight = null; flush(record);
@@ -694,13 +746,19 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
       if (record.interactionTokens < 1) throw new Error('plugin UI interaction rate exceeded');
       record.interactionTokens--;
       jsonBytes(message.payload ?? null, 16 * 1024);
-      if (!pluginHost.get(record.binding.pluginId)?.post({ type: 'view.message', payload: { instanceId: message.instanceId, type: message.messageType, payload: message.payload } })) throw new Error('plugin UI interaction capacity exceeded');
+      // Capacity backpressure is transient (e.g. a large binary transfer in
+      // flight): drop this interaction and keep the view alive; only protocol
+      // violations above retire it.
+      if (!pluginHost.get(record.binding.pluginId)?.post({ type: 'view.message', payload: { instanceId: message.instanceId, type: message.messageType, payload: message.payload } })) {
+        warnDroppedInteraction(record);
+        return;
+      }
     } else if (message.type === 'binary') {
       if (!record.nativeReady) return;
       if (typeof message.transferId !== 'string' || typeof message.seq !== 'number' || typeof message.done !== 'boolean'
         || typeof message.transferType !== 'string' || typeof message.data !== 'string') return;
       if (!record.usesWorker) { acknowledgeUiBinary(record, message, false, 'plugin view has no Worker binary peer'); return; }
-      const receiver = record.binaryReceiver ?? (record.binaryReceiver = new ViewBinaryReceiver());
+      const receiver = binaryReceiverFor(record);
       const received = receiver.push({
         documentId, transferId: message.transferId, transferType: message.transferType,
         seq: message.seq, done: message.done, data: message.data,
@@ -709,6 +767,7 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
       if (received.kind === 'buffered') { acknowledgeUiBinary(record, message, true); return; }
       const worker = pluginHost.get(record.binding.pluginId) as ViewBinarySession | null;
       if (!worker?.postViewBinary || worker.epoch !== record.binding.workerEpoch) {
+        received.release();
         acknowledgeUiBinary(record, message, false, 'plugin Worker changed');
         return;
       }
@@ -717,7 +776,7 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
         if (live(record) && record.documentId === documentId) acknowledgeUiBinary(record, message, true);
       } catch (error) {
         if (live(record) && record.documentId === documentId) acknowledgeUiBinary(record, message, false, errorText(error));
-      }
+      } finally { received.release(); }
     } else if (message.type === 'binary-ack') {
       if (typeof message.transferId !== 'string' || typeof message.seq !== 'number') return;
       record.binarySender?.acknowledge({

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../stores/useAppStore';
-import { PluginHostManager, PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CONTROL_MESSAGES, MAX_PENDING_EVENT_BYTES } from './pluginHost';
+import { PluginHostManager, PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CONTROL_MESSAGES, MAX_PENDING_EVENT_BYTES, PLUGIN_READY_TIMEOUT_MS } from './pluginHost';
 import { executeHostApi } from './pluginHostApi';
 import { cancelPluginHttp } from './pluginHttp';
 import { resetPluginSnapshotForTest, syncStorePluginConfigs } from './pluginConfigSnapshot';
@@ -13,7 +13,12 @@ vi.mock('../services/tauri', () => ({
     setPluginEnabled: (...args: unknown[]) => disable(...args),
   },
 }));
-vi.mock('./pluginHostApi', () => ({ executeHostApi: vi.fn().mockResolvedValue('response') }));
+vi.mock('./pluginHostApi', () => ({
+  executeHostApi: vi.fn().mockResolvedValue('response'),
+  // The host uses this for log sanitizing; a module-level mock must expose every
+  // symbol the host imports or the catch path would throw while replying.
+  cleanHostText: (value: string) => String(value).replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 500),
+}));
 vi.mock('./pluginHttp', () => ({ cancelPluginHttp: vi.fn() }));
 
 const pluginId = 'com.example.worker';
@@ -62,6 +67,28 @@ afterEach(() => {
 });
 
 describe('PluginSession worker lifetime', () => {
+  it('rejects a managed Worker that never becomes ready and terminates it', async () => {
+    vi.useFakeTimers();
+    const session = new PluginSession(pluginId, true);
+    await session.start();
+    const waiting = expect(session.startReady()).rejects.toThrow('ready timed out');
+    await vi.advanceTimersByTimeAsync(PLUGIN_READY_TIMEOUT_MS);
+    await waiting;
+    expect(TestWorker.created[0].terminate).toHaveBeenCalledOnce();
+    session.stop();
+  });
+
+  it('clears the managed startup deadline once the bridge reports ready', async () => {
+    vi.useFakeTimers();
+    const session = new PluginSession(pluginId, true);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ type: '__plugin_ready' });
+    await vi.advanceTimersByTimeAsync(PLUGIN_READY_TIMEOUT_MS + 1);
+    await expect(session.startReady()).resolves.toBeUndefined();
+    expect(worker.terminate).not.toHaveBeenCalled();
+    session.stop();
+  });
   it('loads manifest.entry and fails closed when manifest cannot be read', async () => {
     const session = new PluginSession(pluginId);
     await session.start();
@@ -640,6 +667,143 @@ describe('PluginSession HTTP cancellation and binary view transport', () => {
     });
     session.stop();
     await expect(pending).rejects.toThrow('plugin worker stopped');
+  });
+});
+
+describe('PluginSession binary budgets and control admission', () => {
+  it('keeps large binary data independent from ordinary control and RX byte budgets', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    const binary = session.postViewBinary({
+      instanceId: 'view-a', transferId: 'large', type: 'data', documentId: 'doc-a',
+      bytes: new Uint8Array(MAX_PENDING_EVENT_BYTES + 1),
+    });
+    const outcome = expect(binary).rejects.toThrow('plugin worker stopped');
+    expect(session.post({ type: 'ui.buttonClick', payload: { id: 'button' } })).toBe(true);
+    expect(session.post({ type: 'rx.bytes', payload: [{ bytes: new Uint8Array([1]) }] })).toBe(true);
+    expect(worker.postMessage.mock.calls.some(([message]) => message.type === 'ui.buttonClick')).toBe(true);
+    session.stop();
+    await outcome;
+  });
+
+  it('bounds zero-byte binary transfers by the shared control slot cap', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    // Retire the initial lifecycle event so the entire cap is available.
+    const worker = TestWorker.created[0];
+    const lifecycle = worker.postMessage.mock.calls[0][0] as { eventId: number };
+    worker.emit({ eventAck: lifecycle.eventId });
+    const pending: Promise<void>[] = [];
+    for (let index = 0; index < MAX_PENDING_CONTROL_MESSAGES; index++) {
+      const binary = session.postViewBinary({
+        instanceId: `view-${index}`, transferId: `t-${index}`, type: 'data', documentId: 'doc',
+        bytes: new Uint8Array(0),
+      });
+      pending.push(expect(binary).rejects.toThrow('plugin worker stopped'));
+    }
+    await expect(session.postViewBinary({
+      instanceId: 'extra', transferId: 'extra', type: 'data', documentId: 'doc', bytes: new Uint8Array(0),
+    })).rejects.toThrow('control capacity');
+    session.stop();
+    await Promise.all(pending);
+  });
+
+  it('flushes older queued controls when document cancellation frees a binary slot', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    const binary = session.postViewBinary({
+      instanceId: 'view-a', transferId: 't', type: 'data', documentId: 'old', bytes: new Uint8Array([1]),
+    });
+    const outcome = expect(binary).rejects.toThrow('view document changed');
+    for (let index = 0; index < MAX_PENDING_CONTROL_MESSAGES - 2; index++) {
+      expect(session.post({ type: 'ui.buttonClick', payload: { id: `fill-${index}` } })).toBe(true);
+    }
+    expect(session.post({ type: 'ui.buttonClick', payload: { id: 'queued' } })).toBe(true);
+    expect(worker.postMessage.mock.calls.some(([message]) => message.payload?.id === 'queued')).toBe(false);
+    session.cancelViewBinary('view-a', 'old');
+    expect(worker.postMessage.mock.calls.some(([message]) => message.payload?.id === 'queued')).toBe(true);
+    await outcome;
+    session.stop();
+  });
+});
+
+describe('PluginSession deadline and startup generation regressions', () => {
+  it('retires unanswered binary RPC slots at the dedicated ten-minute deadline', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['ui:view'] }] });
+    vi.mocked(executeHostApi).mockImplementation(() => new Promise(() => {}));
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'view.sendBinary', args: {} });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: false, error: 'plugin RPC timed out' });
+    vi.mocked(executeHostApi).mockResolvedValue('next'); worker.emit({ seq: 2, op: 'ports.list' });
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: 'next' }); session.stop();
+  });
+
+  it('bounds the cancellation escape hatch even when ordinary RPC slots never settle', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request'] }] });
+    vi.mocked(executeHostApi).mockImplementation(() => new Promise(() => {}));
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    for (let seq = 1; seq <= MAX_PENDING_MESSAGES; seq++) worker.emit({ seq, op: 'ports.list' });
+    for (let index = 0; index < 64; index++) worker.emit({ seq: 1000 + index, op: 'http.cancel', args: { requestId: `cancel-${index}` } });
+    worker.emit({ seq: 2000, op: 'http.cancel', args: { requestId: 'excess' } });
+    expect(executeHostApi).toHaveBeenCalledTimes(MAX_PENDING_MESSAGES + 64);
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2000, ok: false, error: 'plugin RPC capacity exceeded' }); session.stop();
+  });
+
+  it('expires a stalled Worker binary ACK, flushes controls, and ignores a late ACK', async () => {
+    vi.useFakeTimers();
+    const session = new PluginSession(pluginId); await session.start();
+    const worker = TestWorker.created[0];
+    const pending = session.postViewBinary({ instanceId: 'view-a', transferId: 'stalled', type: 'blob', documentId: 'doc-a', bytes: new Uint8Array([1]) });
+    const outcome = expect(pending).rejects.toThrow('Worker binary ACK timed out');
+    const sent = worker.postMessage.mock.calls.find(([message]) => message.type === 'view.binary')![0];
+    for (let index = 0; index < MAX_PENDING_CONTROL_MESSAGES - 2; index++) session.post({ type: 'ui.buttonClick' });
+    session.post({ type: 'ui.buttonClick', payload: { id: 'queued-after-binary' } });
+    await vi.advanceTimersByTimeAsync(30_000); await outcome;
+    expect(worker.postMessage.mock.calls.some(([message]) => message.payload?.id === 'queued-after-binary')).toBe(true);
+    worker.emit({ eventAck: sent.eventId, ok: true });
+    const queued = worker.postMessage.mock.calls.find(([message]) => message.payload?.id === 'queued-after-binary')![0];
+    worker.emit({ eventAck: queued.eventId });
+    const next = session.postViewBinary({ instanceId: 'view-a', transferId: 'next', type: 'blob', documentId: 'doc-a', bytes: new Uint8Array(0) });
+    const rejected = expect(next).rejects.toThrow('plugin worker stopped'); session.stop(); await rejected;
+  });
+
+  it('does not let stale start I/O settle readiness of a replacement startup', async () => {
+    const staleRead = deferredResult<string>(); readAsset.mockReturnValueOnce(staleRead.promise);
+    const session = new PluginSession(pluginId);
+    const stale = session.startReady(); const staleOutcome = expect(stale).rejects.toThrow('stopped');
+    session.stop();
+    const fresh = session.startReady(); let ready = false; void fresh.then(() => { ready = true; });
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    staleRead.resolve(JSON.stringify(manifest)); await staleOutcome;
+    expect(ready).toBe(false); expect(TestWorker.created).toHaveLength(1);
+    TestWorker.created[0].emit({ type: '__plugin_ready' }); await fresh; expect(ready).toBe(true); session.stop();
+  });
+
+  it('detects post-ready silent Worker death through bounded health probes', async () => {
+    vi.useFakeTimers();
+    const session = new PluginSession(pluginId, true); await session.start();
+    const worker = TestWorker.created[0]; worker.emit({ type: '__plugin_ready' });
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(worker.postMessage.mock.calls.filter(([message]) => message.type === '__plugin_health')).toHaveLength(1);
+    expect(worker.terminate).toHaveBeenCalledOnce(); session.stop();
+  });
+
+  it('keeps a Worker alive when health probes are acknowledged', async () => {
+    vi.useFakeTimers();
+    const session = new PluginSession(pluginId, true); await session.start();
+    const worker = TestWorker.created[0]; worker.emit({ type: '__plugin_ready' });
+    for (let index = 0; index < 4; index++) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      const probes = worker.postMessage.mock.calls.filter(([message]) => message.type === '__plugin_health');
+      worker.emit({ eventAck: probes[probes.length - 1][0].eventId });
+    }
+    expect(worker.terminate).not.toHaveBeenCalled(); session.stop();
   });
 });
 

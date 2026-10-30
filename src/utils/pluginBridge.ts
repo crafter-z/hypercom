@@ -17,8 +17,12 @@
  * 属于启动失败（可重启/熔断），启动后的普通异步错误只上报诊断。
  * 桥必须**不依赖任何外部模块**（worker 内无 bundler）——纯自包含字符串。
  */
+import { VIEW_BINARY_TRANSFER_TIMEOUT_MS } from './pluginViewBinary';
+
 /** Host expires first; allow the worker one second to receive its reply. */
 export const PLUGIN_RPC_TIMEOUT_MS = 10_000;
+/** Hard resource lifetime for one binary RPC (per-chunk ACK has a shorter idle deadline). */
+export const PLUGIN_BINARY_RPC_TIMEOUT_MS = VIEW_BINARY_TRANSFER_TIMEOUT_MS;
 
 /**
  * Ops that legitimately wait for the user or the network. They have no host
@@ -27,8 +31,7 @@ export const PLUGIN_RPC_TIMEOUT_MS = 10_000;
 export function hasNoRpcDeadline(op: string): boolean {
   return op === 'fs.read' || op === 'fs.openDialog' || op === 'ui.panel.export' ||
     op === 'fs.write' || op === 'storage.set' ||
-    op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel' ||
-    op === 'view.sendBinary';
+    op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel';
 }
 
 /** worker 内执行的桥代码（字符串常量，宿主注入）。 */
@@ -203,8 +206,8 @@ export const PLUGIN_BRIDGE_CODE = `
     }
     var deadline = op === 'fs.read' || op === 'fs.openDialog' || op === 'ui.panel.export' ||
       op === 'fs.write' || op === 'storage.set' ||
-      op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel' ||
-      op === 'view.sendBinary' ? 0 : ${PLUGIN_RPC_TIMEOUT_MS + 1000};
+      op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel'
+      ? 0 : op === 'view.sendBinary' ? ${PLUGIN_BINARY_RPC_TIMEOUT_MS + 1000} : ${PLUGIN_RPC_TIMEOUT_MS + 1000};
     return new Promise(function (resolve, reject) {
       if (signal && signal.aborted) {
         // Never sent: no native request exists to cancel.

@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { acquirePluginViewOverlay } from '../../utils/pluginViewOverlay';
+import { notifyError } from '../../stores/useToastStore';
 
 /** Menus cut only their own rectangle out of native children; modals hide them. */
 export function usePluginViewOverlay(open = true, overlayRef?: RefObject<HTMLElement | null>): boolean {
@@ -10,6 +11,7 @@ export function usePluginViewOverlay(open = true, overlayRef?: RefObject<HTMLEle
     let alive = true;
     let revision = 0;
     let lastRect = '';
+    let failureReported = false;
     const element = overlayRef?.current;
     const measure = () => {
       const rect = element!.getBoundingClientRect();
@@ -20,8 +22,22 @@ export function usePluginViewOverlay(open = true, overlayRef?: RefObject<HTMLEle
     const wait = (pending: Promise<void>) => {
       const current = ++revision;
       setReady(false);
-      void pending.then(() => { if (alive && current === revision) setReady(true); })
-        .catch(error => console.error('[pluginView] overlay suppression', error));
+      void pending.then(() => {
+        if (!alive || current !== revision) return;
+        failureReported = false;
+        setReady(true);
+      }).catch(error => {
+        if (!alive || current !== revision) return;
+        // Fail closed: never reveal a host menu over an unconfirmed native
+        // child. The user can dismiss/reopen to retry; do not leave the reason
+        // hidden only in diagnostics or spam a toast on every resize.
+        lastRect = '';
+        if (!failureReported) {
+          failureReported = true;
+          console.error('[pluginView] overlay suppression', error);
+          notifyError(undefined, 'pluginViews.overlayFailed');
+        }
+      });
     };
     wait(guard.ready);
     const refresh = () => {

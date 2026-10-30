@@ -9,8 +9,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { checkOpAllowed, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS } from './pluginRpc';
 import { PLUGIN_BRIDGE_CODE } from './pluginBridge';
+import hostApiSource from './pluginHostApi.ts?raw';
 
 describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
+  it('covers every dispatched API operation with an explicit permission policy', () => {
+    const dispatched = [...hostApiSource.matchAll(/case '([^']+)':/g)].map(match => match[1]);
+    expect(dispatched.length).toBeGreaterThan(0);
+    expect([...new Set(dispatched)].sort()).toEqual(Object.keys(OP_PERMISSIONS).sort());
+  });
   it('无权限：敏感 op 全拒，只读 op 放行', () => {
     expect(checkOpAllowed('ports.list', [])).toBeNull();
     expect(checkOpAllowed('ports.status', [])).toBeNull();

@@ -18,7 +18,7 @@ import {
   Check,
   X,
 } from 'lucide-react';
-import { usePluginList, isPluginReplaceConfirmationError } from '../../../hooks/usePlugins';
+import { usePluginList, isPluginReplaceConfirmationError, replacementTargetId } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
 import { useAppStore } from '../../../stores/useAppStore';
 import type { PluginView } from '../../../types';
@@ -95,6 +95,21 @@ const PluginSettings: React.FC = () => {
   const [pendingTrust, setPendingTrust] = React.useState<{ plugin: PluginView; install: boolean } | null>(null);
   const [pendingClear, setPendingClear] = React.useState<PluginView | null>(null);
   const [working, setWorking] = React.useState(false);
+  // Hook queues serialize mutations, but a fast double-click can enqueue the
+  // same plugin before React commits `loading`. Keep a synchronous per-plugin
+  // admission set as a UI busy guard; the hook remains the authority for CAS.
+  const busyPluginRef = React.useRef(new Set<string>());
+  const [busyPlugins, setBusyPlugins] = React.useState<ReadonlySet<string>>(new Set());
+  const beginPluginBusy = (pluginId: string): boolean => {
+    if (busyPluginRef.current.has(pluginId)) return false;
+    busyPluginRef.current.add(pluginId);
+    setBusyPlugins(new Set(busyPluginRef.current));
+    return true;
+  };
+  const endPluginBusy = (pluginId: string): void => {
+    busyPluginRef.current.delete(pluginId);
+    setBusyPlugins(new Set(busyPluginRef.current));
+  };
   // 插件出站代理（issue #17）：宿主显式配置的代理优先；未配置时继承系统代理。
   const pluginProxyEnabled = useAppStore((s) => s.config.pluginProxyEnabled);
   const pluginProxy = useAppStore((s) => s.config.pluginProxy);
@@ -112,8 +127,14 @@ const PluginSettings: React.FC = () => {
         // Same/lower version: not a failure yet. Ask for an explicit
         // replacement (data preserved, grants/trust reset) before retrying.
         if (!isPluginReplaceConfirmationError(error)) return;
+        const targetId = replacementTargetId(error);
+        const refreshed = await refresh();
+        const reviewed = (refreshed ?? plugins).find(plugin => plugin.id === targetId);
+        if (!reviewed?.installGeneration) {
+          throw new Error('无法确认待替换插件的当前安装代次，请刷新后重试');
+        }
         if (!window.confirm(t('plugins.replaceConfirm'))) return;
-        installed = await installPlugin(selected, true);
+        installed = await installPlugin(selected, true, reviewed.installGeneration);
       }
       if (installed) {
         if (hasTrustedViews(installed) && installed.trustedWebGranted !== true) setPendingTrust({ plugin: installed, install: true });
@@ -137,7 +158,9 @@ const PluginSettings: React.FC = () => {
         return;
       }
     }
-    void setEnabled(plugin.id, !plugin.enabled, plugin.installGeneration);
+    if (!beginPluginBusy(plugin.id)) return;
+    void setEnabled(plugin.id, !plugin.enabled, plugin.installGeneration)
+      .finally(() => endPluginBusy(plugin.id));
   };
 
   return (
@@ -212,22 +235,28 @@ const PluginSettings: React.FC = () => {
                     {hasTrustedViews(plugin) && <span className="plugin-card-version">{t(plugin.trustedWebGranted === true ? 'plugins.trustedWebBadge' : 'plugins.trustedWebPendingBadge')}</span>}
                   </div>
                   <div className="plugin-card-controls">
-                    {plugin.trustedWebGranted === true && <button className="btn btn-danger btn-sm" disabled={loading} onClick={() => {
-                      void setTrustedWeb(plugin.id, false, plugin.installGeneration).catch(() => {});
+                    {plugin.trustedWebGranted === true && <button className="btn btn-danger btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => {
+                      if (!beginPluginBusy(plugin.id)) return;
+                      void setTrustedWeb(plugin.id, false, plugin.installGeneration)
+                        .catch(() => {}).finally(() => endPluginBusy(plugin.id));
                     }}>{t('plugins.revokeTrustedWeb')}</button>}
-                    {hasTrustedViews(plugin) && <button className="btn btn-sm" disabled={loading} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
+                    {hasTrustedViews(plugin) && <button className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
                     <button
                       className="btn btn-sm"
                       title={t('plugins.reloadCodeHint')}
-                      onClick={() => void reloadPlugin(plugin.id, plugin.installGeneration).catch(() => {})}
-                      disabled={loading || !plugin.enabled || !!plugin.manifestError}
+                      onClick={() => {
+                        if (!beginPluginBusy(plugin.id)) return;
+                        void reloadPlugin(plugin.id, plugin.installGeneration)
+                          .catch(() => {}).finally(() => endPluginBusy(plugin.id));
+                      }}
+                      disabled={loading || busyPlugins.has(plugin.id) || !plugin.enabled || !!plugin.manifestError}
                     >
                       <RefreshCw size={13} /> {t('plugins.reloadCode')}
                     </button>
                     <button
                       className={`btn btn-sm${plugin.enabled ? ' active' : ''}`}
                       onClick={() => handleToggleEnabled(plugin)}
-                      disabled={loading || !!plugin.manifestError}
+                      disabled={loading || busyPlugins.has(plugin.id) || !!plugin.manifestError}
                     >
                       <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
                     </button>
@@ -236,7 +265,9 @@ const PluginSettings: React.FC = () => {
                       disabled={loading}
                       onClick={() => {
                         if (window.confirm(t('plugins.uninstallConfirm', { name: plugin.manifest?.name ?? plugin.id }))) {
-                          void uninstallPlugin(plugin.id);
+                          if (!beginPluginBusy(plugin.id)) return;
+                           void uninstallPlugin(plugin.id)
+                             .finally(() => endPluginBusy(plugin.id));
                         }
                       }}
                     >
@@ -269,8 +300,12 @@ const PluginSettings: React.FC = () => {
                               <input
                                 type="checkbox"
                                 checked={granted.includes(perm)}
-                                disabled={loading || !!plugin.manifestError}
-                                onChange={() => void togglePermission(plugin.id, perm, plugin.installGeneration)}
+                                disabled={loading || busyPlugins.has(plugin.id) || !!plugin.manifestError}
+                                onChange={() => {
+                                   if (!beginPluginBusy(plugin.id)) return;
+                                   void togglePermission(plugin.id, perm, plugin.installGeneration)
+                                     .finally(() => endPluginBusy(plugin.id));
+                                 }}
                               />
                               <code>{perm}</code>
                               <span className="plugin-perm-state">
@@ -335,7 +370,11 @@ const PluginSettings: React.FC = () => {
                 setPendingGrant(null);
                 return;
               }
-              void grantAllAndEnable(pendingGrant).then(() => setPendingGrant(null)).catch(() => {});
+              if (!beginPluginBusy(pendingGrant.id)) return;
+               void grantAllAndEnable(pendingGrant)
+                 .then(() => setPendingGrant(null))
+                 .catch(() => {})
+                 .finally(() => endPluginBusy(pendingGrant.id));
             }}>{t('plugins.permissionPromptGrantAll')}</button>
           </div>
         </div>

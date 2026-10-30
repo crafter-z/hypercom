@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
+import { PLUGIN_RPC_TIMEOUT_MS, PLUGIN_BINARY_RPC_TIMEOUT_MS, hasNoRpcDeadline, wrapPluginCode } from './pluginBridge';
 
 type RpcReply = { seq: number; ok: boolean; result?: unknown; error?: string };
 type HostEvent = { type: string; payload?: unknown; eventId?: number };
@@ -85,6 +85,16 @@ describe('wrapped worker RPC lifecycle', () => {
     worker.reply({ seq: 1, ok: true, result: 'exported' });
     await request;
     expect(outcome).toHaveBeenCalledWith('exported');
+  });
+
+  it('retires binary RPC promises at their dedicated resource deadline, not the network deadline', async () => {
+    vi.useFakeTimers();
+    expect(hasNoRpcDeadline('view.sendBinary')).toBe(false);
+    expect(hasNoRpcDeadline('http.read')).toBe(true);
+    const worker = wrappedWorker('self.request = self.plugin.api["view.sendBinary"]({});');
+    const outcome = expect(worker.scope.request!).rejects.toThrow('plugin RPC timed out');
+    await vi.advanceTimersByTimeAsync(PLUGIN_BINARY_RPC_TIMEOUT_MS + 1001); await outcome;
+    worker.reply({ seq: 1, ok: true });
   });
 
   it('rejects immediately when posting cannot clone arguments', async () => {

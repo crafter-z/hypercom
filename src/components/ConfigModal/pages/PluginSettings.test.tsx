@@ -10,9 +10,13 @@ const mocks = vi.hoisted(() => ({
     grantAllAndEnable: vi.fn(), uninstallPlugin: vi.fn(), setEnabled: vi.fn(), togglePermission: vi.fn(),
     setTrustedWeb: vi.fn(), clearWebData: vi.fn() },
   open: vi.fn(),
-  isReplaceError: vi.fn(),
+  isReplaceError: vi.fn(), replacementTargetId: vi.fn(),
 }));
-vi.mock('../../../hooks/usePlugins', () => ({ usePluginList: () => mocks.api, isPluginReplaceConfirmationError: mocks.isReplaceError }));
+vi.mock('../../../hooks/usePlugins', () => ({
+  usePluginList: () => mocks.api,
+  isPluginReplaceConfirmationError: mocks.isReplaceError,
+  replacementTargetId: mocks.replacementTargetId,
+}));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }));
 vi.mock('../../shared/usePluginViewOverlay', () => ({ usePluginViewOverlay: () => true }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -31,9 +35,11 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.api.plugins = [trustedPlugin()];
   mocks.api.setTrustedWeb.mockResolvedValue(undefined);
+  mocks.api.refresh.mockResolvedValue([trustedPlugin()]);
   mocks.api.setEnabled.mockResolvedValue(undefined);
   mocks.api.reloadPlugin.mockResolvedValue(undefined);
   mocks.isReplaceError.mockReturnValue(false);
+  mocks.replacementTargetId.mockReturnValue('demo');
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -95,10 +101,24 @@ it('reloads the installed code of an enabled plugin without a destructive uninst
   expect(mocks.api.uninstallPlugin).not.toHaveBeenCalled();
 });
 
+it('does not enqueue duplicate reload clicks before the first one settles', async () => {
+  mocks.api.plugins = [{ ...trustedPlugin(), enabled: true }];
+  let resolve!: () => void;
+  mocks.api.reloadPlugin.mockReturnValue(new Promise<void>((done) => { resolve = done; }));
+  await render();
+  const button = [...container.querySelectorAll('button')]
+    .find(item => item.textContent?.trim() === 'plugins.reloadCode');
+  expect(button).toBeDefined();
+  await act(async () => { button!.click(); button!.click(); });
+  expect(mocks.api.reloadPlugin).toHaveBeenCalledTimes(1);
+  resolve();
+  await act(async () => { await Promise.resolve(); });
+});
+
 it('asks for explicit confirmation before replacing a same or lower version', async () => {
   mocks.open.mockResolvedValue('archive.zip');
   mocks.api.installPlugin
-    .mockRejectedValueOnce(new Error('plugin_replace_confirmation_required: same version'))
+    .mockRejectedValueOnce(new Error('plugin_replace_confirmation_required: 插件 demo 已安装（版本 1.0.0）'))
     .mockResolvedValueOnce(null);
   mocks.isReplaceError.mockReturnValue(true);
   const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -106,12 +126,12 @@ it('asks for explicit confirmation before replacing a same or lower version', as
   await click('plugins.installZip');
   expect(confirm).toHaveBeenCalledTimes(1);
   expect(mocks.api.installPlugin).toHaveBeenNthCalledWith(1, 'archive.zip');
-  expect(mocks.api.installPlugin).toHaveBeenNthCalledWith(2, 'archive.zip', true);
+  expect(mocks.api.installPlugin).toHaveBeenNthCalledWith(2, 'archive.zip', true, 'generation-a');
 });
 
 it('keeps the installed version when replacement is cancelled', async () => {
   mocks.open.mockResolvedValue('archive.zip');
-  mocks.api.installPlugin.mockRejectedValueOnce(new Error('plugin_replace_confirmation_required: same version'));
+  mocks.api.installPlugin.mockRejectedValueOnce(new Error('plugin_replace_confirmation_required: 插件 demo 已安装（版本 1.0.0）'));
   mocks.isReplaceError.mockReturnValue(true);
   const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
   await render();

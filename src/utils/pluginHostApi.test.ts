@@ -100,6 +100,19 @@ describe('host API asset reads', () => {
     expect(result).toEqual({ files: files.map(({ path }) => ({ path, bytes: new Uint8Array([239, 187, 191, 0, 255, 128]) })) });
   });
 
+  it('bounds native dialog filter structures without limiting selected file count', async () => {
+    pickFiles.mockResolvedValue({ files: [] });
+    const filters = [{ name: 'Logs', extensions: ['log', 'txt'] }];
+    await executeHostApi('api.plugin', 'fs.openDialog', { filters });
+    expect(pickFiles).toHaveBeenCalledWith('api.plugin', expect.objectContaining({ filters }));
+    await expect(executeHostApi('api.plugin', 'fs.openDialog', {
+      filters: Array.from({ length: 33 }, () => ({ name: 'x', extensions: ['txt'] })),
+    })).rejects.toThrow(/filters/);
+    await expect(executeHostApi('api.plugin', 'fs.openDialog', {
+      filters: [{ name: 'x', extensions: ['x'.repeat(129)] }],
+    })).rejects.toThrow(/extensions/);
+  });
+
   it('keeps text decoding optional and cancellation distinct from an empty binary file', async () => {
     pickFiles.mockResolvedValueOnce({ files: [{ path: '中文.log', base64: '1tDOxA==' }] });
     expect(await executeHostApi('api.plugin', 'fs.openDialog', { encoding: 'gbk' })).toEqual({ files: [{ path: '中文.log', content: '中文' }] });

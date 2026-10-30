@@ -77,6 +77,13 @@ const MAX_TERMINAL_APPEND_CHARS = 64 * 1024;
 const MAX_SERIAL_SEND_CHARS = 1024 * 1024;
 const MAX_LOG_MESSAGE_CHARS = 64 * 1024;
 const MAX_PANEL_APPEND_CHARS = 64 * 1024;
+/** Structural IPC bounds for native file-dialog options (not file quotas). */
+export const MAX_PLUGIN_DIALOG_FILTERS = 32;
+export const MAX_PLUGIN_DIALOG_FILTER_NAME_CHARS = 128;
+export const MAX_PLUGIN_DIALOG_EXTENSIONS = 64;
+export const MAX_PLUGIN_DIALOG_EXTENSION_CHARS = 128;
+export const MAX_PLUGIN_DIALOG_TITLE_CHARS = 256;
+export const MAX_PLUGIN_ENCODING_CHARS = 64;
 const PLUGIN_LINE_ENDINGS = new Set(['None', '\\r', '\\n', '\\r\\n']);
 
 function requireMaxChars(value: string, field: string, max: number): string {
@@ -84,10 +91,46 @@ function requireMaxChars(value: string, field: string, max: number): string {
   return value;
 }
 
+/**
+ * Single sanitizer for text that ends up in host logs/diagnostics: control
+ * characters and newlines are replaced so a plugin cannot forge extra log lines,
+ * then the result is truncated to a bounded length.
+ */
+export function cleanHostText(value: string, maximum = 500): string {
+  return value.replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, maximum);
+}
+
 function binaryFileFormat(args: Record<string, unknown>): boolean {
   if (args.format === undefined || args.format === 'text') return false;
   if (args.format === 'binary') return true;
   throw new Error('文件 format 必须为 text 或 binary');
+}
+
+type PluginDialogFilter = { name: string; extensions: string[] };
+
+function dialogFilters(value: unknown): PluginDialogFilter[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error('文件 filters 必须为数组');
+  if (value.length > MAX_PLUGIN_DIALOG_FILTERS) {
+    throw new Error(`文件 filters 数量超过 ${MAX_PLUGIN_DIALOG_FILTERS} 上限`);
+  }
+  return value.map((item, index) => {
+    const filter = requireObject(item);
+    const name = requireMaxChars(requireString(filter, 'name'), `filters[${index}].name`, MAX_PLUGIN_DIALOG_FILTER_NAME_CHARS);
+    const extensions = filter.extensions;
+    if (!Array.isArray(extensions) || extensions.length > MAX_PLUGIN_DIALOG_EXTENSIONS) {
+      throw new Error(`文件 filters[${index}].extensions 数量非法`);
+    }
+    return {
+      name,
+      extensions: extensions.map((extension, extensionIndex) => {
+        if (typeof extension !== 'string' || extension.length === 0 || extension.length > MAX_PLUGIN_DIALOG_EXTENSION_CHARS) {
+          throw new Error(`文件 filters[${index}].extensions[${extensionIndex}] 长度非法`);
+        }
+        return extension;
+      }),
+    };
+  });
 }
 
 function fileBytes(base64: string): Uint8Array {
@@ -150,10 +193,13 @@ export async function executeHostApi(
       const scopeDenied = checkPortScope(manifest, portId);
       if (scopeDenied) throw new Error(scopeDenied);
       const data = requireMaxChars(requireString(a, 'data'), 'data', MAX_SERIAL_SEND_CHARS);
-      const isHex = Boolean(a.isHex);
-      const lineEnding = typeof a.lineEnding === 'string' ? a.lineEnding : 'None';
-      if (!PLUGIN_LINE_ENDINGS.has(lineEnding)) {
-        throw new Error(`不支持的 lineEnding: ${lineEnding}`);
+      if (a.isHex !== undefined && typeof a.isHex !== 'boolean') {
+        throw new Error('参数 isHex 必须为布尔值');
+      }
+      const isHex = a.isHex === true;
+      const lineEnding = a.lineEnding === undefined ? 'None' : a.lineEnding;
+      if (typeof lineEnding !== 'string' || !PLUGIN_LINE_ENDINGS.has(lineEnding)) {
+        throw new Error(`不支持的 lineEnding: ${String(a.lineEnding)}`);
       }
       const bytes = await sendToPort(portId, data, isHex, lineEnding, true, beforeSend); // silent: 插件发送不弹守卫 toast
       return { bytesWritten: bytes };
@@ -161,13 +207,21 @@ export async function executeHostApi(
     case 'fs.openDialog': {
       const a = requireObject(args);
       const binary = binaryFileFormat(a);
-      const encoding = typeof a.encoding === 'string' && a.encoding !== '' ? a.encoding : 'utf-8';
-      const filters = Array.isArray(a.filters) ? (a.filters as { name: string; extensions: string[] }[]) : undefined;
-      const multiple = Boolean(a.multiple);
+      const encoding = typeof a.encoding === 'string' && a.encoding !== ''
+        ? requireMaxChars(a.encoding, 'encoding', MAX_PLUGIN_ENCODING_CHARS)
+        : 'utf-8';
+      const filters = dialogFilters(a.filters);
+      if (a.multiple !== undefined && typeof a.multiple !== 'boolean') {
+        throw new Error('文件 multiple 必须为布尔值');
+      }
+      const multiple = a.multiple === true;
+      const title = a.title === undefined
+        ? undefined
+        : requireMaxChars(requireString(a, 'title'), 'title', MAX_PLUGIN_DIALOG_TITLE_CHARS);
       const releaseDialog = acquirePluginDialog(pluginId);
       try {
         const selected = await fileService.pickPluginFiles(pluginId, {
-          multiple, filters, title: typeof a.title === 'string' ? a.title : undefined,
+          multiple, filters, title,
         });
         beforeSend?.();
         return {
@@ -242,7 +296,10 @@ export async function executeHostApi(
     case 'log': {
       const a = requireObject(args);
       const level = typeof a.level === 'string' ? a.level : 'info';
-      const msg = requireMaxChars(typeof a.msg === 'string' ? a.msg : String(a.msg ?? ''), 'msg', MAX_LOG_MESSAGE_CHARS);
+      const msg = cleanHostText(
+        requireMaxChars(typeof a.msg === 'string' ? a.msg : String(a.msg ?? ''), 'msg', MAX_LOG_MESSAGE_CHARS),
+        MAX_LOG_MESSAGE_CHARS,
+      );
       // P13 配额：令牌桶限流（突发 20 条 / 回填 4 条每秒），坏插件不再把
       // diaglog 512KB 轮转窗口刷掉；超限丢弃，每 5s 窗口首次丢弃告警一次。
       let quota = logQuotas.get(pluginId);

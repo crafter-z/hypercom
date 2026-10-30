@@ -31,6 +31,14 @@ export function isPluginReplaceConfirmationError(error: unknown): boolean {
   return extractErrorMessage(error).trim().startsWith(REPLACE_CONFIRMATION_PREFIX);
 }
 
+/** Extract the backend-reviewed target identity from a replacement refusal. */
+export function replacementTargetId(error: unknown): string | undefined {
+  const message = extractErrorMessage(error).trim();
+  if (!message.startsWith(REPLACE_CONFIRMATION_PREFIX)) return undefined;
+  const match = message.match(/:\s*(?:插件\s+)?([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?:\s|$)/);
+  return match?.[1];
+}
+
 // Permission updates replace the complete grant array. Keep one queue per
 // plugin outside React component instances so page switches cannot resurrect a
 // stale grant snapshot.
@@ -194,30 +202,42 @@ export function usePluginList() {
 
   useEffect(() => subscribePluginViews(() => setPlugins(getPluginViews())), []);
 
-  const refresh = useCallback(async (): Promise<PluginView[]> => {
+  // Mutation follow-ups must observe list failures: a reload cannot remount
+  // views or announce success using a manifest list that was never refreshed.
+  const refreshSnapshot = useCallback(async (): Promise<PluginView[]> => {
     const version = ++listRefreshVersion.current;
+    const result = await pluginService.listPlugins();
+    if (version !== listRefreshVersion.current) return getPluginViews();
+    const accepted = syncPluginListSnapshot(result);
+    if (accepted && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
+    // A revision-rejected response must not be treated as authoritative by
+    // callers (install handoff); expose the last accepted snapshot instead.
+    return getPluginViews();
+  }, []);
+
+  const refresh = useCallback(async (): Promise<PluginView[]> => {
     try {
-      const result = await pluginService.listPlugins();
-      if (version !== listRefreshVersion.current) return getPluginViews();
-      const accepted = syncPluginListSnapshot(result);
-      if (accepted && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
-      // A revision-rejected response must not be treated as authoritative by
-      // callers (install handoff); expose the last accepted snapshot instead.
-      return getPluginViews();
+      return await refreshSnapshot();
     } catch (error) {
       console.error('[usePluginList] list failed:', error);
       notifyError(error);
       return getPluginViews();
     }
-  }, []);
+  }, [refreshSnapshot]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  const installPlugin = useCallback(async (sourcePath: string, replaceExisting = false): Promise<PluginView | null> => {
+  const installPlugin = useCallback(async (
+    sourcePath: string,
+    replaceExisting = false,
+    expectedGeneration?: string,
+  ): Promise<PluginView | null> => {
     setLoading(true);
-    pluginHost.dispose();
+    // Do not suspend unrelated plugins while validating/installing a source.
+    // Native mutations recheck authority; the returned installation snapshot
+    // below retires only the replaced/disabled session.
     // Identify the installed plugin from the authoritative install snapshot
     // (id + installGeneration), never by diffing the renderer's manifest list:
     // that list may be empty/stale and `find` would return an unrelated plugin,
@@ -226,11 +246,14 @@ export function usePluginList() {
       (useAppStore.getState().config.pluginConfigs ?? []).map(entry => [entry.id, entry.installGeneration]),
     );
     try {
-      const snapshot = await pluginService.installPlugin(sourcePath, replaceExisting || undefined);
+      const snapshot = expectedGeneration === undefined
+        ? await pluginService.installPlugin(sourcePath, replaceExisting || undefined)
+        : await pluginService.installPlugin(sourcePath, replaceExisting || undefined, expectedGeneration);
       const installedEntry = snapshot.pluginConfigs.find(
         entry => previousGenerations.get(entry.id) !== entry.installGeneration,
       );
-      syncStorePluginConfigs(snapshot);
+      const accepted = syncStorePluginConfigs(snapshot);
+      if (accepted && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
       await refresh();
       notifySuccess('plugins.installed');
       if (!installedEntry) return null;
@@ -239,9 +262,8 @@ export function usePluginList() {
       ) ?? null;
     } catch (error) {
       if (!replaceExisting && isPluginReplaceConfirmationError(error)) {
-        // Expected same/lower-version refusal. Nothing changed on disk, so
-        // restore the workers suspended above and let the caller ask for an
-        // explicit replacement instead of showing a failure.
+        // Expected same/lower-version refusal. Nothing changed on disk; let
+        // the caller ask for explicit replacement instead of showing a failure.
         pluginHost.syncWithConfig(true);
         throw error;
       }
@@ -283,7 +305,7 @@ export function usePluginList() {
         // once the fresh session start attempt settles (pure-HTML stays Worker-free).
         await pluginHost.reload(pluginId);
         // Re-read the installed manifest/code listings before remounting views.
-        await refresh();
+        await refreshSnapshot();
         await reloadPluginViews(pluginId);
         notifySuccess('plugins.reloaded');
       } catch (error) {
@@ -294,7 +316,7 @@ export function usePluginList() {
       } finally {
         setLoading(false);
       }
-    }), [refresh]);
+    }), [refreshSnapshot]);
 
   const grantAllAndEnable = useCallback((plugin: PluginView): Promise<void> => queuePermissionMutation(plugin.id, async () => {
     setLoading(true);
@@ -415,7 +437,7 @@ export interface PluginListApi {
   plugins: PluginView[];
   loading: boolean;
   refresh: () => Promise<PluginView[]>;
-  installPlugin: (sourcePath: string, replaceExisting?: boolean) => Promise<PluginView | null>;
+  installPlugin: (sourcePath: string, replaceExisting?: boolean, expectedGeneration?: string) => Promise<PluginView | null>;
   reloadPlugin: (pluginId: string, expectedGeneration: string) => Promise<void>;
   grantAllAndEnable: (plugin: PluginView) => Promise<void>;
   uninstallPlugin: (pluginId: string) => Promise<void>;

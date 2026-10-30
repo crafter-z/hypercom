@@ -28,19 +28,44 @@ import type {
 const MAX_ACTIVE_REQUESTS_PER_PLUGIN = 64;
 /** Cancel-before-open tombstones retained per plugin (bounded, FIFO). */
 const MAX_CANCEL_TOMBSTONES = 64;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+/** Native cancel is a reserved path, but unknown-id floods remain bounded. */
+export const MAX_PENDING_CANCELS_PER_PLUGIN = 32;
+export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const REDIRECTS: readonly PluginHttpRedirect[] = ['follow', 'manual', 'error'];
+/**
+ * Channel-level guardrails (not content quotas): an unbounded URL/header list
+ * would otherwise be copied through the Worker→host IPC bridge before any native
+ * validation can reject it.
+ */
+export const MAX_HTTP_URL_CHARS = 8 * 1024;
+export const MAX_HTTP_HEADERS = 64;
+export const MAX_HTTP_HEADER_NAME_CHARS = 256;
+export const MAX_HTTP_HEADER_VALUE_CHARS = 8 * 1024;
+/**
+ * Streams are pulled by the Worker; an abandoned `http.open` (never read nor
+ * cancelled) would otherwise hold one of the 64 concurrency slots forever.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 60_000;
+const MAX_EXPIRED_STREAMS = 64;
 
 interface ActiveRequest {
   pluginId: string;
   generation: string;
   requestId: string;
   cancelled: boolean;
+  /** Pending native pulls are active consumption, even when the network is quiet. */
+  pendingReads: number;
+  /** Pending idle reaper for a streaming (pull-mode) request. */
+  idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const activeRequests = new Map<string, ActiveRequest>();
 /** requestId cancelled before/without a registered request, keyed plugin+id. */
 const cancelledBeforeOpen = new Map<string, true>();
+/** Recently idle-reaped streams; lets the next read report a precise reason. */
+const expiredStreams = new Map<string, string>();
+/** Deduplicate concurrent native cancels by plugin + request id. */
+const pendingCancels = new Map<string, Promise<void>>();
 
 function requestKey(pluginId: string, requestId: string): string {
   return `${pluginId}\u0000${requestId}`;
@@ -105,15 +130,26 @@ function parseOptions(args: unknown, allowResponseType: boolean): ParsedOptions 
   }
   const a = args as Record<string, unknown>;
   if (typeof a.url !== 'string' || a.url.length === 0) throw new Error('plugin HTTP url 必须是非空字符串');
+  if (a.url.length > MAX_HTTP_URL_CHARS) throw new Error(`plugin HTTP url 超过 ${MAX_HTTP_URL_CHARS} 字符上限`);
   if (a.method !== undefined && typeof a.method !== 'string') throw new Error('plugin HTTP method 必须是字符串');
   let headers: Record<string, string> | undefined;
   if (a.headers !== undefined) {
     if (a.headers === null || typeof a.headers !== 'object' || Array.isArray(a.headers)) {
       throw new Error('plugin HTTP headers 必须是对象');
     }
+    const entries = Object.entries(a.headers);
+    if (entries.length > MAX_HTTP_HEADERS) {
+      throw new Error(`plugin HTTP headers 数量超过 ${MAX_HTTP_HEADERS} 上限`);
+    }
     headers = {};
-    for (const [name, value] of Object.entries(a.headers)) {
+    for (const [name, value] of entries) {
       if (typeof value !== 'string') throw new Error('plugin HTTP header 值必须是字符串');
+      if (name.length === 0 || name.length > MAX_HTTP_HEADER_NAME_CHARS) {
+        throw new Error(`plugin HTTP header 名长度超过 ${MAX_HTTP_HEADER_NAME_CHARS} 上限`);
+      }
+      if (value.length > MAX_HTTP_HEADER_VALUE_CHARS) {
+        throw new Error(`plugin HTTP header 值长度超过 ${MAX_HTTP_HEADER_VALUE_CHARS} 上限`);
+      }
       headers[name] = value;
     }
   }
@@ -135,7 +171,8 @@ function parseOptions(args: unknown, allowResponseType: boolean): ParsedOptions 
     throw new Error('plugin HTTP body 与 bodyBase64 互斥');
   }
   let timeout: number | undefined;
-  if (a.timeout !== undefined && a.timeout !== null) {
+  // `null` is not a valid timeout: omit the field (or use 0) for "no deadline".
+  if (a.timeout !== undefined) {
     if (typeof a.timeout !== 'number' || !Number.isFinite(a.timeout) || a.timeout < 0) {
       throw new Error('plugin HTTP timeout 必须是非负有限秒数');
     }
@@ -189,13 +226,79 @@ function takeCancelled(pluginId: string, requestId: string): boolean {
   return found;
 }
 
-async function cancelNative(pluginId: string, generation: string, requestId: string): Promise<void> {
-  try {
-    await pluginService.pluginHttpCancel(pluginId, generation, requestId);
-  } catch {
-    // Cancellation is idempotent/unknown-tolerant by contract; a missing native
-    // request must not mask the abort reason reported to the Worker.
+async function cancelNative(
+  pluginId: string,
+  generation: string,
+  requestId: string,
+  boundedUnknown = false,
+): Promise<void> {
+  const key = requestKey(pluginId, requestId);
+  const pending = pendingCancels.get(key);
+  if (pending) {
+    await pending;
+    return;
   }
+  if (boundedUnknown) {
+    let pendingForPlugin = 0;
+    for (const pendingKey of pendingCancels.keys()) {
+      if (pendingKey.startsWith(`${pluginId}\u0000`)) pendingForPlugin++;
+    }
+    if (pendingForPlugin >= MAX_PENDING_CANCELS_PER_PLUGIN) return;
+  }
+  const operation = (async () => {
+    try {
+      await pluginService.pluginHttpCancel(pluginId, generation, requestId);
+    } catch {
+      // Cancellation is idempotent/unknown-tolerant by contract; a missing native
+      // request must not mask the abort reason reported to the Worker.
+    }
+  })();
+  pendingCancels.set(key, operation);
+  try {
+    await operation;
+  } finally {
+    if (pendingCancels.get(key) === operation) pendingCancels.delete(key);
+  }
+}
+
+function clearIdle(record: ActiveRequest): void {
+  if (record.idleTimer !== null) {
+    clearTimeout(record.idleTimer);
+    record.idleTimer = null;
+  }
+}
+
+function rememberExpired(key: string, reason: string): void {
+  expiredStreams.delete(key);
+  expiredStreams.set(key, reason);
+  while (expiredStreams.size > MAX_EXPIRED_STREAMS) {
+    const oldest = expiredStreams.keys().next().value;
+    if (oldest === undefined) break;
+    expiredStreams.delete(oldest);
+  }
+}
+
+/**
+ * Reap a pulled stream that nobody reads or cancels within STREAM_IDLE_TIMEOUT_MS.
+ * The entry exits the concurrency ledger and the native request is cancelled;
+ * the next `http.read` reports the precise reason instead of "not found".
+ */
+function armStreamIdle(pluginId: string, record: ActiveRequest): void {
+  clearIdle(record);
+  const key = requestKey(pluginId, record.requestId);
+  record.idleTimer = setTimeout(() => {
+    record.idleTimer = null;
+    if (record.cancelled || activeRequests.get(key) !== record) return;
+    record.cancelled = true;
+    activeRequests.delete(key);
+    rememberExpired(key, `plugin HTTP stream idle for ${STREAM_IDLE_TIMEOUT_MS}ms and was reclaimed`);
+    void cancelNative(pluginId, record.generation, record.requestId);
+  }, STREAM_IDLE_TIMEOUT_MS);
+}
+
+function deleteActiveRequest(key: string, record: ActiveRequest): void {
+  clearIdle(record);
+  if (activeRequests.get(key) === record) activeRequests.delete(key);
 }
 
 async function accumulate(
@@ -268,23 +371,24 @@ async function startRequest(
   if (activeCount(pluginId) >= MAX_ACTIVE_REQUESTS_PER_PLUGIN) {
     throw new Error('plugin HTTP 并发请求数超限');
   }
-  const record: ActiveRequest = { pluginId, generation, requestId, cancelled: false };
+  const record: ActiveRequest = { pluginId, generation, requestId, cancelled: false, pendingReads: 0, idleTimer: null };
   activeRequests.set(key, record);
   let head: PluginHttpHead;
   try {
     head = await pluginService.pluginHttpOpen(pluginId, generation, requestId, options.wire);
   } catch (error) {
-    activeRequests.delete(key);
+    deleteActiveRequest(key, record);
     await cancelNative(pluginId, generation, requestId);
     throw error;
   }
   if (record.cancelled || takeCancelled(pluginId, requestId)) {
-    activeRequests.delete(key);
+    deleteActiveRequest(key, record);
     await cancelNative(pluginId, generation, requestId);
     throw abortError();
   }
   if (!accumulateBody) {
-    // Streaming: the registry entry lives until read(done)/cancel/error.
+    // Streaming: the registry entry lives until read(done)/cancel/error or idle reap.
+    armStreamIdle(pluginId, record);
     return {
       requestId,
       status: head.status,
@@ -298,7 +402,7 @@ async function startRequest(
     await cancelNative(pluginId, generation, requestId);
     throw error;
   } finally {
-    activeRequests.delete(key);
+    deleteActiveRequest(key, record);
   }
 }
 
@@ -314,23 +418,42 @@ async function readRequest(
   if (!requestId) throw new Error('plugin HTTP read 需要 requestId');
   const key = requestKey(pluginId, requestId);
   const record = activeRequests.get(key);
-  if (!record) throw new Error('plugin HTTP 请求不存在或已结束');
+  if (!record) {
+    const expired = expiredStreams.get(key);
+    if (expired) {
+      expiredStreams.delete(key);
+      throw new Error(expired);
+    }
+    throw new Error('plugin HTTP 请求不存在或已结束');
+  }
   if (record.cancelled) throw abortError();
+  let reading = false;
   try {
     beforeSend?.();
+    record.pendingReads++;
+    reading = true;
+    // Waiting for a caller-requested native read is active consumption, not an
+    // abandoned stream. SSE/long polling may legitimately wait indefinitely;
+    // only the caller's explicit timeout may terminate that wait.
+    clearIdle(record);
     const chunk = await pluginService.pluginHttpRead(pluginId, record.generation, requestId);
     if (record.cancelled) throw abortError();
     // Authority may have been revoked while the native read was in flight.
     beforeSend?.();
-    if (chunk.done) activeRequests.delete(key);
+    if (chunk.done) deleteActiveRequest(key, record);
     return { bytes: chunk.base64 ? base64ToBytes(chunk.base64) : new Uint8Array(0), done: chunk.done };
   } catch (error) {
     if (activeRequests.get(key) === record) {
       record.cancelled = true;
-      activeRequests.delete(key);
+      deleteActiveRequest(key, record);
       await cancelNative(pluginId, record.generation, requestId);
     }
     throw error;
+  } finally {
+    if (reading) record.pendingReads--;
+    if (record.pendingReads === 0 && !record.cancelled && activeRequests.get(key) === record) {
+      armStreamIdle(pluginId, record);
+    }
   }
 }
 
@@ -348,7 +471,7 @@ async function cancelRequest(
   const record = activeRequests.get(key);
   if (record) {
     record.cancelled = true;
-    activeRequests.delete(key);
+    deleteActiveRequest(key, record);
     await cancelNative(pluginId, record.generation, requestId);
     return null;
   }
@@ -362,7 +485,9 @@ async function cancelRequest(
     // Disabled/revoked: native already cancels owned requests on that transition.
     return null;
   }
-  await cancelNative(pluginId, generation, requestId);
+  // Unknown-id cancellation uses the reserved bounded budget; active request
+  // cancellation above remains unbounded so it always wakes a live stream.
+  await cancelNative(pluginId, generation, requestId, true);
   return null;
 }
 
@@ -401,11 +526,14 @@ export function cancelPluginHttp(pluginId: string): void {
   for (const [key, record] of [...activeRequests]) {
     if (record.pluginId !== pluginId) continue;
     record.cancelled = true;
-    activeRequests.delete(key);
+    deleteActiveRequest(key, record);
     void pluginService.pluginHttpCancel(pluginId, record.generation, record.requestId).catch(() => undefined);
   }
   const prefix = `${pluginId}\u0000`;
   for (const key of [...cancelledBeforeOpen.keys()]) {
     if (key.startsWith(prefix)) cancelledBeforeOpen.delete(key);
+  }
+  for (const key of [...expiredStreams.keys()]) {
+    if (key.startsWith(prefix)) expiredStreams.delete(key);
   }
 }
