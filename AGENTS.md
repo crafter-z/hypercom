@@ -4,14 +4,14 @@
 
 > **引用纪律**：本文只写「文件 + 符号名」，**不写行号**。行号随每次重构必然腐化，是上一轮审计整片漂移的根因。
 > **数字断言**（命令数 / 配置字段数 / i18n 键数 / hook 数 / store 数 / services 文件数）以代码为准；改动后同步本文件与 [`docs/architecture/README.md`](docs/architecture/README.md)。
-> **内容分工**：本文件只保留 agent 高频需要的**导航 + 跨模块硬规则**。模块架构与行为细节在 [`docs/architecture/`](docs/architecture/README.md)；历史决策（可能已被推翻）在 [`history.md`](docs/architecture/history.md)；插件作者接口在 [`docs/plugin-development.md`](docs/plugin-development.md)。
+> **内容分工**：本文件只保留 agent 高频需要的**导航 + 跨模块硬规则**。模块架构与行为细节在 [`docs/architecture/`](docs/architecture/README.md)；插件作者接口在 [`docs/plugin-development.md`](docs/plugin-development.md)。文档只维护当前状态、行为契约与操作要求，不新增评审报告、审计处置清单、历史设计或执行过程记录。
 
 ## 项目速览
 
 HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 
-- **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 636 键 × zh-CN/en-US。
-- **后端**：13 个命令域文件 + `CommandError`，`lib.rs` 注册 84 个命令（漂移守卫测试核对）；`AppConfig` 47 字段 = 46 个普通字段 + 1 个 `#[serde(flatten)] entities: Entities`（含 9 类实体数组）。
+- **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 637 键 × zh-CN/en-US。
+- **后端**：13 个命令域文件 + `CommandError`，`lib.rs` 注册 86 个命令（漂移守卫测试核对）；`AppConfig` 44 字段 = 43 个普通字段 + 1 个 `#[serde(flatten)] entities: Entities`（含 9 类实体数组）。
 - **工作区**：标签 `TabItem = SerialTabItem | PluginTabItem`，`id` 为 UUID；serial 的 `portId` / plugin 的 `boundPortId` 才是端口身份，标签身份与端口状态分离。
 - **规则实体**：高亮/命令/协议/工具/提醒五类运行态在 `useRuleStore`，编辑草稿在 `utils/entityEditor.ts`，已保存配置是持久化基线；保存链路见 [`config.md`](docs/architecture/config.md)。
 
@@ -21,7 +21,7 @@ HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 hypercom/
 ├── src/                      # React 前端
 │   ├── main.tsx / App.tsx    # entrypoints（App.tsx = AppInit + SerialReceive + 全局文本右键菜单）
-│   ├── i18n.ts               # 636 键 × zh-CN/en-US（扁平 dotted key，keySeparator:false）
+│   ├── i18n.ts               # 637 键 × zh-CN/en-US（扁平 dotted key，keySeparator:false）
 │   ├── services/             # tauri.ts barrel + 13 域（含 plugin / pluginView）
 │   ├── hooks/                # 18 个 hook 文件 + barrel
 │   ├── stores/               # 6 个 store + releaseTerminalState / resetStores
@@ -110,10 +110,9 @@ cargo check --manifest-path src-tauri/Cargo.toml    # 仅 Rust
 
 ## 文档索引
 
-- [`docs/architecture/README.md`](docs/architecture/README.md) — 模块架构文档索引（serial / terminal / tty / transmission / logging / config / workspace / update / plugins / plugin-views / release / errors / conventions / code-map / history）。
+- [`docs/architecture/README.md`](docs/architecture/README.md) — 模块架构文档索引（serial / terminal / tty / transmission / logging / config / workspace / update / plugins / plugin-views / release / errors / conventions / code-map）。
 - [`docs/plugin-development.md`](docs/plugin-development.md) — 插件作者指南（manifest / 权限 / Worker API / 调试 / 打包）。
 - [`docs/userwiki/`](docs/userwiki/README.md) — 面向用户的功能手册。
-- [`docs/architecture/history.md`](docs/architecture/history.md) — 历史版本叙事与当时决策（与现状冲突时以模块文档为准）。
 - [`docs/architecture/conventions.md`](docs/architecture/conventions.md) — 跨模块开发约定与陷阱（本文件规则的展开版）。
 - [`docs/architecture/code-map.md`](docs/architecture/code-map.md) — 符号与模块索引。
 

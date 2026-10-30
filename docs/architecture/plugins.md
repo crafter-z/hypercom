@@ -2,7 +2,7 @@
 
 本模块支持安装目录或 ZIP 形式的普通 JS 脚本插件；设置页分别提供“安装目录”和“安装 ZIP”入口，取消任一选择器不启动另一选择器。插件逻辑在主窗 Web Worker 中运行（纯网页插件可以没有 Worker），UI 可用声明式 Sidebar/端口菜单、文本面板或独立隔离 WebView；隔离视图可替换串口内容或创建额外工作区标签。当前没有 Rust 原生插件、插件市场或远程调试器，插件 UI 不能访问宿主 DOM。
 
-插件作者从独立的[插件开发指南](../plugin-development.md)开始：manifest、权限、Worker API、示例、调试和打包说明集中在那里。普通用户看[设置 → 插件](../userwiki/设置.md#插件)。本文只维护宿主实现、原生 IPC、授权一致性与磁盘恢复；发行验收见[插件发版验收门](release.md#插件发版验收门)，[历史设计评审](../reviews/plugins-review-2026-09-02.md)不代表当前问题清单。
+插件作者从独立的[插件开发指南](../plugin-development.md)开始：manifest、权限、Worker API、示例、调试和打包说明集中在那里。普通用户看[设置 → 插件](../userwiki/设置.md#插件)。本文只维护宿主实现、原生 IPC、授权一致性与磁盘恢复；发行验收要求见[插件发版验收门](release.md#插件发版验收门)。
 
 独立 UI、串口内容替换及动作创建额外工作区标签的当前实现见[隔离视图与标签契约](plugin-views.md)。Windows raw Wry adapter 已实现；其他平台隔离承载未验收时明确拒绝，不用主窗 iframe 替代。
 
@@ -25,12 +25,13 @@
 
 - `config.json` 使用 `AppConfig.entities.plugin_configs`（`#[serde(flatten)]`，JSON 顶层键 `pluginConfigs`），包含 id、安装身份、启用状态、授予权限、网页信任和安装元数据。插件 KV（`pluginKv`）位于 `plugins/<id>/data/state.json`，不进入 config.json；`storage` 权限仅访问此文件，`fs:storage` 允许读取/写入整个 `data/`，`fs:assets` 允许读取自身代码和资产。KV 只在确认文件不存在时初始化空对象，读缓存按安装代次失效、并发首载共享同一次读盘；`set` 按插件串行、整体序列化后经 `write_plugin_asset` 原子替换；不设键长、值大小、节点数或文件大小上限，但仍只接受可无损 JSON 化的值（拒绝非有限数、访问器、循环引用等），`undefined` 删除键。
 - 插件管理响应、排序和调用参数见下方[宿主命令契约](#宿主命令与状态快照)。普通配置保存以 revision CAS 并保留后端权威插件状态；备份恢复只允许同安装身份恢复启用/授权，不匹配的同 ID 插件禁用清权，未提及的当前插件保持原状，备份中的未安装插件不会被安装。导入后读回权威状态，取消设置保留当前插件状态及 revision。配置导出不包含插件代码、私有数据或事务 journal。
-- `trustedWebGranted` 默认 false，独立于普通授权；普通保存保留后端权威值，备份导入不能增加或恢复已撤销的网页信任。每插件浏览器数据在 `<config_dir>/plugin-web-data/<id>/`，不在插件可读写 `data/`；升级保留，禁用不删，清除/卸载经原生 profile API 清空站点数据，空 profile 文件可保留。该目录不包含在配置导出中。
-- Rust 的 manifest、路径及安装包额度校验是权威执行点；私有数据读写不按扩展名、内容、大小、总量或整个 data/ 配额拒绝。资产读写、`list_plugins`、安装/卸载/重载、启用/授权/网页信任变更、网页数据清理与配置恢复共用 `AppState.plugin_io` 异步闸门串行，等待无固定期限（命令不设超时）。只有目标确实不存在才返回 null，权限/IO 错误不伪装成缺文件。
+- `trustedWebGranted` 默认 false，独立于普通授权；普通保存保留后端权威值，备份导入不能增加或恢复已撤销的网页信任。浏览器数据在 `<config_dir>/plugin-web-data/<id>/<installGeneration>/`，目录入口统一校验 UUID，不在插件可读写 `data/`；同代次重载/禁用不删，新安装代次不复用旧站点数据。清除/卸载经原生 profile API 清空当前代次站点数据，失败如实返回且可重试，空 profile 文件可保留；崩溃遗留的旧代次不向新代码暴露。该目录不包含在配置导出中。
+- Rust 的 manifest、路径及安装包额度校验是权威执行点；私有数据读写不按扩展名、内容、大小、总量或整个 data/ 配额拒绝。资产读写、`list_plugins`、安装/卸载/重载、启用/授权/网页信任变更、网页数据清理与配置恢复共用 `AppState.plugin_io` 异步闸门串行；统一准入只对等待闸门设置 5 秒 busy 可重试期限，不给已开始的文件 IO、用户对话框或 HTTP 添加隐式业务期限。普通 revision-CAS `set_config` 不排在插件 IO 后面，备份恢复仍先取得闸门，保持安装/授权事务锁序。HTTP/资产授权使用轻量 manifest 校验，视图只在锁外读取选中资源快照；安装/启用/完整重载仍保留完整包校验。只有目标确实不存在才返回 null，权限/IO 错误不伪装成缺文件。
 - 目录源按已打开句柄逐组件限定：Unix使用目录句柄相对`openat`与`O_NOFOLLOW/O_NONBLOCK`，Windows使用`NtCreateFile.RootDirectory`单组件相对打开并拒绝重解析，保留所选root/递归目录句柄且检查最终路径/链接数；共享祖先不长期锁定，不阻断别的临时目录操作。拒绝源根/祖先链接、特殊文件和硬链接，不先检查pathname再跟随打开；内容不承诺原子快照，复制字节/条目/深度限额保持。
 - 严格路径政策可能拒绝macOS `/var`、`/tmp`别名或Windows junction源，请选择真实非链接路径；不以不安全跟随作为降级。Windows NTFS/UNC与Unix各平台仍需真实发行验收。
 - ZIP先按96MiB压缩输入上限读取不可变快照，再校验实体中央目录条数（≤2000，不按去重后的名称数计）、16MiB中央目录及64KiB单条元数据。eager parser只见已验证元数据与唯一规范footer，不能退回载荷中的另一个footer放大分配；ZIP64条目保留，解压仍逐条流式计64MiB。拒绝重复名称、伪造计数、歧义中央目录结束标记。
 - 安装先完整暂存并验证入口和 manifest 一致性，再持久化禁用清权及安全 `.bak`。`plugin/transaction.rs` 将受限 journal 写入 `<config_dir>/plugin-transaction.json` 并同步，路径只能由有效插件 ID 和 UUID 派生。启动在 Worker 前恢复中断事务：最终发布前恢复旧代码和私有数据，发布完成保留新树但不恢复授权；卸载配置提交前恢复备份，提交后清理备份。恢复幂等，非法/链接/含糊状态报错并保留数据。资产写入同步临时文件后单操作替换目标（Windows `MoveFileExW` 写穿透），不再先移走旧 KV 文件。文件系统和设备必须遵守 flush/write-through；准备阶段尚未登记的惰性 staging 残留不含迁移后的私有数据。
+- **安全授权恢复屏障**：启停、权限、网页信任及配置恢复的插件状态变更，先原子同步 `plugin-trust-recovery.json`，只有 primary 与 safe backup 都同步成功后才清除。启动发现残留 marker 时在暴露 Worker 前将插件禁用、清空权限和网页信任并安全落盘；marker/schema/读取失败不忽略。这样 primary 后续损坏回退旧 `.bak` 也不会复活撤销前授权；普通配置备份语义不变，插件代码/私有数据不因该屏障被删除。
 - 插件 `fs.openDialog` 的唯一入口为 Rust `plugin_pick_files`：验证插件启用及 `fs:open` 授权，由原生文件选择器产生路径，返回原始字节的 base64。无单文件/总量/数量限额；类型 filters 仅提示并追加 All files，不限制读取内容。宿主按请求返回解码文本或 `Uint8Array`。不提供接收任意路径的插件读取命令；`ui.panel.export()` 仍通过另存为写文本。
 - `read_plugin_asset`/`write_plugin_asset` 是包资产与私有区的唯一文件入口：读取逐组件拒绝链接/重解析/硬链接与非常规文件，越界报错，仅目标缺失返回 null；`format` 缺省/text 为 UTF-8 替代解码文本，binary 返回 base64（宿主解码为 `Uint8Array`）。写入只接受 `data/` 首段，先逐组件拒绝链接并补齐父目录，再以同目录临时文件同步后单操作替换目标（`plugin::transaction::replace_file` + `sync_dir`）；`content`（含空串）与 `base64`（原始字节，可为零长度）互斥，二者皆缺报错；不设内容大小上限，也不扫描整个 `data/` 配额。
 
@@ -41,7 +42,7 @@
 | Rust 命令 | 宿主参数 | 响应与关键语义 |
 |---|---|---|
 | `list_plugins` | 无 | `PluginListResponse = {revision, pluginConfigs, plugins}`；一致扫描/状态快照，不修改配置 |
-| `install_plugin` | `{sourcePath, replaceExisting?}` | `PluginStateSnapshot`；更高版本正常覆盖；同版/降级默认拒绝并返回 `plugin_replace_confirmation_required:` 前缀，`replaceExisting:true` 才会替换。替换保留 `data/`，生成新身份并清除授权/网页信任；安装前先持久化「禁用+清权」状态，后续步骤失败保持 fail-closed、不回滚旧授权 |
+| `install_plugin` | `{sourcePath, replaceExisting?, expectedGeneration?}` | `PluginStateSnapshot`；更高版本正常覆盖；同版/降级默认拒绝并返回 `plugin_replace_confirmation_required:` 前缀，`replaceExisting:true` 才会替换。替换保留 `data/`，生成新身份并清除授权/网页信任；安装前先持久化「禁用+清权」状态，后续步骤失败保持 fail-closed、不回滚旧授权 |
 | `reload_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；主窗、已启用、manifest 可读才允许；不写配置（revision 不变），取消该插件网络请求并退休原生视图后用同一安装身份/授权/网页信任/数据重新加载已安装代码 |
 | `uninstall_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须匹配当前安装身份（防止升级期间排队的旧请求卸载新代码）；配置提交后删除代码、状态及私有数据，并取消在途 HTTP、退休视图、清除网页站点数据；目录缺失按已卸载处理 |
 | `set_plugin_enabled` | `{id, enabled, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须为用户实际审阅的安装身份，旧身份拒绝；启用需 manifest 可读且声明可信网页时已获 `trustedWebGranted`；禁用提交后取消在途 HTTP 并退休视图 |
@@ -66,7 +67,7 @@
 - **状态机与准入**：`plugin_http_open` 在同步准入阶段把 `requestId` 写入注册表（`ReadState::Pending`），因此响应头返回前 `plugin_http_cancel` 就能命中并打断挂起的 send；拿到响应头后转 `Streaming`，`read` 报告 `done` 后转 `Finished` 并移除条目。`Pending` 阶段调用 `read` 明确报错而不是返回空块；重复 `requestId` 或全局在途超过 64 条时 open 直接拒绝（运行时资源保护，不是内容上限）。open 先校验主窗来源、安装代次、启用态、`http:request` 授权与 manifest 声明，再解析 URL、白名单和代理；read 每次调用重校验代次、启用态与授权，cancel 校验代次与请求归属（撤销后取消仍可到达）。
 - **读取与取消**：读取是拉取式的，单次最多 `TRANSPORT_CHUNK_BYTES`（64 KiB），有数据即返回，SSE 可逐事件交付；超出传输块的字节原样保留给下一次 read，总量无业务上限，`done:true` 的最后一块仍可携带字节。宿主侧 `pluginHttp` 按插件限制 64 条在途登记与 64 条取消墓碑，`requestId` 在 open 完成前即可取消；取消先于 open 到达时，前端先记墓碑，原生 `PluginHttpRegistry` 再由 `MAX_PRE_CANCELLED`（32 条）有界意图窗口承接，并按 plugin + 安装代次绑定。
 - **期限**：`timeout` 是整个请求（打开 + 所有读取）的绝对截止时间，不从每块重置；缺省或 `0` 表示无总截止，负数/非有限值拒绝。read 在服务残余字节之前先检查截止，避免过期请求继续产出。
-- **重定向与作用域**：`follow` 默认最多 10 跳；`manual` 不跟随、`error` 直接失败；manifest `http.urlWhitelist` 为可选作用域，非空时初始 URL 与每一跳目标都按 `url_glob_match` 校验（`*` 不跨 `/`，`**` 跨段，其余字符字面量，`?` 是查询分隔符）。未显式启用插件代理时走 reqwest 默认（继承系统代理），启用后插件代理优先；响应头名小写、重复头以 ", " 合并，`url` 为最终响应地址。
+- **重定向与作用域**：宿主手动逐跳发送，reqwest 自动重定向与 Referer 均关闭；跨源仅保留 Accept/Accept-Language/Content-Language/Content-Type/Content-Encoding/Range，未知自定义头和凭据头不转发，同源合法业务头保留。301/302 仅 POST 改 GET，303 除 GET/HEAD 改 GET，只有实际重写时删除 body 及 representation headers；307/308 保留方法、body 与类型/编码。错误文本剥离 userinfo/query/fragment。`follow` 默认最多 10 跳；`manual` 不跟随、`error` 直接失败；manifest `http.urlWhitelist` 为可选作用域，非空时初始 URL 与每一跳目标都按 `url_glob_match` 校验（`*` 不跨 `/`，`**` 跨段，其余字符字面量，`?` 是查询分隔符）。未显式启用插件代理时走 reqwest 默认（继承系统代理），启用后插件代理优先；响应头名小写、重复头以 ", " 合并，`url` 为最终响应地址。
 - **取消传播**：禁用、撤销 `http:request`、撤销网页信任、卸载、重载、替换安装都会取消该插件全部在途请求（随状态提交或 reload/替换操作执行）；配置恢复导入执行整体取消。open 准入后和 read 前后都重校验安装代次、启用态与 `http:request` 授权，撤权后的旧请求立即失败且不交付字节。
 
 `commands/file.rs` 的 `plugin_pick_files({pluginId, options})` 原生选择后复核安装身份和权限，wire 返回 `{files:[{path, base64}]}`。`executeHostApi` 将 binary 转为 `{files:[{path, bytes: Uint8Array}]}`，text 用共享 `lineText.decodeBytes` 返回 content；`fs.read` binary 同样返回 `Uint8Array`。`PluginSession` 在成功回复时转移文件缓冲区，不做 JSON 字节数组展开或再次复制；读取完成后再次核对请求仍存活及授权，旧请求不泄漏结果。`fs.read`/`fs.openDialog` 无 RPC 读取期限。文件读取与可信网页批准无关，完整读取仍受实际内存和运行时字符串/缓冲区能力约束。
@@ -77,9 +78,9 @@
 
 作者 API、事件载荷、配额和示例已集中至[插件开发指南](../plugin-development.md#api-参考)，这里不维护第二份接口表。
 
-宿主执行链：`PluginSession.handleWorkerRequest` 验证当前安装身份、启用态及调用时权限 → `pluginHostApi.executeHostApi` 校验参数并执行具体能力。RX 数据在有当前读取授权时才转发；`pluginBridge` 收到批次后按订阅快照执行回调，等待返回的 Promise settle 后 ACK。RPC 到期只回收回执槽位，不能把迟到结果交给替换后的 Worker，也不承诺取消已开始的后端副作用。文件读取、私有写入、KV 持久化、`http.*` 与 `view.sendBinary` 不适用通用 RPC 期限（大文件/长连接/用户选择），取消仍走显式通道。每个会话的普通 RPC 回执槽位上限为 32；槽位饱和时 `http.cancel` 仍被受理，避免取消请求排在自身请求之后。
+宿主执行链：`PluginSession.handleWorkerRequest` 验证当前安装身份、启用态及调用时权限 → `pluginHostApi.executeHostApi` 校验参数并执行具体能力。RX 数据在有当前读取授权时才转发；`pluginBridge` 收到批次后按订阅快照执行回调，等待返回的 Promise settle 后 ACK。RPC 到期只回收回执槽位，不能把迟到结果交给替换后的 Worker，也不承诺取消已开始的后端副作用。文件读取、私有写入、KV 持久化与 `http.*` 不适用通用 RPC 期限（大文件/长连接/用户选择），取消仍走显式通道。`view.sendBinary` 使用独立 10 分钟传输 RPC 资源期限，并受逐块 30 秒 ACK 和主动闲置回收约束（见[二进制通道](plugin-views.md#视图二进制通道)）。每会话普通 RPC 回执槽位上限 32；`http.cancel` 可绕普通槽使用最多额外 64 个取消槽，既避免取消排在自身请求后，又不允许无限取消洪泛。
 
-**错误分级**：`__plugin_ready` 现在由桥在用户入口脚本同步执行完成后发出；此前的加载/解析/初始化异常是致命启动失败（重试与 10 秒三次熔断保留）。就绪后的未处理拒绝、`worker.onerror` 与显式 `error` 事件只写诊断日志并限流提示，不终止会话、不清空插件内存。真正的原生视图进程故障仍按视图失败处理。显式重载走 `startReady`：在 `__plugin_ready` 之前失败会把错误 reject 给调用方并提示，而不是转入后台重试。
+**错误分级**：`__plugin_ready` 现在由桥在用户入口脚本同步执行完成后发出；此前的加载/解析/初始化异常是致命启动失败（重试与 10 秒三次熔断保留）。就绪后的未处理拒绝、`worker.onerror` 与显式 `error` 事件只写诊断日志并限流提示，不终止会话、不清空插件内存。真正的原生视图进程故障仍按视图失败处理。显式重载走 `startReady`：在 `__plugin_ready` 之前失败或 10 秒未 ready 会把错误 reject 给调用方并提示，不永久占用管理队列。readiness 的结算绑定启动代次，旧 IO 完成不能结算新启动；ready 后以 30 秒健康探针检测静默终止，连续两次未回应按崩溃回收，而正常异步错误仍只记录诊断。
 
 **纯网页插件**：`PluginManifest.entry` 可省略，仅当存在非空 `trusted-web` + `input:"none"` 视图且无 Worker 按钮/菜单时合法；`ui.views[].worker:false` 允许混合插件中的某个可信页不依附 Worker。宿主对这些视图使用 `workerEpoch=0`，不创建空 Worker、不等待 Worker ACK，Worker 重启不影响它们。
 
@@ -88,14 +89,6 @@
 
 ## 验证与发行边界
 
-- Rust 测试：ID/路径与 manifest 上限、ZIP 限额、安装身份与旧操作拒绝、同版/降级替换确认、安装与卸载事务在各 rename 边界的中断恢复、纯网页 manifest 规则、缺失/空/二进制内容区分、原样大文件读取、原子替换、data/ 路径分类与 Windows 别名拒绝、HTTP 取消先于打开且无接收者持续生效、重定向模式与 glob 规范化；`cargo test --lib --manifest-path src-tauri/Cargo.toml`。原生 HTTP/重载/替换与网页数据验收记录见[隔离视图验证](plugin-views.md#验证边界)。
+- Rust 测试：ID/路径与 manifest 上限、ZIP 限额、安装身份与旧操作拒绝、同版/降级替换确认、安装与卸载事务在各 rename 边界的中断恢复、纯网页 manifest 规则、缺失/空/二进制内容区分、原样大文件读取、原子替换、data/ 路径分类与 Windows 别名拒绝、HTTP 取消先于打开且无接收者持续生效、重定向模式与 glob 规范化；`cargo test --lib --manifest-path src-tauri/Cargo.toml`。原生生命周期与网页数据的验收要求见[验证边界](plugin-views.md#验证边界)。
 - 前端 Vitest：revision 响应乱序、升级期间权限操作、启用前授权、KV 读失败/损坏数据保全与无配额串行写队列、空内容/二进制 `fs.write`、HTTP 拉取/取消/撤权后重校验、重载陈旧响应与启动失败拒绝、通知配额、RX/字节旁路、UI 注册表与 Worker 初次失败恢复。`npx tsc --noEmit` 与 `npm run test:run`。
-- `e2e/plugin.spec.ts` 使用真实 Chromium Worker/RX/终端但模拟 Rust invoke，不能证明原生选择器、真实 ZIP 事务或生产 WebView CSP。最终安装包验收见[发版要求](release.md#插件发版验收门)；下面的已执行记录不是发行包签收。
-
-### 已执行的原生回归（2026-10-10）
-
-2026-10-10 原生回归使用隔离配置及 `tauri build --debug --no-bundle`（生产前端资产与 CSP、Rust debug 可执行文件）：启用前授权、初始化 KV、200 条通知限流、HTTP 查询精确匹配、深目录额度拒绝后已有文件仍可读写、升级期间旧授权拒绝、重新授权保留 KV、卸载均通过；四个已启用插件同时启动并读取各自 KV 全部成功。五组磁盘中断快照由真实原生启动恢复（备份/私有数据迁移/发布、卸载提交前后），私有数据及禁用清权状态符合预期；这不是物理断电测试，也不替代最终 release 安装包和其他平台验收。该记录对应当时代码：其中旧 `plugin_http` 的 1 MiB 截断/15 秒上限与 data 写入额度已在后续版本移除，当前契约以本页命令表与 [HTTP 流式契约](#http-流式契约)为准。
-
-### 2026-10-29 文件二进制与无限额读取
-
-Windows 生产前端资产/debug 应用、独立配置与测试桌面实跑普通 Worker 插件（trustedWebGranted=false）：包内 0–255 全字节、空文件、文本与非法 UTF-8 替代解码；`data/` 及原生选择器读取 65 MiB + 1 字节，Worker 得到 Uint8Array 且末字节完整；原生选择器一次选 9 个 `.bin`（插件过滤提示为 `.txt`）成功。该验证不包含流式读取或无限可用内存承诺。
+- `e2e/plugin.spec.ts` 使用真实 Chromium Worker/RX/终端但模拟 Rust invoke，不能证明原生选择器、真实 ZIP 事务或生产 WebView CSP。最终安装包验收见[发版要求](release.md#插件发版验收门)。

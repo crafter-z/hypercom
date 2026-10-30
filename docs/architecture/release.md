@@ -136,13 +136,7 @@ gh run watch <recovery-run-id> --compact --exit-status
 
 插件基础契约以 [`plugins.md`](plugins.md) 为准，隔离视图/工作区标签以 [`plugin-views.md`](plugin-views.md) 为准。自动化绿灯、Windows debug 原生 smoke 与最终安装包验收是不同证据，不可互相替代；**当前自动化 CI 不运行真实原生插件生命周期或 WebView CSP 验收**，mock IPC 的 Playwright 也不证明这些行为。
 
-截至 2026-10-10，已有证据来自此前修复验证（本次文档更新未重跑）：896 项 Vitest、278 项 Rust、26 项 Playwright，以及 TypeScript 检查、生产前端构建与 release Cargo 检查。另在 Windows **debug 原生可执行文件加载生产 assets/CSP** 的环境下，验证了禁用时预授权/启用、通知突发上限、query 作用域、目录配额下覆盖已有文件、ZIP 旧安装代授权拒绝、KV 保留、4 插件并发初始化，以及 5 个中断状态的磁盘恢复 fixture。恢复 fixture 并非实际 kill 或断电测试；该 debug 原生证据也不是最终发行包验收签署。
-
-本次隔离视图与工作区实现的新增自动化/原生结果另见 [`plugin-views.md`](plugin-views.md#验证边界) 和 RELEASE_NOTES 的对应记录；不修改上述历史验证数字，也不把新debug结果当作最终发布签收。
-
-2026-10-10全项目维护执行：975项Vitest、32项mock IPC Chromium Playwright、309项Windows Rust单测（另1项原生环境用例默认跳过）、类型检查、生产前端构建、release-profile Cargo检查、15项离线release回归及当前`v0.6.8` preflight通过。显式运行真实WebView2 child退休后host resize用例通过。Windows debug可执行文件加载生产资产/CSP，实际运行目录安装/授权/Worker、ZIP升级清权换代、超额条目拒绝、UTF-8长尾日志导出、SIM收发/搜索、ConPTY自行exit后重开及正常宿主遮挡恢复；raw Wry工具页有桌面视觉证据。npm生产依赖上游audit未报告已知漏洞。最终发行包、完整安全矩阵及跨平台验收仍按下列清单，不把debug或mock结果签作已发布产物验收。
-
-发行维护者仍须在目标版本、最终打包并安装的产物上记录下列人工结果；当前这些检查**尚未完成**：
+发行维护者须在目标版本最终打包并安装的产物上执行下列适用检查。自动化测试、磁盘恢复 fixture 和开发构建不能替代最终产物的人工验收：
 
 - Windows 安装后及重启后，确认实际 bundled assets/CSP 下 classic Worker 与插件生命周期正常；通过真实原生 picker 选择目录/ZIP 安装，验证新装/升级默认禁用且无授权、按用户审阅的安装代授权与启用、卸载/重装、错误反馈与私有数据边界。
 - 按插件契约复核备份导入后的后端状态、同代/异代授权、权限撤销、存储/通知/HTTP 边界与失败关闭；不能仅依据 mock UI 的表现判定通过。

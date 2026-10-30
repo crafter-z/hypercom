@@ -94,11 +94,17 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - **提交前校验与放弃**：集合内 id 必须唯一、`id` 与 `name` 必须非空、正则必须可编译且长度 ≤ 200、HEX 字段必须是完整偶数半字节、协议偏移必须是非负整数；不合法只标错误，不写盘也不清草稿。放弃按作用域生效：单条放弃只把该行恢复为基线内容（新插入的行则移除）并清该 id 的冲突；集合放弃整体回到基线。重排在 id 集合不一致（重复、缺失）时静默忽略、不丢行。
 - 五类实体页统一使用 `useEntityPage({kind})`：挂载只读现有草稿、不重新加载覆盖；展开/选中项按 kind 记忆，切页或卸载后回来保持。新增默认追加末尾，「在上方插入 / 在下方插入」按相邻 id 插入并展开、聚焦新行名称。`shared/SortableEditorList` 只暴露专用手柄：指针需 6px 位移才激活，键盘 Space 拾起、方向键移动、Space 放下；保存中拖拽、增删和行内按钮禁用。命令集保存时按数组位置回写连续 `order`，快捷发送条、命令设置页、循环启动与命令面板共用 `utils/commandOrder.ts`，不再手写 order 排序。协议/工具管理列表的数组顺序只是管理顺序，不增加执行优先级。
 - **离开审批**（`utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx`）：参与者注册 `isDirty` / `save` / `discard` / `label`（设置普通草稿、五类实体草稿、主窗侧的命令面板未同步内容、独立窗口各自的草稿），决策只有保存并关闭 / 放弃并关闭 / 继续编辑。保存或放弃后再次复查脏状态：保存失败、或保存期间又产生编辑都不放行关闭，对话框保留并显示错误供重试；Escape 等价于继续编辑。对话框与设置/更新弹窗一样等原生插件视图让位后才显示（`usePluginViewOverlay`，见[插件视图](plugin-views.md)）。设置取消 / X / 遮罩 / Escape 只请求设置侧参与者（不处理独立命令面板的未同步内容），应用退出请求全部参与者；审批未决时收到范围更大的新请求（如设置关闭未决时托盘退出）会合并参与者复用同一决策，不叠加第二个对话框。
-- **原生关闭路径**：主窗 Rust `request_editor_close` 先 show/unminimize/focus 主窗再发 `editor:close-requested`（载荷 `force_exit`）；主窗 CloseRequested、托盘 Quit 与 `RunEvent::ExitRequested` 都先 `prevent_close` / `prevent_exit`，等前端审批。审批通过后前端调 `complete_editor_close`：非强制关闭且 `closeBehavior = minimize` 时只隐藏窗口，托盘 Quit / ExitRequested（`force_exit`）直接走 `request_shutdown`；该命令只接受主窗调用，其他窗口调用返回错误。独立窗口在 `PopoutShell` 里 `onCloseRequested` → `preventDefault` → 审批通过才 `destroy`；审批进行中重复的关闭请求不叠加。
+- **原生关闭路径**：主窗 Rust `request_editor_close` 先 show/unminimize/focus 主窗再发 `editor:close-requested`（camelCase 载荷 `{requestId, forceExit}`）；主窗 CloseRequested、托盘 Quit 与 `RunEvent::ExitRequested` 都先 `prevent_close` / `prevent_exit`，等前端审批。审批通过后前端调 `complete_editor_close`：非强制关闭且 `closeBehavior = minimize` 时只隐藏窗口，托盘 Quit / ExitRequested（`force_exit`）直接走 `request_shutdown`；该命令只接受主窗及匹配的在飞 `requestId`，其他窗口/伪造或过期 token 返回错误；`cancel_editor_close` 撤销同一 token。主窗每 3 秒以 `acknowledge_editor_close` 续报审批存活，React 关闭监听卸载立即停心跳。15 秒无心跳由独立原生确认提供退出不保存/继续编辑选择，迟到原生回调不能作用新 token。批准真正退出后先禁用并隐藏全部托管窗口，再执行有界收尾。独立窗口在 `PopoutShell` 里 `onCloseRequested` → `preventDefault` → 审批通过才 `destroy`；审批进行中重复的关闭请求不叠加。
 - **保存完成后的边界**：设置底部保存成功后才关闭弹窗并应用 UI 缩放；保存期间正文 `inert`、点击/输入被拦截且关闭按钮禁用；若弹窗已被外部关闭/重开，或保存后又出现新草稿，迟到的结果既不关闭弹窗也不应用未落盘缩放。
 - 备份导入在确认替换后走 `requestEditorLeave()`，导入成功后立即 reload（草稿随新基线丢弃）；更新安装在下载前走 `requestEditorLeave()`。
 - 插件不是五类规则页的实体：启停与权限动作立即独立持久化，取消设置仅回滚普通草稿，保留当前插件状态及 revision。备份导入只覆盖同安装身份的授权；导入中同 ID 不同身份清权禁用、未提及的当前插件保留，且不安装代码或迁移 KV。
-- **备份管理页的「日志库备份」三字段尚未接线**：`backupEnabled` / `backupInterval` / `backupDirectory`（`CONFIG_BOUNDS.backupInterval` 1–720 小时）只有配置模型、设置页读写与保存，前端与 Rust 都没有自动备份日志的消费者。日志备份目前需要用户手动复制日志目录（见[日志](logging.md)）；不要把这组字段当成已实现的定时备份，也不要据此在其它命令里推导备份行为。
+- **备份管理页只提供配置导出/导入**：此前未实现消费者的自动日志备份开关及 `backupEnabled` / `backupInterval` / `backupDirectory` 已从模型、数值边界和 UI 移除，不再展示无效功能；旧配置中的这些未知字段由 serde 忽略。自动日志备份仍不是已交付能力，日志备份应手动复制日志目录（见[日志](logging.md)）。
+
+## 草稿恢复与不可避免的退出
+
+`entityEditorRecovery` 以 schema envelope 记录五类实体的 baseline/draft、普通设置 baseline/draft 和面板未 ACK 文本；读取严格检查键白名单、形状和 schema，损坏/旧版/未知字段或 Storage 不可用时 fail-safe。恢复按新磁盘基线三方合并为会话草稿，冲突可见，不自动保存或发布实体 runtime，也不恢复 pluginConfigs、权限、分组、元数据、预设或 revision。普通字段保留既有主题/字体/电源预览语义，committed update mode 只取磁盘值。成功保存/显式放弃清对应记录；晚编辑、失败保持待恢复。面板恢复文本必须明确 overwrite 或 reload，不自动覆盖主窗。
+
+Windows 的不可避免 `RunEvent::Exit`（含 tao `WM_ENDSESSION` 路径）不能可靠等 JS 审批；此处用后台收尾和单一 3 秒总等待预算尽力处理 serial/log/power/diag，不等待已销毁 UI 线程。恢复记录是在编辑时写入而非等关机通知；localStorage 是 best-effort，不保证强断电零丢失。真正关机/注销、renderer 卡死后的独立原生确认仍列入实机验收，源码/单元测试不能代替。
 
 ## 配置读取/保存数据流
 
@@ -114,7 +120,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
     → AppState::apply_runtime_config(cfg)（日志设置 + 诊断开关 → 后端运行期镜像）
   → 保存成功后当前 WebView `applyUiScale(current.uiScalePercent)`，并广播 `ui-scale:changed` 给已打开的弹出窗；失败则不应用未落盘值
 
-分组变更 → `useAppInit` 500ms 防抖 → `save_port_groups`；端口元数据变更 → 500ms 防抖 → `saveCurrentPortMeta`（取最新配置 + 保留离线端口元数据 + revision CAS 保存）。
+分组变更 → `useAppInit` 500ms 防抖 → `saveCurrentPortGroups`（共享写队列 + 最新配置 + revision CAS）；端口元数据变更 → 500ms 防抖 → `saveCurrentPortMeta`（取最新配置 + 保留离线端口元数据 + revision CAS 保存）。
 ```
 
 ## 规则实体激活语义

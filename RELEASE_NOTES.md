@@ -36,16 +36,6 @@
 - **设置输入**：所有数值框改为 blur/Enter 提交，修复输入 `24` 被逐键夹成 `8 → 84`；HEX 模式字节数与后端一致；日志回放兼容关闭时间戳/方向前缀的日志。
 - 文档同步更新主机文件对话框、单实例锁、发送代次、插件路径与命令计数。
 
-## 验证
-
-- 可信网页新增验证：TypeScript 检查、81 个 Vitest 文件 / 1062 项测试通过；收尾复核 4 个相关文件 / 37 项测试及生产前端构建通过；最终 Rust 322 项通过、1 项忽略，Windows debug 应用构建通过。
-- Windows 原生实跑覆盖 HTML/模块加载、HTTP/WebSocket/SSE、文件选择、剪贴板、报告下载/取消、跨重启存储、升级重审与数据保留、撤信任/迟到下载、清数据、卸载重装，以及隔离模式网络仍拒绝；详情见 `docs/architecture/plugin-views.md`。未使用真实模型账号/服务，也未代替最终安装包或跨平台验收。
-- 插件能力放宽验证：TypeScript、生产前端构建与 Windows debug 应用构建通过；Vitest 82 文件 / 1134 项、Rust 335 项（1 项忽略）通过；mock IPC Playwright 36/37 通过。唯一失败的 `editor.spec.ts › keyboard sorting` 在干净 HEAD 基线上同样随机复现（4 次中 1 次），属既有 dnd-kit 键盘激活竞态，与本次改动无关（复跑当前树 4/4 通过）。
-- Windows 原生实跑（独立配置/测试桌面/本机 HTTP 服务）：2 MiB 完整响应、1 MiB+1 二进制回声、SSE 首块 3 ms、无隐式超时（16 s 响应成功）、显式超时/abort/提前取消、白名单跳转拒绝；17 MiB+1 私有二进制写入读回、5 MiB KV、空文件/空剪贴板；未处理拒绝后 Worker 内存状态保留；重载代码生效且身份/权限/数据不变；同版替换需确认且清权保数据；省略 `entry` 的纯 HTML 插件导航/刷新/存储正常；1 MiB+17 字节 UI↔Worker 双向二进制逐字节一致；隔离视图仍拒绝网络；带视图退出进程码 0。详见 `docs/architecture/plugin-views.md`。
-- 本轮通过：TypeScript 检查与生产前端构建，80 个 Vitest 文件 / 1052 项测试，315 项 Rust 单测（1 项忽略）、Rust dev 编译/构建，以及 37 项 mock IPC Playwright。
-- 编辑回归覆盖单条/全量保存隔离、迟到保存与会话回执、字段序列化顺序、切页草稿、拖排序/插入、失败保留和关闭审批；Windows 原生隔离配置实测主窗/命令面板共享草稿、指针与键盘排序、真实 IPC 保存、主窗重载后继续编辑、窄窗错误提示、继续编辑及正常退出。
-- 本轮自动化不替代最终安装包、真实串口/硬件、原生插件安全矩阵及 Linux/macOS 产物的发布前人工验收。
-
 # HyperCom v1.0.0-preview.2
 
 ## 修复与改进
@@ -54,12 +44,6 @@
 - **插件入口与实例复用**：Sensor settings 的标签栏加号和插件侧边栏入口复用同一设置页；普通 COM 标签的右上角加号提供 Sensor table，并固定绑定当前 COM 口。
 - **插件调试体验**：插件源目录变更、版本升级、私有数据保留和权限重新确认的边界已补充到用户手册；Sensor Workspace 示例升级为 1.0.1。
 - **串口连接**：修复打开串口时后端状态事件递归获取同一把锁导致命令不返回、前端永久停留在“连接中”的问题。
-
-## 验证
-
-- 前端构建、1009 项 Vitest、311 项 Rust 测试及 34 项 mock IPC Playwright 测试通过。
-- Windows 隔离测试桌面实测 Sensor settings、Sensor table、SIM 和 COM1 打开路径。
-
 
 # HyperCom v1.0.0-preview.1
 
@@ -88,26 +72,6 @@
 - **后端收尾与持久化**：用户断开取消旧重连；Interrupted写入仍受总期限约束，模拟TTY退出可重开。日志强制flush/导出/替换保留无换行尾部，同路径writer替换不误删活动文件，文件名模板不能越过日志根；诊断清空与写入串行。配置CRUD写失败回滚完整内存快照，从备份恢复期间不覆盖有效备份。
 - **串口控制与弹窗身份**：DTR/RTS单独切换会实际更新已连接端口；系统CPU轮询刷新实时值。终端弹窗的端口label采用无碰撞编码，URL query正确编码特殊字符，不再聚焦或显示另一端口。
 - **发布与原生视图时序**：慢配置加载不按默认通道抢跑更新；发布门检查notes与RFC3339时间，draft说明漂移在上传/发布前拒绝。原生视图旧监听器不泄漏，隐藏失败必须等实际销毁成功才显示宿主浮层，销毁失败保持拒绝。
-
-## 既有插件基础能力验证记录
-
-以下记录针对此前插件基础能力，不作为本次隔离 UI / 工作区标签的新增验收结论；原生视图仍需单独完成发布门禁。
-
-- Vitest 896 tests、Rust 278 tests、Playwright 26 tests、TypeScript 检查、生产前端构建与 Rust release-profile 编译检查通过。
-- Windows 原生隔离回归通过启用前授权、200 条通知限流、HTTP 精确白名单、目录额度边界、ZIP 升级旧授权拒绝及 KV 保留、四插件并发初始化；五组中断磁盘状态经原生启动恢复并保全私有数据。原生烟测使用生产资产/CSP 的 Rust debug 可执行文件，最终 release 安装包、原生文件选择器及其他平台仍需发布环境验收。
-
-## 隔离视图与工作区标签验证记录
-
-- TypeScript检查、934项Vitest、283项Rust测试、26项Playwright和Rust release-profile检查通过；生产前端资产及Windows debug原生可执行文件构建通过。
-- Windows真实应用验证settings保存经Worker写KV、SIM实时解析表格的排序/筛选、UI动作后台开波形、关闭原始后表格持续更新、分屏实例保持、宿主设置遮挡恢复、替换后返回原始终端、无端口页禁用发送、撤权/禁用不关闭串口。TTY原生探针观察到xterm实例及提示屏跨分屏保留。
-- 原生UI诊断观察到无Tauri globals、网络/主窗/本机/未声明资源访问拒绝、popup及程序化clipboard read拒绝，Worker执行与frame拒绝，恶意导航退休页面。临时child调试端口/构建override与隔离配置已移除；这些debug场景不替代最终安装包完整安全/跨平台验收。
-
-## 发版前全项目维护验证（2026-10-10）
-
-- 975项Vitest、32项mock IPC Chromium Playwright、15项离线release行为回归、TypeScript检查、生产前端构建与当前`v0.6.8`预检通过；npm生产依赖在上游registry审计为0项已知漏洞，不代表全依赖/插件安全验收。
-- Windows原生生产资产/CSP烟测运行目录安装、禁用无授权默认值、授权/启用与真实Worker、ZIP升级清权换代、2001实体条目包拒绝；UTF-8无换行长响应导出完整且无替换字符，真实SIM接收及搜索可用。独立raw Wry工具页有桌面视觉证据；宿主DOM截图不包含原生child，二者不可混用。
-- Rust309项通过、1项默认跳过的WebView2原生resize用例显式运行通过；release-profile检查与生产资产debug可执行文件构建通过。真实ConPTY自行`exit`后再次打开已验证，不再依赖master尚未关闭时的读线程EOF。
-- 最终发行包安装/重启、真实picker、Linux/macOS、物理串口及完整原生安全矩阵仍须按发版文档验收，本轮不代替这些发布门。
 
 # HyperCom v0.6.8
 
@@ -146,7 +110,6 @@
 
 ## 其他
 
-- 界面截图更新至 v0.6.6（`UI.png` 替换旧 v0.1.0）
 - 测试：vitest 新增「暂停不钉底」与「小步 head trim 视口顶 seq 不变」回归（TerminalRenderer / viewportManager）
 
 # HyperCom v0.6.6
@@ -544,6 +507,3 @@ v0.3.x 及更早版本用户将在应用内收到更新提示，更新弹窗会�
 
 ## 性能
 - OperationPanel / ParamsSection / SendSection 的 `ports.find(...)` / 整包 `config` 新引用选择器拆为原语选择器：3s 端口轮询与状态更新不再无条件重渲染操作面板与参数区
-
-## 验证
-- tsc 0 诊断、vitest 684 例全绿（38 文件）、cargo check 通过

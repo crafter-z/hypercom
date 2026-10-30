@@ -181,7 +181,7 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户或网络，不设 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`ui.panel.export`、全部 `http.*` 与 `view.sendBinary`。HTTP 的期限只由请求的 `timeout` 决定。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户或网络，不设 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`ui.panel.export` 与全部 `http.*`。`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
 - 超时只是回执失败，不表示已经开始的串口写入、文件写入或 HTTP 已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
@@ -259,7 +259,7 @@ options 字段：`method?`（缺省 GET，建议大写）、`url`（仅 http/htt
 })();
 ```
 
-仅 http/https URL；响应体与请求体不设宿主业务大小上限；非 2xx 仍返回响应对象，应检查 status。非法 URL/header/method、`body` 与 `bodyBase64` 同时提供都会在发网前 reject；并发上限为每插件 64、全应用 64。`signal` 取消与超时会让进行中的调用 reject（AbortError 或超时错误）；`stream.cancel()` 与提前 break 会取消原生请求并终止迭代，挂起的 `next()` 以 AbortError reject。取消后不要假定已产生的服务端副作用被撤销。不自动注入 cookies 或宿主凭据；默认继承系统代理，宿主显式配置的插件代理优先。`http.urlWhitelist` 仍是**可选**作用域：缺失或空数组表示不限制，非空时初始 URL 与每个重定向目标都要匹配；需要收紧时才声明。`shell.openExternal` 不受 `http.urlWhitelist` 限制。
+仅 http/https URL；响应体与请求体不设宿主业务大小上限；非 2xx 仍返回响应对象，应检查 status。非法 URL/header/method、`body` 与 `bodyBase64` 同时提供都会在发网前 reject；并发上限为每插件 64、全应用 64。`signal` 取消与超时会让进行中的调用 reject（AbortError 或超时错误）；`stream.cancel()` 与提前 break 会取消原生请求并终止迭代，挂起的 `next()` 以 AbortError reject。取消后不要假定已产生的服务端副作用被撤销。不自动注入 cookies、Referer 或宿主凭据；跨源重定向仅保留 Accept/Accept-Language/Content-Language/Content-Type/Content-Encoding/Range 等明确安全头，Authorization、Cookie 和任意未知自定义凭据头不随跳转发送；需要认证时请直接请求最终源。同源保留合法业务头，Host/Content-Length/Transfer-Encoding 等框架头拒绝。URL 最多 8192 字符，headers 最多 64 个、名字 256/值 8192 字符（这是通道结构保护，不是 body 业务配额）；错误日志去除 URL userinfo/query/fragment。默认继承系统代理，宿主显式配置的插件代理优先。`http.urlWhitelist` 仍是**可选**作用域：缺失或空数组表示不限制，非空时初始 URL 与每个重定向目标都要匹配；需要收紧时才声明。`shell.openExternal` 不受 `http.urlWhitelist` 限制。
 
 ### 事件
 
@@ -335,14 +335,14 @@ input 为 bytes/lines/none：分别需要 rx:bytes、terminal:read 或无 RX 权
 ```
 
 - 完整插件通常保留普通 Worker `entry`；纯网页插件可以**完全省略插件根 `entry`**，此时宿主不创建根 Worker，页面独立运行（视图自身的 `entry` 仍必填）。给视图加 `"worker": false` 表示该可信页不依附 Worker：只允许 `trusted-web` + `input:"none"`，没有 Worker 侧会话对象、不接收 RX，也不能发布模型或发送串口；但它不会阻止根 Worker 启动——若 manifest 仍声明 `entry`，根 Worker 照常运行并可供其他视图使用。纯网页或 `worker:false` 页面没有 Worker 对端，`view.send` / `view.sendBinary` 会报错。HTML 无需主动调用 SDK 即可显示。
-- 同源本地页面之间可以正常导航与刷新（路径、查询串、锚点均可），其他声明的 HTML 页面放进 `assets`；每次导航都是新文档，宿主重建 SDK 身份、重放当前模型并拒绝旧文档迟到的 ACK/消息/二进制块。只有用户**真实点击**的外部 http/https 链接或新窗口才交给系统浏览器，不获得 SDK；脚本发起的顶层跳转只取消、不弹浏览器；其他协议拒绝。被取消的顶层导航（含被拒绝的外部跳转）不算文档加载失败、不退休页面。若链接指向声明过的本地 HTML，则按本地导航处理。
+- 同源本地页面之间可以正常导航与刷新（路径、查询串、锚点均可），其他声明的 HTML 页面放进 `assets`；除纯锚点变化外，导航/刷新生成新文档，宿主重建 SDK 身份、重放当前模型并拒绝旧文档迟到的 ACK/消息/二进制块；纯锚点后再刷新仍会生成新身份。只有用户**真实点击**的外部 http/https 链接或新窗口才交给系统浏览器，不获得 SDK；脚本发起的顶层跳转只取消、不弹浏览器；其他协议拒绝。在起始时直接拒绝的外部跳转不退休页面；已准许的本地导航后来被取消则明确报错并退休，避免旧文档身份已失效却永久 loading。若链接指向声明过的本地 HTML，则按本地导航处理。
 - 视图自身 `entry` 必须是 `.html` / `.htm`，`styles` 必须为空；HTML 自己引用 CSS/JS，包内文件列入 `assets`。支持内联脚本、模块脚本及资源查询参数；未声明的本地文件不回退到网络。
 - 浏览器直接支持 HTTP/HTTPS、WebSocket、SSE、普通网页资源、文件选择器、Blob 下载、剪贴板和 localStorage/IndexedDB；无需为这些网页操作另授 Worker 的 `http:request` / `fs:open` / `clipboard` / `storage` 权限。Worker API 的原权限规则不变。
 - 网络不使用宿主端点白名单，也不使用 Worker 代理设置。浏览器 CORS、TLS 和混合内容规则仍生效；模型服务不支持跨域时，应配置服务 CORS 或使用本地桥接，不关闭浏览器安全检查。
 - 文件读取通过 `<input type="file">` 及 File API；下载需确认原生保存对话框，不自动执行下载文件。剪贴板遵循浏览器焦点与用户操作要求。摄像头、麦克风等无关权限不开放。
-- 宿主在文档脚本前注入现有 `view` SDK，不修改 HTML；本地顶层页面获得 SDK，iframe 不获得。页面普通资源/请求错误不会导致插件视图退休；原生进程崩溃或文档加载失败（被取消的导航除外）才报告失败。可信文档不设固定 ready 超时，慢加载不会被判定为超时；隔离页面仍适用 5 秒初始化期限。
+- 宿主在文档脚本前注入现有 `view` SDK，不修改 HTML；本地顶层页面获得 SDK，iframe 不获得。页面普通资源/请求错误不会导致插件视图退休；原生进程崩溃、文档加载失败或已准许导航取消会报告失败。可信文档加载期间不设固定期限，但成功加载后 30 秒仍未 ready 会报错；隔离页面仍适用 5 秒初始化期限。
 - 可信模式默认拒绝，安装/首次启用须独立确认；普通「授予全部并启用」不授予网页信任。批准绑定安装代次，升级重新确认，重启不重复询问；配置导入不能新增或恢复已撤销的网页信任。
-- 浏览器数据位于配置目录旁 `plugin-web-data/<pluginId>/`，与插件可写 `data/` 分离。origin 按 pluginId + viewId 稳定，同视图多实例共享存储；不同视图来源隔离，不同插件浏览器目录隔离。升级保留数据，卸载或“清除网页数据”清除全部站点数据；空浏览器配置文件可能保留。清除操作先禁用插件，普通 `data/` 不受影响。
+- 浏览器数据位于配置目录旁 `plugin-web-data/<pluginId>/<installGeneration>/`，与插件可写 `data/` 分离。origin 按 pluginId + viewId 稳定，同代次同视图多实例共享存储；不同视图来源隔离，不同安装代次目录隔离。普通重载保留，新代次升级/重装不复用旧站点数据，卸载或“清除网页数据”清除全部站点数据；空浏览器配置文件可能保留。清除操作先禁用插件，普通 `data/` 不受影响。
 - 可信网页仍没有主窗口 DOM、Tauri 通用 IPC、Shell 或任意磁盘路径 API。它能够把选中的日志、剪贴板内容上传网络，因此只应信任用户认可的插件及其加载的网页代码。
 
 ### Worker 会话 API
@@ -357,8 +357,8 @@ input 为 bytes/lines/none：分别需要 rx:bytes、terminal:read 或无 RX 权
 | `view.onStatus(cb)` | `{instanceId, status, streamEpoch}`；断开/重连不关闭页面 |
 | `view.publish(snapshot)` | 当前有界 JSON 模型；合并未发送快照，resolve 不保证每个版本都显示 |
 | `view.sendSerial({data,isHex?,lineEnding?})` | 需要 serial:send 及白名单，不接受 portId，由会话固定端口决定；无端口页拒绝；单次 data ≤65536 个 UTF-16 代码单元 |
-| `view.sendBinary(type, bytes)` | 把 `Uint8Array`/`ArrayBuffer` 原始字节经 8 KiB 分块、一块在途逐块 ACK 发给本页，总大小无上限；非末块由接收端入缓存后立即确认，末块等完整字节交付异步回调结算；页面导航、关闭或实例退休会取消并拒绝未完成传输 |
-| `view.onBinary(cb)` | 接收页面的完整传输 `{type, bytes: Uint8Array}`；末块的确认等待回调 Promise settle；没有 ACK 超时 |
+| `view.sendBinary(type, bytes)` | 把 `Uint8Array`/`ArrayBuffer` 原始字节经 8 KiB 分块、一块在途逐块 ACK 发给本页，单条最多 256 MiB、受共享传输资源预算限制；非末块由接收端入缓存后立即确认，末块等完整字节交付异步回调结算；页面导航、关闭或实例退休会取消并拒绝未完成传输 |
+| `view.onBinary(cb)` | 接收页面的完整传输 `{type, bytes: Uint8Array}`；末块的确认等待回调 Promise settle，最多 30 秒 |
 
 `plugin.views.*` 只对依附 Worker 的视图触发；纯网页插件与 `worker:false` 视图没有 Worker 侧会话对象。`view.*` 需要 `ui:view`（`view.sendSerial` 另需 `serial:send` 与端口白名单），`tabs.*` 另需 `ui:tabs`。
 
@@ -373,9 +373,10 @@ UI 脚本全局 `view` 与 Worker 会话对象不是同一对象：
 - `view.onState(cb)`：完整 JSON 模型；回调 Promise 完成后 ACK，失败显示错误，不把“收到”当“已应用”。
 - `view.onEnvironment(cb)`：theme/language/fontFamily/fontSize/zoomPercent/visible/focused/portStatus；变化合并，不从父窗读取样式。
 - `view.send(type, payload)`：向自身 Worker 发交互，不是宿主 API；返回不表示设备命令已完成。UI 未初始化或参数非法时报错。
-- `view.sendBinary(type, bytes)`：把 `Uint8Array`/`ArrayBuffer` 原始字节发给 Worker；每块原始字节 ≤8 KiB、base64 编码后整条信封 ≤16 KiB，`transferType` ≤128 字符全程一致，保持一块在途并等对应 ACK，无总大小上限，不与实时 JSON 状态争用合并通道。发送 Promise 可能因接收端 nack、页面导航/关闭/换代或通道关闭而拒绝。
+- `view.sendBinary(type, bytes)`：把 `Uint8Array`/`ArrayBuffer` 原始字节发给 Worker；每块原始字节 ≤8 KiB、base64 编码后整条信封 ≤16 KiB，`transferType` ≤128 字符全程一致，保持一块在途并等对应 ACK，单条最多 256 MiB，不与实时 JSON 状态争用合并通道。发送 Promise 可能因接收端 nack、页面导航/关闭/换代或通道关闭而拒绝。
 - `view.onBinary(cb)`：接收 Worker 的完整传输 `{type, bytes: Uint8Array}`——按 `seq` 严格顺序重组，全部到齐后一次性交付；非末块在接收端入缓存后立即确认，**只有末块**要等回调 Promise 结算后才确认，可安全异步处理。两个方向的接收端各自最多同时保留 4 个未完成入站传输；乱序、类型变化、非法块或单块超 8 KiB 会 nack 并丢弃半成品。
-- 二进制通道**没有 ACK 超时**：发送以 ACK/nack 或页面失效（导航、关闭、Worker 换代）结算，不会因等待时间过长自动失败；大块传输请自行处理页面可能被用户关闭的情况。
+- 二进制通道有独立资源期限：逐块/末块异步回调 ACK 最多等待 30 秒，发送排队等 ready 最多 60 秒；接收半成品闲置 60 秒会主动释放并 nack。Worker 二进制 RPC 及宿主 sender 自发送入口起的整体资源持有最长 10 分钟，排队计入且持续 ACK 不续期；到期不影响健康后继。超时会明确 reject，不能把迟到 ACK 交给新传输；已经运行的插件回调不假装被撤销。
+- 共享预算涵盖传输拥有的原始缓冲与拼接峰值：主窗双向跨视图每插件安装代次 512 MiB/16 条、全应用 1024 MiB（1 GiB）/32 条；每 sender 排队+在途最多 256 MiB/4 条。页内 SDK 每文档双向共享 512 MiB/4 条。单条均最多 256 MiB；SDK 二进制处理与状态 ACK 使用独立有界队列。预算不是整个 OS 堆或插件自行保留数据的硬配额。
 
 Worker 侧对象对称：`view.sendBinary(type, bytes)` / `view.onBinary(async ({type, bytes}) => …)`。二进制通道按「视图实例 + 当前文档 + Worker 代次」绑定；页面导航、关闭或插件交换代次会拒绝未完成传输，迟到的确认不会影响新页面。已在执行的插件异步逻辑本身不能假装被撤销。通道分块/ACK/取消细节见[视图二进制通道](architecture/plugin-views.md#视图二进制通道)。
 
@@ -406,7 +407,7 @@ self.plugin.on('ui.buttonClick', async function (event) {
 
 替换与独立实例合计每插件最多 8 个、全应用 16 个。每个视图声明的 entry/styles/assets 单文件至多 8 MiB、合计至多 32 MiB，仍受包总限额约束。快照至多 256 KiB UTF-8、只接受 JSON（另限 65536 个节点、嵌套 64 层）；ArrayBuffer/类型化数组/Map/Set/Date、非有限数、getter、稀疏或循环对象拒绝。每视图一条在途快照及一个最新候选，全插件待发送至多 1 MiB，可见发送至多约 30/s；隐藏不积压历史，恢复显示重发当前模型。
 
-params 至多 16 KiB；instanceKey/title 至多 128 字符。tabs 管理按令牌桶 2/s、突发 4 限制；UI 交互至多 16 KiB 原生消息包、约 30/s，页面→原生的非二进制消息（ready/state-ack/交互/error）另有每视图 64 条/秒上限，超出静默丢弃（二进制分片与确认不占此额度）。隔离视图 UI ready 5 秒、Worker 初始化 10 秒；可信文档不设固定 ready 超时。状态 ACK 可见时 5 秒，隐藏/宿主遮挡时不误杀。后台关闭记录每插件最多 128 项，达到后暂停后台新建，用户入口仍受总额度。
+params 至多 16 KiB；instanceKey/title 至多 128 字符。tabs 管理按令牌桶 2/s、突发 4 限制；UI 交互至多 16 KiB 原生消息包、约 30/s，页面→原生普通交互另有每视图 64 条/秒上限；ready/state-ack/error 独立控制桶为 128/s、突发 128，二进制分片/确认按插件共享 512/s、突发 1024，二进制首次超额会使视图明确失败而非永久等 ACK。隔离视图 UI ready 5 秒、Worker 初始化 10 秒；可信文档加载成功后才启动 30 秒 ready 看门狗，加载过程本身不设固定期限。状态 ACK 可见时 5 秒，隐藏/宿主遮挡时不误杀。后台关闭记录每插件最多 128 项，达到后暂停后台新建，用户入口仍受总额度。
 
 串口替换偏好在 portMeta，独立可恢复标签在 session.json。禁用/撤 ui:view 或输入权限/升级/故障使执行环境失效：替换回原始，独立页显示不可用/重试。旧安装代次不能恢复到新代码；新用户选择必须重新审阅。ui:tabs 撤销停止 Worker 标签管理，不自动授予或撤销 ui:view。插件桌面弹出窗未开放。
 
@@ -545,7 +546,7 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | ZIP元数据 | 压缩文件96MiB、中央目录16MiB、单条名称/extra/comment合计64KiB；实体记录≤2000且不得重复，支持限额内ZIP64 |
 | data/ 写入 | 不设单文件/总量/文件数上限；路径与原子写约束保留；每次写入不再扫描整个 data/ |
 | 插件文件读取 | 不限制扩展名/内容/大小/总量/多选数量，无固定读取期限；保留权限与路径范围，完整读取所需内存由运行环境决定 |
-| 插件文件写入 IO | 等待插件磁盘闸门，无固定上限；写入完成后才返回 |
+| 插件文件写入 IO | 闸门准入等待最多 5 秒，繁忙时可重试；已经开始的写入不设隐式业务期限，真实完成后才返回 |
 | 串口与终端写入 | `serial.send` 单次 data ≤1048576 个 UTF-16 代码单元；`view.sendSerial` 单次 data ≤65536 个；`terminal.append` 单次 text ≤65536 个 |
 | HTTP | 仅 http/https；无宿主业务大小上限、无固定 timeout；`timeout` 为调用显式给出的非负有限秒数（0/缺省=不设总期限），重定向默认最多 10 跳；并发上限每插件 64、全应用 64 |
 | 文件对话框 | `fs.openDialog` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |

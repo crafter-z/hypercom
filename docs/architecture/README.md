@@ -1,6 +1,6 @@
 # 架构文档索引
 
-HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模块的架构设计、前端/后端实现、数据流、关键不变量、缺陷修复记录与已知边界。
+HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模块的当前架构设计、前端/后端实现、数据流、关键不变量与已知边界。
 
 ## 模块划分
 
@@ -19,7 +19,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。后端 84 个命令 / 13 个命令域文件；complete_editor_close 是主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
+> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 637 键。后端 86 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个普通字段 + entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
 
 ## 文档清单
 
@@ -41,7 +41,6 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 | [`errors.md`](errors.md) | 错误处理 | `CommandError` 7 个变体定义与映射表（触发条件 = 命令/文件归属）/无按变体的 `toast.error.*` key（i18n 只有 `toast.severity.*` 与 `toast.fallback.operationFailed`）/消费路径（`extractErrorMessage` + `notifyError`） |
 | [`conventions.md`](conventions.md) | 开发约定（跨模块） | Zustand 选择器纪律/React 组件定义/flexbox `min-height` 链/Rust 跨 `.await` 锁纪律/hook 生命周期拆分/`CommandError` 与命令注册/i18n 规则/提交规范/CSS 颜色安全及跨模块陷阱 |
 | [`code-map.md`](code-map.md) | 符号与模块索引 | 新代码优先复用的前端模块清单 + 前端/后端符号 → 文件定位（跨模块速查） |
-| [`history.md`](history.md) | 版本历史（历史叙事） | 各版本发布时的状态与当时的决策；可能已被后续版本推翻，与现行实现冲突时以模块文档为准 |
 
 ## 通用约定（贯穿所有模块）
 
