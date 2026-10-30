@@ -3,9 +3,6 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as UnixCommandExt;
-
 /// Shared admission/drain state for serial file and tool operations.
 /// Shutdown flips the gate once, then waits for the active count to reach zero.
 pub struct SerialWorkState {

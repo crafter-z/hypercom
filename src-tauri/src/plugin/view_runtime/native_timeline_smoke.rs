@@ -249,7 +249,7 @@ fn renderer_geometry_native_webview2_smoke() {
     let messages = Rc::new(RefCell::new(Vec::<Value>::new())); let incoming = messages.clone(); let expected_origin = origin.clone();
     let webview = WebViewBuilder::new_with_web_context(&mut context)
         .with_visible(false).with_devtools(false).with_incognito(true)
-        .with_initialization_script(&geometry_initialization(&origin))
+        .with_initialization_script(geometry_initialization(&origin))
         .with_ipc_handler(move |request| {
             if url::Url::parse(&request.uri().to_string()).ok().is_none_or(|uri| uri.origin().ascii_serialization() != expected_origin) { return; }
             if request.body().len() <= 64 * 1024 { if let Ok(value) = serde_json::from_str::<Value>(request.body()) { incoming.borrow_mut().push(value); } }

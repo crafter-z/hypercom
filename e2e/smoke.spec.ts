@@ -950,14 +950,16 @@ test.describe('HyperCom smoke tests', () => {
       const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
       const slots = useAppStore.getState().tabs.filter(tab => tab.kind === 'serial').map(tab => tab.id);
       const participant = timelineCoordinator.participantForSlot(slots[0]);
+      if (!participant) throw new Error('Expected the first TRX timeline participant');
       const token = timelineCoordinator.beginNavigation(participant.participantId);
+      if (!token) throw new Error('Expected to acquire the TRX navigation lease');
       timelineCoordinator.updateNavigation(token, { timeMs: 1700000002500 });
       useAppStore.getState().setActiveTab(slots[1]); // focus is not a navigation intent
       return { token, owner: participant.participantId };
     });
     await page.waitForTimeout(180);
     expect(await page.locator('.terminal-view:visible').evaluateAll(views => views.slice(1).map(view => view.scrollTop))).toEqual(followersBefore);
-    expect(await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).ownerParticipantId, groupId)).toBe(tokenData.owner);
+    expect(await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id)?.ownerParticipantId, groupId)).toBe(tokenData.owner);
     await page.evaluate(async ({ token }) => {
       const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
       timelineCoordinator.endNavigation(token, { timeMs: 1700000002500 });
@@ -965,31 +967,34 @@ test.describe('HyperCom smoke tests', () => {
     }, tokenData);
     await expect.poll(() => page.evaluate(async id => {
       const group = (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id);
-      return group.members.map(member => ({ state: member.state, status: member.status, actualTimeMs: member.actualTimeMs, reason: member.reason }));
+      return group?.members.map(member => ({ state: member.state, status: member.status, actualTimeMs: member.actualTimeMs, reason: member.reason }));
     }, groupId)).toEqual(Array.from({length:3}, () => ({ state: 'active', status: 'exact', actualTimeMs: 1700000002500, reason: undefined })));
-    await expect.poll(() => page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).committedAnchor.timeMs, groupId)).toBe(1700000002500);
+    await expect.poll(() => page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id)?.committedAnchor?.timeMs, groupId)).toBe(1700000002500);
     // Exercise the actual DOM gesture lane, not only coordinator calls.
-    const beforeWheelEpoch = await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).navigationEpoch, groupId);
+    const beforeWheelEpoch = await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id)?.navigationEpoch, groupId);
+    if (beforeWheelEpoch === undefined) throw new Error('Expected a TRX navigation epoch before wheel input');
     await page.locator('.terminal-view:visible').first().hover();
     await page.mouse.wheel(0, -600);
     await expect.poll(() => page.evaluate(async ({ id, previousEpoch }) => {
       const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
       const group = timelineCoordinator.getSnapshot().groups.find(group => group.id === id);
-      return group.ownerParticipantId === null && group.navigationEpoch > previousEpoch
+      return !!group && !!group.committedAnchor && group.ownerParticipantId === null && group.navigationEpoch > previousEpoch
         && group.committedAnchor.timeMs === timelineCoordinator.readSlotAnchor(group.memberSlots[0])?.timeMs;
     }, { id: groupId, previousEpoch: beforeWheelEpoch })).toBe(true);
-    const epoch = await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).navigationEpoch, groupId);
+    const epoch = await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id)?.navigationEpoch, groupId);
+    if (epoch === undefined) throw new Error('Expected a TRX navigation epoch before zoom input');
     await page.keyboard.down('Control');
     await page.mouse.wheel(0, -100);
     await page.keyboard.up('Control');
     await page.waitForTimeout(250);
-    expect(await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).navigationEpoch, groupId)).toBe(epoch);
+    expect(await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id)?.navigationEpoch, groupId)).toBe(epoch);
     // Leaving while an End-key gesture is still settling must not re-enable Pin.
     await page.locator('.terminal-view:visible').first().focus();
     await page.keyboard.press('End');
     await page.evaluate(async id => {
       const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
       const group = timelineCoordinator.getSnapshot().groups.find(group => group.id === id);
+      if (!group) throw new Error('Expected the TRX timeline group before leaving');
       timelineCoordinator.removeMember(group.memberSlots[0]);
     }, groupId);
     await page.waitForTimeout(200);
@@ -1009,7 +1014,7 @@ test.describe('HyperCom smoke tests', () => {
       const { TerminalBuffer } = await import('/src/utils/terminal/TerminalBuffer.ts');
       const { TerminalRenderer } = await import('/src/utils/terminal/TerminalRenderer.ts');
       const buffer = new TerminalBuffer({ maxLines: 1_000_000 });
-      const line = { timestamp: 1700000000000, direction: 'RX', content: 'geometry record', isHex: false };
+      const line = { timestamp: 1700000000000, direction: 'RX' as const, content: 'geometry record', isHex: false };
       for (let i = 0; i < 1_000_000; i++) buffer.append(line);
       const results = [];
       for (const rowHeight of [12, 72]) for (const zoom of [.8, 2]) {
@@ -1026,7 +1031,7 @@ test.describe('HyperCom smoke tests', () => {
         for (const fraction of [0, .25, .5, .75, 1]) {
           container.scrollTop = max * fraction;
           renderer.render(buffer, view);
-          const rows = [...container.querySelectorAll('.terminal-line')].filter(row => row.style.display !== 'none');
+          const rows = [...container.querySelectorAll<HTMLElement>('.terminal-line')].filter(row => row.style.display !== 'none');
           positions.push({ first: Number(rows[0]?.dataset.seq), last: Number(rows[rows.length - 1]?.dataset.seq), top: container.scrollTop, height: container.scrollHeight, count: rows.length });
         }
         results.push({ rowHeight, zoom, positions, firstSeq: buffer.firstSeq, lastSeq: buffer.lastSeq });
@@ -1036,7 +1041,7 @@ test.describe('HyperCom smoke tests', () => {
     });
     for (const sample of samples) {
       expect(sample.positions[0].first, JSON.stringify(sample)).toBe(sample.firstSeq);
-      expect(sample.positions.at(-1).last, JSON.stringify(sample)).toBe(sample.lastSeq);
+      expect(sample.positions[sample.positions.length - 1].last, JSON.stringify(sample)).toBe(sample.lastSeq);
       for (let i = 1; i < sample.positions.length; i++) expect(sample.positions[i].first).toBeGreaterThan(sample.positions[i - 1].first);
       for (const position of sample.positions) { expect(position.count).toBeGreaterThan(0); expect(position.count).toBeLessThan(100); }
     }

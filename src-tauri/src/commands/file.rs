@@ -194,7 +194,7 @@ pub struct PluginPickOptions {
     title: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginPickedFile {
     path: String,

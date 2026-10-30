@@ -1,8 +1,10 @@
 //! Bounded, identity-free page controls. The native session supplies instance and
 //! document identity; pages cannot nominate another tab, port, participant or group.
+#[cfg(any(windows, test))]
 use serde::Deserialize;
 use serde_json::Value;
 
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Envelope {
@@ -18,33 +20,46 @@ struct Envelope {
     result: Option<SeekResult>,
     error: Option<String>,
 }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Registration { version: u8, clock: Clock, capabilities: Capabilities }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Clock { BoundInput, Custom { id: String } }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Capabilities { preview: String, can_drive: bool }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Availability { available: bool, range: Option<Range> }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Range { start_ms: f64, end_ms: f64 }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Anchor { time_ms: f64, record_key: Option<String> }
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SeekResult { status: String, actual_time_ms: Option<f64>, record_key: Option<String> }
 fn text(value: &str) -> bool { !value.is_empty() && value.len() <= 128 }
+#[cfg(any(windows, test))]
 fn key(value: Option<&str>) -> bool { value.is_none_or(|s| s.len() <= 128) }
+#[cfg(any(windows, test))]
 fn capabilities(value: &Capabilities) -> bool { let _ = value.can_drive; matches!(value.preview.as_str(), "bounded" | "commit-only") }
+#[cfg(any(windows, test))]
 fn anchor(value: &Anchor) -> bool { value.time_ms.is_finite() && key(value.record_key.as_deref()) }
+#[cfg(any(windows, test))]
 fn status(value: &str) -> bool { matches!(value, "exact" | "nearest" | "before-range" | "after-range" | "no-time" | "filtered" | "held" | "loading" | "unsupported") }
+#[cfg(any(windows, test))]
 pub(super) fn preview(value: &Value) -> bool { value.get("action").and_then(Value::as_str) == Some("update") }
+#[cfg(any(windows, test))]
 pub(super) fn validate_page(value: &Value) -> bool {
     if serde_json::to_vec(value).map_or(true, |v| v.len() > 4096) { return false; }
     let Ok(message) = serde_json::from_value::<Envelope>(value.clone()) else { return false; };

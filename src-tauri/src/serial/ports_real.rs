@@ -16,6 +16,7 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
+#[cfg(windows)]
 use serialport::SerialPort;
 use tauri::AppHandle;
 

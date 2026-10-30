@@ -68,6 +68,7 @@ test('independent multi-track import, shared terminal search and paused transpor
     const {useAppStore}=await import('/src/stores/useAppStore.ts');
     const {getReplayTransport}=await import('/src/utils/replay/replayRuntime.ts');
     const state = useAppStore.getState();
+    if (!state.activeTabId) throw new Error('Expected an active replay tab');
     const transport = getReplayTransport(state.activeTabId);
     if (!transport) {
       const runtime = await import('/src/utils/replay/replayRuntime.ts');
@@ -84,10 +85,13 @@ test('independent multi-track import, shared terminal search and paused transpor
     const {timelineCoordinator}=await import('/src/utils/timeline/coordinator.ts');
     const {getReplayTransport}=await import('/src/utils/replay/replayRuntime.ts');
     const {formatTimelineTime}=await import('/src/utils/timeFormat.ts');
-    const id=useAppStore.getState().activeTabId, group=timelineCoordinator.groupForSlot(id);
+    const id=useAppStore.getState().activeTabId;
+    if (!id) throw new Error('Expected an active replay tab');
+    const group=timelineCoordinator.groupForSlot(id), replay=getReplayTransport(id);
+    if (!group || !replay) throw new Error('Expected a grouped replay transport');
     const timeMs=Date.parse('2026-01-01T00:00:10Z');
     timelineCoordinator.seek(group.id,timeMs,'commit');
-    return {timeMs,label:formatTimelineTime(timeMs),clockTimeMs:getReplayTransport(id).getSnapshot().timeMs};
+    return {timeMs,label:formatTimelineTime(timeMs),clockTimeMs:replay.getSnapshot().timeMs};
   });
   expect(external.clockTimeMs).toBe(transport.timeMs);
   await expect(page.getByRole('slider', {name:'轨道',exact:true}).filter({visible:true})).toHaveValue(String(external.timeMs));
@@ -95,16 +99,23 @@ test('independent multi-track import, shared terminal search and paused transpor
   await page.evaluate(async () => {
     const {useAppStore}=await import('/src/stores/useAppStore.ts');
     const {timelineCoordinator}=await import('/src/utils/timeline/coordinator.ts');
-    const group=timelineCoordinator.groupForSlot(useAppStore.getState().activeTabId);
+    const id=useAppStore.getState().activeTabId;
+    if (!id) throw new Error('Expected an active replay tab');
+    const group=timelineCoordinator.groupForSlot(id);
+    if (!group) throw new Error('Expected an active replay timeline group');
     timelineCoordinator.seek(group.id,Date.parse('2026-01-01T00:00:12Z'),'preview');
   });
   await expect(page.getByRole('slider', {name:'轨道',exact:true}).filter({visible:true})).toHaveValue(String(external.timeMs+2000));
   await page.evaluate(async () => {
     const {useAppStore}=await import('/src/stores/useAppStore.ts');
     const {timelineCoordinator}=await import('/src/utils/timeline/coordinator.ts');
-    const group=timelineCoordinator.groupForSlot(useAppStore.getState().activeTabId);
+    const id=useAppStore.getState().activeTabId;
+    if (!id) throw new Error('Expected an active replay tab');
+    const group=timelineCoordinator.groupForSlot(id);
+    if (!group) throw new Error('Expected an active replay timeline group');
     for(const slot of group.memberSlots) {
       const participant=timelineCoordinator.participantForSlot(slot);
+      if (!participant) throw new Error(`Missing timeline participant for ${slot}`);
       timelineCoordinator.setMapping(group.id,{sourceId:participant.sourceId,sourceTimeMs:Date.parse('2026-01-01T00:00:00Z'),groupTimeMs:0,clockEpoch:participant.clockEpoch});
     }
     timelineCoordinator.seek(group.id,0,'commit');

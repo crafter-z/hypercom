@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import type { CommandEditorSnapshot, CommandEditorSyncRequest } from '../src/services/popout';
 
 const BACKEND_KEY = 'editor-regression.config';
 const browserErrors = new WeakMap<Page, string[]>();
@@ -11,9 +12,16 @@ async function installBackend(page: Page) {
     const callbacks = new Map<number, (value: unknown) => void>();
     const listeners = new Map<number, { event: string; handler: number }>();
     const channel = new BroadcastChannel('editor-regression.events');
+    let syncRequest: CommandEditorSyncRequest | undefined;
     const dispatch = ({ event, payload }: { event: string; payload: unknown }) => {
-      if (event === 'command-editor:snapshot' && payload && typeof payload === 'object' && 'sessionId' in payload && typeof payload.sessionId === 'string') {
-        document.documentElement.dataset.editorHostSession = payload.sessionId;
+      if (event === 'command-editor:snapshot' && payload && typeof payload === 'object') {
+        const snapshot = payload as CommandEditorSnapshot;
+        // A broadcast/challenge only announces a host; the panel still uses its
+        // old authority until the correlated client-binding confirmation arrives.
+        if (syncRequest && snapshot.clientProtocol === 2 && !snapshot.challengeId &&
+          snapshot.clientId === syncRequest.clientId && snapshot.syncRequestId === syncRequest.syncRequestId) {
+          document.documentElement.dataset.editorHostSession = snapshot.sessionId;
+        }
       }
       for (const [id, listener] of listeners) {
         if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
@@ -59,6 +67,14 @@ async function installBackend(page: Page) {
         if (command === 'plugin:event|unlisten') { listeners.delete(Number(args.eventId)); return; }
         if (command === 'plugin:event|emit' || command === 'plugin:event|emit_to') {
           const event = { event: String(args.event), payload: args.payload };
+          if (event.event === 'popout:request-sync') {
+            syncRequest = event.payload as CommandEditorSyncRequest;
+            if (localStorage.getItem('editor-regression.hold-sync')) {
+              document.documentElement.dataset.editorSyncBlocked = 'true';
+              await new Promise<void>(resolve => window.addEventListener('editor-regression.release-sync', () => resolve(), { once: true }));
+              delete document.documentElement.dataset.editorSyncBlocked;
+            }
+          }
           dispatch(event);
           channel.postMessage(event);
           return;
@@ -241,11 +257,22 @@ test('command panel shares unsaved drafts with settings and retains them after a
   await expect(panel.locator('.quicksend-draft-actions')).toContainText('已保存');
   // Backup import reloads the main host while the panel can remain open.
   const hostSession = await panel.locator('html').getAttribute('data-editor-host-session');
+  await panel.evaluate(() => localStorage.setItem('editor-regression.hold-sync', '1'));
   await page.reload();
+  // Hold the transport, not a timer: the reload announcement must not count as
+  // ready while the still-visible rows belong to the previous host session.
+  await expect(panel.locator('html')).toHaveAttribute('data-editor-sync-blocked', 'true');
+  expect(await panel.locator('html').getAttribute('data-editor-host-session')).toBe(hostSession);
+  await panel.evaluate(() => {
+    localStorage.removeItem('editor-regression.hold-sync');
+    window.dispatchEvent(new Event('editor-regression.release-sync'));
+  });
   await expect.poll(() => panel.locator('html').getAttribute('data-editor-host-session')).not.toBe(hostSession);
   await expect(panel.locator('.quicksend-row')).toHaveCount(2);
   const editButton = panel.getByRole('button', { name: '修改', exact: true }).first();
   if (await editButton.getAttribute('aria-expanded') !== 'true') await editButton.click();
+  await expect(panel.getByRole('textbox', { name: '命令内容', exact: true })).toHaveValue('PANEL DRAFT');
+  await expect(panel.locator('[role="alert"]')).toHaveCount(0);
   await panel.getByRole('textbox', { name: '命令内容', exact: true }).fill('AFTER HOST RELOAD');
   await panel.locator('.quicksend-draft-actions').getByRole('button', { name: '保存', exact: true }).click();
   await expect(panel.locator('.quicksend-draft-actions')).toContainText('已保存');

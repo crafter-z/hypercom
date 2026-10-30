@@ -7,7 +7,9 @@ pub const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Resource {
+    #[cfg(any(windows, test))]
     pub bytes: Vec<u8>,
+    #[cfg(any(windows, test))]
     pub mime: &'static str,
 }
 
@@ -19,7 +21,14 @@ pub fn snapshot(dir: &Path, view: &UiView) -> Result<HashMap<String, Resource>, 
         let bytes = read_regular_resource(dir, path)?;
         total = total.checked_add(bytes.len()).ok_or("视图资源总量溢出")?;
         if total > MAX_TOTAL_BYTES { return Err("视图资源总量超过 32 MiB".into()); }
-        resources.insert(path.clone(), Resource { bytes, mime: mime(path) });
+        // All platforms validate resource bytes and budgets; only the native
+        // Windows backend needs to retain the serving payload after validation.
+        resources.insert(path.clone(), Resource {
+            #[cfg(any(windows, test))]
+            bytes,
+            #[cfg(any(windows, test))]
+            mime: mime(path),
+        });
     }
     Ok(resources)
 }
@@ -98,6 +107,7 @@ pub fn read_regular_resource(dir: &Path, relative: &str) -> Result<Vec<u8>, Stri
     Ok(bytes)
 }
 
+#[cfg(any(windows, test))]
 pub fn mime(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
@@ -125,6 +135,10 @@ mod tests {
         fs::create_dir_all(root.join("ui")).unwrap();
         fs::write(root.join("ui/a.png"), [0, 255, 1]).unwrap();
         assert_eq!(read_regular_resource(&root, "ui/a.png").unwrap(), [0, 255, 1]);
+        let view = UiView { id: "image".into(), label: "Image".into(), mode: crate::plugin::ViewMode::Isolated, worker: true, entry: "ui/a.png".into(), styles: vec![], assets: vec![], modes: vec!["trx".into()], input: "none".into(), placements: vec!["workspace-tab".into()], port_binding: "none".into(), restore_on_startup: false };
+        let resources = snapshot(&root, &view).unwrap();
+        assert_eq!(resources["ui/a.png"].bytes, [0, 255, 1]);
+        assert_eq!(resources["ui/a.png"].mime, "image/png");
         assert!(read_regular_resource(&root, "ui").is_err());
         let file = fs::File::create(root.join("ui/large.js")).unwrap();
         file.set_len(MAX_FILE_BYTES + 1).unwrap();

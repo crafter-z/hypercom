@@ -3,11 +3,15 @@ mod timeline;
 #[cfg(windows)]
 mod windows;
 
-use std::{collections::HashMap, sync::{Arc, Mutex, LazyLock, atomic::{AtomicBool, Ordering}}, time::Instant};
+use std::{collections::HashMap, sync::{Arc, Mutex, LazyLock, atomic::{AtomicBool, Ordering}}};
+#[cfg(any(windows, test))]
+use std::time::Instant;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{Emitter, Manager};
+#[cfg(windows)]
+use tauri::Emitter;
+use tauri::Manager;
 use crate::{AppState, commands::CommandError, plugin::{self, UiView}};
 
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
@@ -15,17 +19,23 @@ pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// ordinary interaction bucket (ACK pacing must not be starved by page
 /// interactions), but they must not be completely unthrottled either: every
 /// frame is parsed/emitted on the native UI thread.
+#[cfg(any(windows, test))]
 pub const BINARY_MESSAGE_RATE_PER_SECOND: f64 = 512.0;
+#[cfg(any(windows, test))]
 pub const BINARY_MESSAGE_BURST: f64 = 1024.0;
 /// Cheap pre-parse bounds: both of our senders use UUIDs (36 chars), a bounded
 /// upper seq keeps malformed page values from being forwarded to the frontend.
 pub const MAX_BINARY_TRANSFER_ID_LEN: usize = 128;
 pub const MAX_BINARY_SEQ: u64 = 16_777_216;
+#[cfg(any(windows, test))]
 const TIMELINE_PREVIEW_RATE: f64 = 20.0;
+#[cfg(any(windows, test))]
 const TIMELINE_CONTROL_RATE: f64 = 64.0;
 
 /// Simple monotonic token bucket (fractional refill, capped burst).
+#[cfg(any(windows, test))]
 struct TokenBucket { tokens: f64, updated: Instant }
+#[cfg(any(windows, test))]
 impl TokenBucket {
     fn new(burst: f64) -> Self { Self { tokens: burst, updated: Instant::now() } }
     fn try_take(&mut self, rate: f64, burst: f64) -> bool {
@@ -64,21 +74,28 @@ struct DocumentState { current: Option<String> }
 pub struct Session {
     pub binding: Binding, pub alive: AtomicBool, permission: Option<&'static str>,
     pub trusted_web: bool,
+    #[cfg(windows)]
     rate: Mutex<(Instant, u32)>,
+    #[cfg(any(windows, test))]
     control_rate: Mutex<TokenBucket>,
+    #[cfg(any(windows, test))]
     timeline_preview_rate: Mutex<TokenBucket>,
+    #[cfg(any(windows, test))]
     timeline_control_rate: Mutex<TokenBucket>,
     /// Once set, the first binary rate-limit violation has already retired the
     /// view via `native_error`; later hostile frames must stay silent.
+    #[cfg(windows)]
     binary_rate_reported: AtomicBool,
     document: Mutex<DocumentState>,
 }
 impl Session {
     /// Each top-level navigation retires the previous document identity before
     /// any new page can report ready, so old ACKs/data can never initialize it.
+    #[cfg(any(windows, test))]
     pub fn begin_document(&self, id: &str) {
         if let Ok(mut document) = self.document.lock() { document.current = Some(id.to_string()); }
     }
+    #[cfg(windows)]
     pub fn current_document(&self) -> Option<String> {
         self.document.lock().ok().and_then(|document| document.current.clone())
     }
@@ -87,7 +104,11 @@ impl Session {
     }
 }
 #[derive(Default)]
-struct Registry { live: HashMap<String, Arc<Session>>, binary_rates: HashMap<String, TokenBucket> }
+struct Registry {
+    live: HashMap<String, Arc<Session>>,
+    #[cfg(any(windows, test))]
+    binary_rates: HashMap<String, TokenBucket>,
+}
 fn registry() -> &'static Mutex<Registry> { static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Mutex::default); &REGISTRY }
 
 pub fn require_main(source: &tauri::Webview) -> Result<(), CommandError> {
@@ -168,7 +189,22 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     let resource_view = declaration.clone();
     let resources = tokio::task::spawn_blocking(move || resources::snapshot(&dir, &resource_view))
         .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
-    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)), binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()) });
+    let session = Arc::new(Session {
+        binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration),
+        // Only the native Windows backend receives page callbacks. Keep the pure
+        // rate-limit and document checks available to tests on every platform.
+        #[cfg(windows)]
+        rate: Mutex::new((Instant::now(), 0)),
+        #[cfg(any(windows, test))]
+        control_rate: Mutex::new(TokenBucket::new(128.0)),
+        #[cfg(any(windows, test))]
+        timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)),
+        #[cfg(any(windows, test))]
+        timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
+        #[cfg(windows)]
+        binary_rate_reported: AtomicBool::new(false),
+        document: Mutex::new(DocumentState::default()),
+    });
     if !authorized(source.app_handle(), &session) { return Err(error("视图创建期间授权或安装代次已失效")); }
     {
         let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
@@ -305,9 +341,11 @@ fn retire_registry(id: Option<&str>, plugin: Option<&str>) -> Vec<String> {
     let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
     let ids: Vec<_> = registry.live.iter().filter(|(key, session)| id.is_none_or(|id| id == key.as_str()) && plugin.is_none_or(|plugin| plugin == session.binding.plugin_id)).map(|(id, _)| id.clone()).collect();
     for id in &ids { if let Some(session) = registry.live.remove(id) { session.alive.store(false, Ordering::Release); } }
+    #[cfg(any(windows, test))]
     prune_binary_rates(&mut registry);
     ids
 }
+#[cfg(any(windows, test))]
 fn prune_binary_rates(registry: &mut Registry) {
     let live = &registry.live;
     registry.binary_rates.retain(|plugin, _| live.values().any(|session| session.binding.plugin_id == *plugin));
@@ -339,6 +377,7 @@ pub async fn retire_denied(app: &tauri::AppHandle, plugin: &str, grants: &[Strin
             && (!grants.iter().any(|p| p == "ui:view") || session.permission.is_some_and(|permission| !grants.iter().any(|p| p == permission))))
             .map(|(id, _)| id.clone()).collect();
         for id in &ids { if let Some(session) = registry.live.remove(id) { session.alive.store(false, Ordering::Release); } }
+        #[cfg(any(windows, test))]
         prune_binary_rates(&mut registry);
         ids
     };
@@ -354,6 +393,7 @@ pub fn clear_all() {
     #[cfg(windows)] windows::clear();
 }
 
+#[cfg(any(windows, test))]
 fn inbound_binary_chunk(value: &Value, mut event: Value) -> Option<Value> {
     let transfer_id = binary_transfer_id(value).ok()?;
     let transfer_type = bounded_text(value, "transferType", 128).ok()?;
@@ -370,6 +410,7 @@ fn inbound_binary_chunk(value: &Value, mut event: Value) -> Option<Value> {
     event["data"] = data.into();
     Some(event)
 }
+#[cfg(any(windows, test))]
 fn inbound_binary_ack(value: &Value, mut event: Value) -> Option<Value> {
     let transfer_id = binary_transfer_id(value).ok()?;
     let seq = bounded_binary_seq(value)?;
@@ -390,31 +431,38 @@ fn inbound_binary_ack(value: &Value, mut event: Value) -> Option<Value> {
 /// receive callback is synchronous, so an over-budget frame is dropped before
 /// base64 decoding or event construction; this bounds native UI-thread work even
 /// when a page sends malformed or excessive frames.
+#[cfg(any(windows, test))]
 fn take_plugin_binary_token(registry: &mut Registry, plugin_id: &str, now: Instant) -> bool {
     registry.binary_rates.entry(plugin_id.to_string())
         .or_insert_with(|| TokenBucket::new(BINARY_MESSAGE_BURST))
         .try_take_at(BINARY_MESSAGE_RATE_PER_SECOND, BINARY_MESSAGE_BURST, now)
 }
+#[cfg(windows)]
 fn take_binary_token(session: &Session) -> bool {
     registry().lock().map(|mut registry| take_plugin_binary_token(&mut registry, &session.binding.plugin_id, Instant::now())).unwrap_or(false)
 }
 /// State ACK/ready/error must not compete with the 64/s interaction bucket.
 /// These small controls remain bounded independently, including hostile errors.
+#[cfg(any(windows, test))]
 fn take_control_token(session: &Session) -> bool {
     session.control_rate.lock().map(|mut bucket| bucket.try_take(128.0, 128.0)).unwrap_or(false)
 }
+#[cfg(any(windows, test))]
 fn take_timeline_token(session: &Session, preview: bool, now: Instant) -> bool {
     let (bucket, limit) = if preview { (&session.timeline_preview_rate, TIMELINE_PREVIEW_RATE) } else { (&session.timeline_control_rate, TIMELINE_CONTROL_RATE) };
     bucket.lock().map(|mut bucket| bucket.try_take_at(limit, limit, now)).unwrap_or(false)
 }
+#[cfg(any(windows, test))]
 fn is_control_message(event_type: &str) -> bool {
     matches!(event_type, "state-ack" | "ready" | "error")
 }
+#[cfg(any(windows, test))]
 fn claim_binary_rate_report(reported: &AtomicBool) -> bool {
     reported
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
+#[cfg(windows)]
 pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
     if body.len() > 16 * 1024 || !authorized(app, session) { return; }
     let Ok(value) = serde_json::from_str::<Value>(body) else { return; };
@@ -473,6 +521,7 @@ pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
     };
     let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", event);
 }
+#[cfg(windows)]
 pub fn native_document(app: &tauri::AppHandle, session: &Session, document_id: &str) {
     if authorized(app, session) {
         let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
@@ -480,6 +529,7 @@ pub fn native_document(app: &tauri::AppHandle, session: &Session, document_id: &
         }));
     }
 }
+#[cfg(windows)]
 fn event_document(session: &Session) -> Value {
     session.current_document().map(Value::String).unwrap_or(Value::Null)
 }
@@ -488,6 +538,7 @@ fn event_document(session: &Session) -> Value {
 /// The frontend only arms the (generous) trusted-web ready watchdog after this
 /// signal, so a slow page load is never mistaken for a hung document while a page
 /// that loads but never calls `ready` still fails closed.
+#[cfg(windows)]
 pub fn native_navigation_complete(app: &tauri::AppHandle, session: &Session) {
     if authorized(app, session) {
         let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
@@ -495,6 +546,7 @@ pub fn native_navigation_complete(app: &tauri::AppHandle, session: &Session) {
         }));
     }
 }
+#[cfg(windows)]
 pub fn native_focus(app: &tauri::AppHandle, session: &Session) {
     if authorized(app, session) {
         let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
@@ -502,6 +554,7 @@ pub fn native_focus(app: &tauri::AppHandle, session: &Session) {
         }));
     }
 }
+#[cfg(windows)]
 pub fn native_error(app: &tauri::AppHandle, session: &Session, message: &str) {
     if authorized(app, session) {
         let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
@@ -623,8 +676,12 @@ mod tests {
         let session = Session {
             binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
             alive: AtomicBool::new(true), trusted_web: false, permission: None,
-            rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
-            binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()),
+            #[cfg(windows)]
+            rate: Mutex::new((Instant::now(), 0)),
+            control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
+            #[cfg(windows)]
+            binary_rate_reported: AtomicBool::new(false),
+            document: Mutex::new(DocumentState::default()),
         };
         // An exhausted preview bucket cannot consume the reserved final/ACK
         // controls, nor the unrelated state ACK bucket.

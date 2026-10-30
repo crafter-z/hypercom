@@ -37,6 +37,7 @@ jobs:
         run: |
           npx tsc --noEmit
           npx tsc --noEmit -p tsconfig.node.json
+          npx tsc --noEmit -p tsconfig.e2e.json
 
       - name: unit tests (vitest)
         run: npm run test:run
