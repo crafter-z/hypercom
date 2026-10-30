@@ -10,6 +10,33 @@ use tauri::{Emitter, Manager};
 use crate::{AppState, commands::CommandError, plugin::{self, UiView}};
 
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+/// Page -> native binary frames get their own token bucket instead of the
+/// ordinary interaction bucket (ACK pacing must not be starved by page
+/// interactions), but they must not be completely unthrottled either: every
+/// frame is parsed/emitted on the native UI thread.
+pub const BINARY_MESSAGE_RATE_PER_SECOND: f64 = 512.0;
+pub const BINARY_MESSAGE_BURST: f64 = 1024.0;
+/// Cheap pre-parse bounds: both of our senders use UUIDs (36 chars), a bounded
+/// upper seq keeps malformed page values from being forwarded to the frontend.
+pub const MAX_BINARY_TRANSFER_ID_LEN: usize = 128;
+pub const MAX_BINARY_SEQ: u64 = 16_777_216;
+
+/// Simple monotonic token bucket (fractional refill, capped burst).
+struct TokenBucket { tokens: f64, updated: Instant }
+impl TokenBucket {
+    fn new(burst: f64) -> Self { Self { tokens: burst, updated: Instant::now() } }
+    fn try_take(&mut self, rate: f64, burst: f64) -> bool {
+        self.try_take_at(rate, burst, Instant::now())
+    }
+    fn try_take_at(&mut self, rate: f64, burst: f64, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.updated).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * rate).min(burst);
+        self.updated = now;
+        if self.tokens < 1.0 { return false; }
+        self.tokens -= 1.0;
+        true
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -35,6 +62,10 @@ pub struct Session {
     pub binding: Binding, pub alive: AtomicBool, permission: Option<&'static str>,
     pub trusted_web: bool,
     rate: Mutex<(Instant, u32)>,
+    control_rate: Mutex<TokenBucket>,
+    /// Once set, the first binary rate-limit violation has already retired the
+    /// view via `native_error`; later hostile frames must stay silent.
+    binary_rate_reported: AtomicBool,
     document: Mutex<DocumentState>,
 }
 impl Session {
@@ -51,7 +82,7 @@ impl Session {
     }
 }
 #[derive(Default)]
-struct Registry { live: HashMap<String, Arc<Session>> }
+struct Registry { live: HashMap<String, Arc<Session>>, binary_rates: HashMap<String, TokenBucket> }
 fn registry() -> &'static Mutex<Registry> { static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Mutex::default); &REGISTRY }
 
 pub fn require_main(source: &tauri::Webview) -> Result<(), CommandError> {
@@ -82,38 +113,43 @@ fn session(id: &str, app: &tauri::AppHandle) -> Result<Arc<Session>, CommandErro
 
 pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) -> Result<(), CommandError> {
     require_main(&source)?;
-    for identity in [&binding.view_instance_id, &binding.tab_session_id, &binding.tab_id] {
+    for identity in [&binding.view_instance_id, &binding.tab_session_id, &binding.tab_id, &binding.install_generation] {
         if uuid::Uuid::parse_str(identity).is_err() { return Err(error("视图会话身份必须为 UUID")); }
     }
     plugin::validate_plugin_id(&binding.plugin_id).map_err(error)?;
-    let _io = state.plugin_io.lock().await;
-    let (dir, declaration, web_data_dir) = {
+    let _io = crate::commands::acquire_plugin_io(state).await?;
+    // Snapshot memory-only authority under config lock. Full resource reads must
+    // never block unrelated configuration saves while holding that lock.
+    let (plugins_dir, entry) = {
         let manager = state.config_manager.lock().map_err(|e| error(e.to_string()))?;
-        let config = manager.get_config();
-        let entry = config.entities.plugin_configs.iter().find(|e| e.id == binding.plugin_id).ok_or_else(|| error("插件未安装"))?;
-        if !entry.enabled || binding.install_generation.is_empty() || entry.install_generation != binding.install_generation {
+        let entry = manager.get_config().entities.plugin_configs.iter().find(|e| e.id == binding.plugin_id).cloned().ok_or_else(|| error("插件未安装"))?;
+        if !entry.enabled || entry.install_generation != binding.install_generation {
             return Err(error("插件未启用或安装代次失效"));
         }
-        let dir = manager.plugins_dir().join(&binding.plugin_id);
-        let manifest = plugin::load_manifest_from_dir(&dir).map_err(error)?;
-        if manifest.id != binding.plugin_id { return Err(error("插件目录身份不匹配")); }
-        let view = manifest.ui.as_ref().and_then(|ui| ui.views.iter().find(|v| v.id == binding.view_id)).ok_or_else(|| error("未声明视图"))?.clone();
-        if view.is_trusted_web() && !entry.trusted_web_granted {
-            return Err(error("可信网页尚未获得独立授权"));
-        }
-        for permission in std::iter::once("ui:view").chain(input_permission(&view)) {
-            if !manifest.permissions.iter().any(|p| p == permission) || !entry.granted_permissions.iter().any(|p| p == permission) {
-                return Err(error(format!("视图缺少权限 {permission}")));
-            }
-        }
-        validate_binding(&binding, &view)?;
-        if binding.bound_port_id.is_some() {
-            let mode = binding.port_mode.as_deref().ok_or_else(|| error("视图缺少当前端口工作模式"))?;
-            if !["trx", "tty"].contains(&mode) || !view.modes.iter().any(|m| m == mode) { return Err(error("视图不支持端口工作模式")); }
-        } else if binding.port_mode.is_some() { return Err(error("无端口视图不得声明端口模式")); }
-        let web_data_dir = view.is_trusted_web().then(|| plugin::web_data_dir(manager.plugins_dir(), &binding.plugin_id));
-        (dir, view, web_data_dir)
+        (manager.plugins_dir().to_path_buf(), entry)
     };
+    let dir = plugins_dir.join(&binding.plugin_id);
+    let manifest_dir = dir.clone();
+    let manifest = tokio::task::spawn_blocking(move || plugin::load_manifest_lite(&manifest_dir))
+        .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
+    if manifest.id != binding.plugin_id { return Err(error("插件目录身份不匹配")); }
+    let declaration = manifest.ui.as_ref().and_then(|ui| ui.views.iter().find(|v| v.id == binding.view_id)).ok_or_else(|| error("未声明视图"))?.clone();
+    if declaration.is_trusted_web() && !entry.trusted_web_granted {
+        return Err(error("可信网页尚未获得独立授权"));
+    }
+    for permission in std::iter::once("ui:view").chain(input_permission(&declaration)) {
+        if !manifest.permissions.iter().any(|p| p == permission) || !entry.granted_permissions.iter().any(|p| p == permission) {
+            return Err(error(format!("视图缺少权限 {permission}")));
+        }
+    }
+    validate_binding(&binding, &declaration)?;
+    if binding.bound_port_id.is_some() {
+        let mode = binding.port_mode.as_deref().ok_or_else(|| error("视图缺少当前端口工作模式"))?;
+        if !["trx", "tty"].contains(&mode) || !declaration.modes.iter().any(|m| m == mode) { return Err(error("视图不支持端口工作模式")); }
+    } else if binding.port_mode.is_some() { return Err(error("无端口视图不得声明端口模式")); }
+    let web_data_dir = if declaration.is_trusted_web() {
+        Some(plugin::web_data_dir(&plugins_dir, &binding.plugin_id, &binding.install_generation).map_err(error)?)
+    } else { None };
     if let Some(port) = binding.bound_port_id.clone() {
         let manager = state.serial_manager.clone();
         let ports = tokio::task::spawn_blocking(move || crate::serial::list_ports_blocking(&manager))
@@ -122,8 +158,13 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
             return Err(error("视图绑定端口不存在"));
         }
     }
-    let resources = resources::snapshot(&dir, &declaration).map_err(error)?;
-    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)), document: Mutex::new(DocumentState::default()) });
+    // Validate and snapshot only the selected view, once, off the async worker.
+    // Install/enable/reload retain their complete package validation boundary.
+    let resource_view = declaration.clone();
+    let resources = tokio::task::spawn_blocking(move || resources::snapshot(&dir, &resource_view))
+        .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
+    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)), binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()) });
+    if !authorized(source.app_handle(), &session) { return Err(error("视图创建期间授权或安装代次已失效")); }
     {
         let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
         if registry.live.len() >= 16
@@ -182,10 +223,25 @@ fn bounded_text<'a>(message: &'a Value, key: &str, maximum: usize) -> Result<&'a
         .filter(|value| !value.is_empty() && value.len() <= maximum)
         .ok_or_else(|| format!("视图消息 {key} 非法"))
 }
+/// Cheap transfer-id gate applied to both directions before emitting/parsing
+/// further: our senders only produce UUIDs, so a strict charset keeps malformed
+/// or hostile frames from reaching the browser process at all.
+fn valid_binary_transfer_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_BINARY_TRANSFER_ID_LEN
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+fn binary_transfer_id(message: &Value) -> Result<&str, String> {
+    let transfer_id = bounded_text(message, "transferId", MAX_BINARY_TRANSFER_ID_LEN)?;
+    if !valid_binary_transfer_id(transfer_id) { return Err("视图二进制传输标识非法".into()); }
+    Ok(transfer_id)
+}
+fn bounded_binary_seq(message: &Value) -> Option<u64> {
+    message.get("seq").and_then(Value::as_u64).filter(|seq| *seq < MAX_BINARY_SEQ)
+}
 fn validate_binary_chunk(message: &Value) -> Result<(), String> {
-    bounded_text(message, "transferId", 128)?;
+    binary_transfer_id(message)?;
     bounded_text(message, "transferType", 128)?;
-    message.get("seq").and_then(Value::as_u64).ok_or("视图二进制序号非法")?;
+    bounded_binary_seq(message).ok_or("视图二进制序号非法")?;
     message.get("done").and_then(Value::as_bool).ok_or("视图二进制完成标记非法")?;
     let data = message.get("data").and_then(Value::as_str).ok_or("视图二进制分片非法")?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "视图二进制分片编码非法")?;
@@ -193,8 +249,8 @@ fn validate_binary_chunk(message: &Value) -> Result<(), String> {
     Ok(())
 }
 fn validate_binary_ack(message: &Value) -> Result<(), String> {
-    bounded_text(message, "transferId", 128)?;
-    message.get("seq").and_then(Value::as_u64).ok_or("视图二进制确认序号非法")?;
+    binary_transfer_id(message)?;
+    bounded_binary_seq(message).ok_or("视图二进制确认序号非法")?;
     message.get("done").and_then(Value::as_bool).ok_or("视图二进制确认完成标记非法")?;
     message.get("ok").and_then(Value::as_bool).ok_or("视图二进制确认状态非法")?;
     if message.get("error").is_some_and(|value| !value.is_string() || value.as_str().is_some_and(|text| text.len() > 2048)) {
@@ -242,7 +298,12 @@ fn retire_registry(id: Option<&str>, plugin: Option<&str>) -> Vec<String> {
     let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
     let ids: Vec<_> = registry.live.iter().filter(|(key, session)| id.is_none_or(|id| id == key.as_str()) && plugin.is_none_or(|plugin| plugin == session.binding.plugin_id)).map(|(id, _)| id.clone()).collect();
     for id in &ids { if let Some(session) = registry.live.remove(id) { session.alive.store(false, Ordering::Release); } }
+    prune_binary_rates(&mut registry);
     ids
+}
+fn prune_binary_rates(registry: &mut Registry) {
+    let live = &registry.live;
+    registry.binary_rates.retain(|plugin, _| live.values().any(|session| session.binding.plugin_id == *plugin));
 }
 pub async fn retire_plugin(app: &tauri::AppHandle, plugin: &str) -> Result<(), CommandError> {
     let ids = retire_registry(None, Some(plugin));
@@ -271,6 +332,7 @@ pub async fn retire_denied(app: &tauri::AppHandle, plugin: &str, grants: &[Strin
             && (!grants.iter().any(|p| p == "ui:view") || session.permission.is_some_and(|permission| !grants.iter().any(|p| p == permission))))
             .map(|(id, _)| id.clone()).collect();
         for id in &ids { if let Some(session) = registry.live.remove(id) { session.alive.store(false, Ordering::Release); } }
+        prune_binary_rates(&mut registry);
         ids
     };
     on_ui(app, move || { #[cfg(windows)] for id in ids { windows::destroy(&id); } #[cfg(not(windows))] let _ = ids; Ok(()) }).await
@@ -286,9 +348,9 @@ pub fn clear_all() {
 }
 
 fn inbound_binary_chunk(value: &Value, mut event: Value) -> Option<Value> {
-    let transfer_id = bounded_text(value, "transferId", 128).ok()?;
+    let transfer_id = binary_transfer_id(value).ok()?;
     let transfer_type = bounded_text(value, "transferType", 128).ok()?;
-    let seq = value.get("seq").and_then(Value::as_u64)?;
+    let seq = bounded_binary_seq(value)?;
     let done = value.get("done").and_then(Value::as_bool)?;
     let data = value.get("data").and_then(Value::as_str)?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
@@ -302,8 +364,8 @@ fn inbound_binary_chunk(value: &Value, mut event: Value) -> Option<Value> {
     Some(event)
 }
 fn inbound_binary_ack(value: &Value, mut event: Value) -> Option<Value> {
-    let transfer_id = bounded_text(value, "transferId", 128).ok()?;
-    let seq = value.get("seq").and_then(Value::as_u64)?;
+    let transfer_id = binary_transfer_id(value).ok()?;
+    let seq = bounded_binary_seq(value)?;
     let done = value.get("done").and_then(Value::as_bool)?;
     let ok = value.get("ok").and_then(Value::as_bool)?;
     event["type"] = "binary-ack".into();
@@ -316,15 +378,53 @@ fn inbound_binary_ack(value: &Value, mut event: Value) -> Option<Value> {
     }
     Some(event)
 }
+
+/// Binary traffic has a separate budget from ordinary UI messages. The native
+/// receive callback is synchronous, so an over-budget frame is dropped before
+/// base64 decoding or event construction; this bounds native UI-thread work even
+/// when a page sends malformed or excessive frames.
+fn take_plugin_binary_token(registry: &mut Registry, plugin_id: &str, now: Instant) -> bool {
+    registry.binary_rates.entry(plugin_id.to_string())
+        .or_insert_with(|| TokenBucket::new(BINARY_MESSAGE_BURST))
+        .try_take_at(BINARY_MESSAGE_RATE_PER_SECOND, BINARY_MESSAGE_BURST, now)
+}
+fn take_binary_token(session: &Session) -> bool {
+    registry().lock().map(|mut registry| take_plugin_binary_token(&mut registry, &session.binding.plugin_id, Instant::now())).unwrap_or(false)
+}
+/// State ACK/ready/error must not compete with the 64/s interaction bucket.
+/// These small controls remain bounded independently, including hostile errors.
+fn take_control_token(session: &Session) -> bool {
+    session.control_rate.lock().map(|mut bucket| bucket.try_take(128.0, 128.0)).unwrap_or(false)
+}
+fn is_control_message(event_type: &str) -> bool {
+    matches!(event_type, "state-ack" | "ready" | "error")
+}
+fn claim_binary_rate_report(reported: &AtomicBool) -> bool {
+    reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
 pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
     if body.len() > 16 * 1024 || !authorized(app, session) { return; }
     let Ok(value) = serde_json::from_str::<Value>(body) else { return; };
     let Some(document_id) = value.get("documentId").and_then(Value::as_str) else { return; };
     if uuid::Uuid::parse_str(document_id).is_err() || !session.accepts_document(document_id) { return; }
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-    if event_type != "binary-chunk" && event_type != "binary-ack" {
-        // Binary backpressure is chunk ACKs; do not spend or drop it through the
-        // ordinary UI interaction bucket. Everything else stays rate limited.
+    if event_type == "binary-chunk" || event_type == "binary-ack" {
+        // Binary traffic has its own budget so a burst of frames cannot starve
+        // ordinary interaction messages (or spend their bucket). This check is
+        // deliberately before base64 decoding and event construction. Retire
+        // once on the first violation so legitimate senders settle their pending
+        // ACKs, then stay silent for any hostile follow-up burst.
+        if !take_binary_token(session) {
+            if claim_binary_rate_report(&session.binary_rate_reported) {
+                native_error(app, session, "插件视图二进制帧速率超限");
+            }
+            return;
+        }
+    } else if is_control_message(event_type) {
+        if !take_control_token(session) { return; }
+    } else {
         let Ok(mut rate) = session.rate.lock() else { return; };
         if rate.0.elapsed().as_secs_f64() >= 1.0 { *rate = (Instant::now(), 0); }
         rate.1 += 1;
@@ -361,6 +461,18 @@ pub fn native_document(app: &tauri::AppHandle, session: &Session, document_id: &
 }
 fn event_document(session: &Session) -> Value {
     session.current_document().map(Value::String).unwrap_or(Value::Null)
+}
+/// Report that the current document finished navigating successfully.
+///
+/// The frontend only arms the (generous) trusted-web ready watchdog after this
+/// signal, so a slow page load is never mistaken for a hung document while a page
+/// that loads but never calls `ready` still fails closed.
+pub fn native_navigation_complete(app: &tauri::AppHandle, session: &Session) {
+    if authorized(app, session) {
+        let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", serde_json::json!({
+            "instanceId": session.binding.view_instance_id, "documentId": event_document(session), "type": "navigation-complete",
+        }));
+    }
 }
 pub fn native_focus(app: &tauri::AppHandle, session: &Session) {
     if authorized(app, session) {
@@ -416,7 +528,7 @@ mod tests {
     #[test]
     fn validates_occlusion_contract() {
         let rect = OcclusionRect { x: -10.0, y: 20.0, width: 30.0, height: 40.0 };
-        assert!(validate_occlusions(Some(&[rect.clone()])).is_ok());
+        assert!(validate_occlusions(Some(std::slice::from_ref(&rect))).is_ok());
         assert!(validate_occlusions(Some(&[OcclusionRect { width: -1.0, ..rect }])).is_err());
         let rect = OcclusionRect { x: -10.0, y: 20.0, width: 30.0, height: 40.0 };
         assert!(validate_occlusions(Some(&[OcclusionRect { x: f64::NAN, ..rect }])).is_err());
@@ -443,6 +555,102 @@ mod tests {
         assert!(validate_binary_chunk(&oversized).is_err());
         assert!(validate_binary_chunk(&serde_json::json!({"transferId": "", "transferType": "data", "seq": 0u64, "done": true, "data": ""})).is_err());
     }
+    #[test]
+    fn binary_token_bucket_enforces_burst_and_refills_deterministically() {
+        let start = Instant::now();
+        let mut bucket = TokenBucket { tokens: BINARY_MESSAGE_BURST, updated: start };
+        for _ in 0..BINARY_MESSAGE_BURST as usize {
+            assert!(bucket.try_take_at(BINARY_MESSAGE_RATE_PER_SECOND, BINARY_MESSAGE_BURST, start));
+        }
+        assert!(!bucket.try_take_at(BINARY_MESSAGE_RATE_PER_SECOND, BINARY_MESSAGE_BURST, start));
+        let refilled = start + std::time::Duration::from_millis(2);
+        assert!(bucket.try_take_at(BINARY_MESSAGE_RATE_PER_SECOND, BINARY_MESSAGE_BURST, refilled));
+    }
+
+    #[test]
+    fn binary_rate_is_shared_across_views_of_a_plugin_but_not_other_plugins() {
+        let mut registry = Registry::default();
+        // A nearly empty shared bucket models two views spending the same owner.
+        let now = Instant::now();
+        registry.binary_rates.insert("a".into(), TokenBucket { tokens: 1.0, updated: now });
+        assert!(take_plugin_binary_token(&mut registry, "a", now));
+        assert!(!take_plugin_binary_token(&mut registry, "a", now));
+        assert!(take_plugin_binary_token(&mut registry, "b", now));
+        prune_binary_rates(&mut registry);
+        assert!(registry.binary_rates.is_empty());
+    }
+
+    #[test]
+    fn state_and_ready_controls_have_an_independent_bounded_bucket() {
+        assert!(is_control_message("state-ack"));
+        assert!(is_control_message("ready"));
+        assert!(is_control_message("error"));
+        assert!(!is_control_message("ui-message"));
+        assert!(!is_control_message("binary-ack"));
+        let now = Instant::now();
+        let mut interactions = TokenBucket { tokens: 64.0, updated: now };
+        let mut controls = TokenBucket { tokens: 128.0, updated: now };
+        for _ in 0..64 { assert!(interactions.try_take_at(64.0, 64.0, now)); }
+        assert!(!interactions.try_take_at(64.0, 64.0, now));
+        // A full interaction burst cannot spend any of the state ACK allowance.
+        for _ in 0..128 { assert!(controls.try_take_at(128.0, 128.0, now)); }
+        assert!(!controls.try_take_at(128.0, 128.0, now));
+    }
+
+    #[test]
+    fn documents_reject_replaced_and_unknown_identities() {
+        let session = Session {
+            binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
+            alive: AtomicBool::new(true), trusted_web: false, permission: None,
+            rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)),
+            binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()),
+        };
+        assert!(!session.accepts_document("unknown"));
+        session.begin_document("old-document"); assert!(session.accepts_document("old-document"));
+        session.begin_document("new-document");
+        assert!(!session.accepts_document("old-document")); assert!(session.accepts_document("new-document"));
+        assert!(document_identity(&serde_json::json!({})).is_err());
+        assert!(document_identity(&serde_json::json!({ "documentId": "" })).is_err());
+        assert!(document_identity(&serde_json::json!({ "documentId": "a".repeat(65) })).is_err());
+        assert_eq!(document_identity(&serde_json::json!({ "documentId": "new-document" })).unwrap(), "new-document");
+    }
+
+    #[test]
+    fn binary_rate_limit_error_is_claimed_once() {
+        let reported = AtomicBool::new(false);
+        assert!(claim_binary_rate_report(&reported));
+        assert!(reported.load(Ordering::Acquire));
+        assert!(!claim_binary_rate_report(&reported));
+    }
+
+    #[test]
+    fn inbound_binary_envelope_reuses_strict_id_and_sequence_bounds() {
+        assert!(inbound_binary_chunk(&serde_json::json!({
+            "transferId": "transfer-1", "transferType": "data", "seq": 0u64,
+            "done": true, "data": ""
+        }), serde_json::json!({})).is_some());
+        for transfer_id in ["", "../escape", "含有中文"] {
+            assert!(inbound_binary_chunk(&serde_json::json!({
+                "transferId": transfer_id, "transferType": "data", "seq": 0u64,
+                "done": true, "data": ""
+            }), serde_json::json!({})).is_none());
+        }
+        assert!(inbound_binary_chunk(&serde_json::json!({
+            "transferId": "transfer-1", "transferType": "data", "seq": MAX_BINARY_SEQ,
+            "done": true, "data": ""
+        }), serde_json::json!({})).is_none());
+        assert!(inbound_binary_ack(&serde_json::json!({
+            "transferId": "transfer-1", "seq": MAX_BINARY_SEQ, "done": true, "ok": true
+        }), serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn binary_transfer_validation_rejects_unsafe_identifiers() {
+        assert!(!valid_binary_transfer_id("../transfer"));
+        assert!(!valid_binary_transfer_id("传输"));
+        assert!(valid_binary_transfer_id("transfer_1.v2-3"));
+    }
+
     #[test]
     fn validates_fixed_port_and_placement_contract() {
         let view = UiView { id: "table".into(), label: "Table".into(), mode: plugin::ViewMode::Isolated, worker: true, entry: "ui/main.js".into(), styles: vec![], assets: vec![], modes: vec!["trx".into()], input: "bytes".into(), placements: vec!["workspace-tab".into()], port_binding: "required".into(), restore_on_startup: false };

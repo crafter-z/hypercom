@@ -207,7 +207,43 @@ pub struct PluginPickedFiles {
 }
 
 fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
-    let bytes = std::fs::read(&path)
+    // A native picker can still return a device, FIFO, socket, or a link. Do not
+    // let an apparently selected path turn into an unbounded/hanging read.
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?;
+    if !metadata.is_file() || crate::plugin::is_link_or_reparse(&metadata) {
+        return Err(CommandError::Other(
+            "Selected path is not an ordinary file".into(),
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(
+            windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|e| CommandError::Io(format!("Cannot open selected file: {e}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| CommandError::Io(format!("Cannot stat selected file: {e}")))?;
+    if !opened.is_file() || crate::plugin::is_link_or_reparse(&opened) {
+        return Err(CommandError::Other(
+            "Selected path changed into a non-ordinary file".into(),
+        ));
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
         .map_err(|e| CommandError::Io(format!("Cannot read selected file: {e}")))?;
     Ok(PluginPickedFile {
         path: path.display().to_string(),
@@ -248,7 +284,7 @@ pub async fn plugin_pick_files(
             return Err(CommandError::Other("插件未启用或未授予 fs:open".into()));
         }
         let manifest =
-            crate::plugin::load_manifest_from_dir(&manager.plugins_dir().join(&plugin_id))
+            crate::plugin::load_manifest_lite(&manager.plugins_dir().join(&plugin_id))
                 .map_err(CommandError::Other)?;
         if manifest.id != plugin_id || !manifest.permissions.iter().any(|perm| perm == "fs:open") {
             return Err(CommandError::Other("插件未声明 fs:open".into()));
@@ -542,6 +578,19 @@ mod tests {
     fn picked_file_missing_path_is_error() {
         let path = unique_temp_path("map");
         let err = read_picked_file(path).err().unwrap();
-        assert!(err.to_string().contains("Cannot read selected file"));
+        assert!(err.to_string().contains("selected file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picked_file_rejects_symbolic_links_before_reading() {
+        let target = unique_temp_path("target");
+        let link = unique_temp_path("link");
+        std::fs::write(&target, b"secret").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = read_picked_file(link.clone()).unwrap_err();
+        assert!(err.to_string().contains("ordinary file"));
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
     }
 }

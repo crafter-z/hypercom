@@ -15,6 +15,7 @@
  * 2) 解析前的 `strip_legacy_memory_budget_keys`：在 Value 层物理删除已被取代的旧 key；
  * 3) 解析后的 `normalize_legacy_serial_enums`：把持久化实体里已收窄的自由字符串枚举
  *    （端口预设的帧格式）一次性收敛到合法取值，下次 save 落盘即已归一。
+ *
  * 曾有的 `configVersion` 是「每次 set_config 无条件重写为 1」的装饰品——既不参与分派
  * 也不影响解析（旧值只是被 serde 当未知字段丢弃），故删除。
  */
@@ -36,7 +37,6 @@ pub const CONFIG_BOUNDS: &[(&str, i64, i64)] = &[
     ("maxDisplayLines", 1000, 1000000),
     ("maxRetries", 1, 10),
     ("logSplitSizeMb", 1, 10240),
-    ("backupInterval", 1, 720),
     ("quickSendInlineCount", 0, 20),
     ("backgroundImageOpacity", 0, 100),
     ("backgroundImageBlur", 0, 64),
@@ -338,11 +338,6 @@ pub struct AppConfig {
     /// 每次打开串口新建日志文件（不续写已有文件）：true 时每次连接都从空文件开始
     pub log_new_file_per_session: bool,
 
-    // --- 备份设置 ---
-    pub backup_enabled: bool,
-    /// 小时
-    pub backup_interval: u32,
-    pub backup_directory: String,
 
     // --- 会话恢复 ---
     pub restore_session: bool,
@@ -409,9 +404,6 @@ impl Default for AppConfig {
             // issue #5-10：日志子目录策略默认按日期分文件夹。
             log_subdir_mode: "date".to_string(),
             log_new_file_per_session: false,
-            backup_enabled: false,
-            backup_interval: 24,
-            backup_directory: String::new(),
             restore_session: true,
             diag_log_enabled: true,
             // issue #12：自动更新默认「定期检查到正式版」（用户决策，2026-08-15）。
@@ -457,6 +449,14 @@ fn strip_legacy_memory_budget_keys(raw: &str) -> Option<serde_json::Value> {
 /// 比解析集合**窄**会把合法值误改成默认值（用户静默丢配置），比它**宽**则会放过非法值。
 /// 新增帧格式取值时两处一起改（parse_* 旁边有对应提示）。
 fn normalize_legacy_serial_enums(config: &mut AppConfig) {
+    // The old bookmark action became alert. Normalize the loaded baseline, not
+    // only the frontend runtime, otherwise merely opening an entity editor makes
+    // an untouched legacy rule appear dirty.
+    for rule in &mut config.entities.trigger_rules {
+        if rule.action_type == "bookmark" {
+            rule.action_type = "alert".into();
+        }
+    }
     // 与 `parse_parity` 接受集合逐项相等。
     const PARITIES: &[&str] = &["None", "Even", "Odd"];
     // 与 `parse_stop_bits` 接受集合逐项相等。
@@ -481,7 +481,7 @@ fn normalize_legacy_serial_enums(config: &mut AppConfig) {
             );
             preset.stop_bits = "One".to_string();
         }
-        if !matches!(preset.data_bits, 5 | 6 | 7 | 8) {
+        if !matches!(preset.data_bits, 5..=8) {
             log::info!(
                 "Migrated port preset {} data bits {} -> 8",
                 preset.id,
@@ -502,6 +502,12 @@ fn normalize_legacy_serial_enums(config: &mut AppConfig) {
 
 // ==================== ConfigManager ====================
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginRecoveryMarker {
+    version: u8,
+}
+
 pub struct ConfigManager {
     config: AppConfig,
     config_path: PathBuf,
@@ -515,6 +521,68 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
+    fn plugin_recovery_marker_path(&self) -> PathBuf {
+        self.config_path.with_file_name("plugin-trust-recovery.json")
+    }
+
+    /// Persist the fail-closed marker before changing any plugin trust state.
+    pub(crate) fn begin_plugin_recovery_marker(&self) -> anyhow::Result<()> {
+        let marker = self.plugin_recovery_marker_path();
+        let temporary = marker.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        let result = (|| -> anyhow::Result<()> {
+            serde_json::to_writer(&mut file, &PluginRecoveryMarker { version: 1 })?;
+            file.flush()?;
+            file.sync_all()?;
+            crate::plugin::transaction::replace_file(&temporary, &marker)?;
+            crate::plugin::transaction::sync_dir(self.config_path.parent().unwrap_or_else(|| Path::new(".")))?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = fs::remove_file(&temporary); }
+        result
+    }
+
+    /// Remove the marker only after both primary and safe backup are durable.
+    pub(crate) fn clear_plugin_recovery_marker(&self) -> anyhow::Result<()> {
+        let marker = self.plugin_recovery_marker_path();
+        match fs::symlink_metadata(&marker) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => fs::remove_file(&marker)?,
+            Ok(_) => return Err(anyhow::anyhow!("插件信任恢复标记不是普通文件")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        crate::plugin::transaction::sync_dir(self.config_path.parent().unwrap_or_else(|| Path::new(".")))?;
+        Ok(())
+    }
+
+    /// Recover any interrupted plugin trust mutation before config is exposed.
+    fn recover_plugin_recovery_marker(&mut self) -> anyhow::Result<()> {
+        let marker = self.plugin_recovery_marker_path();
+        let metadata = match fs::symlink_metadata(&marker) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 {
+            return Err(anyhow::anyhow!("插件信任恢复标记不安全"));
+        }
+        let marker_value: PluginRecoveryMarker = serde_json::from_slice(&fs::read(&marker)?)?;
+        if marker_value.version != 1 {
+            return Err(anyhow::anyhow!("未知插件信任恢复标记版本"));
+        }
+        // The marker intentionally carries no identity: a crash during restore,
+        // revoke, or generation replacement must fail closed for every plugin.
+        for entry in &mut self.config.entities.plugin_configs {
+            entry.enabled = false;
+            entry.trusted_web_granted = false;
+            entry.granted_permissions.clear();
+        }
+        self.save()?;
+        self.save_safe_backup()?;
+        self.clear_plugin_recovery_marker()?;
+        Ok(())
+    }
+
     /// 创建配置管理器。
     ///
     /// 配置文件路径按优先级解析：
@@ -626,6 +694,7 @@ impl ConfigManager {
             manager.save()?;
             manager.save_safe_backup()?;
         }
+        manager.recover_plugin_recovery_marker()?;
         Ok(manager)
     }
 
@@ -671,7 +740,6 @@ impl ConfigManager {
         config.max_retries = clamp_bound("maxRetries", config.max_retries as i64) as u8;
         config.log_split_size_mb =
             clamp_bound("logSplitSizeMb", config.log_split_size_mb as i64) as u32;
-        config.backup_interval = clamp_bound("backupInterval", config.backup_interval as i64) as u32;
         config.quick_send_inline_count =
             clamp_bound("quickSendInlineCount", config.quick_send_inline_count as i64) as u32;
         config.background_image_opacity =
@@ -905,6 +973,68 @@ mod tests {
     }
 
     #[test]
+    fn plugin_recovery_marker_clears_trust_and_self_cleans() {
+        let root = std::env::temp_dir().join(format!("plugin_marker_recovery_{}", uuid::Uuid::new_v4()));
+        let path = root.join("config.json");
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        manager.get_config_mut().entities.plugin_configs.push(PluginConfigEntry {
+            id: "com.example.marker".into(),
+            install_generation: uuid::Uuid::new_v4().to_string(),
+            enabled: true,
+            trusted_web_granted: true,
+            granted_permissions: vec!["http:request".into()],
+            installed_at: Some(1),
+            source: Some("dir".into()),
+        });
+        manager.save().unwrap();
+        manager.begin_plugin_recovery_marker().unwrap();
+        drop(manager);
+
+        let recovered = ConfigManager::new(Some(path.clone())).unwrap();
+        let entry = &recovered.get_config().entities.plugin_configs[0];
+        assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
+        assert!(entry.granted_permissions.is_empty());
+        assert!(!path.with_file_name("plugin-trust-recovery.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retained_marker_prevents_old_backup_authorization_after_primary_corruption() {
+        let root = std::env::temp_dir().join(format!("plugin_marker_failclosed_{}", uuid::Uuid::new_v4()));
+        let path = root.join("config.json");
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        manager.get_config_mut().entities.plugin_configs.push(PluginConfigEntry {
+            id: "com.example.marker".into(),
+            install_generation: uuid::Uuid::new_v4().to_string(),
+            enabled: true,
+            trusted_web_granted: true,
+            granted_permissions: vec!["http:request".into()],
+            installed_at: Some(1),
+            source: Some("dir".into()),
+        });
+        manager.save().unwrap();
+        manager.save_safe_backup().unwrap();
+        // Simulate a committed primary revocation whose safe-backup refresh failed:
+        // marker remains while the old .bak still contains authorization.
+        manager.begin_plugin_recovery_marker().unwrap();
+        manager.get_config_mut().entities.plugin_configs[0].enabled = false;
+        manager.get_config_mut().entities.plugin_configs[0].trusted_web_granted = false;
+        manager.get_config_mut().entities.plugin_configs[0].granted_permissions.clear();
+        manager.save().unwrap();
+        drop(manager);
+        fs::write(&path, "corrupt primary").unwrap();
+
+        let recovered = ConfigManager::new(Some(path.clone())).unwrap();
+        let entry = &recovered.get_config().entities.plugin_configs[0];
+        assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
+        assert!(entry.granted_permissions.is_empty());
+        assert!(!path.with_file_name("plugin-trust-recovery.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn session_snapshot_replaces_an_existing_snapshot() {
         let root = std::env::temp_dir().join(format!("hypercom_session_replace_{}", uuid::Uuid::new_v4()));
         let manager = ConfigManager::new(Some(root.join("config.json"))).unwrap();
@@ -935,7 +1065,6 @@ mod tests {
         "timestampMode": "perLine", "autoSaveLog": true, "logDirectory": "",
         "logFilenameFormat": "[com]-[datetime]", "logFormat": "string",
         "logEncoding": "UTF-8", "logSplitEnabled": true, "logSplitSizeMb": 100,
-        "backupEnabled": false, "backupInterval": 24, "backupDirectory": "",
         "hasSeenTour": false, "restoreSession": true,
         "sendCommandSets": [], "highlightRuleSets": [], "protocolTemplates": [],
         "triggerRules": [], "portPresets": [], "portToolConfigs": [], "portGroups": []
@@ -993,7 +1122,6 @@ mod tests {
         assert_eq!(cfg.log_split_size_mb, 100);
         // issue #5-10：日志子目录策略默认按日期分文件夹
         assert_eq!(cfg.log_subdir_mode, "date");
-        assert!(!cfg.backup_enabled);
         assert!(cfg.restore_session);
         assert!(cfg.diag_log_enabled);
     }
@@ -1190,6 +1318,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bookmark_action_is_normalized_in_the_loaded_baseline() {
+        let dir = std::env::temp_dir().join(format!("hypercom_trigger_migration_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let raw = legacy_json(serde_json::json!({
+            "triggerRules": [
+                {"id":"legacy", "name":"keep name", "pattern":"ready", "isRegex":false,
+                 "matchType":"contains", "actionType":"bookmark", "actionContent":"keep content",
+                 "actionIsHex":false, "isEnabled":true},
+                {"id":"current", "name":"current", "pattern":"ok", "isRegex":false,
+                 "matchType":"contains", "actionType":"alert", "actionContent":"unchanged",
+                 "actionIsHex":false, "isEnabled":false}
+            ]
+        }));
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        let rules = &manager.get_config().entities.trigger_rules;
+        assert_eq!(rules[0].action_type, "alert");
+        assert_eq!(rules[0].name, "keep name");
+        assert_eq!(rules[0].action_content, "keep content");
+        assert_eq!(rules[1].action_type, "alert");
+        assert!(!rules[1].is_enabled);
+        manager.save().unwrap();
+        let reloaded = ConfigManager::new(Some(path)).unwrap();
+        assert_eq!(serde_json::to_value(&manager.get_config().entities.trigger_rules).unwrap(),
+            serde_json::to_value(&reloaded.get_config().entities.trigger_rules).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn test_trigger_rule_port_id_optional() {
         // issue #3-1：旧 config.json 的 trigger 规则没有 portId，反序列化回退 None；
         // 新规则带 portId 时 camelCase 序列化往返一致。
@@ -1241,7 +1399,6 @@ mod tests {
             max_display_lines: 1,
             max_retries: u8::MAX,
             log_split_size_mb: 0,
-            backup_interval: u32::MAX,
             quick_send_inline_count: u32::MAX,
             background_image_opacity: u32::MAX,
             background_image_blur: u32::MAX,
@@ -1254,7 +1411,6 @@ mod tests {
         assert_eq!(cfg.max_display_lines as i64, bound("maxDisplayLines").0);
         assert_eq!(cfg.max_retries as i64, bound("maxRetries").1);
         assert_eq!(cfg.log_split_size_mb as i64, bound("logSplitSizeMb").0);
-        assert_eq!(cfg.backup_interval as i64, bound("backupInterval").1);
         assert_eq!(cfg.quick_send_inline_count as i64, bound("quickSendInlineCount").1);
         assert_eq!(cfg.background_image_opacity as i64, bound("backgroundImageOpacity").1);
         assert_eq!(cfg.background_image_blur as i64, bound("backgroundImageBlur").1);
@@ -1273,7 +1429,6 @@ mod tests {
                 "maxDisplayLines",
                 "maxRetries",
                 "logSplitSizeMb",
-                "backupInterval",
                 "quickSendInlineCount",
                 "backgroundImageOpacity",
                 "backgroundImageBlur",

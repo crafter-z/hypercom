@@ -33,6 +33,30 @@ fn regular_dir(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Remove abandoned prepared staging trees when a process crashed before the
+/// transaction journal was created. Journal-backed trees are left for `recover`.
+pub(crate) fn cleanup_orphan_staging(root: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(journal(root)?).is_ok() || !regular_dir(root)? {
+        return Ok(());
+    }
+    let mut removed = false;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(token) = name.strip_prefix(".staging-") else { continue };
+        if uuid(token).is_err() { continue; }
+        let path = entry.path();
+        if !regular_dir(&path)? {
+            return Err(io::Error::other("Orphan staging is not an ordinary directory"));
+        }
+        fs::remove_dir_all(path)?;
+        removed = true;
+    }
+    if removed { sync_dir(root)?; }
+    Ok(())
+}
+
 pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
@@ -228,6 +252,21 @@ mod tests {
             uninstall: true, commit_revision: 1, phase: "prepared".into() };
         fs::write(journal(&plugins).unwrap(), serde_json::to_vec(&tx).unwrap()).unwrap();
         assert!(recover(&plugins, &AppConfig::default()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_journal_less_uuid_staging_but_keeps_unrelated_dirs() {
+        let root = std::env::temp_dir().join(format!("plugin_orphan_stage_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let orphan = plugins.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("partial"), "partial").unwrap();
+        fs::create_dir(plugins.join(".staging-not-a-uuid")).unwrap();
+        cleanup_orphan_staging(&plugins).unwrap();
+        assert!(!orphan.exists());
+        assert!(plugins.join(".staging-not-a-uuid").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

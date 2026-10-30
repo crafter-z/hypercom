@@ -60,7 +60,15 @@ pub async fn set_config(
     source: tauri::Webview,
     state: State<'_, AppState>,
 ) -> Result<bool, CommandError> {
-    let _plugin_io = state.plugin_io.lock().await;
+    let restore = restore_plugin_configs.unwrap_or(false);
+    // Ordinary config saves serialize on config_manager/revision CAS and must
+    // not queue behind plugin I/O. Backup imports remain under the plugin gate:
+    // they replace trust state and must not race install/recovery transactions.
+    let _plugin_io = if restore {
+        Some(super::plugin::acquire_plugin_io(&state).await?)
+    } else {
+        None
+    };
     crate::plugin::view_runtime::require_main(&source)?;
     let (saved, cfg, restored_entries) = {
         let mut manager = state
@@ -69,15 +77,17 @@ pub async fn set_config(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         // Backup import deliberately replaces the entire configuration. Ordinary saves
         // need the revision observed before collecting their frontend snapshot.
-        let restore = restore_plugin_configs.unwrap_or(false);
         let saved = if restore {
+            manager
+                .begin_plugin_recovery_marker()
+                .map_err(|e| CommandError::Config(format!("写入插件信任恢复标记失败: {e}")))?;
             preserve_plugin_configs(&mut new_config, manager.get_config(), true);
             // Imports may restore ordinary grants, but browser consent is live authority.
             // Fail closed on unreadable manifests rather than starting unreviewed code.
             for entry in &mut new_config.entities.plugin_configs {
                 if !entry.enabled || entry.trusted_web_granted { continue; }
                 let allowed = crate::plugin::validate_plugin_id(&entry.id).is_ok()
-                    && crate::plugin::load_manifest_from_dir(&manager.plugins_dir().join(&entry.id))
+                    && crate::plugin::load_manifest_lite(&manager.plugins_dir().join(&entry.id))
                         .is_ok_and(|manifest| manifest.id == entry.id && !manifest.has_trusted_web_views());
                 if !allowed { entry.enabled = false; }
             }
@@ -101,11 +111,12 @@ pub async fn set_config(
             }
         };
         if restore && saved {
-            // The imported trust state is now primary; make the recovery
-            // fallback match it so corruption cannot restore old grants.
-            if let Err(e) = manager.save_safe_backup() {
-                log::error!("Failed to update safe config backup after restore: {e}");
-            }
+            manager
+                .save_safe_backup()
+                .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
+            manager
+                .clear_plugin_recovery_marker()
+                .map_err(|e| CommandError::Config(format!("清除插件信任恢复标记失败: {e}")))?;
         }
         (
             saved,

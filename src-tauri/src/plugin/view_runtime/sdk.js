@@ -5,6 +5,24 @@
   const trustedWeb = __HOST_TRUSTED_WEB__;
   const hasWorker = __HOST_HAS_WORKER__;
   const CHUNK_BYTES = 8192;
+  const MAX_BINARY_TRANSFER_BYTES = 256 * 1024 * 1024;
+  const MAX_BINARY_BYTES = 512 * 1024 * 1024;
+  const MAX_BINARY_TRANSFERS = 4;
+  const BINARY_IDLE_MS = 60000;
+  const BINARY_ACK_MS = 30000;
+  let binaryBytes = 0;
+  let binaryTransfers = 0;
+  const reserveBinary = (bytes, transfers = 0) => {
+    if (binaryBytes + bytes > MAX_BINARY_BYTES || binaryTransfers + transfers > MAX_BINARY_TRANSFERS) throw new Error('View binary aggregate capacity exceeded');
+    binaryBytes += bytes; binaryTransfers += transfers;
+    let active = true;
+    return () => { if (!active) return; active = false; binaryBytes -= bytes; binaryTransfers -= transfers; };
+  };
+  const deadline = (promise, ms, reason) => {
+    let timer;
+    const expired = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(reason)), ms); });
+    return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+  };
   let documentId = null;
   const post = (value) => {
     const encoded = JSON.stringify(value);
@@ -31,6 +49,9 @@
   let environment = null;
   let initialized = false;
   let sequence = Promise.resolve();
+  // Slow binary handlers must not strand ordinary state/environment ACKs.
+  let binarySequence = Promise.resolve();
+  let pendingBinaryMessages = 0;
   let pending = 0;
   let pendingEnvironment = null;
   let environmentQueued = false;
@@ -52,7 +73,7 @@
     return btoa(binary);
   };
   const decodeBase64 = (value) => {
-    if (typeof value !== 'string') throw new TypeError('Invalid binary chunk');
+    if (typeof value !== 'string' || value.length > Math.ceil(CHUNK_BYTES / 3) * 4) throw new TypeError('Invalid binary chunk');
     const binary = atob(value);
     const bytes = new Uint8Array(binary.length);
     for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
@@ -75,49 +96,71 @@
     const key = `${message.transferId}:${message.seq}`;
     const waiter = pendingBinaryAcks.get(key);
     if (!waiter) return;
+    if (waiter.done !== message.done) return;
     pendingBinaryAcks.delete(key);
+    clearTimeout(waiter.timer);
     if (message.ok === true) waiter.resolve();
     else waiter.reject(new Error(typeof message.error === 'string' && message.error ? message.error : 'View binary transfer was rejected'));
   };
+  const removeInbound = (id) => {
+    const state = inboundTransfers.get(id);
+    if (!state) return;
+    clearTimeout(state.timer); state.releases.forEach(release => release());
+    state.chunks.length = 0; inboundTransfers.delete(id);
+  };
   const dispatchBinary = async (message) => {
     const transferId = message.transferId;
-    if (typeof transferId !== 'string' || !transferId || transferId.length > 128
-      || !Number.isSafeInteger(message.seq) || message.seq < 0) return;
-    if (typeof message.done !== 'boolean' || !validType(message.transferType)) {
+    if (typeof transferId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(transferId)) return;
+    if (!Number.isSafeInteger(message.seq) || message.seq < 0 || typeof message.done !== 'boolean' || !validType(message.transferType)) {
+      removeInbound(transferId);
       acknowledge(message, false, 'invalid binary chunk metadata');
       return;
     }
     let state = inboundTransfers.get(transferId);
     if (!state) {
       if (message.seq !== 0) { acknowledge(message, false, 'binary chunk order mismatch'); return; }
-      if (inboundTransfers.size >= 4) { acknowledge(message, false, 'too many binary transfers'); return; }
-      state = { next: 0, transferType: message.transferType, chunks: [], total: 0 };
+      if (inboundTransfers.size >= MAX_BINARY_TRANSFERS) { acknowledge(message, false, 'too many binary transfers'); return; }
+      let release;
+      try { release = reserveBinary(0, 1); }
+      catch (error) { acknowledge(message, false, error); return; }
+      state = { next: 0, transferType: message.transferType, chunks: [], total: 0, releases: [release], timer: null };
       inboundTransfers.set(transferId, state);
     }
     if (message.seq !== state.next || state.transferType !== message.transferType) {
-      inboundTransfers.delete(transferId);
+      removeInbound(transferId);
       acknowledge(message, false, 'binary chunk order mismatch');
       return;
     }
     let bytes;
     try { bytes = decodeBase64(message.data); }
-    catch { inboundTransfers.delete(transferId); acknowledge(message, false, 'invalid binary chunk'); return; }
-    if (bytes.length > CHUNK_BYTES) { inboundTransfers.delete(transferId); acknowledge(message, false, 'binary chunk exceeds 8 KiB'); return; }
-    state.chunks.push(bytes);
-    state.total += bytes.length;
-    state.next++;
-    if (!message.done) { acknowledge(message, true); return; }
-    inboundTransfers.delete(transferId);
-    const joined = new Uint8Array(state.total);
-    let offset = 0;
-    for (const part of state.chunks) { joined.set(part, offset); offset += part.length; }
-    const payload = { type: state.transferType, bytes: joined };
-    let failure = null;
-    for (const callback of binaryCallbacks) {
-      try { await callback(payload); }
-      catch (error) { failure = error; break; }
+    catch { removeInbound(transferId); acknowledge(message, false, 'invalid binary chunk'); return; }
+    if (bytes.length > CHUNK_BYTES || (!message.done && !bytes.length) || state.total + bytes.length > MAX_BINARY_TRANSFER_BYTES || (state.next >= Math.ceil(MAX_BINARY_TRANSFER_BYTES / CHUNK_BYTES) && !message.done)) {
+      removeInbound(transferId); acknowledge(message, false, 'binary transfer capacity exceeded'); return;
     }
-    acknowledge(message, failure === null, failure);
+    try { state.releases.push(reserveBinary(bytes.length)); }
+    catch (error) { removeInbound(transferId); acknowledge(message, false, error); return; }
+    state.chunks.push(bytes); state.total += bytes.length; state.next++;
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => { removeInbound(transferId); acknowledge(message, false, 'binary transfer timed out'); }, BINARY_IDLE_MS);
+    if (!message.done) { acknowledge(message, true); return; }
+    let releaseJoined;
+    try { releaseJoined = reserveBinary(state.total); }
+    catch (error) { removeInbound(transferId); acknowledge(message, false, error); return; }
+    try {
+      const joined = new Uint8Array(state.total); let offset = 0;
+      for (const part of state.chunks) { joined.set(part, offset); offset += part.length; }
+      // Keep the transfer slot during async callbacks, but drop chunk buffers.
+      clearTimeout(state.timer); state.chunks.length = 0;
+      state.releases.splice(1).forEach(release => release());
+      const payload = { type: state.transferType, bytes: joined };
+      const jobs = [...binaryCallbacks].map(callback => {
+        try { return Promise.resolve(callback(payload)); }
+        catch (error) { return Promise.reject(error); }
+      });
+      await deadline(Promise.all(jobs), BINARY_ACK_MS, 'binary handler ACK timed out');
+      acknowledge(message, true);
+    } catch (error) { acknowledge(message, false, error); }
+    finally { releaseJoined(); removeInbound(transferId); }
   };
 
   const apply = async (message) => {
@@ -174,14 +217,22 @@
       if (!hasWorker) return Promise.reject(new Error('View has no Worker binary peer'));
       if (!initialized) return Promise.reject(new Error('View not initialized'));
       if (!validType(type)) return Promise.reject(new TypeError('Invalid binary view type'));
-      let bytes;
-      try { bytes = normalizeBytes(value); }
-      catch (error) { return Promise.reject(error); }
+      let bytes; let release;
+      try {
+        if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) throw new TypeError('sendBinary requires Uint8Array or ArrayBuffer');
+        if (value.byteLength > MAX_BINARY_TRANSFER_BYTES) throw new Error('View binary transfer exceeds capacity');
+        release = reserveBinary(value.byteLength, 1);
+        bytes = normalizeBytes(value);
+      } catch (error) { if (release) release(); return Promise.reject(error); }
       const transferId = newId();
       const total = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES));
       const sendChunk = (seq) => new Promise((resolve, reject) => {
         const key = `${transferId}:${seq}`;
-        pendingBinaryAcks.set(key, { resolve, reject });
+        const timer = setTimeout(() => {
+          pendingBinaryAcks.delete(key);
+          reject(new Error('View binary ACK timed out'));
+        }, BINARY_ACK_MS);
+        pendingBinaryAcks.set(key, { resolve, reject, timer, done: seq === total - 1 });
         try {
           const start = seq * CHUNK_BYTES;
           const end = Math.min(bytes.length, start + CHUNK_BYTES);
@@ -190,12 +241,13 @@
             seq, done: seq === total - 1, data: encodeBase64(bytes.subarray(start, end)),
           });
         } catch (error) {
-          pendingBinaryAcks.delete(key);
+          clearTimeout(timer); pendingBinaryAcks.delete(key);
           reject(error);
         }
       });
       return (async () => {
-        for (let seq = 0; seq < total; seq++) await sendChunk(seq);
+        try { for (let seq = 0; seq < total; seq++) await sendChunk(seq); }
+        finally { release(); bytes = null; }
       })();
     },
   });
@@ -216,6 +268,11 @@
     // from ever applying a message addressed to another document generation.
     if (!documentId || message.documentId !== documentId) return;
     if (message.type === 'binary-ack') { handleBinaryAck(message); return; }
+    if (message.type === 'binary-chunk') {
+      if (++pendingBinaryMessages > 16) { pendingBinaryMessages--; report(new Error('Host binary queue overflow')); return; }
+      binarySequence = binarySequence.then(() => apply(message)).catch(report).finally(() => { pendingBinaryMessages--; });
+      return;
+    }
     if (message.type === 'environment') {
       pendingEnvironment = message;
       if (environmentQueued) return;

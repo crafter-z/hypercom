@@ -10,15 +10,24 @@
  *   绝不跨网络 await。
  * - 读取是拉取式的：单次最多 64 KiB 传输块，总量无业务上限，剩余字节原样保留。
  * - 显式 timeout 是**整个请求**截止时间（打开 + 所有读取），不是每块重置；
- *   缺省/0 表示无总截止。重定向默认 follow（最多 10 跳），白名单对每跳生效。
+ *   缺省/0 表示无总截止。
+ * - 重定向由本模块**手动**跟随（`Policy::none()` + `referer(false)`）：最多 10 跳，
+ *   每一跳都重新校验 http.urlWhitelist 与 http/https 协议；跨源跳转剥离凭据头；
+ *   301/302 仅 POST 改 GET；303 除 GET/HEAD 外改 GET；仅在改写时丢弃 body
+ *   与 body representation headers，PUT/DELETE/GET with body 保持原方法与 body；
+ *   307/308 始终保留方法与 body。
+ * - `reqwest::Client` 进程级复用（按插件代理配置分桶），每次请求只覆盖 deadline。
  */
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use reqwest::header::{HeaderName, HeaderValue, LOCATION};
+use reqwest::{Client, Method};
 use tauri::State;
 use tokio::sync::{watch, Mutex as AsyncMutex};
+use url::Url;
 
 use super::CommandError;
 use crate::plugin;
@@ -32,6 +41,256 @@ const MAX_REDIRECTS: usize = 10;
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 /// 取消可能先于 open 到达；只保留一个很小的有界意图窗口。
 const MAX_PRE_CANCELLED: usize = 32;
+/// requestId 上限（与前端 `REQUEST_ID_PATTERN` 完全一致：1–128 位 `[A-Za-z0-9_-]`）。
+const MAX_REQUEST_ID_CHARS: usize = 128;
+/// 复用 Client 的缓存上限（按插件代理配置分桶；配置变化不会无界增长）。
+const MAX_CACHED_CLIENTS: usize = 8;
+/// 禁止插件设置的 HTTP 框架头（hop-by-hop 与消息边界头）：这些头由传输层
+/// 掌控，插件覆盖会造成请求走私、连接语义混乱或与本机代理的不一致行为。
+/// 命中即**显式报错**，不静默透传也不静默丢弃。
+const FORBIDDEN_REQUEST_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "accept-encoding",
+    "expect",
+    "origin",
+    "forwarded",
+];
+/// 由 reqwest/超文本层拥有、整族禁止的前缀头（`proxy-connection`、
+/// `proxy-authorization`、`proxy-authenticate` 等）。
+const FORBIDDEN_REQUEST_HEADER_PREFIXES: &[&str] = &["proxy-", "sec-", "x-forwarded-"];
+/// 重定向处理模式（wire 值 follow/manual/error，缺省 follow）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectMode {
+    Follow,
+    Manual,
+    Error,
+}
+
+fn parse_redirect_mode(value: Option<&str>) -> Result<RedirectMode, CommandError> {
+    match value.unwrap_or("follow") {
+        "follow" => Ok(RedirectMode::Follow),
+        "manual" => Ok(RedirectMode::Manual),
+        "error" => Ok(RedirectMode::Error),
+        other => Err(CommandError::Other(format!(
+            "redirect 只支持 follow/manual/error，收到: {other}"
+        ))),
+    }
+}
+
+/// 插件网络/文件流程共用的 requestId 校验（**唯一实现**）：与前端
+/// `REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/` 逐字符一致。
+fn validate_request_id(request_id: &str) -> Result<(), CommandError> {
+    let valid = !request_id.is_empty()
+        && request_id.chars().count() <= MAX_REQUEST_ID_CHARS
+        && request_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(CommandError::Other(
+            "插件 HTTP requestId 非法（须为 1–128 位字母/数字/_/-）".into(),
+        ))
+    }
+}
+
+/// 错误/日志中使用的脱敏 URL：只保留 origin + path，去掉 userinfo、query 与
+/// fragment，避免凭据或查询参数进入错误串与诊断日志。
+fn redact_url(url: &Url) -> String {
+    let path = if url.path().is_empty() { "/" } else { url.path() };
+    format!("{}{}", url.origin().ascii_serialization(), path)
+}
+
+/// 未解析成功（或不宜解析）的原始 URL 的脱敏：截掉 `?`/`#` 之后的部分并去掉
+/// userinfo，保留 scheme://host/path 供诊断。
+fn redact_raw_url(raw: &str) -> String {
+    let cut = raw.find(['?', '#']).unwrap_or(raw.len());
+    let head = &raw[..cut];
+    if let Some(scheme_end) = head.find("://") {
+        let rest = &head[scheme_end + 3..];
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            return format!("{}{}", &head[..scheme_end + 3], &rest[at + 1..]);
+        }
+    }
+    head.to_string()
+}
+
+/// reqwest 错误文本：先剥离其自带的完整 URL（可能含 query），再附加脱敏 URL。
+fn http_error_text(error: reqwest::Error, url: &Url) -> String {
+    let had_url = error.url().is_some();
+    let text = error.without_url().to_string();
+    if had_url {
+        format!("{text}（{}）", redact_url(url))
+    } else {
+        text
+    }
+}
+
+fn cancelled_error() -> CommandError {
+    CommandError::Other("插件 HTTP 请求已取消".into())
+}
+
+fn timeout_error() -> CommandError {
+    CommandError::Other("插件 HTTP 请求超时".into())
+}
+
+/// 框架头判定：显式名单 + `proxy-*` 整族（名称按小写比较）。
+fn is_forbidden_request_header(name: &str) -> bool {
+    FORBIDDEN_REQUEST_HEADERS.contains(&name)
+        || FORBIDDEN_REQUEST_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// 校验并转换插件提供的请求头；框架头/消息边界头显式报错。
+fn validate_request_headers(
+    headers: &HashMap<String, String>,
+) -> Result<Vec<(HeaderName, HeaderValue)>, CommandError> {
+    let mut out = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| CommandError::Other(format!("非法 HTTP header 名 {name}: {e}")))?;
+        if is_forbidden_request_header(header_name.as_str()) {
+            return Err(CommandError::Other(format!(
+                "禁止设置 HTTP 框架头: {}",
+                header_name.as_str()
+            )));
+        }
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|e| CommandError::Other(format!("非法 HTTP header 值: {e}")))?;
+        out.push((header_name, header_value));
+    }
+    Ok(out)
+}
+
+fn redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Match reqwest/Fetch redirect semantics: 301/302 rewrite POST only; 303
+/// rewrites every method except GET/HEAD. `None` means the original method and
+/// body must be preserved.
+fn redirect_rewrites_method(status: u16, method: &Method) -> Option<Method> {
+    match status {
+        301 | 302 if *method == Method::POST => Some(Method::GET),
+        303 if *method != Method::GET && *method != Method::HEAD => Some(Method::GET),
+        _ => None,
+    }
+}
+
+/// A method rewrite drops the old request representation. Content-Length is
+/// already forbidden at input; these headers describe the body we just removed.
+fn strip_body_representation_headers(headers: &mut Vec<(HeaderName, HeaderValue)>) {
+    headers.retain(|(name, _)| {
+        !matches!(
+            name.as_str(),
+            "content-type"
+                | "content-encoding"
+                | "content-language"
+                | "content-location"
+                | "content-md5"
+                | "digest"
+        )
+    });
+}
+
+/// 判断重定向是否跨源：scheme/host/port 任一变化即视为跨源（比只比 host 更严）。
+fn redirect_crosses_origin(from: &Url, to: &Url) -> bool {
+    from.scheme() != to.scheme()
+        || from.host_str() != to.host_str()
+        || from.port_or_known_default() != to.port_or_known_default()
+}
+
+/// Explicitly safe cross-origin request headers that carry request semantics
+/// but not caller credentials. This is a native HTTP channel, not browser CORS:
+/// all legal `Content-Type` values (including `application/json`) and
+/// `Content-Encoding` are retained so a 307/308 redirect preserves body
+/// semantics. Arbitrary custom headers such as `X-Company-Secret` do not follow
+/// a redirect. Authentication must be sent directly to the final origin.
+fn is_cross_origin_safe_header(name: &HeaderName, _value: &HeaderValue) -> bool {
+    matches!(
+        name.as_str(),
+        "accept"
+            | "accept-language"
+            | "content-language"
+            | "content-type"
+            | "content-encoding"
+            | "range"
+    )
+}
+
+fn strip_credential_headers(headers: &mut Vec<(HeaderName, HeaderValue)>, cross_origin: bool) {
+    if cross_origin {
+        headers.retain(|(name, value)| is_cross_origin_safe_header(name, value));
+    }
+}
+
+/// 每一跳（初始 URL 与每个重定向目标）都走这里：协议 + 可选白名单。
+fn require_allowed_url(
+    whitelist: &[String],
+    url: &Url,
+    label: &str,
+) -> Result<(), CommandError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(CommandError::Other(format!(
+            "仅允许 http/https 协议，收到: {}",
+            url.scheme()
+        )));
+    }
+    if !whitelist.is_empty()
+        && !whitelist
+            .iter()
+            .any(|pattern| url_glob_match(pattern, url.as_str()))
+    {
+        return Err(CommandError::Other(format!(
+            "{label} 不在插件 http.urlWhitelist 内: {}",
+            redact_url(url)
+        )));
+    }
+    Ok(())
+}
+
+/// 进程级 Client 缓存（按插件代理配置分桶）。重定向与 Referer 固定为手动语义：
+/// `Policy::none()` 保证不会被框架悄悄跟随，`referer(false)` 保证不泄漏来源。
+static HTTP_CLIENTS: LazyLock<Mutex<HashMap<Option<String>, Client>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn shared_client(proxy: Option<&str>) -> Result<Client, CommandError> {
+    let key = proxy.map(str::to_owned);
+    if let Ok(clients) = HTTP_CLIENTS.lock() {
+        if let Some(client) = clients.get(&key) {
+            return Ok(client.clone());
+        }
+    }
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false);
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy)
+                .map_err(|e| CommandError::Other(format!("插件代理配置非法: {e}")))?,
+        );
+    }
+    let client = builder
+        .build()
+        .map_err(|e| CommandError::Other(format!("HTTP client 初始化失败: {e}")))?;
+    let mut clients = HTTP_CLIENTS
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    if clients.len() >= MAX_CACHED_CLIENTS {
+        clients.clear();
+    }
+    clients.insert(key, client.clone());
+    Ok(client)
+}
 
 /// 插件 HTTP 请求（wire 与前端 TS 对齐）。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -202,15 +461,26 @@ impl PluginHttpRegistry {
         generation: &str,
         entry: &Arc<RequestEntry>,
     ) {
-        if let Ok(mut entries) = self.lock() {
-            if entries
-                .get(request_id)
-                .is_some_and(|current| Arc::ptr_eq(current, entry))
-                && entry.plugin_id == plugin_id
-                && entry.generation == generation
-            {
-                entries.remove(request_id);
+        let removed = match self.lock() {
+            Ok(mut entries) => {
+                if entries
+                    .get(request_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, entry))
+                    && entry.plugin_id == plugin_id
+                    && entry.generation == generation
+                {
+                    entries.remove(request_id)
+                } else {
+                    None
+                }
             }
+            Err(_) => None,
+        };
+        // Persist cancellation even when the last receiver disappeared between
+        // a failed read and cleanup. This also makes cleanup safe for a caller
+        // that still holds an Arc to the retired entry.
+        if let Some(entry) = removed {
+            entry.cancel_tx.send_replace(true);
         }
     }
 
@@ -236,11 +506,20 @@ impl PluginHttpRegistry {
     /// 禁用/撤销/卸载/重载/替换安装后取消该插件的全部请求。
     pub fn cancel_plugin(&self, plugin_id: &str) {
         self.cancel_where(|entry| entry.plugin_id == plugin_id);
+        // A pre-open cancel intent belongs to the old request lifecycle too.
+        // Retain no stale intent across a plugin lifecycle transition, otherwise
+        // a later requestId reuse could be cancelled by an unrelated operation.
+        if let Ok(mut pre) = self.pre_cancelled.lock() {
+            pre.retain(|(_, plugin, _)| plugin != plugin_id);
+        }
     }
 
     /// 配置恢复/导入可能改变任意插件状态，整体取消最保守。
     pub fn cancel_all(&self) {
         self.cancel_where(|_| true);
+        if let Ok(mut pre) = self.pre_cancelled.lock() {
+            pre.clear();
+        }
     }
 
     /// cancel 先于 open 到达：记录有界意图，admit 时消费。
@@ -288,8 +567,17 @@ fn require_http_access(
         .config_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let entry = manager
-        .get_config()
+    require_http_access_locked(manager.get_config(), plugin_id, expected_generation)
+}
+
+/// 已持有 config 锁时的权限校验（供需要同时读取代理/根目录的调用方复用）。
+fn require_http_access_locked(
+    cfg: &crate::config::AppConfig,
+    plugin_id: &str,
+    expected_generation: &str,
+) -> Result<(), CommandError> {
+    validate_generation(expected_generation)?;
+    let entry = cfg
         .entities
         .plugin_configs
         .iter()
@@ -316,19 +604,29 @@ fn require_http_access(
 }
 
 /// open 时的完整校验：权限 + manifest 声明 + 可选白名单 + 插件代理。
+/// 锁纪律：`config_manager` 只在内存里读取「已安装/启用/授权/代理」与插件根目录，
+/// 释放后再做 manifest 文件 IO。manifest 只需要本体（`load_manifest_lite`），
+/// 不在这里读取任何视图资源。
 fn authorize_open(
     state: &AppState,
     plugin_id: &str,
     expected_generation: &str,
 ) -> Result<AuthorizedHttp, CommandError> {
-    require_http_access(state, plugin_id, expected_generation)?;
-    let manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?;
-    let cfg = manager.get_config();
-    let root = manager.plugins_dir().to_path_buf();
-    let manifest = plugin::load_manifest_from_dir(&super::plugin::plugin_dir(&root, plugin_id)?)
+    let (root, proxy) = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        let cfg = manager.get_config();
+        require_http_access_locked(cfg, plugin_id, expected_generation)?;
+        let proxy = if cfg.plugin_proxy_enabled && !cfg.plugin_proxy.is_empty() {
+            Some(cfg.plugin_proxy.clone())
+        } else {
+            None
+        };
+        (manager.plugins_dir().to_path_buf(), proxy)
+    };
+    let manifest = plugin::load_manifest_lite(&super::plugin::plugin_dir(&root, plugin_id)?)
         .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
     if manifest.id != plugin_id {
         return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
@@ -343,43 +641,10 @@ fn authorize_open(
         .as_ref()
         .map(|h| h.url_whitelist.clone())
         .unwrap_or_default();
-    let proxy = if cfg.plugin_proxy_enabled && !cfg.plugin_proxy.is_empty() {
-        Some(cfg.plugin_proxy.clone())
-    } else {
-        None
-    };
     Ok(AuthorizedHttp { whitelist, proxy })
 }
 
-fn redirect_policy(
-    mode: &str,
-    whitelist: Vec<String>,
-) -> Result<reqwest::redirect::Policy, CommandError> {
-    match mode {
-        "manual" => Ok(reqwest::redirect::Policy::none()),
-        "error" => Ok(reqwest::redirect::Policy::custom(|attempt| {
-            attempt.error("redirect not allowed")
-        })),
-        "follow" => Ok(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error("too many redirects");
-            }
-            if !whitelist.is_empty()
-                && !whitelist
-                    .iter()
-                    .any(|pattern| url_glob_match(pattern, attempt.url().as_str()))
-            {
-                return attempt.error("redirect URL not in http.urlWhitelist");
-            }
-            attempt.follow()
-        })),
-        other => Err(CommandError::Other(format!(
-            "redirect 只支持 follow/manual/error，收到: {other}"
-        ))),
-    }
-}
-
-fn total_deadline(timeout: Option<f64>) -> Result<Option<std::time::Instant>, CommandError> {
+fn total_deadline(timeout: Option<f64>) -> Result<Option<Instant>, CommandError> {
     let Some(seconds) = timeout else { return Ok(None) };
     if !seconds.is_finite() || seconds < 0.0 {
         return Err(CommandError::Other(
@@ -471,6 +736,96 @@ async fn wait_cancel(rx: &mut watch::Receiver<bool>) {
     let _ = rx.changed().await;
 }
 
+/// Send one request and manually follow redirects. reqwest's built-in redirect
+/// policy cannot apply credential stripping to every hop, so this loop owns the
+/// redirect semantics and validates each target before any bytes are sent.
+struct RedirectRequest<'a> {
+    client: &'a Client,
+    method: Method,
+    url: Url,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    body: Vec<u8>,
+    redirect: RedirectMode,
+    whitelist: &'a [String],
+    deadline: Option<Instant>,
+    cancel_rx: &'a mut watch::Receiver<bool>,
+}
+
+async fn send_with_redirects(request: RedirectRequest<'_>) -> Result<reqwest::Response, CommandError> {
+    let RedirectRequest {
+        client,
+        mut method,
+        mut url,
+        mut headers,
+        mut body,
+        redirect,
+        whitelist,
+        deadline,
+        cancel_rx,
+    } = request;
+    let mut redirects = 0usize;
+    loop {
+        require_allowed_url(whitelist, &url, "重定向 URL")?;
+        let mut builder = client.request(method.clone(), url.clone());
+        for (name, value) in &headers {
+            builder = builder.header(name.clone(), value.clone());
+        }
+        if !body.is_empty() {
+            builder = builder.body(body.clone());
+        }
+        let send = builder.send();
+        tokio::pin!(send);
+        let response = tokio::select! {
+            biased;
+            _ = wait_cancel(cancel_rx) => return Err(cancelled_error()),
+            _ = sleep_until_deadline(deadline) => return Err(timeout_error()),
+            response = &mut send => response.map_err(|error| {
+                CommandError::Other(format!("HTTP 请求失败: {}", http_error_text(error, &url)))
+            })?,
+        };
+        if !redirect_status(response.status().as_u16()) {
+            return Ok(response);
+        }
+        match redirect {
+            RedirectMode::Manual => return Ok(response),
+            RedirectMode::Error => {
+                return Err(CommandError::Other(format!(
+                    "HTTP 重定向被拒绝: {}",
+                    redact_url(&url)
+                )))
+            }
+            RedirectMode::Follow => {}
+        }
+        if redirects >= MAX_REDIRECTS {
+            return Err(CommandError::Other("HTTP 重定向次数超过上限".into()));
+        }
+        let Some(location) = response.headers().get(LOCATION) else {
+            // A redirect without Location is a valid response, not a transport
+            // error; callers can inspect its status and headers in follow mode.
+            return Ok(response);
+        };
+        let location = location.to_str().map_err(|_| {
+            CommandError::Other("HTTP 重定向 Location 不是合法文本".into())
+        })?;
+        let next = response.url().join(location).map_err(|error| {
+            CommandError::Other(format!(
+                "HTTP 重定向目标非法（{}）: {error}",
+                redact_url(response.url())
+            ))
+        })?;
+        require_allowed_url(whitelist, &next, "重定向 URL")?;
+        let cross_origin = redirect_crosses_origin(response.url(), &next);
+        strip_credential_headers(&mut headers, cross_origin);
+        if let Some(rewritten) = redirect_rewrites_method(response.status().as_u16(), &method) {
+            method = rewritten;
+            body.clear();
+            strip_body_representation_headers(&mut headers);
+        }
+        url = next;
+        redirects += 1;
+    }
+}
+
 #[tauri::command]
 pub async fn plugin_http_open(
     plugin_id: String,
@@ -482,9 +837,7 @@ pub async fn plugin_http_open(
 ) -> Result<PluginHttpHead, CommandError> {
     super::plugin::require_main_window(&window)?;
     plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
-    if request_id.is_empty() || request_id.len() > 256 {
-        return Err(CommandError::Other("插件 HTTP requestId 非法".into()));
-    }
+    validate_request_id(&request_id)?;
     let PluginHttpRequest {
         method,
         url,
@@ -495,24 +848,10 @@ pub async fn plugin_http_open(
         redirect,
     } = request;
     let scope = authorize_open(&state, &plugin_id, &expected_generation)?;
-    let parsed_url =
-        url::Url::parse(&url).map_err(|e| CommandError::Other(format!("非法 URL: {e}")))?;
-    if !matches!(parsed_url.scheme(), "http" | "https") {
-        return Err(CommandError::Other(format!(
-            "仅允许 http/https 协议，收到: {}",
-            parsed_url.scheme()
-        )));
-    }
-    if !scope.whitelist.is_empty()
-        && !scope
-            .whitelist
-            .iter()
-            .any(|pattern| url_glob_match(pattern, parsed_url.as_str()))
-    {
-        return Err(CommandError::Other(format!(
-            "URL 不在插件 http.urlWhitelist 内: {url}"
-        )));
-    }
+    let parsed_url = Url::parse(&url).map_err(|e| {
+        CommandError::Other(format!("非法 URL {}: {e}", redact_raw_url(&url)))
+    })?;
+    require_allowed_url(&scope.whitelist, &parsed_url, "URL")?;
     let method = match method.as_deref() {
         None | Some("") => "GET".to_string(),
         Some(method) => method.to_string(),
@@ -521,8 +860,8 @@ pub async fn plugin_http_open(
         .map_err(|e| CommandError::Other(format!("非法 HTTP 方法: {e}")))?;
     let body = request_body(body, body_base64)?;
     let deadline = total_deadline(timeout)?;
-    let redirect = redirect.as_deref().unwrap_or("follow");
-    let policy = redirect_policy(redirect, scope.whitelist.clone())?;
+    let redirect = parse_redirect_mode(redirect.as_deref())?;
+    let headers = validate_request_headers(&headers)?;
 
     // 同步准入先于任何 await：连接挂起期间的 cancel 也能命中条目。
     let entry = state
@@ -544,47 +883,28 @@ pub async fn plugin_http_open(
         return Err(CommandError::Other("插件 HTTP 请求已取消".into()));
     }
 
-    let mut client_builder = reqwest::Client::builder().redirect(policy);
-    if let Some(deadline) = deadline {
-        // reqwest 的总超时与本地读取截止同源，避免两块逻辑分叉。
-        client_builder = client_builder.timeout(
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        );
-    }
-    if let Some(proxy) = &scope.proxy {
-        let proxy = reqwest::Proxy::all(proxy)
-            .map_err(|e| CommandError::Other(format!("invalid plugin proxy: {e}")))?;
-        client_builder = client_builder.proxy(proxy);
-    }
-    let client = client_builder
-        .build()
-        .map_err(|e| CommandError::Other(format!("http client init failed: {e}")))?;
+    let client = shared_client(scope.proxy.as_deref())?;
+    let response = send_with_redirects(RedirectRequest {
+        client: &client,
+        method,
+        url: parsed_url,
+        headers,
+        body,
+        redirect,
+        whitelist: &scope.whitelist,
+        deadline,
+        cancel_rx: &mut cancel_rx,
+    })
+    .await?;
 
-    let mut builder = client.request(method, parsed_url.as_str());
-    for (name, value) in &headers {
-        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|e| CommandError::Other(format!("非法 HTTP header 名: {e}")))?;
-        let value = reqwest::header::HeaderValue::from_str(value)
-            .map_err(|e| CommandError::Other(format!("非法 HTTP header 值: {e}")))?;
-        builder = builder.header(name, value);
+    // A permission change may race the final network response. Never expose the
+    // response head unless the current generation is still authorized.
+    if let Err(error) = require_http_access(&state, &plugin_id, &expected_generation) {
+        state
+            .plugin_http
+            .remove_if_matches(&request_id, &plugin_id, &expected_generation, &entry);
+        return Err(error);
     }
-    if !body.is_empty() {
-        builder = builder.body(body);
-    }
-
-    let send = builder.send();
-    tokio::pin!(send);
-    let response = tokio::select! {
-        biased;
-        _ = wait_cancel(&mut cancel_rx) => {
-            return Err(CommandError::Other("插件 HTTP 请求已取消".into()));
-        }
-        _ = sleep_until_deadline(deadline) => {
-            return Err(CommandError::Other("插件 HTTP 请求超时".into()));
-        }
-        response = &mut send => response.map_err(|e| CommandError::Other(format!("HTTP 请求失败: {e}")))?,
-    };
-
     let status = response.status().as_u16();
     let response_headers = response_headers(response.headers());
     let response_url = response.url().as_str().to_string();
@@ -623,6 +943,7 @@ pub async fn plugin_http_read(
 ) -> Result<PluginHttpChunk, CommandError> {
     super::plugin::require_main_window(&window)?;
     plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+    validate_request_id(&request_id)?;
     let entry = state
         .plugin_http
         .get(&request_id, &plugin_id, &expected_generation)?;
@@ -654,6 +975,26 @@ pub async fn plugin_http_read(
         }
         guard = entry.state.lock() => guard,
     };
+    // Cancellation/deadline may win immediately after the async mutex was
+    // acquired. Recheck before consuming leftover bytes or issuing a network
+    // pull so a late cancel cannot leak one more chunk.
+    if *cancel_rx.borrow() {
+        drop(guard);
+        state
+            .plugin_http
+            .remove_if_matches(&request_id, &plugin_id, &expected_generation, &entry);
+        return Err(cancelled_error());
+    }
+    if entry
+        .deadline
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        drop(guard);
+        state
+            .plugin_http
+            .remove_if_matches(&request_id, &plugin_id, &expected_generation, &entry);
+        return Err(timeout_error());
+    }
 
     let done;
     let bytes = match &mut *guard {
@@ -744,6 +1085,7 @@ pub async fn plugin_http_cancel(
 ) -> Result<(), CommandError> {
     super::plugin::require_main_window(&window)?;
     plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+    validate_request_id(&request_id)?;
     validate_generation(&expected_generation)?;
     let action = {
         let entries = state.plugin_http.lock()?;
@@ -785,6 +1127,7 @@ pub async fn plugin_http_cancel(
 /// - `**` 跨 `/` 段匹配（贪婪）；
 /// - `*` 匹配单段内任意字符（不含 `/`）；
 /// - 其余字符字面量。
+///
 /// 空白名单条目 → 恒 false（调用方在空白名单时跳过匹配）。
 pub(crate) fn url_glob_match(pattern: &str, url: &str) -> bool {
     if pattern.is_empty() {
@@ -825,6 +1168,110 @@ pub(crate) fn url_glob_match(pattern: &str, url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    #[derive(Debug)]
+    struct TestRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    fn read_test_request(stream: &mut TcpStream) -> TestRequest {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let header_end;
+        loop {
+            let mut chunk = [0u8; 4096];
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "test server received an incomplete request");
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                header_end = index + 4;
+                break;
+            }
+        }
+        let header_text = String::from_utf8_lossy(&bytes[..header_end]);
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap().to_string();
+        let path = request_parts.next().unwrap().to_string();
+        let mut headers = HashMap::new();
+        let mut content_length = 0usize;
+        for line in lines.filter(|line| !line.is_empty()) {
+            let (name, value) = line.split_once(':').unwrap();
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().unwrap();
+            }
+            headers.insert(name.to_ascii_lowercase(), value);
+        }
+        while bytes.len() < header_end + content_length {
+            let mut chunk = [0u8; 4096];
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "test server received an incomplete body");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        TestRequest {
+            method,
+            path,
+            headers,
+            body: bytes[header_end..header_end + content_length].to_vec(),
+        }
+    }
+
+    fn write_test_response(stream: &mut TcpStream, status: &str, headers: &[(&str, &str)]) {
+        let mut response = format!("HTTP/1.1 {status}\r\n");
+        for (name, value) in headers {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+        }
+        response.push_str("Connection: close\r\n\r\n");
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    fn serve_test_requests<F>(listener: TcpListener, count: usize, mut handler: F) -> thread::JoinHandle<Vec<TestRequest>>
+    where
+        F: FnMut(usize, &TestRequest, &mut TcpStream) + Send + 'static,
+    {
+        thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut requests = Vec::with_capacity(count);
+            while requests.len() < count {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let request = read_test_request(&mut stream);
+                        handler(requests.len(), &request, &mut stream);
+                        requests.push(request);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "test server timed out");
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("test server accept failed: {error}"),
+                }
+            }
+            requests
+        })
+    }
+
+    fn test_client() -> Client {
+        Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .referer(false)
+            .build()
+            .unwrap()
+    }
 
     #[test]
     fn timeout_zero_means_no_deadline_and_negative_is_rejected() {
@@ -856,10 +1303,230 @@ mod tests {
 
     #[test]
     fn redirect_mode_validation_accepts_contract_values() {
-        assert!(redirect_policy("follow", Vec::new()).is_ok());
-        assert!(redirect_policy("manual", Vec::new()).is_ok());
-        assert!(redirect_policy("error", Vec::new()).is_ok());
-        assert!(redirect_policy("bogus", Vec::new()).is_err());
+        assert_eq!(parse_redirect_mode(None).unwrap(), RedirectMode::Follow);
+        assert_eq!(parse_redirect_mode(Some("follow")).unwrap(), RedirectMode::Follow);
+        assert_eq!(parse_redirect_mode(Some("manual")).unwrap(), RedirectMode::Manual);
+        assert_eq!(parse_redirect_mode(Some("error")).unwrap(), RedirectMode::Error);
+        assert!(parse_redirect_mode(Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn framework_headers_are_rejected_case_insensitively() {
+        for name in ["Host", "content-length", "Connection", "Sec-Fetch-Mode", "X-Forwarded-For"] {
+            let mut headers = HashMap::new();
+            headers.insert(name.to_string(), "x".to_string());
+            assert!(validate_request_headers(&headers).is_err(), "{name}");
+        }
+        let mut allowed = HashMap::new();
+        allowed.insert("X-Plugin-Token".to_string(), "ok".to_string());
+        assert!(validate_request_headers(&allowed).is_ok());
+    }
+
+    #[test]
+    fn cross_origin_redirect_strips_sensitive_headers_but_same_origin_keeps_them() {
+        let mut headers = validate_request_headers(&HashMap::from([
+            ("Authorization".into(), "Bearer token".into()),
+            ("X-API-Key".into(), "secret-key".into()),
+            ("Cookie".into(), "a=b".into()),
+            ("Referer".into(), "https://a.test/private?q=secret".into()),
+            ("Accept".into(), "application/json".into()),
+            ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+            ("Content-Encoding".into(), "gzip".into()),
+            ("X-Company-Secret".into(), "keep-out".into()),
+        ]))
+        .unwrap();
+        strip_credential_headers(
+            &mut headers,
+            redirect_crosses_origin(
+                &Url::parse("https://a.test/private").unwrap(),
+                &Url::parse("https://b.test/next").unwrap(),
+            ),
+        );
+        assert_eq!(headers.len(), 3);
+        assert!(headers.iter().any(|(name, _)| name.as_str() == "accept"));
+        assert!(headers.iter().any(|(name, _)| name.as_str() == "content-type"));
+        assert!(headers.iter().any(|(name, _)| name.as_str() == "content-encoding"));
+        assert!(!headers.iter().any(|(name, _)| name.as_str() == "x-company-secret"));
+
+        let mut json_type = validate_request_headers(&HashMap::from([(
+            "Content-Type".into(),
+            "application/json".into(),
+        )]))
+        .unwrap();
+        strip_credential_headers(&mut json_type, true);
+        assert_eq!(json_type.len(), 1, "application/json is valid on the native HTTP channel");
+
+        let mut same = validate_request_headers(&HashMap::from([
+            ("Authorization".into(), "Bearer token".into()),
+            ("X-API-Key".into(), "secret-key".into()),
+            ("Referer".into(), "https://a.test/private".into()),
+        ]))
+        .unwrap();
+        strip_credential_headers(
+            &mut same,
+            redirect_crosses_origin(
+                &Url::parse("https://a.test/private").unwrap(),
+                &Url::parse("https://a.test/next").unwrap(),
+            ),
+        );
+        assert_eq!(same.len(), 3);
+    }
+
+    #[test]
+    fn redirect_method_rules_match_http_contract() {
+        assert_eq!(redirect_rewrites_method(301, &Method::POST), Some(Method::GET));
+        assert_eq!(redirect_rewrites_method(301, &Method::PUT), None);
+        assert_eq!(redirect_rewrites_method(302, &Method::DELETE), None);
+        assert_eq!(redirect_rewrites_method(302, &Method::GET), None);
+        assert_eq!(redirect_rewrites_method(303, &Method::PUT), Some(Method::GET));
+        assert_eq!(redirect_rewrites_method(303, &Method::HEAD), None);
+        assert_eq!(redirect_rewrites_method(303, &Method::GET), None);
+        assert_eq!(redirect_rewrites_method(307, &Method::POST), None);
+        assert_eq!(redirect_rewrites_method(308, &Method::POST), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_http_cross_origin_redirect_strips_credentials_and_keeps_safe_headers() {
+        let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_thread = serve_test_requests(target_listener, 1, |_index, _request, stream| {
+            write_test_response(stream, "200 OK", &[("Content-Length", "0")]);
+        });
+        let source_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_addr = source_listener.local_addr().unwrap();
+        let source_thread = serve_test_requests(source_listener, 1, move |_index, _request, stream| {
+            let location = format!("http://{target_addr}/final");
+            write_test_response(stream, "302 Found", &[("Location", &location), ("Content-Length", "0")]);
+        });
+        let mut headers = validate_request_headers(&HashMap::from([
+            ("Authorization".into(), "Bearer secret".into()),
+            ("X-Company-Secret".into(), "must-not-leak".into()),
+            ("Referer".into(), "http://127.0.0.1/private?q=secret".into()),
+            ("Accept".into(), "application/json".into()),
+        ])).unwrap();
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let client = test_client();
+        let response = send_with_redirects(RedirectRequest {
+            client: &client,
+            method: Method::GET,
+            url: Url::parse(&format!("http://{source_addr}/start")).unwrap(),
+            headers: std::mem::take(&mut headers),
+            body: Vec::new(),
+            redirect: RedirectMode::Follow,
+            whitelist: &[],
+            deadline: Some(Instant::now() + Duration::from_secs(2)),
+            cancel_rx: &mut cancel_rx,
+        }).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let source_requests = source_thread.join().unwrap();
+        let target_requests = target_thread.join().unwrap();
+        assert_eq!(source_requests.len(), 1);
+        let target = &target_requests[0];
+        assert_eq!(target.headers.get("accept").map(String::as_str), Some("application/json"));
+        for secret in ["authorization", "x-company-secret", "referer"] {
+            assert!(!target.headers.contains_key(secret), "cross-origin header leaked: {secret}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_http_same_origin_redirect_preserves_business_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = serve_test_requests(listener, 2, |_index, _request, stream| {
+            if _index == 0 {
+                write_test_response(stream, "302 Found", &[("Location", "/final"), ("Content-Length", "0")]);
+            } else {
+                write_test_response(stream, "200 OK", &[("Content-Length", "0")]);
+            }
+        });
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+        let client = test_client();
+        let response = send_with_redirects(RedirectRequest {
+            client: &client,
+            method: Method::GET,
+            url: Url::parse(&format!("http://{addr}/start")).unwrap(),
+            headers: validate_request_headers(&HashMap::from([
+                ("X-Company-Secret".into(), "same-origin-ok".into()),
+                ("X-Trace".into(), "trace".into()),
+            ])).unwrap(),
+            body: Vec::new(),
+            redirect: RedirectMode::Follow,
+            whitelist: &[],
+            deadline: Some(Instant::now() + Duration::from_secs(2)),
+            cancel_rx: &mut cancel_rx,
+        }).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let requests = thread.join().unwrap();
+        assert_eq!(requests[1].headers.get("x-company-secret").map(String::as_str), Some("same-origin-ok"));
+        assert_eq!(requests[1].headers.get("x-trace").map(String::as_str), Some("trace"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_http_preserves_307_body_and_rewrites_post_301_302() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = serve_test_requests(listener, 6, |_index, request, stream| {
+            match request.path.as_str() {
+                "/keep" => write_test_response(stream, "307 Temporary Redirect", &[("Location", "/kept"), ("Content-Length", "0")]),
+                "/kept" => write_test_response(stream, "200 OK", &[("Content-Length", "0")]),
+                "/post301" => write_test_response(stream, "301 Moved Permanently", &[("Location", "/done301"), ("Content-Length", "0")]),
+                "/post302" => write_test_response(stream, "302 Found", &[("Location", "/done302"), ("Content-Length", "0")]),
+                "/done301" | "/done302" => write_test_response(stream, "200 OK", &[("Content-Length", "0")]),
+                path => panic!("unexpected test path {path}"),
+            }
+        });
+        let client = test_client();
+        for path in ["keep", "post301", "post302"] {
+            let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+            let _ = send_with_redirects(RedirectRequest {
+                client: &client,
+                method: Method::POST,
+                url: Url::parse(&format!("http://{addr}/{path}")).unwrap(),
+                headers: validate_request_headers(&HashMap::from([
+                    ("Content-Type".into(), "application/json".into()),
+                ])).unwrap(),
+                body: br#"{"value":7}"#.to_vec(),
+                redirect: RedirectMode::Follow,
+                whitelist: &[],
+                deadline: Some(Instant::now() + Duration::from_secs(2)),
+                cancel_rx: &mut cancel_rx,
+            }).await.unwrap();
+        }
+        let requests = thread.join().unwrap();
+        assert_eq!(requests[1].path, "/kept");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].body, br#"{"value":7}"#);
+        assert_eq!(requests[1].headers.get("content-type").map(String::as_str), Some("application/json"));
+        assert_eq!(requests[3].path, "/done301");
+        assert_eq!(requests[3].method, "GET");
+        assert!(requests[3].body.is_empty());
+        assert!(!requests[3].headers.contains_key("content-type"));
+        assert_eq!(requests[5].path, "/done302");
+        assert_eq!(requests[5].method, "GET");
+        assert!(requests[5].body.is_empty());
+    }
+
+    #[test]
+    fn representation_headers_are_removed_only_when_body_is_dropped() {
+        let mut headers = validate_request_headers(&HashMap::from([
+            ("Content-Type".into(), "application/json".into()),
+            ("Content-Encoding".into(), "gzip".into()),
+            ("Accept".into(), "application/json".into()),
+            ("X-Trace".into(), "keep".into()),
+        ]))
+        .unwrap();
+        strip_body_representation_headers(&mut headers);
+        assert_eq!(headers.len(), 2);
+        assert!(headers.iter().any(|(name, _)| name.as_str() == "accept"));
+        assert!(headers.iter().any(|(name, _)| name.as_str() == "x-trace"));
+    }
+
+    #[test]
+    fn request_id_uses_ascii_char_limit() {
+        assert!(validate_request_id("a".repeat(128).as_str()).is_ok());
+        assert!(validate_request_id("a".repeat(129).as_str()).is_err());
+        assert!(validate_request_id("é").is_err());
+        assert!(validate_request_id("bad/id").is_err());
     }
 
     #[test]
@@ -956,5 +1623,20 @@ mod tests {
         assert!(registry
             .get("req", "com.example.test", "gen")
             .is_err());
+    }
+
+    #[test]
+    fn lifecycle_cancellation_clears_pre_open_intents() {
+        let registry = PluginHttpRegistry::new();
+        registry.remember_pre_cancel("reuse", "com.example.test", "gen");
+        registry.cancel_plugin("com.example.test");
+        assert!(registry
+            .admit("reuse", "com.example.test", "gen", None)
+            .is_ok());
+        registry.remember_pre_cancel("all", "com.example.test", "gen");
+        registry.cancel_all();
+        assert!(registry
+            .admit("all", "com.example.test", "gen", None)
+            .is_ok());
     }
 }

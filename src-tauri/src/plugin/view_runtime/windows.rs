@@ -136,6 +136,32 @@ fn local_navigation_path(origin: &str, uri: &str) -> Option<String> {
     Some(path)
 }
 
+/// True when `next` only changes the fragment of `previous` (same origin, path and
+/// query, different `#fragment`).
+///
+/// Such a navigation is a *same-document* navigation: the page and its injected
+/// SDK stay alive, so the host must not rotate `documentId` (doing so would strand
+/// the live document waiting for a new `ready`). A reload of the exact same URL is
+/// deliberately **not** same-document: it creates a fresh document and needs a new
+/// identity.
+fn is_same_document_navigation(previous: &str, next: &str) -> bool {
+    let (Ok(previous), Ok(next)) = (url::Url::parse(previous), url::Url::parse(next)) else {
+        return false;
+    };
+    previous.scheme() == next.scheme()
+        && previous.host_str() == next.host_str()
+        && previous.port_or_known_default() == next.port_or_known_default()
+        && previous.path() == next.path()
+        && previous.query() == next.query()
+        && previous.fragment() != next.fragment()
+}
+
+fn record_navigation_url(previous: &mut String, next: &str, can_preserve: bool) -> bool {
+    let same_document = can_preserve && is_same_document_navigation(previous, next);
+    *previous = next.to_string();
+    same_document
+}
+
 fn external_browser_uri(origin: &str, uri: &str) -> bool {
     let Ok(base) = url::Url::parse(origin) else { return false; };
     url::Url::parse(uri).map(|url| matches!(url.scheme(), "http" | "https") && url.origin() != base.origin()).unwrap_or(false)
@@ -248,6 +274,11 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
     let navigation_flag = Rc::new(Cell::new(true));
     let navigation_id = Rc::new(Cell::new(None));
     let starting_navigation_id = navigation_id.clone();
+    // Last top-level URL that became a document. Used to tell a real document
+    // navigation from a same-document (fragment/hash) navigation: the latter must
+    // not rotate `documentId`, because the page and its SDK stay initialized.
+    let navigation_last_url = Rc::new(RefCell::new(shell_url.clone()));
+    let navigation_last_url_writer = navigation_last_url.clone();
     let allowed_shell = shell_url.clone();
     let navigation_origin = origin.clone();
     let navigation_app = app.clone();
@@ -335,14 +366,21 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
                 } else if trusted {
                     local_navigation_path(&navigation_origin, &uri).is_some_and(|path| navigation_html.contains(&path))
                 } else { false };
-                if allow {
+                // Fragment/hash navigation keeps the current document (and its SDK
+                // identity); rotating documentId would discard a live document and
+                // leave the view waiting for a `ready` that can never arrive.
+                // Remember fragment changes too: reloading page.html#x must be
+                // compared to #x, not to the URL before the last hash navigation.
+                let same_document = allow && record_navigation_url(
+                    &mut navigation_last_url_writer.borrow_mut(), &uri, !initial && trusted);
+                if allow && !same_document {
                     let mut id = 0; args.NavigationId(&mut id)?;
                     starting_navigation_id.set(Some(id));
                     // Retire the previous document before the new page exists.
                     let document_id = uuid::Uuid::new_v4().to_string();
                     navigation_session.begin_document(&document_id);
                     super::native_document(&navigation_app, &navigation_session, &document_id);
-                } else if trusted {
+                } else if !allow && trusted {
                     let mut user_initiated = windows::core::BOOL(0);
                     args.IsUserInitiated(&mut user_initiated)?;
                     // External HTTP(S) links are delegated to the OS browser only
@@ -429,10 +467,21 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
                 let mut success = windows::core::BOOL(0); args.IsSuccess(&mut success)?;
                 if !success.as_bool() {
                     let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default(); args.WebErrorStatus(&mut status)?;
-                    // A deliberately denied external link is not a failed document.
-                    if status != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
+                    // This handler only runs for the latest *allowed* navigation, whose
+                    // document was already announced. A cancelled one (download link,
+                    // beforeunload "stay", script stop) will never reach
+                    // DOMContentLoaded, so it must fail closed instead of leaving the
+                    // view loading forever. Deliberately denied external links are
+                    // cancelled in NavigationStarting and never reach this branch.
+                    if status == COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
+                        super::native_error(&loading_app, &loading_session, "插件视图文档导航已取消");
+                    } else {
                         super::native_error(&loading_app, &loading_session, "插件 UI 文档加载失败");
                     }
+                } else {
+                    // Loaded: start the trusted-web ready watchdog only now, so slow
+                    // loading is never failed by a fixed deadline.
+                    super::native_navigation_complete(&loading_app, &loading_session);
                 }
             }
             Ok(())
@@ -652,7 +701,7 @@ pub fn clear() {
 
 #[cfg(test)]
 mod tests {
-    use super::{clipped_occlusion, EphemeralDirectory, ViewParent};
+    use super::{clipped_occlusion, is_same_document_navigation, EphemeralDirectory, ViewParent};
     use crate::plugin::view_runtime::OcclusionRect;
     use windows::{core::{w, PCWSTR}, Win32::{Foundation::RECT, UI::WindowsAndMessaging::{CreateWindowExW, GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW}}};
     use wry::{WebContext, WebViewBuilder, WebViewExtWindows};
@@ -725,5 +774,30 @@ mod tests {
                 assert_eq!((bounds.left, bounds.top, bounds.right, bounds.bottom), (0, 0, client.right, client.bottom));
             }
         }
+    }
+    #[test]
+    fn fragment_navigation_then_reload_rotates_the_document() {
+        let mut previous = "https://view.plugin.invalid/ui/page.html".to_string();
+        let hash = format!("{previous}#settings");
+        assert!(super::record_navigation_url(&mut previous, &hash, true));
+        assert_eq!(previous, hash);
+        assert!(!super::record_navigation_url(&mut previous, &hash, true));
+    }
+
+    #[test]
+    fn same_document_navigation_only_matches_fragment_changes() {
+        let origin = "https://view.plugin.invalid";
+        let page = format!("{origin}/ui/page.html");
+        assert!(is_same_document_navigation(&page, &format!("{page}#settings")));
+        assert!(is_same_document_navigation(&format!("{page}#a"), &format!("{page}#b")));
+        // Reload of the exact same URL creates a new document, so it must NOT be
+        // treated as same-document (the SDK needs a fresh documentId).
+        assert!(!is_same_document_navigation(&page, &page));
+        // Different path / query / origin are real navigations.
+        assert!(!is_same_document_navigation(&page, &format!("{origin}/ui/other.html#x")));
+        assert!(!is_same_document_navigation(&page, &format!("{page}?a=1#x")));
+        assert!(!is_same_document_navigation(&format!("{page}?a=1"), &format!("{page}?a=2#x")));
+        assert!(!is_same_document_navigation(&page, "https://example.com/ui/page.html#x"));
+        assert!(!is_same_document_navigation("not a url", &format!("{page}#x")));
     }
 }

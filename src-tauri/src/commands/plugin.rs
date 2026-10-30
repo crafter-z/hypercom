@@ -16,6 +16,7 @@
  * zip 与目录安装都在 staging 中限制大小、验证路径；升级备份旧版直到状态保存成功。
  */
 use std::path::Path;
+use std::time::Duration;
 use base64::Engine as _;
 
 use tauri::{Manager, State};
@@ -24,6 +25,23 @@ use super::CommandError;
 use crate::config;
 use crate::plugin::{self, PluginManifest};
 use crate::AppState;
+
+const PLUGIN_IO_WAIT: Duration = Duration::from_secs(5);
+
+pub(crate) async fn acquire_plugin_gate<'a>(
+    gate: &'a tokio::sync::Mutex<()>,
+    wait: Duration,
+) -> Result<tokio::sync::MutexGuard<'a, ()>, CommandError> {
+    tokio::time::timeout(wait, gate.lock())
+        .await
+        .map_err(|_| CommandError::Other("插件操作忙，请稍后重试".into()))
+}
+
+pub(crate) async fn acquire_plugin_io(
+    state: &AppState,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, CommandError> {
+    acquire_plugin_gate(&state.plugin_io, PLUGIN_IO_WAIT).await
+}
 
 /// 单个插件的完整视图（前端设置页/宿主桥消费）。
 /// manifest = 磁盘权威（每次 list 现扫）；state = config 实体状态。
@@ -209,7 +227,7 @@ pub async fn list_plugins(
     state: State<'_, AppState>,
 ) -> Result<PluginListResponse, CommandError> {
     require_main_window(&window)?;
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     let root = {
         let manager = state
             .config_manager
@@ -217,9 +235,13 @@ pub async fn list_plugins(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         manager.plugins_dir().to_path_buf()
     };
-    let scanned = tokio::task::spawn_blocking(move || plugin::scan_plugins(&root))
+    let scanned = tokio::task::spawn_blocking(move || {
+        plugin::transaction::cleanup_orphan_staging(&root)
+            .map_err(|e| CommandError::Io(format!("清理插件暂存目录失败: {e}")))?;
+        Ok::<_, CommandError>(plugin::scan_plugins(&root))
+    })
         .await
-        .map_err(|e| CommandError::Other(format!("插件扫描 join 失败: {e}")))?;
+        .map_err(|e| CommandError::Other(format!("插件扫描 join 失败: {e}")))??;
     // Scan may take seconds; never return a permission snapshot captured before it.
     let manager = state
         .config_manager
@@ -246,8 +268,8 @@ pub async fn reload_plugin(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.lock().await;
-    let result = {
+    let _plugin_io = acquire_plugin_io(&state).await?;
+    let root = {
         let manager = state
             .config_manager
             .lock()
@@ -257,9 +279,21 @@ pub async fn reload_plugin(
         if !entry.enabled {
             return Err(CommandError::Other(format!("插件未启用: {id}")));
         }
-        // 重载前确认磁盘代码仍可校验通过；失败则保持旧 Worker/session 不动。
-        plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
-            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+        manager.plugins_dir().to_path_buf()
+    };
+    // Full resource validation is required before reload, but never while the
+    // config mutex is held. The IO gate keeps code stable during this check.
+    plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
+        .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+    let result = {
+        let manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?;
+        require_generation(manager.get_config(), &id, &expected_generation)?;
+        if !state_of(manager.get_config(), &id).is_some_and(|entry| entry.enabled) {
+            return Err(CommandError::Other(format!("插件未启用: {id}")));
+        }
         snapshot(&manager)
     };
     state.plugin_http.cancel_plugin(&id);
@@ -282,11 +316,14 @@ pub async fn reload_plugin(
 pub async fn install_plugin(
     source_path: String,
     replace_existing: Option<bool>,
+    // Optional identity of the code the user reviewed. A replacement install that
+    // races a newer install would otherwise silently overwrite reviewed code.
+    expected_generation: Option<String>,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     let root = state
         .config_manager
         .lock()
@@ -294,6 +331,8 @@ pub async fn install_plugin(
         .plugins_dir()
         .to_path_buf();
     let prepared = tokio::task::spawn_blocking(move || {
+        plugin::transaction::cleanup_orphan_staging(&root)
+            .map_err(|e| CommandError::Io(format!("清理插件暂存目录失败: {e}")))?;
         prepare_plugin_install(
             &source_path,
             &root,
@@ -312,7 +351,7 @@ pub async fn install_plugin(
             .config_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        install_prepared(&mut manager, prepared)
+        install_prepared(&mut manager, prepared, expected_generation.as_deref())
     })
 }
 
@@ -320,6 +359,7 @@ struct PreparedPluginInstall {
     manifest: PluginManifest,
     source_label: &'static str,
     dest: std::path::PathBuf,
+    replace_existing: bool,
     stage_guard: TempDirGuard,
 }
 
@@ -366,7 +406,26 @@ fn persist_install_trust_reset(manager: &mut config::ConfigManager) -> Result<()
 fn install_prepared(
     manager: &mut config::ConfigManager,
     mut prepared: PreparedPluginInstall,
+    expected_generation: Option<&str>,
 ) -> Result<PluginStateSnapshot, CommandError> {
+    // A replacement install may run after the user reviewed a specific install
+    // generation (e.g. a slow double-click or a stale settings page). Refuse when
+    // the installed identity moved on, so reviewed code is never silently swapped.
+    let existing = state_of(manager.get_config(), &prepared.manifest.id);
+    match (existing, expected_generation) {
+        (Some(entry), Some(expected)) if !expected.is_empty() && entry.install_generation == expected => {}
+        (Some(_), Some(_)) | (None, Some(_)) => {
+            return Err(CommandError::Other(
+                "插件安装版本已变化，请重新检查插件后操作".into(),
+            ));
+        }
+        (Some(_), None) if prepared.replace_existing => {
+            return Err(CommandError::Other(
+                "替换安装必须携带已审阅的插件安装代次".into(),
+            ));
+        }
+        (Some(_), None) | (None, None) => {}
+    }
     let old = manager.get_config().clone();
     reset_install_trust(
         manager.get_config_mut(),
@@ -533,6 +592,7 @@ fn prepare_plugin_install(
         manifest,
         source_label,
         dest,
+        replace_existing,
         stage_guard,
     })
 }
@@ -657,7 +717,7 @@ pub async fn uninstall_plugin(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     {
         let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
@@ -681,7 +741,8 @@ pub async fn uninstall_plugin(
             .map_err(|e| CommandError::Other(format!("插件已卸载，但关闭网页视图失败: {e}")))?;
         let directory = {
             let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
-            plugin::web_data_dir(manager.plugins_dir(), &id)
+            plugin::web_data_dir(manager.plugins_dir(), &id, &expected_generation)
+                .map_err(CommandError::Other)?
         };
         plugin::view_runtime::clear_web_data(window.app_handle(), &directory).await
             .map_err(|e| CommandError::Other(format!("插件已卸载，但网页数据清理失败: {e}")))?;
@@ -758,7 +819,7 @@ pub async fn set_plugin_enabled(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     {
         let manager = state
             .config_manager
@@ -773,13 +834,16 @@ pub async fn set_plugin_enabled(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
         if enabled {
-            let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
+            let manifest = plugin::load_manifest_lite(&plugin_dir(manager.plugins_dir(), &id)?)
                 .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
             if manifest.id != id {
                 return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
             }
             require_trusted_web_consent(&manifest, state_of(manager.get_config(), &id).unwrap())?;
         }
+        manager
+            .begin_plugin_recovery_marker()
+            .map_err(|e| CommandError::Config(format!("写入插件信任恢复标记失败: {e}")))?;
         let old_config = manager.get_config().clone();
         let cfg = manager.get_config_mut();
         let entry = cfg
@@ -793,11 +857,12 @@ pub async fn set_plugin_enabled(
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
         }
-        // Keep the corruption-recovery fallback in sync with the committed trust
-        // state; otherwise a later config.json corruption restores the old grants.
-        if let Err(e) = manager.save_safe_backup() {
-            log::error!("Failed to update safe config backup after plugin state change: {e}");
-        }
+        manager
+            .save_safe_backup()
+            .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
+        manager
+            .clear_plugin_recovery_marker()
+            .map_err(|e| CommandError::Config(format!("清除插件信任恢复标记失败: {e}")))?;
         snapshot(&manager)
     };
     // Retire only after the committed state is durable and visible: a rejected
@@ -827,17 +892,20 @@ pub async fn set_plugin_trusted_web(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.lock().await;
-    let (result, backup_error) = {
+    let _plugin_io = acquire_plugin_io(&state).await?;
+    let result = {
         let mut manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
         if trusted {
-            let manifest = plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &id)?)
+            let manifest = plugin::load_manifest_lite(&plugin_dir(manager.plugins_dir(), &id)?)
                 .map_err(CommandError::Other)?;
             if manifest.id != id || !manifest.has_trusted_web_views() {
                 return Err(CommandError::Other("插件未声明可信网页视图".into()));
             }
         }
+        manager
+            .begin_plugin_recovery_marker()
+            .map_err(|e| CommandError::Config(format!("写入插件信任恢复标记失败: {e}")))?;
         let old_config = manager.get_config().clone();
         let entry = manager.get_config_mut().entities.plugin_configs.iter_mut().find(|p| p.id == id).unwrap();
         entry.trusted_web_granted = trusted;
@@ -846,16 +914,18 @@ pub async fn set_plugin_trusted_web(
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(format!("保存网页信任状态失败: {error}")));
         }
-        let backup_error = manager.save_safe_backup().err().map(|e| e.to_string());
-        (snapshot(&manager), backup_error)
+        manager
+            .save_safe_backup()
+            .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
+        manager
+            .clear_plugin_recovery_marker()
+            .map_err(|e| CommandError::Config(format!("清除插件信任恢复标记失败: {e}")))?;
+        snapshot(&manager)
     };
     if !trusted {
         state.plugin_http.cancel_plugin(&id);
         plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
             .map_err(|e| CommandError::Other(format!("网页信任已撤销，但关闭视图失败: {e}")))?;
-    }
-    if let Some(error) = backup_error {
-        return Err(CommandError::Config(format!("网页信任状态已保存，但恢复备份更新失败: {error}")));
     }
     Ok(result)
 }
@@ -869,14 +939,18 @@ pub async fn clear_plugin_web_data(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     let (directory, result) = {
         let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
         if state_of(manager.get_config(), &id).unwrap().enabled {
             return Err(CommandError::Other("请先禁用插件再清除网页数据".into()));
         }
-        (plugin::web_data_dir(manager.plugins_dir(), &id), snapshot(&manager))
+        (
+            plugin::web_data_dir(manager.plugins_dir(), &id, &expected_generation)
+                .map_err(CommandError::Other)?,
+            snapshot(&manager),
+        )
     };
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
     plugin::view_runtime::clear_web_data(window.app_handle(), &directory).await?;
@@ -897,7 +971,7 @@ pub async fn set_plugin_permissions(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     {
         let manager = state
             .config_manager
@@ -914,7 +988,7 @@ pub async fn set_plugin_permissions(
 
         // manifest 权威点：读取声明权限做子集校验。
         let root = manager.plugins_dir().to_path_buf();
-        let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
+        let manifest = plugin::load_manifest_lite(&plugin_dir(&root, &id)?)
             .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
         if manifest.id != id {
             return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
@@ -934,6 +1008,9 @@ pub async fn set_plugin_permissions(
             }
         }
 
+        manager
+            .begin_plugin_recovery_marker()
+            .map_err(|e| CommandError::Config(format!("写入插件信任恢复标记失败: {e}")))?;
         let old_config = manager.get_config().clone();
         let cfg = manager.get_config_mut();
         let entry = cfg
@@ -948,9 +1025,12 @@ pub async fn set_plugin_permissions(
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
         }
-        if let Err(e) = manager.save_safe_backup() {
-            log::error!("Failed to update safe config backup after permission change: {e}");
-        }
+        manager
+            .save_safe_backup()
+            .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
+        manager
+            .clear_plugin_recovery_marker()
+            .map_err(|e| CommandError::Config(format!("清除插件信任恢复标记失败: {e}")))?;
         (snapshot(&manager), committed_permissions)
     };
     // Validate + commit first, then retire views based on committed grants.
@@ -993,7 +1073,7 @@ pub async fn read_plugin_asset(
     if rel_path.len() > 4096 {
         return Err(CommandError::Other("插件资产路径超长".into()));
     }
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     let rel = sanitize_asset_path(&rel_path)?;
     let root = {
         let manager = state
@@ -1001,7 +1081,7 @@ pub async fn read_plugin_asset(
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let root = manager.plugins_dir().to_path_buf();
-        let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
+        let manifest = plugin::load_manifest_lite(&plugin_dir(&root, &id)?)
             .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
         if manifest.id != id {
             return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
@@ -1078,7 +1158,7 @@ pub async fn write_plugin_asset(
             ));
         }
     };
-    let _plugin_io = state.plugin_io.lock().await;
+    let _plugin_io = acquire_plugin_io(&state).await?;
     let rel = sanitize_asset_path(&rel_path)?;
     let first = rel
         .components()
@@ -1096,7 +1176,7 @@ pub async fn write_plugin_asset(
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         let root = manager.plugins_dir().to_path_buf();
-        let manifest = plugin::load_manifest_from_dir(&plugin_dir(&root, &id)?)
+        let manifest = plugin::load_manifest_lite(&plugin_dir(&root, &id)?)
             .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
         let entry = manager
             .get_config()
@@ -1938,6 +2018,9 @@ fn copy_dir_recursive_inner(
 
 // ==================== 插件 Shell（v1：openExternal + 白名单骨架） ====================
 
+/// Channel-level bound only; this is not a business/content quota.
+const MAX_PLUGIN_EXTERNAL_URL_CHARS: usize = 8 * 1024;
+
 /// 插件打开外部 URL；调用时检查插件启用、shell:open 授权及 manifest 声明。
 /// 仅 http/https/mailto 协议（防 file:// 读本地）。
 #[tauri::command]
@@ -1951,6 +2034,9 @@ pub async fn plugin_open_external(
     use tauri_plugin_shell::ShellExt;
     require_main_window(&window)?;
     plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+    if url.chars().count() > MAX_PLUGIN_EXTERNAL_URL_CHARS {
+        return Err(CommandError::Other("openExternal URL 超过通道长度上限".into()));
+    }
     {
         let manager = state
             .config_manager
@@ -1969,7 +2055,7 @@ pub async fn plugin_open_external(
             )));
         }
         let manifest =
-            plugin::load_manifest_from_dir(&plugin_dir(manager.plugins_dir(), &plugin_id)?)
+            plugin::load_manifest_lite(&plugin_dir(manager.plugins_dir(), &plugin_id)?)
                 .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
         if manifest.id != plugin_id || !manifest.permissions.iter().any(|p| p == "shell:open") {
             return Err(CommandError::Other(format!(
@@ -1998,6 +2084,17 @@ mod tests {
     use crate::commands::plugin_http::url_glob_match;
     use super::*;
     use std::fs;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_gate_wait_is_bounded_and_recovers_after_release() {
+        let gate = tokio::sync::Mutex::new(());
+        let held = gate.lock().await;
+        let busy = acquire_plugin_gate(&gate, Duration::from_millis(5)).await;
+        assert!(matches!(busy, Err(CommandError::Other(message)) if message.contains("忙")));
+        drop(held);
+        let acquired = acquire_plugin_gate(&gate, Duration::from_millis(50)).await;
+        assert!(acquired.is_ok());
+    }
 
     fn canonical_test_temp_dir() -> std::path::PathBuf {
         // macOS /var and /tmp can be aliases; fixtures must exercise copying
@@ -2136,9 +2233,9 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), false).unwrap();
         fs::remove_dir_all(&prepared.stage_guard.0).unwrap();
-        assert!(install_prepared(&mut manager, prepared).is_err());
+        assert!(install_prepared(&mut manager, prepared, None).is_err());
         let reloaded = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         let entry = &reloaded.get_config().entities.plugin_configs[0];
         assert!(!entry.enabled);
@@ -2160,10 +2257,10 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), false).unwrap();
         // ConfigManager's atomic save cannot open a directory as its temp file.
         fs::create_dir(root.join("config.json.tmp")).unwrap();
-        assert!(install_prepared(&mut manager, prepared).is_err());
+        assert!(install_prepared(&mut manager, prepared, None).is_err());
         assert!(manager.get_config().entities.plugin_configs[0].enabled);
         assert_eq!(
             fs::read_to_string(manager.plugins_dir().join("com.example.test/main.js")).unwrap(),
@@ -2181,13 +2278,13 @@ mod tests {
         let mut manager = trusted_manager(&root);
         install_plugin_fs_stage(old_source.to_str().unwrap(), manager.plugins_dir()).unwrap();
         let prepared =
-            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+            prepare_plugin_install(new_source.to_str().unwrap(), manager.plugins_dir(), false).unwrap();
         let backup = root.join("config.json.bak");
         if backup.exists() {
             fs::remove_file(&backup).unwrap();
         }
         fs::create_dir(&backup).unwrap();
-        assert!(install_prepared(&mut manager, prepared).is_err());
+        assert!(install_prepared(&mut manager, prepared, None).is_err());
         assert_eq!(
             fs::read_to_string(manager.plugins_dir().join("com.example.test/main.js")).unwrap(),
             "1.0.0"
@@ -3046,10 +3143,15 @@ mod tests {
         let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
         let prepared =
             prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
-        let first = install_prepared(&mut manager, prepared).unwrap();
+        let first = install_prepared(&mut manager, prepared, None).unwrap();
         let prepared =
             prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
-        let second = install_prepared(&mut manager, prepared).unwrap();
+        let second = install_prepared(
+            &mut manager,
+            prepared,
+            Some(&first.plugin_configs[0].install_generation),
+        )
+        .unwrap();
         assert_ne!(
             first.plugin_configs[0].install_generation,
             second.plugin_configs[0].install_generation
@@ -3060,7 +3162,7 @@ mod tests {
         assert!(removed.revision > second.revision);
         let prepared =
             prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
-        let reinstalled = install_prepared(&mut manager, prepared).unwrap();
+        let reinstalled = install_prepared(&mut manager, prepared, None).unwrap();
         assert_ne!(
             reinstalled.plugin_configs[0].install_generation,
             first.plugin_configs[0].install_generation
@@ -3071,6 +3173,63 @@ mod tests {
         );
         assert!(!reinstalled.plugin_configs[0].enabled);
         assert!(reinstalled.plugin_configs[0].granted_permissions.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_install_rejects_a_stale_expected_generation() {
+        let root = canonical_test_temp_dir()
+            .join(format!("plugin_expected_gen_{}", uuid::Uuid::new_v4()));
+        let src1 = source(&root, "1.0.0");
+        let src2 = source(&root, "2.0.0");
+        let mut manager = config::ConfigManager::new(Some(root.join("config.json"))).unwrap();
+
+        // Fresh install has no reviewed prior identity, so it omits expectedGeneration.
+        let prepared =
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+        let first = install_prepared(&mut manager, prepared, None).unwrap();
+        let reviewed = first.plugin_configs[0].install_generation.clone();
+
+        // The reviewed identity still matches, so the replacement is allowed.
+        let prepared =
+            prepare_plugin_install(src2.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+        let second = install_prepared(&mut manager, prepared, Some(&reviewed)).unwrap();
+        let latest = second.plugin_configs[0].install_generation.clone();
+        assert_ne!(latest, reviewed);
+
+        // Explicit replacement without a reviewed identity is refused even when
+        // the currently installed code still exists.
+        let revision = manager.get_config().revision;
+        let prepared =
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+        let error = install_prepared(&mut manager, prepared, None).unwrap_err();
+        assert!(matches!(error, CommandError::Other(ref message) if message.contains("必须携带")));
+        assert_eq!(manager.get_config().revision, revision);
+
+        // A replacement queued against the old identity must be refused before any
+        // durable state or installed file changes.
+        let revision = manager.get_config().revision;
+        let prepared =
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+        let error = install_prepared(&mut manager, prepared, Some(&reviewed)).unwrap_err();
+        assert!(
+            matches!(error, CommandError::Other(ref message) if message.contains("安装版本已变化")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            manager.get_config().revision,
+            revision,
+            "a refused replacement must not touch durable state"
+        );
+        assert_eq!(
+            manager.get_config().entities.plugin_configs[0].install_generation,
+            latest
+        );
+
+        // An empty identity can never be reviewed, so it is refused the same way.
+        let prepared =
+            prepare_plugin_install(src1.to_str().unwrap(), manager.plugins_dir(), true).unwrap();
+        assert!(install_prepared(&mut manager, prepared, Some("")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

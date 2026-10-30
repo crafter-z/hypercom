@@ -142,9 +142,23 @@ impl UiView {
 }
 
 /// Browser profiles are outside plugin packages and plugin-writable private data.
-/// Callers must validate the plugin id before deriving this path.
-pub fn web_data_dir(plugins_dir: &Path, id: &str) -> std::path::PathBuf {
-    plugins_dir.parent().expect("plugins directory has a parent").join("plugin-web-data").join(id)
+/// The install generation is part of the profile identity: reinstalling the same
+/// plugin id must never inherit the old trusted-web profile. Validate and
+/// canonicalize the UUID at this single path derivation boundary.
+pub fn web_data_dir(
+    plugins_dir: &Path,
+    id: &str,
+    install_generation: &str,
+) -> Result<std::path::PathBuf, String> {
+    let generation = uuid::Uuid::parse_str(install_generation)
+        .map_err(|_| "插件安装代次不是合法 UUID".to_string())?
+        .to_string();
+    Ok(plugins_dir
+        .parent()
+        .expect("plugins directory has a parent")
+        .join("plugin-web-data")
+        .join(id)
+        .join(generation))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -202,7 +216,15 @@ pub fn parse_manifest(json: &str) -> Result<PluginManifest, String> {
 }
 
 /// Read a regular, unlinked manifest with both metadata and streaming bounds.
-pub fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, String> {
+///
+/// This is the **cheap** variant: it parses and validates the manifest itself
+/// but does not stat/read the declared view resources. Use it on hot paths
+/// (per-request capability checks, asset reads, enable/permission changes)
+/// where only the manifest's declarations matter. Install, enable, reload and
+/// plugin listing use [`load_manifest_from_dir`] for full package validation;
+/// native view creation validates the manifest here and snapshots only the
+/// selected view resources outside the config lock.
+pub fn load_manifest_lite(dir: &Path) -> Result<PluginManifest, String> {
     let directory = fs::symlink_metadata(dir).map_err(|e| format!("插件目录不可读: {e}"))?;
     if !directory.is_dir() || is_link_or_reparse(&directory) {
         return Err("插件目录必须是普通目录".into());
@@ -229,16 +251,40 @@ pub fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, String> {
     if !opened.is_file() || opened.file_type().is_symlink() || opened.len() > MAX_MANIFEST_BYTES {
         return Err("manifest 必须是普通文件且不超过 1 MiB".into());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.nlink() != 1 {
+            return Err("manifest 不得是硬链接".into());
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         if opened.file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err("manifest 不得是链接或重解析点".into());
         }
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0
+            || information.nNumberOfLinks != 1
+        {
+            return Err("manifest 不得是硬链接".into());
+        }
     }
     let bytes = read_manifest_bytes(file, opened.len())?;
     let content = String::from_utf8(bytes).map_err(|e| format!("manifest 不是 UTF-8: {e}"))?;
-    let manifest = parse_manifest(&content)?;
+    parse_manifest(&content)
+}
+
+/// Read a manifest **and** validate every declared view resource.
+///
+/// Keep the resource walk on install/list/enable/reload paths: it stats and
+/// reads `ui.views[].entry/styles/assets` (up to 32 MiB per view) and must not
+/// run on per-request capability checks or native view creation's config lock.
+pub fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, String> {
+    let manifest = load_manifest_lite(dir)?;
     view_runtime::resources::validate_files(dir, &manifest)?;
     Ok(manifest)
 }
@@ -933,6 +979,21 @@ fn extract_plugin_zip_limited(
 mod tests {
     use super::*;
 
+    #[test]
+    fn web_data_dir_isolated_by_install_generation() {
+        let root = Path::new("/config/plugins");
+        let first_generation = uuid::Uuid::new_v4().to_string();
+        let second_generation = uuid::Uuid::new_v4().to_string();
+        let first = web_data_dir(root, "com.example.test", &first_generation).unwrap();
+        let second = web_data_dir(root, "com.example.test", &second_generation).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.file_name().and_then(|name| name.to_str()), Some(first_generation.as_str()));
+        assert_eq!(second.file_name().and_then(|name| name.to_str()), Some(second_generation.as_str()));
+        assert_eq!(first.parent().and_then(Path::file_name).and_then(|name| name.to_str()), Some("com.example.test"));
+        assert!(web_data_dir(root, "com.example.test", "../../outside").is_err());
+        assert!(web_data_dir(root, "com.example.test", "not-a-generation").is_err());
+    }
+
     fn valid_manifest_json() -> String {
         r#"{
             "id": "com.example.symresolve",
@@ -1044,6 +1105,11 @@ mod tests {
         fs::write(root.join("source/manifest.json"), valid_manifest_json()).unwrap();
         std::os::unix::fs::symlink(root.join("source"), root.join("linked")).unwrap();
         assert!(load_manifest_from_dir(&root.join("linked")).is_err());
+        fs::remove_file(root.join("linked")).unwrap();
+        fs::remove_file(root.join("source/manifest.json")).unwrap();
+        fs::write(root.join("real.json"), valid_manifest_json()).unwrap();
+        fs::hard_link(root.join("real.json"), root.join("source/manifest.json")).unwrap();
+        assert!(load_manifest_lite(&root.join("source")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1503,7 +1569,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hypercom_zip_depth_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let zip_path = dir.join("pkg.zip");
-        let name = std::iter::repeat("x").take(MAX_PLUGIN_SOURCE_DEPTH + 1).collect::<Vec<_>>().join("/");
+        let name = std::iter::repeat_n("x", MAX_PLUGIN_SOURCE_DEPTH + 1)
+            .collect::<Vec<_>>()
+            .join("/");
         write_test_zip(&zip_path, &[(name.as_str(), "")]);
         let error = extract_plugin_zip(&zip_path, &dir.join("out")).unwrap_err();
         assert!(error.contains("深度"));
