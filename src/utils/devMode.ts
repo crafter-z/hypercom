@@ -5,6 +5,6 @@
  * `npm run tauri build` 产出的 release 安装包走 production 构建 → `false`。
  * 模拟串口（SIM:Loopback）按钮及其全部功能仅在调试模式可用；
  * 后端侧 `enable_simulation` / `disable_simulation` 在 release 构建下同样拒绝
- * （`cfg(not(debug_assertions))`），双层门控。
+ * （`commands/system_cmds.rs` 的 `dev_only` 守卫，命令体只有一份实现），双层门控。
  */
 export const DEV_FEATURES_ENABLED: boolean = import.meta.env.DEV;

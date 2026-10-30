@@ -23,6 +23,11 @@
 import { describe, it, expect } from 'vitest';
 import libSource from '../../src-tauri/src/lib.rs?raw';
 import serialRustSource from '../../src-tauri/src/commands/serial.rs?raw';
+import pluginRustSource from '../../src-tauri/src/commands/plugin.rs?raw';
+import httpRustSource from '../../src-tauri/src/commands/plugin_http.rs?raw';
+import fileRustSource from '../../src-tauri/src/commands/file.rs?raw';
+import systemRustSource from '../../src-tauri/src/commands/system_cmds.rs?raw';
+import updateRustSource from '../../src-tauri/src/commands/update.rs?raw';
 
 // ---------------------------------------------------------------------------
 // 源文本收集
@@ -271,6 +276,64 @@ function argsBody(call: CallSite): string {
 }
 
 const keysOf = (body: string): Set<string> => new Set(topLevelProps(body).map((p) => p.key));
+
+/** Read real Rust command signatures; injected Tauri context is not on the wire.
+ * Split commas only outside generics so State<'_, AppState> and Vec<T> are not
+ * mistaken for additional parameters. Rust lifetimes are not JS strings. */
+interface WireParameter { name: string; optional: boolean }
+function commandWireParameters(source: string, command: string): WireParameter[] | null {
+  const signature = new RegExp(`pub\\s+(?:async\\s+)?fn\\s+${command}\\s*\\(([\\s\\S]*?)\\)\\s*(?:->|\\{)`).exec(source);
+  if (!signature) return null;
+  const parameterText = signature[1].replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\r\n]*/g, '');
+  const parameters: WireParameter[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let i = 0; i <= parameterText.length; i++) {
+    const character = parameterText[i];
+    if (character === '<' || character === '[' || character === '(') depth++;
+    if (character === '>' || character === ']' || character === ')') depth--;
+    if (i < parameterText.length && (character !== ',' || depth !== 0)) continue;
+    const parameter = parameterText.slice(start, i).trim();
+    start = i + 1;
+    if (!parameter) continue;
+    const match = /^(\w+)\s*:\s*([\s\S]+)$/.exec(parameter);
+    if (!match) throw new Error(`Cannot parse ${command} parameter: ${parameter}`);
+    if (/(?:^|::)(?:State|Window|Webview|WebviewWindow|AppHandle)(?:\b|<)/.test(match[2])) continue;
+    parameters.push({
+      name: match[1].replace(/_([a-z])/g, (_value, letter: string) => letter.toUpperCase()),
+      optional: /^Option\s*</.test(match[2].trim()),
+    });
+  }
+  return parameters;
+}
+
+const boundaryRustSources = [pluginRustSource, httpRustSource, fileRustSource, systemRustSource, updateRustSource];
+
+describe('plugin / HTTP / view / close / update command parameter contract', () => {
+  it('derives wire keys from real Rust signatures instead of a handwritten mirror', () => {
+    let checked = 0;
+    for (const command of handlerCommands) {
+      const candidates = boundaryRustSources.map(source => commandWireParameters(source, command)).filter((fields): fields is WireParameter[] => fields !== null);
+      if (candidates.length === 0) continue;
+      expect(candidates, `ambiguous command ${command}`).toHaveLength(1);
+      const expected = candidates[0];
+      const sites = byCommand.get(command) ?? [];
+      expect(sites.length, `${command} has no frontend contract`).toBeGreaterThan(0);
+      for (const call of sites) {
+        const actual = [...keysOf(call.body ?? '')];
+        expect(actual.filter(key => !expected.some(parameter => parameter.name === key)), `${call.file}: ${command} unexpected wire keys`).toEqual([]);
+        expect(expected.filter(parameter => !parameter.optional && !actual.includes(parameter.name)), `${call.file}: ${command} missing required wire keys`).toEqual([]);
+      }
+      checked++;
+    }
+    expect(checked).toBeGreaterThanOrEqual(25);
+  });
+
+  it('parses injected context and generic payloads without silently losing fields', () => {
+    expect(commandWireParameters('pub async fn sample(source: tauri::Webview, state: State<\'_, AppState>, expected_generation: String, values: Option<Vec<String>>) -> Result<(), CommandError> {', 'sample'))
+      .toEqual([{ name: 'expectedGeneration', optional: false }, { name: 'values', optional: true }]);
+  });
+});
 
 describe('invoke 命令名 ↔ generate_handler! 双向一致', () => {
   it('扫描确实命中前端调用点（防止 glob/正则失效造成空扫假绿）', () => {

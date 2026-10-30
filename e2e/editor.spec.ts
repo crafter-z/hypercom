@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 const BACKEND_KEY = 'editor-regression.config';
+const browserErrors = new WeakMap<Page, string[]>();
 
 /** Persistence and event boundaries only; all editing is exercised through the real UI. */
 async function installBackend(page: Page) {
@@ -38,6 +39,15 @@ async function installBackend(page: Page) {
         if (loads[command]) return config()?.[loads[command]] ?? [];
         if (command === 'list_available_ports') return [];
         if (command === 'list_plugins') return { revision: config()?.revision ?? 0, pluginConfigs: [], plugins: [] };
+        if (command === 'plugin:app|version') return '1.0.0-e2e';
+        if (command === 'open_serial_port' || command === 'close_serial_port' || command === 'set_serial_params'
+          || command === 'set_flow_control' || command === 'attempt_reconnect' || command === 'cancel_file_send') return null;
+        if (command === 'send_serial_data' || command === 'send_file') return 0;
+        if (command === 'acknowledge_editor_close' || command === 'complete_editor_close' || command === 'cancel_editor_close'
+          || command === 'plugin:window|set_title' || command === 'prevent_screen_off' || command === 'prevent_sleep'
+          || command === 'plugin:webview|set_webview_zoom' || command === 'append_diag_log') return null;
+        if (command === 'plugin:window|is_maximized') return false;
+        if (command === 'get_session_snapshot' || command === 'update_session_snapshot' || command === 'append_diag_log') return null;
         if (command === 'get_system_status') return { status: 'normal', memoryUsedMb: 0, cpuUsage: 0 };
         if (command === 'get_config_path') return 'editor-regression/config.json';
         if (command === 'get_log_files') return [];
@@ -53,7 +63,8 @@ async function installBackend(page: Page) {
           channel.postMessage(event);
           return;
         }
-        return null;
+        (window.__E2E_UNKNOWN_COMMANDS__ ||= []).push(command);
+        throw new Error('Unhandled mocked Tauri command: ' + command);
       },
       transformCallback: (callback: (value: unknown) => void, once = false) => {
         const id = nextId++;
@@ -85,7 +96,22 @@ async function persisted(page: Page) {
   return page.evaluate(key => JSON.parse(localStorage.getItem(key)!), BACKEND_KEY);
 }
 
+function consumeExpectedDiskError(page: Page): void {
+  const errors = browserErrors.get(page) ?? [];
+  const expected = errors.filter((error) =>
+    error.startsWith('console.error: [useConfigPersistence] Failed to save config: Error: Disk unavailable')
+  );
+  expect(expected).toHaveLength(1);
+  errors.splice(errors.indexOf(expected[0]), 1);
+}
+
 test.beforeEach(async ({ page }) => {
+  const errors: string[] = [];
+  browserErrors.set(page, errors);
+  page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(`console.error: ${message.text()}`);
+  });
   await installBackend(page);
   await page.goto('/');
   await expect(page.locator('.app-root')).toBeVisible();
@@ -106,6 +132,12 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator('.app-root')).toBeVisible();
 });
 
+test.afterEach(async ({ page }) => {
+  expect(browserErrors.get(page) ?? []).toEqual([]);
+  const unknown = await page.evaluate(() => window.__E2E_UNKNOWN_COMMANDS__ ?? []);
+  expect(unknown, 'mocked unknown Tauri commands').toEqual([]);
+});
+
 test('insertion survives navigation; discard restores the saved set and failed save retains the draft', async ({ page }) => {
   await openCommands(page);
   await page.locator('.editor-accordion-body').getByRole('button', { name: '在下方插入', exact: true }).first().click();
@@ -121,6 +153,7 @@ test('insertion survives navigation; discard restores the saved set and failed s
   await page.evaluate(() => localStorage.setItem('editor-regression.fail-save', '1'));
   await page.locator('.modal-content-footer .btn-primary').click();
   await expect(page.locator('.modal-dialog')).toBeVisible();
+  consumeExpectedDiskError(page);
   await expect(page.getByPlaceholder('命令内容...').nth(1)).toHaveValue('INSERTED');
   await page.locator('.modal-content-header button').click();
   await page.getByRole('button', { name: '放弃并关闭', exact: true }).click();
@@ -135,6 +168,10 @@ test('keyboard sorting changes persisted execution order and reload restores it'
   await handle.focus();
   await handle.press('Space');
   await expect(handle).toHaveAttribute('aria-pressed', 'true');
+  // KeyboardSensor installs its document keydown listener in a zero-delay
+  // timer *after* aria-pressed changes. Drain that timer turn before sending
+  // movement; Chromium input can otherwise overtake the deferred attachment.
+  await page.evaluate(() => new Promise<void>(resolve => setTimeout(resolve, 0)));
   await handle.press('ArrowDown');
   await expect.poll(async () => {
     const rows = page.locator('.editor-accordion-body .editor-sortable-row');
@@ -177,6 +214,11 @@ test('reminder and highlight drafts do not apply or save until explicit save; hi
 test('command panel shares unsaved drafts with settings and retains them after a failed host save', async ({ page, context }) => {
   const panel = await context.newPage();
   await installBackend(panel);
+  const panelErrors: string[] = [];
+  panel.on('pageerror', (error) => panelErrors.push(`pageerror: ${error.message}`));
+  panel.on('console', (message) => {
+    if (message.type() === 'error') panelErrors.push(`console.error: ${message.text()}`);
+  });
   await panel.goto('/?popout=quick-send');
   await expect(panel.locator('.quicksend-row')).toHaveCount(2);
   await panel.getByRole('button', { name: '修改', exact: true }).first().click();
@@ -208,6 +250,8 @@ test('command panel shares unsaved drafts with settings and retains them after a
   await panel.locator('.quicksend-draft-actions').getByRole('button', { name: '保存', exact: true }).click();
   await expect(panel.locator('.quicksend-draft-actions')).toContainText('已保存');
   expect((await persisted(page)).sendCommandSets[0].commands[0].content).toBe('AFTER HOST RELOAD');
+  expect(panelErrors).toEqual([]);
+  expect(await panel.evaluate(() => window.__E2E_UNKNOWN_COMMANDS__ ?? [])).toEqual([]);
   await panel.close();
 });
 

@@ -3,6 +3,7 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: 'e2e',
   retries: 1,
+  failOnFlakyTests: true,
   timeout: 30000,
   expect: {
     timeout: 10000,

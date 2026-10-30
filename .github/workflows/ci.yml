@@ -33,8 +33,10 @@ jobs:
       - name: install frontend dependencies
         run: npm ci
 
-      - name: typecheck (tsc --noEmit)
-        run: npx tsc --noEmit
+      - name: typecheck (application + tooling + e2e)
+        run: |
+          npx tsc --noEmit
+          npx tsc --noEmit -p tsconfig.node.json
 
       - name: unit tests (vitest)
         run: npm run test:run
@@ -49,12 +51,17 @@ jobs:
         run: npm run build
 
   rust:
-    name: rust (cargo test --lib)
-    runs-on: ubuntu-latest
+    name: rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
       - name: install dependencies (ubuntu only)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # 与发版流的清单一致；唯一差异是 appindicator：发版流跑 ubuntu-22.04 用
@@ -65,6 +72,8 @@ jobs:
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -85,6 +94,9 @@ jobs:
       # Windows 本地开发环境跑不到——把 Windows-only 之外的分支纳入回归是本 job 的目的。
       - name: cargo test
         run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
 
       # `cargo check` 默认只在 debug profile 编译，`cfg(not(debug_assertions))` 与
       # release 专属路径（如 updater 的真实 endpoint）平时永远不编译；发版前必须
@@ -107,9 +119,10 @@ jobs:
       - name: install frontend dependencies
         run: npm ci
 
-      # e2e 用 mock IPC（e2e/smoke.spec.ts 注入 window.__TAURI_INTERNALS__），
-      # 不需要 Rust 侧与 webkit2gtk；playwright.config.ts 的 webServer 会自行
-      # 拉起 vite dev server（1420）；CI 下 reuseExistingServer=false。
+      # e2e specs use mock IPC (injecting window.__TAURI_INTERNALS__), so Rust and
+      # webkit2gtk are not needed; playwright.config.ts starts the Vite dev server
+      # (1420) itself, with reuseExistingServer=false in CI. Each mock throws for
+      # unknown commands so missing coverage cannot silently return null.
       - name: install playwright chromium
         run: npx playwright install --with-deps chromium
 

@@ -9,12 +9,32 @@ import { test, expect, type Page } from '@playwright/test';
  * `invoke` returns type-appropriate defaults per command so the app
  * initialises with empty state instead of crashing on `null.map()`.
  */
+const browserErrors = new WeakMap<Page, string[]>();
+
 const TAURI_MOCK = `
 (() => {
   if (window.__TAURI_INTERNALS__) return;
 
   const callbacks = new Map();
   let nextId = 1;
+  let configRevision = 0;
+  const configFields = {
+    restoreSession: false, sendCommandSets: [], highlightRuleSets: [], protocolTemplates: [],
+    triggerRules: [], portToolConfigs: [], portPresets: [], portGroups: [], portMeta: [], pluginConfigs: [],
+  };
+  let configFixturePromise = null;
+  let configFixture = null;
+  const getConfigFixture = async () => {
+    if (!configFixturePromise) {
+      configFixturePromise = import('/src/stores/useAppStore.ts').then(({ useAppStore }) => {
+        configFixture = structuredClone(useAppStore.getState().config);
+        Object.assign(configFixture, configFields);
+      });
+    }
+    await configFixturePromise;
+    configFixture.revision = configRevision;
+    return structuredClone(configFixture);
+  };
 
   // Commands that return arrays — must NOT return null or .map() crashes.
   const ARRAY_COMMANDS = new Set([
@@ -37,14 +57,43 @@ const TAURI_MOCK = `
         // 给 e2e 一个可打开标签页的端口（issue #6-10 RX 显示路径测试）
         return [{ id: 'COM1', name: 'COM1', port_type: 'real', manufacturer: null, product: null }];
       }
+      if (cmd === 'get_config') return getConfigFixture();
+      if (cmd === 'update_session_snapshot') return null;
+      if (cmd === 'get_config_path') return 'C:/mock/config.json';
+      if (cmd === 'set_config') {
+        if (!args || args.expectedRevision !== configRevision) return false;
+        await getConfigFixture();
+        const nextConfig = { ...(args.newConfig || {}) };
+        delete nextConfig.revision;
+        delete nextConfig.pluginConfigs;
+        Object.assign(configFixture, nextConfig);
+        configRevision++;
+        configFixture.revision = configRevision;
+        return true;
+      }
+      if (cmd === 'list_plugins') return { revision: configRevision, plugins: [], pluginConfigs: [] };
+      if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'plugin:event|listen') {
         const id = nextId++;
         if (args && args.event) eventListeners[args.event] = args.handler;
         return id;
       }
+      if (cmd === 'plugin:app|version') return '1.0.0-e2e';
+      if (cmd === 'open_serial_port' || cmd === 'close_serial_port' || cmd === 'set_serial_params'
+        || cmd === 'set_flow_control' || cmd === 'attempt_reconnect' || cmd === 'cancel_file_send') return null;
+      if (cmd === 'open_popout') return args && args.kind === 'quick-send' ? 'quick-send' : 'terminal';
+      if (cmd === 'close_popout' || cmd === 'set_popout_always_on_top') return null;
+      if (cmd === 'send_serial_data' || cmd === 'send_file') return 0;
+      if (cmd === 'plugin:event|emit' || cmd === 'plugin:event|emit_to'
+        || cmd === 'plugin:window|set_title' || cmd === 'prevent_screen_off' || cmd === 'prevent_sleep'
+        || cmd === 'plugin:webview|set_webview_zoom' || cmd === 'append_diag_log') return null;
+      if (cmd === 'plugin:window|is_maximized') return false;
+      if (cmd === 'get_session_snapshot') return null;
       if (cmd === 'get_system_status')
         return { status: 'normal', memoryUsedMb: 0, cpuUsage: 0 };
-      return null;
+      if (cmd === 'complete_editor_close' || cmd === 'cancel_editor_close' || cmd === 'acknowledge_editor_close') return null;
+      (window.__E2E_UNKNOWN_COMMANDS__ ||= []).push(cmd);
+      throw new Error('Unhandled mocked Tauri command: ' + cmd);
     },
     // 测试驱动：向某个已注册的事件监听器派发 payload（@tauri-apps/api 的
     // handler 收到 { event, payload } 对象）。
@@ -83,10 +132,22 @@ const TAURI_MOCK = `
 
 test.describe('HyperCom smoke tests', () => {
   test.beforeEach(async ({ page }) => {
+    const errors: string[] = [];
+    browserErrors.set(page, errors);
+    page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(`console.error: ${message.text()}`);
+    });
     await page.addInitScript(TAURI_MOCK);
     await page.goto('/');
     // Wait for the React app root to mount
     await expect(page.locator('.app-root')).toBeVisible();
+  });
+
+  test.afterEach(async ({ page }) => {
+    expect(browserErrors.get(page) ?? []).toEqual([]);
+    const unknown = await page.evaluate(() => window.__E2E_UNKNOWN_COMMANDS__ ?? []);
+    expect(unknown, 'mocked unknown Tauri commands').toEqual([]);
   });
 
   test('page loads without crashing (no error boundary)', async ({ page }) => {
@@ -304,7 +365,7 @@ test.describe('HyperCom smoke tests', () => {
           if (cmd === 'get_config') return config;
           if (cmd === 'set_config') {
             if (args?.expectedRevision !== config.revision) return false;
-            localStorage.setItem('smoke.update.config', JSON.stringify({ ...args.newConfig, revision: config.revision + 1 }));
+            localStorage.setItem('smoke.update.config', JSON.stringify({ ...args?.newConfig, revision: config.revision + 1 }));
             return true;
           }
           if (cmd === 'check_for_update' && args?.channel === 'stable') {
@@ -335,6 +396,58 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.config-page').getByText('不自动检查更新')).toBeVisible();
     const radio = page.locator('input[name="updateCheckMode"][value="none"]');
     await expect(radio).toBeChecked();
+  });
+
+  // ==================== P3：端口排序 / 原生关闭事件护栏 ====================
+
+  test('port numeric sorting updates visible order and pointer drag remains usable', async ({ page }) => {
+    await page.evaluate(() => {
+      const original = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_available_ports') {
+          return ['COM10', 'COM2', 'COM1'].map((id) => ({ id, name: id, port_type: 'real' }));
+        }
+        return original(cmd, args);
+      };
+    });
+    await page.locator('.sidebar-toolbar button[title="刷新串口列表"]').click();
+    await expect(page.locator('.port-item-name')).toHaveText(['COM10', 'COM2', 'COM1']);
+    await page.locator('.sidebar-toolbar button[title="更多操作"]').click();
+    await page.getByText('按端口号排序', { exact: true }).click();
+    await expect(page.locator('.port-item-name')).toHaveText(['COM1', 'COM2', 'COM10']);
+
+    // Exercise the real dnd-kit pointer path, not a store-only reorder mock.
+    // Locator.dragTo skips the PointerSensor activation sequence; move >5px
+    // before traversing the target so the real sensor starts a drag.
+    const handles = page.locator('.port-item-drag');
+    const source = (await handles.nth(0).boundingBox())!;
+    const target = (await handles.nth(2).boundingBox())!;
+    await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(source.x + source.width / 2 + 8, source.y + source.height / 2, { steps: 2 });
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await expect(page.locator('.port-item-name')).toHaveText(['COM2', 'COM10', 'COM1']);
+  });
+
+  test('native close request reaches the guarded completion command', async ({ page }) => {
+    // Let the real EditorLeaveDialog listener finish its async Tauri registration.
+    await page.waitForTimeout(100);
+    await page.evaluate(() => {
+      const api = window.__TAURI_INTERNALS__;
+      const original = api.invoke;
+      (window as unknown as Record<string, unknown>).__closeApprovals = [];
+      api.invoke = async (command: string, args?: unknown) => {
+        if (command === 'complete_editor_close' || command === 'cancel_editor_close') {
+          ((window as unknown as Record<string, unknown>).__closeApprovals as unknown[]).push({ command, args });
+        }
+        return original(command, args);
+      };
+      api.dispatchEvent('editor:close-requested', { requestId: 'e2e-close', forceExit: false });
+    });
+    await expect.poll(() => page.evaluate(() => (window as unknown as Record<string, unknown>).__closeApprovals)).toEqual([
+      { command: 'complete_editor_close', args: { requestId: 'e2e-close' } },
+    ]);
   });
 
   // ==================== issue #11：关闭标签页不关闭串口 ====================

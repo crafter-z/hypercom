@@ -19,7 +19,9 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // DSH and tooling may atomically write hidden temporary directories; do not
+      // let Vite treat their transient rename/delete as a source invalidation.
+      ignored: ["**/src-tauri/**", "**/.*.tmpdir/**"],
     },
   },
   test: {
