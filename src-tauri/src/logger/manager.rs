@@ -204,7 +204,7 @@ impl LogManager {
                 drop(writers);
                 drop(writer);
                 let _ = fs::remove_file(&path);
-                return Err(error.into());
+                return Err(error);
             }
             let old_size = old.current_size();
             drop(old);
@@ -625,10 +625,11 @@ fn file_timestamp(metadata: &fs::Metadata) -> i64 {
 #[cfg(test)]
 impl LogManager {
     pub(super) fn for_test(dir: &Path) -> Self {
-        let mut settings = LogSettings::default();
-        settings.auto_save = true;
-        settings.directory = dir.to_string_lossy().into_owned();
-        Self::with_settings(settings)
+        Self::with_settings(LogSettings {
+            auto_save: true,
+            directory: dir.to_string_lossy().into_owned(),
+            ..LogSettings::default()
+        })
     }
 
     /// 按需改设置：走真实 apply_settings 通道（directory 未变，不会触发端口重开）
@@ -656,7 +657,7 @@ impl LogManager {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{lock_mutex, LogManager};
 
@@ -989,7 +990,7 @@ mod tests {
         let files = mgr.list_files().unwrap();
         let entry = files
             .iter()
-            .find(|f| PathBuf::from(&f.path) == first)
+            .find(|f| Path::new(&f.path) == first)
             .expect("旧文件仍应被列出");
         assert_eq!(entry.port_id, "COM1");
         let _ = fs::remove_dir_all(&dir);
@@ -1448,7 +1449,7 @@ mod tests {
     // ---------- 子目录模式 ----------
 
     /// 断言日志文件位于 `root/<expected_sub>/` 直接子目录下，且端口名能正确反查
-    fn assert_in_subdir(mgr: &LogManager, root: &PathBuf, expected_sub: &str, port_id: &str) {
+    fn assert_in_subdir(mgr: &LogManager, root: &Path, expected_sub: &str, port_id: &str) {
         let files = mgr.list_files().unwrap();
         assert_eq!(files.len(), 1, "expected exactly 1 log file, got {files:?}");
         let p = PathBuf::from(&files[0].path);

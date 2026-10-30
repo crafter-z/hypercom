@@ -217,7 +217,7 @@ pub async fn close_serial_port(
     // （close_port 已 drop master）后才退出；即使读线程异常不退，同步 join 也不会
     // 再冻结整个应用 UI。
     if let Some(thread) = join_handle {
-        let _ = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _ = thread.join();
         })
         .await
@@ -515,7 +515,7 @@ pub async fn send_file(
             if cancel.load(Ordering::Acquire) {
                 break;
             }
-            match {
+            let write_result = {
                 let manager = state
                     .serial_manager
                     .lock()
@@ -558,10 +558,8 @@ pub async fn send_file(
                         .write_raw(&args.port_id, chunk)
                         .map_err(|e| CommandError::Serial(e.to_string()))
                 }
-            } {
-                Ok(n) => sent += n,
-                Err(e) => return Err(e),
-            }
+            };
+            sent += write_result?;
             let timestamp = chrono::Local::now()
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string();
@@ -904,7 +902,7 @@ pub async fn run_port_tool(
                     Ok(0) => break,
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf)
-                            .trim_end_matches(|c| c == '\n' || c == '\r')
+                            .trim_end_matches(['\n', '\r'])
                             .to_string();
                         if tx_out.send(("stdout".to_string(), line)).await.is_err() {
                             break;
@@ -925,7 +923,7 @@ pub async fn run_port_tool(
                     Ok(0) => break,
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf)
-                            .trim_end_matches(|c| c == '\n' || c == '\r')
+                            .trim_end_matches(['\n', '\r'])
                             .to_string();
                         if tx_err.send(("stderr".to_string(), line)).await.is_err() {
                             break;

@@ -85,6 +85,7 @@ async fn preview_endpoint(network: &UpdateNetwork) -> Result<url::Url, CommandEr
 /// 从 GitHub API `/releases` 响应中取**版本号最大**的 preview tag：
 /// - 非 draft、是 prerelease
 /// - tag 匹配 `vX.Y.Z-preview.N`（如 `v0.6.0-preview.2`）
+///
 /// 纯函数，便于单测（M1.2b）。
 ///
 /// issue #12 复审：GitHub `/releases` 按创建时间倒序——为旧核心补发的 preview

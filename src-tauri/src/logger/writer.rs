@@ -1,4 +1,4 @@
-/**
+/*!
  * 单端口日志写入器。
  *
  * 一个 `PortLogWriter` 只服务一个串口，独占自己的文件句柄与缓冲；它的所有状态
@@ -430,9 +430,11 @@ mod tests {
     fn writer_spec_keeps_locked_format_and_encoding_when_naming_changes() {
         // 换目录/分片重开只更新命名参数；格式与编码保持创建时锁定的值，否则同一
         // 端口前后两片文件会混入两种编码
-        let mut settings = LogSettings::default();
-        settings.filename_format = "[date]-[com]".to_string();
-        settings.subdir_mode = "port".to_string();
+        let settings = LogSettings {
+            filename_format: "[date]-[com]".to_string(),
+            subdir_mode: "port".to_string(),
+            ..LogSettings::default()
+        };
         let updated = spec().with_current_naming(&settings);
         assert_eq!(updated.filename_format, "[date]-[com]");
         assert_eq!(updated.subdir_mode, "port");

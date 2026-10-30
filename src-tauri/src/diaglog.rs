@@ -77,7 +77,7 @@ impl DiagLogger {
     /// 报告一次 I/O 失败（节流）。诊断日志器不能调用 `log::*`——那是它自己。
     fn report_failure(&self, what: &str, err: &std::io::Error) {
         let count = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if count == 1 || count % FAILURE_REPORT_INTERVAL == 0 {
+        if count == 1 || count.is_multiple_of(FAILURE_REPORT_INTERVAL) {
             eprintln!(
                 "[diaglog] {what} failed: {err} (failure #{count}; reporting every {FAILURE_REPORT_INTERVAL})"
             );
@@ -333,7 +333,7 @@ mod tests {
         let logger = DiagLogger::new(dir.clone()).unwrap();
         logger.set_enabled(false);
         logger.write("ts", "WARN", "t", "should not appear");
-        assert_eq!(logger.is_enabled(), false);
+        assert!(!logger.is_enabled());
         assert_eq!(logger.read(100), "");
         let _ = fs::remove_dir_all(&dir);
     }

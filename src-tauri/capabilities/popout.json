@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "popout",
+  "description": "Pop-out windows (quick send and terminal): window chrome, drag, zoom and draft editing events.",
+  "windows": ["quick-send", "terminal-*"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:webview:allow-set-webview-zoom",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-title",
+    "clipboard-manager:allow-write-text"
+  ]
+}

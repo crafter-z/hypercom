@@ -59,7 +59,7 @@ pub async fn disable_gitbash_sim(state: State<'_, AppState>) -> Result<(), Comma
     // 在锁外、阻塞线程池里 join（与 close_serial_port 同款）：即使某个 GIT:
     // 读线程异常不退，同步 join 也不会冻结应用 UI/事件循环。
     for thread in join_handles {
-        let _ = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _ = thread.join();
         })
         .await

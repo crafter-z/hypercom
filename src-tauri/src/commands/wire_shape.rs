@@ -24,6 +24,8 @@ use serde::Deserialize;
 
 use crate::commands::{
     DiagLogEntry, OpenPortArgs, RunPortToolArgs, SendDataArgs, SendFileArgs, SetSerialParamsArgs,
+    PluginHttpRequest, PluginHttpHead, PluginHttpChunk, PluginStateSnapshot, PluginListResponse,
+    UpdateProgressPayload,
 };
 use crate::config::{
     AppConfig, HighlightRuleSetEntry, PortGroupEntry, PortMetaEntry, PortPresetEntry,
@@ -503,8 +505,8 @@ fn command_param_idents(src: &str, fn_name: &str) -> Vec<String> {
 }
 
 /// 签名漂移守卫：真实 `#[tauri::command]` 形参集合必须与上面的镜像结构体一致。
-/// `app` / `state` 是 Tauri 状态形参（不占 IPC key），其余 ident 经 lowerCamelCase
-/// 就是前端传的 key（`target_id` → `targetId`）。
+/// `app` / `state` / `window` 是 Tauri 注入形参（不占 IPC key），其余 ident 经
+/// lowerCamelCase 就是前端传的 key（`target_id` → `targetId`）。
 #[test]
 fn popout_command_signature_matches_mirror() {
     let src = std::fs::read_to_string(
@@ -512,16 +514,107 @@ fn popout_command_signature_matches_mirror() {
     )
     .unwrap();
 
+    // Popout open/close are main-window-only (capability split + require_main_window),
+    // so they carry the source `window` used for that check.
     assert_eq!(
         command_param_idents(&src, "open_popout"),
-        ["app", "state", "kind", "target_id"]
+        ["app", "window", "state", "kind", "target_id"]
     );
     assert_eq!(
         command_param_idents(&src, "close_popout"),
-        ["app", "state", "kind", "target_id"]
+        ["app", "window", "state", "kind", "target_id"]
     );
+    // Always-on-top stays callable from the popout itself (its own pin button).
     assert_eq!(
         command_param_idents(&src, "set_popout_always_on_top"),
         ["app", "kind", "target_id", "on"]
     );
+}
+
+/// 关闭审批是 token 契约：前端只能回传后端下发的 `requestId`，不再传 `forceExit`
+/// （force 语义由 Rust 侧 pending 状态决定）。
+#[test]
+fn editor_close_commands_only_take_a_request_id() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/system_cmds.rs"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        command_param_idents(&src, "complete_editor_close"),
+        ["app", "window", "state", "request_id"]
+    );
+    assert_eq!(
+        command_param_idents(&src, "cancel_editor_close"),
+        ["window", "state", "request_id"]
+    );
+    assert_eq!(
+        command_param_idents(&src, "acknowledge_editor_close"),
+        ["window", "state", "request_id"]
+    );
+}
+
+fn serialized_keys(value: impl serde::Serialize) -> Vec<String> {
+    let value = serde_json::to_value(value).unwrap();
+    let mut keys = value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn plugin_http_request_uses_real_camel_case_deserializer() {
+    let request: PluginHttpRequest = serde_json::from_value(serde_json::json!({
+        "url": "https://example.test/upload", "method": "POST",
+        "headers": {"Content-Type": "application/octet-stream"},
+        "bodyBase64": "AAH/", "timeout": 0.0, "redirect": "manual",
+    })).unwrap();
+    assert_eq!(request.body_base64.as_deref(), Some("AAH/"));
+    assert_eq!(request.timeout, Some(0.0));
+    assert_eq!(request.redirect.as_deref(), Some("manual"));
+    let minimal: PluginHttpRequest = serde_json::from_value(serde_json::json!({"url":"https://example.test"})).unwrap();
+    assert!(minimal.headers.is_empty());
+    assert!(minimal.body.is_none());
+    assert!(minimal.body_base64.is_none());
+    // An optional snake_case key must never be mistaken for the camelCase wire.
+    let wrong: PluginHttpRequest = serde_json::from_value(serde_json::json!({"url":"https://example.test", "body_base64":"AAH/"})).unwrap();
+    assert!(wrong.body_base64.is_none());
+}
+
+#[test]
+fn plugin_http_response_and_snapshot_serialize_the_actual_wire_keys() {
+    assert_eq!(serialized_keys(PluginHttpHead {
+        request_id: "request-1".into(), status: 200, headers: Default::default(), url: "https://example.test".into(),
+    }), ["headers", "requestId", "status", "url"]);
+    assert_eq!(serialized_keys(PluginHttpChunk { base64: "AAH/".into(), done: false }), ["base64", "done"]);
+    assert_eq!(serialized_keys(PluginStateSnapshot { revision: 7, plugin_configs: vec![] }), ["pluginConfigs", "revision"]);
+    assert_eq!(serialized_keys(PluginListResponse { revision: 7, plugin_configs: vec![], plugins: vec![] }), ["pluginConfigs", "plugins", "revision"]);
+}
+
+#[test]
+fn native_view_binding_and_geometry_use_actual_strict_wire_types() {
+    use crate::plugin::view_runtime::{Binding, Rect, OcclusionRect};
+    let value = serde_json::json!({
+        "pluginId":"com.example.test", "installGeneration":"generation", "viewId":"table",
+        "tabId":"tab", "placement":"workspace-tab", "boundPortId":"COM1", "portMode":"trx",
+        "tabSessionId":"session", "viewInstanceId":"instance", "workerEpoch":2, "streamEpoch":3,
+    });
+    let binding: Binding = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(binding.bound_port_id.as_deref(), Some("COM1"));
+    assert_eq!(serde_json::to_value(binding).unwrap(), value);
+    let mut snake = value;
+    let plugin_id = snake.as_object_mut().unwrap().remove("pluginId").unwrap();
+    snake["plugin_id"] = plugin_id;
+    assert!(serde_json::from_value::<Binding>(snake).is_err());
+    let rect: Rect = serde_json::from_value(serde_json::json!({"x":0,"y":1,"width":40,"height":50,"zoomPercent":125})).unwrap();
+    assert_eq!(rect.zoom_percent, 125.0);
+    assert!(serde_json::from_value::<Rect>(serde_json::json!({"x":0,"y":1,"width":40,"height":50,"zoom_percent":125})).is_err());
+    assert!(serde_json::from_value::<OcclusionRect>(serde_json::json!({"x":0,"y":0,"width":5,"height":5})).is_ok());
+    assert!(serde_json::from_value::<OcclusionRect>(serde_json::json!({"x":0,"y":0,"width":5,"height":5,"unexpected":true})).is_err());
+}
+
+#[test]
+fn update_progress_preserves_unknown_total_and_stage_on_the_wire() {
+    let progress = serde_json::to_value(UpdateProgressPayload { downloaded: 65536, total: None, phase: "download".into() }).unwrap();
+    assert_eq!(progress, serde_json::json!({"downloaded":65536,"total":null,"phase":"download"}));
+    assert_eq!(serialized_keys(UpdateProgressPayload { downloaded: 65536, total: Some(65536), phase: "install".into() }), ["downloaded", "phase", "total"]);
 }

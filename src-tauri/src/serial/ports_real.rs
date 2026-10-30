@@ -189,7 +189,7 @@ impl SerialPortHandle {
 pub(super) fn enumerate_system_ports() -> anyhow::Result<Vec<PortInfo>> {
     #[cfg(windows)]
     {
-        return super::ports_windows::enumerate();
+        super::ports_windows::enumerate()
     }
     #[cfg(not(windows))]
     {
@@ -214,9 +214,12 @@ pub(super) fn enumerate_system_ports() -> anyhow::Result<Vec<PortInfo>> {
 
 /// 端口是否仍在系统端口列表中（阻塞枚举；必须在锁外调用）。
 fn system_port_present(port_id: &str) -> anyhow::Result<bool> {
-    Ok(serialport::available_ports()?
+    // 单一事实来源：与 UI 列表用同一个枚举。Windows 下列表按 SERIALCOMM 注册表
+    // 顺序（SetupAPI 兜底），这里再用 `serialport::available_ports()` 可能与列表
+    // 分歧，出现「列表可见但打开/重连报端口不存在」。
+    Ok(enumerate_system_ports()?
         .iter()
-        .any(|p| p.port_name == port_id))
+        .any(|p| p.id == port_id))
 }
 
 #[cfg(windows)]

@@ -13,7 +13,8 @@ mod update_network;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, EventTarget, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use std::backtrace::Backtrace;
 
@@ -36,6 +37,105 @@ fn format_crash_report(
         message,
         backtrace
     )
+}
+
+/// How long the frontend may sit on an editor close request before its token expires.
+pub const EDITOR_CLOSE_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// One outstanding main-window close approval. The token is what the frontend
+/// passes back to `complete_editor_close` / `cancel_editor_close`, so a forged or
+/// stale call can never approve a close the backend did not request.
+#[derive(Debug, Clone)]
+pub struct PendingClose {
+    pub id: String,
+    pub force_exit: bool,
+    pub issued_at: std::time::Instant,
+    pub last_seen: Option<std::time::Instant>,
+}
+
+impl PendingClose {
+    fn is_expired(&self) -> bool {
+        self.last_seen.unwrap_or(self.issued_at).elapsed() > EDITOR_CLOSE_REQUEST_TIMEOUT
+    }
+}
+
+/// Payload of the `editor:close-requested` event (camelCase on the wire).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditorCloseRequested {
+    request_id: String,
+    force_exit: bool,
+}
+
+/// Create or promote the pending close request.
+///
+/// A newer forced exit upgrades an existing request in place (same id, force
+/// latched to `true`); a non-forced repeat reuses the id and the already-upgraded
+/// force flag. Repeated native close requests therefore coalesce into one dialog.
+pub(crate) fn promote_pending_close(
+    pending: &mut Option<PendingClose>,
+    force_exit: bool,
+    now: std::time::Instant,
+) -> PendingClose {
+    if pending.as_ref().is_some_and(PendingClose::is_expired) {
+        *pending = None;
+    }
+    match pending.as_mut() {
+        Some(close) => {
+            if force_exit {
+                close.force_exit = true;
+            }
+            close.clone()
+        }
+        None => {
+            let close = PendingClose {
+                id: uuid::Uuid::new_v4().to_string(),
+                force_exit,
+                issued_at: now,
+                last_seen: None,
+            };
+            *pending = Some(close.clone());
+            close
+        }
+    }
+}
+
+/// Consume the pending close request only when `request_id` matches and the token
+/// has not expired. Unknown/stale tokens yield `None`; expired state is dropped.
+pub(crate) fn take_matching_pending_close(
+    pending: &mut Option<PendingClose>,
+    request_id: &str,
+) -> Option<PendingClose> {
+    if pending.as_ref().is_some_and(PendingClose::is_expired) {
+        *pending = None;
+        return None;
+    }
+    if pending.as_ref().is_some_and(|close| close.id == request_id) {
+        pending.take()
+    } else {
+        None
+    }
+}
+
+const EDITOR_RENDERER_HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub(crate) fn acknowledge_pending_close(pending: &mut Option<PendingClose>, request_id: &str, now: std::time::Instant) -> bool {
+    if let Some(request) = pending.as_mut().filter(|request| request.id == request_id) {
+        request.last_seen = Some(now);
+        true
+    } else { false }
+}
+
+fn renderer_close_stalled(pending: &Option<PendingClose>, request_id: &str, now: std::time::Instant) -> bool {
+    pending.as_ref().is_some_and(|request| request.id == request_id &&
+        now.saturating_duration_since(request.last_seen.unwrap_or(request.issued_at)) >= EDITOR_RENDERER_HEARTBEAT_TIMEOUT)
+}
+
+fn take_native_close(pending: &mut Option<PendingClose>, request_id: &str) -> Option<PendingClose> {
+    // The native dialog is itself an explicit user approval; its token may be old,
+    // but it may never consume a different, newer request.
+    if pending.as_ref().is_some_and(|request| request.id == request_id) { pending.take() } else { None }
 }
 
 /// 应用状态结构体
@@ -68,6 +168,7 @@ pub struct AppState {
     pub system_info: std::sync::Arc<std::sync::Mutex<sysinfo::System>>,
     /// Prevent duplicate asynchronous shutdown coordinators from racing exit.
     pub shutdown_started: std::sync::atomic::AtomicBool,
+    pub shutdown_complete: std::sync::atomic::AtomicBool,
     /// Active serial/file/tool admission and coordinated shutdown gate.
     pub serial_work: std::sync::Arc<commands::SerialWorkState>,
     /// Active external-tool ownership tokens, keyed by port.
@@ -79,6 +180,9 @@ pub struct AppState {
         std::sync::Mutex<std::collections::HashMap<String, commands::FileSendRegistration>>,
     /// 弹出窗注册表：key 为窗口 label，value 记录 {kind, target_id}（Phase 1 柔性工作区）
     pub popouts: std::sync::Mutex<std::collections::HashMap<String, commands::PopoutMeta>>,
+    /// 关闭审批的待决请求：主窗确认保存/放弃前，原生关闭、托盘退出与 ExitRequested
+    /// 共用同一个 token；只有带回匹配 requestId 的 complete/cancel 才能推进或清除它。
+    pub pending_close: std::sync::Mutex<Option<PendingClose>>,
 }
 
 /// Try to take an exclusive lock next to config.json. Returns Err when another
@@ -150,7 +254,9 @@ impl AppState {
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
+            shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_close: std::sync::Mutex::new(None),
         };
         // 启动时把配置里的日志设置同步到 LogManager（与 set_config 命令同一入口）。
         state.apply_runtime_config(&cfg);
@@ -170,20 +276,115 @@ impl AppState {
     }
 }
 
+/// Upper bound for the serial drain; a wedged port must not block exit forever.
+const SHUTDOWN_SERIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Upper bound for the blocking log/power/diagnostic finalizer.
+const SHUTDOWN_FINALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Native escape remains available even when the WebView cannot run a timer,
+/// render the approval UI, or acknowledge the initial close event.
+fn watch_editor_close(app: tauri::AppHandle, request_id: String) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let stalled = {
+                let state = app.state::<AppState>();
+                if state.shutdown_started.load(std::sync::atomic::Ordering::Acquire) { return; }
+                let Ok(pending) = state.pending_close.lock() else { return; };
+                if !pending.as_ref().is_some_and(|request| request.id == request_id) { return; }
+                renderer_close_stalled(&pending, &request_id, std::time::Instant::now())
+            };
+            if stalled { break; }
+        }
+        let Some(window) = app.get_webview_window("main") else { request_shutdown(app); return; };
+        let chinese = app.state::<AppState>().config_manager.try_lock().ok()
+            .is_some_and(|config| config.get_config().language == "zh-CN");
+        let (message, exit, cancel) = if chinese {
+            ("编辑器未响应关闭请求。是否退出？尚未保存的编辑可能丢失；下次启动会尽力恢复已记录的草稿。", "退出且不保存", "取消关闭")
+        } else {
+            ("The editor is not responding to the close request. Exit anyway? Unsaved edits may be lost; recorded drafts will be offered for recovery on the next launch.", "Exit without saving", "Cancel close")
+        };
+        let callback_app = app.clone();
+        app.dialog().message(message).title("HyperCom").parent(&window)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(exit.into(), cancel.into()))
+            .show(move |approved| {
+                let consumed = {
+                    let state = callback_app.state::<AppState>();
+                    let consumed = state.pending_close.lock().ok().and_then(|mut pending| take_native_close(&mut pending, &request_id)).is_some();
+                    consumed
+                };
+                if approved && consumed { request_shutdown(callback_app); }
+            });
+    });
+}
+
 /// Route every destructive exit through the main editor's save/discard guard.
+///
+/// Requests are token based: repeated native close requests reuse (or upgrade) the
+/// pending token instead of stacking approvals, and the frontend must echo the same
+/// id back through `complete_editor_close`/`cancel_editor_close`. Requests older than
+/// `EDITOR_CLOSE_REQUEST_TIMEOUT` are lazily dropped before reuse.
 fn request_editor_close(app: &tauri::AppHandle, force_exit: bool) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        if let Err(error) = window.emit("editor:close-requested", force_exit) {
-            log::error!("Could not request editor close approval: {error}");
+    let Some(window) = app.get_webview_window("main") else {
+        // Tray quit can arrive without a main window (for example after an
+        // unexpected renderer teardown), so it cannot rely on a later
+        // ExitRequested event to start the drain.
+        log::warn!("Main window is unavailable; starting shutdown directly");
+        request_shutdown(app.clone());
+        return;
+    };
+    let (request, start_watchdog) = {
+        let state = app.state::<AppState>();
+        let mut pending = match state.pending_close.lock() {
+            Ok(pending) => pending,
+            Err(error) => {
+                log::error!("Editor close request state is poisoned: {error}");
+                return;
+            }
+        };
+        let previous = pending.as_ref().map(|request| request.id.clone());
+        let request = promote_pending_close(&mut pending, force_exit, std::time::Instant::now());
+        let start_watchdog = previous.as_deref() != Some(request.id.as_str());
+        (request, start_watchdog)
+    };
+    if start_watchdog { watch_editor_close(app.clone(), request.id.clone()); }
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    if let Err(error) = app.emit_to(
+        EventTarget::webview_window("main"),
+        "editor:close-requested",
+        EditorCloseRequested {
+            request_id: request.id,
+            force_exit: request.force_exit,
+        },
+    ) {
+        log::error!("Could not request editor close approval: {error}");
+    }
+}
+
+/// Hide and disable every managed WebView before any bounded shutdown drain.
+///
+/// This is intentionally synchronous: after approval the renderer must not remain
+/// editable while serial/log/power finalizers can still take up to 15 seconds.
+/// Errors are best effort because a window may disappear concurrently with exit.
+fn lock_windows_for_shutdown(app: &tauri::AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if let Err(error) = window.set_enabled(false) {
+            log::warn!("Could not disable window {label} during shutdown: {error}");
+        }
+        if let Err(error) = window.hide() {
+            log::warn!("Could not hide window {label} during shutdown: {error}");
         }
     }
 }
 
 /// Start one asynchronous shutdown drain. The UI remains alive until serial
 /// readers/work, RX log tails, power inhibitors, and diagnostic logs are finalized.
+///
+/// Every stage is bounded so a stuck serial reader, log sink or power inhibitor can
+/// never leave a windowless process that refuses to exit.
 fn request_shutdown(app: tauri::AppHandle) {
     let state = app.state::<AppState>();
     if state
@@ -198,14 +399,26 @@ fn request_shutdown(app: tauri::AppHandle) {
     {
         return;
     }
+    // Close approval has been consumed; freeze every renderer before any drain
+    // work starts so no main/popout WebView can continue editing during shutdown.
+    lock_windows_for_shutdown(&app);
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if let Err(error) = commands::shutdown_serial_work(app.clone(), &state).await {
-            log::error!("Serial shutdown failed: {error}");
+        match tokio::time::timeout(
+            SHUTDOWN_SERIAL_TIMEOUT,
+            commands::shutdown_serial_work(app.clone(), &state),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::error!("Serial shutdown failed: {error}"),
+            Err(_) => log::error!(
+                "Serial shutdown timed out after {SHUTDOWN_SERIAL_TIMEOUT:?}; continuing to exit"
+            ),
         }
         let logs = std::sync::Arc::clone(&state.log_manager);
         let diag = std::sync::Arc::clone(&state.diag_logger);
-        let result = tauri::async_runtime::spawn_blocking(move || {
+        let finalize = tauri::async_runtime::spawn_blocking(move || {
             if let Err(error) = logs.close_all() {
                 log::error!("Log shutdown failed: {error}");
             }
@@ -215,13 +428,58 @@ fn request_shutdown(app: tauri::AppHandle) {
             if let Err(error) = diag.flush() {
                 log::error!("Diagnostic log flush failed: {error}");
             }
-        })
-        .await;
-        if let Err(error) = result {
-            log::error!("Shutdown finalizer failed: {error}");
+        });
+        match tokio::time::timeout(SHUTDOWN_FINALIZE_TIMEOUT, finalize).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::error!("Shutdown finalizer failed: {error}"),
+            Err(_) => log::error!(
+                "Shutdown finalizer timed out after {SHUTDOWN_FINALIZE_TIMEOUT:?}; forcing exit"
+            ),
         }
+        state.shutdown_complete.store(true, std::sync::atomic::Ordering::Release);
         app.exit(0);
     });
+}
+
+/// tao 0.35.2 handles Windows WM_ENDSESSION(TRUE) by dispatching LoopDestroyed;
+/// tauri-runtime-wry 2.11.1 translates that directly to RunEvent::Exit, NOT
+/// ExitRequested. At this point Windows may terminate us as soon as we return.
+/// There is no reliable async editor approval left: recovery is recorded while
+/// editing, and only bounded backend best-effort finalization is possible here.
+const UNAVOIDABLE_EXIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn wait_for_exit_cleanup(done: std::sync::mpsc::Receiver<()>, budget: std::time::Duration) -> bool {
+    done.recv_timeout(budget).is_ok()
+}
+
+fn cleanup_unavoidable_exit(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if state.shutdown_complete.load(std::sync::atomic::Ordering::Acquire) { return; }
+    state.shutdown_started.store(true, std::sync::atomic::Ordering::Release);
+    let handle = app.clone();
+    let (finished, done) = std::sync::mpsc::channel();
+    // The event-loop/UI thread must never await a task that queues UI work. This
+    // worker uses only backend serial/log/power APIs; the receiver enforces ONE
+    // total wall-clock budget, including any poisoned/wedged mutex or finalizer.
+    let spawned = std::thread::Builder::new().name("hypercom-exit-finalizer".into()).spawn(move || {
+        tauri::async_runtime::block_on(async move {
+            let state = handle.state::<AppState>();
+            let deadline = tokio::time::Instant::now() + UNAVOIDABLE_EXIT_BUDGET;
+            let _ = tokio::time::timeout(UNAVOIDABLE_EXIT_BUDGET / 2, commands::shutdown_serial_work(handle.clone(), &state)).await;
+            let logs = state.log_manager.clone();
+            let diag = state.diag_logger.clone();
+            let finalizer = tauri::async_runtime::spawn_blocking(move || {
+                logs.flush_all_best_effort();
+                let _ = system::shutdown_power_inhibitor();
+                let _ = logs.close_all();
+                let _ = diag.flush();
+            });
+            let _ = tokio::time::timeout_at(deadline, finalizer).await;
+            state.shutdown_complete.store(true, std::sync::atomic::Ordering::Release);
+            let _ = finished.send(());
+        });
+    });
+    if spawned.is_ok() { let _ = wait_for_exit_cleanup(done, UNAVOIDABLE_EXIT_BUDGET); }
 }
 
 /// 终端弹出窗关闭事件载荷（Rust → 主窗前端，触发 detach 标签回贴）。
@@ -308,6 +566,8 @@ pub fn run() {
             commands::prevent_screen_off,
             commands::prevent_sleep,
             commands::complete_editor_close,
+            commands::cancel_editor_close,
+            commands::acknowledge_editor_close,
             // ===== 存储相关命令 =====
             commands::save_command_set,
             commands::load_command_sets,
@@ -511,6 +771,14 @@ pub fn run() {
                 }
                 if let tauri::WindowEvent::Destroyed = event {
                     plugin::view_runtime::clear_all();
+                    // A destroyed main window has no renderer left to answer the close
+                    // approval; drain and exit instead of leaving a windowless process.
+                    if !window.state::<AppState>().shutdown_started.load(
+                        std::sync::atomic::Ordering::Acquire,
+                    ) {
+                        log::warn!("Main window destroyed without shutdown; starting shutdown");
+                        request_shutdown(window.app_handle().clone());
+                    }
                 }
             }
 
@@ -534,9 +802,13 @@ pub fn run() {
                         .and_then(|mut popouts| popouts.remove(label))
                         .and_then(|meta| meta.target_id);
                     if let Some(port_id) = target {
-                        let _ = window
-                            .app_handle()
-                            .emit("popout:terminal:closed", TerminalClosedPayload { port_id });
+                        // Target the main webview explicitly; the app-wide broadcast
+                        // would leak the payload into every pop-out webview.
+                        let _ = window.app_handle().emit_to(
+                            EventTarget::webview_window("main"),
+                            "popout:terminal:closed",
+                            TerminalClosedPayload { port_id },
+                        );
                     }
                 }
             }
@@ -544,13 +816,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if matches!(&event, tauri::RunEvent::Exit) {
+                cleanup_unavoidable_exit(app);
+                return;
+            }
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 let state = app.state::<AppState>();
-                if !state
+                if state
                     .shutdown_started
                     .load(std::sync::atomic::Ordering::Acquire)
                 {
-                    api.prevent_exit();
+                    return;
+                }
+                // Keep the event loop alive so the shutdown drain below can finish
+                // (an allowed exit would tear the process down before `app.exit`).
+                api.prevent_exit();
+                if app.get_webview_window("main").is_none() {
+                    // No renderer left to ask for save/discard: drain and exit so a
+                    // destroyed main window can never leave a windowless process.
+                    log::warn!("Exit requested without a main window; starting shutdown");
+                    request_shutdown(app.clone());
+                } else {
                     request_editor_close(app, true);
                 }
             }
@@ -581,5 +867,155 @@ mod tests {
         let report = format_crash_report("no location", None, &backtrace);
         assert!(report.contains("unknown location"));
         assert!(report.contains("no location"));
+    }
+
+    #[test]
+    fn close_heartbeat_keeps_live_approval_valid_and_stalled_renderer_triggers_escape() {
+        let now = std::time::Instant::now();
+        let mut pending = None;
+        let request = promote_pending_close(&mut pending, false, now);
+        assert!(!renderer_close_stalled(&pending, &request.id, now + std::time::Duration::from_secs(14)));
+        assert!(renderer_close_stalled(&pending, &request.id, now + EDITOR_RENDERER_HEARTBEAT_TIMEOUT));
+        assert!(!acknowledge_pending_close(&mut pending, "unknown", now));
+        assert!(acknowledge_pending_close(&mut pending, &request.id, now + std::time::Duration::from_secs(14)));
+        assert!(!renderer_close_stalled(&pending, &request.id, now + std::time::Duration::from_secs(28)));
+        assert!(renderer_close_stalled(&pending, &request.id, now + std::time::Duration::from_secs(29)));
+        pending.as_mut().unwrap().issued_at = now.checked_sub(EDITOR_CLOSE_REQUEST_TIMEOUT * 2).unwrap();
+        acknowledge_pending_close(&mut pending, &request.id, now);
+        assert!(take_matching_pending_close(&mut pending, &request.id).is_some(), "active heartbeat must outlive an old issue time");
+    }
+
+    #[test]
+    fn delayed_native_escape_never_consumes_a_newer_approval() {
+        let now = std::time::Instant::now();
+        let mut pending = None;
+        let old = promote_pending_close(&mut pending, true, now);
+        pending = None;
+        let new = promote_pending_close(&mut pending, false, now);
+        assert!(take_native_close(&mut pending, &old.id).is_none());
+        assert_eq!(pending.as_ref().unwrap().id, new.id);
+        assert!(!pending.as_ref().unwrap().force_exit);
+        assert!(take_native_close(&mut pending, &new.id).is_some());
+    }
+
+    #[test]
+    fn unavoidable_exit_wait_has_one_total_budget_and_accepts_completed_work() {
+        let (_keep_sender_alive, receiver) = std::sync::mpsc::channel();
+        assert!(!wait_for_exit_cleanup(receiver, std::time::Duration::ZERO));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(()).unwrap();
+        assert!(wait_for_exit_cleanup(receiver, std::time::Duration::ZERO));
+        let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
+        let start = source.find("fn cleanup_unavoidable_exit(app:").unwrap();
+        let end = source[start..].find("/// 终端弹出窗关闭事件载荷").unwrap() + start;
+        let body = &source[start..end];
+        assert!(body.contains("wait_for_exit_cleanup(done, UNAVOIDABLE_EXIT_BUDGET)"));
+        assert!(!body.contains("run_on_main_thread"), "Exit finalizer must not wait for a dead UI loop");
+        assert!(!body.contains("app.exit("), "unavoidable Exit cannot enqueue another exit request");
+        assert!(source.contains("if matches!(&event, tauri::RunEvent::Exit)"));
+        assert!(source.contains("cleanup_unavoidable_exit(app)"));
+    }
+
+    // ===== issue #19：关闭审批 token 状态机 =====
+
+    #[test]
+    fn pending_close_reuses_the_token_and_latches_forced_exit() {
+        let mut pending = None;
+        let now = std::time::Instant::now();
+        let first = promote_pending_close(&mut pending, false, now);
+        assert!(!first.force_exit);
+        assert!(!first.id.is_empty());
+
+        let repeated = promote_pending_close(&mut pending, false, now);
+        assert_eq!(repeated.id, first.id, "repeat close must reuse the token");
+        assert!(!repeated.force_exit);
+
+        let upgraded = promote_pending_close(&mut pending, true, now);
+        assert_eq!(upgraded.id, first.id, "forced exit upgrades in place");
+        assert!(upgraded.force_exit);
+
+        // A later non-forced request must not downgrade an in-flight forced exit.
+        let still_forced = promote_pending_close(&mut pending, false, now);
+        assert_eq!(still_forced.id, first.id);
+        assert!(still_forced.force_exit);
+    }
+
+    #[test]
+    fn pending_close_expires_and_unknown_tokens_are_rejected() {
+        let now = std::time::Instant::now();
+        let mut pending = None;
+        let live = promote_pending_close(&mut pending, false, now);
+
+        // Unknown id neither matches nor consumes the live request.
+        assert!(take_matching_pending_close(&mut pending, "unknown").is_none());
+        assert!(pending.is_some());
+        // Matching id consumes it exactly once.
+        let taken = take_matching_pending_close(&mut pending, &live.id).expect("live token");
+        assert_eq!(taken.id, live.id);
+        assert!(pending.is_none());
+        assert!(take_matching_pending_close(&mut pending, &live.id).is_none());
+
+        // Expired tokens are lazily dropped and never consumed.
+        let stale_issued = now
+            .checked_sub(EDITOR_CLOSE_REQUEST_TIMEOUT + std::time::Duration::from_millis(1))
+            .expect("instant far enough in the past");
+        pending = Some(PendingClose {
+            id: "stale".to_string(),
+            force_exit: true,
+            issued_at: stale_issued,
+            last_seen: None,
+        });
+        assert!(take_matching_pending_close(&mut pending, "stale").is_none());
+        assert!(pending.is_none());
+
+        // An expired request is replaced (new id) instead of being promoted.
+        pending = Some(PendingClose {
+            id: "stale".to_string(),
+            force_exit: false,
+            issued_at: stale_issued,
+            last_seen: None,
+        });
+        let fresh = promote_pending_close(&mut pending, false, now);
+        assert_ne!(fresh.id, "stale");
+        assert!(!fresh.is_expired());
+    }
+
+    #[test]
+    fn shutdown_freezes_windows_before_starting_the_drain() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .unwrap();
+        let shutdown = source
+            .find("fn request_shutdown(app: tauri::AppHandle)")
+            .expect("request_shutdown must remain source-visible");
+        let body = &source[shutdown..];
+        let freeze = body
+            .find("lock_windows_for_shutdown(&app)")
+            .expect("shutdown must freeze all windows");
+        let spawn = body
+            .find("tauri::async_runtime::spawn(async move")
+            .expect("shutdown must remain asynchronous after freezing windows");
+        assert!(freeze < spawn, "windows must be frozen before the drain spawn");
+        assert!(source.contains("app.webview_windows()"));
+        assert!(source.contains("window.set_enabled(false)"));
+        assert!(source.contains("window.hide()"));
+    }
+
+    #[test]
+    fn missing_main_close_request_starts_shutdown_directly() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .unwrap();
+        let start = source
+            .find("fn request_editor_close(app: &tauri::AppHandle")
+            .expect("request_editor_close must remain source-visible");
+        let end = source
+            .find("fn lock_windows_for_shutdown")
+            .expect("shutdown helper must remain after close request");
+        let body = &source[start..end];
+        assert!(body.contains("request_shutdown(app.clone())"));
+        assert!(!body.contains("Dropped editor close request"));
     }
 }

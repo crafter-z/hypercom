@@ -6,25 +6,98 @@ use super::CommandError;
 use crate::AppState;
 
 /// Called only after the main WebView has resolved all unsaved editor work.
+///
+/// The request id must match the token the backend handed to the frontend, and the
+/// forced-exit flag is read from the backend-owned pending request (never from the
+/// caller), so a stale or fabricated approval cannot hide the window or shut down
+/// the application.
 #[tauri::command]
 pub fn complete_editor_close(
     app: tauri::AppHandle,
     window: tauri::Window,
     state: State<'_, AppState>,
-    force_exit: bool,
+    request_id: String,
 ) -> Result<(), CommandError> {
     if window.label() != "main" {
-        return Err(CommandError::System("Only the main window can approve app close".into()));
+        return Err(CommandError::System(
+            "Only the main window can approve app close".into(),
+        ));
     }
-    let close_to_tray = !force_exit && state.config_manager.lock()
-        .map_err(|error| CommandError::Lock(error.to_string()))?
-        .get_config().close_behavior == "minimize";
+    let pending = {
+        let mut slot = state
+            .pending_close
+            .lock()
+            .map_err(|error| CommandError::Lock(error.to_string()))?;
+        crate::take_matching_pending_close(&mut slot, &request_id)
+    };
+    let Some(pending) = pending else {
+        return Err(CommandError::System(
+            "Unknown or expired editor close request".into(),
+        ));
+    };
+    let close_to_tray = !pending.force_exit
+        && state
+            .config_manager
+            .lock()
+            .map_err(|error| CommandError::Lock(error.to_string()))?
+            .get_config()
+            .close_behavior
+            == "minimize";
     if close_to_tray {
-        window.hide().map_err(|error| CommandError::System(error.to_string()))?;
+        window
+            .hide()
+            .map_err(|error| CommandError::System(error.to_string()))?;
     } else {
         crate::request_shutdown(app);
     }
     Ok(())
+}
+
+/// Liveness heartbeat for one backend-owned close request. A responsive
+/// renderer can keep the save/discard dialog open without expiring its token.
+#[tauri::command]
+pub fn acknowledge_editor_close(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::System("Only the main window can acknowledge app close".into()));
+    }
+    let mut pending = state.pending_close.lock().map_err(|error| CommandError::Lock(error.to_string()))?;
+    if crate::acknowledge_pending_close(&mut pending, &request_id, std::time::Instant::now()) {
+        Ok(())
+    } else {
+        Err(CommandError::System("Unknown editor close request".into()))
+    }
+}
+
+/// Abandon the pending close request (the user chose "continue editing").
+///
+/// Only the main window may answer, and only the token that is actually pending:
+/// a stale token from an older dialog is rejected instead of clearing a newer one.
+#[tauri::command]
+pub fn cancel_editor_close(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::System(
+            "Only the main window can cancel app close".into(),
+        ));
+    }
+    let mut slot = state
+        .pending_close
+        .lock()
+        .map_err(|error| CommandError::Lock(error.to_string()))?;
+    if crate::take_matching_pending_close(&mut slot, &request_id).is_some() {
+        Ok(())
+    } else {
+        Err(CommandError::System(
+            "Unknown or expired editor close request".into(),
+        ))
+    }
 }
 
 // ── 构建期能力门控（唯一实现，其它命令模块只调用这里）────────────────────────
@@ -94,7 +167,7 @@ fn collect_app_pids(
     while changed {
         changed = false;
         for (pid, proc_) in processes.iter() {
-            if !pids.contains(pid) && proc_.parent().map_or(false, |p| pids.contains(&p)) {
+            if !pids.contains(pid) && proc_.parent().is_some_and(|p| pids.contains(&p)) {
                 pids.insert(*pid);
                 changed = true;
             }
