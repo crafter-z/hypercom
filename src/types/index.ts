@@ -109,7 +109,8 @@ export interface PluginTabItem extends WorkspaceTabItem {
   restoreOnStartup: boolean;
 }
 
-export type TabItem = SerialTabItem | PluginTabItem;
+export interface ReplayTabItem extends WorkspaceTabItem { kind: 'replay'; sessionId: string; trackId: string }
+export type TabItem = SerialTabItem | PluginTabItem | ReplayTabItem;
 
 /** 分屏方向 */
 export type SplitDirection = 'horizontal' | 'vertical';

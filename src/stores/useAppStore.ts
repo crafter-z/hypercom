@@ -21,6 +21,7 @@ import type {
   TabItem,
   SerialTabItem,
   PluginTabItem,
+  ReplayTabItem,
   PaneNode,
   LeafPane,
   BranchPane,
@@ -143,6 +144,7 @@ export interface AppStoreState {
   // 标签页管理
   openTab: (portId: string) => string;
   addPluginTab: (input: Omit<PluginTabItem, 'id' | 'splitPaneId' | 'isPinned'>, options?: { paneId?: string; activate?: boolean }) => string;
+  addReplayTab: (input: Pick<ReplayTabItem, 'sessionId' | 'trackId' | 'title'>, options?: { paneId?: string; activate?: boolean }) => string;
   setTabTitle: (tabId: string, title: string) => void;
   closeTab: (tabId: string) => void;
   closeTabsToRight: (tabId: string) => void;
@@ -177,7 +179,7 @@ export interface AppStoreState {
 }
 
 export function getTabPortId(tab: TabItem | undefined): string | null {
-  return tab?.kind === 'serial' ? tab.portId : tab?.boundPortId ?? null;
+  return tab?.kind === 'serial' ? tab.portId : tab?.kind === 'plugin' ? tab.boundPortId : null;
 }
 
 export function getActivePortId(state: Pick<AppStoreState, 'tabs' | 'activeTabId'>): string | null {
@@ -387,6 +389,18 @@ export const useAppStore = create<AppStoreState>()(
           state.activeTabId = tabId;
           state.focusedPaneId = paneId;
         }
+      });
+      return tabId;
+    },
+
+    addReplayTab: (input, options) => {
+      const tabId = crypto.randomUUID();
+      set((state) => {
+        revalidateFocus(state);
+        const paneId = options?.paneId && findLeafById(state.paneTree, options.paneId) ? options.paneId : state.focusedPaneId;
+        state.tabs.push({ ...input, kind: 'replay', id: tabId, splitPaneId: paneId, isPinned: false });
+        findLeafById(state.paneTree, paneId)?.tabIds.push(tabId);
+        if (options?.activate !== false) { state.activeTabId = tabId; state.focusedPaneId = paneId; }
       });
       return tabId;
     },

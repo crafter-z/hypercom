@@ -352,6 +352,145 @@ pub async fn plugin_pick_files(
     .map_err(|e| CommandError::Other(format!("文件选择任务失败: {e}")))?
 }
 
+// Replay authorization is a short-lived native-selected read-only handle, never a renderer path.
+const REPLAY_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const REPLAY_SESSION_BYTES: u64 = 64 * 1024 * 1024;
+const REPLAY_CHUNK_BYTES: usize = 64 * 1024;
+const REPLAY_MAX_FILES: usize = 16;
+struct ReplayFile {
+    file: std::fs::File,
+    path: PathBuf,
+    metadata: std::fs::Metadata,
+    fingerprint: String,
+    stream_hash: sha2::Sha256,
+    next_offset: u64,
+}
+struct ReplayGrant { files: HashMap<String, Arc<Mutex<ReplayFile>>>, created: std::time::Instant }
+static REPLAY_GRANTS: LazyLock<Mutex<HashMap<String, ReplayGrant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static REPLAY_PICKER: Semaphore = Semaphore::const_new(1);
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySourceDescriptor { source_id: String, name: String, path: String, size: u64, fingerprint: String }
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayPickedSources { grant_id: String, sources: Vec<ReplaySourceDescriptor> }
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySourceChunk { base64: String, next_offset: u64, done: bool }
+fn replay_main(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
+    if window.label() != "main" { return Err(CommandError::Other("Replay import requires the main window".into())); }
+    Ok(())
+}
+fn replay_fingerprint(file: &mut std::fs::File) -> Result<String, CommandError> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0)).map_err(|e| CommandError::Io(e.to_string()))?;
+    let mut hash = Sha256::new();
+    let mut bytes = [0u8; REPLAY_CHUNK_BYTES];
+    let mut total = 0u64;
+    let mut utf8_tail = Vec::new();
+    loop {
+        let count = file.read(&mut bytes).map_err(|e| CommandError::Io(e.to_string()))?;
+        if count == 0 { break; }
+        total += count as u64;
+        if total > REPLAY_FILE_BYTES { return Err(CommandError::Other("Replay file exceeds 32 MiB".into())); }
+        if bytes[..count].contains(&0) { return Err(CommandError::Other("Raw binary replay is unsupported; select UTF-8 text or HEX text".into())); }
+        utf8_tail.extend_from_slice(&bytes[..count]);
+        match std::str::from_utf8(&utf8_tail) {
+            Ok(_) => utf8_tail.clear(),
+            Err(error) if error.error_len().is_none() => { let tail = utf8_tail.split_off(error.valid_up_to()); utf8_tail = tail; }
+            Err(_) => return Err(CommandError::Other("Replay source is not valid UTF-8".into())),
+        }
+        hash.update(&bytes[..count]);
+    }
+    if !utf8_tail.is_empty() { return Err(CommandError::Other("Replay source ends in incomplete UTF-8".into())); }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn open_replay_file(path: PathBuf) -> Result<ReplayFile, CommandError> {
+    let metadata = std::fs::symlink_metadata(&path).map_err(|e| CommandError::Io(e.to_string()))?;
+    if !metadata.is_file() || crate::plugin::is_link_or_reparse(&metadata) || metadata.len() > REPLAY_FILE_BYTES {
+        return Err(CommandError::Other("Replay source must be an ordinary file of at most 32 MiB".into()));
+    }
+    let mut options = std::fs::OpenOptions::new(); options.read(true);
+    #[cfg(windows)] { use std::os::windows::fs::OpenOptionsExt; options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT); }
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK); }
+    let mut file = options.open(&path).map_err(|e| CommandError::Io(e.to_string()))?;
+    let opened = file.metadata().map_err(|e| CommandError::Io(e.to_string()))?;
+    if !opened.is_file() || crate::plugin::is_link_or_reparse(&opened) || opened.len() != metadata.len() || opened.modified().ok() != metadata.modified().ok() {
+        return Err(CommandError::Other("Replay source changed during selection".into()));
+    }
+    let fingerprint = replay_fingerprint(&mut file)?;
+    use sha2::Digest;
+    Ok(ReplayFile { file, path, metadata: opened, fingerprint, stream_hash: sha2::Sha256::new(), next_offset: 0 })
+}
+fn read_replay_chunk(source: &mut ReplayFile, offset: u64) -> Result<ReplaySourceChunk, CommandError> {
+    use sha2::Digest;
+    use std::io::{Read, Seek, SeekFrom};
+    let metadata = std::fs::symlink_metadata(&source.path).map_err(|e| CommandError::Io(e.to_string()))?;
+    let opened = source.file.metadata().map_err(|e| CommandError::Io(e.to_string()))?;
+    if !metadata.is_file() || crate::plugin::is_link_or_reparse(&metadata) || metadata.len() != source.metadata.len() || metadata.modified().ok() != source.metadata.modified().ok() || opened.len() != source.metadata.len() || opened.modified().ok() != source.metadata.modified().ok() {
+        return Err(CommandError::Other("Replay source changed or disappeared; select it again".into()));
+    }
+    if offset > metadata.len() || offset != source.next_offset { return Err(CommandError::Other("Replay offsets must advance sequentially".into())); }
+    source.file.seek(SeekFrom::Start(offset)).map_err(|e| CommandError::Io(e.to_string()))?;
+    let mut bytes = vec![0; REPLAY_CHUNK_BYTES.min((metadata.len() - offset) as usize)];
+    source.file.read_exact(&mut bytes).map_err(|e| CommandError::Io(e.to_string()))?;
+    let next_offset = offset + bytes.len() as u64; let done = next_offset == metadata.len();
+    source.stream_hash.update(&bytes);
+    if done && (format!("{:x}", source.stream_hash.clone().finalize()) != source.fingerprint || replay_fingerprint(&mut source.file)? != source.fingerprint) {
+        return Err(CommandError::Other("Replay source content changed; select it again".into()));
+    }
+    source.next_offset = next_offset;
+    Ok(ReplaySourceChunk { base64: base64::engine::general_purpose::STANDARD.encode(bytes), next_offset, done })
+}
+#[tauri::command]
+pub async fn pick_replay_sources(window: tauri::WebviewWindow) -> Result<Option<ReplayPickedSources>, CommandError> {
+    replay_main(&window)?;
+    let permit = REPLAY_PICKER.try_acquire().map_err(|_| CommandError::Other("Replay picker is already open".into()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        use tauri_plugin_dialog::DialogExt;
+        let paths = window.dialog().file().add_filter("UTF-8 text logs", &["log", "txt"]).blocking_pick_files();
+        let Some(paths) = paths else { return Ok(None) };
+        if paths.is_empty() { return Ok(None); }
+        if paths.len() > REPLAY_MAX_FILES { return Err(CommandError::Other("Replay supports at most 16 files per import".into())); }
+        let mut files = HashMap::new(); let mut sources = Vec::new(); let mut total = 0;
+        for path in paths {
+            let file = open_replay_file(path.into_path().map_err(|e| CommandError::Other(e.to_string()))?)?;
+            total += file.metadata.len();
+            if total > REPLAY_SESSION_BYTES { return Err(CommandError::Other("Replay import exceeds 64 MiB total".into())); }
+            let source_id = uuid::Uuid::new_v4().to_string();
+            sources.push(ReplaySourceDescriptor { source_id: source_id.clone(), name: file.path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: file.path.to_string_lossy().into_owned(), size: file.metadata.len(), fingerprint: file.fingerprint.clone() });
+            files.insert(source_id, Arc::new(Mutex::new(file)));
+        }
+        let grant_id = uuid::Uuid::new_v4().to_string();
+        let mut grants = REPLAY_GRANTS.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        grants.retain(|_, grant| grant.created.elapsed().as_secs() < 600);
+        if grants.len() >= 2 { return Err(CommandError::Other("Too many pending replay imports".into())); }
+        grants.insert(grant_id.clone(), ReplayGrant { files, created: std::time::Instant::now() });
+        Ok(Some(ReplayPickedSources { grant_id, sources }))
+    }).await.map_err(|e| CommandError::Other(e.to_string()))?
+}
+#[tauri::command]
+pub async fn read_replay_source_chunk(grant_id: String, source_id: String, offset: u64, window: tauri::WebviewWindow) -> Result<ReplaySourceChunk, CommandError> {
+    replay_main(&window)?;
+    let source = {
+        let grants = REPLAY_GRANTS.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        let grant = grants.get(&grant_id).filter(|grant| grant.created.elapsed().as_secs() < 600).ok_or_else(|| CommandError::Other("Replay authorization expired".into()))?;
+        grant.files.get(&source_id).cloned().ok_or_else(|| CommandError::Other("Unknown replay source".into()))?
+    };
+    tokio::task::spawn_blocking(move || {
+        let mut source = source.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        read_replay_chunk(&mut source, offset)
+    }).await.map_err(|e| CommandError::Other(e.to_string()))?
+}
+#[tauri::command]
+pub fn release_replay_sources(grant_id: String, window: tauri::WebviewWindow) -> Result<(), CommandError> {
+    replay_main(&window)?;
+    REPLAY_GRANTS.lock().map_err(|e| CommandError::Lock(e.to_string()))?.remove(&grant_id);
+    Ok(())
+}
+
 /// 背景图文件大小上限（20MB），超过即视为不可用。
 const MAX_BACKGROUND_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -481,6 +620,92 @@ mod tests {
             std::process::id(),
             id
         ))
+    }
+
+    struct ReplayTempDir(std::path::PathBuf);
+    impl ReplayTempDir {
+        fn new() -> Self { let path = unique_temp_path("replaydir"); std::fs::create_dir(&path).unwrap(); Self(path) }
+        fn path(&self) -> &std::path::Path { &self.0 }
+    }
+    impl Drop for ReplayTempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
+    #[test]
+    fn replay_native_source_has_content_identity_and_read_only_handle() {
+        let dir = ReplayTempDir::new();
+        let path = dir.path().join("history.log");
+        std::fs::write(&path, b"RX hello\n").unwrap();
+        let mut source = super::open_replay_file(path.clone()).unwrap();
+        assert_eq!(source.metadata.len(), 9);
+        assert_eq!(source.fingerprint.len(), 64);
+        assert_eq!(super::replay_fingerprint(&mut source.file).unwrap(), source.fingerprint);
+        use std::io::Write;
+        assert!(source.file.write_all(b"forbidden").is_err());
+    }
+
+    #[test]
+    fn replay_rejects_binary_invalid_utf8_and_oversize_without_truncation() {
+        let dir = ReplayTempDir::new();
+        let path = dir.path().join("bad.log");
+        for bytes in [b"binary\0data".as_slice(), b"invalid\xff".as_slice(), b"partial\xe4\xb8".as_slice()] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(super::open_replay_file(path.clone()).is_err());
+        }
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(super::REPLAY_FILE_BYTES + 1).unwrap(); drop(file);
+        assert!(super::open_replay_file(path).is_err());
+        assert!(super::open_replay_file(dir.path().to_path_buf()).is_err());
+    }
+
+    #[test]
+    fn replay_utf8_validation_spans_chunks_and_detects_same_length_content_changes() {
+        let dir = ReplayTempDir::new();
+        let path = dir.path().join("utf8.log");
+        let text = format!("{}中", "a".repeat(super::REPLAY_CHUNK_BYTES - 1));
+        std::fs::write(&path, text.as_bytes()).unwrap();
+        let mut source = super::open_replay_file(path.clone()).unwrap();
+        let original = source.fingerprint.clone();
+        std::fs::write(&path, text.replace('a', "b").as_bytes()).unwrap();
+        assert_ne!(super::replay_fingerprint(&mut source.file).unwrap(), original);
+    }
+
+    #[test]
+    fn replay_chunk_stream_is_bounded_sequential_and_content_verified() {
+        let dir = ReplayTempDir::new(); let path = dir.path().join("chunks.log");
+        let bytes = vec![b'x'; super::REPLAY_CHUNK_BYTES + 13]; std::fs::write(&path, &bytes).unwrap();
+        let mut source = super::open_replay_file(path.clone()).unwrap();
+        assert!(super::read_replay_chunk(&mut source, 1).is_err());
+        let first = super::read_replay_chunk(&mut source, 0).unwrap();
+        assert_eq!(first.next_offset, super::REPLAY_CHUNK_BYTES as u64); assert!(!first.done);
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(first.base64).unwrap().len(), super::REPLAY_CHUNK_BYTES);
+        assert!(super::read_replay_chunk(&mut source, 0).is_err());
+        let last = super::read_replay_chunk(&mut source, first.next_offset).unwrap(); assert!(last.done);
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(last.base64).unwrap().len(), 13);
+        let mut corrupt = super::open_replay_file(path).unwrap();
+        use sha2::Digest; corrupt.stream_hash.update(b"transient altered delivered content");
+        let first = super::read_replay_chunk(&mut corrupt, 0).unwrap();
+        assert!(super::read_replay_chunk(&mut corrupt, first.next_offset).is_err());
+    }
+
+    #[test]
+    fn replay_chunk_refuses_changed_or_disappeared_files() {
+        let dir = ReplayTempDir::new(); let path = dir.path().join("changing.log");
+        std::fs::write(&path, b"original").unwrap();
+        let mut source = super::open_replay_file(path.clone()).unwrap();
+        std::fs::write(&path, b"larger replacement").unwrap();
+        assert!(super::read_replay_chunk(&mut source, 0).is_err()); drop(source);
+        let mut source = super::open_replay_file(path.clone()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::read_replay_chunk(&mut source, 0).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_rejects_selected_symlinks() {
+        let dir = ReplayTempDir::new();
+        let target = dir.path().join("target.log"); let link = dir.path().join("link.log");
+        std::fs::write(&target, b"secret").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(super::open_replay_file(link).is_err());
     }
 
     #[test]

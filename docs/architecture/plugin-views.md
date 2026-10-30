@@ -14,7 +14,7 @@
 
 `plugin/view_runtime/mod.rs` 的 create/update/send/destroy 检查真实来源 WebView 为 main。create 在 plugin_io 中验证启用、installGeneration、声明视图/placement/input、授权、当前端口/mode及资源，随后进入 UI 线程创建控件。状态提交和原生调用不跨 await 持有 config mutex。
 
-资源快照只包含 entry/styles/assets 及隔离模式的宿主 shell/SDK，拒绝 data/、保留命名空间（`__host/` 不可被插件声明覆盖）、路径别名、链接/reparse/hardlinks、非普通文件及额度越界。插件脚本为普通 bundle，不直接拼入主窗 React DOM。Native send 只接受 `init`/`state`/`environment`/`binary-chunk`/`binary-ack` 五类 JSON：按类型分别限制信封大小并转义为 SDK dispatcher（`__hypercomViewDispatch`）的固定调用，不接受源码 eval；未知类型、缺失文档身份或分片非法直接拒绝。
+资源快照只包含 entry/styles/assets 及隔离模式的宿主 shell/SDK，拒绝 data/、保留命名空间（`__host/` 不可被插件声明覆盖）、路径别名、链接/reparse/hardlinks、非普通文件及额度越界。插件脚本为普通 bundle，不直接拼入主窗 React DOM。Native send 只接受 `init`/`state`/`environment`/`binary-chunk`/`binary-ack`/`timeline-seek`/`timeline-cancel` JSON：按类型分别限制信封大小并转义为 SDK dispatcher（`__hypercomViewDispatch`）的固定调用，不接受源码 eval；未知类型、缺失文档身份或分片非法直接拒绝。
 
 隔离模式首文档加载前安装 WebView2 策略：一次宿主初始导航、后续顶层/子 frame 导航拒绝；全请求源拦截并静态响应；下载/新窗口/外部协议/拖入/浏览器权限拒绝；HTML 文件选择通过 acknowledged CDP interception 阻断；网络配置和 CSP 叠加防护。必需 COM/CDP 接口不可用时创建失败，不加载插件代码。
 
@@ -47,6 +47,18 @@ Windows 可信分支不安装离线/CDP 网络阻断、黑洞代理/DNS、隔离
 **期限与主动回收**：每块/末块异步回调 ACK 最多等待 30 秒；等 ready 的发送队列最长 60 秒；未完成接收无新分片 60 秒时由主动定时器释放半成品并回 nack，不依赖下一次输入触发清理。Worker `view.sendBinary` 另有 10 分钟传输 RPC 资源期限；sender 自 `send` 入口起也有绝对 10 分钟总期限（包含排队，持续 ACK 不延长），到期仅终止对应传输、释放资源并继续健康队列。失败/导航/重载/关闭均释放槽位和幂等租约，迟到 ACK 不得结算新传输。SDK 二进制与 state/environment 使用独立有界 lane，慢二进制回调不阻塞状态 ACK。这些是二进制传输资源边界，不改变文件/HTTP 无业务大小或隐式请求期限的契约；不是插件自行分配内存、用户回调长期保留数据或整个 OS 堆的硬配额。Worker→宿主结构化克隆在宿主准入前发生的瞬时分配也不能被接收端预算追溯阻止。
 
 **取消与迟到拒绝**：传输绑定 `viewInstanceId + documentId`，宿主送入 Worker 前还复核 `workerEpoch`。导航、关闭、Worker 换代或 retire 时，宿主 `cancelViewBinary` 拒绝并释放尚未完成的宿主→Worker 投递及其事件/字节额度，`ViewBinarySender.cancel` 拒绝在途与排队发送，`ViewBinaryReceiver.reset` 丢弃半成品；此后迟到的 `binary-ack` 因 `documentId` 不匹配被忽略，原生 `send` 与 `receive` 也分别拒绝/丢弃旧文档消息。原生 `receive` 对非法或身份不符消息丢弃；二进制按每插件 512 帧/秒、突发 1024 共享桶限制，解码/转发前扣令牌。首次超限每视图仅报告一次可观察错误，使宿主退休视图并取消双向传输，后续超量帧不反复 emit 放大。合规发送的丢 ACK/挂起也由独立 ACK 期限结算，不再无限等待。Worker 桥在投递 `view.binary` 前复核会话当前 `documentId`，不匹配即回失败；`view.document` 是独立控制事件，不受控制字节/条数额度的准入限制；Worker 换代由宿主的 `workerEpoch` 判定退休重建。已经在执行的插件异步逻辑不假装被撤销；`view.sendBinary` 使用独立的 10 分钟 RPC 资源期限，先发生的 ACK 失败、主动 idle 回收、文档取消仍会更早结算并释放槽位。文件/HTTP 的无隐式业务期限不受影响；大块数据仍不进入实时状态 JSON 合并通道。
+
+## 可选独立时间通道
+
+`view.timeline.register` 是 UI 文档运行时 opt-in；旧插件无需迁移，纯网页/`worker:false` 以 custom 时钟同样可注册，不依赖 Worker。`pluginTimeline.PluginTimeline` 按原生确定的 binding/document 将视图注册到 `timelineCoordinator`，slot 为真实 tabId；bound-input 仅允许实际有 bytes/lines 输入的绑定会话，来源与 raw 共用 `serial:<portId>` / `host-epoch-ms`。custom 来源按 pluginId/installGeneration/声明 clock.id 命名空间隔离，不能通过自报 id 冒充宿主时间域。组成员选择与映射仍由宿主用户控制。
+
+页面→原生使用 `timeline` 信封，payload 的 register/capabilities/availability/begin/update/end/cancel/ack/dispose 由 `view_runtime/timeline.rs` 白名单、有限数/UUID/有界文本校验；不接受页面自报 group/port/tab/participant 身份。原生从 Session 补 instanceId/documentId。宿主→页面只使用独立 `timeline-seek` / `timeline-cancel`，8KiB 信封；页面控制 payload ≤4KiB。每视图 preview update 令牌桶20/s、突发20，注册/ACK/end 等控制独立64/s、突发64，不消费普通交互、状态 ACK 或 binary 桶。SDK 对范围与能力摘要去重，本地主动导航 update 约10Hz合并，end携带最终锚点直接发控制，不被preview节流吞掉。
+
+SDK dispatcher 在普通 state/environment Promise 队列之外处理时间请求，既不调用 view.send，也不经过业务模型或二进制通道。时间 lane 一条实际在途回调加一条最新候选，commit优先于同代preview；取消由 SDK 本地 AbortController 合作实现，不把信号经 JSON 发送。只有 onSeek Promise 真正结束才ACK（已取消者回held），实际定位的 exact/nearest/边界结果必须携带actualTimeMs。宿主以原请求版本与requestId结算，旧导航/映射/来源/文档结果不更新组或源锚点。
+
+preview 150ms / commit 2s 超时只结算协调器等待者并显示slow，不退休业务页面，也不清掉仍执行回调的物理在途槽。该回调结束前不并发绕过；其他健康成员仍可继续。隐藏/遮挡会禁用适配器并取消当前等待，恢复由协调器只对齐当前目标，不积压历史定位。能力重注册、文档导航/刷新、Worker换代、撤权、实例关闭释放adapter、手势、计时器和等待者；共享组描述保留为不可用成员，不自动改驱动端口或复活隐藏raw。独立lane并非线程/CPU隔离。
+
+作者API、排序/过滤处理和示例只维护在[插件开发指南](../plugin-development.md#可选时间联动-apiui-专用)。表格/波形示例保留输入ts（完成帧使用完成块ts），仅对各自保留的最近200条定位；另有可独立安装的无Worker custom时钟页。时间定位不提供历史输入回补，不触发串口发送。
 
 ## 工作区模型
 
@@ -121,3 +133,5 @@ serial替换偏好 displayView保存在portMeta，走已有CAS安全元数据保
 单测覆盖类型化标签/旧快照迁移、独立输入/trigger租约、JSON边界、动作去重/票据/关闭、串行输入/退休及Rust资源/权限/几何验证。视图运行时另有文档代次用例（`document`/`ready` 替换、旧文档 ACK/ready 被忽略、纯网页无 Worker、Worker 重启后存活）与二进制用例（300 KiB 双向逐字节往返、8 KiB 分块计数、导航替换时在途发送被拒绝、迟到确认不影响新文档）；宿主侧单测覆盖 `postViewBinary` 的 bridge ACK 结算、Worker 停止与 `cancelViewBinary` 只拒绝被替换文档的传输；Rust 覆盖 8 KiB 分片信封往返与超限拒绝、可信 origin 稳定性、同源 HTML 导航白名单、缺失 profile 清除不创建目录。Playwright浏览器mock只证明前端工作区/Worker/终端，不证明native隔离。
 
 Windows 原生回归 `retiring_plugin_children_preserves_host_resize` 需安装 WebView2 Runtime，以 `cargo test --lib --manifest-path src-tauri/Cargo.toml retiring_plugin_children_preserves_host_resize -- --ignored` 显式运行；连续销毁插件 child 后，放大/缩小宿主仍须把 WebView2 bounds 同步为最新 client rect。默认单测跳过该原生环境依赖用例。
+
+`native_timeline_smoke.rs` 的 `workerless_timeline_native_webview2_smoke` 同样是显式 Windows/WebView2 测试：`cargo test --lib --manifest-path src-tauri/Cargo.toml workerless_timeline_native_webview2_smoke -- --ignored --nocapture --test-threads=1` 可单独运行时间通道。时间用例在独立临时浏览器 profile 和隐藏 HWND 上执行真实 SDK/IPC，验证无 Worker 注册、业务 state 回调挂起期间仍完成 seek/结果 ACK、源 begin/end 最终锚点、真实 NavigationStarting 换代与旧文档/能力消息拒绝、新页面重新定位。它不读取用户配置/已安装插件数据、不下载依赖；原生 transport/validator/document gate 的通过不等于完整 Tauri 主窗授权、隔离策略或多窗口布局已被该测试证明。

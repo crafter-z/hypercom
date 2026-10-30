@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Workerless timeline</title>
+<style>body{font:16px system-ui;margin:24px}input{width:90%}output{display:block;margin:16px 0}</style></head>
+<body><h1>Independent device clock</h1><p>This page has no Worker, serial input or shared host clock. Choose a timeline group in the host and explicitly map this device clock before comparing it with other sources.</p>
+<input id="time" type="range" min="1000" max="6000" step="1000" value="1000" aria-label="Navigate device time"><output id="actual">1000 ms</output>
+<script>
+const slider = document.getElementById('time'); const actual = document.getElementById('actual');
+const samples = [1000, 2000, 3000, 4000, 5000, 6000]; let navigation = null;
+const timeline = view.timeline?.register({
+  version: 1, clock: { kind: 'custom', id: 'device-ms' }, capabilities: { preview: 'bounded', canDrive: true },
+  async onSeek({ timeMs, signal }) {
+    const time = samples.filter(t => t <= timeMs).pop() || samples[0];
+    if (signal.aborted) return { status: 'held' };
+    slider.value = String(time); actual.value = `${time} ms`;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    if (signal.aborted) return { status: 'held' };
+    return { status: timeMs < 1000 ? 'before-range' : timeMs > 6000 ? 'after-range' : time === timeMs ? 'exact' : 'nearest', actualTimeMs: time, recordKey: String(time) };
+  },
+});
+timeline?.setAvailability({ available: true, range: { startMs: 1000, endMs: 6000 } });
+function finish() { if (navigation) { navigation.end({ timeMs: Number(slider.value) }); navigation = null; } }
+slider.oninput = () => { if (timeline && !navigation) navigation = timeline.beginNavigation('scrub'); actual.value = `${slider.value} ms`; navigation?.update({ timeMs: Number(slider.value) }); };
+slider.onchange = finish; slider.onkeyup = finish;
+for (const type of ['pointerup', 'mouseup', 'pointercancel', 'blur']) addEventListener(type, finish, true);
+addEventListener('visibilitychange', () => { if (document.hidden) finish(); });
+addEventListener('pagehide', () => { navigation?.cancel(); timeline?.dispose(); }, { once: true });
+</script></body></html>

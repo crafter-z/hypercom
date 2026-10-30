@@ -35,7 +35,7 @@ export function getPluginLineConsumerCount(portId: string): number {
 
 /** Shared port metadata/history belongs to all bound views, including input:none. */
 export function hasPortDisplayConsumers(portId: string): boolean {
-  if (useAppStore.getState().tabs.some(tab => tab.kind === 'serial' ? tab.portId === portId : tab.boundPortId === portId)) return true;
+  if (useAppStore.getState().tabs.some(tab => tab.kind === 'serial' ? tab.portId === portId : tab.kind === 'plugin' && tab.boundPortId === portId)) return true;
   for (const lease of leases) if (lease.portId === portId) return true;
   return false;
 }

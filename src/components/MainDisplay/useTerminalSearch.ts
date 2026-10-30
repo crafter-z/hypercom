@@ -13,11 +13,13 @@ import type { TerminalViewportManager } from '../../utils/terminal/viewportManag
 
 interface UseTerminalSearchOptions {
   vm: TerminalViewportManager;
+  onOpen?: () => void;
+  onNavigate?: () => void;
 }
 
 const QUERY_DEBOUNCE_MS = 150;
 
-export function useTerminalSearch({ vm }: UseTerminalSearchOptions) {
+export function useTerminalSearch({ vm, onOpen, onNavigate }: UseTerminalSearchOptions) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -40,11 +42,11 @@ export function useTerminalSearch({ vm }: UseTerminalSearchOptions) {
   // Refresh readouts on manager render passes (match list changes as data
   // flows while the search bar is open).
   useEffect(() => {
-    return vm.subscribe(() => forceRender((v) => v + 1));
+    return vm.subscribeReadouts(() => forceRender((v) => v + 1));
   }, [vm]);
 
-  const openSearch = useCallback(() => setSearchOpen(true), []);
-  const toggleSearch = useCallback(() => setSearchOpen((prev) => !prev), []);
+  const openSearch = useCallback(() => { onOpen?.(); setSearchOpen(true); }, [onOpen]);
+  const toggleSearch = useCallback(() => { if (!searchOpen) onOpen?.(); setSearchOpen(!searchOpen); }, [searchOpen, onOpen]);
   const toggleCase = useCallback(() => setCaseSensitive((v) => !v), []);
   const closeSearch = useCallback(() => {
     // Closing clears manager matches through setSearch(false, ...), not the
@@ -53,12 +55,16 @@ export function useTerminalSearch({ vm }: UseTerminalSearchOptions) {
   }, []);
 
   const nextMatch = useCallback(() => {
+    if (!vmRef.current.getMatchCount()) return;
     vmRef.current.jumpToMatch(vmRef.current.getCurrentMatchIndex() + 1);
-  }, []);
+    onNavigate?.();
+  }, [onNavigate]);
 
   const prevMatch = useCallback(() => {
+    if (!vmRef.current.getMatchCount()) return;
     vmRef.current.jumpToMatch(vmRef.current.getCurrentMatchIndex() - 1);
-  }, []);
+    onNavigate?.();
+  }, [onNavigate]);
 
   return {
     searchOpen,

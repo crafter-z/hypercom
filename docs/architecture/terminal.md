@@ -8,8 +8,18 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 |---|---|---|
 | `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
 | `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（固定行高），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、head 前进即锚点恢复（issue #19；`LARGE_TRIM_ROWS` 只保留给 `setLimits` 收缩的大跳变，重新 attach（弹窗回贴/换容器）也按 `anchorSeq` 还原阅读位置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
-| `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 每端口枢纽：`TerminalBuffer` + renderer 生命周期（attach/detach/dispose）+ **增量过滤/搜索**（新行 append 时匹配一次并入列，不整缓冲重扫）+ 暂停（frozenSeq）+ 选区/锁定/手势透传 + rAF 调度 + `subscribe`（渲染 pass 通知 React 壳刷新读数）+ matchSet 按 **(offset, seqs.length)** 缓存（currentMatch 只影响 `current-match` 类，不重建 Set） |
+| `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 实时/只读来源枢纽：renderer 生命周期、增量/可取消分块过滤搜索、frozen 上界、时间索引、rAF latest-wins seek；`subscribe` 仅几何/非 React render 通知，`subscribeReadouts` 只在数据/计数/加载状态变化时刷新壳；搜索 Set 增量维护 |
 | 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`normalizeReceivedTerminalLines`/`releaseViewportManager`/`getViewportManager`，另有 `hasViewportManager`/`getManagerPortIds` 查询（不创建实例）——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键/配置限额同步）一律走这里，**不再碰 useTerminalStore 的行 API** |
+
+## 时间定位、只读来源与滚动热路径
+
+`TerminalSource` 为共享只读行接口：实时 manager 使用 `TerminalBuffer`，回放注入 `ReplayDocument`，不复制 renderer 或创建假端口。时间未知由来源返回 null 并显示 `—`。`TerminalTimeIndex` 按 `(time,seq)` 的 AVL 排序，支持重复/乱序时间与有界裁剪；过滤和 frozen 上界决定可定位候选。
+
+过滤计数未冻结直接 length-offset，冻结使用 upper_bound；搜索 membership Set 随 append/chunk/trim 增量维护，不在纯滚动或每帧 RX 重建。大数据过滤、搜索及索引按共享预算可取消分块重建，`isLoading` 标记状态；只有小缓冲保持同步扫描。
+
+`seekTimeline` 合并每帧最新目标，并在实际 render pass 后 ACK；取消、clear/replace、换源或销毁淘汰旧请求。geometry → visible index → seq → timestamp 读取中心锚点，不 snapshot 全历史。有效选区返回 held，释放后只应用最新目标。时间组有效跟随独立于 scrollLocked，grouped 时不受独立 Pin 或成员到尾 settle 重新启用。
+
+renderer 使用有界物理高度映射，避免百万行 × 大字号直接要求无限 CSS spacer；首/中/尾可达与映射单调需要真实浏览器验证。`TerminalPerformance.test.ts` 通过环境变量显式启用，只观测索引/计数与 jsdom CPU 样本，不代表 WebView2 FPS。完整组协议与只读导入边界见[时间联动](timeline.md)。
 
 ## 关键不变式
 

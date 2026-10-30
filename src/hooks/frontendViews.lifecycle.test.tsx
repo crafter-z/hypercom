@@ -8,9 +8,10 @@ import { useRuleStore } from '../stores/useRuleStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { resetStoresForTests } from '../stores/resetStores';
 import { releaseUnusedPortState } from '../stores/releaseTerminalState';
-import { serialService, fileService } from '../services/tauri';
+import { serialService } from '../services/tauri';
+import { fileService, type ReplayPickedSources } from '../services/file';
 import { sendToPort, useSerialSend, releaseSendHistory, type SerialSendActions } from './useSerialSend';
-import { useLogReplay, type LogReplayActions } from '../components/MainDisplay/hooks/useLogReplay';
+import { useLogReplay } from '../components/MainDisplay/hooks/useLogReplay';
 import { useCyclicSend } from '../components/OperationPanel/hooks/useCyclicSend';
 import { getViewportManager, snapshotTerminalLines, releaseViewportManager } from '../utils/terminal/viewportManager';
 import { getRxPipeline } from '../utils/rxPipeline';
@@ -19,9 +20,10 @@ import { ttyService } from '../utils/ttyService';
 
 vi.mock('../services/tauri', () => ({
   serialService: { sendSerialData: vi.fn() },
-  fileService: { readTextFile: vi.fn() },
+
   gitBashSimService: { resizeGitBashSim: vi.fn(async () => {}) },
 }));
+vi.mock('../services/file', () => ({ fileService: { pickReplaySources: vi.fn(), readReplaySourceChunk: vi.fn(), releaseReplaySources: vi.fn(async () => {}) } }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function deferred<T>() {
@@ -29,14 +31,14 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done; });
   return { promise, resolve };
 }
-const log = '[2026-10-10 10:00:00.000] RX old first\n[2026-10-10 10:00:01.000] RX old second';
+const picked: ReplayPickedSources = { grantId: 'grant', sources: [{ sourceId: 'source', name: 'old.log', path: 'C:/old.log', size: 5, fingerprint: 'a'.repeat(64) }] };
 let root: Root;
 let send!: SerialSendActions;
-let replay!: LogReplayActions;
+let replay!: ReturnType<typeof useLogReplay>;
 let tabId: string;
-function Probe({ portId = 'COM1' }: { portId?: string }) {
+function Probe() {
   send = useSerialSend();
-  replay = useLogReplay(portId);
+  replay = useLogReplay();
   useCyclicSend({ sendData: sendToPort });
   return null;
 }
@@ -54,7 +56,7 @@ beforeEach(async () => {
   getViewportManager('COM1');
   tabId = useAppStore.getState().openTab('COM1');
   vi.mocked(serialService.sendSerialData).mockResolvedValue(3);
-  vi.mocked(fileService.readTextFile).mockResolvedValue(log);
+  vi.mocked(fileService.pickReplaySources).mockResolvedValue(picked);
   root = createRoot(document.createElement('div'));
   await act(async () => { root.render(createElement(Probe)); });
 });
@@ -102,45 +104,37 @@ describe('retired frontend view work', () => {
     expect(useSystemStore.getState().trafficStats.COM1?.txTotal).toBe(3);
   });
 
-  it('reserves replay ownership before file read and allows stop/restart without an old read taking over', async () => {
-    const reading = deferred<string>();
-    vi.mocked(fileService.readTextFile).mockImplementationOnce(() => reading.promise);
-    let old!: Promise<void>;
-    await act(async () => {
-      old = replay.startReplay('old.log', 1);
-      void replay.startReplay('duplicate.log', 1);
-    });
-    expect(fileService.readTextFile).toHaveBeenCalledTimes(1);
-    await act(async () => { replay.stopReplay(); await replay.startReplay('new.log', 0); });
-    const before = snapshotTerminalLines('COM1').map(line => line.content);
-    await act(async () => { reading.resolve(log); await old; });
-    expect(snapshotTerminalLines('COM1').map(line => line.content)).toEqual(before);
-    expect(replay.isReplaying).toBe(false);
+  it('releases a native picker result arriving after cancellation and never writes a serial buffer', async () => {
+    const selecting = deferred<ReplayPickedSources | null>();
+    vi.mocked(fileService.pickReplaySources).mockImplementationOnce(() => selecting.promise);
+    let picking!: Promise<void>;
+    await act(async () => { picking = replay.startImport(); });
+    await act(async () => { replay.cancelImport(); selecting.resolve(picked); await picking; });
+    expect(replay.picked).toBeNull();
+    expect(fileService.releaseReplaySources).toHaveBeenCalledWith('grant');
+    expect(snapshotTerminalLines('COM1')).toEqual([]);
   });
 
-  it.each(['switch', 'retire', 'unmount'] as const)('cancels delayed replay rows on %s', async action => {
-    let playing!: Promise<void>;
-    await act(async () => { playing = replay.startReplay('old.log', 1); });
-    expect(snapshotTerminalLines('COM1').map(line => line.content)).toEqual(['old first']);
-    if (action === 'switch') await act(async () => { root.render(createElement(Probe, { portId: 'COM2' })); });
-    else if (action === 'retire') await act(async () => { retireTab(); tabId = useAppStore.getState().openTab('COM1'); });
-    else {
-      await act(async () => { root.unmount(); });
-      root = createRoot(document.createElement('div'));
-      await act(async () => { root.render(createElement(Probe)); });
-    }
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000); await playing; });
-    expect(snapshotTerminalLines('COM1').some(line => line.content === 'old second')).toBe(false);
-    expect(replay.isReplaying).toBe(false);
+  it('cancels an in-flight chunk on unmount without appending historical rows', async () => {
+    const reading = deferred<{ base64: string; nextOffset: number; done: boolean }>();
+    vi.mocked(fileService.readReplaySourceChunk).mockImplementationOnce(() => reading.promise);
+    await act(async () => { await replay.startImport(); });
+    let importing!: Promise<void>;
+    await act(async () => { importing = replay.confirmImport([{ title: 'track', sourceIds: ['source'], options: { encoding: 'UTF-8', format: 'text', timezoneOffsetMinutes: 0 } }]); });
+    // Observe rejection before unmount, so the cooperative abort isn't unhandled.
+    const result = importing.catch(error => error);
+    await act(async () => { root.unmount(); });
+    root = createRoot(document.createElement('div'));
+    await act(async () => { reading.resolve({ base64: btoa('hello'), nextOffset: 5, done: true }); await result; });
+    expect((await result).name).toBe('AbortError');
+    expect(snapshotTerminalLines('COM1')).toEqual([]);
+    expect(fileService.releaseReplaySources).toHaveBeenCalledWith('grant');
   });
 
-  it('does not append a pending file read into a retired and reopened port', async () => {
-    const reading = deferred<string>();
-    vi.mocked(fileService.readTextFile).mockImplementationOnce(() => reading.promise);
-    let playing!: Promise<void>;
-    await act(async () => { playing = replay.startReplay('old.log', 1); });
-    await act(async () => { retireTab(); tabId = useAppStore.getState().openTab('COM1'); });
-    await act(async () => { reading.resolve(log); await playing; });
+  it('keeps import independent when the focused real port retires', async () => {
+    await act(async () => { await replay.startImport(); retireTab(); });
+    expect(replay.picked?.grantId).toBe('grant');
+    await act(async () => { replay.cancelImport(); });
     expect(snapshotTerminalLines('COM1')).toEqual([]);
   });
 

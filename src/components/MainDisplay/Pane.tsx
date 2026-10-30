@@ -8,6 +8,8 @@ import { releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { getTabViewPreference, getPluginViewState, dismissPluginTab } from '../../utils/pluginViewRuntime';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
+import { timelineCoordinator } from '../../utils/timeline';
+import { closeReplayTab } from '../../utils/replay/replayRuntime';
 import { useSerialConnection, usePortToolActions } from '../../hooks';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
@@ -52,6 +54,8 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
   const cleanupClosedTab = useCallback((tabId: string) => {
     const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
     dismissPluginTab(tabId);
+    timelineCoordinator.removeMember(tabId);
+    if (tab?.kind === 'replay') closeReplayTab(tabId);
     if (tab?.kind === 'serial') {
       ttyService.detach(tab.portId);
       void popoutService.closePopout('terminal', tab.portId).catch(error => console.debug('[MainDisplay] closePopout', error));

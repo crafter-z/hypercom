@@ -1,4 +1,5 @@
 pub(crate) mod resources;
+mod timeline;
 #[cfg(windows)]
 mod windows;
 
@@ -20,6 +21,8 @@ pub const BINARY_MESSAGE_BURST: f64 = 1024.0;
 /// upper seq keeps malformed page values from being forwarded to the frontend.
 pub const MAX_BINARY_TRANSFER_ID_LEN: usize = 128;
 pub const MAX_BINARY_SEQ: u64 = 16_777_216;
+const TIMELINE_PREVIEW_RATE: f64 = 20.0;
+const TIMELINE_CONTROL_RATE: f64 = 64.0;
 
 /// Simple monotonic token bucket (fractional refill, capped burst).
 struct TokenBucket { tokens: f64, updated: Instant }
@@ -63,6 +66,8 @@ pub struct Session {
     pub trusted_web: bool,
     rate: Mutex<(Instant, u32)>,
     control_rate: Mutex<TokenBucket>,
+    timeline_preview_rate: Mutex<TokenBucket>,
+    timeline_control_rate: Mutex<TokenBucket>,
     /// Once set, the first binary rate-limit violation has already retired the
     /// view via `native_error`; later hostile frames must stay silent.
     binary_rate_reported: AtomicBool,
@@ -163,7 +168,7 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     let resource_view = declaration.clone();
     let resources = tokio::task::spawn_blocking(move || resources::snapshot(&dir, &resource_view))
         .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
-    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)), binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()) });
+    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration), rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)), binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()) });
     if !authorized(source.app_handle(), &session) { return Err(error("视图创建期间授权或安装代次已失效")); }
     {
         let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
@@ -269,12 +274,14 @@ pub async fn send(source: tauri::Webview, id: String, mut message: Value) -> Res
         "state" | "environment" => {}
         "binary-chunk" => validate_binary_chunk(&message).map_err(error)?,
         "binary-ack" => validate_binary_ack(&message).map_err(error)?,
+        "timeline-seek" | "timeline-cancel" => if !timeline::validate_host(&message) { return Err(error("视图时间控制消息非法")); },
         _ => return Err(error("视图消息类型或大小非法")),
     }
     let serialized = serde_json::to_string(&message).map_err(|e| error(e.to_string()))?;
     let max_bytes = match message_type.as_str() {
         "state" => MAX_MESSAGE_BYTES + 8 * 1024,
         "binary-chunk" | "binary-ack" => 16 * 1024,
+        "timeline-seek" | "timeline-cancel" => 8 * 1024,
         _ => MAX_MESSAGE_BYTES,
     };
     if serialized.len() > max_bytes { return Err(error("视图消息类型或大小非法")); }
@@ -396,6 +403,10 @@ fn take_binary_token(session: &Session) -> bool {
 fn take_control_token(session: &Session) -> bool {
     session.control_rate.lock().map(|mut bucket| bucket.try_take(128.0, 128.0)).unwrap_or(false)
 }
+fn take_timeline_token(session: &Session, preview: bool, now: Instant) -> bool {
+    let (bucket, limit) = if preview { (&session.timeline_preview_rate, TIMELINE_PREVIEW_RATE) } else { (&session.timeline_control_rate, TIMELINE_CONTROL_RATE) };
+    bucket.lock().map(|mut bucket| bucket.try_take_at(limit, limit, now)).unwrap_or(false)
+}
 fn is_control_message(event_type: &str) -> bool {
     matches!(event_type, "state-ack" | "ready" | "error")
 }
@@ -422,6 +433,11 @@ pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
             }
             return;
         }
+    } else if event_type == "timeline" {
+        // End/ACK/registration never spend preview tokens. An ordinary time-lane
+        // timeout or dropped preview does not retire the business page.
+        let preview = timeline::preview(&value["payload"]);
+        if !take_timeline_token(session, preview, Instant::now()) { return; }
     } else if is_control_message(event_type) {
         if !take_control_token(session) { return; }
     } else {
@@ -444,6 +460,11 @@ pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
             let mut event = base; event["type"] = "error".into();
             event["error"] = value.get("error").and_then(Value::as_str).unwrap_or("插件 UI 错误").chars().take(2048).collect::<String>().into();
             event
+        },
+        "timeline" if timeline::validate_page(&value["payload"])
+            && (value["payload"]["registration"]["clock"]["kind"] != "bound-input"
+                || (session.binding.worker_epoch > 0 && session.binding.bound_port_id.is_some() && session.permission.is_some())) => {
+            let mut event = base; event["type"] = "timeline".into(); event["payload"] = value["payload"].clone(); event
         },
         "binary-chunk" => match inbound_binary_chunk(&value, base) { Some(event) => event, None => return },
         "binary-ack" => match inbound_binary_ack(&value, base) { Some(event) => event, None => return },
@@ -602,9 +623,17 @@ mod tests {
         let session = Session {
             binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
             alive: AtomicBool::new(true), trusted_web: false, permission: None,
-            rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)),
+            rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
             binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()),
         };
+        // An exhausted preview bucket cannot consume the reserved final/ACK
+        // controls, nor the unrelated state ACK bucket.
+        let now = Instant::now();
+        for _ in 0..TIMELINE_PREVIEW_RATE as usize { assert!(take_timeline_token(&session, true, now)); }
+        assert!(!take_timeline_token(&session, true, now));
+        for _ in 0..TIMELINE_CONTROL_RATE as usize { assert!(take_timeline_token(&session, false, now)); }
+        assert!(!take_timeline_token(&session, false, now));
+        assert!(take_control_token(&session));
         assert!(!session.accepts_document("unknown"));
         session.begin_document("old-document"); assert!(session.accepts_document("old-document"));
         session.begin_document("new-document");

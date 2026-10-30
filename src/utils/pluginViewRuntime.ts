@@ -4,6 +4,7 @@ import type { PluginManifestView, PluginView, TabItem } from '../types';
 import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage } from '../types/pluginViews';
 import { getPluginViews, subscribePluginViews } from './pluginConfigSnapshot';
 import { pluginHost, subscribePluginSessions, type PluginSession } from './pluginHost';
+import { PluginTimeline } from './pluginTimeline';
 import { ViewBinaryReceiver, ViewBinarySender, viewBinaryBudget, type ViewBinaryAbort } from './pluginViewBinary';
 import { pluginViewService } from '../services/pluginView';
 import { subscribePluginViewInput } from './pluginViewInput';
@@ -57,6 +58,7 @@ interface ViewRecord {
   documentId: string | null;
   binarySender: ViewBinarySender | null;
   binaryReceiver: ViewBinaryReceiver | null;
+  timeline: PluginTimeline | null;
   alive: boolean;
   nativeCreated: boolean;
   nativeReady: boolean;
@@ -118,6 +120,7 @@ function requireString(object: Record<string, unknown>, key: string, max = 128):
 function preferenceFor(tab: TabItem): PluginViewPreference | null {
   if (tab.kind === 'plugin') return { pluginId: tab.pluginId, installGeneration: tab.installGeneration, viewId: tab.viewId };
   const state = useAppStore.getState();
+  if (tab.kind !== 'serial') return null;
   const port = state.ports.find(item => item.id === tab.portId);
   return port ? port.displayView ?? null : state.config.portMeta.find(item => item.portId === tab.portId)?.displayView ?? null;
 }
@@ -178,12 +181,13 @@ function beginDocument(record: ViewRecord, documentId: string): boolean {
   // survive this initial assignment; only an actual replacement cancels it.
   const previousDocument = record.documentId;
   const replacingDocument = previousDocument !== null;
-  if (replacingDocument) {
+  if (replacingDocument && record.usesWorker) {
     // A worker handler awaiting a multi-MiB UI transfer would otherwise retain
     // it forever; document authority releases the delivery and its bytes.
     (pluginHost.get(record.binding.pluginId) as ViewBinarySession | null)
       ?.cancelViewBinary?.(record.binding.viewInstanceId, previousDocument);
   }
+  record.timeline?.dispose(); record.timeline = null;
   record.documentId = documentId;
   clearTimer(record, 'ackTimer');
   clearTimer(record, 'flushTimer');
@@ -268,6 +272,7 @@ function warnDroppedInteraction(record: ViewRecord): void {
 }
 function retire(record: ViewRecord, reason: string | null): void {
   if (!record.alive) return;
+  record.timeline?.dispose(); record.timeline = null;
   record.alive = false;
   clearTimer(record, 'readyTimer'); clearTimer(record, 'ackTimer'); clearTimer(record, 'flushTimer');
   clearTimer(record, 'workerReadyTimer'); clearTimer(record, 'navigationReadyTimer');
@@ -301,7 +306,11 @@ export function failPluginViewInstance(pluginId: string, instanceId: string, rea
   const record = [...records.values()].find(item => item.binding.viewInstanceId === instanceId && item.binding.pluginId === pluginId);
   if (record) fail(record, reason);
 }
+function updateTimelineVisibility(record: ViewRecord): void {
+  record.timeline?.setVisible(live(record) && record.nativeReady && record.workerReady && record.visible && !overlayBlocked);
+}
 function updateReadyState(record: ViewRecord): void {
+  updateTimelineVisibility(record);
   if (live(record) && record.nativeReady && record.workerReady) {
     setState(record.binding.tabId, { status: 'ready', error: null, instanceId: record.binding.viewInstanceId });
   }
@@ -371,7 +380,7 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
   const tabSessionId = tabSessions.get(tab.id) ?? crypto.randomUUID(); tabSessions.set(tab.id, tabSessionId);
   const portId = getTabPortId(tab);
   const binding: PluginViewBinding = { ...preference, tabId: tab.id, placement: tab.kind === 'serial' ? 'serial-content' : 'workspace-tab', boundPortId: portId, portMode: portId ? useAppStore.getState().ports.find(port => port.id === portId)?.mode ?? 'trx' : null, tabSessionId, viewInstanceId: crypto.randomUUID(), workerEpoch: usesWorker ? worker!.epoch : 0, streamEpoch: 0 };
-  const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, navigationReadyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastInteractionDropWarn: 0, lastEnvironment: '' };
+  const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, timeline: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, navigationReadyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastInteractionDropWarn: 0, lastEnvironment: '' };
   records.set(tab.id, record); setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId });
   try {
     await pluginViewService.create(binding);
@@ -386,11 +395,12 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
       record.unsubscribeInput = subscribePluginViewInput(binding, view.input, {
         onInput: (batch, streamEpoch, gapBefore) => {
           if (!live(record) || worker!.epoch !== binding.workerEpoch) return false;
+          if (binding.streamEpoch !== streamEpoch) record.timeline?.updateSourceGeneration(streamEpoch);
           binding.streamEpoch = streamEpoch;
           return worker!.post({ type: 'view.input', payload: { instanceId: binding.viewInstanceId, streamEpoch, gapBefore, batch } });
         },
-        onDiscontinuity: (reason, streamEpoch) => { binding.streamEpoch = streamEpoch; worker!.post({ type: 'view.discontinuity', payload: { instanceId: binding.viewInstanceId, reason, streamEpoch } }); },
-        onStatus: (status, streamEpoch) => { binding.streamEpoch = streamEpoch; worker!.post({ type: 'view.status', payload: { instanceId: binding.viewInstanceId, status, streamEpoch } }); },
+        onDiscontinuity: (reason, streamEpoch) => { if (binding.streamEpoch !== streamEpoch) record.timeline?.updateSourceGeneration(streamEpoch); binding.streamEpoch = streamEpoch; worker!.post({ type: 'view.discontinuity', payload: { instanceId: binding.viewInstanceId, reason, streamEpoch } }); },
+        onStatus: (status, streamEpoch) => { if (binding.streamEpoch !== streamEpoch) record.timeline?.updateSourceGeneration(streamEpoch); binding.streamEpoch = streamEpoch; worker!.post({ type: 'view.status', payload: { instanceId: binding.viewInstanceId, status, streamEpoch } }); },
       });
     }
     if (record.rect) await place(record);
@@ -448,6 +458,7 @@ export function placePluginView(tabId: string, rect: PluginViewRect, visible: bo
   const record = records.get(tabId);
   if (!record) return;
   const wasVisible = record.visible; record.rect = rect; record.visible = visible;
+  updateTimelineVisibility(record);
   if (!visible) clearTimer(record, 'ackTimer');
   else if (!wasVisible) {
     if (record.retained) record.latest = record.retained;
@@ -460,6 +471,7 @@ export async function suppressPluginViews(suppressed: boolean, occlusions: Plugi
   currentOcclusions = normalizeOcclusions(occlusions);
   overlayBlocked = suppressed;
   await Promise.all([...records.values()].map(async record => {
+    updateTimelineVisibility(record);
     if (suppressed) clearTimer(record, 'ackTimer'); else { armAck(record); flush(record); }
     try { await place(record); await sendEnvironment(record); } catch (error) {
       fail(record, error);
@@ -732,6 +744,17 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
     // ACKs, page messages and binary chunks from a replaced document are stale.
     if (!documentId || documentId !== record.documentId) return;
     if (message.type === 'navigation-complete') { armTrustedReadyWatchdog(record, documentId); return; }
+    if (message.type === 'timeline') {
+      // Native has already supplied/checked document+instance identity. This
+      // path is deliberately independent of usesWorker, state ACK and binary.
+      if (!record.timeline) record.timeline = new PluginTimeline({
+        binding: record.binding, declaration: record.declaration, documentId,
+        send: control => pluginViewService.send(record.binding.viewInstanceId, control),
+      });
+      updateTimelineVisibility(record);
+      record.timeline.receive(message.payload);
+      return;
+    }
     if (message.type === 'ack') {
       if (!record.nativeReady || record.inFlight?.revision !== message.revision) return;
       clearTimer(record, 'ackTimer'); record.inFlight = null; flush(record);

@@ -1,0 +1,25 @@
+{
+  "id": "com.example.timeline-page",
+  "name": "Workerless Timeline",
+  "version": "1.0.0",
+  "description": "Independent custom-clock timeline page, without a business Worker or serial input.",
+  "apiVersion": "1.0",
+  "permissions": ["ui:view"],
+  "requires": ["trusted-web-view@1", "plugin-workspace-tabs@1"],
+  "ui": {
+    "views": [{
+      "id": "timeline",
+      "label": "Custom device clock",
+      "mode": "trusted-web",
+      "worker": false,
+      "entry": "index.html",
+      "styles": [],
+      "assets": [],
+      "modes": ["trx", "tty"],
+      "input": "none",
+      "placements": ["workspace-tab"],
+      "portBinding": "none",
+      "restoreOnStartup": true
+    }]
+  }
+}

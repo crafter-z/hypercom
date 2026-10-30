@@ -9,6 +9,7 @@ import { pluginHost, type PluginSession } from './pluginHost';
 import { useSystemStore } from '../stores/useSystemStore';
 import type { PluginNativeMessage } from '../types/pluginViews';
 import { sendToPort } from '../hooks/useSerialSend';
+import { timelineCoordinator } from './timeline/coordinator';
 import { VIEW_BINARY_CHUNK_BYTES, decodeViewBinaryBase64, encodeViewBinaryBase64 } from './pluginViewBinary';
 
 vi.mock('../services/pluginView', () => ({ pluginViewService: { create: vi.fn(), destroy: vi.fn(), send: vi.fn(), update: vi.fn(), onMessage: vi.fn(async () => () => {}) } }));
@@ -365,6 +366,39 @@ describe('independent pages, navigation documents and binary transport', () => {
     } finally { stop(); }
   });
 
+  it('routes worker:false timeline independently and retires only its old document lane on navigation', async () => {
+    enableNative();
+    const pure: PluginView = { ...plugin, manifest: { ...plugin.manifest!, entry: '', ui: { buttons: [], menuItems: [], views: [{ ...declaration, id: 'web', entry: 'ui/index.html', mode: 'trusted-web', worker: false, input: 'none', portBinding: 'none', placements: ['workspace-tab'] }] } } };
+    syncPluginListSnapshot({ revision: 2, plugins: [pure], pluginConfigs: [{ id: plugin.id, installGeneration: plugin.installGeneration, enabled: true, grantedPermissions: plugin.grantedPermissions, trustedWebGranted: true }] });
+    const getWorker = vi.spyOn(pluginHost, 'get');
+    const { tabId, instanceId, nativeMessage, stop } = await openNative('web');
+    let groupId: string | undefined;
+    try {
+      placePluginView(tabId, { x: 0, y: 0, width: 600, height: 400, zoomPercent: 100 }, true); await settle();
+      const generation = crypto.randomUUID();
+      const registration = { action: 'register', capabilityGeneration: generation, registration: { version: 1, clock: { kind: 'custom', id: 'device-ms' }, capabilities: { preview: 'bounded', canDrive: true } } };
+      nativeMessage({ type: 'timeline', instanceId, documentId: 'doc-1', payload: registration }); await settle();
+      const participant = timelineCoordinator.participantForSlot(tabId)!;
+      expect(participant).toMatchObject({ sourceKind: 'custom', availability: { visible: true } });
+      groupId = timelineCoordinator.createGroup({ name: 'Web group', memberSlots: [tabId] });
+      timelineCoordinator.seek(groupId, 5000); await vi.advanceTimersByTimeAsync(1); await settle();
+      const seek = vi.mocked(pluginViewService.send).mock.calls.map(call => call[1]).find(message => message.type === 'timeline-seek')!;
+      expect(seek).toMatchObject({ documentId: 'doc-1', timeline: { timeMs: 5000, capabilityGeneration: generation } });
+      nativeMessage({ type: 'timeline', instanceId, documentId: 'doc-1', payload: { action: 'ack', capabilityGeneration: generation, requestId: seek.timeline!.requestId, result: { status: 'nearest', actualTimeMs: 4500 } } }); await settle();
+      expect(timelineCoordinator.groupForSlot(tabId)?.members[0]).toMatchObject({ actualTimeMs: 4500, status: 'nearest' });
+      timelineCoordinator.seek(groupId, 6000); await vi.advanceTimersByTimeAsync(1); await settle();
+      await vi.advanceTimersByTimeAsync(2001); await settle();
+      expect(getPluginViewState(tabId).status).toBe('ready');
+      expect(pluginViewService.destroy).not.toHaveBeenCalled();
+      nativeMessage({ type: 'document', instanceId, documentId: 'doc-2' }); await settle();
+      expect(timelineCoordinator.participantForSlot(tabId)).toBeUndefined();
+      nativeMessage({ type: 'timeline', instanceId, documentId: 'doc-1', payload: registration }); await settle();
+      expect(timelineCoordinator.participantForSlot(tabId)).toBeUndefined();
+      nativeMessage({ type: 'ready', instanceId, documentId: 'doc-2' }); await settle();
+      expect(getPluginViewState(tabId).status).toBe('ready'); expect(getWorker).not.toHaveBeenCalled();
+    } finally { if (groupId) timelineCoordinator.deleteGroup(groupId); stop(); }
+  });
+
   it.each([false, true])('starts the trusted ready watchdog only after load, and clears it on ready: %s', async becomesReady => {
     enableNative();
     const pure: PluginView = { ...plugin, manifest: { ...plugin.manifest!, entry: '', ui: { buttons: [], menuItems: [], views: [{ ...declaration, id: 'web', entry: 'ui/index.html', mode: 'trusted-web', worker: false, input: 'none', portBinding: 'none', placements: ['workspace-tab'] }] } } };
@@ -383,6 +417,32 @@ describe('independent pages, navigation documents and binary transport', () => {
       expect(getPluginViewState(tabId).status).toBe(becomesReady ? 'ready' : 'unavailable');
       if (!becomesReady) expect(getPluginViewState(tabId).error).toContain('did not become ready');
     } finally { stop(); }
+  });
+
+  it('releases the plugin slot on raw fallback and stale plugin registration cannot reclaim it', async () => {
+    enableNative(); workerSession();
+    const tabId = useAppStore.getState().openTab('COM3');
+    const preference = { pluginId: plugin.id, installGeneration: plugin.installGeneration, viewId: 'table' };
+    selectSerialPluginView(tabId, preference);
+    let nativeMessage!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async callback => { nativeMessage = callback; return () => {}; });
+    const stop = startPluginViewRuntime(); let disposeRaw: (() => void) | undefined;
+    try {
+      await settle(); const instanceId = getPluginViewState(tabId).instanceId!;
+      markPluginViewWorkerReady(plugin.id, instanceId);
+      nativeMessage({ type: 'document', instanceId, documentId: 'plugin-doc' });
+      nativeMessage({ type: 'ready', instanceId, documentId: 'plugin-doc' }); await settle();
+      placePluginView(tabId, { x: 0, y: 0, width: 600, height: 400, zoomPercent: 100 }, true);
+      const registration = { action: 'register', capabilityGeneration: crypto.randomUUID(), registration: { version: 1, clock: { kind: 'bound-input' }, capabilities: { preview: 'bounded', canDrive: true } } };
+      nativeMessage({ type: 'timeline', instanceId, documentId: 'plugin-doc', payload: registration }); await settle();
+      expect(timelineCoordinator.participantForSlot(tabId)?.sourceId).toBe('serial:COM3');
+      selectSerialPluginView(tabId, null);
+      expect(timelineCoordinator.participantForSlot(tabId)).toBeUndefined();
+      const raw = timelineCoordinator.registerParticipant({ participantId: 'raw-returned', slotId: tabId, sourceId: 'serial:COM3', sourceKind: 'live', generation: 1, sourceGeneration: 0, clockId: 'host-epoch-ms', capabilities: { preview: 'bounded', canDrive: true }, readAnchor: () => null, seek: () => ({ status: 'no-time', actualTimeMs: null }) });
+      disposeRaw = raw.dispose;
+      nativeMessage({ type: 'timeline', instanceId, documentId: 'plugin-doc', payload: registration }); await settle();
+      expect(timelineCoordinator.participantForSlot(tabId)?.participantId).toBe('raw-returned');
+    } finally { disposeRaw?.(); stop(); }
   });
 
   it('reinitializes a replacement document and ignores its predecessor ACK', async () => {

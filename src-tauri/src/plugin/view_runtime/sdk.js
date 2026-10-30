@@ -186,7 +186,143 @@
       throw new Error('Unknown host view message');
     }
   };
+  // Timeline controls never enter the state Promise chain or the Worker lane.
+  let timeline = null;
+  let timelineInFlight = null;
+  let timelineLatest = null;
+  const timelinePost = (registration, action, fields = {}) => {
+    if (!documentId) return;
+    post({ type: 'timeline', documentId, payload: { action, capabilityGeneration: registration.generation, ...fields } });
+  };
+  const validTimelineText = (value) => typeof value === 'string' && value.length <= 128 && !/[\uD800-\uDFFF]/u.test(value) && new TextEncoder().encode(value).length <= 128;
+  const validAnchor = (anchor) => anchor && Number.isFinite(anchor.timeMs)
+    && (anchor.recordKey === undefined || validTimelineText(anchor.recordKey));
+  const resultStatuses = new Set(['exact', 'nearest', 'before-range', 'after-range', 'no-time', 'filtered', 'held', 'loading', 'unsupported']);
+  const pumpTimeline = () => {
+    if (timelineInFlight || !timelineLatest) return;
+    const next = timelineLatest; timelineLatest = null;
+    const registration = timeline;
+    if (!registration || registration.disposed || next.capabilityGeneration !== registration.generation) return;
+    const controller = new AbortController();
+    const flight = { request: next, controller }; timelineInFlight = flight;
+    Promise.resolve().then(() => {
+      if (controller.signal.aborted || registration.disposed) return { status: 'held' };
+      return registration.onSeek({ ...next, signal: controller.signal });
+    }).then(result => {
+      if (registration.disposed || timeline !== registration) return;
+      if (controller.signal.aborted) { timelinePost(registration, 'ack', { requestId: next.requestId, result: { status: 'held' } }); return; }
+      if (!result || !resultStatuses.has(result.status)
+        || (['exact', 'nearest', 'before-range', 'after-range'].includes(result.status) && !Number.isFinite(result.actualTimeMs))
+        || (result.actualTimeMs !== undefined && !Number.isFinite(result.actualTimeMs))
+        || (result.recordKey !== undefined && !validTimelineText(result.recordKey))) throw new TypeError('Invalid timeline seek result');
+      timelinePost(registration, 'ack', { requestId: next.requestId, result: { status: result.status, ...(result.actualTimeMs === undefined ? {} : { actualTimeMs: result.actualTimeMs }), ...(result.recordKey === undefined ? {} : { recordKey: result.recordKey }) } });
+    }).catch(error => {
+      if (!registration.disposed && timeline === registration) timelinePost(registration, 'ack', { requestId: next.requestId, result: { status: controller.signal.aborted ? 'held' : 'unsupported' }, error: String(error).slice(0, 512).replace(/[\uD800-\uDFFF]/gu, '\uFFFD') });
+    }).finally(() => {
+      if (timelineInFlight === flight) timelineInFlight = null;
+      pumpTimeline();
+    });
+  };
+  const dispatchTimeline = (message) => {
+    const registration = timeline;
+    if (!registration || registration.disposed) return;
+    if (message.type === 'timeline-cancel') {
+      if (message.capabilityGeneration !== registration.generation) return;
+      if (timelineInFlight?.request.requestId === message.requestId) timelineInFlight.controller.abort();
+      if (timelineLatest?.requestId === message.requestId) {
+        const cancelled = timelineLatest; timelineLatest = null;
+        // Host may already own this physical slot while an old capability's
+        // callback is still running. A not-yet-started cancellation is settled
+        // immediately; no callback remains to produce its ACK later.
+        timelinePost(registration, 'ack', { requestId: cancelled.requestId, result: { status: 'held' } });
+      }
+      return;
+    }
+    const request = message.timeline;
+    if (!request || request.capabilityGeneration !== registration.generation || !validType(request.requestId)
+      || !Number.isFinite(request.timeMs) || !['preview', 'commit'].includes(request.phase)) return;
+    // One active callback plus one latest candidate; commit cannot be displaced
+    // by a preview from that same/older navigation. Cancellation is cooperative.
+    if (timelineLatest?.phase === 'commit' && request.phase === 'preview'
+      && request.navigationEpoch <= timelineLatest.navigationEpoch) return;
+    timelineLatest = request;
+    if (timelineInFlight) timelineInFlight.controller.abort();
+    pumpTimeline();
+  };
+  const registerTimeline = (options) => {
+    if (!options || options.version !== 1 || typeof options.onSeek !== 'function'
+      || !['bound-input', 'custom'].includes(options.clock?.kind)
+      || (options.clock.kind === 'custom' && (!validType(options.clock.id) || !validTimelineText(options.clock.id)))
+      || !['bounded', 'commit-only'].includes(options.capabilities?.preview)
+      || typeof options.capabilities.canDrive !== 'boolean') throw new TypeError('Invalid timeline registration');
+    if (options.clock.kind === 'bound-input' && (!context.boundPortId || !hasWorker)) throw new Error('bound-input requires a bound input session');
+    if (timeline) timeline.dispose(); // Re-register creates a new capability generation.
+    const registration = { generation: newId(), onSeek: options.onSeek, disposed: false, navigation: null,
+      description: { version: 1, clock: { kind: options.clock.kind, ...(options.clock.kind === 'custom' ? { id: options.clock.id } : {}) }, capabilities: { preview: options.capabilities.preview, canDrive: options.capabilities.canDrive } } };
+    const announce = () => {
+      timelinePost(registration, 'register', { registration: registration.description });
+      if (registration.availability) timelinePost(registration, 'availability', { availability: registration.availability });
+    };
+    const dispose = () => {
+      if (registration.disposed) return;
+      registration.navigation?.cancel(); registration.disposed = true;
+      if (timelineInFlight?.request.capabilityGeneration === registration.generation) timelineInFlight.controller.abort();
+      timelineLatest = null; timelinePost(registration, 'dispose');
+      if (timeline === registration) timeline = null;
+    };
+    registration.dispose = dispose; registration.announce = announce;
+    timeline = registration; announce();
+    return Object.freeze({
+      dispose,
+      setAvailability(value) {
+        if (registration.disposed) return;
+        if (!value || typeof value.available !== 'boolean' || (value.range && (!Number.isFinite(value.range.startMs) || !Number.isFinite(value.range.endMs) || value.range.startMs > value.range.endMs))) throw new TypeError('Invalid timeline availability');
+        const next = { available: value.available, ...(value.range ? { range: { startMs: value.range.startMs, endMs: value.range.endMs } } : {}) };
+        if (JSON.stringify(next) === JSON.stringify(registration.availability)) return;
+        registration.availability = next;
+        timelinePost(registration, 'availability', { availability: next });
+      },
+      updateCapabilities(value) {
+        if (registration.disposed) return;
+        if (!value || !['bounded', 'commit-only'].includes(value.preview) || typeof value.canDrive !== 'boolean') throw new TypeError('Invalid timeline capabilities');
+        if (registration.description.capabilities.preview === value.preview && registration.description.capabilities.canDrive === value.canDrive) return;
+        registration.description.capabilities = { preview: value.preview, canDrive: value.canDrive };
+        timelinePost(registration, 'capabilities', { capabilities: registration.description.capabilities });
+      },
+      beginNavigation(intent) {
+        if (registration.disposed || !registration.description.capabilities.canDrive) throw new Error('Timeline cannot drive');
+        if (!['scrollbar', 'wheel', 'keyboard', 'search', 'jump', 'align', 'scrub'].includes(intent)) throw new TypeError('Invalid timeline navigation intent');
+        registration.navigation?.cancel();
+        const gestureId = newId(); let latest = null; let timer = null; let ended = false;
+        timelinePost(registration, 'begin', { gestureId, intent });
+        const flush = () => { timer = null; if (!ended && latest) timelinePost(registration, 'update', { gestureId, anchor: latest }); };
+        const navigation = Object.freeze({
+          update(anchor) {
+            if (ended || registration.disposed) return;
+            if (!validAnchor(anchor)) throw new TypeError('Invalid timeline anchor');
+            latest = { timeMs: anchor.timeMs, ...(anchor.recordKey === undefined ? {} : { recordKey: anchor.recordKey }) };
+            if (timer === null) timer = setTimeout(flush, 100);
+          },
+          end(anchor) {
+            if (ended || registration.disposed) return;
+            if (anchor !== undefined) { if (!validAnchor(anchor)) throw new TypeError('Invalid timeline anchor'); latest = { timeMs: anchor.timeMs, ...(anchor.recordKey === undefined ? {} : { recordKey: anchor.recordKey }) }; }
+            ended = true; clearTimeout(timer); timer = null;
+            // Final anchor travels in the reserved end control, not a throttled update.
+            timelinePost(registration, 'end', { gestureId, ...(latest ? { anchor: latest } : {}) });
+            if (registration.navigation === navigation) registration.navigation = null;
+          },
+          cancel() {
+            if (ended) return; ended = true; clearTimeout(timer); timer = null;
+            timelinePost(registration, 'cancel', { gestureId });
+            if (registration.navigation === navigation) registration.navigation = null;
+          },
+        });
+        registration.navigation = navigation; return navigation;
+      },
+    });
+  };
   const sdk = Object.freeze({
+    timeline: Object.freeze({ register: registerTimeline }),
     get context() { return context; },
     get documentId() { return documentId; },
     onState(callback) {
@@ -252,6 +388,7 @@
     },
   });
   Object.defineProperty(globalThis, 'view', { value: sdk, writable: false, configurable: false });
+  addEventListener('pagehide', () => timeline?.dispose(), { once: true });
   const startDocument = (id) => {
     if (typeof id !== 'string' || !id) throw new Error('Invalid document identity');
     if (documentId !== null) {
@@ -260,6 +397,7 @@
     }
     documentId = id;
     post({ type: 'ready', documentId });
+    timeline?.announce();
   };
   Object.defineProperty(globalThis, '__hypercomViewDocumentStart', { configurable: false, writable: false, value: startDocument });
   Object.defineProperty(globalThis, '__hypercomViewDispatch', { configurable: false, writable: false, value(message) {
@@ -267,6 +405,7 @@
     // Native rejects stale documents too; this keeps the page-side dispatcher
     // from ever applying a message addressed to another document generation.
     if (!documentId || message.documentId !== documentId) return;
+    if (message.type === 'timeline-seek' || message.type === 'timeline-cancel') { dispatchTimeline(message); return; }
     if (message.type === 'binary-ack') { handleBinaryAck(message); return; }
     if (message.type === 'binary-chunk') {
       if (++pendingBinaryMessages > 16) { pendingBinaryMessages--; report(new Error('Host binary queue overflow')); return; }

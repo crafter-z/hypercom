@@ -11,6 +11,7 @@ import { subscribePluginViews, getPluginViews } from '../../utils/pluginConfigSn
 import { removeTabContentPlacement, setTabContentPlacement } from '../../utils/tabContentPlacement';
 import { notifyError } from '../../stores/useToastStore';
 import PluginViewPicker, { type PluginViewChoice } from '../shared/PluginViewPicker';
+import { TimelineButton } from './TimelineControls';
 
 interface Props { tab: TabItem; hidden: boolean; }
 const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
@@ -27,7 +28,7 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
     ? (getPluginViews().find(plugin => plugin.id === tab.pluginId)?.manifest?.name ?? tab.pluginId)
     : null;
   const pluginEffective = !!preference && state.status !== 'unavailable';
-  const stockVisible = tab.kind === 'serial' && !pluginEffective;
+  const stockVisible = tab.kind === 'replay' || (tab.kind === 'serial' && !pluginEffective);
   const replacements = tab.kind === 'serial' ? getAvailablePluginViews(portId, 'serial-content') : [];
   const selected = preference ? `${preference.pluginId}/${preference.viewId}` : '';
   useLayoutEffect(() => {
@@ -82,6 +83,7 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
           {portId && <span className="plugin-view-source-port">· {portId}</span>}
         </span>
       )}
+      <TimelineButton tabId={tab.id} />
       <span className="plugin-view-toolbar-spacer" />
       {preference && state.status === 'unavailable' && <>
         <span className="plugin-view-error-inline" title={state.error ?? ''}>{t('pluginViews.unavailable')}</span>

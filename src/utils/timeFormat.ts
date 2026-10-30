@@ -6,8 +6,18 @@
  */
 import type { TerminalLine, TimestampFormat } from '../types';
 
+/** Shared group-axis label. Event-aligned times must not masquerade as 1970. */
+export function formatTimelineTime(timeMs: number | null | undefined, relative = false): string {
+  if (timeMs == null || !Number.isFinite(timeMs)) return '—';
+  if (relative || Math.abs(timeMs) < 86_400_000) return `T${timeMs >= 0 ? '+' : ''}${(timeMs / 1000).toFixed(3)}s`;
+  const date = new Date(timeMs);
+  if (!Number.isFinite(date.getTime())) return '—';
+  return date.toLocaleString(undefined, { hour12: false }) + `.${String(((timeMs % 1000) + 1000) % 1000).padStart(3, '0')}`;
+}
+
 /** Format a single timestamp as HH:MM:SS.mmm. */
 export function formatAbsoluteTimestamp(ts: number): string {
+  if (!Number.isFinite(ts)) return '—';
   const d = new Date(ts);
   const pad2 = (n: number) => String(n).padStart(2, '0');
   const pad3 = (n: number) => String(n).padStart(3, '0');
@@ -19,6 +29,7 @@ export function formatRelativeDelta(
   line: TerminalLine,
   prevLine: TerminalLine | undefined
 ): string {
+  if (!Number.isFinite(line.timestamp) || (prevLine && !Number.isFinite(prevLine.timestamp))) return '—';
   if (!prevLine) return '+0ms';
   const delta = Math.max(0, line.timestamp - prevLine.timestamp);
   if (delta >= 1000) {
@@ -41,6 +52,7 @@ export function formatUptimeTimestamp(
   line: TerminalLine,
   connectedAt: number | null | undefined
 ): string {
+  if (!Number.isFinite(line.timestamp) || (connectedAt != null && !Number.isFinite(connectedAt))) return '—';
   const start = connectedAt ?? line.timestamp;
   const elapsed = Math.max(0, line.timestamp - start);
   const h = Math.floor(elapsed / 3600000);
@@ -102,5 +114,5 @@ export function isSameRound(
   current: TerminalLine,
   thresholdMs = 50
 ): boolean {
-  return current.timestamp - previous.timestamp <= thresholdMs;
+  return Number.isFinite(previous.timestamp) && Number.isFinite(current.timestamp) && current.timestamp - previous.timestamp <= thresholdMs;
 }

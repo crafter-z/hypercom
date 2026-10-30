@@ -8,7 +8,10 @@ TRX 终端的行缓冲与渲染层。**React 不渲染行**——数据到达后
 |---|---|---|
 |`TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits`|`TerminalBuffer.test.ts`|
 |`TerminalRenderer.ts`|直接 DOM 渲染：节点池复用、固定行高零测量、`visibleSeqsOffset`、同帧钉底、过滤/搜索/选区类名|`TerminalRenderer.test.ts`（jsdom）|
-|`viewportManager.ts`|每端口枢纽：缓冲 + renderer 生命周期 + 增量过滤/搜索 + rAF 调度 + 模块级实例注册表 + 非 React 适配函数|`viewportManager.test.ts`|
+|`viewportManager.ts`|实时端口或注入只读来源的枢纽：缓冲 + renderer 生命周期 + 增量/分块过滤搜索 + 时间索引 + rAF scheduled seek + 模块级实时实例注册表|`viewportManager.test.ts` / `TerminalTimeline.test.ts`|
+|`TerminalSource.ts`|只读连续稳定 seq 来源、统一计数与时间语义、物理高度映射、重建预算及 timeline 接口|`TerminalTimeline.test.ts`|
+|`TerminalTimeIndex.ts`|按 (time,seq) 排序的 AVL，O(log N) 查询/插入/删除；不假定采集时间按 seq 单调|`TerminalTimeline.test.ts`|
+|`TerminalPerformance.test.ts`|显式启用的性能观测：10万/百万索引、裁剪后条目数、宽过滤计数、三视图 jsdom 定位 CPU 样本|`HYPERCOM_TERMINAL_BENCH=1`|
 
 依赖方向：`viewportManager → { TerminalBuffer, TerminalRenderer, lineFilter, lineText, terminalSearch }`。
 **禁止** viewportManager 被 stores 反向依赖（useTerminalStore 不 import 本目录——manager 单向读 store 的显示态）。
@@ -22,7 +25,8 @@ serial:data → RxPipeline（字节切行 + 队列 + rAF tick）
     → requestRender → rAF → renderer.render(buffer, buildView())
 ```
 
-TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同一入口）。
+TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入口）。
+独立日志回放注入只读 `TerminalSource`，不进入实时 append/RX/发送/触发管线。
 弹窗快照：主窗 `snapshotTerminalLines` 发送 / 弹窗 `replaceTerminalLines` 接收。
 
 ## 关键不变式与陷阱
@@ -41,8 +45,11 @@ TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同
 4. **`visibleSeqsOffset`**：过滤列表从头部被缓冲裁剪时只 bump offset（O(1)），
    超过 `COMPACT_THRESHOLD = 4096` 才 splice 压缩——append 摊还 O(1)。renderer 用
    offset 索引过滤列表，勿在 manager 外直接改 `filtered.seqs`。
-5. **增量过滤/搜索**：新行在 `appendLines` 内匹配一次并入列；过滤条件变化才整缓冲重扫
-   （`recomputeFilter`/`recomputeSearch`）。搜索只在 `searchOpen && query` 时维护。
+5. **增量过滤/搜索**：新行在 `appendLines` 内匹配一次并入列；条件变化才走
+   `recomputeFilter`/`recomputeSearch`。超过 `TERMINAL_REBUILD_SYNC_LIMIT` 的重建按
+   `TERMINAL_REBUILD_CHUNK_SIZE` 分块、可取消，扫描期间新行只增量匹配并在完成时合并；
+   clear/replace/新条件/销毁淘汰旧任务。搜索 membership Set 同步随chunk/append/trim维护，
+   不在滚动或每个RX帧重建。搜索只在 `searchOpen && query` 时维护。
 6. **同帧钉底**：`followEnabled = locked && !searchOpen`；钉底在 `render()` 内设置
    scrollTop（0 帧延迟）。手势期间 `gestureActive=true` 抑制钉底；settle 由 TerminalView
    在 120ms 静默后评估 atBottom → 写 store scrollLocked。
@@ -50,8 +57,9 @@ TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同
    `attachRenderer(container, config)`、卸载时 `detachRenderer()`（缓冲保留）；
    **只有**标签关闭 / TRX→TTY 模式切换调 `releaseViewportManager`（销毁缓冲）。
    弹窗是独立 webview → 独立模块作用域 → 独立注册表（与 RxPipeline 单例同款隔离）。
-8. **订阅**：`manager.subscribe(fn)` 在每次渲染 pass 后通知；React 壳（TerminalView）
-   用它刷新 FilterBar 计数/搜索读数——不要轮询 store。
+8. **订阅分流**：`manager.subscribe(fn)` 在每次渲染 pass 后供非 React 几何/手势采样；
+   React 壳（TerminalView）刷新 FilterBar 计数/搜索读数只用 `subscribeReadouts(fn)`，纯
+   scroll/resize/scheduled seek 不通知壳。过滤/搜索/索引重建通过 `isLoading` 提示状态。
 9. **测试环境**：TerminalRenderer 测试需 jsdom（文件头 `@vitest-environment jsdom`）；
    Buffer/Manager 是纯逻辑，node 环境即可。
 
@@ -79,5 +87,7 @@ TX 回显/工具输出/日志回放 → `appendTerminalLine(portId, line)`（同
 ## 编辑纪律
 
 - 大块结构变更用整文件 `write`（edit 工具的多行块匹配在本目录多次损坏文件）。
-- 改动后先跑 `npx vitest run src/utils/terminal/`（101 测试）再跑全量。
+- 改动后先跑 `npx vitest run src/utils/terminal/` 再跑全量；性能观测另显式设置
+  `HYPERCOM_TERMINAL_BENCH=1` 运行 `TerminalPerformance.test.ts`。jsdom 样本不是物理帧率，
+  CSS 高度映射仍须真实浏览器/WebView2 验证首/中/尾、字号与缩放极值。
 - 行为变化必须补测试：seq 稳定性、池复用、offset 压缩、frozen null、裁剪通知。

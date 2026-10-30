@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useRef, useSyncExternalStore } from 'react';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { useOperationStore } from '../../stores/useOperationStore';
@@ -6,8 +6,8 @@ import { clearTerminal } from '../../utils/terminal/viewportManager';
 import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
-import { open } from '@tauri-apps/plugin-dialog';
-import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Square, Type } from 'lucide-react';
+import ReplayImportDialog from './ReplayImportDialog';
+import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Type } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
 import ParamsSection from './ParamsSection';
@@ -39,8 +39,7 @@ const OperationPanel: React.FC = () => {
 
   const { sendData, historyUp, historyDown } = useSerialSend();
   const { toggleConnection } = useSerialConnection();
-  const { isReplaying, startReplay, stopReplay } = useLogReplay(rawPortId ?? '');
-  const [replaySpeed, setReplaySpeed] = useState(4);
+  const replay = useLogReplay();
 
   // 拆成两个原语选择器（zustand Object.is 比较）——`ports.find(...)` 每次返回
   // 新对象引用，会随 3s 端口轮询/状态更新无条件重渲染整个面板。状态位足够
@@ -184,21 +183,14 @@ const OperationPanel: React.FC = () => {
     catch (e) { console.error('Failed to open log dir:', e); notifyError(e); }
   };
 
-  const handleStartReplay = async () => {
-    if (!rawPortId) return;
-    const path = await open({ multiple: false, filters: [{ name: 'Log', extensions: ['log', 'txt'] }] });
-    if (!path || typeof path !== 'string') return;
-    const state = useAppStore.getState();
-    const tab = state.tabs.find((item) => item.id === state.activeTabId);
-    if (tab?.kind !== 'serial' || tab.portId !== rawPortId || !isRawSerialDisplay(tab)) return;
-    await startReplay(path, replaySpeed);
-  };
+  const handleStartReplay = async () => { try { await replay.startImport(); } catch (error) { notifyError(error); } };
 
   return (
     <div
       className={`operation-panel${collapsed ? ' collapsed' : ''}`}
       style={!collapsed ? { height: panelHeight } : undefined}
     >
+      {replay.picked && <ReplayImportDialog picked={replay.picked} busy={replay.isImporting} onConfirm={replay.confirmImport} onCancel={replay.cancelImport} />}
       <div
         className="operation-panel-header"
         title={t('operationPanel.collapse')}
@@ -228,26 +220,7 @@ const OperationPanel: React.FC = () => {
                 <Eraser size={14} />
               </button>
               <span className="toolbar-sep" />
-              <select
-                className="select op-replay-speed"
-                value={replaySpeed}
-                onChange={e => setReplaySpeed(Number(e.target.value))}
-                title={t('terminal.replay.speedTooltip')}
-                disabled={isReplaying || !rawPortId}
-              >
-                <option value={1}>1×</option>
-                <option value={4}>4×</option>
-                <option value={16}>16×</option>
-                <option value={0}>{t('terminal.replay.speedMax')}</option>
-              </select>
-              <button
-                className={`btn btn-icon btn-sm${isReplaying ? ' active' : ''}`}
-                onClick={isReplaying ? stopReplay : handleStartReplay}
-                disabled={!rawPortId}
-                title={isReplaying ? t('terminal.replay.stop') : t('terminal.replay.start')}
-              >
-                {isReplaying ? <Square size={14} /> : <History size={14} />}
-              </button>
+              <button className="btn btn-icon btn-sm" onClick={handleStartReplay} disabled={replay.isPicking || replay.isImporting} title={t('replay.import')}><History size={14} /></button>
               <span className="toolbar-sep" />
               <button className="btn btn-icon btn-sm" title={t('paramsSection.log.saveAs')} disabled={!rawPortId} onClick={handleSaveLogAs}><Save size={14} /></button>
               <button className="btn btn-icon btn-sm" title={t('paramsSection.log.openFile')} disabled={!isPortActive} onClick={handleOpenLogFile}><FileSearch size={14} /></button>

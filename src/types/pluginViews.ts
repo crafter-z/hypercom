@@ -63,7 +63,7 @@ export interface PluginViewRect extends PluginViewportRect {
  *  the trusted-web ready watchdog). */
 export interface PluginNativeMessage {
   instanceId: string;
-  type: 'ready' | 'ack' | 'message' | 'focus' | 'error' | 'document' | 'navigation-complete' | 'binary' | 'binary-ack';
+  type: 'ready' | 'ack' | 'message' | 'focus' | 'error' | 'document' | 'navigation-complete' | 'binary' | 'binary-ack' | 'timeline';
   documentId?: string;
   revision?: number;
   messageType?: string;
@@ -81,12 +81,16 @@ export interface PluginNativeMessage {
 /** Host -> native view message. Binary chunks never pass through the bounded
  *  realtime state JSON; each envelope carries at most 8 KiB of raw bytes. */
 export interface PluginViewHostMessage {
-  type: 'init' | 'state' | 'environment' | 'binary-chunk' | 'binary-ack';
+  type: 'init' | 'state' | 'environment' | 'binary-chunk' | 'binary-ack' | 'timeline-seek' | 'timeline-cancel';
   documentId: string;
   context?: PluginViewBinding;
   environment?: PluginViewEnvironment;
   revision?: number;
   snapshot?: unknown;
+  /** Independent, bounded timeline control, never a model snapshot. */
+  timeline?: PluginTimelineSeek;
+  capabilityGeneration?: string;
+  requestId?: string;
   transferId?: string;
   transferType?: string;
   seq?: number;
@@ -94,6 +98,34 @@ export interface PluginViewHostMessage {
   data?: string;
   ok?: boolean;
   error?: string;
+}
+
+export type PluginTimelineStatus = 'exact' | 'nearest' | 'before-range' | 'after-range' | 'no-time' | 'filtered' | 'held' | 'loading' | 'unsupported';
+export interface PluginTimelineAnchor { timeMs: number; recordKey?: string }
+export interface PluginTimelineResult { status: PluginTimelineStatus; actualTimeMs?: number; recordKey?: string }
+export interface PluginTimelineRegistration {
+  version: 1;
+  clock: { kind: 'bound-input' } | { kind: 'custom'; id: string };
+  capabilities: { preview: 'bounded' | 'commit-only'; canDrive: boolean };
+}
+export interface PluginTimelineAvailability {
+  available: boolean;
+  range?: { startMs: number; endMs: number };
+}
+/** All identities here are assigned by the host, not supplied on register. */
+export interface PluginTimelineSeek {
+  requestId: string;
+  capabilityGeneration: string;
+  groupId: string;
+  navigationEpoch: number;
+  gestureId: string;
+  requestSeq: number;
+  mappingRevision: number;
+  participantGeneration: number;
+  sourceGeneration: number;
+  timeMs: number;
+  phase: 'preview' | 'commit';
+  align: 'center';
 }
 
 /** Raw bytes used by the bidirectional binary channel (256 MiB per transfer). */

@@ -11,7 +11,14 @@ export interface TextFileDialogOptions {
   filters?: Array<{ name: string; extensions: string[] }>;
 }
 
+export interface ReplaySourceDescriptor { sourceId: string; name: string; path: string; size: number; fingerprint: string }
+export interface ReplayPickedSources { grantId: string; sources: ReplaySourceDescriptor[] }
+export interface ReplaySourceChunk { base64: string; nextOffset: number; done: boolean }
+
 export const fileService = {
+  pickReplaySources: (): Promise<ReplayPickedSources | null> => invoke('pick_replay_sources'),
+  readReplaySourceChunk: (grantId: string, sourceId: string, offset: number): Promise<ReplaySourceChunk> => invoke('read_replay_source_chunk', { grantId, sourceId, offset }),
+  releaseReplaySources: (grantId: string): Promise<void> => invoke('release_replay_sources', { grantId }),
   /** 宿主原生 save 对话框 + 写入；前端不提供路径。取消返回 null。 */
   pickTextFileAndWrite: (content: string, options: TextFileDialogOptions): Promise<string | null> => {
     return invoke<string | null>('pick_text_file_and_write', { content, options });

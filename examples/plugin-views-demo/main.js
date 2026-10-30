@@ -7,15 +7,15 @@ function checksum(text) {
   for (let i = 0; i < text.length; i++) sum ^= text.charCodeAt(i);
   return sum;
 }
-function parseLine(line) {
+function parseLine(line, ts) {
   const checked = line.match(/^S,([^,]+),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)\*([0-9a-f]{2})$/i);
   if (checked && checksum(line.slice(0, line.lastIndexOf('*'))) === Number.parseInt(checked[4], 16)) {
-    return { device: checked[1], temperature: Number(checked[2]), voltage: Number(checked[3]), at: Date.now() };
+    return { device: checked[1], temperature: Number(checked[2]), voltage: Number(checked[3]), at: Number.isFinite(ts) ? ts : null };
   }
   const heartbeat = line.match(/^\[SIM\] Heartbeat #(\d+)$/);
   if (heartbeat) {
     const sequence = Number(heartbeat[1]);
-    return { device: 'SIM', temperature: 25 + Math.sin(sequence / 10) * 8, voltage: 3.3 + Math.cos(sequence / 8) * 0.1, at: Date.now() };
+    return { device: 'SIM', temperature: 25 + Math.sin(sequence / 10) * 8, voltage: 3.3 + Math.cos(sequence / 8) * 0.1, at: Number.isFinite(ts) ? ts : null };
   }
   return null;
 }
@@ -37,7 +37,7 @@ self.plugin.views.onOpen(async view => {
     });
     return;
   }
-  const session = { view, decoder: new TextDecoder('utf-8'), pending: '', rows: [], gaps: 0, rejected: 0, status: 'connected' };
+  const session = { view, decoder: new TextDecoder('utf-8'), pending: '', nextRecord: 0, rows: [], gaps: 0, rejected: 0, status: 'connected' };
   sessions.set(view.context.viewInstanceId, session);
   view.onDiscontinuity(() => { session.decoder = new TextDecoder('utf-8'); session.pending = ''; session.gaps++; });
   view.onStatus(async status => { session.status = status.status; await view.publish(snapshot(session)); });
@@ -52,8 +52,11 @@ self.plugin.views.onOpen(async view => {
       const lines = session.pending.split(/\r?\n/);
       session.pending = lines.pop();
       for (const line of lines) {
-        const row = parseLine(line);
+        // A completed frame inherits the timestamp of its finishing input block,
+        // matching host line assembly; never restamp delayed parsing with now().
+        const row = parseLine(line, chunk.ts);
         if (!row) { if (line) session.rejected++; continue; }
+        row.id = String(++session.nextRecord);
         session.rows.push(row);
         if (session.rows.length > MAX_ROWS) session.rows.shift();
       }

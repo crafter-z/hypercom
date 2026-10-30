@@ -918,6 +918,130 @@ test.describe('HyperCom smoke tests', () => {
     expect(after.midSeq! - before.midSeq!).toBeGreaterThan(0);
     expect(after.midSeq! - before.midSeq!).toBeLessThan(16000);
   });
+  test('time groups: three TRX views defer drag followers and commit once without focus stealing', async ({ page }) => {
+    await page.evaluate(async () => {
+      const { useAppStore } = await import('/src/stores/useAppStore.ts');
+      const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
+      const state = useAppStore.getState();
+      state.setPorts(['COM1', 'COM2', 'COM3'].map(id => ({ ...state.ports[0], id, name: id, status: 'disconnected', mode: 'trx' })));
+      for (const id of ['COM1', 'COM2', 'COM3']) state.openTab(id);
+      state.splitPane('vertical');
+      state.splitPane('horizontal');
+      const tabs = useAppStore.getState().tabs.filter(tab => tab.kind === 'serial');
+      const leaves = (await import('/src/utils/paneTree.ts')).collectLeaves(useAppStore.getState().paneTree);
+      tabs.forEach((tab, i) => state.moveTabToPane(tab.id, leaves[i].id));
+      for (const id of ['COM1', 'COM2', 'COM3']) {
+        const vm = getViewportManager(id);
+        vm.replaceAll(Array.from({ length: 3000 }, (_, i) => ({ timestamp: 1700000000000 + i, direction: 'RX', content: `${id} record ${i}`, isHex: false })));
+      }
+    });
+    await expect(page.locator('.terminal-view:visible')).toHaveCount(3);
+    const groupId = await page.evaluate(async () => {
+      const { useAppStore } = await import('/src/stores/useAppStore.ts');
+      const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+      const slots = useAppStore.getState().tabs.filter(tab => tab.kind === 'serial').map(tab => tab.id);
+      return timelineCoordinator.createGroup({ name: '三成员校时', memberSlots: slots, dragSyncPolicy: 'on-release', anchor: { timeMs: 1700000001500 } });
+    });
+    await expect(page.locator('.timeline-workspace-bar')).toBeVisible();
+    await expect(page.locator('.tab-item .timeline-badge')).toHaveCount(3);
+    const followersBefore = await page.locator('.terminal-view:visible').evaluateAll(views => views.slice(1).map(view => view.scrollTop));
+    const tokenData = await page.evaluate(async () => {
+      const { useAppStore } = await import('/src/stores/useAppStore.ts');
+      const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+      const slots = useAppStore.getState().tabs.filter(tab => tab.kind === 'serial').map(tab => tab.id);
+      const participant = timelineCoordinator.participantForSlot(slots[0]);
+      const token = timelineCoordinator.beginNavigation(participant.participantId);
+      timelineCoordinator.updateNavigation(token, { timeMs: 1700000002500 });
+      useAppStore.getState().setActiveTab(slots[1]); // focus is not a navigation intent
+      return { token, owner: participant.participantId };
+    });
+    await page.waitForTimeout(180);
+    expect(await page.locator('.terminal-view:visible').evaluateAll(views => views.slice(1).map(view => view.scrollTop))).toEqual(followersBefore);
+    expect(await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).ownerParticipantId, groupId)).toBe(tokenData.owner);
+    await page.evaluate(async ({ token }) => {
+      const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+      timelineCoordinator.endNavigation(token, { timeMs: 1700000002500 });
+      timelineCoordinator.endNavigation(token, { timeMs: 1700000000100 }); // obsolete release cannot overwrite final target
+    }, tokenData);
+    await expect.poll(() => page.evaluate(async id => {
+      const group = (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id);
+      return group.members.map(member => ({ state: member.state, status: member.status, actualTimeMs: member.actualTimeMs, reason: member.reason }));
+    }, groupId)).toEqual(Array.from({length:3}, () => ({ state: 'active', status: 'exact', actualTimeMs: 1700000002500, reason: undefined })));
+    await expect.poll(() => page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).committedAnchor.timeMs, groupId)).toBe(1700000002500);
+    // Exercise the actual DOM gesture lane, not only coordinator calls.
+    const beforeWheelEpoch = await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).navigationEpoch, groupId);
+    await page.locator('.terminal-view:visible').first().hover();
+    await page.mouse.wheel(0, -600);
+    await expect.poll(() => page.evaluate(async ({ id, previousEpoch }) => {
+      const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+      const group = timelineCoordinator.getSnapshot().groups.find(group => group.id === id);
+      return group.ownerParticipantId === null && group.navigationEpoch > previousEpoch
+        && group.committedAnchor.timeMs === timelineCoordinator.readSlotAnchor(group.memberSlots[0])?.timeMs;
+    }, { id: groupId, previousEpoch: beforeWheelEpoch })).toBe(true);
+    const epoch = await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).navigationEpoch, groupId);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -100);
+    await page.keyboard.up('Control');
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(async id => (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(group => group.id === id).navigationEpoch, groupId)).toBe(epoch);
+    // Leaving while an End-key gesture is still settling must not re-enable Pin.
+    await page.locator('.terminal-view:visible').first().focus();
+    await page.keyboard.press('End');
+    await page.evaluate(async id => {
+      const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+      const group = timelineCoordinator.getSnapshot().groups.find(group => group.id === id);
+      timelineCoordinator.removeMember(group.memberSlots[0]);
+    }, groupId);
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(async () => (await import('/src/stores/useTerminalStore.ts')).useTerminalStore.getState().terminals.COM1.scrollLocked)).toBe(false);
+    const heldTop = await page.locator('.terminal-view:visible').first().evaluate(view => view.scrollTop);
+    await page.evaluate(async () => {
+      const vm = (await import('/src/utils/terminal/viewportManager.ts')).getViewportManager('COM1');
+      vm.appendLines(Array.from({ length: 100 }, (_, i) => ({ timestamp: 1700000004000 + i, direction: 'RX', content: `after-leave ${i}`, isHex: false })));
+    });
+    await page.waitForTimeout(100);
+    expect(await page.locator('.terminal-view:visible').first().evaluate(view => view.scrollTop)).toBe(heldTop);
+  });
+
+  test('million-row geometry remains monotone and reaches tail at font and zoom extremes', async ({ page }) => {
+    test.setTimeout(60000);
+    const samples = await page.evaluate(async () => {
+      const { TerminalBuffer } = await import('/src/utils/terminal/TerminalBuffer.ts');
+      const { TerminalRenderer } = await import('/src/utils/terminal/TerminalRenderer.ts');
+      const buffer = new TerminalBuffer({ maxLines: 1_000_000 });
+      const line = { timestamp: 1700000000000, direction: 'RX', content: 'geometry record', isHex: false };
+      for (let i = 0; i < 1_000_000; i++) buffer.append(line);
+      const results = [];
+      for (const rowHeight of [12, 72]) for (const zoom of [.8, 2]) {
+        const container = document.createElement('div');
+        container.className = 'terminal-view';
+        Object.assign(container.style, { position: 'fixed', left: '0', top: '0', width: '600px', height: '360px', overflow: 'auto', zoom: String(zoom), zIndex: '9999' });
+        document.body.appendChild(container);
+        const renderer = new TerminalRenderer({ rowHeight, showTimestamp: false, displayFormat: 'string', encoding: 'UTF-8', timestampFormat: 'absolute', timestampMode: 'perLine', highlightRuleSets: [], connectedAt: null });
+        renderer.attachToContainer(container);
+        const view = { visibleSeqs: null, visibleSeqsOffset: 0, frozenSeq: null, matchSet: null, currentMatchSeq: -1, searchQuery: '', searchCaseSensitive: false, selectedRange: null, locked: false, gestureActive: true, followEnabled: false };
+        renderer.render(buffer, view);
+        const max = container.scrollHeight - container.clientHeight;
+        const positions = [];
+        for (const fraction of [0, .25, .5, .75, 1]) {
+          container.scrollTop = max * fraction;
+          renderer.render(buffer, view);
+          const rows = [...container.querySelectorAll('.terminal-line')].filter(row => row.style.display !== 'none');
+          positions.push({ first: Number(rows[0]?.dataset.seq), last: Number(rows[rows.length - 1]?.dataset.seq), top: container.scrollTop, height: container.scrollHeight, count: rows.length });
+        }
+        results.push({ rowHeight, zoom, positions, firstSeq: buffer.firstSeq, lastSeq: buffer.lastSeq });
+        renderer.detach(); container.remove();
+      }
+      return results;
+    });
+    for (const sample of samples) {
+      expect(sample.positions[0].first, JSON.stringify(sample)).toBe(sample.firstSeq);
+      expect(sample.positions.at(-1).last, JSON.stringify(sample)).toBe(sample.lastSeq);
+      for (let i = 1; i < sample.positions.length; i++) expect(sample.positions[i].first).toBeGreaterThan(sample.positions[i - 1].first);
+      for (const position of sample.positions) { expect(position.count).toBeGreaterThan(0); expect(position.count).toBeLessThan(100); }
+    }
+  });
+
   test('default line ending settings use backend domain values', async ({ page }) => {
     await page.locator('.titlebar-right button[title="设置"]').click();
     await page.locator('.modal-nav-item', { hasText: '显示与交互' }).click();

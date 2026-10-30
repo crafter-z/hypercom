@@ -22,7 +22,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## 标签页
 
-- `TabItem = SerialTabItem | PluginTabItem`：公共 `id` 是工作区 UUID，`paneTree`、`activeTabId`、拖拽、固定和关闭动作都引用这个 UUID，不再把端口号当作标签身份。串口标签为 `{ kind: 'serial', portId, ... }`；插件标签为 `{ kind: 'plugin', pluginId, installGeneration, viewId, boundPortId, instanceKey, restoreOnStartup, ... }`，其中 `boundPortId` 可为 `null`。
+- `TabItem = SerialTabItem | PluginTabItem | ReplayTabItem`：回放标签持有 sessionId/trackId，不绑定发送端口；`getTabPortId` 对它返回 null，不回退到最近串口。三种 kind 的消费者必须显式判别，不能把非 serial 一律当 plugin。公共 `id` 是工作区 UUID，`paneTree`、`activeTabId`、拖拽、固定和关闭动作都引用这个 UUID，不再把端口号当作标签身份。串口标签为 `{ kind: 'serial', portId, ... }`；插件标签为 `{ kind: 'plugin', pluginId, installGeneration, viewId, boundPortId, instanceKey, restoreOnStartup, ... }`，其中 `boundPortId` 可为 `null`。
 - `openTab(portId)` 只查找或创建该端口的串口标签，并返回工作区 UUID；额外插件标签不占用这个串口标签身份。串口连接、收发管线、TTY、流量和发送历史仍按 `portId` 索引。显式目标用目标端口；活动目标由 `getActivePortId` / `getTabPortId` 解析，无端口工具页返回 `null`，绝不回退到上一次活动串口。
 - TabBar 右键菜单的「打开/断开所有标签页」解析全局标签的端口并去重，跳过无端口工具页，顺序执行并按 100ms 节流；外部工具入口与侧边栏共用 `usePortToolActions`。
 - **关闭标签页 ≠ 关闭串口**：关闭一个插件标签只退休该视图实例与输入订阅，不关闭原始串口标签、同端口其他插件标签或物理连接；关闭原始串口标签也不终止仍在消费该端口的插件视图。后端日志独立于标签继续运行。批量关闭用 `getClosingTabIds(tabId, scope)` 取得与 store 动作一致的集合。
@@ -41,6 +41,12 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - 当前只有 **Windows 原生适配器**实现隔离视图；其他平台在原生创建入口明确拒绝，不使用 iframe 或主窗口 HTML 降级。跨平台隔离策略验收仍是开放对应平台的发布门禁，不代表已完成全平台或完整安全验收。
 
 用户操作见[插件使用：入口与串口关系](../userwiki/插件.md#插件入口和串口关系)，作者 API 见[插件开发指南](../plugin-development.md)，可运行示例见[Sensor Workspace](../../examples/plugin-views-demo/README.md)。
+
+## 时间联动与回放标签
+
+`TimelineWorkspace` 在分屏上方显示当前组控制条，TRX/插件工具栏与标签右键共用链条入口。标签显示链条与 G 编号，焦点切换只选择控制条，不取得时间导航驾驶权。组与偏移热状态在 `timelineCoordinator`，不复制到 store。`SerialContentHost` 也按稳定标签 UUID 持有 `ReplayView`，回放注入只读来源与本地显示配置，跨 Pane 不复制历史。
+
+关闭标签先退出组，回放最后一个标签关闭时释放该会话文档/时钟；实时连接和后端日志不受影响。TTY/弹出内容/未适配插件挂起原有成员；切 raw/plugin 只绑定当前有效内容，隐藏 raw 不能暗中跟随。恢复保存组/回放描述，默认浏览/暂停；重新授权和校验历史文件后才载入。完整契约见[时间联动与只读回放](timeline.md)。
 
 ## 弹出体系（popout，issue #10）
 

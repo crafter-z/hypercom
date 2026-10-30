@@ -115,7 +115,7 @@ import type {
   TerminalLine,
   TimestampFormat,
 } from '../../types';
-import { TerminalBuffer } from './TerminalBuffer';
+import { countVisibleSeqs, mapScrollTop, physicalRowCount, sourceTimeMs, type TerminalSource, type TerminalGeometryAnchor } from './TerminalSource';
 import { bytesToSpacedHex } from '../hexFormat';
 import { getLineText } from '../lineText';
 import { applyHighlightSets, escapeHtml } from '../highlightEngine';
@@ -224,6 +224,8 @@ export class TerminalRenderer {
   private renderedSearchQuery = '';
   private renderedSearchCaseSensitive = false;
   private renderedCurrentMatchSeq = -1;
+  /** Exact logical seek retained until the physical scrollbar actually moves. */
+  private logicalSeek: { physical: number; logical: number } | null = null;
 
   /** Set by the manager: (re)schedule a rAF render (coalesces scroll/resize). */
   onRenderNeeded: (() => void) | null = null;
@@ -293,6 +295,7 @@ export class TerminalRenderer {
     this.pool = [];
     this.lastRenderedFirstSeq = -1;
     this.anchorSeq = null;
+    this.logicalSeek = null;
     this.clearPins();
     const layer = this.contentLayer;
     if (layer && this.headSpacer && this.tailSpacer) {
@@ -396,7 +399,7 @@ export class TerminalRenderer {
     document.addEventListener('selectionchange', this.selectionWatcher);
   }
 
-  private hasLiveSelection(): boolean {
+  hasLiveSelection(): boolean {
     const sel = window.getSelection?.();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
     const layer = this.contentLayer;
@@ -460,7 +463,7 @@ export class TerminalRenderer {
    * Render the visible window. Called by the manager on data/config/filter/
    * search changes (rAF-scheduled) and on scroll/resize (direct, coalesced).
    */
-  render(buffer: TerminalBuffer, view: TerminalViewState): void {
+  render(buffer: TerminalSource, view: TerminalViewState): void {
     const layer = this.contentLayer;
     const container = this.container;
     const headSpacer = this.headSpacer;
@@ -500,7 +503,14 @@ export class TerminalRenderer {
       view.searchQuery !== this.renderedSearchQuery ||
       view.searchCaseSensitive !== this.renderedSearchCaseSensitive;
     const currentMatchChanged = view.currentMatchSeq !== this.renderedCurrentMatchSeq;
-    const totalHeight = baseCount * rowHeight;
+    // Bound CSS heights independently of record count/font size. Only spacers
+    // are compressed; rows stay normal fixed-height flow children (R1/R14).
+    const physicalCount = physicalRowCount(baseCount, rowHeight);
+    const totalHeight = physicalCount * rowHeight;
+    const toPhysical = (top: number) => mapScrollTop(top, baseCount, physicalCount, rowHeight, container.clientHeight);
+    const toLogical = (top: number) => this.logicalSeek?.physical === top
+      ? this.logicalSeek.logical
+      : mapScrollTop(top, physicalCount, baseCount, rowHeight, container.clientHeight);
 
 
     // Follow pin: when follow is engaged and no gesture is active, the
@@ -537,14 +547,15 @@ export class TerminalRenderer {
       // 不能用 identity 算式 (anchor - firstSeq)，须通过 seqToVisIdx 映射。
       if (anchor !== null && anchor >= firstSeq) {
         const visIdx = this.seqToVisIdx(anchor, view, buffer, frozen);
-        container.scrollTop = visIdx !== null ? visIdx * rowHeight : 0;
+        const logical = visIdx !== null ? visIdx * rowHeight : 0;
+        container.scrollTop = toPhysical(logical);
+        this.logicalSeek = { physical: container.scrollTop, logical };
       } else {
         container.scrollTop = 0;
       }
     }
-    const scrollTop = follow
-      ? Math.max(0, totalHeight - container.clientHeight)
-      : container.scrollTop;
+    const physicalTop = follow ? Math.max(0, totalHeight - container.clientHeight) : container.scrollTop;
+    const scrollTop = follow ? Math.max(0, baseCount * rowHeight - container.clientHeight) : toLogical(physicalTop);
 
     // A shrinking visible list (filter/search) can leave scrollTop beyond the
     // new content height. Clamp the window start as well as the end: otherwise
@@ -552,7 +563,8 @@ export class TerminalRenderer {
     // spacer keeps a huge empty scroll range (blank terminal until scrolled).
     const maxVisIdx = Math.max(0, baseCount - 1);
     const clampedScrollTop = Math.min(scrollTop, maxVisIdx * rowHeight);
-    const firstVisIdx = Math.min(maxVisIdx, Math.max(0, Math.floor(clampedScrollTop / rowHeight) - OVERSCAN_ROWS));
+    const headOverscan = physicalCount === baseCount ? OVERSCAN_ROWS : Math.min(OVERSCAN_ROWS, Math.floor(physicalTop / rowHeight));
+    const firstVisIdx = Math.min(maxVisIdx, Math.max(0, Math.floor(clampedScrollTop / rowHeight) - headOverscan));
     const lastVisIdx = Math.min(
       maxVisIdx,
       Math.max(firstVisIdx, Math.ceil((clampedScrollTop + container.clientHeight) / rowHeight) + OVERSCAN_ROWS),
@@ -560,8 +572,11 @@ export class TerminalRenderer {
 
     // 2. Spacers carry the off-screen space; hidden parked rows contribute
     //    zero flow height, so the spacers alone define the geometry.
-    headSpacer.style.height = `${firstVisIdx * rowHeight}px`;
-    tailSpacer.style.height = `${Math.max(0, (baseCount - 1 - lastVisIdx) * rowHeight)}px`;
+    const compressedHead = physicalCount === baseCount
+      ? firstVisIdx * rowHeight
+      : Math.max(0, Math.floor((physicalTop - (clampedScrollTop - firstVisIdx * rowHeight)) / rowHeight) * rowHeight);
+    headSpacer.style.height = `${compressedHead}px`;
+    tailSpacer.style.height = `${Math.max(0, totalHeight - compressedHead - (lastVisIdx - firstVisIdx + 1) * rowHeight)}px`;
 
     // 3. Stale pass (window bounds are now final): rows outside the window
     //    or behind the filter version recycle — unless pinned, in which case
@@ -639,7 +654,7 @@ export class TerminalRenderer {
     // needed). headAdvance is measured against this on the next render.
     if (!follow) {
       const topVisIdx = Math.min(
-        Math.floor(container.scrollTop / rowHeight),
+        Math.floor(toLogical(container.scrollTop) / rowHeight),
         Math.max(0, baseCount - 1),
       );
       this.anchorSeq = this.visIdxToSeq(topVisIdx, view, buffer, frozen);
@@ -656,7 +671,7 @@ export class TerminalRenderer {
   private findFlowAnchor(
     visIdx: number,
     view: TerminalViewState,
-    buffer: TerminalBuffer,
+    buffer: TerminalSource,
     frozen: number,
   ): HTMLDivElement | null {
     const layer = this.contentLayer;
@@ -683,25 +698,55 @@ export class TerminalRenderer {
   scrollToSeq(
     seq: number,
     align: 'start' | 'center' | 'end',
-    buffer: TerminalBuffer,
+    buffer: TerminalSource,
     view: TerminalViewState,
   ): void {
+    if (this.positionToSeq(seq, align, buffer, view)) this.render(buffer, view);
+  }
+
+  /** Position only: manager combines this with exactly one scheduled render. */
+  positionToSeq(seq: number, align: 'start' | 'center' | 'end', buffer: TerminalSource, view: TerminalViewState): boolean {
     const container = this.container;
     const rowHeight = this.config.rowHeight;
-    if (!container || !buffer.getBySeq(seq)) return;
-    const visIdx = this.seqToVisIdx(seq, view, buffer, view.frozenSeq ?? null);
-    if (visIdx === null) return;
-    const targetTop = visIdx * rowHeight;
-    const clientHeight = container.clientHeight;
-    let scrollTop = targetTop;
-    if (align === 'center') scrollTop = targetTop - (clientHeight - rowHeight) / 2;
-    else if (align === 'end') scrollTop = targetTop - clientHeight + rowHeight;
-    container.scrollTop = Math.max(0, scrollTop);
-    // Materialize the rows at the target immediately. The render below must
-    // not override the requested position with the stale reading anchor
-    // (next-match / quick-jump after a head trim).
+    if (!container || container.clientHeight <= 0 || !buffer.getBySeq(seq)) return false;
+    const visIdx = this.seqToVisIdx(seq, view, buffer, view.frozenSeq);
+    if (visIdx === null) return false;
+    const count = countVisibleSeqs(buffer, view.visibleSeqs, view.visibleSeqsOffset, view.frozenSeq);
+    let logical = visIdx * rowHeight;
+    if (align === 'center') logical -= (container.clientHeight - rowHeight) / 2;
+    else if (align === 'end') logical -= container.clientHeight - rowHeight;
+    logical = Math.max(0, Math.min(logical, Math.max(0, count * rowHeight - container.clientHeight)));
+    const physical = mapScrollTop(logical, count, physicalRowCount(count, rowHeight), rowHeight, container.clientHeight);
+    container.scrollTop = physical;
+    this.logicalSeek = { physical: container.scrollTop, logical };
     this.suppressAnchorRestore = true;
-    this.render(buffer, view);
+    return true;
+  }
+
+  /** Center anchor, computed from fixed geometry, never from row DOM/snapshot. */
+  readGeometryAnchor(buffer: TerminalSource, view: TerminalViewState, align: 'start' | 'center' | 'end' = 'center'): TerminalGeometryAnchor | null {
+    const container = this.container;
+    if (!container || container.clientHeight <= 0) return null;
+    const count = countVisibleSeqs(buffer, view.visibleSeqs, view.visibleSeqsOffset, view.frozenSeq);
+    if (!count) return null;
+    const height = this.config.rowHeight;
+    const logical = this.logicalSeek?.physical === container.scrollTop ? this.logicalSeek.logical
+      : mapScrollTop(container.scrollTop, physicalRowCount(count, height), count, height, container.clientHeight);
+    const point = Math.max(0, logical + (align === 'center' ? container.clientHeight / 2 : align === 'end' ? container.clientHeight - 1 : 0));
+    const visibleIndex = Math.max(0, Math.min(count - 1, Math.floor(point / height)));
+    const seq = this.visIdxToSeq(visibleIndex, view, buffer, view.frozenSeq);
+    return seq === null ? null : { seq, visibleIndex, offsetPx: point - visibleIndex * height };
+  }
+
+  get attached(): boolean { return this.container !== null; }
+
+  get geometryAvailable(): boolean { return this.container !== null && this.container.clientHeight > 0; }
+
+  get hasSelection(): boolean { return this.hasLiveSelection(); }
+
+  /** Whether a seq belongs to the effective (filter + pause) view. */
+  isSeqVisible(seq: number, buffer: TerminalSource, view: TerminalViewState): boolean {
+    return this.seqToVisIdx(seq, view, buffer, view.frozenSeq) !== null;
   }
 
   // ==================== Geometry accessors (gesture settle) ====================
@@ -733,18 +778,10 @@ export class TerminalRenderer {
   /** Number of rows to render: filtered survivor count or identity count. */
   private computeVisibleCount(
     view: TerminalViewState,
-    buffer: TerminalBuffer,
+    buffer: TerminalSource,
     frozen: number,
   ): number {
-    if (view.visibleSeqs !== null) {
-      let n = 0;
-      for (let i = view.visibleSeqsOffset; i < view.visibleSeqs.length; i++) {
-        if (view.visibleSeqs[i] > frozen) break; // list is ascending
-        n++;
-      }
-      return n;
-    }
-    return Math.max(0, frozen - buffer.firstSeq + 1);
+    return countVisibleSeqs(buffer, view.visibleSeqs, view.visibleSeqsOffset, view.frozenSeq === null ? null : frozen);
   }
 
   /** Filtered/identity list position of a seq, or null if hidden.
@@ -756,7 +793,7 @@ export class TerminalRenderer {
   private seqToVisIdx(
     seq: number,
     view: TerminalViewState,
-    buffer: TerminalBuffer,
+    buffer: TerminalSource,
     frozen: number | null,
   ): number | null {
     const fz = frozen ?? Number.MAX_SAFE_INTEGER;
@@ -778,7 +815,7 @@ export class TerminalRenderer {
   private visIdxToSeq(
     visIdx: number,
     view: TerminalViewState,
-    buffer: TerminalBuffer,
+    buffer: TerminalSource,
     frozen: number | null,
   ): number | null {
     const fz = frozen ?? Number.MAX_SAFE_INTEGER;
@@ -824,7 +861,7 @@ export class TerminalRenderer {
     node: HTMLDivElement,
     line: TerminalLine,
     seq: number,
-    buffer: TerminalBuffer,
+    buffer: TerminalSource,
     view: TerminalViewState,
   ): void {
     const c = this.config;
@@ -857,7 +894,7 @@ export class TerminalRenderer {
         ? `<span class="terminal-timestamp${muted ? ' terminal-timestamp-muted' : ''}">${
             muted
               ? '-'
-              : escapeHtml(
+              : sourceTimeMs(buffer, seq) === null ? '—' : escapeHtml(
                   formatTerminalTimestampAdj(line, prevLine ?? undefined, c.connectedAt, c.timestampFormat),
                 )
           }</span>`

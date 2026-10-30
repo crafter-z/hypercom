@@ -18,7 +18,7 @@ import ThemeProvider from './components/shared/ThemeProvider';
 import { useAppInit, useSerialReceive, useToolOutput, usePopoutBridge, useAutoUpdate, useHotkeys, usePowerManagement, usePluginHost } from './hooks';
 import { useAppStore } from './stores/useAppStore';
 import { useSystemStore } from './stores/useSystemStore';
-import { saveSessionSnapshot } from './utils/sessionSnapshot';
+import { saveSessionSnapshot, subscribeSessionDescriptors } from './utils/sessionSnapshot';
 import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
 import { computeBufferLimits, getManagerPortIds, getViewportManager } from './utils/terminal/viewportManager';
 import { applyUiScale } from './utils/uiScale';
@@ -107,16 +107,22 @@ const App: React.FC = () => {
   // persistence path — beforeunload below is only a best-effort final flush.
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const unsubscribe = useAppStore.subscribe((state, prevState) => {
-      if (state.tabs === prevState.tabs && state.paneTree === prevState.paneTree) return;
+    const scheduleSave = () => {
       if (timeoutId !== null) clearTimeout(timeoutId);
       timeoutId = setTimeout(() => {
         timeoutId = null;
         saveSessionSnapshot();
-      }, 1000);
+      }, 500);
+    };
+    const unsubscribe = useAppStore.subscribe((state, prevState) => {
+      if (state.tabs === prevState.tabs && state.paneTree === prevState.paneTree) return;
+      scheduleSave();
     });
+    // Descriptors only: preview, ACK, playback ticks and owner changes never save.
+    const unsubscribeDescriptors = subscribeSessionDescriptors(scheduleSave);
     return () => {
       unsubscribe();
+      unsubscribeDescriptors();
       if (timeoutId !== null) clearTimeout(timeoutId);
     };
   }, []);

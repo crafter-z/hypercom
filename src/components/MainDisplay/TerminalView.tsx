@@ -26,7 +26,8 @@ import { ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { getViewportManager } from '../../utils/terminal/viewportManager';
+import { getViewportManager, type TerminalViewportManager } from '../../utils/terminal/viewportManager';
+import type { TerminalState } from '../../types';
 import { TerminalRenderer, type RendererConfig } from '../../utils/terminal/TerminalRenderer';
 import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { isAtBottom } from '../../utils/followLogic';
@@ -40,16 +41,28 @@ import { useTerminalDisplay } from './useTerminalDisplay';
 import { useTerminalSearch } from './useTerminalSearch';
 import TerminalSearchBar from './TerminalSearchBar';
 import TerminalFilterBar from './TerminalFilterBar';
+import { createTrxTimelineAdapter, timelineCoordinator, type TimelineNavigationToken } from '../../utils/timeline';
+import { TerminalNavigationLifecycle } from '../../utils/terminalNavigation';
+import { TimelineButton, useTimelineMembership } from './TimelineControls';
 
-interface TerminalViewProps {
-  portId: string;
+export interface TerminalViewProps {
+  /** Only real serial sources provide a port; replay never fabricates one. */
+  portId?: string;
+  tabId?: string;
+  sourceId?: string;
+  manager?: TerminalViewportManager;
+  terminalConfig?: Partial<TerminalState>;
+  onTerminalConfigChange?: (patch: Partial<TerminalState>) => void;
+  timelineClockId?: string;
+  timelineEnabled?: boolean;
+  onUserNavigation?: () => void;
   /** true = inactive tab (display:none, buffer+renderer stay alive). */
   hidden?: boolean;
 }
 
 const SETTLE_MS = 120;
 
-const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
+const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, manager, terminalConfig, onTerminalConfigChange, timelineClockId, timelineEnabled = true, onUserNavigation, hidden }) => {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
@@ -58,11 +71,16 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
 
   // Display config from the stores (selector-grained — only these re-render
   // the shell; row content is rendered by the manager).
-  const scrollLocked = useTerminalStore((s) => s.terminals[portId]?.scrollLocked);
-  const showTimestamp = useTerminalStore((s) => s.terminals[portId]?.showTimestamp);
-  const displayFormat = useTerminalStore((s) => s.terminals[portId]?.displayFormat);
-  const encoding = useTerminalStore((s) => s.terminals[portId]?.encoding);
-  const connectedAt = useTerminalStore((s) => s.terminals[portId]?.connectedAt);
+  const liveConfig = useTerminalStore((s) => portId ? s.terminals[portId] : undefined);
+  const scrollLocked = terminalConfig?.scrollLocked ?? liveConfig?.scrollLocked ?? false;
+  const showTimestamp = terminalConfig?.showTimestamp ?? liveConfig?.showTimestamp ?? true;
+  const displayFormat = terminalConfig?.displayFormat ?? liveConfig?.displayFormat ?? 'string';
+  const encoding = terminalConfig?.encoding ?? liveConfig?.encoding ?? 'UTF-8';
+  const connectedAt = terminalConfig?.connectedAt ?? liveConfig?.connectedAt ?? null;
+  const updateTerminalConfig = useCallback((patch: Partial<TerminalState>) => {
+    if (onTerminalConfigChange) onTerminalConfigChange(patch);
+    else if (portId) useTerminalStore.getState().setTerminalConfig(portId, patch);
+  }, [portId, onTerminalConfigChange]);
   const timestampFormat = useAppStore((s) => s.config.timestampFormat);
   const timestampMode = useAppStore((s) => s.config.timestampMode);
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
@@ -71,7 +89,41 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
   const protocolTemplateId = useAppStore((s) => s.ports.find((p) => p.id === portId)?.protocolTemplateId);
 
   // Stable per-port manager (module registry — same instance across remounts).
-  const vm = getViewportManager(portId);
+  if (!manager && !portId) throw new Error('TerminalView requires a real port or an independent manager');
+  const vm = manager ?? getViewportManager(portId!);
+  const groupId = useTimelineMembership(tabId);
+  const groupIdRef = useRef(groupId);
+  groupIdRef.current = groupId;
+  const adapterRef = useRef<ReturnType<typeof createTrxTimelineAdapter> | null>(null);
+  const navigationRef = useRef<TerminalNavigationLifecycle<{ timeMs: number; recordKey?: string }> | null>(null);
+  const configRef = useRef({ scrollLocked, updateTerminalConfig, onUserNavigation });
+  configRef.current = { scrollLocked, updateTerminalConfig, onUserNavigation };
+
+  useEffect(() => {
+    if (!tabId || !timelineEnabled) return; // no popout/hidden replacement raw participant
+    const adapter = createTrxTimelineAdapter({ slotId: tabId, portId, sourceId, manager: vm,
+      sourceKind: portId ? 'live' : 'replay', clockId: timelineClockId,
+      visible: !hidden, onUserNavigation: () => configRef.current.onUserNavigation?.(),
+    });
+    adapterRef.current = adapter;
+    return () => { navigationRef.current?.cancel(); adapter.dispose(); adapterRef.current = null; };
+  }, [tabId, portId, sourceId, vm, timelineClockId, timelineEnabled]);
+
+  useEffect(() => {
+    adapterRef.current?.setAvailability({ available: true, visible: !hidden });
+    if (hidden) navigationRef.current?.release();
+  }, [hidden, vm, tabId]);
+
+  const previousGroup = useRef<string | null>(null);
+  useEffect(() => {
+    // Exiting a group holds the current viewport; independent Pin is opt-in again.
+    if (previousGroup.current && !groupId) {
+      navigationRef.current?.cancel();
+      vm.setLocked(false);
+      updateTerminalConfig({ scrollLocked: false });
+    }
+    previousGroup.current = groupId;
+  }, [groupId, vm, updateTerminalConfig]);
 
   const buildConfig = useCallback(
     (): RendererConfig => ({
@@ -101,7 +153,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
     vm.attachRenderer(el, buildConfig());
     return () => vm.detachRenderer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [portId]);
+  }, [vm]);
 
   // Display config changes → live-update the renderer (re-decodes rows on
   // encoding switch; repositions on font change).
@@ -116,12 +168,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
     const prev = prevLockedRef.current;
     prevLockedRef.current = locked;
     vm.setLocked(locked);
-    if (prev !== locked && locked) vm.scrollToBottom();
-  }, [scrollLocked, vm]);
+    if (prev !== locked && locked && !groupId) vm.scrollToBottom();
+  }, [scrollLocked, vm, groupId]);
 
   // Refresh readouts (match count / search index) on manager render passes.
   useEffect(() => {
-    return vm.subscribe(() => {
+    return vm.subscribeReadouts(() => {
+      adapterRef.current?.refreshSource();
       if (!hidden) forceRender((v) => v + 1);
     });
   }, [vm, hidden]);
@@ -132,51 +185,118 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
     debouncedKeyword, paused, togglePause,
   } = useTerminalDisplay({ vm });
 
+  const localViewKey = JSON.stringify([directionFilter, debouncedKeyword, paused, encoding, displayFormat]);
+  const previousLocalViewKey = useRef(localViewKey);
+  useEffect(() => {
+    const changed = previousLocalViewKey.current !== localViewKey;
+    previousLocalViewKey.current = localViewKey;
+    if (changed && tabId && groupId) timelineCoordinator.realign(tabId);
+  }, [tabId, groupId, localViewKey]);
+
+  const resumeHeldAlignment = useCallback(() => {
+    const adapter = adapterRef.current;
+    if (!tabId || !adapter || timelineCoordinator.participantForSlot(tabId)?.participantId !== adapter.participantId) return;
+    const group = timelineCoordinator.groupForSlot(tabId);
+    if (group?.members.find(member => member.slotId === tabId)?.status === 'held' && group.ownerParticipantId !== adapter.participantId) timelineCoordinator.realign(tabId);
+  }, [tabId]);
+  useEffect(() => {
+    const realignAfterSelection = () => { if (window.getSelection()?.isCollapsed) resumeHeldAlignment(); };
+    document.addEventListener('selectionchange', realignAfterSelection);
+    return () => document.removeEventListener('selectionchange', realignAfterSelection);
+  }, [resumeHeldAlignment]);
+
   // Search (UI-local state, manager-backed computation + navigation).
   const {
     searchOpen, searchQuery, caseSensitive, currentMatch, searchMatchCount,
     setSearchQuery, toggleCase, openSearch, toggleSearch, closeSearch,
     nextMatch, prevMatch,
-  } = useTerminalSearch({ vm });
+  } = useTerminalSearch({ vm,
+    onOpen: useCallback(() => {
+      configRef.current.onUserNavigation?.();
+      if (groupIdRef.current) timelineCoordinator.setMode(groupIdRef.current, 'browse');
+    }, []),
+    onNavigate: useCallback(() => navigationRef.current?.commitPosition(), []),
+  });
 
-  // Gesture system: explicit user scroll → suppress follow until settle.
-  const gestureActiveRef = useRef(false);
-  const settleTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  // Explicit intent owns the lease. Bare scroll only samples that lease, never
+  // acquires ownership or writes scrollLocked (including trusted programmatic scroll).
   const lastClickSeqRef = useRef<number | null>(null);
   const contextLineSeqRef = useRef<number | null>(null);
-  const searchOpenRef = useRef(searchOpen);
-  searchOpenRef.current = searchOpen;
-
-  const settle = useCallback(() => {
-    gestureActiveRef.current = false;
-    vm.endGesture();
-    const el = containerRef.current;
-    if (!el) return;
-    const atBottom = isAtBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
-    const store = useTerminalStore.getState();
-    const current = store.terminals[portId]?.scrollLocked ?? true;
-    if (atBottom !== current) {
-      store.setTerminalConfig(portId, { scrollLocked: atBottom });
-    }
-  }, [portId, vm]);
-
-  const beginGesture = useCallback(() => {
-    gestureActiveRef.current = true;
-    vm.beginGesture();
-    clearTimeout(settleTimerRef.current);
-    settleTimerRef.current = setTimeout(settle, SETTLE_MS);
-  }, [vm, settle]);
-
-  // Cleanup settle timer on unmount.
-  useEffect(() => () => clearTimeout(settleTimerRef.current), []);
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    let token: TimelineNavigationToken | null = null;
+    const lifecycle = new TerminalNavigationLifecycle<{ timeMs: number; recordKey?: string }>({
+      quietMs: SETTLE_MS,
+      readScrollTop: () => element.scrollTop,
+      canUseLastAnchor: () => document.visibilityState === 'hidden' || element.clientHeight === 0,
+      isCurrent: () => {
+        if (!token) return true;
+        const group = timelineCoordinator.getSnapshot().groups.find(item => item.id === token!.groupId);
+        return group?.ownerParticipantId === token.participantId && group.navigationEpoch === token.navigationEpoch;
+      },
+      readAnchor: () => {
+        if (document.visibilityState === 'hidden' || element.clientHeight === 0) return null;
+        const anchor = vm.readTimelineAnchor();
+        return anchor?.timeMs != null ? { timeMs: anchor.timeMs, recordKey: anchor.recordKey } : null;
+      },
+      onBegin: () => {
+        vm.beginGesture();
+        configRef.current.onUserNavigation?.();
+        token = adapterRef.current?.beginNavigation() ?? null;
+      },
+      onPreview: anchor => { if (token) adapterRef.current?.updateNavigation(token, anchor); },
+      onCommit: anchor => {
+        // End the follow suppression only AFTER updating the manager's lock.
+        // Waiting for React's effect leaves a frame where the old true lock
+        // pins an explicitly scrolled viewport back to the tail.
+        if (!groupIdRef.current) {
+          const atBottom = isAtBottom(element.scrollTop, element.clientHeight, element.scrollHeight);
+          vm.setLocked(atBottom);
+          if (atBottom !== configRef.current.scrollLocked) configRef.current.updateTerminalConfig({ scrollLocked: atBottom });
+        }
+        vm.endGesture();
+        if (token) adapterRef.current?.endNavigation(token, anchor);
+        token = null;
+      },
+      onCancel: () => {
+        vm.endGesture();
+        if (token) adapterRef.current?.cancelNavigation(token);
+        token = null;
+      },
+    });
+    navigationRef.current = lifecycle;
+    const scroll = () => lifecycle.scroll();
+    const pointerEnd = (event: PointerEvent) => lifecycle.release(event.pointerId);
+    const mouseEnd = () => lifecycle.release();
+    const visibility = () => { if (document.visibilityState === 'hidden') lifecycle.release(); };
+    element.addEventListener('scroll', scroll, { passive: true });
+    window.addEventListener('pointerup', pointerEnd, true);
+    window.addEventListener('pointercancel', pointerEnd, true);
+    window.addEventListener('mouseup', mouseEnd, true);
+    window.addEventListener('blur', mouseEnd);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      lifecycle.dispose(); navigationRef.current = null;
+      element.removeEventListener('scroll', scroll);
+      window.removeEventListener('pointerup', pointerEnd, true);
+      window.removeEventListener('pointercancel', pointerEnd, true);
+      window.removeEventListener('mouseup', mouseEnd, true);
+      window.removeEventListener('blur', mouseEnd);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [vm]);
+  const beginGesture = useCallback(() => navigationRef.current?.commitPosition(), []);
 
   // Ctrl+wheel font zoom, mirrored to the --font-size-terminal var. Bounds come
   // from CONFIG_BOUNDS (the single source of numeric limits, K2) — a local 8/48
   // copy silently drifts the moment the real bounds move.
   const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      beginGesture();
-      if (!e.ctrlKey) return;
+    (e: WheelEvent) => {
+      if (!e.ctrlKey) {
+        if (e.deltaY !== 0 && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) beginGesture();
+        return;
+      }
       e.preventDefault();
       const store = useAppStore.getState();
       const current = store.config.terminalFontSize;
@@ -193,14 +313,22 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
     [beginGesture],
   );
 
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    // React's delegated wheel listener is passive. A local non-passive listener
+    // is required to suppress browser Ctrl+wheel zoom without console errors.
+    element.addEventListener('wheel', handleWheel, { passive: false });
+    return () => element.removeEventListener('wheel', handleWheel);
+  }, [vm, handleWheel]);
+
   // Scrollbar drag / middle-click autoscroll: hold the gesture until pointer-up.
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
-      if (e.button === 1 || e.target === e.currentTarget) {
-        gestureActiveRef.current = true;
-        vm.beginGesture();
-        clearTimeout(settleTimerRef.current);
-      }
+      const element = e.currentTarget;
+      const rect = element.getBoundingClientRect();
+      const verticalScrollbar = e.target === element && e.clientX >= rect.left + element.clientWidth && e.clientY < rect.top + element.clientHeight;
+      if (e.button === 1 || (e.button === 0 && verticalScrollbar)) navigationRef.current?.begin(e.pointerId);
       // Left-button drag on a row starts a native cross-row text selection.
       // The renderer pins rows the live Range anchors to (selectionchange +
       // per-render syncPins) — no freeze protocol. Clear any stale selection
@@ -214,19 +342,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         // 增长滚出视口 → 输出区空白。解锁后视口固定，选区稳定；settle 不
         // 参与拖选（非 gesture 路径），用户停在哪锁定就保持在哪，点底部
         // 按钮可重新跟随。
-        if (useTerminalStore.getState().terminals[portId]?.scrollLocked) {
-          useTerminalStore.getState().setTerminalConfig(portId, { scrollLocked: false });
-        }
+        if (scrollLocked) updateTerminalConfig({ scrollLocked: false });
         vm.setLocked(false);
       }
     },
-    [vm],
+    [vm, scrollLocked, updateTerminalConfig],
   );
 
-  const handlePointerUp = useCallback(() => {
-    clearTimeout(settleTimerRef.current);
-    settleTimerRef.current = setTimeout(settle, SETTLE_MS);
-  }, [settle]);
+  const handlePointerUp = useCallback((event: React.PointerEvent) => navigationRef.current?.release(event.pointerId), []);
 
   // Row click: select range (shift extends from the anchor seq).
   const handleRowClick = useCallback(
@@ -243,8 +366,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
       lastClickSeqRef.current = seq;
       setSelectedRange(null);
       vm.setSelectedRange(null);
+      resumeHeldAlignment();
     },
-    [vm],
+    [vm, resumeHeldAlignment],
   );
 
   // Right-click: record the seq; build the menu from the buffer snapshot.
@@ -253,7 +377,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
       e.preventDefault();
       const seq = TerminalRenderer.seqFromEventTarget(e.target);
       contextLineSeqRef.current = seq;
-      const vmLive = getViewportManager(portId);
+      const vmLive = vm;
       const snapshot = vmLive.buffer.snapshot();
       // The menu works on snapshot ARRAY indices — convert the seq-based
       // selection range (clamped to the live window).
@@ -278,7 +402,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         return !isSameRound(prev, cur);
       };
       const items = buildTerminalContextMenuItems({
-        portId,
+        portId: portId ?? sourceId ?? tabId ?? 'replay', // export label, never a send target
         lines: snapshot,
         range,
         timestampMode,
@@ -292,7 +416,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
       setContextMenu({ x: e.clientX, y: e.clientY, items });
       contextLineSeqRef.current = null;
     },
-    [portId, selectedRange, timestampMode, connectedAt, timestampFormat, encoding, t],
+    [vm, portId, sourceId, tabId, selectedRange, timestampMode, connectedAt, timestampFormat, encoding, t],
   );
 
   const handleSelectAll = useCallback(() => {
@@ -307,10 +431,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
 
   const handleSearchClose = useCallback(() => {
     closeSearch();
-    if (useTerminalStore.getState().terminals[portId]?.scrollLocked) {
-      vm.scrollToBottom();
-    }
-  }, [closeSearch, portId, vm]);
+    if (scrollLocked && !groupId) vm.scrollToBottom();
+  }, [closeSearch, scrollLocked, groupId, vm]);
 
   // Ctrl+L clear · Ctrl+F search · F3/Shift+F3 step · Esc close.
   const handleKeyDown = useCallback(
@@ -334,7 +456,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
       }
       if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) {
         e.preventDefault();
-        getViewportManager(portId).clear();
+        if (portId) vm.clear(); // imported documents are read-only
         return;
       }
       // Native keyboard scrolling is an explicit gesture.
@@ -350,18 +472,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
   );
 
   const jumpToTop = useCallback(() => {
-    useTerminalStore.getState().setTerminalConfig(portId, { scrollLocked: false });
-    // The store write above only reaches the manager on the next effect pass;
-    // update the manager synchronously or the render triggered by the jump
-    // still pins to the bottom (followEnabled was true in this pass).
+    beginGesture();
+    if (!groupId) updateTerminalConfig({ scrollLocked: false });
     vm.setLocked(false);
     vm.scrollToTop();
-  }, [portId, vm]);
+    navigationRef.current?.commitPosition();
+  }, [groupId, updateTerminalConfig, beginGesture, vm]);
 
   const jumpToBottom = useCallback(() => {
-    useTerminalStore.getState().setTerminalConfig(portId, { scrollLocked: true });
+    beginGesture();
+    if (!groupId) updateTerminalConfig({ scrollLocked: true });
     vm.scrollToBottom();
-  }, [portId, vm]);
+    navigationRef.current?.commitPosition();
+  }, [groupId, updateTerminalConfig, beginGesture, vm]);
 
   // FilterBar readout (visible rows under filter/pause) — refreshed via the
   // manager subscription above.
@@ -369,7 +492,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
 
   return (
     <div className="terminal-view-container" style={hidden ? { display: 'none' } : undefined}>
-      {protocolTemplates.length > 0 && (
+      {portId && protocolTemplates.length > 0 && (
         <div className="terminal-protocol-bar">
           <span className="eyebrow">{t('terminalView.protocolLabel')}</span>
           <select
@@ -386,8 +509,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
           </select>
         </div>
       )}
+      {vm.isLoading && <div className="timeline-note" role="status">{t('timeline.status.loading')}</div>}
       <TerminalFilterBar
         portId={portId}
+        configId={tabId ?? sourceId ?? portId}
+        grouped={!!groupId}
+        timelineControl={tabId ? <TimelineButton tabId={tabId} /> : undefined}
+        onConfigChange={updateTerminalConfig}
         encoding={encoding}
         scrollLocked={scrollLocked}
         showTimestamp={showTimestamp}
@@ -403,7 +531,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
         viewPicker={(() => {
           const tab = useAppStore.getState().tabs.find(item => item.kind === 'serial' && item.portId === portId);
           const preference = tab ? getTabViewPreference(tab) : null;
-          const choices = getAvailablePluginViews(portId, 'serial-content');
+          const choices = portId ? getAvailablePluginViews(portId, 'serial-content') : [];
           return tab && (choices.length > 0 || preference) ? (
             <PluginViewPicker
               choices={choices}
@@ -436,7 +564,6 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, hidden }) => {
           className="terminal-view"
           tabIndex={0}
           onContextMenu={handleContextMenu}
-          onWheel={handleWheel}
           onKeyDown={handleKeyDown}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}

@@ -382,6 +382,45 @@ Worker 侧对象对称：`view.sendBinary(type, bytes)` / `view.onBinary(async (
 
 隔离模式 UI 不直接 fetch/WebSocket、不创建 frame/Worker、不打开文件或运行 Tauri 命令；需要敏感能力时发交互让 Worker 经已有授权 API 执行。**浏览器真实用户操作的原生复制/剪切是允许的边界例外**。可信网页的浏览器能力见上节；两种模式都不直接运行 Tauri 命令。
 
+### 可选时间联动 API（UI 专用）
+
+`view.timeline?.register(...)` 是运行时 opt-in，不需要新增 manifest 能力或 Worker 对端；旧插件不注册即不参加时间联动。用户在宿主选择组成员，插件不能自行加入组、指定其他标签或冒充其他端口。原生视图的平台与授权边界不变。
+
+```js
+const timeline = view.timeline?.register({
+  version: 1,
+  clock: { kind: 'bound-input' },
+  capabilities: { preview: 'bounded', canDrive: true },
+  async onSeek({ timeMs, phase, align, signal }) {
+    const row = findRetainedVisibleRecordAtOrBefore(timeMs);
+    if (!row) return { status: 'no-time' };
+    if (signal.aborted) return { status: 'held' };
+    await applyChartPosition(row, { phase, align });
+    // 在最终 DOM/图表写入前也要检查 signal；返回表示本地定位已完成，
+    // 不是仅入队成功，更不是不同 WebView 已物理同帧呈现。
+    if (signal.aborted) return { status: 'held' };
+    return { status: row.ts === timeMs ? 'exact' : 'nearest', actualTimeMs: row.ts, recordKey: row.id };
+  },
+});
+timeline?.setAvailability({ available: true, range: { startMs, endMs } });
+// 仅在真实明确导航时调用，不在焦点、普通行点击、数据更新或程序滚动时调用。
+const navigation = timeline?.beginNavigation('scrollbar');
+navigation?.update({ timeMs: row.ts, recordKey: row.id });
+navigation?.end(); // 立即携带最终锚点，不等待预览节流；也可 end(finalAnchor)
+```
+
+- `clock:{kind:'bound-input'}` 仅允许实际依附输入 Worker、且声明 bytes/lines 的绑定视图，使用宿主确认的采集时间域。保留输入 `ts`，帧完成采用完成块的采集时间，不用处理时 `Date.now()` 重打时间。
+- 自有/设备时间使用 `clock:{kind:'custom',id:'device-clock'}`；宿主按插件与安装代次隔离来源/时钟身份，不能把 id 写成宿主时间域来获取公共时钟。与其他来源比较前由用户确认时间映射。纯网页与 `worker:false` 页面可使用 custom 时间域，即使 `view.send` / `view.sendBinary` 因无 Worker 拒绝，时间通道仍可用。
+- `preview:'bounded'` 表示单次预览的查找与定位有界且支持合作取消；全量昂贵重画应声明 `'commit-only'`。`canDrive:false` 禁止取得驾驶权但仍能跟随，例如表格按温度而非时间排序时。`updateCapabilities({preview,canDrive})` 可更新这两个字段。
+- `onSeek` 的 `phase` 是 preview/commit、`align` 当前是 center，另含宿主绑定的导航/映射/来源版本；`signal` 是 SDK 本地 AbortSignal，不经 JSON。返回 `status` 为 exact/nearest/before-range/after-range/no-time/filtered/held/loading/unsupported，实际可定位结果附有限 `actualTimeMs` 和可选 ≤128 UTF-8 字节 `recordKey`（custom clock.id 同上限，拒绝孤立 UTF-16 代理项）。越界结果只报告本成员实际位置，不修改组共同时间。
+- `setAvailability({available,range?})` 只发布有限范围摘要，不传整条时间数组；`range` 为有限的 `{startMs,endMs}`。宿主可见性由宿主决定，页面不能自行报告“可见”。`dispose()` 注销能力并取消等待；重新 register 创建新的能力代次。
+- `beginNavigation(intent)` 支持 scrollbar/wheel/keyboard/search/jump/align/scrub，返回 update/end/cancel；每个能力只保留一个本地主动手势。update 约 10Hz 合并最新值，end 独立携带最后一次锚点，不被待发 preview 吞掉。需要自行补齐 pointerup/pointercancel/blur/visibilitychange 等本地手势收尾；取消或关闭时可调用 cancel。
+- 时间控制走独立 UI↔宿主原生 lane，**不走 `view.send`、Worker、业务 state Promise 队列或二进制通道**。每目标一条实际在途回调加一条最新候选，commit 优先于同代 preview。新目标/取消会 abort 旧回调，但不会用超时假装旧 JS 已停止；旧回调未结束时不并发绕过它。SDK 只在回调真正结束后发送结果 ACK。
+- 初始慢成员阈值：preview 150ms、commit 2s，慢时间成员显示 slow/待对齐，不因此退休整个插件页面；迟到 ACK 不覆盖更新的导航、映射或文档。导航/刷新、实例关闭、Worker 换代或撤权会释放适配器与等待者。隐藏页面不追赶历史定位，恢复只处理当前目标。独立 lane 不是 CPU/线程隔离，同步重画仍能卡住页面。
+- 原生时间信封 ≤8KiB、页面控制 payload ≤4KiB；页面 preview 独立桶 20/s、突发20，注册/ACK/end 等控制独立桶64/s、突发64，不与普通交互、状态 ACK 或二进制争用。SDK去重能力/范围摘要；勿高频滥发注册或最终控制。
+
+[Sensor Workspace](../examples/plugin-views-demo/README.md) 的表格和波形保留输入时间、明确限制 200 条，因此声明有界预览；其中 [workerless 示例](../examples/plugin-views-demo/workerless/manifest.json) 是可单独安装的无 Worker 自有时钟页。插件只能定位自己保留的数据，时间 API 不会补发历史输入或把回放伪造为实时 RX。
+
 ### 动作标签 API
 
 ```js

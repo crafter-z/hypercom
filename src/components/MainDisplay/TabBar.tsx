@@ -5,6 +5,7 @@ import ContextMenu from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
 import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare } from 'lucide-react';
 import PluginTabLauncher from './PluginTabLauncher';
+import { TimelineBadge, openTimelinePanel } from './TimelineControls';
 import {
   SortableContext,
   useSortable,
@@ -61,6 +62,7 @@ const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, onTab
       <AlertTriangle size={12} className="tab-warning-icon" />
     )}
     <span className="tab-title">{tab.title}</span>
+    <TimelineBadge tabId={tab.id} />
     {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
     {!tab.isPinned && (
       <span
@@ -176,6 +178,8 @@ const TabBar: React.FC<TabBarProps> = ({
     const items: ContextMenuEntry[] = [
       { label: tab?.isPinned ? t('tabBar.contextMenu.unpin') : t('tabBar.contextMenu.pin'), icon: <Pin size={14} />, onClick: () => onTabPin(tabId) },
     ];
+
+    items.push({ label: t('timeline.manage'), onClick: () => openTimelinePanel(tabId) });
 
     // 弹出入口：仅未弹出时提供（弹出后主窗内容区为占位，标签右键不再给此项）。
     if (onPopOut && tab?.kind === 'serial' && !tab.poppedOut) {

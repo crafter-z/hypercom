@@ -79,7 +79,13 @@ npm.cmd run tauri dev
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。
-- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **84** 个命令、**13** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **89** 个命令、**13** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
+
+## 时间工作区会话描述
+
+`sessionSnapshot` 保存三类标签、Pane 布局、时间组描述（成员标签引用、源映射、参考来源与拖动策略）和回放来源/解析选项。组运行态只有 `timelineCoordinator` 一份权威来源，不新增 Zustand store 或 AppConfig 高频字段；保存时读取轻量描述，不保存每帧 preview、owner、实例/document、原始授权、ACK 队列或完整日志模型。
+
+恢复重新校验并重建槽位引用，默认 BROWSE/暂停，不连接串口、不播放。回放来源以占位描述恢复，重新原生选取并验证文件指纹后才载入；插件仍需核对安装代次/能力。缺失来源不绑定到同名其他来源。旧快照缺少时间组字段按空处理。详见[时间联动与只读回放](timeline.md)。
 
 ## 6 个 Zustand Store
 

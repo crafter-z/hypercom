@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import type { TerminalLine } from '../types';
 import {
+  formatTimelineTime,
   formatAbsoluteTimestamp,
   formatRelativeTimestamp,
   formatRelativeDelta,
@@ -23,6 +24,26 @@ function makeLine(timestamp: number, direction: 'RX' | 'TX' = 'RX'): TerminalLin
 }
 
 describe('timeFormat', () => {
+  it('formats event-zero and negative group time without inventing 1970 dates', () => {
+    expect(formatTimelineTime(0)).toBe('T+0.000s');
+    expect(formatTimelineTime(1234)).toBe('T+1.234s');
+    expect(formatTimelineTime(-1234)).toBe('T-1.234s');
+    expect(formatTimelineTime(172_800_000, true)).toBe('T+172800.000s');
+    expect(formatTimelineTime(Date.parse('2026-01-01T00:00:00.123Z'))).toContain('2026');
+    for (const unknown of [null, undefined, NaN, Infinity, 9e99]) expect(formatTimelineTime(unknown)).toBe('—');
+  });
+  it('renders unknown replay time as an em dash in all shared copy/export modes', () => {
+    const unknown = makeLine(Number.NaN), known = makeLine(1000);
+    expect(formatAbsoluteTimestamp(Number.NaN)).toBe('—');
+    expect(formatRelativeDelta(unknown, undefined)).toBe('—');
+    expect(formatRelativeDelta(known, unknown)).toBe('—');
+    expect(formatUptimeTimestamp(unknown, null)).toBe('—');
+    for (const mode of ['absolute', 'relative', 'uptime'] as const) {
+      expect(formatTerminalTimestamp([unknown], 0, null, mode)).toBe('—');
+      expect(formatTerminalTimestampAdj(unknown, undefined, null, mode)).toBe('—');
+    }
+    expect(isSameRound(unknown, known)).toBe(false);
+  });
   describe('formatAbsoluteTimestamp', () => {
     it('renders HH:MM:SS.mmm', () => {
       const ts = new Date(2026, 6, 20, 14, 5, 9, 42).getTime();

@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import type { AppConfig, PortMetaEntry } from '../types';
 import { configService } from '../services/tauri';
-import { parseSessionSnapshot } from '../utils/sessionSnapshot';
+import { parseSessionSnapshot, restoreSessionSources } from '../utils/sessionSnapshot';
 import { jsonEqual } from '../utils/jsonEqual';
 import { collectPortMeta, saveCurrentPortGroups, saveCurrentPortMeta, useConfigPersistence } from './useConfigPersistence';
 import { useSerialPorts } from './useSerialPorts';
@@ -74,7 +74,10 @@ export function useAppInit() {
           );
           if (!baselinePort || unchanged) useAppStore.getState().updatePort(portId, patch);
         }
-        if (snapshot.tabs.length > 0) useAppStore.getState().restoreSessionSnapshot(snapshot);
+        if (snapshot.tabs.length > 0) {
+          restoreSessionSources(snapshot);
+          useAppStore.getState().restoreSessionSnapshot(snapshot);
+        }
       } catch (e) {
         console.warn('[useAppInit] Failed to restore session snapshot:', e);
       }

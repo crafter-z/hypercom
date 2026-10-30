@@ -700,6 +700,10 @@ pub fn clear() {
 }
 
 #[cfg(test)]
+#[path = "native_timeline_smoke.rs"]
+mod timeline_smoke;
+
+#[cfg(test)]
 mod tests {
     use super::{clipped_occlusion, is_same_document_navigation, EphemeralDirectory, ViewParent};
     use crate::plugin::view_runtime::OcclusionRect;

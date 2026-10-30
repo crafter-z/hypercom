@@ -625,6 +625,9 @@ pub fn run() {
             commands::pick_text_file_and_write,
             commands::pick_text_file_and_read,
             commands::read_text_file,
+            commands::pick_replay_sources,
+            commands::read_replay_source_chunk,
+            commands::release_replay_sources,
             commands::plugin_pick_files,
             commands::read_image_data_url,
             // ===== 诊断日志命令 =====

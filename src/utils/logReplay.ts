@@ -1,63 +1,28 @@
-/**
- * 日志回放解析工具
- * 解析 logger 写出的日志行格式：`[YYYY-MM-DD HH:MM:SS.mmm] DIRECTION content`
- * 纯函数，无副作用，便于单测。
- */
-
-export interface ParsedLogLine {
-  /** 时间戳（ms epoch） */
-  time: number;
-  direction: 'RX' | 'TX';
-  content: string;
-}
-
-// 例: [2026-07-21 22:30:15.123] RX hello world
-const LOG_LINE_REGEX = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\] (RX|TX) (.*)$/;
-
-/** 解析单行日志；格式不匹配或时间戳非法时返回 null */
-export function parseLogLine(line: string): ParsedLogLine | null {
-  const m = LOG_LINE_REGEX.exec(line);
+/** Event time is nullable; legacy timestamps require a confirmed UTC offset. */
+export interface ParsedLogLine { time: number | null; direction: 'RX' | 'TX'; content: string }
+export interface LogParseOptions { timezoneOffsetMinutes?: number }
+const PREFIX = /^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})?)\]\s?(.*)$/;
+export function parseLogTimestamp(value: string, options: LogParseOptions = {}): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})?$/.exec(value);
   if (!m) return null;
-  // 将 "YYYY-MM-DD HH:MM:SS.mmm" 转为 ISO 形式以便 Date 解析
-  const time = new Date(m[1].replace(' ', 'T')).getTime();
-  if (Number.isNaN(time)) return null;
-  return { time, direction: m[2] as 'RX' | 'TX', content: m[3] };
+  const [, y, mo, d, h, mi, s, frac, zone] = m;
+  const [year, month, day, hour, minute, second] = [y, mo, d, h, mi, s].map(Number);
+  const date = new Date(0); date.setUTCFullYear(year, month - 1, day); date.setUTCHours(hour, minute, second, Number((frac ?? '').padEnd(3, '0')));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day || hour > 23 || minute > 59 || second > 59) return null;
+  let offset = options.timezoneOffsetMinutes;
+  if (zone === 'Z') offset = 0;
+  else if (zone) { const zh = Number(zone.slice(1, 3)), zm = Number(zone.slice(4, 6)); if (zh > 14 || zm > 59) return null; offset = (zh * 60 + zm) * (zone[0] === '+' ? 1 : -1); }
+  if (offset === undefined || !Number.isInteger(offset) || Math.abs(offset) > 840) return null;
+  return date.getTime() - offset * 60_000;
 }
-
-/** 解析整段日志内容，按原顺序返回日志行。
- *
- * 日志前缀的 时间戳/方向 是可选开关（`logIncludeTimestamp` /
- * `logIncludeDirection`），所以除了严格格式，还要接受：
- * - `[时间] 内容`（无方向 → RX）
- * - `RX 内容`（无时间戳 → time 0）
- * - 纯内容（binary/无前缀 → RX，time 0）
- * 未格式化的续行不再被整体丢弃（旧实现遇到关闭前缀的日志会一行都回放不出来）。
- */
-export function parseLogContent(content: string): ParsedLogLine[] {
-  const result: ParsedLogLine[] = [];
-  const timestampOnly = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s?(.*)$/;
-  const directionOnly = /^(RX|TX)\s(.*)$/;
-  for (const line of content.split(/\r?\n/)) {
-    if (line.length === 0) continue;
-    const strict = parseLogLine(line);
-    if (strict) {
-      result.push(strict);
-      continue;
-    }
-    const timestamp = timestampOnly.exec(line);
-    if (timestamp) {
-      const time = new Date(timestamp[1].replace(' ', 'T')).getTime();
-      if (!Number.isNaN(time)) {
-        result.push({ time, direction: 'RX', content: timestamp[2] });
-        continue;
-      }
-    }
-    const direction = directionOnly.exec(line);
-    if (direction) {
-      result.push({ time: 0, direction: direction[1] as 'RX' | 'TX', content: direction[2] });
-      continue;
-    }
-    result.push({ time: 0, direction: 'RX', content: line });
-  }
-  return result;
+export function parseReplayRecord(line: string, options: LogParseOptions = {}): ParsedLogLine {
+  const prefix = PREFIX.exec(line), text = prefix ? prefix[2] : line, direction = /^(RX|TX) (.*)$/.exec(text);
+  return { time: prefix ? parseLogTimestamp(prefix[1], options) : null, direction: direction ? direction[1] as 'RX' | 'TX' : 'RX', content: direction ? direction[2] : text };
+}
+export function parseLogLine(line: string, options: LogParseOptions = {}): ParsedLogLine | null {
+  const prefix = PREFIX.exec(line); if (!prefix || !/^(RX|TX) /.test(prefix[2])) return null;
+  const parsed = parseReplayRecord(line, options); return parsed.time === null ? null : parsed;
+}
+export function parseLogContent(content: string, options: LogParseOptions = {}): ParsedLogLine[] {
+  const lines = content.split(/\r\n|\n|\r/); if (lines[lines.length - 1] === '') lines.pop(); return lines.map(line => parseReplayRecord(line, options));
 }

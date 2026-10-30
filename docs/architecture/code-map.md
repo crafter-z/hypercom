@@ -25,7 +25,11 @@
 | `utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx` | 保存并关闭/放弃并关闭/继续编辑；保存失败及迟到编辑阻止关闭，主窗和命令面板均等待跨窗确认；原生关闭经 complete_editor_close 审批 |
 | `utils/configWriteQueue.ts` + `jsonEqual.ts` | 配置/实体/元数据 CAS 写串行化；JSON 语义比较忽略对象字段顺序，避免 Rust 序列化产生假冲突 |
 | `utils/textSend.ts` | 弹窗文本模式的纯函数：按 CRLF/LF 切行（裁尾部空行）、HEX 行合法性与间隔收敛，DOM-free 可单测 |
-| `utils/logReplay.ts` | 日志回放解析（`[时间戳] DIRECTION content` → `ParsedLogLine`），纯函数 |
+| `utils/logReplay.ts` | 日志解析（`ParsedLogLine` 允许未知时间，显式 UTC 偏移；不按相邻行 sleep） |
+| `utils/timeline/{coordinator,scheduler,trxTimelineAdapter,ReplayClock}.ts` | app-lifetime 时间组、preview/commit 与代次、每目标最新槽背压、公平预算、TRX 适配与单调播放时钟 |
+| `utils/terminal/{TerminalSource,TerminalTimeIndex}.ts` | 实时/回放共用只读行接口、按 `(time,seq)` 维护的可见时间索引 |
+| `utils/replay/{ReplayDocument,replayRuntime}.ts` | 完整只读历史、轨道/分片与资源预算、宿主授权分块导入、共享组时钟及描述恢复 |
+| `MainDisplay/TimelineControls.tsx` + `utils/terminalNavigation.ts` | 组条/成员/校时 UI 与显式导航生命周期；不把裸 scroll 当用户驾驶权 |
 | `utils/sessionSnapshot.ts` | 会话快照解析/校验（`parseSessionSnapshot`：按可用端口过滤并重建 UUID），启动恢复用 |
 
 ## 前端符号
@@ -63,8 +67,8 @@
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (13 domain files, 84 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | 47 字段 = 46 个普通配置字段 + flatten entities；9 类实体数组含 pluginConfigs。普通字段含 defaultBaudRates 数组，不统称标量；插件安装身份迁移/磁盘恢复先于 Worker 启动 |
+| All Tauri commands (13 domain files, 89 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | 44 字段 = 43 个普通配置字段 + flatten entities；9 类实体数组含 pluginConfigs。普通字段含 defaultBaudRates 数组，不统称标量；插件安装身份迁移/磁盘恢复先于 Worker 启动 |
 | `AppState` | `src-tauri/src/lib.rs` | struct | `serial_manager: Arc<Mutex<..>>`、`config_manager: Mutex<..>`、`plugin_io: tokio::sync::Mutex<()>`（插件磁盘/状态操作互斥）、`log_manager: Arc<LogManager>`、`diag_logger: Arc<..>`、`system_info: Arc<Mutex<..>>`、`tool_processes`/`file_send_cancel`/`popouts` |
 | `SerialPortHandle` | `src-tauri/src/serial/ports_real.rs` | struct | `read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>` 句柄；`open_real_port` 内 DTR/RTS 设置（clone 前，设备级共享）后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享） |
 | `PortKind` / `check_virtual_enabled` | `src-tauri/src/serial/mod.rs` | enum / fn | 端口类别唯一分派 + 虚拟端口分派前门控 |

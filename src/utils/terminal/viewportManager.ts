@@ -27,6 +27,8 @@ import { linePassesFilter, type DirectionFilter } from '../lineFilter';
 import { shouldFollow } from '../followLogic';
 import { getSearchableText } from '../terminalSearch';
 import { TerminalBuffer } from './TerminalBuffer';
+import { TerminalTimeIndex } from './TerminalTimeIndex';
+import { countVisibleSeqs, sourceTimeMs, upperBoundSeq, TERMINAL_REBUILD_SYNC_LIMIT, TERMINAL_REBUILD_CHUNK_SIZE, type TerminalSource, type TerminalViewportOptions, type TerminalTimelineAnchor, type TerminalTimelineResult, type TerminalTimelineRequest, type TerminalSeekOptions, type ScheduledSeekResult } from './TerminalSource';
 import {
   TerminalRenderer,
   type RendererConfig,
@@ -50,7 +52,27 @@ interface SortedList {
 }
 
 export class TerminalViewportManager {
-  readonly buffer: TerminalBuffer;
+  readonly buffer: TerminalSource;
+  private readonly writableBuffer: TerminalBuffer | null;
+  private readonly options: TerminalViewportOptions;
+  private timeIndex = new TerminalTimeIndex();
+  private timeIndexReady = true;
+  private indexBuildVersion = 0;
+  private indexBuildTimer: ReturnType<typeof setTimeout> | null = null;
+  private indexWaiters = new Set<(ready: boolean) => void>();
+  private filterLoading = false;
+  private searchLoading = false;
+  private filterBuildVersion = 0;
+  private searchBuildVersion = 0;
+  private cancelFilterScan: (() => void) | null = null;
+  private cancelSearchScan: (() => void) | null = null;
+  private sourceGenerationValue = 1;
+  private sourceRevisionValue = 0;
+  private timelineGrouped = false;
+  private readoutListeners = new Set<() => void>();
+  private readoutsDirty = true;
+  private pendingSeek: { seq: number; align: 'start' | 'center' | 'end'; options: TerminalSeekOptions; generation: number; resolve: (result: ScheduledSeekResult) => void; cleanup: () => void } | null = null;
+  private heldTimelineRequest: TerminalTimelineRequest | null = null;
   private readonly portId: string;
   private renderer: TerminalRenderer | null = null;
   private renderRaf: number | null = null;
@@ -80,20 +102,28 @@ export class TerminalViewportManager {
   private matchedEncoding: Encoding;
   private matchedDisplayFormat: DisplayFormat;
 
-  constructor(portId: string, limits: { maxLines: number }) {
+  constructor(portId: string, limits: { maxLines: number }, options: TerminalViewportOptions = {}) {
     this.portId = portId;
-    this.buffer = new TerminalBuffer(limits);
+    this.options = options.display ? { ...options, display: { ...options.display } } : options;
+    this.writableBuffer = options.source ? null : new TerminalBuffer(limits);
+    this.buffer = options.source ?? this.writableBuffer!;
     this.matchedEncoding = this.getEncoding();
     this.matchedDisplayFormat = this.getDisplayFormat();
+    this.rebuildTimeIndex();
   }
+
+  get sourceGeneration(): number { return this.sourceGenerationValue; }
+  get sourceRevision(): number { return this.sourceRevisionValue; }
+  get readonlySource(): boolean { return this.writableBuffer === null; }
+  get isLoading(): boolean { return this.filterLoading || this.searchLoading || !this.timeIndexReady; }
 
   /** Port's current encoding (read live from the store — lazy-decode aware). */
   private getEncoding(): Encoding {
-    return useTerminalStore.getState().terminals[this.portId]?.encoding ?? 'UTF-8';
+    return this.options.display?.encoding ?? useTerminalStore.getState().terminals[this.portId]?.encoding ?? 'UTF-8';
   }
 
   private getDisplayFormat(): DisplayFormat {
-    return useTerminalStore.getState().terminals[this.portId]?.displayFormat ?? 'string';
+    return this.options.display?.displayFormat ?? useTerminalStore.getState().terminals[this.portId]?.displayFormat ?? 'string';
   }
 
   // ==================== Data ingestion ====================
@@ -101,13 +131,14 @@ export class TerminalViewportManager {
   /** Append lines (RX batches / TX echo / tool output / replay).
    *  Returns true when the oldest line was evicted (capacity rolling window). */
   appendLines(lines: TerminalLine[]): boolean {
-    if (this.destroyed) return false;
+    if (this.destroyed || !this.writableBuffer) return false;
     let trimmed = false;
     const encoding = this.getEncoding();
     const displayFormat = this.getDisplayFormat();
     for (const line of lines) {
       const beforeFirst = this.buffer.firstSeq;
-      const r = this.buffer.append(line);
+      const r = this.writableBuffer.append(line);
+      this.sourceRevisionValue++;
       if (r.trimmed) trimmed = true;
       // Incremental filter/search: match the new line once, extend the lists.
       if (this.filterActive) {
@@ -118,7 +149,12 @@ export class TerminalViewportManager {
       if (this.searchOpen && this.searchQuery) {
         if (this.lineMatchesSearch(line, displayFormat, encoding)) {
           this.matches.seqs.push(r.seq);
+          this.matchSetCache?.add(r.seq);
         }
+      }
+      if ((this.frozenSeq === null || r.seq <= this.frozenSeq) &&
+          (!this.filterActive || this.filtered.seqs[this.filtered.seqs.length - 1] === r.seq)) {
+        this.timeIndex.add(r.seq, sourceTimeMs(this.buffer, r.seq));
       }
       // The buffer may have evicted any number of oldest lines — drop each
       // from the sorted lists.
@@ -136,7 +172,9 @@ export class TerminalViewportManager {
 
   /** Replace the whole buffer (popout snapshot). Recomputes filter/search. */
   replaceAll(lines: TerminalLine[]): void {
-    this.buffer.replaceAll(lines);
+    if (!this.writableBuffer || this.destroyed) return;
+    this.invalidateSource();
+    this.writableBuffer.replaceAll(lines);
     this.recomputeFilter();
     this.recomputeSearch();
     this.renderer?.invalidate();
@@ -145,8 +183,13 @@ export class TerminalViewportManager {
 
   /** Ctrl+L / mode-switch clear. */
   clear(): void {
+    if (!this.writableBuffer || this.destroyed) return;
+    this.invalidateSource();
     const wasPaused = this.frozenSeq !== null;
-    this.buffer.clear();
+    this.writableBuffer.clear();
+    this.cancelScans();
+    this.cancelIndexBuild();
+    this.timeIndex.clear();
     // Keep the pause state aligned with the UI toggle: a paused view freezes
     // at the (now empty) tail instead of silently resuming follow.
     this.frozenSeq = wasPaused ? this.buffer.lastSeq : null;
@@ -161,7 +204,14 @@ export class TerminalViewportManager {
 
   /** Live buffer-limit change (config edited while streaming). */
   applyLimits(limits: { maxLines: number }): void {
-    this.buffer.setLimits(limits);
+    if (!this.writableBuffer || this.destroyed) return;
+    const first = this.buffer.firstSeq;
+    this.writableBuffer.setLimits(limits);
+    for (let seq = first; seq < this.buffer.firstSeq; seq++) {
+      this.timeIndex.delete(seq);
+      this.matchSetCache?.delete(seq);
+    }
+    this.sourceRevisionValue++;
     this.pruneTrimmed();
     this.requestRender();
   }
@@ -179,21 +229,12 @@ export class TerminalViewportManager {
 
   /** Visible line count for the FilterBar readout (respects pause). */
   getVisibleCount(): number {
-    const frozen =
-      this.frozenSeq !== null ? Math.min(this.frozenSeq, this.buffer.lastSeq) : this.buffer.lastSeq;
-    if (!this.filterActive) {
-      return Math.max(0, frozen - this.buffer.firstSeq + 1);
-    }
-    let n = 0;
-    for (let i = this.filtered.offset; i < this.filtered.seqs.length; i++) {
-      if (this.filtered.seqs[i] > frozen) break;
-      n++;
-    }
-    return n;
+    return countVisibleSeqs(this.buffer, this.filterActive ? this.filtered.seqs : null, this.filtered.offset, this.frozenSeq);
   }
 
   setPaused(paused: boolean): void {
     this.frozenSeq = paused ? this.buffer.lastSeq : null;
+    this.rebuildTimeIndex();
     this.requestRender();
   }
 
@@ -209,15 +250,7 @@ export class TerminalViewportManager {
   }
 
   getMatchCount(): number {
-    if (this.frozenSeq === null) {
-      return this.matches.seqs.length - this.matches.offset;
-    }
-    let n = 0;
-    for (let i = this.matches.offset; i < this.matches.seqs.length; i++) {
-      if (this.matches.seqs[i] > this.frozenSeq) break;
-      n++;
-    }
-    return n;
+    return countVisibleSeqs(this.buffer, this.matches.seqs, this.matches.offset, this.frozenSeq);
   }
 
   getCurrentMatchIndex(): number {
@@ -281,6 +314,10 @@ export class TerminalViewportManager {
   }
 
   updateConfig(patch: Partial<RendererConfig>): void {
+    if (this.options.display) {
+      if (patch.encoding !== undefined) this.options.display.encoding = patch.encoding as Encoding;
+      if (patch.displayFormat !== undefined) this.options.display.displayFormat = patch.displayFormat;
+    }
     const encoding = this.getEncoding();
     const displayFormat = this.getDisplayFormat();
     const encodingChanged = encoding !== this.matchedEncoding;
@@ -306,22 +343,165 @@ export class TerminalViewportManager {
       this.renderer.updateConfig(config);
     }
     this.renderer.attachToContainer(container);
-    this.renderer.onRenderNeeded = () => this.requestRender();
+    this.renderer.onRenderNeeded = () => this.requestRender(false);
     this.requestRender();
   }
 
   detachRenderer(): void {
+    this.finishPendingSeek('unavailable');
     this.renderer?.detach();
   }
 
   /** Tab close / mode switch: destroy the instance. */
   dispose(): void {
     this.destroyed = true;
+    this.cancelScans();
+    this.invalidateSource();
+    this.cancelIndexBuild();
+    this.timeIndex.clear();
+    this.readoutListeners.clear();
     if (this.renderRaf !== null) cancelAnimationFrame(this.renderRaf);
     this.renderRaf = null;
     this.renderer?.dispose();
     this.renderer = null;
     this.listeners.clear();
+  }
+
+  // ==================== Timeline / independent document ====================
+
+  setTimelineGrouped(grouped: boolean): void {
+    if (this.timelineGrouped === grouped) return;
+    this.timelineGrouped = grouped;
+    // Leaving a group must not silently reactivate independent tail-follow.
+    if (!grouped) this.locked = false;
+    this.requestRender(false);
+  }
+
+  readTimelineAnchor(align: 'start' | 'center' | 'end' = 'center'): TerminalTimelineAnchor | null {
+    const anchor = this.renderer?.readGeometryAnchor(this.buffer, this.buildView(), align);
+    return anchor ? { ...anchor, timeMs: sourceTimeMs(this.buffer, anchor.seq), recordKey: String(anchor.seq), sourceGeneration: this.sourceGeneration, sourceRevision: this.sourceRevision, clockEpoch: this.buffer.getClockEpoch?.(anchor.seq) } : null;
+  }
+
+  getTimelineAnchor(): TerminalTimelineAnchor | null { return this.readTimelineAnchor(); }
+
+  lookupTime(timeMs: number): TerminalTimelineResult {
+    if (!this.timeIndexReady) return { status: 'loading', actualTimeMs: null, sourceRevision: this.sourceRevision };
+    const found = this.timeIndex.lookup(timeMs);
+    if (!found) return { status: this.getVisibleCount() === 0 && this.buffer.length > 0 ? 'filtered' : 'no-time', actualTimeMs: null, sourceRevision: this.sourceRevision };
+    return { status: found.status, seq: found.entry.seq, recordKey: String(found.entry.seq), actualTimeMs: found.entry.time, deltaMs: found.entry.time - timeMs, sourceRevision: this.sourceRevision };
+  }
+
+  async seekTimeline(request: TerminalTimelineRequest): Promise<TerminalTimelineResult> {
+    if (this.destroyed || request.signal?.aborted || !(request.isCurrent?.() ?? true)) return { status: 'unsupported', actualTimeMs: null };
+    if (!this.timeIndexReady && request.phase === 'commit') {
+      const ready = await this.waitForTimeIndex(request.signal);
+      if (!ready || request.signal?.aborted || !(request.isCurrent?.() ?? true)) return { status: 'unsupported', actualTimeMs: null };
+    }
+    const found = this.lookupTime(request.timeMs);
+    if (found.seq === undefined) return found;
+    if (this.selectedRange || this.renderer?.hasSelection) {
+      this.heldTimelineRequest = request;
+      return { status: 'held', actualTimeMs: this.readTimelineAnchor()?.timeMs ?? null };
+    }
+    this.heldTimelineRequest = null;
+    const applied = await this.scheduleTimelineSeek(found.seq, 'center', request);
+    if (applied.status === 'held') {
+      this.heldTimelineRequest = request;
+      return { status: 'held', actualTimeMs: null };
+    }
+    return applied.status === 'applied'
+      ? { ...found, actualTimeMs: applied.timeMs ?? null, sourceRevision: applied.sourceRevision }
+      : { status: 'unsupported', actualTimeMs: null };
+  }
+
+  scheduleTimelineSeek(seq: number, align: 'start' | 'center' | 'end' = 'center', options: TerminalSeekOptions = {}): Promise<ScheduledSeekResult> {
+    this.finishPendingSeek('superseded');
+    if (this.destroyed || !this.renderer?.geometryAvailable) return Promise.resolve({ status: 'unavailable', sourceRevision: this.sourceRevision });
+    if (options.signal?.aborted || !(options.isCurrent?.() ?? true)) return Promise.resolve({ status: 'aborted', sourceRevision: this.sourceRevision });
+    return new Promise(resolve => {
+      const onAbort = () => { if (this.pendingSeek?.resolve === resolve) this.finishPendingSeek('aborted'); };
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      this.pendingSeek = { seq, align, options, generation: this.sourceGeneration, resolve, cleanup: () => options.signal?.removeEventListener('abort', onAbort) };
+      this.requestRender(false);
+    });
+  }
+
+  /** A mutable external source explicitly publishes one new document version.
+   * No copying or realtime ring limits are applied to the document. */
+  refreshSource(): void {
+    if (this.destroyed) return;
+    this.invalidateSource();
+    this.recomputeFilter();
+    this.recomputeSearch();
+    this.renderer?.invalidate();
+    this.requestRender();
+  }
+
+  private finishPendingSeek(status: ScheduledSeekResult['status']): void {
+    const pending = this.pendingSeek;
+    if (!pending) return;
+    this.pendingSeek = null;
+    pending.cleanup();
+    pending.resolve({ status, seq: pending.seq, timeMs: sourceTimeMs(this.buffer, pending.seq), sourceRevision: this.sourceRevision });
+  }
+
+  private invalidateSource(): void {
+    this.sourceGenerationValue++;
+    this.sourceRevisionValue++;
+    this.heldTimelineRequest = null;
+    this.finishPendingSeek('aborted');
+  }
+
+  private waitForTimeIndex(signal?: AbortSignal): Promise<boolean> {
+    if (this.timeIndexReady) return Promise.resolve(true);
+    if (signal?.aborted) return Promise.resolve(false);
+    return new Promise(resolve => {
+      const finish = (ready: boolean) => {
+        this.indexWaiters.delete(finish);
+        signal?.removeEventListener('abort', abort);
+        resolve(ready);
+      };
+      const abort = () => finish(false);
+      this.indexWaiters.add(finish);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+  }
+
+  private cancelIndexBuild(preserveWaiters = false): void {
+    if (!preserveWaiters) for (const waiter of this.indexWaiters) waiter(false);
+    this.indexBuildVersion++;
+    if (this.indexBuildTimer !== null) clearTimeout(this.indexBuildTimer);
+    this.indexBuildTimer = null;
+    this.timeIndexReady = true;
+  }
+
+  private rebuildTimeIndex(preserveWaiters = false): void {
+    this.cancelIndexBuild(preserveWaiters);
+    this.timeIndex.clear();
+    if (this.filterLoading) { this.timeIndexReady = false; return; }
+    const version = this.indexBuildVersion;
+    const list = this.filterActive ? this.filtered.seqs : null;
+    let cursor = list ? this.filtered.offset : this.buffer.firstSeq;
+    const end = list ? this.filtered.offset + this.getVisibleCount() : Math.min(this.buffer.lastSeq, this.frozenSeq ?? this.buffer.lastSeq) + 1;
+    this.timeIndexReady = end - cursor <= TERMINAL_REBUILD_SYNC_LIMIT;
+    const run = () => {
+      this.indexBuildTimer = null;
+      if (this.destroyed || version !== this.indexBuildVersion) return;
+      const stop = this.timeIndexReady ? end : Math.min(end, cursor + TERMINAL_REBUILD_CHUNK_SIZE);
+      for (; cursor < stop; cursor++) {
+        const seq = list ? list[cursor] : cursor;
+        if (seq >= this.buffer.firstSeq && seq <= this.buffer.lastSeq) this.timeIndex.add(seq, sourceTimeMs(this.buffer, seq));
+      }
+      if (cursor < end) this.indexBuildTimer = setTimeout(run, 0);
+      else {
+        this.timeIndexReady = true;
+        for (const waiter of this.indexWaiters) waiter(true);
+        this.compact(this.filtered);
+        this.requestRender();
+      }
+    };
+    if (this.timeIndexReady) run();
+    else this.indexBuildTimer = setTimeout(run, 0);
   }
 
   // ==================== Internals ====================
@@ -334,12 +514,45 @@ export class TerminalViewportManager {
     return () => this.listeners.delete(fn);
   }
 
-  private requestRender(): void {
-    if (this.renderRaf !== null || !this.renderer || this.destroyed) return;
+  /** Readout-only subscription excludes geometry-only scroll/resize/seek. */
+  subscribeReadouts(fn: () => void): () => void {
+    this.readoutListeners.add(fn);
+    return () => this.readoutListeners.delete(fn);
+  }
+
+  private requestRender(readouts = true): void {
+    if (readouts) this.readoutsDirty = true;
+    if (this.renderRaf !== null || !this.renderer?.attached || this.destroyed) return;
     this.renderRaf = requestAnimationFrame(() => {
       this.renderRaf = null;
-      this.renderer?.render(this.buffer, this.buildView());
+      const renderer = this.renderer;
+      if (!renderer?.attached || this.destroyed) return;
+      let seekApplied = false;
+      if (this.heldTimelineRequest && !renderer.hasSelection && !this.selectedRange) {
+        const held = this.heldTimelineRequest;
+        this.heldTimelineRequest = null;
+        if (!held.signal?.aborted && (held.isCurrent?.() ?? true)) void this.seekTimeline(held);
+      }
+      const seek = this.pendingSeek;
+      if (seek) {
+        if (seek.options.signal?.aborted || !(seek.options.isCurrent?.() ?? true) || seek.generation !== this.sourceGeneration) {
+          this.finishPendingSeek('aborted');
+        } else if (renderer.hasSelection || this.selectedRange) {
+          this.finishPendingSeek('held');
+        } else {
+          seekApplied = renderer.positionToSeq(seek.seq, seek.align, this.buffer, this.buildView());
+          if (!seekApplied) this.finishPendingSeek('unavailable');
+        }
+      }
+      const view = this.buildView();
+      if (seekApplied) view.followEnabled = false;
+      renderer.render(this.buffer, view);
+      // ACK means the local render pass applied, not merely queue admission.
+      if (seekApplied && this.pendingSeek === seek) this.finishPendingSeek('applied');
+      const notifyReadouts = this.readoutsDirty;
+      this.readoutsDirty = false;
       for (const fn of this.listeners) fn();
+      if (notifyReadouts) for (const fn of this.readoutListeners) fn();
     });
   }
 
@@ -356,7 +569,7 @@ export class TerminalViewportManager {
       selectedRange: this.selectedRange,
       locked: this.locked,
       gestureActive: this.gestureActive,
-      followEnabled: shouldFollow(
+      followEnabled: !this.timelineGrouped && shouldFollow(
         this.frozenSeq !== null,
         this.locked,
         this.gestureActive,
@@ -370,15 +583,10 @@ export class TerminalViewportManager {
    *  cache key is (offset, length, currentMatch) — matches mutate only via
    *  push (append), offset bump (trim) and recompute (new query). */
   private matchSetCache: Set<number> | null = null;
-  private matchSetCacheKey = '';
   private cachedMatchSet(): Set<number> {
-    // currentMatch only changes the `current-match` class, not set membership —
-    // including it here rebuilt up to 50k entries on every F3/prev jump.
-    const key = `${this.matches.offset}:${this.matches.seqs.length}`;
-    if (this.matchSetCache === null || key !== this.matchSetCacheKey) {
-      this.matchSetCache = new Set(this.matches.seqs.slice(this.matches.offset));
-      this.matchSetCacheKey = key;
-    }
+    // Rebuilds fill this Set in the same bounded scan chunks; append/trim
+    // mutate membership incrementally. Navigation/scroll never copy it.
+    if (this.matchSetCache === null) this.matchSetCache = new Set(this.matches.seqs.slice(this.matches.offset));
     return this.matchSetCache;
   }
 
@@ -397,38 +605,100 @@ export class TerminalViewportManager {
    * 在这里是结构性不需要的。
    */
   private recomputeFilter(): void {
+    this.cancelFilterScan?.(); this.cancelFilterScan = null;
+    const version = ++this.filterBuildVersion;
+    this.cancelIndexBuild();
     const active = this.filterDirection !== 'all' || this.filterKeyword.trim().length > 0;
     this.filterActive = active;
     this.filtered = { seqs: [], offset: 0 };
-    if (!active) return;
-    const encoding = this.getEncoding();
-    for (let seq = this.buffer.firstSeq; seq <= this.buffer.lastSeq; seq++) {
-      const line = this.buffer.getBySeq(seq);
-      if (line && linePassesFilter(line, this.filterDirection, this.filterKeyword, encoding)) {
-        this.filtered.seqs.push(seq);
-      }
-    }
+    this.filterLoading = active && this.buffer.length > TERMINAL_REBUILD_SYNC_LIMIT;
+    if (!active) { this.rebuildTimeIndex(); return; }
+    this.timeIndex.clear();
+    this.timeIndexReady = !this.filterLoading;
+    const encoding = this.getEncoding(), direction = this.filterDirection, keyword = this.filterKeyword;
+    this.cancelFilterScan = this.scanSource(
+      line => linePassesFilter(line, direction, keyword, encoding),
+      (seqs, end) => {
+        if (version !== this.filterBuildVersion || this.destroyed) return;
+        // Appends newer than the captured tail have already matched exactly
+        // once in appendLines. Merge, don't rescan or lose those live records.
+        const appended = this.filtered.seqs.slice(upperBoundSeq(this.filtered.seqs, end, this.filtered.offset));
+        const offset = upperBoundSeq(seqs, this.buffer.firstSeq - 1);
+        this.filtered = { seqs: seqs.slice(offset).concat(appended), offset: 0 };
+        this.filterLoading = false;
+        this.cancelFilterScan = null;
+        this.rebuildTimeIndex(true);
+        this.renderer?.bumpFilterVersion();
+        this.requestRender();
+      },
+    );
   }
 
   private recomputeSearch(): void {
+    this.cancelSearchScan?.(); this.cancelSearchScan = null;
+    const version = ++this.searchBuildVersion;
     this.matches = { seqs: [], offset: 0 };
     this.currentMatch = 0;
-    // The cache key (offset:length:currentMatch) carries no query identity —
-    // a new query hitting the same count must not reuse the stale Set.
-    this.matchSetCache = null;
+    const membership = new Set<number>();
+    this.matchSetCache = membership;
+    this.searchLoading = this.searchOpen && !!this.searchQuery && this.buffer.length > TERMINAL_REBUILD_SYNC_LIMIT;
     if (!this.searchOpen || !this.searchQuery) return;
-    const encoding = this.getEncoding();
-    const displayFormat = this.getDisplayFormat();
-    for (let seq = this.buffer.firstSeq; seq <= this.buffer.lastSeq; seq++) {
-      const line = this.buffer.getBySeq(seq);
-      if (line && this.lineMatchesSearch(line, displayFormat, encoding)) {
-        this.matches.seqs.push(seq);
+    const encoding = this.getEncoding(), displayFormat = this.getDisplayFormat();
+    this.cancelSearchScan = this.scanSource(
+      (line, seq) => {
+        const matched = this.lineMatchesSearch(line, displayFormat, encoding);
+        if (matched) membership.add(seq);
+        return matched;
+      },
+      (seqs, end) => {
+        if (version !== this.searchBuildVersion || this.destroyed) return;
+        const appended = this.matches.seqs.slice(upperBoundSeq(this.matches.seqs, end, this.matches.offset));
+        const offset = upperBoundSeq(seqs, this.buffer.firstSeq - 1);
+        this.matches = { seqs: seqs.slice(offset).concat(appended), offset: 0 };
+        this.currentMatch = Math.min(this.currentMatch, Math.max(0, this.getMatchCount() - 1));
+        this.searchLoading = false;
+        this.cancelSearchScan = null;
+        this.renderer?.bumpFilterVersion();
+        this.requestRender();
+      },
+    );
+  }
+
+  /** Rebuild-only scanner. Each task captures its tail, yields between bounded
+   * chunks, and never snapshots/decodes the full document in a preview. */
+  private scanSource(predicate: (line: TerminalLine, seq: number) => boolean, complete: (seqs: number[], end: number) => void): () => void {
+    const end = this.buffer.lastSeq;
+    let cursor = this.buffer.firstSeq;
+    const seqs: number[] = [];
+    const sync = this.buffer.length <= TERMINAL_REBUILD_SYNC_LIMIT;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    const run = () => {
+      timer = null;
+      if (cancelled || this.destroyed) return;
+      const stop = sync ? end + 1 : Math.min(end + 1, cursor + TERMINAL_REBUILD_CHUNK_SIZE);
+      for (; cursor < stop; cursor++) {
+        const line = this.buffer.getBySeq(cursor);
+        if (line && predicate(line, cursor)) seqs.push(cursor);
       }
-    }
+      if (cursor <= end) timer = setTimeout(run, 0);
+      else complete(seqs, end);
+    };
+    if (sync) run(); else timer = setTimeout(run, 0);
+    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
+  }
+
+  private cancelScans(): void {
+    this.filterBuildVersion++; this.searchBuildVersion++;
+    this.cancelFilterScan?.(); this.cancelFilterScan = null;
+    this.cancelSearchScan?.(); this.cancelSearchScan = null;
+    this.filterLoading = false; this.searchLoading = false;
   }
 
   /** Drop one trimmed seq from the sorted lists (O(1) offset bump). */
   private dropTrimmedSeq(seq: number): void {
+    this.timeIndex.delete(seq);
+    this.matchSetCache?.delete(seq);
     if (this.filterActive && this.filtered.seqs[this.filtered.offset] === seq) {
       this.filtered.offset++;
       this.compact(this.filtered);
@@ -443,6 +713,8 @@ export class TerminalViewportManager {
 
   /** Amortized compaction: splice when the offset grows past the threshold. */
   private compact(list: SortedList): void {
+    // A chunked index build holds this array by reference, never a full copy.
+    if (list === this.filtered && !this.timeIndexReady) return;
     if (list.offset >= COMPACT_THRESHOLD) {
       list.seqs.splice(0, list.offset);
       list.offset = 0;
