@@ -19,7 +19,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Stable push must pass the exact same full quality gate as branch CI before
+  # prepare-release creates a draft. Published-release/manual events remain
+  # read-only verification paths and do not rerun a gate for another ref.
+  quality:
+    name: full quality gate
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   prepare-release:
+    needs: quality
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

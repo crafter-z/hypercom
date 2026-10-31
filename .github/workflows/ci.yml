@@ -1,16 +1,15 @@
 name: 'ci'
 
-# 日常质量门：与发版流（publish.yml / publish-preview.yml）保持同一口径
-# （tsc + vitest + cargo test --lib + playwright），但提前到每次 push / PR——
-# 发版门禁报红时 tag 已经打完，回滚代价高。步骤与发版流逐条对应，便于对照排查。
-#
-# branches 过滤而非裸 push：tag push 由发版流自己跑同一套门禁，CI 再跑一遍
-# 只是重复占 runner（排除 tag = 只留分支）。
+# 统一质量门：日常 CI 与发版流（publish.yml / publish-preview.yml）共用此工作流。
+# 日常触发 push / PR / 手动运行；发版流通过 workflow_call 在创建 draft 前调用同一套
+# tsc + vitest + release tests + production build + Rust test/clippy/release check + Playwright。
+# 这样 tag 发布不会绕过日常质量门，也不会维护两份容易漂移的检查清单。
 on:
   push:
     branches: ['**']
   pull_request:
   workflow_dispatch: {}
+  workflow_call: {}
 
 # 同一 PR 的旧运行被新提交取代；分支上的 push 不取消，避免发布前门禁被中断。
 concurrency:

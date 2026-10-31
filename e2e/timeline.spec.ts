@@ -1,5 +1,8 @@
 import { expect, test } from '@playwright/test';
 
+// Keep Node globals local so browser-side timer types stay unchanged.
+declare const process: { env: Record<string, string | undefined> };
+
 // Keep native scrollbars visible: headless Chromium normally hides the gutter.
 test.use({ channel: process.env.HYPERCOM_E2E_CHANNEL, launchOptions: { ignoreDefaultArgs: ['--hide-scrollbars'] } });
 
@@ -138,7 +141,7 @@ test('linked Pins preserve existing follow and keep the latest RX row visible af
   await expect(pins.nth(1)).toHaveAttribute('aria-pressed', 'true');
   const samples = await page.evaluate(async () => {
     const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
-    const results = [];
+    const results: { gap: number; latestVisible: boolean }[] = [];
     for (let batch = 0; batch < 12; batch++) {
       for (const port of ['COM1', 'COM2']) getViewportManager(port).appendLines(Array.from({ length: 40 }, (_, i) => ({ timestamp: Date.now(), direction: 'RX', rawData: new TextEncoder().encode(`batch ${batch} row ${i}`), isHex: false })));
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -212,7 +215,7 @@ test.describe('time linking with real scrolling input', () => {
       return c.getSnapshot().groups[0].members.every(member => !member.pending && !member.inFlight);
     })).toBe(true);
     const initial = await follower.evaluate(element => element.scrollTop);
-    const geometry = await driver.evaluate(element => {
+    const geometry = await driver.evaluate((element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
       const gutter = element.offsetWidth - element.clientWidth;
       const thumbHeight = element.clientHeight * element.clientHeight / element.scrollHeight;

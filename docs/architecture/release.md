@@ -53,9 +53,9 @@ flowchart TD
 
 ## 日常质量门（ci.yml）
 
-日常 CI 与两条发版流共享部分检查，但**并非逐步骤相同**。以下按当前 workflow 的实际命令区分；生产构建、release-profile 检查与浏览器 e2e 不应推断为所有工作流都独立执行。
+`ci.yml` 同时是分支 CI 入口和 stable/preview 发版流调用的 reusable workflow。发版流在 `prepare-release` 之前调用它；质量门任一 job 失败就不会创建 draft，后续 finalize 也会因上游跳过而保持 fail-closed。这样 tag 发布不会绕过日常质量门，也不维护第二份容易漂移的检查清单。
 
-- **触发**：`push`（`branches: ['**']`，覆盖所有分支）、`pull_request`、`workflow_dispatch`。分支过滤而非裸 `push`：tag push 已由发版流自己的质量门（tsc + vitest + `cargo test --lib`）覆盖，CI 再跑一遍只是重复占 runner。
+- **触发**：`push`（`branches: ['**']`，覆盖所有分支）、`pull_request`、`workflow_dispatch`、`workflow_call`。分支过滤而非裸 `push`：tag push 不单独触发该入口，但 stable/preview 发布流会以 tag 的同一 commit 调用本 workflow，并在 `prepare-release` 前阻断失败流程。
 - **concurrency**：`group: ci-${{ github.workflow }}-${{ github.ref }}`；`cancel-in-progress` 仅对 `pull_request` 为真——同一 PR 的旧运行被新提交取代，分支 push 不取消（避免发布前门禁被中断）。
 - **job `frontend`**（ubuntu-latest）：`npm ci` → 三个独立类型检查（`npx tsc --noEmit`、`npx tsc --noEmit -p tsconfig.node.json`、`npx tsc --noEmit -p tsconfig.e2e.json`）→ `npm run test:run` → `node --test scripts/release.test.mjs` → `npm run build`（`tsc && vite build`，生产前端产物）。Node 工具与浏览器 e2e 分开类型环境；e2e 配置继承应用配置、映射 Vite 的 `/src/*` URL 到真实源码类型，不以 `any` 或排除测试绕过检查。
 - **job `rust`**（ubuntu-latest / windows-latest 矩阵，`fail-fast: false`）：仅 Linux 装 `libwebkit2gtk-4.1-dev` / `libayatana-appindicator3-dev` / `librsvg2-dev` / `patchelf` / `xdg-utils` / `libudev-dev` → Rust stable（含 clippy）+ rust-cache → `npm ci`（tauri-build 在 test profile 下仍读 `tauri.conf.json`，前端依赖先就位）→ `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings` → `cargo check --release --lib --manifest-path src-tauri/Cargo.toml`。最后一步检查 release 专属编译路径，不运行 release 程序。`--lib` 在 Linux 上会执行 `#[cfg(not(target_os = "windows"))]` 的串口/TTY 测试，Windows 本地开发环境跑不到；Windows 项覆盖 Windows 专属测试与原生适配代码的编译/lint，不自动运行被忽略的原生 smoke。
@@ -66,11 +66,12 @@ flowchart TD
 
 | 阶段 | stable（publish.yml） | preview（publish-preview.yml） |
 |---|---|---|
-| `prepare-release` | `node --test scripts/release.test.mjs` → `node scripts/release.mjs prepare stable "$RELEASE_TAG"` | 同一脚本测试 → `node scripts/release.mjs prepare preview "$RELEASE_TAG"` |
-| 每个构建矩阵项 | `npm ci` → `npx tsc --noEmit` → `npm run test:run` → `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `tauri-apps/tauri-action@v1` 打包 | 相同检查命令与打包 action，但矩阵参数按上文区分 |
+| `quality` reusable job | 调用当前 tag 的 `ci.yml`，完整执行 frontend、Linux/Windows Rust 和 Playwright 质量门 | 同一 reusable quality gate |
+| `prepare-release` | 质量门成功后执行 `node --test scripts/release.test.mjs` → `node scripts/release.mjs prepare stable "$RELEASE_TAG"` | 质量门成功后执行同一脚本测试 → `node scripts/release.mjs prepare preview "$RELEASE_TAG"` |
+| 每个构建矩阵项 | 保留 `npm ci` → `npx tsc --noEmit` → `npm run test:run` → `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `tauri-apps/tauri-action@v1`，用于各打包 runner 的本地环境复核 | 相同检查命令与打包 action，但矩阵参数按上文区分 |
 | `finalize-release` | `node scripts/release.mjs finalize stable "$RELEASE_TAG" "$RELEASE_ID"` | `node scripts/release.mjs finalize preview "$RELEASE_TAG" "$RELEASE_ID"` |
 
-发版矩阵没有独立 `npm run build` / `cargo check --release --lib` 步骤；生产前端构建由 Tauri 打包的 `beforeBuildCommand` 执行，release Rust 编译由打包执行。两条发版流均不跑 Playwright。stable 的已发布只读验证另行执行 `node ../scripts/release.mjs verify stable "$RELEASE_TAG"`（在 `released-source` 中，使用默认分支 verifier 与所选 tag 的公钥）。
+完整质量门现在由 reusable `ci.yml` 负责，包含三套 TypeScript 检查、Vitest、release gate tests、生产前端构建、Linux/Windows `cargo test`、Clippy、release-profile `cargo check` 和 Playwright。发版矩阵仍保留自身的 tsc/Vitest/cargo test 与 Tauri 打包，确保每个发布 runner 的本地环境和目标产物仍被实际验证；生产前端构建还会由 Tauri 的 `beforeBuildCommand` 再执行一次。stable 的已发布只读验证另行执行 `node ../scripts/release.mjs verify stable "$RELEASE_TAG"`（在 `released-source` 中，使用默认分支 verifier 与所选 tag 的公钥）。
 
 ## 发版操作步骤
 
@@ -185,7 +186,7 @@ updater **先验签名再安装**——直接换 pubkey 会让旧客户端对新
 
 | 文件 | 作用 |
 |------|------|
-| `.github/workflows/ci.yml` | 日常质量门（分支 push / PR / 手动；frontend 含生产构建与 release 脚本测试，rust 含 release-profile 类型检查，e2e 为 mock IPC Playwright；tag push 不跑） |
+| `.github/workflows/ci.yml` | 统一质量门（分支 push / PR / 手动 / workflow_call；frontend 含三套类型检查、生产构建与 release 脚本测试，rust 含 Linux/Windows 测试、Clippy 与 release-profile 类型检查，e2e 为 mock IPC Playwright） |
 | `.github/workflows/publish.yml` | stable：预检→draft→矩阵→finalize 验签/单写清单→人工发布；发布后补充只读验证 |
 | `.github/workflows/publish-preview.yml` | preview：相同门禁，finalize 成功后自动公开 prerelease |
 | `.github/workflows/recover-preview.yml` | 未发布 preview 的受控 finalize 恢复；核对原构建与不变 tag，再完整验签、发布及只读验证 |

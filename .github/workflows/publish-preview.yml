@@ -10,7 +10,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Preview push must pass the exact same full quality gate as branch CI before
+  # prepare-release creates a draft.
+  quality:
+    name: full quality gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   prepare-release:
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: write
