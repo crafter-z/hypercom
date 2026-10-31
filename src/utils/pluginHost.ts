@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 一个启用插件 = 一个 `PluginSession`：后端读 manifest.entry → Blob URL → `Worker`
- *   （评审 v2 P6 加载路径；生产 CSP `script-src 'self' blob:` 已放行，见 D8）。
+ *   （评审 v2 P6 加载路径；生产 CSP `script-src 'self' 'wasm-unsafe-eval' blob:` 已放行，见 D8）。
  * - RPC 桥：宿主 API 调用（worker 侧 `plugin.api.<op>(...)`）→ 本层执行
  *   `{seq, op, args}` 消息；**调用时权限校验**（评审 v2 P7）——每次 RPC 按当前
  *   插件 grantedPermissions 决定放行，撤销即时生效（worker 内旧引用不残留）。

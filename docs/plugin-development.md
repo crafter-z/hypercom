@@ -19,7 +19,7 @@
 
 ## 运行模型
 
-- 有根 Worker 的启用插件对应主窗口中的一个 Web Worker；纯网页插件没有 Worker（见[可信网页模式](#可信网页模式windows)）。入口是**单文件普通脚本**，不是 ESM；不能在运行时使用 `import` / `require`，也不直接加载 npm 包。使用 TypeScript 或第三方依赖时，先在自己的构建流程中打包为普通脚本，再把产物作为 entry。
+- 有根 Worker 的启用插件对应主窗口中的一个 Web Worker；纯网页插件没有 Worker（见[可信网页模式](#可信网页模式windows)）。入口是**单文件普通脚本**，不是 ESM；不能在运行时使用 `import` / `require`，也不直接加载 npm 包。使用 TypeScript 或第三方依赖时，先在自己的构建流程中打包为普通脚本，再把产物作为 entry。生产与开发 CSP 已允许 Worker 内的 WebAssembly 编译/实例化；插件仍需自行把 `.wasm` 作为包内资产，通过 `fs.read({format:'binary'})` 加载，并处理 RX 丢包/gap。
 - 每次安装、升级或用户确认替换都会生成新的安装身份（`installGeneration`）并重置授权（含可信网页信任）；旧身份下排队或迟到的操作会被拒绝，Worker 内存状态也不跨安装身份保留。
 - 宿主注入 Worker 的 `self.plugin`。Worker 无 DOM、window、Tauri invoke 或 localStorage；不要操作宿主 React/store，不要覆盖桥使用的 self.onmessage/self.plugin。
 - 可声明侧边栏按钮、端口菜单、文本面板及隔离视图。隔离 UI 有自己的 DOM 和浏览器上下文，可以使用打包后的 React/Vue/普通 JS，但不访问主窗 DOM 或 Tauri 通用接口。Windows 原生承载已实现，其他平台在隔离策略验收前明确拒绝；桌面弹出窗不运行插件。
