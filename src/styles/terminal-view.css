@@ -238,7 +238,9 @@
 .terminal-filter-bar {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
   padding: var(--space-1) var(--space-2);
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
@@ -246,17 +248,56 @@
   flex-shrink: 0;
 }
 
-.terminal-filter-spacer {
-  flex: 1;
+.terminal-direction-select {
+  flex: 0 0 64px;
+  width: 64px;
+  min-width: 0;
+  padding-left: 6px;
+  padding-right: 18px;
+  background-position: right 4px center;
+}
+
+.terminal-filter-bar > .toolbar-input {
+  flex: 1 1 100px;
+  min-width: min(80px, 100%);
+  max-width: 240px;
+}
+
+.terminal-filter-bar > .plugin-view-picker {
+  flex: 0 1 auto;
+  max-width: min(120px, 100%);
+}
+
+.terminal-filter-bar .plugin-view-picker-trigger { max-width: 100%; }
+.terminal-filter-count { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+.terminal-filter-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
 }
 
 /* Per-tab display controls (scroll lock / timestamp / string-HEX) cluster. */
 .terminal-filter-display-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
   flex-shrink: 0;
 }
+
+.terminal-filter-actions .terminal-bar-field {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.terminal-filter-actions .terminal-bar-select { min-width: 0; max-width: 100%; }
 
 /* "Paused" indicator with a soft pulse so the frozen state reads at a glance */
 .terminal-filter-paused {

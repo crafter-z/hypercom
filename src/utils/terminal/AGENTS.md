@@ -50,9 +50,14 @@ TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入�
    `TERMINAL_REBUILD_CHUNK_SIZE` 分块、可取消，扫描期间新行只增量匹配并在完成时合并；
    clear/replace/新条件/销毁淘汰旧任务。搜索 membership Set 同步随chunk/append/trim维护，
    不在滚动或每个RX帧重建。搜索只在 `searchOpen && query` 时维护。
-6. **同帧钉底**：`followEnabled = locked && !searchOpen`；钉底在 `render()` 内设置
+6. **同帧钉底**：`followEnabled = !paused && locked && !gestureActive`；搜索框可保持打开，
+   命中导航须先解除跟随再定位，关闭搜索不复锁。钉底在 `render()` 内设置
    scrollTop（0 帧延迟）。手势期间 `gestureActive=true` 抑制钉底；settle 由 TerminalView
-   在 120ms 静默后评估 atBottom → 写 store scrollLocked。
+   在 120ms 静默后评估 atBottom → 写 store scrollLocked。时间组不复用残留独立锁：
+   协调器仅在兼容 LIVE 且与参考来源有效偏移相同时通过 `setTimelineLiveFollow` 授权
+   同帧 RX 钉底；BROWSE/暂离/不兼容/相对偏移目标撤销授权。LIVE seek 的 ACK 必须取
+   本次 render 后实际末行 seq/time，不能固定在追加前 lookup 的旧 seq。暂停和选区
+   保护继续抑制该跟随通道；搜索命中导航在 seek 前撤销跟随，搜索框可见性本身不参与抑制。
 7. **实例生命周期**：模块级 `managers` Map 持有每端口实例；TerminalView 挂载时
    `attachRenderer(container, config)`、卸载时 `detachRenderer()`（缓冲保留）；
    **只有**标签关闭 / TRX→TTY 模式切换调 `releaseViewportManager`（销毁缓冲）。

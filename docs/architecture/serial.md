@@ -29,7 +29,7 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► open_serial_
 | `serial/events.rs` | 前端事件载荷与派发助手（`serial:data` / `serial:status` / `serial:reconnect_hint`）+ RX 数据落盘；`PortStatus` 枚举收口状态字符串 |
 | `serial/ports_real.rs` | 真实串口：`SerialPortHandle` 读写句柄拆分、帧格式映射、热插拔幽灵句柄回收、`open_blocking` / `reconnect_blocking` / `enumerate_system_ports` |
 | `serial/ports_windows.rs` | Windows 默认端口列表：按 `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM` 的值枚举顺序返回 COM 端口，与 SuperCom 的 .NET `SerialPort.GetPortNames()` 路径对齐；`is_com_name` 只放行 `COM<数字>`，`dedupe_names` 按不区分大小写保留首次出现；`serialport::available_ports`（SetupAPI）仅补充 USB 元数据，键/元数据缺失都不影响枚举成员与顺序 |
-| `serial/ports_sim.rs` | 模拟串口 SIM:Loopback：回显 + 周期输出（`parse_sim_rate_command` / `sim_due_lines`） |
+| `serial/ports_sim.rs` | 两路模拟串口 SIM:Loopback / SIM:Loopback2：独立回显 + 周期输出（`virtual_port_infos` / `parse_sim_rate_command` / `sim_due_lines`） |
 | `serial/ports_tty.rs` | 模拟终端 GIT:BASH 的打开/关闭/读写路由与行结束符归一（pty 细节在 `tty_sim`） |
 | `serial/tty_sim.rs` | `TtySimPortHandle`：`portable-pty` 0.9（Windows = ConPTY）spawn 本地 git bash pty、DSR 应答、尺寸调整 |
 
@@ -105,7 +105,8 @@ openPort(portId, baud)
 
 - `enable_simulation` / `disable_simulation`（`commands/simulation.rs`）创建虚拟串口，flask 图标在侧边栏工具栏（`useSimulation` hook）。
 - **能力门控（仅 debug 构建可用）**：前端 `DEV_FEATURES_ENABLED = import.meta.env.DEV`（`utils/devMode.ts`）隐藏全部 SIM UI 并在 hook 内兜底 no-op；后端命令入口由 `commands/system_cmds.rs` 的 **`dev_only(capability)`** 守卫拒绝 release 构建——**`dev_only()` / `is_debug_build()` 是构建期能力门控的唯一实现**，命令体只有一份实现，不得再写 `#[cfg(debug_assertions)]` 双主体。端口层另有第二道门 `check_virtual_enabled`（见「模块布局与端口类别分派」）；仅 `npm run tauri dev` 可用。
-- **周期输出频率命令**：向 SIM:Loopback 发送**文本模式纯数字**（trim 后为数字，如 `100`）即把周期输出频率切到每秒 N 次（0 = 停止；上限 `MAX_SIM_RATE = 10000`，超限 clamp），命令本身不回显——输出为 `[SIM] Heartbeat #<seq>` 序号行，积分器补发保证平均频率精确（`sim_due_lines` 纯函数，100ms 循环节拍不限制高频）。HEX 模式/非数字 TX 保持原回显。默认 2/s。
+- 开启模拟模式后同时枚举 `SIM:Loopback` 与 `SIM:Loopback2`，各自拥有独立连接代次、消息队列、输出频率与心跳序号；单路停止输出或断开不影响另一路。关闭模拟模式仍统一关闭并移除全部 SIM 会话。
+- **周期输出频率命令**：向任一路模拟串口发送**文本模式纯数字**（trim 后为数字，如 `100`）即把周期输出频率切到每秒 N 次（0 = 停止；上限 `MAX_SIM_RATE = 10000`，超限 clamp），命令本身不回显——输出为 `[SIM] Heartbeat #<seq>` 序号行，积分器补发保证平均频率精确（`sim_due_lines` 纯函数，100ms 循环节拍不限制高频）。HEX 模式/非数字 TX 保持原回显。默认 2/s。
 - GIT:BASH 读线程在 EOF/错误/正常停止后先把 `running` 置 false，再发 disconnected；bash 自行 `exit` 后可以重新打开，不会把已退出会话误判为存活句柄。
 
 ## 外部工具（flasher）

@@ -90,6 +90,7 @@ export function createTrxTimelineAdapter(
       return manager.seekTimeline(request);
     },
     setGrouped: (grouped) => manager.setTimelineGrouped(grouped),
+    setLiveFollow: (enabled) => manager.setTimelineLiveFollow(enabled),
     onUserNavigation: options.onUserNavigation,
   });
   const unsubscribe = manager.subscribeReadouts(refreshSource);

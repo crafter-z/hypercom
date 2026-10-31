@@ -27,7 +27,8 @@ export function isAtBottom(
 
 /**
  * Whether auto-follow may run: not paused (frozen view), follow engaged,
- * no active user gesture, and no open search bar. The follow *pin target*
+ * no active user gesture. Search visibility is not a blocker: explicit match
+ * navigation releases follow before seeking. The follow *pin target*
  * itself is computed inline in `TerminalRenderer.render` (padding-aware
  * same-frame pin) — there is no pure-function indirection for it because the
  * renderer already owns the container geometry at that point.
@@ -36,7 +37,6 @@ export function shouldFollow(
   paused: boolean,
   follow: boolean,
   gestureActive: boolean,
-  searchOpen: boolean,
 ): boolean {
-  return !paused && follow && !gestureActive && !searchOpen;
+  return !paused && follow && !gestureActive;
 }

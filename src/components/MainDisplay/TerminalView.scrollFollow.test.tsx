@@ -92,6 +92,23 @@ async function group(...slots: string[]) {
 async function key(element: HTMLElement, value: string, ctrlKey = false) {
   await act(async () => { element.dispatchEvent(new KeyboardEvent('keydown', { key: value, ctrlKey, bubbles: true })); });
 }
+async function searchQuery(host: HTMLElement, query: string) {
+  const input = host.querySelector<HTMLInputElement>('.terminal-search-input')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, query);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await frame(12); // debounce the actual controlled input, not a direct manager shortcut
+  await frame(2);
+  return input;
+}
+async function append(view: Awaited<ReturnType<typeof mount>>, start: number) {
+  await act(async () => { view.manager.appendLines(Array.from({ length: 20 }, (_, i) => ({
+    timestamp: start + i, direction: 'RX' as const,
+    rawData: new TextEncoder().encode(`new row ${start + i}`), isHex: false,
+  }))); });
+  await frame();
+}
 
 describe('TerminalView existing Pin + linked scrolling', () => {
   it('enables grouped Pins and derives their pressed state from group LIVE, not stale local locks', async () => {
@@ -144,16 +161,71 @@ describe('TerminalView existing Pin + linked scrolling', () => {
     expect(a.pin().getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('opening search enters browse and closing it does not restart group follow', async () => {
+  it.each([false, true])('opening, typing and closing search preserve actual append-follow (grouped=%s)', async grouped => {
     const a = await mount('a');
-    await group('a');
-    await click(a.pin());
+    if (grouped) { await group('a'); await click(a.pin()); }
     await key(a.container, 'f', true);
-    expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('browse');
-    await key(a.container, 'Escape');
-    await frame(12);
+    expect(a.pin().getAttribute('aria-pressed')).toBe('true');
+    const input = await searchQuery(a.host, 'line 70');
+    expect(a.manager.getMatchCount()).toBe(1);
+    expect(a.pin().getAttribute('aria-pressed')).toBe('true');
+    const before = a.container.scrollTop;
+    await append(a, 3000);
+    expect(a.container.scrollTop).toBeGreaterThan(before);
+    expect(a.manager.readTimelineAnchor('end')?.recordKey).toBe(String(a.manager.buffer.lastSeq));
+    if (grouped) expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('live');
+    await key(input, 'Escape');
+    expect(a.host.querySelector('.terminal-search-input')).toBeNull();
+    await append(a, 4000);
+    expect(a.pin().getAttribute('aria-pressed')).toBe('true');
+    expect(a.manager.readTimelineAnchor('end')?.recordKey).toBe(String(a.manager.buffer.lastSeq));
+    if (grouped) expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('live');
+  });
+
+  it.each([false, true])('search hits unlock before seeking, stay unlocked, and Pin restarts while search stays open (grouped=%s)', async grouped => {
+    const a = await mount('a');
+    if (grouped) { await group('a'); await click(a.pin()); }
+    await key(a.container, 'f', true);
+    const input = await searchQuery(a.host, 'line 70');
+    expect(a.manager.getMatchCount()).toBe(1);
+    const originalJump = a.manager.jumpToMatch.bind(a.manager);
+    const followAtSeek: boolean[] = [];
+    vi.spyOn(a.manager, 'jumpToMatch').mockImplementation(index => {
+      followAtSeek.push(grouped
+        ? timelineCoordinator.groupForSlot('a')?.mode === 'live'
+        : useTerminalStore.getState().terminals.a.scrollLocked);
+      return originalJump(index);
+    });
+    const tail = a.container.scrollTop;
+    await key(input, 'Enter');
+    expect(followAtSeek).toEqual([false]);
     expect(a.pin().getAttribute('aria-pressed')).toBe('false');
-    expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('browse');
+    expect(a.container.scrollTop).toBeLessThan(tail);
+    expect(a.manager.readTimelineAnchor()?.recordKey).toBe('70');
+    await frame(12); // quiet settle must not silently restore Pin
+    const hitTop = a.container.scrollTop;
+    await append(a, 3000);
+    expect(a.container.scrollTop).toBe(hitTop);
+    expect(a.pin().getAttribute('aria-pressed')).toBe('false');
+    if (grouped) expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('browse');
+    else expect(useTerminalStore.getState().terminals.a.scrollLocked).toBe(false);
+
+    await click(a.pin());
+    expect(a.host.querySelector('.terminal-search-input')).not.toBeNull();
+    expect(a.pin().getAttribute('aria-pressed')).toBe('true');
+    await append(a, 4000);
+    expect(a.manager.readTimelineAnchor('end')?.recordKey).toBe(String(a.manager.buffer.lastSeq));
+    expect(a.container.querySelector(`[data-seq="${a.manager.buffer.lastSeq}"]`)).not.toBeNull();
+
+    await key(input, 'Enter');
+    await frame(12);
+    const secondHitTop = a.container.scrollTop;
+    await key(input, 'Escape');
+    await append(a, 5000);
+    expect(a.container.scrollTop).toBe(secondHitTop);
+    expect(a.pin().getAttribute('aria-pressed')).toBe('false');
+    if (grouped) expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('browse');
+    else expect(useTerminalStore.getState().terminals.a.scrollLocked).toBe(false);
   });
 
   it('disables incompatible replay/mixed group LIVE with an explanatory title', async () => {

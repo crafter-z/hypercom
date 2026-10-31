@@ -222,11 +222,18 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     setSearchQuery, toggleCase, openSearch, toggleSearch, closeSearch,
     nextMatch, prevMatch,
   } = useTerminalSearch({ vm,
-    onOpen: useCallback(() => {
-      configRef.current.onUserNavigation?.();
-      if (groupIdRef.current) timelineCoordinator.setMode(groupIdRef.current, 'browse');
-    }, []),
-    onNavigate: useCallback(() => navigationRef.current?.commitPosition(), []),
+    onNavigate: useCallback(() => {
+      navigationRef.current?.cancel();
+      if (groupIdRef.current) {
+        // Acquire browsing authority before seeking; a LIVE tick must not undo the hit.
+        navigationRef.current?.commitPosition();
+      } else {
+        // Search navigation holds even a tail hit until the user explicitly pins again.
+        configRef.current.onUserNavigation?.();
+        vm.setLocked(false);
+        configRef.current.updateTerminalConfig({ scrollLocked: false });
+      }
+    }, [vm]),
   });
 
   // Explicit intent owns the lease. Bare scroll only samples that lease, never
@@ -440,10 +447,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     }
   }, []);
 
-  const handleSearchClose = useCallback(() => {
-    closeSearch();
-    if (scrollLocked && !groupId) vm.scrollToBottom();
-  }, [closeSearch, scrollLocked, groupId, vm]);
+  const handleSearchClose = closeSearch;
 
   // Ctrl+L clear · Ctrl+F search · F3/Shift+F3 step · Esc close.
   const handleKeyDown = useCallback(

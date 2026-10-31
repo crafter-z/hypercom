@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Link2, Settings2, X } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
+import { useTerminalStore } from '../../stores/useTerminalStore';
 import { timelineCoordinator, type DragSyncPolicy } from '../../utils/timeline';
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 import { safeCssColor } from '../../utils/cssColor';
@@ -38,8 +39,8 @@ export const TimelineButton: React.FC<{ tabId: string }> = ({ tabId }) => {
   const groupLabel = useGroupLabel(tabId);
   const groupColor = useSyncExternalStore(timelineCoordinator.subscribe, () => safeCssColor(timelineCoordinator.groupForSlot(tabId)?.color) ?? '');
   return <button type="button" className={`icon-btn timeline-entry${groupId ? ' active' : ''}`}
-    style={{ color: groupColor || undefined }} aria-label={t('timeline.manage')} title={t('timeline.manage')} onClick={() => openTimelinePanel(tabId)}>
-    <Link2 size={13} /><span aria-hidden="true">{groupLabel || '\u00a0'}</span>
+    style={{ color: groupColor || undefined }} aria-label={t('timeline.manage')} title={groupLabel ? `${groupLabel} · ${t('timeline.manage')}` : t('timeline.manage')} onClick={() => openTimelinePanel(tabId)}>
+    <Link2 size={13} />
   </button>;
 };
 
@@ -126,8 +127,14 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
       } else {
         const origin = selectedSlots.includes(slotId) ? slotId : selectedSlots[0];
         const anchor = timelineCoordinator.readSlotAnchor(origin);
+        const originGroup = timelineCoordinator.groupForSlot(origin);
+        const originTab = tabs.find(tab => tab.id === origin);
+        // Joining a group must not silently turn an already pinned live view into history browsing.
+        const following = originGroup ? originGroup.mode === 'live'
+          : originTab?.kind === 'serial' && useTerminalStore.getState().terminals[originTab.portId]?.scrollLocked === true;
         const colors = ['#60a5fa', '#f59e0b', '#34d399', '#c084fc', '#fb7185'];
-        timelineCoordinator.createGroup({ name: name.trim() || `G${snapshot.groups.length + 1}`, color: colors[snapshot.groups.length % colors.length], memberSlots: selectedSlots, anchor: anchor ?? undefined, originSlotId: origin, referenceSourceId: timelineCoordinator.participantForSlot(origin)?.sourceId });
+        const id = timelineCoordinator.createGroup({ name: name.trim() || `G${snapshot.groups.length + 1}`, color: colors[snapshot.groups.length % colors.length], memberSlots: selectedSlots, anchor: anchor ?? undefined, originSlotId: origin, referenceSourceId: timelineCoordinator.participantForSlot(origin)?.sourceId });
+        if (following && timelineCoordinator.canSetLive(id)) timelineCoordinator.setMode(id, 'live');
       }
       closePanel();
     });

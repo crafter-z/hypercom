@@ -17,7 +17,7 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 
 过滤计数未冻结直接 length-offset，冻结使用 upper_bound；搜索 membership Set 随 append/chunk/trim 增量维护，不在纯滚动或每帧 RX 重建。大数据过滤、搜索及索引按共享预算可取消分块重建，`isLoading` 标记状态；只有小缓冲保持同步扫描。
 
-`seekTimeline` 合并每帧最新目标，并在实际 render pass 后 ACK；取消、clear/replace、换源或销毁淘汰旧请求。geometry → visible index → seq → timestamp 读取中心锚点，不 snapshot 全历史。有效选区返回 held，释放后只应用最新目标。时间组有效跟随独立于 scrollLocked，grouped 时不受独立 Pin 或成员到尾 settle 重新启用。
+`seekTimeline` 合并每帧最新目标，并在实际 render pass 后 ACK；取消、clear/replace、换源或销毁淘汰旧请求。geometry → visible index → seq → timestamp 读取中心锚点，不 snapshot 全历史。有效选区返回 held，释放后只应用最新目标。时间组有效跟随独立于成员残留 scrollLocked，由协调器 `setLiveFollow` 显式授权：LIVE 中与参考来源有效偏移相同的 TRX 复用 renderer 同帧钉底，RX 追加不等待定时 seek；LIVE ACK 使用实际渲染的末行，而非追加前查出的旧 seq。BROWSE、暂离、不兼容或具有相对时间偏移的目标不启用本地尾随；后者仍按组时间定位。暂停和选区继续抑制跟随；搜索框本身不禁止跟随，只有显式搜索命中导航先解锁或停止组 LIVE，再定位。
 
 renderer 使用有界物理高度映射，避免百万行 × 大字号直接要求无限 CSS spacer；首/中/尾可达与映射单调需要真实浏览器验证。`TerminalPerformance.test.ts` 通过环境变量显式启用，只观测索引/计数与 jsdom CPU 样本，不代表 WebView2 FPS。完整组协议与只读导入边界见[时间联动](timeline.md)。
 
@@ -60,7 +60,7 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 ## 滚动锁定 / 快捷跳转
 
 - `scrollLocked` 仅由显式意图写入：图钉按钮、`.terminal-jump-btn` 跳转按钮、手势 settle（120ms 静默后判定），拖选起点（按下行）也显式解锁；**无 onScroll 隐式解锁**。
-- 跟随路径由 `TerminalRenderer` **同帧钉底**（render() 内 scrollTop = totalHeight - clientHeight，无 React effect、无双 rAF 链；搜索栏打开时 followEnabled=false 抑制）。
+- 跟随路径由 `TerminalRenderer` **同帧钉底**（render() 内 scrollTop = totalHeight - clientHeight，无 React effect、无双 rAF 链；搜索栏可保持打开，不单独抑制跟随）。
 - settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`shouldFollow`（`utils/followLogic.ts`）；钉底目标值本身由 `TerminalRenderer.render` 内联计算（padding 感知、同帧写 scrollTop），不再有第二份纯函数拷贝。
 - 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮）。
 - 手势 settle：滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定。
@@ -90,6 +90,10 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 - `maxDisplayLines` = 每端口终端最大显示行数（默认 100000，clamp [1000,1000000]；Rust `max_display_lines` + `#[serde(default)]` 缺省回退）。**删除** `memoryLimitMb`/`memoryPerPortBudgetMb` 双内存预算——升级时 `ConfigManager::new` 的 `strip_legacy_memory_budget_keys` 显式剥离旧配置项。
 - 缓冲超限**逐行覆盖最旧一条**（滚动窗口，firstSeq 每 append +1）；`appendLines`/`appendTerminalLines` 返回 boolean；**无「因内存限制清屏」toast**（逐行覆盖是常态滚动，不是异常事件——issue #16 曾整夜误报的根因）。
 - 状态栏内存显示「JS堆 XMB · 进程 YMB」（无总预算分母）；`load_status` 只按 CPU>90 判 high_load。
+
+## 工具栏布局
+
+`TerminalFilterBar` 使用紧凑的收发方向下拉（全部 / 仅 TX / 仅 RX），不再为三个选项常驻占宽。关键词输入可收缩，显示控件按功能组布局；工具栏及显示组按所在 pane 的实际可用宽度自然换行，不依赖整窗断点、不横向滚动，也不通过裁切隐藏按钮。可选插件视图选择器限制宽度并省略长名称。暂停状态和过滤计数出现时同样遵循该布局；改宽不会重建组件或重置过滤/显示状态。
 
 ## 显示态归属
 

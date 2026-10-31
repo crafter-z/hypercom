@@ -25,17 +25,19 @@ use crate::commands::OpenPortArgs;
 pub(crate) mod codec;
 pub(crate) mod events;
 mod ports_real;
-#[cfg(windows)]
-mod ports_windows;
 mod ports_sim;
 mod ports_tty;
+#[cfg(windows)]
+mod ports_windows;
 pub(crate) mod tty_sim;
 
 pub use codec::{
     build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome,
     WRITE_TOTAL_DEADLINE,
 };
-pub(crate) use events::{emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus};
+pub(crate) use events::{
+    emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus,
+};
 pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
@@ -393,7 +395,7 @@ impl SerialManager {
     /// 把已启用的虚拟端口条目追加到系统端口列表之后。
     fn append_virtual_ports(&self, out: &mut Vec<PortInfo>) {
         if self.simulate {
-            out.push(ports_sim::virtual_port_info());
+            out.extend(ports_sim::virtual_port_infos());
         }
         if self.gitbash_sim {
             out.push(ports_tty::virtual_port_info());
@@ -448,6 +450,7 @@ mod tests {
         assert_eq!(PortKind::of("COM3"), PortKind::Real);
         assert_eq!(PortKind::of("/dev/ttyUSB0"), PortKind::Real);
         assert_eq!(PortKind::of("SIM:Loopback"), PortKind::Sim);
+        assert_eq!(PortKind::of("SIM:Loopback2"), PortKind::Sim);
         assert_eq!(PortKind::of("GIT:BASH"), PortKind::Tty);
         // 前缀必须从头匹配：包含 "SIM:" 的真实端口名不算虚拟端口
         assert_eq!(PortKind::of("XSIM:Loopback"), PortKind::Real);
@@ -636,6 +639,7 @@ mod tests {
                 .collect()
         };
         assert!(!ids(&m).iter().any(|id| id == "SIM:Loopback"));
+        assert!(!ids(&m).iter().any(|id| id == "SIM:Loopback2"));
         assert!(!ids(&m).iter().any(|id| id == "GIT:BASH"));
 
         {
@@ -645,6 +649,7 @@ mod tests {
         }
         let ids = ids(&m);
         assert!(ids.iter().any(|id| id == "SIM:Loopback"), "{ids:?}");
+        assert!(ids.iter().any(|id| id == "SIM:Loopback2"), "{ids:?}");
         assert!(ids.iter().any(|id| id == "GIT:BASH"), "{ids:?}");
 
         // 虚拟条目必须标记为 sim 类（前端据此启用模拟相关 UI）

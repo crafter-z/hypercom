@@ -215,6 +215,7 @@ const resources = {
       'terminal.search.counter': '{{current}}/{{total}}',
       'terminal.search.tooltip.shortcut': 'Ctrl+F · Enter 下一个 · Shift+Enter 上一个 · Esc 关闭',
 
+      'terminal.filter.direction': '收发方向',
       'terminal.filter.all': '全部',
       'terminal.filter.txOnly': '仅 TX',
       'terminal.filter.rxOnly': '仅 RX',
@@ -979,6 +980,7 @@ const resources = {
       'terminal.search.counter': '{{current}}/{{total}}',
       'terminal.search.tooltip.shortcut': 'Ctrl+F · Enter next · Shift+Enter previous · Esc close',
 
+      'terminal.filter.direction': 'Traffic direction',
       'terminal.filter.all': 'All',
       'terminal.filter.txOnly': 'TX only',
       'terminal.filter.rxOnly': 'RX only',

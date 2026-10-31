@@ -10,7 +10,7 @@ use super::system_cmds::dev_only;
 use super::CommandError;
 use crate::AppState;
 
-/// 启用模拟模式（在串口列表中添加 SIM:Loopback）
+/// 启用模拟模式（在串口列表中添加 SIM:Loopback 与 SIM:Loopback2）
 #[tauri::command]
 pub fn enable_simulation(state: State<AppState>) -> Result<(), CommandError> {
     dev_only("Simulation")?;

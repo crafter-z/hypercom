@@ -186,6 +186,7 @@ export class TimelineCoordinator {
     this.participants.delete(participant.participantId);
     if (this.slots.get(participant.slotId) === participant.participantId)
       this.slots.delete(participant.slotId);
+    participant.setLiveFollow?.(false);
     participant.setGrouped?.(false);
     this.publish();
   }
@@ -274,6 +275,7 @@ export class TimelineCoordinator {
     if (p) {
       this.scheduler.invalidate(p.participantId);
       if (group.owner === p.participantId) this.invalidateGroup(group);
+      p.setLiveFollow?.(false);
       p.setGrouped?.(false);
     }
     group.descriptor.memberSlots = group.descriptor.memberSlots.filter(
@@ -370,15 +372,17 @@ export class TimelineCoordinator {
     this.scheduleLive();
     this.publish();
   }
+  private liveReference(g: Group, members = g.descriptor.memberSlots
+    .map(slot => this.participantForSlot(slot))
+    .filter((participant): participant is TimelineParticipant => !!participant)): TimelineParticipant | undefined {
+    return members.find(participant => participant.sourceId === g.descriptor.referenceSourceId)
+      ?? members.find(participant => participant.clockId === HOST_CLOCK_ID && participant.sourceKind === 'live');
+  }
   private updateLiveGroup(g: Group, phase: TimelinePhase): void {
     const members = g.descriptor.memberSlots
       .map((s) => this.participantForSlot(s))
       .filter((p): p is TimelineParticipant => !!p);
-    const reference =
-      members.find((p) => p.sourceId === g.descriptor.referenceSourceId) ??
-      members.find(
-        (p) => p.clockId === HOST_CLOCK_ID && p.sourceKind === 'live',
-      );
+    const reference = this.liveReference(g, members);
     if (!reference) return;
     const timeMs = toGroupTime(Date.now(), this.mapping(g, reference.sourceId));
     g.committed = { timeMs };
@@ -802,52 +806,60 @@ export class TimelineCoordinator {
     this.scheduleLive();
     this.snapshot = {
       revision: ++this.revision,
-      groups: [...this.groups.values()].map((g) => ({
-        ...g.descriptor,
-        memberSlots: [...g.descriptor.memberSlots],
-        mappings: g.descriptor.mappings.map((m) => ({ ...m })),
-        mode: g.mode,
-        committedAnchor: g.committed ? { ...g.committed } : null,
-        previewAnchor: g.preview ? { ...g.preview } : null,
-        navigationEpoch: g.epoch,
-        mappingRevision: g.mappingRevision,
-        ownerParticipantId: g.owner,
-        members: g.descriptor.memberSlots.map((slotId) => {
-          const p = this.participantForSlot(slotId),
-            result = g.results.get(slotId);
-          return {
-            slotId,
-            participantId: p?.participantId,
-            sourceId: p?.sourceId,
-            state: g.detached.has(slotId)
-              ? 'temporarilyDetached'
-              : !p ||
-                  p.availability?.available === false ||
-                  p.availability?.visible === false ||
-                  !this.compatible(g, p)
-                ? 'unavailable'
-                : 'active',
-            reason:
-              p?.availability?.reason ??
-              (!p
-                ? 'adapter-unavailable'
-                : !this.compatible(g, p)
-                  ? 'mapping-required'
-                  : undefined),
-            ...result,
-            ...(p
-              ? this.scheduler.state(p.participantId)
-              : { pending: false, inFlight: false }),
-            preview: this.scheduler.previewsPaused
-              ? 'on-release'
-              : (g.tiers.get(slotId) ??
-                (g.descriptor.dragSyncPolicy === 'on-release' ||
-                p?.capabilities.preview !== 'bounded'
-                  ? 'on-release'
-                  : 'continuous')),
-          } as TimelineMemberSnapshot;
-        }),
-      })),
+      groups: [...this.groups.values()].map((g) => {
+        const reference = this.liveReference(g);
+        const referenceOffset = reference ? toGroupTime(0, this.mapping(g, reference.sourceId)) : undefined;
+        return {
+          ...g.descriptor,
+          memberSlots: [...g.descriptor.memberSlots],
+          mappings: g.descriptor.mappings.map((m) => ({ ...m })),
+          mode: g.mode,
+          committedAnchor: g.committed ? { ...g.committed } : null,
+          previewAnchor: g.preview ? { ...g.preview } : null,
+          navigationEpoch: g.epoch,
+          mappingRevision: g.mappingRevision,
+          ownerParticipantId: g.owner,
+          members: g.descriptor.memberSlots.map((slotId) => {
+            const p = this.participantForSlot(slotId),
+              result = g.results.get(slotId);
+            p?.setLiveFollow?.(g.mode === 'live' && !this.restoring
+              && p.sourceKind === 'live' && p.clockId === HOST_CLOCK_ID
+              && !g.detached.has(slotId) && p.availability?.available !== false && p.availability?.visible !== false
+              && this.compatible(g, p) && toGroupTime(0, this.mapping(g, p.sourceId)) === referenceOffset);
+            return {
+              slotId,
+              participantId: p?.participantId,
+              sourceId: p?.sourceId,
+              state: g.detached.has(slotId)
+                ? 'temporarilyDetached'
+                : !p ||
+                    p.availability?.available === false ||
+                    p.availability?.visible === false ||
+                    !this.compatible(g, p)
+                  ? 'unavailable'
+                  : 'active',
+              reason:
+                p?.availability?.reason ??
+                (!p
+                  ? 'adapter-unavailable'
+                  : !this.compatible(g, p)
+                    ? 'mapping-required'
+                    : undefined),
+              ...result,
+              ...(p
+                ? this.scheduler.state(p.participantId)
+                : { pending: false, inFlight: false }),
+              preview: this.scheduler.previewsPaused
+                ? 'on-release'
+                : (g.tiers.get(slotId) ??
+                  (g.descriptor.dragSyncPolicy === 'on-release' ||
+                  p?.capabilities.preview !== 'bounded'
+                    ? 'on-release'
+                    : 'continuous')),
+            } as TimelineMemberSnapshot;
+          }),
+        };
+      }),
     };
     for (const listener of this.listeners) listener();
   }
@@ -856,7 +868,10 @@ export class TimelineCoordinator {
     if (this.liveTimer) clearTimeout(this.liveTimer);
     this.liveTimer = undefined;
     this.scheduler.dispose();
-    for (const p of this.participants.values()) p.setGrouped?.(false);
+    for (const p of this.participants.values()) {
+      p.setLiveFollow?.(false);
+      p.setGrouped?.(false);
+    }
     this.participants.clear();
     this.slots.clear();
     this.groups.clear();

@@ -104,19 +104,15 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
     <div className="terminal-filter-bar">
       {viewPicker}
       {timelineControl}
-      <div className="segmented" role="group">
-        {DIRECTION_OPTIONS.map((d) => (
-          <button
-            key={d}
-            type="button"
-            className={`segmented-btn${direction === d ? ' active' : ''}`}
-            onClick={() => onDirectionChange(d)}
-            aria-pressed={direction === d}
-          >
-            {t(DIRECTION_LABEL_KEYS[d])}
-          </button>
-        ))}
-      </div>
+      <select
+        className="select terminal-bar-select terminal-direction-select"
+        aria-label={t('terminal.filter.direction')}
+        title={t('terminal.filter.direction')}
+        value={direction}
+        onChange={event => onDirectionChange(event.target.value as DirectionFilter)}
+      >
+        {DIRECTION_OPTIONS.map(d => <option key={d} value={d}>{t(DIRECTION_LABEL_KEYS[d])}</option>)}
+      </select>
       <input
         type="text"
         className="toolbar-input"
@@ -130,67 +126,66 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
           {t('terminal.filter.matchCount', { count: matchCount })}
         </span>
       )}
-      <div className="terminal-filter-spacer" />
-      {paused && (
-        <span className="terminal-filter-paused">
-          <span className="terminal-filter-paused-dot" />
-          {t('terminal.filter.paused')}
-        </span>
-      )}
-      <button
-        type="button"
-        className={`icon-btn${paused ? ' active-warn' : ''}`}
-        onClick={onTogglePause}
-        title={paused ? t('terminal.filter.resume') : t('terminal.filter.pause')}
-        aria-pressed={paused}
-      >
-        {paused ? <Play size={13} /> : <Pause size={13} />}
-      </button>
-      <span className="toolbar-sep" />
-      <div className="terminal-filter-display-group">
+      <div className="terminal-filter-actions">
+        {paused && (
+          <span className="terminal-filter-paused">
+            <span className="terminal-filter-paused-dot" />
+            {t('terminal.filter.paused')}
+          </span>
+        )}
         <button
           type="button"
-          className={`icon-btn${scrollLocked ? ' active' : ''}`}
-          title={t(scrollLockDisabled ? 'timeline.liveUnavailable' : grouped ? 'timeline.groupScrollLock' : 'paramsSection.scrollLock')}
-          disabled={scrollLockDisabled}
-          aria-pressed={!!scrollLocked}
-          onClick={onToggleScrollLock ?? (() => updateConfig({ scrollLocked: !scrollLocked }))}
+          className={`icon-btn${paused ? ' active-warn' : ''}`}
+          onClick={onTogglePause}
+          title={paused ? t('terminal.filter.resume') : t('terminal.filter.pause')}
+          aria-pressed={paused}
         >
-          <Pin size={13} />
+          {paused ? <Play size={13} /> : <Pause size={13} />}
         </button>
-        <button
-          type="button"
-          className={`icon-btn${showTimestamp ? ' active' : ''}`}
-          title={t('paramsSection.timestamp')}
-          aria-pressed={!!showTimestamp}
-          onClick={() => updateConfig({ showTimestamp: !showTimestamp })}
-        >
-          <Clock size={13} />
-        </button>
-        <div className="segmented" role="group">
-          <button type="button" className={`segmented-btn${displayFormat === 'hex' ? ' active' : ''}`}
-            onClick={() => updateConfig({ displayFormat: 'hex' })}>HEX</button>
-          <button type="button" className={`segmented-btn${displayFormat === 'string' ? ' active' : ''}`}
-            onClick={() => updateConfig({ displayFormat: 'string' })}>
-            {t('paramsSection.displayFormat.string')}
+        <div className="terminal-filter-display-group">
+          <button
+            type="button"
+            className={`icon-btn${scrollLocked ? ' active' : ''}`}
+            title={t(scrollLockDisabled ? 'timeline.liveUnavailable' : grouped ? 'timeline.groupScrollLock' : 'paramsSection.scrollLock')}
+            disabled={scrollLockDisabled}
+            aria-pressed={!!scrollLocked}
+            onClick={onToggleScrollLock ?? (() => updateConfig({ scrollLocked: !scrollLocked }))}
+          >
+            <Pin size={13} />
           </button>
+          <button
+            type="button"
+            className={`icon-btn${showTimestamp ? ' active' : ''}`}
+            title={t('paramsSection.timestamp')}
+            aria-pressed={!!showTimestamp}
+            onClick={() => updateConfig({ showTimestamp: !showTimestamp })}
+          >
+            <Clock size={13} />
+          </button>
+          <div className="segmented" role="group">
+            <button type="button" className={`segmented-btn${displayFormat === 'hex' ? ' active' : ''}`}
+              onClick={() => updateConfig({ displayFormat: 'hex' })}>HEX</button>
+            <button type="button" className={`segmented-btn${displayFormat === 'string' ? ' active' : ''}`}
+              onClick={() => updateConfig({ displayFormat: 'string' })}>
+              {t('paramsSection.displayFormat.string')}
+            </button>
+          </div>
         </div>
-      </div>
-      <span className="toolbar-sep" />
-      <div className="terminal-bar-field" title={t('pane.toolbar.encodingLabel')}>
-        <label className="eyebrow" htmlFor={`terminal-encoding-${configId ?? portId}`}>
-          {t('pane.toolbar.encodingLabel')}
-        </label>
-        <select
-          id={`terminal-encoding-${configId ?? portId}`}
-          className="select terminal-bar-select"
-          value={encoding || 'UTF-8'}
-          onChange={(e) => handleEncodingChange(e.target.value)}
-        >
-          {ENCODING_OPTIONS.map((enc) => (
-            <option key={enc} value={enc}>{enc}</option>
-          ))}
-        </select>
+        <div className="terminal-bar-field" title={t('pane.toolbar.encodingLabel')}>
+          <label className="eyebrow" htmlFor={`terminal-encoding-${configId ?? portId}`}>
+            {t('pane.toolbar.encodingLabel')}
+          </label>
+          <select
+            id={`terminal-encoding-${configId ?? portId}`}
+            className="select terminal-bar-select"
+            value={encoding || 'UTF-8'}
+            onChange={(e) => handleEncodingChange(e.target.value)}
+          >
+            {ENCODING_OPTIONS.map((enc) => (
+              <option key={enc} value={enc}>{enc}</option>
+            ))}
+          </select>
+        </div>
       </div>
     </div>
   );

@@ -113,6 +113,41 @@ describe('TerminalViewportManager pause', () => {
 });
 
 describe('TerminalViewportManager search', () => {
+  it('opening, editing and closing search preserve an engaged independent Pin', () => {
+    const typed = vm as unknown as { buildView(): { followEnabled: boolean } };
+    vm.setLocked(true);
+    vm.appendLines([makeLine('hello'), makeLine('other')]);
+    for (const [open, query] of [[true, ''], [true, 'hello'], [true, 'missing'], [false, '']] as const) {
+      vm.setSearch(open, query, false);
+      vm.appendLine(makeLine('hello again'));
+      expect(typed.buildView().followEnabled).toBe(true);
+    }
+  });
+
+  it('an actual match navigation stops independent follow and closing search does not re-lock', () => {
+    const typed = vm as unknown as { buildView(): { followEnabled: boolean } };
+    vm.setLocked(true);
+    vm.appendLines([makeLine('target'), makeLine('other')]);
+    vm.setSearch(true, 'target', false);
+    expect(typed.buildView().followEnabled).toBe(true);
+    expect(vm.jumpToMatch(0)).toBe(true);
+    expect(typed.buildView().followEnabled).toBe(false);
+    vm.setSearch(false, '', false);
+    vm.appendLine(makeLine('after navigation'));
+    expect(typed.buildView().followEnabled).toBe(false);
+    vm.setSearch(true, 'target', false);
+    vm.setLocked(true);
+    expect(typed.buildView().followEnabled).toBe(true);
+  });
+
+  it('empty search navigation does not disengage Pin', () => {
+    const typed = vm as unknown as { buildView(): { followEnabled: boolean } };
+    vm.setLocked(true);
+    vm.setSearch(true, 'no match', false);
+    expect(vm.jumpToMatch(0)).toBe(false);
+    expect(typed.buildView().followEnabled).toBe(true);
+  });
+
   it('finds matches incrementally while the search bar is open', () => {
     vm.setSearch(true, 'hello', false);
     vm.appendLines([makeLine('hello world'), makeLine('goodbye')]);

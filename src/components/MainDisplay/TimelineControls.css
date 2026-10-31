@@ -1,12 +1,10 @@
 /* Timeline membership stays in the existing toolbar; hot navigation adds no chrome. */
 .timeline-entry {
   display: inline-flex;
-  flex: 0 0 42px;
-  width: 42px;
-  gap: var(--space-1);
+  flex: 0 0 24px;
+  width: 24px;
   white-space: nowrap;
 }
-.timeline-entry span { min-width: 16px; font-size: var(--text-2xs); font-variant-numeric: tabular-nums; }
 .timeline-badge {
   display: inline-flex;
   align-items: center;

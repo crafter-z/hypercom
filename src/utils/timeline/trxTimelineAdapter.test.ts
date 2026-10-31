@@ -31,6 +31,7 @@ function setup() {
       actualTimeMs: r.timeMs,
     })),
     setTimelineGrouped: vi.fn(),
+    setTimelineLiveFollow: vi.fn(),
     subscribeReadouts: (cb: () => void) => {
       listeners.add(cb);
       return () => {

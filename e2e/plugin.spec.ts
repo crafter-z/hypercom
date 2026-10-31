@@ -94,7 +94,7 @@ const MOCK = `
         menuItems: [],
         views: [
           { id: 'tool', label: 'E2E Tool', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false },
-          { id: 'table', label: 'Sensor table', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'bytes', placements: ['workspace-tab'], portBinding: 'required', restoreOnStartup: false },
+          { id: 'table', label: 'Sensor table', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'bytes', placements: ['workspace-tab', 'serial-content'], portBinding: 'required', restoreOnStartup: false },
         ],
       },
     },
@@ -302,6 +302,44 @@ test.describe('插件系统（issue #17）', () => {
     await expect(page.locator('.plugin-view-picker-option-label').filter({ hasText: 'E2E Tool' })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('listbox', { name: '打开插件工具页…' })).toHaveCount(0);
+  });
+
+  test('终端插件选择器按内容占宽，与联动按钮没有预留空白', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openApp(page, ['ui:view', 'rx:bytes']);
+    await openCom1Tab(page);
+    await page.evaluate(async () => {
+      const { useAppStore } = await import('/src/stores/useAppStore.ts');
+      useAppStore.getState().openTab('COM2');
+      useAppStore.getState().splitPane('vertical');
+    });
+    const bar = page.locator('.terminal-filter-bar:visible').filter({ has: page.locator('.plugin-view-picker') }).first();
+    const trigger = bar.locator('.plugin-view-picker-trigger');
+    await expect(trigger).toBeVisible();
+    for (const language of ['zh-CN', 'en-US']) {
+      await page.evaluate(async language => {
+        const { default: i18n } = await import('/src/i18n.ts'); await i18n.changeLanguage(language);
+      }, language);
+      for (const width of [1440, 980, 620]) {
+        await page.setViewportSize({ width, height: 900 });
+        await expect.poll(() => bar.evaluate(element => {
+          const wrapper = element.querySelector('.plugin-view-picker')!.getBoundingClientRect();
+          const button = element.querySelector('.plugin-view-picker-trigger')!.getBoundingClientRect();
+          const link = element.querySelector('.timeline-entry')!.getBoundingClientRect();
+          const gap = parseFloat(getComputedStyle(element).columnGap);
+          return Math.abs(wrapper.width - button.width) < 1 && Math.abs(link.left - button.right - gap) < 1
+            && Math.abs(link.top - button.top) <= 2 && button.width <= 120;
+        })).toBe(true);
+      }
+    }
+    await page.evaluate(async () => { const { default: i18n } = await import('/src/i18n.ts'); await i18n.changeLanguage('zh-CN'); });
+    await trigger.click();
+    await expect(page.getByRole('option', { name: /Sensor table/ })).toBeVisible();
+    await expect(page.getByRole('option', { name: /^终端/ })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await page.setViewportSize({ width: 1140, height: 900 });
+    await bar.screenshot({ path: '.npm-cache/trx-picker-spacing.png', animations: 'disabled' });
   });
 
   test('普通 COM 标签绑定 Sensor table 在浏览器 native 边界明确降级不可用', async ({ page }) => {

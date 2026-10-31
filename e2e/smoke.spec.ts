@@ -945,6 +945,13 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.timeline-workspace-bar')).toHaveCount(0);
     await expect(page.locator('.timeline-entry.active:visible')).toHaveCount(3);
     await expect(page.locator('.tab-item .timeline-badge')).toHaveCount(3);
+    // Membership chrome can render before the initial scheduled seek/ACK.
+    // Sample only after that commit settles, otherwise it looks like a drag preview moved followers.
+    await expect.poll(() => page.evaluate(async id => {
+      const group = (await import('/src/utils/timeline/index.ts')).timelineCoordinator.getSnapshot().groups.find(item => item.id === id);
+      return group?.members.length === 3 && group.members.every(member => member.status === 'exact'
+        && member.actualTimeMs === 1700000001500 && !member.pending && !member.inFlight);
+    }, groupId)).toBe(true);
     const followersBefore = await page.locator('.terminal-view:visible').evaluateAll(views => views.slice(1).map(view => view.scrollTop));
     const tokenData = await page.evaluate(async () => {
       const { useAppStore } = await import('/src/stores/useAppStore.ts');

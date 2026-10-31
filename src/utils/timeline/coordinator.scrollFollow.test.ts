@@ -122,6 +122,92 @@ describe('existing scroll-lock Pin controls group follow', () => {
     expect(c.canSetLive(id)).toBe(false);
   });
 
+  it('grants native append-follow synchronously only in LIVE and revokes it on navigation or membership changes', () => {
+    const { coordinator: c } = setup();
+    const followA = vi.fn(), followB = vi.fn();
+    c.registerParticipant(participant('a', { setLiveFollow: followA }));
+    c.registerParticipant(participant('b', { setLiveFollow: followB }));
+    const id = c.createGroup({ name: 'native', memberSlots: ['a', 'b'] });
+    // Programmatic creation remains browse even when native follow is supported.
+    expect(c.groupForSlot('a')?.mode).toBe('browse');
+    expect(followA).toHaveBeenLastCalledWith(false);
+    expect(followB).toHaveBeenLastCalledWith(false);
+    c.setMode(id, 'live');
+    expect(followA).toHaveBeenLastCalledWith(true);
+    expect(followB).toHaveBeenLastCalledWith(true);
+    c.beginNavigation('a');
+    expect(followA).toHaveBeenLastCalledWith(false);
+    expect(followB).toHaveBeenLastCalledWith(false);
+    c.setMode(id, 'live');
+    c.setDetached('b', true);
+    expect(followA).toHaveBeenLastCalledWith(true);
+    expect(followB).toHaveBeenLastCalledWith(false);
+    c.setDetached('b', false);
+    expect(followB).toHaveBeenLastCalledWith(true);
+    c.removeMember('b');
+    expect(followB).toHaveBeenLastCalledWith(false);
+    c.setMode(id, 'browse');
+    expect(followA).toHaveBeenLastCalledWith(false);
+  });
+
+  it('relative event mappings grant tail-follow only at the reference source offset', () => {
+    const { coordinator: c } = setup();
+    const followA = vi.fn(), followB = vi.fn();
+    c.registerParticipant(participant('a', { setLiveFollow: followA }));
+    c.registerParticipant(participant('b', { setLiveFollow: followB }));
+    const id = c.createGroup({ name: 'relative', memberSlots: ['a', 'b'], referenceSourceId: 'a' });
+    c.setMapping(id, { sourceId: 'a', sourceTimeMs: 1000, groupTimeMs: 0 });
+    c.setMapping(id, { sourceId: 'b', sourceTimeMs: 1500, groupTimeMs: 0 });
+    c.setMode(id, 'live');
+    expect(followA).toHaveBeenLastCalledWith(true);
+    expect(followB).toHaveBeenLastCalledWith(false);
+    // Different absolute event anchors with the same effective offset are equivalent.
+    c.setMapping(id, { sourceId: 'b', sourceTimeMs: 2000, groupTimeMs: 1000 });
+    expect(followB).toHaveBeenLastCalledWith(true);
+    c.setMapping(id, { sourceId: 'b', sourceTimeMs: 2000, groupTimeMs: 900 });
+    expect(followB).toHaveBeenLastCalledWith(false);
+    c.setMode(id, 'browse');
+    expect(followA).toHaveBeenLastCalledWith(false);
+    expect(followB).toHaveBeenLastCalledWith(false);
+  });
+
+  it('hidden or unavailable participants cannot retain native follow and resume only while LIVE', () => {
+    const { coordinator: c } = setup();
+    const follow = vi.fn();
+    const handle = c.registerParticipant(participant('a', { setLiveFollow: follow }));
+    const id = c.createGroup({ name: 'visibility', memberSlots: ['a'] });
+    c.setMode(id, 'live');
+    expect(follow).toHaveBeenLastCalledWith(true);
+    handle.setAvailability({ available: true, visible: false });
+    expect(follow).toHaveBeenLastCalledWith(false);
+    handle.setAvailability({ available: true, visible: true });
+    expect(follow).toHaveBeenLastCalledWith(true);
+    handle.setAvailability({ available: false });
+    expect(follow).toHaveBeenLastCalledWith(false);
+    c.setMode(id, 'browse');
+    handle.setAvailability({ available: true, visible: true });
+    expect(follow).toHaveBeenLastCalledWith(false);
+    c.setMode(id, 'live');
+    handle.dispose();
+    expect(follow).toHaveBeenLastCalledWith(false);
+  });
+
+  it('replay joining LIVE immediately revokes native tail-follow on all members', () => {
+    const { coordinator: c } = setup();
+    const liveFollow = vi.fn(), replayFollow = vi.fn();
+    c.registerParticipant(participant('a', { setLiveFollow: liveFollow }));
+    c.registerParticipant(participant('replay', {
+      sourceKind: 'replay', clockId: 'replay:session', setLiveFollow: replayFollow,
+    }));
+    const id = c.createGroup({ name: 'mixed-native', memberSlots: ['a'] });
+    c.setMode(id, 'live');
+    expect(liveFollow).toHaveBeenLastCalledWith(true);
+    c.addMember(id, 'replay');
+    expect(liveFollow).toHaveBeenLastCalledWith(false);
+    expect(replayFollow).toHaveBeenLastCalledWith(false);
+    expect(c.groupForSlot('a')?.mode).toBe('browse');
+  });
+
   it('invalidates in-flight seeks without bypassing per-target backpressure', async () => {
     const { coordinator: c, frame } = setup();
     let finish: (() => void) | undefined;

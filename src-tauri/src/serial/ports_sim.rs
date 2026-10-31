@@ -1,5 +1,5 @@
 /**
- * 模拟串口 (Simulated Port, SIM:Loopback)
+ * 模拟串口 (Simulated Ports, SIM:Loopback / SIM:Loopback2)
  * 无硬件时提供回显 + 周期输出的虚拟串口。
  *
  * 回显：TX 文本 → RX `Received: <data>`；TX HEX → RX `[HEX] Received: <hex>`。
@@ -16,11 +16,13 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 use super::codec::{build_tx_bytes, TxOutcome};
-use super::{emit_rx_event, emit_status, emit_status_if_current, PortInfo, PortStatus, SerialManager};
+use super::{
+    emit_rx_event, emit_status, emit_status_if_current, PortInfo, PortStatus, SerialManager,
+};
 use crate::commands::OpenPortArgs;
 
-/// 模拟串口的端口 id
-pub(super) const SIM_PORT_ID: &str = "SIM:Loopback";
+/// 两路独立模拟串口，保留原端口 id 以兼容已有会话与配置。
+pub(super) const SIM_PORT_IDS: [&str; 2] = ["SIM:Loopback", "SIM:Loopback2"];
 
 /// 周期输出频率上限（次/秒）：10000/s 已远超真实串口吞吐（921600 baud ≈
 /// 92KB/s ≈ 数千行/s），防止 interval 截断为 0 导致忙循环。
@@ -57,14 +59,14 @@ impl SimPortHandle {
 }
 
 /// 列表条目（仅当 `simulate` 启用时由 `SerialManager` 追加到系统端口列表之后）。
-pub(super) fn virtual_port_info() -> PortInfo {
-    PortInfo {
-        id: SIM_PORT_ID.to_string(),
-        name: "SIM:Loopback (模拟串口)".to_string(),
+pub(super) fn virtual_port_infos() -> impl Iterator<Item = PortInfo> {
+    SIM_PORT_IDS.into_iter().map(|port_id| PortInfo {
+        id: port_id.to_string(),
+        name: format!("{} (模拟串口)", port_id),
         port_type: "sim".to_string(),
         manufacturer: None,
         product: None,
-    }
+    })
 }
 
 /// 打开模拟串口（锁内；能力门控已由 `SerialManager::open_port` 校验）。
@@ -106,7 +108,12 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
             read_thread: Some(read_thread),
         },
     );
-    emit_status(&app_handle, &port_id, PortStatus::Connected, Some(generation));
+    emit_status(
+        &app_handle,
+        &port_id,
+        PortStatus::Connected,
+        Some(generation),
+    );
     ready.store(true, Ordering::Release);
     log::info!("Sim port opened: {}", port_id);
     Ok(())
@@ -277,9 +284,70 @@ fn sim_due_lines(now: Instant, mut next: Instant, interval: Duration, max: u32) 
 #[cfg(test)]
 mod tests {
     // 显式导入而非 `use super::*`（Windows 测试二进制不能链接 serialport FFI）。
-    // 两个函数都是纯逻辑，测试在所有平台可跑。
-    use super::{parse_sim_rate_command, sim_due_lines, MAX_SIM_RATE};
+    // 枚举与频率逻辑测试在所有平台可跑；管理器路由测试仅在非 Windows 运行。
+    use super::{parse_sim_rate_command, sim_due_lines, virtual_port_infos, MAX_SIM_RATE};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn virtual_ports_keep_original_identity_and_add_an_independent_second_channel() {
+        let ports: Vec<_> = virtual_port_infos().collect();
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].id, "SIM:Loopback");
+        assert_eq!(ports[0].name, "SIM:Loopback (模拟串口)");
+        assert_eq!(ports[1].id, "SIM:Loopback2");
+        assert_ne!(ports[0].name, ports[1].name);
+        assert!(ports.iter().all(|port| port.port_type == "sim"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn channels_route_rate_echo_and_close_independently() {
+        use super::{close, send, write_raw, SimMessage, SimPortHandle, SIM_PORT_IDS};
+        use crate::serial::SerialManager;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        let mut manager = SerialManager::new();
+        let mut receivers = HashMap::new();
+        for port_id in SIM_PORT_IDS {
+            let (tx, rx) = mpsc::sync_channel(4);
+            manager.sim_ports.insert(
+                port_id.to_string(),
+                SimPortHandle {
+                    running: Arc::new(AtomicBool::new(true)),
+                    tx,
+                    read_thread: None,
+                },
+            );
+            receivers.insert(port_id, rx);
+        }
+        let first = &receivers[SIM_PORT_IDS[0]];
+        let second = &receivers[SIM_PORT_IDS[1]];
+        send(&manager, SIM_PORT_IDS[0], "100", false, "None").unwrap();
+        assert!(matches!(
+            first.try_recv(),
+            Ok(SimMessage::SetRate { per_sec: 100 })
+        ));
+        assert!(matches!(second.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        send(&manager, SIM_PORT_IDS[1], "hello", false, "None").unwrap();
+        assert!(
+            matches!(second.try_recv(), Ok(SimMessage::Echo { data, is_hex: false }) if data == "hello")
+        );
+        assert!(matches!(first.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+        assert!(close(&mut manager, SIM_PORT_IDS[0]).is_none());
+        assert!(matches!(first.try_recv(), Ok(SimMessage::Stop)));
+        assert!(!manager.sim_ports.contains_key(SIM_PORT_IDS[0]));
+        assert!(manager.sim_ports[SIM_PORT_IDS[1]]
+            .running
+            .load(Ordering::Relaxed));
+        write_raw(&manager, SIM_PORT_IDS[1], &[0xA5, 0x5A]).unwrap();
+        assert!(
+            matches!(second.try_recv(), Ok(SimMessage::Echo { data, is_hex: true }) if data == "A5 5A")
+        );
+        assert!(close(&mut manager, SIM_PORT_IDS[1]).is_none());
+    }
 
     #[test]
     fn parse_sim_rate_command_accepts_pure_numbers() {

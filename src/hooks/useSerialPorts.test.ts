@@ -258,6 +258,20 @@ describe('mapPortInfo', () => {
     expect(mapped.type).toBe('sim');
   });
 
+  it('keeps both simulation channels and their connection state independent', () => {
+    const incoming = ['SIM:Loopback', 'SIM:Loopback2'].map(id => mapPortInfo({ id, name: id, port_type: 'sim' }));
+    const merged = mergePorts(incoming, [
+      { ...incoming[0], status: 'connected' },
+      { ...incoming[1], status: 'disconnected', alias: 'Second channel' },
+    ]);
+    expect(merged.map(port => [port.id, port.type, port.status])).toEqual([
+      ['SIM:Loopback', 'sim', 'connected'],
+      ['SIM:Loopback2', 'sim', 'disconnected'],
+    ]);
+    expect(merged[0].alias).not.toBe('Second channel');
+    expect(merged[1].alias).toBe('Second channel');
+  });
+
   it('passes manufacturer/product through to SerialPort', () => {
     const mapped = mapPortInfo({
       id: 'COM3',

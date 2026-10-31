@@ -70,6 +70,8 @@ export interface TimelineParticipant {
     request: TimelineSeekRequest,
   ) => Promise<TimelineSeekResult> | TimelineSeekResult;
   setGrouped?: (grouped: boolean) => void;
+  /** Host-authorized same-clock LIVE tail follow, revoked outside LIVE or for offset targets. */
+  setLiveFollow?: (enabled: boolean) => void;
   onUserNavigation?: () => void;
 }
 export interface TimelineNavigationToken {

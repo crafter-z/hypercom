@@ -69,9 +69,10 @@ export class TerminalViewportManager {
   private sourceGenerationValue = 1;
   private sourceRevisionValue = 0;
   private timelineGrouped = false;
+  private timelineLiveFollow = false;
   private readoutListeners = new Set<() => void>();
   private readoutsDirty = true;
-  private pendingSeek: { seq: number; align: 'start' | 'center' | 'end'; options: TerminalSeekOptions; generation: number; resolve: (result: ScheduledSeekResult) => void; cleanup: () => void } | null = null;
+  private pendingSeek: { seq: number; align: 'start' | 'center' | 'end'; followTail: boolean; options: TerminalSeekOptions; generation: number; resolve: (result: ScheduledSeekResult) => void; cleanup: () => void } | null = null;
   private heldTimelineRequest: TerminalTimelineRequest | null = null;
   private readonly portId: string;
   private renderer: TerminalRenderer | null = null;
@@ -264,6 +265,9 @@ export class TerminalViewportManager {
     this.currentMatch = ((idx % count) + count) % count;
     const targetSeq = this.matches.seqs[this.matches.offset + this.currentMatch];
     if (this.frozenSeq !== null && targetSeq > this.frozenSeq) return false;
+    // Match navigation is an explicit seek, not a request to keep riding the tail.
+    // The UI releases the store/group Pin before calling this method as well.
+    this.locked = false;
     this.requestRender();
     this.scrollToSeq(targetSeq, 'center');
     return true;
@@ -373,7 +377,18 @@ export class TerminalViewportManager {
     if (this.timelineGrouped === grouped) return;
     this.timelineGrouped = grouped;
     // Leaving a group must not silently reactivate independent tail-follow.
-    if (!grouped) this.locked = false;
+    if (!grouped) {
+      this.locked = false;
+      this.timelineLiveFollow = false;
+    }
+    this.requestRender(false);
+  }
+
+  /** The coordinator alone authorizes same-clock LIVE tail-follow; membership is not a lock. */
+  setTimelineLiveFollow(enabled: boolean): void {
+    const follow = this.timelineGrouped && enabled;
+    if (this.timelineLiveFollow === follow) return;
+    this.timelineLiveFollow = follow;
     this.requestRender(false);
   }
 
@@ -404,13 +419,24 @@ export class TerminalViewportManager {
       return { status: 'held', actualTimeMs: this.readTimelineAnchor()?.timeMs ?? null };
     }
     this.heldTimelineRequest = null;
-    const applied = await this.scheduleTimelineSeek(found.seq, 'center', request);
+    if (this.timelineLiveFollow && this.frozenSeq !== null)
+      return { status: 'held', actualTimeMs: this.readTimelineAnchor()?.timeMs ?? null };
+    const followTail = this.timelineLiveFollow;
+    const applied = await this.scheduleTimelineSeek(found.seq, followTail ? 'end' : 'center', request);
     if (applied.status === 'held') {
       this.heldTimelineRequest = request;
       return { status: 'held', actualTimeMs: null };
     }
     return applied.status === 'applied'
-      ? { ...found, actualTimeMs: applied.timeMs ?? null, sourceRevision: applied.sourceRevision }
+      ? {
+        ...found,
+        ...(followTail && applied.seq !== undefined ? {
+          seq: applied.seq, recordKey: String(applied.seq),
+          status: applied.timeMs == null ? 'no-time' as const : found.status,
+          deltaMs: applied.timeMs == null ? undefined : applied.timeMs - request.timeMs,
+        } : {}),
+        actualTimeMs: applied.timeMs ?? null, sourceRevision: applied.sourceRevision,
+      }
       : { status: 'unsupported', actualTimeMs: null };
   }
 
@@ -421,7 +447,7 @@ export class TerminalViewportManager {
     return new Promise(resolve => {
       const onAbort = () => { if (this.pendingSeek?.resolve === resolve) this.finishPendingSeek('aborted'); };
       options.signal?.addEventListener('abort', onAbort, { once: true });
-      this.pendingSeek = { seq, align, options, generation: this.sourceGeneration, resolve, cleanup: () => options.signal?.removeEventListener('abort', onAbort) };
+      this.pendingSeek = { seq, align, followTail: this.timelineLiveFollow && align === 'end', options, generation: this.sourceGeneration, resolve, cleanup: () => options.signal?.removeEventListener('abort', onAbort) };
       this.requestRender(false);
     });
   }
@@ -539,16 +565,32 @@ export class TerminalViewportManager {
           this.finishPendingSeek('aborted');
         } else if (renderer.hasSelection || this.selectedRange) {
           this.finishPendingSeek('held');
+        } else if (seek.followTail) {
+          if (!this.timelineLiveFollow) this.finishPendingSeek('aborted');
+          else if (!this.buildView().followEnabled) this.finishPendingSeek('held');
+          else {
+            // Native follow computes the newest visible tail in this render,
+            // including records appended after the timeline lookup was admitted.
+            seekApplied = renderer.geometryAvailable && this.getVisibleCount() > 0;
+            if (!seekApplied) this.finishPendingSeek('unavailable');
+          }
         } else {
           seekApplied = renderer.positionToSeq(seek.seq, seek.align, this.buffer, this.buildView());
           if (!seekApplied) this.finishPendingSeek('unavailable');
         }
       }
       const view = this.buildView();
-      if (seekApplied) view.followEnabled = false;
+      if (seekApplied && !seek?.followTail) view.followEnabled = false;
       renderer.render(this.buffer, view);
       // ACK means the local render pass applied, not merely queue admission.
-      if (seekApplied && this.pendingSeek === seek) this.finishPendingSeek('applied');
+      if (seekApplied && seek && this.pendingSeek === seek) {
+        if (seek.followTail) {
+          const anchor = renderer.readGeometryAnchor(this.buffer, view, 'end');
+          if (anchor) seek.seq = anchor.seq;
+          else this.finishPendingSeek('unavailable');
+        }
+        if (this.pendingSeek === seek) this.finishPendingSeek('applied');
+      }
       const notifyReadouts = this.readoutsDirty;
       this.readoutsDirty = false;
       for (const fn of this.listeners) fn();
@@ -558,6 +600,9 @@ export class TerminalViewportManager {
 
   private buildView(): TerminalViewState {
     const searchActive = this.searchOpen && this.searchQuery.length > 0;
+    const locked = this.timelineGrouped
+      ? this.timelineLiveFollow && !this.selectedRange && !this.renderer?.hasSelection
+      : this.locked;
     return {
       visibleSeqs: this.filterActive ? this.filtered.seqs : null,
       visibleSeqsOffset: this.filterActive ? this.filtered.offset : 0,
@@ -567,13 +612,12 @@ export class TerminalViewportManager {
       searchQuery: this.searchOpen ? this.searchQuery : '',
       searchCaseSensitive: this.searchCaseSensitive,
       selectedRange: this.selectedRange,
-      locked: this.locked,
+      locked,
       gestureActive: this.gestureActive,
-      followEnabled: !this.timelineGrouped && shouldFollow(
+      followEnabled: shouldFollow(
         this.frozenSeq !== null,
-        this.locked,
+        locked,
         this.gestureActive,
-        this.searchOpen,
       ),
     };
   }
