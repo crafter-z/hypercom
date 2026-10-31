@@ -141,10 +141,49 @@ describe('TerminalView existing Pin + linked scrolling', () => {
     await act(async () => { a.container.dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true })); });
     expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('browse');
     expect(a.pin().getAttribute('aria-pressed')).toBe('false');
-    await click(a.bottom());
+    await act(async () => {
+      a.container.scrollTop = a.container.scrollHeight - a.container.clientHeight;
+      a.container.dispatchEvent(new Event('scroll'));
+    });
     await frame(12);
     expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('browse');
     expect(a.pin().getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it.each([false, true])('bottom jump enables append-follow and repeated clicks keep it enabled (grouped=%s)', async grouped => {
+    const a = await mount('a');
+    const b = grouped ? await mount('b') : null;
+    if (grouped) await group('a', 'b');
+    else await click(a.pin()); // start with independent follow disabled
+    await key(a.container, 'PageUp'); // leave an old settle pending
+    await act(async () => a.manager.scrollToSeq(70, 'center'));
+    await frame(2);
+    const oldEpoch = timelineCoordinator.groupForSlot('a')?.navigationEpoch;
+
+    await click(a.bottom());
+    expect(a.pin().getAttribute('aria-pressed')).toBe('true');
+    expect(a.bottom().classList.contains('active')).toBe(true);
+    if (grouped) {
+      expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('live');
+      expect(timelineCoordinator.groupForSlot('a')!.navigationEpoch).toBeGreaterThan(oldEpoch!);
+      expect(b!.pin().getAttribute('aria-pressed')).toBe('true');
+      expect(b!.bottom().classList.contains('active')).toBe(true);
+    } else expect(useTerminalStore.getState().terminals.a.scrollLocked).toBe(true);
+    await frame(15);
+    await act(async () => window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })));
+    await frame(10);
+    expect(a.pin().getAttribute('aria-pressed')).toBe('true');
+
+    await click(a.bottom()); // this is enable, not toggle-off
+    await frame(3);
+    for (const view of b ? [a, b] : [a]) {
+      const before = view.container.scrollTop;
+      await append(view, 3000);
+      expect(view.container.scrollTop).toBeGreaterThan(before);
+      expect(view.manager.readTimelineAnchor('end')?.recordKey).toBe(String(view.manager.buffer.lastSeq));
+      expect(view.pin().getAttribute('aria-pressed')).toBe('true');
+    }
+    if (grouped) expect(timelineCoordinator.groupForSlot('a')?.mode).toBe('live');
   });
 
   it('Pin cancels a pending navigation settle before restoring LIVE', async () => {
@@ -236,6 +275,18 @@ describe('TerminalView existing Pin + linked scrolling', () => {
       expect(view.pin().title).toBe('timeline.liveUnavailable');
       expect(view.pin().getAttribute('aria-pressed')).toBe('false');
       await click(view.pin());
+    }
+    expect(timelineCoordinator.groupForSlot('history')?.mode).toBe('browse');
+    for (const view of [a, replay]) {
+      await act(async () => view.manager.scrollToSeq(70, 'center'));
+      await frame(2);
+      const before = view.container.scrollTop;
+      await click(view.bottom());
+      await frame(12);
+      expect(view.container.scrollTop).toBeGreaterThan(before);
+      expect(view.manager.readTimelineAnchor('end')?.recordKey).toBe(String(view.manager.buffer.lastSeq));
+      expect(view.pin().getAttribute('aria-pressed')).toBe('false');
+      expect(view.bottom().classList.contains('active')).toBe(false);
     }
     expect(timelineCoordinator.groupForSlot('history')?.mode).toBe('browse');
   });

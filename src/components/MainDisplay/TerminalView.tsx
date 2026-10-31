@@ -486,20 +486,24 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     [searchOpen, toggleSearch, openSearch, handleSearchClose, nextMatch, prevMatch, beginGesture, portId],
   );
 
-  const toggleScrollLock = useCallback(() => {
-    // Pin is a new explicit intent: a previous wheel/scrollbar settle must not
-    // turn LIVE back into browse or overwrite the new independent lock.
+  const setScrollLock = useCallback((locked: boolean) => {
+    // Pin and jump-to-bottom are new explicit intents: an old wheel/scrollbar
+    // settle must not overwrite their group transport or independent lock.
     navigationRef.current?.cancel();
     const group = tabId ? timelineCoordinator.groupForSlot(tabId) : undefined;
     if (group) {
-      try { timelineCoordinator.toggleSlotFollow(tabId!); } catch (error) { notifyError(error); }
+      try { timelineCoordinator.setMode(group.id, locked ? 'live' : 'browse'); } catch (error) { notifyError(error); }
       return;
     }
-    const locked = !configRef.current.scrollLocked;
     vm.setLocked(locked);
     configRef.current.updateTerminalConfig({ scrollLocked: locked });
     if (locked) vm.scrollToBottom();
   }, [tabId, vm]);
+
+  const toggleScrollLock = useCallback(() => {
+    const group = tabId ? timelineCoordinator.groupForSlot(tabId) : undefined;
+    setScrollLock(group ? group.mode !== 'live' : !configRef.current.scrollLocked);
+  }, [tabId, setScrollLock]);
 
   const jumpToTop = useCallback(() => {
     beginGesture();
@@ -510,11 +514,19 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   }, [groupId, updateTerminalConfig, beginGesture, vm]);
 
   const jumpToBottom = useCallback(() => {
+    const group = tabId ? timelineCoordinator.groupForSlot(tabId) : undefined;
+    if (!group || timelineCoordinator.canSetLive(group.id)) {
+      // Ensure follow, never toggle it off. Group LIVE owns time mapping and
+      // native tail-follow authorization; don't override it with a local seek.
+      setScrollLock(true);
+      return;
+    }
+    // Replay/mixed-clock groups cannot follow live, but still support a single
+    // bottom jump and its linked browsing position (also pauses playback).
     beginGesture();
-    if (!groupId) updateTerminalConfig({ scrollLocked: true });
     vm.scrollToBottom();
     navigationRef.current?.commitPosition();
-  }, [groupId, updateTerminalConfig, beginGesture, vm]);
+  }, [tabId, setScrollLock, beginGesture, vm]);
 
   // FilterBar readout (visible rows under filter/pause) — refreshed via the
   // manager subscription above.

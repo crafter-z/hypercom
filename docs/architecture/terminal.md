@@ -62,7 +62,7 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 - `scrollLocked` 仅由显式意图写入：图钉按钮、`.terminal-jump-btn` 跳转按钮、手势 settle（120ms 静默后判定），拖选起点（按下行）也显式解锁；**无 onScroll 隐式解锁**。
 - 跟随路径由 `TerminalRenderer` **同帧钉底**（render() 内 scrollTop = totalHeight - clientHeight，无 React effect、无双 rAF 链；搜索栏可保持打开，不单独抑制跟随）。
 - settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`shouldFollow`（`utils/followLogic.ts`）；钉底目标值本身由 `TerminalRenderer.render` 内联计算（padding 感知、同帧写 scrollTop），不再有第二份纯函数拷贝。
-- 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮）。
+- 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮；时间组内到底与点亮 Pin 共用整组 LIVE 路径并保留时间映射，不兼容 LIVE 时只单次跳底）。
 - 手势 settle：滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定。
 - 已知平台降级：Linux WebKitGTK 原生滚动条可能不派发 pointerdown——滚动条拖拽解锁在该平台静默失效，滚轮/键盘/图钉不受影响。
 
