@@ -124,7 +124,10 @@ export class TimelineCoordinator {
     this.participants.set(participant.participantId, participant);
     this.slots.set(participant.slotId, participant.participantId);
     const group = this.findGroup(participant.slotId);
-    if (group) this.rememberReference(group, participant);
+    if (group) {
+      this.rememberReference(group, participant);
+      this.stopUnsupportedLive(group);
+    }
     participant.setGrouped?.(!!group);
     this.publish();
     this.realign(participant.slotId);
@@ -259,6 +262,7 @@ export class TimelineCoordinator {
     group.descriptor.memberSlots.push(slotId);
     const participant = this.participantForSlot(slotId);
     if (participant) this.rememberReference(group, participant);
+    this.stopUnsupportedLive(group);
     participant?.setGrouped?.(true);
     this.realign(slotId);
     this.publish();
@@ -325,18 +329,35 @@ export class TimelineCoordinator {
     if (g.committed) this.broadcast(g, g.committed, 'commit');
     this.publish();
   }
+  /** The Pin control and transport share one LIVE eligibility check. */
+  canSetLive(id: string): boolean {
+    const g = this.groups.get(id);
+    return !!g && this.supportsLive(g);
+  }
+  private supportsLive(g: Group): boolean {
+    const members = g.descriptor.memberSlots
+      .map((slot) => this.participantForSlot(slot))
+      .filter((p): p is TimelineParticipant => !!p);
+    return members.length > 0 && members.every(
+      (p) => p.sourceKind === 'live' && p.clockId === HOST_CLOCK_ID,
+    );
+  }
+  private stopUnsupportedLive(g: Group): void {
+    if (g.mode !== 'live' || this.supportsLive(g)) return;
+    this.invalidateGroup(g);
+    g.mode = 'browse';
+  }
+  /** Existing scroll-lock Pin toggles group transport, never independent tail-follow. */
+  toggleSlotFollow(slotId: string): void {
+    const g = this.findGroup(slotId);
+    if (g) this.setMode(g.descriptor.id, g.mode === 'live' ? 'browse' : 'live');
+  }
   setMode(id: string, mode: TimelineMode): void {
     const g = this.requireGroup(id);
     const members = g.descriptor.memberSlots
       .map((s) => this.participantForSlot(s))
       .filter((p): p is TimelineParticipant => !!p);
-    if (
-      mode === 'live' &&
-      (!members.length ||
-        members.some(
-          (p) => p.sourceKind !== 'live' || p.clockId !== HOST_CLOCK_ID,
-        ))
-    )
+    if (mode === 'live' && !this.supportsLive(g))
       throw new Error('LIVE requires compatible live sources');
     if (
       mode === 'playback' &&

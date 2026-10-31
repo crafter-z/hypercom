@@ -31,6 +31,9 @@ interface TerminalFilterBarProps {
   configId?: string;
   onConfigChange?: (patch: Partial<TerminalState>) => void;
   grouped?: boolean;
+  /** Effective Pin state comes from group transport when grouped. */
+  onToggleScrollLock?: () => void;
+  scrollLockDisabled?: boolean;
   timelineControl?: React.ReactNode;
   encoding: Encoding | undefined;
   scrollLocked?: boolean;
@@ -52,6 +55,8 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
   configId,
   onConfigChange,
   grouped,
+  onToggleScrollLock,
+  scrollLockDisabled,
   timelineControl,
   encoding,
   scrollLocked,
@@ -146,10 +151,10 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
         <button
           type="button"
           className={`icon-btn${scrollLocked ? ' active' : ''}`}
-          title={t(grouped ? 'timeline.groupControlsFollow' : 'paramsSection.scrollLock')}
-          disabled={grouped}
-          aria-pressed={!!scrollLocked && !grouped}
-          onClick={() => updateConfig({ scrollLocked: !scrollLocked })}
+          title={t(scrollLockDisabled ? 'timeline.liveUnavailable' : grouped ? 'timeline.groupScrollLock' : 'paramsSection.scrollLock')}
+          disabled={scrollLockDisabled}
+          aria-pressed={!!scrollLocked}
+          onClick={onToggleScrollLock ?? (() => updateConfig({ scrollLocked: !scrollLocked }))}
         >
           <Pin size={13} />
         </button>

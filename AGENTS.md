@@ -10,7 +10,7 @@
 
 HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 
-- **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 708 键 × zh-CN/en-US。
+- **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 704 键 × zh-CN/en-US。
 - **后端**：13 个命令域文件 + `CommandError`，`lib.rs` 注册 89 个命令（漂移守卫测试核对）；`AppConfig` 44 字段 = 43 个普通字段 + 1 个 `#[serde(flatten)] entities: Entities`（含 9 类实体数组）。
 - **工作区**：标签 `TabItem = SerialTabItem | PluginTabItem | ReplayTabItem`，`id` 为 UUID；serial 的 `portId` / plugin 的 `boundPortId` 才是端口身份，replay 无发送端口。
 - **时间联动**：`utils/timeline` 是组与热游标唯一来源；主窗口 TRX/可选插件/只读回放共用 preview/commit 协议，TTY 与跨弹出窗不参与；不得同步 scrollTop 或把回放追加进实时缓冲。详见 [`timeline.md`](docs/architecture/timeline.md)。
@@ -22,7 +22,7 @@ HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 hypercom/
 ├── src/                      # React 前端
 │   ├── main.tsx / App.tsx    # entrypoints（App.tsx = AppInit + SerialReceive + 全局文本右键菜单）
-│   ├── i18n.ts               # 708 键 × zh-CN/en-US（扁平 dotted key，keySeparator:false）
+│   ├── i18n.ts               # 704 键 × zh-CN/en-US（扁平 dotted key，keySeparator:false）
 │   ├── services/             # tauri.ts barrel + 13 域（含 plugin / pluginView）
 │   ├── hooks/                # 18 个 hook 文件 + barrel
 │   ├── stores/               # 6 个 store + releaseTerminalState / resetStores

@@ -29,7 +29,7 @@
 | `utils/timeline/{coordinator,scheduler,trxTimelineAdapter,ReplayClock}.ts` | app-lifetime 时间组、preview/commit 与代次、每目标最新槽背压、公平预算、TRX 适配与单调播放时钟 |
 | `utils/terminal/{TerminalSource,TerminalTimeIndex}.ts` | 实时/回放共用只读行接口、按 `(time,seq)` 维护的可见时间索引 |
 | `utils/replay/{ReplayDocument,replayRuntime}.ts` | 完整只读历史、轨道/分片与资源预算、宿主授权分块导入、共享组时钟及描述恢复 |
-| `MainDisplay/TimelineControls.tsx` + `utils/terminalNavigation.ts` | 组条/成员/校时 UI 与显式导航生命周期；不把裸 scroll 当用户驾驶权 |
+| `MainDisplay/TimelineControls.tsx` + `utils/terminalNavigation.ts` | 链条入口/成员/校时弹窗与显式导航生命周期；整组跟随复用 Pin，无额外组条；不把裸 scroll 当用户驾驶权 |
 | `utils/sessionSnapshot.ts` | 会话快照解析/校验（`parseSessionSnapshot`：按可用端口过滤并重建 UUID），启动恢复用 |
 
 ## 前端符号

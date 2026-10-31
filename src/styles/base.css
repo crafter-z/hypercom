@@ -55,6 +55,8 @@
   --bg-titlebar: #23252b;
   --bg-sidebar: #202227;
   --bg-panel: #191a1e;
+  --bg-dialog: #191a1e;      /* opaque modal surfaces, independent of custom backgrounds */
+  --bg-dialog-muted: #202227;
   --accent-color: #5eafff;
   --accent-emphasis: #2f7fd6;
   --accent-emphasis-hover: #3f92ea;
@@ -117,6 +119,8 @@
   --bg-titlebar: #e9ebef;
   --bg-sidebar: #f4f5f7;
   --bg-panel: #ffffff;
+  --bg-dialog: #ffffff;
+  --bg-dialog-muted: #f4f5f7;
   --accent-color: #0288d1;
   --accent-emphasis: #0288d1;
   --accent-emphasis-hover: #0277bd;

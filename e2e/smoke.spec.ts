@@ -942,7 +942,8 @@ test.describe('HyperCom smoke tests', () => {
       const slots = useAppStore.getState().tabs.filter(tab => tab.kind === 'serial').map(tab => tab.id);
       return timelineCoordinator.createGroup({ name: '三成员校时', memberSlots: slots, dragSyncPolicy: 'on-release', anchor: { timeMs: 1700000001500 } });
     });
-    await expect(page.locator('.timeline-workspace-bar')).toBeVisible();
+    await expect(page.locator('.timeline-workspace-bar')).toHaveCount(0);
+    await expect(page.locator('.timeline-entry.active:visible')).toHaveCount(3);
     await expect(page.locator('.tab-item .timeline-badge')).toHaveCount(3);
     const followersBefore = await page.locator('.terminal-view:visible').evaluateAll(views => views.slice(1).map(view => view.scrollTop));
     const tokenData = await page.evaluate(async () => {

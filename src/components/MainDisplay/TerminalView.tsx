@@ -20,7 +20,7 @@
  * the buffer + renderer instance survive tab switches — switching back just
  * re-runs the rAF render after the container gains real dimensions.
  */
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
@@ -92,6 +92,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   if (!manager && !portId) throw new Error('TerminalView requires a real port or an independent manager');
   const vm = manager ?? getViewportManager(portId!);
   const groupId = useTimelineMembership(tabId);
+  // Primitive subscriptions: LIVE ticks/ACKs never redraw the terminal shell.
+  const groupLive = useSyncExternalStore(timelineCoordinator.subscribe,
+    () => !!tabId && timelineCoordinator.groupForSlot(tabId)?.mode === 'live');
+  const canGroupLive = useSyncExternalStore(timelineCoordinator.subscribe,
+    () => !groupId || timelineCoordinator.canSetLive(groupId));
+  const effectiveScrollLocked = groupId ? groupLive : scrollLocked;
   const groupIdRef = useRef(groupId);
   groupIdRef.current = groupId;
   const adapterRef = useRef<ReturnType<typeof createTrxTimelineAdapter> | null>(null);
@@ -163,8 +169,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
 
   // Store scrollLocked → manager follow state; engage jumps to the bottom.
   const prevLockedRef = useRef<boolean | undefined>(undefined);
+  const previousLockGroup = useRef(groupId);
   useEffect(() => {
-    const locked = scrollLocked === true;
+    // The exit effect clears the stored lock, but its state update is not
+    // visible in this render. Never briefly re-enable the pre-group lock.
+    const leftGroup = !!previousLockGroup.current && !groupId;
+    previousLockGroup.current = groupId;
+    const locked = !groupId && !leftGroup && scrollLocked === true;
     const prev = prevLockedRef.current;
     prevLockedRef.current = locked;
     vm.setLocked(locked);
@@ -471,6 +482,21 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     [searchOpen, toggleSearch, openSearch, handleSearchClose, nextMatch, prevMatch, beginGesture, portId],
   );
 
+  const toggleScrollLock = useCallback(() => {
+    // Pin is a new explicit intent: a previous wheel/scrollbar settle must not
+    // turn LIVE back into browse or overwrite the new independent lock.
+    navigationRef.current?.cancel();
+    const group = tabId ? timelineCoordinator.groupForSlot(tabId) : undefined;
+    if (group) {
+      try { timelineCoordinator.toggleSlotFollow(tabId!); } catch (error) { notifyError(error); }
+      return;
+    }
+    const locked = !configRef.current.scrollLocked;
+    vm.setLocked(locked);
+    configRef.current.updateTerminalConfig({ scrollLocked: locked });
+    if (locked) vm.scrollToBottom();
+  }, [tabId, vm]);
+
   const jumpToTop = useCallback(() => {
     beginGesture();
     if (!groupId) updateTerminalConfig({ scrollLocked: false });
@@ -514,10 +540,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         portId={portId}
         configId={tabId ?? sourceId ?? portId}
         grouped={!!groupId}
+        onToggleScrollLock={toggleScrollLock}
+        scrollLockDisabled={!!groupId && !groupLive && !canGroupLive}
         timelineControl={tabId ? <TimelineButton tabId={tabId} /> : undefined}
         onConfigChange={updateTerminalConfig}
         encoding={encoding}
-        scrollLocked={scrollLocked}
+        scrollLocked={effectiveScrollLocked}
         showTimestamp={showTimestamp}
         displayFormat={displayFormat}
         direction={directionFilter}
@@ -581,7 +609,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         </button>
         <button
           type="button"
-          className={`terminal-jump-btn bottom${scrollLocked ? ' active' : ''}`}
+          className={`terminal-jump-btn bottom${effectiveScrollLocked ? ' active' : ''}`}
           title={t('terminal.jumpToBottom')}
           aria-label={t('terminal.jumpToBottom')}
           onClick={jumpToBottom}

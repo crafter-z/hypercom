@@ -19,7 +19,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 708 键。后端 89 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个普通字段 + entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
+> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 704 键。后端 89 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个普通字段 + entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
 
 ## 文档清单
 

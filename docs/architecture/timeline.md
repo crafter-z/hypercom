@@ -8,7 +8,7 @@
 - `src/utils/timeline/scheduler.ts` 的 `TimelineScheduler` 维护每目标一条在途和一条最新候选；commit 优先。成员独立完成，不等待最慢成员。
 - `src/utils/timeline/trxTimelineAdapter.ts` 的 `createTrxTimelineAdapter` 连接共享终端引擎；实时以真实 portId 选择数据源，回放注入独立 manager/sourceId，不创建假串口。
 - `src/utils/terminalNavigation.ts` 的 `TerminalNavigationLifecycle` 只从显式垂直滚动意图取得驾驶权。裸 scroll 只能采样已有手势，不改变 scrollLocked；Ctrl+wheel、横向滚动、焦点与普通行点击都不驱动组。
-- `src/components/MainDisplay/TimelineControls.tsx` 提供工作区组条、链条入口、成员管理、常量偏移和事件 T+0 对齐。终端壳只订阅稳定组资格；热游标不使行进入 React。
+- `src/components/MainDisplay/TimelineControls.tsx` 提供链条入口、成员管理、常量偏移和事件 T+0 对齐；工作区宿主只挂载管理弹窗，不额外显示组条或“返回实时”。终端壳只订阅稳定组资格与 Pin 所需的布尔状态；热游标不使行进入 React。
 
 portId 是发送目标，sourceId 是数据来源，tabId 是持久工作区槽位，participantId/generation 是运行实例。组成员引用 tabId；切 Pane 不改变组身份。切换 raw/plugin 时只注册当前有效内容的适配器，不驱动隐藏 raw。instance/document、source/clock、mapping 与 navigation 版本分别校验，不互相替代。
 
@@ -23,7 +23,7 @@ portId 是发送目标，sourceId 是数据来源，tabId 是持久工作区槽�
 ## 模式、驾驶权与调度
 
 - BROWSE：独立浏览与显式时间导航。新建组从发起者当前中心进入浏览；加入已有组不取得驾驶权。
-- LIVE：必须显式“返回实时”，使用确认过的宿主参考时钟，不以所有来源最后输出的最小值拖慢组。无输出成员可以显示较早实际记录与差值。
+- LIVE：通过终端现有滚动锁定 Pin 显式开启整组跟随，再点 Pin 关闭并进入 BROWSE；不另设“返回实时”入口。使用确认过的宿主参考时钟，不以所有来源最后输出的最小值拖慢组。无输出成员可以显示较早实际记录与差值。回放/混合或非宿主时钟组不能开启 LIVE；运行中加入不兼容来源也会退出 LIVE。
 - PLAYBACK：只允许回放来源；用户导航立即暂停。实时与回放混组只浏览，跨时间域必须由用户建立映射。
 
 preview 可丢弃，committed 是最终逻辑目标。每次手势携带 owner、gestureId/navigationEpoch、requestSeq、mappingRevision 和 participant/source 版本。新驾驶者抢占后，旧 release/settle/ACK 不得提交。ACK 表示定位回调与本地 render pass 完成，不代表多个 WebView 已物理同帧呈现。
@@ -34,7 +34,7 @@ preview 可丢弃，committed 是最终逻辑目标。每次手势携带 owner�
 
 ## 本地状态与生命周期
 
-组成员资格不复用 scrollLocked；成员的独立 Pin 置灰，退出保持当前位置并关闭独立跟随。成员滚到尾部不自动返回 LIVE。搜索打开进入浏览，输入不广播，命中导航才驱动。过滤/编码/HEX/暂停仅本地改变，然后按当前组目标重定位。
+组成员资格不复用 scrollLocked；现有 Pin 在组内控制组 transport，亮态只取 `mode === 'live'`，不取成员残留的独立 scrollLocked。来源/时钟不支持 LIVE 时 Pin 禁用并说明原因，其余组内 Pin 可用。Pin 切换先取消本地待 settle 手势，再按协调器当前状态切换并使旧导航代次失效；独立 Pin 则同步写 manager lock 后更新本地配置。退出保持当前位置并关闭独立跟随。成员滚到尾部、跳到底部或关闭搜索都不自动返回 LIVE。搜索打开进入浏览，输入不广播，命中导航才驱动。过滤/编码/HEX/暂停仅本地改变，然后按当前组目标重定位。
 
 有效选区延迟外部定位，清除后仅应用最新目标。暂停保留 frozen 上界，RX 仍继续。隐藏成员不积压历史目标，恢复只定位最新目标。TTY、未适配插件和弹出内容保留组成员描述但标不可用。关闭标签退休成员与 lane，不断串口、不停后端日志。
 
