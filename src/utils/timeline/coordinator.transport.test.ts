@@ -115,6 +115,25 @@ describe('timeline transport and restoration', () => {
     expect(b.seek).toHaveBeenCalledOnce();
     expect(b.seek.mock.calls[0][0].phase).toBe('preview');
   });
+  it('switching to LIVE clears cached on-release browse tiers before periodic previews', async () => {
+    vi.useFakeTimers();
+    const { c, frame } = setup();
+    const a = participant('a'), b = participant('b');
+    c.registerParticipant(a.value);
+    c.registerParticipant(b.value);
+    const id = c.createGroup({ name: 'switch-live', memberSlots: ['a', 'b'], dragSyncPolicy: 'on-release' });
+    await frame();
+    expect(c.getSnapshot().groups[0].members[1].preview).toBe('on-release');
+    c.setMode(id, 'live');
+    await frame();
+    b.seek.mockClear();
+    vi.advanceTimersByTime(100);
+    await frame();
+    expect(b.seek).toHaveBeenCalledOnce();
+    expect(b.seek.mock.calls[0][0].phase).toBe('preview');
+    expect(c.getSnapshot().groups[0].members[1].preview).toBe('continuous');
+  });
+
   it('uses current host time for LIVE even when all devices are quiet', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));

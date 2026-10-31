@@ -130,6 +130,34 @@ describe('TRX adapter with the real terminal engine (jsdom geometry model)', () 
     ).toBe(otherAnchor);
     snapshots.forEach((spy) => expect(spy).not.toHaveBeenCalled());
   });
+  it.each(['continuous', 'auto', 'on-release'] as const)(
+    '%s keeps its drag policy across repeated frame-acknowledged TRX seeks', async dragSyncPolicy => {
+      const a = mount('a'), b = mount('b');
+      await frame(2);
+      coordinator.createGroup({ name: 'drag', memberSlots: ['tab:a', 'tab:b'], dragSyncPolicy });
+      await frame(6); // Warm the initial seek, including its render ACK, for auto.
+      const initial = b.adapter.readAnchor()!.timeMs;
+      const committed = coordinator.getSnapshot().groups[0].committedAnchor;
+      const token = a.adapter.beginNavigation()!;
+      for (const seq of [40, 70, 100, 130, 160]) {
+        a.manager.scrollToSeq(seq, 'center');
+        const anchor = a.adapter.readAnchor()!;
+        a.adapter.updateNavigation(token, anchor);
+        await frame(6); // Normal 16ms rAF ACK latency is not slow callback work.
+        expect(b.adapter.readAnchor()!.timeMs).toBe(dragSyncPolicy === 'on-release' ? initial : anchor.timeMs);
+        const group = coordinator.getSnapshot().groups[0];
+        expect(group.ownerParticipantId).toBe(a.adapter.participantId);
+        expect(group.committedAnchor).toEqual(committed);
+        expect(group.members[1].preview).toBe(dragSyncPolicy === 'on-release' ? 'on-release' : 'continuous');
+      }
+      const final = a.adapter.readAnchor()!;
+      a.adapter.endNavigation(token, final);
+      await frame(6);
+      expect(b.adapter.readAnchor()!.timeMs).toBe(final.timeMs);
+      expect(coordinator.getSnapshot().groups[0].committedAnchor).toEqual(final);
+    },
+  );
+
   it('holds external positioning for selection then applies only the latest target after local realign', async () => {
     const a = mount('a'),
       b = mount('b');

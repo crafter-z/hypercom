@@ -64,7 +64,7 @@ export class TimelineCoordinator {
   private restoring = false;
   private liveTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
-  private costs = new Map<string, number>();
+  private seekLatencies = new Map<string, number>();
   readonly scheduler: TimelineScheduler;
   constructor(options: TimelineSchedulerOptions = {}) {
     this.scheduler = new TimelineScheduler({
@@ -73,7 +73,7 @@ export class TimelineCoordinator {
         options.changed?.();
         if (this.scheduler.previewsPaused) {
           for (const group of this.groups.values()) {
-            if (!group.owner && group.mode !== 'live') continue;
+            if ((!group.owner && group.mode !== 'live') || this.isContinuousBrowse(group)) continue;
             for (const slot of group.descriptor.memberSlots) {
               group.tiers.set(slot, 'on-release');
               const participant = this.participantForSlot(slot);
@@ -182,7 +182,7 @@ export class TimelineCoordinator {
     group?.tiers.delete(participant.slotId);
     this.invalidateParticipant(participant);
     this.scheduler.remove(participant.participantId);
-    this.costs.delete(participant.participantId);
+    this.seekLatencies.delete(participant.participantId);
     this.participants.delete(participant.participantId);
     if (this.slots.get(participant.slotId) === participant.participantId)
       this.slots.delete(participant.slotId);
@@ -310,8 +310,24 @@ export class TimelineCoordinator {
   }
   setDragSyncPolicy(id: string, policy: DragSyncPolicy): void {
     if (!['auto', 'continuous', 'on-release'].includes(policy)) return;
-    this.requireGroup(id).descriptor.dragSyncPolicy = policy;
+    const g = this.requireGroup(id);
+    if (g.descriptor.dragSyncPolicy === policy) return;
+    g.descriptor.dragSyncPolicy = policy;
+    this.resetPreviewTiers(g);
+    if (g.owner && g.preview) this.broadcast(g, g.preview, 'preview', g.owner);
     this.publish();
+  }
+  private isContinuousBrowse(g: Group): boolean {
+    return g.mode !== 'live' && g.descriptor.dragSyncPolicy === 'continuous';
+  }
+  private resetPreviewTiers(g: Group): void {
+    g.tiers.clear();
+    for (const slot of g.descriptor.memberSlots) {
+      const p = this.participantForSlot(slot);
+      if (!p) continue;
+      this.scheduler.dropPendingPreview(p.participantId);
+      this.scheduler.setPreviewInterval(p.participantId, 1000 / TIMELINE_BUDGET.previewHz);
+    }
   }
   setMapping(id: string, mapping: TimelineMapping): void {
     if (
@@ -367,6 +383,7 @@ export class TimelineCoordinator {
     )
       throw new Error('PLAYBACK requires replay-only sources');
     this.invalidateGroup(g);
+    this.resetPreviewTiers(g);
     g.mode = mode;
     if (mode === 'live') this.updateLiveGroup(g, 'commit');
     this.scheduleLive();
@@ -550,19 +567,24 @@ export class TimelineCoordinator {
       this.scheduler.invalidate(p.participantId);
       return;
     }
+    // seek() ACKs after rendering, so its wall latency includes waiting for rAF.
+    // batchMs only budgets synchronous scheduler admission; a healthy ACK may
+    // take one or more display frames without falling behind the preview rate.
+    const previewLatencyBudgetMs = 1000 / TIMELINE_BUDGET.previewHz;
+    const continuous = this.isContinuousBrowse(g);
     let tier =
-      g.tiers.get(p.slotId) ??
-      ((g.mode !== 'live' && g.descriptor.dragSyncPolicy === 'on-release') ||
-      p.capabilities.preview !== 'bounded' ||
-      (g.mode !== 'live' &&
-        g.descriptor.dragSyncPolicy === 'auto' &&
-        !this.costs.has(p.participantId))
+      (g.mode !== 'live' && g.descriptor.dragSyncPolicy === 'on-release') ||
+      p.capabilities.preview !== 'bounded'
         ? 'on-release'
-        : g.descriptor.dragSyncPolicy === 'auto' &&
-            (this.costs.get(p.participantId) ?? 0) > TIMELINE_BUDGET.batchMs
-          ? 'throttled'
-          : 'continuous');
-    if (this.scheduler.previewsPaused) tier = 'on-release';
+        : (g.tiers.get(p.slotId) ??
+          (g.mode !== 'live' && g.descriptor.dragSyncPolicy === 'auto' &&
+           !this.seekLatencies.has(p.participantId)
+            ? 'on-release'
+            : g.descriptor.dragSyncPolicy === 'auto' &&
+              (this.seekLatencies.get(p.participantId) ?? 0) > previewLatencyBudgetMs
+              ? 'throttled'
+              : 'continuous'));
+    if (this.scheduler.previewsPaused && !continuous) tier = 'on-release';
     g.tiers.set(p.slotId, tier);
     if (phase === 'preview' && tier === 'on-release') return;
     const epoch = g.epoch,
@@ -584,6 +606,7 @@ export class TimelineCoordinator {
       this.findGroup(p.slotId) === g;
     this.scheduler.enqueue(p.participantId, {
       phase,
+      allowPreviewUnderPressure: continuous,
       epoch,
       sequence: seq,
       valid,
@@ -615,8 +638,12 @@ export class TimelineCoordinator {
       },
       slow: () => {
         if (!valid()) return;
-        g.tiers.set(p.slotId, 'on-release');
-        this.scheduler.dropPendingPreview(p.participantId);
+        const continuous = this.isContinuousBrowse(g);
+        // Continuous is an explicit user choice: reduce rate, not semantics.
+        // The scheduler still retains exactly one in-flight seek until it settles.
+        g.tiers.set(p.slotId, continuous ? 'throttled' : 'on-release');
+        if (continuous) this.scheduler.setPreviewInterval(p.participantId, 1000 / TIMELINE_BUDGET.slowPreviewHz);
+        else this.scheduler.dropPendingPreview(p.participantId);
         g.results.set(p.slotId, {
           status: 'slow',
           actualTimeMs: g.results.get(p.slotId)?.actualTimeMs ?? null,
@@ -625,15 +652,17 @@ export class TimelineCoordinator {
       },
       settled: (elapsed, error) => {
         if (!valid()) return;
-        if (!error) this.costs.set(p.participantId, elapsed);
+        const continuous = this.isContinuousBrowse(g);
+        if (!error) this.seekLatencies.set(p.participantId, elapsed);
         if (error)
           g.results.set(p.slotId, { status: 'error', actualTimeMs: null });
-        if (phase === 'preview' && elapsed > TIMELINE_BUDGET.batchMs) {
+        if (phase === 'preview' && elapsed > previewLatencyBudgetMs) {
           const old = g.tiers.get(p.slotId);
           const next =
-            old === 'on-release' ||
-            old === 'throttled' ||
-            elapsed >= TIMELINE_BUDGET.previewSlowMs
+            !continuous && (
+              (g.mode !== 'live' && g.descriptor.dragSyncPolicy === 'on-release') ||
+              old === 'on-release' || old === 'throttled' ||
+              elapsed >= TIMELINE_BUDGET.previewSlowMs)
               ? 'on-release'
               : 'throttled';
           g.tiers.set(p.slotId, next);
@@ -849,7 +878,7 @@ export class TimelineCoordinator {
               ...(p
                 ? this.scheduler.state(p.participantId)
                 : { pending: false, inFlight: false }),
-              preview: this.scheduler.previewsPaused
+              preview: this.scheduler.previewsPaused && !this.isContinuousBrowse(g)
                 ? 'on-release'
                 : (g.tiers.get(slotId) ??
                   (g.descriptor.dragSyncPolicy === 'on-release' ||

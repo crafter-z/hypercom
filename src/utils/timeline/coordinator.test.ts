@@ -142,6 +142,195 @@ describe('timeline coordinator', () => {
     expect(group.committedAnchor?.timeMs).toBe(999);
     expect(group.members[1].deltaMs).toBe(-10);
   });
+  it.each([8, 16, 33])('keeps healthy %ims render ACKs continuous across a long gesture', async latencyMs => {
+    for (const dragSyncPolicy of ['continuous', 'auto'] as const) {
+      const { c, frame, advance } = setup();
+      const seek = vi.fn(async (request: TimelineSeekRequest) => {
+        advance(latencyMs); // Model async render ACK latency, not admission CPU time.
+        return { status: 'exact' as const, actualTimeMs: request.timeMs };
+      });
+      c.registerParticipant(participant('a'));
+      c.registerParticipant(participant('b', seek));
+      c.createGroup({ name: 'healthy', memberSlots: ['a', 'b'], dragSyncPolicy });
+      await frame();
+      seek.mockClear();
+      const token = c.beginNavigation('a')!;
+      for (let i = 0; i < 10; i++) {
+        c.updateNavigation(token, { timeMs: 500 + i });
+        await frame();
+        expect(seek).toHaveBeenCalledTimes(i + 1);
+        expect(c.getSnapshot().groups[0].members[1].preview).toBe('continuous');
+      }
+      c.endNavigation(token, { timeMs: 999 });
+      await frame();
+      expect(seek.mock.calls[seek.mock.calls.length - 1]?.[0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+    }
+  });
+
+  it.each(['continuous', 'auto'] as const)('%s honors its policy under sustained frame pressure', async dragSyncPolicy => {
+    const { c, frame } = setup();
+    const seek = vi.fn((request: TimelineSeekRequest) => ({ status: 'exact' as const, actualTimeMs: request.timeMs }));
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b', seek));
+    c.createGroup({ name: 'pressure', memberSlots: ['a', 'b'], dragSyncPolicy });
+    await frame();
+    seek.mockClear();
+    const token = c.beginNavigation('a')!;
+    for (let i = 0; i < 3; i++) c.scheduler.observeFrame(33);
+    expect(c.scheduler.previewsPaused).toBe(true);
+    for (let i = 0; i < 5; i++) {
+      c.updateNavigation(token, { timeMs: 500 + i });
+      await frame(300);
+      expect(seek).toHaveBeenCalledTimes(dragSyncPolicy === 'continuous' ? i + 1 : 0);
+      expect(c.getSnapshot().groups[0].members[1].preview).toBe(dragSyncPolicy === 'continuous' ? 'continuous' : 'on-release');
+    }
+    c.endNavigation(token, { timeMs: 999 });
+    await frame();
+    expect(seek.mock.calls[seek.mock.calls.length - 1]?.[0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+  });
+
+  it('auto still degrades genuinely slow ACKs without swallowing the final commit', async () => {
+    const { c, frame, advance } = setup();
+    const seek = vi.fn(async (request: TimelineSeekRequest) => {
+      if (request.phase === 'preview') advance(80); // Slow preview ACK, below the hard timeout.
+      return { status: 'exact' as const, actualTimeMs: request.timeMs };
+    });
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b', seek));
+    c.createGroup({ name: 'slow', memberSlots: ['a', 'b'], dragSyncPolicy: 'auto' });
+    await frame();
+    seek.mockClear();
+    const token = c.beginNavigation('a')!;
+    c.updateNavigation(token, { timeMs: 500 });
+    await frame();
+    expect(c.getSnapshot().groups[0].members[1].preview).toBe('throttled');
+    c.updateNavigation(token, { timeMs: 600 });
+    await frame(300);
+    expect(c.getSnapshot().groups[0].members[1].preview).toBe('on-release');
+    c.updateNavigation(token, { timeMs: 700 });
+    await frame(300);
+    expect(seek).toHaveBeenCalledTimes(2);
+    c.endNavigation(token, { timeMs: 999 });
+    await frame();
+    expect(seek.mock.calls[seek.mock.calls.length - 1]?.[0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+    expect(seek).toHaveBeenCalledTimes(3);
+  });
+
+  it('continuous throttles repeated slow ACKs but keeps moving before release', async () => {
+    const { c, frame, advance } = setup();
+    const seek = vi.fn(async (request: TimelineSeekRequest) => {
+      advance(80);
+      return { status: 'exact' as const, actualTimeMs: request.timeMs };
+    });
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b', seek));
+    c.createGroup({ name: 'continuous-slow', memberSlots: ['a', 'b'], dragSyncPolicy: 'continuous' });
+    await frame();
+    seek.mockClear();
+    const token = c.beginNavigation('a')!;
+    for (let i = 0; i < 5; i++) {
+      c.updateNavigation(token, { timeMs: 500 + i });
+      await frame(300);
+      expect(seek).toHaveBeenCalledTimes(i + 1);
+      expect(c.getSnapshot().groups[0].members[1].preview).toBe('throttled');
+    }
+    c.endNavigation(token, { timeMs: 999 });
+    await frame();
+    expect(seek.mock.calls[5][0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+  });
+
+  it('continuous keeps timeout backpressure and then applies the latest preview before release', async () => {
+    vi.useFakeTimers();
+    const { c, frame } = setup();
+    const pending = deferred<TimelineSeekResult>();
+    let block = false;
+    const seek = vi.fn((request: TimelineSeekRequest) => block ? pending.promise
+      : Promise.resolve({ status: 'exact' as const, actualTimeMs: request.timeMs }));
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b', seek));
+    c.createGroup({ name: 'timeout', memberSlots: ['a', 'b'], dragSyncPolicy: 'continuous' });
+    await frame();
+    seek.mockClear();
+    block = true;
+    const token = c.beginNavigation('a')!;
+    c.updateNavigation(token, { timeMs: 500 });
+    await frame();
+    c.updateNavigation(token, { timeMs: 600 });
+    vi.advanceTimersByTime(200);
+    expect(seek.mock.calls[0][0].signal.aborted).toBe(true);
+    expect(c.getSnapshot().groups[0].members[1].preview).toBe('throttled');
+    await frame(300);
+    expect(seek).toHaveBeenCalledTimes(1); // Timeout cannot free a physically active lane.
+    block = false;
+    pending.resolve({ status: 'exact', actualTimeMs: 500 });
+    await frame(300);
+    await frame(300);
+    expect(seek).toHaveBeenCalledTimes(2);
+    expect(seek.mock.calls[1][0]).toMatchObject({ phase: 'preview', timeMs: 600 });
+    c.endNavigation(token, { timeMs: 999 });
+    await frame();
+    expect(seek.mock.calls[2][0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+  });
+
+  it('changing a cached on-release policy to continuous immediately resumes the current preview', async () => {
+    const { c, frame } = setup();
+    const seek = vi.fn((request: TimelineSeekRequest) => ({ status: 'exact' as const, actualTimeMs: request.timeMs }));
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b', seek));
+    const id = c.createGroup({ name: 'switch', memberSlots: ['a', 'b'], dragSyncPolicy: 'on-release' });
+    await frame();
+    seek.mockClear();
+    const token = c.beginNavigation('a')!;
+    c.updateNavigation(token, { timeMs: 500 });
+    await frame();
+    expect(seek).not.toHaveBeenCalled();
+    c.setDragSyncPolicy(id, 'continuous');
+    await frame();
+    expect(seek.mock.calls[0][0]).toMatchObject({ phase: 'preview', timeMs: 500 });
+    c.setDragSyncPolicy(id, 'on-release');
+    c.updateNavigation(token, { timeMs: 600 });
+    await frame();
+    expect(seek).toHaveBeenCalledTimes(1);
+    c.endNavigation(token, { timeMs: 999 });
+    await frame();
+    expect(seek.mock.calls[1][0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+  });
+
+  it.each(['continuous', 'on-release'] as const)('late async ACKs respect a new %s policy', async nextPolicy => {
+    const { c, frame } = setup();
+    const pending = deferred<TimelineSeekResult>();
+    let block = false;
+    const seek = vi.fn((request: TimelineSeekRequest) => block ? pending.promise
+      : Promise.resolve({ status: 'exact' as const, actualTimeMs: request.timeMs }));
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b', seek));
+    const id = c.createGroup({ name: 'switch-in-flight', memberSlots: ['a', 'b'],
+      dragSyncPolicy: nextPolicy === 'continuous' ? 'auto' : 'continuous' });
+    await frame();
+    seek.mockClear();
+    block = true;
+    const token = c.beginNavigation('a')!;
+    c.updateNavigation(token, { timeMs: 500 });
+    await frame();
+    c.setDragSyncPolicy(id, nextPolicy);
+    block = false;
+    pending.resolve({ status: 'exact', actualTimeMs: 500 });
+    await frame(300);
+    await frame(300);
+    c.updateNavigation(token, { timeMs: 600 });
+    await frame(300);
+    if (nextPolicy === 'on-release') {
+      expect(seek).toHaveBeenCalledTimes(1);
+      expect(c.getSnapshot().groups[0].members[1].preview).toBe('on-release');
+    } else {
+      expect(seek.mock.calls[seek.mock.calls.length - 1]?.[0]).toMatchObject({ phase: 'preview', timeMs: 600 });
+      expect(c.getSnapshot().groups[0].members[1].preview).not.toBe('on-release');
+    }
+    c.endNavigation(token, { timeMs: 999 });
+    await frame();
+    expect(seek.mock.calls[seek.mock.calls.length - 1]?.[0]).toMatchObject({ phase: 'commit', timeMs: 999 });
+  });
+
   it('keeps one in-flight plus latest pending; commit cannot overlap cancelled preview', async () => {
     const { c, frame } = setup();
     const pending = deferred<TimelineSeekResult>();

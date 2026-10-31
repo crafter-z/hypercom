@@ -28,7 +28,7 @@ portId 是发送目标，sourceId 是数据来源，tabId 是持久工作区槽�
 
 preview 可丢弃，committed 是最终逻辑目标。每次手势携带 owner、gestureId/navigationEpoch、requestSeq、mappingRevision 和 participant/source 版本。新驾驶者抢占后，旧 release/settle/ACK 不得提交。ACK 表示定位回调与本地 render pass 完成，不代表多个 WebView 已物理同帧呈现。
 
-拖动策略为 auto、continuous、on-release。on-release 时 followers 保持原位，仅更新轻量预览，结束后应用最终目标。auto 对未观测成本或 commit-only 成员保守延期，之后依据近期定位成本和前台帧压力降级；同一手势只降档。预算常量集中于 `TIMELINE_BUDGET`，它们是调度起点，不是已保证的帧率。降级丢弃中间预览，但不能吞最终 commit。
+拖动策略为 auto、continuous、on-release。on-release 时 followers 保持原位，仅更新轻量预览，结束后应用最终目标。continuous 是显式连续意图：支持预览的成员在滚动期间持续定位，帧压力不得把它改成松开后定位；慢 ACK/超时只降低预览频率，仍受单在途与最新候选背压约束，不额外并发。auto 对未观测定位延迟或 commit-only 成员保守延期，之后按近期定位 ACK 延迟和前台帧压力降级，允许退到 on-release；同一手势只降档。commit-only 成员不因选择 continuous 而被强行调用预览，隐藏成员与后台窗口也不例外放行。手动切换策略清理旧档位与待发预览，并按新策略处理当前最新目标，不抢驾驶权。ACK 延迟包含等待 render/rAF，以预览周期（`1000 / TIMELINE_BUDGET.previewHz`）判断是否跟得上，不能与仅约束同步批处理的 `batchMs` 比较。预算常量集中于 `TIMELINE_BUDGET`，它们是调度起点，不是已保证的帧率。降级丢弃中间预览，但不能吞最终 commit。
 
 超时只标慢并合作取消，不假装旧 Promise 已被终止；旧回调不结束时仍占一条在途，不能通过无限并发绕过背压。健康成员继续工作。窗口 pointerup/mouseup、cancel、blur、visibility 收尾与静默 settle 合并，最终实际 geometry 在 rAF 读取。平台不能识别原生滚动条意图时，不广播无归因 scroll；可用“按当前位置对齐”可靠提交。
 
@@ -52,7 +52,7 @@ preview 可丢弃，committed 是最终逻辑目标。每次手势携带 owner�
 
 ## 验证与操作边界
 
-单元测试覆盖版本/背压/乱序/过滤/冻结/只读数据源和时钟；Playwright 的真实 Chromium 几何测试覆盖百万行首中尾与字体/缩放极值。`TerminalPerformance.test.ts` 需显式设置 `HYPERCOM_TERMINAL_BENCH=1`，输出索引与 jsdom CPU 样本，不把它当作物理帧率。
+单元测试覆盖版本/背压/乱序/过滤/冻结/只读数据源和时钟；Playwright 的真实 Chromium 几何测试覆盖百万行首中尾与字体/缩放极值。联动输入回归显式保留原生滚动条，通过真实 thumb 拖动和 wheel 输入，在持续帧压力下验证松开前的多次定位与 on-release 原位保持；设置 `HYPERCOM_E2E_CHANNEL=msedge` 可用本机 Edge 复核同组输入测试，但不能据此声称已覆盖 Tauri WebView2 宿主。`TerminalPerformance.test.ts` 需显式设置 `HYPERCOM_TERMINAL_BENCH=1`，输出索引与 jsdom CPU 样本，不把它当作物理帧率。
 
 Windows/WebView2 原生测试在独立临时 profile/隐藏 HWND 中运行。`workerless_timeline_native_webview2_smoke` 覆盖真实 SDK/IPC、慢状态回调隔离、文档/能力换代；`renderer_geometry_native_webview2_smoke` 从受控 Vite 同源加载实际 TerminalBuffer/TerminalRenderer，不复制算法，验证百万行、行高 12/72、原生 zoom 0.8/2 下原生 scrollbar 及首中尾 seek 的单调性、实际末行可见和 DOM 有界，CSS zoom 固定为 1。
 

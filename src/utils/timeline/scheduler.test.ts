@@ -148,6 +148,20 @@ describe('timeline budget scheduler', () => {
     await frame();
     expect(preview).toHaveBeenCalledOnce();
   });
+  it('admits explicit continuous previews under pressure but still suppresses background work', async () => {
+    const { scheduler, frame } = setup();
+    scheduler.beginGesture();
+    for (let i = 0; i < 3; i++) scheduler.observeFrame(33);
+    const preview = vi.fn();
+    scheduler.enqueue('manual', { ...task(1, preview), allowPreviewUnderPressure: true });
+    await frame();
+    expect(preview).toHaveBeenCalledOnce();
+    scheduler.setForeground(false);
+    scheduler.enqueue('manual', { ...task(2, preview), allowPreviewUnderPressure: true });
+    await frame();
+    expect(preview).toHaveBeenCalledOnce();
+  });
+
   it('probes actual rAF gaps while a foreground user gesture is active', async () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
     const { scheduler, advance, frame } = setup();

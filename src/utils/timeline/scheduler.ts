@@ -2,10 +2,13 @@ import { TIMELINE_BUDGET, type TimelinePhase } from './types';
 
 export interface TimelineTask {
   phase: TimelinePhase;
+  /** Explicit continuous mode still admits bounded previews under frame pressure. */
+  allowPreviewUnderPressure?: boolean;
   epoch: number;
   sequence: number;
   run(signal: AbortSignal): Promise<void> | void;
   valid(): boolean;
+  /** Wall-clock latency through the render ACK, including asynchronous/frame waits. */
   settled?(elapsedMs: number, error?: unknown): void;
   slow?(): void;
 }
@@ -220,7 +223,7 @@ export class TimelineScheduler {
           !this.foreground ||
           (typeof document !== 'undefined' &&
             document.visibilityState === 'hidden') ||
-          this.previewPaused
+          (this.previewPaused && !task.allowPreviewUnderPressure)
         ) {
           lane.pending = undefined;
           continue;

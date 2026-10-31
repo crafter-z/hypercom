@@ -1,5 +1,8 @@
 import { expect, test } from '@playwright/test';
 
+// Keep native scrollbars visible: headless Chromium normally hides the gutter.
+test.use({ channel: process.env.HYPERCOM_E2E_CHANNEL, launchOptions: { ignoreDefaultArgs: ['--hide-scrollbars'] } });
+
 const mock = `(() => {
   const callbacks = new Map(); let next = 1;
   window.__TAURI_INTERNALS__ = {
@@ -167,6 +170,107 @@ test('linked Pins preserve existing follow and keep the latest RX row visible af
   await page.mouse.wheel(0, -300);
   await expect(pins.nth(0)).toHaveAttribute('aria-pressed', 'false');
   await expect(pins.nth(1)).toHaveAttribute('aria-pressed', 'false');
+});
+
+test.describe('time linking with real scrolling input', () => {
+  for (const input of ['scrollbar', 'wheel'] as const) {
+  for (const policy of ['continuous', 'on-release'] as const) {
+  test(`${policy} respects real ${input} input even under frame pressure`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.addInitScript(mock);
+    await page.goto('/');
+    await expect(page.locator('.app-root')).toBeVisible();
+    await page.evaluate(async () => {
+      const { useAppStore } = await import('/src/stores/useAppStore.ts');
+      const { useTerminalStore } = await import('/src/stores/useTerminalStore.ts');
+      const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
+      const state = useAppStore.getState();
+      state.openTab('COM1'); state.openTab('COM2'); state.splitPane('vertical');
+      for (const port of ['COM1', 'COM2']) {
+        useTerminalStore.getState().setTerminalConfig(port, { scrollLocked: false });
+        getViewportManager(port).appendLines(Array.from({ length: 1000 }, (_, i) => ({
+          timestamp: 100000 + i * 10, direction: 'RX', rawData: new TextEncoder().encode('record ' + i), isHex: false,
+        })));
+      }
+    });
+    const entries = page.locator('.timeline-entry:visible');
+    await expect(entries).toHaveCount(2);
+    await entries.first().click();
+    const dialog = page.getByRole('dialog', { name: '时间联动', exact: true });
+    await dialog.getByRole('checkbox', { name: /COM1/ }).check();
+    await dialog.getByRole('checkbox', { name: /COM2/ }).check();
+    await dialog.getByRole('button', { name: '创建联动组', exact: true }).click();
+    await entries.first().click();
+    await dialog.locator('summary').click();
+    await dialog.locator('.timeline-policy-field select').selectOption(policy);
+    await dialog.locator('footer').getByRole('button', { name: '关闭', exact: true }).click();
+    const views = page.locator('.terminal-view:visible');
+    const driver = views.first(), follower = views.nth(1);
+    // Wait for the creation commit before acquiring a new gesture.
+    await expect.poll(() => page.evaluate(async () => {
+      const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
+      return c.getSnapshot().groups[0].members.every(member => !member.pending && !member.inFlight);
+    })).toBe(true);
+    const initial = await follower.evaluate(element => element.scrollTop);
+    const geometry = await driver.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      const gutter = element.offsetWidth - element.clientWidth;
+      const thumbHeight = element.clientHeight * element.clientHeight / element.scrollHeight;
+      return { gutter, x: rect.right - gutter / 2, y: rect.top + thumbHeight / 2,
+        travel: element.clientHeight - thumbHeight };
+    });
+    expect(geometry.gutter).toBeGreaterThan(0);
+    if (input === 'scrollbar') {
+      await page.mouse.move(geometry.x, geometry.y);
+      await page.mouse.down();
+    } else await driver.hover();
+    let previousDriverTime = 0;
+    const followerSamples: number[] = [];
+    for (const fraction of [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]) {
+      if (input === 'scrollbar') await page.mouse.move(geometry.x, geometry.y + geometry.travel * fraction, { steps: 3 });
+      else await page.mouse.wheel(0, 250);
+      const sample = await page.evaluate(async () => {
+        const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        // Deterministically exercise the dev/WebView low-cadence branch without
+        // blocking JS or synthesizing the source navigation/scroll events.
+        for (let i = 0; i < 3; i++) c.scheduler.observeFrame(33);
+        for (let frame = 0; frame < 4; frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        const group = c.getSnapshot().groups[0];
+        const anchors = group.memberSlots.map(slot => c.readSlotAnchor(slot)?.timeMs);
+        return { owner: group.ownerParticipantId, tier: group.members[1].preview, anchors, paused: c.scheduler.previewsPaused };
+      });
+      expect(sample.owner).not.toBeNull(); // Never accidentally assert after quiet-settle/commit.
+      expect(sample.paused).toBe(true);
+      expect(sample.anchors[0]).toBeGreaterThan(previousDriverTime);
+      previousDriverTime = sample.anchors[0]!;
+      if (policy === 'continuous') {
+        expect(sample.tier).not.toBe('on-release');
+        followerSamples.push(sample.anchors[1]!);
+        if (input === 'scrollbar') {
+          // The thumb remains held: wait for the bounded preview lane to catch
+          // up, never release or demand source/follower paint in one frame.
+          await expect.poll(() => page.evaluate(async () => {
+            const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
+            const group = c.getSnapshot().groups[0];
+            return { owned: group.ownerParticipantId !== null, time: c.readSlotAnchor(group.memberSlots[1])?.timeMs };
+          })).toEqual({ owned: true, time: sample.anchors[0] });
+        }
+      } else {
+        expect(await follower.evaluate(element => element.scrollTop)).toBe(initial);
+      }
+    }
+    if (policy === 'continuous' && input === 'wheel') expect(new Set(followerSamples).size).toBeGreaterThanOrEqual(3);
+    if (input === 'scrollbar') await page.mouse.up();
+    await expect.poll(() => page.evaluate(async () => {
+      const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
+      const group = c.getSnapshot().groups[0];
+      return group.ownerParticipantId === null && group.members.every(member => !member.pending && !member.inFlight)
+        && c.readSlotAnchor(group.memberSlots[1])?.timeMs === group.committedAnchor?.timeMs;
+    })).toBe(true);
+  });
+  }
+  }
 });
 
 test('creating a time group from an unlocked terminal keeps browsing instead of enabling follow', async ({ page }) => {
