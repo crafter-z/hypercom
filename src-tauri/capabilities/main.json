@@ -20,6 +20,7 @@
     "core:app:allow-version",
     "dialog:allow-open",
     "dialog:allow-save",
+    "dialog:allow-message",
     "process:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text"

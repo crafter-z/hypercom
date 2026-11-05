@@ -73,7 +73,7 @@ openPort(portId, baud)
 - 每个成功打开会话分配单调 `connection_generation`，`serial:status` 事件携带该值。文件发送、读线程终态、TTY reader 和外部工具恢复都必须验证会话代次；旧 reader/旧工具不能覆盖新连接的 `connected` / `disconnected` / `error` 状态。普通发送（`send_serial_data`）与文件发送还接受前端观察到的 `expected_generation`，排队跨重连的旧发送在校验写句柄前被拒绝。
 - `send_serial_data` 的真实串口和 GIT:BASH 写入都在全局 `SerialManager` 锁外执行：锁内只领取 session-bound 写租约，关闭在锁外等待租约/reader/child 收尾。TTY 写入检查 `running`，关闭会 detach 句柄后再 kill、drop master、join 和 reap。
 - **发送异步化（issue #6-1）**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 是 `Arc<Mutex<SerialManager>>`、`log_manager` 是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），`spawn_blocking` 闭包克隆这两个 `Arc` 供 `'static` 使用。
-- `openPort`/`closePort`/自动重连共用前端 per-port operation lane；迟到的 invoke 完成和 `serial:status` 事件按意图/代次丢弃，不再用旧结果覆盖手动关闭。
+- `openPort`/`closePort`/自动重连共用前端 per-port operation lane；迟到的 invoke 完成和 `serial:status` 事件按意图/代次丢弃，不再用旧结果覆盖手动关闭。手动打开另持有覆盖排队与 invoke 的租约：旧 reader 的终态不能取消尚未建立新会话的打开；租约期间重连提示先合并，待打开完成后仍断线才交给恢复流程。
 - 关闭时由 `close_serial_port` 在全局 manager 锁外等待 reader、TTY child、真实写租约和关闭屏障；完成后清理已完成 barrier，避免按历史 portId 无限保留所有权记录。
 - 正常退出先关闭新串口工作准入，取消文件/工具任务，锁外 join/reap 所有会话，再 flush 日志和电源抑制；重复 shutdown 幂等。
 - 文件发送携带 `transfer_id`，每个传输绑定启动时的 connection generation；端口关闭/重开后剩余分块拒绝写入新会话，取消只作用于同一端口同一 transfer。
@@ -85,6 +85,14 @@ openPort(portId, baud)
 - `close_serial_port` 在全局 manager 锁外等待读线程和已经取出的真实串口写入租约，待最后的写句柄释放后才返回；关闭期间同端口重开等待完成信号，不再与仍在飞的发送抢独占 COM 句柄。异步 join/等待由阻塞线程池承载，其他端口命令不被全局锁拖住。
 - `attempt_reconnect` 在进入阻塞线程池前登记每端口意图令牌；用户关闭、显式打开或较新的重连会取消旧令牌。旧尝试在摘除句柄前与最终打开前都于 manager 锁内复查，锁外枚举/join 期间发生关闭也不能重新打开端口或发出新的 connected；旧任务结束不会删除较新的令牌。公开 invoke 参数不变。
 - **标签页关闭 ≠ 端口关闭（issue #11）**：关闭标签只销毁前端显示目标（`Pane.cleanupClosedTab` → `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)` 回收该端口的终端显示态/流量统计/TX 历史），串口连接与后端日志保持。批量关闭先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合再逐个走该生命周期。重开标签页从零开始新一轮输出。
+
+### 自动重连预算与诊断
+
+- `useSerialConnection.runReconnectLoop` 每端口只运行一个恢复循环，每轮使用启动时的 `maxRetries` 预算，仅实际发起 `attemptReconnect` 时计数；入 lane 前已失效而未执行的排队操作不扣次数，但仍退避避免空转。首次立即尝试，失败或本次会话在 invoke 返回前已经终止时，继续剩余预算；轮间等待为 1s、2s、4s，之后封顶 5s。活动期间重复 hint 不开启新循环或重置次数。
+- `serial:status error/disconnected` 只使单次连接完成结果失效，不等同用户取消恢复。真实串口先发 connected 再放行 reader，reader 可在 invoke 返回之前再次断线；该时序仍由当前循环恢复，不能因 hint 已合并而提前退出。
+- 手动 `openPort` / `closePort` 立即撤销旧恢复循环和退避计时器；每次 await 后与入 lane 前验证循环令牌所有权，旧循环收尾不能删除新循环。关闭意图、禁用自动重连或工具接管均阻止后续尝试。
+- 次数用尽后结束本轮恢复并保留耗尽标记，避免最后一个 reader 的迟到 hint 重置预算；只有新手动打开/关闭意图或被接受的新 connected 事件清除该标记。不驻留后台等待设备重现，单纯端口列表轮询不会重新发起恢复。退避在前端 `setTimeout` 执行，实际间隔还受调用耗时和 WebView/系统调度影响，不是固定墙钟期限。
+- 前端诊断日志 `[serial-reconnect]` 记录 loopId、实际尝试次数/预算、下一次等待和退出原因（succeeded / exhausted / cancelled）。后端真实打开错误标注 native open、DTR/RTS、句柄复制/继承设置阶段，同时保留底层 OS 错误文本；`Auto-reconnect failed` 仍代表单次命令失败，而非整轮预算耗尽。
 
 ## 参数与流控
 

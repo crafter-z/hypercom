@@ -15,10 +15,20 @@ interface PortOperation {
   intent: PortIntent;
   queue: Promise<void>;
   active: boolean;
+  started: boolean;
+  sawConnected: boolean;
+}
+interface ReconnectLoop {
+  id: number;
+  cancelled: boolean;
+  cancelDelay?: () => void;
 }
 const state = {
   portOps: new Map<string, PortOperation>(),
-  reconnecting: new Set<string>(),
+  reconnecting: new Map<string, ReconnectLoop>(),
+  manualOpening: new Map<string, { hintPending: boolean }>(),
+  exhaustedReconnects: new Set<string>(),
+  nextReconnectId: 0,
   hintSubscribers: 0,
   hintUnlisten: null as (() => void) | null,
   hintRegistering: null as Promise<() => void> | null,
@@ -68,9 +78,10 @@ function enqueuePortOp(portId: string, intent: Exclude<PortIntent, 'terminal'>, 
   const queued = prior.catch(() => undefined).then(async () => {
     const current = state.portOps.get(portId);
     if (!current || current.generation !== generation) return;
+    current.started = true;
     await op(generation);
   });
-  state.portOps.set(portId, { generation, intent, queue: queued, active: true });
+  state.portOps.set(portId, { generation, intent, queue: queued, active: true, started: false, sawConnected: false });
   void queued.then(
     () => { const current = state.portOps.get(portId); if (current?.generation === generation && current.queue === queued) current.active = false; },
     () => { const current = state.portOps.get(portId); if (current?.generation === generation && current.queue === queued) current.active = false; },
@@ -90,79 +101,129 @@ export function acceptSerialStatus(portId: string, status: string): boolean {
   if (status === 'connected' && current?.intent === 'terminal' && port?.toolRunning) {
     state.portOps.set(portId, { ...current, intent: 'open' });
   }
+  if (status === 'connected') state.exhaustedReconnects.delete(portId);
+  if (status === 'connected' && current?.intent === 'open' && current.active && current.started) {
+    current.sawConnected = true;
+  }
   if (status === 'disconnected' || status === 'error') {
+    // A terminal event must not skip a queued/in-flight manual close. For open,
+    // only a terminal event after this open's connected event invalidates it.
+    if (current?.intent === 'close' && current.active) return true;
+    if (current?.intent === 'open' && current.active && (!current.started || !current.sawConnected)) return true;
     const generation = (current?.generation ?? 0) + 1;
     state.portOps.set(portId, {
       generation,
       intent: 'terminal',
       queue: current?.queue ?? Promise.resolve(),
       active: false,
+      started: false,
+      sawConnected: false,
     });
   }
   return true;
 }
 
+/** 手动意图撤销整个恢复流程，包括尚未触发的退避；状态事件只撤销单次完成结果。 */
+function cancelReconnectLoop(portId: string): void {
+  state.exhaustedReconnects.delete(portId);
+  const loop = state.reconnecting.get(portId);
+  if (!loop) return;
+  loop.cancelled = true;
+  loop.cancelDelay?.();
+}
+
+function ownsReconnectLoop(portId: string, loop: ReconnectLoop): boolean {
+  return state.reconnecting.get(portId) === loop &&
+    !loop.cancelled &&
+    !userClosingPortIds.has(portId) &&
+    useAppStore.getState().config.autoReconnect &&
+    !useAppStore.getState().ports.find((port) => port.id === portId)?.toolRunning;
+}
+
+function waitReconnectDelay(loop: ReconnectLoop, delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = () => {
+      loop.cancelDelay = undefined;
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    loop.cancelDelay = () => { clearTimeout(timer); finish(); };
+  });
+}
+
 /**
- * 自动重连循环：退避重试直到成功 / 重试次数用尽 / 用户主动关闭。
- *
- * 用户意图优先：**每一轮开头**都要检查 `userClosingPortIds`——后端在
- * `serial:reconnect_hint` 之前已经发过 `serial:status(disconnected)`，此时
- * `port.status` 早就不是 connected，用状态判断会让循环在 attempt=0 就永不启动，
- * 也会在用户手动断开后把刚关掉的端口重新打开。
+ * 一个循环拥有一份有限预算；活动期间的 hint 由当前循环覆盖，不另开一套预算。
+ * reader 可在重连 invoke 返回前再次掉线：terminal 事件使该次结果失效，但只要
+ * 没有手动 open/close 撤销循环，就继续剩余尝试，不能把状态变化误当成用户取消。
  */
 async function runReconnectLoop(portId: string): Promise<void> {
-  if (state.reconnecting.has(portId)) return;
+  const manualOpen = state.manualOpening.get(portId);
+  if (manualOpen) { manualOpen.hintPending = true; return; }
+  const existing = state.reconnecting.get(portId);
+  if (existing && !existing.cancelled) return;
   const { autoReconnect, maxRetries } = useAppStore.getState().config;
-  if (!autoReconnect) return;
-  state.reconnecting.add(portId);
+  if (!autoReconnect || userClosingPortIds.has(portId) || state.exhaustedReconnects.has(portId)) return;
+  const loop: ReconnectLoop = { id: ++state.nextReconnectId, cancelled: false };
+  state.reconnecting.set(portId, loop);
   let delayMs = 500;
+  let waitBeforeNext = false;
+  let attempts = 0;
+  let reason = 'exhausted';
+  console.info('[serial-reconnect] started', { portId, loopId: loop.id, maxRetries });
   try {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      if (userClosingPortIds.has(portId)) break;
-      if (attempt > 0) {
-        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-        if (userClosingPortIds.has(portId)) break;
-      }
+    while (attempts < maxRetries) {
+      if (waitBeforeNext) await waitReconnectDelay(loop, delayMs);
+      // Check after every backoff, before enqueue, and inside the operation lane.
+      if (!ownsReconnectLoop(portId, loop)) { reason = 'cancelled'; break; }
       let succeeded = false;
       let opGeneration = -1;
       try {
         await enqueuePortOp(portId, 'reconnect', async (generation) => {
+          if (!ownsReconnectLoop(portId, loop)) return;
           opGeneration = generation;
+          attempts += 1;
+          console.info('[serial-reconnect] attempting', { portId, loopId: loop.id, attempt: attempts, maxRetries });
           await serialService.attemptReconnect(portId);
-          if (!isCurrentOperation(portId, generation) || userClosingPortIds.has(portId)) return;
+          if (!ownsReconnectLoop(portId, loop) || !isCurrentOperation(portId, generation)) return;
           applyConnectedSideEffects(portId);
           lostPortIds.delete(portId);
           succeeded = true;
         });
       } catch (err) {
-        // Compare against the generation this attempt actually ran with. The
-        // previous check compared the current generation with itself and was
-        // always true, so a manual open/close could not stop the retry loop.
-        if (
-          userClosingPortIds.has(portId) ||
-          opGeneration < 0 ||
-          !isCurrentOperation(portId, opGeneration) ||
-          state.portOps.get(portId)?.intent !== 'reconnect'
-        ) break;
+        if (!ownsReconnectLoop(portId, loop)) { reason = 'cancelled'; break; }
+        console.warn('[serial-reconnect] attempt failed', {
+          portId, loopId: loop.id, attempt: attempts, maxRetries, error: extractErrorMessage(err),
+        });
         useToastStore.getState().push({
           severity: 'error',
           messageKey: 'toast.reconnect.failed',
           message: extractErrorMessage(err),
           portId,
         });
-        if (attempt >= maxRetries - 1) break;
-        delayMs = nextReconnectDelay(delayMs);
-        continue;
       }
-      if (succeeded) {
+      if (!ownsReconnectLoop(portId, loop)) { reason = 'cancelled'; break; }
+      // Recheck after the lane settles too: a terminal event may have arrived
+      // between the operation callback and this continuation.
+      if (succeeded && isCurrentOperation(portId, opGeneration)) {
+        reason = 'succeeded';
         notifySuccess('toast.reconnect.succeeded');
         break;
       }
-      // A newer manual open/close or terminal status owns the port now.
-      break;
+      if (attempts < maxRetries) {
+        waitBeforeNext = true;
+        delayMs = nextReconnectDelay(delayMs);
+        console.info('[serial-reconnect] retry scheduled', { portId, loopId: loop.id, delayMs });
+      }
     }
   } finally {
-    state.reconnecting.delete(portId);
+    // An old cancelled loop must not erase a replacement started by a fresh hint.
+    if (state.reconnecting.get(portId) === loop) {
+      state.reconnecting.delete(portId);
+      // The last reader's hint can arrive after invoke/finally. Keep its budget
+      // exhausted until a new manual intent or accepted connection starts a session.
+      if (reason === 'exhausted') state.exhaustedReconnects.add(portId);
+    }
+    console.info('[serial-reconnect] finished', { portId, loopId: loop.id, attempts, maxRetries, reason });
   }
 }
 
@@ -218,47 +279,62 @@ function acquireReconnectHintListener(): () => void {
 
 /** 打开端口：置 connecting → 后端 open → 连接后副作用。 */
 async function openPort(portId: string): Promise<void> {
+  cancelReconnectLoop(portId);
+  const opening = { hintPending: state.manualOpening.get(portId)?.hintPending ?? false };
+  state.manualOpening.set(portId, opening);
   userClosingPortIds.delete(portId);
   lostPortIds.delete(portId);
-  await enqueuePortOp(portId, 'open', async (generation) => {
-    const live = useAppStore.getState().ports.find((p) => p.id === portId);
-    // A reconnect attempt may have opened the port after this open was queued;
-    // issuing open_serial_port again would produce "Port ... is already open".
-    if (!live || live.status === 'connected' || live.status === 'connecting') return;
-    // The backend owns the port while an external tool runs (close→spawn→reopen).
-    if (live.toolRunning) return;
-    const params = resolveConnectionParams(portId);
-    useAppStore.getState().updatePort(portId, { status: 'connecting' });
-    const ttyState = ttyService.get(portId);
-    const ttySize = ttyState?.lastCols != null && ttyState.lastRows != null
-      ? { cols: ttyState.lastCols, rows: ttyState.lastRows }
-      : {};
-    try {
-      await serialService.openSerialPort({
-        portId,
-        ...params,
-        dtr: useOperationStore.getState().dtr,
-        rts: useOperationStore.getState().rts,
-        ...ttySize,
-      });
-      if (isCurrentOperation(portId, generation)) applyConnectedSideEffects(portId);
-    } catch (err) {
-      if (!isCurrentOperation(portId, generation)) return;
-      console.error('[useSerialConnection] Failed to open port:', err);
-      // A reconnect (or the backend itself) may have won the race to open the
-      // port. Reflect the live session instead of a sticky error state.
-      if (String(err).includes('is already open')) {
-        applyConnectedSideEffects(portId);
-        return;
+  try {
+    await enqueuePortOp(portId, 'open', async (generation) => {
+      const live = useAppStore.getState().ports.find((p) => p.id === portId);
+      // A reconnect attempt may have opened the port after this open was queued;
+      // issuing open_serial_port again would produce "Port ... is already open".
+      if (!live || live.status === 'connected' || live.status === 'connecting') return;
+      // The backend owns the port while an external tool runs (close→spawn→reopen).
+      if (live.toolRunning) return;
+      const params = resolveConnectionParams(portId);
+      useAppStore.getState().updatePort(portId, { status: 'connecting' });
+      const ttyState = ttyService.get(portId);
+      const ttySize = ttyState?.lastCols != null && ttyState.lastRows != null
+        ? { cols: ttyState.lastCols, rows: ttyState.lastRows }
+        : {};
+      try {
+        await serialService.openSerialPort({
+          portId,
+          ...params,
+          dtr: useOperationStore.getState().dtr,
+          rts: useOperationStore.getState().rts,
+          ...ttySize,
+        });
+        if (isCurrentOperation(portId, generation)) applyConnectedSideEffects(portId);
+      } catch (err) {
+        if (!isCurrentOperation(portId, generation)) return;
+        console.error('[useSerialConnection] Failed to open port:', err);
+        // A reconnect (or the backend itself) may have won the race to open the
+        // port. Reflect the live session instead of a sticky error state.
+        if (String(err).includes('is already open')) {
+          applyConnectedSideEffects(portId);
+          return;
+        }
+        notifyError(err);
+        useAppStore.getState().updatePort(portId, { status: 'error' });
       }
-      notifyError(err);
-      useAppStore.getState().updatePort(portId, { status: 'error' });
+    });
+  } finally {
+    if (state.manualOpening.get(portId) === opening) {
+      state.manualOpening.delete(portId);
+      // A new manual connection may also die before its invoke returns. Defer
+      // its hint until the manual lane settles instead of dropping or preempting it.
+      if (opening.hintPending && useAppStore.getState().ports.find((port) => port.id === portId)?.status !== 'connected') {
+        void runReconnectLoop(portId);
+      }
     }
-  });
+  }
 }
 
 /** 关闭端口：用户意图优先于在飞重连，日志由后端连接生命周期管理。 */
 async function closePort(portId: string): Promise<void> {
+  cancelReconnectLoop(portId);
   userClosingPortIds.add(portId);
   lostPortIds.delete(portId);
   await enqueuePortOp(portId, 'close', async (generation) => {

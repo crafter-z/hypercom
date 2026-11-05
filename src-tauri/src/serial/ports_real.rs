@@ -354,6 +354,14 @@ fn check_reconnect(cancel: &AtomicBool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Include the cause in the outer message because commands serialize only
+/// `error.to_string()`, while retaining the original error for chain inspection.
+fn open_stage_error(port_id: &str, stage: &str, error: impl Into<anyhow::Error>) -> anyhow::Error {
+    let error = error.into();
+    let message = format!("Serial port {} {} failed: {:#}", port_id, stage, error);
+    error.context(message)
+}
+
 /// 打开真实串口（锁内、不枚举端口、不 join 读线程）。
 ///
 /// 幽灵句柄的探测与回收由 `open_blocking` 在锁外完成；走到这里时同端口不应存在
@@ -386,30 +394,42 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
         .flow_control(flow_control)
         .timeout(Duration::from_millis(100));
     #[cfg(windows)]
-    let mut port = builder.open_native()?;
+    let mut port = builder
+        .open_native()
+        .map_err(|e| open_stage_error(&args.port_id, "native open", e))?;
     #[cfg(not(windows))]
-    let mut port = builder.open()?;
+    let mut port = builder
+        .open()
+        .map_err(|e| open_stage_error(&args.port_id, "native open", e))?;
 
     // The serialport Windows backend duplicates the write handle with
     // bInheritHandle=TRUE. Clear inheritance on both handles before any tool
     // process can be spawned; otherwise a sibling tool can keep this COM port
     // exclusively owned after HyperCom closes its own references.
     #[cfg(windows)]
-    make_handle_non_inheritable(&port)?;
+    make_handle_non_inheritable(&port)
+        .map_err(|e| open_stage_error(&args.port_id, "read handle inheritance setup", e))?;
 
     // 设置 DTR/RTS：两个句柄共享设备级状态，只设置一次即可。
-    port.write_data_terminal_ready(args.dtr)?;
-    port.write_request_to_send(args.rts)?;
+    port.write_data_terminal_ready(args.dtr)
+        .map_err(|e| open_stage_error(&args.port_id, "DTR setup", e))?;
+    port.write_request_to_send(args.rts)
+        .map_err(|e| open_stage_error(&args.port_id, "RTS setup", e))?;
 
     // 原句柄作为读句柄，clone 出的作为写句柄（见 SerialPortHandle 文档）。
     #[cfg(windows)]
     let write_port = {
-        let cloned = port.try_clone_native()?;
-        make_handle_non_inheritable(&cloned)?;
+        let cloned = port
+            .try_clone_native()
+            .map_err(|e| open_stage_error(&args.port_id, "write handle clone", e))?;
+        make_handle_non_inheritable(&cloned)
+            .map_err(|e| open_stage_error(&args.port_id, "write handle inheritance setup", e))?;
         Box::new(cloned) as Box<dyn serialport::SerialPort>
     };
     #[cfg(not(windows))]
-    let write_port = port.try_clone()?;
+    let write_port = port
+        .try_clone()
+        .map_err(|e| open_stage_error(&args.port_id, "write handle clone", e))?;
     #[cfg(windows)]
     let read_port = Box::new(port) as Box<dyn serialport::SerialPort>;
     #[cfg(not(windows))]
@@ -758,6 +778,56 @@ fn parse_flow_control(flow: &str) -> anyhow::Result<serialport::FlowControl> {
 
 #[cfg(test)]
 mod tests {
+    use super::open_stage_error;
+
+    #[test]
+    fn open_stage_error_keeps_port_stage_and_os_error_in_plain_display() {
+        for stage in [
+            "native open",
+            "read handle inheritance setup",
+            "DTR setup",
+            "RTS setup",
+            "write handle clone",
+            "write handle inheritance setup",
+        ] {
+            let source = std::io::Error::from_raw_os_error(2);
+            let source_message = source.to_string();
+            let error = open_stage_error("COM12", stage, source);
+            let message = error.to_string();
+            assert!(message.contains("COM12"), "{message}");
+            assert!(message.contains(stage), "{message}");
+            assert!(message.contains(&source_message), "{message}");
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(2),
+            );
+        }
+    }
+
+    #[test]
+    fn open_stage_error_keeps_nested_cause_in_plain_display() {
+        let source = std::io::Error::from_raw_os_error(2);
+        let source_message = source.to_string();
+        let error = open_stage_error(
+            "COM12",
+            "native open",
+            anyhow::Error::new(source).context("driver operation failed"),
+        );
+        let message = error.to_string();
+        assert!(message.contains("driver operation failed"), "{message}");
+        assert!(message.contains(&source_message), "{message}");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(2),
+        );
+    }
+
     // 显式导入而非 `use super::*`：见模块头注释（Windows 测试二进制不能链接
     // serialport FFI）。这些断言引用 serialport 枚举类型，故仅在非 Windows 运行；
     // CI（Linux/macOS）覆盖。

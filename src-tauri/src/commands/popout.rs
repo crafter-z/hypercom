@@ -364,6 +364,7 @@ mod tests {
             &[
                 "dialog:allow-open",
                 "dialog:allow-save",
+                "dialog:allow-message",
                 "shell:allow-open",
                 "core:app:allow-version",
                 "process:default",
