@@ -38,18 +38,23 @@ function useGroupName(tabId: string): string {
   return useSyncExternalStore(timelineCoordinator.subscribe, () => timelineCoordinator.groupForSlot(tabId)?.name ?? '');
 }
 
-type AlignmentTone = 'ok' | 'pending' | 'misaligned' | 'unavailable';
+type AlignmentTone = 'ok' | 'pending' | 'misaligned' | 'unavailable' | 'idle';
 const ALIGNED_STATUSES: ReadonlySet<TimelineStatus> = new Set<TimelineStatus>(['exact', 'nearest']);
 const PENDING_STATUSES: ReadonlySet<TimelineStatus> = new Set<TimelineStatus>(['loading', 'held', 'slow']);
 /** Member-level alignment tone; only deviations from `ok` reach the panel body.
  *
- *  Only *settled* fields decide the tone. `pending`/`inFlight` are deliberately not
- *  consulted: LIVE preview ticks enqueue a seek every ~66ms, so letting the in-flight
- *  flag win made the badge flip between「对齐中…」and its real status on every frame.
- *  `loading`/`held`/`slow` are themselves settled, in-progress statuses. */
+ *  A *settled* status always wins, so LIVE preview ticks (a seek is re-enqueued every
+ *  ~66ms) can no longer make the badge flip between「对齐中…」and its real status.
+ *  `pending`/`inFlight` are consulted only while no result has settled yet — that is
+ *  the first seek after a group is created. A member with neither a result nor an
+ *  in-flight seek (`idle`) is silent: e.g. a group created on an empty or fully
+ *  filtered terminal never gets an anchor, so no seek is ever issued and「对齐中…」
+ *  would otherwise stay on screen forever. `loading`/`held`/`slow` are themselves
+ *  settled, in-progress statuses. */
 function alignmentTone(member: TimelineMemberSnapshot): AlignmentTone {
   if (member.state !== 'active') return 'unavailable';
-  if (!member.status || PENDING_STATUSES.has(member.status)) return 'pending';
+  if (!member.status) return member.pending || member.inFlight ? 'pending' : 'idle';
+  if (PENDING_STATUSES.has(member.status)) return 'pending';
   return ALIGNED_STATUSES.has(member.status) ? 'ok' : 'misaligned';
 }
 /** Coordinator reasons are machine tokens; only known ones may be shown to users. */
@@ -252,7 +257,7 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
                 // `!participant` is already labelled by the kind chip, so only real deviations add a chip.
                 // A member that cannot follow (clock domain, availability) says so generically; the
                 // machine reason stays in Advanced instead of becoming a prompt in the panel body.
-                const statusLabel = !member || tone === 'ok' || unavailable ? ''
+                const statusLabel = !member || tone === 'ok' || tone === 'idle' || unavailable ? ''
                   : tone === 'unavailable' ? t('timeline.status.unavailable')
                   : member.status ? t(`timeline.status.${member.status}`)
                   : t('timeline.aligning');

@@ -172,6 +172,24 @@ describe('misalignment stays visible in the panel body', () => {
     await act(async () => { host.dispose(); follower.dispose(); });
   });
 
+  it('stays silent for a group that never got an anchor instead of an endless "aligning"', async () => {
+    // A group created on an empty (or fully filtered) terminal samples no anchor, so the
+    // coordinator never broadcasts: no member gets a status and no seek is ever queued.
+    const seek = () => ({ status: 'before-range' as const, actualTimeMs: 0 });
+    const host = timelineCoordinator.registerParticipant({ ...participant('a', HOST_CLOCK_ID), seek });
+    const follower = timelineCoordinator.registerParticipant({ ...participant('b', HOST_CLOCK_ID), seek });
+    const id = timelineCoordinator.createGroup({ name: 'G1', memberSlots: ['a', 'b'] });
+    await mount('a');
+    expect(timelineCoordinator.getSnapshot().groups[0].committedAnchor).toBeNull();
+    expect(container.querySelectorAll('.timeline-member-status')).toHaveLength(0);
+    expect(container.querySelectorAll('.timeline-group-status')).toHaveLength(0);
+    // Once a real seek is queued the transient is legitimate: this is an actual
+    // in-flight navigation, not the endless state an anchor-less group used to show.
+    await act(async () => { timelineCoordinator.seek(id, 100); });
+    expect(container.querySelector('.timeline-group-status')?.textContent).toBe('timeline.aligning');
+    await act(async () => { host.dispose(); follower.dispose(); });
+  });
+
   it('keeps the compact tab label traceable to the persisted group name', async () => {
     timelineCoordinator.createGroup({ name: '设备对照', memberSlots: ['a', 'b'] });
     const host = document.createElement('div');

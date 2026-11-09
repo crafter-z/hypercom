@@ -280,6 +280,22 @@ describe('time index rebuild waits', () => {
     vm.dispose();
   });
 
+  it('counts chunked filter-scan progress, so a long scan is not treated as a lost build', async () => {
+    vi.useFakeTimers();
+    const vm = new TerminalViewportManager('scan-progress', { maxLines: 11000 });
+    vm.appendLines(Array.from({ length: 10000 }, (_, i) => line(i, 'hit')));
+    // A buffer larger than TERMINAL_REBUILD_SYNC_LIMIT makes the filter scan chunked.
+    vm.setFilter('RX', 'hit');
+    expect(vm.isLoading).toBe(true);
+    const progress = () => (vm as unknown as { indexBuildProgress: number }).indexBuildProgress;
+    const before = progress();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(progress()).toBeGreaterThan(before);
+    await vi.runAllTimersAsync(); frame();
+    expect(vm.isLoading).toBe(false);
+    vm.dispose();
+  });
+
   it('re-arms the stall budget while the rebuild keeps progressing past 2x wall-clock', async () => {
     vi.useFakeTimers();
     const vm = new TerminalViewportManager('rebuild-slow', { maxLines: 100 });

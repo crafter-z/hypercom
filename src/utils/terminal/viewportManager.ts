@@ -80,8 +80,9 @@ export class TerminalViewportManager {
   private timeIndex = new TerminalTimeIndex();
   private timeIndexReady = true;
   private indexBuildVersion = 0;
-  /** Advances once per index-build step (chunk or synchronous completion);
-   *  stall timeouts compare it to tell a slow rebuild from a lost one. */
+  /** Advances once per chunked rebuild step: index-build chunks, the synchronous
+   *  index completion path, and filter/search scan chunks (which gate the next
+   *  index rebuild). Stall timeouts compare it to tell slow work from lost work. */
   private indexBuildProgress = 0;
   private indexBuildTimer: ReturnType<typeof setTimeout> | null = null;
   private indexWaiters = new Set<(ready: boolean) => void>();
@@ -782,6 +783,10 @@ export class TerminalViewportManager {
       }
       if (cursor <= end) timer = setTimeout(run, 0);
       else complete(seqs, end);
+      // A filter/search scan is the work that gates the next index rebuild, so a
+      // chunk of it counts as advancement for the stall timers too (see
+      // `waitForTimeIndex`): a healthy long scan must not look like a lost build.
+      this.indexBuildProgress++;
     };
     if (sync) run(); else timer = setTimeout(run, 0);
     return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
