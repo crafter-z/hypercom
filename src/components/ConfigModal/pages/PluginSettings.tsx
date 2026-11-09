@@ -146,6 +146,17 @@ const PluginSettings: React.FC = () => {
   };
 
 
+  /** Sensitive permissions are confirmed before they are granted, on every path that can
+   *  grant them: first enable, "grant all and enable", and a per-permission checkbox.
+   *  Only *granting* asks — revoking stays one click, because it takes effect immediately. */
+  const confirmSensitive = (plugin: PluginView, permissions: readonly string[]): boolean => {
+    const sensitive = permissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
+    return sensitive.length === 0 || window.confirm(t('plugins.sensitiveConfirm', {
+      name: plugin.manifest?.name ?? plugin.id,
+      perms: sensitive.join(', '),
+    }));
+  };
+
   /** 启用时提示当前可授予的敏感权限；未实现能力不列入风险确认。 */
   const handleToggleEnabled = (plugin: PluginView): void => {
     if (!plugin.enabled) {
@@ -153,10 +164,7 @@ const PluginSettings: React.FC = () => {
         setPendingTrust({ plugin, install: false });
         return;
       }
-      const sensitive = plugin.declaredPermissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
-      if (sensitive.length > 0 && !window.confirm(t('plugins.sensitiveConfirm', { name: plugin.manifest?.name ?? plugin.id, perms: sensitive.join(', ') }))) {
-        return;
-      }
+      if (!confirmSensitive(plugin, plugin.declaredPermissions)) return;
     }
     if (!beginPluginBusy(plugin.id)) return;
     void setEnabled(plugin.id, !plugin.enabled, plugin.installGeneration)
@@ -302,6 +310,8 @@ const PluginSettings: React.FC = () => {
                                 checked={granted.includes(perm)}
                                 disabled={loading || busyPlugins.has(plugin.id) || !!plugin.manifestError}
                                 onChange={() => {
+                                   // Granting a sensitive permission is a reviewed action, not a silent toggle.
+                                   if (!granted.includes(perm) && !confirmSensitive(plugin, [perm])) return;
                                    if (!beginPluginBusy(plugin.id)) return;
                                    void togglePermission(plugin.id, perm, plugin.installGeneration)
                                      .finally(() => endPluginBusy(plugin.id));
@@ -370,6 +380,7 @@ const PluginSettings: React.FC = () => {
                 setPendingGrant(null);
                 return;
               }
+              if (!confirmSensitive(pendingGrant, pendingGrant.declaredPermissions)) return;
               if (!beginPluginBusy(pendingGrant.id)) return;
                void grantAllAndEnable(pendingGrant)
                  .then(() => setPendingGrant(null))

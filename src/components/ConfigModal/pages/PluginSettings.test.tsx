@@ -37,6 +37,8 @@ beforeEach(() => {
   mocks.api.setTrustedWeb.mockResolvedValue(undefined);
   mocks.api.refresh.mockResolvedValue([trustedPlugin()]);
   mocks.api.setEnabled.mockResolvedValue(undefined);
+  mocks.api.togglePermission.mockResolvedValue(undefined);
+  mocks.api.grantAllAndEnable.mockResolvedValue(undefined);
   mocks.api.reloadPlugin.mockResolvedValue(undefined);
   mocks.isReplaceError.mockReturnValue(false);
   mocks.replacementTargetId.mockReturnValue('demo');
@@ -149,4 +151,61 @@ it('does not confirm before a first install or a higher-version upgrade', async 
   await click('plugins.installZip');
   expect(confirm).not.toHaveBeenCalled();
   expect(mocks.api.installPlugin).toHaveBeenCalledWith('archive.zip');
+});
+
+const pluginWithWrite = (): PluginView => {
+  const base = trustedPlugin();
+  const permissions = ['fs:open-dir', 'fs:write-dir'];
+  return {
+    ...base,
+    trustedWebGranted: true,
+    declaredPermissions: permissions,
+    knownPermissions: permissions,
+    manifest: { ...base.manifest!, permissions },
+  };
+};
+const permissionCheckbox = (permission: string) => {
+  const row = [...container.querySelectorAll('.plugin-perm-item')]
+    .find(item => item.querySelector('code')?.textContent === permission);
+  expect(row).toBeDefined();
+  return row!.querySelector('input')!;
+};
+
+it('asks before granting fs:write-dir from a per-permission checkbox', async () => {
+  mocks.api.plugins = [pluginWithWrite()];
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await render();
+  await act(async () => permissionCheckbox('fs:write-dir').click());
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(mocks.api.togglePermission).not.toHaveBeenCalled();
+  confirm.mockReturnValue(true);
+  await act(async () => permissionCheckbox('fs:write-dir').click());
+  expect(mocks.api.togglePermission).toHaveBeenCalledWith('demo', 'fs:write-dir', 'generation-a');
+});
+
+it('never asks for the non-sensitive read grant, nor for revoking', async () => {
+  mocks.api.plugins = [{ ...pluginWithWrite(), grantedPermissions: ['fs:write-dir'] }];
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await render();
+  await act(async () => permissionCheckbox('fs:open-dir').click());
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mocks.api.togglePermission).toHaveBeenCalledWith('demo', 'fs:open-dir', 'generation-a');
+  await act(async () => permissionCheckbox('fs:write-dir').click());
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mocks.api.togglePermission).toHaveBeenLastCalledWith('demo', 'fs:write-dir', 'generation-a');
+});
+
+it('asks before "grant all and enable" hands over the same high-risk permissions', async () => {
+  mocks.open.mockResolvedValue('archive.zip');
+  // The dialog re-checks live trust state before granting, so the installed plugin must be
+  // listed as already trusted for this path to reach the permission consent.
+  mocks.api.plugins = [pluginWithWrite()];
+  mocks.api.installPlugin.mockResolvedValue(pluginWithWrite());
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await render();
+  await click('plugins.installZip');
+  expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  await click('plugins.permissionPromptGrantAll');
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(mocks.api.grantAllAndEnable).not.toHaveBeenCalled();
 });
