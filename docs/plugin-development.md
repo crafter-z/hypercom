@@ -23,7 +23,7 @@
 - 每次安装、升级或用户确认替换都会生成新的安装身份（`installGeneration`）并重置授权（含可信网页信任）；旧身份下排队或迟到的操作会被拒绝，Worker 内存状态也不跨安装身份保留。
 - 宿主注入 Worker 的 `self.plugin`。Worker 无 DOM、window、Tauri invoke 或 localStorage；不要操作宿主 React/store，不要覆盖桥使用的 self.onmessage/self.plugin。
 - 可声明侧边栏按钮、端口菜单、文本面板及隔离视图。隔离 UI 有自己的 DOM 和浏览器上下文，可以使用打包后的 React/Vue/普通 JS，但不访问主窗 DOM 或 Tauri 通用接口。Windows 原生承载已实现，其他平台在隔离策略验收前明确拒绝；桌面弹出窗不运行插件。
-- 出站 HTTP 使用 `http.request`，不要直接调用 `fetch` / WebSocket；生产 CSP 不允许任意直接网络连接。读取用户文件使用原生 `fs.openDialog`，不接受任意本机路径。
+- 出站 HTTP 使用 `http.request`，不要直接调用 `fetch` / WebSocket；生产 CSP 不允许任意直接网络连接。读取用户文件使用原生 `fs.openDialog`，读写用户目录使用原生 `fs.openDirectoryDialog`；两者都不接受插件提供的任意本机路径。
 - 安装是用户的信任决定。权限和额度不能替第三方代码提供安全认证；只声明真正需要的能力，不在启动时自动向设备发送控制指令或自动弹文件对话框。
 
 ## 创建第一个插件
@@ -122,6 +122,8 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 | `fs:assets` | 读取插件自身包内文件，可返回文本或原始二进制 |
 | `fs:storage` | 读取自身 data/ 文件（文本/二进制）及写入文本或原始字节 |
 | `fs:open` | 经用户原生选择器读取外部文件（文本/二进制） |
+| `fs:open-dir` | 经用户原生目录选择器获得只读目录授权：列出目录、读取文件和元数据；根目录只能由选择器产生 |
+| `fs:write-dir` | 高风险：经用户原生目录选择器获得写入授权，可创建/覆盖/追加文件、建目录、删除和重命名；根目录只能由选择器产生。宿主启停确认会单独提示 |
 | `http:request` | 经宿主发起完整 HTTP（文本/二进制/流式/重定向/取消）；可选 urlWhitelist 收紧 |
 | `shell:open` | 在系统默认程序打开 http/https/mailto URL；不是执行 shell |
 | `clipboard` | 读/写剪贴板文本 |
@@ -181,7 +183,7 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户或网络，不设 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`ui.panel.export` 与全部 `http.*`。`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户或网络，不设 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export` 与全部 `http.*`。`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
 - 超时只是回执失败，不表示已经开始的串口写入、文件写入或 HTTP 已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
@@ -218,12 +220,21 @@ serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动
 | `api['fs.read']({rel, format?})` | fs:assets 或 fs:storage | rel 为包内或 data/ 相对路径（≤4096 字符）；format 缺省/`text` 返回 UTF-8 文本，非法字节用替代字符；`binary` 返回 `Uint8Array`。空文件为 `''` 或零长度字节数组，缺文件/IO 错误 reject；data/ 与包资产分开授权 |
 | `api['fs.write']({rel, content?} \| {rel, bytes?})` | fs:storage | rel 只允许 data/ 下相对路径；`content`（可为空字符串）或 `bytes`（`Uint8Array`/`ArrayBuffer`，可为零长度）二选一；原子覆盖写入，自动创建父目录；无内容大小上限 |
 | `api['fs.openDialog']({multiple?, filters?, title?, encoding?, format?})` | fs:open | format 缺省/`text` 返回 `{files:[{path, content}]}`，`binary` 返回 `{files:[{path, bytes: Uint8Array}]}`；取消为 `{files:[]}`。文本 encoding 默认 utf-8，可用浏览器 TextDecoder 支持的标签（如 gbk）；二进制忽略 encoding；multiple 缺省 false，无选择数量上限，每插件同时最多 8 个对话框；filters 仅为选择提示，始终可选所有文件 |
+| `api['fs.openDirectoryDialog']({title?, multiple?})` | fs:open-dir 或 fs:write-dir | 经原生目录选择器获得目录授权；返回 `{directories:[{grantId, name, path}]}`，取消为 `{directories:[]}`。`path` 仅供展示；后续访问必须使用 `grantId`。无 TTL、无数量上限；授权保存在宿主内存，应用重启后失效 |
+| `api['fs.listDirectory']({grantId, rel?, recursive?})` | fs:open-dir | 列出授权根或 `rel` 子目录的条目；返回 `{entries:[{name, rel, kind, size, modifiedMs}]}`，`kind` 为 `file`/`directory`/`other`。`recursive` 默认 false；为 true 时返回整棵树，不设深度或条目上限。`rel` 使用 `/`；链接/重解析点与特殊文件标记为 `other` |
+| `api['fs.readDirectoryFile']({grantId, rel, format?, encoding?})` | fs:open-dir | 读取授权目录内的普通文件；返回 `{path, content}`（text，encoding 默认 utf-8）或 `{path, bytes: Uint8Array}`（binary）。`rel` 必填且必须解析到授权根内；绝对路径、`..`、链接和重解析点拒绝。无内容大小上限，一次性读取整个文件 |
+| `api['fs.statDirectoryEntry']({grantId, rel})` | fs:open-dir | 读取单个条目的元数据：`{name, rel, kind, size, modifiedMs}`；不读取文件内容；链接/重解析点拒绝 |
+| `api['fs.writeDirectoryFile']({grantId, rel, content? \| bytes?, mode?, createParents?})` | fs:write-dir | 写入授权目录内的文件；`content`（UTF-8 文本，可为空串）与 `bytes`（`Uint8Array`/`ArrayBuffer`）二选一；`mode` 为 `overwrite`（默认，临时文件同步后原子替换）或 `append`；`createParents` 默认 true；返回 `{path, bytesWritten}`，无内容大小上限 |
+| `api['fs.createDirectory']({grantId, rel, recursive?})` | fs:write-dir | 创建目录；`recursive` 默认 true；已存在目录视为成功；逐组件拒绝链接/重解析点 |
+| `api['fs.removeDirectoryEntry']({grantId, rel, recursive?})` | fs:write-dir | 删除文件/目录；`recursive` 默认 false；非递归删除非空目录会失败；不能删除授权根 |
+| `api['fs.renameDirectoryEntry']({grantId, fromRel, toRel})` | fs:write-dir | 重命名/移动；源必须存在，目标父目录必须存在，目标不能已存在；源/目标都必须在授权根内 |
+| `api['fs.releaseDirectory']({grantId})` | 无 | 提前释放目录授权；未知或已失效的 `grantId` 视为成功。授权也会在插件禁用、同时撤销两个目录权限、卸载、替换或重载时失效 |
 | `api['clipboard.readText']()` | clipboard | 返回剪贴板文本 |
 | `api['clipboard.writeText']({text})` | clipboard | 写入文本；空字符串表示清空剪贴板 |
 
 storage 的文件是 data/state.json。只有确认文件不存在才初始化空对象；暂时读失败、非法 JSON、非对象内容都会 reject，不能用空缓存覆盖旧键。键只要求非空字符串；值必须是可无损 JSON 化的数据——除顶层 `undefined`（删除键）外，拒绝函数、嵌套 `undefined`、NaN/Infinity、Map/Set/Date/类型化数组、getter、可调用的 `toJSON`、稀疏数组与循环引用，但**不设键长、值大小、节点数或文件大小上限**。不要同时用 fs.write 手工改这个文件和 storage.set 操作 KV，两条路径没有共享 KV 缓存更新契约。配置导出不包含 KV、其他 data/ 或插件代码。
 
-**读写都不设文件格式、内容、大小、总量或选择数量上限，所有插件一致，不要求可信网页模式。** `fs.read` 仍只访问已授权插件目录，`fs.openDialog` 只读取用户选择的路径，`fs.write` 只写 data/；二进制保留全部字节，不经过文本解码。文本解码可能替换非法字节，要求无损时必须使用 binary。接口一次性读取并返回整个文件，实际可处理大小受可用内存及 JS/浏览器运行时约束，并非流式接口。安装包与网页声明资源的限额仍属于安装/视图加载，不限制此处的数据读取或私有写入。
+**读写都不设文件格式、内容、大小、总量或选择数量上限，所有插件一致，不要求可信网页模式。** `fs.read` 仍只访问已授权插件目录，`fs.openDialog` 只读取用户选择的路径，`fs.openDirectoryDialog` 只能获得用户原生选择器产生的目录根（读/写权限均可发起选择），`fs.write` 只写 data/；二进制保留全部字节，不经过文本解码。文本解码可能替换非法字节，要求无损时必须使用 binary。目录授权是内存能力，插件不能把任意本机路径或目录根传给宿主；所有目录操作每次调用都重新校验权限、安装代次和路径围栏。接口一次性读取/写入整个文件，实际可处理大小受可用内存及 JS/浏览器运行时约束，并非流式接口。安装包与网页声明资源的限额仍属于安装/视图加载，不限制此处的数据读取或私有写入。
 
 ### 网络与外部链接
 
@@ -274,7 +285,7 @@ options 字段：`method?`（缺省 GET，建议大写）、`url`（仅 http/htt
 
 seq 不是跨应用会话的持久数据 ID；ts 为毫秒时间戳。不要把 RX 块当完整行，也不要按每块重新建解码器处理跨块 UTF-8 多字节字符。
 
-当前**没有** ports.onChange、rx.getBuffer、fs.list、shell.execute、自定义 events.on/emit、插件市场或远程调试协议。声明未来权限不能使这些接口可用。
+当前**没有** ports.onChange、rx.getBuffer、包资产目录遍历（`fs.list`）、shell.execute、自定义 events.on/emit、插件市场或远程调试协议。声明未来权限不能使这些接口可用。目录读写只针对用户通过原生选择器选定的目录，不是任意路径 API；插件不能用自报路径绕过选择器。
 
 ## 隔离 UI 与工作区标签
 
@@ -553,6 +564,46 @@ self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
 
 宿主向 Worker 转移字节缓冲区，避免再次复制大文件。可信网页本身仍可用 `File.arrayBuffer()` / `File.stream()` 或 `fetch(...).arrayBuffer()` 读取，和 Worker API 的返回格式独立。
 
+### 选择目录并读写文件
+
+读取需要 `fs:open-dir`，写入/删除/重命名需要 `fs:write-dir`；只声明 `fs:write-dir` 也能打开目录选择器（得到写权限），但 list/read 会被拒绝。目录选择只应在用户操作（按钮/菜单）中发生；宿主不接受插件提供的任意目录路径。以下示例递归列出所选目录、读取 `.log` 文件，并写出一份汇总：
+
+```js
+self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
+  if (buttonId !== 'open-log-dir') return;
+  const api = self.plugin.api;
+  let grantId;
+  try {
+    const { directories } = await api['fs.openDirectoryDialog']({ title: '选择日志目录', multiple: false });
+    if (directories.length === 0) return; // 用户取消
+    grantId = directories[0].grantId;
+
+    const { entries } = await api['fs.listDirectory']({ grantId, recursive: true });
+    let total = 0;
+    for (const entry of entries) {
+      if (entry.kind !== 'file' || !entry.name.endsWith('.log')) continue;
+      const { content } = await api['fs.readDirectoryFile']({ grantId, rel: entry.rel });
+      total += content.length;
+    }
+
+    await api['fs.createDirectory']({ grantId, rel: 'exports', recursive: true });
+    await api['fs.writeDirectoryFile']({
+      grantId,
+      rel: 'exports/summary.txt',
+      content: `total chars: ${total}\n`,
+      mode: 'overwrite',
+      createParents: true
+    });
+  } catch (error) {
+    console.error('directory read/write failed', error);
+  } finally {
+    if (grantId) await api['fs.releaseDirectory']({ grantId }).catch(() => {});
+  }
+});
+```
+
+`listDirectory` 默认只列一层，`recursive:true` 返回整棵树且不设深度/条数上限。`path` 仅供展示，所有访问必须使用 `grantId` + `rel`。目录内符号链接/重解析点和特殊文件标记为 `kind:"other"`，不可读取；路径解析后越出所选目录、绝对路径或 `..` 一律拒绝。`writeDirectoryFile` 的 `mode` 默认 `overwrite`（原子替换），`append` 用于追加；`createParents` 默认 true。`removeDirectoryEntry` 递归删除需要显式 `recursive:true`。目录权限不等于 `fs:open`：使用文件选择器和目录选择器时，manifest 需分别声明 `fs:open` 与目录权限。
+
 ### 向指定串口发送
 
 需要 serial:send 和匹配作用域。把同样的 send-ping 按钮 id 声明在 ui.menuItems 中，让用户明确选中端口；以下不会在启动时自动发送：
@@ -585,10 +636,11 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | ZIP元数据 | 压缩文件96MiB、中央目录16MiB、单条名称/extra/comment合计64KiB；实体记录≤2000且不得重复，支持限额内ZIP64 |
 | data/ 写入 | 不设单文件/总量/文件数上限；路径与原子写约束保留；每次写入不再扫描整个 data/ |
 | 插件文件读取 | 不限制扩展名/内容/大小/总量/多选数量，无固定读取期限；保留权限与路径范围，完整读取所需内存由运行环境决定 |
+| 插件目录授权 | `fs.openDirectoryDialog` 只能打开原生选择器；无 TTL、无授权数量上限。`listDirectory` 默认一层，`recursive:true` 返回整棵树且不设深度/条数上限；`readDirectoryFile`/`writeDirectoryFile` 无内容大小上限，一次性读写整个文件。目录内 `other` 条目不可读；禁止绝对路径、`..`、链接/重解析点和越界路径。写文件 `overwrite` 使用同目录临时文件 + 原子替换，`append` 直接追加 |
 | 插件文件写入 IO | 闸门准入等待最多 5 秒，繁忙时可重试；已经开始的写入不设隐式业务期限，真实完成后才返回 |
 | 串口与终端写入 | `serial.send` 单次 data ≤1048576 个 UTF-16 代码单元；`view.sendSerial` 单次 data ≤65536 个；`terminal.append` 单次 text ≤65536 个 |
 | HTTP | 仅 http/https；无宿主业务大小上限、无固定 timeout；`timeout` 为调用显式给出的非负有限秒数（0/缺省=不设总期限），重定向默认最多 10 跳；并发上限每插件 64、全应用 64 |
-| 文件对话框 | `fs.openDialog` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |
+| 文件对话框 | `fs.openDialog` / `fs.openDirectoryDialog` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |
 | 插件面板 | 单次 append ≤65536 个 UTF-16 代码单元、约 200 条/s；面板总计 524288 个 UTF-16 代码单元，超限丢最旧文本；不是 UTF-8 字节数 |
 | KV | 无键长/值大小/节点数/文件大小上限；值须可无损 JSON 化 |
 | 剪贴板 | 读写文本无长度上限；空字符串清空剪贴板 |
