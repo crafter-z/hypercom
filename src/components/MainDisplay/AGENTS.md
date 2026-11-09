@@ -19,7 +19,7 @@ Recursive pane tree (2026-07 refactor). `MainDisplay` renders the tree; leaves w
 | `hooks/useTabDragEnd.ts` | end-of-drag move; uses `findLeafByTabId` / `findLeafById` from `useAppStore.ts` |
 | `hooks/useLogReplay.ts` | 原生多文件授权导入与确认，建立独立只读回放标签；不要求活动串口，不向实时buffer追加 |
 | `ReplayView.tsx` | `ReplayDocument` 注入共享 `TerminalView`，本地显示配置、分段选择与每组唯一播放时钟；回放无发送端口 |
-| `TimelineControls.tsx` / `TimelineControls.css` | 紧凑链条图标入口、标签 Gx 标记、成员管理、常量偏移与事件T+0；管理弹窗是窄幅（460px）单列密集布局，当前组条把「移出此视图／解散联动组」放在面板主体，成员行按 `member.status/state` 直接标出未对齐（组条汇总「N 个视图未对齐／对齐中…」），整组不可用时给主体提示；时钟基准不一致/不可用只显示中性「暂不可用」，`reason` 与 T+0 入口留在「高级设置」；工作区宿主只挂载管理弹窗，整组跟随复用现有 Pin，不另设组条/返回实时 |
+| `TimelineControls.tsx` / `TimelineControls.css` | 紧凑链条图标入口、标签 Gx 标记、成员管理、常量偏移与事件T+0；管理弹窗是窄幅（460px）单列密集布局，当前组条把「移出此视图／解散联动组」放在面板主体，成员行按 `member.status/state` 直接标出未对齐（组条汇总「N 个视图未对齐／对齐中…」；tone 只看已结算字段，不读 `pending/inFlight`，否则 LIVE 预览节拍下徽标会每帧闪动），整组不可用时给主体提示；时钟基准不一致/不可用只显示中性「暂不可用」，`reason` 与 T+0 入口留在「高级设置」；工作区宿主只挂载管理弹窗，整组跟随复用现有 Pin，不另设组条/返回实时 |
 
 ## Conventions (root covers flexbox `min-height: 0` chain; 展开见 docs/architecture/conventions.md)
 

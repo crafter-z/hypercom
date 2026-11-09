@@ -31,7 +31,7 @@ portId 是发送目标，sourceId 是数据来源，tabId 是持久工作区槽�
 - 时钟世代：`updateSourceGeneration` 只在 epoch 真正变化时把来源加入 `unconfirmedSources`；来源重新报告已确认的 epoch（该来源 mapping 的 `clockEpoch`，否则 `referenceClock.epoch`）时清除闩锁，瞬时 epoch 丢失可自愈，真不同 epoch 仍要求显式映射（`compatible` 为 false → state unavailable、reason mapping-required）。
 - 组不硬对齐不兼容来源：`supportsLive` 只接受全部 live + 宿主时钟；`setMode` 对跨时间域抛错，`stopUnsupportedLive` 在注册参与者或加成员时退出 LIVE；`updateCapabilities` 只在 `canDrive` 转 false 时失效驾驶租约。
 - 退化组不留幽灵：`removeMember` 移除最后一个成员后直接删除该组，`restoreState` 跳过全槽位失效或空成员列表的组，`exportState` 因此不再携带不可达的组（不再占用组序号与默认配色）。
-- UI 侧由 `TimelineControls` 承担可见兜底：成员行按 tone 标出未对齐状态与实际时间/差值（时钟域不同或不可用只显示中性的「暂不可用」，不展开机器原因），组条汇总「N 个视图未对齐／对齐中…」；整组不可用时在面板主体给出提示。时钟基准不一致按行为兜底处理——不弹提示、不硬对齐，`reason` 与「各自当前位置为 T+0」/常量偏移仍留在「高级设置」。
+- UI 侧由 `TimelineControls` 承担可见兜底：成员行按 tone 标出未对齐状态与实际时间/差值（时钟域不同或不可用只显示中性的「暂不可用」，不展开机器原因），组条汇总「N 个视图未对齐／对齐中…」；整组不可用时在面板主体给出提示。tone 只由**已结算**字段（`state`/`status`）决定，不读 `pending`/`inFlight`——LIVE 预览每约 66ms 就重排一次 seek，读在途标志会让徽标每帧在「对齐中…」与真实状态间闪动。时钟基准不一致按行为兜底处理——不弹提示、不硬对齐，`reason` 与「各自当前位置为 T+0」/常量偏移仍留在「高级设置」。
 
 ## 模式、驾驶权与调度
 

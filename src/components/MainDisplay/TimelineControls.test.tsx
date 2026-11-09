@@ -136,6 +136,42 @@ describe('misalignment stays visible in the panel body', () => {
     await act(async () => { host.dispose(); device.dispose(); });
   });
 
+  it('keeps a settled status while a new seek is queued, so the badge cannot flicker', async () => {
+    // A LIVE group re-enqueues a seek every ~66ms, so `pending`/`inFlight` toggle
+    // constantly: the badge must be driven by settled fields only.
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId; });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id); });
+    const drain = async () => {
+      await act(async () => {
+        for (let round = 0; round < 8; round++) {
+          for (const callback of [...frames.values()]) callback(0);
+          frames.clear();
+          await Promise.resolve();
+        }
+      });
+    };
+    const seek = () => ({ status: 'before-range' as const, actualTimeMs: 0 });
+    const host = timelineCoordinator.registerParticipant({ ...participant('a', HOST_CLOCK_ID), seek });
+    const follower = timelineCoordinator.registerParticipant({ ...participant('b', HOST_CLOCK_ID), seek });
+    const id = timelineCoordinator.createGroup({ name: 'G1', memberSlots: ['a', 'b'], anchor: { timeMs: 100 } });
+    await mount('a');
+    await drain();
+    const chips = () => [...container.querySelectorAll<HTMLElement>('.timeline-member-status')]
+      .map(node => `${node.textContent}|misaligned=${node.classList.contains('is-misaligned')}`);
+    // Both the text and the tone class must stay put: only the class flips first, and that
+    // is what made the badge blink between「对齐中…」and its real status.
+    const settled = ['timeline.status.before-range|misaligned=true', 'timeline.status.before-range|misaligned=true'];
+    expect(chips()).toEqual(settled);
+    await act(async () => { timelineCoordinator.seek(id, 500); });
+    expect(timelineCoordinator.getSnapshot().groups[0].members.some(member => member.pending || member.inFlight)).toBe(true);
+    expect(chips()).toEqual(settled);
+    await drain();
+    expect(chips()).toEqual(settled);
+    await act(async () => { host.dispose(); follower.dispose(); });
+  });
+
   it('keeps the compact tab label traceable to the persisted group name', async () => {
     timelineCoordinator.createGroup({ name: '设备对照', memberSlots: ['a', 'b'] });
     const host = document.createElement('div');

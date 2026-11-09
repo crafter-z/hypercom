@@ -41,10 +41,14 @@ function useGroupName(tabId: string): string {
 type AlignmentTone = 'ok' | 'pending' | 'misaligned' | 'unavailable';
 const ALIGNED_STATUSES: ReadonlySet<TimelineStatus> = new Set<TimelineStatus>(['exact', 'nearest']);
 const PENDING_STATUSES: ReadonlySet<TimelineStatus> = new Set<TimelineStatus>(['loading', 'held', 'slow']);
-/** Member-level alignment tone; only deviations from `ok` reach the panel body. */
+/** Member-level alignment tone; only deviations from `ok` reach the panel body.
+ *
+ *  Only *settled* fields decide the tone. `pending`/`inFlight` are deliberately not
+ *  consulted: LIVE preview ticks enqueue a seek every ~66ms, so letting the in-flight
+ *  flag win made the badge flip between「对齐中…」and its real status on every frame.
+ *  `loading`/`held`/`slow` are themselves settled, in-progress statuses. */
 function alignmentTone(member: TimelineMemberSnapshot): AlignmentTone {
   if (member.state !== 'active') return 'unavailable';
-  if (member.pending || member.inFlight) return 'pending';
   if (!member.status || PENDING_STATUSES.has(member.status)) return 'pending';
   return ALIGNED_STATUSES.has(member.status) ? 'ok' : 'misaligned';
 }
@@ -250,9 +254,8 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
                 // machine reason stays in Advanced instead of becoming a prompt in the panel body.
                 const statusLabel = !member || tone === 'ok' || unavailable ? ''
                   : tone === 'unavailable' ? t('timeline.status.unavailable')
-                  : member.pending || member.inFlight || !member.status || ALIGNED_STATUSES.has(member.status)
-                    ? t('timeline.aligning')
-                    : t(`timeline.status.${member.status ?? 'loading'}`);
+                  : member.status ? t(`timeline.status.${member.status}`)
+                  : t('timeline.aligning');
                 const statusDetail = member?.actualTimeMs != null
                   ? `${clockLabel(member.actualTimeMs)}${member.deltaMs != null ? ` (${member.deltaMs > 0 ? '+' : ''}${member.deltaMs} ms)` : ''}`
                   : undefined;
@@ -306,7 +309,7 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
                 {group.members.map(member => {
                   const reasonKey = member.reason ? REASON_KEYS[member.reason] : undefined;
                   return <div key={member.slotId} className="timeline-result" title={reasonKey ? t(reasonKey) : member.reason}>
-                    <span>{tabs.find(tab => tab.id === member.slotId)?.title ?? member.slotId}</span><span>{t(`timeline.status.${member.status ?? (member.state === 'active' ? 'loading' : 'unavailable')}`)}{member.pending || member.inFlight ? ` · ${t('timeline.pending')}` : ''}</span>
+                    <span>{tabs.find(tab => tab.id === member.slotId)?.title ?? member.slotId}</span><span>{t(`timeline.status.${member.status ?? (member.state === 'active' ? 'loading' : 'unavailable')}`)}</span>
                     <small>{member.actualTimeMs != null ? `${clockLabel(member.actualTimeMs)} (${member.deltaMs ?? 0} ms)` : '—'}</small>
                   </div>;
                 })}

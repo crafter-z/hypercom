@@ -88,8 +88,9 @@ test('time linking uses existing Pin and stable chrome, with opaque accessible s
   const groupBar = dialog.locator('.timeline-group-bar');
   await expect(groupBar).toContainText('2 个成员');
   await expect(groupBar.getByRole('button', { name: '解散联动组', exact: true })).toBeVisible();
-  // A settled group must not raise misalignment chrome: no false positives in the panel body.
-  await expect.poll(() => page.evaluate(async () => (await import('/src/utils/timeline/coordinator.ts')).timelineCoordinator.getSnapshot().groups[0]?.members.every(member => (member.status === 'exact' || member.status === 'nearest') && !member.pending && !member.inFlight))).toBe(true);
+  // A settled group must not raise misalignment chrome. The badge only reads settled
+  // fields, so this poll does not need to wait for in-flight preview ticks to stop.
+  await expect.poll(() => page.evaluate(async () => (await import('/src/utils/timeline/coordinator.ts')).timelineCoordinator.getSnapshot().groups[0]?.members.every(member => member.status === 'exact' || member.status === 'nearest'))).toBe(true);
   await expect(dialog.locator('.timeline-group-status')).toHaveCount(0);
   await expect(dialog.locator('.timeline-notice')).toHaveCount(0);
   await expect(dialog.locator('.timeline-member-status')).toHaveCount(0);
