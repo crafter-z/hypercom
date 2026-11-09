@@ -2,7 +2,7 @@
 
 > 本文承接原根 `AGENTS.md` 中**跨模块**的开发者约定，以及不属于任何单一功能模块的陷阱与平台约束。模块行为细节见 [README.md](README.md) 索引下的各架构文档；目录级文件清单与局部纪律见各子目录 `AGENTS.md`。
 >
-> **引用纪律**：只写文件与符号名，不写行号。**数字断言**以代码为准：6 个 Zustand store、18 个 hook 文件、13 个命令域文件 / 84 条注册命令、636 个 i18n 键（单侧）、19 个 CSS 文件、47 个 `AppConfig` 字段；计数变化时同步本文与根 [AGENTS.md](../../AGENTS.md)。
+> **引用纪律**：只写文件与符号名，不写行号。**数字断言**以代码为准：6 个 Zustand store、18 个 hook 文件、13 个命令域文件 / 98 条注册命令、705 个 i18n 键（单侧）、19 个 CSS 文件、44 个 `AppConfig` 字段；计数变化时同步本文与根 [AGENTS.md](../../AGENTS.md)。
 
 ## 跨模块开发约定
 
@@ -89,7 +89,7 @@ some_async_fn(&cfg).await;
 
 所有 Tauri 命令返回 `Result<T, CommandError>`，**不得返回 `Result<T, String>`**。`CommandError` 定义在 `src-tauri/src/commands/mod.rs`，是 `thiserror` 枚举（`Serial` / `Config` / `Log` / `System` / `Lock` / `Io` / `Other`），手动实现 `serde::Serialize`，前端经 `invoke` 收到格式化字符串。变体定义、触发条件与前端消费路径见 [errors.md](errors.md)。
 
-命令按域拆在 **13 个文件**（`serial.rs` / `config.rs` / `storage.rs` / `plugin.rs` / `plugin_http.rs` / `log.rs` / `file.rs` / `diag.rs` / `popout.rs` / `system_cmds.rs` / `simulation.rs` / `tty_sim.rs` / `update.rs`）；`mod.rs` 只留 `CommandError` 与 `pub use <domain>::*;` 汇总，`wire_shape.rs` 是纯测试契约模块。`src-tauri/src/lib.rs` 的 `generate_handler!` 注册 **84 条命令**，`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 解析两侧源文本，漏注册/多注册即红。
+命令按域拆在 **13 个文件**（`serial.rs` / `config.rs` / `storage.rs` / `plugin.rs` / `plugin_http.rs` / `log.rs` / `file.rs` / `diag.rs` / `popout.rs` / `system_cmds.rs` / `simulation.rs` / `tty_sim.rs` / `update.rs`）；`mod.rs` 只留 `CommandError` 与 `pub use <domain>::*;` 汇总，`wire_shape.rs` 是纯测试契约模块。`src-tauri/src/lib.rs` 的 `generate_handler!` 注册 **98 条命令**，`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 解析两侧源文本，漏注册/多注册即红。
 
 新增命令的固定步骤：
 

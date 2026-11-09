@@ -79,7 +79,7 @@ npm.cmd run tauri dev
 - `commands/config.rs`（**5 个**）：`get_config` / `set_config` / `update_session_snapshot` / `get_session_snapshot` / `get_config_path`。「恢复默认」**没有**后端命令：内存态由 `useAppStore.resetConfig()` 重置（当前无 UI 调用点），落盘仍走同一条安全快照 `saveConfig`——多一条后端命令只会多一个写路径。
 - `commands/storage.rs`（**20 个**）：6 类带 `id` 实体 × save/load/delete = 18，加整体替换的 `save_port_groups` / `save_port_meta`。这 20 个命令共享 `read_config` / `save_entity` / `delete_entity` 三个助手 + `entity_accessors!` / `impl_entity_id!` 宏生成的访问器（不再是 20 份手抄的「加锁 → 找同 id → 替换/追加 → save」）。命令名 / 参数名 / 返回类型保持不变——前端 `storageService` 编译期依赖它们。
 - CRUD 语义：`save_entity` 按 id upsert，**空 id = 新建**（后端生成 UUID），返回最终 id；`delete_entity` 按 id 删除，**不存在的 id 是无操作**（不报错、不动其它条目、不打乱剩余顺序）；`save_port_groups` / `save_port_meta` 是**整组替换**，且**没有**对应 load 命令——读走 `get_config`（`port_groups` / `port_meta` 随 `AppConfig` 一并返回）。
-- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **89** 个命令、**13** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
+- **注册漂移守卫**：`config/mod.rs` 的 `test_generate_handler_matches_tauri_command_attribute` 对比 `lib.rs` 注册与命令定义。当前 **98** 个命令、**13** 个命令域文件（完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)）；系统域 `complete_editor_close` 在主窗确认编辑处理后执行隐藏/退出。
 
 ## 时间工作区会话描述
 

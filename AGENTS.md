@@ -11,7 +11,7 @@
 HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 
 - **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 705 键 × zh-CN/en-US。
-- **后端**：13 个命令域文件 + `CommandError`，`lib.rs` 注册 89 个命令（漂移守卫测试核对）；`AppConfig` 44 字段 = 43 个普通字段 + 1 个 `#[serde(flatten)] entities: Entities`（含 9 类实体数组）。
+- **后端**：13 个命令域文件 + `CommandError`，`lib.rs` 注册 98 个命令（漂移守卫测试核对）；`AppConfig` 44 字段 = 43 个普通字段 + 1 个 `#[serde(flatten)] entities: Entities`（含 9 类实体数组）。
 - **工作区**：标签 `TabItem = SerialTabItem | PluginTabItem | ReplayTabItem`，`id` 为 UUID；serial 的 `portId` / plugin 的 `boundPortId` 才是端口身份，replay 无发送端口。
 - **时间联动**：`utils/timeline` 是组与热游标唯一来源；主窗口 TRX/可选插件/只读回放共用 preview/commit 协议，TTY 与跨弹出窗不参与；不得同步 scrollTop 或把回放追加进实时缓冲。详见 [`timeline.md`](docs/architecture/timeline.md)。
 - **规则实体**：高亮/命令/协议/工具/提醒五类运行态在 `useRuleStore`，编辑草稿在 `utils/entityEditor.ts`，已保存配置是持久化基线；保存链路见 [`config.md`](docs/architecture/config.md)。
@@ -78,7 +78,7 @@ cargo check --manifest-path src-tauri/Cargo.toml    # 仅 Rust
 - 文件发送同样过 `isSendablePort` 守卫（不可发送连文件框都不弹），按增量计入 TX；成功 toast 只在 `done` 且 `sent >= total > 0` 时弹。
 - 端口列表轮询用 `mergePorts`：保留 `connected` / `connecting`、**不保留 `error`**；枚举消失的会话端口最多保留 `MAX_MISSING_POLLS=3` 轮。排序意图仅本会话。
 - UI 缩放 `uiScalePercent`（80–200，默认 100）独立于 `terminalFontSize` / `uiFontSize`，每个 WebView 各自 `setZoom`，已开 popout 经 `ui-scale:changed` 同步。
-- 插件文件/网络**无业务配额**：`fs.write`、KV、剪贴板、Worker HTTP（`plugin_http_*`）不设大小/期限上限；权限与路径守卫保留。
+- 插件文件/网络**无业务配额**：`fs.write`、目录读写、KV、剪贴板、Worker HTTP（`plugin_http_*`）不设大小/期限上限；权限与路径守卫保留。目录授权由原生选择器产生，`fs:open-dir` 管读、`fs:write-dir` 管写；无 TTL/数量上限，禁用/撤权/卸载/替换/重载即失效。
 - 原生视图绑定 instance + document + epoch：导航/刷新生成新 `documentId`，旧文档迟到的 ready/ACK/message/二进制块一律丢弃；`view.sendBinary` 8 KiB 分块 + ACK 背压，**不要塞进实时状态 JSON**。
 - 循环发送目标启动时固定、不随聚焦漂移；发送历史与循环运行态只存在前端内存。
 - `serial:file_progress` 是 camelCase wire（`{portId, transferId, sentBytes, totalBytes, done}`），`eventContract.test.ts` 从两侧源文本守卫。

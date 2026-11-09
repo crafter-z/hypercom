@@ -67,7 +67,7 @@
 | Symbol | File | Type | Role |
 |--------|------|------|------|
 | `CommandError` | `src-tauri/src/commands/mod.rs` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (13 domain files, 89 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
+| All Tauri commands (13 domain files, 98 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
 | `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | 44 字段 = 43 个普通配置字段 + flatten entities；9 类实体数组含 pluginConfigs。普通字段含 defaultBaudRates 数组，不统称标量；插件安装身份迁移/磁盘恢复先于 Worker 启动 |
 | `AppState` | `src-tauri/src/lib.rs` | struct | `serial_manager: Arc<Mutex<..>>`、`config_manager: Mutex<..>`、`plugin_io: tokio::sync::Mutex<()>`（插件磁盘/状态操作互斥）、`log_manager: Arc<LogManager>`、`diag_logger: Arc<..>`、`system_info: Arc<Mutex<..>>`、`tool_processes`/`file_send_cancel`/`popouts` |
 | `SerialPortHandle` | `src-tauri/src/serial/ports_real.rs` | struct | `read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>` 句柄；`open_real_port` 内 DTR/RTS 设置（clone 前，设备级共享）后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享） |
