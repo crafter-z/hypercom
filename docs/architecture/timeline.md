@@ -8,7 +8,7 @@
 - `src/utils/timeline/scheduler.ts` 的 `TimelineScheduler` 维护每目标一条在途和一条最新候选；commit 优先。成员独立完成，不等待最慢成员。
 - `src/utils/timeline/trxTimelineAdapter.ts` 的 `createTrxTimelineAdapter` 连接共享终端引擎；实时以真实 portId 选择数据源，回放注入独立 manager/sourceId，不创建假串口。
 - `src/utils/terminalNavigation.ts` 的 `TerminalNavigationLifecycle` 只从显式垂直滚动意图取得驾驶权。裸 scroll 只能采样已有手势，不改变 scrollLocked；Ctrl+wheel、横向滚动、焦点与普通行点击都不驱动组。
-- `src/components/MainDisplay/TimelineControls.tsx` 提供链条入口、成员管理、常量偏移和事件 T+0 对齐；工作区宿主只挂载管理弹窗，不额外显示组条或“返回实时”。终端壳只订阅稳定组资格与 Pin 所需的布尔状态；热游标不使行进入 React。
+- `src/components/MainDisplay/TimelineControls.tsx` 提供链条入口、成员管理、常量偏移和事件 T+0 对齐；管理弹窗是窄幅单列（460px）密集布局，当前组条直接给出「移出此视图」与「解散联动组」，不需要展开「高级设置」，仅拖动方式、时间基准/偏移与对齐状态留在高级设置；两个成员时只保留解散（移出会留下单成员组）。工作区宿主只挂载管理弹窗，不额外显示组条或“返回实时”。终端壳只订阅稳定组资格与 Pin 所需的布尔状态；热游标不使行进入 React。
 
 portId 是发送目标，sourceId 是数据来源，tabId 是持久工作区槽位，participantId/generation 是运行实例。组成员引用 tabId；切 Pane 不改变组身份。切换 raw/plugin 时只注册当前有效内容的适配器，不驱动隐藏 raw。instance/document、source/clock、mapping 与 navigation 版本分别校验，不互相替代。
 
@@ -19,6 +19,19 @@ portId 是发送目标，sourceId 是数据来源，tabId 是持久工作区槽�
 视口默认以中心记录驱动；目标查询不晚于目标时间的最近可见记录，重复时间用稳定 seq 排序。源视图不会因自己的广播被吸附到另一条同毫秒记录。边界夹紧和实际误差只属于成员结果，不反写组时间。结果区分 exact、nearest、before/after-range、no-time、filtered、held、loading、unsupported、unavailable、slow 与 error。
 
 `TerminalTimeIndex` 按 `(time, seq)` 维护有序索引，不在按 seq 排列的记录上假定时间单调做二分。过滤和 frozen 上界参与有效索引；裁剪删除对应索引条目，clear/replace/source 换代使旧请求失效。未知时间保持未知，显示 `—`，不能用 0 或当前时间补造事件时间。
+
+## 对不齐与异常场景兜底
+
+成员快照 `TimelineMemberSnapshot` 的 `state`（active / temporarilyDetached / unavailable）、`status`、`reason`、`pending`、`inFlight` 是引擎与 UI 之间唯一的对不齐信号。
+
+- `TimelineCoordinator.publish` 只在该成员 `state === 'active'` 时展开上一次定位结果：不可用、时钟不兼容或暂离的成员不会继续上报陈旧的 status / actualTimeMs / deltaMs；`pending`、`inFlight`、`preview` 仍照常反映调度状态。重新可用时由 `realign` 立即按当前组目标重发，旧结果被新 ACK 覆盖。
+- 早于/晚于保留范围由 `TerminalTimeIndex.lookup` 夹紧到首/末记录并给出 before-range / after-range；全无可靠时间为 no-time，目标被本地过滤为 filtered，索引重建中为 loading。协调器据此算出 `deltaMs`，偏差只写在成员结果里，不反写组时间。
+- `held`（选区保护、暂停冻结、LIVE 尾随）只暂缓一次定位并立即结算，不会占住调度在途槽；恢复路径是渲染时重投 `heldTimelineRequest`、document `selectionchange` 与 `TerminalView` 的 `localViewKey` 变更 realign。
+- 时间索引重建期：`TerminalViewportManager.waitForTimeIndex` 用**停滞**预算（`TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS`，随 `indexBuildProgress` 续期）而不是墙钟上限——分块重建靠被浏览器夹到 ~4ms 的嵌套定时器推进，健康重建可能合法地跑很多秒；只有「无进展」持续一个预算才以 `unsupported` 结算，commit 分支在被重建取消后最多再等一次，既不永久挂起等待者，也不无限重试。
+- 时钟世代：`updateSourceGeneration` 只在 epoch 真正变化时把来源加入 `unconfirmedSources`；来源重新报告已确认的 epoch（该来源 mapping 的 `clockEpoch`，否则 `referenceClock.epoch`）时清除闩锁，瞬时 epoch 丢失可自愈，真不同 epoch 仍要求显式映射（`compatible` 为 false → state unavailable、reason mapping-required）。
+- 组不硬对齐不兼容来源：`supportsLive` 只接受全部 live + 宿主时钟；`setMode` 对跨时间域抛错，`stopUnsupportedLive` 在注册参与者或加成员时退出 LIVE；`updateCapabilities` 只在 `canDrive` 转 false 时失效驾驶租约。
+- 退化组不留幽灵：`removeMember` 移除最后一个成员后直接删除该组，`restoreState` 跳过全槽位失效或空成员列表的组，`exportState` 因此不再携带不可达的组（不再占用组序号与默认配色）。
+- UI 侧由 `TimelineControls` 承担可见兜底：成员行按 tone 标出未对齐状态与实际时间/差值（时钟域不同或不可用只显示中性的「暂不可用」，不展开机器原因），组条汇总「N 个视图未对齐／对齐中…」；整组不可用时在面板主体给出提示。时钟基准不一致按行为兜底处理——不弹提示、不硬对齐，`reason` 与「各自当前位置为 T+0」/常量偏移仍留在「高级设置」。
 
 ## 模式、驾驶权与调度
 
@@ -51,6 +64,8 @@ preview 可丢弃，committed 是最终逻辑目标。每次手势携带 owner�
 播放是“完整历史 + 游标移动”，不是发送或逐行 append。`ReplayClock` 以单调时钟结算游标，换速先结算旧速度，保留真实长间隔；组范围用轨道并集，不被最短轨道截断。来源描述和组描述随会话保存，恢复默认浏览/暂停，不持久化运行句柄、preview、owner、ACK 队列或日志模型。
 
 ## 验证与操作边界
+
+TRX 来源的 `clockEpoch` 目前没有生产者：`TerminalBuffer` 未实现 `getClockEpoch`，`trxTimelineAdapter.refreshSource` 因此恒得 undefined，真实时钟回拨不会触发生成世代门禁；回放侧由 `ReplayDocument.segments` 与显式分段选择覆盖。跨时间域仍按显式 mapping 处理，不靠隐式推断。
 
 单元测试覆盖版本/背压/乱序/过滤/冻结/只读数据源和时钟；Playwright 的真实 Chromium 几何测试覆盖百万行首中尾与字体/缩放极值。联动输入回归显式保留原生滚动条，通过真实 thumb 拖动和 wheel 输入，在持续帧压力下验证松开前的多次定位与 on-release 原位保持；设置 `HYPERCOM_E2E_CHANNEL=msedge` 可用本机 Edge 复核同组输入测试，但不能据此声称已覆盖 Tauri WebView2 宿主。`TerminalPerformance.test.ts` 需显式设置 `HYPERCOM_TERMINAL_BENCH=1`，输出索引与 jsdom CPU 样本，不把它当作物理帧率。
 
