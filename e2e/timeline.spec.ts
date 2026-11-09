@@ -59,7 +59,7 @@ test('time linking uses existing Pin and stable chrome, with opaque accessible s
   await expect(dialog).toBeHidden();
   await expect(entry).toBeFocused();
   await expect(page.locator('.tab-item .timeline-badge').first()).toContainText('G1');
-  await expect(entry).toHaveAttribute('title', 'G1 · 时间联动…');
+  await expect(entry).toHaveAttribute('title', 'G1 · 设备对照 · 时间联动…');
   expect(await entry.evaluate(element => element.getBoundingClientRect().width)).toBe(24);
   await expect(page.locator('.timeline-workspace-bar')).toHaveCount(0);
   await expect(page.getByRole('button', { name: /返回实时/ })).toHaveCount(0);
@@ -79,8 +79,20 @@ test('time linking uses existing Pin and stable chrome, with opaque accessible s
   });
   expect(await entry.boundingBox()).toEqual(before);
   await entry.click();
+  // Compact panel: the dialog stays narrow and member rows stay dense.
+  expect(await dialog.evaluate(element => element.clientWidth)).toBeLessThanOrEqual(480);
+  expect(await dialog.locator('.timeline-member-row').first().evaluate(element => element.getBoundingClientRect().height)).toBeLessThanOrEqual(40);
   const advanced = dialog.locator('details');
   await expect(advanced).not.toHaveAttribute('open','');
+  // Group lifecycle is first-class in the panel body, never behind Advanced settings.
+  const groupBar = dialog.locator('.timeline-group-bar');
+  await expect(groupBar).toContainText('2 个成员');
+  await expect(groupBar.getByRole('button', { name: '解散联动组', exact: true })).toBeVisible();
+  // A settled group must not raise misalignment chrome: no false positives in the panel body.
+  await expect.poll(() => page.evaluate(async () => (await import('/src/utils/timeline/coordinator.ts')).timelineCoordinator.getSnapshot().groups[0]?.members.every(member => (member.status === 'exact' || member.status === 'nearest') && !member.pending && !member.inFlight))).toBe(true);
+  await expect(dialog.locator('.timeline-group-status')).toHaveCount(0);
+  await expect(dialog.locator('.timeline-notice')).toHaveCount(0);
+  await expect(dialog.locator('.timeline-member-status')).toHaveCount(0);
   await advanced.locator('summary').click();
   const offsets=dialog.locator('.timeline-offset-row input');
   await expect(offsets).toHaveCount(2);
@@ -112,6 +124,100 @@ test('time linking uses existing Pin and stable chrome, with opaque accessible s
   await page.screenshot({path:'.npm-cache/timeline-settings-light.png'});
   await page.keyboard.press('Escape');
   expect(errors).toEqual([]);
+});
+
+test('a linked view dissolves its group from the panel body without opening advanced settings', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(mock);
+  await page.goto('/');
+  await expect(page.locator('.app-root')).toBeVisible();
+  await page.evaluate(async () => {
+    const { useAppStore } = await import('/src/stores/useAppStore.ts');
+    const state = useAppStore.getState();
+    state.openTab('COM1'); state.openTab('COM2'); state.splitPane('vertical');
+  });
+  const entry = page.locator('.timeline-entry').filter({ visible: true }).first();
+  await entry.click();
+  const dialog = page.getByRole('dialog', { name: '时间联动', exact: true });
+  await dialog.getByRole('button', { name: '创建联动组', exact: true }).click();
+  await expect(page.locator('.tab-item .timeline-badge')).toHaveCount(1);
+  await entry.click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('details')).not.toHaveAttribute('open', '');
+  const dissolve = dialog.locator('.timeline-group-bar').getByRole('button', { name: '解散联动组', exact: true });
+  await expect(dissolve).toBeVisible();
+  await dialog.screenshot({ path: '.npm-cache/timeline-dissolve-dark.png', animations: 'disabled' });
+  await dissolve.click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('.tab-item .timeline-badge')).toHaveCount(0);
+  await expect(page.locator('.timeline-entry.active')).toHaveCount(0);
+  expect(await page.evaluate(async () => (await import('/src/utils/timeline/coordinator.ts')).timelineCoordinator.getSnapshot().groups.length)).toBe(0);
+});
+
+test('a clock-domain mismatch stays a behavioural fallback instead of a panel prompt', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(mock);
+  await page.goto('/');
+  await expect(page.locator('.app-root')).toBeVisible();
+  await page.evaluate(async () => {
+    const { useAppStore } = await import('/src/stores/useAppStore.ts');
+    const { useTerminalStore } = await import('/src/stores/useTerminalStore.ts');
+    const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
+    const state = useAppStore.getState();
+    state.openTab('COM1'); state.openTab('COM2'); state.splitPane('vertical');
+    // Identical timelines so a healthy group settles exactly; browse (unlocked) so
+    // no host-clock LIVE tick keeps chasing the tail of this short fixture.
+    for (const port of ['COM1', 'COM2']) {
+      useTerminalStore.getState().setTerminalConfig(port, { scrollLocked: false });
+      getViewportManager(port).appendLines(Array.from({ length: 200 }, (_, i) => ({
+        timestamp: 1000 + i * 10, direction: 'RX' as const, rawData: new TextEncoder().encode('record ' + i), isHex: false,
+      })));
+    }
+  });
+  const entry = page.locator('.timeline-entry').filter({ visible: true }).first();
+  await entry.click();
+  const dialog = page.getByRole('dialog', { name: '时间联动', exact: true });
+  await dialog.getByRole('checkbox', { name: /COM2/ }).check();
+  await dialog.getByRole('button', { name: '创建联动组', exact: true }).click();
+  // The initiating view is the anchor and is never re-seeked by creation, so
+  // drive one explicit commit to give both members a settled result first.
+  await page.evaluate(async () => {
+    const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+    const group = timelineCoordinator.getSnapshot().groups[0];
+    timelineCoordinator.seek(group.id, 1500, 'commit');
+  });
+  await expect.poll(() => page.evaluate(async () => {
+    const { timelineCoordinator } = await import('/src/utils/timeline/coordinator.ts');
+    return timelineCoordinator.getSnapshot().groups[0]?.members.map(member => ({ state: member.state, status: member.status }));
+  })).toEqual([{ state: 'active', status: 'exact' }, { state: 'active', status: 'exact' }]);
+  // A second clock domain (what a device-clock plugin source reports) cannot follow the host clock.
+  await page.evaluate(async () => {
+    const { useAppStore } = await import('/src/stores/useAppStore.ts');
+    const { timelineCoordinator } = await import('/src/utils/timeline/index.ts');
+    const tab = useAppStore.getState().tabs.find(item => item.kind === 'serial' && item.portId === 'COM2');
+    if (!tab) throw new Error('Expected the COM2 tab');
+    timelineCoordinator.registerParticipant({
+      participantId: `device-clock:${tab.id}`, slotId: tab.id, sourceId: 'device:clock-b', sourceKind: 'custom',
+      generation: 1, sourceGeneration: 1, clockId: 'device-uptime',
+      capabilities: { preview: 'bounded', canDrive: true },
+      readAnchor: () => null, seek: () => ({ status: 'exact', actualTimeMs: 0 }),
+    });
+  });
+  await expect.poll(() => page.evaluate(async () => {
+    const { timelineCoordinator } = await import('/src/utils/timeline/coordinator.ts');
+    return timelineCoordinator.getSnapshot().groups[0]?.members.map(member => ({ state: member.state, status: member.status }));
+  })).toEqual([{ state: 'active', status: 'exact' }, { state: 'unavailable', status: undefined }]);
+  await entry.click();
+  await expect(dialog).toBeVisible();
+  // Behavioural fallback, not a prompt: the member carries no seek result (it never pretends
+  // to be aligned), and the panel body stays silent about the clock domain itself.
+  await expect(dialog.locator('.timeline-notice')).toHaveCount(0);
+  await expect(dialog.locator('details')).not.toHaveAttribute('open', '');
+  const chip = dialog.locator('.timeline-member-status').filter({ hasText: '暂不可用' });
+  await expect(chip).toHaveCount(1);
+  expect(await chip.getAttribute('title')).toBeNull();
+  await expect(dialog.locator('.timeline-group-status')).toContainText('1 个视图未对齐');
+  await dialog.screenshot({ path: '.npm-cache/timeline-clock-mismatch-dark.png', animations: 'disabled' });
 });
 
 test('linked Pins preserve existing follow and keep the latest RX row visible after every append frame', async ({ page }) => {
