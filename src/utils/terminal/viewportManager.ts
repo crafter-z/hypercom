@@ -38,6 +38,28 @@ import {
 /** Compact the lazy filter/search offset after this many logical drops. */
 const COMPACT_THRESHOLD = 4096;
 
+/** Stall budget (NOT a wall-clock cap) for a commit seek parked on
+ *  `waitForTimeIndex`.
+ *
+ *  Waiters are normally settled by `cancelIndexBuild` (rebuild replaced /
+ *  cleared / disposed) or by a chunked rebuild reaching its end. If the
+ *  rebuild that was going to settle them disappears (for example a chunked
+ *  filter rebuild whose scan is dropped) the manager is left "not ready, no
+ *  build running" and nothing would ever wake the waiter — the coordinator
+ *  would then keep that participant's scheduler lane occupied forever.
+ *
+ *  A wall-clock cap cannot be used here: a chunked rebuild walks the buffer
+ *  with nested `setTimeout(run, 0)` steps (`TERMINAL_REBUILD_CHUNK_SIZE` per
+ *  step), and browsers clamp nested 0ms timers to ~4ms. A healthy rebuild of
+ *  the largest allowed buffer therefore legitimately runs for many seconds,
+ *  and failing it at a fixed wall clock would report `unsupported` (and a
+ *  contradicting "loading" state) for work that is still progressing.
+ *  Instead the wait re-arms for another `TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS`
+ *  as long as the rebuild keeps advancing `indexBuildProgress`, and settles
+ *  `false` only after that long with no progress at all — still a guarantee
+ *  that the waiter can never hang forever. */
+export const TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS = 2000;
+
 /** Config-derived line budget (issue #16 redesign: 最大显示行数, no byte budget). */
 export function computeBufferLimits(): { maxLines: number } {
   const cfg = useAppStore.getState().config;
@@ -58,6 +80,9 @@ export class TerminalViewportManager {
   private timeIndex = new TerminalTimeIndex();
   private timeIndexReady = true;
   private indexBuildVersion = 0;
+  /** Advances once per index-build step (chunk or synchronous completion);
+   *  stall timeouts compare it to tell a slow rebuild from a lost one. */
+  private indexBuildProgress = 0;
   private indexBuildTimer: ReturnType<typeof setTimeout> | null = null;
   private indexWaiters = new Set<(ready: boolean) => void>();
   private filterLoading = false;
@@ -409,7 +434,15 @@ export class TerminalViewportManager {
   async seekTimeline(request: TerminalTimelineRequest): Promise<TerminalTimelineResult> {
     if (this.destroyed || request.signal?.aborted || !(request.isCurrent?.() ?? true)) return { status: 'unsupported', actualTimeMs: null };
     if (!this.timeIndexReady && request.phase === 'commit') {
-      const ready = await this.waitForTimeIndex(request.signal);
+      let ready = await this.waitForTimeIndex(request.signal);
+      // A concurrent rebuild (source refresh, filter change, clear + reappend)
+      // settles the first wait false without the request itself failing. The
+      // rebuilt index is normally one chunk away, so allow exactly one more
+      // bounded wait; abort/destroy and a still-unready index fall through to
+      // `unsupported`. Never loop more than that.
+      if (!ready && !this.destroyed && !this.timeIndexReady &&
+          !request.signal?.aborted && (request.isCurrent?.() ?? true))
+        ready = await this.waitForTimeIndex(request.signal);
       if (!ready || request.signal?.aborted || !(request.isCurrent?.() ?? true)) return { status: 'unsupported', actualTimeMs: null };
     }
     const found = this.lookupTime(request.timeMs);
@@ -482,12 +515,31 @@ export class TerminalViewportManager {
     if (this.timeIndexReady) return Promise.resolve(true);
     if (signal?.aborted) return Promise.resolve(false);
     return new Promise(resolve => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let progress = this.indexBuildProgress;
       const finish = (ready: boolean) => {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
         this.indexWaiters.delete(finish);
         signal?.removeEventListener('abort', abort);
         resolve(ready);
       };
       const abort = () => finish(false);
+      // Stall timeout, not a wall-clock cap: re-arm while the rebuild keeps
+      // advancing `indexBuildProgress`; only a full budget without any step
+      // settles false. A rebuild that was replaced without settling its
+      // waiters (leaving no other event to wake this one) stops progressing
+      // and is caught here, so the waiter can still never hang forever.
+      const check = () => {
+        if (this.timeIndexReady) { finish(true); return; }
+        if (this.indexBuildProgress !== progress) {
+          progress = this.indexBuildProgress;
+          timer = setTimeout(check, TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS);
+          return;
+        }
+        finish(false);
+      };
+      timer = setTimeout(check, TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS);
       this.indexWaiters.add(finish);
       signal?.addEventListener('abort', abort, { once: true });
     });
@@ -518,6 +570,9 @@ export class TerminalViewportManager {
         const seq = list ? list[cursor] : cursor;
         if (seq >= this.buffer.firstSeq && seq <= this.buffer.lastSeq) this.timeIndex.add(seq, sourceTimeMs(this.buffer, seq));
       }
+      // Every step — including the synchronous single-step completion path —
+      // counts as progress for stall timers (see `waitForTimeIndex`).
+      this.indexBuildProgress++;
       if (cursor < end) this.indexBuildTimer = setTimeout(run, 0);
       else {
         this.timeIndexReady = true;

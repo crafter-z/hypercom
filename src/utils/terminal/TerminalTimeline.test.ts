@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TerminalLine } from '../../types';
-import { TerminalViewportManager } from './viewportManager';
+import { TerminalViewportManager, TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS } from './viewportManager';
 import { TerminalRenderer, type RendererConfig, type TerminalViewState } from './TerminalRenderer';
 import { countVisibleSeqs, mapScrollTop, physicalRowCount, TERMINAL_MAX_PHYSICAL_HEIGHT, type TerminalSource } from './TerminalSource';
 import { TerminalTimeIndex } from './TerminalTimeIndex';
@@ -246,5 +246,70 @@ describe('bounded virtual geometry', () => {
       expect(container.querySelectorAll('[data-seq]').length).toBeLessThan(40);
     }
     renderer.dispose();
+  });
+});
+
+describe('time index rebuild waits', () => {
+  it('waits for the rebuilt index when a concurrent rebuild settles the first wait', async () => {
+    vi.useFakeTimers();
+    const records = Array.from({ length: 10000 }, (_, i) => line(i));
+    const source: TerminalSource = { length: records.length, firstSeq: 0, lastSeq: records.length - 1, getBySeq: seq => records[seq] ?? null, snapshot: vi.fn(() => records) };
+    const vm = new TerminalViewportManager('rebuild-retry', { maxLines: 1 }, { source });
+    mount(vm); vm.setTimelineGrouped(true);
+    const commit = vm.seekTimeline({ timeMs: 5000, phase: 'commit' });
+    // Replacing the source cancels the in-flight index build: the first wait is
+    // settled false, but the rebuilt index is still on its way.
+    vm.refreshSource();
+    await vi.runAllTimersAsync();
+    frame();
+    expect(await commit).toMatchObject({ status: 'exact', actualTimeMs: 5000 });
+  });
+
+  it('settles a commit on the bounded timeout instead of hanging when no build can finish', async () => {
+    vi.useFakeTimers();
+    const vm = new TerminalViewportManager('rebuild-lost', { maxLines: 11000 });
+    vm.appendLines(Array.from({ length: 10000 }, (_, i) => line(i)));
+    vm.setFilter('all', 'hit'); // chunked filter rebuild → index not ready
+    expect(vm.lookupTime(5000).status).toBe('loading');
+    const commit = vm.seekTimeline({ timeMs: 5000, phase: 'commit' });
+    // The only job that could settle the waiter disappears without settling it.
+    (vm as unknown as { cancelFilterScan: (() => void) | null }).cancelFilterScan?.();
+    await vi.advanceTimersByTimeAsync(TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS * 2 + 1);
+    expect((await commit).status).toBe('unsupported');
+    expect(vm.isLoading).toBe(true);
+    vm.dispose();
+  });
+
+  it('re-arms the stall budget while the rebuild keeps progressing past 2x wall-clock', async () => {
+    vi.useFakeTimers();
+    const vm = new TerminalViewportManager('rebuild-slow', { maxLines: 100 });
+    mount(vm);
+    vm.appendLines([line(100), line(200)]);
+    const typed = vm as unknown as {
+      timeIndexReady: boolean;
+      indexBuildProgress: number;
+      rebuildTimeIndex(preserveWaiters?: boolean): void;
+    };
+    // Park a commit in the reachable "not ready, no build scheduled" state.
+    // Production chunk steps are nested 0ms timers, so under fake timers they
+    // cannot be interleaved across wall-clock windows; stepping the progress
+    // counter models a healthy rebuild that is simply slow (clamped timers).
+    typed.timeIndexReady = false;
+    const commit = vm.seekTimeline({ timeMs: 200, phase: 'commit' });
+    for (let i = 0; i < 3; i++) {
+      typed.indexBuildProgress++; // one rebuild step inside this window
+      await vi.advanceTimersByTimeAsync(TERMINAL_TIME_INDEX_WAIT_TIMEOUT_MS);
+    }
+    // 3x the budget of wall clock has passed and the wait is still armed; a
+    // finishing rebuild that preserves waiters settles it true (the same path
+    // a completed chunked filter scan uses).
+    typed.rebuildTimeIndex(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    // The parked commit resumes and schedules its render pass; fake timers own
+    // rAF here, while `frame()` drives the stubbed queue.
+    await vi.advanceTimersByTimeAsync(100);
+    frame();
+    expect(await commit).toMatchObject({ status: 'exact', actualTimeMs: 200 });
   });
 });
