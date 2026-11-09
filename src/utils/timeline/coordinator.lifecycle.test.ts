@@ -102,7 +102,11 @@ describe('timeline lease and resource lifecycle', () => {
       else c.deleteGroup(id);
       expect(vi.getTimerCount()).toBe(0);
       vi.advanceTimersByTime(10000);
-      if (action !== 'delete-group')
+      if (action === 'remove-member')
+        // Removing the last member empties the group: it is dropped instead of
+        // lingering as an unreachable, still-exportable shell.
+        expect(c.getSnapshot().groups).toHaveLength(0);
+      else if (action === 'unregister')
         expect(c.getSnapshot().groups[0].committedAnchor?.timeMs).toBe(before);
     },
   );

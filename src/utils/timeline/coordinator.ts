@@ -165,8 +165,19 @@ export class TimelineCoordinator {
         )
           return;
         const group = this.findGroup(participant.slotId);
-        if (clockEpoch !== participant.clockEpoch)
-          group?.unconfirmedSources.add(participant.sourceId);
+        if (group) {
+          // The latch is only meant to ask for confirmation of a *new* clock
+          // segment. A transient epoch loss (device re-announcing its already
+          // confirmed epoch) must self-heal instead of pinning the source as
+          // unconfirmed until an explicit re-mapping.
+          const confirmed =
+            this.mapping(group, participant.sourceId)?.clockEpoch ??
+            group.referenceClock?.epoch;
+          if (clockEpoch === confirmed)
+            group.unconfirmedSources.delete(participant.sourceId);
+          else if (clockEpoch !== participant.clockEpoch)
+            group.unconfirmedSources.add(participant.sourceId);
+        }
         participant.sourceGeneration = generation;
         participant.clockEpoch = clockEpoch;
         group?.results.delete(participant.slotId);
@@ -284,6 +295,13 @@ export class TimelineCoordinator {
     group.detached.delete(slotId);
     group.results.delete(slotId);
     group.tiers.delete(slotId);
+    // A group with no members is unreachable from every UI path, yet it would
+    // still be exported (and faithfully restored) while occupying a group
+    // ordinal and the default colour palette. Drop it here directly rather
+    // than via deleteGroup, which would recurse into removeMember for slots
+    // that are already gone. publish() still runs and re-evaluates scheduleLive.
+    if (group.descriptor.memberSlots.length === 0)
+      this.groups.delete(group.descriptor.id);
     this.publish();
   }
   deleteGroup(id: string): void {
@@ -790,6 +808,9 @@ export class TimelineCoordinator {
             !seen.has(s),
         )
         .slice(0, 256);
+      // Every persisted slot was stale/duplicate: restoring would create the
+      // same memberless group the live path now refuses to keep.
+      if (!slots.length) continue;
       slots.forEach((s) => seen.add(s));
       this.createGroup({
         id: raw.id,
@@ -855,18 +876,19 @@ export class TimelineCoordinator {
               && p.sourceKind === 'live' && p.clockId === HOST_CLOCK_ID
               && !g.detached.has(slotId) && p.availability?.available !== false && p.availability?.visible !== false
               && this.compatible(g, p) && toGroupTime(0, this.mapping(g, p.sourceId)) === referenceOffset);
+            const state = g.detached.has(slotId)
+              ? 'temporarilyDetached'
+              : !p ||
+                  p.availability?.available === false ||
+                  p.availability?.visible === false ||
+                  !this.compatible(g, p)
+                ? 'unavailable'
+                : 'active';
             return {
               slotId,
               participantId: p?.participantId,
               sourceId: p?.sourceId,
-              state: g.detached.has(slotId)
-                ? 'temporarilyDetached'
-                : !p ||
-                    p.availability?.available === false ||
-                    p.availability?.visible === false ||
-                    !this.compatible(g, p)
-                  ? 'unavailable'
-                  : 'active',
+              state,
               reason:
                 p?.availability?.reason ??
                 (!p
@@ -874,7 +896,10 @@ export class TimelineCoordinator {
                   : !this.compatible(g, p)
                     ? 'mapping-required'
                     : undefined),
-              ...result,
+              // Only an active member may surface a seek result. An
+              // unavailable/detached member must not keep reporting the
+              // status/actualTimeMs/deltaMs it had before leaving the group.
+              ...(state === 'active' ? result : {}),
               ...(p
                 ? this.scheduler.state(p.participantId)
                 : { pending: false, inFlight: false }),

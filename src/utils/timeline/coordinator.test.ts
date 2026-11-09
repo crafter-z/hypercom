@@ -507,4 +507,71 @@ describe('timeline coordinator', () => {
       preview: 'on-release',
     });
   });
+  it('hides a previous seek result once the member is unavailable or detached', async () => {
+    const { c, frame } = setup();
+    c.registerParticipant(participant('a'));
+    const b = c.registerParticipant(participant('b'));
+    c.createGroup({ name: 'stale-result', memberSlots: ['a', 'b'], anchor: { timeMs: 100 } });
+    await frame();
+    const member = () => c.getSnapshot().groups[0].members[1];
+    expect(member()).toMatchObject({ state: 'active', status: 'exact', actualTimeMs: 100 });
+    b.setAvailability({ available: false, visible: true });
+    expect(member()).toMatchObject({ state: 'unavailable' });
+    expect(member().status).toBeUndefined();
+    expect(member().actualTimeMs).toBeUndefined();
+    expect(member().deltaMs).toBeUndefined();
+    // Only the seek result is gated; lane admission flags stay observable.
+    expect(typeof member().pending).toBe('boolean');
+    expect(typeof member().inFlight).toBe('boolean');
+    b.setAvailability({ available: true, visible: true });
+    c.setDetached('b', true);
+    expect(member()).toMatchObject({ state: 'temporarilyDetached' });
+    expect(member().status).toBeUndefined();
+    expect(member().actualTimeMs).toBeUndefined();
+    expect(member().deltaMs).toBeUndefined();
+  });
+  it('clears the unconfirmed-epoch latch when a source reports its confirmed epoch again', async () => {
+    const { c, frame } = setup();
+    const a = participant('a');
+    a.clockEpoch = 'epoch-1';
+    const handle = c.registerParticipant(a);
+    c.registerParticipant(participant('b'));
+    c.createGroup({ name: 'epoch-recovery', memberSlots: ['a', 'b'] });
+    await frame();
+    const first = () => c.getSnapshot().groups[0].members[0];
+    expect(first().state).toBe('active');
+    handle.updateSourceGeneration(2, 'epoch-2');
+    expect(first()).toMatchObject({ state: 'unavailable', reason: 'mapping-required' });
+    expect(c.beginNavigation('a')).toBeNull();
+    handle.updateSourceGeneration(3, 'epoch-1');
+    expect(first().state).toBe('active');
+    expect(first().reason).toBeUndefined();
+    expect(c.beginNavigation('a')).not.toBeNull();
+    handle.updateSourceGeneration(4, 'epoch-3');
+    expect(first()).toMatchObject({ state: 'unavailable', reason: 'mapping-required' });
+  });
+  it('deletes a group when its last member is removed and never restores an all-stale group', () => {
+    const { c } = setup();
+    c.registerParticipant(participant('a'));
+    c.registerParticipant(participant('b'));
+    const id = c.createGroup({ name: 'pair', memberSlots: ['a', 'b'] });
+    c.removeMember('a');
+    expect(c.getSnapshot().groups).toHaveLength(1);
+    expect(c.getSnapshot().groups[0].memberSlots).toEqual(['b']);
+    c.removeMember('b');
+    expect(c.getSnapshot().groups).toHaveLength(0);
+    expect(c.exportState().groups).toHaveLength(0);
+    const { c: restored } = setup();
+    restored.restoreState(
+      {
+        version: 1,
+        groups: [
+          { id, name: 'stale', color: '#fff', memberSlots: ['gone'], mappings: [], dragSyncPolicy: 'auto' },
+          { id: 'empty', name: 'empty', color: '#fff', memberSlots: [], mappings: [], dragSyncPolicy: 'auto' },
+        ],
+      },
+      new Set<string>(),
+    );
+    expect(restored.getSnapshot().groups).toHaveLength(0);
+  });
 });
