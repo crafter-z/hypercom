@@ -6,13 +6,33 @@ import { useAppStore } from '../stores/useAppStore';
 const readAsset = vi.hoisted(() => vi.fn());
 const writeAsset = vi.hoisted(() => vi.fn());
 const pickFiles = vi.hoisted(() => vi.fn());
+const pickDirectory = vi.hoisted(() => vi.fn());
+const listDirectory = vi.hoisted(() => vi.fn());
+const readDirectoryFile = vi.hoisted(() => vi.fn());
+const statDirectoryEntry = vi.hoisted(() => vi.fn());
+const writeDirectoryFile = vi.hoisted(() => vi.fn());
+const createDirectory = vi.hoisted(() => vi.fn());
+const removeDirectoryEntry = vi.hoisted(() => vi.fn());
+const renameDirectoryEntry = vi.hoisted(() => vi.fn());
+const releaseDirectory = vi.hoisted(() => vi.fn());
 const clipboardWrite = vi.hoisted(() => vi.fn());
 const executeHttp = vi.hoisted(() => vi.fn());
 const executeViewApi = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/tauri', () => ({
   pluginService: { readPluginAsset: readAsset, writePluginAsset: writeAsset },
-  fileService: { pickPluginFiles: pickFiles },
+  fileService: {
+    pickPluginFiles: pickFiles,
+    pickPluginDirectory: pickDirectory,
+    listPluginDirectory: listDirectory,
+    readPluginDirectoryFile: readDirectoryFile,
+    statPluginDirectoryEntry: statDirectoryEntry,
+    writePluginDirectoryFile: writeDirectoryFile,
+    createPluginDirectory: createDirectory,
+    removePluginDirectoryEntry: removeDirectoryEntry,
+    renamePluginDirectoryEntry: renameDirectoryEntry,
+    releasePluginDirectory: releaseDirectory,
+  },
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readText: vi.fn(), writeText: clipboardWrite }));
 vi.mock('./pluginHttp', () => ({ executePluginHttp: executeHttp }));
@@ -34,10 +54,23 @@ beforeEach(() => {
   readAsset.mockReset();
   writeAsset.mockReset();
   pickFiles.mockReset();
+  pickDirectory.mockReset();
+  listDirectory.mockReset();
+  readDirectoryFile.mockReset();
+  statDirectoryEntry.mockReset();
+  writeDirectoryFile.mockReset();
+  createDirectory.mockReset();
+  removeDirectoryEntry.mockReset();
+  renameDirectoryEntry.mockReset();
+  releaseDirectory.mockReset();
   clipboardWrite.mockReset();
   executeHttp.mockReset();
   executeViewApi.mockReset();
   writeAsset.mockResolvedValue(undefined);
+  createDirectory.mockResolvedValue(null);
+  removeDirectoryEntry.mockResolvedValue(null);
+  renameDirectoryEntry.mockResolvedValue(null);
+  releaseDirectory.mockResolvedValue(undefined);
   clipboardWrite.mockResolvedValue(undefined);
   executeHttp.mockResolvedValue(null);
   executeViewApi.mockResolvedValue(null);
@@ -135,6 +168,259 @@ describe('host API asset reads', () => {
     await expect(executeHostApi('api.plugin', 'fs.openDialog', { format: 'hex' })).rejects.toThrow('format');
     expect(readAsset).not.toHaveBeenCalled();
     expect(pickFiles).not.toHaveBeenCalled();
+  });
+});
+
+describe('host API plugin directories', () => {
+  it('turns a cancelled directory picker into an empty list and forwards title and multiple', async () => {
+    pickDirectory.mockResolvedValueOnce([]);
+    await expect(executeHostApi('api.plugin', 'fs.openDirectoryDialog', {})).resolves.toEqual({ directories: [] });
+    expect(pickDirectory).toHaveBeenCalledWith('api.plugin', { title: undefined, multiple: false });
+
+    const picked = [{ grantId: 'grant-a', name: 'logs', path: 'C:\\logs' }];
+    pickDirectory.mockResolvedValueOnce(picked);
+    await expect(executeHostApi('api.plugin', 'fs.openDirectoryDialog', { title: '选择日志目录', multiple: true }))
+      .resolves.toEqual({ directories: picked });
+    expect(pickDirectory).toHaveBeenLastCalledWith('api.plugin', { title: '选择日志目录', multiple: true });
+
+    await expect(executeHostApi('api.plugin', 'fs.openDirectoryDialog', { multiple: 'yes' }))
+      .rejects.toThrow(/multiple/);
+    expect(pickDirectory).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps directory entries with modifiedMs and forwards rel and recursive', async () => {
+    const entries = [
+      { name: 'a.txt', rel: 'a.txt', kind: 'file' as const, size: 3, modifiedMs: 111 },
+      { name: 'sub', rel: 'sub', kind: 'directory' as const, size: 0, modifiedMs: 222 },
+      { name: 'link', rel: 'link', kind: 'other' as const, size: 0, modifiedMs: 333 },
+    ];
+    listDirectory.mockResolvedValue(entries);
+    await expect(executeHostApi('api.plugin', 'fs.listDirectory', { grantId: 'grant-a' }))
+      .resolves.toEqual({ entries });
+    expect(listDirectory).toHaveBeenLastCalledWith('api.plugin', 'grant-a', undefined, undefined);
+
+    await executeHostApi('api.plugin', 'fs.listDirectory', { grantId: 'grant-a', rel: 'sub', recursive: true });
+    expect(listDirectory).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'sub', true);
+
+    await expect(executeHostApi('api.plugin', 'fs.listDirectory', { grantId: 'grant-a', recursive: 'yes' }))
+      .rejects.toThrow(/recursive/);
+  });
+
+  it('maps stat metadata and rejects malformed stat arguments before the native call', async () => {
+    statDirectoryEntry.mockResolvedValueOnce({
+      name: 'a.txt', rel: 'a.txt', kind: 'file', size: 7, modifiedMs: 1234,
+    });
+    await expect(executeHostApi('api.plugin', 'fs.statDirectoryEntry', { grantId: 'grant-a', rel: 'a.txt' }))
+      .resolves.toEqual({ name: 'a.txt', rel: 'a.txt', kind: 'file', size: 7, modifiedMs: 1234 });
+    expect(statDirectoryEntry).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'a.txt');
+
+    await expect(executeHostApi('api.plugin', 'fs.statDirectoryEntry', { grantId: 'grant-a' })).rejects.toThrow(/rel/);
+    await expect(executeHostApi('api.plugin', 'fs.statDirectoryEntry', { rel: 'a.txt' })).rejects.toThrow(/grantId/);
+    await expect(executeHostApi('api.plugin', 'fs.statDirectoryEntry', {
+      grantId: 'g'.repeat(129), rel: 'a.txt',
+    })).rejects.toThrow(/grantId/);
+    expect(statDirectoryEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it('decodes text with the requested encoding and passes binary bytes through losslessly', async () => {
+    readDirectoryFile.mockResolvedValueOnce({ path: '中文.txt', base64: '1tDOxA==' });
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: '中文.txt', encoding: 'gbk',
+    })).resolves.toEqual({ path: '中文.txt', content: '中文' });
+    expect(readDirectoryFile).toHaveBeenLastCalledWith('api.plugin', 'grant-a', '中文.txt');
+
+    readDirectoryFile.mockResolvedValueOnce({ path: 'utf8.txt', base64: '5Lit5paH' });
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', { grantId: 'grant-a', rel: 'utf8.txt' }))
+      .resolves.toEqual({ path: 'utf8.txt', content: '中文' });
+
+    readDirectoryFile.mockResolvedValueOnce({ path: 'raw.bin', base64: 'AP+A' });
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'raw.bin', format: 'binary',
+    })).resolves.toEqual({ path: 'raw.bin', bytes: new Uint8Array([0, 255, 128]) });
+
+    readDirectoryFile.mockResolvedValueOnce({ path: 'empty.bin', base64: '' });
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'empty.bin', format: 'binary',
+    })).resolves.toEqual({ path: 'empty.bin', bytes: new Uint8Array() });
+  });
+
+  it('does not expose directory results after authority is revoked during the native call', async () => {
+    pickDirectory.mockResolvedValue([{ grantId: 'grant-a', name: 'logs', path: 'C:\\logs' }]);
+    listDirectory.mockResolvedValue([{ name: 'a.txt', rel: 'a.txt', kind: 'file', size: 1, modifiedMs: 2 }]);
+    readDirectoryFile.mockResolvedValue({ path: 'a.txt', base64: 'QQ==' });
+    statDirectoryEntry.mockResolvedValue({ name: 'a.txt', rel: 'a.txt', kind: 'file', size: 1, modifiedMs: 2 });
+    writeDirectoryFile.mockResolvedValue({ path: 'C:\\logs\\a.txt', bytesWritten: 1 });
+    const revoked = () => { throw new Error('permission revoked'); };
+    // Nine sequential revoked picks exceed the eight-slot dialog budget; they can
+    // only all reach the post-pick recheck if the finally block released each slot.
+    for (let index = 0; index < 9; index++) {
+      await expect(executeHostApi('api.plugin', 'fs.openDirectoryDialog', {}, null, revoked))
+        .rejects.toThrow('permission revoked');
+    }
+    await expect(executeHostApi('api.plugin', 'fs.listDirectory', { grantId: 'grant-a' }, null, revoked))
+      .rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'a.txt', format: 'binary',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.statDirectoryEntry', {
+      grantId: 'grant-a', rel: 'a.txt',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'a.txt', content: 'a',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.createDirectory', {
+      grantId: 'grant-a', rel: 'sub',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.removeDirectoryEntry', {
+      grantId: 'grant-a', rel: 'a.txt',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.renameDirectoryEntry', {
+      grantId: 'grant-a', fromRel: 'a.txt', toRel: 'b.txt',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    // Release is cleanup, not a data path: revocation does not block it.
+    await expect(executeHostApi('api.plugin', 'fs.releaseDirectory', { grantId: 'grant-a' }, null, revoked))
+      .resolves.toBeNull();
+    expect(pickDirectory).toHaveBeenCalledTimes(9);
+    expect(statDirectoryEntry).toHaveBeenCalledTimes(1);
+    expect(writeDirectoryFile).toHaveBeenCalledTimes(1);
+    expect(createDirectory).toHaveBeenCalledTimes(1);
+    expect(removeDirectoryEntry).toHaveBeenCalledTimes(1);
+    expect(renameDirectoryEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates grant ids, relative paths, formats and encodings before touching the directory', async () => {
+    await expect(executeHostApi('api.plugin', 'fs.openDirectoryDialog', { title: 'x'.repeat(257) }))
+      .rejects.toThrow(/title/);
+    await expect(executeHostApi('api.plugin', 'fs.listDirectory', {})).rejects.toThrow(/grantId/);
+    await expect(executeHostApi('api.plugin', 'fs.listDirectory', { grantId: 'g'.repeat(129) })).rejects.toThrow(/grantId/);
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', { grantId: 'grant-a' })).rejects.toThrow(/rel/);
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'r'.repeat(4097),
+    })).rejects.toThrow(/rel/);
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'a.txt', format: 'hex',
+    })).rejects.toThrow(/format/);
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'a.txt', encoding: 'x'.repeat(65),
+    })).rejects.toThrow(/encoding/);
+    await expect(executeHostApi('api.plugin', 'fs.releaseDirectory', {})).rejects.toThrow(/grantId/);
+    expect(pickDirectory).not.toHaveBeenCalled();
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(readDirectoryFile).not.toHaveBeenCalled();
+    expect(statDirectoryEntry).not.toHaveBeenCalled();
+    expect(writeDirectoryFile).not.toHaveBeenCalled();
+    expect(createDirectory).not.toHaveBeenCalled();
+    expect(removeDirectoryEntry).not.toHaveBeenCalled();
+    expect(renameDirectoryEntry).not.toHaveBeenCalled();
+    expect(releaseDirectory).not.toHaveBeenCalled();
+  });
+
+  it('releases a grant without reading anything', async () => {
+    await expect(executeHostApi('api.plugin', 'fs.releaseDirectory', { grantId: 'grant-a' })).resolves.toBeNull();
+    expect(releaseDirectory).toHaveBeenCalledWith('api.plugin', 'grant-a');
+    expect(readDirectoryFile).not.toHaveBeenCalled();
+  });
+
+  it('writes text, empty text, Uint8Array and ArrayBuffer content with explicit options', async () => {
+    writeDirectoryFile.mockResolvedValue({ path: 'C:\\logs\\a.txt', bytesWritten: 3 });
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'a.txt', content: 'abc',
+    })).resolves.toEqual({ path: 'C:\\logs\\a.txt', bytesWritten: 3 });
+    expect(writeDirectoryFile).toHaveBeenLastCalledWith(
+      'api.plugin', 'grant-a', 'a.txt', 'abc', undefined, undefined, undefined,
+    );
+
+    await executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'empty.txt', content: '', mode: 'append', createParents: false,
+    });
+    expect(writeDirectoryFile).toHaveBeenLastCalledWith(
+      'api.plugin', 'grant-a', 'empty.txt', '', undefined, 'append', false,
+    );
+
+    await executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'deep/new.txt', content: 'x', createParents: true,
+    });
+    expect(writeDirectoryFile).toHaveBeenLastCalledWith(
+      'api.plugin', 'grant-a', 'deep/new.txt', 'x', undefined, undefined, true,
+    );
+
+    const bytes = Uint8Array.from({ length: 256 }, (_, index) => index);
+    await executeHostApi('api.plugin', 'fs.writeDirectoryFile', { grantId: 'grant-a', rel: 'blob.bin', bytes });
+    expect(writeDirectoryFile).toHaveBeenLastCalledWith(
+      'api.plugin', 'grant-a', 'blob.bin', undefined, btoa(String.fromCharCode(...bytes)), undefined, undefined,
+    );
+
+    const buffer = new Uint8Array([0, 255, 128]).buffer;
+    await executeHostApi('api.plugin', 'fs.writeDirectoryFile', { grantId: 'grant-a', rel: 'raw.bin', bytes: buffer });
+    expect(writeDirectoryFile).toHaveBeenLastCalledWith(
+      'api.plugin', 'grant-a', 'raw.bin', undefined, 'AP+A', undefined, undefined,
+    );
+
+    await executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'zero.bin', bytes: new Uint8Array(),
+    });
+    expect(writeDirectoryFile).toHaveBeenLastCalledWith(
+      'api.plugin', 'grant-a', 'zero.bin', undefined, '', undefined, undefined,
+    );
+  });
+
+  it('rejects mixed, missing, non-binary or invalid-mode write arguments before touching disk', async () => {
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'x', content: '', bytes: new Uint8Array(),
+    })).rejects.toThrow('互斥');
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', { grantId: 'grant-a', rel: 'x' }))
+      .rejects.toThrow('content');
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'x', bytes: 'text',
+    })).rejects.toThrow('bytes');
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'x', content: 'a', mode: 'truncate',
+    })).rejects.toThrow(/mode/);
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'x', content: 'a', createParents: 'yes',
+    })).rejects.toThrow(/createParents/);
+    writeDirectoryFile.mockResolvedValueOnce({ path: 'x', bytesWritten: 1 });
+    await expect(executeHostApi('api.plugin', 'fs.writeDirectoryFile', {
+      grantId: 'grant-a', rel: 'x', content: 'a', bytes: undefined,
+    })).resolves.toEqual({ path: 'x', bytesWritten: 1 });
+    expect(writeDirectoryFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps create, remove and rename onto the native directory commands', async () => {
+    await expect(executeHostApi('api.plugin', 'fs.createDirectory', {
+      grantId: 'grant-a', rel: 'sub/deep',
+    })).resolves.toBeNull();
+    expect(createDirectory).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'sub/deep', undefined);
+    await executeHostApi('api.plugin', 'fs.createDirectory', { grantId: 'grant-a', rel: 'sub', recursive: false });
+    expect(createDirectory).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'sub', false);
+
+    await expect(executeHostApi('api.plugin', 'fs.removeDirectoryEntry', { grantId: 'grant-a', rel: 'a.txt' }))
+      .resolves.toBeNull();
+    expect(removeDirectoryEntry).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'a.txt', undefined);
+    await executeHostApi('api.plugin', 'fs.removeDirectoryEntry', { grantId: 'grant-a', rel: 'sub', recursive: true });
+    expect(removeDirectoryEntry).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'sub', true);
+
+    await expect(executeHostApi('api.plugin', 'fs.renameDirectoryEntry', {
+      grantId: 'grant-a', fromRel: 'a.txt', toRel: 'b.txt',
+    })).resolves.toBeNull();
+    expect(renameDirectoryEntry).toHaveBeenLastCalledWith('api.plugin', 'grant-a', 'a.txt', 'b.txt');
+
+    await expect(executeHostApi('api.plugin', 'fs.renameDirectoryEntry', { grantId: 'grant-a', fromRel: 'a.txt' }))
+      .rejects.toThrow(/toRel/);
+    await expect(executeHostApi('api.plugin', 'fs.renameDirectoryEntry', { grantId: 'grant-a', toRel: 'b.txt' }))
+      .rejects.toThrow(/fromRel/);
+    await expect(executeHostApi('api.plugin', 'fs.renameDirectoryEntry', {
+      grantId: 'grant-a', fromRel: 'f'.repeat(4097), toRel: 'b.txt',
+    })).rejects.toThrow(/fromRel/);
+    await expect(executeHostApi('api.plugin', 'fs.createDirectory', {
+      grantId: 'grant-a', rel: 'x', recursive: 1,
+    })).rejects.toThrow(/recursive/);
+    await expect(executeHostApi('api.plugin', 'fs.removeDirectoryEntry', {
+      grantId: 'grant-a', rel: 'r'.repeat(4097),
+    })).rejects.toThrow(/rel/);
+    expect(createDirectory).toHaveBeenCalledTimes(2);
+    expect(removeDirectoryEntry).toHaveBeenCalledTimes(2);
+    expect(renameDirectoryEntry).toHaveBeenCalledTimes(1);
   });
 });
 

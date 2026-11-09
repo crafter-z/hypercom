@@ -40,6 +40,8 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "fs:assets",
     "fs:storage",
     "fs:open",
+    "fs:open-dir",
+    "fs:write-dir",
     "serial:send",
     "http:request",
     "shell:open",

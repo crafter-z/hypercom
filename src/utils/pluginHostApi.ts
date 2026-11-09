@@ -84,11 +84,25 @@ export const MAX_PLUGIN_DIALOG_EXTENSIONS = 64;
 export const MAX_PLUGIN_DIALOG_EXTENSION_CHARS = 128;
 export const MAX_PLUGIN_DIALOG_TITLE_CHARS = 256;
 export const MAX_PLUGIN_ENCODING_CHARS = 64;
+export const MAX_PLUGIN_GRANT_ID_CHARS = 128;
+const MAX_PLUGIN_REL_CHARS = 4096;
 const PLUGIN_LINE_ENDINGS = new Set(['None', '\\r', '\\n', '\\r\\n']);
 
 function requireMaxChars(value: string, field: string, max: number): string {
   if (value.length > max) throw new Error(`参数 ${field} 超过 ${max} 字符上限`);
   return value;
+}
+
+/** 目录授权句柄（宿主签发，插件只能原样带回）。 */
+function requireGrantId(args: unknown): string {
+  return requireMaxChars(requireString(args, 'grantId'), 'grantId', MAX_PLUGIN_GRANT_ID_CHARS);
+}
+
+/** 文本解码编码；缺省 utf-8，与 fs.openDialog 的编码规则一致。 */
+function pluginEncoding(args: Record<string, unknown>): string {
+  return typeof args.encoding === 'string' && args.encoding !== ''
+    ? requireMaxChars(args.encoding, 'encoding', MAX_PLUGIN_ENCODING_CHARS)
+    : 'utf-8';
 }
 
 /**
@@ -104,6 +118,20 @@ function binaryFileFormat(args: Record<string, unknown>): boolean {
   if (args.format === undefined || args.format === 'text') return false;
   if (args.format === 'binary') return true;
   throw new Error('文件 format 必须为 text 或 binary');
+}
+
+/** 可选布尔参数：未提供保持 undefined（Rust 侧落默认值）；提供则必须是布尔。 */
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') throw new Error(`参数 ${field} 必须为布尔值`);
+  return value;
+}
+
+/** 目录写入 mode 白名单（缺省由 Rust 侧落 overwrite）。 */
+function directoryWriteMode(value: unknown): 'overwrite' | 'append' | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'overwrite' || value === 'append') return value;
+  throw new Error('目录写入 mode 必须为 overwrite 或 append');
 }
 
 type PluginDialogFilter = { name: string; extensions: string[] };
@@ -207,9 +235,7 @@ export async function executeHostApi(
     case 'fs.openDialog': {
       const a = requireObject(args);
       const binary = binaryFileFormat(a);
-      const encoding = typeof a.encoding === 'string' && a.encoding !== ''
-        ? requireMaxChars(a.encoding, 'encoding', MAX_PLUGIN_ENCODING_CHARS)
-        : 'utf-8';
+      const encoding = pluginEncoding(a);
       const filters = dialogFilters(a.filters);
       if (a.multiple !== undefined && typeof a.multiple !== 'boolean') {
         throw new Error('文件 multiple 必须为布尔值');
@@ -233,6 +259,136 @@ export async function executeHostApi(
       } finally {
         releaseDialog();
       }
+    }
+    case 'fs.openDirectoryDialog': {
+      const a = requireObject(args ?? {});
+      const multiple = optionalBoolean(a.multiple, 'multiple') === true;
+      const title = a.title === undefined
+        ? undefined
+        : requireMaxChars(requireString(a, 'title'), 'title', MAX_PLUGIN_DIALOG_TITLE_CHARS);
+      const releaseDialog = acquirePluginDialog(pluginId);
+      try {
+        const picked = await fileService.pickPluginDirectory(pluginId, { title, multiple });
+        // Same post-native revalidation as fs.openDialog: a grant revoked while
+        // the user was choosing must not yield the selected directory.
+        beforeSend?.();
+        // The native command already returns an array (empty on cancel).
+        return { directories: picked };
+      } finally {
+        releaseDialog();
+      }
+    }
+    case 'fs.listDirectory': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      let rel: string | undefined;
+      if (a.rel !== undefined) {
+        if (typeof a.rel !== 'string') throw new Error('参数 rel 必须为字符串');
+        rel = requireMaxChars(a.rel, 'rel', MAX_PLUGIN_REL_CHARS);
+      }
+      const recursive = optionalBoolean(a.recursive, 'recursive');
+      const entries = await fileService.listPluginDirectory(pluginId, grantId, rel, recursive);
+      // Re-check authority after the native listing, before entries cross the RPC.
+      beforeSend?.();
+      return {
+        entries: entries.map((entry) => ({
+          name: entry.name,
+          rel: entry.rel,
+          kind: entry.kind,
+          size: entry.size,
+          modifiedMs: entry.modifiedMs,
+        })),
+      };
+    }
+    case 'fs.readDirectoryFile': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', MAX_PLUGIN_REL_CHARS);
+      const binary = binaryFileFormat(a);
+      const encoding = pluginEncoding(a);
+      const file = await fileService.readPluginDirectoryFile(pluginId, grantId, rel);
+      // Re-check authority after the native read, before content crosses the RPC.
+      beforeSend?.();
+      const bytes = fileBytes(file.base64);
+      return binary ? { path: file.path, bytes } : { path: file.path, content: decodeBytes(bytes, encoding) };
+    }
+    case 'fs.statDirectoryEntry': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', MAX_PLUGIN_REL_CHARS);
+      const entry = await fileService.statPluginDirectoryEntry(pluginId, grantId, rel);
+      // Re-check authority after the native stat, before metadata crosses the RPC.
+      beforeSend?.();
+      return {
+        name: entry.name,
+        rel: entry.rel,
+        kind: entry.kind,
+        size: entry.size,
+        modifiedMs: entry.modifiedMs,
+      };
+    }
+    case 'fs.writeDirectoryFile': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', MAX_PLUGIN_REL_CHARS);
+      const content = a.content;
+      const bytes = a.bytes;
+      if (content !== undefined && bytes !== undefined) {
+        throw new Error('fs.writeDirectoryFile 的 content 与 bytes 互斥');
+      }
+      let text: string | undefined;
+      let base64: string | undefined;
+      if (typeof content === 'string') {
+        text = content;
+      } else if (content === undefined && bytes !== undefined) {
+        base64 = bytesToBase64(bytes);
+      } else {
+        throw new Error('fs.writeDirectoryFile 需要 content 字符串或 bytes 二进制');
+      }
+      const mode = directoryWriteMode(a.mode);
+      const createParents = optionalBoolean(a.createParents, 'createParents');
+      const result = await fileService.writePluginDirectoryFile(
+        pluginId, grantId, rel, text, base64, mode, createParents,
+      );
+      // Re-check authority after the native write, before the result crosses the RPC.
+      beforeSend?.();
+      return { path: result.path, bytesWritten: result.bytesWritten };
+    }
+    case 'fs.createDirectory': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', MAX_PLUGIN_REL_CHARS);
+      const recursive = optionalBoolean(a.recursive, 'recursive');
+      await fileService.createPluginDirectory(pluginId, grantId, rel, recursive);
+      // Re-check authority after the native mkdir, before reporting success.
+      beforeSend?.();
+      return null;
+    }
+    case 'fs.removeDirectoryEntry': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      const rel = requireMaxChars(requireString(a, 'rel'), 'rel', MAX_PLUGIN_REL_CHARS);
+      const recursive = optionalBoolean(a.recursive, 'recursive');
+      await fileService.removePluginDirectoryEntry(pluginId, grantId, rel, recursive);
+      // Re-check authority after the native removal, before reporting success.
+      beforeSend?.();
+      return null;
+    }
+    case 'fs.renameDirectoryEntry': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      const fromRel = requireMaxChars(requireString(a, 'fromRel'), 'fromRel', MAX_PLUGIN_REL_CHARS);
+      const toRel = requireMaxChars(requireString(a, 'toRel'), 'toRel', MAX_PLUGIN_REL_CHARS);
+      await fileService.renamePluginDirectoryEntry(pluginId, grantId, fromRel, toRel);
+      // Re-check authority after the native rename, before reporting success.
+      beforeSend?.();
+      return null;
+    }
+    case 'fs.releaseDirectory': {
+      const a = requireObject(args);
+      const grantId = requireGrantId(a);
+      await fileService.releasePluginDirectory(pluginId, grantId);
+      return null;
     }
     case 'fs.read': {
       const a = requireObject(args);

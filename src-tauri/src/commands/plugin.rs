@@ -22,6 +22,7 @@ use base64::Engine as _;
 use tauri::{Manager, State};
 
 use super::CommandError;
+use super::file::revoke_plugin_directory_grants;
 use crate::config;
 use crate::plugin::{self, PluginManifest};
 use crate::AppState;
@@ -297,6 +298,7 @@ pub async fn reload_plugin(
         snapshot(&manager)
     };
     state.plugin_http.cancel_plugin(&id);
+    revoke_plugin_directory_grants(&id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
     log::info!("Plugin reloaded from installed code: {id}");
     Ok(result)
@@ -451,6 +453,7 @@ fn install_prepared(
     }
     plugin::transaction::recover(manager.plugins_dir(), manager.get_config())
         .map_err(|e| CommandError::Io(format!("安装清理失败，保留事务: {e}")))?;
+    revoke_plugin_directory_grants(&prepared.manifest.id);
     log::info!(
         "Plugin installed: {} v{} ({})",
         prepared.manifest.id,
@@ -805,6 +808,7 @@ fn uninstall_with_manager(
     plugin::transaction::recover(&root, manager.get_config())
         .map_err(|e| CommandError::Io(format!("卸载恢复失败，保留事务: {e}")))?;
     result?;
+    revoke_plugin_directory_grants(id);
     Ok(snapshot(manager))
 }
 
@@ -872,6 +876,7 @@ pub async fn set_plugin_enabled(
         if let Err(e) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
             log::warn!("Failed to retire disabled plugin views for {id}: {e}");
         }
+        revoke_plugin_directory_grants(&id);
     }
     log::info!(
         "Plugin {} {}",
@@ -1036,6 +1041,9 @@ pub async fn set_plugin_permissions(
     // Validate + commit first, then retire views based on committed grants.
     if !committed_permissions.iter().any(|p| p == "http:request") {
         state.plugin_http.cancel_plugin(&id);
+    }
+    if !committed_permissions.iter().any(|p| p == "fs:open-dir" || p == "fs:write-dir") {
+        revoke_plugin_directory_grants(&id);
     }
     plugin::view_runtime::retire_denied(window.app_handle(), &id, &committed_permissions).await?;
     log::info!("Plugin {id} permissions updated");

@@ -75,6 +75,74 @@ describe('wrapped worker RPC lifecycle', () => {
     await expect(dialog).resolves.toBe('selected');
   });
 
+  it('keeps directory APIs pending with no deadline while release keeps the ordinary one', async () => {
+    vi.useFakeTimers();
+    expect(hasNoRpcDeadline('fs.openDirectoryDialog')).toBe(true);
+    expect(hasNoRpcDeadline('fs.listDirectory')).toBe(true);
+    expect(hasNoRpcDeadline('fs.readDirectoryFile')).toBe(true);
+    expect(hasNoRpcDeadline('fs.releaseDirectory')).toBe(false);
+
+    const worker = wrappedWorker(`
+      self.pick = self.plugin.api["fs.openDirectoryDialog"]({});
+      self.list = self.plugin.api["fs.listDirectory"]({grantId: "g"});
+      self.read = self.plugin.api["fs.readDirectoryFile"]({grantId: "g", rel: "a"});
+      self.release = self.plugin.api["fs.releaseDirectory"]({grantId: "g"});
+    `);
+    const scope = worker.scope as WorkerScope & {
+      pick: Promise<unknown>; list: Promise<unknown>; read: Promise<unknown>; release: Promise<unknown>;
+    };
+    const settled = vi.fn();
+    for (const request of [scope.pick, scope.list, scope.read, scope.release]) {
+      void request.then(settled, settled);
+    }
+    await vi.advanceTimersByTimeAsync(PLUGIN_RPC_TIMEOUT_MS + 1001);
+    // Only the ordinary-deadline release settles; directory work waits for the host.
+    expect(settled).toHaveBeenCalledTimes(1);
+    worker.reply({ seq: 1, ok: true, result: { directories: [] } });
+    worker.reply({ seq: 2, ok: true, result: { entries: [] } });
+    worker.reply({ seq: 3, ok: true, result: { path: 'a', content: '' } });
+    await expect(scope.pick).resolves.toEqual({ directories: [] });
+    await expect(scope.list).resolves.toEqual({ entries: [] });
+    await expect(scope.read).resolves.toEqual({ path: 'a', content: '' });
+    await expect(scope.release).rejects.toThrow('plugin RPC timed out');
+  });
+
+  it('keeps directory stat and write operations pending with no deadline', async () => {
+    vi.useFakeTimers();
+    for (const op of ['fs.statDirectoryEntry', 'fs.writeDirectoryFile', 'fs.createDirectory',
+      'fs.removeDirectoryEntry', 'fs.renameDirectoryEntry']) {
+      expect(hasNoRpcDeadline(op)).toBe(true);
+    }
+
+    const worker = wrappedWorker(`
+      self.stat = self.plugin.api["fs.statDirectoryEntry"]({grantId: "g", rel: "a"});
+      self.write = self.plugin.api["fs.writeDirectoryFile"]({grantId: "g", rel: "a", content: "x"});
+      self.mkdir = self.plugin.api["fs.createDirectory"]({grantId: "g", rel: "sub"});
+      self.remove = self.plugin.api["fs.removeDirectoryEntry"]({grantId: "g", rel: "a"});
+      self.rename = self.plugin.api["fs.renameDirectoryEntry"]({grantId: "g", fromRel: "a", toRel: "b"});
+    `);
+    const scope = worker.scope as WorkerScope & {
+      stat: Promise<unknown>; write: Promise<unknown>; mkdir: Promise<unknown>;
+      remove: Promise<unknown>; rename: Promise<unknown>;
+    };
+    const settled = vi.fn();
+    for (const request of [scope.stat, scope.write, scope.mkdir, scope.remove, scope.rename]) {
+      void request.then(settled, settled);
+    }
+    await vi.advanceTimersByTimeAsync(PLUGIN_RPC_TIMEOUT_MS + 1001);
+    expect(settled).not.toHaveBeenCalled();
+    worker.reply({ seq: 1, ok: true, result: { name: 'a' } });
+    worker.reply({ seq: 2, ok: true, result: { path: 'a', bytesWritten: 1 } });
+    worker.reply({ seq: 3, ok: true, result: null });
+    worker.reply({ seq: 4, ok: true, result: null });
+    worker.reply({ seq: 5, ok: true, result: null });
+    await expect(scope.stat).resolves.toEqual({ name: 'a' });
+    await expect(scope.write).resolves.toEqual({ path: 'a', bytesWritten: 1 });
+    await expect(scope.mkdir).resolves.toBeNull();
+    await expect(scope.remove).resolves.toBeNull();
+    await expect(scope.rename).resolves.toBeNull();
+  });
+
   it.each(['ui.panel.export', 'fs.read'])('keeps %s pending until the host finishes', async op => {
     vi.useFakeTimers();
     const worker = wrappedWorker(`self.request = self.plugin.api[${JSON.stringify(op)}]({rel: 'assets/large.bin', format: 'binary'});`);

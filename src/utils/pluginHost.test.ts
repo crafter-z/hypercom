@@ -222,6 +222,111 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
+  it('keeps directory selection, listing and reads pending past the ordinary deadline', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:open-dir'] }] });
+    const pick = deferredResult<unknown>();
+    const list = deferredResult<unknown>();
+    const read = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation((_id, op) =>
+      op === 'fs.openDirectoryDialog' ? pick.promise : op === 'fs.listDirectory' ? list.promise : read.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'fs.openDirectoryDialog', args: {} });
+    worker.emit({ seq: 2, op: 'fs.listDirectory', args: { grantId: 'grant-a' } });
+    worker.emit({ seq: 3, op: 'fs.readDirectoryFile', args: { grantId: 'grant-a', rel: 'a.txt' } });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const failed = worker.postMessage.mock.calls
+      .map(([message]) => message as { seq?: number; ok?: boolean })
+      .filter((message) => message.seq !== undefined && message.ok === false);
+    expect(failed).toEqual([]);
+    pick.resolve({ directories: [] });
+    list.resolve({ entries: [] });
+    read.resolve({ path: 'a.txt', content: '' });
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: true, result: { directories: [] } });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: { entries: [] } });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 3, ok: true, result: { path: 'a.txt', content: '' } });
+    session.stop();
+  });
+
+  it('keeps directory stat and write operations pending past the ordinary deadline', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:open-dir', 'fs:write-dir'] }] });
+    const stat = deferredResult<unknown>();
+    const write = deferredResult<unknown>();
+    const mkdir = deferredResult<unknown>();
+    const remove = deferredResult<unknown>();
+    const rename = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation((_id, op) =>
+      op === 'fs.statDirectoryEntry' ? stat.promise
+        : op === 'fs.writeDirectoryFile' ? write.promise
+          : op === 'fs.createDirectory' ? mkdir.promise
+            : op === 'fs.removeDirectoryEntry' ? remove.promise
+              : rename.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'fs.statDirectoryEntry', args: { grantId: 'grant-a', rel: 'a.txt' } });
+    worker.emit({ seq: 2, op: 'fs.writeDirectoryFile', args: { grantId: 'grant-a', rel: 'a.txt', content: 'x' } });
+    worker.emit({ seq: 3, op: 'fs.createDirectory', args: { grantId: 'grant-a', rel: 'sub' } });
+    worker.emit({ seq: 4, op: 'fs.removeDirectoryEntry', args: { grantId: 'grant-a', rel: 'a.txt' } });
+    worker.emit({ seq: 5, op: 'fs.renameDirectoryEntry', args: { grantId: 'grant-a', fromRel: 'a.txt', toRel: 'b.txt' } });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const failed = worker.postMessage.mock.calls
+      .map(([message]) => message as { seq?: number; ok?: boolean })
+      .filter((message) => message.seq !== undefined && message.ok === false);
+    expect(failed).toEqual([]);
+    stat.resolve({ name: 'a.txt', rel: 'a.txt', kind: 'file', size: 1, modifiedMs: 2 });
+    write.resolve({ path: 'a.txt', bytesWritten: 1 });
+    mkdir.resolve(null);
+    remove.resolve(null);
+    rename.resolve(null);
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({
+      seq: 1, ok: true, result: { name: 'a.txt', rel: 'a.txt', kind: 'file', size: 1, modifiedMs: 2 },
+    });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: { path: 'a.txt', bytesWritten: 1 } });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 3, ok: true, result: null });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 4, ok: true, result: null });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 5, ok: true, result: null });
+    session.stop();
+  });
+
+  it('transfers a binary directory read buffer to the worker', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:open-dir'] }] });
+    const bytes = new Uint8Array([1, 2, 3]);
+    vi.mocked(executeHostApi).mockResolvedValueOnce({ path: 'sub/a.bin', bytes });
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 7, op: 'fs.readDirectoryFile', args: { grantId: 'grant-a', rel: 'sub/a.bin', format: 'binary' } });
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith(
+      { seq: 7, ok: true, result: { path: 'sub/a.bin', bytes } },
+      [bytes.buffer],
+    );
+    session.stop();
+  });
+
+  it('separates the file and directory grants and admits permissionless directory release', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:open'] }] });
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'fs.listDirectory', args: { grantId: 'grant-a' } });
+    expect(worker.postMessage).toHaveBeenCalledWith({
+      seq: 1, ok: false, error: expect.stringContaining('fs:open-dir'),
+    });
+    expect(executeHostApi).not.toHaveBeenCalled();
+
+    worker.emit({ seq: 2, op: 'fs.releaseDirectory', args: { grantId: 'grant-a' } });
+    expect(executeHostApi).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(executeHostApi).mock.calls[0][1]).toBe('fs.releaseDirectory');
+    session.stop();
+  });
+
   it('keeps user-controlled panel export pending past the ordinary RPC deadline', async () => {
     vi.useFakeTimers();
     const exported = deferredResult<unknown>();

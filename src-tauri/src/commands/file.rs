@@ -9,7 +9,7 @@
  * 仅做基本有效性校验：写入确认父目录存在，读取确认文件可 canonicalize。
  */
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use base64::Engine as _;
@@ -31,6 +31,61 @@ fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError>
         .entry(plugin_id.to_string())
         .or_insert_with(|| Arc::new(Semaphore::new(MAX_LIVE_PLUGIN_DIALOGS)))
         .clone())
+}
+
+/// Authoritative check used by every plugin file/directory command: the plugin
+/// must still be installed, enabled, granted at least one of the permissions,
+/// and the installed manifest must still declare one of them. Returns the
+/// install generation the caller reviewed, so a later replacement cannot reuse
+/// an older picker result.
+fn plugin_any_permission_generation(
+    state: &crate::AppState,
+    plugin_id: &str,
+    permissions: &[&str],
+) -> Result<String, CommandError> {
+    crate::plugin::validate_plugin_id(plugin_id).map_err(CommandError::Other)?;
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let entry = manager
+        .get_config()
+        .entities
+        .plugin_configs
+        .iter()
+        .find(|item| item.id == plugin_id)
+        .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
+    if !entry.enabled
+        || !permissions
+            .iter()
+            .any(|perm| entry.granted_permissions.iter().any(|granted| granted == perm))
+    {
+        return Err(CommandError::Other(format!(
+            "插件未启用或未授予 {}",
+            permissions.join(" 或 ")
+        )));
+    }
+    let manifest = crate::plugin::load_manifest_lite(&manager.plugins_dir().join(plugin_id))
+        .map_err(CommandError::Other)?;
+    if manifest.id != plugin_id
+        || !permissions
+            .iter()
+            .any(|perm| manifest.permissions.iter().any(|declared| declared == perm))
+    {
+        return Err(CommandError::Other(format!(
+            "插件未声明 {}",
+            permissions.join(" 或 ")
+        )));
+    }
+    Ok(entry.install_generation.clone())
+}
+
+fn plugin_permission_generation(
+    state: &crate::AppState,
+    plugin_id: &str,
+    permission: &str,
+) -> Result<String, CommandError> {
+    plugin_any_permission_generation(state, plugin_id, &[permission])
 }
 
 /// Host-owned text-file dialogs. The renderer never supplies a path: it only
@@ -206,6 +261,38 @@ pub struct PluginPickedFiles {
     files: Vec<PluginPickedFile>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDirectoryPickOptions {
+    title: Option<String>,
+    multiple: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPickedDirectory {
+    grant_id: String,
+    name: String,
+    path: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDirectoryEntry {
+    name: String,
+    rel: String,
+    kind: String,
+    size: u64,
+    modified_ms: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDirectoryWriteResult {
+    path: String,
+    bytes_written: u64,
+}
+
 fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
     // A native picker can still return a device, FIFO, socket, or a link. Do not
     // let an apparently selected path turn into an unbounded/hanging read.
@@ -262,35 +349,7 @@ pub async fn plugin_pick_files(
     if window.label() != "main" {
         return Err(CommandError::Other("插件文件选择仅允许主窗口调用".into()));
     }
-    crate::plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
-    let install_generation = {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let entry = manager
-            .get_config()
-            .entities
-            .plugin_configs
-            .iter()
-            .find(|item| item.id == plugin_id)
-            .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
-        if !entry.enabled
-            || !entry
-                .granted_permissions
-                .iter()
-                .any(|perm| perm == "fs:open")
-        {
-            return Err(CommandError::Other("插件未启用或未授予 fs:open".into()));
-        }
-        let manifest =
-            crate::plugin::load_manifest_lite(&manager.plugins_dir().join(&plugin_id))
-                .map_err(CommandError::Other)?;
-        if manifest.id != plugin_id || !manifest.permissions.iter().any(|perm| perm == "fs:open") {
-            return Err(CommandError::Other("插件未声明 fs:open".into()));
-        }
-        entry.install_generation.clone()
-    };
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:open")?;
     let dialog_permit = plugin_dialog_budget(&plugin_id)?
         .try_acquire_owned()
         .map_err(|_| CommandError::Other("插件文件选择资源已达上限".into()))?;
@@ -315,29 +374,12 @@ pub async fn plugin_pick_files(
             dialog.blocking_pick_file().into_iter().collect()
         };
         // The dialog may have been open while the user revoked the permission.
-        let manager = app.state::<crate::AppState>();
-        let manager = manager
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let permitted = manager
-            .get_config()
-            .entities
-            .plugin_configs
-            .iter()
-            .any(|entry| {
-                entry.id == plugin_id
-                    && entry.install_generation == install_generation
-                    && entry.enabled
-                    && entry
-                        .granted_permissions
-                        .iter()
-                        .any(|perm| perm == "fs:open")
-            });
-        if !permitted {
+        let state = app.state::<crate::AppState>();
+        let current_generation =
+            plugin_permission_generation(&state, &plugin_id, "fs:open")?;
+        if current_generation != install_generation {
             return Err(CommandError::Other("插件文件读取权限已撤销".into()));
         }
-        drop(manager);
         let mut files = Vec::with_capacity(paths.len());
         for path in paths {
             let file_path = path
@@ -350,6 +392,804 @@ pub async fn plugin_pick_files(
     })
     .await
     .map_err(|e| CommandError::Other(format!("文件选择任务失败: {e}")))?
+}
+
+// ==================== 插件目录授权（fs:open-dir） ====================
+
+// A directory root is selected only by the native picker. The renderer/Worker
+// never supplies a root path: it receives an opaque grant bound to the plugin
+// and install generation. Every operation revalidates the current permission and
+// that the canonical target remains inside the canonical root. The grant is a
+// full read/write capability inside the user-selected tree; no artificial TTL or
+// grant-count cap is applied. Structural path fences (no links/escapes) remain.
+
+struct PluginDirectoryGrant {
+    plugin_id: String,
+    install_generation: String,
+    root: PathBuf,
+}
+
+static PLUGIN_DIRECTORY_GRANTS: LazyLock<Mutex<HashMap<String, PluginDirectoryGrant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const MAX_PLUGIN_DIRECTORY_GRANT_ID_CHARS: usize = 128;
+const MAX_PLUGIN_DIRECTORY_REL_CHARS: usize = 4096;
+
+fn create_directory_grant(
+    plugin_id: &str,
+    install_generation: &str,
+    root: PathBuf,
+) -> Result<String, CommandError> {
+    let mut grants = PLUGIN_DIRECTORY_GRANTS
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let grant_id = uuid::Uuid::new_v4().to_string();
+    grants.insert(
+        grant_id.clone(),
+        PluginDirectoryGrant {
+            plugin_id: plugin_id.to_string(),
+            install_generation: install_generation.to_string(),
+            root,
+        },
+    );
+    Ok(grant_id)
+}
+
+fn directory_grant_root(
+    plugin_id: &str,
+    grant_id: &str,
+    install_generation: &str,
+) -> Result<PathBuf, CommandError> {
+    if grant_id.is_empty() || grant_id.chars().count() > MAX_PLUGIN_DIRECTORY_GRANT_ID_CHARS {
+        return Err(CommandError::Other("目录授权标识无效".into()));
+    }
+    let grants = PLUGIN_DIRECTORY_GRANTS
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    let grant = grants
+        .get(grant_id)
+        .ok_or_else(|| CommandError::Other("目录授权已失效，请重新选择目录".into()))?;
+    if grant.plugin_id != plugin_id || grant.install_generation != install_generation {
+        return Err(CommandError::Other(
+            "目录授权不属于当前插件安装版本".into(),
+        ));
+    }
+    Ok(grant.root.clone())
+}
+
+/// Called by plugin state transitions (disable / permission removal / uninstall /
+/// replacement / reload) so a grant cannot silently survive an authorization change.
+pub(super) fn revoke_plugin_directory_grants(plugin_id: &str) {
+    if let Ok(mut grants) = PLUGIN_DIRECTORY_GRANTS.lock() {
+        grants.retain(|_, grant| grant.plugin_id != plugin_id);
+    }
+}
+
+/// Normalize a plugin-supplied path relative to the picked root. Rejects
+/// absolute/drive/UNC input, `..`, control characters and (on Windows) aliases
+/// that could resolve to a device or ADS. `.` and empty segments are ignored.
+fn sanitize_directory_rel(raw: &str) -> Result<(PathBuf, String), CommandError> {
+    if raw.len() > MAX_PLUGIN_DIRECTORY_REL_CHARS {
+        return Err(CommandError::Other("目录相对路径超过长度上限".into()));
+    }
+    if raw.is_empty() {
+        return Ok((PathBuf::new(), String::new()));
+    }
+    let normalized = raw.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return Err(CommandError::Other("目录相对路径不能是绝对路径".into()));
+    }
+    let mut out = PathBuf::new();
+    let mut parts = Vec::new();
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return Err(CommandError::Other("目录相对路径不允许 ..".into()));
+        }
+        if part.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') {
+            return Err(CommandError::Other("目录相对路径含控制字符".into()));
+        }
+        if parts.is_empty() && part.len() == 2 && part.ends_with(':') {
+            return Err(CommandError::Other("Windows 盘符路径不允许".into()));
+        }
+        #[cfg(windows)]
+        {
+            if part.ends_with(['.', ' '])
+                || part.contains(':')
+                || crate::plugin::is_reserved_windows_name(part)
+            {
+                return Err(CommandError::Other(format!(
+                    "目录相对路径含 Windows 路径别名: {part}"
+                )));
+            }
+        }
+        out.push(part);
+        parts.push(part.to_string());
+    }
+    Ok((out, parts.join("/")))
+}
+
+fn resolve_directory_target(root: &Path, rel: &Path) -> Result<PathBuf, CommandError> {
+    let components: Vec<_> = rel.components().collect();
+    let mut current = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(CommandError::Other("目录相对路径含非普通路径段".into()));
+        };
+        current.push(name);
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|e| CommandError::Io(format!("目录条目不可达: {e}")))?;
+        if crate::plugin::is_link_or_reparse(&metadata) {
+            return Err(CommandError::Other("目录路径含链接或重解析点".into()));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(CommandError::Other("目录路径中间组件不是目录".into()));
+        }
+    }
+    let canonical = current
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("目录条目不可达: {e}")))?;
+    if !canonical.starts_with(root) {
+        return Err(CommandError::Other("目录路径越界".into()));
+    }
+    Ok(canonical)
+}
+
+fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn entry_kind(metadata: &std::fs::Metadata) -> &'static str {
+    if crate::plugin::is_link_or_reparse(metadata) {
+        "other"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    }
+}
+
+fn make_entry(name: String, rel: String, metadata: &std::fs::Metadata) -> PluginDirectoryEntry {
+    let kind = entry_kind(metadata);
+    PluginDirectoryEntry {
+        name,
+        rel,
+        kind: kind.to_string(),
+        size: if kind == "file" { metadata.len() } else { 0 },
+        modified_ms: modified_ms(metadata),
+    }
+}
+
+/// Resolve the parent directory of a not-yet-existing target. Missing parents
+/// are created one component at a time when `create_parents` is true; existing
+/// components must be ordinary directories and never links/reparse points.
+fn resolve_directory_parent(
+    root: &Path,
+    rel: &Path,
+    create_parents: bool,
+) -> Result<(PathBuf, PathBuf), CommandError> {
+    let components: Vec<_> = rel.components().collect();
+    let Some((last, parents)) = components.split_last() else {
+        return Err(CommandError::Other(
+            "必须指定目录内的相对路径".into(),
+        ));
+    };
+    let Component::Normal(file_name) = last else {
+        return Err(CommandError::Other("目录相对路径含非普通路径段".into()));
+    };
+    let mut current = root.to_path_buf();
+    for component in parents {
+        let Component::Normal(name) = component else {
+            return Err(CommandError::Other("目录相对路径含非普通路径段".into()));
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if crate::plugin::is_link_or_reparse(&metadata) {
+                    return Err(CommandError::Other("目录路径含链接或重解析点".into()));
+                }
+                if !metadata.is_dir() {
+                    return Err(CommandError::Other("目录路径中间组件不是目录".into()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !create_parents {
+                    return Err(CommandError::Io(format!("父目录不存在: {error}")));
+                }
+                std::fs::create_dir(&current)
+                    .map_err(|e| CommandError::Io(format!("创建父目录失败: {e}")))?;
+            }
+            Err(error) => {
+                return Err(CommandError::Io(format!("目录条目不可达: {error}")))
+            }
+        }
+    }
+    let parent = current
+        .canonicalize()
+        .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
+    if !parent.starts_with(root) {
+        return Err(CommandError::Other("目录路径越界".into()));
+    }
+    Ok((parent.clone(), parent.join(file_name)))
+}
+
+fn existing_target_metadata(
+    target: &Path,
+) -> Result<Option<std::fs::Metadata>, CommandError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) => {
+            if crate::plugin::is_link_or_reparse(&metadata) {
+                return Err(CommandError::Other("目标路径含链接或重解析点".into()));
+            }
+            Ok(Some(metadata))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CommandError::Io(format!("目标不可达: {error}"))),
+    }
+}
+
+fn read_directory_entries(
+    dir: &Path,
+    rel_text: &str,
+    out: &mut Vec<PluginDirectoryEntry>,
+) -> Result<(), CommandError> {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| CommandError::Io(format!("目录不可读: {e}")))?
+    {
+        let entry = entry.map_err(|e| CommandError::Io(format!("目录条目不可读: {e}")))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            log::warn!("Skipping non-UTF-8 directory entry under {}", dir.display());
+            continue;
+        };
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(CommandError::Io(format!(
+                    "目录条目不可达: {error}"
+                )))
+            }
+        };
+        let rel = if rel_text.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_text}/{name}")
+        };
+        out.push(make_entry(name, rel, &metadata));
+    }
+    Ok(())
+}
+
+fn list_plugin_directory(
+    root: &Path,
+    rel: &Path,
+    rel_text: &str,
+    recursive: bool,
+) -> Result<Vec<PluginDirectoryEntry>, CommandError> {
+    let dir = resolve_directory_target(root, rel)?;
+    let metadata = std::fs::metadata(&dir)
+        .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
+    if !metadata.is_dir() {
+        return Err(CommandError::Other("目标不是目录".into()));
+    }
+    if !recursive {
+        let mut entries = Vec::new();
+        read_directory_entries(&dir, rel_text, &mut entries)?;
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        return Ok(entries);
+    }
+    let mut entries = Vec::new();
+    let mut stack = vec![(dir, rel_text.to_string())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let mut local = Vec::new();
+        read_directory_entries(&dir, &prefix, &mut local)?;
+        for entry in &local {
+            if entry.kind == "directory" {
+                // Revalidate each child directory before descending: a directory
+                // swapped for a symlink between readdir and the next read must not
+                // redirect the walk outside the selected root.
+                let child_dir = resolve_directory_target(root, Path::new(&entry.rel))?;
+                stack.push((child_dir, entry.rel.clone()));
+            }
+        }
+        entries.extend(local);
+    }
+    entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok(entries)
+}
+
+fn stat_plugin_directory_entry(
+    root: &Path,
+    rel: &Path,
+    rel_text: &str,
+) -> Result<PluginDirectoryEntry, CommandError> {
+    let target = resolve_directory_target(root, rel)?;
+    let metadata = std::fs::symlink_metadata(&target)
+        .map_err(|e| CommandError::Io(format!("目录条目不可达: {e}")))?;
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| target.display().to_string());
+    Ok(make_entry(name, rel_text.to_string(), &metadata))
+}
+
+fn write_plugin_directory_file(
+    root: &Path,
+    rel: &Path,
+    bytes: &[u8],
+    mode: &str,
+    create_parents: bool,
+) -> Result<PluginDirectoryWriteResult, CommandError> {
+    let (parent, target) = resolve_directory_parent(root, rel, create_parents)?;
+    if let Some(metadata) = existing_target_metadata(&target)? {
+        if !metadata.is_file() {
+            return Err(CommandError::Other("目标不是普通文件".into()));
+        }
+    }
+    let bytes_written = bytes.len() as u64;
+    match mode {
+        "overwrite" => {
+            let temporary = parent.join(format!(
+                ".hypercom-plugin-write-{}.tmp",
+                uuid::Uuid::new_v4()
+            ));
+            let result = (|| -> std::io::Result<()> {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)?;
+                file.write_all(bytes)?;
+                file.flush()?;
+                file.sync_all()?;
+                drop(file);
+                crate::plugin::transaction::replace_file(&temporary, &target)?;
+                crate::plugin::transaction::sync_dir(&parent)
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temporary);
+            }
+            result.map_err(|e| CommandError::Io(format!("写入目录文件失败: {e}")))?;
+        }
+        "append" => {
+            use std::io::Write;
+            let mut open = std::fs::OpenOptions::new();
+            open.append(true).create(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                open.custom_flags(
+                    windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+                );
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let mut file = open
+                .open(&target)
+                .map_err(|e| CommandError::Io(format!("打开目录文件失败: {e}")))?;
+            let metadata = file
+                .metadata()
+                .map_err(|e| CommandError::Io(format!("目录文件不可达: {e}")))?;
+            if !metadata.is_file() || crate::plugin::is_link_or_reparse(&metadata) {
+                return Err(CommandError::Other("目标不是普通文件".into()));
+            }
+            file.write_all(bytes)
+                .map_err(|e| CommandError::Io(format!("写入目录文件失败: {e}")))?;
+            file.flush()
+                .map_err(|e| CommandError::Io(format!("刷新目录文件失败: {e}")))?;
+            file.sync_all()
+                .map_err(|e| CommandError::Io(format!("同步目录文件失败: {e}")))?;
+        }
+        _ => return Err(CommandError::Other("mode 必须为 overwrite 或 append".into())),
+    }
+    Ok(PluginDirectoryWriteResult {
+        path: target.display().to_string(),
+        bytes_written,
+    })
+}
+
+fn create_plugin_directory(root: &Path, rel: &Path, recursive: bool) -> Result<(), CommandError> {
+    let components: Vec<_> = rel.components().collect();
+    if components.is_empty() {
+        return Err(CommandError::Other("必须指定目录相对路径".into()));
+    }
+    let mut current = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(CommandError::Other("目录相对路径含非普通路径段".into()));
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if crate::plugin::is_link_or_reparse(&metadata) {
+                    return Err(CommandError::Other("目录路径含链接或重解析点".into()));
+                }
+                if !metadata.is_dir() {
+                    return Err(CommandError::Other("目标路径不是目录".into()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !recursive && index + 1 != components.len() {
+                    return Err(CommandError::Io(format!("父目录不存在: {error}")));
+                }
+                std::fs::create_dir(&current)
+                    .map_err(|e| CommandError::Io(format!("创建目录失败: {e}")))?;
+            }
+            Err(error) => {
+                return Err(CommandError::Io(format!("目录条目不可达: {error}")))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_plugin_directory_entry(
+    root: &Path,
+    rel: &Path,
+    recursive: bool,
+) -> Result<(), CommandError> {
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("不能移除目录授权根".into()));
+    }
+    let target = resolve_directory_target(root, rel)?;
+    let metadata = std::fs::symlink_metadata(&target)
+        .map_err(|e| CommandError::Io(format!("目录条目不可达: {e}")))?;
+    if metadata.is_file() {
+        std::fs::remove_file(&target)
+            .map_err(|e| CommandError::Io(format!("删除文件失败: {e}")))?;
+    } else if metadata.is_dir() {
+        let result = if recursive {
+            std::fs::remove_dir_all(&target)
+        } else {
+            std::fs::remove_dir(&target)
+        };
+        result.map_err(|e| CommandError::Io(format!("删除目录失败: {e}")))?;
+    } else {
+        return Err(CommandError::Other("特殊文件不可移除".into()));
+    }
+    Ok(())
+}
+
+fn rename_plugin_directory_entry(
+    root: &Path,
+    from: &Path,
+    to: &Path,
+) -> Result<(), CommandError> {
+    if from.as_os_str().is_empty() || to.as_os_str().is_empty() {
+        return Err(CommandError::Other("源路径和目标路径都不能为空".into()));
+    }
+    let source = resolve_directory_target(root, from)?;
+    let (_, target) = resolve_directory_parent(root, to, false)?;
+    if existing_target_metadata(&target)?.is_some() {
+        return Err(CommandError::Other("目标路径已存在".into()));
+    }
+    std::fs::rename(&source, &target)
+        .map_err(|e| CommandError::Io(format!("重命名失败: {e}")))?;
+    Ok(())
+}
+
+fn read_plugin_directory_file(root: &Path, rel: &Path) -> Result<PluginPickedFile, CommandError> {
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
+    }
+    let target = resolve_directory_target(root, rel)?;
+    read_picked_file(target)
+}
+
+#[tauri::command]
+pub async fn plugin_pick_directory(
+    plugin_id: String,
+    options: PluginDirectoryPickOptions,
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<PluginPickedDirectory>, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录选择仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_any_permission_generation(
+        &state,
+        &plugin_id,
+        &["fs:open-dir", "fs:write-dir"],
+    )?;
+    let dialog_permit = plugin_dialog_budget(&plugin_id)?
+        .try_acquire_owned()
+        .map_err(|_| CommandError::Other("插件目录选择资源已达上限".into()))?;
+    let picked = tokio::task::spawn_blocking(move || {
+        let _dialog_permit = dialog_permit;
+        use tauri_plugin_dialog::DialogExt;
+        let mut dialog = app.dialog().file();
+        if let Some(title) = options.title {
+            dialog = dialog.set_title(title);
+        }
+        let folders = if options.multiple == Some(true) {
+            dialog.blocking_pick_folders().unwrap_or_default()
+        } else {
+            dialog.blocking_pick_folder().into_iter().collect()
+        };
+        if folders.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Validate every selected root before creating any grant, so a partial
+        // selection failure cannot leave a half-created batch behind.
+        let mut roots = Vec::with_capacity(folders.len());
+        for folder in folders {
+            let path = folder
+                .into_path()
+                .map_err(|e| CommandError::Other(format!("选择的目录路径不可用: {e}")))?;
+            let display_path = path.display().to_string();
+            let canonical = path
+                .canonicalize()
+                .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
+            let metadata = std::fs::metadata(&canonical)
+                .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
+            if !metadata.is_dir() || crate::plugin::is_link_or_reparse(&metadata) {
+                return Err(CommandError::Other("选择的路径不是普通目录".into()));
+            }
+            roots.push((canonical, display_path));
+        }
+        // The picker may have been open while the user revoked the permission.
+        let state = app.state::<crate::AppState>();
+        let current_generation = plugin_any_permission_generation(
+            &state,
+            &plugin_id,
+            &["fs:open-dir", "fs:write-dir"],
+        )?;
+        if current_generation != install_generation {
+            return Err(CommandError::Other("插件目录权限已撤销".into()));
+        }
+        let mut picked = Vec::with_capacity(roots.len());
+        for (canonical, display_path) in roots {
+            let grant_id =
+                create_directory_grant(&plugin_id, &install_generation, canonical.clone())?;
+            let name = canonical
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| canonical.display().to_string());
+            picked.push(PluginPickedDirectory {
+                grant_id,
+                name,
+                path: display_path,
+            });
+        }
+        Ok(picked)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("目录选择任务失败: {e}")))??;
+    Ok(picked)
+}
+
+#[tauri::command]
+pub async fn plugin_list_directory(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: Option<String>,
+    recursive: Option<bool>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<PluginDirectoryEntry>, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录读取仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:open-dir")?;
+    let (rel, rel_text) = sanitize_directory_rel(rel_path.as_deref().unwrap_or(""))?;
+    let recursive = recursive.unwrap_or(false);
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || {
+        list_plugin_directory(&root, &rel, &rel_text, recursive)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("目录读取任务失败: {e}")))?
+}
+
+#[tauri::command]
+pub async fn plugin_read_directory_file(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<PluginPickedFile, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录读取仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:open-dir")?;
+    let (rel, _) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
+    }
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || read_plugin_directory_file(&root, &rel))
+        .await
+        .map_err(|e| CommandError::Other(format!("目录文件读取任务失败: {e}")))?
+}
+
+#[tauri::command]
+pub async fn plugin_stat_directory_entry(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<PluginDirectoryEntry, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录读取仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:open-dir")?;
+    let (rel, rel_text) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录内的相对路径".into()));
+    }
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || {
+        stat_plugin_directory_entry(&root, &rel, &rel_text)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("目录条目读取任务失败: {e}")))?
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn plugin_write_directory_file(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    content: Option<String>,
+    base64: Option<String>,
+    mode: Option<String>,
+    create_parents: Option<bool>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<PluginDirectoryWriteResult, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录写入仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:write-dir")?;
+    let (rel, _) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
+    }
+    let bytes = match (content, base64) {
+        (Some(content), None) => content.into_bytes(),
+        (None, Some(base64)) => base64::engine::general_purpose::STANDARD
+            .decode(base64)
+            .map_err(|e| CommandError::Other(format!("base64 无效: {e}")))?,
+        (Some(_), Some(_)) => {
+            return Err(CommandError::Other(
+                "content 与 base64 不能同时提供".into(),
+            ))
+        }
+        (None, None) => {
+            return Err(CommandError::Other(
+                "必须提供 content 或 base64 之一".into(),
+            ))
+        }
+    };
+    let mode = mode.unwrap_or_else(|| "overwrite".to_string());
+    if mode != "overwrite" && mode != "append" {
+        return Err(CommandError::Other(
+            "mode 必须为 overwrite 或 append".into(),
+        ));
+    }
+    let create_parents = create_parents.unwrap_or(true);
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || {
+        write_plugin_directory_file(&root, &rel, &bytes, &mode, create_parents)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("目录文件写入任务失败: {e}")))?
+}
+
+#[tauri::command]
+pub async fn plugin_create_directory(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    recursive: Option<bool>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录写入仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:write-dir")?;
+    let (rel, _) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录相对路径".into()));
+    }
+    let recursive = recursive.unwrap_or(true);
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || create_plugin_directory(&root, &rel, recursive))
+        .await
+        .map_err(|e| CommandError::Other(format!("创建目录任务失败: {e}")))?
+}
+
+#[tauri::command]
+pub async fn plugin_remove_directory_entry(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    recursive: Option<bool>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录写入仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:write-dir")?;
+    let (rel, _) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("不能移除目录授权根".into()));
+    }
+    let recursive = recursive.unwrap_or(false);
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || remove_plugin_directory_entry(&root, &rel, recursive))
+        .await
+        .map_err(|e| CommandError::Other(format!("删除目录条目任务失败: {e}")))?
+}
+
+#[tauri::command]
+pub async fn plugin_rename_directory_entry(
+    plugin_id: String,
+    grant_id: String,
+    from_rel: String,
+    to_rel: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录写入仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:write-dir")?;
+    let (from, _) = sanitize_directory_rel(&from_rel)?;
+    let (to, _) = sanitize_directory_rel(&to_rel)?;
+    if from.as_os_str().is_empty() || to.as_os_str().is_empty() {
+        return Err(CommandError::Other("源路径和目标路径都不能为空".into()));
+    }
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    tokio::task::spawn_blocking(move || rename_plugin_directory_entry(&root, &from, &to))
+        .await
+        .map_err(|e| CommandError::Other(format!("重命名任务失败: {e}")))?
+}
+
+#[tauri::command]
+pub fn plugin_release_directory(
+    plugin_id: String,
+    grant_id: String,
+    window: tauri::WebviewWindow,
+) -> Result<(), CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件目录授权仅允许主窗口调用".into()));
+    }
+    crate::plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+    if grant_id.chars().count() > MAX_PLUGIN_DIRECTORY_GRANT_ID_CHARS {
+        return Ok(());
+    }
+    let mut grants = PLUGIN_DIRECTORY_GRANTS
+        .lock()
+        .map_err(|e| CommandError::Lock(e.to_string()))?;
+    if grants
+        .get(&grant_id)
+        .is_some_and(|grant| grant.plugin_id == plugin_id)
+    {
+        grants.remove(&grant_id);
+    }
+    Ok(())
 }
 
 // Replay authorization is a short-lived native-selected read-only handle, never a renderer path.
@@ -603,8 +1443,14 @@ mod tests {
     // 显式导入（镜像 serial/mod.rs 的测试约定，不用 `use super::*;`，
     // 避免 glob 把无关符号拖进测试二进制）。
     use crate::commands::file::{
-        image_mime_from_ext, read_image_data_url, read_picked_file,
+        create_directory_grant, create_plugin_directory, directory_grant_root,
+        image_mime_from_ext, list_plugin_directory, read_image_data_url, read_picked_file,
+        read_plugin_directory_file, remove_plugin_directory_entry, rename_plugin_directory_entry,
+        revoke_plugin_directory_grants, sanitize_directory_rel, stat_plugin_directory_entry,
+        write_plugin_directory_file,
     };
+    #[cfg(unix)]
+    use crate::commands::file::resolve_directory_target;
 
     /// 1x1 PNG 头部字节。函数不做 PNG 解析，仅验证 base64 往返一致。
     const TINY_PNG: &[u8] =
@@ -817,5 +1663,259 @@ mod tests {
         assert!(err.to_string().contains("ordinary file"));
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn directory_rel_normalizes_and_rejects_escapes() {
+        assert_eq!(
+            sanitize_directory_rel("").unwrap(),
+            (std::path::PathBuf::new(), String::new())
+        );
+        assert_eq!(
+            sanitize_directory_rel("logs//2026/./today").unwrap().1,
+            "logs/2026/today"
+        );
+        assert!(sanitize_directory_rel("../secret").is_err());
+        assert!(sanitize_directory_rel("logs/../../secret").is_err());
+        assert!(sanitize_directory_rel("/etc").is_err());
+        assert!(sanitize_directory_rel("C:\\Windows").is_err());
+        assert!(sanitize_directory_rel("logs/\u{0}.txt").is_err());
+        assert!(sanitize_directory_rel("logs/\u{7f}.txt").is_err());
+    }
+
+    #[test]
+    fn directory_listing_reports_sorted_entries_and_relative_paths() {
+        let dir = ReplayTempDir::new();
+        std::fs::write(dir.path().join("b.log"), b"hello").unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/c.log"), b"world").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let entries = list_plugin_directory(&root, std::path::Path::new(""), "", false).unwrap();
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["a.txt", "b.log", "nested"]);
+        let b = entries.iter().find(|entry| entry.name == "b.log").unwrap();
+        assert_eq!((b.rel.as_str(), b.kind.as_str(), b.size), ("b.log", "file", 5));
+        assert!(b.modified_ms > 0);
+        let nested = entries.iter().find(|entry| entry.name == "nested").unwrap();
+        assert_eq!((nested.rel.as_str(), nested.kind.as_str(), nested.size), ("nested", "directory", 0));
+
+        let children = list_plugin_directory(&root, std::path::Path::new("nested"), "nested", false).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].rel, "nested/c.log");
+        assert_eq!(children[0].kind, "file");
+    }
+
+    #[test]
+    fn directory_listing_recursive_returns_the_whole_tree() {
+        let dir = ReplayTempDir::new();
+        std::fs::write(dir.path().join("top.txt"), b"top").unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("a/one.log"), b"1").unwrap();
+        std::fs::write(dir.path().join("a/b/two.log"), b"2").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let entries = list_plugin_directory(&root, std::path::Path::new(""), "", true).unwrap();
+        let rels: Vec<_> = entries.iter().map(|entry| entry.rel.as_str()).collect();
+        assert_eq!(rels, ["a", "a/b", "a/b/two.log", "a/one.log", "top.txt"]);
+        let two = entries.iter().find(|entry| entry.rel == "a/b/two.log").unwrap();
+        assert_eq!((two.kind.as_str(), two.size), ("file", 1));
+    }
+
+    #[test]
+    fn directory_write_overwrite_append_and_parent_creation() {
+        let dir = ReplayTempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+
+        let written = write_plugin_directory_file(
+            &root,
+            std::path::Path::new("new/dir/a.txt"),
+            b"hello",
+            "overwrite",
+            true,
+        )
+        .unwrap();
+        assert_eq!(written.bytes_written, 5);
+        assert_eq!(std::fs::read(dir.path().join("new/dir/a.txt")).unwrap(), b"hello");
+
+        write_plugin_directory_file(
+            &root,
+            std::path::Path::new("new/dir/a.txt"),
+            b"!",
+            "append",
+            true,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("new/dir/a.txt")).unwrap(), b"hello!");
+
+        write_plugin_directory_file(
+            &root,
+            std::path::Path::new("new/dir/a.txt"),
+            b"hi",
+            "overwrite",
+            true,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("new/dir/a.txt")).unwrap(), b"hi");
+
+        assert!(write_plugin_directory_file(
+            &root,
+            std::path::Path::new("missing/a.txt"),
+            b"x",
+            "overwrite",
+            false,
+        )
+        .is_err());
+        assert!(write_plugin_directory_file(
+            &root,
+            std::path::Path::new("new/dir"),
+            b"x",
+            "overwrite",
+            true,
+        )
+        .is_err());
+        assert!(write_plugin_directory_file(
+            &root,
+            std::path::Path::new("../outside.txt"),
+            b"x",
+            "overwrite",
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn directory_create_remove_and_stat_entries() {
+        let dir = ReplayTempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+
+        create_plugin_directory(&root, std::path::Path::new("a/b/c"), true).unwrap();
+        assert!(dir.path().join("a/b/c").is_dir());
+        assert!(create_plugin_directory(&root, std::path::Path::new("a"), true).is_ok());
+        assert!(create_plugin_directory(&root, std::path::Path::new("x/y"), false).is_err());
+
+        write_plugin_directory_file(
+            &root,
+            std::path::Path::new("a/b/c/data.txt"),
+            b"content",
+            "overwrite",
+            true,
+        )
+        .unwrap();
+        let stat = stat_plugin_directory_entry(
+            &root,
+            std::path::Path::new("a/b/c/data.txt"),
+            "a/b/c/data.txt",
+        )
+        .unwrap();
+        assert_eq!((stat.rel.as_str(), stat.kind.as_str(), stat.size), ("a/b/c/data.txt", "file", 7));
+        assert!(stat.modified_ms > 0);
+        assert!(stat_plugin_directory_entry(&root, std::path::Path::new("missing"), "missing").is_err());
+
+        assert!(remove_plugin_directory_entry(&root, std::path::Path::new("a/b"), false).is_err());
+        remove_plugin_directory_entry(&root, std::path::Path::new("a/b"), true).unwrap();
+        assert!(!dir.path().join("a/b").exists());
+        remove_plugin_directory_entry(&root, std::path::Path::new("a"), false).unwrap();
+        assert!(!dir.path().join("a").exists());
+        assert!(remove_plugin_directory_entry(&root, std::path::Path::new(""), true).is_err());
+    }
+
+    #[test]
+    fn directory_rename_moves_files_and_directories() {
+        let dir = ReplayTempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        write_plugin_directory_file(
+            &root,
+            std::path::Path::new("old.txt"),
+            b"data",
+            "overwrite",
+            true,
+        )
+        .unwrap();
+        rename_plugin_directory_entry(
+            &root,
+            std::path::Path::new("old.txt"),
+            std::path::Path::new("nested/new.txt"),
+        )
+        .unwrap_err();
+        create_plugin_directory(&root, std::path::Path::new("nested"), true).unwrap();
+        rename_plugin_directory_entry(
+            &root,
+            std::path::Path::new("old.txt"),
+            std::path::Path::new("nested/new.txt"),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("nested/new.txt")).unwrap(), b"data");
+        assert!(!dir.path().join("old.txt").exists());
+
+        create_plugin_directory(&root, std::path::Path::new("dir-a/sub"), true).unwrap();
+        rename_plugin_directory_entry(
+            &root,
+            std::path::Path::new("dir-a"),
+            std::path::Path::new("dir-b"),
+        )
+        .unwrap();
+        assert!(dir.path().join("dir-b/sub").is_dir());
+        assert!(rename_plugin_directory_entry(
+            &root,
+            std::path::Path::new("dir-b"),
+            std::path::Path::new("nested"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn directory_read_returns_bytes_and_rejects_directories() {
+        let dir = ReplayTempDir::new();
+        std::fs::write(dir.path().join("data.bin"), b"\x00\xff\x80").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let picked = read_plugin_directory_file(&root, std::path::Path::new("data.bin")).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(picked.base64)
+            .unwrap();
+        assert_eq!(bytes, b"\x00\xff\x80");
+        assert!(read_plugin_directory_file(&root, std::path::Path::new("sub")).is_err());
+        assert!(read_plugin_directory_file(&root, std::path::Path::new("")).is_err());
+        assert!(read_plugin_directory_file(&root, std::path::Path::new("../data.bin")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_target_rejects_symlink_entries() {
+        let dir = ReplayTempDir::new();
+        let outside = unique_temp_path("outside");
+        std::fs::write(&outside, b"secret").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        std::fs::create_dir(dir.path().join("inside")).unwrap();
+        std::fs::write(dir.path().join("inside/data.txt"), b"inside").unwrap();
+        let inside_link = dir.path().join("inside-link");
+        std::os::unix::fs::symlink(dir.path().join("inside"), &inside_link).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        assert!(resolve_directory_target(&root, std::path::Path::new("link")).is_err());
+        // Intermediate links are rejected even when their canonical target stays
+        // inside the selected root.
+        assert!(resolve_directory_target(&root, std::path::Path::new("inside-link/data.txt")).is_err());
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn directory_grant_is_bound_to_plugin_and_install_generation() {
+        let dir = ReplayTempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let grant = create_directory_grant("com.example.dirgrant", "gen-a", root.clone()).unwrap();
+        assert_eq!(
+            directory_grant_root("com.example.dirgrant", &grant, "gen-a").unwrap(),
+            root
+        );
+        assert!(directory_grant_root("com.example.other", &grant, "gen-a").is_err());
+        assert!(directory_grant_root("com.example.dirgrant", &grant, "gen-b").is_err());
+        assert!(directory_grant_root("com.example.dirgrant", "not-a-grant", "gen-a").is_err());
+
+        revoke_plugin_directory_grants("com.example.dirgrant");
+        assert!(directory_grant_root("com.example.dirgrant", &grant, "gen-a").is_err());
     }
 }

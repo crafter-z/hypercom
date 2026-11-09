@@ -29,8 +29,11 @@ export const PLUGIN_BINARY_RPC_TIMEOUT_MS = VIEW_BINARY_TRANSFER_TIMEOUT_MS;
  * deadline; native HTTP applies only the caller-supplied timeout.
  */
 export function hasNoRpcDeadline(op: string): boolean {
-  return op === 'fs.read' || op === 'fs.openDialog' || op === 'ui.panel.export' ||
-    op === 'fs.write' || op === 'storage.set' ||
+  return op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
+    op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
+    op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
+    op === 'fs.removeDirectoryEntry' || op === 'fs.renameDirectoryEntry' ||
+    op === 'ui.panel.export' || op === 'fs.write' || op === 'storage.set' ||
     op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel';
 }
 
@@ -204,8 +207,11 @@ export const PLUGIN_BRIDGE_CODE = `
       }
       wireArgs.requestId = requestId;
     }
-    var deadline = op === 'fs.read' || op === 'fs.openDialog' || op === 'ui.panel.export' ||
-      op === 'fs.write' || op === 'storage.set' ||
+    var deadline = op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
+      op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
+      op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
+      op === 'fs.removeDirectoryEntry' || op === 'fs.renameDirectoryEntry' ||
+      op === 'ui.panel.export' || op === 'fs.write' || op === 'storage.set' ||
       op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel'
       ? 0 : op === 'view.sendBinary' ? ${PLUGIN_BINARY_RPC_TIMEOUT_MS + 1000} : ${PLUGIN_RPC_TIMEOUT_MS + 1000};
     return new Promise(function (resolve, reject) {

@@ -58,6 +58,53 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(checkOpAllowed('fs.openDialog', ['fs:assets'])).not.toBeNull();
     expect(checkOpAllowed('fs.openDialog', ['fs:open'])).toBeNull();
   });
+
+  it('fs:open-dir gates the directory APIs and never reuses the fs:open file grant', () => {
+    for (const op of ['fs.listDirectory', 'fs.readDirectoryFile', 'fs.statDirectoryEntry']) {
+      expect(OP_PERMISSIONS[op]).toBe('fs:open-dir');
+      expect(checkOpAllowed(op, [])).toContain('fs:open-dir');
+      expect(checkOpAllowed(op, ['fs:open'])).not.toBeNull();
+      expect(checkOpAllowed(op, ['fs:open-dir'])).toBeNull();
+    }
+    // 反向：目录授权不得打开任意文件。
+    expect(checkOpAllowed('fs.openDialog', ['fs:open-dir'])).not.toBeNull();
+    expect(checkOpAllowed('fs.openDialog', ['fs:write-dir'])).not.toBeNull();
+  });
+
+  it('opens the directory picker with either directory grant and rejects file-only grants', () => {
+    // 选择器是取得目录根的唯一入口；读/写任一权限都可打开。
+    expect(OP_PERMISSIONS['fs.openDirectoryDialog']).toBe('fs:open-dir');
+    const denied = checkOpAllowed('fs.openDirectoryDialog', []);
+    expect(denied).toContain('fs:open-dir');
+    expect(denied).toContain('fs:write-dir');
+    expect(checkOpAllowed('fs.openDirectoryDialog', ['fs:open'])).not.toBeNull();
+    expect(checkOpAllowed('fs.openDirectoryDialog', ['fs:assets'])).not.toBeNull();
+    expect(checkOpAllowed('fs.openDirectoryDialog', ['fs:open-dir'])).toBeNull();
+    expect(checkOpAllowed('fs.openDirectoryDialog', ['fs:write-dir'])).toBeNull();
+    expect(checkOpAllowed('fs.openDirectoryDialog', ['fs:open-dir', 'fs:write-dir'])).toBeNull();
+  });
+
+  it('separates directory read grants from directory write grants', () => {
+    for (const op of ['fs.listDirectory', 'fs.readDirectoryFile', 'fs.statDirectoryEntry']) {
+      expect(OP_PERMISSIONS[op]).toBe('fs:open-dir');
+      expect(checkOpAllowed(op, ['fs:open-dir'])).toBeNull();
+      // 写授权不得隐式升级为读授权（反向亦然）。
+      expect(checkOpAllowed(op, ['fs:write-dir'])).not.toBeNull();
+      expect(checkOpAllowed(op, [])).toContain('fs:open-dir');
+    }
+    for (const op of ['fs.writeDirectoryFile', 'fs.createDirectory', 'fs.removeDirectoryEntry', 'fs.renameDirectoryEntry']) {
+      expect(OP_PERMISSIONS[op]).toBe('fs:write-dir');
+      expect(checkOpAllowed(op, ['fs:write-dir'])).toBeNull();
+      expect(checkOpAllowed(op, ['fs:open-dir'])).not.toBeNull();
+      expect(checkOpAllowed(op, [])).toContain('fs:write-dir');
+    }
+  });
+
+  it('fs.releaseDirectory is cleanup and needs no permission', () => {
+    expect(OP_PERMISSIONS['fs.releaseDirectory']).toBeNull();
+    expect(checkOpAllowed('fs.releaseDirectory', [])).toBeNull();
+    expect(checkOpAllowed('fs.releaseDirectory', ['fs:open-dir'])).toBeNull();
+  });
   it('fs.read grants only the requested data or package path', () => {
     expect(checkOpAllowed('fs.read', ['fs:storage'], { rel: 'data/state.json' })).toBeNull();
     expect(checkOpAllowed('fs.read', ['fs:storage'], { rel: 'assets/help.txt' })).toContain('fs:assets');
@@ -92,8 +139,8 @@ describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () 
     expect(checkPortScope({ serial: { portWhitelist: [] } }, 'COM1')).toContain('空数组');
   });
 
-  it('敏感确认仅列出已交付的三项能力', () => {
-    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:open']);
+  it('敏感确认列出已交付的高风险能力', () => {
+    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:open', 'fs:write-dir']);
   });
 });
 

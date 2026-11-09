@@ -523,6 +523,9 @@ export class PluginSession {
               file !== null && typeof file === 'object' && 'bytes' in file && file.bytes instanceof Uint8Array,
           );
           if (files.length > 0) transfer = files.map((file) => file.bytes.buffer);
+        } else if (req.op === 'fs.readDirectoryFile' && result !== null && typeof result === 'object' && 'bytes' in result) {
+          const { bytes } = result;
+          if (bytes instanceof Uint8Array) transfer = [bytes.buffer];
         }
         respond({ ok: true, result }, transfer);
       }

@@ -35,6 +35,22 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 用户经系统对话框显式选择的任意文件读取（死机日志 map 等；对话框即信任边界）。
   // 单列 fs:open——与「仅读自身资产」的 fs:assets 语义分离，避免资产授权隐式升级。
   'fs.openDialog': 'fs:open',
+  // 用户经系统对话框显式选择的目录授权：列表/读取/stat 都限定在该次选择内。
+  // 与 fs:open（仅文件）分离——目录授权不得复用任意文件读取权限，反之亦然。
+  // openDirectoryDialog 是**唯一**能取得目录根的入口，读或写任一权限都可打开
+  // 选择器（checkOpAllowed 特判）；写操作另需 fs:write-dir。
+  'fs.openDirectoryDialog': 'fs:open-dir',
+  'fs.listDirectory': 'fs:open-dir',
+  'fs.readDirectoryFile': 'fs:open-dir',
+  'fs.statDirectoryEntry': 'fs:open-dir',
+  // 目录写权限与读权限分离：写 op 一律要求 fs:write-dir，绝不隐式接受 fs:open-dir。
+  'fs.writeDirectoryFile': 'fs:write-dir',
+  'fs.createDirectory': 'fs:write-dir',
+  'fs.removeDirectoryEntry': 'fs:write-dir',
+  'fs.renameDirectoryEntry': 'fs:write-dir',
+  // 释放授权是清理动作，不返回任何文件内容 → 无需权限；调用方启用/安装身份
+  // 仍由 PluginSession 的 beforeSend 约束。
+  'fs.releaseDirectory': null,
   // 出站（敏感，唯一合法通道）。open/read/cancel 是同一请求的拉取原语。
   'http.request': 'http:request',
   'http.open': 'http:request',
@@ -82,6 +98,15 @@ export function checkOpAllowed(op: string, grantedPermissions: string[], args?: 
     const required = segments[0] === 'data' ? 'fs:storage' : 'fs:assets';
     return grantedPermissions.includes(required) ? null : `插件未授予 ${required} 权限`;
   }
+  if (op === 'fs.openDirectoryDialog') {
+    // The picker is the only way to obtain a directory root, and that root may be
+    // used for reads or writes; either directory grant authorizes opening it.
+    // Every other directory op stays mapped to exactly one grant.
+    if (grantedPermissions.includes('fs:open-dir') || grantedPermissions.includes('fs:write-dir')) {
+      return null;
+    }
+    return `插件未授予 fs:open-dir 或 fs:write-dir 权限（当前授予: ${grantedPermissions.join(', ') || '无'}）`;
+  }
   const required = OP_PERMISSIONS[op];
   if (required === null) return null;
   return grantedPermissions.includes(required)
@@ -94,6 +119,7 @@ export const SENSITIVE_PERMISSIONS: readonly string[] = [
   'serial:send',
   'http:request',
   'shell:open',
+  'fs:write-dir',
 ];
 
 /**
