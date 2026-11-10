@@ -421,8 +421,7 @@ mod tests {
         fs::create_dir_all(tx.backup(&plugins).join("data")).unwrap();
         fs::write(tx.backup(&plugins).join("manifest.json"), r#"{"id":"com.example.test"}"#).unwrap();
         fs::write(tx.backup(&plugins).join("data/keep"), "private").unwrap();
-        let mut config = AppConfig::default();
-        config.revision = 2;
+        let config = AppConfig { revision: 2, ..Default::default() };
         recover(&plugins, &config).unwrap();
         assert!(!tx.backup(&plugins).exists());
         assert!(!journal(&plugins).unwrap().exists());
