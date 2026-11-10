@@ -542,6 +542,28 @@ impl ConfigManager {
         result
     }
 
+    /// Move a damaged transaction journal aside so every later start does not
+    /// retry (and fail) the same recovery before a window can be created.
+    fn quarantine_plugin_transaction(&self) -> anyhow::Result<()> {
+        let journal = self.config_path.with_file_name("plugin-transaction.json");
+        match fs::symlink_metadata(&journal) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {}
+            Ok(_) => return Err(anyhow::anyhow!("插件事务日志不是普通文件")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        let target = self.config_path.with_file_name(format!(
+            "plugin-transaction.json.corrupt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        crate::plugin::transaction::replace_file(&journal, &target)?;
+        crate::plugin::transaction::sync_dir(
+            self.config_path.parent().unwrap_or_else(|| Path::new(".")),
+        )?;
+        log::warn!("Quarantined plugin transaction journal to {}", target.display());
+        Ok(())
+    }
+
     /// Remove the marker only after both primary and safe backup are durable.
     pub(crate) fn clear_plugin_recovery_marker(&self) -> anyhow::Result<()> {
         let marker = self.plugin_recovery_marker_path();
@@ -682,7 +704,38 @@ impl ConfigManager {
         if fs::symlink_metadata(manager.config_path.with_file_name("plugin-transaction.json")).is_ok() {
             manager.save_safe_backup()?;
         }
-        crate::plugin::transaction::recover(&manager.plugins_dir, &manager.config)?;
+        // A damaged plugin transaction must never keep the whole app from
+        // starting (the window is created after this point). Stay fail-closed:
+        // disable every plugin, persist when possible, and start normally. The
+        // trust marker covers a second crash before the primary and safe backup
+        // both carry the revocation.
+        if let Err(error) = crate::plugin::transaction::recover(&manager.plugins_dir, &manager.config) {
+            log::error!("Plugin transaction recovery failed, starting with plugins disabled: {error}");
+            if let Err(failure) = manager.begin_plugin_recovery_marker() {
+                log::error!("Failed to arm the plugin trust recovery marker: {failure}");
+            }
+            manager.fail_closed_plugin_trust();
+            let persisted = if let Err(error) = manager.save() {
+                log::error!(
+                    "Failed to persist the fail-closed plugin state ({error}); keeping the transaction journal for the next start"
+                );
+                false
+            } else if let Err(error) = manager.save_safe_backup() {
+                log::error!("Failed to refresh the plugin safe backup ({error})");
+                false
+            } else {
+                true
+            };
+            if persisted {
+                // Best effort: a leftover marker only re-disables on next start.
+                if let Err(failure) = manager.clear_plugin_recovery_marker() {
+                    log::error!("Failed to clear the plugin trust recovery marker: {failure}");
+                }
+                if let Err(failure) = manager.quarantine_plugin_transaction() {
+                    log::error!("Failed to quarantine the plugin transaction journal: {failure}");
+                }
+            }
+        }
         let mut migrated = false;
         for entry in &mut manager.config.entities.plugin_configs {
             if entry.install_generation.is_empty() {
@@ -694,8 +747,30 @@ impl ConfigManager {
             manager.save()?;
             manager.save_safe_backup()?;
         }
-        manager.recover_plugin_recovery_marker()?;
+        if let Err(error) = manager.recover_plugin_recovery_marker() {
+            // Same contract as transaction recovery: never exit before a window
+            // exists. The in-memory state is fail-closed for this session and a
+            // retained marker retries the durable reset on the next start.
+            log::error!("Plugin trust recovery marker failed, starting with plugins disabled: {error}");
+            manager.fail_closed_plugin_trust();
+            if let Err(save) = manager.save() {
+                log::error!("Failed to persist the fail-closed plugin state: {save}");
+            }
+            if let Err(save) = manager.save_safe_backup() {
+                log::error!("Failed to persist the plugin safe backup: {save}");
+            }
+        }
         Ok(manager)
+    }
+
+    /// Disable every plugin and drop its grants/consent. Shared by the startup
+    /// fail-closed paths; callers persist afterwards when the disk allows it.
+    fn fail_closed_plugin_trust(&mut self) {
+        for entry in &mut self.config.entities.plugin_configs {
+            entry.enabled = false;
+            entry.trusted_web_granted = false;
+            entry.granted_permissions.clear();
+        }
     }
 
     /// 默认配置路径：%APPDATA%/hypercom/config.json
@@ -1031,6 +1106,81 @@ mod tests {
         assert!(!entry.trusted_web_granted);
         assert!(entry.granted_permissions.is_empty());
         assert!(!path.with_file_name("plugin-trust-recovery.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn damaged_plugin_transaction_cannot_block_startup() {
+        let root = std::env::temp_dir()
+            .join(format!("plugin_journal_failopen_{}", uuid::Uuid::new_v4()));
+        let path = root.join("config.json");
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        manager
+            .get_config_mut()
+            .entities
+            .plugin_configs
+            .push(PluginConfigEntry {
+                id: "com.example.keep".into(),
+                install_generation: uuid::Uuid::new_v4().to_string(),
+                enabled: true,
+                trusted_web_granted: true,
+                granted_permissions: vec!["http:request".into()],
+                installed_at: Some(1),
+                source: Some("dir".into()),
+            });
+        manager.save().unwrap();
+        drop(manager);
+        fs::create_dir_all(root.join("plugins")).unwrap();
+        fs::write(root.join("plugin-transaction.json"), "corrupt").unwrap();
+
+        let recovered = ConfigManager::new(Some(path.clone())).unwrap();
+        let entry = &recovered.get_config().entities.plugin_configs[0];
+        assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
+        assert!(entry.granted_permissions.is_empty());
+        assert!(!root.join("plugin-transaction.json").exists());
+        assert!(fs::read_dir(&root).unwrap().filter_map(|item| item.ok()).any(|item| {
+            item.file_name()
+                .to_string_lossy()
+                .starts_with("plugin-transaction.json.corrupt-")
+        }));
+        drop(recovered);
+        // The next start must be clean: no journal retry and no repeated reset.
+        let second = ConfigManager::new(Some(path)).unwrap();
+        let entry = &second.get_config().entities.plugin_configs[0];
+        assert!(!entry.enabled);
+        assert!(entry.granted_permissions.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unsafe_trust_marker_cannot_block_startup() {
+        let root = std::env::temp_dir()
+            .join(format!("plugin_marker_unsafe_{}", uuid::Uuid::new_v4()));
+        let path = root.join("config.json");
+        let mut manager = ConfigManager::new(Some(path.clone())).unwrap();
+        manager
+            .get_config_mut()
+            .entities
+            .plugin_configs
+            .push(PluginConfigEntry {
+                id: "com.example.keep".into(),
+                install_generation: uuid::Uuid::new_v4().to_string(),
+                enabled: true,
+                trusted_web_granted: true,
+                granted_permissions: vec!["ui:view".into()],
+                installed_at: Some(1),
+                source: Some("zip".into()),
+            });
+        manager.save().unwrap();
+        drop(manager);
+        // A directory (or link) is not a valid marker; it must not be followed.
+        fs::create_dir_all(root.join("plugin-trust-recovery.json")).unwrap();
+        let recovered = ConfigManager::new(Some(path)).unwrap();
+        let entry = &recovered.get_config().entities.plugin_configs[0];
+        assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
+        assert!(entry.granted_permissions.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
