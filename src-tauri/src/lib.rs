@@ -792,6 +792,11 @@ pub fn run() {
             }
             tray_builder.build(_app)?;
 
+            // Reclaim abandoned plugin transaction trees only after the window
+            // exists. Recursive deletion is unbounded in size and must never
+            // delay window/tray creation (it used to make startup look dead).
+            commands::schedule_plugin_sweep(app_handle.clone());
+
             log::info!("HyperCom setup complete");
             Ok(())
         })

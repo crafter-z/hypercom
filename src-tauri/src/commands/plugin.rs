@@ -44,6 +44,52 @@ pub(crate) async fn acquire_plugin_io(
     acquire_plugin_gate(&state.plugin_io, PLUGIN_IO_WAIT).await
 }
 
+/// Reclaim quarantined transaction trees off the interactive path.
+///
+/// Recursive deletion is unbounded in size (a plugin may own millions of log
+/// segments), so it must never run while startup, the config mutex or a command
+/// is waiting for it. The plugin IO gate serializes the sweep with
+/// install/uninstall; callers never await the deletion.
+pub(crate) fn schedule_plugin_sweep(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Shutdown may unmanage state while a detached sweep is still queued.
+        let Some(state) = app.try_state::<AppState>() else { return; };
+        // Only selection is serialized with install/uninstall; recursive deletion
+        // runs off the gate so settings stay usable while a large tree is removed.
+        let (root, trees) = {
+            // A live transaction owns the workspace; wait briefly so a startup
+            // race with list_plugins cannot starve reclamation for the session.
+            let Ok(_gate) = acquire_plugin_gate(&state.plugin_io, Duration::from_secs(2)).await
+            else { return; };
+            let (root, config) = match state.config_manager.lock() {
+                Ok(manager) => (
+                    manager.plugins_dir().to_path_buf(),
+                    manager.get_config().clone(),
+                ),
+                Err(_) => return,
+            };
+            let trees = match plugin::transaction::sweep_collect(&root, &config) {
+                Ok(trees) => trees,
+                Err(error) => {
+                    log::warn!("Plugin transaction sweep selection failed: {error}");
+                    return;
+                }
+            };
+            (root, trees)
+        };
+        if trees.is_empty() { return; }
+        match tokio::task::spawn_blocking(move || {
+            plugin::transaction::sweep_delete(&root, &trees)
+        }).await {
+            Ok(removed) if removed > 0 => {
+                log::info!("Reclaimed {removed} abandoned plugin transaction tree(s)")
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("Plugin transaction sweep join failed: {error}"),
+        }
+    });
+}
+
 /// 单个插件的完整视图（前端设置页/宿主桥消费）。
 /// manifest = 磁盘权威（每次 list 现扫）；state = config 实体状态。
 /// manifest 损坏时（Err）仍列出该项，前端显示「校验失败」而非整体报错。
@@ -325,7 +371,7 @@ pub async fn install_plugin(
     state: State<'_, AppState>,
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
-    let _plugin_io = acquire_plugin_io(&state).await?;
+    let plugin_io = acquire_plugin_io(&state).await?;
     let root = state
         .config_manager
         .lock()
@@ -348,13 +394,16 @@ pub async fn install_plugin(
     plugin::view_runtime::retire_plugin(window.app_handle(), &prepared.manifest.id).await?;
     // No await after persisting the trust reset: cancellation must not drop the
     // IO gate while a detached blocking task is still replacing executable code.
-    tokio::task::block_in_place(|| {
+    let result = tokio::task::block_in_place(|| {
         let mut manager = state
             .config_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         install_prepared(&mut manager, prepared, expected_generation.as_deref())
-    })
+    });
+    drop(plugin_io);
+    schedule_plugin_sweep(window.app_handle().clone());
+    result
 }
 
 struct PreparedPluginInstall {
@@ -720,7 +769,7 @@ pub async fn uninstall_plugin(
 ) -> Result<PluginStateSnapshot, CommandError> {
     require_main_window(&window)?;
     plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    let _plugin_io = acquire_plugin_io(&state).await?;
+    let plugin_io = acquire_plugin_io(&state).await?;
     {
         let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
@@ -740,19 +789,36 @@ pub async fn uninstall_plugin(
     };
     if committed {
         state.plugin_http.cancel_plugin(&id);
-        plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
-            .map_err(|e| CommandError::Other(format!("插件已卸载，但关闭网页视图失败: {e}")))?;
+        // The plugin is already gone from config. A stuck native teardown may
+        // still freeze the UI thread, so the view runtime bounds it internally:
+        // report the failure, keep the command responsive, and retry later.
+        if let Err(error) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
+            log::warn!("Plugin {id} was uninstalled, but closing its views failed: {error}");
+        }
         let directory = {
             let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
             plugin::web_data_dir(manager.plugins_dir(), &id, &expected_generation)
                 .map_err(CommandError::Other)?
         };
-        plugin::view_runtime::clear_web_data(window.app_handle(), &directory).await
-            .map_err(|e| CommandError::Other(format!("插件已卸载，但网页数据清理失败: {e}")))?;
+        if let Err(error) = plugin::view_runtime::clear_web_data(window.app_handle(), &directory).await {
+            log::warn!("Plugin {id} was uninstalled, but clearing its web data failed: {error}");
+        }
+        log::info!("Plugin uninstalled: {id}");
     }
-    result.map_err(|error| if committed {
-        CommandError::Other(format!("插件已卸载，但提交后清理失败: {error}"))
-    } else { error })
+    // Release the gate before the detached sweep tries to take it.
+    drop(plugin_io);
+    schedule_plugin_sweep(window.app_handle().clone());
+    match result {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if committed => {
+            // The config commit already removed the plugin: a post-commit
+            // cleanup failure must not be reported as a failed uninstall.
+            log::warn!("Plugin {id} was uninstalled with a cleanup error: {error}");
+            let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+            Ok(snapshot(&manager))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn uninstall_with_manager(

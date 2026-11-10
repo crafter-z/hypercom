@@ -26,20 +26,136 @@ fn uuid(value: &str) -> io::Result<()> {
 }
 fn regular_dir(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => Ok(true),
+        Ok(meta) if meta.is_dir() && !super::is_link_or_reparse(&meta) => Ok(true),
         Ok(_) => Err(io::Error::other("Transaction path is not an ordinary directory")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
 }
 
+/// Move abandoned transaction trees aside in one rename. Recursive deletion is
+/// deliberately not done on the startup or config-lock path: a plugin tree can
+/// hold an unbounded number of log segments, and deleting it while the window is
+/// still being created made HyperCom look dead (process alive, no window/tray).
+fn quarantine(root: &Path, path: &Path) -> io::Result<PathBuf> {
+    let target = root.join(format!(".trash-{}", uuid::Uuid::new_v4()));
+    rename(root, path, &target)?;
+    Ok(target)
+}
+
+fn transaction_tree_token(name: &str) -> Option<(&'static str, &str)> {
+    [".trash-", ".backup-", ".staging-"]
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix).map(|token| (*prefix, token)))
+        .filter(|(_, token)| uuid(token).is_ok())
+}
+
+/// Read the plugin id from an abandoned backup tree without trusting its paths.
+fn backup_plugin_id(path: &Path) -> Option<String> {
+    let manifest = path.join("manifest.json");
+    let metadata = fs::symlink_metadata(&manifest).ok()?;
+    if !metadata.is_file() || super::is_link_or_reparse(&metadata) || metadata.len() > 1024 * 1024 {
+        return None;
+    }
+    let bytes = fs::read(&manifest).ok()?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let id = manifest.get("id")?.as_str()?.to_owned();
+    super::validate_plugin_id(&id).ok()?;
+    Some(id)
+}
+
+/// A staging tree can hold the only copy of a plugin's private `data/` between
+/// the `private-data` and `publish` renames. Such a tree must never be swept:
+/// the private data would be unrecoverable.
+fn staging_holds_private_data(path: &Path) -> bool {
+    let data = path.join("data");
+    match regular_dir(&data) {
+        Ok(true) => match fs::read_dir(&data) {
+            Ok(mut entries) => entries.next().is_some(),
+            Err(_) => true,
+        },
+        Ok(false) => false,
+        Err(_) => true,
+    }
+}
+
+/// Select abandoned transaction trees that are safe to delete.
+///
+/// Callers must hold the plugin IO gate: a present journal means a live
+/// transaction, so nothing is touched then. The returned paths are a snapshot;
+/// deletion happens outside the gate (`sweep_delete`) because recursive removal
+/// is unbounded and must not block install/list/uninstall.
+///
+/// `.backup-*` is only reclaimed when its code is provably not needed: the
+/// backup carries no committed plugin, or the live directory still exists. A
+/// backup whose plugin is still configured but whose live tree is missing may be
+/// the only surviving copy of the code, so it is preserved.
+pub(crate) fn sweep_collect(root: &Path, config: &AppConfig) -> io::Result<Vec<PathBuf>> {
+    if fs::symlink_metadata(journal(root)?).is_ok() || !regular_dir(root)? {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => { log::warn!("Skipping unreadable plugin tree during sweep: {error}"); continue; }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some((kind, _)) = transaction_tree_token(name) else { continue };
+        let path = entry.path();
+        match regular_dir(&path) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => { log::warn!("Refusing to sweep unsafe plugin tree {}: {error}", path.display()); continue; }
+        }
+        if kind == ".staging-" && staging_holds_private_data(&path) {
+            // Crash between `private-data` and `publish`: the only copy of the
+            // plugin's private data lives here. Keep it for manual recovery.
+            log::warn!(
+                "Keeping plugin staging tree {} because it may hold the only copy of private data",
+                path.display()
+            );
+            continue;
+        }
+        if kind == ".backup-" {
+            let Some(id) = backup_plugin_id(&path) else {
+                // Unidentifiable tree: keep it rather than delete data we cannot name.
+                continue;
+            };
+            let live = root.join(&id).is_dir();
+            let configured = config.entities.plugin_configs.iter().any(|entry| entry.id == id);
+            if configured && !live { continue; }
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Delete a snapshot from `sweep_collect` off the plugin IO gate. Individual
+/// failures (read-only files, antivirus locks) are logged and skipped so one
+/// stuck tree can never abort startup or a later sweep.
+pub(crate) fn sweep_delete(root: &Path, paths: &[PathBuf]) -> u64 {
+    let mut removed = 0;
+    for path in paths {
+        // Re-check after leaving the gate: a swapped link must never be followed.
+        if !matches!(regular_dir(path), Ok(true)) { continue; }
+        match fs::remove_dir_all(path) {
+            Ok(()) => removed += 1,
+            Err(error) => log::warn!("Failed to sweep plugin tree {}: {error}", path.display()),
+        }
+    }
+    if removed > 0 { let _ = sync_dir(root); }
+    removed
+}
+
 /// Remove abandoned prepared staging trees when a process crashed before the
 /// transaction journal was created. Journal-backed trees are left for `recover`.
+/// Trees are moved to `.trash-*` (cheap rename) and reclaimed by `sweep`.
 pub(crate) fn cleanup_orphan_staging(root: &Path) -> io::Result<()> {
     if fs::symlink_metadata(journal(root)?).is_ok() || !regular_dir(root)? {
         return Ok(());
     }
-    let mut removed = false;
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -50,10 +166,11 @@ pub(crate) fn cleanup_orphan_staging(root: &Path) -> io::Result<()> {
         if !regular_dir(&path)? {
             return Err(io::Error::other("Orphan staging is not an ordinary directory"));
         }
-        fs::remove_dir_all(path)?;
-        removed = true;
+        // Reclamation is best-effort: a locked orphan must not fail list/install.
+        if let Err(error) = quarantine(root, &path) {
+            log::warn!("Deferring orphan staging reclamation {}: {error}", path.display());
+        }
     }
-    if removed { sync_dir(root)?; }
     Ok(())
 }
 
@@ -204,7 +321,14 @@ pub(crate) fn recover(root: &Path, config: &AppConfig) -> io::Result<()> {
             && !config.entities.plugin_configs.iter().any(|entry| entry.id == tx.id);
         if committed {
             if has_dest { return Err(io::Error::other("Ambiguous committed uninstall")); }
-            if has_backup { fs::remove_dir_all(&backup)?; sync_dir(root)?; }
+            // The commit is durable: failing to rename the leftover tree only
+            // delays reclamation. Never keep the journal alive (and every later
+            // start retrying) because of a locked/partially deleted backup.
+            if has_backup {
+                if let Err(error) = quarantine(root, &backup) {
+                    log::warn!("Deferring plugin backup reclamation {}: {error}", backup.display());
+                }
+            }
         } else if has_backup {
             if has_dest { return Err(io::Error::other("Ambiguous interrupted uninstall")); }
             rename(root, &backup, &dest)?;
@@ -222,10 +346,15 @@ pub(crate) fn recover(root: &Path, config: &AppConfig) -> io::Result<()> {
         } else if has_dest && !has_stage && has_backup {
             // The final rename completed. Private data lives in the new tree.
             if regular_dir(&backup.join("data"))? { return Err(io::Error::other("Unmigrated private data")); }
-            fs::remove_dir_all(&backup)?;
-            sync_dir(root)?;
+            if let Err(error) = quarantine(root, &backup) {
+                log::warn!("Deferring plugin backup reclamation {}: {error}", backup.display());
+            }
         }
-        if has_stage { fs::remove_dir_all(&stage)?; sync_dir(root)?; }
+        if has_stage {
+            if let Err(error) = quarantine(root, &stage) {
+                log::warn!("Deferring plugin staging reclamation {}: {error}", stage.display());
+            }
+        }
     }
     tx.finish(root)
 }
@@ -233,6 +362,13 @@ pub(crate) fn recover(root: &Path, config: &AppConfig) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: the production path splits collection (under the IO gate)
+    /// from deletion (off the gate); tests exercise both halves in sequence.
+    fn sweep(root: &Path, config: &AppConfig) -> io::Result<u64> {
+        let paths = sweep_collect(root, config)?;
+        Ok(sweep_delete(root, &paths))
+    }
 
     #[test]
     fn journal_rejects_package_controlled_paths_without_cleaning_siblings() {
@@ -267,6 +403,127 @@ mod tests {
         cleanup_orphan_staging(&plugins).unwrap();
         assert!(!orphan.exists());
         assert!(plugins.join(".staging-not-a-uuid").exists());
+        // Cleanup only renames: the recursive delete is deferred to the sweep.
+        let quarantined = fs::read_dir(&plugins).unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".trash-"));
+        assert!(quarantined);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_uninstall_quarantines_backup_instead_of_deleting_at_startup() {
+        let root = std::env::temp_dir().join(format!("plugin_commit_quarantine_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let tx = Transaction::uninstall(&plugins, "com.example.test", 1).unwrap();
+        // The config commit is durable, then the process dies before cleanup.
+        fs::create_dir_all(tx.backup(&plugins).join("data")).unwrap();
+        fs::write(tx.backup(&plugins).join("manifest.json"), r#"{"id":"com.example.test"}"#).unwrap();
+        fs::write(tx.backup(&plugins).join("data/keep"), "private").unwrap();
+        let mut config = AppConfig::default();
+        config.revision = 2;
+        recover(&plugins, &config).unwrap();
+        assert!(!tx.backup(&plugins).exists());
+        assert!(!journal(&plugins).unwrap().exists());
+        let trash: Vec<_> = fs::read_dir(&plugins).unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".trash-"))
+            .collect();
+        assert_eq!(trash.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_reclaims_quarantine_but_keeps_the_only_surviving_backup() {
+        use crate::config::PluginConfigEntry;
+        let root = std::env::temp_dir().join(format!("plugin_sweep_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let trash = plugins.join(format!(".trash-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(trash.join("nested")).unwrap();
+        fs::write(trash.join("nested/segment.bin"), "data").unwrap();
+        let recoverable = plugins.join(format!(".backup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&recoverable).unwrap();
+        fs::write(recoverable.join("manifest.json"), r#"{"id":"com.example.keep"}"#).unwrap();
+        let mut config = AppConfig::default();
+        config.entities.plugin_configs.push(PluginConfigEntry {
+            id: "com.example.keep".into(),
+            install_generation: uuid::Uuid::new_v4().to_string(),
+            enabled: false,
+            trusted_web_granted: false,
+            granted_permissions: Vec::new(),
+            installed_at: Some(1),
+            source: Some("dir".into()),
+        });
+        assert_eq!(sweep(&plugins, &config).unwrap(), 1);
+        assert!(!trash.exists());
+        assert!(recoverable.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_keeps_staging_private_data_and_unidentifiable_backups() {
+        let root = std::env::temp_dir().join(format!("plugin_sweep_keep_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        // The only copy of private data may live in a staging tree after the
+        // `private-data` phase and before `publish`.
+        let staging = plugins.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(staging.join("data")).unwrap();
+        fs::write(staging.join("data/keep"), "private").unwrap();
+        // A backup without a readable manifest cannot be attributed safely.
+        let unknown = plugins.join(format!(".backup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&unknown).unwrap();
+        assert_eq!(sweep(&plugins, &AppConfig::default()).unwrap(), 0);
+        assert_eq!(fs::read_to_string(staging.join("data/keep")).unwrap(), "private");
+        assert!(unknown.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_reclaims_backup_when_the_live_plugin_still_exists() {
+        use crate::config::PluginConfigEntry;
+        let root = std::env::temp_dir().join(format!("plugin_sweep_live_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(plugins.join("com.example.live")).unwrap();
+        let backup = plugins.join(format!(".backup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("manifest.json"), r#"{"id":"com.example.live"}"#).unwrap();
+        let mut config = AppConfig::default();
+        config.entities.plugin_configs.push(PluginConfigEntry {
+            id: "com.example.live".into(),
+            install_generation: uuid::Uuid::new_v4().to_string(),
+            enabled: false,
+            trusted_web_granted: false,
+            granted_permissions: Vec::new(),
+            installed_at: Some(1),
+            source: Some("dir".into()),
+        });
+        assert_eq!(sweep(&plugins, &config).unwrap(), 1);
+        assert!(!backup.exists());
+        assert!(plugins.join("com.example.live").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sweep_never_touches_trees_while_a_journal_is_present() {
+        let root = std::env::temp_dir().join(format!("plugin_sweep_journal_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let trash = plugins.join(format!(".trash-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&trash).unwrap();
+        let staging = plugins.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(staging.join("data")).unwrap();
+        fs::write(staging.join("data/keep"), "private").unwrap();
+        let backup = plugins.join(format!(".backup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("manifest.json"), r#"{"id":"com.example.keep"}"#).unwrap();
+        let _tx = Transaction::uninstall(&plugins, "com.example.test", 1).unwrap();
+        assert_eq!(sweep(&plugins, &AppConfig::default()).unwrap(), 0);
+        assert!(trash.exists());
+        assert!(staging.exists());
+        assert!(backup.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
