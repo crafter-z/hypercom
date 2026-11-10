@@ -353,7 +353,11 @@ test.describe('插件系统（issue #17）', () => {
     await expect(page.locator('.tab-item.active')).toContainText('Sensor table');
     await expect(page.locator('.plugin-view-tab:visible .plugin-view-source-port')).toHaveText('· COM1');
     await expect(page.locator('.plugin-view-placeholder strong')).toHaveText('插件视图不可用');
-    await expect(page.locator('.plugin-view-placeholder')).toContainText('Native plugin view unavailable in browser e2e');
+    // A plain create failure is classified as a transient runtime error: the
+    // surface explains it in the active language and keeps a retry, instead of
+    // the previous generic English message.
+    await expect(page.locator('.plugin-view-placeholder')).toContainText('插件页面运行出错');
+    await expect(page.locator('.plugin-view-placeholder .plugin-view-failure-actions')).toContainText('重试');
     await expect(page.locator('.tab-item').filter({ hasText: 'COM1' })).toBeVisible();
     // Closing the unavailable tab exercises the explicit idempotent destroy boundary.
     await page.locator('.tab-item').filter({ hasText: 'Sensor table' }).locator('.tab-close').click();
