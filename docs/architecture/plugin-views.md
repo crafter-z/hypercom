@@ -126,11 +126,17 @@ environment 按值去重并在页内 SDK 合并为最新一条，不逐条排队
 
 serial替换偏好 displayView保存在portMeta，走已有CAS安全元数据保存链。plugin独立标签布局描述在session.json，只恢复restoreOnStartup声明；不保存params/模型/句柄/票据。旧无kind串口快照一次迁移为UUID并重写树引用，之后只运行显式类型路径。
 
-恢复等待权威manifest/代次/启用/授权/placement/mode；缺失/禁用/旧代次只恢复宿主占位，不执行代码或恢复授权。旧安装偏好不能自动指向新代码。
+恢复等待权威manifest/代次/启用/授权/placement/mode；缺失/禁用只恢复宿主占位，不执行代码或恢复授权。
+
+**失败分类与恢复入口**：`PluginViewState.code`（`PluginViewFailureCode`）把「为什么打不开」从内部英文消息拆成稳定原因，界面据此本地化显示并决定是否给重试。不可重试的结构性原因——`plugin-missing` / `plugin-disabled` / `install-changed` / `view-missing` / `grant-missing` / `trusted-web` / `port-binding` / `port-unavailable` / `port-mode`——宿主占位只给「插件设置」入口（定位到设置页插件页，可在那里重新授权、更新或禁用插件）与原因说明；`worker-unavailable` / `worker-stopped` / `init-timeout` / `capacity` / `runtime` 保留重试（`RETRIABLE_PLUGIN_VIEW_FAILURES` / `isRetriablePluginViewFailure` 是唯一判定；容量可由关闭其它视图解除，所以算可重试）。串口内容区即使回退原始终端也保留一行原因与同一入口，不再静默。安装代次失配被拒绝恢复时另按描述符身份去重记一条 `remembered page not restored: <原因>` 诊断日志。
+
+**失败闩锁只属于瞬时故障**：`failures` 闩锁的唯一职责是阻止「挂载→失败→再挂载」的循环，因此只有真正消耗过原生实例的 `worker-stopped` / `init-timeout` / `runtime` 才写闩锁（`LATCHED_PLUGIN_VIEW_FAILURES`）。结构性拒绝与容量都由下一次 reconcile 重新评估：用户重新启用插件、重新授权、确认可信网页、恢复端口或关闭别的视图后，页面必须**自动**回来，而不是只能靠「重载代码」或重启；`retryPluginView` 因此不再是结构性失败的唯一出路。
+
+**代次重定向**：描述符记住的是插件 id + 视图 id，安装身份（installGeneration）只是「当初审阅的是哪份代码」的标记。同一插件被重装/替换后，恢复路径把它重新指向**当前安装**——串口 displayView 迁移写回 portMeta、插件标签改 `useAppStore.migratePluginTabGeneration`，都以插件 id + viewId + 端口/实例键为准；两份内存副本（`ports[].displayView` 为在线权威、`config.portMeta` 为重启/拔插后的投影）同步改写，避免从另一份读回旧身份。重定向本身不授予任何权限：要求当前安装 enabled、manifest 仍声明同一 viewId、ui:view 与视图输入权限（`rx:bytes` / `terminal:read`）齐备、可信网页另有 `trustedWebGranted`；任一项不满足则保留原有拒绝（宿主占位/回退原始终端），不执行代码、不恢复授权，并按描述符身份**去重**记录一条 `remembered page not restored: <原因>` 警告供诊断日志取证。placement/portBinding/mode 仍按当前 manifest 在 `eligible` 中重新校验。因此「旧安装偏好不能自动指向新代码」指**未审阅、未授权、已变更**的代码不会被继承，而不是让已授权安装的记住页面永久失效。
 
 ## 验证边界
 
-单测覆盖类型化标签/旧快照迁移、独立输入/trigger租约、JSON边界、动作去重/票据/关闭、串行输入/退休及Rust资源/权限/几何验证。视图运行时另有文档代次用例（`document`/`ready` 替换、旧文档 ACK/ready 被忽略、纯网页无 Worker、Worker 重启后存活）与二进制用例（300 KiB 双向逐字节往返、8 KiB 分块计数、导航替换时在途发送被拒绝、迟到确认不影响新文档）；宿主侧单测覆盖 `postViewBinary` 的 bridge ACK 结算、Worker 停止与 `cancelViewBinary` 只拒绝被替换文档的传输；Rust 覆盖 8 KiB 分片信封往返与超限拒绝、可信 origin 稳定性、同源 HTML 导航白名单、缺失 profile 清除不创建目录。Playwright浏览器mock只证明前端工作区/Worker/终端，不证明native隔离。
+单测覆盖类型化标签/旧快照迁移、独立输入/trigger租约、JSON边界、动作去重/票据/关闭、串行输入/退休及Rust资源/权限/几何验证。`remembered plugin pages survive a plugin reinstall` 覆盖重装后的代次重定向：串口 portMeta 描述符（在线与离线两条写入路径）与插件标签都迁移到当前安装并真正挂载，disabled / 撤 `ui:view` / 撤 `rx:bytes` / 撤 `terminal:read` / manifest 删除该视图 / 可信网页未授权 / 配置残留但代码已卸载七类一律不迁移不创建，trusted-web 与 `input:"lines"` 的迁移成功路径各有单独用例，永久拒绝只告警一次，且迁移后收敛不再重复挂载或写 store；重新启用/重新授权后页面自动恢复、容量腾出后自动挂载各有回归用例（闩锁只属于瞬时故障）。`PluginViewSurface.test.tsx` 锁定失败呈现：结构性问题只给插件设置入口且不带重试，瞬时问题保留重试，按钮真的切到设置页插件页，串口回退原始终端时原因与入口仍在，14 个分类逐一断言。`PluginSettings.progress.test.tsx` 锁定卸载进度面板在命令发出前已提交渲染（两帧 rAF 后才 invoke），并持续显示已用时。视图运行时另有文档代次用例（`document`/`ready` 替换、旧文档 ACK/ready 被忽略、纯网页无 Worker、Worker 重启后存活）与二进制用例（300 KiB 双向逐字节往返、8 KiB 分块计数、导航替换时在途发送被拒绝、迟到确认不影响新文档）；宿主侧单测覆盖 `postViewBinary` 的 bridge ACK 结算、Worker 停止与 `cancelViewBinary` 只拒绝被替换文档的传输；Rust 覆盖 8 KiB 分片信封往返与超限拒绝、可信 origin 稳定性、同源 HTML 导航白名单、缺失 profile 清除不创建目录。Playwright浏览器mock只证明前端工作区/Worker/终端，不证明native隔离。
 
 Windows 原生回归 `retiring_plugin_children_preserves_host_resize` 需安装 WebView2 Runtime，以 `cargo test --lib --manifest-path src-tauri/Cargo.toml retiring_plugin_children_preserves_host_resize -- --ignored` 显式运行；连续销毁插件 child 后，放大/缩小宿主仍须把 WebView2 bounds 同步为最新 client rect。默认单测跳过该原生环境依赖用例。
 

@@ -18,7 +18,7 @@ Multi-page settings modal. Split into `pages/` (10 settings pages), `editors/` (
 | `pages/ProtocolSettings.tsx` | protocol templates: frame head/length/checksum/tail |
 | `pages/ToolSettings.tsx` | per-port external tool command template (`{port}` placeholder) |
 | `pages/TriggerSettings.tsx` | staged reminder/auto-reply rules; explicit save only, no debounce or unmount writes |
-| `pages/PluginSettings.tsx` | directory/ZIP install, upgrade, uninstall, pregrant while disabled, enable after queued grants persist; actions bind reviewed installGeneration, snapshots order by revision; proxy uses normal footer save |
+| `pages/PluginSettings.tsx` | directory/ZIP install, upgrade, uninstall, pregrant while disabled, enable after queued grants persist; actions bind reviewed installGeneration, snapshots order by revision; proxy uses normal footer save. Uninstall can occupy the native main thread for tens of seconds (webview teardown + browser-data clear): a blocking `UninstallProgress` panel is committed and painted (two rAFs) before the invoke, so a slow uninstall never reads as a frozen app |
 | `editors/HighlightRuleEditor.tsx` | row form for highlight rule |
 | `editors/SendCmdEditor.tsx` | row form for send command |
 | `editors/ProtocolTemplateEditor.tsx` | field-by-field template form |
