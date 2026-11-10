@@ -28,6 +28,11 @@
 .plugin-view-body { flex: 1; min-height: 0; min-width: 0; position: relative; overflow: hidden; }
 .plugin-view-placeholder { display: flex; height: 100%; align-items: center; justify-content: center; flex-direction: column; gap: 12px; padding: 20px; color: var(--text-secondary); }
 .plugin-view-placeholder p { max-width: 600px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plugin-view-placeholder strong { color: var(--text-primary); }
+/* A rejected page explains itself: what went wrong, and what the user can do
+ * instead of a retry that could never succeed. */
+.plugin-view-failure-hint { color: var(--text-secondary); font-size: var(--text-sm, 12px); }
+.plugin-view-failure-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 
 /* Shared non-native picker for plugin entry points. Native select popups are
  * painted by WebView/OS and cannot follow the app's layered theme. */

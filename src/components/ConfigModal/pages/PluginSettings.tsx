@@ -20,6 +20,29 @@ import {
 } from 'lucide-react';
 import { usePluginList, isPluginReplaceConfirmationError, replacementTargetId } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
+
+/** Uninstalling retires native webviews and clears browser data on the UI thread,
+ *  which can take tens of seconds. The panel is painted before the invoke starts
+ *  and keeps counting, so a slow uninstall never looks like a frozen app. */
+const UninstallProgress: React.FC<{ name: string; startedAt: number }> = ({ name, startedAt }) => {
+  const { t } = useTranslation();
+  const [elapsed, setElapsed] = React.useState(0);
+  React.useEffect(() => {
+    const tick = () => setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    tick();
+    const timer = setInterval(tick, 500);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  const label = t('plugins.uninstalling', { name });
+  return <div className="plugin-uninstall-overlay" role="alertdialog" aria-modal="true" aria-busy="true" aria-label={label}>
+    <div className="plugin-uninstall-panel">
+      <div className="plugin-uninstall-title">{label}</div>
+      <div className="plugin-uninstall-bar" role="progressbar" aria-valuetext={label}><span className="plugin-uninstall-bar-fill" /></div>
+      <p className="plugin-uninstall-hint">{t('plugins.uninstallProgressHint')}</p>
+      <p className="plugin-uninstall-elapsed">{t('plugins.uninstallElapsed', { seconds: elapsed })}</p>
+    </div>
+  </div>;
+};
 import { useAppStore } from '../../../stores/useAppStore';
 import type { PluginView } from '../../../types';
 import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
@@ -95,6 +118,8 @@ const PluginSettings: React.FC = () => {
   const [pendingTrust, setPendingTrust] = React.useState<{ plugin: PluginView; install: boolean } | null>(null);
   const [pendingClear, setPendingClear] = React.useState<PluginView | null>(null);
   const [working, setWorking] = React.useState(false);
+  // One uninstall at a time; the panel outlives the click that started it.
+  const [uninstalling, setUninstalling] = React.useState<{ name: string; startedAt: number } | null>(null);
   // Hook queues serialize mutations, but a fast double-click can enqueue the
   // same plugin before React commits `loading`. Keep a synchronous per-plugin
   // admission set as a UI busy guard; the hook remains the authority for CAS.
@@ -274,8 +299,22 @@ const PluginSettings: React.FC = () => {
                       onClick={() => {
                         if (window.confirm(t('plugins.uninstallConfirm', { name: plugin.manifest?.name ?? plugin.id }))) {
                           if (!beginPluginBusy(plugin.id)) return;
-                           void uninstallPlugin(plugin.id)
-                             .finally(() => endPluginBusy(plugin.id));
+                          const name = plugin.manifest?.name ?? plugin.id;
+                          setUninstalling({ name, startedAt: Date.now() });
+                          // Commit + paint the panel before the native teardown can
+                          // occupy the main thread, so a slow uninstall never looks
+                          // like a frozen application. A hidden document pauses rAF,
+                          // so a timer races it: the command must still start.
+                          let started = false;
+                          const begin = () => {
+                            if (started) return;
+                            started = true;
+                            void uninstallPlugin(plugin.id)
+                              .catch(() => {})
+                              .finally(() => { endPluginBusy(plugin.id); setUninstalling(null); });
+                          };
+                          requestAnimationFrame(() => requestAnimationFrame(begin));
+                          setTimeout(begin, 250);
                         }
                       }}
                     >
@@ -391,6 +430,7 @@ const PluginSettings: React.FC = () => {
         </div>
       </div>
     )}
+    {uninstalling && <UninstallProgress name={uninstalling.name} startedAt={uninstalling.startedAt} />}
     </>
   );
 };

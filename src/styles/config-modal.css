@@ -612,3 +612,57 @@
 .editor-leave-dialog ul { padding-left: 20px; }
 .editor-leave-dialog .modal-content-footer { padding: 12px 0 0; flex-wrap: wrap; }
 .editor-leave-dialog [role="alert"] { color: var(--text-error); }
+
+/* Uninstall can occupy the native main thread for tens of seconds (webview
+ * teardown + browser-data clear). This panel is painted before the command
+ * starts and keeps an indeterminate bar + elapsed counter moving, so a slow
+ * uninstall reads as work in progress instead of a frozen application. */
+.plugin-uninstall-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  cursor: progress;
+}
+.plugin-uninstall-panel {
+  width: min(420px, 90vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+.plugin-uninstall-title { color: var(--text-primary); font-weight: var(--weight-medium); }
+.plugin-uninstall-hint { margin: 0; color: var(--text-secondary); font-size: var(--text-sm, 12px); line-height: 1.5; }
+.plugin-uninstall-elapsed { margin: 0; color: var(--text-secondary); font-size: var(--text-sm, 12px); font-variant-numeric: tabular-nums; }
+.plugin-uninstall-bar {
+  position: relative;
+  overflow: hidden;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-tertiary, rgba(127, 127, 127, 0.25));
+}
+.plugin-uninstall-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: 3px;
+  background: var(--accent-color, #4a9eff);
+  /* transform (not `left`) keeps the bar on the compositor thread, so it keeps
+   * moving even while the native main thread is blocked by the teardown. */
+  will-change: transform;
+  animation: plugin-uninstall-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes plugin-uninstall-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .plugin-uninstall-bar-fill { animation-duration: 3s; }
+}

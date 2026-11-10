@@ -2,18 +2,29 @@ import React, { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TabItem } from '../../types';
 import { useAppStore, getTabPortId } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import {
   getAvailablePluginViews, getPluginViewState, getTabViewPreference,
-  placePluginView, retryPluginView,
+  isRetriablePluginViewFailure, placePluginView, retryPluginView,
   selectSerialPluginView, subscribePluginViewState,
 } from '../../utils/pluginViewRuntime';
 import { subscribePluginViews, getPluginViews } from '../../utils/pluginConfigSnapshot';
 import { removeTabContentPlacement, setTabContentPlacement } from '../../utils/tabContentPlacement';
 import { notifyError } from '../../stores/useToastStore';
+import { Settings } from 'lucide-react';
 import PluginViewPicker, { type PluginViewChoice } from '../shared/PluginViewPicker';
 import { TimelineButton } from './TimelineControls';
 
 interface Props { tab: TabItem; hidden: boolean; }
+
+/** Take the user to the page that can actually fix a rejected view: enable,
+ *  re-grant, update/disable the plugin, or manage its trusted-web consent. */
+function openPluginSettings(): void {
+  const system = useSystemStore.getState();
+  system.setConfigActiveTab('plugins');
+  system.toggleConfigModal(true);
+}
+
 const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   const { t } = useTranslation();
   const state = useSyncExternalStore(subscribePluginViewState, () => getPluginViewState(tab.id));
@@ -29,6 +40,12 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
     : null;
   const pluginEffective = !!preference && state.status !== 'unavailable';
   const stockVisible = tab.kind === 'replay' || (tab.kind === 'serial' && !pluginEffective);
+  // A rejected page must never look like a silent fallback: keep the toolbar (and
+  // therefore the reason + actions) visible even when the raw terminal took over.
+  const rejected = !!preference && state.status === 'unavailable';
+  const showToolbar = !stockVisible || rejected;
+  const retriable = isRetriablePluginViewFailure(state.code);
+  const reasonKey = state.code ? `pluginViews.failure.${state.code}` : null;
   const replacements = tab.kind === 'serial' ? getAvailablePluginViews(portId, 'serial-content') : [];
   const selected = preference ? `${preference.pluginId}/${preference.viewId}` : '';
   useLayoutEffect(() => {
@@ -55,7 +72,7 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
       removeTabContentPlacement(tab.id);
       placePluginView(tab.id, { x: 0, y: 0, width: 0, height: 0, zoomPercent }, false);
     };
-  }, [tab.id, hidden, stockVisible, pluginEffective, state.instanceId, zoomPercent]);
+  }, [tab.id, hidden, stockVisible, pluginEffective, state.instanceId, zoomPercent, showToolbar]);
 
   const choose = (choice: PluginViewChoice | null) => {
     try { selectSerialPluginView(tab.id, choice?.preference ?? null); }
@@ -64,8 +81,21 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   const unavailablePreference = preference && !replacements.some(item => `${item.preference.pluginId}/${item.preference.viewId}` === selected)
     ? { key: selected, label: `${preference.pluginId}: ${preference.viewId}` }
     : undefined;
+  // A structural rejection (changed install, missing grant/consent/view, wrong
+  // port binding) cannot be fixed by retrying; offer the page that can fix it.
+  const failureActions = rejected ? <>
+    <button className="btn btn-sm" onClick={openPluginSettings} title={t('pluginViews.failureHint')}>
+      <Settings size={12} /> {t('pluginViews.openSettings')}
+    </button>
+    {retriable && <button className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
+  </> : null;
+  const failureText = rejected
+    ? <span className="plugin-view-error-inline" title={state.error ?? ''}>
+      {t('pluginViews.failureLead', { reason: reasonKey ? t(reasonKey) : (state.error ?? '') })}
+    </span>
+    : null;
   return <div className="plugin-view-tab" style={{ display: hidden ? 'none' : 'flex' }}>
-    {!stockVisible && <div className="plugin-view-toolbar">
+    {showToolbar && <div className="plugin-view-toolbar">
       {tab.kind === 'serial' ? (
         <PluginViewPicker
           choices={replacements}
@@ -85,15 +115,20 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
       )}
       <TimelineButton tabId={tab.id} />
       <span className="plugin-view-toolbar-spacer" />
-      {preference && state.status === 'unavailable' && <>
-        <span className="plugin-view-error-inline" title={state.error ?? ''}>{t('pluginViews.unavailable')}</span>
-        <button className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>
-      </>}
+      {failureText}
+      {failureActions}
     </div>}
     <div ref={bodyRef} className="plugin-view-body">
-      {tab.kind === 'plugin' && state.status === 'unavailable' && <div className="plugin-view-placeholder">
-        <strong>{t('pluginViews.unavailable')}</strong><p>{state.error}</p>
-        <button className="btn" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>
+      {tab.kind === 'plugin' && rejected && <div className="plugin-view-placeholder">
+        <strong>{t('pluginViews.unavailable')}</strong>
+        <p>{reasonKey ? t(reasonKey) : state.error}</p>
+        <p className="plugin-view-failure-hint">{t('pluginViews.failureHint')}</p>
+        <div className="plugin-view-failure-actions">
+          <button className="btn" onClick={openPluginSettings}>
+            <Settings size={14} /> {t('pluginViews.openSettings')}
+          </button>
+          {retriable && <button className="btn" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
+        </div>
       </div>}
       {pluginEffective && state.status === 'loading' && <div className="plugin-view-placeholder">{t('pluginViews.loading')}</div>}
     </div>

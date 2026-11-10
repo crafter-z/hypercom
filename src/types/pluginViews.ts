@@ -140,8 +140,36 @@ export interface PluginTabOpenOptions {
   actionToken?: string;
 }
 
+/** Why a plugin view could not be shown. Kept separate from the message so the
+ *  UI can localize a stable reason and know whether retrying can ever help. */
+export type PluginViewFailureCode =
+  | 'plugin-missing'
+  | 'plugin-disabled'
+  | 'install-changed'
+  | 'view-missing'
+  | 'grant-missing'
+  | 'trusted-web'
+  | 'port-binding'
+  | 'port-unavailable'
+  | 'port-mode'
+  | 'worker-unavailable'
+  | 'worker-stopped'
+  | 'init-timeout'
+  | 'capacity'
+  | 'runtime';
+
 export interface PluginViewState {
   status: 'loading' | 'ready' | 'unavailable';
   error: string | null;
   instanceId: string | null;
+  /** Only meaningful while `unavailable`; null while loading or ready. */
+  code: PluginViewFailureCode | null;
 }
+
+/** Retrying only helps when the outcome can change: transient runtime failures, a
+ *  worker that may restart, or capacity the user can free by closing another view.
+ *  A changed install, missing grant/consent, dropped view or wrong port binding is
+ *  authoritative state — the same attempt would fail every time. */
+export const RETRIABLE_PLUGIN_VIEW_FAILURES: ReadonlySet<PluginViewFailureCode> = new Set([
+  'worker-unavailable', 'worker-stopped', 'init-timeout', 'capacity', 'runtime',
+]);

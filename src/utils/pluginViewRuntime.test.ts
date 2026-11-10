@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { executePluginViewApi, issuePluginActionToken, openPluginTabForUser, dismissPluginTab, getAvailablePluginViews, startPluginViewRuntime, selectSerialPluginView, getTabViewPreference, isRawSerialDisplay, getPluginViewState, markPluginViewWorkerReady, placePluginView, suppressPluginViews, TRUSTED_READY_TIMEOUT_MS } from './pluginViewRuntime';
+import { executePluginViewApi, issuePluginActionToken, openPluginTabForUser, dismissPluginTab, getAvailablePluginViews, startPluginViewRuntime, selectSerialPluginView, getTabViewPreference, isRawSerialDisplay, getPluginViewState, isRetriablePluginViewFailure, markPluginViewWorkerReady, placePluginView, suppressPluginViews, TRUSTED_READY_TIMEOUT_MS } from './pluginViewRuntime';
 import { useAppStore, getActivePortId } from '../stores/useAppStore';
 import { resetStoresForTests } from '../stores/resetStores';
 import { resetPluginSnapshotForTest, syncPluginListSnapshot } from './pluginConfigSnapshot';
@@ -10,6 +10,7 @@ import { useSystemStore } from '../stores/useSystemStore';
 import type { PluginNativeMessage } from '../types/pluginViews';
 import { sendToPort } from '../hooks/useSerialSend';
 import { timelineCoordinator } from './timeline/coordinator';
+import * as configPersistence from '../hooks/useConfigPersistence';
 import { VIEW_BINARY_CHUNK_BYTES, decodeViewBinaryBase64, encodeViewBinaryBase64 } from './pluginViewBinary';
 
 vi.mock('../services/pluginView', () => ({ pluginViewService: { create: vi.fn(), destroy: vi.fn(), send: vi.fn(), update: vi.fn(), onMessage: vi.fn(async () => () => {}) } }));
@@ -526,6 +527,314 @@ describe('independent pages, navigation documents and binary transport', () => {
       nativeMessage({ type: 'binary-ack', instanceId, documentId: 'doc-1', transferId: 'late', seq: 0, done: false, ok: true });
       await settle();
       expect(getPluginViewState(tabId).status).toBe('loading');
+    } finally { stop(); }
+  });
+});
+
+describe('remembered plugin pages survive a plugin reinstall', () => {
+  // A reinstall keeps the plugin id but replaces the install identity, so every
+  // remembered page descriptor (serial displayView / plugin workspace tab) would
+  // otherwise be rejected forever: serial content falls back to raw and a tab
+  // stays a dead placeholder whose retry can never succeed.
+  const declared = plugin.manifest!.ui!.views;
+  const page = (installGeneration: string) => ({ pluginId: plugin.id, installGeneration, viewId: 'table' });
+  const installed = (installGeneration: string, views = declared): PluginView => ({
+    ...plugin, installGeneration,
+    manifest: { ...plugin.manifest!, ui: { buttons: [], menuItems: [], views } },
+  });
+  const entry = (installGeneration: string, grantedPermissions: string[] = plugin.grantedPermissions, enabled = true) =>
+    ({ id: plugin.id, installGeneration, enabled, grantedPermissions });
+  const pluginTab = () => useAppStore.getState().addPluginTab({
+    kind: 'plugin', title: 'Table', pluginId: plugin.id, installGeneration: 'install-a',
+    viewId: 'table', boundPortId: 'COM3', instanceKey: 'default', restoreOnStartup: true,
+  });
+
+  async function settle(count = 40) { for (let index = 0; index < count; index++) await Promise.resolve(); }
+
+  function armNative(plugins: PluginView[], pluginConfigs: unknown[]) {
+    vi.clearAllMocks();
+    vi.stubGlobal('window', globalThis);
+    const savePortMeta = vi.spyOn(configPersistence, 'saveCurrentPortMeta').mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.create).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.update).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.send).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.destroy).mockResolvedValue(undefined);
+    vi.mocked(pluginViewService.onMessage).mockResolvedValue(() => {});
+    vi.spyOn(pluginHost, 'get').mockReturnValue({ loaded: true, epoch: 1, post: () => true } as unknown as PluginSession);
+    syncPluginListSnapshot({ revision: 1, plugins, pluginConfigs: pluginConfigs as never });
+    useSystemStore.getState().setUIState({ configReady: true });
+    return { savePortMeta };
+  }
+
+  it('re-points a remembered serial content page at the reinstalled installation', async () => {
+    armNative([installed('install-b')], [entry('install-b')]);
+    useAppStore.getState().updatePort('COM3', { displayView: page('install-a') });
+    const tabId = useAppStore.getState().openTab('COM3');
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const tab = useAppStore.getState().tabs.find(item => item.id === tabId)!;
+      expect(useAppStore.getState().ports.find(port => port.id === 'COM3')?.displayView).toEqual(page('install-b'));
+      expect(getTabViewPreference(tab)).toEqual(page('install-b'));
+      expect(isRawSerialDisplay(tab)).toBe(false);
+      expect(getPluginViewState(tabId).status).toBe('loading');
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+    } finally { stop(); }
+  });
+
+  it('re-points a remembered serial page kept only for an absent port', async () => {
+    const { savePortMeta } = armNative([installed('install-b')], [entry('install-b')]);
+    useAppStore.getState().setConfig({ portMeta: [{ portId: 'COM9', isHidden: false, displayView: page('install-a') }] });
+    // The tab outlives its port: only the persisted descriptor can carry the page.
+    const tabId = 'cccccccc-3333-4333-8333-333333333333';
+    useAppStore.getState().restoreSessionSnapshot({
+      paneTree: { id: 'main', type: 'leaf', size: 1, tabIds: [tabId] },
+      tabs: [{ kind: 'serial', id: tabId, portId: 'COM9', title: 'COM9', splitPaneId: 'main', isPinned: false }],
+    });
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      expect(useAppStore.getState().config.portMeta.find(item => item.portId === 'COM9')?.displayView).toEqual(page('install-b'));
+      expect(getTabViewPreference(useAppStore.getState().tabs.find(item => item.id === tabId)!)).toEqual(page('install-b'));
+      expect(savePortMeta).toHaveBeenCalledWith(expect.objectContaining({
+        entries: expect.arrayContaining([expect.objectContaining({ portId: 'COM9', displayView: page('install-b') })]),
+      }));
+    } finally { stop(); }
+  });
+
+  it('re-points a remembered plugin workspace tab at the reinstalled installation', async () => {
+    armNative([installed('install-b')], [entry('install-b')]);
+    const tabId = pluginTab();
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
+      expect(tab?.kind === 'plugin' ? tab.installGeneration : null).toBe('install-b');
+      expect(getPluginViewState(tabId).status).toBe('loading');
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+    } finally { stop(); }
+  });
+
+  async function expectRefused(plugins: PluginView[], pluginConfigs: unknown[]): Promise<void> {
+    armNative(plugins, pluginConfigs);
+    const tabId = pluginTab();
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
+      expect(tab?.kind === 'plugin' ? tab.installGeneration : null).toBe('install-a');
+      expect(getPluginViewState(tabId).status).toBe('unavailable');
+      expect(vi.mocked(pluginViewService.create)).not.toHaveBeenCalled();
+    } finally { stop(); }
+  }
+
+  it('refuses to re-point at a disabled installation', async () => {
+    await expectRefused([installed('install-b')], [entry('install-b', plugin.grantedPermissions, false)]);
+  });
+
+  it('refuses to re-point without ui:view', async () => {
+    await expectRefused([installed('install-b')], [entry('install-b', plugin.grantedPermissions.filter(item => item !== 'ui:view'))]);
+  });
+
+  it('refuses to re-point without the view input permission', async () => {
+    await expectRefused([installed('install-b')], [entry('install-b', plugin.grantedPermissions.filter(item => item !== 'rx:bytes'))]);
+  });
+
+  it('refuses to re-point when the current installation dropped the view', async () => {
+    await expectRefused([installed('install-b', [{ ...declaration, id: 'other' }])], [entry('install-b')]);
+  });
+
+  it('refuses to re-point a trusted webpage without explicit consent', async () => {
+    await expectRefused([installed('install-b', [{ ...declaration, mode: 'trusted-web' }])], [entry('install-b')]);
+  });
+
+  it('refuses to re-point an uninstalled plugin', async () => {
+    await expectRefused([], []);
+  });
+
+  it('refuses to re-point when configuration survives but the installed code is gone', async () => {
+    // Manifest list empty while the config entry still looks enabled/granted:
+    // trusting the config alone would mount a page whose code no longer exists.
+    await expectRefused([], [entry('install-b')]);
+  });
+
+  it('re-points a trusted webpage only once the current install holds web consent', async () => {
+    const trusted = installed('install-b', [{ ...declaration, mode: 'trusted-web' }]);
+    armNative([trusted], [{ ...entry('install-b'), trustedWebGranted: true }]);
+    const tabId = pluginTab();
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
+      expect(tab?.kind === 'plugin' ? tab.installGeneration : null).toBe('install-b');
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+    } finally { stop(); }
+  });
+
+  it('re-points a line-consuming view through its terminal:read grant', async () => {
+    const lines = installed('install-b', [{ ...declaration, input: 'lines' as const }]);
+    armNative([lines], [entry('install-b', ['ui:view', 'terminal:read'])]);
+    const tabId = pluginTab();
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const tab = useAppStore.getState().tabs.find(item => item.id === tabId);
+      expect(tab?.kind === 'plugin' ? tab.installGeneration : null).toBe('install-b');
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+    } finally { stop(); }
+  });
+
+  it('refuses a line-consuming view without terminal:read', async () => {
+    const lines = installed('install-b', [{ ...declaration, input: 'lines' as const }]);
+    await expectRefused([lines], [entry('install-b', ['ui:view', 'rx:bytes'])]);
+  });
+
+  it('reports a permanent rejection once instead of every reconcile pass', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    armNative([installed('install-b')], [entry('install-b', plugin.grantedPermissions, false)]);
+    const tabId = pluginTab();
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const restored = () => warn.mock.calls.filter(([message]) => String(message).includes('remembered page not restored'));
+      expect(restored()).toHaveLength(1);
+      expect(String(restored()[0][0])).toContain('disabled');
+      // Force further reconcile passes: the same descriptor must stay quiet.
+      useAppStore.getState().setActiveTab(tabId);
+      await settle();
+      useAppStore.getState().setPorts([{ ...useAppStore.getState().ports[0] }]);
+      await settle();
+      expect(restored()).toHaveLength(1);
+      expect(useAppStore.getState().tabs.find(item => item.id === tabId)?.kind === 'plugin'
+        ? (useAppStore.getState().tabs.find(item => item.id === tabId) as { installGeneration: string }).installGeneration
+        : null).toBe('install-a');
+    } finally { stop(); }
+  });
+
+  it('classifies a rejected page so the surface can explain it and skip a futile retry', async () => {
+    armNative([installed('install-b')], [entry('install-b', plugin.grantedPermissions, false)]);
+    const tabId = pluginTab();
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      const state = getPluginViewState(tabId);
+      expect(state.code).toBe('plugin-disabled');
+      expect(isRetriablePluginViewFailure(state.code)).toBe(false);
+    } finally { stop(); }
+  });
+
+  it('keeps retrying available only for causes the user or runtime can change', () => {
+    // Capacity and worker/init failures can resolve on their own or after the user
+    // closes a view; install, grant, consent, declaration and port-binding
+    // rejections cannot — those get the settings entry instead of a retry.
+    const retriable = ['worker-unavailable', 'worker-stopped', 'init-timeout', 'capacity', 'runtime'] as const;
+    const structural = [
+      'plugin-missing', 'plugin-disabled', 'install-changed', 'view-missing', 'grant-missing',
+      'trusted-web', 'port-binding', 'port-unavailable', 'port-mode',
+    ] as const;
+    // Exhaustiveness guard: the two lists together must cover every code exactly once.
+    expect([...retriable, ...structural].sort()).toEqual([
+      'capacity', 'grant-missing', 'init-timeout', 'install-changed', 'plugin-disabled',
+      'plugin-missing', 'port-binding', 'port-mode', 'port-unavailable', 'runtime',
+      'trusted-web', 'view-missing', 'worker-stopped', 'worker-unavailable',
+    ]);
+    for (const code of retriable) expect([code, isRetriablePluginViewFailure(code)]).toEqual([code, true]);
+    for (const code of structural) expect([code, isRetriablePluginViewFailure(code)]).toEqual([code, false]);
+    expect(isRetriablePluginViewFailure(null)).toBe(false);
+  });
+
+  it('remounts a page that a structural failure retired, once the cause is fixed', async () => {
+    // The discriminating case for the latch rule: the page had a live native
+    // record, a structural rejection retired it, and the user fixes the cause.
+    // A latched structural failure would keep `reconcile` from ever remounting.
+    armNative([installed('install-b')], [entry('install-b')]);
+    useAppStore.getState().updatePort('COM3', { displayView: page('install-b') });
+    const tabId = useAppStore.getState().openTab('COM3');
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+      expect(getPluginViewState(tabId).status).toBe('loading');
+
+      // Disabling the plugin retires the live page with a structural code.
+      syncPluginListSnapshot({ revision: 2, plugins: [installed('install-b')], pluginConfigs: [entry('install-b', plugin.grantedPermissions, false)] as never });
+      useAppStore.getState().setActiveTab(tabId);
+      await settle();
+      expect(getPluginViewState(tabId).code).toBe('plugin-disabled');
+
+      // Re-enabling it must bring the page back without a retry or a code reload.
+      syncPluginListSnapshot({ revision: 3, plugins: [installed('install-b')], pluginConfigs: [entry('install-b')] as never });
+      useAppStore.getState().setActiveTab(tabId);
+      await settle();
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(2);
+      expect(getPluginViewState(tabId).status).toBe('loading');
+      expect(getPluginViewState(tabId).code).toBeNull();
+    } finally { stop(); }
+  });
+
+  it('recovers a page after the user fixes the rejected cause, instead of staying latched', async () => {
+    // Regression: structural rejections used to latch `failures`, and the retry
+    // button was the only way to clear it. Once the surface stopped offering a
+    // retry for structural causes, a latched rejection made re-enabling the plugin
+    // or re-granting the view unable to ever bring the page back.
+    armNative([installed('install-b')], [entry('install-b', plugin.grantedPermissions, false)]);
+    useAppStore.getState().updatePort('COM3', { displayView: page('install-a') });
+    const tabId = useAppStore.getState().openTab('COM3');
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      expect(getPluginViewState(tabId).code).toBe('plugin-disabled');
+      expect(vi.mocked(pluginViewService.create)).not.toHaveBeenCalled();
+
+      // The user re-enables and re-grants the current install in plugin settings.
+      syncPluginListSnapshot({ revision: 2, plugins: [installed('install-b')], pluginConfigs: [entry('install-b')] as never });
+      useAppStore.getState().setActiveTab(tabId);
+      await settle();
+
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+      expect(getPluginViewState(tabId).status).toBe('loading');
+      expect(useAppStore.getState().ports.find(port => port.id === 'COM3')?.displayView).toEqual(page('install-b'));
+    } finally { stop(); }
+  });
+
+  it('mounts a capacity-rejected page once a slot frees, without a manual retry', async () => {
+    armNative([installed('install-b')], [entry('install-b')]);
+    const openTool = (key: string) => useAppStore.getState().addPluginTab({
+      kind: 'plugin', title: key, pluginId: plugin.id, installGeneration: 'install-b',
+      viewId: 'tool', boundPortId: null, instanceKey: key, restoreOnStartup: true,
+    });
+    // Fill this plugin's instance budget (MAX_PER_PLUGIN), then add one more page.
+    const tabIds = Array.from({ length: 8 }, (_, index) => openTool(`k${index}`));
+    const overflow = openTool('overflow');
+    const stop = startPluginViewRuntime();
+    try {
+      await settle(60);
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(8);
+      expect(getPluginViewState(overflow).code).toBe('capacity');
+
+      // Closing one page frees a slot; the rejected page must mount by itself.
+      useAppStore.getState().closeTab(tabIds[0]);
+      await settle(60);
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(9);
+      expect(getPluginViewState(overflow).status).toBe('loading');
+    } finally { stop(); }
+  });
+
+  it('converges without repeated native mounts or store writes', async () => {
+    armNative([installed('install-b')], [entry('install-b')]);
+    useAppStore.getState().updatePort('COM3', { displayView: page('install-a') });
+    useAppStore.getState().openTab('COM3');
+    const stop = startPluginViewRuntime();
+    try {
+      await settle();
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+      let writes = 0;
+      const unsubscribe = useAppStore.subscribe(() => { writes++; });
+      await settle();
+      unsubscribe();
+      expect(writes).toBe(0);
+      expect(vi.mocked(pluginViewService.create)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(pluginViewService.destroy)).not.toHaveBeenCalled();
     } finally { stop(); }
   });
 });

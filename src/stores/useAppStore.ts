@@ -146,6 +146,9 @@ export interface AppStoreState {
   addPluginTab: (input: Omit<PluginTabItem, 'id' | 'splitPaneId' | 'isPinned'>, options?: { paneId?: string; activate?: boolean }) => string;
   addReplayTab: (input: Pick<ReplayTabItem, 'sessionId' | 'trackId' | 'title'>, options?: { paneId?: string; activate?: boolean }) => string;
   setTabTitle: (tabId: string, title: string) => void;
+  /** 插件被重装（安装代次变化）后，把记住的插件标签重新指向当前已审阅的安装身份；
+   *  只改安装身份，不动标题/分屏/绑定端口。 */
+  migratePluginTabGeneration: (tabId: string, installGeneration: string) => void;
   closeTab: (tabId: string) => void;
   closeTabsToRight: (tabId: string) => void;
   closeTabsToLeft: (tabId: string) => void;
@@ -408,6 +411,12 @@ export const useAppStore = create<AppStoreState>()(
     setTabTitle: (tabId, title) => set((state) => {
       const tab = state.tabs.find((item) => item.id === tabId);
       if (tab) tab.title = title;
+    }),
+
+    migratePluginTabGeneration: (tabId, installGeneration) => set((state) => {
+      const tab = state.tabs.find((item) => item.id === tabId);
+      if (tab?.kind !== 'plugin' || tab.installGeneration === installGeneration) return;
+      tab.installGeneration = installGeneration;
     }),
 
     closeTab: (tabId) => set((state) => closeTabsImpl(state, tabId, 'self')),

@@ -1,7 +1,8 @@
 import { useAppStore, getTabPortId } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
-import type { PluginManifestView, PluginView, TabItem } from '../types';
-import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage } from '../types/pluginViews';
+import type { PluginConfigEntry, PluginManifestView, PluginView, PortMetaEntry, TabItem } from '../types';
+import { RETRIABLE_PLUGIN_VIEW_FAILURES } from '../types/pluginViews';
+import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewFailureCode, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage } from '../types/pluginViews';
 import { getPluginViews, subscribePluginViews } from './pluginConfigSnapshot';
 import { pluginHost, subscribePluginSessions, type PluginSession } from './pluginHost';
 import { PluginTimeline } from './pluginTimeline';
@@ -25,7 +26,7 @@ const MAX_OCCLUSION_SIZE = 1_000_000;
  *  slow loading itself is never failed by a fixed deadline. */
 export const TRUSTED_READY_TIMEOUT_MS = 30_000;
 const INTERACTION_DROP_WARN_MS = 5_000;
-const EMPTY_STATE: PluginViewState = { status: 'unavailable', error: null, instanceId: null };
+const EMPTY_STATE: PluginViewState = { status: 'unavailable', error: null, instanceId: null, code: null };
 const listeners = new Set<() => void>();
 let states: Record<string, PluginViewState> = {};
 let started = false;
@@ -88,11 +89,40 @@ interface ViewRecord {
 function emit(): void { for (const listener of listeners) listener(); }
 function setState(tabId: string, state: PluginViewState): void {
   const previous = states[tabId];
-  if (previous?.status === state.status && previous.error === state.error && previous.instanceId === state.instanceId) return;
+  if (previous?.status === state.status && previous.error === state.error
+    && previous.instanceId === state.instanceId && previous.code === state.code) return;
   states = { ...states, [tabId]: state }; emit();
 }
 export function subscribePluginViewState(listener: () => void): () => void { listeners.add(listener); return () => listeners.delete(listener); }
 export function getPluginViewState(tabId: string): PluginViewState { return states[tabId] ?? EMPTY_STATE; }
+/** Retrying a structural rejection (installation, grants, consent, view
+ *  declaration, port binding) can never succeed — the surface must offer the
+ *  page that fixes the cause instead of a retry button. `capacity` is included:
+ *  the user can free a slot by closing another plugin view. */
+export function isRetriablePluginViewFailure(code: PluginViewFailureCode | null): boolean {
+  return code !== null && RETRIABLE_PLUGIN_VIEW_FAILURES.has(code);
+}
+/** Only failures that already consumed a native instance may latch: the latch
+ *  exists to stop a mount/fail loop, never to hide a cause the user can fix. */
+const LATCHED_PLUGIN_VIEW_FAILURES: ReadonlySet<PluginViewFailureCode> = new Set([
+  'worker-stopped', 'init-timeout', 'runtime',
+]);
+
+/** A failure that carries why it happened, so the surface can localize a stable
+ *  reason and stop offering a retry that cannot succeed. */
+class PluginViewFailure extends Error {
+  constructor(readonly code: PluginViewFailureCode, message: string) { super(message); }
+}
+function failure(code: PluginViewFailureCode, message: string): PluginViewFailure {
+  return new PluginViewFailure(code, message);
+}
+function failureCode(error: unknown): PluginViewFailureCode {
+  return error instanceof PluginViewFailure ? error.code : 'runtime';
+}
+/** `unavailable` states always carry both the message and its classification. */
+function unavailableState(error: unknown): PluginViewState {
+  return { status: 'unavailable', error: errorText(error), instanceId: null, code: failureCode(error) };
+}
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function normalizeOcclusions(occlusions: PluginViewportRect[]): PluginViewportRect[] {
@@ -131,22 +161,138 @@ export function isRawSerialDisplay(tab: TabItem | undefined): boolean {
 function eligible(preference: PluginViewPreference, portId: string | null, placement: PluginViewBinding['placement']): { plugin: PluginView; view: PluginViewDeclaration } {
   const config = useAppStore.getState().config.pluginConfigs.find(entry => entry.id === preference.pluginId);
   const plugin = getPluginViews().find(item => item.id === preference.pluginId && item.installGeneration === preference.installGeneration);
-  if (!config?.enabled || config.installGeneration !== preference.installGeneration || !plugin?.manifest) throw new Error('plugin unavailable or installation changed');
-  if (!config.grantedPermissions.includes('ui:view')) throw new Error('plugin requires ui:view');
+  // Precise reasons: the surface must be able to tell an install the user can fix
+  // (re-enable/update) from one that can never work as remembered.
+  if (!config) throw failure('plugin-missing', 'plugin is not installed');
+  if (!config.enabled) throw failure('plugin-disabled', 'plugin is disabled');
+  if (config.installGeneration !== preference.installGeneration) throw failure('install-changed', 'plugin installation changed');
+  if (!plugin?.manifest) throw failure('plugin-missing', 'plugin manifest unavailable');
+  if (!config.grantedPermissions.includes('ui:view')) throw failure('grant-missing', 'plugin requires ui:view');
   const view = plugin.manifest.ui?.views?.find(item => item.id === preference.viewId);
-  if (!view || !view.placements.includes(placement)) throw new Error('plugin view placement unavailable');
-  if (view.mode === 'trusted-web' && config.trustedWebGranted !== true) throw new Error('trusted webpage requires explicit approval');
-  if (view.portBinding === 'required' && !portId) throw new Error('plugin view requires a port');
-  if (view.portBinding === 'none' && portId) throw new Error('plugin view does not accept a port');
-  if (view.input !== 'none' && !portId) throw new Error('plugin input requires a port');
+  if (!view) throw failure('view-missing', 'plugin does not declare this view');
+  if (!view.placements.includes(placement)) throw failure('view-missing', 'plugin view placement unavailable');
+  if (view.mode === 'trusted-web' && config.trustedWebGranted !== true) throw failure('trusted-web', 'trusted webpage requires explicit approval');
+  if ((view.portBinding === 'required' || view.input !== 'none') && !portId) throw failure('port-binding', 'plugin view requires a port');
+  if (view.portBinding === 'none' && portId) throw failure('port-binding', 'plugin view does not accept a port');
   if (portId) {
     const port = useAppStore.getState().ports.find(item => item.id === portId);
-    if (!port) throw new Error('bound port unavailable');
-    if (!view.modes.includes(port.mode ?? 'trx')) throw new Error('port mode unsupported by plugin view');
+    if (!port) throw failure('port-unavailable', 'bound port unavailable');
+    if (!view.modes.includes(port.mode ?? 'trx')) throw failure('port-mode', 'port mode unsupported by plugin view');
   }
-  const inputPermission = view.input === 'bytes' ? 'rx:bytes' : view.input === 'lines' ? 'terminal:read' : null;
-  if (inputPermission && !config.grantedPermissions.includes(inputPermission)) throw new Error(`plugin requires ${inputPermission}`);
+  const inputPermission = inputPermissionFor(view);
+  if (inputPermission && !config.grantedPermissions.includes(inputPermission)) throw failure('grant-missing', `plugin requires ${inputPermission}`);
   return { plugin, view };
+}
+/** The extra grant a view's input mode needs; `none` needs no input permission. */
+function inputPermissionFor(view: PluginViewDeclaration): 'rx:bytes' | 'terminal:read' | null {
+  return view.input === 'bytes' ? 'rx:bytes' : view.input === 'lines' ? 'terminal:read' : null;
+}
+/**
+ * Resolve a remembered page descriptor against the install that is current now.
+ *
+ * A descriptor (`portMeta.displayView` for serial content, a plugin tab's
+ * `installGeneration`) stores the install identity the page was chosen from.
+ * Reinstalling the same plugin id replaces that identity, and the restore path
+ * cannot ask the user to choose again — without re-pointing, the remembered page
+ * is rejected forever: serial content silently falls back to the raw terminal and
+ * a workspace tab stays a dead placeholder whose retry can never succeed.
+ *
+ * Re-pointing grants nothing by itself: it requires the current install to be
+ * enabled, to hold every permission the view needs (ui:view, the input permission,
+ * trusted-web consent) and to still declare the same view. A disabled, revoked,
+ * uninstalled or changed install keeps the existing refusal, and every
+ * placement/port/mode check still runs in `eligible` against the current manifest.
+ */
+type GenerationResolution =
+  | { status: 'current' }
+  | { status: 'resolved'; preference: PluginViewPreference }
+  | { status: 'rejected'; code: PluginViewFailureCode; reason: string };
+
+function reResolveInstallGeneration(preference: PluginViewPreference): GenerationResolution {
+  const entry: PluginConfigEntry | undefined = useAppStore.getState().config.pluginConfigs.find(item => item.id === preference.pluginId);
+  if (!entry) return { status: 'rejected', code: 'plugin-missing', reason: 'plugin is not installed' };
+  if (entry.installGeneration === preference.installGeneration) return { status: 'current' };
+  if (!entry.enabled) return { status: 'rejected', code: 'plugin-disabled', reason: 'current installation is disabled' };
+  const declaration = getPluginViews()
+    .find(item => item.id === preference.pluginId && item.installGeneration === entry.installGeneration)
+    ?.manifest?.ui?.views?.find(item => item.id === preference.viewId);
+  if (!declaration) return { status: 'rejected', code: 'view-missing', reason: 'current installation does not declare this view' };
+  if (!entry.grantedPermissions.includes('ui:view')) return { status: 'rejected', code: 'grant-missing', reason: 'current installation lacks ui:view' };
+  const inputPermission = inputPermissionFor(declaration);
+  if (inputPermission && !entry.grantedPermissions.includes(inputPermission)) return { status: 'rejected', code: 'grant-missing', reason: `current installation lacks ${inputPermission}` };
+  if (declaration.mode === 'trusted-web' && entry.trustedWebGranted !== true) return { status: 'rejected', code: 'trusted-web', reason: 'current installation lacks trusted-web consent' };
+  return { status: 'resolved', preference: { ...preference, installGeneration: entry.installGeneration } };
+}
+/** Rejection reasons already reported, keyed by descriptor identity, so a page
+ *  that stays rejected across every reconcile pass is logged exactly once. */
+const reportedRejections = new Map<string, string>();
+/** Persist a serial-content display view through the same CAS-safe chain the
+ *  picker uses, including the "tab outlives its port" (portMeta) branch.
+ *
+ *  Both memory copies stay in step: `ports` is authoritative while the port is
+ *  online, `config.portMeta` is the projection that survives an unplug or a
+ *  restart and is what a later enumeration backfills from. Updating only one of
+ *  them would let a stale install identity be read back from the other copy. */
+function persistSerialDisplayView(portId: string, preference: PluginViewPreference | null): void {
+  const store = useAppStore.getState();
+  const port = store.ports.find(item => item.id === portId);
+  const existing = store.config.portMeta.find(entry => entry.portId === portId);
+  const entry: PortMetaEntry = port
+    ? { portId, alias: port.alias, isHidden: port.isHidden, mode: port.mode, displayView: preference }
+    : { portId, alias: existing?.alias, isHidden: existing?.isHidden ?? false, mode: existing?.mode, displayView: preference };
+  store.setConfig({ portMeta: [...store.config.portMeta.filter(item => item.portId !== portId), entry] });
+  if (port) {
+    // Online port: the projection above is persisted by the existing port-meta
+    // auto-save; the live entry is what the picker and surfaces read.
+    store.updatePort(portId, { displayView: preference });
+    return;
+  }
+  // The tab outlives its port (unplugged / not re-enumerated). `updatePort`
+  // is a no-op then, so persist the choice in portMeta; the preference
+  // survives until the port reappears and drives the picker immediately.
+  const live = useAppStore.getState().ports;
+  void saveCurrentPortMeta({
+    entries: [...collectPortMeta(live), entry],
+    presentIds: [...live.map(port => port.id), portId],
+  }).catch((error) => console.debug('[pluginViewRuntime] persist display view failed:', error));
+}
+/** Converge remembered pages before any record work in this pass: a descriptor
+ *  whose install identity was replaced is re-pointed at the reviewed current
+ *  install, none is silently dropped. The store write re-queues reconcile, which
+ *  then mounts the page against the current manifest.
+ *
+ *  A descriptor that cannot be re-pointed stays rejected (host placeholder / raw
+ *  terminal) — and says why once, so "the page is gone after a reinstall" is
+ *  diagnosable instead of invisible. */
+function migrateRememberedPages(tabs: TabItem[]): boolean {
+  let migrated = false;
+  const present = new Set<string>();
+  for (const tab of tabs) {
+    const stored = preferenceFor(tab);
+    if (!stored) continue;
+    const key = identity(tab, stored);
+    present.add(key);
+    const resolution = reResolveInstallGeneration(stored);
+    if (resolution.status === 'current') continue;
+    if (resolution.status === 'rejected') {
+      if (reportedRejections.get(key) === resolution.reason) continue;
+      reportedRejections.set(key, resolution.reason);
+      console.warn(`[pluginViewRuntime] remembered page not restored: ${resolution.reason}`, {
+        tabId: tab.id, pluginId: stored.pluginId, viewId: stored.viewId,
+        storedGeneration: stored.installGeneration,
+        currentGeneration: useAppStore.getState().config.pluginConfigs.find(item => item.id === stored.pluginId)?.installGeneration ?? null,
+      });
+      continue;
+    }
+    failures.delete(key);
+    reportedRejections.delete(key);
+    if (tab.kind === 'plugin') useAppStore.getState().migratePluginTabGeneration(tab.id, resolution.preference.installGeneration);
+    else if (tab.kind === 'serial') persistSerialDisplayView(tab.portId, resolution.preference);
+    migrated = true;
+  }
+  // Closed tabs must not accumulate rejection bookkeeping for the whole session.
+  for (const key of reportedRejections.keys()) if (!present.has(key)) reportedRejections.delete(key);
+  return migrated;
 }
 export function getAvailablePluginViews(portId: string | null, placement: PluginViewBinding['placement']): Array<{ preference: PluginViewPreference; declaration: PluginViewDeclaration; pluginName: string }> {
   const result: Array<{ preference: PluginViewPreference; declaration: PluginViewDeclaration; pluginName: string }> = [];
@@ -203,7 +349,7 @@ function beginDocument(record: ViewRecord, documentId: string): boolean {
     record.binaryReceiver?.reset();
     record.binaryReceiver = null;
   }
-  setState(record.binding.tabId, { status: 'loading', error: null, instanceId: record.binding.viewInstanceId });
+  setState(record.binding.tabId, { status: 'loading', error: null, instanceId: record.binding.viewInstanceId, code: null });
   if (record.usesWorker) {
     const session = pluginHost.get(record.binding.pluginId);
     session?.post({ type: 'view.document', payload: { instanceId: record.binding.viewInstanceId, documentId } });
@@ -259,7 +405,7 @@ function armTrustedReadyWatchdog(record: ViewRecord, documentId: string): void {
   if (record.declaration.mode !== 'trusted-web' || record.nativeReady) return;
   clearTimer(record, 'navigationReadyTimer');
   record.navigationReadyTimer = setTimeout(() => {
-    if (live(record) && record.documentId === documentId && !record.nativeReady) fail(record, 'plugin UI did not become ready');
+    if (live(record) && record.documentId === documentId && !record.nativeReady) fail(record, failure('init-timeout', 'plugin UI did not become ready'));
   }, TRUSTED_READY_TIMEOUT_MS);
 }
 /** Capacity backpressure must not kill a healthy view: drop the interaction and
@@ -270,7 +416,7 @@ function warnDroppedInteraction(record: ViewRecord): void {
   record.lastInteractionDropWarn = now;
   console.warn('[pluginView] interaction dropped: plugin Worker capacity exceeded');
 }
-function retire(record: ViewRecord, reason: string | null): void {
+function retire(record: ViewRecord, reason: string | Error | null): void {
   if (!record.alive) return;
   record.timeline?.dispose(); record.timeline = null;
   record.alive = false;
@@ -296,10 +442,16 @@ function retire(record: ViewRecord, reason: string | null): void {
   void record.retirement.catch(error => console.debug('[pluginView] destroy', error));
   record.latest = null; record.retained = null; record.inFlight = null; record.documentId = null;
   if (reason) {
+    const code = failureCode(reason);
     const tab = useAppStore.getState().tabs.find(item => item.id === record.binding.tabId);
     const preference = tab && preferenceFor(tab);
-    if (tab && preference) failures.set(identity(tab, preference), reason);
-    setState(record.binding.tabId, { status: 'unavailable', error: reason, instanceId: null });
+    // Latch only failures that already consumed a native instance and could
+    // immediately recur (mount/fail loop). A structural rejection is deterministic
+    // given the current install, so reconcile re-evaluates it cheaply every pass —
+    // latching it would mean re-enabling the plugin, re-granting the view or
+    // freeing an instance slot could never bring the page back.
+    if (tab && preference && LATCHED_PLUGIN_VIEW_FAILURES.has(code)) failures.set(identity(tab, preference), errorText(reason));
+    setState(record.binding.tabId, { status: 'unavailable', error: errorText(reason), instanceId: null, code });
   }
 }
 export function failPluginViewInstance(pluginId: string, instanceId: string, reason: string): void {
@@ -312,7 +464,7 @@ function updateTimelineVisibility(record: ViewRecord): void {
 function updateReadyState(record: ViewRecord): void {
   updateTimelineVisibility(record);
   if (live(record) && record.nativeReady && record.workerReady) {
-    setState(record.binding.tabId, { status: 'ready', error: null, instanceId: record.binding.viewInstanceId });
+    setState(record.binding.tabId, { status: 'ready', error: null, instanceId: record.binding.viewInstanceId, code: null });
   }
 }
 export function markPluginViewWorkerReady(pluginId: string, instanceId: string): void {
@@ -324,10 +476,10 @@ export function markPluginViewWorkerReady(pluginId: string, instanceId: string):
   void place(record).catch(error => fail(record, error));
   flush(record);
 }
-function fail(record: ViewRecord, error: unknown): void { if (live(record)) retire(record, errorText(error)); }
+function fail(record: ViewRecord, error: unknown): void { if (live(record)) retire(record, error instanceof Error ? error : errorText(error)); }
 function armAck(record: ViewRecord): void {
   clearTimer(record, 'ackTimer');
-  if (record.inFlight && record.visible && !overlayBlocked) record.ackTimer = setTimeout(() => fail(record, 'plugin UI did not acknowledge state'), 5000);
+  if (record.inFlight && record.visible && !overlayBlocked) record.ackTimer = setTimeout(() => fail(record, failure('runtime', 'plugin UI did not acknowledge state')), 5000);
 }
 async function sendEnvironment(record: ViewRecord): Promise<void> {
   if (!live(record) || !record.nativeReady || !record.documentId) return;
@@ -371,27 +523,29 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
     // Worker is restarting/disabled: never leave a stale `ready` state with a
     // dead instance id (the stock terminal would stay hidden). Reconcile runs
     // again when the session starts. Independent local pages never wait here.
-    setState(tab.id, { status: 'unavailable', error: 'plugin Worker unavailable', instanceId: null });
+    setState(tab.id, unavailableState(failure('worker-unavailable', 'plugin Worker unavailable')));
     return;
   }
   if (records.size >= MAX_ALL || [...records.values()].filter(record => record.binding.pluginId === preference.pluginId).length >= MAX_PER_PLUGIN) {
-    const reason = 'plugin view instance capacity exceeded'; failures.set(identity(tab, preference), reason); setState(tab.id, { status: 'unavailable', error: reason, instanceId: null }); return;
+    // No latch: closing another plugin view frees a slot and the next pass mounts
+    // this page. Retrying is still offered by the surface.
+    setState(tab.id, unavailableState(failure('capacity', 'plugin view instance capacity exceeded'))); return;
   }
   const tabSessionId = tabSessions.get(tab.id) ?? crypto.randomUUID(); tabSessions.set(tab.id, tabSessionId);
   const portId = getTabPortId(tab);
   const binding: PluginViewBinding = { ...preference, tabId: tab.id, placement: tab.kind === 'serial' ? 'serial-content' : 'workspace-tab', boundPortId: portId, portMode: portId ? useAppStore.getState().ports.find(port => port.id === portId)?.mode ?? 'trx' : null, tabSessionId, viewInstanceId: crypto.randomUUID(), workerEpoch: usesWorker ? worker!.epoch : 0, streamEpoch: 0 };
   const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, timeline: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, navigationReadyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastInteractionDropWarn: 0, lastEnvironment: '' };
-  records.set(tab.id, record); setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId });
+  records.set(tab.id, record); setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId, code: null });
   try {
     await pluginViewService.create(binding);
     if (!live(record)) { await pluginViewService.destroy(binding.viewInstanceId); return; }
     record.nativeCreated = true;
     // Trusted local documents may legitimately take as long as they need; a
     // genuine native load/process failure still arrives as a native error.
-    if (!record.nativeReady && !record.nativeInitializing && view.mode !== 'trusted-web') record.readyTimer = setTimeout(() => fail(record, 'plugin UI initialization timed out'), 5000);
+    if (!record.nativeReady && !record.nativeInitializing && view.mode !== 'trusted-web') record.readyTimer = setTimeout(() => fail(record, failure('init-timeout', 'plugin UI initialization timed out')), 5000);
     if (usesWorker) {
       if (!worker!.post({ type: 'view.open', payload: { context: binding, params: openParams.get(tab.id) ?? null, documentId: record.documentId } })) throw new Error('plugin Worker control capacity exceeded');
-      if (!record.workerReady) record.workerReadyTimer = window.setTimeout(() => fail(record, 'plugin parser initialization timed out'), 10000);
+      if (!record.workerReady) record.workerReadyTimer = window.setTimeout(() => fail(record, failure('init-timeout', 'plugin parser initialization timed out')), 10000);
       record.unsubscribeInput = subscribePluginViewInput(binding, view.input, {
         onInput: (batch, streamEpoch, gapBefore) => {
           if (!live(record) || worker!.epoch !== binding.workerEpoch) return false;
@@ -414,6 +568,10 @@ function queueReconcile(): void {
 function reconcile(): void {
   if (!started || !nativeUnlisten || !useSystemStore.getState().ui.configReady) return;
   const state = useAppStore.getState();
+  // A remembered page whose install identity was replaced is re-pointed at the
+  // current reviewed install first; the store write re-queues this pass, which
+  // then mounts the page against the current manifest.
+  if (migrateRememberedPages(state.tabs)) return;
   const tabIds = new Set(state.tabs.map(tab => tab.id));
   for (const record of [...records.values()]) {
     const tab = state.tabs.find(item => item.id === record.binding.tabId);
@@ -425,7 +583,7 @@ function reconcile(): void {
       if (identity(tab, preference) !== JSON.stringify([record.binding.tabId, record.binding.pluginId, record.binding.installGeneration, record.binding.viewId, record.binding.boundPortId])) { retire(record, null); continue; }
       if (record.usesWorker) {
         const worker = pluginHost.get(preference.pluginId);
-        if (!worker?.loaded || worker.epoch !== record.binding.workerEpoch) { retire(record, 'plugin Worker stopped'); continue; }
+        if (!worker?.loaded || worker.epoch !== record.binding.workerEpoch) { retire(record, failure('worker-stopped', 'plugin Worker stopped')); continue; }
       }
       void sendEnvironment(record).catch(error => fail(record, error));
     } catch (error) { fail(record, error); }
@@ -443,10 +601,10 @@ function reconcile(): void {
     if (failures.has(key)) continue;
     try {
       const { plugin, view } = eligible(preference, getTabPortId(tab), tab.kind === 'serial' ? 'serial-content' : 'workspace-tab');
-      if (tab.kind === 'plugin' && !openParams.has(tab.id) && !view.restoreOnStartup) throw new Error('plugin view cannot restore automatically');
+      if (tab.kind === 'plugin' && !openParams.has(tab.id) && !view.restoreOnStartup) throw failure('view-missing', 'plugin view cannot restore automatically');
       void createRecord(tab, preference, view, plugin);
     } catch (error) {
-      setState(tab.id, { status: 'unavailable', error: errorText(error), instanceId: null });
+      setState(tab.id, unavailableState(error));
     }
   }
 }
@@ -510,28 +668,7 @@ export function selectSerialPluginView(tabId: string, preference: PluginViewPref
   }
   const record = records.get(tabId); if (record) retire(record, null);
   if (preference) failures.delete(identity(tab, preference));
-  const store = useAppStore.getState();
-  if (store.ports.some(port => port.id === tab.portId)) {
-    store.updatePort(tab.portId, { displayView: preference });
-  } else {
-    // The tab outlives its port (unplugged / not re-enumerated). `updatePort`
-    // is a no-op then, so persist the choice in portMeta; the preference
-    // survives until the port reappears and drives the picker immediately.
-    const existing = store.config.portMeta.find(entry => entry.portId === tab.portId);
-    const entry = {
-      portId: tab.portId,
-      alias: existing?.alias,
-      isHidden: existing?.isHidden ?? false,
-      mode: existing?.mode,
-      displayView: preference,
-    };
-    store.setConfig({ portMeta: [...store.config.portMeta.filter(item => item.portId !== tab.portId), entry] });
-    const live = useAppStore.getState().ports;
-    void saveCurrentPortMeta({
-      entries: [...collectPortMeta(live), entry],
-      presentIds: [...live.map(port => port.id), tab.portId],
-    }).catch((error) => console.debug('[pluginViewRuntime] persist display view failed:', error));
-  }
+  persistSerialDisplayView(tab.portId, preference);
   queueReconcile();
   if (!preference) setState(tabId, EMPTY_STATE);
 }
@@ -826,6 +963,6 @@ export function startPluginViewRuntime(): () => void {
     started = false; for (const unsubscribe of unsubscribers) unsubscribe(); nativeUnlisten?.(); nativeUnlisten = null;
     for (const record of [...records.values()]) retire(record, null);
     overlayBlocked = false; currentOcclusions = [];
-    states = {}; failures.clear(); tabSessions.clear(); openParams.clear(); dismissed.clear(); rates.clear(); actionTokens.clear(); emit();
+    states = {}; failures.clear(); tabSessions.clear(); openParams.clear(); dismissed.clear(); rates.clear(); actionTokens.clear(); reportedRejections.clear(); emit();
   };
 }
