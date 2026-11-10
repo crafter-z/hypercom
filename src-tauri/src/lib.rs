@@ -529,12 +529,23 @@ pub fn run() {
     let diag_logger = match diaglog::install(diag_dir) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[diaglog] init failed ({}), file logging disabled", e);
-            // 兜底：命令路径需要一个可用的 DiagLogger 实例。
-            std::sync::Arc::new(
-                diaglog::DiagLogger::new(std::env::temp_dir().join("hypercom-diag"))
-                    .expect("diag logger fallback"),
-            )
+            eprintln!("[diaglog] init failed ({}), retrying under the temporary directory", e);
+            // The fallback must also become the global logger: a non-installed
+            // fallback silently drops every later log::* line, which is exactly
+            // how "no starting line" becomes indistinguishable from "never ran".
+            match diaglog::install(std::env::temp_dir().join("hypercom-diag")) {
+                Ok(l) => l,
+                Err(fallback_error) => {
+                    eprintln!(
+                        "[diaglog] fallback init failed ({}), file logging disabled",
+                        fallback_error
+                    );
+                    std::sync::Arc::new(
+                        diaglog::DiagLogger::new(std::env::temp_dir())
+                            .expect("diag logger fallback"),
+                    )
+                }
+            }
         }
     };
     log::info!("HyperCom starting...");
