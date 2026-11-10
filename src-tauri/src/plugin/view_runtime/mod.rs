@@ -6,6 +6,7 @@ mod windows;
 use std::{collections::HashMap, sync::{Arc, Mutex, LazyLock, atomic::{AtomicBool, Ordering}}};
 #[cfg(any(windows, test))]
 use std::time::Instant;
+use std::time::Duration;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -241,6 +242,24 @@ async fn on_ui<T: Send + 'static>(app: &tauri::AppHandle, operation: impl FnOnce
     rx.await.map_err(|_| error("原生 UI 线程已退出"))?.map_err(error)
 }
 
+/// Teardown runs synchronously on the native UI thread (WebView2 `Close`,
+/// `DestroyWindow`, profile deletion). A stuck browser process must not hold the
+/// command forever: the UI thread may stay wedged, but the caller gets an error
+/// and the plugin IO gate is released.
+const VIEW_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const VIEW_DATA_CLEAR_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn on_ui_bounded<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    wait: Duration,
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, CommandError> {
+    match tokio::time::timeout(wait, on_ui(app, operation)).await {
+        Ok(result) => result,
+        Err(_) => Err(error("原生 UI 线程未在期限内完成视图销毁")),
+    }
+}
+
 pub async fn update(source: tauri::Webview, id: String, rect: Rect, occlusions: Option<Vec<OcclusionRect>>, visible: bool, revision: u64) -> Result<(), CommandError> {
     require_main(&source)?;
     let session = session(&id, source.app_handle())?;
@@ -352,7 +371,7 @@ fn prune_binary_rates(registry: &mut Registry) {
 }
 pub async fn retire_plugin(app: &tauri::AppHandle, plugin: &str) -> Result<(), CommandError> {
     let ids = retire_registry(None, Some(plugin));
-    on_ui(app, move || { #[cfg(windows)] for id in ids { windows::destroy(&id); } #[cfg(not(windows))] let _ = ids; Ok(()) }).await
+    on_ui_bounded(app, VIEW_TEARDOWN_TIMEOUT, move || { #[cfg(windows)] for id in ids { windows::destroy(&id); } #[cfg(not(windows))] let _ = ids; Ok(()) }).await
 }
 pub async fn clear_web_data(app: &tauri::AppHandle, directory: &std::path::Path) -> Result<(), CommandError> {
     match std::fs::symlink_metadata(directory) {
@@ -362,7 +381,7 @@ pub async fn clear_web_data(app: &tauri::AppHandle, directory: &std::path::Path)
         Ok(_) => {}
     }
     let directory = directory.to_path_buf();
-    on_ui(app, move || {
+    on_ui_bounded(app, VIEW_DATA_CLEAR_TIMEOUT, move || {
         #[cfg(windows)] { windows::clear_web_data(&directory) }
         #[cfg(not(windows))] {
             let _ = directory;
@@ -381,12 +400,12 @@ pub async fn retire_denied(app: &tauri::AppHandle, plugin: &str, grants: &[Strin
         prune_binary_rates(&mut registry);
         ids
     };
-    on_ui(app, move || { #[cfg(windows)] for id in ids { windows::destroy(&id); } #[cfg(not(windows))] let _ = ids; Ok(()) }).await
+    on_ui_bounded(app, VIEW_TEARDOWN_TIMEOUT, move || { #[cfg(windows)] for id in ids { windows::destroy(&id); } #[cfg(not(windows))] let _ = ids; Ok(()) }).await
 }
 pub async fn destroy(source: tauri::Webview, id: String) -> Result<(), CommandError> {
     require_main(&source)?;
     retire_registry(Some(&id), None);
-    on_ui(source.app_handle(), move || { #[cfg(windows)] windows::destroy(&id); #[cfg(not(windows))] let _ = id; Ok(()) }).await
+    on_ui_bounded(source.app_handle(), VIEW_TEARDOWN_TIMEOUT, move || { #[cfg(windows)] windows::destroy(&id); #[cfg(not(windows))] let _ = id; Ok(()) }).await
 }
 pub fn clear_all() {
     retire_registry(None, None);
