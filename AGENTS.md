@@ -10,7 +10,7 @@
 
 HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 
-- **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 733 键 × zh-CN/en-US。
+- **前端**：6 个 Zustand store；`src/hooks/` 18 个 hook 文件（另有 barrel `index.ts` 与 `disconnectTracking.ts`；`shared/` 下 hook 不计入）；14 个 services 生产文件；i18n 775 键 × zh-CN/en-US。
 - **后端**：13 个命令域文件 + `CommandError`，`lib.rs` 注册 98 个命令（漂移守卫测试核对）；`AppConfig` 44 字段 = 43 个普通字段 + 1 个 `#[serde(flatten)] entities: Entities`（含 9 类实体数组）。
 - **工作区**：标签 `TabItem = SerialTabItem | PluginTabItem | ReplayTabItem`，`id` 为 UUID；serial 的 `portId` / plugin 的 `boundPortId` 才是端口身份，replay 无发送端口。
 - **时间联动**：`utils/timeline` 是组与热游标唯一来源；主窗口 TRX/可选插件/只读回放共用 preview/commit 协议，TTY 与跨弹出窗不参与；不得同步 scrollTop 或把回放追加进实时缓冲。详见 [`timeline.md`](docs/architecture/timeline.md)。
@@ -22,7 +22,7 @@ HyperCom — 现代串口调试工具。Rust 管 I/O，React 管 UI。
 hypercom/
 ├── src/                      # React 前端
 │   ├── main.tsx / App.tsx    # entrypoints（App.tsx = AppInit + SerialReceive + 全局文本右键菜单）
-│   ├── i18n.ts               # 733 键 × zh-CN/en-US（扁平 dotted key，keySeparator:false）
+│   ├── i18n.ts               # 775 键 × zh-CN/en-US（扁平 dotted key，keySeparator:false）
 │   ├── services/             # tauri.ts barrel + 13 域（含 plugin / pluginView）
 │   ├── hooks/                # 18 个 hook 文件 + barrel
 │   ├── stores/               # 6 个 store + releaseTerminalState / resetStores
@@ -65,7 +65,7 @@ cargo check --manifest-path src-tauri/Cargo.toml    # 仅 Rust
 7. **TX 唯一入口 `sendToPort`**：新增发送逻辑不得绕过（否则失去未打开端口守卫、TX 回显、流量统计与历史）。发送绑定连接 `generation`，跨重连排队的旧发送被拒绝；TTY 分支无本地回显。细节 [`transmission.md`](docs/architecture/transmission.md) / [`tty.md`](docs/architecture/tty.md)。
 8. **RX 管线纪律**：`serial:data` 载原始字节 → `getRxPipeline()` 组行/rAF 批写（TTY 端口直喂 `ttyService.feed`）；`useSerialReceive` 全应用只调一次。`getRxPipeline()` / `ttyService` 是 app-lifetime 单例，cleanup 不得 dispose（断线只 `disconnect(portId)`）。生命周期拆分理由（接收/发送两个 hook 各管一端）见 [`conventions.md`](docs/architecture/conventions.md)。
 9. **插件边界**：`installGeneration`（UUID）是安装身份，不是 `installedAt`；启用/授权/重载需 `expectedGeneration`；变更/列表响应带 revision，旧响应被 `pluginConfigSnapshot` 拒绝；升级清授权、trusted-web 独立授权、数据目录按插件区分。宿主细节 [`plugins.md`](docs/architecture/plugins.md)、隔离视图 [`plugin-views.md`](docs/architecture/plugin-views.md)。
-10. **i18n 双侧同步**：新增文本在 `src/i18n.ts` 的 zh-CN 与 en-US 两侧同时加、保持顺序镜像；`i18n.test.ts` 断言集合相等、无重复、占位符一致。协议词（None/Even/Xon/RTS/GBK…）不翻译。
+10. **i18n 双侧同步**：新增文本在 `src/i18n.ts` 的 zh-CN 与 en-US 两侧同时加、保持顺序镜像；`i18n.test.ts` 断言集合相等、无重复、占位符一致；`i18nUsage.test.ts` 断言**代码里引用的字面量键确实存在**（组件测试把 `t` mock 成 `key => key`，漏加键会一路绿到用户界面显示原始 key）。协议词（None/Even/Xon/RTS/GBK…）不翻译。
 11. **CSS 颜色是未信任输入**：规则/协议模板颜色进 `innerHTML` 的 `style="color:…"` 前必须经 `utils/cssColor.ts` 的 `safeCssColor`（唯一入口），禁止各自写正则。
 12. **前端组件/布局**：React 组件定义在模块级（函数内定义会每帧重建导致 DOM 销毁/输入失焦）；终端纵向 flex 链每层都要 `min-height: 0`。
 13. **编辑器与关闭审批**：ConfigModal 五类实体页用 `useEntityPage({kind})` 会话草稿，显式保存（无自动保存）；取消/X/Escape/原生关闭都等待保存/放弃选择，失败保留草稿；跨窗命令编辑必须回 ACK，原生关闭经 `complete_editor_close` 审批。
