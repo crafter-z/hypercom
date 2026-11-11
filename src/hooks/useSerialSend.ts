@@ -9,6 +9,11 @@ import { isSendablePort, portClosedReason } from '../utils/sendGuard';
 import { hexInputError, parseHexBytes } from '../utils/sendUtils';
 import { trafficStats } from '../utils/trafficStats';
 import { ttyService } from '../utils/ttyService';
+import { isFlowRunning } from '../utils/flowRuntime';
+
+/** Origin of a send request. Enhanced flow execution is the only owner allowed
+ * to send while its target port is locked; all other callers are user work. */
+export type SendOrigin = 'user' | 'flow';
 
 // ==================== Module-level in-memory send history ====================
 // Per-port send history lives ONLY in memory (user decision: history may
@@ -62,8 +67,24 @@ export async function sendToPort(
   lineEnding: string,
   silent = false,
   beforeSend?: () => void,
+  origin: SendOrigin = 'user',
 ): Promise<number> {
   const state = useAppStore.getState();
+
+  // Enhanced flows own the target port's TX and parameter operations. Check at
+  // the single send chokepoint so manual send, pop-outs, triggers, plugins and
+  // old cyclic loops cannot bypass the lock. The flow executor opts in with
+  // origin='flow'; it must still pass the normal port/generation checks below.
+  if (origin !== 'flow' && isFlowRunning(portId)) {
+    console.warn('[sendToPort] Send blocked: enhanced flow owns port', portId);
+    if (silent) throw new Error(`Port ${portId} is occupied by an enhanced flow`);
+    useToastStore.getState().push({
+      severity: 'warning',
+      messageKey: 'sendSection.flowBusy',
+      portId,
+    });
+    return 0;
+  }
 
   // HEX 契约（C4 / K7）：与后端 `parse_hex_string` 同尺子——非法输入（奇数个
   // 半字节 / 非 HEX 字符）后端必然 Err。提前拦掉，前端绝不发出后端会拒绝的东西。

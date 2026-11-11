@@ -4,9 +4,47 @@ import { flushSync } from 'react-dom';
 import { ArrowDownToLine, ArrowUpToLine, Pencil, Plus, Save, Search, Trash2, Undo2 } from 'lucide-react';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { orderedCommands, renumberCommands } from '../../utils/commandOrder';
+import {
+  COMMAND_BAUD_RATE,
+  createCommandStep,
+  foldDelayIntoRoundGap,
+  getCommandStepKind,
+  isSendCommand,
+  runsMultipleRounds,
+} from '../../utils/commandSteps';
+import { AfterDelayField } from '../shared/AfterDelayField';
 import SortableEditorList from '../shared/SortableEditorList';
 import { NumericInput } from '../shared/NumericInput';
 import type { LineEnding, SendCommand, SendCommandSet } from '../../types';
+
+/**
+ * 命令集步骤是「发送命令」与「流程动作」（改本机波特率）共用的一条列表。
+ * 弹窗列表只把 `send` 步骤当作可点击发送的命令；流程动作在这里只做只读摘要
+ * 与自身字段编辑——绝不能让空 content 的步骤被当成一条可发送命令。
+ *
+ * 等待不是独立步骤：它是每一步的「之后等待」（位置属性），因此 send 与
+ * setParams 都显示这个字段（见 `AfterDelayField`）。
+ */
+function commandStepSummary(command: SendCommand): string {
+  switch (getCommandStepKind(command)) {
+    case 'setParams': return `${command.baudRate ?? 0} baud`;
+    default: return command.content;
+  }
+}
+
+/** 非发送步骤的徽标文案 key；`null` 表示这是普通发送命令（显示 STR/HEX）。 */
+function commandStepBadgeKey(command: SendCommand): string | null {
+  switch (getCommandStepKind(command)) {
+    case 'setParams': return 'sendCmdEditor.kind.setParams';
+    case 'unknown': return 'sendCmdEditor.kind.unknown';
+    default: return null;
+  }
+}
+
+/**
+ * 「之后等待」字段在 `components/shared/AfterDelayField.tsx`——与设置页共用
+ * 同一份实现（标签、单位、轮末说明、并入轮间间隔都只有一处）。
+ */
 
 interface QuickSendListProps {
   sets: SendCommandSet[];
@@ -93,12 +131,27 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
   const updateCommand = (id: string, patch: Partial<SendCommand>) => {
     updateSet({ commands: renumberCommands(commands.map(command => command.id === id ? { ...command, ...patch } : command)) });
   };
+  /**
+   * 列表里每一步的「之后等待」字段（与设置页共用 `AfterDelayField`）。
+   * 判轮末用**未过滤**的 `commands`：搜索只是隐藏了几行，不能把位置判断改掉。
+   */
+  const renderDelayField = (command: SendCommand) => (
+    <AfterDelayField
+      delay={command.delay ?? 0}
+      onCommit={delay => updateCommand(command.id, { delay })}
+      isRoundFinal={commands.length > 0 && commands[commands.length - 1].id === command.id}
+      loops={selectedSet ? runsMultipleRounds(selectedSet) : false}
+      onFoldIntoRoundGap={() => {
+        if (!selectedSet) return;
+        updateSet(foldDelayIntoRoundGap(selectedSet, command.id));
+      }}
+    />
+  );
   const insertCommand = (beforeId?: string) => {
-    const command: SendCommand = {
-      id: crypto.randomUUID(), name: t('commandSettings.defaultCommandName', { index: commands.length + 1 }),
-      content: '', type: 'string', appendLineEnding: 'None', delay: 0, order: commands.length,
-    };
     const index = beforeId ? commands.findIndex(item => item.id === beforeId) : commands.length;
+    // 与设置页共用同一个工厂：两处新建发送命令的默认值（间隔 100ms、行尾 \r\n）
+    // 必须一致，否则「同一个命令」在两个编辑器里诞生出不同的时序。
+    const command = createCommandStep('send', crypto.randomUUID(), t('commandSettings.defaultCommandName', { index: commands.length + 1 }));
     const next = [...commands];
     next.splice(index < 0 ? next.length : index, 0, command);
     updateSet({ commands: renumberCommands(next) });
@@ -167,31 +220,43 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
         <SortableEditorList items={filtered} disabled={!editable || !!query.trim()}
           onReorder={ids => updateSet({ commands: renumberCommands(ids.map(id => commands.find(command => command.id === id)!)) })}
           renderItem={(command, index, handle) => <div
-            className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled ? ' is-send-disabled' : ''}`}
+            className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled || !isSendCommand(command) ? ' is-send-disabled' : ''}`}
             role="group" aria-label={command.name}
-            onMouseEnter={() => setCursor(index)} onClick={() => { if (!sendDisabled) onSend(command); }} title={command.content}>
+            onMouseEnter={() => setCursor(index)} onClick={() => { if (!sendDisabled && isSendCommand(command)) onSend(command); }} title={commandStepSummary(command)}>
             <div className="quicksend-row-head">
-              {handle}<span className="quicksend-name">{command.name || command.content}</span>
-              <span className={`quicksend-badge quicksend-badge-${command.type}`}>{command.type === 'hex' ? 'HEX' : 'STR'}</span>
-              <span className="quicksend-le">{t(lineEndingLabelKey(command.appendLineEnding, 'sendSection'))}</span>
+              {handle}<span className="quicksend-name">{command.name || commandStepSummary(command)}</span>
+              {commandStepBadgeKey(command)
+                ? <span className="quicksend-badge">{t(commandStepBadgeKey(command)!)}</span>
+                : <span className={`quicksend-badge quicksend-badge-${command.type}`}>{command.type === 'hex' ? 'HEX' : 'STR'}</span>}
+              {isSendCommand(command) && <span className="quicksend-le">{t(lineEndingLabelKey(command.appendLineEnding, 'sendSection'))}</span>}
               <button type="button" className="icon-btn quicksend-edit-btn" aria-expanded={!!editingIds[command.id]} title={t('quickSend.editHint')} aria-label={t('quickSend.editCommand')}
                 onClick={event => { event.stopPropagation(); setEditingIds(current => ({ ...current, [command.id]: !current[command.id] })); }}><Pencil size={12} /></button>
             </div>
             {editingIds[command.id] ? <fieldset className="quicksend-edit-form" disabled={!editable} onClick={event => event.stopPropagation()}>
               <label>{t('quickSend.namePlaceholder')}<input className="input quicksend-edit-input" value={command.name} onChange={event => updateCommand(command.id, { name: event.target.value })} /></label>
-              <label>{t('quickSend.contentPlaceholder')}<textarea autoFocus className="input quicksend-edit-input" value={command.content} onChange={event => updateCommand(command.id, { content: event.target.value })} /></label>
-              <div className="quicksend-edit-row">
+              {isSendCommand(command) ? <>
+                <label>{t('quickSend.contentPlaceholder')}<textarea autoFocus className="input quicksend-edit-input" value={command.content} onChange={event => updateCommand(command.id, { content: event.target.value })} /></label>
+                <div className="quicksend-edit-row">
+                  <span>{t('editor.order')}: {commands.findIndex(item => item.id === command.id) + 1}</span>
+                  {renderDelayField(command)}
+                  <select className="select quicksend-edit-select" aria-label={t('quickSend.format')} value={command.type} onChange={event => updateCommand(command.id, { type: event.target.value as SendCommand['type'] })}>
+                    <option value="string">STR</option><option value="hex">HEX</option>
+                  </select>
+                  <select className="select quicksend-edit-select" aria-label={t('quickSend.lineEnding')} value={command.appendLineEnding} onChange={event => updateCommand(command.id, { appendLineEnding: event.target.value as LineEnding })}>
+                    {LINE_ENDING_VALUES.map(value => <option key={value} value={value}>{t(lineEndingLabelKey(value, 'sendSection'))}</option>)}
+                  </select>
+                </div>
+              </> : <div className="quicksend-edit-row">
                 <span>{t('editor.order')}: {commands.findIndex(item => item.id === command.id) + 1}</span>
-                <label>{t('sendCmdEditor.delayPlaceholder')}<NumericInput className="input quicksend-param-number" min={0} max={3_600_000} value={command.delay}
-                  onCommit={delay => updateCommand(command.id, { delay })} /></label>
-                <select className="select quicksend-edit-select" aria-label={t('quickSend.format')} value={command.type} onChange={event => updateCommand(command.id, { type: event.target.value as SendCommand['type'] })}>
-                  <option value="string">STR</option><option value="hex">HEX</option>
-                </select>
-                <select className="select quicksend-edit-select" aria-label={t('quickSend.lineEnding')} value={command.appendLineEnding} onChange={event => updateCommand(command.id, { appendLineEnding: event.target.value as LineEnding })}>
-                  {LINE_ENDING_VALUES.map(value => <option key={value} value={value}>{t(lineEndingLabelKey(value, 'sendSection'))}</option>)}
-                </select>
-              </div>
-            </fieldset> : <span className="quicksend-content">{command.content}</span>}
+                {getCommandStepKind(command) === 'setParams' && <>
+                  <label>{t('sendCmdEditor.baudRate')}<NumericInput className="input quicksend-param-number"
+                    min={COMMAND_BAUD_RATE[0]} max={COMMAND_BAUD_RATE[1]} value={command.baudRate ?? 115200}
+                    onCommit={baudRate => updateCommand(command.id, { baudRate })} /></label>
+                  {renderDelayField(command)}
+                </>}
+                {getCommandStepKind(command) === 'unknown' && <span role="alert">{t('editor.unknownCommandStep')}</span>}
+              </div>}
+            </fieldset> : <span className="quicksend-content">{commandStepSummary(command)}</span>}
             <div className="quicksend-command-actions" onClick={event => event.stopPropagation()}>
               <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={() => insertCommand(command.id)}><ArrowUpToLine size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={() => insertCommand(commands[commands.findIndex(item => item.id === command.id) + 1]?.id)}><ArrowDownToLine size={12} /></button>

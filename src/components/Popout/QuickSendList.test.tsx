@@ -128,4 +128,42 @@ describe('staged popout command list', () => {
     expect(container.querySelector<HTMLButtonElement>('.quicksend-set-manager .editor-drag-handle')!.disabled).toBe(true);
     expect(container.querySelector<HTMLButtonElement>('.quicksend-row .editor-drag-handle')!.disabled).toBe(true);
   });
+
+  it('renders the per-step wait as a labelled field with a unit, not a bare number', () => {
+    act(() => { click('.quicksend-edit-btn'); });
+    const field = container.querySelector('.after-delay-field')!;
+    expect(field).not.toBeNull();
+    expect(field.textContent).toContain('sendCmdEditor.afterDelayLabel');
+    expect(field.textContent).toContain('sendCmdEditor.delayUnit');
+    const input = field.querySelector('input')!;
+    expect(input.getAttribute('aria-label')).toBe('sendCmdEditor.afterDelayLabel');
+    expect(input.getAttribute('title')).toBe('sendCmdEditor.delayTooltip');
+  });
+
+  it('keeps the wait field on a baud-rate step, since waiting is positional', () => {
+    const paramsSet: SendCommandSet = {
+      id: 'params', name: 'Params', isLoop: false, loopDelay: 0, repeatCount: 0, schemaVersion: 2,
+      commands: [{
+        id: 'p', name: 'Baud', order: 0, delay: 100, type: 'string', content: '',
+        appendLineEnding: 'None', kind: 'setParams', baudRate: 230400,
+      }],
+    };
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const other = createRoot(host);
+    act(() => {
+      other.render(createElement(QuickSendList, {
+        active: true, sets: [paramsSet], selectedSet: paramsSet, onSelectSet: () => {}, flashingId: null,
+        onSend: vi.fn(), onOpenSetEditor: () => {}, ready: true, dirty: false, dirtyIds: new Set<string>(),
+        pending: false, saving: false, error: null, canSend: true, onReplaceSets: () => {},
+        onSave: async () => false, onDiscard: async () => false,
+      }));
+    });
+    act(() => { (host.querySelector('.quicksend-edit-btn') as HTMLButtonElement).click(); });
+    // 波特率 + 「之后等待」两个数字字段都在同一步骤上。
+    expect(host.querySelectorAll('.quicksend-edit-form input[type="number"]')).toHaveLength(2);
+    expect(host.querySelector('.after-delay-field')?.querySelector('input')?.value).toBe('100');
+    act(() => { other.unmount(); });
+    host.remove();
+  });
 });

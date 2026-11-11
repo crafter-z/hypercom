@@ -186,6 +186,114 @@
   50%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-error) 28%, transparent); }
 }
 
+/* ---- 增强流程状态条 ----
+ * 运行阶段用 accent 呼吸点表示「正在进行」，终止阶段（完成/停止/失败）用
+ * 对应语气色且不再脉动——停留到用户清除，作为「流程为什么停了」的可见记录。 */
+.op-flow-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 var(--space-2);
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  font-size: var(--text-2xs);
+  min-width: 0;
+}
+
+.op-flow-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-color);
+  flex-shrink: 0;
+  animation: op-flow-pulse 1.4s ease-in-out infinite;
+}
+
+.op-flow-status.is-completed .op-flow-status-dot,
+.op-flow-status.is-stopped .op-flow-status-dot,
+.op-flow-status.is-failed .op-flow-status-dot {
+  animation: none;
+}
+
+.op-flow-status.is-completed .op-flow-status-dot { background: var(--text-success, #4caf50); }
+.op-flow-status.is-stopped .op-flow-status-dot { background: var(--text-secondary); }
+.op-flow-status.is-failed .op-flow-status-dot { background: var(--text-error); }
+
+.op-flow-status.is-failed {
+  border-color: var(--text-error);
+  color: var(--text-error);
+}
+
+.op-flow-status-text {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.op-flow-status-progress {
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-flow-status-dismiss {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@keyframes op-flow-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+/* ---- 折叠态流程徽标 ----
+ * 面板收起后，运行中的增强流程在主窗里唯一的可见/停止入口。与展开态
+ * `.op-flow-status` 同一语气（accent + 呼吸点）但更紧凑；未运行流程时组件
+ * 根本不渲染，因此普通用户的折叠态界面零变化。 */
+.op-flow-badge {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  min-width: 0;
+  padding: 1px 3px 1px 8px;
+  border: 1px solid var(--accent-emphasis);
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+
+.op-flow-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-color);
+  flex-shrink: 0;
+  animation: op-flow-pulse 1.4s ease-in-out infinite;
+}
+
+.op-flow-badge-text {
+  color: var(--accent-color);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.op-flow-badge-step {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-flow-badge-stop {
+  flex-shrink: 0;
+}
+
 /* ==================== Send Section ==================== */
 
 /* ---- Quick commands — the inline strip shows every command of the ACTIVE

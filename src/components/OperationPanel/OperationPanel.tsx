@@ -7,13 +7,51 @@ import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import ReplayImportDialog from './ReplayImportDialog';
-import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Type } from 'lucide-react';
+import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Type, Square } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
 import ParamsSection from './ParamsSection';
 import { useLogReplay } from '../MainDisplay/hooks/useLogReplay';
 import { useCyclicSend } from './hooks/useCyclicSend';
 import { getPluginViewState, isRawSerialDisplay, subscribePluginViewState } from '../../utils/pluginViewRuntime';
+import { isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
+
+export interface FlowRunningBadgeProps {
+  /** 流程当前步骤（1-based）与总步数；缺失时只显示徽标文案。 */
+  step?: number;
+  totalSteps?: number;
+  onStop: () => void;
+}
+
+/**
+ * 折叠态流程徽标：操作面板收起后，运行中的增强流程在主窗里唯一的可见入口
+ * 与停止入口（展开态由 `.op-flow-status` 状态条承担，两处不重复显示）。
+ *
+ * 必须定义在模块级——组件函数体内定义会让它在每帧重建（仓库硬规则）。
+ * 停止按钮同时要 `stopPropagation`：`.operation-panel-header` 自身是
+ * 「点一下展开/收起」的开关，否则停流程会顺带把面板展开。
+ */
+export function FlowRunningBadge({ step, totalSteps, onStop }: FlowRunningBadgeProps) {
+  const { t } = useTranslation();
+  return (
+    <span className="op-flow-badge">
+      <span className="op-flow-badge-dot" aria-hidden="true" />
+      <span className="op-flow-badge-text">{t('operationPanel.flowBadge')}</span>
+      {step !== undefined && totalSteps !== undefined && (
+        <span className="op-flow-badge-step">{t('operationPanel.flowBadgeStep', { step, totalSteps })}</span>
+      )}
+      <button
+        type="button"
+        className="btn btn-icon btn-sm op-flow-badge-stop"
+        title={t('operationPanel.flowStop')}
+        aria-label={t('operationPanel.flowStop')}
+        onClick={(event) => { event.stopPropagation(); onStop(); }}
+      >
+        <Square size={11} />
+      </button>
+    </span>
+  );
+}
 
 const OperationPanel: React.FC = () => {
   const { t } = useTranslation();
@@ -58,6 +96,11 @@ const OperationPanel: React.FC = () => {
   // 存 useOperationStore.cyclicLoops（每端口 Record），SendSection 按钮按当前
   // 聚焦端口查询状态。
   useCyclicSend({ sendData });
+
+  // 折叠态流程徽标（只读订阅，不新增 store 状态）：收起后运行中的增强流程
+  // 仍需在主窗可见、可停止。未运行时为 null / false，界面零变化。
+  const flowStatus = useFlowStatus(activePortId);
+  const flowRunning = isFlowRunning(activePortId);
 
   // 参数同步（issue #4-2）：记录「已应用参数」的所属端口与签名，用于区分
   // 「切换标签」与「参数变更」——切换标签时把该端口的已存参数载入操作面板；
@@ -203,6 +246,14 @@ const OperationPanel: React.FC = () => {
             <span className="operation-panel-port">{activePortId}</span>
           )}
         </div>
+        {/* 收起后才显示：展开态已有 `.op-flow-status` 状态条，不重复。 */}
+        {collapsed && flowRunning && flowStatus && (
+          <FlowRunningBadge
+            step={flowStatus.step}
+            totalSteps={flowStatus.totalSteps}
+            onStop={() => useOperationStore.getState().setCyclicLoop(flowStatus.portId, false)}
+          />
+        )}
       </div>
 
       {!collapsed && (

@@ -12,6 +12,7 @@ import { useRuleStore } from '../stores/useRuleStore';
 import { configService } from '../services/tauri';
 import { enqueueConfigWrite } from './configWriteQueue';
 import { normalizeCommandOrder } from './commandOrder';
+import { validateCommandSetSteps } from './commandSteps';
 import { jsonEqual as same } from './jsonEqual';
 import { useSystemStore } from '../stores/useSystemStore';
 import { readEditorRecovery, recoverableEntityCollection, recoveryKeys, recoveryRecord, writeEditorRecovery } from './entityEditorRecovery';
@@ -303,9 +304,8 @@ function validateEntity(kind: EntityKey, item: Entity): string | null {
     }
   } else if (kind === 'sendCommandSets') {
     if (!Array.isArray(value.commands) || validateIds(value.commands as Entity[])) return 'editor.invalidEntity';
-    for (const command of ((value.commands as Array<Record<string, unknown>> | undefined) ?? [])) {
-      if (command.type === 'hex' && invalidHex(command.content)) return 'editor.invalidHex';
-    }
+    const commandError = validateCommandSetSteps(item as SendCommandSet);
+    if (commandError) return commandError;
   } else if (kind === 'protocolTemplates') {
     if (invalidHex(value.headerBytes) || invalidHex(value.footerBytes)) return 'editor.invalidHex';
     if (!Number.isInteger(value.lengthFieldOffset) || Number(value.lengthFieldOffset) < 0) return 'editor.invalidProtocol';

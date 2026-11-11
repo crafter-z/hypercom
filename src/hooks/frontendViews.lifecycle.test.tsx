@@ -17,9 +17,11 @@ import { getViewportManager, snapshotTerminalLines, releaseViewportManager } fro
 import { getRxPipeline } from '../utils/rxPipeline';
 import { trafficStats } from '../utils/trafficStats';
 import { ttyService } from '../utils/ttyService';
+import { getFlowStatus, isFlowRunning, resetFlowRuntime } from '../utils/flowRuntime';
+import type { SendCommand, SendCommandSet } from '../types';
 
 vi.mock('../services/tauri', () => ({
-  serialService: { sendSerialData: vi.fn() },
+  serialService: { sendSerialData: vi.fn(), setSerialParams: vi.fn() },
 
   gitBashSimService: { resizeGitBashSim: vi.fn(async () => {}) },
 }));
@@ -52,10 +54,12 @@ beforeEach(async () => {
   releaseSendHistory('COM1');
   releaseViewportManager('COM1');
   resetStoresForTests();
+  resetFlowRuntime();
   useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'connected', type: 'real', isHidden: false, mode: 'trx' }] });
   getViewportManager('COM1');
   tabId = useAppStore.getState().openTab('COM1');
   vi.mocked(serialService.sendSerialData).mockResolvedValue(3);
+  vi.mocked(serialService.setSerialParams).mockResolvedValue(undefined);
   vi.mocked(fileService.pickReplaySources).mockResolvedValue(picked);
   root = createRoot(document.createElement('div'));
   await act(async () => { root.render(createElement(Probe)); });
@@ -166,6 +170,108 @@ describe('retired frontend view work', () => {
     expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['A', 'B', 'A', 'B', 'NEW']);
     expect(Boolean(useOperationStore.getState().cyclicLoops.COM1)).toBe(false);
   });
+
+/**
+/**
+ * 增强流程（命令集含 setParams 动作）：与旧命令集共用同一 runtime，
+ * 但要按步骤真实执行、发布端口独占，并且不得改变旧 send-only 命令集的行为。
+ * 等待不再是独立的步骤类型——它是每一步自带的 `delay`（发送与改参都生效）。
+ */
+describe('enhanced command flow', () => {
+  const sendStep = (content: string, order: number, delay = 0): SendCommand => ({
+    id: `send-${order}`, name: content, order, delay, type: 'string', content, appendLineEnding: 'None',
+  });
+  const setParams = (baudRate: number, order: number, delay = 0): SendCommand => ({
+    id: `params-${order}`, name: 'params', order, delay, type: 'string', content: '', appendLineEnding: 'None', kind: 'setParams', baudRate,
+  });
+
+  /**
+   * 推进假计时器，并消费「tick 内部 await 之后才排上的 0ms 跳转」——只调
+   * `advanceTimersByTimeAsync` 会在恰好用尽预算时停在两步之间。
+   */
+  const advance = async (ms: number): Promise<void> => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    });
+  };
+
+  async function startFlow(commands: SendCommand[], extra: Partial<SendCommandSet> = {}): Promise<void> {
+    useRuleStore.getState().setSendCommandSets([{
+      id: 'flow', name: 'flow', isLoop: false, loopDelay: 0, repeatCount: 1,
+      schemaVersion: 2, commands, ...extra,
+    }]);
+    useRuleStore.getState().setActiveSendCommandSetId('flow');
+    await act(async () => { useOperationStore.getState().setCyclicLoop('COM1', true); });
+    await advance(100);
+  }
+
+  it('honours the wait attached to a parameter step instead of sending right away', async () => {
+    await startFlow([
+      { ...sendStep('AA', 0), type: 'hex' },
+      setParams(230400, 1, 400),
+      sendStep('CC', 2),
+    ]);
+
+    expect(serialService.setSerialParams).toHaveBeenCalledWith('COM1', expect.objectContaining({ baudRate: 230400 }));
+    // 本机参数与端口元数据同步到新波特率（侧边栏/参数面板/后续步骤同源）。
+    expect(useAppStore.getState().ports.find(port => port.id === 'COM1')?.baudRate).toBe(230400);
+    expect(useOperationStore.getState().baudRate).toBe(230400);
+    // 「之后等待」挂在改参步骤上：下一步还没发，且状态如实显示在等多久。
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['AA']);
+    expect(getFlowStatus('COM1')).toMatchObject({ phase: 'waiting', detail: '400 ms' });
+    expect(isFlowRunning('COM1')).toBe(true);
+
+    // 等没等够由计时器决定：先跑 200ms 仍不得发下一步。
+    await advance(200);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['AA']);
+
+    await advance(300);
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['AA', 'CC']);
+    // 发满 repeatCount 后自然结束并释放独占。
+    expect(useOperationStore.getState().cyclicLoops.COM1).toBeFalsy();
+    expect(getFlowStatus('COM1')?.phase).toBe('completed');
+    expect(isFlowRunning('COM1')).toBe(false);
+  });
+
+  it('blocks user sends while the flow owns the port and frees it on stop', async () => {
+    await startFlow([sendStep('AA', 0), setParams(230400, 1, 5000), sendStep('CC', 2)]);
+
+    expect(vi.mocked(serialService.sendSerialData)).toHaveBeenCalledTimes(1);
+    expect(isFlowRunning('COM1')).toBe(true);
+    expect(getFlowStatus('COM1')).toMatchObject({ phase: 'waiting', detail: '5000 ms' });
+
+    // 手动发送（默认 origin='user'）在流程占用期间被统一入口拒绝，且没有到后端。
+    const written = await act(async () => sendToPort('COM1', 'manual', false, 'None'));
+    expect(written).toBe(0);
+    expect(vi.mocked(serialService.sendSerialData)).toHaveBeenCalledTimes(1);
+
+    await act(async () => { useOperationStore.getState().setCyclicLoop('COM1', false); });
+    await advance(0);
+    expect(isFlowRunning('COM1')).toBe(false);
+    expect(getFlowStatus('COM1')?.phase).toBe('stopped');
+
+    // 停止直接清掉未到期的等待计时器，不会在 5s 后继续跑下去。
+    await advance(6000);
+    expect(vi.mocked(serialService.sendSerialData)).toHaveBeenCalledTimes(1);
+  });
+
+  it('never locks the port for a legacy send-only command set', async () => {
+    await startFlow([sendStep('LEGACY', 0)], { schemaVersion: undefined, isLoop: true, repeatCount: 0, loopDelay: 1000 });
+
+    expect(getFlowStatus('COM1')).toBeNull();
+    expect(isFlowRunning('COM1')).toBe(false);
+    expect(vi.mocked(serialService.sendSerialData)).toHaveBeenCalledTimes(1);
+    // 旧循环正在运行，用户手动发送不被流程守卫拦截（旧体验不变）。
+    const written = await act(async () => sendToPort('COM1', 'manual', false, 'None'));
+    expect(written).toBe(3);
+    expect(vi.mocked(serialService.sendSerialData)).toHaveBeenCalledTimes(2);
+
+    await act(async () => { useOperationStore.getState().setCyclicLoop('COM1', false); });
+    expect(useOperationStore.getState().cyclicLoops.COM1).toBeFalsy();
+  });
+});
 
   it('keeps a replacement cyclic run alive after an old round-limit send settles', async () => {
     const old = deferred<number>();

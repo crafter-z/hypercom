@@ -14,6 +14,7 @@ import { notifyError, notifySuccess, useToastStore } from '../../../stores/useTo
 import { eventService, serialService } from '../../../services/tauri';
 import type { FileProgressPayload } from '../../../services/tauri';
 import { isSendablePort } from '../../../utils/sendGuard';
+import { isFlowRunning } from '../../../utils/flowRuntime';
 import { trafficStats } from '../../../utils/trafficStats';
 import type { PortTrafficLease } from '../../../utils/trafficStats';
 
@@ -103,6 +104,12 @@ export function useFileSend(portId: string | null): FileSendControls {
     if (!id || activeRef.current) return;
     if (!isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) {
       useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.portClosedWarning', portId: id });
+      return;
+    }
+    // File send bypasses `sendToPort`, so the enhanced-flow lock must be applied
+    // here too — otherwise a flow's parameter switch could race a file transfer.
+    if (isFlowRunning(id)) {
+      useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.flowBusy', portId: id });
       return;
     }
     const path = await open({ multiple: false });

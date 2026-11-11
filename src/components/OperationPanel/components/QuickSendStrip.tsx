@@ -45,6 +45,8 @@ export interface QuickSendStripProps {
   /** 当前激活命令集的命令，已按 order 排序。 */
   commands: SendCommand[];
   isPortActive: boolean;
+  /** 该端口被增强流程独占时置灰——发送会被统一入口拒绝，不做假可用状态。 */
+  isBusy?: boolean;
   onSendCommand: (cmd: SendCommand) => void;
   /** 「配置命令集」入口（交由 SendSection 打开设置页，避免两处各自写导航）。 */
   onConfigure: () => void;
@@ -53,6 +55,7 @@ export interface QuickSendStripProps {
 export function QuickSendStrip({
   commands,
   isPortActive,
+  isBusy = false,
   onSendCommand,
   onConfigure,
 }: QuickSendStripProps) {
@@ -91,7 +94,7 @@ export function QuickSendStrip({
             <QuickCmdPill
               key={cmd.id}
               cmd={cmd}
-              disabled={!isPortActive}
+              disabled={!isPortActive || isBusy}
               onClick={() => onSendCommand(cmd)}
             />
           ))}

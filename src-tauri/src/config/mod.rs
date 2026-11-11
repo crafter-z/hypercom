@@ -14,7 +14,8 @@
  *    实体子结构再各自带字段级 `#[serde(default)]`；
  * 2) 解析前的 `strip_legacy_memory_budget_keys`：在 Value 层物理删除已被取代的旧 key；
  * 3) 解析后的 `normalize_legacy_serial_enums`：把持久化实体里已收窄的自由字符串枚举
- *    （端口预设的帧格式）一次性收敛到合法取值，下次 save 落盘即已归一。
+ *    （端口预设的帧格式）一次性收敛到合法取值，并折叠已撤销的 `kind == "wait"`
+ *    等待步骤，下次 save 落盘即已归一。
  *
  * 曾有的 `configVersion` 是「每次 set_config 无条件重写为 1」的装饰品——既不参与分派
  * 也不影响解析（旧值只是被 serde 当未知字段丢弃），故删除。
@@ -74,6 +75,17 @@ pub struct SendCommandEntry {
     pub cmd_type: String,
     pub content: String,
     pub append_line_ending: String,
+    /// Missing = legacy send. Keep a string so future step kinds survive config loading;
+    /// execution must reject unsupported kinds instead of treating them as text sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Explicit wait duration, independent of the legacy inter-command delay.
+    /// Invalid values are retained for editor/run validation, never silently clamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i32>,
+    /// Local baud rate for a setParams step; other serial parameters are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baud_rate: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +460,9 @@ fn strip_legacy_memory_budget_keys(raw: &str) -> Option<serde_json::Value> {
 /// 下面的集合必须与 `serial/ports_real.rs` 的 `parse_*` 接受集合逐项相等：归一化集合
 /// 比解析集合**窄**会把合法值误改成默认值（用户静默丢配置），比它**宽**则会放过非法值。
 /// 新增帧格式取值时两处一起改（parse_* 旁边有对应提示）。
+///
+/// 同一函数还折叠旧配置里已撤销的 `kind == "wait"` 命令行（等待时长统一改由每条步骤
+/// 自带的 `delay` 表达）：见函数内 `send_command_sets` 循环处的规则说明。
 fn normalize_legacy_serial_enums(config: &mut AppConfig) {
     // The old bookmark action became alert. Normalize the loaded baseline, not
     // only the frontend runtime, otherwise merely opening an entity editor makes
@@ -497,6 +512,63 @@ fn normalize_legacy_serial_enums(config: &mut AppConfig) {
             );
             preset.handshake = "None".to_string();
         }
+    }
+
+    // 撤销独立的「等待步骤」（未发布）后，旧配置里残留的 `kind == "wait"` 行会在执行期
+    // 被当成未知步骤拒绝。加载期按位置折叠成新模型的等待语义，下次 save 落盘即已归一：
+    // - 非末条 → `durationMs`（缺省 0）累加到前一条命令的 `delay`（步骤间等待）；
+    // - 末条   → 累加到该 set 的 `loop_delay`（轮末等待由 loopDelay 承担）；
+    // - 没有前一条可挂（唯一/第一条）→ 前置等待在新模型里无法表达，直接丢弃并记录，
+    //   宁可丢时长也不把它挪到错误的位置改坏时序。
+    // 累加一律 saturating 且结果不小于 0（`duration_ms` 允许负数残留）。
+    // 其它 kind（含未知值）一律不动：执行期显式拒绝，加载期不猜（既有契约）。
+    // 删除行后按 set 内数组位置重排 `order` 为 0..n（与前端 `renumberCommands` 同义），
+    // 保持剩余行的原相对顺序；没有删除的 set 不碰 `order`。
+    for set in &mut config.entities.send_command_sets {
+        let commands = std::mem::take(&mut set.commands);
+        let original_len = commands.len();
+        let last_index = original_len.checked_sub(1);
+        let mut kept: Vec<SendCommandEntry> = Vec::with_capacity(original_len);
+        for (index, command) in commands.into_iter().enumerate() {
+            if command.kind.as_deref() != Some("wait") {
+                kept.push(command);
+                continue;
+            }
+            let duration = command.duration_ms.unwrap_or(0);
+            if kept.is_empty() {
+                log::info!(
+                    "Migrated command set {} dropped leading wait step {} ({}ms): no previous command to carry the delay",
+                    set.id,
+                    command.id,
+                    duration
+                );
+            } else if Some(index) == last_index {
+                set.loop_delay = set.loop_delay.saturating_add(duration).max(0);
+                log::info!(
+                    "Migrated command set {} trailing wait step {} ({}ms) -> loopDelay {}",
+                    set.id,
+                    command.id,
+                    duration,
+                    set.loop_delay
+                );
+            } else if let Some(previous) = kept.last_mut() {
+                previous.delay = previous.delay.saturating_add(duration).max(0);
+                log::info!(
+                    "Migrated command set {} wait step {} ({}ms) -> command {} delay {}",
+                    set.id,
+                    command.id,
+                    duration,
+                    previous.id,
+                    previous.delay
+                );
+            }
+        }
+        if kept.len() < original_len {
+            for (order, command) in kept.iter_mut().enumerate() {
+                command.order = order as i32;
+            }
+        }
+        set.commands = kept;
     }
 }
 
@@ -1468,6 +1540,120 @@ mod tests {
     }
 
     #[test]
+    fn legacy_wait_steps_are_folded_on_load() {
+        // 撤销独立的「等待步骤」后，旧的 `kind == "wait"` 行必须在加载期折叠成新模型：
+        // 中间 wait 累加到前一条命令的 delay，末尾 wait 累加到 set 的 loopDelay，
+        // 唯一/第一条没有前一条可挂 → 丢弃，未知 kind 原样保留；删除后 order 重排 0..n。
+        let dir = std::env::temp_dir().join(format!(
+            "hypercom_test_legacy_wait_steps_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.json");
+        let legacy = legacy_json(serde_json::json!({
+            "sendCommandSets": [
+                {
+                    "id": "middle", "name": "中间 wait", "isLoop": false, "loopDelay": 1000,
+                    "commands": [
+                        {"id": "a", "name": "A", "order": 0, "delay": 100, "type": "string", "content": "A", "appendLineEnding": "None"},
+                        {"id": "w1", "name": "Wait", "order": 1, "delay": 0, "type": "string", "content": "", "appendLineEnding": "None", "kind": "wait", "durationMs": 250},
+                        {"id": "b", "name": "B", "order": 2, "delay": 50, "type": "string", "content": "B", "appendLineEnding": "None"}
+                    ]
+                },
+                {
+                    "id": "trailing", "name": "末尾 wait", "isLoop": true, "loopDelay": 300,
+                    "commands": [
+                        {"id": "c", "name": "C", "order": 5, "delay": 30, "type": "string", "content": "C", "appendLineEnding": "None"},
+                        {"id": "w2", "name": "Wait", "order": 9, "delay": 0, "type": "string", "content": "", "appendLineEnding": "None", "kind": "wait", "durationMs": 400}
+                    ]
+                },
+                {
+                    "id": "only", "name": "唯一 wait", "isLoop": false, "loopDelay": 700,
+                    "commands": [
+                        {"id": "w3", "name": "Wait", "order": 0, "delay": 0, "type": "string", "content": "", "appendLineEnding": "None", "kind": "wait", "durationMs": 500}
+                    ]
+                },
+                {
+                    "id": "leading", "name": "首条 wait", "isLoop": false, "loopDelay": 40,
+                    "commands": [
+                        {"id": "w4", "name": "Wait", "order": 0, "delay": 0, "type": "string", "content": "", "appendLineEnding": "None", "kind": "wait", "durationMs": 60},
+                        {"id": "d", "name": "D", "order": 1, "delay": 20, "type": "string", "content": "D", "appendLineEnding": "None"}
+                    ]
+                },
+                {
+                    "id": "unknown", "name": "未知 kind", "isLoop": false, "loopDelay": 80,
+                    "commands": [
+                        {"id": "e", "name": "E", "order": 0, "delay": 10, "type": "string", "content": "E", "appendLineEnding": "None"},
+                        {"id": "f", "name": "F", "order": 1, "delay": 0, "type": "string", "content": "", "appendLineEnding": "None", "kind": "futureAction", "durationMs": 999}
+                    ]
+                }
+            ]
+        }));
+        fs::write(&config_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let mut mgr = ConfigManager::new(Some(config_path.clone())).unwrap();
+        let sets = &mgr.get_config().entities.send_command_sets;
+
+        // 中间 wait：行消失，时长累加到前一条命令的 delay，order 重排为 0..n
+        let middle = &sets[0];
+        assert_eq!(middle.loop_delay, 1000, "中置 wait 不改 loopDelay");
+        assert_eq!(middle.commands.len(), 2);
+        assert_eq!(middle.commands[0].id, "a");
+        assert_eq!(middle.commands[0].delay, 350);
+        assert_eq!(middle.commands[1].id, "b");
+        assert_eq!(middle.commands[1].delay, 50);
+        assert_eq!(
+            middle.commands.iter().map(|c| c.order).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        // 末尾 wait：行消失，时长累加到 set 的 loopDelay，剩余 order 重排
+        let trailing = &sets[1];
+        assert_eq!(trailing.loop_delay, 700);
+        assert_eq!(trailing.commands.len(), 1);
+        assert_eq!(trailing.commands[0].id, "c");
+        assert_eq!(trailing.commands[0].delay, 30);
+        assert_eq!(trailing.commands[0].order, 0);
+
+        // 唯一 wait：没有前一条可挂 → 整条丢弃，loopDelay 不被改写
+        let only = &sets[2];
+        assert_eq!(only.loop_delay, 700);
+        assert!(only.commands.is_empty());
+
+        // 首条 wait 同样丢弃，且不把时长挪到后面的命令上（时序不变形）
+        let leading = &sets[3];
+        assert_eq!(leading.loop_delay, 40);
+        assert_eq!(leading.commands.len(), 1);
+        assert_eq!(leading.commands[0].id, "d");
+        assert_eq!(leading.commands[0].delay, 20);
+        assert_eq!(leading.commands[0].order, 0);
+
+        // 未知 kind 原样保留（既有契约：执行期显式拒绝，加载期不动），行数不减
+        let unknown = &sets[4];
+        assert_eq!(unknown.commands.len(), 2);
+        assert_eq!(unknown.commands[1].kind.as_deref(), Some("futureAction"));
+        assert_eq!(unknown.commands[1].duration_ms, Some(999));
+        assert_eq!(unknown.commands[1].delay, 0);
+        assert_eq!(
+            unknown.commands.iter().map(|c| c.order).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        // 幂等：落盘后的归一化结果再次加载不再变化（不会二次累加）
+        mgr.save().unwrap();
+        drop(mgr);
+        let reloaded = ConfigManager::new(Some(config_path)).unwrap();
+        let sets = &reloaded.get_config().entities.send_command_sets;
+        assert_eq!(sets[0].commands.len(), 2);
+        assert_eq!(sets[0].commands[0].delay, 350);
+        assert_eq!(sets[1].loop_delay, 700);
+        assert!(sets[2].commands.is_empty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn legacy_bookmark_action_is_normalized_in_the_loaded_baseline() {
         let dir = std::env::temp_dir().join(format!("hypercom_trigger_migration_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -1671,6 +1857,9 @@ mod tests {
             cmd_type: "string".into(),
             content: "AT".into(),
             append_line_ending: "\\r\\n".into(),
+            kind: None,
+            duration_ms: None,
+            baud_rate: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"string\""), "cmd_type should serialize as 'type': {}", json);
@@ -1691,6 +1880,74 @@ mod tests {
         let json = serde_json::to_string(&preset).unwrap();
         assert!(json.contains("\"baudRate\""), "should be camelCase: {}", json);
         assert!(json.contains("\"dtr\":true"), "dtr should be bool: {}", json);
+    }
+
+    #[test]
+    fn test_legacy_send_command_roundtrip_keeps_wire_shape() {
+        let original = serde_json::json!({
+            "id": "legacy", "name": "Ping", "order": 3, "delay": 125,
+            "type": "hex", "content": "AA 55", "appendLineEnding": "None"
+        });
+        let command: SendCommandEntry = serde_json::from_value(original.clone()).unwrap();
+        assert_eq!(command.kind, None);
+        assert_eq!(command.duration_ms, None);
+        assert_eq!(command.baud_rate, None);
+        assert_eq!(serde_json::to_value(command).unwrap(), original);
+
+        let set: SendCommandSetEntry = serde_json::from_value(serde_json::json!({
+            "id": "legacy-set", "name": "Legacy", "isLoop": true,
+            "loopDelay": 750, "commands": [original]
+        })).unwrap();
+        assert_eq!(set.repeat_count, 0);
+        assert_eq!(set.loop_delay, 750);
+        assert_eq!(set.commands[0].delay, 125);
+        assert_eq!(set.commands[0].order, 3);
+    }
+
+    #[test]
+    fn test_flow_command_optional_fields_roundtrip() {
+        for (kind, extra) in [
+            ("send", serde_json::json!({})),
+            ("wait", serde_json::json!({ "durationMs": 200 })),
+            ("setParams", serde_json::json!({ "baudRate": 230400 })),
+            ("futureAction", serde_json::json!({ "durationMs": 500, "baudRate": 460800 })),
+        ] {
+            let mut original = serde_json::json!({
+                "id": "step", "name": "Step", "order": 0, "delay": 0,
+                "type": "string", "content": "", "appendLineEnding": "None", "kind": kind
+            });
+            original.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let command: SendCommandEntry = serde_json::from_value(original.clone()).unwrap();
+            assert_eq!(command.kind.as_deref(), Some(kind));
+            assert_eq!(serde_json::to_value(command).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn test_unknown_flow_kind_does_not_reset_app_config() {
+        let mut config = legacy_config(serde_json::json!({
+            "theme": "light",
+            "sendCommandSets": [{
+                "id": "future-set", "name": "Future", "isLoop": false,
+                "loopDelay": 100, "repeatCount": 2,
+                "commands": [{
+                    "id": "future", "name": "Unsupported", "order": 0, "delay": 0,
+                    "type": "string", "content": "", "appendLineEnding": "None",
+                    "kind": "futureAction", "durationMs": -1, "baudRate": 0
+                }]
+            }]
+        }));
+        ConfigManager::validate_and_clamp(&mut config);
+        assert_eq!(config.theme, "light");
+        let command = &config.entities.send_command_sets[0].commands[0];
+        assert_eq!(command.kind.as_deref(), Some("futureAction"));
+        // Preserve invalid action values for explicit editor/run rejection rather than
+        // silently changing the intended operation while loading unrelated settings.
+        assert_eq!(command.duration_ms, Some(-1));
+        assert_eq!(command.baud_rate, Some(0));
+        let restored: AppConfig = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored.entities.send_command_sets[0].commands[0].kind.as_deref(), Some("futureAction"));
+        assert_eq!(restored.entities.send_command_sets[0].repeat_count, 2);
     }
 
     #[test]

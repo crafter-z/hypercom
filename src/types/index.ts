@@ -195,12 +195,30 @@ export interface HighlightRuleSet {
 
 // ==================== 发送命令相关 ====================
 
-/** 单条发送命令 */
+/**
+ * 命令列表里的动作类型：缺省（旧数据）与 `'send'` 都是发送数据；`'setParams'`
+ * 是修改本机串口参数。
+ *
+ * 刻意**没有**独立的「等待」动作：等待时长是每一步自带的 `delay`（见下），
+ * 与「执行后多久做下一步」是同一件事——再单独立一种行类型会让同一语义有两个表达。
+ */
+export type CommandStepKind = 'send' | 'setParams';
+
+/** Command-step wire shape keeps legacy send fields for backwards-compatible loading. */
 export interface SendCommand {
+  kind?: CommandStepKind;
+  /** `setParams` 动作的本机波特率（MVP 只开放这一个参数）。 */
+  baudRate?: number;
   id: string;
   name: string;
   order: number;           // 执行顺序
-  delay: number;           // 延时 (ms)
+  /**
+   * 本步骤执行后、同轮下一步之前的间隔 (ms)。
+   *
+   * 对**任何**动作类型（发送 / 改参）都生效；本轮最后一步之后改用集合级
+   * `loopDelay`（轮间间隔），因为轮边界属于「轮与轮之间」而不是「步骤之间」。
+   */
+  delay: number;
   type: 'string' | 'hex';
   content: string;
   appendLineEnding: LineEnding;
@@ -208,6 +226,8 @@ export interface SendCommand {
 
 /** 发送命令规则集 */
 export interface SendCommandSet {
+  /** Omitted for legacy sets; enhanced sets keep version 2 even if steps are later removed. */
+  schemaVersion?: 2;
   id: string;
   name: string;
   commands: SendCommand[];

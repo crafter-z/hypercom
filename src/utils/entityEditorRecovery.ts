@@ -20,8 +20,9 @@ export function recoverableEntityCollection(kind: EntityKey, value: unknown): va
   return value.every(item => {
     const common: Fields = { id: 'string', name: 'string' };
     switch (kind) {
-      case 'sendCommandSets': return entityShape(item, { ...common, isLoop: 'boolean', loopDelay: 'number', repeatCount: 'number' }, {}, {
+      case 'sendCommandSets': return entityShape(item, { ...common, isLoop: 'boolean', loopDelay: 'number', repeatCount: 'number' }, { schemaVersion: 'number' }, {
         key: 'commands', fields: { ...common, order: 'number', delay: 'number', type: 'string', content: 'string', appendLineEnding: 'string' },
+        optional: { kind: 'string', baudRate: 'number' },
       });
       case 'highlightRuleSets': return entityShape(item, { ...common, isEnabled: 'boolean' }, {}, {
         key: 'rules', fields: { ...common, pattern: 'string', isRegex: 'boolean' }, optional: { color: 'string', bold: 'boolean', italic: 'boolean' },

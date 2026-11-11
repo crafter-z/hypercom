@@ -22,6 +22,7 @@ import '@xterm/xterm/css/xterm.css';
 import { useAppStore } from '../../stores/useAppStore';
 import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { ttyService } from '../../utils/ttyService';
+import { isFlowRunning } from '../../utils/flowRuntime';
 
 interface TtyViewProps {
   portId: string;
@@ -77,6 +78,13 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
       // 应答 \x1b[row;colR——对 GIT: 端口过滤掉 xterm 的应答，避免 pty 收到双应答
       // （后端应答使用的 pty 尺寸已与 xterm 尺寸同步，数值一致）。
       if (portId.startsWith('GIT:') && /^\x1b\[\d+;\d+R$/.test(data)) return;
+      // An enhanced flow owns the port's TX while it runs: keyboard input would
+      // interleave with flow steps (and with a parameter switch). Drop it here —
+      // `ttyService.send` bypasses `sendToPort`, so the shared guard cannot see it.
+      if (isFlowRunning(portId)) {
+        console.warn('[TtyView] Keystroke dropped: enhanced flow owns port', portId);
+        return;
+      }
       ttyService.send(portId, data);
     });
     // issue #11：onResize 必须在 open/fit **之前**注册——初始 fit 把 xterm 从

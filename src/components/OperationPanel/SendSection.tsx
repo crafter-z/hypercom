@@ -14,6 +14,14 @@ import { QuickSendStrip } from './components/QuickSendStrip';
 import { LineEndingSelect } from './components/LineEndingSelect';
 import { FileSendProgress, SendFileButton } from './components/SendFileControls';
 import { orderedCommands } from '../../utils/commandOrder';
+import { isSendCommand } from '../../utils/commandSteps';
+import { clearFlowStatus, isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
+import type { FlowPhase } from '../../utils/flowRuntime';
+
+/** i18n key for a flow phase label; terminal phases stay visible until cleared. */
+function flowPhaseKey(phase: FlowPhase): string {
+  return `flow.status.${phase}`;
+}
 
 export interface SendSectionProps {
   activePortId: string | null;
@@ -57,6 +65,11 @@ const SendSection: React.FC<SendSectionProps> = ({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // 增强流程运行态（每端口）：目标端口被流程独占时，本区所有手动发送入口
+  // 都要置灰并拦截——统一入口 sendToPort 仍会兜底拒绝，界面不能给出假可用状态。
+  const flowStatus = useFlowStatus(activePortId);
+  const flowBusy = isFlowRunning(activePortId);
+
   // HEX 预览/转换 + 字节计数（含非法输入的错误态）与发送历史召回各自成模块。
   const { byteCount, hexSuffix, inputErrorKey, toEditableValue, toggleHexMode } = useHexCompose({
     sendInput,
@@ -72,7 +85,9 @@ const SendSection: React.FC<SendSectionProps> = ({
   const activeCommands = useMemo(() => {
     const set = sendCommandSets.find((s) => s.id === activeSendCommandSetId);
     if (!set) return [];
-    return orderedCommands(set.commands);
+    // 快捷发送只承载「发送数据」步骤：wait / setParams 是流程动作，既不能
+    // 伪装成可一键发送的命令，也不能被静默跳过（进条只会是空 content 药丸）。
+    return orderedCommands(set.commands).filter(isSendCommand);
   }, [sendCommandSets, activeSendCommandSetId]);
 
   const openConfigToTab = (tab: string) => {
@@ -83,6 +98,8 @@ const SendSection: React.FC<SendSectionProps> = ({
   const handleSend = async () => {
     const portId = getActivePortId(useAppStore.getState());
     if (!portId || !sendInput.trim() || inputErrorKey !== null) return;
+    // Enter sends even when the button is disabled — keep the flow lock explicit.
+    if (isFlowRunning(portId)) return;
     const sentInput = sendInput;
     const written = await sendData(portId, sentInput, sendIsHex, sendAppendLineEnding);
     // issue #13：默认保留输入框内容；仅在用户开启「发送后清空」时清空。
@@ -98,6 +115,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   const handleQuickCommand = async (cmd: SendCommand) => {
     const portId = getActivePortId(useAppStore.getState());
     if (!portId || !cmd.content) return;
+    if (isFlowRunning(portId)) return;
     await sendData(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
   };
 
@@ -168,9 +186,42 @@ const SendSection: React.FC<SendSectionProps> = ({
         </div>
       </div>
 
+      {/* 增强流程状态条：显示当前阶段、轮次/步骤进度与终止原因；终止态保留到
+          用户清除，避免「流程为什么停了」无从查起。运行中不提供暂停，只有停止
+          （标题行的循环开关即该端口的停止入口）。 */}
+      {flowStatus && (
+        <div className={`op-flow-status is-${flowStatus.phase}`} role="status">
+          <span className="op-flow-status-dot" aria-hidden="true" />
+          <span className="op-flow-status-text">
+            {t(flowPhaseKey(flowStatus.phase), { detail: flowStatus.detail ?? '' })}
+          </span>
+          {flowStatus.name && flowStatus.round !== undefined && flowStatus.step !== undefined && (
+            <span className="op-flow-status-progress">
+              {t(flowStatus.totalRounds ? 'flow.status.progress' : 'flow.status.progressOpen', {
+                name: flowStatus.name,
+                round: flowStatus.round,
+                total: flowStatus.totalRounds ?? 0,
+                step: flowStatus.step,
+                totalSteps: flowStatus.totalSteps ?? 0,
+              })}
+            </span>
+          )}
+          {!flowBusy && (
+            <button
+              type="button"
+              className="btn btn-sm op-flow-status-dismiss"
+              onClick={() => clearFlowStatus(flowStatus.portId, flowStatus.runId)}
+            >
+              {t('flow.status.dismiss')}
+            </button>
+          )}
+        </div>
+      )}
+
       <QuickSendStrip
         commands={activeCommands}
         isPortActive={isPortActive}
+        isBusy={flowBusy}
         onSendCommand={handleQuickCommand}
         onConfigure={() => openConfigToTab('commands')}
       />
@@ -225,7 +276,7 @@ const SendSection: React.FC<SendSectionProps> = ({
         <div className="op-send-actions">
           <button
             className="btn btn-primary op-send-btn"
-            disabled={!isPortActive || inputErrorKey !== null}
+            disabled={!isPortActive || inputErrorKey !== null || flowBusy}
             onClick={handleSend}
           >
             <Send size={14} />
@@ -233,7 +284,7 @@ const SendSection: React.FC<SendSectionProps> = ({
           </button>
           <SendFileButton
             progress={progress}
-            isConnected={isConnected}
+            isConnected={isConnected && !flowBusy}
             onStart={() => void startFileSend()}
             onCancel={cancelFileSend}
           />

@@ -81,6 +81,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 ## 循环发送（每端口独立引擎，issue #12）
 
 - **共享调度引擎**：`components/OperationPanel/hooks/useSequentialSend.ts` 是「顺序 / 循环发送」的唯一调度实现（`createSendLoop` 纯调度 + `useSequentialSend` React 绑定）。计时器链、重入防护（任一次迭代最多在飞一个，防止可见性补发与到期定时器双触发）、可见性补发（`catchUpIfOverdue`，阈值 `SEND_LOOP_OVERDUE_MS`）、卸载自停、可选的变更自停都在引擎里；调用方只提供「一步做什么」的 `step`。**旧的循环发送状态机分叉已消除**：主窗命令集循环与弹窗文本逐行发送（`Popout/QuickSendText.tsx`）共用它——弹窗旧循环器 `Popout/usePanelCyclicSend.ts` 已删除。
+- **推进语义唯一实现**：`utils/flowSchedule.ts` 的 `advanceFlow`（纯函数）负责轮次边界、轮内延时、轮间 `loopDelay`、`repeatCount` 判定。旧行为是硬承诺：轮内非末条用该命令 `delay`、**末条不用** `delay` 而由 `loopDelay` 接续、`repeatCount` 按**轮**累加；`flowSchedule.test.ts` 逐条守卫这些语义（历史上曾用 `nextIdx >= length` 判轮末，导致第二轮起每条都误用 `loopDelay` 且提前停发）。
 - **每端口一个 runtime**：`useCyclicSend`（`components/OperationPanel/hooks/useCyclicSend.ts`）为每个端口创建一条 `SendLoop`（`startLoop(portId)`），目标端口**永远绑定启动它的端口**——不跟随活动标签、不受窗口/标签聚焦切换影响（COM3 启动循环后切到 COM4，COM3 继续发）。
 - **运行开关**：`useOperationStore.cyclicLoops: Record<portId, boolean>` + `setCyclicLoop(portId, running)`（替代旧全局单例 `isLoopSending` 布尔）；SendSection 的按钮按**当前聚焦端口**查状态——切回 COM3 时按钮自然变回「停止」。reconcile effect 幂等：开启的端口没有 runtime → 启动；runtime 存在但开关被关/移除 → 停止。
 - **启动快照**：启动时从 `useRuleStore` 读取已保存命令集（不读 `entityEditor` 会话草稿），用 `utils/commandOrder.ts` 的 `orderedCommands` 固定顺序、内容和循环参数（`isLoop` / `loopDelay` / `repeatCount` 一并快照）；之后编辑、保存、切换或删除命令集均不影响当前运行，重启循环才采用新版本。启动时命令集缺失/为空则清运行开关；自然发满 `repeatCount` 轮或单轮非循环结束发完后同样清该端口运行开关。快捷发送条、命令设置页、命令面板与循环一律经 `orderedCommands` 排序，不再手写 `order` 比较。
@@ -89,6 +90,24 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **端口未连接**：跳过本次 tick 并不推进索引，`TARGET_WAIT_MS`（500ms）后重试（切聚焦 / 短暂断开皆不中断）。
 - **可见性补发**：`useCyclicSend` 注册 `visibilitychange`，恢复可见时对每个 loop 调 `catchUpIfOverdue()`。
 - 弹窗文本模式的多种运行方式（当前行 / 当前行并下移 / 顺序 / 从光标 / 循环）由 `QuickSendText` 用 `useSequentialSend` 驱动，发送意图经 `popout:send-command` 回到主窗 `sendToPort`。
+
+## 增强流程步骤（命令集内的改参动作，兼容旧命令）
+
+命令集仍是**一个** `SendCommandSet.commands` 列表；每条命令由 `kind` 决定动作，`kind` 缺省即旧的发送命令。模型与校验在 `utils/commandSteps.ts`，推进语义在 `utils/flowSchedule.ts`，运行态在 `utils/flowRuntime.ts`，执行在 `useCyclicSend.ts`。
+
+| kind | 字段 | 语义 |
+|---|---|---|
+| 缺省 / `send` | `type` / `content` / `appendLineEnding` / `delay` | 旧发送命令，行为逐字节不变 |
+| `setParams` | `baudRate`（1–4_000_000） | 只改本机波特率，其余参数沿用该端口已确认值 |
+
+- **只有一条时间规则**：等待**不是**一种步骤类型，而是每一步自带的 `delay`（界面写作「之后等待」），对发送与改参都生效；轮与轮之间用集合级 `loopDelay`，所以**轮末那一步的 `delay` 不参与**——编辑器就地说明这件事，不藏在 tooltip 里。曾短暂实现过独立的 `wait` 步骤（`durationMs`）并已撤销：同一件事有两个表达，时序既读不出来也迁移不干净（旧实现里轮末 `wait` 还会与 `loopDelay` 叠加成双倍间隔）。
+- **旧 `wait` 行的迁移**：加载期在 Rust `normalize_legacy_serial_enums` 折叠——非末条折叠进前一步的 `delay`，末条折叠进 `loopDelay`，首条（无前一步可挂）丢弃并记 `log::info!`；其它 `kind`（含未知值）原样保留。
+- **兼容边界**：新增字段全部可选、序列化时不输出，旧 `config.json` 形状不变（Rust `SendCommandEntry` 为 `Option<...>` + `skip_serializing_if`，未知 `kind` 原样保留为 `String`，不会因未来步骤类型导致整份配置反序列化失败）。旧命令集缺 `kind` 只在**运行时**按 `send` 解释，不改写已存档案；`schemaVersion: 2` 仅由编辑器在加入非发送步骤时写入。未知 `kind` **不可执行**（`getCommandStepKind` 返回 `'unknown'`，启动前校验拒绝并保留草稿），绝不回退成文本发送。
+- **端口独占**：`isEnhancedCommandSet` 为真的命令集运行时，在 `flowRuntime` 发布 `exclusive` 状态；`sendToPort` 增加 `origin` 参数，非 `flow` 来源在独占期间被统一入口拒绝（手动发送 / 快捷发送 / 弹窗 / 触发自动回复 / 插件都走这一处）；文件发送（`useFileSend`）与 TTY 键盘（`TtyView`）绕过 `sendToPort`，各自补同样的守卫。旧命令集**不发布**任何独占状态，行为与之前完全一致。
+- **在途收尾**：若有发送/改参在飞，停止先进入 `stopping`（仍独占），待该次迭代收尾后才发布终止态——否则手动发送可能与在途参数切换交错。步骤之间的「之后等待」由调度器的计时器承担，`stop()` 直接清掉它，长等待不会把端口独占拖到超时。
+- **异常策略**：增强流程任一步失败即停止（`failed`）且不重试；旧命令集保留原有 500ms 重试与「端口未连接等待 500ms」语义。终止态（completed/stopped/failed）保留在 UI 直到用户清除，作为「流程为什么停了」的记录。
+- **运行态**：阶段（starting / running / waiting / applyingParams / stopping 与终止态）发布到 `flowRuntime` 并由主窗状态条显示；处于「之后等待」时显示 `waiting` 与该段间隔，用户看到的是「等待 200 ms」而不是黑盒。
+- **已保存快照**：启动时固定命令集快照（含 `kind` / `baudRate` / `delay`），运行中编辑、保存、切换命令集只影响下次运行。
 
 ## 快捷发送 / 命令面板
 

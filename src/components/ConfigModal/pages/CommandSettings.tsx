@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import SortableEditorList from '../../shared/SortableEditorList';
 import { orderedCommands, renumberCommands } from '../../../utils/commandOrder';
-import type { SendCommandSet } from '../../../types';
+import type { CommandStepKind, SendCommandSet } from '../../../types';
+import { createCommandStep, foldDelayIntoRoundGap, isEnhancedCommandSet, runsMultipleRounds } from '../../../utils/commandSteps';
+import { formatDurationMs, roundDurationMs, totalDurationMs } from '../../../utils/flowTiming';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
 import { useEntityPage } from '../hooks/useEntityPage';
@@ -34,19 +36,21 @@ const CommandSettings: React.FC = () => {
     }, beforeId);
   };
 
-  const handleAddCmd = (setId: string, beforeId?: string) => {
+  const handleAddCmd = (setId: string, beforeId?: string, kind: CommandStepKind = 'send') => {
     const set = page.items.find(s => s.id === setId);
     if (!set) return;
     const cmdId = crypto.randomUUID();
     const commands = orderedCommands(set.commands);
     const index = beforeId ? commands.findIndex(command => command.id === beforeId) : commands.length;
-    commands.splice(index < 0 ? commands.length : index, 0, {
-      id: cmdId,
-      name: t('commandSettings.defaultCommandName', { index: commands.length + 1 }),
-      order: 0, delay: 100, type: 'string', content: '', appendLineEnding: '\\r\\n',
-    });
+    const name = kind === 'send'
+      ? t('commandSettings.defaultCommandName', { index: commands.length + 1 })
+      : t(`sendCmdEditor.kind.${kind}`);
+    commands.splice(index < 0 ? commands.length : index, 0, createCommandStep(kind, cmdId, name));
     setLastAddedCmdId(cmdId);
-    page.update(setId, { commands: renumberCommands(commands) });
+    page.update(setId, {
+      commands: renumberCommands(commands),
+      ...(kind !== 'send' ? { schemaVersion: 2 as const } : {}),
+    });
   };
 
   return (
@@ -106,18 +110,54 @@ const CommandSettings: React.FC = () => {
           />
         </>
       )}
-      renderEditor={(set) => <SortableEditorList items={orderedCommands(set.commands)} disabled={page.saving}
-        onReorder={ids => page.update(set.id, { commands: renumberCommands(ids.map(id => set.commands.find(command => command.id === id)!)) })}
-        renderItem={(cmd, idx, handle) => <SendCmdEditor
-          cmd={cmd}
-          cmdIdx={idx}
-          handle={handle}
-          onInsert={() => handleAddCmd(set.id, cmd.id)}
-          onInsertBelow={() => handleAddCmd(set.id, orderedCommands(set.commands)[idx + 1]?.id)}
-          autoFocus={cmd.id === lastAddedCmdId}
-          onChange={patch => page.update(set.id, { commands: set.commands.map(command => command.id === cmd.id ? { ...command, ...patch } : command) })}
-          onDelete={() => page.update(set.id, { commands: renumberCommands(orderedCommands(set.commands).filter(command => command.id !== cmd.id)) })}
-        />} />}
+      renderEditor={(set) => {
+        // 轮末判定与列表顺序同源：最后一步的「之后等待」不生效（轮间用 loopDelay），
+        // 编辑器据此把这件事直接说出来，并允许一键并入轮间间隔。
+        const ordered = orderedCommands(set.commands);
+        const loops = runsMultipleRounds(set);
+        const repeat = set.repeatCount ?? 0;
+        const round = roundDurationMs(ordered);
+        const total = totalDurationMs(ordered, loops ? set.loopDelay : 0, loops ? repeat : 1) ?? 0;
+        return <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <button type="button" className="btn btn-sm" disabled={page.saving} onClick={() => handleAddCmd(set.id, undefined, 'setParams')}>{t('commandSettings.addParams')}</button>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            {t(isEnhancedCommandSet(set) ? 'commandSettings.enhancedHint' : 'commandSettings.legacyHint')}
+          </p>
+          {/* 时长汇总：让「之后等待」的累计结果可见，用户改完时序能立刻核对，
+              不用自己在心里加。只有真的有等待时才出现，避免 0 ms 的噪声。 */}
+          {round > 0 && (
+            <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
+              {loops
+                ? (repeat > 0
+                  ? t('commandSettings.timingSummary', { round: formatDurationMs(round), rounds: repeat, total: formatDurationMs(total) })
+                  : t('commandSettings.timingSummaryOpen', { round: formatDurationMs(round) }))
+                : t('commandSettings.timingSummaryOnce', { round: formatDurationMs(total) })}
+              {' '}
+              <span title={t('commandSettings.timingExcludesDevice')}>({t('commandSettings.timingExcludesDevice')})</span>
+            </p>
+          )}
+          <SortableEditorList items={ordered} disabled={page.saving}
+            onReorder={ids => page.update(set.id, { commands: renumberCommands(ids.map(id => set.commands.find(command => command.id === id)!)) })}
+            renderItem={(cmd, idx, handle) => <SendCmdEditor
+              cmd={cmd}
+              cmdIdx={idx}
+              handle={handle}
+              isRoundFinal={idx === ordered.length - 1}
+              loops={loops}
+              onFoldIntoRoundGap={() => page.update(set.id, foldDelayIntoRoundGap(set, cmd.id))}
+              onInsert={() => handleAddCmd(set.id, cmd.id)}
+              onInsertBelow={() => handleAddCmd(set.id, ordered[idx + 1]?.id)}
+              autoFocus={cmd.id === lastAddedCmdId}
+              onChange={patch => page.update(set.id, {
+                commands: set.commands.map(command => command.id === cmd.id ? { ...command, ...patch } : command),
+                ...(patch.kind && patch.kind !== 'send' ? { schemaVersion: 2 as const } : {}),
+              })}
+              onDelete={() => page.update(set.id, { commands: renumberCommands(orderedCommands(set.commands).filter(command => command.id !== cmd.id)) })}
+            />} />
+        </>;
+      }}
       countLabel={(set) => t('commandSettings.countLabel', { count: set.commands.length })}
       addItemLabel={t('commandSettings.addCommandButton')}
       onAddItem={handleAddCmd}

@@ -160,6 +160,26 @@ describe('session entity drafts versus saved runtime', () => {
   });
 });
 
+it('saves enhanced action fields and keeps an invalid step as a recoverable draft', async () => {
+  const item: SendCommandSet = {
+    ...set('one'), schemaVersion: 2,
+    commands: [
+      { id: 's', name: 'Enable', order: 0, delay: 200, type: 'string', content: 'EN', appendLineEnding: '\\r\\n' },
+      { id: 'p', name: 'Baud', kind: 'setParams', baudRate: 230400, order: 1, delay: 0, type: 'string', content: '', appendLineEnding: 'None' },
+    ],
+  };
+  replaceEntityDraft('sendCommandSets', [item]);
+  expect(await saveEntityDraft('sendCommandSets')).toBe(true);
+  expect(backend.sendCommandSets[0]).toEqual(item);
+  expect(useRuleStore.getState().sendCommandSets[0]).toEqual(item);
+  // 非法波特率：保存失败、草稿保留（-1 仍在草稿里），已提交基线不动。
+  replaceEntityDraft('sendCommandSets', [{ ...item, commands: [item.commands[0], { ...item.commands[1], baudRate: -1 }] }]);
+  expect(await saveEntityDraft('sendCommandSets')).toBe(false);
+  expect(draft().error).toBe('editor.invalidStepBaudRate');
+  expect(draft().items[0].commands[1].baudRate).toBe(-1);
+  expect(backend.sendCommandSets[0].commands[1].baudRate).toBe(230400);
+});
+
 it('accepts equivalent native JSON with different object property order on a later save', async () => {
   updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'first save' });
   expect(await saveEntityDraft('sendCommandSets')).toBe(true);
