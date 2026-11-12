@@ -6,6 +6,7 @@
  * `&mut self` 方法都是短临界区，不会与其它端口或目录遍历互相阻塞。
  */
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -196,13 +197,11 @@ impl PortLogWriter {
         };
         let written = match self.spec.format.as_str() {
             "hex" => {
-                let hex_str = data
-                    .iter()
-                    .map(|b| format!("{:02X} ", b))
-                    .collect::<String>();
-                let line = format!("{}{}\n", prefix, hex_str.trim());
-                self.writer.write_all(line.as_bytes())?;
-                line.len()
+                self.writer.write_all(prefix.as_bytes())?;
+                write_hex(&mut self.writer, data)?;
+                self.writer.write_all(b"\n")?;
+                // Two digits per byte, one space between bytes, then newline.
+                prefix.len() + data.len() * 3
             }
             "binary" => {
                 // Frame: [timestamp] direction <raw data>\n — 保留原始字节，
@@ -213,15 +212,15 @@ impl PortLogWriter {
                 prefix.len() + data.len() + 1
             }
             _ => {
-                let text = decode_bytes(data, &self.spec.encoding)
-                    .trim_end_matches(['\r', '\n'])
-                    .to_string();
+                let decoded = decode_bytes(data, &self.spec.encoding);
+                let text = decoded.trim_end_matches(['\r', '\n']);
                 if text.is_empty() {
                     return Ok(());
                 }
-                let line = format!("{}{}\n", prefix, text);
-                self.writer.write_all(line.as_bytes())?;
-                line.len()
+                self.writer.write_all(prefix.as_bytes())?;
+                self.writer.write_all(text.as_bytes())?;
+                self.writer.write_all(b"\n")?;
+                prefix.len() + text.len() + 1
             }
         };
         // 累加实际写入字节数（含时间戳/方向前缀/换行），使分片阈值反映文件真实大小
@@ -304,16 +303,43 @@ impl PortLogWriter {
     }
 }
 
-/// 按 encoding 解码字节为字符串。仅在 string 模式下调用。
+/// HEX encoding uses a fixed scratch buffer instead of one allocation per byte
+/// and two complete 3×-expanded strings. Chunk boundaries never add a newline.
+fn write_hex(writer: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    const CHUNK_BYTES: usize = 256;
+    let mut encoded = [b' '; CHUNK_BYTES * 3];
+    for (index, chunk) in data.chunks(CHUNK_BYTES).enumerate() {
+        if index != 0 {
+            writer.write_all(b" ")?;
+        }
+        for (index, &byte) in chunk.iter().enumerate() {
+            encoded[index * 3] = DIGITS[(byte >> 4) as usize];
+            encoded[index * 3 + 1] = DIGITS[(byte & 0x0f) as usize];
+        }
+        writer.write_all(&encoded[..chunk.len() * 3 - 1])?;
+    }
+    Ok(())
+}
+
+/// 按 encoding 解码字节为字符串。UTF-8/ASCII 合法输入直接借用，不复制整行。
 /// - "GBK": 走 GBK → UTF-8 转换；解码失败的字节回退为 U+FFFD。
 /// - "ISO-8859-1": 一对一映射到 U+0000-U+00FF。
 /// - 其他（UTF-8 / ASCII / 未知）: `String::from_utf8_lossy`。
-pub(super) fn decode_bytes(bytes: &[u8], encoding: &str) -> String {
-    match encoding.to_ascii_uppercase().as_str() {
-        "GBK" | "GB2312" | "GB18030" => GBK.decode(bytes).0.into_owned(),
-        "ISO-8859-1" | "LATIN1" => bytes.iter().map(|&b| b as char).collect(),
+pub(super) fn decode_bytes<'a>(bytes: &'a [u8], encoding: &str) -> Cow<'a, str> {
+    if ["GBK", "GB2312", "GB18030"]
+        .iter()
+        .any(|name| encoding.eq_ignore_ascii_case(name))
+    {
+        GBK.decode(bytes).0
+    } else if ["ISO-8859-1", "LATIN1"]
+        .iter()
+        .any(|name| encoding.eq_ignore_ascii_case(name))
+    {
+        Cow::Owned(bytes.iter().map(|&b| b as char).collect())
+    } else {
         // ASCII 是 UTF-8 子集，UTF-8 直接走 lossy。
-        _ => String::from_utf8_lossy(bytes).into_owned(),
+        String::from_utf8_lossy(bytes)
     }
 }
 
@@ -345,7 +371,9 @@ mod tests {
         let dir = test_dir("split");
         let mut writer = PortLogWriter::open(&spec(), &dir, "COM1", false).unwrap();
         assert!(!writer.should_split(1));
-        writer.write_line("10:00:00", "TX", &vec![b'x'; 1024 * 1024]).unwrap();
+        writer
+            .write_line("10:00:00", "TX", &vec![b'x'; 1024 * 1024])
+            .unwrap();
         assert!(writer.should_split(1));
         assert!(writer.needs_split(1));
         let _ = std::fs::remove_dir_all(&dir);
@@ -395,10 +423,16 @@ mod tests {
         writer.write_line("10:00:01", "TX", b"after").unwrap();
         writer.flush_and_sync().unwrap();
         let content = std::fs::read_to_string(writer.file_path()).unwrap();
-        assert!(content.contains("before") && content.contains("after"), "{content}");
+        assert!(
+            content.contains("before") && content.contains("after"),
+            "{content}"
+        );
 
         // 失败进入退避窗口，避免持续故障下每个事件都重试
-        assert!(!writer.needs_split(0), "backoff must suppress immediate retries");
+        assert!(
+            !writer.needs_split(0),
+            "backoff must suppress immediate retries"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -413,9 +447,98 @@ mod tests {
         assert_eq!(writer.current_size(), 0);
         writer.write_line("10:00:01", "TX", b"second").unwrap();
         writer.flush_and_sync().unwrap();
-        assert!(std::fs::read_to_string(&old_path).unwrap().contains("first"));
-        assert!(std::fs::read_to_string(writer.file_path()).unwrap().contains("second"));
+        assert!(std::fs::read_to_string(&old_path)
+            .unwrap()
+            .contains("first"));
+        assert!(std::fs::read_to_string(writer.file_path())
+            .unwrap()
+            .contains("second"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hex_encoding_preserves_spacing_across_fixed_buffer_boundaries() {
+        for len in [0, 1, 255, 256, 257, 1025] {
+            let data: Vec<u8> = (0..len).map(|index| index as u8).collect();
+            let expected = data
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut output = Vec::new();
+            write_hex(&mut output, &data).unwrap();
+            assert_eq!(output, expected.as_bytes(), "length {len}");
+        }
+    }
+
+    #[test]
+    fn hex_encoding_scratch_writes_remain_bounded_for_large_input() {
+        #[derive(Default)]
+        struct CountingWriter {
+            bytes: usize,
+            largest_write: usize,
+        }
+        impl Write for CountingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes += bytes.len();
+                self.largest_write = self.largest_write.max(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let data = vec![0xff; 1024 * 1024];
+        let mut output = CountingWriter::default();
+        write_hex(&mut output, &data).unwrap();
+        assert_eq!(output.bytes, data.len() * 3 - 1);
+        assert!(output.largest_write <= 768);
+    }
+
+    #[test]
+    fn formatted_writes_preserve_wire_bytes_and_size_accounting() {
+        let dir = test_dir("format_bytes");
+        for format in ["string", "hex", "binary"] {
+            for timestamp in [false, true] {
+                for direction in [false, true] {
+                    let spec = WriterSpec {
+                        format: format.into(),
+                        include_timestamp: timestamp,
+                        include_direction: direction,
+                        ..spec()
+                    };
+                    let mut writer = PortLogWriter::open(&spec, &dir, "COM1", true).unwrap();
+                    let prefix = format!(
+                        "{}{}",
+                        if timestamp { "[now] " } else { "" },
+                        if direction { "RX " } else { "" }
+                    );
+                    let input = b"hello\r\n";
+                    let expected = match format {
+                        "hex" => format!("{prefix}68 65 6C 6C 6F 0D 0A\n"),
+                        "binary" => format!("{prefix}hello\r\n\n"),
+                        _ => format!("{prefix}hello\n"),
+                    };
+                    writer.write_line("now", "RX", input).unwrap();
+                    writer.flush().unwrap();
+                    assert_eq!(
+                        std::fs::read(writer.file_path()).unwrap(),
+                        expected.as_bytes()
+                    );
+                    assert_eq!(writer.current_size(), expected.len() as u64);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn valid_utf8_decoding_borrows_input_and_lossy_latin1_still_work() {
+        let input = "hello 世界".as_bytes();
+        assert!(matches!(decode_bytes(input, "utf-8"), Cow::Borrowed(_)));
+        assert!(matches!(decode_bytes(b"hello", "ASCII"), Cow::Borrowed(_)));
+        assert_eq!(decode_bytes(&[0xff], "UTF-8"), "\u{fffd}");
+        assert_eq!(decode_bytes(&[0xff], "latin1"), "ÿ");
     }
 
     #[test]

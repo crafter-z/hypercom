@@ -10,12 +10,12 @@ use tauri::{AppHandle, Emitter, Manager};
 
 /// 串口数据事件（推送给前端）
 #[derive(Debug, Clone, Serialize)]
-pub struct SerialDataEvent {
-    pub port_id: String,
+pub struct SerialDataEvent<'a> {
+    pub port_id: &'a str,
     pub timestamp: i64,
     /// 恒为 "RX"：后端只在接收侧派发数据事件，发送回显由前端按自己的发送记录合成。
-    pub direction: String,
-    pub data: Vec<u8>,
+    pub direction: &'static str,
+    pub data: &'a [u8],
     /// 恒为 false：后端一律派发原始字节，HEX 展示由前端决定。
     pub is_hex: bool,
 }
@@ -133,11 +133,13 @@ pub(crate) fn emit_rx_event(app_handle: &AppHandle, port_id: &str, data: &[u8]) 
     let timestamp_ms = now.timestamp_millis();
     let _ = app_handle.emit(
         "serial:data",
+        // Emitter serializes synchronously; the reader buffer remains borrowed
+        // only for this call, not retained by the frontend delivery queue.
         SerialDataEvent {
-            port_id: port_id.to_string(),
+            port_id,
             timestamp: timestamp_ms,
-            direction: "RX".to_string(),
-            data: data.to_vec(),
+            direction: "RX",
+            data,
             is_hex: false,
         },
     );
@@ -157,4 +159,29 @@ pub(crate) fn emit_reconnect_hint(app_handle: &AppHandle, port_id: &str) {
             port_name: port_id.to_string(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SerialDataEvent;
+
+    #[test]
+    fn borrowed_rx_payload_preserves_raw_byte_wire_contract() {
+        let data = [0, 127, 128, 255];
+        let event = SerialDataEvent {
+            port_id: "COM1",
+            timestamp: 123,
+            direction: "RX",
+            data: &data,
+            is_hex: false,
+        };
+        assert_eq!(event.data.as_ptr(), data.as_ptr());
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "port_id": "COM1", "timestamp": 123, "direction": "RX",
+                "data": [0, 127, 128, 255], "is_hex": false,
+            })
+        );
+    }
 }

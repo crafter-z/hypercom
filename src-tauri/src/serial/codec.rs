@@ -12,19 +12,17 @@ use std::time::Duration;
 /// 解析 HEX 字符串为字节数组。支持空格分隔（"48 65 6C"）或紧凑形式（"48656C"）。
 /// 奇数位与非法十六进制字符一律报错（调用方必须把错误显示给用户，而不是自行补零）。
 pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
-    // 收集 (原始索引, 字节) 并跳过空白；保留原始索引使错误定位指向输入原文，
-    // 而非去空白后的字符串（"AA ZZ" 的坏对应报位置 3，而非 2）。
-    let hex_bytes: Vec<(usize, u8)> = data
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| !b.is_ascii_whitespace())
-        .map(|(i, b)| (i, *b))
-        .collect();
-    if !hex_bytes.len().is_multiple_of(2) {
+    // Count first to preserve odd-length error precedence, then decode directly
+    // from borrowed input. A Vec<(usize, u8)> costs 16 bytes per HEX character
+    // on 64-bit targets (32× the decoded bytes), despite only two being needed.
+    let hex_len = data
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .count();
+    if !hex_len.is_multiple_of(2) {
         return Err(anyhow::anyhow!(
             "HEX string has odd length: {} hex chars",
-            hex_bytes.len()
+            hex_len
         ));
     }
     // 将单个 ASCII 十六进制字符解码为数值 0-15，非法字符返回 None。
@@ -36,10 +34,14 @@ pub fn parse_hex_string(data: &str) -> anyhow::Result<Vec<u8>> {
             _ => None,
         }
     };
-    let mut result = Vec::with_capacity(hex_bytes.len() / 2);
-    for pair in hex_bytes.chunks(2) {
-        let (hi_index, hi_byte) = pair[0];
-        let (_, lo_byte) = pair[1];
+    let mut result = Vec::with_capacity(hex_len / 2);
+    // Keep original byte indices for errors: "AA ZZ" reports 3, not 2.
+    let mut hex_bytes = data
+        .bytes()
+        .enumerate()
+        .filter(|(_, byte)| !byte.is_ascii_whitespace());
+    while let Some((hi_index, hi_byte)) = hex_bytes.next() {
+        let (_, lo_byte) = hex_bytes.next().expect("even HEX length checked above");
         match (nibble(hi_byte), nibble(lo_byte)) {
             (Some(hi), Some(lo)) => result.push((hi << 4) | lo),
             _ => {
@@ -80,13 +82,15 @@ pub fn build_tx_bytes(
     if is_hex {
         return parse_hex_string(data);
     }
-    let mut bytes = data.as_bytes().to_vec();
-    match append_line_ending {
-        "\\r\\n" => bytes.extend_from_slice(b"\r\n"),
-        "\\r" => bytes.push(b'\r'),
-        "\\n" => bytes.push(b'\n'),
-        _ => {}
-    }
+    let ending: &[u8] = match append_line_ending {
+        "\\r\\n" => b"\r\n",
+        "\\r" => b"\r",
+        "\\n" => b"\n",
+        _ => b"",
+    };
+    let mut bytes = Vec::with_capacity(data.len() + ending.len());
+    bytes.extend_from_slice(data.as_bytes());
+    bytes.extend_from_slice(ending);
     Ok(bytes)
 }
 
@@ -272,6 +276,32 @@ mod tests {
             err.contains('3'),
             "error should contain original index 3: {err}"
         );
+    }
+
+    #[test]
+    fn parse_hex_preserves_odd_error_precedence_and_all_ascii_whitespace() {
+        assert_eq!(
+            parse_hex_string("ZZ Z").unwrap_err().to_string(),
+            "HEX string has odd length: 3 hex chars"
+        );
+        assert_eq!(
+            parse_hex_string("\t0\rA\n \x0cF\tF").unwrap(),
+            vec![0x0a, 0xff]
+        );
+        assert_eq!(
+            parse_hex_string(" 0 1\tZ Z").unwrap_err().to_string(),
+            "Invalid HEX byte at position 5: \"ZZ\""
+        );
+    }
+
+    #[test]
+    fn parse_hex_large_input_only_needs_the_decoded_result_buffer() {
+        let input = "a5 ".repeat(1024 * 1024);
+        let decoded = parse_hex_string(&input).unwrap();
+        assert_eq!(decoded.len(), 1024 * 1024);
+        assert!(decoded.iter().all(|&byte| byte == 0xa5));
+        // Explicit capacity avoids incremental growth of the output too.
+        assert_eq!(decoded.capacity(), decoded.len());
     }
 
     // ---------- build_tx_bytes ----------
