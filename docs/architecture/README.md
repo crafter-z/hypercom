@@ -47,7 +47,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 
 跨模块开发约定（选择器纪律、React 组件定义、flexbox 链、锁纪律、hook 生命周期、i18n、提交规范、CSS 颜色安全等）的完整说明见 [`conventions.md`](conventions.md)；以下只列最关键的几条。
 
-- **两编译器项目**：前端 React 18 + TypeScript（`src/`），后端 Rust + Tauri v2（`src-tauri/`）；当前锁文件中的 `@tauri-apps/api` 与 Rust `tauri` 均为 2.11.x。manifest 的主版本范围不是 minor 锁定，升级需核对两侧锁文件与 IPC 兼容性。
+- **两编译器项目**：前端 React 18 + TypeScript（`src/`），后端 Rust + Tauri v2（`src-tauri/`）；当前锁文件中的 `@tauri-apps/api` 与 Rust `tauri` 均为 2.12.x。manifest 的主版本范围不是 minor 锁定，升级需核对两侧锁文件与 IPC 兼容性。
 - **Zustand 选择器纪律**：`src/stores/` 共 6 个 store 模块（`useAppStore` / `useOperationStore` / `useTerminalStore` / `useRuleStore` / `useSystemStore` / `useToastStore`），任何 store 调用必须带 selector，禁止无选择器订阅整 store（串口数据事件会触发重渲染 → 输入失焦/卡顿）。其中 `useSystemStore`（`systemStatus` / `trafficStats` / `simulationMode` / `ui`）从 `useAppStore` 独立——高频轮询与 UI 开关不牵动标签页/端口等低频 state。
 - **跨 `.await` 锁纪律**：`MutexGuard` 是 `!Send`，async 命令必须「提取 + clone + drop 锁」后再 `.await`。反证见 `AppState.log_manager`——它是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），因此日志写入不需要持锁跨 `.await`，`save_log_as` 的拷贝 / `list_files` 递归 / 数据写入不争同一把锁。
 - **命令返回**：一律 `Result<T, CommandError>`，不得返回 `String`。

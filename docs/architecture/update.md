@@ -86,6 +86,6 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 ## 依赖
 
 - Rust：`tauri-plugin-updater ~2.10.1`（配置 reqwest 客户端接口需锁 minor）+ `reqwest 0.13`（rustls / system-proxy / socks）+ Windows WinHTTP 接口；`tauri-plugin-process` 负责 Linux relaunch。
-- 前端：`@tauri-apps/plugin-process`（`relaunch`）。
+- 前端：`@tauri-apps/plugin-process`（`relaunch`）；当前前端工具链为 Vite 8 / Vitest 5，CI 固定 Node 22。
 - capabilities：`process:default`（relaunch 必需）；`updater:default` 已移除（JS updater IPC 零使用）。
 - 升级回归覆盖已提交通道失效、空账 snooze、保存失败重试、候选冻结、原生 PAC 路由与取消；测试数量以实际运行输出为准。

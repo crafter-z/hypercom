@@ -26,11 +26,14 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
           cache: 'npm'
 
       - name: install frontend dependencies
         run: npm ci
+
+      - name: dependency audit
+        run: npm audit --audit-level=low --registry=https://registry.npmjs.org
 
       - name: typecheck (application + tooling + e2e)
         run: |
@@ -84,7 +87,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
           cache: 'npm'
 
       - name: install frontend dependencies
@@ -113,7 +116,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
           cache: 'npm'
 
       - name: install frontend dependencies

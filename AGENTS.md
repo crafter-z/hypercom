@@ -1,6 +1,6 @@
 # HyperCom — Agent 指南
 
-**栈：** Tauri v2 (2.11.x) + React 18 + Rust (tokio + serialport)
+**栈：** Tauri v2 (2.12.x) + React 18 + Rust (tokio + serialport)
 
 > **引用纪律**：本文只写「文件 + 符号名」，**不写行号**；重构时同步符号与路径引用。
 > **数字断言**（命令数 / 配置字段数 / i18n 键数 / hook 数 / store 数 / services 文件数）以代码为准；改动后同步本文件与 [`docs/architecture/README.md`](docs/architecture/README.md)。
@@ -48,7 +48,7 @@ cargo check --manifest-path src-tauri/Cargo.toml    # 仅 Rust
 
 统一质量门（`.github/workflows/ci.yml`，分支 CI 与 stable/preview 发版共用；各 job 并行）：
 
-- **前端**：应用、工具、e2e 三套 `tsc --noEmit`（默认配置、`-p tsconfig.node.json`、`-p tsconfig.e2e.json`）→ `npm run test:run` → `node --test scripts/release.test.mjs` → `npm run build`。
+- **前端（Node 22）**：`npm ci` → `npm audit --audit-level=low --registry=https://registry.npmjs.org` → 应用、工具、e2e 三套 `tsc --noEmit`（默认配置、`-p tsconfig.node.json`、`-p tsconfig.e2e.json`）→ `npm run test:run` → `node --test scripts/release.test.mjs` → `npm run build`。
 - **Rust（Linux/Windows）**：`cargo test --lib` → `cargo clippy --all-targets -- -D warnings` → `cargo check --release --lib`（均带 `--manifest-path src-tauri/Cargo.toml`）。
 - **浏览器**：Playwright Chromium e2e，使用 mock IPC；不证明真实串口、原生 WebView/CSP 或最终安装包行为，被忽略的原生 smoke 需显式执行。
 
@@ -137,4 +137,4 @@ scope: ui | backend | store | hooks | docs
 
 - 前端 React 18 + TypeScript + Vite（`src/`）；后端 Rust + Tauri v2（`src-tauri/`）。
 - Tauri v2：`invoke` 前端→后端，`app.emit` 后端→前端事件。
-- `@tauri-apps/api`（npm）与 `tauri`（Cargo）使用兼容的 Tauri v2 版本；当前锁文件均为 2.11.x，升级时核对两侧锁文件与 IPC 兼容性，不把 manifest 的主版本范围误读为 minor 锁定。
+- `@tauri-apps/api`（npm）与 `tauri`（Cargo）使用兼容的 Tauri v2 版本；当前锁文件均为 2.12.x，升级时核对两侧锁文件与 IPC 兼容性，不把 manifest 的主版本范围误读为 minor 锁定。

@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
       - name: release gate behavior tests
         run: node --test scripts/release.test.mjs
       - name: Validate tag, versions and notes; prepare one prerelease draft
@@ -67,7 +67,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libudev-dev
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
           cache: 'npm'
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -109,7 +109,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
       - name: Gate all matrix results; verify signatures; upload once and publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

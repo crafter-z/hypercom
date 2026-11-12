@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: 22.x
       - name: release gate behavior tests
         run: node --test scripts/release.test.mjs
       - name: Verify source builds, verify signatures and publish complete preview

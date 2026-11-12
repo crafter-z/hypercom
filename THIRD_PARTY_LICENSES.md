@@ -32,7 +32,7 @@ HyperCom 基于以下开源项目构建。本页列出各技术栈依赖及其�
 
 | Crate | 版本 | 许可证 |
 |-------|------|--------|
-| `tauri` (v2) | 2.11 | Apache-2.0 OR MIT |
+| `tauri` (v2) | 2.12 | Apache-2.0 OR MIT |
 | `wry` | 0.55.1 | Apache-2.0 OR MIT |
 | `webview2-com` | 0.38.2 | MIT |
 | `windows` | 0.61 | MIT OR Apache-2.0 |
