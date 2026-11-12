@@ -214,7 +214,7 @@ pub async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatu
                 let cpu_usage = if system.cpus().is_empty() {
                     0.0
                 } else {
-                    let total: f32 = system.cpus().iter().map(|c| c.cpu_usage()).sum();
+                    let total: f32 = system.cpus().iter().map(|c| c.usage()).sum();
                     total / system.cpus().len() as f32
                 };
 
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn collect_app_pids_never_panics_on_real_process_table() {
         // 用真实进程表跑一遍扩散逻辑，验证不会 panic、且必然包含本进程。
-        let mut system = sysinfo::System::new_all();
+        let mut system = sysinfo::System::new_all().expect("sysinfo initialization must succeed");
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,

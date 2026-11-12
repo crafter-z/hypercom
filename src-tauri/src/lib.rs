@@ -261,6 +261,8 @@ impl AppState {
 
         // 先建 ConfigManager，再用其配置初始化运行期镜像（消除双数据源）
         let config_manager = config::ConfigManager::new(config_arg)?;
+        let system_info = sysinfo::System::new()
+            .map_err(|error| anyhow::anyhow!("Failed to initialize system information: {error}"))?;
         let cfg = config_manager.get_config().clone();
         // One writer per config directory: concurrent instances otherwise race
         // config.json/session.json (fixed temp names + per-process revision CAS).
@@ -276,7 +278,7 @@ impl AppState {
             plugin_http: commands::PluginHttpRegistry::new(),
             log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
-            system_info: std::sync::Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
+            system_info: std::sync::Arc::new(std::sync::Mutex::new(system_info)),
             serial_work: std::sync::Arc::new(commands::SerialWorkState::new()),
             tool_reservations: std::sync::Mutex::new(std::collections::HashMap::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
