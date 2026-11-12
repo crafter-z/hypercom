@@ -91,10 +91,34 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 - 缓冲超限**逐行覆盖最旧一条**（滚动窗口，firstSeq 每 append +1）；`appendLines`/`appendTerminalLines` 返回 boolean；**无「因内存限制清屏」toast**（逐行覆盖是常态滚动，不是异常事件——issue #16 曾整夜误报的根因）。
 - 状态栏内存显示「JS堆 XMB · 进程 YMB」（无总预算分母）；`load_status` 只按 CPU>90 判 high_load。
 
+## ASCII 日志乱码过滤
+
+- `TerminalFilterBar` 的「过滤乱码」是 `TerminalState.hideAsciiNoise` 端口级显示选项，默认关闭、不写 AppConfig；断连重连保留，关闭标签释放显示态后恢复默认。主窗与终端弹窗各自独立设置。
+- 仅在 `displayFormat === 'string'` 时生效；HEX/binary 绕过过滤且禁用开关，但保留勾选偏好，切回文本后重新应用。TTY 不参与。回放只有携带 `rawData` 的 RX 行可判定，纯文本回放保守保留。
+- `utils/asciiNoise.ts` 的 `isLikelyAsciiNoise` 单遍扫描原字节：可读为 `0x20–0x7E` 和 TAB/CR/LF；其他控制字节（含 NUL/DEL）与高字节计为不可读。不可读至少 4 字节且占比不低于 30%，才可能隐藏。若存在连续至少 12 字节的可打印 ASCII 片段、其中至少 6 个字母或数字，则保守保留整行；空格/标点本身不能构成保护。
+- 这是 ASCII 英文日志启发式，可能误隐藏中文或其他非 ASCII 文本；短碎片、纯可打印协议段可能漏过。有长英文的混合行保留整行，不尝试推测未知协议边界或逐字符删除。
+- `linePassesFilter` 仅控制可见性：只判 RX `rawData`，TX/TOOL/NOTE 不受影响；原始行继续占用同一环形缓冲，关闭过滤可恢复仍未被容量裁剪的行。接收组装/触发器/插件旁路/流量统计/后端日志不变。复制全部与 TXT/CSV 导出仍使用完整缓冲；浏览器选区复制反映可见文本。
+- `viewportManager.setFilter` 的可选参数承接有效开关，新行增量匹配，历史按现有可取消分块扫描重建；不在滚动/每帧重新判断全历史。搜索排除被乱码过滤隐藏的行，并在开关改变时重建命中列表；方向/关键词过滤保持原有独立搜索语义。时间索引与时间组 realign 采用过滤后的可见候选。
+
+### 乱码过滤性能观测
+
+基准显式 opt-in，不给 CI 加机器相关的耗时断言，测量时单独运行、不要并行占用 CPU：
+
+```powershell
+$env:HYPERCOM_ASCII_BENCH='1'
+npx.cmd vitest run src/utils/asciiNoise.perf.test.ts
+npx.cmd playwright test e2e/smoke.spec.ts --grep 'ASCII noise performance observational benchmark' --workers=1 --retries=0
+Remove-Item Env:HYPERCOM_ASCII_BENCH
+```
+
+- `asciiNoise.perf.test.ts` 预生成 256 个不同输入，覆盖 64/256/4096 字节与 ASCII/二进制/有长英文保护的混合行；预热后 7 轮、每样本至少 8 MiB，交错开关顺序，分别测纯判定与过滤谓词，输出 `ASCII_CLASSIFIER_BENCH` JSON。不把输入生成算入耗时，也不把极小的关闭路径作百分比基数。
+- `e2e/asciiNoiseBenchmark.ts` 复用 smoke 的 Tauri mock，在真实 Chromium 应用中通过 `serial:data` 驱动 hooks → RxPipeline → manager → DOM。按 1024 字节事件模拟 115200/4M 波特率（8N1）及超额吞吐，开关各 3 轮，每轮约 2 秒；观测 CDP 主线程任务时间、append 时间、rAF 间隔、长任务、队列末尾积压、行计数与 GC 后堆差，另测十万/百万行的索引切换。原始结果保存在 Playwright 输出目录的 `ascii-noise-results.json`。
+- 主线程任务时间不是 Windows 整机 CPU，rAF 间隔不是物理屏幕 FPS，GC 后堆差也不是进程 RSS 或长期泄漏证明；此基准不覆盖 UART、Rust、原生 IPC、磁盘写入或 WebView2 实机，不应据此承诺所有硬件下的吞吐上限。历史切换完成耗时包括可见列表与时间索引的分块重建，不等于同步阻塞时长。
+
 ## 工具栏布局
 
 `TerminalFilterBar` 使用紧凑的收发方向下拉（全部 / 仅 TX / 仅 RX），不再为三个选项常驻占宽。关键词输入可收缩，显示控件按功能组布局；工具栏及显示组按所在 pane 的实际可用宽度自然换行，不依赖整窗断点、不横向滚动，也不通过裁切隐藏按钮。可选插件视图选择器限制宽度并省略长名称。暂停状态和过滤计数出现时同样遵循该布局；改宽不会重建组件或重置过滤/显示状态。
 
 ## 显示态归属
 
-- 每端口显示态（`scrollLocked`/`displayFormat`/`encoding`/`showTimestamp`）在 `useTerminalStore`，**不在** `useOperationStore`。显示控件（TerminalFilterBar、编码下拉）经 `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding` 写入。行缓冲在 `TerminalViewportManager` 环形缓冲区，store 无行数组、无 Immer、不随数据更新。
+- 每端口显示态（`scrollLocked`/`displayFormat`/`encoding`/`showTimestamp`/`hideAsciiNoise`）在 `useTerminalStore`，**不在** `useOperationStore`。显示控件（TerminalFilterBar、编码下拉）经 `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding` 写入。行缓冲在 `TerminalViewportManager` 环形缓冲区，store 无行数组、无 Immer、不随数据更新。

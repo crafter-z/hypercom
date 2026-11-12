@@ -7,6 +7,7 @@
 | 模块 | 职责 |
 |---|---|
 | `utils/paneTree.ts` | `PaneNode` 树算法：`newPaneId` / `findLeafById` / `findLeafByTabId` / `findBranchById` / `findParentBranch` / `collectLeaves` / `countLeaves` / `pruneTree`。store 只留 action；`useAppStore` 另导出 `getClosingTabIds(tabId, scope)` 供批量关闭取与 store 关闭动作同一集合 |
+| `utils/asciiNoise.ts` | `isLikelyAsciiNoise`——ASCII 日志的纯字节乱码行判定；仅显示过滤使用，不改接收/日志字节 |
 | `utils/hexFormat.ts` | `hexByte` / `bytesToSpacedHex`——**bytes→HEX 的唯一实现**（terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用） |
 | `utils/bounds.ts` | `CONFIG_BOUNDS` / `BoundedNumericSetting`——数值边界的前端镜像 |
 | `utils/uiScale.ts` | `normalizeUiScalePercent` / `applyUiScale`——按当前 WebView 应用持久化 UI 缩放；调用 Tauri `getCurrentWebview().setZoom(percent / 100)` |

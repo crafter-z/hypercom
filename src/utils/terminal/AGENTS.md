@@ -50,6 +50,8 @@ TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入�
    `TERMINAL_REBUILD_CHUNK_SIZE` 分块、可取消，扫描期间新行只增量匹配并在完成时合并；
    clear/replace/新条件/销毁淘汰旧任务。搜索 membership Set 同步随chunk/append/trim维护，
    不在滚动或每个RX帧重建。搜索只在 `searchOpen && query` 时维护。
+   `setFilter` 可选 `hideAsciiNoise` 使用 `utils/asciiNoise.ts` 单一判定，仅影响 RX 字节行可见性，
+   搜索同步排除这些噪声行。UI 在非文本模式传 false，禁止把显示开关下沉到接收/观察者。
 6. **同帧钉底**：`followEnabled = !paused && locked && !gestureActive`；搜索框可保持打开，
    命中导航须先解除跟随再定位，关闭搜索不复锁。钉底在 `render()` 内设置
    scrollTop（0 帧延迟）。手势期间 `gestureActive=true` 抑制钉底；settle 由 TerminalView
