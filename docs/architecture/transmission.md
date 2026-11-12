@@ -11,7 +11,7 @@
 ```
 读线程（阻塞 read，100ms 读超时）
   → port.read(&mut buffer) → Ok(n>0)
-    → emit serial:data { port_id, timestamp, direction:"RX", data: buffer[..n].to_vec(), is_hex:false }
+    → emit serial:data { port_id, timestamp, direction:"RX", data: &buffer[..n], is_hex:false }（同步序列化借用载荷，线上仍是字节数组）
   → eventService.onSerialData → useSerialReceive 回调
     → RxLineAssembler.feedBytes：字节级切行（CR/LF/跨事件 CRLF/4KB 强制发射）
     → 每端口队列（上限 maxQueuedLines 默认 10000，超限丢最旧）
@@ -121,7 +121,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 文件发送
 
-- `send_file`（`commands/serial.rs`：async，打开文件后以 `take(MAX+1)` 有界读取（拒绝 FIFO/设备与读取期间增长的文件），再按 `chunk_size`（clamp 1–1 MiB）分块写；真实串口沿用总写期限并累计已确认写出的部分字节）；`delay_ms==0` 时 `tokio::task::yield_now().await` 让出。
+- `send_file`（`commands/serial.rs`：async）：路径及打开句柄均检查普通文件与 100 MiB 大小上限，以打开句柄的长度固定本次总量；复用一个 `chunk_size`（clamp 1–1 MiB）缓冲流式读取和写入，不驻留整文件。缩短时报读错，最终块发送前检查增长且不发送声明总量之外的字节；真实串口沿用总写期限并累计已确认写出的部分字节。发送期间不得修改源文件：长度检查不提供等长原地改写的快照一致性，失败前可能已有部分字节发出。`delay_ms==0` 时 `tokio::task::yield_now().await` 让出。
 - **可取消 / 单飞**：每端口同一时刻仅允许一次 `send_file`；已在发送时拒绝另一份文件，取消令牌不会被覆盖。取消命令置位该端口令牌，发送循环下一块前退出。
 - **统一收尾**：注册令牌后，无论正常、取消、读文件失败、串口写错或空文件，都清理本次令牌并发 `serial:file_progress{done:true}`；前端进度条不会因读取阶段提前失败卡住。
 - **前端 `useFileSend`（`components/OperationPanel/hooks/useFileSend.ts`）收口三个不变量**：
@@ -133,7 +133,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 - `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词，保存校验复用同一策略；主线程执行仍无期限或隔离，此策略不是完整的正则复杂度/ReDoS 保证；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，归一化后为空的模式不派发动作。
 - **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。
-- **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
+- **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。`pruneTriggerAlertThrottle` 在接收 hook 挂载及已提交提醒规则集合变化时释放已删除规则的节流元数据，不在每个 RX 事件上重建集合。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
 - 规则统一**显式保存后生效**：提醒、自动回复与其他实体页共用 `useEntityPage({kind})` 会话草稿。取消 300ms 自动落盘及卸载 flush；新建、删除、启用和拖动排序也只改草稿。保存后按数组顺序评估所有匹配规则，不改为首条命中即停止。
 - 已知边界：触发匹配按**行**粒度（HEX 匹配按该行的原始字节 `rawData`）；行首 BOM 已在解码时剥离，不参与匹配。
 

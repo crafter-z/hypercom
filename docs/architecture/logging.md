@@ -45,7 +45,7 @@
 - `log_encoding`：`create_writer_with_encoding` 按编码解码（GBK 等，`decode_bytes`）。
 - `log_new_file_per_session`（默认关，保持续写）：每次 `create_writer`（打开串口/重连）用 `FileMode::Unique` 经 `naming::open_unique` 以 `create_new(true)` 原子分配**不存在**的文件（同名冲突依次 `name-1.log`/`name-2.log`…，数字插扩展名前），绝不续写。
 - `list_files` 的 `created_at` 经 `file_timestamp`：`created()` 缺失时回退 `modified()`，避免 UI 按时间排序时全部落到 1970。
-- **日志文件 → port_id 的解析口径与已知边界**：会话内建 `path → port_id` 登记表（创建/分片/换目录/关闭时登记），`list_files` 优先查表；查不到时回退文件名启发式（stem 按 `-` 切首段）。默认模板 `[com]-[datetime]` 下首段就是 port_id，因此**默认配置**在重启后仍能正确归属；但模板把 `[com]` 放在非首位（如 `log_[com]_[date]`）时，重启后（登记表为空）归属会失败或误判，`save_log_as` 的按端口回退选文件也受同一限制。这是既有边界（启发式自始存在），未引入持久化索引以免改变用户日志目录契约；如需彻底解决，应在 writer 创建时追加一个日志目录外的持久化索引并以旧文件启发式兜底。
+- **日志文件 → port_id 的解析口径与已知边界**：`SessionPaths` 会话登记缓存最多 `MAX_SESSION_PATHS=4096` 个唯一路径（创建/分片/换目录/关闭时更新），优先保留活跃映射，超限淘汰最旧非活跃历史；空日志删除时移除，切目录时释放旧根，`list_files` 在锁外核实并清理明确不存在的历史项。该上限只约束内存元数据，不删除或限制日志文件。`list_files` 优先查缓存；查不到时回退文件名启发式（stem 按 `-` 切首段）。默认模板 `[com]-[datetime]` 下首段就是 port_id，因此**默认配置**在重启或缓存淘汰后仍能正确归属；但模板把 `[com]` 放在非首位（如 `log_[com]_[date]`）时，重启、历史映射淘汰或切走后切回目录时归属可能失败或误判，`save_log_as` 的按端口回退选文件也受同一限制。未引入持久化索引；如需跨会话和大量历史文件的精确归属，应另设计持久化索引并以旧文件启发式兜底。
 - TX 日志经 `build_tx_bytes`（与实际发送字节同源，见 serial.md / transmission.md）。
 
 ### 命令（commands/log.rs）
