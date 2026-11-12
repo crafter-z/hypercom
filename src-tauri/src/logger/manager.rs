@@ -16,7 +16,7 @@
  *   「尽力落盘」，因为别的线程 panic 而让后续写入连锁 panic（std 的 poison 传染）
  *   正好与这个职责相反。
  */
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -32,16 +32,79 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// list_files 递归下钻深度上限：防御目录联接成环导致无限递归
 const MAX_LIST_DEPTH: usize = 16;
 
+/// Session-only attribution cache, not a limit on log files or retained data.
+/// Once evicted, historical files use the existing filename fallback.
+const MAX_SESSION_PATHS: usize = 4096;
+
+struct SessionPath {
+    port_id: String,
+    active: bool,
+}
+
+#[derive(Default)]
+struct SessionPaths {
+    paths: HashMap<PathBuf, SessionPath>,
+    /// Exactly one queue entry per path; repeated rotations/close registration
+    /// must not grow a second, unbounded bookkeeping structure.
+    order: VecDeque<PathBuf>,
+}
+
+impl SessionPaths {
+    fn register(&mut self, path: PathBuf, port_id: &str, active: bool) {
+        if self.paths.contains_key(&path) {
+            if let Some(index) = self.order.iter().position(|known| known == &path) {
+                self.order.remove(index);
+            }
+        } else if self.paths.len() >= MAX_SESSION_PATHS {
+            // A quiet active port with a custom filename should keep its exact
+            // attribution while another port generates thousands of fragments.
+            let oldest_history = self.order.iter().position(|path| !self.paths[path].active);
+            let index = match oldest_history {
+                Some(index) => index,
+                None if active => 0,
+                None => return,
+            };
+            if let Some(oldest) = self.order.remove(index) {
+                self.paths.remove(&oldest);
+            }
+        }
+        self.order.push_back(path.clone());
+        self.paths.insert(
+            path,
+            SessionPath {
+                port_id: port_id.to_owned(),
+                active,
+            },
+        );
+    }
+
+    fn remove(&mut self, path: &Path) {
+        self.paths.remove(path);
+        self.order.retain(|known| known != path);
+    }
+
+    fn retain_root(&mut self, root: &Path) {
+        self.paths.retain(|path, _| path.starts_with(root));
+        self.order.retain(|path| self.paths.contains_key(path));
+    }
+
+    fn snapshot(&self) -> HashMap<PathBuf, String> {
+        self.paths
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.port_id.clone()))
+            .collect()
+    }
+}
+
 pub struct LogManager {
     /// 当前设置快照（K3：日志设置的唯一来源）
     settings: RwLock<Arc<LogSettings>>,
     /// 活跃 writer，按端口索引；每端口一把独立的锁
     writers: Mutex<HashMap<String, Arc<Mutex<PortLogWriter>>>>,
-    /// 会话内登记表 `path → port_id`：writer 每次分配新文件（创建 / 分片 / 换目录）时
-    /// 登记，关闭、被替换、滚动后旧文件也留在表里。
-    /// 没有它，list_files 只能靠「文件名按 '-' 切首段」猜端口，自定义模板下必错；
-    /// 有了它，列举日志文件完全不需要碰 writer 锁。
-    session_paths: Mutex<HashMap<PathBuf, String>>,
+    /// 有界会话登记表 `path → port_id`：最多 MAX_SESSION_PATHS 条，优先保留活跃文件。
+    /// 创建 / 分片 / 换目录 / 关闭时登记；旧历史被淘汰后回退既有文件名解析。
+    /// 列举日志文件完全不需要碰 writer 锁，也不随分片次数无限保留元数据。
+    session_paths: Mutex<SessionPaths>,
     /// 上次周期刷盘时刻
     last_flush: Mutex<Instant>,
 }
@@ -63,7 +126,7 @@ impl LogManager {
         Self {
             settings: RwLock::new(Arc::new(settings)),
             writers: Mutex::new(HashMap::new()),
-            session_paths: Mutex::new(HashMap::new()),
+            session_paths: Mutex::new(SessionPaths::default()),
             last_flush: Mutex::new(Instant::now()),
         }
     }
@@ -127,6 +190,10 @@ impl LogManager {
         next.directory = new_root.to_string_lossy().into_owned();
         *write_lock(&self.settings) = Arc::new(next);
         self.reopen_writers_under(&new_root);
+        // Old roots are no longer listed. Drop their historical attribution,
+        // including registration performed while writers were being reopened.
+        let mut paths = lock_mutex(&self.session_paths);
+        paths.retain_root(Path::new(&self.settings().directory));
         Ok(())
     }
 
@@ -150,8 +217,8 @@ impl LogManager {
                     let new_path = writer.file_path().to_path_buf();
                     drop(writer);
                     log::info!("Log directory switched for {old_path:?} → {new_path:?}");
-                    self.register_path(new_path, &port_id);
-                    self.register_path(old_path, &port_id);
+                    self.register_path(new_path, &port_id, true);
+                    self.register_path(old_path, &port_id, false);
                 }
                 Err(e) => log::error!(
                     "Log directory switch failed for {port_id}: {e}; 继续写入 {old_path:?}"
@@ -224,7 +291,7 @@ impl LogManager {
                 "log directory changed while creating writer for {port_id}"
             ));
         }
-        self.register_path(path.clone(), port_id);
+        self.register_path(path.clone(), port_id, true);
         if let Some((old_path, old_size)) = old_path_and_size {
             // Append mode may reopen the same empty file; it is still owned by the new writer.
             if old_path != path {
@@ -307,8 +374,8 @@ impl LogManager {
             "Log split for {port_id}: {old_path:?} → {:?}",
             writer.file_path()
         );
-        self.register_path(writer.file_path().to_path_buf(), port_id);
-        self.register_path(old_path, port_id);
+        self.register_path(writer.file_path().to_path_buf(), port_id, true);
+        self.register_path(old_path, port_id, false);
         Ok(())
     }
 
@@ -430,6 +497,7 @@ impl LogManager {
                 if meta.len() == 0 {
                     match fs::remove_file(&path) {
                         Ok(()) => {
+                            lock_mutex(&self.session_paths).remove(&path);
                             log::info!("Log writer closed for {port_id} (empty, file removed)");
                             return;
                         }
@@ -440,15 +508,20 @@ impl LogManager {
                 }
             }
         }
-        self.register_path(path, port_id);
+        self.register_path(path, port_id, false);
         log::info!("Log writer closed for {port_id}");
     }
 
-    /// 登记「日志文件 → 端口」的映射，供 list_files 精确反查（S-B6）。
-    /// 每次分配/滚动文件时（含关闭后）登记；会话内有效——这是给 UI 列文件用的，
-    /// 进程重启后本就无法知道历史文件属于哪个端口。
-    fn register_path(&self, path: PathBuf, port_id: &str) {
-        lock_mutex(&self.session_paths).insert(path, port_id.to_string());
+    /// Bounded best-effort attribution; cache misses keep the existing filename
+    /// fallback. This does not limit files or delete historical log data.
+    fn register_path(&self, path: PathBuf, port_id: &str, active: bool) {
+        let mut paths = lock_mutex(&self.session_paths);
+        // Check under the cache lock so a late old-root rotation cannot register
+        // after set_directory has finished pruning that root. No writer lock is
+        // acquired here (maybe_split already holds its port's writer lock).
+        if path.starts_with(Path::new(&self.settings().directory)) {
+            paths.register(path, port_id, active);
+        }
     }
 
     /// 手动另存日志：优先用活跃 writer 的文件路径（精确）；无活跃 writer 时回退到
@@ -513,12 +586,29 @@ impl LogManager {
     /// 一个大目录或一个正在落盘的端口就能把整个列表卡住（S-B5）。
     pub fn list_files(&self) -> anyhow::Result<Vec<LogFileInfo>> {
         // 先复制一份登记表再遍历：遍历是 IO，不持锁做
-        let known: HashMap<PathBuf, String> = lock_mutex(&self.session_paths).clone();
+        let known = lock_mutex(&self.session_paths).snapshot();
         let root = PathBuf::from(&self.settings().directory);
 
         let mut files = Vec::new();
         if root.exists() {
             collect_log_files(&root, 0, &known, &mut files)?;
+        }
+        // Metadata IO stays outside registry/writer locks. Only definite
+        // NotFound removes historical cache entries; permission/IO failures do
+        // not erase useful attribution, nor do we prune a newly active writer.
+        let missing: Vec<_> = known
+            .keys()
+            .filter(|path| {
+                fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            })
+            .collect();
+        if !missing.is_empty() {
+            let mut paths = lock_mutex(&self.session_paths);
+            for path in missing {
+                if paths.paths.get(path).is_some_and(|entry| !entry.active) {
+                    paths.remove(path);
+                }
+            }
         }
         Ok(files)
     }
@@ -683,6 +773,128 @@ mod tests {
             .find(|f| f.port_id == port_id)
             .expect("log file must exist");
         fs::read_to_string(&f.path).unwrap()
+    }
+
+    #[test]
+    fn session_path_cache_is_bounded_and_preserves_active_and_recent_attribution() {
+        let dir = test_dir("bounded_paths");
+        let mgr = LogManager::for_test(&dir);
+        let oldest = dir.join("COM_OLD-2026.log");
+        let quiet = dir.join("quiet-custom.log");
+        let newest = dir.join("new-custom.log");
+        for path in [&oldest, &quiet, &newest] {
+            fs::write(path, b"data").unwrap();
+        }
+        mgr.register_path(oldest.clone(), "old-exact", false);
+        mgr.register_path(quiet.clone(), "quiet-exact", true);
+        for index in 0..super::MAX_SESSION_PATHS * 2 {
+            mgr.register_path(dir.join(format!("fragment-{index}.log")), "other", false);
+        }
+        mgr.register_path(newest.clone(), "new-exact", false);
+        {
+            let paths = lock_mutex(&mgr.session_paths);
+            assert_eq!(paths.paths.len(), super::MAX_SESSION_PATHS);
+            assert_eq!(paths.order.len(), super::MAX_SESSION_PATHS);
+            assert!(!paths.paths.contains_key(&oldest));
+            assert!(paths.paths.get(&quiet).unwrap().active);
+        }
+        let files = mgr.list_files().unwrap();
+        let port_for = |path: &Path| {
+            files
+                .iter()
+                .find(|file| Path::new(&file.path) == path)
+                .unwrap()
+                .port_id
+                .as_str()
+        };
+        assert_eq!(
+            port_for(&oldest),
+            "COM_OLD",
+            "evicted history keeps filename fallback"
+        );
+        assert_eq!(
+            port_for(&quiet),
+            "quiet-exact",
+            "quiet active mapping survives rotations"
+        );
+        assert_eq!(
+            port_for(&newest),
+            "new-exact",
+            "cached mapping wins over filename fallback"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repeated_path_registration_never_grows_the_eviction_queue() {
+        let dir = test_dir("repeated_paths");
+        let mgr = LogManager::for_test(&dir);
+        let path = dir.join("same.log");
+        for _ in 0..super::MAX_SESSION_PATHS * 2 {
+            mgr.register_path(path.clone(), "active", true);
+        }
+        mgr.register_path(path.clone(), "closed", false);
+        let paths = lock_mutex(&mgr.session_paths);
+        assert_eq!(paths.paths.len(), 1);
+        assert_eq!(paths.order.len(), 1);
+        assert_eq!(paths.paths[&path].port_id, "closed");
+        assert!(!paths.paths[&path].active);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn active_path_overflow_still_obeys_the_hard_metadata_limit() {
+        let mut paths = super::SessionPaths::default();
+        for index in 0..super::MAX_SESSION_PATHS + 1 {
+            paths.register(PathBuf::from(format!("active-{index}.log")), "COM", true);
+        }
+        assert_eq!(paths.paths.len(), super::MAX_SESSION_PATHS);
+        assert_eq!(paths.order.len(), super::MAX_SESSION_PATHS);
+        assert!(!paths.paths.contains_key(Path::new("active-0.log")));
+        // Historical bookkeeping must not evict an all-active cache.
+        paths.register(PathBuf::from("history.log"), "old", false);
+        assert!(!paths.paths.contains_key(Path::new("history.log")));
+        assert_eq!(paths.paths.len(), super::MAX_SESSION_PATHS);
+    }
+
+    #[test]
+    fn directory_changes_drop_old_root_and_reject_late_old_registrations() {
+        let dir = test_dir("path_root_old");
+        let new_root = test_dir("path_root_new");
+        let mgr = LogManager::for_test(&dir);
+        let old_path = dir.join("old.log");
+        mgr.register_path(old_path.clone(), "old", false);
+        mgr.set_directory(new_root.to_string_lossy().into_owned())
+            .unwrap();
+        mgr.register_path(old_path, "late-old", true);
+        assert!(lock_mutex(&mgr.session_paths).paths.is_empty());
+        let new_path = new_root.join("new.log");
+        mgr.register_path(new_path.clone(), "new", true);
+        assert_eq!(
+            lock_mutex(&mgr.session_paths)
+                .snapshot()
+                .get(&new_path)
+                .map(String::as_str),
+            Some("new")
+        );
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(new_root);
+    }
+
+    #[test]
+    fn listing_forgets_missing_history_but_not_active_paths() {
+        let dir = test_dir("missing_path_history");
+        let mgr = LogManager::for_test(&dir);
+        let retired = dir.join("retired.log");
+        let active = dir.join("active.log");
+        mgr.register_path(retired.clone(), "retired", false);
+        mgr.register_path(active.clone(), "active", true);
+        assert!(mgr.list_files().unwrap().is_empty());
+        let paths = lock_mutex(&mgr.session_paths);
+        assert!(!paths.paths.contains_key(&retired));
+        assert!(paths.paths.contains_key(&active));
+        assert_eq!(paths.paths.len(), paths.order.len());
+        let _ = fs::remove_dir_all(dir);
     }
 
     // ---------- 创建 / 基本写入 ----------
