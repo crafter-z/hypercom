@@ -20,6 +20,23 @@ const ghostMissingPolls = new Map<string, number>();
 const MAX_MISSING_POLLS = 3;
 
 /**
+ * Polling normally recreates merged port objects. Avoid publishing an
+ * identical snapshot: every setPorts call invalidates all port subscribers,
+ * including every pane/tab, even when enumeration has not changed.
+ */
+const SERIAL_PORT_KEYS: (keyof SerialPort)[] = [
+  'id', 'name', 'alias', 'status', 'type', 'isHidden', 'groupId',
+  'baudRate', 'dataBits', 'parity', 'stopBits', 'handshake',
+  'protocolTemplateId', 'toolRunning', 'mode', 'displayView',
+  'connectionGeneration', 'manufacturer', 'product',
+];
+
+export function areSerialPortsEqual(a: SerialPort[], b: SerialPort[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((port, index) => SERIAL_PORT_KEYS.every((key) => Object.is(port[key], b[index][key])));
+}
+
+/**
  * 将后端 PortInfo 映射为前端 SerialPort
  * 后端的 port_type 是 "real"|"virtual"，前端 PortStatus 需要从后端获取或默认 disconnected
  */
@@ -148,7 +165,7 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
       if (requestId !== latestListRequest) return false;
       const state = useAppStore.getState();
       const merged = mergePorts(list.map(mapPortInfo), state.ports, state.portOrder);
-      setPorts(merged);
+      if (!areSerialPortsEqual(state.ports, merged)) setPorts(merged);
       lastListFailed = false;
       return true;
     } catch (err) {

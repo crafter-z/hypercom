@@ -42,11 +42,15 @@ interface RateDisplay {
 
 const StatusBar: React.FC = () => {
   const systemStatus = useSystemStore((s) => s.systemStatus);
-  const trafficStats = useSystemStore((s) => s.trafficStats);
   const activePortId = useAppStore((s) => getActivePortId(s));
-  const ports = useAppStore((s) => s.ports);
-  const activeTraffic = activePortId ? trafficStats[activePortId] : null;
-  const connectedCount = ports.filter(p => p.status === 'connected').length;
+  // Subscribe only to the active port's counters. Subscribing to the whole map
+  // makes every port's 1s traffic flush re-render the status bar even when the
+  // user is looking at a different port.
+  const activeTraffic = useSystemStore((s) => activePortId ? s.trafficStats[activePortId] : null);
+  const connectedCount = useAppStore((s) => s.ports.reduce(
+    (count, port) => count + (port.status === 'connected' ? 1 : 0),
+    0,
+  ));
   const { t } = useTranslation();
 
   useSystemStatus(5000);

@@ -13,6 +13,7 @@ import { configService } from '../services/tauri';
 import { enqueueConfigWrite } from './configWriteQueue';
 import { normalizeCommandOrder } from './commandOrder';
 import { validateCommandSetSteps } from './commandSteps';
+import { isSafeRegexPattern } from './safeRegex';
 import { jsonEqual as same } from './jsonEqual';
 import { useSystemStore } from '../stores/useSystemStore';
 import { readEditorRecovery, recoverableEntityCollection, recoveryKeys, recoveryRecord, writeEditorRecovery } from './entityEditorRecovery';
@@ -299,8 +300,7 @@ function validateEntity(kind: EntityKey, item: Entity): string | null {
   if (kind === 'highlightRuleSets') {
     if (!Array.isArray(value.rules) || validateIds(value.rules as Entity[])) return 'editor.invalidEntity';
     for (const rule of ((value.rules as Array<Record<string, unknown>> | undefined) ?? [])) {
-      if (rule.isRegex && (typeof rule.pattern !== 'string' || rule.pattern.length > 200)) return 'editor.invalidRegex';
-      if (rule.isRegex) { try { new RegExp(String(rule.pattern)); } catch { return 'editor.invalidRegex'; } }
+      if (rule.isRegex && (typeof rule.pattern !== 'string' || !isSafeRegexPattern(rule.pattern))) return 'editor.invalidRegex';
     }
   } else if (kind === 'sendCommandSets') {
     if (!Array.isArray(value.commands) || validateIds(value.commands as Entity[])) return 'editor.invalidEntity';
@@ -313,8 +313,7 @@ function validateEntity(kind: EntityKey, item: Entity): string | null {
     if (!['none', 'sum8', 'xor', 'crc8'].includes(String(value.checksumAlgorithm))) return 'editor.invalidProtocol';
     if (!Number.isInteger(value.checksumOffset) || Number(value.checksumOffset) < 0) return 'editor.invalidProtocol';
   } else if (kind === 'triggerRules') {
-    if ((value.matchType === 'regex' || value.isRegex) && (typeof value.pattern !== 'string' || value.pattern.length > 200)) return 'editor.invalidRegex';
-    if (value.matchType === 'regex' || value.isRegex) { try { new RegExp(String(value.pattern)); } catch { return 'editor.invalidRegex'; } }
+    if ((value.matchType === 'regex' || value.isRegex) && (typeof value.pattern !== 'string' || !isSafeRegexPattern(value.pattern))) return 'editor.invalidRegex';
     if (value.matchType === 'hex' && invalidHex(value.pattern)) return 'editor.invalidHex';
     if (value.actionIsHex && invalidHex(value.actionContent)) return 'editor.invalidHex';
   }

@@ -105,8 +105,9 @@ export function renderProtocolLine(line: TerminalLine, encoding: string = 'UTF-8
   const fields = [...line.parsedFields].sort((a, b) => a.byteStart - b.byteStart);
   const rawData = line.rawData;
 
-  // Build coverage map: for each byte index, which field it belongs to (or null for gap)
-  // Uint8Array 无 .map：Array.from 逐索引映射（issue #6-2）
+  // Build coverage map: for each byte index, which field it belongs to (or null for gap).
+  // Array.from makes the projected array's element type explicit instead of
+  // retaining Uint8Array's byte-only result type.
   const coverage: (ParsedField | null)[] = Array.from({ length: rawData.length }, (_, i) =>
     getFieldForByte(fields, i)
   );

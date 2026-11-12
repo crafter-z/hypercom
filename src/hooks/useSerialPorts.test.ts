@@ -1,5 +1,5 @@
 import { beforeEach, describe, it, expect } from 'vitest';
-import { mergePorts, mapPortInfo } from './useSerialPorts';
+import { areSerialPortsEqual, mergePorts, mapPortInfo } from './useSerialPorts';
 import { useAppStore } from '../stores/useAppStore';
 import type { SerialPort } from '../types';
 import { resetStoresForTests } from '../stores/resetStores';
@@ -244,6 +244,15 @@ describe('mergePorts', () => {
   it('returns incoming ports as-is when nothing exists yet', () => {
     const incoming = [makePort('COM1'), makePort('COM2')];
     expect(mergePorts(incoming, []).map(p => p.id)).toEqual(['COM1', 'COM2']);
+  });
+});
+
+describe('areSerialPortsEqual', () => {
+  it('treats equivalent snapshots as equal and detects field/order changes', () => {
+    const first = [makePort('COM1', { status: 'connected', baudRate: 115200 }), makePort('COM2')];
+    expect(areSerialPortsEqual(first, first.map(port => ({ ...port })))).toBe(true);
+    expect(areSerialPortsEqual(first, [first[1], first[0]])).toBe(false);
+    expect(areSerialPortsEqual(first, [first[0], { ...first[1], status: 'error' }])).toBe(false);
   });
 });
 

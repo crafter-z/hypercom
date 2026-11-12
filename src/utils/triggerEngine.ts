@@ -6,6 +6,7 @@
 
 import type { TriggerRule } from '../types';
 import { bytesToSpacedHex } from './hexFormat';
+import { tryCreateSafeRegex } from './safeRegex';
 
 /** 触发匹配结果：匹配到的规则 + 匹配文本 */
 export interface TriggerAction {
@@ -42,6 +43,9 @@ export function evaluateTriggers(
   portId?: string
 ): TriggerAction[] {
   const actions: TriggerAction[] = [];
+  // Several enabled HEX rules can inspect the same frame. Convert once per
+  // evaluation instead of allocating the spaced representation per rule.
+  let normalizedHexContent: string | undefined;
 
   for (const rule of triggers) {
     if (!rule.isEnabled) continue;
@@ -64,22 +68,21 @@ export function evaluateTriggers(
         break;
 
       case 'regex':
-        try {
-          // ReDoS 防护：短模式也可能触发指数回溯（如 (a+)+$），仅对前 5000 字符 test
-          const safeContent = content.length > 5000 ? content.slice(0, 5000) : content;
-          matched = new RegExp(rule.pattern).test(safeContent);
-        } catch {
-          // 无效正则，跳过
-          continue;
-        }
+        // Length/input truncation alone does not prevent exponential
+        // backtracking. Reject nested-quantifier patterns before they run on
+        // the RX/UI thread.
+        const regex = tryCreateSafeRegex(rule.pattern);
+        if (!regex) continue;
+        const safeContent = content.length > 5000 ? content.slice(0, 5000) : content;
+        matched = regex.test(safeContent);
         break;
 
       case 'hex': {
         if (!rawData || rawData.length === 0) continue;
-        const hexStr = bytesToSpacedHex(rawData);
+        normalizedHexContent ??= bytesToSpacedHex(rawData);
         const normalizedPattern = normalizeHexPattern(rule.pattern);
         if (!normalizedPattern) continue;
-        matched = hexStr.includes(normalizedPattern);
+        matched = normalizedHexContent.includes(normalizedPattern);
         break;
       }
 

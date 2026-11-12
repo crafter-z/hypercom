@@ -5,6 +5,7 @@
 
 import type { HighlightRuleSet, HighlightRule } from '../types';
 import { safeCssColor } from './cssColor';
+import { tryCreateSafeRegex } from './safeRegex';
 
 /** 已告警过的非法正则模式（按 pattern 去重，避免随每批 RX 反复刷屏）。 */
 const warnedInvalidRegex = new Set<string>();
@@ -27,6 +28,10 @@ export function applyHighlightSets(
 
   // 收集所有匹配项
   const enabledSets = ruleSets.filter(s => s.isEnabled);
+  // Decode/case-fold the line once. The same line can be checked by many
+  // literal rules; doing this inside each rule multiplied work on every RX
+  // batch.
+  const lowerText = text.toLowerCase();
   const allMatches: HighlightMatch[] = [];
 
   for (const set of enabledSets) {
@@ -34,10 +39,12 @@ export function applyHighlightSets(
       if (!rule.pattern) continue;
       try {
         if (rule.isRegex) {
-          if (rule.pattern.length > 200) continue;
-          // ReDoS 防护：短模式也可能触发指数回溯（如 (a+)+$），仅对前 5000 字符跑 exec
+          // Length/input truncation alone does not prevent exponential
+          // backtracking. Reject nested-quantifier patterns before they run
+          // on the RX/UI thread.
+          const regex = tryCreateSafeRegex(rule.pattern, 'g');
+          if (!regex) continue;
           const safeText = text.length > 5000 ? text.slice(0, 5000) : text;
-          const regex = new RegExp(rule.pattern, 'g');
           let match: RegExpExecArray | null;
           while ((match = regex.exec(safeText)) !== null) {
             allMatches.push({
@@ -48,7 +55,6 @@ export function applyHighlightSets(
             if (match[0].length === 0) regex.lastIndex++;
           }
         } else {
-          const lowerText = text.toLowerCase();
           const lowerPattern = rule.pattern.toLowerCase();
           // `toLowerCase` may change string length (e.g. 'İ' → 'i̇'), which
           // would shift every index found in the lowercased copy. Fall back to
