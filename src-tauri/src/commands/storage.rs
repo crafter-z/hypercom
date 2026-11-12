@@ -331,6 +331,7 @@ mod tests {
         SendCommandSetEntry {
             id: id.into(),
             name: name.into(),
+            schema_version: None,
             is_loop: false,
             loop_delay: 0,
             repeat_count: 0,

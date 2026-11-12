@@ -93,6 +93,12 @@ pub struct SendCommandEntry {
 pub struct SendCommandSetEntry {
     pub id: String,
     pub name: String,
+    /// Enhanced command sets persist their wire schema so a recovered config
+    /// cannot silently downgrade a set after a round trip through Rust.
+    /// `None` is the legacy send-only shape; unknown values are retained for
+    /// the frontend's explicit unsupported-version validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<i64>,
     pub is_loop: bool,
     pub loop_delay: i32,
     /// 重复轮数: 0 = 跟随 is_loop, >0 = 发送 N 轮后停止。

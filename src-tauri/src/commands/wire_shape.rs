@@ -180,6 +180,25 @@ fn send_command_set_entry_wire_keys_are_camel_case() {
     .expect("frontend wire keys must deserialize");
     assert!(set.is_loop);
     assert_eq!(set.commands[0].cmd_type, "string");
+    assert_eq!(set.schema_version, None);
+
+    let enhanced: SendCommandSetEntry = serde_json::from_value(serde_json::json!({
+        "id": "s2", "name": "改参序列", "schemaVersion": 2,
+        "isLoop": false, "loopDelay": 0, "repeatCount": 1, "commands": [],
+    }))
+    .expect("enhanced command-set schema must deserialize");
+    assert_eq!(enhanced.schema_version, Some(2));
+    let serialized = serde_json::to_value(&enhanced).expect("schema must round-trip");
+    assert_eq!(serialized["schemaVersion"], 2);
+
+    // Unknown versions must survive the backend round trip so the frontend can
+    // reject them explicitly instead of treating the set as legacy send-only.
+    let unknown: SendCommandSetEntry = serde_json::from_value(serde_json::json!({
+        "id": "s3", "name": "未来序列", "schemaVersion": 9,
+        "isLoop": false, "loopDelay": 0, "repeatCount": 1, "commands": [],
+    }))
+    .expect("unknown schema versions remain representable");
+    assert_eq!(unknown.schema_version, Some(9));
 
     // snake_case 拼写必须失败（含嵌套字段 `type` 的正确 wire 名）。
     assert!(serde_json::from_value::<SendCommandSetEntry>(serde_json::json!({

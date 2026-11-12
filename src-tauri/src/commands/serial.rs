@@ -428,49 +428,29 @@ pub async fn send_file(
         cancel: Arc::clone(&cancel),
     };
     const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-    let metadata = match std::fs::metadata(&args.path) {
-        Ok(metadata) => metadata,
-        Err(e) => {
-            let _ = unregister_file_send(
-                &state.file_send_cancel,
-                &args.port_id,
-                &args.transfer_id,
-                &cancel,
-            );
-            return Err(CommandError::Io(format!(
-                "Failed to stat file '{}': {}",
-                args.path, e
-            )));
-        }
-    };
-    if !metadata.is_file() {
-        let _ = unregister_file_send(
-            &state.file_send_cancel,
-            &args.port_id,
-            &args.transfer_id,
-            &cancel,
-        );
-        return Err(CommandError::Io(format!(
-            "Not a regular file: '{}'",
-            args.path
-        )));
-    }
-    if metadata.len() > MAX_FILE_SIZE {
-        let _ = unregister_file_send(
-            &state.file_send_cancel,
-            &args.port_id,
-            &args.transfer_id,
-            &cancel,
-        );
-        return Err(CommandError::Io(format!(
-            "File too large ({} bytes, max {} bytes)",
-            metadata.len(),
-            MAX_FILE_SIZE
-        )));
-    }
     let mut sent = 0usize;
     let mut total = 0usize;
+    // Keep all validation inside the transfer future so every exit path reaches
+    // the common cleanup/final-progress section below. In particular, a missing,
+    // non-regular, or oversized file must not leave the UI's progress indicator
+    // waiting forever for the terminal `done` event.
     let result = async {
+        let metadata = tokio::fs::metadata(&args.path)
+            .await
+            .map_err(|e| CommandError::Io(format!("Failed to stat file '{}': {}", args.path, e)))?;
+        if !metadata.is_file() {
+            return Err(CommandError::Io(format!(
+                "Not a regular file: '{}'",
+                args.path
+            )));
+        }
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(CommandError::Io(format!(
+                "File too large ({} bytes, max {} bytes)",
+                metadata.len(),
+                MAX_FILE_SIZE
+            )));
+        }
         let generation = {
             let manager = state
                 .serial_manager
