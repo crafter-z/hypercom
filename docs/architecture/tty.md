@@ -5,7 +5,7 @@
 ## 核心设计原则
 
 - **后端字节透明（最大解耦点）**：串口是字节管道，「终端语义」完全由前端 xterm.js 承担——RX 后端 `serial:data` 已按读取块吐原始字节流，TX `send_serial_data` 已支持任意字节写。**后端核心 I/O 零模式分支**。
-- **xterm.js = 终端模拟器**（VS Code 同款）：自带屏幕缓冲/滚动区/备用屏幕/全部 ANSI 序列/尺寸协商/自有 canvas 渲染器——完全不依赖现有行缓冲渲染架构。
+- **xterm.js = 终端模拟器**：负责屏幕缓冲、滚动区、备用屏幕与其支持的 ANSI/VT 序列。当前只加载 `FitAddon`，不额外加载 Canvas/WebGL renderer addon；尺寸由宿主 fit 并经 `ttyService.resize` 同步，不能据此承诺任意串口对端都支持尺寸协商。它不依赖 TRX 的行缓冲渲染引擎。
 - **前端两条并行管线**：TRX 走 `RxLineAssembler`→viewportManager→TerminalView（不动）；TTY 走 `ttyService`（按端口持有 xterm 实例引用，实例本身由 `TtyView` 创建并拥有）→`TtyView`。两者经每端口 `mode` 在**三个薄接缝**处分流。
 
 ## 模式状态与切换

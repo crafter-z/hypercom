@@ -81,10 +81,10 @@ openPort(portId, baud)
 
 ### 关闭
 
-- `closePort(portId)` 路由经 `useSerialConnection`：调 `stopLogging` 更新端口状态 → `close_serial_port`。
+- 用户显式关闭经 `useSerialConnection.closePort(portId)`：先发布关闭意图、取消重连，再经同端口 operation lane 调 `close_serial_port`，完成后更新状态；日志 writer 跟随后端连接代次收尾，前端不再另调 `stopLogging` 镜像该生命周期。
 - `close_serial_port` 在全局 manager 锁外等待读线程和已经取出的真实串口写入租约，待最后的写句柄释放后才返回；关闭期间同端口重开等待完成信号，不再与仍在飞的发送抢独占 COM 句柄。异步 join/等待由阻塞线程池承载，其他端口命令不被全局锁拖住。
 - `attempt_reconnect` 在进入阻塞线程池前登记每端口意图令牌；用户关闭、显式打开或较新的重连会取消旧令牌。旧尝试在摘除句柄前与最终打开前都于 manager 锁内复查，锁外枚举/join 期间发生关闭也不能重新打开端口或发出新的 connected；旧任务结束不会删除较新的令牌。公开 invoke 参数不变。
-- **标签页关闭 ≠ 端口关闭（issue #11）**：关闭标签只销毁前端显示目标（`Pane.cleanupClosedTab` → `getRxPipeline().disconnect(tabId)` + `ttyService.detach(tabId)` + `releaseViewportManager` + `releaseTerminalState(portId)` 回收该端口的终端显示态/流量统计/TX 历史），串口连接与后端日志保持。批量关闭先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合再逐个走该生命周期。重开标签页从零开始新一轮输出。
+- **标签页关闭 ≠ 端口关闭**：`Pane.cleanupClosedTab(tabId)` 先退休插件视图与时间组成员；serial 标签按 `tab.portId` detach TTY、关闭终端弹窗、释放 viewport 并 `discardTerminalQueue`，不把 workspace UUID 当端口 ID，也不调用 `pipeline.disconnect` 冒充断线。store 移除标签后 `releaseUnusedPortState(portId)` 仅在没有其他显示/行消费者时回收终端显示态、流量统计与 TX 历史；其他插件输入租约继续工作。串口连接与后端日志保持，重开原始终端从新的显示缓冲开始。批量关闭先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再统一回收涉及的端口。
 
 ### 自动重连预算与诊断
 

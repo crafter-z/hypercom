@@ -26,8 +26,8 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 - **React 不渲染行**：contentLayer 是命令式 DOM，TerminalView 壳重渲染不会触碰它。
 - **标签切换保留缓冲**：主窗 `SerialContentHost` 在分屏树之外**全局常驻挂载**所有非弹出 serial 标签的 `TerminalView`，标签内容区位置/可见性由 `tabContentPlacement` 上报（`PluginViewSurface` 计量并 `display:none` 隐藏）；viewportManager 模块注册表持有实例，切换标签/跨 Pane 拖动都不销毁。仅关闭标签、TRX→TTY 切换才 `releaseViewportManager`。
 - **关闭标签页 = 前端显示目标销毁、串口连接保留（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `dismissPluginTab` + `ttyService.detach(portId)` + `popoutService.closePopout('terminal', portId)` + `releaseViewportManager(portId)` + `getRxPipeline().discardTerminalQueue(portId)`；随后 `closeTab` 再调 `releaseUnusedPortState(portId)`（无行消费者时释放 pipeline 端口租约；无显示/行消费者时统一回收 store 侧 terminals / trafficStats / TX 历史，`releaseTerminalState` 是它的同义别名）。批量关闭（左/右/其它）先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再跑同一套 cleanup——两处不会漂移。`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 是「manager 存在才写入」——标签关闭后 RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始。
-- **惰性解码**：RX 行只存 `rawData`（`Uint8Array`），`getLineText(line, encoding)`（`src/utils/lineText.ts`，全仓唯一的 TextDecoder 工厂 + 模块级缓存，`ignoreBOM:false`）按当前编码解码；编码切换 = 重渲染，无 store 遍历。
-- **内存上限**：`computeBufferLimits()`（从 `config.maxDisplayLines` 派生 `{ maxLines }`，缺省 100000、下限 1000）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits({maxLines})` 同步到现存实例。
+- **惰性解码**：普通 RX 行只存 `rawData`（`Uint8Array`），`getLineText(line, encoding)`（`src/utils/lineText.ts`，全仓唯一的 TextDecoder 工厂 + 模块级缓存，`ignoreBOM:false`）按当前编码解码；编码切换 = 重渲染，无 store 遍历。协议帧和切换编码前排空的边界行可带已解码的 `content`，`getLineText` 优先返回它，不对这类冻结文本重新解码（见[RX 管线](transmission.md#rx-管线2026-08-04-重构)）。
+- **保留行数上限**：`computeBufferLimits()`（从 `config.maxDisplayLines` 派生 `{ maxLines }`，缺省 100000、下限 1000）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits({maxLines})` 同步到现存实例。这是每端口的行数边界，不是字节数、全应用堆内存或进程 RSS 硬上限；行内容、索引和并发端口数仍影响实际内存。
 
 ## 渲染正确性陷阱（历史缺陷 → 现状约束）
 
@@ -74,7 +74,7 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 
 ## 语法高亮与协议字段着色
 
-- **高亮引擎**：`src/utils/highlightEngine.ts`（纯函数）+ `useRuleStore.highlightRuleSets`。按集 `isEnabled` 过滤，遍历规则（isRegex → RegExp exec / 关键词 → indexOf 循环，大小写不敏感），收集 HighlightMatch[] 按位置排序、重叠时优先最长匹配并保留未覆盖尾部，构建 `<span style="color:...">`（颜色经 `safeCssColor` 校验）HTML——`escapeHtml` 防 XSS，由 `TerminalRenderer` 以 `innerHTML` 注入行内容。ReDoS 防护：正则模式 >200 字符跳过、exec 只跑前 5000 字符；非法正则按 pattern 去重只告警一次。**从不读 `activeHighlightSetId`**（RulesSection 移除后该字段已删）。
+- **高亮引擎**：`src/utils/highlightEngine.ts`（纯函数）+ `useRuleStore.highlightRuleSets`。按集 `isEnabled` 过滤，遍历规则（isRegex → RegExp exec / 关键词 → indexOf 循环，大小写不敏感），收集 HighlightMatch[] 按位置排序、重叠时优先最长匹配并保留未覆盖尾部，构建 `<span style="color:...">`（颜色经 `safeCssColor` 校验）HTML——`escapeHtml` 防 XSS，由 `TerminalRenderer` 以 `innerHTML` 注入行内容。正则统一经 `utils/safeRegex.ts` 的 `tryCreateSafeRegex`：语法合法且模式 ≤200 字符，并保守拒绝含嵌套量词的分组（如 `(a+)+$`）；保存校验共用该策略，执行时仍复核，exec 仅匹配前 5000 字符。该策略不构成完整的复杂度证明；执行仍在主线程，没有 Worker 隔离或执行期限，不能承诺所有可接受模式都免于 ReDoS。**从不读 `activeHighlightSetId`**（RulesSection 移除后该字段已删）。
 - **协议解析**：`src/utils/protocolParser.ts`——`ProtocolFrameReassembler.feed()` 返回**有序段数组**（`ReassemblerSegment[]`，`{kind:'frame'|'raw'}`，相邻 raw 合并），帧前裸字节不会排到所有帧之后。帧解析：验证帧头/读取长度字段（totalFrameLength = lengthValue - adjust + fieldSize）/验证帧尾/计算校验和（`checksumAlgorithm` 取值 `sum8` / `xor` / `crc8`）→ 构建 ParsedField[]；声明长度小于帧头/长度字段/帧尾所需空间或超过 65536（`MAX_FRAME_SIZE`）时按损坏帧重同步（跳过已匹配帧头继续扫描，不卡住）。per-port reassembler 由接收 effect 持有，模板编辑/切换、模式切换、消费者释放与断线统一退役。
 - 渲染：`line.parsedFields` 存在 → `renderProtocolLine`，显示格式由当前终端 `displayFormat` 决定，不依赖 RX 事件的 `isHex`；text 模式整行共用流式解码器，跨字段的多字节字符归入完成它的字段，不会变成替换字符；否则走 `applyHighlightSets`。
 

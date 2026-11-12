@@ -76,7 +76,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - `src/utils/hexUtils.ts`：`hexToString` / `stringToHex`（终端右键菜单的 HEX 复制/粘贴消费者是 `src/components/MainDisplay/terminalContextMenu.ts`；操作面板 HEX 转换走 `sendUtils` 的 `textToHexPreview` / `hexToTextPreview`）。
 - **bytes→HEX 唯一实现**：`src/utils/hexFormat.ts`（`hexByte` / `bytesToSpacedHex`）是全仓把字节格式化成空格分隔大写 HEX 的唯一实现，terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用——不要再各写一份 `toString(16).padStart(2,'0')`。
 - **HEX 输入严格模式（错误态，不再补零）**：`hexInputError` 忽略空白后要求「半字节个数为偶数且全为 0-9a-fA-F」，与后端 `parse_hex_string` / `build_tx_bytes` 同尺子；`parseHexBytes` 对非法输入返回 `[]`（不补零、不跳过）。发送区经 `useHexCompose` → `computeByteCount` 把奇数位 nubble 输入渲染为错误态（给 `errorKey`、不给字节数），`sendToPort` 也在入口拦掉——旧实现给奇数位补零，于是 UI 为一个后端**必然拒绝**的输入显示「N B」，是假可用状态。
-- **JSX 属性字符串不转义（issue #5-6）**：`<option value="\r\n">` 运行时值是 6 字符字面量 `\\r\\n`，与域值 4 字符 `\r\n` 不等。行结束符选项必须用表达式字面量 `value={'\r\n'}`，label 走 `lineEndingLabelKey(v, ns)`。
+- **行结束符保存的是域值，不是控制字符**：`LineEnding` 使用 `'\\r\\n'` / `'\\r'` / `'\\n'` / `'None'`，其中 CRLF 域值是反斜杠、r、反斜杠、n 共 4 个字符；实际 CR/LF 两字节仅由 `getLineEndingBytes` 与后端 codec 转换。JSX 字符串属性不会处理 JavaScript 反斜杠转义，统一从 `LINE_ENDING_VALUES` 遍历并用 `value={v}`、`lineEndingLabelKey(v, ns)`，不要另写双重转义或把实际换行控制字符作为 service 参数。
 
 ## 循环发送（每端口独立引擎，issue #12）
 
@@ -131,7 +131,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 触发引擎（条件触发，issue #3-1）
 
-- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式长度上限 200；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，归一化后为空的模式不派发动作。
+- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词，保存校验复用同一策略；主线程执行仍无期限或隔离，此策略不是完整的正则复杂度/ReDoS 保证；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，归一化后为空的模式不派发动作。
 - **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。
 - **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
 - 规则统一**显式保存后生效**：提醒、自动回复与其他实体页共用 `useEntityPage({kind})` 会话草稿。取消 300ms 自动落盘及卸载 flush；新建、删除、启用和拖动排序也只改草稿。保存后按数组顺序评估所有匹配规则，不改为首条命中即停止。

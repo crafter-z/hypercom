@@ -1,8 +1,8 @@
 # 跨模块开发约定与陷阱
 
-> 本文承接原根 `AGENTS.md` 中**跨模块**的开发者约定，以及不属于任何单一功能模块的陷阱与平台约束。模块行为细节见 [README.md](README.md) 索引下的各架构文档；目录级文件清单与局部纪律见各子目录 `AGENTS.md`。
+> 本文记录跨模块开发约定、行为边界与平台约束。模块行为细节见 [README.md](README.md) 索引下的各架构文档；目录级文件清单与局部纪律见各子目录 `AGENTS.md`。
 >
-> **引用纪律**：只写文件与符号名，不写行号。**数字断言**以代码为准：6 个 Zustand store、18 个 hook 文件、13 个命令域文件 / 98 条注册命令、775 个 i18n 键（单侧）、19 个 CSS 文件、44 个 `AppConfig` 字段；计数变化时同步本文与根 [AGENTS.md](../../AGENTS.md)。
+> **引用纪律**：只写文件与符号名，不写行号。**数字断言**以代码为准：6 个 Zustand store、18 个 hook 文件、14 个 services 生产文件、13 个命令域文件 / 98 条注册命令、780 个 i18n 键（单侧）、`src/styles/` 下 20 个 CSS 文件、44 个 `AppConfig` 字段；计数变化时同步本文、根 [AGENTS.md](../../AGENTS.md) 与[架构索引](README.md)。
 
 ## 跨模块开发约定
 
@@ -102,7 +102,7 @@ some_async_fn(&cfg).await;
 
 ### i18n：双语同源，测试守卫
 
-`src/i18n.ts` 用 i18next + react-i18next，键是**扁平 dotted key**（`keySeparator: false`），`zh-CN` 与 `en-US` 各 **636 个键**。`main.tsx` 顶层副作用 `import './i18n'` 初始化；语言切换由 `useAppStore.subscribe` diff `config.language` 后调 `i18n.changeLanguage`，全界面实时切换。
+`src/i18n.ts` 用 i18next + react-i18next，键是**扁平 dotted key**（`keySeparator: false`），`zh-CN` 与 `en-US` 各 **780 个键**。`main.tsx` 顶层副作用 `import './i18n'` 初始化；语言切换由 `useAppStore.subscribe` diff `config.language` 后调 `i18n.changeLanguage`，全界面实时切换。
 
 - 组件内用 `useTranslation()` + `t('namespace.key')` / `t('namespace.key', { var })`；类组件（如 `App.tsx` 的 `AppErrorBoundary`）不能用 hook，只能 `import i18n from './i18n'` 后 `i18n.t('key')`——它不会随语言切换重渲染，仅错误边界这类边缘场景可接受。
 - 新增文案先查 `src/i18n.ts` 是否已有 key；不够用时在 `zh-CN` 与 `en-US` **两侧同时新增、位置保持镜像**。`src/i18n.test.ts` 断言两侧键集合相等、书写顺序一致、无重复键、文案非空、插值占位符一致——任一侧漏加或错位都会红。
@@ -119,7 +119,7 @@ type(scope): description
 - `scope`：常用 `ui` | `backend` | `store` | `hooks` | `docs`（历史提交也使用 `config` / `test` 等按域细分的 scope）
 - `description`：英文、小写开头、祈使句、不加句号；一个提交只做一类逻辑变更。
 
-仓库内的真实示例：`feat(ui): reload installed plugin code and confirm replacements`、`fix(ui): repair window drag and popout close`、`docs: document plugin network, storage, reload and view transport`。提交前 `npx tsc --noEmit` 与 `cargo check` 必须通过，CI 另跑 `cargo test --lib --manifest-path src-tauri/Cargo.toml`（质量门见 `.github/workflows/ci.yml`）。
+提交前运行受影响的质量门，不以 `cargo check` 或单套 `tsc` 替代完整验证。统一 CI（`.github/workflows/ci.yml`）并行执行前端、Rust 和浏览器任务：三套 TypeScript 检查（应用/Node 工具/e2e）、Vitest、release 脚本测试、生产前端构建；Linux/Windows 的 `cargo test --lib`、Clippy（`-D warnings`）与 release-profile 检查；mock IPC 的 Playwright Chromium 回归。stable/preview 发版在创建 draft 前调用同一 reusable workflow。完整命令、原生 smoke 与最终安装包验收边界见 [release.md](release.md#日常质量门ciyml)；mock e2e 与默认跳过原生测试的库测试不证明真实 WebView/CSP、UART 或跨平台安装行为。
 
 ## 跨模块陷阱
 
@@ -129,9 +129,13 @@ type(scope): description
 
 高亮规则与协议模板的颜色来自用户输入/导入文件，渲染器会把它们插进 `innerHTML` 的 `style="color:…"`；引号、尖括号、`;`、`url()` 等可以逃出属性造成存储型 XSS。**唯一入口**是 `src/utils/cssColor.ts` 的 `safeCssColor()`：trim + 长度上限 64，只接受十六进制、命名色与纯数字参数的 `rgb()/rgba()/hsl()/hsla()`，其余返回 `null`（调用方省略该 style）。`highlightEngine` 与 `protocolRenderer` 共用它；**禁止**在渲染器里各自写正则或直接插值。
 
+### 用户正则复用 `safeRegex`
+
+高亮与触发器的执行，以及实体保存校验，共用 `src/utils/safeRegex.ts` 的 `isSafeRegexPattern` / `tryCreateSafeRegex`。策略拒绝无效语法、超过 200 字符的模式和带嵌套量词的分组；执行仍只匹配文本前 5000 字符。不要只在编辑器检查：导入/旧配置也必须在执行入口复核。此保守策略不是完整复杂度证明，仍未提供 Worker 隔离或运行期限，不应把它描述为任意用户正则的硬实时/ReDoS 保证。
+
 ### `serial:data` 的字节形状与 `Array.from`
 
-`serial:data` 线上 `data` 是字节数组（Rust `Vec<u8>` → JSON `number[]`）；前端 `TerminalLine.rawData` 是 **`Uint8Array`**（RX 行与 TX 行同型）。逐字节处理时 `Uint8Array` 没有 `.map()`，必须 `Array.from(...)` 再映射（`protocolRenderer` 的 field coverage 即因此改写）；解码唯一入口是 `src/utils/lineText.ts`（`createDecoder` / `decodeBytes` / `getLineText`，`ignoreBOM: false`），RX 行只存 `rawData`、读取时按当前编码惰性解码。数据通路细节见 [terminal.md](terminal.md)。
+`serial:data` 线上 `data` 是字节数组（Rust `Vec<u8>` → JSON `number[]`）；前端 `TerminalLine.rawData` 是 **`Uint8Array`**（RX 行与 TX 行同型）。`Uint8Array.map()` 存在，但返回仍是 `Uint8Array`，结果会被转换成字节；要映射成 HTML、字符串或对象，应使用 `Array.from(bytes, mapper)` 或先 `Array.from(bytes)` 再映射。解码唯一入口是 `src/utils/lineText.ts`（`createDecoder` / `decodeBytes` / `getLineText`，`ignoreBOM: false`）；普通 RX 行按当前编码惰性解码，协议帧和编码切换边界的行可带冻结的 `content`，此时 `getLineText` 优先返回该内容。数据通路细节见 [transmission.md](transmission.md) 与 [terminal.md](terminal.md)。
 
 ### `serial:file_progress` 是 camelCase wire
 
@@ -151,7 +155,7 @@ Rust 的 `FileProgressPayload` 带 `#[serde(rename_all = "camelCase")]`，线上
 
 ### `src/styles/` 拆分与 `src/styles.css` 入口
 
-样式按组件/页面拆在 `src/styles/`，当前 **19 个 CSS 文件**（`base.css` + 18 个组件/页面样式）；仓库根的 `src/styles.css` 只是 `@import` 入口，不是主样式表，且 `base.css` 必须最先导入（设计 token / CSS 变量才可用）。新增样式建独立文件并在入口登记；不要把组件样式堆进 `base.css` 或 `app.css`。
+样式按组件/页面拆分；`src/styles/` 当前有 **20 个 CSS 文件**（`base.css` + 19 个组件/页面样式）。`src/styles.css` 是全局 `@import` 入口，导入其中 19 个，且 `base.css` 必须最先导入（设计 token / CSS 变量才可用）；`command-settings.css` 由 `CommandSettings.tsx` 单独导入。组件目录也可放就近样式（如 `MainDisplay/TimelineControls.css`），因此 20 不是整个前端的 CSS 总数。新增样式沿用明确的全局或组件导入路径，不要把组件样式堆进 `base.css` 或 `app.css`。
 
 ### 插件路径组件统一校验
 

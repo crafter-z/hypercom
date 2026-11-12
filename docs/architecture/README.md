@@ -19,7 +19,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 780 键。后端 98 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个普通字段 + entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
+> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 780 键。后端 98 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个非 flatten 字段（含 revision）+ entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
 
 ## 文档清单
 
@@ -47,10 +47,10 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 
 跨模块开发约定（选择器纪律、React 组件定义、flexbox 链、锁纪律、hook 生命周期、i18n、提交规范、CSS 颜色安全等）的完整说明见 [`conventions.md`](conventions.md)；以下只列最关键的几条。
 
-- **两编译器项目**：前端 React 18 + TypeScript（`src/`），后端 Rust + Tauri v2（`src-tauri/`）；Tauri 核心与 npm 包同 minor 版本（当前 2.11.x）。
+- **两编译器项目**：前端 React 18 + TypeScript（`src/`），后端 Rust + Tauri v2（`src-tauri/`）；当前锁文件中的 `@tauri-apps/api` 与 Rust `tauri` 均为 2.11.x。manifest 的主版本范围不是 minor 锁定，升级需核对两侧锁文件与 IPC 兼容性。
 - **Zustand 选择器纪律**：`src/stores/` 共 6 个 store 模块（`useAppStore` / `useOperationStore` / `useTerminalStore` / `useRuleStore` / `useSystemStore` / `useToastStore`），任何 store 调用必须带 selector，禁止无选择器订阅整 store（串口数据事件会触发重渲染 → 输入失焦/卡顿）。其中 `useSystemStore`（`systemStatus` / `trafficStats` / `simulationMode` / `ui`）从 `useAppStore` 独立——高频轮询与 UI 开关不牵动标签页/端口等低频 state。
 - **跨 `.await` 锁纪律**：`MutexGuard` 是 `!Send`，async 命令必须「提取 + clone + drop 锁」后再 `.await`。反证见 `AppState.log_manager`——它是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），因此日志写入不需要持锁跨 `.await`，`save_log_as` 的拷贝 / `list_files` 递归 / 数据写入不争同一把锁。
 - **命令返回**：一律 `Result<T, CommandError>`，不得返回 `String`。
-- **DEV 门控**：模拟串口/模拟终端/自动更新等调试能力的后端门控**只有一处实现**——`commands/system_cmds.rs` 的 `dev_only(capability)` / `is_debug_build()`（命令体不得再自带 `#[cfg(debug_assertions)]` 双主体）；前端以 `import.meta.env.DEV`（`utils/devMode.ts` 的 `DEV_FEATURES_ENABLED`）隐藏 UI。两层都要有：release 构建下后端函数直接返回错误，前端同时不渲染入口。
-- **配置持久化审计**：普通全量 `set_config` 经 `saveConfig(patch?)` 组装安全快照并以 revision CAS 保存，绝不用启动实体快照覆盖后端。备份导入是显式恢复边界，但插件授权只能恢复到同一 `installGeneration`；`BackupSettings.handleImport` 读回后端权威配置与插件列表后重载，不发布导入文件中的旧权限。
+- **构建能力门控**：唯一后端实现为 `commands/system_cmds.rs` 的 `dev_only(capability)` / `is_debug_build()`（命令体不得再自带 `#[cfg(debug_assertions)]` 双主体）。模拟串口/模拟终端在 release 由 `dev_only` 拒绝，前端用 `DEV_FEATURES_ENABLED = import.meta.env.DEV` 隐藏入口并在 hook 内兜底；自动更新方向相反，debug 后端短路为空候选/空操作，release 才执行真实检查与安装，前端自动检查也跳过 DEV/macOS。手动更新入口不受自动检查开关影响，后端构建门控仍然生效，详见 [update.md](update.md)。
+- **配置保存契约**：普通全量 `set_config` 经 `saveConfig(patch?)` 组装安全快照并以 revision CAS 保存，绝不用启动实体快照覆盖后端。备份导入是显式恢复边界，但插件授权只能恢复到同一 `installGeneration`；`BackupSettings.handleImport` 读回后端权威配置与插件列表后重载，不发布导入文件中的旧权限。
 - **插件运行与发布证据**：安装身份、权限和 IO 契约见 [`plugins.md`](plugins.md)；最终安装包的原生 Worker/CSP、文件选择器与跨平台验收见 [`release.md`](release.md#插件发版验收门)。用户安装、授权、升级和卸载步骤见[插件使用](../userwiki/插件.md)。
