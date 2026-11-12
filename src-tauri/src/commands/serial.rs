@@ -110,7 +110,112 @@ impl Drop for ToolReservation<'_> {
 use super::CommandError;
 use crate::{serial, AppState};
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+
+/// Fill one bounded transfer chunk. The opened-file length is the transfer
+/// boundary: a shrink/growth is reported, never sent beyond the declared total.
+async fn read_file_send_chunk(
+    reader: &mut (impl AsyncRead + Unpin),
+    buffer: &mut [u8],
+    remaining: usize,
+) -> std::io::Result<usize> {
+    if remaining == 0 {
+        let mut extra = [0u8; 1];
+        return if reader.read(&mut extra).await? == 0 {
+            Ok(0)
+        } else {
+            Err(std::io::Error::other("File changed during file send"))
+        };
+    }
+    let len = buffer.len().min(remaining);
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Empty file-send buffer",
+        ));
+    }
+    reader.read_exact(&mut buffer[..len]).await?;
+    if len == remaining {
+        // Verify the boundary before sending the final chunk: a detected growth
+        // must not publish a misleading full-size successful terminal progress.
+        let mut extra = [0u8; 1];
+        if reader.read(&mut extra).await? != 0 {
+            return Err(std::io::Error::other("File changed during file send"));
+        }
+    }
+    Ok(len)
+}
+
+/// A channel entry is bounded by bytes, not merely by number of lines: tools
+/// may print arbitrarily long progress/binary output without any newline.
+const TOOL_OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+
+fn tool_output_split(bytes: &[u8]) -> usize {
+    // Keep a possible UTF-8 suffix (at most three bytes) for the next event,
+    // even when earlier bytes were malformed. Keep CR for a following LF too.
+    if bytes.last() == Some(&b'\r') {
+        return bytes.len() - 1;
+    }
+    let start = bytes.len().saturating_sub(4);
+    if let Some(offset) = bytes[start..].iter().rposition(|byte| byte & 0xc0 != 0x80) {
+        let tail = start + offset;
+        if std::str::from_utf8(&bytes[tail..])
+            .err()
+            .is_some_and(|error| error.error_len().is_none())
+        {
+            return tail;
+        }
+    }
+    bytes.len()
+}
+
+async fn stream_tool_output(
+    mut reader: impl AsyncBufRead + Unpin,
+    stream: &'static str,
+    tx: tokio::sync::mpsc::Sender<(&'static str, String)>,
+) {
+    let mut pending = Vec::with_capacity(TOOL_OUTPUT_CHUNK_BYTES);
+    let mut split_line = false;
+    while let Ok(available) = reader.fill_buf().await {
+        let eof = available.is_empty();
+        if !eof {
+            let available_len = available
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            let len = available_len.min(TOOL_OUTPUT_CHUNK_BYTES - pending.len());
+            pending.extend_from_slice(&available[..len]);
+            reader.consume(len);
+        }
+        let complete = eof || pending.last() == Some(&b'\n');
+        if complete {
+            let decoded = String::from_utf8_lossy(&pending);
+            let line = decoded.trim_end_matches(['\n', '\r']);
+            // A delimiter immediately after an emitted chunk only ends that
+            // line; it must not introduce a phantom extra empty output event.
+            if (!eof || !pending.is_empty())
+                && (!split_line || !line.is_empty())
+                && tx.send((stream, line.to_string())).await.is_err()
+            {
+                break;
+            }
+            pending.clear();
+            split_line = false;
+            if eof {
+                break;
+            }
+        } else if pending.len() == TOOL_OUTPUT_CHUNK_BYTES {
+            let split = tool_output_split(&pending);
+            let line = String::from_utf8_lossy(&pending[..split]).into_owned();
+            if tx.send((stream, line)).await.is_err() {
+                break;
+            }
+            pending.copy_within(split.., 0);
+            pending.truncate(pending.len() - split);
+            split_line = true;
+        }
+    }
+}
 
 /// 获取系统可用串口列表
 /// 前端调用: invoke('list_available_ports')
@@ -469,29 +574,45 @@ pub async fn send_file(
             }
             generation
         };
-        // Bounded read: a FIFO/device or a file that grows after `stat` must
-        // not be read to EOF. `take` enforces the cap on the actual bytes.
-        let file = tokio::fs::File::open(&args.path)
+        let mut file = tokio::fs::File::open(&args.path)
             .await
             .map_err(|e| CommandError::Io(format!("Failed to open file '{}': {}", args.path, e)))?;
-        let mut data = Vec::with_capacity(metadata.len().min(MAX_FILE_SIZE) as usize);
-        file.take(MAX_FILE_SIZE + 1)
-            .read_to_end(&mut data)
+        // Recheck the actual opened handle, not just the earlier path lookup.
+        let metadata = file
+            .metadata()
             .await
-            .map_err(|e| CommandError::Io(format!("Failed to read file '{}': {}", args.path, e)))?;
-        if data.len() as u64 > MAX_FILE_SIZE {
+            .map_err(|e| CommandError::Io(e.to_string()))?;
+        if !metadata.is_file() || metadata.len() > MAX_FILE_SIZE {
             return Err(CommandError::Io(format!(
-                "File exceeds the {} byte limit: '{}'",
+                "File must remain regular and within the {} byte limit: '{}'",
                 MAX_FILE_SIZE, args.path
             )));
         }
-        total = data.len();
+        total = metadata.len() as usize;
         let chunk_size = args.chunk_size.clamp(1, 1024 * 1024);
+        // Only the current chunk remains resident during slow writes/delays,
+        // rather than retaining the entire (up to 100 MiB) file for the transfer.
+        let mut buffer = vec![0u8; chunk_size.min(total)];
+        let mut read = 0usize;
+        let mut chunk_index = 0usize;
         let is_real_port = serial::PortKind::of(&args.port_id) == serial::PortKind::Real;
-        for (chunk_index, chunk) in data.chunks(chunk_size).enumerate() {
+        loop {
             if cancel.load(Ordering::Acquire) {
                 break;
             }
+            let len = read_file_send_chunk(&mut file, &mut buffer, total - read)
+                .await
+                .map_err(|e| {
+                    CommandError::Io(format!("Failed to read file '{}': {}", args.path, e))
+                })?;
+            if len == 0 {
+                break;
+            }
+            read += len;
+            if cancel.load(Ordering::Acquire) {
+                break;
+            }
+            let chunk = &buffer[..len];
             let write_result = {
                 let manager = state
                     .serial_manager
@@ -541,6 +662,7 @@ pub async fn send_file(
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string();
             let log_data = format!("[FILE] chunk {} ({} bytes)", chunk_index, chunk.len());
+            chunk_index += 1;
             if let Err(e) =
                 state
                     .log_manager
@@ -562,6 +684,9 @@ pub async fn send_file(
                 tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
             } else {
                 tokio::task::yield_now().await;
+            }
+            if read == total {
+                break;
             }
         }
         Ok(sent)
@@ -874,52 +999,20 @@ pub async fn run_port_tool(
             procs.insert(args.port_id.clone(), child);
         }
 
-        // 5. 并发读取 stdout/stderr，逐行推送 tool:output 事件
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
-
-        // 按字节读到 '\n' 为止，再用 from_utf8_lossy 转字符串：
-        // lines()/next_line() 遇到非法 UTF-8 会静默停止，截断二进制烧录器输出。
-        let tx_out = tx.clone();
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let line = String::from_utf8_lossy(&buf)
-                            .trim_end_matches(['\n', '\r'])
-                            .to_string();
-                        if tx_out.send(("stdout".to_string(), line)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let tx_err = tx.clone();
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let line = String::from_utf8_lossy(&buf)
-                            .trim_end_matches(['\n', '\r'])
-                            .to_string();
-                        if tx_err.send(("stderr".to_string(), line)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        // 5. 并发读 stdout/stderr；短行保持逐行，长行按有界块推送。
+        // Invalid UTF-8 remains lossy (never stops capture); UTF-8/CRLF tails
+        // spanning chunk boundaries are carried into the following event.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(&'static str, String)>(256);
+        tokio::spawn(stream_tool_output(
+            BufReader::new(stdout),
+            "stdout",
+            tx.clone(),
+        ));
+        tokio::spawn(stream_tool_output(
+            BufReader::new(stderr),
+            "stderr",
+            tx.clone(),
+        ));
 
         drop(tx); // 两个 reader 任务结束后 channel 关闭，rx.recv() 返回 None
 
@@ -929,7 +1022,7 @@ pub async fn run_port_tool(
                 ToolOutputPayload {
                     port_id: args.port_id.clone(),
                     line,
-                    stream,
+                    stream: stream.to_string(),
                 },
             );
         }
@@ -1135,6 +1228,136 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn file_send_streams_large_input_in_one_reused_bounded_buffer() {
+        use tokio::io::AsyncReadExt;
+        const TOTAL: usize = 100 * 1024 * 1024;
+        let mut reader = tokio::io::repeat(0x5a).take(TOTAL as u64);
+        let mut buffer = vec![0; 64 * 1024];
+        let pointer = buffer.as_ptr();
+        let mut read = 0;
+        loop {
+            let len = super::read_file_send_chunk(&mut reader, &mut buffer, TOTAL - read)
+                .await
+                .unwrap();
+            if len == 0 {
+                break;
+            }
+            assert!(len <= 64 * 1024);
+            assert!(buffer[..len].iter().all(|&byte| byte == 0x5a));
+            assert_eq!(pointer, buffer.as_ptr());
+            read += len;
+        }
+        assert_eq!(read, TOTAL);
+        assert_eq!(buffer.len(), 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn file_send_detects_growth_shrink_and_preserves_final_short_chunk() {
+        let mut reader = &b"abcdefg"[..];
+        let mut buffer = [0; 4];
+        assert_eq!(
+            super::read_file_send_chunk(&mut reader, &mut buffer, 7)
+                .await
+                .unwrap(),
+            4
+        );
+        assert_eq!(&buffer, b"abcd");
+        assert_eq!(
+            super::read_file_send_chunk(&mut reader, &mut buffer, 3)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(&buffer[..3], b"efg");
+        assert_eq!(
+            super::read_file_send_chunk(&mut reader, &mut buffer, 0)
+                .await
+                .unwrap(),
+            0
+        );
+        let mut short = &b"ab"[..];
+        assert_eq!(
+            super::read_file_send_chunk(&mut short, &mut buffer, 4)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        let mut grown = &b"extra"[..];
+        assert!(super::read_file_send_chunk(&mut grown, &mut buffer, 0)
+            .await
+            .is_err());
+        let mut grown_before_final_chunk = &b"abcde"[..];
+        assert!(
+            super::read_file_send_chunk(&mut grown_before_final_chunk, &mut buffer, 4)
+                .await
+                .is_err()
+        );
+        let mut empty = &b""[..];
+        assert_eq!(
+            super::read_file_send_chunk(&mut empty, &mut [], 0)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    async fn captured_tool_output(input: Vec<u8>) -> Vec<String> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let task = tokio::spawn(async move {
+            // A small reader buffer forces delimiters/characters across reads.
+            super::stream_tool_output(
+                tokio::io::BufReader::with_capacity(7, input.as_slice()),
+                "stdout",
+                tx,
+            )
+            .await;
+        });
+        let mut output = Vec::new();
+        while let Some((stream, line)) = rx.recv().await {
+            assert_eq!(stream, "stdout");
+            output.push(line);
+        }
+        task.await.unwrap();
+        output
+    }
+
+    #[tokio::test]
+    async fn tool_output_without_newlines_is_chunked_without_truncation() {
+        let input = vec![b'x'; 2 * 1024 * 1024 + 17];
+        let chunks = captured_tool_output(input.clone()).await;
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= super::TOOL_OUTPUT_CHUNK_BYTES));
+        assert_eq!(chunks.concat().as_bytes(), input);
+    }
+
+    #[tokio::test]
+    async fn tool_output_preserves_utf8_and_crlf_at_chunk_boundaries() {
+        let mut input = vec![0xff];
+        input.extend(vec![b'a'; super::TOOL_OUTPUT_CHUNK_BYTES - 2]);
+        input.extend_from_slice("世界🌍".as_bytes());
+        let expected = String::from_utf8_lossy(&input).into_owned();
+        input.extend_from_slice(b"\r\n");
+        assert_eq!(captured_tool_output(input).await.concat(), expected);
+
+        let mut input = vec![b'a'; super::TOOL_OUTPUT_CHUNK_BYTES - 1];
+        input.extend_from_slice(b"\r\n\n");
+        assert_eq!(
+            captured_tool_output(input).await,
+            vec![
+                "a".repeat(super::TOOL_OUTPUT_CHUNK_BYTES - 1),
+                String::new()
+            ]
+        );
+        assert_eq!(
+            captured_tool_output(b"\nhello\r\ninvalid\xff\nlast".to_vec()).await,
+            vec!["", "hello", "invalid\u{fffd}", "last"]
+        );
+        assert!(captured_tool_output(Vec::new()).await.is_empty());
+    }
 
     #[test]
     fn concurrent_file_send_cannot_replace_or_remove_first_cancel_token() {
