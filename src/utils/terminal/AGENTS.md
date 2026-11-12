@@ -10,7 +10,7 @@ TRX 终端的行缓冲与渲染层。**React 不渲染行**——数据到达后
 |`TerminalRenderer.ts`|直接 DOM 渲染：节点池复用、固定行高零测量、`visibleSeqsOffset`、同帧钉底、过滤/搜索/选区类名|`TerminalRenderer.test.ts`（jsdom）|
 |`viewportManager.ts`|实时端口或注入只读来源的枢纽：缓冲 + renderer 生命周期 + 增量/分块过滤搜索 + 时间索引 + rAF scheduled seek + 模块级实时实例注册表|`viewportManager.test.ts` / `TerminalTimeline.test.ts`|
 |`TerminalSource.ts`|只读连续稳定 seq 来源、统一计数与时间语义、物理高度映射、重建预算及 timeline 接口|`TerminalTimeline.test.ts`|
-|`TerminalTimeIndex.ts`|按 (time,seq) 排序的 AVL，O(log N) 查询/插入/删除；不假定采集时间按 seq 单调|`TerminalTimeline.test.ts`|
+|`TerminalTimeIndex.ts`|按 (time,seq) 排序的 AVL，序号表引用现有节点、不重复保留时间戳；O(log N) 查询/插入/删除，不假定采集时间按 seq 单调|`TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`|
 |`TerminalPerformance.test.ts`|显式启用的性能观测：10万/百万索引、裁剪后条目数、宽过滤计数、三视图 jsdom 定位 CPU 样本|`HYPERCOM_TERMINAL_BENCH=1`|
 
 依赖方向：`viewportManager → { TerminalBuffer, TerminalRenderer, lineFilter, lineText, terminalSearch }`。
@@ -90,6 +90,11 @@ TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入�
     `viewportManager.recomputeFilter`/`recomputeSearch`。`TerminalRenderer.ts`
     文件头是渲染契约清单（R1–R15），`TerminalRenderer.soak.test.ts` 按编号引用、
     结构化断言 R1–R6；不要在别处再实现一份匹配扫描或变量子。
+
+13. **时间索引就绪契约**：即使未联动，时间索引也随 RX 增量维护；首次加入时间组不触发全量重建。
+    序号表只引用 AVL 节点，不另存重复时间戳；双子节点删除移植后继，禁止复制 key 后使序号引用失配。
+    查询一次遍历同时找前驱与上界，返回值快照而非可变节点；裁剪/clear/dispose 仍释放对应条目。
+    不要用省常驻内存为由把百万行索引的全量构建延后到首次交互。回归见 `TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`。
 
 ## 编辑纪律
 

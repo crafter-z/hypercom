@@ -13,13 +13,29 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 
 ## 时间定位、只读来源与滚动热路径
 
-`TerminalSource` 为共享只读行接口：实时 manager 使用 `TerminalBuffer`，回放注入 `ReplayDocument`，不复制 renderer 或创建假端口。时间未知由来源返回 null 并显示 `—`。`TerminalTimeIndex` 按 `(time,seq)` 的 AVL 排序，支持重复/乱序时间与有界裁剪；过滤和 frozen 上界决定可定位候选。
+`TerminalSource` 为共享只读行接口：实时 manager 使用 `TerminalBuffer`，回放注入 `ReplayDocument`，不复制 renderer 或创建假端口。时间未知由来源返回 null 并显示 `—`。`TerminalTimeIndex` 按 `(time,seq)` 的 AVL 排序，支持重复/乱序时间与有界裁剪；过滤和 frozen 上界决定可定位候选。序号表只引用现有 AVL 节点，不另存一份时间戳；双子节点删除通过移植后继节点保持引用一致，查询结果仍为值快照。
+
+时间索引随 RX 增量维护，即使尚未加入时间组也保持就绪，避免首次联动才全量建索引导致额外等待。大来源创建及过滤/frozen 变化仍沿用共享分块构建，preview 返回 loading，commit 等待就绪；裁剪删除对应节点，clear/dispose 释放树和序号表。节点压缩不改变该生命周期，也不以全量扫描取代 O(log N) 时间查询。
 
 过滤计数未冻结直接 length-offset，冻结使用 upper_bound；搜索 membership Set 随 append/chunk/trim 增量维护，不在纯滚动或每帧 RX 重建。大数据过滤、搜索及索引按共享预算可取消分块重建，`isLoading` 标记状态；只有小缓冲保持同步扫描。
 
 `seekTimeline` 合并每帧最新目标，并在实际 render pass 后 ACK；取消、clear/replace、换源或销毁淘汰旧请求。geometry → visible index → seq → timestamp 读取中心锚点，不 snapshot 全历史。有效选区返回 held，释放后只应用最新目标。时间组有效跟随独立于成员残留 scrollLocked，由协调器 `setLiveFollow` 显式授权：LIVE 中与参考来源有效偏移相同的 TRX 复用 renderer 同帧钉底，RX 追加不等待定时 seek；LIVE ACK 使用实际渲染的末行，而非追加前查出的旧 seq。BROWSE、暂离、不兼容或具有相对时间偏移的目标不启用本地尾随；后者仍按组时间定位。暂停和选区继续抑制跟随；搜索框本身不禁止跟随，只有显式搜索命中导航先解锁或停止组 LIVE，再定位。
 
 renderer 使用有界物理高度映射，避免百万行 × 大字号直接要求无限 CSS spacer；首/中/尾可达与映射单调需要真实浏览器验证。`TerminalPerformance.test.ts` 通过环境变量显式启用，只观测索引/计数与 jsdom CPU 样本，不代表 WebView2 FPS。完整组协议与只读导入边界见[时间联动](timeline.md)。
+
+### 保留内存与 CPU 对比观测
+
+`scripts/terminal-memory-bench.mjs` 是显式运行的 Node 基准，不进入 CI 耗时门限。使用 Node 22.15+、已安装的 TypeScript 和 `--expose-gc`；每个样本独立进程、先预热，GC 后观测 `heapUsed + arrayBuffers`（`external` 单独列出，不能再次相加）。默认每场景三次取中位数，测量期间不要并行占用 CPU：
+
+```powershell
+node --expose-gc scripts/terminal-memory-bench.mjs --output node_modules/.cache/hypercom/terminal-memory.json
+# 可筛选 index、buffer、manager、allocation，或完整场景 id
+node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --output node_modules/.cache/hypercom/terminal-index.json
+```
+
+- 覆盖十万/百万行、真实 epoch 大时间戳、重复/回退时钟、24/128/4096 字节行、三端口、联动开关和已有大缓冲首次入组；输出构建、查询、滚动替换、裁剪及分块建索引的 CPU/墙钟样本。
+- `--baseline-dir <目录>` 可载入此前保存的 `TerminalBuffer.ts`、`TerminalTimeIndex.ts`、`viewportManager.ts` 副本；相对依赖仍按原模块 URL 解析，避免创建第二份生产实现。对比时必须用相同脚本、环境与场景，保留对应基线提交号；快照不齐会使用当前模块，不应将混合实现称为完整旧版。
+- 数值是当前 Node/V8 配置下的数据结构增量，不含应用原生进程/DOM/GPU，不能直接当作 WebView2 总内存、FPS 或长期泄漏证明。首次入组墙钟含分块让出，单块 CPU 才接近一次同步工作的时长；浏览器嵌套计时器节流可能增加总等待。索引排序、删除和生命周期语义由 `TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts` 在 CI 确定性验证。
 
 ## 关键不变式
 
