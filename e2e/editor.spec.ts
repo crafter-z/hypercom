@@ -45,12 +45,19 @@ async function installBackend(page: Page) {
           return true;
         }
         if (loads[command]) return config()?.[loads[command]] ?? [];
-        if (command === 'list_available_ports') return [];
+        if (command === 'list_available_ports') return JSON.parse(localStorage.getItem('editor-regression.ports') ?? '[]');
         if (command === 'list_plugins') return { revision: config()?.revision ?? 0, pluginConfigs: [], plugins: [] };
         if (command === 'plugin:app|version') return '1.0.0-e2e';
-        if (command === 'open_serial_port' || command === 'close_serial_port' || command === 'set_serial_params'
+        if (command === 'set_serial_params' || command === 'send_serial_data') {
+          const traceKey = command === 'set_serial_params' ? 'editor-regression.param-calls' : 'editor-regression.tx-calls';
+          const calls = JSON.parse(localStorage.getItem(traceKey) ?? '[]');
+          calls.push(args.args);
+          localStorage.setItem(traceKey, JSON.stringify(calls));
+          return command === 'set_serial_params' ? null : 0;
+        }
+        if (command === 'open_serial_port' || command === 'close_serial_port'
           || command === 'set_flow_control' || command === 'attempt_reconnect' || command === 'cancel_file_send') return null;
-        if (command === 'send_serial_data' || command === 'send_file') return 0;
+        if (command === 'send_file') return 0;
         if (command === 'acknowledge_editor_close' || command === 'complete_editor_close' || command === 'cancel_editor_close'
           || command === 'plugin:window|set_title' || command === 'prevent_screen_off' || command === 'prevent_sleep'
           || command === 'plugin:webview|set_webview_zoom' || command === 'append_diag_log') return null;
@@ -248,6 +255,74 @@ test('the unified command toolbar adds baud steps with focus and saves their enh
   expect(set.schemaVersion).toBe(2);
   expect(set.commands.map((command: { order: number }) => command.order)).toEqual([0, 1, 2]);
   expect(set.commands[2]).toMatchObject({ kind: 'setParams', baudRate: 230400, delay: 0 });
+});
+
+test('baud steps execute from capsules and the separate command panel without sending empty data', async ({ page, context }) => {
+  await page.evaluate(key => {
+    const config = JSON.parse(localStorage.getItem(key)!);
+    config.quickSendInlineCount = 10;
+    config.sendCommandSets[0] = {
+      ...config.sendCommandSets[0], schemaVersion: 2, commands: [
+        { id: 'baud', name: '切换 230400', kind: 'setParams', baudRate: 230400, content: '', type: 'string', appendLineEnding: 'None', delay: 5000, order: 0 },
+        { id: 'ping', name: 'PING', content: 'PING', type: 'string', appendLineEnding: 'None', delay: 0, order: 1 },
+      ],
+    };
+    localStorage.setItem(key, JSON.stringify(config));
+    localStorage.setItem('editor-regression.ports', JSON.stringify(['COM1', 'COM2'].map(id => ({ id, name: id, port_type: 'real' }))));
+  }, BACKEND_KEY);
+  await page.reload();
+  await page.evaluate(async () => {
+    const path = '/src/stores/useAppStore.ts';
+    const { useAppStore } = await import(path);
+    useAppStore.setState({ ports: ['COM1', 'COM2'].map(id => ({
+      id, name: id, type: 'real', status: 'connected', isHidden: false, mode: 'trx', connectionGeneration: 7,
+      baudRate: id === 'COM1' ? 9600 : 38400, dataBits: 8, parity: 'None', stopBits: 'One', handshake: 'None',
+    })) });
+    useAppStore.getState().openTab('COM1');
+  });
+  const calls = (key: string) => page.evaluate(value => JSON.parse(localStorage.getItem(value) ?? '[]'), key);
+  const capsule = page.locator('.op-quick-send-row > .op-quick-cmd').filter({ hasText: '切换 230400' });
+  await expect(capsule).toBeEnabled();
+  await expect(capsule).toContainText('230400 baud');
+  await capsule.click();
+  await expect.poll(() => calls('editor-regression.param-calls')).toHaveLength(1);
+  expect((await calls('editor-regression.param-calls'))[0]).toMatchObject({ port_id: 'COM1', baud_rate: 230400, expected_generation: 7, data_bits: 8 });
+  expect(await calls('editor-regression.tx-calls')).toEqual([]);
+
+  await page.evaluate(async () => {
+    const path = '/src/stores/useAppStore.ts';
+    const { useAppStore } = await import(path);
+    useAppStore.getState().updatePort('COM1', { baudRate: 9600 });
+    useAppStore.getState().openTab('COM2');
+  });
+  const panel = await context.newPage();
+  await installBackend(panel);
+  const panelErrors: string[] = [];
+  panel.on('pageerror', error => panelErrors.push(error.message));
+  await panel.goto('/?popout=quick-send');
+  const row = panel.getByRole('group', { name: '切换 230400', exact: true });
+  await expect(row).toBeVisible();
+  await panel.locator('.quicksend-params select[title="目标串口"]').selectOption('COM1');
+  await expect(row).not.toHaveClass(/is-send-disabled/);
+  await row.click();
+  await expect.poll(() => calls('editor-regression.param-calls')).toHaveLength(2);
+  expect((await calls('editor-regression.param-calls'))[1]).toMatchObject({ port_id: 'COM1', baud_rate: 230400 });
+  const state = await page.evaluate(async () => {
+    const appPath = '/src/stores/useAppStore.ts';
+    const operationPath = '/src/stores/useOperationStore.ts';
+    const { useAppStore } = await import(appPath);
+    const { useOperationStore } = await import(operationPath);
+    return { baud: useAppStore.getState().ports.find((port: { id: string }) => port.id === 'COM1')?.baudRate, focusedBaud: useOperationStore.getState().baudRate, loops: useOperationStore.getState().cyclicLoops };
+  });
+  expect(state).toMatchObject({ baud: 230400, focusedBaud: 38400 });
+  expect(Object.values(state.loops).some(Boolean)).toBe(false);
+  expect(await calls('editor-regression.tx-calls')).toEqual([]);
+  await panel.getByRole('group', { name: 'PING', exact: true }).click();
+  await expect.poll(() => calls('editor-regression.tx-calls')).toHaveLength(1);
+  expect((await calls('editor-regression.tx-calls'))[0]).toMatchObject({ port_id: 'COM1', data: 'PING' });
+  expect(panelErrors).toEqual([]);
+  expect(await panel.evaluate(() => window.__E2E_UNKNOWN_COMMANDS__ ?? [])).toEqual([]);
+  await panel.close();
 });
 
 test('insertion survives navigation; discard restores the saved set and failed save retains the draft', async ({ page }) => {

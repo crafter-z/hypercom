@@ -151,15 +151,24 @@ describe('staged popout command list', () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const other = createRoot(host);
+    const execute = vi.fn();
     act(() => {
       other.render(createElement(QuickSendList, {
         active: true, sets: [paramsSet], selectedSet: paramsSet, onSelectSet: () => {}, flashingId: null,
-        onSend: vi.fn(), onOpenSetEditor: () => {}, ready: true, dirty: false, dirtyIds: new Set<string>(),
+        onSend: execute, onOpenSetEditor: () => {}, ready: true, dirty: false, dirtyIds: new Set<string>(),
         pending: false, saving: false, error: null, canSend: true, onReplaceSets: () => {},
         onSave: async () => false, onDiscard: async () => false,
       }));
     });
+    const row = host.querySelector<HTMLElement>('.quicksend-row')!;
+    expect(row.classList.contains('is-send-disabled')).toBe(false);
+    act(() => { row.click(); });
+    expect(execute).toHaveBeenLastCalledWith(paramsSet.commands[0]);
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(execute).toHaveBeenCalledTimes(2);
     act(() => { (host.querySelector('.quicksend-edit-btn') as HTMLButtonElement).click(); });
+    act(() => { row.click(); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(execute).toHaveBeenCalledTimes(2);
     // 波特率 + 「之后等待」两个数字字段都在同一步骤上。
     expect(host.querySelectorAll('.quicksend-edit-form input[type="number"]')).toHaveLength(2);
     expect(host.querySelector('.after-delay-field')?.querySelector('input')?.value).toBe('100');

@@ -12,11 +12,14 @@ import { popoutEventService, popoutService, serialService } from '../services/ta
 import type { CommandEditorClientResult } from '../services/tauri';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getEditorLeaveDialogState, requestEditorLeave, respondEditorLeave } from '../utils/editorLeave';
+import { updateEntityDraft } from '../utils/entityEditor';
+import { getFlowStatus, resetFlowRuntime } from '../utils/flowRuntime';
+import type { SendCommand, SendCommandSet } from '../types';
 
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ WebviewWindow: { getByLabel: vi.fn(async () => null) } }));
 
 vi.mock('../services/tauri', () => ({
-  serialService: { sendSerialData: vi.fn(async () => 3) },
+  serialService: { sendSerialData: vi.fn(async () => 3), setSerialParams: vi.fn(async () => {}) },
   gitBashSimService: { resizeGitBashSim: vi.fn(async () => {}) },
   popoutService: { terminalClosed: vi.fn(() => true) },
   popoutEventService: {
@@ -44,6 +47,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(WebviewWindow.getByLabel).mockResolvedValue(null);
   resetStoresForTests();
+  resetFlowRuntime();
   useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'connected', type: 'real', isHidden: false }] });
   tabId = useAppStore.getState().openTab('COM1');
   useAppStore.getState().setTabPoppedOut(tabId, true);
@@ -57,7 +61,7 @@ beforeEach(() => {
   vi.mocked(popoutEventService.onTerminalClosed).mockResolvedValue(() => {});
   root = createRoot(document.createElement('div'));
 });
-afterEach(async () => { await respondEditorLeave('continue'); await act(async () => { root.unmount(); }); });
+afterEach(async () => { await respondEditorLeave('continue'); await act(async () => { root.unmount(); }); resetFlowRuntime(); });
 
 describe('main popout bridge retirement', () => {
   it('does not activate an unseen delayed client request without fresh live proof', async () => {
@@ -200,6 +204,38 @@ describe('main popout bridge retirement', () => {
     expect(popoutService.terminalClosed).not.toHaveBeenCalled();
     expect(popoutEventService.emitActiveTabChanged).not.toHaveBeenCalled();
     expect(popoutEventService.emitTerminalSnapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe('saved command step intents', () => {
+  const command: SendCommand = { id: 'baud', name: 'Baud', kind: 'setParams', baudRate: 230400, order: 0, delay: 5000, content: '', type: 'string', appendLineEnding: 'None' };
+  async function host() {
+    const sets = [{ id: 'set', name: 'Saved', schemaVersion: 2 as const, commands: [command], isLoop: false, loopDelay: 0, repeatCount: 1 }];
+    useAppStore.getState().setConfig({ sendCommandSets: sets });
+    useRuleStore.getState().setSendCommandSets(sets);
+    await act(async () => { root.render(createElement(Probe)); });
+    return vi.mocked(popoutEventService.onSendCommand).mock.calls[0][0];
+  }
+
+  it('executes a saved baud action through the main process without an empty send', async () => {
+    const receive = await host();
+    await act(async () => { receive({ kind: 'savedCommand', setId: 'set', command, portId: 'COM1' }); });
+    expect(serialService.setSerialParams).toHaveBeenCalledExactlyOnceWith('COM1', expect.objectContaining({ baudRate: 230400 }));
+    expect(serialService.sendSerialData).not.toHaveBeenCalled();
+    expect(useAppStore.getState().ports[0].baudRate).toBe(230400);
+    expect(getFlowStatus('COM1')?.phase).toBe('completed');
+  });
+
+  it.each(['stale', 'deleted', 'dirty', 'missing-target'])('rejects a %s saved intent instead of reinterpreting it as text', async reason => {
+    const receive = await host();
+    if (reason === 'deleted') useRuleStore.getState().setSendCommandSets([]);
+    if (reason === 'dirty') await act(async () => { updateEntityDraft<SendCommandSet>('sendCommandSets', 'set', { name: 'Unsaved' }); });
+    await act(async () => { receive({
+      kind: 'savedCommand', setId: 'set', portId: reason === 'missing-target' ? '' : 'COM1',
+      command: reason === 'stale' ? { ...command, baudRate: 460800 } : command,
+    }); });
+    expect(serialService.setSerialParams).not.toHaveBeenCalled();
+    expect(serialService.sendSerialData).not.toHaveBeenCalled();
   });
 });
 

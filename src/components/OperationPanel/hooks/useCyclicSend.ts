@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { getActivePortId, useAppStore } from '../../../stores/useAppStore';
+import { useAppStore } from '../../../stores/useAppStore';
 import { useOperationStore } from '../../../stores/useOperationStore';
 import { useRuleStore } from '../../../stores/useRuleStore';
 import { notifyError, useToastStore } from '../../../stores/useToastStore';
 import { createSendLoop, type SendLoop, type SendLoopStepContext } from './useSequentialSend';
-import type { SendCommand, SendCommandSet } from '../../../types';
+import type { SendCommandSet } from '../../../types';
 import { orderedCommands } from '../../../utils/commandOrder';
-import { serialService } from '../../../services/tauri';
+import { applyCommandParams } from '../../../utils/commandExecution';
 import { sendToPort } from '../../../hooks/useSerialSend';
 import {
   getCommandStepKind,
@@ -70,34 +70,6 @@ function currentPort(portId: string) {
   return useAppStore.getState().ports.find((port) => port.id === portId);
 }
 
-/**
- * Apply the MVP setParams step: only the baud rate is changed. Other serial
- * parameters remain the target port's confirmed values. Updating the port
- * metadata and the operation controls after the backend succeeds keeps the
- * sidebar, params panel and subsequent flow steps on the same value.
- */
-async function applyParamsStep(portId: string, command: SendCommand, context: SendLoopStepContext): Promise<void> {
-  const port = currentPort(portId);
-  if (!port || port.status !== 'connected') throw new Error(`Port unavailable: ${portId}`);
-  const operation = useOperationStore.getState();
-  const baudRate = command.baudRate;
-  if (!Number.isInteger(baudRate) || baudRate! < 1 || baudRate! > 4_000_000) {
-    throw new Error('Invalid flow baud rate');
-  }
-  await serialService.setSerialParams(portId, {
-    baudRate: baudRate!,
-    dataBits: port.dataBits ?? operation.dataBits,
-    parity: port.parity ?? operation.parity,
-    stopBits: port.stopBits ?? operation.stopBits,
-    handshake: port.handshake ?? operation.handshake,
-  });
-  if (!context.isCurrent()) return;
-  useAppStore.getState().updatePort(portId, { baudRate: baudRate! });
-  if (getActivePortId(useAppStore.getState()) === portId) {
-    useOperationStore.getState().setOpState({ baudRate: baudRate! });
-  }
-}
-
 export function useCyclicSend(options: UseCyclicSendOptions): void {
   const { sendData } = options;
   const sendDataRef = useRef(sendData);
@@ -117,7 +89,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
 
     if (kind === 'setParams') {
       setStatus(portId, state, 'applyingParams', `baud ${cmd.baudRate}`);
-      await applyParamsStep(portId, cmd, context);
+      await applyCommandParams(portId, cmd, context.isCurrent);
       if (!context.isCurrent()) return null;
     } else {
       setStatus(portId, state, 'running');

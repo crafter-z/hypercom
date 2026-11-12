@@ -8,6 +8,7 @@ import { useSystemStore } from '../../stores/useSystemStore';
 import { resetStoresForTests } from '../../stores/resetStores';
 import { resetFlowRuntime, setFlowStatus } from '../../utils/flowRuntime';
 import OperationPanel, { FlowRunningBadge } from './OperationPanel';
+import { serialService } from '../../services/tauri';
 
 /**
  * 折叠态流程徽标：操作面板收起后，运行中的增强流程必须仍然可见并可停止。
@@ -68,6 +69,7 @@ afterEach(async () => {
   await act(async () => { root.unmount(); });
   container.remove();
   resetFlowRuntime();
+  vi.useRealTimers();
 });
 
 describe('FlowRunningBadge', () => {
@@ -156,5 +158,50 @@ describe('OperationPanel collapsed flow badge', () => {
     await renderPanel();
     // 展开态由 SendSection 的 `.op-flow-status` 承担，这里不重复。
     expect(container.querySelector('.op-flow-badge')).toBeNull();
+  });
+});
+
+describe('confirmed command parameter updates', () => {
+  async function setupParams() {
+    vi.useFakeTimers();
+    useAppStore.getState().updatePort('COM1', { baudRate: 9600, dataBits: 8, parity: 'None', stopBits: 'One', handshake: 'None', connectionGeneration: 7 });
+    await renderPanel();
+  }
+
+  it('adopts an executor confirmation without applying the same baud again after debounce', async () => {
+    await setupParams();
+    await act(async () => {
+      useAppStore.getState().updatePort('COM1', { baudRate: 230400 });
+      useOperationStore.getState().setOpState({ baudRate: 230400 });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(serialService.setSerialParams).not.toHaveBeenCalled();
+    expect(serialService.setFlowControl).not.toHaveBeenCalled();
+  });
+
+  it('still applies a real manual edit once, with its captured connection generation', async () => {
+    await setupParams();
+    await act(async () => { useOperationStore.getState().setOpState({ baudRate: 230400 }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(serialService.setSerialParams).toHaveBeenCalledExactlyOnceWith('COM1', expect.objectContaining({ baudRate: 230400, expectedGeneration: 7 }));
+  });
+
+  it('does not mistake missing framing metadata for confirmation of a manual data-bit edit', async () => {
+    await setupParams();
+    await act(async () => { useAppStore.getState().updatePort('COM1', { dataBits: undefined }); });
+    await act(async () => { useOperationStore.getState().setOpState({ dataBits: 7 }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(serialService.setSerialParams).toHaveBeenCalledExactlyOnceWith('COM1', expect.objectContaining({ baudRate: 9600, dataBits: 7 }));
+  });
+
+  it.each(['flow', 'reconnect'])('retires a queued manual edit before %s can be affected', async reason => {
+    await setupParams();
+    await act(async () => { useOperationStore.getState().setOpState({ baudRate: 230400 }); });
+    await act(async () => {
+      if (reason === 'flow') setFlowStatus({ portId: 'COM1', runId: 'quick', phase: 'applyingParams', exclusive: true });
+      else useAppStore.getState().updatePort('COM1', { connectionGeneration: 8 });
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(serialService.setSerialParams).not.toHaveBeenCalled();
   });
 });

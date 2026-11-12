@@ -8,6 +8,8 @@ import { useSystemStore } from '../stores/useSystemStore';
 import { useTerminalStore } from '../stores/useTerminalStore';
 import { popoutEventService, popoutService } from '../services/tauri';
 import { sendToPort } from './useSerialSend';
+import { executeQuickCommand } from '../utils/commandExecution';
+import { useToastStore } from '../stores/useToastStore';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { snapshotTerminalLines } from '../utils/terminal/viewportManager';
 import { discardEntityDraft, getEntityEditorSnapshot, replaceEntityDraft, saveEntityDraft, subscribeEntityEditor } from '../utils/entityEditor';
@@ -121,7 +123,7 @@ export function usePopoutBridge() {
     // 异步注册竞态保护：参考 SendSection onFileProgress 模式。
     popoutEventService
       .onSendCommand((payload) => {
-        if (cancelled) return;
+        if (cancelled || ('kind' in payload && !payload.portId)) return;
         // 显式目标端口优先（issue #5-4-6）：弹窗携带 portId 时发送到该端口，
         // 否则退回活动标签。端口已关闭时 sendToPort 内部守卫负责 toast/静默。
         const portId = payload.portId ?? getActivePortId(useAppStore.getState());
@@ -129,7 +131,21 @@ export function usePopoutBridge() {
           // 无活动标签是正常控制流分支（弹窗发送无目标），非错误，不记录。
           return;
         }
-        void sendToPort(portId, payload.content, payload.isHex, payload.lineEnding);
+        if ('kind' in payload) {
+          if (payload.kind !== 'savedCommand') return;
+          const set = useRuleStore.getState().sendCommandSets.find(item => item.id === payload.setId);
+          const command = set?.commands.find(item => item.id === payload.command?.id);
+          const editor = getEntityEditorSnapshot('sendCommandSets');
+          // Never apply an unsaved/stale panel value, nor reinterpret a missing
+          // command reference as a raw text send. Text mode is the other branch.
+          if (!command || !jsonEqual(command, payload.command) || editor.saving || editor.dirtyIds.includes(payload.setId)) {
+            useToastStore.getState().push({ severity: 'warning', messageKey: 'editor.conflict', portId });
+            return;
+          }
+          void executeQuickCommand(portId, command);
+        } else {
+          void sendToPort(portId, payload.content, payload.isHex, payload.lineEnding);
+        }
       })
       .then((u) => {
         if (cancelled) u();

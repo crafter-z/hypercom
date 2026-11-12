@@ -93,7 +93,7 @@ export const serialService = {
     return invoke<void>('cancel_file_send', { portId, transferId });
   },
 
-  setSerialParams: (portId: string, params: { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string }) => {
+  setSerialParams: (portId: string, params: { baudRate: number; dataBits: number; parity: string; stopBits: string; handshake: string; expectedGeneration?: number }) => {
     return invoke<void>('set_serial_params', { args: {
       port_id: portId,
       baud_rate: params.baudRate,
@@ -101,6 +101,7 @@ export const serialService = {
       parity: params.parity,
       stop_bits: params.stopBits,
       handshake: params.handshake,
+      expected_generation: params.expectedGeneration,
     }});
   },
 

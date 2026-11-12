@@ -624,6 +624,9 @@ pub struct SetSerialParamsArgs {
     pub parity: String,
     pub stop_bits: String,
     pub handshake: String,
+    /// Reject a parameter action queued for a connection that was replaced.
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
 }
 
 #[tauri::command]
@@ -636,6 +639,13 @@ pub async fn set_serial_params(
         let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
+        if let Some(expected) = args.expected_generation {
+            if !manager.connection_matches(&args.port_id, expected) {
+                return Err(CommandError::Serial(
+                    "Port connection changed before applying parameters".into(),
+                ));
+            }
+        }
         manager
             .set_params(
                 &args.port_id,

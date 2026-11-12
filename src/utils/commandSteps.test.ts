@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SendCommand, SendCommandSet } from '../types';
-import { commandStepKindPatch, createCommandStep, foldDelayIntoRoundGap, getCommandStepKind, isEnhancedCommandSet, isSendCommand, normalizeCommandStep, runsMultipleRounds, validateCommandSetSteps, validateCommandStep } from './commandSteps';
+import { commandStepKindPatch, createCommandStep, foldDelayIntoRoundGap, getCommandStepKind, isEnhancedCommandSet, isSendCommand, isExecutableCommand, normalizeCommandStep, runsMultipleRounds, validateCommandSetSteps, validateCommandStep } from './commandSteps';
 import { recoverableEntityCollection } from './entityEditorRecovery';
 
 const legacy: SendCommand = { id: 'send', name: 'Legacy', order: 3, delay: 250, type: 'hex', content: 'AA BB', appendLineEnding: 'None' };
@@ -12,6 +12,8 @@ describe('command-step compatibility', () => {
     const normalized = normalizeCommandStep(legacy);
     expect(getCommandStepKind(legacy)).toBe('send');
     expect(isSendCommand(legacy)).toBe(true);
+    expect(isExecutableCommand(legacy)).toBe(true);
+    expect(isExecutableCommand(params)).toBe(true);
     expect(normalized).toEqual({ ...legacy, kind: 'send' });
     expect(legacy).not.toHaveProperty('kind');
     expect(validateCommandSetSteps(collection([legacy]))).toBeNull();
@@ -22,6 +24,7 @@ describe('command-step compatibility', () => {
     const future = { ...legacy, kind: 'future' } as unknown as SendCommand;
     expect(getCommandStepKind(future)).toBe('unknown');
     expect(isSendCommand(future)).toBe(false);
+    expect(isExecutableCommand(future)).toBe(false);
     expect(validateCommandStep(future)).toBe('editor.unknownCommandStep');
     expect(normalizeCommandStep(future).kind).toBe('future');
   });

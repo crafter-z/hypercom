@@ -113,10 +113,11 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 - 快捷发送条：pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（`useQuickStripLayout` + ResizeObserver + 隐藏测量行，`utils/sendStrip.ts` 的 `computeFitCount` 算可见切片与溢出条数）、首槽固定「打开命令面板」按钮（`.op-quick-panel-btn`，issue #7-2）。
 - `quickSendInlineCount`（`useAppStore.config`）**只决定内联条是否挂载：仅 0 = 隐藏**，任何 `>0` 都显示；条内实际显示几条由实测宽度决定，不由该值直接切片。
-- QuickSendPanel 双模式：列表（整行可点即发、行内「修改」就地编辑）/ 文本逐行（`QuickSendText` + `useSequentialSend` 驱动，含「执行当前行并移至下一行」，issue #6-3）。
+- **单步执行**：胶囊和面板列表同时支持 `send` / `setParams`，未知步骤不可执行；`executeQuickCommand` 只执行点击项，不启动命令集循环、不等待其 `delay`。发送仍经 `sendToPort`；改参复用循环的 `applyCommandParams`，只改本机波特率，I/O 在飞期间在 `flowRuntime` 发布短期独占，成功/失败后释放，状态保留可查看。`set_serial_params` 的可选 `expected_generation` 在后端持锁检查，旧连接排队的动作不得应用到重连后的同名端口；前端迟到响应同样不回写新连接或新聚焦端口。操作面板采用已确认的回写，不重复触发防抖改参。
+- QuickSendPanel 双模式：列表（整行可点执行、行内「修改」就地编辑）/ 文本逐行（`QuickSendText` + `useSequentialSend` 驱动，含「执行当前行并移至下一行」，issue #6-3）。
 - **面板编辑与主窗定案**：`popout:command-editor-request` 以 version 校验 replace/save/discard，主窗 `entityEditor` 管理权威草稿并返回 requestId 匹配的 ACK；面板同一时刻只有一个 replace 在飞，期间输入排队，15s 无 ACK 按失败处理并保留文本（协议细节见[工作区](workspace.md)）。`command-editor:snapshot` 与已提交 `command-sets:changed` 分离；首个快照到达前列表不可编辑/发送，只有保存 ACK 且主窗确认落盘后才显示已保存，失败/冲突保留输入与错误。主窗退出另经 client-state/client-leave/client-result ACK 处理尚未同步的面板内容。列表和文本切换保留列表编辑器；列表模式下编辑中的行或脏命令集禁发，搜索时禁拖排序。
 - 目标串口下拉只显示串口号（去 `· REAL/VIRTUAL` 后缀，issue #7-4）；底栏「发送到」提示灯跟随真实连接状态——`usePopoutSync` 订阅 `serial:status` 广播 + `port-statuses:sync` 全量回放（绿=连接呼吸/灰=断开，issue #7-5）。
-- 弹出窗（popout）发送经 `popout:send-command` 意图 → 主窗 `sendToPort`（见 workspace.md）。
+- 弹出窗（popout）经 `popout:send-command` 回主窗：文本模式保留原始发送载荷并走 `sendToPort`；列表模式发 `kind: 'savedCommand'`、集合 id、点击时步骤快照与显式端口，主窗核对已提交命令及编辑器非脏/非保存中后走 `executeQuickCommand`；未保存、过期或删除的步骤不会执行，也不会回退为文本发送（见 workspace.md）。
 
 ## 文件发送
 

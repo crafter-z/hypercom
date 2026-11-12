@@ -106,6 +106,14 @@ fn set_serial_params_args_wire_keys_are_snake_case() {
     .expect("frontend wire keys must deserialize");
     assert_eq!(args.parity, "Odd");
     assert_eq!(args.handshake, "RequestToSend");
+    assert_eq!(args.expected_generation, None);
+    let guarded: SetSerialParamsArgs = serde_json::from_value(serde_json::json!({
+        "port_id": "COM3", "baud_rate": 230400, "data_bits": 8,
+        "parity": "None", "stop_bits": "One", "handshake": "None",
+        "expected_generation": 7,
+    }))
+    .expect("guarded parameter changes use the same snake_case contract");
+    assert_eq!(guarded.expected_generation, Some(7));
 
     assert!(serde_json::from_value::<SetSerialParamsArgs>(serde_json::json!({
         "portId": "COM3", "baudRate": 115200, "dataBits": 8,

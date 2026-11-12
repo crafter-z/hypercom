@@ -16,6 +16,11 @@ export function isSendCommand(command: Pick<SendCommand, 'kind'>): boolean {
   return getCommandStepKind(command) === 'send';
 }
 
+/** Both supported actions may execute once; unknown imported kinds never execute. */
+export function isExecutableCommand(command: Pick<SendCommand, 'kind'>): boolean {
+  return getCommandStepKind(command) !== 'unknown';
+}
+
 export function isEnhancedCommandSet(set: Pick<SendCommandSet, 'commands' | 'schemaVersion'>): boolean {
   return set.schemaVersion !== undefined || set.commands.some(command => !isSendCommand(command));
 }

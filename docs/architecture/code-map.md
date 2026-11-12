@@ -25,6 +25,7 @@
 | `shared/SortableEditorList.tsx` + `utils/commandOrder.ts` | 手柄专用指针/键盘拖排序，命令数组与连续 order 统一；行壳提供上下插入，搜索期间禁排 |
 | `utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx` | 保存并关闭/放弃并关闭/继续编辑；保存失败及迟到编辑阻止关闭，主窗和命令面板均等待跨窗确认；原生关闭经 complete_editor_close 审批 |
 | `utils/configWriteQueue.ts` + `jsonEqual.ts` | 配置/实体/元数据 CAS 写串行化；JSON 语义比较忽略对象字段顺序，避免 Rust 序列化产生假冲突 |
+| `utils/commandExecution.ts` | `executeQuickCommand`：胶囊/弹窗列表单步执行，发送仍经 sendToPort，改参持有短期 flowRuntime 独占；`applyCommandParams`：循环与单步唯一改参动作，保留目标帧参数、连接代次守卫、成功后更新端口与当前操作态 |
 | `utils/textSend.ts` | 弹窗文本模式的纯函数：按 CRLF/LF 切行（裁尾部空行）、HEX 行合法性与间隔收敛，DOM-free 可单测 |
 | `utils/logReplay.ts` | 日志解析（`ParsedLogLine` 允许未知时间，显式 UTC 偏移；不按相邻行 sleep） |
 | `utils/timeline/{coordinator,scheduler,trxTimelineAdapter,ReplayClock}.ts` | app-lifetime 时间组、preview/commit 与代次、每目标最新槽背压、公平预算、TRX 适配与单调播放时钟 |

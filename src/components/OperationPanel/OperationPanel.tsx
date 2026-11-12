@@ -138,6 +138,18 @@ const OperationPanel: React.FC = () => {
     }
     if (fullKey === lastAppliedRef.current.fullKey) return;
 
+    // Flow/quick-command executors publish confirmed port metadata before
+    // mirroring controls. Adopt that confirmation instead of sending the same
+    // params again 300 ms later (which could overwrite a subsequent step).
+    const confirmed = useAppStore.getState().ports.find(port => port.id === activePortId);
+    const confirmedFrameKey = confirmed && `${confirmed.baudRate ?? baudRate}-${confirmed.dataBits ?? dataBits}-${confirmed.parity ?? parity}-${confirmed.stopBits ?? stopBits}-${confirmed.handshake ?? handshake}`;
+    const flowControlUnchanged = lastAppliedRef.current.fullKey === `${lastAppliedRef.current.frameKey}-${dtr}-${rts}`;
+    const framingUnchanged = lastAppliedRef.current.frameKey.endsWith(`-${dataBits}-${parity}-${stopBits}-${handshake}`);
+    if (confirmed?.baudRate !== undefined && confirmedFrameKey === frameKey && framingUnchanged && flowControlUnchanged) {
+      lastAppliedRef.current = { portId: activePortId, frameKey, fullKey };
+      return;
+    }
+
     // 帧参数变化 → 回写端口字段（侧边栏 / 标题栏同步显示；重连时 openPort 读到最新值）。
     if (frameKey !== lastAppliedRef.current.frameKey) {
       useAppStore.getState().updatePort(activePortId, { baudRate, dataBits, parity, stopBits, handshake });
@@ -146,14 +158,18 @@ const OperationPanel: React.FC = () => {
 
     // 已连接时实时应用（防抖 300ms 合并连续输入为一次后端调用）。
     if (!isConnected) return;
+    const expectedGeneration = confirmed?.connectionGeneration;
     paramsSyncTimerRef.current = setTimeout(() => {
-      if (getActivePortId(useAppStore.getState()) !== activePortId) return;
+      if (getActivePortId(useAppStore.getState()) !== activePortId || isFlowRunning(activePortId)) return;
+      const port = useAppStore.getState().ports.find(item => item.id === activePortId);
+      if (port?.status !== 'connected' || port.connectionGeneration !== expectedGeneration) return;
       serialService.setSerialParams(activePortId, {
         baudRate,
         dataBits,
         parity,
         stopBits,
         handshake,
+        expectedGeneration,
       }).catch(e => { console.debug('[OperationPanel] setSerialParams failed:', e); notifyError(e); });
       serialService.setFlowControl(activePortId, dtr, rts).catch(e => { console.debug('[OperationPanel] setFlowControl failed:', e); notifyError(e); });
     }, 300);

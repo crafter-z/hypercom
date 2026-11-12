@@ -12,7 +12,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
-import type { SendCommandSet, TerminalLine, TerminalState } from '../types';
+import type { SendCommand, SendCommandSet, TerminalLine, TerminalState } from '../types';
 import type { EntityEditorSnapshot } from '../utils/entityEditor';
 
 
@@ -122,13 +122,19 @@ export const popoutService = {
 
 // ==================== 窗口间意图事件 ====================
 
-/** 弹窗请求主窗发送一条命令。portId 缺省时主窗发送到自己的活动标签（issue #5-4-6）。 */
-export interface PopoutSendCommandPayload {
+/** Text mode keeps its legacy raw-send intent. List mode executes one saved
+ * step; main verifies the displayed snapshot against committed commands. */
+export type PopoutSendCommandPayload = {
   content: string;
   isHex: boolean;
   lineEnding: string;
   portId?: string;
-}
+} | {
+  kind: 'savedCommand';
+  setId: string;
+  command: SendCommand;
+  portId: string;
+};
 
 /** 弹窗请求主窗打开 ConfigModal 指定页（如 'commands'）。 */
 export interface PopoutOpenConfigPayload {

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { popoutEventService } from '../../services/tauri';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { clampInterval, clampRoundInterval } from '../../utils/textSend';
+import { isExecutableCommand } from '../../utils/commandSteps';
 import { NumericInput } from '../shared/NumericInput';
 import { usePopoutSync } from './usePopoutSync';
 import { usePanelTextConfig } from './usePanelTextConfig';
@@ -23,7 +24,7 @@ const ROUND_INTERVAL_MAX = 600_000;
  * 架构原则：弹窗与主窗不共享可变前端态，只交换意图/事件。
  * - Main owns versioned command drafts; usePopoutSync retains local text until
  *   replacement/save/discard is acknowledged. Only committed rows may send.
- * - 模式 A（命令列表）：整行可点 = 发送；行内「修改」展开就地编辑器。
+ * - 模式 A（命令列表）：整行可点 = 执行该步（发送/本机改参）；行内「修改」展开编辑器。
  * - 模式 B（文本）：textarea 每行一条命令，当前行 / 顺序 / 从光标 / 循环四种执行
  *   方式由共享引擎驱动（见 QuickSendText）。
  * - 目标端口来自共享参数栏（`portId` 直传主窗，缺省跟随主窗活动标签）。
@@ -80,16 +81,16 @@ const QuickSendPanel: React.FC = () => {
     flashTimerRef.current = setTimeout(() => setFlashingId(null), FLASH_MS);
   }, []);
 
-  /** 模式 A：发送 = 命令自身携带的类型/行尾；目标端口来自共享参数栏。 */
+  /** 模式 A：主窗核验已保存步骤快照后单步执行；目标端口来自共享参数栏。 */
   const sendCommand = useCallback(
     (cmd: SendCommand) => {
-      if (!canSend || !selectedSet || !editor.ready || editor.saving || editor.pending || editor.dirtyIds.has(selectedSet.id)) return;
-      void emitSendIntent(cmd.content, cmd.type === 'hex', cmd.appendLineEnding).catch((e) =>
+      if (!effectivePortId || !selectedSet || !isExecutableCommand(cmd) || !editor.ready || editor.saving || editor.pending || editor.dirtyIds.has(selectedSet.id)) return;
+      void popoutEventService.emitSendCommand({ kind: 'savedCommand', setId: selectedSet.id, command: cmd, portId: effectivePortId }).catch((e) =>
         console.debug('[QuickSendPanel] emitSendCommand failed:', e),
       );
       flashRow(cmd.id);
     },
-    [canSend, selectedSet, editor.ready, editor.saving, editor.pending, editor.dirtyIds, emitSendIntent, flashRow],
+    [effectivePortId, selectedSet, editor.ready, editor.saving, editor.pending, editor.dirtyIds, flashRow],
   );
 
 

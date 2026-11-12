@@ -10,6 +10,7 @@ import {
   foldDelayIntoRoundGap,
   getCommandStepKind,
   isSendCommand,
+  isExecutableCommand,
   runsMultipleRounds,
 } from '../../utils/commandSteps';
 import { AfterDelayField } from '../shared/AfterDelayField';
@@ -19,8 +20,8 @@ import type { LineEnding, SendCommand, SendCommandSet } from '../../types';
 
 /**
  * 命令集步骤是「发送命令」与「流程动作」（改本机波特率）共用的一条列表。
- * 弹窗列表只把 `send` 步骤当作可点击发送的命令；流程动作在这里只做只读摘要
- * 与自身字段编辑——绝不能让空 content 的步骤被当成一条可发送命令。
+ * 发送和改波特率都可点击单步执行，由主窗按步骤类型分派；未知步骤不可执行。
+ * 改参绝不能把空 content 当成发送命令，也不会因此启动整组流程。
  *
  * 等待不是独立步骤：它是每一步的「之后等待」（位置属性），因此 send 与
  * setParams 都显示这个字段（见 `AfterDelayField`）。
@@ -109,7 +110,7 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
         event.preventDefault();
         if (inSearch) searchRef.current?.blur();
         setCursor(value => Math.max(0, Math.min(value + (event.key === 'ArrowDown' ? 1 : -1), filtered.length - 1)));
-      } else if (event.key === 'Enter' && !sendDisabled && filtered[cursor]) {
+      } else if (event.key === 'Enter' && !sendDisabled && filtered[cursor] && isExecutableCommand(filtered[cursor])) {
         event.preventDefault(); onSend(filtered[cursor]);
       }
     };
@@ -220,9 +221,9 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
         <SortableEditorList items={filtered} disabled={!editable || !!query.trim()}
           onReorder={ids => updateSet({ commands: renumberCommands(ids.map(id => commands.find(command => command.id === id)!)) })}
           renderItem={(command, index, handle) => <div
-            className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled || !isSendCommand(command) ? ' is-send-disabled' : ''}`}
+            className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled || !isExecutableCommand(command) ? ' is-send-disabled' : ''}`}
             role="group" aria-label={command.name}
-            onMouseEnter={() => setCursor(index)} onClick={() => { if (!sendDisabled && isSendCommand(command)) onSend(command); }} title={commandStepSummary(command)}>
+            onMouseEnter={() => setCursor(index)} onClick={() => { if (!sendDisabled && isExecutableCommand(command)) onSend(command); }} title={commandStepSummary(command)}>
             <div className="quicksend-row-head">
               {handle}<span className="quicksend-name">{command.name || commandStepSummary(command)}</span>
               {commandStepBadgeKey(command)

@@ -4,12 +4,13 @@
  *
  * 纯展示组件：命令与回调来自 SendSection，宽度测量来自 `useQuickStripLayout`。
  */
-import { Plus, PanelRightOpen } from 'lucide-react';
+import { Gauge, Plus, PanelRightOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { popoutService } from '../../../services/tauri';
 import type { SendCommand } from '../../../types';
 import { useQuickStripLayout } from '../hooks/useQuickStripLayout';
+import { getCommandStepKind, isExecutableCommand } from '../../../utils/commandSteps';
 
 /**
  * 命令药丸的单点渲染源：可见行与隐藏测量行共用同一份 JSX，保证测量宽度
@@ -24,19 +25,23 @@ function QuickCmdPill({
   disabled: boolean;
   onClick: () => void;
 }) {
+  const { t } = useTranslation();
+  const isParams = getCommandStepKind(cmd) === 'setParams';
+  const content = isParams ? `${cmd.baudRate ?? 0} baud` : cmd.content;
+  const title = isParams ? `${t('sendCmdEditor.kind.setParams')}: ${content}` : content;
   return (
     <button
       className="btn btn-sm op-quick-cmd"
-      disabled={disabled}
-      title={cmd.name && cmd.name !== cmd.content ? `${cmd.name} — ${cmd.content}` : cmd.content}
+      disabled={disabled || !isExecutableCommand(cmd)}
+      title={cmd.name && cmd.name !== title ? `${cmd.name} — ${title}` : title}
       onClick={onClick}
     >
       {/* issue #6-9：名称在上（HEX 徽标与名称同行）、内容在下，两行显示 */}
       <span className="op-quick-cmd-name-row">
-        {cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
-        <span className="op-quick-cmd-name">{cmd.name || cmd.content}</span>
+        {isParams ? <Gauge size={11} aria-hidden="true" /> : cmd.type === 'hex' && <span className="op-quick-cmd-hex">HEX</span>}
+        <span className="op-quick-cmd-name">{cmd.name || content}</span>
       </span>
-      <span className="op-quick-cmd-content">{cmd.content}</span>
+      <span className="op-quick-cmd-content">{content}</span>
     </button>
   );
 }

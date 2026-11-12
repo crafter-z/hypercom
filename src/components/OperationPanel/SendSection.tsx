@@ -14,7 +14,8 @@ import { QuickSendStrip } from './components/QuickSendStrip';
 import { LineEndingSelect } from './components/LineEndingSelect';
 import { FileSendProgress, SendFileButton } from './components/SendFileControls';
 import { orderedCommands } from '../../utils/commandOrder';
-import { isSendCommand } from '../../utils/commandSteps';
+import { isExecutableCommand, isSendCommand } from '../../utils/commandSteps';
+import { executeQuickCommand } from '../../utils/commandExecution';
 import { clearFlowStatus, isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
 import type { FlowPhase } from '../../utils/flowRuntime';
 
@@ -85,9 +86,8 @@ const SendSection: React.FC<SendSectionProps> = ({
   const activeCommands = useMemo(() => {
     const set = sendCommandSets.find((s) => s.id === activeSendCommandSetId);
     if (!set) return [];
-    // 快捷发送只承载「发送数据」步骤：wait / setParams 是流程动作，既不能
-    // 伪装成可一键发送的命令，也不能被静默跳过（进条只会是空 content 药丸）。
-    return orderedCommands(set.commands).filter(isSendCommand);
+    // 发送和改本机波特率都可单步执行；未知导入步骤仍不可执行。
+    return orderedCommands(set.commands).filter(isExecutableCommand);
   }, [sendCommandSets, activeSendCommandSetId]);
 
   const openConfigToTab = (tab: string) => {
@@ -110,13 +110,12 @@ const SendSection: React.FC<SendSectionProps> = ({
     }
   };
 
-  // Send one command from the active set ONCE — each command carries its own
-  // type (string/hex) and line ending, independent of the compose-row options.
+  // Execute the clicked step ONCE. Sends retain their own format/line ending;
+  // parameter steps change the local baud instead of sending empty content.
   const handleQuickCommand = async (cmd: SendCommand) => {
     const portId = getActivePortId(useAppStore.getState());
-    if (!portId || !cmd.content) return;
-    if (isFlowRunning(portId)) return;
-    await sendData(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding);
+    if (!portId || (isSendCommand(cmd) && !cmd.content)) return;
+    await executeQuickCommand(portId, cmd, sendData);
   };
 
   // 循环发送开关（issue #12）：按**当前聚焦端口**启停该端口的独立循环——
@@ -170,7 +169,7 @@ const SendSection: React.FC<SendSectionProps> = ({
           </select>
           <button
             className={`btn btn-icon btn-sm op-loop-toggle${isLoopSending ? ' is-running' : ''}`}
-            disabled={!isLoopSending && (!isPortActive || !activeSendCommandSetId || !isConnected)}
+            disabled={!isLoopSending && (!isPortActive || !activeSendCommandSetId || !isConnected || flowBusy)}
             onClick={handleToggleLoop}
             title={isLoopSending ? t('rulesSection.stopLoop') : t('rulesSection.startLoop')}
           >
