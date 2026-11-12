@@ -72,6 +72,20 @@ describe('terminal timeline index', () => {
     expect(vm.lookupTime(100)).toMatchObject({ seq: 3, actualTimeMs: 400 });
     vm.dispose();
   });
+  it('keeps a large live index ready before group admission without a cold rebuild', () => {
+    vi.useFakeTimers();
+    const vm = new TerminalViewportManager('ready-before-group', { maxLines: 10000 });
+    managers.push(vm);
+    vm.appendLines(Array.from({ length: 10000 }, (_, seq) => line(1_800_000_000_000 + seq)));
+    const add = vi.spyOn(TerminalTimeIndex.prototype, 'add');
+    try {
+      vm.setTimelineGrouped(true);
+      expect(vm.isLoading).toBe(false);
+      expect(vm.lookupTime(1_800_000_005_000)).toMatchObject({ status: 'exact', seq: 5000 });
+      expect(add).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { add.mockRestore(); }
+  });
   it('AVL insertion/deletion agrees with a sorted oracle under adversarial clocks', () => {
     const index = new TerminalTimeIndex();
     const entries = Array.from({ length: 1000 }, (_, seq) => ({ seq, time: seq * 7919 % 101 }));
