@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { runAsciiNoiseBenchmark } from './asciiNoiseBenchmark';
 
 /**
  * Mock `window.__TAURI_INTERNALS__` so the React layer renders without the
@@ -226,6 +227,43 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.terminal-line .terminal-content').first()).toContainText(
       'hello-rx',
     );
+  });
+
+  test('ASCII noise filter hides binary rows with scattered readable bytes and is reversible', async ({ page }) => {
+    await openCom1Tab(page);
+    const toggle = page.locator('.terminal-noise-filter input');
+    await expect(toggle).not.toBeChecked();
+    await dispatchSerialData(page, 'COM1', 'INFO boot complete\n');
+    await page.evaluate(() => {
+      window.__TAURI_INTERNALS__.dispatchEvent('serial:data', {
+        port_id: 'COM1', timestamp: Date.now(), direction: 'RX',
+        data: [0x80, 65, 0xff, 0x01, 66, 0x90, 0x7f, 67, 10], is_hex: false,
+      });
+    });
+    await dispatchSerialData(page, 'COM1', 'ERROR retry later\n');
+    const rows = page.locator('.terminal-line');
+    await expect(rows).toHaveCount(3);
+    await toggle.check();
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText('INFO boot complete');
+    await expect(rows.nth(1)).toContainText('ERROR retry later');
+
+    const toolbar = page.locator('.terminal-filter-bar');
+    await toolbar.getByRole('button', { name: 'HEX', exact: true }).click();
+    await expect(toggle).toBeDisabled();
+    await expect(toggle).toBeChecked();
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(1)).toContainText('80 41 FF 01 42 90 7F 43');
+    await toolbar.getByRole('button', { name: '文本', exact: true }).click();
+    await expect(rows).toHaveCount(2);
+    await toggle.uncheck();
+    await expect(rows).toHaveCount(3);
+  });
+
+  test('ASCII noise performance observational benchmark', async ({ page }, info) => {
+    test.skip(process.env.HYPERCOM_ASCII_BENCH !== '1', 'Opt-in performance samples, run alone with one worker');
+    test.setTimeout(600000);
+    await runAsciiNoiseBenchmark(page, info);
   });
 
   test('RX data still drains while the document is hidden (issue #6-10)', async ({ page }) => {
