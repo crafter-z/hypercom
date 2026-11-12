@@ -46,6 +46,18 @@ describe('command step editor', () => {
     expect(container.textContent).toContain('sendCmdEditor.gapAnnotation');
   });
 
+  it('keeps normal wait explanations accessible without spending another visible row', () => {
+    render(legacy);
+    const delay = container.querySelector<HTMLInputElement>('[aria-label="sendCmdEditor.afterDelayLabel"]')!;
+    const hint = document.getElementById(delay.getAttribute('aria-describedby')!);
+    expect(hint?.className).toBe('command-sr-only');
+    expect(hint?.textContent).toContain('sendCmdEditor.gapAnnotation');
+    expect(container.querySelector('.after-delay-field-compact')).not.toBeNull();
+    render(legacy, { isRoundFinal: true, loops: true, onFoldIntoRoundGap: vi.fn() });
+    expect(container.querySelector('.command-delay-note')?.textContent).toContain('sendCmdEditor.roundFinalDelayInactive');
+    expect(container.querySelector('.command-delay-note')?.textContent).toContain('sendCmdEditor.foldIntoRoundGap');
+  });
+
   it('says "continue immediately" when there is no wait', () => {
     render({ ...legacy, delay: 0 });
     expect(container.textContent).toContain('sendCmdEditor.gapImmediate');
@@ -81,6 +93,29 @@ describe('command step editor', () => {
     expect(foldButton()).toBeUndefined();
     render(legacy, { isRoundFinal: false, loops: true, onFoldIntoRoundGap: fold });
     expect(foldButton()).toBeUndefined();
+  });
+
+  it('labels the send fields and patches format and line ending without changing content', () => {
+    render(legacy);
+    const format = container.querySelector<HTMLSelectElement>('[aria-label="quickSend.format"]')!;
+    const ending = container.querySelector<HTMLSelectElement>('[aria-label="quickSend.lineEnding"]')!;
+    expect(format.closest('label')?.textContent).toContain('quickSend.format');
+    expect(ending.closest('label')?.textContent).toContain('quickSend.lineEnding');
+    expect(ending.value).toBe(legacy.appendLineEnding);
+    act(() => { format.value = 'hex'; format.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(change).toHaveBeenLastCalledWith({ type: 'hex' });
+    act(() => { ending.value = 'None'; ending.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(change).toHaveBeenLastCalledWith({ appendLineEnding: 'None' });
+  });
+
+  it('keeps the content input and focus stable while its draft rerenders', () => {
+    render(legacy);
+    const content = container.querySelector<HTMLInputElement>('[aria-label="sendCmdEditor.contentPlaceholder"]')!;
+    content.focus();
+    render({ ...legacy, content: 'AT+VERSION' });
+    expect(container.querySelector('[aria-label="sendCmdEditor.contentPlaceholder"]')).toBe(content);
+    expect(document.activeElement).toBe(content);
+    expect(content.value).toBe('AT+VERSION');
   });
 
   it('changes action kind explicitly and keeps the step timing', () => {

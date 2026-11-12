@@ -154,6 +154,102 @@ test.afterEach(async ({ page }) => {
   expect(unknown, 'mocked unknown Tauri commands').toEqual([]);
 });
 
+test('run settings stay out of the title bar and finite repeats expose the round gap', async ({ page }) => {
+  await openCommands(page);
+  const header = page.locator('.editor-accordion-header');
+  await expect(header.getByRole('spinbutton')).toHaveCount(0);
+  await expect(header.getByRole('checkbox')).toHaveCount(0);
+  const run = page.getByRole('region', { name: '运行设置', exact: true });
+  const repeat = run.getByRole('spinbutton', { name: '重复', exact: true });
+  const gap = run.getByRole('spinbutton', { name: '轮间间隔 (ms)', exact: true });
+  await expect(gap).toBeDisabled();
+  await repeat.fill('3');
+  await repeat.press('Tab');
+  await expect(gap).toBeEnabled();
+  await expect(run.getByRole('checkbox', { name: '循环', exact: true })).not.toBeChecked();
+  await gap.fill('250');
+  await gap.press('Tab');
+  expect((await persisted(page)).sendCommandSets[0].loopDelay).toBe(0);
+  await page.locator('.editor-status').getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.editor-status')).toContainText('已保存');
+  expect((await persisted(page)).sendCommandSets[0]).toMatchObject({ repeatCount: 3, isLoop: false, loopDelay: 250 });
+});
+
+test('compact command editor fits six editable commands and stays within narrow settings columns', async ({ page }, testInfo) => {
+  await page.evaluate(key => {
+    const config = JSON.parse(localStorage.getItem(key)!);
+    const names = ['设备信息', '读取状态', '读取温度', '设置模式', '读取电压', '启动采集', '停止采集', '保存参数'];
+    const contents = ['AT+INFO?', 'AT+STATUS?', 'AT+TEMP?', 'AT+MODE=1', 'AT+VOLT?', 'AT+START', 'AT+STOP', 'AT+SAVE'];
+    config.sendCommandSets[0].name = '设备调试命令';
+    config.sendCommandSets[0].commands = names.map((name, order) => ({ id: `dense-${order}`, name, content: contents[order], order, delay: 25, type: 'string', appendLineEnding: '\\r\\n' }));
+    localStorage.setItem(key, JSON.stringify(config));
+  }, BACKEND_KEY);
+  await page.reload();
+  await page.locator('.titlebar-right button[title="设置"]').click();
+  await page.locator('.modal-nav-item').filter({ hasText: '发送命令规则' }).click();
+  const toggle = page.getByRole('button', { name: '设备调试命令', exact: true });
+  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+  const card = page.locator('.command-step-row').first();
+  await expect(card.getByRole('combobox', { name: '格式', exact: true })).toBeVisible();
+  await expect(card.getByRole('combobox', { name: '行尾', exact: true })).toBeVisible();
+  await expect(card.getByRole('textbox', { name: '命令内容...', exact: true })).toHaveValue('AT+INFO?');
+  // 密度是验收条件：默认 800×600 弹窗内完整显示至少六条可编辑命令。
+  const footerBox = await page.locator('.modal-content-footer').boundingBox();
+  for (const row of (await page.locator('.command-step-row').all()).slice(0, 6)) {
+    const box = await row.boundingBox();
+    expect(box!.height).toBeLessThanOrEqual(64);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(footerBox!.y);
+  }
+  const details = page.locator('.command-behavior-details');
+  await expect(details).not.toHaveAttribute('open', '');
+  await details.locator('summary').click();
+  await expect(details).toHaveAttribute('open', '');
+  await details.locator('summary').click();
+
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
+    await expect.poll(() => page.locator('.modal-content-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.locator('.modal-dialog').screenshot({ path: testInfo.outputPath(`commands-${theme}.png`) });
+  }
+  await page.setViewportSize({ width: 720, height: 800 });
+  await page.evaluate(async () => {
+    const modulePath = '/src/i18n.ts';
+    const { default: i18n } = await import(modulePath);
+    await i18n.changeLanguage('en-US');
+  });
+  await expect(card.getByRole('combobox', { name: 'Line ending', exact: true })).toBeVisible();
+  for (const width of [720, 600]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect.poll(() => page.locator('.modal-content-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    const cardBox = await card.boundingBox();
+    for (const control of await card.locator('input, select, button').all()) {
+      const box = await control.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(cardBox!.x);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width);
+    }
+    await page.locator('.modal-dialog').screenshot({ path: testInfo.outputPath(`commands-${width}-en.png`) });
+  }
+  await expect.poll(() => page.locator('.modal-content-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.locator('.modal-dialog').screenshot({ path: testInfo.outputPath('commands-run-settings-narrow-en.png') });
+});
+
+test('the unified command toolbar adds baud steps with focus and saves their enhanced schema', async ({ page }) => {
+  await openCommands(page);
+  await page.locator('.command-list-toolbar').getByRole('button', { name: '添加波特率步骤', exact: true }).click();
+  const step = page.locator('.command-step-row').last();
+  await expect(step.getByRole('textbox', { name: '名称', exact: true })).toBeFocused();
+  await expect(step.getByRole('combobox', { name: '步骤类型', exact: true })).toHaveValue('setParams');
+  await expect(step.getByRole('spinbutton', { name: '本机波特率', exact: true })).toHaveValue('230400');
+  await expect(page.getByPlaceholder('命令内容...')).toHaveCount(2);
+  await page.locator('.editor-status').getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.editor-status')).toContainText('已保存');
+  const set = (await persisted(page)).sendCommandSets[0];
+  expect(set.schemaVersion).toBe(2);
+  expect(set.commands.map((command: { order: number }) => command.order)).toEqual([0, 1, 2]);
+  expect(set.commands[2]).toMatchObject({ kind: 'setParams', baudRate: 230400, delay: 0 });
+});
+
 test('insertion survives navigation; discard restores the saved set and failed save retains the draft', async ({ page }) => {
   await openCommands(page);
   await page.locator('.editor-accordion-body').getByRole('button', { name: '在下方插入', exact: true }).first().click();

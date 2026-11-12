@@ -259,6 +259,7 @@
 
 .modal-content-area {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -604,7 +605,6 @@
 .editor-drag-handle:active { cursor: grabbing; }
 .editor-drag-handle:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
 .editor-sortable-row.is-dragging { opacity: 0.65; }
-
 
 .editor-leave-overlay { z-index: 5000; }
 .editor-leave-dialog { width: min(480px, 90vw); min-width: 0; gap: 12px; }

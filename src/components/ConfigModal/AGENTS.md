@@ -14,13 +14,13 @@ Multi-page settings modal. Split into `pages/` (10 settings pages), `editors/` (
 | `pages/BackupSettings.tsx` | config bundle import/export (`version: 2`); no plugin code/private data; import reads back backend-authoritative state and only restores grants for the same installation identity |
 | `pages/DisplaySettings.tsx` | preset baud rates / port type badge / default line ending / send prefix / timestamp mode+format; background image (enable → path → opacity / blur) |
 | `pages/HighlightSettings.tsx` | draft highlight sets and nested rules; committed arrays alone drive rendering |
-| `pages/CommandSettings.tsx` | draft command sets, nested drag/insert; dense order shared with panel and new cyclic runs; **「之后等待」字段与设置页共用 `shared/AfterDelayField`**（`isRoundFinal` 由列表位置传入，`loops` 由 `runsMultipleRounds` 判定），轮末给「并入轮间间隔」（算术在 `utils/commandSteps.foldDelayIntoRoundGap`）；**时长汇总**用 `utils/flowTiming` 的纯函数显示「每轮约 X；N 轮共约 Y」，仅在确有等待时出现，并注明不含发送/设备响应耗时 |
+| `pages/CommandSettings.tsx` | draft command sets, nested drag/insert; dense order shared with panel and new cyclic runs; 运行参数常驻紧凑工具条（有限多轮不依赖循环开关），重复标题/说明移入帮助浮层；添加发送/波特率步骤统一在命令列表工具栏；`styles/command-settings.css` 管双行表格与窄栏布局，e2e 守卫默认 800×600 弹窗完整显示至少六条普通命令； **「之后等待」字段与设置页共用 `shared/AfterDelayField`**（`isRoundFinal` 由列表位置传入，`loops` 由 `runsMultipleRounds` 判定），轮末给「并入轮间间隔」（算术在 `utils/commandSteps.foldDelayIntoRoundGap`）；**时长汇总**用 `utils/flowTiming` 的纯函数显示「每轮约 X；N 轮共约 Y」，仅在确有等待时出现，并注明不含发送/设备响应耗时 |
 | `pages/ProtocolSettings.tsx` | protocol templates: frame head/length/checksum/tail |
 | `pages/ToolSettings.tsx` | per-port external tool command template (`{port}` placeholder) |
 | `pages/TriggerSettings.tsx` | staged reminder/auto-reply rules; explicit save only, no debounce or unmount writes |
 | `pages/PluginSettings.tsx` | directory/ZIP install, upgrade, uninstall, pregrant while disabled, enable after queued grants persist; actions bind reviewed installGeneration, snapshots order by revision; proxy uses normal footer save. Uninstall can occupy the native main thread for tens of seconds (webview teardown + browser-data clear): a blocking `UninstallProgress` panel is committed and painted (two rAFs) before the invoke, so a slow uninstall never reads as a frozen app |
 | `editors/HighlightRuleEditor.tsx` | row form for highlight rule |
-| `editors/SendCmdEditor.tsx` | row form for send command: 按 `kind` 渲染发送字段（内容/类型/行尾）或本机波特率，**两者都渲染 `shared/AfterDelayField`**（「之后等待」的位置属性；轮末由 `isRoundFinal` 就地说明并提供「并入轮间间隔」） |
+| `editors/SendCmdEditor.tsx` | 双行表格式条目（首行名称/类型/格式/行尾/操作，次行内容/等待），共用列头，窄栏重排；按 `kind` 渲染发送字段（内容/类型/行尾）或本机波特率，**两者都渲染 `shared/AfterDelayField`**（「之后等待」的位置属性；轮末由 `isRoundFinal` 就地说明并提供「并入轮间间隔」） |
 | `editors/ProtocolTemplateEditor.tsx` | field-by-field template form |
 
 ## Entity page contract (`hooks/useEntityPage.ts`)

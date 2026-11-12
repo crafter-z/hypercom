@@ -1,0 +1,79 @@
+/* Batch editor: shared columns and two short lines per command, not cards. */
+.command-settings { container-type: inline-size; min-width: 0; }
+.modal-content-body:has(.command-settings) { padding: 8px 12px; }
+.command-settings .config-page { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.command-settings .editor-page-heading { display: contents; }
+.command-settings .editor-page-heading .config-page-title { display: none; }
+.command-settings .editor-page-heading > .btn { grid-column: 2; grid-row: 1; }
+.command-settings .editor-status { grid-column: 1; grid-row: 1; gap: 6px; margin: 0; font-size: 11px; }
+.command-settings .editor-status > span { margin-right: 4px; }
+.command-settings .config-page > .editor-sortable-row,
+.command-settings .config-page > .editor-error,
+.command-settings .config-page > .config-placeholder { grid-column: 1 / -1; }
+.command-settings .editor-accordion { margin-bottom: 0; border-radius: 4px; }
+.command-settings .editor-accordion-header { gap: 3px; padding: 4px 6px; border-radius: 4px; }
+.command-settings .editor-accordion-body { padding: 2px 6px 4px; }
+.command-settings .editor-count { white-space: nowrap; margin-inline: 3px; }
+.command-settings :is(.input, .select, .btn-sm) { height: 22px; min-height: 22px; font-size: 12px; padding: 1px 5px; }
+.command-settings .btn-icon.btn-sm { width: 22px; padding: 0; flex-shrink: 0; }
+.command-set-editor { position: relative; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.command-run-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; border-bottom: 1px solid var(--border-color); color: var(--text-secondary); font-size: 11px; }
+.command-run-bar label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.command-run-bar .command-repeat-input { width: 48px; }
+.command-run-bar .command-round-gap-input { width: 66px; }
+.command-timing-summary { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+.command-list-toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.command-list-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.command-behavior-details, .command-step-help { color: var(--text-secondary); font-size: 11px; }
+.command-behavior-details > summary, .command-step-help > summary { display: flex; align-items: center; justify-content: center; width: 22px; height: 24px; cursor: pointer; list-style: none; border-radius: 3px; }
+.command-behavior-details > summary::-webkit-details-marker, .command-step-help > summary::-webkit-details-marker { display: none; }
+.command-behavior-details > summary:hover, .command-step-help > summary:hover { color: var(--text-primary); background: var(--bg-hover); }
+.command-behavior-details > summary:focus-visible, .command-step-help > summary:focus-visible { outline: 2px solid var(--accent-color); }
+.command-help-content { position: absolute; z-index: 10; right: 0; top: 100%; width: 420px; max-width: 100%; max-height: 200px; overflow-y: auto; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-dialog); box-shadow: var(--shadow-md); color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.command-help-content p + p { margin-top: 6px; }
+.command-column-headings, .command-step-meta { display: grid; grid-template-columns: 20px 18px minmax(60px, 1fr) 102px 66px 58px 64px; align-items: center; gap: 3px; }
+.command-column-headings { padding: 1px 4px; color: var(--text-secondary); font-size: 11px; }
+.command-step-row { position: relative; min-width: 0; padding: 2px 4px; border-bottom: 1px solid var(--border-color); }
+.command-set-editor > .editor-sortable-row:last-of-type .command-step-row { border-bottom: none; }
+.command-step-row:hover { background: var(--bg-secondary); }
+.command-step-row:focus-within { background: var(--bg-secondary); box-shadow: inset 2px 0 var(--accent-color); }
+.command-step-meta > *, .command-row-field { min-width: 0; }
+.command-step-index { color: var(--text-secondary); font: 11px var(--font-terminal); text-align: center; font-variant-numeric: tabular-nums; }
+.command-settings .command-step-handle .btn { width: 20px; border-color: transparent; background: transparent; color: var(--text-secondary); }
+.command-step-meta :is(.input, .select) { width: 100%; min-width: 0; background-color: transparent; border-color: transparent; }
+.command-step-meta :is(.input, .select):hover { border-color: var(--border-color); }
+.command-step-meta :is(.input, .select):focus { border-color: var(--accent-color); background-color: var(--bg-input); }
+.command-step-format-placeholder { grid-column: span 2; }
+.command-step-actions { display: flex; align-items: center; gap: 2px; }
+.command-settings .command-step-actions .btn { width: 20px; min-height: 22px; height: 22px; border-color: transparent; background: transparent; color: var(--text-secondary); }
+.command-settings .command-step-actions .btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.command-settings .command-step-actions .command-step-delete:hover { color: var(--text-error); }
+.command-step-payload { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; padding-left: 44px; margin-top: 2px; }
+.command-step-content { width: 100%; min-width: 0; font-family: var(--font-terminal); }
+.command-step-params { display: flex; align-items: center; min-width: 0; gap: 3px; color: var(--text-secondary); font-size: 11px; }
+.command-step-params > label { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.command-step-params .input { width: 96px; min-width: 0; }
+.command-step-help .command-help-content { top: 100%; width: 100%; }
+.command-delay-note { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 11px; line-height: 1.4; }
+.command-delay-note .btn { margin-left: auto; }
+.command-sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0); white-space: nowrap !important; border: 0 !important; }
+@container (max-width: 520px) {
+  .command-column-headings { display: none; }
+  .command-step-meta { grid-template-columns: 20px 18px minmax(70px, 1fr) 66px 60px; }
+  .command-step-handle { grid-column: 1; grid-row: 1; }
+  .command-step-index { grid-column: 2; grid-row: 1; }
+  .command-step-name { grid-column: 3 / 5; grid-row: 1; }
+  .command-step-kind { grid-column: 3; grid-row: 2; }
+  .command-row-field:nth-of-type(1) { grid-column: 4; grid-row: 2; }
+  .command-row-field:nth-of-type(2) { grid-column: 5; grid-row: 2; }
+  .command-step-actions { grid-column: 5; grid-row: 1; gap: 0; }
+  .command-step-format-placeholder { grid-column: 4 / 6; grid-row: 2; }
+  .command-timing-summary { flex-basis: 100%; margin-left: 0; }
+}
+@container (max-width: 360px) {
+  .command-step-payload { padding-left: 0; }
+  .command-step-params > label { flex-wrap: wrap; gap: 2px; }
+  .command-settings .editor-accordion-header .editor-entity-name { flex-basis: calc(100% - 60px); }
+  .command-settings .editor-status { gap: 3px; }
+  .command-settings .editor-status > .btn { padding-inline: 3px; }
+}

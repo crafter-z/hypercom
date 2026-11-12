@@ -7,10 +7,12 @@
  * 这里同时解决「一个裸数字 100 没人看得懂」的问题：
  * - 有标签（`之后等待`）和单位（`ms`），不再依赖 placeholder / tooltip；
  * - 把它读成一句人话（「等待 100 ms 后执行下一步」/「立即执行下一步」）；
+ *   设置页 compact 模式将普通步骤的重复说明保留为无障碍描述，轮末警告仍就地可见；
  * - 轮末那一步就地说明为什么它不生效（轮间用集合的「轮间间隔」），并在集合
  *   确实会跑多轮时提供「并入轮间间隔」——只提示问题却不让用户一键解决，
  *   等于把算术题丢回给用户。
  */
+import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NumericInput } from './NumericInput';
 import { COMMAND_DELAY_MS } from '../../utils/commandSteps';
@@ -25,6 +27,8 @@ export interface AfterDelayFieldProps {
   loops?: boolean;
   /** 提供时，轮末且集合会跑多轮的情况下显示「并入轮间间隔」。 */
   onFoldIntoRoundGap?: () => void;
+  /** 设置页表格模式；其他消费者保留原有完整布局。 */
+  compact?: boolean;
 }
 
 export function AfterDelayField({
@@ -33,8 +37,10 @@ export function AfterDelayField({
   isRoundFinal = false,
   loops = false,
   onFoldIntoRoundGap,
+  compact = false,
 }: AfterDelayFieldProps) {
   const { t } = useTranslation();
+  const hintId = useId();
 
   const hint = isRoundFinal
     ? (delay > 0 ? t(loops ? 'sendCmdEditor.roundFinalDelayInactive' : 'sendCmdEditor.roundFinalDelayRunEnds') : '')
@@ -42,7 +48,7 @@ export function AfterDelayField({
   const canFold = isRoundFinal && loops && delay > 0 && !!onFoldIntoRoundGap;
 
   return (
-    <span className="after-delay-field" style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', fontSize: 11, color: 'var(--text-secondary)' }}>
+    <span className={`after-delay-field${compact ? ' after-delay-field-compact' : ''}`} style={{ display: compact ? 'contents' : 'inline-flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', fontSize: 11, color: 'var(--text-secondary)' }}>
       {/* 标签与输入同属一个 label：点击文字即可聚焦输入框。
           `.quicksend-edit-form label` 默认纵向堆叠，这里显式压成一行。 */}
       <label style={{ display: 'inline-flex', flexDirection: 'row', alignItems: 'center', gap: 4 }} title={t('sendCmdEditor.delayTooltip')}>
@@ -56,21 +62,18 @@ export function AfterDelayField({
           onCommit={onCommit}
           aria-label={t('sendCmdEditor.afterDelayLabel')}
           title={t('sendCmdEditor.delayTooltip')}
-          style={{ width: 80 }}
+          aria-describedby={hint ? hintId : undefined}
+          style={{ width: compact ? 56 : 80 }}
         />
         {t('sendCmdEditor.delayUnit')}
       </label>
-      {hint && <span style={isRoundFinal ? { color: 'var(--text-warning, var(--text-secondary))' } : undefined}>{hint}</span>}
-      {canFold && (
-        <button
-          type="button"
-          className="btn btn-sm"
-          title={t('sendCmdEditor.foldIntoRoundGapHint')}
-          onClick={onFoldIntoRoundGap}
-        >
-          {t('sendCmdEditor.foldIntoRoundGap')}
-        </button>
-      )}
+      {hint && <span id={hintId}
+        className={compact ? (isRoundFinal ? 'command-delay-note' : 'command-sr-only') : undefined}
+        style={isRoundFinal ? { color: 'var(--text-warning, var(--text-secondary))' } : undefined}>
+        {hint}
+        {compact && canFold && <button type="button" className="btn btn-sm" title={t('sendCmdEditor.foldIntoRoundGapHint')} onClick={onFoldIntoRoundGap}>{t('sendCmdEditor.foldIntoRoundGap')}</button>}
+      </span>}
+      {!compact && canFold && <button type="button" className="btn btn-sm" title={t('sendCmdEditor.foldIntoRoundGapHint')} onClick={onFoldIntoRoundGap}>{t('sendCmdEditor.foldIntoRoundGap')}</button>}
     </span>
   );
 }
