@@ -39,6 +39,7 @@ interface TerminalFilterBarProps {
   scrollLocked?: boolean;
   showTimestamp?: boolean;
   displayFormat?: DisplayFormat;
+  hideAsciiNoise?: boolean;
   direction: DirectionFilter;
   onDirectionChange: (d: DirectionFilter) => void;
   keyword: string;
@@ -62,6 +63,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
   scrollLocked,
   showTimestamp,
   displayFormat,
+  hideAsciiNoise = false,
   direction,
   onDirectionChange,
   keyword,
@@ -142,6 +144,15 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
         >
           {paused ? <Play size={13} /> : <Pause size={13} />}
         </button>
+        <label className="checkbox-wrapper terminal-noise-filter" title={t('terminal.filter.asciiNoiseHelp')}>
+          <input
+            type="checkbox"
+            checked={hideAsciiNoise}
+            disabled={displayFormat !== 'string'}
+            onChange={event => updateConfig({ hideAsciiNoise: event.target.checked })}
+          />
+          {t('terminal.filter.hideAsciiNoise')}
+        </label>
         <div className="terminal-filter-display-group">
           <button
             type="button"

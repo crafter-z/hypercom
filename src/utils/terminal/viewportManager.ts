@@ -110,6 +110,7 @@ export class TerminalViewportManager {
   // Filter state (null seqs = identity mode).
   private filterDirection: DirectionFilter = 'all';
   private filterKeyword = '';
+  private filterHideAsciiNoise = false;
   private filtered: SortedList = { seqs: [], offset: 0 };
   private filterActive = false;
 
@@ -169,7 +170,7 @@ export class TerminalViewportManager {
       if (r.trimmed) trimmed = true;
       // Incremental filter/search: match the new line once, extend the lists.
       if (this.filterActive) {
-        if (linePassesFilter(line, this.filterDirection, this.filterKeyword, encoding)) {
+        if (linePassesFilter(line, this.filterDirection, this.filterKeyword, encoding, this.filterHideAsciiNoise)) {
           this.filtered.seqs.push(r.seq);
         }
       }
@@ -245,11 +246,16 @@ export class TerminalViewportManager {
 
   // ==================== Filter ====================
 
-  /** Set direction/keyword filter (debounced by the caller). */
-  setFilter(direction: DirectionFilter, keyword: string): void {
+  /** Set display filters (keyword debounced by the caller; noise opt-in). */
+  setFilter(direction: DirectionFilter, keyword: string, hideAsciiNoise = false): void {
+    const noiseChanged = hideAsciiNoise !== this.filterHideAsciiNoise;
     this.filterDirection = direction;
     this.filterKeyword = keyword;
+    this.filterHideAsciiNoise = hideAsciiNoise;
     this.recomputeFilter();
+    // Keep search navigation off the hidden noisy rows. Direction/keyword
+    // retain their existing independent search semantics.
+    if (noiseChanged) this.recomputeSearch();
     this.renderer?.bumpFilterVersion();
     this.requestRender();
   }
@@ -708,7 +714,7 @@ export class TerminalViewportManager {
     this.cancelFilterScan?.(); this.cancelFilterScan = null;
     const version = ++this.filterBuildVersion;
     this.cancelIndexBuild();
-    const active = this.filterDirection !== 'all' || this.filterKeyword.trim().length > 0;
+    const active = this.filterHideAsciiNoise || this.filterDirection !== 'all' || this.filterKeyword.trim().length > 0;
     this.filterActive = active;
     this.filtered = { seqs: [], offset: 0 };
     this.filterLoading = active && this.buffer.length > TERMINAL_REBUILD_SYNC_LIMIT;
@@ -716,8 +722,9 @@ export class TerminalViewportManager {
     this.timeIndex.clear();
     this.timeIndexReady = !this.filterLoading;
     const encoding = this.getEncoding(), direction = this.filterDirection, keyword = this.filterKeyword;
+    const hideAsciiNoise = this.filterHideAsciiNoise;
     this.cancelFilterScan = this.scanSource(
-      line => linePassesFilter(line, direction, keyword, encoding),
+      line => linePassesFilter(line, direction, keyword, encoding, hideAsciiNoise),
       (seqs, end) => {
         if (version !== this.filterBuildVersion || this.destroyed) return;
         // Appends newer than the captured tail have already matched exactly
@@ -850,6 +857,7 @@ export class TerminalViewportManager {
   }
 
   private lineMatchesSearch(line: TerminalLine, displayFormat: DisplayFormat, encoding: Encoding): boolean {
+    if (!linePassesFilter(line, 'all', '', encoding, this.filterHideAsciiNoise)) return false;
     const text = getSearchableText(line, displayFormat, encoding);
     if (!text) return false;
     return this.searchCaseSensitive

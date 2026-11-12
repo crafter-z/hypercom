@@ -15,6 +15,7 @@
  */
 import type { TerminalLine } from '../types';
 import { getLineText } from './lineText';
+import { isLikelyAsciiNoise } from './asciiNoise';
 
 /** Direction filter: 'all' shows everything, 'TX'/'RX' only that direction. */
 export type DirectionFilter = 'all' | 'TX' | 'RX';
@@ -28,8 +29,12 @@ export function linePassesFilter(
   direction: DirectionFilter,
   keyword: string,
   encoding: string,
+  hideAsciiNoise = false,
 ): boolean {
   if (direction !== 'all' && line.direction !== direction) return false;
+  // Display-only: inspect original RX bytes, never mutate content/rawData or
+  // gate upstream observers. Text-only replay rows without bytes stay visible.
+  if (hideAsciiNoise && line.direction === 'RX' && line.rawData && isLikelyAsciiNoise(line.rawData)) return false;
   const kw = keyword.trim().toLowerCase();
   if (!kw) return true;
   return getLineText(line, encoding).toLowerCase().includes(kw);

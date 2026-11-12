@@ -19,6 +19,7 @@ describe('ensureTerminal', () => {
     expect(t.showTimestamp).toBe(true);
     expect(t.displayFormat).toBe('string');
     expect(t.encoding).toBe('ASCII');
+    expect(t.hideAsciiNoise).toBe(false);
     expect(t.connectedAt).toBeNull();
   });
 

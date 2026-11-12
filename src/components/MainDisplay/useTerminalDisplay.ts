@@ -14,11 +14,13 @@ import type { TerminalViewportManager } from '../../utils/terminal/viewportManag
 
 interface UseTerminalDisplayOptions {
   vm: TerminalViewportManager;
+  /** Effective flag: caller disables it outside text display. */
+  hideAsciiNoise?: boolean;
 }
 
 const KEYWORD_DEBOUNCE_MS = 200;
 
-export function useTerminalDisplay({ vm }: UseTerminalDisplayOptions) {
+export function useTerminalDisplay({ vm, hideAsciiNoise = false }: UseTerminalDisplayOptions) {
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('all');
   const [keywordInput, setKeywordInput] = useState('');
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
@@ -34,8 +36,8 @@ export function useTerminalDisplay({ vm }: UseTerminalDisplayOptions) {
 
   // Push filter changes into the manager (full recompute, one render).
   useEffect(() => {
-    vmRef.current.setFilter(directionFilter, debouncedKeyword);
-  }, [directionFilter, debouncedKeyword]);
+    vm.setFilter(directionFilter, debouncedKeyword, hideAsciiNoise);
+  }, [vm, directionFilter, debouncedKeyword, hideAsciiNoise]);
 
   // Pause freezes the rendered window at the current newest line; data keeps
   // accumulating in the ring buffer. The manager state is pushed from an

@@ -37,6 +37,7 @@ const DEFAULT_TERMINAL_STATE = (): TerminalState => ({
   showTimestamp: true,
   displayFormat: 'string',
   encoding: 'ASCII',
+  hideAsciiNoise: false,
   connectedAt: null,
 });
 

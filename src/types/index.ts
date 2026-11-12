@@ -169,6 +169,8 @@ export interface TerminalState {
   showTimestamp: boolean;
   displayFormat: DisplayFormat;
   encoding: Encoding;
+  /** Opt-in ASCII-log heuristic; hides noisy RX rows in text view only. */
+  hideAsciiNoise?: boolean;
   connectedAt: number | null; // 端口连接成功时间戳 (ms)
 }
 

@@ -76,6 +76,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   const showTimestamp = terminalConfig?.showTimestamp ?? liveConfig?.showTimestamp ?? true;
   const displayFormat = terminalConfig?.displayFormat ?? liveConfig?.displayFormat ?? 'string';
   const encoding = terminalConfig?.encoding ?? liveConfig?.encoding ?? 'UTF-8';
+  const hideAsciiNoise = terminalConfig?.hideAsciiNoise ?? liveConfig?.hideAsciiNoise ?? false;
+  const effectiveHideAsciiNoise = hideAsciiNoise && displayFormat === 'string';
   const connectedAt = terminalConfig?.connectedAt ?? liveConfig?.connectedAt ?? null;
   const updateTerminalConfig = useCallback((patch: Partial<TerminalState>) => {
     if (onTerminalConfigChange) onTerminalConfigChange(patch);
@@ -194,9 +196,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   const {
     directionFilter, setDirectionFilter, keywordInput, setKeywordInput,
     debouncedKeyword, paused, togglePause,
-  } = useTerminalDisplay({ vm });
+  } = useTerminalDisplay({ vm, hideAsciiNoise: effectiveHideAsciiNoise });
 
-  const localViewKey = JSON.stringify([directionFilter, debouncedKeyword, paused, encoding, displayFormat]);
+  const localViewKey = JSON.stringify([directionFilter, debouncedKeyword, paused, encoding, displayFormat, effectiveHideAsciiNoise]);
   const previousLocalViewKey = useRef(localViewKey);
   useEffect(() => {
     const changed = previousLocalViewKey.current !== localViewKey;
@@ -564,12 +566,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         scrollLocked={effectiveScrollLocked}
         showTimestamp={showTimestamp}
         displayFormat={displayFormat}
+        hideAsciiNoise={hideAsciiNoise}
         direction={directionFilter}
         onDirectionChange={setDirectionFilter}
         keyword={keywordInput}
         onKeywordChange={setKeywordInput}
         matchCount={matchCount}
-        showMatchCount={debouncedKeyword.trim().length > 0}
+        showMatchCount={debouncedKeyword.trim().length > 0 || effectiveHideAsciiNoise}
         paused={paused}
         onTogglePause={togglePause}
         viewPicker={(() => {

@@ -298,6 +298,7 @@
   max-width: 100%;
 }
 .terminal-filter-actions .terminal-bar-select { min-width: 0; max-width: 100%; }
+.terminal-noise-filter { flex: 0 0 auto; font-size: var(--text-xs); white-space: nowrap; }
 
 /* "Paused" indicator with a soft pulse so the frozen state reads at a glance */
 .terminal-filter-paused {

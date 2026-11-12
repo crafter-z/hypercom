@@ -323,3 +323,47 @@ describe('TerminalView existing Pin + linked scrolling', () => {
     expect(useTerminalStore.getState().terminals.a.scrollLocked).toBe(false);
   });
 });
+
+describe('TerminalView ASCII noise switch', () => {
+  it('filters real row DOM per port, restores rows in HEX, and preserves buffered data', async () => {
+    const a = await mount('a'), b = await mount('b');
+    const raw = new Uint8Array([0x80, 65, 0xff, 0x01, 66, 0x90, 0x7f, 67]);
+    await act(async () => {
+      for (const view of [a, b]) view.manager.appendLines([
+        { timestamp: 3000, direction: 'RX', rawData: raw, isHex: false },
+        { timestamp: 3001, direction: 'RX', rawData: new TextEncoder().encode('Boot complete'), isHex: false },
+      ]);
+    });
+    await frame(2);
+    const toggle = a.host.querySelector<HTMLInputElement>('.terminal-noise-filter input')!;
+    expect(toggle.checked).toBe(false);
+    expect(a.container.querySelector('[data-seq="200"]')).not.toBeNull();
+    await act(async () => toggle.click());
+    await frame(2);
+    expect(toggle.checked).toBe(true);
+    expect(a.manager.getVisibleCount()).toBe(201);
+    expect(a.container.querySelector('[data-seq="200"]')).toBeNull();
+    expect(b.manager.getVisibleCount()).toBe(202);
+    expect(useTerminalStore.getState().terminals.b.hideAsciiNoise).toBe(false);
+    expect(a.manager.buffer.getBySeq(200)?.rawData).toBe(raw);
+
+    const hex = [...a.host.querySelectorAll<HTMLButtonElement>('.segmented-btn')].find(button => button.textContent === 'HEX')!;
+    await click(hex);
+    await frame(2);
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.checked).toBe(true);
+    expect(a.manager.getVisibleCount()).toBe(202);
+    expect(a.container.querySelector('[data-seq="200"]')).not.toBeNull();
+
+    const string = [...a.host.querySelectorAll<HTMLButtonElement>('.segmented-btn')].find(button => button.textContent === 'paramsSection.displayFormat.string')!;
+    await click(string);
+    await frame(2);
+    expect(a.manager.getVisibleCount()).toBe(201);
+    expect(toggle.disabled).toBe(false);
+    await act(async () => toggle.click());
+    await frame(2);
+    expect(a.manager.getVisibleCount()).toBe(202);
+    expect(a.container.querySelector('[data-seq="200"]')).not.toBeNull();
+    expect(a.manager.buffer.length).toBe(202);
+  });
+});
