@@ -23,6 +23,19 @@ import { hasPortDisplayConsumers, hasPortLineConsumers, notifyPluginViewPortStat
 // not spam toasts — module-level so it survives the empty-deps effect.
 const TRIGGER_ALERT_THROTTLE_MS = 1000;
 const triggerAlertThrottle = new Map<string, number>();
+
+/**
+ * Rule ids are user-editable and can be replaced indefinitely during a long
+ * session. Keep the alert throttle metadata scoped to the currently committed
+ * trigger rules so deleting a rule also releases its old id.
+ */
+function pruneTriggerAlertThrottle(): void {
+  const activeRuleIds = new Set(useRuleStore.getState().triggerRules.map((rule) => rule.id));
+  for (const ruleId of triggerAlertThrottle.keys()) {
+    if (!activeRuleIds.has(ruleId)) triggerAlertThrottle.delete(ruleId);
+  }
+}
+
 // 触发引擎异常限流：规则配置错误时随每次 RX 触发，最多每 2s 打一条日志。
 let lastTriggerEvalErrorLog = 0;
 
@@ -119,6 +132,9 @@ export function useSerialReceive() {
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+    // Also prune on remount: rule edits can happen while this root listener is
+    // temporarily absent (tests, hot reload, or a remounted shell).
+    pruneTriggerAlertThrottle();
     const pipeline = getRxPipeline();
     pipeline.setLineConsumerQuery(hasPortLineConsumers);
     const modes = new Map<string, string>();
@@ -164,7 +180,10 @@ export function useSerialReceive() {
       }
     };
     const unsubscribeApp = useAppStore.subscribe(syncBindings);
-    const unsubscribeRules = useRuleStore.subscribe(syncBindings);
+    const unsubscribeRules = useRuleStore.subscribe((state, previous) => {
+      if (state.triggerRules !== previous.triggerRules) pruneTriggerAlertThrottle();
+      syncBindings();
+    });
     const unsubscribeConsumers = subscribePortInputConsumersChanged(syncBindings);
 
     // P1-1：行级触发器——每条完整行组装完成时评估触发规则（行边界而非读事件块）。

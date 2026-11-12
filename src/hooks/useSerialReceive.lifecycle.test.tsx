@@ -2,16 +2,18 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ProtocolTemplate, SerialPort, TerminalLine } from '../types';
+import type { ProtocolTemplate, SerialPort, TerminalLine, TriggerRule } from '../types';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
+import { useToastStore } from '../stores/useToastStore';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { addPluginRxObserver, resetPluginObserverForTest } from '../utils/pluginObserver';
 import type { RxPipeline, RxPipelineOptions } from '../utils/rxPipeline';
 import { lostPortIds } from './disconnectTracking';
 import { useSerialReceive, openTabForConnectedPort } from './useSerialReceive';
 import { subscribePluginViewInput } from '../utils/pluginViewInput';
+import { evaluateTriggers } from '../utils/triggerEngine';
 
 const eventHandlers = vi.hoisted(() => ({
   data: null as ((event: SerialDataEvent) => void) | null,
@@ -227,6 +229,29 @@ describe('useSerialReceive protocol lifecycle', () => {
       useRuleStore.getState().setTriggerRules([]);
       vi.useRealTimers();
     }
+  });
+
+  it('prunes alert throttle entries when a trigger rule is removed and re-added', () => {
+    const rule: TriggerRule = {
+      id: 'throttle-rule', name: 'Throttle rule', pattern: 'ready', isRegex: false,
+      matchType: 'contains', actionType: 'alert', actionContent: 'ready', actionIsHex: false,
+      isEnabled: true, portId: 'COM1',
+    };
+    useToastStore.getState().clearAll();
+    vi.mocked(evaluateTriggers)
+      .mockReturnValueOnce([{ rule, matchedText: 'ready' }])
+      .mockReturnValueOnce([{ rule, matchedText: 'ready' }]);
+    useRuleStore.getState().setTriggerRules([rule]);
+    receive(utf8('ready\n'));
+    expect(evaluateTriggers).toHaveBeenCalled();
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+
+    // Reusing the same id within the one-second throttle window must behave as
+    // a fresh rule after deletion, rather than inheriting stale module state.
+    useRuleStore.getState().setTriggerRules([]);
+    useRuleStore.getState().setTriggerRules([rule]);
+    receive(utf8('ready\n'));
+    expect(useToastStore.getState().toasts).toHaveLength(2);
   });
 
   it('tool-owned disconnect suppresses lost banner while still draining RX', () => {
