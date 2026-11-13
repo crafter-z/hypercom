@@ -48,7 +48,11 @@ pub async fn disable_simulation(state: State<'_, AppState>) -> Result<(), Comman
                 .map_err(|e| CommandError::Serial(e.to_string()))?
         };
         if let Some(thread) = join_handle {
-            let _ = thread.join();
+            tokio::task::spawn_blocking(move || {
+                let _ = thread.join();
+            })
+            .await
+            .map_err(|e| CommandError::Other(format!("simulation close join task failed: {e}")))?;
         }
     }
     log::info!("Simulation mode disabled");

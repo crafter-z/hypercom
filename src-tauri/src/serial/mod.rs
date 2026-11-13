@@ -354,9 +354,20 @@ impl SerialManager {
         )
     }
 
-    /// 设置流控（DTR/RTS）
-    pub fn set_flow_control(&self, port_id: &str, dtr: bool, rts: bool) -> anyhow::Result<()> {
-        ports_real::set_flow_control(self, port_id, dtr, rts)
+    /// 设置流控（DTR/RTS），并同步重连所用的最近参数。
+    pub fn set_flow_control(
+        &mut self,
+        port_id: &str,
+        dtr: bool,
+        rts: bool,
+        expected_generation: Option<u64>,
+    ) -> anyhow::Result<()> {
+        ports_real::set_flow_control(self, port_id, dtr, rts, expected_generation)?;
+        if let Some(params) = self.last_params.get_mut(port_id) {
+            params.dtr = dtr;
+            params.rts = rts;
+        }
+        Ok(())
     }
 
     /// 获取指定端口上次成功连接的参数（用于外部工具执行后重开端口）。
@@ -582,7 +593,7 @@ mod tests {
     fn port_mutating_commands_error_on_missing_ports() {
         let mut m = SerialManager::new();
         assert!(m.get_write_handle("COM1").is_err());
-        assert!(m.set_flow_control("COM1", true, true).is_err());
+        assert!(m.set_flow_control("COM1", true, true, None).is_err());
         assert!(m
             .set_params("COM1", 9600, 8, "None", "One", "None")
             .is_err());

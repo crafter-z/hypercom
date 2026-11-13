@@ -265,9 +265,24 @@ pub(crate) fn spawn_bash(
                                 if !dsr_pending.swap(true, Ordering::AcqRel) {
                                     let writer = Arc::clone(&writer_clone);
                                     let pending = Arc::clone(&dsr_pending);
+                                    let running = Arc::clone(&running_clone);
                                     thread::spawn(move || {
-                                        if let Ok(mut w) = writer.lock() {
-                                            let _ = w.write_all(b"\x1b[1;1R");
+                                        loop {
+                                            if !running.load(Ordering::Acquire) {
+                                                break;
+                                            }
+                                            match writer.try_lock() {
+                                                Ok(mut w) => {
+                                                    if running.load(Ordering::Acquire) {
+                                                        let _ = w.write_all(b"\x1b[1;1R");
+                                                    }
+                                                    break;
+                                                }
+                                                Err(std::sync::TryLockError::WouldBlock) => {
+                                                    thread::sleep(std::time::Duration::from_millis(10));
+                                                }
+                                                Err(std::sync::TryLockError::Poisoned(_)) => break,
+                                            }
                                         }
                                         pending.store(false, Ordering::Release);
                                     });

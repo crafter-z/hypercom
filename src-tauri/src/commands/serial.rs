@@ -149,6 +149,21 @@ async fn read_file_send_chunk(
 /// A channel entry is bounded by bytes, not merely by number of lines: tools
 /// may print arbitrarily long progress/binary output without any newline.
 const TOOL_OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+/// Cancellation polling interval for inter-chunk file-send delays. A raw
+/// `sleep(delay_ms)` would make shutdown wait an unbounded user-provided delay.
+const FILE_SEND_DELAY_SLICE_MS: u64 = 50;
+
+async fn wait_file_send_delay(cancel: &AtomicBool, delay_ms: u64) {
+    let mut remaining = delay_ms;
+    while remaining > 0 {
+        if cancel.load(Ordering::Acquire) {
+            return;
+        }
+        let slice = remaining.min(FILE_SEND_DELAY_SLICE_MS);
+        tokio::time::sleep(std::time::Duration::from_millis(slice)).await;
+        remaining -= slice;
+    }
+}
 
 fn tool_output_split(bytes: &[u8]) -> usize {
     // Keep a possible UTF-8 suffix (at most three bytes) for the next event,
@@ -681,7 +696,7 @@ pub async fn send_file(
                 },
             );
             if args.delay_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
+                wait_file_send_delay(&cancel, args.delay_ms).await;
             } else {
                 tokio::task::yield_now().await;
             }
@@ -809,17 +824,20 @@ pub async fn set_flow_control(
     port_id: String,
     dtr: bool,
     rts: bool,
+    expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
     tokio::task::spawn_blocking(move || {
-        let manager = serial_manager
+        let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager.set_flow_control(&port_id, dtr, rts).map_err(|e| {
-            log::warn!("Failed to set flow control for {}: {}", port_id, e);
-            CommandError::Serial(e.to_string())
-        })
+        manager
+            .set_flow_control(&port_id, dtr, rts, expected_generation)
+            .map_err(|e| {
+                log::warn!("Failed to set flow control for {}: {}", port_id, e);
+                CommandError::Serial(e.to_string())
+            })
     })
     .await
     .map_err(|e| CommandError::Other(format!("Set flow control task panicked: {e}")))?
@@ -948,9 +966,15 @@ pub async fn run_port_tool(
             .map_err(|e| CommandError::Serial(e.to_string()))?;
         (params, jh, generation)
     };
-    // 在锁外 join：读线程最长约 100ms 退出，不能在全局串口锁内阻塞。
+    // Join outside the manager lock and off the async runtime worker. TTY
+    // teardown may wait for a bounded child/reader cleanup, so a direct join
+    // here would starve unrelated async serial commands.
     if let Some(t) = join_handle {
-        let _ = t.join();
+        tokio::task::spawn_blocking(move || {
+            let _ = t.join();
+        })
+        .await
+        .map_err(|e| CommandError::Other(format!("tool close join task failed: {e}")))?;
     }
 
     let outcome = async {
@@ -1083,6 +1107,27 @@ pub async fn run_port_tool(
     result
 }
 
+/// Kill a tool process and its descendants where the platform supports process trees.
+fn kill_tool_process_tree(pid: u32) -> std::io::Result<bool> {
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()?;
+        Ok(status.success())
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+        Ok(result == 0)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        Ok(false)
+    }
+}
+
 /// 终止正在运行的外部工具进程。
 /// 进程被 kill 后 run_port_tool 的 wait() 会返回，自动触发串口重开。
 #[tauri::command]
@@ -1101,25 +1146,7 @@ pub async fn kill_port_tool(
         procs.get(&port_id).and_then(|child| child.id())
     };
     if let Some(pid) = pid {
-        let killed = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
-            #[cfg(windows)]
-            {
-                let status = std::process::Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .status()?;
-                Ok(status.success())
-            }
-            #[cfg(unix)]
-            {
-                let result = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
-                Ok(result == 0)
-            }
-            #[cfg(not(any(windows, unix)))]
-            {
-                let _ = pid;
-                Ok(false)
-            }
-        })
+        let killed = tokio::task::spawn_blocking(move || kill_tool_process_tree(pid))
         .await
         .map_err(|e| CommandError::Other(format!("Kill tool task failed: {e}")))?
         .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {e}")))?;
@@ -1188,6 +1215,27 @@ pub async fn shutdown_serial_work(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         map.drain()
             .map(|(_, mut child)| async move {
+                // Tools run in a process group/tree and may leave stdout/stderr
+                // descendants alive after the leader is killed. Force-kill the
+                // whole tree during shutdown so stream_tool_output tasks can
+                // close and serial_work can drain deterministically.
+                if let Some(pid) = child.id() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        #[cfg(windows)]
+                        {
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                                .status();
+                        }
+                        #[cfg(unix)]
+                        {
+                            unsafe {
+                                let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                            }
+                        }
+                    })
+                    .await;
+                }
                 let _ = child.start_kill();
                 let _ = child.wait().await;
             })
@@ -1228,6 +1276,21 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn cancelled_file_send_delay_returns_without_waiting_full_delay() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = tokio::spawn(async move {
+            super::wait_file_send_delay(&worker_cancel, 5_000).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        cancel.store(true, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .expect("cancellation must interrupt a long delay")
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn file_send_streams_large_input_in_one_reused_bounded_buffer() {

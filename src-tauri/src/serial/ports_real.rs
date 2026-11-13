@@ -159,8 +159,10 @@ impl PortClose {
 
 /// 单个真实串口连接句柄。
 ///
-/// 读写句柄经 `try_clone()` 拆分（Windows 上 = `DuplicateHandle`），读线程独占
-/// `read_port`、发送路径独占 `write_port`。拆分前读线程与 TX 写路径共享同一把
+/// 读写句柄经 `try_clone()` 拆分（Windows 上 = `DuplicateHandle`），读句柄直接
+/// 移交读线程，发送/改参共用 `write_port`。读句柄没有可供改参等待的共享锁：
+/// std::Mutex 不保证公平，连续 read 的锁竞争会让改参持有全局锁无限等待。
+/// 拆分前读线程与 TX 写路径共享同一把
 /// per-port `Mutex<Box<dyn SerialPort>>`：TX 的 write_all 阻塞期间端口锁被 TX
 /// 独占，RX 读线程被饿死——设备响应早已到达 OS 接收缓冲区，却直到 TX 释放锁才
 /// 被读出来（"TX 后等一分钟才收到响应"的根因）。拆分后 TX 再阻塞也影响不到 RX。
@@ -170,8 +172,6 @@ impl PortClose {
 /// 是设备级状态、两个句柄共享，改参（set_params/set_flow_control）只在
 /// 写句柄上进行。
 pub(super) struct SerialPortHandle {
-    /// 读句柄：读线程独占（只锁读）
-    read_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     /// 写句柄：发送路径独占（只锁写）
     write_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     leases: Arc<WriterLeases>,
@@ -218,9 +218,7 @@ fn system_port_present(port_id: &str) -> anyhow::Result<bool> {
     // 单一事实来源：与 UI 列表用同一个枚举。Windows 下列表按 SERIALCOMM 注册表
     // 顺序（SetupAPI 兜底），这里再用 `serialport::available_ports()` 可能与列表
     // 分歧，出现「列表可见但打开/重连报端口不存在」。
-    Ok(enumerate_system_ports()?
-        .iter()
-        .any(|p| p.id == port_id))
+    Ok(enumerate_system_ports()?.iter().any(|p| p.id == port_id))
 }
 
 #[cfg(windows)]
@@ -435,7 +433,6 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     #[cfg(not(windows))]
     let read_port = port;
 
-    let read_port_arc = Arc::new(Mutex::new(read_port));
     let write_port_arc = Arc::new(Mutex::new(write_port));
     let leases = Arc::new(WriterLeases {
         count: Mutex::new(0),
@@ -450,7 +447,6 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
         .unwrap_or_default();
     let thread_port_id = args.port_id.clone();
     let read_thread = thread::spawn({
-        let read_port = Arc::clone(&read_port_arc);
         let running = Arc::clone(&running);
         let ready = Arc::clone(&ready);
         let app_handle = app_handle.clone();
@@ -469,7 +465,6 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     manager.ports.insert(
         args.port_id.clone(),
         SerialPortHandle {
-            read_port: read_port_arc,
             write_port: write_port_arc,
             leases,
             running,
@@ -479,7 +474,12 @@ pub(super) fn open(manager: &mut SerialManager, args: OpenPortArgs) -> anyhow::R
     manager
         .last_params
         .insert(args.port_id.clone(), args.clone());
-    emit_status(&app_handle, &args.port_id, PortStatus::Connected, Some(generation));
+    emit_status(
+        &app_handle,
+        &args.port_id,
+        PortStatus::Connected,
+        Some(generation),
+    );
     ready.store(true, Ordering::Release);
     log::info!("Serial port opened: {}", port_id);
     Ok(())
@@ -581,15 +581,12 @@ pub(super) fn set_params(
             .ports
             .get(port_id)
             .ok_or_else(|| anyhow::anyhow!("Port not found: {}", port_id))?;
-        // DCB/COMMTIMEOUTS 是设备级状态、两个句柄共享。先拿写句柄（可能等一次
-        // 在途 TX，最多 ~2s），再拿读句柄（读线程单次 read 最长 ~100ms）——
-        // 顺序不能反：先持读锁等写锁会把 RX 一起停住整个等待期。
+        // Only the writer owns settings changes. Do not wait for the reader:
+        // its timeout/re-read loop can starve a std::Mutex waiter indefinitely,
+        // pinning both the write lock and the global manager lock. Device-level
+        // settings also apply to the cloned read handle without borrowing it.
         let mut port = handle
             .write_port
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let _read_guard = handle
-            .read_port
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         port.set_baud_rate(baud_rate)?;
@@ -622,14 +619,22 @@ pub(super) fn set_params(
     Ok(())
 }
 
-/// 设置流控（DTR/RTS）：两句柄都是设备级状态，同时锁读写句柄避免改参瞬间另一
-/// 句柄正在 I/O；DTR/RTS 在写句柄上应用。
+/// 设置输出控制线（DTR/RTS）：设备级状态，只与写入/其它改参串行，
+/// 不能等待读线程交出锁（空闲端口的连续阻塞 read 会饿死改参、发送和关闭）。
 pub(super) fn set_flow_control(
     manager: &SerialManager,
     port_id: &str,
     dtr: bool,
     rts: bool,
+    expected_generation: Option<u64>,
 ) -> anyhow::Result<()> {
+    if let Some(expected) = expected_generation {
+        if !manager.connection_matches(port_id, expected) {
+            return Err(anyhow::anyhow!(
+                "Port connection changed before applying flow control"
+            ));
+        }
+    }
     let handle = manager
         .ports
         .get(port_id)
@@ -637,10 +642,6 @@ pub(super) fn set_flow_control(
     // Write lock first: waiting for an in-flight TX must not park the reader.
     let mut port = handle
         .write_port
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-    let _read_guard = handle
-        .read_port
         .lock()
         .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
     port.write_data_terminal_ready(dtr)?;
@@ -651,7 +652,7 @@ pub(super) fn set_flow_control(
 /// 读线程主体：独占读句柄，读到的字节派发为 RX 事件，退出时派发状态与重连提示。
 fn read_loop(
     port_id: String,
-    read_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    mut read_port: Box<dyn serialport::SerialPort>,
     running: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
     generation: u64,
@@ -672,22 +673,13 @@ fn read_loop(
     let mut abnormal = false;
 
     while running.load(Ordering::Relaxed) {
-        // 仅在 read() 调用期间持有端口锁，读完立即释放。emit_rx_event 会派发 Tauri
-        // 事件并同步写日志落盘，不能在持锁期间执行，否则会阻塞发送与改参，高波特率
-        // 下还可能撑爆 OS 接收缓冲区。
-        let outcome = match read_port.lock() {
-            Ok(mut p) => match p.read(&mut buffer) {
-                Ok(n) => ReadOutcome::Data(n),
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ReadOutcome::Timeout,
-                Err(e) => ReadOutcome::Error(e),
-            },
-            Err(e) => {
-                log::error!("Serial port lock error: {}", e);
-                abnormal = true;
-                break;
-            }
+        // The reader exclusively owns its handle. Settings and TX use the
+        // cloned write handle, so an idle blocking read cannot hold up either.
+        let outcome = match read_port.read(&mut buffer) {
+            Ok(n) => ReadOutcome::Data(n),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ReadOutcome::Timeout,
+            Err(e) => ReadOutcome::Error(e),
         };
-        // 端口 MutexGuard 在此处已释放
 
         match outcome {
             // Stop may have been signalled while read() was blocked; bytes read
@@ -775,6 +767,10 @@ fn parse_flow_control(flow: &str) -> anyhow::Result<serialport::FlowControl> {
         )),
     }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "ports_real_tests.rs"]
+mod io_tests;
 
 #[cfg(test)]
 mod tests {
