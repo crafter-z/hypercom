@@ -57,6 +57,14 @@ async function click(label: string) {
 }
 
 describe('update dialog transactions', () => {
+  it('keeps the release-notes and action regions present for responsive layout styling', () => {
+    expect(container.querySelector('.update-dialog')).not.toBeNull();
+    expect(container.querySelector('.update-changelog')).not.toBeNull();
+    expect(container.querySelector('.update-changelog-body')?.textContent).toBe('original notes');
+    expect(container.querySelectorAll('.update-actions > button')).toHaveLength(4);
+    expect(container.querySelector('.update-release-link')).not.toBeNull();
+  });
+
   it('retains committed mode and dialog after never-remind save failure, then permits a successful retry', async () => {
     saveConfig.mockResolvedValueOnce(false).mockImplementationOnce(async () => { commitUpdateMode('none', true); return true; });
     await click('update.never');

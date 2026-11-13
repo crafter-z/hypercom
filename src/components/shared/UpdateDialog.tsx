@@ -134,7 +134,7 @@ const UpdateDialog: React.FC = () => {
     // issue #12 复审：下载中遮罩点击不可关闭——X 与三个动作按钮都 disabled，
     // 遮罩是同一意图的漏网之口（否则点外面关弹窗，后台装完仍无预警 relaunch）。
     <div className="modal-overlay" onClick={busy ? undefined : remindLater}>
-      <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-dialog-compact update-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('update.title')}</h3>
           <button className="btn btn-icon btn-sm" onClick={remindLater} title={t('hotkeys.close')} disabled={busy}>

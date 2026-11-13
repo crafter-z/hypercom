@@ -2,9 +2,21 @@
  * 更新弹窗独立样式——方案 M1.4 原定 styles/update-dialog.css；首轮实现误落
  * config-modal.css，复审迁回（组件 CSS 一文件一组件纪律）。
  */
+.update-dialog {
+  /* Keep the dialog inside the viewport instead of letting the action row
+   * determine an oversized intrinsic width. */
+  width: min(640px, calc(100vw - 32px));
+  min-width: 0;
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .update-dialog-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 6px;
 }
@@ -53,6 +65,7 @@
   border-bottom: 1px solid var(--border-color);
   position: sticky;
   top: 0;
+  z-index: 1;
   background: var(--bg-secondary);
 }
 
@@ -63,6 +76,7 @@
   font-size: 12.5px;
   line-height: 1.6;
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-family: inherit;
   color: var(--text-primary);
   display: flex;
@@ -127,18 +141,56 @@
 }
 
 .update-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);
+  align-items: center;
   gap: 8px;
-  justify-content: flex-end;
 }
 
 .update-actions .btn {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
   gap: 6px;
 }
 
 /* issue #12 二轮：发布页链接靠左（三个动作按钮仍靠右） */
 .update-release-link {
-  margin-right: auto;
+  justify-self: start;
+  margin-right: 0;
+}
+
+/* The dialog is intentionally usable in a narrow popout/window as well as the
+ * main window. Stack actions before their labels become unreadable or clipped. */
+@media (max-width: 560px) {
+  .update-dialog {
+    width: calc(100vw - 24px);
+    padding: 16px;
+  }
+
+  .update-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .update-actions .btn {
+    width: 100%;
+    min-height: 30px;
+    white-space: normal;
+    text-align: center;
+  }
+
+  .update-release-link {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+}
+
+@media (max-width: 380px) {
+  .update-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .update-release-link {
+    grid-column: auto;
+  }
 }
