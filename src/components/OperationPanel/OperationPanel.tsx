@@ -107,6 +107,10 @@ const OperationPanel: React.FC = () => {
   // 参数变更时实时应用到后端（已连接）+ 回写端口字段同步显示 + 供重连使用。
   const paramsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAppliedRef = useRef<{ portId: string; frameKey: string; fullKey: string } | null>(null);
+  // Keep a frame update pending across debounce cancellations (for example, a
+  // DTR toggle immediately after changing baud rate must not swallow the frame
+  // update whose timer was replaced).
+  const pendingFrameSyncRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (paramsSyncTimerRef.current) {
@@ -129,20 +133,51 @@ const OperationPanel: React.FC = () => {
         handshake: port?.handshake ?? handshake,
       };
       useOperationStore.getState().setOpState(loaded);
+      const loadedFrameKey = `${loaded.baudRate}-${loaded.dataBits}-${loaded.parity}-${loaded.stopBits}-${loaded.handshake}`;
+      pendingFrameSyncRef.current = null;
       lastAppliedRef.current = {
         portId: activePortId,
-        frameKey: `${loaded.baudRate}-${loaded.dataBits}-${loaded.parity}-${loaded.stopBits}-${loaded.handshake}`,
-        fullKey: `${loaded.baudRate}-${loaded.dataBits}-${loaded.parity}-${loaded.stopBits}-${loaded.handshake}-${dtr}-${rts}`,
+        frameKey: loadedFrameKey,
+        fullKey: `${loadedFrameKey}-${dtr}-${rts}`,
       };
+      // DTR/RTS are global UI controls, but already-open ports may have been
+      // opened before the global value changed. Re-apply the current control
+      // lines when focusing a connected port so switching tabs cannot leave
+      // the selected port with stale modem-line state.
+      if (port?.status === 'connected' && port.type === 'real') {
+        const expectedGeneration = port.connectionGeneration;
+        paramsSyncTimerRef.current = setTimeout(() => {
+          if (getActivePortId(useAppStore.getState()) !== activePortId || isFlowRunning(activePortId)) return;
+          const current = useAppStore.getState().ports.find(item => item.id === activePortId);
+          if (current?.status !== 'connected' || current.connectionGeneration !== expectedGeneration) return;
+          serialService.setFlowControl(activePortId, dtr, rts, expectedGeneration).catch(e => {
+            console.debug('[OperationPanel] setFlowControl failed:', e);
+            notifyError(e);
+          });
+        }, 300);
+      }
       return;
     }
-    if (fullKey === lastAppliedRef.current.fullKey) return;
+    if (fullKey === lastAppliedRef.current.fullKey) {
+      // Opening a port applies the current frame values in its OpenPortArgs.
+      // Do not carry a disconnected-session debounce marker into the first
+      // DTR/RTS-only change after reconnecting.
+      if (isConnected) pendingFrameSyncRef.current = null;
+      return;
+    }
 
     // Flow/quick-command executors publish confirmed port metadata before
     // mirroring controls. Adopt that confirmation instead of sending the same
     // params again 300 ms later (which could overwrite a subsequent step).
     const confirmed = useAppStore.getState().ports.find(port => port.id === activePortId);
-    const confirmedFrameKey = confirmed && `${confirmed.baudRate ?? baudRate}-${confirmed.dataBits ?? dataBits}-${confirmed.parity ?? parity}-${confirmed.stopBits ?? stopBits}-${confirmed.handshake ?? handshake}`;
+    // SIM/GIT:BASH ports do not expose real serial framing or modem-line
+    // controls. Keep their operation state for a future real-port selection,
+    // but never dispatch unsupported settings to the backend.
+    if (confirmed?.type !== 'real') {
+      pendingFrameSyncRef.current = null;
+      return;
+    }
+    const confirmedFrameKey = `${confirmed.baudRate ?? baudRate}-${confirmed.dataBits ?? dataBits}-${confirmed.parity ?? parity}-${confirmed.stopBits ?? stopBits}-${confirmed.handshake ?? handshake}`;
     const flowControlUnchanged = lastAppliedRef.current.fullKey === `${lastAppliedRef.current.frameKey}-${dtr}-${rts}`;
     const framingUnchanged = lastAppliedRef.current.frameKey.endsWith(`-${dataBits}-${parity}-${stopBits}-${handshake}`);
     if (confirmed?.baudRate !== undefined && confirmedFrameKey === frameKey && framingUnchanged && flowControlUnchanged) {
@@ -151,7 +186,11 @@ const OperationPanel: React.FC = () => {
     }
 
     // 帧参数变化 → 回写端口字段（侧边栏 / 标题栏同步显示；重连时 openPort 读到最新值）。
-    if (frameKey !== lastAppliedRef.current.frameKey) {
+    // DTR/RTS 是独立的设备控制线；仅切换它们时不要重复提交整套帧参数，
+    // 否则会和流控调用同时竞争后端串口句柄锁。
+    const frameChanged = frameKey !== lastAppliedRef.current.frameKey;
+    if (frameChanged) {
+      pendingFrameSyncRef.current = frameKey;
       useAppStore.getState().updatePort(activePortId, { baudRate, dataBits, parity, stopBits, handshake });
     }
     lastAppliedRef.current = { portId: activePortId, frameKey, fullKey };
@@ -159,19 +198,24 @@ const OperationPanel: React.FC = () => {
     // 已连接时实时应用（防抖 300ms 合并连续输入为一次后端调用）。
     if (!isConnected) return;
     const expectedGeneration = confirmed?.connectionGeneration;
+    const frameSyncKey = pendingFrameSyncRef.current;
     paramsSyncTimerRef.current = setTimeout(() => {
       if (getActivePortId(useAppStore.getState()) !== activePortId || isFlowRunning(activePortId)) return;
       const port = useAppStore.getState().ports.find(item => item.id === activePortId);
       if (port?.status !== 'connected' || port.connectionGeneration !== expectedGeneration) return;
-      serialService.setSerialParams(activePortId, {
-        baudRate,
-        dataBits,
-        parity,
-        stopBits,
-        handshake,
-        expectedGeneration,
-      }).catch(e => { console.debug('[OperationPanel] setSerialParams failed:', e); notifyError(e); });
-      serialService.setFlowControl(activePortId, dtr, rts).catch(e => { console.debug('[OperationPanel] setFlowControl failed:', e); notifyError(e); });
+      if (frameSyncKey !== null) {
+        serialService.setSerialParams(activePortId, {
+          baudRate,
+          dataBits,
+          parity,
+          stopBits,
+          handshake,
+          expectedGeneration,
+        }).then(() => {
+          if (pendingFrameSyncRef.current === frameSyncKey) pendingFrameSyncRef.current = null;
+        }).catch(e => { console.debug('[OperationPanel] setSerialParams failed:', e); notifyError(e); });
+      }
+      serialService.setFlowControl(activePortId, dtr, rts, expectedGeneration).catch(e => { console.debug('[OperationPanel] setFlowControl failed:', e); notifyError(e); });
     }, 300);
   }, [activePortId, isConnected, baudRate, dataBits, parity, stopBits, handshake, dtr, rts]);
 

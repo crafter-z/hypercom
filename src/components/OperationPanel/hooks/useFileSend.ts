@@ -35,6 +35,7 @@ interface ActiveTransfer {
   lease: PortTrafficLease;
   countedBytes: number;
   generation: number;
+  connectionGeneration?: number;
 }
 
 function newTransferId(): string {
@@ -45,8 +46,7 @@ export function useFileSend(portId: string | null): FileSendControls {
   const [progress, setProgress] = useState<FileSendProgress | null>(null);
   const activeRef = useRef<ActiveTransfer | null>(null);
   const generationRef = useRef(0);
-  const listenerReadyRef = useRef<Promise<void> | null>(null);
-  const unlistenRef = useRef<(() => void) | null>(null);
+  const ensureListenerRef = useRef<(() => Promise<boolean>) | null>(null);
 
   useEffect(() => {
     const generation = ++generationRef.current;
@@ -68,7 +68,9 @@ export function useFileSend(portId: string | null): FileSendControls {
 
   useEffect(() => {
     let cancelled = false;
-    const setup = eventService.onFileProgress((payload: FileProgressPayload) => {
+    let unlisten: (() => void) | null = null;
+    let pending: Promise<boolean> | null = null;
+    const onProgress = (payload: FileProgressPayload) => {
       if (cancelled) return;
       const active = activeRef.current;
       if (!active || payload.transferId !== active.transferId || payload.portId !== active.portId) return;
@@ -82,43 +84,50 @@ export function useFileSend(portId: string | null): FileSendControls {
       } else {
         setProgress({ sent: payload.sentBytes, total: payload.totalBytes });
       }
-    });
-    listenerReadyRef.current = setup.then((unlisten) => {
-      if (cancelled) {
-        unlisten();
-        return;
-      }
-      unlistenRef.current = unlisten;
-    }).catch((e) => {
-      console.debug('[useFileSend] onFileProgress failed:', e);
-    });
+    };
+    const ensureListener = (): Promise<boolean> => {
+      if (cancelled) return Promise.resolve(false);
+      if (unlisten) return Promise.resolve(true);
+      if (pending) return pending;
+      pending = eventService.onFileProgress(onProgress).then((release) => {
+        if (cancelled) {
+          release();
+          return false;
+        }
+        unlisten = release;
+        return true;
+      }).catch((e) => {
+        console.debug('[useFileSend] onFileProgress failed:', e);
+        // Do not send without progress accounting. A later click can retry a
+        // transient subscription failure rather than staying broken forever.
+        pending = null;
+        return false;
+      });
+      return pending;
+    };
+    ensureListenerRef.current = ensureListener;
+    void ensureListener();
     return () => {
       cancelled = true;
-      unlistenRef.current?.();
-      unlistenRef.current = null;
+      unlisten?.();
+      if (ensureListenerRef.current === ensureListener) ensureListenerRef.current = null;
     };
   }, []);
 
   const startFileSend = useCallback(async () => {
     const id = portId;
     if (!id || activeRef.current) return;
-    if (!isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) {
+    const port = useAppStore.getState().ports.find((p) => p.id === id);
+    if (!isSendablePort(port)) {
       useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.portClosedWarning', portId: id });
       return;
     }
-    // File send bypasses `sendToPort`, so the enhanced-flow lock must be applied
-    // here too — otherwise a flow's parameter switch could race a file transfer.
     if (isFlowRunning(id)) {
       useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.flowBusy', portId: id });
       return;
     }
-    const path = await open({ multiple: false });
-    if (!path || typeof path !== 'string') return;
-    if (portId !== id || !isSendablePort(useAppStore.getState().ports.find((p) => p.id === id))) return;
-    const listenerReady = listenerReadyRef.current;
-    if (!listenerReady) return;
-    await listenerReady;
-    if (portId !== id) return;
+    // Reserve ownership BEFORE the dialog: repeated clicks must not create
+    // competing dialogs, and a tab change must retire the pending selection.
     const generation = generationRef.current;
     const transfer: ActiveTransfer = {
       transferId: newTransferId(),
@@ -126,31 +135,46 @@ export function useFileSend(portId: string | null): FileSendControls {
       lease: trafficStats.capture(id),
       countedBytes: 0,
       generation,
+      connectionGeneration: port?.connectionGeneration,
     };
     activeRef.current = transfer;
-    setProgress({ sent: 0, total: 0 });
+    const ownsTransfer = () => generationRef.current === generation && activeRef.current === transfer;
     try {
-      await serialService.sendFile({
+      const path = await open({ multiple: false });
+      if (!ownsTransfer() || !path || typeof path !== 'string') return;
+      const ready = await ensureListenerRef.current?.();
+      if (!ownsTransfer()) return;
+      if (!ready) throw new Error('Unable to subscribe to file transfer progress');
+      // Both dialog and listener registration are asynchronous. Recheck the
+      // fixed session and the flow lock at the actual I/O boundary, not against
+      // the stale portId captured by this callback.
+      const currentPort = useAppStore.getState().ports.find((p) => p.id === id);
+      if (!isSendablePort(currentPort) || currentPort?.connectionGeneration !== transfer.connectionGeneration ||
+          !trafficStats.isCurrent(id, transfer.lease)) return;
+      if (isFlowRunning(id)) {
+        useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.flowBusy', portId: id });
+        return;
+      }
+      setProgress({ sent: 0, total: 0 });
+      const sentBytes = await serialService.sendFile({
         portId: id,
         transferId: transfer.transferId,
         path,
         chunkSize: 1024,
         delayMs: 10,
-        expectedGeneration: useAppStore.getState().ports.find((p) => p.id === id)?.connectionGeneration,
+        expectedGeneration: transfer.connectionGeneration,
       });
+      // invoke settlement can overtake delivery of the last progress event.
+      // Reconcile the confirmed total before retiring the owner (no double count).
+      const delta = sentBytes - transfer.countedBytes;
+      if (activeRef.current === transfer && delta > 0) trafficStats.addTx(id, delta, transfer.lease);
     } catch (e) {
       if (generationRef.current === generation) {
-        if (activeRef.current?.transferId === transfer.transferId) {
-          activeRef.current = null;
-          setProgress(null);
-        }
-        // The backend emits the final done event before the command returns Err;
-        // by then the listener has already cleared activeRef. Report the failure
-        // for the same generation regardless of that state.
+        // A done event may already have cleared activeRef before invoke rejects.
         notifyError(e);
       }
     } finally {
-      if (activeRef.current?.generation === generation && activeRef.current.transferId === transfer.transferId) {
+      if (activeRef.current === transfer) {
         activeRef.current = null;
         setProgress(null);
       }

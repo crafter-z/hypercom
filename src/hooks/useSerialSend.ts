@@ -136,6 +136,13 @@ export async function sendToPort(
   // Re-check port ownership and caller authority at that exact boundary.
   const authorizeSend = (): void => {
     if (!trafficStats.isCurrent(portId, lease)) throw new Error('Send owner retired');
+    // TTY writes are serialized by ttyService, so a request can sit in its
+    // queue after the initial guard above. Recheck the flow lease at dispatch
+    // time as well; otherwise a flow that starts while a user keystroke is
+    // queued could be bypassed by that delayed write.
+    if (origin !== 'flow' && isFlowRunning(portId)) {
+      throw new Error(`Port ${portId} is occupied by an enhanced flow`);
+    }
     const currentPort = useAppStore.getState().ports.find((item) => item.id === portId);
     if (!isSendablePort(currentPort)) throw new Error(`Send blocked: ${portClosedReason(currentPort)}`);
     beforeSend?.();

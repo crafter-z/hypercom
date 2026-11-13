@@ -34,6 +34,11 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const setOpState = useOperationStore(s => s.setOpState);
   // issue #11：端口工作模式切换（trx=传统收发 | tty=终端模式）
   const activePortId = useAppStore(s => getActivePortId(s));
+  const activePortIsReal = useAppStore((s) => {
+    const portId = getActivePortId(s);
+    return s.ports.find((port) => port.id === portId)?.type === 'real';
+  });
+  const canConfigureSerial = isPortActive && activePortIsReal;
   const setPortMode = useAppStore(s => s.setPortMode);
   const portMode = useAppStore((s) => {
     const portId = getActivePortId(s);
@@ -195,7 +200,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.baudRateLabel')}</span>
-          <select className="select op-param-select" disabled={!isPortActive} value={isCustomBaud ? '__custom__' : baudRate}
+          <select className="select op-param-select" disabled={!canConfigureSerial} value={isCustomBaud ? '__custom__' : baudRate}
             onChange={e => {
               if (e.target.value === '__custom__') { setIsCustomBaud(true); }
               else { setIsCustomBaud(false); setOpState({ baudRate: Number(e.target.value) }); }
@@ -205,7 +210,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
             <option value="__custom__">{t('paramsSection.baudRate.custom')}</option>
           </select>
           {isCustomBaud && (
-            <input className="input op-baud-custom-input" type="number" disabled={!isPortActive}
+            <input className="input op-baud-custom-input" type="number" disabled={!canConfigureSerial}
               value={customBaudInput}
               onChange={e => setCustomBaudInput(e.target.value)}
               onBlur={() => {
@@ -221,7 +226,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.dataBitsLabel')}</span>
-          <select className="select op-param-select" disabled={!isPortActive} value={dataBits} onChange={e => setOpState({ dataBits: Number(e.target.value) as DataBits })}>
+          <select className="select op-param-select" disabled={!canConfigureSerial} value={dataBits} onChange={e => setOpState({ dataBits: Number(e.target.value) as DataBits })}>
             <option value={5}>5</option><option value={6}>6</option><option value={7}>7</option><option value={8}>8</option>
           </select>
         </div>
@@ -230,20 +235,20 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
           {/* 只提供 serialport 实际支持的取值（None/Even/Odd）：后端参数解析对未知
               取值返回 Err 而不是回落默认，列出 Mark/Space 会让「用户选了、打开时报警」
               的错位成为常态。 */}
-          <select className="select op-param-select" disabled={!isPortActive} value={parity} onChange={e => setOpState({ parity: e.target.value as Parity })}>
+          <select className="select op-param-select" disabled={!canConfigureSerial} value={parity} onChange={e => setOpState({ parity: e.target.value as Parity })}>
             <option>None</option><option>Even</option><option>Odd</option>
           </select>
         </div>
         <div className="op-param-item">
           <span className="op-label">{t('paramsSection.stopBitsLabel')}</span>
           {/* 同上：serialport 只支持 One/Two，1.5 位停止位无法下发。 */}
-          <select className="select op-param-select" disabled={!isPortActive} value={stopBits} onChange={e => setOpState({ stopBits: e.target.value as StopBits })}>
+          <select className="select op-param-select" disabled={!canConfigureSerial} value={stopBits} onChange={e => setOpState({ stopBits: e.target.value as StopBits })}>
             <option value="One">1</option><option value="Two">2</option>
           </select>
         </div>
         <div className="op-param-item op-param-item-wide">
           <span className="op-label">{t('paramsSection.handshakeLabel')}</span>
-          <select className="select op-param-select" disabled={!isPortActive} value={handshake} onChange={e => setOpState({ handshake: e.target.value as Handshake })}>
+          <select className="select op-param-select" disabled={!canConfigureSerial} value={handshake} onChange={e => setOpState({ handshake: e.target.value as Handshake })}>
             <option value="None">None</option><option value="XonXoff">Xon/Xoff</option>
             <option value="RequestToSend">RTS/CTS</option><option value="RequestToSendXonXoff">RTS/CTS+Xon/Xoff</option>
           </select>
@@ -251,8 +256,8 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
       </div>
 
       <div className="op-checkbox-row">
-        <label className="checkbox-wrapper"><input type="checkbox" disabled={!isPortActive} checked={dtr} onChange={e => setOpState({ dtr: e.target.checked })} /> {t('paramsSection.dtr')}</label>
-        <label className="checkbox-wrapper"><input type="checkbox" disabled={!isPortActive} checked={rts} onChange={e => setOpState({ rts: e.target.checked })} /> {t('paramsSection.rts')}</label>
+        <label className="checkbox-wrapper"><input type="checkbox" disabled={!canConfigureSerial} checked={dtr} onChange={e => setOpState({ dtr: e.target.checked })} /> {t('paramsSection.dtr')}</label>
+        <label className="checkbox-wrapper"><input type="checkbox" disabled={!canConfigureSerial} checked={rts} onChange={e => setOpState({ rts: e.target.checked })} /> {t('paramsSection.rts')}</label>
         <label className="checkbox-wrapper op-checkbox-compact"><input type="checkbox" disabled={!isPortActive} checked={ignoreEmptyChars} onChange={e => setOpState({ ignoreEmptyChars: e.target.checked })} /> {t('paramsSection.ignoreEmptyChars')}</label>
       </div>
     </div>

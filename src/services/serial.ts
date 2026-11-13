@@ -105,9 +105,9 @@ export const serialService = {
     }});
   },
 
-  /** 运行时切换 DTR/RTS（顶层 camelCase 参数由 Tauri 映射到 Rust 形参）。 */
-  setFlowControl: (portId: string, dtr: boolean, rts: boolean) => {
-    return invoke<void>('set_flow_control', { portId, dtr, rts });
+  /** 运行时切换 DTR/RTS；可携带连接代次拒绝迟到的旧会话更新。 */
+  setFlowControl: (portId: string, dtr: boolean, rts: boolean, expectedGeneration?: number) => {
+    return invoke<void>('set_flow_control', { portId, dtr, rts, expectedGeneration });
   },
 
   attemptReconnect: (portId: string): Promise<void> => {
