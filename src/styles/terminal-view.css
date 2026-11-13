@@ -157,6 +157,42 @@
   flex: none;
 }
 
+/* Optional text-only soft wrap. The fixed mode rules above remain unchanged.
+   Override the existing inline vertical clip without rewriting selected text
+   nodes when toggling wrap. Browser line breaking retains spaces, Unicode and
+   highlight/mark spans; no synthetic newline enters the underlying record. */
+.terminal-view.terminal-word-wrap {
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+.terminal-word-wrap .terminal-line {
+  min-height: var(--terminal-row-height);
+  /* Match the engine's rounded line box even at odd font sizes. This keeps
+     offsetHeight measurements exact instead of accumulating half-pixel drift. */
+  line-height: var(--terminal-row-height);
+  align-items: flex-start;
+  min-width: 0;
+}
+.terminal-word-wrap .terminal-timestamp,
+.terminal-word-wrap .terminal-direction {
+  white-space: nowrap;
+}
+.terminal-word-wrap .terminal-timestamp {
+  flex-shrink: 1;
+  min-width: min(80px, 30%);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.terminal-word-wrap .terminal-content {
+  flex: 1 1 0%;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
 /* ==================== Empty State ==================== */
 .terminal-empty-state {
   flex: 1;

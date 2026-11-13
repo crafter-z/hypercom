@@ -38,6 +38,7 @@ const DEFAULT_TERMINAL_STATE = (): TerminalState => ({
   displayFormat: 'string',
   encoding: 'ASCII',
   hideAsciiNoise: false,
+  wordWrap: false,
   connectedAt: null,
 });
 

@@ -20,6 +20,7 @@ describe('ensureTerminal', () => {
     expect(t.displayFormat).toBe('string');
     expect(t.encoding).toBe('ASCII');
     expect(t.hideAsciiNoise).toBe(false);
+    expect(t.wordWrap).toBe(false);
     expect(t.connectedAt).toBeNull();
   });
 
@@ -61,6 +62,18 @@ describe('setTerminalConfig', () => {
     expect(t.displayFormat).toBe('string'); // unchanged
     expect(t.encoding).toBe('ASCII'); // unchanged
     expect(t.connectedAt).toBeNull(); // unchanged
+  });
+
+  it('keeps word wrap per port across format/encoding/reconnect changes, and resets on release', () => {
+    const store = useTerminalStore.getState();
+    store.ensureTerminal('COM1'); store.ensureTerminal('COM2');
+    store.setTerminalConfig('COM1', { wordWrap: true });
+    store.setTerminalConfig('COM1', { displayFormat: 'hex' });
+    store.setTerminalEncoding('COM1', 'GBK'); store.setTerminalConnectedAt('COM1', 123);
+    expect(useTerminalStore.getState().terminals.COM1.wordWrap).toBe(true);
+    expect(useTerminalStore.getState().terminals.COM2.wordWrap).toBe(false);
+    store.releaseTerminal('COM1'); store.ensureTerminal('COM1');
+    expect(useTerminalStore.getState().terminals.COM1.wordWrap).toBe(false);
   });
 
   it('is no-op for non-existent port', () => {

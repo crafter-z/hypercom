@@ -76,6 +76,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   const showTimestamp = terminalConfig?.showTimestamp ?? liveConfig?.showTimestamp ?? true;
   const displayFormat = terminalConfig?.displayFormat ?? liveConfig?.displayFormat ?? 'string';
   const encoding = terminalConfig?.encoding ?? liveConfig?.encoding ?? 'UTF-8';
+  const wordWrap = terminalConfig?.wordWrap ?? liveConfig?.wordWrap ?? false;
   const hideAsciiNoise = terminalConfig?.hideAsciiNoise ?? liveConfig?.hideAsciiNoise ?? false;
   const effectiveHideAsciiNoise = hideAsciiNoise && displayFormat === 'string';
   const connectedAt = terminalConfig?.connectedAt ?? liveConfig?.connectedAt ?? null;
@@ -86,6 +87,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   const timestampFormat = useAppStore((s) => s.config.timestampFormat);
   const timestampMode = useAppStore((s) => s.config.timestampMode);
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
+  const terminalFont = useAppStore((s) => s.config.terminalFont);
   const highlightRuleSets = useRuleStore((s) => s.highlightRuleSets);
   const protocolTemplates = useRuleStore((s) => s.protocolTemplates);
   const protocolTemplateId = useAppStore((s) => s.ports.find((p) => p.id === portId)?.protocolTemplateId);
@@ -136,6 +138,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   const buildConfig = useCallback(
     (): RendererConfig => ({
       rowHeight: Math.round(terminalFontSize * 1.5),
+      fontFamily: terminalFont,
+      wordWrap,
       showTimestamp: showTimestamp !== false,
       displayFormat: displayFormat ?? 'string',
       encoding: encoding ?? 'UTF-8',
@@ -144,7 +148,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
       highlightRuleSets,
       connectedAt: connectedAt ?? null,
     }),
-    [terminalFontSize, showTimestamp, displayFormat, encoding, timestampFormat, timestampMode, highlightRuleSets, connectedAt],
+    [terminalFontSize, terminalFont, wordWrap, showTimestamp, displayFormat, encoding, timestampFormat, timestampMode, highlightRuleSets, connectedAt],
   );
 
   // Attach the renderer to the container on mount (re-attach on pane move).
@@ -567,6 +571,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         showTimestamp={showTimestamp}
         displayFormat={displayFormat}
         hideAsciiNoise={hideAsciiNoise}
+        wordWrap={wordWrap}
         direction={directionFilter}
         onDirectionChange={setDirectionFilter}
         keyword={keywordInput}

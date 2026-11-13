@@ -171,6 +171,8 @@ export interface TerminalState {
   encoding: Encoding;
   /** Opt-in ASCII-log heuristic; hides noisy RX rows in text view only. */
   hideAsciiNoise?: boolean;
+  /** Optional display-only soft wrap; effective in text mode, never changes records. */
+  wordWrap?: boolean;
   connectedAt: number | null; // 端口连接成功时间戳 (ms)
 }
 

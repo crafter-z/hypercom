@@ -10,7 +10,7 @@
  */
 import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pause, Play, Pin, Clock } from 'lucide-react';
+import { Pause, Play, Pin, Clock, WrapText } from 'lucide-react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import type { DisplayFormat, Encoding, TerminalState } from '../../types';
@@ -40,6 +40,7 @@ interface TerminalFilterBarProps {
   showTimestamp?: boolean;
   displayFormat?: DisplayFormat;
   hideAsciiNoise?: boolean;
+  wordWrap?: boolean;
   direction: DirectionFilter;
   onDirectionChange: (d: DirectionFilter) => void;
   keyword: string;
@@ -64,6 +65,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
   showTimestamp,
   displayFormat,
   hideAsciiNoise = false,
+  wordWrap = false,
   direction,
   onDirectionChange,
   keyword,
@@ -172,6 +174,17 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
             onClick={() => updateConfig({ showTimestamp: !showTimestamp })}
           >
             <Clock size={13} />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn terminal-wrap-toggle${wordWrap && displayFormat === 'string' ? ' active' : ''}`}
+            title={t('terminal.filter.wordWrapHelp')}
+            aria-label={t('terminal.filter.wordWrap')}
+            aria-pressed={wordWrap}
+            disabled={displayFormat !== 'string'}
+            onClick={() => updateConfig({ wordWrap: !wordWrap })}
+          >
+            <WrapText size={13} />
           </button>
           <div className="segmented" role="group">
             <button type="button" className={`segmented-btn${displayFormat === 'hex' ? ' active' : ''}`}

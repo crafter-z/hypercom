@@ -301,7 +301,7 @@ export class TerminalViewportManager {
     // The UI releases the store/group Pin before calling this method as well.
     this.locked = false;
     this.requestRender();
-    this.scrollToSeq(targetSeq, 'center');
+    if (this.renderer) this.renderer.scrollToSeq(targetSeq, 'center', this.buffer, this.buildView(), true);
     return true;
   }
 

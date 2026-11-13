@@ -47,7 +47,7 @@
  *     parked (display:none).
  *     Why: a row whose line was head-trimmed has no data to show.
  *     Symptom: ghost rows holding evicted content, or rows rendered from stale seqs.
- * R4  Spacers carry the off-screen space: both ≥ 0, row-height aligned, both 0
+ * R4  Spacers carry the off-screen space: both ≥ 0 (row-aligned in fixed mode), both 0
  *     when the buffer is empty; the layer's height is never set inline.
  *     Why: flow geometry must come from spacers + rows alone.
  *     Symptom: scrollbar length/scrollTop drift, unreachable content tails.
@@ -92,10 +92,10 @@
  *     Why: Range anchors point at live text nodes.
  *     Symptom: selection dies whenever data streams in, or Select-All pins the
  *     entire DOM.
- * R14 Fixed row height, zero measurement: geometry comes only from
- *     `config.rowHeight` (live-updated on config change), and row content never
- *     wraps (the row box clips vertically; wide lines scroll horizontally).
- *     Why: measurement in the render loop is the classic jump/jitter source.
+ * R14 Default fixed mode: geometry comes only from config.rowHeight, with no
+ *     row measurements. Optional text-only soft wrap uses TerminalWrapLayout:
+ *     batched window measurements, bounded sparse heights, record+offset anchors.
+ *     Never enable CSS wrapping without the corresponding variable geometry.
  *     Symptom: scrollTop/spacer math off by the measured delta; rows overlapping.
  *
  * R15 Row DOM structure mirrors TerminalRow: `.terminal-line` containing an
@@ -122,9 +122,14 @@ import { applyHighlightSets, escapeHtml } from '../highlightEngine';
 import { renderProtocolLine } from '../protocolRenderer';
 import { formatTerminalTimestampAdj, isSameRound } from '../timeFormat';
 import { markSearchMatchesInHtml } from '../terminalSearch';
+import { TerminalWrapLayout, type WrapProjection, type WrapRow } from './TerminalWrapLayout';
 
 export interface RendererConfig {
   rowHeight: number;
+  /** Default false; text-only soft wrap. Omitted by legacy callers. */
+  wordWrap?: boolean;
+  /** Font changes invalidate wrapped heights even when rowHeight is unchanged. */
+  fontFamily?: string;
   showTimestamp: boolean;
   displayFormat: DisplayFormat;
   encoding: Encoding | string;
@@ -189,6 +194,8 @@ interface ActiveRow {
   visIdx: number;
   /** filterVersion at position time — stale rows are recycled on mismatch. */
   version: number;
+  /** A pinned Range postpones, but must not lose, a config/search rewrite. */
+  deferredRedraw?: boolean;
 }
 
 export class TerminalRenderer {
@@ -226,6 +233,26 @@ export class TerminalRenderer {
   private renderedCurrentMatchSeq = -1;
   /** Exact logical seek retained until the physical scrollbar actually moves. */
   private logicalSeek: { physical: number; logical: number } | null = null;
+  private wrapLayout: TerminalWrapLayout | null = null;
+  private get wrapping(): boolean { return !!this.config.wordWrap && this.config.displayFormat === 'string'; }
+
+  private applyGeometryStyle(): void {
+    this.container?.classList.toggle('terminal-word-wrap', this.wrapping);
+    this.container?.style.setProperty('--terminal-row-height', `${this.config.rowHeight}px`);
+  }
+
+  private wrappedProjection(buffer: TerminalSource, view: TerminalViewState): WrapProjection {
+    const seqs = view.visibleSeqs;
+    const first = seqs ? view.visibleSeqsOffset : buffer.firstSeq;
+    const count = countVisibleSeqs(buffer, seqs, view.visibleSeqsOffset, view.frozenSeq);
+    return { source: buffer, seqs, first, count,
+      seqAt: key => key < first || key >= first + count ? null : seqs ? seqs[key] ?? null : key,
+      keyOf: seq => {
+        const index = this.seqToVisIdx(seq, view, buffer, view.frozenSeq);
+        return index === null ? null : first + index;
+      },
+    };
+  }
 
   /** Set by the manager: (re)schedule a rAF render (coalesces scroll/resize). */
   onRenderNeeded: (() => void) | null = null;
@@ -241,6 +268,7 @@ export class TerminalRenderer {
     if (this.container === container) return;
     this.detach();
     this.container = container;
+    this.applyGeometryStyle();
     const layer = document.createElement('div');
     layer.className = 'terminal-content-layer';
     this.headSpacer = document.createElement('div');
@@ -276,6 +304,9 @@ export class TerminalRenderer {
       this.contentLayer.remove();
       this.contentLayer = null;
     }
+    this.container?.classList.remove('terminal-word-wrap');
+    this.container?.style.removeProperty('--terminal-row-height');
+    this.wrapLayout?.detach();
     this.container = null;
     this.headSpacer = null;
     this.tailSpacer = null;
@@ -291,6 +322,7 @@ export class TerminalRenderer {
 
   /** Drop all DOM rows (clear). Pool is discarded — seqs are invalid. */
   clear(): void {
+    this.wrapLayout?.clear();
     this.active.clear();
     this.pool = [];
     this.lastRenderedFirstSeq = -1;
@@ -317,6 +349,7 @@ export class TerminalRenderer {
    *  changes (R13) also drop selection pins — their anchors may be rewritten. */
   invalidate(): void {
     this.clearPins();
+    this.wrapLayout?.clear();
     this.fullRedraw = true;
   }
 
@@ -331,13 +364,19 @@ export class TerminalRenderer {
 
   /** Update the display config; every row is redrawn with the new settings. */
   updateConfig(patch: Partial<RendererConfig>): void {
-    const rowHeightChanged =
-      patch.rowHeight !== undefined && patch.rowHeight !== this.config.rowHeight;
+    const wasWrapping = this.wrapping;
+    const rowHeightChanged = patch.rowHeight !== undefined && patch.rowHeight !== this.config.rowHeight;
+    const changed = Object.entries(patch).some(([key, value]) => value !== this.config[key as keyof RendererConfig]);
     Object.assign(this.config, patch);
-    if (rowHeightChanged) {
-      for (const row of this.active.values()) {
-        row.node.style.height = `${this.config.rowHeight}px`;
-      }
+    if (wasWrapping && !this.wrapping) {
+      this.anchorSeq = this.wrapLayout?.anchor?.seq ?? this.anchorSeq;
+      this.wrapLayout = null; // the fixed fast path retains no measured-height cache
+      this.restoreAnchorOnAttach = this.anchorSeq !== null;
+      this.logicalSeek = null;
+    } else if (this.wrapping && changed) this.wrapLayout?.invalidate();
+    this.applyGeometryStyle();
+    if (rowHeightChanged || wasWrapping !== this.wrapping) {
+      for (const row of this.active.values()) row.node.style.height = this.wrapping ? '' : `${this.config.rowHeight}px`;
     }
     this.fullRedraw = true;
   }
@@ -482,6 +521,7 @@ export class TerminalRenderer {
       tailSpacer.style.height = '0px';
       this.recycleAll();
       this.clearPins();
+      this.wrapLayout?.clear();
       this.anchorSeq = null;
       this.restoreAnchorOnAttach = false;
       this.lastRenderedFirstSeq = firstSeq;
@@ -495,14 +535,24 @@ export class TerminalRenderer {
       tailSpacer.style.height = '0px';
       this.recycleAll();
       this.clearPins();
+      this.wrapLayout?.clear();
       this.anchorSeq = null;
       this.lastRenderedFirstSeq = firstSeq;
       return;
     }
-    const searchChanged =
-      view.searchQuery !== this.renderedSearchQuery ||
-      view.searchCaseSensitive !== this.renderedSearchCaseSensitive;
-    const currentMatchChanged = view.currentMatchSeq !== this.renderedCurrentMatchSeq;
+    if (this.wrapping) {
+      const layout = this.wrapLayout ??= new TerminalWrapLayout(rowHeight, this.anchorSeq);
+      layout.render(container, headSpacer, tailSpacer, this.wrappedProjection(buffer, view), rowHeight,
+        view.followEnabled && !view.gestureActive && view.frozenSeq === null,
+        view.gestureActive, this.hasLiveSelection(),
+        (first, last) => this.renderWindow(buffer, view, frozen, first, last, true)!,
+        () => this.onRenderNeeded?.());
+      this.anchorSeq = layout.anchor?.seq ?? this.anchorSeq;
+      this.lastRenderedFirstSeq = firstSeq;
+      this.restoreAnchorOnAttach = false;
+      this.suppressAnchorRestore = false;
+      return;
+    }
     // Bound CSS heights independently of record count/font size. Only spacers
     // are compressed; rows stay normal fixed-height flow children (R1/R14).
     const physicalCount = physicalRowCount(baseCount, rowHeight);
@@ -578,66 +628,7 @@ export class TerminalRenderer {
     headSpacer.style.height = `${compressedHead}px`;
     tailSpacer.style.height = `${Math.max(0, totalHeight - compressedHead - (lastVisIdx - firstVisIdx + 1) * rowHeight)}px`;
 
-    // 3. Stale pass (window bounds are now final): rows outside the window
-    //    or behind the filter version recycle — unless pinned, in which case
-    //    they park (display:none, same parent).
-    for (const [seq, row] of this.active) {
-      const visIdx = this.seqToVisIdx(seq, view, buffer, frozen);
-      const stale =
-        visIdx === null ||
-        row.version !== this.filterVersion ||
-        visIdx < firstVisIdx ||
-        visIdx > lastVisIdx;
-      if (!stale) continue;
-      if (this.seqInSelection(seq)) {
-        row.node.style.display = 'none';
-      } else {
-        this.recycle(row);
-        this.active.delete(seq);
-      }
-    }
-
-    // 4. Materialize the window rows in flow order. New rows insert before
-    //    the first visible row with a larger visIdx (or the tail spacer);
-    //    parked rows re-entering the window just clear display:none — their
-    //    parked flow slot IS their correct slot, no node move.
-    for (let visIdx = firstVisIdx; visIdx <= lastVisIdx; visIdx++) {
-      const seq = this.visIdxToSeq(visIdx, view, buffer, frozen);
-      if (seq === null) continue;
-      const line = buffer.getBySeq(seq);
-      if (!line) continue;
-      let row = this.active.get(seq);
-      const isNew = !row;
-      if (!row) {
-        row = this.acquireRow();
-        this.active.set(seq, row);
-        row.node.style.height = `${this.config.rowHeight}px`;
-        const anchor = this.findFlowAnchor(visIdx, view, buffer, frozen);
-        layer.insertBefore(row.node, anchor);
-      }
-      row.seq = seq;
-      row.visIdx = visIdx;
-      row.version = this.filterVersion;
-      row.node.style.display = '';
-      row.node.dataset.seq = String(seq);
-      // Pinned rows skip content rewrites while the selection lives: any
-      // innerHTML replacement rebuilds the anchor text node and kills the
-      // Range. Content refreshes on the pass after the selection clears.
-      if (
-        !this.seqInSelection(seq) &&
-        (isNew || this.fullRedraw || searchChanged ||
-          (currentMatchChanged && (seq === this.renderedCurrentMatchSeq || seq === view.currentMatchSeq)) ||
-          row.node.dataset.renderedSeq !== String(seq))
-      ) {
-        this.writeRowContent(row.node, line, seq, buffer, view);
-        row.node.dataset.renderedSeq = String(seq);
-      }
-      this.applyRowClasses(row.node, seq, view);
-    }
-    this.fullRedraw = false;
-    this.renderedSearchQuery = view.searchQuery;
-    this.renderedSearchCaseSensitive = view.searchCaseSensitive;
-    this.renderedCurrentMatchSeq = view.currentMatchSeq;
+    this.renderWindow(buffer, view, frozen, firstVisIdx, lastVisIdx);
 
     // 5. Follow pin — same frame, zero latency. Account for the container's
     //    padding (8px top/bottom on .terminal-view) so the last row is fully
@@ -660,6 +651,55 @@ export class TerminalRenderer {
       this.anchorSeq = this.visIdxToSeq(topVisIdx, view, buffer, frozen);
     }
     this.lastRenderedFirstSeq = firstSeq;
+  }
+
+  /** Shared row lifecycle: geometry modes never duplicate DOM/selection logic.
+   * Fixed mode does not allocate a measurement list or perform row layout reads. */
+  private renderWindow(buffer: TerminalSource, view: TerminalViewState, frozen: number,
+    firstVisIdx: number, lastVisIdx: number, measure = false): WrapRow[] | null {
+    const rows: WrapRow[] | null = measure ? [] : null;
+    const searchChanged = view.searchQuery !== this.renderedSearchQuery || view.searchCaseSensitive !== this.renderedSearchCaseSensitive;
+    const currentMatchChanged = view.currentMatchSeq !== this.renderedCurrentMatchSeq;
+    for (const [seq, row] of this.active) {
+      const visIdx = this.seqToVisIdx(seq, view, buffer, frozen);
+      if (visIdx !== null && row.version === this.filterVersion && visIdx >= firstVisIdx && visIdx <= lastVisIdx) continue;
+      if (this.seqInSelection(seq)) row.node.style.display = 'none';
+      else { this.recycle(row); this.active.delete(seq); }
+    }
+    for (let visIdx = firstVisIdx; visIdx <= lastVisIdx; visIdx++) {
+      const seq = this.visIdxToSeq(visIdx, view, buffer, frozen);
+      if (seq === null) continue;
+      const line = buffer.getBySeq(seq);
+      if (!line) continue;
+      let row = this.active.get(seq);
+      const isNew = !row;
+      if (!row) {
+        row = this.acquireRow();
+        this.active.set(seq, row);
+        row.node.style.height = this.wrapping ? '' : `${this.config.rowHeight}px`;
+        this.contentLayer!.insertBefore(row.node, this.findFlowAnchor(visIdx, view, buffer, frozen));
+      }
+      row.seq = seq; row.visIdx = visIdx; row.version = this.filterVersion;
+      row.node.style.display = '';
+      row.node.dataset.seq = String(seq);
+      // Never replace a live Range's text nodes, re-parent, or move parked pins.
+      const needsWrite = isNew || row.deferredRedraw || this.fullRedraw || searchChanged ||
+        (currentMatchChanged && (seq === this.renderedCurrentMatchSeq || seq === view.currentMatchSeq)) ||
+        row.node.dataset.renderedSeq !== String(seq);
+      const dirty = !!needsWrite && !this.seqInSelection(seq);
+      row.deferredRedraw = !!needsWrite && !dirty;
+      if (dirty) {
+        this.writeRowContent(row.node, line, seq, buffer, view);
+        row.node.dataset.renderedSeq = String(seq);
+      }
+      this.applyRowClasses(row.node, seq, view);
+      rows?.push({ key: (view.visibleSeqs ? view.visibleSeqsOffset : buffer.firstSeq) + visIdx, node: row.node, dirty });
+    }
+    this.fullRedraw = false;
+    this.renderedSearchQuery = view.searchQuery;
+    this.renderedSearchCaseSensitive = view.searchCaseSensitive;
+    this.renderedCurrentMatchSeq = view.currentMatchSeq;
+    return rows;
   }
 
   /** First visible sibling that should come AFTER a row at `visIdx` — the
@@ -700,17 +740,22 @@ export class TerminalRenderer {
     align: 'start' | 'center' | 'end',
     buffer: TerminalSource,
     view: TerminalViewState,
+    revealSearch = false,
   ): void {
-    if (this.positionToSeq(seq, align, buffer, view)) this.render(buffer, view);
+    if (this.positionToSeq(seq, align, buffer, view, revealSearch)) this.render(buffer, view);
   }
 
   /** Position only: manager combines this with exactly one scheduled render. */
-  positionToSeq(seq: number, align: 'start' | 'center' | 'end', buffer: TerminalSource, view: TerminalViewState): boolean {
+  positionToSeq(seq: number, align: 'start' | 'center' | 'end', buffer: TerminalSource, view: TerminalViewState, revealSearch = false): boolean {
     const container = this.container;
     const rowHeight = this.config.rowHeight;
     if (!container || container.clientHeight <= 0 || !buffer.getBySeq(seq)) return false;
     const visIdx = this.seqToVisIdx(seq, view, buffer, view.frozenSeq);
     if (visIdx === null) return false;
+    if (this.wrapping) {
+      (this.wrapLayout ??= new TerminalWrapLayout(rowHeight, this.anchorSeq)).seek(seq, align, revealSearch);
+      return true;
+    }
     const count = countVisibleSeqs(buffer, view.visibleSeqs, view.visibleSeqsOffset, view.frozenSeq);
     let logical = visIdx * rowHeight;
     if (align === 'center') logical -= (container.clientHeight - rowHeight) / 2;
@@ -727,6 +772,7 @@ export class TerminalRenderer {
   readGeometryAnchor(buffer: TerminalSource, view: TerminalViewState, align: 'start' | 'center' | 'end' = 'center'): TerminalGeometryAnchor | null {
     const container = this.container;
     if (!container || container.clientHeight <= 0) return null;
+    if (this.wrapping) return this.wrapLayout?.readAnchor(container, align) ?? null;
     const count = countVisibleSeqs(buffer, view.visibleSeqs, view.visibleSeqsOffset, view.frozenSeq);
     if (!count) return null;
     const height = this.config.rowHeight;
