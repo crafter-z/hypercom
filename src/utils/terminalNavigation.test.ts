@@ -61,6 +61,42 @@ describe('explicit terminal navigation lifecycle', () => {
     expect(s.callbacks.cancel).toHaveBeenCalledTimes(1);
   });
 
+  it('new wheel input cancels a quiet commit already queued for the next frame', () => {
+    const s = setup();
+    s.lifecycle.begin(); s.top(10); s.lifecycle.scroll(); s.frame();
+    vi.advanceTimersByTime(120); // quiet timer fired, but its final rAF has not run
+    s.lifecycle.begin(); s.top(20); s.anchor(20); s.lifecycle.scroll(); s.frame();
+    expect(s.callbacks.commit).not.toHaveBeenCalled();
+    expect(s.callbacks.preview).toHaveBeenLastCalledWith(20);
+    vi.advanceTimersByTime(119); s.frame();
+    expect(s.callbacks.commit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1); s.frame();
+    expect(s.callbacks.commit).toHaveBeenCalledExactlyOnceWith(20);
+  });
+
+  it('a trailing native scroll renews quiet time after the old timer already fired', () => {
+    const s = setup();
+    s.lifecycle.begin(); s.top(10); s.lifecycle.scroll(); s.frame();
+    vi.advanceTimersByTime(120);
+    s.top(30); s.anchor(30); s.lifecycle.scroll(); s.frame();
+    expect(s.callbacks.commit).not.toHaveBeenCalled();
+    expect(s.callbacks.preview).toHaveBeenLastCalledWith(30);
+    vi.advanceTimersByTime(120); s.frame();
+    expect(s.callbacks.commit).toHaveBeenCalledExactlyOnceWith(30);
+  });
+
+  it('a newly held scrollbar cannot be committed by the previous wheel settle frame', () => {
+    const s = setup();
+    s.lifecycle.begin(); s.top(10); s.lifecycle.scroll(); s.frame();
+    vi.advanceTimersByTime(120);
+    s.lifecycle.begin(7); s.top(40); s.anchor(40); s.lifecycle.scroll(); s.frame();
+    vi.advanceTimersByTime(1000); s.frame();
+    expect(s.callbacks.commit).not.toHaveBeenCalled();
+    expect(s.callbacks.preview).toHaveBeenLastCalledWith(40);
+    s.lifecycle.release(7); vi.advanceTimersByTime(120); s.frame();
+    expect(s.callbacks.commit).toHaveBeenCalledExactlyOnceWith(40);
+  });
+
   it('cancels old settle and source generations without stale commit', () => {
     const s = setup(); s.lifecycle.begin(); s.top(10); s.lifecycle.scroll(); s.frame();
     vi.advanceTimersByTime(120); // final rAF pending

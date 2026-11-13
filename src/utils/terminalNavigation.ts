@@ -27,6 +27,7 @@ export class TerminalNavigationLifecycle<A> {
   private lastAnchor: A | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private frame: number | null = null;
+  private settleFrame: number | null = null;
   private readonly requestFrame: (callback: FrameRequestCallback) => number;
   private readonly cancelFrame: (id: number) => void;
 
@@ -53,7 +54,7 @@ export class TerminalNavigationLifecycle<A> {
       this.held = true;
       this.pointerId = pointerId;
     }
-    clearTimeout(this.timer);
+    this.cancelEnd();
     if (!this.held) this.scheduleEnd();
   }
 
@@ -103,15 +104,26 @@ export class TerminalNavigationLifecycle<A> {
     });
   }
 
-  private scheduleEnd(): void {
+  private cancelEnd(): void {
     clearTimeout(this.timer);
+    this.timer = undefined;
+    // Quiet time can expire before the next display frame. New input must
+    // cancel that queued commit as well as the timer, without losing previews.
+    if (this.settleFrame !== null) this.cancelFrame(this.settleFrame);
+    this.settleFrame = null;
+  }
+
+  private scheduleEnd(): void {
+    this.cancelEnd();
     const generation = this.generation;
     this.timer = setTimeout(() => {
+      this.timer = undefined;
       if (!this.active || this.held || this.disposed || generation !== this.generation) return;
       if (this.frame !== null) this.cancelFrame(this.frame);
-      this.frame = this.requestFrame(() => {
-        this.frame = null;
-        if (!this.active || this.disposed || generation !== this.generation) return;
+      this.frame = null;
+      this.settleFrame = this.requestFrame(() => {
+        this.settleFrame = null;
+        if (!this.active || this.held || this.disposed || generation !== this.generation) return;
         const anchor = this.options.readAnchor() ?? (this.options.canUseLastAnchor?.() !== false ? this.lastAnchor : null);
         this.active = false;
         this.lastAnchor = null;
@@ -123,7 +135,7 @@ export class TerminalNavigationLifecycle<A> {
 
   /** Closing/hiding/changing source invalidates without submitting stale geometry. */
   cancel(): void {
-    clearTimeout(this.timer);
+    this.cancelEnd();
     if (this.frame !== null) this.cancelFrame(this.frame);
     this.frame = null;
     this.generation++;

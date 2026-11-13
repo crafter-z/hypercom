@@ -318,13 +318,40 @@ test.describe('time linking with real scrolling input', () => {
     await dialog.locator('.timeline-policy-field select').selectOption(policy);
     await dialog.locator('footer').getByRole('button', { name: '关闭', exact: true }).click();
     const views = page.locator('.terminal-view:visible');
-    const driver = views.first(), follower = views.nth(1);
+    const driver = views.first();
     // Wait for the creation commit before acquiring a new gesture.
     await expect.poll(() => page.evaluate(async () => {
       const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
       return c.getSnapshot().groups[0].members.every(member => !member.pending && !member.inFlight);
     })).toBe(true);
-    const initial = await follower.evaluate(element => element.scrollTop);
+    // Observe ownership in the page, not after a CDP round trip plus several
+    // display frames: a real wheel gesture legitimately settles after 120 ms.
+    // Keep every owned sample so commits cannot masquerade as live previews.
+    const observation = await page.evaluateHandle(async () => {
+      const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
+      const samples: Array<{
+        owner: string; epoch: number; tier: string; paused: boolean;
+        anchors: Array<number | null | undefined>; followerTop: number; initialFollowerTop: number;
+      }> = [];
+      let epoch = -1, initialFollowerTop = 0;
+      const stop = c.subscribe(() => {
+        const group = c.getSnapshot().groups[0];
+        if (!group?.ownerParticipantId) return;
+        const follower = Array.from(document.querySelectorAll<HTMLElement>('.terminal-view'))
+          .filter(element => element.getClientRects().length > 0)[1];
+        if (group.navigationEpoch !== epoch) {
+          epoch = group.navigationEpoch;
+          initialFollowerTop = follower.scrollTop;
+        }
+        // Exercise the low-cadence branch while the real gesture is owned;
+        // never synthesize source navigation or scroll events.
+        for (let i = 0; i < 3; i++) c.scheduler.observeFrame(33);
+        samples.push({ owner: group.ownerParticipantId, epoch, tier: group.members[1].preview,
+          paused: c.scheduler.previewsPaused, followerTop: follower.scrollTop, initialFollowerTop,
+          anchors: group.memberSlots.map(slot => c.readSlotAnchor(slot)?.timeMs) });
+      });
+      return { samples, stop };
+    });
     const geometry = await driver.evaluate((element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
       const gutter = element.offsetWidth - element.clientWidth;
@@ -338,42 +365,49 @@ test.describe('time linking with real scrolling input', () => {
       await page.mouse.down();
     } else await driver.hover();
     let previousDriverTime = 0;
-    const followerSamples: number[] = [];
     for (const fraction of [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]) {
+      const offset = await observation.evaluate(value => value.samples.length);
       if (input === 'scrollbar') await page.mouse.move(geometry.x, geometry.y + geometry.travel * fraction, { steps: 3 });
       else await page.mouse.wheel(0, 250);
-      const sample = await page.evaluate(async () => {
-        const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        // Deterministically exercise the dev/WebView low-cadence branch without
-        // blocking JS or synthesizing the source navigation/scroll events.
-        for (let i = 0; i < 3; i++) c.scheduler.observeFrame(33);
+      await page.evaluate(async () => {
         for (let frame = 0; frame < 4; frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        const group = c.getSnapshot().groups[0];
-        const anchors = group.memberSlots.map(slot => c.readSlotAnchor(slot)?.timeMs);
-        return { owner: group.ownerParticipantId, tier: group.members[1].preview, anchors, paused: c.scheduler.previewsPaused };
       });
-      expect(sample.owner).not.toBeNull(); // Never accidentally assert after quiet-settle/commit.
+      await expect.poll(() => observation.evaluate((value, { offset, previous }) =>
+        value.samples.slice(offset).some(sample => (sample.anchors[0] ?? 0) > previous),
+      { offset, previous: previousDriverTime })).toBe(true);
+      const samples = await observation.evaluate((value, offset) => value.samples.slice(offset), offset);
+      const sample = samples[samples.length - 1];
+      expect(sample.owner).not.toBeNull(); // Captured during ownership, never after a commit.
       expect(sample.paused).toBe(true);
       expect(sample.anchors[0]).toBeGreaterThan(previousDriverTime);
       previousDriverTime = sample.anchors[0]!;
-      if (policy === 'continuous') {
-        expect(sample.tier).not.toBe('on-release');
-        followerSamples.push(sample.anchors[1]!);
-        if (input === 'scrollbar') {
-          // The thumb remains held: wait for the bounded preview lane to catch
-          // up, never release or demand source/follower paint in one frame.
-          await expect.poll(() => page.evaluate(async () => {
-            const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
-            const group = c.getSnapshot().groups[0];
-            return { owned: group.ownerParticipantId !== null, time: c.readSlotAnchor(group.memberSlots[1])?.timeMs };
-          })).toEqual({ owned: true, time: sample.anchors[0] });
-        }
-      } else {
-        expect(await follower.evaluate(element => element.scrollTop)).toBe(initial);
+      if (policy === 'continuous' && input === 'scrollbar') {
+        // A held thumb cannot quiet-settle; require the bounded preview lane
+        // to catch up before release rather than accepting the final commit.
+        await expect.poll(() => page.evaluate(async () => {
+          const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
+          const group = c.getSnapshot().groups[0];
+          return { owned: group.ownerParticipantId !== null, time: c.readSlotAnchor(group.memberSlots[1])?.timeMs };
+        })).toEqual({ owned: true, time: sample.anchors[0] });
       }
     }
-    if (policy === 'continuous' && input === 'wheel') expect(new Set(followerSamples).size).toBeGreaterThanOrEqual(3);
+    const ownedSamples = await observation.evaluate(value => value.samples);
+    expect(ownedSamples.length).toBeGreaterThan(0);
+    expect(ownedSamples.every(sample => sample.paused)).toBe(true);
+    if (policy === 'continuous') {
+      expect(ownedSamples.every(sample => sample.tier !== 'on-release')).toBe(true);
+      if (input === 'wheel') {
+        const previewSamples = ownedSamples.filter(sample => sample.followerTop !== sample.initialFollowerTop
+          && typeof sample.anchors[1] === 'number');
+        expect(new Set(previewSamples.map(sample => sample.anchors[1])).size).toBeGreaterThanOrEqual(3);
+      }
+    } else {
+      // Each wheel quiet interval may legitimately finish a gesture on a slow
+      // runner. Within every owned epoch the follower must still stay put.
+      expect(ownedSamples.every(sample => sample.followerTop === sample.initialFollowerTop)).toBe(true);
+    }
+    await observation.evaluate(value => value.stop());
+    await observation.dispose();
     if (input === 'scrollbar') await page.mouse.up();
     await expect.poll(() => page.evaluate(async () => {
       const { timelineCoordinator: c } = await import('/src/utils/timeline/coordinator.ts');
