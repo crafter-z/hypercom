@@ -18,6 +18,7 @@ const releaseDirectory = vi.hoisted(() => vi.fn());
 const clipboardWrite = vi.hoisted(() => vi.fn());
 const executeHttp = vi.hoisted(() => vi.fn());
 const executeViewApi = vi.hoisted(() => vi.fn());
+const sendToPort = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/tauri', () => ({
   pluginService: { readPluginAsset: readAsset, writePluginAsset: writeAsset },
@@ -37,7 +38,7 @@ vi.mock('../services/tauri', () => ({
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readText: vi.fn(), writeText: clipboardWrite }));
 vi.mock('./pluginHttp', () => ({ executePluginHttp: executeHttp }));
 vi.mock('./pluginViewRuntime', () => ({ executePluginViewApi: executeViewApi }));
-vi.mock('../hooks/useSerialSend', () => ({ sendToPort: vi.fn() }));
+vi.mock('../hooks/useSerialSend', () => ({ sendToPort }));
 vi.mock('./pluginObserver', () => ({ addPluginRxObserver: vi.fn() }));
 vi.mock('./terminal/viewportManager', () => ({ appendTerminalLine: vi.fn() }));
 vi.mock('./pluginPanelRegistry', () => ({
@@ -66,6 +67,7 @@ beforeEach(() => {
   clipboardWrite.mockReset();
   executeHttp.mockReset();
   executeViewApi.mockReset();
+  sendToPort.mockReset();
   writeAsset.mockResolvedValue(undefined);
   createDirectory.mockResolvedValue(null);
   removeDirectoryEntry.mockResolvedValue(null);
