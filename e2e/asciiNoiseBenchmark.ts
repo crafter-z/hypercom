@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 /** Opt-in observational benchmark. Uses real app hooks/queue/DOM with mocked
  * serial:data delivery; it does NOT measure Rust, native IPC, disk IO or a UART.
  * Run alone with --workers=1; no CI performance thresholds. */
-export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo) {
+export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo, feature: 'noise' | 'wrap' = 'noise') {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Performance.enable');
   await page.locator('.port-item-name', { hasText: 'COM1' }).dblclick();
@@ -43,11 +43,13 @@ export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo) {
     { name: 'mixed-search-4Mbaud', kind: 'mixed', rowBytes: 64, bytesPerSecond: 400000, search: true },
     { name: 'ascii-long-4Mbaud', kind: 'ascii', rowBytes: 4096, bytesPerSecond: 400000, search: false },
     { name: 'ascii-stress-4MBps', kind: 'ascii', rowBytes: 64, bytesPerSecond: 4000000, search: false },
-  ];
+    ...(feature === 'wrap' ? [{ name: 'ascii-search-4Mbaud', kind: 'ascii', rowBytes: 64, bytesPerSecond: 400000, search: true }] : []),
+  ].filter(spec => feature === 'noise' || spec.kind === 'ascii');
   const streaming: any[] = [];
   // One short throw-away run loads/transforms modules and warms actual hot paths.
-  await page.evaluate(async () => {
+  await page.evaluate(async feature => {
     const state = (window as any).__ASCII_BENCH__;
+    state.store.getState().setTerminalConfig('COM1', { wordWrap: feature === 'wrap' });
     const data = Array.from(new TextEncoder().encode(('INFO warmup ready\n').repeat(100)));
     for (let i = 0; i < 30; i++) {
       window.__TAURI_INTERNALS__.dispatchEvent('serial:data', { port_id: 'COM1', timestamp: Date.now(), direction: 'RX', data, is_hex: false });
@@ -55,20 +57,20 @@ export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo) {
     }
     state.pipeline.flushBeforeSend('COM1');
     state.manager.clear();
-  });
+  }, feature);
 
   for (const spec of cases) {
     for (let repeat = 0; repeat < 3; repeat++) {
       // Alternate order to reduce JIT/thermal/background ordering bias.
       for (const enabled of repeat % 2 ? [true, false] : [false, true]) {
-        await page.evaluate(({ enabled, search }) => {
+        await page.evaluate(({ enabled, search, feature }) => {
           const state = (window as any).__ASCII_BENCH__;
           state.pipeline.flushBeforeSend('COM1');
           state.manager.clear();
           state.manager.applyLimits({ maxLines: 100000 });
-          state.store.getState().setTerminalConfig('COM1', { hideAsciiNoise: enabled, displayFormat: 'string' });
+          state.store.getState().setTerminalConfig('COM1', { hideAsciiNoise: feature === 'noise' && enabled, wordWrap: feature === 'wrap' && enabled, displayFormat: 'string' });
           state.manager.setSearch(search, search ? 'INFO' : '', false);
-        }, { enabled, search: spec.search });
+        }, { enabled, search: spec.search, feature });
         await waitReady();
         // Allocate deterministic source chunks BEFORE timing, separate from RX allocations.
         await page.evaluate(spec => {
@@ -158,7 +160,7 @@ export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo) {
         expect(row.assembled, 'no RX rows dropped by the frontend queue').toBe(row.expectedRows);
         expect(row.domRows).toBeLessThan(100);
         streaming.push(row);
-        console.log('ASCII_STREAM_BENCH', JSON.stringify(row));
+        console.log(feature === 'wrap' ? 'WRAP_STREAM_BENCH' : 'ASCII_STREAM_BENCH', JSON.stringify(row));
       }
     }
   }
@@ -166,7 +168,7 @@ export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo) {
   const switching: any[] = [];
   // Isolated managers use actual buffer/filter/time index but no DOM/React, so
   // settle time and synchronous call time can be separated from rendering.
-  for (const count of [100000, 1000000]) {
+  for (const count of feature === 'noise' ? [100000, 1000000] : []) {
     for (const kind of ['ascii', 'mixed']) {
       const sample = await page.evaluate(async ({ count, kind }) => {
         const root = '/src/';
@@ -208,11 +210,13 @@ export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo) {
       console.log('ASCII_SWITCH_BENCH', JSON.stringify(sample));
     }
   }
-  const artifact = { recordedAt: new Date().toISOString(), browserVersion: page.context().browser()?.version(),
-    method: 'Actual app RX hooks + pipeline + DOM, synthetic 1024-byte serial:data events; 2s/sample, 3 paired runs, alternating order; CDP main-thread TaskDuration, not system CPU or native WebView2 FPS. History isolated manager, 3 enable/disable pairs. No native IO/IPC/logging.',
+  const artifact = { feature, recordedAt: new Date().toISOString(), browserVersion: page.context().browser()?.version(),
+    method: 'Actual app RX hooks + pipeline + DOM, synthetic 1024-byte serial:data events; 2s/sample, 3 paired runs, alternating order; CDP main-thread TaskDuration, not system CPU or native WebView2 FPS. No native IO/IPC/logging.',
+    historyMethod: feature === 'noise' ? 'Isolated manager, 3 enable/disable pairs.' : 'Not sampled here; million-record wrap geometry has separate browser regressions.',
     streaming, switching };
-  await writeFile(info.outputPath('ascii-noise-results.json'), JSON.stringify(artifact, null, 2));
-  await info.attach('ascii-noise-results', { body: JSON.stringify(artifact), contentType: 'application/json' });
+  const name = feature === 'wrap' ? 'word-wrap-results' : 'ascii-noise-results';
+  await writeFile(info.outputPath(`${name}.json`), JSON.stringify(artifact, null, 2));
+  await info.attach(name, { body: JSON.stringify(artifact), contentType: 'application/json' });
   await cdp.detach();
   return artifact;
 }

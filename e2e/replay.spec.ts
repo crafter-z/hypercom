@@ -54,6 +54,11 @@ test('independent multi-track import, shared terminal search and paused transpor
   });
   expect(imported).toEqual({count:2,ports:0,target:null,shared:true});
   const view = page.locator('.serial-content-slot').filter({ has: page.locator('.terminal-line', { hasText: 'track-a-start' }) });
+  const wrap = page.getByRole('button', { name: '自动换行', exact: true }).filter({ visible: true });
+  await expect(wrap).toHaveAttribute('aria-pressed', 'false');
+  await wrap.click();
+  await expect(page.locator('.terminal-view:visible')).toHaveClass(/terminal-word-wrap/);
+  // Search and the transport below now exercise the shared soft-wrap geometry.
   // Search is the existing shared TerminalView Ctrl+F path, not a replay renderer.
   await page.locator('.terminal-line').filter({ hasText: 'track-a-start' }).click();
   await page.keyboard.press('Control+f');

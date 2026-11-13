@@ -221,22 +221,23 @@ test('a clock-domain mismatch stays a behavioural fallback instead of a panel pr
   await dialog.screenshot({ path: '.npm-cache/timeline-clock-mismatch-dark.png', animations: 'disabled' });
 });
 
-test('linked Pins preserve existing follow and keep the latest RX row visible after every append frame', async ({ page }) => {
+for (const wordWrap of [false, true]) {
+test(`linked Pins preserve existing follow and keep the latest RX row visible after every append frame (${wordWrap ? 'mixed soft wrap' : 'fixed'})`, async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(mock);
   await page.goto('/');
   await expect(page.locator('.app-root')).toBeVisible();
-  await page.evaluate(async () => {
+  await page.evaluate(async wordWrap => {
     const { useAppStore } = await import('/src/stores/useAppStore.ts');
     const { useTerminalStore } = await import('/src/stores/useTerminalStore.ts');
     const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
     const state = useAppStore.getState();
     state.openTab('COM1'); state.openTab('COM2'); state.splitPane('vertical');
     for (const port of ['COM1', 'COM2']) {
-      useTerminalStore.getState().setTerminalConfig(port, { scrollLocked: true });
+      useTerminalStore.getState().setTerminalConfig(port, { scrollLocked: true, wordWrap: wordWrap && port === 'COM1' });
       getViewportManager(port).appendLines(Array.from({ length: 200 }, (_, i) => ({ timestamp: Date.now() - 200 + i, direction: 'RX', rawData: new TextEncoder().encode('initial ' + i), isHex: false })));
     }
-  });
+  }, wordWrap);
   await expect(page.getByTitle('滚动锁定', { exact: true }).filter({ visible: true })).toHaveCount(2);
   await page.locator('.timeline-entry:visible').first().click();
   const dialog = page.getByRole('dialog', { name: '时间联动', exact: true });
@@ -250,7 +251,7 @@ test('linked Pins preserve existing follow and keep the latest RX row visible af
     const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
     const results: { gap: number; latestVisible: boolean }[] = [];
     for (let batch = 0; batch < 12; batch++) {
-      for (const port of ['COM1', 'COM2']) getViewportManager(port).appendLines(Array.from({ length: 40 }, (_, i) => ({ timestamp: Date.now(), direction: 'RX', rawData: new TextEncoder().encode(`batch ${batch} row ${i}`), isHex: false })));
+      for (const port of ['COM1', 'COM2']) getViewportManager(port).appendLines(Array.from({ length: 40 }, (_, i) => ({ timestamp: Date.now(), direction: 'RX', rawData: new TextEncoder().encode(`batch ${batch} row ${i} ` + ' payload 0123456789'.repeat(8)), isHex: false })));
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       [...document.querySelectorAll<HTMLElement>('.terminal-view')].filter(view => view.getClientRects().length).forEach((view, index) => {
         const lastSeq = getViewportManager(index === 0 ? 'COM1' : 'COM2').buffer.lastSeq;
@@ -281,6 +282,8 @@ test('linked Pins preserve existing follow and keep the latest RX row visible af
   await expect(pins.nth(0)).toHaveAttribute('aria-pressed', 'false');
   await expect(pins.nth(1)).toHaveAttribute('aria-pressed', 'false');
 });
+
+}
 
 test.describe('time linking with real scrolling input', () => {
   for (const input of ['scrollbar', 'wheel'] as const) {

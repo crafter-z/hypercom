@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { runAsciiNoiseBenchmark } from './asciiNoiseBenchmark';
+import { runTerminalWrapChecks, runMillionWrapChecks } from './terminalWrapChecks';
 
 /**
  * Mock `window.__TAURI_INTERNALS__` so the React layer renders without the
@@ -264,6 +265,12 @@ test.describe('HyperCom smoke tests', () => {
     test.skip(process.env.HYPERCOM_ASCII_BENCH !== '1', 'Opt-in performance samples, run alone with one worker');
     test.setTimeout(600000);
     await runAsciiNoiseBenchmark(page, info);
+  });
+
+  test('soft wrap performance observational benchmark', async ({ page }, info) => {
+    test.skip(process.env.HYPERCOM_WRAP_BENCH !== '1', 'Opt-in performance samples, run alone with one worker');
+    test.setTimeout(180000);
+    await runAsciiNoiseBenchmark(page, info, 'wrap');
   });
 
   test('RX data still drains while the document is hidden (issue #6-10)', async ({ page }) => {
@@ -1091,6 +1098,40 @@ test.describe('HyperCom smoke tests', () => {
       for (let i = 1; i < sample.positions.length; i++) expect(sample.positions[i].first).toBeGreaterThan(sample.positions[i - 1].first);
       for (const position of sample.positions) { expect(position.count).toBeGreaterThan(0); expect(position.count).toBeLessThan(100); }
     }
+  });
+
+  test('soft wrap: real layout, resize anchors, long-line search, selection and rolling trim', async ({ page }) => {
+    await runTerminalWrapChecks(page);
+  });
+
+  test('soft wrap: million-row geometry stays bounded at font and zoom extremes', async ({ page }) => {
+    await runMillionWrapChecks(page);
+  });
+
+  test('soft wrap: toolbar is opt-in and text-only without altering buffered data', async ({ page }) => {
+    await openCom1Tab(page);
+    await dispatchSerialData(page, 'COM1', 'WRAP ' + 'long-data-'.repeat(250) + '\n');
+    const toggle = page.getByRole('button', { name: '自动换行', exact: true });
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await toggle.click();
+    await expect(page.locator('.terminal-view')).toHaveClass(/terminal-word-wrap/);
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    const content = page.locator('.terminal-line .terminal-content').first();
+    expect(await content.evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThan(40);
+    await page.evaluate(async () => {
+      const { useAppStore } = await import('/src/stores/useAppStore.ts');
+      useAppStore.getState().setConfig({ terminalFontSize: 15 });
+    });
+    await expect.poll(() => content.evaluate(el => getComputedStyle(el).lineHeight)).toBe('23px');
+    await page.getByRole('button', { name: 'HEX', exact: true }).click();
+    await expect(toggle).toBeDisabled();
+    await expect(page.locator('.terminal-view')).not.toHaveClass(/terminal-word-wrap/);
+    await page.locator('.terminal-filter-bar .segmented-btn').nth(1).click();
+    await expect(toggle).toBeEnabled();
+    await expect(page.locator('.terminal-view')).toHaveClass(/terminal-word-wrap/);
+    await toggle.click();
+    await expect(page.locator('.terminal-view')).not.toHaveClass(/terminal-word-wrap/);
+    await expect(content).toContainText('WRAP long-data-');
   });
 
   test('default line ending settings use backend domain values', async ({ page }) => {
