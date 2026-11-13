@@ -78,15 +78,21 @@ export class TerminalWrapLayout {
     // poison geometry. Container ResizeObserver schedules the reveal render.
     if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
     const old = this.projection;
+    const reset = this.dirty || this.width !== container.clientWidth || this.heights.estimate !== rowHeight ||
+      old?.source !== p.source || old?.seqs !== p.seqs || this.listHead !== p.seqs?.[0];
+    // Reflow can shrink the current flow rows before ResizeObserver/render runs.
+    // The browser then clamps scrollTop against those NEW boxes, while our height
+    // index still describes the OLD layout. Never invert that mixed geometry to
+    // replace the saved reading anchor or infer a user request to jump to tail.
+    // Explicit seeks and LIVE follow retain their normal precedence below.
+    const scrolled = !!old && !reset && container.scrollTop !== this.lastTop;
     // A user reaching the physical scrollbar end requests the last record,
     // even before that tail's estimated heights have been measured. Preserve
     // this boundary during correction without enabling persistent LIVE/follow.
-    const atTail = !!old?.count && container.scrollTop !== this.lastTop && container.scrollTop > 0 &&
+    const atTail = scrolled && !!old?.count && container.scrollTop > 0 &&
       container.scrollTop + container.clientHeight >= this.physicalHeight(old) + this.padding.top + this.padding.bottom - 1.5;
-    const current = old && container.scrollTop !== this.lastTop ? this.readAnchor(container) : null;
+    const current = scrolled ? this.readAnchor(container) : null;
     const saved = current ? { seq: current.seq, offset: current.offsetPx } : this.anchor;
-    const reset = this.dirty || this.width !== container.clientWidth || this.heights.estimate !== rowHeight ||
-      old?.source !== p.source || old?.seqs !== p.seqs || this.listHead !== p.seqs?.[0];
     const rangeChanged = old?.first !== p.first || old?.count !== p.count;
     let logical = old ? this.logicalTop(container, old) : container.scrollTop;
     if (reset) {
