@@ -466,9 +466,6 @@ pub fn validate_view_resource_path(path: &str) -> Result<(), String> {
 /// Link or Windows reparse point (junction/symlink). `file_type().is_symlink()`
 /// alone does not report junctions, which are creatable without privileges.
 pub(crate) fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -479,7 +476,7 @@ pub(crate) fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
             return true;
         }
     }
-    false
+    meta.file_type().is_symlink()
 }
 
 /// Windows device names / path aliases. Win32 strips trailing dots/spaces,
