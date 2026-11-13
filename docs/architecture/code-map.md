@@ -30,6 +30,7 @@
 | `utils/textSend.ts` | 弹窗文本模式的纯函数：按 CRLF/LF 切行（裁尾部空行）、HEX 行合法性与间隔收敛，DOM-free 可单测 |
 | `utils/logReplay.ts` | 日志解析（`ParsedLogLine` 允许未知时间，显式 UTC 偏移；不按相邻行 sleep） |
 | `utils/timeline/{coordinator,scheduler,trxTimelineAdapter,ReplayClock}.ts` | app-lifetime 时间组、preview/commit 与代次、每目标最新槽背压、公平预算、TRX 适配与单调播放时钟 |
+| `utils/terminal/{TerminalWrapLayout,TerminalHeightIndex}.ts` | 默认关闭的文本软换行几何：屏内批量测量、稀疏高度前缀索引与固定缓存上限；渲染节点/选区仍由 TerminalRenderer 共用 |
 | `utils/terminal/{TerminalSource,TerminalTimeIndex}.ts` | 实时/回放共用只读行接口、按 `(time,seq)` 维护的可见时间索引 |
 | `utils/replay/{ReplayDocument,replayRuntime}.ts` | 完整只读历史、轨道/分片与资源预算、宿主授权分块导入、共享组时钟及描述恢复 |
 | `MainDisplay/TimelineControls.tsx` + `utils/terminalNavigation.ts` | 链条入口/成员/校时弹窗与显式导航生命周期；整组跟随复用 Pin，无额外组条；不把裸 scroll 当用户驾驶权 |
@@ -45,7 +46,7 @@
 | `getClosingTabIds` | `src/stores/useAppStore.ts` | pure fn | 批量关闭（toLeft/toRight/others）的标签集合，供 `Pane` 的 cleanup 与 store 关闭动作取同一集合 |
 | `getTabPortId` / `getActivePortId` / `findSerialTabByPortId` | `src/stores/useAppStore.ts` | pure fns | 显式 workspace→端口解析；plugin 可绑定 null，无 last-port 回退；串口引擎始终按 portId 索引 |
 | `useOperationStore` | `src/stores/useOperationStore.ts` | Zustand store | serial params + send (NO `op` prefix; NO display state); `cyclicLoops: Record<portId, boolean>` 每端口循环发送开关（`setCyclicLoop` 逐端口启停，替代旧全局 `isLoopSending`） |
-| `useTerminalStore` | `src/stores/useTerminalStore.ts` | Zustand store | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt）；`ensureTerminal` / `setTerminalConfig` / `setTerminalEncoding` / `setTerminalConnectedAt` / `releaseTerminal`；**无行数组、无 Immer**（行缓冲在 viewportManager 环形缓冲区） |
+| `useTerminalStore` | `src/stores/useTerminalStore.ts` | Zustand store | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/hideAsciiNoise/wordWrap/connectedAt）；`ensureTerminal` / `setTerminalConfig` / `setTerminalEncoding` / `setTerminalConnectedAt` / `releaseTerminal`；**无行数组、无 Immer**（行缓冲在 viewportManager 环形缓冲区） |
 | `useRuleStore` | `src/stores/useRuleStore.ts` | Zustand store | 已保存的 highlight/protocol/command/tool/trigger 运行数组及活动命令集；表单不得直接修改运行态，使用 entityEditor |
 | `useSystemStore` | `src/stores/useSystemStore.ts` | Zustand store | systemStatus / trafficStats / simulationMode / ui（+ `clearTrafficStats`） |
 | `releaseUnusedPortState` / `releaseTerminalState` | `src/stores/releaseTerminalState.ts` | pure fns | 最后一份显示/行消费者释放后统一回收 terminals + trafficStats + TX 历史，保留其他插件租约的共享状态 |

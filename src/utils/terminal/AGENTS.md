@@ -7,7 +7,8 @@ TRX 终端的行缓冲与渲染层。**React 不渲染行**——数据到达后
 |文件|职责|测试|
 |---|---|---|
 |`TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits`|`TerminalBuffer.test.ts`|
-|`TerminalRenderer.ts`|直接 DOM 渲染：节点池复用、固定行高零测量、`visibleSeqsOffset`、同帧钉底、过滤/搜索/选区类名|`TerminalRenderer.test.ts`（jsdom）|
+|`TerminalRenderer.ts`|直接 DOM 渲染：节点池复用、默认固定行高零测量、`visibleSeqsOffset`、同帧钉底、过滤/搜索/选区类名；软换行仍复用同一个 `renderWindow`|`TerminalRenderer.test.ts`（jsdom）|
+|`TerminalWrapLayout.ts` / `TerminalHeightIndex.ts`|可选文本软换行：屏内批量测量、有界稀疏累计高度、seq+行内偏移锚点；关闭时不实例化，缓存上限 `TERMINAL_HEIGHT_CACHE_SIZE`|`TerminalWrap.test.ts` / `TerminalHeightIndex.test.ts` + 浏览器 `terminalWrapChecks.ts`|
 |`viewportManager.ts`|实时端口或注入只读来源的枢纽：缓冲 + renderer 生命周期 + 增量/分块过滤搜索 + 时间索引 + rAF scheduled seek + 模块级实时实例注册表|`viewportManager.test.ts` / `TerminalTimeline.test.ts`|
 |`TerminalSource.ts`|只读连续稳定 seq 来源、统一计数与时间语义、物理高度映射、重建预算及 timeline 接口|`TerminalTimeline.test.ts`|
 |`TerminalTimeIndex.ts`|按 (time,seq) 排序的 AVL，序号表引用现有节点、不重复保留时间戳；O(log N) 查询/插入/删除，不假定采集时间按 seq 单调|`TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`|
@@ -36,7 +37,7 @@ TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入�
 2. **frozen null 归一化**：`seqToVisIdx`/`visIdxToSeq` 收到 `frozen = null` 必须归一化为
    `Number.MAX_SAFE_INTEGER`——原生 `seq > null`（null→0）会把所有行判为隐藏。
 3. **流式布局：DOM 顺序 == 视觉顺序由结构保证（issue #18）**：contentLayer =
-   `[headSpacer][行…][tailSpacer]`，行是普通文档流子元素（固定行高），spacer 承载
+   `[headSpacer][行…][tailSpacer]`，行是普通文档流子元素（默认固定行高，软换行时按需测量），spacer 承载
    屏外空间；新行插在「首个 visIdx 更大的可见行」之前（`findFlowAnchor`，停车行占
    真实流槽位、必须作为锚点候选），**没有任何节点被移动**。旧 absolute+translateY
    格子与 `insertRowInOrder`/每帧排序修复（issue #14/#15 一类 bug 的温床）已结构性
@@ -95,6 +96,8 @@ TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入�
     序号表只引用 AVL 节点，不另存重复时间戳；双子节点删除移植后继，禁止复制 key 后使序号引用失配。
     查询一次遍历同时找前驱与上界，返回值快照而非可变节点；裁剪/clear/dispose 仍释放对应条目。
     不要用省常驻内存为由把百万行索引的全量构建延后到首次交互。回归见 `TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`。
+
+14. **软换行是显示几何，不是数据切行**：`wordWrap` 默认关闭、只对文本生效，不能把宽度/视觉续行写回缓冲或 RX。两种模式共用 `renderWindow` 的节点/选区生命周期；未访问历史按固定行高估算，缓存只保留有界增量。resize/字体/编码/时间戳/过滤压缩后保留 seq + 行内偏移，禁止同步遍历排版全历史。搜索跳转须定位记录内 mark；非选区 rewrite 被 pins 推迟时，`deferredRedraw` 必须保留到选区释放。
 
 ## 编辑纪律
 

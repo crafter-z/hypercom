@@ -94,7 +94,7 @@ npm.cmd run tauri dev
 | `useAppStore` | tabs / ports / `paneTree` / config / groups | 五类规则数组是最后确认的持久化基线，普通设置是草稿；插件镜像由后端 revision 排序刷新，树算法在 `utils/paneTree.ts` |
 | `useSystemStore` | `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`（含 `configReady`）+ `clearTrafficStats` | 高频写点集中地（5s 系统轮询 / 每端口 1s 流量 flush / 拖拽 resize），故必须与 `useAppStore` 分开 |
 | `useOperationStore` | serial params + send（**无 `op` 前缀**、无显示态字段）+ `cyclicLoops: Record<portId, boolean>` | 显示态不在此 |
-| `useTerminalStore` | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/connectedAt） | 行缓冲在 viewportManager 环形缓冲区；无行数组、无 Immer、不随数据更新 |
+| `useTerminalStore` | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/hideAsciiNoise/wordWrap/connectedAt） | 行缓冲在 viewportManager 环形缓冲区；无行数组、无 Immer、不随数据更新 |
 | `useRuleStore` | highlightRuleSets / sendCommandSets / protocolTemplates / triggerRules / portToolConfigs + CRUD | **已提交运行态**；编辑草稿由 `utils/entityEditor.ts` 管理，不新增 Zustand store |
 | `useToastStore` | 通知队列（toasts / stashed） | 宿主走 `push` 保留通知；插件走 `pushPlugin`，身份由宿主赋值并应用速率/文本/积压限额，见[通知模块](workspace.md#通知中心--toast) |
 

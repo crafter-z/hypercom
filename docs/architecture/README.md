@@ -19,7 +19,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 └──────────────────────┘        └─────────────────────┘
 ```
 
-> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 780 键。后端 98 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个非 flatten 字段（含 revision）+ entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
+> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 782 键。后端 98 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个非 flatten 字段（含 revision）+ entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
 
 ## 文档清单
 
@@ -28,7 +28,7 @@ HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模�
 | 文档 | 功能模块 | 核心内容 |
 |------|---------|---------|
 | [`serial.md`](serial.md) | 串口管理 | 端口枚举/热插拔/连接生命周期/参数流控/读写句柄分离与发送期限/`PortKind::of` 类别分派 + 虚拟端口门控（SIM:Loopback）/外部工具（flasher）/端口排序（Windows 注册表添加顺序、自然序）与分组 |
-| [`terminal.md`](terminal.md) | 终端显示（TRX） | 方案B 渲染引擎（TerminalBuffer/Renderer/viewportManager）/单一 `maxDisplayLines` 逐行覆盖滚动窗口/TerminalRenderer 渲染契约 R1–R15/滚动锁定/搜索/多编码/高亮/协议字段着色 |
+| [`terminal.md`](terminal.md) | 终端显示（TRX） | 方案B 渲染引擎（TerminalBuffer/Renderer/viewportManager）/单一 `maxDisplayLines` 逐行覆盖滚动窗口/TerminalRenderer 渲染契约 R1–R15/可选文本软换行与有界测量缓存/滚动锁定/搜索/多编码/高亮/协议字段着色 |
 | [`timeline.md`](timeline.md) | 时间联动与只读回放 | 多组时间映射/preview-commit 协议/预算与背压/TRX 与可选插件适配/安全导入独立多轨回放/共享播放时钟/恢复与平台边界 |
 | [`tty.md`](tty.md) | TTY 终端 | xterm.js 完整交互终端/ttyService 管线/TRX↔TTY 切换/模拟终端（git bash pty）/会话跨标签保留 |
 | [`transmission.md`](transmission.md) | 数据收发 | RX 管线（字节组装/rAF 批写/visibility）/TX 发送（回显/时序/守卫）/循环发送（状态机合一 `useSequentialSend`）/快捷发送/命令面板/文件发送/触发引擎 |

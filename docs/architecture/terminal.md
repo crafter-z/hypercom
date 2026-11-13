@@ -7,7 +7,7 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
-| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（固定行高），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、head 前进即锚点恢复（issue #19；`LARGE_TRIM_ROWS` 只保留给 `setLimits` 收缩的大跳变，重新 attach（弹窗回贴/换容器）也按 `anchorSeq` 还原阅读位置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
+| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（默认固定行高，软换行时按需测量），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、head 前进即锚点恢复（issue #19；`LARGE_TRIM_ROWS` 只保留给 `setLimits` 收缩的大跳变，重新 attach（弹窗回贴/换容器）也按 `anchorSeq` 还原阅读位置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
 | `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 实时/只读来源枢纽：renderer 生命周期、增量/可取消分块过滤搜索、frozen 上界、时间索引、rAF latest-wins seek；`subscribe` 仅几何/非 React render 通知，`subscribeReadouts` 只在数据/计数/加载状态变化时刷新壳；搜索 Set 增量维护 |
 | 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`normalizeReceivedTerminalLines`/`releaseViewportManager`/`getViewportManager`，另有 `hasViewportManager`/`getManagerPortIds` 查询（不创建实例）——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键/配置限额同步）一律走这里，**不再碰 useTerminalStore 的行 API** |
 
@@ -60,7 +60,7 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 | R1 | 流序：layer 子节点为 `[headSpacer][按 visIdx 排序的行][tailSpacer]`，DOM 顺序 == 视觉顺序（结构保证）。 |
 | R2 | DOM 有界：至多 窗口行 + OVERSCAN + 停车钉住（+ POOL_CAP 池），逐帧不累积。 |
 | R3 | 每行的 `data-seq` 在活缓冲窗口内，或该行已停车（`display:none`）。 |
-| R4 | spacer 承载屏外空间：两者 ≥0、按行高对齐、空缓冲时为 0；layer 自身高度从不写 inline。 |
+| R4 | spacer 承载屏外空间：两者 ≥0（固定模式按行高对齐）、空缓冲时为 0；layer 自身高度从不写 inline。 |
 | R5 | `data-seq` 存在、数值、唯一；空缓冲 ⇒ 零行。 |
 | R6 | 过滤列表激活时，每个**可见** seq 都是列表成员（停车钉住行豁免）。 |
 | R7 | stale 判定只用**实时** `seqToVisIdx`，不信缓存 visIdx 字段（issue #10）。 |
@@ -70,7 +70,7 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 | R11 | 暂停（`frozenSeq !== null`）抑制跟随钉底，`locked` 仍为 true。 |
 | R12 | 选区钉住：活 Range 触及的行永不换父；`findFlowAnchor` 必须把停车行当锚点候选。 |
 | R13 | 钉住行跳过内容重写；结构性变更（`bumpFilterVersion` / `invalidate` / `clear` / `detach`）清 pins；超 `MAX_PINNED_ROWS` 自弃（不钉住无界 DOM）。 |
-| R14 | 固定行高、零测量：几何只来自 `config.rowHeight`（变更时 `updateConfig` 活更新现存行高，不重排节点），行内容不换行（固定行盒裁剪，宽行横向滚动）。 |
+| R14 | 默认固定行高、零测量；显式文本软换行用 `TerminalWrapLayout` 的屏内批量测量和累计高度，不得只开 CSS 换行而沿用固定几何。 |
 | R15 | 行 DOM 结构镜像 `TerminalRow`：`.terminal-line` + 可选 `.terminal-timestamp`、`.terminal-direction`、`.terminal-content`。 |
 
 ## 滚动锁定 / 快捷跳转
@@ -81,6 +81,26 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 - 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮；时间组内到底与点亮 Pin 共用整组 LIVE 路径并保留时间映射，不兼容 LIVE 时只单次跳底）。
 - 手势 settle：滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定。
 - 已知平台降级：Linux WebKitGTK 原生滚动条可能不派发 pointerdown——滚动条拖拽解锁在该平台静默失效，滚轮/键盘/图钉不受影响。
+
+## 可选文本软换行
+
+- 工具栏 `wordWrap` 默认 false，只在 `displayFormat === 'string'` 生效；HEX/binary 暂时禁用但保留偏好。状态属于 `TerminalState`，不进 AppConfig；重连保留、显示消费者释放后恢复默认。弹出窗初始快照携带显示态，随后独立设置；回放通过自己的 `terminalConfig` 复用相同控件与引擎，TTY 不参与。
+- 关闭时使用原固定行高快速路径，不创建测量索引、不读行高；两种几何共用 `TerminalRenderer.renderWindow` 的 DOM 顺序、节点池、停车 pins 和内容渲染。软换行只改变正文排版，不修改 rawData/content、不添加真实换行、不改变缓冲容量、匹配计数、日志与导出。
+- `TerminalWrapLayout` 只测量窗口与少量像素 overscan 中新增/变更的行。每帧最多三组先写后读的布局批次，少数未收敛窗口交给下一帧；无全历史排版、无每行 ResizeObserver。`TerminalHeightIndex` 以固定行高估算未访问记录，使用稀疏 AVL 前缀增量；只保存至多 `TERMINAL_HEIGHT_CACHE_SIZE=8192` 条增高记录，FIFO 逐出后回到估算。裁剪删除旧键，detach/clear/换源释放缓存，关闭软换行释放几何对象。
+- 几何缓存随可用宽度、字体/字号、编码、显示格式、时间戳与高亮配置失效。过滤数组更换或原地压缩也失效；一般 append 和 head offset 推进不重建全历史。非手势/非选区阅读以 seq + 记录内像素偏移恢复；锚点已淘汰/被过滤则钳制边界。原生选区继续保护文本节点，resize 不重建选中的正文。隐藏标签不测量零宽度，恢复可见后重排。
+- 搜索匹配仍以完整记录为单位，不受视觉折行边界影响；显式命中导航在排版后把记录内首个 `<mark>` 放入视口。时间联动以换行累计几何读取 seq，不同步 scrollTop；钉底和暂停保留原意图契约。拖滚动条到尾时，本次测量修正保留末尾边界，但不擅自开启后续跟随。
+- **估算边界**：未访问或被缓存逐出的记录高度未知，因此滚动条长度/中间比例会随测量修正；不承诺全历史像素坐标不变。屏外 spacer 仍使用有界物理高度映射；单条极长 TX/回放记录本身仍需浏览器完整排版，缓存上限不构成文本长度、布局工作量或总进程内存硬上限。
+- `TerminalWrap.test.ts` / `TerminalHeightIndex.test.ts` 验证确定性几何与缓存不变式；`e2e/terminalWrapChecks.ts` 覆盖真实折行、Unicode/高亮、选区复制、resize/裁剪锚点、长记录内搜索及百万行字号/缩放极值。jsdom 与 Chromium mock IPC 均不能代替最终 WebView 实机验收。
+
+性能观测复用 `e2e/asciiNoiseBenchmark.ts` 的实际 RX hooks → pipeline → manager → DOM 驱动，单独运行：
+
+```powershell
+$env:HYPERCOM_WRAP_BENCH='1'
+npx.cmd playwright test e2e/smoke.spec.ts --grep 'soft wrap performance observational benchmark' --workers=1 --retries=0
+Remove-Item Env:HYPERCOM_WRAP_BENCH
+```
+
+结果为 Playwright 输出目录的 `word-wrap-results.json`，记录关闭/开启各三次、交替顺序的主线程任务时间、帧间隔、长任务、队列积压、DOM 数量与 GC 后堆差；这些是观测而非 CI 耗时门限，不代表 UART/Rust/原生 IPC/日志磁盘吞吐或物理 FPS。
 
 ## 多编码
 
@@ -137,4 +157,4 @@ Remove-Item Env:HYPERCOM_ASCII_BENCH
 
 ## 显示态归属
 
-- 每端口显示态（`scrollLocked`/`displayFormat`/`encoding`/`showTimestamp`/`hideAsciiNoise`）在 `useTerminalStore`，**不在** `useOperationStore`。显示控件（TerminalFilterBar、编码下拉）经 `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding` 写入。行缓冲在 `TerminalViewportManager` 环形缓冲区，store 无行数组、无 Immer、不随数据更新。
+- 每端口显示态（`scrollLocked`/`displayFormat`/`encoding`/`showTimestamp`/`hideAsciiNoise`/`wordWrap`）在 `useTerminalStore`，**不在** `useOperationStore`。显示控件（TerminalFilterBar、编码下拉）经 `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding` 写入。行缓冲在 `TerminalViewportManager` 环形缓冲区，store 无行数组、无 Immer、不随数据更新。
