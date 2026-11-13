@@ -97,7 +97,7 @@ TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入�
     查询一次遍历同时找前驱与上界，返回值快照而非可变节点；裁剪/clear/dispose 仍释放对应条目。
     不要用省常驻内存为由把百万行索引的全量构建延后到首次交互。回归见 `TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`。
 
-14. **软换行是显示几何，不是数据切行**：`wordWrap` 默认关闭、只对文本生效，不能把宽度/视觉续行写回缓冲或 RX。两种模式共用 `renderWindow` 的节点/选区生命周期；未访问历史按固定行高估算，缓存只保留有界增量。resize/字体/编码/时间戳/过滤压缩后保留 seq + 行内偏移，禁止同步遍历排版全历史。搜索跳转须定位记录内 mark；非选区 rewrite 被 pins 推迟时，`deferredRedraw` 必须保留到选区释放。
+14. **软换行是显示几何，不是数据切行**：`wordWrap` 默认关闭、只对文本生效，不能把宽度/视觉续行写回缓冲或 RX。两种模式共用 `renderWindow` 的节点/选区生命周期；未访问历史按固定行高估算，缓存只保留有界增量。resize/字体/编码/时间戳/过滤压缩后保留 seq + 行内偏移；必须先识别几何失效，不能把重排产生的原生 scrollTop 钳制按旧高度反算成新锚点或用户到尾意图。禁止同步遍历排版全历史。搜索跳转须定位记录内 mark；非选区 rewrite 被 pins 推迟时，`deferredRedraw` 必须保留到选区释放。
 
 ## 编辑纪律
 
