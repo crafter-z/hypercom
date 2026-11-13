@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { executeHostApi } from './pluginHostApi';
 import { useToastStore } from '../stores/useToastStore';
 import { useAppStore } from '../stores/useAppStore';
+import type { PluginManifestView } from '../types';
 
 const readAsset = vi.hoisted(() => vi.fn());
 const writeAsset = vi.hoisted(() => vi.fn());
@@ -86,6 +87,75 @@ afterEach(() => {
   testTime = Date.now();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('host API serial sends', () => {
+  const allowedManifest: PluginManifestView = {
+    id: 'api.plugin',
+    name: 'API Plugin',
+    version: '1.0.0',
+    description: '',
+    apiVersion: '1',
+    permissions: ['serial:send'],
+    serial: { portWhitelist: ['COM3', 'COM4'] },
+  };
+
+  it('maps serial.send arguments and returns bytesWritten', async () => {
+    sendToPort.mockResolvedValueOnce(4);
+    const beforeSend = vi.fn();
+
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM3', data: 'A1B2', isHex: true, lineEnding: '\\r\\n',
+    }, allowedManifest, beforeSend)).resolves.toEqual({ bytesWritten: 4 });
+    expect(sendToPort).toHaveBeenCalledWith('COM3', 'A1B2', true, '\\r\\n', true, beforeSend);
+  });
+
+  it('uses the default text mode and line ending when options are omitted', async () => {
+    sendToPort.mockResolvedValueOnce(2);
+
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM4', data: 'PING',
+    }, allowedManifest)).resolves.toEqual({ bytesWritten: 2 });
+    expect(sendToPort).toHaveBeenCalledWith('COM4', 'PING', false, 'None', true, undefined);
+  });
+
+  it('preserves a zero-byte result from the send pipeline', async () => {
+    sendToPort.mockResolvedValueOnce(0);
+
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM3', data: 'PING',
+    }, allowedManifest)).resolves.toEqual({ bytesWritten: 0 });
+    expect(sendToPort).toHaveBeenCalledExactlyOnceWith('COM3', 'PING', false, 'None', true, undefined);
+  });
+
+  it('preserves send failures and rejects invalid arguments before sending', async () => {
+    sendToPort.mockRejectedValueOnce(new Error('port unavailable'));
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM3', data: 'PING',
+    }, allowedManifest)).rejects.toThrow('port unavailable');
+
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM3', data: 'PING', isHex: 'yes',
+    }, allowedManifest)).rejects.toThrow(/isHex/);
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM3', data: 'PING', lineEnding: 'invalid',
+    }, allowedManifest)).rejects.toThrow(/lineEnding/);
+    expect(sendToPort).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a port outside the manifest scope without sending', async () => {
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM9', data: 'PING',
+    }, allowedManifest)).rejects.toThrow(/不在插件 serial\.portWhitelist 内/);
+    expect(sendToPort).not.toHaveBeenCalled();
+  });
+
+  it('rejects the default missing manifest before sending', async () => {
+    await expect(executeHostApi('api.plugin', 'serial.send', {
+      portId: 'COM3', data: 'PING',
+    })).rejects.toThrow(/manifest/);
+    expect(sendToPort).not.toHaveBeenCalled();
+  });
 });
 
 describe('host API asset reads', () => {
