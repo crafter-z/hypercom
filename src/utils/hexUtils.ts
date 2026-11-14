@@ -1,25 +1,42 @@
 /**
- * Hex <-> String conversion utilities.
- * Shared across terminal display and operation panel.
+ * Shared strict HEX input parsing and UTF-8 text conversion.
+ * Terminal conversion, send previews, editor validation and HEX matching use
+ * the same bytes; invalid input is never padded or partially recovered.
  */
 import { bytesToSpacedHex } from './hexFormat';
+import { decodeBytes } from './lineText';
 
-/**
- * Convert a space-separated hex string (e.g. "41 42 43") to a string ("ABC").
- * Empty / whitespace-only input yields "". Tokens that don't match
- * /^[0-9a-fA-F]{1,2}$/ are skipped. Bytes are decoded as UTF-8 so multi-byte
- * sequences (e.g. "E4 B8 AD" -> "中") round-trip correctly.
- */
-export function hexToString(hex: string): string {
-  const trimmed = hex.trim();
-  if (trimmed.length === 0) return '';
+/** Exact whitespace set accepted by Rust `serial/codec.rs::parse_hex_string`.
+ * JS `\s` also accepts Unicode spaces that the backend rejects. */
+const ASCII_WS = /[ \t\n\r\v\f]+/g;
+
+function compactHex(input: string): string {
+  return input.replace(ASCII_WS, '');
+}
+
+function validCompactHex(input: string): boolean {
+  return input.length % 2 === 0 && /^[0-9a-fA-F]*$/.test(input);
+}
+
+/** Empty input is valid; callers requiring a command must check for bytes. */
+export function isValidHexInput(input: string): boolean {
+  return validCompactHex(compactHex(input));
+}
+
+/** Parse spaced or compact HEX. Invalid input returns [] (no padding/skipping). */
+export function parseHexBytes(input: string): number[] {
+  const cleaned = compactHex(input);
+  if (!validCompactHex(cleaned)) return [];
   const bytes: number[] = [];
-  for (const token of trimmed.split(/\s+/)) {
-    if (!/^[0-9a-fA-F]{1,2}$/.test(token)) continue;
-    bytes.push(parseInt(token, 16));
+  for (let i = 0; i < cleaned.length; i += 2) {
+    bytes.push(parseInt(cleaned.slice(i, i + 2), 16));
   }
-  if (bytes.length === 0) return '';
-  return new TextDecoder('utf-8').decode(Uint8Array.from(bytes));
+  return bytes;
+}
+
+/** Decode strict HEX as UTF-8 using the app's shared non-fatal/BOM policy. */
+export function hexToString(hex: string): string {
+  return decodeBytes(Uint8Array.from(parseHexBytes(hex)), 'UTF-8');
 }
 
 /**

@@ -1,6 +1,6 @@
 /**
  * 跨语言 HEX 契约测试（C4/K7）：前端 `hexInputError` / `parseHexBytes`
- * (`src/utils/sendUtils.ts`) 必须与 Rust `serial/codec.rs::parse_hex_string` 同一把尺子：
+ * (`src/utils/hexUtils.ts` 实现，`sendUtils.ts` 兼容导出) 必须与 Rust `serial/codec.rs::parse_hex_string` 同一把尺子：
  *
  * - 奇数个半字节 → 两侧都拒（前端不补零、后端不补齐）
  * - 空输入（含纯空白）→ 两侧都接受为空字节

@@ -5,6 +5,7 @@
  * text mode. DOM-free so they can be unit-tested under vitest's
  * `environment: 'node'`.
  */
+import { parseHexBytes } from './hexUtils';
 
 /**
  * 按 CRLF/LF 切行，并裁掉尾部空行（含纯空白行）。
@@ -20,14 +21,12 @@ export function splitSendLines(text: string): string[] {
 }
 
 /**
- * 是否为合法 HEX 行：去掉全部空白后非空、长度为偶数、且只含 0-9a-fA-F。
+ * 是否为合法 HEX 行：共享严格解析后至少有一个字节（只忽略 ASCII 空白）。
  * 「48 65 6C」/「AABBCC」合法；「4」「zz」「0x48」非法（含奇数半字节或非 HEX 字符）。
  * 空行（空白）不算非法——调用方应先判空。
  */
 export function isValidHexLine(line: string): boolean {
-  const cleaned = line.replace(/\s+/g, '');
-  if (cleaned.length === 0 || cleaned.length % 2 !== 0) return false;
-  return /^[0-9a-fA-F]+$/.test(cleaned);
+  return parseHexBytes(line).length > 0;
 }
 
 /**

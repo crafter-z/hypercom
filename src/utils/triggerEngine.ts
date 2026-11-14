@@ -6,6 +6,7 @@
 
 import type { TriggerRule } from '../types';
 import { bytesToSpacedHex } from './hexFormat';
+import { parseHexBytes } from './hexUtils';
 import { tryCreateSafeRegex } from './safeRegex';
 
 /** 触发匹配结果：匹配到的规则 + 匹配文本 */
@@ -18,11 +19,11 @@ export interface TriggerAction {
 const MAX_PATTERN_LENGTH = 200;
 
 /**
- * 规范化 HEX 模式字符串：去多余空格、转大写
- * 例: "aa  55 bb" → "AA 55 BB"
+ * 规范化 HEX 模式为完整字节：紧凑或空白分隔写法使用同一严格解析。
+ * 例: "aa55bb" / "aa  55 bb" → "AA 55 BB"；非法或空模式 → ""。
  */
 export function normalizeHexPattern(pattern: string): string {
-  return pattern.trim().toUpperCase().replace(/\s+/g, ' ');
+  return bytesToSpacedHex(parseHexBytes(pattern));
 }
 
 /**

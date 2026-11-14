@@ -25,6 +25,15 @@ describe('normalizeHexPattern', () => {
   it('trims leading/trailing spaces', () => {
     expect(normalizeHexPattern('  FF 00  ')).toBe('FF 00');
   });
+
+  it('formats compact and split-nibble input as actual bytes', () => {
+    expect(normalizeHexPattern('aa55')).toBe('AA 55');
+    expect(normalizeHexPattern('a a\t5 5')).toBe('AA 55');
+  });
+
+  it.each(['A', 'A 5 5', 'AA ZZ', 'AA\u00a055'])('rejects malformed byte patterns: %j', pattern => {
+    expect(normalizeHexPattern(pattern)).toBe('');
+  });
 });
 
 describe('evaluateTriggers', () => {
@@ -89,6 +98,16 @@ describe('evaluateTriggers', () => {
       const rule = makeRule({ pattern: 'aa  55', matchType: 'hex' });
       const result = evaluateTriggers('', [0xaa, 0x55], [rule], undefined);
       expect(result).toHaveLength(1);
+    });
+
+    it.each(['AA55', 'a a\t5 5'])('matches saved compact or split-nibble patterns: %j', pattern => {
+      const rule = makeRule({ pattern, matchType: 'hex' });
+      expect(evaluateTriggers('', [0xaa, 0x55], [rule])).toHaveLength(1);
+    });
+
+    it.each(['A', 'A 5 5', '55 0', 'AA\u00a055'])('never matches partial bytes or invalid input: %j', pattern => {
+      const rule = makeRule({ pattern, matchType: 'hex' });
+      expect(evaluateTriggers('', [0xaa, 0x55, 0x00], [rule])).toEqual([]);
     });
 
     it('does not dispatch a HEX response for a whitespace-only pattern', () => {

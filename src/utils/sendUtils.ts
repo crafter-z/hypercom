@@ -4,6 +4,10 @@
  */
 import type { Encoding, LineEnding } from '../types';
 import { bytesToSpacedHex } from './hexFormat';
+import { isValidHexInput, parseHexBytes } from './hexUtils';
+
+// Compatibility exports for send-area callers; these are the same shared functions.
+export { parseHexBytes, stringToHex as textToHexPreview, hexToString as hexToTextPreview } from './hexUtils';
 
 /**
  * Return the raw bytes represented by a line-ending selector value.
@@ -33,34 +37,9 @@ export function getLineEndingBytes(lineEnding: LineEnding): number[] {
  */
 export const HEX_INPUT_ERROR_KEY = 'sendSection.hexInput.invalid';
 
-/** ASCII whitespace only — the exact set Rust `is_ascii_whitespace` accepts.
- *  JS `\s` also matches NBSP/Unicode spaces, which the backend sees as
- *  invalid (non-ASCII) HEX characters. */
-const ASCII_WS = /[ \t\n\r\v\f]+/g;
-
 /** HEX 输入是否可发送：合法 / 空输入 → null，否则返回 {@link HEX_INPUT_ERROR_KEY}。 */
 export function hexInputError(input: string): string | null {
-  const cleaned = input.replace(ASCII_WS, '');
-  if (cleaned.length === 0) return null;
-  if (cleaned.length % 2 !== 0) return HEX_INPUT_ERROR_KEY;
-  return /^[0-9a-fA-F]+$/.test(cleaned) ? null : HEX_INPUT_ERROR_KEY;
-}
-
-/**
- * Parse a space-separated or compact HEX string into a byte array.
- *
- * Strict, mirroring the backend: odd nibble counts and non-HEX characters yield `[]`
- * (no zero-padding, no skipping) — callers gate on {@link hexInputError} and must
- * never fabricate bytes the backend would reject.
- */
-export function parseHexBytes(input: string): number[] {
-  if (hexInputError(input) !== null) return [];
-  const cleaned = input.replace(ASCII_WS, '');
-  const bytes: number[] = [];
-  for (let i = 0; i < cleaned.length; i += 2) {
-    bytes.push(parseInt(cleaned.slice(i, i + 2), 16));
-  }
-  return bytes;
+  return isValidHexInput(input) ? null : HEX_INPUT_ERROR_KEY;
 }
 
 export interface ByteCountResult {
@@ -121,19 +100,6 @@ export function formatLineEndingHex(lineEnding: LineEnding): string | null {
   const bytes = getLineEndingBytes(lineEnding);
   if (bytes.length === 0) return null;
   return bytesToSpacedHex(bytes);
-}
-
-/** Convert plain text to a spaced uppercase HEX byte preview (UTF-8 bytes). '' → ''. */
-export function textToHexPreview(text: string): string {
-  if (!text) return '';
-  return bytesToSpacedHex(new TextEncoder().encode(text));
-}
-
-/** Decode a HEX byte string back to text (UTF-8, non-fatal). Invalid HEX / empty → ''. */
-export function hexToTextPreview(hex: string): string {
-  const bytes = parseHexBytes(hex);
-  if (bytes.length === 0) return '';
-  return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));
 }
 
 /** Strip anything that isn't a HEX digit or whitespace (HEX-mode input guard). */

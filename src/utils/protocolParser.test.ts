@@ -67,6 +67,12 @@ describe('ProtocolFrameReassembler', () => {
     expect(frames[0]?.bytes).toEqual(bytes);
   });
 
+  it.each(['AABB', 'a a\tb b', '0xAA 0XBB', '0xAABB'])('shares strict byte parsing while preserving protocol prefix syntax: %j', headerBytes => {
+    const parser = new ProtocolFrameReassembler(template({ headerBytes }));
+    const bytes = [0xaa, 0xbb, 0x06, 0x01, 0x02, 0x0d, 0x0a];
+    expect(extractFrames(parser.feed(bytes)).map(frame => frame.bytes)).toEqual([bytes]);
+  });
+
   it('reassembles a frame split across feeds', () => {
     const reassembler = new ProtocolFrameReassembler(template());
 
