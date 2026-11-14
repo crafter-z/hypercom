@@ -60,6 +60,11 @@
   background: var(--bg-hover);
 }
 
+.tab-item:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
 .tab-item.active {
   background: var(--bg-primary);
   border-bottom: 2px solid var(--accent-color);
@@ -97,11 +102,18 @@
 }
 
 .tab-close {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
   border-radius: var(--radius-sm);
   opacity: 0;
   transition: opacity var(--transition-fast);
@@ -110,8 +122,14 @@
 }
 
 .tab-item:hover .tab-close,
-.tab-item.active .tab-close {
+.tab-item.active .tab-close,
+.tab-close:focus-visible {
   opacity: 1;
+}
+
+.tab-close:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
 }
 
 .tab-close:hover {

@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ClipboardPaste, Copy, Redo, Scissors, SquareDashed, Undo } from 'lucide-react';
-import { useMenuPlacement } from './menuPlacement';
-import { useOutsideDismiss } from './useOutsideDismiss';
-import { usePluginViewOverlay } from './usePluginViewOverlay';
+import ContextMenu from './ContextMenu';
+import type { ContextMenuEntry } from './ContextMenu';
 
 /**
  * Custom text-edit context menu (issue #7-10).
@@ -23,6 +22,10 @@ import { usePluginViewOverlay } from './usePluginViewOverlay';
  *  - executes the edit commands via `document.execCommand` (deprecated but
  *    fully functional in WebView2/Chromium; paste requires the click's user
  *    activation, which a menu click provides)
+ *
+ * The menu itself is the shared `ContextMenu`, so roles, roving focus and
+ * keyboard navigation (Arrow/Home/End/Enter/Space/Escape) are identical to
+ * every other app menu. Focus returns to the edited field on close.
  *
  * Non-editable targets keep the existing behavior: `preventDefault` so no
  * native menu appears. The hook therefore fully replaces App.tsx's old global
@@ -126,50 +129,45 @@ interface TextEditContextMenuProps {
 
 const TextEditContextMenu: React.FC<TextEditContextMenuProps> = ({ x, y, target, snapshot, savedRange, onClose }) => {
   const { t } = useTranslation();
-  const overlayReady = usePluginViewOverlay();
-  const { ref, pos } = useMenuPlacement(x, y, overlayReady);
-  useOutsideDismiss(ref, onClose);
-  if (!overlayReady) return null;
 
   const hasSelection = snapshot ? snapshot.start !== snapshot.end : savedRange != null;
 
   const action = (cmd: EditCommand) => () => {
     runEditCommand(target, snapshot, savedRange, cmd);
-    onClose();
   };
+  const item = (
+    cmd: EditCommand,
+    label: string,
+    icon: React.ReactNode,
+    disabled = false,
+  ): ContextMenuEntry => ({
+    label,
+    icon,
+    disabled,
+    onClick: action(cmd),
+  });
+
   // Cut/copy only make sense with an actual selection; undo/redo/paste/selectAll
   // are always offered (execCommand no-ops silently when unavailable).
-  const itemClass = (disabled: boolean) => `context-menu-item${disabled ? ' disabled' : ''}`;
+  const items: ContextMenuEntry[] = [
+    item('undo', t('contextMenu.undo'), <Undo size={14} />),
+    item('redo', t('contextMenu.redo'), <Redo size={14} />),
+    { type: 'separator' },
+    item('cut', t('contextMenu.cut'), <Scissors size={14} />, !hasSelection),
+    item('copy', t('contextMenu.copy'), <Copy size={14} />, !hasSelection),
+    item('paste', t('contextMenu.paste'), <ClipboardPaste size={14} />),
+    { type: 'separator' },
+    item('selectAll', t('contextMenu.selectAll'), <SquareDashed size={14} />),
+  ];
 
   return (
-    <div ref={ref} className="context-menu animate-fade-in" style={{ left: pos.x, top: pos.y }}>
-      <div className="context-menu-item" onClick={action('undo')}>
-        <span className="context-menu-icon"><Undo size={14} /></span>
-        <span>{t('contextMenu.undo')}</span>
-      </div>
-      <div className="context-menu-item" onClick={action('redo')}>
-        <span className="context-menu-icon"><Redo size={14} /></span>
-        <span>{t('contextMenu.redo')}</span>
-      </div>
-      <div className="context-menu-separator" />
-      <div className={itemClass(!hasSelection)} onClick={hasSelection ? action('cut') : undefined}>
-        <span className="context-menu-icon"><Scissors size={14} /></span>
-        <span>{t('contextMenu.cut')}</span>
-      </div>
-      <div className={itemClass(!hasSelection)} onClick={hasSelection ? action('copy') : undefined}>
-        <span className="context-menu-icon"><Copy size={14} /></span>
-        <span>{t('contextMenu.copy')}</span>
-      </div>
-      <div className="context-menu-item" onClick={action('paste')}>
-        <span className="context-menu-icon"><ClipboardPaste size={14} /></span>
-        <span>{t('contextMenu.paste')}</span>
-      </div>
-      <div className="context-menu-separator" />
-      <div className="context-menu-item" onClick={action('selectAll')}>
-        <span className="context-menu-icon"><SquareDashed size={14} /></span>
-        <span>{t('contextMenu.selectAll')}</span>
-      </div>
-    </div>
+    <ContextMenu
+      x={x}
+      y={y}
+      items={items}
+      onClose={onClose}
+      trigger={target}
+    />
   );
 };
 

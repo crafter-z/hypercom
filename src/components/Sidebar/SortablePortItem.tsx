@@ -48,7 +48,7 @@ function portMetadataTitle(port: SerialPort): string | undefined {
 const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }) => {
   const { t } = useTranslation();
   const actions = useSidebarActions();
-  const { show, element } = useContextMenu();
+  const { show, showAt, element } = useContextMenu();
   const pluginMenuItems = usePortPluginMenuItems();
   // 分组控制菜单在渲染时构建，需要实时读 groups。
   const groups = useAppStore((s) => s.groups);
@@ -135,8 +135,24 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
     <div ref={setNodeRef} style={style}>
       <div
         className={`port-item${isConnected ? ' connected' : ''}`}
+        tabIndex={0}
+        aria-label={`${port.alias || port.name} (${label})`}
         onDoubleClick={() => actions.openTab(port.id)}
         onContextMenu={(e) => show(e, items)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            actions.openTab(port.id);
+          } else if (e.key === ' ') {
+            e.preventDefault();
+            actions.toggleConnect(port.id);
+          } else if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            showAt(rect.left, rect.bottom, items, e.currentTarget, port.alias || port.name);
+          }
+        }}
       >
         <span className="port-item-drag" {...attributes} {...listeners}>
           <GripVertical size={12} />

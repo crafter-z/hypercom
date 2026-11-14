@@ -75,7 +75,7 @@
   width: 100%;
   flex: 1 1 auto;
   padding-left: var(--space-7);
-  padding-right: var(--space-6);
+  padding-right: calc(var(--space-8) + var(--space-1));
 }
 
 .sidebar-search-clear {
@@ -83,7 +83,12 @@
   right: calc(var(--space-2) + var(--space-1));
   display: flex;
   align-items: center;
-  padding: 2px;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
   border: none;
   border-radius: var(--radius-sm);
   background: none;
@@ -405,12 +410,10 @@
   font-size: var(--text-xs);
   color: var(--text-link);
   cursor: pointer;
-  opacity: 0.85;
   transition: opacity var(--transition-fast);
 }
 
 .guide-card-quickstart-link:hover {
-  opacity: 1;
   text-decoration: underline;
 }
 
@@ -506,4 +509,25 @@
   display: flex;
   justify-content: flex-end;
   padding: var(--space-3) var(--space-4);
+}
+
+/* Keyboard focus for the port rack: rows and group headers are operable
+ * without a mouse (Enter opens/toggles, Space connects, Shift+F10 menu). */
+.port-item:focus-visible,
+.port-group-header:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
+.sidebar-no-results {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--border-radius);
+  margin: var(--space-2) 0;
 }

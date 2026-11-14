@@ -13,6 +13,11 @@ const TitleBar: React.FC = () => {
   const [isPinned, setIsPinned] = useState(false);
   const { t } = useTranslation();
 
+  // Icon-only buttons announce the same action as their tooltip.
+  const sidebarToggleLabel = sidebarCollapsed ? t('titleBar.expandSidebar') : t('titleBar.collapseSidebar');
+  const pinLabel = isPinned ? t('titleBar.unpinOnTop') : t('titleBar.pinOnTop');
+  const maximizeLabel = isMaximized ? t('titleBar.restore') : t('titleBar.maximize');
+
   // F.5: derive active port info with primitive selectors (no unnecessary re-renders)
   const activePortId = useAppStore((s) => getActivePortId(s));
   const activePortStatus = useAppStore((s) => {
@@ -92,7 +97,8 @@ const TitleBar: React.FC = () => {
         </svg>
         <button
           className="btn btn-icon btn-sm titlebar-panel-toggle"
-          title={sidebarCollapsed ? t('titleBar.expandSidebar') : t('titleBar.collapseSidebar')}
+          title={sidebarToggleLabel}
+          aria-label={sidebarToggleLabel}
           onClick={() => setUIState({ sidebarCollapsed: !sidebarCollapsed })}
         >
           {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
@@ -103,7 +109,8 @@ const TitleBar: React.FC = () => {
       <div className="titlebar-right">
         <button
           className="btn btn-icon btn-sm titlebar-help"
-          title={isPinned ? t('titleBar.unpinOnTop') : t('titleBar.pinOnTop')}
+          title={pinLabel}
+          aria-label={pinLabel}
           onClick={handleTogglePin}
         >
           {isPinned ? <PinOff size={15} /> : <Pin size={15} />}
@@ -111,24 +118,25 @@ const TitleBar: React.FC = () => {
         <button
           className="btn btn-icon btn-sm titlebar-help"
           title={t('hotkeys.title')}
+          aria-label={t('hotkeys.title')}
           onClick={() => setUIState({ isHotkeyHelpOpen: true })}
         >
           <Keyboard size={15} />
         </button>
-        <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.about')} onClick={() => setUIState({ isAboutOpen: true })}>
+        <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.about')} aria-label={t('titleBar.about')} onClick={() => setUIState({ isAboutOpen: true })}>
           <Info size={15} />
         </button>
-        <button className="btn btn-icon btn-sm" title={t('titleBar.settings')} onClick={() => toggleConfigModal(true)}>
+        <button className="btn btn-icon btn-sm" title={t('titleBar.settings')} aria-label={t('titleBar.settings')} onClick={() => toggleConfigModal(true)}>
           <Settings size={15} />
         </button>
         <div className="titlebar-separator" />
-        <button className="titlebar-control" title={t('titleBar.minimize')} onClick={handleMinimize}>
+        <button className="titlebar-control" title={t('titleBar.minimize')} aria-label={t('titleBar.minimize')} onClick={handleMinimize}>
           <Minus size={15} />
         </button>
-        <button className="titlebar-control" title={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} onClick={handleMaximize}>
+        <button className="titlebar-control" title={maximizeLabel} aria-label={maximizeLabel} onClick={handleMaximize}>
           {isMaximized ? <Minimize2 size={13} /> : <Square size={13} />}
         </button>
-        <button className="titlebar-control titlebar-close" title={t('titleBar.close')} onClick={handleClose}>
+        <button className="titlebar-control titlebar-close" title={t('titleBar.close')} aria-label={t('titleBar.close')} onClick={handleClose}>
           <X size={15} />
         </button>
       </div>

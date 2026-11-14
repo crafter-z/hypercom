@@ -80,7 +80,7 @@ const GuideCard: React.FC<GuideCardProps> = ({ onEnableSimulation, simulationAva
         <Cable size={18} />
       </div>
       <div className="guide-card-title">{t('guide.title')}</div>
-      <p className="guide-card-hint">{t('guide.hint')}</p>
+      <p className="guide-card-hint">{t(simulationAvailable ? 'guide.hint' : 'guide.hintNoSim')}</p>
       {simulationAvailable && (
         <button className="btn btn-primary btn-sm guide-card-sim-btn" onClick={onEnableSimulation}>
           <FlaskConical size={13} />

@@ -13,6 +13,7 @@
 
 
 .context-menu-item {
+  position: relative;
   padding: 6px 16px 6px 12px;
   cursor: pointer;
   display: flex;
@@ -21,6 +22,30 @@
   font-size: 13px;
   color: var(--text-primary);
   transition: background var(--transition-fast);
+}
+
+.context-menu-item:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+  background: var(--bg-active);
+}
+
+.context-menu-item[aria-haspopup="menu"] {
+  padding-right: 12px;
+}
+
+.context-menu-submenu-arrow {
+  margin-left: auto;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+/* Nested level: the same panel visuals, anchored to the right of its item. */
+.context-submenu {
+  position: absolute;
+  left: 100%;
+  top: -5px;
 }
 
 .context-menu-item:hover {

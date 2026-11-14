@@ -4,6 +4,7 @@ import type { PortGroup, SerialPort } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import { useSidebarActions } from './SidebarActions';
 import { groupDroppableId } from './hooks/usePortDragEnd';
+import ConfirmDialog from '../shared/ConfirmDialog';
 import SortablePortItem from './SortablePortItem';
 import { Play, Square, Pencil, Trash2, Wrench, ChevronRight } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
@@ -38,8 +39,9 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
   const connectedCount = groupPorts.filter(p => p.status === 'connected').length;
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(group.name);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const { show, element } = useContextMenu();
+  const { show, showAt, element } = useContextMenu();
 
   // Make the group a droppable target so ports can be dropped onto the group
   // header itself (not just onto individual ports inside the group).
@@ -81,7 +83,7 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
     { type: 'separator' },
     { label: t('sidebar.group.contextMenu.rename'), icon: <Pencil size={14} />, onClick: () => { setRenameValue(group.name); setIsRenaming(true); } },
     { type: 'separator' },
-    { label: t('sidebar.group.contextMenu.delete'), icon: <Trash2 size={14} />, danger: true, onClick: () => actions.removeGroup(group.id) },
+    { label: t('sidebar.group.contextMenu.delete'), icon: <Trash2 size={14} />, danger: true, onClick: () => setConfirmDelete(true) },
   ];
 
   const portIds = useMemo(() => groupPorts.map(p => p.id), [groupPorts]);
@@ -93,8 +95,27 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
     >
       <div
         className="port-group-header"
+        role="button"
+        tabIndex={0}
+        aria-expanded={group.isExpanded}
+        aria-label={group.name}
         onClick={() => actions.toggleGroupExpand(group.id)}
         onContextMenu={(e) => show(e, groupMenuItems)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            actions.toggleGroupExpand(group.id);
+          } else if (e.key === 'F10' && e.shiftKey) {
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            showAt(rect.left, rect.bottom, groupMenuItems, e.currentTarget, group.name);
+          } else if (e.key === 'ContextMenu') {
+            e.preventDefault();
+            const rect = e.currentTarget.getBoundingClientRect();
+            showAt(rect.left, rect.bottom, groupMenuItems, e.currentTarget, group.name);
+          }
+        }}
       >
         <ChevronRight
           size={12}
@@ -128,6 +149,16 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
         </span>
       </div>
       {element}
+      <ConfirmDialog
+        open={confirmDelete}
+        title={t('sidebar.group.deleteTitle')}
+        message={t('sidebar.group.deleteMessage', { name: group.name })}
+        confirmLabel={t('confirmDialog.confirm')}
+        cancelLabel={t('confirmDialog.cancel')}
+        danger
+        onConfirm={() => { setConfirmDelete(false); actions.removeGroup(group.id); }}
+        onCancel={() => setConfirmDelete(false)}
+      />
       {group.isExpanded && (
         <SortableContext items={portIds} strategy={verticalListSortingStrategy}>
           <div className="port-group-list">

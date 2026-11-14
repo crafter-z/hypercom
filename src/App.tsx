@@ -151,15 +151,16 @@ const App: React.FC = () => {
     <AppErrorBoundary>
       <ThemeProvider>
         <div className="app-root">
+          <h1 className="sr-only">HyperCom</h1>
           <div className="app-background" aria-hidden="true" />
           <TitleBar />
 
-          <div className="app-main">
-            <div className="app-sidebar-col" style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}>
+          <main className="app-main">
+            <aside className="app-sidebar-col" style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}>
               <div style={{ width: sidebarWidth, height: '100%' }}>
                 <Sidebar />
               </div>
-            </div>
+            </aside>
             {!sidebarCollapsed && <SidebarResizeHandle />}
 
             <div className="app-content-col">
@@ -168,7 +169,7 @@ const App: React.FC = () => {
               <OperationPanel />
               <PluginPanel />
             </div>
-          </div>
+          </main>
 
           <StatusBar />
           <ConfigModal />

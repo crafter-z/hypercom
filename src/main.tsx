@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import PopoutShell from "./components/Popout/PopoutShell";
+import ThemeProvider from "./components/shared/ThemeProvider";
 import "./styles.css";
 import "./i18n"; // 初始化 i18next + react-i18next (副作用导入)
 
@@ -16,7 +17,9 @@ const rootElement = document.getElementById("root") as HTMLElement;
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     {popoutKind != null ? (
-      <PopoutShell kind={popoutKind} targetId={popoutTargetId} />
+      <ThemeProvider>
+        <PopoutShell kind={popoutKind} targetId={popoutTargetId} />
+      </ThemeProvider>
     ) : (
       <App />
     )}

@@ -1,7 +1,7 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TabItem, LeafPane } from '../../types';
-import ContextMenu from '../shared/ContextMenu';
+import { useContextMenu } from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
 import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare } from 'lucide-react';
 import PluginTabLauncher from './PluginTabLauncher';
@@ -45,6 +45,7 @@ interface TabItemProps {
   tab: TabItem;
   isActive: boolean;
   isPortDisconnected: boolean;
+  closeLabel: string;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
   onContextMenu: (e: React.MouseEvent, tabId: string) => void;
@@ -55,7 +56,7 @@ const tabItemClassName = (tab: TabItem, isActive: boolean): string =>
 
 /** Presentational tab innards shared by the sortable and static shells —
  * the single source of truth for what a tab looks like. */
-const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, onTabClose }) => (
+const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, closeLabel, onTabClose }) => (
   <>
     {getTabPortId(tab) !== null && <span className="tab-status-dot" />}
     {isPortDisconnected && (
@@ -65,15 +66,25 @@ const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, onTab
     <TimelineBadge tabId={tab.id} />
     {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
     {!tab.isPinned && (
-      <span
+      <button
+        type="button"
         className="tab-close"
+        aria-label={closeLabel}
         onClick={(e) => { e.stopPropagation(); onTabClose(tab.id); }}
       >
         <X size={12} />
-      </span>
+      </button>
     )}
   </>
 );
+
+/** Keyboard/ARIA tab semantics shared by both shells. */
+const tabA11yProps = (tab: TabItem, isActive: boolean) => ({
+  role: 'tab' as const,
+  'aria-selected': isActive,
+  tabIndex: isActive ? 0 : -1,
+  'data-tab-id': tab.id,
+});
 
 /** DnD-enabled shell — used when reordering / cross-pane drag applies. */
 const SortableTab: React.FC<TabItemProps> = (props) => {
@@ -102,6 +113,7 @@ const SortableTab: React.FC<TabItemProps> = (props) => {
       onContextMenu={(e) => props.onContextMenu(e, props.tab.id)}
       {...attributes}
       {...listeners}
+      {...tabA11yProps(props.tab, props.isActive)}
     >
       <TabItemContent {...props} />
     </div>
@@ -114,6 +126,7 @@ const StaticTab: React.FC<TabItemProps> = (props) => (
     className={tabItemClassName(props.tab, props.isActive)}
     onClick={() => props.onTabClick(props.tab.id)}
     onContextMenu={(e) => props.onContextMenu(e, props.tab.id)}
+    {...tabA11yProps(props.tab, props.isActive)}
   >
     <TabItemContent {...props} />
   </div>
@@ -142,12 +155,19 @@ const TabBar: React.FC<TabBarProps> = ({
   onKillTool,
   onConfigTool,
 }) => {
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const { t } = useTranslation();
+  const {
+    show: showContextMenu,
+    showAt: showContextMenuAt,
+    element: contextMenuElement,
+  } = useContextMenu();
   const ports = useAppStore((s) => s.ports);
   // 批量开/关针对**全部标签页**（跨分屏），禁用态按全局 tabs 计算。
   const allTabs = useAppStore((s) => s.tabs);
   const pluginLauncherPortId = getTabPortId(tabs.find(tab => tab.id === activeTabId)) ?? null;
+  const tabsContainerRef = useRef<HTMLDivElement>(null);
+  /** Index to focus after the next `tabs` change (keyboard/close-button close). */
+  const pendingFocusIndexRef = useRef<number | null>(null);
 
   // Lookup: portId → is disconnected (status 'disconnected' or port missing).
   // A missing port (USB unplug removed it from the list) is treated as
@@ -164,13 +184,26 @@ const TabBar: React.FC<TabBarProps> = ({
     return set;
   }, [ports, tabs]);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, tabId });
-  }, []);
+  // Move focus to a surviving tab after the close commits. The store's
+  // successor may differ (global last tab), so index-focus is the predictable
+  // choice for a keyboard user.
+  useEffect(() => {
+    const index = pendingFocusIndexRef.current;
+    if (index === null) return;
+    pendingFocusIndexRef.current = null;
+    const elements = tabsContainerRef.current?.querySelectorAll<HTMLElement>('[role="tab"]');
+    if (!elements || elements.length === 0) return;
+    elements[Math.min(index, elements.length - 1)]?.focus({ preventScroll: true });
+  }, [tabs]);
 
-  const handleCloseContextMenu = useCallback(() => setContextMenu(null), []);
+  const requestCloseTab = useCallback((tabId: string) => {
+    const index = tabs.findIndex(tab => tab.id === tabId);
+    if (index >= 0) {
+      // After removal the same index holds the next tab; the last one falls back left.
+      pendingFocusIndexRef.current = Math.max(0, Math.min(index, tabs.length - 2));
+    }
+    onTabClose(tabId);
+  }, [tabs, onTabClose]);
 
   const getContextMenuItems = useCallback((tabId: string): ContextMenuEntry[] => {
     const tab = tabs.find(t => t.id === tabId);
@@ -225,7 +258,7 @@ const TabBar: React.FC<TabBarProps> = ({
 
     items.push(
       { type: 'separator' },
-      { label: t('tabBar.contextMenu.close'), onClick: () => onTabClose(tabId) },
+      { label: t('tabBar.contextMenu.close'), onClick: () => requestCloseTab(tabId) },
       { label: t('tabBar.contextMenu.closeToRight'), onClick: () => onCloseToRight(tabId) },
       { label: t('tabBar.contextMenu.closeToLeft'), onClick: () => onCloseToLeft(tabId) },
       { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId) },
@@ -243,7 +276,89 @@ const TabBar: React.FC<TabBarProps> = ({
     }
 
     return items;
-  }, [tabs, allTabs, ports, onTabPin, onTabClose, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, onConnectAllTabs, onDisconnectAllTabs, onRunTool, onKillTool, onConfigTool, t]);
+  }, [tabs, allTabs, ports, onTabPin, requestCloseTab, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, onConnectAllTabs, onDisconnectAllTabs, onRunTool, onKillTool, onConfigTool, t]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
+    showContextMenu(e, getContextMenuItems(tabId));
+  }, [showContextMenu, getContextMenuItems]);
+
+  const openContextMenuForTabElement = useCallback((tabEl: HTMLElement) => {
+    const tabId = tabEl.dataset.tabId;
+    if (!tabId) return;
+    const rect = tabEl.getBoundingClientRect();
+    showContextMenuAt(rect.left, rect.bottom, getContextMenuItems(tabId), tabEl);
+  }, [showContextMenuAt, getContextMenuItems]);
+
+  const handleTablistKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    // The close affordance is a native button with its own Enter/Space handling.
+    if (target.closest('.tab-close')) return;
+    const tabEl = target.closest<HTMLElement>('[role="tab"]');
+    if (!tabEl || !e.currentTarget.contains(tabEl)) return;
+    const index = tabs.findIndex(tab => tab.id === tabEl.dataset.tabId);
+    if (index < 0) return;
+
+    const focusTabAt = (nextIndex: number) => {
+      const elements = e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]');
+      if (elements.length === 0) return;
+      const wrapped = ((nextIndex % elements.length) + elements.length) % elements.length;
+      elements[wrapped]?.focus({ preventScroll: true });
+    };
+
+    const closeFocused = () => {
+      const tab = tabs[index];
+      if (!tab || tab.isPinned) return;
+      pendingFocusIndexRef.current = Math.max(0, Math.min(index, tabs.length - 2));
+      onTabClose(tab.id);
+    };
+
+    switch (e.key) {
+      case 'ArrowLeft':
+        e.preventDefault();
+        focusTabAt(index - 1);
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        focusTabAt(index + 1);
+        break;
+      case 'Home':
+        e.preventDefault();
+        focusTabAt(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        focusTabAt(tabs.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        onTabClick(tabs[index].id);
+        break;
+      case 'Delete':
+        e.preventDefault();
+        closeFocused();
+        break;
+      case 'w':
+      case 'W':
+        if (e.ctrlKey) {
+          e.preventDefault();
+          closeFocused();
+        }
+        break;
+      case 'F10':
+        if (e.shiftKey) {
+          e.preventDefault();
+          openContextMenuForTabElement(tabEl);
+        }
+        break;
+      case 'ContextMenu':
+        e.preventDefault();
+        openContextMenuForTabElement(tabEl);
+        break;
+      default:
+        break;
+    }
+  }, [tabs, onTabClick, onTabClose, openContextMenuForTabElement]);
 
   const tabIds = tabs.map(t => t.id);
 
@@ -252,14 +367,16 @@ const TabBar: React.FC<TabBarProps> = ({
   // or multi-pane, tabs render as sortable so @dnd-kit handles both
   // within-pane reordering and cross-pane moves.
   const shouldUseSortable = tabIds.length >= 2 || !!isMultiPane;
+  const closeLabel = t('tabBar.contextMenu.close');
 
   const renderTab = (tab: TabItem) => {
     const itemProps: TabItemProps = {
       tab,
       isActive: tab.id === activeTabId,
       isPortDisconnected: disconnectedPortIds.has(tab.id),
+      closeLabel,
       onTabClick,
-      onTabClose,
+      onTabClose: requestCloseTab,
       onContextMenu: handleContextMenu,
     };
     return shouldUseSortable
@@ -273,7 +390,14 @@ const TabBar: React.FC<TabBarProps> = ({
       strategy={horizontalListSortingStrategy}
     >
       <div className="tab-bar">
-        <div className="tab-bar-tabs">
+        <div
+          ref={tabsContainerRef}
+          className="tab-bar-tabs"
+          role="tablist"
+          aria-label={t('tabBar.tabsLabel')}
+          aria-orientation="horizontal"
+          onKeyDown={handleTablistKeyDown}
+        >
           {tabs.map(renderTab)}
         </div>
         <div className="tab-bar-actions">
@@ -293,14 +417,7 @@ const TabBar: React.FC<TabBarProps> = ({
         </div>
       </div>
 
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={getContextMenuItems(contextMenu.tabId)}
-          onClose={handleCloseContextMenu}
-        />
-      )}
+      {contextMenuElement}
     </SortableContext>
   );
 };

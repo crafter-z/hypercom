@@ -18,6 +18,8 @@ import SortablePortItem from './SortablePortItem';
 import GroupItem from './GroupItem';
 import { SidebarActionsProvider, type SidebarActions } from './SidebarActions';
 import GroupToolDialog from '../shared/GroupToolDialog';
+import ConfirmDialog from '../shared/ConfirmDialog';
+import { notifyInfo } from '../../stores/useToastStore';
 import { createEmptyGroup, createGroupWithPort } from './groupActions';
 import { usePortDragEnd } from './hooks/usePortDragEnd';
 
@@ -46,6 +48,7 @@ const Sidebar: React.FC = () => {
   } = usePortToolActions();
 
   const [showHidden, setShowHidden] = useState(false);
+  const [bulkConfirm, setBulkConfirm] = useState<{ mode: 'open' | 'close'; portIds: string[] } | null>(null);
   const pluginButtons = useToolbarPluginButtons();
   const [search, setSearch] = useState('');
   const [aliasDialog, setAliasDialog] = useState<{ portId: string; currentAlias: string } | null>(null);
@@ -143,14 +146,33 @@ const Sidebar: React.FC = () => {
     });
   }, [refreshPorts]);
   // 批量开/关：串行 + 100ms 间隔，避免并发 open/close 在后端抢串口句柄。
+  // 范围只取当前搜索可见的端口（隐藏端口不在机架里，不能被“全部”误伤）。
+  const visiblePorts = useMemo(
+    () => filteredPorts.filter(port => !port.isHidden),
+    [filteredPorts],
+  );
+
+  const runBulk = useCallback((mode: 'open' | 'close', portIds: string[]) => {
+    const targets = useAppStore.getState().ports.filter(port => portIds.includes(port.id));
+    if (targets.length === 0) return;
+    void runSequential(targets, (port) => toggleConnection(port.id)).then(() => {
+      notifyInfo(t(mode === 'open' ? 'sidebar.bulk.openDone' : 'sidebar.bulk.closeDone', {
+        count: targets.length,
+      }));
+    });
+  }, [toggleConnection, t]);
+
   const handleOpenAll = useCallback(() => {
-    const pending = useAppStore.getState().ports.filter(p => p.status !== 'connected');
-    void runSequential(pending, (p) => toggleConnection(p.id));
-  }, [toggleConnection]);
+    const pending = visiblePorts.filter(p => p.status !== 'connected' && p.status !== 'connecting');
+    if (pending.length === 0) return;
+    setBulkConfirm({ mode: 'open', portIds: pending.map(p => p.id) });
+  }, [visiblePorts]);
+
   const handleCloseAll = useCallback(() => {
-    const connected = useAppStore.getState().ports.filter(p => p.status === 'connected');
-    void runSequential(connected, (p) => toggleConnection(p.id));
-  }, [toggleConnection]);
+    const connected = visiblePorts.filter(p => p.status === 'connected');
+    if (connected.length === 0) return;
+    setBulkConfirm({ mode: 'close', portIds: connected.map(p => p.id) });
+  }, [visiblePorts]);
 
   const handleDragEnd = usePortDragEnd();
 
@@ -227,6 +249,15 @@ const Sidebar: React.FC = () => {
             )}
           </DndContext>
 
+          {search && visiblePorts.length === 0 && (
+            <div className="sidebar-no-results" role="status">
+              <span>{t('sidebar.search.noResults')}</span>
+              <button type="button" className="btn btn-sm" onClick={() => setSearch('')}>
+                {t('sidebar.search.clear')}
+              </button>
+            </div>
+          )}
+
           <div className="sidebar-add-group">
             <button className="btn sidebar-add-group-btn" onClick={handleAddGroup}>
               <Plus size={14} />
@@ -253,6 +284,22 @@ const Sidebar: React.FC = () => {
             onClose={closeToolDialog}
           />
         )}
+        <ConfirmDialog
+          open={bulkConfirm !== null}
+          title={t(bulkConfirm?.mode === 'open' ? 'sidebar.bulk.openAllTitle' : 'sidebar.bulk.closeAllTitle')}
+          message={t(bulkConfirm?.mode === 'open' ? 'sidebar.bulk.openAllMessage' : 'sidebar.bulk.closeAllMessage', {
+            count: bulkConfirm?.portIds.length ?? 0,
+          })}
+          confirmLabel={t('confirmDialog.confirm')}
+          cancelLabel={t('confirmDialog.cancel')}
+          danger={bulkConfirm?.mode === 'close'}
+          onConfirm={() => {
+            const pending = bulkConfirm;
+            setBulkConfirm(null);
+            if (pending) runBulk(pending.mode, pending.portIds);
+          }}
+          onCancel={() => setBulkConfirm(null)}
+        />
       </div>
     </SidebarActionsProvider>
   );

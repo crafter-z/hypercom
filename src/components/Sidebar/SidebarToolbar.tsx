@@ -61,6 +61,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
           <button
             className={`icon-btn${simulationMode ? ' active' : ''}`}
             title={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
+            aria-label={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
             onClick={onToggleSimulation}
           >
             <FlaskConical size={14} />
@@ -70,6 +71,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
           <button
             className={`icon-btn${gitBashMode ? ' active' : ''}`}
             title={gitBashMode ? t('sidebar.toolbar.disableGitBashSim') : t('sidebar.toolbar.enableGitBashSim')}
+            aria-label={gitBashMode ? t('sidebar.toolbar.disableGitBashSim') : t('sidebar.toolbar.enableGitBashSim')}
             onClick={onToggleGitBash}
           >
             <Terminal size={14} />
@@ -82,19 +84,20 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
               key={`${reg.pluginId}:${button.id}`}
               className="icon-btn"
               title={`${reg.pluginName}: ${button.label}`}
+              aria-label={`${reg.pluginName}: ${button.label}`}
               onClick={() => onPluginClick(reg, button.id)}
             >
               {pluginIcon(button.icon, 14)}
             </button>
           );
         })}
-        <button className="icon-btn" title={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
+        <button className="icon-btn" title={t('sidebar.toolbar.refresh')} aria-label={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
           <RefreshCw size={14} />
         </button>
-        <button className="icon-btn" title={t('sidebar.toolbar.openAll')} onClick={onOpenAll}>
+        <button className="icon-btn" title={t('sidebar.toolbar.openAll')} aria-label={t('sidebar.toolbar.openAll')} onClick={onOpenAll}>
           <Play size={14} />
         </button>
-        <button className="icon-btn" title={t('sidebar.toolbar.closeAll')} onClick={onCloseAll}>
+        <button className="icon-btn" title={t('sidebar.toolbar.closeAll')} aria-label={t('sidebar.toolbar.closeAll')} onClick={onCloseAll}>
           <Square size={14} />
         </button>
         <span className="toolbar-sep" />
