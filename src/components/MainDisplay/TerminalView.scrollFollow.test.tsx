@@ -341,6 +341,7 @@ describe('TerminalView ASCII noise switch', () => {
     await act(async () => toggle.click());
     await frame(2);
     expect(toggle.checked).toBe(true);
+    expect(a.host.querySelector('.terminal-filter-count')).toBeNull();
     expect(a.manager.getVisibleCount()).toBe(201);
     expect(a.container.querySelector('[data-seq="200"]')).toBeNull();
     expect(b.manager.getVisibleCount()).toBe(202);
@@ -352,6 +353,7 @@ describe('TerminalView ASCII noise switch', () => {
     await frame(2);
     expect(toggle.disabled).toBe(true);
     expect(toggle.checked).toBe(true);
+    expect(a.host.querySelector('.terminal-filter-count')).toBeNull();
     expect(a.manager.getVisibleCount()).toBe(202);
     expect(a.container.querySelector('[data-seq="200"]')).not.toBeNull();
 
@@ -365,5 +367,13 @@ describe('TerminalView ASCII noise switch', () => {
     expect(a.manager.getVisibleCount()).toBe(202);
     expect(a.container.querySelector('[data-seq="200"]')).not.toBeNull();
     expect(a.manager.buffer.length).toBe(202);
+
+    const filterInput = a.host.querySelector<HTMLInputElement>('.terminal-filter-main .toolbar-input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(filterInput, 'Boot');
+      filterInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await frame(15);
+    expect(a.host.querySelector('.terminal-filter-count')).not.toBeNull();
   });
 });

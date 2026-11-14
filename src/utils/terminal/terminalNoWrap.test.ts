@@ -63,4 +63,23 @@ describe('terminal no-wrap contract (issue #9)', () => {
     expect(computed('.terminal-line', 'overflow-x')).toBe('visible');
     expect(computed('.terminal-line', 'overflow-y')).toBe('visible');
   });
+
+  it('word-wrap keeps the configured terminal line-height', () => {
+    const view = document.createElement('div');
+    view.className = 'terminal-view terminal-word-wrap';
+    view.style.setProperty('--line-height-terminal', '1.375');
+    view.style.setProperty('--terminal-row-height', '20px');
+    const line = document.createElement('div');
+    line.className = 'terminal-line';
+    view.appendChild(line);
+    document.body.appendChild(view);
+    try {
+      // rowHeight is a rounded geometry estimate; it must not replace the
+      // inherited line-height when the wrapping preference is enabled.
+      expect(getComputedStyle(line).lineHeight).toBe(getComputedStyle(view).lineHeight);
+      expect(getComputedStyle(line).lineHeight).not.toBe('20px');
+    } finally {
+      view.remove();
+    }
+  });
 });

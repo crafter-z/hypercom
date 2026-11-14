@@ -1020,7 +1020,10 @@ test.describe('HyperCom smoke tests', () => {
       const { useAppStore } = await import('/src/stores/useAppStore.ts');
       useAppStore.getState().setConfig({ terminalFontSize: 15 });
     });
-    await expect.poll(() => content.evaluate(el => getComputedStyle(el).lineHeight)).toBe('23px');
+    await expect.poll(() => content.evaluate(el => {
+      const view = el.closest('.terminal-view');
+      return !!view && getComputedStyle(el).lineHeight === getComputedStyle(view).lineHeight;
+    })).toBe(true);
     await page.getByRole('button', { name: 'HEX', exact: true }).click();
     await expect(toggle).toBeDisabled();
     await expect(page.locator('.terminal-view')).not.toHaveClass(/terminal-word-wrap/);

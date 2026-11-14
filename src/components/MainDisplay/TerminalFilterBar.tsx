@@ -47,7 +47,7 @@ interface TerminalFilterBarProps {
   keyword: string;
   onKeywordChange: (k: string) => void;
   matchCount: number;      // visible line count while the keyword filter is active
-  showMatchCount: boolean; // true when the debounced keyword is non-empty
+  showMatchCount: boolean; // true when a complete debounced keyword result is available
   paused: boolean;
   onTogglePause: () => void;
   viewPicker?: React.ReactNode;

@@ -38,7 +38,8 @@ import { getAvailablePluginViews, getTabViewPreference, selectSerialPluginView }
 import { notifyError } from '../../stores/useToastStore';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import PluginViewPicker from '../shared/PluginViewPicker';
-import { buildTerminalContextMenuItems } from './terminalContextMenu';
+import { buildTerminalContextMenuItems, selectionText } from './terminalContextMenu';
+import { writeClipboardText } from '../../utils/clipboard';
 import { useTerminalDisplay } from './useTerminalDisplay';
 import { useTerminalSearch } from './useTerminalSearch';
 import TerminalSearchBar from './TerminalSearchBar';
@@ -432,6 +433,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
       const items = buildTerminalContextMenuItems({
         portId: portId ?? sourceId ?? tabId ?? 'replay', // export label, never a send target
         lines: snapshot,
+        browserSelectionText: selectionText(containerRef.current ?? undefined),
         range,
         timestampMode,
         isFirstInRound,
@@ -455,6 +457,16 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
       sel.removeAllRanges();
       sel.addRange(range);
     }
+  }, []);
+
+  const handleCopy = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented) return;
+    const text = selectionText(event.currentTarget);
+    if (!text) return;
+    // Handle the browser's copy event, not a broad Ctrl+C keydown: this keeps
+    // unrelated shortcuts and native editable-control behavior intact.
+    event.preventDefault();
+    void writeClipboardText(text).catch(notifyError);
   }, []);
 
   const handleSearchClose = closeSearch;
@@ -581,7 +593,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         keyword={keywordInput}
         onKeywordChange={setKeywordInput}
         matchCount={matchCount}
-        showMatchCount={debouncedKeyword.trim().length > 0 || effectiveHideAsciiNoise}
+        showMatchCount={debouncedKeyword.trim().length > 0 && !vm.isLoading}
         paused={paused}
         onTogglePause={togglePause}
         viewPicker={(() => {
@@ -620,6 +632,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           className="terminal-view"
           tabIndex={0}
           onContextMenu={handleContextMenu}
+          onCopy={handleCopy}
           onKeyDown={handleKeyDown}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
