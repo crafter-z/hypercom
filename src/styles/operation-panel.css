@@ -656,20 +656,22 @@
  * .segmented/.segmented-btn primitives from base.css directly. */
 
 /* ==================== Short-panel priority layout ====================
- * The default 280px panel height must never clip the primary send column
- * (Send / Send File / HEX / clear-after-send / line ending). The compose row
- * is therefore pinned (it keeps at least its content height), the textarea
- * absorbs the leftover height and scrolls its own text, and the secondary
- * block above it (flow status + quick-send strip) takes the remaining space
- * and scrolls when the panel is dragged shorter still. Rules live after the
- * generic `.op-section > *` shrink guard, and target the send section by ID
- * class so params section scrolling is untouched. */
+ * Keep both the primary compose row (Send / Send File / HEX / clear-after-send /
+ * line ending) and the secondary block (flow status + quick-send strip) at
+ * least at their content height. The textarea absorbs extra height and scrolls
+ * its own text; when the panel is dragged shorter, the send section scrolls
+ * rather than cropping controls in a shrunken nested scroller. Rules live after
+ * the generic `.op-section > *` shrink guard and only target the send section,
+ * so params section scrolling is untouched. */
 .op-section-send {
   overflow-y: auto;
 }
 
 .op-section-send > .op-send-secondary {
-  flex: 0 1 auto;
+  /* Keep the command-entry row at its intrinsic height. When the panel is
+   * short, the send section owns scrolling; shrinking this nested scroller
+   * would clip the bottom border of the panel/configure buttons. */
+  flex: 0 0 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
