@@ -10,18 +10,23 @@
  *   都不在任何 writer 锁内执行——旧实现把它们放在单一全局 Mutex 里，另存一个大文件
  *   会把整个日志子系统（含所有端口的写入）堵住。为此 `list_files` 的端口反查只读
  *   会话登记表（writer 每次分配/滚动文件时登记），一个 writer 锁都不碰。
- * - 锁顺序：先 writers 表锁（只做快照/插入，随即释放）→ 再端口锁。任何路径都不在
+ * - 操作闸门 `RwLock<()>`：日常 I/O 共享读，迁移/换根/创建/关闭独占写；普通端口
+ *   写入仍可并行，显式迁移期间等待复制与句柄交接。公开入口只取闸门一次，内部不递归。
+ *   panic 路径只 try_read，不能等待自己尚未释放的生命周期锁。
+ * - 锁顺序：操作闸门 → 短设置快照/表快照 → 单端口锁 → 路径缓存。任何路径都不在
  *   持有端口锁时去抢表锁（`writer_snapshot` 先复制 Arc 再逐个加锁），因此不会死锁。
  * - 全部取锁走 mod 级 `lock_mutex` / `read_lock` / `write_lock`：日志子系统的职责是
  *   「尽力落盘」，因为别的线程 panic 而让后续写入连锁 panic（std 的 poison 传染）
  *   正好与这个职责相反。
  */
-use std::collections::{HashMap, VecDeque};
-use std::fs;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use super::migration::PreparedLogMigration;
 use super::settings::LogSettings;
 use super::writer::{PortLogWriter, WriterSpec};
 use super::{lock_mutex, read_lock, write_lock, LogFileInfo};
@@ -97,6 +102,9 @@ impl SessionPaths {
 }
 
 pub struct LogManager {
+    /// Shared for ordinary I/O; exclusive for directory/writer lifecycle changes.
+    /// Never reacquire this gate inside an already-gated operation.
+    operations: RwLock<()>,
     /// 当前设置快照（K3：日志设置的唯一来源）
     settings: RwLock<Arc<LogSettings>>,
     /// 活跃 writer，按端口索引；每端口一把独立的锁
@@ -124,6 +132,7 @@ impl LogManager {
 
     fn with_settings(settings: LogSettings) -> Self {
         Self {
+            operations: RwLock::new(()),
             settings: RwLock::new(Arc::new(settings)),
             writers: Mutex::new(HashMap::new()),
             session_paths: Mutex::new(SessionPaths::default()),
@@ -144,6 +153,7 @@ impl LogManager {
     ///   已打开的文件不换编码——否则同一个文件里会混入两种编码的字节；
     /// - 换目录会显式收尾活动 writer 并在新根下重解析重开（见 set_directory）。
     pub fn apply_settings(&self, settings: &LogSettings) {
+        let _operation = write_lock(&self.operations);
         let previous = self.settings();
         let mut next = settings.clone();
         if next.directory.is_empty() {
@@ -154,7 +164,7 @@ impl LogManager {
         *write_lock(&self.settings) = Arc::new(next.clone());
 
         if directory_changed {
-            if let Err(e) = self.set_directory(next.directory.clone()) {
+            if let Err(e) = self.set_directory_locked(next.directory.clone()) {
                 // 目标根不可用：把快照目录回滚，让 UI 与实际写入位置保持一致
                 // （否则又是「UI 列 A、实际写 B」）。
                 let mut reverted = (*self.settings()).clone();
@@ -174,14 +184,137 @@ impl LogManager {
         PathBuf::from(&self.settings().directory)
     }
 
+    /// Migrate files and active ownership as one serialized operation. Every
+    /// fallible copy/open/sync happens before changing writers or settings; after
+    /// commit, source cleanup is best-effort and never rolls the root back.
+    pub fn migrate_directory(&self, old_path: &Path, new_path: &Path) -> anyhow::Result<u32> {
+        self.migrate_directory_with(old_path, new_path, |source, target| fs::hard_link(source, target))
+    }
+
+    fn migrate_directory_with(
+        &self,
+        old_path: &Path,
+        new_path: &Path,
+        link: impl FnMut(&Path, &Path) -> io::Result<()>,
+    ) -> anyhow::Result<u32> {
+        let _operation = write_lock(&self.operations);
+        // Validate only after acquiring ownership: a queued migration must not
+        // move an obsolete root selected before another directory switch.
+        if !old_path.is_dir() { anyhow::bail!("Old log directory does not exist"); }
+        let source = old_path.canonicalize()?;
+        if source != self.get_directory().canonicalize()? {
+            anyhow::bail!("Old log directory is not the active log root");
+        }
+        fs::create_dir_all(new_path)?;
+        let destination = new_path.canonicalize()?;
+        if source == destination {
+            // A physical no-op can still change the root's lexical spelling.
+            // Normalize recorded paths without rotating into a new session; a
+            // subsequent set_config of this alias must remain a physical no-op.
+            let mut owners = Vec::new();
+            for (port_id, handle) in self.writer_snapshot() {
+                let canonical = lock_mutex(&handle).file_path().canonicalize()?;
+                let path = new_path.join(canonical.strip_prefix(&destination)?);
+                owners.push((port_id, handle, path));
+            }
+            let known = lock_mutex(&self.session_paths).snapshot();
+            let aliases: Vec<_> = known.into_iter().filter_map(|(path, port_id)| {
+                let canonical = path.canonicalize().ok()?;
+                Some((new_path.join(canonical.strip_prefix(&destination).ok()?), port_id))
+            }).collect();
+            for (_, handle, path) in &owners { lock_mutex(handle).relabel_path(path.clone()); }
+            let mut next = (*self.settings()).clone();
+            next.directory = new_path.to_string_lossy().into_owned();
+            *write_lock(&self.settings) = Arc::new(next);
+            let mut paths = lock_mutex(&self.session_paths);
+            paths.retain_root(new_path);
+            for (path, port_id) in aliases { paths.register(path, &port_id, false); }
+            for (port_id, _, path) in owners { paths.register(path, &port_id, true); }
+            return Ok(0);
+        }
+
+        let handles = self.writer_snapshot();
+        let mut active_sources = Vec::with_capacity(handles.len());
+        for (_, handle) in &handles {
+            let mut writer = lock_mutex(handle);
+            // Do not force out a half UTF-8/GBK character or pending CR. The
+            // assembler survives the handle handoff; all completed lines must
+            // nevertheless reach disk before staging starts.
+            writer.flush_and_sync()?;
+            active_sources.push(writer.file_path().canonicalize()?);
+        }
+        let active: HashSet<_> = active_sources.iter().cloned().collect();
+        let known = lock_mutex(&self.session_paths).snapshot();
+        let prepared = PreparedLogMigration::prepare(&source, new_path, &active, link)?;
+        let moved: HashMap<_, _> = prepared.files.iter()
+            .map(|entry| (entry.source.clone(), entry.target.clone())).collect();
+
+        // Multiple ports may share a filename when the template omits [com].
+        // Stage each physical source once, but prepare a distinct append handle
+        // for every writer. No open/clone can fail after publication begins.
+        let mut replacements = Vec::with_capacity(handles.len());
+        for active_source in &active_sources {
+            let target = if let Some(target) = moved.get(active_source) {
+                target.clone()
+            } else if let Ok(relative) = active_source.strip_prefix(&destination) {
+                // Already inside a child destination: retain that file and only
+                // normalize its recorded lexical root to match settings/listing.
+                new_path.join(relative)
+            } else {
+                anyhow::bail!("Active log was not prepared for migration: {}", active_source.display());
+            };
+            let file = OpenOptions::new().append(true).open(&target)?;
+            let size = file.metadata()?.len();
+            replacements.push((target, file, size));
+        }
+        let remapped: Vec<_> = known.into_iter().filter_map(|(old, port_id)| {
+            let canonical = old.canonicalize().ok()?;
+            let target = moved.get(&canonical)?.clone();
+            Some((old, target, port_id))
+        }).collect();
+
+        // Infallible commit: all I/O is already prepared and ordinary operations
+        // remain excluded by the gate until every owner/path has been rebound.
+        for ((_, handle), (path, file, size)) in handles.iter().zip(replacements) {
+            lock_mutex(handle).attach_existing_file(path, file, size);
+        }
+        let mut next = (*self.settings()).clone();
+        next.directory = new_path.to_string_lossy().into_owned();
+        *write_lock(&self.settings) = Arc::new(next);
+        let active_paths: Vec<_> = handles.iter().map(|(port_id, handle)|
+            (port_id, lock_mutex(handle).file_path().to_path_buf())).collect();
+        let migrated = prepared.commit();
+        // A cleanup failure can leave an inactive source copy inside a new
+        // parent root. Keep its original custom-template attribution as well.
+        let remapped: Vec<_> = remapped.into_iter().map(|(old, target, port_id)| {
+            let retained_source = old.starts_with(new_path) && old.is_file();
+            (old, target, port_id, retained_source)
+        }).collect();
+        {
+            let mut paths = lock_mutex(&self.session_paths);
+            paths.retain_root(new_path);
+            for (old, target, port_id, retained_source) in remapped {
+                paths.remove(&old);
+                if retained_source { paths.register(old, &port_id, false); }
+                paths.register(target, &port_id, false);
+            }
+            for (port_id, path) in active_paths { paths.register(path, port_id, true); }
+        }
+        Ok(migrated)
+    }
+
     /// 切换日志根目录。活动 writer 先显式 flush + sync 旧文件，再在新根下按同一策略
     /// 重新解析并重开文件（S-B4）——否则 UI 列的是新目录、实际却继续写旧目录的文件。
     /// 幂等：已经在新根下的 writer 不动，重复调用无副作用。
     ///
-    /// 为什么不是「拒绝在活动 writer 存在时切换」：前端换目录的流程是
-    /// migrate_log_directory（先把 .log 搬到新目录）→ set_config（再切目录）。
-    /// 若这里拒绝，用户会看到「文件已经搬走了但目录没换」的撕裂状态，比重开文件更糟。
+    /// 此接口只换写入根，不搬历史。显式文件迁移必须走 migrate_directory 的
+    /// 准备/提交协议；前端随后 set_config 再应用同一根时保持幂等。
     pub fn set_directory(&self, path: String) -> anyhow::Result<()> {
+        let _operation = write_lock(&self.operations);
+        self.set_directory_locked(path)
+    }
+
+    fn set_directory_locked(&self, path: String) -> anyhow::Result<()> {
         let new_root = PathBuf::from(path);
         // 根不可用就整个失败（调用方 apply_settings 会把快照目录回滚），
         // 绝不留下「快照指向新目录、写入还在旧目录」的半迁移状态。
@@ -244,53 +377,26 @@ impl LogManager {
         encoding: &str,
         force_new_file: bool,
     ) -> anyhow::Result<()> {
+        let _operation = write_lock(&self.operations);
         let settings = self.settings();
         let spec = WriterSpec::from_settings(&settings, format, encoding);
-        let writer = PortLogWriter::open(
-            &spec,
-            Path::new(&settings.directory),
-            port_id,
-            force_new_file,
-        )?;
-        let path = writer.file_path().to_path_buf();
-
-        // Keep the old writer registered until its final flush succeeds. Holding the
-        // writers-table lock across this short finalization also prevents a concurrent
-        // close from removing the old handle between our read and replacement.
-        let mut writers = lock_mutex(&self.writers);
-        let old_path_and_size = if let Some(old_handle) = writers.get(port_id).cloned() {
+        // Finish the old owner before allocating a replacement. An append
+        // allocation may be the very same file: never remove it as "new-file"
+        // cleanup after a failed flush. The operation gate keeps ownership stable.
+        let old_path_and_size = if let Some(old_handle) = self.writer_handle(port_id) {
             let mut old = lock_mutex(&old_handle);
-            let old_path = old.file_path().to_path_buf();
-            let now = chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string();
-            if let Err(error) = old.flush_rx_tail(&now).and_then(|()| old.flush_and_sync()) {
-                drop(old);
-                // The replacement never became authoritative: delete the newly
-                // allocated empty file instead of leaving a phantom in list_files.
-                drop(writers);
-                drop(writer);
-                let _ = fs::remove_file(&path);
-                return Err(error);
-            }
-            let old_size = old.current_size();
-            drop(old);
-            writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
-            Some((old_path, old_size))
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            old.flush_rx_tail(&now)?;
+            old.flush_and_sync()?;
+            Some((old.file_path().to_path_buf(), old.current_size()))
         } else {
-            writers.insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
             None
         };
-        drop(writers);
-        // A concurrent directory change after the settings snapshot would leave
-        // this writer in the old root while get_directory() reports the new one.
-        if self.settings().directory != settings.directory {
-            let _ = self.close_writer(port_id);
-            let _ = fs::remove_file(&path);
-            return Err(anyhow::anyhow!(
-                "log directory changed while creating writer for {port_id}"
-            ));
-        }
+        let writer = PortLogWriter::open(
+            &spec, Path::new(&settings.directory), port_id, force_new_file,
+        )?;
+        let path = writer.file_path().to_path_buf();
+        lock_mutex(&self.writers).insert(port_id.to_string(), Arc::new(Mutex::new(writer)));
         self.register_path(path.clone(), port_id, true);
         if let Some((old_path, old_size)) = old_path_and_size {
             // Append mode may reopen the same empty file; it is still owned by the new writer.
@@ -311,6 +417,7 @@ impl LogManager {
         direction: &str,
         data: &[u8],
     ) -> anyhow::Result<()> {
+        let _operation = read_lock(&self.operations);
         if !self.settings().auto_save {
             return Ok(());
         }
@@ -334,6 +441,7 @@ impl LogManager {
     /// 尾部滞留超过 250ms（自其首字节驻留起算）时，下一个事件到来先把它冲刷成行，
     /// 保证长时间停顿的半行不会无限滞留。
     pub fn write_rx(&self, port_id: &str, timestamp: &str, data: &[u8]) -> anyhow::Result<()> {
+        let _operation = read_lock(&self.operations);
         if !self.settings().auto_save {
             return Ok(());
         }
@@ -400,6 +508,7 @@ impl LogManager {
     /// 强制刷新所有活跃 writer 到磁盘（flush + sync_all）。panic hook 与关闭流程调用；
     /// 任何单个端口的失败只告警，不影响其它端口。
     pub fn flush_all(&self) -> anyhow::Result<()> {
+        let _operation = read_lock(&self.operations);
         for (port_id, handle) in self.writer_snapshot() {
             let mut writer = lock_mutex(&handle);
             let now = chrono::Local::now()
@@ -419,6 +528,14 @@ impl LogManager {
     /// hold (the hook runs before unwinding releases guards). Skip such writers
     /// instead of self-deadlocking the crash report.
     pub fn flush_all_best_effort(&self) {
+        let _operation = match self.operations.try_read() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                log::warn!("Panic flush skipped: log lifecycle operation is in progress");
+                return;
+            }
+        };
         let handles: Vec<(String, Arc<Mutex<PortLogWriter>>)> = match self.writers.try_lock() {
             Ok(writers) => writers
                 .iter()
@@ -450,6 +567,11 @@ impl LogManager {
     /// 关闭串口日志。writer 只有在 RX 尾部与最终 flush/sync 全部成功后才从
     /// registry 移除；失败时保持所有权，使调用方可以重试而后续写入不丢失。
     pub fn close_writer(&self, port_id: &str) -> anyhow::Result<()> {
+        let _operation = write_lock(&self.operations);
+        self.close_writer_locked(port_id)
+    }
+
+    fn close_writer_locked(&self, port_id: &str) -> anyhow::Result<()> {
         let mut writers = lock_mutex(&self.writers);
         let Some(handle) = writers.get(port_id).cloned() else {
             return Ok(());
@@ -473,10 +595,11 @@ impl LogManager {
     /// Finalize every active writer. A failed writer remains registered for retry while
     /// other ports are still drained.
     pub fn close_all(&self) -> anyhow::Result<()> {
+        let _operation = write_lock(&self.operations);
         let port_ids: Vec<String> = lock_mutex(&self.writers).keys().cloned().collect();
         let mut first_error = None;
         for port_id in port_ids {
-            if let Err(error) = self.close_writer(&port_id) {
+            if let Err(error) = self.close_writer_locked(&port_id) {
                 log::error!("Failed to close log writer for {port_id}: {error}");
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -532,6 +655,7 @@ impl LogManager {
     /// 尾部（拷贝的是「flush 那一刻之后 + 拷贝期间新增」的近似快照），这是可接受的：
     /// 阻塞落盘比多几行尾部数据严重得多。
     pub fn save_log_as(&self, port_id: &str, target_path: &str) -> anyhow::Result<()> {
+        let _operation = read_lock(&self.operations);
         let copy_to_target = |source: &Path| -> anyhow::Result<()> {
             let source_canon = source.canonicalize()?;
             // Copying a file onto itself truncates it before the copy reads it
@@ -560,7 +684,7 @@ impl LogManager {
         }
 
         // 无活跃 writer → 回退：在日志目录中查找该端口最新的日志文件
-        let files = self.list_files()?;
+        let files = self.list_files_locked()?;
         let best = files
             .iter()
             .filter(|f| f.port_id == port_id)
@@ -585,13 +709,18 @@ impl LogManager {
     /// 全程不碰任何 writer 锁：旧实现要在单一全局 Mutex 里递归 `read_dir`，
     /// 一个大目录或一个正在落盘的端口就能把整个列表卡住（S-B5）。
     pub fn list_files(&self) -> anyhow::Result<Vec<LogFileInfo>> {
+        let _operation = read_lock(&self.operations);
+        self.list_files_locked()
+    }
+
+    fn list_files_locked(&self) -> anyhow::Result<Vec<LogFileInfo>> {
         // 先复制一份登记表再遍历：遍历是 IO，不持锁做
         let known = lock_mutex(&self.session_paths).snapshot();
         let root = PathBuf::from(&self.settings().directory);
 
         let mut files = Vec::new();
         if root.exists() {
-            collect_log_files(&root, 0, &known, &mut files)?;
+            collect_log_files(&root, &known, &mut files)?;
         }
         // Metadata IO stays outside registry/writer locks. Only definite
         // NotFound removes historical cache entries; permission/IO failures do
@@ -626,12 +755,20 @@ impl LogManager {
     }
 }
 
-/// 递归收集日志文件。子目录 `read_dir` 失败只告警跳过（防御性），根目录失败仍上抛。
-fn collect_log_files(
+/// Recursively collect files below a log root. This is shared with the log-directory
+/// migration command so listing and migration cannot silently disagree about nested
+/// date/port subdirectories. Subdirectory `read_dir` failures are defensive skips;
+/// a failure at the requested root is returned.
+pub(crate) fn collect_log_paths(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    collect_log_paths_inner(root, 0, &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_log_paths_inner(
     dir: &Path,
     depth: usize,
-    known: &HashMap<PathBuf, String>,
-    files: &mut Vec<LogFileInfo>,
+    paths: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
     if depth > MAX_LIST_DEPTH {
         log::warn!("Log subdirectory walk exceeded depth {MAX_LIST_DEPTH} at {dir:?}");
@@ -667,19 +804,39 @@ fn collect_log_files(
             }
         };
         if metadata.is_dir() {
-            collect_log_files(&path, depth + 1, known, files)?;
+            collect_log_paths_inner(&path, depth + 1, paths)?;
         } else if metadata.is_file() {
-            let port_id = known
-                .get(&path)
-                .cloned()
-                .unwrap_or_else(|| fallback_port_id(&path));
-            files.push(LogFileInfo {
-                path: path.to_string_lossy().to_string(),
-                port_id,
-                created_at: file_timestamp(&metadata),
-                size: metadata.len(),
-            });
+            paths.push(path);
         }
+    }
+    Ok(())
+}
+
+/// 递归收集日志文件。子目录 `read_dir` 失败只告警跳过（防御性），根目录失败仍上抛。
+fn collect_log_files(
+    dir: &Path,
+    known: &HashMap<PathBuf, String>,
+    files: &mut Vec<LogFileInfo>,
+) -> anyhow::Result<()> {
+    for path in collect_log_paths(dir)? {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                log::warn!("Failed to stat log entry {path:?}: {e}");
+                continue;
+            }
+        };
+        let port_id = known
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| fallback_port_id(&path));
+        files.push(LogFileInfo {
+            path: path.to_string_lossy().to_string(),
+            port_id,
+            created_at: file_timestamp(&metadata),
+            size: metadata.len(),
+        });
     }
     Ok(())
 }
@@ -743,6 +900,10 @@ impl LogManager {
         self.writer_handle(port_id)
     }
 }
+
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
 
 #[cfg(test)]
 mod tests {

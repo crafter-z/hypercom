@@ -114,8 +114,8 @@ impl PortLogWriter {
         })
     }
 
-    /// 分片续片 / 换目录重开：**先把新文件开好**，成功后才替换当前文件。
-    /// 开文件失败时返回 Err 且旧 writer 原封不动——端口继续写旧文件，绝不出现
+    /// 分片续片 / 换目录重开：严格 flush/sync 旧文件，再开新文件，成功后才替换。
+    /// 刷盘或开文件失败时返回 Err 且旧 writer 原封不动——端口继续写旧文件，绝不出现
     /// 「分片失败即永久静默不落盘」；调用方负责把 Err 向上传播（S-B3）。
     pub(super) fn rotate(
         &mut self,
@@ -129,6 +129,9 @@ impl PortLogWriter {
         } else {
             FileMode::Append
         };
+        // Flush errors must preserve the old owner, not silently drop a buffer
+        // after opening its successor. Also makes append-to-same-file size exact.
+        self.flush_and_sync()?;
         let (file_path, file, existing_size) = match naming::allocate_file(
             root,
             &spec.subdir_mode,
@@ -142,17 +145,27 @@ impl PortLogWriter {
                 return Err(e);
             }
         };
-        // 旧文件的缓冲显式落盘，不依赖 BufWriter::Drop（Drop 里的错误只能被丢弃）：
-        // 新文件已就绪，此处失败只告警——不把写路径卡在旧文件上，端口才更快恢复落盘。
-        if let Err(e) = self.flush_and_sync() {
-            log::warn!("Log file final flush failed before rotate ({port_id}): {e}");
-        }
         self.writer = BufWriter::new(file);
         self.file_path = file_path;
         self.current_size = existing_size;
         self.spec = spec.clone();
         self.split_backoff_until = None;
         Ok(())
+    }
+
+    /// Commit a prepared append handle after a directory migration. Preparation
+    /// already strictly flushed/synced the old file; retain RX assembly and all
+    /// locked format/encoding/prefix settings across the infallible handoff.
+    pub(super) fn attach_existing_file(&mut self, path: PathBuf, file: File, size: u64) {
+        self.writer = BufWriter::new(file);
+        self.file_path = path;
+        self.current_size = size;
+    }
+
+    /// Same physical root, different lexical spelling (e.g. a junction alias).
+    /// No new file/session and no loss of buffered bytes or RX assembly state.
+    pub(super) fn relabel_path(&mut self, path: PathBuf) {
+        self.file_path = path;
     }
 
     pub(super) fn file_path(&self) -> &Path {
@@ -295,10 +308,7 @@ impl PortLogWriter {
     /// flush 后再 sync_all，确保 OS 把缓冲落盘（关闭 / 另存 / 换文件前的关键路径）
     pub(super) fn flush_and_sync(&mut self) -> anyhow::Result<()> {
         self.writer.flush()?;
-        // try_clone 失败（句柄不可克隆）不是致命问题：数据至少已进入 OS 页缓存
-        if let Ok(file) = self.writer.get_ref().try_clone() {
-            file.sync_all()?;
-        }
+        self.writer.get_ref().sync_all()?;
         Ok(())
     }
 }

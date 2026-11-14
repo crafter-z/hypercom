@@ -7,7 +7,8 @@
  * - `naming`：文件名模板、子目录策略、目标文件分配（含路径遍历防御）
  * - `assembler`：字节级 RX 行聚合（与前端 `src/utils/rxAssembler.ts` 同语义）
  * - `writer`：单端口写入器（编码、格式、分片滚动、尾部冲刷）
- * - `manager`：`LogManager` —— 细粒度锁的对外门面（设置、创建/关闭、写路径、列举、另存）
+ * - `manager`：`LogManager` —— 操作闸门与细粒度锁门面（设置、创建/关闭、写入、列举、另存、迁移）
+ * - `migration`：不覆盖的文件准备/回滚与提交后源清理（writer 所有权交接由 manager 负责）
  *
  * 锁与并发口径统一在 `manager` 的文件头注释里；本文件只提供全模块共用的
  * 「忽略 poison 的取锁」助手——std 的 Mutex/RwLock 在其它线程 panic 后会永久
@@ -17,6 +18,7 @@
 
 mod assembler;
 mod manager;
+mod migration;
 mod naming;
 mod settings;
 mod writer;
