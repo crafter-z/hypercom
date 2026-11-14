@@ -10,7 +10,7 @@
  */
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use base64::Engine as _;
 use tauri::Manager;
@@ -19,7 +19,10 @@ use tokio::sync::Semaphore;
 use crate::commands::CommandError;
 use crate::AppState;
 
-static PLUGIN_DIALOG_BUDGETS: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
+// Weak values preserve the per-plugin cap while a picker/permit is alive, but
+// allow the entry to retire once the plugin has no in-flight dialog. A strong
+// map here would leak one semaphore for every plugin id ever opened.
+static PLUGIN_DIALOG_BUDGETS: LazyLock<Mutex<HashMap<String, Weak<Semaphore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const MAX_LIVE_PLUGIN_DIALOGS: usize = 8;
 
@@ -27,10 +30,15 @@ fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError>
     let mut budgets = PLUGIN_DIALOG_BUDGETS
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    Ok(budgets
-        .entry(plugin_id.to_string())
-        .or_insert_with(|| Arc::new(Semaphore::new(MAX_LIVE_PLUGIN_DIALOGS)))
-        .clone())
+    // Weak values alone would still retain every historical id/control block.
+    // Prune expired entries on admission so metadata follows live concurrency.
+    budgets.retain(|_, budget| budget.strong_count() > 0);
+    if let Some(semaphore) = budgets.get(plugin_id).and_then(Weak::upgrade) {
+        return Ok(semaphore);
+    }
+    let semaphore = Arc::new(Semaphore::new(MAX_LIVE_PLUGIN_DIALOGS));
+    budgets.insert(plugin_id.to_string(), Arc::downgrade(&semaphore));
+    Ok(semaphore)
 }
 
 /// Authoritative check used by every plugin file/directory command: the plugin
@@ -388,6 +396,14 @@ pub async fn plugin_pick_files(
             let picked = read_picked_file(file_path)?;
             files.push(picked);
         }
+        // Reading can be arbitrarily long (there is deliberately no business
+        // size limit). Recheck after the final byte is read so a revoke or
+        // install replacement that races the blocking read cannot deliver the
+        // selected contents to the old worker.
+        let current_generation = plugin_permission_generation(&state, &plugin_id, "fs:open")?;
+        if current_generation != install_generation {
+            return Err(CommandError::Other("插件文件读取权限已撤销".into()));
+        }
         Ok(PluginPickedFiles { files })
     })
     .await
@@ -414,6 +430,32 @@ static PLUGIN_DIRECTORY_GRANTS: LazyLock<Mutex<HashMap<String, PluginDirectoryGr
 
 const MAX_PLUGIN_DIRECTORY_GRANT_ID_CHARS: usize = 128;
 const MAX_PLUGIN_DIRECTORY_REL_CHARS: usize = 4096;
+
+/// Native pickers may return a symlink/junction path. Canonicalizing first would
+/// silently turn that into a grant for the link target, contrary to the directory
+/// capability's no-reparse policy. Check the selected path and every existing
+/// ancestor before canonicalization.
+fn reject_linked_directory_source(path: &Path) -> Result<(), CommandError> {
+    let mut current = path.to_path_buf();
+    loop {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if crate::plugin::is_link_or_reparse(&metadata) => {
+                return Err(CommandError::Other(
+                    "选择的目录路径含链接或重解析点".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CommandError::Io(format!("目录不可达: {error}")));
+            }
+            Err(error) => return Err(CommandError::Io(format!("目录不可达: {error}"))),
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    Ok(())
+}
 
 fn create_directory_grant(
     plugin_id: &str,
@@ -931,6 +973,7 @@ pub async fn plugin_pick_directory(
             let path = folder
                 .into_path()
                 .map_err(|e| CommandError::Other(format!("选择的目录路径不可用: {e}")))?;
+            reject_linked_directory_source(&path)?;
             let display_path = path.display().to_string();
             let canonical = path
                 .canonicalize()
@@ -1447,10 +1490,28 @@ mod tests {
         image_mime_from_ext, list_plugin_directory, read_image_data_url, read_picked_file,
         read_plugin_directory_file, remove_plugin_directory_entry, rename_plugin_directory_entry,
         revoke_plugin_directory_grants, sanitize_directory_rel, stat_plugin_directory_entry,
-        write_plugin_directory_file,
+        write_plugin_directory_file, plugin_dialog_budget, PLUGIN_DIALOG_BUDGETS,
     };
     #[cfg(unix)]
-    use crate::commands::file::resolve_directory_target;
+    use crate::commands::file::{reject_linked_directory_source, resolve_directory_target};
+
+    #[test]
+    fn dialog_budget_lives_with_owned_permits_and_retires_expired_plugin_ids() {
+        let id = format!("com.example.budget-{}", uuid::Uuid::new_v4());
+        let first = plugin_dialog_budget(&id).unwrap();
+        let second = plugin_dialog_budget(&id).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        let permit = first.clone().try_acquire_owned().unwrap();
+        drop(first);
+        drop(second);
+        let active = plugin_dialog_budget(&id).unwrap();
+        assert_eq!(active.available_permits(), 7);
+        drop(active);
+        drop(permit);
+        let next_id = format!("com.example.budget-next-{}", uuid::Uuid::new_v4());
+        let _next = plugin_dialog_budget(&next_id).unwrap();
+        assert!(!PLUGIN_DIALOG_BUDGETS.lock().unwrap().contains_key(&id));
+    }
 
     /// 1x1 PNG 头部字节。函数不做 PNG 解析，仅验证 base64 往返一致。
     const TINY_PNG: &[u8] =
@@ -1663,6 +1724,18 @@ mod tests {
         assert!(err.to_string().contains("ordinary file"));
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(&target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_picker_rejects_symlinked_root_before_canonicalizing() {
+        let dir = ReplayTempDir::new();
+        let target = dir.path().join("real");
+        let link = dir.path().join("linked");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(reject_linked_directory_source(&link).is_err());
+        assert!(reject_linked_directory_source(&target).is_ok());
     }
 
     #[test]

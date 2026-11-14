@@ -123,7 +123,10 @@ pub(crate) fn sweep_collect(root: &Path, config: &AppConfig) -> io::Result<Vec<P
                 // Unidentifiable tree: keep it rather than delete data we cannot name.
                 continue;
             };
-            let live = root.join(&id).is_dir();
+            // `Path::is_dir` follows links. A swapped junction/symlink must
+            // not make an unsafe live path look present and authorize deleting
+            // the only ordinary backup tree.
+            let live = matches!(regular_dir(&root.join(&id)), Ok(true));
             let configured = config.entities.plugin_configs.iter().any(|entry| entry.id == id);
             if configured && !live { continue; }
         }
@@ -165,6 +168,18 @@ pub(crate) fn cleanup_orphan_staging(root: &Path) -> io::Result<()> {
         let path = entry.path();
         if !regular_dir(&path)? {
             return Err(io::Error::other("Orphan staging is not an ordinary directory"));
+        }
+        // A journal-less orphan normally predates the first transaction phase,
+        // but a crash/corruption can still leave the only private-data copy in
+        // staging. Keep that tree under its original `.staging-*` name so the
+        // sweep's private-data guard can preserve it; never rename it to
+        // `.trash-*`, whose normal reclamation would delete the data.
+        if staging_holds_private_data(&path) {
+            log::warn!(
+                "Keeping orphan plugin staging tree {} because it may hold the only copy of private data",
+                path.display()
+            );
+            continue;
         }
         // Reclamation is best-effort: a locked orphan must not fail list/install.
         if let Err(error) = quarantine(root, &path) {
@@ -399,9 +414,14 @@ mod tests {
         let orphan = plugins.join(format!(".staging-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&orphan).unwrap();
         fs::write(orphan.join("partial"), "partial").unwrap();
+        let private = plugins.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(private.join("data")).unwrap();
+        fs::write(private.join("data/only-copy"), "private").unwrap();
         fs::create_dir(plugins.join(".staging-not-a-uuid")).unwrap();
         cleanup_orphan_staging(&plugins).unwrap();
         assert!(!orphan.exists());
+        assert!(private.join("data/only-copy").exists());
+        assert!(private.exists());
         assert!(plugins.join(".staging-not-a-uuid").exists());
         // Cleanup only renames: the recursive delete is deferred to the sweep.
         let quarantined = fs::read_dir(&plugins).unwrap()

@@ -897,6 +897,28 @@ pub async fn set_plugin_enabled(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
     }
+    // Enabling is a package admission boundary, not just a config toggle:
+    // validate all declared view resources before committing enabled=true. Keep
+    // the potentially expensive resource walk outside config_manager, then
+    // recheck the generation under the lock before persisting the state.
+    let enable_manifest = if enabled {
+        let manifest_dir = {
+            let manager = state
+                .config_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            require_generation(manager.get_config(), &id, &expected_generation)?;
+            plugin_dir(manager.plugins_dir(), &id)?
+        };
+        let manifest = plugin::load_manifest_from_dir(&manifest_dir)
+            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+        if manifest.id != id {
+            return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
+        }
+        Some(manifest)
+    } else {
+        None
+    };
     let result = {
         let mut manager = state
             .config_manager
@@ -904,12 +926,12 @@ pub async fn set_plugin_enabled(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         require_generation(manager.get_config(), &id, &expected_generation)?;
         if enabled {
-            let manifest = plugin::load_manifest_lite(&plugin_dir(manager.plugins_dir(), &id)?)
-                .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-            if manifest.id != id {
-                return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
-            }
-            require_trusted_web_consent(&manifest, state_of(manager.get_config(), &id).unwrap())?;
+            let manifest = enable_manifest
+                .as_ref()
+                .ok_or_else(|| CommandError::Other("插件 manifest 校验状态丢失".into()))?;
+            let entry = state_of(manager.get_config(), &id)
+                .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+            require_trusted_web_consent(manifest, entry)?;
         }
         manager
             .begin_plugin_recovery_marker()
