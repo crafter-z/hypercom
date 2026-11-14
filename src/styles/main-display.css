@@ -62,10 +62,37 @@
 
 /* ==================== Pane Resize Handle ==================== */
 .pane-resize-handle {
+  position: relative;
   flex-shrink: 0;
   background: var(--border-color);
   transition: background var(--transition-fast);
   z-index: 10;
+}
+
+.pane-resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 3px;
+  background: var(--text-secondary);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.pane-branch-row > .pane-resize-handle::after {
+  width: 3px;
+  height: 24px;
+}
+
+.pane-branch-column > .pane-resize-handle::after {
+  width: 24px;
+  height: 3px;
+}
+
+.pane-resize-handle:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -1px;
 }
 
 /* (0,2,0) beats the base rule above — no !important needed. */

@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useOutsideDismiss } from '../shared/useOutsideDismiss';
+import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../i18n';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
-import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer } from 'lucide-react';
+import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer, Info } from 'lucide-react';
 import { useSystemStatus } from '../../hooks';
 import { readJsHeapMb } from '../../utils/jsHeap';
 import DisconnectBanner from './DisconnectBanner';
@@ -56,6 +58,11 @@ const StatusBar: React.FC = () => {
   useSystemStatus(5000);
 
   const [now, setNow] = useState(new Date());
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsRef = useRef<HTMLDivElement>(null);
+  const closeDetails = useCallback(() => setDetailsOpen(false), []);
+  useOutsideDismiss(detailsRef, closeDetails, detailsOpen);
+  const detailsReady = usePluginViewOverlay(detailsOpen);
 
   // F.4: rate + duration state (updated once per second, NOT on every serial event)
   const [rateDisplay, setRateDisplay] = useState<RateDisplay | null>(null);
@@ -143,33 +150,36 @@ const StatusBar: React.FC = () => {
     <DisconnectBanner />
     <footer className="statusbar">
       <div className="statusbar-left">
-        <span className="statusbar-item">
+        {activePortId && (
+          <span className="statusbar-item statusbar-value statusbar-primary statusbar-port" title={activePortId}>
+            {activePortId}
+          </span>
+        )}
+        <span className="statusbar-item statusbar-secondary statusbar-system-state">
           <span className={systemStatus.status === 'high_load' ? 'statusbar-dot warning' : 'statusbar-dot'} />
           {systemStatus.status === 'high_load' ? t('statusBar.highLoad') : t('statusBar.normal')}
         </span>
         {connectedCount > 0 && (
-          <span className="statusbar-item statusbar-connected">
+          <span className="statusbar-item statusbar-connected statusbar-secondary">
             <PlugZap size={12} />
             {t('statusBar.connectedCount', { count: connectedCount })}
           </span>
         )}
-        {activePortId && (
-          <span className="statusbar-item statusbar-value">{activePortId}</span>
-        )}
-        <span className="statusbar-item" title={t('statusBar.processMem')}>
+        <span
+          className="statusbar-item statusbar-secondary statusbar-process"
+          title={`${t('statusBar.processMem')} ${systemStatus.memoryUsedMb}MB · CPU ${systemStatus.cpuUsage.toFixed(1)}%`}
+          aria-label={`${t('statusBar.processMem')} ${systemStatus.memoryUsedMb}MB · CPU ${systemStatus.cpuUsage.toFixed(1)}%`}
+        >
           <MemoryStick size={12} />
           {(() => { const jsHeap = readJsHeapMb(); return jsHeap > 0 ? `${t('statusBar.jsHeap')} ${jsHeap}MB · ` : ''; })()}
           {t('statusBar.processMem')} {systemStatus.memoryUsedMb}MB
-        </span>
-        <span className="statusbar-item">
-          <Cpu size={12} />
-          {systemStatus.cpuUsage.toFixed(1)}%
+          <Cpu size={12} /> {systemStatus.cpuUsage.toFixed(1)}%
         </span>
       </div>
 
       <div className="statusbar-right">
         {rateDisplay && (
-          <span className="statusbar-item statusbar-rate-group">
+          <span className="statusbar-item statusbar-rate-group statusbar-secondary" title={t('statusBar.rate.peak')}>
             <Timer size={12} />
             <span className="statusbar-duration">{rateDisplay.duration}</span>
             <span className="statusbar-rate-sep">|</span>
@@ -185,22 +195,37 @@ const StatusBar: React.FC = () => {
         )}
         {activeTraffic ? (
           <>
-            <span className="statusbar-item statusbar-tx">
+            <span className="statusbar-item statusbar-tx statusbar-primary">
               <ArrowUpCircle size={12} />
               TX: {formatBytes(activeTraffic.txTotal)}
             </span>
-            <span className="statusbar-item statusbar-rx">
+            <span className="statusbar-item statusbar-rx statusbar-primary">
               <ArrowDownCircle size={12} />
               RX: {formatBytes(activeTraffic.rxTotal)}
             </span>
           </>
         ) : activePortId ? (
-          <span className="statusbar-item">{t('statusBar.noTraffic')}</span>
+          <span className="statusbar-item statusbar-primary">{t('statusBar.noTraffic')}</span>
         ) : (
-          <span className="statusbar-item">{t('statusBar.noPortSelected')}</span>
+          <span className="statusbar-item statusbar-primary">{t('statusBar.noPortSelected')}</span>
         )}
-        <NotificationCenter />
-        <span className="statusbar-item">
+        <div className="statusbar-details" ref={detailsRef}>
+          <button type="button" className="icon-btn" aria-expanded={detailsOpen}
+            title={t('statusBar.details')} aria-label={t('statusBar.details')}
+            onClick={() => setDetailsOpen(open => !open)}><Info size={13} /></button>
+          {detailsOpen && detailsReady && <div className="statusbar-details-panel" role="dialog" aria-label={t('statusBar.details')}>
+            <strong>{t('statusBar.details')}</strong>
+            <span>{t('statusBar.processMem')}: {systemStatus.memoryUsedMb} MB · CPU {systemStatus.cpuUsage.toFixed(1)}%</span>
+            <span>{t('statusBar.jsHeap')}: {readJsHeapMb()} MB</span>
+            {rateDisplay && <>
+              <span>{rateDisplay.duration}</span>
+              <span>{t('statusBar.rate.rx')} {formatRate(rateDisplay.rxRate)} · {t('statusBar.rate.peak')} {formatRate(rateDisplay.peakRx)}</span>
+              <span>{t('statusBar.rate.tx')} {formatRate(rateDisplay.txRate)} · {t('statusBar.rate.peak')} {formatRate(rateDisplay.peakTx)}</span>
+            </>}
+          </div>}
+        </div>
+        <span className="statusbar-primary"><NotificationCenter /></span>
+        <span className="statusbar-item statusbar-secondary">
           {now.toLocaleTimeString(i18n.language === 'en-US' ? 'en-US' : 'zh-CN')}
         </span>
       </div>

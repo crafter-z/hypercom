@@ -5,7 +5,7 @@ import type { LucideIcon } from 'lucide-react';
 import type { ToastItem, ToastSeverity } from '../../../stores/useToastStore';
 import { useToastStore } from '../../../stores/useToastStore';
 
-const severityIcon: Record<ToastSeverity, LucideIcon> = {
+export const severityIcon: Record<ToastSeverity, LucideIcon> = {
   info: Info,
   success: CheckCircle2,
   warning: AlertTriangle,

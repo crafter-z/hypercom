@@ -88,6 +88,6 @@
 
 .context-menu-separator {
   height: 1px;
-  background: var(--border-color);
+  background: var(--border-subtle);
   margin: 4px 0;
 }

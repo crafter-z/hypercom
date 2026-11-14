@@ -25,6 +25,8 @@ const STATUS_LABEL_KEY: Record<string, string> = {
 
 interface SortablePortItemProps {
   port: SerialPort;
+  /** Active selection is independent from the port's connection state. */
+  isActive: boolean;
   isConnected: boolean;
 }
 
@@ -45,7 +47,7 @@ function portMetadataTitle(port: SerialPort): string | undefined {
  * (+alias/badges), a quiet monospace meta line, and the connect toggle.
  * Everything else lives in the right-click menu.
  */
-const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }) => {
+const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isConnected }) => {
   const { t } = useTranslation();
   const actions = useSidebarActions();
   const { show, showAt, element } = useContextMenu();
@@ -134,8 +136,9 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isConnected }
   return (
     <div ref={setNodeRef} style={style}>
       <div
-        className={`port-item${isConnected ? ' connected' : ''}`}
+        className={`port-item${isActive ? ' active' : ''}${isConnected ? ' connected' : ''}`}
         tabIndex={0}
+        aria-current={isActive ? 'true' : undefined}
         aria-label={`${port.alias || port.name} (${label})`}
         onDoubleClick={() => actions.openTab(port.id)}
         onContextMenu={(e) => show(e, items)}

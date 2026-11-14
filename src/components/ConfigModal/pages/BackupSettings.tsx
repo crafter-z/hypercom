@@ -105,13 +105,19 @@ const BackupSettings: React.FC = () => {
 
   return (
     <div className="config-page">
-      <h4 className="config-section-title">{t('backupSettings.exportImportTitle')}</h4>
-      <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 12px' }}>
-        {t('backupSettings.exportImportHint')}
-      </p>
-      <div className="config-row" style={{ gap: 8 }}>
-        <button className="btn btn-sm" onClick={handleExport}>{t('backupSettings.exportButton')}</button>
-        <button className="btn btn-sm" onClick={handleImport}>{t('backupSettings.importButton')}</button>
+      <p className="config-page-summary">{t('backupSettings.exportImportHint')}</p>
+      <div className="backup-actions-grid">
+        <section className="backup-action-card" aria-labelledby="backup-export-title">
+          <h3 id="backup-export-title" className="config-section-title">{t('backupSettings.exportTitle')}</h3>
+          <p className="config-field-hint">{t('backupSettings.exportHint')}</p>
+          <button className="btn btn-sm btn-primary" onClick={handleExport}>{t('backupSettings.exportButton')}</button>
+        </section>
+        <section className="backup-action-card backup-action-card-warning" aria-labelledby="backup-import-title">
+          <h3 id="backup-import-title" className="config-section-title">{t('backupSettings.importTitle')}</h3>
+          <p className="config-field-hint">{t('backupSettings.importHint')}</p>
+          <p className="config-field-warning">{t('backupSettings.importRisk')}</p>
+          <button className="btn btn-sm btn-danger" onClick={handleImport}>{t('backupSettings.importButton')}</button>
+        </section>
       </div>
     </div>
   );

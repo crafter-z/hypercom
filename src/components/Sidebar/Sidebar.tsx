@@ -34,6 +34,9 @@ const Sidebar: React.FC = () => {
   const ports = useAppStore((s) => s.ports);
   const portOrder = useAppStore((s) => s.portOrder);
   const groups = useAppStore((s) => s.groups);
+  // Selection is an explicit active-tab derivation; it must not follow the
+  // connected port or fall back to the last port in the rack.
+  const activePortId = useAppStore((s) => getActivePortId(s));
   const openTab = useAppStore((s) => s.openTab);
   const updatePort = useAppStore((s) => s.updatePort);
   const updateGroup = useAppStore((s) => s.updateGroup);
@@ -226,7 +229,8 @@ const Sidebar: React.FC = () => {
                     <SortablePortItem
                       key={port.id}
                       port={port}
-                      isConnected={port.status === 'connected'}
+                      isActive={activePortId === port.id}
+                       isConnected={port.status === 'connected'}
                     />
                   ))}
                 </SortableContext>
@@ -241,7 +245,8 @@ const Sidebar: React.FC = () => {
                     <SortablePortItem
                       key={port.id}
                       port={port}
-                      isConnected={port.status === 'connected'}
+                      isActive={activePortId === port.id}
+                       isConnected={port.status === 'connected'}
                     />
                   ))}
                 </SortableContext>

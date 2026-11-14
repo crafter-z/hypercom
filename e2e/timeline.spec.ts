@@ -19,7 +19,7 @@ const mock = `(() => {
       if(cmd==='list_plugins') return {revision:0,plugins:[],pluginConfigs:[]};
       if(cmd==='get_system_status') return {status:'normal',memoryUsedMb:0,cpuUsage:0};
       if(cmd==='plugin:app|version') return 'e2e';
-      if(cmd==='plugin:window|is_maximized') return false;
+      if(cmd==='plugin:window|is_maximized'||cmd==='plugin:window|is_always_on_top') return false;
       if(cmd==='plugin:event|listen') return next++;
       return null;
     }

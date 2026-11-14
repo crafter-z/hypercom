@@ -52,7 +52,7 @@ const ProtocolSettings: React.FC = () => {
       onSave={page.save}
       onRename={(id, name) => updateProtocolTemplate(id, { name })}
       renderHeaderExtra={(template) => (
-        <label className="checkbox-wrapper" style={{ fontSize: 11 }} onClick={e => e.stopPropagation()}>
+        <label className="checkbox-wrapper rule-header-enable" onClick={e => e.stopPropagation()}>
           <input
             type="checkbox"
             checked={template.isEnabled}

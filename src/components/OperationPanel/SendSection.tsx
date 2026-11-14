@@ -230,51 +230,70 @@ const SendSection: React.FC<SendSectionProps> = ({
       </div>
 
       <div className="op-send-row">
-        <textarea
-          ref={textareaRef}
-          className={`input op-send-input${inputErrorKey !== null ? ' is-error' : ''}`}
-          placeholder={
-            !isPortActive
-              ? t('sendSection.input.placeholder.noPort')
-              : sendIsHex
-              ? t('sendSection.input.placeholder.hex')
-              : t('sendSection.input.placeholder.active')
-          }
-          disabled={!isPortActive}
-          aria-invalid={inputErrorKey !== null}
-          value={sendInput}
-          onChange={(e) => setOpState({ sendInput: toEditableValue(e.target.value) })}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                insertNewlineAtCursor(); // Ctrl/Meta/Shift+Enter: ALWAYS newline
-              } else if (sendOnEnter) {
-                handleSend(); // plain Enter: sends only when setting on
-              } else {
-                insertNewlineAtCursor();
+        <div className="op-send-editor">
+          <div className="op-send-input-wrap">
+            <textarea
+              ref={textareaRef}
+              className={`input op-send-input${inputErrorKey !== null ? ' is-error' : ''}`}
+              placeholder={
+                !isPortActive
+                  ? t('sendSection.input.placeholder.noPort')
+                  : sendIsHex
+                  ? t('sendSection.input.placeholder.hex')
+                  : t('sendSection.input.placeholder.active')
               }
-            } else if (e.key === 'ArrowUp' && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              recallUp();
-            } else if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              recallDown();
-            }
-          }}
-        />
-        {/* 字节计数：非法 HEX 时（后端必然拒绝）显示原因而不是 "N B"（C4/K7）。 */}
-        <div
-          className={`chip op-send-byte-chip${inputErrorKey !== null ? ' is-error' : ''}`}
-          title={inputErrorKey !== null ? t(inputErrorKey) : byteCount.tooltip}
-        >
-          {inputErrorKey !== null ? (
-            t(inputErrorKey)
-          ) : (
-            <>
-              {byteCount.count} {t('op.send.bytesLabel')}
-            </>
-          )}
+              disabled={!isPortActive}
+              aria-invalid={inputErrorKey !== null}
+              value={sendInput}
+              onChange={(e) => setOpState({ sendInput: toEditableValue(e.target.value) })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                    insertNewlineAtCursor(); // Ctrl/Meta/Shift+Enter: ALWAYS newline
+                  } else if (sendOnEnter) {
+                    handleSend(); // plain Enter: sends only when setting on
+                  } else {
+                    insertNewlineAtCursor();
+                  }
+                } else if (e.key === 'ArrowUp' && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  recallUp();
+                } else if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  recallDown();
+                }
+              }}
+            />
+            {/* 字节计数：非法 HEX 时（后端必然拒绝）显示原因而不是 "N B"（C4/K7）。 */}
+            <div
+              className={`chip op-send-byte-chip${inputErrorKey !== null ? ' is-error' : ''}`}
+              title={inputErrorKey !== null ? t(inputErrorKey) : byteCount.tooltip}
+            >
+              {inputErrorKey !== null ? (
+                t(inputErrorKey)
+              ) : (
+                <>
+                  {byteCount.count} {t('op.send.bytesLabel')}
+                </>
+              )}
+            </div>
+          </div>
+          <div className="op-send-options" role="group" aria-label={t('sendSection.cardTitle')}>
+            <label className="checkbox-wrapper op-checkbox-compact">
+              <input type="checkbox" checked={sendIsHex} onChange={(e) => toggleHexMode(e.target.checked)} />
+              HEX
+            </label>
+            <label className="checkbox-wrapper op-checkbox-compact" title={t('sendSection.clearAfterSend')}>
+              <input
+                type="checkbox"
+                checked={clearSendInputAfterSend}
+                onChange={(e) => setConfig({ clearSendInputAfterSend: e.target.checked })}
+              />
+              {t('sendSection.clearAfterSend')}
+            </label>
+            <LineEndingSelect />
+          </div>
         </div>
         <div className="op-send-actions">
           <button
@@ -291,21 +310,6 @@ const SendSection: React.FC<SendSectionProps> = ({
             onStart={() => void startFileSend()}
             onCancel={cancelFileSend}
           />
-          <div className="op-send-options">
-            <label className="checkbox-wrapper op-checkbox-compact">
-              <input type="checkbox" checked={sendIsHex} onChange={(e) => toggleHexMode(e.target.checked)} />
-              HEX
-            </label>
-            <label className="checkbox-wrapper op-checkbox-compact" title={t('sendSection.clearAfterSend')}>
-              <input
-                type="checkbox"
-                checked={clearSendInputAfterSend}
-                onChange={(e) => setConfig({ clearSendInputAfterSend: e.target.checked })}
-              />
-              {t('sendSection.clearAfterSend')}
-            </label>
-            <LineEndingSelect />
-          </div>
         </div>
       </div>
 

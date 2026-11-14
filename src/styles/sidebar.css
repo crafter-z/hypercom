@@ -11,7 +11,7 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-subtle);
   user-select: none;
 }
 
@@ -37,7 +37,7 @@
   gap: var(--space-2);
   padding: var(--space-1) var(--space-2);
   background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   box-shadow: var(--edge-top);
 }
 
@@ -60,7 +60,7 @@
   display: flex;
   align-items: center;
   padding: var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .sidebar-search-icon {
@@ -152,6 +152,22 @@
    .status-dot (base.css) carries the heartbeat. */
 .port-item.connected,
 .port-item.connected:hover {
+  border-left-color: var(--status-connected);
+}
+
+/* Active selection is a focus affordance, not a connection indicator. A
+   disconnected active port remains selected without inheriting the live fill. */
+.port-item.active {
+  background: color-mix(in srgb, var(--accent-color) 12%, var(--bg-sidebar));
+  border-left-color: var(--accent-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 26%, transparent);
+}
+
+.port-item.active .port-item-name {
+  color: var(--text-active);
+}
+
+.port-item.active.connected {
   border-left-color: var(--status-connected);
 }
 
@@ -281,7 +297,7 @@
   gap: var(--space-1);
   padding: var(--space-1) var(--space-2);
   background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
   transition: background var(--transition-fast);
 }
@@ -444,7 +460,7 @@
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-tertiary);
   box-shadow: var(--edge-top);
 }

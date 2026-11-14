@@ -78,10 +78,12 @@
 .highlight-rule-editor__preview {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+.highlight-rule-editor__preview .rule-preview__samples {
+  margin-top: 4px;
 }
 
 .highlight-rule-editor__preview-value {

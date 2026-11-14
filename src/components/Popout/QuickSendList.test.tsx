@@ -129,6 +129,15 @@ describe('staged popout command list', () => {
     expect(container.querySelector<HTMLButtonElement>('.quicksend-row .editor-drag-handle')!.disabled).toBe(true);
   });
 
+  it('keeps draft controls in a labelled surface separate from command sending', () => {
+    const draft = container.querySelector<HTMLElement>('.quicksend-draft-panel');
+    expect(draft?.getAttribute('role')).toBe('region');
+    expect(draft?.getAttribute('aria-label')).toBe('quickSend.editSet');
+    expect(draft?.querySelector('.quicksend-draft-actions')).not.toBeNull();
+    expect(draft?.querySelector('.quicksend-send-btn')).toBeNull();
+    expect(container.querySelector('.quicksend-list .quicksend-send-btn')).not.toBeNull();
+  });
+
   it('renders the per-step wait as a labelled field with a unit, not a bare number', () => {
     act(() => { click('.quicksend-edit-btn'); });
     const field = container.querySelector('.after-delay-field')!;

@@ -20,6 +20,8 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - 新 splitPane：找焦点叶子 → 在父分支子数组里替换为含 [源叶(0.5), 新叶(0.5)] 的新分支（新分支继承源叶原 size）；焦点叶是根时整树替换（新分支 size = 1）。
 - 测试断言：`state.paneTree.type === 'branch'` 后 `as BranchPane` 再断 `children`——严禁 `state.panes[0]` / `state.panes.length`。
 
+`ResizeHandle` 也支持沿分屏方向用方向键微调；ARIA 当前比例直接由相邻 `paneTree` 节点尺寸派生，不另存布局状态。
+
 ## 标签页
 
 - `TabItem = SerialTabItem | PluginTabItem | ReplayTabItem`：回放标签持有 sessionId/trackId，不绑定发送端口；`getTabPortId` 对它返回 null，不回退到最近串口。三种 kind 的消费者必须显式判别，不能把非 serial 一律当 plugin。公共 `id` 是工作区 UUID，`paneTree`、`activeTabId`、拖拽、固定和关闭动作都引用这个 UUID，不再把端口号当作标签身份。串口标签为 `{ kind: 'serial', portId, ... }`；插件标签为 `{ kind: 'plugin', pluginId, installGeneration, viewId, boundPortId, instanceKey, restoreOnStartup, ... }`，其中 `boundPortId` 可为 `null`。

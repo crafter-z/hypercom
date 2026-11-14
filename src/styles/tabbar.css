@@ -5,7 +5,7 @@
   height: var(--tab-height);
   min-width: 0;
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   overflow: hidden;
 }
 
@@ -29,7 +29,7 @@
   position: relative;
   z-index: 1;
   background: var(--bg-secondary);
-  border-left: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-subtle);
 }
 
 /* Split-pane controls share the fixed action area with the plugin launcher. */
@@ -49,7 +49,7 @@
   min-width: 120px;
   max-width: 200px;
   background: var(--bg-secondary);
-  border-right: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-subtle);
   cursor: pointer;
   transition: background var(--transition-fast);
   white-space: nowrap;

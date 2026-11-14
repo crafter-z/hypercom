@@ -16,6 +16,7 @@ export function LineEndingSelect() {
   return (
     <select
       className="select op-line-ending-select"
+      aria-label={t('quickSend.lineEnding')}
       value={lineEnding}
       onChange={(e: ChangeEvent<HTMLSelectElement>) =>
         setOpState({ sendAppendLineEnding: e.target.value as LineEnding })

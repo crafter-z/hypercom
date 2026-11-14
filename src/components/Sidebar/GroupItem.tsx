@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PortGroup, SerialPort } from '../../types';
+import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import { useSidebarActions } from './SidebarActions';
 import { groupDroppableId } from './hooks/usePortDragEnd';
@@ -26,6 +27,7 @@ interface GroupItemProps {
 const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
   const { t } = useTranslation();
   const actions = useSidebarActions();
+  const activePortId = useAppStore((s) => getActivePortId(s));
   // Exclude hidden ports so "hide" actually works for grouped ports too
   // (they reappear in the hidden section when toggled visible).
   // Render in `group.portIds` order - that is the authoritative in-group order that
@@ -166,7 +168,8 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
               <SortablePortItem
                 key={port.id}
                 port={port}
-                isConnected={port.status === 'connected'}
+                isActive={activePortId === port.id}
+                 isConnected={port.status === 'connected'}
               />
             ))}
           </div>

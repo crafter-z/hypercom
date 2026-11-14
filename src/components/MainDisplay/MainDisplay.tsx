@@ -129,6 +129,7 @@ const MainDisplay: React.FC = () => {
                   // （左右并排）＝ 竖向手柄（col-resize / 拖 X）。此处曾取反，
                   // 并排分屏渲染出满宽横条、显示区溢出错乱。
                   direction={branch.direction}
+                  value={Math.round(child.size / (child.size + siblings[idx + 1].size) * 100)}
                   onResize={handleResize}
                 />
               )}

@@ -48,15 +48,16 @@ const DisplaySettings: React.FC = () => {
 
   return (
     <div className="config-page">
+      <p className="config-page-summary">{t('displaySettings.summary')}</p>
       <div className="config-row">
         <label>{t('displaySettings.defaultBaudRatesLabel')}</label>
         <input
-          className="input"
+          className="input config-flex-input"
           value={baudDraft}
           onChange={(e) => setBaudDraft(e.target.value)}
           onBlur={commitBaudDraft}
           onKeyDown={(e) => { if (e.key === 'Enter') commitBaudDraft(); }}
-          style={{ flex: 1 }}
+
         />
       </div>
 
@@ -92,11 +93,11 @@ const DisplaySettings: React.FC = () => {
           <div className="config-row">
             <label>{t('displaySettings.background.pathLabel')}</label>
             <input
-              className="input"
+              className="input config-flex-input"
               value={backgroundImage}
               placeholder={t('displaySettings.background.pathPlaceholder')}
               readOnly
-              style={{ flex: 1 }}
+
             />
             <button className="btn btn-sm" onClick={handleBrowseImage}>{t('displaySettings.background.browseButton')}</button>
           </div>
@@ -104,25 +105,23 @@ const DisplaySettings: React.FC = () => {
           <div className="config-row">
             <label>{t('displaySettings.background.opacityLabel')}</label>
             <NumericInput
-              className="input"
+              className="input config-number-input"
               value={backgroundImageOpacity}
               onCommit={(value) => setConfig({ backgroundImageOpacity: value })}
               min={CONFIG_BOUNDS.backgroundImageOpacity[0]} max={CONFIG_BOUNDS.backgroundImageOpacity[1]} step={1}
-              style={{ width: 80 }}
             />
-            <span>%</span>
+            <span className="config-unit">%</span>
           </div>
 
           <div className="config-row">
             <label>{t('displaySettings.background.blurLabel')}</label>
             <NumericInput
-              className="input"
+              className="input config-number-input"
               value={backgroundImageBlur}
               onCommit={(value) => setConfig({ backgroundImageBlur: value })}
               min={CONFIG_BOUNDS.backgroundImageBlur[0]} max={CONFIG_BOUNDS.backgroundImageBlur[1]} step={1}
-              style={{ width: 80 }}
             />
-            <span>px</span>
+            <span className="config-unit">px</span>
           </div>
         </>
       )}

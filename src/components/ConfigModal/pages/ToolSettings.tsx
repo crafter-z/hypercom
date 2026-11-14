@@ -4,6 +4,7 @@ import type { PortToolConfig } from '../../../types';
 import RuleSetAccordion from '../RuleSetAccordion';
 import { useEntityPage } from '../hooks/useEntityPage';
 import { Wrench } from 'lucide-react';
+import '../../../styles/rule-preview.css';
 
 /**
  * 外部工具配置页：管理端口号 → 命令行工具的映射关系。
@@ -39,50 +40,49 @@ const ToolSettings: React.FC = () => {
       onDelete={page.remove}
       onSave={page.save}
       onRename={(id, name) => updateConfig(id, { name })}
-      renderHeaderExtra={(config) => config.portId ? (
-        <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-terminal)', flexShrink: 0 }}>
-          {config.portId}
-        </span>
-      ) : null}
+      renderHeaderExtra={(config) => {
+        const empty = t('toolSettings.summaryEmpty');
+        const port = config.portId.trim() || empty;
+        const command = config.command.trim() || empty;
+        const summary = t('toolSettings.summary', { port, command });
+        return <span className="rule-header-extra" title={summary} onClick={e => e.stopPropagation()}>{summary}</span>;
+      }}
       renderEditor={(config) => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div className="config-row">
-            <label>{t('toolSettings.portLabel')}</label>
+        <div className="rule-settings-editor tool-settings-editor">
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`tool-port-${config.id}`}>{t('toolSettings.portLabel')}</label>
             <input
-              className="input"
+              id={`tool-port-${config.id}`}
+              className="input rule-settings-field rule-settings-terminal"
               value={config.portId}
               placeholder="COM5"
               onChange={e => updateConfig(config.id, { portId: e.target.value })}
-              style={{ flex: 1, fontFamily: 'var(--font-terminal)' }}
             />
           </div>
-          <div className="config-row">
-            <label>{t('toolSettings.commandLabel')}</label>
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`tool-command-${config.id}`}>{t('toolSettings.commandLabel')}</label>
             <input
-              className="input"
+              id={`tool-command-${config.id}`}
+              className="input rule-settings-field rule-settings-terminal"
               value={config.command}
               placeholder={t('toolSettings.commandPlaceholder')}
               onChange={e => updateConfig(config.id, { command: e.target.value })}
-              style={{ flex: 1, fontFamily: 'var(--font-terminal)' }}
             />
           </div>
-          <div className="config-row">
-            <label>{t('toolSettings.workdirLabel')}</label>
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`tool-workdir-${config.id}`}>{t('toolSettings.workdirLabel')}</label>
             <input
-              className="input"
+              id={`tool-workdir-${config.id}`}
+              className="input rule-settings-field rule-settings-terminal"
               value={config.workdir}
               placeholder={t('toolSettings.workdirPlaceholder')}
               onChange={e => updateConfig(config.id, { workdir: e.target.value })}
-              style={{ flex: 1, fontFamily: 'var(--font-terminal)' }}
             />
           </div>
           {config.command && config.portId && (
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-              <Wrench size={11} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-              {t('toolSettings.previewLabel')}:{' '}
-              <code style={{ fontFamily: 'var(--font-terminal)' }}>
-                {config.command.replace(/\{port\}/g, config.portId)}
-              </code>
+            <div className="rule-settings-note">
+              <Wrench size={11} aria-hidden="true" />
+              <span>{t('toolSettings.previewLabel')}: <code className="rule-settings-terminal">{config.command.replace(/\{port\}/g, config.portId)}</code></span>
             </div>
           )}
         </div>

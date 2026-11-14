@@ -17,7 +17,7 @@
 .command-settings :is(.input, .select, .btn-sm) { height: 22px; min-height: 22px; font-size: 12px; padding: 1px 5px; }
 .command-settings .btn-icon.btn-sm { width: 24px; height: 24px; min-height: 24px; padding: 0; flex-shrink: 0; }
 .command-set-editor { position: relative; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.command-run-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; border-bottom: 1px solid var(--border-color); color: var(--text-secondary); font-size: 11px; }
+.command-run-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: 11px; }
 .command-run-bar label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .command-run-bar .command-repeat-input { width: 48px; }
 .command-run-bar .command-round-gap-input { width: 66px; }
@@ -31,9 +31,9 @@
 .command-behavior-details > summary:focus-visible, .command-step-help > summary:focus-visible { outline: 2px solid var(--accent-color); }
 .command-help-content { position: absolute; z-index: 10; right: 0; top: 100%; width: 420px; max-width: 100%; max-height: 200px; overflow-y: auto; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-dialog); box-shadow: var(--shadow-md); color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .command-help-content p + p { margin-top: 6px; }
-.command-column-headings, .command-step-meta { display: grid; grid-template-columns: 20px 18px minmax(60px, 1fr) 102px 66px 58px 64px; align-items: center; gap: 3px; }
+.command-column-headings, .command-step-meta { display: grid; grid-template-columns: 20px 18px minmax(60px, 1fr) 102px 66px 58px 74px; align-items: center; gap: 3px; }
 .command-column-headings { padding: 1px 4px; color: var(--text-secondary); font-size: 11px; }
-.command-step-row { position: relative; min-width: 0; padding: 2px 4px; border-bottom: 1px solid var(--border-color); }
+.command-step-row { position: relative; min-width: 0; padding: 2px 4px; border-bottom: 1px solid var(--border-subtle); }
 .command-set-editor > .editor-sortable-row:last-of-type .command-step-row { border-bottom: none; }
 .command-step-row:hover { background: var(--bg-secondary); }
 .command-step-row:focus-within { background: var(--bg-secondary); box-shadow: inset 2px 0 var(--accent-color); }
@@ -59,7 +59,7 @@
 .command-sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0); white-space: nowrap !important; border: 0 !important; }
 @container (max-width: 520px) {
   .command-column-headings { display: none; }
-  .command-step-meta { grid-template-columns: 20px 18px minmax(70px, 1fr) 66px 60px; }
+  .command-step-meta { grid-template-columns: 20px 18px minmax(70px, 1fr) 66px 72px; }
   .command-step-handle { grid-column: 1; grid-row: 1; }
   .command-step-index { grid-column: 2; grid-row: 1; }
   .command-step-name { grid-column: 3 / 5; grid-row: 1; }

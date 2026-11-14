@@ -3,9 +3,10 @@
  * (font-variant-numeric on `.statusbar-item`).
  */
 .statusbar {
+  container-type: inline-size;
   height: var(--statusbar-height);
   background: var(--bg-secondary);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-subtle);
   box-shadow: var(--edge-top);
   display: flex;
   align-items: center;
@@ -21,6 +22,21 @@
   display: flex;
   align-items: center;
   gap: var(--space-4);
+  min-width: 0;
+}
+
+.statusbar-left { flex: 1 1 auto; overflow: hidden; }
+/* Notification and telemetry popovers escape this row above the status bar. */
+.statusbar-right { flex: 0 0 auto; overflow: visible; }
+.statusbar-primary { flex-shrink: 0; }
+.statusbar-secondary { flex-shrink: 1; }
+.statusbar-port { min-width: 0; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@container (max-width: 900px) {
+  .statusbar { gap: var(--space-2); }
+  .statusbar-left,
+  .statusbar-right { gap: var(--space-2); }
+  .statusbar-secondary { display: none; }
 }
 
 .statusbar-item {
@@ -68,12 +84,13 @@
   background: var(--status-error-solid);
   color: var(--text-on-accent);
   font-size: var(--text-sm);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
 .disconnect-banner.blink {
-  animation: disconnected-blink 1s ease-in-out infinite;
+  /* Briefly draw attention on first mount, then settle to a static warning. */
+  animation: disconnected-blink 1s ease-in-out 2;
 }
 
 @keyframes disconnected-blink {
@@ -108,6 +125,26 @@
 .tab-warning-icon {
   color: var(--status-error);
   flex-shrink: 0;
+}
+
+.statusbar-details { position: relative; display: flex; flex-shrink: 0; }
+.statusbar-details-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 10002;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: max-content;
+  max-width: min(360px, 90vw);
+  padding: var(--space-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-primary);
+  white-space: normal;
 }
 
 /* ==================== Connection Rate & Duration ==================== */

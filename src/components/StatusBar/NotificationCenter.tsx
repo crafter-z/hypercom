@@ -1,6 +1,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bell, Pin, Trash2, X } from 'lucide-react';
+import { severityIcon } from '../shared/Toast/Toast';
 import type { ToastItem } from '../../stores/useToastStore';
 import { useToastStore } from '../../stores/useToastStore';
 import { getTabPortId, useAppStore } from '../../stores/useAppStore';
@@ -73,7 +74,7 @@ const NotificationCenter: React.FC = () => {
       {centerOpen && overlayReady && (
         <div className="notify-panel" role="dialog" aria-label={t('notify.title')}>
           <div className="notify-header">
-            <span className="notify-title">{t('notify.title')}</span>
+            <span className="notify-title">{t('notify.title')} <span className="notify-title-count">{count}</span></span>
             <button
               type="button"
               className="notify-clear-all"
@@ -89,10 +90,13 @@ const NotificationCenter: React.FC = () => {
           ) : (
             <div className="notify-list">
               {all.map((toast) => {
+                const Icon = severityIcon[toast.severity];
                 const text = toast.messageKey ? t(toast.messageKey) : (toast.message ?? '');
+                const sourceTab = toast.portId ? tabs.find((item) => getTabPortId(item) === toast.portId) : undefined;
+                const hasSource = !!sourceTab;
                 const openSource = () => {
-                  if (!toast.portId) return;
-                  const tab = tabs.find((item) => getTabPortId(item) === toast.portId);
+                  if (!hasSource) return;
+                  const tab = sourceTab;
                   if (tab) {
                     setActiveTab(tab.id);
                     setCenterOpen(false);
@@ -101,20 +105,23 @@ const NotificationCenter: React.FC = () => {
                 return (
                   <div
                     key={toast.id}
-                    className={`notify-row notify-${toast.severity}`}
-                    role={toast.portId ? 'button' : 'group'}
-                    tabIndex={toast.portId ? 0 : -1}
-                    title={toast.portId ? t('notify.openSource') : undefined}
+                    className={`notify-row notify-${toast.severity}${hasSource ? ' notify-row-actionable' : ''}`}
+                    role={hasSource ? 'button' : 'group'}
+                    tabIndex={hasSource ? 0 : -1}
+                    title={hasSource ? t('notify.openSource') : undefined}
                     onClick={openSource}
                     onKeyDown={(event) => {
-                      if (!toast.portId) return;
+                      if (event.target !== event.currentTarget || !hasSource) return;
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault();
                         openSource();
                       }
                     }}
                   >
-                    {toast.title && <div className="notify-row-title">{toast.title}</div>}
+                    <div className="notify-row-heading">
+                      <span className={`notify-severity-icon notify-severity-${toast.severity}`}><Icon size={14} aria-hidden="true" /></span>
+                      {toast.title && <div className="notify-row-title">{toast.title}</div>}
+                    </div>
                     <div className="notify-row-msg">{text}</div>
                     <div className="notify-row-meta">
                       <span>{t(`toast.severity.${toast.severity}`)}</span>

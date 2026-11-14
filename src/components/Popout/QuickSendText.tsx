@@ -246,7 +246,7 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
         <span className={`quicksend-current-line${running ? ' is-running' : ''}`}>
           {t('quickSend.currentLine')}: {lineLabel}
         </span>
-        <div className="quicksend-run-buttons">
+        <div className="quicksend-run-buttons" role="group" aria-label={t('quickSend.runControls')}>
           <button
             type="button"
             className="quicksend-run-btn"

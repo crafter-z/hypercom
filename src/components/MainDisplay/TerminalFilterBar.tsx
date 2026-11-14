@@ -160,7 +160,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
             disabled={displayFormat !== 'string'}
             onChange={event => updateConfig({ hideAsciiNoise: event.target.checked })}
           />
-          {t('terminal.filter.hideAsciiNoise')}
+          <span className="terminal-noise-label">{t('terminal.filter.hideAsciiNoise')}</span>
         </label>
         <div className="terminal-filter-display-group">
           <button
@@ -203,7 +203,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
           </div>
         </div>
         <div className="terminal-bar-field" title={t('pane.toolbar.encodingLabel')}>
-          <label className="eyebrow" htmlFor={`terminal-encoding-${configId ?? portId}`}>
+          <label className="eyebrow terminal-encoding-label" htmlFor={`terminal-encoding-${configId ?? portId}`}>
             {t('pane.toolbar.encodingLabel')}
           </label>
           <select

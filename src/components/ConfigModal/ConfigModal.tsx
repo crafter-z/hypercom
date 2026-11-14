@@ -9,7 +9,7 @@ import { applyUiScale } from '../../utils/uiScale';
 import { listDirtyEntityKinds, subscribeEntityEditor } from '../../utils/entityEditor';
 import { registerEditorParticipant, requestEditorLeave } from '../../utils/editorLeave';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X,
+  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X, Maximize2, Minimize2,
 } from 'lucide-react';
 import GeneralSettings from './pages/GeneralSettings';
 import LogSettings from './pages/LogSettings';
@@ -65,6 +65,8 @@ const ConfigModal: React.FC = () => {
   const navRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeNavRef = useRef<HTMLButtonElement | null>(null);
   const [saving, setSaving] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => { if (!isConfigOpen) setExpanded(false); }, [isConfigOpen]);
   const [dirty, setDirty] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const savingRef = useRef(false);
@@ -226,7 +228,7 @@ const ConfigModal: React.FC = () => {
       disableEscape={isHotkeyHelpOpen}
       labelledBy={CONFIG_TITLE_ID}
       overlayClassName="animate-fade-in"
-      dialogClassName="animate-slide-up"
+      dialogClassName={`animate-slide-up${expanded ? ' modal-dialog-expanded' : ''}`}
       dialogRef={dialogRef}
       initialFocusRef={activeNavRef}
       onOverlayClick={handleOverlayClick}
@@ -270,12 +272,21 @@ const ConfigModal: React.FC = () => {
 
       <div className="modal-content-area">
         <div className="modal-content-header">
-          <span className="modal-content-title">
-            {activeNav ? t(activeNav.labelKey) : ''}
-          </span>
-          <button className="btn btn-icon" disabled={saving} onClick={handleCancel} title={t('configModal.close')}>
-            <X size={16} />
-          </button>
+          <div className="modal-content-heading">
+            <span className="modal-content-title">
+              {activeNav ? t(activeNav.labelKey) : ''}
+            </span>
+          </div>
+          <div className="modal-header-actions">
+            <button type="button" className="btn btn-icon" onClick={() => setExpanded(value => !value)}
+              aria-pressed={expanded} title={t(expanded ? 'configModal.compact' : 'configModal.expand')}
+              aria-label={t(expanded ? 'configModal.compact' : 'configModal.expand')}>
+              {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
+            <button className="btn btn-icon" disabled={saving} onClick={handleCancel} title={t('configModal.close')} aria-label={t('configModal.close')}>
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
         <div
@@ -294,9 +305,12 @@ const ConfigModal: React.FC = () => {
           <div className="modal-save-error" role="alert">{t('configModal.saveFailed')}</div>
         )}
         <div className="modal-content-footer">
+          <span className="modal-save-scope" title={t('configModal.scope.globalSaveHint')}>
+            {t('configModal.scope.allDrafts')}
+          </span>
           {dirty && !saving && <span className="modal-dirty-hint">{t('configModal.unsaved')}</span>}
           <button className="btn" disabled={saving} onClick={handleCancel}>{t('configModal.cancel')}</button>
-          <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{t('configModal.save')}</button>
+          <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{t('configModal.globalSave')}</button>
         </div>
       </div>
     </Modal>

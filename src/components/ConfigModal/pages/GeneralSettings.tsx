@@ -38,6 +38,7 @@ const GeneralSettings: React.FC = () => {
 
   return (
     <div className="config-page">
+      <p className="config-page-summary">{t('generalSettings.summary')}</p>
       <div className="config-row">
         <label>{t('generalSettings.closeBehaviorLabel')}</label>
         <select
@@ -128,17 +129,19 @@ const GeneralSettings: React.FC = () => {
         </label>
       </div>
 
-      <div className="config-row">
+      <div className={`config-row config-row-dependent${autoReconnect ? '' : ' is-disabled'}`} title={!autoReconnect ? t('settings.reconnect.maxRetriesDisabledHint') : undefined}>
         <label>{t('settings.reconnect.maxRetries.label')}:</label>
         <NumericInput
-          className="input"
+          className="input config-number-input"
           value={maxRetries}
           onCommit={(value) => setConfig({ maxRetries: value })}
           min={CONFIG_BOUNDS.maxRetries[0]}
           max={CONFIG_BOUNDS.maxRetries[1]}
           step={1}
-          style={{ width: 80 }}
+          disabled={!autoReconnect}
+          aria-describedby={!autoReconnect ? 'reconnect-disabled-hint' : undefined}
         />
+        {!autoReconnect && <span id="reconnect-disabled-hint" className="config-field-hint">{t('settings.reconnect.maxRetriesDisabledHint')}</span>}
       </div>
 
       <div className="divider-h" />
@@ -148,7 +151,7 @@ const GeneralSettings: React.FC = () => {
           clearLastCheck）在 ConfigModal.handleSave 保存边界执行——取消时不泄漏。 */}
       <div className="config-row" title={t('update.periodHint')}>
         <label>{t('update.modeLabel')}</label>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+        <div className="config-option-stack">
           {(['none', 'stable', 'preview'] as UpdateCheckMode[]).map((mode) => (
             <label key={mode} className="checkbox-wrapper">
               <input
@@ -166,7 +169,7 @@ const GeneralSettings: React.FC = () => {
 
       <div className="config-row">
         <label>{t('update.lastCheckLabel')}</label>
-        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+        <span className="config-value-hint">
           {lastCheckAt === null ? t('update.lastCheckNever') : new Date(lastCheckAt).toLocaleString()}
         </span>
       </div>
@@ -177,15 +180,15 @@ const GeneralSettings: React.FC = () => {
       <div className="config-row">
         <label>{t('generalSettings.terminalFontLabel')}</label>
         <input className="input" value={terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
-        <NumericInput className="input" value={terminalFontSize} onCommit={(value) => setConfig({ terminalFontSize: value })} min={CONFIG_BOUNDS.terminalFontSize[0]} max={CONFIG_BOUNDS.terminalFontSize[1]} style={{ width: 60 }} />
-        <span>{t('generalSettings.pxUnit')}</span>
+        <NumericInput className="input config-number-input" value={terminalFontSize} onCommit={(value) => setConfig({ terminalFontSize: value })} min={CONFIG_BOUNDS.terminalFontSize[0]} max={CONFIG_BOUNDS.terminalFontSize[1]} style={{ width: 60 }} />
+        <span className="config-unit">{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
         <label>{t('generalSettings.uiFontLabel')}</label>
         <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
-        <NumericInput className="input" value={uiFontSize} onCommit={(value) => setConfig({ uiFontSize: value })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
-        <span>{t('generalSettings.pxUnit')}</span>
+        <NumericInput className="input config-number-input" value={uiFontSize} onCommit={(value) => setConfig({ uiFontSize: value })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
+        <span className="config-unit">{t('generalSettings.pxUnit')}</span>
       </div>
       <div className="divider-h" />
       <h4 className="config-section-title">{t('generalSettings.uiScaleSectionTitle')}</h4>
@@ -198,7 +201,7 @@ const GeneralSettings: React.FC = () => {
         </select>
       </div>
 
-      <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
+      <div className="config-path-hint">
         {t('general.configPath')}: {configPath}
       </div>
     </div>

@@ -165,7 +165,7 @@ const MOCK = `
         || cmd === 'acknowledge_editor_close' || cmd === 'complete_editor_close' || cmd === 'cancel_editor_close'
         || cmd === 'plugin:window|set_title' || cmd === 'prevent_screen_off' || cmd === 'prevent_sleep'
         || cmd === 'plugin:webview|set_webview_zoom' || cmd === 'append_diag_log') return null;
-      if (cmd === 'plugin:window|is_maximized') return false;
+      if (cmd === 'plugin:window|is_maximized' || cmd === 'plugin:window|is_always_on_top') return false;
       if (cmd === 'get_session_snapshot') return null;
       if (cmd === 'get_system_status')
         return { status: 'normal', memoryUsedMb: 0, cpuUsage: 0 };

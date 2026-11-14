@@ -81,12 +81,11 @@ export function QuickSendStrip({
 
   return (
     <div className="op-quick-send-row" ref={stripRef}>
-      {/* 首槽：常驻「打开独立发送面板」入口——issue #7-2：明显的按压按钮样式
-          （accent 填充 + 文字标签，区别于滚动锁定等带状态的图标按钮），
-          高度与两行药丸对齐；0 条命令时也保留（面板仍有内容可看）。 */}
+      {/* 首槽：常驻「打开独立发送面板」入口——保留文字标签与清晰边界，
+          但作为次级入口不抢占主发送动作；高度与两行药丸对齐；0 条命令时也保留。 */}
       <button
         ref={panelBtnRef}
-        className="btn btn-sm op-quick-panel-btn"
+        className="btn btn-sm op-quick-panel-btn op-quick-panel-btn-secondary"
         title={t('quickSend.openPanel')}
         onClick={openQuickPanel}
       >

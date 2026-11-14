@@ -61,7 +61,7 @@ async function installBackend(page: Page) {
         if (command === 'acknowledge_editor_close' || command === 'complete_editor_close' || command === 'cancel_editor_close'
           || command === 'plugin:window|set_title' || command === 'prevent_screen_off' || command === 'prevent_sleep'
           || command === 'plugin:webview|set_webview_zoom' || command === 'append_diag_log') return null;
-        if (command === 'plugin:window|is_maximized') return false;
+        if (command === 'plugin:window|is_maximized' || command === 'plugin:window|is_always_on_top') return false;
         if (command === 'get_session_snapshot' || command === 'update_session_snapshot' || command === 'append_diag_log') return null;
         if (command === 'get_system_status') return { status: 'normal', memoryUsedMb: 0, cpuUsage: 0 };
         if (command === 'get_config_path') return 'editor-regression/config.json';
@@ -177,7 +177,7 @@ test('run settings stay out of the title bar and finite repeats expose the round
   await gap.fill('250');
   await gap.press('Tab');
   expect((await persisted(page)).sendCommandSets[0].loopDelay).toBe(0);
-  await page.locator('.editor-status').getByRole('button', { name: '保存', exact: true }).click();
+  await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
   await expect(page.locator('.editor-status')).toContainText('已保存');
   expect((await persisted(page)).sendCommandSets[0]).toMatchObject({ repeatCount: 3, isLoop: false, loopDelay: 250 });
 });
@@ -249,7 +249,7 @@ test('the unified command toolbar adds baud steps with focus and saves their enh
   await expect(step.getByRole('combobox', { name: '步骤类型', exact: true })).toHaveValue('setParams');
   await expect(step.getByRole('spinbutton', { name: '本机波特率', exact: true })).toHaveValue('230400');
   await expect(page.getByPlaceholder('命令内容...')).toHaveCount(2);
-  await page.locator('.editor-status').getByRole('button', { name: '保存', exact: true }).click();
+  await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
   await expect(page.locator('.editor-status')).toContainText('已保存');
   const set = (await persisted(page)).sendCommandSets[0];
   expect(set.schemaVersion).toBe(2);
@@ -305,6 +305,9 @@ test('baud steps execute from capsules and the separate command panel without se
   await panel.locator('.quicksend-params select[title="目标串口"]').selectOption('COM1');
   await expect(row).not.toHaveClass(/is-send-disabled/);
   await row.click();
+  // Selecting a row is not a send gesture; the explicit action is the boundary.
+  expect(await calls('editor-regression.param-calls')).toHaveLength(1);
+  await row.locator('.quicksend-send-btn').click();
   await expect.poll(() => calls('editor-regression.param-calls')).toHaveLength(2);
   expect((await calls('editor-regression.param-calls'))[1]).toMatchObject({ port_id: 'COM1', baud_rate: 230400 });
   const state = await page.evaluate(async () => {
@@ -317,9 +320,16 @@ test('baud steps execute from capsules and the separate command panel without se
   expect(state).toMatchObject({ baud: 230400, focusedBaud: 38400 });
   expect(Object.values(state.loops).some(Boolean)).toBe(false);
   expect(await calls('editor-regression.tx-calls')).toEqual([]);
-  await panel.getByRole('group', { name: 'PING', exact: true }).click();
+  await panel.getByRole('group', { name: 'PING', exact: true }).locator('.quicksend-send-btn').click();
   await expect.poll(() => calls('editor-regression.tx-calls')).toHaveLength(1);
   expect((await calls('editor-regression.tx-calls'))[0]).toMatchObject({ port_id: 'COM1', data: 'PING' });
+  await panel.setViewportSize({ width: 480, height: 760 });
+  await panel.screenshot({ path: '.npm-cache/ui-polish/final/quick-send-dark.png', animations: 'disabled' });
+  await panel.getByRole('tab', { name: '文本模式', exact: true }).click();
+  await panel.locator('.quicksend-textarea').fill('AT+INFO?\nAT+STATUS?\nAT+TEMP?');
+  await expect(panel.locator('.quicksend-format-toggle')).toBeVisible();
+  await expect(panel.locator('.quicksend-params select').nth(1)).toBeVisible();
+  await panel.screenshot({ path: '.npm-cache/ui-polish/final/quick-send-text-dark.png', animations: 'disabled' });
   expect(panelErrors).toEqual([]);
   expect(await panel.evaluate(() => window.__E2E_UNKNOWN_COMMANDS__ ?? [])).toEqual([]);
   await panel.close();
@@ -342,7 +352,7 @@ test('insertion survives navigation; discard restores the saved set and failed s
   await expect(page.locator('.modal-dialog')).toBeVisible();
   consumeExpectedDiskError(page);
   await expect(page.getByPlaceholder('命令内容...').nth(1)).toHaveValue('INSERTED');
-  await page.locator('.modal-content-header button').click();
+  await page.locator('.modal-content-header').getByRole('button', { name: '关闭', exact: true }).click();
   await page.getByRole('button', { name: '放弃并关闭', exact: true }).click();
   await expect(page.locator('.modal-dialog')).toHaveCount(0);
   await openCommands(page);
@@ -368,7 +378,7 @@ test('keyboard sorting changes persisted execution order and reload restores it'
   }).toBe(true);
   await handle.press('Space');
   await expect(page.getByPlaceholder('命令内容...').first()).toHaveValue('B');
-  await page.locator('.editor-status').getByRole('button', { name: '保存', exact: true }).click();
+  await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
   await expect(page.locator('.editor-status')).toContainText('已保存');
   expect((await persisted(page)).sendCommandSets[0].commands.map((item: { content: string; order: number }) => [item.content, item.order])).toEqual([['B', 0], ['A', 1]]);
   await page.reload();
@@ -422,7 +432,7 @@ test('command panel shares unsaved drafts with settings and retains them after a
   await expect(panel.getByRole('textbox', { name: '命令内容', exact: true })).toHaveValue('PANEL DRAFT');
   expect((await persisted(page)).sendCommandSets[0].commands[0].content).toBe('A');
   await page.evaluate(() => localStorage.removeItem('editor-regression.fail-save'));
-  await page.locator('.editor-status').getByRole('button', { name: '保存', exact: true }).click();
+  await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
   await expect(page.locator('.editor-status')).toContainText('已保存');
   await expect.poll(async () => (await persisted(page)).sendCommandSets[0].commands[0].content).toBe('PANEL DRAFT');
   await expect(panel.locator('.quicksend-draft-actions')).toContainText('已保存');
@@ -457,9 +467,9 @@ test('editing after an individual save is preserved by a later full settings sav
   await openCommands(page);
   const name = page.locator('.editor-accordion-header').getByRole('textbox', { name: '名称', exact: true });
   await name.fill('Saved once');
-  await page.locator('.editor-accordion-header').getByRole('button', { name: '保存', exact: true }).click();
+  await page.locator('.editor-accordion-header').getByRole('button', { name: '保存此行', exact: true }).click();
   await expect(page.locator('.editor-status')).toContainText('已保存');
-  await page.locator('.modal-content-header button').click();
+  await page.locator('.modal-content-header').getByRole('button', { name: '关闭', exact: true }).click();
   await expect(page.locator('.modal-dialog')).toHaveCount(0);
   await page.locator('.titlebar-right button[title="设置"]').click();
   await expect(name).toHaveValue('Saved once');

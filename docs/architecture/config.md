@@ -122,6 +122,12 @@ npm.cmd run tauri dev
 - 插件不是五类规则页的实体：启停与权限动作立即独立持久化，取消设置仅回滚普通草稿，保留当前插件状态及 revision。备份导入只覆盖同安装身份的授权；导入中同 ID 不同身份清权禁用、未提及的当前插件保留，且不安装代码或迁移 KV。
 - **备份管理页只提供配置导出/导入**：此前未实现消费者的自动日志备份开关及 `backupEnabled` / `backupInterval` / `backupDirectory` 已从模型、数值边界和 UI 移除，不再展示无效功能；旧配置中的这些未知字段由 serde 忽略。自动日志备份仍不是已交付能力，日志备份应手动复制日志目录（见[日志](logging.md)）。
 
+### 设置编辑界面
+
+`ConfigModal` 默认 800×600，扩大/还原只改变本次会话的显示空间，不写入配置、不重建编辑草稿。`RuleSetAccordion` 的行级、页级和底部「保存全部」保持上述三个保存作用域；说明可展开查看。插件即时操作与代理配置草稿分区呈现，备份导入/导出仍走独立执行路径。
+
+`ProtocolTemplateEditor` 的字段摘要仅描述模板配置，点击或键盘激活可定位相应输入框，不运行或模拟协议解析。`HighlightRuleEditor` 在深浅终端背景上展示相同颜色；可计算的十六进制颜色（含 alpha）提供对比度提示，其他安全颜色明确标为不可测，不自动修改用户配色。布局位于 `styles/rule-preview.css`。
+
 ## 草稿恢复与不可避免的退出
 
 `entityEditorRecovery` 以 schema envelope 记录五类实体的 baseline/draft、普通设置 baseline/draft 和面板未 ACK 文本；读取严格检查键白名单、形状和 schema，损坏/旧版/未知字段或 Storage 不可用时 fail-safe。恢复按新磁盘基线三方合并为会话草稿，冲突可见，不自动保存或发布实体 runtime，也不恢复 pluginConfigs、权限、分组、元数据、预设或 revision。普通字段保留既有主题/字体/电源预览语义，committed update mode 只取磁盘值。成功保存/显式放弃清对应记录；晚编辑、失败保持待恢复。面板恢复文本必须明确 overwrite 或 reload，不自动覆盖主窗。

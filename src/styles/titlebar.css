@@ -17,11 +17,17 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
   -webkit-app-region: drag;
   app-region: drag;
 }
 
 .titlebar-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-md);
   font-weight: var(--weight-medium);
   color: var(--text-primary);
@@ -31,7 +37,8 @@
   display: flex;
   align-items: center;
   gap: 2px; /* tighter than the spacing scale on purpose — control cluster */
-  margin-left: auto;
+  flex: 0 0 auto;
+  margin-left: var(--space-2);
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
@@ -39,7 +46,7 @@
 .titlebar-separator {
   width: 1px;
   height: var(--space-4);
-  background: var(--border-color);
+  background: var(--border-subtle);
   margin: 0 var(--space-2);
 }
 
@@ -48,9 +55,14 @@
   transition: color var(--transition-fast), background var(--transition-fast);
 }
 
-.titlebar-help:hover {
+.titlebar-help:hover,
+.titlebar-help.active {
   color: var(--accent-color);
   background: var(--bg-hover);
+}
+
+.titlebar-pin.active {
+  box-shadow: inset 0 -2px 0 var(--accent-color);
 }
 
 /* Titlebar-left toggle (sidebar collapse/expand). Lives outside `.titlebar-right`

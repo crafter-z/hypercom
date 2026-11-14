@@ -21,7 +21,9 @@ Multi-page settings modal. Split into `pages/` (10 settings pages), `editors/` (
 | `pages/PluginSettings.tsx` | directory/ZIP install, upgrade, uninstall, pregrant while disabled, enable after queued grants persist; actions bind reviewed installGeneration, snapshots order by revision; proxy uses normal footer save. Uninstall can occupy the native main thread for tens of seconds (webview teardown + browser-data clear): a blocking `UninstallProgress` panel is committed and painted (two rAFs) before the invoke, so a slow uninstall never reads as a frozen app |
 | `editors/HighlightRuleEditor.tsx` | row form for highlight rule |
 | `editors/SendCmdEditor.tsx` | 双行表格式条目（首行名称/类型/格式/行尾/操作，次行内容/等待），共用列头，窄栏重排；按 `kind` 渲染发送字段（内容/类型/行尾）或本机波特率，**两者都渲染 `shared/AfterDelayField`**（「之后等待」的位置属性；轮末由 `isRoundFinal` 就地说明并提供「并入轮间间隔」） |
-| `editors/ProtocolTemplateEditor.tsx` | field-by-field template form |
+| `editors/ProtocolTemplateEditor.tsx` | field-by-field template form + keyboard-accessible configured frame summary (not a live parser); preview layout in `styles/rule-preview.css` |
+
+`ConfigModal` defaults to 800×600 and offers a session-local expand/restore control without changing drafts or persisted UI scale. Save labels distinguish row, page and all-settings scope. `HighlightRuleEditor` previews the same color on opaque light/dark terminal surfaces; hex colors (including alpha) get a contrast estimate, unsupported spellings remain explicitly unmeasured, and colors are never rewritten automatically.
 
 ## Entity page contract (`hooks/useEntityPage.ts`)
 

@@ -5,6 +5,7 @@ import type { TriggerMatchType, TriggerActionType, TriggerRule } from '../../../
 import RuleSetAccordion from '../RuleSetAccordion';
 import { useEntityPage } from '../hooks/useEntityPage';
 import { Zap } from 'lucide-react';
+import '../../../styles/rule-preview.css';
 
 const TriggerSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -49,46 +50,56 @@ const TriggerSettings: React.FC = () => {
       onDelete={page.remove}
       onSave={page.save}
       onRename={(id, name) => updateTriggerRule(id, { name })}
-      renderHeaderExtra={(rule) => (
-        <label className="checkbox-wrapper" style={{ fontSize: 11, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
-          <input
-            type="checkbox"
-            checked={rule.isEnabled}
-            onChange={e => updateTriggerRule(rule.id, { isEnabled: e.target.checked })}
-          /> {t('highlightSettings.enableCheckbox')}
-        </label>
-      )}
+      renderHeaderExtra={(rule) => {
+        const pattern = rule.pattern.trim() || t('trigger.summaryEmptyPattern');
+        const summary = t('trigger.summaryMatchAction', {
+          match: `${t(`trigger.matchType.${rule.matchType}`)}: ${pattern}`,
+          action: t(`trigger.actionType.${rule.actionType}`),
+        });
+        return (
+          <>
+            <span className="rule-header-extra" title={summary} onClick={e => e.stopPropagation()}>{summary}</span>
+            <label className="checkbox-wrapper rule-header-enable" onClick={e => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                checked={rule.isEnabled}
+                onChange={e => updateTriggerRule(rule.id, { isEnabled: e.target.checked })}
+              /> {t('highlightSettings.enableCheckbox')}
+            </label>
+          </>
+        );
+      }}
       renderEditor={(rule) => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div className="config-row">
-            <label>{t('trigger.pattern')}</label>
+        <div className="rule-settings-editor">
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`trigger-pattern-${rule.id}`}>{t('trigger.pattern')}</label>
             <input
-              className="input"
+              id={`trigger-pattern-${rule.id}`}
+              className="input rule-settings-field rule-settings-terminal"
               value={rule.pattern}
               onChange={e => updateTriggerRule(rule.id, { pattern: e.target.value })}
-              style={{ flex: 1, fontFamily: 'var(--font-terminal)' }}
             />
           </div>
-          <div className="config-row">
-            <label>{t('trigger.matchType')}</label>
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`trigger-match-${rule.id}`}>{t('trigger.matchType')}</label>
             <select
-              className="input"
+              id={`trigger-match-${rule.id}`}
+              className="input rule-settings-field"
               value={rule.matchType}
               onChange={e => updateTriggerRule(rule.id, { matchType: e.target.value as TriggerMatchType })}
-              style={{ flex: 1 }}
             >
               {matchTypeOptions.map(opt => (
                 <option key={opt} value={opt}>{t(`trigger.matchType.${opt}`)}</option>
               ))}
             </select>
           </div>
-          <div className="config-row">
-            <label>{t('trigger.portId')}</label>
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`trigger-port-${rule.id}`}>{t('trigger.portId')}</label>
             <select
-              className="input"
+              id={`trigger-port-${rule.id}`}
+              className="input rule-settings-field"
               value={rule.portId ?? ''}
               onChange={e => updateTriggerRule(rule.id, { portId: e.target.value || undefined })}
-              style={{ flex: 1 }}
             >
               <option value="">{t('trigger.portId.all')}</option>
               {ports.map(p => (
@@ -96,32 +107,32 @@ const TriggerSettings: React.FC = () => {
               ))}
             </select>
           </div>
-          <div className="config-row">
-            <label>{t('trigger.actionType')}</label>
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`trigger-action-${rule.id}`}>{t('trigger.actionType')}</label>
             <select
-              className="input"
+              id={`trigger-action-${rule.id}`}
+              className="input rule-settings-field"
               value={rule.actionType}
               onChange={e => updateTriggerRule(rule.id, { actionType: e.target.value as TriggerActionType })}
-              style={{ flex: 1 }}
             >
               {actionTypeOptions.map(opt => (
                 <option key={opt} value={opt}>{t(`trigger.actionType.${opt}`)}</option>
               ))}
             </select>
           </div>
-          <div className="config-row">
-            <label>{t('trigger.actionContent')}</label>
+          <div className="rule-settings-row">
+            <label className="rule-settings-label" htmlFor={`trigger-content-${rule.id}`}>{t('trigger.actionContent')}</label>
             <input
-              className="input"
+              id={`trigger-content-${rule.id}`}
+              className="input rule-settings-field rule-settings-terminal"
               value={rule.actionContent}
               onChange={e => updateTriggerRule(rule.id, { actionContent: e.target.value })}
-              style={{ flex: 1, fontFamily: 'var(--font-terminal)' }}
             />
           </div>
           {rule.actionType === 'respond' && (
-            <div className="config-row">
-              <label />
-              <label className="checkbox-wrapper" style={{ fontSize: 12 }}>
+            <div className="rule-settings-row">
+              <span className="rule-settings-label" aria-hidden="true" />
+              <label className="checkbox-wrapper rule-settings-checkbox">
                 <input
                   type="checkbox"
                   checked={rule.actionIsHex}
@@ -131,9 +142,12 @@ const TriggerSettings: React.FC = () => {
             </div>
           )}
           {rule.pattern && (
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-              <Zap size={11} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-              {t('trigger.matchType')}: {t(`trigger.matchType.${rule.matchType}`)} → {t(`trigger.actionType.${rule.actionType}`)}
+            <div className="rule-settings-note">
+              <Zap size={11} aria-hidden="true" />
+              <span>{t('trigger.summaryMatchAction', {
+                match: `${t(`trigger.matchType.${rule.matchType}`)}: ${rule.pattern}`,
+                action: t(`trigger.actionType.${rule.actionType}`),
+              })}</span>
             </div>
           )}
         </div>

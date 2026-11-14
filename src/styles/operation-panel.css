@@ -6,7 +6,7 @@
  */
 .operation-panel {
   background: var(--bg-secondary);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -51,7 +51,7 @@
   align-items: center;
   justify-content: space-between;
   padding: var(--space-1) var(--space-3);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-tertiary);
   box-shadow: var(--edge-top);
   cursor: pointer;
@@ -476,7 +476,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 /* The primary action of the whole deck. Complete styling of its own —
@@ -622,7 +622,7 @@
   justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-1) var(--space-3);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
@@ -665,11 +665,11 @@
  * generic `.op-section > *` shrink guard, and target the send section by ID
  * class so params section scrolling is untouched. */
 .op-section-send {
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .op-section-send > .op-send-secondary {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -699,4 +699,149 @@
 .op-section-send .op-send-input {
   min-height: 52px;
   overflow-y: auto;
+}
+
+/* ==================== UI polish: target context + send hierarchy ====================
+ * Keep the existing compact deck geometry while making the active target, primary
+ * send action and secondary format controls easier to scan at narrow widths. */
+.operation-panel-port {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.operation-panel-port-name {
+  font-family: var(--font-terminal);
+  font-weight: var(--weight-semibold);
+}
+
+.operation-panel-port-meta {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The command panel is useful, but it is not the send action. */
+.op-quick-panel-btn-secondary {
+  background: transparent;
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.op-quick-panel-btn-secondary:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-emphasis);
+  color: var(--accent-color);
+}
+
+/* The editor owns the textarea and its secondary option row. The action column
+ * stays intact, so Send / Send File never become ambiguous with checkboxes. */
+.op-send-editor {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  min-height: 0;
+}
+
+.op-send-input-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 52px;
+}
+
+.op-send-input-wrap .op-send-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 52px;
+}
+
+.op-send-options {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  padding: 1px 0;
+  font-size: var(--text-xs);
+}
+
+.op-checkbox-compact {
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.op-line-ending-select {
+  width: 64px;
+  font-size: var(--text-xs);
+}
+
+.op-send-actions {
+  flex-shrink: 0;
+  min-width: 82px;
+}
+
+.op-send-btn {
+  min-width: 74px;
+}
+
+.op-send-byte-chip {
+  font-size: var(--text-xs);
+}
+
+.op-quick-cmd,
+.op-quick-cmd-hex,
+.op-flow-status,
+.op-flow-badge,
+.op-file-progress-label {
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 760px) {
+  .operation-panel-content {
+    gap: var(--space-2);
+    padding-inline: var(--space-2);
+  }
+
+  .op-section-send {
+    min-width: 240px;
+  }
+
+  .op-section-params {
+    min-width: 160px;
+  }
+
+  .op-send-row {
+    gap: var(--space-1);
+  }
+
+  .op-send-actions {
+    min-width: 76px;
+  }
+
+  .op-send-btn {
+    min-width: 68px;
+    padding-inline: var(--space-2);
+  }
+
+  .op-send-options {
+    gap: 3px 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-loop-toggle.is-running,
+  .op-flow-status-dot,
+  .op-flow-badge-dot {
+    animation: none;
+  }
 }

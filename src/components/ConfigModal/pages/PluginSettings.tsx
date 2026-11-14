@@ -199,49 +199,53 @@ const PluginSettings: React.FC = () => {
   return (
     <>
       <div className="plugin-settings">
-      <div className="settings-section-header">
-        <h3>{t('plugins.title')}</h3>
-        <div className="plugin-settings-actions">
-          <button className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
-            <RefreshCw size={14} /> {t('plugins.refresh')}
-          </button>
-          <button className="btn btn-primary btn-sm" onClick={() => void handleInstall('directory')} disabled={loading}>
-            <FolderOpen size={14} /> {t('plugins.installDirectory')}
-          </button>
-          <button className="btn btn-sm" onClick={() => void handleInstall('zip')} disabled={loading}>
-            <FolderOpen size={14} /> {t('plugins.installZip')}
-          </button>
-        </div>
-      </div>
+        <section className="plugin-immediate-section" aria-labelledby="plugin-immediate-title">
+          <div className="settings-section-header">
+            <div>
+              <h3 id="plugin-immediate-title" className="config-section-title">{t('plugins.immediateSectionTitle')}</h3>
+              <p className="settings-hint">{t('plugins.immediateSectionHint')}</p>
+            </div>
+            <div className="plugin-settings-actions">
+              <button className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
+                <RefreshCw size={14} /> {t('plugins.refresh')}
+              </button>
+              <button className="btn btn-primary btn-sm" onClick={() => void handleInstall('directory')} disabled={loading}>
+                <FolderOpen size={14} /> {t('plugins.installDirectory')}
+              </button>
+              <button className="btn btn-sm" onClick={() => void handleInstall('zip')} disabled={loading}>
+                <FolderOpen size={14} /> {t('plugins.installZip')}
+              </button>
+            </div>
+          </div>
+          <p className="plugin-instant-note">{t('plugins.instantNote')}</p>
+        </section>
 
-      <p className="settings-hint">{t('plugins.description')}</p>
-      <p className="plugin-instant-note">{t('plugins.instantNote')}</p>
+        <section className="plugin-proxy-section" aria-labelledby="plugin-proxy-title">
+          <h3 id="plugin-proxy-title" className="config-section-title">{t('plugins.proxy.sectionTitle')}</h3>
+          <p className="settings-hint">{t('plugins.proxy.saveHint')}</p>
+          <label className="checkbox-wrapper">
+            <input
+              type="checkbox"
+              checked={pluginProxyEnabled}
+              onChange={(e) => setConfig({ pluginProxyEnabled: e.target.checked })}
+            />
+            {t('plugins.proxy.enable')}
+          </label>
 
-      <div className="divider-h" />
-      <h4 className="config-section-title">{t('plugins.proxy.sectionTitle')}</h4>
-
-      <label className="checkbox-wrapper">
-        <input
-          type="checkbox"
-          checked={pluginProxyEnabled}
-          onChange={(e) => setConfig({ pluginProxyEnabled: e.target.checked })}
-        />
-        {t('plugins.proxy.enable')}
-      </label>
-
-      {pluginProxyEnabled && (
-        <div className="config-row">
-          <label htmlFor="plugin-proxy-url">{t('plugins.proxy.urlLabel')}</label>
-          <input
-            id="plugin-proxy-url"
-            className="input"
-            value={pluginProxy}
-            placeholder={t('plugins.proxy.urlPlaceholder')}
-            onChange={(e) => setConfig({ pluginProxy: e.target.value })}
-          />
-        </div>
-      )}
-      <p className="settings-hint">{t('plugins.proxy.hint')}</p>
+          {pluginProxyEnabled && (
+            <div className="config-row">
+              <label htmlFor="plugin-proxy-url">{t('plugins.proxy.urlLabel')}</label>
+              <input
+                id="plugin-proxy-url"
+                className="input config-flex-input"
+                value={pluginProxy}
+                placeholder={t('plugins.proxy.urlPlaceholder')}
+                onChange={(e) => setConfig({ pluginProxy: e.target.value })}
+              />
+            </div>
+          )}
+          <p className="settings-hint">{t('plugins.proxy.hint')}</p>
+        </section>
 
       {plugins.length === 0 ? (
         <div className="plugin-empty">

@@ -262,7 +262,7 @@
   gap: var(--space-2);
   padding: var(--space-1) var(--space-2);
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   box-shadow: var(--edge-top);
   flex-shrink: 0;
 }
@@ -280,7 +280,7 @@
   min-width: 0;
   padding: var(--space-1) var(--space-2);
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   box-shadow: var(--edge-top);
   flex-shrink: 0;
 }
@@ -368,7 +368,7 @@
   gap: var(--space-2);
   padding: var(--space-1) var(--space-2);
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
   box-shadow: var(--edge-top);
   flex-shrink: 0;
 }

@@ -626,7 +626,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           onPointerCancel={handlePointerUp}
           onClick={handleRowClick}
         />
-        {portId && portStatus !== 'connected' && (
+        {portId && portStatus !== 'connected' && vm.buffer.length === 0 && (
           <div className="terminal-empty" role="status" aria-live="polite">
             <div className="terminal-empty-card">
               <Cable size={22} className="terminal-empty-icon" aria-hidden="true" />

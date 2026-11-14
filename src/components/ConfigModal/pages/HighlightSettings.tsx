@@ -51,7 +51,7 @@ const HighlightSettings: React.FC = () => {
       onSave={page.save}
       onRename={(id, name) => updateHighlightRuleSet(id, { name })}
       renderHeaderExtra={(set) => (
-        <label className="checkbox-wrapper" style={{ fontSize: 11 }} onClick={e => e.stopPropagation()}>
+        <label className="checkbox-wrapper rule-header-enable" onClick={e => e.stopPropagation()}>
           <input
             type="checkbox"
             checked={set.isEnabled}

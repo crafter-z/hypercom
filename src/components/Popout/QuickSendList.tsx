@@ -184,21 +184,23 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
         <button type="button" className="icon-btn" title={t('commandSettings.addSet')} aria-label={t('commandSettings.addSet')}
           disabled={!editable} onClick={() => insertSet()}><Plus size={13} /></button>
       </div>
-      <div className="quicksend-draft-actions">
-        <span role="status">{t(!ready || saving || pending ? 'editor.saving' : dirty ? 'editor.unsaved' : 'editor.saved')}</span>
-        <button type="button" className="btn btn-sm" disabled={!ready || saving} onClick={() => { void saveDraft(); }}><Save size={12} />{t('editor.save')}</button>
-        <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
+      <div className="quicksend-draft-panel" role="region" aria-label={t('quickSend.editSet')}>
+        <div className="quicksend-draft-actions">
+          <span role="status">{t(!ready || saving || pending ? 'editor.saving' : dirty ? 'editor.unsaved' : 'editor.saved')}</span>
+          <button type="button" className="btn btn-sm" disabled={!ready || saving} onClick={() => { void saveDraft(); }}><Save size={12} />{t('editor.save')}</button>
+          <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
+        </div>
+        {error && <div className="quicksend-draft-error" role="alert">
+          <span>{error.startsWith('editor.') ? t(error) : error}</span>
+          {conflict && onOverwriteHost && onReloadHost && <span className="quicksend-conflict-actions">
+            <button type="button" className="btn btn-sm" disabled={saving || pending}
+              onClick={() => { void onOverwriteHost(); }}>{t('editor.overwriteHostDraft')}</button>
+            <button type="button" className="btn btn-sm" disabled={saving || pending}
+              onClick={() => { void onReloadHost(); }}>{t('editor.reloadHostDraft')}</button>
+          </span>}
+        </div>}
+        {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
       </div>
-      {error && <div className="quicksend-draft-error" role="alert">
-        <span>{error.startsWith('editor.') ? t(error) : error}</span>
-        {conflict && onOverwriteHost && onReloadHost && <span className="quicksend-conflict-actions">
-          <button type="button" className="btn btn-sm" disabled={saving || pending}
-            onClick={() => { void onOverwriteHost(); }}>{t('editor.overwriteHostDraft')}</button>
-          <button type="button" className="btn btn-sm" disabled={saving || pending}
-            onClick={() => { void onReloadHost(); }}>{t('editor.reloadHostDraft')}</button>
-        </span>}
-      </div>}
-      {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
     </div>
     <div className="quicksend-list" ref={listRef}>
       <details className="quicksend-set-manager">

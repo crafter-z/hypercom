@@ -9,7 +9,7 @@
   justify-content: center;
   padding: var(--space-4);
   background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .terminal-empty-card {
@@ -43,5 +43,6 @@
 }
 
 .terminal-empty-connect {
+  pointer-events: auto;
   margin-top: var(--space-2);
 }

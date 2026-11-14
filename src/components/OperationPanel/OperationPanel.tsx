@@ -311,7 +311,10 @@ const OperationPanel: React.FC = () => {
           <ChevronDown size={12} className="operation-panel-chevron" />
           <span className="operation-panel-title">{t('operationPanel.title')}</span>
           {isPortActive && (
-            <span className="operation-panel-port">{activePortId}</span>
+            <span className="operation-panel-port" title={`${activePortId} · ${t('paramsSection.baudRateLabel')} ${baudRate}`}>
+              <span className="operation-panel-port-name">{activePortId}</span>
+              <span className="operation-panel-port-meta">{t('paramsSection.baudRateLabel')} {baudRate}</span>
+            </span>
           )}
         </div>
         {/* 收起后才显示：展开态已有 `.op-flow-status` 状态条，不重复。 */}

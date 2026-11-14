@@ -21,7 +21,7 @@ const mock = `(() => {
       if(cmd==='list_plugins') return {revision:0,plugins:[],pluginConfigs:[]};
       if(cmd==='get_system_status') return {status:'normal',memoryUsedMb:0,cpuUsage:0};
       if(cmd==='plugin:app|version') return 'e2e';
-      if(cmd==='plugin:window|is_maximized') return false;
+      if(cmd==='plugin:window|is_maximized'||cmd==='plugin:window|is_always_on_top') return false;
       if(cmd==='plugin:event|listen') return next++;
       if(cmd==='pick_replay_sources') return {grantId:'native-grant',sources:Object.entries(files).map(([id,content])=>({sourceId:id,name:id+'.log',path:'C:/'+id+'.log',size:new TextEncoder().encode(content).length,fingerprint:'a'.repeat(64)}))};
       if(cmd==='read_replay_source_chunk') { const bytes=new TextEncoder().encode(files[args.sourceId]); const part=bytes.slice(args.offset,args.offset+11); return {base64:btoa(String.fromCharCode(...part)),nextOffset:args.offset+part.length,done:args.offset+part.length===bytes.length}; }

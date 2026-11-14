@@ -48,15 +48,21 @@ const TitleBar: React.FC = () => {
 
     const setup = async () => {
       try {
-        setIsMaximized(await appWindow.isMaximized());
+        const maximized = await appWindow.isMaximized();
+        if (cancelled) return;
+        setIsMaximized(maximized);
         unlisten = await appWindow.onResized(async () => {
-          setIsMaximized(await appWindow.isMaximized());
+          const next = await appWindow.isMaximized();
+          if (!cancelled) setIsMaximized(next);
         });
-        // Unmount raced ahead of registration — tear down the listener now.
+        // Retire a late listener before any further native query can reject.
         if (cancelled) {
           unlisten();
           unlisten = undefined;
+          return;
         }
+        const pinned = await appWindow.isAlwaysOnTop();
+        if (!cancelled) setIsPinned(pinned);
       } catch (e) {
         console.debug('[TitleBar] Window state setup failed:', e);
       }
@@ -108,9 +114,10 @@ const TitleBar: React.FC = () => {
 
       <div className="titlebar-right">
         <button
-          className="btn btn-icon btn-sm titlebar-help"
+          className={`btn btn-icon btn-sm titlebar-help titlebar-pin${isPinned ? ' active' : ''}`}
           title={pinLabel}
           aria-label={pinLabel}
+          aria-pressed={isPinned}
           onClick={handleTogglePin}
         >
           {isPinned ? <PinOff size={15} /> : <Pin size={15} />}

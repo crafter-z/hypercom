@@ -152,6 +152,12 @@ describe('OperationPanel collapsed flow badge', () => {
     expect(container.querySelector('.op-flow-badge')).toBeNull();
   });
 
+  it('keeps the active target context visible in the panel header', async () => {
+    await renderPanel();
+    expect(container.querySelector('.operation-panel-port-name')?.textContent).toBe('COM1');
+    expect(container.querySelector('.operation-panel-port-meta')?.textContent).toContain('paramsSection.baudRateLabel');
+  });
+
   it('does not duplicate the badge in the expanded panel', async () => {
     useSystemStore.getState().setUIState({ isOperationPanelCollapsed: false });
     setFlowStatus(runningFlow(1, 4));

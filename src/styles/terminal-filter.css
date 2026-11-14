@@ -3,7 +3,7 @@
  * Imported by TerminalFilterBar.tsx so the layout travels with the component.
  *
  * The strip lives in a pane that can be as narrow as one half of a split
- * (~650px). The bar is an inline-size container; below 900px the action
+ * (~650px). The bar is an inline-size container; below 700px the action
  * cluster (pause / ASCII-noise / pin / timestamp / wrap / HEX-text /
  * encoding) moves to its own full-width row instead of competing with the
  * direction + keyword group for the same line. Every control stays reachable
@@ -45,11 +45,28 @@
   max-width: min(120px, 100%);
 }
 
+/* Keep the primary filter and secondary controls as two readable clusters;
+   each cluster may wrap internally without pushing controls out of a pane. */
+.terminal-filter-bar .terminal-filter-actions {
+  padding-left: var(--space-1);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.terminal-filter-bar .terminal-filter-display-group {
+  padding-left: var(--space-1);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.terminal-filter-bar .terminal-noise-label,
+.terminal-filter-bar .terminal-encoding-label {
+  white-space: nowrap;
+}
+
 /* Narrow pane: at most two chrome rows.
  * Row 1 = view/timeline + direction + keyword (+ match count)
  * Row 2 = the full action cluster, left-aligned so `margin-left: auto` can
  * never push it past the right border of the pane. */
-@container terminal-filter (max-width: 900px) {
+@container terminal-filter (max-width: 700px) {
   .terminal-filter-bar .terminal-filter-main {
     flex-basis: 100%;
   }
@@ -58,5 +75,27 @@
     flex: 1 1 100%;
     margin-left: 0;
     justify-content: flex-start;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .terminal-filter-bar .terminal-filter-display-group {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .terminal-filter-bar .terminal-noise-label,
+  .terminal-filter-bar .terminal-encoding-label {
+    font-size: 0;
+  }
+
+  .terminal-filter-bar .terminal-noise-label::after {
+    content: 'ASCII';
+    font-size: var(--text-xs);
+  }
+
+  .terminal-filter-bar .terminal-encoding-label::after {
+    content: 'ENC';
+    font-size: var(--text-2xs);
   }
 }

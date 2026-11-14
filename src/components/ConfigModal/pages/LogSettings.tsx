@@ -111,6 +111,7 @@ const LogSettings: React.FC = () => {
 
   return (
     <div className="config-page">
+      <p className="config-page-summary">{t('logSettings.summary')}</p>
       <label className="checkbox-wrapper">
         <input type="checkbox" checked={autoSaveLog} onChange={(e) => setConfig({ autoSaveLog: e.target.checked })} />
         {t('logSettings.autoSaveLog')}
@@ -123,14 +124,14 @@ const LogSettings: React.FC = () => {
 
       <div className="config-row">
         <label>{t('logSettings.directoryLabel')}</label>
-        <input className="input" value={logDirectory} placeholder={t('logSettings.directoryPlaceholder')} readOnly />
+        <input className="input config-flex-input" value={logDirectory} placeholder={t('logSettings.directoryPlaceholder')} readOnly />
         <button className="btn btn-sm" onClick={handleBrowse}>{t('logSettings.browseButton')}</button>
       </div>
 
       <div className="config-row">
         <label>{t('logSettings.filenameFormatLabel')}</label>
         <input className="input" value={logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
-        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('logSettings.filenameFormatHint')}</span>
+        <span className="config-field-hint">{t('logSettings.filenameFormatHint')}</span>
       </div>
 
       <div className="config-row">
@@ -178,7 +179,7 @@ const LogSettings: React.FC = () => {
       {logSplitEnabled && (
         <div className="config-row">
           <label>{t('logSettings.splitSizeLabel')}</label>
-          <NumericInput className="input" value={logSplitSizeMb} onCommit={(value) => setConfig({ logSplitSizeMb: value })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
+          <NumericInput className="input config-number-input" value={logSplitSizeMb} onCommit={(value) => setConfig({ logSplitSizeMb: value })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
         </div>
       )}
 
