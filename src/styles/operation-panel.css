@@ -738,8 +738,9 @@
   color: var(--accent-color);
 }
 
-/* The editor owns the textarea and its secondary option row. The action column
- * stays intact, so Send / Send File never become ambiguous with checkboxes. */
+/* The editor owns the textarea while the action column owns its related format
+ * controls. Keeping the controls in that column makes HEX / clear-after-send /
+ * line-ending visibly subordinate to (and directly below) Send. */
 .op-send-editor {
   display: flex;
   flex: 1 1 auto;
@@ -766,10 +767,9 @@
 
 .op-send-options {
   display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   min-width: 0;
   padding: 1px 0;
   font-size: var(--text-xs);
@@ -787,7 +787,9 @@
 
 .op-send-actions {
   flex-shrink: 0;
-  min-width: 82px;
+  /* Keep the English clear-after-send label and file action readable at narrow
+   * widths; the editor flexes into the remaining space. */
+  min-width: max-content;
 }
 
 .op-send-btn {
@@ -825,7 +827,7 @@
   }
 
   .op-send-actions {
-    min-width: 76px;
+    min-width: max-content;
   }
 
   .op-send-btn {
@@ -834,7 +836,7 @@
   }
 
   .op-send-options {
-    gap: 3px 8px;
+    gap: 3px;
   }
 }
 

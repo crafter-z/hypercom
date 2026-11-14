@@ -279,6 +279,16 @@ const SendSection: React.FC<SendSectionProps> = ({
               )}
             </div>
           </div>
+        </div>
+        <div className="op-send-actions">
+          <button
+            className="btn btn-primary op-send-btn"
+            disabled={!isPortActive || inputErrorKey !== null || flowBusy}
+            onClick={handleSend}
+          >
+            <Send size={14} />
+            {t('sendSection.sendButton')}
+          </button>
           <div className="op-send-options" role="group" aria-label={t('sendSection.cardTitle')}>
             <label className="checkbox-wrapper op-checkbox-compact">
               <input type="checkbox" checked={sendIsHex} onChange={(e) => toggleHexMode(e.target.checked)} />
@@ -294,16 +304,6 @@ const SendSection: React.FC<SendSectionProps> = ({
             </label>
             <LineEndingSelect />
           </div>
-        </div>
-        <div className="op-send-actions">
-          <button
-            className="btn btn-primary op-send-btn"
-            disabled={!isPortActive || inputErrorKey !== null || flowBusy}
-            onClick={handleSend}
-          >
-            <Send size={14} />
-            {t('sendSection.sendButton')}
-          </button>
           <SendFileButton
             progress={progress}
             isConnected={isConnected && !flowBusy}

@@ -174,14 +174,14 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
           <span className="op-label">{t('params.mode')}</span>
           <div className="segmented" role="group">
             <button type="button"
-              className={`btn btn-sm${portMode === 'trx' ? ' active' : ''}`}
+              className={`segmented-btn${portMode === 'trx' ? ' active' : ''}`}
               disabled={!isPortActive}
               onClick={() => handleModeChange('trx')}
               aria-pressed={portMode === 'trx'}>
               {t('params.mode.trx')}
             </button>
             <button type="button"
-              className={`btn btn-sm${portMode === 'tty' ? ' active' : ''}`}
+              className={`segmented-btn${portMode === 'tty' ? ' active' : ''}`}
               disabled={!isPortActive}
               onClick={() => handleModeChange('tty')}
               aria-pressed={portMode === 'tty'}>
