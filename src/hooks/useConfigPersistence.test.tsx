@@ -171,6 +171,18 @@ describe('whole-config saves versus independently persisted rules', () => {
     expect(backend.sendCommandSets).toEqual([rule('unsaved'), { ...rule('remote'), id: 'rule-2' }]);
   });
 
+  it('keeps live group edits made while preset loading is in flight', async () => {
+    const firstLoad = deferred<AppConfig['portPresets']>();
+    vi.mocked(storageService.loadPortPresets).mockImplementationOnce(() => firstLoad.promise);
+    const saving = save({ theme: 'light' });
+    await vi.waitFor(() => expect(storageService.loadPortPresets).toHaveBeenCalledTimes(1));
+    const groups = [{ id: 'g1', name: 'edited during save', portIds: [], isExpanded: true, order: 0 }];
+    useAppStore.getState().setGroups(groups);
+    firstLoad.resolve([]);
+    expect(await saving).toBe(true);
+    expect(backend.portGroups).toEqual(groups);
+  });
+
   it('keeps presets loaded from the backend after a conflicting CRUD write', async () => {
     const firstInvoke = deferred<boolean>();
     vi.mocked(configService.setConfig).mockImplementationOnce(async () => firstInvoke.promise);
@@ -203,6 +215,26 @@ describe('whole-config saves versus independently persisted rules', () => {
     replaceEntityDraft('sendCommandSets', [rule('edited winner')]);
     expect(await save()).toBe(true);
     expect(backend.sendCommandSets).toEqual([rule('edited winner')]);
+  });
+
+  it('does not regress a newer revision observed while an accepted full save is in flight', async () => {
+    const accepted = deferred<boolean>();
+    vi.mocked(configService.setConfig).mockImplementationOnce(async candidate => {
+      backend = candidate;
+      revision++;
+      await accepted.promise;
+      return true;
+    });
+    replaceEntityDraft('sendCommandSets', [rule('saved draft')]);
+    const saving = save();
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledTimes(1));
+    // Simulate an unrelated plugin snapshot committed after the backend accepted
+    // this entity write but before its response reached the editor.
+    useAppStore.getState().setConfig({ revision: 10, pluginConfigs: [{ id: 'plugin', installGeneration: 'g1', enabled: false, grantedPermissions: [] }] });
+    accepted.resolve(true);
+    expect(await saving).toBe(true);
+    expect(useAppStore.getState().config.revision).toBe(10);
+    expect(useRuleStore.getState().sendCommandSets).toEqual([rule('saved draft')]);
   });
 
   it('does not erase edits made while an accepted full save is in flight', async () => {

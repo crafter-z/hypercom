@@ -34,6 +34,16 @@ const protocol: ProtocolTemplate = {
 };
 
 describe('entity editor remaining validation boundaries', () => {
+  it.each(['AABB', 'AA BB', 'A A\tB B', 'AA\vBB\f'])('uses shared HEX validation for protocol and trigger input: %j', hex => {
+    expect(validateEntityDraft('protocolTemplates', [{ ...protocol, headerBytes: hex } as ProtocolTemplate])).toBeNull();
+    const trigger: TriggerRule = { id: 'hex', name: 'HEX', pattern: hex, isRegex: false, matchType: 'hex', actionType: 'respond', actionContent: hex, actionIsHex: true, isEnabled: true };
+    expect(validateEntityDraft('triggerRules', [trigger])).toBeNull();
+  });
+  it.each(['A', 'AA ZZ', 'AA\u00a0BB'])('rejects unsendable HEX in protocol and trigger drafts: %j', hex => {
+    expect(validateEntityDraft('protocolTemplates', [{ ...protocol, headerBytes: hex } as ProtocolTemplate])).toBe('editor.invalidHex');
+    const trigger: TriggerRule = { id: 'hex', name: 'HEX', pattern: hex, isRegex: false, matchType: 'hex', actionType: 'alert', actionContent: '', actionIsHex: false, isEnabled: true };
+    expect(validateEntityDraft('triggerRules', [trigger])).toBe('editor.invalidHex');
+  });
   it.each([0, 3, 1.5, NaN])('rejects invalid lengthFieldSize %s', lengthFieldSize => {
     expect(validateEntityDraft('protocolTemplates', [{ ...protocol, lengthFieldSize } as unknown as ProtocolTemplate])).toBe('editor.invalidProtocol');
   });
@@ -68,6 +78,22 @@ describe('entity editor remaining validation boundaries', () => {
 });
 
 describe('prepare / commit / adopt and late edits', () => {
+  it('does not regress a newer revision when a targeted save resolves late', async () => {
+    let release!: (value: boolean) => void;
+    vi.mocked(configService.setConfig).mockImplementationOnce(async candidate => {
+      backend = structuredClone({ ...candidate, revision: 2 });
+      return new Promise<boolean>(resolve => { release = resolve; });
+    });
+    updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'saved' });
+    const saving = saveEntityDraft('sendCommandSets', 'one');
+    await vi.waitFor(() => expect(configService.setConfig).toHaveBeenCalledOnce());
+    useAppStore.getState().setConfig({ revision: 10, pluginConfigs: [{ id: 'plugin', installGeneration: 'g1', enabled: false, grantedPermissions: [] }] });
+    release(true);
+    expect(await saving).toBe(true);
+    expect(useAppStore.getState().config.revision).toBe(10);
+    expect(useRuleStore.getState().sendCommandSets[0].name).toBe('saved');
+  });
+
   it('prepares a three-way candidate without committing runtime, then commits only after acknowledgement', () => {
     updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'local' });
     const remote = [commandSet('one'), commandSet('two', 'remote'), commandSet('three')];
@@ -129,6 +155,18 @@ describe('prepare / commit / adopt and late edits', () => {
 });
 
 describe('crash/session-end draft recovery', () => {
+  it('clears recovery for entity pages that were never mounted during import', () => {
+    const recovered = { ...commandSet('one'), name: 'stale recovered draft' };
+    writeEditorRecovery('sendCommandSets', {
+      baseline: backend.sendCommandSets,
+      draft: [recovered, commandSet('two')],
+      conflicts: [],
+    });
+    adoptEntityEditorBaselineFromConfig(backend);
+    expect(localStorage.getItem('hypercom.editor-recovery.sendCommandSets')).toBeNull();
+    expect(draft().items).toEqual(backend.sendCommandSets);
+  });
+
   it('waits for the real startup baseline instead of treating defaults as remote deletions', () => {
     updateEntityDraft<SendCommandSet>('sendCommandSets', 'one', { name: 'recovered local' });
     resetEntityEditorForTests(true);

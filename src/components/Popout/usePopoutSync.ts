@@ -10,9 +10,9 @@ import { jsonEqual } from '../../utils/jsonEqual';
 export const POPOUT_COMMAND_EDITOR_ID = 'popout:commands';
 
 function changedSetIds(previous: SendCommandSet[], next: SendCommandSet[]): string[] {
-  const before = new Map(previous.map(item => [item.id, JSON.stringify(item)]));
-  const after = new Map(next.map(item => [item.id, JSON.stringify(item)]));
-  return [...new Set([...before.keys(), ...after.keys()])].filter(id => before.get(id) !== after.get(id));
+  const before = new Map(previous.map(item => [item.id, item]));
+  const after = new Map(next.map(item => [item.id, item]));
+  return [...new Set([...before.keys(), ...after.keys()])].filter(id => !jsonEqual(before.get(id), after.get(id)));
 }
 const EMPTY_SNAPSHOT: CommandEditorSnapshot = {
   items: [], sessionId: '', version: -1, dirty: false, dirtyIds: [], saving: false, error: null,

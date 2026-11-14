@@ -19,6 +19,7 @@ import type {
   TriggerRule,
 } from '../types';
 import { useAppStore } from '../stores/useAppStore';
+import { enqueueConfigWrite } from '../utils/configWriteQueue';
 
 type RuleEntityKey = 'sendCommandSets' | 'highlightRuleSets' | 'protocolTemplates' | 'triggerRules' | 'portToolConfigs';
 
@@ -98,7 +99,10 @@ export const storageService = {
   },
 
   savePortPreset: (args: PortPreset): Promise<string> => {
-    return invoke<string>('save_port_preset', { args });
+    // Presets are an immediate backend-owned path, but still serialize with
+    // full-config saves so a stale preset snapshot cannot be written after a
+    // successful CAS save.
+    return enqueueConfigWrite(() => invoke<string>('save_port_preset', { args }));
   },
 
   loadPortPresets: (): Promise<PortPreset[]> => {
@@ -106,7 +110,7 @@ export const storageService = {
   },
 
   deletePortPreset: (presetId: string): Promise<void> => {
-    return invoke<void>('delete_port_preset', { presetId });
+    return enqueueConfigWrite(() => invoke<void>('delete_port_preset', { presetId }));
   },
 
   savePortToolConfig: (args: PortToolConfig): Promise<string> => {

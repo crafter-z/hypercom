@@ -14,6 +14,7 @@ import { enqueueConfigWrite } from './configWriteQueue';
 import { normalizeCommandOrder } from './commandOrder';
 import { validateCommandSetSteps } from './commandSteps';
 import { isSafeRegexPattern } from './safeRegex';
+import { isValidHexInput } from './hexUtils';
 import { jsonEqual as same } from './jsonEqual';
 import { useSystemStore } from '../stores/useSystemStore';
 import { readEditorRecovery, recoverableEntityCollection, recoveryKeys, recoveryRecord, writeEditorRecovery } from './entityEditorRecovery';
@@ -60,7 +61,13 @@ let publishingEntityCommit = false;
 function publishEntityCommit(kind: EntityKey, items: Entity[], revision?: number): void {
   publishingEntityCommit = true;
   try {
-    useAppStore.getState().setConfig({ [kind]: clone(items), ...(revision !== undefined ? { revision } : {}) } as Partial<AppConfig>);
+    // A plugin/status writer may advance the shared config revision while this
+    // entity write is awaiting the backend. Never publish an older revision
+    // over that newer snapshot; the entity itself is still safe to publish
+    // because its request was accepted by CAS before the unrelated update.
+    const currentRevision = useAppStore.getState().config.revision ?? 0;
+    const publishedRevision = revision !== undefined && revision >= currentRevision ? revision : undefined;
+    useAppStore.getState().setConfig({ [kind]: clone(items), ...(publishedRevision !== undefined ? { revision: publishedRevision } : {}) } as Partial<AppConfig>);
     setCommitted(kind, items);
   } finally {
     publishingEntityCommit = false;
@@ -279,9 +286,7 @@ function normalizeItems(kind: EntityKey, items: Entity[]): Entity[] {
 }
 
 function invalidHex(value: unknown): boolean {
-  if (typeof value !== 'string') return true;
-  const compact = value.replace(/[\t\r\n ]/g, '');
-  return compact.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(compact);
+  return typeof value !== 'string' || !isValidHexInput(value);
 }
 
 function validateIds(items: readonly Entity[]): string | null {
@@ -634,7 +639,13 @@ export function adoptEntityEditorBaselineFromConfig(config: AppConfig = useAppSt
   const source = config as unknown as Record<EntityKey, Entity[]>;
   for (const kind of KEY_SET) {
     const state = states.get(kind);
-    if (!state) continue;
+    // Import/restore is destructive for every session draft, including pages
+    // that were never mounted in this process. Clear their recovery records as
+    // well or the next editor mount would resurrect pre-import data.
+    if (!state) {
+      writeEditorRecovery(kind, null);
+      continue;
+    }
     const items = clone(source[kind] ?? []);
     state.baseline = items;
     state.draft = clone(items);
@@ -660,7 +671,12 @@ export function listDirtyEntityKinds(): EntityKey[] {
 /** Mark a full-config candidate as persisted, retaining edits made while it was in flight. */
 export function commitEntityEditorDraft(kind: EntityKey, persisted: Entity[], expectedVersion?: number, revision?: number): void {
   const state = ensure(kind);
-  if (revision !== undefined && revision < (useAppStore.getState().config.revision ?? 0)) return;
+  const preparedMatches = state.prepared !== null && state.prepared.version === expectedVersion;
+  // A full save prepares this entity before awaiting CAS. An unrelated writer
+  // (notably the plugin revision snapshot) may advance the shared revision in
+  // the meantime; that must not cancel the accepted entity commit. A response
+  // with no matching prepared version is still stale and must be ignored.
+  if (revision !== undefined && revision < (useAppStore.getState().config.revision ?? 0) && !preparedMatches) return;
   const oldBaseline = clone(state.baseline);
   const oldDraft = clone(state.draft);
   const prepared = state.prepared;

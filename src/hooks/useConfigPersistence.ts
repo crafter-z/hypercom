@@ -51,7 +51,11 @@ export function saveCurrentPortMeta(
       const present = new Set(current.presentIds);
       const portMeta = [...persisted.portMeta.filter((entry) => !present.has(entry.portId)), ...current.entries];
       if (await configService.setConfig({ ...persisted, portMeta }, false, persisted.revision)) {
-        useAppStore.getState().setConfig({ portMeta, revision: persisted.revision + 1 });
+        // An unrelated backend writer can advance the local revision while this
+        // metadata request is in flight. Keep that newer revision instead of
+        // regressing the store after our CAS succeeds.
+        const currentRevision = useAppStore.getState().config.revision ?? 0;
+        useAppStore.getState().setConfig({ portMeta, revision: Math.max(currentRevision, persisted.revision + 1) });
         return;
       }
     }
@@ -68,7 +72,8 @@ export function saveCurrentPortGroups(): Promise<void> {
       if (persisted.revision === undefined) throw new Error('Backend config revision is missing');
       const portGroups = useAppStore.getState().groups;
       if (await configService.setConfig({ ...persisted, portGroups }, false, persisted.revision)) {
-        useAppStore.getState().setConfig({ portGroups, revision: persisted.revision + 1 });
+        const currentRevision = useAppStore.getState().config.revision ?? 0;
+        useAppStore.getState().setConfig({ portGroups, revision: Math.max(currentRevision, persisted.revision + 1) });
         return;
       }
     }
@@ -252,13 +257,17 @@ export function useConfigPersistence() {
             entities[kind] = prepared.items;
           }
         }
+        // Groups and port metadata are live store authorities, not editor
+        // drafts. Capture them after the asynchronous preset read so a late
+        // group/port edit cannot be replaced by the state from save start.
+        const latestState = useAppStore.getState();
         const candidate: AppConfig = fieldOnly ? { ...persisted, ...patch } : {
-          ...state.config,
+          ...latestState.config,
           ...ordinary.values,
           ...patch,
           ...(entities as Partial<AppConfig>),
-          portGroups: state.groups,
-          portMeta: mergePortMeta(state.ports, persisted.portMeta),
+          portGroups: latestState.groups,
+          portMeta: mergePortMeta(latestState.ports, persisted.portMeta),
           portPresets,
         };
         const saved = await configService.setConfig(candidate, false, revision);
@@ -270,7 +279,9 @@ export function useConfigPersistence() {
           for (const kind of ENTITY_KEYS) delete ordinaryPatch[kind];
           if (latest === state.config) {
             useAppStore.getState().setConfig({ ...ordinaryPatch, revision: nextRevision });
-          } else {
+          } else if ((latest.revision ?? 0) < nextRevision) {
+            // Preserve unrelated newer snapshots (for example plugin state)
+            // observed while this CAS request was in flight.
             useAppStore.getState().setConfig({ revision: nextRevision });
           }
           for (const kind of ENTITY_KEYS) {

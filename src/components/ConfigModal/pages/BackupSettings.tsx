@@ -9,6 +9,7 @@ import { syncPluginListSnapshot } from '../../../utils/pluginConfigSnapshot';
 import { requestEditorLeave } from '../../../utils/editorLeave';
 import { adoptEntityEditorBaselineFromConfig } from '../../../utils/entityEditor';
 import { markOrdinaryConfigSaved } from '../../../hooks/useConfigPersistence';
+import { enqueueConfigWrite } from '../../../utils/configWriteQueue';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
@@ -43,6 +44,8 @@ function validateConfigBundle(bundle: ConfigBundle): string | null {
 
 const BackupSettings: React.FC = () => {
   const { t } = useTranslation();
+  const importInFlight = React.useRef(false);
+  const [importing, setImporting] = React.useState(false);
 
   const handleExport = async () => {
     try {
@@ -66,6 +69,9 @@ const BackupSettings: React.FC = () => {
   };
 
   const handleImport = async () => {
+    if (importInFlight.current) return;
+    importInFlight.current = true;
+    setImporting(true);
     try {
       const content = await fileService.pickTextFileAndRead({
         filters: [{ name: 'HyperCom Config', extensions: ['json'] }],
@@ -87,19 +93,27 @@ const BackupSettings: React.FC = () => {
       }
       if (!(await confirm(t('backupSettings.importConfirm'), { title: t('backupSettings.importButton'), kind: 'warning' }))) return;
       if (!(await requestEditorLeave())) return;
-      // Only the backend can decide whether backed-up grants still name installed code.
-      await configService.setConfig(bundle.config, true);
-      const restored = await configService.getConfig();
-      const current = useAppStore.getState().config;
-      useAppStore.getState().setConfig({ ...restored, revision: Math.max(restored.revision ?? 0, current.revision ?? 0), pluginConfigs: current.pluginConfigs });
-      adoptEntityEditorBaselineFromConfig(restored);
-      markOrdinaryConfigSaved(useAppStore.getState().config);
-      syncPluginListSnapshot(await pluginService.listPlugins());
-      notifySuccess('backupSettings.importSuccess');
-      // Reload immediately: a delayed reload would leave a window for new edits.
-      window.location.reload();
+      const imported = bundle.config;
+      // Import is a destructive write, but it still owns the same serialized
+      // lane as ordinary/entity/metadata saves. Never publish before its ACK.
+      await enqueueConfigWrite(async () => {
+        // Only the backend can decide whether grants still name installed code.
+        if (!await configService.setConfig(imported, true)) throw new Error(t('editor.saveFailed'));
+        const restored = await configService.getConfig();
+        const current = useAppStore.getState().config;
+        useAppStore.getState().setConfig({ ...restored, revision: Math.max(restored.revision ?? 0, current.revision ?? 0), pluginConfigs: current.pluginConfigs });
+        adoptEntityEditorBaselineFromConfig(restored);
+        markOrdinaryConfigSaved(useAppStore.getState().config);
+        syncPluginListSnapshot(await pluginService.listPlugins());
+        notifySuccess('backupSettings.importSuccess');
+        // Reload immediately: a delayed reload would leave a window for new edits.
+        window.location.reload();
+      });
     } catch (e) {
       notifyError(e);
+    } finally {
+      importInFlight.current = false;
+      setImporting(false);
     }
   };
 
@@ -110,13 +124,13 @@ const BackupSettings: React.FC = () => {
         <section className="backup-action-card" aria-labelledby="backup-export-title">
           <h3 id="backup-export-title" className="config-section-title">{t('backupSettings.exportTitle')}</h3>
           <p className="config-field-hint">{t('backupSettings.exportHint')}</p>
-          <button className="btn btn-sm btn-primary" onClick={handleExport}>{t('backupSettings.exportButton')}</button>
+          <button className="btn btn-sm btn-primary" disabled={importing} onClick={handleExport}>{t('backupSettings.exportButton')}</button>
         </section>
         <section className="backup-action-card backup-action-card-warning" aria-labelledby="backup-import-title">
           <h3 id="backup-import-title" className="config-section-title">{t('backupSettings.importTitle')}</h3>
           <p className="config-field-hint">{t('backupSettings.importHint')}</p>
           <p className="config-field-warning">{t('backupSettings.importRisk')}</p>
-          <button className="btn btn-sm btn-danger" onClick={handleImport}>{t('backupSettings.importButton')}</button>
+          <button className="btn btn-sm btn-danger" disabled={importing} onClick={handleImport}>{t('backupSettings.importButton')}</button>
         </section>
       </div>
     </div>

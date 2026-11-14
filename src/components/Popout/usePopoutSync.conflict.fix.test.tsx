@@ -54,6 +54,14 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount(); }); });
 
 describe('popout conflict escape hatches', () => {
+  it('does not attribute untouched records to the panel merely because JSON properties were reordered', async () => {
+    await mountReady();
+    const reorderedB = { repeatCount: b.repeatCount, loopDelay: b.loopDelay, isLoop: b.isLoop, commands: b.commands, name: b.name, id: b.id };
+    const items = [{ ...a, name: 'panel draft' }, reorderedB];
+    vi.mocked(popoutEventService.requestCommandEditor).mockResolvedValueOnce(reply({ ...initial, items, version: 2, dirty: true, dirtyIds: ['a'] }));
+    await act(async () => sync.replaceSets(items));
+    expect(popoutEventService.requestCommandEditor).toHaveBeenCalledWith(expect.objectContaining({ action: 'replace', ids: ['a'] }));
+  });
   it('resends the full local replace on the latest host version and reports touched ids', async () => {
     await mountReady();
     vi.mocked(popoutEventService.requestCommandEditor).mockResolvedValueOnce(reply(main, false, 'editor.conflict'));
