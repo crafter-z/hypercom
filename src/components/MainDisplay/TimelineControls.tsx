@@ -1,10 +1,12 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useRef, useState, useSyncExternalStore } from 'react';
+import { useDialogLifecycle } from '../shared/useDialogLifecycle';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Link2, Settings2, X } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { timelineCoordinator, type DragSyncPolicy, type TimelineMemberSnapshot, type TimelineStatus } from '../../utils/timeline';
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import { safeCssColor } from '../../utils/cssColor';
 import { formatTimelineTime as clockLabel } from '../../utils/timeFormat';
 import './TimelineControls.css';
@@ -126,33 +128,7 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
   const allUnavailable = !!group && group.members.length > 0 && group.members.every(member => member.state === 'unavailable');
   const mappingRequired = (group?.members ?? []).some(member => member.reason === 'mapping-required');
 
-  useEffect(() => {
-    if (!ready) return;
-    const previousFocus = document.activeElement;
-    dialogRef.current?.querySelector<HTMLElement>('[data-initial-focus]')?.focus();
-    return () => { if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true }); };
-  }, [ready]);
-  useEffect(() => {
-    const listener = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        closePanel();
-      } else if (event.key === 'Tab') {
-        const controls = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary') ?? [])
-          .filter(element => element.getClientRects().length > 0);
-        const first = controls[0], last = controls[controls.length - 1];
-        if (!first) { event.preventDefault(); return; }
-        if (!dialogRef.current?.contains(document.activeElement)) {
-          event.preventDefault();
-          (event.shiftKey ? last : first).focus();
-        } else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-      }
-    };
-    window.addEventListener('keydown', listener, true);
-    return () => window.removeEventListener('keydown', listener, true);
-  }, []);
+  useDialogLifecycle({ open: ready, dialogRef, onClose: closePanel });
   const action = (work: () => void) => { try { work(); setError(''); } catch (cause) { setError(String(cause)); } };
   const alignEvent = () => action(() => {
     if (!group) return;
@@ -207,7 +183,7 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
   const sourceLabel = (sourceId: string) => tabs.filter(tab => timelineCoordinator.participantForSlot(tab.id)?.sourceId === sourceId).map(tab => tab.title).join(' / ') || sourceId;
 
   return <div className="modal-overlay timeline-modal-overlay" style={{ visibility: ready ? 'visible' : 'hidden' }} onMouseDown={event => { if (event.target === event.currentTarget) closePanel(); }}>
-    <section ref={dialogRef} className="timeline-panel" role="dialog" aria-modal="true" aria-labelledby="timeline-panel-title" aria-describedby="timeline-panel-description">
+    <section ref={dialogRef} tabIndex={-1} className="timeline-panel" role="dialog" aria-modal="true" aria-labelledby="timeline-panel-title" aria-describedby="timeline-panel-description">
       <header className="timeline-panel-header">
         <div className="timeline-panel-heading">
           <h2 id="timeline-panel-title">{t('timeline.title')}</h2>
@@ -229,10 +205,12 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
               <button type="button" className="btn btn-sm btn-danger" onClick={dissolveGroup}>{t('timeline.deleteGroup')}</button>
             </div>
           </div> : <div className="timeline-setup">
-            {joinableGroups.length > 0 && <div className="segmented timeline-setup-mode" role="group" aria-label={t('timeline.selectGroup')}>
-              <button type="button" className={`segmented-btn${!joinExisting ? ' active' : ''}`} aria-pressed={!joinExisting} onClick={() => setJoinExisting(false)}>{t('timeline.newGroup')}</button>
-              <button type="button" className={`segmented-btn${joinExisting ? ' active' : ''}`} aria-pressed={joinExisting} onClick={() => setJoinExisting(true)}>{t('timeline.join')}</button>
-            </div>}
+            {joinableGroups.length > 0 && <SegmentedControl
+              className="timeline-setup-mode" aria-label={t('timeline.selectGroup')}
+              value={joinExisting ? 'join' : 'new'}
+              options={[{ value: 'new', label: t('timeline.newGroup') }, { value: 'join', label: t('timeline.join') }]}
+              onChange={mode => setJoinExisting(mode === 'join')}
+            />}
             <label className="timeline-field"><span>{t(joinExisting ? 'timeline.selectGroup' : 'timeline.groupName')}</span>
               {joinExisting ? <select className="select" value={joinGroupId} onChange={event => setJoinGroupId(event.target.value)}>
                 {joinableGroups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}

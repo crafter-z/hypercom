@@ -3,6 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PluginView } from '../../../types';
+import Modal from '../../shared/Modal';
 
 // React needs this flag for `act()` outside its own test renderer.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -66,6 +67,20 @@ afterEach(() => {
 });
 
 describe('plugin uninstall progress', () => {
+  it('keeps focus and Escape in the non-cancellable progress overlay, not the parent settings dialog', async () => {
+    const parentClose = vi.fn();
+    let finish!: () => void;
+    uninstallPlugin.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    await act(async () => root.render(createElement(Modal, { open: true, label: 'settings', onClose: parentClose, children: createElement(PluginSettings) })));
+    await act(async () => uninstallButton().click());
+    expect(document.activeElement).toBe(overlay());
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    await act(async () => overlay()!.dispatchEvent(escape));
+    expect(escape.defaultPrevented).toBe(true);
+    expect(parentClose).not.toHaveBeenCalled();
+    await flushPaint(); await flushPaint();
+    await act(async () => finish());
+  });
   it('paints the progress panel before the uninstall command starts', async () => {
     let finish!: () => void;
     uninstallPlugin.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));

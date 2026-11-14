@@ -32,9 +32,15 @@ export function useHotkeys(): void {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A terminal/editor or nested dialog may already own this key. Global
+      // fallbacks must not execute the same action against a different target.
+      if (e.defaultPrevented) return;
       const ctrl = e.ctrlKey || e.metaKey;
+      // Dialogs own their keyboard lifecycle even when this window listener was
+      // registered first. Never connect, clear or close background UI through it.
+      if ((ctrl || e.key === 'Escape') && document.querySelector('[aria-modal="true"]')) return;
 
-      // Escape always works — close topmost modal/dialog
+      // Fallback while a help dialog is still waiting for its native overlay.
       if (e.key === 'Escape') {
         const system = useSystemStore.getState();
         if (system.ui.isHotkeyHelpOpen) {

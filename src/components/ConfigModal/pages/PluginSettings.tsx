@@ -27,6 +27,8 @@ import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
 const UninstallProgress: React.FC<{ name: string; startedAt: number }> = ({ name, startedAt }) => {
   const { t } = useTranslation();
   const [elapsed, setElapsed] = React.useState(0);
+  const dialogRef = React.useRef<HTMLDivElement>(null);
+  useDialogLifecycle({ open: true, dialogRef, disableEscape: true });
   React.useEffect(() => {
     const tick = () => setElapsed(Math.floor((Date.now() - startedAt) / 1000));
     tick();
@@ -34,7 +36,7 @@ const UninstallProgress: React.FC<{ name: string; startedAt: number }> = ({ name
     return () => clearInterval(timer);
   }, [startedAt]);
   const label = t('plugins.uninstalling', { name });
-  return <div className="plugin-uninstall-overlay" role="alertdialog" aria-modal="true" aria-busy="true" aria-label={label}>
+  return <div ref={dialogRef} tabIndex={-1} className="plugin-uninstall-overlay" role="alertdialog" aria-modal="true" aria-busy="true" aria-label={label}>
     <div className="plugin-uninstall-panel">
       <div className="plugin-uninstall-title">{label}</div>
       <div className="plugin-uninstall-bar" role="progressbar" aria-valuetext={label}><span className="plugin-uninstall-bar-fill" /></div>
@@ -46,6 +48,7 @@ const UninstallProgress: React.FC<{ name: string; startedAt: number }> = ({ name
 import { useAppStore } from '../../../stores/useAppStore';
 import type { PluginView } from '../../../types';
 import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
+import { useDialogLifecycle } from '../../shared/useDialogLifecycle';
 
 const hasTrustedViews = (plugin: PluginView): boolean =>
   plugin.manifest?.ui?.views?.some(view => view.mode === 'trusted-web') === true;
@@ -56,32 +59,10 @@ function TrustedWebDialog({ plugin, clearing, working, onCancel, onAccept }: {
   const { t } = useTranslation();
   const ready = usePluginViewOverlay();
   const ref = React.useRef<HTMLDivElement>(null);
-  React.useEffect(() => {
-    if (!ready) return;
-    const previous = document.activeElement;
-    ref.current?.querySelector('button')?.focus();
-    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
-  }, [ready]);
-  React.useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (!working) onCancel();
-      } else if (event.key === 'Tab') {
-        const buttons = ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-        if (!buttons?.length) { event.preventDefault(); return; }
-        const first = buttons[0], last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [onCancel, working]);
+  useDialogLifecycle({ open: ready, dialogRef: ref, onClose: onCancel, disableEscape: working });
   if (!ready) return null;
   return <div className="modal-overlay" role="presentation" onClick={event => event.stopPropagation()}>
-    <div ref={ref} className="modal-dialog-compact plugin-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="trusted-web-title" aria-describedby="trusted-web-description">
+    <div ref={ref} tabIndex={-1} className="modal-dialog-compact plugin-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="trusted-web-title" aria-describedby="trusted-web-description">
       <h3 id="trusted-web-title">{t(clearing ? 'plugins.clearWebDataTitle' : 'plugins.trustedWebTitle')}</h3>
       <p><strong>{plugin.manifest?.name ?? plugin.id}</strong> · {plugin.manifest?.version}</p>
       <p id="trusted-web-description">{t(clearing ? 'plugins.clearWebDataDescription' : 'plugins.trustedWebDescription')}</p>
@@ -125,6 +106,12 @@ const PluginSettings: React.FC = () => {
   // admission set as a UI busy guard; the hook remains the authority for CAS.
   const busyPluginRef = React.useRef(new Set<string>());
   const [busyPlugins, setBusyPlugins] = React.useState<ReadonlySet<string>>(new Set());
+  const grantDialogRef = React.useRef<HTMLDivElement>(null);
+  const grantTitleId = React.useId();
+  const grantReady = usePluginViewOverlay(pendingGrant !== null);
+  const grantWorking = loading || working || !!pendingGrant && busyPlugins.has(pendingGrant.id);
+  useDialogLifecycle({ open: pendingGrant !== null && grantReady, dialogRef: grantDialogRef,
+    disableEscape: grantWorking, onClose: () => setPendingGrant(null) });
   const beginPluginBusy = (pluginId: string): boolean => {
     if (busyPluginRef.current.has(pluginId)) return false;
     busyPluginRef.current.add(pluginId);
@@ -404,10 +391,10 @@ const PluginSettings: React.FC = () => {
         })().catch(() => {}).finally(() => setWorking(false));
       }}
     />}
-    {pendingGrant && (
-      <div className="modal-overlay" onClick={() => setPendingGrant(null)}>
-        <div className="modal-dialog-compact plugin-permission-dialog animate-slide-up" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-          <h3 className="modal-dialog-title">{t('plugins.permissionPromptTitle', { name: pendingGrant.manifest?.name ?? pendingGrant.id })}</h3>
+    {pendingGrant && grantReady && (
+      <div className="modal-overlay" onClick={() => { if (!grantWorking) setPendingGrant(null); }}>
+        <div ref={grantDialogRef} tabIndex={-1} className="modal-dialog-compact plugin-permission-dialog animate-slide-up" role="dialog" aria-modal="true" aria-labelledby={grantTitleId} onClick={(event) => event.stopPropagation()}>
+          <h3 id={grantTitleId} className="modal-dialog-title">{t('plugins.permissionPromptTitle', { name: pendingGrant.manifest?.name ?? pendingGrant.id })}</h3>
           <p className="settings-hint">{t('plugins.permissionPromptDescription')}</p>
           {pendingGrant.declaredPermissions.length > 0 ? (
             <div className="plugin-permission-dialog-list">
@@ -417,8 +404,8 @@ const PluginSettings: React.FC = () => {
             </div>
           ) : <p className="settings-hint">{t('plugins.noPermissions')}</p>}
           <div className="plugin-permission-dialog-actions">
-            <button className="btn" onClick={() => setPendingGrant(null)}>{t('plugins.permissionPromptLater')}</button>
-            <button className="btn btn-primary" disabled={loading} onClick={() => {
+            <button className="btn" disabled={grantWorking} onClick={() => setPendingGrant(null)}>{t('plugins.permissionPromptLater')}</button>
+            <button className="btn btn-primary" disabled={grantWorking} onClick={() => {
               if (hasTrustedViews(pendingGrant) && !plugins.some(plugin => plugin.id === pendingGrant.id && plugin.installGeneration === pendingGrant.installGeneration && plugin.trustedWebGranted === true)) {
                 setPendingTrust({ plugin: pendingGrant, install: true });
                 setPendingGrant(null);

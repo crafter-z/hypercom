@@ -9,6 +9,7 @@ import { listDirtyEntityKinds, saveEntityDraft, discardEntityDraft } from '../..
 import { flushSync } from 'react-dom';
 import type { EntityKey } from '../../utils/entityEditor';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import { useDialogLifecycle } from './useDialogLifecycle';
 
 /** Native close contract: payload `{requestId, forceExit}`; answer by id. */
 const closeCommands = systemService;
@@ -159,31 +160,8 @@ export const EditorLeaveDialog: React.FC = () => {
   const requestRef = useRef(0);
   const dialogRef = useRef<HTMLDivElement>(null);
   const overlayReady = usePluginViewOverlay(state.open);
-  useEffect(() => {
-    if (!state.open || !overlayReady) return;
-    const previousFocus = document.activeElement;
-    dialogRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
-    return () => { if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true }); };
-  }, [state.open, overlayReady]);
-  useEffect(() => {
-    if (!state.open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (!working) void respondEditorLeave('continue');
-      } else if (event.key === 'Tab') {
-        const buttons = dialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-        if (!buttons?.length) { event.preventDefault(); return; }
-        const first = buttons[0];
-        const last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [state.open, working]);
+  useDialogLifecycle({ open: state.open && overlayReady, dialogRef,
+    disableEscape: working, onClose: () => { void respondEditorLeave('continue'); } });
   if (!state.open || !overlayReady) return null;
 
   const respond = async (action: 'save' | 'discard' | 'continue') => {
@@ -203,7 +181,7 @@ export const EditorLeaveDialog: React.FC = () => {
   };
   return (
     <div className="modal-overlay editor-leave-overlay" role="presentation">
-      <div ref={dialogRef} className="modal-dialog-compact editor-leave-dialog" role="dialog" aria-modal="true" aria-labelledby="editor-leave-title">
+      <div ref={dialogRef} tabIndex={-1} className="modal-dialog-compact editor-leave-dialog" role="dialog" aria-modal="true" aria-labelledby="editor-leave-title">
         <h2 id="editor-leave-title">{t('editor.leaveTitle')}</h2>
         <p>{t('editor.leaveMessage')}</p>
         {state.labels.length > 0 && <ul>{state.labels.map((label, index) => <li key={`${label}-${index}`}>{t(label)}</li>)}</ul>}

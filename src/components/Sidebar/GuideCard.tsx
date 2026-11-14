@@ -1,4 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { useDialogLifecycle } from '../shared/useDialogLifecycle';
+import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 import { useTranslation } from 'react-i18next';
 import {
   Cable, FlaskConical, BookOpen, Send, Highlighter, Split, FileText,
@@ -16,17 +18,16 @@ const QUICK_START_FEATURES: ReadonlyArray<{ icon: React.ReactNode; titleKey: str
 const QuickStartModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { t } = useTranslation();
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const ready = usePluginViewOverlay();
+  useDialogLifecycle({ open: ready, dialogRef, onClose });
+  if (!ready) return null;
 
   return (
     <div className="guide-quickstart-backdrop" onClick={onClose}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="guide-quickstart animate-slide-up"
         role="dialog"
         aria-modal="true"
