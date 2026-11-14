@@ -178,7 +178,7 @@ test('run settings stay out of the title bar and finite repeats expose the round
   await gap.press('Tab');
   expect((await persisted(page)).sendCommandSets[0].loopDelay).toBe(0);
   await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
-  await expect(page.locator('.editor-status')).toContainText('已保存');
+  await expect(page.locator('.editor-status')).toHaveCount(0);
   expect((await persisted(page)).sendCommandSets[0]).toMatchObject({ repeatCount: 3, isLoop: false, loopDelay: 250 });
 });
 
@@ -241,7 +241,7 @@ test('compact command editor fits six editable commands and stays within narrow 
   await page.locator('.modal-dialog').screenshot({ path: testInfo.outputPath('commands-run-settings-narrow-en.png') });
 });
 
-test('the unified command toolbar adds baud steps with focus and saves their enhanced schema', async ({ page }) => {
+test('the unified command toolbar adds baud steps with focus and saves their enhanced schema', async ({ page }, testInfo) => {
   await openCommands(page);
   await page.locator('.command-list-toolbar').getByRole('button', { name: '添加波特率步骤', exact: true }).click();
   const step = page.locator('.command-step-row').last();
@@ -249,8 +249,9 @@ test('the unified command toolbar adds baud steps with focus and saves their enh
   await expect(step.getByRole('combobox', { name: '步骤类型', exact: true })).toHaveValue('setParams');
   await expect(step.getByRole('spinbutton', { name: '本机波特率', exact: true })).toHaveValue('230400');
   await expect(page.getByPlaceholder('命令内容...')).toHaveCount(2);
+  await page.locator('.modal-dialog').screenshot({ path: testInfo.outputPath('commands-dirty.png'), animations: 'disabled' });
   await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
-  await expect(page.locator('.editor-status')).toContainText('已保存');
+  await expect(page.locator('.editor-status')).toHaveCount(0);
   const set = (await persisted(page)).sendCommandSets[0];
   expect(set.schemaVersion).toBe(2);
   expect(set.commands.map((command: { order: number }) => command.order)).toEqual([0, 1, 2]);
@@ -379,7 +380,7 @@ test('keyboard sorting changes persisted execution order and reload restores it'
   await handle.press('Space');
   await expect(page.getByPlaceholder('命令内容...').first()).toHaveValue('B');
   await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
-  await expect(page.locator('.editor-status')).toContainText('已保存');
+  await expect(page.locator('.editor-status')).toHaveCount(0);
   expect((await persisted(page)).sendCommandSets[0].commands.map((item: { content: string; order: number }) => [item.content, item.order])).toEqual([['B', 0], ['A', 1]]);
   await page.reload();
   await openCommands(page);
@@ -433,9 +434,9 @@ test('command panel shares unsaved drafts with settings and retains them after a
   expect((await persisted(page)).sendCommandSets[0].commands[0].content).toBe('A');
   await page.evaluate(() => localStorage.removeItem('editor-regression.fail-save'));
   await page.locator('.editor-status').getByRole('button', { name: '保存此页', exact: true }).click();
-  await expect(page.locator('.editor-status')).toContainText('已保存');
+  await expect(page.locator('.editor-status')).toHaveCount(0);
   await expect.poll(async () => (await persisted(page)).sendCommandSets[0].commands[0].content).toBe('PANEL DRAFT');
-  await expect(panel.locator('.quicksend-draft-actions')).toContainText('已保存');
+  await expect(panel.locator('.quicksend-draft-actions')).toHaveCount(0);
   // Backup import reloads the main host while the panel can remain open.
   const hostSession = await panel.locator('html').getAttribute('data-editor-host-session');
   await panel.evaluate(() => localStorage.setItem('editor-regression.hold-sync', '1'));
@@ -456,7 +457,7 @@ test('command panel shares unsaved drafts with settings and retains them after a
   await expect(panel.locator('[role="alert"]')).toHaveCount(0);
   await panel.getByRole('textbox', { name: '命令内容', exact: true }).fill('AFTER HOST RELOAD');
   await panel.locator('.quicksend-draft-actions').getByRole('button', { name: '保存', exact: true }).click();
-  await expect(panel.locator('.quicksend-draft-actions')).toContainText('已保存');
+  await expect(panel.locator('.quicksend-draft-actions')).toHaveCount(0);
   expect((await persisted(page)).sendCommandSets[0].commands[0].content).toBe('AFTER HOST RELOAD');
   expect(panelErrors).toEqual([]);
   expect(await panel.evaluate(() => window.__E2E_UNKNOWN_COMMANDS__ ?? [])).toEqual([]);
@@ -468,7 +469,7 @@ test('editing after an individual save is preserved by a later full settings sav
   const name = page.locator('.editor-accordion-header').getByRole('textbox', { name: '名称', exact: true });
   await name.fill('Saved once');
   await page.locator('.editor-accordion-header').getByRole('button', { name: '保存此行', exact: true }).click();
-  await expect(page.locator('.editor-status')).toContainText('已保存');
+  await expect(page.locator('.editor-status')).toHaveCount(0);
   await page.locator('.modal-content-header').getByRole('button', { name: '关闭', exact: true }).click();
   await expect(page.locator('.modal-dialog')).toHaveCount(0);
   await page.locator('.titlebar-right button[title="设置"]').click();

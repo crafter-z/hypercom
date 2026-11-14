@@ -59,6 +59,11 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
     pendingFocus.current = true;
     if (beforeId) onInsert(beforeId); else onAdd();
   };
+  // Keep the status/actions region out of the clean DOM entirely. Besides
+  // avoiding a persistent "Saved" message, this keeps Tab navigation focused
+  // on controls that can actually do something. A reorder marks the page dirty
+  // (even when no individual row is dirty), so page actions still appear.
+  const showPageStatus = dirty || saving;
   return <div className="config-page" ref={root}>
     <div className="editor-page-heading">
       <h3 className="config-page-title config-visually-hidden">{title}</h3>
@@ -70,11 +75,13 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
       )}
       <button type="button" className="btn btn-sm" disabled={saving} onClick={() => add()}><Plus size={14} /> {addLabel}</button>
     </div>
-    <div className="editor-status" aria-live="polite">
-      <span>{t(saving ? 'editor.saving' : dirty ? 'editor.unsaved' : 'editor.saved')}</span>
-      <button type="button" className="btn btn-sm" disabled={!dirty || saving} onClick={() => { void onSave(); }} aria-label={t('configModal.pageSave')}><Check size={14} /> {t('configModal.pageSave')}</button>
-      <button type="button" className="btn btn-sm" disabled={!dirty || saving} onClick={() => onDiscard()} aria-label={t('configModal.pageDiscard')}><Undo2 size={14} /> {t('configModal.pageDiscard')}</button>
-    </div>
+    {showPageStatus && <div className="editor-status" aria-live="polite">
+      <span>{t(saving ? 'editor.saving' : 'editor.unsaved')}</span>
+      {dirty && <>
+        <button type="button" className="btn btn-sm" disabled={saving} onClick={() => { void onSave(); }} aria-label={t('configModal.pageSave')}><Check size={14} /> {t('configModal.pageSave')}</button>
+        <button type="button" className="btn btn-sm" disabled={saving} onClick={() => onDiscard()} aria-label={t('configModal.pageDiscard')}><Undo2 size={14} /> {t('configModal.pageDiscard')}</button>
+      </>}
+    </div>}
     {error && <div className="editor-error" role="alert">{t(error)}</div>}
     {items.length === 0 && <div className="config-placeholder">{emptyText}</div>}
     <SortableEditorList items={items} onReorder={onReorder} disabled={saving} renderItem={(set, index, handle) => (
@@ -90,8 +97,10 @@ function RuleSetAccordion<TSet extends { id: string; name: string }>({
           {isDirty(set.id) && <span className="editor-dirty-dot" title={t('editor.unsaved')} aria-label={t('editor.unsaved')} />}
           <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} disabled={saving} onClick={() => add(set.id)}><ArrowUpToLine size={14} /></button>
           <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} disabled={saving} onClick={() => add(items[index + 1]?.id)}><ArrowDownToLine size={14} /></button>
-          <button type="button" className="btn btn-icon btn-sm" title={t('configModal.rowSave')} aria-label={t('configModal.rowSave')} disabled={!isDirty(set.id) || saving} onClick={() => { void onSave(set.id); }}><Check size={14} /></button>
-          <button type="button" className="btn btn-icon btn-sm" title={t('configModal.rowDiscard')} aria-label={t('configModal.rowDiscard')} disabled={!isDirty(set.id) || saving} onClick={() => onDiscard(set.id)}><Undo2 size={14} /></button>
+          {isDirty(set.id) && <>
+            <button type="button" className="btn btn-icon btn-sm" title={t('configModal.rowSave')} aria-label={t('configModal.rowSave')} disabled={saving} onClick={() => { void onSave(set.id); }}><Check size={14} /></button>
+            <button type="button" className="btn btn-icon btn-sm" title={t('configModal.rowDiscard')} aria-label={t('configModal.rowDiscard')} disabled={saving} onClick={() => onDiscard(set.id)}><Undo2 size={14} /></button>
+          </>}
           <button type="button" className="btn btn-icon btn-sm" title={t('ruleSetAccordion.delete')} aria-label={t('ruleSetAccordion.delete')} disabled={saving} onClick={() => onDelete(set.id)}><Trash2 size={14} /></button>
         </div>
         {selectedId === set.id && <div className="editor-accordion-body">

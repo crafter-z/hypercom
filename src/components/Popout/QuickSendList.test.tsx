@@ -51,6 +51,7 @@ afterEach(() => { act(() => { root.unmount(); }); container.remove(); });
 
 describe('staged popout command list', () => {
   it('flushes a numeric-only buffer before Save even when the published draft is clean', async () => {
+    expect(container.querySelector('.quicksend-draft-panel')).toBeNull();
     const delay = container.querySelector<HTMLInputElement>('.quicksend-set-fields input[type="number"]')!;
     act(() => { delay.focus(); type(delay, '500'); });
     expect(current[0].loopDelay).toBe(0);
@@ -132,13 +133,34 @@ describe('staged popout command list', () => {
     expect(container.querySelector<HTMLButtonElement>('.quicksend-row .editor-drag-handle')!.disabled).toBe(true);
   });
 
-  it('keeps draft controls in a labelled surface separate from command sending', () => {
+  it('hides clean draft controls and keeps dirty controls separate from command sending', () => {
+    expect(container.querySelector('.quicksend-draft-panel')).toBeNull();
+    act(() => { click('.quicksend-edit-btn'); });
+    act(() => { type(container.querySelector('.quicksend-edit-form textarea') as HTMLTextAreaElement, 'dirty'); });
     const draft = container.querySelector<HTMLElement>('.quicksend-draft-panel');
     expect(draft?.getAttribute('role')).toBe('region');
     expect(draft?.getAttribute('aria-label')).toBe('quickSend.editSet');
     expect(draft?.querySelector('.quicksend-draft-actions')).not.toBeNull();
     expect(draft?.querySelector('.quicksend-send-btn')).toBeNull();
     expect(container.querySelector('.quicksend-list .quicksend-send-btn')).not.toBeNull();
+  });
+
+  it('retains the action surface for pending, error, and conflict states', () => {
+    const overwrite = vi.fn(async () => true);
+    const reload = vi.fn(async () => true);
+    act(() => {
+      root.render(createElement(QuickSendList, {
+        active: true, sets: baseline, selectedSet: baseline[0], onSelectSet: () => {}, flashingId: null,
+        onSend: send, onOpenSetEditor: () => {}, ready: true, dirty: false, dirtyIds: new Set<string>(),
+        pending: true, saving: false, error: 'editor.conflict', conflict: true, canSend: true,
+        onReplaceSets: () => {}, onSave: async () => false, onDiscard: async () => false,
+        onOverwriteHost: overwrite, onReloadHost: reload,
+      }));
+    });
+    expect(container.querySelector('.quicksend-draft-panel')).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('editor.conflict');
+    expect([...container.querySelectorAll('button')].find(button => button.textContent?.includes('editor.overwriteHostDraft'))).not.toBeUndefined();
+    expect([...container.querySelectorAll('button')].find(button => button.textContent?.includes('editor.reloadHostDraft'))).not.toBeUndefined();
   });
 
   it('renders the per-step wait as a labelled field with a unit, not a bare number', () => {

@@ -8,6 +8,7 @@ import { useSystemStore } from '../../stores/useSystemStore';
 import { resetStoresForTests } from '../../stores/resetStores';
 import { configService, storageService, popoutEventService } from '../../services/tauri';
 import { applyUiScale } from '../../utils/uiScale';
+import { markOrdinaryConfigSaved, resetOrdinaryConfigBaselineForTests } from '../../hooks/useConfigPersistence';
 import type { AppConfig } from '../../types';
 
 vi.mock('react-i18next', () => ({
@@ -36,9 +37,11 @@ let revision: number;
 beforeEach(async () => {
   vi.clearAllMocks();
   resetStoresForTests();
+  resetOrdinaryConfigBaselineForTests();
   revision = 0;
   backend = { ...useAppStore.getState().config, revision, updateCheckMode: 'none' };
   useAppStore.getState().setConfig(backend);
+  markOrdinaryConfigSaved(backend);
   useSystemStore.getState().setUIState({ isConfigOpen: true, configActiveTab: 'general' });
   vi.mocked(configService.getConfig).mockImplementation(async () => ({ ...backend, revision }));
   vi.mocked(configService.setConfig).mockImplementation(async candidate => { backend = candidate; revision++; return true; });
@@ -51,6 +54,9 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => { root.unmount(); }); container.remove(); });
 
 async function startHeldSave() {
+  // Clean sessions no longer render the global Save action. Make the helper
+  // dirty the ordinary draft so it exercises the same in-flight save path.
+  await act(async () => { useAppStore.getState().setConfig({ uiScalePercent: 125 }); });
   const held = deferred<boolean>();
   vi.mocked(configService.setConfig).mockImplementationOnce(async candidate => {
     const accepted = await held.promise;
@@ -110,5 +116,25 @@ describe('configuration save ownership', () => {
     expect(container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')!.disabled).toBe(false);
     await act(async () => { container.querySelector<HTMLButtonElement>('.modal-content-footer .btn')!.click(); });
     expect(useAppStore.getState().config.uiScalePercent).toBe(150);
+  });
+
+  it('keeps Save visible for a focused NumericInput buffer and flushes it before saving', async () => {
+    expect(container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')).toBeNull();
+    expect(container.querySelector('.modal-save-scope')).toBeNull();
+
+    const input = container.querySelectorAll<HTMLInputElement>('input[type="number"]')[0];
+    const next = 1234;
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, String(next));
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(useAppStore.getState().config.maxDisplayLines).not.toBe(next);
+    expect(container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')).not.toBeNull();
+
+    await act(async () => { container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')!.click(); });
+    expect(configService.setConfig).toHaveBeenCalledTimes(1);
+    expect(backend.maxDisplayLines).toBe(next);
+    expect(useSystemStore.getState().ui.isConfigOpen).toBe(false);
   });
 });

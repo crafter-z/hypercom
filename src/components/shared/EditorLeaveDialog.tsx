@@ -6,10 +6,13 @@ import { systemService } from '../../services/tauri';
 import type { EditorCloseRequest } from '../../services/tauri';
 import { forceDiscardEditorLeave, getEditorLeaveDialogState, registerEditorParticipant, requestEditorLeave, respondEditorLeave, subscribeEditorLeave } from '../../utils/editorLeave';
 import { listDirtyEntityKinds, saveEntityDraft, discardEntityDraft } from '../../utils/entityEditor';
-import { flushSync } from 'react-dom';
 import type { EntityKey } from '../../utils/entityEditor';
+import { flushFocusedEditor } from '../../utils/flushFocusedEditor';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
 import { useDialogLifecycle } from './useDialogLifecycle';
+
+// Kept as a named export for embedders that need the same synchronous boundary.
+export { flushFocusedEditor };
 
 /** Native close contract: payload `{requestId, forceExit}`; answer by id. */
 const closeCommands = systemService;
@@ -18,12 +21,6 @@ let popoutCloseInFlight: Promise<void> | null = null;
 let mainCloseInFlight: Promise<void> | null = null;
 let pendingMainClose: EditorCloseRequest | null = null;
 let mainHeartbeat: ReturnType<typeof setInterval> | null = null;
-
-function flushFocusedEditor(): void {
-  // NumericInput commits on blur. Native close does not normally move focus, so
-  // publish that buffer before asking participants whether anything is dirty.
-  flushSync(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
-}
 
 function enqueuePopoutClose(close: () => Promise<void>): void {
   if (popoutCloseInFlight) return;

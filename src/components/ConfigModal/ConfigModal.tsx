@@ -8,6 +8,7 @@ import { getCommittedUpdateMode, runAutoCheck } from '../../utils/updateService'
 import { applyUiScale } from '../../utils/uiScale';
 import { listDirtyEntityKinds, subscribeEntityEditor } from '../../utils/entityEditor';
 import { registerEditorParticipant, requestEditorLeave } from '../../utils/editorLeave';
+import { flushFocusedEditor } from '../../utils/flushFocusedEditor';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X, Maximize2, Minimize2,
 } from 'lucide-react';
@@ -47,6 +48,10 @@ const navTabId = (id: string) => `config-tab-${id}`;
 const navPanelId = (id: string) => `config-tabpanel-${id}`;
 const CONFIG_TITLE_ID = 'config-modal-title';
 
+function isNumericEditorTarget(target: EventTarget | null): target is HTMLInputElement {
+  return target instanceof HTMLInputElement && target.type === 'number';
+}
+
 const ConfigModal: React.FC = () => {
   const { t } = useTranslation();
   const isConfigOpen = useSystemStore((s) => s.ui.isConfigOpen);
@@ -68,8 +73,12 @@ const ConfigModal: React.FC = () => {
   const [expanded, setExpanded] = useState(false);
   useEffect(() => { if (!isConfigOpen) setExpanded(false); }, [isConfigOpen]);
   const [dirty, setDirty] = useState(false);
+  // NumericInput keeps an uncommitted raw buffer until blur/Enter. Track that
+  // buffer independently so a clean footer still exposes Save while typing.
+  const [focusedEditorPending, setFocusedEditorPending] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const savingRef = useRef(false);
+  const editorFocusSequenceRef = useRef(0);
   const sessionRef = useRef(0);
   const mountedRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -116,8 +125,27 @@ const ConfigModal: React.FC = () => {
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
   }, [isConfigOpen]);
 
+  const handleEditorFocusCapture = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    if (!isNumericEditorTarget(event.target)) return;
+    editorFocusSequenceRef.current++;
+    // A focused NumericInput may still hold a raw buffer, so keep the external
+    // save action available until the input commits on blur/Enter.
+    setFocusedEditorPending(true);
+  }, []);
+  const handleEditorBlurCapture = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    if (!isNumericEditorTarget(event.target)) return;
+    const sequence = ++editorFocusSequenceRef.current;
+    // Let NumericInput's own onBlur commit its raw draft before hiding the
+    // pending action surface. If focus moved to another numeric editor, its
+    // focus handler advances the sequence and keeps the surface visible.
+    queueMicrotask(() => {
+      if (sequence === editorFocusSequenceRef.current) setFocusedEditorPending(false);
+    });
+  }, []);
+
   const handleCancel = useCallback(() => {
     if (savingRef.current) return;
+    flushFocusedEditor();
     void requestEditorLeave(['config-ordinary', 'entity-editor']).then(allowed => {
       if (!allowed || savingRef.current) return;
       toggleConfigModal(false);
@@ -141,6 +169,12 @@ const ConfigModal: React.FC = () => {
     navRefs.current[((index % count) + count) % count]?.focus();
   }, []);
 
+  const selectConfigTab = useCallback((id: string) => {
+    if (savingRef.current) return;
+    flushFocusedEditor();
+    setConfigActiveTab(id);
+  }, [setConfigActiveTab]);
+
   const handleNavKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
     switch (event.key) {
       case 'ArrowDown':
@@ -162,12 +196,12 @@ const ConfigModal: React.FC = () => {
       case 'Enter':
       case ' ':
         event.preventDefault();
-        if (!savingRef.current) setConfigActiveTab(navItems[index].id);
+        selectConfigTab(navItems[index].id);
         break;
       default:
         break;
     }
-  }, [focusNavItem, setConfigActiveTab]);
+  }, [focusNavItem, selectConfigTab]);
 
   useEffect(() => {
     if (!isConfigOpen) return undefined;
@@ -180,6 +214,7 @@ const ConfigModal: React.FC = () => {
 
   const handleSave = async () => {
     if (savingRef.current) return;
+    flushFocusedEditor();
     savingRef.current = true;
     setSaving(true);
     setSaveFailed(false);
@@ -220,6 +255,7 @@ const ConfigModal: React.FC = () => {
   };
 
   const activeNav = navItems.find(n => n.id === configActiveTab);
+  const showGlobalActions = dirty || focusedEditorPending || saving || saveFailed;
 
   return (
     <Modal
@@ -259,7 +295,7 @@ const ConfigModal: React.FC = () => {
                 aria-controls={selected ? navPanelId(item.id) : undefined}
                 tabIndex={selected ? 0 : -1}
                 className={`modal-nav-item${selected ? ' active' : ''}`}
-                onClick={() => { if (!savingRef.current) setConfigActiveTab(item.id); }}
+                onClick={() => selectConfigTab(item.id)}
                 onKeyDown={(event) => handleNavKeyDown(event, index)}
               >
                 <span className="modal-nav-icon">{item.icon}</span>
@@ -297,7 +333,10 @@ const ConfigModal: React.FC = () => {
           ref={contentRef}
           aria-busy={saving}
           onClickCapture={(event) => { if (savingRef.current) { event.preventDefault(); event.stopPropagation(); } }}
-          onChangeCapture={(event) => { if (savingRef.current) event.stopPropagation(); }}>
+          onChangeCapture={(event) => { if (savingRef.current) event.stopPropagation(); }}
+          onFocusCapture={handleEditorFocusCapture}
+          onBlurCapture={handleEditorBlurCapture}
+        >
           {renderContent()}
         </div>
 
@@ -305,12 +344,18 @@ const ConfigModal: React.FC = () => {
           <div className="modal-save-error" role="alert">{t('configModal.saveFailed')}</div>
         )}
         <div className="modal-content-footer">
-          <span className="modal-save-scope" title={t('configModal.scope.globalSaveHint')}>
-            {t('configModal.scope.allDrafts')}
-          </span>
-          {dirty && !saving && <span className="modal-dirty-hint">{t('configModal.unsaved')}</span>}
-          <button className="btn" disabled={saving} onClick={handleCancel}>{t('configModal.cancel')}</button>
-          <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{t('configModal.globalSave')}</button>
+          {showGlobalActions && <>
+            <span className="modal-save-scope" title={t('configModal.scope.globalSaveHint')}>
+              {t('configModal.scope.allDrafts')}
+            </span>
+            {dirty && !saving && <span className="modal-dirty-hint">{t('configModal.unsaved')}</span>}
+          </>}
+          <button className="btn" disabled={saving} onClick={handleCancel}>
+            {t(showGlobalActions ? 'configModal.cancel' : 'configModal.close')}
+          </button>
+          {showGlobalActions && <button className="btn btn-primary" disabled={saving} onClick={handleSave}>
+            {t('configModal.globalSave')}
+          </button>}
         </div>
       </div>
     </Modal>

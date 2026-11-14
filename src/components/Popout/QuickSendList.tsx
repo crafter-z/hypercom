@@ -42,6 +42,10 @@ function commandStepBadgeKey(command: SendCommand): string | null {
   }
 }
 
+function isNumericInputTarget(target: EventTarget | null): target is HTMLInputElement {
+  return target instanceof HTMLInputElement && target.type === 'number';
+}
+
 /**
  * 「之后等待」字段在 `components/shared/AfterDelayField.tsx`——与设置页共用
  * 同一份实现（标签、单位、轮末说明、并入轮间间隔都只有一处）。
@@ -80,20 +84,44 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
   const [editingIds, setEditingIds] = useState<Record<string, boolean>>({});
+  const [focusedNumericInput, setFocusedNumericInput] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const focusCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commands = useMemo(() => orderedCommands(selectedSet?.commands ?? []), [selectedSet]);
   const filtered = useMemo(() => {
     const search = query.trim().toLowerCase();
     return search ? commands.filter(command => command.name.toLowerCase().includes(search) || command.content.toLowerCase().includes(search)) : commands;
   }, [commands, query]);
   const editable = ready && !saving;
+  const draftDirty = dirty || focusedNumericInput;
+  const showDraftPanel = !ready || draftDirty || pending || saving || !!error || !!conflict;
   const sendDisabled = !active || !canSend || !ready || saving || pending || commands.some(command => editingIds[command.id]) || !!selectedSet && dirtyIds.has(selectedSet.id);
 
   useEffect(() => { setCursor(value => Math.max(0, Math.min(value, filtered.length - 1))); }, [filtered.length]);
   useEffect(() => {
     listRef.current?.querySelector('.quicksend-row.is-cursor')?.scrollIntoView?.({ block: 'nearest' });
   }, [cursor, filtered.length]);
+  useEffect(() => () => {
+    if (focusCheckTimerRef.current !== null) clearTimeout(focusCheckTimerRef.current);
+  }, []);
+  const onListFocusCapture = (event: React.FocusEvent<HTMLDivElement>) => {
+    if (isNumericInputTarget(event.target)) {
+      if (focusCheckTimerRef.current !== null) clearTimeout(focusCheckTimerRef.current);
+      setFocusedNumericInput(true);
+    }
+  };
+  const onListBlurCapture = (event: React.FocusEvent<HTMLDivElement>) => {
+    if (!isNumericInputTarget(event.target)) return;
+    if (focusCheckTimerRef.current !== null) clearTimeout(focusCheckTimerRef.current);
+    // Let NumericInput commit first. The next active element also tells us whether
+    // another numeric buffer is still pending inside this list.
+    focusCheckTimerRef.current = setTimeout(() => {
+      focusCheckTimerRef.current = null;
+      const active = document.activeElement;
+      setFocusedNumericInput(isNumericInputTarget(active) && !!listRef.current?.contains(active));
+    }, 0);
+  };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (!active) return;
@@ -184,14 +212,15 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
         <button type="button" className="icon-btn" title={t('commandSettings.addSet')} aria-label={t('commandSettings.addSet')}
           disabled={!editable} onClick={() => insertSet()}><Plus size={13} /></button>
       </div>
-      <div className="quicksend-draft-panel" role="region" aria-label={t('quickSend.editSet')}>
+      {showDraftPanel && <div className="quicksend-draft-panel" role="region" aria-label={t('quickSend.editSet')}>
         <div className="quicksend-draft-actions">
-          <span role="status">{t(!ready || saving || pending ? 'editor.saving' : dirty ? 'editor.unsaved' : 'editor.saved')}</span>
+          {(!ready || saving || pending) && <span role="status">{t('editor.saving')}</span>}
+          {draftDirty && ready && !saving && !pending && <span role="status">{t('editor.unsaved')}</span>}
           <button type="button" className="btn btn-sm" disabled={!ready || saving} onClick={() => { void saveDraft(); }}><Save size={12} />{t('editor.save')}</button>
-          <button type="button" className="btn btn-sm" disabled={!ready || saving || !dirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
+          <button type="button" className="btn btn-sm" disabled={!ready || saving || !draftDirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
         </div>
-        {error && <div className="quicksend-draft-error" role="alert">
-          <span>{error.startsWith('editor.') ? t(error) : error}</span>
+        {(error || conflict) && <div className="quicksend-draft-error" role={error ? 'alert' : 'status'}>
+          {error && <span>{error.startsWith('editor.') ? t(error) : error}</span>}
           {conflict && onOverwriteHost && onReloadHost && <span className="quicksend-conflict-actions">
             <button type="button" className="btn btn-sm" disabled={saving || pending}
               onClick={() => { void onOverwriteHost(); }}>{t('editor.overwriteHostDraft')}</button>
@@ -200,9 +229,9 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
           </span>}
         </div>}
         {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
-      </div>
+      </div>}
     </div>
-    <div className="quicksend-list" ref={listRef}>
+    <div className="quicksend-list" ref={listRef} onFocusCapture={onListFocusCapture} onBlurCapture={onListBlurCapture}>
       <details className="quicksend-set-manager">
         <summary>{t('quickSend.editSet')}</summary>
         <SortableEditorList items={sets} disabled={!editable || !!query.trim()} onReorder={ids => onReplaceSets(ids.map(id => sets.find(set => set.id === id)!))}
