@@ -6,6 +6,8 @@ import { diagLogService, fileService } from '../../services/tauri';
 import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
 import { clearDiagLog, parseDiagLogLine } from '../../utils/diagLog';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import ConfirmDialog from './ConfirmDialog';
+import Modal from './Modal';
 
 type LevelFilter = 'all' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -32,6 +34,7 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [diagPath, setDiagPath] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const overlayReady = usePluginViewOverlay();
 
@@ -114,77 +117,93 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   if (!overlayReady) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-dialog diag-log-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="diag-log-header">
-          <h3 className="modal-content-title diag-log-title">{t('diagLog.title')}</h3>
-          <div className="diag-log-toolbar">
-            <label className="checkbox-wrapper diag-log-toggle">
-              <input
-                type="checkbox"
-                checked={diagEnabled}
-                onChange={(e) => handleToggleDiag(e.target.checked)}
-              />
-              {t('diagLog.enabled')}
-            </label>
-            <select
-              className="select diag-log-filter"
-              value={levelFilter}
-              onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
-              title={t('diagLog.filter')}
-            >
-              <option value="all">{t('diagLog.filterAll')}</option>
-              <option value="INFO">INFO</option>
-              <option value="WARN">WARN</option>
-              <option value="ERROR">ERROR</option>
-            </select>
-            <label className="checkbox-wrapper diag-log-toggle">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) => setAutoRefresh(e.target.checked)}
-              />
-              {t('diagLog.autoRefresh')}
-            </label>
-            <button className="btn btn-icon btn-sm" title={t('diagLog.refresh')} onClick={refresh} disabled={busy}>
-              <RefreshCw size={14} />
-            </button>
-            <button className="btn btn-icon btn-sm" title={t('diagLog.export')} onClick={handleExport} disabled={busy}>
-              <Download size={14} />
-            </button>
-            <button className="btn btn-icon btn-sm" title={t('diagLog.clear')} onClick={handleClear} disabled={busy}>
-              <Trash2 size={14} />
-            </button>
-            <button className="btn btn-icon btn-sm" title={t('hotkeys.close')} onClick={onClose}>
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-
-        <div
-          ref={logRef}
-          className="diag-log-view"
-        >
-          {lines.length === 0 ? (
-            <div className="diag-log-empty">{t('diagLog.empty')}</div>
-          ) : (
-            lines.map((l, i) => (
-              <div key={i} className={`diag-log-line ${levelClass(l.level)}`}>
-                {l.text}
-              </div>
-            ))
-          )}
-        </div>
-
-        <div className="diag-log-footer">
-          <button className="btn btn-sm diag-log-clear-scroll" title={t('diagLog.scrollToLatest')} onClick={() => { const el = logRef.current; if (el) el.scrollTop = el.scrollHeight; }}>
-            <Eraser size={12} />
-            {t('diagLog.scrollToLatest')}
+    <>
+    <Modal
+      open
+      onClose={onClose}
+      labelledBy="diag-log-dialog-title"
+      dialogClassName="diag-log-dialog"
+      onOverlayClick={onClose}
+    >
+      <div className="diag-log-header">
+        <h3 className="modal-content-title diag-log-title" id="diag-log-dialog-title">{t('diagLog.title')}</h3>
+        <div className="diag-log-toolbar">
+          <label className="checkbox-wrapper diag-log-toggle">
+            <input
+              type="checkbox"
+              checked={diagEnabled}
+              onChange={(e) => handleToggleDiag(e.target.checked)}
+            />
+            {t('diagLog.enabled')}
+          </label>
+          <select
+            className="select diag-log-filter"
+            value={levelFilter}
+            onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
+            title={t('diagLog.filter')}
+          >
+            <option value="all">{t('diagLog.filterAll')}</option>
+            <option value="INFO">INFO</option>
+            <option value="WARN">WARN</option>
+            <option value="ERROR">ERROR</option>
+          </select>
+          <label className="checkbox-wrapper diag-log-toggle">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+            />
+            {t('diagLog.autoRefresh')}
+          </label>
+          <button className="btn btn-icon btn-sm" title={t('diagLog.refresh')} onClick={refresh} disabled={busy}>
+            <RefreshCw size={14} />
           </button>
-          <span className="diag-log-path" title={diagPath}>{diagPath || t('diagLog.loadingPath')}</span>
+          <button className="btn btn-icon btn-sm" title={t('diagLog.export')} onClick={handleExport} disabled={busy}>
+            <Download size={14} />
+          </button>
+          <button className="btn btn-icon btn-sm" title={t('diagLog.clear')} onClick={() => setConfirmClear(true)} disabled={busy}>
+            <Trash2 size={14} />
+          </button>
+          <button className="btn btn-icon btn-sm" title={t('hotkeys.close')} onClick={onClose}>
+            <X size={14} />
+          </button>
         </div>
       </div>
-    </div>
+
+      <div
+        ref={logRef}
+        className="diag-log-view"
+      >
+        {lines.length === 0 ? (
+          <div className="diag-log-empty">{t('diagLog.empty')}</div>
+        ) : (
+          lines.map((l, i) => (
+            <div key={i} className={`diag-log-line ${levelClass(l.level)}`}>
+              {l.text}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="diag-log-footer">
+        <button className="btn btn-sm diag-log-clear-scroll" title={t('diagLog.scrollToLatest')} onClick={() => { const el = logRef.current; if (el) el.scrollTop = el.scrollHeight; }}>
+          <Eraser size={12} />
+          {t('diagLog.scrollToLatest')}
+        </button>
+        <span className="diag-log-path" title={diagPath}>{diagPath || t('diagLog.loadingPath')}</span>
+      </div>
+    </Modal>
+    <ConfirmDialog
+      open={confirmClear}
+      title={t('diagLog.clearTitle')}
+      message={t('diagLog.clearMessage')}
+      confirmLabel={t('confirmDialog.confirm')}
+      cancelLabel={t('confirmDialog.cancel')}
+      danger
+      onConfirm={() => { setConfirmClear(false); void handleClear(); }}
+      onCancel={() => setConfirmClear(false)}
+    />
+    </>
   );
 };
 

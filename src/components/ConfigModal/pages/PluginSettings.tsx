@@ -215,6 +215,7 @@ const PluginSettings: React.FC = () => {
       </div>
 
       <p className="settings-hint">{t('plugins.description')}</p>
+      <p className="plugin-instant-note">{t('plugins.instantNote')}</p>
 
       <div className="divider-h" />
       <h4 className="config-section-title">{t('plugins.proxy.sectionTitle')}</h4>

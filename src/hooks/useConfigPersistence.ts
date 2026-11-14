@@ -287,7 +287,12 @@ export function useConfigPersistence() {
       throw new Error('Config changed during save; please try again');
     } catch (err) {
       console.error('[useConfigPersistence] Failed to save config:', err);
-      notifyError(err);
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('editor.conflict') || message.includes('Config changed during save')) {
+        notifyError(undefined, 'configModal.saveConflict');
+      } else {
+        notifyError(err);
+      }
       return false;
     }
   }), []);

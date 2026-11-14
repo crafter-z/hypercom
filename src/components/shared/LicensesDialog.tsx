@@ -2,6 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import Modal from './Modal';
 
 interface LicenseRow {
   name: string;
@@ -69,21 +70,25 @@ const LicensesDialog: React.FC<LicensesDialogProps> = ({ onClose }) => {
   if (!overlayReady) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-dialog-compact animate-slide-up licenses-dialog" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('about.licenses.title')}</h3>
-          <button className="btn btn-icon btn-sm" onClick={onClose} title={t('hotkeys.close')}>
-            <X size={14} />
-          </button>
-        </div>
-        <div className="licenses-scroll">
-          <LicenseTable title={t('about.licenses.frontend')} rows={FRONTEND_LICENSES} />
-          <LicenseTable title={t('about.licenses.backend')} rows={BACKEND_LICENSES} />
-        </div>
-        <div className="licenses-note">{t('about.licenses.note')}</div>
+    <Modal
+      open
+      onClose={onClose}
+      labelledBy="licenses-dialog-title"
+      dialogClassName="modal-dialog-compact animate-slide-up licenses-dialog"
+      onOverlayClick={onClose}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <h3 className="modal-dialog-title" id="licenses-dialog-title" style={{ margin: 0 }}>{t('about.licenses.title')}</h3>
+        <button className="btn btn-icon btn-sm" onClick={onClose} title={t('hotkeys.close')}>
+          <X size={14} />
+        </button>
       </div>
-    </div>
+      <div className="licenses-scroll">
+        <LicenseTable title={t('about.licenses.frontend')} rows={FRONTEND_LICENSES} />
+        <LicenseTable title={t('about.licenses.backend')} rows={BACKEND_LICENSES} />
+      </div>
+      <div className="licenses-note">{t('about.licenses.note')}</div>
+    </Modal>
   );
 };
 

@@ -6,7 +6,7 @@ import { popoutEventService } from '../../services/tauri';
 import { useConfigPersistence, isOrdinaryConfigDirty, discardOrdinaryConfigDraft } from '../../hooks/useConfigPersistence';
 import { getCommittedUpdateMode, runAutoCheck } from '../../utils/updateService';
 import { applyUiScale } from '../../utils/uiScale';
-import { listDirtyEntityKinds } from '../../utils/entityEditor';
+import { listDirtyEntityKinds, subscribeEntityEditor } from '../../utils/entityEditor';
 import { registerEditorParticipant, requestEditorLeave } from '../../utils/editorLeave';
 import {
   Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X,
@@ -21,6 +21,7 @@ import ProtocolSettings from './pages/ProtocolSettings';
 import ToolSettings from './pages/ToolSettings';
 import TriggerSettings from './pages/TriggerSettings';
 import PluginSettings from './pages/PluginSettings';
+import Modal from '../shared/Modal';
 
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 interface NavItem {
@@ -42,11 +43,15 @@ const navItems: NavItem[] = [
   { id: 'plugins', labelKey: 'configModal.nav.plugins', icon: <Plug size={16} /> },
 ];
 
+const navTabId = (id: string) => `config-tab-${id}`;
+const navPanelId = (id: string) => `config-tabpanel-${id}`;
+const CONFIG_TITLE_ID = 'config-modal-title';
 
 const ConfigModal: React.FC = () => {
   const { t } = useTranslation();
   const isConfigOpen = useSystemStore((s) => s.ui.isConfigOpen);
   const configActiveTab = useSystemStore((s) => s.ui.configActiveTab);
+  const isHotkeyHelpOpen = useSystemStore((s) => s.ui.isHotkeyHelpOpen);
   const overlayReady = usePluginViewOverlay(isConfigOpen);
   const toggleConfigModal = useSystemStore((s) => s.toggleConfigModal);
   const setConfigActiveTab = useSystemStore((s) => s.setConfigActiveTab);
@@ -57,7 +62,11 @@ const ConfigModal: React.FC = () => {
   // dialog mid-selection.
   const dialogRef = useRef<HTMLDivElement>(null);
   const mouseDownInsideDialogRef = useRef(false);
+  const navRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const activeNavRef = useRef<HTMLButtonElement | null>(null);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
   const savingRef = useRef(false);
   const sessionRef = useRef(0);
   const mountedRef = useRef(false);
@@ -85,6 +94,26 @@ const ConfigModal: React.FC = () => {
     if (contentRef.current) contentRef.current.inert = saving;
   }, [saving, isConfigOpen, overlayReady]);
 
+  // Each settings page owns the same scroll container. Reset it when the user
+  // switches pages (or reopens the modal) so a long page can't leave the next
+  // page scrolled into its middle.
+  useEffect(() => {
+    if (isConfigOpen && contentRef.current) contentRef.current.scrollTop = 0;
+  }, [configActiveTab, isConfigOpen]);
+
+  // Track where the press started so a drag that ends over the overlay does not
+  // count as an overlay click. Capture phase sees the press before any handler
+  // in the content can stop it.
+  useEffect(() => {
+    if (!isConfigOpen) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      mouseDownInsideDialogRef.current =
+        dialogRef.current?.contains(event.target as Node) ?? false;
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [isConfigOpen]);
+
   const handleCancel = useCallback(() => {
     if (savingRef.current) return;
     void requestEditorLeave(['config-ordinary', 'entity-editor']).then(allowed => {
@@ -93,28 +122,72 @@ const ConfigModal: React.FC = () => {
     });
   }, [toggleConfigModal]);
 
+  const handleOverlayClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    // Clicks on dialog content bubble here; only an overlay-targeted click can
+    // dismiss. Keyboard activation of a nav button has no pointer press, so the
+    // press guard alone would not be enough.
+    if (event.target !== event.currentTarget) return;
+    if (mouseDownInsideDialogRef.current) {
+      mouseDownInsideDialogRef.current = false;
+      return;
+    }
+    handleCancel();
+  }, [handleCancel]);
+
+  const focusNavItem = useCallback((index: number) => {
+    const count = navItems.length;
+    navRefs.current[((index % count) + count) % count]?.focus();
+  }, []);
+
+  const handleNavKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        focusNavItem(index + 1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        focusNavItem(index - 1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        focusNavItem(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        focusNavItem(navItems.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        if (!savingRef.current) setConfigActiveTab(navItems[index].id);
+        break;
+      default:
+        break;
+    }
+  }, [focusNavItem, setConfigActiveTab]);
+
   useEffect(() => {
-    if (!isConfigOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || useSystemStore.getState().ui.isHotkeyHelpOpen) return;
-      event.preventDefault();
-      handleCancel();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isConfigOpen, handleCancel]);
+    if (!isConfigOpen) return undefined;
+    const refresh = () => setDirty(isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0);
+    refresh();
+    const unsubscribeConfig = useAppStore.subscribe(refresh);
+    const unsubscribeEntities = subscribeEntityEditor(refresh);
+    return () => { unsubscribeConfig(); unsubscribeEntities(); };
+  }, [isConfigOpen, configActiveTab]);
 
   const handleSave = async () => {
     if (savingRef.current) return;
     savingRef.current = true;
     setSaving(true);
+    setSaveFailed(false);
     const session = sessionRef.current;
     const current = useAppStore.getState().config;
     const modeChanged = getCommittedUpdateMode() !== current.updateCheckMode;
     try {
-      if (!(await saveConfig())) return;
+      if (!(await saveConfig())) { setSaveFailed(true); return; }
       if (!mountedRef.current || session !== sessionRef.current || !useSystemStore.getState().ui.isConfigOpen) return;
-      if (isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0) return;
+      if (isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0) { setSaveFailed(true); return; }
       const latest = useAppStore.getState().config;
       void applyUiScale(latest.uiScalePercent);
       void popoutEventService.emitUiScaleChanged(latest.uiScalePercent)
@@ -127,8 +200,6 @@ const ConfigModal: React.FC = () => {
       if (mountedRef.current) setSaving(false);
     }
   };
-
-  if (!isConfigOpen || !overlayReady) return null;
 
   const renderContent = () => {
     switch (configActiveTab) {
@@ -149,62 +220,86 @@ const ConfigModal: React.FC = () => {
   const activeNav = navItems.find(n => n.id === configActiveTab);
 
   return (
-    <div
-      className="modal-overlay animate-fade-in"
-      onPointerDown={(e) => {
-        mouseDownInsideDialogRef.current =
-          dialogRef.current?.contains(e.target as Node) ?? false;
-      }}
-      onClick={() => {
-        if (mouseDownInsideDialogRef.current) {
-          mouseDownInsideDialogRef.current = false;
-          return;
-        }
-        handleCancel();
-      }}
+    <Modal
+      open={isConfigOpen && overlayReady}
+      onClose={handleCancel}
+      disableEscape={isHotkeyHelpOpen}
+      labelledBy={CONFIG_TITLE_ID}
+      overlayClassName="animate-fade-in"
+      dialogClassName="animate-slide-up"
+      dialogRef={dialogRef}
+      initialFocusRef={activeNavRef}
+      onOverlayClick={handleOverlayClick}
     >
-      <div className="modal-dialog animate-slide-up" ref={dialogRef} onClick={(e) => e.stopPropagation()}>
-        <div className="modal-nav">
-          <div className="modal-nav-header">
-            <h2 className="modal-nav-title">{t('configModal.title')}</h2>
-          </div>
-          <div className="modal-nav-list">
-            {navItems.map(item => (
-              <div
+      <div className="modal-nav">
+        <div className="modal-nav-header">
+          <h2 className="modal-nav-title" id={CONFIG_TITLE_ID}>{t('configModal.title')}</h2>
+        </div>
+        <div
+          className="modal-nav-list"
+          role="tablist"
+          aria-label={t('configModal.title')}
+          aria-orientation="vertical"
+        >
+          {navItems.map((item, index) => {
+            const selected = configActiveTab === item.id;
+            return (
+              <button
                 key={item.id}
-                className={`modal-nav-item${configActiveTab === item.id ? ' active' : ''}`}
+                ref={(element) => {
+                  navRefs.current[index] = element;
+                  if (selected) activeNavRef.current = element;
+                }}
+                type="button"
+                role="tab"
+                id={navTabId(item.id)}
+                aria-selected={selected}
+                aria-controls={selected ? navPanelId(item.id) : undefined}
+                tabIndex={selected ? 0 : -1}
+                className={`modal-nav-item${selected ? ' active' : ''}`}
                 onClick={() => { if (!savingRef.current) setConfigActiveTab(item.id); }}
+                onKeyDown={(event) => handleNavKeyDown(event, index)}
               >
                 <span className="modal-nav-icon">{item.icon}</span>
                 {t(item.labelKey)}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="modal-content-area">
-          <div className="modal-content-header">
-            <span className="modal-content-title">
-              {activeNav ? t(activeNav.labelKey) : ''}
-            </span>
-            <button className="btn btn-icon" disabled={saving} onClick={handleCancel} title={t('configModal.close')}>
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className="modal-content-body" ref={contentRef} aria-busy={saving}
-            onClickCapture={(event) => { if (savingRef.current) { event.preventDefault(); event.stopPropagation(); } }}
-            onChangeCapture={(event) => { if (savingRef.current) event.stopPropagation(); }}>
-            {renderContent()}
-          </div>
-
-          <div className="modal-content-footer">
-            <button className="btn" disabled={saving} onClick={handleCancel}>{t('configModal.cancel')}</button>
-            <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{t('configModal.save')}</button>
-          </div>
+              </button>
+            );
+          })}
         </div>
       </div>
-    </div>
+
+      <div className="modal-content-area">
+        <div className="modal-content-header">
+          <span className="modal-content-title">
+            {activeNav ? t(activeNav.labelKey) : ''}
+          </span>
+          <button className="btn btn-icon" disabled={saving} onClick={handleCancel} title={t('configModal.close')}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div
+          className="modal-content-body"
+          id={navPanelId(configActiveTab)}
+          role="tabpanel"
+          aria-labelledby={navTabId(configActiveTab)}
+          ref={contentRef}
+          aria-busy={saving}
+          onClickCapture={(event) => { if (savingRef.current) { event.preventDefault(); event.stopPropagation(); } }}
+          onChangeCapture={(event) => { if (savingRef.current) event.stopPropagation(); }}>
+          {renderContent()}
+        </div>
+
+        {saveFailed && (
+          <div className="modal-save-error" role="alert">{t('configModal.saveFailed')}</div>
+        )}
+        <div className="modal-content-footer">
+          {dirty && !saving && <span className="modal-dirty-hint">{t('configModal.unsaved')}</span>}
+          <button className="btn" disabled={saving} onClick={handleCancel}>{t('configModal.cancel')}</button>
+          <button className="btn btn-primary" disabled={saving} onClick={handleSave}>{t('configModal.save')}</button>
+        </div>
+      </div>
+    </Modal>
   );
 };
 

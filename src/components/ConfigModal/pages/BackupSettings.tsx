@@ -105,9 +105,7 @@ const BackupSettings: React.FC = () => {
 
   return (
     <div className="config-page">
-      <h3 className="config-page-title">{t('backupSettings.title')}</h3>
-
-      <h3 className="config-page-title" style={{ marginTop: 20 }}>{t('backupSettings.exportImportTitle')}</h3>
+      <h4 className="config-section-title">{t('backupSettings.exportImportTitle')}</h4>
       <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 12px' }}>
         {t('backupSettings.exportImportHint')}
       </p>

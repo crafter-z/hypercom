@@ -86,3 +86,12 @@
   overflow-y: auto;
   color: var(--text-primary);
 }
+
+.plugin-instant-note {
+  margin: 2px 0 12px;
+  padding-left: 10px;
+  border-left: 2px solid var(--text-warning);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}

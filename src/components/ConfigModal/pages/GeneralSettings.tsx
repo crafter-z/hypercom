@@ -38,8 +38,6 @@ const GeneralSettings: React.FC = () => {
 
   return (
     <div className="config-page">
-      <h3 className="config-page-title">{t('generalSettings.title')}</h3>
-
       <div className="config-row">
         <label>{t('generalSettings.closeBehaviorLabel')}</label>
         <select

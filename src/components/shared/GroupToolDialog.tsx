@@ -2,6 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PortGroup, SerialPort } from '../../types';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import Modal from './Modal';
 
 export interface GroupToolDialogProps {
   group: PortGroup;
@@ -30,29 +31,33 @@ const GroupToolDialog: React.FC<GroupToolDialogProps> = ({
   if (!overlayReady) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
-        <h3 className="modal-dialog-title">{t('groupTool.title')}</h3>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
-          {hasUnconfigured
-            ? t('groupTool.message', { configured: configured.length, unconfigured: unconfigured.length })
-            : t('groupTool.noConfigured')}
-        </p>
-        <div className="modal-dialog-actions">
-          <button className="btn" onClick={onClose}>{t('groupTool.cancel')}</button>
-          {hasUnconfigured && (
-            <button className="btn" onClick={onConfigure}>{t('groupTool.configureMissing')}</button>
-          )}
-          <button
-            className="btn btn-primary"
-            disabled={configured.length === 0}
-            onClick={onRun}
-          >
-            {t('groupTool.runConfigured')}
-          </button>
-        </div>
+    <Modal
+      open
+      onClose={onClose}
+      labelledBy="group-tool-dialog-title"
+      dialogClassName="modal-dialog-compact animate-slide-up"
+      onOverlayClick={onClose}
+    >
+      <h3 className="modal-dialog-title" id="group-tool-dialog-title">{t('groupTool.title')}</h3>
+      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 12 }}>
+        {hasUnconfigured
+          ? t('groupTool.message', { configured: configured.length, unconfigured: unconfigured.length })
+          : t('groupTool.noConfigured')}
+      </p>
+      <div className="modal-dialog-actions">
+        <button className="btn" onClick={onClose}>{t('groupTool.cancel')}</button>
+        {hasUnconfigured && (
+          <button className="btn" onClick={onConfigure}>{t('groupTool.configureMissing')}</button>
+        )}
+        <button
+          className="btn btn-primary"
+          disabled={configured.length === 0}
+          onClick={onRun}
+        >
+          {t('groupTool.runConfigured')}
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 };
 

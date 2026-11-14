@@ -111,8 +111,6 @@ const LogSettings: React.FC = () => {
 
   return (
     <div className="config-page">
-      <h3 className="config-page-title">{t('logSettings.title')}</h3>
-
       <label className="checkbox-wrapper">
         <input type="checkbox" checked={autoSaveLog} onChange={(e) => setConfig({ autoSaveLog: e.target.checked })} />
         {t('logSettings.autoSaveLog')}

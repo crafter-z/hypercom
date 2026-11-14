@@ -48,8 +48,6 @@ const DisplaySettings: React.FC = () => {
 
   return (
     <div className="config-page">
-      <h3 className="config-page-title">{t('displaySettings.title')}</h3>
-
       <div className="config-row">
         <label>{t('displaySettings.defaultBaudRatesLabel')}</label>
         <input
@@ -128,6 +126,9 @@ const DisplaySettings: React.FC = () => {
           </div>
         </>
       )}
+
+      <div className="divider-h" />
+      <h4 className="config-section-title">{t('displaySettings.timestampSectionTitle')}</h4>
 
       <div className="config-row">
         <label>{t('displaySettings.timestampModeLabel')}</label>

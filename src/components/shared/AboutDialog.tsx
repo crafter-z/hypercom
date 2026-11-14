@@ -6,6 +6,7 @@ import { open } from '@tauri-apps/plugin-shell';
 import { X, ExternalLink, ScrollText, Bug, Download } from 'lucide-react';
 import LicensesDialog from './LicensesDialog';
 import DiagnosticLogDialog from './DiagnosticLogDialog';
+import Modal from './Modal';
 import { manualCheck, isMacPlatform } from '../../utils/updateService';
 import { useToastStore } from '../../stores/useToastStore';
 import { channelLabelKey, GITHUB_REPO_URL } from '../../utils/channel';
@@ -79,10 +80,16 @@ const AboutDialog: React.FC = () => {
   };
 
   return (
-    <div className="modal-overlay" onClick={close}>
-      <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
+    <>
+      <Modal
+        open
+        onClose={close}
+        labelledBy="about-dialog-title"
+        dialogClassName="modal-dialog-compact animate-slide-up"
+        onOverlayClick={close}
+      >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('about.title')}</h3>
+          <h3 className="modal-dialog-title" id="about-dialog-title" style={{ margin: 0 }}>{t('about.title')}</h3>
           <button className="btn btn-icon btn-sm" onClick={close} title={t('hotkeys.close')}>
             <X size={14} />
           </button>
@@ -150,11 +157,11 @@ const AboutDialog: React.FC = () => {
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-secondary)', textAlign: 'center' }}>
           {t('about.license')} · © 2026 HyperCom
         </div>
-      </div>
+      </Modal>
 
       {showLicenses && <LicensesDialog onClose={() => setShowLicenses(false)} />}
       {showDiagLog && <DiagnosticLogDialog onClose={() => setShowDiagLog(false)} />}
-    </div>
+    </>
   );
 };
 

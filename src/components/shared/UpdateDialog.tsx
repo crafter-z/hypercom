@@ -13,6 +13,7 @@ import { updateTiming, beginUpdateInstall, finishUpdateInstall, dismissUpdate } 
 import type { UpdateProgressPayload } from '../../types';
 import { X, Download, Clock, Ban, ExternalLink } from 'lucide-react';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import Modal from './Modal';
 import { requestEditorLeave } from '../../utils/editorLeave';
 
 /** changelog 块 → React 节点（issue #12 二轮：Markdown 轻量渲染替代 <pre> 原文）。 */
@@ -133,73 +134,78 @@ const UpdateDialog: React.FC = () => {
   return (
     // issue #12 复审：下载中遮罩点击不可关闭——X 与三个动作按钮都 disabled，
     // 遮罩是同一意图的漏网之口（否则点外面关弹窗，后台装完仍无预警 relaunch）。
-    <div className="modal-overlay" onClick={busy ? undefined : remindLater}>
-      <div className="modal-dialog-compact update-dialog animate-slide-up" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h3 className="modal-dialog-title" style={{ margin: 0 }}>{t('update.title')}</h3>
-          <button className="btn btn-icon btn-sm" onClick={remindLater} title={t('hotkeys.close')} disabled={busy}>
-            <X size={14} />
-          </button>
-        </div>
-
-        <div className="update-dialog-meta">
-          <span className={`update-channel-badge update-channel-${candidate.channel}`}>{t(channelKey)}</span>
-          <span className="update-version">{candidate.version}</span>
-          {dateStr && <span className="update-date">{dateStr}</span>}
-        </div>
-
-        <div className="update-dialog-current">
-          {t('update.currentVersion')}: v{candidate.currentVersion}
-        </div>
-
-        <div className="update-changelog">
-          <div className="update-changelog-title">{t('update.changelogTitle')}</div>
-          {candidate.notes ? (
-            <ChangelogBlocks notes={candidate.notes} />
-          ) : (
-            <div className="update-changelog-empty">{t('update.noChangelog')}</div>
-          )}
-        </div>
-
-        {progress && (
-          <div className="update-download-progress">
-            {progress.phase === 'download'
-              ? t('update.downloading', {
-                  percent: progress.total ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : 0,
-                })
-              : t('update.installing')}
-          </div>
-        )}
-        {error && <div className="update-error">{error}</div>}
-
-        <div className="update-actions">
-          {/* issue #12 二轮：跳转该版本 GitHub Release 页（方案 §2.5 rawJson 预留的落地） */}
-          <button
-            className="btn update-release-link"
-            onClick={() =>
-              open(releaseUrl(candidate.version)).catch((e) =>
-                console.debug('[UpdateDialog] open release page failed:', e),
-              )
-            }
-          >
-            <ExternalLink size={14} />
-            {t('update.viewRelease')}
-          </button>
-          <button className="btn" onClick={remindLater} disabled={busy}>
-            <Clock size={14} />
-            {t('update.later')}
-          </button>
-          <button className="btn" onClick={neverRemind} disabled={busy}>
-            <Ban size={14} />
-            {t('update.never')}
-          </button>
-          <button className="btn btn-primary" onClick={installNow} disabled={busy}>
-            <Download size={14} />
-            {t('update.installNow')}
-          </button>
-        </div>
+    <Modal
+      open
+      onClose={remindLater}
+      labelledBy="update-dialog-title"
+      dialogClassName="modal-dialog-compact update-dialog animate-slide-up"
+      onOverlayClick={busy ? undefined : remindLater}
+      disableEscape={busy}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <h3 className="modal-dialog-title" id="update-dialog-title" style={{ margin: 0 }}>{t('update.title')}</h3>
+        <button className="btn btn-icon btn-sm" onClick={remindLater} title={t('hotkeys.close')} disabled={busy}>
+          <X size={14} />
+        </button>
       </div>
-    </div>
+
+      <div className="update-dialog-meta">
+        <span className={`update-channel-badge update-channel-${candidate.channel}`}>{t(channelKey)}</span>
+        <span className="update-version">{candidate.version}</span>
+        {dateStr && <span className="update-date">{dateStr}</span>}
+      </div>
+
+      <div className="update-dialog-current">
+        {t('update.currentVersion')}: v{candidate.currentVersion}
+      </div>
+
+      <div className="update-changelog">
+        <div className="update-changelog-title">{t('update.changelogTitle')}</div>
+        {candidate.notes ? (
+          <ChangelogBlocks notes={candidate.notes} />
+        ) : (
+          <div className="update-changelog-empty">{t('update.noChangelog')}</div>
+        )}
+      </div>
+
+      {progress && (
+        <div className="update-download-progress">
+          {progress.phase === 'download'
+            ? t('update.downloading', {
+                percent: progress.total ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : 0,
+              })
+            : t('update.installing')}
+        </div>
+      )}
+      {error && <div className="update-error">{error}</div>}
+
+      <div className="update-actions">
+        {/* issue #12 二轮：跳转该版本 GitHub Release 页（方案 §2.5 rawJson 预留的落地） */}
+        <button
+          className="btn update-release-link"
+          onClick={() =>
+            open(releaseUrl(candidate.version)).catch((e) =>
+              console.debug('[UpdateDialog] open release page failed:', e),
+            )
+          }
+        >
+          <ExternalLink size={14} />
+          {t('update.viewRelease')}
+        </button>
+        <button className="btn" onClick={remindLater} disabled={busy}>
+          <Clock size={14} />
+          {t('update.later')}
+        </button>
+        <button className="btn" onClick={neverRemind} disabled={busy}>
+          <Ban size={14} />
+          {t('update.never')}
+        </button>
+        <button className="btn btn-primary" onClick={installNow} disabled={busy}>
+          <Download size={14} />
+          {t('update.installNow')}
+        </button>
+      </div>
+    </Modal>
   );
 };
 

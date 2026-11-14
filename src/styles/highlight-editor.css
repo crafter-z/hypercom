@@ -1,0 +1,107 @@
+/* Highlight rule row editor.
+ * Two-line grid so the row fits the 800x600 ConfigModal content area without
+ * horizontal scrolling: line 1 = drag/insert + name + pattern + regex,
+ * line 2 = colour + bold + italic + delete + preview. */
+.highlight-rule-editor {
+  container-type: inline-size;
+  min-width: 0;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.highlight-rule-editor:hover {
+  border-color: var(--border-color);
+}
+
+.highlight-rule-editor:focus-within {
+  border-color: var(--accent-color);
+}
+
+.highlight-rule-editor__line {
+  display: grid;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.highlight-rule-editor__line--main {
+  grid-template-columns: 24px 24px 24px minmax(64px, 0.75fr) minmax(0, 1.7fr) auto;
+}
+
+.highlight-rule-editor__line--style {
+  grid-template-columns: 28px auto auto 24px minmax(0, 1fr);
+  margin-top: 6px;
+}
+
+.highlight-rule-editor :is(.input, .select) {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.highlight-rule-editor__name,
+.highlight-rule-editor__pattern {
+  min-width: 0;
+}
+
+.highlight-rule-editor__regex,
+.highlight-rule-editor__toggle {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.highlight-rule-editor__color {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-input);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.highlight-rule-editor__delete {
+  justify-self: start;
+  color: var(--text-secondary);
+}
+
+.highlight-rule-editor__delete:hover {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.highlight-rule-editor__preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.highlight-rule-editor__preview-value {
+  color: inherit;
+}
+
+/* Very narrow ConfigModal windows: let the pattern drop to its own line rather
+ * than forcing the grid wider than its container. */
+@container (max-width: 420px) {
+  .highlight-rule-editor__line--main {
+    grid-template-columns: 24px 24px 24px minmax(0, 1fr) auto;
+  }
+
+  .highlight-rule-editor__regex {
+    grid-column: 5;
+    grid-row: 1;
+  }
+
+  .highlight-rule-editor__pattern {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
