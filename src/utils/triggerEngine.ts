@@ -17,6 +17,19 @@ export interface TriggerAction {
 
 /** 模式最大长度（ReDoS 防护，与 highlightEngine 一致） */
 const MAX_PATTERN_LENGTH = 200;
+const REGEX_CACHE_LIMIT = 256;
+const safeRegexCache = new Map<string, RegExp | null>();
+
+function getCachedSafeRegex(pattern: string): RegExp | null {
+  if (safeRegexCache.has(pattern)) return safeRegexCache.get(pattern) ?? null;
+  const regex = tryCreateSafeRegex(pattern);
+  if (safeRegexCache.size >= REGEX_CACHE_LIMIT) {
+    const oldest = safeRegexCache.keys().next().value;
+    if (oldest !== undefined) safeRegexCache.delete(oldest);
+  }
+  safeRegexCache.set(pattern, regex);
+  return regex;
+}
 
 /**
  * 规范化 HEX 模式为完整字节：紧凑或空白分隔写法使用同一严格解析。
@@ -50,7 +63,10 @@ export function evaluateTriggers(
 
   for (const rule of triggers) {
     if (!rule.isEnabled) continue;
-    if (!rule.pattern) continue;
+    // A blank/whitespace-only condition is not actionable. Treat it as an
+    // incomplete draft even for literal modes; otherwise every whitespace
+    // line could unexpectedly fire a saved rule.
+    if (typeof rule.pattern !== 'string' || !rule.pattern.trim()) continue;
     // 长度上限只针对正则：contains/exact/hex 是线性匹配，长模式是合法输入
     // （例如较长的 HEX 帧）。超过上限的正则跳过以限制 ReDoS 面。
     if (rule.matchType === 'regex' && rule.pattern.length > MAX_PATTERN_LENGTH) continue;
@@ -72,7 +88,7 @@ export function evaluateTriggers(
         // Length/input truncation alone does not prevent exponential
         // backtracking. Reject nested-quantifier patterns before they run on
         // the RX/UI thread.
-        const regex = tryCreateSafeRegex(rule.pattern);
+        const regex = getCachedSafeRegex(rule.pattern);
         if (!regex) continue;
         const safeContent = content.length > 5000 ? content.slice(0, 5000) : content;
         matched = regex.test(safeContent);

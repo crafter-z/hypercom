@@ -1,12 +1,15 @@
 /** Best-effort crash/session-end recovery, never a persistence/runtime authority. */
 import type { EntityKey } from './entityEditor';
 
-type Fields = Record<string, 'string' | 'number' | 'boolean'>;
+type FieldType = 'string' | 'number' | 'boolean' | 'nullableString';
+type Fields = Record<string, FieldType>;
 function entityShape(value: unknown, fields: Fields, optional: Fields = {}, nested?: { key: string; fields: Fields; optional?: Fields }): boolean {
   if (!recoveryRecord(value)) return false;
   const allowed = new Set([...Object.keys(fields), ...Object.keys(optional), ...(nested ? [nested.key] : [])]);
   if (Object.keys(value).some(key => !allowed.has(key))) return false;
-  const matches = (key: string, type: string) => typeof value[key] === type && (type !== 'number' || Number.isFinite(value[key]));
+  const matches = (key: string, type: FieldType) => type === 'nullableString'
+    ? (typeof value[key] === 'string' || value[key] === null)
+    : typeof value[key] === type && (type !== 'number' || Number.isFinite(value[key]));
   if (!Object.entries(fields).every(([key, type]) => matches(key, type))) return false;
   if (!Object.entries(optional).every(([key, type]) => value[key] === undefined || matches(key, type))) return false;
   if (nested && (!Array.isArray(value[nested.key]) || !(value[nested.key] as unknown[]).every(item => entityShape(item, nested.fields, nested.optional)))) return false;
@@ -28,7 +31,7 @@ export function recoverableEntityCollection(kind: EntityKey, value: unknown): va
         key: 'rules', fields: { ...common, pattern: 'string', isRegex: 'boolean' }, optional: { color: 'string', bold: 'boolean', italic: 'boolean' },
       });
       case 'portToolConfigs': return entityShape(item, { ...common, portId: 'string', command: 'string', workdir: 'string' });
-      case 'triggerRules': return entityShape(item, { ...common, pattern: 'string', isRegex: 'boolean', matchType: 'string', actionType: 'string', actionContent: 'string', actionIsHex: 'boolean', isEnabled: 'boolean' }, { portId: 'string' });
+      case 'triggerRules': return entityShape(item, { ...common, pattern: 'string', isRegex: 'boolean', matchType: 'string', actionType: 'string', actionContent: 'string', actionIsHex: 'boolean', isEnabled: 'boolean' }, { portId: 'nullableString' });
       case 'protocolTemplates': return entityShape(item, { ...common, isEnabled: 'boolean', headerBytes: 'string', lengthFieldOffset: 'number', lengthFieldSize: 'number', lengthEndian: 'string', lengthAdjust: 'number', checksumAlgorithm: 'string', checksumOffset: 'number', footerBytes: 'string', colorHeader: 'string', colorLength: 'string', colorPayload: 'string', colorChecksum: 'string', colorFooter: 'string' });
     }
   });

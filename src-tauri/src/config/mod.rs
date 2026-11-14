@@ -14,8 +14,9 @@
  *    实体子结构再各自带字段级 `#[serde(default)]`；
  * 2) 解析前的 `strip_legacy_memory_budget_keys`：在 Value 层物理删除已被取代的旧 key；
  * 3) 解析后的 `normalize_legacy_serial_enums`：把持久化实体里已收窄的自由字符串枚举
- *    （端口预设的帧格式）一次性收敛到合法取值，并折叠已撤销的 `kind == "wait"`
- *    等待步骤，下次 save 落盘即已归一。
+ *    （端口预设的帧格式、触发规则的 matchType/actionType）一次性收敛到合法取值，
+ *    同步触发规则的 legacy isRegex 镜像，并折叠已撤销的 `kind == "wait"` 等待步骤，
+ *    下次 save 落盘即已归一。
  *
  * 曾有的 `configVersion` 是「每次 set_config 无条件重写为 1」的装饰品——既不参与分派
  * 也不影响解析（旧值只是被 serde 当未知字段丢弃），故删除。
@@ -467,17 +468,33 @@ fn strip_legacy_memory_budget_keys(raw: &str) -> Option<serde_json::Value> {
 /// 比解析集合**窄**会把合法值误改成默认值（用户静默丢配置），比它**宽**则会放过非法值。
 /// 新增帧格式取值时两处一起改（parse_* 旁边有对应提示）。
 ///
+/// Normalize trigger fields at every config boundary. `match_type` is authoritative;
+/// `is_regex` is a legacy mirror retained for old readers. Empty/whitespace port scopes
+/// are equivalent to an omitted scope (all ports), including the frontend's null wire value.
+fn normalize_trigger_rules(config: &mut AppConfig) {
+    for rule in &mut config.entities.trigger_rules {
+        restrict(
+            &mut rule.match_type,
+            &["contains", "exact", "regex", "hex"],
+            "contains",
+        );
+        rule.is_regex = rule.match_type == "regex";
+        restrict(&mut rule.action_type, &["alert", "respond"], "alert");
+        if let Some(port_id) = &mut rule.port_id {
+            *port_id = port_id.trim().to_string();
+            if port_id.is_empty() {
+                rule.port_id = None;
+            }
+        }
+    }
+}
+
 /// 同一函数还折叠旧配置里已撤销的 `kind == "wait"` 命令行（等待时长统一改由每条步骤
 /// 自带的 `delay` 表达）：见函数内 `send_command_sets` 循环处的规则说明。
 fn normalize_legacy_serial_enums(config: &mut AppConfig) {
-    // The old bookmark action became alert. Normalize the loaded baseline, not
-    // only the frontend runtime, otherwise merely opening an entity editor makes
-    // an untouched legacy rule appear dirty.
-    for rule in &mut config.entities.trigger_rules {
-        if rule.action_type == "bookmark" {
-            rule.action_type = "alert".into();
-        }
-    }
+    // Normalize the loaded baseline, not only the frontend runtime, otherwise merely
+    // opening an entity editor makes an untouched legacy rule appear dirty.
+    normalize_trigger_rules(config);
     // 与 `parse_parity` 接受集合逐项相等。
     const PARITIES: &[&str] = &["None", "Even", "Odd"];
     // 与 `parse_stop_bits` 接受集合逐项相等。
@@ -900,6 +917,10 @@ impl ConfigManager {
         config.background_image_blur =
             clamp_bound("backgroundImageBlur", config.background_image_blur as i64) as u32;
 
+        // Trigger entities use free-string wire fields for forward compatibility,
+        // but persisted values must remain executable by the current engine.
+        normalize_trigger_rules(config);
+
         restrict(&mut config.close_behavior, &["minimize", "exit"], "exit");
         restrict(&mut config.theme, &["light", "dark", "system"], "dark");
         restrict(&mut config.language, &["zh-CN", "en-US"], "zh-CN");
@@ -1028,6 +1049,9 @@ impl ConfigManager {
     /// 保存配置到文件（原子写入 + .bak 备份）。
     /// 失败时记录错误日志（诊断日志排查需要落盘根因，而非仅返回 Result）。
     pub fn save(&mut self) -> anyhow::Result<()> {
+        // CRUD helpers call save() directly, so keep their trigger writes on the
+        // same compatibility boundary as whole-config set_config saves.
+        normalize_trigger_rules(&mut self.config);
         let next_revision = self.config.revision.checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Config revision overflow"))?;
         self.config.revision = next_revision;
@@ -1707,6 +1731,37 @@ mod tests {
         };
         let json = serde_json::to_string(&rule).unwrap();
         assert!(json.contains(r#""portId":"COM3""#), "got: {json}");
+    }
+
+    #[test]
+    fn trigger_fields_normalize_to_match_type_and_port_scope() {
+        let mut cfg = AppConfig::default();
+        cfg.entities.trigger_rules.push(TriggerRuleEntry {
+            id: "legacy".into(),
+            name: "legacy".into(),
+            pattern: "[literal".into(),
+            is_regex: true,
+            match_type: "contains".into(),
+            action_type: "bookmark".into(),
+            action_content: String::new(),
+            action_is_hex: false,
+            is_enabled: true,
+            port_id: Some("  COM3  ".into()),
+        });
+        ConfigManager::validate_and_clamp(&mut cfg);
+        let rule = &cfg.entities.trigger_rules[0];
+        assert!(!rule.is_regex);
+        assert_eq!(rule.match_type, "contains");
+        assert_eq!(rule.action_type, "alert");
+        assert_eq!(rule.port_id.as_deref(), Some("COM3"));
+
+        cfg.entities.trigger_rules[0].match_type = "regex".into();
+        cfg.entities.trigger_rules[0].is_regex = false;
+        cfg.entities.trigger_rules[0].port_id = Some(" \t ".into());
+        ConfigManager::validate_and_clamp(&mut cfg);
+        let rule = &cfg.entities.trigger_rules[0];
+        assert!(rule.is_regex);
+        assert_eq!(rule.port_id, None);
     }
 
     #[test]

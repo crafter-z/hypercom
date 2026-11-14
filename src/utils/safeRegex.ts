@@ -3,8 +3,8 @@
  *
  * JavaScript's RegExp engine is synchronous and offers no execution timeout.
  * Limiting pattern/input length therefore does not stop nested-quantifier
- * backtracking (for example `(a+)+$`). This parser rejects the common
- * exponential shape before a pattern reaches the hot RX path. It intentionally
+ * backtracking (for example `(a+)+$` or `(a|aa)+$`). This parser rejects the
+ * common exponential shapes before a pattern reaches the hot RX path. It intentionally
  * errs on the safe side; unsupported/invalid expressions should be edited
  * rather than allowed to stall the UI.
  */
@@ -14,19 +14,33 @@ export const MAX_SAFE_REGEX_PATTERN_LENGTH = 200;
 
 interface GroupFrame {
   hasQuantifier: boolean;
+  hasAlternation: boolean;
 }
 
-function isQuantifierStart(pattern: string, index: number, previousWasAtom: boolean): number {
+interface QuantifierInfo {
+  length: number;
+  /** An unbounded repetition (`*`, `+`, `{n,}`) can backtrack exponentially
+   * when its atom is an alternation with overlapping branches. */
+  unbounded: boolean;
+}
+
+function quantifierInfo(pattern: string, index: number, previousWasAtom: boolean): QuantifierInfo | null {
   const char = pattern[index];
-  if (char === '*' || char === '+') return previousWasAtom ? 1 : 0;
+  if (char === '*' || char === '+') return previousWasAtom ? { length: 1, unbounded: true } : null;
   if (char === '?') {
     // `?` directly after `(` belongs to a non-capturing/lookaround group,
     // not to the group body. Elsewhere it is a quantifier only after an atom.
-    return previousWasAtom && pattern[index - 1] !== '(' ? 1 : 0;
+    return previousWasAtom && pattern[index - 1] !== '(' ? { length: 1, unbounded: false } : null;
   }
-  if (char !== '{' || !previousWasAtom) return 0;
-  const rest = pattern.slice(index);
-  return /^\{\d+(?:,\d*)?\}/.test(rest) ? rest.match(/^\{\d+(?:,\d*)?\}/)![0].length : 0;
+  if (char !== '{' || !previousWasAtom) return null;
+  const match = /^\{(\d+)(?:,(\d*))?\}/.exec(pattern.slice(index));
+  if (!match) return null;
+  return {
+    length: match[0].length,
+    // A missing upper bound is the only unbounded brace form. Finite ranges
+    // have a bounded amount of backtracking and remain supported.
+    unbounded: match[2] !== undefined && match[2] === '',
+  };
 }
 
 /**
@@ -48,6 +62,7 @@ export function isSafeRegexPattern(pattern: string): boolean {
   let inClass = false;
   let previousWasAtom = false;
   let closedGroupHasQuantifier = false;
+  let closedGroupHasAlternation = false;
 
   for (let index = 0; index < pattern.length; index += 1) {
     const char = pattern[index];
@@ -55,6 +70,7 @@ export function isSafeRegexPattern(pattern: string): boolean {
       escaped = false;
       previousWasAtom = true;
       closedGroupHasQuantifier = false;
+      closedGroupHasAlternation = false;
       continue;
     }
     if (char === '\\') {
@@ -65,45 +81,63 @@ export function isSafeRegexPattern(pattern: string): boolean {
       if (char === ']') inClass = false;
       previousWasAtom = true;
       closedGroupHasQuantifier = false;
+      closedGroupHasAlternation = false;
       continue;
     }
     if (char === '[') {
       inClass = true;
       previousWasAtom = true;
       closedGroupHasQuantifier = false;
+      closedGroupHasAlternation = false;
       continue;
     }
     if (char === '(') {
-      groups.push({ hasQuantifier: false });
+      groups.push({ hasQuantifier: false, hasAlternation: false });
       previousWasAtom = false;
       closedGroupHasQuantifier = false;
+      closedGroupHasAlternation = false;
       continue;
     }
     if (char === ')') {
       const frame = groups.pop();
       if (!frame) return false;
-      // A quantified child is part of the parent group's complexity even when
-      // the child itself was not quantified as a whole.
-      if (groups.length > 0 && frame.hasQuantifier) groups[groups.length - 1].hasQuantifier = true;
+      // A quantified child or an alternation is part of the parent group's
+      // complexity even when the child itself was not quantified as a whole.
+      if (groups.length > 0) {
+        if (frame.hasQuantifier) groups[groups.length - 1].hasQuantifier = true;
+        if (frame.hasAlternation) groups[groups.length - 1].hasAlternation = true;
+      }
       previousWasAtom = true;
       closedGroupHasQuantifier = frame.hasQuantifier;
+      closedGroupHasAlternation = frame.hasAlternation;
       continue;
     }
 
-    const quantifierLength = isQuantifierStart(pattern, index, previousWasAtom);
-    if (quantifierLength > 0) {
-      if (closedGroupHasQuantifier) return false;
+    const quantifier = quantifierInfo(pattern, index, previousWasAtom);
+    if (quantifier) {
+      // Existing nested-quantifier guard, plus the common overlapping-
+      // alternation shape such as `(a|aa)+$`. The latter has no nested
+      // quantifier but still causes exponential backtracking on a long near
+      // miss. Finite `{n,m}` repetitions stay allowed.
+      if (closedGroupHasQuantifier || (quantifier.unbounded && closedGroupHasAlternation)) return false;
       if (groups.length > 0) groups[groups.length - 1].hasQuantifier = true;
       previousWasAtom = true;
       closedGroupHasQuantifier = false;
-      index += quantifierLength - 1;
+      closedGroupHasAlternation = false;
+      index += quantifier.length - 1;
       continue;
     }
 
     // Group modifiers (`?:`, `?=`, `?!`, `?<name>`) and alternation do not
     // create an atom. Everything else is an ordinary atom or anchor.
-    if (char !== '|' && !(char === '?' && !previousWasAtom)) previousWasAtom = true;
+    if (char === '|') {
+      if (groups.length > 0) groups[groups.length - 1].hasAlternation = true;
+      previousWasAtom = false;
+    } else if (!(char === '?' && !previousWasAtom)) {
+      previousWasAtom = true;
+    }
     closedGroupHasQuantifier = false;
+    closedGroupHasAlternation = false;
   }
 
   return groups.length === 0;

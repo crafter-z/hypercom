@@ -86,7 +86,12 @@ const TriggerSettings: React.FC = () => {
               id={`trigger-match-${rule.id}`}
               className="input rule-settings-field"
               value={rule.matchType}
-              onChange={e => updateTriggerRule(rule.id, { matchType: e.target.value as TriggerMatchType })}
+              onChange={e => {
+                const matchType = e.target.value as TriggerMatchType;
+                // matchType is the persisted/engine-authoritative discriminator;
+                // keep the legacy isRegex mirror in sync for old consumers.
+                updateTriggerRule(rule.id, { matchType, isRegex: matchType === 'regex' });
+              }}
             >
               {matchTypeOptions.map(opt => (
                 <option key={opt} value={opt}>{t(`trigger.matchType.${opt}`)}</option>

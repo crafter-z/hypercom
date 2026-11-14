@@ -279,8 +279,30 @@ function syncRemote(kind: EntityKey): EditorState {
   return state;
 }
 
+const TRIGGER_MATCH_TYPES: readonly TriggerRule['matchType'][] = ['contains', 'exact', 'regex', 'hex'];
+const TRIGGER_ACTION_TYPES: readonly TriggerRule['actionType'][] = ['alert', 'respond'];
+
+/**
+ * Keep the persisted trigger wire shape compatible with older readers. `matchType`
+ * is the authoritative discriminator; `isRegex` is a legacy mirror retained for
+ * old config files and consumers. Empty/null port scope means all ports.
+ */
+function normalizeTriggerRule(item: Entity): Entity {
+  const rule = item as TriggerRule;
+  const matchType = TRIGGER_MATCH_TYPES.includes(rule.matchType) ? rule.matchType : 'contains';
+  const actionType = TRIGGER_ACTION_TYPES.includes(rule.actionType) ? rule.actionType : 'alert';
+  const portId = typeof rule.portId === 'string' ? rule.portId.trim() : undefined;
+  return {
+    ...item,
+    matchType,
+    isRegex: matchType === 'regex',
+    actionType,
+    portId: portId || undefined,
+  } as TriggerRule;
+}
+
 function normalizeItems(kind: EntityKey, items: Entity[]): Entity[] {
-  if (kind === 'triggerRules') return items.map(item => ({ ...item, portId: (item as TriggerRule).portId ?? '' }));
+  if (kind === 'triggerRules') return items.map(normalizeTriggerRule);
   if (kind !== 'sendCommandSets') return clone(items);
   return items.map(item => ({ ...item, commands: normalizeCommandOrder((item as SendCommandSet).commands) }));
 }
@@ -318,7 +340,12 @@ function validateEntity(kind: EntityKey, item: Entity): string | null {
     if (!['none', 'sum8', 'xor', 'crc8'].includes(String(value.checksumAlgorithm))) return 'editor.invalidProtocol';
     if (!Number.isInteger(value.checksumOffset) || Number(value.checksumOffset) < 0) return 'editor.invalidProtocol';
   } else if (kind === 'triggerRules') {
-    if ((value.matchType === 'regex' || value.isRegex) && (typeof value.pattern !== 'string' || !isSafeRegexPattern(value.pattern))) return 'editor.invalidRegex';
+    // matchType is authoritative; isRegex is only a compatibility mirror and
+    // must not make a literal rule undergo regex validation.
+    if (!TRIGGER_MATCH_TYPES.includes(value.matchType as TriggerRule['matchType'])) return 'editor.invalidEntity';
+    if (!TRIGGER_ACTION_TYPES.includes(value.actionType as TriggerRule['actionType'])) return 'editor.invalidEntity';
+    if (typeof value.pattern !== 'string' || !value.pattern.trim()) return 'editor.invalidEntity';
+    if (value.matchType === 'regex' && !isSafeRegexPattern(value.pattern)) return 'editor.invalidRegex';
     if (value.matchType === 'hex' && invalidHex(value.pattern)) return 'editor.invalidHex';
     if (value.actionIsHex && invalidHex(value.actionContent)) return 'editor.invalidHex';
   }

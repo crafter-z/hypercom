@@ -8,6 +8,11 @@ describe('safeRegex', () => {
     expect(tryCreateSafeRegex('(a+)+$')).toBeNull();
   });
 
+  it('rejects unbounded quantified alternations with exponential near-misses', () => {
+    expect(isSafeRegexPattern('(a|aa)+$')).toBe(false);
+    expect(tryCreateSafeRegex('(a|aa)+$')).toBeNull();
+  });
+
   it('allows ordinary and lazy quantifiers', () => {
     expect(isSafeRegexPattern('^ERR\\d+?$')).toBe(true);
     expect(isSafeRegexPattern('colou?r')).toBe(true);

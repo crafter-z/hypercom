@@ -201,6 +201,15 @@ describe('evaluateTriggers', () => {
       const result = evaluateTriggers('anything', undefined, [rule], undefined);
       expect(result).toHaveLength(0);
     });
+
+    it('skips whitespace-only patterns in every text mode', () => {
+      for (const matchType of ['contains', 'exact', 'regex'] as const) {
+        const rule = makeRule({ pattern: '  \t', matchType });
+        expect(evaluateTriggers('  \t', undefined, [rule])).toEqual([]);
+      }
+      const hexRule = makeRule({ pattern: '  \t', matchType: 'hex' });
+      expect(evaluateTriggers('', [0x20], [hexRule])).toEqual([]);
+    });
   });
 
   describe('portId filtering', () => {
@@ -215,10 +224,11 @@ describe('evaluateTriggers', () => {
       expect(onCom1.map(a => a.rule.id)).toEqual(['rA']);
     });
 
-    it('empty-string portId is equivalent to undefined (all ports)', () => {
-      const rule = makeRule({ pattern: 'ERROR', matchType: 'contains', portId: '' });
-      const result = evaluateTriggers('ERROR', undefined, [rule], 'COM3');
-      expect(result).toHaveLength(1);
+    it('empty-string or null portId is equivalent to undefined (all ports)', () => {
+      const empty = makeRule({ pattern: 'ERROR', matchType: 'contains', portId: '' });
+      const nullable = makeRule({ id: 'nullable', pattern: 'ERROR', matchType: 'contains', portId: null });
+      expect(evaluateTriggers('ERROR', undefined, [empty], 'COM3')).toHaveLength(1);
+      expect(evaluateTriggers('ERROR', undefined, [nullable], 'COM3')).toHaveLength(1);
     });
 
     it('portId is optional when the caller has no port context', () => {

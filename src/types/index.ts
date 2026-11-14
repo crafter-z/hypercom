@@ -487,8 +487,8 @@ export interface TriggerRule {
   actionContent: string;
   actionIsHex: boolean;
   isEnabled: boolean;
-  /** 仅对该串口生效；空/缺省 = 全部端口（issue #3-1） */
-  portId?: string;
+  /** 仅对该串口生效；空/缺省/null = 全部端口（issue #3-1）。Rust Option<String> 读取时 None 以 null 出线。 */
+  portId?: string | null;
 }
 
 // ==================== 插件相关（issue #17）====================

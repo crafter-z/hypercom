@@ -44,6 +44,10 @@ describe('entity editor remaining validation boundaries', () => {
     const trigger: TriggerRule = { id: 'hex', name: 'HEX', pattern: hex, isRegex: false, matchType: 'hex', actionType: 'alert', actionContent: '', actionIsHex: false, isEnabled: true };
     expect(validateEntityDraft('triggerRules', [trigger])).toBe('editor.invalidHex');
   });
+  it('rejects whitespace-only trigger conditions before persistence', () => {
+    const trigger: TriggerRule = { id: 'blank', name: 'Blank', pattern: ' \t', isRegex: false, matchType: 'contains', actionType: 'alert', actionContent: '', actionIsHex: false, isEnabled: true };
+    expect(validateEntityDraft('triggerRules', [trigger])).toBe('editor.invalidEntity');
+  });
   it.each([0, 3, 1.5, NaN])('rejects invalid lengthFieldSize %s', lengthFieldSize => {
     expect(validateEntityDraft('protocolTemplates', [{ ...protocol, lengthFieldSize } as unknown as ProtocolTemplate])).toBe('editor.invalidProtocol');
   });
@@ -74,6 +78,38 @@ describe('entity editor remaining validation boundaries', () => {
     useAppStore.getState().setConfig({ triggerRules: [trigger] });
     useRuleStore.getState().setTriggerRules([trigger]);
     expect(getEntityEditorSnapshot('triggerRules')).toMatchObject({ items: [trigger], dirty: false, error: null });
+  });
+
+  it('treats matchType as authoritative and repairs the legacy isRegex mirror on save', async () => {
+    const trigger: TriggerRule = {
+      id: 'literal', name: 'Literal', pattern: '[not regex', isRegex: true, matchType: 'contains',
+      actionType: 'alert', actionContent: '', actionIsHex: false, isEnabled: true,
+    };
+    backend.triggerRules = [trigger];
+    useAppStore.getState().setConfig({ triggerRules: [trigger] });
+    useRuleStore.getState().setTriggerRules([trigger]);
+    replaceEntityDraft('triggerRules', [trigger]);
+    expect(validateEntityDraft('triggerRules', [trigger])).toBeNull();
+    expect(await saveEntityDraft('triggerRules')).toBe(true);
+    expect(backend.triggerRules[0]).toMatchObject({ matchType: 'contains', isRegex: false });
+  });
+
+  it('accepts null portId in recovered drafts and keeps it unscoped', () => {
+    const trigger: TriggerRule = {
+      id: 'all-ports', name: 'All ports', pattern: 'ready', isRegex: false, matchType: 'contains',
+      actionType: 'alert', actionContent: '', actionIsHex: false, isEnabled: true, portId: null,
+    };
+    resetEntityEditorForTests();
+    useAppStore.getState().setConfig({ triggerRules: [trigger] });
+    useRuleStore.getState().setTriggerRules([trigger]);
+    writeEditorRecovery('triggerRules', {
+      baseline: [trigger],
+      draft: [{ ...trigger, name: 'Recovered all ports' }],
+      conflicts: [],
+    });
+    expect(getEntityEditorSnapshot<TriggerRule>('triggerRules')).toMatchObject({
+      items: [{ ...trigger, name: 'Recovered all ports' }], dirty: true,
+    });
   });
 });
 
