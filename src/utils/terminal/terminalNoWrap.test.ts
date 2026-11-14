@@ -64,20 +64,27 @@ describe('terminal no-wrap contract (issue #9)', () => {
     expect(computed('.terminal-line', 'overflow-y')).toBe('visible');
   });
 
-  it('word-wrap keeps the configured terminal line-height', () => {
+  it('fixed and wrapped rows share the renderer line-height without additive vertical padding', () => {
     const view = document.createElement('div');
-    view.className = 'terminal-view terminal-word-wrap';
-    view.style.setProperty('--line-height-terminal', '1.375');
+    view.className = 'terminal-view';
+    view.style.setProperty('--line-height-terminal', '1.5');
     view.style.setProperty('--terminal-row-height', '20px');
     const line = document.createElement('div');
     line.className = 'terminal-line';
     view.appendChild(line);
     document.body.appendChild(view);
     try {
-      // rowHeight is a rounded geometry estimate; it must not replace the
-      // inherited line-height when the wrapping preference is enabled.
-      expect(getComputedStyle(line).lineHeight).toBe(getComputedStyle(view).lineHeight);
-      expect(getComputedStyle(line).lineHeight).not.toBe('20px');
+      const fixedLineHeight = getComputedStyle(line).lineHeight;
+      // Both modes must use the same renderer geometry, including odd font
+      // sizes where fontSize * 1.5 is fractional. Real heights, glyph positions
+      // and continuation-line spacing are checked in Playwright, not jsdom.
+      expect(fixedLineHeight).not.toBe(getComputedStyle(view).lineHeight);
+      expect(getComputedStyle(line).paddingTop).toBe('0px');
+      expect(getComputedStyle(line).paddingBottom).toBe('0px');
+      view.classList.add('terminal-word-wrap');
+      expect(getComputedStyle(line).lineHeight).toBe(fixedLineHeight);
+      expect(getComputedStyle(line).paddingTop).toBe('0px');
+      expect(getComputedStyle(line).paddingBottom).toBe('0px');
     } finally {
       view.remove();
     }

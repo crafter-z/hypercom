@@ -85,7 +85,7 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 ## 可选文本软换行
 
 - 工具栏 `wordWrap` 默认 false，只在 `displayFormat === 'string'` 生效；HEX/binary 暂时禁用但保留偏好。状态属于 `TerminalState`，不进 AppConfig；重连保留、显示消费者释放后恢复默认。弹出窗初始快照携带显示态，随后独立设置；回放通过自己的 `terminalConfig` 复用相同控件与引擎，TTY 不参与。
-- 关闭时使用原固定行高快速路径，不创建测量索引、不读行高；两种几何共用 `TerminalRenderer.renderWindow` 的 DOM 顺序、节点池、停车 pins 和内容渲染。软换行只改变正文排版，不修改 rawData/content、不添加真实换行、不改变缓冲容量、匹配计数、日志与导出。
+- 关闭时使用原固定行高快速路径，不创建测量索引、不读行高；两种几何共用 `TerminalRenderer.renderWindow` 的 DOM 顺序、节点池、停车 pins 和内容渲染。单行与视觉续行统一使用 renderer 的 `rowHeight` 作为行距，行盒无额外纵向 padding，切换换行不改变短行高度或文字位置。软换行只改变正文排版，不修改 rawData/content、不添加真实换行、不改变缓冲容量、匹配计数、日志与导出。
 - `TerminalWrapLayout` 只测量窗口与少量像素 overscan 中新增/变更的行。每帧最多三组先写后读的布局批次，少数未收敛窗口交给下一帧；无全历史排版、无每行 ResizeObserver。`TerminalHeightIndex` 以固定行高估算未访问记录，使用稀疏 AVL 前缀增量；只保存至多 `TERMINAL_HEIGHT_CACHE_SIZE=8192` 条增高记录，FIFO 逐出后回到估算。裁剪删除旧键，detach/clear/换源释放缓存，关闭软换行释放几何对象。
 - 几何缓存随可用宽度、字体/字号、编码、显示格式、时间戳与高亮配置失效。过滤数组更换或原地压缩也失效；一般 append 和 head offset 推进不重建全历史。非手势/非选区阅读以 seq + 记录内像素偏移恢复；先判断几何失效，重排产生的原生 scrollTop 钳制不得用旧高度反算覆盖锚点，也不得推断为用户到尾意图。稳定几何下的滚动、显式 seek 与 LIVE 跟随仍按各自优先级生效；锚点已淘汰/被过滤则钳制边界。原生选区继续保护文本节点，resize 不重建选中的正文。隐藏标签不测量零宽度，恢复可见后重排。
 - 搜索匹配仍以完整记录为单位，不受视觉折行边界影响；显式命中导航在排版后把记录内首个 `<mark>` 放入视口。时间联动以换行累计几何读取 seq，不同步 scrollTop；钉底和暂停保留原意图契约。拖滚动条到尾时，本次测量修正保留末尾边界，但不擅自开启后续跟随。

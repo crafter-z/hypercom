@@ -1024,10 +1024,9 @@ test.describe('HyperCom smoke tests', () => {
       const { useAppStore } = await import('/src/stores/useAppStore.ts');
       useAppStore.getState().setConfig({ terminalFontSize: 15 });
     });
-    await expect.poll(() => content.evaluate(el => {
-      const view = el.closest('.terminal-view');
-      return !!view && getComputedStyle(el).lineHeight === getComputedStyle(view).lineHeight;
-    })).toBe(true);
+    // Odd font sizes use the renderer's rounded row height in both modes,
+    // rather than inheriting a fractional line-height only when wrapping.
+    await expect.poll(() => content.evaluate(el => getComputedStyle(el).lineHeight)).toBe('23px');
     await page.getByRole('radio', { name: 'HEX', exact: true }).click();
     await expect(toggle).toBeDisabled();
     await expect(page.locator('.terminal-view')).not.toHaveClass(/terminal-word-wrap/);
@@ -1036,6 +1035,7 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.terminal-view')).toHaveClass(/terminal-word-wrap/);
     await toggle.click();
     await expect(page.locator('.terminal-view')).not.toHaveClass(/terminal-word-wrap/);
+    await expect.poll(() => content.evaluate(el => getComputedStyle(el).lineHeight)).toBe('23px');
     await expect(content).toContainText('WRAP long-data-');
   });
 

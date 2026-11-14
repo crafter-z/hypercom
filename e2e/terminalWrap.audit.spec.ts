@@ -10,6 +10,66 @@ test.beforeEach(async ({ page }) => {
   await page.addStyleTag({ content: ':root { --space-2:4px; --space-3:6px; --space-6:24px; --font-size-terminal:14px; --weight-semibold:600 } * { box-sizing:border-box }' });
 });
 
+test('soft-wrap toggle preserves row height, text position and continuation spacing', async ({ page }) => {
+  const samples = await page.evaluate(async () => {
+    const root = '/src/';
+    const { TerminalBuffer } = await import(root + 'utils/terminal/TerminalBuffer.ts');
+    const { TerminalRenderer } = await import(root + 'utils/terminal/TerminalRenderer.ts');
+    const source = new TerminalBuffer({ maxLines: 100 });
+    for (const content of ['', 'ABC short', '中文🙂 ABC', 'plain text', 'ABC '.repeat(180)]) {
+      source.append({ timestamp: 0, direction: 'RX', content, isHex: false });
+    }
+    const view = { visibleSeqs: null, visibleSeqsOffset: 0, frozenSeq: null, matchSet: null, currentMatchSeq: -1, searchQuery: '', searchCaseSensitive: false, selectedRange: null, locked: false, gestureActive: false, followEnabled: false };
+    const samples = [];
+    for (const fontSize of [8, 13, 14, 15, 48]) for (const zoom of [.8, 1, 2]) for (const showTimestamp of [false, true]) {
+      const rowHeight = Math.round(fontSize * 1.5);
+      const container = document.createElement('div'); container.className = 'terminal-view';
+      Object.assign(container.style, { position: 'fixed', top: '0', left: '0', width: '640px', height: '600px', fontFamily: 'Consolas, monospace', fontSize: `${fontSize}px`, lineHeight: '1.5', zoom: String(zoom) });
+      container.style.setProperty('--font-size-terminal', `${fontSize}px`);
+      document.body.append(container);
+      const renderer = new TerminalRenderer({ rowHeight, wordWrap: false, showTimestamp, displayFormat: 'string', encoding: 'UTF-8', timestampFormat: 'absolute', timestampMode: 'perLine', connectedAt: null,
+        highlightRuleSets: [{ id: 'spacing', isEnabled: true, rules: [{ id: 'bold', pattern: 'ABC', isRegex: false, color: '#ff0000', bold: true }] }] });
+      renderer.attachToContainer(container);
+      const measure = () => [...container.querySelectorAll<HTMLElement>('.terminal-line')].slice(0, 4).map(row => {
+        const rect = row.getBoundingClientRect();
+        const content = row.querySelector<HTMLElement>('.terminal-content')!;
+        const range = document.createRange(); range.selectNodeContents(content);
+        const glyph = range.getClientRects()[0];
+        return { height: rect.height / zoom, top: rect.top / zoom, lineHeight: getComputedStyle(content).lineHeight, textTop: glyph ? (glyph.top - rect.top) / zoom : null };
+      });
+      try {
+        renderer.render(source, view); const fixed = measure();
+        renderer.updateConfig({ wordWrap: true });
+        for (let pass = 0; pass < 4; pass++) renderer.render(source, view);
+        const wrapped = measure();
+        const range = document.createRange(); range.selectNodeContents(container.querySelector('[data-seq="4"] .terminal-content')!);
+        const tops = [...new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => rect.top))].sort((a, b) => a - b);
+        const continuationSteps = tops.slice(1).map((top, i) => (top - tops[i]) / zoom);
+        renderer.updateConfig({ wordWrap: false }); renderer.render(source, view);
+        samples.push({ fontSize, zoom, showTimestamp, rowHeight, fixed, wrapped, restored: measure(), continuationSteps });
+      } finally { renderer.dispose(); container.remove(); }
+    }
+    return samples;
+  });
+  for (const sample of samples) {
+    const context = JSON.stringify(sample);
+    for (const mode of [sample.fixed, sample.wrapped, sample.restored]) {
+      expect(mode).toHaveLength(4);
+      for (const row of mode) {
+        expect(row.height, context).toBeCloseTo(sample.rowHeight, 1);
+        expect(parseFloat(row.lineHeight), context).toBeCloseTo(sample.rowHeight, 1);
+      }
+      for (let i = 1; i < mode.length; i++) expect(mode[i].top - mode[i - 1].top, context).toBeCloseTo(sample.rowHeight, 1);
+    }
+    for (let i = 1; i < sample.fixed.length; i++) {
+      expect(sample.wrapped[i].textTop, context).toBeCloseTo(sample.fixed[i].textTop!, 1);
+      expect(sample.restored[i].textTop, context).toBeCloseTo(sample.fixed[i].textTop!, 1);
+    }
+    expect(sample.continuationSteps.length, context).toBeGreaterThan(1);
+    for (const step of sample.continuationSteps) expect(step, context).toBeCloseTo(sample.rowHeight, 1);
+  }
+});
+
 test('audit: reported center/end anchors agree with actual rows during compressed scrolling', async ({ page }) => {
   const result = await page.evaluate(async () => {
     const root = '/src/';

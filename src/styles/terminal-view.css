@@ -90,7 +90,11 @@
 .terminal-line {
   display: flex;
   gap: var(--space-2);
-  padding: 1px 0; /* optical row breathing — deliberately below the 4px scale */
+  /* One visual line uses the renderer's exact geometry in both modes. Extra
+     vertical padding would enlarge auto-height wrapped rows but be absorbed by
+     fixed border-box rows, changing spacing whenever word wrap is toggled. */
+  padding: 0;
+  line-height: var(--terminal-row-height, inherit);
   flex: none; /* flow layout (issue #18): rows are block-flow children of
                  .terminal-content-layer; flex:none keeps them unsqueezed if
                  an ancestor turns the layer into a flex container. */
@@ -168,11 +172,6 @@
 }
 .terminal-word-wrap .terminal-line {
   min-height: var(--terminal-row-height);
-  /* Keep the terminal's configured line-height for wrapped rows. The renderer's
-     rowHeight is a geometry estimate (and is rounded to a whole pixel), not a
-     replacement for the inherited line-height. Overriding it here makes the
-     wrap toggle visibly change row spacing at fractional font sizes. */
-  line-height: inherit;
   align-items: flex-start;
   min-width: 0;
 }
