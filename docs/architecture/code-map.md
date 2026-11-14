@@ -9,6 +9,8 @@
 | `utils/paneTree.ts` | `PaneNode` 树算法：`newPaneId` / `findLeafById` / `findLeafByTabId` / `findBranchById` / `findParentBranch` / `collectLeaves` / `countLeaves` / `pruneTree`。store 只留 action；`useAppStore` 另导出 `getClosingTabIds(tabId, scope)` 供批量关闭取与 store 关闭动作同一集合 |
 | `utils/asciiNoise.ts` | `isLikelyAsciiNoise`——ASCII 日志的纯字节乱码行判定；仅显示过滤使用，不改接收/日志字节 |
 | `utils/hexFormat.ts` | `hexByte` / `bytesToSpacedHex`——**bytes→HEX 的唯一实现**（terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用） |
+| `utils/hexUtils.ts` | `isValidHexInput` / `parseHexBytes`：与后端同口径的严格 HEX 输入；`hexToString` / `stringToHex`：UTF-8 转换（解码复用 lineText）。sendUtils 的预览函数是同一函数别名；终端复制、文本弹窗、实体校验与 HEX 提醒共用 |
+| `shared/SegmentedControl.tsx` | 受控互斥 radiogroup：单 Tab 停靠点、方向键/Home/End 跳过禁用项、重复激活不清空；TRX/TTY、显示/发送格式及联动组模式共用 |
 | `utils/safeRegex.ts` | `isSafeRegexPattern` / `tryCreateSafeRegex`：高亮/触发执行与实体保存共用的语法、长度及保守嵌套量词策略；不是完整复杂度证明或执行隔离 |
 | `utils/bounds.ts` | `CONFIG_BOUNDS` / `BoundedNumericSetting`——数值边界的前端镜像 |
 | `utils/uiScale.ts` | `normalizeUiScalePercent` / `applyUiScale`——按当前 WebView 应用持久化 UI 缩放；调用 Tauri `getCurrentWebview().setZoom(percent / 100)` |
@@ -25,7 +27,8 @@
 | `utils/pluginViewRuntime.ts` / `pluginViewInput.ts` / `pluginViewJson.ts` | 原生视图会话、Worker/UI 状态 ACK、固定端口输入租约与有界 JSON；`services/pluginView.ts` 为四个原生命令及消息事件的 IPC 门面 |
 | `shared/SortableEditorList.tsx` + `utils/commandOrder.ts` | 手柄专用指针/键盘拖排序，命令数组与连续 order 统一；行壳提供上下插入，搜索期间禁排 |
 | `utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx` | 保存并关闭/放弃并关闭/继续编辑；保存失败及迟到编辑阻止关闭，主窗和命令面板均等待跨窗确认；原生关闭经 complete_editor_close 审批 |
-| `utils/configWriteQueue.ts` + `jsonEqual.ts` | 配置/实体/元数据 CAS 写串行化；JSON 语义比较忽略对象字段顺序，避免 Rust 序列化产生假冲突 |
+| `utils/configWriteQueue.ts` + `jsonEqual.ts` | 配置/实体/元数据、备份导入与预设写入串行化；JSON 语义比较忽略对象字段顺序，主窗草稿与弹窗修改归因共用，避免 Rust 序列化产生假冲突 |
+| `shared/useDialogLifecycle.ts` + `shared/Modal.tsx` | 顶层弹窗所有权、可见控件 Tab 循环、Escape、焦点恢复；Modal/时间联动/离开审批/插件授权与卸载/快速入门共用。样式与业务关闭审批不进入生命周期原语 |
 | `utils/commandExecution.ts` | `executeQuickCommand`：胶囊/弹窗列表单步执行，发送仍经 sendToPort，改参持有短期 flowRuntime 独占；`applyCommandParams`：循环与单步唯一改参动作，保留目标帧参数、连接代次守卫、成功后更新端口与当前操作态 |
 | `utils/textSend.ts` | 弹窗文本模式的纯函数：按 CRLF/LF 切行（裁尾部空行）、HEX 行合法性与间隔收敛，DOM-free 可单测 |
 | `utils/logReplay.ts` | 日志解析（`ParsedLogLine` 允许未知时间，显式 UTC 偏移；不按相邻行 sleep） |
@@ -81,6 +84,7 @@
 | `collect_app_pids` / `get_system_status` | `src-tauri/src/commands/system_cmds.rs` | fn / cmd | 应用进程树内存：本进程+后代进程（含 WebView2/Chromium 子进程）RSS 之和；CPU 仍系统级；纯函数可注入进程表便于单测 |
 | `LogSettings::from_config` | `src-tauri/src/logger/settings.rs` | fn | 日志设置的唯一构造入口 |
 | `LogManager::apply_settings` | `src-tauri/src/logger/manager.rs` | fn | 日志设置的唯一应用入口（旧逐字段 setter / `sync_log_manager_from_config` 已删） |
+| `LogManager::migrate_directory` / `PreparedLogMigration` | `src-tauri/src/logger/manager.rs` + `logger/migration.rs` | fn / struct | 活动日志迁移唯一入口：闸门内刷盘/准备/句柄交接与精确路径登记，提交后才清源；命令层不得独立 copy/delete 活动文件 |
 | `LogLineAssembler` | `src-tauri/src/logger/assembler.rs` | struct | 字节级 CR/LF/CRLF 组行 + pendingCR + 4096 强制 flush + 250ms 陈旧尾 flush（`just_forced` 语义与前端 `rxAssembler` 一致） |
 | `TtySimPortHandle` / `find_bash` / `spawn_bash` | `src-tauri/src/serial/tty_sim.rs` | mod | git bash pty 模拟终端（portable-pty 0.9，Windows = ConPTY）：writer（TX）/`master`（resize）/child（kill）/读线程（stdout→`serial:data`，退出发 disconnected）；`find_bash` 查 PATH + 常见 Git 安装路径 |
 | `enable_gitbash_sim` / `disable_gitbash_sim` / `resize_gitbash_sim` | `src-tauri/src/commands/tty_sim.rs` | Tauri cmd | 调试专用（`dev_only()` / `is_debug_build()` 门控）——启用/停用 GIT:BASH 虚拟端口、前端 xterm fit 后同步 pty 尺寸 |

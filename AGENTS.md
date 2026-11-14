@@ -60,7 +60,9 @@ cargo check --manifest-path src-tauri/Cargo.toml    # 仅 Rust
 2. **单一来源，不造第二份实现**：
    - 数值边界：Rust `config/mod.rs` 的 `CONFIG_BOUNDS` 是唯一表（`validate_and_clamp` / `clamp_bound`），前端 `utils/bounds.ts` 镜像，`bounds.test.ts` 解析两侧源文本逐项断言。
    - bytes→文本：`utils/lineText.ts` 的 `createDecoder` / `decodeBytes`（唯一 TextDecoder 工厂，`ignoreBOM: false`）。
-   - bytes→HEX：`utils/hexFormat.ts`（`hexByte` / `bytesToSpacedHex`）。
+   - bytes→HEX：`utils/hexFormat.ts`（`hexByte` / `bytesToSpacedHex`）；HEX 输入与 UTF-8 转换：`utils/hexUtils.ts`（`isValidHexInput` / `parseHexBytes` / `hexToString` / `stringToHex`），发送预览、复制转换、实体校验与提醒共用，禁止另写宽松解析。
+   - 互斥分段选择：`shared/SegmentedControl.tsx`（受控 radiogroup、单一 Tab 停靠、方向键/Home/End、禁用与不可清空），TRX/TTY、HEX/文本及联动组模式共用。
+   - 弹窗生命周期：`shared/useDialogLifecycle.ts` 统一顶层键盘所有权、可见 Tab 循环与焦点恢复；`Modal` 和自定义外壳复用，不另写窗口级 Escape/Tab 状态机，业务审批留在调用方。
    - 端口类别：`serial::PortKind::of`；虚拟端口门控 `check_virtual_enabled` 在分派之前。
    - 调试能力：`commands/system_cmds.rs` 的 `dev_only()` / `is_debug_build()`（命令体不写 `#[cfg(debug_assertions)]` 双主体）。
    - 日志设置：`LogSettings::from_config` + `LogManager::apply_settings`，经 `AppState::apply_runtime_config` 由启动与 `set_config` 共用；无逐字段 `set_log_*`。

@@ -11,8 +11,8 @@
 ## 模式状态与切换
 
 - `PortMode = 'trx' | 'tty'`，放 `useAppStore` 的 `Port.mode`，经 `port_meta`（config.json）持久化——Rust `PortMetaEntry` 必须带 `#[serde(default)] mode: Option<String>`（曾因缺字段被 serde 静默丢弃、重启全回退 TRX），`validate_and_clamp` 钳制非 trx/tty 值回 trx。
-- 切换控件：OperationPanel→ParamsSection 分段控件（`.segmented` 复刻 TerminalFilterBar），i18n `params.mode.*`。
-- **切换副作用**：`setPortMode` + `clearTerminal`（清 TRX 视口缓冲）+ 切 TTY 时 `releaseViewportManager`（销毁 TRX 缓冲，切回 TRX 时新挂载重建）+ `getRxPipeline().flushAndReset` + `ttyService.clear`——避免旧模式 buffered 数据混入新模式首屏。`ttyService` 另订阅 store：检测到端口 `mode` 变化即丢弃未发送的按键合批并递增 TX 代际，使旧连接已排队未开始的批次失效（模式切换不能把旧键盘工作带进新模式）。
+- 切换控件：OperationPanel→ParamsSection 复用 `shared/SegmentedControl`，i18n `params.mode.*`；确认固定请求的端口与模式。
+- **切换副作用**：先 `getRxPipeline().flushAndReset` 排空旧模式，再 `setPortMode` + `clearTerminal`（清 TRX 视口缓冲）+ 切 TTY 时 `releaseViewportManager`（销毁 TRX 缓冲，切回 TRX 时新挂载重建）+ `ttyService.clear`——避免旧模式 buffered 数据混入新模式首屏。`ttyService` 另订阅 store：检测到端口 `mode` 变化即丢弃未发送的按键合批并递增 TX 代际，使旧连接已排队未开始的批次失效（模式切换不能把旧键盘工作带进新模式）。
 
 ## ttyService（模块单例，镜像 getRxPipeline 纪律）
 
@@ -26,6 +26,7 @@ serial:data（TTY 端口，useSerialReceive 分流）
 ```
 
 API：`attach`/`detach`/`feed`/`clear`/`disconnect`（断线 flush 保留 term 跨重连）/`send`（onData→10ms 按键合批、64KiB 单批上限）/`sendData`（`sendToPort` 的显式命令入口，先排空已有按键）/`resize`/`resync`。按键与显式命令共用同端口写入队列：上一批 IPC settle 后才发下一批，跨端口独立，失败后后续批次仍可发送；TX 统计只在该入口成功后计入一次。`detach` 发送残留按键并保留当前连接写入顺序；`disconnect` 丢弃未发出的旧连接批次，不让旧队列阻塞重连。
+- 键盘输入在 `ttyService.send` 入队及真正写入前复查增强流程独占；10ms 合批、显式命令排空旧按键、detach 收尾都不能绕过。被独占拒绝的按键丢弃，不排到流程结束后补发。
 - 显式命令排队期间不视为已开始 I/O；连接代际检查后、IPC 调用前执行 `sendToPort` 的端口连接复查及 `beforeSend` 宿主授权回调，插件撤权或会话失效可取消尚未开始的命令，已开始的后端写入不追溯撤销。
 
 - `disconnect` **重建 decoder**（断线残留的半截多字节字符会在重连后与首字节拼错）；`detach` 同样丢弃 decoder 与未写 RX 队列，但**保留 lastCols/lastRows**（切走标签再重开不再回退 80×24）。

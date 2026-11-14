@@ -136,7 +136,10 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 ## 共享交互原语（`src/components/shared/`）
 
-三个交互此前在各处手写/复制，现各只有一份实现：
+共享交互统一使用以下原语，不在业务组件另写相同生命周期：
+
+- `useDialogLifecycle({open, dialogRef, onClose, disableEscape, initialFocusRef})`：Modal 和自定义弹窗外壳共用顶层键盘所有权、焦点捕获/恢复、可见控件 Tab 循环（含 summary，排除隐藏/折叠/inert/禁用区域）。嵌套弹窗先挂载时父窗不抢焦点，处理中 Escape 只消费不关闭；已消费事件不重复处理。时间联动、离开审批、插件授权/卸载与快速入门均复用，业务审批与原生遮挡就绪仍由调用方负责。全局快捷键在模态层存在时让权，不连接/清屏或关闭后台 UI。
+- `SegmentedControl`：单一非空互斥值、radiogroup、单 Tab 停靠及方向键/Home/End，TRX/TTY、HEX/文本和联动组设置共用。
 
 - `useOutsideDismiss(ref, onDismiss, active = true)`：外点（document mousedown）+ Escape 关闭浮层；ref 内按下不关（浮层自带的触发按钮才能继续 toggle）；`active` 门控使关闭态零监听开销。`ContextMenu` / `TextEditContextMenu` / `NotificationCenter` 共用。
 - `useDragResize({axis, mode, min, max, invert, onChange, onDragStart})`：press → window mousemove → window mouseup 的拖拽生命周期（每次拖拽只挂一次监听、必拆；options 经 ref 读取，父级重渲染不重绑）。`mode:'absolute'` 报钳位后的指针坐标（左/下停靠面板的宽度/高度），`mode:'delta'` 报自拖拽起点的累计位移（分屏分隔条，几何归父级）。`ResizeHandle` / `OperationPanelResizeHandle` / `SidebarResizeHandle` 共用。

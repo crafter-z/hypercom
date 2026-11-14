@@ -38,8 +38,9 @@ Five entity pages use `useEntityPage<T>({kind})`; never create page-local persis
 ## Conventions (root covers i18n rules; 展开见 docs/architecture/conventions.md)
 
 - Runtime rules live in `useRuleStore`; pages use `useEntityPage` drafts, not runtime setters. `useAppStore.config` entity arrays are last persisted baseline.
-- `entityEditor` and `useConfigPersistence` serialize CAS writes through `configWriteQueue`; publish runtime only after acceptance. Plugin actions remain immediate/backend-authoritative. Backup import confirms destructive replacement, handles drafts, adopts backend state and reloads.
+- `entityEditor` and `useConfigPersistence` serialize CAS writes through `configWriteQueue`; publish runtime only after acceptance. Plugin actions remain immediate/backend-authoritative. Backup import confirms destructive replacement, handles drafts, enters the same config write queue and checks the backend ACK before adopting state/reloading; import is single-flight. Restore clears recovery for every entity kind, including pages never mounted. Successful writes never regress a newer observed revision. Preset save/delete use the same queue; loads stay direct to avoid nesting.
 - Numeric inputs take their range from `CONFIG_BOUNDS` (`src/utils/bounds.ts`, the frontend's single source; the Rust side mirrors it and `bounds.test.ts` asserts the two tables match). Page-local ranges (e.g. a command set's `loopDelay`) are declared once per page as a `[min, max]` pair so the `clampNumber` arguments and the `min`/`max` attributes cannot drift.
+- HEX 命令不追加文本行尾：`SendCmdEditor` 与发送区/弹窗统一禁用行尾选择并保留原值；DisplaySettings 的默认行尾是独立设置，始终可编辑且标签通过 `useId` / `htmlFor` 关联。
 - Each row editor is a small presentational component declared at module level. NEVER inline `<Editor>` JSX inside a page body — rerender churn causes input focus loss.
 - Pages use `useTranslation()`'s `t()` for visible strings. Do not translate protocol vocabulary (`None/Even/Odd`, `Xon/Xoff`, encoding names, units like `ms/px/MB`, acronyms `SIM/VCP/HEX/DTR/RTS`).
 

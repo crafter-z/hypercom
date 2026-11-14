@@ -4,7 +4,7 @@
 
 ## 落盘日志（LogManager）
 
-`logger/` 按职责拆成 6 个模块（原先是一个职责互相纠缠的单文件门面）：
+`logger/` 按职责拆成 7 个模块（原先是一个职责互相纠缠的单文件门面）：
 
 | 模块 | 职责 |
 |---|---|
@@ -13,7 +13,8 @@
 | `logger/naming.rs` | 文件名模板 / 子目录策略 / 目标文件分配（`create_new` 唯一化、路径遍历防御） |
 | `logger/assembler.rs` | `LogLineAssembler`——字节级 RX 行聚合 |
 | `logger/writer.rs` | `PortLogWriter`——单端口写入器（编码 / 格式 / 前缀 / 分片滚动 / 尾部冲刷） |
-| `logger/manager.rs` | `LogManager`——`apply_settings` / `create_writer_with_encoding` / `write` / `write_rx` / `maybe_split` / `periodic_flush` / `close_writer` / `close_all` / `list_files` / `save_log_as` / `set_directory` / `retire_path` |
+| `logger/manager.rs` | `LogManager`——操作闸门、设置/writer 生命周期、写入/分片/刷盘、列表/另存、`set_directory` 与 `migrate_directory` 所有权交接 |
+| `logger/migration.rs` | `PreparedLogMigration`——递归计划、不覆盖的目标准备、准备失败清理及提交后源清理；不自行更换活动 writer |
 
 `LogManager` 在 `AppState::new()` 经 `AppState::apply_runtime_config` 从 ConfigManager 初始化。`AppState.log_manager` 是 **`Arc<LogManager>`（无外层 Mutex）**：写路径全是 `&self` + 内部细粒度锁——`save_log_as` 的拷贝、`list_files` 的递归遍历与数据写入**不争同一把锁**（旧实现是单一全局 `Mutex`，一个大目录或一个正在落盘的端口就能把列表与其它端口写路径一起卡住）。
 - 连接 writer 跟随后端 `connection_generation`：Connected 先创建新 writer，Disconnected/Error/替换先冲刷 RX 尾部并 `flush_and_sync`，失败时保留 writer 所有权以便重试，不把半成品从 registry 丢掉。前端不再用迟到的 start/stop 调用跨越新旧会话。
@@ -27,6 +28,15 @@
 - `log_format`（string/hex/binary）**不属于** `LogSettings`——同一时刻不同端口可用不同格式，由 `start_logging` 命令按端口逐次传入。
 - `apply_settings` 对空 `log_directory` 有守卫：空串不覆盖当前根（首次启动 config.json 的 `logDirectory` 可能为空）；换目录会显式收尾活动 writer 并在新根下重开，失败则把快照目录回滚，绝不留下「UI 列 A、实际写 B」的撕裂状态。
 
+### 活动日志目录迁移
+
+- `migrate_log_directory` 只在线程池中调用 `LogManager::migrate_directory`。源根校验在 manager 操作闸门内执行；只有当前活动日志根可迁移，不在命令层先搬文件再补调 `set_directory`。
+- 操作闸门是 `RwLock<()>`：日常读写、刷盘、列表与另存共享；创建/替换/关闭 writer、应用设置、换根和迁移独占。正常多端口写入仍并行；显式迁移会等待在途 I/O 并让新 I/O 等待，直至文件准备和交接完成。内部入口不递归取闸门；panic flush 只 `try_read`，忙则跳过。
+- 准备阶段严格 flush/sync 全部活动 writer，保留 RX assembler、CRLF 状态与多字节半字符。按实际源路径分组，一份文件只准备一次；同卷优先 hard-link 创建不覆盖的目标别名，不支持时 `create_new` + copy + sync，**两条路径在提交前都不删除旧源**。所有活动目标 append 句柄预先打开；任何准备失败只清理本次拥有的目标，writer、根与路径登记保持旧状态。
+- 活动目标已有同名文件时准备失败，不能把 writer 接到无关内容；历史冲突保留 skip。目标位于源内时排除其原有整棵子树；canonical 同根不移动/重开物理文件，仅同步根/writer/历史登记的路径表示，使随后应用同一别名配置仍为 no-op；父根、路径别名及共享 append 文件均按精确 old→new 映射交接。
+- 全部准备成功后不可失败地替换活动句柄/路径/累计大小，保留锁定格式、编码、前缀及会话；发布新根、更新会话归属，再清旧源。提交后清源失败保留 durable 副本并记录残留，不返回“根未切换”的失败；返回数量仅计成功清除旧源的文件。位于新父根内的残留源保持原端口归属。
+- `set_directory` 是只切换写入根、不搬历史的独立操作；不能用它的“路径已在新根内”判断代替迁移交接。`migration_tests.rs` 覆盖三种布局的活动缓冲、强制 copy 回退、父/子/同根、冲突回滚、半字符、共享文件、分片、源清理失败及并发闸门；真实跨卷选择器和高压 UART 仍需安装包实机验收。
+
 ### RX 日志行组装（issue #5-9/10）
 
 - `LogLineAssembler`（`assembler.rs`）：CR/LF/跨事件CRLF组行与`pending_cr`/`just_forced`边界语义；`take_tail` 取尾部未成行残字节。4096字节无分隔符强制flush按writer锁定的UTF-8/GBK字符边界最多延迟3字节，避免字符被拆成替换符；畸形流仍有4099字节硬边界，单字节编码按原阈值。与前端`rxAssembler`保持同一切分口径。
@@ -39,7 +49,7 @@
 ### 分片 / 子目录 / 编码 / 每会话新文件
 
 - `log_split_enabled` / `log_split_size_mb`：`LogManager::maybe_split` → `PortLogWriter::needs_split`（阈值判定 `should_split` + 分片失败 5s 退避）超阈值自动分片；**split 续片经 `PortLogWriter::rotate(force_new_file=true)` 强制唯一化（与 `logNewFilePerSession` 开关无关）**——粗粒度模板（`[com]`/`[com]-[date]`）下 append 重开刚关闭的超阈值文件会令 `current_size` 从超阈值初始化、每写必分片（死循环）。`rotate` 先把新文件开好再替换，失败时旧 writer 原封不动继续可用。
-- `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：`naming::subdir_component` 产出子目录、`naming::allocate_file` 按策略 join（`create_dir_all`）；`list_files` 经 `collect_log_files` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。
+- `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：`naming::subdir_component` 产出子目录、`naming::allocate_file` 按策略 join（`create_dir_all`）；`list_files` 与目录迁移共用 `collect_log_paths` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。迁移仅处理 `.log`，保留根内相对目录结构、创建目标父目录、同名目标跳过不覆盖；目标位于源根内时跳过其已有子树，同根迁移为空操作，跨卷回退到 copy + remove；删除失败不算成功迁移。
 - 文件名模板替换完成后，最终 stem 与端口名一样经过 `sanitize_filename_component`：模板中的绝对路径、路径分隔符和 `..` 不得把日志带出根目录；子目录布局只由 `logSubdirMode` 控制。
 - `log_include_timestamp` / `log_include_direction`（缺省 true）：控制 `PortLogWriter::write_line` 是否 emit `[timestamp] ` / `RX|TX ` 前缀；两者都关 → 裸数据行。它们与 `format` / `encoding` 一样锁于 `create_writer` 时（`WriterSpec`），后续重开沿用创建时锁定的值。
 - `log_encoding`：`create_writer_with_encoding` 按编码解码（GBK 等，`decode_bytes`）。

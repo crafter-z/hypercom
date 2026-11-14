@@ -73,9 +73,10 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 ### 发送格式工具
 
 - `src/utils/sendUtils.ts`（纯函数，单测）：`getLineEndingBytes` / `hexInputError` + `HEX_INPUT_ERROR_KEY` / `parseHexBytes` / `computeByteCount` / `formatLineEndingHex` / `textToHexPreview` / `hexToTextPreview` / `sanitizeHexInput` / `LINE_ENDING_VALUES` / `lineEndingLabelKey`。
-- `src/utils/hexUtils.ts`：`hexToString` / `stringToHex`（终端右键菜单的 HEX 复制/粘贴消费者是 `src/components/MainDisplay/terminalContextMenu.ts`；操作面板 HEX 转换走 `sendUtils` 的 `textToHexPreview` / `hexToTextPreview`）。
+- `src/utils/hexUtils.ts`：`isValidHexInput` / `parseHexBytes` 是严格 HEX 输入的唯一规则；`hexToString` / `stringToHex` 是 UTF-8 转换的唯一实现，解码委托 `lineText.decodeBytes`。终端右键转换、发送预览、文本弹窗行校验、实体保存校验与 HEX 提醒共用；`sendUtils` 仅重导出 `parseHexBytes` 及 `textToHexPreview` / `hexToTextPreview` 别名，不保留另一份宽松解析。协议模板的运行时解析仅保留 token 起始 `0x` 的兼容语法适配，实际字节仍委托同一解析器；发送输入不因此接受 `0x`。
 - **bytes→HEX 唯一实现**：`src/utils/hexFormat.ts`（`hexByte` / `bytesToSpacedHex`）是全仓把字节格式化成空格分隔大写 HEX 的唯一实现，terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用——不要再各写一份 `toString(16).padStart(2,'0')`。
 - **HEX 输入严格模式（错误态，不再补零）**：`hexInputError` 忽略空白后要求「半字节个数为偶数且全为 0-9a-fA-F」，与后端 `parse_hex_string` / `build_tx_bytes` 同尺子；`parseHexBytes` 对非法输入返回 `[]`（不补零、不跳过）。发送区经 `useHexCompose` → `computeByteCount` 把奇数位 nubble 输入渲染为错误态（给 `errorKey`、不给字节数），`sendToPort` 也在入口拦掉——旧实现给奇数位补零，于是 UI 为一个后端**必然拒绝**的输入显示「N B」，是假可用状态。
+- **HEX 不追加文本行尾**：主窗发送区、命令编辑器和弹窗文本/列表编辑器在 HEX 下禁用行尾选择，保留原值供切回文本使用；HEX 摘要不暗示会发出该后缀。
 - **行结束符保存的是域值，不是控制字符**：`LineEnding` 使用 `'\\r\\n'` / `'\\r'` / `'\\n'` / `'None'`，其中 CRLF 域值是反斜杠、r、反斜杠、n 共 4 个字符；实际 CR/LF 两字节仅由 `getLineEndingBytes` 与后端 codec 转换。JSX 字符串属性不会处理 JavaScript 反斜杠转义，统一从 `LINE_ENDING_VALUES` 遍历并用 `value={v}`、`lineEndingLabelKey(v, ns)`，不要另写双重转义或把实际换行控制字符作为 service 参数。
 
 ## 循环发送（每端口独立引擎，issue #12）
@@ -85,7 +86,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **每端口一个 runtime**：`useCyclicSend`（`components/OperationPanel/hooks/useCyclicSend.ts`）为每个端口创建一条 `SendLoop`（`startLoop(portId)`），目标端口**永远绑定启动它的端口**——不跟随活动标签、不受窗口/标签聚焦切换影响（COM3 启动循环后切到 COM4，COM3 继续发）。
 - **运行开关**：`useOperationStore.cyclicLoops: Record<portId, boolean>` + `setCyclicLoop(portId, running)`（替代旧全局单例 `isLoopSending` 布尔）；SendSection 的按钮按**当前聚焦端口**查状态——切回 COM3 时按钮自然变回「停止」。reconcile effect 幂等：开启的端口没有 runtime → 启动；runtime 存在但开关被关/移除 → 停止。
 - **启动快照**：启动时从 `useRuleStore` 读取已保存命令集（不读 `entityEditor` 会话草稿），用 `utils/commandOrder.ts` 的 `orderedCommands` 固定顺序、内容和循环参数（`isLoop` / `loopDelay` / `repeatCount` 一并快照）；之后编辑、保存、切换或删除命令集均不影响当前运行，重启循环才采用新版本。启动时命令集缺失/为空则清运行开关；自然发满 `repeatCount` 轮或单轮非循环结束发完后同样清该端口运行开关。快捷发送条、命令设置页、命令面板与循环一律经 `orderedCommands` 排序，不再手写 `order` 比较。
-- **静默发送**：逐条 `sendData(..., silent=true)`（循环 / 触发自动回复不打扰用户）；失败由引擎的 `onStepError` 聚合为一条 toast（`notified` 去重）并返回 `RETRY_MS`（500ms）重试，不推进索引、不终止循环。
+- **静默发送**：逐条 `sendData(..., silent=true)`（循环 / 触发自动回复不打扰用户）；失败由引擎的 `onStepError` 聚合为一条 toast（`notified` 去重）并返回 `RETRY_MS`（500ms）重试，不推进索引、不终止循环。旧循环遇有载荷命令的零字节拒绝也保留当前步骤重试；合法空载荷按 `computeByteCount` 区分，仍作为 no-op 正常推进，不能永久卡在空命令。
 - **计时**：轮内用每命令 `delay`，仅轮间用集合级 `loopDelay`。轮次边界以「本条是否本轮最后一条」（`currentCmdIdx === commands.length - 1`）判定；曾用 `nextIdx >= length`，导致第二轮起每条都误用 `loopDelay`、`completedRounds` 按「条」而非「轮」累加而提前停发。重复轮数 `repeatCount` 是命令集自有字段（config.json），`>0` 时精确发满 N 轮停止，否则跟随集合的 `isLoop`。
 - **端口未连接**：跳过本次 tick 并不推进索引，`TARGET_WAIT_MS`（500ms）后重试（切聚焦 / 短暂断开皆不中断）。
 - **可见性补发**：`useCyclicSend` 注册 `visibilitychange`，恢复可见时对每个 loop 调 `catchUpIfOverdue()`。
@@ -131,7 +132,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 触发引擎（条件触发，issue #3-1）
 
-- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词，保存校验复用同一策略；主线程执行仍无期限或隔离，此策略不是完整的正则复杂度/ReDoS 保证；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，归一化后为空的模式不派发动作。
+- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词，保存校验复用同一策略；主线程执行仍无期限或隔离，此策略不是完整的正则复杂度/ReDoS 保证；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，模式先经 `hexUtils.parseHexBytes` 严格解析再格式化，紧凑与空白分隔写法等价；非法、半字节或归一化后为空的模式不派发动作。
 - **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。
 - **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。`pruneTriggerAlertThrottle` 在接收 hook 挂载及已提交提醒规则集合变化时释放已删除规则的节流元数据，不在每个 RX 事件上重建集合。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
 - 规则统一**显式保存后生效**：提醒、自动回复与其他实体页共用 `useEntityPage({kind})` 会话草稿。取消 300ms 自动落盘及卸载 flush；新建、删除、启用和拖动排序也只改草稿。保存后按数组顺序评估所有匹配规则，不改为首条命中即停止。

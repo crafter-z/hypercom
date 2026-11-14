@@ -49,7 +49,7 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 
 - **frozen 归一化**：frozen 参数为 null 时必须归一化为 `Number.MAX_SAFE_INTEGER`（原始 `seq > null` 会把所有行判为隐藏）。
 - **stale 判定用实时列表位置（issue #10）**：head trim 前进 firstSeq（及 filtered.offset）后，active 行缓存的 visIdx 字段整体过期——stale 检查若按字段判定，被裁行/幸存行永不回收 → **DOM 行数无限增长**（e2e 实测 6669 vs 正常 27）、每帧 O(n) 渲染 → 输出区上下抖动。`seqToVisIdx`（identity O(1)、过滤模式**二分**）是每帧 stale 检查的唯一判定来源，越界即回收。修复后 DOM 恒 ≤ 窗口+overscan（e2e 断言 ≤40）。
-- **选区钉住替代全局冻结（issue #18）**：旧 `isSelecting` 全局冻结（拖选期间停一切回收/重写）+ `setSelecting` API 已删。新语义：活选区触及的行（`captureSelectionSeqSpans` 把 Range 端点映射到 seq 区间）**永不回收、永不重写、永不换父**——窗外停车 `display:none`（同父，Chromium 探针证实 remove+换父即丢 Range，删除非端点行只裁剪）；`document.selectionchange` 监听器在选区消失时清 pins 并调度渲染；**停车行占真实文档流槽位**——`findFlowAnchor` 必须把停车行当插入锚点候选（曾漏 → 复现乱序 [30..35, 8..29, 36..44]），只跳过 seqToVisIdx 为 null（已被裁出缓冲）的行；**`Selection.toString()` 按布局可见性序列化**（Chromium）——停车行文本会从中消失，右键菜单复制路径用 `selectionText()`（`Range.cloneContents` 纯树克隆，`terminalContextMenu.ts` 导出）；`MAX_PINNED_ROWS=600` 超限（拖选+滚轮延伸）优雅放弃 pins。soak 测试（`TerminalRenderer.soak.test.ts`）随机操作序列按编号断言结构化不变式（R1–R6：DOM 有界/可见行 seq 升序/seq 在窗内或停车/spacer 对齐/data-seq 唯一/过滤列表一致）。完整 R1–R15 渲染契约见下节清单（`TerminalRenderer.ts` 文件头注释逐条给出「为什么」与违反症状）。
+- **选区钉住替代全局冻结（issue #18）**：旧 `isSelecting` 全局冻结（拖选期间停一切回收/重写）+ `setSelecting` API 已删。新语义：活选区触及的行（`captureSelectionSeqSpans` 把 Range 端点映射到 seq 区间）**永不回收、永不重写、永不换父**——窗外停车 `display:none`（同父，Chromium 探针证实 remove+换父即丢 Range，删除非端点行只裁剪）；`document.selectionchange` 监听器在选区消失时清 pins 并调度渲染；**停车行占真实文档流槽位**——`findFlowAnchor` 必须把停车行当插入锚点候选（曾漏 → 复现乱序 [30..35, 8..29, 36..44]），只跳过 seqToVisIdx 为 null（已被裁出缓冲）的行；**`Selection.toString()` 按布局可见性序列化**（Chromium）——停车行文本会从中消失，键盘与右键菜单复制均用根限定的 `selectionText(root)`（`Range.cloneContents` 纯树克隆，`terminalContextMenu.ts` 导出）并经 `writeClipboardText` 写入，菜单在打开前快照选区，聚焦菜单后不再现读别的选区；`MAX_PINNED_ROWS=600` 超限（拖选+滚轮延伸）优雅放弃 pins。soak 测试（`TerminalRenderer.soak.test.ts`）随机操作序列按编号断言结构化不变式（R1–R6：DOM 有界/可见行 seq 升序/seq 在窗内或停车/spacer 对齐/data-seq 唯一/过滤列表一致）。完整 R1–R15 渲染契约见下节清单（`TerminalRenderer.ts` 文件头注释逐条给出「为什么」与违反症状）。
 
 ### TerminalRenderer 渲染契约（R1–R15）
 
@@ -116,6 +116,8 @@ Remove-Item Env:HYPERCOM_WRAP_BENCH
 
 ## 终端搜索
 
+- `TerminalView` 壳统一处理 Ctrl/Cmd+F、F3/Shift+F3 与 Escape；搜索输入聚焦时仍走同一入口。Enter/Shift+Enter、按钮及 F3 复用 `useTerminalSearch` 的导航，关闭搜索统一回焦输出，不恢复跟随。
+- 输出区 Ctrl/Cmd+L 只清所属实时 manager，并消费事件；只读回放消费快捷键但不清数据。全局 `useHotkeys` 尊重 `defaultPrevented`，不按另一个活动标签重复执行。
 - `terminalSearch.ts` `markSearchMatchesInHtml`：HTML tag/实体感知的 `<mark>` 叠加层，只在命中行（每屏 ~50 行）应用，兼容用户高亮 span 与协议着色（跨界匹配自动拆段），当前匹配行 current 加强样式。
 - 匹配计算**仅搜索栏打开时进行**，且只有一份实现（`viewportManager.recomputeSearch`）：新行在 append 时匹配一次并入列，查询/编码/显示格式变化才整缓冲重扫；缓冲头部裁剪只 bump 列表 offset，同时保持当前匹配指向仍存活的行，目标被裁则钳制到有效索引。导航更新旧/新当前行的字符级 mark；清屏会调度订阅通知，空过滤结果清零 spacer，不保留无内容的滚动空间。
 - `terminalSearch.ts` 只负责单行搜索文本（HEX 显示走 `hexFormat.bytesToSpacedHex`）与 `markSearchMatchesInHtml` 字符级叠加，不再提供第二套匹配扫描。
