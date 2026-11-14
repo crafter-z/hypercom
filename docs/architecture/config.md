@@ -44,16 +44,13 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 若工作区带有可继承的 `Low Mandatory Level` 标签，其下生成的可执行文件也会继承低完整性标签。即使从开始菜单打开普通 Terminal，运行这些产物时进程仍可能降至低完整性，无法写入普通完整性的 `%APPDATA%/hypercom`；表现为诊断日志及实例锁同时报 `os error 5`。用户的 DACL FullControl 不会绕过完整性级别限制，单独查看 `TokenHasRestrictions` 也不能区分普通 UAC 过滤与此问题。
 
-先用 `icacls` 检查工作区、构建输出目录与可执行文件的完整性标签。确认这一原因后，可在普通 Terminal 中将 Cargo 产物放到工作区之外的正常完整性目录；不需要修改 AppData 权限、删除配置或移除工作区的沙箱权限项。例如 PowerShell（环境变量只在当前终端及其子进程有效）：
+先用 `icacls` 检查工作区、构建输出目录与可执行文件的完整性标签。确认这一原因后，不需要修改 AppData 权限、删除配置或移除工作区的沙箱权限项。仓库的 `npm run tauri` 已通过 `scripts/tauri.mjs` 在 Windows 上自动将 Cargo 产物放到工作区之外的正常完整性目录：
 
-```powershell
-$env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'HyperComBuild\target'
-npm.cmd run tauri dev
+```text
+%LOCALAPPDATA%\HyperComBuild\target
 ```
 
-若需要保持原来的 `npm run tauri dev` 命令，可在项目根目录的 `.cargo/config.toml` 中设置 `[build]` 的 `target-dir` 为上述外部目录的**绝对路径**（TOML 不展开 `%LOCALAPPDATA%`）。这种含本机路径的配置应加入 `.git/info/exclude`，不提交到仓库；Cargo 从 `src-tauri` 启动时也会向上发现此配置。已有 `CARGO_TARGET_DIR` 环境变量会优先于该设置。
-
-切换目录后首次启动会重新编译。应使用新目录的产物，不能复制回低完整性目录再运行。
+因此直接执行 `npm.cmd run tauri dev`（或 `npm run tauri dev`）即可；脚本会保留用户显式设置的 `CARGO_TARGET_DIR`。该保护只覆盖 `npm run tauri ...`，不覆盖直接执行的 `npx tauri`、`cargo run` 或 CI action；若显式变量重新指向低完整性目录，仍需自行改回正常完整性路径。首次切换目录后会重新编译。应使用新目录的产物，不能复制回低完整性目录再运行。
 
 ### 数值边界：`CONFIG_BOUNDS` 是唯一来源
 
