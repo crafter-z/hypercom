@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { ClipboardPaste, Copy, Redo, Scissors, SquareDashed, Undo } from 'lucide-react';
 import ContextMenu from './ContextMenu';
 import type { ContextMenuEntry } from './ContextMenu';
+import { writeClipboardText } from '../../utils/clipboard';
+import { notifyError } from '../../stores/useToastStore';
 
 /**
  * Custom text-edit context menu (issue #7-10).
@@ -19,9 +21,9 @@ import type { ContextMenuEntry } from './ContextMenu';
  *  - snapshots the target's selection before the menu opens (right-click does
  *    not move focus, but clicking a menu item blurs the field and drops the
  *    selection — the snapshot lets the action restore focus + selection first)
- *  - executes the edit commands via `document.execCommand` (deprecated but
- *    fully functional in WebView2/Chromium; paste requires the click's user
- *    activation, which a menu click provides)
+ *  - copies via the shared clipboard writer; cut only deletes after a
+ *    successful write and if the original value/selection is unchanged
+ *  - keeps native execCommand for undo/redo/paste and deletion (undo history)
  *
  * The menu itself is the shared `ContextMenu`, so roles, roving focus and
  * keyboard navigation (Arrow/Home/End/Enter/Space/Escape) are identical to
@@ -55,14 +57,17 @@ function supportsTextSelection(el: HTMLInputElement | HTMLTextAreaElement): bool
   if (el.tagName === 'TEXTAREA') return true;
   const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
   return type === 'text' || type === 'search' || type === 'url' || type === 'tel'
-    || type === 'password' || type === 'email';
+    || type === 'password';
 }
 
-function isEditableTarget(t: EventTarget | null): t is HTMLElement {
-  const el = t as HTMLElement | null;
-  if (!el) return false;
-  if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return true;
-  return el.isContentEditable;
+function editableTarget(t: EventTarget | null): HTMLElement | null {
+  if (!(t instanceof HTMLElement)) return null;
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return t;
+  // A right click can land on a span inside an editing host. Restore focus and
+  // ranges on that host, not on the non-focusable descendant. Respect explicit
+  // contenteditable=false islands rather than escaping to an editable parent.
+  const host = t.closest<HTMLElement>('[contenteditable]');
+  return host && host.getAttribute('contenteditable') !== 'false' ? host : null;
 }
 
 /** Snapshot the target's current selection so a later menu click can restore it. */
@@ -86,7 +91,8 @@ function captureSelection(target: HTMLElement): Pick<TextEditMenuState, 'snapsho
 }
 
 /** Run an edit command on the (re-focused) target. */
-function runEditCommand(target: HTMLElement, snapshot: SelectionSnapshot | null, savedRange: Range | null, cmd: EditCommand): void {
+async function runEditCommand(target: HTMLElement, snapshot: SelectionSnapshot | null, savedRange: Range | null, cmd: EditCommand): Promise<void> {
+  if (!target.isConnected) return;
   // Restore focus — a mousedown on the menu blurred the field and dropped its
   // selection; without this, copy/cut operate on an empty document selection.
   target.focus({ preventScroll: true });
@@ -114,8 +120,52 @@ function runEditCommand(target: HTMLElement, snapshot: SelectionSnapshot | null,
     sel?.addRange(savedRange);
   }
 
-  // user activation from the menu click makes 'paste' work in WebView2.
-  document.execCommand(cmd);
+  if (cmd !== 'copy' && cmd !== 'cut') {
+    // Keep native editing/undo semantics. Do not request additional clipboard
+    // read permission for paste (popout windows intentionally lack it).
+    document.execCommand(cmd);
+    return;
+  }
+
+  const field = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+    ? target as HTMLInputElement | HTMLTextAreaElement : null;
+  // Native password fields must not become readable via our clipboard helper.
+  if (field?.type === 'password' || field?.disabled || (cmd === 'cut' && field?.readOnly)) return;
+  const valueBefore = field?.value;
+  const htmlBefore = target.innerHTML;
+  const text = field && snapshot
+    ? field.value.slice(snapshot.start, snapshot.end)
+    : savedRange?.toString() ?? '';
+  if (!text) return;
+  const anchor = savedRange ? {
+    start: savedRange.startContainer, startOffset: savedRange.startOffset,
+    end: savedRange.endContainer, endOffset: savedRange.endOffset,
+  } : null;
+
+  await writeClipboardText(text);
+  if (cmd !== 'cut' || !target.isConnected || document.activeElement !== target) return;
+
+  // Clipboard IPC is asynchronous: never delete newer input or a selection the
+  // user moved while the write was pending. A failed write never reaches here.
+  if (field) {
+    if (!snapshot || field.readOnly || field.disabled || field.value !== valueBefore
+      || field.selectionStart !== snapshot.start || field.selectionEnd !== snapshot.end) return;
+    if (document.execCommand?.('delete')) return;
+    // Fallback only for deletion, never cut/copy: the text is already written.
+    // setRangeText bypasses React's tracked value setter, so the input event
+    // updates controlled inputs too, rather than leaving a stale model value.
+    field.setRangeText('', snapshot.start, snapshot.end, 'start');
+  } else {
+    const current = window.getSelection();
+    if (!anchor || !current || current.rangeCount === 0 || target.innerHTML !== htmlBefore) return;
+    const range = current.getRangeAt(0);
+    if (range.startContainer !== anchor.start || range.startOffset !== anchor.startOffset
+      || range.endContainer !== anchor.end || range.endOffset !== anchor.endOffset) return;
+    if (document.execCommand?.('delete')) return;
+    range.deleteContents();
+    range.collapse(true);
+  }
+  target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteByCut' }));
 }
 
 interface TextEditContextMenuProps {
@@ -130,10 +180,14 @@ interface TextEditContextMenuProps {
 const TextEditContextMenu: React.FC<TextEditContextMenuProps> = ({ x, y, target, snapshot, savedRange, onClose }) => {
   const { t } = useTranslation();
 
-  const hasSelection = snapshot ? snapshot.start !== snapshot.end : savedRange != null;
+  const field = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+    ? target as HTMLInputElement | HTMLTextAreaElement : null;
+  const hasSelection = snapshot ? snapshot.start !== snapshot.end : !!savedRange && !savedRange.collapsed;
+  const canCopy = hasSelection && field?.type !== 'password' && !field?.disabled;
+  const readOnly = !!field && (field.readOnly || field.disabled);
 
   const action = (cmd: EditCommand) => () => {
-    runEditCommand(target, snapshot, savedRange, cmd);
+    void runEditCommand(target, snapshot, savedRange, cmd).catch(notifyError);
   };
   const item = (
     cmd: EditCommand,
@@ -153,9 +207,9 @@ const TextEditContextMenu: React.FC<TextEditContextMenuProps> = ({ x, y, target,
     item('undo', t('contextMenu.undo'), <Undo size={14} />),
     item('redo', t('contextMenu.redo'), <Redo size={14} />),
     { type: 'separator' },
-    item('cut', t('contextMenu.cut'), <Scissors size={14} />, !hasSelection),
-    item('copy', t('contextMenu.copy'), <Copy size={14} />, !hasSelection),
-    item('paste', t('contextMenu.paste'), <ClipboardPaste size={14} />),
+    item('cut', t('contextMenu.cut'), <Scissors size={14} />, !canCopy || readOnly),
+    item('copy', t('contextMenu.copy'), <Copy size={14} />, !canCopy),
+    item('paste', t('contextMenu.paste'), <ClipboardPaste size={14} />, readOnly),
     { type: 'separator' },
     item('selectAll', t('contextMenu.selectAll'), <SquareDashed size={14} />),
   ];
@@ -178,9 +232,9 @@ export function useTextEditContextMenu() {
 
   useEffect(() => {
     const onContextMenu = (e: MouseEvent) => {
-      if (isEditableTarget(e.target)) {
+      const target = editableTarget(e.target);
+      if (target) {
         e.preventDefault();
-        const target = e.target as HTMLElement;
         const { snapshot, savedRange } = captureSelection(target);
         setState({ x: e.clientX, y: e.clientY, target, snapshot, savedRange });
       } else {
@@ -190,8 +244,27 @@ export function useTextEditContextMenu() {
         e.preventDefault();
       }
     };
+    const onCopy = (e: ClipboardEvent) => {
+      // Component-owned selections (TRX/xterm) keep their own copy handlers.
+      if (e.defaultPrevented) return;
+      const target = editableTarget(e.target);
+      if (!target) return;
+      const field = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+        ? target as HTMLInputElement | HTMLTextAreaElement : null;
+      if (field?.type === 'password' || field?.disabled) return;
+      const { snapshot, savedRange } = captureSelection(target);
+      const text = field && snapshot
+        ? field.value.slice(snapshot.start, snapshot.end) : savedRange?.toString() ?? '';
+      if (!text) return;
+      e.preventDefault();
+      void writeClipboardText(text).catch(notifyError);
+    };
     document.addEventListener('contextmenu', onContextMenu);
-    return () => document.removeEventListener('contextmenu', onContextMenu);
+    document.addEventListener('copy', onCopy);
+    return () => {
+      document.removeEventListener('contextmenu', onContextMenu);
+      document.removeEventListener('copy', onCopy);
+    };
   }, []);
 
   const element = state ? (

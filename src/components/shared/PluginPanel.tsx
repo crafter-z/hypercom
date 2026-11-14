@@ -13,6 +13,7 @@ import { PanelBottomClose, PanelBottomOpen, X, Copy, Download } from 'lucide-rea
 import { usePluginPanel } from '../../hooks/usePluginPanel';
 import { clearPluginPanel } from '../../utils/pluginPanelRegistry';
 import { exportPluginPanel } from '../../utils/pluginPanelExport';
+import { writeClipboardText } from '../../utils/clipboard';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 
 const PluginPanel: React.FC = () => {
@@ -26,7 +27,7 @@ const PluginPanel: React.FC = () => {
   const copyAll = (pluginId: string) => {
     const text = panels[pluginId]?.buffer ?? '';
     if (!text) return;
-    void navigator.clipboard.writeText(text)
+    void writeClipboardText(text)
       .then(() => notifyInfo('plugins.panelCopied'))
       .catch((e) => notifyError(e));
   };

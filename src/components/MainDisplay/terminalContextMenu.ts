@@ -43,6 +43,8 @@ export interface TerminalContextMenuData {
   t: TFunction;
   /** Select-all needs the scroll container ref, so it stays a callback. */
   onSelectAll: () => void;
+  /** Captured before opening/focusing the menu; empty means no selection. */
+  browserSelectionText?: string;
 }
 
 /**
@@ -55,15 +57,21 @@ export interface TerminalContextMenuData {
  * every text node the Range anchors, parked or not. Line boundaries are
  * preserved because each row is a block-level div.
  */
-export function selectionText(): string {
+export function selectionText(root?: HTMLElement): string {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return '';
   const parts: string[] = [];
   for (let i = 0; i < sel.rangeCount; i++) {
     const r = sel.getRangeAt(i);
-    if (r.collapsed) continue;
+    if (r.collapsed || (root && (!root.contains(r.startContainer) || !root.contains(r.endContainer)))) continue;
     const div = document.createElement('div');
     div.appendChild(r.cloneContents());
+    // Clone textContent includes parked rows even when their live nodes are
+    // display:none; unlike Selection.toString it does not add block line
+    // breaks itself.
+    const rows = div.querySelectorAll('.terminal-line');
+    rows.forEach((row, index) => { if (index < rows.length - 1) row.append('\n'); });
+    div.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
     const text = div.textContent ?? '';
     if (text) parts.push(text);
   }
@@ -77,6 +85,9 @@ export function buildTerminalContextMenuItems(
     portId, lines, range, timestampMode, isFirstInRound,
     connectedAt, timestampFormat, encoding, t, onSelectAll,
   } = data;
+  // Capture once, before ContextMenu moves focus; callbacks must not read a
+  // possibly collapsed/replaced document selection at activation time.
+  const browserSelectionText = data.browserSelectionText ?? selectionText();
 
   // Timestamp cell for a given line index, honoring per-round muting.
   const lineTimestamp = (idx: number): string =>
@@ -87,12 +98,12 @@ export function buildTerminalContextMenuItems(
   const copySelected = () => {
     if (!range) return;
     const text = lines.slice(range.start, range.end + 1).map((l) => formatLineForCopy(l, encoding)).join('\n');
-    if (text) void writeClipboardText(text);
+    if (text) void writeClipboardText(text).catch(notifyError);
   };
 
   const copyAll = () => {
     const text = lines.map((l) => formatLineForCopy(l, encoding)).join('\n');
-    if (text) void writeClipboardText(text);
+    if (text) void writeClipboardText(text).catch(notifyError);
   };
 
   // issue #18: Chromium's Selection.toString() serializes by LAYOUT
@@ -100,8 +111,8 @@ export function buildTerminalContextMenuItems(
   // drop out of it. Range.cloneContents() is a pure tree clone and keeps
   // parked rows' text, so copy what the Range anchors, not what is visible.
   const copyBrowserSelection = () => {
-    const text = selectionText();
-    if (text) void writeClipboardText(text);
+    const text = browserSelectionText;
+    if (text) void writeClipboardText(text).catch(notifyError);
   };
 
   const exportLines = async (ext: 'txt' | 'csv') => {
@@ -135,12 +146,12 @@ export function buildTerminalContextMenuItems(
     { label: t('terminalView.contextMenu.copy'), onClick: copyBrowserSelection },
     { type: 'separator' },
     { label: t('terminalView.contextMenu.copyAsHex'), onClick: () => {
-      const text = selectionText();
-      if (text) void writeClipboardText(stringToHex(text));
+      const text = browserSelectionText;
+      if (text) void writeClipboardText(stringToHex(text)).catch(notifyError);
     }},
     { label: t('terminalView.contextMenu.hexToText'), onClick: () => {
-      const text = selectionText();
-      if (text) void writeClipboardText(hexToString(text));
+      const text = browserSelectionText;
+      if (text) void writeClipboardText(hexToString(text)).catch(notifyError);
     }},
     { type: 'separator' },
     { label: t('terminalView.contextMenu.exportTxt'), onClick: () => { void exportLines('txt'); } },
