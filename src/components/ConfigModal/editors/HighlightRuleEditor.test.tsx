@@ -63,12 +63,32 @@ describe('highlight rule preview', () => {
     expect(contrast?.dark).toBeLessThan(5);
     expect(container.querySelector('[role="alert"]')).toBeNull();
     render();
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('highlightRuleEditor.contrastWarning');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    const toggle = container.querySelector<HTMLButtonElement>('.highlight-rule-editor__contrast-toggle')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.title).toContain('highlightRuleEditor.contrastWarning');
+    expect(container.querySelector('.highlight-rule-editor__contrast-panel')).toBeNull();
+    act(() => toggle.click());
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('highlightRuleEditor.contrastWarning');
+  });
+
+  it('keeps style toggles explicit without changing unrelated fields', () => {
+    render();
+    const buttons = container.querySelectorAll<HTMLButtonElement>('.highlight-rule-editor__toggle');
+    expect(buttons[0].getAttribute('aria-pressed')).toBe('true');
+    expect(buttons[1].getAttribute('aria-pressed')).toBe('false');
+    act(() => buttons[0].click());
+    expect(change).toHaveBeenLastCalledWith({ bold: false });
+    act(() => buttons[1].click());
+    expect(change).toHaveBeenLastCalledWith({ italic: true });
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it('does not claim contrast for safe but non-hex CSS colors', () => {
     expect(getHighlightContrast('tomato')).toBeNull();
     render({ ...rule, color: 'tomato' });
+    act(() => container.querySelector<HTMLButtonElement>('.highlight-rule-editor__contrast-toggle')!.click());
     expect(container.querySelector('.rule-preview__contrast--unknown')?.textContent)
       .toContain('highlightRuleEditor.contrastUnavailable');
   });

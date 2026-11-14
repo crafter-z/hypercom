@@ -1,109 +1,110 @@
-/* Highlight rule row editor.
- * Two-line grid so the row fits the 800x600 ConfigModal content area without
- * horizontal scrolling: line 1 = drag/insert + name + pattern + regex,
- * line 2 = colour + bold + italic + delete + preview. */
+/* Compact highlight editor: editable fields first, style + two small live
+ * samples second. Contrast explanations expand only on explicit request. */
+.highlight-settings { min-width: 0; }
+.modal-content-body:has(.highlight-settings) { padding: 8px 12px; }
+.highlight-settings .editor-accordion-header { gap: 4px; padding: 4px 6px; }
+.highlight-settings .editor-accordion-body { padding: 4px 6px; }
+.highlight-settings .editor-accordion-body > .btn:last-child { margin-top: 4px; }
+
 .highlight-rule-editor {
   container-type: inline-size;
   min-width: 0;
-  padding: 8px;
-  margin-bottom: 6px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: var(--bg-secondary);
+  padding: 4px;
+  border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
 }
-
-.highlight-rule-editor:hover {
-  border-color: var(--border-color);
-}
-
+.highlight-rule-editor:hover { background: var(--bg-secondary); }
 .highlight-rule-editor:focus-within {
-  border-color: var(--accent-color);
+  background: var(--bg-secondary);
+  box-shadow: inset 2px 0 var(--accent-color);
 }
-
 .highlight-rule-editor__line {
   display: grid;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
-
 .highlight-rule-editor__line--main {
-  grid-template-columns: 24px 24px 24px minmax(64px, 0.75fr) minmax(0, 1.7fr) auto;
+  grid-template-columns: 24px minmax(76px, 0.8fr) minmax(100px, 2fr) auto 24px;
 }
-
 .highlight-rule-editor__line--style {
-  grid-template-columns: 28px auto auto 24px minmax(0, 1fr);
-  margin-top: 6px;
+  grid-template-columns: 24px 24px 24px minmax(0, 1fr) 24px auto;
+  padding-left: 28px;
+  margin-top: 3px;
 }
-
 .highlight-rule-editor :is(.input, .select) {
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
-}
-
-.highlight-rule-editor__name,
-.highlight-rule-editor__pattern {
-  min-width: 0;
-}
-
-.highlight-rule-editor__regex,
-.highlight-rule-editor__toggle {
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.highlight-rule-editor__color {
-  width: 28px;
   height: 24px;
-  padding: 0;
-  border: 1px solid var(--border-color);
-  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: var(--text-sm);
+}
+.highlight-rule-editor__pattern { font-family: var(--font-terminal); }
+.highlight-rule-editor__name {
+  background: transparent;
+  border-color: transparent;
+}
+.highlight-rule-editor__name:hover { border-color: var(--border-control); }
+.highlight-rule-editor__name:focus { border-color: var(--accent-color); }
+.highlight-rule-editor__handle { display: flex; align-items: center; }
+.highlight-rule-editor__handle .btn {
+  background: transparent;
+  border-color: transparent;
+}
+.highlight-rule-editor__regex { font-size: var(--text-xs); white-space: nowrap; }
+.highlight-rule-editor__color {
+  width: 24px;
+  height: 22px;
+  padding: 2px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   cursor: pointer;
-  flex-shrink: 0;
 }
+.highlight-rule-editor__color::-webkit-color-swatch-wrapper { padding: 0; }
+.highlight-rule-editor__color::-webkit-color-swatch { border: 0; border-radius: 2px; }
+.highlight-rule-editor__color:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 1px; }
+.highlight-rule-editor__delete:hover { color: var(--text-error); }
+.highlight-rule-editor__insert-actions { display: flex; gap: 0; }
 
-.highlight-rule-editor__delete {
-  justify-self: start;
-  color: var(--text-secondary);
-}
-
-.highlight-rule-editor__delete:hover {
-  color: var(--text-error);
-  border-color: var(--text-error);
-}
-
-.highlight-rule-editor__preview {
+/* Scope above the shared preview stylesheet: samples are swatches, not cards. */
+.highlight-rule-editor .highlight-rule-editor__preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
   min-width: 0;
-  overflow: hidden;
-  font-size: 11px;
-  color: var(--text-secondary);
+  margin: 0 4px;
 }
-
-.highlight-rule-editor__preview .rule-preview__samples {
-  margin-top: 4px;
+.highlight-rule-editor .rule-preview__sample {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 2px 6px;
+  border-color: var(--border-subtle);
+  border-radius: 3px;
+  font-size: var(--text-sm);
 }
-
-.highlight-rule-editor__preview-value {
-  color: inherit;
+.highlight-rule-editor__sample-icon { flex: 0 0 auto; color: var(--preview-muted); }
+.highlight-rule-editor .rule-preview__sample-text { min-width: 0; }
+.highlight-rule-editor .highlight-rule-editor__contrast-panel {
+  margin: 4px 0 0 28px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border-control);
+  background: var(--bg-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
 }
+.highlight-rule-editor__contrast-note { flex-basis: 100%; color: var(--text-warning); }
 
-/* Very narrow ConfigModal windows: let the pattern drop to its own line rather
- * than forcing the grid wider than its container. */
-@container (max-width: 420px) {
-  .highlight-rule-editor__line--main {
-    grid-template-columns: 24px 24px 24px minmax(0, 1fr) auto;
-  }
-
-  .highlight-rule-editor__regex {
-    grid-column: 5;
-    grid-row: 1;
-  }
-
-  .highlight-rule-editor__pattern {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
+/* Narrow editor columns reflow rather than reducing hit targets or font size. */
+@container (max-width: 390px) {
+  .highlight-rule-editor__line--main { grid-template-columns: 24px minmax(0, 1fr) auto 24px; }
+  .highlight-rule-editor__pattern { grid-column: 2 / -1; grid-row: 2; }
+  .highlight-rule-editor__regex { grid-column: 3; grid-row: 1; }
+  .highlight-rule-editor__delete { grid-column: 4; grid-row: 1; }
+  .highlight-rule-editor__line--style { grid-template-columns: 24px 24px 24px 1fr auto; }
+  .highlight-rule-editor .highlight-rule-editor__preview { grid-column: 1 / -1; grid-row: 2; margin: 0; }
+  .highlight-rule-editor__contrast-toggle { grid-column: 4; grid-row: 1; justify-self: end; }
+  .highlight-rule-editor__insert-actions { grid-column: 5; grid-row: 1; }
 }

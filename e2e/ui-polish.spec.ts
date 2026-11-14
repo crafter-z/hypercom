@@ -165,6 +165,64 @@ for (const theme of ['dark', 'light'] as const) {
   });
 }
 
+for (const theme of ['dark', 'light'] as const) {
+  test(`highlight editor ${theme}: six compact rules fit and details stay optional`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await seed(page, theme);
+    await page.evaluate(async () => {
+      const path = '/src/stores/useAppStore.ts';
+      const { useAppStore } = await import(path);
+      const names = ['错误', '警告', '成功', '调试', '接收', '发送', '超时', '启动'];
+      const patterns = ['ERROR|FAIL', 'WARN', 'OK|SUCCESS', 'DEBUG', 'RX', 'TX', 'TIMEOUT', 'BOOT'];
+      const colors = ['#f48771', '#dcdcaa', '#4ec9b0', '#9aa1b3', '#5eafff', '#ce9178', '#f48771', '#4ec9b0'];
+      const sets = [{ id: 'dense-highlight', name: '设备日志', isEnabled: true,
+        rules: names.map((name, index) => ({ id: `dense-rule-${index}`, name, pattern: patterns[index], isRegex: index === 0 || index === 2, color: colors[index], bold: index < 3, italic: index === 3 })),
+      }];
+      useAppStore.getState().setConfig({ highlightRuleSets: sets });
+      const rulesPath = '/src/stores/useRuleStore.ts';
+      const editorPath = '/src/utils/entityEditor.ts';
+      const { useRuleStore } = await import(rulesPath);
+      const { adoptEntityEditorBaselineFromConfig } = await import(editorPath);
+      useRuleStore.getState().setHighlightRuleSets(sets);
+      adoptEntityEditorBaselineFromConfig(useAppStore.getState().config);
+    });
+    await openSettings(page, 'highlight');
+    await page.locator('.editor-accordion-header button[aria-expanded="false"]').first().click();
+    const rows = page.locator('.highlight-rule-editor');
+    await expect(rows).toHaveCount(8);
+    await expect(page.locator('.highlight-rule-editor__contrast-panel')).toHaveCount(0);
+    const footer = await page.locator('.modal-content-footer').boundingBox();
+    for (const row of (await rows.all()).slice(0, 6)) {
+      const box = (await row.boundingBox())!;
+      expect(box.height).toBeLessThanOrEqual(64);
+      expect(box.y + box.height).toBeLessThanOrEqual(footer!.y);
+    }
+    await page.locator('.modal-dialog').screenshot({ path: `.npm-cache/highlight-compact/highlight-${theme}.png`, animations: 'disabled' });
+    const details = rows.first().locator('.highlight-rule-editor__contrast-toggle');
+    await details.focus();
+    await page.keyboard.press('Enter');
+    await expect(rows.first().locator('.highlight-rule-editor__contrast-panel')).toBeVisible();
+    await details.click();
+    await expect(rows.first().locator('.highlight-rule-editor__contrast-panel')).toHaveCount(0);
+    await page.evaluate(async () => {
+      const path = '/src/i18n.ts';
+      const { default: i18n } = await import(path);
+      await i18n.changeLanguage('en-US');
+    });
+    for (const width of [720, 600]) {
+      await page.setViewportSize({ width, height: 800 });
+      await expect.poll(() => page.locator('.modal-content-body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      const box = (await rows.first().boundingBox())!;
+      for (const control of await rows.first().locator('input, button').all()) {
+        const controlBox = (await control.boundingBox())!;
+        expect(controlBox.x).toBeGreaterThanOrEqual(box.x);
+        expect(controlBox.x + controlBox.width).toBeLessThanOrEqual(box.x + box.width + 1);
+      }
+    }
+    await page.locator('.modal-dialog').screenshot({ path: `.npm-cache/highlight-compact/highlight-narrow-${theme}.png`, animations: 'disabled' });
+  });
+}
+
 test('active port follows selected serial tab, not connection state', async ({ page }) => {
   await seed(page, 'dark');
   // Both ports stay connected while changing only the active workspace tab.

@@ -31,6 +31,7 @@ const HighlightSettings: React.FC = () => {
   };
 
   return (
+    <div className="highlight-settings">
     <RuleSetAccordion<HighlightRuleSet>
       title={t('highlightSettings.accordionTitle')}
       description={t('highlightSettings.accordionDescription')}
@@ -74,6 +75,7 @@ const HighlightSettings: React.FC = () => {
       itemCount={(set) => set.rules.length}
       emptyItemText={t('highlightSettings.emptyRulesText')}
     />
+    </div>
   );
 };
 

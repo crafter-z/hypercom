@@ -1,6 +1,6 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDownToLine, ArrowUpToLine, Trash2 } from 'lucide-react';
+import { AlertTriangle, ArrowDownToLine, ArrowUpToLine, Bold, Info, Italic, Moon, Sun, Trash2 } from 'lucide-react';
 import type { HighlightRule } from '../../../types';
 import { safeCssColor } from '../../../utils/cssColor';
 import '../../../styles/highlight-editor.css';
@@ -75,6 +75,8 @@ const HighlightRuleEditor: React.FC<{
 }> = ({ rule, onChange, onDelete, handle, onInsert, onInsertBelow, autoFocus }) => {
   const { t } = useTranslation();
   const patternRef = useRef<HTMLInputElement>(null);
+  const contrastId = useId();
+  const [showContrast, setShowContrast] = useState(false);
   const previewColor = safeCssColor(rule.color);
   const pickerColor = previewColor ?? (rule.color ? '#000000' : '#ff6b6b');
   const contrast = getHighlightContrast(rule.color);
@@ -85,6 +87,9 @@ const HighlightRuleEditor: React.FC<{
     '--preview-style': rule.italic ? 'italic' : 'normal',
   } as React.CSSProperties;
   const sample = rule.pattern || t('highlightRuleEditor.emptyPattern');
+  const contrastLabel = contrast
+    ? `${t('highlightRuleEditor.backgroundLight')} · ${t('highlightRuleEditor.contrastRatio', { ratio: contrast.light.toFixed(1) })}; ${t('highlightRuleEditor.backgroundDark')} · ${t('highlightRuleEditor.contrastRatio', { ratio: contrast.dark.toFixed(1) })}${contrastWarning ? ` — ${t('highlightRuleEditor.contrastWarning')}` : ''}`
+    : t('highlightRuleEditor.contrastUnavailable');
 
   useEffect(() => {
     if (autoFocus) {
@@ -96,47 +101,49 @@ const HighlightRuleEditor: React.FC<{
   return (
     <div className="highlight-rule-editor">
       <div className="highlight-rule-editor__line highlight-rule-editor__line--main">
-        {handle}
-        {onInsert && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={onInsert}><ArrowUpToLine size={12} /></button>}
-        {onInsertBelow && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={onInsertBelow}><ArrowDownToLine size={12} /></button>}
-        <input className="input highlight-rule-editor__name" value={rule.name} onChange={e => onChange({ name: e.target.value })} placeholder={t('highlightRuleEditor.namePlaceholder')} />
-        <input ref={patternRef} className="input highlight-rule-editor__pattern" value={rule.pattern} onChange={e => onChange({ pattern: e.target.value })} placeholder={t('highlightRuleEditor.patternPlaceholder')} />
+        <span className="highlight-rule-editor__handle">{handle}</span>
+        <input className="input highlight-rule-editor__name" value={rule.name} onChange={e => onChange({ name: e.target.value })} aria-label={t('highlightRuleEditor.namePlaceholder')} placeholder={t('highlightRuleEditor.namePlaceholder')} />
+        <input ref={patternRef} className="input highlight-rule-editor__pattern" value={rule.pattern} onChange={e => onChange({ pattern: e.target.value })} aria-label={t('highlightRuleEditor.patternPlaceholder')} placeholder={t('highlightRuleEditor.patternPlaceholder')} spellCheck={false} />
         <label className="checkbox-wrapper highlight-rule-editor__regex">
           <input type="checkbox" checked={rule.isRegex} onChange={e => onChange({ isRegex: e.target.checked })} />{t('highlightRuleEditor.regexLabel')}
         </label>
+        <button type="button" className="icon-btn highlight-rule-editor__delete" onClick={onDelete} title={t('highlightRuleEditor.deleteRule')} aria-label={t('highlightRuleEditor.deleteRule')}><Trash2 size={13} /></button>
       </div>
       <div className="highlight-rule-editor__line highlight-rule-editor__line--style">
         <input className="highlight-rule-editor__color" type="color" value={pickerColor} onChange={e => onChange({ color: e.target.value })} aria-label={t('highlightRuleEditor.colorLabel')} />
-        <label className="checkbox-wrapper highlight-rule-editor__toggle">
-          <input type="checkbox" checked={rule.bold || false} onChange={e => onChange({ bold: e.target.checked })} />{t('highlightRuleEditor.boldLabel')}
-        </label>
-        <label className="checkbox-wrapper highlight-rule-editor__toggle">
-          <input type="checkbox" checked={rule.italic || false} onChange={e => onChange({ italic: e.target.checked })} />{t('highlightRuleEditor.italicLabel')}
-        </label>
-        <button type="button" className="btn btn-icon btn-sm highlight-rule-editor__delete" onClick={onDelete} title={t('highlightRuleEditor.deleteRule')} aria-label={t('highlightRuleEditor.deleteRule')}><Trash2 size={12} /></button>
-        <div className="highlight-rule-editor__preview rule-preview">
-          <div className="rule-preview__label">{t('highlightRuleEditor.previewLabel')}</div>
-          <div className="rule-preview__samples" aria-label={t('highlightRuleEditor.previewLabel')}>
-            <div className="rule-preview__sample rule-preview__sample--light" style={previewStyle}>
-              <span className="rule-preview__sample-label">{t('highlightRuleEditor.backgroundLight')}</span>
-              <span className="rule-preview__sample-text">{sample}</span>
-            </div>
-            <div className="rule-preview__sample rule-preview__sample--dark" style={previewStyle}>
-              <span className="rule-preview__sample-label">{t('highlightRuleEditor.backgroundDark')}</span>
-              <span className="rule-preview__sample-text">{sample}</span>
-            </div>
+        <button type="button" className={`icon-btn highlight-rule-editor__toggle${rule.bold ? ' active' : ''}`}
+          aria-pressed={!!rule.bold} title={t('highlightRuleEditor.boldLabel')} aria-label={t('highlightRuleEditor.boldLabel')}
+          onClick={() => onChange({ bold: !rule.bold })}><Bold size={14} /></button>
+        <button type="button" className={`icon-btn highlight-rule-editor__toggle${rule.italic ? ' active' : ''}`}
+          aria-pressed={!!rule.italic} title={t('highlightRuleEditor.italicLabel')} aria-label={t('highlightRuleEditor.italicLabel')}
+          onClick={() => onChange({ italic: !rule.italic })}><Italic size={14} /></button>
+        <div className="highlight-rule-editor__preview rule-preview__samples" role="group" aria-label={t('highlightRuleEditor.previewLabel')}>
+          <div className="rule-preview__sample rule-preview__sample--light" style={previewStyle} title={`${t('highlightRuleEditor.backgroundLight')} · ${sample}`}>
+            <Sun size={12} className="highlight-rule-editor__sample-icon" aria-label={t('highlightRuleEditor.backgroundLight')} />
+            <span className="rule-preview__sample-text">{sample}</span>
           </div>
-          {contrast ? (
-            <div className={`rule-preview__contrast${contrastWarning ? ' rule-preview__contrast--warning' : ''}`} role={contrastWarning ? 'alert' : 'status'}>
-              <span>{t('highlightRuleEditor.contrastRatio', { ratio: contrast.light.toFixed(1) })} · {t('highlightRuleEditor.backgroundLight')}</span>
-              <span>{t('highlightRuleEditor.contrastRatio', { ratio: contrast.dark.toFixed(1) })} · {t('highlightRuleEditor.backgroundDark')}</span>
-              {contrastWarning && <span>{t('highlightRuleEditor.contrastWarning')}</span>}
-            </div>
-          ) : (
-            <div className="rule-preview__contrast rule-preview__contrast--unknown" role="status">{t('highlightRuleEditor.contrastUnavailable')}</div>
-          )}
+          <div className="rule-preview__sample rule-preview__sample--dark" style={previewStyle} title={`${t('highlightRuleEditor.backgroundDark')} · ${sample}`}>
+            <Moon size={12} className="highlight-rule-editor__sample-icon" aria-label={t('highlightRuleEditor.backgroundDark')} />
+            <span className="rule-preview__sample-text">{sample}</span>
+          </div>
+        </div>
+        <button type="button" className={`icon-btn highlight-rule-editor__contrast-toggle${contrastWarning ? ' rule-preview__contrast--warning' : ''}`}
+          aria-expanded={showContrast} aria-controls={showContrast ? contrastId : undefined} title={contrastLabel} aria-label={contrastLabel}
+          onClick={() => setShowContrast(value => !value)}>
+          {contrastWarning ? <AlertTriangle size={13} /> : <Info size={13} />}
+        </button>
+        <div className="highlight-rule-editor__insert-actions">
+          {onInsert && <button type="button" className="icon-btn" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={onInsert}><ArrowUpToLine size={12} /></button>}
+          {onInsertBelow && <button type="button" className="icon-btn" title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={onInsertBelow}><ArrowDownToLine size={12} /></button>}
         </div>
       </div>
+      {showContrast && <div id={contrastId} className={`rule-preview__contrast highlight-rule-editor__contrast-panel${contrast ? '' : ' rule-preview__contrast--unknown'}`} role="status">
+        {contrast ? <>
+          <span>{t('highlightRuleEditor.backgroundLight')} · {t('highlightRuleEditor.contrastRatio', { ratio: contrast.light.toFixed(1) })}</span>
+          <span>{t('highlightRuleEditor.backgroundDark')} · {t('highlightRuleEditor.contrastRatio', { ratio: contrast.dark.toFixed(1) })}</span>
+          {contrastWarning && <span className="highlight-rule-editor__contrast-note">{t('highlightRuleEditor.contrastWarning')}</span>}
+        </> : t('highlightRuleEditor.contrastUnavailable')}
+      </div>}
     </div>
   );
 };
