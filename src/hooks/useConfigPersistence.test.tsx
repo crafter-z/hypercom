@@ -11,6 +11,7 @@ import { useConfigPersistence, saveCurrentPortMeta, saveCurrentPortGroups, reset
 import { getEntityEditorSnapshot, replaceEntityDraft, resetEntityEditorForTests } from '../utils/entityEditor';
 import { commitUpdateMode, getCommittedUpdateMode, updateTiming } from '../utils/updateService';
 import { resetStoresForTests } from '../stores/resetStores';
+import { DEFAULT_TERMINAL_FONT, DEFAULT_UI_FONT, LEGACY_TERMINAL_FONT, LEGACY_UI_FONT } from '../utils/fontDefaults';
 
 vi.mock('../services/tauri', () => ({
   configService: { getConfig: vi.fn(), setConfig: vi.fn() },
@@ -310,6 +311,45 @@ describe('committed update mode persistence', () => {
     expect(backend.theme).toBe(persistedTheme);
     expect(backend.sendCommandSets).toEqual([rule('already persisted elsewhere')]);
     expect(getCommittedUpdateMode()).toBe('none');
+  });
+});
+
+describe('font defaults migration', () => {
+  it('upgrades the exact legacy UI and terminal pair together', async () => {
+    backend = { ...backend, uiFont: LEGACY_UI_FONT, terminalFont: LEGACY_TERMINAL_FONT };
+
+    await act(async () => { await load(); });
+
+    expect(useAppStore.getState().config.uiFont).toBe(DEFAULT_UI_FONT);
+    expect(useAppStore.getState().config.terminalFont).toBe(DEFAULT_TERMINAL_FONT);
+    expect(isOrdinaryConfigDirty()).toBe(false);
+    // The frontend fallback is intentionally in-memory; the real Rust loader
+    // persists this exact-pair migration before returning the config snapshot.
+    expect(configService.setConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['only UI is legacy', { uiFont: LEGACY_UI_FONT, terminalFont: DEFAULT_TERMINAL_FONT }],
+    ['only terminal is legacy', { uiFont: DEFAULT_UI_FONT, terminalFont: LEGACY_TERMINAL_FONT }],
+    ['both fields are customized', { uiFont: 'Custom UI', terminalFont: 'Custom terminal' }],
+  ])('does not alter configs when %s', async (_label, fonts) => {
+    backend = { ...backend, ...fonts };
+
+    await act(async () => { await load(); });
+
+    expect(useAppStore.getState().config.uiFont).toBe(fonts.uiFont);
+    expect(useAppStore.getState().config.terminalFont).toBe(fonts.terminalFont);
+    expect(isOrdinaryConfigDirty()).toBe(false);
+  });
+
+  it('keeps an already upgraded backend response unchanged', async () => {
+    backend = { ...backend, uiFont: DEFAULT_UI_FONT, terminalFont: DEFAULT_TERMINAL_FONT };
+
+    await act(async () => { await load(); });
+
+    expect(useAppStore.getState().config.uiFont).toBe(DEFAULT_UI_FONT);
+    expect(useAppStore.getState().config.terminalFont).toBe(DEFAULT_TERMINAL_FONT);
+    expect(configService.setConfig).not.toHaveBeenCalled();
   });
 });
 

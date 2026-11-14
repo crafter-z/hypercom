@@ -378,6 +378,15 @@ pub struct AppConfig {
     pub entities: Entities,
 }
 
+/// 字体配置迁移常量。旧版默认值只有英文字体；新版在保留首选字体的同时，
+/// 追加常见中文字体作为 fallback，确保中文字符不会落到平台不一致的默认字体。
+const LEGACY_TERMINAL_FONT: &str = "Consolas, monospace";
+const LEGACY_UI_FONT: &str = "Inter, sans-serif";
+const DEFAULT_TERMINAL_FONT: &str =
+    "Consolas, \"Noto Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Segoe UI\", monospace";
+const DEFAULT_UI_FONT: &str =
+    "Inter, \"Noto Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Segoe UI\", sans-serif";
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -391,9 +400,9 @@ impl Default for AppConfig {
             prevent_sleep: false,
             auto_reconnect: false,
             max_retries: 3,
-            terminal_font: "Consolas, monospace".to_string(),
+            terminal_font: DEFAULT_TERMINAL_FONT.to_string(),
             terminal_font_size: 14,
-            ui_font: "Inter, sans-serif".to_string(),
+            ui_font: DEFAULT_UI_FONT.to_string(),
             ui_font_size: 14,
             ui_scale_percent: 100,
             background_image: String::new(),
@@ -447,6 +456,43 @@ fn strip_legacy_memory_budget_keys(raw: &str) -> Option<serde_json::Value> {
         }
     }
     Some(value)
+}
+
+/// 仅在两个字体字段都由旧配置显式提供且仍是旧版双英文字体栈时迁移。
+///
+/// 必须在 serde 反序列化后仍使用原始 `Value` 判断字段是否存在：`AppConfig` 的容器级
+/// `#[serde(default)]` 会把缺失字段填成当前默认值，若只比较反序列化后的字符串，
+/// 「缺字段」会被误认为是用户显式保存了旧值。迁移成功后由 `ConfigManager::new` 立即
+/// 持久化到 config.json 及其安全备份，下一次加载不再重复迁移。
+fn migrate_legacy_font_fallbacks(raw: &serde_json::Value, config: &mut AppConfig) -> bool {
+    let Some(object) = raw.as_object() else {
+        return false;
+    };
+    let Some(ui_font) = object.get("uiFont").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(terminal_font) = object
+        .get("terminalFont")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+
+    if ui_font == LEGACY_UI_FONT && terminal_font == LEGACY_TERMINAL_FONT {
+        config.ui_font = DEFAULT_UI_FONT.to_string();
+        config.terminal_font = DEFAULT_TERMINAL_FONT.to_string();
+        log::info!("Migrated legacy UI and terminal font stacks with Chinese fallbacks");
+        return true;
+    }
+    false
+}
+
+/// 从已剥离旧 key 的 JSON Value 反序列化配置，并执行依赖原始字段存在性的迁移。
+/// 返回值中的 bool 表示是否需要把迁移后的配置持久化。
+fn parse_config_value(value: serde_json::Value) -> anyhow::Result<(AppConfig, bool)> {
+    let mut config = serde_json::from_value::<AppConfig>(value.clone())?;
+    let migrated = migrate_legacy_font_fallbacks(&value, &mut config);
+    Ok((config, migrated))
 }
 
 /// 加载期归一化：把旧 config.json 里已收窄的串口帧格式自由字符串收敛到合法取值。
@@ -736,6 +782,7 @@ impl ConfigManager {
 
         let session_path = config_path.with_file_name("session.json");
         let mut primary_valid = false;
+        let mut fonts_migrated = false;
 
         let mut config = if config_path.exists() {
             let content = fs::read_to_string(&config_path)?;
@@ -744,10 +791,11 @@ impl ConfigManager {
             let stripped = strip_legacy_memory_budget_keys(&content);
             let result = stripped
                 .ok_or_else(|| anyhow::anyhow!("config.json is not valid JSON"))
-                .and_then(|v| serde_json::from_value::<AppConfig>(v).map_err(anyhow::Error::from));
+                .and_then(parse_config_value);
             match result {
-                Ok(cfg) => {
+                Ok((cfg, migrated)) => {
                     primary_valid = true;
+                    fonts_migrated = migrated;
                     cfg
                 }
                 Err(e) => {
@@ -756,7 +804,11 @@ impl ConfigManager {
                     if bak_path.exists() {
                         let bak_content = fs::read_to_string(&bak_path)?;
                         strip_legacy_memory_budget_keys(&bak_content)
-                            .and_then(|v| serde_json::from_value::<AppConfig>(v).ok())
+                            .and_then(|v| parse_config_value(v).ok())
+                            .map(|(cfg, migrated)| {
+                                fonts_migrated = migrated;
+                                cfg
+                            })
                             .unwrap_or_default()
                     } else {
                         log::warn!("No .bak available, using defaults");
@@ -831,7 +883,9 @@ impl ConfigManager {
                 }
             }
         }
-        let mut migrated = false;
+        // Font fallback and plugin install-generation migrations share one durable
+        // write so a config carrying both legacy shapes advances revision only once.
+        let mut migrated = fonts_migrated;
         for entry in &mut manager.config.entities.plugin_configs {
             if entry.install_generation.is_empty() {
                 entry.install_generation = uuid::Uuid::new_v4().to_string();
@@ -1358,6 +1412,8 @@ mod tests {
         assert!(!cfg.prevent_sleep);
         assert!(!cfg.auto_reconnect);
         assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.terminal_font, DEFAULT_TERMINAL_FONT);
+        assert_eq!(cfg.ui_font, DEFAULT_UI_FONT);
         assert_eq!(cfg.terminal_font_size, 14);
         assert_eq!(cfg.ui_scale_percent, 100);
         assert_eq!(
@@ -1448,6 +1504,167 @@ mod tests {
         assert!(!json.contains("sessionSnapshot"), "sessionSnapshot must not be in config.json");
         // configVersion 已删除（迁移只靠 serde default + strip_legacy_*）
         assert!(!json.contains("configVersion"), "configVersion must be gone: {json}");
+    }
+
+    #[test]
+    fn legacy_font_pair_migrates_only_when_both_explicit_old_values() {
+        let (migrated, did_migrate) =
+            parse_config_value(legacy_json(serde_json::json!({}))).unwrap();
+        assert!(did_migrate);
+        assert_eq!(migrated.ui_font, DEFAULT_UI_FONT);
+        assert_eq!(migrated.terminal_font, DEFAULT_TERMINAL_FONT);
+
+        // One old value alone must not trigger a pair migration, even when the
+        // other field is explicitly present with a user-selected stack.
+        let (only_one_old, did_migrate) = parse_config_value(legacy_json(serde_json::json!({
+            "terminalFont": "Fira Code, monospace"
+        })))
+        .unwrap();
+        assert!(!did_migrate);
+        assert_eq!(only_one_old.ui_font, LEGACY_UI_FONT);
+        assert_eq!(only_one_old.terminal_font, "Fira Code, monospace");
+    }
+
+    #[test]
+    fn legacy_font_non_old_values_are_preserved() {
+        let (config, did_migrate) = parse_config_value(legacy_json(serde_json::json!({
+            "uiFont": "Arial, sans-serif",
+            "terminalFont": "Cascadia Mono, monospace"
+        })))
+        .unwrap();
+        assert!(!did_migrate);
+        assert_eq!(config.ui_font, "Arial, sans-serif");
+        assert_eq!(config.terminal_font, "Cascadia Mono, monospace");
+    }
+
+    #[test]
+    fn legacy_font_missing_fields_use_new_defaults_without_migration() {
+        let mut value = legacy_json(serde_json::json!({}));
+        let object = value.as_object_mut().unwrap();
+        object.remove("uiFont");
+        object.remove("terminalFont");
+
+        let (config, did_migrate) = parse_config_value(value).unwrap();
+        assert!(!did_migrate);
+        assert_eq!(config.ui_font, DEFAULT_UI_FONT);
+        assert_eq!(config.terminal_font, DEFAULT_TERMINAL_FONT);
+    }
+
+    #[test]
+    fn legacy_font_migration_persists_to_disk_and_bumps_revision() {
+        let root = std::env::temp_dir().join(format!(
+            "hypercom_font_migration_{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let legacy = legacy_json(serde_json::json!({ "revision": 9 }));
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let manager = ConfigManager::new(Some(path.clone())).unwrap();
+        assert_eq!(manager.get_config().revision, 10);
+        assert_eq!(manager.get_config().ui_font, DEFAULT_UI_FONT);
+        assert_eq!(manager.get_config().terminal_font, DEFAULT_TERMINAL_FONT);
+
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted["revision"], 10);
+        assert_eq!(persisted["uiFont"], DEFAULT_UI_FONT);
+        assert_eq!(persisted["terminalFont"], DEFAULT_TERMINAL_FONT);
+        let backup = path.with_extension("json.bak");
+        let persisted_backup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(backup).unwrap()).unwrap();
+        assert_eq!(persisted_backup["revision"], 10);
+        assert_eq!(persisted_backup["uiFont"], DEFAULT_UI_FONT);
+        assert_eq!(persisted_backup["terminalFont"], DEFAULT_TERMINAL_FONT);
+        drop(manager);
+
+        // The persisted pair is no longer legacy, so a second load is idempotent
+        // and does not increment the revision again.
+        let second = ConfigManager::new(Some(path.clone())).unwrap();
+        assert_eq!(second.get_config().revision, 10);
+        assert_eq!(second.get_config().ui_font, DEFAULT_UI_FONT);
+        assert_eq!(second.get_config().terminal_font, DEFAULT_TERMINAL_FONT);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_manager_preserves_partial_missing_and_custom_font_configs() {
+        let mut missing_terminal = legacy_json(serde_json::json!({}));
+        missing_terminal
+            .as_object_mut()
+            .unwrap()
+            .remove("terminalFont");
+        let mut missing_ui = legacy_json(serde_json::json!({}));
+        missing_ui.as_object_mut().unwrap().remove("uiFont");
+
+        let cases: Vec<(&str, serde_json::Value, &str, &str)> = vec![
+            (
+                "only_ui_old",
+                legacy_json(serde_json::json!({
+                    "terminalFont": "Fira Code, monospace"
+                })),
+                LEGACY_UI_FONT,
+                "Fira Code, monospace",
+            ),
+            (
+                "only_terminal_old",
+                legacy_json(serde_json::json!({ "uiFont": "Arial, sans-serif" })),
+                "Arial, sans-serif",
+                LEGACY_TERMINAL_FONT,
+            ),
+            (
+                "missing_terminal",
+                missing_terminal,
+                LEGACY_UI_FONT,
+                DEFAULT_TERMINAL_FONT,
+            ),
+            (
+                "missing_ui",
+                missing_ui,
+                DEFAULT_UI_FONT,
+                LEGACY_TERMINAL_FONT,
+            ),
+            (
+                "custom",
+                legacy_json(serde_json::json!({
+                    "uiFont": "Arial, sans-serif",
+                    "terminalFont": "Cascadia Mono, monospace"
+                })),
+                "Arial, sans-serif",
+                "Cascadia Mono, monospace",
+            ),
+        ];
+
+        for (name, raw, expected_ui, expected_terminal) in cases {
+            let root = std::env::temp_dir().join(format!(
+                "hypercom_font_no_migration_{}_{}",
+                name,
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let path = root.join("config.json");
+            fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+            let manager = ConfigManager::new(Some(path.clone())).unwrap();
+            assert_eq!(manager.get_config().revision, 0, "case {name}");
+            assert_eq!(manager.get_config().ui_font, expected_ui, "case {name}");
+            assert_eq!(
+                manager.get_config().terminal_font,
+                expected_terminal,
+                "case {name}"
+            );
+            drop(manager);
+
+            // No migration means no startup write: the raw config (including any
+            // missing field) remains byte-for-value unchanged and no backup exists.
+            let persisted: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(persisted, raw, "case {name}");
+            assert!(!path.with_extension("json.bak").exists(), "case {name}");
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

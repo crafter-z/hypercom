@@ -9,6 +9,7 @@ import { enqueueConfigWrite } from '../utils/configWriteQueue';
 import { prepareEntityCollectionForSave, commitEntityEditorDraft } from '../utils/entityEditor';
 import type { EntityKey } from '../utils/entityEditor';
 import { jsonEqual } from '../utils/jsonEqual';
+import { migrateLegacyFontConfig } from '../utils/fontDefaults';
 import { readEditorRecovery, recoveryKeys, recoveryRecord, writeEditorRecovery } from '../utils/entityEditorRecovery';
 
 /**
@@ -192,18 +193,22 @@ export function useConfigPersistence() {
     try {
       const config = await configService.getConfig();
       if (!config) throw new Error('Configuration is unavailable');
+      // Rust performs this migration at its raw-JSON boundary. Keep a pure
+      // frontend fallback for older backends/mocks, with the same strict pair
+      // guard so a custom single-field font is never overwritten.
+      const migratedConfig = migrateLegacyFontConfig(config);
       const recovery = readOrdinaryRecovery();
       publishingRecovery = true;
       try {
-        setConfig(config);
+        setConfig(migratedConfig);
         ordinaryConflicts.clear();
-        markOrdinaryConfigSaved(config);
+        markOrdinaryConfigSaved(migratedConfig);
         // Commit only the disk value before restoring an update-mode draft.
-        commitUpdateMode(config.updateCheckMode);
+        commitUpdateMode(migratedConfig.updateCheckMode);
         if (recovery) {
-          const merged = mergeOrdinary(config, recovery.draft, recovery.baseline);
+          const merged = mergeOrdinary(migratedConfig, recovery.draft, recovery.baseline);
           for (const key of recovery.conflicts as Array<keyof AppConfig>) {
-            if (!jsonEqual(merged.values[key], config[key])) merged.conflicts.add(key);
+            if (!jsonEqual(merged.values[key], migratedConfig[key])) merged.conflicts.add(key);
           }
           for (const key of merged.conflicts) ordinaryConflicts.add(key);
           setConfig(merged.values);
