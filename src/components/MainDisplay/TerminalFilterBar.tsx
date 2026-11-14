@@ -15,6 +15,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import type { DisplayFormat, Encoding, TerminalState } from '../../types';
 import type { DirectionFilter } from '../../utils/lineFilter';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import '../../styles/terminal-filter.css';
 
 const DIRECTION_LABEL_KEYS: Record<DirectionFilter, string> = {
@@ -193,14 +194,12 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
           >
             <WrapText size={13} />
           </button>
-          <div className="segmented" role="group">
-            <button type="button" className={`segmented-btn${displayFormat === 'hex' ? ' active' : ''}`}
-              onClick={() => updateConfig({ displayFormat: 'hex' })}>HEX</button>
-            <button type="button" className={`segmented-btn${displayFormat === 'string' ? ' active' : ''}`}
-              onClick={() => updateConfig({ displayFormat: 'string' })}>
-              {t('paramsSection.displayFormat.string')}
-            </button>
-          </div>
+          <SegmentedControl<DisplayFormat>
+            aria-label={t('quickSend.format')}
+            value={displayFormat ?? 'string'}
+            options={[{ value: 'hex', label: 'HEX' }, { value: 'string', label: t('paramsSection.displayFormat.string') }]}
+            onChange={format => updateConfig({ displayFormat: format })}
+          />
         </div>
         <div className="terminal-bar-field" title={t('pane.toolbar.encodingLabel')}>
           <label className="eyebrow terminal-encoding-label" htmlFor={`terminal-encoding-${configId ?? portId}`}>

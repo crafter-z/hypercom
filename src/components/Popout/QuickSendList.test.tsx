@@ -109,9 +109,12 @@ describe('staged popout command list', () => {
     act(() => { type(delay, '125'); });
     act(() => { delay.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
     const format = container.querySelector('.quicksend-edit-form select[aria-label="quickSend.format"]') as HTMLSelectElement;
-    act(() => { format.value = 'hex'; format.dispatchEvent(new Event('change', { bubbles: true })); });
     const ending = container.querySelector('.quicksend-edit-form select[aria-label="quickSend.lineEnding"]') as HTMLSelectElement;
     act(() => { ending.value = '\\r\\n'; ending.dispatchEvent(new Event('change', { bubbles: true })); });
+    act(() => { format.value = 'hex'; format.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(ending.disabled).toBe(true);
+    expect(ending.value).toBe('\\r\\n');
+    expect(container.querySelector('.quicksend-row')?.querySelector('.quicksend-le')).toBeNull();
     act(() => { click('.quicksend-set-fields input[type="checkbox"]'); });
     const numbers = container.querySelectorAll<HTMLInputElement>('.quicksend-set-fields input[type="number"]');
     act(() => { type(numbers[0], '500'); });

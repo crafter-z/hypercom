@@ -233,7 +233,7 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
               {commandStepBadgeKey(command)
                 ? <span className="quicksend-badge">{t(commandStepBadgeKey(command)!)}</span>
                 : <span className={`quicksend-badge quicksend-badge-${command.type}`}>{command.type === 'hex' ? 'HEX' : 'STR'}</span>}
-              {isSendCommand(command) && <span className="quicksend-le">{t(lineEndingLabelKey(command.appendLineEnding, 'sendSection'))}</span>}
+              {isSendCommand(command) && command.type !== 'hex' && <span className="quicksend-le">{t(lineEndingLabelKey(command.appendLineEnding, 'sendSection'))}</span>}
               <button type="button" className="icon-btn quicksend-edit-btn" aria-expanded={!!editingIds[command.id]} title={t('quickSend.editHint')} aria-label={t('quickSend.editCommand')}
                 onClick={event => { event.stopPropagation(); setEditingIds(current => ({ ...current, [command.id]: !current[command.id] })); }}><Pencil size={12} /></button>
             </div>
@@ -247,7 +247,7 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
                   <select className="select quicksend-edit-select" aria-label={t('quickSend.format')} value={command.type} onChange={event => updateCommand(command.id, { type: event.target.value as SendCommand['type'] })}>
                     <option value="string">STR</option><option value="hex">HEX</option>
                   </select>
-                  <select className="select quicksend-edit-select" aria-label={t('quickSend.lineEnding')} value={command.appendLineEnding} onChange={event => updateCommand(command.id, { appendLineEnding: event.target.value as LineEnding })}>
+                  <select className="select quicksend-edit-select" aria-label={t('quickSend.lineEnding')} disabled={command.type === 'hex'} value={command.appendLineEnding} onChange={event => updateCommand(command.id, { appendLineEnding: event.target.value as LineEnding })}>
                     {LINE_ENDING_VALUES.map(value => <option key={value} value={value}>{t(lineEndingLabelKey(value, 'sendSection'))}</option>)}
                   </select>
                 </div>

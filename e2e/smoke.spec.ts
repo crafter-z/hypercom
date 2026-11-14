@@ -148,12 +148,14 @@ test.describe('HyperCom smoke tests', () => {
     await expect(rows.nth(1)).toContainText('ERROR retry later');
 
     const toolbar = page.locator('.terminal-filter-bar');
-    await toolbar.getByRole('button', { name: 'HEX', exact: true }).click();
+    await toolbar.getByRole('radio', { name: 'HEX', exact: true }).click();
     await expect(toggle).toBeDisabled();
     await expect(toggle).toBeChecked();
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(1)).toContainText('80 41 FF 01 42 90 7F 43');
-    await toolbar.getByRole('button', { name: '文本', exact: true }).click();
+    await expect(toolbar.getByRole('radio', { name: 'HEX', exact: true })).toBeChecked();
+    await toolbar.getByRole('radio', { name: 'HEX', exact: true }).press('ArrowRight');
+    await expect(toolbar.getByRole('radio', { name: '文本', exact: true })).toBeChecked();
     await expect(rows).toHaveCount(2);
     await toggle.uncheck();
     await expect(rows).toHaveCount(3);
@@ -1015,7 +1017,9 @@ test.describe('HyperCom smoke tests', () => {
     await expect(page.locator('.terminal-view')).toHaveClass(/terminal-word-wrap/);
     await expect(toggle).toHaveAttribute('aria-pressed', 'true');
     const content = page.locator('.terminal-line .terminal-content').first();
-    expect(await content.evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThan(40);
+    // The React toggle commits before the direct-DOM renderer's rAF layout.
+    // Wait for measured wrapping, not just the already-updated toolbar state.
+    await expect.poll(() => content.evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThan(40);
     await page.evaluate(async () => {
       const { useAppStore } = await import('/src/stores/useAppStore.ts');
       useAppStore.getState().setConfig({ terminalFontSize: 15 });
@@ -1024,7 +1028,7 @@ test.describe('HyperCom smoke tests', () => {
       const view = el.closest('.terminal-view');
       return !!view && getComputedStyle(el).lineHeight === getComputedStyle(view).lineHeight;
     })).toBe(true);
-    await page.getByRole('button', { name: 'HEX', exact: true }).click();
+    await page.getByRole('radio', { name: 'HEX', exact: true }).click();
     await expect(toggle).toBeDisabled();
     await expect(page.locator('.terminal-view')).not.toHaveClass(/terminal-word-wrap/);
     await page.locator('.terminal-filter-bar .segmented-btn').nth(1).click();

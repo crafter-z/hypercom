@@ -9,6 +9,7 @@ import { notifySuccess, notifyError } from '../../stores/useToastStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
 import ConfirmDialog from '../shared/ConfirmDialog';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import { Save, Trash2 } from 'lucide-react';
 
 export interface ParamsSectionProps {
@@ -55,7 +56,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const [customBaudInput, setCustomBaudInput] = useState(String(baudRate));
   const [presets, setPresets] = useState<PortPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
-  const [pendingMode, setPendingMode] = useState<PortMode | null>(null);
+  const [pendingMode, setPendingMode] = useState<{ portId: string; mode: PortMode } | null>(null);
 
   // 外部改 store baudRate（选预设/应用预设）时 draft 跟随；键入期间 baudRate 不变，
   // 此 effect 不会触发，与用户输入天然无冲突。
@@ -144,23 +145,28 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   // issue #11：切换工作模式 → 落 store + 清屏 + 冲刷 RX 管线残留字节，
   // 避免旧模式 buffered 的数据混入新模式首屏。TRX 侧清 viewport buffer + 冲刷
   // RxPipeline（切 TTY 时销毁 TRX 缓冲）；TTY 侧清 ttyService 屏幕（若已挂 TTY 视图）。
-  const applyModeChange = useCallback((mode: PortMode) => {
-    const activePortId = getActivePortId(useAppStore.getState());
-    if (!activePortId) return;
-    setPortMode(activePortId, mode);
-    clearTerminal(activePortId);
+  const applyModeChange = useCallback(({ portId, mode }: { portId: string; mode: PortMode }) => {
+    // Confirmation belongs to the requested port, not whichever tab is focused
+    // when the dialog resolves. A removed port or an already-applied mode is a no-op.
+    const port = useAppStore.getState().ports.find(item => item.id === portId);
+    if (!port || (port.mode ?? 'trx') === mode) return;
+    // Drain old-mode rows before clearing/releasing the display. Flushing last
+    // would append them again (and recreate the just-released TRX manager).
+    getRxPipeline().flushAndReset(portId);
+    setPortMode(portId, mode);
+    clearTerminal(portId);
     if (mode === 'tty') {
       // TRX 缓冲销毁；切回 TRX 时 TerminalView 挂载会重建 manager
-      releaseViewportManager(activePortId);
+      releaseViewportManager(portId);
     }
-    getRxPipeline().flushAndReset(activePortId);
-    ttyService.clear(activePortId);
+    ttyService.clear(portId);
   }, [setPortMode]);
 
   // Switching mode destroys the current display buffer; confirm first.
   const handleModeChange = useCallback((mode: PortMode) => {
-    if (!getActivePortId(useAppStore.getState()) || mode === portMode) return;
-    setPendingMode(mode);
+    const portId = getActivePortId(useAppStore.getState());
+    if (!portId || mode === portMode) return;
+    setPendingMode({ portId, mode });
   }, [portMode]);
 
   return (
@@ -168,26 +174,18 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
       <div className="panel-card-title eyebrow">{t('paramsSection.cardTitle')}</div>
 
       <div className="op-params-grid">
-        {/* issue #11：工作模式切换（trx=传统收发 | tty=终端模式），样式复刻
-            TerminalFilterBar 的 HEX/Text 分段控件（.segmented + .btn.btn-sm + active）。 */}
         <div className="op-param-item">
           <span className="op-label">{t('params.mode')}</span>
-          <div className="segmented" role="group">
-            <button type="button"
-              className={`segmented-btn${portMode === 'trx' ? ' active' : ''}`}
-              disabled={!isPortActive}
-              onClick={() => handleModeChange('trx')}
-              aria-pressed={portMode === 'trx'}>
-              {t('params.mode.trx')}
-            </button>
-            <button type="button"
-              className={`segmented-btn${portMode === 'tty' ? ' active' : ''}`}
-              disabled={!isPortActive}
-              onClick={() => handleModeChange('tty')}
-              aria-pressed={portMode === 'tty'}>
-              {t('params.mode.tty')}
-            </button>
-          </div>
+          <SegmentedControl<PortMode>
+            aria-label={t('params.mode')}
+            value={portMode}
+            disabled={!isPortActive}
+            onChange={handleModeChange}
+            options={[
+              { value: 'trx', label: t('params.mode.trx') },
+              { value: 'tty', label: t('params.mode.tty') },
+            ]}
+          />
         </div>
         <div className="op-param-item op-param-item-wide">
           <span className="op-label">{t('paramsSection.preset.label')}</span>

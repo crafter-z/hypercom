@@ -7,13 +7,18 @@ import { TerminalViewportManager } from '../../utils/terminal/viewportManager';
 import { timelineCoordinator } from '../../utils/timeline';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { resetStoresForTests } from '../../stores/resetStores';
+import { useAppStore } from '../../stores/useAppStore';
+import { useHotkeys } from '../../hooks/useHotkeys';
+import { getViewportManager, releaseViewportManager } from '../../utils/terminal/viewportManager';
 
 vi.mock('react-i18next', async importOriginal => ({
   ...await importOriginal<typeof import('react-i18next')>(),
   useTranslation: () => ({ t: (key: string) => key }),
 }));
+vi.mock('../../hooks/useSerialConnection', () => ({ useSerialConnection: () => ({ toggleConnection: vi.fn() }) }));
 vi.mock('../../utils/pluginViewRuntime', () => ({
   getAvailablePluginViews: () => [], getTabViewPreference: () => null, selectSerialPluginView: vi.fn(),
+  isRawSerialDisplay: () => true,
 }));
 vi.mock('./terminalContextMenu', () => ({ buildTerminalContextMenuItems: () => [] }));
 
@@ -89,8 +94,8 @@ async function group(...slots: string[]) {
   await frame(5);
   return id;
 }
-async function key(element: HTMLElement, value: string, ctrlKey = false) {
-  await act(async () => { element.dispatchEvent(new KeyboardEvent('keydown', { key: value, ctrlKey, bubbles: true })); });
+async function key(element: HTMLElement, value: string, ctrlKey = false, shiftKey = false) {
+  await act(async () => { element.dispatchEvent(new KeyboardEvent('keydown', { key: value, ctrlKey, shiftKey, bubbles: true, cancelable: true })); });
 }
 async function searchQuery(host: HTMLElement, query: string) {
   const input = host.querySelector<HTMLInputElement>('.terminal-search-input')!;
@@ -109,6 +114,56 @@ async function append(view: Awaited<ReturnType<typeof mount>>, start: number) {
   }))); });
   await frame();
 }
+
+function GlobalHotkeys() { useHotkeys(); return null; }
+
+describe('TerminalView shortcut ownership', () => {
+  it('routes F3 from the focused search field through the same navigation as the buttons', async () => {
+    const view = await mount('search');
+    await key(view.container, 'f', true);
+    const input = await searchQuery(view.host, 'line');
+    const before = view.manager.getCurrentMatchIndex();
+    await key(input, 'F3');
+    expect(view.manager.getCurrentMatchIndex()).toBe(before + 1);
+    expect(useTerminalStore.getState().terminals.search.scrollLocked).toBe(false);
+    await key(input, 'F3', false, true);
+    expect(view.manager.getCurrentMatchIndex()).toBe(before);
+    await key(input, 'Enter');
+    expect(view.manager.getCurrentMatchIndex()).toBe(before + 1);
+    await click(view.host.querySelector<HTMLButtonElement>('button[title="terminal.search.previous"]')!);
+    expect(view.manager.getCurrentMatchIndex()).toBe(before);
+  });
+
+  it('handles Ctrl+F and Escape while focus is in the search strip, returning focus to output', async () => {
+    const view = await mount('search');
+    await key(view.container, 'f', true);
+    await key(view.host.querySelector<HTMLInputElement>('.terminal-search-input')!, 'f', true);
+    expect(view.host.querySelector('.terminal-search-input')).toBeNull();
+    expect(document.activeElement).toBe(view.container);
+    await key(view.container, 'f', true);
+    await key(view.host.querySelector<HTMLInputElement>('.terminal-search-input')!, 'Escape');
+    expect(document.activeElement).toBe(view.container);
+  });
+
+  it.each([false, true])('does not also clear another active tab through global Ctrl+L (replay=%s)', async replay => {
+    const view = await mount('local', replay);
+    const other = getViewportManager('other');
+    other.appendLine({ timestamp: 1, direction: 'RX', content: 'must survive', isHex: false });
+    useAppStore.getState().openTab('other');
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.push(root);
+    await act(async () => root.render(<GlobalHotkeys />));
+    try {
+      await key(view.container, 'l', true);
+      expect(other.buffer.length).toBe(1);
+      expect(view.manager.buffer.length).toBe(replay ? 200 : 0);
+    } finally {
+      releaseViewportManager('other');
+    }
+  });
+});
 
 describe('TerminalView existing Pin + linked scrolling', () => {
   it('enables grouped Pins and derives their pressed state from group LIVE, not stale local locks', async () => {

@@ -9,6 +9,7 @@ import { resetStoresForTests } from '../../stores/resetStores';
 import { resetFlowRuntime, setFlowStatus } from '../../utils/flowRuntime';
 import OperationPanel, { FlowRunningBadge } from './OperationPanel';
 import { serialService } from '../../services/tauri';
+import { getViewportManager, releaseViewportManager } from '../../utils/terminal/viewportManager';
 
 /**
  * 折叠态流程徽标：操作面板收起后，运行中的增强流程必须仍然可见并可停止。
@@ -164,6 +165,44 @@ describe('OperationPanel collapsed flow badge', () => {
     await renderPanel();
     // 展开态由 SendSection 的 `.op-flow-status` 承担，这里不重复。
     expect(container.querySelector('.op-flow-badge')).toBeNull();
+  });
+});
+
+describe('clear confirmation target ownership', () => {
+  it('clears the original tab even if focus changes while confirmation is open', async () => {
+    const original = getViewportManager('COM1');
+    const other = getViewportManager('COM2');
+    original.appendLine({ timestamp: 1, direction: 'RX', content: 'original', isHex: false });
+    other.appendLine({ timestamp: 1, direction: 'RX', content: 'other', isHex: false });
+    await renderPanel();
+    try {
+      await act(async () => container.querySelector<HTMLButtonElement>('[title="sendSection.clearButton"]')!.click());
+      await act(async () => { useAppStore.getState().openTab('COM2'); });
+      const confirm = container.querySelector<HTMLButtonElement>('.confirm-dialog .btn-danger-solid')!;
+      await act(async () => confirm.click());
+      expect(original.buffer.length).toBe(0);
+      expect(other.buffer.length).toBe(1);
+    } finally {
+      releaseViewportManager('COM1');
+      releaseViewportManager('COM2');
+    }
+  });
+
+  it('does not clear a same-port replacement after the original tab closes', async () => {
+    const manager = getViewportManager('COM1');
+    manager.appendLine({ timestamp: 1, direction: 'RX', content: 'new owner', isHex: false });
+    await renderPanel();
+    try {
+      await act(async () => container.querySelector<HTMLButtonElement>('[title="sendSection.clearButton"]')!.click());
+      await act(async () => {
+        useAppStore.getState().closeTab(useAppStore.getState().activeTabId!);
+        useAppStore.getState().openTab('COM1');
+      });
+      await act(async () => container.querySelector<HTMLButtonElement>('.confirm-dialog .btn-danger-solid')!.click());
+      expect(manager.buffer.length).toBe(1);
+    } finally {
+      releaseViewportManager('COM1');
+    }
   });
 });
 

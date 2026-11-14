@@ -63,7 +63,7 @@ const OperationPanel: React.FC = () => {
   const rawPortId = activeTab?.kind === 'serial' && isRawSerialDisplay(activeTab) ? activeTab.portId : null;
   const collapsed = useSystemStore(s => s.ui.isOperationPanelCollapsed);
   const panelHeight = useSystemStore(s => s.ui.operationPanelHeight);
-  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearTarget, setClearTarget] = useState<{ tabId: string; portId: string } | null>(null);
   const dataBits = useOperationStore(s => s.dataBits);
   const parity = useOperationStore(s => s.parity);
   const stopBits = useOperationStore(s => s.stopBits);
@@ -248,13 +248,17 @@ const OperationPanel: React.FC = () => {
   const handleClear = () => {
     const state = useAppStore.getState();
     const tab = state.tabs.find((item) => item.id === state.activeTabId);
-    if (tab?.kind === 'serial' && isRawSerialDisplay(tab)) setConfirmClear(true);
+    if (tab?.kind === 'serial' && isRawSerialDisplay(tab)) setClearTarget({ tabId: tab.id, portId: tab.portId });
   };
 
   const doClear = () => {
-    const state = useAppStore.getState();
-    const tab = state.tabs.find((item) => item.id === state.activeTabId);
-    if (tab?.kind === 'serial' && isRawSerialDisplay(tab)) clearTerminal(tab.portId);
+    const target = clearTarget;
+    setClearTarget(null);
+    if (!target) return;
+    // A confirmation owns the original workspace tab, not a later focus or a
+    // same-port replacement opened after that tab was closed.
+    const tab = useAppStore.getState().tabs.find(item => item.id === target.tabId);
+    if (tab?.kind === 'serial' && tab.portId === target.portId && isRawSerialDisplay(tab)) clearTerminal(target.portId);
   };
 
   // ---- Log handlers (moved up from the old view strip) ----
@@ -370,14 +374,14 @@ const OperationPanel: React.FC = () => {
         </>
       )}
       <ConfirmDialog
-        open={confirmClear}
+        open={clearTarget !== null}
         title={t('operationPanel.clearTitle')}
         message={t('operationPanel.clearMessage')}
         confirmLabel={t('confirmDialog.confirm')}
         cancelLabel={t('confirmDialog.cancel')}
         danger
-        onConfirm={() => { setConfirmClear(false); doClear(); }}
-        onCancel={() => setConfirmClear(false)}
+        onConfirm={doClear}
+        onCancel={() => setClearTarget(null)}
       />
     </div>
   );

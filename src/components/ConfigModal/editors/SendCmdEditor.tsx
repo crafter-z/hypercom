@@ -60,7 +60,7 @@ const SendCmdEditor: React.FC<SendCmdEditorProps> = ({
           </label>
           <label className="command-row-field">
             <span className="command-sr-only">{t('quickSend.lineEnding')}</span>
-            <select className="select" value={cmd.appendLineEnding} aria-label={t('quickSend.lineEnding')} title={t('quickSend.lineEnding')} onChange={e => onChange({ appendLineEnding: e.target.value as SendCommand['appendLineEnding'] })}>
+            <select className="select" value={cmd.appendLineEnding} disabled={cmd.type === 'hex'} aria-label={t('quickSend.lineEnding')} title={t('quickSend.lineEnding')} onChange={e => onChange({ appendLineEnding: e.target.value as SendCommand['appendLineEnding'] })}>
               {LINE_ENDING_VALUES.map(v => <option key={v} value={v}>{t(lineEndingLabelKey(v, 'sendCmdEditor'))}</option>)}
             </select>
           </label>

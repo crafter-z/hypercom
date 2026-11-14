@@ -5,6 +5,7 @@ import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { clampInterval, clampRoundInterval } from '../../utils/textSend';
 import { isExecutableCommand } from '../../utils/commandSteps';
 import { NumericInput } from '../shared/NumericInput';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import { usePopoutSync } from './usePopoutSync';
 import { usePanelTextConfig } from './usePanelTextConfig';
 import QuickSendList from './QuickSendList';
@@ -148,6 +149,8 @@ const QuickSendPanel: React.FC = () => {
           <select
             className="select quicksend-param-control"
             value={config.lineEnding}
+            aria-label={t('quickSend.lineEnding')}
+            disabled={config.isHex}
             onChange={(e) => patchConfig({ lineEnding: e.target.value as LineEnding })}
           >
             {LINE_ENDING_VALUES.map((v) => (
@@ -157,22 +160,13 @@ const QuickSendPanel: React.FC = () => {
             ))}
           </select>
           <label className="quicksend-param-label">{t('quickSend.format')}</label>
-          <div className="quicksend-format-toggle">
-            <button
-              type="button"
-              className={!config.isHex ? 'active' : ''}
-              onClick={() => patchConfig({ isHex: false })}
-            >
-              STR
-            </button>
-            <button
-              type="button"
-              className={config.isHex ? 'active' : ''}
-              onClick={() => patchConfig({ isHex: true })}
-            >
-              HEX
-            </button>
-          </div>
+          <SegmentedControl
+            className="quicksend-format-toggle"
+            aria-label={t('quickSend.format')}
+            value={config.isHex ? 'hex' : 'string'}
+            options={[{ value: 'string', label: 'STR' }, { value: 'hex', label: 'HEX' }]}
+            onChange={format => patchConfig({ isHex: format === 'hex' })}
+          />
         </div>
         {mode === 'text' && (
           <>
@@ -248,7 +242,7 @@ const QuickSendPanel: React.FC = () => {
             />
             <span className="quicksend-target-port">{effectivePortId}</span>
             <span className="quicksend-target-meta">
-              {config.isHex ? 'HEX' : 'STR'} · {t(lineEndingLabelKey(config.lineEnding, 'sendSection'))}
+              {config.isHex ? 'HEX' : `STR · ${t(lineEndingLabelKey(config.lineEnding, 'sendSection'))}`}
             </span>
           </span>
         ) : (

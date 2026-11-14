@@ -108,6 +108,17 @@ describe('command step editor', () => {
     expect(change).toHaveBeenLastCalledWith({ appendLineEnding: 'None' });
   });
 
+  it('disables the inapplicable HEX line ending without rewriting the text-mode choice', () => {
+    render({ ...legacy, type: 'hex', content: '41 54' });
+    const ending = container.querySelector<HTMLSelectElement>('[aria-label="quickSend.lineEnding"]')!;
+    expect(ending.disabled).toBe(true);
+    expect(ending.value).toBe(legacy.appendLineEnding);
+    expect(change).not.toHaveBeenCalled();
+    render(legacy);
+    expect(ending.disabled).toBe(false);
+    expect(ending.value).toBe(legacy.appendLineEnding);
+  });
+
   it('keeps the content input and focus stable while its draft rerenders', () => {
     render(legacy);
     const content = container.querySelector<HTMLInputElement>('[aria-label="sendCmdEditor.contentPlaceholder"]')!;

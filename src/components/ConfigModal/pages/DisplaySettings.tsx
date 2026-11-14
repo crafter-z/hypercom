@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
@@ -9,6 +9,7 @@ import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils
 
 const DisplaySettings: React.FC = () => {
   const { t } = useTranslation();
+  const lineEndingId = useId();
   const defaultBaudRates = useAppStore(s => s.config.defaultBaudRates);
   const showPortType = useAppStore(s => s.config.showPortType);
   const defaultLineEnding = useAppStore(s => s.config.defaultLineEnding);
@@ -67,8 +68,8 @@ const DisplaySettings: React.FC = () => {
       </label>
 
       <div className="config-row">
-        <label>{t('displaySettings.defaultLineEndingLabel')}</label>
-        <select className="select" value={defaultLineEnding} onChange={(e) => setConfig({ defaultLineEnding: e.target.value as AppConfig['defaultLineEnding'] })}>
+        <label htmlFor={lineEndingId}>{t('displaySettings.defaultLineEndingLabel')}</label>
+        <select id={lineEndingId} className="select" value={defaultLineEnding} onChange={(e) => setConfig({ defaultLineEnding: e.target.value as AppConfig['defaultLineEnding'] })}>
           {LINE_ENDING_VALUES.map((value) => (
             <option key={value} value={value}>{t(lineEndingLabelKey(value, 'sendSection'))}</option>
           ))}

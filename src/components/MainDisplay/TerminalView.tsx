@@ -230,7 +230,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   // Search (UI-local state, manager-backed computation + navigation).
   const {
     searchOpen, searchQuery, caseSensitive, currentMatch, searchMatchCount,
-    setSearchQuery, toggleCase, openSearch, toggleSearch, closeSearch,
+    setSearchQuery, toggleCase, openSearch, closeSearch,
     nextMatch, prevMatch,
   } = useTerminalSearch({ vm,
     onNavigate: useCallback(() => {
@@ -469,44 +469,47 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     void writeClipboardText(text).catch(notifyError);
   }, []);
 
-  const handleSearchClose = closeSearch;
+  const handleSearchClose = useCallback(() => {
+    closeSearch();
+    containerRef.current?.focus({ preventScroll: true });
+  }, [closeSearch]);
 
-  // Ctrl+L clear · Ctrl+F search · F3/Shift+F3 step · Esc close.
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
-        e.preventDefault();
-        toggleSearch();
-        return;
-      }
-      if (e.key === 'F3') {
-        e.preventDefault();
-        if (!searchOpen) openSearch();
-        if (e.shiftKey) prevMatch();
-        else nextMatch();
-        return;
-      }
-      if (e.key === 'Escape' && searchOpen) {
-        e.preventDefault();
-        handleSearchClose();
-        return;
-      }
-      if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) {
-        e.preventDefault();
-        if (portId) vm.clear(); // imported documents are read-only
-        return;
-      }
-      // Native keyboard scrolling is an explicit gesture.
-      if (
-        e.target === e.currentTarget &&
-        ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)
-      ) {
-        beginGesture();
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [searchOpen, toggleSearch, openSearch, handleSearchClose, nextMatch, prevMatch, beginGesture, portId],
-  );
+  // Search shortcuts belong to the whole terminal shell: the search input and
+  // its buttons are siblings of the output, and must use the same navigation.
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (searchOpen) handleSearchClose();
+      else openSearch();
+    } else if (e.key === 'F3') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!searchOpen) openSearch();
+      if (e.shiftKey) prevMatch();
+      else nextMatch();
+    } else if (e.key === 'Escape' && searchOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleSearchClose();
+    }
+  }, [searchOpen, openSearch, handleSearchClose, nextMatch, prevMatch]);
+
+  // Output-only shortcuts must not clear from editable toolbar fields, or
+  // bubble to the global active-tab handler and clear a different pane.
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (portId) vm.clear(); // imported documents are read-only
+      return;
+    }
+    if (e.target === e.currentTarget &&
+      ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
+      beginGesture();
+    }
+  }, [vm, portId, beginGesture]);
 
   const setScrollLock = useCallback((locked: boolean) => {
     // Pin and jump-to-bottom are new explicit intents: an old wheel/scrollbar
@@ -555,7 +558,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   const matchCount = vm.getVisibleCount();
 
   return (
-    <div className="terminal-view-container" style={hidden ? { display: 'none' } : undefined}>
+    <div className="terminal-view-container" style={hidden ? { display: 'none' } : undefined} onKeyDown={handleSearchKeyDown}>
       {portId && protocolTemplates.length > 0 && (
         <div className="terminal-protocol-bar">
           <span className="eyebrow">{t('terminalView.protocolLabel')}</span>

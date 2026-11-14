@@ -11,6 +11,7 @@ import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils
 export function LineEndingSelect() {
   const { t } = useTranslation();
   const lineEnding = useOperationStore((s) => s.sendAppendLineEnding);
+  const isHex = useOperationStore((s) => s.sendIsHex);
   const setOpState = useOperationStore((s) => s.setOpState);
 
   return (
@@ -18,6 +19,8 @@ export function LineEndingSelect() {
       className="select op-line-ending-select"
       aria-label={t('quickSend.lineEnding')}
       value={lineEnding}
+      // HEX sends never append line endings; retain the text-mode choice.
+      disabled={isHex}
       onChange={(e: ChangeEvent<HTMLSelectElement>) =>
         setOpState({ sendAppendLineEnding: e.target.value as LineEnding })
       }
