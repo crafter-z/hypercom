@@ -29,6 +29,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 1. **缺字段**：`AppConfig` / `Entities` 的容器级 `#[serde(default)]` 和实体字段缺省提供默认值，不需要配置版本号。
 2. **废弃字段**：解析前由 `strip_legacy_memory_budget_keys` 物理剥离旧内存预算 key；非法 JSON 走 `.bak` 恢复。
 3. **插件安装身份**：`ConfigManager::new` 在磁盘事务恢复后，为缺失的 `installGeneration` 分配 UUID，保存配置并同步安全 `.bak`；这项一次性身份迁移会推进 revision，与缺字段取默认值不是同一种处理。
+4. **字体 fallback**：默认 UI 字体为 `Inter, "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif`，默认终端字体保留 `Consolas` 首选并追加同一组中文候选。加载配置时仅当原始 JSON 显式同时使用旧版 `Inter, sans-serif` 与 `Consolas, monospace` 时升级并立即持久化；缺字段、只命中一项或其他自定义字体均不改动。
 
 ### 生命周期
 
