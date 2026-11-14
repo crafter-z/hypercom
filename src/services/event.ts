@@ -10,6 +10,8 @@ import { listen } from '@tauri-apps/api/event';
 export interface SerialDataEvent {
   port_id: string;
   timestamp: number;
+  /** Connection identity; optional for compatibility with older backends. */
+  generation?: number | null;
   direction: string;
   data: number[];
   is_hex: boolean;

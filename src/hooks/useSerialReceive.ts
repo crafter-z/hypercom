@@ -5,11 +5,12 @@ import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
 import { acceptSerialStatus } from './useSerialConnection';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
-import type { ProtocolTemplate } from '../types';
+import type { ProtocolTemplate, TriggerRule } from '../types';
 import { getRxPipeline } from '../utils/rxPipeline';
 import { ttyService } from '../utils/ttyService';
 import { trafficStats } from '../utils/trafficStats';
 import { evaluateTriggers } from '../utils/triggerEngine';
+import { parseHexBytes } from '../utils/hexUtils';
 import { sendToPort } from './useSerialSend';
 import { notifyPortDisconnected } from '../utils/pluginObserver';
 import { feedPluginBytes, hasPluginBytesObservers, notifyBytesPortDisconnected } from '../utils/pluginBytesObserver';
@@ -22,18 +23,107 @@ import { hasPortDisplayConsumers, hasPortLineConsumers, notifyPluginViewPortStat
 // Alert toast throttle: same rule re-matched within this window (ms) must
 // not spam toasts — module-level so it survives the empty-deps effect.
 const TRIGGER_ALERT_THROTTLE_MS = 1000;
-const triggerAlertThrottle = new Map<string, number>();
+/** Throttle independently per rule and source port: an unscoped rule must not
+ * hide COM2's alert merely because COM1 matched moments earlier. */
+const triggerAlertThrottle = new Map<string, Map<string, number>>();
 
 /**
  * Rule ids are user-editable and can be replaced indefinitely during a long
- * session. Keep the alert throttle metadata scoped to the currently committed
+ * session. Keep alert throttle metadata scoped to the currently committed
  * trigger rules so deleting a rule also releases its old id.
  */
 function pruneTriggerAlertThrottle(): void {
   const activeRuleIds = new Set(useRuleStore.getState().triggerRules.map((rule) => rule.id));
-  for (const ruleId of triggerAlertThrottle.keys()) {
+  for (const [ruleId, ports] of triggerAlertThrottle) {
     if (!activeRuleIds.has(ruleId)) triggerAlertThrottle.delete(ruleId);
+    else if (ports.size === 0) triggerAlertThrottle.delete(ruleId);
   }
+}
+
+/** Auto responses are serialized per port so multiple rules matched by one RX
+ * line have deterministic TX order. A short echo guard prevents the common
+ * `PING -> PING` device/SIM echo from recursively scheduling forever. */
+const TRIGGER_RESPONSE_ECHO_GUARD_MS = 1000;
+const MAX_PENDING_TRIGGER_RESPONSES = 64;
+interface TriggerResponseEchoGuard {
+  content: string;
+  isHex: boolean;
+  expiresAt: number;
+}
+const triggerRespondQueues = new Map<string, Promise<void>>();
+const triggerRespondPending = new Map<string, number>();
+const triggerResponseEchoGuards = new Map<string, Map<string, TriggerResponseEchoGuard>>();
+
+function bytesContain(haystack: Uint8Array, needle: number[]): boolean {
+  if (needle.length === 0 || needle.length > haystack.length) return false;
+  outer: for (let start = 0; start <= haystack.length - needle.length; start++) {
+    for (let index = 0; index < needle.length; index++) {
+      if (haystack[start + index] !== needle[index]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
+function isRecentTriggerResponseEcho(portId: string, ruleId: string, text: string, rawData: Uint8Array, now: number): boolean {
+  const guard = triggerResponseEchoGuards.get(ruleId)?.get(portId);
+  if (!guard) return false;
+  if (guard.expiresAt <= now) {
+    triggerResponseEchoGuards.get(ruleId)?.delete(portId);
+    return false;
+  }
+  if (guard.isHex) return bytesContain(rawData, parseHexBytes(guard.content));
+  return guard.content.length > 0 && text.includes(guard.content);
+}
+
+function clearTriggerResponseEcho(portId: string, ruleId: string, guard: TriggerResponseEchoGuard): void {
+  const byPort = triggerResponseEchoGuards.get(ruleId);
+  if (byPort?.get(portId) === guard) {
+    byPort.delete(portId);
+    if (byPort.size === 0) triggerResponseEchoGuards.delete(ruleId);
+  }
+}
+
+function queueTriggerResponse(portId: string, rule: TriggerRule): void {
+  const pending = triggerRespondPending.get(portId) ?? 0;
+  if (pending >= MAX_PENDING_TRIGGER_RESPONSES) {
+    console.warn('[useSerialReceive] Dropping trigger response backlog:', portId);
+    return;
+  }
+  const now = Date.now();
+  const guard: TriggerResponseEchoGuard = {
+    content: rule.actionContent,
+    isHex: rule.actionIsHex,
+    expiresAt: now + TRIGGER_RESPONSE_ECHO_GUARD_MS,
+  };
+  const byPort = triggerResponseEchoGuards.get(rule.id) ?? new Map<string, TriggerResponseEchoGuard>();
+  byPort.set(portId, guard);
+  triggerResponseEchoGuards.set(rule.id, byPort);
+
+  const previous = triggerRespondQueues.get(portId) ?? Promise.resolve();
+  triggerRespondPending.set(portId, pending + 1);
+  const task = previous.catch(() => undefined).then(async () => {
+    // Start the echo window when this queued response actually owns the send
+    // lane, not when it was enqueued behind a slow earlier response.
+    guard.expiresAt = Date.now() + TRIGGER_RESPONSE_ECHO_GUARD_MS;
+    try {
+      const bytesWritten = await sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true);
+      // A rejected/blocked or zero-byte action cannot produce the guarded echo.
+      if (bytesWritten === 0) clearTriggerResponseEcho(portId, rule.id, guard);
+    } catch (error) {
+      clearTriggerResponseEcho(portId, rule.id, guard);
+      console.debug('[useSerialReceive] trigger respond failed:', rule.id, error);
+    }
+  });
+  const settled = task.finally(() => {
+    const current = triggerRespondPending.get(portId) ?? 1;
+    if (current <= 1) triggerRespondPending.delete(portId);
+    else triggerRespondPending.set(portId, current - 1);
+    if (triggerRespondQueues.get(portId) === settled) triggerRespondQueues.delete(portId);
+  });
+  triggerRespondQueues.set(portId, settled);
+  // The task handles send failures; consume finally's rejection defensively.
+  void settled.catch(() => undefined);
 }
 
 // 触发引擎异常限流：规则配置错误时随每次 RX 触发，最多每 2s 打一条日志。
@@ -56,10 +146,13 @@ function evaluateLineTriggers(portId: string, text: string, rawData: Uint8Array)
     for (const action of matched) {
       const rule = action.rule;
       if (rule.actionType === 'alert') {
-        // Throttle: don't re-toast the same rule within 1s.
+        // Throttle independently per source port so a shared rule can alert on
+        // COM1 and COM2 in the same window without cross-port suppression.
         const now = Date.now();
-        if (now - (triggerAlertThrottle.get(rule.id) ?? 0) < TRIGGER_ALERT_THROTTLE_MS) continue;
-        triggerAlertThrottle.set(rule.id, now);
+        const byPort = triggerAlertThrottle.get(rule.id) ?? new Map<string, number>();
+        if (now - (byPort.get(portId) ?? 0) < TRIGGER_ALERT_THROTTLE_MS) continue;
+        byPort.set(portId, now);
+        triggerAlertThrottle.set(rule.id, byPort);
         // The alert must surface the rule's ACTION CONTENT, not a generic
         // line (issue #5-3). Fall back to the generic message only when the
         // rule has no content configured.
@@ -75,11 +168,13 @@ function evaluateLineTriggers(portId: string, text: string, rawData: Uint8Array)
           durationMs: 0,
         });
       } else if (rule.actionType === 'respond') {
-        // silent=true: sendToPort re-throws on failure — swallow to keep the
-        // RX loop alive.
-        sendToPort(portId, rule.actionContent, rule.actionIsHex, 'None', true).catch((e) => {
-          console.debug('[useSerialReceive] trigger respond failed:', rule.id, e);
-        });
+        const now = Date.now();
+        if (isRecentTriggerResponseEcho(portId, rule.id, text, rawData, now)) {
+          // The device echoed a response payload that would match this rule;
+          // suppress only this short-lived self-echo, not normal repeated RX.
+          continue;
+        }
+        queueTriggerResponse(portId, rule);
       }
     }
   } catch (e) {
@@ -138,7 +233,14 @@ export function useSerialReceive() {
     const pipeline = getRxPipeline();
     pipeline.setLineConsumerQuery(hasPortLineConsumers);
     const modes = new Map<string, string>();
-    for (const port of useAppStore.getState().ports) modes.set(port.id, port.mode ?? 'trx');
+    // Older data events may omit a connection generation. Keep an explicit
+    // per-port session gate so a reader event racing a disconnect/error cannot
+    // recreate RX state and bridge bytes into the next connection.
+    const activeSessions = new Map<string, number | null>();
+    for (const port of useAppStore.getState().ports) {
+      modes.set(port.id, port.mode ?? 'trx');
+      if (port.status === 'connected') activeSessions.set(port.id, port.connectionGeneration ?? null);
+    }
     // Only the current binding per port is retained. Changing a template (even
     // A → B → A), editing it or disabling it must never revive historical bytes.
     const reassemblers = new Map<string, {
@@ -195,6 +297,19 @@ export function useSerialReceive() {
       const unlistenData = await eventService.onSerialData((event: SerialDataEvent) => {
         if (cancelled) return;
         const portId = event.port_id;
+        const port = useAppStore.getState().ports.find(p => p.id === portId);
+        // Older serial:data payloads may omit generation, so only accept bytes
+        // while the receive hook knows this port has an active connected
+        // session. Newer payloads are additionally checked below. This drops
+        // late reader data during connecting/error/disconnected windows before
+        // it can recreate pipeline, TTY, plugin, or traffic state.
+        if (!port || port.status !== 'connected' || !activeSessions.has(portId) || userClosingPortIds.has(portId)) return;
+        // Newer backends stamp each RX event. Reject bytes from a retired
+        // connection even if a stale status event was ignored because a newer
+        // session is already active; older backends omit the field and remain
+        // protected by the connected-session gate above.
+        if (event.generation != null && port.connectionGeneration != null &&
+            event.generation !== port.connectionGeneration) return;
         // Traffic stats ONCE per event for ALL paths (protocol + common)
         // P1-1：每事件 setTrafficStats 降频——字节先经 1s 聚合器累计，每秒统一写
         // 一次 store（StatusBar 本就 1s 窗口差分算速率，总量语义不变；消除每事件
@@ -210,8 +325,7 @@ export function useSerialReceive() {
         // TTY 模式（issue #11）：字节直喂 ttyService（xterm 渲染）。
         // 跳过触发引擎 / 协议解析 / RxPipeline 行组装——终端字节流没有「行」语义，
         // 由 xterm.js 完整终端模拟（ANSI 颜色、光标寻址、备用屏幕、CR 覆写）接管。
-        const port = useAppStore.getState().ports.find(p => p.id === portId);
-        if (port?.mode === 'tty') {
+        if (port.mode === 'tty') {
           ttyService.feed(portId, event.data);
           return;
         }
@@ -283,6 +397,7 @@ export function useSerialReceive() {
         // A fresh connection clears any prior "lost" mark so the banner
         // hides as soon as the port is back up.
         if (event.status === 'connected') {
+          activeSessions.set(event.port_id, event.generation ?? null);
           lostPortIds.delete(event.port_id);
           useAppStore.getState().updatePort(event.port_id, {
             connectionGeneration: event.generation ?? undefined,
@@ -293,14 +408,14 @@ export function useSerialReceive() {
           // 容器才完成布局」的边角时序；非 GIT: 端口 / 无尺寸时为 no-op）。
           ttyService.resync(event.port_id);
         }
-        // Detect unexpected connected → disconnected transition BEFORE
-        // updating the store (we need the previous status). User-initiated
-        // closes are tracked in `userClosingPortIds` and suppressed.
-        if (event.status === 'disconnected' && !userClosingPortIds.has(event.port_id)) {
+        // Detect an unexpected connected → terminal transition BEFORE updating
+        // the store (we need the previous status). Reader errors are normally
+        // followed by disconnected, so treating only that later event as the
+        // transition would miss the lost banner after status becomes error.
+        // User-initiated closes are tracked and suppressed.
+        if ((event.status === 'disconnected' || event.status === 'error') && !userClosingPortIds.has(event.port_id)) {
           const prevPort = useAppStore.getState().ports.find(p => p.id === event.port_id);
           if (prevPort && prevPort.status === 'connected' && !prevPort.toolRunning) {
-            // Mark lost so DisconnectBanner shows; only a real
-            // connected→disconnected transition this session lands here.
             lostPortIds.add(event.port_id);
             const portName = prevPort.alias || prevPort.name;
             useToastStore.getState().push({
@@ -312,8 +427,13 @@ export function useSerialReceive() {
             });
           }
         }
-        // Retire while the port is still bound to its old template/mode.
-        if (event.status === 'disconnected') {
+        // Error and disconnected are both terminal boundaries for the current
+        // reader session. Retire while the port is still bound to its old
+        // template/mode, before publishing the new status.
+        const terminalStatus = event.status === 'disconnected' || event.status === 'error';
+        const hadActiveSession = terminalStatus && activeSessions.has(event.port_id);
+        if (terminalStatus) {
+          activeSessions.delete(event.port_id);
           retire(event.port_id, true);
           pipeline.disconnect(event.port_id);
         }
@@ -323,17 +443,22 @@ export function useSerialReceive() {
             ? { connectionGeneration: event.generation ?? undefined }
             : { connectionGeneration: undefined }),
         });
-        if (event.status === 'disconnected') {
+        if (terminalStatus) {
           // TTY（issue #11）：flush 队列、保留 xterm 实例——视图跨重连保持挂载。
           ttyService.disconnect(event.port_id);
-          // 插件 RX 观察器断流通知（issue #17 复审补强：真实断线与 mode-tty
-          // 同为 rx.detached；关标签页不清端口状态、不走这里）。
-          notifyPortDisconnected(event.port_id);
-          // 插件 RX 字节旁路断流：清该端口遗留字节队列（插件感知「字节流断了」）。
-          notifyBytesPortDisconnected(event.port_id);
+          // 插件 RX 观察器断流通知（issue #17 复审补强：真实断线与
+          // reader error 同样结束当前输入会话；关标签页不清端口状态、不走这里）。
+          // A reader normally emits error followed by disconnected; only the
+          // first terminal event should retire observer queues and emit detach.
+          if (hadActiveSession) {
+            notifyPortDisconnected(event.port_id);
+            // 插件 RX 字节旁路断流：清该端口遗留字节队列（插件感知「字节流断了」）。
+            notifyBytesPortDisconnected(event.port_id);
+          }
+          notifyPluginViewPortStatus(event.port_id, event.status);
+        } else {
           notifyPluginViewPortStatus(event.port_id, event.status);
         }
-        if (event.status !== 'disconnected') notifyPluginViewPortStatus(event.port_id, event.status);
       });
 
       if (cancelled) {

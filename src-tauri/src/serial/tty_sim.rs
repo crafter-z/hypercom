@@ -241,7 +241,7 @@ pub(crate) fn spawn_bash(
                         break;
                     }
                     let chunk = &buf[..n];
-                    crate::serial::emit_rx_event(&app_handle_clone, &port_id, chunk);
+                    crate::serial::emit_rx_event(&app_handle_clone, &port_id, chunk, generation);
                     // DSR 应答（issue #11）：bash/readline 启动时查询光标位置
                     // （\x1b[6n）并阻塞等待应答——TRX 模式没有终端模拟器，后端必须
                     // 应答否则 bash 永不处理输入（发送面板命令全部无响应）。应答

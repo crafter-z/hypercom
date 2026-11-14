@@ -219,7 +219,7 @@ fn read_loop(
                 } else {
                     format!("Received: {}\r\n", data)
                 };
-                emit_rx_event(&app_handle, &port_id, echo_data.as_bytes());
+                emit_rx_event(&app_handle, &port_id, echo_data.as_bytes(), generation);
             }
             Ok(SimMessage::SetRate { per_sec }) => {
                 // 频率命令：切换周期输出速率并重置节拍（首行立即发出，便于观察生效）。
@@ -240,7 +240,7 @@ fn read_loop(
                     for _ in 0..due {
                         line_seq += 1;
                         let heartbeat = format!("[SIM] Heartbeat #{}\r\n", line_seq);
-                        emit_rx_event(&app_handle, &port_id, heartbeat.as_bytes());
+                        emit_rx_event(&app_handle, &port_id, heartbeat.as_bytes(), generation);
                     }
                 }
             }

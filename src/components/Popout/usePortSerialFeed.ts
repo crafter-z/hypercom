@@ -6,6 +6,7 @@ import { getRxPipeline } from '../../utils/rxPipeline';
 interface PendingRxEvent {
   data: number[];
   timestamp: number;
+  generation?: number | null;
 }
 
 /**
@@ -35,35 +36,72 @@ export function usePortSerialFeed(portId: string): {
 } {
   const pendingRef = useRef<PendingRxEvent[]>([]);
   const gateOpenRef = useRef(false);
+  // A popout has its own store and does not receive the main window's port
+  // records. It starts optimistically for the requested active port, then
+  // status events establish terminal/error boundaries and the RX generation.
+  const connectedRef = useRef(true);
+  const generationRef = useRef<number | null | undefined>(undefined);
 
   useEffect(() => {
     // 切换端口 = 重新走一次交接，上一个端口的 pending 没有意义。
     pendingRef.current = [];
     gateOpenRef.current = false;
+    connectedRef.current = true;
+    generationRef.current = undefined;
     const pipeline = getRxPipeline();
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
+    let unlistenData: (() => void) | null = null;
+    let unlistenStatus: (() => void) | null = null;
+
+    eventService
+      .onSerialStatus((event) => {
+        if (event.port_id !== portId) return;
+        if (event.generation != null && generationRef.current != null && event.generation < generationRef.current) return;
+        if (event.status === 'connected') {
+          connectedRef.current = true;
+          generationRef.current = event.generation ?? undefined;
+        } else {
+          connectedRef.current = false;
+          generationRef.current = undefined;
+          pendingRef.current = [];
+          pipeline.releasePort(portId);
+        }
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlistenStatus = u;
+      })
+      .catch((e) => console.debug('[usePortSerialFeed] status subscribe failed:', e));
 
     eventService
       .onSerialData((event) => {
-        if (event.port_id !== portId) return;
+        if (event.port_id !== portId || !connectedRef.current) return;
+        if (event.generation != null && generationRef.current != null &&
+            event.generation !== generationRef.current) return;
+        // If the popout mounted after the connected status broadcast, learn the
+        // active generation from the first data event and reject older events
+        // thereafter. Older backends omit generation and remain status-gated.
+        if (generationRef.current == null && event.generation != null) generationRef.current = event.generation;
         if (!gateOpenRef.current) {
-          pendingRef.current.push({ data: event.data, timestamp: event.timestamp });
+          pendingRef.current.push({ data: event.data, timestamp: event.timestamp, generation: event.generation });
           return;
         }
         pipeline.feedBytes(portId, event.data, event.timestamp);
       })
       .then((u) => {
         if (cancelled) u();
-        else unlisten = u;
+        else unlistenData = u;
       })
       .catch((e) => console.debug('[usePortSerialFeed] subscribe failed:', e));
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenData?.();
+      unlistenStatus?.();
       pendingRef.current = [];
       gateOpenRef.current = false;
+      connectedRef.current = false;
+      generationRef.current = undefined;
     };
   }, [portId]);
 
@@ -72,7 +110,12 @@ export function usePortSerialFeed(portId: string): {
       if (gateOpenRef.current) return;
       gateOpenRef.current = true;
       const pipeline = getRxPipeline();
+      if (!connectedRef.current) {
+        pendingRef.current = [];
+        return;
+      }
       for (const event of pendingRef.current) {
+        if (event.generation != null && generationRef.current != null && event.generation !== generationRef.current) continue;
         if (snapshotLastTs !== null && event.timestamp <= snapshotLastTs) continue;
         pipeline.feedBytes(portId, event.data, event.timestamp);
       }

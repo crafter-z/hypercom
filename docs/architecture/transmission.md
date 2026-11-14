@@ -132,9 +132,9 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 触发引擎（条件触发，issue #3-1）
 
-- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；per-port 经 `portId`（规则未声明 `portId` 或为空时对所有端口生效）。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词，保存校验复用同一策略；主线程执行仍无期限或隔离，此策略不是完整的正则复杂度/ReDoS 保证；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，模式先经 `hexUtils.parseHexBytes` 严格解析再格式化，紧凑与空白分隔写法等价；非法、半字节或归一化后为空的模式不派发动作。
-- **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。
-- **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则 1s 内不重复弹（模块级 Map：规则 id → 最后时间戳）。`pruneTriggerAlertThrottle` 在接收 hook 挂载及已提交提醒规则集合变化时释放已删除规则的节流元数据，不在每个 RX 事件上重建集合。**auto-respond** 走 `sendToPort(..., silent=true)`，失败补 debug 日志；触发引擎异常限流到每 2s 至多一条日志。
+- `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；`matchType` 是匹配判定权威，`isRegex` 仅为旧配置兼容镜像；per-port 经 `portId`（规则未声明、为空串或为 Rust `Option<String>` 的 `null` 时对所有端口生效）。空白条件不派发动作。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词及交替分支无界量词，保存校验复用同一策略；运行时安全正则使用有界 256 项缓存，避免高速 RX 反复编译；主线程执行仍无期限或隔离，长行语义仍受 5000 字符策略限制；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，模式先经 `hexUtils.parseHexBytes` 严格解析再格式化，紧凑与空白分隔写法等价；非法、半字节或归一化后为空的模式不派发动作。
+- **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。RX 数据按连接代次校验；旧/断线/错误会话的迟到字节不进入触发器，后端 `serial:data` 新载荷带 `generation`（旧后端可省略）。
+- **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则同来源端口 1s 内不重复弹（模块级 Map：规则 id + portId）。`pruneTriggerAlertThrottle` 在接收 hook 挂载及已提交提醒规则集合变化时释放已删除规则的节流元数据，不在每个 RX 事件上重建集合。**auto-respond** 通过每端口队列串行调用 `sendToPort(..., silent=true)`，匹配设备/SIM 回显的短期相同载荷被抑制，避免 `PING→PING` 无限递归；失败补 debug 日志，积压超过 64 条丢弃。触发引擎异常限流到每 2s 至多一条日志。
 - 规则统一**显式保存后生效**：提醒、自动回复与其他实体页共用 `useEntityPage({kind})` 会话草稿。取消 300ms 自动落盘及卸载 flush；新建、删除、启用和拖动排序也只改草稿。保存后按数组顺序评估所有匹配规则，不改为首条命中即停止。
 - 已知边界：触发匹配按**行**粒度（HEX 匹配按该行的原始字节 `rawData`）；行首 BOM 已在解码时剥离，不参与匹配。
 

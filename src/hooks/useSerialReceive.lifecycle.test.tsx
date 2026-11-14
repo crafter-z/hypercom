@@ -13,7 +13,9 @@ import type { RxPipeline, RxPipelineOptions } from '../utils/rxPipeline';
 import { lostPortIds } from './disconnectTracking';
 import { useSerialReceive, openTabForConnectedPort } from './useSerialReceive';
 import { subscribePluginViewInput } from '../utils/pluginViewInput';
+import { ttyService } from '../utils/ttyService';
 import { evaluateTriggers } from '../utils/triggerEngine';
+import { sendToPort } from './useSerialSend';
 
 const eventHandlers = vi.hoisted(() => ({
   data: null as ((event: SerialDataEvent) => void) | null,
@@ -60,7 +62,8 @@ const port = (extras: Partial<SerialPort> = {}): SerialPort => ({
 });
 const utf8 = (text: string) => Array.from(new TextEncoder().encode(text));
 const texts = () => output.rows.map(line => line.content ?? new TextDecoder().decode(line.rawData));
-const receive = (data: number[]) => eventHandlers.data!({ port_id: 'COM1', data, timestamp: 42, direction: 'RX', is_hex: false });
+const receiveAt = (portId: string, data: number[], generation?: number) => eventHandlers.data!({ port_id: portId, data, timestamp: 42, direction: 'RX', is_hex: false, generation });
+const receive = (data: number[]) => receiveAt('COM1', data);
 let root: Root;
 const Probe = () => { useSerialReceive(); return null; };
 
@@ -68,7 +71,7 @@ beforeEach(async () => {
   output.rows.length = 0;
   resetPluginObserverForTest();
   lostPortIds.delete('COM1');
-  useAppStore.setState({ ports: [port()], tabs: [], paneTree: { id: 'main', type: 'leaf', tabIds: [], size: 1 }, activeTabId: null, focusedPaneId: 'main' });
+  useAppStore.setState({ ports: [port(), port({ id: 'COM2', name: 'COM2' })], tabs: [], paneTree: { id: 'main', type: 'leaf', tabIds: [], size: 1 }, activeTabId: null, focusedPaneId: 'main' });
   useRuleStore.getState().setProtocolTemplates([template('A', 'AA BB'), template('B', 'CC DD')]);
   useRuleStore.getState().setTriggerRules([]);
   useAppStore.getState().openTab('COM1');
@@ -252,6 +255,94 @@ describe('useSerialReceive protocol lifecycle', () => {
     useRuleStore.getState().setTriggerRules([rule]);
     receive(utf8('ready\n'));
     expect(useToastStore.getState().toasts).toHaveLength(2);
+  });
+
+  it('drops late data while disconnected and does not bridge it into the next connection', async () => {
+    receive(utf8('before-disconnect'));
+    eventHandlers.status!({ port_id: 'COM1', status: 'disconnected', generation: 1 });
+    // The current tail is flushed at the lifecycle boundary.
+    expect(texts()).toEqual(['before-disconnect']);
+
+    // A reader event racing the terminal status must not recreate per-port RX
+    // state; otherwise this partial would join the next connection's first row.
+    receive(utf8('stale-partial'));
+    // Simulate the next session's status snapshot before remounting the root
+    // listener (the connection-state hook owns status-event acceptance).
+    useAppStore.getState().updatePort('COM1', { status: 'connected', connectionGeneration: 2 });
+    await act(async () => { root.unmount(); });
+    root = createRoot(document.createElement('div'));
+    await act(async () => { root.render(createElement(Probe)); });
+    receiveAt('COM1', utf8('old\n'), 1);
+    receiveAt('COM1', utf8('fresh\n'), 2);
+    getRxPipeline().flushBeforeSend('COM1');
+
+    expect(texts()).toEqual(['before-disconnect', 'fresh']);
+  });
+
+  it('treats reader error as a receive-session boundary for RX, TTY, and plugin input', async () => {
+    const onDiscontinuity = vi.fn();
+    const onStatus = vi.fn();
+    const unsubscribe = subscribePluginViewInput({
+      pluginId: 'p', installGeneration: 'g', viewId: 'view', placement: 'workspace-tab',
+      tabId: 'plugin-tab', tabSessionId: 'session', viewInstanceId: 'instance',
+      workerEpoch: 1, streamEpoch: 1, boundPortId: 'COM1', portMode: 'trx',
+    }, 'lines', { onInput: vi.fn(), onDiscontinuity, onStatus });
+    try {
+      receive(utf8('before-error'));
+      eventHandlers.status!({ port_id: 'COM1', status: 'error', generation: 1 });
+      expect(lostPortIds.has('COM1')).toBe(true);
+      expect(texts()).toEqual(['before-error']);
+      expect(vi.mocked(ttyService.disconnect)).toHaveBeenCalledWith('COM1');
+      expect(onDiscontinuity).toHaveBeenCalledWith('port-error', 2);
+      expect(onStatus).toHaveBeenCalledWith('error', 2);
+
+      // Error is terminal even before a follow-up disconnected event arrives.
+      receive(utf8('stale\n'));
+      useAppStore.getState().updatePort('COM1', { status: 'connected', connectionGeneration: 2 });
+      await act(async () => { root.unmount(); });
+      root = createRoot(document.createElement('div'));
+      await act(async () => { root.render(createElement(Probe)); });
+      receive(utf8('fresh\n'));
+      getRxPipeline().flushBeforeSend('COM1');
+      expect(texts()).toEqual(['before-error', 'fresh']);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('throttles alerts independently for each source port', () => {
+    const rule: TriggerRule = {
+      id: 'shared-alert', name: 'Shared alert', pattern: 'ready', isRegex: false,
+      matchType: 'contains', actionType: 'alert', actionContent: 'ready', actionIsHex: false,
+      isEnabled: true,
+    };
+    useToastStore.getState().clearAll();
+    useRuleStore.getState().setTriggerRules([rule]);
+    vi.mocked(evaluateTriggers).mockReturnValue([{ rule, matchedText: 'ready' }]);
+    receiveAt('COM1', utf8('ready\n'));
+    receiveAt('COM2', utf8('ready\n'));
+    expect(useToastStore.getState().toasts).toHaveLength(2);
+    expect(useToastStore.getState().toasts.map(toast => toast.portId)).toEqual(['COM1', 'COM2']);
+  });
+
+  it('serializes trigger responses and suppresses a matching device echo', async () => {
+    const rule: TriggerRule = {
+      id: 'echo-response', name: 'Echo response', pattern: 'PING', isRegex: false,
+      matchType: 'contains', actionType: 'respond', actionContent: 'PING', actionIsHex: false,
+      isEnabled: true,
+    };
+    useRuleStore.getState().setTriggerRules([rule]);
+    vi.mocked(sendToPort).mockResolvedValue(1);
+    vi.mocked(evaluateTriggers).mockReturnValue([{ rule, matchedText: 'PING' }]);
+    receive(utf8('PING\n'));
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(sendToPort).toHaveBeenCalledTimes(1);
+
+    // A simulator/echo device may return a line containing the response. It
+    // must not recursively schedule the same response forever.
+    receive(utf8('Received: PING\n'));
+    await Promise.resolve();
+    expect(sendToPort).toHaveBeenCalledTimes(1);
   });
 
   it('tool-owned disconnect suppresses lost banner while still draining RX', () => {

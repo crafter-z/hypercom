@@ -13,6 +13,8 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct SerialDataEvent<'a> {
     pub port_id: &'a str,
     pub timestamp: i64,
+    /// Connection identity for stale-data rejection in the frontend.
+    pub generation: u64,
     /// 恒为 "RX"：后端只在接收侧派发数据事件，发送回显由前端按自己的发送记录合成。
     pub direction: &'static str,
     pub data: &'a [u8],
@@ -126,7 +128,7 @@ pub(crate) fn emit_status_if_current(
 /// 参数传入（旧签名里的 `direction` / `is_hex` 在所有调用点都是常量，等于把常量
 /// 抄了四遍，还让人以为存在 TX 事件通道）。TX 字节由发送命令在写入成功后记录
 /// （`TxOutcome::bytes` 是唯一来源）。
-pub(crate) fn emit_rx_event(app_handle: &AppHandle, port_id: &str, data: &[u8]) {
+pub(crate) fn emit_rx_event(app_handle: &AppHandle, port_id: &str, data: &[u8], generation: u64) {
     // 只取一次当前时间：格式化字符串与毫秒时间戳同源，避免两次 now() 跨毫秒不一致。
     let now = chrono::Local::now();
     let timestamp_str = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
@@ -138,6 +140,7 @@ pub(crate) fn emit_rx_event(app_handle: &AppHandle, port_id: &str, data: &[u8]) 
         SerialDataEvent {
             port_id,
             timestamp: timestamp_ms,
+            generation,
             direction: "RX",
             data,
             is_hex: false,
@@ -171,6 +174,7 @@ mod tests {
         let event = SerialDataEvent {
             port_id: "COM1",
             timestamp: 123,
+            generation: 7,
             direction: "RX",
             data: &data,
             is_hex: false,
@@ -179,7 +183,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(event).unwrap(),
             serde_json::json!({
-                "port_id": "COM1", "timestamp": 123, "direction": "RX",
+                "port_id": "COM1", "timestamp": 123, "generation": 7, "direction": "RX",
                 "data": [0, 127, 128, 255], "is_hex": false,
             })
         );

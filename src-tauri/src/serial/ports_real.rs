@@ -685,7 +685,7 @@ fn read_loop(
             // Stop may have been signalled while read() was blocked; bytes read
             // from a session being retired must not leak into the log/UI.
             ReadOutcome::Data(n) if n > 0 && running.load(Ordering::Acquire) => {
-                emit_rx_event(&app_handle, &port_id, &buffer[..n])
+                emit_rx_event(&app_handle, &port_id, &buffer[..n], generation)
             }
             ReadOutcome::Data(_) | ReadOutcome::Timeout => {}
             ReadOutcome::Error(e) => {

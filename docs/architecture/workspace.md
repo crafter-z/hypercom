@@ -65,7 +65,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 ### 前端路由分流（main.tsx）
 
 - 无 React Router：`new URLSearchParams(window.location.search)` 读 `popout` 参数；有 → `<PopoutShell/>`（按 kind 分发 QuickSendPanel / TerminalPopout）；无 → `<App/>`。
-- `Popout/` 模块：`PopoutShell.tsx` / `QuickSendPanel.tsx` / `QuickSendList.tsx`（命令列表 + 行内编辑）/ `QuickSendText.tsx`（文本逐行，直接复用 `hooks/useSequentialSend`，旧 `usePanelCyclicSend` 已删）/ `TerminalPopout.tsx` / `usePopoutSync.ts`（跨窗同步）/ `usePanelTextConfig.ts`（面板文本配置）/ `usePortSerialFeed.ts`（终端弹窗 RX 喂入：快照交接 + 时间戳闸门）。
+- `Popout/` 模块：`PopoutShell.tsx` / `QuickSendPanel.tsx` / `QuickSendList.tsx`（命令列表 + 行内编辑）/ `QuickSendText.tsx`（文本逐行，直接复用 `hooks/useSequentialSend`，旧 `usePanelCyclicSend` 已删）/ `TerminalPopout.tsx` / `usePopoutSync.ts`（跨窗同步）/ `usePanelTextConfig.ts`（面板文本配置）/ `usePortSerialFeed.ts`（终端弹窗 RX 喂入：快照交接 + 时间戳闸门 + connected/generation 会话门控）。
 
 ### 意图/事件协议（`usePopoutBridge` + `popoutEventService`）
 
