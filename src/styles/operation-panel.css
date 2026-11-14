@@ -507,13 +507,6 @@
   font-size: var(--text-2xs);
 }
 
-/* HEX-mode line-ending hint — quiet monospace aside. */
-.op-send-hex-suffix {
-  font-family: var(--font-terminal);
-  font-size: var(--text-2xs);
-  color: var(--text-secondary);
-}
-
 /* Connect button in the top strip — semibold so the primary connection
  * affordance reads heavier than the neighbouring icon buttons. */
 .op-connect-btn {

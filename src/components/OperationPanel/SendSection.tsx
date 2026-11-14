@@ -72,7 +72,7 @@ const SendSection: React.FC<SendSectionProps> = ({
   const flowBusy = isFlowRunning(activePortId);
 
   // HEX 预览/转换 + 字节计数（含非法输入的错误态）与发送历史召回各自成模块。
-  const { byteCount, hexSuffix, inputErrorKey, toEditableValue, toggleHexMode } = useHexCompose({
+  const { byteCount, inputErrorKey, toEditableValue, toggleHexMode } = useHexCompose({
     sendInput,
     isHex: sendIsHex,
     encoding: encoding ?? 'ASCII',
@@ -312,12 +312,6 @@ const SendSection: React.FC<SendSectionProps> = ({
           />
         </div>
       </div>
-
-      {sendIsHex && (
-        <div className="op-send-hex-suffix">
-          {t('op.send.hexSuffixLabel')} {hexSuffix ?? t('sendSection.lineEnding.none')}
-        </div>
-      )}
 
       {progress && <FileSendProgress progress={progress} />}
     </div>

@@ -194,6 +194,8 @@ const Sidebar: React.FC = () => {
           onToggleGitBash={toggleGitBashSim}
           onOpenAll={handleOpenAll}
           onCloseAll={handleCloseAll}
+          canOpenAll={visiblePorts.some(port => port.status !== 'connected' && port.status !== 'connecting')}
+          canCloseAll={visiblePorts.some(port => port.status === 'connected')}
           onSortByPort={handleSortByPort}
           onSortByAdded={handleSortByAdded}
           addedOrderActive={portOrder === 'added'}

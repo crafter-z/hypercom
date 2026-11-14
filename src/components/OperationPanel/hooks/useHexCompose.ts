@@ -1,5 +1,5 @@
 /**
- * 发送输入框的 HEX/文本关注点：字节计数（含非法 HEX 的错误态）、行尾字节提示、
+ * 发送输入框的 HEX/文本关注点：字节计数（含非法 HEX 的错误态）、
  * HEX 模式切换时的就地转换。
  *
  * 抽出来的原因不只是行数：HEX 契约（C4/K7）要求「后端必然拒绝的输入不得显示
@@ -11,7 +11,6 @@ import { useOperationStore } from '../../../stores/useOperationStore';
 import type { Encoding } from '../../../types';
 import {
   computeByteCount,
-  formatLineEndingHex,
   hexInputError,
   hexToTextPreview,
   sanitizeHexInput,
@@ -21,8 +20,6 @@ import {
 
 export interface HexCompose {
   byteCount: ByteCountResult;
-  /** 行尾追加字节的 HEX 展示（"0D 0A"）；无追加 → null。 */
-  hexSuffix: string | null;
   /** HEX 模式且输入非法时的 i18n key —— UI 显示错误态并禁用发送。 */
   inputErrorKey: string | null;
   /** textarea 取值清洗：HEX 模式剥离非 HEX 字符。 */
@@ -43,12 +40,6 @@ export function useHexCompose(args: {
   const byteCount = useMemo(
     () => computeByteCount(sendInput, isHex, encoding, sendAppendLineEnding),
     [sendInput, isHex, encoding, sendAppendLineEnding]
-  );
-
-  const hexSuffix = useMemo(
-    // 后端 HEX 发送不追加行结束符——提示也不能显示会误导的追加字节。
-    () => (isHex ? null : formatLineEndingHex(sendAppendLineEnding)),
-    [isHex, sendAppendLineEnding]
   );
 
   const toEditableValue = useCallback(
@@ -76,7 +67,6 @@ export function useHexCompose(args: {
 
   return {
     byteCount,
-    hexSuffix,
     inputErrorKey: byteCount.errorKey ?? null,
     toEditableValue,
     toggleHexMode,

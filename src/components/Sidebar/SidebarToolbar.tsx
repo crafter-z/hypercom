@@ -19,6 +19,8 @@ interface SidebarToolbarProps {
   onToggleGitBash: () => void;
   onOpenAll: () => void;
   onCloseAll: () => void;
+  canOpenAll: boolean;
+  canCloseAll: boolean;
   onSortByPort: () => void;
   onSortByAdded: () => void;
   addedOrderActive: boolean;
@@ -38,7 +40,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
   showHidden, onToggleHidden, onRefresh,
   simulationMode, simulationAvailable, onToggleSimulation,
   gitBashMode, gitBashAvailable, onToggleGitBash,
-  onOpenAll, onCloseAll, onSortByPort, onSortByAdded, addedOrderActive, pluginButtons, onPluginClick,
+  onOpenAll, onCloseAll, canOpenAll, canCloseAll, onSortByPort, onSortByAdded, addedOrderActive, pluginButtons, onPluginClick,
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
@@ -94,10 +96,10 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
         <button className="icon-btn" title={t('sidebar.toolbar.refresh')} aria-label={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
           <RefreshCw size={14} />
         </button>
-        <button className="icon-btn" title={t('sidebar.toolbar.openAll')} aria-label={t('sidebar.toolbar.openAll')} onClick={onOpenAll}>
+        <button className="icon-btn" title={t('sidebar.toolbar.openAll')} aria-label={t('sidebar.toolbar.openAll')} onClick={onOpenAll} disabled={!canOpenAll}>
           <Play size={14} />
         </button>
-        <button className="icon-btn" title={t('sidebar.toolbar.closeAll')} aria-label={t('sidebar.toolbar.closeAll')} onClick={onCloseAll}>
+        <button className="icon-btn" title={t('sidebar.toolbar.closeAll')} aria-label={t('sidebar.toolbar.closeAll')} onClick={onCloseAll} disabled={!canCloseAll}>
           <Square size={14} />
         </button>
         <span className="toolbar-sep" />
