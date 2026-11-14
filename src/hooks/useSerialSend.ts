@@ -126,6 +126,7 @@ export async function sendToPort(
   }
   const { sendPrefix } = state.config;
   const lease = trafficStats.capture(portId);
+  const expectedGeneration = port.connectionGeneration;
 
   // TTY 模式（issue #11）：无本地回显——对端 shell 会把命令 echo 回来，本地再
   // 插一条 TX 行既重复又破坏终端流。因此 TTY 下跳过 TX 回显与 RX 队列排空，
@@ -145,10 +146,26 @@ export async function sendToPort(
     }
     const currentPort = useAppStore.getState().ports.find((item) => item.id === portId);
     if (!isSendablePort(currentPort)) throw new Error(`Send blocked: ${portClosedReason(currentPort)}`);
+    if (currentPort.connectionGeneration !== expectedGeneration) {
+      throw new Error(`Send blocked: connection changed for ${portId}`);
+    }
     beforeSend?.();
+    const afterAuthPort = useAppStore.getState().ports.find((item) => item.id === portId);
+    if (!isSendablePort(afterAuthPort) || afterAuthPort.connectionGeneration !== expectedGeneration) {
+      throw new Error(`Send blocked: connection changed for ${portId}`);
+    }
   };
   if (!isTty) {
     beforeSend?.();
+    // The host authorization callback may retire the view or a status event may
+    // have advanced the session. Reject before creating a TX echo for a write
+    // that the backend's expected-generation check would refuse.
+    const currentPort = useAppStore.getState().ports.find((item) => item.id === portId);
+    if (!trafficStats.isCurrent(portId, lease) || !isSendablePort(currentPort) ||
+        currentPort.connectionGeneration !== expectedGeneration) {
+      console.warn('[sendToPort] Send blocked: connection changed before TX', portId);
+      return 0;
+    }
     const prefix = sendPrefix ? `${sendPrefix} ` : '';
     const displayText = `${prefix}${data}`;
     // rawData must reflect the ACTUAL transmitted bytes (drives the
@@ -185,7 +202,7 @@ export async function sendToPort(
         data,
         isHex,
         appendLineEnding: lineEnding,
-        expectedGeneration: port.connectionGeneration,
+        expectedGeneration,
       });
 
     // Track TX bytes（P1-1：经 1s 聚合器统一写 store——高频发送/触发自动回复

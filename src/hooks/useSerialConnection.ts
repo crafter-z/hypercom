@@ -61,9 +61,10 @@ function applyConnectedSideEffects(portId: string): void {
   const params = resolveConnectionParams(portId);
   useAppStore.getState().updatePort(portId, {
     status: 'connected',
-    // Wait for the connected status event to carry the new generation; a
-    // stale value here would reject an immediate send after reconnect.
-    connectionGeneration: undefined,
+    // The backend emits `connected` before open/reconnect resolves. The status
+    // handler records that event's generation; do not overwrite it when the
+    // invoke settles after the event (otherwise the next send loses its
+    // connection identity and can cross a reconnect boundary).
     ...params,
   });
   useTerminalStore.getState().setTerminalConnectedAt(portId, Date.now());
@@ -293,7 +294,7 @@ async function openPort(portId: string): Promise<void> {
       // The backend owns the port while an external tool runs (close→spawn→reopen).
       if (live.toolRunning) return;
       const params = resolveConnectionParams(portId);
-      useAppStore.getState().updatePort(portId, { status: 'connecting' });
+      useAppStore.getState().updatePort(portId, { status: 'connecting', connectionGeneration: undefined });
       const ttyState = ttyService.get(portId);
       const ttySize = ttyState?.lastCols != null && ttyState.lastRows != null
         ? { cols: ttyState.lastCols, rows: ttyState.lastRows }
@@ -341,7 +342,7 @@ async function closePort(portId: string): Promise<void> {
     try {
       await serialService.closeSerialPort(portId);
       if (isCurrentOperation(portId, generation)) {
-        useAppStore.getState().updatePort(portId, { status: 'disconnected' });
+        useAppStore.getState().updatePort(portId, { status: 'disconnected', connectionGeneration: undefined });
       }
     } catch (err) {
       if (!isCurrentOperation(portId, generation)) return;

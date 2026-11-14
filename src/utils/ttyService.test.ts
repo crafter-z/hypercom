@@ -19,6 +19,7 @@ import { ttyService, MAX_TTY_QUEUE, TX_COALESCE_MS, TX_MAX_BATCH_BYTES } from '.
 import { trafficStats } from './trafficStats';
 import type { Terminal } from '@xterm/xterm';
 import { sendToPort } from '../hooks/useSerialSend';
+import { clearFlowStatus, setFlowStatus } from './flowRuntime';
 
 vi.mock('../services/tauri', () => ({
   serialService: {
@@ -244,6 +245,22 @@ describe('ttyService — send (TX path, P0-2 合批)', () => {
       appendLineEnding: 'None',
     });
     expect(ttyService.get('COM1')?.txBuffer).toBe('');
+  });
+
+  it('drops a keyboard batch when an enhanced flow starts before dispatch', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(2);
+    ttyService.send('COM1', 'queued');
+    setFlowStatus({ portId: 'COM1', runId: 'flow-1', phase: 'running', exclusive: true });
+    try {
+      vi.advanceTimersByTime(TX_COALESCE_MS);
+      await drainMicrotasks();
+      expect(serialService.sendSerialData).not.toHaveBeenCalled();
+      expect(ttyService.get('COM1')?.txBuffer).toBe('');
+    } finally {
+      clearFlowStatus('COM1', 'flow-1');
+      errorSpy.mockRestore();
+    }
   });
 
   it('starts a new batch after the window (cross-batch order preserved)', async () => {

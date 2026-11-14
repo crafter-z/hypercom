@@ -14,6 +14,7 @@ import {
   validateCommandSetSteps,
 } from '../../../utils/commandSteps';
 import { advanceFlow } from '../../../utils/flowSchedule';
+import { computeByteCount } from '../../../utils/sendUtils';
 import {
   getFlowStatus,
   isFlowRunning,
@@ -93,15 +94,19 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
       if (!context.isCurrent()) return null;
     } else {
       setStatus(portId, state, 'running');
-      // Legacy send commands intentionally retain the old semantics: a 0-byte
-      // silent result does not advance the index, while thrown backend errors
-      // are handled by the old retry callback.
-      if (state.enhanced) {
-        await sendToPort(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding, true, undefined, 'flow');
-      } else {
-        await sendDataRef.current(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding, true);
-      }
+      // Legacy guard refusals retry the current step. An accepted empty payload
+      // is still a legitimate no-op and must retain its old advancement semantics.
+      const bytesWritten = state.enhanced
+        ? await sendToPort(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding, true, undefined, 'flow')
+        : await sendDataRef.current(portId, cmd.content, cmd.type === 'hex', cmd.appendLineEnding, true);
       if (!context.isCurrent()) return null;
+      // Legacy sendToPort intentionally returns 0 for a silent guard refusal
+      // instead of throwing. Do not advance the snapshot in that case: retry
+      // the same command, preserving the documented disconnected/race behavior.
+      if (!state.enhanced && bytesWritten <= 0) {
+        const expected = computeByteCount(cmd.content, cmd.type === 'hex', 'UTF-8', cmd.appendLineEnding);
+        if (expected.count > 0 || expected.errorKey) return RETRY_MS;
+      }
     }
 
     const schedule = advanceFlow({

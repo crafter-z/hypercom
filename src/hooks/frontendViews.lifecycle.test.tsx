@@ -80,6 +80,16 @@ function retireTab() {
 }
 
 describe('retired frontend view work', () => {
+  it('does not leave a TX echo when authorization advances the connection generation', async () => {
+    useAppStore.getState().updatePort('COM1', { connectionGeneration: 7 });
+    const written = await act(async () => sendToPort('COM1', 'stale', false, 'None', false, () => {
+      useAppStore.getState().updatePort('COM1', { connectionGeneration: 8 });
+    }));
+    expect(written).toBe(0);
+    expect(serialService.sendSerialData).not.toHaveBeenCalled();
+    expect(snapshotTerminalLines('COM1')).toEqual([]);
+  });
+
   it.each(['trx', 'tty'] as const)('does not restore %s history or stats after the last consumer retires', async mode => {
     await act(async () => { useAppStore.getState().setPortMode('COM1', mode); });
     const pending = deferred<number>();
@@ -142,6 +152,40 @@ describe('retired frontend view work', () => {
     expect(snapshotTerminalLines('COM1')).toEqual([]);
   });
 
+  it('does not advance a legacy loop after a silent zero-byte send refusal', async () => {
+    vi.mocked(serialService.sendSerialData).mockResolvedValue(0);
+    const command = { id: 'zero', name: 'zero', content: 'zero', order: 0, delay: 0, type: 'string' as const, appendLineEnding: 'None' as const };
+    useRuleStore.getState().setSendCommandSets([{
+      id: 'zero-set', name: 'zero-set', isLoop: false, loopDelay: 0, repeatCount: 1, commands: [command],
+    }]);
+    useRuleStore.getState().setActiveSendCommandSetId('zero-set');
+    await act(async () => {
+      useOperationStore.getState().setCyclicLoop('COM1', true);
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(serialService.sendSerialData).toHaveBeenCalledTimes(1);
+    expect(useOperationStore.getState().cyclicLoops.COM1).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.length).toBeGreaterThan(1);
+    expect(useOperationStore.getState().cyclicLoops.COM1).toBe(true);
+  });
+
+  it.each(['string', 'hex'] as const)('advances a legitimate empty %s payload rather than retrying it forever', async type => {
+    vi.mocked(serialService.sendSerialData).mockImplementation(async args => args.data.trim() ? 1 : 0);
+    const command = (id: string, content: string, order: number): SendCommand => ({ id, name: id, content, order, delay: 0, type, appendLineEnding: 'None' });
+    useRuleStore.getState().setSendCommandSets([{
+      id: 'empty-set', name: 'empty-set', isLoop: false, loopDelay: 0, repeatCount: 1,
+      commands: [command('empty', '', 0), command('next', type === 'hex' ? '41' : 'NEXT', 1)],
+    }]);
+    useRuleStore.getState().setActiveSendCommandSetId('empty-set');
+    await act(async () => {
+      useOperationStore.getState().setCyclicLoop('COM1', true);
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(vi.mocked(serialService.sendSerialData).mock.calls.map(([args]) => args.data)).toEqual(['', type === 'hex' ? '41' : 'NEXT']);
+    expect(Boolean(useOperationStore.getState().cyclicLoops.COM1)).toBe(false);
+  });
+
   it('uses saved rank order and keeps the starting set, content and repeat count until restart', async () => {
     const command = (id: string, order: number) => ({
       id, name: id, content: id, order, delay: 25,
@@ -171,7 +215,6 @@ describe('retired frontend view work', () => {
     expect(Boolean(useOperationStore.getState().cyclicLoops.COM1)).toBe(false);
   });
 
-/**
 /**
  * 增强流程（命令集含 setParams 动作）：与旧命令集共用同一 runtime，
  * 但要按步骤真实执行、发布端口独占，并且不得改变旧 send-only 命令集的行为。

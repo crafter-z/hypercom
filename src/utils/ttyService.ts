@@ -30,6 +30,7 @@ import { serialService, gitBashSimService } from '../services/tauri';
 import { findSerialTabByPortId, useAppStore } from '../stores/useAppStore';
 import { trafficStats, type PortTrafficLease } from './trafficStats';
 import { createDecoder } from './lineText';
+import { isFlowRunning } from './flowRuntime';
 
 /** 每端口等待批写的解码字符串队列上限（条）：超过即丢弃最旧（issue #6-10 同款策略）。 */
 export const MAX_TTY_QUEUE = 10_000;
@@ -134,9 +135,16 @@ function sendOrdered(
   return pending;
 }
 
+/** 键盘输入绕过 sendToPort，因此在共享写队列真正启动 I/O 前也要复查流程独占。 */
+function assertKeyboardSendAllowed(portId: string): void {
+  if (isFlowRunning(portId)) {
+    throw new Error(`Port ${portId} is occupied by an enhanced flow`);
+  }
+}
+
 /** 取走 TX 缓冲并串行发送：每个端口只在上一批 IPC settle 后启动下一批。
  * detach 仍排空缓冲；disconnect 则使旧连接尚未启动的批次失效。 */
-function flushTx(portId: string, state: TtyPortState): Promise<void> {
+function flushTx(portId: string, state: TtyPortState, beforeSend?: () => void): Promise<void> {
   if (state.txTimerId !== null) {
     clearTimeout(state.txTimerId);
     state.txTimerId = null;
@@ -147,7 +155,7 @@ function flushTx(portId: string, state: TtyPortState): Promise<void> {
   state.txBuffer = '';
   state.txBufferBytes = 0;
   if (!text || !lease) return Promise.resolve();
-  return sendOrdered(portId, state, text, false, 'None', undefined, lease).then(() => {}, (err) => {
+  return sendOrdered(portId, state, text, false, 'None', beforeSend, lease).then(() => {}, (err) => {
     console.error('[ttyService] send failed for', portId, err);
   });
 }
@@ -266,7 +274,7 @@ export const ttyService = {
     if (!state) return;
     cancelPending(state);
     // 标签页关闭不断开串口：待发送合批与已有 IPC 保持原顺序。
-    void flushTx(portId, state);
+    void flushTx(portId, state, assertKeyboardSendAllowed.bind(null, portId));
     state.term = null;
     state.decoder = null;
     state.queue.length = 0;
@@ -338,6 +346,10 @@ export const ttyService = {
    */
   send(portId: string, text: string): Promise<void> {
     if (!text) return Promise.resolve();
+    if (isFlowRunning(portId)) {
+      console.warn('[ttyService] Keystroke dropped: enhanced flow owns port', portId);
+      return Promise.resolve();
+    }
     const state = getPortState(portId);
     if (state.txLease && !trafficStats.isCurrent(portId, state.txLease)) dropTxBuffer(state);
     state.txLease ??= trafficStats.capture(portId);
@@ -346,13 +358,13 @@ export const ttyService = {
     state.txBufferBytes += new TextEncoder().encode(text).length;
     if (state.txBufferBytes >= TX_MAX_BATCH_BYTES) {
       // 单批上限：立即发送，防止大粘贴无限滞留
-      return flushTx(portId, state);
+      return flushTx(portId, state, assertKeyboardSendAllowed.bind(null, portId));
     }
     if (state.txTimerId === null) {
       // 首字节到达启动静默定时器；窗口内到达的按键并入同一批
       state.txTimerId = setTimeout(() => {
         state.txTimerId = null;
-        void flushTx(portId, state);
+        void flushTx(portId, state, assertKeyboardSendAllowed.bind(null, portId));
       }, TX_COALESCE_MS);
     }
     return Promise.resolve();
@@ -364,7 +376,7 @@ export const ttyService = {
     portId: string, data: string, isHex: boolean, lineEnding: string, beforeSend?: () => void,
   ): Promise<number> {
     const state = getPortState(portId);
-    void flushTx(portId, state);
+    void flushTx(portId, state, assertKeyboardSendAllowed.bind(null, portId));
     return sendOrdered(portId, state, data, isHex, lineEnding, beforeSend);
   },
 

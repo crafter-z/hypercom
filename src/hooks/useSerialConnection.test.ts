@@ -210,6 +210,25 @@ describe('serial reconnect intent and listener ownership', () => {
     await mounted.unmount();
   });
 
+  it('preserves the backend generation emitted before manual open settles', async () => {
+    const opening = deferred<void>();
+    vi.mocked(serialService.openSerialPort).mockReturnValue(opening.promise);
+    const mounted = await mountConnection(true);
+    const onStatus = vi.mocked(eventService.onSerialStatus).mock.calls[0][0];
+    let manualOpen!: Promise<void>;
+    await act(async () => { manualOpen = mounted.api.openPort('COM1'); });
+    await act(async () => {
+      // The backend emits connected while open_serial_port is still awaiting
+      // its native setup. The later invoke settlement must not erase this id.
+      onStatus({ port_id: 'COM1', status: 'connected', generation: 41 });
+      expect(useAppStore.getState().ports[0].connectionGeneration).toBe(41);
+      opening.resolve(undefined);
+      await manualOpen;
+    });
+    expect(useAppStore.getState().ports[0].connectionGeneration).toBe(41);
+    await mounted.unmount();
+  });
+
   it('does not let an old hint preempt a manual open queued behind an in-flight reconnect', async () => {
     const reconnect = deferred<void>();
     vi.mocked(eventService.onSerialReconnectHint).mockResolvedValue(vi.fn());
