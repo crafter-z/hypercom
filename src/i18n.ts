@@ -121,6 +121,8 @@ const resources = {
       'diagLog.refresh': '刷新',
       'diagLog.export': '导出',
       'diagLog.clear': '清空',
+      'diagLog.clearTitle': '清空诊断日志',
+      'diagLog.clearMessage': '清空后当前诊断日志内容不可恢复，确定继续？',
       'diagLog.empty': '暂无日志',
       'diagLog.scrollToLatest': '跳到最新',
       'diagLog.loadingPath': '加载路径中...',
@@ -143,7 +145,18 @@ const resources = {
       'sidebar.toolbar.disableGitBashSim': '停用 Git Bash 模拟终端',
       'tty.title': 'TTY 终端模式',
       'tty.popoutUnsupported': 'TTY 模式暂不支持弹出窗',
+      'tty.flowLocked': '键盘输入已暂停',
       'sidebar.search.placeholder': '搜索串口...',
+      'sidebar.search.noResults': '没有匹配的串口',
+      'sidebar.search.clear': '清除搜索',
+      'sidebar.bulk.openAllTitle': '打开全部串口',
+      'sidebar.bulk.openAllMessage': '将打开 {{count}} 个串口，确定继续？',
+      'sidebar.bulk.closeAllTitle': '断开全部串口',
+      'sidebar.bulk.closeAllMessage': '将断开 {{count}} 个已连接串口，确定继续？',
+      'sidebar.bulk.openDone': '已打开 {{count}} 个串口',
+      'sidebar.bulk.closeDone': '已断开 {{count}} 个串口',
+      'sidebar.group.deleteTitle': '删除分组',
+      'sidebar.group.deleteMessage': '删除「{{name}}」后，组内串口会回到未分组，确定继续？',
       'sidebar.port.status.disconnected': '未连接',
       'sidebar.port.status.error': '错误',
       'sidebar.port.status.connected': '已连接',
@@ -180,6 +193,8 @@ const resources = {
       'aliasDialog.input.placeholder': '输入备注名...',
       'aliasDialog.cancel': '取消',
       'aliasDialog.confirm': '确定',
+      'confirmDialog.cancel': '取消',
+      'confirmDialog.confirm': '确定',
 
       'mainDisplay.toolbar.splitVertical': '左右分屏',
       'mainDisplay.toolbar.splitHorizontal': '上下分屏',
@@ -193,6 +208,7 @@ const resources = {
 
       'tabBar.contextMenu.unpin': '取消固定',
       'tabBar.contextMenu.pin': '固定选项卡',
+      'tabBar.tabsLabel': '工作区标签页',
       'tabBar.contextMenu.close': '关闭',
       'tabBar.contextMenu.closeToRight': '关闭右侧',
       'tabBar.contextMenu.closeToLeft': '关闭左侧',
@@ -211,6 +227,8 @@ const resources = {
       'terminalView.saveDialog.title.csv': '导出为 CSV',
       'terminalView.saveDialog.filterName': '文本文件',
       'terminalView.protocolLabel': '协议:',
+      'terminalView.disconnectedHint': '在下方操作面板设置端口参数，然后打开串口。',
+      'terminalView.connectingHint': '正在打开串口，请稍候…',
       'terminalView.protocolNone': '-- 无协议 --',
 
       'terminal.search.placeholder': '搜索终端...',
@@ -248,6 +266,8 @@ const resources = {
       'terminal.context.copyAll': '复制全部',
 
       'operationPanel.title': '操作面板',
+      'operationPanel.clearTitle': '清空当前终端',
+      'operationPanel.clearMessage': '清空后当前端口的显示缓冲不可恢复，确定继续？',
       'operationPanel.collapse': '收起',
       'operationPanel.flowBadge': '流程运行中',
       'operationPanel.flowBadgeStep': '第 {{step}}/{{totalSteps}} 步',
@@ -304,6 +324,8 @@ const resources = {
       'paramsSection.log.openDir': '目录',
       'paramsSection.log.notFound': '未找到该端口的日志文件',
       'paramsSection.baudRateLabel': '波特率:',
+      'paramsSection.modeSwitchTitle': '切换工作模式',
+      'paramsSection.modeSwitchMessage': '切换 TRX/TTY 会清空当前终端显示缓冲，确定继续？',
       'paramsSection.baudRate.custom': '其他...',
       'paramsSection.dataBitsLabel': '数据位:',
       'paramsSection.parityLabel': '校验:',
@@ -331,6 +353,7 @@ const resources = {
       'statusBar.normal': '运行正常',
       'statusBar.connectedCount': '{{count}} 已连接',
       'statusBar.noPortSelected': '未选择串口',
+      'statusBar.noTraffic': '暂无流量',
       'statusBar.jsHeap': 'JS堆',
       'statusBar.processMem': '进程',
 
@@ -347,6 +370,9 @@ const resources = {
       'configModal.close': '关闭',
       'configModal.cancel': '取消',
       'configModal.save': '保存',
+      'configModal.unsaved': '未保存的更改',
+      'configModal.saveFailed': '保存失败，草稿已保留。请重试。',
+      'configModal.saveConflict': '配置已在其他地方更新，请重试。',
 
       'generalSettings.title': '通用设置',
       'generalSettings.closeBehaviorLabel': '程序关闭行为:',
@@ -455,6 +481,7 @@ const resources = {
       'displaySettings.background.browseButton': '浏览...',
       'displaySettings.background.opacityLabel': '不透明度:',
       'displaySettings.background.blurLabel': '模糊度:',
+      'displaySettings.timestampSectionTitle': '时间戳',
       'displaySettings.timestampModeLabel': '时间戳显示方式:',
       'displaySettings.timestampMode.perLine': '每行显示一个时间戳',
       'displaySettings.timestampMode.perRound': '每轮输出显示一个时间戳',
@@ -634,6 +661,7 @@ const resources = {
 
       'guide.title': '未检测到串口设备',
       'guide.hint': '插入 USB 转串口模块后自动刷新，或点击下方按钮启用模拟模式体验',
+      'guide.hintNoSim': '插入 USB 转串口模块后会自动刷新；也可以从串口工具栏刷新。',
       'guide.simButton': '启用模拟模式',
       'guide.quickStartLink': '首次启动？查看快速入门',
       'guide.quickStart.title': '快速入门',
@@ -649,10 +677,10 @@ const resources = {
 
       'hotkeys.title': '键盘快捷键',
       'hotkeys.clearTerminal': '清空终端',
-      'hotkeys.focusSearch': '聚焦终端搜索',
+      'hotkeys.focusSearch': '在终端中搜索（需终端聚焦）',
       'hotkeys.toggleConnect': '连接/断开当前端口',
       'hotkeys.toggleSidebar': '切换侧边栏显示',
-      'hotkeys.closeModal': '关闭弹窗',
+      'hotkeys.closeModal': '关闭当前弹窗（部分弹窗支持）',
       'hotkeys.showHelp': '显示快捷键帮助',
       'hotkeys.shortcut': '快捷键',
       'hotkeys.action': '功能',
@@ -688,6 +716,10 @@ const resources = {
 
       'notify.title': '通知中心',
       'notify.clearAll': '清空',
+      'notify.clearTitle': '清空通知',
+      'notify.clearMessage': '将删除全部 {{count}} 条通知，确定继续？',
+      'notify.openSource': '定位到所属标签页',
+      'notify.dismiss': '删除这条通知',
       'notify.empty': '暂无通知',
       'notify.openCenter': '打开通知中心',
 
@@ -753,6 +785,7 @@ const resources = {
       // issue #17：插件系统
       'plugins.title': '插件',
       'plugins.description': '安装 JS 插件扩展串口功能。Worker 按声明权限运行；网页视图可使用隔离模式，或经独立确认后使用可信网页模式。',
+      'plugins.instantNote': '插件安装、启停、权限授予与卸载会立即生效，不受页脚“保存”影响。',
       'plugins.emptyText': '暂无已安装插件',
       'plugins.installDirectory': '安装目录…',
       'plugins.installZip': '安装 ZIP…',
@@ -963,6 +996,8 @@ const resources = {
       'diagLog.refresh': 'Refresh',
       'diagLog.export': 'Export',
       'diagLog.clear': 'Clear',
+      'diagLog.clearTitle': 'Clear diagnostic log',
+      'diagLog.clearMessage': 'The current diagnostic log content cannot be recovered after clearing. Continue?',
       'diagLog.empty': 'No logs yet',
       'diagLog.scrollToLatest': 'Jump to latest',
       'diagLog.loadingPath': 'Loading path...',
@@ -985,7 +1020,18 @@ const resources = {
       'sidebar.toolbar.disableGitBashSim': 'Disable Git Bash Sim Terminal',
       'tty.title': 'TTY Terminal Mode',
       'tty.popoutUnsupported': 'TTY mode does not support pop-out windows',
+      'tty.flowLocked': 'Keyboard input is paused',
       'sidebar.search.placeholder': 'Search ports...',
+      'sidebar.search.noResults': 'No matching ports',
+      'sidebar.search.clear': 'Clear search',
+      'sidebar.bulk.openAllTitle': 'Open all ports',
+      'sidebar.bulk.openAllMessage': 'This will open {{count}} ports. Continue?',
+      'sidebar.bulk.closeAllTitle': 'Disconnect all ports',
+      'sidebar.bulk.closeAllMessage': 'This will disconnect {{count}} connected ports. Continue?',
+      'sidebar.bulk.openDone': 'Opened {{count}} ports',
+      'sidebar.bulk.closeDone': 'Disconnected {{count}} ports',
+      'sidebar.group.deleteTitle': 'Delete group',
+      'sidebar.group.deleteMessage': 'Deleting "{{name}}" will move its ports back to ungrouped. Continue?',
       'sidebar.port.status.disconnected': 'Disconnected',
       'sidebar.port.status.error': 'Error',
       'sidebar.port.status.connected': 'Connected',
@@ -1022,6 +1068,8 @@ const resources = {
       'aliasDialog.input.placeholder': 'Enter alias...',
       'aliasDialog.cancel': 'Cancel',
       'aliasDialog.confirm': 'OK',
+      'confirmDialog.cancel': 'Cancel',
+      'confirmDialog.confirm': 'Confirm',
 
       'mainDisplay.toolbar.splitVertical': 'Split Vertical',
       'mainDisplay.toolbar.splitHorizontal': 'Split Horizontal',
@@ -1035,6 +1083,7 @@ const resources = {
 
       'tabBar.contextMenu.unpin': 'Unpin',
       'tabBar.contextMenu.pin': 'Pin Tab',
+      'tabBar.tabsLabel': 'Workspace tabs',
       'tabBar.contextMenu.close': 'Close',
       'tabBar.contextMenu.closeToRight': 'Close to Right',
       'tabBar.contextMenu.closeToLeft': 'Close to Left',
@@ -1053,6 +1102,8 @@ const resources = {
       'terminalView.saveDialog.title.csv': 'Export as CSV',
       'terminalView.saveDialog.filterName': 'Text Files',
       'terminalView.protocolLabel': 'Protocol:',
+      'terminalView.disconnectedHint': 'Set the port parameters in the operation panel below, then open the port.',
+      'terminalView.connectingHint': 'Opening the port, please wait…',
       'terminalView.protocolNone': '-- None --',
 
       'terminal.search.placeholder': 'Search terminal...',
@@ -1090,6 +1141,8 @@ const resources = {
       'terminal.context.copyAll': 'Copy all',
 
       'operationPanel.title': 'Operation Panel',
+      'operationPanel.clearTitle': 'Clear terminal',
+      'operationPanel.clearMessage': 'This clears the current port display buffer and cannot be undone. Continue?',
       'operationPanel.collapse': 'Collapse',
       'operationPanel.flowBadge': 'Flow running',
       'operationPanel.flowBadgeStep': 'Step {{step}}/{{totalSteps}}',
@@ -1146,6 +1199,8 @@ const resources = {
       'paramsSection.log.openDir': 'Directory',
       'paramsSection.log.notFound': 'No log file found for this port',
       'paramsSection.baudRateLabel': 'Baud Rate:',
+      'paramsSection.modeSwitchTitle': 'Switch working mode',
+      'paramsSection.modeSwitchMessage': 'Switching between TRX and TTY clears the current terminal buffer. Continue?',
       'paramsSection.baudRate.custom': 'Other...',
       'paramsSection.dataBitsLabel': 'Data Bits:',
       'paramsSection.parityLabel': 'Parity:',
@@ -1173,6 +1228,7 @@ const resources = {
       'statusBar.normal': 'Normal',
       'statusBar.connectedCount': '{{count}} Connected',
       'statusBar.noPortSelected': 'No port selected',
+      'statusBar.noTraffic': 'No traffic yet',
       'statusBar.jsHeap': 'JS',
       'statusBar.processMem': 'proc',
 
@@ -1189,6 +1245,9 @@ const resources = {
       'configModal.close': 'Close',
       'configModal.cancel': 'Cancel',
       'configModal.save': 'Save',
+      'configModal.unsaved': 'Unsaved changes',
+      'configModal.saveFailed': 'Save failed. Your draft is preserved; please retry.',
+      'configModal.saveConflict': 'Configuration changed elsewhere. Please retry.',
 
       'generalSettings.title': 'General Settings',
       'generalSettings.closeBehaviorLabel': 'On Close:',
@@ -1297,6 +1356,7 @@ const resources = {
       'displaySettings.background.browseButton': 'Browse...',
       'displaySettings.background.opacityLabel': 'Opacity:',
       'displaySettings.background.blurLabel': 'Blur:',
+      'displaySettings.timestampSectionTitle': 'Timestamps',
       'displaySettings.timestampModeLabel': 'Timestamp Mode:',
       'displaySettings.timestampMode.perLine': 'One timestamp per line',
       'displaySettings.timestampMode.perRound': 'One timestamp per round',
@@ -1476,6 +1536,7 @@ const resources = {
 
       'guide.title': 'No serial ports detected',
       'guide.hint': 'Plug in a USB-to-serial adapter to auto-refresh, or click below to try simulation mode',
+      'guide.hintNoSim': 'Plug in a USB serial adapter to auto-refresh, or refresh from the serial toolbar.',
       'guide.simButton': 'Enable Simulation Mode',
       'guide.quickStartLink': 'First time here? See the quick start guide',
       'guide.quickStart.title': 'Quick Start',
@@ -1491,10 +1552,10 @@ const resources = {
 
       'hotkeys.title': 'Keyboard Shortcuts',
       'hotkeys.clearTerminal': 'Clear terminal',
-      'hotkeys.focusSearch': 'Focus terminal search',
+      'hotkeys.focusSearch': 'Search in terminal (focus terminal first)',
       'hotkeys.toggleConnect': 'Connect/disconnect active port',
       'hotkeys.toggleSidebar': 'Toggle sidebar',
-      'hotkeys.closeModal': 'Close modal/dialog',
+      'hotkeys.closeModal': 'Close the current dialog (where supported)',
       'hotkeys.showHelp': 'Show shortcut help',
       'hotkeys.shortcut': 'Shortcut',
       'hotkeys.action': 'Action',
@@ -1530,6 +1591,10 @@ const resources = {
 
       'notify.title': 'Notifications',
       'notify.clearAll': 'Clear All',
+      'notify.clearTitle': 'Clear notifications',
+      'notify.clearMessage': 'This will delete all {{count}} notifications. Continue?',
+      'notify.openSource': 'Go to source tab',
+      'notify.dismiss': 'Dismiss this notification',
       'notify.empty': 'No notifications yet',
       'notify.openCenter': 'Open notification center',
 
@@ -1595,6 +1660,7 @@ const resources = {
       // issue #17: plugin system
       'plugins.title': 'Plugins',
       'plugins.description': 'Install JS plugins to extend serial features. Workers use declared permissions; views use isolated mode or independently approved trusted webpage mode.',
+      'plugins.instantNote': 'Installing, enabling, granting and uninstalling plugins take effect immediately; the footer Save does not apply to them.',
       'plugins.emptyText': 'No plugins installed yet',
       'plugins.installDirectory': 'Install Directory…',
       'plugins.installZip': 'Install ZIP…',
@@ -1696,6 +1762,12 @@ const resources = {
 // 启动时从 store 读取语言配置；config.language 已是 'zh-CN'/'en-US'。
 const initialLang = useAppStore.getState().config?.language || 'zh-CN';
 
+// 文档语言跟随当前 UI 语言（屏幕阅读器 / 断词 / font fallback）。
+// 测试环境为 node（无 document），仅在浏览器运行时写入。
+function syncDocumentLanguage(language: string): void {
+  if (typeof document !== 'undefined') document.documentElement.lang = language;
+}
+
 i18n.use(initReactI18next).init({
   resources,
   lng: initialLang,
@@ -1706,7 +1778,9 @@ i18n.use(initReactI18next).init({
     // React 已自动转义，关闭 i18next 的转义避免双重处理
     escapeValue: false,
   },
-});
+}).then(() => syncDocumentLanguage(i18n.language));
+
+i18n.on('languageChanged', syncDocumentLanguage);
 
 // ==================== 语言切换效果 ====================
 // 监听 store 中的 config.language 变化并同步到 i18next。
