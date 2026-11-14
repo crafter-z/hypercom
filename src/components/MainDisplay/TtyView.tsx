@@ -22,7 +22,7 @@ import '@xterm/xterm/css/xterm.css';
 import { useAppStore } from '../../stores/useAppStore';
 import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { ttyService } from '../../utils/ttyService';
-import { isFlowRunning } from '../../utils/flowRuntime';
+import { isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
 
 interface TtyViewProps {
   portId: string;
@@ -46,6 +46,8 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const backgroundImageEnabled = useAppStore((s) => s.config.backgroundImageEnabled);
   const theme = useAppStore((s) => s.config.theme);
+  const flowStatus = useFlowStatus(portId);
+  const flowRunning = isFlowRunning(portId);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -241,6 +243,18 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
         <span className="tty-titlebar-label eyebrow">{t('tty.title')}</span>
         <span className="tty-titlebar-port">{portId}</span>
       </div>
+      {flowRunning && (
+        <div className="tty-flow-lock" role="status" aria-live="polite">
+          <span className="tty-flow-lock-dot" aria-hidden="true" />
+          <span>{t('operationPanel.flowBadge')}</span>
+          {flowStatus?.step !== undefined && flowStatus?.totalSteps !== undefined && (
+            <span className="tty-flow-lock-step">
+              {t('operationPanel.flowBadgeStep', { step: flowStatus.step, totalSteps: flowStatus.totalSteps })}
+            </span>
+          )}
+          <span className="tty-flow-lock-hint">{t('tty.flowLocked')}</span>
+        </div>
+      )}
       <div className="tty-container" ref={containerRef} />
     </div>
   );

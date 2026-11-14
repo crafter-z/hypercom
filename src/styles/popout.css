@@ -697,3 +697,14 @@
   align-self: flex-start;
   margin: var(--space-2);
 }
+
+/* Explicit send action: clicking a row only selects it, so a saved command
+ * can never fire from a stray click; the row's send button is the only
+ * pointer path (Enter with the cursor still sends). */
+.quicksend-send-btn {
+  color: var(--accent-color);
+}
+
+.quicksend-send-btn:disabled {
+  color: var(--text-secondary);
+}

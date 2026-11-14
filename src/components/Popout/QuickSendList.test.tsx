@@ -80,7 +80,7 @@ describe('staged popout command list', () => {
   });
 
   it('suppresses row and keyboard sends immediately after editing, and ignores drag-handle Enter', async () => {
-    act(() => { click('.quicksend-row'); });
+    act(() => { click('.quicksend-send-btn'); });
     expect(send).toHaveBeenCalledTimes(1);
     act(() => { click('.quicksend-edit-btn'); });
     act(() => { type(container.querySelector('.quicksend-edit-form textarea') as HTMLTextAreaElement, 'dirty'); });
@@ -163,6 +163,8 @@ describe('staged popout command list', () => {
     const row = host.querySelector<HTMLElement>('.quicksend-row')!;
     expect(row.classList.contains('is-send-disabled')).toBe(false);
     act(() => { row.click(); });
+    expect(execute).not.toHaveBeenCalled();
+    act(() => { (host.querySelector('.quicksend-send-btn') as HTMLButtonElement).click(); });
     expect(execute).toHaveBeenLastCalledWith(paramsSet.commands[0]);
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
     expect(execute).toHaveBeenCalledTimes(2);

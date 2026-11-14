@@ -8,6 +8,7 @@ import { storageService } from '../../services/tauri';
 import { notifySuccess, notifyError } from '../../stores/useToastStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
+import ConfirmDialog from '../shared/ConfirmDialog';
 import { Save, Trash2 } from 'lucide-react';
 
 export interface ParamsSectionProps {
@@ -33,7 +34,6 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const defaultBaudRates = useAppStore(s => s.config.defaultBaudRates);
   const setOpState = useOperationStore(s => s.setOpState);
   // issue #11：端口工作模式切换（trx=传统收发 | tty=终端模式）
-  const activePortId = useAppStore(s => getActivePortId(s));
   const activePortIsReal = useAppStore((s) => {
     const portId = getActivePortId(s);
     return s.ports.find((port) => port.id === portId)?.type === 'real';
@@ -55,6 +55,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const [customBaudInput, setCustomBaudInput] = useState(String(baudRate));
   const [presets, setPresets] = useState<PortPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [pendingMode, setPendingMode] = useState<PortMode | null>(null);
 
   // 外部改 store baudRate（选预设/应用预设）时 draft 跟随；键入期间 baudRate 不变，
   // 此 effect 不会触发，与用户输入天然无冲突。
@@ -143,7 +144,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   // issue #11：切换工作模式 → 落 store + 清屏 + 冲刷 RX 管线残留字节，
   // 避免旧模式 buffered 的数据混入新模式首屏。TRX 侧清 viewport buffer + 冲刷
   // RxPipeline（切 TTY 时销毁 TRX 缓冲）；TTY 侧清 ttyService 屏幕（若已挂 TTY 视图）。
-  const handleModeChange = useCallback((mode: PortMode) => {
+  const applyModeChange = useCallback((mode: PortMode) => {
     const activePortId = getActivePortId(useAppStore.getState());
     if (!activePortId) return;
     setPortMode(activePortId, mode);
@@ -154,7 +155,13 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     }
     getRxPipeline().flushAndReset(activePortId);
     ttyService.clear(activePortId);
-  }, [activePortId, setPortMode]);
+  }, [setPortMode]);
+
+  // Switching mode destroys the current display buffer; confirm first.
+  const handleModeChange = useCallback((mode: PortMode) => {
+    if (!getActivePortId(useAppStore.getState()) || mode === portMode) return;
+    setPendingMode(mode);
+  }, [portMode]);
 
   return (
     <div className="op-section op-section-params">
@@ -260,6 +267,20 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
         <label className="checkbox-wrapper"><input type="checkbox" disabled={!canConfigureSerial} checked={rts} onChange={e => setOpState({ rts: e.target.checked })} /> {t('paramsSection.rts')}</label>
         <label className="checkbox-wrapper op-checkbox-compact"><input type="checkbox" disabled={!isPortActive} checked={ignoreEmptyChars} onChange={e => setOpState({ ignoreEmptyChars: e.target.checked })} /> {t('paramsSection.ignoreEmptyChars')}</label>
       </div>
+      <ConfirmDialog
+        open={pendingMode !== null}
+        title={t('paramsSection.modeSwitchTitle')}
+        message={t('paramsSection.modeSwitchMessage')}
+        confirmLabel={t('confirmDialog.confirm')}
+        cancelLabel={t('confirmDialog.cancel')}
+        danger
+        onConfirm={() => {
+          const mode = pendingMode;
+          setPendingMode(null);
+          if (mode) applyModeChange(mode);
+        }}
+        onCancel={() => setPendingMode(null)}
+      />
     </div>
   );
 };

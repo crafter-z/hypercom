@@ -1,0 +1,62 @@
+/**
+ * Responsive terminal filter strip.
+ * Imported by TerminalFilterBar.tsx so the layout travels with the component.
+ *
+ * The strip lives in a pane that can be as narrow as one half of a split
+ * (~650px). The bar is an inline-size container; below 900px the action
+ * cluster (pause / ASCII-noise / pin / timestamp / wrap / HEX-text /
+ * encoding) moves to its own full-width row instead of competing with the
+ * direction + keyword group for the same line. Every control stays reachable
+ * — nothing is hidden or removed.
+ *
+ * main.tsx imports App before its global stylesheet, so component CSS can be
+ * injected *before* terminal-view.css. These selectors therefore out-specify
+ * their terminal-view.css counterparts instead of relying on import order,
+ * and never use !important.
+ */
+
+.terminal-filter-bar {
+  container-type: inline-size;
+  container-name: terminal-filter;
+}
+
+/* Primary cluster: view/timeline entries + direction + keyword + match count.
+ * Grouped so the responsive rule below can fold the action cluster onto its
+ * own row without also folding the keyword filter off-screen. */
+.terminal-filter-bar .terminal-filter-main {
+  display: flex;
+  align-items: center;
+  flex: 1 1 260px;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+/* Keyword input keeps its previous sizing now that it is no longer a direct
+ * child of the bar (the old rule targeted `.terminal-filter-bar > ...`). */
+.terminal-filter-bar .terminal-filter-main > .toolbar-input {
+  flex: 1 1 100px;
+  min-width: min(80px, 100%);
+  max-width: 240px;
+}
+
+.terminal-filter-bar .terminal-filter-main > .plugin-view-picker {
+  flex: 0 1 auto;
+  max-width: min(120px, 100%);
+}
+
+/* Narrow pane: at most two chrome rows.
+ * Row 1 = view/timeline + direction + keyword (+ match count)
+ * Row 2 = the full action cluster, left-aligned so `margin-left: auto` can
+ * never push it past the right border of the pane. */
+@container terminal-filter (max-width: 900px) {
+  .terminal-filter-bar .terminal-filter-main {
+    flex-basis: 100%;
+  }
+
+  .terminal-filter-bar .terminal-filter-actions {
+    flex: 1 1 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+}

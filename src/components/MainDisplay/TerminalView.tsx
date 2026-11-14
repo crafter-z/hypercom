@@ -22,10 +22,12 @@
  */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpToLine, ArrowDownToLine } from 'lucide-react';
+import { ArrowUpToLine, ArrowDownToLine, Cable } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
+import { useSerialConnection } from '../../hooks';
+import '../../styles/terminal-empty.css';
 import { getViewportManager, type TerminalViewportManager } from '../../utils/terminal/viewportManager';
 import type { TerminalState } from '../../types';
 import { TerminalRenderer, type RendererConfig } from '../../utils/terminal/TerminalRenderer';
@@ -64,6 +66,8 @@ const SETTLE_MS = 120;
 
 const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, manager, terminalConfig, onTerminalConfigChange, timelineClockId, timelineEnabled = true, onUserNavigation, hidden }) => {
   const { t } = useTranslation();
+  const portStatus = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.status : undefined));
+  const { toggleConnection } = useSerialConnection();
   const containerRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null);
@@ -622,6 +626,30 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           onPointerCancel={handlePointerUp}
           onClick={handleRowClick}
         />
+        {portId && portStatus !== 'connected' && (
+          <div className="terminal-empty" role="status" aria-live="polite">
+            <div className="terminal-empty-card">
+              <Cable size={22} className="terminal-empty-icon" aria-hidden="true" />
+              <div className="terminal-empty-title">
+                {t(`sidebar.port.status.${portStatus ?? 'disconnected'}`)}
+              </div>
+              <div className="terminal-empty-hint">
+                {portStatus === 'connecting'
+                  ? t('terminalView.connectingHint')
+                  : t('terminalView.disconnectedHint')}
+              </div>
+              {portStatus !== 'connecting' && (
+                <button
+                  type="button"
+                  className="btn btn-primary terminal-empty-connect"
+                  onClick={() => { void toggleConnection(portId); }}
+                >
+                  {t('sendSection.connectBtn.open')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         <button
           type="button"
           className="terminal-jump-btn top"

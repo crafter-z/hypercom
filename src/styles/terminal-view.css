@@ -46,8 +46,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
   padding: 0;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -122,8 +124,7 @@
 }
 
 .terminal-timestamp-muted {
-  color: var(--text-secondary);
-  opacity: 0.4;
+  color: var(--text-tertiary);
 }
 
 .terminal-direction {
@@ -387,54 +388,38 @@
 
 /* ==================== Terminal Row Selection / Match ==================== */
 .terminal-line.selected {
-  background: rgba(79, 195, 247, 0.14);
+  background: color-mix(in srgb, var(--accent-color) 16%, transparent);
   box-shadow: inset 3px 0 0 var(--accent-color);
 }
 
-:root[data-theme="light"] .terminal-line.selected {
-  background: rgba(2, 136, 209, 0.14);
-}
-
 .terminal-line.search-hit-line {
-  background: rgba(220, 220, 170, 0.10);
-}
-
-:root[data-theme="light"] .terminal-line.search-hit-line {
-  background: rgba(255, 235, 59, 0.18);
+  background: color-mix(in srgb, var(--mark-bg) 30%, transparent);
 }
 
 .terminal-line.current-match {
-  background: rgba(220, 220, 170, 0.22);
-  box-shadow: inset 3px 0 0 var(--text-warning);
-}
-
-:root[data-theme="light"] .terminal-line.current-match {
-  background: rgba(255, 235, 59, 0.32);
+  background: color-mix(in srgb, var(--mark-bg-current) 32%, transparent);
+  box-shadow: inset 3px 0 0 var(--mark-bg-current);
 }
 
 /* Selected + match combo: selection takes priority visually */
 .terminal-line.selected.search-hit-line,
 .terminal-line.selected.current-match {
-  background: rgba(79, 195, 247, 0.20);
+  background: color-mix(in srgb, var(--accent-color) 24%, transparent);
 }
 
 /* Character-level search highlight (issue #2-8): <mark> wraps the exact
  * query occurrences inside a hit line, layered over user highlights and
- * protocol coloring. The current-match line gets a stronger fill. */
+ * protocol coloring. The current-match line gets a stronger fill and dark
+ * ink; the explicit color beats the inherited TX/RX/ANSI direction color
+ * (including inline styles on ancestor spans). */
 .terminal-search-mark {
-  background: rgba(220, 220, 170, 0.30);
-  color: inherit;
+  background: var(--mark-bg);
+  color: var(--mark-fg);
   border-radius: 2px;
 }
 
-.terminal-line.current-match .terminal-search-mark {
-  background: rgba(255, 193, 7, 0.55);
-}
-
-:root[data-theme="light"] .terminal-search-mark {
-  background: rgba(255, 235, 59, 0.45);
-}
-
-:root[data-theme="light"] .terminal-line.current-match .terminal-search-mark {
-  background: rgba(255, 152, 0, 0.45);
+.terminal-line.current-match .terminal-search-mark,
+.terminal-search-mark.current {
+  background: var(--mark-bg-current);
+  color: var(--mark-fg-current);
 }

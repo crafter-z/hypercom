@@ -185,45 +185,49 @@ const SendSection: React.FC<SendSectionProps> = ({
         </div>
       </div>
 
-      {/* 增强流程状态条：显示当前阶段、轮次/步骤进度与终止原因；终止态保留到
-          用户清除，避免「流程为什么停了」无从查起。运行中不提供暂停，只有停止
-          （标题行的循环开关即该端口的停止入口）。 */}
-      {flowStatus && (
-        <div className={`op-flow-status is-${flowStatus.phase}`} role="status">
-          <span className="op-flow-status-dot" aria-hidden="true" />
-          <span className="op-flow-status-text">
-            {t(flowPhaseKey(flowStatus.phase), { detail: flowStatus.detail ?? '' })}
-          </span>
-          {flowStatus.name && flowStatus.round !== undefined && flowStatus.step !== undefined && (
-            <span className="op-flow-status-progress">
-              {t(flowStatus.totalRounds ? 'flow.status.progress' : 'flow.status.progressOpen', {
-                name: flowStatus.name,
-                round: flowStatus.round,
-                total: flowStatus.totalRounds ?? 0,
-                step: flowStatus.step,
-                totalSteps: flowStatus.totalSteps ?? 0,
-              })}
+      {/* 次要内容容器：流程状态条 + 快捷发送条。面板被拖矮时这一块自己滚动/
+          收缩，下面的发送行（主操作列）固定保留可见，绝不被挤出面板。 */}
+      <div className="op-send-secondary">
+        {/* 增强流程状态条：显示当前阶段、轮次/步骤进度与终止原因；终止态保留到
+            用户清除，避免「流程为什么停了」无从查起。运行中不提供暂停，只有停止
+            （标题行的循环开关即该端口的停止入口）。 */}
+        {flowStatus && (
+          <div className={`op-flow-status is-${flowStatus.phase}`} role="status">
+            <span className="op-flow-status-dot" aria-hidden="true" />
+            <span className="op-flow-status-text">
+              {t(flowPhaseKey(flowStatus.phase), { detail: flowStatus.detail ?? '' })}
             </span>
-          )}
-          {!flowBusy && (
-            <button
-              type="button"
-              className="btn btn-sm op-flow-status-dismiss"
-              onClick={() => clearFlowStatus(flowStatus.portId, flowStatus.runId)}
-            >
-              {t('flow.status.dismiss')}
-            </button>
-          )}
-        </div>
-      )}
+            {flowStatus.name && flowStatus.round !== undefined && flowStatus.step !== undefined && (
+              <span className="op-flow-status-progress">
+                {t(flowStatus.totalRounds ? 'flow.status.progress' : 'flow.status.progressOpen', {
+                  name: flowStatus.name,
+                  round: flowStatus.round,
+                  total: flowStatus.totalRounds ?? 0,
+                  step: flowStatus.step,
+                  totalSteps: flowStatus.totalSteps ?? 0,
+                })}
+              </span>
+            )}
+            {!flowBusy && (
+              <button
+                type="button"
+                className="btn btn-sm op-flow-status-dismiss"
+                onClick={() => clearFlowStatus(flowStatus.portId, flowStatus.runId)}
+              >
+                {t('flow.status.dismiss')}
+              </button>
+            )}
+          </div>
+        )}
 
-      <QuickSendStrip
-        commands={activeCommands}
-        isPortActive={isPortActive}
-        isBusy={flowBusy}
-        onSendCommand={handleQuickCommand}
-        onConfigure={() => openConfigToTab('commands')}
-      />
+        <QuickSendStrip
+          commands={activeCommands}
+          isPortActive={isPortActive}
+          isBusy={flowBusy}
+          onSendCommand={handleQuickCommand}
+          onConfigure={() => openConfigToTab('commands')}
+        />
+      </div>
 
       <div className="op-send-row">
         <textarea

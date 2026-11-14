@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { flushSync } from 'react-dom';
-import { ArrowDownToLine, ArrowUpToLine, Pencil, Plus, Save, Search, Trash2, Undo2 } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, Pencil, Plus, Save, Search, Send, Trash2, Undo2 } from 'lucide-react';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { orderedCommands, renumberCommands } from '../../utils/commandOrder';
 import {
@@ -223,7 +223,9 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
           renderItem={(command, index, handle) => <div
             className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled || !isExecutableCommand(command) ? ' is-send-disabled' : ''}`}
             role="group" aria-label={command.name}
-            onMouseEnter={() => setCursor(index)} onClick={() => { if (!sendDisabled && isExecutableCommand(command)) onSend(command); }} title={commandStepSummary(command)}>
+            onMouseEnter={() => setCursor(index)} onClick={() => setCursor(index)}
+            onDoubleClick={() => { if (!sendDisabled && isExecutableCommand(command)) onSend(command); }}
+            title={commandStepSummary(command)}>
             <div className="quicksend-row-head">
               {handle}<span className="quicksend-name">{command.name || commandStepSummary(command)}</span>
               {commandStepBadgeKey(command)
@@ -259,6 +261,7 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
               </div>}
             </fieldset> : <span className="quicksend-content">{commandStepSummary(command)}</span>}
             <div className="quicksend-command-actions" onClick={event => event.stopPropagation()}>
+              <button type="button" className="icon-btn quicksend-send-btn" disabled={sendDisabled || !isExecutableCommand(command)} title={t('sendSection.sendButton')} aria-label={t('sendSection.sendButton')} onClick={() => onSend(command)}><Send size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={() => insertCommand(command.id)}><ArrowUpToLine size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={() => insertCommand(commands[commands.findIndex(item => item.id === command.id) + 1]?.id)}><ArrowDownToLine size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('sendCmdEditor.delete')} aria-label={t('sendCmdEditor.delete')} onClick={() => updateSet({ commands: renumberCommands(commands.filter(item => item.id !== command.id)) })}><Trash2 size={12} /></button>

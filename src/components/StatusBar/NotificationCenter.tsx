@@ -1,8 +1,10 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Bell, Pin, Trash2 } from 'lucide-react';
+import { Bell, Pin, Trash2, X } from 'lucide-react';
 import type { ToastItem } from '../../stores/useToastStore';
 import { useToastStore } from '../../stores/useToastStore';
+import { getTabPortId, useAppStore } from '../../stores/useAppStore';
+import ConfirmDialog from '../shared/ConfirmDialog';
 import { useOutsideDismiss } from '../shared/useOutsideDismiss';
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 
@@ -34,6 +36,9 @@ const NotificationCenter: React.FC = () => {
   const setCenterOpen = useToastStore((s) => s.setCenterOpen);
   const clearAll = useToastStore((s) => s.clearAll);
   const dismiss = useToastStore((s) => s.dismiss);
+  const tabs = useAppStore((s) => s.tabs);
+  const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const [clearConfirm, setClearConfirm] = useState(false);
   const overlayReady = usePluginViewOverlay(centerOpen);
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -72,7 +77,7 @@ const NotificationCenter: React.FC = () => {
             <button
               type="button"
               className="notify-clear-all"
-              onClick={clearAll}
+              onClick={() => setClearConfirm(true)}
               disabled={count === 0}
             >
               <Trash2 size={12} />
@@ -85,13 +90,29 @@ const NotificationCenter: React.FC = () => {
             <div className="notify-list">
               {all.map((toast) => {
                 const text = toast.messageKey ? t(toast.messageKey) : (toast.message ?? '');
+                const openSource = () => {
+                  if (!toast.portId) return;
+                  const tab = tabs.find((item) => getTabPortId(item) === toast.portId);
+                  if (tab) {
+                    setActiveTab(tab.id);
+                    setCenterOpen(false);
+                  }
+                };
                 return (
-                  <button
+                  <div
                     key={toast.id}
-                    type="button"
                     className={`notify-row notify-${toast.severity}`}
-                    title={t('toast.close')}
-                    onClick={() => dismiss(toast.id)}
+                    role={toast.portId ? 'button' : 'group'}
+                    tabIndex={toast.portId ? 0 : -1}
+                    title={toast.portId ? t('notify.openSource') : undefined}
+                    onClick={openSource}
+                    onKeyDown={(event) => {
+                      if (!toast.portId) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openSource();
+                      }
+                    }}
                   >
                     {toast.title && <div className="notify-row-title">{toast.title}</div>}
                     <div className="notify-row-msg">{text}</div>
@@ -101,14 +122,33 @@ const NotificationCenter: React.FC = () => {
                       {toast.portId && <span className="notify-row-port">{toast.portId}</span>}
                       <span className="notify-row-time">{formatNotifyTime(toast.createdAt)}</span>
                       {toast.durationMs === 0 && <Pin size={10} aria-hidden="true" />}
+                      <button
+                        type="button"
+                        className="notify-row-dismiss"
+                        title={t('notify.dismiss')}
+                        aria-label={t('notify.dismiss')}
+                        onClick={(event) => { event.stopPropagation(); dismiss(toast.id); }}
+                      >
+                        <X size={11} />
+                      </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
           )}
         </div>
       )}
+      <ConfirmDialog
+        open={clearConfirm}
+        title={t('notify.clearTitle')}
+        message={t('notify.clearMessage', { count })}
+        confirmLabel={t('confirmDialog.confirm')}
+        cancelLabel={t('confirmDialog.cancel')}
+        danger
+        onConfirm={() => { setClearConfirm(false); clearAll(); }}
+        onCancel={() => setClearConfirm(false)}
+      />
     </div>
   );
 };

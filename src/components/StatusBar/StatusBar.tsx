@@ -141,7 +141,7 @@ const StatusBar: React.FC = () => {
   return (
     <>
     <DisconnectBanner />
-    <div className="statusbar">
+    <footer className="statusbar">
       <div className="statusbar-left">
         <span className="statusbar-item">
           <span className={systemStatus.status === 'high_load' ? 'statusbar-dot warning' : 'statusbar-dot'} />
@@ -194,6 +194,8 @@ const StatusBar: React.FC = () => {
               RX: {formatBytes(activeTraffic.rxTotal)}
             </span>
           </>
+        ) : activePortId ? (
+          <span className="statusbar-item">{t('statusBar.noTraffic')}</span>
         ) : (
           <span className="statusbar-item">{t('statusBar.noPortSelected')}</span>
         )}
@@ -202,7 +204,7 @@ const StatusBar: React.FC = () => {
           {now.toLocaleTimeString(i18n.language === 'en-US' ? 'en-US' : 'zh-CN')}
         </span>
       </div>
-    </div>
+    </footer>
     </>
   );
 };

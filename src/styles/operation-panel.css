@@ -654,3 +654,49 @@
 
 /* Strip separators and the HEX/string switch use the .toolbar-sep and
  * .segmented/.segmented-btn primitives from base.css directly. */
+
+/* ==================== Short-panel priority layout ====================
+ * The default 280px panel height must never clip the primary send column
+ * (Send / Send File / HEX / clear-after-send / line ending). The compose row
+ * is therefore pinned (it keeps at least its content height), the textarea
+ * absorbs the leftover height and scrolls its own text, and the secondary
+ * block above it (flow status + quick-send strip) takes the remaining space
+ * and scrolls when the panel is dragged shorter still. Rules live after the
+ * generic `.op-section > *` shrink guard, and target the send section by ID
+ * class so params section scrolling is untouched. */
+.op-section-send {
+  overflow: hidden;
+}
+
+.op-section-send > .op-send-secondary {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.op-section-send > .op-send-secondary > * {
+  flex-shrink: 0;
+}
+
+/* The wrapper already supplies the column gap — drop the status bar's own
+ * vertical margins so the secondary block stays compact at 280px. */
+.op-section-send > .op-send-secondary > .op-flow-status {
+  margin: 0;
+}
+
+/* Compose row: never collapses below its content (the action column is the
+ * tallest part, so this equals "actions always visible"); extra height goes
+ * to the textarea, which scrolls internally once its text overflows. */
+.op-section-send > .op-send-row {
+  flex: 1 1 auto;
+  min-height: min-content;
+}
+
+.op-section-send .op-send-input {
+  min-height: 52px;
+  overflow-y: auto;
+}

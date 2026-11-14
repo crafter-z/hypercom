@@ -15,6 +15,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import type { DisplayFormat, Encoding, TerminalState } from '../../types';
 import type { DirectionFilter } from '../../utils/lineFilter';
+import '../../styles/terminal-filter.css';
 
 const DIRECTION_LABEL_KEYS: Record<DirectionFilter, string> = {
   all: 'terminal.filter.all',
@@ -106,30 +107,36 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
 
   return (
     <div className="terminal-filter-bar">
-      {viewPicker}
-      {timelineControl}
-      <select
-        className="select terminal-bar-select terminal-direction-select"
-        aria-label={t('terminal.filter.direction')}
-        title={t('terminal.filter.direction')}
-        value={direction}
-        onChange={event => onDirectionChange(event.target.value as DirectionFilter)}
-      >
-        {DIRECTION_OPTIONS.map(d => <option key={d} value={d}>{t(DIRECTION_LABEL_KEYS[d])}</option>)}
-      </select>
-      <input
-        type="text"
-        className="toolbar-input"
-        value={keyword}
-        placeholder={t('terminal.filter.keywordPlaceholder')}
-        onChange={(e) => onKeywordChange(e.target.value)}
-        onKeyDown={handleKeyDown}
-      />
-      {showMatchCount && (
-        <span className={`chip terminal-filter-count${matchCount === 0 ? ' no-results' : ''}`}>
-          {t('terminal.filter.matchCount', { count: matchCount })}
-        </span>
-      )}
+      {/* Primary cluster: view picker / timeline entry / direction / keyword.
+          Kept together so the responsive rules can put the action cluster on
+          its own full-width row in a narrow split pane instead of letting it
+          shrink past the right edge. */}
+      <div className="terminal-filter-main">
+        {viewPicker}
+        {timelineControl}
+        <select
+          className="select terminal-bar-select terminal-direction-select"
+          aria-label={t('terminal.filter.direction')}
+          title={t('terminal.filter.direction')}
+          value={direction}
+          onChange={event => onDirectionChange(event.target.value as DirectionFilter)}
+        >
+          {DIRECTION_OPTIONS.map(d => <option key={d} value={d}>{t(DIRECTION_LABEL_KEYS[d])}</option>)}
+        </select>
+        <input
+          type="text"
+          className="toolbar-input"
+          value={keyword}
+          placeholder={t('terminal.filter.keywordPlaceholder')}
+          onChange={(e) => onKeywordChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+        {showMatchCount && (
+          <span className={`chip terminal-filter-count${matchCount === 0 ? ' no-results' : ''}`}>
+            {t('terminal.filter.matchCount', { count: matchCount })}
+          </span>
+        )}
+      </div>
       <div className="terminal-filter-actions">
         {paused && (
           <span className="terminal-filter-paused">

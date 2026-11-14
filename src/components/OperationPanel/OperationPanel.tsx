@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useSyncExternalStore } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { useOperationStore } from '../../stores/useOperationStore';
@@ -7,6 +7,7 @@ import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
 import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import ReplayImportDialog from './ReplayImportDialog';
+import ConfirmDialog from '../shared/ConfirmDialog';
 import { ChevronDown, Cable, Eraser, Save, FolderOpen, FileSearch, History, Type, Square } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SendSection from './SendSection';
@@ -62,6 +63,7 @@ const OperationPanel: React.FC = () => {
   const rawPortId = activeTab?.kind === 'serial' && isRawSerialDisplay(activeTab) ? activeTab.portId : null;
   const collapsed = useSystemStore(s => s.ui.isOperationPanelCollapsed);
   const panelHeight = useSystemStore(s => s.ui.operationPanelHeight);
+  const [confirmClear, setConfirmClear] = useState(false);
   const dataBits = useOperationStore(s => s.dataBits);
   const parity = useOperationStore(s => s.parity);
   const stopBits = useOperationStore(s => s.stopBits);
@@ -246,6 +248,12 @@ const OperationPanel: React.FC = () => {
   const handleClear = () => {
     const state = useAppStore.getState();
     const tab = state.tabs.find((item) => item.id === state.activeTabId);
+    if (tab?.kind === 'serial' && isRawSerialDisplay(tab)) setConfirmClear(true);
+  };
+
+  const doClear = () => {
+    const state = useAppStore.getState();
+    const tab = state.tabs.find((item) => item.id === state.activeTabId);
     if (tab?.kind === 'serial' && isRawSerialDisplay(tab)) clearTerminal(tab.portId);
   };
 
@@ -358,6 +366,16 @@ const OperationPanel: React.FC = () => {
           </div>
         </>
       )}
+      <ConfirmDialog
+        open={confirmClear}
+        title={t('operationPanel.clearTitle')}
+        message={t('operationPanel.clearMessage')}
+        confirmLabel={t('confirmDialog.confirm')}
+        cancelLabel={t('confirmDialog.cancel')}
+        danger
+        onConfirm={() => { setConfirmClear(false); doClear(); }}
+        onCancel={() => setConfirmClear(false)}
+      />
     </div>
   );
 };

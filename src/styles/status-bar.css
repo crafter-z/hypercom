@@ -65,8 +65,8 @@
   gap: var(--space-2);
   height: 28px;
   padding: 0 var(--space-3);
-  background: var(--status-error);
-  color: #ffffff;
+  background: var(--status-error-solid);
+  color: var(--text-on-accent);
   font-size: var(--text-sm);
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
@@ -89,11 +89,12 @@
 .disconnect-banner-view-btn {
   display: inline-flex;
   align-items: center;
+  min-height: 24px;
   padding: 2px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: var(--border-radius);
   background: transparent;
-  color: #ffffff;
+  color: var(--text-on-accent);
   font-size: var(--text-sm);
   cursor: pointer;
   transition: background var(--transition-fast);

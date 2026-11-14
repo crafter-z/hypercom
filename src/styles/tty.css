@@ -64,3 +64,35 @@
 .tty-view-hidden {
   display: none;
 }
+/* Enhanced flow owns the port's TX: keystrokes are dropped. Make that explicit
+ * instead of leaving a silently dead terminal. */
+.tty-flow-lock {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  margin-bottom: var(--space-2);
+  padding: 4px var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--text-warning) 45%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text-warning) 12%, transparent);
+  color: var(--text-warning);
+  font-size: var(--text-xs);
+}
+
+.tty-flow-lock-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tty-flow-lock-step {
+  font-family: var(--font-terminal);
+  font-variant-numeric: tabular-nums;
+}
+
+.tty-flow-lock-hint {
+  margin-left: auto;
+  color: var(--text-secondary);
+}
