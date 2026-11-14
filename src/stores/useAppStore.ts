@@ -39,6 +39,7 @@ import {
   newPaneId,
   pruneTree,
 } from '../utils/paneTree';
+import { DEFAULT_TERMINAL_FONT, DEFAULT_UI_FONT } from '../utils/fontDefaults';
 
 // ==================== 默认配置 ====================
 
@@ -52,9 +53,9 @@ const defaultConfig: AppConfig = {
   preventSleep: false,
   autoReconnect: false,
   maxRetries: 3,
-  terminalFont: 'Consolas, monospace',
+  terminalFont: DEFAULT_TERMINAL_FONT,
   terminalFontSize: 14,
-  uiFont: 'Inter, sans-serif',
+  uiFont: DEFAULT_UI_FONT,
   uiFontSize: 14,
   uiScalePercent: 100,
   // 背景图（issue #13）：默认关闭；启用后全窗毛玻璃（透明度 50%，模糊 0px 起步）。

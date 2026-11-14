@@ -22,6 +22,7 @@ import { saveSessionSnapshot, subscribeSessionDescriptors } from './utils/sessio
 import { setupDiagLogCapture, setDiagLogForwardEnabled } from './utils/diagLog';
 import { computeBufferLimits, getManagerPortIds, getViewportManager } from './utils/terminal/viewportManager';
 import { applyUiScale } from './utils/uiScale';
+import { DEFAULT_TERMINAL_FONT } from './utils/fontDefaults';
 import { startPluginViewRuntime } from './utils/pluginViewRuntime';
 import { startPluginViewOverlayGuard } from './utils/pluginViewOverlay';
 import { EditorLeaveDialog, useEditorWindowClose } from './components/shared/EditorLeaveDialog';
@@ -41,7 +42,7 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
   render() {
     if (this.state.hasError) {
       return (
-        <div style={{ width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1e1e1e', color: '#ccc', fontFamily: 'Consolas, monospace', fontSize: 14, flexDirection: 'column', gap: 12 }}>
+        <div style={{ width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1e1e1e', color: '#ccc', fontFamily: DEFAULT_TERMINAL_FONT, fontSize: 14, flexDirection: 'column', gap: 12 }}>
           <div style={{ color: '#f48771', fontSize: 18, fontWeight: 'bold' }}>{i18n.t('app.errorBoundary.title')}</div>
           <div style={{ maxWidth: 600, background: '#2d2d30', padding: 16, borderRadius: 6, overflow: 'auto', maxHeight: '50vh' }}>
             <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>

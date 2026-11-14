@@ -105,8 +105,8 @@
   /* A hairline light edge along the top of raised surfaces — cheap depth. */
   --edge-top: inset 0 1px 0 rgba(255,255,255,0.045);
 
-  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-terminal: 'JetBrains Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Courier New', monospace;
+  --font-ui: Inter, "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  --font-terminal: Consolas, "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", monospace;
   --font-size-ui: var(--text-md);
   --font-size-terminal: var(--text-lg);
   --line-height-terminal: 1.5;
