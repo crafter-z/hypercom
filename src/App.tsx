@@ -1,4 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { emit, listen } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-shell';
 import i18n from './i18n';
 import TitleBar from './components/TitleBar/TitleBar';
 import Sidebar from './components/Sidebar/Sidebar';
@@ -74,6 +76,56 @@ const App: React.FC = () => {
   usePopoutBridge();
   useHotkeys();
   usePowerManagement();
+  const helpLanguage = useAppStore((s) => s.config.language);
+  const helpTheme = useAppStore((s) => s.config.theme);
+  const helpUiScalePercent = useAppStore((s) => s.config.uiScalePercent);
+  const helpSettingsRef = useRef({ language: helpLanguage, theme: helpTheme, uiScalePercent: helpUiScalePercent });
+  helpSettingsRef.current = { language: helpLanguage, theme: helpTheme, uiScalePercent: helpUiScalePercent };
+  // Help popouts have no shell capability. The main window validates and relays
+  // explicit user-clicked external links on their behalf.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen('help:settings-request', () => {
+      if (!disposed) void emit('help:settings', helpSettingsRef.current);
+    }).then(stop => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(error => console.debug('[App] Help settings listener failed:', error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    void emit('help:settings', helpSettingsRef.current).catch(error => console.debug('[App] Help settings broadcast failed:', error));
+  }, [helpLanguage, helpTheme, helpUiScalePercent]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const isSafeExternalUrl = (value: unknown): value is string => {
+      if (typeof value !== 'string' || value.length > 2048) return false;
+      try {
+        const url = new URL(value);
+        return url.protocol === 'https:' || url.protocol === 'http:' || url.protocol === 'mailto:';
+      } catch {
+        return false;
+      }
+    };
+    void listen<{ url?: unknown }>('help:external-link', event => {
+      if (disposed || !isSafeExternalUrl(event.payload?.url)) return;
+      void open(event.payload.url).catch(error => console.debug('[App] Help external link failed:', error));
+    }).then(stop => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(error => console.debug('[App] Help external-link listener failed:', error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   // issue #12：启动自动更新检查（仅主窗）。
   useAutoUpdate();
   // issue #17：插件宿主装配（主窗单例——worker 生命周期 + RX 批转发 + config 同步）。

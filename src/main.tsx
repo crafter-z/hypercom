@@ -11,6 +11,8 @@ import "./i18n"; // 初始化 i18next + react-i18next (副作用导入)
 const params = new URLSearchParams(window.location.search);
 const popoutKind = params.get("popout");
 const popoutTargetId = params.get("id");
+const popoutArticleId = params.get("article");
+const popoutAnchor = params.get("anchor");
 
 const rootElement = document.getElementById("root") as HTMLElement;
 
@@ -18,7 +20,7 @@ ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     {popoutKind != null ? (
       <ThemeProvider>
-        <PopoutShell kind={popoutKind} targetId={popoutTargetId} />
+        <PopoutShell kind={popoutKind} targetId={popoutTargetId} articleId={popoutArticleId} anchor={popoutAnchor} />
       </ThemeProvider>
     ) : (
       <App />

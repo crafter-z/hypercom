@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { popoutService } from './popout';
+import { listen } from '@tauri-apps/api/event';
+import type { Event } from '@tauri-apps/api/event';
+import { popoutEventService, popoutService } from './popout';
 import { useAppStore } from '../stores/useAppStore';
 import { resetStoresForTests } from '../stores/resetStores';
 
@@ -26,6 +28,7 @@ beforeEach(() => {
 afterEach(async () => {
   await popoutService.closePopout('terminal', 'COM1');
   await popoutService.closePopout('terminal', 'COM2');
+  await popoutService.closePopout('help');
 });
 
 describe('native popout desired-state lane', () => {
@@ -90,5 +93,37 @@ describe('native popout desired-state lane', () => {
     expect(windows.has('COM2')).toBe(true);
     creating.resolve();
     await old;
+  });
+
+  it('keeps help targets on one singleton lane', async () => {
+    const creating = deferred<void>();
+    vi.mocked(invoke).mockImplementationOnce(async () => { await creating.promise; windows.add('help'); });
+    const first = popoutService.openHelp('quick-start', 'connect');
+    const second = popoutService.openHelp('serial', 'groups');
+    expect(invoke).toHaveBeenCalledTimes(1);
+    creating.resolve();
+    await Promise.all([first, second]);
+    expect(vi.mocked(invoke).mock.calls.map(([command, args]) => [command, (args as { targetId?: string }).targetId])).toEqual([
+      ['open_popout', 'quick-start#connect'],
+      ['open_popout', 'serial#groups'],
+    ]);
+  });
+
+  it('rejects an anchor without an article before invoking native code', () => {
+    expect(() => popoutService.openHelp(null, 'connect')).toThrow('Help anchor requires an article id');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('exposes the help:open event payload for an existing singleton', async () => {
+    const receive = vi.fn();
+    const stop = vi.fn();
+    let callback!: (event: Event<{ articleId: string | null; anchor: string | null }>) => void;
+    vi.mocked(listen).mockImplementationOnce((_name, handler) => {
+      callback = handler;
+      return Promise.resolve(stop);
+    });
+    await popoutEventService.onHelpOpen(receive);
+    callback({ event: 'help:open', id: 1, payload: { articleId: 'serial', anchor: 'groups' } });
+    expect(receive).toHaveBeenCalledWith({ articleId: 'serial', anchor: 'groups' });
   });
 });

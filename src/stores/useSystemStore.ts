@@ -22,6 +22,8 @@ const defaultUIState: UIState = {
   isOperationPanelCollapsed: false,
   isHotkeyHelpOpen: false,
   isAboutOpen: false,
+  isHelpOpen: false,
+  helpArticleId: null,
   sidebarCollapsed: false,
   // issue #12：更新弹窗初始关闭、无候选更新。
   isUpdateOpen: false,

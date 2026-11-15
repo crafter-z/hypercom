@@ -18,6 +18,8 @@ import type { EntityEditorSnapshot } from '../utils/entityEditor';
 
 interface PopoutLane {
   desiredOpen: boolean;
+  /** Latest native target; singleton help updates this between queued opens. */
+  targetId: string | null;
   revision: number;
   closing: boolean;
   ignoreNativeClose: boolean;
@@ -27,13 +29,17 @@ const lanes = new Map<string, PopoutLane>();
 
 /** Desired state changes immediately; one lane owns native open/close order. */
 function transitionPopout(kind: string, targetId: string | null, open: boolean, isDesired?: () => boolean): Promise<void> {
-  const key = JSON.stringify([kind, kind === 'quick-send' ? null : targetId]);
+  // quick-send and help are singleton windows. Help's article/anchor target is
+  // intentionally not part of the lane key; a later open updates the existing
+  // native window through `help:open` rather than creating another WebView.
+  const key = JSON.stringify([kind, kind === 'quick-send' || kind === 'help' ? null : targetId]);
   let lane = lanes.get(key);
   if (!lane) {
-    lane = { desiredOpen: open, revision: 0, closing: false, ignoreNativeClose: !open, pending: null };
+    lane = { desiredOpen: open, targetId, revision: 0, closing: false, ignoreNativeClose: !open, pending: null };
     lanes.set(key, lane);
   }
   lane.desiredOpen = open;
+  lane.targetId = targetId;
   if (!open) lane.ignoreNativeClose = true;
   lane.revision++;
   if (lane.pending) return lane.pending;
@@ -43,6 +49,7 @@ function transitionPopout(kind: string, targetId: string | null, open: boolean, 
     for (;;) {
       const revision = owner.revision;
       const desiredOpen = owner.desiredOpen;
+      const targetId = owner.targetId;
       if (desiredOpen) {
         if (isDesired && !isDesired()) {
           owner.desiredOpen = false;
@@ -88,10 +95,25 @@ function transitionPopout(kind: string, targetId: string | null, open: boolean, 
   });
   return pending;
 }
+function encodeHelpTarget(articleId: string | null | undefined, anchor: string | null | undefined): string | null {
+  const article = articleId ?? null;
+  const fragment = anchor ?? null;
+  if (article === null) {
+    if (fragment !== null) throw new Error('Help anchor requires an article id');
+    return null;
+  }
+  return fragment === null ? article : `${article}#${fragment}`;
+}
+
 export const popoutService = {
-  /** 打开（或聚焦已存在的）弹出窗。kind: "quick-send" | "terminal"。 */
+  /** 打开（或聚焦已存在的）弹出窗。kind: "quick-send" | "terminal" | "help"。 */
   openPopout: (kind: string, targetId?: string | null, isDesired?: () => boolean): Promise<void> => {
     return transitionPopout(kind, targetId ?? null, true, isDesired);
+  },
+
+  /** Open/focus the singleton native help window at an optional article anchor. */
+  openHelp: (articleId?: string | null, anchor?: string | null, isDesired?: () => boolean): Promise<void> => {
+    return transitionPopout('help', encodeHelpTarget(articleId, anchor), true, isDesired);
   },
 
   /**
@@ -139,6 +161,12 @@ export type PopoutSendCommandPayload = {
 /** 弹窗请求主窗打开 ConfigModal 指定页（如 'commands'）。 */
 export interface PopoutOpenConfigPayload {
   page: string;
+}
+
+/** Native help singleton target. Rust emits this when an existing help window is reused. */
+export interface PopoutHelpOpenPayload {
+  articleId: string | null;
+  anchor: string | null;
 }
 
 /** 主窗活动标签变化 → 弹窗更新"发送到 ● COMx"指示。 */
@@ -252,6 +280,13 @@ export const popoutEventService = {
   /** 弹窗 → 主窗：请求打开配置弹窗指定页。 */
   onOpenConfig: (callback: (payload: PopoutOpenConfigPayload) => void) => {
     return listen<PopoutOpenConfigPayload>('popout:open-config', (event) => {
+      callback(event.payload);
+    });
+  },
+
+  /** Main window → existing help singleton: navigate to a new article/anchor. */
+  onHelpOpen: (callback: (payload: PopoutHelpOpenPayload) => void) => {
+    return listen<PopoutHelpOpenPayload>('help:open', (event) => {
       callback(event.payload);
     });
   },

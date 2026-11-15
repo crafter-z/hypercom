@@ -16,6 +16,7 @@ import { useSystemStore } from '../stores/useSystemStore';
 import { clearTerminal } from '../utils/terminal/viewportManager';
 import { useSerialConnection } from './useSerialConnection';
 import { isRawSerialDisplay } from '../utils/pluginViewRuntime';
+import { openHelpCenter } from '../utils/help/helpNavigation';
 
 function isFormField(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
@@ -47,6 +48,13 @@ export function useHotkeys(): void {
           e.preventDefault();
           system.setUIState({ isHotkeyHelpOpen: false });
         }
+        return;
+      }
+
+      // F1 is a documentation affordance and remains available from controls.
+      if (e.key === 'F1') {
+        e.preventDefault();
+        void openHelpCenter();
         return;
       }
 

@@ -11,18 +11,85 @@
  * 映射——两侧各写一份必然漂移，而漂移的症状是置顶/关闭命令找不到窗口（静默
  * 失效，没有报错）。src 侧只传 kind 与 targetId。
  */
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, State};
 
 use super::CommandError;
 use crate::AppState;
 
+const HELP_MAX_COMPONENT_BYTES: usize = 512;
+
 /// 弹出窗元数据：记录窗口 label 对应的业务语义。
 #[derive(Debug, Clone)]
 pub struct PopoutMeta {
-    /// 弹出类型："quick-send" 或 "terminal"。
+    /// 弹出类型："quick-send"、"terminal" 或 "help"。
     pub kind: String,
     /// 目标端口 id（终端弹出时为 portId；快捷发送为 None）。
     pub target_id: Option<String>,
+}
+
+/// help 窗口收到已有窗口复用请求时的目标载荷。
+///
+/// `article_id` 的 wire 名称显式固定为 `articleId`，避免事件载荷跟 Rust
+/// 字段命名约定漂移。首次打开时同样的值通过 URL query 传递。
+#[derive(Debug, Clone, serde::Serialize)]
+struct HelpOpenPayload {
+    #[serde(rename = "articleId")]
+    article_id: Option<String>,
+    anchor: Option<String>,
+}
+
+fn validate_help_component(value: &str, name: &str) -> Result<(), CommandError> {
+    if value.is_empty() {
+        return Err(CommandError::Other(format!(
+            "Help {name} must not be empty"
+        )));
+    }
+    if value.len() > HELP_MAX_COMPONENT_BYTES {
+        return Err(CommandError::Other(format!("Help {name} is too long")));
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_control() || ch == '#' || ch == '\\')
+    {
+        return Err(CommandError::Other(format!(
+            "Help {name} contains invalid characters"
+        )));
+    }
+    if value.split('/').any(|segment| segment == "..") {
+        return Err(CommandError::Other(format!(
+            "Help {name} contains a path traversal"
+        )));
+    }
+    Ok(())
+}
+
+/// Decode the service token `articleId#anchor` without allowing path/query
+/// delimiters to escape the app-owned help route. Article ids may contain `/`
+/// because the content pipeline can use a relative source path as a stable id.
+fn parse_help_target(target_id: Option<&str>) -> Result<HelpOpenPayload, CommandError> {
+    let Some(token) = target_id else {
+        return Ok(HelpOpenPayload {
+            article_id: None,
+            anchor: None,
+        });
+    };
+    if token.len() > HELP_MAX_COMPONENT_BYTES * 2 + 1 {
+        return Err(CommandError::Other("Help target is too long".into()));
+    }
+    let (article, anchor) = token
+        .split_once('#')
+        .map_or((token, None), |(article, anchor)| (article, Some(anchor)));
+    validate_help_component(article, "article id")?;
+    if let Some(anchor) = anchor {
+        if anchor.is_empty() {
+            return Err(CommandError::Other("Help anchor must not be empty".into()));
+        }
+        validate_help_component(anchor, "anchor")?;
+    }
+    Ok(HelpOpenPayload {
+        article_id: Some(article.to_string()),
+        anchor: anchor.map(str::to_string),
+    })
 }
 
 /// Encode UTF-8 bytes injectively into the window label's safe alphabet.
@@ -40,12 +107,24 @@ fn sanitize(id: &str) -> String {
     safe
 }
 
-fn popout_url(kind: &str, target_id: Option<&str>) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("popout", kind)
-        .append_pair("id", target_id.unwrap_or_default())
-        .finish();
-    format!("index.html?{query}")
+fn popout_url(kind: &str, target_id: Option<&str>) -> Result<String, CommandError> {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("popout", kind);
+    match kind {
+        "help" => {
+            let target = parse_help_target(target_id)?;
+            if let Some(article_id) = target.article_id.as_deref() {
+                serializer.append_pair("article", article_id);
+            }
+            if let Some(anchor) = target.anchor.as_deref() {
+                serializer.append_pair("anchor", anchor);
+            }
+        }
+        _ => {
+            serializer.append_pair("id", target_id.unwrap_or_default());
+        }
+    }
+    Ok(format!("index.html?{}", serializer.finish()))
 }
 
 /// 按 kind + target_id 计算窗口 label。未知 kind 返回 Err。
@@ -53,6 +132,9 @@ fn compute_label(kind: &str, target_id: Option<&str>) -> Result<String, CommandE
     match kind {
         "quick-send" => Ok("quick-send".to_string()),
         "terminal" => Ok(format!("terminal-{}", sanitize(target_id.unwrap_or("")))),
+        // Help is a singleton. Its article/anchor target must never affect the
+        // native label, otherwise each link opens another native window.
+        "help" => Ok("help".to_string()),
         other => Err(CommandError::Other(format!(
             "Unknown popout kind: {}",
             other
@@ -89,21 +171,36 @@ pub async fn open_popout(
     target_id: Option<String>,
 ) -> Result<(), CommandError> {
     require_main_window(&window)?;
+    let help_target = if kind == "help" {
+        Some(parse_help_target(target_id.as_deref())?)
+    } else {
+        None
+    };
     let label = compute_label(&kind, target_id.as_deref())?;
 
-    // 已存在 → 拉起聚焦，避免重复窗口。
+    // 已存在 → 拉起聚焦，避免重复窗口。Help 还把新目标通知给现有页面，
+    // 因为 singleton 不能通过重新建窗 URL 更新当前文章。
     if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.show();
-        let _ = window.set_focus();
+        if let Some(target) = help_target {
+            app.emit_to(EventTarget::webview_window(&label), "help:open", target)
+                .map_err(|e| CommandError::System(e.to_string()))?;
+        }
+        window
+            .show()
+            .map_err(|e| CommandError::System(e.to_string()))?;
+        window
+            .set_focus()
+            .map_err(|e| CommandError::System(e.to_string()))?;
         return Ok(());
     }
 
-    let url = popout_url(&kind, target_id.as_deref());
+    let url = popout_url(&kind, target_id.as_deref())?;
 
     // 按 kind 取默认标题与尺寸。
     let (title, width, height) = match kind.as_str() {
         "quick-send" => ("HyperCom — Quick Send", 280.0, 640.0),
         "terminal" => ("HyperCom — Terminal", 720.0, 480.0),
+        "help" => ("HyperCom — Help", 1080.0, 760.0),
         // compute_label 已拦截未知 kind，此处不可达。
         _ => unreachable!("compute_label already rejected unknown kind"),
     };
@@ -160,7 +257,9 @@ pub fn close_popout(
     // destroying the WebView and bypassing save/discard confirmation.
     if kind == "quick-send" {
         if let Some(window) = app.get_webview_window(&label) {
-            return window.close().map_err(|error| CommandError::System(error.to_string()));
+            return window
+                .close()
+                .map_err(|error| CommandError::System(error.to_string()));
         }
     }
     let removed = state
@@ -235,7 +334,7 @@ mod tests {
     #[test]
     fn popout_query_roundtrips_special_port_id() {
         let id = "/dev/tty+usb&name=#端口";
-        let route = popout_url("terminal", Some(id));
+        let route = popout_url("terminal", Some(id)).unwrap();
         let parsed = url::Url::parse(&format!("https://localhost/{route}")).unwrap();
         let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
         assert_eq!(query.get("id").unwrap(), id);
@@ -270,6 +369,51 @@ mod tests {
         assert!(compute_label("control-bar", None).is_err());
     }
 
+    #[test]
+    fn help_is_singleton_and_encodes_article_and_anchor_as_query() {
+        assert_eq!(
+            compute_label("help", Some("quick-start#connect")).unwrap(),
+            "help"
+        );
+        let route = popout_url("help", Some("快速入门#连接设备")).unwrap();
+        let parsed = url::Url::parse(&format!("https://localhost/{route}")).unwrap();
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(query.get("popout").unwrap(), "help");
+        assert_eq!(query.get("article").unwrap(), "快速入门");
+        assert_eq!(query.get("anchor").unwrap(), "连接设备");
+        assert!(!query.contains_key("id"));
+    }
+
+    #[test]
+    fn help_target_validation_rejects_unsafe_or_incomplete_tokens() {
+        for target in [
+            "#anchor",
+            "article#",
+            "article#one#two",
+            "../secret",
+            "article/../secret",
+            "article\\\\secret",
+        ] {
+            assert!(
+                parse_help_target(Some(target)).is_err(),
+                "accepted unsafe help target {target:?}"
+            );
+        }
+        assert!(parse_help_target(None).unwrap().article_id.is_none());
+    }
+
+    #[test]
+    fn help_open_payload_uses_stable_article_id_wire_name() {
+        let payload = serde_json::to_value(HelpOpenPayload {
+            article_id: Some("quick-start".into()),
+            anchor: Some("connect".into()),
+        })
+        .unwrap();
+        assert_eq!(payload["articleId"], "quick-start");
+        assert_eq!(payload["anchor"], "connect");
+        assert!(payload.get("article_id").is_none());
+    }
+
     fn read_json(relative: &str) -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
         let content =
@@ -287,7 +431,10 @@ mod tests {
             .as_array()
             .unwrap_or_else(|| panic!("{field} must be an array"))
             .iter()
-            .map(|item| item.as_str().unwrap_or_else(|| panic!("{field} entries must be strings")))
+            .map(|item| {
+                item.as_str()
+                    .unwrap_or_else(|| panic!("{field} entries must be strings"))
+            })
             .collect()
     }
 
@@ -317,12 +464,19 @@ mod tests {
 
     #[test]
     fn popout_title_text_remains_a_native_drag_and_double_click_region() {
-        let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/components/Popout/PopoutShell.tsx")).unwrap();
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../src/components/Popout/PopoutShell.tsx"),
+        )
+        .unwrap();
         assert!(source.contains("<span className=\"popout-title\" data-tauri-drag-region>"));
         assert!(source.contains("className=\"popout-titlebar-drag\" data-tauri-drag-region"));
         // Tauri's injected drag.js selects start_dragging for detail=1 and its
         // default internal_toggle_maximize command for detail=2 on this region.
-        assert_has_permissions(&capability("popout.json"), &["core:default", "core:window:allow-start-dragging"]);
+        assert_has_permissions(
+            &capability("popout.json"),
+            &["core:default", "core:window:allow-start-dragging"],
+        );
     }
 
     #[test]
@@ -331,7 +485,10 @@ mod tests {
         let popout = capability("popout.json");
 
         assert_eq!(string_list(&main, "windows"), ["main"]);
-        assert_eq!(string_list(&popout, "windows"), ["quick-send", "terminal-*"]);
+        assert_eq!(
+            string_list(&popout, "windows"),
+            ["quick-send", "terminal-*"]
+        );
 
         // Dragging is installed from the shared title-bar markup in both windows.
         assert_has_permissions(&main, &["core:window:allow-start-dragging"]);
@@ -352,6 +509,37 @@ mod tests {
             ],
         );
         assert_lacks_permissions(&main, &["core:window:allow-destroy"]);
+    }
+
+    #[test]
+    fn help_capability_is_singleton_and_minimally_scoped() {
+        let help = capability("help.json");
+        assert_eq!(string_list(&help, "windows"), ["help"]);
+        assert_has_permissions(
+            &help,
+            &[
+                "core:default",
+                "core:event:allow-listen",
+                "core:event:allow-emit",
+                "core:webview:allow-set-webview-zoom",
+                "core:window:allow-close",
+                "core:window:allow-start-dragging",
+                "core:window:allow-set-always-on-top",
+                "core:window:allow-set-title",
+            ],
+        );
+        assert_lacks_permissions(
+            &help,
+            &[
+                "core:window:allow-destroy",
+                "shell:allow-open",
+                "dialog:allow-open",
+                "process:default",
+                "core:app:allow-version",
+                "clipboard-manager:allow-write-text",
+                "clipboard-manager:allow-read-text",
+            ],
+        );
     }
 
     #[test]
@@ -419,5 +607,4 @@ mod tests {
             );
         }
     }
-
 }

@@ -32,6 +32,14 @@ jobs:
       - name: install frontend dependencies
         run: npm ci
 
+      # UserWiki is compiled into a checked-in, HTML-free catalog. Keep source,
+      # generated manifest, links, anchors, locale and image references in sync
+      # before the broader TypeScript/test/build gates run.
+      - name: Help content build/manifest validation
+        run: |
+          npm run help:check
+          npm run test:help
+
       - name: dependency audit
         run: npm audit --audit-level=low --registry=https://registry.npmjs.org
 

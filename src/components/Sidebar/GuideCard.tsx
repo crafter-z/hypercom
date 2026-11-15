@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Cable, FlaskConical, BookOpen, Send, Highlighter, Split, FileText,
 } from 'lucide-react';
+import { openHelpCenter } from '../../utils/help/helpNavigation';
 
 /** 快速入门功能条目（模块级常量，避免每次渲染重建） */
 const QUICK_START_FEATURES: ReadonlyArray<{ icon: React.ReactNode; titleKey: string; bodyKey: string }> = [
@@ -90,6 +91,10 @@ const GuideCard: React.FC<GuideCardProps> = ({ onEnableSimulation, simulationAva
       )}
       <button className="guide-card-quickstart-link" onClick={() => setShowQuickStart(true)}>
         {t('guide.quickStartLink')}
+      </button>
+      <button className="guide-card-help-link" onClick={() => { void openHelpCenter({ articleId: 'quick-start' }); }}>
+        <BookOpen size={13} aria-hidden="true" />
+        {t('guide.helpLink')}
       </button>
       {showQuickStart && <QuickStartModal onClose={() => setShowQuickStart(false)} />}
     </div>

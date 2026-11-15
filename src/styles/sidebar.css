@@ -433,6 +433,21 @@
   text-decoration: underline;
 }
 
+.guide-card-help-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-1);
+  border: 0;
+  background: transparent;
+  color: var(--text-link);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.guide-card-help-link:hover { text-decoration: underline; }
+.guide-card-help-link:focus-visible,
+.guide-card-quickstart-link:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+
 /* ==================== Quick Start Modal ==================== */
 .guide-quickstart-backdrop {
   position: fixed;

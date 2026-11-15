@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
-import { Settings, Keyboard, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Settings, Keyboard, BookOpen, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { openHelpCenter } from '../../utils/help/helpNavigation';
 
 const TitleBar: React.FC = () => {
   const toggleConfigModal = useSystemStore((state) => state.toggleConfigModal);
@@ -121,6 +122,14 @@ const TitleBar: React.FC = () => {
           onClick={handleTogglePin}
         >
           {isPinned ? <PinOff size={15} /> : <Pin size={15} />}
+        </button>
+        <button
+          className="btn btn-icon btn-sm titlebar-help"
+          title={t('help.title')}
+          aria-label={t('help.title')}
+          onClick={() => { void openHelpCenter(); }}
+        >
+          <BookOpen size={15} />
         </button>
         <button
           className="btn btn-icon btn-sm titlebar-help"

@@ -458,6 +458,8 @@ export interface UIState {
   isOperationPanelCollapsed: boolean;
   isHotkeyHelpOpen: boolean; // 快捷键帮助弹窗是否打开
   isAboutOpen: boolean;    // 关于对话框是否打开
+  isHelpOpen: boolean;     // UserWiki 帮助窗口是否已请求打开
+  helpArticleId: string | null; // 最近一次请求打开的帮助文章
   sidebarCollapsed: boolean; // 左侧边栏是否折叠（仅本次会话有效，不进入重启快照）
   // 更新弹窗（issue #12）：isUpdateOpen + 待展示的更新载荷（null = 仅提示无更新）
   isUpdateOpen: boolean;

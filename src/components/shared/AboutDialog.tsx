@@ -12,6 +12,7 @@ import { useToastStore } from '../../stores/useToastStore';
 import { channelLabelKey, GITHUB_REPO_URL } from '../../utils/channel';
 import type { ReleaseChannel } from '../../types';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
+import HelpContextButton from '../Help/HelpContextButton';
 
 const AboutDialog: React.FC = () => {
   const { t } = useTranslation();
@@ -129,6 +130,7 @@ const AboutDialog: React.FC = () => {
             <Bug size={14} />
             {t('about.diagLog')}
           </button>
+          <HelpContextButton articleId="home" className="btn-sm" />
         </div>
 
         {/* issue #12：手动检查更新（正式版 / preview 任选，不受 updateCheckMode=none 限制）。

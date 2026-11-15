@@ -10,41 +10,51 @@ import { useTextEditContextMenu } from '../shared/TextEditContextMenu';
 import { EditorLeaveDialog, useEditorWindowClose } from '../shared/EditorLeaveDialog';
 import QuickSendPanel from './QuickSendPanel';
 import TerminalPopout from './TerminalPopout';
+import HelpCenter from '../Help/HelpCenter';
 
 interface PopoutShellProps {
   kind: string;
   targetId: string | null;
+  articleId?: string | null;
+  anchor?: string | null;
 }
 
-/** 内容区：按 kind 分发到真实面板（快捷发送 / 终端）。 */
-const PopoutContent: React.FC<{ kind: string; targetId: string | null }> = ({ kind, targetId }) => {
+/** Content routing is intentionally explicit: help has no serial/editor surface. */
+const PopoutContent: React.FC<{ kind: string; targetId: string | null; articleId?: string | null; anchor?: string | null }> = ({ kind, targetId, articleId, anchor }) => {
   const { t } = useTranslation();
   switch (kind) {
     case 'quick-send':
       return <QuickSendPanel />;
     case 'terminal':
-      // 终端弹出以 portId 为目标；缺失时降级为占位（URL 异常兜底）。
-      if (!targetId) {
-        return <div className="popout-placeholder">{t('terminalPopout.noTarget')}</div>;
-      }
+      if (!targetId) return <div className="popout-placeholder">{t('terminalPopout.noTarget')}</div>;
       return <TerminalPopout portId={targetId} />;
+    case 'help':
+      return <HelpCenter initialArticleId={articleId ?? 'home'} initialAnchor={anchor} />;
     default:
       return <div className="popout-placeholder">{kind}</div>;
   }
 };
 
-/**
- * 弹出窗外壳：自绘窄标题栏（拖拽区 + 置顶切换 + 关闭）+ 内容区。
- * 宿主无关——真实面板（QuickSendPanel / TerminalPopout）将来可复用于应用内浮层。
- */
-const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
+interface PopoutFrameProps extends PopoutShellProps {
+  textEditMenuElement?: React.ReactNode;
+  editorLeaveDialog?: boolean;
+}
+
+/** Shared native frame. It deliberately contains no editor or clipboard hooks. */
+const PopoutFrame: React.FC<PopoutFrameProps> = ({ kind, targetId, articleId, anchor, textEditMenuElement, editorLeaveDialog = false }) => {
   const { t } = useTranslation();
-  useEditorWindowClose();
-  const [pinned, setPinned] = useState(true); // 建窗默认 always_on_top(true)
+  const [pinned, setPinned] = useState(true); // native windows are created on top
   const configReady = useSystemStore((s) => s.ui.configReady);
   const liveScale = useRef<number | null>(null);
   const appliedScale = useRef(false);
+
   useEffect(() => {
+    if (kind === 'help') {
+      // The Help capability is intentionally read-only and has no config IPC;
+      // theme/language arrive through the main-window settings relay below.
+      useSystemStore.getState().setUIState({ configReady: true });
+      return undefined;
+    }
     let cancelled = false;
     void configService.getConfig().then((config) => {
       if (cancelled) return;
@@ -56,12 +66,14 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
     });
     return () => { cancelled = true; };
   }, []);
+
   useEffect(() => {
     if (configReady && !appliedScale.current) {
       appliedScale.current = true;
       void applyUiScale(liveScale.current ?? useAppStore.getState().config.uiScalePercent);
     }
   }, [configReady]);
+
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
@@ -80,61 +92,60 @@ const PopoutShell: React.FC<PopoutShellProps> = ({ kind, targetId }) => {
     };
   }, []);
 
-  // issue #7-10：弹出窗是独立 webview，同样需要自定义右键菜单替换原生菜单。
-  const { element: textEditMenuElement } = useTextEditContextMenu();
-
-  // Terminal pop-out titles include the port id (e.g. "终端 — COM3") so users
-  // can identify the window at a glance when multiple terminals are popped out.
-  // Quick-send stays as-is (singleton, no target).
-  const title =
-    kind === 'quick-send'
-      ? t('popout.quickSendTitle')
-      : kind === 'terminal'
-        ? `${t('popout.terminalTitle')} — ${targetId ?? ''}`
+  const title = kind === 'quick-send'
+    ? t('popout.quickSendTitle')
+    : kind === 'terminal'
+      ? `${t('popout.terminalTitle')} — ${targetId ?? ''}`
+      : kind === 'help'
+        ? t('popout.helpTitle')
         : kind;
 
   const handleTogglePin = () => {
     const next = !pinned;
-    // label 由后端从 kind + targetId 算出：前端不持有 label 计算逻辑（未知 kind
-    // 由后端返回错误，走 catch 分支）。
-    popoutService
-      .setAlwaysOnTop(kind, targetId, next)
+    popoutService.setAlwaysOnTop(kind, targetId, next)
       .then(() => setPinned(next))
       .catch((e) => console.debug('[PopoutShell] set_popout_always_on_top failed:', e));
   };
   const handleClose = () => {
-    // Native close requests are handled by useEditorWindowClose, which keeps
-    // the save/discard guard in one path for the titlebar button and OS close.
     void getCurrentWindow().close().catch((e) => console.debug('[PopoutShell] close failed:', e));
   };
 
   return (
-    <div className="popout-shell">
+    <div className={`popout-shell${kind === 'help' ? ' popout-shell-help' : ''}`}>
       <div className="popout-titlebar">
         <div className="popout-titlebar-drag" data-tauri-drag-region>
           <span className="popout-title" data-tauri-drag-region>{title}</span>
         </div>
         <div className="popout-titlebar-actions" onPointerDown={(event) => event.stopPropagation()}>
-          <button
-            type="button"
-            className={`icon-btn${pinned ? ' active' : ''}`}
-            title={t('popout.alwaysOnTop')}
-            onClick={handleTogglePin}
-          >
+          <button type="button" className={`icon-btn${pinned ? ' active' : ''}`} title={t('popout.alwaysOnTop')} aria-label={t('popout.alwaysOnTop')} aria-pressed={pinned} onClick={handleTogglePin}>
             {pinned ? <Pin size={14} /> : <PinOff size={14} />}
           </button>
-          <button type="button" className="icon-btn popout-close" title={t('popout.close')} onClick={handleClose}>
+          <button type="button" className="icon-btn popout-close" title={t('popout.close')} aria-label={t('popout.close')} onClick={handleClose}>
             <X size={14} />
           </button>
         </div>
       </div>
       <div className="popout-content">
-        <PopoutContent kind={kind} targetId={targetId} />
+        <PopoutContent kind={kind} targetId={targetId} articleId={articleId} anchor={anchor} />
       </div>
       {textEditMenuElement}
-      <EditorLeaveDialog />
+      {editorLeaveDialog && <EditorLeaveDialog />}
     </div>
   );
 };
+
+/** Standard command/terminal popouts retain edit leave approval and clipboard menu. */
+const EditablePopoutShell: React.FC<PopoutShellProps> = (props) => {
+  useEditorWindowClose();
+  const { element: textEditMenuElement } = useTextEditContextMenu();
+  return <PopoutFrame {...props} textEditMenuElement={textEditMenuElement} editorLeaveDialog />;
+};
+
+/** Help is read-only and deliberately receives neither editor nor clipboard hooks. */
+const HelpPopoutShell: React.FC<PopoutShellProps> = (props) => <PopoutFrame {...props} />;
+
+const PopoutShell: React.FC<PopoutShellProps> = (props) => (
+  props.kind === 'help' ? <HelpPopoutShell {...props} /> : <EditablePopoutShell {...props} />
+);
 
 export default PopoutShell;

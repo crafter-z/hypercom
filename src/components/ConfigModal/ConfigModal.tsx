@@ -23,6 +23,7 @@ import ToolSettings from './pages/ToolSettings';
 import TriggerSettings from './pages/TriggerSettings';
 import PluginSettings from './pages/PluginSettings';
 import Modal from '../shared/Modal';
+import HelpContextButton from '../Help/HelpContextButton';
 
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 interface NavItem {
@@ -46,6 +47,18 @@ const navItems: NavItem[] = [
 
 const navTabId = (id: string) => `config-tab-${id}`;
 const navPanelId = (id: string) => `config-tabpanel-${id}`;
+const CONFIG_HELP_ARTICLES: Record<string, string> = {
+  general: 'settings',
+  log: 'logging',
+  backup: 'settings',
+  display: 'settings',
+  highlight: 'rules',
+  commands: 'rules',
+  protocol: 'rules',
+  tools: 'tools',
+  triggers: 'rules',
+  plugins: 'plugins',
+};
 const CONFIG_TITLE_ID = 'config-modal-title';
 
 function isNumericEditorTarget(target: EventTarget | null): target is HTMLInputElement {
@@ -314,6 +327,7 @@ const ConfigModal: React.FC = () => {
             </span>
           </div>
           <div className="modal-header-actions">
+            <HelpContextButton articleId={CONFIG_HELP_ARTICLES[configActiveTab] ?? 'settings'} />
             <button type="button" className="btn btn-icon" onClick={() => setExpanded(value => !value)}
               aria-pressed={expanded} title={t(expanded ? 'configModal.compact' : 'configModal.expand')}
               aria-label={t(expanded ? 'configModal.compact' : 'configModal.expand')}>
