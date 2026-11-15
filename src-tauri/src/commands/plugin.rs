@@ -2861,6 +2861,37 @@ mod tests {
     }
 
     #[test]
+    fn mixed_local_and_marketplace_install_resets_provenance_and_trust() {
+        let mut cfg = config::AppConfig::default();
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        let entry = &mut cfg.entities.plugin_configs[0];
+        entry.enabled = true;
+        entry.trusted_web_granted = true;
+        entry.granted_permissions.push("serial:send".into());
+        let local_generation = entry.install_generation.clone();
+
+        reset_install_trust_with_url(
+            &mut cfg,
+            "com.example.test",
+            "marketplace",
+            Some("https://example.test/releases/demo.zip"),
+        );
+        let entry = &cfg.entities.plugin_configs[0];
+        assert_eq!(entry.source.as_deref(), Some("marketplace"));
+        assert_eq!(entry.update_url.as_deref(), Some("https://example.test/releases/demo.zip"));
+        assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
+        assert!(entry.granted_permissions.is_empty());
+        assert_ne!(entry.install_generation, local_generation);
+
+        reset_install_trust(&mut cfg, "com.example.test", "zip");
+        let entry = &cfg.entities.plugin_configs[0];
+        assert_eq!(entry.source.as_deref(), Some("zip"));
+        assert!(entry.update_url.is_none());
+        assert_ne!(entry.install_generation, local_generation);
+    }
+
+    #[test]
     fn data_paths_classify_first_component_and_reject_windows_aliases() {
         for raw in [
             "data/key",
