@@ -10,7 +10,9 @@ const env = { ...process.env };
 // normal-integrity %APPDATA% directory, which makes startup fail while
 // creating config.lock and the diagnostic log. Keep an explicit user override,
 // otherwise place Cargo artifacts in a normal-integrity per-user directory.
-if (process.platform === 'win32' && !env.CARGO_TARGET_DIR) {
+// GitHub's Tauri action discovers bundles under the repository target path, so
+// keep its default target directory on release runners.
+if (process.platform === 'win32' && !env.CARGO_TARGET_DIR && env.GITHUB_ACTIONS !== 'true') {
   const localAppData = env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   env.CARGO_TARGET_DIR = path.join(localAppData, 'HyperComBuild', 'target');
   console.log(`[tauri] Using external Cargo target directory: ${env.CARGO_TARGET_DIR}`);
