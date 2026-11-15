@@ -236,7 +236,7 @@ pub struct PluginStateSnapshot {
     pub plugin_configs: Vec<config::PluginConfigEntry>,
 }
 
-fn snapshot(manager: &config::ConfigManager) -> PluginStateSnapshot {
+pub(crate) fn snapshot(manager: &config::ConfigManager) -> PluginStateSnapshot {
     let cfg = manager.get_config();
     PluginStateSnapshot {
         revision: cfg.revision,
@@ -406,15 +406,25 @@ pub async fn install_plugin(
     result
 }
 
-struct PreparedPluginInstall {
+pub(crate) struct PreparedPluginInstall {
     manifest: PluginManifest,
     source_label: &'static str,
+    update_url: Option<String>,
     dest: std::path::PathBuf,
     replace_existing: bool,
     stage_guard: TempDirGuard,
 }
 
 fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str) {
+    reset_install_trust_with_url(cfg, id, source_label, None);
+}
+
+fn reset_install_trust_with_url(
+    cfg: &mut config::AppConfig,
+    id: &str,
+    source_label: &str,
+    update_url: Option<&str>,
+) {
     if let Some(existing) = cfg.entities.plugin_configs.iter_mut().find(|p| p.id == id) {
         existing.enabled = false;
         existing.trusted_web_granted = false;
@@ -423,6 +433,7 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
         existing.installed_at =
             Some(now_unix_secs().max(existing.installed_at.unwrap_or(0).saturating_add(1)));
         existing.source = Some(source_label.into());
+        existing.update_url = update_url.map(str::to_owned);
     } else {
         cfg.entities.plugin_configs.push(config::PluginConfigEntry {
             id: id.into(),
@@ -432,6 +443,7 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
             install_generation: uuid::Uuid::new_v4().to_string(),
             installed_at: Some(now_unix_secs()),
             source: Some(source_label.into()),
+            update_url: update_url.map(str::to_owned),
         });
     }
 }
@@ -454,7 +466,11 @@ fn persist_install_trust_reset(manager: &mut config::ConfigManager) -> Result<()
         .map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))
 }
 
-fn install_prepared(
+pub(crate) fn prepared_manifest(prepared: &PreparedPluginInstall) -> &PluginManifest {
+    &prepared.manifest
+}
+
+pub(crate) fn install_prepared(
     manager: &mut config::ConfigManager,
     mut prepared: PreparedPluginInstall,
     expected_generation: Option<&str>,
@@ -478,10 +494,11 @@ fn install_prepared(
         (Some(_), None) | (None, None) => {}
     }
     let old = manager.get_config().clone();
-    reset_install_trust(
+    reset_install_trust_with_url(
         manager.get_config_mut(),
         &prepared.manifest.id,
         prepared.source_label,
+        prepared.update_url.as_deref(),
     );
     // The durable disabled/no-grants state precedes the first rename. Restart
     // after any later interruption therefore cannot trust either code version.
@@ -517,6 +534,18 @@ fn prepare_plugin_install(
     source_path: &str,
     root: &Path,
     replace_existing: bool,
+) -> Result<PreparedPluginInstall, CommandError> {
+    prepare_plugin_install_with_metadata(source_path, root, replace_existing, None, None)
+}
+
+/// Prepare an install while carrying provenance for a marketplace download.
+/// The caller must hold the plugin IO gate before invoking this function.
+pub(crate) fn prepare_plugin_install_with_metadata(
+    source_path: &str,
+    root: &Path,
+    replace_existing: bool,
+    source_label_override: Option<&'static str>,
+    update_url: Option<String>,
 ) -> Result<PreparedPluginInstall, CommandError> {
     let src = Path::new(source_path);
 
@@ -562,7 +591,8 @@ fn prepare_plugin_install(
 
     let manifest = plugin::load_manifest_from_dir(&src_plugin_dir)
         .map_err(|e| CommandError::Other(format!("插件目录校验失败: {e}")))?;
-    let source_label: &'static str = if tmp_holder.is_some() { "zip" } else { "dir" };
+    let source_label: &'static str = source_label_override
+        .unwrap_or(if tmp_holder.is_some() { "zip" } else { "dir" });
 
     std::fs::create_dir_all(root)
         .map_err(|e| CommandError::Io(format!("创建插件目录失败: {e}")))?;
@@ -643,6 +673,7 @@ fn prepare_plugin_install(
     Ok(PreparedPluginInstall {
         manifest,
         source_label,
+        update_url,
         dest,
         replace_existing,
         stage_guard,
@@ -2250,6 +2281,7 @@ mod tests {
                 granted_permissions: vec!["fs:storage".into()],
                 installed_at: Some(1),
                 source: Some("dir".into()),
+                update_url: None,
             });
         manager.save().unwrap();
         manager

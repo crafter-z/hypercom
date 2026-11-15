@@ -5,6 +5,8 @@ import type {
   PluginHttpRequest,
   PluginListResponse,
   PluginStateSnapshot,
+  MarketplaceIndex,
+  MarketplaceUpdate,
 } from '../types';
 
 function assertAssetWriteContent(content: string | undefined, base64: string | undefined): void {
@@ -55,4 +57,18 @@ export const pluginService = {
     invoke('plugin_http_cancel', { pluginId, expectedGeneration, requestId }),
   pluginOpenExternal: (pluginId: string, url: string): Promise<void> =>
     invoke('plugin_open_external', { pluginId, url }),
+  /** Fetch the configured marketplace index from an explicitly reviewed source. */
+  fetchPluginMarketplace: (sourceUrl: string): Promise<MarketplaceIndex> =>
+    invoke('fetch_plugin_marketplace', { sourceUrl }),
+  /** Check the current marketplace source for updates to installed plugins. */
+  checkPluginUpdates: (): Promise<MarketplaceUpdate[]> =>
+    invoke('check_plugin_updates'),
+  /** Install/update a marketplace plugin after the metadata and version were reviewed. */
+  installMarketplacePlugin: (
+    metadataUrl: string,
+    expectedId: string,
+    expectedVersion: string,
+    expectedGeneration?: string,
+  ): Promise<PluginStateSnapshot> =>
+    invoke('install_marketplace_plugin', { metadataUrl, expectedId, expectedVersion, expectedGeneration }),
 };

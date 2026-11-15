@@ -474,6 +474,7 @@ mod tests {
             granted_permissions: Vec::new(),
             installed_at: Some(1),
             source: Some("dir".into()),
+            update_url: None,
         });
         assert_eq!(sweep(&plugins, &config).unwrap(), 1);
         assert!(!trash.exists());
@@ -518,6 +519,7 @@ mod tests {
             granted_permissions: Vec::new(),
             installed_at: Some(1),
             source: Some("dir".into()),
+            update_url: None,
         });
         assert_eq!(sweep(&plugins, &config).unwrap(), 1);
         assert!(!backup.exists());

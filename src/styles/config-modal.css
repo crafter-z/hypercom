@@ -532,7 +532,8 @@
 }
 
 .plugin-immediate-section,
-.plugin-proxy-section {
+.plugin-proxy-section,
+.plugin-marketplace-section {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -551,6 +552,10 @@
   background: var(--bg-primary);
 }
 
+.plugin-marketplace-section {
+  background: var(--bg-primary);
+}
+
 .plugin-immediate-section .settings-section-header {
   margin: 0;
 }
@@ -560,12 +565,14 @@
 }
 
 .plugin-immediate-section h3,
-.plugin-proxy-section h3 {
+.plugin-proxy-section h3,
+.plugin-marketplace-section h3 {
   margin: 0;
 }
 
 .plugin-immediate-section .settings-hint,
 .plugin-proxy-section .settings-hint,
+.plugin-marketplace-section .settings-hint,
 .plugin-instant-note {
   margin: 0;
 }
@@ -610,6 +617,77 @@
 .plugin-settings .config-row .input {
   flex: 1 1 200px;
   min-width: 0;
+}
+
+.plugin-marketplace-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.plugin-marketplace-results-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.plugin-marketplace-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plugin-marketplace-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+
+.plugin-marketplace-card-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plugin-marketplace-card-copy code {
+  color: var(--text-secondary);
+  font-family: var(--font-terminal);
+  font-size: var(--text-xs);
+}
+
+.plugin-marketplace-card-action {
+  flex-shrink: 0;
+}
+
+.plugin-marketplace-error {
+  margin: 0;
+  color: var(--text-error);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .plugin-marketplace-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plugin-marketplace-card-action .btn {
+    width: 100%;
+  }
 }
 
 .plugin-empty {

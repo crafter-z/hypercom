@@ -11,9 +11,11 @@ const mocks = vi.hoisted(() => ({
     setTrustedWeb: vi.fn(), clearWebData: vi.fn() },
   open: vi.fn(),
   isReplaceError: vi.fn(), replacementTargetId: vi.fn(),
+  marketplace: { index: null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() },
 }));
 vi.mock('../../../hooks/usePlugins', () => ({
   usePluginList: () => mocks.api,
+  usePluginMarketplace: () => mocks.marketplace,
   isPluginReplaceConfirmationError: mocks.isReplaceError,
   replacementTargetId: mocks.replacementTargetId,
 }));

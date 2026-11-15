@@ -252,6 +252,9 @@ pub struct PluginConfigEntry {
     pub installed_at: Option<i64>,
     #[serde(default)]
     pub source: Option<String>,
+    /// URL used for marketplace updates; absent for local installs.
+    #[serde(default)]
+    pub update_url: Option<String>,
 }
 
 // ==================== 设置实体集合 ====================
@@ -372,6 +375,9 @@ pub struct AppConfig {
     /// 插件 HTTP 出站代理；未显式启用时强制直连。
     pub plugin_proxy: String,
     pub plugin_proxy_enabled: bool,
+    /// 插件市场索引地址；空值表示未配置市场。
+    #[serde(default)]
+    pub plugin_marketplace_url: String,
 
     // --- 设置实体（config.json 顶层 key，见 Entities）---
     #[serde(flatten)]
@@ -438,6 +444,7 @@ impl Default for AppConfig {
             update_check_mode: "stable".to_string(),
             plugin_proxy: String::new(),
             plugin_proxy_enabled: false,
+            plugin_marketplace_url: String::new(),
             entities: Entities::default(),
         }
     }
@@ -1002,6 +1009,7 @@ impl ConfigManager {
             "stable",
         );
         config.plugin_proxy = config.plugin_proxy.trim().to_string();
+        config.plugin_marketplace_url = config.plugin_marketplace_url.trim().to_string();
         if config.plugin_proxy.is_empty() {
             config.plugin_proxy_enabled = false;
         }
@@ -1216,6 +1224,7 @@ mod tests {
             granted_permissions: vec!["http:request".into()],
             installed_at: Some(1),
             source: Some("dir".into()),
+            update_url: None,
         });
         manager.save().unwrap();
         manager.begin_plugin_recovery_marker().unwrap();
@@ -1243,6 +1252,7 @@ mod tests {
             granted_permissions: vec!["http:request".into()],
             installed_at: Some(1),
             source: Some("dir".into()),
+            update_url: None,
         });
         manager.save().unwrap();
         manager.save_safe_backup().unwrap();
@@ -1283,6 +1293,7 @@ mod tests {
                 granted_permissions: vec!["http:request".into()],
                 installed_at: Some(1),
                 source: Some("dir".into()),
+            update_url: None,
             });
         manager.save().unwrap();
         drop(manager);
@@ -1327,6 +1338,7 @@ mod tests {
                 granted_permissions: vec!["ui:view".into()],
                 installed_at: Some(1),
                 source: Some("zip".into()),
+            update_url: None,
             });
         manager.save().unwrap();
         drop(manager);

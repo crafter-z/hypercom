@@ -19,7 +19,7 @@ import { reloadPluginViews } from '../utils/pluginViewRuntime';
 import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { extractErrorMessage, notifyError, notifySuccess } from '../stores/useToastStore';
-import type { AppConfig, PluginView } from '../types';
+import type { AppConfig, MarketplaceIndex, MarketplaceUpdate, PluginView } from '../types';
 
 // Backend refuses a same/lower-version install unless the caller explicitly
 // replaces it. The refusal is not a user-visible failure: the settings page
@@ -195,6 +195,117 @@ export function usePluginHost(): void {
   }, []);
 }
 
+/**
+ * Marketplace reads are deliberately scoped to the source URL captured at the
+ * start of each request. A source edit invalidates the request epoch, so a
+ * slow response from the previous source cannot replace the current index or
+ * update list.
+ */
+export interface PluginMarketplaceApi {
+  index: MarketplaceIndex | null;
+  updates: MarketplaceUpdate[];
+  loading: boolean;
+  error: string | null;
+  fetchIndex: () => Promise<MarketplaceIndex | null>;
+  checkUpdates: () => Promise<MarketplaceUpdate[] | null>;
+}
+
+export function usePluginMarketplace(sourceUrl: string): PluginMarketplaceApi {
+  const sourceKey = sourceUrl.trim();
+  const [index, setIndex] = useState<MarketplaceIndex | null>(null);
+  const [indexSource, setIndexSource] = useState<string | null>(null);
+  const [updates, setUpdates] = useState<MarketplaceUpdate[]>([]);
+  const [updatesSource, setUpdatesSource] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [errorSource, setErrorSource] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
+  const sourceRef = useRef(sourceKey);
+  // Keep this ref current during render so a click immediately after editing
+  // cannot be accepted against the previous source before effects run.
+  if (sourceRef.current !== sourceKey) {
+    sourceRef.current = sourceKey;
+    requestVersionRef.current += 1;
+  }
+
+  useEffect(() => {
+    setIndex(null);
+    setIndexSource(null);
+    setUpdates([]);
+    setUpdatesSource(null);
+    setError(null);
+    setErrorSource(null);
+    setLoading(false);
+  }, [sourceKey]);
+
+  const fetchIndex = useCallback(async (): Promise<MarketplaceIndex | null> => {
+    if (!sourceKey) {
+      setError('marketplace source is empty');
+      setErrorSource(sourceKey);
+      return null;
+    }
+    const version = ++requestVersionRef.current;
+    const requestedSource = sourceKey;
+    setLoading(true);
+    setError(null);
+    setErrorSource(null);
+    try {
+      const result = await pluginService.fetchPluginMarketplace(requestedSource);
+      if (version !== requestVersionRef.current || sourceRef.current !== requestedSource) return null;
+      setIndex(result);
+      setIndexSource(requestedSource);
+      setUpdates([]);
+      setUpdatesSource(null);
+      return result;
+    } catch (reason) {
+      if (version !== requestVersionRef.current || sourceRef.current !== requestedSource) return null;
+      const message = extractErrorMessage(reason);
+      setError(message);
+      setErrorSource(requestedSource);
+      return null;
+    } finally {
+      if (version === requestVersionRef.current && sourceRef.current === requestedSource) setLoading(false);
+    }
+  }, [sourceKey]);
+
+  const checkUpdates = useCallback(async (): Promise<MarketplaceUpdate[] | null> => {
+    if (!sourceKey) {
+      setError('marketplace source is empty');
+      setErrorSource(sourceKey);
+      return null;
+    }
+    const version = ++requestVersionRef.current;
+    const requestedSource = sourceKey;
+    setLoading(true);
+    setError(null);
+    setErrorSource(null);
+    try {
+      const result = await pluginService.checkPluginUpdates();
+      if (version !== requestVersionRef.current || sourceRef.current !== requestedSource) return null;
+      setUpdates(result);
+      setUpdatesSource(requestedSource);
+      return result;
+    } catch (reason) {
+      if (version !== requestVersionRef.current || sourceRef.current !== requestedSource) return null;
+      const message = extractErrorMessage(reason);
+      setError(message);
+      setErrorSource(requestedSource);
+      return null;
+    } finally {
+      if (version === requestVersionRef.current && sourceRef.current === requestedSource) setLoading(false);
+    }
+  }, [sourceKey]);
+
+  return {
+    index: indexSource === sourceKey ? index : null,
+    updates: updatesSource === sourceKey ? updates : [],
+    loading,
+    error: errorSource === sourceKey ? error : null,
+    fetchIndex,
+    checkUpdates,
+  };
+}
+
 export function usePluginList() {
   const [plugins, setPlugins] = useState<PluginView[]>(() => getPluginViews());
   const [loading, setLoading] = useState(false);
@@ -271,6 +382,40 @@ export function usePluginList() {
       console.error('[usePluginList] install failed:', error);
       notifyError(error);
       throw error;
+    } finally {
+      setLoading(false);
+    }
+  }, [refresh]);
+
+  const installMarketplacePlugin = useCallback(async (update: MarketplaceUpdate): Promise<PluginView | null> => {
+    setLoading(true);
+    const previousGenerations = new Map(
+      (useAppStore.getState().config.pluginConfigs ?? []).map(entry => [entry.id, entry.installGeneration]),
+    );
+    const expectedGeneration = previousGenerations.get(update.id);
+    try {
+      const snapshot = await pluginService.installMarketplacePlugin(
+        update.descriptionUrl,
+        update.id,
+        update.latestVersion,
+        expectedGeneration,
+      );
+      const installedEntry = snapshot.pluginConfigs.find(
+        entry => previousGenerations.get(entry.id) !== entry.installGeneration,
+      );
+      const accepted = syncStorePluginConfigs(snapshot);
+      if (accepted && useSystemStore.getState().ui.configReady) pluginHost.syncWithConfig(true);
+      await refresh();
+      notifySuccess('plugins.installed');
+      if (!installedEntry) return null;
+      return getPluginViews().find(
+        plugin => plugin.id === installedEntry.id && plugin.installGeneration === installedEntry.installGeneration,
+      ) ?? null;
+    } catch (reason) {
+      await reconcileMutationFailure();
+      console.error('[usePluginList] marketplace install failed:', reason);
+      notifyError(reason);
+      throw reason;
     } finally {
       setLoading(false);
     }
@@ -430,7 +575,7 @@ export function usePluginList() {
     }
   }), [refresh]);
 
-  return { plugins, loading, refresh, installPlugin, reloadPlugin, grantAllAndEnable, uninstallPlugin, setEnabled, togglePermission, setTrustedWeb, clearWebData } satisfies PluginListApi;
+  return { plugins, loading, refresh, installPlugin, installMarketplacePlugin, reloadPlugin, grantAllAndEnable, uninstallPlugin, setEnabled, togglePermission, setTrustedWeb, clearWebData } satisfies PluginListApi;
 }
 
 export interface PluginListApi {
@@ -438,6 +583,7 @@ export interface PluginListApi {
   loading: boolean;
   refresh: () => Promise<PluginView[]>;
   installPlugin: (sourcePath: string, replaceExisting?: boolean, expectedGeneration?: string) => Promise<PluginView | null>;
+  installMarketplacePlugin: (update: MarketplaceUpdate) => Promise<PluginView | null>;
   reloadPlugin: (pluginId: string, expectedGeneration: string) => Promise<void>;
   grantAllAndEnable: (plugin: PluginView) => Promise<void>;
   uninstallPlugin: (pluginId: string) => Promise<void>;

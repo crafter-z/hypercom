@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   Plug,
+  Download,
   Trash2,
   Power,
   FolderOpen,
@@ -18,7 +19,7 @@ import {
   Check,
   X,
 } from 'lucide-react';
-import { usePluginList, isPluginReplaceConfirmationError, replacementTargetId } from '../../../hooks/usePlugins';
+import { usePluginList, usePluginMarketplace, isPluginReplaceConfirmationError, replacementTargetId } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
 
 /** Uninstalling retires native webviews and clears browser data on the UI thread,
@@ -46,7 +47,7 @@ const UninstallProgress: React.FC<{ name: string; startedAt: number }> = ({ name
   </div>;
 };
 import { useAppStore } from '../../../stores/useAppStore';
-import type { PluginView } from '../../../types';
+import type { MarketplaceUpdate, PluginView } from '../../../types';
 import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
 import { useDialogLifecycle } from '../../shared/useDialogLifecycle';
 
@@ -87,6 +88,7 @@ const PluginSettings: React.FC = () => {
     loading,
     refresh,
     installPlugin,
+    installMarketplacePlugin,
     reloadPlugin,
     grantAllAndEnable,
     uninstallPlugin,
@@ -125,7 +127,17 @@ const PluginSettings: React.FC = () => {
   // 插件出站代理（issue #17）：宿主显式配置的代理优先；未配置时继承系统代理。
   const pluginProxyEnabled = useAppStore((s) => s.config.pluginProxyEnabled);
   const pluginProxy = useAppStore((s) => s.config.pluginProxy);
+  const pluginMarketplaceUrl = useAppStore((s) => s.config.pluginMarketplaceUrl);
   const setConfig = useAppStore((s) => s.setConfig);
+  const {
+    index: marketplaceIndex,
+    updates: marketplaceUpdates,
+    loading: marketplaceLoading,
+    error: marketplaceError,
+    fetchIndex: fetchMarketplace,
+    checkUpdates: checkMarketplaceUpdates,
+  } = usePluginMarketplace(pluginMarketplaceUrl);
+  const [marketplaceBusyId, setMarketplaceBusyId] = React.useState<string | null>(null);
   const handleInstall = async (source: 'directory' | 'zip'): Promise<void> => {
     try {
       const selected = source === 'directory'
@@ -154,6 +166,27 @@ const PluginSettings: React.FC = () => {
       }
     } catch (error) {
       console.debug('[PluginSettings] install failed:', error);
+    }
+  };
+
+  const handleMarketplaceInstall = async (update: MarketplaceUpdate): Promise<void> => {
+    if (marketplaceBusyId || loading || !update.descriptionUrl || !update.latestVersion) return;
+    setMarketplaceBusyId(update.id);
+    if (!beginPluginBusy(update.id)) {
+      setMarketplaceBusyId(null);
+      return;
+    }
+    try {
+      const installed = await installMarketplacePlugin(update);
+      if (installed) {
+        if (hasTrustedViews(installed) && installed.trustedWebGranted !== true) setPendingTrust({ plugin: installed, install: true });
+        else setPendingGrant(installed);
+      }
+    } catch (error) {
+      console.debug('[PluginSettings] marketplace install failed:', error);
+    } finally {
+      endPluginBusy(update.id);
+      setMarketplaceBusyId(null);
     }
   };
 
@@ -232,6 +265,98 @@ const PluginSettings: React.FC = () => {
             </div>
           )}
           <p className="settings-hint">{t('plugins.proxy.hint')}</p>
+        </section>
+
+        <section className="plugin-marketplace-section" aria-labelledby="plugin-marketplace-title">
+          <div className="settings-section-header">
+            <div>
+              <h3 id="plugin-marketplace-title" className="config-section-title">{t('plugins.marketplace.title')}</h3>
+              <p className="settings-hint">{t('plugins.marketplace.description')}</p>
+            </div>
+            <div className="plugin-settings-actions">
+              <button
+                className="btn btn-sm"
+                onClick={() => void fetchMarketplace()}
+                disabled={marketplaceLoading || !pluginMarketplaceUrl.trim()}
+              >
+                <RefreshCw size={14} /> {t('plugins.marketplace.fetch')}
+              </button>
+              <button
+                className="btn btn-sm"
+                onClick={() => void checkMarketplaceUpdates()}
+                disabled={marketplaceLoading || !pluginMarketplaceUrl.trim()}
+              >
+                <RefreshCw size={14} /> {t('plugins.marketplace.checkUpdates')}
+              </button>
+            </div>
+          </div>
+          <div className="config-row">
+            <label htmlFor="plugin-marketplace-url">{t('plugins.marketplace.sourceLabel')}</label>
+            <input
+              id="plugin-marketplace-url"
+              className="input config-flex-input"
+              value={pluginMarketplaceUrl}
+              placeholder={t('plugins.marketplace.sourcePlaceholder')}
+              onChange={(event) => setConfig({ pluginMarketplaceUrl: event.target.value })}
+            />
+          </div>
+          <p className="settings-hint">{t('plugins.marketplace.saveHint')}</p>
+          {marketplaceError && <p className="plugin-marketplace-error" role="alert">
+            {marketplaceError === 'marketplace source is empty' ? t('plugins.marketplace.sourceRequired') : marketplaceError}
+          </p>}
+          {marketplaceIndex ? (
+            <div className="plugin-marketplace-results" aria-live="polite">
+              <div className="plugin-marketplace-results-heading">
+                <strong>{t('plugins.marketplace.results')}</strong>
+                <span className="settings-hint">{t('plugins.marketplace.resultCount', { count: marketplaceIndex.plugins.length })}</span>
+              </div>
+              {marketplaceIndex.plugins.length === 0 ? (
+                <p className="settings-hint">{t('plugins.marketplace.empty')}</p>
+              ) : (
+                <div className="plugin-marketplace-list">
+                  {marketplaceIndex.plugins.map((metadataUrl) => {
+                    const update = marketplaceUpdates.find(item => item.descriptionUrl === metadataUrl);
+                    const pluginId = update?.id ?? metadataUrl;
+                    const installed = update ? plugins.find(item => item.id === pluginId) : undefined;
+                    const name = update?.manifest?.name ?? metadataUrl;
+                    const currentVersion = update?.currentVersion ?? installed?.manifest?.version;
+                    const latestVersion = update?.latestVersion;
+                    const updateAvailable = !!update && (update.updateAvailable ?? (!currentVersion || currentVersion !== latestVersion));
+                    return (
+                      <div key={metadataUrl} className="plugin-marketplace-card">
+                        <div className="plugin-marketplace-card-copy">
+                          <strong>{name}</strong>
+                          <code>{pluginId}</code>
+                          <span className="settings-hint">
+                            {installed
+                              ? t('plugins.marketplace.installedVersion', { version: currentVersion ?? '—' })
+                              : t('plugins.marketplace.notInstalled')}
+                            {latestVersion && ` · ${t('plugins.marketplace.latestVersion', { version: latestVersion })}`}
+                          </span>
+                          {update?.manifest?.description && <span className="settings-hint">{update.manifest.description}</span>}
+                        </div>
+                        <div className="plugin-marketplace-card-action">
+                          {update ? (
+                            <button
+                              className="btn btn-primary btn-sm"
+                              disabled={marketplaceLoading || loading || marketplaceBusyId !== null || busyPlugins.has(pluginId) || !updateAvailable}
+                              onClick={() => void handleMarketplaceInstall(update)}
+                            >
+                              <Download size={13} /> {installed ? t('plugins.marketplace.update') : t('plugins.marketplace.install')}
+                            </button>
+                          ) : (
+                            <span className="settings-hint">{t('plugins.marketplace.checkForDetails')}</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="settings-hint">{t('plugins.marketplace.noIndex')}</p>
+          )}
         </section>
 
       {plugins.length === 0 ? (

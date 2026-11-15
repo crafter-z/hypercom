@@ -683,6 +683,10 @@ pub fn run() {
             commands::update_plugin_view,
             commands::send_plugin_view_message,
             commands::destroy_plugin_view,
+             // ===== 插件市场命令 =====
+             commands::fetch_plugin_marketplace,
+             commands::check_plugin_updates,
+             commands::install_marketplace_plugin,
         ])
         .setup(|_app| {
             let app_handle = _app.handle().clone();

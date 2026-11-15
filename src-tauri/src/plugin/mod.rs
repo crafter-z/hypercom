@@ -21,6 +21,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod marketplace;
 pub(crate) mod transaction;
 pub(crate) mod view_runtime;
 

@@ -1,6 +1,6 @@
 # 插件系统
 
-本模块支持安装目录或 ZIP 形式的普通 JS 脚本插件；设置页分别提供“安装目录”和“安装 ZIP”入口，取消任一选择器不启动另一选择器。插件逻辑在主窗 Web Worker 中运行（纯网页插件可以没有 Worker），UI 可用声明式 Sidebar/端口菜单、文本面板或独立隔离 WebView；隔离视图可替换串口内容或创建额外工作区标签。当前没有 Rust 原生插件、插件市场或远程调试器，插件 UI 不能访问宿主 DOM。
+本模块支持安装目录或 ZIP 形式的普通 JS 脚本插件；设置页分别提供“安装目录”和“安装 ZIP”入口，取消任一选择器不启动另一选择器。插件逻辑在主窗 Web Worker 中运行（纯网页插件可以没有 Worker），UI 可用声明式 Sidebar/端口菜单、文本面板或独立隔离 WebView；隔离视图可替换串口内容或创建额外工作区标签。插件市场提供可选的索引、版本检查和用户确认后安装流程，但不提供自动安装或隐式信任；插件 UI 不能访问宿主 DOM。
 
 插件作者从独立的[插件开发指南](../plugin-development.md)开始：manifest、权限、Worker API、示例、调试和打包说明集中在那里。普通用户看[设置 → 插件](../userwiki/设置.md#插件)。本文只维护宿主实现、原生 IPC、授权一致性与磁盘恢复；发行验收要求见 [`release.md`](release.md) 的插件原生验收边界。
 
@@ -21,13 +21,34 @@
 
 - legacy all-port RX/bytes observer 也按订阅 `observerStart` 截断队列；撤权后重新订阅只接收订阅之后的数据和丢失通知，不能回放授权缺失期间的字节。
 
+## 插件市场协议与生命周期
+
+插件市场是**不可信的远程元数据来源**，不是插件权限或代码的信任根。用户在设置中配置可选的 `pluginMarketplaceUrl` 后，宿主按以下协议读取索引；未配置时不访问市场，也不会阻止本地目录/ZIP 安装。
+
+### 文档格式与校验
+
+- 索引是 UTF-8 JSON：`{"schemaVersion":1,"plugins":["https://.../plugin.json"]}`。`schemaVersion` 必须为 `1`，`plugins` 最多 256 项，每项是插件描述 JSON 的 URL。索引和描述均不超过 1 MiB；索引/描述顶层未知字段、非法 JSON、未知 schema、空/非法 URL 都拒绝。
+- 描述 JSON 是 `{"schemaVersion":1,"manifest":{...},"downloadUrl":"https://...zip","homepage":"https://...","releaseNotes":"..."}`。`homepage` 与 `releaseNotes` 可省略；`manifest` 按本模块相同的 Rust 权威校验（id、版本、apiVersion、entry、权限和 UI 路径）执行，不能用市场元数据绕过插件包校验。`downloadUrl` 和可选 `homepage` 只接受 `http`/`https`，不得包含凭据或 fragment；部署应优先使用 HTTPS，HTTP 仅适合受控的本地/私有镜像。
+- 索引中的 URL 只表示可检查的元数据地址；下载 URL 只表示待用户审阅的代码来源。市场响应、描述和归档均按外部输入处理，不执行描述中的脚本，也不因为 URL 可访问就授予权限。
+
+### 命令与生命周期
+
+1. `fetch_plugin_marketplace({sourceUrl})` 获取并校验一个明确的索引来源，返回 `{schemaVersion, plugins}`。前端在来源变更时丢弃旧请求结果；失败时保留现有本地插件状态。
+2. `check_plugin_updates()` 使用配置的市场来源读取描述并与当前安装版本按数字 semver 比较，返回包含 `id`、`latestVersion`、`descriptionUrl`、`downloadUrl`、`manifest`、`updateAvailable` 以及已安装时的 `currentVersion`（未安装时省略）和可选发布说明/主页的结果。检查只读，不下载、替换或改变权限。
+3. 用户选择更新后，前端展示描述中的 id、版本、权限、主页和发布说明，并将 `metadataUrl`、`expectedId`、`expectedVersion`（以及已安装插件的 `expectedGeneration`）原样绑定到确认操作。后端重新获取描述并逐字段校验，拒绝 id/version 不匹配、旧安装代次、非法 URL、无效 manifest 或归档校验失败；不能信任前端此前缓存的 JSON。
+4. 确认安装沿用普通插件事务：先完整下载、解压和校验，再提交禁用/清权状态和代码替换。成功后保留插件 `data/`，生成新的 `installGeneration`，清除普通授权与可信网页信任，并记录 `source: "marketplace"` 与归档 `updateUrl`；用户必须重新审阅并授予权限。任何准备或网络失败都不应报告安装成功，事务恢复/配置快照仍按普通安装规则执行。
+5. 取消确认、同版/降级拒绝或代次变化只结束本次市场操作，不修改已安装代码；市场检查也不自动升级。重载已安装代码和本地安装仍遵循原有生命周期，不把 `installedAt` 当作身份。
+
+### 宿主边界
+
+市场请求通过 Rust 网络层发起并沿用 HTTP 代理、重定向和 TLS 边界；不得从 Worker 直接调用 Tauri 命令或把市场 URL 当作插件的 `http.urlWhitelist`。市场权限仅影响安装后插件，不能授予市场服务任何宿主权限。当前市场源地址保存在 `pluginMarketplaceUrl`，市场安装会把归档地址保存为插件的 `updateUrl`；这些地址只用于后续展示/检查，不构成签名或供应链证明。需要发布完整性与供应链保证时，应在部署层提供 HTTPS、签名或可信镜像。
 
 ## 磁盘与配置
 
 - `config.json` 使用 `AppConfig.entities.plugin_configs`（`#[serde(flatten)]`，JSON 顶层键 `pluginConfigs`），包含 id、安装身份、启用状态、授予权限、网页信任和安装元数据。插件 KV（`pluginKv`）位于 `plugins/<id>/data/state.json`，不进入 config.json；`storage` 权限仅访问此文件，`fs:storage` 允许读取/写入整个 `data/`，`fs:assets` 允许读取自身代码和资产。KV 只在确认文件不存在时初始化空对象，读缓存按安装代次失效、并发首载共享同一次读盘；`set` 按插件串行、整体序列化后经 `write_plugin_asset` 原子替换；不设键长、值大小、节点数或文件大小上限，但仍只接受可无损 JSON 化的值（拒绝非有限数、访问器、循环引用等），`undefined` 删除键。
 - 插件管理响应、排序和调用参数见下方[宿主命令契约](#宿主命令与状态快照)。普通配置保存以 revision CAS 并保留后端权威插件状态；备份恢复只允许同安装身份恢复启用/授权，不匹配的同 ID 插件禁用清权，未提及的当前插件保持原状，备份中的未安装插件不会被安装。导入后读回权威状态，取消设置保留当前插件状态及 revision。配置导出不包含插件代码、私有数据或事务 journal。
 - `trustedWebGranted` 默认 false，独立于普通授权；普通保存保留后端权威值，备份导入不能增加或恢复已撤销的网页信任。浏览器数据在 `<config_dir>/plugin-web-data/<id>/<installGeneration>/`，目录入口统一校验 UUID，不在插件可读写 `data/`；同代次重载/禁用不删，新安装代次不复用旧站点数据。清除/卸载经原生 profile API 清空当前代次站点数据，失败如实返回且可重试，空 profile 文件可保留；崩溃遗留的旧代次不向新代码暴露。该目录不包含在配置导出中。
-- Rust 的 manifest、路径及安装包额度校验是权威执行点；私有数据读写不按扩展名、内容、大小、总量或整个 data/ 配额拒绝。资产读写、`list_plugins`、安装/卸载/重载、启用/授权/网页信任变更、网页数据清理与配置恢复共用 `AppState.plugin_io` 异步闸门串行；统一准入只对等待闸门设置 5 秒 busy 可重试期限，不给已开始的文件 IO、用户对话框或 HTTP 添加隐式业务期限（例外：原生视图退休 15 秒、可信网页数据清理 30 秒——两者都在 UI 线程同步析构 WebView2，无上限会让整窗冻结）。普通 revision-CAS `set_config` 不排在插件 IO 后面，备份恢复仍先取得闸门，保持安装/授权事务锁序。HTTP/资产授权使用轻量 manifest 校验，视图只在锁外读取选中资源快照；安装/启用/完整重载仍保留完整包校验。只有目标确实不存在才返回 null，权限/IO 错误不伪装成缺文件。
+- Rust 的 manifest、路径及安装包额度校验是权威执行点；私有数据读写不按扩展名、内容、大小、总量或整个 data/ 配额拒绝。资产读写、`list_plugins`、市场索引/描述读取、安装/卸载/重载、启用/授权/网页信任变更、网页数据清理与配置恢复共用 `AppState.plugin_io` 异步闸门串行；统一准入只对等待闸门设置 5 秒 busy 可重试期限，不给已开始的文件 IO、用户对话框或 HTTP 添加隐式业务期限（例外：原生视图退休 15 秒、可信网页数据清理 30 秒——两者都在 UI 线程同步析构 WebView2，无上限会让整窗冻结）。普通 revision-CAS `set_config` 不排在插件 IO 后面，备份恢复仍先取得闸门，保持安装/授权事务锁序。HTTP/资产授权使用轻量 manifest 校验，视图只在锁外读取选中资源快照；安装/启用/完整重载仍保留完整包校验。只有目标确实不存在才返回 null，权限/IO 错误不伪装成缺文件。
 - 目录源按已打开句柄逐组件限定：Unix使用目录句柄相对`openat`与`O_NOFOLLOW/O_NONBLOCK`，Windows使用`NtCreateFile.RootDirectory`单组件相对打开并拒绝重解析，保留所选root/递归目录句柄且检查最终路径/链接数；共享祖先不长期锁定，不阻断别的临时目录操作。拒绝源根/祖先链接、特殊文件和硬链接，不先检查pathname再跟随打开；内容不承诺原子快照，复制字节/条目/深度限额保持。
 - 严格路径政策可能拒绝macOS `/var`、`/tmp`别名或Windows junction源，请选择真实非链接路径；不以不安全跟随作为降级。Windows NTFS/UNC与Unix各平台仍需真实发行验收。
 - ZIP先按96MiB压缩输入上限读取不可变快照，再校验实体中央目录条数（≤2000，不按去重后的名称数计）、16MiB中央目录及64KiB单条元数据。eager parser只见已验证元数据与唯一规范footer，不能退回载荷中的另一个footer放大分配；ZIP64条目保留，解压仍逐条流式计64MiB。拒绝重复名称、伪造计数、歧义中央目录结束标记。
@@ -44,6 +65,9 @@
 | Rust 命令 | 宿主参数 | 响应与关键语义 |
 |---|---|---|
 | `list_plugins` | 无 | `PluginListResponse = {revision, pluginConfigs, plugins}`；一致扫描/状态快照，不修改配置 |
+| `fetch_plugin_marketplace` | `{sourceUrl}` | `MarketplaceIndex = {schemaVersion, plugins}`；校验 schema、URL 和最多 256 个描述地址；只读，不改变插件状态 |
+| `check_plugin_updates` | 无 | `MarketplaceUpdate[]`；使用配置的 `pluginMarketplaceUrl`，按数字 semver 填充 `currentVersion`/`updateAvailable`；只读，不自动下载或安装 |
+| `install_marketplace_plugin` | `{metadataUrl, expectedId, expectedVersion, expectedGeneration?}` | `PluginStateSnapshot`；重新获取并校验描述与归档，绑定用户审阅的 id/version/代次；成功后记录来源、换新安装代次并清权，保留 `data/` |
 | `install_plugin` | `{sourcePath, replaceExisting?, expectedGeneration?}` | `PluginStateSnapshot`；更高版本正常覆盖；同版/降级默认拒绝并返回 `plugin_replace_confirmation_required:` 前缀，`replaceExisting:true` 才会替换。替换保留 `data/`，生成新身份并清除授权/网页信任；安装前先持久化「禁用+清权」状态，后续步骤失败保持 fail-closed、不回滚旧授权 |
 | `reload_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；主窗、已启用、manifest 可读才允许；不写配置（revision 不变），取消该插件网络请求并退休原生视图后用同一安装身份/授权/网页信任/数据重新加载已安装代码 |
 | `uninstall_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须匹配当前安装身份（防止升级期间排队的旧请求卸载新代码）；配置提交后删除代码、状态及私有数据，并取消在途 HTTP、退休视图、清除网页站点数据；目录缺失按已卸载处理。视图退休与清网页数据在 UI 线程执行且有 15/30 秒上限，失败只记日志（配置已提交即视为卸载成功），递归删除交给后台 sweep，不阻塞命令 |
@@ -101,6 +125,6 @@ HTTP 只经 `plugin_http_open`、`plugin_http_read` 和 `plugin_http_cancel` 三
 
 ## 验证与发行边界
 
-- Rust 库测试覆盖 manifest/路径/ZIP 边界、安装身份与事务恢复、权限和目录 grant、原子文件写入、HTTP 流式取消与重定向；运行 `cargo test --lib --manifest-path src-tauri/Cargo.toml`。
+- Rust 库测试覆盖 manifest/路径/ZIP 边界、市场索引/描述 schema 与 URL 校验、安装身份与事务恢复、权限和目录 grant、原子文件写入、HTTP 流式取消与重定向；运行 `cargo test --lib --manifest-path src-tauri/Cargo.toml`。
 - 前端类型检查与 Vitest 覆盖 revision 快照、权限撤销、KV/文件/目录/HTTP、Worker、RX 旁路、通知和 UI 注册表；运行 `npx tsc --noEmit` 与 `npm run test:run`。
 - `e2e/plugin.spec.ts` 使用 Chromium Worker/RX/终端和 mock Rust invoke；它不证明原生选择器、ZIP 事务或生产 WebView CSP。目标平台安装包验收见 [`release.md`](release.md) 与 [`plugin-views.md`](plugin-views.md)。
