@@ -280,7 +280,7 @@ export function usePluginMarketplace(sourceUrl: string): PluginMarketplaceApi {
     setError(null);
     setErrorSource(null);
     try {
-      const result = await pluginService.checkPluginUpdates();
+      const result = await pluginService.checkPluginUpdates(requestedSource);
       if (version !== requestVersionRef.current || sourceRef.current !== requestedSource) return null;
       setUpdates(result);
       setUpdatesSource(requestedSource);

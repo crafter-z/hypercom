@@ -169,6 +169,11 @@ const PluginSettings: React.FC = () => {
     }
   };
 
+  const handleMarketplaceRefresh = async (): Promise<void> => {
+    const index = await fetchMarketplace();
+    if (index) await checkMarketplaceUpdates();
+  };
+
   const handleMarketplaceInstall = async (update: MarketplaceUpdate): Promise<void> => {
     if (marketplaceBusyId || loading || !update.descriptionUrl || !update.latestVersion) return;
     setMarketplaceBusyId(update.id);
@@ -276,7 +281,7 @@ const PluginSettings: React.FC = () => {
           </div>
         </details>
 
-        <details className="plugin-marketplace-section plugin-secondary-section">
+        <details open className="plugin-marketplace-section plugin-secondary-section">
           <summary className="plugin-secondary-summary">
             <span className="plugin-secondary-summary-copy">
               <strong>{t('plugins.marketplace.title')}</strong>
@@ -291,7 +296,7 @@ const PluginSettings: React.FC = () => {
             <div className="plugin-settings-actions">
               <button
                 className="btn btn-sm"
-                onClick={() => void fetchMarketplace()}
+                onClick={() => void handleMarketplaceRefresh()}
                 disabled={marketplaceLoading || !pluginMarketplaceUrl.trim()}
               >
                 <RefreshCw size={14} /> {t('plugins.marketplace.fetch')}
@@ -325,43 +330,44 @@ const PluginSettings: React.FC = () => {
                 <strong>{t('plugins.marketplace.results')}</strong>
                 <span className="settings-hint">{t('plugins.marketplace.resultCount', { count: marketplaceIndex.plugins.length })}</span>
               </div>
-              {marketplaceIndex.plugins.length === 0 ? (
-                <p className="settings-hint">{t('plugins.marketplace.empty')}</p>
+              {marketplaceUpdates.length === 0 ? (
+                <p className="settings-hint">{t('plugins.marketplace.checkForDetails')}</p>
               ) : (
                 <div className="plugin-marketplace-list">
-                  {marketplaceIndex.plugins.map((metadataUrl) => {
-                    const update = marketplaceUpdates.find(item => item.descriptionUrl === metadataUrl);
-                    const pluginId = update?.id ?? metadataUrl;
-                    const installed = update ? plugins.find(item => item.id === pluginId) : undefined;
-                    const name = update?.manifest?.name ?? metadataUrl;
-                    const currentVersion = update?.currentVersion ?? installed?.manifest?.version;
-                    const latestVersion = update?.latestVersion;
-                    const updateAvailable = !!update && (update.updateAvailable ?? (!currentVersion || currentVersion !== latestVersion));
+                  {marketplaceUpdates.map((update) => {
+                    const installed = plugins.find(plugin => plugin.id === update.id);
+                    const currentVersion = update.currentVersion ?? installed?.manifest?.version;
+                    const updateAvailable = update.updateAvailable;
+                    const status = !installed
+                      ? t('plugins.marketplace.statusNotInstalled')
+                      : updateAvailable
+                        ? t('plugins.marketplace.statusUpdateAvailable')
+                        : t('plugins.marketplace.statusLatest');
                     return (
-                      <div key={metadataUrl} className="plugin-marketplace-card">
+                      <div key={update.descriptionUrl} className="plugin-marketplace-card">
                         <div className="plugin-marketplace-card-copy">
-                          <strong>{name}</strong>
-                          <code>{pluginId}</code>
+                          <div className="plugin-marketplace-card-title-row">
+                            <strong>{update.manifest.name}</strong>
+                            <span className={`plugin-marketplace-status${updateAvailable ? ' is-update' : ''}`}>{status}</span>
+                          </div>
+                          <code>{update.id}</code>
                           <span className="settings-hint">
-                            {installed
-                              ? t('plugins.marketplace.installedVersion', { version: currentVersion ?? '—' })
+                            {currentVersion
+                              ? t('plugins.marketplace.installedVersion', { version: currentVersion })
                               : t('plugins.marketplace.notInstalled')}
-                            {latestVersion && ` · ${t('plugins.marketplace.latestVersion', { version: latestVersion })}`}
+                            {' · '}{t('plugins.marketplace.latestVersion', { version: update.latestVersion })}
+                            {' · '}{t('plugins.marketplace.permissionCount', { count: update.manifest.permissions.length })}
                           </span>
-                          {update?.manifest?.description && <span className="settings-hint">{update.manifest.description}</span>}
+                          {update.manifest.description && <span className="settings-hint">{update.manifest.description}</span>}
                         </div>
                         <div className="plugin-marketplace-card-action">
-                          {update ? (
-                            <button
-                              className="btn btn-primary btn-sm"
-                              disabled={marketplaceLoading || loading || marketplaceBusyId !== null || busyPlugins.has(pluginId) || !updateAvailable}
-                              onClick={() => void handleMarketplaceInstall(update)}
-                            >
-                              <Download size={13} /> {installed ? t('plugins.marketplace.update') : t('plugins.marketplace.install')}
-                            </button>
-                          ) : (
-                            <span className="settings-hint">{t('plugins.marketplace.checkForDetails')}</span>
-                          )}
+                          <button
+                            className="btn btn-primary btn-sm"
+                            disabled={marketplaceLoading || loading || marketplaceBusyId !== null || busyPlugins.has(update.id) || !updateAvailable}
+                            onClick={() => void handleMarketplaceInstall(update)}
+                          >
+                            <Download size={13} /> {installed ? t('plugins.marketplace.update') : t('plugins.marketplace.install')}
+                          </button>
                         </div>
                       </div>
                     );
@@ -383,12 +389,19 @@ const PluginSettings: React.FC = () => {
         </div>
       ) : (
         <div className="plugin-list">
-          {plugins.map((plugin) => {
+          {plugins.map((plugin, index) => {
             const declared = (plugin.manifest?.permissions ?? [])
               .filter((permission) => plugin.knownPermissions.includes(permission));
+            const source = plugin.source === 'marketplace' ? 'marketplace' : 'manual';
+            const previousSource = plugins[index - 1]?.source === 'marketplace' ? 'marketplace' : 'manual';
+            const showGroupTitle = index === 0 || source !== previousSource;
             const granted = plugin.grantedPermissions;
             return (
-              <div key={plugin.id} className={`plugin-card ${plugin.manifestError ? 'plugin-card-error' : ''}`}>
+              <React.Fragment key={plugin.id}>
+                {showGroupTitle && <div className="plugin-list-group-title">
+                  {source === 'marketplace' ? t('plugins.localSourceMarketplace') : t('plugins.localSourceManual')}
+                </div>}
+                <div className={`plugin-card ${plugin.manifestError ? 'plugin-card-error' : ''}`}>
                 <div className="plugin-card-header">
                   <div className="plugin-card-title">
                     <strong>{plugin.manifest?.name ?? plugin.id}</strong>
@@ -506,6 +519,7 @@ const PluginSettings: React.FC = () => {
                   </>
                 )}
               </div>
+              </React.Fragment>
             );
           })}
         </div>

@@ -534,6 +534,10 @@ export interface PluginView {
   installedAt: number | null;
   /** Identity of the installed code reviewed by the user; changes on every install. */
   installGeneration: string;
+  /** Installation provenance, when available. */
+  source?: 'dir' | 'zip' | 'marketplace' | string | null;
+  /** Marketplace archive URL, when installed from a marketplace. */
+  updateUrl?: string | null;
 }
 
 /** Authoritative plugin state, ordered by the backend configuration revision. */

@@ -169,11 +169,14 @@ pub async fn fetch_plugin_marketplace(
 /// Check every metadata URL in the configured marketplace index.
 #[tauri::command]
 pub async fn check_plugin_updates(
+    source_url: Option<String>,
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<Vec<MarketplaceUpdate>, CommandError> {
     require_main_window(&window)?;
-    let source_url = configured_marketplace_url(&state)?;
+    let source_url = source_url
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or(configured_marketplace_url(&state)?);
     let network = UpdateNetwork::new().await.map_err(marketplace_error)?;
     let index = fetch_index(&network, &source_url).await?;
 

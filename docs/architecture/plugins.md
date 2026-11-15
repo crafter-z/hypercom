@@ -66,7 +66,7 @@
 |---|---|---|
 | `list_plugins` | 无 | `PluginListResponse = {revision, pluginConfigs, plugins}`；一致扫描/状态快照，不修改配置 |
 | `fetch_plugin_marketplace` | `{sourceUrl}` | `MarketplaceIndex = {schemaVersion, plugins}`；校验 schema、URL 和最多 256 个描述地址；只读，不改变插件状态 |
-| `check_plugin_updates` | 无 | `MarketplaceUpdate[]`；使用配置的 `pluginMarketplaceUrl`，按数字 semver 填充 `currentVersion`/`updateAvailable`；只读，不自动下载或安装 |
+| `check_plugin_updates` | `{sourceUrl?}` | `MarketplaceUpdate[]`；优先检查当前草稿 sourceUrl，缺省时使用已保存的 `pluginMarketplaceUrl`，按数字 semver 填充 `currentVersion`/`updateAvailable`；只读，不自动下载或安装 |
 | `install_marketplace_plugin` | `{metadataUrl, expectedId, expectedVersion, expectedGeneration?}` | `PluginStateSnapshot`；重新获取并校验描述与归档，绑定用户审阅的 id/version/代次；成功后记录来源、换新安装代次并清权，保留 `data/` |
 | `install_plugin` | `{sourcePath, replaceExisting?, expectedGeneration?}` | `PluginStateSnapshot`；更高版本正常覆盖；同版/降级默认拒绝并返回 `plugin_replace_confirmation_required:` 前缀，`replaceExisting:true` 才会替换。替换保留 `data/`，生成新身份并清除授权/网页信任；安装前先持久化「禁用+清权」状态，后续步骤失败保持 fail-closed、不回滚旧授权 |
 | `reload_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；主窗、已启用、manifest 可读才允许；不写配置（revision 不变），取消该插件网络请求并退休原生视图后用同一安装身份/授权/网页信任/数据重新加载已安装代码 |

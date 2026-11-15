@@ -112,6 +112,12 @@ pub struct PluginView {
     pub manifest_error: Option<String>,
     /// 已安装时间（unix 秒）。
     pub installed_at: Option<i64>,
+    /// 安装来源（dir/zip/marketplace）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// 市场安装时关联的归档地址。
+    #[serde(rename = "updateUrl", skip_serializing_if = "Option::is_none")]
+    pub update_url: Option<String>,
 }
 
 /// manifest 的 wire 视图（camelCase 与前端 TS 类型对齐）。
@@ -190,6 +196,8 @@ fn build_views_from_scan(
                     manifest: Some(PluginManifestView::from(&manifest)),
                     manifest_error: None,
                     installed_at: state.and_then(|s| s.installed_at),
+                     source: state.and_then(|s| s.source.clone()),
+                     update_url: state.and_then(|s| s.update_url.clone()),
                 },
                 Err(err) => PluginView {
                     // 损坏目录：id 无法从 manifest 得知——用目录名占位，前端显示校验失败。
@@ -211,6 +219,8 @@ fn build_views_from_scan(
                     manifest: None,
                     manifest_error: Some(err),
                     installed_at: None,
+                     source: None,
+                     update_url: None,
                 },
             }
         })

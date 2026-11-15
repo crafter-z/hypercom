@@ -61,8 +61,8 @@ export const pluginService = {
   fetchPluginMarketplace: (sourceUrl: string): Promise<MarketplaceIndex> =>
     invoke('fetch_plugin_marketplace', { sourceUrl }),
   /** Check the current marketplace source for updates to installed plugins. */
-  checkPluginUpdates: (): Promise<MarketplaceUpdate[]> =>
-    invoke('check_plugin_updates'),
+  checkPluginUpdates: (sourceUrl?: string): Promise<MarketplaceUpdate[]> =>
+    invoke('check_plugin_updates', { sourceUrl }),
   /** Install/update a marketplace plugin after the metadata and version were reviewed. */
   installMarketplacePlugin: (
     metadataUrl: string,
