@@ -178,14 +178,16 @@ const PluginSettings: React.FC = () => {
     const source = pluginMarketplaceUrl.trim();
     const index = await fetchMarketplace();
     if (!index) return;
-    const updates = await checkMarketplaceUpdates();
-    if (updates) await persistMarketplaceSource(source);
+    // Persist before the second metadata/version request so the backend's
+    // persisted-source fallback cannot replace the address just entered.
+    if (!(await persistMarketplaceSource(source))) return;
+    await checkMarketplaceUpdates();
   };
 
   const handleMarketplaceCheck = async (): Promise<void> => {
     const source = pluginMarketplaceUrl.trim();
-    const updates = await checkMarketplaceUpdates();
-    if (updates) await persistMarketplaceSource(source);
+    if (!(await persistMarketplaceSource(source))) return;
+    await checkMarketplaceUpdates();
   };
 
   const handleMarketplaceInstall = async (update: MarketplaceUpdate): Promise<void> => {

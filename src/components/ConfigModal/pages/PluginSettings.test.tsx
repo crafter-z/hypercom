@@ -3,7 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import PluginSettings from './PluginSettings';
-import type { PluginView } from '../../../types';
+import type { MarketplaceIndex, PluginView } from '../../../types';
 import { useAppStore } from '../../../stores/useAppStore';
 
 const mocks = vi.hoisted(() => ({
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     setTrustedWeb: vi.fn(), clearWebData: vi.fn() },
   open: vi.fn(),
   isReplaceError: vi.fn(), replacementTargetId: vi.fn(),
-  marketplace: { index: null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() },
+  marketplace: { index: null as MarketplaceIndex | null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() },
   config: { saveConfig: vi.fn() },
 }));
 vi.mock('../../../hooks/usePlugins', () => ({
