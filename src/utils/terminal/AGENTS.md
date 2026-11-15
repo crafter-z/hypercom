@@ -1,108 +1,58 @@
-# src/utils/terminal — 方案B 终端显示引擎（issue #14）
+# `src/utils/terminal/`
 
-TRX 终端的行缓冲与渲染层。**React 不渲染行**——数据到达后由本目录的引擎在同一 rAF 内完成「入缓冲 → 画 DOM」。
+终端显示引擎直接管理行缓冲和 DOM 渲染；React 只负责外壳和交互状态，不逐行渲染。
 
-## 模块职责
+## 导航
 
-|文件|职责|测试|
-|---|---|---|
-|`TerminalBuffer.ts`|环形缓冲区：O(1) 追加/裁剪、稳定 seq、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits`|`TerminalBuffer.test.ts`|
-|`TerminalRenderer.ts`|直接 DOM 渲染：节点池复用、默认固定行高零测量、`visibleSeqsOffset`、同帧钉底、过滤/搜索/选区类名；软换行仍复用同一个 `renderWindow`|`TerminalRenderer.test.ts`（jsdom）|
-|`TerminalWrapLayout.ts` / `TerminalHeightIndex.ts`|可选文本软换行：屏内批量测量、有界稀疏累计高度、seq+行内偏移锚点；关闭时不实例化，缓存上限 `TERMINAL_HEIGHT_CACHE_SIZE`|`TerminalWrap.test.ts` / `TerminalHeightIndex.test.ts` + 浏览器 `terminalWrapChecks.ts`|
-|`viewportManager.ts`|实时端口或注入只读来源的枢纽：缓冲 + renderer 生命周期 + 增量/分块过滤搜索 + 时间索引 + rAF scheduled seek + 模块级实时实例注册表|`viewportManager.test.ts` / `TerminalTimeline.test.ts`|
-|`TerminalSource.ts`|只读连续稳定 seq 来源、统一计数与时间语义、物理高度映射、重建预算及 timeline 接口|`TerminalTimeline.test.ts`|
-|`TerminalTimeIndex.ts`|按 (time,seq) 排序的 AVL，序号表引用现有节点、不重复保留时间戳；O(log N) 查询/插入/删除，不假定采集时间按 seq 单调|`TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`|
-|`TerminalPerformance.test.ts`|显式启用的性能观测：10万/百万索引、裁剪后条目数、宽过滤计数、三视图 jsdom 定位 CPU 样本|`HYPERCOM_TERMINAL_BENCH=1`|
+| 文件 | 责任 |
+|---|---|
+| `TerminalBuffer.ts` | 稳定 `seq` 的环形行缓冲；`append`、`snapshot`、`replaceAll`、`clear`、`setLimits` |
+| `TerminalRenderer.ts` | 节点池、固定行高/软换行、过滤结果、选区和同帧跟随的 DOM 渲染 |
+| `TerminalWrapLayout.ts` / `TerminalHeightIndex.ts` | 文本软换行的可见区域测量和有界高度索引 |
+| `viewportManager.ts` | 端口显示实例、缓冲、增量过滤/搜索、时间索引和 renderer 生命周期 |
+| `TerminalSource.ts` | 只读回放来源、稳定序号、时间和物理高度映射 |
+| `TerminalTimeIndex.ts` | 按 `(time, seq)` 排序的 AVL 索引 |
+| `src/utils/lineText.ts` | 全仓唯一的字节到文本解码器工厂和缓存 |
 
-依赖方向：`viewportManager → { TerminalBuffer, TerminalRenderer, lineFilter, lineText, terminalSearch }`。
-**禁止** viewportManager 被 stores 反向依赖（useTerminalStore 不 import 本目录——manager 单向读 store 的显示态）。
+依赖方向是 `viewportManager` → `TerminalBuffer`、`TerminalRenderer`、`lineFilter`、`lineText`、`terminalSearch`；stores 不得反向 import 本目录。
 
 ## 数据流
 
+```text
+serial:data → RxPipeline（组行、排队、rAF）
+  → appendTerminalLines(portId, lines)
+  → TerminalViewportManager.appendLines()
+  → buffer / filter / search
+  → requestRender → TerminalRenderer.render()
 ```
-serial:data → RxPipeline（字节切行 + 队列 + rAF tick）
-  → viewportManager.appendTerminalLines(portId, lines)   ← RxPipeline 的 appendLines 目标
-    → buffer.append × N（增量匹配 filter/search 列表）
-    → requestRender → rAF → renderer.render(buffer, buildView())
+
+TX 回显和工具输出使用 `appendTerminalLine`。日志回放使用独立 `TerminalSource`，不进入实时 RX、发送或触发管线。弹窗通过 `snapshotTerminalLines` / `replaceTerminalLines` 交换快照。
+
+## 必守规则
+
+- `seq` 是渲染键：追加只分配递增序号，裁剪不改变存活行序号，`clear()` 不复用旧序号。
+- 过滤结果用 `visibleSeqsOffset` 延迟压缩；新增行在 `appendLines` 增量匹配，条件变化才重建。大规模重建使用模块已有的分块和取消逻辑，不能在滚动或每个 RX 帧全量扫描。
+- `setFilter` 的 `hideAsciiNoise` 只改变文本视图可见性，并通过 `src/utils/asciiNoise.ts` 判定；不可把显示开关当成接收或日志门控。
+- `followEnabled` 必须同时尊重暂停、锁定、手势和时间组授权。搜索定位先撤销跟随；BROWSE 或不兼容来源不得本地尾随。LIVE seek 的确认使用本次 render 后的实际末行。
+- 模块级 `managers` 保存每端口实例。TerminalView 挂载调用 `attachRenderer`，卸载调用 `detachRenderer`；只有关闭标签或 TRX 切换到 TTY 才 `releaseViewportManager`。独立 webview 各自拥有注册表。
+- `TerminalRenderer` 维护普通文档流顺序：`headSpacer`、行节点、`tailSpacer`；不要恢复 absolute/translate 排序或移动既有行节点。
+- 缓冲只受 `computeBufferLimits()` 的 `maxLines` 约束，来源是 `config.maxDisplayLines`；超限逐行覆盖最旧行，不加字节预算、软兜底或清屏通知。
+- 所有字节解码都走 `lineText.ts` 的 `createDecoder` / `decodeBytes`，统一 `ignoreBOM: false`。流式解码器必须按端口独占并保留残字节；禁止新增 `new TextDecoder()` 路径。
+- 时间索引在 RX 增量时维护，即使当前没有联动；AVL 序号表只引用节点，不复制时间戳。裁剪、清空和销毁必须释放对应索引。
+- 软换行是显示几何，不是数据切行；不把视觉续行写回缓冲或 RX，也不为历史全量同步排版。调整尺寸、字体、编码或过滤后保留 `seq` 与行内偏移。
+- `frozen = null` 进入序号/可视索引转换时按实现约定归一化，不直接依赖 JavaScript 的 `null` 比较语义。
+
+## 常用检查
+
+```bash
+npx vitest run src/utils/terminal
 ```
 
-TX 回显/工具输出 → `appendTerminalLine(portId, line)`（同一实时入口）。
-独立日志回放注入只读 `TerminalSource`，不进入实时 append/RX/发送/触发管线。
-弹窗快照：主窗 `snapshotTerminalLines` 发送 / 弹窗 `replaceTerminalLines` 接收。
+`TerminalRenderer` 的 DOM 测试使用 jsdom；性能观测仅在明确需要时以 `HYPERCOM_TERMINAL_BENCH=1` 运行对应测试。行为变化必须覆盖序号稳定、节点复用、过滤偏移、裁剪和软换行等受影响契约。
 
-## 关键不变式与陷阱
+## 反模式
 
-1. **seq 是渲染键**：append 分配单调递增 seq；头部裁剪只移动 `[firstSeq, lastSeq]` 窗口，
-   存活行 seq 不变 → renderer 不重画未变行。`clear()` 不重置 nextSeq（seq 永不复用）。
-2. **frozen null 归一化**：`seqToVisIdx`/`visIdxToSeq` 收到 `frozen = null` 必须归一化为
-   `Number.MAX_SAFE_INTEGER`——原生 `seq > null`（null→0）会把所有行判为隐藏。
-3. **流式布局：DOM 顺序 == 视觉顺序由结构保证（issue #18）**：contentLayer =
-   `[headSpacer][行…][tailSpacer]`，行是普通文档流子元素（默认固定行高，软换行时按需测量），spacer 承载
-   屏外空间；新行插在「首个 visIdx 更大的可见行」之前（`findFlowAnchor`，停车行占
-   真实流槽位、必须作为锚点候选），**没有任何节点被移动**。旧 absolute+translateY
-   格子与 `insertRowInOrder`/每帧排序修复（issue #14/#15 一类 bug 的温床）已结构性
-   删除——浏览器按 DOM 顺序拼接跨行拖拽选区，顺序一乱视觉中间的行就被跳过。
-   `TerminalRenderer.ts` 文件头的 R1–R15 是完整契约清单。
-4. **`visibleSeqsOffset`**：过滤列表从头部被缓冲裁剪时只 bump offset（O(1)），
-   超过 `COMPACT_THRESHOLD = 4096` 才 splice 压缩——append 摊还 O(1)。renderer 用
-   offset 索引过滤列表，勿在 manager 外直接改 `filtered.seqs`。
-5. **增量过滤/搜索**：新行在 `appendLines` 内匹配一次并入列；条件变化才走
-   `recomputeFilter`/`recomputeSearch`。超过 `TERMINAL_REBUILD_SYNC_LIMIT` 的重建按
-   `TERMINAL_REBUILD_CHUNK_SIZE` 分块、可取消，扫描期间新行只增量匹配并在完成时合并；
-   clear/replace/新条件/销毁淘汰旧任务。搜索 membership Set 同步随chunk/append/trim维护，
-   不在滚动或每个RX帧重建。搜索只在 `searchOpen && query` 时维护。
-   `setFilter` 可选 `hideAsciiNoise` 使用 `utils/asciiNoise.ts` 单一判定，仅影响 RX 字节行可见性，
-   搜索同步排除这些噪声行。UI 在非文本模式传 false，禁止把显示开关下沉到接收/观察者。
-6. **同帧钉底**：`followEnabled = !paused && locked && !gestureActive`；搜索框可保持打开，
-   命中导航须先解除跟随再定位，关闭搜索不复锁。钉底在 `render()` 内设置
-   scrollTop（0 帧延迟）。手势期间 `gestureActive=true` 抑制钉底；settle 由 TerminalView
-   在 120ms 静默后评估 atBottom → 写 store scrollLocked。时间组不复用残留独立锁：
-   协调器仅在兼容 LIVE 且与参考来源有效偏移相同时通过 `setTimelineLiveFollow` 授权
-   同帧 RX 钉底；BROWSE/暂离/不兼容/相对偏移目标撤销授权。LIVE seek 的 ACK 必须取
-   本次 render 后实际末行 seq/time，不能固定在追加前 lookup 的旧 seq。暂停和选区
-   保护继续抑制该跟随通道；搜索命中导航在 seek 前撤销跟随，搜索框可见性本身不参与抑制。
-7. **实例生命周期**：模块级 `managers` Map 持有每端口实例；TerminalView 挂载时
-   `attachRenderer(container, config)`、卸载时 `detachRenderer()`（缓冲保留）；
-   **只有**标签关闭 / TRX→TTY 模式切换调 `releaseViewportManager`（销毁缓冲）。
-   弹窗是独立 webview → 独立模块作用域 → 独立注册表（与 RxPipeline 单例同款隔离）。
-8. **订阅分流**：`manager.subscribe(fn)` 在每次渲染 pass 后供非 React 几何/手势采样；
-   React 壳（TerminalView）刷新 FilterBar 计数/搜索读数只用 `subscribeReadouts(fn)`，纯
-   scroll/resize/scheduled seek 不通知壳。过滤/搜索/索引重建通过 `isLoading` 提示状态。
-9. **测试环境**：TerminalRenderer 测试需 jsdom（文件头 `@vitest-environment jsdom`）；
-   Buffer/Manager 是纯逻辑，node 环境即可。
-
-10. **裁剪语义（issue #16 改版）**：终端缓冲只由用户配置的**最大显示行数**
-    （`maxDisplayLines` → `maxLines`）约束。`append` 返回 `{seq, trimmed}`——
-    满 `maxLines` 后每 append **逐行覆盖最旧一条**（滚动窗口，`trimmed=true`）。
-    无字节预算、无 half-trim、无应用级软兜底、无「因内存限制清屏」toast
-    （逐行覆盖是常态滚动，不是异常事件）。`viewportManager.appendLines` /
-    `appendTerminalLines` 返回 boolean（是否发生覆盖），RxPipeline 不再消费该
-    返回值弹通知。`computeBufferLimits()` 从 `config.maxDisplayLines` 派生
-    `{ maxLines }`（缺省 100000，下限 1000）。
-
-11. **解码器单一来源（K8）**：`src/utils/lineText.ts` 是全仓唯一的 TextDecoder
-    工厂与缓存（`createDecoder` / `decodeBytes`，统一 `ignoreBOM: false` —— 行首
-    BOM 作为编码标记被剥离，不进入行文本/搜索/复制）。RxPipeline 的 per-port
-    缓存与 ttyService 的流式解码器都从这里取（流式实例持残字节，必须 per-port
-    独占，不能共用一份）。新增解码路径一律走它，不要再 `new TextDecoder`。
-
-12. **过滤/搜索只有一份实现**：`src/utils/lineFilter.ts` 只提供 `linePassesFilter`
-    谓词；命中列表（append 时增量匹配、`offset` 压缩、缓冲裁剪回退）只在
-    `viewportManager.recomputeFilter`/`recomputeSearch`。`TerminalRenderer.ts`
-    文件头是渲染契约清单（R1–R15），`TerminalRenderer.soak.test.ts` 按编号引用、
-    结构化断言 R1–R6；不要在别处再实现一份匹配扫描或变量子。
-
-13. **时间索引就绪契约**：即使未联动，时间索引也随 RX 增量维护；首次加入时间组不触发全量重建。
-    序号表只引用 AVL 节点，不另存重复时间戳；双子节点删除移植后继，禁止复制 key 后使序号引用失配。
-    查询一次遍历同时找前驱与上界，返回值快照而非可变节点；裁剪/clear/dispose 仍释放对应条目。
-    不要用省常驻内存为由把百万行索引的全量构建延后到首次交互。回归见 `TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts`。
-
-14. **软换行是显示几何，不是数据切行**：`wordWrap` 默认关闭、只对文本生效，不能把宽度/视觉续行写回缓冲或 RX。两种模式共用 `renderWindow` 的节点/选区生命周期；未访问历史按固定行高估算，缓存只保留有界增量。resize/字体/编码/时间戳/过滤压缩后保留 seq + 行内偏移；必须先识别几何失效，不能把重排产生的原生 scrollTop 钳制按旧高度反算成新锚点或用户到尾意图。禁止同步遍历排版全历史。搜索跳转须定位记录内 mark；非选区 rewrite 被 pins 推迟时，`deferredRedraw` 必须保留到选区释放。
-
-## 编辑纪律
-
-- 大块结构变更用整文件 `write`（edit 工具的多行块匹配在本目录多次损坏文件）。
-- 改动后先跑 `npx vitest run src/utils/terminal/` 再跑全量；性能观测另显式设置
-  `HYPERCOM_TERMINAL_BENCH=1` 运行 `TerminalPerformance.test.ts`。jsdom 样本不是物理帧率，
-  CSS 高度映射仍须真实浏览器/WebView2 验证首/中/尾、字号与缩放极值。
-- 行为变化必须补测试：seq 稳定性、池复用、offset 压缩、frozen null、裁剪通知。
+- 让 stores 依赖 `viewportManager`，或把行数组放回 Zustand。
+- 在 `serial:data` 回调中逐事件写行、直接重建搜索集合或调用 manager `dispose`。
+- 通过 `scrollTop` 同步时间组，或把回放行追加进实时缓冲。
+- 用新增的解码器、过滤扫描或另一套高度/时间索引替代现有实现。

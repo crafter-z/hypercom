@@ -1,54 +1,52 @@
-# src/components/ConfigModal/
+# `src/components/ConfigModal/`
 
-Multi-page settings modal. Split into `pages/` (10 settings pages), `editors/` (3 row form editors), `hooks/` (the shared entity-page contract), and `RuleSetAccordion.tsx` (the shared row shell).
+设置模态框按页面和编辑器拆分。配置页面修改会话草稿，只有统一保存链路接受后才更新持久化基线和运行态。
 
-## Files
+## 导航
 
-| File | Role |
-|---|---|---|
-| `ConfigModal.tsx` | tab switcher + full save; X/Cancel/Escape use shared Save/Discard/Continue guard, preserving committed plugin state |
-| `hooks/useEntityPage.ts` | unified `useEntityPage({kind})` session-draft API backed by `utils/entityEditor.ts` |
-| `RuleSetAccordion.tsx` | sortable row shell, insert above/below, row and collection save/discard, dirty/error status |
-| `pages/GeneralSettings.tsx` | close behavior + max display lines + language + theme + power flags + Enter semantics + reconnect retries + **auto-update tri-state radio** (`updateCheckMode: none/stable/preview`) + fonts + config path |
-| `pages/LogSettings.tsx` | file path template, shard threshold, per-session new file, directory-change migration dialog (DirChangeDialog), directory/subdir mode, timestamp/direction, format, encoding, split size |
-| `pages/BackupSettings.tsx` | config bundle import/export (`version: 2`); no plugin code/private data; import reads back backend-authoritative state and only restores grants for the same installation identity |
-| `pages/DisplaySettings.tsx` | preset baud rates / port type badge / default line ending / send prefix / timestamp mode+format; background image (enable → path → opacity / blur) |
-| `pages/HighlightSettings.tsx` | draft highlight sets and nested rules; committed arrays alone drive rendering |
-| `pages/CommandSettings.tsx` | draft command sets, nested drag/insert; dense order shared with panel and new cyclic runs; 运行参数常驻紧凑工具条（有限多轮不依赖循环开关），重复标题/说明移入帮助浮层；添加发送/波特率步骤统一在命令列表工具栏；`styles/command-settings.css` 管双行表格与窄栏布局，e2e 守卫默认 800×600 弹窗完整显示至少六条普通命令； **「之后等待」字段与设置页共用 `shared/AfterDelayField`**（`isRoundFinal` 由列表位置传入，`loops` 由 `runsMultipleRounds` 判定），轮末给「并入轮间间隔」（算术在 `utils/commandSteps.foldDelayIntoRoundGap`）；**时长汇总**用 `utils/flowTiming` 的纯函数显示「每轮约 X；N 轮共约 Y」，仅在确有等待时出现，并注明不含发送/设备响应耗时 |
-| `pages/ProtocolSettings.tsx` | protocol templates: frame head/length/checksum/tail |
-| `pages/ToolSettings.tsx` | per-port external tool command template (`{port}` placeholder) |
-| `pages/TriggerSettings.tsx` | staged reminder/auto-reply rules; explicit save only, no debounce or unmount writes |
-| `pages/PluginSettings.tsx` | directory/ZIP install, upgrade, uninstall, pregrant while disabled, enable after queued grants persist; actions bind reviewed installGeneration, snapshots order by revision; proxy uses normal footer save. Uninstall can occupy the native main thread for tens of seconds (webview teardown + browser-data clear): a blocking `UninstallProgress` panel is committed and painted (two rAFs) before the invoke, so a slow uninstall never reads as a frozen app |
-| `editors/HighlightRuleEditor.tsx` | compact two-line rule editor: name/pattern/regex above color/B/I and inline light/dark samples; contrast details expand on demand, six rows fit the default settings window |
-| `editors/SendCmdEditor.tsx` | 双行表格式条目（首行名称/类型/格式/行尾/操作，次行内容/等待），共用列头，窄栏重排；按 `kind` 渲染发送字段（内容/类型/行尾）或本机波特率，**两者都渲染 `shared/AfterDelayField`**（「之后等待」的位置属性；轮末由 `isRoundFinal` 就地说明并提供「并入轮间间隔」） |
-| `editors/ProtocolTemplateEditor.tsx` | field-by-field template form + keyboard-accessible configured frame summary (not a live parser); preview layout in `styles/rule-preview.css` |
+| 路径 | 责任 |
+|---|---|
+| `ConfigModal.tsx` | 页面切换、全量保存和共享关闭守卫 |
+| `hooks/useEntityPage.ts` | 规则实体的统一草稿 API |
+| `RuleSetAccordion.tsx` | 可排序实体行、行/集合保存与脏状态 |
+| `pages/GeneralSettings.tsx` | 通用显示、语言、主题、电源、重连、Enter 行为、字体和更新设置 |
+| `pages/LogSettings.tsx` | 日志路径、分片、目录、格式、编码和会话文件设置 |
+| `pages/BackupSettings.tsx` | 配置备份导入导出；不导入插件代码或私有数据 |
+| `pages/DisplaySettings.tsx` | 默认波特率、行尾、时间戳、端口类型和背景图 |
+| `pages/HighlightSettings.tsx` / `pages/CommandSettings.tsx` | 高亮规则、命令集和命令步骤 |
+| `pages/ProtocolSettings.tsx` / `pages/ToolSettings.tsx` / `pages/TriggerSettings.tsx` | 协议模板、外部工具、触发规则 |
+| `pages/PluginSettings.tsx` | 插件安装、升级、卸载、权限、信任和代理 |
+| `editors/HighlightRuleEditor.tsx` | 高亮规则编辑和安全颜色预览 |
+| `editors/SendCmdEditor.tsx` | 发送/参数步骤编辑和等待字段 |
+| `editors/ProtocolTemplateEditor.tsx` | 协议模板字段和配置摘要 |
 
-`ConfigModal` defaults to 800×600 and offers a session-local expand/restore control without changing drafts or persisted UI scale. Save labels distinguish row, page and all-settings scope. `HighlightRuleEditor` previews the same color on opaque light/dark terminal surfaces; hex colors (including alpha) get a contrast estimate, unsupported spellings remain explicitly unmeasured, and colors are never rewritten automatically.
+## 实体页面契约
 
-## Entity page contract (`hooks/useEntityPage.ts`)
+- 五类运行规则页面使用 `src/components/ConfigModal/hooks/useEntityPage.ts` 的 `useEntityPage({ kind })`；不要直接编辑 `src/stores/useRuleStore.ts` 或 `src/stores/useAppStore.ts` 的 `config` 基线数组。
+- 草稿、展开行和脏状态跨页面卸载保留；挂载不能用基线覆盖未保存草稿。
+- 创建、更新、删除、启用和排序先进入草稿。`save(id)` 只提交实体，`save()` 提交集合；页脚保存提交所有类别。
+- 丢弃只影响请求范围。取消、X、Escape 和原生关闭都经过共享 Save/Discard/Continue 守卫；保存失败、冲突或产生新编辑时不能关闭。
+- 行排序使用 `src/components/shared/SortableEditorList.tsx` 的 `SortableEditorList`，命令顺序使用 `src/utils/commandOrder.ts` 的 `orderedCommands` / `normalizeCommandOrder`；数组顺序是管理列表的权威，不能把对象属性顺序当成编辑。
 
-Five entity pages use `useEntityPage<T>({kind})`; never create page-local persistence or edit committed runtime arrays.
+## 必守规则
 
-1. Drafts and expanded entity IDs survive page unmount. Mount never reloads over dirty state.
-2. Create/update/delete/enable/reorder are staged. `items` is the draft; `useRuleStore` arrays remain committed runtime.
-3. `save(id)` commits only that entity; `save()` commits the collection including deletion/order. Footer save commits all categories. Failed validation/CAS retains drafts; late edits stay dirty.
-4. Discard affects only its requested scope. Shared close guard awaits saves or remote discard ACKs; failure/new edits prevent closing.
-5. Use `SortableEditorList` for handle-only pointer/keyboard sorting; `commandOrder` normalizes command ranks. Array order is authoritative for other management lists. Object property order is not an edit (`jsonEqual`).
+- 所有普通配置、实体、预设和备份写入经过 `src/utils/configWriteQueue.ts` 的 `enqueueConfigWrite`、revision CAS 和 ACK；成功后才发布 `src/stores/useRuleStore.ts` 的运行态。失败或迟到响应保留草稿，不能回退更高 revision。插件动作遵循后端权威快照。
+- 数字输入范围来自 `src/utils/bounds.ts` 的 `CONFIG_BOUNDS`；Rust 镜像由 `src/utils/bounds.test.ts` 守卫。页面私有范围定义一次，同时用于 `clampNumber` 与输入属性。
+- HEX 命令不追加文本行尾；发送区、弹窗和命令编辑器共享 `src/utils/hexUtils.ts` / `src/utils/hexFormat.ts`，非法 HEX 保留输入并显示错误，不补零。
+- 编辑器组件必须在模块级定义；页面文字通过 `useTranslation().t()`，协议词、编码名和单位保持原文。
+- 备份导入先确认破坏性替换，读取后端权威状态并通过同一写入队列；只为相同 `installGeneration` 恢复插件授权。
+- 插件设置操作绑定用户审阅的 `installGeneration`，列表和变更按后端 revision；关闭/卸载等长操作必须先呈现状态，再等待后端结果。
 
-## Conventions (root covers i18n rules; 展开见 docs/architecture/conventions.md)
+## 常用检查
 
-- Runtime rules live in `useRuleStore`; pages use `useEntityPage` drafts, not runtime setters. `useAppStore.config` entity arrays are last persisted baseline.
-- `entityEditor` and `useConfigPersistence` serialize CAS writes through `configWriteQueue`; publish runtime only after acceptance. Plugin actions remain immediate/backend-authoritative. Backup import confirms destructive replacement, handles drafts, enters the same config write queue and checks the backend ACK before adopting state/reloading; import is single-flight. Restore clears recovery for every entity kind, including pages never mounted. Successful writes never regress a newer observed revision. Preset save/delete use the same queue; loads stay direct to avoid nesting.
-- Numeric inputs take their range from `CONFIG_BOUNDS` (`src/utils/bounds.ts`, the frontend's single source; the Rust side mirrors it and `bounds.test.ts` asserts the two tables match). Page-local ranges (e.g. a command set's `loopDelay`) are declared once per page as a `[min, max]` pair so the `clampNumber` arguments and the `min`/`max` attributes cannot drift.
-- HEX 命令不追加文本行尾：`SendCmdEditor` 与发送区/弹窗统一禁用行尾选择并保留原值；DisplaySettings 的默认行尾是独立设置，始终可编辑且标签通过 `useId` / `htmlFor` 关联。
-- Each row editor is a small presentational component declared at module level. NEVER inline `<Editor>` JSX inside a page body — rerender churn causes input focus loss.
-- Pages use `useTranslation()`'s `t()` for visible strings. Do not translate protocol vocabulary (`None/Even/Odd`, `Xon/Xoff`, encoding names, units like `ms/px/MB`, acronyms `SIM/VCP/HEX/DTR/RTS`).
+```bash
+npx vitest run src/components/ConfigModal
+npx tsc --noEmit
+```
 
-## Anti-patterns
+## 反模式
 
-- Subscribing the whole `useRuleStore` — every CRUD action re-renders every page.
-- Editing `useRuleStore` arrays or `useAppStore.config` entity baselines directly from forms.
-- Bypassing the shared editor CAS/save/leave contract with CRUD invokes, auto-save, or unmount writes.
-- Defining editor components inside page bodies — focus loss guaranteed.
-- Hard-coding strings instead of `t('namespace.key')` — page text won't switch with language toggle.
-- Adding a second persistence mechanism to a page (a bespoke debounce, a save-on-unmount, a manual ✓ handler) instead of `useEntityPage`.
+- 订阅整个 `useRuleStore`，直接改运行态或持久化基线。
+- 页面自建 CRUD、自动保存、卸载保存或额外脏状态。
+- 在页面函数体内声明编辑器组件，或硬编码未翻译文本。
+- 绕过 CAS/关闭守卫，或把旧插件快照、旧 revision 写回当前状态。

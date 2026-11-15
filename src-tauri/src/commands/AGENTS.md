@@ -1,42 +1,48 @@
-# src-tauri/src/commands/
+# `src-tauri/src/commands/`
 
-13 command domain files + `mod.rs` re-export hub; `wire_shape.rs` is a test-only IPC contract module. All Tauri commands return `Result<T, CommandError>`.
+Tauri 命令按领域分文件；`mod.rs` 汇总导出 `CommandError` 和各领域命令，`wire_shape.rs` 只保存 IPC 形状测试契约。所有命令返回 `Result<T, CommandError>`。
 
-## Where to look
+## 导航
 
-| File | Commands |
-|------|----------|
-| `serial.rs` | `list_available_ports`, `open_serial_port`, `close_serial_port`, `send_serial_data`, `send_file`, `set_serial_params`, `set_flow_control`, `attempt_reconnect`, `run_port_tool`, `kill_port_tool`, `cancel_file_send`. Blocking enumeration/open/send work runs off the command thread. File send owns per-port cancellation and terminal progress; `set_serial_params` accepts optional `expected_generation` and checks connection identity while holding the manager lock before applying; tools close→spawn→stream→reopen. Port routing uses `PortKind::of`, not string prefixes. |
-| `simulation.rs` | `enable_simulation`, `disable_simulation`. **Dev-only**（issue #2-9）：两条命令入口由 `system_cmds::dev_only` 守卫拒绝 release 构建，命令体只有一份实现（不再有 `#[cfg]` 双分支）。 |
-| `tty_sim.rs` | `enable_gitbash_sim`, `disable_gitbash_sim`, `resize_gitbash_sim` — 模拟终端（git bash pty）控制（issue #11）。**Dev-only**（镜像 `simulation.rs`）：三个命令入口由 `system_cmds::dev_only` 守卫拒绝 release 构建（唯一门控点）。`enable_*` 校验 `find_bash()` 存在后 `set_gitbash_sim(true)` 并返回 `"GIT:BASH"`；`disable_*` 遍历 `tty_sim_ports` 逐个 `close_port`（锁外 join 读线程）后 `set_gitbash_sim(false)`；`resize_*` 走 `SerialManager::resize_tty_sim`。依赖 Cargo crate `portable-pty` 0.9（Windows = ConPTY）。 |
-| `config.rs` | `get_config`, `set_config`, `update_session_snapshot`, `get_session_snapshot`, `get_config_path`. `set_config` 落盘后经 `AppState::apply_runtime_config()`（唯一同步入口）把配置里的日志设置 / 诊断日志开关应用到 `LogManager` / `DiagLogger`；诊断日志设置无逐字段命令。`update_session_snapshot` writes the separate `session.json` (not config.json, no `.bak`). |
-| `log.rs` | `start_logging`, `stop_logging`, `pick_and_save_log`, `get_log_files`, `open_path`, `open_log_directory`, `migrate_log_directory`. 日志设置唯一写入路径是 `set_config`（见 `config.rs`），没有逐字段 `set_log_*` 命令。另存路径由宿主原生 save 对话框选择（`pick_and_save_log`），前端不传路径。 |
-| `storage.rs` | settings entities CRUD (command sets / highlight sets / protocol templates / trigger rules / port presets / tool configs) + `save_port_groups` (whole-list replace of port groups, issue #2-3 — read back via `get_config` 的 `AppConfig.entities.port_groups`, no separate load command) + `save_port_meta` (whole-list replace of port meta `{portId, alias, isHidden}`, issue #4-9 — read back via `AppConfig.entities.port_meta`)。20 个命令均由 `save_entity` / `read_config` / `delete_entity` 三个助手 + 实体访问器生成，命令体只指明实体。Synchronous ConfigManager operations — lock `config_manager`, mutate the entity Vec in `AppConfig.entities`, save config.json. NO SQLite/async/transactions. |
-| `diag.rs` | `get_diag_log_path`, `read_diag_log(limit?)`, `clear_diag_log`, `append_diag_log(entries)` — 应用自身维测日志的读取/清空 + 前端 `console.*` 转发追加；底层由 `crate::diaglog::DiagLogger`（全局 logger，落盘 + 轮转）提供 |
-| `system_cmds.rs` | `get_system_status`, `prevent_sleep`, `prevent_screen_off`, `complete_editor_close`, `cancel_editor_close`, `acknowledge_editor_close` (main-window-only requestId approval/cancellation/heartbeat; obeys close-to-tray unless forced exit, native liveness escape after heartbeat loss) |
-| `file.rs` | `pick_text_file_and_read`, `pick_text_file_and_write`, `read_text_file`, `read_image_data_url`, `plugin_pick_files`, `plugin_pick_directory`, `plugin_list_directory`, `plugin_read_directory_file`, `plugin_stat_directory_entry`, `plugin_write_directory_file`, `plugin_create_directory`, `plugin_remove_directory_entry`, `plugin_rename_directory_entry`, `plugin_release_directory`, `pick_replay_sources`, `read_replay_source_chunk`, `release_replay_sources`. Text dialogs are host-owned; legacy `read_text_file` remains log-root restricted. Replay uses main-window native multi-selection, bounded read-only grants, 64 KiB chunks and metadata/content fingerprint verification; it never accepts arbitrary read paths. Plugin file and directory pickers recheck installGeneration, enabled state and the matching permission after selection. Directory grants are native-picker-only, in-memory, bound to plugin + installGeneration, path-fenced and revalidated on every operation; read (`fs:open-dir`) and write (`fs:write-dir`) are separate permissions. Overwrite writes use same-directory temp + atomic replace; links/reparse points and escapes are rejected. No TTL or grant-count cap; grants are revoked on disable/remove both permissions/uninstall/replacement/reload. |
-| `plugin.rs` | 15 plugin commands; list returns `{revision, pluginConfigs, plugins}`, mutators return `{revision, pluginConfigs}`. Enable/permissions/trust/reload require expectedGeneration checked after bounded plugin_io admission (5s busy wait, not an active-IO deadline). Security state changes use ConfigManager's durable plugin-trust recovery marker until primary and safe backup are synchronized. Asset reads return text/base64 only after authorization (null = missing); private writes accept empty content or raw bytes with no size cap and no whole-`data/` scan. `install_plugin` accepts `replaceExisting` for explicit same/lower replacement (error prefix `plugin_replace_confirmation_required:`); `reload_plugin` keeps identity/grants/data while retiring views and cancelling HTTP. Manifest/path limits and install transactions remain backend-authoritative. |
-| `plugin_http.rs` | `plugin_http_open` / `plugin_http_read` / `plugin_http_cancel`: requestId admitted before any await (plus bounded pre-cancel intents), per-request async mutex + watch cancellation, optional `http.urlWhitelist` enforced per redirect hop (≤10), system proxy inherited unless plugin proxy configured, no implicit deadline or body truncation, 64 KiB transport chunks with exact leftovers. Permission/generation rechecked at open/read and before delivering bytes; disable/revoke/uninstall/reload cancel owned requests. |
-| `popout.rs` | `open_popout(kind, target_id)`, `close_popout(kind, target_id)`, `set_popout_always_on_top(kind, target_id, on)` — 弹出窗建/关/置顶。**label 规则（`sanitize` / `compute_label`）权威实现在本文件**：命令只收业务语义参数，label 一律由 Rust 计算，前端只传 `kind` + `targetId`（src 侧不再有副本）。`open_popout` 为 async（Windows/Webview2 下从同步命令建窗会死锁）。 |
-| `update.rs` | `check_for_update`, `download_and_install_update`（自动更新，issue #12）。**通道是运行时参数**：JS `check()` 无法指定 endpoint → 本模块经 `app.updater_builder().endpoints(vec![url])` 按 channel 选 endpoint——`stable` 直连 `releases/latest/download/latest.json`（GitHub「最新非 prerelease」指针）；`preview` 先经 GitHub API（`api.github.com/releases?per_page=100`，未认证限流 60/h/IP）用纯函数 `find_latest_preview_tag` 取**版本号最大**的 `vX.Y.Z-preview.N` tag（`parse_preview_tag` 数值四元组比较；复审：API 是创建时间序，补发旧核心 preview 会乱序）再 tag-pinned URL。**构建门控方向相反**：入口 `system_cmds::is_debug_build()` 守卫，debug 短路为 Ok(None)/Ok(())，release 执行真实逻辑（命令体只有一份，release 逻辑不再 cfg 条件编译；前端 `import.meta.env.DEV` 自动短路外另有前端 `manualCheck` 不过门控——显式意图，依赖本层 debug 兜底）。**复审加固**：未知 channel 报错（不静默回退 stable）；GitHub API 请求 15s 超时（`GITHUB_API_TIMEOUT`，防手动检查按钮永久「正在检查」）；`download_and_install_update` 带 `expected_version` 参数——安装前重检查（设计上 check/install 两次往返），服务器侧版本与弹窗候选不一致则拒绝安装（防「展示 X 装 Y」TOCTOU，前端重新检查即可）。**二轮**：preview 通道语义 = max(preview, stable)——`check_for_update("preview")` 双检查 preview 与 stable endpoint，纯函数 `newer_channel`/`version_key`（数值四元组，stable rank=u64::MAX 保证同核心 preview<stable）取 semver 大者，`payload.channel` 反映更新实际来源（安装按该通道解析 endpoint）；双通道合并：一边失败另一边有更新则用有更新的一边（不丢可用更新）；两边都失败透出 preview 侧错误；preview 侧无 preview release 视为无更新继续查 stable，其它失败且 stable 无更新时错误上抛（自动检查静默、手动 toast）。下载进度经 `Emitter` 发 `update:progress` 事件（`UpdateProgressPayload` camelCase：downloaded/total/phase）。错误统一 `CommandError::Other`。 |
-| `mod.rs` | `CommandError` enum (thiserror) + `pub use domain::*;` re-exports |
+| 文件 | 主要入口 |
+|---|---|
+| `serial.rs` | 端口枚举、打开/关闭、发送、文件发送、串口参数、流控、重连、外部工具和取消文件发送 |
+| `simulation.rs` / `tty_sim.rs` | 开发构建的虚拟端口与 GIT:BASH 模拟终端；入口统一由 `system_cmds::dev_only` 门控 |
+| `config.rs` | `get_config`、`set_config`、会话快照和配置路径；`set_config` 通过 `AppState::apply_runtime_config` 应用运行时设置 |
+| `storage.rs` | 命令集、高亮集、协议模板、预设、工具配置、触发规则、端口分组和端口元数据的 CRUD |
+| `log.rs` / `diag.rs` | 日志生命周期、日志文件操作、诊断日志读写清理 |
+| `system_cmds.rs` | 系统状态、电源管理和编辑器关闭审批 |
+| `file.rs` | 宿主文件选择、文本/图片读取、插件文件目录授权与操作、回放源授权和分块读取 |
+| `plugin.rs` | 插件安装、升级、卸载、启停、权限、信任、资源、原生视图和外部打开 |
+| `plugin_http.rs` | 插件 HTTP 请求的打开、读取、取消和取消传播 |
+| `popout.rs` | 弹窗创建、关闭和置顶；标签由 Rust 的 `sanitize` / `compute_label` 计算 |
+| `update.rs` | 更新检查、通道选择、下载和安装 |
 
-## Conventions
+## 必守规则
 
-- `CommandError` variants: `Serial` / `Config` / `Log` / `System` / `Lock` / `Io` / `Other`. Manual `impl serde::Serialize` so the frontend gets the error string via `invoke`.
-- `AppState` holds `config_manager: Mutex<ConfigManager>` in addition to `serial_manager`、`log_manager: Arc<LogManager>`（无外层 Mutex——LogManager 自身用细粒度锁，命令层直接 `state.log_manager.xxx()`）。Config commands (`config.rs`) and settings-entity CRUD (`storage.rs`) access the config manager directly. 日志/诊断设置的同步只有一个入口：`AppState::apply_runtime_config()`。
-- Map errors with `map_err(|e| CommandError::Domain(e.to_string()))`. Pick the matching variant by domain; fall back to `CommandError::Other` only for genuinely domain-less errors.
-- `pub use <domain>::*;` in `mod.rs` — register the command in `lib.rs::invoke_handler!` (or `generate_handler!`), do not leak per-domain `pub mod` renames.
-- `src-tauri/src/system.rs` 是电源管理适配层：共享「期望状态 → 整体应用」骨架，平台差异只在后端模块（`win32_backend` 包 Win32 `SetThreadExecutionState` FFI / `child_process_backend` 管抑制子进程）。仅 `system_cmds.rs` 调用 — 不要另写 FFI 或第二份状态机。
-- 构建期能力门控只有 `system_cmds.rs` 的 `dev_only` / `is_debug_build` 两个实现（命令体不得再写 `#[cfg(debug_assertions)]` 双主体）。
-- Window close, tray Quit and RunEvent::ExitRequested route through `editor:close-requested` before shutdown. Only `complete_editor_close(requestId)` may approve hide/serial shutdown; `cancel_editor_close(requestId)` withdraws the matching pending request. Quick-send `close_popout` must request `CloseRequested` and never directly destroy its unsaved editor; terminal teardown retains its existing destroy semantics. Keep `core:window:allow-start-dragging` on main and popout capabilities; only popouts receive `core:window:allow-destroy`. Never grant main direct destruction, which bypasses close approval (`capability_keeps_window_drag_and_close_permissions` in `commands/popout.rs` guards the split).
-- Plugin identity is installGeneration UUID, never installedAt. Capture expectedGeneration from the code the user reviewed; reject queued old edits after install. Ordinary config saves preserve current plugin state; backup import only restores matching identities. Do not turn busy/IO/permission errors into a missing asset or empty KV.
-- Plugin transaction journal lives beside config.json, outside package files. Keep the durable trust reset and safe .bak before executable replacement; journal-owned recovery preserves private data and never regrants changed code. Current details: `docs/architecture/plugins.md`.
+- 新命令必须在所属模块公开、由 `mod.rs` 重导出，并注册到 `src-tauri/src/lib.rs` 的 `generate_handler!`；不要在前端直接 `invoke` 字符串，使用 `src/services/` 封装。
+- 使用匹配领域的 `CommandError` 变体；不要返回 `Result<T, String>`。错误映射应保留可诊断信息，不把权限、忙碌或 I/O 错误伪装成“缺失资源”。
+- `std::sync::MutexGuard` 不得跨 `.await`；先提取或 clone 必要数据并释放 guard，再 await。`AppState::log_manager` 已是 `Arc<LogManager>`，不要再包一层锁。
+- 配置和实体命令直接经过 `ConfigManager`；日志设置唯一由 `AppState::apply_runtime_config` 应用，不新增逐字段日志设置命令。
+- 串口路由使用 `serial::PortKind::of`；连接代次检查在执行参数变更、发送或重连时保持。阻塞 I/O 不应占用 Tauri 命令线程。
+- `dev_only()` / `is_debug_build()` 是构建能力门控的统一实现；不要为同一命令写两套 `#[cfg(debug_assertions)]` 主体。
+- 文件和目录访问必须由宿主选择器、安装身份、权限和路径围栏共同授权；目录读写权限分离，每次操作重新校验，拒绝链接、重解析点和路径逃逸。回放只使用窗口授权和分块读取，不接受任意路径。
+- 插件身份使用 `installGeneration`，不是安装时间。涉及启用、授权、信任或重载的操作带 `expectedGeneration`；列表和变更响应带 revision，旧响应不得恢复授权。插件事务恢复和信任重置保持在配置目录的持久化状态中。
+- 插件 HTTP 请求在打开、读取和交付前重新校验权限与安装代次；禁用、撤权、卸载、替换或重载时取消所属请求。不要在命令层添加隐式正文截断或业务配额。
+- `open_popout` 保持异步创建；业务参数只传 `kind` 和 `targetId`，不在前端复制窗口 label 规则。
+- 主窗口和托盘关闭都先经过 `editor:close-requested`；仅 `complete_editor_close` 可批准关闭流程。主窗口保留拖动能力但不授予直接销毁能力，弹窗才使用 destroy 能力。
 
-## Anti-patterns
+## 常用检查
 
-- Returning `Result<T, String>` — frontend no longer parses raw strings; serialization contract is broken.
-- Holding a `std::sync::MutexGuard` on `state.serial_manager` / `state.logger` / `state.config_manager` across `.await` — `MutexGuard` is `!Send`, the Tauri future must be `Send`. Pattern: extract + clone, drop guard, then `.await`. See `log.rs`.
-- `eprintln!` for error logging — use the `log` crate (`error!` / `warn!`). Backend uses `log` → `diaglog::DiagLogger` (全局 logger，落盘 + 轮转，替换原 env_logger), not print macros.
-- Registering commands without updating `lib.rs::generate_handler!`; the config test detects drift.
-- Bypassing the `tauri` service module in the frontend and calling `invoke('<cmd>', ...)` directly.
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo check --manifest-path src-tauri/Cargo.toml --release --lib
+```
+
+## 反模式
+
+- 跨 await 持有标准 mutex guard。
+- 用 `eprintln!` 代替 `log` crate；绕过服务层直接调用命令；新增命令却不更新 `generate_handler!`。
+- 把 `installGeneration` 当成时间戳，或把旧 revision/旧安装身份的结果写回当前状态。
+- 放宽路径、权限、窗口关闭审批或插件网络取消边界。

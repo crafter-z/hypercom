@@ -1,53 +1,45 @@
-# src/components/OperationPanel/
+# `src/components/OperationPanel/`
 
-Send area + serial params. Split into 2 view sections (send / params) plus the send-area hooks and subcomponents — the old standalone `RulesSection` (highlight dropdown + loop controls) was removed: its highlight dropdown was a dead control (the highlight engine filters by each set's `isEnabled`, never reading `activeHighlightSetId`), and its command-set select + loop toggle were merged into `SendSection`'s compact header. `OperationPanel.tsx` owns the top strip (connect / clear screen / log replay / log save-open / font-size slider). The panel height is drag-resizable: `OperationPanelResizeHandle` (in `src/components/shared/`, mounted between `MainDisplay` and `OperationPanel` in `App.tsx`) writes `ui.operationPanelHeight`, which `OperationPanel.tsx` applies as an inline height (the collapsed state still pins to the header via CSS).
+操作区由 `OperationPanel` 顶部工具条、`SendSection` 发送区和 `ParamsSection` 参数区组成。面板高度写入 `useSystemStore.ui.operationPanelHeight`，由 `OperationPanelResizeHandle` 调整。
 
-## Files
+## 导航
 
-| File | Role |
-|---|---|---|
-| `OperationPanel.tsx` | container + top strip: connect / clear screen / replay controls (targets active tab) / log save-as, open-file, open-dir / font-size slider; mounts `SendSection` + `ParamsSection` (no `RulesSection`); **折叠态流程徽标**：面板收起时若当前聚焦端口有运行中的增强流程，header 内渲染模块级 `FlowRunningBadge`（`utils/flowRuntime` 只读订阅）——它同时是该端口唯一的可见与停止入口，停止按钮必须 `stopPropagation` 才不会被 header 的收起手势吞掉；展开态由 `SendSection` 的 `.op-flow-status` 承担，不重复显示 |
-| `SendSection.tsx` | composition only: compact header (`.op-send-header`: card title on the left; command-set `<select>` + loop icon-toggle + edit icon on the right, one line) + `QuickSendStrip` + compose textarea / byte chip / send button + `SendFileButton` + options cluster (`LineEndingSelect`, HEX & clear-after-send checkboxes); the loop toggle (`handleToggleLoop`) 按**当前聚焦端口**启停该端口的独立循环（`setCyclicLoop(activeTabId, bool)`，issue #12）并脉动显示; repeat count lives per command set (`SendCommandSet.repeatCount`); Enter semantics governed by `config.sendOnEnter`; **增强流程状态条**（`.op-flow-status`，读 `useFlowStatus(activePortId)`，终止态保留到用户清除）与发送互斥：流程占用端口时发送按钮/文件按钮置灰、快捷药丸 `isBusy`，快捷条支持 `send` 与 `setParams` 单步执行（未知步骤仍过滤），统一走 `utils/commandExecution.executeQuickCommand`；单步只执行点击项，不启动循环或等待 `delay`，改参在飞期间独占端口 |
-| `components/QuickSendStrip.tsx` | quick-send pill row: active command set's commands that fit + `⋯ +N` overflow + permanent pop-out button; visible row and hidden measuring row share one `QuickCmdPill` so measured width === rendered width; `isBusy` 置灰药丸（增强流程独占该端口时） |
-| `components/LineEndingSelect.tsx` | line-ending `<select>`; values and i18n keys come from `sendUtils` (`LINE_ENDING_VALUES` / `lineEndingLabelKey`) — the pop-out text mode reuses the same source |
-| `components/SendFileControls.tsx` | file-send button (send ⇄ cancel) and the progress bar; both are fed by one `useFileSend` instance owned by `SendSection` |
-| `ParamsSection.tsx` | baudRate / dataBits / parity / stopBits / handshake / DTR / RTS; **preset management lives HERE** (apply dropdown + save + delete via `storageService.savePortPreset` / `deletePortPreset`) — `ConfigModal/pages/GeneralSettings.tsx` only owns `defaultBaudRates`; presets are not written back into `useAppStore.config` (K5 safe snapshot reads them from the backend); **TRX/TTY 模式分段控件**复用 `shared/SegmentedControl`；`handleModeChange` 固定请求的端口与模式，确认后先 `getRxPipeline().flushAndReset` 排空旧数据，再 `setPortMode` + `clearTerminal` / 必要时 `releaseViewportManager` + `ttyService.clear`（禁止清屏后再 flush 复活旧数据） |
-| `hooks/useSequentialSend.ts` | **共享顺序发送调度引擎（S-F1）**：`SEND_LOOP_FIRST_TICK_MS` / `SEND_LOOP_OVERDUE_MS` + 纯引擎 `createSendLoop({ step, onStepError?, firstTickMs?, onStop? })`（递归 setTimeout 链、一次迭代在飞不重入、消费定时器句柄防可见性补发双发、`step` 返回下一次延迟或 `null` 结束）+ 单循环 React 绑定 `useSequentialSend({ ..., autoStopOnChange? })`（可见性补发 + 卸载自停 + 变更自停）。主窗 `useCyclicSend` 与弹窗文本模式共用；引擎不碰 `document`，可在 node 环境用假定时器直测（`useSequentialSend.test.ts`） |
-| `hooks/useCyclicSend.ts` | per-port runtime fixes target, committed command set, ordered commands, delays and repeat policy at start; later edits/saves/set switches only affect the next run. Shared createSendLoop scheduling; disconnected targets wait 500ms without index advance; errors retry 500ms; visibility catch-up retained. **Enhanced command sets**（含 `setParams` 动作）走同一 runtime：setParams 与单步执行共用 `utils/commandExecution.applyCommandParams`（校验连接代次并在成功后回写端口/操作态）、失败即停不重试、运行期间在 `utils/flowRuntime.ts` 发布 `exclusive` 占用态；每一步的 `delay` 是「之后等待」（对发送与改参都生效，轮末改用 `loopDelay`），处于等待时发布 `waiting` 阶段。旧 send-only 集保持原重试与延时语义（推进规则唯一实现在 `utils/flowSchedule.ts`） |
-| `hooks/useQuickStripLayout.ts` | 快捷发送条的宽度测量（ResizeObserver 容器 + 隐藏测量行）+ `computeFitCount` → `visibleCommands` / `overflowCount`；布局常量（gap 4px / 面板按钮估算 32px）也只在这里 |
-| `hooks/useHexCompose.ts` | 发送输入框的 HEX 关注点：字节计数（非法 HEX 给 `inputErrorKey` 而不是 `N B`，C4/K7）、行尾 HEX 提示、textarea 清洗、HEX 模式就地转换（非法 HEX 转文本时保留原文） |
-| `hooks/useFileSend.ts` | 文件发送：**发送前经 `isSendablePort` 守卫**（不可发送直接告警、连文件框都不弹）、**增强流程独占该端口时同样拒绝**（文件发送绕过 `sendToPort`，独占守卫必须在此重复一次）、进度事件订阅（按 portId 过滤）、**按增量计入 `trafficStats` TX**、完成时成功提示、取消 |
-| `hooks/useSendHistoryRecall.ts` | ↑/↓ 历史回填（回填 `sendInput`/`sendIsHex`/`sendAppendLineEnding`；取不到则清空输入框），历史本体仍在 `useSerialSend` |
+| 路径 | 责任 |
+|---|---|
+| `OperationPanel.tsx` | 连接、清屏、回放、日志、字号和流程状态入口；流程状态徽标在模块级 `FlowRunningBadge` |
+| `SendSection.tsx` | 命令集选择、循环开关、快捷发送、文本/HEX 输入、文件发送和发送选项 |
+| `components/QuickSendStrip.tsx` | 命令快捷条、溢出项和弹窗入口 |
+| `components/LineEndingSelect.tsx` | 复用 `sendUtils` 的行尾值和标签 |
+| `components/SendFileControls.tsx` / `hooks/useFileSend.ts` | 文件发送、取消、进度、TX 增量统计和成功提示 |
+| `ParamsSection.tsx` | 串口参数、预设和 TRX/TTY 模式切换 |
+| `hooks/useSequentialSend.ts` | `createSendLoop` 与 React 绑定；主窗循环和弹窗文本循环共用 |
+| `hooks/useCyclicSend.ts` | 按命令集运行发送/参数步骤和流程状态 |
+| `hooks/useHexCompose.ts` / `hooks/useQuickStripLayout.ts` / `hooks/useSendHistoryRecall.ts` | HEX 输入、快捷条布局和发送历史回填 |
 
-## Conventions (root covers selector discipline; 展开见 docs/architecture/conventions.md)
+## 必守规则
 
-- Operation fields live on `useOperationStore` with NO `op` prefix — selectors look like `s => s.baudRate`, not `s => s.opBaudRate`.
-- `useCyclicSend` reads committed `useRuleStore` once at start and uses `orderedCommands` from `utils/commandOrder`; never read session drafts or the active set again mid-run.
-- HEX 输入与 UTF-8 转换的唯一实现位于 `src/utils/hexUtils.ts`（`isValidHexInput` / `parseHexBytes` / `stringToHex` / `hexToString`）；`sendUtils` 只重导出字节解析及预览别名，并提供 `sanitizeHexInput` / `computeByteCount` / `hexInputError` 等发送区适配。终端菜单、弹窗、实体校验与提醒不得另写宽松解析。 字节→HEX 字符串的唯一实现是 `src/utils/hexFormat.ts`（`hexByte` / `bytesToSpacedHex`）——不要再写 `toString(16).padStart(2,'0')`。
-- **HEX 契约（C4/K7）**：`parseHexBytes` 与后端 `parse_hex_string` 同尺子——忽略空白后要求偶数个半字节且全为 `0-9a-fA-F`，否则返回 `[]`（**不补零**）。`hexInputError(input)` 返回非法时的 i18n key（`sendSection.hexInput.invalid`）。`computeByteCount` 在非法时给 `errorKey` 且 `label` 为空，UI 显示错误原因并把「发送」置灰——**绝不能**为后端必然拒绝的输入显示 `N B`。`sendToPort` 也在入口拒发非法 HEX。
-- HEX 不追加文本行尾：发送区与各命令编辑器在 HEX 下禁用行尾选择，保留已选文本行尾供切回文本恢复；默认设置页不受当前发送模式影响。
-- 清屏按钮确认固定原标签 UUID 与 portId；焦点切换不改变目标，原标签关闭后不清同端口新标签。Ctrl/Cmd+L 保留直接清屏快捷操作，局部事件不得冒泡清另一个全局活动标签。
-- HEX toggle on the checkbox converts content both ways: string→hex on check (via `textToHexPreview`), hex→string on uncheck (via `hexToTextPreview`). HEX-mode input is sanitized. 非法 HEX（打了一半/含非法字符）转文本时**只切模式、保留原文**，不静默清空用户输入。
-- Enter semantics: plain Enter sends by default; Shift+Enter and Ctrl+Enter always insert newline. When `config.sendOnEnter` is off (settings toggle), Enter also inserts newline and sending is only via the Send button. The "Enter behavior toggle" button was removed; it's now a setting checkbox in GeneralSettings.
-- Send history: in-memory per-port (cap 50, `Map<portId, SendHistoryEntry[]>` in `useSerialSend`); "clear send history" button removed. ↑/↓ recall still works.
-- Log replay (`useLogReplay` in `src/components/MainDisplay/hooks/useLogReplay.ts`) is driven from OperationPanel's strip; targets the active tab.
-- Timing for cyclic send is single-sourced from the command set: per-command `delay` (intra-round), `loopDelay` (inter-round), and `repeatCount` (round limit; 0 = follow `isLoop`). No global interval or repeat field exists in `useOperationStore` (`loopRepeatCount` was removed — repeat count is now per-set).
-- The compose-row file button becomes a cancel button while a send is in flight (calls `serialService.cancelFileSend(activeTabId)` → backend `cancel_file_send`, which sets the per-port cancel token so `send_file` breaks at the next chunk). File send goes through `useFileSend`, which (a) refuses to even open the file dialog when `isSendablePort` is false and (b) adds each run's byte delta to `trafficStats` TX. The success toast is fired from the `onFileProgress` handler only when the `done` event arrives with `sent>=total>0`; cancel and empty-file completions clear the bar with no toast (the backend guarantees the `done:true` event on every exit path).
-- The section components are defined at module level — never inline them in `OperationPanel.tsx`'s body.
-- `.op-section > *` carries `flex-shrink: 0`: when the panel is dragged short, section children keep their natural height and the section scrolls. Removing this re-introduces the overlap bug where `.op-send-row` (which has `min-height: 0`) collapsed to 0 height and its 发送/文件/HEX controls spilled onto the quick-send pills.
-- Panel height lives in `ui.operationPanelHeight` (default 280 — raised from 200 because 200 clipped the full send+params layout, issue #2-6; clamped [160, 600] by `OperationPanelResizeHandle`) and is applied inline in `OperationPanel.tsx`. The old static `--operation-panel-height` CSS variable is gone — don't reintroduce a fixed height in CSS.
-- Params section width is capped: `.op-section-params` has `max-width: 300px` (issue #2-7) — wide windows previously stretched it past 350px at the send section's expense. Don't remove the cap.
-- **增强流程独占端口**：命令集含非 `send` 步骤时，运行期在 `utils/flowRuntime.ts` 发布 `exclusive` 状态。发送侧守卫在 `sendToPort` 的 `origin` 参数（流程执行传 `'flow'`）；**任何绕过 `sendToPort` 的发送路径都要自己补守卫**（当前是 `useFileSend` 的文件发送与 `TtyView` 的键盘输入）。停止时若仍有发送/改参在飞，先进入 `stopping`（保持独占）再由该次迭代收尾发布终止态；步骤之间的「之后等待」是调度器计时器，`stop()` 直接清掉。旧 send-only 命令集不发布任何占用态——不要给它加锁，否则会破坏现有循环体验。
-- **时间只有一个概念**：等待不是步骤类型，而是每一步自带的 `delay`（界面「之后等待」），对发送与改参都生效；轮末那一步改用 `loopDelay`。编辑器必须把这件事说出来（`isRoundFinal` → `sendCmdEditor.roundFinalDelayInactive`），不要靠 tooltip 藏规则。新增动作类型时让它同样可携带 `delay`，不要再引入独立的「等待」行。
-- `useCyclicSend` does not take focus/connection props. The target port is fixed at start, status is checked live per tick; changing focus never retargets a running loop. Saved edits require stop/restart. An unavailable port waits 500ms without advancing.
-- **弹窗文本循环（`src/components/Popout/QuickSendText.tsx`，I 的文件）与主窗 `useCyclicSend` 共用 `hooks/useSequentialSend.ts`**（旧的 `Popout/usePanelCyclicSend.ts` 已删除）：调度（计时器链、重入防护、可见性补发阈值、卸载自停）只有一份，两个调用方只提供「一步做什么」的 `step`。改调度语义请在引擎里改一次；不要在任何一侧重新手写 setTimeout 链。
+- 串口参数字段使用 `useOperationStore` 的无前缀名称；显示格式、编码、滚动锁和时间戳属于 `useTerminalStore`，普通 Enter 设置属于 `useAppStore.config`。
+- TRX 的快捷发送、循环、触发、插件和弹窗发送统一走 `sendToPort`；入口保持端口可发送、连接代次、RX-before-TX、回显、TX 统计和历史契约。TTY 显式命令走 `ttyService.sendData`，键盘走 `ttyService.send`，不做本地 TX 回显但仍保持有序写入、代次、流程独占和统计边界。
+- 发送前必须 `getRxPipeline().flushBeforeSend(portId)`，不能让排队 RX 越过 TX 回显。文件发送和 TTY 键盘绕过 `sendToPort` 时必须自行执行同一流程独占守卫。
+- `useCyclicSend` 在启动时固定目标端口、已提交命令集、排序结果和重复策略；焦点、草稿或中途保存不改当前运行。步骤等待由 `delay` 表达，轮末使用 `loopDelay`，重复次数来自命令集；不要新建全局间隔字段或独立定时器链。
+- 增强流程（含非 `send` 步骤）运行时通过 `src/utils/flowRuntime.ts` 独占端口；流程执行发送使用 `origin: 'flow'`，用户发送、文件和 TTY 输入必须拒绝被占用端口。停止时保留独占直到在飞操作结束。
+- HEX 输入和转换只使用 `src/utils/hexUtils.ts`、`src/utils/hexFormat.ts` 与 `src/utils/sendUtils.ts` 适配；忽略空白后必须偶数位且全为十六进制字符，非法输入显示错误并禁止发送，不补零。HEX 模式不追加文本行尾，切回文本时保留非法原文。
+- `ParamsSection` 模式切换必须按固定端口执行，先按旧模式冲刷 `src/utils/rxPipeline.ts` 的 `getRxPipeline().flushAndReset`，再切模式并清理对应显示/TTY 状态；预设读写走 `src/services/storage.ts` 的 `storageService`。
+- 文件按钮在 `isSendablePort` 失败或流程占用时不得打开选择器；进度按增量计入 TX，只有收到完成且发送量有效时提示成功。
+- `QuickSendStrip` 的可见行与测量行共用同一 pill；所有区段组件在模块级定义。面板子项必须保持自然高度，短面板通过区段滚动，不用固定 CSS 高度覆盖状态。
 
-## Anti-patterns
+## 常用检查
 
-- Defining section components inside `OperationPanel.tsx` function body — input focus loss on every keystroke.
-- Subscribing to `useRuleStore` without a selector — every rule CRUD re-renders all sections.
-- Calling `invoke('send_data', ...)` directly — go through `tauriService.send` (`src/services/tauri.ts`).
-- Reading `useOperationStore.sendInput` via a non-selector inside `useCyclicSend` — selector subscriptions break the loop on every typing keystroke.
-- Hardcoding cyclic intervals instead of routing through the command set's `delay` / `loopDelay`.
-- Re-introducing `displayFormat`, `encoding`, `scrollLocked`, `showTimestamp`, or `loopInterval` into `useOperationStore` — those live per-tab in `useTerminalStore`.
-- Writing display state from OperationPanel sections — display controls live in `TerminalFilterBar` (per-tab, writes via `useTerminalStore.getState()`).
+```bash
+npx vitest run src/components/OperationPanel
+npx vitest run src/components/OperationPanel/hooks/useSequentialSend.test.ts
+npx tsc --noEmit
+```
+
+## 反模式
+
+- 在 `OperationPanel` 函数体内声明区段组件，或无 selector 订阅整个规则 store。
+- 在发送区直接调用 Tauri `invoke` 或后端发送命令，或新增独立循环调度。
+- 用焦点变化重新定位已运行循环，或从草稿读取运行中命令。
+- 把显示字段放回 `useOperationStore`，或在 HEX 下宽松解析/补零。
+- 文件发送绕过发送前守卫、取消/进度边界或 TX 增量统计。

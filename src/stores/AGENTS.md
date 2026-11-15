@@ -1,44 +1,40 @@
-# src/stores/
+# `src/stores/`
 
-Six Zustand stores, no god store. Split by domain so a write in one domain cannot re-render subscribers of another. `useAppStore` / `useRuleStore` / `useOperationStore` / `useToastStore` use Immer; `useTerminalStore` / `useSystemStore` are plain shallow-set (no line arrays, no proxies).
+Zustand 状态按领域拆分；组件和 hook 必须用 selector 订阅，回调或 effect 需要实时值时使用 `useXxxStore.getState()`。
 
-## Where to look
+## 导航
 
-| Store | File | Job |
-|-------|------|-----|
-| `useAppStore` | `useAppStore.ts` | ports/groups/tabs/paneTree/config; rule arrays are last confirmed persisted baselines, ordinary config is editable draft; pluginConfigs is backend revision-ordered. Groups/port metadata retain useAppInit persistence |
-| `useSystemStore` | `useSystemStore.ts` | 运行期系统态：`systemStatus`、`trafficStats`、`simulationMode`、`ui.*`（含 `configReady`）. 高频写点（5s 系统轮询 / 每端口 1s 流量 flush / 拖拽 resize）集中在这里，所以它必须与 `useAppStore` 分开，否则每次流量 flush 都会唤醒端口/标签订阅者。 |
-| `useOperationStore` | `useOperationStore.ts` | serial params + send — `baudRate`, `dataBits`, `parity`, `stopBits`, `handshake`, `dtr`, `rts`, `ignoreEmptyChars`, `sendIsHex`, `sendAppendLineEnding`, `sendInput`, `cyclicLoops`（每端口循环发送开关 `Record<portId, boolean>`，issue #12；NO `op` prefix; NO `sendOnEnter`/`quickSendInlineCount` — those live in `useAppStore.config`; NO `displayFormat`/`encoding`/`scrollLocked`/`showTimestamp`/`loopInterval` — those live per-tab in `useTerminalStore`; NO `loopRepeatCount` — repeat count is per-command-set `SendCommandSet.repeatCount`; 旧全局 `isLoopSending` 布尔已删除，改用 `setCyclicLoop(portId, running)` 逐端口启停） |
-| `useTerminalStore` | `useTerminalStore.ts` | pure display state (`scrollLocked`, `showTimestamp`, `displayFormat`, `encoding`, `hideAsciiNoise`, `wordWrap`, `connectedAt`) per port. `hideAsciiNoise` defaults false; text-view-only ASCII noise visibility, never an RX/logging gate. 方案B（issue #14）：line buffer moved OUT into `TerminalViewportManager`'s ring buffer (`utils/terminal/viewportManager.ts`). Interface: `ensureTerminal` / `setTerminalConfig` / `setTerminalEncoding` / `setTerminalConnectedAt` / `releaseTerminal`. `setTerminalEncoding` updates `term.encoding`; re-decode is lazy (`getLineText` at render time) — no buffer walk. |
-| `useRuleStore` | `useRuleStore.ts` | committed highlight/command/protocol/trigger/tool runtime arrays and active command set. Forms use separate session drafts in utils/entityEditor; only accepted saves promote runtime |
-| `useToastStore` | `useToastStore.ts` | host `push` preserves overflow/sticky notifications; plugin `pushPlugin` assigns trusted source identity and enforces rate, text and pending limits. Both share max 5 visible + stashed; module helpers serve non-React callers. |
+| 文件 | 负责 |
+|---|---|
+| `useAppStore.ts` | 端口、分组、标签、`paneTree`、配置基线与普通设置草稿；`getTabPortId` / `getActivePortId` 解析发送端口，`getClosingTabIds` 统一关闭范围 |
+| `useSystemStore.ts` | `systemStatus`、`trafficStats`、`simulationMode`、`ui` 等高频运行态 |
+| `useOperationStore.ts` | 串口参数、发送输入和按端口的循环运行态；不放显示字段或全局循环间隔 |
+| `useTerminalStore.ts` | 按端口的显示设置：滚动锁、时间戳、格式、编码、ASCII 噪声可见性、软换行、连接时间；行缓冲在 `src/utils/terminal/viewportManager.ts` |
+| `useRuleStore.ts` | 已提交的高亮、命令、协议、触发器、工具运行态和活动命令集；编辑草稿在 `src/utils/entityEditor.ts` |
+| `useToastStore.ts` | 宿主通知与插件通知；插件必须通过 `pushPlugin` |
+| `src/stores/releaseTerminalState.ts` / `src/stores/resetStores.ts` | 关闭标签后的端口显示资源回收；测试用 `resetStoresForTests` 整组 store 快照重置 |
 
-## Conventions (root covers selector discipline; 展开见 docs/architecture/conventions.md)
+## 必守规则
 
-- **活动标签只有一个来源**：`useAppStore.activeTabId`（渲染侧 `tab.id === activeTabId` 派生）。`TabItem` 没有 `isActive` —— 双表示会漂移，且切换要遍历整个 tabs 数组。
-- **关闭标签/端口后的回收走 `releaseTerminalState(portId)`**（`releaseTerminalState.ts`）：一次性清掉 `useTerminalStore.terminals` 条目、流量统计（含聚合器里未 flush 的字节）、以及 `useSerialSend` 的 per-port TX 历史。关闭路径有多条（关标签、批量关闭），任何一条漏调都会留下幽灵端口。触发点是**关标签**，不是断连——断连后标签仍在，终端显示态（滚动锁/编码）要跨重连保留。
-- 关闭范围语义的唯一实现是 `getClosingTabIds(tabId, scope)`（`'self' | 'toLeft' | 'toRight' | 'others'`）：`toLeft`/`toRight` 按**所属叶子的 tabIds 顺序**（屏幕顺序）且不碰别的分屏；固定标签只被 `'self'` 关闭。4 个关闭动作（`closeTab` / `closeTabsToLeft` / `closeTabsToRight` / `closeOtherTabs`）共用它。
-- `sendOnEnter` and `quickSendInlineCount` live ONLY in `useAppStore.config`. SendSection reads them via `useAppStore(s => s.config.sendOnEnter)` / `useAppStore(s => s.config.quickSendInlineCount)`. They were removed from `useOperationStore` to eliminate dual-source ambiguity. The dead `quickSendSlots` field was deleted entirely (quick-send is command-set driven; `quickSendInlineCount` = inline strip size, 0 hides it).
-- `appendTerminalLines(portId, lines[])` in `utils/terminal/viewportManager.ts` is the RX batch-write entry into the ring buffer, not Zustand. Overflow advances the head O(1), overwriting the oldest line at fixed capacity; never reintroduce per-line shift, byte-budget trimming or an Immer line array.
-- 内存上限（issue #16 改版）：`maxDisplayLines` 每端口终端最大显示行数（默认 100000），缓冲超限**逐行覆盖最旧**（滚动窗口）——无字节预算、无软兜底双闸、无内存裁剪 toast。
-- `setTerminalEncoding(portId, encoding)` updates `term.encoding`. 方案B（issue #14）：re-decode is lazy — `getLineText(line, encoding)` decodes `rawData` at render time, so encoding switch = next render, no buffer walk. Callers switching encoding MUST flush the RX pipeline tail under the OLD label first (`getRxPipeline().flushAndReset(portId)`), or a partially-buffered line corrupts at the seam.
-- Per-tab display state (`scrollLocked`, `showTimestamp`, `displayFormat`, `encoding`) lives in `useTerminalStore`. Display controls must use `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding(portId, encoding)` / `useSystemStore.getState().setUIState(...)` for panel layout. Never reintroduce global display fields in `useOperationStore`.
-- **分屏树算法在 `utils/paneTree.ts`**：`findLeafById` / `findLeafByTabId` / `findBranchById` / `findParentBranch` / `collectLeaves` / `countLeaves` / `pruneTree` / `newPaneId`。store 只做状态编排，不要再把树算法搬回 `useAppStore.ts`。
-- `pruneTree` auto-runs after every tree mutation: ① drops non-root empty leaves → ② collapses single-child branches (size inherits) → ③ empty root branch → degenerate `'main'` leaf.
-- `focusedPaneId` references a LEAF ID in the tree (never a flat array index). 任何改动 `paneTree` 的动作收尾都要 `revalidateFocus`：悬空 id 会让 `openTab` 把标签推进 `state.tabs` 却挂不到任何叶子（孤儿标签）。
-- Tree mutation actions: `splitPane`, `closeTab`, `resizeChildren(branchId, childIndex, deltaFraction)`. Use these — never write tree state by hand.
-- Full settings save composes entityEditor drafts + ordinary config/groups/portMeta/presets and revision CAS through configWriteQueue. Baseline, session drafts and runtime are separate; per-entity save preserves unrelated drafts, failures/late edits stay dirty. No page-level CRUD or auto-save may bypass this boundary.
-- 插件镜像只接受 `pluginConfigSnapshot` 的后端 `{revision, pluginConfigs}` 快照，旧响应不能恢复权限；安装身份变化使旧 KV 缓存失效。不要用规则实体基线直接发布插件状态或备份中的旧授权。
-- 插件通知只能走 `pushPlugin(pluginId, input)`；不能走宿主 `push` 绕过限额。作者 API 与数值见 `docs/plugin-development.md`；宿主实现见 `docs/architecture/plugins.md`，宿主/串口粘滞记录不因插件配额被移除。
-- 测试用 `resetStoresForTests()`（`resetStores.ts`）而不是手抄每个 store 的默认字段；它按模块加载时的快照整份替换。
-- In callbacks/effects needing latest value without subscribing: `useXStore.getState().y`.
+- `activeTabId` 是活动标签唯一来源；`TabItem` 不重复保存活动标记。
+- `paneTree` 的算法在 `src/utils/paneTree.ts`。状态变更使用 `splitPane`、`closeTab`、`resizeChildren` 等 action；每次树变更都保持 `focusedPaneId` 指向真实叶子。
+- 关闭标签的范围必须来自 `src/stores/useAppStore.ts` 的 `getClosingTabIds(tabId, scope)`，范围按所属叶子顺序计算，不要在组件中重新筛选。关闭标签而非断开端口时，清理走 `src/stores/releaseTerminalState.ts` 的 `releaseTerminalState(portId)`；断开仍走 `src/hooks/useSerialConnection.ts` 的 `useSerialConnection.closePort()`。
+- `src/utils/terminal/viewportManager.ts` 的 `appendTerminalLines` 是批量入口，不把行数组放回 Zustand，也不实现逐行 `shift`、字节预算或额外内存闸门。
+- 显示字段只属于 `src/stores/useTerminalStore.ts` 的 `useTerminalStore`；`sendOnEnter`、`quickSendInlineCount` 等普通设置只属于 `src/stores/useAppStore.ts` 的 `config`；不要在 `useOperationStore` 复制这些字段。
+- 配置、实体、分组、端口元数据和预设保存统一经过 `src/utils/configWriteQueue.ts` 与 revision CAS；保存成功后才推进基线和 `useRuleStore`，失败或迟到响应保留草稿。
+- 插件状态只接受 `src/utils/pluginConfigSnapshot.ts` 的后端带 revision 快照；安装身份变化会使旧授权和缓存失效，不得从规则实体基线恢复插件权限。
+- 测试使用 `resetStoresForTests()`，不要手抄默认状态；高频 hook 不得无 selector 订阅整个 store。
 
-## Anti-patterns
+## 常用检查
 
-- Subscribing without a selector — every `appendTerminalLine` re-renders consumer, causing input focus loss.
-- Test code using `state.panes[...]` or `state.panes.length` — that schema is gone; assert on `state.paneTree`, narrow with `as BranchPane` for `children`.
-- Mutating tree state by hand instead of `splitPane`/`closeTab`/`resizeChildren`.
-- Re-introducing the `op`-prefixed operation field names (`opBaudRate` etc.).
-- Re-introducing `displayFormat`, `encoding`, `scrollLocked`, `showTimestamp`, or `loopInterval` into `useOperationStore`. Those fields are per-tab in `useTerminalStore` and must stay there.
-- Putting `ui.*` / `systemStatus` / `trafficStats` / `simulationMode` back into `useAppStore` — they belong to `useSystemStore` (high-frequency writers).
-- Calling a store with no selector inside a hook that owns a high-frequency listener (saps perf worse than in a render fn).
+```bash
+npx vitest run src/stores
+npx tsc --noEmit
+```
+
+## 反模式
+
+- 订阅整 store。
+- 手动写 `paneTree` 或访问已不存在的 `state.panes`。
+- 把显示设置、系统高频态或 `op` 前缀字段重新放进错误的 store。
+- 绕过统一配置保存边界，直接在页面执行 CRUD、自动保存或卸载保存。

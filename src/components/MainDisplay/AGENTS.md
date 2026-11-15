@@ -1,53 +1,46 @@
-# src/components/MainDisplay/
+# `src/components/MainDisplay/`
 
-Recursive pane tree (2026-07 refactor). `MainDisplay` renders the tree; leaves wrap tabs; branches fork by row/column.
+主显示区按 `paneTree` 递归渲染分屏；叶子显示标签栏和内容。串口内容由 `SerialContentHost` 在树外常驻挂载，避免切换标签或跨 Pane 移动时销毁终端实例。
 
-## Files
+## 导航
 
-| File | Job |
-|---|---|---|
-| `MainDisplay.tsx` | `renderNode(node, parentBranch)` recursion; root toggle for empty `'main'` leaf |
-| `Pane.tsx` | leaf shell: TabBar + content container + `PluginViewSurface` measurement（内容位置/可见性经 `tabContentPlacement` 上报）；串口终端实例由分屏树之外的 `SerialContentHost` **全局常驻挂载**（TRX/TTY 均以 `key={tab.id}`，切标签/跨 Pane 拖动不销毁），Pane 不再直接渲染 `TtyView`/`TerminalView`；blocks pop-out for TTY ports (`tty.popoutUnsupported` toast) |
-| `TtyView.tsx` | xterm.js TTY host (issue #11): creates `Terminal` + FitAddon per port (fonts/theme from config + CSS vars), `term.open` + ResizeObserver+rAF-debounced fit, onData→`ttyService.send`, onResize→`ttyService.resize`; `hidden` prop = 非活动标签（display:none，恢复可见显式 re-fit，**会话跨标签保留**）; 字体/字号经 `term.options` 活更新不重建; Ctrl+滚轮缩放（镜像 TerminalView，上下限取 `CONFIG_BOUNDS.terminalFontSize`）; **背景图毛玻璃（issue #13）**：`backgroundImageEnabled` 切换时按 config + `data-theme` 构造 rgba 活更新 `term.options.theme.background`（xterm 创建时快照，不读 CSS 变量避免与 ThemeProvider 父 effect 时序竞态）; owns the Terminal instance (dispose on unmount, `ttyService.detach` keeps it) |
-| `TabBar.tsx` | tabs + `@dnd-kit/sortable` horizontal reorder + cross-pane drag + split buttons (right-end `.tab-bar-split-group`, sticky so it never scrolls away; accepts `onSplitVertical`/`onSplitHorizontal` props) |
-| `TerminalView.tsx` | 方案B 直接 DOM 渲染薄壳（issue #14）：hosts scroll container + `TerminalViewportManager` 渲染器 attach/detach（`useLayoutEffect`，issue #15 防跨 Pane 位移 insertBefore 崩溃）；同步显示配置（字体/格式/编码/时间戳/高亮规则）到 renderer；拥有 UI 局部交互态（过滤/搜索/选区/右键菜单/手势 scroll-lock/快速跳转按钮）；协议模板选择条。行渲染由 `TerminalRenderer` 直接操作 DOM，React 不参与行级渲染 |
-| `TerminalRenderer.ts` | direct-DOM 渲染引擎（`utils/terminal/`）：节点池复用 + 稳定 seq + 默认固定行高（可选文本软换行委托 TerminalWrapLayout）+ 同帧钉底 + 流式布局保 DOM 序 == 视觉序；文件头是渲染契约清单 R1–R15（soak 测试按编号引用）；search hit-rows 经 `markSearchMatchesInHtml` 叠加字符级 `<mark>`（`searchQuery`/`searchCaseSensitive` 来自 view state） |
-| `TerminalFilterBar.tsx` | compact direction dropdown/keyword filter + per-tab display controls (scroll-lock / show-timestamp / opt-in text-only word-wrap / HEX-text segmented / encoding select); responsive toolbar wraps control groups within each pane, never overlaps/clips buttons; writes via `useTerminalStore.getState()` |
-| `TerminalSearchBar.tsx` | Ctrl+F 搜索条（纯展示组件；状态在 `useTerminalSearch`，字符级高亮由 `viewportManager.recomputeSearch` + `markSearchMatchesInHtml` 提供） |
-| `useTerminalDisplay.ts` | UI 局部显示管线 hook：方向/关键字过滤输入（防抖）与暂停开关，把值推给 `TerminalViewportManager`；该状态刻意不进 Zustand，标签重挂载即重置 |
-| `ResizeHandle.tsx` | drag handler → `resizeChildren(branchId, childIndex, delta)` store action; drag lifecycle from shared `shared/useDragResize`（`mode:'delta'`，逐事件增量由本组件对累计位移取差得出——store 动作是相对累加） |
-| `hooks/useTabDragEnd.ts` | end-of-drag move; uses `findLeafByTabId` / `findLeafById` from `useAppStore.ts` |
-| `hooks/useLogReplay.ts` | 原生多文件授权导入与确认，建立独立只读回放标签；不要求活动串口，不向实时buffer追加 |
-| `ReplayView.tsx` | `ReplayDocument` 注入共享 `TerminalView`，本地显示配置、分段选择与每组唯一播放时钟；回放无发送端口 |
-| `TimelineControls.tsx` / `TimelineControls.css` | 紧凑链条图标入口、标签 Gx 标记、成员管理、常量偏移与事件T+0；管理弹窗是窄幅（460px）单列密集布局，当前组条把「移出此视图／解散联动组」放在面板主体，成员行按 `member.status/state` 直接标出未对齐（组条汇总「N 个视图未对齐／对齐中…」；tone 只看已结算字段，不读 `pending/inFlight`，否则 LIVE 预览节拍下徽标会每帧闪动），整组不可用时给主体提示；时钟基准不一致/不可用只显示中性「暂不可用」，`reason` 与 T+0 入口留在「高级设置」；工作区宿主只挂载管理弹窗，整组跟随复用现有 Pin，不另设组条/返回实时 |
+| 文件 | 责任 |
+|---|---|
+| `MainDisplay.tsx` | paneTree、拖拽上下文、`ResizeHandle` 和 `TimelineWorkspace` 的宿主 |
+| `Pane.tsx` | 叶子外壳、TabBar、关闭清理、插件视图测量和端口批量操作 |
+| `SerialContentHost.tsx` | 常驻的 TRX/TTY 内容实例 |
+| `TabBar.tsx` | 标签排序、跨 Pane 拖动、分屏按钮和弹出状态 |
+| `TerminalView.tsx` | `TerminalViewportManager` 的薄壳、过滤/搜索/选择/滚动交互 |
+| `TerminalFilterBar.tsx` / `TerminalSearchBar.tsx` | 显示控制与搜索输入 |
+| `TtyView.tsx` | xterm 实例、fit、键盘发送和窗口调整 |
+| `ReplayView.tsx` / `hooks/useLogReplay.ts` | 独立只读回放标签和原生回放授权 |
+| `TimelineControls.tsx` | 时间组管理、组模式和时间偏移 |
+| `ResizeHandle.tsx` / `hooks/useTabDragEnd.ts` | 分屏尺寸和标签拖拽动作 |
+| `PluginViewSurface.tsx` / `PluginTabLauncher.tsx` | 插件视图承载和标签启动 |
 
-## Conventions (root covers flexbox `min-height: 0` chain; 展开见 docs/architecture/conventions.md)
+## 必守规则
 
-- New pane split: find focused leaf → replace it in the parent branch's `children` array with a new branch `[source-leaf(0.5), new-leaf(0.5)]`. If focused leaf IS the root → replace the entire tree.
-- Split buttons live in `TabBar` (not in a separate toolbar). They accept `onSplitVertical`/`onSplitHorizontal` props. Click sequence: focus the pane (set `focusedPaneId`) → then call `splitPane`. The `.tab-bar-split-group` is sticky-pinned at the right end so it never scrolls away.
-- `focusedPaneId` references a leaf ID in the tree (never a flat index). Set in `useAppStore.openTab`, cleared on `closeTab`.
-- `useTabDragEnd` uses tree helpers from `useAppStore.ts` — DO NOT reintroduce `state.panes.find(...)`.
-- Drag a tab onto a ResizeHandle → produces a new pane split by handoff (interfaces with `MainDisplay`'s drag state).
-- `TerminalFilterBar` owns per-tab display controls (scroll-lock / timestamp / HEX-text / encoding select) via `useTerminalStore.getState().setTerminalConfig(portId, ...)` / `setTerminalEncoding(portId, encoding)`. TerminalView is a thin orchestrator; it does NOT own display state. Encoding changes MUST flush the RX pipeline tail under the OLD label first (`getRxPipeline().flushAndReset(portId)`) — already wired in `TerminalFilterBar.handleEncodingChange`.
-- **Scroll lock is explicit-intent only.** `scrollLocked` 只由 Pin、跳转、显式用户手势 settle、拖选起点或退出时间组写入；裸 scroll 不改锁。`TerminalNavigationLifecycle` 允许 native scroll 只采样已取得的驾驶权，窗口级结束路径合并最后 scroll；wheel 使用本地 non-passive 监听以支持 Ctrl 字号缩放。时间组复用现有 Pin：UI 新建兼容实时组保留发起者已有的 Pin 意图；亮态与 `group.mode === 'live'` 一致，点击切换整组 LIVE/BROWSE，不写独立跟随。同参考映射偏移的 TRX 由协调器授权同帧 RX 钉底，BROWSE 或相对偏移目标不得本地尾随；来源/时钟不兼容 LIVE（如回放/混合组）时禁用并说明原因。Pin、显式跳底与退出都先取消旧手势，退出停止独立跟随；手动到尾/关闭搜索不自动返回 LIVE，显式跳底在兼容实时组中开启并保持 LIVE，不兼容组只单次定位。非组成员在解除 gesture suppression 之前同步更新 manager lock，防止 React effect 前旧锁重新钉底。
-- Quick-jump buttons ride the scrollbar ends inside the `.terminal-scroll-wrap` wrapper: top → unlock + `vm.scrollToTop()`（过滤感知：按当前过滤列表首行；identity 模式即 `buffer.firstSeq`）, bottom → 独立模式 lock + `vm.scrollToBottom()`，兼容实时组开启/保持整组 LIVE（由协调器按映射定位），不兼容组只单次跳底。 The wrapper preserves the flex `min-height: 0` chain.
-- 互斥分段选择复用 `shared/SegmentedControl`：TerminalFilterBar 的 HEX/文本与 TimelineControls 的新建/加入沿用同一 radiogroup、键盘和禁用契约，不各写按钮状态机。
-- 搜索 Ctrl/Cmd+F、F3/Shift+F3 与 Escape 在 TerminalView 壳处理，搜索输入聚焦后仍复用 `useTerminalSearch` 导航，关闭统一回焦输出。输出 Ctrl/Cmd+L 只清本实时 manager；回放消费事件但保持只读，两者均禁止冒泡到全局再次执行。
-- **Search (Ctrl+F) is performance-gated** (issue #2-8): match indices compute ONLY while the search bar is open (`useTerminalSearch`), never in the background — a stale query would otherwise rescan the whole buffer on every RX batch. Incremental maintenance lives in `viewportManager` (the single production implementation): new lines are matched once at append time and appended to the match list, and only a query/encoding change triggers a full rescan (`recomputeSearch`); buffer head-trim just bumps the list offset, so no cache has to be re-validated. Character-level highlight: `markSearchMatchesInHtml` wraps query occurrences in `<mark class="terminal-search-mark">` on hit rows only — it is HTML-tag/entity aware (works over highlight-engine spans and protocol coloring, splitting cross-span matches). Search visibility never gates follow: opening/typing/closing preserves Pin; next/previous match invokes `onNavigate` **before** `jumpToMatch` to release independent follow or acquire group BROWSE, and closing does not re-pin. A user may re-enable Pin while search remains open. Known edge: F3 re-opening a closed search needs a second press to navigate (matches compute after opening).
-- Encoding changes go through `setTerminalEncoding(portId, encoding)`: RX lines keep only `rawData`, so the next redraw decodes under the new label (no store walk). `TerminalFilterBar.handleEncodingChange` flushes the pipeline tail under the OLD label first (`getRxPipeline().flushAndReset(portId)`). The old OperationPanel "encoding sync effect" pattern was removed — there is no write-back from `useOperationStore`.
-- Right-click menu lives in `TerminalView` and exports TXT/CSV via `@tauri-apps/plugin-dialog`'s `save()` + Rust `std::fs::write`.
-- `renderNode` is module-level, NOT defined inside `MainDisplay.tsx`'s body — defining render components inline causes DOM reset on identity churn.
+- 分屏树操作使用 `src/stores/useAppStore.ts` 的 `splitPane`、`closeTab`、`resizeChildren`、`moveTabToPane`；`focusedPaneId` 始终是叶子 ID，不要恢复扁平 `panes` 查找。
+- `Pane.cleanupClosedTab` 必须先释放插件/回放/终端显示资源，再执行 store 关闭；批量关闭的集合来自 `src/stores/useAppStore.ts` 的 `getClosingTabIds(tabId, scope)`。关闭标签不关闭串口，显式断开才调用 `src/hooks/useSerialConnection.ts` 的 `useSerialConnection.closePort()`。
+- `TerminalFilterBar` 通过 `src/stores/useTerminalStore.ts` 的 `useTerminalStore.getState()` 写每端口显示设置；编码变化先调用 `src/utils/rxPipeline.ts` 的 `getRxPipeline().flushAndReset(portId)`，再切换编码。`TerminalView` 不把显示设置写入 `src/stores/useOperationStore.ts`。
+- `TerminalView` 只装配 renderer 外壳，行节点由 `src/utils/terminal/TerminalRenderer.ts` 直接管理。不要把行数组传进 React state，也不要通过 DOM 高度直接修复分屏尺寸。
+- 滚动锁是显式意图：Pin、跳转、用户手势 settle、拖选和时间组退出才可写 `scrollLocked`。搜索定位先解除独立跟随；BROWSE、相对偏移或不兼容来源不得本地尾随；时间组 LIVE 的授权由协调器完成。
+- 搜索匹配只在搜索打开且有查询时维护，增量和重建统一由 `viewportManager` 完成；快捷键由 TerminalView 处理并阻止向全局重复传播。
+- 回放使用独立 `TerminalSource` 和本地时钟，不要求活动串口，不追加实时缓冲，也没有发送端口。
+- TTY 由 `TtyView` 持有 xterm 实例；非活动标签隐藏但保留会话，恢复可见时重新 fit。TTY 弹窗能力按 `tty.popoutUnsupported` 处理。
+- 所有纵向 flex 容器保留 `min-height: 0`；组件定义在模块级，避免重渲染导致 DOM/输入焦点重建。
 
-## Anti-patterns
+## 常用检查
 
-- Mutating the tree by hand — go through `splitPane` / `closeTab` / `resizeChildren` actions in `useAppStore`.
-- Defining `TreeNodeComponent` inside `MainDisplay.tsx`'s function body — identity churn resets DOM and input focus.
-- Skipping `min-height: 0` on any flex column ancestor of `.terminal-view` — scroll breaks.
-- Direct DOM height mutation to "fix" sizing — use `ResizeHandle` + `resizeChildren`. Size is a fraction stored in the tree, not a pixel value.
-- Closing a tab without going through `cleanupClosedTab` in `Pane.tsx` — bypass leaks the RX pipeline state / viewport manager / popout window / per-port store entries (`releaseTerminalState`). (issue #11：关闭标签页**不**关闭串口——`closePort` 由用户显式触发，标签关闭只销毁前端显示目标。)
-- Re-deriving the bulk-close set in `Pane.tsx` (`tabIds.slice(...)` + `isPinned` filter) — call `getClosingTabIds(tabId, scope)` from `useAppStore` (the same selector the close actions use) so the cleanup pass and the state mutation can never disagree about which tabs are going away.
-- Hand-rolling a "connect all / disconnect all" throttle loop — use `runSequential(items, action)` (`src/utils/sequential.ts`): the 100ms inter-item gap is a backend constraint (ports race for the same OS handle) and lives in that one helper, shared with the Sidebar.
-- Writing display state (encoding/displayFormat/scrollLocked/showTimestamp) from OperationPanel or any `useOperationStore` field — display controls are per-tab in `TerminalFilterBar` via `useTerminalStore`.
-- Re-introducing an `onScroll`-driven `scrollLocked` write in TerminalView — that heuristic (atBottom + programmatic-scroll guard) permanently unlocked during fast output and on tab remount. Lock changes come only from the pin button / jump buttons / user-gesture `settle()`.
-- Passing row data through React state — the ring buffer + `TerminalRenderer` own row DOM; React re-renders only the shell.
-- Calling `setTerminalConfig(portId, { encoding: ... })` alone for encoding switches — use `setTerminalEncoding(portId, encoding)` (renderer re-decodes on the next redraw).
+```bash
+npx vitest run src/components/MainDisplay
+npx vitest run src/utils/terminal
+npx tsc --noEmit
+```
+
+## 反模式
+
+- 手改 `paneTree`、按全局 `tabs` 顺序重建 Pane 标签或重新筛选批量关闭集合。
+- 在 `TerminalView` 中用 `onScroll` 推断并写回锁，或同步两个时间组的 `scrollTop`。
+- 让 React 逐行渲染、在序列化状态中传大块终端/插件二进制，或绕过 `TerminalViewportManager`。
+- 关闭标签时省略 `cleanupClosedTab`，或把终端显示设置写入 OperationPanel/`useOperationStore`。

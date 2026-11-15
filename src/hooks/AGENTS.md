@@ -1,58 +1,46 @@
-# src/hooks/
+# `src/hooks/`
 
-18 hook files + 1 shared module + barrel `index.ts` — each hook owns its React↔Tauri lifecycle.
+本目录的 hook 负责 React 与 Tauri 的生命周期连接。模块导出统一从 `index.ts` 引用；需要跨 hook 共享的断线标记在 `disconnectTracking.ts`。
 
-## File structure
+## 导航
 
-| File | Exports | Call site | Lifecycle |
-|------|---------|-----------|-----------|
-| `disconnectTracking.ts` | `userClosingPortIds`, `lostPortIds`, `isPortLost()` | shared by useSerialConnection + useSerialReceive | module-level Sets for session-aware disconnect tracking; both hooks read/write the sets directly (only the `isPortLost` predicate is a helper) |
-| `useSerialPorts.ts` | `useSerialPorts(pollIntervalMs=3000)`, `mapPortInfo()`, `mergePorts()` | Sidebar (`useAppInit` passes `0` to get a manual `refreshPorts` handle) | polling; `mapPortInfo`/`mergePorts` also used by useSimulation |
-| `useSerialConnection.ts` | `useSerialConnection()` | Sidebar / TabBar | open/close; routes through `closePort()`; owns reconnect backoff loop; per-port in-flight guard against concurrent open/close |
-| `useSerialReceive.ts` | `useSerialReceive()` | `App.tsx` **exactly once** | owns `serial:data` event listener + status handler (writes `lostPortIds` for DisconnectBanner); RX feeds `RxPipeline` (byte-level line aggregation + rAF-batched writes into the `viewportManager` ring buffer — **not** store writes), NOT direct per-event appends; TTY 端口（`mode==='tty'`）字节**直喂 `ttyService.feed`**（跳过触发引擎/协议解析/行组装），断线走 `ttyService.disconnect`（flush 队列、保留 xterm 实例跨重连） |
-| `useSerialSend.ts` | `useSerialSend()`, `sendToPort()` | OperationPanel (hook); `usePopoutBridge` (module fn) | action; module-level `sendToPort` owns the real send (backend call + TX echo + traffic stats + in-memory per-port history `Map<portId, SendHistoryEntry[]>`, cap 50, no SQLite); the hook is a thin wrapper mirroring history into state for ↑/↓ recall; **TTY 分支**（`port.mode==='tty'`）跳过 TX 回显 + `flushNow`（无本地回显，仍走后端发送/流量统计/历史）；**`origin` 参数**（`'user' \| 'flow'`，末位可选）：增强流程运行期间该端口被独占，非 `flow` 来源在入口被拒绝（`utils/flowRuntime.isFlowRunning`）——新增任何发送入口都必须经此，绕过者（文件发送 / TTY 键盘）须自行补同一守卫 |
-| `usePopoutBridge.ts` | `usePopoutBridge()` | `App.tsx` **exactly once** | handles serial send/config-open/snapshot intents; list `savedCommand` intents carry an explicit port and displayed step snapshot, verified against committed sets and clean editor state before `executeQuickCommand`; raw text intents still use `sendToPort`; versioned `popout:command-editor-request` routes to main-owned entity drafts and returns ACK (listen-before-emit, requestId filter, `COMMAND_EDITOR_TIMEOUT_MS` 15s timeout retires the listener). Host session id + retired sessions reject stale panel snapshots even at higher versions; the panel cannot edit/send before the first snapshot. `command-editor:snapshot` carries drafts; `command-sets:changed` carries committed runtime only. Client-state/client-leave/client-result ACKs protect unacknowledged panel text during app exit; terminal snapshots drain RX before replying |
-| `useConfigPersistence.ts` | `useConfigPersistence()` + ordinary baseline helpers | App/settings | shared serialized revision-CAS saves from entityEditor drafts; successful commit publishes runtime, failure/late edits retain drafts |
-| `useSystemStatus.ts` | `useSystemStatus(pollIntervalMs=5000)` | StatusBar | polling |
-| `useAppInit.ts` | `useAppInit()` | App.tsx | one-shot bootstrap; owns `isValidPaneNode`; loads settings entities (command/highlight/protocol/trigger/tool) from `config` into `useRuleStore` (preset is NOT loaded here — it lives in ParamsSection/GeneralSettings via `storageService` + local state); restores `config.portGroups` into `useAppStore.groups` + backfills `ports.groupId`; restores `config.portMeta` (alias/isHidden/mode) into ports (issue #4-9/11); debounced (500ms) auto-save of groups AND port meta on change (issue #2-3 / #4-9/10 — both write back into `config` so a full `set_config` never clobbers them); session restore via `configService.getSessionSnapshot()` |
-| `useSimulation.ts` | `useSimulation()` | Sidebar toolbar | SIM:Loopback / SIM:Loopback2 virtual ports toggle; imports `mapPortInfo`/`mergePorts` from useSerialPorts; **dev-only** — no-op when `DEV_FEATURES_ENABLED` is false (issue #2-9) |
-| `useGitBashSim.ts` | `useGitBashSim()` | Sidebar toolbar | debug-only GIT:BASH 模拟终端 toggle (issue #11); mirrors `useSimulation` dev gating (no-op when `DEV_FEATURES_ENABLED` false); local `useState` for the mode flag (no new store field) |
-| `useToolOutput.ts` | `useToolOutput()` | App.tsx **exactly once** | `tool:output` / `tool:exit` event listeners; writes TOOL lines to terminal, updates `toolRunning` |
-| `useAutoUpdate.ts` | `useAutoUpdate()` | App.tsx **exactly once** | 等待 `ui.configReady`；加载成功/失败均置位，不按超时抢用默认通道。读取已提交通道，7天周期/snooze与6h重评估；当前generation/epoch检查成功才记账或发布候选，旧结果失效，DEV/macOS短路。 |
-| `usePortToolActions.ts` | `usePortToolActions()` | Sidebar + Pane (TabBar menu) | external-tool actions shared by the sidebar port menu and the tab context menu (issue #2-2): `runTool` (unconfigured → jump to config page) / `killTool` / `configTool`; group execution `runToolForGroup` (issue #5-7). **Imports no components** (hook must not depend on the component layer): when a group has unconfigured ports it fills `toolDialog` state instead of rendering, and the caller (Sidebar) renders `GroupToolDialog` wired to `closeToolDialog` / `runToolDialogConfigured` / `configureToolFromDialog` |
-| `useHotkeys.ts` | `useHotkeys()` | App.tsx (once) | global keydown: Ctrl+L/K/B// + Escape; ignores non-Escape when focus is in a form field |
-| `usePowerManagement.ts` | `usePowerManagement()` | App.tsx (once) | mirrors `config.preventScreenOff` / `config.preventSleep` to the OS via backend commands |
-| `usePlugins.ts` | `usePluginHost()`, `usePluginList()` | App.tsx（宿主一次）/ PluginSettings | 等 `ui.configReady` 后装配安装身份绑定的 Worker、RX 权限观察与启停；快照按后端 revision 排序，权限点击绑定实际审阅的安装身份并逐插件串行，启用等待授权落盘；初次加载失败有界重试，刷新可恢复未运行会话。 |
-| `usePluginPanel.ts` / `usePluginUi.ts` | 面板与声明式 UI 订阅、`dispatchPluginUiClick` | PluginPanel / SidebarToolbar / SortablePortItem | 主窗 `useSyncExternalStore`，插件 UI 不进入 popout；工具栏与端口菜单点击发送 Worker 消息。 |
-| `index.ts` | barrel re-export | all consumers | import from `'../../hooks'` or `'./hooks'` |
+| 文件 | 责任与装配位置 |
+|---|---|
+| `useAppInit.ts` | `App.tsx` 启动装配：加载配置与会话、恢复分组和端口元数据、初始化规则运行态 |
+| `useSerialPorts.ts` | 端口轮询和 `mergePorts`；`useSimulation.ts` 复用端口映射与合并逻辑 |
+| `useSerialConnection.ts` | 打开、关闭和重连；`closePort()` 是显式断开唯一入口 |
+| `useSerialReceive.ts` | `App.tsx` 唯一的主窗 `serial:data` 监听；把 TRX 字节送入 `getRxPipeline()`，TTY 字节送入 `ttyService.feed` |
+| `useSerialSend.ts` | `sendToPort()`、TRX 回显、TX 统计、发送历史；TTY 走对应服务路径 |
+| `useConfigPersistence.ts` | 普通配置和实体保存的 revision-CAS 队列 |
+| `usePopoutBridge.ts` | 主窗与弹窗的 intent、快照、命令编辑 ACK |
+| `useSystemStatus.ts` / `useToolOutput.ts` | 系统轮询、工具输出事件 |
+| `useAutoUpdate.ts` / `usePowerManagement.ts` | 更新检查、系统防休眠/防关屏 |
+| `usePlugins.ts` / `usePluginPanel.ts` / `usePluginUi.ts` | 插件宿主、声明式 UI 和面板订阅 |
+| `usePortToolActions.ts` | 侧边栏和标签菜单共用的外部工具动作 |
+| `useHotkeys.ts` | 全局快捷键；表单焦点时忽略非 Escape 快捷键 |
+| `useSimulation.ts` / `useGitBashSim.ts` | 开发构建中的虚拟端口和 GIT:BASH 模拟终端 |
 
-## Conventions (root covers lifecycle split rationale; 展开见 docs/architecture/conventions.md)
+## 必守规则
 
-- RX lines land via the app-lifetime `RxPipeline` singleton (line assembly, bounded rAF batches, 250ms tail flush). Single-line writers (`appendTerminalLine`) remain for TX echo, tool output and log replay. `sendToPort` MUST call `getRxPipeline().flushBeforeSend(portId)` BEFORE the TX echo: `flushNow` writes at most one batch and cannot establish RX-before-TX order when the queue is longer. Disconnect and encoding changes also drain the boundary before dropping/resetting state.
-- The pipeline singleton is app-lifetime per webview: neither `useSerialReceive` cleanup nor `TerminalPopout` cleanup may call `dispose()`. Disconnect cleanup goes through `pipeline.disconnect(portId)` (flush tail + drop per-port state) inside the status handler.
-- `useSerialReceive` MUST be called exactly once in `App.tsx`. Calling it twice double-registers the `serial:data` listener → every line gets appended twice.
-- `useSerialReceive`'s status handler is the ONLY place that **adds** to `lostPortIds` (in `disconnectTracking.ts`): a port is marked "lost" only on a connected→disconnected transition within this session, and only while it is absent from `userClosingPortIds`. **Clearing** is shared by design: the same status handler clears it on `connected`, and `useSerialConnection` clears it in `openPort` / `closePort` / successful reconnect so a deliberate retry hides the banner immediately. No other module may touch these sets. `isPortLost(portId)` is exported for `DisconnectBanner.tsx`, which uses the pure helper `filterLostTabIds(tabs, isPortLost)` — never probe port state from outside the hook.
-- 连接代次由 connected 状态事件写入；open/reconnect invoke 完成的副作用不得清掉先到事件的代次。新打开进入 connecting 与显式关闭完成才清旧代次。`sendToPort` 固定起始代次，TRX 回显前以及 TTY 排队实际写入前后复核；回调导致端口退休/换代时不得产生新 TX 回显。
-- 配置/实体/分组/元数据保存成功不得回退更高的本地 revision；备份导入与即时预设写入同样进入 configWriteQueue。备份恢复要清所有实体的 recovery，不只清已挂载编辑器。
-- `useSerialSend` maintains in-memory per-port send history (`Map<portId, SendHistoryEntry[]>`, cap 50, dedup on content+format). `SendHistoryEntry` lives in `src/types/index.ts`. No SQLite persistence; the old `sendHistoryService` / `SendHistoryItem` were removed. Backend Rust commands survive but are not invoked from the frontend.
-- `useSerialConnection.closePort()` is the only sanctioned close path: triggers `stopLogging` and updates port status. Bypassing leaks log file handles + leaves status "connected" stuck.
-- `useSerialPorts(3000)` uses `mergePorts(incoming, existing, portOrder)` on every refresh — preserves alias/group/connection state/baud. Default `added` follows current enumeration; manual drag/numeric sorting selects `manual`, preserving existing order and appending new ports. The peer added-order menu action switches back and refreshes; response completion reads the latest order intent.
-- `mergePorts` status 语义（issue #12 热插拔修复）：① fresh 枚举命中的端口保留 `connected`/`connecting`（真实会话），但**不保留 `error`**——前次 open 失败的错误态在端口重新枚举后被重置为 `disconnected`，否则刷新按钮永远救不回卡死状态；② 从枚举消失的 `connected`/`connecting` 端口经 union-back 保留**最多 `MAX_MISSING_POLLS=3` 轮**（模块级 `ghostMissingPolls` 计数 ≈9s 宽限，容忍瞬时 USB 抖动），超限放弃保留——不产生永久幽灵端口。幽灵计数在端口重新出现时清零。
-- Polling hooks accept `pollIntervalMs` as a parameter intentionally — do not hardcode inside the hook.
-- `useAppInit` runs once on mount: registers backend command handlers if needed, pulls initial config via `useConfigPersistence`. No longer syncs sendOnEnter (lives only in config). Loads settings entities directly from `config` (`cfg.sendCommandSets` etc., wire format matches store format via camelCase) into `useRuleStore` — including `triggerRules`; no startup `storageService.loadCommandSets()` calls. Session restore uses `configService.getSessionSnapshot()`.
-- Pop-out windows are SEPARATE webviews with their own store instances — they never share mutable frontend state with the main window, only intents/signals (`popoutEventService`, defined in `src/services/popout.ts` and re-exported by the `src/services/tauri.ts` barrel). Sending from a pop-out MUST go through `popout:send-command` → main's `sendToPort`; a direct `serialService.sendSerialData` call from the pop-out would skip the TX echo / traffic stats / send history (the backend emits no TX event).
-- **EXCEPTION to the single-`serial:data`-listener rule (terminal pop-out).** `src/components/Popout/usePortSerialFeed.ts` registers its own `serial:data` subscription, and that is correct: every pop-out is a separate webview with its own JS realm, so it shares neither React context nor module singletons with the main window — main's `useSerialReceive` listener and its `RxPipeline` instance physically cannot deliver bytes into the pop-out. The exception is only about *where the subscription lives*: `usePortSerialFeed` touches nothing but the public `getRxPipeline()` API of its own webview-local singleton, so byte-level line splitting / decode / rAF batching / silence flush stay single-implementation. Its `openGate(snapshotLastTs)` gate orders the request→reply snapshot hand-off (events before the gate are buffered, events at or before the snapshot's last line are dropped as already-covered) — it does not fork the RX path, and the caller opens the gate unconditionally after a timeout so a missing snapshot can never silence live display permanently.
-- Log settings have exactly ONE entry point in Rust: `LogSettings::from_config(&cfg)` + `LogManager::apply_settings(...)`, both reached through `AppState::apply_runtime_config` (shared by `AppState::new` and the `set_config` command). The old per-field setter list, `sync_log_manager_from_config()` and the `reset_config` command are gone; the frontend never syncs log settings (`syncLogSettingsToBackend` deleted). Note `log_format` (string/hex/binary) is deliberately NOT part of `LogSettings` — it is passed per call by `start_logging`, so ports can differ at the same instant.
-- Inside hook callbacks/effects, prefer `use{App,Operation,Terminal,Rule}Store.getState()` over selector-bound locals when the value must be live.
+- `src/hooks/useSerialReceive.ts` 的 `useSerialReceive` 在主应用只装配一次；正常接收路径不得另加 `serial:data` 监听。终端弹窗是独立 webview，可由 `src/components/Popout/usePortSerialFeed.ts` 监听自己的事件，但仍必须只调用本地 `src/utils/rxPipeline.ts` 的 `getRxPipeline`。
+- RX 字节必须经过 app-lifetime 的 `src/utils/rxPipeline.ts` 的 `RxPipeline` 组行和 rAF 批写；不要在事件回调中逐事件 `appendTerminalLine`。管线 cleanup 不调用 `dispose()`，端口断开由 status handler 调 `disconnect(portId)`。
+- 发送前调用 `getRxPipeline().flushBeforeSend(portId)`，确保 RX 先于 TX 回显；`src/hooks/useSerialSend.ts` 的 `sendToPort` 是 TRX 发送统一入口。绕过它的文件发送和 TTY 键盘输入，必须补齐流程独占、连接代次和统计规则。
+- `src/hooks/useSerialConnection.ts` 的 `useSerialConnection.closePort()` 协调日志停止、关闭意图和端口状态。标签关闭只清理前端显示消费者，不代替显式断开。
+- `lostPortIds` 只由 `src/hooks/useSerialReceive.ts` 的状态处理器添加；连接、打开、关闭和成功重连可以清除标记。端口轮询使用 `src/hooks/useSerialPorts.ts` 的 `mergePorts`，其状态保留和缺失端口处理以实现和测试为准。
+- 配置和实体写入走 `src/hooks/useConfigPersistence.ts` / `src/utils/configWriteQueue.ts` 与 revision CAS；迟到结果不得回退更高 revision 或覆盖新编辑。
+- 弹窗是独立 webview，不共享 store；发送 intent 必须回主窗 `src/hooks/useSerialSend.ts` 的 `sendToPort`，命令编辑使用带 requestId 的 ACK。hook 回调需要实时 store 值时使用 `getState()`。
+- 轮询 hook 的间隔由调用方参数传入，不在 hook 内隐藏硬编码。
 
-## Anti-patterns
+## 常用检查
 
-- Calling `useSerialReceive` more than once per app lifetime.
-- Registering an ad-hoc `listen('serial:data', …)` outside `useSerialReceive`. The **only sanctioned exception** is the terminal pop-out's `src/components/Popout/usePortSerialFeed.ts` (separate webview — no shared React context or module singletons, so main's listener cannot reach it); any new subscription of this kind must also feed `getRxPipeline()` and never append per event. See the pop-out exception bullet under Conventions.
-- Bypassing `RxPipeline` in a `serial:data` handler (per-event `appendTerminalLine` fragments lines across multi-event responses AND re-renders the terminal at event rate).
-- Calling `getRxPipeline().dispose()` anywhere — the singleton is app-lifetime; per-port cleanup goes through `pipeline.disconnect(portId)` in the status handler.
-- Appending the TX echo before `getRxPipeline().flushBeforeSend(portId)` — queued RX then overtakes the send line (zero-delay cyclic sends interleave TX1,TX2,RX1).
-- Subscribing the whole `useTerminalStore` from a component that owns a hook — same re-render pathology as in any component.
-- Bypassing `closePort()` to remove a tab — corrupts log lifecycle + port status.
-- Adding to `lostPortIds` from anywhere except the status handler inside `useSerialReceive`. That hook may also delete the mark on `connected`, and `useSerialConnection` may only *delete* it (openPort / closePort / reconnect); an add from anywhere else breaks `DisconnectBanner` correctness, and a stray delete elsewhere silently hides a genuine unexpected disconnect.
-- Re-introducing global display fields (`displayFormat`, `encoding`, `scrollLocked`, `showTimestamp`, `loopInterval`) in `useOperationStore` — those live per-tab in `useTerminalStore`.
+```bash
+npx vitest run src/hooks
+npx tsc --noEmit
+```
+
+## 反模式
+
+- 重复装配 `useSerialReceive` 或在主窗增加临时 `serial:data` 监听。
+- 绕过 `RxPipeline`、绕过 `closePort()` 或直接调用后端发送命令。
+- hook 内订阅整 store，或在循环运行期间读取会随输入变化的 selector 值。
+- 把弹窗自己的 store 当作主窗状态，或允许旧快照/旧 requestId 覆盖当前会话。
