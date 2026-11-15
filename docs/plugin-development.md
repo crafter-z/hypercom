@@ -93,7 +93,8 @@ api['ui.panel.append']({ text: 'Hello HyperCom ready\n' })
 | 字段 | 必填 | 规则 |
 |---|---|---|
 | `id` | 是 | 稳定的反向域名标识，如 com.example.hello；至少两段，每段非空，只使用小写 ASCII 字母、数字、`-`、`_`。不要在升级时改 id |
-| `name` | 是 | 非空显示名 |
+|
+ame` | 是 | 非空显示名 |
 | `version` | 是 | 写 `x`、`x.y` 或 `x.y.z` 纯数字（缺省段按 0）；比较按数字元组，不按字符串。当前不支持 `-preview.1`、`+build` 等后缀或第四段 |
 | `description` | 否 | 设置页显示的说明，建议交代用途和权限原因 |
 | `apiVersion` | 是 | 当前写 `"1.0"`；宿主校验主版本为 1，不是最低软件版本字段，也不按次版本自动提供未来能力 |
@@ -127,7 +128,8 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 | `http:request` | 经宿主发起完整 HTTP（文本/二进制/流式/重定向/取消）；可选 urlWhitelist 收紧 |
 | `shell:open` | 在系统默认程序打开 http/https/mailto URL；不是执行 shell |
 | `clipboard` | 读/写剪贴板文本 |
-| `notify` | 发出受限的非粘滞通知 |
+|
+otify` | 发出受限的非粘滞通知 |
 | `storage` | 通过 get/set 访问专属 JSON KV；只覆盖 data/state.json，不等于整个 data/ 的文件权限 |
 | `ui:view` | 显示声明的隔离页面、发布 JSON 模型及接收本页面交互，不隐含其他权限 |
 | `ui:tabs` | Worker 打开/激活/关闭/改标题/列出自身独立标签；不能管理其他插件或原始串口标签 |
@@ -270,7 +272,8 @@ options 字段：`method?`（缺省 GET，建议大写）、`url`（仅 http/htt
 })();
 ```
 
-仅 http/https URL；响应体与请求体不设宿主业务大小上限；非 2xx 仍返回响应对象，应检查 status。非法 URL/header/method、`body` 与 `bodyBase64` 同时提供都会在发网前 reject；并发上限为每插件 64、全应用 64。`signal` 取消与超时会让进行中的调用 reject（AbortError 或超时错误）；`stream.cancel()` 与提前 break 会取消原生请求并终止迭代，挂起的 `next()` 以 AbortError reject。取消后不要假定已产生的服务端副作用被撤销。不自动注入 cookies、Referer 或宿主凭据；跨源重定向仅保留 Accept/Accept-Language/Content-Language/Content-Type/Content-Encoding/Range 等明确安全头，Authorization、Cookie 和任意未知自定义凭据头不随跳转发送；需要认证时请直接请求最终源。同源保留合法业务头，Host/Content-Length/Transfer-Encoding 等框架头拒绝。URL 最多 8192 字符，headers 最多 64 个、名字 256/值 8192 字符（这是通道结构保护，不是 body 业务配额）；错误日志去除 URL userinfo/query/fragment。默认继承系统代理，宿主显式配置的插件代理优先。`http.urlWhitelist` 仍是**可选**作用域：缺失或空数组表示不限制，非空时初始 URL 与每个重定向目标都要匹配；需要收紧时才声明。`shell.openExternal` 不受 `http.urlWhitelist` 限制。
+仅 http/https URL；响应体与请求体不设宿主业务大小上限；非 2xx 仍返回响应对象，应检查 status。非法 URL/header/method、`body` 与 `bodyBase64` 同时提供都会在发网前 reject；并发上限为每插件 64、全应用 64。`signal` 取消与超时会让进行中的调用 reject（AbortError 或超时错误）；`stream.cancel()` 与提前 break 会取消原生请求并终止迭代，挂起的
+ext()` 以 AbortError reject。取消后不要假定已产生的服务端副作用被撤销。不自动注入 cookies、Referer 或宿主凭据；跨源重定向仅保留 Accept/Accept-Language/Content-Language/Content-Type/Content-Encoding/Range 等明确安全头，Authorization、Cookie 和任意未知自定义凭据头不随跳转发送；需要认证时请直接请求最终源。同源保留合法业务头，Host/Content-Length/Transfer-Encoding 等框架头拒绝。URL 最多 8192 字符，headers 最多 64 个、名字 256/值 8192 字符（这是通道结构保护，不是 body 业务配额）；错误日志去除 URL userinfo/query/fragment。默认继承系统代理，宿主显式配置的插件代理优先。`http.urlWhitelist` 仍是**可选**作用域：缺失或空数组表示不限制，非空时初始 URL 与每个重定向目标都要匹配；需要收紧时才声明。`shell.openExternal` 不受 `http.urlWhitelist` 限制。
 
 ### 事件
 
@@ -658,7 +661,7 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 
 1. 保留独立的源目录；从设置安装其副本，安装完成后在弹窗中授予 manifest 声明且宿主支持的全部权限并启用，或选择稍后处理后再逐项授权。先验证输出面板和按钮，再接串口或网络。
 2. 修改 main.js 或 manifest 后递增 version，例如 1.0.0 → 1.0.1，再通过安装目录覆盖安装。每次成功升级都会重新弹出权限确认，旧 Worker 会被终止；升级保留 data/。
-3. 同版本或降级安装默认被拒绝，随后弹出替换确认（确认框文案说明会使用所选来源的代码、保留插件数据，但生成新的安装版本并重置权限与网页信任）；确认后以 `replaceExisting` 重装，取消则保留原安装。替换会保留 `data/`（网页数据目录也不受安装影响），但生成新的安装身份并重置普通授权与网页信任。只想让已安装代码重新生效时用「重载已安装代码」：它不重新读取来源文件，也不影响安装身份、权限、网页信任或私有数据；重载只对已启用插件可用，会终止旧 Worker、取消进行中的 HTTP 请求并重建视图，新代码同步初始化失败时重载报错。
+3. 同版本或降级安装默认被拒绝，随后弹出替换确认（确认框文案说明会使用所选来源的代码、保留插件数据，但生成新的安装版本并重置权限与网页信任）；确认后以 `replaceExisting` 重装，取消则保留原安装。替换会保留 `data/`，但生成新的安装身份；网页数据按安装代次隔离，不复用旧代次，普通授权与网页信任也会重置。只想让已安装代码重新生效时用「重载已安装代码」：它不重新读取来源文件，也不影响安装身份、权限、网页信任或私有数据；重载只对已启用插件可用，会终止旧 Worker、取消进行中的 HTTP 请求并重建视图，新代码同步初始化失败时重载报错。
 4. 设置页「刷新」重新取得权威状态，可尝试恢复未运行会话；自动禁用后先定位错误、授权不足或初始化问题，再手动启用。刷新不会重新复制源代码。
 5. 用 ui.panel 输出插件可见结果；需要诊断记录时使用 api.log，并在「关于 → 诊断日志」查看/导出。直接 Worker console 输出不等于 api.log 已经写入宿主诊断文件。
 6. 源码开发宿主时可用 `npm run tauri dev`，但 Vite 浏览器 + 模拟 IPC 不能证明原生选择器或生产 CSP。插件交付前在实际应用上验证，不以开发环境直连网络成功为依据。
@@ -697,7 +700,7 @@ Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-
 
 不要把 ZIP 输出放进插件源目录，不打包 node_modules、构建缓存、秘密或用户 data/。ZIP 名不参与插件身份或版本判断；真正依据是 manifest.id / version。用户用「安装 ZIP…」选择成品，安装完成后按弹窗决定授予权限并启用。
 
-升级保持相同 id 并严格提高 version；同版/降级拒绝（旧已安装 manifest 损坏时可走修复安装）。升级替换代码及资产、保留旧 data/，但清空授权并重新弹出权限确认；卸载再安装是新身份，私有数据不会自动恢复。配置备份不打包代码/KV，不能用旧备份代替新版授权。
+升级保持相同 id 并严格提高 version。选择同版/降级来源时，安装器会先要求明确确认 `replaceExisting`；确认后替换代码及资产并保留旧 `data/`，同时生成新的安装身份、清空授权并重新弹出权限确认；取消则保留原安装。卸载再安装是新身份，私有数据不会自动恢复。配置备份不打包代码/KV，不能用旧备份代替新版授权。
 
 如果持久数据结构随版本变化，插件负责自己的数据迁移：先成功读到旧对象，识别自己的数据格式，再提交迁移结果；读取或迁移失败时保留旧数据并报告，不能把宿主的 installGeneration 当插件数据 schema 版本。
 
@@ -712,4 +715,4 @@ Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-
 - [ ] ZIP 结构、entry、纯数字 version、额度与资源路径符合约束，不含 data/、密钥或本地依赖目录。
 - [ ] 在准备支持的实际应用/平台验证 Worker、文件选择器和生产网络限制；开发浏览器模拟 IPC 的通过不替代原生验收。
 
-现有 RX/旁注/声明式按钮/白名单演示见[示例插件](../examples/plugin-demo/README.md)；宿主磁盘恢复和权限实现见[架构说明](architecture/plugins.md)，应用发行包验证边界见[发布验收](architecture/release.md#插件发版验收门)。
+现有 RX/旁注/声明式按钮/白名单演示见[示例插件](../examples/plugin-demo/README.md)；宿主磁盘恢复和权限实现见[架构说明](architecture/plugins.md)，应用发行包验证边界见[发布验收](architecture/release.md#自动更新与平台边界)。
