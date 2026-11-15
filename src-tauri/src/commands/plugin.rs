@@ -415,6 +415,7 @@ pub(crate) struct PreparedPluginInstall {
     stage_guard: TempDirGuard,
 }
 
+#[cfg(test)]
 fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str) {
     reset_install_trust_with_url(cfg, id, source_label, None);
 }

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use serde::Serialize;
-use tauri::{State, WebviewWindow};
+use tauri::{Manager, State, WebviewWindow};
 
 use super::{
     acquire_plugin_io, install_prepared, require_main_window, schedule_plugin_sweep, CommandError,
