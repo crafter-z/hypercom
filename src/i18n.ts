@@ -156,7 +156,7 @@ const resources = {
       'about.licenses.title': '第三方开源许可证',
       'about.licenses.frontend': '前端依赖',
       'about.licenses.backend': '后端依赖',
-      'about.licenses.note': '完整许可证文本见仓库 THIRD_PARTY_LICENSES.md',
+      'about.licenses.note': '仓库 THIRD_PARTY_LICENSES.md 提供直接依赖的许可证索引；完整文本和传递依赖声明需按实际分发包核对。',
       'about.diagLog': '诊断日志',
 
       'diagLog.title': '诊断日志',
@@ -1117,7 +1117,7 @@ const resources = {
       'about.licenses.title': 'Third-party Open Source Licenses',
       'about.licenses.frontend': 'Frontend',
       'about.licenses.backend': 'Backend',
-      'about.licenses.note': 'Full license texts live in THIRD_PARTY_LICENSES.md in the repo',
+      'about.licenses.note': 'THIRD_PARTY_LICENSES.md is a direct-dependency index; verify full texts and transitive notices for the distributed package.',
       'about.diagLog': 'Diagnostic Log',
 
       'diagLog.title': 'Diagnostic Log',
