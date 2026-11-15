@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import PluginSettings from './PluginSettings';
 import type { PluginView } from '../../../types';
+import { useAppStore } from '../../../stores/useAppStore';
 
 const mocks = vi.hoisted(() => ({
   api: { plugins: [] as PluginView[], loading: false, refresh: vi.fn(), installPlugin: vi.fn(), reloadPlugin: vi.fn(),
@@ -12,12 +13,16 @@ const mocks = vi.hoisted(() => ({
   open: vi.fn(),
   isReplaceError: vi.fn(), replacementTargetId: vi.fn(),
   marketplace: { index: null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() },
+  config: { saveConfig: vi.fn() },
 }));
 vi.mock('../../../hooks/usePlugins', () => ({
   usePluginList: () => mocks.api,
   usePluginMarketplace: () => mocks.marketplace,
   isPluginReplaceConfirmationError: mocks.isReplaceError,
   replacementTargetId: mocks.replacementTargetId,
+}));
+vi.mock('../../../hooks/useConfigPersistence', () => ({
+  useConfigPersistence: () => mocks.config,
 }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }));
 vi.mock('../../shared/usePluginViewOverlay', () => ({ usePluginViewOverlay: () => true }));
@@ -44,6 +49,7 @@ beforeEach(() => {
   mocks.api.reloadPlugin.mockResolvedValue(undefined);
   mocks.isReplaceError.mockReturnValue(false);
   mocks.replacementTargetId.mockReturnValue('demo');
+  mocks.config.saveConfig.mockResolvedValue(true);
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -55,6 +61,22 @@ async function click(key: string) {
   expect(button).toBeDefined();
   await act(async () => button!.click());
 }
+
+it('persists a valid marketplace source after syncing without footer save', async () => {
+  useAppStore.getState().setConfig({ pluginMarketplaceUrl: 'http://127.0.0.1:8787/index.json' });
+  mocks.marketplace.index = { schemaVersion: 1, plugins: ['http://127.0.0.1:8787/plugin-demo.json'] };
+  mocks.marketplace.fetchIndex.mockResolvedValue(mocks.marketplace.index);
+  mocks.marketplace.checkUpdates.mockResolvedValue([]);
+  await render();
+  await click('plugins.marketplace.fetch');
+  expect(mocks.config.saveConfig).toHaveBeenCalledWith(
+    { pluginMarketplaceUrl: 'http://127.0.0.1:8787/index.json' },
+    true,
+  );
+  await act(async () => {
+    useAppStore.getState().setConfig({ pluginMarketplaceUrl: '' });
+  });
+});
 
 it('requires independent consent on enable and focuses cancel without granting anything', async () => {
   await render();

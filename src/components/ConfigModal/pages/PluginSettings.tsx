@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { usePluginList, usePluginMarketplace, isPluginReplaceConfirmationError, replacementTargetId } from '../../../hooks/usePlugins';
 import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
+import { useConfigPersistence } from '../../../hooks/useConfigPersistence';
 
 /** Uninstalling retires native webviews and clears browser data on the UI thread,
  *  which can take tens of seconds. The panel is painted before the invoke starts
@@ -83,6 +84,7 @@ function TrustedWebDialog({ plugin, clearing, working, onCancel, onAccept }: {
 
 const PluginSettings: React.FC = () => {
   const { t } = useTranslation();
+  const { saveConfig } = useConfigPersistence();
   const {
     plugins,
     loading,
@@ -169,9 +171,21 @@ const PluginSettings: React.FC = () => {
     }
   };
 
+  const persistMarketplaceSource = async (source: string): Promise<boolean> =>
+    saveConfig({ pluginMarketplaceUrl: source }, true);
+
   const handleMarketplaceRefresh = async (): Promise<void> => {
+    const source = pluginMarketplaceUrl.trim();
     const index = await fetchMarketplace();
-    if (index) await checkMarketplaceUpdates();
+    if (!index) return;
+    const updates = await checkMarketplaceUpdates();
+    if (updates) await persistMarketplaceSource(source);
+  };
+
+  const handleMarketplaceCheck = async (): Promise<void> => {
+    const source = pluginMarketplaceUrl.trim();
+    const updates = await checkMarketplaceUpdates();
+    if (updates) await persistMarketplaceSource(source);
   };
 
   const handleMarketplaceInstall = async (update: MarketplaceUpdate): Promise<void> => {
@@ -303,7 +317,7 @@ const PluginSettings: React.FC = () => {
               </button>
               <button
                 className="btn btn-sm"
-                onClick={() => void checkMarketplaceUpdates()}
+                onClick={() => void handleMarketplaceCheck()}
                 disabled={marketplaceLoading || !pluginMarketplaceUrl.trim()}
               >
                 <RefreshCw size={14} /> {t('plugins.marketplace.checkUpdates')}

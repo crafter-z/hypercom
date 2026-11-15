@@ -19,6 +19,10 @@ const plugin: PluginView = {
 };
 const uninstallPlugin = vi.fn();
 
+vi.mock('../../../hooks/useConfigPersistence', () => ({
+  useConfigPersistence: () => ({ saveConfig: vi.fn().mockResolvedValue(true) }),
+  resetOrdinaryConfigBaselineForTests: vi.fn(),
+}));
 vi.mock('../../../hooks/usePlugins', () => ({
   usePluginList: () => ({
     plugins: [plugin], loading: false, refresh: vi.fn(),
