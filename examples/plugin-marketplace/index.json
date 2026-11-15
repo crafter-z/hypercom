@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "plugins": [
+    "http://127.0.0.1:8787/plugin-demo.json"
+  ]
+}

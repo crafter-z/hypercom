@@ -15,6 +15,7 @@
 - [限制与错误处理](#限制与错误处理)
 - [本地调试](#本地调试)
 - [打包与升级](#打包与升级)
+- [插件市场发布与更新](#插件市场发布与更新)
 - [交付前自检](#交付前自检)
 
 ## 运行模型
@@ -288,7 +289,7 @@ ext()` 以 AbortError reject。取消后不要假定已产生的服务端副作�
 
 seq 不是跨应用会话的持久数据 ID；ts 为毫秒时间戳。不要把 RX 块当完整行，也不要按每块重新建解码器处理跨块 UTF-8 多字节字符。
 
-当前**没有** ports.onChange、rx.getBuffer、包资产目录遍历（`fs.list`）、shell.execute、自定义 events.on/emit、插件市场或远程调试协议。声明未来权限不能使这些接口可用。目录读写只针对用户通过原生选择器选定的目录，不是任意路径 API；插件不能用自报路径绕过选择器。
+当前**没有** ports.onChange、rx.getBuffer、包资产目录遍历（`fs.list`）、shell.execute、自定义 events.on/emit 或远程调试协议。插件市场提供的是宿主侧索引、更新检查和用户确认后的安装流程，不是 Worker API；声明未来权限不能使未实现接口可用。目录读写只针对用户通过原生选择器选定的目录，不是任意路径 API；插件不能用自报路径绕过选择器。
 
 ## 隔离 UI 与工作区标签
 
@@ -704,6 +705,73 @@ Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-
 
 如果持久数据结构随版本变化，插件负责自己的数据迁移：先成功读到旧对象，识别自己的数据格式，再提交迁移结果；读取或迁移失败时保留旧数据并报告，不能把宿主的 installGeneration 当插件数据 schema 版本。
 
+## 插件市场发布与更新
+
+插件市场由宿主读取远程 JSON，不是插件 Worker API。用户在设置中配置一个索引 URL 后，宿主先读取索引，再读取其中的插件描述；两种文档都按不可信输入处理。市场不会自动安装、自动授予权限或替代用户对代码的审阅。
+
+在设置页填写源地址后，点击「同步市场」或「检查更新」会使用当前输入立即检查；检查成功前端通过 field-only revision CAS 保存 `pluginMarketplaceUrl`，不要求先点击普通设置的「保存全部」。
+
+### 索引文件
+
+索引当前使用 `schemaVersion: 1`，`plugins` 是插件描述 JSON 的 URL 数组，最多 256 项：
+
+```json
+{
+  "schemaVersion": 1,
+  "plugins": [
+    "https://downloads.example.com/hypercom/com.example.hello.json"
+  ]
+}
+```
+
+索引及每份描述不得超过 1 MiB。URL 必须是 `http` 或 `https`，不能包含用户名、密码或 URL fragment；生产发布建议全程使用 HTTPS。索引 URL 只用于发现元数据，不能把插件代码直接嵌入索引。
+
+HyperCom 官方示例市场源仓库为 [`crafter-z/hypercom-plugin-marketplace`](https://github.com/crafter-z/hypercom-plugin-marketplace)。仓库中的 `index.json` 只维护 metadata 链接；示例插件 ZIP 作为 GitHub Release Asset 发布，metadata 的 `downloadUrl` 固定指向该 Release Asset。
+
+### 发布描述 JSON
+
+每个插件描述包含一个与待下载归档**完全一致**的 `manifest`，以及归档地址。`homepage` 和 `releaseNotes` 可省略，其他未知字段不要添加：
+
+```json
+{
+  "schemaVersion": 1,
+  "manifest": {
+    "id": "com.example.hello",
+    "name": "Hello HyperCom",
+    "version": "1.1.0",
+    "description": "在插件面板输出启动信息，并统计按钮点击次数。",
+    "apiVersion": "1.0",
+    "entry": "main.js",
+    "permissions": [],
+    "ui": {
+      "buttons": [
+        {
+          "id": "hello",
+          "label": "问候",
+          "icon": "Play",
+          "target": "sidebar"
+        }
+      ]
+    }
+  },
+  "downloadUrl": "https://downloads.example.com/hypercom/com.example.hello-1.1.0.zip",
+  "homepage": "https://example.com/hypercom/hello",
+  "releaseNotes": "修复启动提示并改进错误处理。"
+}
+```
+
+宿主会重新校验描述中的 schema、URL、manifest id/version/API/路径/权限和归档内容；描述中的 manifest 不是对归档 `manifest.json` 的替代。`downloadUrl` 不能带凭据或 fragment，市场服务器不应要求插件权限来读取公开元数据。
+
+### 更新与安装流程
+
+1. 宿主以数字 semver 比较描述版本与已安装版本，更新检查只读；结果通过 `updateAvailable` 标记是否有更高版本，已安装插件带 `currentVersion`，未安装插件省略该字段。检查失败不改变现有安装。
+2. 用户打开更新项，核对插件 id、版本、权限、主页、发布说明和下载来源，再明确确认安装。不要把“检查到更新”当作“已安装”。
+3. 确认操作绑定 metadata URL、期望 id/version 及当前 `installGeneration`；如果期间插件被替换或描述内容改变，宿主拒绝安装并要求重新检查。
+4. 成功市场安装会保留 `data/`，但产生新的安装代次并清除普通权限和可信网页信任；用户必须重新授权后才运行。取消、同版/降级拒绝、网络失败或 manifest/ZIP 校验失败都不替换旧代码。
+5. 发布新版本时保持相同 `id` 并提高 `version`，更新索引中的描述 URL 或描述内容；不要复用旧版本 ZIP 地址指向不同代码。安装后配置记录 `source: "marketplace"` 和归档 `updateUrl`（`downloadUrl`），但这些字段不是签名或供应链证明。
+
+发布前至少验证：索引和描述可用 UTF-8 JSON 解析、schemaVersion 为 1、HTTPS 无凭据/fragment、描述 manifest 与 ZIP 完全一致、ZIP 不含 data/ 或秘密、下载地址可重复取得同一版本、权限和 releaseNotes 与实际行为相符。需要强完整性保证时，在 HTTPS 之外提供签名或可信镜像，并在发布渠道记录校验值。
+
 ## 交付前自检
 
 - [ ] 从本文两个文件或自己的源包，在干净配置下完成安装 → 授权 → 启用，不依赖本机源码路径和 npm 运行时。
@@ -713,6 +781,8 @@ Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-
 - [ ] 所有异步副作用有 await/catch，不在启动时自动发危险命令，不依赖退出回调保存。
 - [ ] 从旧版升级成功，KV 保留且插件数据迁移不会因读失败覆盖；新代码重新授权后才能运行。
 - [ ] ZIP 结构、entry、纯数字 version、额度与资源路径符合约束，不含 data/、密钥或本地依赖目录。
+- [ ] 若发布到插件市场，索引/描述 schemaVersion 为 1，描述 manifest 与 ZIP 一致，URL 无凭据/fragment，并完成 HTTPS 或可信镜像验收。
+- [ ] 市场更新只在用户确认后安装；确认后预期会生成新的 installGeneration 并要求重新授权，不把旧权限或可信网页信任当作升级成功条件。
 - [ ] 在准备支持的实际应用/平台验证 Worker、文件选择器和生产网络限制；开发浏览器模拟 IPC 的通过不替代原生验收。
 
 现有 RX/旁注/声明式按钮/白名单演示见[示例插件](../examples/plugin-demo/README.md)；宿主磁盘恢复和权限实现见[架构说明](architecture/plugins.md)，应用发行包验证边界见[发布验收](architecture/release.md#自动更新与平台边界)。

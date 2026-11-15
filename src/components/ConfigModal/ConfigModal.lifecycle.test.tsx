@@ -89,7 +89,8 @@ describe('configuration save ownership', () => {
     expect(backend.uiScalePercent).toBe(125);
     expect(applyUiScale).toHaveBeenCalledWith(125);
     expect(popoutEventService.emitUiScaleChanged).toHaveBeenCalledWith(125);
-    expect(useSystemStore.getState().ui.isConfigOpen).toBe(false);
+    expect(useSystemStore.getState().ui.isConfigOpen).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')).toBeNull();
   });
 
   it('keeps an external newer draft open rather than claiming the old in-flight snapshot saved it', async () => {
@@ -100,7 +101,8 @@ describe('configuration save ownership', () => {
     expect(applyUiScale).not.toHaveBeenCalled();
     await act(async () => { container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')!.click(); });
     expect(backend.uiScalePercent).toBe(150);
-    expect(useSystemStore.getState().ui.isConfigOpen).toBe(false);
+    expect(useSystemStore.getState().ui.isConfigOpen).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')).toBeNull();
   });
 
   it('cannot close a newly opened settings session after the previous save completes', async () => {
@@ -135,6 +137,7 @@ describe('configuration save ownership', () => {
     await act(async () => { container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')!.click(); });
     expect(configService.setConfig).toHaveBeenCalledTimes(1);
     expect(backend.maxDisplayLines).toBe(next);
-    expect(useSystemStore.getState().ui.isConfigOpen).toBe(false);
+    expect(useSystemStore.getState().ui.isConfigOpen).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('.modal-content-footer .btn-primary')).toBeNull();
   });
 });

@@ -27,7 +27,7 @@ Tauri 应用壳
 | [`config.md`](config.md) | `AppConfig`/`Entities`、会话快照、store 划分、实体草稿、保存队列、CAS 和数值边界 |
 | [`workspace.md`](workspace.md) | pane tree、标签、弹窗、通知、侧边栏、状态栏、背景和文本右键菜单 |
 | [`update.md`](update.md) | stable/preview 更新检查、网络策略、安装流程和前端决策流 |
-| [`plugins.md`](plugins.md) | 插件安装身份、权限/快照、Worker、HTTP/KV/文件、事务恢复和 RX 旁路 |
+| [`plugins.md`](plugins.md) | 插件安装身份、权限/快照、Worker、市场索引/更新、HTTP/KV/文件、事务恢复和 RX 旁路 |
 | [`plugin-views.md`](plugin-views.md) | 隔离原生视图、可信网页、工作区标签、文档代次、二进制通道和输入生命周期 |
 | [`release.md`](release.md) | CI 质量门、stable/preview 发布工作流、清单/签名校验和原生验收边界 |
 | [`errors.md`](errors.md) | `CommandError` 变体、命令归属和前端错误消费路径 |

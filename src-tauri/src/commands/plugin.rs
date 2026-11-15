@@ -112,6 +112,12 @@ pub struct PluginView {
     pub manifest_error: Option<String>,
     /// 已安装时间（unix 秒）。
     pub installed_at: Option<i64>,
+    /// 安装来源（dir/zip/marketplace）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// 市场安装时关联的归档地址。
+    #[serde(rename = "updateUrl", skip_serializing_if = "Option::is_none")]
+    pub update_url: Option<String>,
 }
 
 /// manifest 的 wire 视图（camelCase 与前端 TS 类型对齐）。
@@ -190,6 +196,8 @@ fn build_views_from_scan(
                     manifest: Some(PluginManifestView::from(&manifest)),
                     manifest_error: None,
                     installed_at: state.and_then(|s| s.installed_at),
+                     source: state.and_then(|s| s.source.clone()),
+                     update_url: state.and_then(|s| s.update_url.clone()),
                 },
                 Err(err) => PluginView {
                     // 损坏目录：id 无法从 manifest 得知——用目录名占位，前端显示校验失败。
@@ -211,6 +219,8 @@ fn build_views_from_scan(
                     manifest: None,
                     manifest_error: Some(err),
                     installed_at: None,
+                     source: None,
+                     update_url: None,
                 },
             }
         })
@@ -236,7 +246,7 @@ pub struct PluginStateSnapshot {
     pub plugin_configs: Vec<config::PluginConfigEntry>,
 }
 
-fn snapshot(manager: &config::ConfigManager) -> PluginStateSnapshot {
+pub(crate) fn snapshot(manager: &config::ConfigManager) -> PluginStateSnapshot {
     let cfg = manager.get_config();
     PluginStateSnapshot {
         revision: cfg.revision,
@@ -406,15 +416,26 @@ pub async fn install_plugin(
     result
 }
 
-struct PreparedPluginInstall {
+pub(crate) struct PreparedPluginInstall {
     manifest: PluginManifest,
     source_label: &'static str,
+    update_url: Option<String>,
     dest: std::path::PathBuf,
     replace_existing: bool,
     stage_guard: TempDirGuard,
 }
 
+#[cfg(test)]
 fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str) {
+    reset_install_trust_with_url(cfg, id, source_label, None);
+}
+
+fn reset_install_trust_with_url(
+    cfg: &mut config::AppConfig,
+    id: &str,
+    source_label: &str,
+    update_url: Option<&str>,
+) {
     if let Some(existing) = cfg.entities.plugin_configs.iter_mut().find(|p| p.id == id) {
         existing.enabled = false;
         existing.trusted_web_granted = false;
@@ -423,6 +444,7 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
         existing.installed_at =
             Some(now_unix_secs().max(existing.installed_at.unwrap_or(0).saturating_add(1)));
         existing.source = Some(source_label.into());
+        existing.update_url = update_url.map(str::to_owned);
     } else {
         cfg.entities.plugin_configs.push(config::PluginConfigEntry {
             id: id.into(),
@@ -432,6 +454,7 @@ fn reset_install_trust(cfg: &mut config::AppConfig, id: &str, source_label: &str
             install_generation: uuid::Uuid::new_v4().to_string(),
             installed_at: Some(now_unix_secs()),
             source: Some(source_label.into()),
+            update_url: update_url.map(str::to_owned),
         });
     }
 }
@@ -454,7 +477,11 @@ fn persist_install_trust_reset(manager: &mut config::ConfigManager) -> Result<()
         .map_err(|e| CommandError::Config(format!("安装前更新禁用状态备份失败: {e}")))
 }
 
-fn install_prepared(
+pub(crate) fn prepared_manifest(prepared: &PreparedPluginInstall) -> &PluginManifest {
+    &prepared.manifest
+}
+
+pub(crate) fn install_prepared(
     manager: &mut config::ConfigManager,
     mut prepared: PreparedPluginInstall,
     expected_generation: Option<&str>,
@@ -478,10 +505,11 @@ fn install_prepared(
         (Some(_), None) | (None, None) => {}
     }
     let old = manager.get_config().clone();
-    reset_install_trust(
+    reset_install_trust_with_url(
         manager.get_config_mut(),
         &prepared.manifest.id,
         prepared.source_label,
+        prepared.update_url.as_deref(),
     );
     // The durable disabled/no-grants state precedes the first rename. Restart
     // after any later interruption therefore cannot trust either code version.
@@ -517,6 +545,18 @@ fn prepare_plugin_install(
     source_path: &str,
     root: &Path,
     replace_existing: bool,
+) -> Result<PreparedPluginInstall, CommandError> {
+    prepare_plugin_install_with_metadata(source_path, root, replace_existing, None, None)
+}
+
+/// Prepare an install while carrying provenance for a marketplace download.
+/// The caller must hold the plugin IO gate before invoking this function.
+pub(crate) fn prepare_plugin_install_with_metadata(
+    source_path: &str,
+    root: &Path,
+    replace_existing: bool,
+    source_label_override: Option<&'static str>,
+    update_url: Option<String>,
 ) -> Result<PreparedPluginInstall, CommandError> {
     let src = Path::new(source_path);
 
@@ -562,7 +602,8 @@ fn prepare_plugin_install(
 
     let manifest = plugin::load_manifest_from_dir(&src_plugin_dir)
         .map_err(|e| CommandError::Other(format!("插件目录校验失败: {e}")))?;
-    let source_label: &'static str = if tmp_holder.is_some() { "zip" } else { "dir" };
+    let source_label: &'static str = source_label_override
+        .unwrap_or(if tmp_holder.is_some() { "zip" } else { "dir" });
 
     std::fs::create_dir_all(root)
         .map_err(|e| CommandError::Io(format!("创建插件目录失败: {e}")))?;
@@ -643,6 +684,7 @@ fn prepare_plugin_install(
     Ok(PreparedPluginInstall {
         manifest,
         source_label,
+        update_url,
         dest,
         replace_existing,
         stage_guard,
@@ -2250,6 +2292,7 @@ mod tests {
                 granted_permissions: vec!["fs:storage".into()],
                 installed_at: Some(1),
                 source: Some("dir".into()),
+                update_url: None,
             });
         manager.save().unwrap();
         manager
@@ -2815,6 +2858,37 @@ mod tests {
         assert!(cfg.entities.plugin_configs[0]
             .granted_permissions
             .is_empty());
+    }
+
+    #[test]
+    fn mixed_local_and_marketplace_install_resets_provenance_and_trust() {
+        let mut cfg = config::AppConfig::default();
+        reset_install_trust(&mut cfg, "com.example.test", "dir");
+        let entry = &mut cfg.entities.plugin_configs[0];
+        entry.enabled = true;
+        entry.trusted_web_granted = true;
+        entry.granted_permissions.push("serial:send".into());
+        let local_generation = entry.install_generation.clone();
+
+        reset_install_trust_with_url(
+            &mut cfg,
+            "com.example.test",
+            "marketplace",
+            Some("https://example.test/releases/demo.zip"),
+        );
+        let entry = &cfg.entities.plugin_configs[0];
+        assert_eq!(entry.source.as_deref(), Some("marketplace"));
+        assert_eq!(entry.update_url.as_deref(), Some("https://example.test/releases/demo.zip"));
+        assert!(!entry.enabled);
+        assert!(!entry.trusted_web_granted);
+        assert!(entry.granted_permissions.is_empty());
+        assert_ne!(entry.install_generation, local_generation);
+
+        reset_install_trust(&mut cfg, "com.example.test", "zip");
+        let entry = &cfg.entities.plugin_configs[0];
+        assert_eq!(entry.source.as_deref(), Some("zip"));
+        assert!(entry.update_url.is_none());
+        assert_ne!(entry.install_generation, local_generation);
     }
 
     #[test]

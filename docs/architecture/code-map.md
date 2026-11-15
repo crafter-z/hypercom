@@ -62,6 +62,7 @@
 | 诊断日志 | `src-tauri/src/diaglog.rs`：`DiagLogger` | 前后端诊断日志统一落盘、轮转和清空 |
 | 系统能力 | `src-tauri/src/system.rs`：`win32_backend`、`child_process_backend`；`commands/system_cmds.rs`：`dev_only`、`is_debug_build` | 平台电源抑制与调试能力门控的集中入口 |
 | 插件事务 | `src-tauri/src/plugin/transaction.rs` | 安装/升级/卸载 journal、原子替换与中断恢复 |
+| 插件市场协议 | `src-tauri/src/plugin/marketplace.rs`：`parse_index`、`parse_description`、`metadata_matches`；`src-tauri/src/commands/plugin_marketplace.rs`：`fetch_plugin_marketplace`、`check_plugin_updates`、`install_marketplace_plugin` | 索引只保存 metadata URL；描述携带 manifest/downloadUrl；远程安装复用插件事务并绑定期望 id/version/generation |
 | 原生插件视图 | `src-tauri/src/plugin/view_runtime/`：`mod.rs`、`resources.rs`、`windows.rs`、`sdk.js` | 身份、资源、Windows Wry child 和视图 SDK 分层 |
 | 更新网络 | `src-tauri/src/update_network.rs`、`src-tauri/src/commands/update.rs` | 代理策略与更新检查/下载/安装命令分离 |
 

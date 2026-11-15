@@ -92,6 +92,8 @@ const defaultConfig: AppConfig = {
   // issue #17 插件代理：默认不启用（D5 隔离，插件出站直连）。
   pluginProxy: '',
   pluginProxyEnabled: false,
+  // 官方轻量插件市场源；用户可在插件设置中替换为自己的源。
+  pluginMarketplaceUrl: 'https://raw.githubusercontent.com/crafter-z/hypercom-plugin-marketplace/main/index.json',
   sendCommandSets: [],
   highlightRuleSets: [],
   protocolTemplates: [],

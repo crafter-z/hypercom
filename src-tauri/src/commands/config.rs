@@ -205,6 +205,7 @@ mod tests {
             granted_permissions: Vec::new(),
             installed_at: None,
             source: None,
+            update_url: None,
         });
         let mut old_draft = current.clone();
         old_draft.entities.plugin_configs[0].enabled = true;
@@ -242,6 +243,7 @@ mod tests {
             granted_permissions: Vec::new(),
             installed_at: None,
             source: None,
+            update_url: None,
         });
         let mut imported = current.clone();
         current.entities.plugin_configs[0].trusted_web_granted = true;

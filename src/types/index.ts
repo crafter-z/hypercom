@@ -371,6 +371,8 @@ export interface AppConfig {
   // 缺省空串 + 关闭：插件出站继承系统代理；开启且非空时用该代理覆盖系统代理。
   pluginProxy: string;          // http://[user:pass@]host:port，''=不覆盖
   pluginProxyEnabled: boolean;  // 是否启用插件代理
+  /** URL of the plugin marketplace index; saved with ordinary settings. */
+  pluginMarketplaceUrl: string;
 
   // 设置实体（全部存入 config.json）
   sendCommandSets: SendCommandSet[];
@@ -532,12 +534,47 @@ export interface PluginView {
   installedAt: number | null;
   /** Identity of the installed code reviewed by the user; changes on every install. */
   installGeneration: string;
+  /** Installation provenance, when available. */
+  source?: 'dir' | 'zip' | 'marketplace' | string | null;
+  /** Marketplace archive URL, when installed from a marketplace. */
+  updateUrl?: string | null;
 }
 
 /** Authoritative plugin state, ordered by the backend configuration revision. */
 export interface PluginStateSnapshot {
   revision: number;
   pluginConfigs: PluginConfigEntry[];
+}
+
+/** Index returned by the configured plugin marketplace source. */
+export interface MarketplaceIndex {
+  schemaVersion: number;
+  /** Marketplace metadata URLs/identifiers published by the source. */
+  plugins: string[];
+}
+
+/** Metadata document shape used by marketplace entries. */
+export interface MarketplacePluginMetadata {
+  schemaVersion: number;
+  manifest: PluginManifestView;
+  downloadUrl: string;
+  homepage?: string | null;
+  releaseNotes?: string | null;
+}
+
+/** Update information returned by check_plugin_updates. */
+export interface MarketplaceUpdate {
+  id: string;
+  currentVersion?: string | null;
+  latestVersion: string;
+  /** Whether the backend considers this entry newer than the installed version. */
+  updateAvailable: boolean;
+  /** URL of the metadata document passed as `metadataUrl` to install. */
+  descriptionUrl: string;
+  downloadUrl: string;
+  manifest: PluginManifestView;
+  releaseNotes?: string | null;
+  homepage?: string | null;
 }
 
 /** list_plugins adds scanned manifests to the same ordered state snapshot. */
@@ -612,4 +649,6 @@ export interface PluginConfigEntry {
   grantedPermissions: string[];
   installedAt?: number | null;
   source?: string | null;
+  /** Marketplace download URL, absent for local installs. */
+  updateUrl?: string | null;
 }

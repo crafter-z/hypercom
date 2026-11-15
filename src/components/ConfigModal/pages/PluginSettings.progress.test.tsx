@@ -19,6 +19,10 @@ const plugin: PluginView = {
 };
 const uninstallPlugin = vi.fn();
 
+vi.mock('../../../hooks/useConfigPersistence', () => ({
+  useConfigPersistence: () => ({ saveConfig: vi.fn().mockResolvedValue(true) }),
+  resetOrdinaryConfigBaselineForTests: vi.fn(),
+}));
 vi.mock('../../../hooks/usePlugins', () => ({
   usePluginList: () => ({
     plugins: [plugin], loading: false, refresh: vi.fn(),
@@ -26,6 +30,7 @@ vi.mock('../../../hooks/usePlugins', () => ({
     uninstallPlugin: (...args: unknown[]) => uninstallPlugin(...args),
     setEnabled: vi.fn(), togglePermission: vi.fn(), setTrustedWeb: vi.fn(), clearWebData: vi.fn(),
   }),
+  usePluginMarketplace: () => ({ index: null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() }),
   isPluginReplaceConfirmationError: () => false,
   replacementTargetId: () => undefined,
 }));

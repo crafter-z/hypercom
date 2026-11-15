@@ -252,6 +252,9 @@ pub struct PluginConfigEntry {
     pub installed_at: Option<i64>,
     #[serde(default)]
     pub source: Option<String>,
+    /// URL used for marketplace updates; absent for local installs.
+    #[serde(default)]
+    pub update_url: Option<String>,
 }
 
 // ==================== 设置实体集合 ====================
@@ -372,6 +375,9 @@ pub struct AppConfig {
     /// 插件 HTTP 出站代理；未显式启用时强制直连。
     pub plugin_proxy: String,
     pub plugin_proxy_enabled: bool,
+    /// 插件市场索引地址；默认使用官方市场，用户可替换。
+    #[serde(default = "default_plugin_marketplace_url")]
+    pub plugin_marketplace_url: String,
 
     // --- 设置实体（config.json 顶层 key，见 Entities）---
     #[serde(flatten)]
@@ -386,6 +392,12 @@ const DEFAULT_TERMINAL_FONT: &str =
     "Consolas, \"Noto Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Segoe UI\", monospace";
 const DEFAULT_UI_FONT: &str =
     "Inter, \"Noto Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Segoe UI\", sans-serif";
+const DEFAULT_PLUGIN_MARKETPLACE_URL: &str =
+    "https://raw.githubusercontent.com/crafter-z/hypercom-plugin-marketplace/main/index.json";
+
+fn default_plugin_marketplace_url() -> String {
+    DEFAULT_PLUGIN_MARKETPLACE_URL.to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -438,6 +450,7 @@ impl Default for AppConfig {
             update_check_mode: "stable".to_string(),
             plugin_proxy: String::new(),
             plugin_proxy_enabled: false,
+            plugin_marketplace_url: default_plugin_marketplace_url(),
             entities: Entities::default(),
         }
     }
@@ -1002,6 +1015,7 @@ impl ConfigManager {
             "stable",
         );
         config.plugin_proxy = config.plugin_proxy.trim().to_string();
+        config.plugin_marketplace_url = config.plugin_marketplace_url.trim().to_string();
         if config.plugin_proxy.is_empty() {
             config.plugin_proxy_enabled = false;
         }
@@ -1216,6 +1230,7 @@ mod tests {
             granted_permissions: vec!["http:request".into()],
             installed_at: Some(1),
             source: Some("dir".into()),
+            update_url: None,
         });
         manager.save().unwrap();
         manager.begin_plugin_recovery_marker().unwrap();
@@ -1243,6 +1258,7 @@ mod tests {
             granted_permissions: vec!["http:request".into()],
             installed_at: Some(1),
             source: Some("dir".into()),
+            update_url: None,
         });
         manager.save().unwrap();
         manager.save_safe_backup().unwrap();
@@ -1283,6 +1299,7 @@ mod tests {
                 granted_permissions: vec!["http:request".into()],
                 installed_at: Some(1),
                 source: Some("dir".into()),
+            update_url: None,
             });
         manager.save().unwrap();
         drop(manager);
@@ -1327,6 +1344,7 @@ mod tests {
                 granted_permissions: vec!["ui:view".into()],
                 installed_at: Some(1),
                 source: Some("zip".into()),
+            update_url: None,
             });
         manager.save().unwrap();
         drop(manager);
