@@ -527,7 +527,7 @@
 .plugin-settings {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -545,10 +545,23 @@
 }
 
 .plugin-immediate-section {
+  order: 0;
   border-left: 3px solid var(--accent-color);
+  padding: 10px 12px;
+}
+
+.plugin-list,
+.plugin-empty {
+  order: 1;
+}
+
+.plugin-marketplace-section {
+  order: 2;
 }
 
 .plugin-proxy-section {
+  order: 3;
+
   background: var(--bg-primary);
 }
 
@@ -562,6 +575,73 @@
 
 .plugin-immediate-section .settings-section-header > div:first-child {
   min-width: 0;
+}
+
+.plugin-section-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.plugin-installed-count {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.plugin-secondary-section {
+  padding: 0;
+  border-color: var(--border-subtle);
+  background: var(--bg-primary);
+}
+
+.plugin-secondary-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 38px;
+  padding: 8px 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.plugin-secondary-summary::-webkit-details-marker {
+  display: none;
+}
+
+.plugin-secondary-summary::after {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  content: '⌄';
+  font-size: 16px;
+  transition: transform 120ms ease;
+}
+
+.plugin-secondary-section[open] > .plugin-secondary-summary::after {
+  transform: rotate(180deg);
+}
+
+.plugin-secondary-summary-copy {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px var(--space-2);
+  min-width: 0;
+}
+
+.plugin-secondary-summary-copy .settings-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-secondary-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 12px 12px;
 }
 
 .plugin-immediate-section h3,
@@ -595,7 +675,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 5px;
 }
 
 .plugin-settings-actions .btn {
@@ -705,13 +785,13 @@
 .plugin-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: 8px;
   min-width: 0;
 }
 
 .plugin-card {
   min-width: 0;
-  padding: var(--space-3);
+  padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
   background: var(--bg-secondary);
@@ -733,9 +813,22 @@
   display: flex;
   flex: 1 1 180px;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 2px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.plugin-card-title strong {
+  font-size: var(--text-md);
+}
+
+.plugin-card-id {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-terminal);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .plugin-card-version {
@@ -749,11 +842,15 @@
 }
 
 .plugin-desc {
-  margin-top: var(--space-2);
+  display: -webkit-box;
+  margin: 6px 0 0;
+  overflow: hidden;
   color: var(--text-secondary);
-  font-size: var(--text-md);
-  line-height: 1.5;
+  font-size: var(--text-sm);
+  line-height: 1.4;
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .plugin-error-row {
@@ -773,9 +870,9 @@
 .plugin-perms {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -788,16 +885,16 @@
 
 .plugin-perm-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
-  gap: var(--space-2);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 5px;
 }
 
 .plugin-perm-item {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
   min-width: 0;
-  padding: var(--space-2);
+  padding: 5px 7px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   background: var(--bg-primary);

@@ -222,8 +222,11 @@ const PluginSettings: React.FC = () => {
         <section className="plugin-immediate-section" aria-labelledby="plugin-immediate-title">
           <div className="settings-section-header">
             <div>
-              <h3 id="plugin-immediate-title" className="config-section-title">{t('plugins.immediateSectionTitle')}</h3>
-              <p className="settings-hint">{t('plugins.immediateSectionHint')}</p>
+              <div className="plugin-section-title-row">
+                <h3 id="plugin-immediate-title" className="config-section-title">{t('plugins.installedSectionTitle')}</h3>
+                <span className="plugin-installed-count">{t('plugins.installedCount', { count: plugins.length })}</span>
+              </div>
+              <p className="settings-hint">{t('plugins.installedSectionHint')}</p>
             </div>
             <div className="plugin-settings-actions">
               <button className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
@@ -237,11 +240,16 @@ const PluginSettings: React.FC = () => {
               </button>
             </div>
           </div>
-          <p className="plugin-instant-note">{t('plugins.instantNote')}</p>
         </section>
 
-        <section className="plugin-proxy-section" aria-labelledby="plugin-proxy-title">
-          <h3 id="plugin-proxy-title" className="config-section-title">{t('plugins.proxy.sectionTitle')}</h3>
+        <details className="plugin-proxy-section plugin-secondary-section">
+          <summary className="plugin-secondary-summary">
+            <span className="plugin-secondary-summary-copy">
+              <strong>{t('plugins.proxy.sectionTitle')}</strong>
+              <span className="settings-hint">{t('plugins.proxy.summary')}</span>
+            </span>
+          </summary>
+          <div className="plugin-secondary-body">
           <p className="settings-hint">{t('plugins.proxy.saveHint')}</p>
           <label className="checkbox-wrapper">
             <input
@@ -265,12 +273,19 @@ const PluginSettings: React.FC = () => {
             </div>
           )}
           <p className="settings-hint">{t('plugins.proxy.hint')}</p>
-        </section>
+          </div>
+        </details>
 
-        <section className="plugin-marketplace-section" aria-labelledby="plugin-marketplace-title">
+        <details className="plugin-marketplace-section plugin-secondary-section">
+          <summary className="plugin-secondary-summary">
+            <span className="plugin-secondary-summary-copy">
+              <strong>{t('plugins.marketplace.title')}</strong>
+              <span className="settings-hint">{t('plugins.marketplace.summary')}</span>
+            </span>
+          </summary>
+          <div className="plugin-secondary-body">
           <div className="settings-section-header">
             <div>
-              <h3 id="plugin-marketplace-title" className="config-section-title">{t('plugins.marketplace.title')}</h3>
               <p className="settings-hint">{t('plugins.marketplace.description')}</p>
             </div>
             <div className="plugin-settings-actions">
@@ -357,7 +372,8 @@ const PluginSettings: React.FC = () => {
           ) : (
             <p className="settings-hint">{t('plugins.marketplace.noIndex')}</p>
           )}
-        </section>
+        </div>
+        </details>
 
       {plugins.length === 0 ? (
         <div className="plugin-empty">
@@ -376,6 +392,7 @@ const PluginSettings: React.FC = () => {
                 <div className="plugin-card-header">
                   <div className="plugin-card-title">
                     <strong>{plugin.manifest?.name ?? plugin.id}</strong>
+                    <span className="plugin-card-id">{plugin.id}</span>
                     {plugin.manifest && (
                       <span className="plugin-card-version">
                         {t('plugins.version', { version: plugin.manifest.version })} ·{' '}

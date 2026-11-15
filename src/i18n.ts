@@ -37,7 +37,12 @@ const resources = {
       'backupSettings.importRisk': "导入会替换已保存的配置。建议先导出备份；导入结果不能通过“取消”撤销。",
       'plugins.immediateSectionTitle': "插件操作（立即生效）",
       'plugins.immediateSectionHint': "安装、刷新、启停、授权和卸载直接作用于当前插件，不等待页脚保存。",
+      'plugins.installedSectionTitle': "已安装插件",
+      'plugins.installedSectionHint': "先管理当前已安装的插件；安装、启停和权限调整会立即生效。",
+      'plugins.installedCount': "{{count}} 个",
       'plugins.proxy.saveHint': "下面的代理地址属于普通配置草稿，使用页脚“保存全部”后才生效；取消或关闭会按普通设置离开规则处理。",
+      'plugins.proxy.summary': "仅影响 Worker 网络请求；默认继承系统代理。",
+      'plugins.marketplace.summary': "按市场索引浏览、检查并安装插件。",
 
       'highlightRuleEditor.colorLabel': "规则颜色",
 
@@ -1049,7 +1054,12 @@ const resources = {
       'backupSettings.importRisk': "Import replaces your saved configuration. Export a backup first; Cancel cannot undo an import.",
       'plugins.immediateSectionTitle': "Plugin actions (instant)",
       'plugins.immediateSectionHint': "Install, refresh, enable, permission, and uninstall actions apply immediately and do not wait for Footer Save.",
-      'plugins.proxy.saveHint': "The proxy fields below are ordinary config drafts and take effect after Footer Save; Cancel or Close follows the ordinary settings leave guard.",
+      'plugins.installedSectionTitle': "Installed plugins",
+       'plugins.installedSectionHint': "Manage installed plugins first; install, enable, and permission changes take effect immediately.",
+       'plugins.installedCount': "{{count}}",
+       'plugins.proxy.saveHint': "The proxy fields below are ordinary config drafts and take effect after Footer Save; Cancel or Close follows the ordinary settings leave guard.",
+                                          'plugins.proxy.summary': "Worker network requests only; the system proxy is used by default.",
+       'plugins.marketplace.summary': "Browse, check, and install plugins from a marketplace index.",
 
       'highlightRuleEditor.colorLabel': "Rule color",
 
