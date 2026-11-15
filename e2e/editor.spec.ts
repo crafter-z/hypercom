@@ -403,7 +403,8 @@ test('reminder and highlight drafts do not apply or save until explicit save; hi
   expect(runtime).toEqual({ trigger: 'Fixture trigger', highlight: 'Fixture highlight' });
   expect((await persisted(page)).triggerRules[0].name).toBe('Fixture trigger');
   await page.locator('.modal-content-footer .btn-primary').click();
-  await expect(page.locator('.modal-dialog')).toHaveCount(0);
+  await expect(page.locator('.modal-dialog')).toBeVisible();
+  await expect(page.locator('.modal-content-footer .btn-primary')).toHaveCount(0);
   const saved = await persisted(page);
   expect(saved.triggerRules[0].name).toBe('Edited trigger');
   expect(saved.highlightRuleSets[0].name).toBe('Edited highlight');
@@ -476,6 +477,10 @@ test('editing after an individual save is preserved by a later full settings sav
   await expect(name).toHaveValue('Saved once');
   await name.fill('Latest edit');
   await page.locator('.modal-content-footer .btn-primary').click();
+  await expect(page.locator('.modal-dialog')).toBeVisible();
+  await expect(page.locator('.modal-content-footer .btn-primary')).toHaveCount(0);
+  expect((await persisted(page)).sendCommandSets[0].name).toBe('Latest edit');
+  await page.locator('.modal-content-header').getByRole('button', { name: '关闭', exact: true }).click();
   await expect(page.locator('.modal-dialog')).toHaveCount(0);
   await page.reload();
   await page.locator('.titlebar-right button[title="设置"]').click();
