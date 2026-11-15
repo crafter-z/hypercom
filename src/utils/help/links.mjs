@@ -1,5 +1,5 @@
 /** Shared by the Node compiler and WebView: never return unchecked navigation. */
-export const externalHelpDocuments = ['docs/plugin-development.md', 'docs/architecture/plugins.md', 'docs/architecture/plugin-views.md', 'examples/plugin-views-demo/README.md'];
+export const externalHelpDocuments = ['docs/plugin-development.md', 'docs/architecture/plugins.md', 'docs/architecture/plugin-views.md', 'examples/plugin-views-demo/README.md', 'examples/plugin-marketplace/README.md'];
 const externalDocuments = new Set(externalHelpDocuments);
 function normalizeRelative(source, relative) {
   const parts = source.split('/');
