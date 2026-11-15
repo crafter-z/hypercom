@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { TAURI_MOCK } from './tauriMock';
+import { connectMockSerialPort, TAURI_MOCK } from './tauriMock';
 import type { SerialPort, SendCommandSet, HighlightRuleSet, ProtocolTemplate, TriggerRule, TabItem } from '../src/types';
 
 // Playwright creates parent directories for screenshots automatically.
@@ -54,6 +54,8 @@ async function seed(page: Page, theme: 'dark' | 'light', language = 'zh-CN') {
     await i18n.changeLanguage(language);
   }, { ports, commands, highlights, protocols, triggers, theme, language });
   await expect(page.locator('.terminal-view:visible').first()).toBeVisible();
+  // Store fixtures describe the ports; only status events establish RX sessions.
+  for (const port of [...ports].reverse()) await connectMockSerialPort(page, port.id);
   await page.evaluate(() => {
     const lines = [
       '[INFO] HyperCom instrument console ready',

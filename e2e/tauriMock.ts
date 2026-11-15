@@ -1,3 +1,18 @@
+import { expect, type Page } from '@playwright/test';
+import type { SerialPort } from '../src/types';
+
+/** Establish a receive session through the real status handler, not a store patch.
+ * Polling also waits for the app-root status listener to finish registering. */
+export async function connectMockSerialPort(page: Page, portId: string, generation = 1): Promise<void> {
+  await expect.poll(() => page.evaluate(async ({ portId, generation }) => {
+    const path = '/src/stores/useAppStore.ts';
+    const { useAppStore } = await import(path);
+    window.__TAURI_INTERNALS__.dispatchEvent('serial:status', { port_id: portId, status: 'connected', generation });
+    const port = useAppStore.getState().ports.find((port: SerialPort) => port.id === portId);
+    return port?.status === 'connected' && port.connectionGeneration === generation;
+  }, { portId, generation }), { message: `connected receive session for ${portId}` }).toBe(true);
+}
+
 /** Shared browser-only Tauri IPC fixture. Never used by production code. */
 export const TAURI_MOCK = `
 (() => {

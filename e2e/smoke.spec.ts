@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { TAURI_MOCK } from './tauriMock';
+import { connectMockSerialPort, TAURI_MOCK } from './tauriMock';
 import { runAsciiNoiseBenchmark } from './asciiNoiseBenchmark';
 import { runTerminalWrapChecks, runMillionWrapChecks } from './terminalWrapChecks';
 
@@ -79,10 +79,11 @@ test.describe('HyperCom smoke tests', () => {
 
   // ==================== issue #6-10：RX 显示 + 隐藏窗口排空 ====================
 
-  /** 打开 COM1 标签页（侧边栏双击端口行）并等终端渲染 */
-  async function openCom1Tab(page: import('@playwright/test').Page): Promise<void> {
+  /** Opening a tab does not connect it; RX tests explicitly request a session. */
+  async function openCom1Tab(page: Page, connected = false): Promise<void> {
     await page.locator('.port-item-name', { hasText: 'COM1' }).dblclick();
     await expect(page.locator('.tab-item', { hasText: 'COM1' })).toBeVisible();
+    if (connected) await connectMockSerialPort(page, 'COM1');
   }
 
   /** 通过 mock 事件桥向应用派发一条 serial:data */
@@ -109,7 +110,11 @@ test.describe('HyperCom smoke tests', () => {
   test('disconnected guidance never covers retained log rows and returns after clearing', async ({ page }) => {
     await openCom1Tab(page);
     await expect(page.locator('.terminal-empty')).toBeVisible();
+    await connectMockSerialPort(page, 'COM1');
     await dispatchSerialData(page, 'COM1', 'retained-offline-log\n');
+    await expect(page.locator('.terminal-line').first()).toContainText('retained-offline-log');
+    await dispatchSerialStatus(page, 'COM1', 'disconnected');
+    await expect(page.locator('.port-item.connected')).toHaveCount(0);
     await expect(page.locator('.terminal-line').first()).toContainText('retained-offline-log');
     await expect(page.locator('.terminal-empty')).toHaveCount(0);
     await page.evaluate(async () => {
@@ -121,7 +126,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('RX serial data renders in the terminal (issue #6-10)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     await dispatchSerialData(page, 'COM1', 'hello-rx\n');
     await expect(page.locator('.terminal-line .terminal-content').first()).toContainText(
       'hello-rx',
@@ -129,7 +134,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('ASCII noise filter hides binary rows with scattered readable bytes and is reversible', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     const toggle = page.locator('.terminal-noise-filter input');
     await expect(toggle).not.toBeChecked();
     await dispatchSerialData(page, 'COM1', 'INFO boot complete\n');
@@ -174,7 +179,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('RX data still drains while the document is hidden (issue #6-10)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     // 强制页面进入隐藏态（rAF 停摆的等价条件）+ 派发 visibilitychange 让管线重排
     await page.evaluate(() => {
       Object.defineProperty(document, 'visibilityState', {
@@ -207,9 +212,8 @@ test.describe('HyperCom smoke tests', () => {
   }
 
   test('notification center shows port id + timestamp for serial messages (issue #7-1)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     // 模拟已连接端口意外断开 → portLost toast 携带串口号
-    await dispatchSerialStatus(page, 'COM1', 'connected');
     await dispatchSerialStatus(page, 'COM1', 'disconnected');
     // 打开通知中心（状态栏铃铛）
     await page.locator('.notify-btn').click();
@@ -222,7 +226,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('trigger alert toast carries the rule port context (issue #7-1)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     // 触发告警走 serial:data 匹配路径（无规则时无告警——此处仅验证配置规则路径不崩溃）
     await dispatchSerialData(page, 'COM1', 'anything\n');
     // 铃铛仍可用（未配置触发规则时不应有通知）
@@ -398,8 +402,7 @@ test.describe('HyperCom smoke tests', () => {
   // ==================== issue #11：关闭标签页不关闭串口 ====================
 
   test('closing a tab keeps the port connected; reopening starts a fresh session (issue #11)', async ({ page }) => {
-    await openCom1Tab(page);
-    await dispatchSerialStatus(page, 'COM1', 'connected');
+    await openCom1Tab(page, true);
     await dispatchSerialData(page, 'COM1', 'hello-before\n');
     await expect(page.locator('.terminal-line .terminal-content').first()).toContainText('hello-before');
 
@@ -445,7 +448,7 @@ test.describe('HyperCom smoke tests', () => {
   // ==================== issue #10：高频输出 + 缓冲裁剪阶段 DOM 有界 ====================
 
   test('high-rate RX with buffer trim keeps the row DOM bounded (issue #10)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     const stats = await page.evaluate(async () => {
       const view = document.querySelector('.terminal-view') as HTMLElement;
       let maxRows = 0;
@@ -476,6 +479,7 @@ test.describe('HyperCom smoke tests', () => {
     });
     // DOM 行数有界（窗口 + overscan；修复前 head trim 泄漏到数千行 → 每帧 O(n)
     // 渲染 → 输出区抖动）
+    expect(stats.maxRows, 'high-rate RX must render actual data').toBeGreaterThan(0);
     expect(stats.maxRows).toBeLessThanOrEqual(40);
     // 跟随 scrollTop 单调（无回跳）
     expect(stats.nonMonotonic).toBe(0);
@@ -484,7 +488,7 @@ test.describe('HyperCom smoke tests', () => {
   // ==================== issue #12：拖选滚动时新露出的行可渲染可选中 ====================
 
   test('drag-selecting while scrolling up shows newly exposed rows (issue #12)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     // 灌入足够数据（20 × 50 行）
     for (let i = 0; i < 20; i++) {
       await dispatchSerialData(page, 'COM1', `chunk-${i}\n`.repeat(50));
@@ -532,7 +536,7 @@ test.describe('HyperCom smoke tests', () => {
   // ==================== issue #17：拖选期间滚轮滚动后选区起点保持 ====================
 
   test('drag-select then wheel-scroll keeps the selection anchored (issue #17)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     // 灌入大量数据（60 × 50 行 = 3000 行）
     for (let i = 0; i < 60; i++) {
       await page.evaluate((i) => {
@@ -633,7 +637,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('selection endpoint anchored on a fresh row survives release (issue #17)', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     // 初始数据 + follow 到底部
     for (let i = 0; i < 20; i++) {
       await page.evaluate((i) => {
@@ -745,6 +749,7 @@ test.describe('HyperCom smoke tests', () => {
 
     // ① 打开 COM1 + COM2（同在单 Pane）→ split 垂直 → [main(COM1), leafB(COM2)]
     await openPortTab(page, 'COM1');
+    await connectMockSerialPort(page, 'COM1');
     await openPortTab(page, 'COM2');
     await page.locator('.pane-container-inner.pane-focused .tab-bar-split-group button:first-child').click();
     await expect(page.locator('.pane-node')).toHaveCount(2);
@@ -768,6 +773,7 @@ test.describe('HyperCom smoke tests', () => {
     // ④ 聚焦 COM1 → 打开 COM3 落左 Pane → 聚焦 COM1 → 再 split（嵌套位移）
     await page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM1")').click();
     await openPortTab(page, 'COM3');
+    await connectMockSerialPort(page, 'COM3');
     await expect(page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM3")')).toBeVisible();
     await page.locator('.pane-node:has(.tab-item:has-text("COM1")) .tab-item:has-text("COM1")').click();
     await page.locator('.pane-container-inner.pane-focused .tab-bar-split-group button:first-child').click();
@@ -807,6 +813,7 @@ test.describe('HyperCom smoke tests', () => {
     await page.goto('/');
     await expect(page.locator('.app-root')).toBeVisible();
     await openPortTab(page, 'COM1');
+    await connectMockSerialPort(page, 'COM1');
 
     const view = page.locator('.terminal-view');
     // 灌入 3000 行（< 4000 上限，不触发覆盖）
@@ -1009,7 +1016,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('soft wrap: toolbar is opt-in and text-only without altering buffered data', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     await dispatchSerialData(page, 'COM1', 'WRAP ' + 'long-data-'.repeat(250) + '\n');
     const toggle = page.getByRole('button', { name: '自动换行', exact: true });
     await expect(toggle).toHaveAttribute('aria-pressed', 'false');
@@ -1051,7 +1058,7 @@ test.describe('HyperCom smoke tests', () => {
   });
 
   test('reopening terminal search restores matches for the unchanged query', async ({ page }) => {
-    await openCom1Tab(page);
+    await openCom1Tab(page, true);
     await dispatchSerialData(page, 'COM1', 'quality-needle\n');
     await page.locator('.terminal-view').click();
     await page.keyboard.press('Control+f');

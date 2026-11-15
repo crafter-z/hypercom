@@ -1,5 +1,6 @@
 import { expect, type Page, type TestInfo } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
+import { connectMockSerialPort } from './tauriMock';
 
 /** Opt-in observational benchmark. Uses real app hooks/queue/DOM with mocked
  * serial:data delivery; it does NOT measure Rust, native IPC, disk IO or a UART.
@@ -9,6 +10,7 @@ export async function runAsciiNoiseBenchmark(page: Page, info: TestInfo, feature
   await cdp.send('Performance.enable');
   await page.locator('.port-item-name', { hasText: 'COM1' }).dblclick();
   await expect(page.locator('.terminal-noise-filter input')).toBeVisible();
+  await connectMockSerialPort(page, 'COM1');
   await page.evaluate(async () => {
     const root = '/src/';
     const { getViewportManager } = await import(root + 'utils/terminal/viewportManager.ts');

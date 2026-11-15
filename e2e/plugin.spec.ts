@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { connectMockSerialPort } from './tauriMock';
 
 /**
  * 插件系统 e2e（issue #17，设计 §9）。
@@ -200,10 +201,11 @@ const MOCK = `
 })();
 `;
 
-/** 打开 COM1 标签页（侧边栏双击端口行）并等终端渲染。 */
+/** Open COM1's display, then explicitly establish its mocked receive session. */
 async function openCom1Tab(page: Page): Promise<void> {
   await page.locator('.port-item-name', { hasText: 'COM1' }).dblclick();
   await expect(page.locator('.tab-item', { hasText: 'COM1' })).toBeVisible();
+  await connectMockSerialPort(page, 'COM1');
 }
 
 /** 通过 mock 事件桥向应用派发一条 serial:data。 */
@@ -286,6 +288,8 @@ test.describe('插件系统（issue #17）', () => {
   test('端口断线 → rx.detached(port-disconnected) → 插件写断流旁注', async ({ page }) => {
     await openApp(page, ['terminal:read', 'terminal:write']);
     await openCom1Tab(page);
+    await dispatchSerialData(page, 'COM1', 'PING before-disconnect\n');
+    await expect(page.locator('.terminal-line .terminal-content').filter({ hasText: 'PONG<PING before-disconnect>' })).toBeVisible();
     // 让宿主派发断线状态（useSerialReceive → notifyPortDisconnected → rx.detached）。
     await page.evaluate(() => {
       window.__TAURI_INTERNALS__.dispatchEvent('serial:status', { port_id: 'COM1', status: 'disconnected' });
