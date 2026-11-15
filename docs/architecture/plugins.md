@@ -2,7 +2,7 @@
 
 本模块支持安装目录或 ZIP 形式的普通 JS 脚本插件；设置页分别提供“安装目录”和“安装 ZIP”入口，取消任一选择器不启动另一选择器。插件逻辑在主窗 Web Worker 中运行（纯网页插件可以没有 Worker），UI 可用声明式 Sidebar/端口菜单、文本面板或独立隔离 WebView；隔离视图可替换串口内容或创建额外工作区标签。当前没有 Rust 原生插件、插件市场或远程调试器，插件 UI 不能访问宿主 DOM。
 
-插件作者从独立的[插件开发指南](../plugin-development.md)开始：manifest、权限、Worker API、示例、调试和打包说明集中在那里。普通用户看[设置 → 插件](../userwiki/设置.md#插件)。本文只维护宿主实现、原生 IPC、授权一致性与磁盘恢复；发行验收要求见[插件发版验收门](release.md#插件发版验收门)。
+插件作者从独立的[插件开发指南](../plugin-development.md)开始：manifest、权限、Worker API、示例、调试和打包说明集中在那里。普通用户看[设置 → 插件](../userwiki/设置.md#插件)。本文只维护宿主实现、原生 IPC、授权一致性与磁盘恢复；发行验收要求见 [`release.md`](release.md) 的插件原生验收边界。
 
 独立 UI、串口内容替换及动作创建额外工作区标签的当前实现见[隔离视图与标签契约](plugin-views.md)。Windows raw Wry adapter 已实现；其他平台隔离承载未验收时明确拒绝，不用主窗 iframe 替代。
 
@@ -71,7 +71,7 @@
 | `send_plugin_view_message` | `{instanceId,message}` | 只准 init/state/environment 有界 JSON，状态快照 256 KiB，不接受源代码 |
 | `destroy_plugin_view` | `{instanceId}` | 幂等退休原生路由/控件，迟到消息不能复活 |
 
-旧的单命令 `plugin_http`（`{status, body, truncated}`，带 1 MiB 响应截断与 15 秒超时上限）已移除；响应体现在只能经 `plugin_http_open` + `plugin_http_read` 拉取，取消走 `plugin_http_cancel`。三个命令共享进程级 `PluginHttpRegistry`，`requestId` 由 Worker 在 open 前生成并贯穿整个请求生命周期；`signal` 与 `responseType` 只在 Worker 侧消费，不进入原生 wire（wire 请求字段为 `method`/`url`/`headers`/`body`/`bodyBase64`/`timeout`/`redirect`）。
+HTTP 只经 `plugin_http_open`、`plugin_http_read` 和 `plugin_http_cancel` 三个命令；三者共享进程级 `PluginHttpRegistry`，`requestId` 由 Worker 在 open 前生成并贯穿请求生命周期。`signal` 与 `responseType` 只在 Worker 侧消费；原生 wire 字段为 `method`、`url`、`headers`、`body`、`bodyBase64`、`timeout` 和 `redirect`。
 
 ### HTTP 流式契约
 
@@ -92,7 +92,7 @@
 
 宿主执行链：`PluginSession.handleWorkerRequest` 验证当前安装身份、启用态及调用时权限 → `pluginHostApi.executeHostApi` 校验参数并执行具体能力。RX 数据在有当前读取授权时才转发；`pluginBridge` 收到批次后按订阅快照执行回调，等待返回的 Promise settle 后 ACK。RPC 到期只回收回执槽位，不能把迟到结果交给替换后的 Worker，也不承诺取消已开始的后端副作用。文件读取、私有写入、KV 持久化与 `http.*` 不适用通用 RPC 期限（大文件/长连接/用户选择），取消仍走显式通道。`view.sendBinary` 使用独立 10 分钟传输 RPC 资源期限，并受逐块 30 秒 ACK 和主动闲置回收约束（见[二进制通道](plugin-views.md#视图二进制通道)）。每会话普通 RPC 回执槽位上限 32；`http.cancel` 可绕普通槽使用最多额外 64 个取消槽，既避免取消排在自身请求后，又不允许无限取消洪泛。
 
-**错误分级**：`__plugin_ready` 现在由桥在用户入口脚本同步执行完成后发出；此前的加载/解析/初始化异常是致命启动失败（重试与 10 秒三次熔断保留）。就绪后的未处理拒绝、`worker.onerror` 与显式 `error` 事件只写诊断日志并限流提示，不终止会话、不清空插件内存。真正的原生视图进程故障仍按视图失败处理。显式重载走 `startReady`：在 `__plugin_ready` 之前失败或 10 秒未 ready 会把错误 reject 给调用方并提示，不永久占用管理队列。readiness 的结算绑定启动代次，旧 IO 完成不能结算新启动；ready 后以 30 秒健康探针检测静默终止，连续两次未回应按崩溃回收，而正常异步错误仍只记录诊断。
+**Worker 就绪与错误分级**：桥在用户入口脚本同步执行完成后发出 `__plugin_ready`。入口加载、解析或初始化失败属于启动失败，按启动重试与熔断策略处理；就绪后的未处理拒绝、`worker.onerror` 与显式 `error` 事件只写诊断日志并限流提示，不终止会话或清空插件内存。原生视图故障按视图失败处理。`startReady` 将启动代次绑定到 readiness 结算，旧 IO 不能结算新启动；ready 后健康探针检测静默终止，正常异步错误仍只记录诊断。
 
 **纯网页插件**：`PluginManifest.entry` 可省略，仅当存在非空 `trusted-web` + `input:"none"` 视图且无 Worker 按钮/菜单时合法；`ui.views[].worker:false` 允许混合插件中的某个可信页不依附 Worker。宿主对这些视图使用 `workerEpoch=0`，不创建空 Worker、不等待 Worker ACK，Worker 重启不影响它们。
 
@@ -101,6 +101,6 @@
 
 ## 验证与发行边界
 
-- Rust 测试：ID/路径与 manifest 上限、ZIP 限额、安装身份与旧操作拒绝、同版/降级替换确认、安装与卸载事务在各 rename 边界的中断恢复、纯网页 manifest 规则、缺失/空/二进制内容区分、原样大文件读取、原子替换、data/ 路径分类与 Windows 别名拒绝、插件目录相对路径归一化/穿越与盘符拒绝、目录条目分类与排序/递归、目录文件读取与目录/链接拒绝、overwrite/append/建父目录、create/remove/rename/stat、grant 的 plugin/安装代次绑定与撤销、HTTP 取消先于打开且无接收者持续生效、重定向模式与 glob 规范化；`cargo test --lib --manifest-path src-tauri/Cargo.toml`。原生生命周期与网页数据的验收要求见[验证边界](plugin-views.md#验证边界)。
-- 前端 Vitest：revision 响应乱序、升级期间权限操作、启用前授权、KV 读失败/损坏数据保全与无配额串行写队列、空内容/二进制 `fs.write`、目录 picker 取消/单选/多选、list/read/stat 的权限与 revoke 重校验、write/create/remove/rename 参数与返回、目录二进制 buffer transfer、无 RPC 期限、HTTP 拉取/取消/撤权后重校验、重载陈旧响应与启动失败拒绝、通知配额、RX/字节旁路、UI 注册表与 Worker 初次失败恢复。`npx tsc --noEmit` 与 `npm run test:run`。
-- `e2e/plugin.spec.ts` 使用真实 Chromium Worker/RX/终端但模拟 Rust invoke，不能证明原生选择器、真实 ZIP 事务或生产 WebView CSP。最终安装包验收见[发版要求](release.md#插件发版验收门)。
+- Rust 库测试覆盖 manifest/路径/ZIP 边界、安装身份与事务恢复、权限和目录 grant、原子文件写入、HTTP 流式取消与重定向；运行 `cargo test --lib --manifest-path src-tauri/Cargo.toml`。
+- 前端类型检查与 Vitest 覆盖 revision 快照、权限撤销、KV/文件/目录/HTTP、Worker、RX 旁路、通知和 UI 注册表；运行 `npx tsc --noEmit` 与 `npm run test:run`。
+- `e2e/plugin.spec.ts` 使用 Chromium Worker/RX/终端和 mock Rust invoke；它不证明原生选择器、ZIP 事务或生产 WebView CSP。目标平台安装包验收见 [`release.md`](release.md) 与 [`plugin-views.md`](plugin-views.md)。

@@ -4,7 +4,7 @@
 
 > **两条 HEX 口径**（详见 §「发送格式工具」）：`utils/hexFormat.ts` 是 bytes→HEX 的**唯一实现**；HEX 输入奇数位是**错误态**，前端与后端同一把尺子拒绝，绝不再补零。
 
-## RX 管线（2026-08-04 重构）
+## RX 管线
 
 `serial:data` 事件**不再「一事件一行」**，而是进 `getRxPipeline()`（每 webview 一个模块单例）：
 
@@ -25,10 +25,10 @@
 - **rAF 批写**：全管线只有一个批写 tick 句柄；tick 内对每个有排队的端口各做一次 `appendTerminalLines`，每端口每帧最多写 `maxLinesPerTick`（默认 2000）行。`flushNow(portId)` 仍只写一批；发送 TX 回显、弹窗快照以及断线/编码切换边界用 `flushBeforeSend(portId)` 完整排空已有队列（按 `maxLinesPerTick` 分批写），保证 RX 不丢失、不越过 TX 或快照边界。
 - **静默 flush**：feed 后组装器仍有未终结尾部时（重新）武装 250ms 定时器，超时取尾部成行并入队，行时间戳沿用该端口**最后一次事件时间**（从未 feed 过才退回 `Date.now()`）。
 - **队列上限**：`maxQueuedLines`（默认 10000）超限丢弃**最旧**的行——排空跟不上入队时（隐藏窗口 rAF 停摆 / 主线程忙）最旧的行最无价值。
-- **visibility-aware 排空（issue #6-10）**：默认调度器在页面可见且 rAF 可用时走 rAF，否则（页面隐藏 / 无 rAF）走 `setTimeout(cb, 16)` 兜底。构造函数注册 `visibilitychange`：变 hidden → 取消未触发的 tick 并按当前可见性重排（自然落到 setTimeout）；变 visible → 同样重排回 rAF（更低延迟）。`dispose()` 移除该监听。
+- **visibility-aware 排空**：默认调度器在页面可见且 rAF 可用时走 rAF，否则（页面隐藏 / 无 rAF）走 `setTimeout(cb, 16)` 兜底。构造函数注册 `visibilitychange`：变 hidden → 取消未触发的 tick 并按当前可见性重排（自然落到 setTimeout）；变 visible → 同样重排回 rAF（更低延迟）。`dispose()` 移除该监听。
 - **断线 / 编码切换**：`disconnect(portId)` 先冲刷尾部、写完全部队列，再删除该端口状态；`flushAndReset(portId)` 在编码切换前冻结队列中 RX 行的旧编码文本、完整排空后重置组装器，旧编码字节不会按新 label 显示。尾部与已解析协议帧也经统一的 RX 行观察入口通知触发器/插件，不遗漏无换行尾行。
 - **协议帧 / 日志回放**：协议解析帧走 `pipeline.enqueueFrame`，与普通 RX 行共享队列和观察者；日志回放等已构造行仍经 `enqueueLines` 入队（不冒充新 RX 触发）。模板切换/编辑及工作模式切换会重置解析器，旧帧前缀不与新模板的字节拼接。
-- **行级触发器钩子**：`setOnLineAssembled` 由 `useSerialReceive` 注入；完整 RX 行（含静默尾行、协议帧）先入队再通知观察者，自动回复调用 `sendToPort` 时先排空此前 RX，再追加 TX 回显。
+- **行级触发器钩子**：`setOnLineAssembled` 由 `useSerialReceive` 注入；完整 RX 行（含静默尾行、协议帧）先入队再通知观察者，自动回复调用 `sendToPort` 时先排空已排队 RX，再追加 TX 回显。
 - **流量统计**：RX 字节在 `useSerialReceive` 的事件处理器顶部经 `trafficStats.addRx` 计入，**1s 聚合**后统一写 store（`utils/trafficStats.ts`，字段仍是 `rxTotal`/`txTotal`）——不再每事件 `setTrafficStats`，消除高频 RX 下的 Zustand 重渲染。
 - **不得**在 hook/弹窗 cleanup 里 `dispose()` 单例（单例与应用同寿命）；`feedBytes` 不加 tab 存在性门控（弹窗 store 从不填充 tabs，门控会丢光弹窗实时流；对已 release 的 manager 喂数据本就是静默 no-op）。
 - 事件订阅按获取顺序登记 cleanup；后续状态/工具退出订阅失败会释放已取得的数据/工具输出监听。重连提示的迟到注册只能释放自身，不能覆盖重挂载后的活监听；重连退避结束及失败返回均复查用户关闭意图，后端取消令牌承担在飞重连取消。
@@ -64,7 +64,7 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **发送历史**：模块级 `Map<portId, SendHistoryEntry[]>`（仅内存，应用关闭即失），上限 50 条、按「内容 + 格式」去重；`releaseSendHistory(portId)` 由 `releaseTerminalState` 调用。
 - 所有发送路径（快捷发送/循环/触发自动回复/弹出窗/批量）都必须经 `sendToPort`，绕过会失去守卫与 TX 回显/历史管线。
 
-### 后端发送（issue #6-1 / #6-10）
+### 后端发送
 
 - `send_serial_data` async + `spawn_blocking`；`build_tx_bytes`（`serial/codec.rs`）是「实际写入字节」唯一事实来源。
 - 两段式发送 + 读写句柄分离 + `write_all_with_deadline`（2s 总期限，去无界 flush）——详见 [`serial.md`](serial.md)「读写句柄分离与发送期限」。
@@ -79,29 +79,30 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **HEX 不追加文本行尾**：主窗发送区、命令编辑器和弹窗文本/列表编辑器在 HEX 下禁用行尾选择，保留原值供切回文本使用；HEX 摘要不暗示会发出该后缀。
 - **行结束符保存的是域值，不是控制字符**：`LineEnding` 使用 `'\\r\\n'` / `'\\r'` / `'\\n'` / `'None'`，其中 CRLF 域值是反斜杠、r、反斜杠、n 共 4 个字符；实际 CR/LF 两字节仅由 `getLineEndingBytes` 与后端 codec 转换。JSX 字符串属性不会处理 JavaScript 反斜杠转义，统一从 `LINE_ENDING_VALUES` 遍历并用 `value={v}`、`lineEndingLabelKey(v, ns)`，不要另写双重转义或把实际换行控制字符作为 service 参数。
 
-## 循环发送（每端口独立引擎，issue #12）
+## 循环发送（每端口独立引擎）
 
-- **共享调度引擎**：`components/OperationPanel/hooks/useSequentialSend.ts` 是「顺序 / 循环发送」的唯一调度实现（`createSendLoop` 纯调度 + `useSequentialSend` React 绑定）。计时器链、重入防护（任一次迭代最多在飞一个，防止可见性补发与到期定时器双触发）、可见性补发（`catchUpIfOverdue`，阈值 `SEND_LOOP_OVERDUE_MS`）、卸载自停、可选的变更自停都在引擎里；调用方只提供「一步做什么」的 `step`。**旧的循环发送状态机分叉已消除**：主窗命令集循环与弹窗文本逐行发送（`Popout/QuickSendText.tsx`）共用它——弹窗旧循环器 `Popout/usePanelCyclicSend.ts` 已删除。
-- **推进语义唯一实现**：`utils/flowSchedule.ts` 的 `advanceFlow`（纯函数）负责轮次边界、轮内延时、轮间 `loopDelay`、`repeatCount` 判定。旧行为是硬承诺：轮内非末条用该命令 `delay`、**末条不用** `delay` 而由 `loopDelay` 接续、`repeatCount` 按**轮**累加；`flowSchedule.test.ts` 逐条守卫这些语义（历史上曾用 `nextIdx >= length` 判轮末，导致第二轮起每条都误用 `loopDelay` 且提前停发）。
+- **共享调度引擎**：`components/OperationPanel/hooks/useSequentialSend.ts` 是「顺序 / 循环发送」的唯一调度实现（`createSendLoop` 纯调度 + `useSequentialSend` React 绑定）。计时器链、重入防护（任一次迭代最多在飞一个，防止可见性补发与到期定时器双触发）、可见性补发（`catchUpIfOverdue`，阈值 `SEND_LOOP_OVERDUE_MS`）、卸载自停、可选的变更自停都在引擎里；调用方只提供「一步做什么」的 `step`。主窗命令集循环与弹窗文本逐行发送（`Popout/QuickSendText.tsx`）共用该引擎。
+- **推进语义唯一实现**：`utils/flowSchedule.ts` 的 `advanceFlow`（纯函数）负责轮次边界、轮内延时、轮间 `loopDelay`、`repeatCount` 判定。旧行为是硬承诺：轮内非末条用该命令 `delay`、**末条不用** `delay` 而由 `loopDelay` 接续、`repeatCount` 按**轮**累加；`flowSchedule.test.ts` 守卫这些语义。
 - **每端口一个 runtime**：`useCyclicSend`（`components/OperationPanel/hooks/useCyclicSend.ts`）为每个端口创建一条 `SendLoop`（`startLoop(portId)`），目标端口**永远绑定启动它的端口**——不跟随活动标签、不受窗口/标签聚焦切换影响（COM3 启动循环后切到 COM4，COM3 继续发）。
 - **运行开关**：`useOperationStore.cyclicLoops: Record<portId, boolean>` + `setCyclicLoop(portId, running)`（替代旧全局单例 `isLoopSending` 布尔）；SendSection 的按钮按**当前聚焦端口**查状态——切回 COM3 时按钮自然变回「停止」。reconcile effect 幂等：开启的端口没有 runtime → 启动；runtime 存在但开关被关/移除 → 停止。
 - **启动快照**：启动时从 `useRuleStore` 读取已保存命令集（不读 `entityEditor` 会话草稿），用 `utils/commandOrder.ts` 的 `orderedCommands` 固定顺序、内容和循环参数（`isLoop` / `loopDelay` / `repeatCount` 一并快照）；之后编辑、保存、切换或删除命令集均不影响当前运行，重启循环才采用新版本。启动时命令集缺失/为空则清运行开关；自然发满 `repeatCount` 轮或单轮非循环结束发完后同样清该端口运行开关。快捷发送条、命令设置页、命令面板与循环一律经 `orderedCommands` 排序，不再手写 `order` 比较。
-- **静默发送**：逐条 `sendData(..., silent=true)`（循环 / 触发自动回复不打扰用户）；失败由引擎的 `onStepError` 聚合为一条 toast（`notified` 去重）并返回 `RETRY_MS`（500ms）重试，不推进索引、不终止循环。旧循环遇有载荷命令的零字节拒绝也保留当前步骤重试；合法空载荷按 `computeByteCount` 区分，仍作为 no-op 正常推进，不能永久卡在空命令。
-- **计时**：轮内用每命令 `delay`，仅轮间用集合级 `loopDelay`。轮次边界以「本条是否本轮最后一条」（`currentCmdIdx === commands.length - 1`）判定；曾用 `nextIdx >= length`，导致第二轮起每条都误用 `loopDelay`、`completedRounds` 按「条」而非「轮」累加而提前停发。重复轮数 `repeatCount` 是命令集自有字段（config.json），`>0` 时精确发满 N 轮停止，否则跟随集合的 `isLoop`。
+- **静默发送**：逐条 `sendData(..., silent=true)`（循环 / 触发自动回复不打扰用户）；失败由引擎的 `onStepError` 聚合为一条 toast（
+otified` 去重）并返回 `RETRY_MS`（500ms）重试，不推进索引、不终止循环。旧循环遇有载荷命令的零字节拒绝也保留当前步骤重试；合法空载荷按 `computeByteCount` 区分，仍作为 no-op 正常推进，不能永久卡在空命令。
+- **计时**：轮内用每命令 `delay`，仅轮间用集合级 `loopDelay`。轮次边界以「本条是否本轮最后一条」（`currentCmdIdx === commands.length - 1`）判定。重复轮数 `repeatCount` 是命令集自有字段（config.json），`>0` 时精确发满 N 轮停止，否则跟随集合的 `isLoop`。
 - **端口未连接**：跳过本次 tick 并不推进索引，`TARGET_WAIT_MS`（500ms）后重试（切聚焦 / 短暂断开皆不中断）。
 - **可见性补发**：`useCyclicSend` 注册 `visibilitychange`，恢复可见时对每个 loop 调 `catchUpIfOverdue()`。
 - 弹窗文本模式的多种运行方式（当前行 / 当前行并下移 / 顺序 / 从光标 / 循环）由 `QuickSendText` 用 `useSequentialSend` 驱动，发送意图经 `popout:send-command` 回到主窗 `sendToPort`。
 
 ## 增强流程步骤（命令集内的改参动作，兼容旧命令）
 
-命令集仍是**一个** `SendCommandSet.commands` 列表；每条命令由 `kind` 决定动作，`kind` 缺省即旧的发送命令。模型与校验在 `utils/commandSteps.ts`，推进语义在 `utils/flowSchedule.ts`，运行态在 `utils/flowRuntime.ts`，执行在 `useCyclicSend.ts`。
+命令集仍是**一个** `SendCommandSet.commands` 列表；每条命令由 `kind` 决定动作，缺省 `kind` 按 `send` 处理。模型与校验在 `utils/commandSteps.ts`，推进语义在 `utils/flowSchedule.ts`，运行态在 `utils/flowRuntime.ts`，执行在 `useCyclicSend.ts`。
 
 | kind | 字段 | 语义 |
 |---|---|---|
 | 缺省 / `send` | `type` / `content` / `appendLineEnding` / `delay` | 旧发送命令，行为逐字节不变 |
 | `setParams` | `baudRate`（1–4_000_000） | 只改本机波特率，其余参数沿用该端口已确认值 |
 
-- **只有一条时间规则**：等待**不是**一种步骤类型，而是每一步自带的 `delay`（界面写作「之后等待」），对发送与改参都生效；轮与轮之间用集合级 `loopDelay`，所以**轮末那一步的 `delay` 不参与**——编辑器就地说明这件事，不藏在 tooltip 里。曾短暂实现过独立的 `wait` 步骤（`durationMs`）并已撤销：同一件事有两个表达，时序既读不出来也迁移不干净（旧实现里轮末 `wait` 还会与 `loopDelay` 叠加成双倍间隔）。
+- **只有一条时间规则**：等待**不是**一种步骤类型，而是每一步自带的 `delay`（界面写作「之后等待」），对发送与改参都生效；轮与轮之间用集合级 `loopDelay`，所以**轮末那一步的 `delay` 不参与**——编辑器就地说明这件事，不藏在 tooltip 里。独立 `wait` 步骤不属于当前模型。
 - **旧 `wait` 行的迁移**：加载期在 Rust `normalize_legacy_serial_enums` 折叠——非末条折叠进前一步的 `delay`，末条折叠进 `loopDelay`，首条（无前一步可挂）丢弃并记 `log::info!`；其它 `kind`（含未知值）原样保留。
 - **兼容边界**：新增字段全部可选、序列化时不输出，旧 `config.json` 形状不变（Rust `SendCommandEntry` 为 `Option<...>` + `skip_serializing_if`，未知 `kind` 原样保留为 `String`，不会因未来步骤类型导致整份配置反序列化失败）。旧命令集缺 `kind` 只在**运行时**按 `send` 解释，不改写已存档案；`schemaVersion: 2` 仅由编辑器在加入非发送步骤时写入。未知 `kind` **不可执行**（`getCommandStepKind` 返回 `'unknown'`，启动前校验拒绝并保留草稿），绝不回退成文本发送。
 - **端口独占**：`isEnhancedCommandSet` 为真的命令集运行时，在 `flowRuntime` 发布 `exclusive` 状态；`sendToPort` 增加 `origin` 参数，非 `flow` 来源在独占期间被统一入口拒绝（手动发送 / 快捷发送 / 弹窗 / 触发自动回复 / 插件都走这一处）；文件发送（`useFileSend`）与 TTY 键盘（`TtyView`）绕过 `sendToPort`，各自补同样的守卫。旧命令集**不发布**任何独占状态，行为与之前完全一致。
@@ -112,12 +113,12 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 
 ## 快捷发送 / 命令面板
 
-- 快捷发送条：pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下，issue #6-9）、宽度自适应（`useQuickStripLayout` + ResizeObserver + 隐藏测量行，`utils/sendStrip.ts` 的 `computeFitCount` 算可见切片与溢出条数）、首槽固定「打开命令面板」按钮（`.op-quick-panel-btn`，issue #7-2）。
+- 快捷发送条：pill 两行显示（`.op-quick-cmd-name-row`：HEX 徽标+名称在上、`.op-quick-cmd-content` 内容在下）、宽度自适应（`useQuickStripLayout` + ResizeObserver + 隐藏测量行，`utils/sendStrip.ts` 的 `computeFitCount` 算可见切片与溢出条数）、首槽固定「打开命令面板」按钮（`.op-quick-panel-btn`）。
 - `quickSendInlineCount`（`useAppStore.config`）**只决定内联条是否挂载：仅 0 = 隐藏**，任何 `>0` 都显示；条内实际显示几条由实测宽度决定，不由该值直接切片。
 - **单步执行**：胶囊和面板列表同时支持 `send` / `setParams`，未知步骤不可执行；`executeQuickCommand` 只执行点击项，不启动命令集循环、不等待其 `delay`。发送仍经 `sendToPort`；改参复用循环的 `applyCommandParams`，只改本机波特率，I/O 在飞期间在 `flowRuntime` 发布短期独占，成功/失败后释放，状态保留可查看。`set_serial_params` 的可选 `expected_generation` 在后端持锁检查，旧连接排队的动作不得应用到重连后的同名端口；前端迟到响应同样不回写新连接或新聚焦端口。操作面板采用已确认的回写，不重复触发防抖改参。
-- QuickSendPanel 双模式：列表（整行可点执行、行内「修改」就地编辑）/ 文本逐行（`QuickSendText` + `useSequentialSend` 驱动，含「执行当前行并移至下一行」，issue #6-3）。
+- QuickSendPanel 双模式：列表（整行可点执行、行内「修改」就地编辑）/ 文本逐行（`QuickSendText` + `useSequentialSend` 驱动，含「执行当前行并移至下一行」）。
 - **面板编辑与主窗定案**：`popout:command-editor-request` 以 version 校验 replace/save/discard，主窗 `entityEditor` 管理权威草稿并返回 requestId 匹配的 ACK；面板同一时刻只有一个 replace 在飞，期间输入排队，15s 无 ACK 按失败处理并保留文本（协议细节见[工作区](workspace.md)）。`command-editor:snapshot` 与已提交 `command-sets:changed` 分离；首个快照到达前列表不可编辑/发送，只有保存 ACK 且主窗确认落盘后才显示已保存，失败/冲突保留输入与错误。主窗退出另经 client-state/client-leave/client-result ACK 处理尚未同步的面板内容。列表和文本切换保留列表编辑器；列表模式下编辑中的行或脏命令集禁发，搜索时禁拖排序。
-- 目标串口下拉只显示串口号（去 `· REAL/VIRTUAL` 后缀，issue #7-4）；底栏「发送到」提示灯跟随真实连接状态——`usePopoutSync` 订阅 `serial:status` 广播 + `port-statuses:sync` 全量回放（绿=连接呼吸/灰=断开，issue #7-5）。
+- 目标串口下拉只显示串口号（去 `· REAL/VIRTUAL` 后缀）；底栏「发送到」提示灯跟随真实连接状态——`usePopoutSync` 订阅 `serial:status` 广播 + `port-statuses:sync` 全量回放（绿=连接呼吸/灰=断开）。
 - 弹出窗（popout）经 `popout:send-command` 回主窗：文本模式保留原始发送载荷并走 `sendToPort`；列表模式发 `kind: 'savedCommand'`、集合 id、点击时步骤快照与显式端口，主窗核对已提交命令及编辑器非脏/非保存中后走 `executeQuickCommand`；未保存、过期或删除的步骤不会执行，也不会回退为文本发送（见 workspace.md）。
 
 ## 文件发送
@@ -128,12 +129,13 @@ sendToPort(portId, data, isHex, lineEnding, silent?)
 - **前端 `useFileSend`（`components/OperationPanel/hooks/useFileSend.ts`）收口三个不变量**：
   1. **守卫在弹文件框之前**：`startFileSend` 先查 `isSendablePort`，不可发送直接 toast `sendSection.portClosedWarning` 返回——不该让用户先挑完文件再被告知端口没连（旧实现绕过守卫，未连接端口也能选文件、只在后端报错）。选完文件后再校验一次（对话框期间端口可能断开或目标已切换），真正启动前把 `expectedGeneration` 绑定当前连接代次，进度只接受匹配 `transferId` 与 `portId` 的事件。
   2. **按增量计入 TX 流量**：进度事件是 camelCase wire（`{portId, transferId, sentBytes, totalBytes, done}`）；`sentBytes` 是本次运行累计值，与 `ActiveTransfer.countedBytes` 比出差量，正增量才 `trafficStats.addTx(portId, delta, lease)`——`lease` 来自启动时的 `trafficStats.capture(portId)`，端口 `release` 后旧租约失效，迟到的进度不会污染该端口新的统计周期；`done` 时把 `countedBytes` 归零，下一次运行重新计数（旧实现文件发几 MB 而 TX 计数器纹丝不动）。
-  3. **成功 toast 只在真发完时弹**：`done && sentBytes >= totalBytes > 0` 才 `notifySuccess('sendSection.file.sent')`；取消（`sentBytes < totalBytes`）与空文件（`totalBytes == 0`）静默清进度条，否则取消时误报「已发送」、空文件残留 0/0 进度条。
+  3. **成功 toast 只在真发完时弹**：`done && sentBytes >= totalBytes > 0` 才
+otifySuccess('sendSection.file.sent')`；取消（`sentBytes < totalBytes`）与空文件（`totalBytes == 0`）静默清进度条，否则取消时误报「已发送」、空文件残留 0/0 进度条。
 
-## 触发引擎（条件触发，issue #3-1）
+## 触发引擎（条件触发）
 
 - `src/utils/triggerEngine.ts` 的 `evaluateTriggers`（纯函数）：pattern match（contains / exact / regex / hex）→ alert / auto-respond；`matchType` 是匹配判定权威，`isRegex` 仅为旧配置兼容镜像；per-port 经 `portId`（规则未声明、为空串或为 Rust `Option<String>` 的 `null` 时对所有端口生效）。空白条件不派发动作。regex 仅对前 5000 字符 test，模式经共享 `safeRegex.tryCreateSafeRegex` 验证语法、200 字符上限并保守拒绝嵌套量词及交替分支无界量词，保存校验复用同一策略；运行时安全正则使用有界 256 项缓存，避免高速 RX 反复编译；主线程执行仍无期限或隔离，长行语义仍受 5000 字符策略限制；hex 匹配用 `hexFormat.bytesToSpacedHex` + `normalizeHexPattern`，模式先经 `hexUtils.parseHexBytes` 严格解析再格式化，紧凑与空白分隔写法等价；非法、半字节或归一化后为空的模式不派发动作。
-- **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，而非旧的「按 `serial:data` 读事件块」匹配——读事件边界任意，跨块模式会失效、exact 因块内带 `\r\n` 几乎不命中。RX 数据按连接代次校验；旧/断线/错误会话的迟到字节不进入触发器，后端 `serial:data` 新载荷带 `generation`（旧后端可省略）。
+- **接线在 `useSerialReceive`**：触发器在 RxPipeline 的 `setOnLineAssembled` 钩子（**完整行边界**）上评估，独立于 `serial:data` 事件边界，因此跨事件数据仍按完整行匹配。RX 数据按连接代次校验；断线或错误会话的迟到字节不进入触发器，后端 `serial:data` 载荷带 `generation`。
 - **alert = sticky toast**（`durationMs:0` 不自动关闭，展示规则的 `actionContent`，标题带端口/规则上下文）；同规则同来源端口 1s 内不重复弹（模块级 Map：规则 id + portId）。`pruneTriggerAlertThrottle` 在接收 hook 挂载及已提交提醒规则集合变化时释放已删除规则的节流元数据，不在每个 RX 事件上重建集合。**auto-respond** 通过每端口队列串行调用 `sendToPort(..., silent=true)`，匹配设备/SIM 回显的短期相同载荷被抑制，避免 `PING→PING` 无限递归；失败补 debug 日志，积压超过 64 条丢弃。触发引擎异常限流到每 2s 至多一条日志。
 - 规则统一**显式保存后生效**：提醒、自动回复与其他实体页共用 `useEntityPage({kind})` 会话草稿。取消 300ms 自动落盘及卸载 flush；新建、删除、启用和拖动排序也只改草稿。保存后按数组顺序评估所有匹配规则，不改为首条命中即停止。
 - 已知边界：触发匹配按**行**粒度（HEX 匹配按该行的原始字节 `rawData`）；行首 BOM 已在解码时剥离，不参与匹配。

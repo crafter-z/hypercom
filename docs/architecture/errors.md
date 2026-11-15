@@ -1,68 +1,40 @@
 # 错误处理（CommandError）
 
-命令层的所有 Tauri 命令（`#[tauri::command]`）返回 `Result<T, CommandError>`，不得返回 `String`。`CommandError` 是 thiserror 枚举，定义于 `src-tauri/src/commands/mod.rs`，手动实现 `serde::Serialize`——前端经 `invoke` 收到的是格式化后的错误字符串。
+所有 `#[tauri::command]` 返回 `Result<T, CommandError>`，命令不得使用 `Result<T, String>`。`CommandError` 定义于 `src-tauri/src/commands/mod.rs`，实现 `thiserror::Error` 和字符串形式的 `serde::Serialize`；前端 `invoke` 收到格式化错误字符串。命令之外的串口、配置、日志和系统模块保留各自错误类型，由命令层映射到领域变体。
 
-命令层之外的模块各用自己的错误类型：`system.rs` 电源适配层返回 `Result<(), String>`，`serial/` / `logger/` / `config::ConfigManager` 返回 `anyhow::Result`（一律经 `e.to_string()` 落进对应变体）——这些都由命令层 `map_err` 收敛为 `CommandError`。
-
-## 变体定义
+## 变体
 
 ```rust
-#[derive(Debug, thiserror::Error)]
 pub enum CommandError {
-    #[error("Serial error: {0}")]
     Serial(String),
-    #[error("Config error: {0}")]
     Config(String),
-    #[error("Log error: {0}")]
     Log(String),
-    #[error("System error: {0}")]
     System(String),
-    #[error("Lock error: {0}")]
     Lock(String),
-    #[error("IO error: {0}")]
     Io(String),
-    #[error("{0}")]
     Other(String),
-}
-
-impl serde::Serialize for CommandError {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.to_string().as_ref())
-    }
 }
 ```
 
-> 旧的 `Storage` 变体已删除：`commands/storage.rs` 各实体的持久化失败统一走 `Config`（存储即 config.json 实体 CRUD），加锁失败走 `Lock`。
+- `Serial`：串口枚举、开关、发送、重连、流控、外部工具、SIM 与 GIT:BASH 模拟终端命令；底层实现位于 `src-tauri/src/serial/`。
+- `Config`：`set_config`、会话快照、实体 CRUD 和插件配置持久化失败；实体存储位于 `src-tauri/src/commands/storage.rs`，配置模型位于 `src-tauri/src/config/mod.rs`。
+- `Log`：日志目录、writer、迁移、导出和打开路径操作；实现位于 `src-tauri/src/commands/log.rs`。
+- `System`：电源抑制、编辑器关闭审批和弹窗创建/销毁/置顶；实现位于 `src-tauri/src/commands/system_cmds.rs` 与 `src-tauri/src/commands/popout.rs`。
+- `Lock`：命令访问 `AppState` 中同步锁失败。`AppState.log_manager` 是 `Arc<LogManager>`，没有外层 mutex，不返回该变体。
+- `Io`：文件对话框、文件/日志读写、外部工具进程、插件安装资产等 I/O 失败。
+- `Other`：没有明确领域的参数、生命周期、任务 join 或更新网络失败；调用方应优先复用匹配领域变体。
 
-## 映射表
+`commands/file.rs` 的 `read_image_data_url` 是软失败接口：空路径、缺失、扩展名不支持、超限或读取失败返回空字符串并记录 warn，前端将空字符串解释为无背景图，不转成命令错误。
 
-| 变体 | 错误格式 | 触发条件（命令 / 文件） |
-|------|---------|------------------------|
-| `Serial` | `Serial error: {details}` | `commands/serial.rs`：`list_available_ports` / `open_serial_port` / `close_serial_port` / `send_serial_data` / `send_file` / `set_serial_params` / `attempt_reconnect` / `set_flow_control` / `run_port_tool`；`commands/simulation.rs`：`disable_simulation`（关模拟端口）；`commands/tty_sim.rs`：`disable_gitbash_sim` / `resize_gitbash_sim`；`commands/system_cmds.rs` 的 `dev_only(capability)`（由 `simulation.rs` / `tty_sim.rs` 的命令入口调用，release 构建下拒绝模拟串口 / Git Bash 模拟终端等调试能力）。包装 `serial/` 各模块错误 |
-| `Config` | `Config error: {details}` | `commands/config.rs`：`set_config` / `update_session_snapshot`；`commands/storage.rs`：各实体 `save_*` / `delete_*`（经共享助手 `save_entity` / `delete_entity` → `mutate_config` → `mutate`）落盘失败；`commands/plugin.rs`：插件状态实体（启用/权限/网页信任/安装代）写 `AppConfig.entities.plugin_configs` 失败、安装前清除授权或状态备份恢复失败。包装 `config::ConfigManager` 持久化错误 |
-| `Log` | `Log error: {details}` | `commands/log.rs`：`pick_and_save_log` / `get_log_files` / `start_logging` / `stop_logging` / `open_path`（路径越出日志目录、目标不存在）/ `open_log_directory`（内部即 `open_path`）/ `migrate_log_directory`（旧目录不存在或不是当前活动日志根、迁移后 `set_directory` 失败）。包装 `logger` 错误 |
-| `System` | `System error: {details}` | `commands/system_cmds.rs`：`prevent_screen_off` / `prevent_sleep`（包装 `system.rs` 的 Win32 `SetThreadExecutionState` / 子进程后端失败）；`complete_editor_close`（非主窗审批、隐藏到托盘失败）；`commands/popout.rs`：`open_popout` / `close_popout` / `set_popout_always_on_top` 的建窗、销毁、置顶失败 |
-| `Lock` | `Lock error: {details}` | 任何对 `AppState` 内 `Mutex` 字段加锁失败的 Tauri 命令（`serial` / `simulation` / `tty_sim` / `config` / `storage` / `log` / `file` / `system_cmds` / `popout` / `plugin` / `plugin_http` 的持锁路径）。注意 `log_manager` 是 `Arc<LogManager>`、无外层 `Mutex`，其写路径不发 `Lock` 错误 |
-| `Io` | `IO error: {details}` | `commands/file.rs`：`pick_text_file_and_read` / `pick_text_file_and_write` / `read_text_file`（日志根限制）的对话框、canonicalize 与读写；`commands/log.rs`：canonicalize 父目录 / 写导出文件 / 建·读迁移目录 / spawn `explorer`·`open`·`xdg-open`（`open_log_directory` 走同一路径）；`commands/serial.rs`：`send_file` 的 stat 与读文件、`run_port_tool` 的 spawn / 取管道 / 等待 / 杀进程；`commands/plugin.rs`：插件安装/解压/升级备份/资产读写的文件系统失败 |
-| `Other` | `{details}` | 无领域可归属的失败：`serial.rs` / `system_cmds.rs` 的 `spawn_blocking` 任务 panic / join 失败；`file.rs` / `log.rs` 的「路径无父目录」、`file.rs` 的 64MB 文本上限与插件文件选择器的主窗/安装代/授权校验；`popout.rs` 的未知 kind、找不到弹窗窗口；`tty_sim.rs` 的找不到 git bash、join 失败；`plugin.rs` 的 manifest 校验/安装事务/状态语义错误（未安装、未启用、需先单独确认网页信任等）；`plugin_http.rs` 的请求生命周期错误（已取消、请求不存在、URL 白名单拒绝等）；`update.rs` 的 endpoint 解析、GitHub API 请求·解析、updater 构建、更新检查与安装失败 |
+## 前端消费
 
-> 例外：`commands/file.rs::read_image_data_url`（自定义背景图）虽是 `Result<String, CommandError>`，但契约上**软失败**——路径为空 / 文件不存在 / 扩展名不支持 / 超过大小上限 / 读取失败一律返回空字符串并记 warn，前端按「空串 = 无背景图」判定。这些分支不得改成 `Err`（有单测钉住）。
+服务层只转发 `invoke`，不拆解错误前缀。`src/stores/useToastStore.ts` 的 `extractErrorMessage` 从字符串、`Error` 或 `{message}` 提取文本；
+otifyError` 在文本为空时使用 `toast.fallback.operationFailed`，再以错误级别推入通知。
 
-## i18n
+`src/i18n.ts` 不按 `CommandError` 变体维护翻译键。`toast.severity.*` 只表示通知级别；确实需要用户化失败文案的调用点显式传入 fallback key，例如更新安装使用 `update.installFailed`。
 
-前端**没有**按变体拆分的 `toast.error.*` 翻译键——后端消息（英文）经 `invoke` 抛出后原样展示。i18n 只提供两类相关键：
+串口重连取消属于 `Serial` 错误域：`src-tauri/src/commands/serial.rs` 的 `attempt_reconnect` 在用户关闭、显式打开或新重连取代时返回取消结果，调用方按当前意图结束旧尝试，不补偿关闭新连接。
 
-- `toast.severity.error` / `toast.severity.warning` / `toast.severity.success` / `toast.severity.info`：Toast 与通知中心的**级别标签**（`NotificationCenter.tsx`）。
-- `toast.fallback.operationFailed`：`notifyError` 在提取到的消息为空/纯空白时的兜底文案。
+规则实体保存失败时，`src-tauri/src/config/mod.rs` 的配置写入恢复完整旧 `AppConfig` 与 revision；`get_config` 和后续无关保存不会暴露失败修改。新命令在对应域文件实现、映射匹配领域错误，并登记到 `src-tauri/src/lib.rs` 的 `generate_handler!`。
 
-因此新增变体**不**需要在 `src/i18n.ts` 登记；只有确实要面向用户翻译的失败文案才走 `notifyError(e, '<key>')` 的显式 fallback（现有唯一用例：`UpdateDialog` 的 `update.installFailed`）。
-
-## 消费路径
-
-- `CommandError` 手动序列化为普通字符串，前端收到形如 `"Serial error: Port COM3 is not available"` 的消息。
-- 旧 `attempt_reconnect` 被用户关闭、显式打开或新重连取消时，返回 `Serial` 域取消消息，不再在关闭之后重开端口；调用方应按用户当前意图退出重试，不做会误关较新连接的补偿 close。
-- 规则实体 CRUD 落盘失败返回 `Config` 域错误，并回退整份内存配置与 revision；`get_config` 不得在未推进 revision 时暴露失败修改，后续无关保存也不得夹带该修改。
-- `src/services/*.ts` 各域 service 只转发 `invoke`，不做错误包装、也不做前缀解析——**不存在统一的 `CommandError` 解析约定**。调用方 `catch` 后交 `src/stores/useToastStore.ts`：
-  - `extractErrorMessage(e)`：字符串原样返回；`Error` 取 `message`；对象取 `message` 字段；其余 `String(e)`。
-  - `notifyError(e, fallbackKey = 'toast.fallback.operationFailed')`：提取并 `trim`，为空则用翻译后的 fallback，再以 `severity: 'error'` 推入 toast（`notifySuccess` / `notifyInfo` 同理，但收的是 i18n key）。
-- **新增后端命令应复用匹配其领域的既有变体，而非引入新的 `Other` 错误。**
+(End of file)

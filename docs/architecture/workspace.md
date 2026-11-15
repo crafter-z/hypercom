@@ -2,7 +2,7 @@
 
 分屏（paneTree）、标签页、弹出体系（popout）、操作面板布局、侧边栏、通知中心、状态栏、自定义文本右键菜单。
 
-## Pane 树（2026-07 重构）
+## Pane 树
 
 `panes: SplitPane[]` 平铺数组已替换为 `paneTree: PaneNode`（单根递归树）：
 
@@ -50,7 +50,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 
 关闭标签先退出组，回放最后一个标签关闭时释放该会话文档/时钟；实时连接和后端日志不受影响。TTY/弹出内容/未适配插件挂起原有成员；切 raw/plugin 只绑定当前有效内容，隐藏 raw 不能暗中跟随。恢复保存组/回放描述，默认浏览/暂停；重新授权和校验历史文件后才载入。完整契约见[时间联动与只读回放](timeline.md)。
 
-## 弹出体系（popout，issue #10）
+## 弹出体系（popout）
 
 **核心架构原则**：弹出窗与主窗不共享可变前端态。config.json 是持久化来源，主窗 `useRuleStore` 是已提交运行态，`entityEditor` 是权威会话草稿。跨窗使用带版本的编辑意图与 requestId ACK；草稿快照和运行配置广播严格分离。
 
@@ -109,11 +109,11 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - 串口参数同步签名包含DTR/RTS；仅切换控制线也触发300ms防抖后端更新，不与当前值自比较而误跳过。
 - 布局防线：`.op-section > * { flex-shrink: 0 }`（面板变矮时发送键不被压塌叠压）；`.op-section-params` `max-width: 300px` 封顶（宽窗口参数栏不挤占发送区）。
 - Sidebar：`Sidebar.tsx` + `AliasDialog.tsx`；端口右键菜单分组控制（见 serial.md）。侧边栏宽度由 `App.tsx` 渲染的 `shared/SidebarResizeHandle.tsx` 调整（共享 `useDragResize`，clamp [200,400]，写 `useSystemStore.ui.sidebarWidth`）。
-- 设置弹窗 ConfigModal 框选文字松手界外不关闭（issue #6-8）：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭。
+- 设置弹窗 ConfigModal 框选文字松手界外不关闭：overlay pointerdown 记录起点是否在弹窗内，click 时起点在弹窗内则忽略关闭。
 - 设置的取消、X、遮罩与 Escape 都走同一离开审批：有未保存草稿时先问保存并关闭 / 放弃并关闭 / 继续编辑，保存失败或保存期间的新编辑不放行；只有选择放弃才丢弃普通设置草稿。已独立持久化的规则基线、分组/端口元数据和插件状态不受取消影响（细节见[配置持久化](config.md)）。
 - **UI 运行态与系统态都在 `useSystemStore`**（`src/stores/useSystemStore.ts`），`useAppStore` **不再持有** `systemStatus` / `trafficStats` / `simulationMode` / `ui.*`：`ui.*`（`sidebarWidth` / `sidebarCollapsed` / `operationPanelHeight` / `isConfigOpen` / `configActiveTab` / `configReady` 等）写入口是 `setUIState` / `toggleConfigModal` / `setConfigActiveTab`，流量回收是 `clearTrafficStats`。这些字段写点密集（5s 系统轮询、每端口 1s 流量 flush、拖拽 resize），与端口/标签数据分开后各自订阅面互不干扰。
 
-## 主题与自定义背景图（issue #13）
+## 主题与自定义背景图
 
 - 主题、字体与背景图由 `shared/ThemeProvider.tsx` 统一映射到 `<html>`：`data-theme`（`dark` / `light` / `system`，system 走 `matchMedia`）、`--font-*` 变量、`--app-bg-image/-opacity/-blur` 变量与 `data-app-bg` 门控。不透明度/模糊度只改 CSS 变量，与异步读图分离——连续拖动滑块不会反复读盘。
 - 配置四字段 `backgroundImage` / `backgroundImageEnabled` / `backgroundImageOpacity`（0–100，默认 50）/ `backgroundImageBlur`（0–64px，默认 0）存 config.json；其中不透明度与模糊度由 `CONFIG_BOUNDS` 收敛，路径与启用开关是普通字段（serde 缺省回退）。
@@ -124,14 +124,14 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 ## 通知中心 / toast
 
 - `useToastStore` + `StatusBar/NotificationCenter.tsx`：宿主 `push` 的 `durationMs === 0` 为粘滞（Toast.tsx 跳过自动关闭计时）；可见栈最多 5 条，已接纳通知超出后进入 `stashed`，面板按 `createdAt` 倒序合并展示。`clearAll()` 清空两队列；铃铛 badge 上限 99+，外点 / Escape 关闭由共享 `useOutsideDismiss` 提供。
-- `ToastItem.portId?`（issue #7-1）：串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行渲染 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳（`createdAt` push 时打点）。
+- `ToastItem.portId?`：串口来源消息（触发告警/断线/发送目标关闭/重连失败）携带串口号，通知行渲染 `.notify-row-port` chip + `.notify-row-time` HH:MM:SS 时间戳（`createdAt` push 时打点）。
 - 插件通知必须经 `pushPlugin(pluginId, input)`，不能借宿主 `push` 绕过配额；`ToastItem.pluginId` 由宿主赋值，不接受插件伪造。插件速率、文本和积压上限见[开发指南](../plugin-development.md#限制与错误处理)；超额静默丢弃，不逐条生成错误通知。宿主/串口粘滞记录不因插件配额被移除。
 - 面板几何以 `styles/notification-center.css` 的 `.notify-panel` 为准：宽 360px、最大高度 400px，不是固定高度。
 
 ## 状态栏
 
 - `StatusBar.tsx`：端口连接计数、CPU、**应用进程树级内存**（`get_system_status`：本进程+全部后代进程含 WebView2/Chromium 子进程 RSS 之和——`collect_app_pids` 纯函数 + `refresh_processes_specifics(All, true, ProcessRefreshKind::nothing().with_memory().with_cpu())`；CPU 仍系统级；`memory_used_mb`/`load_status` 纯函数可注入进程表单测）。
-- 内存胶囊显示「JS堆 XMB · 进程 YMB」（`readJsHeapMb()` + `systemStatus.memoryUsedMb`），**无总预算分母**（旧的「双层内存预算」已删）；CPU 负载状态只看 CPU：`load_status` 在 `cpu > 90` 时才报 `high_load`，与内存无关。
+- 内存胶囊显示「JS堆 XMB · 进程 YMB」（`readJsHeapMb()` + `systemStatus.memoryUsedMb`），**无总预算分母**；CPU 负载状态只看 CPU：`load_status` 在 `cpu > 90` 时才报 `high_load`，与内存无关。
 - `systemStatus` / `trafficStats` 读自 `useSystemStore`（非 `useAppStore`）；`useSystemStatus` 5s 轮询；DisconnectBanner（`disconnectTracking.ts` 的 `isPortLost` 读会话级 `lostPortIds`；`filterLostTabIds` 在 `StatusBar/DisconnectBanner.tsx`；`lostPortIds` 只在「本会话 connect → 非用户触发的 disconnect」时打点，故会话恢复标签不会在启动时误报）。
 
 ## 共享交互原语（`src/components/shared/`）
@@ -145,7 +145,7 @@ interface BranchPane { id: string; type: 'branch'; direction: SplitDirection; ch
 - `useDragResize({axis, mode, min, max, invert, onChange, onDragStart})`：press → window mousemove → window mouseup 的拖拽生命周期（每次拖拽只挂一次监听、必拆；options 经 ref 读取，父级重渲染不重绑）。`mode:'absolute'` 报钳位后的指针坐标（左/下停靠面板的宽度/高度），`mode:'delta'` 报自拖拽起点的累计位移（分屏分隔条，几何归父级）。`ResizeHandle` / `OperationPanelResizeHandle` / `SidebarResizeHandle` 共用。
 - `useMenuPlacement(x, y)`：菜单坐标计算 + 贴边溢出时翻转/夹紧，返回 `{ref, pos}`。`ContextMenu` 与 `TextEditContextMenu` 共用。
 
-## 自定义文本右键菜单（issue #7-10）
+## 自定义文本右键菜单
 
 - `TextEditContextMenu` + `useTextEditContextMenu()`：输入框/文本域/可编辑区右键显示应用自定义菜单（撤销/重做/剪切/复制/粘贴/全选，`contextMenu.*` i18n）；document 级拦截——可编辑目标 preventDefault + 弹菜单（右键时快照选区，点击项先 `focus({preventScroll:true})` + 恢复选区再 `document.execCommand`——mousedown 在菜单上会先 blur 目标丢掉选区），非可编辑目标一律 preventDefault。菜单定位与外点关闭走共享 `useMenuPlacement` / `useOutsideDismiss`。
 - **必须在 App 根 + PopoutShell 各挂一次**（弹窗是独立 webview，旧 App.tsx effect 从未覆盖）。组件级 `onContextMenu`（stopPropagation 的终端行/侧边栏/标签页）不受影响。

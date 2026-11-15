@@ -2,7 +2,7 @@
 
 config.json 实体模型与向前兼容口径、会话快照、6 个 Zustand store 划分、规则实体 CRUD、安全快照持久化、分组/端口元数据、前后端数值边界契约。
 
-## config.json（单一事实来源，2026-08 迁移）
+## config.json（单一事实来源）
 
 SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体）的持久化事实来源**。会话快照独立保存在 `session.json`，插件私有 KV 独立保存在 `plugins/<id>/data/state.json`，二者不属于配置导出 bundle。
 
@@ -16,7 +16,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 | TriggerRuleEntry | `trigger_rules` | `triggerRules` | 触发规则 |
 | PortPresetEntry | `port_presets` | `portPresets` | 串口参数预设 |
 | PortToolConfigEntry | `port_tool_configs` | `portToolConfigs` | 外部工具配置 |
-| PortGroupEntry | `port_groups` | `portGroups` | 串口分组（issue #2-3，整体替换） |
+| PortGroupEntry | `port_groups` | `portGroups` | 串口分组（整体替换） |
 | PortMetaEntry | `port_meta` | `portMeta` | 端口元数据：备注名/隐藏/mode；当前枚举端口的编辑覆盖其条目，未插入设备的条目保留 |
 | PluginConfigEntry | `plugin_configs` | `pluginConfigs` | 插件安装身份 `installGeneration` / 启用态 / 授权（插件私有 KV 独立存放） |
 
@@ -58,13 +58,13 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - **Rust**：`pub const CONFIG_BOUNDS: &[(&str, i64, i64)]`（`src-tauri/src/config/mod.rs`）是数值范围的唯一来源。`validate_and_clamp` 经 `clamp_bound(name, value)` 查表收敛，**调用点不写 clamp 字面量**；名字缺失直接 panic（静默不收敛正是「非法值落盘」的来源）。其中 `uiScalePercent` 的边界为 **80–200**。
 - **前端**：镜像表在 `src/utils/bounds.ts`（导出 `CONFIG_BOUNDS` 与 `BoundedNumericSetting` 类型）。
 - **跨语言契约测试**：`src/utils/bounds.test.ts` 用 `?raw` 导入 Rust 源文本、正则逐项解析 `CONFIG_BOUNDS`，断言**两侧键集合相同且每个键的 min/max 相等**——任一侧改了未同步另一侧立即红（曾出现前端允许 8..96 而后端收敛到 8..48，用户输入被静默丢弃；备份间隔 1..8760 vs 1..720 同款）。
-- **枚举字段**走 `restrict(field, &[...], fallback)`：`closeBehavior` / `theme` / `language` / `logFormat` / `timestampMode` / `timestampFormat` / `logEncoding` / `logSubdirMode`（非法值回 `date`）/ `updateCheckMode`（非法值含旧版残留回 `stable`）/ `defaultLineEnding`，以及 `entities.port_meta[*].mode`（非 `trx`/`tty` 收敛回 `trx`，issue #11）。
+- **枚举字段**走 `restrict(field, &[...], fallback)`：`closeBehavior` / `theme` / `language` / `logFormat` / `timestampMode` / `timestampFormat` / `logEncoding` / `logSubdirMode`（非法值回 `date`）/ `updateCheckMode`（非法值含旧版残留回 `stable`）/ `defaultLineEnding`，以及 `entities.port_meta[*].mode`（非 `trx`/`tty` 收敛回 `trx`）。
 - 默认行尾设置复用 `sendUtils.LINE_ENDING_VALUES` 与 `lineEndingLabelKey`，保存的是反斜杠域值（`'\\r\\n'` / `'\\r'` / `'\\n'` / `'None'`），不是实际换行控制字符。
 
 ### 会话快照
 
 - `update_session_snapshot` / `get_session_snapshot` 读写**独立**的 `session.json`（格式 `{"snapshot": "..."}`），与 config.json 分开——高频快照写入**不触发** config 的 `.bak` churn。
-- `ui.configReady`（`useSystemStore`，`loadConfig` 完成后置位；加载失败保留默认值也置位）供主窗/弹出窗按加载后的配置应用 WebView 缩放，也供自动更新等待配置就绪，替代旧的固定超时启发式（config 加载超过阈值会按默认 stable 误判用户设置的 none/preview）。它**不进**会话快照。
+- `ui.configReady`（`useSystemStore`，`loadConfig` 完成后置位；加载失败保留默认值也置位）供主窗/弹出窗按加载后的配置应用 WebView 缩放，也供自动更新等待配置就绪。它**不进**会话快照。
 
 ### 前端 WebView 缩放
 
@@ -100,7 +100,7 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 
 **选择器纪律（Critical）**：调用 store 不带 selector 订阅整 store——每个串口数据事件都会重渲染该组件（输入失焦/卡顿）。hook 内写不订阅用 `getState()`。
 
-## 配置持久化：安全快照（issue #5-2）
+## 配置持久化：安全快照
 
 后端 `set_config` 是**整体替换**。`useAppStore.config` 的五类实体数组是最后确认的持久化基线，`useRuleStore` 是已保存运行态，`utils/entityEditor.ts` 单独拥有会话草稿；普通设置、分组、端口和预设仍各有原来的权威来源。
 
@@ -110,15 +110,17 @@ SQLite 层已整体移除——**config.json 是应用设置（标量 + 实体�
 - `collectPortMeta(ports)` 仅投影本次枚举到的端口；`mergePortMeta(ports, persisted.portMeta)` 用实时端口条目覆盖当前端口、保留后端已有的离线端口备注/隐藏/TTY 模式；当前端口显式清空全部元数据时移除其条目，不会被旧配置复活。`saveConfig` 与 `useAppInit` 自动保存共用该投影口径；自动保存读取最新后端配置并以 revision CAS 重试，且与本窗全量保存串行化，防延迟提交覆盖较新的编辑。元数据保存最多尝试 5 次 CAS，失败由 `useAppInit` 记日志并延迟重试（不弹 toast）。
 - 已接线处：`ConfigModal.handleSave`、`DiagnosticLogDialog` 的诊断开关（改 store 后 `saveConfig()`）、`UpdateDialog` 的「不再提醒」（`saveConfig({ updateCheckMode: 'none' }, true)` 只 CAS 该普通字段，不提交任何草稿）。**新增全量保存点照抄此模式**——调 `saveConfig`，不要自己拼实体数组。
 - **会话草稿模型**（`utils/entityEditor.ts`）：五类实体各一份模块级状态（`baseline` / `draft` / `version` / `committed` / `conflicts` / `orderDirty`），由 `useSyncExternalStore` 暴露快照；草稿跨切页、关闭设置和组件卸载存活，保存成功与显式放弃分别推进/回退它，外部配置变化只会按下面的合并规则进入。`useAppStore.config` 与 `useRuleStore` 的外部变化经 store 订阅合并进草稿：本地未改的记录采用远端版本、远端新增追加、远端删除消失、本地新增保留；同一 id 两边都改则记入 `conflicts`（`editor.conflict`），在放弃该记录前保存继续报冲突、集合保存整体不放行。`version` 随每次草稿变更递增，跨窗命令草稿用它做乐观并发校验。
-- **保存作用域**：单条保存（`saveEntityDraft(kind, id)`）只把该实体合入最新后端快照，不影响同一集合里的其他改动、删除和顺序；集合保存（不带 id）提交整个数组与顺序；设置底部保存（`useConfigPersistence.saveConfig`）一次覆盖五类实体与普通设置（另按各自权威来源附带分组、端口元数据和预设）。三者都经 `configWriteQueue` 串行 + revision CAS，提交前重新读取后端快照；全量保存最多重试 5 轮、单实体保存单次 CAS 失败即报冲突；失败都保留草稿（全量保存另 `notifyError`）。保存成功才推进基线、`useRuleStore` 运行态和 `useAppStore.config`，保存期间产生的新编辑按 `expectedVersion` 保留为未保存（`commitEntityEditorDraft` 重组草稿），不会被这次成功抹掉。同一个 kind 已有在飞保存时再次保存复用同一 promise。
-- **提交前校验与放弃**：集合内 id 必须唯一、`id` 与 `name` 必须非空、正则必须通过 `utils/safeRegex.ts` 的共享策略（可编译、长度 ≤200、保守拒绝嵌套量词）、HEX 字段必须是完整偶数半字节、协议偏移必须是非负整数；触发规则以 `matchType` 为匹配判定权威，`isRegex` 仅作为旧配置兼容镜像并在前端编辑/保存及后端加载/`set_config` 校验时同步，不能用旧镜像字段把文本匹配误判成正则；触发规则端口作用域的 `portId` 缺省、空串或 Rust `Option<String>` 的 `null` 均表示全部端口，前后端边界均归一为空作用域。非法内容只标错误，不写盘也不清草稿。放弃按作用域生效：单条放弃只把该行恢复为基线内容（新插入的行则移除）并清该 id 的冲突；集合放弃整体回到基线。重排在 id 集合不一致（重复、缺失）时静默忽略、不丢行。
+- **保存作用域**：单条保存（`saveEntityDraft(kind, id)`）只把该实体合入最新后端快照，不影响同一集合里的其他改动、删除和顺序；集合保存（不带 id）提交整个数组与顺序；设置底部保存（`useConfigPersistence.saveConfig`）一次覆盖五类实体与普通设置（另按各自权威来源附带分组、端口元数据和预设）。三者都经 `configWriteQueue` 串行 + revision CAS，提交前重新读取后端快照；全量保存最多重试 5 轮、单实体保存单次 CAS 失败即报冲突；失败都保留草稿（全量保存另
+otifyError`）。保存成功才推进基线、`useRuleStore` 运行态和 `useAppStore.config`，保存期间产生的新编辑按 `expectedVersion` 保留为未保存（`commitEntityEditorDraft` 重组草稿），不会被这次成功抹掉。同一个 kind 已有在飞保存时再次保存复用同一 promise。
+- **提交前校验与放弃**：集合内 id 必须唯一、`id` 与
+ame` 必须非空、正则必须通过 `utils/safeRegex.ts` 的共享策略（可编译、长度 ≤200、保守拒绝嵌套量词）、HEX 字段必须是完整偶数半字节、协议偏移必须是非负整数；触发规则以 `matchType` 为匹配判定权威，`isRegex` 仅作为旧配置兼容镜像并在前端编辑/保存及后端加载/`set_config` 校验时同步，不能用旧镜像字段把文本匹配误判成正则；触发规则端口作用域的 `portId` 缺省、空串或 Rust `Option<String>` 的 `null` 均表示全部端口，前后端边界均归一为空作用域。非法内容只标错误，不写盘也不清草稿。放弃按作用域生效：单条放弃只把该行恢复为基线内容（新插入的行则移除）并清该 id 的冲突；集合放弃整体回到基线。重排在 id 集合不一致（重复、缺失）时静默忽略、不丢行。
 - 五类实体页统一使用 `useEntityPage({kind})`：挂载只读现有草稿、不重新加载覆盖；展开/选中项按 kind 记忆，切页或卸载后回来保持。新增默认追加末尾，「在上方插入 / 在下方插入」按相邻 id 插入并展开、聚焦新行名称。`shared/SortableEditorList` 只暴露专用手柄：指针需 6px 位移才激活，键盘 Space 拾起、方向键移动、Space 放下；保存中拖拽、增删和行内按钮禁用。命令集保存时按数组位置回写连续 `order`，快捷发送条、命令设置页、循环启动与命令面板共用 `utils/commandOrder.ts`，不再手写 order 排序。协议/工具管理列表的数组顺序只是管理顺序，不增加执行优先级。
 - **离开审批**（`utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx`）：参与者注册 `isDirty` / `save` / `discard` / `label`（设置普通草稿、五类实体草稿、主窗侧的命令面板未同步内容、独立窗口各自的草稿），决策只有保存并关闭 / 放弃并关闭 / 继续编辑。保存或放弃后再次复查脏状态：保存失败、或保存期间又产生编辑都不放行关闭，对话框保留并显示错误供重试；Escape 等价于继续编辑。对话框与设置/更新弹窗一样等原生插件视图让位后才显示（`usePluginViewOverlay`，见[插件视图](plugin-views.md)）。设置取消 / X / 遮罩 / Escape 只请求设置侧参与者（不处理独立命令面板的未同步内容），应用退出请求全部参与者；审批未决时收到范围更大的新请求（如设置关闭未决时托盘退出）会合并参与者复用同一决策，不叠加第二个对话框。
 - **原生关闭路径**：主窗 Rust `request_editor_close` 先 show/unminimize/focus 主窗再发 `editor:close-requested`（camelCase 载荷 `{requestId, forceExit}`）；主窗 CloseRequested、托盘 Quit 与 `RunEvent::ExitRequested` 都先 `prevent_close` / `prevent_exit`，等前端审批。审批通过后前端调 `complete_editor_close`：非强制关闭且 `closeBehavior = minimize` 时只隐藏窗口，托盘 Quit / ExitRequested（`force_exit`）直接走 `request_shutdown`；该命令只接受主窗及匹配的在飞 `requestId`，其他窗口/伪造或过期 token 返回错误；`cancel_editor_close` 撤销同一 token。主窗每 3 秒以 `acknowledge_editor_close` 续报审批存活，React 关闭监听卸载立即停心跳。15 秒无心跳由独立原生确认提供退出不保存/继续编辑选择，迟到原生回调不能作用新 token。批准真正退出后先禁用并隐藏全部托管窗口，再执行有界收尾。独立窗口在 `PopoutShell` 里 `onCloseRequested` → `preventDefault` → 审批通过才 `destroy`；审批进行中重复的关闭请求不叠加。
 - **保存完成后的边界**：设置底部保存成功后才关闭弹窗并应用 UI 缩放；保存期间正文 `inert`、点击/输入被拦截且关闭按钮禁用；若弹窗已被外部关闭/重开，或保存后又出现新草稿，迟到的结果既不关闭弹窗也不应用未落盘缩放。
 - 备份导入在确认替换后走 `requestEditorLeave()`，导入成功后立即 reload（草稿随新基线丢弃）；更新安装在下载前走 `requestEditorLeave()`。
 - 插件不是五类规则页的实体：启停与权限动作立即独立持久化，取消设置仅回滚普通草稿，保留当前插件状态及 revision。备份导入只覆盖同安装身份的授权；导入中同 ID 不同身份清权禁用、未提及的当前插件保留，且不安装代码或迁移 KV。
-- **备份管理页只提供配置导出/导入**：此前未实现消费者的自动日志备份开关及 `backupEnabled` / `backupInterval` / `backupDirectory` 已从模型、数值边界和 UI 移除，不再展示无效功能；旧配置中的这些未知字段由 serde 忽略。自动日志备份仍不是已交付能力，日志备份应手动复制日志目录（见[日志](logging.md)）。
+- **备份管理页只提供配置导出/导入**：配置模型不包含自动日志备份开关；旧配置中的未知备份字段由 serde 忽略。日志备份需手动复制日志目录（见[日志](logging.md)）。
 
 ### 设置编辑界面
 
@@ -163,10 +165,10 @@ Windows 的不可避免 `RunEvent::Exit`（含 tao `WM_ENDSESSION` 路径）不�
 |---|---|---|
 | `serial_manager` | `Arc<Mutex<SerialManager>>` | 异步命令经 `spawn_blocking` 时需从 State 克隆出 `'static` 句柄 |
 | `config_manager` | `Mutex<ConfigManager>` | 配置读写（含全部实体） |
-| `plugin_io` | `tokio::sync::Mutex<()>` | 插件磁盘/授权一致性串行闸门：安装、卸载、重载、启停、权限与网页信任变更、网页数据清理、一致列表扫描、资产读写、原生视图创建以及 `set_config`（含备份导入的整份替换）都 `lock().await` 排队；**等待没有固定期限**（旧 `lock_asset_io` 的 2 秒超时已移除），获得闸门后才读 manifest 与当前授权再访问磁盘 |
+| `plugin_io` | `tokio::sync::Mutex<()>` | 插件安装、卸载、重载、授权、网页数据、资产读写、原生视图和备份导入共用的串行闸门；等待闸门不添加业务期限，获得闸门后重新校验 manifest 与授权 |
 | `log_manager` | **`Arc<LogManager>`（无外层 `Mutex`）** | 写路径是 `&self` + 内部细粒度锁；再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与数据写入争同一把锁（高波特率下 RX 写入被拖住） |
 | `diag_logger` | `Arc<DiagLogger>` | 应用自身诊断日志（512KB 轮转、保留 3 份），开关取 `config.diagLogEnabled` |
 | `system_info` | `Arc<Mutex<sysinfo::System>>` | 增量刷新，避免 `new_all` 的每次高开销 |
 | `tool_processes` / `file_send_cancel` / `popouts` | `Mutex<HashMap<..>>` | 外部工具子进程 / 文件发送取消令牌 / 弹窗注册表 |
 
-配置 → 运行期的同步只有 **`AppState::apply_runtime_config(&AppConfig)`** 一个入口：内部 `LogSettings::from_config(cfg)` + `LogManager::apply_settings(...)` 同步日志设置，`DiagLogger::set_enabled(cfg.diag_log_enabled)` 同步诊断开关。调用点只有两处——`AppState::new`（启动）与 `set_config` 命令，因此 **`set_config` 是运行期变更的唯一同步点**。旧的逐字段日志 setter 命令、前端镜像同步函数、以及「启动与命令各手抄一份 setter」（新增字段必漏一处）均已删除。
+配置到运行期的同步统一由 **`AppState::apply_runtime_config(&AppConfig)`** 完成：使用 `LogSettings::from_config`、`LogManager::apply_settings` 和 `DiagLogger::set_enabled` 应用日志与诊断设置；启动和 `set_config` 共用该入口。

@@ -1,13 +1,13 @@
 # 终端显示模块（TRX）
 
-TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎，issue #14，v0.6.0）。数据路径：`serial:data` → `RxPipeline`（字节级行聚合 + rAF 批写）→ `viewportManager.appendTerminalLines` → `TerminalBuffer`（环形缓冲区）→ 同一 rAF 内 `TerminalRenderer.render`（直接 DOM）。TTY 模式见 [`tty.md`](tty.md)。
+TRX 行级终端的行缓冲与渲染，**脱离 React 调度**。数据路径：`serial:data` → `RxPipeline`（字节级行聚合 + rAF 批写）→ `viewportManager.appendTerminalLines` → `TerminalBuffer`（环形缓冲区）→ 同一 rAF 内 `TerminalRenderer.render`（直接 DOM）。TTY 模式见 [`tty.md`](tty.md)。
 
 ## 核心模块
 
 | 模块 | 文件 | 职责 |
 |---|---|---|
-| `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口，issue #16 改版）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
-| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（issue #18 流式布局重构）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（默认固定行高，软换行时按需测量），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、head 前进即锚点恢复（issue #19；`LARGE_TRIM_ROWS` 只保留给 `setLimits` 收缩的大跳变，重新 attach（弹窗回贴/换容器）也按 `anchorSeq` 还原阅读位置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
+| `TerminalBuffer` | `src/utils/terminal/TerminalBuffer.ts` | 环形缓冲区：O(1) 追加/裁剪、稳定 seq（裁剪只移动 [firstSeq,lastSeq] 窗口，存活行 seq 不变）、`maxLines` 行容量（超限**逐行覆盖最旧**，滚动窗口）、`snapshot`/`replaceAll`/`clear`/`setLimits` |
+| `TerminalRenderer` | `src/utils/terminal/TerminalRenderer.ts` | 直接 DOM 引擎（流式布局）：contentLayer = `[headSpacer][行…][tailSpacer]`，行是**普通文档流**子元素（默认固定行高，软换行时按需测量），spacer 承载屏外空间——**DOM 顺序 == 视觉顺序由结构保证**（旧 absolute+translateY 格子与整套顺序维护机制——insertRowInOrder/每帧排序修复/脱链防御——结构性删除）；新行只相对 spacer 或更大 visIdx 的行插入（`findFlowAnchor`，含已停车行）；**选区钉住**：活选区触及的行永不回收/不重写——窗内=文档流行、窗外=**原地停车**（`display:none`，同父不换父，探针证实 Chromium 换父即丢选区），`selectionchange` 监听器在选区消失后下一帧回收停车行，`MAX_PINNED_ROWS=600` 超限优雅降级；同帧钉底、head 前进即锚点恢复（`LARGE_TRIM_ROWS` 只保留给 `setLimits` 收缩的大跳变，重新 attach（弹窗回贴/换容器）也按 `anchorSeq` 还原阅读位置）、`seqToVisIdx`/`visIdxToSeq` 支持过滤列表、frozen null 归一化全部保留 |
 | `TerminalViewportManager` | `src/utils/terminal/viewportManager.ts` | 实时/只读来源枢纽：renderer 生命周期、增量/可取消分块过滤搜索、frozen 上界、时间索引、rAF latest-wins seek；`subscribe` 仅几何/非 React render 通知，`subscribeReadouts` 只在数据/计数/加载状态变化时刷新壳；搜索 Set 增量维护 |
 | 适配面 | `viewportManager.ts` 模块级函数 | `appendTerminalLine(s)`/`clearTerminal`/`replaceTerminalLines`/`snapshotTerminalLines`/`normalizeReceivedTerminalLines`/`releaseViewportManager`/`getViewportManager`，另有 `hasViewportManager`/`getManagerPortIds` 查询（不创建实例）——非 React 调用方（TX 回显/工具输出/回放/弹窗/热键/配置限额同步）一律走这里，**不再碰 useTerminalStore 的行 API** |
 
@@ -23,33 +23,19 @@ TRX 行级终端的行缓冲与渲染，**脱离 React 调度**（方案B 引擎
 
 renderer 使用有界物理高度映射，避免百万行 × 大字号直接要求无限 CSS spacer；首/中/尾可达与映射单调需要真实浏览器验证。`TerminalPerformance.test.ts` 通过环境变量显式启用，只观测索引/计数与 jsdom CPU 样本，不代表 WebView2 FPS。完整组协议与只读导入边界见[时间联动](timeline.md)。
 
-### 保留内存与 CPU 对比观测
-
-`scripts/terminal-memory-bench.mjs` 是显式运行的 Node 基准，不进入 CI 耗时门限。使用 Node 22.15+、已安装的 TypeScript 和 `--expose-gc`；每个样本独立进程、先预热，GC 后观测 `heapUsed + arrayBuffers`（`external` 单独列出，不能再次相加）。默认每场景三次取中位数，测量期间不要并行占用 CPU：
-
-```powershell
-node --expose-gc scripts/terminal-memory-bench.mjs --output node_modules/.cache/hypercom/terminal-memory.json
-# 可筛选 index、buffer、manager、allocation，或完整场景 id
-node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --output node_modules/.cache/hypercom/terminal-index.json
-```
-
-- 覆盖十万/百万行、真实 epoch 大时间戳、重复/回退时钟、24/128/4096 字节行、三端口、联动开关和已有大缓冲首次入组；输出构建、查询、滚动替换、裁剪及分块建索引的 CPU/墙钟样本。
-- `--baseline-dir <目录>` 可载入此前保存的 `TerminalBuffer.ts`、`TerminalTimeIndex.ts`、`viewportManager.ts` 副本；相对依赖仍按原模块 URL 解析，避免创建第二份生产实现。对比时必须用相同脚本、环境与场景，保留对应基线提交号；快照不齐会使用当前模块，不应将混合实现称为完整旧版。
-- 数值是当前 Node/V8 配置下的数据结构增量，不含应用原生进程/DOM/GPU，不能直接当作 WebView2 总内存、FPS 或长期泄漏证明。首次入组墙钟含分块让出，单块 CPU 才接近一次同步工作的时长；浏览器嵌套计时器节流可能增加总等待。索引排序、删除和生命周期语义由 `TerminalTimeIndex.test.ts` / `TerminalTimeline.test.ts` 在 CI 确定性验证。
-
 ## 关键不变式
 
 - **React 不渲染行**：contentLayer 是命令式 DOM，TerminalView 壳重渲染不会触碰它。
 - **标签切换保留缓冲**：主窗 `SerialContentHost` 在分屏树之外**全局常驻挂载**所有非弹出 serial 标签的 `TerminalView`，标签内容区位置/可见性由 `tabContentPlacement` 上报（`PluginViewSurface` 计量并 `display:none` 隐藏）；viewportManager 模块注册表持有实例，切换标签/跨 Pane 拖动都不销毁。仅关闭标签、TRX→TTY 切换才 `releaseViewportManager`。
-- **关闭标签页 = 前端显示目标销毁、串口连接保留（issue #11）**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `dismissPluginTab` + `ttyService.detach(portId)` + `popoutService.closePopout('terminal', portId)` + `releaseViewportManager(portId)` + `getRxPipeline().discardTerminalQueue(portId)`；随后 `closeTab` 再调 `releaseUnusedPortState(portId)`（无行消费者时释放 pipeline 端口租约；无显示/行消费者时统一回收 store 侧 terminals / trafficStats / TX 历史，`releaseTerminalState` 是它的同义别名）。批量关闭（左/右/其它）先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再跑同一套 cleanup——两处不会漂移。`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 是「manager 存在才写入」——标签关闭后 RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始。
-- **惰性解码**：普通 RX 行只存 `rawData`（`Uint8Array`），`getLineText(line, encoding)`（`src/utils/lineText.ts`，全仓唯一的 TextDecoder 工厂 + 模块级缓存，`ignoreBOM:false`）按当前编码解码；编码切换 = 重渲染，无 store 遍历。协议帧和切换编码前排空的边界行可带已解码的 `content`，`getLineText` 优先返回它，不对这类冻结文本重新解码（见[RX 管线](transmission.md#rx-管线2026-08-04-重构)）。
+- **关闭标签页 = 前端显示目标销毁、串口连接保留**：`Pane.cleanupClosedTab` 不再调 `closePort`（后端日志由 LogManager 独立落盘），改 `dismissPluginTab` + `ttyService.detach(portId)` + `popoutService.closePopout('terminal', portId)` + `releaseViewportManager(portId)` + `getRxPipeline().discardTerminalQueue(portId)`；随后 `closeTab` 再调 `releaseUnusedPortState(portId)`（无行消费者时释放 pipeline 端口租约；无显示/行消费者时统一回收 store 侧 terminals / trafficStats / TX 历史，`releaseTerminalState` 是它的同义别名）。批量关闭（左/右/其它）先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再跑同一套 cleanup——两处不会漂移。`appendTerminalLines/appendTerminalLine/replaceTerminalLines` 是「manager 存在才写入」——标签关闭后 RX 继续到达时**静默丢弃**（不复活 manager、不积压），重开标签页从零开始。
+- **惰性解码**：普通 RX 行只存 `rawData`（`Uint8Array`），`getLineText(line, encoding)`（`src/utils/lineText.ts`，全仓唯一的 TextDecoder 工厂 + 模块级缓存，`ignoreBOM:false`）按当前编码解码；编码切换 = 重渲染，无 store 遍历。协议帧和切换编码前排空的边界行可带已解码的 `content`，`getLineText` 优先返回它，不对这类冻结文本重新解码（见[RX 管线](transmission.md#rx-管线)）。
 - **保留行数上限**：`computeBufferLimits()`（从 `config.maxDisplayLines` 派生 `{ maxLines }`，缺省 100000、下限 1000）在 manager 创建时读取；配置变更由 App.tsx effect 经 `applyLimits({maxLines})` 同步到现存实例。这是每端口的行数边界，不是字节数、全应用堆内存或进程 RSS 硬上限；行内容、索引和并发端口数仍影响实际内存。
 
-## 渲染正确性陷阱（历史缺陷 → 现状约束）
+## 渲染正确性约束
 
 - **frozen 归一化**：frozen 参数为 null 时必须归一化为 `Number.MAX_SAFE_INTEGER`（原始 `seq > null` 会把所有行判为隐藏）。
-- **stale 判定用实时列表位置（issue #10）**：head trim 前进 firstSeq（及 filtered.offset）后，active 行缓存的 visIdx 字段整体过期——stale 检查若按字段判定，被裁行/幸存行永不回收 → **DOM 行数无限增长**（e2e 实测 6669 vs 正常 27）、每帧 O(n) 渲染 → 输出区上下抖动。`seqToVisIdx`（identity O(1)、过滤模式**二分**）是每帧 stale 检查的唯一判定来源，越界即回收。修复后 DOM 恒 ≤ 窗口+overscan（e2e 断言 ≤40）。
-- **选区钉住替代全局冻结（issue #18）**：旧 `isSelecting` 全局冻结（拖选期间停一切回收/重写）+ `setSelecting` API 已删。新语义：活选区触及的行（`captureSelectionSeqSpans` 把 Range 端点映射到 seq 区间）**永不回收、永不重写、永不换父**——窗外停车 `display:none`（同父，Chromium 探针证实 remove+换父即丢 Range，删除非端点行只裁剪）；`document.selectionchange` 监听器在选区消失时清 pins 并调度渲染；**停车行占真实文档流槽位**——`findFlowAnchor` 必须把停车行当插入锚点候选（曾漏 → 复现乱序 [30..35, 8..29, 36..44]），只跳过 seqToVisIdx 为 null（已被裁出缓冲）的行；**`Selection.toString()` 按布局可见性序列化**（Chromium）——停车行文本会从中消失，键盘与右键菜单复制均用根限定的 `selectionText(root)`（`Range.cloneContents` 纯树克隆，`terminalContextMenu.ts` 导出）并经 `writeClipboardText` 写入，菜单在打开前快照选区，聚焦菜单后不再现读别的选区；`MAX_PINNED_ROWS=600` 超限（拖选+滚轮延伸）优雅放弃 pins。soak 测试（`TerminalRenderer.soak.test.ts`）随机操作序列按编号断言结构化不变式（R1–R6：DOM 有界/可见行 seq 升序/seq 在窗内或停车/spacer 对齐/data-seq 唯一/过滤列表一致）。完整 R1–R15 渲染契约见下节清单（`TerminalRenderer.ts` 文件头注释逐条给出「为什么」与违反症状）。
+- **stale 判定用实时列表位置**：head trim 前进 firstSeq（及 filtered.offset）后，active 行缓存的 visIdx 字段整体过期——stale 检查若按字段判定，被裁行/幸存行永不回收 → **DOM 行数无限增长**（e2e 实测 6669 vs 正常 27）、每帧 O(n) 渲染 → 输出区上下抖动。`seqToVisIdx`（identity O(1)、过滤模式**二分**）是每帧 stale 检查的唯一判定来源，越界即回收。修复后 DOM 恒 ≤ 窗口+overscan（e2e 断言 ≤40）。
+- **选区钉住替代全局冻结**：旧 `isSelecting` 全局冻结（拖选期间停一切回收/重写）+ `setSelecting` API 已删。新语义：活选区触及的行（`captureSelectionSeqSpans` 把 Range 端点映射到 seq 区间）**永不回收、永不重写、永不换父**——窗外停车 `display:none`（同父，Chromium 探针证实 remove+换父即丢 Range，删除非端点行只裁剪）；`document.selectionchange` 监听器在选区消失时清 pins 并调度渲染；**停车行占真实文档流槽位**——`findFlowAnchor` 必须把停车行当插入锚点候选（曾漏 → 复现乱序 [30..35, 8..29, 36..44]），只跳过 seqToVisIdx 为 null（已被裁出缓冲）的行；**`Selection.toString()` 按布局可见性序列化**（Chromium）——停车行文本会从中消失，键盘与右键菜单复制均用根限定的 `selectionText(root)`（`Range.cloneContents` 纯树克隆，`terminalContextMenu.ts` 导出）并经 `writeClipboardText` 写入，菜单在打开前快照选区，聚焦菜单后不再现读别的选区；`MAX_PINNED_ROWS=600` 超限（拖选+滚轮延伸）优雅放弃 pins。soak 测试（`TerminalRenderer.soak.test.ts`）随机操作序列按编号断言结构化不变式（R1–R6：DOM 有界/可见行 seq 升序/seq 在窗内或停车/spacer 对齐/data-seq 唯一/过滤列表一致）。完整 R1–R15 渲染契约见下节清单（`TerminalRenderer.ts` 文件头注释逐条给出「为什么」与违反症状）。
 
 ### TerminalRenderer 渲染契约（R1–R15）
 
@@ -63,7 +49,7 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 | R4 | spacer 承载屏外空间：两者 ≥0（固定模式按行高对齐）、空缓冲时为 0；layer 自身高度从不写 inline。 |
 | R5 | `data-seq` 存在、数值、唯一；空缓冲 ⇒ 零行。 |
 | R6 | 过滤列表激活时，每个**可见** seq 都是列表成员（停车钉住行豁免）。 |
-| R7 | stale 判定只用**实时** `seqToVisIdx`，不信缓存 visIdx 字段（issue #10）。 |
+| R7 | stale 判定只用**实时** `seqToVisIdx`，不信缓存 visIdx 字段。 |
 | R8 | `frozenSeq === null` 归一化为 `Number.MAX_SAFE_INTEGER` 再比较。 |
 | R9 | 阅读位置锚定：head 前进且非跟随/非手势/无选区时，按 `anchorSeq` 还原 scrollTop（锚点被裁则 clamp/就近）。 |
 | R10 | 跟随钉底在 `render()` 内同帧完成（padding 感知、浏览器绘制前）。 |
@@ -78,7 +64,7 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 - `scrollLocked` 仅由显式意图写入：图钉按钮、`.terminal-jump-btn` 跳转按钮、手势 settle（120ms 静默后判定），拖选起点（按下行）也显式解锁；**无 onScroll 隐式解锁**。
 - 跟随路径由 `TerminalRenderer` **同帧钉底**（render() 内 scrollTop = totalHeight - clientHeight，无 React effect、无双 rAF 链；搜索栏可保持打开，不单独抑制跟随）。
 - settle/抑制/锁定迁移逻辑下沉纯函数 `isAtBottom`/`shouldFollow`（`utils/followLogic.ts`）；钉底目标值本身由 `TerminalRenderer.render` 内联计算（padding 感知、同帧写 scrollTop），不再有第二份纯函数拷贝。
-- 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——方案B 已没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮；时间组内到底与点亮 Pin 共用整组 LIVE 路径并保留时间映射，不兼容 LIVE 时只单次跳底）。
+- 到顶/搜索跳转走 manager 的 `scrollToSeq(seq, align)`（到顶 = `scrollToTop()`——按当前过滤列表首行，identity 模式即 `buffer.firstSeq`——且解锁；到底 = `scrollToBottom()` 且锁定），renderer 内直接写 scrollTop——当前没有第三方虚拟化（@tanstack 虚拟列表与 `countRef` 一并删除）；跳转按钮钉在滚动条两端（到顶解锁、到底点亮；时间组内到底与点亮 Pin 共用整组 LIVE 路径并保留时间映射，不兼容 LIVE 时只单次跳底）。
 - 手势 settle：滚轮/滚动键/滚动条拖拽/中键，120ms 静默后按 atBottom 50px 容差判定。
 - 已知平台降级：Linux WebKitGTK 原生滚动条可能不派发 pointerdown——滚动条拖拽解锁在该平台静默失效，滚轮/键盘/图钉不受影响。
 
@@ -91,16 +77,6 @@ node --expose-gc scripts/terminal-memory-bench.mjs --case index --repeats 5 --ou
 - 搜索匹配仍以完整记录为单位，不受视觉折行边界影响；显式命中导航在排版后把记录内首个 `<mark>` 放入视口。时间联动以换行累计几何读取 seq，不同步 scrollTop；钉底和暂停保留原意图契约。拖滚动条到尾时，本次测量修正保留末尾边界，但不擅自开启后续跟随。
 - **估算边界**：未访问或被缓存逐出的记录高度未知，因此滚动条长度/中间比例会随测量修正；不承诺全历史像素坐标不变。屏外 spacer 仍使用有界物理高度映射；单条极长 TX/回放记录本身仍需浏览器完整排版，缓存上限不构成文本长度、布局工作量或总进程内存硬上限。
 - `TerminalWrap.test.ts` / `TerminalHeightIndex.test.ts` 及对应 `*.audit.test.ts` 验证确定性几何与缓存不变式；`e2e/terminalWrapChecks.ts` / `terminalWrap.audit.spec.ts` 覆盖真实折行、Unicode/高亮、选区复制、resize/裁剪锚点、近尾宽度/字号重排的原生钳制、长记录内搜索及百万行字号/缩放极值。jsdom 与 Chromium mock IPC 均不能代替最终 WebView 实机验收。
-
-性能观测复用 `e2e/asciiNoiseBenchmark.ts` 的实际 RX hooks → pipeline → manager → DOM 驱动，单独运行：
-
-```powershell
-$env:HYPERCOM_WRAP_BENCH='1'
-npx.cmd playwright test e2e/smoke.spec.ts --grep 'soft wrap performance observational benchmark' --workers=1 --retries=0
-Remove-Item Env:HYPERCOM_WRAP_BENCH
-```
-
-结果为 Playwright 输出目录的 `word-wrap-results.json`，记录关闭/开启各三次、交替顺序的主线程任务时间、帧间隔、长任务、队列积压、DOM 数量与 GC 后堆差；这些是观测而非 CI 耗时门限，不代表 UART/Rust/原生 IPC/日志磁盘吞吐或物理 FPS。
 
 ## 多编码
 
@@ -123,10 +99,10 @@ Remove-Item Env:HYPERCOM_WRAP_BENCH
 - `terminalSearch.ts` 只负责单行搜索文本（HEX 显示走 `hexFormat.bytesToSpacedHex`）与 `markSearchMatchesInHtml` 字符级叠加，不再提供第二套匹配扫描。
 - 已知边界：关闭搜索栏期间按 F3 重新打开时首次导航需再按一次（匹配在打开后才计算——「不后台全缓冲扫描」的代价）。
 
-## 最大显示行数（issue #16 改版）
+## 最大显示行数
 
 - `maxDisplayLines` = 每端口终端最大显示行数（默认 100000，clamp [1000,1000000]；Rust `max_display_lines` + `#[serde(default)]` 缺省回退）。**删除** `memoryLimitMb`/`memoryPerPortBudgetMb` 双内存预算——升级时 `ConfigManager::new` 的 `strip_legacy_memory_budget_keys` 显式剥离旧配置项。
-- 缓冲超限**逐行覆盖最旧一条**（滚动窗口，firstSeq 每 append +1）；`appendLines`/`appendTerminalLines` 返回 boolean；**无「因内存限制清屏」toast**（逐行覆盖是常态滚动，不是异常事件——issue #16 曾整夜误报的根因）。
+- 缓冲超限**逐行覆盖最旧一条**（滚动窗口，firstSeq 每 append +1）；`appendLines`/`appendTerminalLines` 返回 boolean；**无「因内存限制清屏」toast**（逐行覆盖是常态滚动，不是异常事件——曾整夜误报的根因）。
 - 状态栏内存显示「JS堆 XMB · 进程 YMB」（无总预算分母）；`load_status` 只按 CPU>90 判 high_load。
 
 ## ASCII 日志乱码过滤
@@ -137,21 +113,6 @@ Remove-Item Env:HYPERCOM_WRAP_BENCH
 - 这是 ASCII 英文日志启发式，可能误隐藏中文或其他非 ASCII 文本；短碎片、纯可打印协议段可能漏过。有长英文的混合行保留整行，不尝试推测未知协议边界或逐字符删除。
 - `linePassesFilter` 仅控制可见性：只判 RX `rawData`，TX/TOOL/NOTE 不受影响；原始行继续占用同一环形缓冲，关闭过滤可恢复仍未被容量裁剪的行。接收组装/触发器/插件旁路/流量统计/后端日志不变。复制全部与 TXT/CSV 导出仍使用完整缓冲；浏览器选区复制反映可见文本。
 - `viewportManager.setFilter` 的可选参数承接有效开关，新行增量匹配，历史按现有可取消分块扫描重建；不在滚动/每帧重新判断全历史。搜索排除被乱码过滤隐藏的行，并在开关改变时重建命中列表；方向/关键词过滤保持原有独立搜索语义。时间索引与时间组 realign 采用过滤后的可见候选。
-
-### 乱码过滤性能观测
-
-基准显式 opt-in，不给 CI 加机器相关的耗时断言，测量时单独运行、不要并行占用 CPU：
-
-```powershell
-$env:HYPERCOM_ASCII_BENCH='1'
-npx.cmd vitest run src/utils/asciiNoise.perf.test.ts
-npx.cmd playwright test e2e/smoke.spec.ts --grep 'ASCII noise performance observational benchmark' --workers=1 --retries=0
-Remove-Item Env:HYPERCOM_ASCII_BENCH
-```
-
-- `asciiNoise.perf.test.ts` 预生成 256 个不同输入，覆盖 64/256/4096 字节与 ASCII/二进制/有长英文保护的混合行；预热后 7 轮、每样本至少 8 MiB，交错开关顺序，分别测纯判定与过滤谓词，输出 `ASCII_CLASSIFIER_BENCH` JSON。不把输入生成算入耗时，也不把极小的关闭路径作百分比基数。
-- `e2e/asciiNoiseBenchmark.ts` 复用 smoke 的 Tauri mock，在真实 Chromium 应用中通过 `serial:data` 驱动 hooks → RxPipeline → manager → DOM。按 1024 字节事件模拟 115200/4M 波特率（8N1）及超额吞吐，开关各 3 轮，每轮约 2 秒；观测 CDP 主线程任务时间、append 时间、rAF 间隔、长任务、队列末尾积压、行计数与 GC 后堆差，另测十万/百万行的索引切换。原始结果保存在 Playwright 输出目录的 `ascii-noise-results.json`。
-- 主线程任务时间不是 Windows 整机 CPU，rAF 间隔不是物理屏幕 FPS，GC 后堆差也不是进程 RSS 或长期泄漏证明；此基准不覆盖 UART、Rust、原生 IPC、磁盘写入或 WebView2 实机，不应据此承诺所有硬件下的吞吐上限。历史切换完成耗时包括可见列表与时间索引的分块重建，不等于同步阻塞时长。
 
 ## 工具栏布局
 

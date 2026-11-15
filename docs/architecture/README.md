@@ -1,56 +1,64 @@
 # 架构文档索引
 
-HyperCom 架构文档按**功能模块**组织。每个模块文档聚合该模块的当前架构设计、前端/后端实现、数据流、关键不变量与已知边界。
+本文档集只描述当前实现、跨模块契约和验证边界。模块文档中的路径与符号名以源码为准；用户操作见 [`docs/userwiki/`](../userwiki/README.md)，插件作者接口见 [`docs/plugin-development.md`](../plugin-development.md)。
 
-## 模块划分
+## 系统边界
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    应用壳（Tauri v2）                        │
-│   main.tsx / App.tsx / lib.rs / AppState / 命令注册          │
-└──────────┬──────────────────────────────┬──────────────────┘
-           │ invoke 命令 / 事件            │
-┌──────────▼──────────┐        ┌──────────▼──────────┐
-│    前端（React）      │        │    后端（Rust）      │
-│  6 Zustand stores    │        │  SerialManager      │
-│  18 hook files       │◄──────►│  ConfigManager      │
-│  方案B 终端引擎       │  IPC   │  logger/LogManager  │
-│  rxPipeline/ttySvc   │        │  diaglog/DiagLogger │
-└──────────────────────┘        └─────────────────────┘
+```text
+Tauri 应用壳
+├─ React/TypeScript：App、Zustand store、hooks、services、终端与工作区
+└─ Rust：AppState、Tauri commands、串口、配置、日志、插件与更新
+
+前端 ── invoke / emit ── Rust
 ```
 
-> 前端：6 个 Zustand store、14 个 services 生产文件、18 个 src/hooks 文件（不含测试/barrel/辅助模块）；编辑草稿/离开保护在 utils 与 shared，不增加 store。双语 896 键。后端 98 个命令 / 13 个命令域文件；AppConfig 44 字段（43 个非 flatten 字段（含 revision）+ entities）；complete_editor_close / cancel_editor_close 是带 requestId 的主窗编辑审批入口。插件持久化、事务与原生视图仍分别在 ConfigManager、transaction.rs、view_runtime。
+前端的状态、生命周期和复用模块见 [`config.md`](config.md)、[`workspace.md`](workspace.md) 与 [`code-map.md`](code-map.md)。Rust 命令统一由 `src-tauri/src/lib.rs` 的 `generate_handler!` 注册，错误契约见 [`errors.md`](errors.md)。
 
 ## 文档清单
 
-插件作者的入口是独立的[插件开发指南](../plugin-development.md)（创建、manifest、Worker API、调试、打包）；下表的插件架构文档面向维护宿主实现，两者职责分开。
+| 文档 | 当前覆盖范围 |
+|---|---|
+| [`serial.md`](serial.md) | 端口枚举、连接生命周期、参数/流控、读写句柄、SIM/GIT:BASH 虚拟端口、外部工具和排序分组 |
+| [`terminal.md`](terminal.md) | TRX 的 `TerminalBuffer`、`TerminalRenderer`、`viewportManager`、滚动/搜索/编码/高亮与协议字段显示 |
+| [`timeline.md`](timeline.md) | `timelineCoordinator`、preview/commit 定位、调度预算、TRX/插件适配器及只读多轨回放 |
+| [`tty.md`](tty.md) | xterm.js TTY、`ttyService`、TRX/TTY 切换和 GIT:BASH 调试终端 |
+| [`transmission.md`](transmission.md) | RX 管线、`sendToPort`、TTY/文件发送、循环发送、快捷发送、命令步骤和触发器 |
+| [`logging.md`](logging.md) | `LogManager` 落盘、日志迁移/分片/编码、连接代次和 `DiagLogger` |
+| [`config.md`](config.md) | `AppConfig`/`Entities`、会话快照、store 划分、实体草稿、保存队列、CAS 和数值边界 |
+| [`workspace.md`](workspace.md) | pane tree、标签、弹窗、通知、侧边栏、状态栏、背景和文本右键菜单 |
+| [`update.md`](update.md) | stable/preview 更新检查、网络策略、安装流程和前端决策流 |
+| [`plugins.md`](plugins.md) | 插件安装身份、权限/快照、Worker、HTTP/KV/文件、事务恢复和 RX 旁路 |
+| [`plugin-views.md`](plugin-views.md) | 隔离原生视图、可信网页、工作区标签、文档代次、二进制通道和输入生命周期 |
+| [`release.md`](release.md) | CI 质量门、stable/preview 发布工作流、清单/签名校验和原生验收边界 |
+| [`errors.md`](errors.md) | `CommandError` 变体、命令归属和前端错误消费路径 |
+| [`conventions.md`](conventions.md) | selector、React/flex、Rust 锁、hook、i18n、输入安全和平台约定 |
+| [`code-map.md`](code-map.md) | 前端/后端符号定位及应复用的单一实现 |
 
-| 文档 | 功能模块 | 核心内容 |
-|------|---------|---------|
-| [`serial.md`](serial.md) | 串口管理 | 端口枚举/热插拔/连接生命周期/参数流控/读写句柄分离与发送期限/`PortKind::of` 类别分派 + 虚拟端口门控（SIM:Loopback）/外部工具（flasher）/端口排序（Windows 注册表添加顺序、自然序）与分组 |
-| [`terminal.md`](terminal.md) | 终端显示（TRX） | 方案B 渲染引擎（TerminalBuffer/Renderer/viewportManager）/单一 `maxDisplayLines` 逐行覆盖滚动窗口/TerminalRenderer 渲染契约 R1–R15/可选文本软换行与有界测量缓存/滚动锁定/搜索/多编码/高亮/协议字段着色 |
-| [`timeline.md`](timeline.md) | 时间联动与只读回放 | 多组时间映射/preview-commit 协议/预算与背压/TRX 与可选插件适配/安全导入独立多轨回放/共享播放时钟/恢复与平台边界 |
-| [`tty.md`](tty.md) | TTY 终端 | xterm.js 完整交互终端/ttyService 管线/TRX↔TTY 切换/模拟终端（git bash pty）/会话跨标签保留 |
-| [`transmission.md`](transmission.md) | 数据收发 | RX 管线（字节组装/rAF 批写/visibility）/TX 发送（回显/时序/守卫）/循环发送（状态机合一 `useSequentialSend`）/快捷发送/命令面板/文件发送/触发引擎 |
-| [`logging.md`](logging.md) | 日志 | RX 落盘日志（行组装/分片/子目录/编码/每会话新文件）/日志设置单一入口（`LogSettings::from_config` + `LogManager::apply_settings`，经 `AppState::apply_runtime_config` 由启动与 `set_config` 共用；无逐字段 `set_log_*` 命令）/应用诊断日志（diaglog） |
-| [`config.md`](config.md) | 配置与状态 | config.json 实体（`Entities` 9 个 `Vec` 数组，含插件状态）/会话快照/6 个 store 划分/规则实体 CRUD 与会话草稿（`entityEditor`）/离开审批/安全保存快照（`saveConfig(patch?)`）/`CONFIG_BOUNDS` 跨语言契约/分组与端口元数据 |
-| [`workspace.md`](workspace.md) | 工作区与通知 | paneTree 分屏（树算法在 `utils/paneTree.ts`）/标签页/弹出体系（popout）/操作面板布局/侧边栏/通知中心/状态栏/自定义文本右键菜单 |
-| [`update.md`](update.md) | 自动更新 | preview/stable 双通道/检查链路（GitHub API + endpoint 解析）/6h 重评估与 7 天 snooze/UpdateDialog/失败分类 |
-| [`plugins.md`](plugins.md) | 插件宿主内部架构 | 安装身份/revision 授权一致性、分级 Worker 生命周期与重载、流式 HTTP、KV/资产无配额与原子写、原生 IPC、RX 旁路及磁盘中断恢复；作者 API 见[开发指南](../plugin-development.md) |
-| [`plugin-views.md`](plugin-views.md) | 插件隔离 UI 与工作区标签 | 原生隔离子 WebView、终端替换/额外插件标签、动作打开；documentId 文档代次、视图二进制通道、安全、输入消费者与生命周期契约，Windows 已实现/其他平台门控 |
-| [`release.md`](release.md) | 发版与构建 | CI/CD 工作流/签名/密钥轮换/坏版本召回/RELEASE_NOTES 机制/故障排查 |
-| [`errors.md`](errors.md) | 错误处理 | `CommandError` 7 个变体定义与映射表（触发条件 = 命令/文件归属）/无按变体的 `toast.error.*` key（i18n 只有 `toast.severity.*` 与 `toast.fallback.operationFailed`）/消费路径（`extractErrorMessage` + `notifyError`） |
-| [`conventions.md`](conventions.md) | 开发约定（跨模块） | Zustand 选择器纪律/React 组件定义/flexbox `min-height` 链/Rust 跨 `.await` 锁纪律/hook 生命周期拆分/`CommandError` 与命令注册/i18n 规则/提交规范/CSS 颜色安全及跨模块陷阱 |
-| [`code-map.md`](code-map.md) | 符号与模块索引 | 新代码优先复用的前端模块清单 + 前端/后端符号 → 文件定位（跨模块速查） |
+## 跨模块不变量
 
-## 通用约定（贯穿所有模块）
+- **状态订阅**：Zustand 组件和 hook 只用 selector；实时值在回调中用 `getState()`。终端行缓冲由 `viewportManager`/`TerminalBuffer` 管理，不进入 store。
+- **单一实现**：边界用 `src/utils/bounds.ts` 与 `src-tauri/src/config/mod.rs` 的 `CONFIG_BOUNDS`；文本解码用 `src/utils/lineText.ts`；HEX 输入用 `src/utils/hexUtils.ts`，字节格式化用 `src/utils/hexFormat.ts`；树算法用 `src/utils/paneTree.ts`。
+- **配置保存**：普通设置和实体草稿经 `src/utils/configWriteQueue.ts` 的 `enqueueConfigWrite` 串行写入，并用 revision CAS；成功才推进基线与运行态，失败/冲突/迟到响应不得覆盖新草稿。
+- **命令与事件**：Tauri 命令返回 `Result<T, CommandError>`，新命令必须在 `src-tauri/src/lib.rs` 注册；Rust 的 `FileProgressPayload` 使用 camelCase wire。`serial:data` 传原始字节，接收管线只在 `App` 装配一次。
+- **工作区身份**：`TabItem.id` 是工作区 UUID；串口目标来自 `getTabPortId`/`getActivePortId`，plugin 使用 `boundPortId`，replay 没有发送端口，不做 last-port 回退。
+- **生命周期**：关闭标签不等于断开串口；`Pane.cleanupClosedTab` 只退休显示/输入消费者。显式断开走 `useSerialConnection.closePort`。插件视图按 instance/document/epoch 丢弃迟到消息，二进制走分块与 ACK，不进入实时状态 JSON。
+- **安全输入**：用户颜色经 `safeCssColor`，正则经 `safeRegex`；插件文件/权限/原生视图由宿主重新校验，不能信任 Worker 或页面自报身份。
 
-跨模块开发约定（选择器纪律、React 组件定义、flexbox 链、锁纪律、hook 生命周期、i18n、提交规范、CSS 颜色安全等）的完整说明见 [`conventions.md`](conventions.md)；以下只列最关键的几条。
+## 验证边界
 
-- **两编译器项目**：前端 React 18 + TypeScript（`src/`），后端 Rust + Tauri v2（`src-tauri/`）；当前锁文件中的 `@tauri-apps/api` 与 Rust `tauri` 均为 2.12.x。manifest 的主版本范围不是 minor 锁定，升级需核对两侧锁文件与 IPC 兼容性。
-- **Zustand 选择器纪律**：`src/stores/` 共 6 个 store 模块（`useAppStore` / `useOperationStore` / `useTerminalStore` / `useRuleStore` / `useSystemStore` / `useToastStore`），任何 store 调用必须带 selector，禁止无选择器订阅整 store（串口数据事件会触发重渲染 → 输入失焦/卡顿）。其中 `useSystemStore`（`systemStatus` / `trafficStats` / `simulationMode` / `ui`）从 `useAppStore` 独立——高频轮询与 UI 开关不牵动标签页/端口等低频 state。
-- **跨 `.await` 锁纪律**：`MutexGuard` 是 `!Send`，async 命令必须「提取 + clone + drop 锁」后再 `.await`。反证见 `AppState.log_manager`——它是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），因此日志写入不需要持锁跨 `.await`，`save_log_as` 的拷贝 / `list_files` 递归 / 数据写入不争同一把锁。
-- **命令返回**：一律 `Result<T, CommandError>`，不得返回 `String`。
-- **构建能力门控**：唯一后端实现为 `commands/system_cmds.rs` 的 `dev_only(capability)` / `is_debug_build()`（命令体不得再自带 `#[cfg(debug_assertions)]` 双主体）。模拟串口/模拟终端在 release 由 `dev_only` 拒绝，前端用 `DEV_FEATURES_ENABLED = import.meta.env.DEV` 隐藏入口并在 hook 内兜底；自动更新方向相反，debug 后端短路为空候选/空操作，release 才执行真实检查与安装，前端自动检查也跳过 DEV/macOS。手动更新入口不受自动检查开关影响，后端构建门控仍然生效，详见 [update.md](update.md)。
-- **配置保存契约**：普通全量 `set_config` 经 `saveConfig(patch?)` 组装安全快照并以 revision CAS 保存，绝不用启动实体快照覆盖后端。备份导入是显式恢复边界，但插件授权只能恢复到同一 `installGeneration`；`BackupSettings.handleImport` 读回后端权威配置与插件列表后重载，不发布导入文件中的旧权限。
-- **插件运行与发布证据**：安装身份、权限和 IO 契约见 [`plugins.md`](plugins.md)；最终安装包的原生 Worker/CSP、文件选择器与跨平台验收见 [`release.md`](release.md#插件发版验收门)。用户安装、授权、升级和卸载步骤见[插件使用](../userwiki/插件.md)。
+常规检查命令见根 [`AGENTS.md`](../../AGENTS.md)。Vitest、Rust 库测试、Clippy、release-profile 检查和 mock IPC Playwright 覆盖源码契约；它们不替代真实串口、原生 WebView/CSP 或最终安装包验收。插件原生视图的 Windows/WebView2 显式测试与安装包边界见 [`plugin-views.md`](plugin-views.md) 和 [`release.md`](release.md)。
+
+## 引用规则
+
+架构文档只引用“文件 + 符号名”，不写行号；实现变更时同步路径、符号名和本索引。过程记录、审计清单、历史设计和用户操作步骤不放在本目录。
+
+## 快速导航
+
+- 串口与收发：[`serial.md`](serial.md) → [`transmission.md`](transmission.md)
+- TRX/TTY/回放：[`terminal.md`](terminal.md)、[`tty.md`](tty.md)、[`timeline.md`](timeline.md)
+- 配置与工作区：[`config.md`](config.md)、[`workspace.md`](workspace.md)
+- 插件：[`plugins.md`](plugins.md)、[`plugin-views.md`](plugin-views.md)
+- 发版与更新：[`release.md`](release.md)、[`update.md`](update.md)
+- 复用与约定：[`code-map.md`](code-map.md)、[`conventions.md`](conventions.md)
+
+(End of file)

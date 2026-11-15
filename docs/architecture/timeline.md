@@ -55,29 +55,16 @@ preview 可丢弃，committed 是最终逻辑目标。每次手势携带 owner�
 
 `ReplayTabItem` 是独立 kind，`getTabPortId`/`getActivePortId` 对它返回 null。`ReplayDocument` 实现共享只读 `TerminalSource`；`TerminalView` 注入 manager 与本地显示配置，复用渲染、搜索、高亮和复制，不向实时 ring/RX/trigger/plugin 输入旁路追加历史，不统计流量或发送串口。
 
-专用宿主命令 `pick_replay_sources`、`read_replay_source_chunk`、`release_replay_sources` 由主窗口原生选择器授予只读句柄，后续只收 grant/source 身份，不收任意路径。旧 `read_text_file` 的日志根目录限制没有放宽。分块读取要求严格顺序 offset，逐块校验元数据，并将实际交付流 SHA256 与初始指纹、EOF 重新读取文件的指纹双重比对；文件修改或消失均拒绝。恢复只保存来源描述，原生重选后路径、大小和指纹须与原描述匹配才重新授权。
+专用宿主命令 `pick_replay_sources`、`read_replay_source_chunk`、`release_replay_sources` 由主窗口原生选择器授予只读句柄，后续只收 grant/source 身份，不收任意路径；`read_text_file` 仍只服务日志根目录内的读取。分块读取要求严格顺序 offset，逐块校验元数据，并将实际交付流 SHA256 与初始指纹、EOF 重新读取文件的指纹双重比对；文件修改或消失均拒绝。恢复只保存来源描述，原生重选后路径、大小和指纹须与原描述匹配才重新授权。
 
-首版支持 UTF-8 文本和 HEX 文本：最多 16 文件、单文件 32 MiB、会话总文件 64 MiB、500,000 记录、192 MiB 解码内存。超限拒绝并提示，不静默截断。完整导入历史不受实时 maxDisplayLines 裁剪；不承诺无限文件或分页。导入按分块执行并可取消；原始 binary/GBK 不在首版支持范围。
+当前支持 UTF-8 文本和 HEX 文本：最多 16 文件、单文件 32 MiB、会话总文件 64 MiB、500,000 记录、192 MiB 解码内存。超限拒绝并提示，不静默截断。导入历史不受实时 maxDisplayLines 裁剪；不承诺无限文件或分页。导入按分块执行并可取消；原始 binary/GBK 不在支持范围。
 
 用户确认轨道、分片顺序、格式和记录机 UTC 偏移；不从同名文件自动合并会话，也不从 ctime/mtime/文件名推导事件时间。未知时间行保留顺序与上下文，全无可靠时间的轨道只独立查看。回拨分段需要明确选择时段后才参加联动。
 
 播放是“完整历史 + 游标移动”，不是发送或逐行 append。`ReplayClock` 以单调时钟结算游标，换速先结算旧速度，保留真实长间隔；组范围用轨道并集，不被最短轨道截断。来源描述和组描述随会话保存，恢复默认浏览/暂停，不持久化运行句柄、preview、owner、ACK 队列或日志模型。
 
-## 验证与操作边界
+## 验证边界
 
-TRX 来源的 `clockEpoch` 目前没有生产者：`TerminalBuffer` 未实现 `getClockEpoch`，`trxTimelineAdapter.refreshSource` 因此恒得 undefined，真实时钟回拨不会触发生成世代门禁；回放侧由 `ReplayDocument.segments` 与显式分段选择覆盖。跨时间域仍按显式 mapping 处理，不靠隐式推断。
+TRX 来源的 `clockEpoch` 当前没有生产者，真实时钟回拨不会触发来源世代门禁；回放侧由 `ReplayDocument.segments` 和显式分段选择覆盖。跨时间域必须使用显式 mapping。
 
-单元测试覆盖版本/背压/乱序/过滤/冻结/只读数据源和时钟；Playwright 的真实 Chromium 几何测试覆盖百万行首中尾与字体/缩放极值。联动输入回归显式保留原生滚动条，通过真实 thumb 拖动和 wheel 输入，在持续帧压力下验证松开前的多次定位与 on-release 原位保持；设置 `HYPERCOM_E2E_CHANNEL=msedge` 可用本机 Edge 复核同组输入测试，但不能据此声称已覆盖 Tauri WebView2 宿主。`TerminalPerformance.test.ts` 需显式设置 `HYPERCOM_TERMINAL_BENCH=1`，输出索引与 jsdom CPU 样本，不把它当作物理帧率。
-
-Windows/WebView2 原生测试在独立临时 profile/隐藏 HWND 中运行。`workerless_timeline_native_webview2_smoke` 覆盖真实 SDK/IPC、慢状态回调隔离、文档/能力换代；`renderer_geometry_native_webview2_smoke` 从受控 Vite 同源加载实际 TerminalBuffer/TerminalRenderer，不复制算法，验证百万行、行高 12/72、原生 zoom 0.8/2 下原生 scrollbar 及首中尾 seek 的单调性、实际末行可见和 DOM 有界，CSS zoom 固定为 1。
-
-运行三个显式原生门禁（另一个终端运行当前 checkout 的 `npm.cmd run dev -- --host 127.0.0.1`；结束后关闭该测试服务）：
-
-```powershell
-$env:HYPERCOM_GEOMETRY_URL = 'http://127.0.0.1:1420/'
-cargo test --lib --manifest-path src-tauri/Cargo.toml plugin::view_runtime -- --ignored --nocapture --test-threads=1
-```
-
-正式 Playwright 回归应停止开发服务，使用 `$env:CI='1'; npm.cmd run e2e -- --workers=2` 让测试启动全新受控 Vite，避免复用经过源码 HMR 的模块图，使测试侧动态导入与 UI 持有不同的 app-lifetime 单例。
-
-默认库测试跳过这些需要原生环境/受控 URL 的用例。原生几何通过不等于已测得任意多视图并发 RX 的前台 FPS，原生通道通过也不等于完整 Tauri 授权、文件选择器交互或全部平台隔离已被证明；不承诺任意百万行、多插件组合 60fps。
+单元测试覆盖版本、背压、乱序、过滤、冻结、只读数据源和时钟；Playwright 的 Chromium 几何测试覆盖终端首中尾定位与字体/缩放边界。`TerminalPerformance.test.ts` 只提供索引与 jsdom CPU 样本，不代表 WebView2 帧率。Windows/WebView2 的 `workerless_timeline_native_webview2_smoke` 和 `renderer_geometry_native_webview2_smoke` 验证原生 SDK/IPC、文档代次和终端几何，但不代表完整 Tauri 授权、文件选择器或全部平台隔离已经验收。

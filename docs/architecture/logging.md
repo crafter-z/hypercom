@@ -24,7 +24,7 @@
 
 `LogSettings::from_config(&AppConfig)` + `LogManager::apply_settings(&LogSettings)` 是日志设置的**唯一**入口，两者经 `AppState::apply_runtime_config` 串联（`AppState::new` 与 `set_config` 命令共用）。因此 **`set_config` 是唯一同步点**，前端不再手动同步。
 
-- 旧的逐字段 `set_log_*` 命令（`set_log_split_size` / `set_log_split_enabled` / `set_log_filename_format` / `set_log_auto_save` / `set_log_encoding` 等 6 个）、`sync_log_manager_from_config` 与前端 `syncLogSettingsToBackend` 已删除。当前命令总量及注册守卫见[配置模块](config.md#命令)，不在日志模块维护第二份总数。
+- 日志设置不提供逐字段命令；`AppState::apply_runtime_config` 通过 `LogSettings::from_config` 和 `LogManager::apply_settings` 统一应用。命令注册与配置保存见[配置模块](config.md#命令)。
 - `log_format`（string/hex/binary）**不属于** `LogSettings`——同一时刻不同端口可用不同格式，由 `start_logging` 命令按端口逐次传入。
 - `apply_settings` 对空 `log_directory` 有守卫：空串不覆盖当前根（首次启动 config.json 的 `logDirectory` 可能为空）；换目录会显式收尾活动 writer 并在新根下重开，失败则把快照目录回滚，绝不留下「UI 列 A、实际写 B」的撕裂状态。
 
@@ -37,23 +37,28 @@
 - 全部准备成功后不可失败地替换活动句柄/路径/累计大小，保留锁定格式、编码、前缀及会话；发布新根、更新会话归属，再清旧源。提交后清源失败保留 durable 副本并记录残留，不返回“根未切换”的失败；返回数量仅计成功清除旧源的文件。位于新父根内的残留源保持原端口归属。
 - `set_directory` 是只切换写入根、不搬历史的独立操作；不能用它的“路径已在新根内”判断代替迁移交接。`migration_tests.rs` 覆盖三种布局的活动缓冲、强制 copy 回退、父/子/同根、冲突回滚、半字符、共享文件、分片、源清理失败及并发闸门；真实跨卷选择器和高压 UART 仍需安装包实机验收。
 
-### RX 日志行组装（issue #5-9/10）
+### RX 日志行组装
 
 - `LogLineAssembler`（`assembler.rs`）：CR/LF/跨事件CRLF组行与`pending_cr`/`just_forced`边界语义；`take_tail` 取尾部未成行残字节。4096字节无分隔符强制flush按writer锁定的UTF-8/GBK字符边界最多延迟3字节，避免字符被拆成替换符；畸形流仍有4099字节硬边界，单字节编码按原阈值。与前端`rxAssembler`保持同一切分口径。
 - `LogManager::write_rx`：RX 方向组行落盘（不再按读取块一行）；TX 保持直写 `write`。RX 尾部滞留 ≥250ms（`RX_TAIL_SILENCE_FLUSH`）时，下一个事件先经 `flush_stale_rx_tail` 把尾部冲刷成行，长停顿的半行不会无限滞留。
 - `close_writer`、writer 替换、`flush_all`（崩溃收尾）和活动日志 `save_log_as` 都先把尚未终结的 RX 尾部写成最后一行；250ms 静默冲刷遇到**未完成的多字节字符**会延后到下一个事件（避免把一个 UTF-8/GBK 字符拆成 U+FFFD + 续字节），关闭路径仍强制落盘，再 flush/sync；仅刷 `BufWriter` 不会触及组装器内的半行。分片滚动保留组装器，跨片尾部不会被清空。
 - 续写模式替换同端口 writer 时，如果新旧路径相同，该文件仍归新 writer 所有；旧 writer 收尾不得将它当作空日志删除，否则 Unix 下后续写入会落到已解除链接的句柄。
-- 空行不落盘守卫：`PortLogWriter::write_line` 顶部 `data.is_empty()` 直接返 `Ok`；string 格式 decode 后 `trim_end_matches(['\r','\n'])` 为空（只含行结束符的内容）同样跳过（issue #12：日志空行不落盘）。`close_writer` 收尾时 0 字节文件经 `retire_path` **删除**（有内容的文件登记进会话反查表）。
+- 空行不落盘守卫：`PortLogWriter::write_line` 顶部 `data.is_empty()` 直接返 `Ok`；string 格式 decode 后 `trim_end_matches(['\r','\n'])` 为空（只含行结束符的内容）同样跳过（：日志空行不落盘）。`close_writer` 收尾时 0 字节文件经 `retire_path` **删除**（有内容的文件登记进会话反查表）。
 - 新增日志写入路径不要绕过这两个守卫（组装器仍会产出空块，这是刻意的行边界语义）。
 
 ### 分片 / 子目录 / 编码 / 每会话新文件
 
 - `log_split_enabled` / `log_split_size_mb`：`LogManager::maybe_split` → `PortLogWriter::needs_split`（阈值判定 `should_split` + 分片失败 5s 退避）超阈值自动分片；**split 续片经 `PortLogWriter::rotate(force_new_file=true)` 强制唯一化（与 `logNewFilePerSession` 开关无关）**——粗粒度模板（`[com]`/`[com]-[date]`）下 append 重开刚关闭的超阈值文件会令 `current_size` 从超阈值初始化、每写必分片（死循环）。`rotate` 先把新文件开好再替换，失败时旧 writer 原封不动继续可用。
-- `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：`naming::subdir_component` 产出子目录、`naming::allocate_file` 按策略 join（`create_dir_all`）；`list_files` 与目录迁移共用 `collect_log_paths` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。迁移仅处理 `.log`，保留根内相对目录结构、创建目标父目录、同名目标跳过不覆盖；目标位于源根内时跳过其已有子树，同根迁移为空操作，跨卷回退到 copy + remove；删除失败不算成功迁移。
+- `log_subdir_mode: 'none'|'date'|'port'`（默认 `date`，非法值 clamp 回 `date`，与配置端校验口径一致）：
+aming::subdir_component` 产出子目录、
+aming::allocate_file` 按策略 join（`create_dir_all`）；`list_files` 与目录迁移共用 `collect_log_paths` 递归下钻（`MAX_LIST_DEPTH=16`，防目录联接成环）。迁移仅处理 `.log`，保留根内相对目录结构、创建目标父目录、同名目标跳过不覆盖；目标位于源根内时跳过其已有子树，同根迁移为空操作，跨卷回退到 copy + remove；删除失败不算成功迁移。
 - 文件名模板替换完成后，最终 stem 与端口名一样经过 `sanitize_filename_component`：模板中的绝对路径、路径分隔符和 `..` 不得把日志带出根目录；子目录布局只由 `logSubdirMode` 控制。
 - `log_include_timestamp` / `log_include_direction`（缺省 true）：控制 `PortLogWriter::write_line` 是否 emit `[timestamp] ` / `RX|TX ` 前缀；两者都关 → 裸数据行。它们与 `format` / `encoding` 一样锁于 `create_writer` 时（`WriterSpec`），后续重开沿用创建时锁定的值。
 - `log_encoding`：`create_writer_with_encoding` 按编码解码（GBK 等，`decode_bytes`）。
-- `log_new_file_per_session`（默认关，保持续写）：每次 `create_writer`（打开串口/重连）用 `FileMode::Unique` 经 `naming::open_unique` 以 `create_new(true)` 原子分配**不存在**的文件（同名冲突依次 `name-1.log`/`name-2.log`…，数字插扩展名前），绝不续写。
+- `log_new_file_per_session`（默认关，保持续写）：每次 `create_writer`（打开串口/重连）用 `FileMode::Unique` 经
+aming::open_unique` 以 `create_new(true)` 原子分配**不存在**的文件（同名冲突依次
+ame-1.log`/
+ame-2.log`…，数字插扩展名前），绝不续写。
 - `list_files` 的 `created_at` 经 `file_timestamp`：`created()` 缺失时回退 `modified()`，避免 UI 按时间排序时全部落到 1970。
 - **日志文件 → port_id 的解析口径与已知边界**：`SessionPaths` 会话登记缓存最多 `MAX_SESSION_PATHS=4096` 个唯一路径（创建/分片/换目录/关闭时更新），优先保留活跃映射，超限淘汰最旧非活跃历史；空日志删除时移除，切目录时释放旧根，`list_files` 在锁外核实并清理明确不存在的历史项。该上限只约束内存元数据，不删除或限制日志文件。`list_files` 优先查缓存；查不到时回退文件名启发式（stem 按 `-` 切首段）。默认模板 `[com]-[datetime]` 下首段就是 port_id，因此**默认配置**在重启或缓存淘汰后仍能正确归属；但模板把 `[com]` 放在非首位（如 `log_[com]_[date]`）时，重启、历史映射淘汰或切走后切回目录时归属可能失败或误判，`save_log_as` 的按端口回退选文件也受同一限制。未引入持久化索引；如需跨会话和大量历史文件的精确归属，应另设计持久化索引并以旧文件启发式兜底。
 - TX 日志经 `build_tx_bytes`（与实际发送字节同源，见 serial.md / transmission.md）。
@@ -62,7 +67,7 @@
 
 `start_logging` / `stop_logging` / `pick_and_save_log` / `get_log_files` / `open_path` / `open_log_directory` / `migrate_log_directory`（**无 `set_log_*`**；`save_log_as` 拒绝把活动文件拷到自身，`migrate_log_directory` 只接受当前活动日志根）。跨 `.await` 锁纪律：提取 + clone + drop `MutexGuard` 再 await（`commands/log.rs` 是示范模式）。
 
-## 应用诊断日志（diaglog，issue #5-2）
+## 应用诊断日志（diaglog）
 
 - 后端 `diaglog.rs` 的 `DiagLogger`：后端 `log::*` + 前端 `console.*`（`utils/diagLog.ts` 的 `setupDiagLogCapture` 拦截转发）统一落盘 `%APPDATA%/hypercom/diag/hypercom-debug.log`（单文件 512KB 轮转，`.log.1`~`.log.3` 保留 3 份）。写入即 flush，保证 `read_diag_log` 能读到最新内容；读取按「最旧备份 → 最新活跃」拼接后取末尾 `limit` 行。`Log::enabled` 尊重 `enabled` 开关（关闭时 `log::*` 宏在格式化参数前短路）。
 - 开关 `config.diagLogEnabled`（Rust 序列化名，`AppState::apply_runtime_config` 里经 `DiagLogger::set_enabled` 同步）；查看入口「关于 → 诊断日志」（`shared/DiagnosticLogDialog.tsx`）。

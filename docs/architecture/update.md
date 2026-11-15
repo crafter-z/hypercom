@@ -1,6 +1,6 @@
 # 自动更新模块
 
-preview/stable 双通道自动更新（issue #12）。发版与签名见 [`release.md`](release.md)。
+preview/stable 双通道自动更新。发版与签名见 [`release.md`](release.md)。
 
 ## 通道模型（v1.2 定稿）
 

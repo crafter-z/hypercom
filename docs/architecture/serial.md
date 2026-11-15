@@ -44,7 +44,7 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► open_serial_
 - Windows 的 `enumerate_system_ports` 委托 `ports_windows::enumerate`，以注册表值顺序作为默认添加顺序，不按 COM 编号排序，也不读取设备添加时间。只接受 `REG_SZ` / `REG_EXPAND_SZ` 且形如 `COM<数字>` 的值；重名（不区分大小写，如 `COM10` / `com10`）保留首次出现，避免把同一端口渲染成两个 dnd-kit 项。键不存在返回空列表；读取错误正常上报；元数据（厂商/产品）失败只记录告警，不改变端口成员与顺序。其他平台沿用 `serialport::available_ports()`。
 - `mergePorts(incoming, existing, portOrder)` 独立合并运行态（status/alias/isHidden/groupId/连接参数/`protocolTemplateId`/`toolRunning`/`mode`/`displayView`/连接代次）。会话默认 `portOrder='added'`，每次刷新按本次枚举排列，暂时缺失的活动端口放在末尾并保留原有宽限期。拖拽或端口号排序切到 `manual`，保留现有顺序并追加新端口；选择「按添加顺序排序」切回 `added` 并立即刷新。响应完成时读取最新排序意图，迟到响应不会覆盖用户刚选的规则。
 
-### 热插拔语义（issue #12）
+### 热插拔语义
 
 - fresh 枚举命中的端口保留 `connected`/`connecting`（真实会话），**不保留 `error`**——重置为 `disconnected`，否则本次 open 失败的状态被每次轮询永久重建，刷新按钮（与轮询同一条 `refreshPorts`→`mergePorts` 链）永远救不回。
 - 从枚举消失的 `connected`/`connecting` 端口经 union-back 保留**最多 `MAX_MISSING_POLLS=3` 轮**（模块级 `ghostMissingPolls`），超限放弃——拔出后读线程可能永不发 `disconnected`（空闲），无上限保留会产生幽灵端口。
@@ -72,7 +72,7 @@ openPort(portId, baud)
 - **陈旧句柄守卫**：异常断线后陈旧句柄留在 `ports`，`open_port` 通过 live/session generation 与系统枚举交叉核对；旧会话只在身份仍匹配时回收，避免并发打开误删新会话。
 - 每个成功打开会话分配单调 `connection_generation`，`serial:status` 事件携带该值。文件发送、读线程终态、TTY reader 和外部工具恢复都必须验证会话代次；旧 reader/旧工具不能覆盖新连接的 `connected` / `disconnected` / `error` 状态。普通发送（`send_serial_data`）与文件发送还接受前端观察到的 `expected_generation`，排队跨重连的旧发送在校验写句柄前被拒绝。
 - `send_serial_data` 的真实串口和 GIT:BASH 写入都在全局 `SerialManager` 锁外执行：锁内只领取 session-bound 写租约，关闭在锁外等待租约/reader/child 收尾。TTY 写入检查 `running`，关闭会 detach 句柄后再 kill、drop master、join 和 reap。
-- **发送异步化（issue #6-1）**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 是 `Arc<Mutex<SerialManager>>`、`log_manager` 是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），`spawn_blocking` 闭包克隆这两个 `Arc` 供 `'static` 使用。
+- **发送异步化**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 是 `Arc<Mutex<SerialManager>>`、`log_manager` 是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），`spawn_blocking` 闭包克隆这两个 `Arc` 供 `'static` 使用。
 - `openPort`/`closePort`/自动重连共用前端 per-port operation lane；迟到的 invoke 完成和 `serial:status` 事件按意图/代次丢弃，不再用旧结果覆盖手动关闭。手动打开另持有覆盖排队与 invoke 的租约：旧 reader 的终态不能取消尚未建立新会话的打开；租约期间重连提示先合并，待打开完成后仍断线才交给恢复流程。
 - 关闭时由 `close_serial_port` 在全局 manager 锁外等待 reader、TTY child、真实写租约和关闭屏障；完成后清理已完成 barrier，避免按历史 portId 无限保留所有权记录。
 - 正常退出先关闭新串口工作准入，取消文件/工具任务，锁外 join/reap 所有会话，再 flush 日志和电源抑制；重复 shutdown 幂等。
@@ -100,14 +100,9 @@ openPort(portId, baud)
 - `set_params` 的 `data_bits` 走 `u8` 直传（命令层去掉 `to_string()` 往返）。
 - 参数预设（`portPresets`）是 config 实体，由设置页管理、ParamsSection 下拉使用（见 config.md）。
 
-## 读写句柄分离与发送期限（issue #6-10）
+## 读写句柄分离与发送期限
 
-此前「TX 后等一分钟才收到响应」根因有二：
-
-1. 读写共用同一把 per-port 锁——TX 的 write_all+flush 阻塞时读线程拿不到锁，响应到了 OS 接收缓冲也读不走；
-2. 热路径 `flush()`（Windows = FlushFileBuffers）无超时、受流控约束（对端 CTS 拉低/XOFF 时无界阻塞）。
-
-修复：`SerialPortHandle` try_clone 拆 read/write 双句柄；读线程只锁读、发送只锁写；热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 与 Interrupted 都重试至总期限）。发送改**两段式**：全局锁内 `get_write_handle` 查找并取得写租约 → 释放全局锁 → 锁外只持 per-port 写锁写；关闭先从注册表摘除端口、停止读线程，再锁外等待所有已取得的写租约完成并释放写句柄。端口列表轮询/其它端口命令不被 TX 阻塞拖死；当前端口快速关闭/重开不会冲撞仍被 TX 占用的独占句柄。
+发送和接收使用独立句柄与锁，避免发送阻塞影响读线程。发送路径不调用无界 `flush()`，改用带总期限的写入。当前实现：`SerialPortHandle` try_clone 拆 read/write 双句柄；读线程只锁读、发送只锁写；热路径去 flush + `write_all_with_deadline` 总写期限（`WRITE_TOTAL_DEADLINE` 2s，Ok(0) 立即报错、TimedOut 与 Interrupted 都重试至总期限）。发送改**两段式**：全局锁内 `get_write_handle` 查找并取得写租约 → 释放全局锁 → 锁外只持 per-port 写锁写；关闭先从注册表摘除端口、停止读线程，再锁外等待所有已取得的写租约完成并释放写句柄。端口列表轮询/其它端口命令不被 TX 阻塞拖死；当前端口快速关闭/重开不会冲撞仍被 TX 占用的独占句柄。
 
 ## 虚拟端口（SIM:Loopback）
 
@@ -124,21 +119,23 @@ openPort(portId, baud)
 - `stream_tool_output` 对 stdout/stderr 保持短行与空行语义，超长无换行输出以最多 16 KiB 原始字节分段发 `tool:output`；跨块 UTF-8/CRLF 尾部留至下一段，非法 UTF-8 仍用 lossy 解码。共用 256 项有界通道，避免单行缓冲无限增长；这是后端读取队列边界，不是 Tauri/WebView 事件队列的总内存保证。
 - 工具 reader、子进程和串口恢复共享同一 owner；工具退出/恢复完成后才发 `tool:exit`，程序性关闭不触发错误的用户回贴。Windows 克隆句柄不继承到工具；Unix/Windows 进程树终止与 reader 收尾必须纳入 owner teardown。
 - `run_port_tool` 在全局串口锁外等待读线程和写租约；真实串口的 Windows 写克隆句柄必须清除 `HANDLE_FLAG_INHERIT`，否则并行启动的兄弟工具可能继承尚未关闭的 COM 句柄，导致 HyperCom 关闭后仍由子进程占有端口。写租约在释放实际 Arc 句柄后才通知关闭完成。正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。
-- 分组整组执行（issue #5-7）：`usePortToolActions.runToolForGroup` + `GroupToolDialog`——严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。
+- 分组整组执行：`usePortToolActions.runToolForGroup` + `GroupToolDialog`——严格配置判定=配置存在+portId 匹配+`command.trim() !== ''`；`utils/groupTool.ts` `partitionGroupPorts` 纯函数；**`Promise.all` 并行**运行已配置端口（跳过运行中端口，单端口失败不中断整组）。
 - 标签页菜单与侧边栏同源（`usePortToolActions`），文案复用 `sidebar.port.contextMenu.*` key。
 
 ## 端口排序与分组
 
-- **排序一次性动作（issue #6-4）**：`sortPortsByNumber()`（重排 ports + 各分组 portIds，自然序）；Sidebar **无持久 sortMode 开关**，拖拽/分组始终可用。`naturalCompare`（`utils/portSort.ts`）数字段按数值比较（COM1<COM2<COM12）。组内顺序随 `save_port_groups` 持久化、未分组顺序不保存。
+- **排序一次性动作**：`sortPortsByNumber()`（重排 ports + 各分组 portIds，自然序）；Sidebar **无持久 sortMode 开关**，拖拽/分组始终可用。
+aturalCompare`（`utils/portSort.ts`）数字段按数值比较（COM1<COM2<COM12）。组内顺序随 `save_port_groups` 持久化、未分组顺序不保存。
 - **添加顺序为默认**：「按添加顺序排序」与「按端口号排序」同级，当前添加顺序项高亮；选择后重新枚举，并在后续轮询中持续跟随。排序意图仅存在本次会话，不新增配置字段，重启回到添加顺序；分组成员及隐藏状态不受排序切换影响。
-- **分组控制（issue #6-5）**：按端口分组态动态渲染右键菜单项——未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」。i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}`。
+- **分组控制**：按端口分组态动态渲染右键菜单项——未分组且有组→逐组「移入分组『{{name}}』」；未分组无组→「新建分组并移入」；已在组里→「移出分组」。i18n keys `sidebar.port.contextMenu.{removeFromGroup,addToGroup,createGroupWithPort}`。
 - 分组是第 7 类 config 实体（`PortGroupEntry`），启动经 `get_config` 恢复并回填 `ports.groupId`；变更 500ms 防抖自动保存（无手动「保存布局」按钮）。
 
 ## 单元测试纪律（`serial/`）
 
 - 测试用**显式导入**（`use super::{...}` 指名符号），绝不 `use super::*`：glob 会把 `serialport` FFI 拖进测试二进制，Windows `cargo test` harness 因缺应用清单而 `0xc0000139` 加载失败。
 - 纯函数测试（`PortKind::of`、`check_virtual_enabled`、hex 解析、`build_tx_bytes` 各分支、`write_all_with_deadline` 的 std mock writer）在 Windows 运行；引用 `serialport` 类型 / `SerialManager` 的测试标 `#[cfg(not(target_os = "windows"))]`，在 Linux/macOS CI 运行。
-- `build_tx_bytes` 是「入参 → 写入字节」的唯一实现，`send_data` 与 TX 日志同走它；`TxOutcome::bytes` 是**实际上线字节**的唯一来源——TTY 行结束符归一、SIM 频率命令被吞、行结束符追加都只发生一次，TX 日志与前端字节数不再按入参重算（否则会出现「日志记 7 字节、线上 6 字节」这类不一致）。`emit_rx_event` 只取一次 `now()`，格式化串与毫秒同源。
+- `build_tx_bytes` 是「入参 → 写入字节」的唯一实现，`send_data` 与 TX 日志同走它；`TxOutcome::bytes` 是**实际上线字节**的唯一来源——TTY 行结束符归一、SIM 频率命令被吞、行结束符追加都只发生一次，TX 日志与前端字节数不再按入参重算（否则会出现「日志记 7 字节、线上 6 字节」这类不一致）。`emit_rx_event` 只取一次
+ow()`，格式化串与毫秒同源。
 
 ## 数据流
 

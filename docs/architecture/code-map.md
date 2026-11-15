@@ -1,97 +1,78 @@
 # 符号与模块索引
 
-> 本文用于跨模块符号定位。逐目录文件清单见各子目录 `AGENTS.md`，模块行为细节见对应架构文档；新增代码优先复用下表中的模块实现，勿再造第二份。
+本文是跨模块复用入口。新增实现前先查这里；同一行为只保留一个生产实现。引用只写文件与符号名，不写行号。
 
-## 前端模块索引（新代码优先复用）
+## 前端复用模块
 
-| 模块 | 职责 |
-|---|---|
-| `utils/paneTree.ts` | `PaneNode` 树算法：`newPaneId` / `findLeafById` / `findLeafByTabId` / `findBranchById` / `findParentBranch` / `collectLeaves` / `countLeaves` / `pruneTree`。store 只留 action；`useAppStore` 另导出 `getClosingTabIds(tabId, scope)` 供批量关闭取与 store 关闭动作同一集合 |
-| `utils/asciiNoise.ts` | `isLikelyAsciiNoise`——ASCII 日志的纯字节乱码行判定；仅显示过滤使用，不改接收/日志字节 |
-| `utils/hexFormat.ts` | `hexByte` / `bytesToSpacedHex`——**bytes→HEX 的唯一实现**（terminalSearch / protocolRenderer / sendUtils / triggerEngine / TerminalRenderer 共用） |
-| `utils/hexUtils.ts` | `isValidHexInput` / `parseHexBytes`：与后端同口径的严格 HEX 输入；`hexToString` / `stringToHex`：UTF-8 转换（解码复用 lineText）。sendUtils 的预览函数是同一函数别名；终端复制、文本弹窗、实体校验与 HEX 提醒共用 |
-| `shared/SegmentedControl.tsx` | 受控互斥 radiogroup：单 Tab 停靠点、方向键/Home/End 跳过禁用项、重复激活不清空；TRX/TTY、显示/发送格式及联动组模式共用 |
-| `utils/safeRegex.ts` | `isSafeRegexPattern` / `tryCreateSafeRegex`：高亮/触发执行与实体保存共用的语法、长度及保守嵌套量词策略；不是完整复杂度证明或执行隔离 |
-| `utils/bounds.ts` | `CONFIG_BOUNDS` / `BoundedNumericSetting`——数值边界的前端镜像 |
-| `utils/uiScale.ts` | `normalizeUiScalePercent` / `applyUiScale`——按当前 WebView 应用持久化 UI 缩放；调用 Tauri `getCurrentWebview().setZoom(percent / 100)` |
-| `utils/sequential.ts` | `runSequential<T>`——串行发送/循环的通用次序原语 |
-| `stores/useSystemStore.ts` | `systemStatus` / `trafficStats` / `simulationMode` / `ui` + `setSystemStatus` / `setTrafficStats` / `clearTrafficStats` / `setSimulationMode` / `setUIState` / `toggleConfigModal` / `setConfigActiveTab`——**从 `useAppStore` 拆出** |
-| `stores/releaseTerminalState.ts` | `releaseUnusedPortState(portId)`：最后一个显示/行消费者退休后才回收 terminals / trafficStats / TX 历史；`releaseTerminalState` 委托同一守卫 |
-| `ConfigModal/hooks/useEntityPage.ts` + `utils/entityEditor.ts` | 五类实体页共用会话草稿、新增/删除/启用/排序暂存、显式保存/放弃；挂载不回库覆盖，提交成功才发布 `useRuleStore` 运行态；单条保存保留其他草稿 |
-| `OperationPanel/hooks/useSequentialSend.ts` | **循环发送两套状态机合一**（原弹窗侧与面板侧的分叉已消除） |
-| `OperationPanel/hooks/{useHexCompose,useFileSend,useQuickStripLayout,useSendHistoryRecall}.ts` | HEX 组包 / 文件发送（守卫 + TX 统计）/ 快捷条宽度自适应（`utils/sendStrip.ts` `computeFitCount`）/ 发送历史回溯 |
-| `shared/{useOutsideDismiss,useDragResize,menuPlacement}.ts` + `shared/PluginViewPicker.tsx` | 三个共享交互原语：外点关闭 / 拖拽调整尺寸 / 菜单定位；PluginViewPicker 统一插件视图自定义选择浮层（勿在各组件内手写第五份） |
-| `Popout/{usePopoutSync,usePanelTextConfig,usePortSerialFeed}.ts` | 弹窗↔主窗同步（命令集/活动标签/端口状态事件总线）/ 面板文本配置 / 终端弹窗 RX 喂入（快照交接 + 时间戳闸门防重复） |
-| `shared/usePluginViewOverlay.ts` + `utils/pluginViewOverlay.ts` | `usePluginViewOverlay` / `acquirePluginViewOverlay`：菜单等待原生矩形裁剪，未覆盖内容保持可见；模态层等待原生子视图隐藏后显示；不属于 `src/hooks/` 的 18 个 hook 文件 |
-| `MainDisplay/SerialContentHost.tsx` + `utils/tabContentPlacement.ts` | 原始 TRX/TTY 实例由分屏树之外的稳定宿主拥有，按 workspace tab UUID 保持身份；切标签、跨分屏移动与插件替换只改变位置/可见性 |
-| `utils/pluginViewRuntime.ts` / `pluginViewInput.ts` / `pluginViewJson.ts` | 原生视图会话、Worker/UI 状态 ACK、固定端口输入租约与有界 JSON；`services/pluginView.ts` 为四个原生命令及消息事件的 IPC 门面 |
-| `shared/SortableEditorList.tsx` + `utils/commandOrder.ts` | 手柄专用指针/键盘拖排序，命令数组与连续 order 统一；行壳提供上下插入，搜索期间禁排 |
-| `utils/editorLeave.ts` + `shared/EditorLeaveDialog.tsx` | 保存并关闭/放弃并关闭/继续编辑；保存失败及迟到编辑阻止关闭，主窗和命令面板均等待跨窗确认；原生关闭经 complete_editor_close 审批 |
-| `utils/configWriteQueue.ts` + `jsonEqual.ts` | 配置/实体/元数据、备份导入与预设写入串行化；JSON 语义比较忽略对象字段顺序，主窗草稿与弹窗修改归因共用，避免 Rust 序列化产生假冲突 |
-| `shared/useDialogLifecycle.ts` + `shared/Modal.tsx` | 顶层弹窗所有权、可见控件 Tab 循环、Escape、焦点恢复；Modal/时间联动/离开审批/插件授权与卸载/快速入门共用。样式与业务关闭审批不进入生命周期原语 |
-| `utils/commandExecution.ts` | `executeQuickCommand`：胶囊/弹窗列表单步执行，发送仍经 sendToPort，改参持有短期 flowRuntime 独占；`applyCommandParams`：循环与单步唯一改参动作，保留目标帧参数、连接代次守卫、成功后更新端口与当前操作态 |
-| `utils/textSend.ts` | 弹窗文本模式的纯函数：按 CRLF/LF 切行（裁尾部空行）、HEX 行合法性与间隔收敛，DOM-free 可单测 |
-| `utils/logReplay.ts` | 日志解析（`ParsedLogLine` 允许未知时间，显式 UTC 偏移；不按相邻行 sleep） |
-| `utils/timeline/{coordinator,scheduler,trxTimelineAdapter,ReplayClock}.ts` | app-lifetime 时间组、preview/commit 与代次、每目标最新槽背压、公平预算、TRX 适配与单调播放时钟 |
-| `utils/terminal/{TerminalWrapLayout,TerminalHeightIndex}.ts` | 默认关闭的文本软换行几何：屏内批量测量、稀疏高度前缀索引与固定缓存上限；渲染节点/选区仍由 TerminalRenderer 共用 |
-| `utils/terminal/{TerminalSource,TerminalTimeIndex}.ts` | 实时/回放共用只读行接口、按 `(time,seq)` 维护的可见时间索引 |
-| `utils/replay/{ReplayDocument,replayRuntime}.ts` | 完整只读历史、轨道/分片与资源预算、宿主授权分块导入、共享组时钟及描述恢复 |
-| `MainDisplay/TimelineControls.tsx` + `utils/terminalNavigation.ts` | 链条入口/成员/校时弹窗与显式导航生命周期；整组跟随复用 Pin，无额外组条；不把裸 scroll 当用户驾驶权 |
-| `utils/sessionSnapshot.ts` | 会话快照解析/校验（`parseSessionSnapshot`：按可用端口过滤并重建 UUID），启动恢复用 |
+| 能力 | 文件与符号 | 约束 |
+|---|---|---|
+| 端口/标签解析 | `src/stores/useAppStore.ts`：`getTabPortId`、`getActivePortId`、`findSerialTabByPortId` | `TabItem.id` 是工作区 UUID；serial 用 `portId`，plugin 用 `boundPortId`，replay 无端口；不回退 last-port |
+| pane tree | `src/utils/paneTree.ts`：`newPaneId`、`findLeafById`、`findLeafByTabId`、`findParentBranch`、`findBranchById`、`collectLeaves`、`countLeaves`、`pruneTree` | 纯函数；store、拖拽和恢复共用 |
+| 配置写入 | `src/utils/configWriteQueue.ts`：`enqueueConfigWrite`；`src/hooks/useConfigPersistence.ts`：`saveConfig` | 串行写入、revision CAS；成功后才推进基线 |
+| 实体会话草稿 | `src/utils/entityEditor.ts`；`src/components/ConfigModal/hooks/useEntityPage.ts`：`useEntityPage` | 页面编辑不直接修改已提交运行态 |
+| 数值边界 | `src/utils/bounds.ts`：`CONFIG_BOUNDS`；Rust `src-tauri/src/config/mod.rs`：`CONFIG_BOUNDS` | `src/utils/bounds.test.ts` 校验两侧键与范围一致 |
+| 文本解码 | `src/utils/lineText.ts`：`createDecoder`、`decodeBytes`、`getLineText` | 唯一 TextDecoder 工厂；`ignoreBOM: false` |
+| HEX 输入 | `src/utils/hexUtils.ts`：`isValidHexInput`、`parseHexBytes`、`hexToString`、`stringToHex` | 奇数位/非法字符拒绝；发送、复制、实体校验共用 |
+| 字节转 HEX | `src/utils/hexFormat.ts`：`hexByte`、`bytesToSpacedHex` | 唯一格式化实现 |
+| 发送与守卫 | `src/hooks/useSerialSend.ts`：`sendToPort`；`src/utils/sendGuard.ts` | TRX 快捷、循环、触发和插件发送共用连接/代次守卫 |
+| RX 管线 | `src/utils/rxAssembler.ts`：`RxLineAssembler`；`src/utils/rxPipeline.ts`：`RxPipeline`、`getRxPipeline` | 原始字节组行、rAF 批写、断线/编码切换 flush；主应用只装配一次 |
+| TTY I/O | `src/utils/ttyService.ts`：`ttyService` | per-port 解码、队列、键盘 `send`、显式 `sendData`、`disconnect` |
+| 终端缓冲/渲染 | `src/utils/terminal/TerminalBuffer.ts`：`TerminalBuffer`；`TerminalRenderer.ts`：`TerminalRenderer`；`viewportManager.ts`：`getViewportManager` | 行缓冲脱离 React；显示、搜索、回放复用同一引擎 |
+| 终端搜索/过滤 | `src/utils/terminalSearch.ts`；`src/utils/lineFilter.ts` | 不在组件中重复扫描或解码 |
+| 顺序/流程调度 | `src/utils/sequential.ts`：`runSequential`；`src/utils/flowRuntime.ts`；`src/utils/flowSchedule.ts`：`advanceFlow` | 循环发送和命令步骤共用 |
+| 命令执行 | `src/utils/commandExecution.ts`：`executeQuickCommand`、`applyCommandParams`；`src/utils/commandOrder.ts`：`orderedCommands` | 单步与循环都从同一命令快照执行 |
+| 规则安全 | `src/utils/cssColor.ts`：`safeCssColor`；`src/utils/safeRegex.ts`：`isSafeRegexPattern`、`tryCreateSafeRegex` | 用户颜色/正则在保存和执行入口均复核 |
+| UI 缩放 | `src/utils/uiScale.ts`：`normalizeUiScalePercent`、`applyUiScale` | 每个 WebView 独立调用 `setZoom` |
+| 时间联动 | `src/utils/timeline/coordinator.ts`：`timelineCoordinator`；`scheduler.ts`：`TimelineScheduler`；`trxTimelineAdapter.ts`：`createTrxTimelineAdapter` | preview/commit、代次和背压的唯一来源 |
+| 只读回放 | `src/utils/replay/ReplayDocument.ts`、`src/utils/replay/replayRuntime.ts` | 回放只读，不写实时 RX、TX 或触发旁路 |
+| 插件宿主 | `src/hooks/usePlugins.ts`：`usePluginHost`；`src/utils/pluginHost.ts`；`pluginObserver.ts`；`pluginBytesObserver.ts` | 每次 RPC 复核安装身份、启用态和权限 |
+| 插件配置快照 | `src/utils/pluginConfigSnapshot.ts`：`syncPluginListSnapshot`、`syncStorePluginConfigs` | 后端 revision 单调；旧快照不可恢复权限 |
+| 插件视图二进制 | `src/utils/pluginViewBinary.ts`；`src/utils/pluginViewJson.ts` | 分块、ACK、document/epoch 绑定；不塞实时状态 JSON |
+| 插件视图输入 | `src/utils/pluginViewInput.ts`：`pluginViewInput` | 端口输入租约按 bytes/lines/none 管理 |
+| 原生视图遮挡 | `src/components/shared/usePluginViewOverlay.ts`；`src/utils/pluginViewOverlay.ts` | 等待原生裁剪/隐藏完成后显示宿主浮层 |
+| 编辑关闭审批 | `src/utils/editorLeave.ts`；`src/shared/EditorLeaveDialog.tsx` | 保存/放弃/继续；失败和迟到编辑不得放行关闭 |
+| 事件服务 | `src/services/event.ts`；`src/services/eventContract.test.ts` | 事件载荷与 Rust wire 形状在测试中对齐 |
 
-## 前端符号
+## 状态模块
 
-> 前端为人工维护的符号表（改动后同步本表）。
+| store | 文件 | 责任 |
+|---|---|---|
+| `useAppStore` | `src/stores/useAppStore.ts` | ports、tabs、paneTree、config、groups、端口元数据 |
+| `useOperationStore` | `src/stores/useOperationStore.ts` | serial 参数、发送输入、快捷/循环操作态 |
+| `useTerminalStore` | `src/stores/useTerminalStore.ts` | 显示配置和连接显示态，不存行数组 |
+| `useRuleStore` | `src/stores/useRuleStore.ts` | 已提交的 highlight/protocol/command/tool/trigger 运行态 |
+| `useSystemStore` | `src/stores/useSystemStore.ts` | systemStatus、trafficStats、simulationMode、ui |
+| `useToastStore` | `src/stores/useToastStore.ts` | 宿主通知与 `pushPlugin` 插件通知 |
+| 释放守卫 | `src/stores/releaseTerminalState.ts` | `releaseUnusedPortState`：最后显示/行消费者退休后回收端口显示态、统计和 TX 历史 |
 
-| Symbol | File | Type | Role |
-|--------|------|------|------|
-| `useAppStore` | `src/stores/useAppStore.ts` | Zustand store | tabs / ports / `paneTree` / config / groups + `sortPortsByNumber`；**不持有** systemStatus/trafficStats/simulationMode/ui（见 `useSystemStore`），无树算法（见 `utils/paneTree.ts`） |
-| `getClosingTabIds` | `src/stores/useAppStore.ts` | pure fn | 批量关闭（toLeft/toRight/others）的标签集合，供 `Pane` 的 cleanup 与 store 关闭动作取同一集合 |
-| `getTabPortId` / `getActivePortId` / `findSerialTabByPortId` | `src/stores/useAppStore.ts` | pure fns | 显式 workspace→端口解析；plugin 可绑定 null，无 last-port 回退；串口引擎始终按 portId 索引 |
-| `useOperationStore` | `src/stores/useOperationStore.ts` | Zustand store | serial params + send (NO `op` prefix; NO display state); `cyclicLoops: Record<portId, boolean>` 每端口循环发送开关（`setCyclicLoop` 逐端口启停，替代旧全局 `isLoopSending`） |
-| `useTerminalStore` | `src/stores/useTerminalStore.ts` | Zustand store | 纯显示态（scrollLocked/showTimestamp/displayFormat/encoding/hideAsciiNoise/wordWrap/connectedAt）；`ensureTerminal` / `setTerminalConfig` / `setTerminalEncoding` / `setTerminalConnectedAt` / `releaseTerminal`；**无行数组、无 Immer**（行缓冲在 viewportManager 环形缓冲区） |
-| `useRuleStore` | `src/stores/useRuleStore.ts` | Zustand store | 已保存的 highlight/protocol/command/tool/trigger 运行数组及活动命令集；表单不得直接修改运行态，使用 entityEditor |
-| `useSystemStore` | `src/stores/useSystemStore.ts` | Zustand store | systemStatus / trafficStats / simulationMode / ui（+ `clearTrafficStats`） |
-| `releaseUnusedPortState` / `releaseTerminalState` | `src/stores/releaseTerminalState.ts` | pure fns | 最后一份显示/行消费者释放后统一回收 terminals + trafficStats + TX 历史，保留其他插件租约的共享状态 |
-| `paneTree` helpers | `src/utils/paneTree.ts` | pure fns | recursive `PaneNode` tree traversal（`findLeafById` / `findLeafByTabId` / `findParentBranch` / `findBranchById` / `collectLeaves` / `countLeaves` / `pruneTree` / `newPaneId`） |
-| 18 hook files: 15 个既有 hook + `usePlugins` / `usePluginUi` / `usePluginPanel` | `src/hooks/*.ts` + barrel `index.ts` | hooks | 插件宿主在主窗 `usePluginHost` 一次装配；设置页 `usePluginList` 用后端权威状态；Sidebar/UI 面板用外部 store 订阅。串口与工具 hook 仍遵循原生命周期（详 `src/hooks/AGENTS.md`）。 |
-| `RxLineAssembler` / `RxPipeline` / `getRxPipeline` | `src/utils/rxAssembler.ts`, `src/utils/rxPipeline.ts` | RX 管线 | 字节级行聚合 + rAF 批写（目标=viewportManager 环形缓冲区）+ 静默/断线/编码切换 flush + `maxLinesPerTick` 写量限制 + visibility-aware 调度 + 每端口队列上限 `maxQueuedLines`（默认 10000，超限丢最旧）；主窗与弹出窗各自模块单例（裁剪是常态滚动，不弹通知） |
-| `ttyService` | `src/utils/ttyService.ts` | module singleton | TTY 模式 RX/TX 服务：流式 UTF-8 解码（`lineText.createDecoder`）+ 每端口队列 + visibility-aware 批写 `term.write`；`attach`/`detach`/`feed`/`clear`/`disconnect`/`send`/`sendData`/`resize`；队列上限 `MAX_TTY_QUEUE`；键盘走 `send`，显式命令由 `sendToPort` 委托 `sendData`，两者共用同端口写入队列且无本地回显 |
-| `TtyView` | `src/components/MainDisplay/TtyView.tsx` | component | TTY 端口 xterm 宿主：Terminal + FitAddon fit（ResizeObserver + rAF 防抖）、onData→`ttyService.send`、onResize→`ttyService.resize`；`hidden` prop = 非活动标签（`.tty-view-hidden` display:none，恢复可见显式 re-fit，**会话跨标签保留**）；字体/字号经 `term.options` 活更新不重建；Ctrl+滚轮缩放；Terminal 实例由本组件拥有，卸载时 dispose（`ttyService.detach` 不清实例） |
-| `ReassemblerSegment` | `src/utils/protocolParser.ts` | type | `ProtocolFrameReassembler.feed()` 返回有序段数组（frame/raw 按流顺序），不再是 `{frames, flushedBytes}` |
-| Pop-out intent bridge | `hooks/usePopoutBridge.ts` + `services/popout.ts` | hook/service | separate WebViews exchange versioned editor requests/snapshot/ACKs and committed broadcasts; pending client text participates in app-exit guard; serial sends reuse sendToPort |
-| `evaluateTriggers` | `src/utils/triggerEngine.ts` | pure fn | conditional trigger matching engine (contains/exact/regex/hex) |
-| `hexFormat` | `src/utils/hexFormat.ts` | pure fns | `hexByte` / `bytesToSpacedHex`——bytes→HEX 唯一实现 |
-| `lineText` | `src/utils/lineText.ts` | pure fns | 全仓唯一 TextDecoder 工厂（`createDecoder` 缓存 / `decodeBytes` / `getLineText`，`ignoreBOM: false`） |
-| `CONFIG_BOUNDS` | `src/utils/bounds.ts` | const | 数值边界（镜像 Rust；由 `bounds.test.ts` 断言） |
-| `normalizeUiScalePercent` / `applyUiScale` | `src/utils/uiScale.ts` | runtime | 80–200% 收敛 / Tauri `getCurrentWebview().setZoom(percent / 100)`；每个 WebView 独立应用 |
-| `runSequential` | `src/utils/sequential.ts` | pure fn | 串行执行原语（循环发送/批量开关） |
-| `pluginHost` / `pluginObserver` / `pluginBytesObserver` / `pluginKv` | `src/utils/plugin*.ts` | runtime | Worker 调用时权限、RX 行/字节有界旁路、逐插件 KV 串行落盘（详 `docs/architecture/plugins.md`） |
-| `tauri` service modules | `src/services/tauri.ts` (barrel) + `src/services/*.ts` | service | 14 个非测试文件（13 域 + barrel）；插件域 `plugin.ts`、原生视图域 `pluginView.ts` |
+## Rust 后端符号
 
-## 后端符号
+| 能力 | 文件与符号 | 约束 |
+|---|---|---|
+| 命令错误 | `src-tauri/src/commands/mod.rs`：`CommandError` | 所有 Tauri 命令返回 `Result<T, CommandError>` |
+| 命令注册 | `src-tauri/src/lib.rs`：`generate_handler!` | 新命令必须注册；`test_generate_handler_matches_tauri_command_attribute` 守卫注册集合 |
+| 配置模型 | `src-tauri/src/config/mod.rs`：`AppConfig`、`Entities`、`ConfigManager` | `AppConfig` 44 个字段；`entities` 是 flatten，含 9 个实体数组；`CONFIG_BOUNDS` 是 Rust 边界来源 |
+| 运行期配置 | `src-tauri/src/lib.rs`：`AppState::apply_runtime_config` | 启动和 `set_config` 共用日志/诊断设置应用入口 |
+| 串口类别 | `src-tauri/src/serial/mod.rs`：`PortKind::of`、`check_virtual_enabled` | Real/Sim/Tty 分派及虚拟端口门控唯一入口 |
+| 真实串口句柄 | `src-tauri/src/serial/ports_real.rs`：`SerialPortHandle`、`open_real_port` | 读写 clone 分离；写入按连接代次和写租约守卫 |
+| TX 编码/期限 | `src-tauri/src/serial/codec.rs`：`parse_hex_string`、`build_tx_bytes`、`write_all_with_deadline` | 入参到实际上线字节的唯一后端实现 |
+| TTY 模拟 | `src-tauri/src/serial/tty_sim.rs`：`TtySimPortHandle`、`find_bash`、`spawn_bash` | GIT:BASH 调试能力；PTY 子进程生命周期由后端管理 |
+| 日志设置 | `src-tauri/src/logger/settings.rs`：`LogSettings::from_config`；`logger/manager.rs`：`LogManager::apply_settings` | `AppState.log_manager` 是 `Arc<LogManager>`，不包外层 mutex |
+| 日志迁移 | `src-tauri/src/logger/manager.rs`：`LogManager::migrate_directory`；`logger/migration.rs`：`PreparedLogMigration` | 活动 writer 刷盘、交接和路径登记由同一入口完成 |
+| 诊断日志 | `src-tauri/src/diaglog.rs`：`DiagLogger` | 前后端诊断日志统一落盘、轮转和清空 |
+| 系统能力 | `src-tauri/src/system.rs`：`win32_backend`、`child_process_backend`；`commands/system_cmds.rs`：`dev_only`、`is_debug_build` | 平台电源抑制与调试能力门控的集中入口 |
+| 插件事务 | `src-tauri/src/plugin/transaction.rs` | 安装/升级/卸载 journal、原子替换与中断恢复 |
+| 原生插件视图 | `src-tauri/src/plugin/view_runtime/`：`mod.rs`、`resources.rs`、`windows.rs`、`sdk.js` | 身份、资源、Windows Wry child 和视图 SDK 分层 |
+| 更新网络 | `src-tauri/src/update_network.rs`、`src-tauri/src/commands/update.rs` | 代理策略与更新检查/下载/安装命令分离 |
 
-| Symbol | File | Type | Role |
-|--------|------|------|------|
-| `CommandError` | `src-tauri/src/commands/mod.rs` | enum (thiserror) | Serial/Config/Log/System/Lock/Io/Other; manual `serde::Serialize` |
-| All Tauri commands (13 domain files, 98 registered) | `src-tauri/src/commands/*.rs` | Tauri cmd | see `src-tauri/src/commands/AGENTS.md` |
-| `ConfigManager` + `AppConfig` + `Entities` | `src-tauri/src/config/mod.rs` | struct | 44 字段 = 43 个非 flatten 字段（含 revision）+ flatten entities；9 类实体数组含 pluginConfigs。非 flatten 字段含 defaultBaudRates 数组，不统称标量；插件安装身份迁移/磁盘恢复先于 Worker 启动 |
-| `AppState` | `src-tauri/src/lib.rs` | struct | `serial_manager: Arc<Mutex<..>>`、`config_manager: Mutex<..>`、`plugin_io: tokio::sync::Mutex<()>`（插件磁盘/状态操作互斥）、`log_manager: Arc<LogManager>`、`diag_logger: Arc<..>`、`system_info: Arc<Mutex<..>>`、`tool_processes`/`file_send_cancel`/`popouts` |
-| `SerialPortHandle` | `src-tauri/src/serial/ports_real.rs` | struct | `read_port`（读线程独占，只锁读）/ `write_port`（发送路径独占，只锁写）双 `Arc<Mutex<Box<dyn SerialPort>>>` 句柄；`open_real_port` 内 DTR/RTS 设置（clone 前，设备级共享）后 `port.try_clone()`（Windows = DuplicateHandle）得写句柄、原句柄作读句柄——**不能对同一 COM 口二次 CreateFile**（crate 以 dwShareMode=0 打开）；`set_params`/`set_flow_control` 改在写句柄上（DCB/COMMTIMEOUTS 设备级、两句柄共享） |
-| `PortKind` / `check_virtual_enabled` | `src-tauri/src/serial/mod.rs` | enum / fn | 端口类别唯一分派 + 虚拟端口分派前门控 |
-| `win32_backend` / `child_process_backend` | `src-tauri/src/system.rs` | mod | 电源管理的两个平台后端（共享状态机骨架）；**没有** `win32_power`/`macos_power`/`linux_power` 模块名 |
-| `dev_only` / `is_debug_build` | `src-tauri/src/commands/system_cmds.rs` | fn | **调试能力门控唯一实现**；命令体不得再写 `#[cfg(debug_assertions)]` 双主体 |
-| `collect_app_pids` / `get_system_status` | `src-tauri/src/commands/system_cmds.rs` | fn / cmd | 应用进程树内存：本进程+后代进程（含 WebView2/Chromium 子进程）RSS 之和；CPU 仍系统级；纯函数可注入进程表便于单测 |
-| `LogSettings::from_config` | `src-tauri/src/logger/settings.rs` | fn | 日志设置的唯一构造入口 |
-| `LogManager::apply_settings` | `src-tauri/src/logger/manager.rs` | fn | 日志设置的唯一应用入口（旧逐字段 setter / `sync_log_manager_from_config` 已删） |
-| `LogManager::migrate_directory` / `PreparedLogMigration` | `src-tauri/src/logger/manager.rs` + `logger/migration.rs` | fn / struct | 活动日志迁移唯一入口：闸门内刷盘/准备/句柄交接与精确路径登记，提交后才清源；命令层不得独立 copy/delete 活动文件 |
-| `LogLineAssembler` | `src-tauri/src/logger/assembler.rs` | struct | 字节级 CR/LF/CRLF 组行 + pendingCR + 4096 强制 flush + 250ms 陈旧尾 flush（`just_forced` 语义与前端 `rxAssembler` 一致） |
-| `TtySimPortHandle` / `find_bash` / `spawn_bash` | `src-tauri/src/serial/tty_sim.rs` | mod | git bash pty 模拟终端（portable-pty 0.9，Windows = ConPTY）：writer（TX）/`master`（resize）/child（kill）/读线程（stdout→`serial:data`，退出发 disconnected）；`find_bash` 查 PATH + 常见 Git 安装路径 |
-| `enable_gitbash_sim` / `disable_gitbash_sim` / `resize_gitbash_sim` | `src-tauri/src/commands/tty_sim.rs` | Tauri cmd | 调试专用（`dev_only()` / `is_debug_build()` 门控）——启用/停用 GIT:BASH 虚拟端口、前端 xterm fit 后同步 pty 尺寸 |
-| `plugin/view_runtime` 模块 | `src-tauri/src/plugin/view_runtime/{mod.rs,resources.rs,windows.rs,sdk.js}` | mod | `mod.rs` 原生视图身份/授权/生命周期；`resources.rs` 声明资产快照（`MAX_FILE_BYTES` 8 MiB / `MAX_TOTAL_BYTES` 32 MiB）；`windows.rs` raw Wry 子控件（仅 Windows）；`sdk.js` 注入视图的插件 SDK |
+## 相关局部指南
 
-## 组件目录拆分（侧边栏）
+- `src/hooks/AGENTS.md`：hook 清单和生命周期
+- `src/stores/AGENTS.md`：store 写入纪律
+- `src/utils/terminal/AGENTS.md`：终端引擎约定
+- `src-tauri/src/commands/AGENTS.md`：命令域与错误/锁规则
+- `src/components/MainDisplay/AGENTS.md`：显示区与布局约束
+- `src/components/ConfigModal/AGENTS.md`：配置编辑器约束
+- `src/components/OperationPanel/AGENTS.md`：发送区约束
 
-`src/components/Sidebar/`：`Sidebar.tsx`、`AliasDialog.tsx`、`GroupItem.tsx`、`GuideCard.tsx`、`SearchBox.tsx`、`SidebarActions.tsx`、`SidebarToolbar.tsx`、`SortablePortItem.tsx`、`pluginIcon.tsx`、`groupActions.ts`、`hooks/usePortDragEnd.ts`。其余组件目录（MainDisplay / ConfigModal / OperationPanel）的逐文件清单一律见各自子目录 `AGENTS.md`。
-
-命令的完整清单与每域职责见 [`src-tauri/src/commands/AGENTS.md`](../../src-tauri/src/commands/AGENTS.md)；hook 清单见 [`src/hooks/AGENTS.md`](../../src/hooks/AGENTS.md)；终端引擎细节见 [`src/utils/terminal/AGENTS.md`](../../src/utils/terminal/AGENTS.md)。
+(End of file)

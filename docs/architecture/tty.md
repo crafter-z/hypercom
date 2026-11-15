@@ -1,6 +1,6 @@
 # TTY 终端模块
 
-完整交互式终端模式（issue #11）。TRX=行级终端（terminal.md）；TTY=xterm.js 渲染完整终端流（真实 ANSI/VT100、光标、备用屏幕 vim/top、onData 尺寸协商，**无本地回显**由对端 echo）。场景：下位机是 Linux 设备，串口链路实际是 TTY（serial console / getty shell）。
+完整交互式终端模式。TRX=行级终端（terminal.md）；TTY=xterm.js 渲染完整终端流（真实 ANSI/VT100、光标、备用屏幕 vim/top、onData 尺寸协商，**无本地回显**由对端 echo）。场景：下位机是 Linux 设备，串口链路实际是 TTY（serial console / getty shell）。
 
 ## 核心设计原则
 
@@ -63,7 +63,7 @@ pty 行规程（ICRNL）把 `\r` 转成 `\n`，`\r\n` 会变成两个换行—�
 
 ## 模拟终端（GIT:BASH，仅 debug）
 
-- 调试专用虚拟串口（issue #11）：`portable-pty` 0.9（Windows = ConPTY）spawn 本地 git bash pty，pty stdout→`serial:data`（RX）、`send_serial_data`→pty stdin（TX）。
+- 调试专用虚拟串口：`portable-pty` 0.9（Windows = ConPTY）spawn 本地 git bash pty，pty stdout→`serial:data`（RX）、`send_serial_data`→pty stdin（TX）。
 - **模块划分**：`commands/tty_sim.rs`（3 个命令 `enable_gitbash_sim` / `disable_gitbash_sim` / `resize_gitbash_sim`）· `serial/ports_tty.rs`（GIT: 路由与端口句柄操作 `open` / `close` / `send` / `write_raw` / `resize`）· `serial/tty_sim.rs`（portable-pty/ConPTY 本体：`spawn_bash`、`find_bash`、读线程）· `serial/mod.rs`（类别分派与门控：`PortKind::of(port_id)` 是端口类别分派的唯一入口，`open_port` 在分派前调 `check_virtual_enabled(kind, simulate, gitbash_sim)`；全仓没有 `port_id.starts_with("GIT:")` 式字符串分派）。
 - **必须用 pty 而非普通管道**：仅 `std::process` 管道会让 bash 进入非交互模式（无提示符/方向键编辑/自动上色/不能跑 vim）——验证不了 TTY 目标。
 - `TtySimPortHandle`（writer/master/child/读线程）；`find_bash` 查 PATH + 常见 Git 安装路径。

@@ -1,196 +1,64 @@
-# 发版与构建模块
+# 发版与构建
 
-GitHub Actions 日常质量门（`ci.yml`）+ 发布/updater 工作流（tag 触发构建、RELEASE_NOTES.md 统一 notes、签名、密钥轮换、故障排查）。客户端自动更新行为见 [`update.md`](update.md)。
+发版由 `.github/workflows/ci.yml`、`.github/workflows/publish.yml`、`.github/workflows/publish-preview.yml` 和 `.github/workflows/recover-preview.yml` 组成。客户端更新实现见 [`update.md`](update.md)。本页描述工作流契约和验收边界，不记录某次发布的操作过程。
 
-## 架构概览
+## 质量门
 
-```mermaid
-flowchart TD
-  Tag[推送严格版本 tag] --> Preflight[核对 tag / 三处源版本 / 两锁 / notes]
-  Preflight --> Draft[预建唯一 draft release]
-  Draft --> Matrix[四平台构建并上传安装包与签名]
-  Matrix --> Gate[唯一汇总：下载资产、验签、生成并回读 latest.json]
-  Gate --> Stable[stable：保持 draft，人工 Publish]
-  Gate --> Preview[preview：验证完成后自动 Publish]
-  Matrix -->|失败或取消| Hold[保留 draft，不发布]
-  Gate -->|验证失败| Hold
-```
+`.github/workflows/ci.yml` 是分支 CI 和 stable/preview 发布流共用的 reusable workflow：
 
-## 触发方式
+- `frontend` 使用 Node 22，执行 `npm ci`、低级别依赖审计、应用/Node 工具/e2e 三套 TypeScript 检查、`npm run test:run`、`node --test scripts/release.test.mjs` 和 `npm run build`。
+- `rust` 在 Linux/Windows 矩阵执行 `cargo test --lib`、Clippy（`-D warnings`）和 release-profile 的 `cargo check --release --lib`；Linux 安装 Tauri 所需系统依赖。
+- `e2e` 安装 Chromium 并运行 Playwright。测试注入 mock Tauri IPC，不证明真实串口、原生 WebView/CSP 或安装包行为。
 
-| 事件 | 说明 |
-|------|------|
-| `push` tag 匹配 `v*`（如 `git push origin v0.x.0`） | stable 流 `publish.yml` 的**构建**触发；`v*-preview*` 经同过滤器 `!` 否定排除（GitHub Actions 禁止 tags 与 tags-ignore 同事件共存，由 preview 流负责） |
-| `push` tag 匹配 `v*-preview*`（如 `git push origin v0.x.y-preview.N`） | **preview 流**（`publish-preview.yml`）：每版独立唯一 tag，`prerelease: true`。该流**仅**由此事件触发 |
-| release **published** | stable 的补充只读 `verify-release`，不是发布前门禁；使用该 tag 源码的 updater 公钥验证已公开资产 |
-| `workflow_dispatch` | stable 输入明确已发布 tag 做只读验证；独立 `recover-preview.yml` 可对未发布 draft 重做 finalize，输入原 tag 与失败的源流水线 ID，不重建或移动 tag |
+发布流在创建 draft 前调用同一质量门。质量门失败时不会进入可发布状态。
 
-## Stable 与 Preview 流差异
+## 稳定版与预览版
 
-| 项 | stable（publish.yml） | preview（publish-preview.yml） |
+| 项 | stable | preview |
 |---|---|---|
-| 触发 tag | `v*` + `!v*-preview*` 否定 | `v*-preview*` |
-| tag | `v0.6.0`（唯一） | `v0.6.0-preview.N`（**每版唯一，绝不复用**） |
-| draft / Publish | 预建 draft，finalize 通过后由开发者 Publish | 预建 draft，全部矩阵及验签通过后 finalize 自动 Publish |
-| prerelease | false | **true**（从 `releases/latest` 排除 → stable 用户零污染；API 解析按此筛选） |
-| Windows 产物 | NSIS `.exe` + `.msi`（`args: ''`，`targets: all`） | **仅 NSIS**（`args: '--bundles nsis'`；MSI/WiX 只接受数字版本，`0.x.y-preview.N` 的 pre-release 段非数字，bundler 直接拒绝打包——对更新链路零损失，`latest.json` Windows 块本就走 NSIS） |
-| latest.json | 矩阵 `uploadUpdaterJson: false`；唯一汇总脚本选择 NSIS 默认键，同时保留 MSI 专用键 | 同一汇总脚本，Windows 只有 NSIS |
+| 工作流 | `.github/workflows/publish.yml` | `.github/workflows/publish-preview.yml` |
+| tag | `vX.Y.Z`，排除 `-preview` | `vX.Y.Z-preview.N` |
+| Release | 先创建 draft；清单和签名验证通过后保持 draft，由维护者 Publish | 先创建 prerelease draft；清单和签名验证通过后自动 Publish |
+| Windows | NSIS 与 MSI | 仅 NSIS（WiX 不接受预发布版本号） |
+| 其它平台 | Linux x86_64、macOS aarch64、macOS x86_64 | 同一平台矩阵 |
 
-预览版本号约定：`0.x.y-preview.N` 属于「下一个核心」——目标 stable 0.6.0 → preview 依次 `0.6.0-preview.1/2/…`，stable 落地即收尾。semver 保证同核心下 preview < stable，preview 用户发布后自动晋升 stable（由 preview 通道双检查实际兑现，见 update.md）。
+`src-tauri/tauri.conf.json`、`package.json`、`src-tauri/Cargo.toml`、两侧锁文件和 `RELEASE_NOTES.md` 的顶层版本必须与 tag 一致。`scripts/release.mjs` 的 `preflight` 负责版本、通道和首个 notes 章节校验。
 
-> preview 仅在交付完成后成为 `prerelease: true` 的非 draft：构建期留 draft，客户端不可见；finalize 成功后公开，API 的 `prerelease && !draft` 筛选自然生效，不暴露部分平台清单。
+## 资产、签名与清单
 
-## 构建矩阵
+`tauri-apps/tauri-action@v1` 为每个矩阵项上传安装包和 updater 签名，矩阵不直接写 `latest.json`。`scripts/release.mjs` 的 `finalize`：
 
-| Runner | 产物 | 备注 |
-|--------|------|------|
-| `windows-latest` | NSIS `.exe` + `.msi`（含对应 `.sig`，updater） | 主要分发平台；`createUpdaterArtifacts: true` |
-| `ubuntu-22.04` | `.deb` + `.AppImage` | 需 webkit2gtk + libudev 系统依赖 |
-| `macos-latest` (aarch64) | `.dmg` + 签名 `.app.tar.gz` | Apple Silicon；安装器归档用于清单验签 |
-| `macos-latest` (x86_64) | `.dmg` + 签名 `.app.tar.gz` | Intel Mac；自动更新仍禁用 |
+1. 校验 release 的 tag、通道、draft/prerelease 状态以及所有矩阵结果；
+2. 检查平台安装包、版本、上传状态、签名配对和文件大小；
+3. 使用 `src-tauri/tauri.conf.json` 的 updater 公钥验证 minisign `Ed`/`ED` 签名及 trusted comment；
+4. 生成只引用 tag 的公开下载 URL，单次上传 `latest.json` 并回读校验版本、notes、平台键和 `pub_date`。
 
-两条流共用同一 4 项矩阵（`fail-fast: false` — 任一平台失败不阻断其他平台）；preview 的 Windows 项改 `--bundles nsis`（见上表差异）。
+stable 的 `finalize` 不自动 Publish；preview 的 `finalize` 在门禁成功后 Publish。`.github/workflows/publish.yml` 的 `verify-release` 对已公开 stable 做只读复核，不替代发布前门禁。
 
-## 日常质量门（ci.yml）
+`RELEASE_NOTES.md` 的首个版本章节同时成为 GitHub release body 和 `latest.json.notes`；后续章节保留在文件中，但不进入当前发布描述。
 
-`ci.yml` 同时是分支 CI 入口和 stable/preview 发版流调用的 reusable workflow。发版流在 `prepare-release` 之前调用它；质量门任一 job 失败就不会创建 draft，后续 finalize 也会因上游跳过而保持 fail-closed。这样 tag 发布不会绕过日常质量门，也不维护第二份容易漂移的检查清单。
+## Preview 恢复
 
-- **触发**：`push`（`branches: ['**']`，覆盖所有分支）、`pull_request`、`workflow_dispatch`、`workflow_call`。分支过滤而非裸 `push`：tag push 不单独触发该入口，但 stable/preview 发布流会以 tag 的同一 commit 调用本 workflow，并在 `prepare-release` 前阻断失败流程。
-- **concurrency**：`group: ci-${{ github.workflow }}-${{ github.ref }}`；`cancel-in-progress` 仅对 `pull_request` 为真——同一 PR 的旧运行被新提交取代，分支 push 不取消（避免发布前门禁被中断）。
-- **job `frontend`**（ubuntu-latest，Node 22）：`npm ci` → `npm audit --audit-level=low --registry=https://registry.npmjs.org` → 三个独立类型检查（`npx tsc --noEmit`、`npx tsc --noEmit -p tsconfig.node.json`、`npx tsc --noEmit -p tsconfig.e2e.json`）→ `npm run test:run` → `node --test scripts/release.test.mjs` → `npm run build`（`tsc && vite build`，生产前端产物）。Node 工具与浏览器 e2e 分开类型环境；e2e 配置继承应用配置、映射 Vite 的 `/src/*` URL 到真实源码类型，不以 `any` 或排除测试绕过检查。Vite 8 的最低 Node 要求由 CI 固定版本满足。
-- **job `rust`**（ubuntu-latest / windows-latest 矩阵，`fail-fast: false`）：仅 Linux 装 `libwebkit2gtk-4.1-dev` / `libayatana-appindicator3-dev` / `librsvg2-dev` / `patchelf` / `xdg-utils` / `libudev-dev` → Rust stable（含 clippy）+ rust-cache → `npm ci`（tauri-build 在 test profile 下仍读 `tauri.conf.json`，前端依赖先就位）→ `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings` → `cargo check --release --lib --manifest-path src-tauri/Cargo.toml`。最后一步检查 release 专属编译路径，不运行 release 程序。`--lib` 在 Linux 上会执行 `#[cfg(not(target_os = "windows"))]` 的串口/TTY 测试，Windows 本地开发环境跑不到；Windows 项覆盖 Windows 专属测试与原生适配代码的编译/lint，不自动运行被忽略的原生 smoke。
-  - 系统依赖差异：发版流跑 ubuntu-22.04 用 `libappindicator3-dev`，本 job 跑 ubuntu-latest（24.04）用 `libayatana-appindicator3-dev`（两者提供所需 pkg-config 依赖）；这不是两套工作流的唯一步骤差异。
-- **job `e2e`**（ubuntu-latest）：`npm ci` → `npx playwright install --with-deps chromium` → `npx playwright test`。e2e 由 `e2e/smoke.spec.ts`、`e2e/plugin.spec.ts`、`e2e/editor.spec.ts`、`e2e/replay.spec.ts` 四个 spec 组成，均通过注入 mock `window.__TAURI_INTERNALS__` 运行，不需要 Rust 侧与 webkit2gtk；`playwright.config.ts` 的 `webServer` 自行拉起 vite dev server（1420），CI 下 `reuseExistingServer=false`。
+`.github/workflows/recover-preview.yml` 只接受同仓库、tag 未移动、原 `publish-preview.yml` 已完成且仅 finalize 失败的运行。`scripts/release.mjs` 的 recovery 校验原构建结果、重新验签并发布完整清单；已发布 release 不复用或移动 tag。
 
-两条发版流的 tag 构建分别执行：
+## 自动更新与平台边界
 
-| 阶段 | stable（publish.yml） | preview（publish-preview.yml） |
-|---|---|---|
-| `quality` reusable job | 调用当前 tag 的 `ci.yml`，完整执行 frontend、Linux/Windows Rust 和 Playwright 质量门 | 同一 reusable quality gate |
-| `prepare-release` | 质量门成功后执行 `node --test scripts/release.test.mjs` → `node scripts/release.mjs prepare stable "$RELEASE_TAG"` | 质量门成功后执行同一脚本测试 → `node scripts/release.mjs prepare preview "$RELEASE_TAG"` |
-| 每个构建矩阵项 | 保留 `npm ci` → `npx tsc --noEmit` → `npm run test:run` → `cargo test --lib --manifest-path src-tauri/Cargo.toml` → `tauri-apps/tauri-action@v1`，用于各打包 runner 的本地环境复核 | 相同检查命令与打包 action，但矩阵参数按上文区分 |
-| `finalize-release` | `node scripts/release.mjs finalize stable "$RELEASE_TAG" "$RELEASE_ID"` | `node scripts/release.mjs finalize preview "$RELEASE_TAG" "$RELEASE_ID"` |
-
-完整质量门现在由 reusable `ci.yml` 负责，包含三套 TypeScript 检查、Vitest、release gate tests、生产前端构建、Linux/Windows `cargo test`、Clippy、release-profile `cargo check` 和 Playwright。发版矩阵仍保留自身的 tsc/Vitest/cargo test 与 Tauri 打包，确保每个发布 runner 的本地环境和目标产物仍被实际验证；生产前端构建还会由 Tauri 的 `beforeBuildCommand` 再执行一次。stable 的已发布只读验证另行执行 `node ../scripts/release.mjs verify stable "$RELEASE_TAG"`（在 `released-source` 中，使用默认分支 verifier 与所选 tag 的公钥）。
-
-## 发版操作步骤
-
-```bash
-# 1. 同步修改版本号（三处源文件手工改）
-#    - package.json → "version": "0.x.0"
-#    - src-tauri/tauri.conf.json → "version": "0.x.0"
-#    - src-tauri/Cargo.toml → version = "0.x.0"
-#    另有两处版本号随工具链同步：src-tauri/Cargo.lock（cargo 生成）与
-#    package-lock.json（npm 生成，preflight 同时校验顶层 version 与 packages[""] 根包两项）
-#    ——触发 tag、五处版本与 notes 首节必须完全一致，
-#    scripts/release.mjs preflight 在任何 release 修改前拒绝不一致
-# 1b. 编辑 RELEASE_NOTES.md：顶部新章节 # HyperCom vX（本次更新说明；
-#     同时成为 GitHub 网页 release notes 和 updater 弹窗文案）
-# 2. git add -A && git commit -m "chore: bump version to 0.x.0"
-# 3. git tag v0.x.0（preview: git tag v0.x.y-preview.N）
-# 4. git push origin main --tags
-# 5. 等待 finalize-release 通过：资产完整、安装包及 trusted comment 验签、单次清单上传回读
-# 6. stable：仅在 finalize 绿后确认 notes/资产并点 Publish
-#    preview：finalize 验证后自动 Publish，无需人工提前公开
-```
-
-## Release notes 与 updater 弹窗文案机制
-
-GitHub 网页 release 说明与 updater 弹窗更新说明是**两份独立内容**，但本工作流让它们来自同一个文件 `RELEASE_NOTES.md`，避免不一致：
-
-- `scripts/release.mjs::preflight` 提取顶部当前版本章节并核对触发 tag；`prepare` 将其写入 draft release body。
-- `finalize` 再次核对 draft release body 与触发 tag 的 notes 首节完全一致，拒绝 prepare 后的文案漂移，再从 body 写 `latest.json.notes`；矩阵不再写 release body 或清单。
-- `RELEASE_NOTES.md` 是累积式——旧版本章节保留为**历史归档**，不进入 release 描述与弹窗（0.5.1 及更早版本曾 `cat` 全文件受影响）。
-- 版本守卫同时核对严格通道 tag、npm/Tauri/Cargo 源版本、npm 锁顶层/根包、Cargo 锁根包和 notes 首节；误推 tag 不会覆盖别的已发布版本。
-- notes 在打 tag 前完成；已发布 release 的内容与资产不由构建流程重写，修正须发更高版本。
-
-## Action 版本
-
-`actions/checkout@v5` 与 `actions/setup-node@v5`（v4 声明 node20，GitHub 自 2025-09 弃用会报 `Node.js 20 is deprecated` 警告；v5 声明 node24，纯警告不影响产物；选 v5 而非 v6/v7 是「首个脱离 node20 的稳定 major」）。升级 major 前可用 `gh api repos/<owner>/<repo>/contents/action.yml?ref=vN --jq .content`（base64 解码看 `using:` 行）确认 Node 运行时。
-
-其余动作（发版流与 `ci.yml` 一致）：`dtolnay/rust-toolchain@stable`、`swatinem/rust-cache@v2`（`workspaces: './src-tauri -> target'`）、`tauri-apps/tauri-action@v1`（仅发版流）。
-
-## 发布门禁
-
-1. `prepare-release`：严格 tag/版本/notes 预检，拒绝复用已发布 release；创建或恢复唯一、通道标记正确的 draft，并清除旧 draft 清单。
-2. 矩阵：既有 tsc/vitest/Rust 质量门后只上传安装包与 `.sig`，不读改写 `latest.json`。同 tag workflow 串行，失败不取消其他平台。
-3. `finalize-release`：即使依赖失败也运行状态检查；只有 prepare/矩阵全部成功才允许发布路径，否则报错并保持 draft。
-4. 唯一汇总 `scripts/release.mjs`：使用工作流 token 读取 draft 资产，下载实际安装包与签名，用配置公钥校验 minisign `Ed`/`ED` 签名与 trusted comment；检查四平台、稳定版 MSI、版本、上传状态、大小及签名配对。draft 允许同仓库、同文件名的 `untagged-*` 临时下载地址；已发布资产仍必须是严格 tag 地址，其他源/仓库/路径一律拒绝。
-5. 生成 OS/arch 默认键与 installer-specific 键，Windows 默认 NSIS；安装包 URL 按已核对的 repository/tag/文件名构造公开下载地址，不把 draft 临时地址或资产 API 地址写入清单。清单上传一次并认证下载回读验证，同时要求 notes 与 release body 一致、`pub_date` 是有效 RFC 3339 时间，避免资产验签通过但客户端无法解析清单。
-6. stable 维持 draft 等待人工 Publish；preview 只有门禁通过才公开。发布后的只读验证是补充，不能替代 finalize。
-
-匿名无法读 draft；工作流 token 的认证 asset API 用于发布前验签。认证失败时门禁失败、不提前发布。不得以历史某次 401 推断所有身份都无法读取 draft。
-
-本地验证：`node --test scripts/release.test.mjs`；`node scripts/release.mjs preflight stable v<version>`。`local` 命令可在隔离资产目录生成/验签完整清单，无 GitHub 修改；真实 Publish、安装及重启仍需发行环境验收。
-
-### 未发布 preview 的 finalize 恢复
-
-`recover-preview.yml` 使用当前分支修复后的门禁脚本与原 tag 的配置、公钥和 notes。只接受同仓库、原 tag 未移动、已完成且失败的 `publish-preview.yml` push 流水线；prepare 和四个指定平台构建必须全部成功，仅 finalize 失败。随后重新下载真实资产、完整验签、上传并回读清单后公开 prerelease，再执行公开版只读验证。已发布 release 不可恢复；不设置伪造的矩阵状态，不复用或强推 tag。
-
-```bash
-gh workflow run recover-preview.yml --ref main -f tag=v1.0.0-preview.1 -f source_run=38191639582
-gh run watch <recovery-run-id> --compact --exit-status
-```
-
-
-### 插件发版验收门
-
-插件基础契约以 [`plugins.md`](plugins.md) 为准，隔离视图/工作区标签以 [`plugin-views.md`](plugin-views.md) 为准。自动化绿灯、Windows debug 原生 smoke 与最终安装包验收是不同证据，不可互相替代；**当前自动化 CI 不运行真实原生插件生命周期或 WebView CSP 验收**，mock IPC 的 Playwright 也不证明这些行为。
-
-发行维护者须在目标版本最终打包并安装的产物上执行下列适用检查。自动化测试、磁盘恢复 fixture 和开发构建不能替代最终产物的人工验收：
-
-- Windows 安装后及重启后，确认实际 bundled assets/CSP 下 classic Worker 与插件生命周期正常；通过真实原生 picker 选择目录/ZIP 安装，验证新装/升级默认禁用且无授权、按用户审阅的安装代授权与启用、卸载/重装、错误反馈与私有数据边界。
-- 按插件契约复核备份导入后的后端状态、同代/异代授权、权限撤销、存储/通知/HTTP 边界与失败关闭；不能仅依据 mock UI 的表现判定通过。
-- 对真实进程中断与重启恢复进行受控验收并记录结果，区分于现有磁盘 fixture；不要将 fixture 描述为掉电持久性保证。
-- 在实际交付的 Linux、macOS 架构安装包上检查 picker、Worker/CSP、权限及生命周期行为，并记录平台差异；Windows debug smoke 不提供跨平台结论。
-- 新隔离视图：Windows 最终安装包验证 raw Wry 页面的原生/API/资源/导航拒绝，native文件选择/设备权限和独立存储，用户复制/剪切的明确例外；没有支持 adapter 的平台必须明确拒绝，不能降级主窗 iframe。最终打包界面没有临时 CDP 端口或 smoke override。
-- 工作区验收：替换原始/新建关联/无端口工具，按钮/菜单/后台动作去重和票据，焦点/收发目标，原始关闭后解析继续，跨Pane及TTY连续性，宿主modal/菜单/通知遮挡、DPI/zoom，多视图慢ACK/隐藏不积压，撤权/升级/故障及时错误/原始回退。
-
-stable 人工 Publish 前应完成以上适用验收；preview 会在 finalize 后自动公开，须在打 tag 前安排候选产物的人工验收，并对最终公开产物补做安装复核。工作流的资产验签门只证明交付资产与签名/清单一致，不自动签署插件功能验收。
-
-## 故障排查
-
-| 症状 | 原因 | 解决 |
-|------|------|------|
-| workflow 未触发或 preflight 拒绝 | tag/通道/配置版本不一致 | stable 用 `vX.Y.Z`，preview 用 `vX.Y.Z-preview.N`，与五处版本及 notes 完全一致 |
-| 构建失败 "signing key not found" | Secret 未配置 | 检查 `TAURI_SIGNING_PRIVATE_KEY` |
-| updater 报 "Could not fetch update" | Release 未 Publish | draft 不可被 updater 访问，必须 Publish |
-| Release 页面看不到安装包 | Release 还是 draft | draft 不进公开列表，asset 链接是临时 `untagged-*` ID（公开 404），`/latest/` 不认 draft |
-| updater 签名验证失败 | 公钥/私钥不匹配 | 重新生成密钥对，更新 tauri.conf.json 的 `pubkey` |
-| updater 弹窗更新说明不符 | notes 首节或 draft body 错误 | 打 tag 前准备 notes；finalize 的清单 notes 来自已核对的 release body |
-| Linux 构建缺依赖 | 缺系统库 | workflow 已装 `libwebkit2gtk-4.1-dev` + `libudev-dev`；仍报 `libudev-sys` 失败则确认 runner 为 ubuntu-22.04 |
-| macOS 公证失败 | 未配置 Apple 证书 | 当前未做代码签名，macOS 用户需手动信任 |
-| 矩阵失败/取消 | finalize 状态门禁拒绝发布 | release 保持 draft；修复并重跑失败任务，不提前人工 Publish |
-| 资产或签名门禁失败 | 缺平台/签名、下载不完整、版本或公钥不符 | 按脚本错误修复资产/签名并重跑，保持 draft |
-| 已发布版本只读验证失败 | 旧 API URL 清单或资产/签名不符 | 不重跑构建覆盖旧发布；安排受验证的新版本，必要时人工修复清单 |
-
-## macOS 与自动更新
-
-macOS 构建照常发布（可手动下载安装），但**自动更新暂不支持**：未签名/公证的 `.app` 带 quarantine 属性会被 Gatekeeper 拦截，更新 relaunch 即失败。启用前置条件 = Apple Developer ID 签名 + 公证（尚未实施，属后续规划）。`verify-release` 仍校验 darwin 键（产物完整性），不代表 macOS 更新可用。
-
-## 签名密钥轮换 SOP（TAURI_SIGNING_PRIVATE_KEY 泄漏/丢失）
-
-updater **先验签名再安装**——直接换 pubkey 会让旧客户端对新签名的 release 验证失败、无法更新，必须两步：
-
-1. **过渡版本**：旧密钥仍有效时，发一个仅把 `tauri.conf.json` `pubkey` 改为新公钥的常规版本（仍用旧密钥签名）→ 旧客户端验签照常通过、升级到过渡版；
-2. **切换**：过渡版覆盖装机面后，签名切新密钥（更新仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`），后续 release 用新密钥。
-
-跳过过渡版的客户端无法再原地更新（验签失败），只能手动下载安装新版。
-
-## 坏版本召回
-
-- **preview**：直接删除该 release 与 tag → GitHub API 解析自动回落到上一个 preview；已装该版的客户端不受影响（无强制降级），下次检查自然收到新版本。
-- **stable**：draft 是缓冲闸；Publish 前必须确认 `finalize-release` 绿与资产齐全。发布后不自动降级/回滚，坏安装版本须 ship-forward 发布更高修复版本。
+- Windows 发布 NSIS/MSI 并带 updater 签名；Linux 发布 deb/AppImage；macOS 发布 aarch64/x86_64 安装包与 app archive。
+- macOS 当前未启用自动更新，`verify-release` 仍可检查其清单资产完整性。
+- updater 安装前必须验证签名；公钥变更需要兼容旧客户端的过渡版本，否则旧客户端无法原地更新。
+- 自动化质量门、签名清单和 Windows 原生 smoke 不等于最终安装包验收。插件 Worker/CSP、原生隔离视图、文件选择器、权限和跨平台行为需在目标平台安装包上单独确认，边界见 [`plugins.md`](plugins.md) 与 [`plugin-views.md`](plugin-views.md)。
 
 ## 相关文件
 
 | 文件 | 作用 |
-|------|------|
-| `.github/workflows/ci.yml` | 统一质量门（分支 push / PR / 手动 / workflow_call；frontend 含三套类型检查、生产构建与 release 脚本测试，rust 含 Linux/Windows 测试、Clippy 与 release-profile 类型检查，e2e 为 mock IPC Playwright） |
-| `.github/workflows/publish.yml` | stable：预检→draft→矩阵→finalize 验签/单写清单→人工发布；发布后补充只读验证 |
-| `.github/workflows/publish-preview.yml` | preview：相同门禁，finalize 成功后自动公开 prerelease |
-| `.github/workflows/recover-preview.yml` | 未发布 preview 的受控 finalize 恢复；核对原构建与不变 tag，再完整验签、发布及只读验证 |
-| `scripts/release.mjs` / `release.test.mjs` | 共享预检、draft 事务、真实 minisign 验签与公开下载清单；离线消费行为回归 |
-| `RELEASE_NOTES.md` | 本次发版说明，构建时写入网页 notes 与 latest.json.notes |
-| `src-tauri/tauri.conf.json` | bundle + updater 配置（pubkey / endpoint / installMode passive） |
-| `src-tauri/Cargo.toml` / `package.json` | Rust / 前端版本号 |
+|---|---|
+| `.github/workflows/ci.yml` | 日常与发版共用质量门 |
+| `.github/workflows/publish.yml` | stable draft、构建、签名清单和只读验证 |
+| `.github/workflows/publish-preview.yml` | preview draft、构建、签名清单和自动发布 |
+| `.github/workflows/recover-preview.yml` | 未发布 preview 的 finalize 恢复 |
+| `scripts/release.mjs` / `scripts/release.test.mjs` | 版本预检、发布事务、签名和清单验证 |
+| `RELEASE_NOTES.md` | 当前 release body 与 updater notes 来源 |
+| `src-tauri/tauri.conf.json` | bundle 与 updater 公钥/endpoint/installMode |
+| `package.json` / `src-tauri/Cargo.toml` | 前端/Rust 版本来源 |
+
+(End of file)
