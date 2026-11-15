@@ -375,8 +375,8 @@ pub struct AppConfig {
     /// 插件 HTTP 出站代理；未显式启用时强制直连。
     pub plugin_proxy: String,
     pub plugin_proxy_enabled: bool,
-    /// 插件市场索引地址；空值表示未配置市场。
-    #[serde(default)]
+    /// 插件市场索引地址；默认使用官方市场，用户可替换。
+    #[serde(default = "default_plugin_marketplace_url")]
     pub plugin_marketplace_url: String,
 
     // --- 设置实体（config.json 顶层 key，见 Entities）---
@@ -392,6 +392,12 @@ const DEFAULT_TERMINAL_FONT: &str =
     "Consolas, \"Noto Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Segoe UI\", monospace";
 const DEFAULT_UI_FONT: &str =
     "Inter, \"Noto Sans SC\", \"Microsoft YaHei\", \"PingFang SC\", \"Segoe UI\", sans-serif";
+const DEFAULT_PLUGIN_MARKETPLACE_URL: &str =
+    "https://raw.githubusercontent.com/crafter-z/hypercom-plugin-marketplace/main/index.json";
+
+fn default_plugin_marketplace_url() -> String {
+    DEFAULT_PLUGIN_MARKETPLACE_URL.to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -444,7 +450,7 @@ impl Default for AppConfig {
             update_check_mode: "stable".to_string(),
             plugin_proxy: String::new(),
             plugin_proxy_enabled: false,
-            plugin_marketplace_url: String::new(),
+            plugin_marketplace_url: default_plugin_marketplace_url(),
             entities: Entities::default(),
         }
     }
