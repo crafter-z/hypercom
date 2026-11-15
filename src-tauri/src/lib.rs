@@ -154,6 +154,8 @@ pub struct AppState {
     pub plugin_io: tokio::sync::Mutex<()>,
     /// 插件 HTTP 流式请求注册表（按 requestId 绑定插件/安装版本，可取消）。
     pub plugin_http: commands::PluginHttpRegistry,
+    /// 插件本机 shell 执行注册表（按插件/安装版本绑定，可取消）。
+    pub plugin_shell: commands::PluginShellRegistry,
     /// 日志管理器：负责日志文件的写入与管理。
     /// `Arc<LogManager>`（无外层 Mutex）：写路径已是 `&self` + 内部细粒度锁，
     /// 再套一层 Mutex 会让 `save_log_as` 的文件拷贝、`list_files` 的递归遍历与
@@ -276,6 +278,7 @@ impl AppState {
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
             plugin_http: commands::PluginHttpRegistry::new(),
+            plugin_shell: commands::PluginShellRegistry::new(),
             log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(system_info)),
@@ -678,6 +681,7 @@ pub fn run() {
             commands::plugin_http_open,
             commands::plugin_http_read,
             commands::plugin_http_cancel,
+            commands::plugin_shell_execute,
             commands::plugin_open_external,
             commands::create_plugin_view,
             commands::update_plugin_view,

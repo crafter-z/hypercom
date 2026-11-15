@@ -354,6 +354,7 @@ pub async fn reload_plugin(
         snapshot(&manager)
     };
     state.plugin_http.cancel_plugin(&id);
+    state.plugin_shell.cancel_plugin(&id);
     revoke_plugin_directory_grants(&id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
     log::info!("Plugin reloaded from installed code: {id}");
@@ -401,6 +402,7 @@ pub async fn install_plugin(
     .map_err(|e| CommandError::Other(format!("安装暂存 join 失败: {e}")))??;
     // Replacement/new code invalidates every in-flight network request id.
     state.plugin_http.cancel_plugin(&prepared.manifest.id);
+    state.plugin_shell.cancel_plugin(&prepared.manifest.id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &prepared.manifest.id).await?;
     // No await after persisting the trust reset: cancellation must not drop the
     // IO gate while a detached blocking task is still replacing executable code.
@@ -831,6 +833,7 @@ pub async fn uninstall_plugin(
     };
     if committed {
         state.plugin_http.cancel_plugin(&id);
+        state.plugin_shell.cancel_plugin(&id);
         // The plugin is already gone from config. A stuck native teardown may
         // still freeze the UI thread, so the view runtime bounds it internally:
         // report the failure, keep the command responsive, and retry later.
@@ -1003,6 +1006,7 @@ pub async fn set_plugin_enabled(
     // request or failed save must not destroy live native views.
     if !enabled {
         state.plugin_http.cancel_plugin(&id);
+        state.plugin_shell.cancel_plugin(&id);
         if let Err(e) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
             log::warn!("Failed to retire disabled plugin views for {id}: {e}");
         }
@@ -1059,6 +1063,7 @@ pub async fn set_plugin_trusted_web(
     };
     if !trusted {
         state.plugin_http.cancel_plugin(&id);
+        state.plugin_shell.cancel_plugin(&id);
         plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
             .map_err(|e| CommandError::Other(format!("网页信任已撤销，但关闭视图失败: {e}")))?;
     }
@@ -1171,6 +1176,9 @@ pub async fn set_plugin_permissions(
     // Validate + commit first, then retire views based on committed grants.
     if !committed_permissions.iter().any(|p| p == "http:request") {
         state.plugin_http.cancel_plugin(&id);
+    }
+    if !committed_permissions.iter().any(|p| p == "shell:execute") {
+        state.plugin_shell.cancel_plugin(&id);
     }
     if !committed_permissions.iter().any(|p| p == "fs:open-dir" || p == "fs:write-dir") {
         revoke_plugin_directory_grants(&id);

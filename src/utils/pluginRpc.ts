@@ -58,6 +58,7 @@ export const OP_PERMISSIONS: PermissionMap = {
   'http.cancel': 'http:request',
   // shell
   'shell.openExternal': 'shell:open',
+  'shell.execute': 'shell:execute',
   // 剪贴板
   'clipboard.readText': 'clipboard',
   'clipboard.writeText': 'clipboard',
@@ -119,6 +120,7 @@ export const SENSITIVE_PERMISSIONS: readonly string[] = [
   'serial:send',
   'http:request',
   'shell:open',
+  'shell:execute',
   'fs:write-dir',
 ];
 

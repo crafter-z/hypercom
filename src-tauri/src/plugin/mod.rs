@@ -46,6 +46,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "serial:send",
     "http:request",
     "shell:open",
+    "shell:execute",
     "clipboard",
     "notify",
     "storage",
@@ -67,7 +68,7 @@ pub struct HttpScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellScope {
-    /// 可执行文件白名单（`shell.executableWhitelist`）。运行时逐条匹配。
+    /// 可执行文件白名单（`shell.executableWhitelist`）。兼容保留字段，shell.execute 不受其限制。
     #[serde(default)]
     pub executable_whitelist: Vec<String>,
 }

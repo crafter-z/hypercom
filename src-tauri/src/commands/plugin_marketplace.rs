@@ -340,7 +340,7 @@ pub async fn install_marketplace_plugin(
             .plugin_configs
             .iter()
             .any(|entry| entry.id == expected_id)
-            && expected_generation.as_deref().map_or(true, str::is_empty)
+            && expected_generation.as_deref().is_none_or(str::is_empty)
         {
             return Err(marketplace_error(
                 "更新已安装插件必须携带 expectedGeneration",
@@ -348,6 +348,7 @@ pub async fn install_marketplace_plugin(
         }
     }
     state.plugin_http.cancel_plugin(&expected_id);
+    state.plugin_shell.cancel_plugin(&expected_id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &expected_id).await?;
 
     let result = tokio::task::block_in_place(|| {

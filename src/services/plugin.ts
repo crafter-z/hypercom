@@ -5,6 +5,8 @@ import type {
   PluginHttpRequest,
   PluginListResponse,
   PluginStateSnapshot,
+  PluginShellRequest,
+  PluginShellResult,
   MarketplaceIndex,
   MarketplaceUpdate,
 } from '../types';
@@ -57,6 +59,12 @@ export const pluginService = {
     invoke('plugin_http_cancel', { pluginId, expectedGeneration, requestId }),
   pluginOpenExternal: (pluginId: string, url: string): Promise<void> =>
     invoke('plugin_open_external', { pluginId, url }),
+  pluginShellExecute: (
+    pluginId: string,
+    expectedGeneration: string,
+    request: PluginShellRequest,
+  ): Promise<PluginShellResult> =>
+    invoke('plugin_shell_execute', { pluginId, expectedGeneration, request }),
   /** Fetch the configured marketplace index from an explicitly reviewed source. */
   fetchPluginMarketplace: (sourceUrl: string): Promise<MarketplaceIndex> =>
     invoke('fetch_plugin_marketplace', { sourceUrl }),

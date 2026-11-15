@@ -29,6 +29,7 @@ import type { PluginManifestView } from '../types';
 import { exportPluginPanel } from './pluginPanelExport';
 import { executePluginViewApi } from './pluginViewRuntime';
 import { executePluginHttp } from './pluginHttp';
+import { executePluginShell } from './pluginShell';
 import { acquirePluginDialog } from './pluginDialogBudget';
 import { decodeBytes } from './lineText';
 
@@ -434,6 +435,8 @@ export async function executeHostApi(
     case 'http.read':
     case 'http.cancel':
       return executePluginHttp(pluginId, op, args, beforeSend);
+    case 'shell.execute':
+      return executePluginShell(pluginId, args, beforeSend);
     case 'shell.openExternal': {
       const url = requireString(args, 'url');
       await pluginService.pluginOpenExternal(pluginId, url);

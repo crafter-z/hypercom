@@ -107,6 +107,33 @@ pub fn parse_description(bytes: &[u8]) -> Result<PluginDescription, String> {
     Ok(description)
 }
 
+pub(crate) fn is_update_available(current: Option<&str>, remote: &str) -> bool {
+    match current {
+        None => true,
+        Some(current) => super::version_greater(remote, current),
+    }
+}
+
+pub(crate) fn metadata_matches(
+    description: &PluginDescription,
+    expected_id: &str,
+    expected_version: &str,
+) -> Result<(), String> {
+    if description.manifest.id != expected_id {
+        return Err(format!(
+            "插件描述 id 不匹配：期望 {expected_id}，实际 {}",
+            description.manifest.id
+        ));
+    }
+    if description.manifest.version != expected_version {
+        return Err(format!(
+            "插件描述 version 不匹配：期望 {expected_version}，实际 {}",
+            description.manifest.version
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -201,31 +228,4 @@ mod tests {
         });
         assert!(parse_description(&serde_json::to_vec(&description).unwrap()).is_err());
     }
-}
-
-pub(crate) fn is_update_available(current: Option<&str>, remote: &str) -> bool {
-    match current {
-        None => true,
-        Some(current) => super::version_greater(remote, current),
-    }
-}
-
-pub(crate) fn metadata_matches(
-    description: &PluginDescription,
-    expected_id: &str,
-    expected_version: &str,
-) -> Result<(), String> {
-    if description.manifest.id != expected_id {
-        return Err(format!(
-            "插件描述 id 不匹配：期望 {expected_id}，实际 {}",
-            description.manifest.id
-        ));
-    }
-    if description.manifest.version != expected_version {
-        return Err(format!(
-            "插件描述 version 不匹配：期望 {expected_version}，实际 {}",
-            description.manifest.version
-        ));
-    }
-    Ok(())
 }

@@ -489,7 +489,7 @@ export class PluginSession {
     };
     this.retireRequests.add(retire);
     // File reads have no size cap; native selection/export wait for the user, and
-    // HTTP waits on the network under the caller-supplied native timeout only.
+    // HTTP and shell.execute wait under their native deadlines, not the generic RPC timer.
     if (!hasNoRpcDeadline(req.op)) {
       timer = setTimeout(() => {
         if (retire()) respond({ ok: false, error: 'plugin RPC timed out' });

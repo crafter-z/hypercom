@@ -509,6 +509,7 @@ export interface PluginManifestView {
   permissions: string[];
   requires?: string[];
   http?: { urlWhitelist: string[] } | null;
+  /** Reserved compatibility metadata; shell.execute is controlled only by its grant. */
   shell?: { executableWhitelist: string[] } | null;
   /** 发送端口作用域（P10：声明且非空=仅白名单；空数组=全拒；未声明=不限）。 */
   serial?: { portWhitelist: string[] } | null;
@@ -580,6 +581,27 @@ export interface MarketplaceUpdate {
 /** list_plugins adds scanned manifests to the same ordered state snapshot. */
 export interface PluginListResponse extends PluginStateSnapshot {
   plugins: PluginView[];
+}
+
+/** Native program invocation, without implicit shell parsing or interactive stdin. */
+export interface PluginShellRequest {
+  program: string;
+  args?: string[];
+  /** Native working directory (absolute or relative); absent inherits the application's directory. */
+  cwd?: string;
+  /** Variables overlaid on the application's inherited environment. */
+  env?: Record<string, string>;
+  /** UTF-8 input, closed after writing; absent closes stdin immediately. */
+  stdin?: string;
+  /** Optional nonnegative integer milliseconds; absent or 0 means no deadline. */
+  timeoutMs?: number;
+}
+
+/** Nonzero exits are results, not RPC failures. Output uses UTF-8 replacement decoding. */
+export interface PluginShellResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
 }
 
 /** Redirect handling for plugin HTTP requests (backend default: follow). */

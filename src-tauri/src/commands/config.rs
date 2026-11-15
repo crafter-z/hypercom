@@ -133,6 +133,7 @@ pub async fn set_config(
     // install identity; in-flight network requests must not outlive that.
     if saved && restore_plugin_configs.unwrap_or(false) {
         state.plugin_http.cancel_all();
+        state.plugin_shell.cancel_all();
     }
     // Retire views only after the imported configuration committed.
     if let Some(entries) = restored_entries {
