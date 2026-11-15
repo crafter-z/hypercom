@@ -1531,7 +1531,11 @@ mod tests {
 
     struct ReplayTempDir(std::path::PathBuf);
     impl ReplayTempDir {
-        fn new() -> Self { let path = unique_temp_path("replaydir"); std::fs::create_dir(&path).unwrap(); Self(path) }
+        fn new() -> Self {
+            let path = unique_temp_path("replaydir");
+            std::fs::create_dir(&path).unwrap();
+            Self(path.canonicalize().unwrap())
+        }
         fn path(&self) -> &std::path::Path { &self.0 }
     }
     impl Drop for ReplayTempDir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
