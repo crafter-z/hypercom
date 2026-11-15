@@ -75,6 +75,20 @@ describe('wrapped worker RPC lifecycle', () => {
     await expect(dialog).resolves.toBe('selected');
   });
 
+  it('lets native shell execution enforce its own deadline instead of timing out after 11 seconds', async () => {
+    vi.useFakeTimers();
+    expect(hasNoRpcDeadline('shell.execute')).toBe(true);
+    const worker = wrappedWorker('self.request = self.plugin.api["shell.execute"]({program: "git", args: ["--version"], timeoutMs: 120000});');
+    const settled = vi.fn();
+    const request = worker.scope.request!.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(settled).not.toHaveBeenCalled();
+    expect(sentMessages(worker.sent)).toContainEqual({ seq: 1, op: 'shell.execute', args: { program: 'git', args: ['--version'], timeoutMs: 120000 } });
+    worker.reply({ seq: 1, ok: true, result: { exitCode: 0, stdout: 'git version', stderr: '' } });
+    await request;
+    expect(settled).toHaveBeenCalledWith({ exitCode: 0, stdout: 'git version', stderr: '' });
+  });
+
   it('keeps directory APIs pending with no deadline while release keeps the ordinary one', async () => {
     vi.useFakeTimers();
     expect(hasNoRpcDeadline('fs.openDirectoryDialog')).toBe(true);

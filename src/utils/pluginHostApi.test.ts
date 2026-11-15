@@ -18,6 +18,7 @@ const renameDirectoryEntry = vi.hoisted(() => vi.fn());
 const releaseDirectory = vi.hoisted(() => vi.fn());
 const clipboardWrite = vi.hoisted(() => vi.fn());
 const executeHttp = vi.hoisted(() => vi.fn());
+const executeShell = vi.hoisted(() => vi.fn());
 const executeViewApi = vi.hoisted(() => vi.fn());
 const sendToPort = vi.hoisted(() => vi.fn());
 
@@ -38,6 +39,7 @@ vi.mock('../services/tauri', () => ({
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readText: vi.fn(), writeText: clipboardWrite }));
 vi.mock('./pluginHttp', () => ({ executePluginHttp: executeHttp }));
+vi.mock('./pluginShell', () => ({ executePluginShell: executeShell }));
 vi.mock('./pluginViewRuntime', () => ({ executePluginViewApi: executeViewApi }));
 vi.mock('../hooks/useSerialSend', () => ({ sendToPort }));
 vi.mock('./pluginObserver', () => ({ addPluginRxObserver: vi.fn() }));
@@ -67,6 +69,7 @@ beforeEach(() => {
   releaseDirectory.mockReset();
   clipboardWrite.mockReset();
   executeHttp.mockReset();
+  executeShell.mockReset();
   executeViewApi.mockReset();
   sendToPort.mockReset();
   writeAsset.mockResolvedValue(undefined);
@@ -87,6 +90,21 @@ afterEach(() => {
   testTime = Date.now();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('host API shell dispatch', () => {
+  it('forwards shell.execute to the native driver with live Worker authority and no executable scope', async () => {
+    const request = { program: 'git', args: ['--version'] };
+    const manifest: PluginManifestView = {
+      id: 'api.plugin', name: 'API', version: '1', description: '', apiVersion: '1',
+      permissions: ['shell:execute'], shell: { executableWhitelist: ['git'] },
+    };
+    const authority = vi.fn();
+    const result = { exitCode: 3, stdout: 'output', stderr: 'error' };
+    executeShell.mockResolvedValueOnce(result);
+    await expect(executeHostApi('api.plugin', 'shell.execute', request, manifest, authority)).resolves.toEqual(result);
+    expect(executeShell).toHaveBeenCalledExactlyOnceWith('api.plugin', request, authority);
+  });
 });
 
 describe('host API serial sends', () => {

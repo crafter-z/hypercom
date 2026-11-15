@@ -21,6 +21,15 @@ const browserErrors = new WeakMap<Page, string[]>();
 /** demo worker：PING → PONG 旁注；断流通知写旁注。普通脚本（无 ESM）。 */
 const DEMO_WORKER = `
 var reloadRxCount = 0;
+self.plugin.on('ui.buttonClick', async function (event) {
+  if (event.buttonId !== 'shell-run') return;
+  try {
+    var result = await self.plugin.api['shell.execute']({ program: 'git', args: ['--version', 'literal;echo unsafe'], timeoutMs: 120000 });
+    await self.plugin.api['ui.panel.append']({ text: 'SHELL-RESULT:' + JSON.stringify(result) + '\\n' });
+  } catch (error) {
+    await self.plugin.api['ui.panel.append']({ text: 'SHELL-ERROR:' + error.message + '\\n' });
+  }
+});
 self.plugin.on('rx.line', function (lines) {
   for (var i = 0; i < lines.length; i++) {
     var text = new TextDecoder().decode(lines[i].rawData);
@@ -80,8 +89,8 @@ const MOCK = `
     dir: 'C:/mock/plugins/${PLUGIN_ID}',
     enabled: state.enabled,
     grantedPermissions: [...state.granted],
-    declaredPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view'],
-    knownPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view'],
+    declaredPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute'],
+    knownPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute'],
     manifest: {
       id: '${PLUGIN_ID}',
       name: 'E2E Demo',
@@ -89,9 +98,9 @@ const MOCK = `
       description: 'e2e demo',
       apiVersion: '1.0',
       entry: 'main.js',
-      permissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view'],
+      permissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute'],
       ui: {
-        buttons: [],
+        buttons: [{ id: 'shell-run', label: 'E2E Shell Run', icon: 'Play', target: 'sidebar' }],
         menuItems: [],
         views: [
           { id: 'tool', label: 'E2E Tool', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false },
@@ -144,6 +153,10 @@ const MOCK = `
         state.reloads++;
         revision++;
         return { revision, pluginConfigs: [PLUGIN_CONFIG()] };
+      }
+      if (cmd === 'plugin_shell_execute') {
+        state.shellRequest = structuredClone(args);
+        return { exitCode: 7, stdout: 'native stdout', stderr: 'native stderr' };
       }
       if (cmd === 'read_plugin_asset') {
         if (args && args.relPath === 'main.js') return ${JSON.stringify(DEMO_WORKER)};
@@ -254,6 +267,17 @@ test.describe('插件系统（issue #17）', () => {
     // 插件宿主 boot（refresh → 写回 store → 订阅 → syncWithConfig 拉 worker）。
     await dispatchSerialData(page, 'COM1', 'PING alpha\n');
     await expect(page.locator('.terminal-line .terminal-content').filter({ hasText: 'PONG<PING alpha>' })).toBeVisible();
+  });
+
+  test('插件按钮通过真实 Worker 执行命令并展示退出码和两个输出流', async ({ page }) => {
+    await openApp(page, ['shell:execute']);
+    await page.getByRole('button', { name: 'E2E Demo: E2E Shell Run', exact: true }).click();
+    await expect(page.locator('.plugin-panel-content')).toContainText('SHELL-RESULT:{"exitCode":7,"stdout":"native stdout","stderr":"native stderr"}');
+    // The mock sees one program plus literal args, not a concatenated shell expression.
+    expect(await page.evaluate(() => (window.__PLUGIN_E2E__ as unknown as { shellRequest: unknown }).shellRequest)).toEqual({
+      pluginId: PLUGIN_ID, expectedGeneration: 'e2e-install',
+      request: { program: 'git', args: ['--version', 'literal;echo unsafe'], timeoutMs: 120000 },
+    });
   });
 
   test('插件设置真实重载按钮刷新 generation/revision 后仍可响应 RX', async ({ page }) => {

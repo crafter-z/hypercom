@@ -44,6 +44,14 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(checkOpAllowed('serial.send', grantedAfter)).not.toBeNull();
   });
 
+  it('shell.execute has its own high-risk grant, never inherited from shell:open', () => {
+    expect(OP_PERMISSIONS['shell.execute']).toBe('shell:execute');
+    expect(checkOpAllowed('shell.execute', ['shell:open'])).toContain('shell:execute');
+    expect(checkOpAllowed('shell.execute', ['shell:execute'])).toBeNull();
+    expect(checkOpAllowed('shell.openExternal', ['shell:execute'])).toContain('shell:open');
+    expect(checkOpAllowed('shell.execute', [])).toContain('shell:execute');
+  });
+
   it('未知 op 拒绝', () => {
     expect(checkOpAllowed('totally.made.up', ['terminal:read'])).toContain('未知');
   });
@@ -140,7 +148,7 @@ describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () 
   });
 
   it('敏感确认列出已交付的高风险能力', () => {
-    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:open', 'fs:write-dir']);
+    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:open', 'shell:execute', 'fs:write-dir']);
   });
 });
 

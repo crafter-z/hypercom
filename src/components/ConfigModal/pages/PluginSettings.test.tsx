@@ -188,6 +188,17 @@ const pluginWithWrite = (): PluginView => {
     manifest: { ...base.manifest!, permissions },
   };
 };
+const pluginWithShellPermission = (): PluginView => {
+  const base = trustedPlugin();
+  const permissions = ['shell:execute'];
+  return {
+    ...base,
+    trustedWebGranted: true,
+    declaredPermissions: permissions,
+    knownPermissions: permissions,
+    manifest: { ...base.manifest!, permissions },
+  };
+};
 const permissionCheckbox = (permission: string) => {
   const row = [...container.querySelectorAll('.plugin-perm-item')]
     .find(item => item.querySelector('code')?.textContent === permission);
@@ -217,6 +228,15 @@ it('never asks for the non-sensitive read grant, nor for revoking', async () => 
   await act(async () => permissionCheckbox('fs:write-dir').click());
   expect(confirm).not.toHaveBeenCalled();
   expect(mocks.api.togglePermission).toHaveBeenLastCalledWith('demo', 'fs:write-dir', 'generation-a');
+});
+
+it('uses the one-time generic risk confirmation when granting shell:execute', async () => {
+  mocks.api.plugins = [pluginWithShellPermission()];
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await render();
+  await act(async () => permissionCheckbox('shell:execute').click());
+  expect(confirm).toHaveBeenCalledWith('plugins.sensitiveConfirm');
+  expect(mocks.api.togglePermission).not.toHaveBeenCalled();
 });
 
 it('asks before "grant all and enable" hands over the same high-risk permissions', async () => {

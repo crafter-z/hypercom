@@ -196,6 +196,27 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
+  it('keeps shell execution alive past the ordinary deadline and denies shell:open-only callers', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['shell:open'] }] });
+    const deferred = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation(() => deferred.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op: 'shell.execute', args: { program: 'git' } });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: false, error: expect.stringContaining('shell:execute') });
+    expect(executeHostApi).not.toHaveBeenCalled();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['shell:execute'] }] });
+    worker.emit({ seq: 2, op: 'shell.execute', args: { program: 'git' } });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(worker.postMessage).not.toHaveBeenCalledWith({ seq: 2, ok: false, error: 'plugin RPC timed out' });
+    deferred.resolve({ exitCode: 1, stdout: '', stderr: 'failed' });
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 2, ok: true, result: { exitCode: 1, stdout: '', stderr: 'failed' } });
+    session.stop();
+  });
+
   it('keeps slow file reads and user-controlled dialogs alive beyond ordinary deadlines', async () => {
     vi.useFakeTimers();
     useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request', 'fs:open', 'fs:assets'] }] });

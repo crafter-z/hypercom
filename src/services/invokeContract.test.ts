@@ -25,6 +25,7 @@ import libSource from '../../src-tauri/src/lib.rs?raw';
 import serialRustSource from '../../src-tauri/src/commands/serial.rs?raw';
 import pluginRustSource from '../../src-tauri/src/commands/plugin.rs?raw';
 import httpRustSource from '../../src-tauri/src/commands/plugin_http.rs?raw';
+import shellRustSource from '../../src-tauri/src/commands/plugin_shell.rs?raw';
 import fileRustSource from '../../src-tauri/src/commands/file.rs?raw';
 import systemRustSource from '../../src-tauri/src/commands/system_cmds.rs?raw';
 import updateRustSource from '../../src-tauri/src/commands/update.rs?raw';
@@ -307,7 +308,7 @@ function commandWireParameters(source: string, command: string): WireParameter[]
   return parameters;
 }
 
-const boundaryRustSources = [pluginRustSource, httpRustSource, fileRustSource, systemRustSource, updateRustSource];
+const boundaryRustSources = [pluginRustSource, httpRustSource, shellRustSource, fileRustSource, systemRustSource, updateRustSource];
 
 describe('plugin / HTTP / view / close / update command parameter contract', () => {
   it('derives wire keys from real Rust signatures instead of a handwritten mirror', () => {
