@@ -21,12 +21,14 @@ npm run build
 npm run test:run
 npm run e2e
 npx tsc --noEmit
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run test:rust
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo check --manifest-path src-tauri/Cargo.toml --release --lib
 ```
 
 按改动范围运行对应检查；前端构建还会执行 TypeScript 检查。Playwright 使用 mock IPC，不等同于真实串口、原生 WebView/CSP 或最终安装包验收。Windows PowerShell 若拦截 `npm`，使用 `npm.cmd`。
+
+Rust 测试统一入口为 `scripts/test-rust.mjs` 的 `runRustTests`：在 `.npm-cache/` 下为每次运行创建独立临时目录，仅给 Cargo 子进程设置 `TEMP` / `TMP` / `TMPDIR` 并在结束后清理；保留调用方环境及 `CARGO_TARGET_DIR`。这避免 Windows 低完整性工作区产物无法写系统临时目录的问题，不改变应用运行态或系统目录权限。筛选测试可用 `npm run test:rust -- plugin_shell::tests`；入口自身验证为 `npm run test:rust:runner`。
 
 ## 跨模块硬规则
 
@@ -36,7 +38,7 @@ cargo check --manifest-path src-tauri/Cargo.toml --release --lib
 4. **Rust 命令契约**：命令返回 `Result<T, CommandError>`，错误映射保持领域变体；新增命令同时注册到 `src-tauri/src/lib.rs` 的 `generate_handler!`。不要以 `Result<T, String>` 作为命令错误类型；`std::sync::MutexGuard` 不得跨 `.await`。日志设置统一由 `AppState::apply_runtime_config` 应用，命令层不要给 `LogManager` 包外层 mutex。
 5. **串口发送与生命周期**：TRX 发送统一走 `src/hooks/useSerialSend.ts` 的 `sendToPort`；TTY 键盘、文件发送等旁路必须自行执行连接代次、流程独占和统计边界。RX 由 `src/hooks/useSerialReceive.ts` 的 `useSerialReceive` → `src/utils/rxPipeline.ts` 的 `getRxPipeline` → `src/utils/terminal/viewportManager.ts` 批量写入；主应用只装配一次 `useSerialReceive`，`getRxPipeline` 和 `src/utils/ttyService.ts` 的 `ttyService` 是 webview 生命周期单例，清理端口使用 `disconnect`，不可 `dispose`。
 6. **标签关闭不等于断开**：`src/components/MainDisplay/Pane.tsx` 的 `cleanupClosedTab` 负责关闭清理，批量范围使用 `src/stores/useAppStore.ts` 的 `getClosingTabIds`；显式断开走 `src/hooks/useSerialConnection.ts` 的 `useSerialConnection.closePort`。显示状态和缓冲只在对应标签消费者退休时回收。
-7. **插件身份与快照**：安装身份是 `installGeneration`，不是安装时间；需要用户确认的启用、授权、重载操作带 `expectedGeneration`。插件配置只接受 `src/utils/pluginConfigSnapshot.ts` 的后端带 revision 快照，旧快照不得恢复权限；插件通知走 `src/stores/useToastStore.ts` 的 `pushPlugin`。
+7. **插件能力、身份与快照**：插件系统以提供能力为目标，用户是安全第一责任人；本机命令执行以 `shell:execute` 显式授权为界，不额外施加程序白名单、默认超时或参数/输出业务配额。安装身份是 `installGeneration`，不是安装时间；需要用户确认的启用、授权、重载操作带 `expectedGeneration`。插件配置只接受 `src/utils/pluginConfigSnapshot.ts` 的后端带 revision 快照，旧快照不得恢复权限；插件通知走 `src/stores/useToastStore.ts` 的 `pushPlugin`。
 8. **编辑器与界面**：规则页面使用 `src/components/ConfigModal/hooks/useEntityPage.ts` 的 `useEntityPage({ kind })` 会话草稿并显式保存；关闭审批经过共享生命周期和 `complete_editor_close`。React 组件定义在模块级；终端纵向 flex 链每层保留 `min-height: 0`。
 9. **国际化与未信任颜色**：`src/i18n.ts` 的 zh-CN/en-US 保持键集合、顺序和占位符一致，协议词不翻译。进入 HTML style 的规则颜色必须经 `src/utils/cssColor.ts` 的 `safeCssColor`。
 10. **先查复用索引**：跨模块改动先看 [`docs/architecture/code-map.md`](docs/architecture/code-map.md)，禁止重复实现 pane tree、解码、HEX、边界、缩放或顺序调度逻辑。

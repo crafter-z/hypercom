@@ -11,6 +11,7 @@
 - `<config_dir>/plugins/<反向域名 id>/manifest.json` 与 manifest 指定的 `entry` 是插件代码来源；入口为单文件普通脚本，不支持 ESM `import` / `require`。Rust 的 `plugin::PluginManifest::validate` 校验 id、API 主版本、路径及权限声明；启动时宿主读取 manifest，失败即拒绝运行。
 - 主窗口 `usePluginHost` 在 `ui.configReady` 后同步插件状态；会话绑定 `installGeneration`，身份变化终止旧 Worker。启动失败计数窗口为 10 秒：窗口内累计三次启动失败后尝试持久化禁用并通知，未达阈值时按 500ms × 当前失败次数等待自动重试；`__plugin_ready` 之后的运行时错误只记诊断，不重启、不计数（分级见 [Worker 桥与派发](#worker-桥与派发)）。设置页刷新可重试未运行会话；若禁用状态保存失败，记录错误而不声称持久化成功。弹窗不加载插件宿主。
 - Worker 没有 DOM / `window.__TAURI__`；宿主和插件以 `postMessage` 通讯，宿主在每次 RPC 调用时检查当前安装身份及 `grantedPermissions`。`list_plugins` 在控制面闸门内取得一致的磁盘与配置快照；主窗 `pluginConfigSnapshot` 按后端 `revision` 拒绝迟到的列表和变更响应，防撤权后旧快照复活权限。插件安装与启用是用户信任决策，不是针对恶意主窗口脚本的强沙箱：能在主窗口执行的任意脚本仍可直接调用 Tauri 命令。后端对插件命令另做主窗口来源限制、已启用及权限验证，不把 Worker 中的 `pluginId` 当成不可伪造身份。
+- `shell.execute` 是高风险的主窗 Worker→宿主能力，不注入到视图页面。每次调用复核启用态、安装代次和 `shell:execute` 授权；权限用于用户明确授权能力，不额外设置命令专用并发、输出或参数业务配额围栏；宿主通用 RPC 在途限制仍适用。`program`、`args`、`cwd`、环境和 stdin 按操作系统进程语义传递，插件可显式选择 shell 解释器；禁用、撤权、显式重载、卸载或替换会取消并等待直接子进程，但仅 Worker 崩溃或停止时，宿主可能只丢弃 RPC 回执，不保证取消已启动的原生命令；命令可运行至自身结束、调用方 timeout 或后续用户禁用。任何情况下都不承诺终止进程树或撤销已发生的副作用。
 - 生产主窗口 CSP 在 `src-tauri/tauri.conf.json` 中限制 `connect-src 'self'`，并以 `wasm-unsafe-eval` 允许插件 Worker 编译/实例化 WebAssembly；Worker 出站 HTTP 只能经 `plugin_http_open/read/cancel`（`http:request` 授权；manifest 的 `http.urlWhitelist` 是可选收紧作用域，声明非空时逐跳校验）。默认跟随重定向（≤10 跳）、继承系统代理；用户显式配置的插件代理优先。无隐式 timeout 或响应大小截断，期限由调用方给出（完整语义见 [HTTP 流式契约](#http-流式契约)）。可信原生网页使用浏览器网络，不受 Worker 代理/白名单约束，仍遵守浏览器 CORS/TLS。开发环境 `devCsp` 放行 Vite HMR 并同步允许 WASM。
 - 已安装插件的 manifest 正常时，同 ID 仅接受更高版本覆盖安装；同版/降级拒绝，旧 manifest 损坏可修复安装。安装或升级默认禁用、清除普通授权及网页信任，生成新的 UUID `installGeneration`；可信网页先弹独立确认，普通权限另行授予，取消保留已安装但禁用状态。批准与启用绑定 `expectedGeneration`，升级期间排队的旧操作拒绝。网页批准独立于 `grantedPermissions`，正常重启保持，升级重审；`installedAt` 不参与身份判断。设置页仅在 `install_plugin` 返回同版/降级前缀时弹替换确认，取消不写磁盘；安装后按权威快照中 `installGeneration` 的变化识别新装插件，不按渲染进程的 manifest 列表推断。
 - 重载（`reload_plugin`）只重启已安装副本：不重新读取来源目录、不写 `config.json`（revision 不变），保留 `installGeneration`、`grantedPermissions`、`trustedWebGranted` 与 `data/`；要求主窗调用、已启用且磁盘 manifest 仍可校验。后端取消该插件在途 HTTP 并退休原生视图后返回当前快照；前端先停旧 Worker，快照被 revision 判旧即报错，否则严格等待新 Worker 到 `__plugin_ready` 再刷新列表并重建视图；只有快照被接受且新 Worker 就绪后才提示成功，陈旧快照或启动失败只报错。纯网页插件不创建 Worker。
@@ -90,6 +91,7 @@
 | `plugin_http_read` | `{pluginId, expectedGeneration, requestId}` | `{base64, done}`；单次最多 64 KiB 传输块，总量无业务上限；有数据即返回（EOF 可带最后一块），`Pending` 状态明确报错；取消/超时/撤权立即失败，`done` 后移除条目 |
 | `plugin_http_cancel` | `{pluginId, expectedGeneration, requestId}` | 幂等；未知 requestId 记录有界（32 条）「先取消后打开」意图，挂起中的 open/read 被打断；归属其他安装代次的 requestId 报错 |
 | `plugin_open_external` | `{pluginId, url}` | 无返回值；需要 shell:open，仅 http/https/mailto |
+| `plugin_shell_execute` | `{pluginId, expectedGeneration, request: {program, args?, cwd?, env?, stdin?, timeoutMs?}}` | `{exitCode, stdout, stderr}`；需要 shell:execute；按 OS 进程语义执行，直接子进程生命周期由插件能力层管理；不额外设置命令专用并发/输出/参数业务配额（宿主通用 RPC/OS/内存限制仍适用） |
 | `create_plugin_view` | `{binding}` | 主 WebView 专用；校验安装/权限/端口及资源后创建独立原生 UI |
 | `update_plugin_view` | `{instanceId, rect, occlusions?, visible, layoutRevision}` | 最新 revision 几何、局部遮挡（≤64 矩形，见[隔离视图](plugin-views.md)）及可见性；按主窗 zoom/DPI 转换并裁剪 |
 | `send_plugin_view_message` | `{instanceId,message}` | 只准 init/state/environment 有界 JSON，状态快照 256 KiB，不接受源代码 |
@@ -125,6 +127,6 @@ HTTP 只经 `plugin_http_open`、`plugin_http_read` 和 `plugin_http_cancel` 三
 
 ## 验证与发行边界
 
-- Rust 库测试覆盖 manifest/路径/ZIP 边界、市场索引/描述 schema 与 URL 校验、安装身份与事务恢复、权限和目录 grant、原子文件写入、HTTP 流式取消与重定向；运行 `cargo test --lib --manifest-path src-tauri/Cargo.toml`。
+- Rust 库测试覆盖 manifest/路径/ZIP 边界、市场索引/描述 schema 与 URL 校验、安装身份与事务恢复、权限和目录 grant、原子文件写入、HTTP 流式取消与重定向、本机命令执行与取消；运行 `npm run test:rust`（统一入口的临时目录隔离见[提交与验证](conventions.md#提交与验证)）。
 - 前端类型检查与 Vitest 覆盖 revision 快照、权限撤销、KV/文件/目录/HTTP、Worker、RX 旁路、通知和 UI 注册表；运行 `npx tsc --noEmit` 与 `npm run test:run`。
 - `e2e/plugin.spec.ts` 使用 Chromium Worker/RX/终端和 mock Rust invoke；它不证明原生选择器、ZIP 事务或生产 WebView CSP。目标平台安装包验收见 [`release.md`](release.md) 与 [`plugin-views.md`](plugin-views.md)。

@@ -15,6 +15,7 @@ Tauri 命令按领域分文件；`mod.rs` 汇总导出 `CommandError` 和各领�
 | `file.rs` | 宿主文件选择、文本/图片读取、插件文件目录授权与操作、回放源授权和分块读取 |
 | `plugin.rs` | 插件安装、升级、卸载、启停、权限、信任、资源、原生视图和外部打开 |
 | `plugin_http.rs` | 插件 HTTP 请求的打开、读取、取消和取消传播 |
+| `plugin_shell.rs` | 插件 shell.execute 本机进程执行、并发输出读取、超时/取消和生命周期准入 |
 | `popout.rs` | 弹窗创建、关闭和置顶；标签由 Rust 的 `sanitize` / `compute_label` 计算 |
 | `update.rs` | 更新检查、通道选择、下载和安装 |
 
@@ -35,7 +36,7 @@ Tauri 命令按领域分文件；`mod.rs` 汇总导出 `CommandError` 和各领�
 ## 常用检查
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run test:rust
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo check --manifest-path src-tauri/Cargo.toml --release --lib
 ```

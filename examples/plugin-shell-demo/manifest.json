@@ -1,0 +1,14 @@
+{
+  "id": "com.example.hypercom-shell-demo",
+  "name": "HyperCom Shell Demo",
+  "version": "1.0.0",
+  "description": "按钮触发 shell.execute，运行 git --version 并显示结果；不会在插件启动时自动运行。",
+  "apiVersion": "1.0",
+  "entry": "main.js",
+  "permissions": ["shell:execute"],
+  "ui": {
+    "buttons": [
+      { "id": "show-git-version", "label": "显示 Git 版本", "icon": "Terminal", "target": "sidebar" }
+    ]
+  }
+}

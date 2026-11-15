@@ -107,7 +107,7 @@ ame` | 是 | 非空显示名 |
 | `ui.menuItems` | 否 | 端口菜单数组：`{id, label, target?}`；target 缺省或 port-context 才显示 |
 | `ui.views` | 否 | 视图声明；`mode` 缺省为 `isolated`，显式 `trusted-web` 加载包内 HTML 文档；`worker:false` 表示该可信页不依附 Worker（仅允许 `input:"none"`），见下文 |
 | `requires` | 有视图时必需 | 每个 `ui.views` 项必须声明对应能力：隔离视图 `isolated-tab-view@1`、可信网页 `trusted-web-view@1`；声明 workspace-tab 放置时另需 `plugin-workspace-tabs@1`。未知或重复能力拒绝 |
-| `shell.executableWhitelist` | 否 | 保留字段；当前没有 shell.execute，不能靠此字段运行本机程序，也不约束 shell.openExternal |
+| `shell.executableWhitelist` | 否 | 兼容保留字段，不限制 `shell.execute`；也不约束 `shell.openExternal`。当前版本不需要声明它来执行程序 |
 
 按钮与菜单 id 应在插件内唯一，并在代码中按 buttonId 分派；label 由插件作者负责语言，不经过宿主翻译。支持的 icon 名见 `src/components/Sidebar/pluginIcon.tsx`；未识别的名称使用默认插头图标，入门示例使用已支持的 Play。
 
@@ -128,6 +128,7 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 | `fs:write-dir` | 高风险：经用户原生目录选择器获得写入授权，可创建/覆盖/追加文件、建目录、删除和重命名；根目录只能由选择器产生。宿主启停确认会单独提示 |
 | `http:request` | 经宿主发起完整 HTTP（文本/二进制/流式/重定向/取消）；可选 urlWhitelist 收紧 |
 | `shell:open` | 在系统默认程序打开 http/https/mailto URL；不是执行 shell |
+| `shell:execute` | **高风险**：经宿主按操作系统语义启动程序并返回退出码及 UTF-8 stdout/stderr；程序可读写本机数据、访问网络或运行其他程序。需一次性授予敏感权限，用户负责审阅插件代码和参数 |
 | `clipboard` | 读/写剪贴板文本 |
 |
 otify` | 发出受限的非粘滞通知 |
@@ -186,8 +187,8 @@ otify` | 发出受限的非粘滞通知 |
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户或网络，不设 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export` 与全部 `http.*`。`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
-- 超时只是回执失败，不表示已经开始的串口写入、文件写入或 HTTP 已被撤销。避免对可能已成功的副作用盲目重试。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`shell.execute` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
+- 超时只是回执失败，不表示已经开始的串口写入、文件写入、HTTP 请求或本机进程已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
 
@@ -276,6 +277,34 @@ options 字段：`method?`（缺省 GET，建议大写）、`url`（仅 http/htt
 仅 http/https URL；响应体与请求体不设宿主业务大小上限；非 2xx 仍返回响应对象，应检查 status。非法 URL/header/method、`body` 与 `bodyBase64` 同时提供都会在发网前 reject；并发上限为每插件 64、全应用 64。`signal` 取消与超时会让进行中的调用 reject（AbortError 或超时错误）；`stream.cancel()` 与提前 break 会取消原生请求并终止迭代，挂起的
 ext()` 以 AbortError reject。取消后不要假定已产生的服务端副作用被撤销。不自动注入 cookies、Referer 或宿主凭据；跨源重定向仅保留 Accept/Accept-Language/Content-Language/Content-Type/Content-Encoding/Range 等明确安全头，Authorization、Cookie 和任意未知自定义凭据头不随跳转发送；需要认证时请直接请求最终源。同源保留合法业务头，Host/Content-Length/Transfer-Encoding 等框架头拒绝。URL 最多 8192 字符，headers 最多 64 个、名字 256/值 8192 字符（这是通道结构保护，不是 body 业务配额）；错误日志去除 URL userinfo/query/fragment。默认继承系统代理，宿主显式配置的插件代理优先。`http.urlWhitelist` 仍是**可选**作用域：缺失或空数组表示不限制，非空时初始 URL 与每个重定向目标都要匹配；需要收紧时才声明。`shell.openExternal` 不受 `http.urlWhitelist` 限制。
 
+### 本机程序执行（高风险）
+
+| 调用 | 权限 | 参数与结果 |
+|---|---|---|
+| `api['shell.execute']({program, args?, cwd?, env?, stdin?, timeoutMs?})` | shell:execute | 返回 `{exitCode: number | null, stdout: string, stderr: string}`；非零退出码仍是正常结果，输出是 UTF-8 文本（非法字节按运行时替换） |
+
+`shell.execute` 由主窗口 Worker 经宿主执行，隔离视图不能直接启动程序。`program`、`args` 和 `cwd` 直接采用操作系统进程语义，不会自动拼成 shell 命令；可传相对或绝对路径，`cwd` 省略时使用应用默认工作目录。`env` 是在继承环境上叠加的字符串键值；`stdin` 是可选 UTF-8 文本，省略则关闭输入。`timeoutMs` 省略或为 `0` 表示不设截止，正整数表示调用方选择的毫秒截止（仅受安全整数数据表示约束，不设业务上限）。不额外设置命令专用并发、输出或参数业务配额；实际仍受 OS、进程、可用内存及宿主通用 RPC 在途限制。
+
+这是一次性敏感权限授权，不会在每次命令前重复确认。用户应在授权前审阅插件代码和它传给程序的参数；插件可显式选择 `cmd.exe`、PowerShell、`sh` 等解释器来执行 shell 脚本，参数因此可能包含任意代码。禁用、撤权、显式重载、卸载或替换会取消并等待直接子进程，但仅 Worker 崩溃或停止时，宿主可能只丢弃 RPC 回执，不保证取消已启动的原生命令；该命令可能运行至自身结束、调用方 timeout 或后续用户禁用。任何情况下都不承诺终止其创建的进程树，也不撤销已经发生的文件、网络或其他副作用。
+
+```js
+self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
+  if (buttonId !== 'show-git-version') return; // 不在启动时自动执行
+  try {
+    const result = await self.plugin.api['shell.execute']({
+      program: 'git',
+      args: ['--version'],
+      timeoutMs: 10_000,
+    });
+    await self.plugin.api['ui.panel.append']({
+      text: `[stdout]\n${result.stdout}\n[stderr]\n${result.stderr}\n[exit] ${result.exitCode}\n`,
+    });
+  } catch (error) {
+    console.error('shell.execute failed', error);
+  }
+});
+```
+
 ### 事件
 
 | 订阅 | 载荷 | 语义 |
@@ -289,7 +318,7 @@ ext()` 以 AbortError reject。取消后不要假定已产生的服务端副作�
 
 seq 不是跨应用会话的持久数据 ID；ts 为毫秒时间戳。不要把 RX 块当完整行，也不要按每块重新建解码器处理跨块 UTF-8 多字节字符。
 
-当前**没有** ports.onChange、rx.getBuffer、包资产目录遍历（`fs.list`）、shell.execute、自定义 events.on/emit 或远程调试协议。插件市场提供的是宿主侧索引、更新检查和用户确认后的安装流程，不是 Worker API；声明未来权限不能使未实现接口可用。目录读写只针对用户通过原生选择器选定的目录，不是任意路径 API；插件不能用自报路径绕过选择器。
+当前**没有** ports.onChange、rx.getBuffer、包资产目录遍历（`fs.list`）、自定义 events.on/emit 或远程调试协议；`shell.execute` 按上文的 `shell:execute` 权限和操作系统进程语义提供。插件市场提供的是宿主侧索引、更新检查和用户确认后的安装流程，不是 Worker API；声明未来权限不能使未实现接口可用。目录读写只针对用户通过原生选择器选定的目录，不是任意路径 API；插件不能用自报路径绕过选择器。
 
 ## 隔离 UI 与工作区标签
 
@@ -785,4 +814,4 @@ HyperCom 官方示例市场源仓库为 [`crafter-z/hypercom-plugin-marketplace`
 - [ ] 市场更新只在用户确认后安装；确认后预期会生成新的 installGeneration 并要求重新授权，不把旧权限或可信网页信任当作升级成功条件。
 - [ ] 在准备支持的实际应用/平台验证 Worker、文件选择器和生产网络限制；开发浏览器模拟 IPC 的通过不替代原生验收。
 
-现有 RX/旁注/声明式按钮/白名单演示见[示例插件](../examples/plugin-demo/README.md)；宿主磁盘恢复和权限实现见[架构说明](architecture/plugins.md)，应用发行包验证边界见[发布验收](architecture/release.md#自动更新与平台边界)。
+现有 RX/旁注/声明式按钮/串口作用域演示见[基础示例插件](../examples/plugin-demo/README.md)，本机命令按钮触发演示见[shell.execute 示例](../examples/plugin-shell-demo/README.md)；宿主磁盘恢复和权限实现见[架构说明](architecture/plugins.md)，应用发行包验证边界见[发布验收](architecture/release.md#自动更新与平台边界)。

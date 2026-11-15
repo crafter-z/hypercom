@@ -68,7 +68,9 @@
 
 提交格式为 `type(scope): description`；`type` 使用 `feat`、`fix`、`docs`、`style`、`refactor`、`perf`、`test`、`chore`，scope 使用实际受影响域。
 
-按改动范围运行 `npm run build`、`npm run test:run`、`npx tsc --noEmit`、`cargo test --manifest-path src-tauri/Cargo.toml --lib`、Clippy 和 release-profile 检查。Playwright 使用 mock IPC；它不证明真实 UART、原生 WebView/CSP 或最终安装包行为。质量门与平台验收边界见 [`release.md`](release.md)。
+按改动范围运行 `npm run build`、`npm run test:run`、`npx tsc --noEmit`、`npm run test:rust`、Clippy 和 release-profile 检查。Playwright 使用 mock IPC；它不证明真实 UART、原生 WebView/CSP 或最终安装包行为。质量门与平台验收边界见 [`release.md`](release.md)。
+
+Rust 库测试由 `scripts/test-rust.mjs` 的 `runRustTests` 启动，仍执行完整的 `cargo test --manifest-path src-tauri/Cargo.toml --lib`，并原样转发额外筛选参数。每次测试在 `.npm-cache/` 下创建独立目录，只向 Cargo 子进程传入该目录作为 `TEMP` / `TMP` / `TMPDIR`，结束或启动失败时清理；不改调用方环境、`CARGO_TARGET_DIR` 或应用运行时行为。Windows 工作区及其产物可能带 Low Mandatory Level 标签，导致测试进程不能写正常完整性级别的系统临时目录；测试临时目录隔离解决这一环境问题，无需修改系统目录权限，也不跳过文件访问断言。入口脚本自身由 `npm run test:rust:runner` 验证。
 
 ## 相关文档
 

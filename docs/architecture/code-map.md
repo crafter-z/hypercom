@@ -26,6 +26,7 @@
 | 时间联动 | `src/utils/timeline/coordinator.ts`：`timelineCoordinator`；`scheduler.ts`：`TimelineScheduler`；`trxTimelineAdapter.ts`：`createTrxTimelineAdapter` | preview/commit、代次和背压的唯一来源 |
 | 只读回放 | `src/utils/replay/ReplayDocument.ts`、`src/utils/replay/replayRuntime.ts` | 回放只读，不写实时 RX、TX 或触发旁路 |
 | 插件宿主 | `src/hooks/usePlugins.ts`：`usePluginHost`；`src/utils/pluginHost.ts`；`pluginObserver.ts`；`pluginBytesObserver.ts` | 每次 RPC 复核安装身份、启用态和权限 |
+| 插件命令执行 | `src/utils/pluginShell.ts`：`executePluginShell`；`src-tauri/src/commands/plugin_shell.rs`：`plugin_shell_execute` | `shell:execute` 一次性授权；按 OS 进程语义传递 program/args/cwd/env/stdin，状态变更终止直接子进程 |
 | 插件配置快照 | `src/utils/pluginConfigSnapshot.ts`：`syncPluginListSnapshot`、`syncStorePluginConfigs` | 后端 revision 单调；旧快照不可恢复权限 |
 | 插件视图二进制 | `src/utils/pluginViewBinary.ts`；`src/utils/pluginViewJson.ts` | 分块、ACK、document/epoch 绑定；不塞实时状态 JSON |
 | 插件视图输入 | `src/utils/pluginViewInput.ts`：`pluginViewInput` | 端口输入租约按 bytes/lines/none 管理 |
