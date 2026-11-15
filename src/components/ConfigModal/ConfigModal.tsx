@@ -238,12 +238,12 @@ const ConfigModal: React.FC = () => {
       if (!(await saveConfig())) { setSaveFailed(true); return; }
       if (!mountedRef.current || session !== sessionRef.current || !useSystemStore.getState().ui.isConfigOpen) return;
       if (isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0) { setSaveFailed(true); return; }
+      setDirty(false);
+      setFocusedEditorPending(false);
       const latest = useAppStore.getState().config;
       void applyUiScale(latest.uiScalePercent);
       void popoutEventService.emitUiScaleChanged(latest.uiScalePercent)
         .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
-
-      toggleConfigModal(false);
       if (modeChanged && getCommittedUpdateMode() !== 'none') void runAutoCheck();
     } finally {
       savingRef.current = false;
