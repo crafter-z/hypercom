@@ -56,6 +56,12 @@ HyperCom 是一款串口调试工具。连接开发板、传感器等串口设�
 
 编写插件请看独立的[插件开发指南](docs/plugin-development.md)：从最小插件到 manifest、API、隔离 UI、工作区标签动作、调试和打包。完整隔离页面示例见[Sensor Workspace](examples/plugin-views-demo/README.md)；目前原生自定义视图承载支持 Windows，其他平台在通过隔离策略验收前明确拒绝。开发宿主与内部实现资料见[架构索引](docs/architecture/README.md)。
 
+## 源码开发与贡献
+
+本项目使用 React / TypeScript 和 Rust / Tauri v2。环境准备、启动、验证命令与文档维护分工见[贡献指南](<CONTRIBUTING.md>)；当前实现见[架构索引](<docs/architecture/README.md>)。只想使用软件，无需准备开发环境。
+
+各版本面向用户的功能与修复摘要见[发行说明](<RELEASE_NOTES.md>)；历史版本内容不代表当前接口或设置。
+
 ## 许可证
 
-本项目使用 MIT 许可证。第三方开源项目及其许可证见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)，也可在应用「关于 → 开源许可证」中查看。
+本项目使用 MIT 许可证。直接依赖的许可证索引见[第三方许可证](<THIRD_PARTY_LICENSES.md>)，应用「关于 → 开源许可证」提供精简列表；分发时仍需保留相关依赖要求的版权与许可证文本。
