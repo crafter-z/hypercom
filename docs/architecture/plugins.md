@@ -34,7 +34,7 @@
 ### 命令与生命周期
 
 1. `fetch_plugin_marketplace({sourceUrl})` 获取并校验一个明确的索引来源，返回 `{schemaVersion, plugins}`。前端在来源变更时丢弃旧请求结果；失败时保留现有本地插件状态。
-2. `check_plugin_updates()` 使用配置的市场来源读取描述并与当前安装版本按数字 semver 比较，返回包含 `id`、`latestVersion`、`descriptionUrl`、`downloadUrl`、`manifest`、`updateAvailable` 以及已安装时的 `currentVersion`（未安装时省略）和可选发布说明/主页的结果。检查只读，不下载、替换或改变权限。
+2. `check_plugin_updates({sourceUrl?})` 优先使用当前输入的市场源，缺省时回退到已保存的 `pluginMarketplaceUrl`；读取描述并与当前安装版本按数字 semver 比较，返回包含 `id`、`latestVersion`、`descriptionUrl`、`downloadUrl`、`manifest`、`updateAvailable` 以及已安装时的 `currentVersion`（未安装时省略）和可选发布说明/主页的结果。前端在检查成功前先用 field-only revision CAS 保存当前源；检查只读，不下载、替换或改变权限。
 3. 用户选择更新后，前端展示描述中的 id、版本、权限、主页和发布说明，并将 `metadataUrl`、`expectedId`、`expectedVersion`（以及已安装插件的 `expectedGeneration`）原样绑定到确认操作。后端重新获取描述并逐字段校验，拒绝 id/version 不匹配、旧安装代次、非法 URL、无效 manifest 或归档校验失败；不能信任前端此前缓存的 JSON。
 4. 确认安装沿用普通插件事务：先完整下载、解压和校验，再提交禁用/清权状态和代码替换。成功后保留插件 `data/`，生成新的 `installGeneration`，清除普通授权与可信网页信任，并记录 `source: "marketplace"` 与归档 `updateUrl`；用户必须重新审阅并授予权限。任何准备或网络失败都不应报告安装成功，事务恢复/配置快照仍按普通安装规则执行。
 5. 取消确认、同版/降级拒绝或代次变化只结束本次市场操作，不修改已安装代码；市场检查也不自动升级。重载已安装代码和本地安装仍遵循原有生命周期，不把 `installedAt` 当作身份。

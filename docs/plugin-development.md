@@ -709,6 +709,8 @@ Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-
 
 插件市场由宿主读取远程 JSON，不是插件 Worker API。用户在设置中配置一个索引 URL 后，宿主先读取索引，再读取其中的插件描述；两种文档都按不可信输入处理。市场不会自动安装、自动授予权限或替代用户对代码的审阅。
 
+在设置页填写源地址后，点击「同步市场」或「检查更新」会使用当前输入立即检查；检查成功前端通过 field-only revision CAS 保存 `pluginMarketplaceUrl`，不要求先点击普通设置的「保存全部」。
+
 ### 索引文件
 
 索引当前使用 `schemaVersion: 1`，`plugins` 是插件描述 JSON 的 URL 数组，最多 256 项：
@@ -723,6 +725,8 @@ Compress-Archive -Path .\com.example.hello -DestinationPath .\com.example.hello-
 ```
 
 索引及每份描述不得超过 1 MiB。URL 必须是 `http` 或 `https`，不能包含用户名、密码或 URL fragment；生产发布建议全程使用 HTTPS。索引 URL 只用于发现元数据，不能把插件代码直接嵌入索引。
+
+HyperCom 官方示例市场源仓库为 [`crafter-z/hypercom-plugin-marketplace`](https://github.com/crafter-z/hypercom-plugin-marketplace)。仓库中的 `index.json` 只维护 metadata 链接；示例插件 ZIP 作为 GitHub Release Asset 发布，metadata 的 `downloadUrl` 固定指向该 Release Asset。
 
 ### 发布描述 JSON
 

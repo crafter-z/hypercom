@@ -20,7 +20,7 @@ python -m http.server 8787 --directory examples/plugin-marketplace
 http://127.0.0.1:8787/index.json
 ```
 
-保存配置后点击「同步市场」。你应该能看到：
+填入地址后直接点击「同步市场」即可；成功检查会立即保存市场源，不需要先点击普通设置的「保存全部」。你应该能看到：
 
 - `HyperCom Demo`
 - `com.example.hypercom-demo`
