@@ -40,6 +40,10 @@
 4. 确认安装沿用普通插件事务：先完整下载、解压和校验，再提交禁用/清权状态和代码替换。成功后保留插件 `data/`，生成新的 `installGeneration`，清除普通授权与可信网页信任，并记录 `source: "marketplace"` 与归档 `updateUrl`；用户必须重新审阅并授予权限。任何准备或网络失败都不应报告安装成功，事务恢复/配置快照仍按普通安装规则执行。
 5. 取消确认、同版/降级拒绝或代次变化只结束本次市场操作，不修改已安装代码；市场检查也不自动升级。重载已安装代码和本地安装仍遵循原有生命周期，不把 `installedAt` 当作身份。
 
+### 自动检查联动与通知
+
+插件市场更新检查已接入软件更新检查生命周期：`useAutoUpdate` 在配置就绪后并行调用 `src/utils/pluginUpdateService.ts` 的 `runPluginAutoCheck`（7 天周期、独立 localStorage 记账），`AboutDialog` 的手动检查并行调用 `runPluginManualCheck`；`updateCheckMode = 'none'` 时两者都不自动检查，DEV 构建不自动检查（手动显式检查可绕过）。后台检查使用已提交的 `pluginMarketplaceUrl`（仅未初始化时回退当前配置值），不读取设置草稿。发现已安装插件的可用更新时，应用经通知中心投递一条粘性 info 通知（`action: 'open-plugin-settings'`，点击通知中心行或右下角提示均可直达“设置 → 插件”）；通知只提示，不自动下载、安装或回写配置，未安装的市场插件不参与提示。插件检查失败静默记录诊断，不影响软件更新结果；设置页的“检查更新”手动入口仍保留。
+
 ### 宿主边界
 
 市场请求通过 Rust 网络层发起并沿用 HTTP 代理、重定向和 TLS 边界；不得从 Worker 直接调用 Tauri 命令或把市场 URL 当作插件的 `http.urlWhitelist`。市场权限仅影响安装后插件，不能授予市场服务任何宿主权限。当前市场源地址保存在 `pluginMarketplaceUrl`，市场安装会把归档地址保存为插件的 `updateUrl`；这些地址只用于后续展示/检查，不构成签名或供应链证明。需要发布完整性与供应链保证时，应在部署层提供 HTTPS、签名或可信镜像。

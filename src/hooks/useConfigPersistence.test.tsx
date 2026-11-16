@@ -10,6 +10,11 @@ import { configService, storageService } from '../services/tauri';
 import { useConfigPersistence, saveCurrentPortMeta, saveCurrentPortGroups, resetOrdinaryConfigBaselineForTests, isOrdinaryConfigDirty, discardOrdinaryConfigDraft } from './useConfigPersistence';
 import { getEntityEditorSnapshot, replaceEntityDraft, resetEntityEditorForTests } from '../utils/entityEditor';
 import { commitUpdateMode, getCommittedUpdateMode, updateTiming } from '../utils/updateService';
+import {
+  getCommittedPluginMarketplaceUrl,
+  pluginUpdateTiming,
+  resetPluginUpdateServiceForTests,
+} from '../utils/pluginUpdateService';
 import { resetStoresForTests } from '../stores/resetStores';
 import { DEFAULT_TERMINAL_FONT, DEFAULT_UI_FONT, LEGACY_TERMINAL_FONT, LEGACY_UI_FONT } from '../utils/fontDefaults';
 
@@ -57,6 +62,7 @@ function Probe() {
 beforeEach(async () => {
   resetStoresForTests();
   commitUpdateMode('stable');
+  resetPluginUpdateServiceForTests();
   resetEntityEditorForTests();
   resetOrdinaryConfigBaselineForTests();
   localStorage.clear();
@@ -311,6 +317,54 @@ describe('committed update mode persistence', () => {
     expect(backend.theme).toBe(persistedTheme);
     expect(backend.sendCommandSets).toEqual([rule('already persisted elsewhere')]);
     expect(getCommittedUpdateMode()).toBe('none');
+  });
+});
+
+describe('committed plugin marketplace source (linked update checks)', () => {
+  it('loads the persisted source and never commits the editable settings draft', async () => {
+    backend = { ...backend, pluginMarketplaceUrl: 'https://disk.example/index.json' };
+    useAppStore.getState().setConfig({ pluginMarketplaceUrl: 'https://draft.example/index.json' });
+
+    await act(async () => { await load(); });
+
+    expect(getCommittedPluginMarketplaceUrl()).toBe('https://disk.example/index.json');
+  });
+
+  it('commits a changed source only after a successful save and resets plugin check accounting', async () => {
+    await act(async () => { await load(); });
+    pluginUpdateTiming.markCheckedAt(1_750_000_000_000);
+    pluginUpdateTiming.setNotified('plugin.alpha@1.1.0');
+    useAppStore.getState().setConfig({ pluginMarketplaceUrl: 'https://new.example/index.json' });
+
+    expect(await save()).toBe(true);
+
+    expect(backend.pluginMarketplaceUrl).toBe('https://new.example/index.json');
+    expect(getCommittedPluginMarketplaceUrl()).toBe('https://new.example/index.json');
+    expect(pluginUpdateTiming.getLastCheckAt()).toBeNull();
+    expect(pluginUpdateTiming.getNotified()).toBeNull();
+  });
+
+  it('keeps plugin check accounting when an unrelated save leaves the source unchanged', async () => {
+    await act(async () => { await load(); });
+    pluginUpdateTiming.markCheckedAt(1_750_000_000_000);
+
+    expect(await save({ theme: backend.theme === 'light' ? 'dark' : 'light' })).toBe(true);
+
+    expect(getCommittedPluginMarketplaceUrl()).toBe(backend.pluginMarketplaceUrl);
+    expect(pluginUpdateTiming.getLastCheckAt()).toBe(1_750_000_000_000);
+  });
+
+  it('clears plugin check accounting when the committed update mode changes', async () => {
+    await act(async () => { await load(); });
+    pluginUpdateTiming.markCheckedAt(1_750_000_000_000);
+    pluginUpdateTiming.setNotified('plugin.alpha@1.1.0');
+    useAppStore.getState().setConfig({ updateCheckMode: 'preview' });
+
+    expect(await save()).toBe(true);
+
+    expect(getCommittedUpdateMode()).toBe('preview');
+    expect(pluginUpdateTiming.getLastCheckAt()).toBeNull();
+    expect(pluginUpdateTiming.getNotified()).toBeNull();
   });
 });
 

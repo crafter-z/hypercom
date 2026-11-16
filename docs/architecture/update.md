@@ -52,13 +52,24 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 
 ## 前端决策流
 
-- `useAutoUpdate`（`hooks/useAutoUpdate.ts`，App.tsx 挂一次）：先过 `isUpdateCheckEnabled()`（DEV 构建与 macOS 直接不检查），再等 `ui.configReady` 信号（`useConfigPersistence.loadConfig` 成功或失败后均置位）后评估。没有超时抢跑：慢启动期间不能用默认 stable 覆盖尚未加载的持久化 none/preview；就绪后立即按已提交模式检查。**会话内每 6h 重评估**（setInterval，门控在 shouldAutoCheck，常驻挂机覆盖）。
+- `useAutoUpdate`（`hooks/useAutoUpdate.ts`，App.tsx 挂一次）：先等 `ui.configReady` 信号（`useConfigPersistence.loadConfig` 成功或失败后均置位）后评估；软件更新过 `isUpdateCheckEnabled()`（DEV 构建与 macOS 不检查软件更新），插件更新走独立门控与 `runPluginAutoCheck`，两者并行（见「插件更新联动」）。没有超时抢跑：慢启动期间不能用默认 stable 覆盖尚未加载的持久化 none/preview；就绪后立即按已提交模式检查。**会话内每 6h 重评估**（setInterval，门控在 `shouldAutoCheck` / `shouldCheckPluginUpdates`，常驻挂机覆盖）。
 - `shouldAutoCheck`：先检查 `none` 与有效 snooze，再判断首启、时钟回拨与 7 天周期；即使自动检查账为空，手动检查后的延期也生效。仅当前意图下成功完成的自动检查记 `lastCheckAt`。
 - localStorage 记账：`hypercom.update.lastCheckAt` / `hypercom.update.snoozeUntil`（`updateTiming` 读写，非法值解析为 null；per-install，不随配置导出）。
 - `utils/updateService.ts` 的 `getCommittedUpdateMode` / `commitUpdateMode` 管理已提交模式，与设置页 `useAppStore.config` 草稿分离。加载/成功保存使旧 generation 失效，取消设置不会触发升级副作用。
 - `runAutoCheck()` 读取已提交模式，同 generation 去重；切新通道可在旧检查未完成时启动，旧结果不发布、不记账。`manualCheck(channel)` 绕过周期/none/DEV，推进发布意图使更早自动结果失效，并走同一发布守卫；失效结果返回 `discarded`。
 - 成功保存改变模式才清除 `lastCheckAt` / snooze；`ConfigModal.handleSave` 在模式变化且新模式非 `none` 时关闭设置后立即 `runAutoCheck()`。设置页显示最后成功自动检查时间。
 - 版本号约定：stable `0.x.y`、preview `0.x.y-preview.N`（属于下一核心，同核心 preview<stable 晋升自洽——semver 免费降级保护）。
+
+## 插件更新联动
+
+软件更新与插件市场更新共享同一自动检查时机，但插件更新只做通知：不自动安装、不回写配置。插件侧逻辑集中在 `src/utils/pluginUpdateService.ts`，记账与软件更新分离；`useAutoUpdate` 在 `ui.configReady` 后并行评估 `runAutoCheck`（软件）与 `runPluginAutoCheck`（插件），会话内每 6h 重评估。`updateCheckMode === 'none'` 时两者都不自动检查；DEV 构建下 `isPluginUpdateCheckEnabled()` 关闭自动插件检查（手动显式检查可绕过）；macOS 不支持软件自动更新，但插件检查不排除 macOS，`isUpdateCheckEnabled()` 为 false 时插件仍按自身门控执行。
+
+- **触发与周期**：自动插件检查周期为 7 天（`PLUGIN_UPDATE_CHECK_PERIOD_MS`），`shouldCheckPluginUpdates(mode, now, lastCheckAt)` 判定是否到期：`none` 永不、无记录或时钟回拨立即、距上次成功 ≥7 天。`runPluginAutoCheck` 只在成功完成实际检查后 `markCheckedAt`；`runPluginManualCheck` 表示显式用户意图，绕过 DEV/模式/周期，但仍要求非空市场源，且不写 `lastCheckAt`。
+- **独立记账**：localStorage 键 `hypercom.pluginUpdate.lastCheckAt` / `hypercom.pluginUpdate.notified` 由 `pluginUpdateTiming` 读写（复用 `updateService` 的 `parseStoredTs`，非法值按 null）；`notified` 保存已提示过的更新指纹，不随配置导出。
+- **只提示已安装插件的可用更新**：`availablePluginUpdates` 只保留 `updateAvailable === true` 且 `currentVersion` 非空的条目，未安装的市场插件不产生提示。`pluginUpdateFingerprint` 对排序后的 `id@latestVersion` 拼串去重：同一批更新只提示一次，安装或版本变化使指纹改变后再次提示；没有可用更新时清除 `notified`。提示经 `useToastStore.push` 投递粘性（`durationMs: 0`）info 通知，携带 `action: 'open-plugin-settings'`，标题与正文使用 `update.pluginUpdatesTitle` 和 `update.pluginUpdatesAvailable`（多于 3 条用 `update.pluginUpdatesAvailableMore`，只列前 3 个名字加“等”）；名称取 `manifest.name` 回退 id。`pushPlugin` 的输入类型不暴露 `action`，插件通知不能伪造该跳转。
+- **通知入口**：`Toast`（`ToastContainer` 的粘性 toast）与 `NotificationCenter` 的通知行都识别 `action === 'open-plugin-settings'`，提供 button 语义（Enter/Space 可触发）。点击 toast 会移除该提示并打开“设置 → 插件”；通知中心行点击会关闭通知中心并打开同一页面（`configActiveTab: 'plugins'` 与 `toggleConfigModal`），标题用 `notify.openPluginSettings`；关闭按钮 `stopPropagation`，原有按 `portId` 打开串口标签的行为保留，普通 toast 仍为不可点击的 `alert`。
+- **手动联动与失败分类**：`AboutDialog` 手动检查软件更新时并行发起 `void runPluginManualCheck()`，不阻塞软件更新的候选弹窗或“已是最新”提示；设置页市场手动检查（`usePluginMarketplace` → `checkPluginUpdates`）仍保留。插件检查失败只 `console.debug` 静默记录，不抛异常、不弹 toast，也不影响软件更新结果。
+- **已提交市场源**：`pluginUpdateService` 维护模块级已提交源（`getCommittedPluginMarketplaceUrl()` / `commitPluginMarketplaceUrl(url, {resetTiming?})`）；配置加载成功前尚未初始化时回退读取 `useAppStore` 的 `config.pluginMarketplaceUrl`。后台检查以已提交值为准，设置草稿不会改变已提交源。`useConfigPersistence.loadConfig` 成功应用迁移配置后提交当前源；`saveConfig` 成功提交后若源变化则提交并 `resetTiming`（清 `lastCheckAt` 与 `notified`，新源立即重新检查），更新模式变化也清插件记账与已通知指纹。`ConfigModal.handleSave` 在模式变化且新模式非 `none` 时追加 `void runPluginAutoCheck()`；`GeneralSettings.tsx` 在更新模式下方以 `update.pluginCheckHint` 说明联动。
 
 ## UpdateDialog
 
@@ -72,6 +83,7 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 ## 失败分类
 
 - 自动检查 reject → 静默 + diagLog；手动检查 reject → toast；下载/签名验证失败 → toast 不退出。
+- 插件更新检查 reject → 静默 `console.debug` 诊断，不弹 toast、不记账，也不影响软件更新结果；手动检查软件更新时并行发起的插件检查同样静默。
 
 ## 关键事实备忘
 
@@ -79,9 +91,9 @@ check_for_update(channel)                    # 入口：is_debug_build() → Ok(
 2. **同版本永不重装**：强行重推必须 bump 版本。
 3. **清单由唯一发布汇总生成**：`scripts/release.mjs` 明确令 Windows 默认键选择 NSIS，并保留 `-nsis` / `-msi` 等 installer-specific 键；矩阵 `uploadUpdaterJson: false`，不并行读改写 latest.json。
 4. **endpoint 数组是 fallback 不是协商器**：第一有效 2XX 即定——每端点只喂一个 URL（通道协商由 `newer_channel` 在命令层完成，不靠 `endpoints` 数组）。
-5. **DEV 短路（双层）**：前端 `import.meta.env.DEV`（`isUpdateCheckEnabled()`）+ 后端 `commands::system_cmds::is_debug_build()`——调试能力门控的唯一实现处（与 `dev_only()` 同文件），`update.rs` 命令体不再写 `#[cfg(debug_assertions)]` 双主体。
+5. **DEV 短路（双层）**：前端 `import.meta.env.DEV`（`isUpdateCheckEnabled()`）+ 后端 `commands::system_cmds::is_debug_build()`——调试能力门控的唯一实现处（与 `dev_only()` 同文件），`update.rs` 命令体不再写 `#[cfg(debug_assertions)]` 双主体；插件自动检查由 `isPluginUpdateCheckEnabled()` 按同一 DEV 事实关闭，手动显式检查可绕过。
 6. **更新检查只挂主窗** App.tsx；弹出窗不挂（沿用一次性纪律）。
-7. **macOS 暂不支持自动更新**：未签名/公证的 .app 带 quarantine 属性会被 Gatekeeper 拦截，更新 relaunch 即失败。前端据此把 macOS 判为不可用——`isUpdateCheckEnabled()`（`!DEV && !isMacPlatform()`）不检查不弹窗，`AboutDialog` 也隐藏两个手动检查按钮。启用前置条件 = Apple Developer ID 签名 + 公证（尚未实施）。`verify-release` 仍校验 darwin 键（产物完整性），不代表 macOS 更新可用。
+7. **macOS 暂不支持自动更新**：未签名/公证的 .app 带 quarantine 属性会被 Gatekeeper 拦截，更新 relaunch 即失败。前端据此把 macOS 判为不可用——`isUpdateCheckEnabled()`（`!DEV && !isMacPlatform()`）不检查不弹窗，`AboutDialog` 也隐藏两个手动检查按钮。启用前置条件 = Apple Developer ID 签名 + 公证（尚未实施）。`verify-release` 仍校验 darwin 键（产物完整性），不代表 macOS 更新可用。该平台判断只关闭软件更新；插件更新检查不排除 macOS，仍会按周期提示已安装插件的可用更新（见「插件更新联动」）。
 
 ## 依赖
 

@@ -5,6 +5,7 @@ import { severityIcon } from '../shared/Toast/Toast';
 import type { ToastItem } from '../../stores/useToastStore';
 import { useToastStore } from '../../stores/useToastStore';
 import { getTabPortId, useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import ConfirmDialog from '../shared/ConfirmDialog';
 import { useOutsideDismiss } from '../shared/useOutsideDismiss';
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
@@ -39,6 +40,8 @@ const NotificationCenter: React.FC = () => {
   const dismiss = useToastStore((s) => s.dismiss);
   const tabs = useAppStore((s) => s.tabs);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const setConfigActiveTab = useSystemStore((s) => s.setConfigActiveTab);
+  const toggleConfigModal = useSystemStore((s) => s.toggleConfigModal);
   const [clearConfirm, setClearConfirm] = useState(false);
   const overlayReady = usePluginViewOverlay(centerOpen);
 
@@ -94,27 +97,37 @@ const NotificationCenter: React.FC = () => {
                 const text = toast.messageKey ? t(toast.messageKey) : (toast.message ?? '');
                 const sourceTab = toast.portId ? tabs.find((item) => getTabPortId(item) === toast.portId) : undefined;
                 const hasSource = !!sourceTab;
-                const openSource = () => {
-                  if (!hasSource) return;
-                  const tab = sourceTab;
-                  if (tab) {
-                    setActiveTab(tab.id);
+                // 插件更新通知是宿主通知：点击关闭通知中心并直达插件设置页。
+                const opensPluginSettings = toast.action === 'open-plugin-settings';
+                const actionable = hasSource || opensPluginSettings;
+                const activate = () => {
+                  if (hasSource) {
+                    const tab = sourceTab;
+                    if (tab) {
+                      setActiveTab(tab.id);
+                      setCenterOpen(false);
+                    }
+                    return;
+                  }
+                  if (opensPluginSettings) {
                     setCenterOpen(false);
+                    setConfigActiveTab('plugins');
+                    toggleConfigModal(true);
                   }
                 };
                 return (
                   <div
                     key={toast.id}
-                    className={`notify-row notify-${toast.severity}${hasSource ? ' notify-row-actionable' : ''}`}
-                    role={hasSource ? 'button' : 'group'}
-                    tabIndex={hasSource ? 0 : -1}
-                    title={hasSource ? t('notify.openSource') : undefined}
-                    onClick={openSource}
+                    className={`notify-row notify-${toast.severity}${actionable ? ' notify-row-actionable' : ''}`}
+                    role={actionable ? 'button' : 'group'}
+                    tabIndex={actionable ? 0 : -1}
+                    title={hasSource ? t('notify.openSource') : opensPluginSettings ? t('notify.openPluginSettings') : undefined}
+                    onClick={activate}
                     onKeyDown={(event) => {
-                      if (event.target !== event.currentTarget || !hasSource) return;
+                      if (event.target !== event.currentTarget || !actionable) return;
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault();
-                        openSource();
+                        activate();
                       }
                     }}
                   >

@@ -166,6 +166,7 @@ const GeneralSettings: React.FC = () => {
           ))}
         </div>
       </div>
+      <p className="settings-hint">{t('update.pluginCheckHint')}</p>
 
       <div className="config-row">
         <label>{t('update.lastCheckLabel')}</label>

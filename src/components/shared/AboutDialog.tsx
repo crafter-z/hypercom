@@ -8,6 +8,7 @@ import LicensesDialog from './LicensesDialog';
 import DiagnosticLogDialog from './DiagnosticLogDialog';
 import Modal from './Modal';
 import { manualCheck, isMacPlatform } from '../../utils/updateService';
+import { runPluginManualCheck } from '../../utils/pluginUpdateService';
 import { useToastStore } from '../../stores/useToastStore';
 import { channelLabelKey, GITHUB_REPO_URL } from '../../utils/channel';
 import type { ReleaseChannel } from '../../types';
@@ -58,6 +59,9 @@ const AboutDialog: React.FC = () => {
   const handleManualCheck = async (channel: ReleaseChannel) => {
     if (checking) return;
     setChecking(channel);
+    // 软件更新与插件市场更新联动：并行触发插件检查，不阻塞软件结果 UI；
+    // 插件侧失败静默（runPluginManualCheck 永不 reject）。
+    void runPluginManualCheck();
     try {
       // 手动检查不过 DEV 门控：显式用户意图，后端 debug 构建返回 Ok(None)
       // 双保险（开发时不触网）。E2E 在 dev server 上 mock check_for_update 驱动。

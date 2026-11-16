@@ -15,6 +15,9 @@ import i18n from '../i18n';
 
 export type ToastSeverity = 'info' | 'success' | 'warning' | 'error';
 
+/** Host-only row action; plugin notifications cannot request it. */
+export type ToastAction = 'open-plugin-settings';
+
 export interface ToastItem {
   id: string;
   severity: ToastSeverity;
@@ -27,6 +30,8 @@ export interface ToastItem {
   /** Optional source serial port id — rendered as a chip by the notification
    *  center when the message originates from a serial port (issue #7-1). */
   portId?: string;
+  /** Optional host action for an actionable notification row. */
+  action?: ToastAction;
   /** Trusted source identity, assigned by the host rather than plugin arguments. */
   pluginId?: string;
   /** Auto-dismiss delay in ms. `0` = sticky: NO auto-dismiss (persists until
@@ -42,6 +47,8 @@ export interface ToastPushInput {
   message?: string;
   title?: string;
   portId?: string;
+  /** Host action; `pushPlugin` deliberately does not accept this field. */
+  action?: ToastAction;
   durationMs?: number;
 }
 
@@ -111,6 +118,7 @@ function makeToast(input: ToastPushInput, pluginId?: string): ToastItem {
     message: input.message,
     title: input.title,
     portId: input.portId,
+    action: input.action,
     pluginId,
     durationMs: input.durationMs ?? (input.severity === 'error' ? ERROR_DURATION_MS : DEFAULT_DURATION_MS),
     createdAt: Date.now(),

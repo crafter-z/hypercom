@@ -1,6 +1,12 @@
 import { useEffect } from 'react';
 import { useSystemStore } from '../stores/useSystemStore';
 import { updateTiming, shouldAutoCheck, isUpdateCheckEnabled, runAutoCheck, getCommittedUpdateMode } from '../utils/updateService';
+import {
+  isPluginUpdateCheckEnabled,
+  pluginUpdateTiming,
+  runPluginAutoCheck,
+  shouldCheckPluginUpdates,
+} from '../utils/pluginUpdateService';
 
 /**
  * 会话内周期重评估间隔（issue #12 二轮）：串口工具常驻运行，「启动评估一次」
@@ -15,29 +21,35 @@ const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
  *   首次评估：模式 none → 跳过；否则按「周期 7 天 + snooze + 首启立即」决定
  *   是否检查（纯函数 shouldAutoCheck）。配置仍在加载时不按默认 stable 发请求，
  *   避免慢启动覆盖用户已持久化的 none/preview 意图。
+ * - **软件更新与插件市场更新联动**：两者独立门控（macOS 不检查软件本体，
+ *   但仍检查插件市场），并发执行；插件侧按 7 天周期记账（shouldCheckPluginUpdates）。
  * - **会话内每 6h 重评估**（二轮）：覆盖长期挂机场景。检查成功（有无更新同）
- *   经 runAutoCheck 记 lastCheckAt 完成时刻；失败静默不记账——下次启动/下个
- *   周期重试（console/debug 由 diagLog 落盘，不打扰用户）。
- * - 发现更新 → 打开 UpdateDialog（通知中心无需参与，弹窗即通知）。
+ *   各自记账；失败静默不记账——下次启动/下个周期重试（console/debug 由
+ *   diagLog 落盘，不打扰用户）。
+ * - 发现更新 → 打开 UpdateDialog / 插件更新通知（通知中心）。
  * - 仅在主窗挂载一次（App.tsx）。
  */
 export function useAutoUpdate(): void {
   useEffect(() => {
-    // DEV 构建短路（后端 debug 另有一层 Ok(None) 双保险）
-    if (!isUpdateCheckEnabled()) return;
-
     let cancelled = false;
     let started = false;
 
     const evaluate = async () => {
+      if (cancelled) return;
       const mode = getCommittedUpdateMode();
+      // none 同时关闭软件与插件的自动检查。
+      if (mode === 'none') return;
       const now = Date.now();
 
-      if (!shouldAutoCheck(mode, now, updateTiming.getLastCheckAt(), updateTiming.getSnoozeUntil())) {
-        return;
-      }
+      const appDue = isUpdateCheckEnabled()
+        && shouldAutoCheck(mode, now, updateTiming.getLastCheckAt(), updateTiming.getSnoozeUntil());
+      const pluginDue = isPluginUpdateCheckEnabled()
+        && shouldCheckPluginUpdates(mode, now, pluginUpdateTiming.getLastCheckAt());
 
-      if (!cancelled) await runAutoCheck();
+      const checks: Promise<unknown>[] = [];
+      if (appDue) checks.push(runAutoCheck());
+      if (pluginDue) checks.push(runPluginAutoCheck());
+      if (checks.length > 0) await Promise.all(checks);
     };
 
     const start = () => {

@@ -9,6 +9,7 @@
 | 端口/标签解析 | `src/stores/useAppStore.ts`：`getTabPortId`、`getActivePortId`、`findSerialTabByPortId` | `TabItem.id` 是工作区 UUID；serial 用 `portId`，plugin 用 `boundPortId`，replay 无端口；不回退 last-port |
 | pane tree | `src/utils/paneTree.ts`：`newPaneId`、`findLeafById`、`findLeafByTabId`、`findParentBranch`、`findBranchById`、`collectLeaves`、`countLeaves`、`pruneTree` | 纯函数；store、拖拽和恢复共用 |
 | 配置写入 | `src/utils/configWriteQueue.ts`：`enqueueConfigWrite`；`src/hooks/useConfigPersistence.ts`：`saveConfig` | 串行写入、revision CAS；成功后才推进基线 |
+| 联动更新检查 | `src/utils/pluginUpdateService.ts`：`runPluginAutoCheck`、`runPluginManualCheck`、`shouldCheckPluginUpdates`、`pluginUpdateTiming`；`src/utils/updateService.ts`：`runAutoCheck`、`manualCheck`、`shouldAutoCheck`、`updateTiming`；`src/hooks/useAutoUpdate.ts`：`useAutoUpdate`；`src/hooks/useConfigPersistence.ts`：`loadConfig`、`saveConfig` | 插件更新只通知不安装；插件记账独立；后台检查以已提交市场源为准 |
 | 实体会话草稿 | `src/utils/entityEditor.ts`；`src/components/ConfigModal/hooks/useEntityPage.ts`：`useEntityPage` | 页面编辑不直接修改已提交运行态 |
 | 数值边界 | `src/utils/bounds.ts`：`CONFIG_BOUNDS`；Rust `src-tauri/src/config/mod.rs`：`CONFIG_BOUNDS` | `src/utils/bounds.test.ts` 校验两侧键与范围一致 |
 | 文本解码 | `src/utils/lineText.ts`：`createDecoder`、`decodeBytes`、`getLineText` | 唯一 TextDecoder 工厂；`ignoreBOM: false` |

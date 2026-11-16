@@ -48,6 +48,9 @@ export const TAURI_MOCK = `
     'load_trigger_rules',
     'load_port_presets',
     'get_log_files',
+    // Plugin marketplace checks are part of manual update checks; an empty
+    // result keeps E2E free of an unknown-command failure.
+    'check_plugin_updates',
   ]);
 
   // 事件名 → transformCallback id（issue #6-10 e2e：驱动 serial:data 事件）

@@ -5,6 +5,7 @@ import { useSystemStore } from '../../stores/useSystemStore';
 import { popoutEventService } from '../../services/tauri';
 import { useConfigPersistence, isOrdinaryConfigDirty, discardOrdinaryConfigDraft } from '../../hooks/useConfigPersistence';
 import { getCommittedUpdateMode, runAutoCheck } from '../../utils/updateService';
+import { runPluginAutoCheck } from '../../utils/pluginUpdateService';
 import { applyUiScale } from '../../utils/uiScale';
 import { listDirtyEntityKinds, subscribeEntityEditor } from '../../utils/entityEditor';
 import { registerEditorParticipant, requestEditorLeave } from '../../utils/editorLeave';
@@ -244,7 +245,11 @@ const ConfigModal: React.FC = () => {
       void applyUiScale(latest.uiScalePercent);
       void popoutEventService.emitUiScaleChanged(latest.uiScalePercent)
         .catch((error) => console.debug('[ConfigModal] Failed to broadcast UI scale:', error));
-      if (modeChanged && getCommittedUpdateMode() !== 'none') void runAutoCheck();
+      if (modeChanged && getCommittedUpdateMode() !== 'none') {
+        void runAutoCheck();
+        // 更新模式变化即显式意图：插件市场更新检查与软件检查同步触发。
+        void runPluginAutoCheck();
+      }
     } finally {
       savingRef.current = false;
       if (mountedRef.current) setSaving(false);

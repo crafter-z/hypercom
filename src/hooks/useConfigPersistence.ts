@@ -5,6 +5,12 @@ import { useSystemStore } from '../stores/useSystemStore';
 import { configService, storageService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
 import { commitUpdateMode, getCommittedUpdateMode } from '../utils/updateService';
+import {
+  commitPluginMarketplaceUrl,
+  getCommittedPluginMarketplaceUrl,
+  isPluginMarketplaceUrlCommitted,
+  resetPluginUpdateTracking,
+} from '../utils/pluginUpdateService';
 import { enqueueConfigWrite } from '../utils/configWriteQueue';
 import { prepareEntityCollectionForSave, commitEntityEditorDraft } from '../utils/entityEditor';
 import type { EntityKey } from '../utils/entityEditor';
@@ -205,6 +211,9 @@ export function useConfigPersistence() {
         markOrdinaryConfigSaved(migratedConfig);
         // Commit only the disk value before restoring an update-mode draft.
         commitUpdateMode(migratedConfig.updateCheckMode);
+        // Background plugin checks always use the persisted marketplace source,
+        // never the editable settings draft.
+        commitPluginMarketplaceUrl(migratedConfig.pluginMarketplaceUrl);
         if (recovery) {
           const merged = mergeOrdinary(migratedConfig, recovery.draft, recovery.baseline);
           for (const key of recovery.conflicts as Array<keyof AppConfig>) {
@@ -295,8 +304,23 @@ export function useConfigPersistence() {
           markOrdinaryConfigSaved(candidate);
         }
         if (fieldOnly) markOrdinaryConfigSaved(candidate);
+        // Committed marketplace source is independent of the ordinary draft.
+        // A changed source invalidates plugin check accounting so the new source
+        // is checked immediately instead of waiting out the old 7-day period.
+        // Before the first commit (loadConfig not run yet) compare with the
+        // persisted disk value, not with the editable draft fallback.
+        const previousMarketplaceUrl = isPluginMarketplaceUrlCommitted()
+          ? getCommittedPluginMarketplaceUrl()
+          : (persisted.pluginMarketplaceUrl ?? '').trim();
+        const nextMarketplaceUrl = (candidate.pluginMarketplaceUrl ?? '').trim();
+        commitPluginMarketplaceUrl(nextMarketplaceUrl, {
+          resetTiming: nextMarketplaceUrl !== previousMarketplaceUrl,
+        });
         if (candidate.updateCheckMode !== getCommittedUpdateMode()) {
           commitUpdateMode(candidate.updateCheckMode, true);
+          // Mode changes are explicit intent: reset plugin check accounting and
+          // notification fingerprint so the next evaluation follows the new mode.
+          resetPluginUpdateTracking();
         }
         return true;
       }

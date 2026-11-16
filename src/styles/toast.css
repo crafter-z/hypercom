@@ -37,6 +37,16 @@
   overflow: hidden;
 }
 
+/* Host notifications with an action (linked plugin updates) are clickable. */
+.toast-actionable {
+  cursor: pointer;
+}
+
+.toast-actionable:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
 .toast-icon {
   display: inline-flex;
   align-items: center;
