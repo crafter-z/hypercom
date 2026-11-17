@@ -3,7 +3,7 @@
 > **文档状态：设计提案；P1 基础切片已实现，完整远程方案仍未实现。**
 > 编制日期：2026-11-17。
 > 范围：本地 GUI、办公室远程 GUI、CLI、后续 SDK 的统一访问与管理。
-> 本文原为设计提案；当前实现分支已落地其中的 **P1 基础切片**：纯 Rust 控制/操作/事件核心、边界受限的 loopback JSON-lines transport、显式环境变量启用的本机 `host.status`/`ports.list` 只读 Host 适配器，以及独立 console CLI 的 `status`/`ports list`/参数校验骨架。串口写入、watch 事件、远程 TLS、持久 Host 任务仍明确未启用，不能把本切片称为完整远程或 headless。
+> 本文原为设计提案；当前实现分支已落地其中的 **P1 基础切片**：纯 Rust 控制/操作/事件核心、边界受限的 loopback JSON-lines transport、显式环境变量启用的本机 Host 适配器、共享 native send helper、独立 `serial:tx` 权威事件、控制租约/fence、操作去重与 `status`/`ports list`/`control acquire|release`/`send`/`operation get` CLI。控制和写入仍需第二个 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，主体是明确的未认证本机测试身份，`nativeGuiArbitration=false`；远程 TLS、原子 watch、持久 Host 任务和全 GUI 写入口迁移仍未启用，不能把本切片称为完整远程或 headless。
 
 ## 0. 结论与推荐决策
 
@@ -583,14 +583,19 @@ CLI `host` 针对服务；未来 `ui show` 只操作明确的客户端 UI，不�
 
 ### 14.3 使用示例（完整命令面仍在后续阶段）
 
-P1 当前可运行的只读本机切片需要显式环境变量启用 Host loopback adapter；默认 HyperCom 不打开监听器。该切片只支持 `status` 与 `ports list`，`monitor`/`send` 会返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功：
+P1 当前可运行的本机切片需要显式环境变量启用 Host loopback adapter；默认 HyperCom 不打开监听器。默认只读支持 `status` 与 `ports list`；只有额外设置 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1` 才 advertise 并允许本机测试用 `control acquire|release`、`send`、`operation get`。该控制模式是未认证测试身份，Host 会标注 `nativeGuiArbitration=false`；`monitor/watch` 仍返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功：
 
 ```powershell
 $env:HYPERCOM_AUTOMATION_LOOPBACK = '1'
 $env:HYPERCOM_AUTOMATION_PORT = '39071'
+# 仅本机测试控制时额外启用；默认不要打开：
+$env:HYPERCOM_AUTOMATION_UNSAFE_CONTROL = '1'
 # 启动实验室 HyperCom 后，在另一终端：
 .\src-tauri/target/debug/hypercom-cli.exe status
 .\src-tauri/target/debug/hypercom-cli.exe ports list
+.\src-tauri/target/debug/hypercom-cli.exe control acquire --port COM3 --connection-generation 7 --ttl-ms 3000
+.\src-tauri/target/debug/hypercom-cli.exe send --port COM3 --text status --ending crlf --lease-id LEASE --fence 1 --connection-generation 7
+.\src-tauri/target/debug/hypercom-cli.exe operation get --request-id REQUEST_ID
 ```
 
 后续完整命令面仍按下列契约演进：
