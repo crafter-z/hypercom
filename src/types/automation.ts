@@ -70,13 +70,19 @@ export const AUTOMATION_ERROR_CODES = [
 ] as const;
 export type AutomationErrorCode = typeof AUTOMATION_ERROR_CODES[number];
 export type OutcomeCertainty = 'known' | 'unknown' | 'partial';
-export interface SideEffects { certainty: OutcomeCertainty; bytesWritten?: string }
+export interface SideEffects {
+  /** Independent of operation state; succeeded/failed alone never supplies a byte count. */
+  certainty: OutcomeCertainty;
+  bytesWritten?: string;
+}
+export interface WireSideEffects { certainty: OutcomeCertainty; bytesWritten?: WireCounter }
+export interface WireSideEffectsSnake { certainty: OutcomeCertainty; bytes_written?: WireCounter }
 export interface StructuredAutomationError {
   code: AutomationErrorCode;
   stage: string;
   message: string;
   operationId?: OperationId;
-  sideEffects?: SideEffects;
+  sideEffects: SideEffects;
   /** Diagnostic hint only. Never authorizes automatic replay of a device operation. */
   retryable?: boolean;
 }
@@ -85,7 +91,7 @@ export interface WireAutomationError {
   stage?: string;
   message: string;
   operationId?: OperationId;
-  sideEffects?: SideEffects;
+  sideEffects?: WireSideEffects;
   retryable?: boolean;
 }
 export interface WireAutomationErrorSnake {
@@ -93,7 +99,7 @@ export interface WireAutomationErrorSnake {
   stage: string;
   message: string;
   operation_id?: OperationId;
-  side_effects?: { certainty: OutcomeCertainty; bytes_written?: string };
+  side_effects?: WireSideEffectsSnake;
   retryable?: boolean;
 }
 
@@ -199,8 +205,9 @@ export interface AutomationOperation {
   outcome: SideEffects;
   error?: StructuredAutomationError;
 }
-export interface WireAutomationOperation extends Omit<AutomationOperation, 'connectionGeneration' | 'error'> {
+export interface WireAutomationOperation extends Omit<AutomationOperation, 'connectionGeneration' | 'error' | 'outcome'> {
   connectionGeneration: WireCounter;
+  outcome?: WireSideEffects;
   error?: WireAutomationError;
 }
 export interface WireAutomationOperationSnake {
@@ -210,7 +217,7 @@ export interface WireAutomationOperationSnake {
   server_epoch: ServerEpoch;
   connection_generation: ConnectionGeneration;
   state: OperationState;
-  outcome: { certainty: OutcomeCertainty; bytes_written?: string };
+  outcome?: WireSideEffectsSnake;
   error?: WireAutomationErrorSnake;
 }
 
@@ -257,6 +264,8 @@ export interface AutomationEvent extends Omit<WireAutomationEvent, 'dataBase64' 
   seq: EventSequence;
   data?: Uint8Array;
   replay: boolean;
+  /** Explicit live-only routing hint; replay must never re-enter automatic send paths. */
+  delivery: 'live' | 'replay';
 }
 
 export interface HostRequest { requestId: RequestId; hostId: HostId; serverEpoch: ServerEpoch }
@@ -279,7 +288,19 @@ export interface SubscribeRequest extends HostRequest { nativePortId?: string; c
 export type GetOperationRequest = HostRequest &
   ({ operationId: OperationId; originalRequestId?: never } | { originalRequestId: RequestId; operationId?: never });
 
-/** Transport returns unwrapped domain response payloads, not arbitrary Tauri invoke values. */
+/** Closed set of command codecs; this is not an arbitrary invoke/transport escape hatch. */
+export type AutomationCommand =
+  | { method: 'control.acquire'; request: AcquireControlRequest }
+  | { method: 'control.renew'; request: RenewControlRequest }
+  | { method: 'control.release'; request: ReleaseControlRequest }
+  | { method: 'serial.send'; request: SendRequest }
+  | { method: 'operations.get'; request: GetOperationRequest };
+
+/**
+ * Transport returns normalized, unwrapped wire payloads, not arbitrary invoke values.
+ * Successful control.release resolves to explicit JSON null; errors reject with the
+ * structured wire error. An omitted result is not a successful acknowledgement.
+ */
 export interface AutomationTransport {
   request(target: AutomationTarget, request: WireAutomationRequest): Promise<unknown>;
   /** Must atomically register the stream and return its matching snapshot/watermark. */

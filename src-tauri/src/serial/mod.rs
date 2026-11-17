@@ -31,10 +31,7 @@ mod ports_tty;
 mod ports_windows;
 pub(crate) mod tty_sim;
 
-pub use codec::{
-    build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome,
-    WRITE_TOTAL_DEADLINE,
-};
+pub use codec::{build_tx_bytes, write_with_deadline_progress, TxOutcome, WRITE_TOTAL_DEADLINE};
 pub(crate) use events::{
     emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus,
 };

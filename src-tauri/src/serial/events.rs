@@ -5,8 +5,56 @@
  * 事件名与字段名是前后端线上契约（`serial:data` / `serial:status` /
  * `serial:reconnect_hint`），改动必须同步前端。
  */
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+
+/// Optional trusted attribution for native TX facts. This is not authorization:
+/// adapters must derive these values from their authenticated operation context.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialTxContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerialTxStatus {
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+/// Native write facts use their own event, never the legacy RX-only serial:data.
+/// `data` contains only confirmed bytes, not reconstructed input or device ACKs.
+/// For an unknown outcome it is a lower bound; empty data does not prove no effect.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialTxEvent<'a> {
+    pub port_id: &'a str,
+    pub timestamp: i64,
+    pub generation: u64,
+    pub direction: &'static str,
+    pub data: &'a [u8],
+    pub written_bytes: usize,
+    pub bytes_exact: bool,
+    pub status: SerialTxStatus,
+    #[serde(flatten)]
+    pub context: &'a SerialTxContext,
+}
+
+pub(crate) fn emit_tx_event(app_handle: &AppHandle, event: SerialTxEvent<'_>) {
+    // Serialization is synchronous, so the outcome's byte buffer stays borrowed.
+    let _ = app_handle.emit("serial:tx", event);
+}
 
 /// 串口数据事件（推送给前端）
 #[derive(Debug, Clone, Serialize)]
@@ -166,7 +214,91 @@ pub(crate) fn emit_reconnect_hint(app_handle: &AppHandle, port_id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::SerialDataEvent;
+    use super::{SerialDataEvent, SerialTxContext, SerialTxEvent, SerialTxStatus};
+
+    #[test]
+    fn tx_payload_preserves_actual_bytes_and_optional_attribution() {
+        let data = [0, 128, 255];
+        let context = SerialTxContext {
+            source: Some("automation".into()),
+            operation_id: Some("op-7".into()),
+            request_id: Some("request-9".into()),
+            principal_id: Some("alice".into()),
+            client_session_id: Some("session-2".into()),
+        };
+        let event = SerialTxEvent {
+            port_id: "COM3",
+            timestamp: 1234,
+            generation: 7,
+            direction: "TX",
+            data: &data,
+            written_bytes: data.len(),
+            bytes_exact: true,
+            status: SerialTxStatus::Succeeded,
+            context: &context,
+        };
+        assert_eq!(event.data.as_ptr(), data.as_ptr());
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "portId":"COM3", "timestamp":1234, "generation":7, "direction":"TX", "data":[0,128,255],
+                "writtenBytes":3, "bytesExact":true, "status":"succeeded", "source":"automation", "operationId":"op-7",
+                "requestId":"request-9", "principalId":"alice", "clientSessionId":"session-2"
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_tx_payload_does_not_claim_zero_effect_and_omits_absent_context() {
+        let context = SerialTxContext::default();
+        let event = SerialTxEvent {
+            port_id: "GIT:BASH",
+            timestamp: 12,
+            generation: 4,
+            direction: "TX",
+            data: &[],
+            written_bytes: 0,
+            bytes_exact: false,
+            status: SerialTxStatus::Unknown,
+            context: &context,
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["status"], "unknown");
+        assert_eq!(json["bytesExact"], false);
+        for key in [
+            "source",
+            "operationId",
+            "requestId",
+            "principalId",
+            "clientSessionId",
+        ] {
+            assert!(json.get(key).is_none());
+        }
+        assert_eq!(
+            serde_json::from_str::<SerialTxContext>("{}").unwrap(),
+            context
+        );
+    }
+
+    #[test]
+    fn partial_tx_status_is_not_serialized_as_success() {
+        let context = SerialTxContext::default();
+        let event = SerialTxEvent {
+            port_id: "COM3",
+            timestamp: 12,
+            generation: 4,
+            direction: "TX",
+            data: &[1, 2],
+            written_bytes: 2,
+            bytes_exact: true,
+            status: SerialTxStatus::Failed,
+            context: &context,
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["data"], serde_json::json!([1, 2]));
+        assert_eq!(json["writtenBytes"], 2);
+    }
 
     #[test]
     fn borrowed_rx_payload_preserves_raw_byte_wire_contract() {

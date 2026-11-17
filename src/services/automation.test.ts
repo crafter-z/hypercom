@@ -2,11 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AutomationServiceError, automationService, createAutomationNdjsonDecoder, createAutomationService,
   decodeAutomationEvent, decodeAutomationHandshake, decodeAutomationLease, decodeAutomationOperation,
-  decodeAutomationPort, decodeAutomationSnapshot, encodeAutomationRequest, mapAutomationError,
+  decodeAutomationPort, decodeAutomationSnapshot, decodeAutomationSideEffects, decodeAutomationRelease,
+  encodeAutomationCommand, encodeAutomationRequest, mapAutomationError,
 } from './automation';
 import { AUTOMATION_ERROR_CODES } from '../types/automation';
 import type {
-  AutomationRequest, AutomationTransport, SendRequest, WireAutomationEvent,
+  AutomationCommand, AutomationRequest, AutomationTransport, SendRequest, WireAutomationEvent,
   WireAutomationEventSnake, WireAutomationSubscription,
 } from '../types/automation';
 
@@ -156,6 +157,57 @@ describe('automation explicit wire/domain mapping', () => {
   });
 });
 
+describe('automation command codecs and outcome certainty', () => {
+  it.each(['camel', 'snake'] as const)('encodes complete control/send/query requests in %s wire', casing => {
+    const acquire = encodeAutomationCommand({ method: 'control.acquire', request: { ...portRequest, ttlMs: 500, waitMs: 0 } }, casing);
+    const release = encodeAutomationCommand({ method: 'control.release', request: { ...portRequest, control } }, casing);
+    const send = encodeAutomationCommand({ method: 'serial.send', request: sendRequest() }, casing);
+    const query = encodeAutomationCommand({ method: 'operations.get', request: { ...hostRequest, originalRequestId: 'original-r' } }, casing);
+    expect(acquire.params).toEqual(casing === 'camel' ? { ttlMs: 500, waitMs: 0 } : { ttl_ms: 500, wait_ms: 0 });
+    expect(release).toMatchObject(casing === 'camel'
+      ? { target, precondition, control, params: {} }
+      : { target: snakeTarget, precondition: { server_epoch: 'boot-a', connection_generation: '7' }, control: { lease_id: 'lease-a', fence: '9007199254740993' }, params: {} });
+    expect(send.params).toEqual(casing === 'camel' ? { dataBase64: 'AP+A' } : { data_base64: 'AP+A' });
+    expect(query.params).toEqual(casing === 'camel' ? { requestId: 'original-r' } : { request_id: 'original-r' });
+  });
+
+  it.each([
+    { method: 'control.acquire', request: { ...portRequest, ttlMs: 0 } },
+    { method: 'control.acquire', request: { ...portRequest, ttlMs: 1, precondition: { serverEpoch: 'boot-a' } } },
+    { method: 'control.release', request: { ...portRequest } },
+    { method: 'serial.send', request: { ...sendRequest(), control: { leaseId: 'lease-a' } } },
+    { method: 'serial.send', request: { ...sendRequest(), input: { mode: 'raw', data: [0, 255] } } },
+    { method: 'serial.send', request: { ...sendRequest(), input: { mode: 'text', text: 1, encoding: 'utf-8', lineEnding: 'None' } } },
+    { method: 'operations.get', request: { ...hostRequest } },
+    { method: 'operations.get', request: { ...hostRequest, operationId: 'op', originalRequestId: 'r' } },
+  ])('rejects missing guards, invalid inputs and ambiguous query keys before dispatch', input => {
+    expect(() => encodeAutomationCommand(input as unknown as AutomationCommand)).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+  });
+
+  it('accepts only an explicit successful release acknowledgement', () => {
+    expect(decodeAutomationRelease(null)).toBeUndefined();
+    for (const value of [undefined, true, {}, { success: true }, { released: true }]) {
+      expect(() => decodeAutomationRelease(value)).toThrow(AutomationServiceError);
+    }
+  });
+
+  it('normalizes absent outcomes to unknown without deriving a byte count from operation state', () => {
+    expect(decodeAutomationSideEffects(undefined)).toEqual({ certainty: 'unknown' });
+    expect(decodeAutomationSideEffects(null)).toEqual({ certainty: 'unknown' });
+    for (const state of ['accepted', 'executing', 'succeeded', 'failed', 'cancelled']) {
+      expect(decodeAutomationOperation({ ...operation, state, outcome: undefined }).outcome).toEqual({ certainty: 'unknown' });
+    }
+    expect(mapAutomationError({ code: 'IO_ERROR', stage: 'write', message: 'lost result' }).sideEffects).toEqual({ certainty: 'unknown' });
+  });
+
+  it('preserves known, partial and unknown byte evidence losslessly in either dialect', () => {
+    expect(decodeAutomationSideEffects({ certainty: 'known', bytesWritten: 0 })).toEqual({ certainty: 'known', bytesWritten: '0' });
+    expect(decodeAutomationSideEffects({ certainty: 'partial', bytes_written: '9007199254740993' }, 'snake')).toEqual({ certainty: 'partial', bytesWritten: '9007199254740993' });
+    expect(decodeAutomationSideEffects({ certainty: 'unknown' })).not.toHaveProperty('bytesWritten');
+    expect(() => decodeAutomationSideEffects({ certainty: 'known', bytesWritten: Number.MAX_SAFE_INTEGER + 1 })).toThrow(AutomationServiceError);
+  });
+});
+
 describe('automation NDJSON and base64 decoding', () => {
   it.each(['A', 'AA=', '!!!!', 'AP+A\n', '____', 'AB==', 'AAB='])('rejects noncanonical base64 %s', value => {
     expect(() => decodeAutomationEvent({ ...event, dataBase64: value })).toThrow(AutomationServiceError);
@@ -293,7 +345,7 @@ describe('automation service adapter', () => {
       .mockResolvedValueOnce({ ...lease, connectionGeneration: '8' }).mockResolvedValueOnce({ success: true });
     const client = createAutomationService(transport).selectTarget();
     await expect(client.acquireControl({ ...portRequest, ttlMs: 1000 })).rejects.toBeInstanceOf(AutomationServiceError);
-    await expect(client.acquireControl({ ...portRequest, ttlMs: 1000 })).rejects.toMatchObject({ code: 'STALE_SESSION' });
+    await expect(client.acquireControl({ ...portRequest, ttlMs: 1000 })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN', sideEffects: { certainty: 'unknown' } });
     await expect(client.releaseControl({ ...portRequest, control })).rejects.toBeInstanceOf(AutomationServiceError);
   });
 
@@ -316,6 +368,43 @@ describe('automation service adapter', () => {
     await client.send({ ...sendRequest(), input: { mode: 'hex', hex: '00 ff', lineEnding: 'None' } });
     expect((transport.request.mock.calls[0][1] as AutomationRequest).params).toEqual({ mode: 'text', text: '你好', encoding: 'GBK', lineEnding: '\r\n' });
     expect((transport.request.mock.calls[1][1] as AutomationRequest).params).toEqual({ mode: 'hex', hex: '00 ff', lineEnding: 'None' });
+  });
+
+  it('reports unknown control outcomes when acknowledgements are lost without retrying', async () => {
+    const transport = fakeTransport();
+    transport.request.mockRejectedValue(new Error('lost ACK'));
+    const client = createAutomationService(transport).selectTarget();
+    await expect(client.acquireControl({ ...portRequest, ttlMs: 1000 })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN', sideEffects: { certainty: 'unknown' } });
+    await expect(client.renewControl({ ...portRequest, control, ttlMs: 1000 })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    await expect(client.releaseControl({ ...portRequest, control })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    expect(transport.request).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not call an invalid post-dispatch send or release response a safe failure', async () => {
+    const transport = fakeTransport();
+    transport.request.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ ...operation, requestId: 'another-request' });
+    const client = createAutomationService(transport).selectTarget();
+    await expect(client.releaseControl({ ...portRequest, control })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN', stage: 'decode', retryable: false, sideEffects: { certainty: 'unknown' } });
+    await expect(client.send(sendRequest())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN', stage: 'decode', sideEffects: { certainty: 'unknown' } });
+    expect(transport.request).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats malformed post-dispatch error metadata as unknown rather than zero-byte rejection', async () => {
+    const transport = fakeTransport();
+    transport.request.mockRejectedValue({ code: 'IO_ERROR', message: 'bad peer', sideEffects: { certainty: 'known', bytesWritten: -1 } });
+    await expect(createAutomationService(transport).selectTarget().send(sendRequest())).rejects.toMatchObject({
+      code: 'OUTCOME_UNKNOWN', stage: 'decode', sideEffects: { certainty: 'unknown' }, retryable: false,
+    });
+    expect(transport.request).toHaveBeenCalledOnce();
+  });
+
+  it('keeps query transport failure separate from the queried operation outcome', async () => {
+    const transport = fakeTransport();
+    transport.request.mockRejectedValueOnce(new Error('query connection failed')).mockResolvedValueOnce({ ...operation, state: 'executing', outcome: undefined });
+    const client = createAutomationService(transport).selectTarget();
+    await expect(client.getOperation({ ...hostRequest, operationId: 'operation-a' })).rejects.toMatchObject({ code: 'HOST_UNAVAILABLE', sideEffects: { certainty: 'unknown' } });
+    await expect(client.getOperation({ ...hostRequest, operationId: 'operation-a' })).resolves.toMatchObject({ state: 'executing', outcome: { certainty: 'unknown' } });
+    expect(transport.request).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry side effects on retryable structured errors or lost replies', async () => {
@@ -351,6 +440,25 @@ describe('automation service adapter', () => {
     expect(transport.subscribe.mock.calls[0][1]).toMatchObject({ method: 'events.subscribe', target, params: { cursor: 'cursor:18' } });
     await subscription.unsubscribe();
     expect(stream.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('watch preserves gap, replay and live delivery in transport order without list-then-listen', async () => {
+    const transport = fakeTransport();
+    const gap = { ...event, type: 'gap', replay: false, dataBase64: undefined };
+    const replay = { ...event, type: 'rx', replay: true, gap: undefined };
+    const live = { ...event, seq: '22', replay: false, gap: undefined };
+    transport.subscribe.mockResolvedValue(wireSubscription([gap, replay, live]));
+    const client = createAutomationService(transport).selectTarget();
+    const subscription = await client.watch({ ...hostRequest, cursor: 'cursor:18' });
+    const result = [];
+    for await (const item of subscription.events) result.push(item);
+    expect(result.map(item => item.delivery)).toEqual(['live', 'replay', 'live']);
+    expect(result[0].gap).toEqual(event.gap);
+    expect(result[0]).not.toHaveProperty('data');
+    expect(result[1].replay).toBe(true);
+    expect(result[2].seq).toBe('22');
+    expect(transport.request).not.toHaveBeenCalled();
+    expect(transport.subscribe).toHaveBeenCalledOnce();
   });
 
   it('watch uses the stream interface and detach never closes the port or releases control', async () => {

@@ -158,6 +158,10 @@ pub enum ErrorCode {
     CounterExhausted,
     ClockRegression,
     CursorAhead,
+    IoError,
+    OutcomeUnknown,
+    DeadlineExceeded,
+    Cancelled,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -203,7 +207,11 @@ impl AutomationError {
         Self {
             code,
             stage,
-            retryable,
+            // Retryability is never permission to blindly repeat a physical
+            // side effect, and unknown/cancelled outcomes require reconciliation.
+            retryable: retryable
+                && side_effect == SideEffect::None
+                && !matches!(code, ErrorCode::OutcomeUnknown | ErrorCode::Cancelled),
             side_effect,
             message: message.into(),
         }

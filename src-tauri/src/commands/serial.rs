@@ -360,102 +360,371 @@ pub struct SendDataArgs {
     pub expected_generation: Option<u64>,
 }
 
-/// 向串口发送数据（异步非阻塞）。返回实际写入端口的字节数。
-///
-/// 旧实现是同步命令：Tauri 的同步命令在事件循环主线程上同步执行，内部每次调用都
-/// 无条件执行「拿 serial_manager 锁 → 写串口 → 拿 log_manager 锁 → 写日志」。
-/// 这些阻塞 IO 跑完前主线程无法处理重绘/点击/RX 刷新——每次发送都无条件卡顿，
-/// 长期占用主线程还会错过 tao 的 RedrawEventsCleared 窗口，触发
-/// NewEvents/RedrawEventsCleared 警告与白屏（与 RX 数据量无关，纯发送路径自身阻塞）。
-///
-/// 修法：改 async fn（命令移到 tokio 运行时，不再占主线程），再经
-/// `spawn_blocking` 把串口 IO 与日志写放到独立线程池——主线程发完命令立即返回。
+/// Prepared once by the existing codec. Private fields prevent adapters from
+/// changing the port or input after accounting for requested bytes.
+#[derive(Debug)]
+pub struct PreparedSerialSend {
+    args: SendDataArgs,
+    bytes: Vec<u8>,
+}
+
+impl PreparedSerialSend {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn requested_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerialSendStage {
+    Admission,
+    Prepare,
+    Generation,
+    Guard,
+    Driver,
+    Join,
+}
+
+/// Preserve native error variants for the legacy command while giving automation
+/// a byte-level result. `bytes_exact == false` means further effects are unknown.
+#[derive(Debug)]
+pub struct SerialSendFailure {
+    pub error: CommandError,
+    pub known_bytes: Vec<u8>,
+    pub generation: Option<u64>,
+    pub bytes_exact: bool,
+    pub stage: SerialSendStage,
+}
+
+impl SerialSendFailure {
+    fn before_write(error: CommandError, stage: SerialSendStage) -> Self {
+        Self {
+            error,
+            known_bytes: Vec::new(),
+            generation: None,
+            bytes_exact: true,
+            stage,
+        }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct SerialSendResult {
+    pub tx: serial::TxOutcome,
+    pub generation: u64,
+    pub timestamp: i64,
+}
+
+/// Recheck server epoch/lease/fence as close as possible to native I/O. Never
+/// called while holding SerialManager. The callback must not do blocking I/O.
+pub type SerialPreWriteGuard = Box<dyn FnOnce() -> Result<(), CommandError> + Send + 'static>;
+
+pub fn prepare_serial_send(args: SendDataArgs) -> Result<PreparedSerialSend, SerialSendFailure> {
+    let ending = match serial::PortKind::of(&args.port_id) {
+        serial::PortKind::Tty => serial::codec::normalize_tty_line_ending(&args.append_line_ending),
+        _ => &args.append_line_ending,
+    };
+    let bytes = serial::build_tx_bytes(&args.data, args.is_hex, ending).map_err(|e| {
+        SerialSendFailure::before_write(
+            CommandError::Serial(e.to_string()),
+            SerialSendStage::Prepare,
+        )
+    })?;
+    Ok(PreparedSerialSend { args, bytes })
+}
+
+/// Explicit raw mode already contains wire bytes: do not add line endings or
+/// reinterpret numeric SIM text as a control command. Text/HEX use the codec above.
+pub fn prepare_serial_send_raw(
+    port_id: String,
+    bytes: Vec<u8>,
+    expected_generation: u64,
+) -> PreparedSerialSend {
+    PreparedSerialSend {
+        args: SendDataArgs {
+            port_id,
+            data: String::new(),
+            is_hex: true,
+            append_line_ending: "None".into(),
+            expected_generation: Some(expected_generation),
+        },
+        bytes,
+    }
+}
+
+fn check_send_generation(
+    current: Option<u64>,
+    expected: Option<u64>,
+) -> Result<u64, SerialSendFailure> {
+    if expected.is_some() && current != expected {
+        return Err(SerialSendFailure::before_write(
+            CommandError::Serial("Port connection changed before send".into()),
+            SerialSendStage::Generation,
+        ));
+    }
+    current.ok_or_else(|| {
+        SerialSendFailure::before_write(
+            CommandError::Serial("Port is not connected".into()),
+            SerialSendStage::Generation,
+        )
+    })
+}
+
+/// The deadline/partial-byte implementation remains the existing serial codec.
+fn write_prepared_bytes(
+    port_id: &str,
+    writer: &mut dyn std::io::Write,
+    bytes: Vec<u8>,
+) -> Result<serial::TxOutcome, SerialSendFailure> {
+    let mut written = 0;
+    match serial::write_with_deadline_progress(
+        port_id,
+        writer,
+        &bytes,
+        serial::WRITE_TOTAL_DEADLINE,
+        &mut written,
+    ) {
+        Ok(()) => Ok(serial::TxOutcome::sent(bytes)),
+        Err(error) => Err(SerialSendFailure {
+            error: CommandError::Serial(error.to_string()),
+            known_bytes: bytes[..written].to_vec(),
+            generation: None,
+            bytes_exact: true,
+            stage: SerialSendStage::Driver,
+        }),
+    }
+}
+
+fn run_pre_write_guard(guard: Option<SerialPreWriteGuard>) -> Result<(), SerialSendFailure> {
+    if let Some(guard) = guard {
+        guard().map_err(|error| SerialSendFailure::before_write(error, SerialSendStage::Guard))?;
+    }
+    Ok(())
+}
+
+fn execute_prepared_send(
+    prepared: PreparedSerialSend,
+    serial_manager: &std::sync::Mutex<serial::SerialManager>,
+    pre_write: Option<SerialPreWriteGuard>,
+) -> Result<(serial::TxOutcome, u64), SerialSendFailure> {
+    let PreparedSerialSend { args, bytes } = prepared;
+    let manager = serial_manager.lock().map_err(|e| {
+        SerialSendFailure::before_write(
+            CommandError::Lock(e.to_string()),
+            SerialSendStage::Admission,
+        )
+    })?;
+    let generation = check_send_generation(
+        manager.connection_generation(&args.port_id),
+        args.expected_generation,
+    )?;
+    let result = match serial::PortKind::of(&args.port_id) {
+        serial::PortKind::Real => {
+            let write_port = manager.get_write_handle(&args.port_id).map_err(|e| {
+                SerialSendFailure::before_write(
+                    CommandError::Serial(e.to_string()),
+                    SerialSendStage::Driver,
+                )
+            })?;
+            drop(manager);
+            // The session-bound native lease survives even if the async caller is
+            // cancelled. The late guard runs after waiting for this writer lock.
+            let mut writer = write_port.lock().map_err(|e| {
+                SerialSendFailure::before_write(
+                    CommandError::Lock(e.to_string()),
+                    SerialSendStage::Driver,
+                )
+            })?;
+            run_pre_write_guard(pre_write)?;
+            write_prepared_bytes(&args.port_id, &mut **writer, bytes)
+        }
+        serial::PortKind::Tty => {
+            // TtyWriteHandle owns its internal writer lock. Without changing that
+            // module we cannot promise a guard *after* its wait, so refuse guarded
+            // remote TTY rather than silently weakening the execution fence.
+            if pre_write.is_some() {
+                return Err(SerialSendFailure::before_write(
+                    CommandError::Serial("Guarded automation TTY writes are not supported".into()),
+                    SerialSendStage::Guard,
+                ));
+            }
+            let writer = manager.get_tty_write_handle(&args.port_id).map_err(|e| {
+                SerialSendFailure::before_write(
+                    CommandError::Serial(e.to_string()),
+                    SerialSendStage::Driver,
+                )
+            })?;
+            drop(manager);
+            writer
+                .write(&bytes)
+                .map(|written| serial::TxOutcome::sent(bytes[..written].to_vec()))
+                .map_err(|e| SerialSendFailure {
+                    error: CommandError::Serial(e.to_string()),
+                    known_bytes: Vec::new(),
+                    generation: Some(generation),
+                    bytes_exact: false,
+                    stage: SerialSendStage::Driver,
+                })
+        }
+        serial::PortKind::Sim => {
+            // Avoid invoking a domain callback under the manager lock. A guarded
+            // send may not wait on that lock *after* the fence check: fail closed
+            // on contention, then recheck the captured generation before the
+            // nonblocking SIM channel operation. Legacy sends retain lock wait.
+            let guarded = pre_write.is_some();
+            drop(manager);
+            run_pre_write_guard(pre_write)?;
+            let manager = if guarded {
+                serial_manager.try_lock().map_err(|e| {
+                    SerialSendFailure::before_write(
+                        CommandError::Lock(e.to_string()),
+                        SerialSendStage::Admission,
+                    )
+                })?
+            } else {
+                serial_manager.lock().map_err(|e| {
+                    SerialSendFailure::before_write(
+                        CommandError::Lock(e.to_string()),
+                        SerialSendStage::Admission,
+                    )
+                })?
+            };
+            check_send_generation(
+                manager.connection_generation(&args.port_id),
+                Some(generation),
+            )?;
+            if args.is_hex {
+                manager
+                    .write_raw(&args.port_id, &bytes)
+                    .map(|written| serial::TxOutcome::sent(bytes[..written].to_vec()))
+            } else {
+                // Preserve legacy SIM text frequency commands (consumed => zero
+                // bytes); only the SIM module interprets that control protocol.
+                manager.send_data(&args.port_id, &args.data, false, &args.append_line_ending)
+            }
+            .map_err(|e| {
+                SerialSendFailure::before_write(
+                    CommandError::Serial(e.to_string()),
+                    SerialSendStage::Driver,
+                )
+            })
+        }
+    };
+    result.map(|tx| (tx, generation)).map_err(|mut failure| {
+        failure.generation = Some(generation);
+        failure
+    })
+}
+
+/// Shared native send path for Tauri and automation adapters. Domain admission is
+/// the caller's responsibility; the optional late guard bridges blocking-pool and
+/// writer-lock waits. Actual bytes, generation and one timestamp drive log/event.
+/// No manager guard crosses await, native I/O, logging, or the domain callback.
+/// The work guard lives in spawn_blocking, not in the cancellable awaiting future.
+pub async fn send_serial_data_internal(
+    prepared: PreparedSerialSend,
+    serial_manager: Arc<std::sync::Mutex<serial::SerialManager>>,
+    log_manager: Arc<crate::logger::LogManager>,
+    serial_work: Arc<SerialWorkState>,
+    app_handle: Option<AppHandle>,
+    context: serial::events::SerialTxContext,
+    pre_write: Option<SerialPreWriteGuard>,
+) -> Result<SerialSendResult, SerialSendFailure> {
+    let work = serial_work.admit().ok_or_else(|| {
+        SerialSendFailure::before_write(
+            CommandError::Serial("Serial work is shutting down".into()),
+            SerialSendStage::Admission,
+        )
+    })?;
+    let port_id = prepared.args.port_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let _work = work;
+        let result = execute_prepared_send(prepared, &serial_manager, pre_write);
+        let now = chrono::Local::now();
+        let timestamp = now.timestamp_millis();
+        let (bytes, generation, bytes_exact, status) = match &result {
+            Ok((tx, generation)) => (
+                tx.bytes.as_slice(),
+                Some(*generation),
+                true,
+                serial::events::SerialTxStatus::Succeeded,
+            ),
+            Err(failure) => (
+                failure.known_bytes.as_slice(),
+                failure.generation,
+                failure.bytes_exact,
+                if failure.bytes_exact {
+                    serial::events::SerialTxStatus::Failed
+                } else {
+                    serial::events::SerialTxStatus::Unknown
+                },
+            ),
+        };
+        // Never reconstruct TX data from the user's original text/HEX request.
+        if !bytes.is_empty() {
+            let timestamp_str = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            if let Err(e) = log_manager.write(&port_id, &timestamp_str, "TX", bytes) {
+                log::warn!("Failed to write TX log for {}: {}", port_id, e);
+            }
+        }
+        if !bytes.is_empty() || !bytes_exact {
+            if let (Some(app_handle), Some(generation)) = (app_handle.as_ref(), generation) {
+                serial::events::emit_tx_event(
+                    app_handle,
+                    serial::events::SerialTxEvent {
+                        port_id: &port_id,
+                        timestamp,
+                        generation,
+                        direction: "TX",
+                        data: bytes,
+                        written_bytes: bytes.len(),
+                        bytes_exact,
+                        status,
+                        context: &context,
+                    },
+                );
+            }
+        }
+        result.map(|(tx, generation)| SerialSendResult {
+            tx,
+            generation,
+            timestamp,
+        })
+    })
+    .await
+    .map_err(|e| SerialSendFailure {
+        error: CommandError::Other(format!("Send task panicked: {e}")),
+        known_bytes: Vec::new(),
+        generation: None,
+        bytes_exact: false,
+        stage: SerialSendStage::Join,
+    })?
+}
+
+/// 向串口发送数据（异步非阻塞）。IPC 参数及返回实际字节数保持不变。
 #[tauri::command]
 pub async fn send_serial_data(
     args: SendDataArgs,
     state: State<'_, AppState>,
+    app_handle: AppHandle,
 ) -> Result<usize, CommandError> {
-    let _work = state
-        .serial_work
-        .admit()
-        .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
-    // 从 State 克隆出 'static 的 Arc 句柄供 spawn_blocking 闭包使用
-    // （AppState 的 serial_manager / log_manager 是 Arc）。
-    let serial_manager = state.serial_manager.clone();
-    let log_manager = state.log_manager.clone();
-    let SendDataArgs {
-        port_id,
-        data,
-        is_hex,
-        append_line_ending,
-        expected_generation,
-    } = args;
-    tokio::task::spawn_blocking(move || {
-        let tx = {
-            let manager = serial_manager
-                .lock()
-                .map_err(|e| CommandError::Lock(e.to_string()))?;
-            if let Some(expected) = expected_generation {
-                if !manager.connection_matches(&port_id, expected) {
-                    return Err(CommandError::Serial(
-                        "Port connection changed before send".into(),
-                    ));
-                }
-            }
-            let kind = serial::PortKind::of(&port_id);
-            match kind {
-                serial::PortKind::Real => {
-                    let write_port = manager
-                        .get_write_handle(&port_id)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    drop(manager);
-                    let mut port = write_port
-                        .lock()
-                        .map_err(|e| CommandError::Lock(e.to_string()))?;
-                    serial::write_all_with_deadline(
-                        &port_id,
-                        &mut **port,
-                        &bytes,
-                        serial::WRITE_TOTAL_DEADLINE,
-                    )
-                    .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    serial::TxOutcome::sent(bytes)
-                }
-                serial::PortKind::Tty => {
-                    let writer = manager
-                        .get_tty_write_handle(&port_id)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    let bytes = serial::build_tx_bytes(
-                        &data,
-                        is_hex,
-                        serial::codec::normalize_tty_line_ending(&append_line_ending),
-                    )
-                    .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    drop(manager);
-                    let written = writer
-                        .write(&bytes)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    serial::TxOutcome::sent(bytes[..written].to_vec())
-                }
-                serial::PortKind::Sim => manager
-                    .send_data(&port_id, &data, is_hex, &append_line_ending)
-                    .map_err(|e| CommandError::Serial(e.to_string()))?,
-            }
-        };
-        if !tx.bytes.is_empty() {
-            let timestamp = chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string();
-            if let Err(e) = log_manager.write(&port_id, &timestamp, "TX", &tx.bytes) {
-                log::warn!("Failed to write TX log for {}: {}", port_id, e);
-            }
-        }
-        Ok(tx.written)
-    })
+    let prepared = prepare_serial_send(args).map_err(|failure| failure.error)?;
+    send_serial_data_internal(
+        prepared,
+        state.serial_manager.clone(),
+        state.log_manager.clone(),
+        state.serial_work.clone(),
+        Some(app_handle),
+        serial::events::SerialTxContext::default(),
+        None,
+    )
     .await
-    .map_err(|e| CommandError::Other(format!("Send task panicked: {e}")))?
+    .map(|result| result.tx.written)
+    .map_err(|failure| failure.error)
 }
 
 /// 文件发送进度事件 payload
@@ -1147,9 +1416,9 @@ pub async fn kill_port_tool(
     };
     if let Some(pid) = pid {
         let killed = tokio::task::spawn_blocking(move || kill_tool_process_tree(pid))
-        .await
-        .map_err(|e| CommandError::Other(format!("Kill tool task failed: {e}")))?
-        .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {e}")))?;
+            .await
+            .map_err(|e| CommandError::Other(format!("Kill tool task failed: {e}")))?
+            .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {e}")))?;
         if killed {
             return Ok(());
         }
@@ -1276,6 +1545,140 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn send_preparation_uses_shared_codec_and_tty_normalization() {
+        let args = |port: &str, data: &str, is_hex, ending: &str| super::SendDataArgs {
+            port_id: port.into(),
+            data: data.into(),
+            is_hex,
+            append_line_ending: ending.into(),
+            expected_generation: Some(7),
+        };
+        let text = super::prepare_serial_send(args("COM3", "hi", false, "\\r\\n")).unwrap();
+        assert_eq!(text.bytes(), b"hi\r\n");
+        assert_eq!(text.requested_bytes(), 4);
+        let tty = super::prepare_serial_send(args("GIT:BASH", "hi", false, "\\r\\n")).unwrap();
+        assert_eq!(tty.bytes(), b"hi\r");
+        let hex = super::prepare_serial_send(args("COM3", "00 FF 7f", true, "\\r\\n")).unwrap();
+        assert_eq!(hex.bytes(), &[0, 255, 127]);
+        for invalid in ["F", "XX", "0 G"] {
+            let failure =
+                super::prepare_serial_send(args("COM3", invalid, true, "None")).unwrap_err();
+            assert_eq!(failure.stage, super::SerialSendStage::Prepare);
+            assert!(failure.bytes_exact);
+            assert!(failure.known_bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn raw_send_preserves_exact_bytes_without_control_or_line_endings() {
+        let raw = b"100\r\n\0\xff".to_vec();
+        let pointer = raw.as_ptr();
+        let prepared = super::prepare_serial_send_raw("SIM:Loopback".into(), raw, 9);
+        assert_eq!(prepared.bytes(), b"100\r\n\0\xff");
+        assert_eq!(prepared.bytes().as_ptr(), pointer);
+        assert!(prepared.args.is_hex);
+        assert_eq!(prepared.args.expected_generation, Some(9));
+    }
+
+    #[test]
+    fn send_generation_rejects_stale_and_disconnected_before_any_write() {
+        assert_eq!(super::check_send_generation(Some(7), Some(7)).unwrap(), 7);
+        assert_eq!(super::check_send_generation(Some(7), None).unwrap(), 7);
+        for (current, expected) in [(Some(8), Some(7)), (None, Some(7)), (None, None)] {
+            let failure = super::check_send_generation(current, expected).unwrap_err();
+            assert_eq!(failure.stage, super::SerialSendStage::Generation);
+            assert!(failure.bytes_exact);
+            assert!(failure.known_bytes.is_empty());
+        }
+    }
+
+    struct PartialWriter {
+        calls: usize,
+    }
+    impl std::io::Write for PartialWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(data.len().min(2))
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "mock failure",
+                ))
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            panic!("native send must not flush")
+        }
+    }
+
+    #[test]
+    fn send_partial_failure_retains_only_confirmed_actual_prefix() {
+        let mut writer = PartialWriter { calls: 0 };
+        let failure =
+            super::write_prepared_bytes("COM3", &mut writer, vec![0, 255, 17, 18]).unwrap_err();
+        assert_eq!(failure.known_bytes, [0, 255]);
+        assert!(failure.bytes_exact);
+        assert_eq!(failure.stage, super::SerialSendStage::Driver);
+        assert!(matches!(failure.error, CommandError::Serial(_)));
+        assert_eq!(writer.calls, 2);
+    }
+
+    #[test]
+    fn send_success_returns_actual_outcome_without_reencoding() {
+        let mut writer = Vec::new();
+        let bytes = vec![0, 128, 255, b'\r'];
+        let result = super::write_prepared_bytes("COM3", &mut writer, bytes.clone()).unwrap();
+        assert_eq!(result.bytes, bytes);
+        assert_eq!(result.written, writer.len());
+        assert_eq!(writer, result.bytes);
+    }
+
+    #[test]
+    fn late_guard_runs_once_and_preserves_domain_rejection() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let guard_calls = calls.clone();
+        let guard: super::SerialPreWriteGuard = Box::new(move || {
+            guard_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CommandError::Serial("fence lost".into()))
+        });
+        let failure = super::run_pre_write_guard(Some(guard)).unwrap_err();
+        assert_eq!(failure.stage, super::SerialSendStage::Guard);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(failure.bytes_exact && failure.known_bytes.is_empty());
+        super::run_pre_write_guard(None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_work_guard_survives_cancellation_until_blocking_work_finishes() {
+        let work = Arc::new(super::SerialWorkState::new());
+        let guard = work.admit().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _guard = guard;
+                started_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                drop(_guard);
+                let _ = done_tx.send(());
+            })
+            .await
+            .unwrap();
+        });
+        started_rx.await.unwrap();
+        owner.abort();
+        let _ = owner.await;
+        work.begin_shutdown();
+        assert_eq!(work.active.load(Ordering::Acquire), 1);
+        assert!(work.admit().is_none());
+        finish_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert_eq!(work.active.load(Ordering::Acquire), 0);
+    }
 
     #[tokio::test]
     async fn cancelled_file_send_delay_returns_without_waiting_full_delay() {

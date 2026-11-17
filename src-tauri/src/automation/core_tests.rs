@@ -75,6 +75,44 @@ fn failure() -> AutomationError {
         "writer failed",
     )
 }
+#[test]
+fn native_error_codes_are_stable_and_retry_hints_are_conservative() {
+    for (code, wire) in [
+        (ErrorCode::IoError, "io_error"),
+        (ErrorCode::OutcomeUnknown, "outcome_unknown"),
+        (ErrorCode::DeadlineExceeded, "deadline_exceeded"),
+        (ErrorCode::Cancelled, "cancelled"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), wire);
+        let error = AutomationError::new(
+            code,
+            ErrorStage::Execute,
+            true,
+            SideEffect::None,
+            "native result",
+        );
+        assert_eq!(
+            error.retryable,
+            matches!(code, ErrorCode::IoError | ErrorCode::DeadlineExceeded)
+        );
+        roundtrip(&error);
+        for side_effect in [
+            SideEffect::Partial,
+            SideEffect::Complete,
+            SideEffect::Unknown,
+        ] {
+            let error = AutomationError::new(
+                code,
+                ErrorStage::Execute,
+                true,
+                side_effect,
+                "physical effect",
+            );
+            assert!(!error.retryable);
+        }
+    }
+}
+
 fn running() -> (OperationRegistry, QueuedRequest) {
     let mut arbiter = arbiter();
     let actor = session("alice");

@@ -7,7 +7,7 @@
 import { createDecoder } from '../utils/lineText';
 import { AUTOMATION_ERROR_CODES } from '../types/automation';
 import type {
-  AutomationClient, AutomationErrorCode, AutomationEvent, AutomationMethod,
+  AutomationClient, AutomationCommand, AutomationErrorCode, AutomationEvent, AutomationMethod,
   AutomationOperation, AutomationRequest, AutomationSnapshot, AutomationSubscription,
   AutomationTarget, AutomationTransport, ControlLease, Handshake, HostRequest,
   PortRef, PortRequest, PortSnapshot, SerialParameters, SideEffects,
@@ -20,16 +20,16 @@ export class AutomationServiceError extends Error implements StructuredAutomatio
   readonly code: AutomationErrorCode;
   readonly stage: string;
   readonly operationId?: string;
-  readonly sideEffects?: SideEffects;
+  readonly sideEffects: SideEffects;
   readonly retryable?: boolean;
   readonly wireCode?: string;
-  constructor(error: StructuredAutomationError, wireCode?: string) {
+  constructor(error: Omit<StructuredAutomationError, 'sideEffects'> & { sideEffects?: SideEffects }, wireCode?: string) {
     super(error.message);
     this.name = 'AutomationServiceError';
     this.code = error.code;
     this.stage = error.stage;
     this.operationId = error.operationId;
-    this.sideEffects = error.sideEffects;
+    this.sideEffects = error.sideEffects ?? { certainty: 'unknown' };
     this.retryable = error.retryable;
     this.wireCode = wireCode;
   }
@@ -81,7 +81,9 @@ function portRef(value: unknown, casing: WireCase): PortRef {
     nativePortId: text(field(item, 'nativePortId', 'native_port_id', casing), 'nativePortId'),
   };
 }
-function sideEffects(value: unknown, casing: WireCase): SideEffects {
+/** Missing evidence is unknown, independently of accepted/succeeded/failed status. */
+export function decodeAutomationSideEffects(value: unknown, casing: WireCase = 'camel'): SideEffects {
+  if (value === undefined || value === null) return { certainty: 'unknown' };
   const item = object(value);
   const bytes = field(item, 'bytesWritten', 'bytes_written', casing);
   return {
@@ -103,7 +105,7 @@ export function mapAutomationError(value: unknown, casing: WireCase = 'camel', f
       stage: item.stage === undefined ? 'transport' : text(item.stage, 'error stage'),
       message: text(item.message, 'error message'),
       operationId: optionalText(field(item, 'operationId', 'operation_id', casing), 'operationId'),
-      sideEffects: effects === undefined ? undefined : sideEffects(effects, casing),
+      sideEffects: decodeAutomationSideEffects(effects, casing),
       retryable: item.retryable === undefined ? undefined : boolean(item.retryable, 'retryable'),
     }, wireCode);
   }
@@ -194,7 +196,7 @@ export function decodeAutomationOperation(value: unknown, casing: WireCase = 'ca
     serverEpoch: text(field(item, 'serverEpoch', 'server_epoch', casing), 'serverEpoch'),
     connectionGeneration: counter(field(item, 'connectionGeneration', 'connection_generation', casing), 'connectionGeneration'),
     state: oneOf(item.state, ['accepted', 'queued', 'executing', 'succeeded', 'failed', 'cancelled'], 'operation state'),
-    outcome: sideEffects(item.outcome, casing),
+    outcome: decodeAutomationSideEffects(item.outcome, casing),
     ...(item.error === undefined || item.error === null ? {} : { error: mapAutomationError(item.error, casing) }),
   };
 }
@@ -213,6 +215,7 @@ function decodeBase64(value: unknown): Uint8Array {
 export function decodeAutomationEvent(value: unknown, casing: WireCase = 'camel'): AutomationEvent {
   const item = object(value);
   const data = field(item, 'dataBase64', 'data_base64', casing);
+  const replay = item.replay === undefined ? false : boolean(item.replay, 'replay');
   const event: AutomationEvent = {
     hostId: text(field(item, 'hostId', 'host_id', casing), 'hostId'),
     serverEpoch: text(field(item, 'serverEpoch', 'server_epoch', casing), 'serverEpoch'),
@@ -220,7 +223,7 @@ export function decodeAutomationEvent(value: unknown, casing: WireCase = 'camel'
     connectionGeneration: counter(field(item, 'connectionGeneration', 'connection_generation', casing), 'connectionGeneration'),
     seq: counter(item.seq, 'event sequence'), cursor: text(item.cursor, 'cursor'),
     type: text(item.type, 'event type'), timestampMs: integer(field(item, 'timestampMs', 'timestamp_ms', casing), 'timestampMs'),
-    replay: item.replay === undefined ? false : boolean(item.replay, 'replay'),
+    replay, delivery: replay ? 'replay' : 'live',
     operationId: optionalText(field(item, 'operationId', 'operation_id', casing), 'operationId'),
     jobId: optionalText(field(item, 'jobId', 'job_id', casing), 'jobId'),
   };
@@ -316,6 +319,68 @@ export function encodeAutomationRequest(request: AutomationRequest, casing: Wire
   };
 }
 
+/** Method-specific construction validates mandatory control guards before dispatch. */
+export function encodeAutomationCommand(command: AutomationCommand, casing: WireCase = 'camel'): WireAutomationRequest {
+  const method = command.method;
+  const request = command.request;
+  const base = { protocolVersion: AUTOMATION_PROTOCOL_VERSION, requestId: request.requestId, method };
+  if (command.method === 'operations.get') {
+    const query = command.request;
+    if ((query.operationId !== undefined) === (query.originalRequestId !== undefined)) return invalid('Exactly one operation query key is required');
+    return encodeAutomationRequest({
+      ...base, target: { hostId: query.hostId }, precondition: { serverEpoch: query.serverEpoch },
+      params: query.operationId !== undefined
+        ? casing === 'camel' ? { operationId: text(query.operationId, 'operationId') } : { operation_id: text(query.operationId, 'operationId') }
+        : casing === 'camel' ? { requestId: text(query.originalRequestId, 'originalRequestId') } : { request_id: text(query.originalRequestId, 'originalRequestId') },
+    }, casing);
+  }
+  const portRequest = command.request;
+  const guard = object(portRequest.precondition);
+  const context = {
+    target: portRef(portRequest.target, 'camel'),
+    precondition: {
+      serverEpoch: text(guard.serverEpoch, 'serverEpoch'),
+      connectionGeneration: counter(guard.connectionGeneration, 'connectionGeneration'),
+    },
+    timeoutMs: portRequest.timeoutMs,
+  };
+  let params: Record<string, unknown> = {};
+  if (command.method === 'control.acquire' || command.method === 'control.renew') {
+    const ttlMs = integer(command.request.ttlMs, 'ttlMs');
+    if (ttlMs === 0) return invalid('ttlMs must be positive');
+    params = casing === 'camel' ? { ttlMs } : { ttl_ms: ttlMs };
+    if (command.method === 'control.acquire' && command.request.waitMs !== undefined) {
+      const waitMs = integer(command.request.waitMs, 'waitMs');
+      params = { ...params, ...(casing === 'camel' ? { waitMs } : { wait_ms: waitMs }) };
+    }
+  }
+  if (command.method === 'control.acquire') return encodeAutomationRequest({ ...base, ...context, params }, casing);
+  if (command.method !== 'control.renew' && command.method !== 'control.release' && command.method !== 'serial.send') return invalid('Unsupported automation command');
+  const token = object(command.request.control);
+  const control = { leaseId: text(token.leaseId, 'leaseId'), fence: counter(token.fence, 'fence') };
+  if (command.method === 'serial.send') {
+    const input = object(command.request.input);
+    if (input.mode === 'raw') {
+      if (!(input.data instanceof Uint8Array)) return invalid('Raw send requires Uint8Array');
+      params = casing === 'camel' ? { dataBase64: encodeBase64(input.data) } : { data_base64: encodeBase64(input.data) };
+    } else if (input.mode === 'text' || input.mode === 'hex') {
+      const data = input.mode === 'text' ? input.text : input.hex;
+      if (typeof data !== 'string' || typeof input.lineEnding !== 'string') return invalid('Invalid send content or line ending');
+      params = {
+        mode: input.mode,
+        ...(input.mode === 'text' ? { text: data, encoding: text(input.encoding, 'encoding') } : { hex: data }),
+        ...(casing === 'camel' ? { lineEnding: input.lineEnding } : { line_ending: input.lineEnding }),
+      };
+    } else return invalid('Invalid send input mode');
+  }
+  return encodeAutomationRequest({ ...base, ...context, control, params }, casing);
+}
+
+/** The native transport must supply an explicit successful acknowledgement, not an omitted result. */
+export function decodeAutomationRelease(value: unknown): void {
+  if (value !== null) return invalid('Invalid release acknowledgement');
+}
+
 function assertIdentity(hostId: string, epoch: string | undefined, expectedHost?: string, expectedEpoch?: string): void {
   if ((expectedHost !== undefined && hostId !== expectedHost) || (expectedEpoch !== undefined && epoch !== expectedEpoch)) {
     throw new AutomationServiceError({ code: 'STALE_SESSION', stage: 'identity', message: 'Automation Host or server epoch does not match the selected target' });
@@ -350,12 +415,38 @@ export function createAutomationService(transport?: AutomationTransport, casing:
         if (rest.target) assertIdentity(rest.target.hostId, undefined, target.hostId);
         return encodeAutomationRequest({ protocolVersion: AUTOMATION_PROTOCOL_VERSION, requestId, method, ...rest }, casing);
       };
-      const call = async <T>(method: AutomationMethod, requestId: string, rest: Omit<AutomationRequest, 'protocolVersion' | 'requestId' | 'method'>, decode: (value: unknown) => T): Promise<T> => {
-        try { return decode(await available().request(target, envelope(method, requestId, rest))); }
-        catch (error) { throw mapAutomationError(error, casing, method === 'serial.send' ? 'OUTCOME_UNKNOWN' : 'HOST_UNAVAILABLE'); }
+      const dispatch = async <T>(method: AutomationMethod, wire: WireAutomationRequest, decode: (value: unknown) => T): Promise<T> => {
+        const native = available(); // No dispatch means a known failure, not an unknown outcome.
+        const mutating = method === 'serial.send' || method === 'control.acquire' || method === 'control.renew' || method === 'control.release';
+        const unknownAcknowledgement = (error: unknown) => new AutomationServiceError({
+          code: 'OUTCOME_UNKNOWN', stage: 'decode', retryable: false,
+          message: `Unusable ${method} acknowledgement: ${error instanceof Error ? error.message : 'invalid response'}`,
+          sideEffects: { certainty: 'unknown' },
+        });
+        let value: unknown;
+        try { value = await native.request(target, wire); }
+        catch (error) {
+          let mapped: AutomationServiceError;
+          try { mapped = mapAutomationError(error, casing, mutating ? 'OUTCOME_UNKNOWN' : 'HOST_UNAVAILABLE'); }
+          catch (decodeError) { throw mutating ? unknownAcknowledgement(decodeError) : decodeError; }
+          throw mapped;
+        }
+        try { return decode(value); }
+        catch (error) {
+          if (!mutating) throw mapAutomationError(error, casing);
+          // A malformed or unrelated acknowledgement cannot prove that the admitted
+          // command had no effect. Query the original request; never replay it here.
+          throw unknownAcknowledgement(error);
+        }
+      };
+      const call = async <T>(method: AutomationMethod, requestId: string, rest: Omit<AutomationRequest, 'protocolVersion' | 'requestId' | 'method'>, decode: (value: unknown) => T): Promise<T> =>
+        dispatch(method, envelope(method, requestId, rest), decode);
+      const command = async <T>(input: AutomationCommand, decode: (value: unknown) => T): Promise<T> => {
+        const hostId = input.method === 'operations.get' ? text(input.request.hostId, 'hostId') : portRef(input.request.target, 'camel').hostId;
+        assertIdentity(hostId, undefined, target.hostId);
+        return dispatch(input.method, encodeAutomationCommand(input, casing), decode);
       };
       const hostEnvelope = (request: HostRequest) => ({ target: { hostId: request.hostId }, precondition: { serverEpoch: request.serverEpoch } });
-      const portEnvelope = (request: PortRequest) => ({ target: request.target, precondition: request.precondition, timeoutMs: request.timeoutMs });
       const checkLease = (value: unknown, request: PortRequest): ControlLease => {
         const lease = decodeAutomationLease(value, casing);
         assertIdentity(lease.target.hostId, lease.serverEpoch, request.target.hostId, request.precondition.serverEpoch);
@@ -433,43 +524,17 @@ export function createAutomationService(transport?: AutomationTransport, casing:
         }),
         subscribe: request => subscribe('events.subscribe', request),
         watch: request => subscribe('ports.watch', request),
-        acquireControl: async request => call('control.acquire', request.requestId, {
-          ...portEnvelope(request), params: casing === 'camel'
-            ? { ttlMs: integer(request.ttlMs, 'ttlMs'), ...(request.waitMs === undefined ? {} : { waitMs: integer(request.waitMs, 'waitMs') }) }
-            : { ttl_ms: integer(request.ttlMs, 'ttlMs'), ...(request.waitMs === undefined ? {} : { wait_ms: integer(request.waitMs, 'waitMs') }) },
-        }, value => checkLease(value, request)),
-        renewControl: async request => call('control.renew', request.requestId, {
-          ...portEnvelope(request), control: request.control,
-          params: casing === 'camel' ? { ttlMs: integer(request.ttlMs, 'ttlMs') } : { ttl_ms: integer(request.ttlMs, 'ttlMs') },
-        }, value => checkLease(value, request)),
-        releaseControl: request => call('control.release', request.requestId, {
-          ...portEnvelope(request), control: request.control, params: {},
-        }, value => { if (value !== undefined && value !== null) return invalid('Invalid release acknowledgement'); }),
-        send: async request => {
-          let params: Record<string, unknown>;
-          if (request.input.mode === 'raw') {
-            if (!(request.input.data instanceof Uint8Array)) return invalid('Raw send requires Uint8Array');
-            params = casing === 'camel' ? { dataBase64: encodeBase64(request.input.data) } : { data_base64: encodeBase64(request.input.data) };
-          } else if (request.input.mode === 'text') {
-            params = { mode: 'text', text: request.input.text, encoding: request.input.encoding,
-              ...(casing === 'camel' ? { lineEnding: request.input.lineEnding } : { line_ending: request.input.lineEnding }) };
-          } else if (request.input.mode === 'hex') {
-            params = { mode: 'hex', hex: request.input.hex,
-              ...(casing === 'camel' ? { lineEnding: request.input.lineEnding } : { line_ending: request.input.lineEnding }) };
-          } else return invalid('Invalid send input mode');
-          return call('serial.send', request.requestId, { ...portEnvelope(request), control: request.control, params }, value => {
-            const operation = decodeAutomationOperation(value, casing);
-            assertIdentity(operation.target.hostId, operation.serverEpoch, request.target.hostId, request.precondition.serverEpoch);
-            assertPort(operation.target, request.target);
-            if (operation.requestId !== request.requestId || operation.connectionGeneration !== request.precondition.connectionGeneration) return invalid('Unexpected send operation identity');
-            return operation;
-          });
-        },
-        getOperation: request => call('operations.get', request.requestId, {
-          ...hostEnvelope(request), params: request.operationId !== undefined
-            ? casing === 'camel' ? { operationId: request.operationId } : { operation_id: request.operationId }
-            : casing === 'camel' ? { requestId: request.originalRequestId } : { request_id: request.originalRequestId },
-        }, value => {
+        acquireControl: request => command({ method: 'control.acquire', request }, value => checkLease(value, request)),
+        renewControl: request => command({ method: 'control.renew', request }, value => checkLease(value, request)),
+        releaseControl: request => command({ method: 'control.release', request }, decodeAutomationRelease),
+        send: request => command({ method: 'serial.send', request }, value => {
+          const operation = decodeAutomationOperation(value, casing);
+          assertIdentity(operation.target.hostId, operation.serverEpoch, request.target.hostId, request.precondition.serverEpoch);
+          assertPort(operation.target, request.target);
+          if (operation.requestId !== request.requestId || operation.connectionGeneration !== request.precondition.connectionGeneration) return invalid('Unexpected send operation identity');
+          return operation;
+        }),
+        getOperation: request => command({ method: 'operations.get', request }, value => {
           const operation = decodeAutomationOperation(value, casing);
           assertIdentity(operation.target.hostId, operation.serverEpoch, request.hostId, request.serverEpoch);
           if (request.operationId !== undefined ? operation.operationId !== request.operationId : operation.requestId !== request.originalRequestId) return invalid('Unexpected queried operation identity');
