@@ -2,6 +2,7 @@
  * HyperCom 后端主入口
  * 注册所有 Tauri 命令、初始化各模块、管理应用生命周期
  */
+mod automation;
 mod commands;
 mod config;
 mod diaglog;
@@ -148,6 +149,10 @@ pub struct AppState {
     /// 挪到独立线程时，需要从 State 克隆出 'static 句柄——Arc 允许克隆，
     /// `Deref<Target=Mutex<..>>` 使既有 `.lock()` 调用点零改动。
     pub serial_manager: std::sync::Arc<std::sync::Mutex<serial::SerialManager>>,
+    /// Optional, explicitly enabled loopback automation listener. The default
+    /// application never opens this endpoint; it is retained here so shutdown
+    /// and future authenticated adapters share one lifecycle owner.
+    pub automation_listener: std::sync::Arc<std::sync::Mutex<Option<automation::transport::LoopbackListener>>>,
     /// 配置管理器：负责读写应用配置（含全部设置实体）
     pub config_manager: std::sync::Mutex<config::ConfigManager>,
     /// 插件安装、卸载及私有资产写入共享的异步闸门；覆盖 fs 与状态提交整个事务。
@@ -277,6 +282,7 @@ impl AppState {
             serial_manager: std::sync::Arc::new(
                 std::sync::Mutex::new(serial::SerialManager::new()),
             ),
+            automation_listener: std::sync::Arc::new(std::sync::Mutex::new(None)),
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
             plugin_http: commands::PluginHttpRegistry::new(),
@@ -440,6 +446,16 @@ fn request_shutdown(app: tauri::AppHandle) {
     lock_windows_for_shutdown(&app);
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
+        if let Some(listener) = state.automation_listener.lock().ok().and_then(|mut slot| slot.take()) {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                listener.shutdown(),
+            ).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("Automation listener shutdown failed: {error}"),
+                Err(_) => log::warn!("Automation listener shutdown timed out"),
+            }
+        }
         match tokio::time::timeout(
             SHUTDOWN_SERIAL_TIMEOUT,
             commands::shutdown_serial_work(app.clone(), &state),
@@ -725,6 +741,29 @@ pub fn run() {
             // 显式 drop 确保 MutexGuard 临时值在 state 之前析构。
             #[allow(clippy::drop_non_drop)]
             drop(state);
+
+            // The automation endpoint is deliberately opt-in and loopback-only.
+            // It exposes the versioned domain transport, not arbitrary Tauri
+            // invoke. Production remote/TLS and native control leases are added
+            // only after every local write path is routed through the arbiter.
+            if let Some(port) = automation::runtime::parse_opt_in_port() {
+                let listener_slot = _app.state::<AppState>().automation_listener.clone();
+                let automation_app = _app.handle().clone();
+                let host_id = format!("host-{}", uuid::Uuid::new_v4());
+                let server_epoch = uuid::Uuid::new_v4().to_string();
+                tauri::async_runtime::spawn(async move {
+                    match automation::runtime::start_loopback(
+                        automation_app,
+                        listener_slot,
+                        host_id,
+                        server_epoch,
+                        port,
+                    ).await {
+                        Ok(bound_port) => log::info!("Automation loopback endpoint listening on 127.0.0.1:{bound_port}"),
+                        Err(error) => log::error!("Automation loopback endpoint failed to start: {error}"),
+                    }
+                });
+            }
 
             // 预热 sysinfo CPU 采样：first refresh_cpu_all 没有基线会返回 0，
             // 等待 MINIMUM_CPU_UPDATE_INTERVAL (~200ms) 后再次刷新建立基线
