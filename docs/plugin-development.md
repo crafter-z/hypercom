@@ -101,7 +101,7 @@ ame` | 是 | 非空显示名 |
 | `apiVersion` | 是 | 当前写 `"1.0"`；宿主校验主版本为 1，不是最低软件版本字段，也不按次版本自动提供未来能力 |
 | `entry` | 纯网页插件可省 | 插件内现存普通脚本文件的相对路径，如 main.js 或 dist/main.js；不能是绝对路径、`..` 穿越或 data/ 内文件。省略表示没有根 Worker：此时 `ui.views` 必须非空且**全部**为 `trusted-web` + `input:"none"` 视图，并不得声明 Worker 专用的 `ui.buttons`/`ui.menuItems` |
 | `permissions` | 是 | 所需权限字符串数组；可为空，不能含重复或空项。声明不等于用户授权；可以声明宿主尚未实现的权限，但安装时只能授予当前已支持的能力 |
-| `serial.portWhitelist` | 否 | serial.send 的精确端口 ID 数组，语义见下一节 |
+| `serial.portWhitelist` | 否 | serial.open/close/send 共用的精确端口 ID 数组，语义见下一节 |
 | `http.urlWhitelist` | 否 | 可选的 HTTP URL 作用域：缺失或空数组表示不限制；非空时初始 URL 与每个重定向目标都必须匹配 |
 | `ui.buttons` | 否 | 侧边栏按钮数组：`{id, label, icon?, target?}`；target 缺省或 sidebar 才显示 |
 | `ui.menuItems` | 否 | 端口菜单数组：`{id, label, target?}`；target 缺省或 port-context 才显示 |
@@ -120,12 +120,15 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 | `terminal:read` | 订阅 TRX 的 rx.line |
 | `rx:bytes` | 订阅包括 TTY 在内的原始 RX 块 |
 | `terminal:write` | 在已打开 TRX 终端写 NOTE 旁注，不发送串口数据 |
-| `serial:send` | 向已连接端口发送，仍需通过 serial.portWhitelist |
+| `serial:control` | **敏感**：打开/关闭串口，受 serial.portWhitelist 约束；与发送分开授权，关闭需绑定观察到的连接代次 |
+| `serial:send` | 向已连接端口发送，仍需通过 serial.portWhitelist；不隐式获得打开/关闭权限 |
 | `fs:assets` | 读取插件自身包内文件，可返回文本或原始二进制 |
 | `fs:storage` | 读取自身 data/ 文件（文本/二进制）及写入文本或原始字节 |
 | `fs:open` | 经用户原生选择器读取外部文件（文本/二进制） |
 | `fs:open-dir` | 经用户原生目录选择器获得只读目录授权：列出目录、读取文件和元数据；根目录只能由选择器产生 |
-| `fs:write-dir` | 高风险：经用户原生目录选择器获得写入授权，可创建/覆盖/追加文件、建目录、删除和重命名；根目录只能由选择器产生。宿主启停确认会单独提示 |
+| `fs:export-dir` | **推荐的目录导出最小权限**：只向用户原生选择的白名单目录根 + 相对路径创建/覆盖文件，按需创建父目录；不读取、不删除、不重命名、不追加。属于敏感权限 |
+| `fs:save` | **任意目录 Save As 最小权限**：每次由用户通过原生另存为选择目标，支持文本/原始字节；插件只能提供文件名提示，不能传绝对目标路径，不获得后续目录访问权。属于敏感权限 |
+| `fs:write-dir` | 兼容保留的高风险目录修改权限：可创建/覆盖/追加文件、建目录、删除和重命名；根目录只能由原生选择器产生。仅导出时优先使用 fs:export-dir，宿主授权确认会单独提示 |
 | `http:request` | 经宿主发起完整 HTTP（文本/二进制/流式/重定向/取消）；可选 urlWhitelist 收紧 |
 | `shell:open` | 在系统默认程序打开 http/https/mailto URL；不是执行 shell |
 | `shell:execute` | **高风险**：经宿主按操作系统语义启动程序并返回退出码及 UTF-8 stdout/stderr；程序可读写本机数据、访问网络或运行其他程序。需一次性授予敏感权限，用户负责审阅插件代码和参数 |
@@ -140,7 +143,7 @@ otify` | 发出受限的非粘滞通知 |
 
 ### 串口作用域
 
-在已有 manifest 中声明以下字段时，同时把 serial:send 加入 permissions，并让用户授予它：
+在已有 manifest 中声明以下字段时，发送需把 `serial:send` 加入 permissions；打开/关闭需独立声明并授予 `serial:control`。同一白名单同时约束 open、close 和 send：
 
 ```json
 {
@@ -187,7 +190,7 @@ otify` | 发出受限的非粘滞通知 |
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`shell.execute` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`serial.open`、`serial.close`、`fs.exportFile`、`fs.saveFile`、`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`shell.execute` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
 - 超时只是回执失败，不表示已经开始的串口写入、文件写入、HTTP 请求或本机进程已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
@@ -198,12 +201,18 @@ otify` | 发出受限的非粘滞通知 |
 
 | 调用 | 权限 | 参数与结果 |
 |---|---|---|
-| `api['ports.list']()` | 无 | 端口摘要数组；成员含 id/name/status/type，可含 mode/baudRate，不暴露完整宿主状态 |
-| `api['ports.status']({portId})` | 无 | 单个端口摘要；目标不存在返回 null |
+| `api['ports.list']()` | 无 | 原生权威端口摘要数组；成员含 id/name/status/type/mode/connectionGeneration，可含 baudRate；mode 优先保留已有宿主显示模式，连接状态/代次始终来自 native；失败 reject，不回退过期前端连接缓存 |
+| `api['ports.status']({portId})` | 无 | 原生权威单端口摘要；未知且从未成功连接返回 null，曾成功连接但已消失的目标可返回 disconnected + 历史 connectionGeneration |
+| `api['serial.open']({portId, params?})` | serial:control | 打开端口，不创建/激活标签或发送数据；返回 `{port, result:'opened'\|'already-open', connectionGeneration}`。已连接时不重开、不修改现有参数 |
+| `api['serial.close']({portId, expectedConnectionGeneration})` | serial:control | 关闭观察到的连接代次；必填非负安全整数代次，匹配时返回 `{port,result:'closed'\|'already-closed'}`；旧代次拒绝，不误关后来的新连接 |
 | `api['serial.send']({portId, data, isHex?, lineEnding?})` | serial:send | data 为非空字符串（≤1048576 个 UTF-16 代码单元）；默认文本、不加行尾；返回 `{bytesWritten}`，0 表示没有发送 |
 | `api['terminal.append']({portId, text})` | terminal:write | 非空 text（单次 ≤65536 个 UTF-16 代码单元），写 NOTE，不进入 TX 流量或历史；未打开对应终端显示目标时不保留旁注 |
 
 serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动补零。行尾值是字面量反斜杠表示：JavaScript 源码写 `lineEnding: '\\r\\n'`、`'\\r'`、`'\\n'` 或 `'None'`，不要写成真实换行字符串 `lineEnding: '\r\n'`。TTY 无本地 TX 回显，终端行旁注不是 TTY 画面注入接口。
+
+`serial.open` 的 `params` 可省略；未提供字段沿用宿主当前端口参数与默认值。允许 `baudRate`（1..4294967295 整数）、`dataBits`（5/6/7/8）、`parity`（`None`/`Even`/`Odd`）、`stopBits`（`One`/`Two`）、`handshake`（`None`/`XonXoff`/`RequestToSend`/`RequestToSendXonXoff`）、布尔 `dtr`/`rts` 以及 TTY `cols`/`rows`（1..65535 整数）；未知字段、非法枚举/数值明确 reject，不静默钳制。虚拟端口仍受宿主开发能力开关约束，控制权限不能绕过它。
+
+打开、关闭与用户连接按钮/自动重连共用每端口顺序 lane；排队后再次检查启用态、安装身份、授权与白名单。连接/权限/过期意图错误 reject，不使用 `serial.send` 的零字节兼容成功语义。`expectedConnectionGeneration` 不是端口所有权证明：用户明确授权后，插件也能关闭白名单内由用户或其他插件打开、且代次仍匹配的连接。不要失败后自动删除代次并盲目重试关闭。
 
 ### 面板、通知与日志
 
@@ -224,7 +233,9 @@ serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动
 | `api['fs.read']({rel, format?})` | fs:assets 或 fs:storage | rel 为包内或 data/ 相对路径（≤4096 字符）；format 缺省/`text` 返回 UTF-8 文本，非法字节用替代字符；`binary` 返回 `Uint8Array`。空文件为 `''` 或零长度字节数组，缺文件/IO 错误 reject；data/ 与包资产分开授权 |
 | `api['fs.write']({rel, content?} \| {rel, bytes?})` | fs:storage | rel 只允许 data/ 下相对路径；`content`（可为空字符串）或 `bytes`（`Uint8Array`/`ArrayBuffer`，可为零长度）二选一；原子覆盖写入，自动创建父目录；无内容大小上限 |
 | `api['fs.openDialog']({multiple?, filters?, title?, encoding?, format?})` | fs:open | format 缺省/`text` 返回 `{files:[{path, content}]}`，`binary` 返回 `{files:[{path, bytes: Uint8Array}]}`；取消为 `{files:[]}`。文本 encoding 默认 utf-8，可用浏览器 TextDecoder 支持的标签（如 gbk）；二进制忽略 encoding；multiple 缺省 false，无选择数量上限，每插件同时最多 8 个对话框；filters 仅为选择提示，始终可选所有文件 |
-| `api['fs.openDirectoryDialog']({title?, multiple?})` | fs:open-dir 或 fs:write-dir | 经原生目录选择器获得目录授权；返回 `{directories:[{grantId, name, path}]}`，取消为 `{directories:[]}`。`path` 仅供展示；后续访问必须使用 `grantId`。无 TTL、无数量上限；授权保存在宿主内存，应用重启后失效 |
+| `api['fs.exportFile']({grantId, rel, content? \| bytes?})` | fs:export-dir | 向用户所选白名单目录内的相对路径创建/原子覆盖文件，自动创建父目录；文本/原始字节二选一，允许空内容；返回 `{path,bytesWritten}`。不接受 mode、读取、删除或重命名能力；rel ≤4096 UTF-8 字节，拒绝绝对路径、`..` 和链接/重解析点 |
+| `api['fs.saveFile']({content? \| bytes?, options?})` | fs:save | 每次原生 Save As，由用户选择任意保存位置；成功返回 `{path,bytesWritten}`，取消返回 null。options 仅含 `{title?,defaultFileName?,filters?}`，defaultFileName 是文件名不是路径；不能传绝对目标或默认目录，不产生 grant |
+| `api['fs.openDirectoryDialog']({title?, multiple?})` | fs:open-dir、fs:export-dir 或 fs:write-dir | 经原生目录选择器获得目录授权；返回 `{directories:[{grantId, name, path}]}`，取消为 `{directories:[]}`。`path` 仅供展示；后续访问必须使用 `grantId`。无 TTL、无数量上限；授权保存在宿主内存，应用重启后失效 |
 | `api['fs.listDirectory']({grantId, rel?, recursive?})` | fs:open-dir | 列出授权根或 `rel` 子目录的条目；返回 `{entries:[{name, rel, kind, size, modifiedMs}]}`，`kind` 为 `file`/`directory`/`other`。`recursive` 默认 false；为 true 时返回整棵树，不设深度或条目上限。`rel` 使用 `/`；链接/重解析点与特殊文件标记为 `other` |
 | `api['fs.readDirectoryFile']({grantId, rel, format?, encoding?})` | fs:open-dir | 读取授权目录内的普通文件；返回 `{path, content}`（text，encoding 默认 utf-8）或 `{path, bytes: Uint8Array}`（binary）。`rel` 必填且必须解析到授权根内；绝对路径、`..`、链接和重解析点拒绝。无内容大小上限，一次性读取整个文件 |
 | `api['fs.statDirectoryEntry']({grantId, rel})` | fs:open-dir | 读取单个条目的元数据：`{name, rel, kind, size, modifiedMs}`；不读取文件内容；链接/重解析点拒绝 |
@@ -232,13 +243,20 @@ serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动
 | `api['fs.createDirectory']({grantId, rel, recursive?})` | fs:write-dir | 创建目录；`recursive` 默认 true；已存在目录视为成功；逐组件拒绝链接/重解析点 |
 | `api['fs.removeDirectoryEntry']({grantId, rel, recursive?})` | fs:write-dir | 删除文件/目录；`recursive` 默认 false；非递归删除非空目录会失败；不能删除授权根 |
 | `api['fs.renameDirectoryEntry']({grantId, fromRel, toRel})` | fs:write-dir | 重命名/移动；源必须存在，目标父目录必须存在，目标不能已存在；源/目标都必须在授权根内 |
-| `api['fs.releaseDirectory']({grantId})` | 无 | 提前释放目录授权；未知或已失效的 `grantId` 视为成功。授权也会在插件禁用、同时撤销两个目录权限、卸载、替换或重载时失效 |
+| `api['fs.releaseDirectory']({grantId})` | 无 | 提前释放目录授权；未知或已失效的 `grantId` 视为成功。授权也会在插件禁用、撤销全部三种目录权限、卸载、替换或重载时失效 |
 | `api['clipboard.readText']()` | clipboard | 返回剪贴板文本 |
 | `api['clipboard.writeText']({text})` | clipboard | 写入文本；空字符串表示清空剪贴板 |
 
 storage 的文件是 data/state.json。只有确认文件不存在才初始化空对象；暂时读失败、非法 JSON、非对象内容都会 reject，不能用空缓存覆盖旧键。键只要求非空字符串；值必须是可无损 JSON 化的数据——除顶层 `undefined`（删除键）外，拒绝函数、嵌套 `undefined`、NaN/Infinity、Map/Set/Date/类型化数组、getter、可调用的 `toJSON`、稀疏数组与循环引用，但**不设键长、值大小、节点数或文件大小上限**。不要同时用 fs.write 手工改这个文件和 storage.set 操作 KV，两条路径没有共享 KV 缓存更新契约。配置导出不包含 KV、其他 data/ 或插件代码。
 
-**旧全文件读写接口继续保留，不设文件格式、内容、大小、总量或选择数量的业务上限，也不增加隐式读取期限；所有插件一致，不要求可信网页模式。** `fs.read` 仍只访问已授权插件目录，`fs.openDialog` 只读取用户选择的路径，`fs.openDirectoryDialog` 只能获得用户原生选择器产生的目录根（读/写权限均可发起选择），`fs.write` 只写 data/；二进制保留全部字节，不经过文本解码。文本解码可能替换非法字节，要求无损时必须使用 binary。目录授权是内存能力，插件不能把任意本机路径或目录根传给宿主；所有目录操作每次调用都重新校验权限、安装代次和路径围栏。旧接口一次性读取/写入整个文件，实际可处理大小受可用内存及 JS/浏览器运行时约束，并非流式接口；大文件预览和目录扫描优先使用下面的有界窗口与分页 API。安装包与网页声明资源的限额仍属于安装/视图加载，不限制此处的数据读取或私有写入。
+**旧全文件读写接口继续保留，不设文件格式、内容、大小、总量或选择数量的业务上限，也不增加隐式读取期限；所有插件一致，不要求可信网页模式。** `fs.read` 仍只访问已授权插件目录，`fs.openDialog` 只读取用户选择的路径，`fs.openDirectoryDialog` 只能获得用户原生选择器产生的目录根（只读、最小导出或完整目录写任一授权均可发起选择），`fs.write` 只写 data/；二进制保留全部字节，不经过文本解码。文本解码可能替换非法字节，要求无损时必须使用 binary。目录授权是内存能力，插件不能把任意本机路径或目录根传给宿主；所有目录操作每次调用都重新校验权限、安装代次和路径围栏。旧接口一次性读取/写入整个文件，实际可处理大小受可用内存及 JS/浏览器运行时约束，并非流式接口；大文件预览和目录扫描优先使用下面的有界窗口与分页 API。安装包与网页声明资源的限额仍属于安装/视图加载，不限制此处的数据读取或私有写入。
+
+### 保存文件时选择最小权限
+
+- **反复导出到同一白名单目录**：声明并授予 `fs:export-dir`，通过 `fs.openDirectoryDialog` 让用户选择根，随后只用 `grantId` + 相对路径调用 `fs.exportFile`。自动创建父目录，原子覆盖而不是追加；不能列/读文件或元数据、删除、重命名，也不能调用旧完整目录写 API。要读同一目录还须另授 `fs:open-dir`；需要追加/删除/重命名时才申请旧 `fs:write-dir`，它不会自动涵盖新导出权限。
+- **每次由用户决定任意保存位置**：只授予 `fs:save`，调用 `fs.saveFile`，每次均打开原生 Save As；插件不能传绝对路径、`defaultPath`、目录路径或自报 grant。`defaultFileName` ≤255 个 UTF-16 代码单元、只能是非空 basename（拒绝分隔符、冒号、控制字符、`.`、`..`）；title ≤256 个 UTF-16 单元且不含控制字符，filters 与 open 共用结构边界（扩展名不得含路径分隔符、冒号或控制字符），都是提示而不是访问能力。成功返回展示用 path，不可用于下一次免确认写入。
+- 两者都接受且只接受 `content`（UTF-8 文本，可空）或 `bytes`（`Uint8Array` / `ArrayBuffer`，可零长度），无内容业务大小限额，无隐式保存期限；仍受可用内存、磁盘和宿主普通 RPC 在途槽位约束。`fs.saveFile` 与其他文件选择/面板导出共用每插件最多 8 个对话框许可；不要在后台循环弹出对话框。
+- 撤权、禁用或安装身份变化会拒绝排队请求并丢弃迟到回执；原生选择后/提交前再次校验。取消 Save As 返回 null，不是写入零字节。撤销不回滚已经完成的文件写入；失败不应盲目重放。旧 `fs:write-dir` 和仅导出自身面板的 `ui.panel.export` 保持原契约，不被两个新权限隐式扩大或替代。
 
 ### 范围读取、批量与目录分页
 
@@ -618,7 +636,7 @@ self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
 
 ### 选择目录并读写文件
 
-读取需要 `fs:open-dir`，写入/删除/重命名需要 `fs:write-dir`；只声明 `fs:write-dir` 也能打开目录选择器（得到写权限），但 list/read 会被拒绝。目录选择只应在用户操作（按钮/菜单）中发生；宿主不接受插件提供的任意目录路径。以下示例需要两个目录权限，并在 manifest 声明 `open-log-dir` / `stop-log-scan` 按钮：分页扫描 `.log`，每个文件只查看前 64 KiB，并写出预览汇总；每次只保留一页目录和一个文件窗口，不收集完整树或所有文件内容，也不对所有文件启动 `Promise.all`。
+读取需要 `fs:open-dir`，仅导出汇总使用最小 `fs:export-dir`；追加/显式建目录/删除/重命名才需要旧 `fs:write-dir`。任一目录权限均能打开目录选择器，但仅有导出/写权限不能 list/read。目录选择只应在用户操作（按钮/菜单）中发生；宿主不接受插件提供的任意目录路径。以下示例需要 `fs:open-dir` + `fs:export-dir`，并在 manifest 声明 `open-log-dir` / `stop-log-scan` 按钮：分页扫描 `.log`，每个文件只查看前 64 KiB，并以相对路径导出预览汇总；每次只保留一页目录和一个文件窗口，不收集完整树或所有文件内容，也不对所有文件启动 `Promise.all`。
 
 ```js
 let logScanController = null;
@@ -663,12 +681,10 @@ self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
     } while (cursor !== undefined);
 
     if (signal.aborted) return;
-    await api['fs.writeDirectoryFile']({
+    await api['fs.exportFile']({
       grantId,
       rel: 'exports/summary.txt',
-      content: `files: ${files}, preview bytes: ${totalBytes}\n`,
-      mode: 'overwrite',
-      createParents: true
+      content: `files: ${files}, preview bytes: ${totalBytes}\n`
     });
   } catch (error) {
     if (error?.name === 'AbortError') console.log('scan cancelled');
@@ -681,6 +697,63 @@ self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
 ```
 
 `listDirectory` 默认只列一层，`recursive:true` 返回整棵树且不设深度/条数上限。`path` 仅供展示，所有访问必须使用 `grantId` + `rel`。目录内符号链接/重解析点和特殊文件标记为 `kind:"other"`，不可读取；路径解析后越出所选目录、绝对路径或 `..` 一律拒绝。`writeDirectoryFile` 的 `mode` 默认 `overwrite`（原子替换），`append` 用于追加；`createParents` 默认 true。`removeDirectoryEntry` 递归删除需要显式 `recursive:true`。目录权限不等于 `fs:open`：使用文件选择器和目录选择器时，manifest 需分别声明 `fs:open` 与目录权限。
+
+### 两种最小权限导出
+
+下面是 Worker 片段。分别在 manifest 声明 `export-report` / `save-report` 按钮与实际需要的 `fs:export-dir` / `fs:save`；只需其中一种时不要申请另一种。示例保留原始字节（含 NUL 和非 UTF-8），不把展示用 path 当后续写权限：
+
+```js
+self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
+  const api = self.plugin.api;
+  const bytes = new Uint8Array([0x00, 0xff, 0x80]);
+  try {
+    if (buttonId === 'export-report') {
+      const { directories } = await api['fs.openDirectoryDialog']({ title: '选择导出白名单目录' });
+      if (!directories.length) return;
+      const { grantId } = directories[0];
+      try {
+        await api['fs.exportFile']({ grantId, rel: 'reports/sample.bin', bytes });
+      } finally {
+        await api['fs.releaseDirectory']({ grantId });
+      }
+    } else if (buttonId === 'save-report') {
+      const saved = await api['fs.saveFile']({
+        bytes,
+        options: { title: 'Save As', defaultFileName: 'sample.bin', filters: [{ name: 'Binary', extensions: ['bin'] }] }
+      });
+      if (saved === null) return; // 用户取消，不等于成功保存空文件
+      await api['ui.panel.append']({ text: `Saved ${saved.bytesWritten} bytes\n` });
+    }
+  } catch (error) {
+    console.error('export failed', error); // 不盲目重放可能已提交的写入
+  }
+});
+```
+
+### 打开与按代次关闭串口
+
+声明 `serial:control`、匹配的 `serial.portWhitelist`，以及 `open-device` / `close-device` 端口菜单按钮；如果还需要发送，另加 `serial:send`。只在用户按钮事件执行，不在插件启动时抢设备。打开不切换当前标签；关闭不能沿用旧连接代次去影响新会话：
+
+```js
+const openedGenerations = new Map();
+self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
+  const portId = context?.portId;
+  if (!portId) return;
+  try {
+    if (buttonId === 'open-device') {
+      const opened = await self.plugin.api['serial.open']({ portId, params: { baudRate: 115200 } });
+      openedGenerations.set(portId, opened.connectionGeneration);
+    } else if (buttonId === 'close-device') {
+      const expectedConnectionGeneration = openedGenerations.get(portId);
+      if (expectedConnectionGeneration === undefined) return; // 或显式查询 ports.status 并由用户决定
+      await self.plugin.api['serial.close']({ portId, expectedConnectionGeneration });
+      openedGenerations.delete(portId);
+    }
+  } catch (error) {
+    console.error('serial control failed', error); // 过期代次/撤权失败不自动重试
+  }
+});
+```
 
 ### 向指定串口发送
 
@@ -720,7 +793,9 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | 插件 IO 准入 | 控制面闸门等待最多 5 秒，繁忙时可重试；公平文件 IO 调度独立于 RX/control 事件预算；soft IO budgets 不是总内存或堆限额，见[范围读取、批量与目录分页](#范围读取批量与目录分页)；已开始的 IO 不因回执退休而提前归还资源 |
 | 串口与终端写入 | `serial.send` 单次 data ≤1048576 个 UTF-16 代码单元；`view.sendSerial` 单次 data ≤65536 个；`terminal.append` 单次 text ≤65536 个 |
 | HTTP | 仅 http/https；无宿主业务大小上限、无固定 timeout；`timeout` 为调用显式给出的非负有限秒数（0/缺省=不设总期限），重定向默认最多 10 跳；并发上限每插件 64、全应用 64 |
-| 文件对话框 | `fs.openDialog` / `fs.openDirectoryDialog` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |
+| 文件保存 | `fs.exportFile` 仅白名单 grant + 相对路径，原子覆盖/建父目录；`fs.saveFile` 每次原生 Save As；二者无内容业务大小限额/隐式期限，取消另存为返回 null，不能以 path 复用授权 |
+| 串口控制 | open/close 需独立 `serial:control` + 端口白名单；close 必须带观察到的 connectionGeneration CAS；参数严格校验、错误 reject、无通用 RPC 隐式截止 |
+| 文件对话框 | `fs.openDialog` / `fs.openDirectoryDialog` / `fs.saveFile` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |
 | 插件面板 | 单次 append ≤65536 个 UTF-16 代码单元、约 200 条/s；面板总计 524288 个 UTF-16 代码单元，超限丢最旧文本；不是 UTF-8 字节数 |
 | KV | 无键长/值大小/节点数/文件大小上限；值须可无损 JSON 化 |
 | 剪贴板 | 读写文本无长度上限；空字符串清空剪贴板 |

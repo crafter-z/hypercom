@@ -18,7 +18,7 @@ export interface SidebarActions {
   /** Resolves when the connect/disconnect op settled — batch loops in the
    *  toolbar and the group header `await` it to stay serial (concurrent
    *  open/close races for the same OS handle). */
-  toggleConnect: (portId: string) => Promise<void>;
+  toggleConnect: (portId: string) => Promise<unknown>;
   setAlias: (portId: string) => void;
   hidePort: (portId: string) => void;
   showPort: (portId: string) => void;

@@ -239,6 +239,31 @@ it('uses the one-time generic risk confirmation when granting shell:execute', as
   expect(mocks.api.togglePermission).not.toHaveBeenCalled();
 });
 
+it.each([
+  ['serial:control', 'plugins.sensitiveSerialControl'],
+  ['fs:export-dir', 'plugins.sensitiveExportDir'],
+  ['fs:save', 'plugins.sensitiveSave'],
+])('describes and confirms %s before granting, while revocation remains one click', async (permission, risk) => {
+  const plugin = pluginWithWrite();
+  plugin.declaredPermissions = [permission];
+  plugin.knownPermissions = [permission];
+  plugin.manifest!.permissions = [permission];
+  mocks.api.plugins = [plugin];
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await render();
+  await act(async () => permissionCheckbox(permission).click());
+  expect(confirm).toHaveBeenCalledWith(`plugins.sensitiveConfirm\n\n${risk}`);
+  expect(mocks.api.togglePermission).not.toHaveBeenCalled();
+  confirm.mockReturnValue(true);
+  await act(async () => permissionCheckbox(permission).click());
+  expect(mocks.api.togglePermission).toHaveBeenLastCalledWith('demo', permission, 'generation-a');
+  plugin.grantedPermissions = [permission];
+  await render();
+  confirm.mockClear();
+  await act(async () => permissionCheckbox(permission).click());
+  expect(confirm).not.toHaveBeenCalled();
+});
+
 it('asks before "grant all and enable" hands over the same high-risk permissions', async () => {
   mocks.open.mockResolvedValue('archive.zip');
   // The dialog re-checks live trust state before granting, so the installed plugin must be

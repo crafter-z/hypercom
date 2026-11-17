@@ -25,11 +25,13 @@ export const PLUGIN_RPC_TIMEOUT_MS = 10_000;
 export const PLUGIN_BINARY_RPC_TIMEOUT_MS = VIEW_BINARY_TRANSFER_TIMEOUT_MS;
 
 /**
- * Ops that legitimately wait for the user, network, or a native process. They
- * have no host deadline; HTTP and shell.execute enforce their native deadlines.
+ * Ops that legitimately wait for the user, file IO, connection lifecycle, network,
+ * or a native process. No generic deadline; HTTP/shell use only caller deadlines.
  */
 export function hasNoRpcDeadline(op: string): boolean {
-  return op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
+  return op === 'serial.open' || op === 'serial.close' ||
+    op === 'fs.exportFile' || op === 'fs.saveFile' ||
+    op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
     op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
     op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage' || op === 'fs.cancel' ||
     op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
@@ -209,7 +211,9 @@ export const PLUGIN_BRIDGE_CODE = `
       }
       wireArgs.requestId = requestId;
     }
-    var deadline = op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
+    var deadline = op === 'serial.open' || op === 'serial.close' ||
+      op === 'fs.exportFile' || op === 'fs.saveFile' ||
+      op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
       op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
       op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage' || op === 'fs.cancel' ||
       op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||

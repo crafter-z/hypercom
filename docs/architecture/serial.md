@@ -1,12 +1,12 @@
 # 串口管理模块
 
-串口枚举、连接生命周期、参数/流控、读写句柄、虚拟端口（SIM:Loopback）、模拟终端（GIT:BASH，渲染细节见 [`tty.md`](tty.md)）、外部工具（flasher）。后端 `serial/{mod,codec,events,ports_real,ports_sim,ports_tty}.rs` + `tty_sim.rs`，命令层 `commands/{serial,simulation,tty_sim}.rs`；前端 `useSerialPorts` / `useSerialConnection` / `useSimulation` / `useGitBashSim` / `usePortToolActions`。
+串口枚举、连接生命周期、参数/流控、读写句柄、虚拟端口（SIM:Loopback）、模拟终端（GIT:BASH，渲染细节见 [`tty.md`](tty.md)）、外部工具（flasher）。后端 `serial/{mod,codec,events,ports_real,ports_sim,ports_tty}.rs` + `tty_sim.rs`，命令层 `commands/{serial,simulation,tty_sim}.rs`；前端 `useSerialPorts` / `useSerialConnection` / [`serialConnectionRuntime`](../../src/utils/serialConnectionRuntime.ts) / [`serialPlugin`](../../src/utils/serialPlugin.ts) / `useSimulation` / `useGitBashSim` / `usePortToolActions`。
 
 ## 架构总览
 
 ```
 Sidebar 端口列表 ◄── 3s 轮询 useSerialPorts ──► list_available_ports（后端枚举）
-Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► open_serial_port / close_serial_port
+Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► serialConnectionRuntime ──► open_serial_port / close_serial_port
                                                         │
                                               SerialManager（全局，Arc<Mutex>）
                                               ┌──────────────────────────────┐
@@ -86,9 +86,18 @@ openPort(portId, baud)
 - `attempt_reconnect` 在进入阻塞线程池前登记每端口意图令牌；用户关闭、显式打开或较新的重连会取消旧令牌。旧尝试在摘除句柄前与最终打开前都于 manager 锁内复查，锁外枚举/join 期间发生关闭也不能重新打开端口或发出新的 connected；旧任务结束不会删除较新的令牌。公开 invoke 参数不变。
 - **标签页关闭 ≠ 端口关闭**：`Pane.cleanupClosedTab(tabId)` 先退休插件视图与时间组成员；serial 标签按 `tab.portId` detach TTY、关闭终端弹窗、释放 viewport 并 `discardTerminalQueue`，不把 workspace UUID 当端口 ID，也不调用 `pipeline.disconnect` 冒充断线。store 移除标签后 `releaseUnusedPortState(portId)` 仅在没有其他显示/行消费者时回收终端显示态、流量统计与 TX 历史；其他插件输入租约继续工作。串口连接与后端日志保持，重开原始终端从新的显示缓冲开始。批量关闭先用 `getClosingTabIds(tabId, scope)` 取 store 关闭动作的同一集合，再统一回收涉及的端口。
 
+### 插件串口控制（`serial:control`）
+
+- Worker 的 `serial.open({portId, params?})` / `serial.close({portId, expectedConnectionGeneration})` 经 `pluginHostApi.executeHostApi` → `serialPlugin.executePluginSerialOpen` / `executePluginSerialClose` → `serialConnectionRuntime`，与用户按钮和自动重连共用同一 per-port operation lane，而不是在桥上直接 invoke。插件打开不主动创建/激活串口标签、改变当前焦点或发送数据；成功连接仍正常进入接收、日志、流控和统计生命周期。用户按钮保留原有可视交互。
+- `serial:control` 与 `serial:send` 独立；两者都受 manifest `serial.portWhitelist` 精确端口 ID 作用域约束（未声明不限、空数组全拒）。主窗 Worker 每次准入、入 lane 和交付前检查启用态、安装身份及实时授权。未知字段、非法枚举/数值被拒绝，不能通过 clamp 悄悄改成别的连接参数。
+- 原生命令 `plugin_serial_open/close` 再校验主窗来源、`expectedGeneration` 安装 UUID、manifest/当前 `serial:control` 与白名单；打开时的共享关闭屏障、虚拟端口门控、锁外阻塞收尾及连接代次规则与宿主相同。已连接时返回 `already-open`，不重开或暗改现有连接参数。
+- 关闭的 `expectedConnectionGeneration` 必须是非负安全整数，来自成功 `serial.open` 的 `connectionGeneration` 或权威 `ports.status/list` 摘要。旧代次关闭不能误关用户或其他插件重开的新连接；匹配但已经关闭时返回 `already-closed`。它不是端口所有权令牌：授权插件可关闭白名单内由用户或其他插件打开、且代次仍匹配的端口。关闭不等于关闭标签。
+- `ports.list/status` 分别走 `plugin_serial_list/status` 读取 native 权威摘要，含 `connectionGeneration`，只要求主窗、启用态及安装 UUID，不额外要求控制权限。status 对未知且从未成功打开的端口返回 null；已消失但有历史连接代次的端口可返回 disconnected 摘要。连接状态和代次始终以 native 为准；仅 `mode` 是宿主 UI metadata，已有端口时保留用户的 TRX/TTY 显示模式（真实端口也可使用 TTY），缺失时回退 native 类别默认值。查询失败明确 reject，不退回过期 store 连接缓存。
+- open/close 没有通用 RPC 隐式截止，真实 native 失败必须 reject；不能把过期意图、撤权或串口错误伪装为成功。撤权/禁用/替换阻止尚未执行的旧请求，迟到回执不交付；不承诺回滚已完成的物理打开/关闭副作用。
+
 ### 自动重连预算与诊断
 
-- `useSerialConnection.runReconnectLoop` 每端口只运行一个恢复循环，每轮使用启动时的 `maxRetries` 预算，仅实际发起 `attemptReconnect` 时计数；入 lane 前已失效而未执行的排队操作不扣次数，但仍退避避免空转。首次立即尝试，失败或本次会话在 invoke 返回前已经终止时，继续剩余预算；轮间等待为 1s、2s、4s，之后封顶 5s。活动期间重复 hint 不开启新循环或重置次数。
+- `serialConnectionRuntime.runReconnectLoop` 每端口只运行一个恢复循环，每轮使用启动时的 `maxRetries` 预算，仅实际发起 `attemptReconnect` 时计数；入 lane 前已失效而未执行的排队操作不扣次数，但仍退避避免空转。首次立即尝试，失败或本次会话在 invoke 返回前已经终止时，继续剩余预算；轮间等待为 1s、2s、4s，之后封顶 5s。活动期间重复 hint 不开启新循环或重置次数。
 - `serial:status error/disconnected` 只使单次连接完成结果失效，不等同用户取消恢复。真实串口先发 connected 再放行 reader，reader 可在 invoke 返回之前再次断线；该时序仍由当前循环恢复，不能因 hint 已合并而提前退出。
 - 手动 `openPort` / `closePort` 立即撤销旧恢复循环和退避计时器；每次 await 后与入 lane 前验证循环令牌所有权，旧循环收尾不能删除新循环。关闭意图、禁用自动重连或工具接管均阻止后续尝试。
 - 次数用尽后结束本轮恢复并保留耗尽标记，避免最后一个 reader 的迟到 hint 重置预算；只有新手动打开/关闭意图或被接受的新 connected 事件清除该标记。不驻留后台等待设备重现，单纯端口列表轮询不会重新发起恢复。退避在前端 `setTimeout` 执行，实际间隔还受调用耗时和 WebView/系统调度影响，不是固定墙钟期限。

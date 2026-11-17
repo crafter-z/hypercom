@@ -1186,7 +1186,9 @@ pub async fn set_plugin_permissions(
     if !committed_permissions.iter().any(|p| p == "shell:execute") {
         state.plugin_shell.cancel_plugin(&id);
     }
-    if !committed_permissions.iter().any(|p| p == "fs:open-dir" || p == "fs:write-dir") {
+    if !committed_permissions.iter().any(|p| {
+        p == "fs:open-dir" || p == "fs:write-dir" || p == "fs:export-dir"
+    }) {
         revoke_plugin_directory_grants(&id);
     }
     plugin::view_runtime::retire_denied(window.app_handle(), &id, &committed_permissions).await?;

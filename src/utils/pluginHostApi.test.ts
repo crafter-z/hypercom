@@ -14,6 +14,12 @@ const listDirectory = vi.hoisted(() => vi.fn());
 const readDirectoryBytes = vi.hoisted(() => vi.fn());
 const statDirectoryEntry = vi.hoisted(() => vi.fn());
 const writeDirectoryFile = vi.hoisted(() => vi.fn());
+const exportFile = vi.hoisted(() => vi.fn());
+const saveFile = vi.hoisted(() => vi.fn());
+const serialOpen = vi.hoisted(() => vi.fn());
+const serialClose = vi.hoisted(() => vi.fn());
+const serialList = vi.hoisted(() => vi.fn());
+const serialStatus = vi.hoisted(() => vi.fn());
 const createDirectory = vi.hoisted(() => vi.fn());
 const removeDirectoryEntry = vi.hoisted(() => vi.fn());
 const renameDirectoryEntry = vi.hoisted(() => vi.fn());
@@ -25,6 +31,7 @@ const executeViewApi = vi.hoisted(() => vi.fn());
 const sendToPort = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/tauri', () => ({
+  serialService: { pluginSerialList: serialList, pluginSerialStatus: serialStatus },
   pluginService: { readPluginAsset: readAsset, readPluginAssetBytes: readAssetBytes, writePluginAsset: writeAsset },
   fileService: {
     pickPluginFiles: pickFiles,
@@ -33,6 +40,8 @@ vi.mock('../services/tauri', () => ({
     readPluginDirectoryBytes: readDirectoryBytes,
     statPluginDirectoryEntry: statDirectoryEntry,
     writePluginDirectoryFile: writeDirectoryFile,
+    exportPluginFile: exportFile,
+    savePluginFile: saveFile,
     createPluginDirectory: createDirectory,
     removePluginDirectoryEntry: removeDirectoryEntry,
     renamePluginDirectoryEntry: renameDirectoryEntry,
@@ -42,6 +51,7 @@ vi.mock('../services/tauri', () => ({
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readText: vi.fn(), writeText: clipboardWrite }));
 vi.mock('./pluginHttp', () => ({ executePluginHttp: executeHttp }));
 vi.mock('./pluginShell', () => ({ executePluginShell: executeShell }));
+vi.mock('./serialPlugin', () => ({ executePluginSerialOpen: serialOpen, executePluginSerialClose: serialClose }));
 vi.mock('./pluginViewRuntime', () => ({ executePluginViewApi: executeViewApi }));
 vi.mock('../hooks/useSerialSend', () => ({ sendToPort }));
 vi.mock('./pluginObserver', () => ({ addPluginRxObserver: vi.fn() }));
@@ -66,6 +76,12 @@ beforeEach(() => {
   readDirectoryBytes.mockReset();
   statDirectoryEntry.mockReset();
   writeDirectoryFile.mockReset();
+  exportFile.mockReset();
+  saveFile.mockReset();
+  serialOpen.mockReset();
+  serialClose.mockReset();
+  serialList.mockReset();
+  serialStatus.mockReset();
   createDirectory.mockReset();
   removeDirectoryEntry.mockReset();
   renameDirectoryEntry.mockReset();
@@ -175,6 +191,139 @@ describe('host API shell dispatch', () => {
     executeShell.mockResolvedValueOnce(result);
     await expect(executeHostApi('api.plugin', 'shell.execute', request, manifest, authority)).resolves.toEqual(result);
     expect(executeShell).toHaveBeenCalledExactlyOnceWith('api.plugin', request, authority);
+  });
+});
+
+describe('host API authoritative port queries', () => {
+  const port = { id: 'COM3', name: 'COM3', type: 'real', mode: 'trx', status: 'connected', baudRate: 115200, connectionGeneration: 7 };
+  it('reads native list/status with the original installation and includes close CAS generation without control permission', async () => {
+    serialList.mockResolvedValueOnce([{ ...port, privateNativeField: 'not exposed' }]);
+    serialStatus.mockResolvedValueOnce(port).mockResolvedValueOnce(null);
+    await expect(executeHostApi('api.plugin', 'ports.list', null)).resolves.toEqual([port]);
+    expect(serialList).toHaveBeenCalledExactlyOnceWith('api.plugin', 'api-install');
+    await expect(executeHostApi('api.plugin', 'ports.status', { portId: 'COM3' })).resolves.toEqual(port);
+    expect(serialStatus).toHaveBeenLastCalledWith('api.plugin', 'api-install', 'COM3');
+    await expect(executeHostApi('api.plugin', 'ports.status', { portId: 'missing' })).resolves.toBeNull();
+  });
+  it('merges only existing UI mode metadata while retaining native connection state and generation', async () => {
+    const previousPorts = useAppStore.getState().ports;
+    useAppStore.setState({ ports: [{ id: 'COM3', name: 'stale UI name', type: 'real', mode: 'tty', status: 'disconnected', baudRate: 9600, connectionGeneration: 2, isHidden: false }] });
+    try {
+      serialList.mockResolvedValueOnce([port, { ...port, id: 'COM9' }]);
+      serialStatus.mockResolvedValueOnce(port);
+      await expect(executeHostApi('api.plugin', 'ports.list', null)).resolves.toEqual([
+        { ...port, mode: 'tty' }, { ...port, id: 'COM9' },
+      ]);
+      await expect(executeHostApi('api.plugin', 'ports.status', { portId: 'COM3' })).resolves.toEqual({ ...port, mode: 'tty' });
+    } finally {
+      useAppStore.setState({ ports: previousPorts });
+    }
+  });
+  it('rejects native failures instead of falling back to stale store state', async () => {
+    serialStatus.mockRejectedValueOnce(new Error('native query failed'));
+    await expect(executeHostApi('api.plugin', 'ports.status', { portId: 'COM3' })).rejects.toThrow('native query failed');
+  });
+  it('drops native query results when the reviewed installation changes while awaiting', async () => {
+    serialList.mockImplementationOnce(async () => {
+      useAppStore.getState().setConfig({ pluginConfigs: [{ id: 'api.plugin', enabled: true, installGeneration: 'replacement', grantedPermissions: [] }] });
+      return [port];
+    });
+    await expect(executeHostApi('api.plugin', 'ports.list', null)).rejects.toThrow('plugin disabled');
+  });
+});
+
+describe('host API serial control', () => {
+  const manifest: PluginManifestView = {
+    id: 'api.plugin', name: 'API', version: '1', description: '', apiVersion: '1',
+    permissions: ['serial:control'], serial: { portWhitelist: ['COM3'] },
+  };
+  it.each(['serial.open', 'serial.close'])('dispatches %s through the shared lane with a live scope guard', async op => {
+    const args = op === 'serial.open' ? { portId: 'COM3', params: { baudRate: 115200 } }
+      : { portId: 'COM3', expectedConnectionGeneration: 7 };
+    const facade = op === 'serial.open' ? serialOpen : serialClose;
+    const result = { port: { id: 'COM3' }, result: op === 'serial.open' ? 'opened' : 'closed', connectionGeneration: 7 };
+    facade.mockResolvedValueOnce(result);
+    const authority = vi.fn();
+    await expect(executeHostApi('api.plugin', op, args, manifest, authority)).resolves.toEqual(result);
+    expect(facade).toHaveBeenCalledExactlyOnceWith('api.plugin', args, expect.any(Function));
+    const guard = facade.mock.calls[0][2] as () => void;
+    guard();
+    expect(authority).toHaveBeenCalledTimes(2);
+    manifest.serial!.portWhitelist = [];
+    expect(guard).toThrow('空数组');
+    manifest.serial!.portWhitelist = ['COM3'];
+  });
+  it('rejects absent manifests, disallowed ports and retired callers before dispatch', async () => {
+    await expect(executeHostApi('api.plugin', 'serial.open', { portId: 'COM3' })).rejects.toThrow('manifest');
+    await expect(executeHostApi('api.plugin', 'serial.close', { portId: 'COM9' }, manifest)).rejects.toThrow('portWhitelist');
+    await expect(executeHostApi('api.plugin', 'serial.open', { portId: 'COM3' }, manifest,
+      () => { throw new Error('retired'); })).rejects.toThrow('retired');
+    expect(serialOpen).not.toHaveBeenCalled();
+    expect(serialClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('host API minimal file saves', () => {
+  it('exports text and exact bytes only within a picked grant and returns native metadata', async () => {
+    const result = { path: 'C:\\exports\\deep\\report.bin', bytesWritten: 3 };
+    exportFile.mockResolvedValue(result);
+    const authority = vi.fn();
+    await expect(executeHostApi('api.plugin', 'fs.exportFile', { grantId: 'g', rel: 'deep/report.txt', content: '' }, null, authority)).resolves.toEqual(result);
+    expect(exportFile).toHaveBeenLastCalledWith('api.plugin', 'g', 'deep/report.txt', '', undefined);
+    expect(authority).toHaveBeenCalledTimes(2);
+    await executeHostApi('api.plugin', 'fs.exportFile', { grantId: 'g', rel: 'report.bin', bytes: new Uint8Array([0, 255, 128]).buffer });
+    expect(exportFile).toHaveBeenLastCalledWith('api.plugin', 'g', 'report.bin', undefined, 'AP+A');
+    await executeHostApi('api.plugin', 'fs.exportFile', { grantId: 'g', rel: 'empty.bin', bytes: new Uint8Array() });
+    expect(exportFile).toHaveBeenLastCalledWith('api.plugin', 'g', 'empty.bin', undefined, '');
+  });
+  it.each(['../outside', '/absolute', 'C:\\outside', '\\\\server\\share', '.', '', 'x\0y'])('rejects invalid export paths before dispatch: %j', async rel => {
+    await expect(executeHostApi('api.plugin', 'fs.exportFile', { grantId: 'g', rel, content: 'x' })).rejects.toThrow();
+    expect(exportFile).not.toHaveBeenCalled();
+  });
+  it('rejects invalid payloads and unsupported export operations without broadening legacy writes', async () => {
+    for (const invalid of [{}, { content: 'x', bytes: new Uint8Array() }, { content: 3 }, { bytes: [0] }, { content: '', mode: 'append' }, { content: '', path: 'C:\\target' }]) {
+      await expect(executeHostApi('api.plugin', 'fs.exportFile', { grantId: 'g', rel: 'report', ...invalid })).rejects.toThrow();
+    }
+    expect(exportFile).not.toHaveBeenCalled();
+    expect(writeDirectoryFile).not.toHaveBeenCalled();
+  });
+  it('uses a fresh Save As with basename hints, lossless bytes and cancellation distinct from empty files', async () => {
+    saveFile.mockResolvedValueOnce({ path: 'D:\\chosen.bin', bytesWritten: 3 }).mockResolvedValueOnce(null);
+    const options = { title: 'Save report', defaultFileName: 'report.bin', filters: [{ name: 'Binary', extensions: ['bin'] }] };
+    await expect(executeHostApi('api.plugin', 'fs.saveFile', { bytes: new Uint8Array([0, 255, 128]), options })).resolves.toEqual({ path: 'D:\\chosen.bin', bytesWritten: 3 });
+    expect(saveFile).toHaveBeenLastCalledWith('api.plugin', undefined, 'AP+A', options);
+    await expect(executeHostApi('api.plugin', 'fs.saveFile', { content: '' })).resolves.toBeNull();
+    expect(saveFile).toHaveBeenLastCalledWith('api.plugin', '', undefined, { title: undefined, defaultFileName: undefined, filters: undefined });
+  });
+  it.each([
+    { path: 'C:\\target', content: 'x' },
+    { content: 'x', options: { defaultPath: 'C:\\target' } },
+    { content: 'x', options: { defaultFileName: '../target' } },
+    { content: 'x', options: { defaultFileName: 'C:\\target' } },
+    { content: 'x', options: { defaultFileName: '..' } },
+    { content: 'x', options: { defaultFileName: 'x'.repeat(256) } },
+    { content: 'x', options: { title: 'x'.repeat(257) } },
+    { content: 'x', options: { title: 'forged\ntitle' } },
+    { content: 'x', options: { filters: [{ name: 'x', extensions: ['x'.repeat(129)] }] } },
+    { content: 'x', options: { filters: [{ name: 'x', extensions: ['../txt'] }] } },
+    { content: 'x', options: [] },
+  ])('rejects unsupported Save As paths and malformed hints before showing a dialog: %j', async args => {
+    await expect(executeHostApi('api.plugin', 'fs.saveFile', args)).rejects.toThrow();
+    expect(saveFile).not.toHaveBeenCalled();
+  });
+  it('releases dialog slots after native failures and refuses revoked results', async () => {
+    saveFile.mockRejectedValue(new Error('native write failed'));
+    for (let index = 0; index < 9; index++) {
+      await expect(executeHostApi('api.plugin', 'fs.saveFile', { content: 'x' })).rejects.toThrow('native write failed');
+    }
+    exportFile.mockResolvedValueOnce({ path: 'a', bytesWritten: 1 });
+    saveFile.mockResolvedValueOnce({ path: 'b', bytesWritten: 1 });
+    for (const op of ['fs.exportFile', 'fs.saveFile']) {
+      let calls = 0;
+      const authority = () => { if (++calls > 1) throw new Error('permission revoked'); };
+      const args = op === 'fs.exportFile' ? { grantId: 'g', rel: 'a', content: 'x' } : { content: 'x' };
+      await expect(executeHostApi('api.plugin', op, args, null, authority)).rejects.toThrow('permission revoked');
+    }
   });
 });
 

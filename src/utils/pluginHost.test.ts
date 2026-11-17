@@ -219,6 +219,28 @@ describe('PluginSession worker lifetime', () => {
     session.stop();
   });
 
+  it.each([
+    ['serial.open', 'serial:control'], ['serial.close', 'serial:control'],
+    ['fs.exportFile', 'fs:export-dir'], ['fs.saveFile', 'fs:save'],
+  ])('keeps %s pending without a host deadline and drops results after revocation', async (op, permission) => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: [permission] }] });
+    const deferred = deferredResult<unknown>();
+    vi.mocked(executeHostApi).mockImplementation(() => deferred.promise);
+    const session = new PluginSession(pluginId);
+    await session.start();
+    const worker = TestWorker.created[0];
+    worker.emit({ seq: 1, op, args: {} });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(worker.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: false, error: 'plugin RPC timed out' });
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: [] }] });
+    deferred.resolve({ path: 'private', connectionGeneration: 7 });
+    for (let index = 0; index < 5; index++) await Promise.resolve();
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: false, error: expect.stringContaining(permission) });
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 1, ok: true }));
+    session.stop();
+  });
+
   it('keeps slow file reads and user-controlled dialogs alive beyond ordinary deadlines', async () => {
     vi.useFakeTimers();
     useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request', 'fs:open', 'fs:assets'] }] });

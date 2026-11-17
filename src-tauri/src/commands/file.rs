@@ -242,7 +242,7 @@ pub async fn pick_text_file_and_write(
 /// 此命令在阻塞线程中弹出文件选择器并读取用户选择的原始字节，避免 JS
 /// `open()` → `read_file_bytes(path)` 之间出现可伪造的任意路径读取入口。
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginFileFilter {
     name: String,
@@ -299,6 +299,19 @@ pub(crate) struct PluginDirectoryEntry {
 pub struct PluginDirectoryWriteResult {
     path: String,
     bytes_written: u64,
+}
+
+/// Options for the plugin-owned Save As picker. The plugin never supplies a
+/// destination path; only presentation hints cross the IPC boundary.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginSaveFileOptions {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    default_file_name: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<PluginFileFilter>>,
 }
 
 fn read_picked_file(path: PathBuf) -> Result<PluginPickedFile, CommandError> {
@@ -726,6 +739,70 @@ fn stat_plugin_directory_entry(
     Ok(make_entry(name, rel_text.to_string(), &metadata))
 }
 
+fn decode_plugin_file_bytes(
+    content: Option<String>,
+    base64: Option<String>,
+) -> Result<Vec<u8>, CommandError> {
+    match (content, base64) {
+        (Some(content), None) => Ok(content.into_bytes()),
+        (None, Some(base64)) => base64::engine::general_purpose::STANDARD
+            .decode(base64)
+            .map_err(|e| CommandError::Other(format!("base64 无效: {e}"))),
+        (Some(_), Some(_)) => Err(CommandError::Other(
+            "content 与 base64 不能同时提供".into(),
+        )),
+        (None, None) => Err(CommandError::Other(
+            "必须提供 content 或 base64 之一".into(),
+        )),
+    }
+}
+
+fn validate_save_file_options(options: &PluginSaveFileOptions) -> Result<(), CommandError> {
+    if options
+        .title
+        .as_deref()
+        .is_some_and(|title| title.encode_utf16().count() > 256 || title.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}'))
+    {
+        return Err(CommandError::Other("Save As 标题超过 256 个 UTF-16 单元或含控制字符".into()));
+    }
+    if let Some(name) = options.default_file_name.as_deref() {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.encode_utf16().count() > 255
+            || name.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
+            || name.chars().any(|c| matches!(c, '/' | '\\' | ':'))
+        {
+            return Err(CommandError::Other("Save As 默认文件名无效".into()));
+        }
+    }
+    if let Some(filters) = options.filters.as_ref() {
+        if filters.len() > 32 {
+            return Err(CommandError::Other("Save As 文件过滤器过多".into()));
+        }
+        for filter in filters {
+            if filter.name.encode_utf16().count() > 128
+                || filter.name.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
+                || filter.extensions.len() > 64
+                || filter
+                    .extensions
+                    .iter()
+                    .any(|ext| ext.is_empty() || ext.encode_utf16().count() > 128 || ext.chars().any(|c| c <= '\u{1f}' || matches!(c, '/' | '\\' | ':')))
+            {
+                return Err(CommandError::Other("Save As 文件过滤器无效".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn map_plugin_write_error(error: String) -> CommandError {
+    error
+        .strip_prefix("PLUGIN_AUTHORITY:")
+        .map(|message| CommandError::Other(message.to_string()))
+        .unwrap_or(CommandError::Io(error))
+}
+
 fn write_plugin_directory_file(
     root: &Path,
     rel: &Path,
@@ -733,74 +810,18 @@ fn write_plugin_directory_file(
     mode: &str,
     create_parents: bool,
 ) -> Result<PluginDirectoryWriteResult, CommandError> {
-    let (parent, target) = resolve_directory_parent(root, rel, create_parents)?;
-    if let Some(metadata) = existing_target_metadata(&target)? {
-        if !metadata.is_file() {
-            return Err(CommandError::Other("目标不是普通文件".into()));
-        }
-    }
-    let bytes_written = bytes.len() as u64;
-    match mode {
-        "overwrite" => {
-            let temporary = parent.join(format!(
-                ".hypercom-plugin-write-{}.tmp",
-                uuid::Uuid::new_v4()
-            ));
-            let result = (|| -> std::io::Result<()> {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)?;
-                file.write_all(bytes)?;
-                file.flush()?;
-                file.sync_all()?;
-                drop(file);
-                crate::plugin::transaction::replace_file(&temporary, &target)?;
-                crate::plugin::transaction::sync_dir(&parent)
-            })();
-            if result.is_err() {
-                let _ = std::fs::remove_file(&temporary);
-            }
-            result.map_err(|e| CommandError::Io(format!("写入目录文件失败: {e}")))?;
-        }
-        "append" => {
-            use std::io::Write;
-            let mut open = std::fs::OpenOptions::new();
-            open.append(true).create(true);
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                open.custom_flags(
-                    windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
-                );
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-            }
-            let mut file = open
-                .open(&target)
-                .map_err(|e| CommandError::Io(format!("打开目录文件失败: {e}")))?;
-            let metadata = file
-                .metadata()
-                .map_err(|e| CommandError::Io(format!("目录文件不可达: {e}")))?;
-            if !metadata.is_file() || crate::plugin::is_link_or_reparse(&metadata) {
-                return Err(CommandError::Other("目标不是普通文件".into()));
-            }
-            file.write_all(bytes)
-                .map_err(|e| CommandError::Io(format!("写入目录文件失败: {e}")))?;
-            file.flush()
-                .map_err(|e| CommandError::Io(format!("刷新目录文件失败: {e}")))?;
-            file.sync_all()
-                .map_err(|e| CommandError::Io(format!("同步目录文件失败: {e}")))?;
-        }
-        _ => return Err(CommandError::Other("mode 必须为 overwrite 或 append".into())),
-    }
+    let rel_text = rel.to_string_lossy().replace('\\', "/");
+    let written = crate::plugin::fs_access::write_directory_file(
+        root,
+        &rel_text,
+        bytes,
+        mode,
+        create_parents,
+    )
+    .map_err(CommandError::Io)?;
     Ok(PluginDirectoryWriteResult {
-        path: target.display().to_string(),
-        bytes_written,
+        path: written.path.display().to_string(),
+        bytes_written: written.bytes_written,
     })
 }
 
@@ -906,7 +927,7 @@ pub async fn plugin_pick_directory(
     let install_generation = plugin_any_permission_generation(
         &state,
         &plugin_id,
-        &["fs:open-dir", "fs:write-dir"],
+        &["fs:open-dir", "fs:write-dir", "fs:export-dir"],
     )?;
     let dialog_permit = plugin_dialog_budget(&plugin_id)?
         .try_acquire_owned()
@@ -950,7 +971,7 @@ pub async fn plugin_pick_directory(
         let current_generation = plugin_any_permission_generation(
             &state,
             &plugin_id,
-            &["fs:open-dir", "fs:write-dir"],
+            &["fs:open-dir", "fs:write-dir", "fs:export-dir"],
         )?;
         if current_generation != install_generation {
             return Err(CommandError::Other("插件目录权限已撤销".into()));
@@ -1159,6 +1180,161 @@ pub async fn plugin_write_directory_file(
     })
     .await
     .map_err(|e| CommandError::Other(format!("目录文件写入任务失败: {e}")))?
+}
+
+/// Export one file below a user-selected directory grant. This is deliberately
+/// narrower than the historical fs:write-dir API: only overwrite of a relative
+/// file is exposed; deletion, rename, append and reads remain separate grants.
+#[tauri::command]
+pub async fn plugin_export_file(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    content: Option<String>,
+    base64: Option<String>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<PluginDirectoryWriteResult, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件文件导出仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:export-dir")?;
+    let (rel, rel_text) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
+    }
+    let bytes = decode_plugin_file_bytes(content, base64)?;
+    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    let app = window.app_handle().clone();
+    let plugin_for_auth = plugin_id.clone();
+    let grant_for_auth = grant_id.clone();
+    let generation_for_auth = install_generation.clone();
+    let written = tokio::task::spawn_blocking(move || {
+        let auth = || {
+            let current = plugin_permission_generation(
+                &app.state::<crate::AppState>(),
+                &plugin_for_auth,
+                "fs:export-dir",
+            )?;
+            if current != generation_for_auth {
+                return Err(CommandError::Other("插件文件导出权限已撤销".into()));
+            }
+            directory_grant_root(&plugin_for_auth, &grant_for_auth, &generation_for_auth)?;
+            Ok(())
+        };
+        crate::plugin::fs_access::write_directory_file_authorized(
+            &root,
+            &rel_text,
+            &bytes,
+            "overwrite",
+            true,
+            || auth().map_err(|error| format!("PLUGIN_AUTHORITY:{error}")),
+        )
+        .map_err(map_plugin_write_error)
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("插件文件导出任务失败: {e}")))??;
+    let current = plugin_permission_generation(&state, &plugin_id, "fs:export-dir")?;
+    if current != install_generation {
+        return Err(CommandError::Other("插件文件导出权限已撤销".into()));
+    }
+    directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    Ok(PluginDirectoryWriteResult {
+        path: written.path.display().to_string(),
+        bytes_written: written.bytes_written,
+    })
+}
+
+/// Save one plugin-owned payload through a native Save As picker. The plugin
+/// supplies presentation hints and bytes only; the absolute destination path
+/// is returned by the host picker and is never accepted from IPC.
+#[tauri::command]
+pub async fn plugin_save_file(
+    plugin_id: String,
+    content: Option<String>,
+    base64: Option<String>,
+    options: Option<PluginSaveFileOptions>,
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Option<PluginDirectoryWriteResult>, CommandError> {
+    if window.label() != "main" {
+        return Err(CommandError::Other("插件文件保存仅允许主窗口调用".into()));
+    }
+    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:save")?;
+    let options = options.unwrap_or_default();
+    validate_save_file_options(&options)?;
+    let bytes = decode_plugin_file_bytes(content, base64)?;
+    let dialog_permit = plugin_dialog_budget(&plugin_id)?
+        .try_acquire_owned()
+        .map_err(|_| CommandError::Other("插件文件保存资源已达上限".into()))?;
+    let plugin_for_auth = plugin_id.clone();
+    let generation_for_auth = install_generation.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _dialog_permit = dialog_permit;
+        use tauri_plugin_dialog::DialogExt;
+        let mut dialog = app.dialog().file();
+        if let Some(title) = options.title {
+            dialog = dialog.set_title(title);
+        }
+        if let Some(name) = options.default_file_name {
+            dialog = dialog.set_file_name(name);
+        }
+        if let Some(filters) = options.filters {
+            for filter in filters {
+                let exts: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
+                dialog = dialog.add_filter(filter.name, &exts);
+            }
+        }
+        dialog = dialog.add_filter("All files", &["*"]);
+        let Some(picked) = dialog.blocking_save_file() else {
+            return Ok(None);
+        };
+        let target = picked
+            .into_path()
+            .map_err(|e| CommandError::Other(format!("Save As 目标路径不可用: {e}")))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| CommandError::Other("Save As 目标没有父目录".into()))?
+            .to_path_buf();
+        let name = target
+            .file_name()
+            .ok_or_else(|| CommandError::Other("Save As 目标文件名无效".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let app_for_auth = app.clone();
+        let auth = || {
+            let current = plugin_permission_generation(
+                &app_for_auth.state::<crate::AppState>(),
+                &plugin_for_auth,
+                "fs:save",
+            )?;
+            if current != generation_for_auth {
+                return Err(CommandError::Other("插件文件保存权限已撤销".into()));
+            }
+            Ok(())
+        };
+        let written = crate::plugin::fs_access::write_directory_file_authorized(
+            &parent,
+            &name,
+            &bytes,
+            "overwrite",
+            false,
+            || auth().map_err(|error| format!("PLUGIN_AUTHORITY:{error}")),
+        )
+        .map_err(map_plugin_write_error)?;
+        Ok(Some(PluginDirectoryWriteResult {
+            path: target.display().to_string(),
+            bytes_written: written.bytes_written,
+        }))
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("插件 Save As 任务失败: {e}")))??;
+    let current = plugin_permission_generation(&state, &plugin_id, "fs:save")?;
+    if current != install_generation {
+        return Err(CommandError::Other("插件文件保存权限已撤销".into()));
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1514,9 +1690,39 @@ mod tests {
         read_plugin_directory_file, remove_plugin_directory_entry, rename_plugin_directory_entry,
         revoke_plugin_directory_grants, sanitize_directory_rel, stat_plugin_directory_entry,
         write_plugin_directory_file, plugin_dialog_budget, PLUGIN_DIALOG_BUDGETS,
+        PluginSaveFileOptions, validate_save_file_options,
     };
     #[cfg(unix)]
     use crate::commands::file::{reject_linked_directory_source, resolve_directory_target};
+
+    #[test]
+    fn plugin_save_options_use_camel_case_and_reject_unsafe_names() {
+        let options: PluginSaveFileOptions = serde_json::from_value(serde_json::json!({
+            "title": "Export",
+            "defaultFileName": "report.txt",
+            "filters": [{ "name": "Text", "extensions": ["txt"] }]
+        }))
+        .unwrap();
+        validate_save_file_options(&options).unwrap();
+        assert!(serde_json::from_value::<PluginSaveFileOptions>(serde_json::json!({
+            "default_file_name": "wrong.txt"
+        }))
+        .is_err());
+        for name in ["../outside", "a/b", "a\\\\b", "a:b", ".", "..", "bad\\u{0}"] {
+            let options = PluginSaveFileOptions {
+                title: None,
+                default_file_name: Some(name.into()),
+                filters: None,
+            };
+            assert!(validate_save_file_options(&options).is_err(), "unsafe name: {name:?}");
+        }
+        let options = PluginSaveFileOptions {
+            title: None,
+            default_file_name: Some("x".repeat(256)),
+            filters: None,
+        };
+        assert!(validate_save_file_options(&options).is_err());
+    }
 
     #[test]
     fn legacy_directory_raw_frame_contains_unencoded_bytes_and_display_path() {

@@ -12,7 +12,7 @@
  * - 串口 RX 行经 pluginObserver 旁路总线接入（`rx.onLine` 订阅注册在
  *   pluginObserver 装配层，不在此层重复实现）。
  */
-import { pluginService, fileService } from '../services/tauri';
+import { pluginService, fileService, serialService } from '../services/tauri';
 import { readText as clipboardReadText, writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { sendToPort } from '../hooks/useSerialSend';
 import { useAppStore } from '../stores/useAppStore';
@@ -30,6 +30,7 @@ import { exportPluginPanel } from './pluginPanelExport';
 import { executePluginViewApi } from './pluginViewRuntime';
 import { executePluginHttp } from './pluginHttp';
 import { executePluginShell } from './pluginShell';
+import { executePluginSerialOpen, executePluginSerialClose } from './serialPlugin';
 import { acquirePluginDialog } from './pluginDialogBudget';
 import { decodeBytes } from './lineText';
 import type { PluginFsContext } from './pluginFs';
@@ -45,6 +46,8 @@ export interface PluginPortView {
   type: string;
   mode?: string;
   baudRate?: number;
+  /** Authoritative native generation; close uses this as a CAS, not as port identity. */
+  connectionGeneration: number;
 }
 
 function portView(port: {
@@ -54,14 +57,18 @@ function portView(port: {
   type: string;
   mode?: string;
   baudRate?: number;
+  /** Authoritative native generation; close uses this as a CAS, not as port identity. */
+  connectionGeneration: number;
 }): PluginPortView {
   return {
     id: port.id,
     name: port.name,
     status: port.status,
     type: port.type,
-    mode: port.mode,
+    // Display mode is host UI metadata; native remains authoritative for status/CAS.
+    mode: useAppStore.getState().ports.find(item => item.id === port.id)?.mode ?? port.mode,
     baudRate: port.baudRate,
+    connectionGeneration: port.connectionGeneration,
   };
 }
 
@@ -175,9 +182,9 @@ function fileBytes(base64: string): Uint8Array {
 
 /**
  * 执行一次宿主 API 调用。返回结构化克隆结果（文件二进制为 Uint8Array）。
- * 权限已在调用前过滤（本层不做权限判断——由 PluginSession 负责，评审 v2 P7）。
- * `manifest` 是该插件的 wire 视图（PluginSession 启动时缓存）——port/URL 作用域
- * 校验（P10）在此消费；manifest 不可得时按 null 处理（作用域声明不存在 = 不限制）。
+ * PluginSession 调用前/交付前过滤权限；等待中的副作用通过 beforeSend/live facade 复核。
+ * `manifest` 是该插件启动时的 wire 视图，串口作用域在本层消费并于控制入 lane 时复核；
+ * 缺少 manifest 时不能验证串口作用域，按拒绝处理。原生层仍执行权威授权和路径/CAS 检查。
  */
 export async function executeHostApi(
   pluginId: string,
@@ -231,13 +238,25 @@ export async function executeHostApi(
     case 'tabs.setTitle':
     case 'tabs.list':
       return executePluginViewApi(pluginId, op, args, manifest, beforeSend);
-    case 'ports.list': {
-      const ports = useAppStore.getState().ports;
-      return ports.map(portView);
-    }
+    case 'ports.list':
     case 'ports.status': {
-      const id = requireString(args, 'portId');
-      const port = useAppStore.getState().ports.find((p) => p.id === id);
+      const entry = useAppStore.getState().config.pluginConfigs?.find(item => item.id === pluginId);
+      if (!entry?.enabled || !entry.installGeneration) throw new Error('plugin disabled');
+      const generation = entry.installGeneration;
+      const assertAuthority = (): void => {
+        beforeSend?.();
+        const current = useAppStore.getState().config.pluginConfigs?.find(item => item.id === pluginId);
+        if (!current?.enabled || current.installGeneration !== generation) throw new Error('plugin disabled');
+      };
+      assertAuthority();
+      if (op === 'ports.list') {
+        const ports = await serialService.pluginSerialList(pluginId, generation);
+        assertAuthority();
+        return ports.map(portView);
+      }
+      const portId = requireString(args, 'portId');
+      const port = await serialService.pluginSerialStatus(pluginId, generation, portId);
+      assertAuthority();
       return port ? portView(port) : null;
     }
     case 'terminal.append': {
@@ -251,6 +270,19 @@ export async function executeHostApi(
         isHex: false,
       });
       return null;
+    }
+    case 'serial.open':
+    case 'serial.close': {
+      const portId = requireString(args, 'portId');
+      const assertAuthority = (): void => {
+        beforeSend?.();
+        const denied = checkPortScope(manifest, portId);
+        if (denied) throw new Error(denied);
+      };
+      assertAuthority();
+      return op === 'serial.open'
+        ? executePluginSerialOpen(pluginId, args, assertAuthority)
+        : executePluginSerialClose(pluginId, args, assertAuthority);
     }
     case 'serial.send': {
       const a = requireObject(args);
@@ -296,6 +328,50 @@ export async function executeHostApi(
             return binary ? { path, bytes } : { path, content: decodeBytes(bytes, encoding) };
           }),
         };
+      } finally {
+        releaseDialog();
+      }
+    }
+    case 'fs.exportFile': {
+      const a = requireObject(args);
+      requireOnlyFields(a, ['grantId', 'rel', 'content', 'bytes'], op);
+      const grantId = requireGrantId(a);
+      const rel = requirePluginFsPath(requireString(a, 'rel'));
+      const normalized = rel.replace(/\\/g, '/');
+      const parts = normalized.split('/').filter(part => part && part !== '.');
+      if (!parts.length || normalized.startsWith('/') || /^[a-z]:/i.test(normalized) || parts.includes('..') || rel.includes('\0')) {
+        throw new Error('导出 rel 必须为授权目录内的相对路径');
+      }
+      const { content, base64 } = pluginFilePayload(a, op);
+      beforeSend?.();
+      const result = await fileService.exportPluginFile(pluginId, grantId, rel, content, base64);
+      beforeSend?.();
+      return { path: result.path, bytesWritten: result.bytesWritten };
+    }
+    case 'fs.saveFile': {
+      const a = requireObject(args);
+      requireOnlyFields(a, ['content', 'bytes', 'options'], op);
+      const { content, base64 } = pluginFilePayload(a, op);
+      const options = requireObject(a.options ?? {});
+      requireOnlyFields(options, ['title', 'defaultFileName', 'filters'], 'fs.saveFile options');
+      const title = options.title === undefined ? undefined
+        : requireMaxChars(requireString(options, 'title'), 'title', MAX_PLUGIN_DIALOG_TITLE_CHARS);
+      const defaultFileName = options.defaultFileName === undefined ? undefined
+        : requireMaxChars(requireString(options, 'defaultFileName'), 'defaultFileName', 255);
+      if (defaultFileName !== undefined && (defaultFileName === '.' || defaultFileName === '..' || /[\\/:\u0000-\u001f\u007f]/.test(defaultFileName))) {
+        throw new Error('defaultFileName 必须为文件名，不能包含目录路径');
+      }
+      const filters = dialogFilters(options.filters);
+      if (title !== undefined && /[\u0000-\u001f\u007f]/.test(title)) throw new Error('Save As title 不能包含控制字符');
+      if (filters?.some(filter => filter.extensions.some(extension => /[\\/:\u0000-\u001f\u007f]/.test(extension)))) {
+        throw new Error('Save As filters 扩展名不能包含路径或控制字符');
+      }
+      const releaseDialog = acquirePluginDialog(pluginId);
+      try {
+        beforeSend?.();
+        const result = await fileService.savePluginFile(pluginId, content, base64, { title, defaultFileName, filters });
+        beforeSend?.();
+        return result === null ? null : { path: result.path, bytesWritten: result.bytesWritten };
       } finally {
         releaseDialog();
       }
@@ -561,6 +637,18 @@ export async function executeHostApi(
 }
 
 // ==================== 参数校验辅助（宿主侧最后防线） ====================
+
+function requireOnlyFields(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
+  if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error(`${field} 含不支持的参数`);
+}
+
+/** Whole-file data only: no new content-size quota or implicit text conversion. */
+function pluginFilePayload(args: Record<string, unknown>, op: string): { content: string | undefined; base64: string | undefined } {
+  if (args.content !== undefined && args.bytes !== undefined) throw new Error(`${op} 的 content 与 bytes 互斥`);
+  if (typeof args.content === 'string') return { content: args.content, base64: undefined };
+  if (args.content === undefined && args.bytes !== undefined) return { content: undefined, base64: bytesToBase64(args.bytes) };
+  throw new Error(`${op} 需要 content 字符串或 bytes 二进制`);
+}
 
 function requireSafeInteger(value: unknown, field: string, min: number, max = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {

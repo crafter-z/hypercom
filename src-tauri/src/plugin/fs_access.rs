@@ -7,7 +7,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use super::sanitize_plugin_rel_path;
@@ -217,6 +217,226 @@ mod platform {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
+    fn create_directory_at(parent: &File, name: &OsStr) -> Result<(), String> {
+        let name = CString::new(name.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
+        let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o755) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Ok(());
+        }
+        Err(io_error("创建插件目录失败", error))
+    }
+
+    fn rename_at(parent: &File, source: &OsStr, target: &OsStr) -> Result<(), String> {
+        let source = CString::new(source.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
+        let target = CString::new(target.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
+        if unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                target.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(io_error("提交插件文件失败", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn remove_at(parent: &File, name: &OsStr) {
+        if let Ok(name) = CString::new(name.as_bytes()) {
+            unsafe {
+                libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0);
+            }
+        }
+    }
+
+    fn open_parent(
+        root: &Path,
+        rel: &Path,
+        create_parents: bool,
+    ) -> Result<(File, std::ffi::OsString), String> {
+        let mut components = rel.components();
+        let last = components
+            .next_back()
+            .ok_or_else(|| "文件相对路径不能为空".to_string())?;
+        let last = require_normal_component(last)?.to_os_string();
+        let mut parent = open_root(root)?;
+        for component in components {
+            let name = require_normal_component(component)?;
+            match open_child_dir(&parent, name) {
+                Ok(child) => parent = child,
+                Err(error) if create_parents && error == "PLUGIN_FILE_NOT_FOUND" => {
+                    create_directory_at(&parent, name)?;
+                    parent = open_child_dir(&parent, name)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok((parent, last))
+    }
+
+    fn open_write_at(parent: &File, name: &OsStr, append: bool) -> Result<File, String> {
+        let name = CString::new(name.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
+        // O_NONBLOCK keeps a FIFO swapped in between the type check and this
+        // open from blocking a host worker forever. It is a no-op for regular files.
+        let mut flags = libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+        if append {
+            flags |= libc::O_APPEND;
+        }
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(not_found_or(
+                "打开插件目标失败",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn existing_target(parent: &File, name: &OsStr) -> Result<Option<File>, String> {
+        match open_at(parent, name, false) {
+            Ok(file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|error| io_error("插件目标句柄不可读", error))?;
+                if !metadata.is_file() {
+                    return Err("目标不是普通文件".into());
+                }
+                if metadata.nlink() != 1 {
+                    return Err("插件导出目标不得是硬链接".into());
+                }
+                Ok(Some(file))
+            }
+            Err(error) if error == "PLUGIN_FILE_NOT_FOUND" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn write_file(mut file: File, bytes: &[u8], append: bool) -> Result<(), String> {
+        let metadata = file
+            .metadata()
+            .map_err(|error| io_error("插件目标句柄不可读", error))?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err("插件导出目标不得是硬链接或特殊文件".into());
+        }
+        if !append {
+            file.set_len(0)
+                .map_err(|error| io_error("清空插件目标失败", error))?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| io_error("定位插件目标失败", error))?;
+        }
+        file.write_all(bytes)
+            .map_err(|error| io_error("写入插件文件失败", error))?;
+        file.flush()
+            .map_err(|error| io_error("刷新插件文件失败", error))?;
+        file.sync_all()
+            .map_err(|error| io_error("同步插件文件失败", error))?;
+        Ok(())
+    }
+
+    pub fn write_regular_mode(
+        root: &Path,
+        rel: &Path,
+        bytes: &[u8],
+        mode: &str,
+        create_parents: bool,
+        before_commit: &dyn Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (parent, name) = open_parent(root, rel, create_parents)?;
+        if mode == "append" {
+            let (file, created) = if existing_target(&parent, &name)?.is_some() {
+                (open_write_at(&parent, &name, true)?, false)
+            } else {
+                let c_name = CString::new(name.as_bytes())
+                    .map_err(|_| "路径段含 NUL".to_string())?;
+                let fd = unsafe {
+                    libc::openat(
+                        parent.as_raw_fd(),
+                        c_name.as_ptr(),
+                        libc::O_WRONLY
+                            | libc::O_CREAT
+                            | libc::O_EXCL
+                            | libc::O_CLOEXEC
+                            | libc::O_NOFOLLOW,
+                        0o644,
+                    )
+                };
+                if fd < 0 {
+                    return Err(not_found_or(
+                        "创建插件目标失败",
+                        std::io::Error::last_os_error(),
+                    ));
+                }
+                (unsafe { File::from_raw_fd(fd) }, true)
+            };
+            if let Err(error) = before_commit() {
+                drop(file);
+                if created {
+                    remove_at(&parent, &name);
+                }
+                return Err(error);
+            }
+            write_file(file, bytes, true)?;
+        } else if mode == "overwrite" {
+            // Write to an O_EXCL temporary opened relative to the pinned parent.
+            // The final rename is also relative to that handle, so a root/path
+            // replacement cannot redirect the write outside the selected tree.
+            let temp_name = std::ffi::OsString::from(format!(
+                ".hypercom-plugin-write-{}.tmp",
+                uuid::Uuid::new_v4()
+            ));
+            let c_name = CString::new(temp_name.as_bytes())
+                .map_err(|_| "临时文件名无效".to_string())?;
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    c_name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_CLOEXEC
+                        | libc::O_NOFOLLOW,
+                    0o644,
+                )
+            };
+            if fd < 0 {
+                return Err(io_error("创建插件临时文件失败", std::io::Error::last_os_error()));
+            }
+            let file = unsafe { File::from_raw_fd(fd) };
+            if let Err(error) = write_file(file, bytes, false) {
+                remove_at(&parent, &temp_name);
+                return Err(error);
+            }
+            if let Err(error) = existing_target(&parent, &name) {
+                remove_at(&parent, &temp_name);
+                return Err(error);
+            }
+            if let Err(error) = before_commit() {
+                remove_at(&parent, &temp_name);
+                return Err(error);
+            }
+            if let Err(error) = existing_target(&parent, &name) {
+                remove_at(&parent, &temp_name);
+                return Err(error);
+            }
+            if let Err(error) = rename_at(&parent, &temp_name, &name) {
+                remove_at(&parent, &temp_name);
+                return Err(error);
+            }
+            parent
+                .sync_all()
+                .map_err(|error| io_error("同步插件目录失败", error))?;
+        } else {
+            return Err("mode 必须为 overwrite 或 append".into());
+        }
+        Ok(())
+    }
+
     pub fn open_root(root: &Path) -> Result<File, String> {
         let mut current = if root.is_absolute() {
             let slash = CString::new("/").expect("literal");
@@ -400,6 +620,12 @@ mod platform {
     const STATUS_NO_MORE_FILES: i32 = 0x8000_0006u32 as i32;
     const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005u32 as i32;
     const FILE_ID_BOTH_DIRECTORY_INFORMATION: u32 = 37;
+    const FILE_CREATE: u32 = 2;
+    const FILE_RENAME_INFORMATION: u32 = 10;
+    const FILE_DISPOSITION_INFORMATION: u32 = 13;
+    const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034u32 as i32;
+    const STATUS_OBJECT_PATH_NOT_FOUND: i32 = 0xC000_003Au32 as i32;
+    const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035u32 as i32;
 
     #[repr(C)]
     struct UnicodeString {
@@ -451,6 +677,13 @@ mod platform {
             restart_scan: u8,
         ) -> i32;
         fn RtlNtStatusToDosError(status: i32) -> u32;
+        fn NtSetInformationFile(
+            file_handle: *mut std::ffi::c_void,
+            io_status: *mut IoStatusBlock,
+            file_information: *mut std::ffi::c_void,
+            length: u32,
+            information_class: u32,
+        ) -> i32;
     }
 
     pub struct DirectoryName {
@@ -607,6 +840,9 @@ mod platform {
 
     fn open_anchor_path(path: &Path) -> Result<File, String> {
         let mut options = std::fs::OpenOptions::new();
+        // Read-only anchor: child handles carry their own write access, and a
+        // volume root like C:\ is not writable for standard users. Requiring
+        // write here would break every plugin file operation for them.
         options
             .read(true)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -674,6 +910,278 @@ mod platform {
             ));
         }
         Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    fn open_relative_write(
+        parent: &File,
+        name: &OsStr,
+        directory: bool,
+        create: bool,
+    ) -> Result<File, String> {
+        let mut wide: Vec<u16> = name.encode_wide().collect();
+        if wide.is_empty()
+            || wide.len() > u16::MAX as usize / 2
+            || wide.iter().any(|value| matches!(*value, 0 | 47 | 92 | 58))
+        {
+            return Err("插件路径段无效".into());
+        }
+        let mut unicode = UnicodeString {
+            length: (wide.len() * 2) as u16,
+            maximum_length: (wide.len() * 2) as u16,
+            buffer: wide.as_mut_ptr(),
+        };
+        let mut attributes = ObjectAttributes {
+            length: std::mem::size_of::<ObjectAttributes>() as u32,
+            root: parent.as_raw_handle(),
+            name: &mut unicode,
+            attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+            security: std::ptr::null_mut(),
+            quality: std::ptr::null_mut(),
+        };
+        let mut status = IoStatusBlock { status: 0, information: 0 };
+        let mut handle = std::ptr::null_mut();
+        let options = FILE_OPEN_REPARSE_POINT
+            | SYNCHRONOUS_IO_NONALERT
+            | if directory {
+                FILE_DIRECTORY_FILE
+            } else {
+                FILE_NON_DIRECTORY_FILE
+            };
+        let result = unsafe {
+            NtCreateFile(
+                &mut handle,
+                // FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA plus
+                // attributes/synchronize; this handle never follows reparses.
+                0x0013_019F,
+                &mut attributes,
+                &mut status,
+                std::ptr::null_mut(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                if create { FILE_CREATE } else { FILE_OPEN },
+                options,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            if result == STATUS_OBJECT_NAME_NOT_FOUND || result == STATUS_OBJECT_PATH_NOT_FOUND {
+                return Err("PLUGIN_FILE_NOT_FOUND".into());
+            }
+            if result == STATUS_OBJECT_NAME_COLLISION && create && directory {
+                return Err("PLUGIN_FILE_EXISTS".into());
+            }
+            let code = unsafe { RtlNtStatusToDosError(result) } as i32;
+            return Err(io_error(
+                "打开插件写入路径失败",
+                std::io::Error::from_raw_os_error(code),
+            ));
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    fn create_directory_at(parent: &File, name: &OsStr) -> Result<(), String> {
+        match open_relative_write(parent, name, true, true) {
+            Ok(directory) => {
+                drop(directory);
+                Ok(())
+            }
+            Err(error) if error == "PLUGIN_FILE_EXISTS" => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_parent(
+        root: &Path,
+        rel: &Path,
+        create_parents: bool,
+    ) -> Result<(File, std::ffi::OsString), String> {
+        let mut components = rel.components();
+        let last = components
+            .next_back()
+            .ok_or_else(|| "文件相对路径不能为空".to_string())?;
+        let last = require_normal_component(last)?.to_os_string();
+        let mut parent = open_root(root)?;
+        for component in components {
+            let name = require_normal_component(component)?;
+            match open_relative_write(&parent, name, true, false) {
+                Ok(child) => {
+                    opened_identity(&child, true)?;
+                    parent = child;
+                }
+                Err(error) if create_parents && error == "PLUGIN_FILE_NOT_FOUND" => {
+                    create_directory_at(&parent, name)?;
+                    let child = open_relative_write(&parent, name, true, false)?;
+                    opened_identity(&child, true)?;
+                    parent = child;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok((parent, last))
+    }
+
+    fn regular_target(parent: &File, name: &OsStr) -> Result<Option<File>, String> {
+        match open_relative(parent, name, false) {
+            Ok(file) => {
+                let metadata = opened_identity(&file, false)?;
+                let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+                if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0
+                {
+                    return Err(io_error("读取插件目标身份失败", std::io::Error::last_os_error()));
+                }
+                if information.nNumberOfLinks != 1 {
+                    return Err("插件导出目标不得是硬链接".into());
+                }
+                if !metadata.is_file() {
+                    return Err("目标不是普通文件".into());
+                }
+                Ok(Some(file))
+            }
+            Err(error) if error == "PLUGIN_FILE_NOT_FOUND" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn delete_on_close(file: &File) {
+        let mut status = IoStatusBlock { status: 0, information: 0 };
+        let mut disposition = [1u8];
+        unsafe {
+            let _ = NtSetInformationFile(
+                file.as_raw_handle(),
+                &mut status,
+                disposition.as_mut_ptr().cast(),
+                disposition.len() as u32,
+                FILE_DISPOSITION_INFORMATION,
+            );
+        }
+    }
+
+    fn commit_relative(file: &File, parent: &File, name: &OsStr, replace: bool) -> Result<(), String> {
+        let wide: Vec<u16> = name.encode_wide().collect();
+        if wide.is_empty() || wide.len() > (u32::MAX as usize / 2) {
+            return Err("插件目标文件名过长".into());
+        }
+        #[repr(C)]
+        struct RenameInfo {
+            replace_if_exists: u8,
+            root_directory: *mut std::ffi::c_void,
+            file_name_length: u32,
+            file_name: [u16; 1],
+        }
+        let header = std::mem::size_of::<RenameInfo>() - std::mem::size_of::<u16>();
+        let mut bytes = vec![0u8; header + wide.len() * 2];
+        let info = bytes.as_mut_ptr().cast::<RenameInfo>();
+        unsafe {
+            (*info).replace_if_exists = u8::from(replace);
+            (*info).root_directory = parent.as_raw_handle();
+            (*info).file_name_length = (wide.len() * 2) as u32;
+            std::ptr::copy_nonoverlapping(
+                wide.as_ptr(),
+                (*info).file_name.as_mut_ptr(),
+                wide.len(),
+            );
+        }
+        let mut status = IoStatusBlock { status: 0, information: 0 };
+        let result = unsafe {
+            NtSetInformationFile(
+                file.as_raw_handle(),
+                &mut status,
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as u32,
+                FILE_RENAME_INFORMATION,
+            )
+        };
+        if result < 0 {
+            let code = unsafe { RtlNtStatusToDosError(result) } as i32;
+            return Err(io_error(
+                "提交插件文件失败",
+                std::io::Error::from_raw_os_error(code),
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_file(mut file: File, bytes: &[u8], append: bool) -> Result<(), String> {
+        let metadata = opened_identity(&file, false)?;
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+            return Err(io_error("读取插件目标身份失败", std::io::Error::last_os_error()));
+        }
+        if information.nNumberOfLinks != 1 || !metadata.is_file() {
+            return Err("插件导出目标不得是硬链接或特殊文件".into());
+        }
+        if !append {
+            file.set_len(0)
+                .map_err(|error| io_error("清空插件目标失败", error))?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| io_error("定位插件目标失败", error))?;
+        } else {
+            file.seek(SeekFrom::End(0))
+                .map_err(|error| io_error("定位插件目标末尾失败", error))?;
+        }
+        file.write_all(bytes)
+            .map_err(|error| io_error("写入插件文件失败", error))?;
+        file.flush()
+            .map_err(|error| io_error("刷新插件文件失败", error))?;
+        file.sync_all()
+            .map_err(|error| io_error("同步插件文件失败", error))?;
+        Ok(())
+    }
+
+    pub fn write_regular_mode(
+        root: &Path,
+        rel: &Path,
+        bytes: &[u8],
+        mode: &str,
+        create_parents: bool,
+        before_commit: &dyn Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (parent, name) = open_parent(root, rel, create_parents)?;
+        if mode == "append" {
+            let (file, created) = if regular_target(&parent, &name)?.is_some() {
+                (open_relative_write(&parent, &name, false, false)?, false)
+            } else {
+                (open_relative_write(&parent, &name, false, true)?, true)
+            };
+            if let Err(error) = before_commit() {
+                if created {
+                    delete_on_close(&file);
+                }
+                return Err(error);
+            }
+            write_file(file, bytes, true)?;
+        } else if mode == "overwrite" {
+            let _ = regular_target(&parent, &name)?;
+            let temp_name = std::ffi::OsString::from(format!(
+                ".hypercom-plugin-write-{}.tmp",
+                uuid::Uuid::new_v4()
+            ));
+            let temp = open_relative_write(&parent, &temp_name, false, true)?;
+            if let Err(error) = write_file(temp.try_clone().map_err(|e| e.to_string())?, bytes, false) {
+                delete_on_close(&temp);
+                return Err(error);
+            }
+            if let Err(error) = regular_target(&parent, &name) {
+                delete_on_close(&temp);
+                return Err(error);
+            }
+            if let Err(error) = before_commit() {
+                delete_on_close(&temp);
+                return Err(error);
+            }
+            if let Err(error) = regular_target(&parent, &name) {
+                delete_on_close(&temp);
+                return Err(error);
+            }
+            if let Err(error) = commit_relative(&temp, &parent, &name, true) {
+                delete_on_close(&temp);
+                return Err(error);
+            }
+        } else {
+            return Err("mode 必须为 overwrite 或 append".into());
+        }
+        Ok(())
     }
 
     pub fn open_root(root: &Path) -> Result<File, String> {
@@ -818,6 +1326,16 @@ mod platform {
     pub fn open_regular_mode(_: &Path, _: &Path, _: bool) -> Result<OpenedFile, String> {
         Err("此平台不支持安全文件访问".into())
     }
+    pub fn write_regular_mode(
+        _: &Path,
+        _: &Path,
+        _: &[u8],
+        _: &str,
+        _: bool,
+        _: &dyn Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
+        Err("此平台不支持安全文件写入".into())
+    }
     pub fn open_directory(_: &Path, _: &Path) -> Result<File, String> {
         Err("此平台不支持安全目录枚举".into())
     }
@@ -866,6 +1384,61 @@ pub fn sanitize_directory_rel(raw: &str) -> Result<(PathBuf, String), String> {
         parts.push(part.to_string());
     }
     Ok((out, parts.join("/")))
+}
+
+#[derive(Debug, Clone)]
+pub struct WrittenFile {
+    pub path: PathBuf,
+    pub bytes_written: u64,
+}
+
+/// Write a regular file below a selected directory using pinned component
+/// handles. `before_commit` is called after staging and immediately before the
+/// atomic replacement; callers use it to re-check plugin permission and
+/// install generation after a native picker or long write.
+pub fn write_directory_file_authorized<F>(
+    root: &Path,
+    rel: &str,
+    bytes: &[u8],
+    mode: &str,
+    create_parents: bool,
+    before_commit: F,
+) -> Result<WrittenFile, String>
+where
+    F: Fn() -> Result<(), String>,
+{
+    let (normalized, _) = sanitize_directory_rel(rel)?;
+    if normalized.as_os_str().is_empty() {
+        return Err("必须指定目录内的文件相对路径".into());
+    }
+    if mode != "overwrite" && mode != "append" {
+        return Err("mode 必须为 overwrite 或 append".into());
+    }
+    platform::write_regular_mode(
+        root,
+        &normalized,
+        bytes,
+        mode,
+        create_parents,
+        &before_commit,
+    )?;
+    Ok(WrittenFile {
+        path: root.join(&normalized),
+        bytes_written: bytes.len() as u64,
+    })
+}
+
+/// Compatibility wrapper for existing directory-write commands. New plugin
+/// export/save commands should use `write_directory_file_authorized` so the
+/// final commit is gated by a live authority check.
+pub fn write_directory_file(
+    root: &Path,
+    rel: &str,
+    bytes: &[u8],
+    mode: &str,
+    create_parents: bool,
+) -> Result<WrittenFile, String> {
+    write_directory_file_authorized(root, rel, bytes, mode, create_parents, || Ok(()))
 }
 
 /// Open a regular package/private file using pinned component-relative handles.
@@ -1237,6 +1810,96 @@ mod tests {
             .any(|entry| entry.name == "link-dir" && entry.kind == "other"));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn writes_are_handle_based_and_commit_after_authority() {
+        let root = unique_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let written = write_directory_file(&root, "nested/value.txt", b"first", "overwrite", true).unwrap();
+        assert_eq!(written.bytes_written, 5);
+        assert_eq!(std::fs::read(root.join("nested/value.txt")).unwrap(), b"first");
+        write_directory_file(&root, "nested/value.txt", b"second", "overwrite", true).unwrap();
+        assert_eq!(std::fs::read(root.join("nested/value.txt")).unwrap(), b"second");
+        write_directory_file(&root, "nested/value.txt", b"+", "append", true).unwrap();
+        assert_eq!(std::fs::read(root.join("nested/value.txt")).unwrap(), b"second+");
+        let denied = write_directory_file_authorized(
+            &root,
+            "nested/denied.txt",
+            b"denied",
+            "overwrite",
+            true,
+            || Err("revoked".into()),
+        );
+        assert!(denied.is_err());
+        assert!(!root.join("nested/denied.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn writes_top_level_file_in_a_grant_without_creating_parents() {
+        // Native Save As writes directly below the selected folder; unlike nested
+        // exports, that path has no writable intermediate handle of its own.
+        let root = unique_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let written = write_directory_file(&root, "top.txt", b"first", "overwrite", false).unwrap();
+        assert_eq!(written.bytes_written, 5);
+        assert_eq!(written.path, root.join("top.txt"));
+        assert_eq!(std::fs::read(root.join("top.txt")).unwrap(), b"first");
+        write_directory_file(&root, "top.txt", b"second", "overwrite", false).unwrap();
+        assert_eq!(std::fs::read(root.join("top.txt")).unwrap(), b"second");
+        write_directory_file(&root, "top.txt", b"+", "append", false).unwrap();
+        assert_eq!(std::fs::read(root.join("top.txt")).unwrap(), b"second+");
+        let denied = write_directory_file_authorized(
+            &root,
+            "denied.txt",
+            b"denied",
+            "overwrite",
+            false,
+            || Err("revoked".into()),
+        );
+        assert!(denied.is_err());
+        assert!(!root.join("denied.txt").exists());
+        let authorized = write_directory_file_authorized(
+            &root,
+            "authorized.txt",
+            b"ok",
+            "overwrite",
+            false,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(authorized.bytes_written, 2);
+        assert_eq!(std::fs::read(root.join("authorized.txt")).unwrap(), b"ok");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hardlinked_file_is_not_written() {
+        let root = unique_root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("x"), b"x").unwrap();
+        std::fs::hard_link(root.join("x"), root.join("y")).unwrap();
+        assert!(write_directory_file(&root, "x", b"changed", "overwrite", false).is_err());
+        assert_eq!(std::fs::read(root.join("x")).unwrap(), b"x");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_parent_and_target_are_rejected_for_writes() {
+        use std::os::unix::fs::symlink;
+        let root = unique_root();
+        let outside = unique_root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"secret").unwrap();
+        symlink(&outside, root.join("link-dir")).unwrap();
+        assert!(write_directory_file(&root, "link-dir/new", b"x", "overwrite", true).is_err());
+        symlink(outside.join("secret"), root.join("link-file")).unwrap();
+        assert!(write_directory_file(&root, "link-file", b"x", "overwrite", false).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

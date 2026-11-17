@@ -8,6 +8,7 @@ import { resetStoresForTests } from '../stores/resetStores';
 import { userClosingPortIds, lostPortIds } from './disconnectTracking';
 import { useSerialConnection, type SerialConnectionActions } from './useSerialConnection';
 import { useSerialReceive } from './useSerialReceive';
+import { openSerialConnection } from '../utils/serialConnectionRuntime';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -37,6 +38,8 @@ beforeEach(async () => {
   vi.resetAllMocks();
   vi.useFakeTimers();
   resetStoresForTests();
+  // Strict close rejects unknown ports; seed a real runtime entry before reset.
+  useAppStore.setState({ ports: [{ id: 'COM1', name: 'COM1', status: 'disconnected', type: 'real', isHidden: false }] });
   vi.mocked(serialService.closeSerialPort).mockResolvedValue(undefined);
   vi.mocked(eventService.onSerialReconnectHint).mockResolvedValue(vi.fn());
   // Begin each test with a new manual intent, including clearing exhausted
@@ -63,6 +66,45 @@ afterEach(() => {
 });
 
 describe('serial reconnect intent and listener ownership', () => {
+  it('returns explicit UI failures for native errors and missing/no-op targets', async () => {
+    const mounted = await mountConnection();
+    const failure = new Error('access denied');
+    vi.mocked(serialService.openSerialPort).mockRejectedValue(failure);
+    await act(async () => {
+      await expect(mounted.api.openPort('COM1')).resolves.toEqual({ ok: false, error: failure });
+      await expect(mounted.api.openPort('missing')).resolves.toMatchObject({ ok: false, error: { code: 'port-not-found' } });
+    });
+    expect(useAppStore.getState().ports[0].status).toBe('error');
+    await mounted.unmount();
+  });
+
+  it('never steals focus for a plugin/background session, including automatic reconnect', async () => {
+    useAppStore.setState({ ports: [...useAppStore.getState().ports, { id: 'COM2', name: 'COM2', status: 'disconnected', type: 'real', isHidden: false }] });
+    useAppStore.getState().openTab('COM2');
+    const active = useAppStore.getState().activeTabId;
+    const mounted = await mountConnection(true);
+    const onStatus = vi.mocked(eventService.onSerialStatus).mock.calls[0][0];
+    const onHint = vi.mocked(eventService.onSerialReconnectHint).mock.calls[0][0];
+    vi.mocked(serialService.openSerialPort).mockImplementation(async () => {
+      onStatus({ port_id: 'COM1', status: 'connected', generation: 10 });
+    });
+    vi.mocked(serialService.attemptReconnect).mockImplementation(async () => {
+      onStatus({ port_id: 'COM1', status: 'connected', generation: 11 });
+    });
+    await act(async () => { await openSerialConnection('COM1', { background: true }); });
+    expect(useAppStore.getState().activeTabId).toBe(active);
+    expect(useAppStore.getState().tabs).toHaveLength(1);
+    await act(async () => {
+      onStatus({ port_id: 'COM1', status: 'disconnected', generation: 10 });
+      onHint({ port_name: 'COM1' });
+    });
+    expect(serialService.attemptReconnect).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().ports[0]).toMatchObject({ status: 'connected', connectionGeneration: 11 });
+    expect(useAppStore.getState().activeTabId).toBe(active);
+    expect(useAppStore.getState().tabs).toHaveLength(1);
+    await mounted.unmount();
+  });
+
   it('uses all 10 attempts for a missing Windows device, then stops retrying', async () => {
     useAppStore.setState({
       config: { ...useAppStore.getState().config, maxRetries: 10 },
@@ -215,7 +257,7 @@ describe('serial reconnect intent and listener ownership', () => {
     vi.mocked(serialService.openSerialPort).mockReturnValue(opening.promise);
     const mounted = await mountConnection(true);
     const onStatus = vi.mocked(eventService.onSerialStatus).mock.calls[0][0];
-    let manualOpen!: Promise<void>;
+    let manualOpen!: Promise<unknown>;
     await act(async () => { manualOpen = mounted.api.openPort('COM1'); });
     await act(async () => {
       // The backend emits connected while open_serial_port is still awaiting
@@ -238,7 +280,7 @@ describe('serial reconnect intent and listener ownership', () => {
     const onHint = vi.mocked(eventService.onSerialReconnectHint).mock.calls[0][0];
     const onStatus = vi.mocked(eventService.onSerialStatus).mock.calls[0][0];
     await act(async () => { onHint({ port_name: 'COM1' }); });
-    let manualOpen!: Promise<void>;
+    let manualOpen!: Promise<unknown>;
     await act(async () => { manualOpen = mounted.api.openPort('COM1'); });
     await act(async () => {
       onStatus({ port_id: 'COM1', status: 'connected', generation: 1 });
@@ -263,7 +305,7 @@ describe('serial reconnect intent and listener ownership', () => {
     const mounted = await mountConnection(true);
     const onHint = vi.mocked(eventService.onSerialReconnectHint).mock.calls[0][0];
     const onStatus = vi.mocked(eventService.onSerialStatus).mock.calls[0][0];
-    let manualOpen!: Promise<void>;
+    let manualOpen!: Promise<unknown>;
     await act(async () => { manualOpen = mounted.api.openPort('COM1'); });
     await act(async () => {
       onStatus({ port_id: 'COM1', status: 'connected', generation: 2 });
@@ -286,7 +328,7 @@ describe('serial reconnect intent and listener ownership', () => {
     const mounted = await mountConnection();
     const onHint = vi.mocked(eventService.onSerialReconnectHint).mock.calls[0][0];
     await act(async () => { onHint({ port_name: 'COM1' }); });
-    let manualOpen!: Promise<void>;
+    let manualOpen!: Promise<unknown>;
     await act(async () => { manualOpen = mounted.api.openPort('COM1'); });
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(serialService.attemptReconnect).toHaveBeenCalledTimes(1);
@@ -317,7 +359,7 @@ describe('serial reconnect intent and listener ownership', () => {
     const onHint = vi.mocked(eventService.onSerialReconnectHint).mock.calls[0][0];
     const onStatus = vi.mocked(eventService.onSerialStatus).mock.calls[0][0];
     await act(async () => { onHint({ port_name: 'COM1' }); });
-    let closing!: Promise<void>;
+    let closing!: Promise<unknown>;
     await act(async () => { closing = mounted.api.closePort('COM1'); });
     await act(async () => {
       onStatus({ port_id: 'COM1', status: 'error', generation: 3 });

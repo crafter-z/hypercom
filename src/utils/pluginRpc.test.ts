@@ -52,6 +52,36 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(checkOpAllowed('shell.execute', [])).toContain('shell:execute');
   });
 
+  it('serial control is independent of serial sending and revokes immediately', () => {
+    for (const op of ['serial.open', 'serial.close']) {
+      expect(OP_PERMISSIONS[op]).toBe('serial:control');
+      expect(checkOpAllowed(op, ['serial:send'])).toContain('serial:control');
+      expect(checkOpAllowed(op, ['serial:control'])).toBeNull();
+      expect(checkOpAllowed(op, [])).toContain('serial:control');
+    }
+    expect(checkOpAllowed('serial.send', ['serial:control'])).toContain('serial:send');
+  });
+
+  it('minimal file grants never inherit reading, destructive writes, or each other', () => {
+    expect(OP_PERMISSIONS['fs.exportFile']).toBe('fs:export-dir');
+    expect(OP_PERMISSIONS['fs.saveFile']).toBe('fs:save');
+    for (const permission of ['fs:open', 'fs:open-dir', 'fs:write-dir', 'fs:assets', 'fs:storage']) {
+      expect(checkOpAllowed('fs.exportFile', [permission])).toContain('fs:export-dir');
+      expect(checkOpAllowed('fs.saveFile', [permission])).toContain('fs:save');
+    }
+    expect(checkOpAllowed('fs.exportFile', ['fs:export-dir'])).toBeNull();
+    expect(checkOpAllowed('fs.saveFile', ['fs:save'])).toBeNull();
+    expect(checkOpAllowed('fs.exportFile', ['fs:save'])).not.toBeNull();
+    expect(checkOpAllowed('fs.saveFile', ['fs:export-dir'])).not.toBeNull();
+    expect(checkOpAllowed('fs.openDirectoryDialog', ['fs:export-dir'])).toBeNull();
+    for (const op of ['fs.listDirectory', 'fs.readDirectoryFile', 'fs.statDirectoryEntry',
+      'fs.writeDirectoryFile', 'fs.createDirectory', 'fs.removeDirectoryEntry', 'fs.renameDirectoryEntry', 'fs.openDialog']) {
+      expect(checkOpAllowed(op, ['fs:export-dir'])).not.toBeNull();
+      expect(checkOpAllowed(op, ['fs:save'])).not.toBeNull();
+    }
+    expect(checkOpAllowed('ui.panel.export', [])).toBeNull();
+  });
+
   it('未知 op 拒绝', () => {
     expect(checkOpAllowed('totally.made.up', ['terminal:read'])).toContain('未知');
   });
@@ -148,7 +178,7 @@ describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () 
   });
 
   it('敏感确认列出已交付的高风险能力', () => {
-    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:send', 'http:request', 'shell:open', 'shell:execute', 'fs:write-dir']);
+    expect(SENSITIVE_PERMISSIONS).toEqual(['serial:control', 'serial:send', 'http:request', 'shell:open', 'shell:execute', 'fs:export-dir', 'fs:save', 'fs:write-dir']);
   });
 });
 

@@ -5,6 +5,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { decodeLegacyDirectoryFrame, decodeLegacyPluginBytes, isPluginRawUnsupported } from './pluginBinary';
+import type { PluginFileSaveResult, PluginSaveFileOptions } from '../types';
 
 export interface TextFileDialogOptions {
   title?: string;
@@ -16,7 +17,7 @@ export interface ReplaySourceDescriptor { sourceId: string; name: string; path: 
 export interface ReplayPickedSources { grantId: string; sources: ReplaySourceDescriptor[] }
 export interface ReplaySourceChunk { base64: string; nextOffset: number; done: boolean }
 
-/** 插件经系统对话框选中的只读目录授权（grantId 仅在本次授权内有效）。 */
+/** 插件经系统对话框选中的目录能力；具体读/写/导出能力每次另按权限校验。 */
 export interface PickedPluginDirectory { grantId: string; name: string; path: string }
 export type PluginDirectoryEntryKind = 'file' | 'directory' | 'other';
 export interface PluginDirectoryEntry {
@@ -95,6 +96,16 @@ export const fileService = {
    */
   writePluginDirectoryFile: (pluginId: string, grantId: string, relPath: string, content: string | undefined, base64: string | undefined, mode?: 'overwrite' | 'append', createParents?: boolean): Promise<PluginDirectoryWriteResult> => {
     return invoke('plugin_write_directory_file', { pluginId, grantId, relPath, content, base64, mode, createParents });
+  },
+
+  /** fs:export-dir: create/overwrite a relative export, creating parents as needed. */
+  exportPluginFile: (pluginId: string, grantId: string, relPath: string, content: string | undefined, base64: string | undefined): Promise<PluginFileSaveResult> => {
+    return invoke('plugin_export_file', { pluginId, grantId, relPath, content, base64 });
+  },
+
+  /** fs:save: every call uses native Save As; no destination path crosses this API. */
+  savePluginFile: (pluginId: string, content: string | undefined, base64: string | undefined, options: PluginSaveFileOptions): Promise<PluginFileSaveResult | null> => {
+    return invoke('plugin_save_file', { pluginId, content, base64, options });
   },
 
   /** 在已授权目录内创建目录；recursive 默认 true。 */

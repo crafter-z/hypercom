@@ -511,7 +511,7 @@ export interface PluginManifestView {
   http?: { urlWhitelist: string[] } | null;
   /** Reserved compatibility metadata; shell.execute is controlled only by its grant. */
   shell?: { executableWhitelist: string[] } | null;
-  /** 发送端口作用域（P10：声明且非空=仅白名单；空数组=全拒；未声明=不限）。 */
+  /** serial.open/close/send 的精确端口作用域：非空=仅白名单；空数组=全拒；未声明=不限。 */
   serial?: { portWhitelist: string[] } | null;
   ui?: {
     buttons: { id: string; label: string; icon?: string | null; target?: string | null }[];
@@ -582,6 +582,25 @@ export interface MarketplaceUpdate {
 export interface PluginListResponse extends PluginStateSnapshot {
   plugins: PluginView[];
 }
+
+/** Lossless whole-file export payload; text is UTF-8, binary accepts zero bytes. */
+export type PluginFileContent =
+  | { content: string; bytes?: never }
+  | { bytes: Uint8Array | ArrayBuffer; content?: never };
+
+/** Save As hints only: no absolute destination or reusable directory authority. */
+export interface PluginSaveFileOptions {
+  title?: string;
+  /** A basename only, not a path. The user chooses the destination natively. */
+  defaultFileName?: string;
+  filters?: Array<{ name: string; extensions: string[] }>;
+}
+
+/** Worker fs.exportFile: create/overwrite inside a user-picked directory grant. */
+export type PluginExportFileRequest = PluginFileContent & { grantId: string; rel: string };
+/** Worker fs.saveFile: a fresh native Save As on each call; cancel returns null. */
+export type PluginSaveFileRequest = PluginFileContent & { options?: PluginSaveFileOptions };
+export interface PluginFileSaveResult { path: string; bytesWritten: number }
 
 /** Native program invocation, without implicit shell parsing or interactive stdin. */
 export interface PluginShellRequest {

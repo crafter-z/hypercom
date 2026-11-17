@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useRuleStore } from '../stores/useRuleStore';
 import { eventService } from '../services/tauri';
 import type { SerialDataEvent, SerialStatusEvent } from '../services/tauri';
-import { acceptSerialStatus } from './useSerialConnection';
+import { acceptSerialStatus, shouldFocusSerialConnection } from '../utils/serialConnectionRuntime';
 import { ProtocolFrameReassembler } from '../utils/protocolParser';
 import type { ProtocolTemplate, TriggerRule } from '../types';
 import { getRxPipeline } from '../utils/rxPipeline';
@@ -200,6 +200,9 @@ function evaluateLineTriggers(portId: string, text: string, rawData: Uint8Array)
  * - 关闭串口不受影响——closePort 只改端口状态，本函数不处理 disconnected。
  */
 export function openTabForConnectedPort(portId: string): void {
+  // A plugin opens a background connection, not a workspace navigation request.
+  // The policy is retained by the runtime for subsequent reconnects as well.
+  if (!shouldFocusSerialConnection(portId)) return;
   const state = useAppStore.getState();
   // Reconnecting an independently bound view must not resurrect its closed raw tab.
   if (hasPortDisplayConsumers(portId) && !state.tabs.some(tab => tab.kind === 'serial' && tab.portId === portId)) return;

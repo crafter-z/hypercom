@@ -31,6 +31,34 @@ export interface OpenPortParams {
   rows?: number;
 }
 
+/** Plugin commands return camelCase payloads, mirroring their explicit Rust wire contract. */
+export interface PluginSerialPort {
+  id: string;
+  name: string;
+  status: string;
+  type: string;
+  mode: string;
+  baudRate?: number;
+  connectionGeneration: number;
+}
+export interface PluginSerialOpenRequest {
+  portId: string;
+  params?: Partial<Omit<OpenPortParams, 'portId'>>;
+}
+export interface PluginSerialCloseRequest {
+  portId: string;
+  expectedConnectionGeneration: number;
+}
+export interface PluginSerialOpenResult {
+  port: PluginSerialPort;
+  result: 'opened' | 'already-open';
+  connectionGeneration: number;
+}
+export interface PluginSerialCloseResult {
+  port: PluginSerialPort;
+  result: 'closed' | 'already-closed';
+}
+
 /** 发送数据参数（camelCase 公开 API；service 内部映射为 wire 的 snake_case）。 */
 export interface SendDataParams {
   portId: string;
@@ -64,6 +92,27 @@ export const serialService = {
 
   closeSerialPort: (portId: string): Promise<void> => {
     return invoke<void>('close_serial_port', { portId });
+  },
+
+  pluginSerialOpen: (pluginId: string, expectedGeneration: string, request: PluginSerialOpenRequest): Promise<PluginSerialOpenResult> => {
+    return invoke<PluginSerialOpenResult>('plugin_serial_open', {
+      pluginId, expectedGeneration, portId: request.portId, params: request.params,
+    });
+  },
+
+  pluginSerialClose: (pluginId: string, expectedGeneration: string, request: PluginSerialCloseRequest): Promise<PluginSerialCloseResult> => {
+    return invoke<PluginSerialCloseResult>('plugin_serial_close', {
+      pluginId, expectedGeneration, portId: request.portId,
+      expectedConnectionGeneration: request.expectedConnectionGeneration,
+    });
+  },
+
+  pluginSerialStatus: (pluginId: string, expectedGeneration: string, portId: string): Promise<PluginSerialPort | null> => {
+    return invoke<PluginSerialPort | null>('plugin_serial_status', { pluginId, expectedGeneration, portId });
+  },
+
+  pluginSerialList: (pluginId: string, expectedGeneration: string): Promise<PluginSerialPort[]> => {
+    return invoke<PluginSerialPort[]>('plugin_serial_list', { pluginId, expectedGeneration });
   },
 
   sendSerialData: (params: SendDataParams): Promise<number> => {

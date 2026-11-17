@@ -184,6 +184,10 @@ impl SerialPortHandle {
     pub(super) fn request_stop(&self) {
         self.running.store(false, Ordering::Relaxed);
     }
+
+    pub(super) fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
 }
 
 /// Enumerate system serial ports (blocking IO; call outside the manager lock).
@@ -244,6 +248,58 @@ fn make_handle_non_inheritable(port: &serialport::COMPort) -> anyhow::Result<()>
 /// 阻塞点：端口枚举、一次 open 系统调用、可能的读线程 join——必须从阻塞线程池
 /// 调用，不得在异步运行时线程或事件循环主线程上直接调用。
 pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyhow::Result<()> {
+    open_blocking_inner(manager, args, None, || Ok(())).map(|_| ())
+}
+
+/// Plugin control uses the same driver/recycling path, but each mutating lock
+/// section first acquires a plugin lifecycle guard, preventing disable/revoke/
+/// replace from committing between validation and the synchronous side effect.
+/// Never return a config mutex guard: connected emission reads that mutex itself.
+/// No authority guard is held while waiting for close barriers, enumerating
+/// ports, or joining a reader.
+///
+/// Returns whether a new connection was opened and its successful generation.
+pub(crate) fn open_blocking_authorized<G>(
+    manager: &Mutex<SerialManager>,
+    args: OpenPortArgs,
+    expected_generation: u64,
+    cancel: &AtomicBool,
+    authorize: impl FnMut() -> anyhow::Result<G>,
+) -> anyhow::Result<(bool, u64)> {
+    open_blocking_inner(
+        manager,
+        args,
+        Some((expected_generation, cancel)),
+        authorize,
+    )
+}
+
+fn check_open_control(
+    manager: &SerialManager,
+    port_id: &str,
+    control: Option<(u64, &AtomicBool)>,
+) -> anyhow::Result<()> {
+    if let Some((expected, cancel)) = control {
+        check_reconnect(cancel)?;
+        manager.check_control_generation(port_id, expected)?;
+    }
+    Ok(())
+}
+
+fn open_blocking_inner<G>(
+    manager: &Mutex<SerialManager>,
+    args: OpenPortArgs,
+    control: Option<(u64, &AtomicBool)>,
+    mut authorize: impl FnMut() -> anyhow::Result<G>,
+) -> anyhow::Result<(bool, u64)> {
+    {
+        let _authority = authorize()?;
+        let guard = manager.lock().map_err(lock_error)?;
+        check_open_control(&guard, &args.port_id, control)?;
+        if control.is_some() && guard.connection_is_live(&args.port_id) {
+            return Ok((false, guard.status_generation(&args.port_id).unwrap_or(0)));
+        }
+    }
     if PortKind::of(&args.port_id) == PortKind::Real {
         let pending = manager
             .lock()
@@ -268,7 +324,9 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
         let present = system_port_present(&args.port_id)?;
         if !live || !present {
             let close = {
+                let _authority = authorize()?;
                 let mut guard = manager.lock().map_err(lock_error)?;
+                check_open_control(&guard, &args.port_id, control)?;
                 // Do not let a stale enumeration remove a newer session.
                 if guard.connection_generations.get(&args.port_id).copied() != observed_generation {
                     None
@@ -288,16 +346,24 @@ pub fn open_blocking(manager: &Mutex<SerialManager>, args: OpenPortArgs) -> anyh
     // opener uses the non-reentrant emitter because this function still owns the
     // manager lock at that point.
     loop {
+        let authority = authorize()?;
         let mut guard = manager.lock().map_err(lock_error)?;
+        check_open_control(&guard, &args.port_id, control)?;
         if let Some(pending) = guard.pending_real_closes.get(&args.port_id).cloned() {
             if !pending.completed() {
                 drop(guard);
+                drop(authority);
                 pending.wait();
                 continue;
             }
             guard.pending_real_closes.remove(&args.port_id);
         }
-        return guard.open_port(args.clone());
+        // Another opener can win while enumeration/close waits run outside locks.
+        if control.is_some() && guard.connection_is_live(&args.port_id) {
+            return Ok((false, guard.status_generation(&args.port_id).unwrap_or(0)));
+        }
+        guard.open_port(args.clone())?;
+        return Ok((true, guard.status_generation(&args.port_id).unwrap_or(0)));
     }
 }
 
@@ -829,6 +895,44 @@ mod tests {
     // CI（Linux/macOS）覆盖。
     #[cfg(not(target_os = "windows"))]
     use super::{parse_data_bits, parse_flow_control, parse_parity, parse_stop_bits};
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn authorized_open_rechecks_before_side_effect_and_honors_cancelled_intent() {
+        let manager = std::sync::Mutex::new(super::SerialManager::new());
+        let args = crate::commands::OpenPortArgs {
+            port_id: "SIM:Loopback".into(),
+            baud_rate: 9600,
+            data_bits: 8,
+            parity: "None".into(),
+            stop_bits: "One".into(),
+            handshake: "None".into(),
+            dtr: false,
+            rts: false,
+            cols: 80,
+            rows: 24,
+        };
+        let token = manager.lock().unwrap().begin_reconnect(&args.port_id);
+        let mut checks = 0;
+        let error = super::open_blocking_authorized(&manager, args.clone(), 0, &token, || {
+            checks += 1;
+            if checks == 2 {
+                anyhow::bail!("authority revoked before open");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(checks, 2);
+        assert!(error.to_string().contains("authority revoked"));
+        assert_eq!(
+            manager.lock().unwrap().status_generation(&args.port_id),
+            None
+        );
+        manager.lock().unwrap().close_port(&args.port_id).unwrap();
+        let error =
+            super::open_blocking_authorized(&manager, args, 0, &token, || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("Reconnect cancelled"));
+    }
 
     #[cfg(not(target_os = "windows"))]
     #[test]

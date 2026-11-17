@@ -217,10 +217,18 @@ const PluginSettings: React.FC = () => {
    *  Only *granting* asks — revoking stays one click, because it takes effect immediately. */
   const confirmSensitive = (plugin: PluginView, permissions: readonly string[]): boolean => {
     const sensitive = permissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
-    return sensitive.length === 0 || window.confirm(t('plugins.sensitiveConfirm', {
-      name: plugin.manifest?.name ?? plugin.id,
-      perms: sensitive.join(', '),
-    }));
+    if (sensitive.length === 0) return true;
+    const risks: string[] = [];
+    if (sensitive.includes('serial:control')) risks.push(t('plugins.sensitiveSerialControl'));
+    if (sensitive.includes('fs:export-dir')) risks.push(t('plugins.sensitiveExportDir'));
+    if (sensitive.includes('fs:save')) risks.push(t('plugins.sensitiveSave'));
+    return window.confirm([
+      t('plugins.sensitiveConfirm', {
+        name: plugin.manifest?.name ?? plugin.id,
+        perms: sensitive.join(', '),
+      }),
+      ...risks,
+    ].join('\n\n'));
   };
 
   /** 启用时提示当前可授予的敏感权限；未实现能力不列入风险确认。 */

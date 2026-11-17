@@ -14,7 +14,7 @@
  */
 export async function runSequential<T>(
   items: readonly T[],
-  action: (item: T) => void | Promise<void>,
+  action: (item: T) => unknown | Promise<unknown>,
   gapMs = 100,
 ): Promise<void> {
   for (let i = 0; i < items.length; i++) {

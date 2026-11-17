@@ -38,6 +38,7 @@ pub use codec::{
 pub(crate) use events::{
     emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus,
 };
+pub(crate) use ports_real::open_blocking_authorized;
 pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
@@ -109,6 +110,16 @@ fn check_virtual_enabled(kind: PortKind, simulate: bool, gitbash_sim: bool) -> a
 /// 全局串口锁中毒（持锁线程 panic）时的统一错误文案。
 pub(super) fn lock_error<T>(e: PoisonError<T>) -> anyhow::Error {
     anyhow::anyhow!("Lock error: {}", e)
+}
+
+/// Pure CAS comparison, kept separate so Windows tests do not link serialport FFI.
+fn check_control_generation(current: u64, expected: u64) -> anyhow::Result<()> {
+    if current != expected {
+        anyhow::bail!(
+            "Serial connection generation changed (expected {expected}, current {current})"
+        );
+    }
+    Ok(())
 }
 
 /// 串口管理器：三类端口的注册表 + 能力开关 + 上次连接参数。
@@ -238,6 +249,45 @@ impl SerialManager {
     pub fn connection_matches(&self, port_id: &str, generation: u64) -> bool {
         self.connection_generation(port_id) == Some(generation)
     }
+
+    /// Unlike registry membership, this excludes handles whose reader has exited.
+    pub(crate) fn connection_is_live(&self, port_id: &str) -> bool {
+        match PortKind::of(port_id) {
+            PortKind::Real => self
+                .ports
+                .get(port_id)
+                .is_some_and(|port| port.is_running()),
+            PortKind::Sim => self
+                .sim_ports
+                .get(port_id)
+                .is_some_and(|port| port.is_running()),
+            PortKind::Tty => self
+                .tty_sim_ports
+                .get(port_id)
+                .is_some_and(|port| port.running.load(std::sync::atomic::Ordering::Acquire)),
+        }
+    }
+
+    /// The last successful generation survives close, so a disconnected/open/close
+    /// ABA cannot make an old control request match a replacement connection.
+    pub(crate) fn check_control_generation(
+        &self,
+        port_id: &str,
+        expected: u64,
+    ) -> anyhow::Result<()> {
+        check_control_generation(self.status_generation(port_id).unwrap_or(0), expected)
+    }
+
+    /// Compare and detach in the same manager critical section. A stale plugin
+    /// close must not even cancel the reconnect intent of a newer connection.
+    pub(crate) fn close_port_cas(
+        &mut self,
+        port_id: &str,
+        expected: u64,
+    ) -> anyhow::Result<Option<PortClose>> {
+        self.check_control_generation(port_id, expected)?;
+        self.close_port(port_id)
+    }
     /// 打开串口（按 `PortKind` 分派；虚拟端口先过能力门控）。各端口 opener
     /// 在注册句柄后使用不重新获取 `serial_manager` 的状态派发路径；不能在
     /// `emit_status_if_current` 中从管理器锁内递归获取同一把锁。
@@ -251,6 +301,7 @@ impl SerialManager {
         let kind = PortKind::of(&args.port_id);
         check_virtual_enabled(kind, self.simulate, self.gitbash_sim)?;
         let port_id = args.port_id.clone();
+        let params = args.clone();
         let previous = self.connection_generations.get(&port_id).copied();
         self.connection_generations
             .insert(port_id.clone(), previous.unwrap_or(0).wrapping_add(1));
@@ -265,6 +316,9 @@ impl SerialManager {
             } else {
                 self.connection_generations.remove(&port_id);
             }
+        } else {
+            // Keep status/default resolution consistent for virtual and real ports.
+            self.last_params.insert(port_id, params);
         }
         result
     }
@@ -452,7 +506,19 @@ mod tests {
     // 路径）拉进 *测试* 二进制的链接闭包，Windows 上 harness 因缺少应用清单而以
     // 0xc0000139 加载失败。引用 serialport 类型 / `SerialManager` 的测试因此只在
     // 非 Windows 运行（CI 的 Linux/macOS 覆盖）；纯函数测试在所有平台运行。
-    use super::{check_virtual_enabled, PortKind};
+    use super::{check_control_generation, check_virtual_enabled, PortKind};
+
+    #[test]
+    fn control_generation_rejects_stale_and_disconnected_aba_requests() {
+        assert!(check_control_generation(0, 0).is_ok());
+        assert!(check_control_generation(7, 7).is_ok());
+        for (current, stale) in [(1, 0), (8, 7), (7, 8)] {
+            let error = check_control_generation(current, stale)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("generation changed"), "{error}");
+        }
+    }
 
     // ---------- PortKind（纯函数，所有平台）----------
 
@@ -599,6 +665,22 @@ mod tests {
             .is_err());
         assert!(m.resize_tty_sim("GIT:BASH", 80, 24).is_err());
         assert!(m.get_last_params("COM1").is_none());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn close_cas_does_not_cancel_newer_intent_and_keeps_closed_generation() {
+        let mut manager = SerialManager::new();
+        manager.connection_generations.insert("COM9".into(), 7);
+        let pending = manager.begin_reconnect("COM9");
+        assert!(manager.close_port_cas("COM9", 6).is_err());
+        assert!(!pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(manager.close_port_cas("COM9", 7).unwrap().is_none());
+        assert!(pending.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(manager.status_generation("COM9"), Some(7));
+        assert!(manager.close_port_cas("COM9", 7).unwrap().is_none());
+        manager.connection_generations.insert("COM9".into(), 8);
+        assert!(manager.close_port_cas("COM9", 7).is_err());
     }
 
     // ---------- 自动重连 ----------

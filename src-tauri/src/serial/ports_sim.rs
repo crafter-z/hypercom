@@ -56,6 +56,10 @@ impl SimPortHandle {
         self.running.store(false, Ordering::Relaxed);
         let _ = self.tx.try_send(SimMessage::Stop);
     }
+
+    pub(super) fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
 }
 
 /// 列表条目（仅当 `simulate` 启用时由 `SerialManager` 追加到系统端口列表之后）。
@@ -347,6 +351,102 @@ mod tests {
             matches!(second.try_recv(), Ok(SimMessage::Echo { data, is_hex: true }) if data == "A5 5A")
         );
         assert!(close(&mut manager, SIM_PORT_IDS[1]).is_none());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn plugin_control_is_idempotent_and_stale_close_keeps_replacement_session() {
+        use super::{SimMessage, SimPortHandle, SIM_PORT_IDS};
+        use crate::commands::OpenPortArgs;
+        use crate::serial::{open_blocking_authorized, SerialManager};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc, Mutex};
+
+        let id = SIM_PORT_IDS[0];
+        let args = OpenPortArgs {
+            port_id: id.into(),
+            baud_rate: 9600,
+            data_bits: 8,
+            parity: "None".into(),
+            stop_bits: "One".into(),
+            handshake: "None".into(),
+            dtr: false,
+            rts: false,
+            cols: 80,
+            rows: 24,
+        };
+        let mut inner = SerialManager::new();
+        inner.set_simulate(true);
+        inner.connection_generations.insert(id.into(), 7);
+        inner.last_params.insert(id.into(), args.clone());
+        let (tx, rx) = mpsc::sync_channel(4);
+        inner.sim_ports.insert(
+            id.into(),
+            SimPortHandle {
+                running: Arc::new(AtomicBool::new(true)),
+                tx,
+                read_thread: Some(std::thread::spawn(|| {})),
+            },
+        );
+        let manager = Mutex::new(inner);
+        let cancel = AtomicBool::new(false);
+        let result = open_blocking_authorized(
+            &manager,
+            OpenPortArgs {
+                baud_rate: 115200,
+                ..args
+            },
+            7,
+            &cancel,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result, (false, 7));
+        assert_eq!(
+            manager
+                .lock()
+                .unwrap()
+                .get_last_params(id)
+                .unwrap()
+                .baud_rate,
+            9600
+        );
+        let intent = manager.lock().unwrap().begin_reconnect(id);
+        assert!(manager.lock().unwrap().close_port_cas(id, 6).is_err());
+        assert!(!intent.load(Ordering::Acquire));
+        assert!(manager.lock().unwrap().connection_is_live(id));
+        let close = manager
+            .lock()
+            .unwrap()
+            .close_port_cas(id, 7)
+            .unwrap()
+            .unwrap();
+        close.join().unwrap();
+        assert!(matches!(rx.try_recv(), Ok(SimMessage::Stop)));
+        assert!(manager
+            .lock()
+            .unwrap()
+            .close_port_cas(id, 7)
+            .unwrap()
+            .is_none());
+        assert_eq!(manager.lock().unwrap().status_generation(id), Some(7));
+
+        let (tx, _rx) = mpsc::sync_channel(4);
+        {
+            let mut inner = manager.lock().unwrap();
+            inner.connection_generations.insert(id.into(), 8);
+            inner.sim_ports.insert(
+                id.into(),
+                SimPortHandle {
+                    running: Arc::new(AtomicBool::new(true)),
+                    tx,
+                    read_thread: None,
+                },
+            );
+            assert!(inner.close_port_cas(id, 7).is_err());
+            assert!(inner.connection_is_live(id));
+            assert_eq!(inner.connection_generation(id), Some(8));
+        }
     }
 
     #[test]

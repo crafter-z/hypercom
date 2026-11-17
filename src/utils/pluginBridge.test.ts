@@ -89,6 +89,19 @@ describe('wrapped worker RPC lifecycle', () => {
     expect(settled).toHaveBeenCalledWith({ exitCode: 0, stdout: 'git version', stderr: '' });
   });
 
+  it.each(['serial.open', 'serial.close', 'fs.exportFile', 'fs.saveFile'])('does not impose a deadline on %s', async op => {
+    vi.useFakeTimers();
+    expect(hasNoRpcDeadline(op)).toBe(true);
+    const worker = wrappedWorker(`self.request = self.plugin.api[${JSON.stringify(op)}]({});`);
+    const settled = vi.fn();
+    const request = worker.scope.request!.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(settled).not.toHaveBeenCalled();
+    worker.reply({ seq: 1, ok: true, result: { completed: true } });
+    await request;
+    expect(settled).toHaveBeenCalledWith({ completed: true });
+  });
+
   it('keeps directory APIs pending with no deadline while release keeps the ordinary one', async () => {
     vi.useFakeTimers();
     expect(hasNoRpcDeadline('fs.openDirectoryDialog')).toBe(true);
