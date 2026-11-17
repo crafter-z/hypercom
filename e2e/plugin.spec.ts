@@ -22,6 +22,29 @@ const browserErrors = new WeakMap<Page, string[]>();
 const DEMO_WORKER = `
 var reloadRxCount = 0;
 self.plugin.on('ui.buttonClick', async function (event) {
+  if (event.buttonId === 'fs-run') {
+    try {
+      var api = self.plugin.api;
+      var legacy = await api['fs.read']({ rel: 'data/legacy.bin', format: 'binary' });
+      var single = await api['fs.readRange']({ rel: 'data/legacy.bin', offset: 2, length: 3 });
+      var batch = await api['fs.readRanges']({ ranges: [
+        { rel: 'data/legacy.bin', offset: 0, length: 2 },
+        { grantId: 'e2e-directory', rel: 'a.bin', offset: 5, length: 4 },
+        { rel: 'data/missing.bin', offset: 0, length: 2 }
+      ] });
+      var first = await api['fs.listDirectoryPage']({ grantId: 'e2e-directory', limit: 1 });
+      var last = await api['fs.listDirectoryPage']({ grantId: 'e2e-directory', cursor: first.nextCursor, limit: 1 });
+      await api['ui.panel.append']({ text: 'FS-RESULT:' + JSON.stringify({
+        legacy: Array.from(legacy), single: Array.from(single),
+        batch: batch.results.map(function (item) { return item.bytes ? Array.from(item.bytes) : item.error; }),
+        pages: first.entries.concat(last.entries).map(function (item) { return item.rel; }),
+        done: last.nextCursor === null, typed: single instanceof Uint8Array && batch.results[0].bytes instanceof Uint8Array
+      }) + '\\n' });
+    } catch (error) {
+      await self.plugin.api['ui.panel.append']({ text: 'FS-ERROR:' + error.message + '\\n' });
+    }
+    return;
+  }
   if (event.buttonId !== 'shell-run') return;
   try {
     var result = await self.plugin.api['shell.execute']({ program: 'git', args: ['--version', 'literal;echo unsafe'], timeoutMs: 120000 });
@@ -89,8 +112,8 @@ const MOCK = `
     dir: 'C:/mock/plugins/${PLUGIN_ID}',
     enabled: state.enabled,
     grantedPermissions: [...state.granted],
-    declaredPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute'],
-    knownPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute'],
+    declaredPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute', 'fs:assets', 'fs:storage', 'fs:open-dir'],
+    knownPermissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute', 'fs:assets', 'fs:storage', 'fs:open-dir'],
     manifest: {
       id: '${PLUGIN_ID}',
       name: 'E2E Demo',
@@ -98,9 +121,12 @@ const MOCK = `
       description: 'e2e demo',
       apiVersion: '1.0',
       entry: 'main.js',
-      permissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute'],
+      permissions: ['terminal:read', 'terminal:write', 'rx:bytes', 'ui:view', 'shell:execute', 'fs:assets', 'fs:storage', 'fs:open-dir'],
       ui: {
-        buttons: [{ id: 'shell-run', label: 'E2E Shell Run', icon: 'Play', target: 'sidebar' }],
+        buttons: [
+          { id: 'shell-run', label: 'E2E Shell Run', icon: 'Play', target: 'sidebar' },
+          { id: 'fs-run', label: 'E2E File Scan', icon: 'Play', target: 'sidebar' },
+        ],
         menuItems: [],
         views: [
           { id: 'tool', label: 'E2E Tool', entry: 'ui/main.js', styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false },
@@ -157,6 +183,44 @@ const MOCK = `
       if (cmd === 'plugin_shell_execute') {
         state.shellRequest = structuredClone(args);
         return { exitCode: 7, stdout: 'native stdout', stderr: 'native stderr' };
+      }
+      if (cmd.startsWith('plugin_fs_') || cmd === 'read_plugin_asset_raw') {
+        (state.fsCalls ||= []).push({ cmd, args: structuredClone(args) });
+        const bytes = new Uint8Array([0, 1, 128, 255, 65, 0]);
+        if (cmd === 'plugin_fs_open_session') {
+          if (args.expectedGeneration !== 'e2e-install') throw new Error('file session installation mismatch');
+          return '11111111-1111-4111-8111-111111111111';
+        }
+        if (cmd === 'plugin_fs_close_session' || cmd === 'plugin_fs_cancel' || cmd === 'plugin_fs_release') return null;
+        if (cmd === 'read_plugin_asset_raw') return bytes.buffer;
+        if (args.expectedGeneration !== 'e2e-install' || args.sessionId !== '11111111-1111-4111-8111-111111111111') {
+          throw new Error('file request session mismatch');
+        }
+        if (cmd === 'plugin_fs_read_ranges') {
+          let offset = 0;
+          const chunks = [];
+          const results = args.ranges.map(range => {
+            if (range.rel === 'data/missing.bin') return { rel: range.rel, offset, length: 0, error: 'file missing' };
+            const chunk = bytes.slice(range.offset, range.offset + range.length);
+            const descriptor = { rel: range.rel, offset, length: chunk.length };
+            offset += chunk.length;
+            chunks.push(chunk);
+            return descriptor;
+          });
+          const metadata = new TextEncoder().encode(JSON.stringify({ results }));
+          const frame = new Uint8Array(8 + metadata.length + offset);
+          frame.set([72, 67, 70, 82]);
+          new DataView(frame.buffer).setUint32(4, metadata.length, true);
+          frame.set(metadata, 8);
+          let position = 8 + metadata.length;
+          for (const chunk of chunks) { frame.set(chunk, position); position += chunk.length; }
+          return frame.buffer;
+        }
+        if (cmd === 'plugin_fs_list_directory_page') {
+          const last = args.cursor === 'page-2';
+          return { entries: [{ name: last ? 'b.bin' : 'a.bin', rel: last ? 'b.bin' : 'a.bin', kind: 'file', size: 6, modifiedMs: 1 }], nextCursor: last ? null : 'page-2' };
+        }
+        throw new Error('Unhandled plugin FS command: ' + cmd);
       }
       if (cmd === 'read_plugin_asset') {
         if (args && args.relPath === 'main.js') return ${JSON.stringify(DEMO_WORKER)};
@@ -278,6 +342,23 @@ test.describe('插件系统（issue #17）', () => {
       pluginId: PLUGIN_ID, expectedGeneration: 'e2e-install',
       request: { program: 'git', args: ['--version', 'literal;echo unsafe'], timeoutMs: 120000 },
     });
+  });
+
+  test('真实 Worker 保持旧整读并接收窗口批量原始字节和分页结果', async ({ page }) => {
+    await openApp(page, ['fs:assets', 'fs:storage', 'fs:open-dir']);
+    await page.getByRole('button', { name: 'E2E Demo: E2E File Scan', exact: true }).click();
+    await expect(page.locator('.plugin-panel-content')).toContainText('FS-RESULT:{"legacy":[0,1,128,255,65,0],"single":[128,255,65],"batch":[[0,1],[0],"file missing"],"pages":["a.bin","b.bin"],"done":true,"typed":true}');
+    const readCalls = () => page.evaluate(() => (window.__PLUGIN_E2E__ as unknown as {
+      fsCalls: Array<{ cmd: string; args: Record<string, unknown> }>;
+    }).fsCalls);
+    await expect.poll(async () => (await readCalls()).filter(call => call.cmd === 'plugin_fs_release').length).toBe(4);
+    const calls = await readCalls();
+    expect(calls.filter(call => call.cmd === 'plugin_fs_open_session')).toHaveLength(1);
+    expect(calls.filter(call => call.cmd === 'plugin_fs_read_ranges')).toHaveLength(2);
+    const range = calls.find(call => call.cmd === 'plugin_fs_read_ranges')!;
+    expect(range.args.ranges).toEqual([{ rel: 'data/legacy.bin', offset: 2, length: 3 }]);
+    expect(range.args.priority).toBe('background');
+    expect(typeof range.args.requestId).toBe('string');
   });
 
   test('插件设置真实重载按钮刷新 generation/revision 后仍可响应 RX', async ({ page }) => {

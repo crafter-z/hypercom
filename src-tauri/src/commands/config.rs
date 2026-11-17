@@ -111,6 +111,7 @@ pub async fn set_config(
             }
         };
         if restore && saved {
+            super::plugin::retire_all_plugin_file_io(&state);
             manager
                 .save_safe_backup()
                 .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
@@ -134,6 +135,7 @@ pub async fn set_config(
     if saved && restore_plugin_configs.unwrap_or(false) {
         state.plugin_http.cancel_all();
         state.plugin_shell.cancel_all();
+        super::plugin::retire_all_plugin_file_io(&state);
     }
     // Retire views only after the imported configuration committed.
     if let Some(entries) = restored_entries {

@@ -415,6 +415,40 @@ describe('wrapped worker binary view transport', () => {
   });
 });
 
+describe('wrapped worker windowed FS cancellation', () => {
+  it.each(['fs.readRange', 'fs.readRanges', 'fs.listDirectoryPage'])('strips signal, precreates UUID and sends %s cancellation without a deadline', async op => {
+    vi.useFakeTimers();
+    const worker = wrappedWorker('');
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const request = worker.scope.plugin!.api[op]({ rel: 'a', offset: 0, length: 1, signal: controller.signal });
+    const outcome = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    const sent = sentMessages(worker.sent).find(message => message.op === op)!;
+    expect(sent.args).not.toHaveProperty('signal');
+    expect(sent.args?.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(hasNoRpcDeadline(op)).toBe(true);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(sentMessages(worker.sent).filter(message => message.op === 'fs.cancel')).toHaveLength(0);
+    controller.abort(); await outcome;
+    expect(sentMessages(worker.sent)).toContainEqual(expect.objectContaining({ op: 'fs.cancel', args: { requestId: sent.args!.requestId } }));
+    expect(remove).toHaveBeenCalled();
+    worker.reply({ seq: sent.seq!, ok: true, result: new Uint8Array([9]) });
+  });
+  it('does not send an already aborted FS request and removes listeners on success', async () => {
+    const worker = wrappedWorker('');
+    const aborted = new AbortController(); aborted.abort();
+    await expect(worker.scope.plugin!.api['fs.readRange']({ signal: aborted.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(sentMessages(worker.sent).filter(message => message.op?.startsWith('fs.'))).toHaveLength(0);
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const request = worker.scope.plugin!.api['fs.readRange']({ rel: 'a', offset: 0, length: 0, signal: controller.signal });
+    const sent = sentMessages(worker.sent).find(message => message.op === 'fs.readRange')!;
+    worker.reply({ seq: sent.seq!, ok: true, result: new Uint8Array() }); await request;
+    expect(remove).toHaveBeenCalled(); controller.abort();
+    expect(sentMessages(worker.sent).filter(message => message.op === 'fs.cancel')).toHaveLength(0);
+  });
+});
+
 describe('wrapped worker stream concurrency and explicit cancel', () => {
   async function openStream(worker: ReturnType<typeof wrappedWorker>) {
     const open = sentMessages(worker.sent).find((message) => message.op === 'http.open')!;

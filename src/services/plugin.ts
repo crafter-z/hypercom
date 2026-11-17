@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { decodeLegacyPluginBytes, isPluginRawUnsupported } from './pluginBinary';
 import type {
   PluginHttpChunk,
   PluginHttpHead,
@@ -38,9 +39,23 @@ export const pluginService = {
     invoke('set_plugin_trusted_web', { id, trusted, expectedGeneration }),
   clearPluginWebData: (id: string, expectedGeneration: string): Promise<PluginStateSnapshot> =>
     invoke('clear_plugin_web_data', { id, expectedGeneration }),
-  // Binary responses use base64 on Tauri's JSON wire, decoded before reaching the Worker.
+  // Legacy wire contract is retained for text, KV and older native IPC paths.
   readPluginAsset: (id: string, relPath: string, format: 'text' | 'binary' = 'text'): Promise<string | null> =>
     invoke('read_plugin_asset', { id, relPath, format }),
+  /** Whole-file binary fast path; only unsupported raw IPC may use legacy base64. */
+  async readPluginAssetBytes(id: string, relPath: string, expectedGeneration?: string): Promise<Uint8Array | null> {
+    try {
+      const raw = await invoke<unknown>('read_plugin_asset_raw', { id, relPath, expectedGeneration });
+      if (!(raw instanceof ArrayBuffer)) throw new Error('invalid plugin asset raw response');
+      return new Uint8Array(raw);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === 'PLUGIN_FILE_NOT_FOUND') return null;
+      if (!isPluginRawUnsupported(error)) throw error;
+      const legacy = await invoke<string | null>('read_plugin_asset', { id, relPath, format: 'binary' });
+      return legacy === null ? null : decodeLegacyPluginBytes(legacy);
+    }
+  },
   /** Text or raw bytes; content/base64 are mutually exclusive on the wire. */
   writePluginAsset: (id: string, relPath: string, content?: string, base64?: string): Promise<void> => {
     assertAssetWriteContent(content, base64);

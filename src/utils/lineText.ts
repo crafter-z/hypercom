@@ -38,11 +38,12 @@ export function normalizeEncodingLabel(encoding: Encoding | string): string {
  * RX across event splits) call this per port — a streaming decoder holds
  * partial bytes, so instances MUST NOT be shared between ports.
  */
-export function createDecoder(encoding: Encoding | string): TextDecoder {
+export function createDecoder(encoding: Encoding | string, options?: { fatal?: boolean }): TextDecoder {
+  const fatal = options?.fatal ?? false;
   try {
-    return new TextDecoder(normalizeEncodingLabel(encoding), { fatal: false, ignoreBOM: false });
+    return new TextDecoder(normalizeEncodingLabel(encoding), { fatal, ignoreBOM: false });
   } catch {
-    return new TextDecoder('utf-8', { fatal: false, ignoreBOM: false });
+    return new TextDecoder('utf-8', { fatal, ignoreBOM: false });
   }
 }
 

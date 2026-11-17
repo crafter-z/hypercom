@@ -187,7 +187,7 @@ otify` | 发出受限的非粘滞通知 |
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`fs.read`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`shell.execute` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`shell.execute` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
 - 超时只是回执失败，不表示已经开始的串口写入、文件写入、HTTP 请求或本机进程已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
@@ -238,7 +238,26 @@ serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动
 
 storage 的文件是 data/state.json。只有确认文件不存在才初始化空对象；暂时读失败、非法 JSON、非对象内容都会 reject，不能用空缓存覆盖旧键。键只要求非空字符串；值必须是可无损 JSON 化的数据——除顶层 `undefined`（删除键）外，拒绝函数、嵌套 `undefined`、NaN/Infinity、Map/Set/Date/类型化数组、getter、可调用的 `toJSON`、稀疏数组与循环引用，但**不设键长、值大小、节点数或文件大小上限**。不要同时用 fs.write 手工改这个文件和 storage.set 操作 KV，两条路径没有共享 KV 缓存更新契约。配置导出不包含 KV、其他 data/ 或插件代码。
 
-**读写都不设文件格式、内容、大小、总量或选择数量上限，所有插件一致，不要求可信网页模式。** `fs.read` 仍只访问已授权插件目录，`fs.openDialog` 只读取用户选择的路径，`fs.openDirectoryDialog` 只能获得用户原生选择器产生的目录根（读/写权限均可发起选择），`fs.write` 只写 data/；二进制保留全部字节，不经过文本解码。文本解码可能替换非法字节，要求无损时必须使用 binary。目录授权是内存能力，插件不能把任意本机路径或目录根传给宿主；所有目录操作每次调用都重新校验权限、安装代次和路径围栏。接口一次性读取/写入整个文件，实际可处理大小受可用内存及 JS/浏览器运行时约束，并非流式接口。安装包与网页声明资源的限额仍属于安装/视图加载，不限制此处的数据读取或私有写入。
+**旧全文件读写接口继续保留，不设文件格式、内容、大小、总量或选择数量的业务上限，也不增加隐式读取期限；所有插件一致，不要求可信网页模式。** `fs.read` 仍只访问已授权插件目录，`fs.openDialog` 只读取用户选择的路径，`fs.openDirectoryDialog` 只能获得用户原生选择器产生的目录根（读/写权限均可发起选择），`fs.write` 只写 data/；二进制保留全部字节，不经过文本解码。文本解码可能替换非法字节，要求无损时必须使用 binary。目录授权是内存能力，插件不能把任意本机路径或目录根传给宿主；所有目录操作每次调用都重新校验权限、安装代次和路径围栏。旧接口一次性读取/写入整个文件，实际可处理大小受可用内存及 JS/浏览器运行时约束，并非流式接口；大文件预览和目录扫描优先使用下面的有界窗口与分页 API。安装包与网页声明资源的限额仍属于安装/视图加载，不限制此处的数据读取或私有写入。
+
+### 范围读取、批量与目录分页
+
+这些是新增 Worker API，不替换旧接口；无需为已有插件改返回类型。`range` 指 `{rel, offset, length, grantId?}`，偏移与长度均以**字节**计：
+
+| 调用 | 权限 | 参数与结果 |
+|---|---|---|
+| `api['fs.readRange']({rel, offset, length, grantId?, priority?, signal?})` | 见路径规则 | 返回 `Uint8Array`，只读取一个窗口，不先读取整文件再切片；单次 `length` 为 0..4 MiB |
+| `api['fs.readRanges']({ranges, priority?, signal?})` | 每项单独校验 | `ranges` 为 1..64 个 range，申请长度之和 ≤8 MiB，单项仍 ≤4 MiB；返回 `{results:[{rel, bytes: Uint8Array} \| {rel, error: string}]}`，顺序与输入一致 |
+| `api['fs.listDirectoryPage']({grantId, rel?, recursive?, cursor?, limit?, priority?, signal?})` | fs:open-dir | 返回 `{entries, nextCursor: string \| null}`；entries 使用旧 list 的 `{name, rel, kind, size, modifiedMs}` 字段；`limit` 默认 256，允许 1..1000，`recursive` 默认 false |
+
+- **路径与授权**：不传 `grantId` 时，`rel` 是插件包内相对路径，`data/` 需要 `fs:storage`，其余资产需要 `fs:assets`；传 `grantId` 时，`rel` 是所选目录内相对路径，需要 `fs:open-dir`，按本机目录文件名规则保留大小写；Unix 合法的 `~`、`:`、尾点/尾空格不套用包路径限制，无 grant 的资产/私有路径仍遵守严格包路径规则。`rel` 的 UTF-8 编码长度 ≤4096 字节，拒绝绝对路径、`..`、链接/重解析点与硬链接文件。`fs:open` 的文件选择结果不能充当目录 grant；`storage` 权限或宿主启动时读取入口的特例也不能代替普通范围读取权限。整个批次先完成授权，任一项权限不足不会先返回其他项内容。与此不同，旧 `fs.readDirectoryFile` 为保持兼容，仍允许授权目录内的最终普通硬链接文件，不代表可用新范围接口读取它。
+- **数值与 EOF**：`offset`、`length` 及 `offset + length` 必须是非负 JS 安全整数。零长度合法；越过或刚好位于 EOF 返回空字节，碰到 EOF 可以短读。文件内容不是快照，两个窗口之间可能被外部修改；不能以首次 stat 的 size 推断所有后续窗口一定存在。
+- **错误**：批量里的缺文件或普通 IO 错误通过该项 `{rel,error}` 表达，其他项仍可成功；参数、权限、会话失效或取消会 reject 整次调用。单窗口遇到该项错误直接 reject，不返回错误对象。扫描时应逐项处理错误，不盲目重试整批。
+- **分页**：首调省略 `cursor`，后续把 `nextCursor` 原样带回，直到为 null；允许最后一次返回空 `entries` 且 `nextCursor:null`，扫描应只以 cursor 判断结束，不能以本页条数推断是否结束；继续使用相同 grant，`rel` / `recursive` 可省略以沿用游标记录值，显式传值时必须与首次请求一致。页是原生句柄迭代器的增量结果，不预收集整棵树、不保证排序，也不是一致性快照；遍历期间的新增/删除可能影响后续页。除条数外，每页还有约 1 MiB 元数据软预算，因此可能少于 limit；递归游标最多保留 128 层目录栈，条目 rel 最多 4096 UTF-8 字节，超出会 reject 而非静默截断。`size`（字节）和 `modifiedMs`（Unix 毫秒，未知为 0）均是非负安全整数，超出可表示范围时整页 reject；链接/重解析点、特殊文件及硬链接文件作为 `kind:'other'` 返回，不向下遍历或读取。cursor 是会话内不透明句柄，闲置达到 60 秒后失效并由回收器清理，不能保存到 storage、跨重载或跨 Worker 继续用。若处理一页耗时过长、cursor 过期或会话失效，应结束本轮扫描并让用户重新发起；分页失败或取消后也不要假定旧 cursor 仍可继续，不能把旧 cursor 自动交给新会话重试。旧 `fs.listDirectory` 仍一次性返回完整、排序后的列表，且不新增该分页深度/页预算限制；不要把旧接口当成分页实现。
+- **优先级与取消**：`priority` 只接受 `'interactive'` / `'background'`，默认 background；用户当前可见窗口可用 interactive，整树扫描应保持 background。优先级是调度提示，不绕过每插件聚合预算。`signal` 是标准 `AbortSignal`，仅在 Worker 内消费，不跨结构化克隆；`AbortController.abort()` 使挂起调用以 `AbortError` reject，并经独立取消通道通知原生层。新文件 API 不设隐式总读取期限；取消不表示 OS 已同步结束阻塞 IO，资源只在真实任务结束后归还。
+- **传输与所有权**：范围读取只支持原生 raw custom-protocol 通道，不将文件字节转成 base64、JSON 数字数组或可执行脚本；不支持该通道时明确失败，不静默退回大文本路径。少量请求、分页和 frame 描述元数据仍使用 JSON。宿主向 Worker 使用 transfer list，批量各项可能共享同一 payload buffer，处理单项时使用其 `byteOffset` / `byteLength`；需要独立保留某项时调用 `bytes.slice()`。raw、frame 解析和 transfer 不意味着端到端零拷贝。旧 `fs.read({format:'binary'})` 与 `fs.readDirectoryFile`（text/binary）优先走 raw 字节快速路径，目录文本仍按指定 encoding 解码；仅明确不支持 raw 时兼容回退旧 base64 wire，公开返回形状不变。`fs.openDialog` 仍走原有文件选择 wire，`view.sendBinary` 的传输也不由此改变。
+
+新增读取会话绑定插件 ID、`installGeneration` 与根 Worker epoch，原生 session 懒创建；禁用、撤权、重载、替换或 Worker 停止会使旧会话失效，迟到结果不能投给新 Worker。**soft IO budgets 是宿主运行时的准入/在途资源预算，不是文件总大小、整个插件内存或 JS 堆的限额。** 当前调度默认全局 4、每插件 2、每会话 2 个实际 IO，background 全局最多 3，保留 1 个交互容量；受控在途字节预留预算全局 64 MiB、每插件 32 MiB；background 的全局/每插件/每会话令牌桶各为 8 MiB/s、突发 8 MiB，带宽成本与内存预留分开计账。批量/窗口限额只约束单次请求，可按窗口读取更大的文件；旧资产读写和目录 raw 快速路径共享 IO 并发但不新增文件大小上限，未将文件选择器改成新范围通道。新文件 RPC 有独立的 8 个在途槽，不占 32 个普通 RPC 槽；取消另有有界通道。它们独立于 RX/control 事件背压，也不能保证其他插件、插件自行保存的数据或浏览器总内存有硬上限；本实现没有独立插件进程或堆配额。上述并发/速率数字是调度配置，不是实测吞吐或响应延迟承诺；尚未完成真实发行 WebView 与磁盘上的多插件大文件扫描压测，不能据此推断主窗绝不会卡顿或总内存一定受控。
 
 ### 网络与外部链接
 
@@ -595,42 +614,68 @@ self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
 })();
 ```
 
-宿主向 Worker 转移字节缓冲区，避免再次复制大文件。可信网页本身仍可用 `File.arrayBuffer()` / `File.stream()` 或 `fetch(...).arrayBuffer()` 读取，和 Worker API 的返回格式独立。
+宿主向 Worker 转移字节缓冲区，减少交付时的重复复制；这不代表原生读取、frame 解析和 JS 处理端到端零拷贝。要只看文件头或当前可见区域，使用 `fs.readRange`，不要先完整读取再 `subarray`。可信网页本身仍可用 `File.arrayBuffer()` / `File.stream()` 或 `fetch(...).arrayBuffer()` 读取，和 Worker API 的返回格式独立。
 
 ### 选择目录并读写文件
 
-读取需要 `fs:open-dir`，写入/删除/重命名需要 `fs:write-dir`；只声明 `fs:write-dir` 也能打开目录选择器（得到写权限），但 list/read 会被拒绝。目录选择只应在用户操作（按钮/菜单）中发生；宿主不接受插件提供的任意目录路径。以下示例递归列出所选目录、读取 `.log` 文件，并写出一份汇总：
+读取需要 `fs:open-dir`，写入/删除/重命名需要 `fs:write-dir`；只声明 `fs:write-dir` 也能打开目录选择器（得到写权限），但 list/read 会被拒绝。目录选择只应在用户操作（按钮/菜单）中发生；宿主不接受插件提供的任意目录路径。以下示例需要两个目录权限，并在 manifest 声明 `open-log-dir` / `stop-log-scan` 按钮：分页扫描 `.log`，每个文件只查看前 64 KiB，并写出预览汇总；每次只保留一页目录和一个文件窗口，不收集完整树或所有文件内容，也不对所有文件启动 `Promise.all`。
 
 ```js
+let logScanController = null;
+
 self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
-  if (buttonId !== 'open-log-dir') return;
+  if (buttonId === 'stop-log-scan') {
+    logScanController?.abort();
+    return;
+  }
+  if (buttonId !== 'open-log-dir' || logScanController) return;
   const api = self.plugin.api;
+  const controller = new AbortController();
+  logScanController = controller;
+  const signal = controller.signal;
   let grantId;
   try {
-    const { directories } = await api['fs.openDirectoryDialog']({ title: '选择日志目录', multiple: false });
+    const { directories } = await api['fs.openDirectoryDialog']({ title: '选择日志目录' });
     if (directories.length === 0) return; // 用户取消
     grantId = directories[0].grantId;
+    if (signal.aborted) return; // 选择器本身不接受 signal
 
-    const { entries } = await api['fs.listDirectory']({ grantId, recursive: true });
-    let total = 0;
-    for (const entry of entries) {
-      if (entry.kind !== 'file' || !entry.name.endsWith('.log')) continue;
-      const { content } = await api['fs.readDirectoryFile']({ grantId, rel: entry.rel });
-      total += content.length;
-    }
+    let cursor;
+    let files = 0;
+    let totalBytes = 0;
+    const windowBytes = 64 * 1024;
+    do {
+      const page = await api['fs.listDirectoryPage']({
+        grantId, recursive: true, cursor, limit: 128,
+        priority: 'background', signal
+      });
+      for (const entry of page.entries) {
+        if (entry.kind !== 'file' || !entry.name.endsWith('.log')) continue;
+        const bytes = await api['fs.readRange']({
+          grantId, rel: entry.rel, offset: 0, length: windowBytes,
+          priority: 'background', signal
+        });
+        // 在这里解析/消费文件头；不把 bytes 推入累计数组。
+        totalBytes += bytes.byteLength;
+        files += 1;
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
 
-    await api['fs.createDirectory']({ grantId, rel: 'exports', recursive: true });
+    if (signal.aborted) return;
     await api['fs.writeDirectoryFile']({
       grantId,
       rel: 'exports/summary.txt',
-      content: `total chars: ${total}\n`,
+      content: `files: ${files}, preview bytes: ${totalBytes}\n`,
       mode: 'overwrite',
       createParents: true
     });
   } catch (error) {
-    console.error('directory read/write failed', error);
+    if (error?.name === 'AbortError') console.log('scan cancelled');
+    else console.error('directory scan failed', error);
   } finally {
     if (grantId) await api['fs.releaseDirectory']({ grantId }).catch(() => {});
+    if (logScanController === controller) logScanController = null;
   }
 });
 ```
@@ -668,9 +713,11 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | 目录 / ZIP 包 | 64 MiB 总解压/复制数据、2000 条、32 层；拒绝穿越/链接/特殊文件/硬链接；目录根与祖先也须为真实非链接路径，macOS可选`/private/...`规范路径而非`/var`/`/tmp`别名 |
 | ZIP元数据 | 压缩文件96MiB、中央目录16MiB、单条名称/extra/comment合计64KiB；实体记录≤2000且不得重复，支持限额内ZIP64 |
 | data/ 写入 | 不设单文件/总量/文件数上限；路径与原子写约束保留；每次写入不再扫描整个 data/ |
-| 插件文件读取 | 不限制扩展名/内容/大小/总量/多选数量，无固定读取期限；保留权限与路径范围，完整读取所需内存由运行环境决定 |
-| 插件目录授权 | `fs.openDirectoryDialog` 只能打开原生选择器；无 TTL、无授权数量上限。`listDirectory` 默认一层，`recursive:true` 返回整棵树且不设深度/条数上限；`readDirectoryFile`/`writeDirectoryFile` 无内容大小上限，一次性读写整个文件。目录内 `other` 条目不可读；禁止绝对路径、`..`、链接/重解析点和越界路径。写文件 `overwrite` 使用同目录临时文件 + 原子替换，`append` 直接追加 |
-| 插件文件写入 IO | 闸门准入等待最多 5 秒，繁忙时可重试；已经开始的写入不设隐式业务期限，真实完成后才返回 |
+| 旧全文件读取 | 保留 `fs.read` / `fs.openDialog` / `fs.readDirectoryFile` 的参数、返回类型；不限制扩展名/内容/文件大小/总量/多选数量，无固定读取期限；完整读取所需内存由运行环境决定 |
+| 范围/批量读取 | 单 range ≤4 MiB，批量 1..64 项且申请长度之和 ≤8 MiB；是单次传输窗口，不是文件总大小上限；支持 signal，无隐式总期限 |
+| 目录分页 | 每页默认 256、最多 1000 项，另有约 1 MiB 元数据软预算，递归栈最多 128 层、rel ≤4096 UTF-8 字节；真正增量、不保证排序/快照；cursor 闲置 60 秒失效且不能跨会话复用 |
+| 插件目录授权 | `fs.openDirectoryDialog` 只能打开原生选择器；grant 本身无 TTL、无数量上限，不等于有 TTL 的分页 cursor。旧 `listDirectory` 默认一层，`recursive:true` 返回完整排序树且不设深度/条数上限；`readDirectoryFile`/`writeDirectoryFile` 无内容大小上限，一次性读写整个文件。`other` 条目不可读；禁止绝对路径、`..`、链接/重解析点和越界路径。写文件 `overwrite` 使用同目录临时文件 + 原子替换，`append` 直接追加 |
+| 插件 IO 准入 | 控制面闸门等待最多 5 秒，繁忙时可重试；公平文件 IO 调度独立于 RX/control 事件预算；soft IO budgets 不是总内存或堆限额，见[范围读取、批量与目录分页](#范围读取批量与目录分页)；已开始的 IO 不因回执退休而提前归还资源 |
 | 串口与终端写入 | `serial.send` 单次 data ≤1048576 个 UTF-16 代码单元；`view.sendSerial` 单次 data ≤65536 个；`terminal.append` 单次 text ≤65536 个 |
 | HTTP | 仅 http/https；无宿主业务大小上限、无固定 timeout；`timeout` 为调用显式给出的非负有限秒数（0/缺省=不设总期限），重定向默认最多 10 跳；并发上限每插件 64、全应用 64 |
 | 文件对话框 | `fs.openDialog` / `fs.openDirectoryDialog` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |

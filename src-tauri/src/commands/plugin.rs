@@ -355,6 +355,7 @@ pub async fn reload_plugin(
     };
     state.plugin_http.cancel_plugin(&id);
     state.plugin_shell.cancel_plugin(&id);
+    retire_plugin_file_io(&state, &id);
     revoke_plugin_directory_grants(&id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
     log::info!("Plugin reloaded from installed code: {id}");
@@ -403,6 +404,7 @@ pub async fn install_plugin(
     // Replacement/new code invalidates every in-flight network request id.
     state.plugin_http.cancel_plugin(&prepared.manifest.id);
     state.plugin_shell.cancel_plugin(&prepared.manifest.id);
+    retire_plugin_file_io(&state, &prepared.manifest.id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &prepared.manifest.id).await?;
     // No await after persisting the trust reset: cancellation must not drop the
     // IO gate while a detached blocking task is still replacing executable code.
@@ -832,6 +834,7 @@ pub async fn uninstall_plugin(
         state_of(manager.get_config(), &id).is_none()
     };
     if committed {
+        retire_plugin_file_io(&state, &id);
         state.plugin_http.cancel_plugin(&id);
         state.plugin_shell.cancel_plugin(&id);
         // The plugin is already gone from config. A stuck native teardown may
@@ -994,6 +997,7 @@ pub async fn set_plugin_enabled(
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
         }
+        if !enabled { retire_plugin_file_io(&state, &id); }
         manager
             .save_safe_backup()
             .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
@@ -1053,6 +1057,7 @@ pub async fn set_plugin_trusted_web(
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(format!("保存网页信任状态失败: {error}")));
         }
+        if !trusted { retire_plugin_file_io(&state, &id); }
         manager
             .save_safe_backup()
             .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
@@ -1165,6 +1170,7 @@ pub async fn set_plugin_permissions(
             *manager.get_config_mut() = old_config;
             return Err(CommandError::Config(format!("保存插件状态失败: {e}")));
         }
+        retire_plugin_file_io(&state, &id);
         manager
             .save_safe_backup()
             .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
@@ -1204,8 +1210,136 @@ fn encode_asset(bytes: Vec<u8>, format: PluginFileFormat) -> String {
     }
 }
 
-/// Read authorized package/private files without format or size restrictions.
-/// Text is UTF-8 with replacement; binary is base64 on the JSON wire.
+pub(crate) struct LegacyFileAuthority(tokio::sync::watch::Sender<bool>);
+
+impl LegacyFileAuthority {
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> { self.0.subscribe() }
+}
+type LegacyAuthorityMap = std::collections::HashMap<String, std::sync::Weak<LegacyFileAuthority>>;
+static LEGACY_FILE_AUTHORITIES: std::sync::LazyLock<std::sync::Mutex<LegacyAuthorityMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn legacy_file_authority(id: &str) -> Result<std::sync::Arc<LegacyFileAuthority>, CommandError> {
+    let mut authorities = LEGACY_FILE_AUTHORITIES.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    authorities.retain(|_, authority| authority.strong_count() > 0);
+    if let Some(authority) = authorities.get(id).and_then(std::sync::Weak::upgrade) { return Ok(authority); }
+    let (cancel, _) = tokio::sync::watch::channel(false);
+    let authority = std::sync::Arc::new(LegacyFileAuthority(cancel));
+    authorities.insert(id.to_string(), std::sync::Arc::downgrade(&authority));
+    Ok(authority)
+}
+
+pub(crate) fn require_live_file_authority(authority: &LegacyFileAuthority) -> Result<(), CommandError> {
+    if *authority.0.borrow() { Err(CommandError::Other("插件文件请求已取消".into())) } else { Ok(()) }
+}
+
+fn cancel_legacy_file_authority(id: &str) {
+    if let Ok(mut authorities) = LEGACY_FILE_AUTHORITIES.lock() {
+        if let Some(authority) = authorities.remove(id).and_then(|authority| authority.upgrade()) {
+            authority.0.send_replace(true);
+        }
+    }
+}
+
+pub(crate) fn retire_plugin_file_io(state: &AppState, id: &str) {
+    state.plugin_fs.invalidate_plugin(id);
+    cancel_legacy_file_authority(id);
+}
+
+pub(crate) fn retire_all_plugin_file_io(state: &AppState) {
+    state.plugin_fs.invalidate_all();
+    if let Ok(mut authorities) = LEGACY_FILE_AUTHORITIES.lock() {
+        for authority in authorities.drain().filter_map(|(_, authority)| authority.upgrade()) {
+            authority.0.send_replace(true);
+        }
+    }
+}
+
+/// An opened file belongs to this installation, never to a later tree at the
+/// same pathname. Bootstrap/KV exceptions remain private host capabilities.
+fn asset_read_authority(
+    state: &AppState,
+    id: &str,
+    rel: &Path,
+    expected_generation: Option<&str>,
+) -> Result<(std::path::PathBuf, String), CommandError> {
+    let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    let base = plugin_dir(manager.plugins_dir(), id)?;
+    let manifest = plugin::load_manifest_lite(&base)
+        .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+    if manifest.id != id {
+        return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
+    }
+    let entry = state_of(manager.get_config(), id)
+        .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+    if !entry.enabled || expected_generation.is_some_and(|expected| expected != entry.install_generation) {
+        return Err(CommandError::Other(format!("插件已停用或安装身份变化: {id}")));
+    }
+    let in_data = is_data_path(rel);
+    let boot_file = rel == Path::new("manifest.json")
+        || (!manifest.entry.trim().is_empty()
+            && rel == plugin::sanitize_plugin_rel_path(&manifest.entry).map_err(CommandError::Other)?);
+    let permission = if in_data { "fs:storage" } else { "fs:assets" };
+    let kv_allowed = rel == Path::new("data/state.json")
+        && entry.granted_permissions.iter().any(|p| p == "storage")
+        && manifest.permissions.iter().any(|p| p == "storage");
+    if !(boot_file && !in_data) && !kv_allowed
+        && (!entry.granted_permissions.iter().any(|p| p == permission)
+            || !manifest.permissions.iter().any(|p| p == permission))
+    {
+        return Err(CommandError::Other(format!("插件未授予 {permission}: {id}")));
+    }
+    Ok((base, entry.install_generation.clone()))
+}
+
+async fn read_asset_payload(
+    state: &AppState,
+    id: &str,
+    rel_path: &str,
+    expected_generation: Option<&str>,
+) -> Result<Option<Vec<u8>>, CommandError> {
+    use crate::plugin::io_scheduler::{IoOwner, IoPriority};
+    plugin::validate_plugin_id(id).map_err(CommandError::Other)?;
+    if rel_path.len() > 4096 {
+        return Err(CommandError::Other("插件资产路径超长".into()));
+    }
+    let rel = sanitize_asset_path(rel_path)?;
+    let authority = legacy_file_authority(id)?;
+    let (_, generation) = asset_read_authority(state, id, &rel, expected_generation)?;
+    let cancelled = authority.0.subscribe();
+    // Legacy whole-file APIs retain their unbounded result contract. They share
+    // IO slots, not the new range transport's bounded byte reservations.
+    let permit = state.plugin_fs.scheduler().acquire(
+        IoOwner { plugin_id: id.to_string(), session_id: format!("legacy:{generation}") },
+        0,
+        IoPriority::Interactive,
+        cancelled,
+    ).await.map_err(CommandError::Other)?;
+    let gate = acquire_plugin_io(state).await?;
+    require_live_file_authority(&authority)?;
+    let (base, _) = asset_read_authority(state, id, &rel, Some(&generation))?;
+    drop(gate);
+    let open_rel = rel.clone();
+    let open_authority = authority.clone();
+    let (opened, permit) = super::plugin_fs::blocking_open(permit, move || {
+        require_live_file_authority(&open_authority)?;
+        open_authorized_asset(&base, &open_rel)
+    }).await?;
+    require_live_file_authority(&authority)?;
+    asset_read_authority(state, id, &rel, Some(&generation))?;
+    // No global transaction gate spans handle opens, data reads or encoding.
+    // The permit stays with each actual blocking task, not its async waiter.
+    let task_authority = authority.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        opened.map(|file| read_open_asset_cancellable(file, Some(&task_authority))).transpose()
+    }).await.map_err(|e| CommandError::Other(format!("插件文件读取任务失败: {e}")))??;
+    require_live_file_authority(&authority)?;
+    asset_read_authority(state, id, &rel, Some(&generation))?;
+    Ok(bytes)
+}
+
+/// Backwards-compatible whole-file text/base64 endpoint. No business size cap.
 #[tauri::command]
 pub async fn read_plugin_asset(
     id: String,
@@ -1215,58 +1349,27 @@ pub async fn read_plugin_asset(
     state: State<'_, AppState>,
 ) -> Result<Option<String>, CommandError> {
     require_main_window(&window)?;
-    plugin::validate_plugin_id(&id).map_err(CommandError::Other)?;
-    if rel_path.len() > 4096 {
-        return Err(CommandError::Other("插件资产路径超长".into()));
-    }
-    let _plugin_io = acquire_plugin_io(&state).await?;
-    let rel = sanitize_asset_path(&rel_path)?;
-    let root = {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let root = manager.plugins_dir().to_path_buf();
-        let manifest = plugin::load_manifest_lite(&plugin_dir(&root, &id)?)
-            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-        if manifest.id != id {
-            return Err(CommandError::Other("manifest id 与插件目录不一致".into()));
-        }
-        let entry = manager
-            .get_config()
-            .entities
-            .plugin_configs
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
-        if !entry.enabled {
-            return Err(CommandError::Other(format!("插件未启用: {id}")));
-        }
-        let in_data = is_data_path(&rel);
-        let boot_file = rel == Path::new("manifest.json")
-            || (!manifest.entry.trim().is_empty()
-                && rel
-                    == plugin::sanitize_plugin_rel_path(&manifest.entry)
-                        .map_err(CommandError::Other)?);
-        let permission = if in_data { "fs:storage" } else { "fs:assets" };
-        let kv_allowed = rel == Path::new("data/state.json")
-            && entry.granted_permissions.iter().any(|p| p == "storage")
-            && manifest.permissions.iter().any(|p| p == "storage");
-        if !(boot_file && !in_data)
-            && !kv_allowed
-            && (!entry.granted_permissions.iter().any(|p| p == permission)
-                || !manifest.permissions.iter().any(|p| p == permission))
-        {
-            return Err(CommandError::Other(format!(
-                "插件未授予 {permission}: {id}"
-            )));
-        }
-        root
-    };
-    tokio::task::block_in_place(move || {
-        let base = plugin_dir(&root, &id)?;
-        read_authorized_asset(&base, &rel).map(|bytes| bytes.map(|bytes| encode_asset(bytes, format.unwrap_or_default())))
-    })
+    let bytes = read_asset_payload(&state, &id, &rel_path, None).await?;
+    tokio::task::spawn_blocking(move || bytes.map(|bytes| encode_asset(bytes, format.unwrap_or_default())))
+        .await.map_err(|e| CommandError::Other(format!("插件文件编码任务失败: {e}")))
+}
+
+/// Raw fast path for existing binary callers. Missing files map to null in the
+/// host service, and unsupported IPC may fall back only in that legacy service.
+#[tauri::command]
+pub async fn read_plugin_asset_raw(
+    id: String,
+    rel_path: String,
+    expected_generation: Option<String>,
+    request: tauri::ipc::Request<'_>,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, CommandError> {
+    require_main_window(&window)?;
+    super::plugin_fs::require_raw_transport_for_legacy(&request)?;
+    let bytes = read_asset_payload(&state, &id, &rel_path, expected_generation.as_deref()).await?
+        .ok_or_else(|| CommandError::Other("PLUGIN_FILE_NOT_FOUND".into()))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// 写入插件私有区（`data/` 子目录，storage 权限授予后）。
@@ -1304,81 +1407,109 @@ pub async fn write_plugin_asset(
             ));
         }
     };
-    let _plugin_io = acquire_plugin_io(&state).await?;
+    use crate::plugin::io_scheduler::{IoOwner, IoPriority};
     let rel = sanitize_asset_path(&rel_path)?;
-    let first = rel
-        .components()
-        .next()
-        .and_then(|c| c.as_os_str().to_str())
-        .unwrap_or("");
-    if first != "data" {
-        return Err(CommandError::Other(
-            "插件写入仅限 data/ 私有区（fs:storage 权限范围）".into(),
-        ));
+    if !is_data_path(&rel) {
+        return Err(CommandError::Other("插件写入仅限 data/ 私有区（fs:storage 权限范围）".into()));
     }
-    let root = {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let root = manager.plugins_dir().to_path_buf();
-        let manifest = plugin::load_manifest_lite(&plugin_dir(&root, &id)?)
-            .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
-        let entry = manager
-            .get_config()
-            .entities
-            .plugin_configs
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
-        let storage_allowed = entry.granted_permissions.iter().any(|p| p == "fs:storage")
-            && manifest.permissions.iter().any(|p| p == "fs:storage");
-        let kv_allowed = rel == Path::new("data/state.json")
-            && entry.granted_permissions.iter().any(|p| p == "storage")
-            && manifest.permissions.iter().any(|p| p == "storage");
-        if manifest.id != id || !entry.enabled || !(storage_allowed || kv_allowed) {
-            return Err(CommandError::Other(format!(
-                "插件未启用或未授予存储权限: {id}"
-            )));
+    let authority = legacy_file_authority(&id)?;
+    let (_, generation) = asset_write_authority(&state, &id, &rel, None)?;
+    // Serialise writes to one plugin, not unrelated plugins or lifecycle control.
+    let write_guard = asset_write_queue(&id)?.lock_owned().await;
+    let cancelled = authority.0.subscribe();
+    let permit = state.plugin_fs.scheduler().acquire(
+        IoOwner { plugin_id: id.clone(), session_id: format!("legacy:{generation}") },
+        0, IoPriority::Interactive, cancelled,
+    ).await.map_err(CommandError::Other)?;
+    let gate = acquire_plugin_io(&state).await?;
+    require_live_file_authority(&authority)?;
+    let (base, _) = asset_write_authority(&state, &id, &rel, Some(&generation))?;
+    let mut prepared = tokio::task::block_in_place(|| {
+        let (parent, target) = asset_write_target(&base, &rel, true)?;
+        PreparedAssetWrite::new(parent, target).map_err(|e| CommandError::Io(e.to_string()))
+    })?;
+    drop(gate);
+    // The large write and fsync hold neither config_manager nor plugin_io. All
+    // owned resources stay with the real task even if its command is abandoned.
+    let task_authority = authority.clone();
+    let staged = tokio::task::spawn_blocking(move || {
+        require_live_file_authority(&task_authority)?;
+        prepared.write_cancellable(&bytes, Some(&task_authority))?;
+        Ok::<_, CommandError>((prepared, permit, write_guard))
+    }).await.map_err(|e| CommandError::Other(format!("插件文件写入任务失败: {e}")))??;
+    let (prepared, _permit, _write_guard) = staged;
+    let _gate = acquire_plugin_io(&state).await?;
+    require_live_file_authority(&authority)?;
+    let (base, _) = asset_write_authority(&state, &id, &rel, Some(&generation))?;
+    tokio::task::block_in_place(|| {
+        let (parent, target) = asset_write_target(&base, &rel, false)?;
+        if parent != prepared.parent || target != prepared.target {
+            return Err(CommandError::Other("插件文件目标在写入期间发生变化".into()));
         }
-        root
-    };
-    tokio::task::block_in_place(move || {
-        let base = plugin_dir(&root, &id)?;
-        let target = base.join(&rel);
-
-        let canon_base = base
-            .canonicalize()
-            .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
-        // Check each existing parent before creating the next component.
-        let mut parent = base.clone();
-        for component in rel.parent().unwrap().components() {
-            parent.push(component);
-            match std::fs::symlink_metadata(&parent) {
-                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
-                Ok(_) => return Err(CommandError::Other("写入目录含符号链接或非目录".into())),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::create_dir(&parent)
-                        .map_err(|e| CommandError::Io(format!("创建目录失败: {e}")))?;
-                }
-                Err(e) => return Err(CommandError::Io(format!("目录不可达: {e}"))),
-            }
-        }
-        let canon_parent = parent
-            .canonicalize()
-            .map_err(|e| CommandError::Io(format!("目录不可达: {e}")))?;
-        if !canon_parent.starts_with(&canon_base) {
-            return Err(CommandError::Other("写入路径越界，拒绝".into()));
-        }
-        match std::fs::symlink_metadata(&target) {
-            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {}
-            Ok(_) => return Err(CommandError::Other("写入目标不是普通文件".into())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(CommandError::Io(format!("写入目标不可达: {e}"))),
-        }
-        atomic_write_asset(&canon_parent, &target, &bytes)
-            .map_err(|e| CommandError::Io(format!("写入资产失败: {e}")))
+        prepared.commit().map_err(|e| CommandError::Io(format!("写入资产失败: {e}")))
     })
+}
+
+fn asset_write_authority(
+    state: &AppState, id: &str, rel: &Path, expected_generation: Option<&str>,
+) -> Result<(std::path::PathBuf, String), CommandError> {
+    let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    let base = plugin_dir(manager.plugins_dir(), id)?;
+    let manifest = plugin::load_manifest_lite(&base)
+        .map_err(|e| CommandError::Other(format!("插件 manifest 不可读: {e}")))?;
+    let entry = state_of(manager.get_config(), id)
+        .ok_or_else(|| CommandError::Other(format!("插件未安装: {id}")))?;
+    let storage_allowed = entry.granted_permissions.iter().any(|p| p == "fs:storage")
+        && manifest.permissions.iter().any(|p| p == "fs:storage");
+    let kv_allowed = rel == Path::new("data/state.json")
+        && entry.granted_permissions.iter().any(|p| p == "storage")
+        && manifest.permissions.iter().any(|p| p == "storage");
+    if manifest.id != id || !entry.enabled || !(storage_allowed || kv_allowed)
+        || expected_generation.is_some_and(|expected| expected != entry.install_generation)
+    {
+        return Err(CommandError::Other(format!("插件未启用、安装身份变化或未授予存储权限: {id}")));
+    }
+    Ok((base, entry.install_generation.clone()))
+}
+
+fn asset_write_queue(id: &str) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>, CommandError> {
+    use std::sync::{Arc, LazyLock, Mutex, Weak};
+    static QUEUES: LazyLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let mut queues = QUEUES.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    queues.retain(|_, queue| queue.strong_count() > 0);
+    if let Some(queue) = queues.get(id).and_then(Weak::upgrade) { return Ok(queue); }
+    let queue = Arc::new(tokio::sync::Mutex::new(()));
+    queues.insert(id.to_string(), Arc::downgrade(&queue));
+    Ok(queue)
+}
+
+fn asset_write_target(
+    base: &Path, rel: &Path, create_parents: bool,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), CommandError> {
+    let canonical_base = base.canonicalize().map_err(|e| CommandError::Io(e.to_string()))?;
+    let mut parent = base.to_path_buf();
+    for component in rel.parent().ok_or_else(|| CommandError::Other("文件缺少父目录".into()))?.components() {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(meta) if meta.is_dir() && !plugin::is_link_or_reparse(&meta) => {}
+            Err(e) if create_parents && e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&parent).map_err(|e| CommandError::Io(e.to_string()))?;
+            }
+            Ok(_) => return Err(CommandError::Other("写入目录含链接、重解析点或非目录".into())),
+            Err(e) => return Err(CommandError::Io(e.to_string())),
+        }
+    }
+    let parent = parent.canonicalize().map_err(|e| CommandError::Io(e.to_string()))?;
+    if !parent.starts_with(canonical_base) { return Err(CommandError::Other("写入路径越界".into())); }
+    let target = parent.join(rel.file_name().ok_or_else(|| CommandError::Other("文件名无效".into()))?);
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.is_file() && !plugin::is_link_or_reparse(&meta) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(CommandError::Other("写入目标不是普通文件".into())),
+        Err(e) => return Err(CommandError::Io(e.to_string())),
+    }
+    Ok((parent, target))
 }
 
 fn is_data_path(rel: &Path) -> bool {
@@ -1412,8 +1543,9 @@ fn sanitize_asset_path(raw: &str) -> Result<std::path::PathBuf, CommandError> {
     Ok(out)
 }
 
-/// Called only after authorization and acquisition of the IO gate.
-fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<Vec<u8>>, CommandError> {
+/// Open a capability-checked handle outside the transaction gate; the caller
+/// revalidates native authority before reading and again before delivery.
+fn open_authorized_asset(base: &Path, rel: &Path) -> Result<Option<std::fs::File>, CommandError> {
     let canon_base = base
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("插件目录不可达: {e}")))?;
@@ -1436,79 +1568,90 @@ fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<Vec<u8>>, Com
     let target = current
         .canonicalize()
         .map_err(|e| CommandError::Io(format!("资产不可达: {e}")))?;
-    if !target.starts_with(canon_base) {
+    if !target.starts_with(&canon_base) {
         return Err(CommandError::Other("资产路径越界".into()));
     }
-    read_asset_bytes(&target).map(Some)
+    crate::plugin::fs_access::open_regular_file(&canon_base, &rel.to_string_lossy())
+        .map(|opened| Some(opened.file))
+        .map_err(CommandError::Io)
 }
 
-fn read_asset_bytes(path: &Path) -> Result<Vec<u8>, CommandError> {
+#[cfg(test)]
+fn read_authorized_asset(base: &Path, rel: &Path) -> Result<Option<Vec<u8>>, CommandError> {
+    open_authorized_asset(base, rel)?.map(read_open_asset).transpose()
+}
+
+#[cfg(test)]
+fn read_open_asset(file: std::fs::File) -> Result<Vec<u8>, CommandError> {
+    read_open_asset_cancellable(file, None)
+}
+
+pub(crate) fn read_open_asset_cancellable(
+    mut file: std::fs::File, authority: Option<&LegacyFileAuthority>,
+) -> Result<Vec<u8>, CommandError> {
     use std::io::Read;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|e| CommandError::Io(format!("读取资产失败: {e}")))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    if !meta.is_file() || plugin::is_link_or_reparse(&meta) {
-        return Err(CommandError::Other("插件资产路径不是普通文件".into()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() != 1 {
-            return Err(CommandError::Other("插件资产不得是硬链接".into()));
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        };
-        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0
-            || information.nNumberOfLinks != 1
-        {
-            return Err(CommandError::Other("插件资产不得是硬链接".into()));
-        }
-    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| CommandError::Io(e.to_string()))?;
-    Ok(bytes)
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        if let Some(authority) = authority { require_live_file_authority(authority)?; }
+        let count = match file.read(&mut chunk) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|e| CommandError::Io(e.to_string()))?,
+        };
+        if count == 0 { return Ok(bytes); }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
 }
 
-fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let temporary = parent.join(format!(".write-{}", uuid::Uuid::new_v4()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    let result = (|| {
-        file.write_all(content)?;
-        file.sync_all()?;
-        drop(file);
-        plugin::transaction::replace_file(&temporary, target)?;
-        plugin::transaction::sync_dir(parent)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+struct PreparedAssetWrite {
+    parent: std::path::PathBuf,
+    target: std::path::PathBuf,
+    temporary: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl PreparedAssetWrite {
+    fn new(parent: std::path::PathBuf, target: std::path::PathBuf) -> std::io::Result<Self> {
+        let temporary = parent.join(format!(".write-{}", uuid::Uuid::new_v4()));
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        Ok(Self { parent, target, temporary, file: Some(file) })
     }
-    result
+
+    #[cfg(test)]
+    fn write(&mut self, content: &[u8]) -> Result<(), CommandError> {
+        self.write_cancellable(content, None)
+    }
+
+    fn write_cancellable(&mut self, content: &[u8], authority: Option<&LegacyFileAuthority>) -> Result<(), CommandError> {
+        use std::io::Write;
+        let mut file = self.file.take().ok_or_else(|| CommandError::Other("文件暂存已经完成".into()))?;
+        for chunk in content.chunks(64 * 1024) {
+            if let Some(authority) = authority { require_live_file_authority(authority)?; }
+            file.write_all(chunk).map_err(|e| CommandError::Io(format!("写入资产暂存失败: {e}")))?;
+        }
+        if let Some(authority) = authority { require_live_file_authority(authority)?; }
+        file.sync_all().map_err(|e| CommandError::Io(format!("同步资产暂存失败: {e}")))
+    }
+
+    fn commit(self) -> std::io::Result<()> {
+        plugin::transaction::replace_file(&self.temporary, &self.target)?;
+        plugin::transaction::sync_dir(&self.parent)
+    }
+}
+
+impl Drop for PreparedAssetWrite {
+    fn drop(&mut self) {
+        self.file.take();
+        // A UUID temporary file only; never remove the target on failure/cancel.
+        let _ = std::fs::remove_file(&self.temporary);
+    }
+}
+
+#[cfg(test)]
+fn atomic_write_asset(parent: &Path, target: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut prepared = PreparedAssetWrite::new(parent.to_path_buf(), target.to_path_buf())?;
+    prepared.write(content).map_err(std::io::Error::other)?;
+    prepared.commit()
 }
 
 pub(crate) fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
@@ -2924,6 +3067,65 @@ mod tests {
         ] {
             assert!(sanitize_asset_path(raw).is_err(), "{raw}");
         }
+    }
+
+    #[test]
+    fn legacy_file_authorities_retire_without_poisoning_a_new_runtime() {
+        let id = format!("com.example.{}", uuid::Uuid::new_v4().simple());
+        let old = legacy_file_authority(&id).unwrap();
+        let same = legacy_file_authority(&id).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&old, &same));
+        cancel_legacy_file_authority(&id);
+        assert!(require_live_file_authority(&old).is_err());
+        let next = legacy_file_authority(&id).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old, &next));
+        assert!(require_live_file_authority(&next).is_ok());
+    }
+
+    #[test]
+    fn opened_asset_reads_the_original_file_after_path_replacement() {
+        let root = canonical_test_temp_dir().join(format!("plugin_open_handle_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data/file.bin"), b"original").unwrap();
+        let opened = open_authorized_asset(&root, Path::new("data/file.bin")).unwrap().unwrap();
+        fs::rename(root.join("data/file.bin"), root.join("data/old.bin")).unwrap();
+        fs::write(root.join("data/file.bin"), b"replacement").unwrap();
+        assert_eq!(read_open_asset(opened).unwrap(), b"original");
+        assert_eq!(read_authorized_asset(&root, Path::new("data/file.bin")).unwrap().unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn abandoned_staged_asset_write_preserves_the_committed_target() {
+        let root = canonical_test_temp_dir().join(format!("plugin_staged_write_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("file.bin");
+        fs::write(&target, b"committed").unwrap();
+        let mut staged = PreparedAssetWrite::new(root.clone(), target.clone()).unwrap();
+        let temporary = staged.temporary.clone();
+        staged.write(b"not published").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"committed");
+        drop(staged);
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"committed");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_legacy_reads_and_writes_do_not_publish_data() {
+        let root = canonical_test_temp_dir().join(format!("plugin_cancelled_io_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let target = root.join("data/file.bin");
+        fs::write(&target, b"committed").unwrap();
+        let opened = open_authorized_asset(&root, Path::new("data/file.bin")).unwrap().unwrap();
+        let (cancel, _) = tokio::sync::watch::channel(true);
+        let authority = LegacyFileAuthority(cancel);
+        assert!(read_open_asset_cancellable(opened, Some(&authority)).is_err());
+        let mut staged = PreparedAssetWrite::new(root.join("data"), target.clone()).unwrap();
+        assert!(staged.write_cancellable(b"forbidden", Some(&authority)).is_err());
+        drop(staged);
+        assert_eq!(fs::read(&target).unwrap(), b"committed");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

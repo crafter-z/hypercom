@@ -4,6 +4,7 @@
  * 参数约定见 `./tauri.ts` 文件头。
  */
 import { invoke } from '@tauri-apps/api/core';
+import { decodeLegacyDirectoryFrame, decodeLegacyPluginBytes, isPluginRawUnsupported } from './pluginBinary';
 
 export interface TextFileDialogOptions {
   title?: string;
@@ -69,6 +70,17 @@ export const fileService = {
   /** 读取已授权目录内的单个文件；字节以 base64 返回。 */
   readPluginDirectoryFile: (pluginId: string, grantId: string, relPath: string): Promise<PluginDirectoryFile> => {
     return invoke('plugin_read_directory_file', { pluginId, grantId, relPath });
+  },
+
+  /** Same whole-file result as the legacy API, with raw bytes on capable IPC. */
+  async readPluginDirectoryBytes(pluginId: string, grantId: string, relPath: string): Promise<{ path: string; bytes: Uint8Array }> {
+    try {
+      return decodeLegacyDirectoryFrame(await invoke<unknown>('plugin_read_directory_file_raw', { pluginId, grantId, relPath }));
+    } catch (error) {
+      if (!isPluginRawUnsupported(error)) throw error;
+      const legacy = await invoke<PluginDirectoryFile>('plugin_read_directory_file', { pluginId, grantId, relPath });
+      return { path: legacy.path, bytes: decodeLegacyPluginBytes(legacy.base64) };
+    }
   },
 
   /** 读取已授权目录内单个条目的元数据（含 modifiedMs）。 */

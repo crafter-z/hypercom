@@ -25,6 +25,7 @@ import libSource from '../../src-tauri/src/lib.rs?raw';
 import serialRustSource from '../../src-tauri/src/commands/serial.rs?raw';
 import pluginRustSource from '../../src-tauri/src/commands/plugin.rs?raw';
 import httpRustSource from '../../src-tauri/src/commands/plugin_http.rs?raw';
+import fsRustSource from '../../src-tauri/src/commands/plugin_fs.rs?raw';
 import shellRustSource from '../../src-tauri/src/commands/plugin_shell.rs?raw';
 import fileRustSource from '../../src-tauri/src/commands/file.rs?raw';
 import systemRustSource from '../../src-tauri/src/commands/system_cmds.rs?raw';
@@ -299,7 +300,7 @@ function commandWireParameters(source: string, command: string): WireParameter[]
     if (!parameter) continue;
     const match = /^(\w+)\s*:\s*([\s\S]+)$/.exec(parameter);
     if (!match) throw new Error(`Cannot parse ${command} parameter: ${parameter}`);
-    if (/(?:^|::)(?:State|Window|Webview|WebviewWindow|AppHandle)(?:\b|<)/.test(match[2])) continue;
+    if (/(?:^|::)(?:State|Window|Webview|WebviewWindow|AppHandle|Request)(?:\b|<)/.test(match[2])) continue;
     parameters.push({
       name: match[1].replace(/_([a-z])/g, (_value, letter: string) => letter.toUpperCase()),
       optional: /^Option\s*</.test(match[2].trim()),
@@ -308,7 +309,7 @@ function commandWireParameters(source: string, command: string): WireParameter[]
   return parameters;
 }
 
-const boundaryRustSources = [pluginRustSource, httpRustSource, shellRustSource, fileRustSource, systemRustSource, updateRustSource];
+const boundaryRustSources = [pluginRustSource, httpRustSource, fsRustSource, shellRustSource, fileRustSource, systemRustSource, updateRustSource];
 
 describe('plugin / HTTP / view / close / update command parameter contract', () => {
   it('derives wire keys from real Rust signatures instead of a handwritten mirror', () => {
@@ -333,6 +334,8 @@ describe('plugin / HTTP / view / close / update command parameter contract', () 
   it('parses injected context and generic payloads without silently losing fields', () => {
     expect(commandWireParameters('pub async fn sample(source: tauri::Webview, state: State<\'_, AppState>, expected_generation: String, values: Option<Vec<String>>) -> Result<(), CommandError> {', 'sample'))
       .toEqual([{ name: 'expectedGeneration', optional: false }, { name: 'values', optional: true }]);
+    expect(commandWireParameters('pub async fn raw(request: tauri::ipc::Request<\'_>, shell_request: PluginShellRequest, ranges: Vec<PluginFsRange>) -> Result<Response, CommandError> {', 'raw'))
+      .toEqual([{ name: 'shellRequest', optional: false }, { name: 'ranges', optional: false }]);
   });
 });
 

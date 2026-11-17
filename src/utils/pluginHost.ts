@@ -24,6 +24,7 @@ import i18n from '../i18n';
 import { hasNoRpcDeadline, PLUGIN_BINARY_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
 import { cleanHostText, executeHostApi } from './pluginHostApi';
 import { cancelPluginHttp } from './pluginHttp';
+import { PluginFsContext, pluginFsTransferables, releasePluginFsResultWithRetry } from './pluginFs';
 import { MAX_VIEW_BINARY_TRANSFER_BYTES, VIEW_BINARY_ACK_TIMEOUT_MS } from './pluginViewBinary';
 import { checkOpAllowed } from './pluginRpc';
 import { removePluginPanel } from './pluginPanelRegistry';
@@ -53,8 +54,10 @@ export const PLUGIN_HEALTH_MAX_MISSES = 2;
 export const MAX_PENDING_BINARY_BYTES = MAX_VIEW_BINARY_TRANSFER_BYTES;
 /** Concurrent host→Worker binary transfers allowed per view instance. */
 export const MAX_PENDING_BINARY_TRANSFERS_PER_VIEW = 4;
-/** `http.cancel` may bypass the ordinary RPC slot cap by at most this many entries. */
+/** HTTP/FS cancellation has its own bounded lane, independent of ordinary or FS work. */
 export const MAX_CANCEL_RPC_BYPASS = 64;
+/** Scans cannot consume ordinary RPC slots needed by buttons, serial traffic and controls. */
+export const MAX_FS_RPC_REQUESTS = 8;
 /** Process-wide epoch source so a reloaded session never reuses view epochs. */
 let workerEpochSeq = 0;
 
@@ -204,6 +207,9 @@ export class PluginSession {
   private crashWindowStart = 0;
   /** Retirement callbacks for this worker's RPC slots; backend operations may continue after retirement. */
   private readonly retireRequests = new Set<() => void>();
+  private readonly fsRequests = new Set<() => void>();
+  private readonly cancelRequests = new Set<() => void>();
+  private fsContext: PluginFsContext | undefined;
   /** Host-side RPC error logging is plugin-triggerable; apply the same token
    *  bucket as explicit log calls so a denied-op loop cannot flood diaglog. */
   private readonly errorLogQuota = new PluginLogQuota();
@@ -371,6 +377,7 @@ export class PluginSession {
       this.manifest = manifest;
       this.ready = false;
       this.worker = worker;
+      this.fsContext = new PluginFsContext(this.pluginId, this.installGeneration, this.epoch);
       worker.onmessage = (ev: MessageEvent) => {
         if (this.worker !== worker) return;
         const msg = ev.data as {
@@ -470,14 +477,15 @@ export class PluginSession {
         else worker.postMessage({ seq: req.seq, ...payload });
       }
     };
-    const atCapacity = this.retireRequests.size >= MAX_PENDING_MESSAGES;
-    if (atCapacity &&
-      (req.op !== 'http.cancel' || this.retireRequests.size >= MAX_PENDING_MESSAGES + MAX_CANCEL_RPC_BYPASS)) {
-      // Cancellation is the escape hatch for a saturated session, but the bypass
-      // itself is bounded so a cancel flood cannot grow the slot set without limit.
+    const isFs = req.op === 'fs.readRange' || req.op === 'fs.readRanges' || req.op === 'fs.listDirectoryPage';
+    const isCancel = req.op === 'http.cancel' || req.op === 'fs.cancel';
+    const ordinaryCount = this.retireRequests.size - this.fsRequests.size - this.cancelRequests.size;
+    if (isFs ? this.fsRequests.size >= MAX_FS_RPC_REQUESTS
+      : isCancel ? this.cancelRequests.size >= MAX_CANCEL_RPC_BYPASS : ordinaryCount >= MAX_PENDING_MESSAGES) {
       respond({ ok: false, error: 'plugin RPC capacity exceeded' });
       return;
     }
+    const fsContext = this.fsContext;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let active = true;
     const retire = (): boolean => {
@@ -485,9 +493,13 @@ export class PluginSession {
       active = false;
       clearTimeout(timer);
       this.retireRequests.delete(retire);
+      this.fsRequests.delete(retire);
+      this.cancelRequests.delete(retire);
       return true;
     };
     this.retireRequests.add(retire);
+    if (isFs) this.fsRequests.add(retire);
+    if (isCancel) this.cancelRequests.add(retire);
     // File reads have no size cap; native selection/export wait for the user, and
     // HTTP and shell.execute wait under their native deadlines, not the generic RPC timer.
     if (!hasNoRpcDeadline(req.op)) {
@@ -495,6 +507,7 @@ export class PluginSession {
         if (retire()) respond({ ok: false, error: 'plugin RPC timed out' });
       }, req.op === 'view.sendBinary' ? PLUGIN_BINARY_RPC_TIMEOUT_MS : PLUGIN_RPC_TIMEOUT_MS);
     }
+    let result: unknown;
     try {
       // Admission and queued TTY effects share the same live worker/grant authority.
       const beforeSend = (): void => {
@@ -505,10 +518,14 @@ export class PluginSession {
         if (denied) throw new Error(denied);
       };
       beforeSend();
-      const result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest, beforeSend);
+      result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest, beforeSend, fsContext);
+      // Recheck immediately before delivery, including results from old/native APIs.
+      beforeSend();
       if (retire()) {
         let transfer: Transferable[] | undefined;
-        if (req.op === 'fs.read' && result instanceof Uint8Array) {
+        if (req.op === 'fs.readRange' || req.op === 'fs.readRanges') {
+          transfer = pluginFsTransferables(result);
+        } else if (req.op === 'fs.read' && result instanceof Uint8Array) {
           transfer = [result.buffer];
         } else if (req.op === 'http.read' && result !== null && typeof result === 'object' && 'bytes' in result) {
           const { bytes } = result;
@@ -527,7 +544,8 @@ export class PluginSession {
           const { bytes } = result;
           if (bytes instanceof Uint8Array) transfer = [bytes.buffer];
         }
-        respond({ ok: true, result }, transfer);
+        // Shared batch buffers (and any repeated old file buffers) transfer once.
+        respond({ ok: true, result }, transfer ? [...new Set(transfer)] : undefined);
       }
     } catch (e) {
       if (!active) return;
@@ -539,6 +557,18 @@ export class PluginSession {
         console.warn(`[pluginHost] ${this.pluginId} RPC 错误日志超限，已累计抑制 ${verdict.droppedTotal} 条`);
       }
       if (retire()) respond({ ok: false, error: errMsg });
+    } finally {
+      // Keep the native response byte lease through postMessage. This also runs
+      // when delivery throws, permissions change, or the old Worker is discarded.
+      await releasePluginFsResultWithRetry(result, error => {
+        const verdict = this.errorLogQuota.tryConsume(Date.now());
+        if (verdict.allowed) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[pluginHost] ${this.pluginId} FS release failed; native reaper will reclaim:`, cleanHostText(message));
+        } else if (verdict.warn) {
+          console.warn(`[pluginHost] ${this.pluginId} FS cleanup diagnostics suppressed: ${verdict.droppedTotal}`);
+        }
+      });
     }
   }
 
@@ -549,6 +579,8 @@ export class PluginSession {
       this.restartTimer = null;
     }
     this.starting = null;
+    this.fsContext?.stop();
+    this.fsContext = undefined;
     ++this.generation;
     // Wake every native open/read owned by this session; fresh request IDs on the
     // replacement generation are untouched.

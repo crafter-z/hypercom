@@ -4,6 +4,8 @@ import { PluginHostManager, PluginSession, MAX_PENDING_MESSAGES, MAX_PENDING_CON
 import { executeHostApi } from './pluginHostApi';
 import { cancelPluginHttp } from './pluginHttp';
 import { resetPluginSnapshotForTest, syncStorePluginConfigs } from './pluginConfigSnapshot';
+import { MAX_FS_RPC_REQUESTS } from './pluginHost';
+import { attachPluginFsLease, PluginFsContext } from './pluginFs';
 
 const readAsset = vi.fn();
 const disable = vi.fn();
@@ -930,6 +932,95 @@ describe('PluginSession deadline and startup generation regressions', () => {
       worker.emit({ eventAck: probes[probes.length - 1][0].eventId });
     }
     expect(worker.terminate).not.toHaveBeenCalled(); session.stop();
+  });
+});
+
+describe('PluginSession filesystem lane and delivery ownership', () => {
+  it('reserves ordinary RPC capacity independently of FS scans and keeps cancellation bounded/reachable', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:assets'] }] });
+    vi.mocked(executeHostApi).mockImplementation(() => new Promise(() => {}));
+    const session = new PluginSession(pluginId); await session.start();
+    const worker = TestWorker.created[0];
+    for (let i = 0; i < MAX_FS_RPC_REQUESTS; i++) worker.emit({ seq: i + 1, op: 'fs.readRange', args: { rel: 'a' } });
+    worker.emit({ seq: 90, op: 'fs.readRange', args: { rel: 'a' } });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 90, ok: false, error: 'plugin RPC capacity exceeded' });
+    for (let i = 0; i < MAX_PENDING_MESSAGES; i++) worker.emit({ seq: 100 + i, op: 'ports.list' });
+    expect(executeHostApi).toHaveBeenCalledTimes(MAX_FS_RPC_REQUESTS + MAX_PENDING_MESSAGES);
+    worker.emit({ seq: 200, op: 'ports.list' });
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 200, ok: false, error: 'plugin RPC capacity exceeded' });
+    for (let i = 0; i < 64; i++) worker.emit({ seq: 300 + i, op: 'fs.cancel', args: { requestId: 'cancel' } });
+    worker.emit({ seq: 500, op: 'fs.cancel', args: { requestId: 'cancel' } });
+    expect(executeHostApi).toHaveBeenCalledTimes(MAX_FS_RPC_REQUESTS + MAX_PENDING_MESSAGES + 64);
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 500, ok: false, error: 'plugin RPC capacity exceeded' });
+    expect(vi.mocked(executeHostApi).mock.calls[0][5]).toBeInstanceOf(PluginFsContext);
+    session.stop();
+  });
+  it('deduplicates shared batch transfers and releases the native lease only after postMessage', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:assets'] }] });
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    const payload = new Uint8Array([1, 2]); const result = { results: [{ rel: 'a', bytes: payload.subarray(0, 1) }, { rel: 'b', bytes: payload.subarray(1) }] };
+    const release = vi.fn().mockResolvedValue(undefined); attachPluginFsLease(result, release);
+    vi.mocked(executeHostApi).mockResolvedValueOnce(result);
+    worker.postMessage.mockImplementation((message) => { if (message.seq === 1) expect(release).not.toHaveBeenCalled(); });
+    worker.emit({ seq: 1, op: 'fs.readRanges', args: { ranges: [{ rel: 'a' }, { rel: 'b' }] } });
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: true, result }, [payload.buffer]);
+    session.stop();
+  });
+  it.each(['stop', 'revoke', 'post-failure'])('releases raw bytes on %s instead of leaking a native response lease', async mode => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:assets'] }] });
+    const pending = deferredResult<unknown>(); vi.mocked(executeHostApi).mockReturnValueOnce(pending.promise);
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    const result = new Uint8Array([1]); const release = vi.fn().mockResolvedValue(undefined); attachPluginFsLease(result, release);
+    worker.emit({ seq: 1, op: 'fs.readRange', args: { rel: 'a' } });
+    if (mode === 'stop') { session.stop(); await session.start(); }
+    if (mode === 'revoke') useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: [] }] });
+    if (mode === 'post-failure') worker.postMessage.mockImplementation(() => { throw new Error('structured clone failed'); });
+    pending.resolve(result); await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    if (mode !== 'post-failure') expect(worker.postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result }, expect.anything());
+    if (mode === 'stop') expect(TestWorker.created[1].postMessage).not.toHaveBeenCalledWith({ seq: 1, ok: true, result }, expect.anything());
+    session.stop();
+  });
+});
+
+describe('PluginSession page leases and bounded release retry', () => {
+  it('posts a directory page before releasing and retries one transient release failure', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:open-dir'] }] });
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    const result = { entries: [], nextCursor: null };
+    const release = vi.fn().mockRejectedValueOnce(new Error('transient release')).mockResolvedValue(undefined);
+    attachPluginFsLease(result, release); vi.mocked(executeHostApi).mockResolvedValueOnce(result);
+    worker.postMessage.mockImplementation(message => { if (message.seq === 1) expect(release).not.toHaveBeenCalled(); });
+    worker.emit({ seq: 1, op: 'fs.listDirectoryPage', args: { grantId: 'grant' } });
+    await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(2));
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 1, ok: true, result }); session.stop();
+  });
+  it.each(['stop', 'revoke', 'post-failure'])('releases page metadata on %s', async mode => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:open-dir'] }] });
+    const waiting = deferredResult<unknown>(); vi.mocked(executeHostApi).mockReturnValueOnce(waiting.promise);
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    const result = { entries: [], nextCursor: null }; const release = vi.fn().mockResolvedValue(undefined); attachPluginFsLease(result, release);
+    worker.emit({ seq: 1, op: 'fs.listDirectoryPage', args: { grantId: 'grant' } });
+    if (mode === 'stop') session.stop();
+    if (mode === 'revoke') useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: [] }] });
+    if (mode === 'post-failure') worker.postMessage.mockImplementation(() => { throw new Error('page clone failed'); });
+    waiting.resolve(result); await vi.waitFor(() => expect(release).toHaveBeenCalledOnce()); session.stop();
+  });
+  it('limits permanently failed release to two attempts per response and rate-limits diagnostics', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(100000);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:assets'] }] });
+    const release = vi.fn().mockRejectedValue(new Error('release unavailable'));
+    vi.mocked(executeHostApi).mockImplementation(async () => {
+      const result = new Uint8Array([1]); attachPluginFsLease(result, release); return result;
+    });
+    const session = new PluginSession(pluginId); await session.start(); const worker = TestWorker.created[0];
+    for (let start = 0; start < 25; start += MAX_FS_RPC_REQUESTS) {
+      const end = Math.min(25, start + MAX_FS_RPC_REQUESTS);
+      for (let index = start; index < end; index++) worker.emit({ seq: index + 1, op: 'fs.readRange', args: { rel: 'a' } });
+      await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(end * 2));
+    }
+    expect(warn).toHaveBeenCalledTimes(21); session.stop();
   });
 });
 

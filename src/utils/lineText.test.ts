@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { TerminalLine } from '../types';
-import { decodeBytes, getLineText, normalizeEncodingLabel } from './lineText';
+import { createDecoder, decodeBytes, getLineText, normalizeEncodingLabel } from './lineText';
 
 const makeLine = (overrides?: Partial<TerminalLine>): TerminalLine => ({
   timestamp: 0,
@@ -49,6 +49,22 @@ describe('decodeBytes', () => {
   it('strips a leading UTF-8 BOM (ignoreBOM: false)', () => {
     // BOM 是编码标记而非内容：进入行文本会污染渲染、搜索 haystack 与右键复制。
     expect(decodeBytes(new Uint8Array([0xef, 0xbb, 0xbf, 0x41]), 'UTF-8')).toBe('A');
+  });
+});
+
+describe('createDecoder', () => {
+  it('keeps replacement decoding as the default', () => {
+    expect(createDecoder('utf-8').decode(new Uint8Array([0xff]))).toBe('\ufffd');
+  });
+
+  it('allows strict protocol UTF-8 without changing BOM handling', () => {
+    const decoder = createDecoder('utf-8', { fatal: true });
+    expect(() => decoder.decode(new Uint8Array([0xff]))).toThrow();
+    expect(createDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xef, 0xbb, 0xbf, 65]))).toBe('A');
+  });
+
+  it('retains strictness when an invalid encoding label falls back', () => {
+    expect(() => createDecoder('INVALID', { fatal: true }).decode(new Uint8Array([0xff]))).toThrow();
   });
 });
 

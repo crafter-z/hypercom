@@ -46,7 +46,7 @@ fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError>
 /// and the installed manifest must still declare one of them. Returns the
 /// install generation the caller reviewed, so a later replacement cannot reuse
 /// an older picker result.
-fn plugin_any_permission_generation(
+pub(crate) fn plugin_any_permission_generation(
     state: &crate::AppState,
     plugin_id: &str,
     permissions: &[&str],
@@ -88,7 +88,7 @@ fn plugin_any_permission_generation(
     Ok(entry.install_generation.clone())
 }
 
-fn plugin_permission_generation(
+pub(crate) fn plugin_permission_generation(
     state: &crate::AppState,
     plugin_id: &str,
     permission: &str,
@@ -286,12 +286,12 @@ pub struct PluginPickedDirectory {
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginDirectoryEntry {
-    name: String,
-    rel: String,
-    kind: String,
-    size: u64,
-    modified_ms: u64,
+pub(crate) struct PluginDirectoryEntry {
+    pub(crate) name: String,
+    pub(crate) rel: String,
+    pub(crate) kind: String,
+    pub(crate) size: u64,
+    pub(crate) modified_ms: u64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -419,17 +419,16 @@ pub async fn plugin_pick_files(
 // full read/write capability inside the user-selected tree; no artificial TTL or
 // grant-count cap is applied. Structural path fences (no links/escapes) remain.
 
-struct PluginDirectoryGrant {
-    plugin_id: String,
-    install_generation: String,
-    root: PathBuf,
+pub(crate) struct PluginDirectoryGrant {
+    pub(crate) plugin_id: String,
+    pub(crate) install_generation: String,
+    pub(crate) root: PathBuf,
 }
 
 static PLUGIN_DIRECTORY_GRANTS: LazyLock<Mutex<HashMap<String, PluginDirectoryGrant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const MAX_PLUGIN_DIRECTORY_GRANT_ID_CHARS: usize = 128;
-const MAX_PLUGIN_DIRECTORY_REL_CHARS: usize = 4096;
 
 /// Native pickers may return a symlink/junction path. Canonicalizing first would
 /// silently turn that into a grant for the link target, contrary to the directory
@@ -477,7 +476,7 @@ fn create_directory_grant(
     Ok(grant_id)
 }
 
-fn directory_grant_root(
+pub(crate) fn directory_grant_root(
     plugin_id: &str,
     grant_id: &str,
     install_generation: &str,
@@ -510,50 +509,11 @@ pub(super) fn revoke_plugin_directory_grants(plugin_id: &str) {
 /// Normalize a plugin-supplied path relative to the picked root. Rejects
 /// absolute/drive/UNC input, `..`, control characters and (on Windows) aliases
 /// that could resolve to a device or ADS. `.` and empty segments are ignored.
-fn sanitize_directory_rel(raw: &str) -> Result<(PathBuf, String), CommandError> {
-    if raw.len() > MAX_PLUGIN_DIRECTORY_REL_CHARS {
-        return Err(CommandError::Other("目录相对路径超过长度上限".into()));
-    }
-    if raw.is_empty() {
-        return Ok((PathBuf::new(), String::new()));
-    }
-    let normalized = raw.replace('\\', "/");
-    if normalized.starts_with('/') {
-        return Err(CommandError::Other("目录相对路径不能是绝对路径".into()));
-    }
-    let mut out = PathBuf::new();
-    let mut parts = Vec::new();
-    for part in normalized.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            return Err(CommandError::Other("目录相对路径不允许 ..".into()));
-        }
-        if part.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') {
-            return Err(CommandError::Other("目录相对路径含控制字符".into()));
-        }
-        if parts.is_empty() && part.len() == 2 && part.ends_with(':') {
-            return Err(CommandError::Other("Windows 盘符路径不允许".into()));
-        }
-        #[cfg(windows)]
-        {
-            if part.ends_with(['.', ' '])
-                || part.contains(':')
-                || crate::plugin::is_reserved_windows_name(part)
-            {
-                return Err(CommandError::Other(format!(
-                    "目录相对路径含 Windows 路径别名: {part}"
-                )));
-            }
-        }
-        out.push(part);
-        parts.push(part.to_string());
-    }
-    Ok((out, parts.join("/")))
+pub(crate) fn sanitize_directory_rel(raw: &str) -> Result<(PathBuf, String), CommandError> {
+    crate::plugin::fs_access::sanitize_directory_rel(raw).map_err(CommandError::Other)
 }
 
-fn resolve_directory_target(root: &Path, rel: &Path) -> Result<PathBuf, CommandError> {
+pub(crate) fn resolve_directory_target(root: &Path, rel: &Path) -> Result<PathBuf, CommandError> {
     let components: Vec<_> = rel.components().collect();
     let mut current = root.to_path_buf();
     for (index, component) in components.iter().enumerate() {
@@ -579,7 +539,7 @@ fn resolve_directory_target(root: &Path, rel: &Path) -> Result<PathBuf, CommandE
     Ok(canonical)
 }
 
-fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
+pub(crate) fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
     metadata
         .modified()
         .ok()
@@ -588,7 +548,7 @@ fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn entry_kind(metadata: &std::fs::Metadata) -> &'static str {
+pub(crate) fn entry_kind(metadata: &std::fs::Metadata) -> &'static str {
     if crate::plugin::is_link_or_reparse(metadata) {
         "other"
     } else if metadata.is_dir() {
@@ -600,7 +560,7 @@ fn entry_kind(metadata: &std::fs::Metadata) -> &'static str {
     }
 }
 
-fn make_entry(name: String, rel: String, metadata: &std::fs::Metadata) -> PluginDirectoryEntry {
+pub(crate) fn make_entry(name: String, rel: String, metadata: &std::fs::Metadata) -> PluginDirectoryEntry {
     let kind = entry_kind(metadata);
     PluginDirectoryEntry {
         name,
@@ -1062,6 +1022,69 @@ pub async fn plugin_read_directory_file(
         .map_err(|e| CommandError::Other(format!("目录文件读取任务失败: {e}")))?
 }
 
+/// Whole-file compatibility fast path. Unlike range reads, this intentionally
+/// retains the old unbounded result contract; only the transport changes.
+#[tauri::command]
+pub async fn plugin_read_directory_file_raw(
+    plugin_id: String,
+    grant_id: String,
+    rel_path: String,
+    request: tauri::ipc::Request<'_>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<tauri::ipc::Response, CommandError> {
+    use crate::plugin::io_scheduler::{IoOwner, IoPriority};
+    super::plugin::require_main_window(&window)?;
+    super::plugin_fs::require_raw_transport_for_legacy(&request)?;
+    let authority = super::plugin::legacy_file_authority(&plugin_id)?;
+    let generation = plugin_permission_generation(&state, &plugin_id, "fs:open-dir")?;
+    let (rel, rel_text) = sanitize_directory_rel(&rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
+    }
+    let permit = state.plugin_fs.scheduler().acquire(
+        IoOwner { plugin_id: plugin_id.clone(), session_id: format!("legacy:{generation}") },
+        0, IoPriority::Interactive, authority.subscribe(),
+    ).await.map_err(CommandError::Other)?;
+    super::plugin::require_live_file_authority(&authority)?;
+    if plugin_permission_generation(&state, &plugin_id, "fs:open-dir")? != generation {
+        return Err(CommandError::Other("插件目录权限已撤销".into()));
+    }
+    let root = directory_grant_root(&plugin_id, &grant_id, &generation)?;
+    let task_authority = authority.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        super::plugin::require_live_file_authority(&task_authority)?;
+        let path = resolve_directory_target(&root, &rel)?.display().to_string();
+        let opened = crate::plugin::fs_access::open_legacy_directory_file(&root, &rel_text)
+            .map_err(CommandError::Io)?;
+        let bytes = super::plugin::read_open_asset_cancellable(opened.file, Some(&task_authority))?;
+        encode_plugin_directory_raw(&path, &bytes)
+    }).await.map_err(|e| CommandError::Other(format!("目录文件读取任务失败: {e}")))??;
+    super::plugin::require_live_file_authority(&authority)?;
+    if plugin_permission_generation(&state, &plugin_id, "fs:open-dir")? != generation {
+        return Err(CommandError::Other("插件目录权限已撤销".into()));
+    }
+    directory_grant_root(&plugin_id, &grant_id, &generation)?;
+    Ok(response)
+}
+
+fn encode_plugin_directory_raw(path: &str, bytes: &[u8]) -> Result<tauri::ipc::Response, CommandError> {
+    let metadata = serde_json::to_vec(&serde_json::json!({ "path": path }))
+        .map_err(|e| CommandError::Other(format!("目录文件元数据编码失败: {e}")))?;
+    if metadata.len() > 128 * 1024 {
+        return Err(CommandError::Other("目录文件路径元数据过长".into()));
+    }
+    let capacity = 8usize.checked_add(metadata.len()).and_then(|size| size.checked_add(bytes.len()))
+        .ok_or_else(|| CommandError::Other("目录文件响应长度溢出".into()))?;
+    let mut frame = Vec::with_capacity(capacity);
+    frame.extend_from_slice(b"HCFD");
+    frame.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&metadata);
+    frame.extend_from_slice(bytes);
+    Ok(tauri::ipc::Response::new(frame))
+}
+
 #[tauri::command]
 pub async fn plugin_stat_directory_entry(
     plugin_id: String,
@@ -1494,6 +1517,28 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::commands::file::{reject_linked_directory_source, resolve_directory_target};
+
+    #[test]
+    fn legacy_directory_raw_frame_contains_unencoded_bytes_and_display_path() {
+        use tauri::ipc::{InvokeResponseBody, IpcResponse};
+        let response = super::encode_plugin_directory_raw("C:/日志/data.bin", &[0, 255, 128, 65]).unwrap();
+        let InvokeResponseBody::Raw(frame) = response.body().unwrap() else { panic!("raw response required") };
+        assert_eq!(&frame[..4], b"HCFD");
+        let length = u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize;
+        let metadata: serde_json::Value = serde_json::from_slice(&frame[8..8 + length]).unwrap();
+        assert_eq!(metadata["path"], "C:/日志/data.bin");
+        assert_eq!(&frame[8 + length..], &[0, 255, 128, 65]);
+    }
+
+    #[test]
+    fn legacy_directory_raw_empty_file_is_not_missing_and_metadata_is_bounded() {
+        use tauri::ipc::{InvokeResponseBody, IpcResponse};
+        let InvokeResponseBody::Raw(frame) = super::encode_plugin_directory_raw("empty", &[]).unwrap().body().unwrap()
+            else { panic!("raw response required") };
+        let length = u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize;
+        assert_eq!(frame.len(), 8 + length);
+        assert!(super::encode_plugin_directory_raw(&"x".repeat(128 * 1024), &[]).is_err());
+    }
 
     #[test]
     fn dialog_budget_lives_with_owned_permits_and_retires_expired_plugin_ids() {

@@ -23,7 +23,7 @@ import { appendTerminalLine } from './terminal/viewportManager';
 import { pluginKv } from './pluginKv';
 import { appendPluginPanel, clearPluginPanel, getPluginPanelSnapshot } from './pluginPanelRegistry';
 import { addPluginBytesObserver } from './pluginBytesObserver';
-import { checkPortScope, OP_PERMISSIONS } from './pluginRpc';
+import { checkOpAllowed, checkPortScope, OP_PERMISSIONS } from './pluginRpc';
 import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
 import { exportPluginPanel } from './pluginPanelExport';
@@ -32,6 +32,10 @@ import { executePluginHttp } from './pluginHttp';
 import { executePluginShell } from './pluginShell';
 import { acquirePluginDialog } from './pluginDialogBudget';
 import { decodeBytes } from './lineText';
+import type { PluginFsContext } from './pluginFs';
+import { requirePluginFsPath } from './pluginFsPath';
+import { MAX_PLUGIN_FS_BATCH_BYTES, MAX_PLUGIN_FS_RANGE_BYTES, MAX_PLUGIN_FS_RANGES } from '../services/pluginFs';
+import type { PluginFsPriority, PluginFsRange } from '../services/pluginFs';
 
 /** 插件可见的端口摘要（避免把内部字段全量暴露给插件）。 */
 export interface PluginPortView {
@@ -181,8 +185,43 @@ export async function executeHostApi(
   args: unknown,
   manifest: PluginManifestView | null = null,
   beforeSend?: () => void,
+  fsContext?: PluginFsContext,
 ): Promise<unknown> {
   switch (op) {
+    case 'fs.readRange':
+    case 'fs.readRanges':
+    case 'fs.listDirectoryPage':
+    case 'fs.cancel': {
+      const a = requireObject(args);
+      const requestId = requireString(a, 'requestId');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+        throw new Error('plugin FS requestId 无效');
+      }
+      if (!fsContext || fsContext.pluginId !== pluginId) throw new Error('plugin FS context unavailable');
+      if (op === 'fs.cancel') return fsContext.cancel(requestId);
+      const priority = pluginFsPriority(a.priority);
+      const assertAuthority = (): void => {
+        beforeSend?.();
+        const config = useAppStore.getState().config.pluginConfigs?.find(entry => entry.id === pluginId);
+        if (!config?.enabled || config.installGeneration !== fsContext.installGeneration) throw new Error('plugin disabled');
+        const denied = checkOpAllowed(op, config.grantedPermissions, a);
+        if (denied) throw new Error(denied);
+      };
+      if (op === 'fs.listDirectoryPage') {
+        const grantId = requireGrantId(a);
+        const relPath = a.rel === undefined ? undefined : requirePluginFsPath(requireText(a, 'rel'), true);
+        const recursive = optionalBoolean(a.recursive, 'recursive');
+        const cursor = a.cursor === undefined ? undefined : requireMaxChars(requireString(a, 'cursor'), 'cursor', 4096);
+        const limit = a.limit === undefined ? undefined : requireSafeInteger(a.limit, 'limit', 1, 1000);
+        return fsContext.listDirectoryPage(requestId, { grantId, relPath, recursive, cursor, limit, priority }, assertAuthority);
+      }
+      const ranges = op === 'fs.readRange' ? [pluginFsRange(a)] : pluginFsRanges(a.ranges);
+      // Validate every range and authorize the entire batch before opening a native session.
+      assertAuthority();
+      return op === 'fs.readRange'
+        ? fsContext.readRange(requestId, ranges[0], priority, assertAuthority)
+        : fsContext.readRanges(requestId, ranges, priority, assertAuthority);
+    }
     case 'view.publish':
     case 'view.sendSerial':
     case 'view.sendBinary':
@@ -307,11 +346,10 @@ export async function executeHostApi(
       const rel = requireMaxChars(requireString(a, 'rel'), 'rel', MAX_PLUGIN_REL_CHARS);
       const binary = binaryFileFormat(a);
       const encoding = pluginEncoding(a);
-      const file = await fileService.readPluginDirectoryFile(pluginId, grantId, rel);
+      const { path, bytes } = await fileService.readPluginDirectoryBytes(pluginId, grantId, rel);
       // Re-check authority after the native read, before content crosses the RPC.
       beforeSend?.();
-      const bytes = fileBytes(file.base64);
-      return binary ? { path: file.path, bytes } : { path: file.path, content: decodeBytes(bytes, encoding) };
+      return binary ? { path, bytes } : { path, content: decodeBytes(bytes, encoding) };
     }
     case 'fs.statDirectoryEntry': {
       const a = requireObject(args);
@@ -407,11 +445,11 @@ export async function executeHostApi(
         throw new Error('插件未授予 fs:assets 权限');
       }
       const content = binary
-        ? await pluginService.readPluginAsset(pluginId, rel, 'binary')
+        ? await pluginService.readPluginAssetBytes(pluginId, rel, granted.installGeneration)
         : await pluginService.readPluginAsset(pluginId, rel);
       beforeSend?.();
       if (content === null) throw new Error('plugin file not found');
-      return binary ? fileBytes(content) : content;
+      return content;
     }
     case 'fs.write': {
       const a = requireObject(args);
@@ -523,6 +561,37 @@ export async function executeHostApi(
 }
 
 // ==================== 参数校验辅助（宿主侧最后防线） ====================
+
+function requireSafeInteger(value: unknown, field: string, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`参数 ${field} 必须为 ${min}..${max} 的安全整数`);
+  }
+  return value;
+}
+function pluginFsPriority(value: unknown): PluginFsPriority {
+  if (value === undefined) return 'background';
+  if (value === 'interactive' || value === 'background') return value;
+  throw new Error('参数 priority 必须为 interactive 或 background');
+}
+function pluginFsRange(value: unknown): PluginFsRange {
+  const a = requireObject(value);
+  const rel = requirePluginFsPath(requireString(a, 'rel'));
+  const grantId = a.grantId === undefined ? undefined : requireGrantId(a);
+  const offset = requireSafeInteger(a.offset, 'offset', 0);
+  const length = requireSafeInteger(a.length, 'length', 0, MAX_PLUGIN_FS_RANGE_BYTES);
+  if (!Number.isSafeInteger(offset + length)) throw new Error('参数 offset + length 超出安全整数范围');
+  return { rel, offset, length, ...(grantId === undefined ? {} : { grantId }) };
+}
+function pluginFsRanges(value: unknown): PluginFsRange[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PLUGIN_FS_RANGES) {
+    throw new Error(`参数 ranges 必须为 1..${MAX_PLUGIN_FS_RANGES} 项数组`);
+  }
+  const ranges = value.map(pluginFsRange);
+  if (ranges.reduce((sum, range) => sum + range.length, 0) > MAX_PLUGIN_FS_BATCH_BYTES) {
+    throw new Error('参数 ranges 总长度超过 8 MiB');
+  }
+  return ranges;
+}
 
 function requireObject(args: unknown): Record<string, unknown> {
   if (args === null || typeof args !== 'object' || Array.isArray(args)) {

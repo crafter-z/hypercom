@@ -31,6 +31,7 @@ export const PLUGIN_BINARY_RPC_TIMEOUT_MS = VIEW_BINARY_TRANSFER_TIMEOUT_MS;
 export function hasNoRpcDeadline(op: string): boolean {
   return op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
     op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
+    op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage' || op === 'fs.cancel' ||
     op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
     op === 'fs.removeDirectoryEntry' || op === 'fs.renameDirectoryEntry' ||
     op === 'ui.panel.export' || op === 'fs.write' || op === 'storage.set' || op === 'shell.execute' ||
@@ -189,17 +190,18 @@ export const PLUGIN_BRIDGE_CODE = `
     try { self.postMessage({ seq: ++seq, op: op, args: args }); } catch (error) {}
   }
 
-  // api 代理：plugin.api.<op>(args) → 宿主。HTTP open/request strip signal and
-  // carry a pre-generated requestId so abort can cancel a pending open.
+  // api 代理：plugin.api.<op>(args) → 宿主。HTTP open/request and windowed FS
+  // strip signal and carry a pre-generated requestId for cancellation before completion.
   function callHost(op, args) {
     var id = ++seq;
     var options = args && typeof args === 'object' ? args : {};
     var isHttp = op === 'http.request' || op === 'http.open';
-    var signal = isHttp ? options.signal : undefined;
+    var isFs = op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage';
+    var signal = isHttp || isFs ? options.signal : undefined;
     var requestId;
     var wireArgs = args === undefined ? null : args;
-    if (isHttp) {
-      requestId = typeof options.requestId === 'string' && options.requestId ? options.requestId : newRequestId();
+    if (isHttp || isFs) {
+      requestId = isHttp && typeof options.requestId === 'string' && options.requestId ? options.requestId : newRequestId();
       wireArgs = {};
       for (var key in options) {
         if (key === 'signal' || key === 'requestId') continue;
@@ -209,6 +211,7 @@ export const PLUGIN_BRIDGE_CODE = `
     }
     var deadline = op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
       op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
+      op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage' || op === 'fs.cancel' ||
       op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
       op === 'fs.removeDirectoryEntry' || op === 'fs.renameDirectoryEntry' ||
       op === 'ui.panel.export' || op === 'fs.write' || op === 'storage.set' || op === 'shell.execute' ||
@@ -237,7 +240,8 @@ export const PLUGIN_BRIDGE_CODE = `
           if (pending[id] !== entry) return;
           delete pending[id];
           clearTimeout(timer);
-          if (requestId) sendFire('http.cancel', { requestId: requestId });
+          entry.removeAbort();
+          if (requestId) sendFire(isFs ? 'fs.cancel' : 'http.cancel', { requestId: requestId });
           reject(abortError());
         };
         signal.addEventListener('abort', onAbort, { once: true });

@@ -3,13 +3,15 @@ import { executeHostApi } from './pluginHostApi';
 import { useToastStore } from '../stores/useToastStore';
 import { useAppStore } from '../stores/useAppStore';
 import type { PluginManifestView } from '../types';
+import { PluginFsContext } from './pluginFs';
 
 const readAsset = vi.hoisted(() => vi.fn());
+const readAssetBytes = vi.hoisted(() => vi.fn());
 const writeAsset = vi.hoisted(() => vi.fn());
 const pickFiles = vi.hoisted(() => vi.fn());
 const pickDirectory = vi.hoisted(() => vi.fn());
 const listDirectory = vi.hoisted(() => vi.fn());
-const readDirectoryFile = vi.hoisted(() => vi.fn());
+const readDirectoryBytes = vi.hoisted(() => vi.fn());
 const statDirectoryEntry = vi.hoisted(() => vi.fn());
 const writeDirectoryFile = vi.hoisted(() => vi.fn());
 const createDirectory = vi.hoisted(() => vi.fn());
@@ -23,12 +25,12 @@ const executeViewApi = vi.hoisted(() => vi.fn());
 const sendToPort = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/tauri', () => ({
-  pluginService: { readPluginAsset: readAsset, writePluginAsset: writeAsset },
+  pluginService: { readPluginAsset: readAsset, readPluginAssetBytes: readAssetBytes, writePluginAsset: writeAsset },
   fileService: {
     pickPluginFiles: pickFiles,
     pickPluginDirectory: pickDirectory,
     listPluginDirectory: listDirectory,
-    readPluginDirectoryFile: readDirectoryFile,
+    readPluginDirectoryBytes: readDirectoryBytes,
     statPluginDirectoryEntry: statDirectoryEntry,
     writePluginDirectoryFile: writeDirectoryFile,
     createPluginDirectory: createDirectory,
@@ -56,11 +58,12 @@ beforeEach(() => {
   testTime += 10_000;
   vi.setSystemTime(testTime);
   readAsset.mockReset();
+  readAssetBytes.mockReset();
   writeAsset.mockReset();
   pickFiles.mockReset();
   pickDirectory.mockReset();
   listDirectory.mockReset();
-  readDirectoryFile.mockReset();
+  readDirectoryBytes.mockReset();
   statDirectoryEntry.mockReset();
   writeDirectoryFile.mockReset();
   createDirectory.mockReset();
@@ -90,6 +93,74 @@ afterEach(() => {
   testTime = Date.now();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('host API windowed files', () => {
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  const range = { rel: 'assets/a', offset: 10, length: 3 };
+  function context() { return new PluginFsContext('api.plugin', 'api-install', 1); }
+  it('normalizes new range parameters with background default and explicit context', async () => {
+    const fs = context(); const bytes = new Uint8Array([1]);
+    const read = vi.spyOn(fs, 'readRange').mockResolvedValue(bytes);
+    await expect(executeHostApi('api.plugin', 'fs.readRange', { ...range, requestId }, null, undefined, fs)).resolves.toBe(bytes);
+    expect(read).toHaveBeenCalledWith(requestId, range, 'background', expect.any(Function));
+    await expect(executeHostApi('api.plugin', 'fs.readRange', { ...range, requestId })).rejects.toThrow('context');
+  });
+  it.each([
+    { offset: -1 }, { offset: 1.5 }, { offset: Number.MAX_SAFE_INTEGER, length: 1 },
+    { length: 4 * 1024 * 1024 + 1 }, { length: NaN }, { length: '3' },
+    { rel: '' }, { rel: 'x'.repeat(4097) }, { grantId: null }, { priority: 'urgent' },
+  ])('rejects malformed range options before dispatch: %j', async invalid => {
+    const fs = context(); const read = vi.spyOn(fs, 'readRange');
+    await expect(executeHostApi('api.plugin', 'fs.readRange', { ...range, requestId, ...invalid }, null, undefined, fs)).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('bounds batches and authorizes every range before any native dispatch', async () => {
+    const fs = context(); const read = vi.spyOn(fs, 'readRanges').mockResolvedValue({ results: [] });
+    const call = (ranges: unknown) => executeHostApi('api.plugin', 'fs.readRanges', { ranges, requestId }, null, undefined, fs);
+    for (const invalid of [[], [null], Array(65).fill(range), Array(3).fill({ ...range, length: 4 * 1024 * 1024 })]) {
+      await expect(call(invalid)).rejects.toThrow();
+    }
+    await expect(call([range, { ...range, rel: 'private', grantId: 'grant' }])).rejects.toThrow('fs:open-dir');
+    expect(read).not.toHaveBeenCalled();
+    await expect(call([range, { ...range, rel: 'data/a' }])).resolves.toEqual({ results: [] });
+    expect(read).toHaveBeenCalledOnce();
+  });
+  it('uses shared directory helpers for page options and rejects bad limits/cursors', async () => {
+    useAppStore.getState().setConfig({ pluginConfigs: [{ id: 'api.plugin', installGeneration: 'api-install', enabled: true, grantedPermissions: ['fs:open-dir'] }] });
+    const fs = context(); const list = vi.spyOn(fs, 'listDirectoryPage').mockResolvedValue({ entries: [], nextCursor: null });
+    const args = { requestId, grantId: 'grant', rel: '', recursive: true, limit: 1000, cursor: 'opaque', priority: 'interactive' };
+    await expect(executeHostApi('api.plugin', 'fs.listDirectoryPage', args, null, undefined, fs)).resolves.toEqual({ entries: [], nextCursor: null });
+    expect(list).toHaveBeenCalledWith(requestId, { grantId: 'grant', relPath: '', recursive: true, limit: 1000, cursor: 'opaque', priority: 'interactive' }, expect.any(Function));
+    for (const invalid of [{ limit: 0 }, { limit: 1001 }, { limit: 1.5 }, { recursive: 1 }, { cursor: '' }, { cursor: 'a'.repeat(4097) }, { rel: 1 }]) {
+      await expect(executeHostApi('api.plugin', 'fs.listDirectoryPage', { ...args, ...invalid }, null, undefined, fs)).rejects.toThrow();
+    }
+    expect(list).toHaveBeenCalledOnce();
+  });
+  it('matches native UTF-8 path boundaries for new range and page calls before dispatch', async () => {
+    const fs = context(); const read = vi.spyOn(fs, 'readRange').mockResolvedValue(new Uint8Array());
+    for (const rel of ['a'.repeat(4096), '中'.repeat(1365) + 'a', '😀'.repeat(1024)]) {
+      await expect(executeHostApi('api.plugin', 'fs.readRange', { ...range, rel, requestId }, null, undefined, fs)).resolves.toEqual(new Uint8Array());
+    }
+    for (const rel of ['中'.repeat(1366), '😀'.repeat(1024) + 'a', '\ud800', '\udc00']) {
+      await expect(executeHostApi('api.plugin', 'fs.readRange', { ...range, rel, requestId }, null, undefined, fs)).rejects.toThrow(/UTF-8/);
+    }
+    expect(read).toHaveBeenCalledTimes(3);
+    useAppStore.getState().setConfig({ pluginConfigs: [{ id: 'api.plugin', installGeneration: 'api-install', enabled: true, grantedPermissions: ['fs:open-dir'] }] });
+    const list = vi.spyOn(fs, 'listDirectoryPage').mockResolvedValue({ entries: [], nextCursor: null });
+    for (const rel of ['', '中'.repeat(1365) + 'a', '😀'.repeat(1024)]) {
+      await executeHostApi('api.plugin', 'fs.listDirectoryPage', { grantId: 'grant', rel, requestId }, null, undefined, fs);
+    }
+    for (const rel of ['中'.repeat(1366), '😀'.repeat(1024) + 'a', '\ud800', '\udc00']) {
+      await expect(executeHostApi('api.plugin', 'fs.listDirectoryPage', { grantId: 'grant', rel, requestId }, null, undefined, fs)).rejects.toThrow(/UTF-8/);
+    }
+    expect(list).toHaveBeenCalledTimes(3);
+  });
+  it('keeps permissionless cancellation on the same epoch context', async () => {
+    const fs = context(); const cancel = vi.spyOn(fs, 'cancel').mockResolvedValue();
+    await expect(executeHostApi('api.plugin', 'fs.cancel', { requestId }, null, undefined, fs)).resolves.toBeUndefined();
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(requestId);
+  });
 });
 
 describe('host API shell dispatch', () => {
@@ -202,9 +273,13 @@ describe('host API asset reads', () => {
   });
   it('preserves all byte values and empty binary files without text decoding', async () => {
     const bytes = Uint8Array.from({ length: 256 }, (_, index) => index);
-    readAsset.mockResolvedValueOnce(btoa(String.fromCharCode(...bytes))).mockResolvedValueOnce('');
+    readAssetBytes.mockResolvedValueOnce(bytes).mockResolvedValueOnce(new Uint8Array());
     expect(await executeHostApi('api.plugin', 'fs.read', { rel: 'assets/firmware.bin', format: 'binary' })).toEqual(bytes);
     expect(await executeHostApi('api.plugin', 'fs.read', { rel: 'data/empty', format: 'binary' })).toEqual(new Uint8Array());
+    expect(readAssetBytes).toHaveBeenCalledWith('api.plugin', 'assets/firmware.bin', 'api-install');
+    expect(readAsset).not.toHaveBeenCalled();
+    readAssetBytes.mockRejectedValueOnce(new Error('raw asset permission denied'));
+    await expect(executeHostApi('api.plugin', 'fs.read', { rel: 'assets/firmware.bin', format: 'binary' })).rejects.toThrow('raw asset permission denied');
   });
 
   it('keeps binary private reads permission-gated and missing files distinguishable', async () => {
@@ -212,7 +287,7 @@ describe('host API asset reads', () => {
       id: 'api.plugin', installGeneration: 'api-install', enabled: true, grantedPermissions: ['fs:assets'],
     }] });
     await expect(executeHostApi('api.plugin', 'fs.read', { rel: 'data/private.bin', format: 'binary' })).rejects.toThrow('fs:storage');
-    readAsset.mockResolvedValue(null);
+    readAssetBytes.mockResolvedValue(null);
     await expect(executeHostApi('api.plugin', 'fs.read', { rel: 'assets/missing.bin', format: 'binary' })).rejects.toThrow('plugin file not found');
   });
 
@@ -246,7 +321,7 @@ describe('host API asset reads', () => {
   });
 
   it('does not expose file contents after the caller loses authority during reading', async () => {
-    readAsset.mockResolvedValue('AP8=');
+    readAssetBytes.mockResolvedValue(new Uint8Array([0, 255]));
     pickFiles.mockResolvedValue({ files: [{ path: 'private.bin', base64: 'AP8=' }] });
     const revoked = () => { throw new Error('permission revoked'); };
     await expect(executeHostApi('api.plugin', 'fs.read', { rel: 'assets/private.bin', format: 'binary' }, null, revoked)).rejects.toThrow('permission revoked');
@@ -313,31 +388,61 @@ describe('host API plugin directories', () => {
   });
 
   it('decodes text with the requested encoding and passes binary bytes through losslessly', async () => {
-    readDirectoryFile.mockResolvedValueOnce({ path: '中文.txt', base64: '1tDOxA==' });
+    readDirectoryBytes.mockResolvedValueOnce({ path: 'C:\\logs\\中文.txt', bytes: new Uint8Array([0xd6, 0xd0, 0xce, 0xc4]) });
     await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
       grantId: 'grant-a', rel: '中文.txt', encoding: 'gbk',
-    })).resolves.toEqual({ path: '中文.txt', content: '中文' });
-    expect(readDirectoryFile).toHaveBeenLastCalledWith('api.plugin', 'grant-a', '中文.txt');
+    })).resolves.toEqual({ path: 'C:\\logs\\中文.txt', content: '中文' });
+    expect(readDirectoryBytes).toHaveBeenLastCalledWith('api.plugin', 'grant-a', '中文.txt');
 
-    readDirectoryFile.mockResolvedValueOnce({ path: 'utf8.txt', base64: '5Lit5paH' });
+    readDirectoryBytes.mockResolvedValueOnce({ path: 'utf8.txt', bytes: new Uint8Array([0xe4, 0xb8, 0xad, 0xe6, 0x96, 0x87]) });
     await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', { grantId: 'grant-a', rel: 'utf8.txt' }))
       .resolves.toEqual({ path: 'utf8.txt', content: '中文' });
 
-    readDirectoryFile.mockResolvedValueOnce({ path: 'raw.bin', base64: 'AP+A' });
+    readDirectoryBytes.mockResolvedValueOnce({ path: 'raw.bin', bytes: new Uint8Array([0, 255, 128]) });
     await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
       grantId: 'grant-a', rel: 'raw.bin', format: 'binary',
     })).resolves.toEqual({ path: 'raw.bin', bytes: new Uint8Array([0, 255, 128]) });
 
-    readDirectoryFile.mockResolvedValueOnce({ path: 'empty.bin', base64: '' });
+    readDirectoryBytes.mockResolvedValueOnce({ path: 'empty.bin', bytes: new Uint8Array() });
     await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
       grantId: 'grant-a', rel: 'empty.bin', format: 'binary',
     })).resolves.toEqual({ path: 'empty.bin', bytes: new Uint8Array() });
   });
 
+  it('preserves binary buffer identity and native paths without imposing range-read limits on whole files', async () => {
+    const bytes = new Uint8Array(4 * 1024 * 1024 + 1);
+    bytes.set([0xef, 0xbb, 0xbf, 0xff]);
+    const path = 'C:\\logs\\whole.bin';
+    readDirectoryBytes.mockResolvedValueOnce({ path, bytes });
+    const result = await executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'whole.bin', format: 'binary',
+    }) as { path: string; bytes: Uint8Array };
+    expect(result.path).toBe(path);
+    expect(result.bytes).toBe(bytes);
+    expect(result.bytes.byteLength).toBe(4 * 1024 * 1024 + 1);
+  });
+
+  it('keeps empty text and shared decoder BOM/replacement semantics for directory bytes', async () => {
+    readDirectoryBytes.mockResolvedValueOnce({ path: 'empty.txt', bytes: new Uint8Array() });
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', { grantId: 'grant-a', rel: 'empty.txt' }))
+      .resolves.toEqual({ path: 'empty.txt', content: '' });
+    readDirectoryBytes.mockResolvedValueOnce({ path: 'bom.txt', bytes: new Uint8Array([0xef, 0xbb, 0xbf, 65, 255]) });
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', { grantId: 'grant-a', rel: 'bom.txt' }))
+      .resolves.toEqual({ path: 'bom.txt', content: 'A\ufffd' });
+  });
+
+  it.each(['text', 'binary'])('preserves directory raw read errors for %s without host fallback', async format => {
+    readDirectoryBytes.mockRejectedValueOnce(new Error('directory permission denied'));
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'denied', format,
+    })).rejects.toThrow('directory permission denied');
+    expect(readDirectoryBytes).toHaveBeenCalledExactlyOnceWith('api.plugin', 'grant-a', 'denied');
+  });
+
   it('does not expose directory results after authority is revoked during the native call', async () => {
     pickDirectory.mockResolvedValue([{ grantId: 'grant-a', name: 'logs', path: 'C:\\logs' }]);
     listDirectory.mockResolvedValue([{ name: 'a.txt', rel: 'a.txt', kind: 'file', size: 1, modifiedMs: 2 }]);
-    readDirectoryFile.mockResolvedValue({ path: 'a.txt', base64: 'QQ==' });
+    readDirectoryBytes.mockResolvedValue({ path: 'a.txt', bytes: new Uint8Array([65]) });
     statDirectoryEntry.mockResolvedValue({ name: 'a.txt', rel: 'a.txt', kind: 'file', size: 1, modifiedMs: 2 });
     writeDirectoryFile.mockResolvedValue({ path: 'C:\\logs\\a.txt', bytesWritten: 1 });
     const revoked = () => { throw new Error('permission revoked'); };
@@ -351,6 +456,9 @@ describe('host API plugin directories', () => {
       .rejects.toThrow('permission revoked');
     await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
       grantId: 'grant-a', rel: 'a.txt', format: 'binary',
+    }, null, revoked)).rejects.toThrow('permission revoked');
+    await expect(executeHostApi('api.plugin', 'fs.readDirectoryFile', {
+      grantId: 'grant-a', rel: 'a.txt', format: 'text',
     }, null, revoked)).rejects.toThrow('permission revoked');
     await expect(executeHostApi('api.plugin', 'fs.statDirectoryEntry', {
       grantId: 'grant-a', rel: 'a.txt',
@@ -396,7 +504,7 @@ describe('host API plugin directories', () => {
     await expect(executeHostApi('api.plugin', 'fs.releaseDirectory', {})).rejects.toThrow(/grantId/);
     expect(pickDirectory).not.toHaveBeenCalled();
     expect(listDirectory).not.toHaveBeenCalled();
-    expect(readDirectoryFile).not.toHaveBeenCalled();
+    expect(readDirectoryBytes).not.toHaveBeenCalled();
     expect(statDirectoryEntry).not.toHaveBeenCalled();
     expect(writeDirectoryFile).not.toHaveBeenCalled();
     expect(createDirectory).not.toHaveBeenCalled();
@@ -408,7 +516,7 @@ describe('host API plugin directories', () => {
   it('releases a grant without reading anything', async () => {
     await expect(executeHostApi('api.plugin', 'fs.releaseDirectory', { grantId: 'grant-a' })).resolves.toBeNull();
     expect(releaseDirectory).toHaveBeenCalledWith('api.plugin', 'grant-a');
-    expect(readDirectoryFile).not.toHaveBeenCalled();
+    expect(readDirectoryBytes).not.toHaveBeenCalled();
   });
 
   it('writes text, empty text, Uint8Array and ArrayBuffer content with explicit options', async () => {

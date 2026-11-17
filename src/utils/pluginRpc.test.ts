@@ -152,6 +152,39 @@ describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () 
   });
 });
 
+describe('windowed file permissions', () => {
+  it('requires the correct per-range capability and rejects the entire mixed batch', () => {
+    expect(checkOpAllowed('fs.readRange', ['fs:assets'], { rel: 'a' })).toBeNull();
+    expect(checkOpAllowed('fs.readRange', ['fs:storage'], { rel: './data/a' })).toBeNull();
+    expect(checkOpAllowed('fs.readRange', ['fs:assets'], { rel: 'data/a' })).toContain('fs:storage');
+    expect(checkOpAllowed('fs.readRange', ['fs:open-dir'], { rel: 'a', grantId: 'grant' })).toBeNull();
+    expect(checkOpAllowed('fs.readRange', ['fs:write-dir'], { rel: 'a', grantId: 'grant' })).toContain('fs:open-dir');
+    const args = { ranges: [{ rel: 'a' }, { rel: 'data/a' }, { rel: 'a', grantId: 'grant' }] };
+    expect(checkOpAllowed('fs.readRanges', ['fs:assets', 'fs:storage'], args)).toContain('fs:open-dir');
+    expect(checkOpAllowed('fs.readRanges', ['fs:assets', 'fs:storage', 'fs:open-dir'], args)).toBeNull();
+    expect(checkOpAllowed('fs.cancel', [])).toBeNull();
+    expect(checkOpAllowed('fs.listDirectoryPage', ['fs:assets'], { grantId: 'grant' })).toContain('fs:open-dir');
+  });
+  it('uses UTF-8 byte path limits for new ranges/pages while keeping legacy path contracts', () => {
+    for (const rel of ['a'.repeat(4096), '中'.repeat(1365) + 'a', '😀'.repeat(1024)]) {
+      expect(checkOpAllowed('fs.readRange', ['fs:assets'], { rel })).toBeNull();
+      expect(checkOpAllowed('fs.listDirectoryPage', ['fs:open-dir'], { grantId: 'grant', rel })).toBeNull();
+    }
+    for (const rel of ['a'.repeat(4097), '中'.repeat(1366), '😀'.repeat(1024) + 'a', '\ud800', '\udc00']) {
+      expect(checkOpAllowed('fs.readRange', ['fs:assets'], { rel })).not.toBeNull();
+      expect(checkOpAllowed('fs.readRanges', ['fs:assets'], { ranges: [{ rel: 'a' }, { rel }] })).not.toBeNull();
+      expect(checkOpAllowed('fs.listDirectoryPage', ['fs:open-dir'], { grantId: 'grant', rel })).not.toBeNull();
+    }
+    expect(checkOpAllowed('fs.listDirectoryPage', ['fs:open-dir'], { grantId: 'grant', rel: '' })).toBeNull();
+    expect(checkOpAllowed('fs.read', ['fs:assets'], { rel: '中'.repeat(1366) })).toBeNull();
+  });
+  it.each([null, {}, { ranges: [] }, { ranges: [null] }, { ranges: [{ rel: '../a' }] },
+    { ranges: [{ rel: '/data/a' }] }, { ranges: [{ rel: 'C:a' }] }, { ranges: [{ rel: 'a', grantId: null }] },
+  ])('fails closed on malformed batch identity: %j', args => {
+    expect(checkOpAllowed('fs.readRanges', ['fs:assets', 'fs:storage', 'fs:open-dir'], args)).not.toBeNull();
+  });
+});
+
 describe('plugin worker event registration contract', () => {
   it('registers RX event handlers, unsubscribes, and acknowledges only after async handlers settle', async () => {
     const posted: unknown[] = [];

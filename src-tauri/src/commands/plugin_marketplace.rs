@@ -349,6 +349,7 @@ pub async fn install_marketplace_plugin(
     }
     state.plugin_http.cancel_plugin(&expected_id);
     state.plugin_shell.cancel_plugin(&expected_id);
+    super::plugin::retire_plugin_file_io(&state, &expected_id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &expected_id).await?;
 
     let result = tokio::task::block_in_place(|| {

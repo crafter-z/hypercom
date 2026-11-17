@@ -154,6 +154,8 @@ pub struct AppState {
     pub plugin_io: tokio::sync::Mutex<()>,
     /// 插件 HTTP 流式请求注册表（按 requestId 绑定插件/安装版本，可取消）。
     pub plugin_http: commands::PluginHttpRegistry,
+    /// 插件文件 I/O 会话、取消、响应租约及公平调度（不与 RX 共用预算）。
+    pub plugin_fs: std::sync::Arc<commands::PluginFsRegistry>,
     /// 插件本机 shell 执行注册表（按插件/安装版本绑定，可取消）。
     pub plugin_shell: commands::PluginShellRegistry,
     /// 日志管理器：负责日志文件的写入与管理。
@@ -278,6 +280,7 @@ impl AppState {
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
             plugin_http: commands::PluginHttpRegistry::new(),
+            plugin_fs: std::sync::Arc::new(commands::PluginFsRegistry::new()),
             plugin_shell: commands::PluginShellRegistry::new(),
             log_manager: std::sync::Arc::new(logger::LogManager::new()),
             diag_logger,
@@ -648,6 +651,7 @@ pub fn run() {
             commands::plugin_pick_directory,
             commands::plugin_list_directory,
             commands::plugin_read_directory_file,
+            commands::plugin_read_directory_file_raw,
             commands::plugin_stat_directory_entry,
             commands::plugin_write_directory_file,
             commands::plugin_create_directory,
@@ -676,7 +680,14 @@ pub fn run() {
             commands::set_plugin_trusted_web,
             commands::clear_plugin_web_data,
             commands::read_plugin_asset,
+            commands::read_plugin_asset_raw,
             commands::write_plugin_asset,
+            commands::plugin_fs_open_session,
+            commands::plugin_fs_close_session,
+            commands::plugin_fs_read_ranges,
+            commands::plugin_fs_list_directory_page,
+            commands::plugin_fs_cancel,
+            commands::plugin_fs_release,
             commands::reload_plugin,
             commands::plugin_http_open,
             commands::plugin_http_read,

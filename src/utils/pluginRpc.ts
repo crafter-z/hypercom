@@ -11,6 +11,8 @@
  */
 
 
+import { isPluginFsPath } from './pluginFsPath';
+
 /** 权限点定义：op → 所需权限。无权限要求的 op 用 null（放行）。 */
 export interface PermissionMap {
   [op: string]: string | null;
@@ -32,6 +34,12 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 资产读写
   'fs.read': 'fs:assets',
   'fs.write': 'fs:storage',
+  // Range batches are authorized per entry before any entry is read.
+  'fs.readRange': null,
+  'fs.readRanges': null,
+  'fs.listDirectoryPage': 'fs:open-dir',
+  // Cleanup must remain reachable even after file permissions are revoked.
+  'fs.cancel': null,
   // 用户经系统对话框显式选择的任意文件读取（死机日志 map 等；对话框即信任边界）。
   // 单列 fs:open——与「仅读自身资产」的 fs:assets 语义分离，避免资产授权隐式升级。
   'fs.openDialog': 'fs:open',
@@ -88,6 +96,30 @@ export const OP_PERMISSIONS: PermissionMap = {
  */
 export function checkOpAllowed(op: string, grantedPermissions: string[], args?: unknown): string | null {
   if (!Object.prototype.hasOwnProperty.call(OP_PERMISSIONS, op)) return `未知 API: ${op}`;
+  if (op === 'fs.readRange' || op === 'fs.readRanges') {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return '插件文件参数无效';
+    const ranges = op === 'fs.readRange' ? [args] : ('ranges' in args ? args.ranges : undefined);
+    if (!Array.isArray(ranges) || ranges.length === 0 || ranges.length > 64) return '插件文件 ranges 无效';
+    for (const range of ranges) {
+      if (!range || typeof range !== 'object' || Array.isArray(range) || !('rel' in range) ||
+        !isPluginFsPath(range.rel)) return '插件文件路径无效';
+      const rel: string = range.rel.replace(/\\/g, '/');
+      const segments = rel.split('/').filter(part => part && part !== '.');
+      if (!segments.length || rel.startsWith('/') || /^[a-z]:/i.test(rel) || segments.includes('..')) return '插件文件路径无效';
+      let required: string;
+      if ('grantId' in range && range.grantId !== undefined) {
+        if (typeof range.grantId !== 'string' || !range.grantId || range.grantId.length > 128) return '插件目录 grantId 无效';
+        required = 'fs:open-dir';
+      } else required = segments[0] === 'data' ? 'fs:storage' : 'fs:assets';
+      if (!grantedPermissions.includes(required)) return `插件未授予 ${required} 权限`;
+    }
+    return null;
+  }
+  if (op === 'fs.listDirectoryPage') {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return '插件文件参数无效';
+    const rel = 'rel' in args ? args.rel : undefined;
+    if (rel !== undefined && !isPluginFsPath(rel, true)) return '插件文件路径无效';
+  }
   if (op === 'fs.read') {
     // data/ is private storage; other package files require fs:assets.
     // Malformed paths must fail before checking either grant.
