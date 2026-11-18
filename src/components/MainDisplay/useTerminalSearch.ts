@@ -10,6 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TerminalViewportManager } from '../../utils/terminal/viewportManager';
+import { DEFAULT_SEARCH_SPEC, type SearchSpec } from '../../utils/terminal/search/searchTypes';
 
 interface UseTerminalSearchOptions {
   vm: TerminalViewportManager;
@@ -24,6 +25,7 @@ export function useTerminalSearch({ vm, onNavigate }: UseTerminalSearchOptions) 
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
+  const [searchOptions, setSearchOptions] = useState<SearchSpec>({ ...DEFAULT_SEARCH_SPEC });
   const [, forceRender] = useState(0);
   const vmRef = useRef(vm);
   vmRef.current = vm;
@@ -36,8 +38,9 @@ export function useTerminalSearch({ vm, onNavigate }: UseTerminalSearchOptions) 
 
   // Push open/query/case into the manager (full recompute).
   useEffect(() => {
-    vmRef.current.setSearch(searchOpen, debouncedQuery, caseSensitive);
-  }, [searchOpen, debouncedQuery, caseSensitive]);
+    vm.setSearch(searchOpen, debouncedQuery, caseSensitive, searchOptions);
+    return () => vm.setSearch(false, '', false);
+  }, [vm, searchOpen, debouncedQuery, caseSensitive, searchOptions]);
 
   // Refresh readouts on manager render passes (match list changes as data
   // flows while the search bar is open).
@@ -70,6 +73,10 @@ export function useTerminalSearch({ vm, onNavigate }: UseTerminalSearchOptions) 
     searchOpen,
     searchQuery,
     caseSensitive,
+    searchOptions,
+    setSearchOptions,
+    searchSnapshot: vm.getSearchSnapshot(),
+    cancelSearch: () => vm.cancelAdvancedSearch(),
     currentMatch: vm.getCurrentMatchIndex(),
     searchMatchCount: vm.getMatchCount(),
     setSearchQuery,

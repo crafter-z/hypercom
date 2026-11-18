@@ -11,7 +11,9 @@
 | `SerialContentHost.tsx` | 常驻的 TRX/TTY 内容实例 |
 | `TabBar.tsx` | 标签排序、跨 Pane 拖动、分屏按钮和弹出状态 |
 | `TerminalView.tsx` | `TerminalViewportManager` 的薄壳、过滤/搜索/选择/滚动交互 |
-| `TerminalFilterBar.tsx` / `TerminalSearchBar.tsx` | 显示控制与搜索输入 |
+| `TerminalFilterBar.tsx` / `TerminalSearchBar.tsx` | 显示控制与一级搜索输入 |
+| `SearchAdvancedOptions.tsx` | 本地/全局共用的高级选项二级浮层、条件计数与重置；不负责匹配扫描 |
+| `GlobalTerminalSearchPanel.tsx` / `globalTerminalSearch.ts` | 当前 WebView 的多来源搜索面板与显式来源注册表 |
 | `TtyView.tsx` | xterm 实例、fit、键盘发送和窗口调整 |
 | `ReplayView.tsx` / `hooks/useLogReplay.ts` | 独立只读回放标签和原生回放授权 |
 | `TimelineControls.tsx` | 时间组管理、组模式和时间偏移 |
@@ -25,7 +27,7 @@
 - `TerminalFilterBar` 通过 `src/stores/useTerminalStore.ts` 的 `useTerminalStore.getState()` 写每端口显示设置；编码变化先调用 `src/utils/rxPipeline.ts` 的 `getRxPipeline().flushAndReset(portId)`，再切换编码。`TerminalView` 不把显示设置写入 `src/stores/useOperationStore.ts`。
 - `TerminalView` 只装配 renderer 外壳，行节点由 `src/utils/terminal/TerminalRenderer.ts` 直接管理。不要把行数组传进 React state，也不要通过 DOM 高度直接修复分屏尺寸。
 - 滚动锁是显式意图：Pin、跳转、用户手势 settle、拖选和时间组退出才可写 `scrollLocked`。搜索定位先解除独立跟随；BROWSE、相对偏移或不兼容来源不得本地尾随；时间组 LIVE 的授权由协调器完成。
-- 搜索匹配只在搜索打开且有查询时维护，增量和重建统一由 `viewportManager` 完成；快捷键由 TerminalView 处理并阻止向全局重复传播。
+- 搜索只在打开且有查询时维护：普通本地匹配归 `viewportManager`，高级/多来源匹配归 `src/utils/terminal/search/` 的共享 Worker 会话；组件不扫描行。TerminalView 消费本地快捷键，Ctrl/Cmd+Shift+F 交给 MainDisplay 的全局入口，模态框保留键盘所有权。
 - 回放使用独立 `TerminalSource` 和本地时钟，不要求活动串口，不追加实时缓冲，也没有发送端口。
 - TTY 由 `TtyView` 持有 xterm 实例；非活动标签隐藏但保留会话，恢复可见时重新 fit。TTY 弹窗能力按 `tty.popoutUnsupported` 处理。
 - 所有纵向 flex 容器保留 `min-height: 0`；组件定义在模块级，避免重渲染导致 DOM/输入焦点重建。

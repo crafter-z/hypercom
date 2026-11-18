@@ -99,6 +99,18 @@ describe('markSearchMatchesInHtml (issue #2-8 char-level highlight)', () => {
     expect(markSearchMatchesInHtml('abc', '', false, false)).toBe('abc');
   });
 
+  it('uses supplied fuzzy/cross-line spans across entities and highlight boundaries', () => {
+    expect(markSearchMatchesInHtml('e<span>r&amp;r</span> tail', '', false, true,
+      [{ start: 0, end: 2 }, { start: 3, end: 4 }])).toBe(
+      '<mark class="terminal-search-mark current">e</mark><span><mark class="terminal-search-mark current">r</mark>&amp;<mark class="terminal-search-mark current">r</mark></span> tail');
+  });
+
+  it('merges overlapping spans and rejects invalid/empty offsets without changing text', () => {
+    expect(markSearchMatchesInHtml('abc&lt;def', '', false, false,
+      [{ start: 2, end: 5 }, { start: -3, end: 3 }, { start: 99, end: 100 }, { start: NaN, end: 2 }]))
+      .toBe('<mark class="terminal-search-mark">abc&lt;d</mark>ef');
+  });
+
   it('marks every non-overlapping occurrence', () => {
     expect(markSearchMatchesInHtml('aa aa aa', 'aa', false, false)).toBe(
       '<mark class="terminal-search-mark">aa</mark> '

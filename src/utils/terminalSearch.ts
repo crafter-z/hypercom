@@ -132,9 +132,10 @@ export function markSearchMatchesInHtml(
   html: string,
   query: string,
   caseSensitive: boolean,
-  isCurrentLine: boolean
+  isCurrentLine: boolean,
+  suppliedOccurrences?: ReadonlyArray<{ start: number; end: number }>,
 ): string {
-  if (!html || !query) return html;
+  if (!html || (!query && !suppliedOccurrences?.length)) return html;
 
   // 1) 切段：<...> 为标签段，其余为文本段
   const segments: Array<{ raw: string; isTag: boolean; decoded: string; rawOffsets: number[] }> = [];
@@ -170,7 +171,19 @@ export function markSearchMatchesInHtml(
   }
 
   // 3) 找匹配区间，按段归并成 段内 [start,end) 列表
-  const occurrences = findTextOccurrences(plain, query, caseSensitive);
+  // Worker matches use UTF-16 offsets in the same plain text. Clamp and merge
+  // overlaps so multiple cross-line hits cannot nest marks or duplicate text.
+  const occurrences: Array<{ start: number; end: number }> = [];
+  for (const span of suppliedOccurrences
+    ? [...suppliedOccurrences].sort((a, b) => a.start - b.start || a.end - b.end)
+    : findTextOccurrences(plain, query, caseSensitive)) {
+    const start = Math.max(0, Math.min(plain.length, Math.floor(span.start)));
+    const end = Math.max(start, Math.min(plain.length, Math.floor(span.end)));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) continue;
+    const previous = occurrences[occurrences.length - 1];
+    if (previous && start <= previous.end) previous.end = Math.max(previous.end, end);
+    else occurrences.push({ start, end });
+  }
   if (occurrences.length === 0) return html;
   const segMarks = new Map<number, Array<{ start: number; end: number }>>();
   for (const { start, end } of occurrences) {

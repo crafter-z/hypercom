@@ -163,6 +163,10 @@ export interface TerminalViewState {
   /** Search query text ('' when closed) — needed to paint `<mark>`s. */
   searchQuery: string;
   searchCaseSensitive: boolean;
+  /** Advanced matches are computed off-thread; rendering only consumes offsets. */
+  searchVersion?: number;
+  searchSpansForSeq?: (seq: number) => ReadonlyArray<{ start: number; end: number }>;
+  currentMatchEndSeq?: number;
   /** Shift+click selection range (inclusive seqs); null when none. */
   selectedRange: { start: number; end: number } | null;
   /** Store's scrollLocked — reflected by the pin button. */
@@ -230,6 +234,7 @@ export class TerminalRenderer {
   private selectionWatcher: (() => void) | null = null;
   private renderedSearchQuery = '';
   private renderedSearchCaseSensitive = false;
+  private renderedSearchVersion = 0;
   private renderedCurrentMatchSeq = -1;
   /** Exact logical seek retained until the physical scrollbar actually moves. */
   private logicalSeek: { physical: number; logical: number } | null = null;
@@ -658,7 +663,8 @@ export class TerminalRenderer {
   private renderWindow(buffer: TerminalSource, view: TerminalViewState, frozen: number,
     firstVisIdx: number, lastVisIdx: number, measure = false): WrapRow[] | null {
     const rows: WrapRow[] | null = measure ? [] : null;
-    const searchChanged = view.searchQuery !== this.renderedSearchQuery || view.searchCaseSensitive !== this.renderedSearchCaseSensitive;
+    const searchChanged = view.searchQuery !== this.renderedSearchQuery || view.searchCaseSensitive !== this.renderedSearchCaseSensitive ||
+      (view.searchVersion ?? 0) !== this.renderedSearchVersion;
     const currentMatchChanged = view.currentMatchSeq !== this.renderedCurrentMatchSeq;
     for (const [seq, row] of this.active) {
       const visIdx = this.seqToVisIdx(seq, view, buffer, frozen);
@@ -698,6 +704,7 @@ export class TerminalRenderer {
     this.fullRedraw = false;
     this.renderedSearchQuery = view.searchQuery;
     this.renderedSearchCaseSensitive = view.searchCaseSensitive;
+    this.renderedSearchVersion = view.searchVersion ?? 0;
     this.renderedCurrentMatchSeq = view.currentMatchSeq;
     return rows;
   }
@@ -922,9 +929,10 @@ export class TerminalRenderer {
       html = applyHighlightSets(displayText, c.highlightRuleSets);
     }
 
-    if (view.matchSet?.has(seq) && view.searchQuery) {
-      const isCurrent = seq === view.currentMatchSeq;
-      html = markSearchMatchesInHtml(html, view.searchQuery, view.searchCaseSensitive, isCurrent);
+    const spans = view.searchSpansForSeq?.(seq);
+    if (spans?.length || (view.matchSet?.has(seq) && view.searchQuery)) {
+      const isCurrent = seq >= view.currentMatchSeq && seq <= (view.currentMatchEndSeq ?? view.currentMatchSeq);
+      html = markSearchMatchesInHtml(html, view.searchQuery, view.searchCaseSensitive, isCurrent, spans);
     }
 
     const prevLine = seq > buffer.firstSeq ? buffer.getBySeq(seq - 1) : undefined;
@@ -960,8 +968,8 @@ export class TerminalRenderer {
     if (view.selectedRange && seq >= view.selectedRange.start && seq <= view.selectedRange.end) {
       classes.push('selected');
     }
-    if (view.matchSet?.has(seq)) {
-      if (seq === view.currentMatchSeq) classes.push('current-match');
+    if (view.matchSet?.has(seq) || view.searchSpansForSeq?.(seq).length) {
+      if (seq >= view.currentMatchSeq && seq <= (view.currentMatchEndSeq ?? view.currentMatchSeq)) classes.push('current-match');
       else classes.push('search-hit-line');
     }
     node.className = classes.join(' ');

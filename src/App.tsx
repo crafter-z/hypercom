@@ -1,10 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-shell';
 import i18n from './i18n';
 import TitleBar from './components/TitleBar/TitleBar';
 import Sidebar from './components/Sidebar/Sidebar';
 import MainDisplay from './components/MainDisplay/MainDisplay';
+import GlobalTerminalSearchPanel from './components/MainDisplay/GlobalTerminalSearchPanel';
 import OperationPanel from './components/OperationPanel/OperationPanel';
 import StatusBar from './components/StatusBar/StatusBar';
 import ConfigModal from './components/ConfigModal/ConfigModal';
@@ -66,6 +67,8 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
 }
 
 const App: React.FC = () => {
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const openGlobalSearch = useCallback(() => setGlobalSearchOpen(true), []);
   useEditorWindowClose();
   useAppInit();
   // Serial event listeners (onSerialData / onSerialStatus /
@@ -206,7 +209,7 @@ const App: React.FC = () => {
         <div className="app-root">
           <h1 className="sr-only">HyperCom</h1>
           <div className="app-background" aria-hidden="true" />
-          <TitleBar />
+          <TitleBar onGlobalSearch={openGlobalSearch} />
 
           <main className="app-main">
             <aside className="app-sidebar-col" style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}>
@@ -217,7 +220,7 @@ const App: React.FC = () => {
             {!sidebarCollapsed && <SidebarResizeHandle />}
 
             <div className="app-content-col">
-              <MainDisplay />
+              <MainDisplay onGlobalSearch={openGlobalSearch} />
               <OperationPanelResizeHandle />
               <OperationPanel />
               <PluginPanel />
@@ -225,6 +228,7 @@ const App: React.FC = () => {
           </main>
 
           <StatusBar />
+          <GlobalTerminalSearchPanel open={globalSearchOpen} onClose={() => setGlobalSearchOpen(false)} />
           <ConfigModal />
           <HotkeyHelpDialog />
           <AboutDialog />

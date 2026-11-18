@@ -26,6 +26,9 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { linePassesFilter, type DirectionFilter } from '../lineFilter';
 import { shouldFollow } from '../followLogic';
 import { getSearchableText } from '../terminalSearch';
+import { bytesToSpacedHex } from '../hexFormat';
+import { DEFAULT_SEARCH_SPEC, SEARCH_MAX_TEXT_BYTES, type SearchHit, type SearchSource, type SearchSpec, type SearchSnapshot } from './search/searchTypes';
+import { TerminalSearchSession } from './search/searchSession';
 import { TerminalBuffer } from './TerminalBuffer';
 import { TerminalTimeIndex } from './TerminalTimeIndex';
 import { countVisibleSeqs, sourceTimeMs, upperBoundSeq, TERMINAL_REBUILD_SYNC_LIMIT, TERMINAL_REBUILD_CHUNK_SIZE, type TerminalSource, type TerminalViewportOptions, type TerminalTimelineAnchor, type TerminalTimelineResult, type TerminalTimelineRequest, type TerminalSeekOptions, type ScheduledSeekResult } from './TerminalSource';
@@ -37,6 +40,8 @@ import {
 
 /** Compact the lazy filter/search offset after this many logical drops. */
 const COMPACT_THRESHOLD = 4096;
+// Never reuse search identities when a closed tab is reopened with the same id.
+let nextSearchGeneration = 0;
 
 /** Stall budget (NOT a wall-clock cap) for a commit seek parked on
  *  `waitForTimeIndex`.
@@ -120,6 +125,43 @@ export class TerminalViewportManager {
   private searchCaseSensitive = false;
   private matches: SortedList = { seqs: [], offset: 0 };
   private currentMatch = 0;
+  private advancedSearch: TerminalSearchSession | null = null;
+  private advancedSpec: SearchSpec | null = null;
+  private advancedSnapshot: SearchSnapshot | null = null;
+  private searchOverlayVersion = 0;
+  private searchContextGeneration = ++nextSearchGeneration;
+  private revealedHit: SearchHit | null = null;
+  private searchRevealAll = false;
+  private searchPaintCache = new Map<number, ReadonlyArray<{ start: number; end: number }>>();
+  private searchPaintKey = '';
+
+  get revealingOutsideFilter(): boolean { return this.searchRevealAll; }
+
+  restoreSearchFilter(): void {
+    if (!this.searchRevealAll && !this.revealedHit) return;
+    const changedVisibility = this.searchRevealAll;
+    this.searchRevealAll = false;
+    this.revealedHit = null;
+    this.searchOverlayVersion++;
+    if (changedVisibility) this.rebuildTimeIndex();
+    this.renderer?.bumpFilterVersion();
+    this.requestRender();
+  }
+
+  private revealSearchRange(start: number, end: number): void {
+    if (!this.filterActive || this.searchRevealAll) return;
+    for (let seq = start; seq <= end; seq++) {
+      const line = this.buffer.getBySeq(seq);
+      if (line && !linePassesFilter(line, this.filterDirection, this.filterKeyword, this.getEncoding(), this.filterHideAsciiNoise)) {
+        // An explicit hit navigation may temporarily reveal filtered records,
+        // without copying a million-entry filter array or changing user settings.
+        this.searchRevealAll = true;
+        this.rebuildTimeIndex();
+        this.renderer?.bumpFilterVersion();
+        return;
+      }
+    }
+  }
 
   // Display pass-through.
   private frozenSeq: number | null = null;
@@ -174,14 +216,14 @@ export class TerminalViewportManager {
           this.filtered.seqs.push(r.seq);
         }
       }
-      if (this.searchOpen && this.searchQuery) {
+      if (this.searchOpen && this.searchQuery && !this.advancedSpec) {
         if (this.lineMatchesSearch(line, displayFormat, encoding)) {
           this.matches.seqs.push(r.seq);
           this.matchSetCache?.add(r.seq);
         }
       }
       if ((this.frozenSeq === null || r.seq <= this.frozenSeq) &&
-          (!this.filterActive || this.filtered.seqs[this.filtered.seqs.length - 1] === r.seq)) {
+          (!this.filterActive || this.searchRevealAll || this.filtered.seqs[this.filtered.seqs.length - 1] === r.seq)) {
         this.timeIndex.add(r.seq, sourceTimeMs(this.buffer, r.seq));
       }
       // The buffer may have evicted any number of oldest lines — drop each
@@ -249,6 +291,11 @@ export class TerminalViewportManager {
   /** Set display filters (keyword debounced by the caller; noise opt-in). */
   setFilter(direction: DirectionFilter, keyword: string, hideAsciiNoise = false): void {
     const noiseChanged = hideAsciiNoise !== this.filterHideAsciiNoise;
+    if (noiseChanged || direction !== this.filterDirection || keyword !== this.filterKeyword) {
+      this.searchContextGeneration = ++nextSearchGeneration;
+      this.revealedHit = null;
+    }
+    this.searchRevealAll = false;
     this.filterDirection = direction;
     this.filterKeyword = keyword;
     this.filterHideAsciiNoise = hideAsciiNoise;
@@ -262,10 +309,12 @@ export class TerminalViewportManager {
 
   /** Visible line count for the FilterBar readout (respects pause). */
   getVisibleCount(): number {
-    return countVisibleSeqs(this.buffer, this.filterActive ? this.filtered.seqs : null, this.filtered.offset, this.frozenSeq);
+    return countVisibleSeqs(this.buffer, this.filterActive && !this.searchRevealAll ? this.filtered.seqs : null, this.filtered.offset, this.frozenSeq);
   }
 
   setPaused(paused: boolean): void {
+    this.searchContextGeneration = ++nextSearchGeneration;
+    this.revealedHit = null;
     this.frozenSeq = paused ? this.buffer.lastSeq : null;
     this.rebuildTimeIndex();
     this.requestRender();
@@ -273,16 +322,131 @@ export class TerminalViewportManager {
 
   // ==================== Search ====================
 
-  setSearch(open: boolean, query: string, caseSensitive: boolean): void {
+  setSearch(open: boolean, query: string, caseSensitive: boolean, options?: Partial<SearchSpec>): void {
+    this.restoreSearchFilter();
+    this.advancedSearch?.dispose();
+    this.advancedSearch = null;
+    this.advancedSnapshot = null;
+    this.advancedSpec = null;
+    this.revealedHit = null;
     this.searchOpen = open;
     this.searchQuery = query;
     this.searchCaseSensitive = caseSensitive;
+    const spec: SearchSpec = { ...DEFAULT_SEARCH_SPEC, ...options, query, caseSensitive };
+    // The common literal single-line case retains its original incremental RX path.
+    const advanced = spec.mode !== 'literal' || spec.multiline || spec.wholeWord ||
+      spec.scope !== 'buffer' || spec.directions.length !== 4;
+    if (open && query && advanced) this.advancedSpec = spec;
     this.recomputeSearch();
+    if (this.advancedSpec) {
+      const session = new TerminalSearchSession([this.createSearchSource()], spec, snapshot => {
+        if (this.advancedSearch !== session || this.destroyed) return;
+        const previous = this.advancedSnapshot?.hits[this.currentMatch];
+        this.advancedSnapshot = snapshot;
+        if (previous) {
+          const next = snapshot.hits.findIndex(hit => hit.startSeq === previous.startSeq && hit.endSeq === previous.endSeq);
+          this.currentMatch = next >= 0 ? next : Math.min(this.currentMatch, Math.max(0, snapshot.hits.length - 1));
+        } else this.currentMatch = Math.min(this.currentMatch, Math.max(0, snapshot.hits.length - 1));
+        this.searchOverlayVersion++;
+        this.requestRender();
+      });
+      this.advancedSearch = session;
+      session.start();
+    }
+    this.searchOverlayVersion++;
     this.renderer?.bumpFilterVersion();
     this.requestRender();
   }
 
+  getSearchSnapshot(): SearchSnapshot | null { return this.advancedSnapshot; }
+
+  cancelAdvancedSearch(): void { this.advancedSearch?.cancel(); }
+
+  /** A lightweight source adapter; no snapshots, eager decoding or background index. */
+  createSearchSource(id = this.portId): SearchSource {
+    return {
+      id,
+      getState: () => ({
+        generation: this.searchContextGeneration,
+        revision: this.sourceRevision,
+        firstSeq: this.buffer.firstSeq,
+        lastSeq: Math.min(this.buffer.lastSeq, this.frozenSeq ?? this.buffer.lastSeq),
+        configKey: JSON.stringify([this.getEncoding(), this.getDisplayFormat(), this.filterDirection,
+          this.filterKeyword, this.filterHideAsciiNoise, this.frozenSeq]),
+        available: !this.destroyed,
+      }),
+      readRecord: (seq, spec) => {
+        if (this.destroyed || (this.frozenSeq !== null && seq > this.frozenSeq)) return null;
+        const line = this.buffer.getBySeq(seq);
+        if (!line || !spec.directions.includes(line.direction)) return null;
+        if ((line.rawData?.byteLength ?? 0) > SEARCH_MAX_TEXT_BYTES || (line.content?.length ?? 0) * 2 > SEARCH_MAX_TEXT_BYTES) {
+          return { seq, timestamp: line.timestamp, direction: line.direction, text: '', oversized: true };
+        }
+        const encoding = this.getEncoding();
+        if (!linePassesFilter(line, 'all', '', encoding, spec.mode === 'hex' ? false : this.filterHideAsciiNoise)) return null;
+        if (spec.scope === 'visible' && !linePassesFilter(line, this.filterDirection, this.filterKeyword, encoding, this.filterHideAsciiNoise)) return null;
+        return { seq, timestamp: line.timestamp, direction: line.direction,
+          text: spec.mode === 'hex' ? '' : getSearchableText(line, this.getDisplayFormat(), encoding),
+          rawData: spec.mode === 'hex' ? line.rawData : undefined };
+      },
+    };
+  }
+
+  isSearchHitValid(hit: SearchHit): boolean {
+    return !this.destroyed && hit.generation === this.searchContextGeneration &&
+      hit.startSeq >= this.buffer.firstSeq && hit.endSeq <= Math.min(this.buffer.lastSeq, this.frozenSeq ?? this.buffer.lastSeq);
+  }
+
+  previewSearchHit(hit: SearchHit, spec?: SearchSpec): string {
+    if (!this.isSearchHitValid(hit)) return '';
+    const line = this.buffer.getBySeq(hit.startSeq);
+    if (!line) return '';
+    const text = spec?.mode === 'hex' && line.rawData ? bytesToSpacedHex(line.rawData) : getSearchableText(line, this.getDisplayFormat(), this.getEncoding());
+    const offset = Math.max(0, (hit.spans.find(span => span.seq === hit.startSeq)?.start ?? 0) - 40);
+    return `${offset ? '…' : ''}${text.slice(offset, offset + 240)}${hit.endSeq > hit.startSeq ? ' ↵ …' : ''}`;
+  }
+
+  /** The shell acquires navigation/Pin authority before invoking this method. */
+  revealSearchHit(hit: SearchHit): boolean {
+    if (!this.isSearchHitValid(hit)) return false;
+    this.revealedHit = hit;
+    this.revealSearchRange(hit.startSeq, hit.endSeq);
+    this.locked = false;
+    this.searchOverlayVersion++;
+    this.requestRender();
+    this.renderer?.scrollToSeq(hit.startSeq, 'center', this.buffer, this.buildView(), true);
+    return true;
+  }
+
+  private searchSpansForSeq = (seq: number): ReadonlyArray<{ start: number; end: number }> => {
+    const key = `${this.searchOverlayVersion}:${this.searchContextGeneration}:${this.buffer.firstSeq}`;
+    if (key !== this.searchPaintKey) { this.searchPaintKey = key; this.searchPaintCache.clear(); }
+    const cached = this.searchPaintCache.get(seq);
+    if (cached) return cached;
+    const spans = this.computeSearchSpans(seq);
+    this.searchPaintCache.set(seq, spans);
+    if (this.searchPaintCache.size > 256) this.searchPaintCache.delete(this.searchPaintCache.keys().next().value!);
+    return spans;
+  };
+
+  private computeSearchSpans(seq: number): ReadonlyArray<{ start: number; end: number }> {
+    if (this.revealedHit && this.isSearchHitValid(this.revealedHit)) return this.revealedHit.spans.filter(span => span.seq === seq);
+    const hits = this.advancedSnapshot?.hits;
+    if (!hits?.length) return [];
+    // Hits are sequence ordered per source. At most 32 preceding record starts
+    // can overlap this record; never build an unbounded per-character DOM index.
+    let lo = 0, hi = hits.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (hits[mid].startSeq <= seq) lo = mid + 1; else hi = mid; }
+    const spans: Array<{ start: number; end: number }> = [];
+    for (let i = lo - 1; i >= 0 && hits[i].startSeq >= seq - 31; i--) {
+      const hit = hits[i];
+      if (hit.endSeq >= seq && this.isSearchHitValid(hit)) for (const span of hit.spans) if (span.seq === seq) spans.push(span);
+    }
+    return spans;
+  }
+
   getMatchCount(): number {
+    if (this.advancedSpec) return this.advancedSnapshot?.hits.length ?? 0;
     return countVisibleSeqs(this.buffer, this.matches.seqs, this.matches.offset, this.frozenSeq);
   }
 
@@ -295,8 +459,20 @@ export class TerminalViewportManager {
     const count = this.getMatchCount();
     if (count === 0) return false;
     this.currentMatch = ((idx % count) + count) % count;
+    this.revealedHit = null;
+    if (this.advancedSpec) {
+      const hit = this.advancedSnapshot?.hits[this.currentMatch];
+      if (!hit || !this.isSearchHitValid(hit)) return false;
+      this.searchOverlayVersion++;
+      this.revealSearchRange(hit.startSeq, hit.endSeq);
+      this.locked = false;
+      this.requestRender();
+      this.renderer?.scrollToSeq(hit.startSeq, 'center', this.buffer, this.buildView(), true);
+      return true;
+    }
     const targetSeq = this.matches.seqs[this.matches.offset + this.currentMatch];
     if (this.frozenSeq !== null && targetSeq > this.frozenSeq) return false;
+    this.revealSearchRange(targetSeq, targetSeq);
     // Match navigation is an explicit seek, not a request to keep riding the tail.
     // The UI releases the store/group Pin before calling this method as well.
     this.locked = false;
@@ -343,7 +519,7 @@ export class TerminalViewportManager {
   /** Scroll to the first row of the currently visible list (filter-aware). */
   scrollToTop(): void {
     if (!this.renderer || this.buffer.length === 0) return;
-    const firstVisible = this.filterActive
+    const firstVisible = this.filterActive && !this.searchRevealAll
       ? this.filtered.seqs[this.filtered.offset] ?? this.buffer.firstSeq
       : this.buffer.firstSeq;
     this.renderer.scrollToSeq(firstVisible, 'start', this.buffer, this.buildView());
@@ -362,6 +538,8 @@ export class TerminalViewportManager {
     this.matchedDisplayFormat = displayFormat;
     if (encodingChanged) this.recomputeFilter();
     if (encodingChanged || displayChanged) {
+      this.searchContextGeneration = ++nextSearchGeneration;
+      this.revealedHit = null;
       this.recomputeSearch();
       this.renderer?.bumpFilterVersion();
     }
@@ -391,6 +569,11 @@ export class TerminalViewportManager {
   /** Tab close / mode switch: destroy the instance. */
   dispose(): void {
     this.destroyed = true;
+    this.searchPaintCache.clear();
+    this.advancedSearch?.dispose();
+    this.advancedSearch = null;
+    this.advancedSnapshot = null;
+    this.revealedHit = null;
     this.cancelScans();
     this.invalidateSource();
     this.cancelIndexBuild();
@@ -512,6 +695,11 @@ export class TerminalViewportManager {
   }
 
   private invalidateSource(): void {
+    this.searchRevealAll = false;
+    this.searchContextGeneration = ++nextSearchGeneration;
+    this.advancedSnapshot = null;
+    this.revealedHit = null;
+    this.searchOverlayVersion++;
     this.sourceGenerationValue++;
     this.sourceRevisionValue++;
     this.heldTimelineRequest = null;
@@ -563,9 +751,9 @@ export class TerminalViewportManager {
   private rebuildTimeIndex(preserveWaiters = false): void {
     this.cancelIndexBuild(preserveWaiters);
     this.timeIndex.clear();
-    if (this.filterLoading) { this.timeIndexReady = false; return; }
+    if (this.filterLoading && !this.searchRevealAll) { this.timeIndexReady = false; return; }
     const version = this.indexBuildVersion;
-    const list = this.filterActive ? this.filtered.seqs : null;
+    const list = this.filterActive && !this.searchRevealAll ? this.filtered.seqs : null;
     let cursor = list ? this.filtered.offset : this.buffer.firstSeq;
     const end = list ? this.filtered.offset + this.getVisibleCount() : Math.min(this.buffer.lastSeq, this.frozenSeq ?? this.buffer.lastSeq) + 1;
     this.timeIndexReady = end - cursor <= TERMINAL_REBUILD_SYNC_LIMIT;
@@ -662,15 +850,21 @@ export class TerminalViewportManager {
 
   private buildView(): TerminalViewState {
     const searchActive = this.searchOpen && this.searchQuery.length > 0;
+    const advanced = !!this.advancedSpec || !!this.revealedHit;
+    const currentHit = this.revealedHit && this.isSearchHitValid(this.revealedHit)
+      ? this.revealedHit : this.advancedSnapshot?.hits[this.currentMatch];
     const locked = this.timelineGrouped
       ? this.timelineLiveFollow && !this.selectedRange && !this.renderer?.hasSelection
       : this.locked;
     return {
-      visibleSeqs: this.filterActive ? this.filtered.seqs : null,
-      visibleSeqsOffset: this.filterActive ? this.filtered.offset : 0,
+      visibleSeqs: this.filterActive && !this.searchRevealAll ? this.filtered.seqs : null,
+      visibleSeqsOffset: this.filterActive && !this.searchRevealAll ? this.filtered.offset : 0,
       frozenSeq: this.frozenSeq,
-      matchSet: searchActive ? this.cachedMatchSet() : null,
-      currentMatchSeq: searchActive ? this.matches.seqs[this.matches.offset + this.currentMatch] ?? -1 : -1,
+      matchSet: searchActive && !advanced ? this.cachedMatchSet() : null,
+      currentMatchSeq: advanced ? currentHit?.startSeq ?? -1 : searchActive ? this.matches.seqs[this.matches.offset + this.currentMatch] ?? -1 : -1,
+      currentMatchEndSeq: advanced ? currentHit?.endSeq : undefined,
+      searchSpansForSeq: advanced ? this.searchSpansForSeq : undefined,
+      searchVersion: this.searchOverlayVersion,
       searchQuery: this.searchOpen ? this.searchQuery : '',
       searchCaseSensitive: this.searchCaseSensitive,
       selectedRange: this.selectedRange,
@@ -749,7 +943,7 @@ export class TerminalViewportManager {
     const membership = new Set<number>();
     this.matchSetCache = membership;
     this.searchLoading = this.searchOpen && !!this.searchQuery && this.buffer.length > TERMINAL_REBUILD_SYNC_LIMIT;
-    if (!this.searchOpen || !this.searchQuery) return;
+    if (!this.searchOpen || !this.searchQuery || this.advancedSpec) { this.searchLoading = false; return; }
     const encoding = this.getEncoding(), displayFormat = this.getDisplayFormat();
     this.cancelSearchScan = this.scanSource(
       (line, seq) => {
