@@ -167,8 +167,8 @@ test('global multi-port Worker search selects sources and activates the correct 
   await expect(page.locator('.serial-content-layer[data-port-id="COM2"] .terminal-line[data-seq="0"] mark')).toHaveText('GLOBAL_LEFT');
   await expect(page.locator('.serial-content-layer[data-port-id="COM2"] .terminal-line[data-seq="1"] mark')).toHaveText('GLOBAL_RIGHT');
   expect(await page.evaluate(async () => {
-    const { useAppStore } = await import('/src/stores/useAppStore.ts');
-    return useAppStore.getState().tabs.find(tab => tab.id === useAppStore.getState().activeTabId)?.portId;
+    const { getActivePortId, useAppStore } = await import('/src/stores/useAppStore.ts');
+    return getActivePortId(useAppStore.getState());
   })).toBe('COM2');
   await expect.poll(() => page.workers().length).toBe(0);
   expect(errors).toEqual([]);

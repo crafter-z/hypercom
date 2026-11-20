@@ -14,7 +14,7 @@ test(`${ROW_COUNT} retained rows: receive/display cost with advanced search off 
     const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
     const { DEFAULT_SEARCH_SPEC } = await import('/src/utils/terminal/search/searchTypes.ts');
     const vm = getViewportManager('COM1');
-    const row = (seq: number) => ({ timestamp: seq, direction: 'RX', content: `INFO packet ${seq}: temperature=24.5 status=normal`, isHex: false });
+    const row = (seq: number) => ({ timestamp: seq, direction: 'RX' as const, content: `INFO packet ${seq}: temperature=24.5 status=normal`, isHex: false });
     vm.applyLimits({ maxLines: rowCount });
     vm.appendLines(Array.from({ length: rowCount }, (_, seq) => row(seq)));
     await new Promise(resolve => setTimeout(resolve, 200));
