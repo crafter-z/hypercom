@@ -104,7 +104,12 @@ jobs:
       # --lib 在 Linux 上会执行 #[cfg(not(target_os = "windows"))] 的串口/TTY 测试，
       # Windows 本地开发环境跑不到——把 Windows-only 之外的分支纳入回归是本 job 的目的。
       - name: cargo test
-        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+        run: npm run test:rust -- --locked
+
+      - name: CLI tests (real executable and fake serial Host)
+        run: |
+          npm run test:rust:runner
+          npm run test:cli -- --locked
 
       - name: clippy (deny warnings)
         run: cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
@@ -113,7 +118,7 @@ jobs:
       # release 专属路径（如 updater 的真实 endpoint）平时永远不编译；发版前必须
       # 在 release profile 上过一遍类型检查。
       - name: cargo check (release)
-        run: cargo check --release --lib --manifest-path src-tauri/Cargo.toml
+        run: cargo check --locked --release --lib --bin hypercom-cli --manifest-path src-tauri/Cargo.toml
 
   e2e:
     name: e2e (playwright chromium)

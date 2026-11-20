@@ -26,7 +26,7 @@ Sidebar/TabBar 连接按钮 ──► useSerialConnection ──► serialConnec
 |------|------|
 | `serial/mod.rs` | `SerialManager`（`ports` / `sim_ports` / `tty_sim_ports` 三张注册表 + `simulate` / `gitbash_sim` 能力开关 + `last_params`）、`PortKind` / `check_virtual_enabled`、全局串口锁纪律；`open_port` / `close_port` / `send_data` / `write_raw` 按 `PortKind` 分派 |
 | `serial/codec.rs` | TX 编码：`parse_hex_string` / `build_tx_bytes`（入参 → 字节的**唯一实现**）/ `normalize_tty_line_ending` / `write_all_with_deadline` + `WRITE_TOTAL_DEADLINE` / `TxOutcome`；纯逻辑，不碰 `serialport` |
-| `serial/events.rs` | 前端事件载荷与派发助手（`serial:data` / `serial:status` / `serial:reconnect_hint`）+ RX 数据落盘；`PortStatus` 枚举收口状态字符串 |
+| `serial/events.rs` | 前端事件载荷与派发助手（`serial:data` / `serial:status` / `serial:reconnect_hint`）、RX 数据落盘；普通发送的原生写入事实用独立 `serial:tx`，不改变上述事件或现有 GUI 回显 |
 | `serial/ports_real.rs` | 真实串口：`SerialPortHandle` 读写句柄拆分、帧格式映射、热插拔幽灵句柄回收、`open_blocking` / `reconnect_blocking` / `enumerate_system_ports` |
 | `serial/ports_windows.rs` | Windows 默认端口列表：按 `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM` 的值枚举顺序返回 COM 端口，与 SuperCom 的 .NET `SerialPort.GetPortNames()` 路径对齐；`is_com_name` 只放行 `COM<数字>`，`dedupe_names` 按不区分大小写保留首次出现；`serialport::available_ports`（SetupAPI）仅补充 USB 元数据，键/元数据缺失都不影响枚举成员与顺序 |
 | `serial/ports_sim.rs` | 两路模拟串口 SIM:Loopback / SIM:Loopback2：独立回显 + 周期输出（`virtual_port_infos` / `parse_sim_rate_command` / `sim_due_lines`） |

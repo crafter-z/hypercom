@@ -7,7 +7,7 @@
 `.github/workflows/ci.yml` 是分支 CI 和 stable/preview 发布流共用的 reusable workflow：
 
 - `frontend` 使用 Node 22，执行 `npm ci`、低级别依赖审计、应用/Node 工具/e2e 三套 TypeScript 检查、`npm run test:run`、`node --test scripts/release.test.mjs` 和 `npm run build`。
-- `rust` 在 Linux/Windows 矩阵执行 `cargo test --lib`、Clippy（`-D warnings`）和 release-profile 的 `cargo check --release --lib`；Linux 安装 Tauri 所需系统依赖。
+- `rust` 在 Linux/Windows 矩阵执行 `npm run test:rust`、`npm run test:rust:runner`、`npm run test:cli`、Clippy（`-D warnings`）和 release-profile 的 `cargo check --release --lib --bin hypercom-cli`；Linux 安装 Tauri 所需系统依赖。CLI 验收用实际二进制连接 loopback Host 和假串口，并不验证发行包、驱动或双机。
 - `e2e` 安装 Chromium 并运行 Playwright。测试注入 mock Tauri IPC，不证明真实串口、原生 WebView/CSP 或安装包行为。
 
 发布流在创建 draft 前调用同一质量门。质量门失败时不会进入可发布状态。

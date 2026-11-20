@@ -1,7 +1,9 @@
 use super::*;
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tokio::io::{duplex, AsyncReadExt};
+use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 fn config() -> ListenerConfig {
@@ -183,7 +185,8 @@ fn structured_error_round_trip_and_response_exclusivity() {
     let response = Response::error("epoch-1", Some("r1".into()), error);
     let line = encode_response(&response, 4096).unwrap();
     let wire: Value = serde_json::from_slice(&line).unwrap();
-    assert_eq!(wire["error"]["code"], "OUTCOME_UNKNOWN");
+    assert_eq!(ErrorCode::OutcomeUnknown.as_str(), "OUTCOME_UNKNOWN");
+    assert_eq!(wire["error"]["code"], ErrorCode::OutcomeUnknown.as_str());
     assert_eq!(wire["error"]["operationId"], "op-1");
     assert_eq!(wire["error"]["retryable"], false);
     assert_eq!(
@@ -219,6 +222,53 @@ async fn partial_frames_survive_cancellation_and_accept_multiple_requests() {
 }
 
 #[tokio::test]
+async fn negotiated_frame_limit_applies_to_prefetched_bytes() {
+    let mut reader = FrameReader::new(&b"boot\n1234\n12345\n"[..], MAX_FRAME_BYTES).unwrap();
+    assert_eq!(reader.read_frame().await.unwrap().unwrap(), b"boot");
+    reader.set_limit(4).unwrap();
+    for limit in [0, MAX_FRAME_BYTES + 1] {
+        assert_eq!(
+            reader.set_limit(limit).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+    }
+    assert_eq!(reader.read_frame().await.unwrap().unwrap(), b"1234");
+    assert!(matches!(
+        reader.read_frame().await.unwrap_err(),
+        TransportError::Protocol(WireError {
+            code: ErrorCode::FrameTooLarge,
+            ..
+        })
+    ));
+
+    let mut reader = FrameReader::new(&b"hi\n123456789\n"[..], 2).unwrap();
+    assert_eq!(reader.read_frame().await.unwrap().unwrap(), b"hi");
+    reader.set_limit(9).unwrap();
+    assert_eq!(reader.read_frame().await.unwrap().unwrap(), b"123456789");
+}
+
+#[tokio::test]
+async fn smaller_limit_rejects_an_already_partial_frame_without_waiting_for_more() {
+    let (mut producer, consumer) = duplex(64);
+    let mut reader = FrameReader::new(consumer, 32).unwrap();
+    producer.write_all(b"1234").await.unwrap();
+    assert!(timeout(Duration::from_millis(10), reader.read_frame())
+        .await
+        .is_err());
+    reader.set_limit(3).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), reader.read_frame())
+            .await
+            .unwrap()
+            .unwrap_err(),
+        TransportError::Protocol(WireError {
+            code: ErrorCode::FrameTooLarge,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn overlong_unterminated_frames_are_bounded_and_terminal() {
     let mut reader = FrameReader::new(tokio::io::repeat(b'x'), 64).unwrap();
     let error = reader.read_frame().await.unwrap_err();
@@ -229,7 +279,6 @@ async fn overlong_unterminated_frames_are_bounded_and_terminal() {
             ..
         })
     ));
-    assert!(reader.pending.len() <= 64);
     assert!(matches!(
         reader.read_frame().await.unwrap_err(),
         TransportError::Protocol(WireError {
@@ -657,31 +706,57 @@ async fn dropping_listener_requests_shutdown_and_runs_disconnect_hook() {
     assert!(client.read.read_frame().await.unwrap().is_none());
 }
 
+#[derive(Default)]
 struct BlockingHandler {
     started: Notify,
     disconnected: Notify,
+    dropped: AtomicBool,
+    calls: Mutex<Vec<String>>,
+    disconnects: Mutex<Vec<(Option<ErrorCode>, bool)>>,
+}
+
+struct MarkDropped<'a>(&'a AtomicBool);
+
+impl Drop for MarkDropped<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl RequestHandler for BlockingHandler {
-    fn handle(&self, _connection: ConnectionContext, _request: Request) -> HandlerFuture<'_> {
+    fn handle(&self, _connection: ConnectionContext, request: Request) -> HandlerFuture<'_> {
         Box::pin(async move {
+            let _mark_dropped = MarkDropped(&self.dropped);
+            self.calls.lock().unwrap().push(request.request_id);
             self.started.notify_one();
             std::future::pending().await
         })
     }
 
     fn disconnected(&self, _connection: ConnectionContext, reason: Option<WireError>) {
-        assert_eq!(reason.unwrap().code, ErrorCode::ShuttingDown);
+        self.disconnects.lock().unwrap().push((
+            reason.map(|error| error.code),
+            self.dropped.load(Ordering::SeqCst),
+        ));
         self.disconnected.notify_one();
     }
 }
 
-#[tokio::test]
-async fn shutdown_cancels_pending_handler_futures_and_joins_connections() {
-    let handler = Arc::new(BlockingHandler {
-        started: Notify::new(),
-        disconnected: Notify::new(),
-    });
+impl BlockingHandler {
+    async fn wait_for_disconnect(&self) {
+        timeout(Duration::from_secs(2), self.disconnected.notified())
+            .await
+            .unwrap();
+    }
+
+    fn assert_disconnected_once(&self, reason: Option<ErrorCode>) {
+        assert_eq!(&*self.disconnects.lock().unwrap(), &[(reason, true)]);
+        assert_eq!(&*self.calls.lock().unwrap(), &["pending".to_owned()]);
+    }
+}
+
+async fn blocking_connection() -> (Arc<BlockingHandler>, LoopbackListener, Client) {
+    let handler = Arc::new(BlockingHandler::default());
     let listener = LoopbackListener::bind(0, config(), handler.clone())
         .await
         .unwrap();
@@ -691,13 +766,116 @@ async fn shutdown_cancels_pending_handler_futures_and_joins_connections() {
     timeout(Duration::from_secs(2), handler.started.notified())
         .await
         .unwrap();
+    (handler, listener, client)
+}
+
+#[tokio::test]
+async fn shutdown_cancels_pending_handler_futures_and_joins_connections() {
+    let (handler, listener, _client) = blocking_connection().await;
     timeout(Duration::from_secs(2), listener.shutdown())
         .await
         .unwrap()
         .unwrap();
-    timeout(Duration::from_secs(2), handler.disconnected.notified())
+    handler.assert_disconnected_once(Some(ErrorCode::ShuttingDown));
+}
+
+#[tokio::test]
+async fn peer_disconnect_cancels_pending_handler_without_listener_shutdown() {
+    let (handler, listener, client) = blocking_connection().await;
+    drop(client);
+    handler.wait_for_disconnect().await;
+    listener.shutdown().await.unwrap();
+    handler.assert_disconnected_once(None);
+}
+
+#[tokio::test]
+async fn tcp_half_close_also_cancels_pending_and_queued_requests() {
+    let (handler, listener, mut client) = blocking_connection().await;
+    client.send(&request("queued", "host.status")).await;
+    client.write.shutdown().await.unwrap();
+    handler.wait_for_disconnect().await;
+    assert!(timeout(Duration::from_secs(2), client.read.read_frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+    listener.shutdown().await.unwrap();
+    handler.assert_disconnected_once(None);
+}
+
+#[tokio::test]
+async fn partial_frame_at_eof_cancels_handler_and_returns_structured_error() {
+    let (handler, listener, mut client) = blocking_connection().await;
+    client.write.write_all(b"{").await.unwrap();
+    client.write.shutdown().await.unwrap();
+    handler.wait_for_disconnect().await;
+    assert_error(&client.response().await, ErrorCode::IncompleteFrame, None);
+    listener.shutdown().await.unwrap();
+    handler.assert_disconnected_once(Some(ErrorCode::IncompleteFrame));
+}
+
+#[tokio::test]
+async fn pending_handler_does_not_allow_unbounded_request_intake() {
+    let (handler, listener, mut client) = blocking_connection().await;
+    let mut burst = Vec::new();
+    for number in 0..=REQUEST_QUEUE_CAPACITY {
+        burst.extend(encode_request(&request(&format!("q{number}"), "host.status"), 4096).unwrap());
+    }
+    client.write.write_all(&burst).await.unwrap();
+    handler.wait_for_disconnect().await;
+    assert_error(&client.response().await, ErrorCode::RequestLimit, None);
+    listener.shutdown().await.unwrap();
+    handler.assert_disconnected_once(Some(ErrorCode::RequestLimit));
+}
+
+#[tokio::test]
+async fn eof_releases_handler_before_stalled_output_drain_and_shutdown_interrupts_it() {
+    let handler = Arc::new(BlockingHandler::default());
+    let (mut client_input, input) = duplex(4096);
+    let (output, _unread_output) = duplex(1);
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn({
+        let handler = handler.clone();
+        async move {
+            let connection = ConnectionContext {
+                connection_id: 1,
+                peer_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1).into(),
+            };
+            let mut settings = config();
+            settings.write_timeout = Duration::from_secs(30);
+            serve_connection(
+                input,
+                output,
+                connection,
+                &settings,
+                handler.as_ref(),
+                stopped,
+            )
+            .await;
+        }
+    });
+    for request in [
+        request("h", HANDSHAKE_METHOD),
+        request("pending", "host.status"),
+    ] {
+        client_input
+            .write_all(&encode_request(&request, 4096).unwrap())
+            .await
+            .unwrap();
+    }
+    timeout(Duration::from_secs(2), handler.started.notified())
         .await
         .unwrap();
+    client_input.shutdown().await.unwrap();
+    handler.wait_for_disconnect().await;
+    handler.assert_disconnected_once(None);
+    assert!(!task.is_finished()); // The handshake response cannot fit in the output buffer.
+    stop.send_replace(true);
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    handler.assert_disconnected_once(None);
 }
 
 #[test]

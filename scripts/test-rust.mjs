@@ -24,26 +24,32 @@ function removeOwnedTemp(directory, cacheRoot) {
  * (see tauri.mjs), so they cannot write to the ordinary system %TEMP% directory.
  * A private workspace directory also isolates fixed fixture names across runners.
  */
-export function runRustTests(args = [], { env = process.env, launch = spawnSync } = {}) {
+export function withRustTestTemp(env, run) {
   const cachePath = path.join(projectRoot, '.npm-cache');
   fs.mkdirSync(cachePath, { recursive: true });
   const cacheRoot = fs.realpathSync(cachePath);
   const directory = fs.mkdtempSync(path.join(cacheRoot, 'rust-tests-'));
   console.log(`[test:rust] Temporary fixtures: ${directory}`);
   try {
-    const result = launch('cargo', [
-      'test', '--manifest-path', path.join(projectRoot, 'src-tauri', 'Cargo.toml'), '--lib', ...args,
-    ], {
-      cwd: projectRoot,
-      env: { ...env, TEMP: directory, TMP: directory, TMPDIR: directory },
-      // Inherit streams: no shell expansion or captured child-process pipes.
-      stdio: 'inherit',
-    });
-    if (result.error) throw result.error;
-    return result.status ?? 1;
+    return run(directory, { ...env, TEMP: directory, TMP: directory, TMPDIR: directory });
   } finally {
     removeOwnedTemp(directory, cacheRoot);
   }
+}
+
+export function runCargo(args, { env, launch = spawnSync, stdio = 'inherit' }) {
+  const [subcommand, ...rest] = args;
+  const result = launch('cargo', [
+    subcommand, '--manifest-path', path.join(projectRoot, 'src-tauri', 'Cargo.toml'), ...rest,
+  ], { cwd: projectRoot, env, stdio });
+  if (result.error) throw result.error;
+  return result.status ?? 1;
+}
+
+export function runRustTests(args = [], { env = process.env, launch = spawnSync } = {}) {
+  return withRustTestTemp(env, (_directory, childEnv) => runCargo(
+    ['test', '--lib', ...args], { env: childEnv, launch },
+  ));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

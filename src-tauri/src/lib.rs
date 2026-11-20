@@ -422,6 +422,14 @@ fn lock_windows_for_shutdown(app: &tauri::AppHandle) {
     }
 }
 
+/// Disarm the loopback endpoint and take ownership of its shutdown join handle.
+/// The caller sets `shutdown_started` first to prevent late listener publication.
+fn stop_automation_listener(state: &AppState) -> Option<automation::transport::LoopbackListener> {
+    let listener = state.automation_listener.lock().ok()?.take()?;
+    listener.request_shutdown();
+    Some(listener)
+}
+
 /// Start one asynchronous shutdown drain. The UI remains alive until serial
 /// readers/work, RX log tails, power inhibitors, and diagnostic logs are finalized.
 ///
@@ -441,16 +449,14 @@ fn request_shutdown(app: tauri::AppHandle) {
     {
         return;
     }
-    // Close approval has been consumed; freeze every renderer before any drain
-    // work starts so no main/popout WebView can continue editing during shutdown.
+    let automation_listener = stop_automation_listener(&state);
+    // Close approval has been consumed; freeze every renderer before awaiting any drain
+    // so no main/popout WebView can continue editing during shutdown.
     lock_windows_for_shutdown(&app);
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if let Some(listener) = state.automation_listener.lock().ok().and_then(|mut slot| slot.take()) {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                listener.shutdown(),
-            ).await {
+        if let Some(listener) = automation_listener {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), listener.shutdown()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => log::warn!("Automation listener shutdown failed: {error}"),
                 Err(_) => log::warn!("Automation listener shutdown timed out"),
@@ -517,6 +523,8 @@ fn cleanup_unavoidable_exit(app: &tauri::AppHandle) {
         tauri::async_runtime::block_on(async move {
             let state = handle.state::<AppState>();
             let deadline = tokio::time::Instant::now() + UNAVOIDABLE_EXIT_BUDGET;
+            // Signal listener shutdown without spending this forced exit's serial/log budget awaiting it.
+            drop(stop_automation_listener(&state));
             let _ = tokio::time::timeout(UNAVOIDABLE_EXIT_BUDGET / 2, commands::shutdown_serial_work(handle.clone(), &state)).await;
             let logs = state.log_manager.clone();
             let diag = state.diag_logger.clone();
@@ -759,7 +767,8 @@ pub fn run() {
                         server_epoch,
                         port,
                     ).await {
-                        Ok(bound_port) => log::info!("Automation loopback endpoint listening on 127.0.0.1:{bound_port}"),
+                        Ok(Some(bound_port)) => log::info!("Automation loopback endpoint listening on 127.0.0.1:{bound_port}"),
+                        Ok(None) => {},
                         Err(error) => log::error!("Automation loopback endpoint failed to start: {error}"),
                     }
                 });

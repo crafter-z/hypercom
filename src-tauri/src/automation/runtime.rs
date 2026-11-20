@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
@@ -60,6 +61,9 @@ type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// immediately before physical I/O and return only when that I/O has finished.
 /// A fake backend can implement this contract without AppHandle or serial hardware.
 trait RuntimeBackend: Send + Sync + 'static {
+    fn is_shutting_down(&self) -> bool {
+        false
+    }
     fn list_ports(&self) -> BackendFuture<'_, Result<Vec<Value>, WireError>>;
     fn generation(&self, port_id: &str) -> Result<u64, WireError>;
     fn send(
@@ -89,6 +93,10 @@ struct NativeBackend {
 }
 
 impl RuntimeBackend for NativeBackend {
+    fn is_shutting_down(&self) -> bool {
+        self.app.state::<AppState>().shutdown_started.load(Ordering::Acquire)
+    }
+
     fn list_ports(&self) -> BackendFuture<'_, Result<Vec<Value>, WireError>> {
         Box::pin(async move {
             let manager = self.app.state::<AppState>().serial_manager.clone();
@@ -318,11 +326,18 @@ impl RuntimeShared {
         Ok(session)
     }
 
+    fn require_running(&self) -> Result<(), WireError> {
+        if self.backend.is_shutting_down() {
+            return Err(runtime_error(ErrorCode::ShuttingDown, "host is shutting down"));
+        }
+        Ok(())
+    }
+
     fn require_control(&self) -> Result<(), WireError> {
         if !self.unsafe_control {
             return Err(runtime_error(
                 ErrorCode::PermissionDenied,
-                "experimental control requires HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1",
+                "experimental control requires a development build and HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1",
             ));
         }
         Ok(())
@@ -482,6 +497,7 @@ impl RuntimeShared {
     ) -> Result<(), WireError> {
         let mut state = self.lock()?;
         let validation = (|| {
+            self.require_running()?;
             if state.sessions.get(&connection.connection_id) != Some(session) {
                 return Err(runtime_error(
                     ErrorCode::ControlLost,
@@ -643,12 +659,12 @@ impl LocalAutomationHandler {
             host_id: host_id.clone(),
             server_epoch: server_epoch.clone(),
         });
-        Self::with_backend(
-            backend,
-            host_id,
-            server_epoch,
-            std::env::var(UNSAFE_CONTROL_ENV).ok().as_deref() == Some("1"),
-        )
+        let requested_control = std::env::var(UNSAFE_CONTROL_ENV).ok().as_deref() == Some("1");
+        let unsafe_control = requested_control && commands::is_debug_build();
+        if requested_control && !unsafe_control {
+            log::warn!("Ignoring {UNSAFE_CONTROL_ENV}: automation control is a development-only experiment");
+        }
+        Self::with_backend(backend, host_id, server_epoch, unsafe_control)
     }
 
     fn with_backend(
@@ -928,6 +944,7 @@ impl LocalAutomationHandler {
 impl RequestHandler for LocalAutomationHandler {
     fn handle(&self, connection: ConnectionContext, request: Request) -> HandlerFuture<'_> {
         Box::pin(async move {
+            self.shared.require_running()?;
             if let Some(target) = &request.target {
                 if target.host_id != self.shared.host_id.0 {
                     return Err(runtime_error(
@@ -1196,9 +1213,13 @@ pub async fn start_loopback(
     host_id: String,
     server_epoch: String,
     port: u16,
-) -> Result<u16, String> {
+) -> Result<Option<u16>, String> {
+    let shutting_down = || app.state::<AppState>().shutdown_started.load(Ordering::Acquire);
+    if shutting_down() {
+        return Ok(None);
+    }
     let handler = Arc::new(LocalAutomationHandler::new(
-        app,
+        app.clone(),
         host_id,
         server_epoch.clone(),
     ));
@@ -1214,11 +1235,16 @@ pub async fn start_loopback(
     let mut slot = slot
         .lock()
         .map_err(|_| "automation listener state unavailable".to_owned())?;
+    // Shutdown sets its flag before taking this slot. Whichever side wins the
+    // slot lock, a listener is either taken by shutdown or never published.
+    if shutting_down() {
+        return Ok(None);
+    }
     if slot.is_some() {
         return Err("automation listener is already running".into());
     }
     *slot = Some(listener);
-    Ok(bound_port)
+    Ok(Some(bound_port))
 }
 
 pub fn parse_opt_in_port() -> Option<u16> {

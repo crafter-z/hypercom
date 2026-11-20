@@ -3,7 +3,7 @@
 > **文档状态：设计提案；P1 基础切片已实现，完整远程方案仍未实现。**
 > 编制日期：2026-11-17。
 > 范围：本地 GUI、办公室远程 GUI、CLI、后续 SDK 的统一访问与管理。
-> 本文原为设计提案；当前实现分支已落地其中的 **P1 基础切片**：纯 Rust 控制/操作/事件核心、边界受限的 loopback JSON-lines transport、显式环境变量启用的本机 Host 适配器、共享 native send helper、独立 `serial:tx` 权威事件、控制租约/fence、操作去重与 `status`/`ports list`/`control acquire|release`/`send`/`operation get` CLI。控制和写入仍需第二个 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，主体是明确的未认证本机测试身份，`nativeGuiArbitration=false`；远程 TLS、原子 watch、持久 Host 任务和全 GUI 写入口迁移仍未启用，不能把本切片称为完整远程或 headless。
+> **当前实现仅为 P1 本机实验切片**：Rust 操作/控制核心、默认关闭的 loopback Host、共享 wire 编解码、同连接短租约 CLI、内存操作账本，以及普通原生发送的 `serial:tx` 事实。控制和写入只在开发构建中可用，仍需第二个 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，使用未认证本机测试身份，`nativeGuiArbitration=false`。`hostId` 暂按进程生成；TypeScript 适配层尚未接入真实后端。Windows Named Pipe、稳定 Host 身份、全 GUI 原生仲裁、原子 watch、远程 TLS 及独立 Host 仍未交付。
 
 ## 0. 结论与推荐决策
 
@@ -583,20 +583,26 @@ CLI `host` 针对服务；未来 `ui show` 只操作明确的客户端 UI，不�
 
 ### 14.3 使用示例（完整命令面仍在后续阶段）
 
-P1 当前可运行的本机切片需要显式环境变量启用 Host loopback adapter；默认 HyperCom 不打开监听器。默认只读支持 `status` 与 `ports list`；只有额外设置 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1` 才 advertise 并允许本机测试用 `control acquire|release`、`send`、`operation get`。该控制模式是未认证测试身份，Host 会标注 `nativeGuiArbitration=false`；`monitor/watch` 仍返回 `UNSUPPORTED_CAPABILITY`，不会伪造成功：
+本机实验入口默认关闭。启动桌面 Host 前显式设置 `HYPERCOM_AUTOMATION_LOOPBACK=1`，才开放 `status` 与 `ports list`。只有使用开发构建做本机隔离写入测试时再设 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`；正式构建忽略该变量，只能显式启用只读。开发写入仍是未认证的本机测试身份，**不得跨机转发，也不适合与本地 GUI 控制真实设备并行使用**。CLI 只允许本机端点，`monitor/watch` 暂不支持。
 
 ```powershell
+# 在启动桌面 Host 的终端：
 $env:HYPERCOM_AUTOMATION_LOOPBACK = '1'
-$env:HYPERCOM_AUTOMATION_PORT = '39071'
-# 仅本机测试控制时额外启用；默认不要打开：
-$env:HYPERCOM_AUTOMATION_UNSAFE_CONTROL = '1'
-# 启动实验室 HyperCom 后，在另一终端：
-.\src-tauri/target/debug/hypercom-cli.exe status
-.\src-tauri/target/debug/hypercom-cli.exe ports list
-.\src-tauri/target/debug/hypercom-cli.exe control acquire --port COM3 --connection-generation 7 --ttl-ms 3000
-.\src-tauri/target/debug/hypercom-cli.exe send --port COM3 --text status --ending crlf --lease-id LEASE --fence 1 --connection-generation 7
-.\src-tauri/target/debug/hypercom-cli.exe operation get --request-id REQUEST_ID
+# 下面这一行仅供本机隔离写入测试；只读测试保留注释：
+# $env:HYPERCOM_AUTOMATION_UNSAFE_CONTROL = '1'
+# 设置变量后，从此终端启动桌面 Host。
+
+# 在另一终端、同一仓库根目录（默认端口 39071）：
+cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- status
+cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- ports list
+# 发送前在开发版桌面 Host 中启用并打开模拟端口；CLI 不会隐式打开端口。
+cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- send --port SIM:Loopback --text ping --ending crlf
+cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- operation get --request-id REQUEST_ID
 ```
+
+`send` 在同一连接解析当前代次并取得、释放短租约。不能将租约跨 CLI 进程使用。`send` 只有得到成功的操作记录才退出 `0`；部分写入、失败和结果未知退出非零。已发送请求未收到有效回执时保留原 `requestId`，可向同一运行中的 Host 查询，不能据此自动重发。`operation get` 退出 `0` 表示成功取得记录，不表示原操作成功。
+
+开发验收使用 `npm run test:cli`：构建实际 CLI 二进制，连接真实 loopback listener 和假串口后端；不启动桌面应用，不需要硬件。不替代真实串口、Windows 双机或发行包验收。
 
 后续完整命令面仍按下列契约演进：
 

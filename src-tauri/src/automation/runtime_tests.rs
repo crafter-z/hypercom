@@ -4,16 +4,20 @@ use crate::automation::transport::{
     DEFAULT_MAX_FRAME_BYTES,
 };
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::process::Command;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
 #[derive(Default)]
 struct FakeBackend {
     generation: AtomicU64,
+    shutting_down: AtomicBool,
     lock_probe: Mutex<Option<std::sync::Weak<RuntimeShared>>>,
     writes: Mutex<Vec<Vec<u8>>>,
     contexts: Mutex<Vec<SerialTxContext>>,
@@ -36,6 +40,10 @@ impl FakeBackend {
 }
 
 impl RuntimeBackend for FakeBackend {
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
     fn list_ports(&self) -> BackendFuture<'_, Result<Vec<Value>, WireError>> {
         Box::pin(async {
             Ok(vec![
@@ -695,21 +703,49 @@ async fn ledger_capacity_rejects_new_work_without_evicting_dedupe_records() {
     assert_eq!(backend.writes.lock().unwrap().len(), 1);
 }
 
+type TestTcpReader = FrameReader<tokio::net::tcp::OwnedReadHalf>;
+type TestTcpWriter = tokio::net::tcp::OwnedWriteHalf;
+
+async fn tcp_client(listener: &LoopbackListener) -> (TestTcpWriter, TestTcpReader) {
+    let (read, write) = timeout(TEST_TCP_TIMEOUT, TcpStream::connect(listener.local_addr()))
+        .await
+        .expect("connect to test listener timed out")
+        .expect("connect to test listener")
+        .into_split();
+    (
+        write,
+        FrameReader::new(read, DEFAULT_MAX_FRAME_BYTES).unwrap(),
+    )
+}
+
+async fn tcp_send(writer: &mut TestTcpWriter, request: &Request) {
+    let frame = encode_request(request, DEFAULT_MAX_FRAME_BYTES).unwrap();
+    timeout(TEST_TCP_TIMEOUT, writer.write_all(&frame))
+        .await
+        .expect("test TCP write timed out")
+        .expect("write request to test TCP connection");
+}
+
+async fn tcp_exchange(
+    writer: &mut TestTcpWriter,
+    reader: &mut TestTcpReader,
+    request: &Request,
+) -> Response {
+    tcp_send(writer, request).await;
+    let frame = timeout(TEST_TCP_TIMEOUT, reader.read_frame())
+        .await
+        .expect("test TCP response timed out")
+        .expect("read test TCP response")
+        .expect("test TCP connection closed before response");
+    decode_response(&frame, DEFAULT_MAX_FRAME_BYTES).unwrap()
+}
+
 async fn tcp_call(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    reader: &mut FrameReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: &mut TestTcpWriter,
+    reader: &mut TestTcpReader,
     request: &Request,
 ) -> Value {
-    writer
-        .write_all(&encode_request(request, DEFAULT_MAX_FRAME_BYTES).unwrap())
-        .await
-        .unwrap();
-    let frame = timeout(Duration::from_secs(2), reader.read_frame())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    match decode_response(&frame, DEFAULT_MAX_FRAME_BYTES).unwrap() {
+    match tcp_exchange(writer, reader, request).await {
         Response::Ok { result, .. } => result,
         response => panic!("unexpected response: {response:?}"),
     }
@@ -718,19 +754,8 @@ async fn tcp_call(
 #[tokio::test]
 async fn loopback_handshake_acquire_send_query_release_vertical_slice() {
     let backend = Arc::new(FakeBackend::new());
-    let handler = Arc::new(handler(backend.clone(), true));
-    let listener = LoopbackListener::bind(
-        0,
-        ListenerConfig::new("epoch-test", handler.capabilities()),
-        handler,
-    )
-    .await
-    .unwrap();
-    let (read, mut write) = TcpStream::connect(listener.local_addr())
-        .await
-        .unwrap()
-        .into_split();
-    let mut read = FrameReader::new(read, DEFAULT_MAX_FRAME_BYTES).unwrap();
+    let listener = bind_test_listener(Arc::new(handler(backend.clone(), true))).await;
+    let (mut write, mut read) = tcp_client(&listener).await;
     let handshake = tcp_call(
         &mut write,
         &mut read,
@@ -770,6 +795,571 @@ async fn loopback_handshake_acquire_send_query_release_vertical_slice() {
     )
     .await;
     assert_eq!(released, Value::Null);
-    listener.shutdown().await.unwrap();
+    shutdown_test_listener(listener).await;
     assert_eq!(backend.writes.lock().unwrap()[0], b"AT\r\n");
+}
+
+#[tokio::test]
+async fn loopback_eof_before_native_guard_prevents_old_write() {
+    assert_loopback_eof_fencing(false).await;
+}
+
+#[tokio::test]
+async fn loopback_eof_during_native_write_drains_before_granting_new_control() {
+    assert_loopback_eof_fencing(true).await;
+}
+
+async fn assert_loopback_eof_fencing(after_guard: bool) {
+    let backend = Arc::new(FakeBackend::new());
+    backend.block_before.store(!after_guard, Ordering::SeqCst);
+    backend.block_after.store(after_guard, Ordering::SeqCst);
+    let handler = Arc::new(handler(backend.clone(), true));
+    let listener = bind_test_listener(handler.clone()).await;
+    let (mut old_write, mut old_read) = tcp_client(&listener).await;
+    let (mut new_write, mut new_read) = tcp_client(&listener).await;
+    let hello = Request::new("hello", "handshake", json!({}));
+    tcp_call(&mut old_write, &mut old_read, &hello).await;
+    tcp_call(&mut new_write, &mut new_read, &hello).await;
+    let acquire = |id: &str| port_request(id, "control.acquire", json!({"ttlMs":60000}));
+    let old_lease = tcp_call(&mut old_write, &mut old_read, &acquire("original-lease")).await;
+    let old_session = old_lease["clientSessionId"].as_str().unwrap();
+    let blocked = if after_guard {
+        &backend.after
+    } else {
+        &backend.before
+    };
+    let unblock = if after_guard {
+        &backend.continue_after
+    } else {
+        &backend.continue_before
+    };
+    tcp_send(&mut old_write, &send_request("eof-send", &old_lease)).await;
+    timeout(TEST_TCP_TIMEOUT, blocked.notified())
+        .await
+        .expect("fake backend did not reach the write barrier");
+
+    let query = |id: &str| port_request(id, "operations.get", json!({"requestId":"eof-send"}));
+    let pending = tcp_call(&mut new_write, &mut new_read, &query("while-blocked")).await;
+    assert_eq!(
+        pending["state"],
+        if after_guard { "executing" } else { "queued" }
+    );
+    // Send a real TCP FIN (not listener shutdown, a direct handler call or a
+    // socket reset). Keep the read half open and don't wait for the response.
+    timeout(TEST_TCP_TIMEOUT, old_write.shutdown())
+        .await
+        .expect("test TCP half-close timed out")
+        .expect("half-close old TCP connection");
+    // Observe the disconnect hook's effect before releasing the fake backend.
+    // In the executing case, PORT_BUSY alone would not prove EOF was handled.
+    timeout(TEST_TCP_TIMEOUT, async {
+        while handler
+            .shared
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .any(|session| session.id.0 == old_session)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("listener did not disconnect the old session while the fake write was blocked");
+
+    let new_lease = if after_guard {
+        let busy = tcp_exchange(&mut new_write, &mut new_read, &acquire("must-drain")).await;
+        match busy {
+            Response::Error { error, .. } => assert_eq!(error.code, ErrorCode::PortBusy),
+            response => panic!("in-flight write must block the new lease: {response:?}"),
+        }
+        None
+    } else {
+        Some(tcp_call(&mut new_write, &mut new_read, &acquire("new-lease")).await)
+    };
+    unblock.notify_one();
+
+    let completed = timeout(TEST_TCP_TIMEOUT, async {
+        for attempt in 0_u64.. {
+            let result = tcp_call(
+                &mut new_write,
+                &mut new_read,
+                &query(&format!("query-after-eof-{attempt}")),
+            )
+            .await;
+            if !matches!(result["state"].as_str(), Some("queued" | "executing")) {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        unreachable!()
+    })
+    .await
+    .expect("old operation did not finish after advancing the fake backend");
+    assert_eq!(completed["operationId"], pending["operationId"]);
+    let new_lease = if after_guard {
+        assert_eq!(completed["state"], "succeeded");
+        assert_eq!(
+            completed["outcome"],
+            json!({"certainty":"known","bytesWritten":"4"})
+        );
+        assert_eq!(*backend.writes.lock().unwrap(), vec![b"AT\r\n".to_vec()]);
+        tcp_call(&mut new_write, &mut new_read, &acquire("after-drain")).await
+    } else {
+        assert_eq!(completed["state"], "failed");
+        assert_eq!(completed["error"]["code"], "CONTROL_LOST");
+        assert_eq!(
+            completed["outcome"],
+            json!({"certainty":"known","bytesWritten":"0"})
+        );
+        assert!(backend.writes.lock().unwrap().is_empty());
+        new_lease.unwrap()
+    };
+    assert_eq!(new_lease["state"], "granted");
+    assert_ne!(new_lease["leaseId"], old_lease["leaseId"]);
+    assert_eq!(backend.generation("COM3").unwrap(), 7);
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+async fn shutdown_rejects_new_requests_and_an_existing_send_that_has_not_started() {
+    let backend = Arc::new(FakeBackend::new());
+    backend.block_before.store(true, Ordering::SeqCst);
+    let handler = Arc::new(handler(backend.clone(), true));
+    let lease = acquire(&handler, 1).await;
+    let pending = tokio::spawn({
+        let handler = handler.clone();
+        async move {
+            handler
+                .handle(connection(1), send_request("queued-at-stop", &lease))
+                .await
+        }
+    });
+    timeout(TEST_TCP_TIMEOUT, backend.before.notified())
+        .await
+        .unwrap();
+    backend.shutting_down.store(true, Ordering::SeqCst);
+    let error = handler
+        .handle(
+            connection(2),
+            Request::new("read-at-stop", "host.status", json!({})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ShuttingDown);
+    backend.continue_before.notify_one();
+    let finished = timeout(TEST_TCP_TIMEOUT, pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished["state"], "failed");
+    assert_eq!(finished["error"]["code"], "SHUTTING_DOWN");
+    assert!(backend.writes.lock().unwrap().is_empty());
+}
+
+const TEST_TCP_TIMEOUT: Duration = Duration::from_secs(5);
+const TEST_CLI_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn bind_test_listener(handler: Arc<LocalAutomationHandler>) -> LoopbackListener {
+    timeout(
+        TEST_TCP_TIMEOUT,
+        LoopbackListener::bind(
+            0,
+            ListenerConfig::new("epoch-test", handler.capabilities()),
+            handler,
+        ),
+    )
+    .await
+    .expect("test listener bind timed out")
+    .expect("bind the runtime to an ephemeral loopback port")
+}
+
+async fn shutdown_test_listener(listener: LoopbackListener) {
+    timeout(TEST_TCP_TIMEOUT, listener.shutdown())
+        .await
+        .expect("test listener shutdown timed out")
+        .expect("shut down the test listener");
+}
+
+fn cli_binary_path() -> PathBuf {
+    let bin = std::env::var_os("HYPERCOM_TEST_CLI_BIN")
+        .filter(|bin| !bin.is_empty())
+        .expect("HYPERCOM_TEST_CLI_BIN must point to the built hypercom-cli; run npm run test:cli");
+    // Resolve relative paths as files too, never look up a same-named program on PATH.
+    std::path::absolute(bin).expect("resolve HYPERCOM_TEST_CLI_BIN")
+}
+
+async fn run_cli(
+    bin: &Path,
+    listener: &LoopbackListener,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Output {
+    let mut child = Command::new(bin)
+        .arg("--endpoint")
+        .arg(listener.local_addr().to_string())
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn {} {args:?}: {error}", bin.display()));
+    let stdin = child.stdin.take();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let write_input = async move {
+        if let Some(input) = input {
+            stdin.expect("piped CLI stdin").write_all(input).await?;
+            // Dropping the pipe delivers EOF to `--stdin`.
+        }
+        Ok(())
+    };
+    let result = timeout(TEST_CLI_TIMEOUT, async {
+        tokio::try_join!(
+            write_input,
+            child.wait(),
+            stdout.read_to_end(&mut out),
+            stderr.read_to_end(&mut err),
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(((), status, _, _))) => Output {
+            status,
+            stdout: out,
+            stderr: err,
+        },
+        failure => {
+            // Tokio's kill also waits for the child; kill_on_drop is the fallback.
+            let _ = timeout(TEST_TCP_TIMEOUT, child.kill()).await;
+            panic!(
+                "hypercom-cli {args:?} did not complete: {failure:?}; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err),
+            );
+        }
+    }
+}
+
+fn cli_json(output: &Output, success: bool) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output
+            .status
+            .code()
+            .is_some_and(|code| (code == 0) == success),
+        "expected CLI success={success}, got {}; stdout: {stdout}; stderr: {stderr}",
+        output.status,
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!("invalid CLI JSON: {error}; stdout: {stdout}; stderr: {stderr}")
+    });
+    assert_eq!(value["ok"], success, "unexpected CLI response: {value}");
+    value
+}
+
+fn cli_success(output: &Output) -> Value {
+    cli_json(output, true)
+        .get("result")
+        .expect("CLI success did not return a result")
+        .clone()
+}
+
+async fn cli_operation(bin: &Path, listener: &LoopbackListener, request_id: &str) -> Value {
+    cli_success(
+        &run_cli(
+            bin,
+            listener,
+            &["operation", "get", "--request-id", request_id],
+            None,
+        )
+        .await,
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_default_local_status_and_ports_list() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let listener = bind_test_listener(Arc::new(handler(backend, false))).await;
+
+    // Do not supply --target; the CLI must resolve the default local host.
+    let status = cli_success(&run_cli(&bin, &listener, &["status"], None).await);
+    assert_eq!(status["hostId"], "host-test");
+    assert_eq!(status["serverEpoch"], "epoch-test");
+    assert_eq!(status["serialControl"], "not-enabled");
+    assert_eq!(status["capabilities"], json!(["host.status", "ports.list"]));
+    let ports = cli_success(&run_cli(&bin, &listener, &["ports", "list"], None).await);
+    assert_eq!(ports["hostId"], status["hostId"]);
+    assert_eq!(ports["serverEpoch"], status["serverEpoch"]);
+    assert_eq!(ports["readOnly"], true);
+    assert_eq!(
+        ports["ports"],
+        json!([{"target":{"hostId":"host-test","nativePortId":"COM3"},
+            "serverEpoch":"epoch-test","connectionGeneration":"7","state":"open"}]),
+    );
+
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_send_discovers_generation_acquires_on_same_connection_and_queries() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let listener = bind_test_listener(Arc::new(handler(backend.clone(), true))).await;
+
+    // No generation, lease or fence is supplied. The runtime binds the lease
+    // holder to the TCP connection, so acquiring on a different one cannot send.
+    let expected = b"AT + TEST\r\n";
+    let sent = cli_success(
+        &run_cli(
+            &bin,
+            &listener,
+            &[
+                "send",
+                "--port",
+                "COM3",
+                "--text",
+                "AT + TEST",
+                "--ending",
+                "crlf",
+            ],
+            None,
+        )
+        .await,
+    );
+    assert_eq!(sent["state"], "succeeded");
+    assert_eq!(sent["connectionGeneration"], "7");
+    assert_eq!(
+        sent["target"],
+        json!({"hostId":"host-test","nativePortId":"COM3"})
+    );
+    assert_eq!(
+        sent["outcome"],
+        json!({"certainty":"known","bytesWritten":expected.len().to_string()}),
+    );
+    let request_id = sent["requestId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap();
+    let operation_id = sent["operationId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap();
+    assert_eq!(cli_operation(&bin, &listener, request_id).await, sent);
+    assert_eq!(*backend.writes.lock().unwrap(), vec![expected.to_vec()]);
+    assert_eq!(
+        backend.contexts.lock().unwrap()[0].operation_id.as_deref(),
+        Some(operation_id),
+    );
+
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_stdin_preserves_exact_binary_bytes() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let listener = bind_test_listener(Arc::new(handler(backend.clone(), true))).await;
+
+    let input = b"\x00\xff\x80\r\nA\x1a\n\x00";
+    let sent = cli_success(
+        &run_cli(
+            &bin,
+            &listener,
+            &["send", "--port", "COM3", "--stdin"],
+            Some(input),
+        )
+        .await,
+    );
+    assert_eq!(sent["state"], "succeeded");
+    assert_eq!(
+        sent["outcome"],
+        json!({"certainty":"known","bytesWritten":input.len().to_string()}),
+    );
+    assert_eq!(*backend.writes.lock().unwrap(), vec![input.to_vec()]);
+
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_read_only_denies_send_and_watch_is_unsupported() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let listener = bind_test_listener(Arc::new(handler(backend.clone(), false))).await;
+
+    let denied = cli_json(
+        &run_cli(
+            &bin,
+            &listener,
+            &["send", "--port", "COM3", "--text", "AT"],
+            None,
+        )
+        .await,
+        false,
+    );
+    assert!(
+        matches!(
+            denied["error"]["code"].as_str(),
+            Some("UNSUPPORTED_CAPABILITY" | "PERMISSION_DENIED")
+        ),
+        "expected read-only control denial, got {denied}",
+    );
+    assert!(denied["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| !msg.is_empty()));
+
+    let unsupported = cli_json(
+        &run_cli(&bin, &listener, &["watch", "--port", "COM3"], None).await,
+        false,
+    );
+    assert_eq!(unsupported["error"]["code"], "UNSUPPORTED_CAPABILITY");
+    assert!(unsupported["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| !msg.is_empty()));
+    assert!(backend.writes.lock().unwrap().is_empty());
+
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_ack_timeout_keeps_request_id_and_does_not_replay() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    backend.block_after.store(true, Ordering::SeqCst);
+    let handler = Arc::new(handler(backend.clone(), true));
+    let listener = bind_test_listener(handler.clone()).await;
+    let (output, entered_driver) = tokio::join!(
+        run_cli(
+            &bin,
+            &listener,
+            &[
+                "send",
+                "--port",
+                "COM3",
+                "--text",
+                "PING",
+                "--timeout-ms",
+                "2000"
+            ],
+            None
+        ),
+        timeout(TEST_TCP_TIMEOUT, backend.after.notified()),
+    );
+    entered_driver.expect("CLI send did not reach the fake driver's write barrier");
+    assert_eq!(output.status.code(), Some(7));
+    let failure = cli_json(&output, false);
+    assert_eq!(failure["error"]["code"], "OUTCOME_UNKNOWN");
+    let request_id = failure["requestId"].as_str().unwrap();
+    assert_eq!(
+        backend.contexts.lock().unwrap()[0].request_id.as_deref(),
+        Some(request_id)
+    );
+
+    backend.continue_after.notify_one();
+    let key = RequestKey {
+        principal_id: PrincipalId(TEST_PRINCIPAL.into()),
+        request_id: RequestId(request_id.into()),
+    };
+    timeout(TEST_TCP_TIMEOUT, async {
+        while !handler
+            .shared
+            .lock()
+            .unwrap()
+            .operations
+            .get(&key)
+            .is_some_and(|record| record.status.is_terminal())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("host did not record the final operation after disconnect");
+    let operation = cli_operation(&bin, &listener, request_id).await;
+    assert_eq!(operation["state"], "succeeded");
+    assert_eq!(*backend.writes.lock().unwrap(), vec![b"PING".to_vec()]);
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_partial_and_unknown_sends_fail_with_queryable_request_ids() {
+    let bin = cli_binary_path();
+    for (bytes, code, code_string, message, status, certainty) in [
+        (
+            ByteCount::exact(2),
+            ErrorCode::IoError,
+            "IO_ERROR",
+            "partial write",
+            "failed",
+            "partial",
+        ),
+        (
+            ByteCount::at_least(0),
+            ErrorCode::OutcomeUnknown,
+            "OUTCOME_UNKNOWN",
+            "driver outcome unknown",
+            "unknown",
+            "unknown",
+        ),
+    ] {
+        let backend = Arc::new(FakeBackend::new());
+        backend.reports.lock().unwrap().push_back(SendReport {
+            native_fact: None,
+            bytes,
+            failure: Some(runtime_error(code, message)),
+        });
+        let listener = bind_test_listener(Arc::new(handler(backend.clone(), true))).await;
+
+        let failed = cli_json(
+            &run_cli(
+                &bin,
+                &listener,
+                &["send", "--port", "COM3", "--text", "ABCD"],
+                None,
+            )
+            .await,
+            false,
+        );
+        assert_eq!(failed["error"]["code"], code_string);
+        assert!(failed["error"]["message"]
+            .as_str()
+            .is_some_and(|msg| !msg.is_empty()));
+        let request_id = failed["requestId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap();
+        // Querying is read-only and succeeds even though the original send failed.
+        // Check authoritative details here, without depending on how the CLI
+        // chooses to include extra operation fields in the failed send output.
+        let operation = cli_operation(&bin, &listener, request_id).await;
+        assert_eq!(operation["requestId"], request_id);
+        assert_eq!(operation["state"], "failed");
+        assert_eq!(operation["status"], status);
+        assert_eq!(operation["error"]["code"], code_string);
+        assert_eq!(operation["error"]["message"], message);
+        assert_eq!(operation["error"]["retryable"], false);
+        assert_eq!(
+            operation["outcome"],
+            json!({"certainty":certainty,"bytesWritten":bytes.known.to_string()}),
+        );
+        // Each case attempted the write once; neither send nor query replayed it.
+        assert_eq!(*backend.writes.lock().unwrap(), vec![b"ABCD".to_vec()]);
+
+        shutdown_test_listener(listener).await;
+    }
 }
