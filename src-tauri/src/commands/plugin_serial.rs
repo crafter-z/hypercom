@@ -305,6 +305,9 @@ pub async fn plugin_serial_open(
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let authority = serial_authority(&state, &plugin_id, &expected_generation, Some(&port_id))?;
+        // Keep device admission in the worker through intent cleanup and any
+        // driver close barriers, independently of the short plugin authority.
+        let _native = state.admit_native_port(&port_id)?;
         let (args, expected, cancel) = {
             let mut manager = state
                 .serial_manager
@@ -373,6 +376,8 @@ pub async fn plugin_serial_close(
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let authority = serial_authority(&state, &plugin_id, &expected_generation, Some(&port_id))?;
+        // The blocking task, not its invoke awaiter, owns admission through join.
+        let _native = state.admit_native_port(&port_id)?;
         let (close, port) = {
             let mut manager = state
                 .serial_manager

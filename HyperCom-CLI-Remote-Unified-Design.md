@@ -3,7 +3,7 @@
 > **文档状态：设计提案；P1 基础切片已实现，完整远程方案仍未实现。**
 > 编制日期：2026-11-17。
 > 范围：本地 GUI、办公室远程 GUI、CLI、后续 SDK 的统一访问与管理。
-> **当前实现仅为 P1 本机实验切片**：Rust 操作/控制核心、默认关闭的 loopback Host、共享 wire 编解码、同连接短租约 CLI、内存操作账本，以及普通原生发送的 `serial:tx` 事实。控制和写入只在开发构建中可用，仍需第二个 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，使用未认证本机测试身份，`nativeGuiArbitration=false`。`hostId` 暂按进程生成；TypeScript 适配层尚未接入真实后端。Windows Named Pipe、稳定 Host 身份、全 GUI 原生仲裁、原子 watch、远程 TLS 及独立 Host 仍未交付。
+> **当前实现仅为 P1 本机实验切片**：默认关闭的 loopback Host、同连接短租约 CLI、内存操作账本、普通原生发送的 `serial:tx`，以及 CLI 租约与桌面设备操作之间的端口级互斥。实验写入仅开发构建可用，还需 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，身份仍未认证。`nativeGuiArbitration=true` 对应 `nativeArbitrationScope=desktop-native-vs-local-cli`：桌面原生操作作为一个本机执行类，内部仍使用现有规则，不代表桌面循环、插件和触发器已经获得独立的全事务租约。`hostId` 仍按进程生成，TypeScript 适配层尚未接线。Windows Named Pipe、稳定 Host 身份、全事务执行器、原子 watch、远程 TLS 和独立 Host 尚未交付。
 
 ## 0. 结论与推荐决策
 
@@ -600,7 +600,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- send --port
 cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- operation get --request-id REQUEST_ID
 ```
 
-`send` 在同一连接解析当前代次并取得、释放短租约。不能将租约跨 CLI 进程使用。`send` 只有得到成功的操作记录才退出 `0`；部分写入、失败和结果未知退出非零。已发送请求未收到有效回执时保留原 `requestId`，可向同一运行中的 Host 查询，不能据此自动重发。`operation get` 退出 `0` 表示成功取得记录，不表示原操作成功。
+`send` 在同一连接解析当前代次并取得、释放短租约。不能将租约跨 CLI 进程使用。CLI 和桌面命令竞争同一个端口时不隐式抢占：CLI 收到 `PORT_BUSY`，被阻止的桌面命令返回忙碌错误，不执行串口副作用。文件传输、受管外部工具和关闭收尾均计入桌面工作；控制到期或断连后，尚未进入写入的旧 CLI 请求也不能复活。CLI 暂不支持 TTY 租约。
+
+`send` 只有得到成功的操作记录才退出 `0`；部分写入、失败和结果未知退出非零。已发送请求未收到有效回执时保留原 `requestId`，可向同一运行中的 Host 查询，不能据此自动重发。`operation get` 退出 `0` 表示成功取得记录，不表示原操作成功。
 
 开发验收使用 `npm run test:cli`：构建实际 CLI 二进制，连接真实 loopback listener 和假串口后端；不启动桌面应用，不需要硬件。不替代真实串口、Windows 双机或发行包验收。
 
@@ -739,6 +741,8 @@ Windows 服务在 Session 0，与普通交互桌面隔离。不能把现有 Taur
 - 现有前端自动化作为受控 attached executor 保持兼容，不复制第二套执行器。
 
 退出条件：CLI 和本地 GUI 已真正共享同一 Core；不允许本地旧入口绕过租约；同名端口身份迁移有测试。
+
+当前分支已完成本机实验命令和原生操作级互斥；桌面增强流程和其他前端执行器的事务级委派、稳定身份与 `PortKey` 迁移、正式本机 IPC 与权威订阅仍是 P1 退出项。不要把旧 GUI 的写前回显当作权威 TX，也不要把任意外部程序自行访问串口当成可由本 Host 仲裁。
 
 ### P2：首个完整远程闭环（V1）
 

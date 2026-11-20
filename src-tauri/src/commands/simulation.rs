@@ -8,12 +8,13 @@ use tauri::State;
 
 use super::system_cmds::dev_only;
 use super::CommandError;
-use crate::AppState;
+use crate::{serial::SIM_PORT_IDS, AppState};
 
 /// 启用模拟模式（在串口列表中添加 SIM:Loopback 与 SIM:Loopback2）
 #[tauri::command]
 pub fn enable_simulation(state: State<AppState>) -> Result<(), CommandError> {
     dev_only("Simulation")?;
+    let _native = state.admit_native_ports(SIM_PORT_IDS)?;
 
     let mut manager = state
         .serial_manager
@@ -29,32 +30,35 @@ pub fn enable_simulation(state: State<AppState>) -> Result<(), CommandError> {
 pub async fn disable_simulation(state: State<'_, AppState>) -> Result<(), CommandError> {
     dev_only("Simulation")?;
 
-    let sim_ids: Vec<String> = {
-        let mut manager = state
-            .serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager.set_simulate(false);
-        manager.sim_ports.keys().cloned().collect()
-    };
-    for id in &sim_ids {
-        let join_handle = {
-            let mut manager = state
-                .serial_manager
+    // CLI 只支持枚举出的两个模拟端口，一次性准入且不先持有 manager 锁。
+    let native = state.admit_native_ports(SIM_PORT_IDS)?;
+    let serial_manager = state.serial_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        // 即使调用方取消等待，也要在实际关闭和 join 完成后才放行 CLI。
+        let _native = native;
+        let sim_ids: Vec<String> = {
+            let mut manager = serial_manager
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
-            manager
-                .close_port(id)
-                .map_err(|e| CommandError::Serial(e.to_string()))?
+            manager.set_simulate(false);
+            manager.sim_ports.keys().cloned().collect()
         };
-        if let Some(thread) = join_handle {
-            tokio::task::spawn_blocking(move || {
+        for id in &sim_ids {
+            let join_handle = {
+                let mut manager = serial_manager
+                    .lock()
+                    .map_err(|e| CommandError::Lock(e.to_string()))?;
+                manager
+                    .close_port(id)
+                    .map_err(|e| CommandError::Serial(e.to_string()))?
+            };
+            if let Some(thread) = join_handle {
                 let _ = thread.join();
-            })
-            .await
-            .map_err(|e| CommandError::Other(format!("simulation close join task failed: {e}")))?;
+            }
         }
-    }
-    log::info!("Simulation mode disabled");
-    Ok(())
+        log::info!("Simulation mode disabled");
+        Ok(())
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("simulation close task failed: {e}")))?
 }

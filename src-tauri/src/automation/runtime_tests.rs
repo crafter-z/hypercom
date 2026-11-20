@@ -17,6 +17,7 @@ use tokio::time::timeout;
 #[derive(Default)]
 struct FakeBackend {
     generation: AtomicU64,
+    reopen_after_snapshot: AtomicBool,
     shutting_down: AtomicBool,
     lock_probe: Mutex<Option<std::sync::Weak<RuntimeShared>>>,
     writes: Mutex<Vec<Vec<u8>>>,
@@ -64,11 +65,16 @@ impl RuntimeBackend for FakeBackend {
             .and_then(std::sync::Weak::upgrade)
         {
             assert!(
-                shared.state.try_lock().is_ok(),
-                "native state must not be acquired under runtime state"
+                shared.authority.state.try_lock().is_ok(),
+                "native state must not be acquired under runtime authority state"
             );
         }
-        match self.generation.load(Ordering::SeqCst) {
+        let snapshot = if self.reopen_after_snapshot.swap(false, Ordering::SeqCst) {
+            self.generation.fetch_add(1, Ordering::SeqCst)
+        } else {
+            self.generation.load(Ordering::SeqCst)
+        };
+        match snapshot {
             0 => Err(runtime_error(ErrorCode::PortNotFound, "port was closed")),
             generation => Ok(generation),
         }
@@ -264,6 +270,376 @@ async fn acquire_and_release_enforce_unique_holder_lease_and_fence() {
         second["fence"].as_str().unwrap().parse::<u64>().unwrap()
             > first["fence"].as_str().unwrap().parse::<u64>().unwrap()
     );
+}
+
+#[tokio::test]
+async fn native_permit_blocks_cli_on_same_port_but_admits_a_different_port() {
+    let handler = handler(Arc::new(FakeBackend::new()), true);
+    let status = handler
+        .handle(
+            connection(1),
+            Request::new("native-status", "host.status", json!({})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status["nativeGuiArbitration"], true);
+    let native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+
+    let busy = handler
+        .handle(
+            connection(1),
+            port_request("native-busy", "control.acquire", json!({"ttlMs":1000})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(busy.code, ErrorCode::PortBusy);
+
+    // Native ownership is per local port, not a global desktop mutex.
+    let other = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM4"])
+        .unwrap();
+    drop(other);
+    drop(native);
+    assert_eq!(acquire(&handler, 1).await["state"], "granted");
+}
+
+#[tokio::test]
+async fn native_batch_admission_is_atomic_and_duplicate_names_do_not_underflow() {
+    let handler = handler(Arc::new(FakeBackend::new()), true);
+    let cli = acquire(&handler, 1).await;
+
+    // COM4 must not be left reserved when the batch fails on COM3.
+    assert!(handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3", "COM4"])
+        .is_err());
+    let unreserved = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM4"])
+        .unwrap();
+    drop(unreserved);
+    handler
+        .handle(
+            connection(1),
+            with_lease(
+                port_request(
+                    "release-before-grouped-native",
+                    "control.release",
+                    json!({}),
+                ),
+                &cli,
+            ),
+        )
+        .await
+        .unwrap();
+
+    // This is the compatibility shape used by one desktop process which has
+    // several writers targeting the same native port.
+    let grouped = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3", "COM3"])
+        .unwrap();
+    let second_native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    assert_eq!(
+        handler
+            .handle(
+                connection(2),
+                port_request("grouped-busy", "control.acquire", json!({"ttlMs":1000})),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PortBusy
+    );
+    drop(second_native);
+    assert_eq!(
+        handler
+            .handle(
+                connection(2),
+                port_request(
+                    "grouped-still-busy",
+                    "control.acquire",
+                    json!({"ttlMs":1000})
+                ),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PortBusy
+    );
+    drop(grouped);
+    assert_eq!(acquire(&handler, 2).await["state"], "granted");
+}
+
+#[tokio::test]
+async fn cli_lease_blocks_native_until_release_or_disconnect() {
+    let handler = handler(Arc::new(FakeBackend::new()), true);
+    let lease = acquire(&handler, 1).await;
+    assert!(handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .is_err());
+
+    handler
+        .handle(
+            connection(1),
+            with_lease(
+                port_request("native-after-release", "control.release", json!({})),
+                &lease,
+            ),
+        )
+        .await
+        .unwrap();
+    let after_release = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    drop(after_release);
+
+    let _second = acquire(&handler, 2).await;
+    handler.disconnected(connection(2), None);
+    let after_disconnect = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    drop(after_disconnect);
+}
+
+#[tokio::test]
+async fn expired_queued_cli_request_is_rejected_while_native_admission_opens() {
+    let backend = Arc::new(FakeBackend::new());
+    backend.block_before.store(true, Ordering::SeqCst);
+    let handler = Arc::new(handler(backend.clone(), true));
+    let lease = handler
+        .handle(
+            connection(1),
+            port_request("short-lease-native", "control.acquire", json!({"ttlMs":20})),
+        )
+        .await
+        .unwrap();
+    let sending = {
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            handler
+                .handle(connection(1), send_request("expired-native", &lease))
+                .await
+        })
+    };
+    timeout(TEST_TCP_TIMEOUT, backend.before.notified())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(35)).await;
+
+    let native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    assert_eq!(
+        handler
+            .handle(
+                connection(2),
+                port_request(
+                    "native-blocks-old-cli",
+                    "control.acquire",
+                    json!({"ttlMs":1000})
+                ),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PortBusy
+    );
+    backend.continue_before.notify_one();
+    let result = sending.await.unwrap().unwrap();
+    assert_eq!(result["state"], "failed");
+    assert_eq!(result["error"]["code"], "CONTROL_LOST");
+    assert!(backend.writes.lock().unwrap().is_empty());
+    drop(native);
+    assert_eq!(acquire(&handler, 2).await["state"], "granted");
+}
+
+#[tokio::test]
+async fn expired_in_flight_cli_write_blocks_native_until_physical_completion() {
+    let backend = Arc::new(FakeBackend::new());
+    backend.block_after.store(true, Ordering::SeqCst);
+    let handler = Arc::new(handler(backend.clone(), true));
+    let lease = handler
+        .handle(
+            connection(1),
+            port_request("short-in-flight", "control.acquire", json!({"ttlMs":20})),
+        )
+        .await
+        .unwrap();
+    let sending = {
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            handler
+                .handle(connection(1), send_request("expired-in-flight", &lease))
+                .await
+        })
+    };
+    timeout(TEST_TCP_TIMEOUT, backend.after.notified())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(35)).await;
+    assert!(handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .is_err());
+    backend.continue_after.notify_one();
+    assert_eq!(sending.await.unwrap().unwrap()["state"], "succeeded");
+    let native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    drop(native);
+}
+
+#[tokio::test]
+async fn disconnected_in_flight_cli_write_blocks_native_until_physical_completion() {
+    let backend = Arc::new(FakeBackend::new());
+    backend.block_after.store(true, Ordering::SeqCst);
+    let handler = Arc::new(handler(backend.clone(), true));
+    let lease = acquire(&handler, 1).await;
+    let sending = {
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            handler
+                .handle(
+                    connection(1),
+                    send_request("disconnected-in-flight", &lease),
+                )
+                .await
+        })
+    };
+    timeout(TEST_TCP_TIMEOUT, backend.after.notified())
+        .await
+        .unwrap();
+    handler.disconnected(connection(1), None);
+    assert!(handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .is_err());
+    backend.continue_after.notify_one();
+    assert_eq!(sending.await.unwrap().unwrap()["state"], "succeeded");
+    let native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    drop(native);
+}
+
+#[tokio::test]
+async fn loopback_listener_native_permit_blocks_cli_and_drop_reopens_port() {
+    let backend = Arc::new(FakeBackend::new());
+    let handler = Arc::new(handler(backend, true));
+    let listener = bind_test_listener(handler.clone()).await;
+    let (mut write, mut read) = tcp_client(&listener).await;
+    tcp_call(
+        &mut write,
+        &mut read,
+        &Request::new("listener-handshake", "handshake", json!({})),
+    )
+    .await;
+
+    let native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    match tcp_exchange(
+        &mut write,
+        &mut read,
+        &port_request("listener-busy", "control.acquire", json!({"ttlMs":1000})),
+    )
+    .await
+    {
+        Response::Error { error, .. } => assert_eq!(error.code, ErrorCode::PortBusy),
+        response => panic!("native permit should block listener CLI acquire: {response:?}"),
+    }
+    drop(native);
+    assert_eq!(
+        tcp_call(
+            &mut write,
+            &mut read,
+            &port_request("listener-open", "control.acquire", json!({"ttlMs":1000})),
+        )
+        .await["state"],
+        "granted"
+    );
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+async fn automation_rejects_unimplemented_virtual_writer_targets() {
+    let handler = handler(Arc::new(FakeBackend::new()), true);
+    for port in ["GIT:BASH", "GIT:other", "SIM:not-enumerated"] {
+        let mut request = port_request("virtual-control", "control.acquire", json!({"ttlMs":1000}));
+        request.target.as_mut().unwrap().native_port_id = port.into();
+        assert_eq!(
+            handler
+                .handle(connection(1), request)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedCapability,
+            "{port} must not hold automation control"
+        );
+    }
+}
+
+#[tokio::test]
+async fn acquisition_does_not_publish_a_lease_for_a_reopened_connection() {
+    let backend = Arc::new(FakeBackend::new());
+    backend.reopen_after_snapshot.store(true, Ordering::SeqCst);
+    let handler = handler(backend, true);
+    let error = handler
+        .handle(
+            connection(1),
+            port_request(
+                "acquire-old-generation",
+                "control.acquire",
+                json!({"ttlMs":60000}),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StaleSession);
+    let native = handler
+        .shared
+        .authority
+        .admit_native_ports(&["COM3"])
+        .unwrap();
+    drop(native);
+    let mut current = port_request(
+        "acquire-new-generation",
+        "control.acquire",
+        json!({"ttlMs":60000}),
+    );
+    current.precondition.as_mut().unwrap().connection_generation = Some(8);
+    let lease = handler.handle(connection(2), current).await.unwrap();
+    assert_eq!(lease["connectionGeneration"], "8");
 }
 
 #[tokio::test]
@@ -855,6 +1231,8 @@ async fn assert_loopback_eof_fencing(after_guard: bool) {
     timeout(TEST_TCP_TIMEOUT, async {
         while handler
             .shared
+            .authority
+            .state
             .lock()
             .unwrap()
             .sessions
@@ -1278,6 +1656,8 @@ async fn cli_binary_ack_timeout_keeps_request_id_and_does_not_replay() {
     timeout(TEST_TCP_TIMEOUT, async {
         while !handler
             .shared
+            .authority
+            .state
             .lock()
             .unwrap()
             .operations

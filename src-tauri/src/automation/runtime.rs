@@ -94,7 +94,10 @@ struct NativeBackend {
 
 impl RuntimeBackend for NativeBackend {
     fn is_shutting_down(&self) -> bool {
-        self.app.state::<AppState>().shutdown_started.load(Ordering::Acquire)
+        self.app
+            .state::<AppState>()
+            .shutdown_started
+            .load(Ordering::Acquire)
     }
 
     fn list_ports(&self) -> BackendFuture<'_, Result<Vec<Value>, WireError>> {
@@ -158,7 +161,7 @@ impl RuntimeBackend for NativeBackend {
                 work,
                 Some(app),
                 context,
-                Some(guard),
+                commands::SerialSendAdmission::Automation(guard),
             )
             .await
             {
@@ -253,25 +256,78 @@ struct OperationMetadata {
 struct RuntimeState {
     sessions: BTreeMap<u64, ClientSession>,
     arbiters: BTreeMap<PortRef, PortArbiter>,
+    native_work: BTreeMap<String, usize>,
     operations: OperationRegistry,
     metadata: BTreeMap<RequestKey, OperationMetadata>,
 }
 
-struct RuntimeShared {
+/// One authority per desktop host, available even before the listener starts.
+/// Native calls are a single local ownership class here. Within that class the
+/// existing driver and per-port intent rules continue to order desktop work.
+/// The mutex is never held across driver I/O, config access, or an async wait.
+pub(crate) struct DeviceAuthority {
     state: Mutex<RuntimeState>,
-    backend: Arc<dyn RuntimeBackend>,
     host_id: HostId,
     epoch: ServerEpoch,
-    unsafe_control: bool,
     started: Instant,
-    max_operations: usize,
 }
 
-impl RuntimeShared {
-    fn lock(&self) -> Result<MutexGuard<'_, RuntimeState>, WireError> {
-        self.state
-            .lock()
-            .map_err(|_| runtime_error(ErrorCode::Internal, "automation state unavailable"))
+/// Owns the local side of the arbitration boundary until actual work finishes.
+/// Move it into blocking/owned workers instead of holding it in an IPC waiter.
+#[must_use = "the permit must be held while native work can still affect the port"]
+pub(crate) struct NativeDevicePermit {
+    authority: Arc<DeviceAuthority>,
+    port_ids: Vec<String>,
+    // AppState also enrolls native work in the application's teardown barrier.
+    _teardown_work: Option<commands::SerialWorkGuard>,
+}
+
+impl NativeDevicePermit {
+    pub(crate) fn track_teardown(mut self, work: commands::SerialWorkGuard) -> Self {
+        self._teardown_work = Some(work);
+        self
+    }
+}
+
+impl std::fmt::Debug for NativeDevicePermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeDevicePermit")
+            .field("port_ids", &self.port_ids)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for NativeDevicePermit {
+    fn drop(&mut self) {
+        let Ok(mut state) = self.authority.state.lock() else {
+            return;
+        };
+        for port_id in &self.port_ids {
+            if let Some(count) = state.native_work.get_mut(port_id) {
+                *count -= 1;
+                if *count == 0 {
+                    state.native_work.remove(port_id);
+                }
+            }
+        }
+    }
+}
+
+impl DeviceAuthority {
+    pub(crate) fn new(host_id: String, server_epoch: String) -> Arc<Self> {
+        let epoch = ServerEpoch(server_epoch);
+        Arc::new(Self {
+            state: Mutex::new(RuntimeState {
+                sessions: BTreeMap::new(),
+                arbiters: BTreeMap::new(),
+                native_work: BTreeMap::new(),
+                operations: OperationRegistry::new(epoch.clone()),
+                metadata: BTreeMap::new(),
+            }),
+            host_id: HostId(host_id),
+            epoch,
+            started: Instant::now(),
+        })
     }
 
     fn now(&self) -> u64 {
@@ -280,6 +336,75 @@ impl RuntimeShared {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn admit_native_ports(
+        self: &Arc<Self>,
+        port_ids: &[&str],
+    ) -> Result<NativeDevicePermit, CommandError> {
+        let port_ids: Vec<_> = port_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CommandError::Lock("device authority unavailable".into()))?;
+        let now = self.now();
+        for port_id in &port_ids {
+            let target = PortRef {
+                host_id: self.host_id.clone(),
+                native_port_id: port_id.clone(),
+            };
+            if let Some(arbiter) = state.arbiters.get_mut(&target) {
+                arbiter
+                    .expire(now)
+                    .map_err(|error| CommandError::Serial(error.to_string()))?;
+                if !matches!(arbiter.state(), WriterState::Vacant) || arbiter.in_flight().is_some()
+                {
+                    return Err(CommandError::Serial(format!(
+                        "Port {port_id} is controlled by automation or waiting for its write to finish"
+                    )));
+                }
+            }
+            if state.native_work.get(port_id) == Some(&usize::MAX) {
+                return Err(CommandError::Serial(
+                    "Native device admission exhausted".into(),
+                ));
+            }
+        }
+        // Publish all counts at once; a failed batch did not admit any port.
+        for port_id in &port_ids {
+            *state.native_work.entry(port_id.clone()).or_default() += 1;
+        }
+        Ok(NativeDevicePermit {
+            authority: Arc::clone(self),
+            port_ids,
+            _teardown_work: None,
+        })
+    }
+}
+
+struct RuntimeShared {
+    authority: Arc<DeviceAuthority>,
+    backend: Arc<dyn RuntimeBackend>,
+    unsafe_control: bool,
+    max_operations: usize,
+}
+
+impl RuntimeShared {
+    fn lock(&self) -> Result<MutexGuard<'_, RuntimeState>, WireError> {
+        self.authority
+            .state
+            .lock()
+            .map_err(|_| runtime_error(ErrorCode::Internal, "automation state unavailable"))
+    }
+
+    fn now(&self) -> u64 {
+        self.authority.now()
     }
 
     fn session(
@@ -310,13 +435,13 @@ impl RuntimeShared {
         let session = ClientSession {
             id: ClientSessionId(format!(
                 "{}:connection:{}",
-                self.epoch.0, connection.connection_id
+                self.authority.epoch.0, connection.connection_id
             )),
             principal: Principal {
                 id: PrincipalId(TEST_PRINCIPAL.into()),
                 kind: PrincipalKind::Cli,
             },
-            server_epoch: self.epoch.clone(),
+            server_epoch: self.authority.epoch.clone(),
             permissions,
             port_scope: PortScope::All,
         };
@@ -328,7 +453,10 @@ impl RuntimeShared {
 
     fn require_running(&self) -> Result<(), WireError> {
         if self.backend.is_shutting_down() {
-            return Err(runtime_error(ErrorCode::ShuttingDown, "host is shutting down"));
+            return Err(runtime_error(
+                ErrorCode::ShuttingDown,
+                "host is shutting down",
+            ));
         }
         Ok(())
     }
@@ -349,7 +477,7 @@ impl RuntimeShared {
             .as_ref()
             .and_then(|precondition| precondition.server_epoch.as_deref())
         {
-            Some(epoch) if epoch == self.epoch.0 => Ok(()),
+            Some(epoch) if epoch == self.authority.epoch.0 => Ok(()),
             Some(_) => Err(runtime_error(
                 ErrorCode::StaleSession,
                 "server epoch does not match",
@@ -368,7 +496,7 @@ impl RuntimeShared {
             .target
             .as_ref()
             .ok_or_else(|| runtime_error(ErrorCode::InvalidArgument, "target is required"))?;
-        if target.host_id != self.host_id.0 {
+        if target.host_id != self.authority.host_id.0 {
             return Err(runtime_error(
                 ErrorCode::HostUnavailable,
                 "target host does not match this host",
@@ -390,9 +518,20 @@ impl RuntimeShared {
                     "precondition.connectionGeneration is required",
                 )
             })?;
+        let port_id = target.native_port_id.as_str();
+        if match serial::PortKind::of(port_id) {
+            serial::PortKind::Real => false,
+            serial::PortKind::Sim => !serial::SIM_PORT_IDS.contains(&port_id),
+            serial::PortKind::Tty => true,
+        } {
+            return Err(runtime_error(
+                ErrorCode::UnsupportedCapability,
+                "this port has no automation write capability",
+            ));
+        }
         Ok((
             PortRef {
-                host_id: self.host_id.clone(),
+                host_id: self.authority.host_id.clone(),
                 native_port_id: target.native_port_id.clone(),
             },
             ConnectionGeneration(generation),
@@ -404,12 +543,21 @@ impl RuntimeShared {
         state: &'a mut RuntimeState,
         target: &PortRef,
         expected: ConnectionGeneration,
-        native_generation: u64,
+        native_generation: Result<u64, WireError>,
     ) -> Result<&'a mut PortArbiter, WireError> {
+        self.require_running()?;
+        // Native admission and CLI fencing share this lock. Ownership matters
+        // even if the native operation has temporarily detached the handle.
+        if state.native_work.contains_key(&target.native_port_id) {
+            return Err(runtime_error(
+                ErrorCode::PortBusy,
+                "desktop work owns this port",
+            ));
+        }
         // Obtain the native snapshot before the runtime mutex: never create the
         // lock cycle runtime -> SerialManager -> writer -> pre-write runtime.
         // The native helper rechecks generation at the actual write boundary.
-        let current = ConnectionGeneration(native_generation);
+        let current = ConnectionGeneration(native_generation?);
         if current != expected {
             return Err(runtime_error(
                 ErrorCode::StaleSession,
@@ -422,10 +570,9 @@ impl RuntimeShared {
                 "port arbitration capacity reached",
             ));
         }
-        let arbiter = state
-            .arbiters
-            .entry(target.clone())
-            .or_insert_with(|| PortArbiter::new(target.clone(), self.epoch.clone(), current));
+        let arbiter = state.arbiters.entry(target.clone()).or_insert_with(|| {
+            PortArbiter::new(target.clone(), self.authority.epoch.clone(), current)
+        });
         if arbiter.generation() != current {
             arbiter
                 .change_generation(current, self.now())
@@ -509,6 +656,15 @@ impl RuntimeShared {
                 return Err(runtime_error(
                     ErrorCode::DeadlineExceeded,
                     "request deadline expired before execution",
+                ));
+            }
+            if state
+                .native_work
+                .contains_key(&queued.fence.port.native_port_id)
+            {
+                return Err(runtime_error(
+                    ErrorCode::ControlLost,
+                    "desktop work now owns this port",
                 ));
             }
             let RuntimeState {
@@ -647,46 +803,45 @@ pub struct LocalAutomationHandler {
 }
 
 impl LocalAutomationHandler {
-    pub fn new(
-        app: AppHandle,
-        host_id: impl Into<String>,
-        server_epoch: impl Into<String>,
-    ) -> Self {
-        let host_id = host_id.into();
-        let server_epoch = server_epoch.into();
+    fn new(app: AppHandle) -> Self {
+        let authority = app.state::<AppState>().device_authority.clone();
         let backend = Arc::new(NativeBackend {
             app,
-            host_id: host_id.clone(),
-            server_epoch: server_epoch.clone(),
+            host_id: authority.host_id.0.clone(),
+            server_epoch: authority.epoch.0.clone(),
         });
         let requested_control = std::env::var(UNSAFE_CONTROL_ENV).ok().as_deref() == Some("1");
         let unsafe_control = requested_control && commands::is_debug_build();
         if requested_control && !unsafe_control {
             log::warn!("Ignoring {UNSAFE_CONTROL_ENV}: automation control is a development-only experiment");
         }
-        Self::with_backend(backend, host_id, server_epoch, unsafe_control)
+        Self::with_authority(backend, authority, unsafe_control)
     }
 
+    #[cfg(test)]
     fn with_backend(
         backend: Arc<dyn RuntimeBackend>,
         host_id: String,
         server_epoch: String,
         unsafe_control: bool,
     ) -> Self {
-        let epoch = ServerEpoch(server_epoch);
+        Self::with_authority(
+            backend,
+            DeviceAuthority::new(host_id, server_epoch),
+            unsafe_control,
+        )
+    }
+
+    fn with_authority(
+        backend: Arc<dyn RuntimeBackend>,
+        authority: Arc<DeviceAuthority>,
+        unsafe_control: bool,
+    ) -> Self {
         Self {
             shared: Arc::new(RuntimeShared {
-                state: Mutex::new(RuntimeState {
-                    sessions: BTreeMap::new(),
-                    arbiters: BTreeMap::new(),
-                    operations: OperationRegistry::new(epoch.clone()),
-                    metadata: BTreeMap::new(),
-                }),
+                authority,
                 backend,
-                host_id: HostId(host_id),
-                epoch,
                 unsafe_control,
-                started: Instant::now(),
                 max_operations: MAX_OPERATIONS,
             }),
         }
@@ -724,22 +879,39 @@ impl LocalAutomationHandler {
                 "waiting for control is not supported by this test slice",
             ));
         }
-        let native_generation = self.shared.backend.generation(&target.native_port_id)?;
-        let mut state = self.shared.lock()?;
-        let session = self.shared.session(&mut state, connection)?;
-        let arbiter =
-            self.shared
-                .current_arbiter(&mut state, &target, generation, native_generation)?;
-        let lease = arbiter
-            .acquire(
-                &session,
-                LeaseOptions {
-                    ttl_ms: params.ttl_ms,
-                    permissions: BTreeSet::from([Permission::Control, Permission::Write]),
-                },
-                self.shared.now(),
-            )
-            .map_err(core_error)?;
+        let native_generation = self.shared.backend.generation(&target.native_port_id);
+        let (lease, session) = {
+            let mut state = self.shared.lock()?;
+            let session = self.shared.session(&mut state, connection)?;
+            let arbiter =
+                self.shared
+                    .current_arbiter(&mut state, &target, generation, native_generation)?;
+            let lease = arbiter
+                .acquire(
+                    &session,
+                    LeaseOptions {
+                        ttl_ms: params.ttl_ms,
+                        permissions: BTreeSet::from([Permission::Control, Permission::Write]),
+                    },
+                    self.shared.now(),
+                )
+                .map_err(core_error)?;
+            (lease, session)
+        };
+        // A native close/reopen could have finished between sampling generation
+        // and acquiring the authority lock. The tentative lease now excludes new
+        // desktop work, so verify the driver snapshot without reversing lock order.
+        if !matches!(self.shared.backend.generation(&target.native_port_id), Ok(current) if current == generation.0)
+        {
+            let mut state = self.shared.lock()?;
+            if let Some(arbiter) = state.arbiters.get_mut(&target) {
+                let _ = arbiter.release(&session, &lease.fence, self.shared.now());
+            }
+            return Err(runtime_error(
+                ErrorCode::StaleSession,
+                "port connection changed during control acquisition",
+            ));
+        }
         Ok(lease_value(&lease))
     }
 
@@ -751,7 +923,7 @@ impl LocalAutomationHandler {
         self.shared.require_control()?;
         let _: EmptyParams = parse_params(&request.params)?;
         let (target, generation) = self.shared.target(request)?;
-        let native_generation = self.shared.backend.generation(&target.native_port_id)?;
+        let native_generation = self.shared.backend.generation(&target.native_port_id);
         let mut state = self.shared.lock()?;
         let session = self.shared.session(&mut state, connection)?;
         let arbiter =
@@ -856,7 +1028,7 @@ impl LocalAutomationHandler {
             }
             let arbiter =
                 self.shared
-                    .current_arbiter(&mut state, &target, generation, native_generation?)?;
+                    .current_arbiter(&mut state, &target, generation, native_generation)?;
             let lease = RuntimeShared::lease(arbiter, &session, &request, self.shared.now())?;
             let queued = arbiter
                 .queue_request(
@@ -946,7 +1118,7 @@ impl RequestHandler for LocalAutomationHandler {
         Box::pin(async move {
             self.shared.require_running()?;
             if let Some(target) = &request.target {
-                if target.host_id != self.shared.host_id.0 {
+                if target.host_id != self.shared.authority.host_id.0 {
                     return Err(runtime_error(
                         ErrorCode::HostUnavailable,
                         "target host does not match this host",
@@ -959,17 +1131,19 @@ impl RequestHandler for LocalAutomationHandler {
                     let mut state = self.shared.lock()?;
                     let session = self.shared.session(&mut state, connection)?;
                     Ok(
-                        json!({"hostId": self.shared.host_id.0, "serverEpoch": self.shared.epoch.0,
+                        json!({"hostId": self.shared.authority.host_id.0, "serverEpoch": self.shared.authority.epoch.0,
                             "mode": "desktop-attached", "capabilities": self.capabilities(),
                             "clientSessionId": session.id.0,
                             "serialControl": if self.shared.unsafe_control { "unsafe-local-test-only" } else { "not-enabled" },
-                            "security": "unauthenticated-local-test-only", "nativeGuiArbitration": false,
+                            "security": "unauthenticated-local-test-only",
+                            "nativeGuiArbitration": self.shared.unsafe_control,
+                            "nativeArbitrationScope": "desktop-native-vs-local-cli",
                             "operationRetention": {"maxRecords": self.shared.max_operations, "automaticEviction": false},
                         }),
                     )
                 }
                 "ports.list" => Ok(
-                    json!({"hostId": self.shared.host_id.0, "serverEpoch": self.shared.epoch.0,
+                    json!({"hostId": self.shared.authority.host_id.0, "serverEpoch": self.shared.authority.epoch.0,
                     "ports": self.shared.backend.list_ports().await?, "readOnly": !self.shared.unsafe_control}),
                 ),
                 "control.acquire" => self.acquire(connection, &request),
@@ -1210,27 +1384,22 @@ fn operation_value(state: &RuntimeState, key: &RequestKey) -> Result<Value, Wire
 pub async fn start_loopback(
     app: AppHandle,
     slot: Arc<Mutex<Option<LoopbackListener>>>,
-    host_id: String,
-    server_epoch: String,
     port: u16,
 ) -> Result<Option<u16>, String> {
-    let shutting_down = || app.state::<AppState>().shutdown_started.load(Ordering::Acquire);
+    let shutting_down = || {
+        app.state::<AppState>()
+            .shutdown_started
+            .load(Ordering::Acquire)
+    };
     if shutting_down() {
         return Ok(None);
     }
-    let handler = Arc::new(LocalAutomationHandler::new(
-        app.clone(),
-        host_id,
-        server_epoch.clone(),
-    ));
+    let handler = Arc::new(LocalAutomationHandler::new(app.clone()));
     let capabilities = handler.capabilities();
-    let listener = LoopbackListener::bind(
-        port,
-        ListenerConfig::new(server_epoch, capabilities),
-        handler,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let epoch = handler.shared.authority.epoch.0.clone();
+    let listener = LoopbackListener::bind(port, ListenerConfig::new(epoch, capabilities), handler)
+        .await
+        .map_err(|error| error.to_string())?;
     let bound_port = listener.local_addr().port();
     let mut slot = slot
         .lock()

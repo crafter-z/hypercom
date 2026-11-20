@@ -42,6 +42,10 @@ pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHand
 pub(crate) const SIM_PORT_PREFIX: &str = "SIM:";
 /// 模拟终端（git bash pty）id 前缀（`PortKind` 的判定依据）
 pub(crate) const TTY_PORT_PREFIX: &str = "GIT:";
+/// 模拟串口开关影响的枚举端口；与端口列表使用同一组 ID。
+pub(crate) const SIM_PORT_IDS: &[&str] = &ports_sim::SIM_PORT_IDS;
+/// Git Bash 模拟终端开关影响的枚举端口。
+pub(crate) const TTY_PORT_ID: &str = ports_tty::TTY_PORT_ID;
 
 /// 串口信息（返回给前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -75,6 +75,7 @@ openPort(portId, baud)
 - **发送异步化**：`send_serial_data` 是 async fn + `tokio::task::spawn_blocking`——原同步命令在事件循环主线程执行 write_all+flush+日志写，每次 TX 无条件卡顿 + tao `NewEvents`/`RedrawEventsCleared` 警告白屏。`AppState.serial_manager` 是 `Arc<Mutex<SerialManager>>`、`log_manager` 是 `Arc<LogManager>`（无外层 Mutex，写路径 `&self` + 内部细粒度锁），`spawn_blocking` 闭包克隆这两个 `Arc` 供 `'static` 使用。
 - `openPort`/`closePort`/自动重连共用前端 per-port operation lane；迟到的 invoke 完成和 `serial:status` 事件按意图/代次丢弃，不再用旧结果覆盖手动关闭。手动打开另持有覆盖排队与 invoke 的租约：旧 reader 的终态不能取消尚未建立新会话的打开；租约期间重连提示先合并，待打开完成后仍断线才交给恢复流程。
 - 关闭时由 `close_serial_port` 在全局 manager 锁外等待 reader、TTY child、真实写租约和关闭屏障；完成后清理已完成 barrier，避免按历史 portId 无限保留所有权记录。
+- 桌面设备副作用先通过 `AppState::admit_native_port` / `admit_native_ports` 与本机 CLI 租约互斥。桌面许可由实际工作持有，跨阻塞 worker、文件分块、工具退出和关闭收尾；丢弃 IPC 等待方不会让仍在写入的端口开放给 CLI。桌面组内仍沿用既有代次、意图和文件/工具约束。
 - 正常退出先关闭新串口工作准入，取消文件/工具任务，锁外 join/reap 所有会话，再 flush 日志和电源抑制；重复 shutdown 幂等。
 - 文件发送携带 `transfer_id`，每个传输绑定启动时的 connection generation；端口关闭/重开后剩余分块拒绝写入新会话，取消只作用于同一端口同一 transfer。
 - `SerialManager` 的 SIM/GIT:BASH 能力在 teardown 前先关闭，随后锁外销毁句柄；关闭期间不能重新打开一个最终会脱离枚举的虚拟端口。

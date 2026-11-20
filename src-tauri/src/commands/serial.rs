@@ -20,7 +20,7 @@ impl SerialWorkState {
         }
     }
 
-    fn admit(self: &Arc<Self>) -> Option<SerialWorkGuard> {
+    pub(crate) fn admit(self: &Arc<Self>) -> Option<SerialWorkGuard> {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
@@ -83,7 +83,7 @@ impl Drop for FileSendGuard<'_> {
     }
 }
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Removes a tool reservation on every exit path (including the early `?`
 /// returns between insertion and the final cleanup). Previously those paths
@@ -108,6 +108,7 @@ impl Drop for ToolReservation<'_> {
 }
 
 use super::CommandError;
+use crate::automation::runtime::NativeDevicePermit;
 use crate::{serial, AppState};
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
@@ -297,6 +298,7 @@ pub async fn open_serial_port(
     args: OpenPortArgs,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
+    let native_permit = state.admit_native_port(&args.port_id)?;
     let serial_manager = state.serial_manager.clone();
     let port_id = args.port_id.clone();
     serial_manager
@@ -304,6 +306,7 @@ pub async fn open_serial_port(
         .map_err(|e| CommandError::Lock(e.to_string()))?
         .cancel_reconnect(&port_id);
     tokio::task::spawn_blocking(move || {
+        let _native_permit = native_permit;
         serial::open_blocking(&serial_manager, args).map_err(|e| {
             log::warn!("Failed to open port {}: {}", port_id, e);
             CommandError::Serial(e.to_string())
@@ -319,32 +322,34 @@ pub async fn close_serial_port(
     port_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
+    let native_permit = state.admit_native_port(&port_id)?;
     let serial_manager = state.serial_manager.clone();
-    // 持锁期间只停止读取线程并取出 JoinHandle，立即释放锁
-    let join_handle = {
-        let mut manager = serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager.close_port(&port_id).map_err(|e| {
-            log::warn!("Failed to close port {}: {}", port_id, e);
-            CommandError::Serial(e.to_string())
-        })?
-    };
-    // join 移到阻塞线程池执行，不占主线程——GIT:BASH 读线程需等 ConPTY 关闭
-    // （close_port 已 drop master）后才退出；即使读线程异常不退，同步 join 也不会
-    // 再冻结整个应用 UI。
-    if let Some(thread) = join_handle {
-        tokio::task::spawn_blocking(move || {
+    // Keep the permit in the blocking task so cancellation of this await cannot
+    // admit CLI work while the close/join/cleanup sequence is still running.
+    tokio::task::spawn_blocking(move || {
+        let _native_permit = native_permit;
+        // 持锁期间只停止读取线程并取出 JoinHandle，立即释放锁
+        let join_handle = {
+            let mut manager = serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?;
+            manager.close_port(&port_id).map_err(|e| {
+                log::warn!("Failed to close port {}: {}", port_id, e);
+                CommandError::Serial(e.to_string())
+            })?
+        };
+        // GIT:BASH 读线程需等 ConPTY 关闭（close_port 已 drop master）后才退出。
+        if let Some(thread) = join_handle {
             let _ = thread.join();
-        })
-        .await
-        .map_err(|e| CommandError::Other(format!("close port join task failed: {e}")))?;
-    }
-    serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?
-        .cleanup_real_close(&port_id);
-    Ok(())
+        }
+        serial_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?
+            .cleanup_real_close(&port_id);
+        Ok(())
+    })
+    .await
+    .map_err(|e| CommandError::Other(format!("Close port task panicked: {e}")))?
 }
 
 /// 向串口发送数据
@@ -422,6 +427,11 @@ pub struct SerialSendResult {
 /// Recheck server epoch/lease/fence as close as possible to native I/O. Never
 /// called while holding SerialManager. The callback must not do blocking I/O.
 pub type SerialPreWriteGuard = Box<dyn FnOnce() -> Result<(), CommandError> + Send + 'static>;
+
+pub(crate) enum SerialSendAdmission {
+    Desktop(NativeDevicePermit),
+    Automation(SerialPreWriteGuard),
+}
 
 pub fn prepare_serial_send(args: SendDataArgs) -> Result<PreparedSerialSend, SerialSendFailure> {
     let ending = match serial::PortKind::of(&args.port_id) {
@@ -625,23 +635,35 @@ fn execute_prepared_send(
 /// writer-lock waits. Actual bytes, generation and one timestamp drive log/event.
 /// No manager guard crosses await, native I/O, logging, or the domain callback.
 /// The work guard lives in spawn_blocking, not in the cancellable awaiting future.
-pub async fn send_serial_data_internal(
+pub(crate) async fn send_serial_data_internal(
     prepared: PreparedSerialSend,
     serial_manager: Arc<std::sync::Mutex<serial::SerialManager>>,
     log_manager: Arc<crate::logger::LogManager>,
     serial_work: Arc<SerialWorkState>,
     app_handle: Option<AppHandle>,
     context: serial::events::SerialTxContext,
-    pre_write: Option<SerialPreWriteGuard>,
+    admission: SerialSendAdmission,
 ) -> Result<SerialSendResult, SerialSendFailure> {
-    let work = serial_work.admit().ok_or_else(|| {
-        SerialSendFailure::before_write(
-            CommandError::Serial("Serial work is shutting down".into()),
-            SerialSendStage::Admission,
-        )
-    })?;
+    // A desktop permit already enrolls the worker in the shutdown barrier.
+    // The Automation guard instead claims the lease at the late write boundary.
+    let (native_permit, work, pre_write) = match admission {
+        SerialSendAdmission::Desktop(permit) => (Some(permit), None, None),
+        SerialSendAdmission::Automation(guard) => {
+            let work = serial_work.admit().ok_or_else(|| {
+                SerialSendFailure::before_write(
+                    CommandError::Serial("Serial work is shutting down".into()),
+                    SerialSendStage::Admission,
+                )
+            })?;
+            (None, Some(work), Some(guard))
+        }
+    };
     let port_id = prepared.args.port_id.clone();
     tokio::task::spawn_blocking(move || {
+        // The owned permit must live in the blocking closure: dropping the
+        // cancellable command future must not release admission while a native
+        // writer is still queued or running.
+        let _native_permit = native_permit;
         let _work = work;
         let result = execute_prepared_send(prepared, &serial_manager, pre_write);
         let now = chrono::Local::now();
@@ -713,6 +735,7 @@ pub async fn send_serial_data(
     app_handle: AppHandle,
 ) -> Result<usize, CommandError> {
     let prepared = prepare_serial_send(args).map_err(|failure| failure.error)?;
+    let native_permit = state.admit_native_port(&prepared.args.port_id)?;
     send_serial_data_internal(
         prepared,
         state.serial_manager.clone(),
@@ -720,7 +743,7 @@ pub async fn send_serial_data(
         state.serial_work.clone(),
         Some(app_handle),
         serial::events::SerialTxContext::default(),
-        None,
+        SerialSendAdmission::Desktop(native_permit),
     )
     .await
     .map(|result| result.tx.written)
@@ -799,10 +822,27 @@ pub async fn send_file(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<usize, CommandError> {
-    let _work = state
-        .serial_work
-        .admit()
-        .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
+    // Admit before metadata/open I/O so the whole transfer, including slow
+    // delays between chunks, excludes CLI physical work on this port.
+    let native_permit = match state.admit_native_port(&args.port_id) {
+        Ok(permit) => permit,
+        Err(error) => {
+            // Keep the renderer's progress state finite even when admission is
+            // rejected before the transfer future is created.
+            let _ = app.emit(
+                "serial:file_progress",
+                FileProgressPayload {
+                    port_id: args.port_id.clone(),
+                    transfer_id: args.transfer_id.clone(),
+                    sent_bytes: 0,
+                    total_bytes: 0,
+                    done: true,
+                },
+            );
+            return Err(error);
+        }
+    };
+    let _native_permit = native_permit;
     let cancel = Arc::new(AtomicBool::new(false));
     register_file_send(
         &state.file_send_cancel,
@@ -1023,8 +1063,10 @@ pub async fn set_serial_params(
     args: SetSerialParamsArgs,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
+    let native_permit = state.admit_native_port(&args.port_id)?;
     let serial_manager = state.serial_manager.clone();
     tokio::task::spawn_blocking(move || {
+        let _native_permit = native_permit;
         let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -1063,6 +1105,7 @@ pub async fn attempt_reconnect(
     port_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
+    let native_permit = state.admit_native_port(&port_id)?;
     let serial_manager = state.serial_manager.clone();
     // Capture intent before queuing blocking work; a close can cancel a queued attempt too.
     let cancel = serial_manager
@@ -1073,17 +1116,21 @@ pub async fn attempt_reconnect(
     let cleanup_port = port_id.clone();
     let worker_manager = serial_manager.clone();
     let result = tokio::task::spawn_blocking(move || {
-        serial::reconnect_blocking(&worker_manager, &port_id, &cancel).map_err(|e| {
+        let _native_permit = native_permit;
+        let result = serial::reconnect_blocking(&worker_manager, &port_id, &cancel).map_err(|e| {
             log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
             CommandError::Serial(e.to_string())
-        })
+        });
+        // Cleanup stays in this non-cancellable blocking task, after reconnect's
+        // close/join/open work, so the permit cannot be released early.
+        worker_manager
+            .lock()
+            .map_err(|e| CommandError::Lock(e.to_string()))?
+            .finish_reconnect(&cleanup_port, &cleanup_token);
+        result
     })
     .await
     .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?;
-    serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?
-        .finish_reconnect(&cleanup_port, &cleanup_token);
     result
 }
 
@@ -1096,8 +1143,10 @@ pub async fn set_flow_control(
     expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
+    let native_permit = state.admit_native_port(&port_id)?;
     let serial_manager = state.serial_manager.clone();
     tokio::task::spawn_blocking(move || {
+        let _native_permit = native_permit;
         let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -1175,10 +1224,20 @@ pub async fn run_port_tool(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<i32, CommandError> {
-    let _work = state
-        .serial_work
-        .admit()
-        .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
+    let native_permit = state.admit_native_port(&args.port_id)?;
+    // The owned task retains its permit through close, child exit and recovery,
+    // independent of the renderer waiting for the result.
+    tokio::spawn(run_port_tool_owned(args, app, native_permit))
+        .await
+        .map_err(|e| CommandError::Other(format!("Port tool task panicked: {e}")))?
+}
+
+async fn run_port_tool_owned(
+    args: RunPortToolArgs,
+    app: AppHandle,
+    _native_permit: NativeDevicePermit,
+) -> Result<i32, CommandError> {
+    let state = app.state::<AppState>();
     // Only a persisted tool configuration may be executed. Without this an
     // XSS/compromised renderer could use this command as an arbitrary shell.
     let configured = {
@@ -1271,26 +1330,38 @@ pub async fn run_port_tool(
             command.current_dir(dir);
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| CommandError::Io(format!("Failed to spawn tool process: {}", e)))?;
-
-        // kill_on_drop reaps a child abandoned by an output capture or lock failure.
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| CommandError::Io("Failed to capture stdout".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| CommandError::Io("Failed to capture stderr".into()))?;
-        {
+        let (stdout, stderr) = {
             let mut procs = state
                 .tool_processes
                 .lock()
                 .map_err(|e| CommandError::Lock(e.to_string()))?;
+            // Serialize child publication with shutdown's registry drain.
+            // Work admitted before shutdown may not publish an unseen late child.
+            if state.shutdown_started.load(Ordering::Acquire)
+                || state.serial_work.shutting_down.load(Ordering::Acquire)
+            {
+                return Err(CommandError::Serial("Serial work is shutting down".into()));
+            }
+            if procs.contains_key(&args.port_id) {
+                return Err(CommandError::Serial(format!(
+                    "Tool child still owns {}",
+                    args.port_id
+                )));
+            }
+            let mut child = command
+                .spawn()
+                .map_err(|e| CommandError::Io(format!("Failed to spawn tool process: {e}")))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| CommandError::Io("Failed to capture stdout".into()))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| CommandError::Io("Failed to capture stderr".into()))?;
             procs.insert(args.port_id.clone(), child);
-        }
+            (stdout, stderr)
+        };
 
         // 5. 并发读 stdout/stderr；短行保持逐行，长行按有界块推送。
         // Invalid UTF-8 remains lossy (never stops capture); UTF-8/CRLF tails
@@ -1320,25 +1391,27 @@ pub async fn run_port_tool(
             );
         }
 
-        // 6. 等待进程退出（先取出 Child 再 drop 锁，MutexGuard 不跨 await）
-        let child = {
-            let mut procs = state
-                .tool_processes
-                .lock()
-                .map_err(|e| CommandError::Lock(e.to_string()))?;
-            procs.remove(&args.port_id)
-        };
-        let exit_code = match child {
-            Some(mut c) => c
-                .wait()
-                .await
-                .map(|s| s.code().unwrap_or(-1))
-                .map_err(|e| CommandError::Io(format!("Failed to wait for tool process: {}", e)))?,
-            // 进程已被 kill_port_tool 移除并 wait，此处无法再 wait
-            None => -1,
-        };
-
-        Ok(exit_code)
+        // A process may close both output pipes and keep using the port.
+        // Keep its child registered for cancel/shutdown until it really exits.
+        loop {
+            {
+                let mut procs = state
+                    .tool_processes
+                    .lock()
+                    .map_err(|e| CommandError::Lock(e.to_string()))?;
+                let Some(child) = procs.get_mut(&args.port_id) else {
+                    // Global shutdown took ownership of killing/reaping it.
+                    break Ok(-1);
+                };
+                if let Some(status) = child.try_wait().map_err(|e| {
+                    CommandError::Io(format!("Failed to wait for tool process: {e}"))
+                })? {
+                    procs.remove(&args.port_id);
+                    break Ok(status.code().unwrap_or(-1));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
     .await;
 
@@ -1414,20 +1487,22 @@ pub async fn kill_port_tool(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         procs.get(&port_id).and_then(|child| child.id())
     };
-    if let Some(pid) = pid {
-        let killed = tokio::task::spawn_blocking(move || kill_tool_process_tree(pid))
-            .await
-            .map_err(|e| CommandError::Other(format!("Kill tool task failed: {e}")))?
-            .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {e}")))?;
-        if killed {
-            return Ok(());
-        }
+    let Some(pid) = pid else { return Ok(()) };
+    let killed = tokio::task::spawn_blocking(move || kill_tool_process_tree(pid))
+        .await
+        .map_err(|e| CommandError::Other(format!("Kill tool task failed: {e}")))?
+        .map_err(|e| CommandError::Io(format!("Failed to kill tool process tree: {e}")))?;
+    if killed {
+        return Ok(());
     }
     let mut procs = state
         .tool_processes
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
-    if let Some(child) = procs.get_mut(&port_id) {
+    if let Some(child) = procs
+        .get_mut(&port_id)
+        .filter(|child| child.id() == Some(pid))
+    {
         child
             .start_kill()
             .map_err(|e| CommandError::Io(format!("Failed to kill tool process: {e}")))?;

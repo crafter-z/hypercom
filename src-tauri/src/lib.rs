@@ -149,6 +149,8 @@ pub struct AppState {
     /// 挪到独立线程时，需要从 State 克隆出 'static 句柄——Arc 允许克隆，
     /// `Deref<Target=Mutex<..>>` 使既有 `.lock()` 调用点零改动。
     pub serial_manager: std::sync::Arc<std::sync::Mutex<serial::SerialManager>>,
+    /// Shared device-operation authority; independent of listener availability.
+    pub(crate) device_authority: std::sync::Arc<automation::runtime::DeviceAuthority>,
     /// Optional, explicitly enabled loopback automation listener. The default
     /// application never opens this endpoint; it is retained here so shutdown
     /// and future authenticated adapters share one lifecycle owner.
@@ -282,6 +284,10 @@ impl AppState {
             serial_manager: std::sync::Arc::new(
                 std::sync::Mutex::new(serial::SerialManager::new()),
             ),
+            device_authority: automation::runtime::DeviceAuthority::new(
+                format!("host-{}", uuid::Uuid::new_v4()),
+                uuid::Uuid::new_v4().to_string(),
+            ),
             automation_listener: std::sync::Arc::new(std::sync::Mutex::new(None)),
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
@@ -303,6 +309,29 @@ impl AppState {
         // 启动时把配置里的日志设置同步到 LogManager（与 set_config 命令同一入口）。
         state.apply_runtime_config(&cfg);
         Ok(state)
+    }
+
+    pub(crate) fn admit_native_port(
+        &self,
+        port_id: &str,
+    ) -> Result<automation::runtime::NativeDevicePermit, commands::CommandError> {
+        self.admit_native_ports(&[port_id])
+    }
+
+    pub(crate) fn admit_native_ports(
+        &self,
+        port_ids: &[&str],
+    ) -> Result<automation::runtime::NativeDevicePermit, commands::CommandError> {
+        let shutting_down = || commands::CommandError::Serial("Serial work is shutting down".into());
+        if self.shutdown_started.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(shutting_down());
+        }
+        let work = self.serial_work.admit().ok_or_else(shutting_down)?;
+        let permit = self.device_authority.admit_native_ports(port_ids)?;
+        if self.shutdown_started.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(shutting_down());
+        }
+        Ok(permit.track_teardown(work))
     }
 
     /// 把配置中属于「运行期镜像」的设置应用到各管理器：日志设置 → `LogManager`，
@@ -750,23 +779,13 @@ pub fn run() {
             #[allow(clippy::drop_non_drop)]
             drop(state);
 
-            // The automation endpoint is deliberately opt-in and loopback-only.
-            // It exposes the versioned domain transport, not arbitrary Tauri
-            // invoke. Production remote/TLS and native control leases are added
-            // only after every local write path is routed through the arbiter.
+            // Experimental loopback only; not an authenticated remote API or
+            // a way to route arbitrary Tauri commands.
             if let Some(port) = automation::runtime::parse_opt_in_port() {
                 let listener_slot = _app.state::<AppState>().automation_listener.clone();
                 let automation_app = _app.handle().clone();
-                let host_id = format!("host-{}", uuid::Uuid::new_v4());
-                let server_epoch = uuid::Uuid::new_v4().to_string();
                 tauri::async_runtime::spawn(async move {
-                    match automation::runtime::start_loopback(
-                        automation_app,
-                        listener_slot,
-                        host_id,
-                        server_epoch,
-                        port,
-                    ).await {
+                    match automation::runtime::start_loopback(automation_app, listener_slot, port).await {
                         Ok(Some(bound_port)) => log::info!("Automation loopback endpoint listening on 127.0.0.1:{bound_port}"),
                         Ok(None) => {},
                         Err(error) => log::error!("Automation loopback endpoint failed to start: {error}"),
