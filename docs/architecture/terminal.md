@@ -99,6 +99,20 @@ renderer 使用有界物理高度映射，避免百万行 × 大字号直接要�
 - `terminalSearch.ts` 只负责单行搜索文本（HEX 显示走 `hexFormat.bytesToSpacedHex`）与 `markSearchMatchesInHtml` 字符级叠加，不再提供第二套匹配扫描。
 - 已知边界：关闭搜索栏期间按 F3 重新打开时首次导航需再按一次（匹配在打开后才计算——「不后台全缓冲扫描」的代价）。
 
+### 高级搜索与多来源查询
+
+- 交互采用一级输入、二级高级条件：`TerminalSearchBar` 常驻部分只放查询、计数、导航和入口；本地与全局共用 `SearchAdvancedOptions` 的 portal 浮层，默认折叠，启用条件显示数量标记，重置不清查询。模式/跨行/大小写/整词/方向/范围、全局来源选择只在浮层中显示；结果排序放在分页旁。浮层复用 `useOutsideDismiss` / `useDialogLifecycle` / `usePluginViewOverlay` / `useMenuPlacement`，关闭二级浮层不关闭父搜索。单纯展开/收起不改变 SearchSpec 或重启 Worker，会话和 RX 热路径不参与布局。
+- 普通单行 literal / 默认作用域保持 manager 的同步增量快速路径；regex、fuzzy、HEX、跨行、整词、显式方向或可见范围使用 `src/utils/terminal/search/` 的 `TerminalSearchSession`。主线程只通过 `TerminalViewportManager.createSearchSource` 分批读取、解码与提交，不在 RX append 或 renderer 中执行高级匹配。Worker 不可用时明确报错，不退回主线程执行正则。
+- `SearchSpec` 是临时查询配置；`SearchHit` 只保存来源、generation、起止 seq、UTF-16 命中区间与评分，不复制完整历史。`searchMatcher` 是 Worker 和测试共用的唯一匹配实现，正则准入复用 `safeRegex`，HEX 复用 `hexUtils` / `hexFormat`，字符解码继续复用 `lineText`。
+- 跨行按真实相邻逻辑记录以 LF 连接，最多 32 条记录 / 16 KB；软换行不是记录边界。过滤、方向排除或缺失记录会切断邻接，不把隐藏的中间行跳过去拼接。HEX 保持单记录字节匹配。模糊匹配为有序子序列，不是编辑距离拼写纠错。
+- 会话只有打开且非空查询时才创建 Worker/计时器；批量传输不转移终端 `rawData` 的所有权。单会话串行批次、来源轮转、有限结果与输入预算、超时终止和取消共同构成背压；主线程切片预算是协作目标，单条极长记录的解码/复制和浏览器调度仍不能承诺严格时延。
+- 普通 append 只推进源 revision，不重扫历史；Worker 保留有限尾部窗口补充跨批/增量命中。显示/编码/过滤/暂停、clear/replace/换源推进搜索 generation，裁剪移除跨越缓冲头部的结果。关闭标签、取消或查询变化终止会话，迟到消息不能复活结果。搜索结果上限或处理边界必须显示 partial/incomplete，不能声称完整全历史。
+- `globalTerminalSearch` 注册挂载的 TRX/只读回放来源；TTY、已弹出的主窗占位、插件替代视图与独立 WebView 不纳入主窗口搜索。`App` 持有全局搜索弹窗开关，标题栏右侧的标准放大镜图标与 `MainDisplay` 的 Ctrl/Cmd+Shift+F 共用打开动作，不给主显示区新增工具栏行。`GlobalTerminalSearchPanel` 提供来源选择与分页结果，只为当前页读取短预览。结果选择必须验证 generation/seq，激活对应标签，再走 `TerminalView` 统一的搜索导航授权解除独立跟随或组 LIVE。
+- 高级高亮只向现有 `markSearchMatchesInHtml` 提交区间；HTML tag/entity 映射与协议着色共用现有实现，不在可见行重跑正则/模糊匹配，不为屏外命中创建 DOM。可见行区间查询使用至多 256 条的 FIFO 缓存。搜索不查日志文件，不提供完整连接历史检索。
+- 当前保护边界：高级文本/HEX 查询最多 4096 字符，fuzzy 查询 128 字符，regex 复用 `MAX_SAFE_REGEX_PATTERN_LENGTH`；每记录文本最多 16 KiB UTF-16（fuzzy 8 KiB），原字节超过 16 KiB 提前跳过，不在 UI 解码巨大记录。跨行合并文本最多 16 KiB UTF-16，HEX 不跨行。单记录最多 256 个高亮片段，每会话最多 10000 结果 / 100000 片段；达到边界返回 incomplete/truncated，而非修改终端缓冲。
+- 单次提取最多 128 条 / 128 KiB，协作式主线程预算约 4ms；会话最多一批在途，活动尾部轮询 100ms，进度/结果快照限频，空闲轮询不复制命中数组。每批 Worker 超过 2s 无响应则 terminate；取消和 dispose 同样真正 terminate，而非仅修改 UI 状态。满结果上限时仍清理已淘汰结果。显示过滤以外的显式命中可暂时使用全缓冲几何并提供恢复过滤按钮，不复制整份 filtered seq 数组。
+- 浏览器观测入口为 `e2e/terminalSearch.performance.spec.ts`：PowerShell 使用 `$env:HYPERCOM_SEARCH_BENCH='1'; npx playwright test e2e/terminalSearch.performance.spec.ts --workers=1`；可用 `$env:HYPERCOM_SEARCH_BENCH_ROWS='1000000'` 改为百万条真实缓冲。样本比较搜索关闭/跨行模糊扫描期间每批追加、rAF 和事件循环时延，不代表完整扫描耗时、真实串口吞吐或 WebView2 帧率保证。
+
 ## 最大显示行数
 
 - `maxDisplayLines` = 每端口终端最大显示行数（默认 100000，clamp [1000,1000000]；Rust `max_display_lines` + `#[serde(default)]` 缺省回退）。**删除** `memoryLimitMb`/`memoryPerPortBudgetMb` 双内存预算——升级时 `ConfigManager::new` 的 `strip_legacy_memory_budget_keys` 显式剥离旧配置项。

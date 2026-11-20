@@ -9,7 +9,8 @@
 | `TerminalBuffer.ts` | 稳定 `seq` 的环形行缓冲；`append`、`snapshot`、`replaceAll`、`clear`、`setLimits` |
 | `TerminalRenderer.ts` | 节点池、固定行高/软换行、过滤结果、选区和同帧跟随的 DOM 渲染 |
 | `TerminalWrapLayout.ts` / `TerminalHeightIndex.ts` | 文本软换行的可见区域测量和有界高度索引 |
-| `viewportManager.ts` | 端口显示实例、缓冲、增量过滤/搜索、时间索引和 renderer 生命周期 |
+| `viewportManager.ts` | 端口显示实例、缓冲、增量过滤/普通搜索、高级搜索适配、时间索引和 renderer 生命周期 |
+| `search/` | 共享高级匹配器、有界跨行窗口、Worker 协议及多来源可取消搜索会话 |
 | `TerminalSource.ts` | 只读回放来源、稳定序号、时间和物理高度映射 |
 | `TerminalTimeIndex.ts` | 按 `(time, seq)` 排序的 AVL 索引 |
 | `src/utils/lineText.ts` | 全仓唯一的字节到文本解码器工厂和缓存 |

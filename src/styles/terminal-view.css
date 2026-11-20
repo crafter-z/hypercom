@@ -363,8 +363,14 @@
 }
 
 /* ==================== Terminal Search Bar ==================== */
+.terminal-search-container { flex-shrink: 0; min-width: 0; background: var(--bg-secondary); }
+.terminal-search-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: 0 var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); }
+.terminal-search-feedback:empty { display: none; }
+.terminal-search-bar textarea { resize: vertical; min-height: 40px; max-height: 100px; }
 .terminal-search-bar {
   display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-1) var(--space-2);
@@ -377,7 +383,9 @@
 /* Search field stretches to fill the strip; the .toolbar-input base caps
  * generic toolbar fields at 200px. */
 .terminal-search-input {
-  flex: 1;
+  flex: 1 1 160px;
+  min-width: 100px;
+  max-width: none;
 }
 
 /* Search position readout — held at a steady width to avoid strip jitter

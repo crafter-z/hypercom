@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
-import { Settings, Keyboard, BookOpen, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Settings, Search, Keyboard, BookOpen, Minus, Square, X, Minimize2, Pin, PinOff, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openHelpCenter } from '../../utils/help/helpNavigation';
 
-const TitleBar: React.FC = () => {
+const TitleBar: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) => {
   const toggleConfigModal = useSystemStore((state) => state.toggleConfigModal);
   const setUIState = useSystemStore((state) => state.setUIState);
   const sidebarCollapsed = useSystemStore((state) => state.ui.sidebarCollapsed);
@@ -114,6 +114,15 @@ const TitleBar: React.FC = () => {
       </div>
 
       <div className="titlebar-right">
+        <button
+          type="button"
+          className="btn btn-icon btn-sm titlebar-help global-terminal-search-trigger"
+          title={t('globalSearch.shortcut')}
+          aria-label={t('globalSearch.open')}
+          onClick={onGlobalSearch}
+        >
+          <Search size={15} />
+        </button>
         <button
           className={`btn btn-icon btn-sm titlebar-help titlebar-pin${isPinned ? ' active' : ''}`}
           title={pinLabel}

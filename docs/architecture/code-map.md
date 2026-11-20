@@ -19,7 +19,8 @@
 | RX 管线 | `src/utils/rxAssembler.ts`：`RxLineAssembler`；`src/utils/rxPipeline.ts`：`RxPipeline`、`getRxPipeline` | 原始字节组行、rAF 批写、断线/编码切换 flush；主应用只装配一次 |
 | TTY I/O | `src/utils/ttyService.ts`：`ttyService` | per-port 解码、队列、键盘 `send`、显式 `sendData`、`disconnect` |
 | 终端缓冲/渲染 | `src/utils/terminal/TerminalBuffer.ts`：`TerminalBuffer`；`TerminalRenderer.ts`：`TerminalRenderer`；`viewportManager.ts`：`getViewportManager` | 行缓冲脱离 React；显示、搜索、回放复用同一引擎 |
-| 终端搜索/过滤 | `src/utils/terminalSearch.ts`；`src/utils/lineFilter.ts` | 不在组件中重复扫描或解码 |
+| 终端搜索/过滤 | `src/utils/terminalSearch.ts`；`src/utils/lineFilter.ts`；`src/utils/terminal/search/`：`TerminalSearchSession`；`src/components/MainDisplay/globalTerminalSearch.ts`：`registerGlobalTerminalSearch` | 普通搜索留 manager 快路径；高级匹配只在 Worker，会话增量/取消；组件不扫描或重复解码 |
+| 搜索高级条件入口 | `src/components/MainDisplay/SearchAdvancedOptions.tsx`：`SearchAdvancedOptions`、`countAdvancedSearchOptions` | 本地/全局共用二级浮层，不重复控件、不负责匹配；浮层定位和焦点复用 shared hooks |
 | 顺序/流程调度 | `src/utils/sequential.ts`：`runSequential`；`src/utils/flowRuntime.ts`；`src/utils/flowSchedule.ts`：`advanceFlow` | 循环发送和命令步骤共用 |
 | 命令执行 | `src/utils/commandExecution.ts`：`executeQuickCommand`、`applyCommandParams`；`src/utils/commandOrder.ts`：`orderedCommands` | 单步与循环都从同一命令快照执行 |
 | 规则安全 | `src/utils/cssColor.ts`：`safeCssColor`；`src/utils/safeRegex.ts`：`isSafeRegexPattern`、`tryCreateSafeRegex` | 用户颜色/正则在保存和执行入口均复核 |

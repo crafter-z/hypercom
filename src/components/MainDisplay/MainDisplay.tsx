@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { countLeaves } from '../../utils/paneTree';
 import type { PaneNode, BranchPane, SplitDirection } from '../../types';
@@ -25,7 +25,11 @@ function flexDirectionFor(direction: SplitDirection): 'row' | 'column' {
   return direction === 'horizontal' ? 'column' : 'row';
 }
 
-const MainDisplay: React.FC = () => {
+export function isGlobalTerminalSearchShortcut(event: KeyboardEvent): boolean {
+  return (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'f';
+}
+
+const MainDisplay: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) => {
   const paneTree = useAppStore((s) => s.paneTree);
   const tabs = useAppStore((s) => s.tabs);
   const focusedPaneId = useAppStore((s) => s.focusedPaneId);
@@ -36,6 +40,18 @@ const MainDisplay: React.FC = () => {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragTabId, setDragTabId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleGlobalSearchShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || !isGlobalTerminalSearchShortcut(event)) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onGlobalSearch();
+    };
+    window.addEventListener('keydown', handleGlobalSearchShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalSearchShortcut);
+  }, [onGlobalSearch]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })

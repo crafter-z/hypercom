@@ -23,18 +23,19 @@ export function useMenuPlacement(x: number, y: number, ready = true) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const rect = el.getBoundingClientRect();
-    let nx = x;
-    let ny = y;
-    if (rect.width + x > window.innerWidth - EDGE_MARGIN) {
-      nx = window.innerWidth - rect.width - EDGE_MARGIN;
-    }
-    if (rect.height + y > window.innerHeight - EDGE_MARGIN) {
-      ny = window.innerHeight - rect.height - EDGE_MARGIN;
-    }
-    if (nx < 0) nx = 0;
-    if (ny < 0) ny = 0;
-    if (nx !== x || ny !== y) setPos({ x: nx, y: ny });
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      const nx = Math.max(0, Math.min(x, window.innerWidth - rect.width - EDGE_MARGIN));
+      const ny = Math.max(0, Math.min(y, window.innerHeight - rect.height - EDGE_MARGIN));
+      // The anchor may change even when it still fits. Do not retain the old
+      // coordinates, and re-clamp when an options panel changes its own size.
+      setPos(previous => previous.x === nx && previous.y === ny ? previous : { x: nx, y: ny });
+    };
+    update();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    observer?.observe(el);
+    window.addEventListener('resize', update);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', update); };
   }, [x, y, ready]);
 
   return { ref, pos };

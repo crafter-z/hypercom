@@ -47,6 +47,7 @@ import TerminalFilterBar from './TerminalFilterBar';
 import { createTrxTimelineAdapter, timelineCoordinator, type TimelineNavigationToken } from '../../utils/timeline';
 import { TerminalNavigationLifecycle } from '../../utils/terminalNavigation';
 import { TimelineButton, useTimelineMembership } from './TimelineControls';
+import { registerGlobalTerminalSearch } from './globalTerminalSearch';
 
 export interface TerminalViewProps {
   /** Only real serial sources provide a port; replay never fabricates one. */
@@ -227,25 +228,59 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     return () => document.removeEventListener('selectionchange', realignAfterSelection);
   }, [resumeHeldAlignment]);
 
-  // Search (UI-local state, manager-backed computation + navigation).
+  const onSearchNavigate = useCallback(() => {
+    navigationRef.current?.cancel();
+    if (groupIdRef.current) {
+      // Acquire browsing authority before seeking; a LIVE tick must not undo the hit.
+      navigationRef.current?.commitPosition();
+    } else {
+      configRef.current.onUserNavigation?.();
+      vm.setLocked(false);
+      configRef.current.updateTerminalConfig({ scrollLocked: false });
+    }
+  }, [vm]);
+
+  // Search (UI-local options; match arrays remain in the viewport/worker session).
   const {
     searchOpen, searchQuery, caseSensitive, currentMatch, searchMatchCount,
     setSearchQuery, toggleCase, openSearch, closeSearch,
-    nextMatch, prevMatch,
-  } = useTerminalSearch({ vm,
-    onNavigate: useCallback(() => {
-      navigationRef.current?.cancel();
-      if (groupIdRef.current) {
-        // Acquire browsing authority before seeking; a LIVE tick must not undo the hit.
-        navigationRef.current?.commitPosition();
-      } else {
-        // Search navigation holds even a tail hit until the user explicitly pins again.
-        configRef.current.onUserNavigation?.();
-        vm.setLocked(false);
-        configRef.current.updateTerminalConfig({ scrollLocked: false });
-      }
-    }, [vm]),
+    nextMatch, prevMatch, searchOptions, setSearchOptions, searchSnapshot, cancelSearch,
+  } = useTerminalSearch({ vm, onNavigate: onSearchNavigate });
+
+  const searchableRawView = useAppStore(state => {
+    const tab = state.tabs.find(item => item.id === tabId);
+    return !tab || tab.kind === 'replay' || (tab.kind === 'serial' && !tab.poppedOut && !getTabViewPreference(tab));
   });
+  useEffect(() => {
+    if (!searchableRawView) return;
+    let frame: number | null = null;
+    const unregister = registerGlobalTerminalSearch({
+      id: sourceId ?? portId ?? tabId ?? vm.createSearchSource().id, tabId, portId, manager: vm,
+      onReveal: (hit, spec) => {
+        if (!vm.isSearchHitValid(hit)) return;
+        if (frame !== null) cancelAnimationFrame(frame);
+        const sourceGeneration = vm.sourceGeneration;
+        if (spec?.mode === 'hex') {
+          configRef.current.updateTerminalConfig({ displayFormat: 'hex' });
+          vm.updateConfig({ displayFormat: 'hex' });
+        }
+        if (tabId) useAppStore.getState().setActiveTab(tabId);
+        // Hidden tabs need a committed layout before the shared renderer can
+        // seek. Rebase HEX only for display/noise changes on the same source;
+        // clear/replace/retirement can never revive the old hit.
+        frame = requestAnimationFrame(() => {
+          frame = null;
+          if (vm.sourceGeneration !== sourceGeneration) return;
+          if (spec?.mode === 'hex') hit = { ...hit, generation: vm.createSearchSource().getState().generation };
+          if (!vm.isSearchHitValid(hit)) return;
+          onSearchNavigate();
+          vm.revealSearchHit(hit);
+          containerRef.current?.focus({ preventScroll: true });
+        });
+      },
+    });
+    return () => { if (frame !== null) cancelAnimationFrame(frame); unregister(); };
+  }, [vm, sourceId, portId, tabId, onSearchNavigate, searchableRawView]);
 
   // Explicit intent owns the lease. Bare scroll only samples that lease, never
   // acquires ownership or writes scrollLocked (including trusted programmatic scroll).
@@ -478,7 +513,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   // its buttons are siblings of the output, and must use the same navigation.
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.defaultPrevented) return;
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
       e.stopPropagation();
       if (searchOpen) handleSearchClose();
@@ -616,6 +651,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           ) : null;
         })()}
       />
+      {vm.revealingOutsideFilter && <div className="timeline-note" role="status">
+        {t('terminal.search.revealingOutsideFilter')} <button type="button" className="btn btn-sm" onClick={() => vm.restoreSearchFilter()}>{t('terminal.search.restoreFilter')}</button>
+      </div>}
       {searchOpen && (
         <TerminalSearchBar
           query={searchQuery}
@@ -627,6 +665,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           onNext={nextMatch}
           onPrev={prevMatch}
           onClose={handleSearchClose}
+          options={searchOptions}
+          onOptionsChange={options => {
+            if (options.mode === 'hex' && displayFormat !== 'hex') updateTerminalConfig({ displayFormat: 'hex' });
+            setSearchOptions(options);
+          }}
+          snapshot={searchSnapshot}
+          onCancel={cancelSearch}
         />
       )}
       <div className="terminal-scroll-wrap">
