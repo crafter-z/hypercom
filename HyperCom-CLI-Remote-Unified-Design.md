@@ -3,7 +3,7 @@
 > **文档状态：设计提案；P1 基础切片已实现，完整远程方案仍未实现。**
 > 编制日期：2026-11-17。
 > 范围：本地 GUI、办公室远程 GUI、CLI、后续 SDK 的统一访问与管理。
-> **当前实现仅为 P1 本机实验切片**：默认关闭的 loopback Host、同连接短租约 CLI、内存操作账本、普通原生发送的 `serial:tx`，以及 CLI 租约与桌面设备操作之间的端口级互斥。实验写入仅开发构建可用，还需 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，身份仍未认证。`nativeGuiArbitration=true` 对应 `nativeArbitrationScope=desktop-native-vs-local-cli`：桌面原生操作作为一个本机执行类，内部仍使用现有规则，不代表桌面循环、插件和触发器已经获得独立的全事务租约。`hostId` 仍按进程生成，TypeScript 适配层尚未接线。Windows Named Pipe、稳定 Host 身份、全事务执行器、原子 watch、远程 TLS 和独立 Host 尚未交付。
+> **当前实现仅为 P1 本机实验切片**：默认关闭的 loopback Host、同连接短租约 CLI、内存操作账本、普通原生发送的 `serial:tx`，以及 CLI 租约与桌面设备操作之间的端口级互斥。实验写入仅开发构建可用，还需 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`，身份仍未认证。`nativeGuiArbitration=true` 对应 `nativeArbitrationScope=desktop-native-vs-local-cli`：桌面原生操作作为一个本机执行类，内部仍使用现有规则，不代表桌面循环、插件和触发器已经获得独立的全事务租约。`hostId` 按配置实例持久化、`serverEpoch` 每次启动刷新；CLI 已支持只读端口状态快照与有界游标续传。该订阅只涵盖采样后发布的端口列表、连接状态及代次，不是 RX/TX 订阅或无损物理事件日志。TypeScript 适配层尚未接线；Windows Named Pipe、全事务执行器、远程 TLS 和独立 Host 尚未交付。
 
 ## 0. 结论与推荐决策
 
@@ -191,6 +191,8 @@ RFC2217 能传输波特率、数据位、校验、控制线等，是未来第三
 | `cursor` | 有作用域的事件续传位置 | 重连恢复，不使用 GUI 行号当历史位置 |
 
 执行请求至少绑定 Host、serverEpoch、目标 PortRef；涉及已有连接的副作用还绑定 connectionGeneration 和有效控制身份。打开连接使用观察到的端口状态版本/最近代次作为前置条件，不把“还没有活动连接”解释为无需竞争保护。
+
+本机实现将 `hostId` 存在实际配置文件旁的 `<配置文件名>.host-identity.json`，与常规设置导入导出分开；换用另一份配置会使用另一份身份。重启生成新的 `serverEpoch`。身份文件存在但损坏或不可读时，保留文件并禁用实验监听，不用新的 ID 冒充原实例，桌面功能仍可使用。该 ID 用于隔离资源，不等于认证凭据或 USB 设备标识。
 
 到串口驱动边界时只传 nativePortId，例如 COM3，不传 `lab/COM3` 或网络 URL。现有 `PortKind::of` 仍只处理 owner 本机端口类别。
 
@@ -583,7 +585,7 @@ CLI `host` 针对服务；未来 `ui show` 只操作明确的客户端 UI，不�
 
 ### 14.3 使用示例（完整命令面仍在后续阶段）
 
-本机实验入口默认关闭。启动桌面 Host 前显式设置 `HYPERCOM_AUTOMATION_LOOPBACK=1`，才开放 `status` 与 `ports list`。只有使用开发构建做本机隔离写入测试时再设 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`；正式构建忽略该变量，只能显式启用只读。开发写入仍是未认证的本机测试身份，**不得跨机转发，也不适合与本地 GUI 控制真实设备并行使用**。CLI 只允许本机端点，`monitor/watch` 暂不支持。
+本机实验入口默认关闭。启动桌面 Host 前显式设置 `HYPERCOM_AUTOMATION_LOOPBACK=1`，才开放只读的 `status`、`ports list` 和 `ports watch`。只有使用开发构建做本机隔离写入测试时再设 `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`；正式构建忽略该变量，只能显式启用只读。实验入口没有应用级认证，**不得跨机转发，也不适合与本地 GUI 控制真实设备并行使用**。CLI 只允许本机端点，`monitor` 仍不支持。
 
 ```powershell
 # 在启动桌面 Host 的终端：
@@ -595,10 +597,15 @@ $env:HYPERCOM_AUTOMATION_LOOPBACK = '1'
 # 在另一终端、同一仓库根目录（默认端口 39071）：
 cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- status
 cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- ports list
+cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- ports watch --once
+# 持续观察已发布的端口状态变化（Ctrl+C 退出）：
+cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- ports watch
 # 发送前在开发版桌面 Host 中启用并打开模拟端口；CLI 不会隐式打开端口。
 cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- send --port SIM:Loopback --text ping --ending crlf
 cargo run --manifest-path src-tauri/Cargo.toml --bin hypercom-cli -- operation get --request-id REQUEST_ID
 ```
+
+`ports watch` 输出逐行 JSON：不带游标时先给 `snapshot`（其 `ports` 与 `cursor` 在同一次状态发布下读取），随后给 `changes`；带 `--cursor TOKEN` 时只续传其后的状态变化。`--once` 只取一页。游标是 Host 与 epoch 作用域内的透明传递值，不可拼接或跨实例重用。`CURSOR_EXPIRED`（例如 Host 已重启）或 `STREAM_GAP`（历史已淘汰）要求显式开始新快照，不自动跳过。状态源是合并采样，不保证记录两个采样之间的物理变化，不读取或监听 RX/TX，也不取得写租约。
 
 `send` 在同一连接解析当前代次并取得、释放短租约。不能将租约跨 CLI 进程使用。CLI 和桌面命令竞争同一个端口时不隐式抢占：CLI 收到 `PORT_BUSY`，被阻止的桌面命令返回忙碌错误，不执行串口副作用。文件传输、受管外部工具和关闭收尾均计入桌面工作；控制到期或断连后，尚未进入写入的旧 CLI 请求也不能复活。CLI 暂不支持 TTY 租约。
 
@@ -742,7 +749,7 @@ Windows 服务在 Session 0，与普通交互桌面隔离。不能把现有 Taur
 
 退出条件：CLI 和本地 GUI 已真正共享同一 Core；不允许本地旧入口绕过租约；同名端口身份迁移有测试。
 
-当前分支已完成本机实验命令和原生操作级互斥；桌面增强流程和其他前端执行器的事务级委派、稳定身份与 `PortKey` 迁移、正式本机 IPC 与权威订阅仍是 P1 退出项。不要把旧 GUI 的写前回显当作权威 TX，也不要把任意外部程序自行访问串口当成可由本 Host 仲裁。
+当前分支已完成本机实验命令、原生操作级互斥、按配置实例持久化的 Host 身份及采样端口状态续传。桌面增强流程和其他前端执行器的事务级委派、`PortKey` 迁移、正式本机 IPC 和权威 RX/TX／操作事件订阅仍是 P1 退出项。不要把状态采样当作原始采集，不要把旧 GUI 的写前回显当作权威 TX，也不要把任意外部程序自行访问串口当成可由本 Host 仲裁。
 
 ### P2：首个完整远程闭环（V1）
 

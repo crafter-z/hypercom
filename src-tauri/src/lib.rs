@@ -151,6 +151,8 @@ pub struct AppState {
     pub serial_manager: std::sync::Arc<std::sync::Mutex<serial::SerialManager>>,
     /// Shared device-operation authority; independent of listener availability.
     pub(crate) device_authority: std::sync::Arc<automation::runtime::DeviceAuthority>,
+    /// Never put a temporary identity on the automation wire.
+    automation_identity_ready: bool,
     /// Optional, explicitly enabled loopback automation listener. The default
     /// application never opens this endpoint; it is retained here so shutdown
     /// and future authenticated adapters share one lifecycle owner.
@@ -278,6 +280,14 @@ impl AppState {
         // One writer per config directory: concurrent instances otherwise race
         // config.json/session.json (fixed temp names + per-process revision CAS).
         let instance_lock = acquire_instance_lock(config_manager.config_path())?;
+        let (host_id, automation_identity_ready) =
+            match automation::identity::load_or_create(config_manager.config_path()) {
+                Ok(id) => (id, true),
+                Err(error) => {
+                    log::warn!("Automation Host identity unavailable; loopback disabled: {error}");
+                    (automation::identity::fresh_id(), false)
+                }
+            };
 
         let state = Self {
             _instance_lock: instance_lock,
@@ -285,9 +295,10 @@ impl AppState {
                 std::sync::Mutex::new(serial::SerialManager::new()),
             ),
             device_authority: automation::runtime::DeviceAuthority::new(
-                format!("host-{}", uuid::Uuid::new_v4()),
+                host_id,
                 uuid::Uuid::new_v4().to_string(),
             ),
+            automation_identity_ready,
             automation_listener: std::sync::Arc::new(std::sync::Mutex::new(None)),
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),

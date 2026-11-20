@@ -10,7 +10,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -28,6 +28,7 @@ const MAX_STDIN_BYTES: usize = 48_000;
 
 const HOST_STATUS: &str = "host.status";
 const PORTS_LIST: &str = "ports.list";
+const PORTS_WATCH: &str = "ports.watch";
 const CONTROL_ACQUIRE: &str = "control.acquire";
 const CONTROL_RELEASE: &str = "control.release";
 const SERIAL_SEND: &str = "serial.send";
@@ -208,9 +209,16 @@ impl SendOptions {
 }
 
 #[derive(Debug)]
+struct WatchOptions {
+    cursor: Option<String>,
+    once: bool,
+}
+
+#[derive(Debug)]
 enum Command {
     Status,
     PortsList,
+    PortsWatch(WatchOptions),
     Send(SendOptions),
     OperationGet { request_id: String },
 }
@@ -219,6 +227,7 @@ enum Command {
 enum CommandName {
     Status,
     PortsList,
+    PortsWatch,
     Send,
     OperationGet,
 }
@@ -274,6 +283,10 @@ fn parse_args(iter: impl IntoIterator<Item = String>) -> CliResult<ParseAction> 
     let mut ending = LineEnding::None;
     let mut generation = None;
     let mut request_id = None;
+    let mut watch = WatchOptions {
+        cursor: None,
+        once: false,
+    };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(ParseAction::Help),
@@ -302,11 +315,22 @@ fn parse_args(iter: impl IntoIterator<Item = String>) -> CliResult<ParseAction> 
             }
             "status" if command.is_none() => command = Some(CommandName::Status),
             "ports" if command.is_none() => {
-                if args.next().as_deref() != Some("list") {
-                    return Err(CliError::usage("ports requires the list subcommand"));
-                }
-                command = Some(CommandName::PortsList);
+                command = Some(match args.next().as_deref() {
+                    Some("list") => CommandName::PortsList,
+                    Some("watch") => CommandName::PortsWatch,
+                    _ => return Err(CliError::usage("ports requires list or watch")),
+                });
             }
+            "--cursor" if command == Some(CommandName::PortsWatch) => {
+                let token = take_value(&mut args, &arg)?;
+                if !valid_watch_cursor(&token) || watch.cursor.is_some() {
+                    return Err(CliError::usage(
+                        "ports watch requires a single valid --cursor token",
+                    ));
+                }
+                watch.cursor = Some(token);
+            }
+            "--once" if command == Some(CommandName::PortsWatch) => watch.once = true,
             "send" if command.is_none() => command = Some(CommandName::Send),
             "operation" if command.is_none() => {
                 if args.next().as_deref() != Some("get") {
@@ -315,7 +339,9 @@ fn parse_args(iter: impl IntoIterator<Item = String>) -> CliResult<ParseAction> 
                 command = Some(CommandName::OperationGet);
             }
             "monitor" | "watch" if command.is_none() => {
-                return Err(CliError::unsupported("monitor/watch is not supported"))
+                return Err(CliError::unsupported(
+                    "RX/TX monitor is not supported; use ports watch for port state",
+                ))
             }
             "control" if command.is_none() => {
                 return Err(CliError::unsupported("standalone control acquire/release is not supported; send takes its own connection-scoped lease"));
@@ -358,6 +384,7 @@ fn parse_args(iter: impl IntoIterator<Item = String>) -> CliResult<ParseAction> 
     let command = match command {
         Some(CommandName::Status) => Command::Status,
         Some(CommandName::PortsList) => Command::PortsList,
+        Some(CommandName::PortsWatch) => Command::PortsWatch(watch),
         Some(CommandName::Send) => {
             let port = port
                 .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
@@ -1027,6 +1054,173 @@ fn success(result: Value) -> Value {
     json!({"ok": true, "result": result})
 }
 
+fn valid_watch_cursor(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 512
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+}
+
+fn valid_watch_port(port: &Value, host: &str, epoch: &str) -> bool {
+    let generation = port["connectionGeneration"].as_str().and_then(|counter| {
+        let value = counter.parse::<u64>().ok()?;
+        (value.to_string() == counter).then_some(value)
+    });
+    port["target"]["hostId"].as_str() == Some(host)
+        && port["serverEpoch"].as_str() == Some(epoch)
+        && port["target"]["nativePortId"]
+            .as_str()
+            .is_some_and(valid_watch_port_id)
+        && generation.is_some()
+        && matches!(
+            port["state"].as_str(),
+            Some("open" | "closed" | "opening" | "closing" | "error")
+        )
+        && (port["state"] != "open" || generation != Some(0))
+}
+
+fn valid_watch_port_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+}
+
+fn check_watch_page<'a>(
+    reply: &'a RpcResult,
+    host: Option<&str>,
+    epoch: &str,
+    previous: Option<&str>,
+) -> CliResult<(&'a str, &'a str, bool)> {
+    let actual_host = reply.identity(epoch)?;
+    let invalid = || {
+        CliError::protocol("invalid ports.watch snapshot, identity or change page")
+            .with_request_id(&reply.id)
+    };
+    if host.is_some_and(|host| host != actual_host) {
+        return Err(invalid());
+    }
+    let next = reply.result["cursor"]
+        .as_str()
+        .filter(|value| valid_watch_cursor(value))
+        .ok_or_else(invalid)?;
+    let visible = match (reply.result["kind"].as_str(), previous) {
+        (Some("snapshot"), None) => {
+            let mut ids = std::collections::HashSet::new();
+            let ports = reply.result["ports"].as_array().ok_or_else(invalid)?;
+            for port in ports {
+                if !valid_watch_port(port, actual_host, epoch)
+                    || !ids.insert(port["target"]["nativePortId"].as_str())
+                {
+                    return Err(invalid());
+                }
+            }
+            true
+        }
+        (Some("changes"), Some(previous)) => {
+            let changes = reply.result["changes"].as_array().ok_or_else(invalid)?;
+            let mut cursors = std::collections::HashSet::from([previous]);
+            let mut last = previous;
+            for change in changes {
+                last = change["cursor"]
+                    .as_str()
+                    .filter(|value| valid_watch_cursor(value))
+                    .ok_or_else(invalid)?;
+                if !cursors.insert(last) {
+                    return Err(invalid());
+                }
+                match change["kind"].as_str() {
+                    Some("upsert") if valid_watch_port(&change["port"], actual_host, epoch) => {}
+                    Some("remove")
+                        if change["nativePortId"]
+                            .as_str()
+                            .is_some_and(valid_watch_port_id) => {}
+                    _ => return Err(invalid()),
+                }
+            }
+            if last != next {
+                return Err(invalid());
+            }
+            !changes.is_empty()
+        }
+        _ => return Err(invalid()),
+    };
+    Ok((actual_host, next, visible))
+}
+
+fn emit_json(mut output: impl Write, value: &Value) -> io::Result<()> {
+    writeln!(output, "{value}")?;
+    output.flush()
+}
+
+async fn run_ports_watch(
+    cli: &Cli,
+    options: &WatchOptions,
+    mut output: impl Write,
+) -> CliResult<()> {
+    let endpoint = loopback_endpoint(&cli.endpoint)?;
+    let duration = Duration::from_millis(cli.timeout_ms);
+    let mut cursor = options.cursor.clone();
+    let mut identity: Option<(String, String)> = None;
+    loop {
+        let mut client = Client::connect(endpoint, Instant::now() + duration).await?;
+        client.require(PORTS_WATCH)?;
+        let epoch = client.handshake.server_epoch.clone();
+        if identity
+            .as_ref()
+            .is_some_and(|(_, previous_epoch)| previous_epoch != &epoch)
+        {
+            return Err(CliError::new(
+                ExitCode::Remote,
+                ErrorCode::CursorExpired.as_str(),
+                "Host restarted; take a new port snapshot",
+            ));
+        }
+        // The handshake consumes one request ID. Roll over deliberately before
+        // the advertised limit; carry only the last delivered cursor forward.
+        let available = client
+            .handshake
+            .max_requests_per_connection
+            .saturating_sub(1);
+        if available == 0 {
+            return Err(CliError::protocol(
+                "handshake left no requests for ports.watch",
+            ));
+        }
+        for _ in 0..available {
+            let mut params = json!({"waitMs":(cli.timeout_ms / 2).min(1000)});
+            if let Some(cursor) = &cursor {
+                params["cursor"] = json!(cursor);
+            }
+            client.connection.deadline = Instant::now() + duration;
+            let reply = client
+                .call(client.request(PORTS_WATCH, params, None, None))
+                .await?;
+            let (host, next, visible) = check_watch_page(
+                &reply,
+                identity.as_ref().map(|(host, _)| host.as_str()),
+                &epoch,
+                cursor.as_deref(),
+            )?;
+            let next = next.to_owned();
+            identity.get_or_insert_with(|| (host.to_owned(), epoch.clone()));
+            if visible || options.once {
+                match emit_json(&mut output, &success(reply.result)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+                    Err(error) => {
+                        return Err(CliError::unavailable(format!(
+                            "cannot write watch output: {error}"
+                        )))
+                    }
+                }
+            }
+            if options.once {
+                return Ok(());
+            }
+            cursor = Some(next);
+        }
+    }
+}
+
 async fn execute(cli: Cli, stdin: impl Read) -> CliResult<Value> {
     let endpoint = loopback_endpoint(&cli.endpoint)?;
     // Read finite redirected input before connecting or acquiring a lease.
@@ -1040,6 +1234,7 @@ async fn execute(cli: Cli, stdin: impl Read) -> CliResult<Value> {
     match cli.command {
         Command::Status => Ok(success(client.status().await?.result)),
         Command::PortsList => Ok(success(client.list_ports().await?.0.result)),
+        Command::PortsWatch(_) => Err(CliError::protocol("ports watch requires the stream runner")),
         Command::OperationGet { request_id } => {
             let reply = client
                 .call(client.request(OPERATIONS_GET, json!({"requestId": request_id}), None, None))
@@ -1066,7 +1261,7 @@ async fn execute(cli: Cli, stdin: impl Read) -> CliResult<Value> {
 
 const HELP: &str = "hypercom-cli (experimental loopback client)\n\n\
 Usage: hypercom-cli [--target local] [--endpoint HOST:PORT] [--timeout-ms N] COMMAND\n\n\
-Commands:\n  status\n  ports list\n  send --port PORT (--text TEXT | --hex HEX | --stdin) [--ending none|lf|cr|crlf]\n\
+Commands:\n  status\n  ports list\n  ports watch [--cursor TOKEN] [--once]\n  send --port PORT (--text TEXT | --hex HEX | --stdin) [--ending none|lf|cr|crlf]\n\
     [--connection-generation N] checks that the live generation is N.\n  operation get --request-id ID\n\n\
 Endpoint: numeric loopback IP or localhost only. Default: 127.0.0.1:39071\n\
 (or HYPERCOM_AUTOMATION_ENDPOINT). No remote alias resolution.\n\
@@ -1074,14 +1269,16 @@ Timeout: one 1..60000 ms budget for connect, handshake and protocol I/O (default
 Only text appends an ending; HEX ignores it. Redirected raw stdin is limited to\n\
 48000 bytes (subject to frame size) and cannot append an ending.\n\
 Send requires an open host port and uses one short, connection-scoped lease.\n\
-Standalone control acquire/release, external leases, and monitor/watch are unsupported.\n\
+Standalone control acquire/release, external leases, and RX/TX monitor are unsupported.\n\
+Ports watch emits an initial state snapshot and then JSON change pages (Ctrl+C stops).\n\
+The timeout is per watch exchange. After a cursor gap or restart, take a fresh snapshot explicitly.\n\
 A send with OUTCOME_UNKNOWN must not be replayed; query its original requestId.\n\
-Commands emit one JSON line. Exit codes: 0 success, 2 usage, 3 unavailable/deadline,\n\
+Other commands emit one JSON line. Exit codes: 0 success, 2 usage, 3 unavailable/deadline,\n\
 4 protocol, 5 host error/known write failure, 6 cancelled, 7 unknown outcome.\n";
 
 fn print_error(error: &CliError) -> i32 {
     eprintln!("hypercom-cli: {error}");
-    println!("{}", error.output);
+    let _ = emit_json(io::stdout().lock(), &error.output);
     error.exit_code as i32
 }
 
@@ -1107,6 +1304,19 @@ pub fn run(iter: impl IntoIterator<Item = String>) -> i32 {
                     )))
                 }
             };
+            if let Command::PortsWatch(options) = &cli.command {
+                let result = runtime.block_on(async {
+                    tokio::select! {
+                        interrupt = tokio::signal::ctrl_c() => interrupt.map_err(|error|
+                            CliError::unavailable(format!("cannot register interrupt: {error}"))),
+                        result = run_ports_watch(&cli, options, io::stdout().lock()) => result,
+                    }
+                });
+                return match result {
+                    Ok(()) => 0,
+                    Err(error) => print_error(&error),
+                };
+            }
             match runtime.block_on(execute(cli, io::stdin().lock())) {
                 Ok(output) => {
                     println!("{output}");
@@ -1201,6 +1411,87 @@ mod tests {
                 .exit_code,
             ExitCode::Usage
         );
+    }
+
+    #[test]
+    fn watch_pages_never_skip_an_empty_or_duplicate_cursor() {
+        let cli = parsed(&["ports", "watch", "--cursor", "old", "--once"]);
+        assert!(
+            matches!(cli.command, Command::PortsWatch(WatchOptions { cursor: Some(cursor), once: true }) if cursor == "old")
+        );
+        let mut reply = RpcResult {
+            id: "watch-id".into(),
+            result: json!({
+                "kind":"changes", "hostId":HOST, "serverEpoch":EPOCH, "cursor":"old", "changes":[]
+            }),
+        };
+        assert_eq!(
+            check_watch_page(&reply, Some(HOST), EPOCH, Some("old")).unwrap(),
+            (HOST, "old", false)
+        );
+        reply.result["cursor"] = json!("skipped");
+        assert!(check_watch_page(&reply, Some(HOST), EPOCH, Some("old")).is_err());
+        reply.result["changes"] = json!([
+            {"kind":"remove", "cursor":"skipped", "nativePortId":PORT_ID},
+            {"kind":"remove", "cursor":"skipped", "nativePortId":PORT_ID},
+        ]);
+        assert!(check_watch_page(&reply, Some(HOST), EPOCH, Some("old")).is_err());
+    }
+
+    #[tokio::test]
+    async fn continuous_watch_rotates_before_request_limit_without_resetting_cursor() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cli = parsed(&["ports", "watch"]);
+        cli.endpoint = listener.local_addr().unwrap().to_string();
+        let Command::PortsWatch(options) = &cli.command else {
+            panic!("expected watch")
+        };
+        let mut output = Vec::new();
+        let server = async {
+            for snapshot in [true, false] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, write) = stream.into_split();
+                let mut peer = Peer {
+                    read: FrameReader::new(read, DEFAULT_MAX_FRAME_BYTES).unwrap(),
+                    write,
+                };
+                let hello = peer.read(HANDSHAKE_METHOD).await;
+                peer.ok(
+                    hello,
+                    json!({"protocolVersion":PROTOCOL_VERSION, "serverEpoch":EPOCH,
+                    "capabilities":[PORTS_WATCH], "maxFrameBytes":DEFAULT_MAX_FRAME_BYTES,
+                    "writeQueueCapacity":32, "maxRequestsPerConnection":2}),
+                )
+                .await;
+                let watch = peer.read(PORTS_WATCH).await;
+                assert!(watch.target.is_none() && watch.control.is_none());
+                if snapshot {
+                    assert!(watch.params.get("cursor").is_none());
+                    peer.ok(
+                        watch,
+                        json!({"kind":"snapshot", "hostId":HOST, "serverEpoch":EPOCH,
+                        "cursor":"saved", "ports":[]}),
+                    )
+                    .await;
+                } else {
+                    assert_eq!(watch.params["cursor"], "saved");
+                    peer.reply(Response::error(
+                        EPOCH,
+                        Some(watch.request_id),
+                        WireError::new(ErrorCode::StreamGap, "history gap"),
+                    ))
+                    .await;
+                }
+            }
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(run_ports_watch(&cli, options, &mut output), server)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().output["error"]["code"], "STREAM_GAP");
+        let output: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["result"]["cursor"], "saved");
     }
 
     #[test]

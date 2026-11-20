@@ -20,6 +20,7 @@ struct FakeBackend {
     reopen_after_snapshot: AtomicBool,
     shutting_down: AtomicBool,
     lock_probe: Mutex<Option<std::sync::Weak<RuntimeShared>>>,
+    inventory: Mutex<Vec<Value>>,
     writes: Mutex<Vec<Vec<u8>>>,
     contexts: Mutex<Vec<SerialTxContext>>,
     reports: Mutex<VecDeque<SendReport>>,
@@ -35,8 +36,16 @@ impl FakeBackend {
     fn new() -> Self {
         Self {
             generation: AtomicU64::new(7),
+            inventory: Mutex::new(vec![json!({
+                "target":{"hostId":"host-test","nativePortId":"COM3"},
+                "serverEpoch":"epoch-test","connectionGeneration":"7","state":"open"
+            })]),
             ..Self::default()
         }
+    }
+
+    fn set_inventory(&self, ports: Vec<Value>) {
+        *self.inventory.lock().unwrap() = ports;
     }
 }
 
@@ -46,11 +55,7 @@ impl RuntimeBackend for FakeBackend {
     }
 
     fn list_ports(&self) -> BackendFuture<'_, Result<Vec<Value>, WireError>> {
-        Box::pin(async {
-            Ok(vec![
-                json!({"target":{"hostId":"host-test","nativePortId":"COM3"},"serverEpoch":"epoch-test","connectionGeneration":"7","state":"open"}),
-            ])
-        })
+        Box::pin(async { Ok(self.inventory.lock().unwrap().clone()) })
     }
 
     fn generation(&self, port_id: &str) -> Result<u64, WireError> {
@@ -131,7 +136,11 @@ impl RuntimeBackend for FakeBackend {
 }
 
 fn handler(backend: Arc<FakeBackend>, control: bool) -> LocalAutomationHandler {
-    LocalAutomationHandler::with_backend(backend, "host-test".into(), "epoch-test".into(), control)
+    handler_epoch(backend, control, "epoch-test")
+}
+
+fn handler_epoch(backend: Arc<FakeBackend>, control: bool, epoch: &str) -> LocalAutomationHandler {
+    LocalAutomationHandler::with_backend(backend, "host-test".into(), epoch.into(), control)
 }
 
 fn connection(id: u64) -> ConnectionContext {
@@ -201,7 +210,10 @@ async fn get_operation(handler: &LocalAutomationHandler, client: u64, original_i
 async fn read_only_default_never_advertises_or_grants_control() {
     let backend = Arc::new(FakeBackend::new());
     let handler = handler(backend.clone(), false);
-    assert_eq!(handler.capabilities(), ["host.status", "ports.list"]);
+    assert_eq!(
+        handler.capabilities(),
+        ["host.status", "ports.list", "ports.watch"]
+    );
     let status = handler
         .handle(
             connection(1),
@@ -221,6 +233,45 @@ async fn read_only_default_never_advertises_or_grants_control() {
         .unwrap_err();
     assert_eq!(failure.code, ErrorCode::PermissionDenied);
     assert!(backend.writes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ports_watch_is_read_only_host_wide_and_bounds_wait_time() {
+    let backend = Arc::new(FakeBackend::new());
+    let handler = handler(backend, false);
+    let request = Request::new("watch-snapshot", "ports.watch", json!({}));
+    assert!(request.target.is_none());
+    let snapshot = handler.handle(connection(1), request).await.unwrap();
+    assert_eq!(snapshot["kind"], "snapshot");
+    assert_eq!(snapshot["hostId"], "host-test");
+    assert_eq!(snapshot["serverEpoch"], "epoch-test");
+    assert!(snapshot["cursor"]
+        .as_str()
+        .is_some_and(|cursor| !cursor.is_empty()));
+    assert_eq!(snapshot["ports"].as_array().unwrap().len(), 1);
+
+    let invalid_wait = handler
+        .handle(
+            connection(1),
+            Request::new("watch-invalid-wait", "ports.watch", json!({"waitMs":1001})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_wait.code, ErrorCode::InvalidArgument);
+
+    let mut targeted = Request::new("watch-target", "ports.watch", json!({}));
+    targeted.target = Some(Target {
+        host_id: "host-test".into(),
+        native_port_id: "COM3".into(),
+    });
+    assert_eq!(
+        handler
+            .handle(connection(1), targeted)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
 }
 
 #[tokio::test]
@@ -1340,11 +1391,18 @@ const TEST_TCP_TIMEOUT: Duration = Duration::from_secs(5);
 const TEST_CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn bind_test_listener(handler: Arc<LocalAutomationHandler>) -> LoopbackListener {
+    bind_test_listener_epoch(handler, "epoch-test").await
+}
+
+async fn bind_test_listener_epoch(
+    handler: Arc<LocalAutomationHandler>,
+    epoch: &str,
+) -> LoopbackListener {
     timeout(
         TEST_TCP_TIMEOUT,
         LoopbackListener::bind(
             0,
-            ListenerConfig::new("epoch-test", handler.capabilities()),
+            ListenerConfig::new(epoch, handler.capabilities()),
             handler,
         ),
     )
@@ -1476,7 +1534,10 @@ async fn cli_binary_default_local_status_and_ports_list() {
     assert_eq!(status["hostId"], "host-test");
     assert_eq!(status["serverEpoch"], "epoch-test");
     assert_eq!(status["serialControl"], "not-enabled");
-    assert_eq!(status["capabilities"], json!(["host.status", "ports.list"]));
+    assert_eq!(
+        status["capabilities"],
+        json!(["host.status", "ports.list", "ports.watch"])
+    );
     let ports = cli_success(&run_cli(&bin, &listener, &["ports", "list"], None).await);
     assert_eq!(ports["hostId"], status["hostId"]);
     assert_eq!(ports["serverEpoch"], status["serverEpoch"]);
@@ -1487,6 +1548,143 @@ async fn cli_binary_default_local_status_and_ports_list() {
             "serverEpoch":"epoch-test","connectionGeneration":"7","state":"open"}]),
     );
 
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_ports_watch_snapshot_change_resume_and_independent_subscriber() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let listener = bind_test_listener(Arc::new(handler(backend.clone(), false))).await;
+
+    // The CLI opens a real loopback connection and must not attach a target to
+    // this host-wide, read-only stream. --once emits exactly one standard JSON
+    // result line containing the initial inventory and an opaque cursor.
+    let snapshot =
+        cli_success(&run_cli(&bin, &listener, &["ports", "watch", "--once"], None).await);
+    assert_eq!(snapshot["kind"], "snapshot");
+    assert_eq!(snapshot["hostId"], "host-test");
+    assert_eq!(snapshot["serverEpoch"], "epoch-test");
+    assert_eq!(
+        snapshot["ports"],
+        json!([{"target":{"hostId":"host-test","nativePortId":"COM3"},
+            "serverEpoch":"epoch-test","connectionGeneration":"7","state":"open"}]),
+    );
+    let initial_cursor = snapshot["cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+        .expect("snapshot cursor must be opaque and nonempty")
+        .to_owned();
+
+    // Replace the enumeration, rather than reaching into a native/hardware
+    // port. The watch sampler must publish one remove and one upsert in order.
+    backend.set_inventory(vec![json!({
+        "target":{"hostId":"host-test","nativePortId":"COM4"},
+        "serverEpoch":"epoch-test","connectionGeneration":"8","state":"open"
+    })]);
+    let changes = cli_success(
+        &run_cli(
+            &bin,
+            &listener,
+            &["ports", "watch", "--cursor", &initial_cursor, "--once"],
+            None,
+        )
+        .await,
+    );
+    assert_eq!(changes["kind"], "changes");
+    assert_eq!(changes["hostId"], "host-test");
+    assert_eq!(changes["serverEpoch"], "epoch-test");
+    let events = changes["changes"].as_array().expect("changes array");
+    assert_eq!(events.len(), 2, "one remove and one upsert are expected");
+    assert_eq!(events[0]["kind"], "remove");
+    assert_eq!(events[0]["nativePortId"], "COM3");
+    assert_eq!(events[1]["kind"], "upsert");
+    assert_eq!(events[1]["port"]["target"]["nativePortId"], "COM4");
+    assert_ne!(events[0]["cursor"], events[1]["cursor"]);
+    assert_eq!(changes["cursor"], events[1]["cursor"]);
+
+    // A second real CLI connection starting at the same cursor is independent
+    // and sees the same non-empty replay, not a duplicate event in one stream.
+    let second = cli_success(
+        &run_cli(
+            &bin,
+            &listener,
+            &["ports", "watch", "--cursor", &initial_cursor, "--once"],
+            None,
+        )
+        .await,
+    );
+    assert_eq!(second["kind"], "changes");
+    assert_eq!(second["changes"], changes["changes"]);
+    assert_eq!(second["cursor"], changes["cursor"]);
+
+    shutdown_test_listener(listener).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_ports_watch_old_cursor_is_expired_after_restart() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let first = bind_test_listener(Arc::new(handler(backend.clone(), false))).await;
+    let snapshot = cli_success(&run_cli(&bin, &first, &["ports", "watch", "--once"], None).await);
+    let old_cursor = snapshot["cursor"].as_str().unwrap().to_owned();
+    shutdown_test_listener(first).await;
+
+    // A new listener has a new cursor namespace. Reusing the old opaque value
+    // must be an explicit CURSOR_EXPIRED failure, never an implicit snapshot.
+    let restarted = bind_test_listener_epoch(
+        Arc::new(handler_epoch(backend, false, "epoch-restarted")),
+        "epoch-restarted",
+    )
+    .await;
+    let expired = cli_json(
+        &run_cli(
+            &bin,
+            &restarted,
+            &["ports", "watch", "--cursor", &old_cursor, "--once"],
+            None,
+        )
+        .await,
+        false,
+    );
+    assert_eq!(expired["error"]["code"], "CURSOR_EXPIRED");
+    shutdown_test_listener(restarted).await;
+}
+
+#[tokio::test]
+#[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
+async fn cli_binary_ports_watch_evicted_cursor_reports_stream_gap() {
+    let bin = cli_binary_path();
+    let backend = Arc::new(FakeBackend::new());
+    let listener = bind_test_listener(Arc::new(handler(backend.clone(), false))).await;
+    let snapshot =
+        cli_success(&run_cli(&bin, &listener, &["ports", "watch", "--once"], None).await);
+    let old_cursor = snapshot["cursor"].as_str().unwrap().to_owned();
+
+    // The test runtime retains a bounded event ring. One inventory replacement
+    // is deliberately larger than that ring, so the old cursor cannot be
+    // silently advanced and must request a fresh snapshot.
+    let mut inventory = Vec::new();
+    for index in 0..160_u16 {
+        inventory.push(json!({
+            "target":{"hostId":"host-test","nativePortId":format!("COM{index}" )},
+            "serverEpoch":"epoch-test","connectionGeneration":"7","state":"open"
+        }));
+    }
+    backend.set_inventory(inventory);
+    let gap = cli_json(
+        &run_cli(
+            &bin,
+            &listener,
+            &["ports", "watch", "--cursor", &old_cursor, "--once"],
+            None,
+        )
+        .await,
+        false,
+    );
+    assert_eq!(gap["error"]["code"], "STREAM_GAP");
     shutdown_test_listener(listener).await;
 }
 
@@ -1574,7 +1772,7 @@ async fn cli_binary_stdin_preserves_exact_binary_bytes() {
 
 #[tokio::test]
 #[ignore = "requires HYPERCOM_TEST_CLI_BIN; run npm run test:cli"]
-async fn cli_binary_read_only_denies_send_and_watch_is_unsupported() {
+async fn cli_binary_read_only_denies_send_and_legacy_watch_is_unsupported() {
     let bin = cli_binary_path();
     let backend = Arc::new(FakeBackend::new());
     let listener = bind_test_listener(Arc::new(handler(backend.clone(), false))).await;

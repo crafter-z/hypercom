@@ -31,6 +31,9 @@ npm-debug.log*
 src-tauri/target/
 .tauri/
 
+# Machine-local automation identity, separate from settings/export fixtures
+*.host-identity.json
+
 # SQLite
 *.db
 *.sqlite

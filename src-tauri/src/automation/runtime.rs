@@ -2,8 +2,8 @@
 //!
 //! `HYPERCOM_AUTOMATION_LOOPBACK=1` remains read-only. Control additionally needs
 //! `HYPERCOM_AUTOMATION_UNSAFE_CONTROL=1`. This grants all local processes the same
-//! TEST principal, not authenticated production authority. Native GUI/plugin/file
-//! writers have NOT migrated to this arbiter; status advertises that limitation.
+//! TEST principal, not authenticated production authority. Native operations and
+//! CLI leases are mutually exclusive; multi-step desktop executor leases are not yet implemented.
 //! Never expose this adapter through a public listener, tunnel or proxy.
 //!
 //! Each connection has its own lease-holder session. The endpoint shares one
@@ -20,6 +20,7 @@ use super::core::{
     Principal, PrincipalId, PrincipalKind, QueuedRequest, RequestId, RequestKey, ServerEpoch,
     SideEffect, WriterState,
 };
+use super::port_watch::PortWatch;
 use super::transport::{
     ConnectionContext, ErrorCode, HandlerFuture, ListenerConfig, LoopbackListener, Request,
     RequestHandler, WireError,
@@ -42,7 +43,7 @@ pub const DEFAULT_LOOPBACK_PORT: u16 = 39_071;
 pub const ENABLE_ENV: &str = "HYPERCOM_AUTOMATION_LOOPBACK";
 pub const PORT_ENV: &str = "HYPERCOM_AUTOMATION_PORT";
 pub const UNSAFE_CONTROL_ENV: &str = "HYPERCOM_AUTOMATION_UNSAFE_CONTROL";
-const READ_METHODS: &[&str] = &["host.status", "ports.list"];
+const READ_METHODS: &[&str] = &["host.status", "ports.list", "ports.watch"];
 const CONTROL_METHODS: &[&str] = &[
     "control.acquire",
     "control.release",
@@ -800,6 +801,7 @@ impl RuntimeShared {
 
 pub struct LocalAutomationHandler {
     shared: Arc<RuntimeShared>,
+    port_watch: Arc<PortWatch>,
 }
 
 impl LocalAutomationHandler {
@@ -838,6 +840,7 @@ impl LocalAutomationHandler {
         unsafe_control: bool,
     ) -> Self {
         Self {
+            port_watch: PortWatch::new(authority.host_id.clone(), authority.epoch.clone()),
             shared: Arc::new(RuntimeShared {
                 authority,
                 backend,
@@ -1146,6 +1149,33 @@ impl RequestHandler for LocalAutomationHandler {
                     json!({"hostId": self.shared.authority.host_id.0, "serverEpoch": self.shared.authority.epoch.0,
                     "ports": self.shared.backend.list_ports().await?, "readOnly": !self.shared.unsafe_control}),
                 ),
+                "ports.watch" => {
+                    if request.target.is_some()
+                        || request.control.is_some()
+                        || request
+                            .precondition
+                            .as_ref()
+                            .is_some_and(|value| value.connection_generation.is_some())
+                    {
+                        return Err(runtime_error(
+                            ErrorCode::InvalidArgument,
+                            "ports.watch is host-wide and read-only",
+                        ));
+                    }
+                    let params: WatchPortsParams = parse_params(&request.params)?;
+                    let backend = self.shared.backend.clone();
+                    self.port_watch
+                        .watch(
+                            params.cursor.as_deref(),
+                            params.wait_ms,
+                            request.timeout_ms,
+                            move || {
+                                let backend = backend.clone();
+                                async move { backend.list_ports().await }
+                            },
+                        )
+                        .await
+                }
                 "control.acquire" => self.acquire(connection, &request),
                 "control.release" => self.release(connection, &request),
                 "serial.send" => self.send(connection, request).await,
@@ -1161,6 +1191,15 @@ impl RequestHandler for LocalAutomationHandler {
     fn disconnected(&self, connection: ConnectionContext, _reason: Option<WireError>) {
         self.shared.disconnect(connection);
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WatchPortsParams {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    wait_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -1391,7 +1430,7 @@ pub async fn start_loopback(
             .shutdown_started
             .load(Ordering::Acquire)
     };
-    if shutting_down() {
+    if shutting_down() || !app.state::<AppState>().automation_identity_ready {
         return Ok(None);
     }
     let handler = Arc::new(LocalAutomationHandler::new(app.clone()));

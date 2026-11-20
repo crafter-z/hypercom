@@ -64,6 +64,8 @@
 | 真实串口句柄 | `src-tauri/src/serial/ports_real.rs`：`SerialPortHandle`、`open_real_port` | 读写 clone 分离；写入按连接代次和写租约守卫 |
 | TX 编码/期限 | `src-tauri/src/serial/codec.rs`：`parse_hex_string`、`build_tx_bytes`、`write_all_with_deadline` | 入参到实际上线字节的唯一后端实现 |
 | 本机 CLI 契约 | [`automation/wire.rs`](../../src-tauri/src/automation/wire.rs)：`Request`、`Response`、`FrameReader`；[`cli.rs`](../../src-tauri/src/cli.rs)：`Client` | CLI 与 loopback Host 共用 Rust envelope 和有界帧，写入同连接使用短租约；现有 TS 适配层未接线 |
+| Host 身份 | [`automation/identity.rs`](../../src-tauri/src/automation/identity.rs)：`load_or_create`；[`lib.rs`](../../src-tauri/src/lib.rs)：`AppState::new` | 配置实例锁下持久化 ID、启动更换 epoch；身份损坏或不可读时只关闭实验监听 |
+| 端口状态观察 | [`automation/port_watch.rs`](../../src-tauri/src/automation/port_watch.rs)；[`automation/core.rs`](../../src-tauri/src/automation/core.rs)：`EventRing` | 状态采样共享发布、快照和水位同锁读取；有界续传，缺口明确，不是 RX/TX 日志 |
 | 设备准入 | [`lib.rs`](../../src-tauri/src/lib.rs)：`AppState::admit_native_port` / `admit_native_ports`；[`automation/runtime.rs`](../../src-tauri/src/automation/runtime.rs)：`DeviceAuthority`、`LocalAutomationHandler` | 桌面设备操作与本机 CLI 租约共用端口级仲裁；持许可的一方收尾前不交接。桌面组内仍沿用已有顺序规则，实验入口默认关闭且不得对外开放 |
 | TTY 模拟 | `src-tauri/src/serial/tty_sim.rs`：`TtySimPortHandle`、`find_bash`、`spawn_bash` | GIT:BASH 调试能力；PTY 子进程生命周期由后端管理 |
 | 日志设置 | `src-tauri/src/logger/settings.rs`：`LogSettings::from_config`；`logger/manager.rs`：`LogManager::apply_settings` | `AppState.log_manager` 是 `Arc<LogManager>`，不包外层 mutex |
