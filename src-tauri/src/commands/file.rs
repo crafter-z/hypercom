@@ -26,7 +26,7 @@ static PLUGIN_DIALOG_BUDGETS: LazyLock<Mutex<HashMap<String, Weak<Semaphore>>>> 
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const MAX_LIVE_PLUGIN_DIALOGS: usize = 8;
 
-fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError> {
+pub(super) fn plugin_dialog_budget(plugin_id: &str) -> Result<Arc<Semaphore>, CommandError> {
     let mut budgets = PLUGIN_DIALOG_BUDGETS
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -51,11 +51,19 @@ pub(crate) fn plugin_any_permission_generation(
     plugin_id: &str,
     permissions: &[&str],
 ) -> Result<String, CommandError> {
-    crate::plugin::validate_plugin_id(plugin_id).map_err(CommandError::Other)?;
     let manager = state
         .config_manager
         .lock()
         .map_err(|e| CommandError::Lock(e.to_string()))?;
+    plugin_permission_generation_locked(&manager, plugin_id, permissions)
+}
+
+pub(super) fn plugin_permission_generation_locked(
+    manager: &crate::config::ConfigManager,
+    plugin_id: &str,
+    permissions: &[&str],
+) -> Result<String, CommandError> {
+    crate::plugin::validate_plugin_id(plugin_id).map_err(CommandError::Other)?;
     let entry = manager
         .get_config()
         .entities
@@ -469,7 +477,7 @@ fn reject_linked_directory_source(path: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn create_directory_grant(
+pub(super) fn create_directory_grant(
     plugin_id: &str,
     install_generation: &str,
     root: PathBuf,
@@ -757,7 +765,7 @@ fn decode_plugin_file_bytes(
     }
 }
 
-fn validate_save_file_options(options: &PluginSaveFileOptions) -> Result<(), CommandError> {
+pub(super) fn validate_save_file_options(options: &PluginSaveFileOptions) -> Result<(), CommandError> {
     if options
         .title
         .as_deref()
@@ -796,6 +804,31 @@ fn validate_save_file_options(options: &PluginSaveFileOptions) -> Result<(), Com
     Ok(())
 }
 
+/// A native open or Save As dialog selects exactly one target; callers retain
+/// their own actual-task dialog permit and revalidate authorization on return.
+pub(super) fn pick_plugin_single_file(
+    app: &tauri::AppHandle,
+    options: PluginSaveFileOptions,
+    save: bool,
+) -> Result<Option<PathBuf>, CommandError> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file();
+    if let Some(title) = options.title { dialog = dialog.set_title(title); }
+    if let Some(name) = options.default_file_name { dialog = dialog.set_file_name(name); }
+    if let Some(filters) = options.filters {
+        for filter in filters {
+            let extensions: Vec<_> = filter.extensions.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(filter.name, &extensions);
+        }
+    }
+    dialog = dialog.add_filter("All files", &["*"]);
+    let picked = if save { dialog.blocking_save_file() } else { dialog.blocking_pick_file() };
+    picked.map(|picked| picked.into_path().map_err(|e| {
+        let label = if save { "Save As 目标路径不可用" } else { "选择的文件路径不可用" };
+        CommandError::Other(format!("{label}: {e}"))
+    })).transpose()
+}
+
 fn map_plugin_write_error(error: String) -> CommandError {
     error
         .strip_prefix("PLUGIN_AUTHORITY:")
@@ -803,26 +836,68 @@ fn map_plugin_write_error(error: String) -> CommandError {
         .unwrap_or(CommandError::Io(error))
 }
 
-fn write_plugin_directory_file(
+fn write_plugin_directory_file_authorized(
     root: &Path,
     rel: &Path,
     bytes: &[u8],
     mode: &str,
     create_parents: bool,
+    verify: impl Fn() -> Result<(), CommandError>,
 ) -> Result<PluginDirectoryWriteResult, CommandError> {
+    verify()?;
     let rel_text = rel.to_string_lossy().replace('\\', "/");
-    let written = crate::plugin::fs_access::write_directory_file(
+    let written = crate::plugin::fs_access::write_directory_file_authorized(
         root,
         &rel_text,
         bytes,
         mode,
         create_parents,
+        || verify().map_err(|error| format!("PLUGIN_AUTHORITY:{error}")),
     )
-    .map_err(CommandError::Io)?;
+    .map_err(map_plugin_write_error)?;
     Ok(PluginDirectoryWriteResult {
         path: written.path.display().to_string(),
         bytes_written: written.bytes_written,
     })
+}
+
+#[cfg(test)]
+fn write_plugin_directory_file(
+    root: &Path, rel: &Path, bytes: &[u8], mode: &str, create_parents: bool,
+) -> Result<PluginDirectoryWriteResult, CommandError> {
+    write_plugin_directory_file_authorized(root, rel, bytes, mode, create_parents, || Ok(()))
+}
+
+struct DirectoryWriteGrant {
+    plugin_id: String,
+    grant_id: String,
+    generation: String,
+    permission: &'static str,
+    authority: std::sync::Arc<super::plugin::LegacyFileAuthority>,
+}
+
+impl DirectoryWriteGrant {
+    fn new(
+        state: &crate::AppState,
+        plugin_id: String,
+        grant_id: String,
+        permission: &'static str,
+        scope: super::plugin::LegacyFileScope,
+    ) -> Result<Self, CommandError> {
+        let authority = super::plugin::legacy_file_authority(&plugin_id, scope)?;
+        let generation = plugin_permission_generation(state, &plugin_id, permission)?;
+        Ok(Self { plugin_id, grant_id, generation, permission, authority })
+    }
+
+    fn recheck(&self, state: &crate::AppState) -> Result<PathBuf, CommandError> {
+        super::plugin::require_live_file_authority(&self.authority)?;
+        if plugin_permission_generation(state, &self.plugin_id, self.permission)? != self.generation {
+            return Err(CommandError::Other("插件目录写入权限已撤销".into()));
+        }
+        let root = directory_grant_root(&self.plugin_id, &self.grant_id, &self.generation)?;
+        super::plugin::require_live_file_authority(&self.authority)?;
+        Ok(root)
+    }
 }
 
 fn create_plugin_directory(root: &Path, rel: &Path, recursive: bool) -> Result<(), CommandError> {
@@ -966,10 +1041,12 @@ pub async fn plugin_pick_directory(
             }
             roots.push((canonical, display_path));
         }
-        // The picker may have been open while the user revoked the permission.
+        // Serialize the final permission check and grant publication with
+        // config commit, so a picker cannot insert a grant after revocation.
         let state = app.state::<crate::AppState>();
-        let current_generation = plugin_any_permission_generation(
-            &state,
+        let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+        let current_generation = plugin_permission_generation_locked(
+            &manager,
             &plugin_id,
             &["fs:open-dir", "fs:write-dir", "fs:export-dir"],
         )?;
@@ -1057,7 +1134,7 @@ pub async fn plugin_read_directory_file_raw(
     use crate::plugin::io_scheduler::{IoOwner, IoPriority};
     super::plugin::require_main_window(&window)?;
     super::plugin_fs::require_raw_transport_for_legacy(&request)?;
-    let authority = super::plugin::legacy_file_authority(&plugin_id)?;
+    let authority = super::plugin::legacy_file_authority(&plugin_id, super::plugin::LegacyFileScope::DirectoryRead)?;
     let generation = plugin_permission_generation(&state, &plugin_id, "fs:open-dir")?;
     let (rel, rel_text) = sanitize_directory_rel(&rel_path)?;
     if rel.as_os_str().is_empty() {
@@ -1082,11 +1159,11 @@ pub async fn plugin_read_directory_file_raw(
         let bytes = super::plugin::read_open_asset_cancellable(opened.file, Some(&task_authority))?;
         encode_plugin_directory_raw(&path, &bytes)
     }).await.map_err(|e| CommandError::Other(format!("目录文件读取任务失败: {e}")))??;
-    super::plugin::require_live_file_authority(&authority)?;
     if plugin_permission_generation(&state, &plugin_id, "fs:open-dir")? != generation {
         return Err(CommandError::Other("插件目录权限已撤销".into()));
     }
     directory_grant_root(&plugin_id, &grant_id, &generation)?;
+    super::plugin::require_live_file_authority(&authority)?;
     Ok(response)
 }
 
@@ -1146,27 +1223,14 @@ pub async fn plugin_write_directory_file(
     if window.label() != "main" {
         return Err(CommandError::Other("插件目录写入仅允许主窗口调用".into()));
     }
-    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:write-dir")?;
+    let grant = DirectoryWriteGrant::new(
+        &state, plugin_id, grant_id, "fs:write-dir", super::plugin::LegacyFileScope::DirectoryWrite,
+    )?;
     let (rel, _) = sanitize_directory_rel(&rel_path)?;
     if rel.as_os_str().is_empty() {
         return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
     }
-    let bytes = match (content, base64) {
-        (Some(content), None) => content.into_bytes(),
-        (None, Some(base64)) => base64::engine::general_purpose::STANDARD
-            .decode(base64)
-            .map_err(|e| CommandError::Other(format!("base64 无效: {e}")))?,
-        (Some(_), Some(_)) => {
-            return Err(CommandError::Other(
-                "content 与 base64 不能同时提供".into(),
-            ))
-        }
-        (None, None) => {
-            return Err(CommandError::Other(
-                "必须提供 content 或 base64 之一".into(),
-            ))
-        }
-    };
+    let bytes = decode_plugin_file_bytes(content, base64)?;
     let mode = mode.unwrap_or_else(|| "overwrite".to_string());
     if mode != "overwrite" && mode != "append" {
         return Err(CommandError::Other(
@@ -1174,9 +1238,12 @@ pub async fn plugin_write_directory_file(
         ));
     }
     let create_parents = create_parents.unwrap_or(true);
-    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    let root = grant.recheck(&state)?;
+    let app = window.app_handle().clone();
     tokio::task::spawn_blocking(move || {
-        write_plugin_directory_file(&root, &rel, &bytes, &mode, create_parents)
+        write_plugin_directory_file_authorized(&root, &rel, &bytes, &mode, create_parents, || {
+            grant.recheck(&app.state::<crate::AppState>()).map(|_| ())
+        })
     })
     .await
     .map_err(|e| CommandError::Other(format!("目录文件写入任务失败: {e}")))?
@@ -1198,51 +1265,26 @@ pub async fn plugin_export_file(
     if window.label() != "main" {
         return Err(CommandError::Other("插件文件导出仅允许主窗口调用".into()));
     }
-    let install_generation = plugin_permission_generation(&state, &plugin_id, "fs:export-dir")?;
-    let (rel, rel_text) = sanitize_directory_rel(&rel_path)?;
+    let grant = std::sync::Arc::new(DirectoryWriteGrant::new(
+        &state, plugin_id, grant_id, "fs:export-dir", super::plugin::LegacyFileScope::DirectoryExport,
+    )?);
+    let (rel, _) = sanitize_directory_rel(&rel_path)?;
     if rel.as_os_str().is_empty() {
         return Err(CommandError::Other("必须指定目录内的文件相对路径".into()));
     }
     let bytes = decode_plugin_file_bytes(content, base64)?;
-    let root = directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
+    let root = grant.recheck(&state)?;
     let app = window.app_handle().clone();
-    let plugin_for_auth = plugin_id.clone();
-    let grant_for_auth = grant_id.clone();
-    let generation_for_auth = install_generation.clone();
+    let task_grant = grant.clone();
     let written = tokio::task::spawn_blocking(move || {
-        let auth = || {
-            let current = plugin_permission_generation(
-                &app.state::<crate::AppState>(),
-                &plugin_for_auth,
-                "fs:export-dir",
-            )?;
-            if current != generation_for_auth {
-                return Err(CommandError::Other("插件文件导出权限已撤销".into()));
-            }
-            directory_grant_root(&plugin_for_auth, &grant_for_auth, &generation_for_auth)?;
-            Ok(())
-        };
-        crate::plugin::fs_access::write_directory_file_authorized(
-            &root,
-            &rel_text,
-            &bytes,
-            "overwrite",
-            true,
-            || auth().map_err(|error| format!("PLUGIN_AUTHORITY:{error}")),
-        )
-        .map_err(map_plugin_write_error)
+        write_plugin_directory_file_authorized(&root, &rel, &bytes, "overwrite", true, || {
+            task_grant.recheck(&app.state::<crate::AppState>()).map(|_| ())
+        })
     })
     .await
     .map_err(|e| CommandError::Other(format!("插件文件导出任务失败: {e}")))??;
-    let current = plugin_permission_generation(&state, &plugin_id, "fs:export-dir")?;
-    if current != install_generation {
-        return Err(CommandError::Other("插件文件导出权限已撤销".into()));
-    }
-    directory_grant_root(&plugin_id, &grant_id, &install_generation)?;
-    Ok(PluginDirectoryWriteResult {
-        path: written.path.display().to_string(),
-        bytes_written: written.bytes_written,
-    })
+    grant.recheck(&state)?;
+    Ok(written)
 }
 
 /// Save one plugin-owned payload through a native Save As picker. The plugin
@@ -1272,27 +1314,9 @@ pub async fn plugin_save_file(
     let generation_for_auth = install_generation.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _dialog_permit = dialog_permit;
-        use tauri_plugin_dialog::DialogExt;
-        let mut dialog = app.dialog().file();
-        if let Some(title) = options.title {
-            dialog = dialog.set_title(title);
-        }
-        if let Some(name) = options.default_file_name {
-            dialog = dialog.set_file_name(name);
-        }
-        if let Some(filters) = options.filters {
-            for filter in filters {
-                let exts: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
-                dialog = dialog.add_filter(filter.name, &exts);
-            }
-        }
-        dialog = dialog.add_filter("All files", &["*"]);
-        let Some(picked) = dialog.blocking_save_file() else {
+        let Some(target) = pick_plugin_single_file(&app, options, true)? else {
             return Ok(None);
         };
-        let target = picked
-            .into_path()
-            .map_err(|e| CommandError::Other(format!("Save As 目标路径不可用: {e}")))?;
         let parent = target
             .parent()
             .ok_or_else(|| CommandError::Other("Save As 目标没有父目录".into()))?
@@ -1680,7 +1704,10 @@ pub fn read_image_data_url(path: String) -> Result<String, CommandError> {
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::commands::CommandError;
 
     // 显式导入（镜像 serial/mod.rs 的测试约定，不用 `use super::*;`，
     // 避免 glob 把无关符号拖进测试二进制）。
@@ -1689,7 +1716,7 @@ mod tests {
         image_mime_from_ext, list_plugin_directory, read_image_data_url, read_picked_file,
         read_plugin_directory_file, remove_plugin_directory_entry, rename_plugin_directory_entry,
         revoke_plugin_directory_grants, sanitize_directory_rel, stat_plugin_directory_entry,
-        write_plugin_directory_file, plugin_dialog_budget, PLUGIN_DIALOG_BUDGETS,
+        write_plugin_directory_file, write_plugin_directory_file_authorized, plugin_dialog_budget, PLUGIN_DIALOG_BUDGETS,
         PluginSaveFileOptions, validate_save_file_options,
     };
     #[cfg(unix)]
@@ -2111,6 +2138,35 @@ mod tests {
             true,
         )
         .is_err());
+    }
+
+    #[test]
+    fn legacy_directory_write_rechecks_authority_before_overwrite_and_append() {
+        let dir = ReplayTempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+        let target = Path::new("value.txt");
+        std::fs::write(root.join(target), b"original").unwrap();
+        for mode in ["overwrite", "append"] {
+            let checks = std::cell::Cell::new(0);
+            let error = write_plugin_directory_file_authorized(
+                &root, target, b"new bytes", mode, false, || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 1 {
+                        return Ok(());
+                    }
+                    // The second check must happen at the real commit, after
+                    // overwrite staging; dropping a reply after write is too late.
+                    if mode == "overwrite" {
+                        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+                    }
+                    Err(CommandError::Other("test authority revoked".into()))
+                },
+            ).unwrap_err();
+            assert_eq!(checks.get(), 2);
+            assert!(matches!(error, CommandError::Other(message) if message.contains("authority revoked")));
+            assert_eq!(std::fs::read(root.join(target)).unwrap(), b"original");
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        }
     }
 
     #[test]

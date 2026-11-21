@@ -16,6 +16,9 @@ use crate::plugin::fs_access::{self, DirectoryCursor};
 use crate::plugin::io_scheduler::{IoLimits, IoOwner, IoPermit, IoPriority, IoScheduler};
 use crate::{plugin, AppState};
 
+#[path = "plugin_file_handles.rs"]
+pub mod plugin_file_handles;
+
 const MAX_RANGES: usize = 64;
 const MAX_RANGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_BATCH_BYTES: u64 = 8 * 1024 * 1024;
@@ -27,6 +30,8 @@ const MIN_RANGE_IO_COST_BYTES: usize = 4096;
 const MAX_LIVE_REQUESTS: usize = 128;
 const MAX_LIVE_CURSORS: usize = 64;
 const SESSION_INVALID: &str = "PLUGIN_FS_SESSION_INVALID";
+const RANGE_READ_PERMISSIONS: [&str; 3] = ["fs:assets", "fs:storage", "fs:open-dir"];
+const FILE_SESSION_PERMISSIONS: [&str; 5] = ["fs:assets", "fs:storage", "fs:open-dir", "fs:open", "fs:save"];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -69,6 +74,7 @@ struct RequestEntry {
     key: String,
     plugin_id: String,
     session_id: String,
+    permissions: Vec<&'static str>,
     cancel_tx: watch::Sender<bool>,
     state: Mutex<RequestState>,
 }
@@ -104,6 +110,7 @@ pub struct PluginFsRegistry {
     scheduler: Arc<IoScheduler>,
     state: Mutex<RegistryState>,
     reaper_started: AtomicBool,
+    file_handles: plugin_file_handles::FileHandleTable,
 }
 
 impl Default for PluginFsRegistry {
@@ -118,6 +125,7 @@ impl PluginFsRegistry {
             scheduler: Arc::new(IoScheduler::new(IoLimits::default())),
             state: Mutex::new(RegistryState::default()),
             reaper_started: AtomicBool::new(false),
+            file_handles: plugin_file_handles::FileHandleTable::new(),
         }
     }
 
@@ -256,6 +264,7 @@ impl PluginFsRegistry {
             state
                 .pre_cancelled
                 .retain(|item| !(item.0 == plugin_id && item.1 == session_id));
+            self.file_handles.retire(|handle| handle.belongs_to_session(plugin_id, session_id));
         }
     }
 
@@ -298,6 +307,32 @@ impl PluginFsRegistry {
                 .cursors
                 .retain(|_, entry| entry.plugin_id != plugin_id);
             state.pre_cancelled.retain(|item| item.0 != plugin_id);
+            self.file_handles.retire(|handle| handle.belongs_to_plugin(plugin_id));
+        }
+    }
+
+    pub(crate) fn revoke_read_permissions(&self, plugin_id: &str, previous: &[String], granted: &[String]) {
+        let revoked = |permission: &str| {
+            previous.iter().any(|item| item == permission)
+                && !granted.iter().any(|item| item == permission)
+        };
+        if !FILE_SESSION_PERMISSIONS.into_iter().any(revoked) {
+            return;
+        }
+        if !granted.iter().any(|item| FILE_SESSION_PERMISSIONS.contains(&item.as_str())) {
+            self.invalidate_plugin(plugin_id);
+            return;
+        }
+        if let Ok(mut state) = self.lock() {
+            for entry in state.requests.values().filter(|entry| entry.plugin_id == plugin_id) {
+                if entry.permissions.iter().any(|permission| revoked(permission)) {
+                    Self::cancel_entry(entry);
+                }
+            }
+            if revoked("fs:open-dir") {
+                state.cursors.retain(|_, entry| entry.plugin_id != plugin_id);
+            }
+            self.file_handles.retire(|handle| handle.belongs_to_plugin(plugin_id) && revoked(handle.permission()));
         }
     }
 
@@ -313,6 +348,7 @@ impl PluginFsRegistry {
             state.requests.clear();
             state.cursors.clear();
             state.pre_cancelled.clear();
+            self.file_handles.retire(|_| true);
         }
     }
 
@@ -322,6 +358,7 @@ impl PluginFsRegistry {
         session_id: &str,
         generation: &str,
         request_id: &str,
+        permissions: Vec<&'static str>,
     ) -> Result<Arc<RequestEntry>, CommandError> {
         self.ensure_reaper();
         let key = Self::key(plugin_id, session_id, request_id);
@@ -352,6 +389,7 @@ impl PluginFsRegistry {
             key: key.clone(),
             plugin_id: plugin_id.to_string(),
             session_id: session_id.to_string(),
+            permissions,
             cancel_tx,
             state: Mutex::new(RequestState {
                 running: false,
@@ -410,6 +448,7 @@ impl PluginFsRegistry {
 
     fn cancel(&self, plugin_id: &str, session_id: &str, request_id: &str) {
         if let Ok(mut state) = self.lock() {
+            self.file_handles.retire(|handle| handle.was_picked_by(plugin_id, session_id, request_id));
             let key = Self::key(plugin_id, session_id, request_id);
             if let Some(entry) = state.requests.get(&key) {
                 Self::cancel_entry(entry);
@@ -684,6 +723,29 @@ fn authorize(
     let snapshot = snapshot(state, plugin_id, generation)?;
     authorize_snapshot(&snapshot, plugin_id, generation, permission, grant_id)
 }
+fn admit_read(
+    state: &AppState,
+    plugin_id: &str,
+    session_id: &str,
+    generation: &str,
+    request_id: &str,
+    permissions: Vec<&'static str>,
+) -> Result<Arc<RequestEntry>, CommandError> {
+    // The caller has already checked manifest declarations and directory grants.
+    // Serialize the current grant check + request registration with config commit
+    // so a revocation cannot miss a newly admitted request using an old snapshot.
+    let manager = state.config_manager.lock().map_err(|e| CommandError::Lock(e.to_string()))?;
+    let entry = super::plugin::state_of(manager.get_config(), plugin_id)
+        .filter(|entry| entry.enabled && entry.install_generation == generation)
+        .ok_or_else(|| CommandError::Other(SESSION_INVALID.into()))?;
+    for permission in &permissions {
+        if !entry.granted_permissions.iter().any(|granted| granted == permission) {
+            return Err(CommandError::Other(format!("插件未授予或未声明 {permission}: {plugin_id}")));
+        }
+    }
+    state.plugin_fs.admit(plugin_id, session_id, generation, request_id, permissions)
+}
+
 fn normalized_rel(rel: &str) -> Result<String, CommandError> {
     if rel.len() > 4096 || rel.encode_utf16().count() > 4096 {
         return Err(CommandError::Other("插件 FS 相对路径超长".into()));
@@ -777,8 +839,7 @@ pub async fn plugin_fs_open_session(
     super::plugin::require_main_window(&window)?;
     let _gate = super::plugin::acquire_plugin_io(&state).await?;
     let snapshot = snapshot(&state, &plugin_id, &expected_generation)?;
-    if !["fs:assets", "fs:storage", "fs:open-dir"]
-        .iter()
+    if !FILE_SESSION_PERMISSIONS.iter()
         .any(|permission| {
             snapshot.granted.iter().any(|item| item == permission)
                 && snapshot
@@ -858,17 +919,22 @@ pub async fn plugin_fs_read_ranges(
     // Entire batch authorization precedes any I/O or scheduler admission;
     // one manifest/config snapshot serves every range in this batch.
     let fs_snapshot = snapshot(&state, &plugin_id, &expected_generation)?;
+    let mut permissions = Vec::with_capacity(RANGE_READ_PERMISSIONS.len());
     for (range, path) in ranges.iter().zip(&paths) {
+        let permission = permission_for(path, range.grant_id.as_deref());
         authorize_snapshot(
             &fs_snapshot,
             &plugin_id,
             &expected_generation,
-            permission_for(path, range.grant_id.as_deref()),
+            permission,
             range.grant_id.as_deref(),
         )?;
+        if !permissions.contains(&permission) {
+            permissions.push(permission);
+        }
     }
     let registry = Arc::clone(&state.plugin_fs);
-    let entry = registry.admit(&plugin_id, &session_id, &expected_generation, &request_id)?;
+    let entry = admit_read(&state, &plugin_id, &session_id, &expected_generation, &request_id, permissions)?;
     let mut admission = Admission {
         registry: Arc::clone(&registry),
         entry: Arc::clone(&entry),
@@ -895,6 +961,7 @@ pub async fn plugin_fs_read_ranges(
     // represented by the session watch and the native authority rechecks below.
     registry.session(&plugin_id, &session_id, &expected_generation)?;
     check_cancel(&entry)?;
+    let fs_snapshot = snapshot(&state, &plugin_id, &expected_generation)?;
     let mut open_inputs = Vec::with_capacity(ranges.len());
     for (range, path) in ranges.iter().zip(&paths) {
         let root = authorize_snapshot(
@@ -985,8 +1052,8 @@ pub async fn plugin_fs_read_ranges(
             range.grant_id.as_deref(),
         )?;
     }
-    check_cancel(&entry)?;
     let response = encode_frame(results, payload)?;
+    check_cancel(&entry)?;
     admission.delivered = true;
     Ok(response)
 }
@@ -1053,7 +1120,7 @@ pub async fn plugin_fs_list_directory_page(
                 requested_recursive.unwrap_or(false),
             )
         });
-    let entry = registry.admit(&plugin_id, &session_id, &expected_generation, &request_id)?;
+    let entry = admit_read(&state, &plugin_id, &session_id, &expected_generation, &request_id, vec!["fs:open-dir"])?;
     let mut admission = Admission {
         registry: Arc::clone(&registry),
         entry: Arc::clone(&entry),
@@ -1190,6 +1257,38 @@ pub async fn plugin_fs_list_directory_page(
 mod tests {
     use super::*;
     use tauri::ipc::IpcResponse;
+
+    #[test]
+    fn only_removed_read_authority_cancels_registered_file_requests() {
+        let id = "com.test.scoped";
+        let registry = Arc::new(PluginFsRegistry::new());
+        let session = registry.open_session(id, "g").unwrap();
+        let assets = registry.admit(id, &session, "g", "asset", vec!["fs:assets"]).unwrap();
+        let directory = registry.admit(id, &session, "g", "dir", vec!["fs:open-dir"]).unwrap();
+        let mixed = registry.admit(id, &session, "g", "mixed", vec!["fs:assets", "fs:open-dir"]).unwrap();
+        let permissions = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let original = permissions(&["fs:assets", "fs:open-dir", "fs:write-dir", "notify"]);
+        let unrelated_change = permissions(&["fs:assets", "fs:open-dir", "fs:storage"]);
+        registry.revoke_read_permissions(id, &original, &unrelated_change);
+        assert!(check_cancel(&assets).is_ok());
+        assert!(check_cancel(&directory).is_ok());
+        assert!(check_cancel(&mixed).is_ok());
+        assert!(registry.session(id, &session, "g").is_ok());
+
+        let without_directory = permissions(&["fs:assets", "fs:storage"]);
+        registry.revoke_read_permissions(id, &unrelated_change, &without_directory);
+        assert!(check_cancel(&assets).is_ok());
+        assert!(check_cancel(&directory).is_err());
+        assert!(check_cancel(&mixed).is_err());
+        assert!(registry.session(id, &session, "g").is_ok());
+
+        registry.revoke_read_permissions(id, &without_directory, &unrelated_change);
+        assert!(check_cancel(&directory).is_err(), "regrant cannot revive an old request");
+        assert!(check_cancel(&assets).is_ok());
+        registry.revoke_read_permissions(id, &unrelated_change, &[]);
+        assert!(check_cancel(&assets).is_err());
+        assert!(registry.session(id, &session, "g").is_err());
+    }
 
     #[test]
     fn range_bounds_and_safe_integer_validation() {
@@ -1349,7 +1448,7 @@ mod tests {
         let registry = Arc::new(PluginFsRegistry::new());
         let first = registry.open_session("com.test.fs", "generation").unwrap();
         let request = registry
-            .admit("com.test.fs", &first, "generation", "r")
+            .admit("com.test.fs", &first, "generation", "r", vec!["fs:assets"])
             .unwrap();
         let second = registry.open_session("com.test.fs", "generation").unwrap();
         assert!(registry
@@ -1367,7 +1466,7 @@ mod tests {
             MAX_PRE_CANCELLED
         );
         assert!(registry
-            .admit("com.test.fs", &second, "generation", "r99")
+            .admit("com.test.fs", &second, "generation", "r99", vec!["fs:assets"])
             .is_err());
         registry.invalidate_all();
         assert!(registry
@@ -1397,7 +1496,7 @@ mod tests {
                 &session,
             )
             .unwrap();
-        let entry = registry.admit("com.test.fs", &session, "g", "r").unwrap();
+        let entry = registry.admit("com.test.fs", &session, "g", "r", vec!["fs:assets"]).unwrap();
         let admission = Admission {
             registry: Arc::clone(&registry),
             entry,
@@ -1413,7 +1512,7 @@ mod tests {
     async fn cancel_retains_completed_lease_until_release() {
         let registry = Arc::new(PluginFsRegistry::new());
         let session = registry.open_session("com.test.fs", "g").unwrap();
-        let entry = registry.admit("com.test.fs", &session, "g", "r").unwrap();
+        let entry = registry.admit("com.test.fs", &session, "g", "r", vec!["fs:assets"]).unwrap();
         let permit = registry
             .scheduler
             .acquire(
@@ -1439,7 +1538,7 @@ mod tests {
     async fn shared_reaper_reclaims_expired_completed_lease() {
         let registry = Arc::new(PluginFsRegistry::new());
         let session = registry.open_session("com.test.fs", "g").unwrap();
-        let entry = registry.admit("com.test.fs", &session, "g", "r").unwrap();
+        let entry = registry.admit("com.test.fs", &session, "g", "r", vec!["fs:assets"]).unwrap();
         let permit = registry
             .scheduler
             .acquire(
@@ -1465,7 +1564,7 @@ mod tests {
     async fn release_does_not_erase_cursors_and_running_permit_is_not_early_released() {
         let registry = Arc::new(PluginFsRegistry::new());
         let session = registry.open_session("com.test.fs", "g").unwrap();
-        let entry = registry.admit("com.test.fs", &session, "g", "r").unwrap();
+        let entry = registry.admit("com.test.fs", &session, "g", "r", vec!["fs:assets"]).unwrap();
         let permit = registry
             .scheduler
             .acquire(

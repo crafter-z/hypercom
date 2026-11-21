@@ -3,16 +3,16 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import PluginSettings from './PluginSettings';
-import type { MarketplaceIndex, PluginView } from '../../../types';
+import type { MarketplaceIndex, MarketplaceUpdate, PluginView } from '../../../types';
 import { useAppStore } from '../../../stores/useAppStore';
 
 const mocks = vi.hoisted(() => ({
   api: { plugins: [] as PluginView[], loading: false, refresh: vi.fn(), installPlugin: vi.fn(), reloadPlugin: vi.fn(),
-    grantAllAndEnable: vi.fn(), uninstallPlugin: vi.fn(), setEnabled: vi.fn(), togglePermission: vi.fn(),
-    setTrustedWeb: vi.fn(), clearWebData: vi.fn() },
+    installMarketplacePlugin: vi.fn(), applyPermissionReview: vi.fn(), uninstallPlugin: vi.fn(), setEnabled: vi.fn(),
+    revokeTrustedWeb: vi.fn(), clearWebData: vi.fn() },
   open: vi.fn(),
   isReplaceError: vi.fn(), replacementTargetId: vi.fn(),
-  marketplace: { index: null as MarketplaceIndex | null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() },
+  marketplace: { index: null as MarketplaceIndex | null, updates: [] as MarketplaceUpdate[], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() },
   config: { saveConfig: vi.fn() },
 }));
 vi.mock('../../../hooks/usePlugins', () => ({
@@ -41,11 +41,11 @@ let root: Root;
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.api.plugins = [trustedPlugin()];
-  mocks.api.setTrustedWeb.mockResolvedValue(undefined);
+  mocks.marketplace.index = null;
+  mocks.marketplace.updates = [];
+  mocks.api.applyPermissionReview.mockResolvedValue(undefined);
   mocks.api.refresh.mockResolvedValue([trustedPlugin()]);
   mocks.api.setEnabled.mockResolvedValue(undefined);
-  mocks.api.togglePermission.mockResolvedValue(undefined);
-  mocks.api.grantAllAndEnable.mockResolvedValue(undefined);
   mocks.api.reloadPlugin.mockResolvedValue(undefined);
   mocks.isReplaceError.mockReturnValue(false);
   mocks.replacementTargetId.mockReturnValue('demo');
@@ -78,44 +78,48 @@ it('persists a valid marketplace source after syncing without footer save', asyn
   });
 });
 
-it('requires independent consent on enable and focuses cancel without granting anything', async () => {
+it('requires explicit trust for a pure trusted-web plugin and focuses cancel', async () => {
+  const plugin = trustedPlugin();
+  delete plugin.manifest!.entry;
+  mocks.api.plugins = [plugin];
   await render();
   await click('plugins.enable');
   const dialog = container.querySelector('[role="dialog"]');
   expect(dialog).not.toBeNull();
   expect(document.activeElement).toBe(dialog?.querySelector('button'));
-  expect(mocks.api.setEnabled).not.toHaveBeenCalled();
+  expect(dialog?.textContent).toContain('plugins.review.trustRequired');
+  expect(checkbox('plugins.trustedWebAccept').checked).toBe(false);
+  await click('plugins.review.applyAndEnable');
   await click('plugins.trustedWebCancel');
   expect(container.querySelector('[role="dialog"]')).toBeNull();
-  expect(mocks.api.setTrustedWeb).not.toHaveBeenCalled();
-});
-
-it('uses the reviewed generation only after explicit consent', async () => {
-  await render();
-  await click('plugins.enable');
-  await click('plugins.trustedWebAccept');
-  expect(mocks.api.setTrustedWeb).toHaveBeenCalledWith('demo', true, 'generation-a');
-  expect(mocks.api.setEnabled).toHaveBeenCalledWith('demo', true, 'generation-a');
-});
-
-it('shows separate trust consent before ordinary install permissions', async () => {
-  mocks.open.mockResolvedValue('archive.zip');
-  mocks.api.installPlugin.mockResolvedValue(trustedPlugin());
-  await render();
-  await click('plugins.installZip');
-  expect(container.querySelector('#trusted-web-title')).not.toBeNull();
-  expect(mocks.api.grantAllAndEnable).not.toHaveBeenCalled();
-  await click('plugins.trustedWebCancel');
-  expect(mocks.api.setTrustedWeb).not.toHaveBeenCalled();
+  expect(mocks.api.applyPermissionReview).not.toHaveBeenCalled();
   expect(mocks.api.setEnabled).not.toHaveBeenCalled();
 });
 
-it('does not ask again for a previously trusted installation', async () => {
-  mocks.api.plugins[0].trustedWebGranted = true;
+it('submits trust only when explicitly selected, without adding ungranted permissions on enable', async () => {
+  const plugin = workerPlugin(['serial:control', 'terminal:read'], ['terminal:read']);
+  plugin.manifest!.ui = trustedPlugin().manifest!.ui;
+  mocks.api.plugins = [plugin];
+  const confirm = vi.spyOn(window, 'confirm');
+  await render();
+  await click('plugins.enable');
+  expect(container.querySelector('[role="dialog"]')?.textContent).toContain('plugins.review.permission.terminal:read');
+  expect(container.querySelector('[role="dialog"]')?.textContent).not.toContain('plugins.review.permission.serial:control');
+  await act(async () => checkbox('plugins.trustedWebAccept').click());
+  await click('plugins.review.applyAndEnable');
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mocks.api.applyPermissionReview).toHaveBeenCalledWith({ plugin, intent: 'enable', permissions: ['terminal:read'], trustWeb: true });
+});
+
+it('does not show permission or trust prompts on normal re-enable with existing grants', async () => {
+  const plugin = workerPlugin(['fs:write-dir', 'terminal:read'], ['terminal:read']);
+  const confirm = vi.spyOn(window, 'confirm');
+  mocks.api.plugins = [plugin];
   await render();
   await click('plugins.enable');
   expect(container.querySelector('[role="dialog"]')).toBeNull();
-  expect(mocks.api.setTrustedWeb).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mocks.api.applyPermissionReview).not.toHaveBeenCalled();
   expect(mocks.api.setEnabled).toHaveBeenCalledWith('demo', true, 'generation-a');
 });
 
@@ -177,104 +181,87 @@ it('does not confirm before a first install or a higher-version upgrade', async 
   expect(mocks.api.installPlugin).toHaveBeenCalledWith('archive.zip');
 });
 
-const pluginWithWrite = (): PluginView => {
+function workerPlugin(permissions: string[], grantedPermissions: string[] = []): PluginView {
   const base = trustedPlugin();
-  const permissions = ['fs:open-dir', 'fs:write-dir'];
   return {
     ...base,
-    trustedWebGranted: true,
+    grantedPermissions,
     declaredPermissions: permissions,
-    knownPermissions: permissions,
-    manifest: { ...base.manifest!, permissions },
+    knownPermissions: [...permissions, 'notify'].filter(permission => permission !== 'future:unknown'),
+    manifest: { ...base.manifest!, permissions, ui: null },
   };
-};
-const pluginWithShellPermission = (): PluginView => {
-  const base = trustedPlugin();
-  const permissions = ['shell:execute'];
-  return {
-    ...base,
-    trustedWebGranted: true,
-    declaredPermissions: permissions,
-    knownPermissions: permissions,
-    manifest: { ...base.manifest!, permissions },
-  };
-};
-const permissionCheckbox = (permission: string) => {
-  const row = [...container.querySelectorAll('.plugin-perm-item')]
-    .find(item => item.querySelector('code')?.textContent === permission);
+}
+
+function checkbox(label: string): HTMLInputElement {
+  const dialog = container.querySelector('[role="dialog"]');
+  const row = [...dialog!.querySelectorAll('label')].find(item => item.textContent?.trim() === label);
   expect(row).toBeDefined();
   return row!.querySelector('input')!;
-};
+}
 
-it('asks before granting fs:write-dir from a per-permission checkbox', async () => {
-  mocks.api.plugins = [pluginWithWrite()];
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-  await render();
-  await act(async () => permissionCheckbox('fs:write-dir').click());
-  expect(confirm).toHaveBeenCalledTimes(1);
-  expect(mocks.api.togglePermission).not.toHaveBeenCalled();
-  confirm.mockReturnValue(true);
-  await act(async () => permissionCheckbox('fs:write-dir').click());
-  expect(mocks.api.togglePermission).toHaveBeenCalledWith('demo', 'fs:write-dir', 'generation-a');
-});
-
-it('never asks for the non-sensitive read grant, nor for revoking', async () => {
-  mocks.api.plugins = [{ ...pluginWithWrite(), grantedPermissions: ['fs:write-dir'] }];
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-  await render();
-  await act(async () => permissionCheckbox('fs:open-dir').click());
-  expect(confirm).not.toHaveBeenCalled();
-  expect(mocks.api.togglePermission).toHaveBeenCalledWith('demo', 'fs:open-dir', 'generation-a');
-  await act(async () => permissionCheckbox('fs:write-dir').click());
-  expect(confirm).not.toHaveBeenCalled();
-  expect(mocks.api.togglePermission).toHaveBeenLastCalledWith('demo', 'fs:write-dir', 'generation-a');
-});
-
-it('uses the one-time generic risk confirmation when granting shell:execute', async () => {
-  mocks.api.plugins = [pluginWithShellPermission()];
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-  await render();
-  await act(async () => permissionCheckbox('shell:execute').click());
-  expect(confirm).toHaveBeenCalledWith('plugins.sensitiveConfirm');
-  expect(mocks.api.togglePermission).not.toHaveBeenCalled();
-});
-
-it.each([
-  ['serial:control', 'plugins.sensitiveSerialControl'],
-  ['fs:export-dir', 'plugins.sensitiveExportDir'],
-  ['fs:save', 'plugins.sensitiveSave'],
-])('describes and confirms %s before granting, while revocation remains one click', async (permission, risk) => {
-  const plugin = pluginWithWrite();
-  plugin.declaredPermissions = [permission];
-  plugin.knownPermissions = [permission];
-  plugin.manifest!.permissions = [permission];
-  mocks.api.plugins = [plugin];
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-  await render();
-  await act(async () => permissionCheckbox(permission).click());
-  expect(confirm).toHaveBeenCalledWith(`plugins.sensitiveConfirm\n\n${risk}`);
-  expect(mocks.api.togglePermission).not.toHaveBeenCalled();
-  confirm.mockReturnValue(true);
-  await act(async () => permissionCheckbox(permission).click());
-  expect(mocks.api.togglePermission).toHaveBeenLastCalledWith('demo', permission, 'generation-a');
-  plugin.grantedPermissions = [permission];
-  await render();
-  confirm.mockClear();
-  await act(async () => permissionCheckbox(permission).click());
-  expect(confirm).not.toHaveBeenCalled();
-});
-
-it('asks before "grant all and enable" hands over the same high-risk permissions', async () => {
+it('uses one installed-package review, never preselects shell, and enables ordinary permissions without shell', async () => {
+  const plugin = workerPlugin(['terminal:read', 'fs:export-dir', 'shell:execute', 'future:unknown']);
   mocks.open.mockResolvedValue('archive.zip');
-  // The dialog re-checks live trust state before granting, so the installed plugin must be
-  // listed as already trusted for this path to reach the permission consent.
-  mocks.api.plugins = [pluginWithWrite()];
-  mocks.api.installPlugin.mockResolvedValue(pluginWithWrite());
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  mocks.api.installPlugin.mockResolvedValue(plugin);
+  const confirm = vi.spyOn(window, 'confirm');
   await render();
   await click('plugins.installZip');
-  expect(container.querySelector('[role="dialog"]')).not.toBeNull();
-  await click('plugins.permissionPromptGrantAll');
-  expect(confirm).toHaveBeenCalledTimes(1);
-  expect(mocks.api.grantAllAndEnable).not.toHaveBeenCalled();
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(container.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+  expect(dialog?.querySelector('details')?.open).toBe(false);
+  expect(dialog?.querySelector('details code')?.textContent).toBe('terminal:read');
+  expect(dialog?.textContent).not.toContain('future:unknown');
+  expect(checkbox('plugins.review.permission.fs:export-dir').checked).toBe(true);
+  expect(checkbox('plugins.review.permission.shell:execute').checked).toBe(false);
+  await click('plugins.review.applyAndEnable');
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mocks.api.applyPermissionReview).toHaveBeenCalledWith({ plugin, intent: 'install', permissions: ['terminal:read', 'fs:export-dir'], trustWeb: false });
+});
+
+it('shows actual-versus-preview differences and cannot grant a permission from marketplace metadata alone', async () => {
+  const plugin = workerPlugin(['serial:send', 'shell:execute']);
+  plugin.manifest!.serial = { portWhitelist: [] };
+  const update: MarketplaceUpdate = {
+    id: plugin.id, currentVersion: '1.0.0', latestVersion: '1.2.3', updateAvailable: true,
+    descriptionUrl: 'https://example.test/plugin.json', downloadUrl: 'https://example.test/plugin.zip',
+    manifest: { ...plugin.manifest!, permissions: ['serial:send', 'clipboard'], serial: { portWhitelist: ['COM2'] } },
+  };
+  mocks.api.plugins = [{ ...plugin, installGeneration: 'old-generation' }];
+  mocks.marketplace.index = { schemaVersion: 1, plugins: [update.descriptionUrl] };
+  mocks.marketplace.updates = [update];
+  mocks.api.installMarketplacePlugin.mockResolvedValue(plugin);
+  await render();
+  await click('plugins.marketplace.update');
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(dialog?.textContent).toContain('plugins.review.previewMismatch');
+  expect(dialog?.textContent).toContain('plugins.review.previewAdded');
+  expect(dialog?.textContent).toContain('plugins.review.previewRemoved');
+  expect(dialog?.textContent).toContain('plugins.review.previewSerial');
+  expect(dialog?.textContent).toContain('plugins.review.serialNone');
+  expect([...dialog!.querySelectorAll('label')].some(label => label.textContent?.includes('clipboard'))).toBe(false);
+  expect(mocks.api.installMarketplacePlugin).toHaveBeenCalledWith(update, 'old-generation');
+  await click('plugins.review.applyAndEnable');
+  expect(mocks.api.applyPermissionReview).toHaveBeenCalledWith({ plugin, intent: 'install', permissions: ['serial:send'], trustWeb: false });
+});
+
+it('retains only effective existing grants by default and saves an exact explicit change', async () => {
+  const plugin = workerPlugin(['fs:open-dir', 'fs:export-dir', 'shell:execute'], ['fs:open-dir', 'fs:write-dir']);
+  mocks.api.plugins = [plugin];
+  const confirm = vi.spyOn(window, 'confirm');
+  await render();
+  await click('plugins.review.manage');
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(checkbox('plugins.review.permission.fs:open-dir').checked).toBe(true);
+  expect(checkbox('plugins.review.permission.fs:export-dir').checked).toBe(false);
+  expect(checkbox('plugins.review.permission.shell:execute').checked).toBe(false);
+  expect(dialog?.textContent).not.toContain('fs:write-dir');
+  await click('plugins.review.save');
+  expect(mocks.api.applyPermissionReview).not.toHaveBeenCalled();
+  await act(async () => checkbox('plugins.review.permission.fs:open-dir').click());
+  await act(async () => checkbox('plugins.review.permission.shell:execute').click());
+  expect(dialog?.textContent).toContain('plugins.review.willGrant');
+  expect(dialog?.textContent).toContain('plugins.review.willRevoke');
+  await click('plugins.review.save');
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mocks.api.applyPermissionReview).toHaveBeenCalledWith({ plugin, intent: 'manage', permissions: ['shell:execute'], trustWeb: false });
 });

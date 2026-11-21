@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { decodeLegacyPluginBytes, isPluginRawUnsupported } from './pluginBinary';
 import type {
   PluginHttpChunk,
@@ -18,6 +18,17 @@ function assertAssetWriteContent(content: string | undefined, base64: string | u
   }
 }
 
+export type PluginInstallProgress =
+  | { phase: 'waiting' | 'scanning' | 'validating' | 'committing' }
+  | { phase: 'copying'; copiedBytes: number; totalBytes: number; availableBytes: number };
+
+export interface PluginDirectoryInstallRequest {
+  requestId: string;
+  onProgress: (progress: PluginInstallProgress) => void;
+}
+
+export type PluginInstallCancelResult = 'accepted' | 'tooLate' | 'notFound';
+
 export const pluginService = {
   listPlugins: (): Promise<PluginListResponse> => invoke('list_plugins'),
   installPlugin: (
@@ -26,6 +37,17 @@ export const pluginService = {
     expectedGeneration?: string,
   ): Promise<PluginStateSnapshot> =>
     invoke('install_plugin', { sourcePath, replaceExisting, expectedGeneration }),
+  installPluginDirectory: (
+    sourcePath: string,
+    { requestId, onProgress }: PluginDirectoryInstallRequest,
+    replaceExisting?: boolean,
+    expectedGeneration?: string,
+  ): Promise<PluginStateSnapshot> => {
+    const progress = new Channel<PluginInstallProgress>(onProgress);
+    return invoke('install_plugin_directory_with_progress', { sourcePath, replaceExisting, expectedGeneration, requestId, progress });
+  },
+  cancelPluginInstall: (requestId: string): Promise<PluginInstallCancelResult> =>
+    invoke('cancel_plugin_install', { requestId }),
   /** Reload installed code in place; preserves installGeneration/consent/data. */
   reloadPlugin: (id: string, expectedGeneration: string): Promise<PluginStateSnapshot> =>
     invoke('reload_plugin', { id, expectedGeneration }),

@@ -99,7 +99,7 @@ fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
 mod platform {
     use super::*;
     use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::MetadataExt;
 
@@ -317,6 +317,119 @@ mod platform {
         }
     }
 
+    fn link_selected_noreplace(parent: &File, source: &OsStr, target: &OsStr) -> Result<(), String> {
+        let source = CString::new(source.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
+        let target = CString::new(target.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
+        let fd = parent.as_raw_fd();
+        // One atomic operation claims an absent name, with no exists/rename
+        // race and no partial destination file. If links are unsupported on
+        // this filesystem, fail closed rather than falling back to overwrite.
+        if unsafe { libc::linkat(fd, source.as_ptr(), fd, target.as_ptr(), 0) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Err(SELECTED_FILE_TARGET_CONFLICT.into())
+        } else {
+            Err(io_error("发布新保存文件失败", error))
+        }
+    }
+
+    fn same_file(first: &File, second: &File) -> Result<bool, String> {
+        let first = first.metadata().map_err(|e| io_error("读取保存文件身份失败", e))?;
+        let second = second.metadata().map_err(|e| io_error("读取保存文件身份失败", e))?;
+        Ok(first.dev() == second.dev() && first.ino() == second.ino())
+    }
+
+    pub struct StagedSelectedFile {
+        parent: File,
+        name: std::ffi::OsString,
+        // Keeping this inode open prevents reuse of the original identity even
+        // when someone removes or replaces the selected name while we stage.
+        original: Option<File>,
+        temporary: Option<std::ffi::OsString>,
+        pub file: File,
+    }
+
+    impl StagedSelectedFile {
+        pub fn new(root: &Path, name: &Path) -> Result<Self, String> {
+            let (parent, name) = open_parent(root, name, false)?;
+            let original = existing_target(&parent, &name)?;
+            let temporary = super::selected_temporary_name(&name);
+            let c_name = CString::new(temporary.as_bytes()).map_err(|_| "临时文件名无效".to_string())?;
+            let fd = unsafe {
+                libc::openat(parent.as_raw_fd(), c_name.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0o600)
+            };
+            if fd < 0 {
+                return Err(io_error("创建保存临时文件失败", std::io::Error::last_os_error()));
+            }
+            Ok(Self { parent, name, original, temporary: Some(temporary), file: unsafe { File::from_raw_fd(fd) } })
+        }
+
+        fn temporary_still_owned(&self, name: &OsStr) -> Result<bool, String> {
+            match open_at(&self.parent, name, false) {
+                // A newly published file may briefly have both the chosen name
+                // and the temporary name. Identity, not nlink, governs cleanup.
+                Ok(file) if same_file(&self.file, &file)? => Ok(true),
+                Err(error) if error == "PLUGIN_FILE_NOT_FOUND" => Ok(false),
+                Err(error) => Err(error),
+                Ok(_) => Err("保存临时文件身份已变化".into()),
+            }
+        }
+
+        fn cleanup_temporary(&mut self) -> Result<(), String> {
+            if let Some(name) = self.temporary.as_deref() {
+                if self.temporary_still_owned(name)? {
+                    let name = CString::new(name.as_bytes()).map_err(|_| "临时文件名无效".to_string())?;
+                    if unsafe { libc::unlinkat(self.parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            return Err(io_error("清理保存临时文件失败", error));
+                        }
+                    }
+                }
+                self.temporary = None;
+            }
+            Ok(())
+        }
+
+        pub fn publish(&mut self) -> Result<(), String> {
+            let temporary = self.temporary.as_deref().ok_or_else(|| "保存临时文件已关闭".to_string())?;
+            if !self.temporary_still_owned(temporary)?
+                || self.file.metadata().map_err(|e| io_error("读取保存临时文件失败", e))?.nlink() != 1
+            {
+                return Err("保存临时文件身份已变化".into());
+            }
+            if let Some(original) = &self.original {
+                let current = existing_target(&self.parent, &self.name)?.ok_or(SELECTED_FILE_TARGET_CONFLICT)?;
+                if !same_file(original, &current)? {
+                    return Err(SELECTED_FILE_TARGET_CONFLICT.into());
+                }
+                // POSIX rename has no compare-by-inode variant; this identity
+                // check detects prior replacement, not an adversarial swap in
+                // the interval between this final check and the atomic rename.
+                rename_at(&self.parent, temporary, &self.name)?;
+                self.temporary = None;
+            } else {
+                link_selected_noreplace(&self.parent, temporary, &self.name)?;
+                // Publication is already complete. Drop/sync_parent only
+                // retire the separately named staging link; never the target.
+            }
+            Ok(())
+        }
+
+        pub fn sync_parent(&mut self) -> Result<(), String> {
+            let cleanup = self.cleanup_temporary();
+            let sync = self.parent.sync_all().map_err(|e| io_error("同步保存目录失败", e));
+            cleanup.and(sync)
+        }
+    }
+
+    impl Drop for StagedSelectedFile {
+        fn drop(&mut self) { let _ = self.cleanup_temporary(); }
+    }
+
     fn write_file(mut file: File, bytes: &[u8], append: bool) -> Result<(), String> {
         let metadata = file
             .metadata()
@@ -487,7 +600,8 @@ mod platform {
         Ok(file)
     }
 
-    pub fn inspect_child(parent: &File, name: &OsStr) -> Result<EntryInfo, String> {
+    pub fn inspect_child(parent: &File, entry: &DirectoryName) -> Result<EntryInfo, String> {
+        let name = entry.name.as_os_str();
         let c_name = CString::new(name.as_bytes()).map_err(|_| "路径段含 NUL".to_string())?;
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe {
@@ -1094,12 +1208,83 @@ mod platform {
         };
         if result < 0 {
             let code = unsafe { RtlNtStatusToDosError(result) } as i32;
-            return Err(io_error(
-                "提交插件文件失败",
-                std::io::Error::from_raw_os_error(code),
-            ));
+            let error = std::io::Error::from_raw_os_error(code);
+            return if !replace
+                && (result == STATUS_OBJECT_NAME_COLLISION || error.kind() == std::io::ErrorKind::AlreadyExists)
+            {
+                Err(SELECTED_FILE_TARGET_CONFLICT.into())
+            } else {
+                Err(io_error("提交插件文件失败", error))
+            };
         }
         Ok(())
+    }
+
+    fn file_identity(file: &File) -> Result<(u64, [u8; 16]), String> {
+        use windows_sys::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO};
+        // Full ID comparison also works on volumes with 128-bit IDs (e.g. ReFS).
+        let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        if unsafe {
+            GetFileInformationByHandleEx(file.as_raw_handle(), FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(), std::mem::size_of::<FILE_ID_INFO>() as u32)
+        } == 0 {
+            return Err(io_error("读取保存文件身份失败", std::io::Error::last_os_error()));
+        }
+        Ok((info.VolumeSerialNumber, info.FileId.Identifier))
+    }
+
+    pub struct StagedSelectedFile {
+        parent: File,
+        name: std::ffi::OsString,
+        original: Option<File>,
+        pub file: File,
+        publication_started: bool,
+        published: bool,
+    }
+
+    impl StagedSelectedFile {
+        pub fn new(root: &Path, name: &Path) -> Result<Self, String> {
+            let (parent, name) = open_parent(root, name, false)?;
+            let original = regular_target(&parent, &name)?;
+            let temporary = super::selected_temporary_name(&name);
+            let file = open_relative_write(&parent, &temporary, false, true)?;
+            Ok(Self { parent, name, original, file, publication_started: false, published: false })
+        }
+
+        pub fn publish(&mut self) -> Result<(), String> {
+            if self.publication_started {
+                return Err("保存文件已尝试发布".into());
+            }
+            self.publication_started = true;
+            let replace = if let Some(original) = self.original.take() {
+                let current = regular_target(&self.parent, &self.name)?.ok_or(SELECTED_FILE_TARGET_CONFLICT)?;
+                if file_identity(&original)? != file_identity(&current)? {
+                    return Err(SELECTED_FILE_TARGET_CONFLICT.into());
+                }
+                // The classic NT rename may reject replacement while the target
+                // has open handles even with sharing. Drop these two probes
+                // just before rename. This is a last identity check, not an
+                // OS compare-and-swap for an existing target.
+                true
+            } else {
+                // FileRenameInformation.ReplaceIfExists is checked atomically
+                // by the OS; never replace anything that appeared after open.
+                false
+            };
+            commit_relative(&self.file, &self.parent, &self.name, replace)?;
+            self.published = true;
+            Ok(())
+        }
+
+        pub fn sync_parent(&self) -> Result<(), String> { Ok(()) }
+    }
+
+    impl Drop for StagedSelectedFile {
+        fn drop(&mut self) {
+            if !self.published {
+                delete_on_close(&self.file);
+            }
+        }
     }
 
     fn write_file(mut file: File, bytes: &[u8], append: bool) -> Result<(), String> {
@@ -1336,6 +1521,12 @@ mod platform {
     ) -> Result<(), String> {
         Err("此平台不支持安全文件写入".into())
     }
+    pub struct StagedSelectedFile { pub file: File }
+    impl StagedSelectedFile {
+        pub fn new(_: &Path, _: &Path) -> Result<Self, String> { Err("此平台不支持安全文件写入".into()) }
+        pub fn publish(&mut self) -> Result<(), String> { Err("此平台不支持安全文件写入".into()) }
+        pub fn sync_parent(&self) -> Result<(), String> { Err("此平台不支持安全文件写入".into()) }
+    }
     pub fn open_directory(_: &Path, _: &Path) -> Result<File, String> {
         Err("此平台不支持安全目录枚举".into())
     }
@@ -1428,10 +1619,9 @@ where
     })
 }
 
-/// Compatibility wrapper for existing directory-write commands. New plugin
-/// export/save commands should use `write_directory_file_authorized` so the
-/// final commit is gated by a live authority check.
-pub fn write_directory_file(
+/// Test the filesystem behavior without a plugin authority to revoke.
+#[cfg(test)]
+fn write_directory_file(
     root: &Path,
     rel: &str,
     bytes: &[u8],
@@ -1439,6 +1629,97 @@ pub fn write_directory_file(
     create_parents: bool,
 ) -> Result<WrittenFile, String> {
     write_directory_file_authorized(root, rel, bytes, mode, create_parents, || Ok(()))
+}
+
+pub const SELECTED_FILE_WINDOW_BYTES: usize = 1024 * 1024;
+const SELECTED_FILE_CANCEL_SLICE: usize = 64 * 1024;
+pub(crate) const SELECTED_FILE_CANCELLED: &str = "PLUGIN_FILE_CANCELLED";
+#[cfg(any(unix, windows))]
+pub(crate) const SELECTED_FILE_TARGET_CONFLICT: &str = "PLUGIN_FILE_TARGET_CONFLICT";
+
+#[cfg(any(unix, windows))]
+fn selected_temporary_name(target: &OsStr) -> std::ffi::OsString {
+    let target = target.to_string_lossy();
+    loop {
+        let name = format!(".hypercom-plugin-save-{}.tmp", uuid::Uuid::new_v4());
+        // The temporary name must never be the selected destination, even on
+        // case-insensitive filesystem volumes.
+        if !target.eq_ignore_ascii_case(&name) { return name.into(); }
+    }
+}
+
+fn selected_target(path: &Path) -> Result<(&Path, &Path), String> {
+    let parent = path.parent().filter(|p| path.is_absolute() && !p.as_os_str().is_empty())
+        .ok_or_else(|| "选择的文件没有绝对父目录".to_string())?;
+    let name = path.file_name().map(Path::new).ok_or_else(|| "选择的文件名无效".to_string())?;
+    #[cfg(windows)]
+    {
+        let text = name.to_string_lossy();
+        if sanitize_directory_rel(&text)?.0.as_os_str() != name.as_os_str() {
+            return Err("选择的文件名不是普通文件名".into());
+        }
+    }
+    Ok((parent, name))
+}
+
+/// Only the native picker supplies this path, and only once. The returned OS
+/// handle is read-only; later calls never resolve the display pathname again.
+pub(crate) fn open_selected_file(path: &Path) -> Result<OpenedFile, String> {
+    let (parent, name) = selected_target(path)?;
+    platform::open_regular_mode(parent, name, false)
+}
+
+pub(crate) fn read_selected_window(
+    file: &mut OpenedFile, offset: u64, length: usize, cancelled: impl Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    if length > SELECTED_FILE_WINDOW_BYTES { return Err("文件窗口超出传输上限".into()); }
+    if cancelled() { return Err(SELECTED_FILE_CANCELLED.into()); }
+    let length = file.len.saturating_sub(offset).min(length as u64) as usize;
+    if length == 0 { return Ok(Vec::new()); }
+    file.file.seek(SeekFrom::Start(offset)).map_err(|e| io_error("定位选择的文件失败", e))?;
+    let mut bytes = vec![0; length];
+    for slice in bytes.chunks_mut(SELECTED_FILE_CANCEL_SLICE) {
+        if cancelled() { return Err(SELECTED_FILE_CANCELLED.into()); }
+        // Content is not a snapshot. If truncated, do not advertise a complete
+        // transfer of the original selected length or deliver a partial window.
+        file.file.read_exact(slice).map_err(|e| io_error("读取选择的文件失败", e))?;
+    }
+    if cancelled() { return Err(SELECTED_FILE_CANCELLED.into()); }
+    Ok(bytes)
+}
+
+/// Write-only temporary sibling, anchored to the chosen parent. The native
+/// picker returns a path, so target identity is captured by the first safe
+/// open after selection. Only publish changes the selected name; dropping an
+/// unpublished writer (close/cancel/failure) aborts staging.
+pub(crate) struct SelectedFileWrite {
+    staged: platform::StagedSelectedFile,
+    bytes_written: u64,
+}
+
+impl SelectedFileWrite {
+    pub(crate) fn new(path: &Path) -> Result<Self, String> {
+        let (parent, name) = selected_target(path)?;
+        Ok(Self { staged: platform::StagedSelectedFile::new(parent, name)?, bytes_written: 0 })
+    }
+    pub(crate) fn bytes_written(&self) -> u64 { self.bytes_written }
+
+    pub(crate) fn append(&mut self, bytes: &[u8], cancelled: impl Fn() -> bool) -> Result<u64, String> {
+        if bytes.len() > SELECTED_FILE_WINDOW_BYTES { return Err("文件窗口超出传输上限".into()); }
+        for slice in bytes.chunks(SELECTED_FILE_CANCEL_SLICE) {
+            if cancelled() { return Err(SELECTED_FILE_CANCELLED.into()); }
+            self.staged.file.write_all(slice).map_err(|e| io_error("写入保存临时文件失败", e))?;
+            self.bytes_written += slice.len() as u64;
+        }
+        if cancelled() { return Err(SELECTED_FILE_CANCELLED.into()); }
+        Ok(self.bytes_written)
+    }
+    pub(crate) fn prepare_publish(&mut self) -> Result<(), String> {
+        self.staged.file.flush().map_err(|e| io_error("刷新保存文件失败", e))?;
+        self.staged.file.sync_all().map_err(|e| io_error("同步保存文件失败", e))
+    }
+    pub(crate) fn publish(&mut self) -> Result<(), String> { self.staged.publish() }
+    pub(crate) fn sync_parent(&mut self) -> Result<(), String> { self.staged.sync_parent() }
 }
 
 /// Open a regular package/private file using pinned component-relative handles.

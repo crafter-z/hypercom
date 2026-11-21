@@ -1,0 +1,9 @@
+[package]
+name = "hypercom-plugin-resource-stream"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+windows = { version = "0.61", features = ["Win32_System_Com"] }
+windows-core = "0.61.2"

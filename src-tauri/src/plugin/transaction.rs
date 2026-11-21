@@ -1,7 +1,9 @@
 //! Durable plugin transactions. Journal paths are derived, never supplied by packages.
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 use crate::config::AppConfig;
 
@@ -44,10 +46,56 @@ fn quarantine(root: &Path, path: &Path) -> io::Result<PathBuf> {
 }
 
 fn transaction_tree_token(name: &str) -> Option<(&'static str, &str)> {
-    [".trash-", ".backup-", ".staging-"]
+    [".trash-", ".backup-", ".staging-", ".prepare-"]
         .iter()
         .find_map(|prefix| name.strip_prefix(prefix).map(|token| (*prefix, token)))
         .filter(|(_, token)| uuid(token).is_ok())
+}
+
+// Register before the preparation path can exist. Only the short registration
+// and lookups share this lock; copying, fsync and recursive removal do not.
+static ACTIVE_PREPARATIONS: LazyLock<Mutex<HashSet<uuid::Uuid>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+pub(crate) struct PreparationLease {
+    token: uuid::Uuid,
+    path: PathBuf,
+}
+
+impl PreparationLease {
+    pub(crate) fn reserve(root: &Path) -> io::Result<Self> {
+        if !regular_dir(root)? { return Err(io::Error::other("Missing plugin preparation root")); }
+        let mut active = ACTIVE_PREPARATIONS.lock().map_err(|_| io::Error::other("Plugin preparations unavailable"))?;
+        let token = uuid::Uuid::new_v4();
+        if !active.insert(token) { return Err(io::Error::other("Plugin preparation collision")); }
+        Ok(Self { token, path: root.join(format!(".prepare-{token}")) })
+    }
+
+    pub(crate) fn path(&self) -> &Path { &self.path }
+
+    /// Called under the plugin IO gate, only after the private tree was synced
+    /// and the current target was revalidated. The journal format never refers
+    /// to `.prepare` and recovery never migrates private data there.
+    pub(crate) fn adopt(&self, root: &Path) -> io::Result<PathBuf> {
+        if self.path.parent() != Some(root) || !regular_dir(root)? || !regular_dir(&self.path)? {
+            return Err(io::Error::other("Plugin preparation is missing or outside its original root"));
+        }
+        let stage = root.join(format!(".staging-{}", self.token));
+        if regular_dir(&stage)? { return Err(io::Error::other("Plugin staging collision")); }
+        rename(root, &self.path, &stage)?;
+        Ok(stage)
+    }
+}
+
+impl Drop for PreparationLease {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_PREPARATIONS.lock() { active.remove(&self.token); }
+    }
+}
+
+fn preparation_active(token: &str) -> io::Result<bool> {
+    let token = uuid::Uuid::parse_str(token).map_err(io::Error::other)?;
+    let active = ACTIVE_PREPARATIONS.lock().map_err(|_| io::Error::other("Plugin preparations unavailable"))?;
+    Ok(active.contains(&token))
 }
 
 /// Read the plugin id from an abandoned backup tree without trusting its paths.
@@ -102,7 +150,10 @@ pub(crate) fn sweep_collect(root: &Path, config: &AppConfig) -> io::Result<Vec<P
         };
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some((kind, _)) = transaction_tree_token(name) else { continue };
+        let Some((kind, token)) = transaction_tree_token(name) else { continue };
+        // Abandoned `.prepare` trees never contain migrated user data. A live
+        // preparation, however, stays protected across unrelated control work.
+        if kind == ".prepare-" && preparation_active(token)? { continue; }
         let path = entry.path();
         match regular_dir(&path) {
             Ok(true) => {}
@@ -142,6 +193,9 @@ pub(crate) fn sweep_delete(root: &Path, paths: &[PathBuf]) -> u64 {
     let mut removed = 0;
     for path in paths {
         // Re-check after leaving the gate: a swapped link must never be followed.
+        if let Some((".prepare-", token)) = path.file_name().and_then(|name| name.to_str()).and_then(transaction_tree_token) {
+            if !matches!(preparation_active(token), Ok(false)) { continue; }
+        }
         if !matches!(regular_dir(path), Ok(true)) { continue; }
         match fs::remove_dir_all(path) {
             Ok(()) => removed += 1,
@@ -227,27 +281,40 @@ pub(crate) fn rename(root: &Path, source: &Path, target: &Path) -> io::Result<()
     Ok(())
 }
 
-pub(crate) fn sync_tree(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_tree(path: &Path, check: &impl Fn() -> io::Result<()>) -> io::Result<()> {
+    check()?;
     if !regular_dir(path)? { return Err(io::Error::other("Missing staged tree")); }
     for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let meta = fs::symlink_metadata(entry.path())?;
-        if meta.is_dir() && !meta.file_type().is_symlink() { sync_tree(&entry.path())?; }
-        else if meta.is_file() && !meta.file_type().is_symlink() {
-            fs::OpenOptions::new().write(true).open(entry.path())?.sync_all()?;
-        }
-        else { return Err(io::Error::other("Transaction tree contains a link or special file")); }
+        check()?;
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if super::is_link_or_reparse(&meta) { return Err(io::Error::other("Transaction tree contains a link")); }
+        if meta.is_dir() { sync_tree(&path, check)?; }
+        else if meta.is_file() { fs::OpenOptions::new().write(true).open(path)?.sync_all()?; }
+        else { return Err(io::Error::other("Transaction tree contains a special file")); }
     }
+    check()?;
     sync_dir(path)
+}
+
+fn staging_token<'a>(root: &Path, staging: &'a Path) -> io::Result<&'a str> {
+    let name = staging.file_name().and_then(|name| name.to_str()).ok_or_else(|| io::Error::other("Invalid staging path"))?;
+    let token = name.strip_prefix(".staging-").ok_or_else(|| io::Error::other("Invalid staging name"))?;
+    uuid(token)?;
+    if staging != root.join(name) || !regular_dir(staging)? { return Err(io::Error::other("Invalid plugin staging tree")); }
+    Ok(token)
 }
 
 impl Transaction {
     pub(crate) fn install(root: &Path, id: &str, staging: &Path, revision: u64) -> io::Result<Self> {
-        let name = staging.file_name().and_then(|s| s.to_str()).ok_or_else(|| io::Error::other("Invalid staging path"))?;
-        let token = name.strip_prefix(".staging-").ok_or_else(|| io::Error::other("Invalid staging name"))?;
-        uuid(token)?;
-        if staging != root.join(name) { return Err(io::Error::other("Staging is outside plugin root")); }
-        sync_tree(staging)?;
+        let token = staging_token(root, staging)?;
+        sync_tree(staging, &|| Ok(()))?;
+        Self::begin(root, id, Some(token.to_owned()), false, revision)
+    }
+
+    /// The adopted private directory was already synced outside the control gate.
+    pub(crate) fn install_synced(root: &Path, id: &str, staging: &Path, revision: u64) -> io::Result<Self> {
+        let token = staging_token(root, staging)?;
         Self::begin(root, id, Some(token.to_owned()), false, revision)
     }
     pub(crate) fn uninstall(root: &Path, id: &str, revision: u64) -> io::Result<Self> {
@@ -383,6 +450,39 @@ mod tests {
     fn sweep(root: &Path, config: &AppConfig) -> io::Result<u64> {
         let paths = sweep_collect(root, config)?;
         Ok(sweep_delete(root, &paths))
+    }
+
+    #[test]
+    fn sweep_protects_live_preparation_and_reclaims_abandoned_or_adopted_paths() {
+        let root = std::env::temp_dir().join(format!("plugin_private_prepare_{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let live = PreparationLease::reserve(&plugins).unwrap();
+        fs::create_dir(live.path()).unwrap();
+        fs::write(live.path().join("main.js"), "live").unwrap();
+        let orphan = PreparationLease::reserve(&plugins).unwrap();
+        let orphan_path = orphan.path().to_path_buf();
+        fs::create_dir_all(orphan_path.join("data")).unwrap();
+        fs::write(orphan_path.join("data/package-not-user-data"), "abandoned").unwrap();
+        drop(orphan); // Simulate restart: no live lease remains.
+
+        cleanup_orphan_staging(&plugins).unwrap();
+        assert_eq!(
+            sweep_collect(&plugins, &AppConfig::default()).unwrap(),
+            std::slice::from_ref(&orphan_path)
+        );
+        assert_eq!(sweep_delete(&plugins, &[live.path().to_path_buf(), orphan_path.clone()]), 1);
+        assert!(live.path().exists());
+        assert!(!orphan_path.exists());
+
+        let adopted = live.adopt(&plugins).unwrap();
+        assert!(!live.path().exists());
+        assert_eq!(fs::read_to_string(adopted.join("main.js")).unwrap(), "live");
+        // A stop between adoption and journal creation leaves ordinary staging.
+        cleanup_orphan_staging(&plugins).unwrap();
+        assert!(!adopted.exists());
+        assert_eq!(sweep(&plugins, &AppConfig::default()).unwrap(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

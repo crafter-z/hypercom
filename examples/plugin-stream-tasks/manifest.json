@@ -1,0 +1,21 @@
+{
+  "id": "com.example.hypercom-stream-tasks",
+  "name": "HyperCom Stream Tasks",
+  "version": "1.0.0",
+  "description": "按用户按钮演示单文件窗口、另存为写入、固定代次串口任务和 shell 流输出。不会启动时访问文件、设备或程序。",
+  "apiVersion": "1.0",
+  "entry": "main.js",
+  "permissions": ["fs:open", "fs:save", "serial:send", "shell:execute"],
+  "ui": {
+    "buttons": [
+      { "id": "read-file", "label": "选择并读文件", "icon": "FileText", "target": "sidebar" },
+      { "id": "write-file", "label": "另存为小报告", "icon": "Save", "target": "sidebar" },
+      { "id": "start-tool", "label": "运行 Git 版本流", "icon": "Terminal", "target": "sidebar" },
+      { "id": "cancel-tool", "label": "取消工具任务", "icon": "Square", "target": "sidebar" }
+    ],
+    "menuItems": [
+      { "id": "send-bytes", "label": "发送示例字节", "target": "port-context" },
+      { "id": "send-file", "label": "发送已选文件", "target": "port-context" }
+    ]
+  }
+}

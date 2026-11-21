@@ -11,12 +11,15 @@ use webview2_com::{
     DOMContentLoadedEventHandler, FocusChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
     NavigationCompletedEventHandler, NavigationStartingEventHandler,
     NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
-    StateChangedEventHandler, WebResourceRequestedEventHandler,
+    StateChangedEventHandler,
 };
 use tauri_plugin_shell::ShellExt;
-use windows::{core::{w, Error, HSTRING, Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND, Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, HRGN, RGN_DIFF, RGN_ERROR, SetWindowRgn}, System::Com::CoTaskMemFree, UI::{Shell::SHCreateMemStream, Input::KeyboardAndMouse::GetKeyState, WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SetWindowPos, ShowWindow, HWND_TOP, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS}}}};
+use windows::{core::{w, Error, HSTRING, Interface, PCWSTR, PWSTR}, Win32::{Foundation::HWND, Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, HGDIOBJ, HRGN, RGN_DIFF, RGN_ERROR, SetWindowRgn}, System::Com::CoTaskMemFree, UI::{Input::KeyboardAndMouse::GetKeyState, WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SetWindowPos, ShowWindow, HWND_TOP, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS}}}};
 use wry::{raw_window_handle::{HandleError, HasWindowHandle, Win32WindowHandle, WindowHandle}, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
-use super::{resources::Resource, OcclusionRect, Rect, Session};
+use super::{resources::{Resource, ResourceContents}, OcclusionRect, Rect, Session};
+#[path = "resource_response.rs"]
+mod resource_response;
+use resource_response::ResourceServer;
 struct OwnedRegion(Option<HRGN>);
 impl OwnedRegion {
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Result<Self, String> {
@@ -260,8 +263,8 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
     if !trusted {
         let styles = declaration.styles.iter().map(|path| format!("<link rel=\"stylesheet\" href=\"/{path}\">" )).collect::<String>();
         let html = format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{styles}<script defer src=\"/__host/sdk.js\"></script><script defer src=\"/{}\"></script></head><body><div id=\"plugin-root\"></div></body></html>", declaration.entry);
-        resources.insert("__host/index.html".into(), Resource { bytes: html.into_bytes(), mime: "text/html; charset=utf-8" });
-        resources.insert("__host/sdk.js".into(), Resource { bytes: sdk.into_bytes(), mime: "text/javascript; charset=utf-8" });
+        resources.insert("__host/index.html".into(), Resource { contents: ResourceContents::Generated(html.into_bytes()), mime: "text/html; charset=utf-8" });
+        resources.insert("__host/sdk.js".into(), Resource { contents: ResourceContents::Generated(sdk.into_bytes()), mime: "text/javascript; charset=utf-8" });
     }
     let downloads = Rc::new(RefCell::new(HashMap::new()));
     let pending_downloads = Rc::new(RefCell::new(HashMap::new()));
@@ -286,8 +289,6 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
     let new_window_origin = origin.clone();
     let new_window_session = session.clone();
     let new_window_trusted = trusted;
-    let resource_session = session.clone();
-    let resource_origin = origin.clone();
     let focus_session = session.clone();
     let focus_app = app.clone();
     let new_window_app = app.clone();
@@ -495,53 +496,8 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
             }
             Ok(())
         })), &mut token).map_err(|e| e.to_string())?;
-        // Trusted pages intercept only their local origin. Unknown local files
-        // always receive a response; remote requests retain browser CORS/TLS.
-        let filter = if trusted { format!("{origin}/*") } else { "*".into() };
-        core.cast::<ICoreWebView2_22>().and_then(|c| c.AddWebResourceRequestedFilterWithRequestSourceKinds(&HSTRING::from(filter), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL)).map_err(|e| e.to_string())?;
-        core.add_WebResourceRequested(&WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
-            let Some(args) = args else { return Ok(()); };
-            // Fail closed for every matched request, including malformed paths.
-            let denied = env.CreateWebResourceResponse(None, 403, &HSTRING::from("Forbidden"), &HSTRING::from("Content-Type: text/plain\r\nCache-Control: no-store\r\n"))?;
-            args.SetResponse(&denied)?;
-            let request = args.Request()?;
-            let mut uri = PWSTR::null(); request.Uri(&mut uri)?;
-            let uri = take_string(uri);
-            let mut method = PWSTR::null(); request.Method(&mut method)?;
-            let method = take_string(method);
-            let mut kind = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
-            args.ResourceContext(&mut kind)?;
-            let mut source_kind = COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL;
-            args.cast::<ICoreWebView2WebResourceRequestedEventArgs2>()?.RequestedSourceKind(&mut source_kind)?;
-            let path = uri.strip_prefix(resource_origin.as_str()).and_then(|path| path.strip_prefix('/'))
-                .and_then(|path| {
-                    let path = if trusted { path.split(['?', '#']).next().unwrap_or("") } else if path.contains(['?', '#']) { return None; } else { path };
-                    percent_encoding::percent_decode_str(path).decode_utf8().ok()
-                });
-            let resource = if resource_session.alive.load(Ordering::Acquire) && (method == "GET" || (trusted && method == "HEAD"))
-                // Isolated mode may only load its declared snapshot, including
-                // the host shell's own script/style subresources.
-                && (trusted || source_kind == COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT
-                    || path.as_deref().is_some_and(|path| resources.contains_key(path)))
-                && kind != COREWEBVIEW2_WEB_RESOURCE_CONTEXT_WEBSOCKET
-                && path.as_deref().is_some_and(|path| crate::plugin::validate_view_resource_path(path).is_ok()) {
-                path.as_deref().and_then(|path| resources.get(path))
-            } else { None };
-            let (status, mime, bytes): (i32, &'static str, &[u8]) = match resource {
-                Some(resource) => (200, resource.mime, resource.bytes.as_slice()),
-                None => (403, "text/plain", b"Forbidden".as_slice()),
-            };
-            let stream = SHCreateMemStream(Some(if method == "HEAD" { b"" } else { bytes }));
-            let policy = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-same-origin";
-            let headers = HSTRING::from(if trusted {
-                format!("Content-Type: {mime}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n")
-            } else {
-                format!("Content-Type: {mime}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Security-Policy: {policy}\r\nPermissions-Policy: camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), usb=(), serial=(), hid=(), bluetooth=(), display-capture=(), payment=()\r\n")
-            });
-            let response = env.CreateWebResourceResponse(stream.as_ref(), status, &HSTRING::from(if status == 200 { "OK" } else { "Forbidden" }), &headers)?;
-            args.SetResponse(&response)?;
-            Ok(())
-        })), &mut token).map_err(|e| e.to_string())?;
+        ResourceServer { origin, trusted, resources, alive: session.alive.clone() }
+            .install(&core, env).map_err(|error| error.to_string())?;
     }
     if !trusted {
         // Native policies, not DOM patches, isolate the legacy mode.
@@ -702,6 +658,9 @@ pub fn clear() {
 #[cfg(test)]
 #[path = "native_timeline_smoke.rs"]
 mod timeline_smoke;
+#[cfg(test)]
+#[path = "native_resource_smoke.rs"]
+mod resource_smoke;
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,7 @@ import { isSendablePort, portClosedReason } from '../utils/sendGuard';
 import { hexInputError, parseHexBytes } from '../utils/sendUtils';
 import { trafficStats } from '../utils/trafficStats';
 import { ttyService } from '../utils/ttyService';
-import { isFlowRunning } from '../utils/flowRuntime';
+import { isFlowRunning, isSerialTaskRunning } from '../utils/flowRuntime';
 
 /** Origin of a send request. Enhanced flow execution is the only owner allowed
  * to send while its target port is locked; all other callers are user work. */
@@ -70,6 +70,12 @@ export async function sendToPort(
   origin: SendOrigin = 'user',
 ): Promise<number> {
   const state = useAppStore.getState();
+  if (isSerialTaskRunning(portId)) {
+    const error = new Error('Port is occupied by a plugin send task');
+    if (silent) throw error;
+    notifyError(error);
+    return 0;
+  }
 
   // Enhanced flows own the target port's TX and parameter operations. Check at
   // the single send chokepoint so manual send, pop-outs, triggers, plugins and
@@ -137,6 +143,7 @@ export async function sendToPort(
   // Re-check port ownership and caller authority at that exact boundary.
   const authorizeSend = (): void => {
     if (!trafficStats.isCurrent(portId, lease)) throw new Error('Send owner retired');
+    if (isSerialTaskRunning(portId)) throw new Error('Port is occupied by a plugin send task');
     // TTY writes are serialized by ttyService, so a request can sit in its
     // queue after the initial guard above. Recheck the flow lease at dispatch
     // time as well; otherwise a flow that starts while a user keystroke is

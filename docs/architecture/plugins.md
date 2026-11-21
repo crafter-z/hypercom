@@ -6,6 +6,8 @@
 
 独立 UI、串口内容替换及动作创建额外工作区标签的当前实现见[隔离视图与标签契约](plugin-views.md)。Windows raw Wry adapter 已实现；其他平台隔离承载未验收时明确拒绝，不用主窗 iframe 替代。
 
+声明视图资源不会在安装/视图创建时整读载荷：宿主先记录已打开文件的身份、大小、修改时间和 MIME，WebView 请求时再次按句柄校验并以文件流供给，响应带 `Content-Length`/`nosniff`，资源身份变化则拒绝。manifest 的视图数量与资源路径数量边界仍有效；没有把未完成真实发行环境的 9 MiB 全流程写成已验收性能结论。
+
 ## 运行与信任边界
 
 - `<config_dir>/plugins/<反向域名 id>/manifest.json` 与 manifest 指定的 `entry` 是插件代码来源；入口为单文件普通脚本，不支持 ESM `import` / `require`。Rust 的 `plugin::PluginManifest::validate` 校验 id、API 主版本、路径及权限声明；启动时宿主读取 manifest，失败即拒绝运行。
@@ -13,12 +15,13 @@
 - Worker 没有 DOM / `window.__TAURI__`；宿主和插件以 `postMessage` 通讯，宿主在每次 RPC 调用时检查当前安装身份及 `grantedPermissions`。`list_plugins` 在控制面闸门内取得一致的磁盘与配置快照；主窗 `pluginConfigSnapshot` 按后端 `revision` 拒绝迟到的列表和变更响应，防撤权后旧快照复活权限。插件安装与启用是用户信任决策，不是针对恶意主窗口脚本的强沙箱：能在主窗口执行的任意脚本仍可直接调用 Tauri 命令。后端对插件命令另做主窗口来源限制、已启用及权限验证，不把 Worker 中的 `pluginId` 当成不可伪造身份。
 - `shell.execute` 是高风险的主窗 Worker→宿主能力，不注入到视图页面。每次调用复核启用态、安装代次和 `shell:execute` 授权；权限用于用户明确授权能力，不额外设置命令专用并发、输出或参数业务配额围栏；宿主通用 RPC 在途限制仍适用。`program`、`args`、`cwd`、环境和 stdin 按操作系统进程语义传递，插件可显式选择 shell 解释器；禁用、撤权、显式重载、卸载或替换会取消并等待直接子进程，但仅 Worker 崩溃或停止时，宿主可能只丢弃 RPC 回执，不保证取消已启动的原生命令；命令可运行至自身结束、调用方 timeout 或后续用户禁用。任何情况下都不承诺终止进程树或撤销已发生的副作用。
 - 生产主窗口 CSP 在 [`tauri.conf.json`](../../src-tauri/tauri.conf.json) 中明确设置 `connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost`，并以 `wasm-unsafe-eval` 允许插件 Worker 编译/实例化 WebAssembly。这些新增来源仅为 Tauri 内部 IPC 端点，使 raw custom-protocol fetch 可用；Tauri 2.12 不会自动补齐它们，不能只保留 `'self'` 后依赖 fallback。它们不表示额外开放外网、任意 localhost 或泛 HTTP/HTTPS 访问；Worker 没有 invoke key，不能直接使用宿主通用 native IPC，出站 HTTP 仍只能经 `plugin_http_open/read/cancel` 授权桥（`http:request` 授权；manifest 的 `http.urlWhitelist` 是可选收紧作用域，声明非空时逐跳校验）。默认跟随重定向（≤10 跳）、继承系统代理；用户显式配置的插件代理优先。无隐式 timeout 或响应大小截断，期限由调用方给出（完整语义见 [HTTP 流式契约](#http-流式契约)）。可信原生网页使用浏览器网络，不受 Worker 代理/白名单约束，仍遵守浏览器 CORS/TLS。开发 `devCsp` 保留相同内部 IPC 来源，仅额外允许 `ws://localhost:1420` 用于 Vite HMR，并同步允许 WASM；[`pluginFsCsp.test.ts`](../../src/services/pluginFsCsp.test.ts) 守卫这两组精确连接来源。
-- 已安装插件的 manifest 正常时，同 ID 仅接受更高版本覆盖安装；同版/降级拒绝，旧 manifest 损坏可修复安装。安装或升级默认禁用、清除普通授权及网页信任，生成新的 UUID `installGeneration`；可信网页先弹独立确认，普通权限另行授予，取消保留已安装但禁用状态。批准与启用绑定 `expectedGeneration`，升级期间排队的旧操作拒绝。网页批准独立于 `grantedPermissions`，正常重启保持，升级重审；`installedAt` 不参与身份判断。设置页仅在 `install_plugin` 返回同版/降级前缀时弹替换确认，取消不写磁盘；安装后按权威快照中 `installGeneration` 的变化识别新装插件，不按渲染进程的 manifest 列表推断。
+- 已安装插件的 manifest 正常时，同 ID 仅接受更高版本覆盖安装；同版/降级拒绝，旧 manifest 损坏可修复安装。安装或升级默认禁用、清除普通授权及网页信任，生成新的 UUID `installGeneration`；可信网页信任在同一权限审阅中以独立勾选项确认；若从设置单独管理信任则仍需该项明确确认。普通权限另行授予，取消保留已安装但禁用状态。批准与启用绑定 `expectedGeneration`，升级期间排队的旧操作拒绝；市场更新对已安装目标始终要求 `expectedGeneration`，本地严格更高版本安装为兼容旧调用可省略代次，但替换/同版确认必须绑定。网页批准独立于 `grantedPermissions`，正常重启保持，升级重审；`installedAt` 不参与身份判断。设置页仅在 `install_plugin` 返回同版/降级前缀时弹替换确认，取消不写磁盘；安装事务在身份预检通过后才取消 HTTP、Shell、文件任务并退休视图，提交前再次复核身份，避免被拒请求先中断当前工作。安装后按权威快照中 `installGeneration` 的变化识别新装插件，不按渲染进程的 manifest 列表推断。
 - 重载（`reload_plugin`）只重启已安装副本：不重新读取来源目录、不写 `config.json`（revision 不变），保留 `installGeneration`、`grantedPermissions`、`trustedWebGranted` 与 `data/`；要求主窗调用、已启用且磁盘 manifest 仍可校验。后端取消该插件在途 HTTP 并退休原生视图后返回当前快照；前端先停旧 Worker，快照被 revision 判旧即报错，否则严格等待新 Worker 到 `__plugin_ready` 再刷新列表并重建视图；只有快照被接受且新 Worker 就绪后才提示成功，陈旧快照或启动失败只报错。纯网页插件不创建 Worker。
-- 设置页允许在插件禁用时逐项授权；权限整体替换按插件在模块级队列执行，启用等待当前授权队列落盘；安装/卸载进行时禁用设置页控制，但最终安全边界仍是后端安装身份检查。
-- 安装/卸载在持久化禁用清权或配置提交后即使后续步骤失败，设置页也必须重新读取 `list_plugins` 权威快照；旧 Worker 先退休，快照读取失败时 fail-closed 停止宿主 Worker，不能继续按过期前端授权执行。
+- 设置页允许在插件禁用时逐项授权；权限整体替换按插件在模块级队列执行，启用等待当前授权队列落盘。安装完成后的审阅按用途分组显示实际声明能力；`shell:execute` 默认不加入初始选择，可信网页信任始终独立，混合包未获信任时不能启用。安装/卸载进行时禁用设置页控制，但最终安全边界仍是后端安装身份检查。
+- 启停、撤普通权限或撤网页信任先提交主配置；主配置提交成功后一定执行对应的 HTTP/Shell、文件任务、视图和目录授权清理。安全备份或恢复标记收尾失败会保留 fail-closed 屏障并返回错误；前端必须回读 `list_plugins` 权威快照。主配置保存失败则不提前退休运行态。安装/卸载在持久化禁用清权或配置提交后即使后续步骤失败，设置页也必须重新读取权威快照；旧 Worker 先退休，快照读取失败时 fail-closed 停止宿主 Worker，不能继续按过期前端授权执行。
 - `fs.openDialog`、`fs.openDirectoryDialog`、`fs.saveFile` 与 `ui.panel.export` 受跨 Worker generation 共享的 per-plugin dialog permit 限制；permit 由实际原生 picker/write 任务持有到终止，Worker 退休不会提前归还容量；Rust 预算表使用弱引用并在新准入时回收过期 ID，元数据不随历史插件数永久增长。KV 排队写在 dispatch 和真实写入前复核 RPC authority，旧请求不能影响新 Worker。
-- 插件目录权限分开授权：`fs:open-dir` 列目录/读文件/读元数据；推荐的最小 `fs:export-dir` 仅创建/覆盖导出文件并自动创建父目录；兼容保留的 `fs:write-dir` 还允许追加、显式建目录、删除和重命名。目录根只能来自 `plugin_pick_directory` 原生目录选择器（授予任一目录权限即可选择），`grantId` 与插件 ID、`installGeneration` 绑定，展示用 path 不是访问能力。每次操作都重校验启用态、manifest、当前对应权限、安装身份和授权，限制目标为 canonical root + 相对路径，拒绝绝对路径、`..`、链接/重解析点与越界；最小导出不隐式获得读取或破坏性目录操作。授权无 TTL、无数量上限，只存在宿主内存；重启、禁用、全部目录权限撤销、卸载、替换或重载时失效。
+- 插件目录权限分开授权：`fs:open-dir` 列目录/读文件/读元数据；推荐的最小 `fs:export-dir` 仅创建/覆盖导出文件并自动创建父目录；兼容保留的 `fs:write-dir` 还允许追加、显式建目录、删除和重命名。目录根只能来自 `plugin_pick_directory` 原生目录选择器（授予任一目录权限即可选择），`grantId` 与插件 ID、`installGeneration` 绑定，展示用 path 不是访问能力。每次操作都重校验启用态、manifest、当前对应权限、安装身份和授权，限制目标为 canonical root + 相对路径，拒绝绝对路径、`..`、链接/重解析点与越界；最小导出不隐式获得读取或破坏性目录操作。授权无 TTL、无数量上限，只存在宿主内存；重启、禁用、全部目录权限撤销、卸载、替换或重载时失效。旧目录 overwrite/append 与导出共用原生路径、权限、身份和 grant 的提交前复核，授权在提交点失效时不报告成功。
+- 新范围/分页读取会记录每个请求实际依赖的 `fs:assets`、`fs:storage`、`fs:open-dir`；撤销某一具体读取能力只取消依赖该能力的请求，仍有其他 read grant 的 session 保留。三种范围读取能力全部撤销时才退休该插件的读取 session；重新授予不会复活已取消请求或旧 cursor。
 - `fs:save` 是独立的任意目录 Save As 最小权限：`fs.saveFile` 每次在原生保存对话框中由用户产生目标，只接受内容与标题/文件名/过滤器提示，不接受插件指定的绝对路径，也不产生可复用目录 grant。`plugin_save_file` 在选择后与写提交前复核身份/授权；取消返回 null，与空内容保存成功不同。`fs.exportFile` / `fs.saveFile` 均接受 UTF-8 文本或完整原始字节，不增加内容业务大小限额、读取权限或隐式 RPC 截止；既有 `fs:write-dir` 与无额外权限的 `ui.panel.export` 保持兼容。
 - `serial:control` 独立于 `serial:send`，仅允许通过共享串口 runtime 打开/关闭白名单内端口，不向 Worker 暴露直接 invoke。`pluginHostApi` 与原生 `plugin_serial_open/close` 都复核安装身份、启用态、manifest/当前权限与端口白名单；关闭使用 `expectedConnectionGeneration` CAS，不将排队旧关闭作用到新连接。`ports.list/status` 走原生权威连接摘要（含代次，无额外控制权限），仅显示 `mode` 优先采用已有宿主 UI metadata，不用过期 store 状态/代次覆盖 native；打开不抢占前端焦点或隐式发送；无通用 RPC 控制期限。授权确认分别说明控制风险、白名单目录导出及每次 Save As 的差异。
 
@@ -61,7 +64,8 @@
 - ZIP先按96MiB压缩输入上限读取不可变快照，再校验实体中央目录条数（≤2000，不按去重后的名称数计）、16MiB中央目录及64KiB单条元数据。eager parser只见已验证元数据与唯一规范footer，不能退回载荷中的另一个footer放大分配；ZIP64条目保留，解压仍逐条流式计64MiB。拒绝重复名称、伪造计数、歧义中央目录结束标记。
 - 安装先完整暂存并验证入口和 manifest 一致性，再持久化禁用清权及安全 `.bak`。`plugin/transaction.rs` 将受限 journal 写入 `<config_dir>/plugin-transaction.json` 并同步，路径只能由有效插件 ID 和 UUID 派生。启动在 Worker 前恢复中断事务：最终发布前恢复旧代码和私有数据，发布完成保留新树但不恢复授权；卸载配置提交前恢复备份，提交后把备份**原子改名**为 `.trash-<uuid>`，不在启动或配置锁内做递归删除。恢复幂等，非法/链接/含糊状态报错并保留数据。递归删除只在窗口/托盘创建完成后由后台 sweep 执行：sweep 的选择阶段与插件 IO 闸门串行、删除阶段不占闸门，journal 存在时不触碰任何树，单棵删除失败只记日志不中止；`.backup-*` 仅在其插件已不在配置中、或普通非链接活目录仍存在时才回收，链接不能证明备份已有替代；`.staging-*` 若含 `data/`（升级 `private-data`→`publish` 窗口内私有数据的唯一副本）永不回收，即使没有 journal 也保留原名，不先改为可清理的 `.trash-*`。启动期恢复失败**不再中止启动**：先 arm `plugin-trust-recovery.json`，把 journal 隔离为 `plugin-transaction.json.corrupt-<uuid>`，所有插件按 fail-closed 禁用并清空授权/网页信任后继续启动；持久化失败时保留 journal 与 marker 以便下次重试，仍不阻塞启动。资产写入同步临时文件后单操作替换目标（Windows `MoveFileExW` 写穿透），不再先移走旧 KV 文件。文件系统和设备必须遵守 flush/write-through；准备阶段尚未登记的惰性 staging 残留不含迁移后的私有数据。
 - **安全授权恢复屏障**：启停、权限、网页信任及配置恢复的插件状态变更，先原子同步 `plugin-trust-recovery.json`，只有 primary 与 safe backup 都同步成功后才清除。启动发现残留 marker 时在暴露 Worker 前将插件禁用、清空权限和网页信任并安全落盘；marker/schema/读取失败不忽略。这样 primary 后续损坏回退旧 `.bak` 也不会复活撤销前授权；普通配置备份语义不变，插件代码/私有数据不因该屏障被删除。
-- 插件 `fs.openDialog` 的唯一入口为 Rust `plugin_pick_files`：验证插件启用及 `fs:open` 授权，由原生文件选择器产生路径，返回原始字节的 base64。无单文件/总量/数量限额；类型 filters 仅提示并追加 All files，不限制读取内容。宿主按请求返回解码文本或 `Uint8Array`。不提供接收任意路径的插件读取命令；`ui.panel.export()` 仍通过另存为写文本。
+- **本地目录准备与复制**：选择本地目录后，源树以不跟随链接的句柄遍历做条目/总字节/目标卷可用空间预检；预检和复制均在控制闸门外执行，按 256 KiB 窗口复制并发布 `waiting/scanning/copying/validating/committing` 进度。扫描与复制间源身份或大小变化、空间不足或取消都会丢弃 staging，不发布半成品。提交后代码/安装代次和授权清理按事务完成；已发布提交不回滚。ZIP 仍先守压缩输入、中央目录、条目和单条元数据边界，再按既有解压上限展开，不把 ZIP 的不受信解析预算当成本地目录复制上限。
+- 插件 `fs.openDialog` 的唯一入口为 Rust `plugin_pick_files`：验证插件启用及 `fs:open` 授权，由原生文件选择器产生路径，返回原始字节的 base64。无单文件/总量/数量限额；类型 filters 仅提示并追加 All files，不限制读取内容。宿主按请求返回解码文本或 `Uint8Array`。不提供接收任意路径的插件读取命令；`ui.panel.export()` 仍通过另存为写文本。损坏 manifest 的已配置插件目录仍返回匹配的 `installGeneration` 供卸载/恢复确认，但不会暴露可运行 manifest、授权或启用状态。
 - 插件 `fs.openDirectoryDialog` 的唯一入口为 Rust `plugin_pick_directory`：授予 `fs:open-dir`、`fs:export-dir` 或 `fs:write-dir` 即可选择，原生目录选择器返回路径后先拒绝根及其祖先中的链接/重解析点，再产生 canonical root 并创建内存 grant，返回 `{grantId, name, path}`（支持 `multiple` 多选）；`path` 只用于展示，后续只能通过 grant 的相对路径触达该根。每次调用都重跑同一套启用/权限/manifest/安装代次校验，并在 `spawn_blocking` 中枚举、读取或修改。读侧：list（可递归、无深度上限）、read file、stat；写侧：旧 fs:write-dir 的 write file（overwrite/append，可自动建父目录）、create dir、remove、rename；最小 fs:export-dir 单独走 plugin_export_file，仅相对路径原子覆盖导出并创建父目录。所有写操作只允许在 canonical root 内，拒绝链接/重解析点和越界；`plugin_release_directory` 幂等释放，插件状态变化时自然失效。
 - 旧 `read_plugin_asset`/`write_plugin_asset` 全文件接口保留，新增 `read_plugin_asset_raw` 加速旧 binary 读取，并由 `plugin_fs_read_ranges` 提供有界窗口；普通插件的范围读取不继承宿主 bootstrap/KV 私有读取例外。读取仍拒绝链接/重解析/硬链接与非常规文件、越界报错；旧文本返回 UTF-8 替代解码文本，旧 JSON wire 的 binary 仍为 base64，raw wire 直接返回字节。写入只接受 `data/` 首段，`content`（含空串）与 `base64`（原始字节，可为零长度）互斥；`PreparedAssetWrite` 在同目录暂存、锁外写入并同步，重新取得短闸门复核安装身份/权限/目标后才执行 `plugin::transaction::replace_file` 与 `sync_dir`。同插件写入经 `asset_write_queue` 串行，安装/授权生命周期继续由控制面闸门串行，不设内容大小上限，也不扫描整个 `data/` 配额。
 
@@ -80,15 +84,21 @@
 | `uninstall_plugin` | `{id, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须匹配当前安装身份（防止升级期间排队的旧请求卸载新代码）；配置提交后删除代码、状态及私有数据，并取消在途 HTTP、退休视图、清除网页站点数据；目录缺失按已卸载处理。视图退休与清网页数据在 UI 线程执行且有 15/30 秒上限，失败只记日志（配置已提交即视为卸载成功），递归删除交给后台 sweep，不阻塞命令 |
 | `set_plugin_enabled` | `{id, enabled, expectedGeneration}` | `PluginStateSnapshot`；expectedGeneration 必须为用户实际审阅的安装身份，旧身份拒绝；启用在配置锁外复用完整 manifest/声明视图资源校验，随后在锁内复核安装代次；声明可信网页时还须已获 `trustedWebGranted`；禁用提交后取消在途 HTTP、退休视图并释放该插件的目录授权 |
 | `set_plugin_permissions` | `{id, permissions, expectedGeneration}` | `PluginStateSnapshot`；整体替换为 manifest 已声明且宿主支持的权限子集，可在禁用时授权；撤掉 `http:request` 会取消在途请求，目录权限全部撤掉时释放该插件的目录授权，按已提交授权退休被拒视图 |
-| `set_plugin_trusted_web` | `{id, trusted, expectedGeneration}` | `PluginStateSnapshot`；仅主窗独立确认后授予，`trusted=true` 要求 manifest 声明可信网页视图；撤销同时禁用并退休视图，普通权限命令不能替代；`.bak` 更新失败时报错但状态已提交 |
+| `set_plugin_trusted_web` | `{id, trusted, expectedGeneration}` | `PluginStateSnapshot`；仅主窗在用户明确勾选网页信任（单独管理场景仍是独立确认）后授予，`trusted=true` 要求 manifest 声明可信网页视图；撤销同时禁用并退休视图，普通权限命令不能替代；`.bak` 更新失败时报错但状态已提交 |
 | `clear_plugin_web_data` | `{id, expectedGeneration}` | `PluginStateSnapshot`；要求插件禁用，退休视图后等待原生网页数据清理完成（清站点数据，空 profile 可保留，实现见[隔离视图](plugin-views.md)），失败报错 |
 | `read_plugin_asset` | `{id, relPath, format?}` | 兼容保留 `string \| null`；format 缺省/text 为 UTF-8 替代解码文本，binary 为 base64。仅缺文件返回 null，权限/IO 错误 reject；不设读取大小限制 |
 | `read_plugin_asset_raw` | `{id, relPath, expectedGeneration?}` | 原始字节 `Response`，加速旧 binary 读取；仅 custom-protocol，缺文件为 `PLUGIN_FILE_NOT_FOUND`，宿主映射旧缺失语义；明确 raw unsupported 才可回退旧命令 |
+| `plugin_file_pick_read` / `plugin_file_pick_write` | `{pluginId, expectedGeneration, sessionId, requestId, options?}` | 原生只选一个文件；read 返回只读句柄元数据，write 打开独立 Save As 暂存目标；取消返回 null；句柄不携带路径能力 |
+| `plugin_file_read` / `plugin_file_write` | `{pluginId, expectedGeneration, sessionId, requestId, handleId, offset, length/base64}` | 读/写均按 ≤1 MiB 窗口；每次重校验 session、代次和对应 `fs:open`/`fs:save` 权限；迟到或取消结果不交付 |
+| `plugin_file_commit` / `plugin_file_close` | `{pluginId, expectedGeneration, sessionId, requestId, handleId}` / cleanup | commit 在授权复核后发布暂存写目标，成功替换不可回滚；父目录同步失败以 `durabilityWarning` 返回；close 幂等清理 |
 | `write_plugin_asset` | `{id, relPath, content?, base64?}` | 无返回值；`content`（可空）与 `base64`（原始字节）互斥，二者皆缺则报错；仅已授权 `data/` 写入，路径/原子写约束保留，不设内容大小上限 |
 | `plugin_serial_list` | `{pluginId, expectedGeneration}` | 原生权威端口摘要数组，含 connectionGeneration；只要求主窗、启用态和安装身份，无额外 serial:control |
 | `plugin_serial_status` | `{pluginId, expectedGeneration, portId}` | 单端口原生摘要或 null；初始未连接代次为 0，已关闭保留历史成功代次 |
 | `plugin_serial_open` | `{pluginId, expectedGeneration, portId, params?}` | `{port,result:'opened'\|'already-open',connectionGeneration}`；serial:control + 白名单，params 使用 camelCase 子字段，已连接不重开或修改参数 |
 | `plugin_serial_close` | `{pluginId, expectedGeneration, portId, expectedConnectionGeneration}` | `{port,result:'closed'\|'already-closed'}`；serial:control + 白名单 + 原生连接代次 CAS；旧代次不能关闭新会话 |
+| `plugin_serial_task_begin` | `{pluginId, expectedGeneration, portId, connectionGeneration, taskId, source}` | 固定端口/连接代次的字节或文件任务；source 为 bytes 总长度或已选只读文件句柄；返回 `{totalBytes,connected,windowBytes}`，不自动重连 |
+| `plugin_serial_task_step` | `{pluginId, expectedGeneration, portId, taskId, offset, bytes?}` | 单次最多 64 KiB；原生返回 `written|cancelled|disconnected|failed` 与已写字节；IPC 失败后状态为 unknown，禁止自动重发 |
+| `plugin_serial_task_close` | `{pluginId, expectedGeneration, portId, taskId}` | 幂等收尾/释放端口流程独占；取消只影响该任务，迟到回执不能写入新连接代次 |
 | `plugin_export_file` | `{pluginId, grantId, relPath, content?, base64?}` | `{path,bytesWritten}`；fs:export-dir，仅所选 grant 根 + 相对文件名，UTF-8 文本/字节互斥，按需建父目录并原子覆盖，无 append/remove/rename/read |
 | `plugin_save_file` | `{pluginId, content?, base64?, options}` | `{path,bytesWritten}` 或 null；fs:save，每次原生 Save As，options 仅标题/文件名/过滤器提示，不接受目标路径，取消不写入 |
 | `plugin_pick_directory` | `{pluginId, options}` | `PluginPickedDirectory[]`；options 为 `{title?, multiple?}`。主窗原生目录选择器，校验目录权限与安装代次，canonicalize 后创建 grant；无 TTL、无数量上限 |
@@ -112,6 +122,10 @@
 | `plugin_http_cancel` | `{pluginId, expectedGeneration, requestId}` | 幂等；未知 requestId 记录有界（32 条）「先取消后打开」意图，挂起中的 open/read 被打断；归属其他安装代次的 requestId 报错 |
 | `plugin_open_external` | `{pluginId, url}` | 无返回值；需要 shell:open，仅 http/https/mailto |
 | `plugin_shell_execute` | `{pluginId, expectedGeneration, request: {program, args?, cwd?, env?, stdin?, timeoutMs?}}` | `{exitCode, stdout, stderr}`；需要 shell:execute；按 OS 进程语义执行，直接子进程生命周期由插件能力层管理；不额外设置命令专用并发/输出/参数业务配额（宿主通用 RPC/OS/内存限制仍适用） |
+| `plugin_shell_open_session` / `plugin_shell_close_session` | `{pluginId, expectedGeneration}` / session | 为 `shell.start` 建立/关闭 Worker 代次会话；不改变既有 shell.execute |
+| `plugin_shell_start` | `{pluginId, expectedGeneration, sessionId, request, options:{stdout?,stderr?}}` | 同一 shell:execute 授权启动单任务；每管道 `pipe` 或 `discard`，无默认总期限/总量业务配额；返回 taskId |
+| `plugin_shell_read` / `plugin_shell_status` | `{..., taskId, stream}` / `{..., taskId, wait}` | 每管道单 reader，逐块最多 16 KiB；status 为 running/cancelling/exited/cancelled/timed-out/failed；stdout/stderr 各自有序 |
+| `plugin_shell_cancel` / `plugin_shell_release` | `{..., taskId}` | cancel 只请求该直接子进程，release 释放任务记录；不终止进程树、不回滚外部副作用 |
 | `create_plugin_view` | `{binding}` | 主 WebView 专用；校验安装/权限/端口及资源后创建独立原生 UI |
 | `update_plugin_view` | `{instanceId, rect, occlusions?, visible, layoutRevision}` | 最新 revision 几何、局部遮挡（≤64 矩形，见[隔离视图](plugin-views.md)）及可见性；按主窗 zoom/DPI 转换并裁剪 |
 | `send_plugin_view_message` | `{instanceId,message}` | 只准 init/state/environment 有界 JSON，状态快照 256 KiB，不接受源代码 |
@@ -178,7 +192,7 @@ cursor 绑定 plugin/session/grant 及规范化 rel/recursive；后续可省略 
 
 ## 验证与发行边界
 
-范围/分页 raw 通道、队列与 soft IO budgets 的自动化验证不等于真实环境性能验收；尚未完成发行 WebView、真实磁盘与多插件同时扫描大文件的实机压测。当前并发/字节/速率预算是准入与在途资源策略，不是吞吐/延迟 SLA，也不能证明主窗绝不阻塞或插件/应用总内存有硬上限。没有新增独立插件进程或堆配额。
+范围/分页 raw 通道、队列与 soft IO budgets 的自动化验证不等于真实环境性能验收；当前已用生产资源 selector 在隐藏 WebView2 中完成约 9 MiB 声明资源的加载与 SHA 校验，但这不等于发行包全流程、安装复制或跨平台验收。尚未完成发行包、真实磁盘与多插件同时扫描大文件的完整实机压测。当前并发/字节/速率预算是准入与在途资源策略，不是吞吐/延迟 SLA，也不能证明主窗绝不阻塞或插件/应用总内存有硬上限。没有新增独立插件进程或堆配额。
 
 - Rust 库测试覆盖 manifest/路径/ZIP 边界、市场索引/描述 schema 与 URL 校验、安装身份与事务恢复、权限和目录 grant、原子文件写入、HTTP 流式取消与重定向、本机命令执行与取消；运行 `npm run test:rust`（统一入口的临时目录隔离见[提交与验证](conventions.md#提交与验证)）。
 - 前端类型检查与 Vitest 覆盖 revision 快照、权限撤销、KV/文件/目录/HTTP、Worker、RX 旁路、通知和 UI 注册表；运行 `npx tsc --noEmit` 与 `npm run test:run`。

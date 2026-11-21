@@ -83,7 +83,7 @@ api['ui.panel.append']({ text: 'Hello HyperCom ready\n' })
 ### 安装并观察
 
 1. 打开「设置 → 插件 → 安装目录…」，选择包含 manifest.json 的 `com.example.hello/`。
-2. 安装完成后宿主会弹出权限确认。用户可以一次性授予 manifest 声明且宿主支持的全部权限并启用插件，也可以稍后在插件设置中逐项授权；取消确认会保留插件但不运行。
+2. 安装完成后宿主会打开按“观察设备数据、向设备发送或改变连接、读取/保存/导出文件、访问网络/系统程序/剪贴板、应用内显示与设置”等任务分组的权限审阅。默认选择实际声明且宿主支持的普通能力，但高风险 `shell:execute` 默认不勾选，需用户明确加入；审阅基于实际安装包而不是市场预览。若包含 `trusted-web` 视图，还须单独勾选网页信任；混合包在未获网页信任时保持禁用。用户可稍后在插件设置中重新审阅或撤权；取消会保留插件但不运行。
 3. 主窗口出现「插件输出」，包含 `Hello HyperCom ready`；点侧边栏的「问候」，依次出现 `Hello HyperCom #1`、`#2`。
 4. 此时计数只在 Worker 内存中。禁用或重启会重置；需要持久化时使用 storage。
 
@@ -190,7 +190,7 @@ otify` | 发出受限的非粘滞通知 |
 - `on(...)` 返回注销函数；不需要订阅时调用它。
 - RX 行和字节回调收到**数组批次**，不是单条记录。
 - 异步回调应返回 Promise（async 函数会自动返回）；桥在本批回调完成后发送 ACK。不要 fire-and-forget 大量任务或在回调里永久等待。
-- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`serial.open`、`serial.close`、`fs.exportFile`、`fs.saveFile`、`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`shell.execute` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
+- 宿主对普通 RPC 的回执期限为 10 秒，Worker 侧留 11 秒等待回执；超时只让该次调用 reject。以下调用等待真实完成、用户、网络或进程，不设通用 RPC 期限：`serial.open`、`serial.close`、`fs.exportFile`、`fs.saveFile`、`fs.read`、`fs.readRange`、`fs.readRanges`、`fs.listDirectoryPage`、`fs.write`、`storage.set`、`fs.openDialog`、`fs.openDirectoryDialog`、`fs.listDirectory`、`fs.readDirectoryFile`、`fs.statDirectoryEntry`、`fs.writeDirectoryFile`、`fs.createDirectory`、`fs.removeDirectoryEntry`、`fs.renameDirectoryEntry`、`ui.panel.export`、`fs.openFile`、`fs.createFile`、`fs.readFileWindow`、`fs.writeFileChunk`、`fs.commitFile`、`shell.execute`、`shell.start`、`shell.read`、`shell.status`、`shell.cancel`、`shell.release` 与全部 `http.*`。`shell.execute` 的业务 `timeoutMs` 由调用方指定（缺省或 `0` 不设截止），不因 RPC 回执期限被隐式改写；`view.sendBinary` 另有 10 分钟传输 RPC 资源期限与逐块 30 秒 ACK 期限。HTTP 的业务期限仍只由请求的 `timeout` 决定；未消费的 stream 会在闲置 60 秒后回收，正在进行的 `read` 不计闲置。
 - 超时只是回执失败，不表示已经开始的串口写入、文件写入、HTTP 请求或本机进程已被撤销。避免对可能已成功的副作用盲目重试。
 
 ## API 参考
@@ -213,6 +213,26 @@ serial.send 的 HEX 使用偶数个十六进制字符，可含空白，不自动
 `serial.open` 的 `params` 可省略；未提供字段沿用宿主当前端口参数与默认值。允许 `baudRate`（1..4294967295 整数）、`dataBits`（5/6/7/8）、`parity`（`None`/`Even`/`Odd`）、`stopBits`（`One`/`Two`）、`handshake`（`None`/`XonXoff`/`RequestToSend`/`RequestToSendXonXoff`）、布尔 `dtr`/`rts` 以及 TTY `cols`/`rows`（1..65535 整数）；未知字段、非法枚举/数值明确 reject，不静默钳制。虚拟端口仍受宿主开发能力开关约束，控制权限不能绕过它。
 
 打开、关闭与用户连接按钮/自动重连共用每端口顺序 lane；排队后再次检查启用态、安装身份、授权与白名单。连接/权限/过期意图错误 reject，不使用 `serial.send` 的零字节兼容成功语义。`expectedConnectionGeneration` 不是端口所有权证明：用户明确授权后，插件也能关闭白名单内由用户或其他插件打开、且代次仍匹配的连接。不要失败后自动删除代次并盲目重试关闭。
+
+#### 分块串口任务（字节与已选文件）
+
+除一次性的 `serial.send` 外，Worker 还可使用 `self.plugin.serial.sendBytes` / `sendFile` 建立一个固定端口的分块任务。两者都要求 `serial:send`、端口白名单和调用方观察到的 `expectedConnectionGeneration`；任务不会随焦点或自动重连漂移。
+
+```js
+const task = self.plugin.serial.sendBytes({
+  portId: 'COM9',
+  expectedConnectionGeneration: 12,
+  bytes: new Uint8Array([0x55, 0xaa, 0x01]),
+  signal: controller.signal,
+});
+task.onProgress((progress) => console.log(progress.status, progress.bytesWritten, progress.totalBytes));
+const result = await task.done;
+```
+
+- `sendBytes({portId, expectedConnectionGeneration, bytes, signal?})` 接受 `Uint8Array` 或 `ArrayBuffer`；`sendFile({portId, expectedConnectionGeneration, handleId, signal?})` 只接受 `fs.openFile()` 产生的只读句柄 ID，不接受路径。每次 IPC 窗口最多 64 KiB，宿主可按串口速率选择更小窗口。
+- 返回任务对象 `{taskId, done, cancel, getProgress, onProgress}`。进度状态为 `starting`、`running`、`cancelling`、`completed`、`cancelled`、`disconnected`、`failed` 或 `unknown`；`bytesWritten` 是已确认的最低写入量，`unknown` 时最后一次窗口可能已经到达驱动。
+- `AbortSignal` 或 `task.cancel()` 只取消该任务；已经交给驱动的字节不能撤回。拔插/重连导致连接代次不匹配时，旧任务结束为 `disconnected` 或 `unknown`，新连接不会接收旧任务尾部。零字节任务可直接 `completed`；部分写入、超时或失败都**不自动重发**，调用方必须先核对设备状态再决定。
+- 任务在两次窗口之间闲置约 60 秒会被回收；这不是执行总期限。`done` 会在任务状态结算（也可能是 `unknown`）时 resolve，不代表设备或驱动结果已知。撤权、禁用、换代会取消相关任务；撤销 `fs:open` 只影响文件任务，不影响仍在运行的纯字节任务。
 
 ### 面板、通知与日志
 
@@ -258,6 +278,32 @@ storage 的文件是 data/state.json。只有确认文件不存在才初始化�
 - 两者都接受且只接受 `content`（UTF-8 文本，可空）或 `bytes`（`Uint8Array` / `ArrayBuffer`，可零长度），无内容业务大小限额，无隐式保存期限；仍受可用内存、磁盘和宿主普通 RPC 在途槽位约束。`fs.saveFile` 与其他文件选择/面板导出共用每插件最多 8 个对话框许可；不要在后台循环弹出对话框。
 - 撤权、禁用或安装身份变化会拒绝排队请求并丢弃迟到回执；原生选择后/提交前再次校验。取消 Save As 返回 null，不是写入零字节。撤销不回滚已经完成的文件写入；失败不应盲目重放。旧 `fs:write-dir` 和仅导出自身面板的 `ui.panel.export` 保持原契约，不被两个新权限隐式扩大或替代。
 
+### 单文件句柄：只读选择与只写另存为
+
+这是新增 API，不替换旧 `fs.openDialog`/`fs.saveFile` 契约。`fs.openFile` 只开一个文件的只读句柄；`fs.createFile` 每次打开原生 Save As，产生独立的只写暂存目标。二者不能合并成双向句柄，也不把路径交给插件。
+
+```js
+const reader = await self.plugin.fs.openFile({ title: '选择日志', signal: controller.signal });
+if (reader) {
+  for await (const chunk of reader.windows({ chunkSize: 1024 * 1024, signal: controller.signal })) {
+    consume(chunk);
+  }
+  // windows() 完成或取消时会 close；也可显式 reader.close()/reader.cancel()
+}
+
+const writer = await self.plugin.fs.createFile({ defaultFileName: 'report.bin' });
+if (writer) {
+  await writer.write(new Uint8Array([1, 2, 3]), { signal: controller.signal });
+  const committed = await writer.commit();
+  console.log(committed.bytesWritten, committed.durabilityWarning);
+}
+```
+
+- 读句柄结果含 `{handleId, name, size, read, windows, close, cancel}`；`read(offset,length,{signal?})` 单窗口最多 1 MiB，EOF 可短读或返回零字节。`windows()` 是顺序窗口迭代器，按需交付，不把 1 GiB 文件整读到 JS 内存。
+- 写目标结果含 `{name, write, commit, close, cancel}`；`write(bytes,{signal?})` 每块 1..1 MiB，必须按顺序追加。`commit()` 先在暂存文件上完成提交前校验，再发布目标；成功后返回 `{bytesWritten,durabilityWarning?}`。发布后的原子替换不可回滚，即使父目录同步只得到 warning，也不要重放 commit。
+- 句柄/写目标最多每插件 4 个、全局 32 个；请求并发受新文件 lane 及共享 IO 调度约束。打开、窗口读取、分块写入和关闭都可被 `AbortSignal`/显式取消；`commit()` 不接受 signal，竞态中若回执丢失，结果是未知，必须先核实目标再重试。
+- 句柄绑定插件安装代次、Worker epoch 和 FS session；关闭、撤权、禁用、重载、替换、卸载或 Worker 停止会使迟到请求失效。`fs:open` 只产生读句柄，`fs:save` 只产生写目标；选择目录不会升级为目录授权。
+
 ### 范围读取、批量与目录分页
 
 这些是新增 Worker API，不替换旧接口；无需为已有插件改返回类型。`range` 指 `{rel, offset, length, grantId?}`，偏移与长度均以**字节**计：
@@ -275,7 +321,7 @@ storage 的文件是 data/state.json。只有确认文件不存在才初始化�
 - **优先级与取消**：`priority` 只接受 `'interactive'` / `'background'`，默认 background；用户当前可见窗口可用 interactive，整树扫描应保持 background。优先级是调度提示，不绕过每插件聚合预算。`signal` 是标准 `AbortSignal`，仅在 Worker 内消费，不跨结构化克隆；`AbortController.abort()` 使挂起调用以 `AbortError` reject，并经独立取消通道通知原生层。新文件 API 不设隐式总读取期限；取消不表示 OS 已同步结束阻塞 IO，资源只在真实任务结束后归还。
 - **传输与所有权**：范围读取只支持原生 raw custom-protocol 通道，不将文件字节转成 base64、JSON 数字数组或可执行脚本；不支持该通道时明确失败，不静默退回大文本路径。少量请求、分页和 frame 描述元数据仍使用 JSON。宿主向 Worker 使用 transfer list，批量各项可能共享同一 payload buffer，处理单项时使用其 `byteOffset` / `byteLength`；需要独立保留某项时调用 `bytes.slice()`。raw、frame 解析和 transfer 不意味着端到端零拷贝。旧 `fs.read({format:'binary'})` 与 `fs.readDirectoryFile`（text/binary）优先走 raw 字节快速路径，目录文本仍按指定 encoding 解码；仅明确不支持 raw 时兼容回退旧 base64 wire，公开返回形状不变。`fs.openDialog` 仍走原有文件选择 wire，`view.sendBinary` 的传输也不由此改变。
 
-新增读取会话绑定插件 ID、`installGeneration` 与根 Worker epoch，原生 session 懒创建；禁用、撤权、重载、替换或 Worker 停止会使旧会话失效，迟到结果不能投给新 Worker。**soft IO budgets 是宿主运行时的准入/在途资源预算，不是文件总大小、整个插件内存或 JS 堆的限额。** 当前调度默认全局 4、每插件 2、每会话 2 个实际 IO，background 全局最多 3，保留 1 个交互容量；受控在途字节预留预算全局 64 MiB、每插件 32 MiB；background 的全局/每插件/每会话令牌桶各为 8 MiB/s、突发 8 MiB，带宽成本与内存预留分开计账。批量/窗口限额只约束单次请求，可按窗口读取更大的文件；旧资产读写和目录 raw 快速路径共享 IO 并发但不新增文件大小上限，未将文件选择器改成新范围通道。新文件 RPC 有独立的 8 个在途槽，不占 32 个普通 RPC 槽；取消另有有界通道。它们独立于 RX/control 事件背压，也不能保证其他插件、插件自行保存的数据或浏览器总内存有硬上限；本实现没有独立插件进程或堆配额。上述并发/速率数字是调度配置，不是实测吞吐或响应延迟承诺；尚未完成真实发行 WebView 与磁盘上的多插件大文件扫描压测，不能据此推断主窗绝不会卡顿或总内存一定受控。
+新增读取会话绑定插件 ID、`installGeneration` 与根 Worker epoch，原生 session 懒创建；禁用、撤权、重载、替换或 Worker 停止会使旧会话失效，迟到结果不能投给新 Worker。**soft IO budgets 是宿主运行时的准入/在途资源预算，不是文件总大小、整个插件内存或 JS 堆的限额。** 当前调度默认全局 4、每插件 2、每会话 2 个实际 IO，background 全局最多 3，保留 1 个交互容量；受控在途字节预留预算全局 64 MiB、每插件 32 MiB；background 的全局/每插件/每会话令牌桶各为 8 MiB/s、突发 8 MiB，带宽成本与内存预留分开计账。批量/窗口限额只约束单次请求，可按窗口读取更大的文件；旧资产读写和目录 raw 快速路径共享 IO 并发但不新增文件大小上限，未将文件选择器改成新范围通道。新文件 RPC 有独立的 8 个在途槽，不占 32 个普通 RPC 槽；取消另有有界通道。它们独立于 RX/control 事件背压，也不能保证其他插件、插件自行保存的数据或浏览器总内存有硬上限；本实现没有独立插件进程或堆配额。上述并发/速率数字是调度配置，不是实测吞吐或响应延迟承诺；约 9 MiB 资源的隐藏 WebView2 生产 selector 加载与 SHA 校验已通过，但尚未完成发行包全流程与真实磁盘上的多插件大文件扫描压测，不能据此推断主窗绝不会卡顿或总内存一定受控。
 
 ### 网络与外部链接
 
@@ -341,6 +387,38 @@ self.plugin.on('ui.buttonClick', async ({ buttonId }) => {
   }
 });
 ```
+
+#### 持续输出任务
+
+需要实时观察工具输出时，使用同一 `shell:execute` 授权下的 `self.plugin.shell.start`。它只在显式调用时启动程序，默认不设执行时间或输出总量业务配额；通用 IPC、操作系统和内存约束仍适用。两个管道各自有序，不能把 stdout 与 stderr 的到达顺序拼成全局时序。
+
+```js
+const task = await self.plugin.shell.start(
+  { program: 'git', args: ['--version'] },
+  { stdout: 'pipe', stderr: 'pipe' },
+);
+const decoder = () => new TextDecoder();
+async function drain(stream, label) {
+  const text = decoder();
+  for await (const bytes of stream) {
+    const part = text.decode(bytes, { stream: true });
+    if (part) await self.plugin.api['ui.panel.append']({ text: `[${label}] ${part}` });
+  }
+  const tail = text.decode(); // flush 跨块 UTF-8 尾字节
+  if (tail) await self.plugin.api['ui.panel.append']({ text: `[${label}] ${tail}` });
+}
+try {
+  await Promise.all([drain(task.stdout, 'stdout'), drain(task.stderr, 'stderr'), task.wait()]);
+} finally {
+  await task.release();
+}
+// 用户点击“取消”时：await task.cancel();
+```
+
+- `shell.start(request, options?)` 返回 `{stdout, stderr, status, wait, cancel, release}`。每个流只能有一个 reader；必须并行 drain 两个 `pipe`，或在启动时把不需要的一侧设为 `{stdout:'discard'|'pipe', stderr:'discard'|'pipe'}`，否则子进程可能因有界管道背压停住。即使 discard，该流也有自己的 EOF。
+- `stream` 每块最多 16 KiB；每个管道分别保持顺序。使用独立 `TextDecoder` 并以 `decode(bytes,{stream:true})` 处理块，EOF 后调用无参 `decode()` flush；二进制工具请直接保留 `Uint8Array`，不要强制当 UTF-8。
+- `task.status()` 立即取状态，`task.wait()` 等待 `running/cancelling` 以外的 `exited/cancelled/timed-out/failed`；状态含 `exitCode`（失败/取消可为 null）与 `error`。`task.cancel()` 只请求该任务的直接子进程取消；`task.release()` 释放持有的任务记录，仍运行的进程由宿主继续回收，不能撤销进程树或已发生副作用。
+- `timeoutMs` 仍是调用方显式设置的单任务截止；缺省/0 不设默认时间。流任务的槽位是运行时资源准入（每 Worker 最多 8 个任务、全局最多 64 个），不是 stdout 总量配额；不要用槽位数字宣称吞吐 SLA。既有一次性 `shell.execute` 保持原返回形状。
 
 ### 事件
 
@@ -415,14 +493,14 @@ input 为 bytes/lines/none：分别需要 rx:bytes、terminal:read 或无 RX 权
 }
 ```
 
-- 完整插件通常保留普通 Worker `entry`；纯网页插件可以**完全省略插件根 `entry`**，此时宿主不创建根 Worker，页面独立运行（视图自身的 `entry` 仍必填）。给视图加 `"worker": false` 表示该可信页不依附 Worker：只允许 `trusted-web` + `input:"none"`，没有 Worker 侧会话对象、不接收 RX，也不能发布模型或发送串口；但它不会阻止根 Worker 启动——若 manifest 仍声明 `entry`，根 Worker 照常运行并可供其他视图使用。纯网页或 `worker:false` 页面没有 Worker 对端，`view.send` / `view.sendBinary` 会报错。HTML 无需主动调用 SDK 即可显示。
+- 完整插件通常保留普通 Worker `entry`；纯网页插件可以**完全省略插件根 `entry`**，此时宿主不创建根 Worker，页面独立运行（视图自身的 `entry` 仍必填）。给视图加 `"worker": false` 表示该可信页不依附 Worker：只允许 `trusted-web` + `input:"none"`，没有 Worker 侧会话对象、不接收 RX，也不能发布模型或发送串口；但它不会阻止根 Worker 启动——若 manifest 仍声明 `entry`，根 Worker 照常运行并可供其他视图使用。纯网页或 `worker:false` 页面没有 Worker 对端，`view.send` / `view.preview` 会同步报错，`view.sendAction` 返回 `unavailable`，`view.sendBinary` 会 reject。HTML 无需主动调用 SDK 即可显示。
 - 同源本地页面之间可以正常导航与刷新（路径、查询串、锚点均可），其他声明的 HTML 页面放进 `assets`；除纯锚点变化外，导航/刷新生成新文档，宿主重建 SDK 身份、重放当前模型并拒绝旧文档迟到的 ACK/消息/二进制块；纯锚点后再刷新仍会生成新身份。只有用户**真实点击**的外部 http/https 链接或新窗口才交给系统浏览器，不获得 SDK；脚本发起的顶层跳转只取消、不弹浏览器；其他协议拒绝。在起始时直接拒绝的外部跳转不退休页面；已准许的本地导航后来被取消则明确报错并退休，避免旧文档身份已失效却永久 loading。若链接指向声明过的本地 HTML，则按本地导航处理。
 - 视图自身 `entry` 必须是 `.html` / `.htm`，`styles` 必须为空；HTML 自己引用 CSS/JS，包内文件列入 `assets`。支持内联脚本、模块脚本及资源查询参数；未声明的本地文件不回退到网络。
 - 浏览器直接支持 HTTP/HTTPS、WebSocket、SSE、普通网页资源、文件选择器、Blob 下载、剪贴板和 localStorage/IndexedDB；无需为这些网页操作另授 Worker 的 `http:request` / `fs:open` / `clipboard` / `storage` 权限。Worker API 的原权限规则不变。
 - 网络不使用宿主端点白名单，也不使用 Worker 代理设置。浏览器 CORS、TLS 和混合内容规则仍生效；模型服务不支持跨域时，应配置服务 CORS 或使用本地桥接，不关闭浏览器安全检查。
 - 文件读取通过 `<input type="file">` 及 File API；下载需确认原生保存对话框，不自动执行下载文件。剪贴板遵循浏览器焦点与用户操作要求。摄像头、麦克风等无关权限不开放。
 - 宿主在文档脚本前注入现有 `view` SDK，不修改 HTML；本地顶层页面获得 SDK，iframe 不获得。页面普通资源/请求错误不会导致插件视图退休；原生进程崩溃、文档加载失败或已准许导航取消会报告失败。可信文档加载期间不设固定期限，但成功加载后 30 秒仍未 ready 会报错；隔离页面仍适用 5 秒初始化期限。
-- 可信模式默认拒绝，安装/首次启用须独立确认；普通「授予全部并启用」不授予网页信任。批准绑定安装代次，升级重新确认，重启不重复询问；配置导入不能新增或恢复已撤销的网页信任。
+- 可信模式默认拒绝；安装或首次启用时，在同一权限审阅中以独立的网页信任勾选项明确确认，普通权限选择不会代替它。若从设置单独管理网页信任，也必须明确确认。批准绑定安装代次，升级重新确认，重启不重复询问；配置导入不能新增或恢复已撤销的网页信任。
 - 浏览器数据位于配置目录旁 `plugin-web-data/<pluginId>/<installGeneration>/`，与插件可写 `data/` 分离。origin 按 pluginId + viewId 稳定，同代次同视图多实例共享存储；不同视图来源隔离，不同安装代次目录隔离。普通重载保留，新代次升级/重装不复用旧站点数据，卸载或“清除网页数据”清除全部站点数据；空浏览器配置文件可能保留。清除操作先禁用插件，普通 `data/` 不受影响。
 - 可信网页仍没有主窗口 DOM、Tauri 通用 IPC、Shell 或任意磁盘路径 API。它能够把选中的日志、剪贴板内容上传网络，因此只应信任用户认可的插件及其加载的网页代码。
 
@@ -453,7 +531,9 @@ UI 脚本全局 `view` 与 Worker 会话对象不是同一对象：
 - `view.documentId`：当前文档身份，仅供诊断/关联；导航或刷新后变化，旧文档异步结果应丢弃。
 - `view.onState(cb)`：完整 JSON 模型；回调 Promise 完成后 ACK，失败显示错误，不把“收到”当“已应用”。
 - `view.onEnvironment(cb)`：theme/language/fontFamily/fontSize/zoomPercent/visible/focused/portStatus；变化合并，不从父窗读取样式。
-- `view.send(type, payload)`：向自身 Worker 发交互，不是宿主 API；返回不表示设备命令已完成。UI 未初始化或参数非法时报错。
+- `view.send(type, payload)`：兼容保留的普通交互入口，向自身 Worker **尝试发送一次**，不是宿主 API，也不表示设备命令已完成；返回 `void`，只对未初始化、无 Worker 或参数非法抛出同步错误。宿主拥塞或 Worker 未确认时不会返回拒绝 Promise；页面会显示节流的“未发送/未获确认”提示，重试前应核实可能已发生的副作用。
+- `view.preview(type, payload)`：适用于拖动、筛选等可替换预览。每个文档只保留最新候选，约每 50ms 尝试一次；旧候选会被合并，文档 `pagehide`、关闭、导航或换代时丢弃。该方法返回 `void`；宿主内部以 ACK 管理接纳状态，但不向页面承诺业务处理完成。
+- `await view.sendAction(type, payload)`：离散动作的一次性发送，返回 `{status:'accepted'|'busy'|'unavailable'|'unknown'}`。`accepted` 仅表示进入当前 Worker 桥，不表示动作完成；`busy`/`unavailable` 不会自动重发，`unknown` 表示在等待确认期间发生超时或换代，重试前应核实副作用。每个文档的在途动作有界，单次 payload 仍受 16 KiB UTF-8 包络限制。
 - `view.sendBinary(type, bytes)`：把 `Uint8Array`/`ArrayBuffer` 原始字节发给 Worker；每块原始字节 ≤8 KiB、base64 编码后整条信封 ≤16 KiB，`transferType` ≤128 字符全程一致，保持一块在途并等对应 ACK，单条最多 256 MiB，不与实时 JSON 状态争用合并通道。发送 Promise 可能因接收端 nack、页面导航/关闭/换代或通道关闭而拒绝。
 - `view.onBinary(cb)`：接收 Worker 的完整传输 `{type, bytes: Uint8Array}`——按 `seq` 严格顺序重组，全部到齐后一次性交付；非末块在接收端入缓存后立即确认，**只有末块**要等回调 Promise 结算后才确认，可安全异步处理。两个方向的接收端各自最多同时保留 4 个未完成入站传输；乱序、类型变化、非法块或单块超 8 KiB 会 nack 并丢弃半成品。
 - 二进制通道有独立资源期限：逐块/末块异步回调 ACK 最多等待 30 秒，发送排队等 ready 最多 60 秒；接收半成品闲置 60 秒会主动释放并 nack。Worker 二进制 RPC 及宿主 sender 自发送入口起的整体资源持有最长 10 分钟，排队计入且持续 ACK 不续期；到期不影响健康后继。超时会明确 reject，不能把迟到 ACK 交给新传输；已经运行的插件回调不假装被撤销。
@@ -525,7 +605,7 @@ self.plugin.on('ui.buttonClick', async function (event) {
 
 ### 额度与恢复
 
-替换与独立实例合计每插件最多 8 个、全应用 16 个。每个视图声明的 entry/styles/assets 单文件至多 8 MiB、合计至多 32 MiB，仍受包总限额约束。快照至多 256 KiB UTF-8、只接受 JSON（另限 65536 个节点、嵌套 64 层）；ArrayBuffer/类型化数组/Map/Set/Date、非有限数、getter、稀疏或循环对象拒绝。每视图一条在途快照及一个最新候选，全插件待发送至多 1 MiB，可见发送至多约 30/s；隐藏不积压历史，恢复显示重发当前模型。
+替换与独立实例合计每插件最多 8 个、全应用 16 个。每个视图最多声明 256 个 styles/assets 路径；资源只快照元数据并在 WebView 请求时按需流式供给，不把单文件 8 MiB/视图 32 MiB 当作当前运行时硬上限。约 9 MiB 资源已通过隐藏 WebView2 生产 selector 加载并完成 SHA 校验，但不等于发行包全流程验收。快照至多 256 KiB UTF-8、只接受 JSON（另限 65536 个节点、嵌套 64 层）；ArrayBuffer/类型化数组/Map/Set/Date、非有限数、getter、稀疏或循环对象拒绝。每视图一条在途快照及一个最新候选，全插件待发送至多 1 MiB，可见发送至多约 30/s；隐藏不积压历史，恢复显示重发当前模型。
 
 params 至多 16 KiB；instanceKey/title 至多 128 字符。tabs 管理按令牌桶 2/s、突发 4 限制；UI 交互至多 16 KiB 原生消息包、约 30/s，页面→原生普通交互另有每视图 64 条/秒上限；ready/state-ack/error 独立控制桶为 128/s、突发 128，二进制分片/确认按插件共享 512/s、突发 1024，二进制首次超额会使视图明确失败而非永久等 ACK。隔离视图 UI ready 5 秒、Worker 初始化 10 秒；可信文档加载成功后才启动 30 秒 ready 看门狗，加载过程本身不设固定期限。状态 ACK 可见时 5 秒，隐藏/宿主遮挡时不误杀。后台关闭记录每插件最多 128 项，达到后暂停后台新建，用户入口仍受总额度。
 
@@ -783,8 +863,9 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | 资源 | 当前限制 / 行为 |
 |---|---|
 | manifest | 1 MiB，UTF-8 普通文件 |
-| 目录 / ZIP 包 | 64 MiB 总解压/复制数据、2000 条、32 层；拒绝穿越/链接/特殊文件/硬链接；目录根与祖先也须为真实非链接路径，macOS可选`/private/...`规范路径而非`/var`/`/tmp`别名 |
-| ZIP元数据 | 压缩文件96MiB、中央目录16MiB、单条名称/extra/comment合计64KiB；实体记录≤2000且不得重复，支持限额内ZIP64 |
+| 目录 / ZIP 包 | 本地目录复制先在控制闸门外做无跟随扫描、条目计数/总字节与目标卷可用空间预检，再以 256 KiB 窗口复制并报告进度；本地复制仍守 64 MiB 总解压/复制数据、2000 条、32 层边界。源在扫描与复制间变化会失败，取消不发布 staging；拒绝穿越/链接/特殊文件/硬链接；目录根与祖先也须为真实非链接路径 |
+| ZIP元数据 | 压缩输入96MiB、中央目录16MiB、单条名称/extra/comment合计64KiB；实体记录≤2000且不得重复，支持限额内ZIP64；这些是不受信归档解析/展开保护，不等同合法本地目录复制上限 |
+| 声明视图资源 | manifest 仍限制每插件最多 32 个视图、每视图最多 256 个 styles/assets 路径；安装/启用时只快照声明资源的身份、大小、修改时间和 MIME，WebView 请求时再按已打开句柄校验并流式供给；不把资源整包读入内存。约 9 MiB 资源已在隐藏 WebView2 的生产 selector 路径加载并完成 SHA 校验，但不等于发行包全流程验收 |
 | data/ 写入 | 不设单文件/总量/文件数上限；路径与原子写约束保留；每次写入不再扫描整个 data/ |
 | 旧全文件读取 | 保留 `fs.read` / `fs.openDialog` / `fs.readDirectoryFile` 的参数、返回类型；不限制扩展名/内容/文件大小/总量/多选数量，无固定读取期限；完整读取所需内存由运行环境决定 |
 | 范围/批量读取 | 单 range ≤4 MiB，批量 1..64 项且申请长度之和 ≤8 MiB；是单次传输窗口，不是文件总大小上限；支持 signal，无隐式总期限 |
@@ -793,9 +874,12 @@ self.plugin.on('ui.buttonClick', async ({ buttonId, context }) => {
 | 插件 IO 准入 | 控制面闸门等待最多 5 秒，繁忙时可重试；公平文件 IO 调度独立于 RX/control 事件预算；soft IO budgets 不是总内存或堆限额，见[范围读取、批量与目录分页](#范围读取批量与目录分页)；已开始的 IO 不因回执退休而提前归还资源 |
 | 串口与终端写入 | `serial.send` 单次 data ≤1048576 个 UTF-16 代码单元；`view.sendSerial` 单次 data ≤65536 个；`terminal.append` 单次 text ≤65536 个 |
 | HTTP | 仅 http/https；无宿主业务大小上限、无固定 timeout；`timeout` 为调用显式给出的非负有限秒数（0/缺省=不设总期限），重定向默认最多 10 跳；并发上限每插件 64、全应用 64 |
+| Shell 流任务 | 同一 `shell:execute` 权限；stdout/stderr 各自单 reader、每块 ≤16 KiB、可 pipe/discard；每 Worker 最多 8 个、全局最多 64 个任务槽；无默认时间或输出总量业务配额，`timeoutMs` 仅按调用方设置 |
+| 单文件句柄 | `fs.openFile` 只读、`fs.createFile` 只写另存为；单窗口/写块 ≤1 MiB；每插件最多 4、全局最多 32 个句柄；AbortSignal/close 可取消，commit 不自动重试且发布后不回滚 |
 | 文件保存 | `fs.exportFile` 仅白名单 grant + 相对路径，原子覆盖/建父目录；`fs.saveFile` 每次原生 Save As；二者无内容业务大小限额/隐式期限，取消另存为返回 null，不能以 path 复用授权 |
+| 串口任务 | `serial.sendBytes` / `serial.sendFile` 每窗口最多 64 KiB，固定 `portId` + `expectedConnectionGeneration`；每端口一项发送流程（同一 Worker 不同端口可并行）；闲置约 60 秒回收，无默认执行期限；`done` 可结算 `unknown` |
 | 串口控制 | open/close 需独立 `serial:control` + 端口白名单；close 必须带观察到的 connectionGeneration CAS；参数严格校验、错误 reject、无通用 RPC 隐式截止 |
-| 文件对话框 | `fs.openDialog` / `fs.openDirectoryDialog` / `fs.saveFile` / `ui.panel.export` 每插件同时最多 8 个；无选择数量/内容上限，等待用户完成 |
+| 文件对话框 | 旧 `fs.openDialog` / `fs.openDirectoryDialog` / `fs.saveFile` / `ui.panel.export` 每插件同时最多 8 个；新单文件句柄另受每插件 4、全局 32 个句柄限制；均等待用户完成且不把路径交给插件作为长期授权 |
 | 插件面板 | 单次 append ≤65536 个 UTF-16 代码单元、约 200 条/s；面板总计 524288 个 UTF-16 代码单元，超限丢最旧文本；不是 UTF-8 字节数 |
 | KV | 无键长/值大小/节点数/文件大小上限；值须可无损 JSON 化 |
 | 剪贴板 | 读写文本无长度上限；空字符串清空剪贴板 |

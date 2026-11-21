@@ -768,6 +768,48 @@ describe('PluginHostManager reload', () => {
   });
 });
 
+describe('PluginSession ordinary view interaction admission', () => {
+  const interaction = { instanceId: 'view-a', documentId: 'doc-a', type: 'save', payload: null };
+
+  it('reports busy when control slots are full, never replays a refused action, and admits a fresh one', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    try {
+      const worker = TestWorker.created[0];
+      for (let index = 0; index < MAX_PENDING_CONTROL_MESSAGES; index++) expect(session.post({ type: 'ui.buttonClick' })).toBe(true);
+      expect(session.postViewInteraction(interaction)).toBe('busy');
+      const controls = worker.postMessage.mock.calls.map(([wire]) => wire as { type: string; eventId: number });
+      expect(controls.every(wire => wire.type !== 'view.message')).toBe(true);
+      for (const wire of controls) worker.emit({ eventAck: wire.eventId });
+      expect(worker.postMessage.mock.calls.some(([wire]) => wire.type === 'view.message')).toBe(false);
+      expect(session.postViewInteraction({ ...interaction, payload: 2 })).toBe('accepted');
+      expect(worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'view.message', payload: { ...interaction, payload: 2 } }), []);
+    } finally { session.stop(); }
+  });
+
+  it('holds one physical preview per instance until Worker ACK without blocking a discrete action', async () => {
+    const session = new PluginSession(pluginId);
+    await session.start();
+    try {
+      const worker = TestWorker.created[0];
+      const completed = vi.fn();
+      expect(session.postViewInteraction({ ...interaction, type: 'preview' }, completed)).toBe('accepted');
+      const eventId = (worker.postMessage.mock.lastCall?.[0] as { eventId: number }).eventId;
+      expect(session.postViewInteraction({ ...interaction, documentId: 'doc-b' }, completed)).toBe('busy');
+      expect(session.postViewInteraction(interaction)).toBe('accepted');
+      expect(completed).not.toHaveBeenCalled();
+      worker.emit({ eventAck: eventId }); worker.emit({ eventAck: eventId });
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(session.postViewInteraction({ ...interaction, documentId: 'doc-b' }, completed)).toBe('accepted');
+      const late = (worker.postMessage.mock.lastCall?.[0] as { eventId: number }).eventId;
+      expect(session.post({ type: 'view.close', payload: { instanceId: interaction.instanceId } })).toBe(true);
+      worker.emit({ eventAck: late });
+      expect(completed).toHaveBeenCalledTimes(1);
+    } finally { session.stop(); }
+    expect(session.postViewInteraction(interaction)).toBe('unavailable');
+  });
+});
+
 describe('PluginSession HTTP cancellation and binary view transport', () => {
   it('admits http.cancel even when every ordinary RPC slot is occupied', async () => {
     useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['http:request'] }] });
@@ -958,23 +1000,29 @@ describe('PluginSession deadline and startup generation regressions', () => {
 });
 
 describe('PluginSession filesystem lane and delivery ownership', () => {
-  it('reserves ordinary RPC capacity independently of FS scans and keeps cancellation bounded/reachable', async () => {
-    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:assets'] }] });
+  it('bounds mixed FS work separately and keeps new cleanup reachable even when the ordinary lane is full', async () => {
+    vi.useFakeTimers();
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...entry, grantedPermissions: ['fs:assets', 'fs:open', 'shell:execute'] }] });
     vi.mocked(executeHostApi).mockImplementation(() => new Promise(() => {}));
     const session = new PluginSession(pluginId); await session.start();
     const worker = TestWorker.created[0];
-    for (let i = 0; i < MAX_FS_RPC_REQUESTS; i++) worker.emit({ seq: i + 1, op: 'fs.readRange', args: { rel: 'a' } });
-    worker.emit({ seq: 90, op: 'fs.readRange', args: { rel: 'a' } });
+    for (let i = 0; i < MAX_FS_RPC_REQUESTS; i++) worker.emit({ seq: i + 1, op: i % 2 ? 'fs.readRange' : 'fs.readFileWindow', args: { rel: 'a' } });
+    worker.emit({ seq: 90, op: 'fs.openFile', args: {} });
     expect(worker.postMessage).toHaveBeenCalledWith({ seq: 90, ok: false, error: 'plugin RPC capacity exceeded' });
     for (let i = 0; i < MAX_PENDING_MESSAGES; i++) worker.emit({ seq: 100 + i, op: 'ports.list' });
     expect(executeHostApi).toHaveBeenCalledTimes(MAX_FS_RPC_REQUESTS + MAX_PENDING_MESSAGES);
-    worker.emit({ seq: 200, op: 'ports.list' });
+    worker.emit({ seq: 200, op: 'shell.read' });
     expect(worker.postMessage).toHaveBeenCalledWith({ seq: 200, ok: false, error: 'plugin RPC capacity exceeded' });
-    for (let i = 0; i < 64; i++) worker.emit({ seq: 300 + i, op: 'fs.cancel', args: { requestId: 'cancel' } });
-    worker.emit({ seq: 500, op: 'fs.cancel', args: { requestId: 'cancel' } });
+    const cleanup = ['fs.cancel', 'fs.cancelFileRequest', 'fs.closeFile', 'serial.cancelSend', 'shell.cancel', 'shell.release'];
+    for (let i = 0; i < 64; i++) worker.emit({ seq: 300 + i, op: cleanup[i % cleanup.length], args: { requestId: 'cancel' } });
+    worker.emit({ seq: 500, op: 'shell.release', args: {} });
     expect(executeHostApi).toHaveBeenCalledTimes(MAX_FS_RPC_REQUESTS + MAX_PENDING_MESSAGES + 64);
     expect(worker.postMessage).toHaveBeenCalledWith({ seq: 500, ok: false, error: 'plugin RPC capacity exceeded' });
     expect(vi.mocked(executeHostApi).mock.calls[0][5]).toBeInstanceOf(PluginFsContext);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(worker.postMessage).toHaveBeenCalledWith({ seq: 100, ok: false, error: 'plugin RPC timed out' });
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 1 }));
+    expect(worker.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 301 }));
     session.stop();
   });
   it('deduplicates shared batch transfers and releases the native lease only after postMessage', async () => {

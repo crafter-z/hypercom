@@ -18,27 +18,37 @@
  * 桥必须**不依赖任何外部模块**（worker 内无 bundler）——纯自包含字符串。
  */
 import { VIEW_BINARY_TRANSFER_TIMEOUT_MS } from './pluginViewBinary';
+import { PLUGIN_FILE_HANDLE_OPS, PLUGIN_FILE_HANDLE_REQUEST_OPS } from './pluginFileHandle';
+import { PLUGIN_FILE_HANDLE_SDK } from './pluginFileHandleSdk';
+import { PLUGIN_SERIAL_TASK_OPS } from './pluginRpc';
+import { PLUGIN_SERIAL_TASK_SDK_CODE } from './pluginSerialTaskSdk';
+import { isPluginProcessCleanupOp, PLUGIN_PROCESS_OPS } from './pluginProcess';
+import { PLUGIN_PROCESS_FACADE_CODE } from './pluginProcessFacade';
 
 /** Host expires first; allow the worker one second to receive its reply. */
 export const PLUGIN_RPC_TIMEOUT_MS = 10_000;
 /** Hard resource lifetime for one binary RPC (per-chunk ACK has a shorter idle deadline). */
 export const PLUGIN_BINARY_RPC_TIMEOUT_MS = VIEW_BINARY_TRANSFER_TIMEOUT_MS;
 
-/**
- * Ops that legitimately wait for the user, file IO, connection lifecycle, network,
- * or a native process. No generic deadline; HTTP/shell use only caller deadlines.
- */
-export function hasNoRpcDeadline(op: string): boolean {
-  return op === 'serial.open' || op === 'serial.close' ||
-    op === 'fs.exportFile' || op === 'fs.saveFile' ||
-    op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
-    op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
-    op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage' || op === 'fs.cancel' ||
-    op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
-    op === 'fs.removeDirectoryEntry' || op === 'fs.renameDirectoryEntry' ||
-    op === 'ui.panel.export' || op === 'fs.write' || op === 'storage.set' || op === 'shell.execute' ||
-    op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel';
+const FS_WINDOW_OPS = ['fs.readRange', 'fs.readRanges', 'fs.listDirectoryPage'] as const;
+export function isPluginFsWorkOp(op: string): boolean {
+  return (FS_WINDOW_OPS as readonly string[]).includes(op) || (PLUGIN_FILE_HANDLE_REQUEST_OPS as readonly string[]).includes(op);
 }
+export function isPluginCleanupRpc(op: string): boolean {
+  return op === 'http.cancel' || op === 'fs.cancel' || op === 'fs.closeFile' || op === 'fs.cancelFileRequest' ||
+    op === 'serial.cancelSend' || isPluginProcessCleanupOp(op);
+}
+
+/** Business operations wait for their native result; the same policy is injected into the Worker. */
+const NO_RPC_DEADLINE_OPS = new Set<string>([
+  'serial.open', 'serial.close', ...PLUGIN_SERIAL_TASK_OPS,
+  'fs.exportFile', 'fs.saveFile', 'fs.read', 'fs.openDialog', 'fs.openDirectoryDialog',
+  'fs.listDirectory', 'fs.readDirectoryFile', 'fs.statDirectoryEntry', ...FS_WINDOW_OPS, 'fs.cancel', ...PLUGIN_FILE_HANDLE_OPS,
+  'fs.writeDirectoryFile', 'fs.createDirectory', 'fs.removeDirectoryEntry', 'fs.renameDirectoryEntry',
+  'ui.panel.export', 'fs.write', 'storage.set', 'shell.execute', ...PLUGIN_PROCESS_OPS,
+  'http.request', 'http.open', 'http.read', 'http.cancel',
+]);
+export function hasNoRpcDeadline(op: string): boolean { return NO_RPC_DEADLINE_OPS.has(op); }
 
 /** worker 内执行的桥代码（字符串常量，宿主注入）。 */
 export const PLUGIN_BRIDGE_CODE = `
@@ -46,6 +56,9 @@ export const PLUGIN_BRIDGE_CODE = `
   'use strict';
   var seq = 0;
   var pending = Object.create(null);
+  var noDeadline = new Set(${JSON.stringify([...NO_RPC_DEADLINE_OPS])});
+  var windowedFs = new Set(${JSON.stringify(FS_WINDOW_OPS)});
+  var selectedFileRequests = new Set(${JSON.stringify(PLUGIN_FILE_HANDLE_REQUEST_OPS)});
 
   // 宿主 → 插件事件处理器（plugin.on）
   var handlers = Object.create(null);
@@ -192,17 +205,19 @@ export const PLUGIN_BRIDGE_CODE = `
     try { self.postMessage({ seq: ++seq, op: op, args: args }); } catch (error) {}
   }
 
-  // api 代理：plugin.api.<op>(args) → 宿主。HTTP open/request and windowed FS
-  // strip signal and carry a pre-generated requestId for cancellation before completion.
+  // api 代理：plugin.api.<op>(args) → 宿主。HTTP and file work strip
+  // AbortSignal and carry a requestId so cancellation can precede completion.
   function callHost(op, args) {
     var id = ++seq;
     var options = args && typeof args === 'object' ? args : {};
     var isHttp = op === 'http.request' || op === 'http.open';
-    var isFs = op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage';
-    var signal = isHttp || isFs ? options.signal : undefined;
+    var isFs = windowedFs.has(op);
+    var isSelectedFile = selectedFileRequests.has(op);
+    // An atomic publication is not advertised as abortable to the caller.
+    var signal = isHttp || isFs || (isSelectedFile && op !== 'fs.commitFile') ? options.signal : undefined;
     var requestId;
     var wireArgs = args === undefined ? null : args;
-    if (isHttp || isFs) {
+    if (isHttp || isFs || isSelectedFile) {
       requestId = isHttp && typeof options.requestId === 'string' && options.requestId ? options.requestId : newRequestId();
       wireArgs = {};
       for (var key in options) {
@@ -211,16 +226,7 @@ export const PLUGIN_BRIDGE_CODE = `
       }
       wireArgs.requestId = requestId;
     }
-    var deadline = op === 'serial.open' || op === 'serial.close' ||
-      op === 'fs.exportFile' || op === 'fs.saveFile' ||
-      op === 'fs.read' || op === 'fs.openDialog' || op === 'fs.openDirectoryDialog' ||
-      op === 'fs.listDirectory' || op === 'fs.readDirectoryFile' || op === 'fs.statDirectoryEntry' ||
-      op === 'fs.readRange' || op === 'fs.readRanges' || op === 'fs.listDirectoryPage' || op === 'fs.cancel' ||
-      op === 'fs.writeDirectoryFile' || op === 'fs.createDirectory' ||
-      op === 'fs.removeDirectoryEntry' || op === 'fs.renameDirectoryEntry' ||
-      op === 'ui.panel.export' || op === 'fs.write' || op === 'storage.set' || op === 'shell.execute' ||
-      op === 'http.request' || op === 'http.open' || op === 'http.read' || op === 'http.cancel'
-      ? 0 : op === 'view.sendBinary' ? ${PLUGIN_BINARY_RPC_TIMEOUT_MS + 1000} : ${PLUGIN_RPC_TIMEOUT_MS + 1000};
+    var deadline = noDeadline.has(op) ? 0 : op === 'view.sendBinary' ? ${PLUGIN_BINARY_RPC_TIMEOUT_MS + 1000} : ${PLUGIN_RPC_TIMEOUT_MS + 1000};
     return new Promise(function (resolve, reject) {
       if (signal && signal.aborted) {
         // Never sent: no native request exists to cancel.
@@ -245,7 +251,7 @@ export const PLUGIN_BRIDGE_CODE = `
           delete pending[id];
           clearTimeout(timer);
           entry.removeAbort();
-          if (requestId) sendFire(isFs ? 'fs.cancel' : 'http.cancel', { requestId: requestId });
+          if (requestId) sendFire(isSelectedFile ? 'fs.cancelFileRequest' : isFs ? 'fs.cancel' : 'http.cancel', { requestId: requestId });
           reject(abortError());
         };
         signal.addEventListener('abort', onAbort, { once: true });
@@ -442,9 +448,7 @@ export const PLUGIN_BRIDGE_CODE = `
     var id = message.type === 'view.open' ? payload.context.viewInstanceId : payload.instanceId;
     if (message.type === 'view.open') {
       var session = { handlers: Object.create(null), context: Object.freeze(payload.context), streamEpoch: payload.context.streamEpoch || 0, gapEpoch: -1, retired: false };
-      session.documentId = typeof payload.documentId === 'string'
-        ? payload.documentId
-        : (viewDocuments[id] || null);
+      session.documentId = viewDocuments[id] || (typeof payload.documentId === 'string' ? payload.documentId : null);
       var view = {
         context: session.context,
         params: payload.params,
@@ -482,6 +486,10 @@ export const PLUGIN_BRIDGE_CODE = `
       return Promise.all(runHandlers('view.close', { view: current.view, reason: payload.reason }));
     }
     var type = message.type.slice(5);
+    var canDeliver = function () {
+      return !current.retired && (type !== 'message' || (typeof payload.documentId === 'string' && payload.documentId === current.documentId));
+    };
+    if (!canDeliver()) return Promise.resolve();
     var callbacks = current.handlers[type] || [];
     if (typeof payload.streamEpoch === 'number') {
       if (payload.streamEpoch < current.streamEpoch) return Promise.resolve();
@@ -496,17 +504,18 @@ export const PLUGIN_BRIDGE_CODE = `
       });
     }
     return Promise.all(jobs).then(function () {
-      if (current.retired) return;
+      if (!canDeliver()) return;
       return Promise.all(callbacks.slice().map(function (cb) {
         return Promise.resolve().then(function () {
-          if (current.retired) return;
+          if (!canDeliver()) return;
           if (type === 'input') return cb(payload.batch);
           if (type === 'binary') return cb({ type: payload.type, bytes: payload.bytes });
+          if (type === 'message') return cb({ instanceId: id, type: payload.type, payload: payload.payload });
           return cb(payload);
         });
       }));
     }).then(function () {
-      if (!current.retired && type === 'message') return Promise.all(runHandlers('view.message', { view: current.view, type: payload.type, payload: payload.payload }));
+      if (canDeliver() && type === 'message') return Promise.all(runHandlers('view.message', { view: current.view, type: payload.type, payload: payload.payload }));
     });
   }
 
@@ -530,7 +539,14 @@ export const PLUGIN_BRIDGE_CODE = `
     onDropped: function (cb) { return on('rx.dropped', cb); }
   };
 
-  self.plugin = { api: api, http: http, on: on, rx: rx, views: views, tabs: tabs };
+${PLUGIN_FILE_HANDLE_SDK}
+${PLUGIN_SERIAL_TASK_SDK_CODE}
+${PLUGIN_PROCESS_FACADE_CODE}
+  self.plugin = {
+    api: api, http: http, on: on, rx: rx, views: views, tabs: tabs,
+    fs: pluginFileSdk, serial: Object.freeze(serialTasks),
+    shell: Object.freeze({ start: startPluginProcess, execute: api['shell.execute'] })
+  };
 
   // 普通异步异常只上报诊断（宿主记录后保留 worker）；同步初始化失败发生在
   // __plugin_ready 之前，由宿主按启动失败处理。

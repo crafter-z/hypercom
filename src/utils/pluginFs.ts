@@ -1,6 +1,7 @@
 import { pluginFsService } from '../services/pluginFs';
 import type { PluginFsPage, PluginFsPageOptions, PluginFsPriority, PluginFsRange, PluginFsResults } from '../services/pluginFs';
 import { PluginLogQuota } from './pluginLogQuota';
+import type { PluginFileHandleSessionPort } from './pluginFileHandle';
 
 const MAX_PENDING_CANCELS = 64;
 const MAX_PRE_CANCELLED = 64;
@@ -59,6 +60,14 @@ export class PluginFsContext {
   private readonly cleanupLogQuota = new PluginLogQuota();
 
   constructor(readonly pluginId: string, readonly installGeneration: string, readonly workerEpoch: number) {}
+
+  /** Selected-handle operations may borrow, but never replace or independently close, this Worker session. */
+  fileHandleSessionPort(): PluginFileHandleSessionPort {
+    return {
+      acquire: beforeSend => this.getSession(beforeSend),
+      invalidate: (error, sessionId) => this.invalidateSession(error, sessionId),
+    };
+  }
 
   private assertLive(beforeSend?: () => void): void {
     if (!this.alive) throw new Error('plugin FS session retired');

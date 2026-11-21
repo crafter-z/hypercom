@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{Manager, State, WebviewWindow};
 
 use super::{
-    acquire_plugin_io, install_prepared, require_main_window, schedule_plugin_sweep, CommandError,
+    acquire_plugin_io, install_prepared_transaction, require_main_window, CommandError,
     PluginStateSnapshot,
 };
 use crate::plugin::{
@@ -327,41 +327,9 @@ pub async fn install_marketplace_plugin(
         ));
     }
 
-    // Recheck current identity before retiring runtime views and again inside
-    // install_prepared immediately before the first durable rename.
-    {
-        let manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        if manager
-            .get_config()
-            .entities
-            .plugin_configs
-            .iter()
-            .any(|entry| entry.id == expected_id)
-            && expected_generation.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(marketplace_error(
-                "更新已安装插件必须携带 expectedGeneration",
-            ));
-        }
-    }
-    state.plugin_http.cancel_plugin(&expected_id);
-    state.plugin_shell.cancel_plugin(&expected_id);
-    super::plugin::retire_plugin_file_io(&state, &expected_id);
-    plugin::view_runtime::retire_plugin(window.app_handle(), &expected_id).await?;
-
-    let result = tokio::task::block_in_place(|| {
-        let mut manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        install_prepared(&mut manager, prepared, expected_generation.as_deref())
-    });
-    drop(plugin_io);
-    schedule_plugin_sweep(window.app_handle().clone());
-    result
+    install_prepared_transaction(
+        &state, window.app_handle(), plugin_io, prepared, expected_generation.as_deref(),
+    ).await
 }
 
 #[cfg(test)]

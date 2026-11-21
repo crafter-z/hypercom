@@ -33,6 +33,42 @@ use crate::config::{
     TriggerRuleEntry,
 };
 
+#[test]
+fn plugin_batch2_service_invokes_match_registered_symbols() {
+    let lib = include_str!("../lib.rs");
+    let commands = lib
+        .split_once(".invoke_handler(tauri::generate_handler![")
+        .and_then(|(_, body)| body.split_once("])").map(|(commands, _)| commands))
+        .expect("registered Tauri invoke commands");
+    let groups: [(&str, &[&str]); 4] = [
+        (include_str!("../../../src/services/pluginFileHandle.ts"), &[
+            "plugin_file_pick_read", "plugin_file_pick_write", "plugin_file_read",
+            "plugin_file_write", "plugin_file_commit", "plugin_file_close",
+        ]),
+        (include_str!("../../../src/services/pluginSerialTask.ts"), &[
+            "plugin_serial_task_begin", "plugin_serial_task_step", "plugin_serial_task_close",
+        ]),
+        (include_str!("../../../src/services/pluginProcess.ts"), &[
+            "plugin_shell_open_session", "plugin_shell_start", "plugin_shell_read", "plugin_shell_status",
+            "plugin_shell_cancel", "plugin_shell_release", "plugin_shell_close_session",
+        ]),
+        (include_str!("../../../src/services/plugin.ts"), &[
+            "install_plugin_directory_with_progress", "cancel_plugin_install",
+        ]),
+    ];
+    for (service, names) in groups {
+        for name in names {
+            let args = format!("('{name}',");
+            assert!(service.contains(&args), "service does not invoke {name} by literal");
+            let entry = format!("commands::{name},");
+            assert!(
+                commands.lines().any(|line| line.trim() == entry),
+                "generate_handler! does not register {name} at the commands root"
+            );
+        }
+    }
+}
+
 // ==================== 命令入参结构体（snake_case：无 rename_all）====================
 
 /// `src/services/serial.ts::openSerialPort` → `{ args: { port_id, … } }`。

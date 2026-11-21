@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PLUGIN_RPC_TIMEOUT_MS, PLUGIN_BINARY_RPC_TIMEOUT_MS, hasNoRpcDeadline, wrapPluginCode } from './pluginBridge';
+import { PLUGIN_FILE_HANDLE_OPS } from './pluginFileHandle';
+import { PLUGIN_SERIAL_TASK_OPS } from './pluginRpc';
+import { PLUGIN_PROCESS_OPS } from './pluginProcess';
 
 type RpcReply = { seq: number; ok: boolean; result?: unknown; error?: string };
 type HostEvent = { type: string; payload?: unknown; eventId?: number };
@@ -262,6 +265,33 @@ describe('isolated view Worker processing', () => {
     expect((worker.scope as WorkerScope & { order: string[] }).order).not.toContain('start-3');
   });
 
+  it('discards queued old-document interactions without replay and keeps the existing Worker handler shape', async () => {
+    vi.useFakeTimers();
+    const worker = wrappedWorker(`
+      self.received = [];
+      self.global = [];
+      self.plugin.views.onMessage(function(message) { self.global.push(message.type); });
+      self.plugin.views.onOpen(function(view) {
+        view.onMessage(async function(message) {
+          self.received.push(message);
+          if (message.type === 'preview') await new Promise(done => setTimeout(done, 100));
+        });
+      });
+    `);
+    const instanceId = 'view-a';
+    worker.reply({ type: 'view.open', payload: { context: { viewInstanceId: instanceId }, documentId: 'doc-a' } });
+    worker.reply({ type: 'view.message', eventId: 1, payload: { instanceId, documentId: 'doc-a', type: 'preview', payload: 20 } });
+    await vi.advanceTimersByTimeAsync(1);
+    worker.reply({ type: 'view.message', eventId: 2, payload: { instanceId, documentId: 'doc-a', type: 'old-save', payload: 21 } });
+    worker.reply({ type: 'view.document', payload: { instanceId, documentId: 'doc-b' } });
+    worker.reply({ type: 'view.message', eventId: 3, payload: { instanceId, documentId: 'doc-b', type: 'save', payload: 22 } });
+    await vi.advanceTimersByTimeAsync(200);
+    const scope = worker.scope as WorkerScope & { received: unknown[]; global: string[] };
+    expect(scope.received).toEqual([{ instanceId, type: 'preview', payload: 20 }, { instanceId, type: 'save', payload: 22 }]);
+    expect(scope.global).toEqual(['save']);
+    for (const eventAck of [1, 2, 3]) expect(worker.sent).toContainEqual({ eventAck });
+  });
+
   it('closes and releases queued deliveries without waiting for stalled initialization', async () => {
     const worker = wrappedWorker(`
       self.closed = [];
@@ -459,6 +489,44 @@ describe('wrapped worker windowed FS cancellation', () => {
     worker.reply({ seq: sent.seq!, ok: true, result: new Uint8Array() }); await request;
     expect(remove).toHaveBeenCalled(); controller.abort();
     expect(sentMessages(worker.sent).filter(message => message.op === 'fs.cancel')).toHaveLength(0);
+  });
+});
+
+describe('native task transport policies', () => {
+  it('shares the host deadline exemption with the Worker for every selected-file, serial-task and shell-stream op', async () => {
+    vi.useFakeTimers();
+    const worker = wrappedWorker('');
+    const ops = [...PLUGIN_FILE_HANDLE_OPS, ...PLUGIN_SERIAL_TASK_OPS, ...PLUGIN_PROCESS_OPS];
+    const settle = vi.fn();
+    const requests = ops.map(op => {
+      expect(hasNoRpcDeadline(op)).toBe(true);
+      return worker.scope.plugin!.api[op]({}).then(settle, settle);
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settle).not.toHaveBeenCalled();
+    for (const request of sentMessages(worker.sent)) {
+      if (typeof request.seq === 'number') worker.reply({ seq: request.seq, ok: true, result: request.op });
+    }
+    await Promise.all(requests);
+    expect(settle.mock.calls.map(([op]) => op)).toEqual(ops);
+  });
+
+  it('rejects a pre-aborted selected file without post and emits only matching file-request cancellation when in flight', async () => {
+    const worker = wrappedWorker('');
+    const api = worker.scope.plugin!.api;
+    const preset = new AbortController(); preset.abort();
+    await expect(api['fs.openFile']({ signal: preset.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(sentMessages(worker.sent).filter(message => message.op)).toEqual([]);
+    const active = new AbortController();
+    const waiting = expect(api['fs.writeFileChunk']({ bytes: new Uint8Array([9]), signal: active.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    const nativeWrite = sentMessages(worker.sent).find(message => message.op === 'fs.writeFileChunk')!;
+    expect(nativeWrite.args).not.toHaveProperty('signal');
+    expect(nativeWrite.args?.requestId).toMatch(/^[a-f\d-]{36}$/i);
+    active.abort();
+    await waiting;
+    expect(sentMessages(worker.sent)).toContainEqual(expect.objectContaining({ op: 'fs.cancelFileRequest', args: { requestId: nativeWrite.args!.requestId } }));
+    expect(sentMessages(worker.sent).some(message => message.op === 'fs.cancel')).toBe(false);
+    worker.reply({ seq: nativeWrite.seq!, ok: true, result: 1 });
   });
 });
 

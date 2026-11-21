@@ -48,6 +48,15 @@ Windows 可信分支不安装离线/CDP 网络阻断、黑洞代理/DNS、隔离
 
 **取消与迟到拒绝**：传输绑定 `viewInstanceId + documentId`，宿主送入 Worker 前还复核 `workerEpoch`。导航、关闭、Worker 换代或 retire 时，宿主 `cancelViewBinary` 拒绝并释放尚未完成的宿主→Worker 投递及其事件/字节额度，`ViewBinarySender.cancel` 拒绝在途与排队发送，`ViewBinaryReceiver.reset` 丢弃半成品；此后迟到的 `binary-ack` 因 `documentId` 不匹配被忽略，原生 `send` 与 `receive` 也分别拒绝/丢弃旧文档消息。原生 `receive` 对非法或身份不符消息丢弃；二进制按每插件 512 帧/秒、突发 1024 共享桶限制，解码/转发前扣令牌。首次超限每视图仅报告一次可观察错误，使宿主退休视图并取消双向传输，后续超量帧不反复 emit 放大。合规发送的丢 ACK/挂起也由独立 ACK 期限结算，不再无限等待。Worker 桥在投递 `view.binary` 前复核会话当前 `documentId`，不匹配即回失败；`view.document` 是独立控制事件，不受控制字节/条数额度的准入限制；Worker 换代由宿主的 `workerEpoch` 判定退休重建。已经在执行的插件异步逻辑不假装被撤销；`view.sendBinary` 使用独立的 10 分钟 RPC 资源期限，先发生的 ACK 失败、主动 idle 回收、文档取消仍会更早结算并释放槽位。文件/HTTP 的无隐式业务期限不受影响；大块数据仍不进入实时状态 JSON 合并通道。
 
+## 普通页面交互通道
+
+普通 `ui-message` 与二进制、RX、状态 ACK 分开处理，不能因页面交互填满控制队列而静默排队。原生收到交互后校验当前 `documentId`、实例和 Worker epoch，并向页面返回有界状态：`accepted` 只表示消息已进入当前 Worker 桥，`busy` 表示临时准入失败，`unavailable` 表示当前页面/Worker 不可用，`unknown` 表示页面在确认窗口内未得到可靠结果。交互接收器以每视图令牌桶做准入，动作不自动重试。
+
+- `preview` 是 latest-only：每个文档最多保持一个在途候选和一个最新待发候选；新值替换旧值，已知 `busy` 时仅对仍未过期的最新候选择机重试，文档 `pagehide`、关闭、导航或换代丢弃候选；切到后台标签或宿主遮挡不作为这里的丢弃承诺。预览 ACK 等待 Worker 实际事件 ACK，不把页面层超时当作完成。
+- `sendAction` 是离散动作，一次发送、最多 8 个页面等待者；结果为 `accepted|busy|unavailable|unknown`，不自动重放。`accepted` 不等于插件业务处理完成，也不等于设备已执行。
+- 兼容 `view.send` 保持同步 `void` 和原有参数校验/16 KiB UTF-8 包络；宿主无法接纳或确认时由页面显示一个节流的非模态提示，不产生拒绝 Promise，提示不会证明副作用已撤回。
+- 页面没有 Worker 对端时：`send`/`preview` 同步报错，`sendAction` 返回 `unavailable`；可信网页的普通浏览器能力不因此获得 Worker 权限。旧文档、旧实例和旧 Worker 的交互回执按身份丢弃，不退休健康页面。
+
 ## 可选独立时间通道
 
 `view.timeline.register` 是 UI 文档运行时 opt-in；纯网页/`worker:false` 视图以 custom 时钟同样可注册，不依赖 Worker。`pluginTimeline.PluginTimeline` 按原生确定的 binding/document 将视图注册到 `timelineCoordinator`，slot 为真实 tabId；bound-input 仅允许实际有 bytes/lines 输入的绑定会话，来源与 raw 共用 `serial:<portId>` / `host-epoch-ms`。custom 来源按 pluginId/installGeneration/声明 clock.id 命名空间隔离，不能通过自报 id 冒充宿主时间域。组成员选择与映射仍由宿主用户控制。
@@ -120,7 +129,7 @@ Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry �
 
 快照 256 KiB，state 信封 264 KiB；每页面一条在途、一条最新候选，全插件待发送 1 MiB、可见时约 30 次/秒（34 ms 间隔）。状态 ACK 在 UI 回调 Promise 完成后发送；可见且有在途快照时 5 秒未确认即失败。整体隐藏不重置真实数据，但停止显示发送；恢复重发当前模型，不排历史。局部菜单裁剪不把整个页面视为隐藏。
 
-environment 按值去重并在页内 SDK 合并为最新一条，不逐条排队、不占用 16 条待处理消息额度，也不因 resize 塞满 state 后面的队列。标签/实例每插件 8、全应用 16；视图资源单文件 8 MiB、entry/styles/assets 合计 32 MiB；交互载荷 16 KiB 且受约 30 次/秒令牌桶；页面→原生 IPC 单条 16 KiB；普通交互每实例 64 条/秒，ready/state-ack/error 使用独立控制桶（128 条/秒、突发 128），二进制块与确认使用每插件共享桶（512 帧/秒、突发 1024）及 ACK 背压，避免控制 ACK 被交互或慢二进制回调饿死。tabs 创建/管理令牌桶 2/s、突发 4；后台关闭键 128。限额不宣称能够限制插件私自分配的内存。
+environment 按值去重并在页内 SDK 合并为最新一条，不逐条排队、不占用 16 条待处理消息额度，也不因 resize 塞满 state 后面的队列。标签/实例每插件 8、全应用 16；每视图最多 256 个 styles/assets 声明路径，资源只快照元数据并在 WebView 请求时按已打开句柄按需流式供给，不把单文件 8 MiB/视图 32 MiB 当作当前运行时硬上限；交互载荷 16 KiB 且受约 30 次/秒令牌桶；页面→原生 IPC 单条 16 KiB；普通交互由独立准入 lane 保护控制槽位：`preview` latest-only，每文档一个在途和一个最新候选；`sendAction` 最多 8 个在途等待者，返回 accepted/busy/unavailable/unknown；ready/state-ack/error 使用独立控制桶（128 条/秒、突发 128），二进制块与确认使用每插件共享桶（512 帧/秒、突发 1024）及 ACK 背压，避免控制 ACK 被交互或慢二进制回调饿死。兼容 `view.send` 不返回 Promise，拥塞通过节流页面提示可见。tabs 创建/管理令牌桶 2/s、突发 4；后台关闭键 128。限额不宣称能够限制插件私自分配的内存。
 
 ## 持久化
 

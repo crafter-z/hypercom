@@ -125,23 +125,28 @@ impl TtySimPortHandle {
 
 impl TtyWriteHandle {
     pub fn write(&self, bytes: &[u8]) -> anyhow::Result<usize> {
+        let mut written = 0;
+        self.write_progress(bytes, &mut written)?;
+        Ok(written)
+    }
+
+    pub(crate) fn write_progress(&self, bytes: &[u8], written: &mut usize) -> anyhow::Result<()> {
         let mut w = self
             .writer
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let mut written = 0usize;
-        while written < bytes.len() {
+        while *written < bytes.len() {
             if !self.running.load(Ordering::Acquire) {
                 return Err(anyhow::anyhow!("TTY sim port is closing"));
             }
-            match w.write(&bytes[written..]) {
+            match w.write(&bytes[*written..]) {
                 Ok(0) => return Err(anyhow::anyhow!("TTY sim write returned 0 bytes")),
-                Ok(n) => written += n,
+                Ok(n) => *written += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(anyhow::anyhow!("TTY sim write error: {}", e)),
             }
         }
-        Ok(written)
+        Ok(())
     }
 }
 

@@ -1765,6 +1765,7 @@ dependencies = [
  "encoding_rs",
  "http",
  "hyper-util",
+ "hypercom-plugin-resource-stream",
  "libc",
  "log",
  "parking_lot",
@@ -1794,6 +1795,14 @@ dependencies = [
  "winreg 0.55.0",
  "wry 0.55.1",
  "zip 2.6.1",
+]
+
+[[package]]
+name = "hypercom-plugin-resource-stream"
+version = "0.1.0"
+dependencies = [
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

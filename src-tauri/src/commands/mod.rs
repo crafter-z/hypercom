@@ -31,6 +31,7 @@ pub use log::*;
 pub use plugin::*;
 pub use plugin_http::*;
 pub use plugin_fs::*;
+pub use plugin_file_handles::*;
 pub use plugin_shell::*;
 pub use plugin_serial::*;
 pub use plugin_marketplace::*;

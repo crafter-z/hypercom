@@ -3,14 +3,14 @@
 //! The full Tauri main-window authorization/UI layout is intentionally outside
 //! this harness; the production SDK, native validators and document gate run.
 use super::{EphemeralDirectory, ViewParent};
-use super::super::{Binding, DocumentState, Session, TokenBucket, timeline};
+use super::super::{Binding, DocumentState, InteractionRate, Session, TokenBucket, timeline};
 use std::{cell::{Cell, RefCell}, rc::Rc, sync::{Arc, Mutex, atomic::AtomicBool}, time::{Duration, Instant}};
 use serde_json::{Value, json};
 use windows::{core::{w, PCWSTR}, Win32::UI::WindowsAndMessaging::{CreateWindowExW, PeekMessageW, TranslateMessage, DispatchMessageW, MSG, PM_REMOVE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW}};
 use wry::{WebContext, WebView, WebViewBuilder, WebViewExtWindows};
 use webview2_com::NavigationStartingEventHandler;
 
-fn pump_until(mut ready: impl FnMut() -> bool, description: &str) {
+pub(super) fn pump_until(mut ready: impl FnMut() -> bool, description: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !ready() {
         assert!(Instant::now() < deadline, "WebView2 smoke timed out: {description}");
@@ -76,8 +76,8 @@ fn workerless_timeline_native_webview2_smoke() {
         CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), PCWSTR::null(), WS_OVERLAPPEDWINDOW, 0, 0, 800, 600, None, None, None, None).unwrap()
     });
     let binding = Binding { plugin_id: "com.example.native-timeline".into(), install_generation: uuid::Uuid::new_v4().to_string(), view_id: "page".into(), tab_id: uuid::Uuid::new_v4().to_string(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: uuid::Uuid::new_v4().to_string(), view_instance_id: uuid::Uuid::new_v4().to_string(), port_mode: None, worker_epoch: 0, stream_epoch: 0 };
-    let session = Arc::new(Session { binding, alive: AtomicBool::new(true), trusted_web: true, permission: None,
-        rate: Mutex::new((Instant::now(), 0)), control_rate: Mutex::new(TokenBucket::new(128.0)),
+    let session = Arc::new(Session { binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: true, permission: None,
+        interaction_rate: Mutex::new(InteractionRate::new()), control_rate: Mutex::new(TokenBucket::new(128.0)),
         timeline_preview_rate: Mutex::new(TokenBucket::new(20.0)), timeline_control_rate: Mutex::new(TokenBucket::new(64.0)),
         binary_rate_reported: AtomicBool::new(false), document: Mutex::new(DocumentState::default()) });
     let first_document = uuid::Uuid::new_v4().to_string(); session.begin_document(&first_document);

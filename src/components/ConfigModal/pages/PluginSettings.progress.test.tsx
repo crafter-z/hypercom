@@ -17,6 +17,7 @@ const plugin: PluginView = {
     entry: 'main.js', permissions: ['ui:view'], ui: { buttons: [], menuItems: [], views: [] },
   },
 };
+let listedPlugin: PluginView;
 const uninstallPlugin = vi.fn();
 
 vi.mock('../../../hooks/useConfigPersistence', () => ({
@@ -25,10 +26,10 @@ vi.mock('../../../hooks/useConfigPersistence', () => ({
 }));
 vi.mock('../../../hooks/usePlugins', () => ({
   usePluginList: () => ({
-    plugins: [plugin], loading: false, refresh: vi.fn(),
-    installPlugin: vi.fn(), reloadPlugin: vi.fn(), grantAllAndEnable: vi.fn(),
+    plugins: [listedPlugin], loading: false, refresh: vi.fn(),
+    installPlugin: vi.fn(), reloadPlugin: vi.fn(), applyPermissionReview: vi.fn(),
     uninstallPlugin: (...args: unknown[]) => uninstallPlugin(...args),
-    setEnabled: vi.fn(), togglePermission: vi.fn(), setTrustedWeb: vi.fn(), clearWebData: vi.fn(),
+    setEnabled: vi.fn(), revokeTrustedWeb: vi.fn(), clearWebData: vi.fn(),
   }),
   usePluginMarketplace: () => ({ index: null, updates: [], loading: false, error: null, fetchIndex: vi.fn(), checkUpdates: vi.fn() }),
   isPluginReplaceConfirmationError: () => false,
@@ -56,6 +57,7 @@ async function flushPaint(): Promise<void> {
 
 beforeEach(() => {
   resetStoresForTests();
+  listedPlugin = plugin;
   frames = [];
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
   vi.stubGlobal('cancelAnimationFrame', () => {});
@@ -99,10 +101,12 @@ describe('plugin uninstall progress', () => {
     expect(container.textContent).toContain(label('plugins.uninstalling', { name: 'Slow plugin' }));
     expect(uninstallPlugin).not.toHaveBeenCalled();
 
+    listedPlugin = { ...plugin, installGeneration: 'gen-2' };
+    await act(async () => { root.render(createElement(PluginSettings)); });
     await flushPaint(); // outer rAF
     expect(uninstallPlugin).not.toHaveBeenCalled();
     await flushPaint(); // inner rAF: commit + paint done
-    expect(uninstallPlugin).toHaveBeenCalledWith(plugin.id);
+    expect(uninstallPlugin).toHaveBeenCalledWith(plugin.id, 'gen-1');
 
     await act(async () => { finish(); });
     expect(overlay()).toBeNull();

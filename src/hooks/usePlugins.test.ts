@@ -117,58 +117,104 @@ describe('ordered plugin authorization snapshots', () => {
 });
 
 describe('reviewed installation permission edits', () => {
-  it('serializes rapid clicks without losing either requested grant', async () => {
+  it('does not replay a queued decision after the same installation grants change', async () => {
     syncStorePluginConfigs(snapshot(1, [entry()]));
-    const { promise, resolve } = deferred<PluginStateSnapshot>();
-    vi.mocked(pluginService.setPluginPermissions)
-      .mockReturnValueOnce(promise)
-      .mockImplementationOnce(async (_id, permissions) => snapshot(3, [entry(permissions)]));
+    const pending = deferred<PluginStateSnapshot>();
+    vi.mocked(pluginService.setPluginPermissions).mockReturnValueOnce(pending.promise);
     const mounted = await mountList();
-    const first = mounted.api.togglePermission(id, 'terminal:read', 'install-a');
-    const second = mounted.api.togglePermission(id, 'rx:bytes', 'install-a');
-    await vi.waitFor(() => expect(pluginService.setPluginPermissions).toHaveBeenCalledTimes(1));
-    await act(async () => { resolve(snapshot(2, [entry(['terminal:read'])])); await Promise.all([first, second]); });
-    expect(useAppStore.getState().config.pluginConfigs[0].grantedPermissions).toEqual(['terminal:read', 'rx:bytes']);
-    await mounted.unmount();
-  });
-
-  it('persists pre-run authorization before enabling a plugin that needs it at startup', async () => {
-    syncStorePluginConfigs(snapshot(1, [entry([], false)]));
-    const { promise, resolve } = deferred<PluginStateSnapshot>();
-    vi.mocked(pluginService.setPluginPermissions).mockReturnValueOnce(promise);
-    vi.mocked(pluginService.setPluginEnabled).mockResolvedValue(snapshot(3, [entry(['terminal:read'])]));
-    const mounted = await mountList();
-    const grant = mounted.api.togglePermission(id, 'terminal:read', 'install-a');
-    await vi.waitFor(() => expect(pluginService.setPluginPermissions).toHaveBeenCalledTimes(1));
-    const enable = mounted.api.setEnabled(id, true, 'install-a');
-    await Promise.resolve();
-    expect(pluginService.setPluginEnabled).not.toHaveBeenCalled();
-    expect(rxEligiblePluginIds().has(id)).toBe(false);
+    const plugin = mounted.api.plugins[0];
+    let first!: Promise<void>;
+    let second!: Promise<unknown>;
     await act(async () => {
-      resolve(snapshot(2, [entry(['terminal:read'], false)]));
-      await Promise.all([grant, enable]);
+      first = mounted.api.applyPermissionReview({ plugin, intent: 'manage', permissions: ['terminal:read'], trustWeb: false });
+      second = mounted.api.applyPermissionReview({ plugin, intent: 'manage', permissions: ['rx:bytes'], trustWeb: false }).catch(error => error);
+      await vi.waitFor(() => expect(pluginService.setPluginPermissions).toHaveBeenCalledTimes(1));
     });
-    expect(rxEligiblePluginIds().has(id)).toBe(true);
-    await mounted.unmount();
-  });
-
-  it('rejects a queued old-view click when an upgrade replaces the installation', async () => {
-    syncStorePluginConfigs(snapshot(1, [entry(['terminal:read'])]));
-    const { promise, resolve } = deferred<PluginStateSnapshot>();
-    vi.mocked(pluginService.setPluginPermissions).mockReturnValueOnce(promise);
-    const mounted = await mountList();
-    const first = mounted.api.togglePermission(id, 'terminal:read', 'install-a');
-    const second = mounted.api.togglePermission(id, 'rx:bytes', 'install-a');
-    await vi.waitFor(() => expect(pluginService.setPluginPermissions).toHaveBeenCalledTimes(1));
     await act(async () => {
-      syncStorePluginConfigs(snapshot(3, [entry([], false, 'install-b')]));
-      resolve(snapshot(2, [entry([])]));
-      await Promise.all([first, second]);
+      pending.resolve(snapshot(2, [entry(['terminal:read'])]));
+      await first;
+      await expect(second).resolves.toEqual(expect.objectContaining({ message: expect.stringContaining('permissions changed') }));
     });
     expect(pluginService.setPluginPermissions).toHaveBeenCalledTimes(1);
-    expect(useAppStore.getState().config.pluginConfigs[0]).toMatchObject({
-      installGeneration: 'install-b', enabled: false, grantedPermissions: [],
+    expect(useAppStore.getState().config.pluginConfigs[0].grantedPermissions).toEqual(['terminal:read']);
+    await mounted.unmount();
+  });
+
+  it('persists only the choices actually approved before enabling the ordinary plugin', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], false)]));
+    const pending = deferred<PluginStateSnapshot>();
+    vi.mocked(pluginService.setPluginPermissions).mockReturnValueOnce(pending.promise);
+    vi.mocked(pluginService.setPluginEnabled).mockResolvedValue(snapshot(3, [entry(['terminal:read'])]));
+    const mounted = await mountList();
+    let applying!: Promise<void>;
+    await act(async () => {
+      applying = mounted.api.applyPermissionReview({ plugin: mounted.api.plugins[0], intent: 'install', permissions: ['terminal:read'], trustWeb: false });
+      await vi.waitFor(() => expect(pluginService.setPluginPermissions).toHaveBeenCalledWith(id, ['terminal:read'], 'install-a'));
     });
+    expect(pluginService.setPluginEnabled).not.toHaveBeenCalled();
+    expect(rxEligiblePluginIds().has(id)).toBe(false);
+    await act(async () => { pending.resolve(snapshot(2, [entry(['terminal:read'], false)])); await applying; });
+    expect(rxEligiblePluginIds().has(id)).toBe(true);
+    expect(pluginService.setPluginTrustedWeb).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('does not enable, trust or apply grants on replacement code reviewed under an old identity', async () => {
+    syncPluginListSnapshot(list(snapshot(1, [entry([], false)])));
+    const mounted = await mountList();
+    const plugin = mounted.api.plugins[0];
+    await act(async () => {
+      syncPluginListSnapshot(list(snapshot(2, [entry([], false, 'install-b')])));
+      await expect(mounted.api.applyPermissionReview({ plugin, intent: 'install', permissions: ['terminal:read'], trustWeb: false })).rejects.toThrow(/changed/);
+    });
+    expect(pluginService.setPluginPermissions).not.toHaveBeenCalled();
+    expect(pluginService.setPluginEnabled).not.toHaveBeenCalled();
+    expect(pluginService.setPluginTrustedWeb).not.toHaveBeenCalled();
+    expect(pluginHost.disable).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('rejects an unlisted permission and cannot top up a grant during re-enable', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry(['terminal:read'], false)]));
+    const mounted = await mountList();
+    const plugin = mounted.api.plugins[0];
+    await act(async () => {
+      await expect(mounted.api.applyPermissionReview({ plugin, intent: 'manage', permissions: ['shell:execute'], trustWeb: false })).rejects.toThrow(/unreviewed/);
+      await expect(mounted.api.applyPermissionReview({ plugin, intent: 'enable', permissions: ['terminal:read', 'rx:bytes'], trustWeb: false })).rejects.toThrow(/unreviewed/);
+    });
+    expect(pluginService.setPluginPermissions).not.toHaveBeenCalled();
+    expect(pluginService.setPluginEnabled).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('reads back a committed revocation when permission cleanup rejects', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry(['terminal:read'], true)]));
+    const mounted = await mountList();
+    const revoked = snapshot(2, [entry([], true)]);
+    vi.mocked(pluginService.setPluginPermissions).mockImplementationOnce(async () => {
+      vi.mocked(pluginService.listPlugins).mockResolvedValueOnce(list(revoked));
+      throw new Error('permission cleanup failed');
+    });
+    await act(async () => {
+      await expect(mounted.api.applyPermissionReview({ plugin: mounted.api.plugins[0], intent: 'manage', permissions: [], trustWeb: false })).rejects.toThrow('permission cleanup failed');
+    });
+    expect(rxEligiblePluginIds().has(id)).toBe(false);
+    expect(mounted.api.plugins[0].grantedPermissions).toEqual([]);
+    expect(toastKeys()).not.toContain('plugins.permissionsSaved');
+    await mounted.unmount();
+  });
+
+  it('reads back a committed disable even when backend cleanup rejects', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry(['terminal:read'], true)]));
+    const mounted = await mountList();
+    vi.mocked(pluginService.setPluginEnabled).mockImplementationOnce(async () => {
+      vi.mocked(pluginService.listPlugins).mockResolvedValueOnce(list(snapshot(2, [entry(['terminal:read'], false)])));
+      throw new Error('disable cleanup failed');
+    });
+    await act(async () => { await mounted.api.setEnabled(id, false, 'install-a'); });
+    expect(rxEligiblePluginIds().has(id)).toBe(false);
+    expect(mounted.api.plugins[0].enabled).toBe(false);
+    expect(toastKeys()).not.toContain('plugins.disabled');
     await mounted.unmount();
   });
 
@@ -178,25 +224,109 @@ describe('reviewed installation permission edits', () => {
     syncStorePluginConfigs(authorized);
     vi.mocked(pluginService.setPluginPermissions).mockResolvedValue(revoked);
     const mounted = await mountList();
-    const { promise, resolve } = deferred<PluginListResponse>();
-    vi.mocked(pluginService.listPlugins).mockReturnValueOnce(promise);
+    const deferredList = deferred<PluginListResponse>();
+    vi.mocked(pluginService.listPlugins).mockReturnValueOnce(deferredList.promise);
     const pending = mounted.api.refresh();
-    await act(async () => { await mounted.api.togglePermission(id, 'terminal:read', 'install-a'); });
-    await act(async () => { resolve(list(authorized)); await pending; });
+    await act(async () => {
+      await mounted.api.applyPermissionReview({ plugin: mounted.api.plugins[0], intent: 'manage', permissions: [], trustWeb: false });
+    });
+    await act(async () => { deferredList.resolve(list(authorized)); await pending; });
     expect(rxEligiblePluginIds().has(id)).toBe(false);
     await mounted.unmount();
   });
 });
 
-describe('trusted webpage authorization', () => {
-  it('rejects consent for an installation replaced while its dialog was open', async () => {
-    syncStorePluginConfigs(snapshot(1, [entry([], false, 'install-b')]));
+describe('reviewed uninstall identity', () => {
+  it('does not stop a replacement Worker or request uninstall after stale consent', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], true, 'install-b')]));
     const mounted = await mountList();
+    await act(async () => { await mounted.api.uninstallPlugin(id, 'install-a'); });
+    expect(pluginHost.disable).not.toHaveBeenCalled();
+    expect(pluginService.uninstallPlugin).not.toHaveBeenCalled();
+    expect(toastKeys()).not.toContain('plugins.uninstalled');
+    await mounted.unmount();
+  });
+
+  it('checks a queued uninstall after an earlier action settles', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    const mounted = await mountList();
+    const pending = deferred<PluginStateSnapshot>();
+    vi.mocked(pluginService.setPluginEnabled).mockReturnValueOnce(pending.promise);
+    const disabling = mounted.api.setEnabled(id, false, 'install-a');
+    const removing = mounted.api.uninstallPlugin(id, 'install-a');
     await act(async () => {
-      await expect(mounted.api.setTrustedWeb(id, true, 'install-a')).rejects.toThrow();
+      syncStorePluginConfigs(snapshot(3, [entry([], true, 'install-b')]));
+      pending.resolve(snapshot(2, [entry([], false)]));
+      await Promise.all([disabling, removing]);
+    });
+    expect(pluginHost.disable).not.toHaveBeenCalled();
+    expect(pluginService.uninstallPlugin).not.toHaveBeenCalled();
+    await mounted.unmount();
+  });
+
+  it('stops the matching Worker before invoking uninstall with the captured generation', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry()]));
+    vi.mocked(pluginService.uninstallPlugin).mockImplementationOnce(async () => {
+      expect(pluginHost.disable).toHaveBeenCalledWith(id);
+      return snapshot(2, []);
+    });
+    const mounted = await mountList();
+    await act(async () => { await mounted.api.uninstallPlugin(id, 'install-a'); });
+    expect(pluginService.uninstallPlugin).toHaveBeenCalledWith(id, 'install-a');
+    expect(getPluginViews()).toEqual([]);
+    expect(toastKeys()).toContain('plugins.uninstalled');
+    await mounted.unmount();
+  });
+});
+
+describe('trusted webpage authorization', () => {
+  it('blocks trusted-web startup without the separate opt-in and commits trust before enable', async () => {
+    const disabled = entry([], false);
+    syncStorePluginConfigs(snapshot(1, [disabled]));
+    vi.mocked(pluginService.listPlugins).mockImplementation(async () => {
+      const state = useAppStore.getState().config;
+      const trustedView = view(state.pluginConfigs[0]);
+      trustedView.manifest = {
+        ...trustedView.manifest!, entry: '', permissions: [],
+        ui: { buttons: [], menuItems: [], views: [{ id: 'web', label: 'Web', entry: 'index.html', mode: 'trusted-web',
+          styles: [], assets: [], modes: ['trx'], input: 'none', placements: ['workspace-tab'], portBinding: 'none', restoreOnStartup: false }] },
+      };
+      trustedView.declaredPermissions = [];
+      return { ...snapshot(state.revision ?? 0, state.pluginConfigs), plugins: [trustedView] };
+    });
+    const mounted = await mountList();
+    const plugin = mounted.api.plugins[0];
+    await act(async () => {
+      await expect(mounted.api.applyPermissionReview({ plugin, intent: 'enable', permissions: [], trustWeb: false })).rejects.toThrow(/separate consent/);
     });
     expect(pluginService.setPluginTrustedWeb).not.toHaveBeenCalled();
-    expect(useAppStore.getState().config.pluginConfigs[0].enabled).toBe(false);
+    expect(pluginService.setPluginEnabled).not.toHaveBeenCalled();
+    const trusted = { ...disabled, trustedWebGranted: true };
+    vi.mocked(pluginService.setPluginTrustedWeb).mockResolvedValueOnce(snapshot(2, [trusted]));
+    vi.mocked(pluginService.setPluginEnabled).mockImplementationOnce(async () => {
+      expect(useAppStore.getState().config.pluginConfigs[0].trustedWebGranted).toBe(true);
+      return snapshot(3, [{ ...trusted, enabled: true }]);
+    });
+    await act(async () => {
+      await mounted.api.applyPermissionReview({ plugin, intent: 'enable', permissions: [], trustWeb: true });
+    });
+    expect(pluginService.setPluginTrustedWeb).toHaveBeenCalledWith(id, true, 'install-a');
+    expect(pluginService.setPluginPermissions).not.toHaveBeenCalled();
+    expect(pluginService.setPluginEnabled).toHaveBeenCalledWith(id, true, 'install-a');
+    await mounted.unmount();
+  });
+
+  it('does not stop new code when old trust or web-data actions are attempted', async () => {
+    syncStorePluginConfigs(snapshot(1, [entry([], true, 'install-b')]));
+    const mounted = await mountList();
+    await act(async () => {
+      await mounted.api.revokeTrustedWeb(id, 'install-a');
+      await mounted.api.clearWebData(id, 'install-a');
+    });
+    expect(pluginHost.disable).not.toHaveBeenCalled();
+    expect(pluginService.setPluginTrustedWeb).not.toHaveBeenCalled();
+    expect(pluginService.clearPluginWebData).not.toHaveBeenCalled();
+    expect(pluginService.setPluginEnabled).not.toHaveBeenCalled();
     await mounted.unmount();
   });
 

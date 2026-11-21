@@ -96,12 +96,12 @@ mod tests {
     use super::*;
     #[test]
     fn shipped_workerless_example_passes_native_manifest_and_resource_validation() {
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugin-views-demo/workerless");
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("examples/plugin-views-demo/workerless");
         let manifest = crate::plugin::load_manifest_from_dir(&directory).unwrap();
         assert!(manifest.entry.is_empty());
         let view = &manifest.ui.as_ref().unwrap().views[0];
         assert!(!view.worker); assert!(view.is_trusted_web()); assert_eq!(view.input, "none");
-        assert!(super::super::resources::snapshot(&directory, view).is_ok());
+        assert!(super::super::resources::snapshot_lazy(&directory, view).is_ok());
     }
     #[test]
     fn host_timeline_controls_require_complete_safe_versions_and_small_envelopes() {

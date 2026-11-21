@@ -21,8 +21,11 @@ import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useToastStore } from '../stores/useToastStore';
 import i18n from '../i18n';
-import { hasNoRpcDeadline, PLUGIN_BINARY_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
-import { cleanHostText, executeHostApi } from './pluginHostApi';
+import { hasNoRpcDeadline, isPluginCleanupRpc, isPluginFsWorkOp, PLUGIN_BINARY_RPC_TIMEOUT_MS, PLUGIN_RPC_TIMEOUT_MS, wrapPluginCode } from './pluginBridge';
+import { cleanHostText, executeHostApi, type PluginTaskContexts } from './pluginHostApi';
+import { PluginFileHandleHost } from './pluginFileHandle';
+import { PluginProcessContext } from './pluginProcess';
+import { PluginSerialTaskContext } from './pluginSerialTask';
 import { cancelPluginHttp } from './pluginHttp';
 import { PluginFsContext, pluginFsTransferables, releasePluginFsResultWithRetry } from './pluginFs';
 import { MAX_VIEW_BINARY_TRANSFER_BYTES, VIEW_BINARY_ACK_TIMEOUT_MS } from './pluginViewBinary';
@@ -31,6 +34,7 @@ import { removePluginPanel } from './pluginPanelRegistry';
 import { PluginLogQuota } from './pluginLogQuota';
 import { syncStorePluginConfigs } from './pluginConfigSnapshot';
 import type { PluginManifestView } from '../types';
+import type { PluginViewInteractionPayload, PluginViewInteractionStatus } from '../types/pluginViews';
 
 /** 连续崩溃阈值：达到后写 disabled（评审 v2 P5 防持久 DoS）。 */
 export const MAX_CRASHES_BEFORE_DISABLE = 3;
@@ -41,6 +45,8 @@ export const MAX_PENDING_MESSAGES = 32;
 export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
 /** Control traffic has its own acknowledgement slots and bounded overflow queue, independent of RX. */
 export const MAX_PENDING_CONTROL_MESSAGES = 32;
+// Ordinary page interactions cannot fill the control lane used by other work.
+const RESERVED_NON_INTERACTION_CONTROLS = 4;
 /** How long a managed session may take to post __plugin_ready after its Worker starts. */
 export const PLUGIN_READY_TIMEOUT_MS = 10_000;
 /** Post-ready health probe cadence and consecutive unanswered probes that count as a crash. */
@@ -198,6 +204,8 @@ export class PluginSession {
   private readonly controlsInFlight = new Set<number>();
   private readonly pendingControls: Array<{ message: { type: string; payload?: unknown }; transfer?: Transferable[] }> = [];
   private readonly viewEvents = new Map<number, string>();
+  /** A preview remains physically in flight until Worker ACK, not the UI's timeout. */
+  private readonly pendingPreviews = new Map<number, { instanceId: string; complete: () => void }>();
   private eventSeq = 0;
   private eventBytes = 0;
   private lastBackpressureNotice = 0;
@@ -210,6 +218,7 @@ export class PluginSession {
   private readonly fsRequests = new Set<() => void>();
   private readonly cancelRequests = new Set<() => void>();
   private fsContext: PluginFsContext | undefined;
+  private taskContexts: PluginTaskContexts | undefined;
   /** Host-side RPC error logging is plugin-triggerable; apply the same token
    *  bucket as explicit log calls so a denied-op loop cannot flood diaglog. */
   private readonly errorLogQuota = new PluginLogQuota();
@@ -377,7 +386,13 @@ export class PluginSession {
       this.manifest = manifest;
       this.ready = false;
       this.worker = worker;
-      this.fsContext = new PluginFsContext(this.pluginId, this.installGeneration, this.epoch);
+      const fsContext = new PluginFsContext(this.pluginId, this.installGeneration, this.epoch);
+      this.fsContext = fsContext;
+      this.taskContexts = {
+        files: new PluginFileHandleHost(this.pluginId, this.installGeneration, fsContext.fileHandleSessionPort()),
+        serial: new PluginSerialTaskContext(this.pluginId, this.installGeneration, this.epoch),
+        process: new PluginProcessContext(this.pluginId, this.installGeneration),
+      };
       worker.onmessage = (ev: MessageEvent) => {
         if (this.worker !== worker) return;
         const msg = ev.data as {
@@ -409,6 +424,11 @@ export class PluginSession {
           if (binary) {
             if (msg.ok === false) binary.reject(new Error(msg.error || 'view binary transfer failed'));
             else binary.resolve();
+          }
+          const preview = this.pendingPreviews.get(msg.eventAck);
+          if (preview) {
+            this.pendingPreviews.delete(msg.eventAck);
+            preview.complete();
           }
         } else if (typeof msg.op === 'string') {
           void this.handleWorkerRequest(worker, msg as { seq: number; op: string; args?: unknown });
@@ -477,8 +497,8 @@ export class PluginSession {
         else worker.postMessage({ seq: req.seq, ...payload });
       }
     };
-    const isFs = req.op === 'fs.readRange' || req.op === 'fs.readRanges' || req.op === 'fs.listDirectoryPage';
-    const isCancel = req.op === 'http.cancel' || req.op === 'fs.cancel';
+    const isFs = isPluginFsWorkOp(req.op);
+    const isCancel = isPluginCleanupRpc(req.op);
     const ordinaryCount = this.retireRequests.size - this.fsRequests.size - this.cancelRequests.size;
     if (isFs ? this.fsRequests.size >= MAX_FS_RPC_REQUESTS
       : isCancel ? this.cancelRequests.size >= MAX_CANCEL_RPC_BYPASS : ordinaryCount >= MAX_PENDING_MESSAGES) {
@@ -486,6 +506,7 @@ export class PluginSession {
       return;
     }
     const fsContext = this.fsContext;
+    const taskContexts = this.taskContexts;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let active = true;
     const retire = (): boolean => {
@@ -518,16 +539,16 @@ export class PluginSession {
         if (denied) throw new Error(denied);
       };
       beforeSend();
-      result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest, beforeSend, fsContext);
+      result = await executeHostApi(this.pluginId, req.op, req.args, this.manifest, beforeSend, fsContext, taskContexts);
       // Recheck immediately before delivery, including results from old/native APIs.
       beforeSend();
       if (retire()) {
         let transfer: Transferable[] | undefined;
-        if (req.op === 'fs.readRange' || req.op === 'fs.readRanges') {
+        if (req.op === 'fs.readRange' || req.op === 'fs.readRanges' || req.op === 'fs.readFileWindow') {
           transfer = pluginFsTransferables(result);
         } else if (req.op === 'fs.read' && result instanceof Uint8Array) {
           transfer = [result.buffer];
-        } else if (req.op === 'http.read' && result !== null && typeof result === 'object' && 'bytes' in result) {
+        } else if ((req.op === 'http.read' || req.op === 'shell.read') && result !== null && typeof result === 'object' && 'bytes' in result) {
           const { bytes } = result;
           if (bytes instanceof Uint8Array) transfer = [bytes.buffer];
         } else if (req.op === 'http.request' && result !== null && typeof result === 'object' && 'body' in result) {
@@ -579,6 +600,13 @@ export class PluginSession {
       this.restartTimer = null;
     }
     this.starting = null;
+    // Stop send tasks first: a file-backed task may currently hold a selected
+    // handle shared with this Worker FS session. All facades retire before a
+    // replacement Worker can start, even when their IPC cleanup is still draining.
+    this.taskContexts?.serial.stop();
+    this.taskContexts?.process.stop();
+    this.taskContexts?.files.stop();
+    this.taskContexts = undefined;
     this.fsContext?.stop();
     this.fsContext = undefined;
     ++this.generation;
@@ -604,6 +632,7 @@ export class PluginSession {
     this.pendingBinaryPerInstance.clear();
     this.eventsInFlight.clear();
     this.viewEvents.clear();
+    this.pendingPreviews.clear();
     this.controlsInFlight.clear();
     this.pendingControls.length = 0;
     this.eventBytes = 0;
@@ -670,6 +699,9 @@ export class PluginSession {
   /** Bounded delivery: RX may drop; control events reserve independent slots and queue until ACK. */
   post(message: { type: string; payload?: unknown }, transfer?: Transferable[]): boolean {
     if (!this.worker) return false;
+    // This path can queue controls. Page interactions must instead report
+    // immediate admission or refusal through postViewInteraction.
+    if (message.type === 'view.message') return false;
     if (message.type === 'view.document') {
       // Tiny trusted control event: must never be dropped by control byte/count caps.
       const payload = message.payload;
@@ -699,6 +731,7 @@ export class PluginSession {
         if (viewId !== instanceId) continue;
         this.eventBytes -= this.eventsInFlight.get(eventId) ?? 0;
         this.eventsInFlight.delete(eventId); this.controlsInFlight.delete(eventId); this.viewEvents.delete(eventId);
+        this.pendingPreviews.delete(eventId);
       }
       for (let index = this.pendingControls.length - 1; index >= 0; index--) {
         const pending = this.pendingControls[index].message;
@@ -711,22 +744,10 @@ export class PluginSession {
     const isRx = message.type === 'rx.line' || message.type === 'rx.bytes' || message.type === 'view.input';
     if (!isRx) {
       const bytes = controlMessageBytes(message);
-      if (bytes > 32 * 1024 || this.eventBytes + bytes > MAX_PENDING_EVENT_BYTES) {
-        // A lossy view.message must never be surfaced as "capacity exceeded" to
-        // pluginViewRuntime (it would retire an otherwise healthy view).
-        if (message.type === 'view.message') {
-          console.warn(`[pluginHost] ${this.pluginId} view message dropped: control byte budget full`);
-          return true;
-        }
-        return false;
-      }
+      if (bytes > 32 * 1024 || this.eventBytes + bytes > MAX_PENDING_EVENT_BYTES) return false;
       // Preserve control ordering: older queued control events drain first.
       this.flushControls();
       if (this.controlsInFlight.size >= MAX_PENDING_CONTROL_MESSAGES) {
-        if (message.type === 'view.message') {
-          console.warn(`[pluginHost] ${this.pluginId} view message dropped: control slots full`);
-          return true;
-        }
         if (this.pendingControls.length >= MAX_PENDING_CONTROL_MESSAGES) return false;
         this.pendingControls.push({ message, transfer });
         return true;
@@ -756,6 +777,24 @@ export class PluginSession {
       return false;
     }
     return this.sendEvent(message, bytes, false, transfer) !== null;
+  }
+
+  /** Admit directly to this Worker or return busy; never queue for retry in the
+   * host. A preview owns its slot up to actual Worker callback completion. */
+  postViewInteraction(payload: PluginViewInteractionPayload, previewComplete?: () => void): Exclude<PluginViewInteractionStatus, 'unknown'> {
+    if (!this.worker) return 'unavailable';
+    try {
+      this.flushControls();
+      if (this.pendingControls.length > 0 || this.controlsInFlight.size >= MAX_PENDING_CONTROL_MESSAGES - RESERVED_NON_INTERACTION_CONTROLS) return 'busy';
+      if (previewComplete && [...this.pendingPreviews.values()].some(preview => preview.instanceId === payload.instanceId)) return 'busy';
+      const message = { type: 'view.message', payload };
+      const bytes = controlMessageBytes(message);
+      if (bytes > 32 * 1024 || this.eventBytes + bytes > MAX_PENDING_EVENT_BYTES) return 'busy';
+      const eventId = this.sendEvent(message, bytes, true);
+      if (eventId === null) return 'unavailable';
+      if (previewComplete) this.pendingPreviews.set(eventId, { instanceId: payload.instanceId, complete: previewComplete });
+      return 'accepted';
+    } catch { return 'unavailable'; }
   }
 
   /**

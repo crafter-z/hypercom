@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { pluginService } from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
-import type { MarketplaceUpdate, PluginConfigEntry, PluginListResponse, PluginStateSnapshot } from '../types';
+import type { MarketplaceUpdate, PluginConfigEntry, PluginListResponse, PluginStateSnapshot, PluginView } from '../types';
 import { resetPluginSnapshotForTest } from '../utils/pluginConfigSnapshot';
 import { usePluginList, type PluginListApi } from './usePlugins';
 
@@ -97,7 +97,7 @@ describe('usePluginList marketplace installation', () => {
     const mounted = await mountList();
 
     await act(async () => {
-      await expect(mounted.api.installMarketplacePlugin(update)).resolves.toBeNull();
+      await expect(mounted.api.installMarketplacePlugin(update, oldGeneration)).resolves.toBeNull();
     });
 
     expect(pluginService.installMarketplacePlugin).toHaveBeenCalledWith(
@@ -111,12 +111,32 @@ describe('usePluginList marketplace installation', () => {
     await mounted.unmount();
   });
 
+  it('returns the actual package for the target even if another identity changed in the response', async () => {
+    const installed = entry(newGeneration);
+    const unrelated = { ...entry('other-generation'), id: 'com.example.other' };
+    const state = snapshot(2, [unrelated, installed]);
+    const makeView = (plugin: PluginConfigEntry): PluginView => ({
+      ...plugin, dir: '', installedAt: null, manifestError: null,
+      declaredPermissions: ['shell:execute'], knownPermissions: ['shell:execute'],
+      manifest: { ...update.manifest, id: plugin.id, permissions: ['shell:execute'] },
+    });
+    vi.mocked(pluginService.installMarketplacePlugin).mockResolvedValue(state);
+    const mounted = await mountList();
+    vi.mocked(pluginService.listPlugins).mockResolvedValue({ ...state, plugins: state.pluginConfigs.map(makeView) });
+    await act(async () => {
+      await expect(mounted.api.installMarketplacePlugin(update, oldGeneration)).resolves.toMatchObject({
+        id, installGeneration: newGeneration, declaredPermissions: ['shell:execute'],
+      });
+    });
+    await mounted.unmount();
+  });
+
   it('does not claim success or mutate local state when marketplace installation fails', async () => {
     vi.mocked(pluginService.installMarketplacePlugin).mockRejectedValue(new Error('metadata changed'));
     const mounted = await mountList();
 
     await act(async () => {
-      await expect(mounted.api.installMarketplacePlugin(update)).rejects.toThrow('metadata changed');
+      await expect(mounted.api.installMarketplacePlugin(update, oldGeneration)).rejects.toThrow('metadata changed');
     });
 
     expect(useAppStore.getState().config.pluginConfigs).toEqual([entry(oldGeneration)]);

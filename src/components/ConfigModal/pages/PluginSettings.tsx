@@ -16,11 +16,12 @@ import {
   FolderOpen,
   RefreshCw,
   AlertTriangle,
-  Check,
-  X,
 } from 'lucide-react';
 import { usePluginList, usePluginMarketplace, isPluginReplaceConfirmationError, replacementTargetId } from '../../../hooks/usePlugins';
-import { SENSITIVE_PERMISSIONS } from '../../../utils/pluginRpc';
+import { effectivePermissions, hasTrustedViews, reviewablePermissions } from '../../../utils/pluginPermissionReview';
+import { PluginPermissionDialog, type PendingPermissionReview } from './PluginPermissionDialog';
+import { PluginSettingsInstallProgress, canCancelDirectoryInstall, type DirectoryInstallPanelState } from './PluginSettingsInstallProgress';
+import { pluginService } from '../../../services/plugin';
 import { useConfigPersistence } from '../../../hooks/useConfigPersistence';
 
 /** Uninstalling retires native webviews and clears browser data on the UI thread,
@@ -52,11 +53,8 @@ import type { MarketplaceUpdate, PluginView } from '../../../types';
 import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
 import { useDialogLifecycle } from '../../shared/useDialogLifecycle';
 
-const hasTrustedViews = (plugin: PluginView): boolean =>
-  plugin.manifest?.ui?.views?.some(view => view.mode === 'trusted-web') === true;
-
-function TrustedWebDialog({ plugin, clearing, working, onCancel, onAccept }: {
-  plugin: PluginView; clearing: boolean; working: boolean; onCancel: () => void; onAccept: () => void;
+function ClearWebDataDialog({ plugin, working, onCancel, onAccept }: {
+  plugin: PluginView; working: boolean; onCancel: () => void; onAccept: () => void;
 }) {
   const { t } = useTranslation();
   const ready = usePluginViewOverlay();
@@ -64,19 +62,13 @@ function TrustedWebDialog({ plugin, clearing, working, onCancel, onAccept }: {
   useDialogLifecycle({ open: ready, dialogRef: ref, onClose: onCancel, disableEscape: working });
   if (!ready) return null;
   return <div className="modal-overlay" role="presentation" onClick={event => event.stopPropagation()}>
-    <div ref={ref} tabIndex={-1} className="modal-dialog-compact plugin-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="trusted-web-title" aria-describedby="trusted-web-description">
-      <h3 id="trusted-web-title">{t(clearing ? 'plugins.clearWebDataTitle' : 'plugins.trustedWebTitle')}</h3>
+    <div ref={ref} tabIndex={-1} className="modal-dialog-compact plugin-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="clear-web-title" aria-describedby="clear-web-description">
+      <h3 id="clear-web-title">{t('plugins.clearWebDataTitle')}</h3>
       <p><strong>{plugin.manifest?.name ?? plugin.id}</strong> · {plugin.manifest?.version}</p>
-      <p id="trusted-web-description">{t(clearing ? 'plugins.clearWebDataDescription' : 'plugins.trustedWebDescription')}</p>
-      {!clearing && <ul>
-        <li>{t('plugins.trustedWebNetwork')}</li>
-        <li>{t('plugins.trustedWebFiles')}</li>
-        <li>{t('plugins.trustedWebClipboard')}</li>
-        <li>{t('plugins.trustedWebStorage')}</li>
-      </ul>}
+      <p id="clear-web-description">{t('plugins.clearWebDataDescription')}</p>
       <div className="plugin-permission-dialog-actions">
         <button className="btn" disabled={working} onClick={onCancel}>{t('plugins.trustedWebCancel')}</button>
-        <button className="btn btn-danger" disabled={working} onClick={onAccept}>{t(clearing ? 'plugins.clearWebData' : 'plugins.trustedWebAccept')}</button>
+        <button className="btn btn-danger" disabled={working} onClick={onAccept}>{t('plugins.clearWebData')}</button>
       </div>
     </div>
   </div>;
@@ -92,30 +84,23 @@ const PluginSettings: React.FC = () => {
     installPlugin,
     installMarketplacePlugin,
     reloadPlugin,
-    grantAllAndEnable,
+    applyPermissionReview,
     uninstallPlugin,
     setEnabled,
-    togglePermission,
-    setTrustedWeb,
+    revokeTrustedWeb,
     clearWebData,
   } = usePluginList();
-  const [pendingGrant, setPendingGrant] = React.useState<PluginView | null>(null);
-  const [pendingTrust, setPendingTrust] = React.useState<{ plugin: PluginView; install: boolean } | null>(null);
+  const [review, setReview] = React.useState<PendingPermissionReview | null>(null);
   const [pendingClear, setPendingClear] = React.useState<PluginView | null>(null);
   const [working, setWorking] = React.useState(false);
   // One uninstall at a time; the panel outlives the click that started it.
   const [uninstalling, setUninstalling] = React.useState<{ name: string; startedAt: number } | null>(null);
+  const uninstallBusyRef = React.useRef(false);
   // Hook queues serialize mutations, but a fast double-click can enqueue the
   // same plugin before React commits `loading`. Keep a synchronous per-plugin
   // admission set as a UI busy guard; the hook remains the authority for CAS.
   const busyPluginRef = React.useRef(new Set<string>());
   const [busyPlugins, setBusyPlugins] = React.useState<ReadonlySet<string>>(new Set());
-  const grantDialogRef = React.useRef<HTMLDivElement>(null);
-  const grantTitleId = React.useId();
-  const grantReady = usePluginViewOverlay(pendingGrant !== null);
-  const grantWorking = loading || working || !!pendingGrant && busyPlugins.has(pendingGrant.id);
-  useDialogLifecycle({ open: pendingGrant !== null && grantReady, dialogRef: grantDialogRef,
-    disableEscape: grantWorking, onClose: () => setPendingGrant(null) });
   const beginPluginBusy = (pluginId: string): boolean => {
     if (busyPluginRef.current.has(pluginId)) return false;
     busyPluginRef.current.add(pluginId);
@@ -140,15 +125,54 @@ const PluginSettings: React.FC = () => {
     checkUpdates: checkMarketplaceUpdates,
   } = usePluginMarketplace(pluginMarketplaceUrl);
   const [marketplaceBusyId, setMarketplaceBusyId] = React.useState<string | null>(null);
+  const [directoryInstall, setDirectoryInstall] = React.useState<DirectoryInstallPanelState | null>(null);
+  const installPickerBusy = React.useRef(false);
+  const cancelBusy = React.useRef<string | null>(null);
+  const handleInstallCancel = async () => {
+    if (!directoryInstall || !canCancelDirectoryInstall(directoryInstall)) return;
+    const { requestId } = directoryInstall;
+    if (cancelBusy.current === requestId) return;
+    cancelBusy.current = requestId;
+    setDirectoryInstall(current => current?.requestId === requestId ? { ...current, cancel: 'pending' } : current);
+    try {
+      const cancel = await pluginService.cancelPluginInstall(requestId);
+      setDirectoryInstall(current => current?.requestId === requestId ? { ...current, cancel } : current);
+    } catch {
+      setDirectoryInstall(current => current?.requestId === requestId ? { ...current, cancel: 'failed' } : current);
+    } finally {
+      if (cancelBusy.current === requestId) cancelBusy.current = null;
+    }
+  };
+
   const handleInstall = async (source: 'directory' | 'zip'): Promise<void> => {
+    if (installPickerBusy.current) return;
+    installPickerBusy.current = true;
     try {
       const selected = source === 'directory'
         ? await open({ directory: true, multiple: false, title: t('plugins.installDirectory') })
         : await open({ multiple: false, filters: [{ name: 'Plugin archive', extensions: ['zip'] }], title: t('plugins.installZip') });
       if (typeof selected !== 'string') return;
+      const install = async (replaceExisting?: boolean, expectedGeneration?: string) => {
+        if (source === 'zip') {
+          return expectedGeneration === undefined
+            ? installPlugin(selected)
+            : installPlugin(selected, replaceExisting, expectedGeneration);
+        }
+        const requestId = crypto.randomUUID();
+        setDirectoryInstall({ requestId, progress: null, cancel: 'none' });
+        try {
+          return await installPlugin(selected, replaceExisting, expectedGeneration, {
+            requestId,
+            onProgress: progress => setDirectoryInstall(current => current?.requestId === requestId
+              ? { ...current, progress } : current),
+          });
+        } finally {
+          setDirectoryInstall(current => current?.requestId === requestId ? null : current);
+        }
+      };
       let installed: PluginView | null;
       try {
-        installed = await installPlugin(selected);
+        installed = await install();
       } catch (error) {
         // Same/lower version: not a failure yet. Ask for an explicit
         // replacement (data preserved, grants/trust reset) before retrying.
@@ -159,15 +183,15 @@ const PluginSettings: React.FC = () => {
         if (!reviewed?.installGeneration) {
           throw new Error('无法确认待替换插件的当前安装代次，请刷新后重试');
         }
-        if (!window.confirm(t('plugins.replaceConfirm'))) return;
-        installed = await installPlugin(selected, true, reviewed.installGeneration);
+        if (!window.confirm(t('plugins.replaceConfirm', { name: reviewed.manifest?.name ?? reviewed.id,
+          version: reviewed.manifest?.version ?? '' }))) return;
+        installed = await install(true, reviewed.installGeneration);
       }
-      if (installed) {
-        if (hasTrustedViews(installed) && installed.trustedWebGranted !== true) setPendingTrust({ plugin: installed, install: true });
-        else setPendingGrant(installed);
-      }
+      if (installed?.manifest) setReview({ plugin: installed, intent: 'install' });
     } catch (error) {
       console.debug('[PluginSettings] install failed:', error);
+    } finally {
+      installPickerBusy.current = false;
     }
   };
 
@@ -190,7 +214,7 @@ const PluginSettings: React.FC = () => {
     await checkMarketplaceUpdates();
   };
 
-  const handleMarketplaceInstall = async (update: MarketplaceUpdate): Promise<void> => {
+  const handleMarketplaceInstall = async (update: MarketplaceUpdate, expectedGeneration?: string): Promise<void> => {
     if (marketplaceBusyId || loading || !update.descriptionUrl || !update.latestVersion) return;
     setMarketplaceBusyId(update.id);
     if (!beginPluginBusy(update.id)) {
@@ -198,11 +222,8 @@ const PluginSettings: React.FC = () => {
       return;
     }
     try {
-      const installed = await installMarketplacePlugin(update);
-      if (installed) {
-        if (hasTrustedViews(installed) && installed.trustedWebGranted !== true) setPendingTrust({ plugin: installed, install: true });
-        else setPendingGrant(installed);
-      }
+      const installed = await installMarketplacePlugin(update, expectedGeneration);
+      if (installed?.manifest) setReview({ plugin: installed, intent: 'install', preview: update.manifest });
     } catch (error) {
       console.debug('[PluginSettings] marketplace install failed:', error);
     } finally {
@@ -212,33 +233,10 @@ const PluginSettings: React.FC = () => {
   };
 
 
-  /** Sensitive permissions are confirmed before they are granted, on every path that can
-   *  grant them: first enable, "grant all and enable", and a per-permission checkbox.
-   *  Only *granting* asks — revoking stays one click, because it takes effect immediately. */
-  const confirmSensitive = (plugin: PluginView, permissions: readonly string[]): boolean => {
-    const sensitive = permissions.filter((p) => SENSITIVE_PERMISSIONS.includes(p));
-    if (sensitive.length === 0) return true;
-    const risks: string[] = [];
-    if (sensitive.includes('serial:control')) risks.push(t('plugins.sensitiveSerialControl'));
-    if (sensitive.includes('fs:export-dir')) risks.push(t('plugins.sensitiveExportDir'));
-    if (sensitive.includes('fs:save')) risks.push(t('plugins.sensitiveSave'));
-    return window.confirm([
-      t('plugins.sensitiveConfirm', {
-        name: plugin.manifest?.name ?? plugin.id,
-        perms: sensitive.join(', '),
-      }),
-      ...risks,
-    ].join('\n\n'));
-  };
-
-  /** 启用时提示当前可授予的敏感权限；未实现能力不列入风险确认。 */
   const handleToggleEnabled = (plugin: PluginView): void => {
-    if (!plugin.enabled) {
-      if (hasTrustedViews(plugin) && plugin.trustedWebGranted !== true) {
-        setPendingTrust({ plugin, install: false });
-        return;
-      }
-      if (!confirmSensitive(plugin, plugin.declaredPermissions)) return;
+    if (!plugin.enabled && hasTrustedViews(plugin.manifest) && plugin.trustedWebGranted !== true) {
+      setReview({ plugin, intent: 'enable' });
+      return;
     }
     if (!beginPluginBusy(plugin.id)) return;
     void setEnabled(plugin.id, !plugin.enabled, plugin.installGeneration)
@@ -388,7 +386,7 @@ const PluginSettings: React.FC = () => {
                           <button
                             className="btn btn-primary btn-sm"
                             disabled={marketplaceLoading || loading || marketplaceBusyId !== null || busyPlugins.has(update.id) || !updateAvailable}
-                            onClick={() => void handleMarketplaceInstall(update)}
+                            onClick={() => void handleMarketplaceInstall(update, installed?.installGeneration)}
                           >
                             <Download size={13} /> {installed ? t('plugins.marketplace.update') : t('plugins.marketplace.install')}
                           </button>
@@ -414,12 +412,11 @@ const PluginSettings: React.FC = () => {
       ) : (
         <div className="plugin-list">
           {plugins.map((plugin, index) => {
-            const declared = (plugin.manifest?.permissions ?? [])
-              .filter((permission) => plugin.knownPermissions.includes(permission));
+            const declared = reviewablePermissions(plugin);
             const source = plugin.source === 'marketplace' ? 'marketplace' : 'manual';
             const previousSource = plugins[index - 1]?.source === 'marketplace' ? 'marketplace' : 'manual';
             const showGroupTitle = index === 0 || source !== previousSource;
-            const granted = plugin.grantedPermissions;
+            const granted = effectivePermissions(plugin);
             return (
               <React.Fragment key={plugin.id}>
                 {showGroupTitle && <div className="plugin-list-group-title">
@@ -436,15 +433,15 @@ const PluginSettings: React.FC = () => {
                         {t('plugins.apiVersion', { version: plugin.manifest.apiVersion })}
                       </span>
                     )}
-                    {hasTrustedViews(plugin) && <span className="plugin-card-version">{t(plugin.trustedWebGranted === true ? 'plugins.trustedWebBadge' : 'plugins.trustedWebPendingBadge')}</span>}
+                    {hasTrustedViews(plugin.manifest) && <span className="plugin-card-version">{t(plugin.trustedWebGranted === true ? 'plugins.trustedWebBadge' : 'plugins.trustedWebPendingBadge')}</span>}
                   </div>
                   <div className="plugin-card-controls">
                     {plugin.trustedWebGranted === true && <button className="btn btn-danger btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => {
                       if (!beginPluginBusy(plugin.id)) return;
-                      void setTrustedWeb(plugin.id, false, plugin.installGeneration)
+                      void revokeTrustedWeb(plugin.id, plugin.installGeneration)
                         .catch(() => {}).finally(() => endPluginBusy(plugin.id));
                     }}>{t('plugins.revokeTrustedWeb')}</button>}
-                    {hasTrustedViews(plugin) && <button className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
+                    {hasTrustedViews(plugin.manifest) && <button className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
                     <button
                       className="btn btn-sm"
                       title={t('plugins.reloadCodeHint')}
@@ -460,33 +457,33 @@ const PluginSettings: React.FC = () => {
                     <button
                       className={`btn btn-sm${plugin.enabled ? ' active' : ''}`}
                       onClick={() => handleToggleEnabled(plugin)}
-                      disabled={loading || busyPlugins.has(plugin.id) || !!plugin.manifestError}
+                      disabled={loading || busyPlugins.has(plugin.id) || !plugin.installGeneration || !!plugin.manifestError}
                     >
                       <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
                     </button>
                     <button
                       className="btn btn-danger btn-sm"
-                      disabled={loading}
+                      disabled={loading || !!uninstalling || !plugin.installGeneration || busyPlugins.has(plugin.id)}
                       onClick={() => {
-                        if (window.confirm(t('plugins.uninstallConfirm', { name: plugin.manifest?.name ?? plugin.id }))) {
-                          if (!beginPluginBusy(plugin.id)) return;
-                          const name = plugin.manifest?.name ?? plugin.id;
-                          setUninstalling({ name, startedAt: Date.now() });
-                          // Commit + paint the panel before the native teardown can
-                          // occupy the main thread, so a slow uninstall never looks
-                          // like a frozen application. A hidden document pauses rAF,
-                          // so a timer races it: the command must still start.
-                          let started = false;
-                          const begin = () => {
-                            if (started) return;
-                            started = true;
-                            void uninstallPlugin(plugin.id)
-                              .catch(() => {})
-                              .finally(() => { endPluginBusy(plugin.id); setUninstalling(null); });
-                          };
-                          requestAnimationFrame(() => requestAnimationFrame(begin));
-                          setTimeout(begin, 250);
-                        }
+                        const { id, installGeneration } = plugin;
+                        if (!installGeneration || uninstallBusyRef.current || busyPluginRef.current.has(id)) return;
+                        const name = plugin.manifest?.name ?? id;
+                        if (!window.confirm(t('plugins.uninstallConfirm', { name })) || !beginPluginBusy(id)) return;
+                        uninstallBusyRef.current = true;
+                        setUninstalling({ name, startedAt: Date.now() });
+                        // Paint before native teardown. A timer races rAF because hidden documents pause rAF.
+                        let started = false;
+                        const begin = () => {
+                          if (started) return;
+                          started = true;
+                          void uninstallPlugin(id, installGeneration).catch(() => {}).finally(() => {
+                            uninstallBusyRef.current = false;
+                            endPluginBusy(id);
+                            setUninstalling(null);
+                          });
+                        };
+                        requestAnimationFrame(() => requestAnimationFrame(begin));
+                        setTimeout(begin, 250);
                       }}
                     >
                       <Trash2 size={13} /> {t('plugins.uninstall')}
@@ -503,43 +500,18 @@ const PluginSettings: React.FC = () => {
                   <>
                     <p className="plugin-desc">{plugin.manifest?.description}</p>
 
-                    {/* 权限授予区 */}
-                    <div className="plugin-perms">
-                      <div className="plugin-perms-header">
-                        <strong>{t('plugins.permissions')}</strong>
-                        <span className="settings-hint">{t('plugins.permissionsHint')}</span>
-                      </div>
-                      {declared.length === 0 ? (
-                        <p className="settings-hint">{t('plugins.noPermissions')}</p>
-                      ) : (
-                        <div className="plugin-perm-grid">
-                          {declared.map((perm) => (
-                            <label key={perm} className="plugin-perm-item">
-                              <input
-                                type="checkbox"
-                                checked={granted.includes(perm)}
-                                disabled={loading || busyPlugins.has(plugin.id) || !!plugin.manifestError}
-                                onChange={() => {
-                                   // Granting a sensitive permission is a reviewed action, not a silent toggle.
-                                   if (!granted.includes(perm) && !confirmSensitive(plugin, [perm])) return;
-                                   if (!beginPluginBusy(plugin.id)) return;
-                                   void togglePermission(plugin.id, perm, plugin.installGeneration)
-                                     .finally(() => endPluginBusy(plugin.id));
-                                 }}
-                              />
-                              <code>{perm}</code>
-                              <span className="plugin-perm-state">
-                                {granted.includes(perm) ? (
-                                  <Check size={12} className="granted" />
-                                ) : (
-                                  <X size={12} className="not-granted" />
-                                )}
-                              </span>
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                     <div className="plugin-perms">
+                       <div className="plugin-perms-header">
+                         <strong>{t('plugins.permissions')}</strong>
+                         {declared.length > 0 && <span className="settings-hint">
+                           {t('plugins.review.summary', { count: granted.length, total: declared.length })}
+                         </span>}
+                         {(declared.length > 0 || hasTrustedViews(plugin.manifest) && plugin.trustedWebGranted !== true) &&
+                           <button className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id) || !plugin.installGeneration}
+                             onClick={() => setReview({ plugin, intent: 'manage' })}>{t('plugins.review.manage')}</button>}
+                       </div>
+                       {declared.length === 0 && <p className="settings-hint">{t('plugins.noPermissions')}</p>}
+                     </div>
                   </>
                 )}
               </div>
@@ -549,59 +521,36 @@ const PluginSettings: React.FC = () => {
         </div>
       )}
       </div>
-    {(pendingTrust || pendingClear) && <TrustedWebDialog
-      plugin={(pendingTrust?.plugin ?? pendingClear)!}
-      clearing={pendingClear !== null}
+    {pendingClear && <ClearWebDataDialog
+      plugin={pendingClear}
       working={working || loading}
-      onCancel={() => { setPendingTrust(null); setPendingClear(null); }}
+      onCancel={() => setPendingClear(null)}
       onAccept={() => {
-        if (working) return;
+        const { id, installGeneration } = pendingClear;
+        if (!beginPluginBusy(id)) return;
         setWorking(true);
-        void (async () => {
-          if (pendingClear) {
-            await clearWebData(pendingClear.id, pendingClear.installGeneration);
-            setPendingClear(null);
-          } else if (pendingTrust) {
-            const { plugin, install } = pendingTrust;
-            await setTrustedWeb(plugin.id, true, plugin.installGeneration);
-            setPendingTrust(null);
-            if (install) setPendingGrant(plugin);
-            else handleToggleEnabled({ ...plugin, trustedWebGranted: true });
-          }
-        })().catch(() => {}).finally(() => setWorking(false));
+        void clearWebData(id, installGeneration).catch(() => {}).finally(() => {
+          setPendingClear(null);
+          setWorking(false);
+          endPluginBusy(id);
+        });
       }}
     />}
-    {pendingGrant && grantReady && (
-      <div className="modal-overlay" onClick={() => { if (!grantWorking) setPendingGrant(null); }}>
-        <div ref={grantDialogRef} tabIndex={-1} className="modal-dialog-compact plugin-permission-dialog animate-slide-up" role="dialog" aria-modal="true" aria-labelledby={grantTitleId} onClick={(event) => event.stopPropagation()}>
-          <h3 id={grantTitleId} className="modal-dialog-title">{t('plugins.permissionPromptTitle', { name: pendingGrant.manifest?.name ?? pendingGrant.id })}</h3>
-          <p className="settings-hint">{t('plugins.permissionPromptDescription')}</p>
-          {pendingGrant.declaredPermissions.length > 0 ? (
-            <div className="plugin-permission-dialog-list">
-              {pendingGrant.declaredPermissions.filter(permission => pendingGrant.knownPermissions.includes(permission)).map(permission => (
-                <code key={permission}>{permission}</code>
-              ))}
-            </div>
-          ) : <p className="settings-hint">{t('plugins.noPermissions')}</p>}
-          <div className="plugin-permission-dialog-actions">
-            <button className="btn" disabled={grantWorking} onClick={() => setPendingGrant(null)}>{t('plugins.permissionPromptLater')}</button>
-            <button className="btn btn-primary" disabled={grantWorking} onClick={() => {
-              if (hasTrustedViews(pendingGrant) && !plugins.some(plugin => plugin.id === pendingGrant.id && plugin.installGeneration === pendingGrant.installGeneration && plugin.trustedWebGranted === true)) {
-                setPendingTrust({ plugin: pendingGrant, install: true });
-                setPendingGrant(null);
-                return;
-              }
-              if (!confirmSensitive(pendingGrant, pendingGrant.declaredPermissions)) return;
-              if (!beginPluginBusy(pendingGrant.id)) return;
-               void grantAllAndEnable(pendingGrant)
-                 .then(() => setPendingGrant(null))
-                 .catch(() => {})
-                 .finally(() => endPluginBusy(pendingGrant.id));
-            }}>{t('plugins.permissionPromptGrantAll')}</button>
-          </div>
-        </div>
-      </div>
-    )}
+    {review && <PluginPermissionDialog
+      key={`${review.plugin.id}:${review.plugin.installGeneration}:${review.intent}`}
+      review={review}
+      working={loading || busyPlugins.has(review.plugin.id)}
+      onCancel={() => setReview(null)}
+      onApply={decision => {
+        const { id } = decision.plugin;
+        if (!beginPluginBusy(id)) return;
+        void applyPermissionReview(decision).catch(() => {}).finally(() => {
+          setReview(null);
+          endPluginBusy(id);
+        });
+      }}
+    />}
+    {directoryInstall && <PluginSettingsInstallProgress state={directoryInstall} onCancel={() => void handleInstallCancel()} />}
     {uninstalling && <UninstallProgress name={uninstalling.name} startedAt={uninstalling.startedAt} />}
     </>
   );

@@ -12,6 +12,12 @@
 
 
 import { isPluginFsPath } from './pluginFsPath';
+import type { PluginSerialTaskOp } from './pluginSerialTask';
+
+export const PLUGIN_SERIAL_TASK_OPS = ['serial.beginSend', 'serial.sendStep', 'serial.cancelSend'] as const satisfies readonly PluginSerialTaskOp[];
+export function isPluginSerialTaskOp(op: string): op is PluginSerialTaskOp {
+  return (PLUGIN_SERIAL_TASK_OPS as readonly string[]).includes(op);
+}
 
 /** 权限点定义：op → 所需权限。无权限要求的 op 用 null（放行）。 */
 export interface PermissionMap {
@@ -33,6 +39,9 @@ export const OP_PERMISSIONS: PermissionMap = {
   'serial.open': 'serial:control',
   'serial.close': 'serial:control',
   'serial.send': 'serial:send',
+  'serial.beginSend': 'serial:send',
+  'serial.sendStep': 'serial:send',
+  'serial.cancelSend': null, // only closes a task owned by this Worker epoch
   // 资产读写
   'fs.read': 'fs:assets',
   'fs.write': 'fs:storage',
@@ -45,6 +54,13 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 用户经系统对话框显式选择的任意文件读取（死机日志 map 等；对话框即信任边界）。
   // 单列 fs:open——与「仅读自身资产」的 fs:assets 语义分离，避免资产授权隐式升级。
   'fs.openDialog': 'fs:open',
+  'fs.openFile': 'fs:open',
+  'fs.readFileWindow': 'fs:open',
+  'fs.createFile': 'fs:save',
+  'fs.writeFileChunk': 'fs:save',
+  'fs.commitFile': 'fs:save',
+  'fs.closeFile': null,
+  'fs.cancelFileRequest': null,
   // 最小保存权限：export 仅写入用户选择的目录；save 每次均需原生 Save As。
   'fs.exportFile': 'fs:export-dir',
   'fs.saveFile': 'fs:save',
@@ -72,6 +88,11 @@ export const OP_PERMISSIONS: PermissionMap = {
   // shell
   'shell.openExternal': 'shell:open',
   'shell.execute': 'shell:execute',
+  'shell.start': 'shell:execute',
+  'shell.read': 'shell:execute',
+  'shell.status': 'shell:execute',
+  'shell.cancel': 'shell:execute',
+  'shell.release': 'shell:execute',
   // 剪贴板
   'clipboard.readText': 'clipboard',
   'clipboard.writeText': 'clipboard',
@@ -146,9 +167,10 @@ export function checkOpAllowed(op: string, grantedPermissions: string[], args?: 
   }
   const required = OP_PERMISSIONS[op];
   if (required === null) return null;
-  return grantedPermissions.includes(required)
-    ? null
-    : `插件未授予 ${required} 权限（当前授予: ${grantedPermissions.join(', ') || '无'}）`;
+  if (!grantedPermissions.includes(required)) return `插件未授予 ${required} 权限（当前授予: ${grantedPermissions.join(', ') || '无'}）`;
+  if (op === 'serial.beginSend' && args && typeof args === 'object' && 'kind' in args && args.kind === 'file'
+    && !grantedPermissions.includes('fs:open')) return '插件未授予 fs:open 权限';
+  return null;
 }
 
 /** 敏感权限集（设计 D3：首次启用时确认框列出并说明风险）。 */

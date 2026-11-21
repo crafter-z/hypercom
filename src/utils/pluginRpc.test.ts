@@ -7,7 +7,9 @@
  * - Worker 桥事件注册与调用语义。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { checkOpAllowed, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS } from './pluginRpc';
+import { checkOpAllowed, OP_PERMISSIONS, checkPortScope, SENSITIVE_PERMISSIONS, PLUGIN_SERIAL_TASK_OPS } from './pluginRpc';
+import { PLUGIN_FILE_HANDLE_OPS } from './pluginFileHandle';
+import { PLUGIN_PROCESS_OPS } from './pluginProcess';
 import { PLUGIN_BRIDGE_CODE } from './pluginBridge';
 import hostApiSource from './pluginHostApi.ts?raw';
 
@@ -15,7 +17,22 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
   it('covers every dispatched API operation with an explicit permission policy', () => {
     const dispatched = [...hostApiSource.matchAll(/case '([^']+)':/g)].map(match => match[1]);
     expect(dispatched.length).toBeGreaterThan(0);
-    expect([...new Set(dispatched)].sort()).toEqual(Object.keys(OP_PERMISSIONS).sort());
+    const all = [...dispatched, ...PLUGIN_FILE_HANDLE_OPS, ...PLUGIN_SERIAL_TASK_OPS, ...PLUGIN_PROCESS_OPS];
+    expect([...new Set(all)].sort()).toEqual(Object.keys(OP_PERMISSIONS).sort());
+  });
+
+  it('never inherits task permissions from related grants and keeps ownership-only cleanup available', () => {
+    expect(checkOpAllowed('fs.openFile', ['fs:assets', 'fs:open-dir', 'fs:save'])).toContain('fs:open');
+    expect(checkOpAllowed('fs.createFile', ['fs:open', 'fs:export-dir'])).toContain('fs:save');
+    expect(checkOpAllowed('serial.beginSend', ['serial:send'], { kind: 'file' })).toContain('fs:open');
+    expect(checkOpAllowed('serial.beginSend', ['serial:send', 'fs:open'], { kind: 'file' })).toBeNull();
+    expect(checkOpAllowed('serial.beginSend', ['serial:send'], { kind: 'bytes' })).toBeNull();
+    expect(checkOpAllowed('serial.sendStep', ['serial:control'])).toContain('serial:send');
+    for (const op of PLUGIN_PROCESS_OPS) {
+      expect(checkOpAllowed(op, ['shell:open'])).toContain('shell:execute');
+      expect(checkOpAllowed(op, ['shell:execute'])).toBeNull();
+    }
+    for (const op of ['fs.closeFile', 'fs.cancelFileRequest', 'serial.cancelSend']) expect(checkOpAllowed(op, [])).toBeNull();
   });
   it('无权限：敏感 op 全拒，只读 op 放行', () => {
     expect(checkOpAllowed('ports.list', [])).toBeNull();

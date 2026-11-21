@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 /// Shared admission/drain state for serial file and tool operations.
 /// Shutdown flips the gate once, then waits for the active count to reach zero.
 pub struct SerialWorkState {
+    pub(crate) tx: Arc<super::plugin_serial_tasks::TxReservations>,
     pub(crate) shutting_down: AtomicBool,
     pub(crate) active: AtomicUsize,
     pub(crate) drained: Notify,
@@ -14,13 +15,14 @@ pub struct SerialWorkState {
 impl SerialWorkState {
     pub fn new() -> Self {
         Self {
+            tx: Arc::default(),
             shutting_down: AtomicBool::new(false),
             active: AtomicUsize::new(0),
             drained: Notify::new(),
         }
     }
 
-    fn admit(self: &Arc<Self>) -> Option<SerialWorkGuard> {
+    pub(crate) fn admit(self: &Arc<Self>) -> Option<SerialWorkGuard> {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
@@ -390,7 +392,9 @@ pub async fn send_serial_data(
         append_line_ending,
         expected_generation,
     } = args;
+    let tx_reservation = state.serial_work.tx.legacy(&port_id)?;
     tokio::task::spawn_blocking(move || {
+        let _tx_reservation = tx_reservation;
         let tx = {
             let manager = serial_manager
                 .lock()
@@ -555,6 +559,7 @@ pub async fn send_file(
     // non-regular, or oversized file must not leave the UI's progress indicator
     // waiting forever for the terminal `done` event.
     let result = async {
+        let _tx_reservation = state.serial_work.tx.legacy(&args.port_id)?;
         let metadata = tokio::fs::metadata(&args.path)
             .await
             .map_err(|e| CommandError::Io(format!("Failed to stat file '{}': {}", args.path, e)))?;
@@ -755,7 +760,9 @@ pub async fn set_serial_params(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
+    let tx_reservation = state.serial_work.tx.legacy(&args.port_id)?;
     tokio::task::spawn_blocking(move || {
+        let _tx_reservation = tx_reservation;
         let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -828,7 +835,9 @@ pub async fn set_flow_control(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let serial_manager = state.serial_manager.clone();
+    let tx_reservation = state.serial_work.tx.legacy(&port_id)?;
     tokio::task::spawn_blocking(move || {
+        let _tx_reservation = tx_reservation;
         let mut manager = serial_manager
             .lock()
             .map_err(|e| CommandError::Lock(e.to_string()))?;
@@ -1192,6 +1201,7 @@ pub async fn shutdown_serial_work(
     state: &crate::AppState,
 ) -> Result<(), CommandError> {
     state.serial_work.begin_shutdown();
+    super::plugin_serial_tasks::retire_plugin_serial_tasks(state, None);
     {
         let mut manager = state
             .serial_manager

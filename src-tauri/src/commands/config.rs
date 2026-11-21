@@ -111,7 +111,12 @@ pub async fn set_config(
             }
         };
         if restore && saved {
+            // Restore has committed. Retire old work even if subsequent recovery
+            // bookkeeping fails; stop file-backed sends before closing handles.
+            crate::commands::plugin_serial_tasks::retire_plugin_serial_tasks(&state, None);
             super::plugin::retire_all_plugin_file_io(&state);
+            state.plugin_http.cancel_all();
+            state.plugin_shell.cancel_all();
             manager
                 .save_safe_backup()
                 .map_err(|e| CommandError::Config(format!("保存插件安全备份失败，已保留恢复标记: {e}")))?;
@@ -129,13 +134,6 @@ pub async fn set_config(
         // Log-directory switches do create_dir_all/allocation/fsync; keep
         // that filesystem work off the async worker's cooperative budget.
         tokio::task::block_in_place(|| state.apply_runtime_config(&cfg));
-    }
-    // An imported configuration can change any plugin's enablement/grants or
-    // install identity; in-flight network requests must not outlive that.
-    if saved && restore_plugin_configs.unwrap_or(false) {
-        state.plugin_http.cancel_all();
-        state.plugin_shell.cancel_all();
-        super::plugin::retire_all_plugin_file_io(&state);
     }
     // Retire views only after the imported configuration committed.
     if let Some(entries) = restored_entries {

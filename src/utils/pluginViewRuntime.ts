@@ -2,7 +2,7 @@ import { useAppStore, getTabPortId } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import type { PluginConfigEntry, PluginManifestView, PluginView, PortMetaEntry, TabItem } from '../types';
 import { RETRIABLE_PLUGIN_VIEW_FAILURES } from '../types/pluginViews';
-import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewFailureCode, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage } from '../types/pluginViews';
+import type { PluginViewBinding, PluginViewDeclaration, PluginViewEnvironment, PluginViewFailureCode, PluginViewPreference, PluginViewRect, PluginViewportRect, PluginViewState, PluginTabOpenOptions, PluginNativeMessage, PluginViewHostMessage, PluginViewInteractionStatus } from '../types/pluginViews';
 import { getPluginViews, subscribePluginViews } from './pluginConfigSnapshot';
 import { pluginHost, subscribePluginSessions, type PluginSession } from './pluginHost';
 import { PluginTimeline } from './pluginTimeline';
@@ -25,7 +25,6 @@ const MAX_OCCLUSION_SIZE = 1_000_000;
 /** Trusted documents only start this watchdog after a successful navigation:
  *  slow loading itself is never failed by a fixed deadline. */
 export const TRUSTED_READY_TIMEOUT_MS = 30_000;
-const INTERACTION_DROP_WARN_MS = 5_000;
 const EMPTY_STATE: PluginViewState = { status: 'unavailable', error: null, instanceId: null, code: null };
 const listeners = new Set<() => void>();
 let states: Record<string, PluginViewState> = {};
@@ -82,7 +81,7 @@ interface ViewRecord {
   unsubscribeInput: (() => void) | null;
   interactionTokens: number;
   interactionTime: number;
-  lastInteractionDropWarn: number;
+  interactionDocumentRouted: boolean;
   lastEnvironment: string;
 }
 
@@ -350,9 +349,12 @@ function beginDocument(record: ViewRecord, documentId: string): boolean {
     record.binaryReceiver = null;
   }
   setState(record.binding.tabId, { status: 'loading', error: null, instanceId: record.binding.viewInstanceId, code: null });
+  record.interactionDocumentRouted = false;
   if (record.usesWorker) {
     const session = pluginHost.get(record.binding.pluginId);
-    session?.post({ type: 'view.document', payload: { instanceId: record.binding.viewInstanceId, documentId } });
+    if (session?.epoch === record.binding.workerEpoch) {
+      record.interactionDocumentRouted = session.post({ type: 'view.document', payload: { instanceId: record.binding.viewInstanceId, documentId } });
+    }
   }
   return true;
 }
@@ -408,13 +410,33 @@ function armTrustedReadyWatchdog(record: ViewRecord, documentId: string): void {
     if (live(record) && record.documentId === documentId && !record.nativeReady) fail(record, failure('init-timeout', 'plugin UI did not become ready'));
   }, TRUSTED_READY_TIMEOUT_MS);
 }
-/** Capacity backpressure must not kill a healthy view: drop the interaction and
- *  warn at a bounded rate instead of turning it into a protocol/state failure. */
-function warnDroppedInteraction(record: ViewRecord): void {
+function handleUiInteraction(record: ViewRecord, documentId: string, message: PluginNativeMessage): void {
+  const { requestId, interaction, messageType } = message;
+  if (typeof requestId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(requestId)
+    || (interaction !== 'action' && interaction !== 'preview')) throw new Error('invalid UI interaction receipt identity');
+  const acknowledge = (status: PluginViewInteractionStatus): void => {
+    if (!live(record) || record.documentId !== documentId) return;
+    // A lost receipt is unknown to the caller, not a reason to retire the view.
+    void pluginViewService.send(record.binding.viewInstanceId, { type: 'interaction-ack', documentId, requestId, status }).catch(() => {});
+  };
+  if (message.type === 'interaction-busy') { acknowledge('busy'); return; }
+  if (typeof messageType !== 'string' || !messageType || messageType.length > 128) throw new Error('invalid UI message');
+  const worker = pluginHost.get(record.binding.pluginId);
+  if (!record.usesWorker || !worker?.loaded || worker.epoch !== record.binding.workerEpoch || !record.interactionDocumentRouted) {
+    acknowledge('unavailable'); return;
+  }
+  if (!record.nativeReady || !record.workerReady) { acknowledge('busy'); return; }
   const now = Date.now();
-  if (now - record.lastInteractionDropWarn < INTERACTION_DROP_WARN_MS) return;
-  record.lastInteractionDropWarn = now;
-  console.warn('[pluginView] interaction dropped: plugin Worker capacity exceeded');
+  record.interactionTokens = Math.min(32, record.interactionTokens + Math.max(0, now - record.interactionTime) * 0.03);
+  record.interactionTime = now;
+  if (record.interactionTokens < 1) { acknowledge('busy'); return; }
+  record.interactionTokens--;
+  jsonBytes(message.payload ?? null, 16 * 1024);
+  const status = worker.postViewInteraction({ instanceId: message.instanceId, documentId, type: messageType, payload: message.payload },
+    interaction === 'preview' ? () => {
+      if (pluginHost.get(record.binding.pluginId) === worker && worker.epoch === record.binding.workerEpoch) acknowledge('accepted');
+    } : undefined);
+  if (interaction === 'action' || status !== 'accepted') acknowledge(status);
 }
 function retire(record: ViewRecord, reason: string | Error | null): void {
   if (!record.alive) return;
@@ -534,7 +556,7 @@ async function createRecord(tab: TabItem, preference: PluginViewPreference, view
   const tabSessionId = tabSessions.get(tab.id) ?? crypto.randomUUID(); tabSessions.set(tab.id, tabSessionId);
   const portId = getTabPortId(tab);
   const binding: PluginViewBinding = { ...preference, tabId: tab.id, placement: tab.kind === 'serial' ? 'serial-content' : 'workspace-tab', boundPortId: portId, portMode: portId ? useAppStore.getState().ports.find(port => port.id === portId)?.mode ?? 'trx' : null, tabSessionId, viewInstanceId: crypto.randomUUID(), workerEpoch: usesWorker ? worker!.epoch : 0, streamEpoch: 0 };
-  const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, timeline: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, navigationReadyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), lastInteractionDropWarn: 0, lastEnvironment: '' };
+  const record: ViewRecord = { binding, declaration: view, usesWorker, documentId: null, binarySender: null, binaryReceiver: null, timeline: null, alive: true, nativeCreated: false, nativeReady: false, nativeInitializing: false, workerReady: !usesWorker, retirement: null, visible: false, rect: null, layoutRevision: 0, revision: 0, inFlight: null, latest: null, retained: null, readyTimer: null, navigationReadyTimer: null, workerReadyTimer: null, ackTimer: null, flushTimer: null, lastSentAt: 0, unsubscribeInput: null, interactionTokens: 32, interactionTime: Date.now(), interactionDocumentRouted: false, lastEnvironment: '' };
   records.set(tab.id, record); setState(tab.id, { status: 'loading', error: null, instanceId: binding.viewInstanceId, code: null });
   try {
     await pluginViewService.create(binding);
@@ -897,23 +919,8 @@ async function handleNative(message: PluginNativeMessage): Promise<void> {
       clearTimer(record, 'ackTimer'); record.inFlight = null; flush(record);
     } else if (message.type === 'error') fail(record, message.error ?? 'plugin UI failed');
     else if (message.type === 'focus') { if (record.visible && !overlayBlocked) useAppStore.getState().setActiveTab(record.binding.tabId); }
-    else if (message.type === 'message') {
-      if (!record.nativeReady || !record.usesWorker) return;
-      if (typeof message.messageType !== 'string' || !message.messageType || message.messageType.length > 128) throw new Error('invalid UI message');
-      const now = Date.now();
-      record.interactionTokens = Math.min(32, record.interactionTokens + (now - record.interactionTime) * 0.03);
-      record.interactionTime = now;
-      if (record.interactionTokens < 1) throw new Error('plugin UI interaction rate exceeded');
-      record.interactionTokens--;
-      jsonBytes(message.payload ?? null, 16 * 1024);
-      // Capacity backpressure is transient (e.g. a large binary transfer in
-      // flight): drop this interaction and keep the view alive; only protocol
-      // violations above retire it.
-      if (!pluginHost.get(record.binding.pluginId)?.post({ type: 'view.message', payload: { instanceId: message.instanceId, type: message.messageType, payload: message.payload } })) {
-        warnDroppedInteraction(record);
-        return;
-      }
-    } else if (message.type === 'binary') {
+    else if (message.type === 'message' || message.type === 'interaction-busy') handleUiInteraction(record, documentId, message);
+    else if (message.type === 'binary') {
       if (!record.nativeReady) return;
       if (typeof message.transferId !== 'string' || typeof message.seq !== 'number' || typeof message.done !== 'boolean'
         || typeof message.transferType !== 'string' || typeof message.data !== 'string') return;

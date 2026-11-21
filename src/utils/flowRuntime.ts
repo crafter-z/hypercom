@@ -30,7 +30,22 @@ export interface FlowRuntimeStatus {
 }
 
 const statuses = new Map<string, FlowRuntimeStatus>();
+const serialTasks = new Map<string, symbol>();
 const listeners = new Set<() => void>();
+
+/** A transfer owns TX without impersonating an enhanced flow in the UI. */
+export function isSerialTaskRunning(portId: string | null | undefined): boolean {
+  return !!portId && serialTasks.has(portId);
+}
+
+export function reserveSerialTask(portId: string): (() => void) | null {
+  if (isFlowRunning(portId) || isSerialTaskRunning(portId)) return null;
+  const lease = Symbol(portId);
+  serialTasks.set(portId, lease);
+  return () => {
+    if (serialTasks.get(portId) === lease) serialTasks.delete(portId);
+  };
+}
 
 function notify(): void {
   for (const listener of listeners) listener();
@@ -88,6 +103,7 @@ export function flowIsActive(status: FlowRuntimeStatus | null): boolean {
 
 /** Test cleanup and app teardown helper. */
 export function resetFlowRuntime(): void {
+  serialTasks.clear();
   if (statuses.size === 0) return;
   statuses.clear();
   notify();

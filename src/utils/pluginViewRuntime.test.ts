@@ -144,6 +144,69 @@ describe('native view lifecycle handshakes', () => {
     vi.mocked(pluginViewService.destroy).mockResolvedValue(undefined);
   }
 
+  it('receipts native, runtime and Worker backpressure without retiring an ordinary view or replaying actions', async () => {
+    enableWorker();
+    const deliver = vi.fn<PluginSession['postViewInteraction']>().mockReturnValue('accepted').mockReturnValueOnce('busy');
+    vi.mocked(pluginHost.get).mockReturnValue({ loaded: true, epoch: 1, post: () => true, postViewInteraction: deliver } as unknown as PluginSession);
+    let receive!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async cb => { receive = cb; return () => {}; });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = (await open({ viewId: 'tool' })).tabId;
+      await settle();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      receive({ instanceId, type: 'ready', documentId: 'doc-a' });
+      markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      vi.mocked(pluginViewService.send).mockClear();
+      const action = (index: number): PluginNativeMessage => ({ instanceId, type: 'message', documentId: 'doc-a', requestId: crypto.randomUUID(), interaction: 'action', messageType: 'save', payload: index });
+      const actions = Array.from({ length: 35 }, (_, index) => action(index));
+      const beforeNative = { ...action(-1), type: 'interaction-busy' } as const;
+      receive(beforeNative);
+      for (const message of actions) receive(message);
+      expect(deliver).toHaveBeenCalledTimes(32);
+      expect(deliver.mock.calls.map(([payload]) => payload.payload)).toEqual(Array.from({ length: 32 }, (_, index) => index));
+      const receipts = vi.mocked(pluginViewService.send).mock.calls.map(([, message]) => [message.requestId, message.status]);
+      expect(receipts).toEqual([[beforeNative.requestId, 'busy'], ...actions.map((message, index) => [message.requestId, index === 0 || index >= 32 ? 'busy' : 'accepted'])]);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deliver).toHaveBeenCalledTimes(32);
+      expect(getPluginViewState(tabId).status).toBe('ready');
+    } finally { stop(); }
+  });
+
+  it('drops stale interaction routing and preview receipts on document replacement', async () => {
+    enableWorker();
+    const deliver = vi.fn<PluginSession['postViewInteraction']>().mockReturnValue('accepted');
+    vi.mocked(pluginHost.get).mockReturnValue({ loaded: true, epoch: 1, post: () => true, postViewInteraction: deliver } as unknown as PluginSession);
+    let receive!: (message: PluginNativeMessage) => void;
+    vi.mocked(pluginViewService.onMessage).mockImplementationOnce(async cb => { receive = cb; return () => {}; });
+    const stop = startPluginViewRuntime();
+    try {
+      const tabId = (await open({ viewId: 'tool' })).tabId;
+      await settle();
+      const instanceId = getPluginViewState(tabId).instanceId!;
+      receive({ instanceId, type: 'ready', documentId: 'doc-a' });
+      markPluginViewWorkerReady(plugin.id, instanceId);
+      await settle();
+      const previous = { instanceId, type: 'message', documentId: 'doc-a', requestId: crypto.randomUUID(), interaction: 'preview', messageType: 'threshold', payload: 1 } as const;
+      receive(previous);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(pluginViewService.send).not.toHaveBeenCalledWith(instanceId, expect.objectContaining({ type: 'interaction-ack', requestId: previous.requestId }));
+      receive({ instanceId, type: 'document', documentId: 'doc-b' });
+      receive({ instanceId, type: 'ready', documentId: 'doc-b' });
+      await settle();
+      receive(previous);
+      deliver.mock.calls[0][1]!();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(pluginViewService.send).not.toHaveBeenCalledWith(instanceId, expect.objectContaining({ type: 'interaction-ack', requestId: previous.requestId }));
+      const next = { ...previous, documentId: 'doc-b', requestId: crypto.randomUUID(), payload: 2 };
+      receive(next);
+      deliver.mock.calls[1][1]!();
+      expect(pluginViewService.send).toHaveBeenCalledWith(instanceId, expect.objectContaining({ type: 'interaction-ack', documentId: 'doc-b', requestId: next.requestId, status: 'accepted' }));
+      expect(getPluginViewState(tabId).status).toBe('ready');
+    } finally { stop(); }
+  });
+
   it('requires independent trust before opening and retires a ready page when trust is revoked', async () => {
     enableWorker();
     const trusted: PluginView = { ...plugin, manifest: { ...plugin.manifest!, ui: { buttons: [], menuItems: [], views: [{ ...declaration, id: 'web', mode: 'trusted-web', entry: 'ui/index.html', input: 'none', portBinding: 'none', placements: ['workspace-tab'] }] } } };

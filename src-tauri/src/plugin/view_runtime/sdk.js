@@ -24,11 +24,13 @@
     return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
   };
   let documentId = null;
-  const post = (value) => {
+  const encoder = new TextEncoder();
+  const encodeMessage = (value) => {
     const encoded = JSON.stringify(value);
-    if (new TextEncoder().encode(encoded).length > 16384) throw new Error('View message exceeds 16 KiB');
-    globalThis.ipc.postMessage(encoded);
+    if (encoder.encode(encoded).length > 16384) throw new Error('View message exceeds 16 KiB');
+    return encoded;
   };
+  const post = value => globalThis.ipc.postMessage(encodeMessage(value));
   const report = (error) => {
     try { post({ type: 'error', documentId, error: String(error?.stack || error).slice(0, 2048) }); }
     catch { /* Native channel may already be retired. */ }
@@ -85,6 +87,104 @@
     throw new TypeError('sendBinary requires Uint8Array or ArrayBuffer');
   };
   const validType = (value) => typeof value === 'string' && value.length > 0 && value.length <= 128;
+
+  // Ordinary interaction is neither telemetry nor a host command. Keep legacy
+  // and explicit actions at-most-once; only explicitly replaceable previews coalesce.
+  const INTERACTION_ACK_MS = 5000;
+  const MAX_PENDING_ACTIONS = 8;
+  const PREVIEW_INTERVAL_MS = 50;
+  const pendingActions = new Map();
+  let actionTokens = 32;
+  let actionTime = performance.now();
+  let latestPreview = null;
+  let previewInFlight = null;
+  let previewTimer = null;
+  let interactionClosed = false;
+  let legacyNotice = null;
+  let legacyNoticeTimer = null;
+  let legacyNoticeUnknown = false;
+  const interactionStatuses = ['accepted', 'busy', 'unavailable', 'unknown'];
+  const encodeInteraction = (type, payload) => {
+    if (!validType(type)) throw new TypeError('Invalid view message type');
+    return encodeMessage({ type: 'ui-message', documentId, messageType: type, payload });
+  };
+  // Preserve the original 16 KiB application envelope; receipt metadata has
+  // a small separate native allowance and never expands the payload budget.
+  const interactionWire = (body, interaction, requestId) => body.slice(0, -1) + ',' + JSON.stringify({ interaction, requestId }).slice(1);
+  const requireWorker = () => {
+    if (!initialized) throw new Error('View not initialized');
+    if (!hasWorker) throw new Error('View has no Worker peer');
+  };
+  const submitAction = (body, complete) => {
+    if (interactionClosed) { complete('unavailable'); return; }
+    const now = performance.now();
+    actionTokens = Math.min(32, actionTokens + (now - actionTime) * 0.03);
+    actionTime = now;
+    if (actionTokens < 1 || pendingActions.size >= MAX_PENDING_ACTIONS) { complete('busy'); return; }
+    actionTokens--;
+    const requestId = newId();
+    const finish = status => {
+      clearTimeout(timer); pendingActions.delete(requestId); complete(status);
+    };
+    const timer = setTimeout(() => finish('unknown'), INTERACTION_ACK_MS);
+    pendingActions.set(requestId, finish);
+    try { globalThis.ipc.postMessage(interactionWire(body, 'action', requestId)); }
+    catch { finish('unknown'); }
+  };
+  // A single, non-modal, localized page notice is enough even under a legacy
+  // mousemove flood. An uncertain outcome overrides "not sent" in the same window.
+  const showLegacyOutcome = status => {
+    if (status === 'accepted' || interactionClosed) return;
+    const doc = globalThis.document;
+    if (!doc?.documentElement) return;
+    const unknown = status === 'unknown';
+    if (legacyNotice && (legacyNoticeUnknown || !unknown)) return;
+    if (!legacyNotice) {
+      legacyNotice = doc.createElement('div');
+      legacyNotice.setAttribute('role', 'status');
+      legacyNotice.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:calc(100% - 24px);padding:8px 12px;border-radius:6px;background:#27272a;color:#fff;font:14px sans-serif;pointer-events:none';
+      (doc.body || doc.documentElement).appendChild(legacyNotice);
+    }
+    clearTimeout(legacyNoticeTimer);
+    legacyNoticeTimer = setTimeout(() => {
+      legacyNotice?.remove(); legacyNotice = null; legacyNoticeUnknown = false; legacyNoticeTimer = null;
+    }, INTERACTION_ACK_MS);
+    legacyNoticeUnknown = unknown;
+    legacyNotice.textContent = environment?.language === 'zh-CN'
+      ? (unknown ? '页面操作未获确认，重试前请先核实是否已执行。' : '页面暂时无法发送操作，请稍后重试。')
+      : (unknown ? 'View action not confirmed. Check whether it ran before retrying.' : 'View action was not sent. Try again when the view is ready.');
+  };
+  const schedulePreview = (delay = PREVIEW_INTERVAL_MS) => {
+    if (interactionClosed || previewTimer !== null || previewInFlight || !latestPreview) return;
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      const candidate = latestPreview; latestPreview = null;
+      if (!candidate || performance.now() >= candidate.expires) return;
+      const finish = status => {
+        clearTimeout(timer); previewInFlight = null;
+        // Retry only a known-not-admitted preview, and never displace newer data.
+        if (status === 'busy' && !latestPreview && performance.now() < candidate.expires) latestPreview = candidate;
+        schedulePreview(status === 'busy' ? 100 : PREVIEW_INTERVAL_MS);
+      };
+      const timer = setTimeout(() => finish('unknown'), INTERACTION_ACK_MS);
+      const requestId = newId();
+      previewInFlight = { requestId, finish };
+      try { globalThis.ipc.postMessage(interactionWire(candidate.body, 'preview', requestId)); }
+      catch { finish('unknown'); }
+    }, delay);
+  };
+  const handleInteractionAck = ({ requestId, status }) => {
+    if (!interactionStatuses.includes(status)) return;
+    if (previewInFlight?.requestId === requestId) previewInFlight.finish(status);
+    else pendingActions.get(requestId)?.(status);
+  };
+  const closeInteractions = () => {
+    interactionClosed = true;
+    clearTimeout(previewTimer); latestPreview = null;
+    previewInFlight?.finish('unknown');
+    for (const finish of pendingActions.values()) finish('unknown');
+    clearTimeout(legacyNoticeTimer); legacyNotice?.remove(); legacyNotice = null;
+  };
 
   const acknowledge = (message, ok, error) => {
     const ack = { type: 'binary-ack', documentId, transferId: message.transferId, seq: message.seq, done: message.done === true, ok };
@@ -344,10 +444,19 @@
       return () => binaryCallbacks.delete(callback);
     },
     send(type, payload) {
-      if (!initialized) throw new Error('View not initialized');
-      if (!hasWorker) throw new Error('View has no Worker peer');
-      if (!validType(type)) throw new TypeError('Invalid view message type');
-      post({ type: 'ui-message', documentId, messageType: type, payload });
+      requireWorker();
+      submitAction(encodeInteraction(type, payload), showLegacyOutcome);
+    },
+    sendAction(type, payload) {
+      if (!initialized || !hasWorker || interactionClosed) return Promise.resolve({ status: 'unavailable' });
+      const action = encodeInteraction(type, payload);
+      return new Promise(resolve => submitAction(action, status => resolve({ status })));
+    },
+    preview(type, payload) {
+      requireWorker();
+      if (interactionClosed) return;
+      latestPreview = { body: encodeInteraction(type, payload), expires: performance.now() + INTERACTION_ACK_MS };
+      schedulePreview();
     },
     sendBinary(type, value) {
       if (!hasWorker) return Promise.reject(new Error('View has no Worker binary peer'));
@@ -388,7 +497,7 @@
     },
   });
   Object.defineProperty(globalThis, 'view', { value: sdk, writable: false, configurable: false });
-  addEventListener('pagehide', () => timeline?.dispose(), { once: true });
+  addEventListener('pagehide', () => { closeInteractions(); timeline?.dispose(); }, { once: true });
   const startDocument = (id) => {
     if (typeof id !== 'string' || !id) throw new Error('Invalid document identity');
     if (documentId !== null) {
@@ -406,6 +515,7 @@
     // from ever applying a message addressed to another document generation.
     if (!documentId || message.documentId !== documentId) return;
     if (message.type === 'timeline-seek' || message.type === 'timeline-cancel') { dispatchTimeline(message); return; }
+    if (message.type === 'interaction-ack') { handleInteractionAck(message); return; }
     if (message.type === 'binary-ack') { handleBinaryAck(message); return; }
     if (message.type === 'binary-chunk') {
       if (++pendingBinaryMessages > 16) { pendingBinaryMessages--; report(new Error('Host binary queue overflow')); return; }

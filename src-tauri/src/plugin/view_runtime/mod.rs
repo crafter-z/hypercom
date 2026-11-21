@@ -32,6 +32,15 @@ pub const MAX_BINARY_SEQ: u64 = 16_777_216;
 const TIMELINE_PREVIEW_RATE: f64 = 20.0;
 #[cfg(any(windows, test))]
 const TIMELINE_CONTROL_RATE: f64 = 64.0;
+#[cfg(any(windows, test))]
+const INTERACTION_RATE: f64 = 64.0;
+#[cfg(any(windows, test))]
+const INTERACTION_BUSY_RATE: f64 = 16.0;
+#[cfg(any(windows, test))]
+const PAGE_MESSAGE_BYTES: usize = 16 * 1024;
+// Preserve the original application envelope, allowing only fixed receipt metadata.
+#[cfg(any(windows, test))]
+const INTERACTION_METADATA_BYTES: usize = 76;
 
 /// Simple monotonic token bucket (fractional refill, capped burst).
 #[cfg(any(windows, test))]
@@ -49,6 +58,23 @@ impl TokenBucket {
         if self.tokens < 1.0 { return false; }
         self.tokens -= 1.0;
         true
+    }
+}
+
+#[cfg(any(windows, test))]
+struct InteractionRate { messages: TokenBucket, busy_receipts: TokenBucket }
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum InteractionAdmission { Forward, Busy, Drop }
+#[cfg(any(windows, test))]
+impl InteractionRate {
+    fn new() -> Self {
+        Self { messages: TokenBucket::new(INTERACTION_RATE), busy_receipts: TokenBucket::new(INTERACTION_BUSY_RATE) }
+    }
+    fn take(&mut self, now: Instant) -> InteractionAdmission {
+        if self.messages.try_take_at(INTERACTION_RATE, INTERACTION_RATE, now) { InteractionAdmission::Forward }
+        else if self.busy_receipts.try_take_at(INTERACTION_BUSY_RATE, INTERACTION_BUSY_RATE, now) { InteractionAdmission::Busy }
+        else { InteractionAdmission::Drop }
     }
 }
 
@@ -73,10 +99,10 @@ pub struct Rect { pub x: f64, pub y: f64, pub width: f64, pub height: f64, pub z
 #[derive(Default)]
 struct DocumentState { current: Option<String> }
 pub struct Session {
-    pub binding: Binding, pub alive: AtomicBool, permission: Option<&'static str>,
+    pub binding: Binding, pub alive: Arc<AtomicBool>, permission: Option<&'static str>,
     pub trusted_web: bool,
     #[cfg(windows)]
-    rate: Mutex<(Instant, u32)>,
+    interaction_rate: Mutex<InteractionRate>,
     #[cfg(any(windows, test))]
     control_rate: Mutex<TokenBucket>,
     #[cfg(any(windows, test))]
@@ -188,14 +214,14 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     // Validate and snapshot only the selected view, once, off the async worker.
     // Install/enable/reload retain their complete package validation boundary.
     let resource_view = declaration.clone();
-    let resources = tokio::task::spawn_blocking(move || resources::snapshot(&dir, &resource_view))
+    let resources = tokio::task::spawn_blocking(move || resources::snapshot_lazy(&dir, &resource_view))
         .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
     let session = Arc::new(Session {
-        binding, alive: AtomicBool::new(true), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration),
+        binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration),
         // Only the native Windows backend receives page callbacks. Keep the pure
         // rate-limit and document checks available to tests on every platform.
         #[cfg(windows)]
-        rate: Mutex::new((Instant::now(), 0)),
+        interaction_rate: Mutex::new(InteractionRate::new()),
         #[cfg(any(windows, test))]
         control_rate: Mutex::new(TokenBucket::new(128.0)),
         #[cfg(any(windows, test))]
@@ -318,6 +344,14 @@ fn validate_binary_ack(message: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+fn interaction_request_id(message: &Value) -> Option<&str> {
+    let id = message.get("requestId")?.as_str()?;
+    (id.len() == 36 && uuid::Uuid::parse_str(id).is_ok()).then_some(id)
+}
+fn validate_interaction_ack(message: &Value) -> bool {
+    interaction_request_id(message).is_some()
+        && matches!(message.get("status").and_then(Value::as_str), Some("accepted" | "busy" | "unavailable" | "unknown"))
+}
 pub async fn send(source: tauri::Webview, id: String, mut message: Value) -> Result<(), CommandError> {
     require_main(&source)?;
     let session = session(&id, source.app_handle())?;
@@ -327,6 +361,7 @@ pub async fn send(source: tauri::Webview, id: String, mut message: Value) -> Res
     match message_type.as_str() {
         "init" => { message["context"] = serde_json::to_value(&session.binding).map_err(|e| error(e.to_string()))?; }
         "state" | "environment" => {}
+        "interaction-ack" if validate_interaction_ack(&message) => {}
         "binary-chunk" => validate_binary_chunk(&message).map_err(error)?,
         "binary-ack" => validate_binary_ack(&message).map_err(error)?,
         "timeline-seek" | "timeline-cancel" => if !timeline::validate_host(&message) { return Err(error("视图时间控制消息非法")); },
@@ -337,6 +372,7 @@ pub async fn send(source: tauri::Webview, id: String, mut message: Value) -> Res
         "state" => MAX_MESSAGE_BYTES + 8 * 1024,
         "binary-chunk" | "binary-ack" => 16 * 1024,
         "timeline-seek" | "timeline-cancel" => 8 * 1024,
+        "interaction-ack" => 512,
         _ => MAX_MESSAGE_BYTES,
     };
     if serialized.len() > max_bytes { return Err(error("视图消息类型或大小非法")); }
@@ -481,13 +517,53 @@ fn claim_binary_rate_report(reported: &AtomicBool) -> bool {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
+#[cfg(any(windows, test))]
+fn interaction_fields(value: &Value) -> Option<(&str, &str, &str)> {
+    let request_id = interaction_request_id(value)?;
+    let interaction = value.get("interaction")?.as_str()?;
+    if !matches!(interaction, "action" | "preview") { return None; }
+    let message_type = value.get("messageType")?.as_str()?;
+    if message_type.is_empty() || message_type.encode_utf16().count() > 128 { return None; }
+    Some((request_id, interaction, message_type))
+}
+#[cfg(any(windows, test))]
+fn inbound_interaction(value: &Value, fields: (&str, &str, &str), admission: InteractionAdmission, mut event: Value) -> Option<Value> {
+    let (request_id, interaction, message_type) = fields;
+    match admission {
+        InteractionAdmission::Drop => return None,
+        InteractionAdmission::Busy => event["type"] = "interaction-busy".into(),
+        InteractionAdmission::Forward => {
+            event["type"] = "message".into();
+            event["messageType"] = message_type.into();
+            event["payload"] = value["payload"].clone();
+        }
+    }
+    event["requestId"] = request_id.into();
+    event["interaction"] = interaction.into();
+    Some(event)
+}
+#[cfg(any(windows, test))]
+fn page_message_fits(body_len: usize, event_type: &str) -> bool {
+    body_len <= PAGE_MESSAGE_BYTES + if event_type == "ui-message" { INTERACTION_METADATA_BYTES } else { 0 }
+}
 #[cfg(windows)]
 pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
-    if body.len() > 16 * 1024 || !authorized(app, session) { return; }
+    if !page_message_fits(body.len(), "ui-message") || !authorized(app, session) { return; }
     let Ok(value) = serde_json::from_str::<Value>(body) else { return; };
     let Some(document_id) = value.get("documentId").and_then(Value::as_str) else { return; };
     if uuid::Uuid::parse_str(document_id).is_err() || !session.accepts_document(document_id) { return; }
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if !page_message_fits(body.len(), event_type) { return; }
+    if event_type == "ui-message" {
+        if session.binding.worker_epoch == 0 { return; }
+        let Some(fields) = interaction_fields(&value) else { return; };
+        let admission = session.interaction_rate.lock().map(|mut rate| rate.take(Instant::now())).unwrap_or(InteractionAdmission::Drop);
+        let base = serde_json::json!({"instanceId": session.binding.view_instance_id, "documentId": document_id});
+        if let Some(event) = inbound_interaction(&value, fields, admission, base) {
+            let _ = app.emit_to(tauri::EventTarget::webview("main"), "plugin:view-message", event);
+        }
+        return;
+    }
     if event_type == "binary-chunk" || event_type == "binary-ack" {
         // Binary traffic has its own budget so a burst of frames cannot starve
         // ordinary interaction messages (or spend their bucket). This check is
@@ -507,21 +583,12 @@ pub fn receive(app: &tauri::AppHandle, session: &Session, body: &str) {
         if !take_timeline_token(session, preview, Instant::now()) { return; }
     } else if is_control_message(event_type) {
         if !take_control_token(session) { return; }
-    } else {
-        let Ok(mut rate) = session.rate.lock() else { return; };
-        if rate.0.elapsed().as_secs_f64() >= 1.0 { *rate = (Instant::now(), 0); }
-        rate.1 += 1;
-        if rate.1 > 64 { return; }
-        drop(rate);
-    }
+    } else { return; }
     let base = serde_json::json!({"instanceId": session.binding.view_instance_id, "documentId": document_id});
     let event = match event_type {
         "ready" => { let mut event = base; event["type"] = "ready".into(); event },
         "state-ack" if value.get("revision").and_then(Value::as_u64).is_some() => {
             let mut event = base; event["type"] = "ack".into(); event["revision"] = value["revision"].clone(); event
-        },
-        "ui-message" if value.get("messageType").and_then(Value::as_str).is_some_and(|s| !s.is_empty() && s.len() <= 128) => {
-            let mut event = base; event["type"] = "message".into(); event["messageType"] = value["messageType"].clone(); event["payload"] = value["payload"].clone(); event
         },
         "error" => {
             let mut event = base; event["type"] = "error".into();
@@ -680,23 +747,52 @@ mod tests {
         assert!(is_control_message("error"));
         assert!(!is_control_message("ui-message"));
         assert!(!is_control_message("binary-ack"));
+        let mut interactions = InteractionRate::new();
         let now = Instant::now();
-        let mut interactions = TokenBucket { tokens: 64.0, updated: now };
         let mut controls = TokenBucket { tokens: 128.0, updated: now };
-        for _ in 0..64 { assert!(interactions.try_take_at(64.0, 64.0, now)); }
-        assert!(!interactions.try_take_at(64.0, 64.0, now));
-        // A full interaction burst cannot spend any of the state ACK allowance.
+        for _ in 0..INTERACTION_RATE as usize { assert_eq!(interactions.take(now), InteractionAdmission::Forward); }
+        for _ in 0..INTERACTION_BUSY_RATE as usize { assert_eq!(interactions.take(now), InteractionAdmission::Busy); }
+        assert_eq!(interactions.take(now), InteractionAdmission::Drop);
+        // A full interaction burst and its bounded busy receipts cannot spend state ACK allowance.
         for _ in 0..128 { assert!(controls.try_take_at(128.0, 128.0, now)); }
         assert!(!controls.try_take_at(128.0, 128.0, now));
+    }
+
+    #[test]
+    fn interaction_receipt_is_bounded_and_does_not_echo_overloaded_payload() {
+        let request_id = "ee3fe333-c7d0-4d8b-bace-e5d29cdfa289";
+        let value = serde_json::json!({"type":"ui-message", "interaction":"action", "requestId":request_id,
+            "messageType":"保存", "payload":{"value":1}});
+        let fields = interaction_fields(&value).unwrap();
+        let base = serde_json::json!({"instanceId":"native-instance", "documentId":"native-document"});
+        let busy = inbound_interaction(&value, fields, InteractionAdmission::Busy, base.clone()).unwrap();
+        assert_eq!(busy, serde_json::json!({"instanceId":"native-instance", "documentId":"native-document",
+            "type":"interaction-busy", "requestId":request_id, "interaction":"action"}));
+        let forwarded = inbound_interaction(&value, fields, InteractionAdmission::Forward, base.clone()).unwrap();
+        assert_eq!(forwarded["messageType"], "保存");
+        assert_eq!(forwarded["payload"], serde_json::json!({"value":1}));
+        assert!(inbound_interaction(&value, fields, InteractionAdmission::Drop, base).is_none());
+        assert!(page_message_fits(PAGE_MESSAGE_BYTES + INTERACTION_METADATA_BYTES, "ui-message"));
+        assert!(!page_message_fits(PAGE_MESSAGE_BYTES + INTERACTION_METADATA_BYTES + 1, "ui-message"));
+        assert!(!page_message_fits(PAGE_MESSAGE_BYTES + 1, "binary-ack"));
+        assert!(!page_message_fits(PAGE_MESSAGE_BYTES + 1, "timeline"));
+        let mut invalid = value;
+        invalid["interaction"] = "command".into();
+        assert!(interaction_fields(&invalid).is_none());
+        invalid["interaction"] = "preview".into();
+        invalid["requestId"] = "not-an-id".into();
+        assert!(interaction_fields(&invalid).is_none());
+        assert!(validate_interaction_ack(&serde_json::json!({"requestId":request_id, "status":"busy"})));
+        assert!(!validate_interaction_ack(&serde_json::json!({"requestId":request_id, "status":"executed"})));
     }
 
     #[test]
     fn documents_reject_replaced_and_unknown_identities() {
         let session = Session {
             binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
-            alive: AtomicBool::new(true), trusted_web: false, permission: None,
+            alive: Arc::new(AtomicBool::new(true)), trusted_web: false, permission: None,
             #[cfg(windows)]
-            rate: Mutex::new((Instant::now(), 0)),
+            interaction_rate: Mutex::new(InteractionRate::new()),
             control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
             #[cfg(windows)]
             binary_rate_reported: AtomicBool::new(false),

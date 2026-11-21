@@ -14,7 +14,7 @@ import { notifyError, notifySuccess, useToastStore } from '../../../stores/useTo
 import { eventService, serialService } from '../../../services/tauri';
 import type { FileProgressPayload } from '../../../services/tauri';
 import { isSendablePort } from '../../../utils/sendGuard';
-import { isFlowRunning } from '../../../utils/flowRuntime';
+import { isFlowRunning, isSerialTaskRunning } from '../../../utils/flowRuntime';
 import { trafficStats } from '../../../utils/trafficStats';
 import type { PortTrafficLease } from '../../../utils/trafficStats';
 
@@ -122,6 +122,10 @@ export function useFileSend(portId: string | null): FileSendControls {
       useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.portClosedWarning', portId: id });
       return;
     }
+    if (isSerialTaskRunning(id)) {
+      notifyError(new Error('Port is occupied by a plugin send task'));
+      return;
+    }
     if (isFlowRunning(id)) {
       useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.flowBusy', portId: id });
       return;
@@ -151,6 +155,7 @@ export function useFileSend(portId: string | null): FileSendControls {
       const currentPort = useAppStore.getState().ports.find((p) => p.id === id);
       if (!isSendablePort(currentPort) || currentPort?.connectionGeneration !== transfer.connectionGeneration ||
           !trafficStats.isCurrent(id, transfer.lease)) return;
+      if (isSerialTaskRunning(id)) throw new Error('Port is occupied by a plugin send task');
       if (isFlowRunning(id)) {
         useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.flowBusy', portId: id });
         return;

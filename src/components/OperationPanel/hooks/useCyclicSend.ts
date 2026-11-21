@@ -18,6 +18,7 @@ import { computeByteCount } from '../../../utils/sendUtils';
 import {
   getFlowStatus,
   isFlowRunning,
+  isSerialTaskRunning,
   setFlowStatus,
   type FlowPhase,
 } from '../../../utils/flowRuntime';
@@ -170,7 +171,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     if (loopsRef.current.has(portId)) return;
     // A flow status is the shared runtime occupancy guard. This also prevents
     // a stale reconcile callback from starting a second loop on the same port.
-    if (isFlowRunning(portId) || getFlowStatus(portId)?.phase === 'starting') {
+    if (isFlowRunning(portId) || isSerialTaskRunning(portId) || getFlowStatus(portId)?.phase === 'starting') {
       useOperationStore.getState().setCyclicLoop(portId, false);
       useToastStore.getState().push({ severity: 'warning', messageKey: 'flow.start.blocked', portId });
       return;

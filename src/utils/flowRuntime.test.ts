@@ -3,6 +3,8 @@ import {
   clearFlowStatus,
   getFlowStatus,
   isFlowRunning,
+  isSerialTaskRunning,
+  reserveSerialTask,
   resetFlowRuntime,
   setFlowStatus,
   subscribeFlowRuntime,
@@ -43,6 +45,25 @@ describe('flowRuntime — enhanced flow occupancy', () => {
     expect(isFlowRunning('COM4')).toBe(false);
     expect(isFlowRunning(null)).toBe(false);
     expect(isFlowRunning(undefined)).toBe(false);
+  });
+
+  it('keeps plugin send task ownership separate from enhanced flow status', () => {
+    publish('waiting');
+    expect(reserveSerialTask('COM3')).toBeNull();
+    expect(isSerialTaskRunning('COM3')).toBe(false);
+    publish('completed');
+    const old = reserveSerialTask('COM3')!;
+    expect(isFlowRunning('COM3')).toBe(false);
+    expect(isSerialTaskRunning('COM3')).toBe(true);
+    expect(reserveSerialTask('COM3')).toBeNull();
+    clearFlowStatus('COM3');
+    expect(isSerialTaskRunning('COM3')).toBe(true);
+    old();
+    const replacement = reserveSerialTask('COM3')!;
+    old();
+    expect(isSerialTaskRunning('COM3')).toBe(true);
+    replacement();
+    expect(isSerialTaskRunning('COM3')).toBe(false);
   });
 
   it('ignores a clear request from an older run', () => {

@@ -5,7 +5,7 @@ import { useOperationStore } from '../stores/useOperationStore';
 import { notifyError, useToastStore } from '../stores/useToastStore';
 import { sendToPort } from '../hooks/useSerialSend';
 import { getCommandStepKind, validateCommandStep } from './commandSteps';
-import { getFlowStatus, isFlowRunning, setFlowStatus } from './flowRuntime';
+import { getFlowStatus, isFlowRunning, isSerialTaskRunning, setFlowStatus } from './flowRuntime';
 import { isSendablePort } from './sendGuard';
 
 /** Shared by cyclic flows and one-shot execution: only change baud, retaining
@@ -54,6 +54,10 @@ export async function executeQuickCommand(portId: string, command: SendCommand, 
   };
   const validation = validateCommandStep(command);
   if (validation) return reject(validation);
+  if (isSerialTaskRunning(portId)) {
+    notifyError(new Error('Port is occupied by a plugin send task'));
+    return false;
+  }
   if (isFlowRunning(portId)) return reject('sendSection.flowBusy');
   if (!isSendablePort(useAppStore.getState().ports.find(item => item.id === portId))) {
     return reject('sendSection.portClosedWarning');

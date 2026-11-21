@@ -63,10 +63,12 @@ export interface PluginViewRect extends PluginViewportRect {
  *  the trusted-web ready watchdog). */
 export interface PluginNativeMessage {
   instanceId: string;
-  type: 'ready' | 'ack' | 'message' | 'focus' | 'error' | 'document' | 'navigation-complete' | 'binary' | 'binary-ack' | 'timeline';
+  type: 'ready' | 'ack' | 'message' | 'interaction-busy' | 'focus' | 'error' | 'document' | 'navigation-complete' | 'binary' | 'binary-ack' | 'timeline';
   documentId?: string;
   revision?: number;
   messageType?: string;
+  requestId?: string;
+  interaction?: 'action' | 'preview';
   payload?: unknown;
   error?: string;
   transferId?: string;
@@ -81,7 +83,7 @@ export interface PluginNativeMessage {
 /** Host -> native view message. Binary chunks never pass through the bounded
  *  realtime state JSON; each envelope carries at most 8 KiB of raw bytes. */
 export interface PluginViewHostMessage {
-  type: 'init' | 'state' | 'environment' | 'binary-chunk' | 'binary-ack' | 'timeline-seek' | 'timeline-cancel';
+  type: 'init' | 'state' | 'environment' | 'interaction-ack' | 'binary-chunk' | 'binary-ack' | 'timeline-seek' | 'timeline-cancel';
   documentId: string;
   context?: PluginViewBinding;
   environment?: PluginViewEnvironment;
@@ -91,6 +93,7 @@ export interface PluginViewHostMessage {
   timeline?: PluginTimelineSeek;
   capabilityGeneration?: string;
   requestId?: string;
+  status?: PluginViewInteractionStatus;
   transferId?: string;
   transferType?: string;
   seq?: number;
@@ -98,6 +101,14 @@ export interface PluginViewHostMessage {
   data?: string;
   ok?: boolean;
   error?: string;
+}
+
+export type PluginViewInteractionStatus = 'accepted' | 'busy' | 'unavailable' | 'unknown';
+export interface PluginViewInteractionPayload {
+  instanceId: string;
+  documentId: string;
+  type: string;
+  payload: unknown;
 }
 
 export type PluginTimelineStatus = 'exact' | 'nearest' | 'before-range' | 'after-range' | 'no-time' | 'filtered' | 'held' | 'loading' | 'unsupported';

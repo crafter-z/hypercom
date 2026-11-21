@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) mod fs_access;
 pub(crate) mod io_scheduler;
 pub(crate) mod marketplace;
+pub(crate) mod source_copy;
 pub(crate) mod transaction;
 pub(crate) mod view_runtime;
 
@@ -929,6 +930,17 @@ fn extract_plugin_zip_limited(
     let mut archive = zip::ZipArchive::with_config(zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) }, reader)
         .map_err(|e| format!("读取 zip 失败（损坏或非 zip）: {e}"))?;
     indexing.set(false);
+
+    // Advertised sizes are useful only for disk-space preview; the existing
+    // compressed/parser/count and streaming output bounds remain authoritative.
+    let mut estimated = 0u64;
+    for index in 0..archive.len() {
+        let entry = archive.by_index_raw(index).map_err(|e| format!("读取 zip 条目元数据失败: {e}"))?;
+        estimated = estimated.saturating_add(entry.size()).min(max_total_bytes);
+    }
+    fs::create_dir_all(dest_dir).map_err(|e| format!("创建 ZIP 解压暂存目录失败: {e}"))?;
+    let available = source_copy::available_space(dest_dir).map_err(|e| format!("无法查询 ZIP 解压暂存空间: {e}"))?;
+    source_copy::ensure_space(estimated, available).map_err(|e| e.to_string())?;
 
     let mut total_written: u64 = 0;
     for i in 0..archive.len() {

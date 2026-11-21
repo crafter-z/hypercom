@@ -9,6 +9,10 @@ use crate::config::PluginConfigEntry;
 use crate::plugin::{self, PluginManifest};
 use crate::{serial, AppState};
 
+#[path = "plugin_serial_tasks.rs"]
+pub mod plugin_serial_tasks;
+pub use plugin_serial_tasks::*;
+
 /// Partial camelCase plugin options. The host normally resolves its UI defaults
 /// before invoking; omitted native fields reuse the last connection or 9600/8N1.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -160,29 +164,30 @@ fn validate_access(
         return Err(CommandError::Other("插件 manifest 身份不匹配".into()));
     }
     if let Some(port_id) = control_port {
-        if !entry
-            .granted_permissions
-            .iter()
-            .any(|permission| permission == "serial:control")
-            || !manifest
-                .permissions
-                .iter()
-                .any(|permission| permission == "serial:control")
-        {
-            return Err(CommandError::Other(format!(
-                "插件未授予 serial:control 权限: {plugin_id}"
-            )));
-        }
-        if manifest.serial.as_ref().is_some_and(|scope| {
-            !scope
-                .port_whitelist
-                .iter()
-                .any(|allowed| allowed == port_id)
-        }) {
-            return Err(CommandError::Other(format!(
-                "串口不在插件白名单内: {port_id}"
-            )));
-        }
+        validate_port_permission(entry, manifest, port_id, "serial:control")?;
+    }
+    Ok(())
+}
+
+fn validate_port_permission(
+    entry: &PluginConfigEntry,
+    manifest: &PluginManifest,
+    port_id: &str,
+    permission: &str,
+) -> Result<(), CommandError> {
+    if !entry.granted_permissions.iter().any(|item| item == permission)
+        || !manifest.permissions.iter().any(|item| item == permission)
+    {
+        return Err(CommandError::Other(format!(
+            "插件未授予 {permission} 权限: {}", entry.id
+        )));
+    }
+    if manifest.serial.as_ref().is_some_and(|scope| {
+        !scope.port_whitelist.iter().any(|allowed| allowed == port_id)
+    }) {
+        return Err(CommandError::Other(format!(
+            "串口不在插件白名单内: {port_id}"
+        )));
     }
     Ok(())
 }
@@ -206,6 +211,16 @@ fn serial_authority<'a>(
     plugin_id: &str,
     expected_generation: &str,
     control_port: Option<&str>,
+) -> Result<tokio::sync::MutexGuard<'a, ()>, CommandError> {
+    scoped_serial_authority(state, plugin_id, expected_generation, control_port, None)
+}
+
+fn scoped_serial_authority<'a>(
+    state: &'a AppState,
+    plugin_id: &str,
+    expected_generation: &str,
+    control_port: Option<&str>,
+    send_port: Option<&str>,
 ) -> Result<tokio::sync::MutexGuard<'a, ()>, CommandError> {
     blocking_authority(super::plugin::acquire_plugin_io(state), || {
         let directory = {
@@ -243,6 +258,9 @@ fn serial_authority<'a>(
             expected_generation,
             control_port,
         )?;
+        if let Some(port_id) = send_port {
+            validate_port_permission(entry, &manifest, port_id, "serial:send")?;
+        }
         drop(manager);
         Ok(())
     })

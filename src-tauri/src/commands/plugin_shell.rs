@@ -6,6 +6,7 @@
 //! handle is kept until timeout/cancellation/stream failure has killed and waited it.
 
 use std::collections::HashMap;
+use std::future::{pending, Future};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -22,6 +23,10 @@ use tokio::sync::watch;
 use super::CommandError;
 use crate::plugin;
 use crate::AppState;
+
+#[path = "plugin_shell_tasks.rs"]
+mod tasks;
+pub use tasks::*;
 
 /// Wire request for native process execution. Unknown fields are rejected so a caller
 /// cannot accidentally believe an unimplemented process option was applied.
@@ -62,6 +67,7 @@ struct ShellEntry {
 pub struct PluginShellRegistry {
     entries: Mutex<HashMap<u64, Arc<ShellEntry>>>,
     next_id: AtomicU64,
+    process_sessions: tasks::ProcessSessions,
 }
 
 impl PluginShellRegistry {
@@ -69,6 +75,7 @@ impl PluginShellRegistry {
         Self {
             entries: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            process_sessions: tasks::ProcessSessions::default(),
         }
     }
 
@@ -109,6 +116,7 @@ impl PluginShellRegistry {
     /// its Child (or observed the queued cancellation), so a lifecycle transition
     /// cannot race a still-live execution during registry cleanup.
     pub fn cancel_plugin(&self, plugin_id: &str) {
+        self.process_sessions.retire(Some(plugin_id));
         if let Ok(entries) = self.entries.lock() {
             for entry in entries
                 .values()
@@ -121,6 +129,7 @@ impl PluginShellRegistry {
 
     /// Configuration restore can alter every plugin identity/permission at once.
     pub fn cancel_all(&self) {
+        self.process_sessions.retire(None);
         if let Ok(entries) = self.entries.lock() {
             for entry in entries.values() {
                 entry.cancel_tx.send_replace(true);
@@ -236,6 +245,14 @@ fn require_shell_access(
 }
 
 fn spawn_child(request: &PluginShellRequest) -> Result<Child, CommandError> {
+    spawn_child_with_output(request, Stdio::piped(), Stdio::piped())
+}
+
+fn spawn_child_with_output(
+    request: &PluginShellRequest,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> Result<Child, CommandError> {
     let mut command = Command::new(&request.program);
     command
         .args(&request.args)
@@ -244,8 +261,8 @@ fn spawn_child(request: &PluginShellRequest) -> Result<Child, CommandError> {
         } else {
             Stdio::null()
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(stdout)
+        .stderr(stderr);
     if let Some(cwd) = request.cwd.as_deref() {
         command.current_dir(cwd);
     }
@@ -324,31 +341,36 @@ async fn write_stdin(mut input: tokio::process::ChildStdin, bytes: Vec<u8>) -> R
     Ok(())
 }
 
-enum ExecutionStop {
+enum ExecutionStop<T> {
     Cancelled,
     TimedOut,
-    Finished(Result<ProcessOutput, ReaderFailure>),
+    Finished(Result<(ExitStatus, T, ()), ReaderFailure>),
 }
 
-async fn run_child(
+#[derive(Debug)]
+enum ProcessFailure {
+    Cancelled,
+    TimedOut,
+    Io(CommandError),
+}
+
+async fn finish_process<T, F, R>(
     mut child: Child,
     timeout_deadline: Option<Instant>,
-    cancel_rx: &mut watch::Receiver<bool>,
+    cancelled: impl Future<Output = ()>,
     stdin_text: Option<String>,
-) -> Result<ProcessOutput, CommandError> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| CommandError::Io("shell.execute stdout pipe 不可用".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| CommandError::Io("shell.execute stderr pipe 不可用".into()))?;
+    read_pipes: F,
+) -> Result<(ExitStatus, T), ProcessFailure>
+where
+    F: FnOnce(Option<tokio::process::ChildStdout>, Option<tokio::process::ChildStderr>) -> R,
+    R: Future<Output = Result<T, ReaderFailure>>,
+{
+    let readers = read_pipes(child.stdout.take(), child.stderr.take());
     let stdin_pipe = child.stdin.take();
     let stdin_bytes = stdin_text.map(String::into_bytes);
 
-    // The future and its pin live only inside this block.  Leaving the block truly
-    // drops the future (and all pipe borrows) before kill_and_wait borrows Child.
+    // Drop pipe futures before borrowing Child again to kill and reap it. A
+    // blocked writer or output sink must never keep cancellation from advancing.
     let stop = {
         let execution = async {
             let wait = async {
@@ -356,9 +378,6 @@ async fn run_child(
                     .wait()
                     .await
                     .map_err(|error| ReaderFailure::Io("子进程", error.to_string()))
-            };
-            let readers = async {
-                tokio::try_join!(read_output(stdout, "stdout"), read_output(stderr, "stderr"),)
             };
             let input = async move {
                 match (stdin_pipe, stdin_bytes) {
@@ -368,48 +387,65 @@ async fn run_child(
                     _ => Ok(()),
                 }
             };
-            let (status, (stdout, stderr), ()) = tokio::try_join!(wait, readers, input)?;
-            Ok::<_, ReaderFailure>(ProcessOutput {
-                status,
-                stdout,
-                stderr,
-            })
+            tokio::try_join!(wait, readers, input)
         };
-        tokio::pin!(execution);
-        match timeout_deadline {
-            Some(deadline) => tokio::select! {
-                biased;
-                _ = wait_cancel(cancel_rx) => ExecutionStop::Cancelled,
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                    ExecutionStop::TimedOut
-                }
-                result = &mut execution => ExecutionStop::Finished(result),
-            },
-            None => tokio::select! {
-                biased;
-                _ = wait_cancel(cancel_rx) => ExecutionStop::Cancelled,
-                result = &mut execution => ExecutionStop::Finished(result),
-            },
+        let timeout = async {
+            if let Some(deadline) = timeout_deadline {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            } else {
+                pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = cancelled => ExecutionStop::Cancelled,
+            _ = timeout => ExecutionStop::TimedOut,
+            result = execution => ExecutionStop::Finished(result),
         }
     };
 
-    match stop {
-        ExecutionStop::Cancelled => {
-            kill_and_wait(&mut child).await?;
-            Err(CommandError::Other("插件 shell 执行已取消".into()))
-        }
-        ExecutionStop::TimedOut => {
-            kill_and_wait(&mut child).await?;
-            Err(CommandError::Other("插件 shell 执行超时".into()))
-        }
-        ExecutionStop::Finished(Ok(output)) => Ok(output),
-        ExecutionStop::Finished(Err(ReaderFailure::Io(stream, message))) => {
-            kill_and_wait(&mut child).await?;
-            Err(CommandError::Io(format!(
-                "shell.execute {stream} IO 失败: {message}"
-            )))
-        }
-    }
+    let failure = match stop {
+        ExecutionStop::Cancelled => ProcessFailure::Cancelled,
+        ExecutionStop::TimedOut => ProcessFailure::TimedOut,
+        ExecutionStop::Finished(Ok((status, output, ()))) => return Ok((status, output)),
+        ExecutionStop::Finished(Err(ReaderFailure::Io(stream, message))) => ProcessFailure::Io(
+            CommandError::Io(format!("shell.execute {stream} IO 失败: {message}")),
+        ),
+    };
+    kill_and_wait(&mut child)
+        .await
+        .map_err(ProcessFailure::Io)?;
+    Err(failure)
+}
+
+async fn run_child(
+    child: Child,
+    timeout_deadline: Option<Instant>,
+    cancel_rx: &mut watch::Receiver<bool>,
+    stdin_text: Option<String>,
+) -> Result<ProcessOutput, CommandError> {
+    let (status, (stdout, stderr)) = finish_process(
+        child,
+        timeout_deadline,
+        wait_cancel(cancel_rx),
+        stdin_text,
+        |stdout, stderr| async move {
+            let stdout = stdout.ok_or_else(|| ReaderFailure::Io("stdout", "pipe 不可用".into()))?;
+            let stderr = stderr.ok_or_else(|| ReaderFailure::Io("stderr", "pipe 不可用".into()))?;
+            tokio::try_join!(read_output(stdout, "stdout"), read_output(stderr, "stderr"))
+        },
+    )
+    .await
+    .map_err(|failure| match failure {
+        ProcessFailure::Cancelled => CommandError::Other("插件 shell 执行已取消".into()),
+        ProcessFailure::TimedOut => CommandError::Other("插件 shell 执行超时".into()),
+        ProcessFailure::Io(error) => error,
+    })?;
+    Ok(ProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[tauri::command]

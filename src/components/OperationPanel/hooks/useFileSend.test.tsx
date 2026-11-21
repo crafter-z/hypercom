@@ -7,7 +7,7 @@ import { useAppStore } from '../../../stores/useAppStore';
 import { eventService, serialService, type FileProgressPayload } from '../../../services/tauri';
 import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { trafficStats } from '../../../utils/trafficStats';
-import { isFlowRunning } from '../../../utils/flowRuntime';
+import { isFlowRunning, reserveSerialTask, resetFlowRuntime } from '../../../utils/flowRuntime';
 import { useFileSend, type FileSendControls } from './useFileSend';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
@@ -19,7 +19,10 @@ vi.mock('../../../stores/useToastStore', () => ({
   notifyError: vi.fn(), notifySuccess: vi.fn(),
   useToastStore: { getState: () => ({ push: vi.fn() }) },
 }));
-vi.mock('../../../utils/flowRuntime', () => ({ isFlowRunning: vi.fn(() => false) }));
+vi.mock('../../../utils/flowRuntime', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../utils/flowRuntime')>(),
+  isFlowRunning: vi.fn(() => false),
+}));
 vi.mock('../../../utils/trafficStats', () => ({
   trafficStats: { capture: vi.fn(() => ({ identity: Symbol('lease') })), isCurrent: vi.fn(() => true), addTx: vi.fn() },
 }));
@@ -67,6 +70,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   if (mounted) await act(async () => { root.unmount(); });
+  resetFlowRuntime();
 });
 
 describe('file send ownership and asynchronous boundaries', () => {
@@ -78,6 +82,26 @@ describe('file send ownership and asynchronous boundaries', () => {
     await act(async () => { await controls.startFileSend(); });
     expect(open).not.toHaveBeenCalled();
     expect(serialService.sendFile).not.toHaveBeenCalled();
+  });
+
+  it('does not open the picker while a plugin task owns the target', async () => {
+    const release = reserveSerialTask('COM1')!;
+    await act(async () => { await controls.startFileSend(); });
+    expect(open).not.toHaveBeenCalled();
+    expect(serialService.sendFile).not.toHaveBeenCalled();
+    release();
+    await act(async () => { await controls.startFileSend(); });
+    expect(serialService.sendFile).toHaveBeenCalledOnce();
+  });
+
+  it('does not dispatch the selected file when a plugin task took the port while the picker was open', async () => {
+    const picker = deferred<string | null>();
+    vi.mocked(open).mockReturnValueOnce(picker.promise);
+    const { sending } = await begin();
+    const release = reserveSerialTask('COM1')!;
+    await act(async () => { picker.resolve('C:/retired.bin'); await sending; });
+    expect(serialService.sendFile).not.toHaveBeenCalled();
+    release();
   });
 
   it.each(['COM2', null])('retires a pending picker on target change to %s', async target => {

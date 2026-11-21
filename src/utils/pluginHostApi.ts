@@ -23,7 +23,10 @@ import { appendTerminalLine } from './terminal/viewportManager';
 import { pluginKv } from './pluginKv';
 import { appendPluginPanel, clearPluginPanel, getPluginPanelSnapshot } from './pluginPanelRegistry';
 import { addPluginBytesObserver } from './pluginBytesObserver';
-import { checkOpAllowed, checkPortScope, OP_PERMISSIONS } from './pluginRpc';
+import { checkOpAllowed, checkPortScope, isPluginSerialTaskOp, OP_PERMISSIONS } from './pluginRpc';
+import { isPluginFileHandleOperation, type PluginFileHandleHost } from './pluginFileHandle';
+import type { PluginSerialTaskContext } from './pluginSerialTask';
+import { executePluginProcessApi, isPluginProcessOp, type PluginProcessContext } from './pluginProcess';
 import { PluginLogQuota } from './pluginLogQuota';
 import type { PluginManifestView } from '../types';
 import { exportPluginPanel } from './pluginPanelExport';
@@ -180,6 +183,12 @@ function fileBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+export interface PluginTaskContexts {
+  files: PluginFileHandleHost;
+  serial: PluginSerialTaskContext;
+  process: PluginProcessContext;
+}
+
 /**
  * 执行一次宿主 API 调用。返回结构化克隆结果（文件二进制为 Uint8Array）。
  * PluginSession 调用前/交付前过滤权限；等待中的副作用通过 beforeSend/live facade 复核。
@@ -193,7 +202,25 @@ export async function executeHostApi(
   manifest: PluginManifestView | null = null,
   beforeSend?: () => void,
   fsContext?: PluginFsContext,
+  tasks?: PluginTaskContexts,
 ): Promise<unknown> {
+  const fileOp = isPluginFileHandleOperation(op);
+  const serialOp = isPluginSerialTaskOp(op);
+  const processOp = isPluginProcessOp(op);
+  if (fileOp || serialOp || processOp) {
+    if (!tasks || tasks.files.pluginId !== pluginId) throw new Error('plugin task context unavailable');
+    const assertAuthority = (): void => {
+      beforeSend?.();
+      const config = useAppStore.getState().config.pluginConfigs.find(entry => entry.id === pluginId);
+      if (!config?.enabled || config.installGeneration !== tasks.files.installGeneration) throw new Error('plugin disabled');
+      const denied = checkOpAllowed(op, config.grantedPermissions, args);
+      if (denied) throw new Error(denied);
+    };
+    assertAuthority();
+    if (fileOp) return tasks.files.dispatch(op, args, assertAuthority);
+    if (serialOp) return tasks.serial.execute(op, args, manifest, assertAuthority, handleId => tasks.files.readSource(handleId));
+    if (processOp) return executePluginProcessApi(tasks.process, op, args, assertAuthority);
+  }
   switch (op) {
     case 'fs.readRange':
     case 'fs.readRanges':

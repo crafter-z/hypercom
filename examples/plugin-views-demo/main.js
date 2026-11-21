@@ -29,8 +29,13 @@ self.plugin.views.onOpen(async view => {
     if (typeof saved === 'number' && Number.isFinite(saved)) threshold = saved;
     await view.publish({ threshold });
     view.onMessage(async message => {
-      if (message.type !== 'save-threshold' || typeof message.payload?.threshold !== 'number' || !Number.isFinite(message.payload.threshold)) return;
+      if (!Number.isFinite(message.payload?.threshold)) return;
       const value = Math.max(-100, Math.min(200, message.payload.threshold));
+      if (message.type === 'preview-threshold') {
+        await view.publish({ threshold, previewThreshold: value });
+        return;
+      }
+      if (message.type !== 'save-threshold') return;
       await self.plugin.api['storage.set']({ key: 'threshold', value });
       threshold = value;
       await view.publish({ threshold });
