@@ -22,6 +22,9 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# Local validation artifacts
+.tmp/
+
 # Environment
 .env
 .env.local
