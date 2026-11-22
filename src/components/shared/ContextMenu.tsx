@@ -51,13 +51,11 @@ interface MenuListProps {
   items: ContextMenuEntry[];
   label: string;
   level: number;
-  autoFocus: boolean;
   onActivate: (item: ContextMenuItem) => void;
   onCloseAll: () => void;
   /** Close just this submenu and return focus to its parent item. */
   onBack?: () => void;
   panelRef?: React.RefObject<HTMLDivElement | null>;
-  className?: string;
   style?: React.CSSProperties;
 }
 
@@ -70,16 +68,16 @@ const MenuList: React.FC<MenuListProps> = ({
   items,
   label,
   level,
-  autoFocus,
   onActivate,
   onCloseAll,
   onBack,
   panelRef,
-  className,
   style,
 }) => {
   const ownRef = useRef<HTMLDivElement>(null);
   const ref = panelRef ?? ownRef;
+  // Submenus can extend beyond their parent's cutout, so each level owns one.
+  const overlayReady = usePluginViewOverlay(true, ref);
   const [activeIndex, setActiveIndex] = useState<number>(() => firstEnabledIndex(items));
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
   const enabled = enabledIndices(items);
@@ -95,10 +93,10 @@ const MenuList: React.FC<MenuListProps> = ({
   }, [ref, level]);
 
   useEffect(() => {
-    if (autoFocus && activeIndex >= 0) focusIndex(activeIndex);
-    // Focus only when this level first becomes interactive.
+    if (overlayReady && activeIndex >= 0) focusIndex(activeIndex);
+    // Focus when the native cutout makes this level interactive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoFocus]);
+  }, [overlayReady]);
 
   const moveFocus = useCallback((current: number, direction: 1 | -1) => {
     if (enabled.length === 0) return;
@@ -192,8 +190,9 @@ const MenuList: React.FC<MenuListProps> = ({
     <div
       ref={ref as React.RefObject<HTMLDivElement>}
       data-menu-list
-      className={className ?? `context-menu${level > 0 ? ' context-submenu' : ' animate-fade-in'}`}
-      style={style}
+      data-plugin-view-cutout
+      className={`context-menu${level > 0 ? ' context-submenu' : ' animate-fade-in'}`}
+      style={{ ...style, visibility: overlayReady ? 'visible' : 'hidden' }}
       role="menu"
       aria-label={levelLabel}
       onKeyDown={handleKeyDown}
@@ -232,7 +231,6 @@ const MenuList: React.FC<MenuListProps> = ({
                 items={entry.submenu}
                 label={entry.label}
                 level={level + 1}
-                autoFocus
                 onActivate={onActivate}
                 onCloseAll={onCloseAll}
                 onBack={() => {
@@ -250,7 +248,6 @@ const MenuList: React.FC<MenuListProps> = ({
 
 const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose, trigger, ariaLabel = 'Context menu' }) => {
   const { ref, pos } = useMenuPlacement(x, y);
-  const overlayGuardReady = usePluginViewOverlay(true, ref);
   useOutsideDismiss(ref, onClose);
 
   // Remember what was focused before the menu mounted so closing can restore
@@ -289,12 +286,10 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose, trigger
   return createPortal(
     <MenuList
       panelRef={ref}
-      className="context-menu animate-fade-in"
-      style={{ left: pos.x, top: pos.y, visibility: overlayGuardReady ? 'visible' : 'hidden' }}
+      style={{ left: pos.x, top: pos.y }}
       items={items}
       label={ariaLabel}
       level={0}
-      autoFocus={overlayGuardReady}
       onActivate={handleActivate}
       onCloseAll={onClose}
     />,

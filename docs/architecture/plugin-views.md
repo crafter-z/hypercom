@@ -115,7 +115,7 @@ TTY 同端口发送串行排队时，插件请求必须在实际发送开始前�
 
 Windows 每个插件控件拥有独立、无激活的 child HWND 容器，Wry 子 WebView 的父窗口只能是该容器，不能直接使用 Tauri 主窗口。Wry 0.55.1 的 child drop 仍会移除父窗口的 resize/focus subclass；直接挂在主窗口会使关闭、禁用或创建失败后的宿主 WebView 停留在旧尺寸，放大出现黑边、缩小不重排。容器与 WebView 共用可见性，容器按主窗 client 坐标定位并保持在宿主 WebView 上方，WebView 使用容器内 `(0, 0)`；销毁顺序为 WebView → 容器，不重装或替换主窗事件回调。
 
-原生 child 不参与 DOM z-index。菜单/选择器先挂载不可见的可测量面板，由 `usePluginViewOverlay` 提交覆盖矩形并等待原生完成后才显示。`update_plugin_view.occlusions` 至多 64 个 CSS viewport 矩形；Windows 将它们按主 WebView zoom × DPI 转为相对真实容器原点的物理坐标，向外取整并用 `SetWindowRgn` 的差集同时排除绘制和命中。仅菜单覆盖区域让位，未覆盖插件内容继续显示/更新；不使用截图冒充实时视图。布局/位置改变会更新矩形，关闭后移除，嵌套菜单互不清除对方区域。
+原生 child 不参与 DOM z-index。菜单/选择器先挂载不可见的可测量面板，由 `usePluginViewOverlay` 提交覆盖矩形并等待原生完成后才显示。`update_plugin_view.occlusions` 至多 64 个 CSS viewport 矩形；Windows 将它们按主 WebView zoom × DPI 转为相对真实容器原点的物理坐标，向外取整并用 `SetWindowRgn` 的差集同时排除绘制和命中。仅菜单覆盖区域让位，未覆盖插件内容继续显示/更新；不使用截图冒充实时视图。共享 `ContextMenu` 的每一级面板都有自己的裁剪矩形，并标记 `data-plugin-view-cutout`，不进入全局隐藏兜底。布局/位置改变会更新矩形，关闭后只移除该面板的矩形。
 
 模态层、通知、页面隐藏及拖拽仍整体抑制控件；嵌套 guard 保留其他层的抑制/裁剪。超过 64 个局部 guard 时退为整体隐藏，不发送越界列表。解除只恢复当前有效可见会话，过期 rect 不能重现已销毁 UI。
 
