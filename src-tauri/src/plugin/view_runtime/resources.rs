@@ -245,9 +245,11 @@ mod tests {
         {
             let resource = metadata_resource(root.path(), "ui/data.bin").unwrap();
             assert_eq!(resource.mime, "application/octet-stream");
+            #[cfg(not(windows))]
+            let ResourceContents::Declared(declared) = resource.contents;
+            #[cfg(windows)]
             let declared = match resource.contents {
                 ResourceContents::Declared(declared) => declared,
-                #[cfg(windows)]
                 ResourceContents::Generated(_) => {
                     panic!("a plugin resource must hold metadata only")
                 }

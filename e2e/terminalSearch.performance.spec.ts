@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import type { TerminalLine } from '../src/types';
 import { TAURI_MOCK } from './tauriMock';
 
 /** Observational Chromium/mock-IPC sample, not a serial/WebView2 FPS guarantee. */
@@ -14,7 +15,7 @@ test(`${ROW_COUNT} retained rows: receive/display cost with advanced search off 
     const { getViewportManager } = await import('/src/utils/terminal/viewportManager.ts');
     const { DEFAULT_SEARCH_SPEC } = await import('/src/utils/terminal/search/searchTypes.ts');
     const vm = getViewportManager('COM1');
-    const row = (seq: number) => ({ timestamp: seq, direction: 'RX', content: `INFO packet ${seq}: temperature=24.5 status=normal`, isHex: false });
+    const row = (seq: number): TerminalLine => ({ timestamp: seq, direction: 'RX', content: `INFO packet ${seq}: temperature=24.5 status=normal`, isHex: false });
     vm.applyLimits({ maxLines: rowCount });
     vm.appendLines(Array.from({ length: rowCount }, (_, seq) => row(seq)));
     await new Promise(resolve => setTimeout(resolve, 200));
