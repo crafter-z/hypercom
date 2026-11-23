@@ -1914,13 +1914,29 @@ mod tests {
     #[test]
     fn directory_grants_keep_legal_unix_names_and_case() {
         let root = unique_root();
-        std::fs::create_dir_all(root.join("DATA")).unwrap();
-        std::fs::create_dir_all(root.join("data")).unwrap();
-        std::fs::write(root.join("DATA/x"), b"upper").unwrap();
-        std::fs::write(root.join("data/x"), b"lower").unwrap();
+        let upper_dir = root.join("DATA");
+        let lower_dir = root.join("data");
+        std::fs::create_dir_all(&upper_dir).unwrap();
+        std::fs::write(upper_dir.join("x"), b"upper").unwrap();
+        // APFS is often case-insensitive, so DATA and data may be the same
+        // directory.  A fresh create distinguishes that case without relying
+        // on canonicalize preserving or normalizing the requested spelling.
+        let distinct_case_dirs = match std::fs::create_dir(&lower_dir) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => panic!("create case probe directory: {error}"),
+        };
+        if distinct_case_dirs {
+            std::fs::write(lower_dir.join("x"), b"lower").unwrap();
+        }
         assert_eq!(
             read_open_range(open_directory_range_file(&root, "DATA/x").unwrap(), 0, 10).unwrap(),
             b"upper"
+        );
+        let lower_case_contents = if distinct_case_dirs { b"lower" } else { b"upper" };
+        assert_eq!(
+            read_open_range(open_directory_range_file(&root, "data/x").unwrap(), 0, 10).unwrap(),
+            lower_case_contents
         );
         for name in ["a~b", "a:b", "a.", "a "] {
             std::fs::write(root.join(name), b"native").unwrap();

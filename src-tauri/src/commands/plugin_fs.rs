@@ -1475,9 +1475,13 @@ mod tests {
     }
     #[test]
     fn failed_page_admission_retires_cursor() {
-        let root =
-            std::env::temp_dir().join(format!("hypercom-plugin-fs-page-{}", uuid::Uuid::new_v4()));
+        // macOS commonly exposes the temporary directory through a symlink
+        // (`/var` -> `/private/var`).  The handle-based opener rejects symlink
+        // path components, so anchor this fixture at the canonical temp root.
+        let root = std::env::temp_dir()
+            .join(format!("hypercom-plugin-fs-page-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
         let registry = Arc::new(PluginFsRegistry::new());
         let session = registry.open_session("com.test.fs", "g").unwrap();
         let walker = DirectoryCursor::open(&root, "", false).unwrap();

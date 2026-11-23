@@ -218,6 +218,14 @@ impl TestDirectory {
         let path =
             std::env::temp_dir().join(format!("hypercom-resource-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
+        // The component-walking opener deliberately rejects symlinked ancestors.
+        // Canonicalize the Unix fixture root so macOS's /var -> /private/var
+        // alias does not make every otherwise-valid resource fail before the
+        // test reaches the declared path (and so the symlink test exercises its
+        // own alias). Keep the Windows path unchanged: its native final-path
+        // fence handles the platform's path aliases separately.
+        #[cfg(unix)]
+        let path = std::fs::canonicalize(path).unwrap();
         Self(path)
     }
     pub fn path(&self) -> &Path {
