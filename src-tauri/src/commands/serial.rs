@@ -873,10 +873,25 @@ pub struct ToolExitPayload {
 #[derive(Debug, Deserialize)]
 pub struct RunPortToolArgs {
     pub port_id: String,
-    /// 命令模板，`{port}` 在运行时替换为实际端口名
+    /// 命令模板，`{port}` 对 COM 端口取数字部分，对其它端口保留原名
     pub command: String,
     /// 可选工作目录
     pub workdir: Option<String>,
+}
+
+/// Keep the settings preview (`previewPortToolCommand`) in sync with this expansion.
+fn render_port_tool_command(template: &str, port_id: &str) -> String {
+    let port = match port_id.split_at_checked(3) {
+        Some((prefix, number))
+            if prefix.eq_ignore_ascii_case("COM")
+                && !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            number
+        }
+        _ => port_id,
+    };
+    template.replace("{port}", port)
 }
 
 /// Preserve tool outcome on normal exits, but never hide a failure that occurred
@@ -987,7 +1002,7 @@ pub async fn run_port_tool(
     }
 
     let outcome = async {
-        let cmd = args.command.replace("{port}", &args.port_id);
+        let cmd = render_port_tool_command(&args.command, &args.port_id);
 
         // 3. 构建子进程
         #[cfg(target_os = "windows")]
@@ -1446,6 +1461,32 @@ mod tests {
         assert!(!second.load(Ordering::Relaxed));
         unregister_file_send(&sends, "COM3", "first", &first).unwrap();
         assert!(sends.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn port_tool_template_expands_com_numbers_and_preserves_other_names() {
+        let template = "flasher --port {port} --log={port}.log";
+        for (port_id, rendered_port) in [
+            ("COM5", "5"),
+            ("cOm12", "12"),
+            ("COM", "COM"),
+            ("COM5-extra", "COM5-extra"),
+            ("/dev/ttyUSB0", "/dev/ttyUSB0"),
+            ("虚拟端口", "虚拟端口"),
+        ] {
+            assert_eq!(
+                super::render_port_tool_command(template, port_id),
+                format!("flasher --port {rendered_port} --log={rendered_port}.log"),
+            );
+        }
+        assert_eq!(
+            super::render_port_tool_command("flasher COM{port}", "COM5"),
+            "flasher COM5",
+        );
+        assert_eq!(
+            super::render_port_tool_command("flasher --help", "COM5"),
+            "flasher --help",
+        );
     }
 
     #[test]

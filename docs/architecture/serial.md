@@ -124,7 +124,8 @@ openPort(portId, baud)
 ## 外部工具（flasher）
 
 - `run_port_tool` / `kill_port_tool`（`commands/serial.rs`）+ `useToolOutput` hook + ToolSettings 页。
-- close→spawn→stream→reopen 闭环；`{port}` 模板替换；配置在设置弹窗「外部工具」页；同一端口通过 owner token 单飞，旧调用不能替换或移除新调用的 child。
+- close→spawn→stream→reopen 闭环；配置在设置弹窗「外部工具」页；同一端口通过 owner token 单飞，旧调用不能替换或移除新调用的 child。
+- `commands/serial.rs` 的 `render_port_tool_command` 和 `src/services/tool.ts` 的 `previewPortToolCommand` 使用相同的 `{port}` 规则：`COM`（不区分大小写）后紧跟纯数字时只取数字，否则保留端口名。替换只影响命令文本，不影响配置匹配、串口身份或恢复。
 - `stream_tool_output` 对 stdout/stderr 保持短行与空行语义，超长无换行输出以最多 16 KiB 原始字节分段发 `tool:output`；跨块 UTF-8/CRLF 尾部留至下一段，非法 UTF-8 仍用 lossy 解码。共用 256 项有界通道，避免单行缓冲无限增长；这是后端读取队列边界，不是 Tauri/WebView 事件队列的总内存保证。
 - 工具 reader、子进程和串口恢复共享同一 owner；工具退出/恢复完成后才发 `tool:exit`，程序性关闭不触发错误的用户回贴。Windows 克隆句柄不继承到工具；Unix/Windows 进程树终止与 reader 收尾必须纳入 owner teardown。
 - `run_port_tool` 在全局串口锁外等待读线程和写租约；真实串口的 Windows 写克隆句柄必须清除 `HANDLE_FLAG_INHERIT`，否则并行启动的兄弟工具可能继承尚未关闭的 COM 句柄，导致 HyperCom 关闭后仍由子进程占有端口。写租约在释放实际 Arc 句柄后才通知关闭完成。正常工具退出立即重开串口。工作目录错误、进程启动失败等「已关串口、工具未启动」路径也按原连接参数尝试重开，并保留原工具错误（如恢复再失败则一并报告）；工具接管期间的预期 disconnected 不触发掉线横幅。正常退出后重开失败仍发 `serial:status error`。

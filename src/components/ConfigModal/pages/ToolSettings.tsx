@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PortToolConfig } from '../../../types';
+import { previewPortToolCommand } from '../../../services/tool';
 import RuleSetAccordion from '../RuleSetAccordion';
 import { useEntityPage } from '../hooks/useEntityPage';
 import { Wrench } from 'lucide-react';
@@ -82,7 +83,7 @@ const ToolSettings: React.FC = () => {
           {config.command && config.portId && (
             <div className="rule-settings-note">
               <Wrench size={11} aria-hidden="true" />
-              <span>{t('toolSettings.previewLabel')}: <code className="rule-settings-terminal">{config.command.replace(/\{port\}/g, config.portId)}</code></span>
+              <span>{t('toolSettings.previewLabel')}: <code className="rule-settings-terminal">{previewPortToolCommand(config.command, config.portId)}</code></span>
             </div>
           )}
         </div>

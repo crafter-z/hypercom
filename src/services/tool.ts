@@ -5,6 +5,12 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 
+/** Mirrors the native `render_port_tool_command` for the settings preview only. */
+export function previewPortToolCommand(template: string, portId: string): string {
+  const port = /^COM([0-9]+)$/i.exec(portId)?.[1] ?? portId;
+  return template.replace(/\{port\}/g, () => port);
+}
+
 export const toolService = {
   /** 执行外部工具：关闭串口 → 运行命令 → 流式输出 → 退出 → 重开串口 */
   runPortTool: (params: { portId: string; command: string; workdir?: string }): Promise<number> => {
