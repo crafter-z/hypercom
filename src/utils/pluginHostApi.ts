@@ -219,7 +219,7 @@ export async function executeHostApi(
     assertAuthority();
     if (fileOp) return tasks.files.dispatch(op, args, assertAuthority);
     if (serialOp) return tasks.serial.execute(op, args, manifest, assertAuthority, handleId => tasks.files.readSource(handleId));
-    if (processOp) return executePluginProcessApi(tasks.process, op, args, assertAuthority);
+    if (processOp) return executePluginProcessApi(tasks.process, op, args, assertAuthority, manifest);
   }
   switch (op) {
     case 'fs.readRange':

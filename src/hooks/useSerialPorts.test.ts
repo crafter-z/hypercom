@@ -29,6 +29,13 @@ describe('mergePorts', () => {
     expect(merged[3]).toMatchObject({ alias: '设备', status: 'connected', connectionGeneration: 7 });
   });
 
+  it('retains a borrowed COM identity across bootloader enumeration gaps only while it is owned', () => {
+    const port = makePort('COM4', { pluginToolRunning: true, alias: 'board A' });
+    expect(mergePorts([], [port])).toEqual([port]);
+    expect(mergePorts([makePort('COM4')], [port])[0]).toMatchObject({ alias: 'board A', pluginToolRunning: true });
+    expect(mergePorts([], [{ ...port, pluginToolRunning: false }])).toEqual([]);
+  });
+
   it('preserves explicit numeric/drag order until the user switches back to added order', () => {
     const incoming = ['COM10', 'COM2', 'COM1', 'COM3'].map(id => makePort(id));
     useAppStore.getState().setPorts(incoming.slice(0, 3));

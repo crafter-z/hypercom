@@ -1574,6 +1574,8 @@ pub async fn set_plugin_permissions(
             }
             if !granted.iter().any(|p| p == "shell:execute") {
                 state.plugin_shell.cancel_plugin(&id);
+            } else if previous.granted_permissions.iter().any(|p| p == "serial:control") && !granted.iter().any(|p| p == "serial:control") {
+                state.plugin_shell.cancel_serial_loans(&id);
             }
             if !granted.iter().any(|p| matches!(p.as_str(), "fs:open-dir" | "fs:write-dir" | "fs:export-dir")) {
                 revoke_plugin_directory_grants(&id);

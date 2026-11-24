@@ -3,6 +3,9 @@ import type { PluginProcessOptions, PluginProcessSession, PluginProcessStream, P
 import { useAppStore } from '../stores/useAppStore';
 import type { PluginShellRequest } from '../types';
 import { parsePluginShellRequest } from './pluginShell';
+import { parsePluginSerialCloseRequest } from './serialPlugin';
+import { checkPortScope } from './pluginRpc';
+import { waitForToolOutputListener } from '../hooks/useToolOutput';
 
 export const PLUGIN_PROCESS_OPS = ['shell.start', 'shell.read', 'shell.status', 'shell.cancel', 'shell.release'] as const;
 export type PluginProcessOp = typeof PLUGIN_PROCESS_OPS[number];
@@ -24,8 +27,9 @@ function requestObject(value: unknown, allowed: string[]): Record<string, unknow
 }
 function parseOptions(value: unknown): PluginProcessOptions {
   if (value === undefined) return {};
-  const args = requestObject(value, ['stdout', 'stderr']);
+  const args = requestObject(value, ['stdout', 'stderr', 'serialLoan']);
   const options: PluginProcessOptions = {};
+  if (args.serialLoan !== undefined) options.serialLoan = parsePluginSerialCloseRequest(args.serialLoan);
   for (const key of ['stdout', 'stderr'] as const) {
     const mode = args[key];
     if (mode === undefined) continue;
@@ -90,12 +94,21 @@ export class PluginProcessContext {
     }
   }
 
-  async start(request: PluginShellRequest, options: PluginProcessOptions, beforeSend?: () => void): Promise<{ taskId: string }> {
-    this.check(beforeSend);
+  async start(request: PluginShellRequest, options: PluginProcessOptions, beforeSend?: () => void, manifest?: Parameters<typeof checkPortScope>[0]): Promise<{ taskId: string }> {
+    const assertStart = () => {
+      beforeSend?.();
+      if (!options.serialLoan) return;
+      const entry = useAppStore.getState().config.pluginConfigs.find(item => item.id === this.pluginId);
+      if (!entry?.grantedPermissions.includes('serial:control')) throw new Error('插件未授予 serial:control 权限');
+      const denied = checkPortScope(manifest, options.serialLoan.portId);
+      if (denied) throw new Error(denied);
+    };
+    this.check(assertStart);
+    if (options.serialLoan) await waitForToolOutputListener();
     const session = await this.getSession();
-    this.checkSession(session, beforeSend);
+    this.checkSession(session, assertStart);
     const taskId = await this.request(session, () => pluginProcessService.start(session, request, options));
-    try { this.checkSession(session, beforeSend); }
+    try { this.checkSession(session, assertStart); }
     catch (error) {
       // Spawn succeeded but this request/epoch retired before delivery.
       void pluginProcessService.release({ ...session, taskId }).catch(() => {});
@@ -142,10 +155,10 @@ export class PluginProcessContext {
   }
 }
 
-export async function executePluginProcessApi(context: PluginProcessContext, op: PluginProcessOp, args: unknown, beforeSend?: () => void): Promise<unknown> {
+export async function executePluginProcessApi(context: PluginProcessContext, op: PluginProcessOp, args: unknown, beforeSend?: () => void, manifest?: Parameters<typeof checkPortScope>[0]): Promise<unknown> {
   if (op === 'shell.start') {
     const values = requestObject(args, ['request', 'options']);
-    return context.start(parsePluginShellRequest(values.request), parseOptions(values.options), beforeSend);
+    return context.start(parsePluginShellRequest(values.request), parseOptions(values.options), beforeSend, manifest);
   }
   const values = requestObject(args, ['taskId', ...(op === 'shell.read' ? ['stream'] : op === 'shell.status' ? ['wait'] : [])]);
   if (typeof values.taskId !== 'string' || !UUID.test(values.taskId)) throw new Error('shell 流任务标识无效');

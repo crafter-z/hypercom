@@ -279,6 +279,7 @@ fn check_open_control(
     port_id: &str,
     control: Option<(u64, &AtomicBool)>,
 ) -> anyhow::Result<()> {
+    manager.ensure_port_available(port_id)?;
     if let Some((expected, cancel)) = control {
         check_reconnect(cancel)?;
         manager.check_control_generation(port_id, expected)?;
@@ -393,6 +394,7 @@ fn reconnect_with_probe(
     let join_handle = {
         let mut guard = manager.lock().map_err(lock_error)?;
         check_reconnect(cancel)?;
+        guard.ensure_port_available(port_id)?;
         guard.close_port_inner(port_id)?
     };
     // 阶段 2（锁外）：join 确保旧 COM 句柄已释放，否则 open 会因端口被旧线程占用而失败

@@ -5,10 +5,13 @@ export type PluginProcessStream = 'stdout' | 'stderr';
 export interface PluginProcessOptions {
   stdout?: 'pipe' | 'discard';
   stderr?: 'pipe' | 'discard';
+  serialLoan?: { portId: string; expectedConnectionGeneration: number };
 }
 export interface PluginProcessStatus {
   state: 'running' | 'cancelling' | 'exited' | 'cancelled' | 'timed-out' | 'failed';
   exitCode: number | null;
+  /** Present only after a managed task has completed its native cleanup. */
+  serialRecovery?: { state: 'restored' | 'not-connected' | 'superseded' | 'failed'; error?: string };
   error: string | null;
 }
 export interface PluginProcessOwner {

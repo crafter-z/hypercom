@@ -418,7 +418,7 @@ export function useSerialReceive() {
         // User-initiated closes are tracked and suppressed.
         if ((event.status === 'disconnected' || event.status === 'error') && !userClosingPortIds.has(event.port_id)) {
           const prevPort = useAppStore.getState().ports.find(p => p.id === event.port_id);
-          if (prevPort && prevPort.status === 'connected' && !prevPort.toolRunning) {
+          if (prevPort && prevPort.status === 'connected' && !prevPort.toolRunning && !prevPort.pluginToolRunning) {
             lostPortIds.add(event.port_id);
             const portName = prevPort.alias || prevPort.name;
             useToastStore.getState().push({

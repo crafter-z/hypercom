@@ -46,7 +46,8 @@ export function usePortToolActions() {
   const updatePort = useAppStore((s) => s.updatePort);
   const [groupToolState, setGroupToolState] = useState<GroupToolDialogState | null>(null);
   const runTool = useCallback(async (portId: string) => {
-    if (toolRunsInFlight.has(portId) || useAppStore.getState().ports.find((p) => p.id === portId)?.toolRunning) return;
+    const port = useAppStore.getState().ports.find(p => p.id === portId);
+    if (toolRunsInFlight.has(portId) || port?.toolRunning || port?.pluginToolRunning) return;
     const config = useRuleStore.getState().findToolConfigByPort(portId);
     if (!config) {
       // 未配置 → 跳转配置页

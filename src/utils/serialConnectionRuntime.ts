@@ -88,7 +88,7 @@ const state = {
 };
 
 export function shouldFocusSerialConnection(portId: string): boolean {
-  if (state.manualOpening.get(portId)?.background) return false;
+  if (state.manualOpening.get(portId)?.background || useAppStore.getState().ports.find(p => p.id === portId)?.pluginToolRunning) return false;
   return state.focusOnConnected.get(portId) ?? true;
 }
 
@@ -179,8 +179,9 @@ function assertCurrentOperation(portId: string, generation: number): void {
 export function acceptSerialStatus(portId: string, status: string): boolean {
   const current = state.portOps.get(portId);
   const port = useAppStore.getState().ports.find((item) => item.id === portId);
-  if (status === 'connected' && (current?.intent === 'close' || (current?.intent === 'terminal' && !port?.toolRunning))) return false;
-  if (status === 'connected' && current?.intent === 'terminal' && port?.toolRunning) {
+  const toolActive = port?.toolRunning || port?.pluginToolRunning;
+  if (status === 'connected' && (current?.intent === 'close' || (current?.intent === 'terminal' && !toolActive))) return false;
+  if (status === 'connected' && current?.intent === 'terminal' && toolActive) {
     state.portOps.set(portId, { ...current, intent: 'open' });
   }
   if (status === 'connected') state.exhaustedReconnects.delete(portId);
@@ -208,7 +209,7 @@ function cancelReconnectLoop(portId: string): void {
 function ownsReconnectLoop(portId: string, loop: ReconnectLoop): boolean {
   const port = useAppStore.getState().ports.find((item) => item.id === portId);
   return state.reconnecting.get(portId) === loop && !loop.cancelled &&
-    !userClosingPortIds.has(portId) && useAppStore.getState().config.autoReconnect && !!port && !port.toolRunning;
+    !userClosingPortIds.has(portId) && useAppStore.getState().config.autoReconnect && !!port && !port.toolRunning && !port.pluginToolRunning;
 }
 
 function waitReconnectDelay(loop: ReconnectLoop, delayMs: number): Promise<void> {
@@ -321,6 +322,7 @@ export function acquireSerialConnectionRuntime(): () => void {
 export async function openSerialConnection<T = void>(portId: string, options: SerialOpenOptions<T> = {}): Promise<SerialOpenResult<T>> {
   options.assertAuthority?.();
   const requestedPort = availablePort(portId, options.allowUnknownPort);
+  if (requestedPort?.pluginToolRunning) throw new SerialConnectionError('tool-running', portId);
   cancelReconnectLoop(portId);
   const opening = { hintPending: state.manualOpening.get(portId)?.hintPending ?? false, background: options.background ?? false };
   state.manualOpening.set(portId, opening);
@@ -331,6 +333,7 @@ export async function openSerialConnection<T = void>(portId: string, options: Se
     return await enqueuePortOp(portId, 'open', async (generation) => {
       options.assertAuthority?.();
       const live = availablePort(portId, options.allowUnknownPort);
+      if (live?.pluginToolRunning) throw new SerialConnectionError('tool-running', portId);
       const alreadyOpen = live?.status === 'connected';
       if (alreadyOpen && !options.invokeWhenConnected) return { port: { ...live! }, result: 'already-open', value: undefined };
       if (live?.status === 'connecting') throw new SerialConnectionError('connection-busy', portId);

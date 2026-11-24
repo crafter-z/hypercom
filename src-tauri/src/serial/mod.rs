@@ -18,13 +18,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::commands::OpenPortArgs;
 
 pub(crate) mod codec;
 pub(crate) mod events;
 mod ports_real;
+mod managed_loan;
 mod ports_sim;
 mod ports_tty;
 #[cfg(windows)]
@@ -39,6 +40,7 @@ pub(crate) use events::{
     emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus,
 };
 pub(crate) use ports_real::open_blocking_authorized;
+pub(crate) use managed_loan::ManagedPortLoan;
 pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
@@ -143,6 +145,8 @@ pub struct SerialManager {
     pub gitbash_sim: bool,
     /// Monotonic connection identity per port; transfers and stale readers bind to it.
     connection_generations: HashMap<String, u64>,
+    /// Exclusive managed external-tool reservations, keyed by port.
+    tool_loans: HashMap<String, managed_loan::ToolReservation>,
     /// Once set, no new serial work may be admitted.
     shutting_down: bool,
     /// Tauri AppHandle：事件推送与日志落盘的唯一入口
@@ -156,6 +160,7 @@ impl SerialManager {
             ports: HashMap::new(),
             pending_real_closes: HashMap::new(),
             reconnect_attempts: HashMap::new(),
+            tool_loans: HashMap::new(),
             sim_ports: HashMap::new(),
             tty_sim_ports: HashMap::new(),
             simulate: false,
@@ -184,6 +189,9 @@ impl SerialManager {
     }
 
     pub(crate) fn begin_reconnect(&mut self, port_id: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        if self.tool_loans.contains_key(port_id) {
+            return Arc::new(std::sync::atomic::AtomicBool::new(true));
+        }
         self.cancel_reconnect(port_id);
         let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.reconnect_attempts
@@ -250,6 +258,26 @@ impl SerialManager {
         self.connection_generation(port_id) == Some(generation)
     }
 
+    pub(super) fn ensure_port_available(&self, port_id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.tool_loans.contains_key(port_id), "Port {port_id} is occupied by a tool");
+        Ok(())
+    }
+
+    pub(crate) fn emit_tool_loan(&self, port_id: &str, active: bool) {
+        if let Some(app) = &self.app_handle {
+            #[derive(Clone, Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct ToolLoanEvent<'a> {
+                port_id: &'a str,
+                active: bool,
+            }
+            let _ = app.emit(
+                "serial:tool-loan",
+                ToolLoanEvent { port_id, active },
+            );
+        }
+    }
+
     /// Unlike registry membership, this excludes handles whose reader has exited.
     pub(crate) fn connection_is_live(&self, port_id: &str) -> bool {
         match PortKind::of(port_id) {
@@ -295,6 +323,7 @@ impl SerialManager {
     /// 锁内执行：不枚举端口、不 join 读线程（两者都是阻塞操作）。需要这两种操作的
     /// 完整打开流程见 `open_blocking`。
     pub fn open_port(&mut self, args: OpenPortArgs) -> anyhow::Result<()> {
+        self.ensure_port_available(&args.port_id)?;
         if self.shutting_down {
             return Err(anyhow::anyhow!("Serial manager is shutting down"));
         }
@@ -329,6 +358,10 @@ impl SerialManager {
     /// `join()`，等待读线程及所有在途真实端口写句柄释放，再返回给用户。
     /// 持锁 join 会卡住所有其他串口命令。
     pub fn close_port(&mut self, port_id: &str) -> anyhow::Result<Option<PortClose>> {
+        if let Some(loan) = self.tool_loans.get_mut(port_id) {
+            loan.restore_allowed = false;
+            return Ok(None);
+        }
         self.cancel_reconnect(port_id);
         self.close_port_inner(port_id)
     }
@@ -403,6 +436,7 @@ impl SerialManager {
         stop_bits: &str,
         handshake: &str,
     ) -> anyhow::Result<()> {
+        self.ensure_port_available(port_id)?;
         ports_real::set_params(
             self, port_id, baud_rate, data_bits, parity, stop_bits, handshake,
         )
@@ -416,6 +450,7 @@ impl SerialManager {
         rts: bool,
         expected_generation: Option<u64>,
     ) -> anyhow::Result<()> {
+        self.ensure_port_available(port_id)?;
         ports_real::set_flow_control(self, port_id, dtr, rts, expected_generation)?;
         if let Some(params) = self.last_params.get_mut(port_id) {
             params.dtr = dtr;

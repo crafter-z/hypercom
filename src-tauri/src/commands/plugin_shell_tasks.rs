@@ -5,6 +5,8 @@ use super::{
     wait_cancel, AppState, AsyncRead, AsyncReadExt, Child, CommandError, HashMap, Instant, Mutex,
     PluginShellRequest, ProcessFailure, ReaderFailure, Serialize, State, Stdio, WebviewWindow,
 };
+use crate::commands::{plugin_serial, SerialWorkGuard};
+use crate::serial::ManagedPortLoan;
 use base64::Engine as _;
 use serde::Deserialize;
 use std::sync::{
@@ -46,6 +48,52 @@ impl OutputMode {
 pub struct PluginShellOutputOptions {
     stdout: OutputMode,
     stderr: OutputMode,
+    serial_loan: Option<SerialLoanRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SerialLoanRequest {
+    port_id: String,
+    expected_connection_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct SerialRecovery {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+// Owned cleanup runs exactly once, after the child is reaped and before its terminal status is published.
+type PendingPortRecovery =
+    std::pin::Pin<Box<dyn std::future::Future<Output = SerialRecovery> + Send>>;
+
+/// Keep shutdown admission until the OS handles and the recovery path have both settled.
+struct ManagedHandoff {
+    loan: ManagedPortLoan,
+    _work: SerialWorkGuard,
+}
+impl ManagedHandoff {
+    async fn finish(self) -> SerialRecovery {
+        let result = tokio::task::spawn_blocking(move || {
+            let Self { loan, _work } = self;
+            loan.finish().map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+        match result {
+            Ok(state) => SerialRecovery { state, error: None },
+            Err(error) => {
+                log::warn!("Plugin tool port recovery failed: {error}");
+                SerialRecovery {
+                    state: "failed",
+                    error: Some(error),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -77,6 +125,8 @@ pub struct PluginShellTaskStatus {
     state: ProcessPhase,
     exit_code: Option<i32>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serial_recovery: Option<SerialRecovery>,
 }
 impl PluginShellTaskStatus {
     fn new(state: ProcessPhase) -> Self {
@@ -84,6 +134,7 @@ impl PluginShellTaskStatus {
             state,
             exit_code: None,
             error: None,
+            serial_recovery: None,
         }
     }
 }
@@ -102,6 +153,7 @@ struct ProcessTask {
     status: watch::Sender<PluginShellTaskStatus>,
     waiter: AsyncMutex<()>,
     released: AtomicBool,
+    managed_port: AtomicBool,
     _permit: OwnedSemaphorePermit,
 }
 impl ProcessTask {
@@ -224,6 +276,7 @@ impl ProcessSession {
             status,
             waiter: AsyncMutex::new(()),
             released: AtomicBool::new(false),
+            managed_port: AtomicBool::new(false),
             _permit: permit,
         });
         let id = unused_id(&inner.tasks);
@@ -336,6 +389,22 @@ impl ProcessSessions {
         Ok(())
     }
 
+    pub(super) fn cancel_managed(&self, plugin_id: &str) {
+        if let Ok(sessions) = self.sessions.lock() {
+            for session in sessions.values().filter(|s| s.plugin_id == plugin_id) {
+                if let Ok(inner) = session.inner.lock() {
+                    for task in inner
+                        .tasks
+                        .values()
+                        .filter(|t| t.managed_port.load(Ordering::Acquire))
+                    {
+                        task.request_cancel();
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn retire(&self, plugin_id: Option<&str>) {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.retain(|_, session| {
@@ -383,9 +452,10 @@ struct Admission {
 impl Admission {
     fn run(
         mut self,
-        child: Child,
+        child: Result<Child, CommandError>,
         deadline: Option<Instant>,
         stdin: Option<String>,
+        recovery: Option<PendingPortRecovery>,
     ) -> impl std::future::Future<Output = ()> {
         let pipes = self
             .pipes
@@ -396,9 +466,9 @@ impl Admission {
             self.id,
             self.task.clone(),
             child,
-            deadline,
-            stdin,
+            (deadline, stdin),
             pipes,
+            recovery,
         )
     }
 }
@@ -442,10 +512,10 @@ async fn run_task(
     session: Arc<ProcessSession>,
     id: Uuid,
     task: Arc<ProcessTask>,
-    child: Child,
-    deadline: Option<Instant>,
-    stdin: Option<String>,
+    child: Result<Child, CommandError>,
+    (deadline, stdin): (Option<Instant>, Option<String>),
     pipes: (OutputTx, OutputTx),
+    recovery: Option<PendingPortRecovery>,
 ) {
     let (stdout, stderr) = pipes;
     let mut retired = session.retired.subscribe();
@@ -456,13 +526,25 @@ async fn run_task(
             _ = wait_cancel(&mut cancelled) => (),
         }
     };
-    let result = finish_process(child, deadline, stop, stdin, |out, err| async move {
-        tokio::try_join!(
-            push_pipe(out, "stdout", stdout),
-            push_pipe(err, "stderr", stderr)
-        )
-    })
-    .await;
+    let result = match child {
+        Err(error) => {
+            drop((stdout, stderr));
+            Err(ProcessFailure::Io(error))
+        }
+        Ok(child) => {
+            finish_process(child, deadline, stop, stdin, |out, err| async move {
+                tokio::try_join!(
+                    push_pipe(out, "stdout", stdout),
+                    push_pipe(err, "stderr", stderr)
+                )
+            })
+            .await
+        }
+    };
+    let recovery = match recovery {
+        Some(cleanup) => Some(cleanup.await),
+        None => None,
+    };
     let terminal = match result {
         Ok((exit, ((), ()))) => PluginShellTaskStatus {
             exit_code: exit.code(),
@@ -476,12 +558,15 @@ async fn run_task(
         },
     };
     task.status.send_modify(|status| {
-        *status =
-            if status.state == ProcessPhase::Cancelling && terminal.state != ProcessPhase::Failed {
-                PluginShellTaskStatus::new(ProcessPhase::Cancelled)
-            } else {
-                terminal
-            };
+        *status = if recovery.is_none()
+            && status.state == ProcessPhase::Cancelling
+            && terminal.state != ProcessPhase::Failed
+        {
+            PluginShellTaskStatus::new(ProcessPhase::Cancelled)
+        } else {
+            terminal
+        };
+        status.serial_recovery = recovery;
     });
     if task.released.load(Ordering::Acquire) {
         session.remove(id);
@@ -551,9 +636,80 @@ pub async fn plugin_shell_start(
     if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
         return Err(other("插件 shell 启动前已超时"));
     }
-    let child = session.spawn(&request, options.unwrap_or_default())?;
-    drop(gate);
-    tauri::async_runtime::spawn(admission.run(child, deadline, request.stdin));
+    let mut options = options.unwrap_or_default();
+    if let Some(target) = options.serial_loan.take() {
+        plugin_serial::validate_target(&plugin_id, &target.port_id)?;
+        if crate::serial::PortKind::of(&target.port_id) != crate::serial::PortKind::Real {
+            return Err(CommandError::Serial("插件工具只能借用操作系统串口".into()));
+        }
+        let authorize = || {
+            require_shell_access(&state, &plugin_id, &expected_generation)?;
+            let manifest = plugin_serial::require_scoped_serial_access(
+                &state,
+                &plugin_id,
+                &expected_generation,
+                Some(&target.port_id),
+                None,
+            )?;
+            if !manifest.permissions.iter().any(|p| p == "shell:execute") {
+                return Err(other("插件未声明 shell:execute 权限"));
+            }
+            Ok(())
+        };
+        authorize()?;
+        let work = state
+            .serial_work
+            .admit()
+            .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
+        let loan = {
+            let inner = session.inner.lock().map_err(lock_error)?;
+            if inner.retired {
+                return Err(inactive_session());
+            }
+            admission.task.managed_port.store(true, Ordering::Release);
+            ManagedPortLoan::reserve(
+                state.serial_manager.clone(),
+                target.port_id.clone(),
+                target.expected_connection_generation,
+            )
+            .map_err(|error| CommandError::Serial(error.to_string()))?
+        };
+        drop(gate);
+        // The blocking owner retains the loan if an invoke/Worker disappears during the close barrier.
+        let (handoff, ready) = tokio::task::spawn_blocking(move || {
+            let mut handoff = ManagedHandoff { loan, _work: work };
+            let ready = handoff.loan.wait_ready();
+            (handoff, ready)
+        })
+        .await
+        .map_err(|error| other(&error.to_string()))?;
+        let child = async {
+            ready.map_err(|error| CommandError::Serial(error.to_string()))?;
+            let _gate = super::super::plugin::acquire_plugin_io(&state).await?;
+            authorize()?;
+            if *admission.task.cancel.borrow()
+                || state.serial_work.shutting_down.load(Ordering::Acquire)
+            {
+                return Err(other("插件工具启动前已取消"));
+            }
+            if deadline.is_some_and(|d| d <= Instant::now()) {
+                return Err(other("插件工具启动前已超时"));
+            }
+            session.spawn(&request, options)
+        }
+        .await;
+        // After physical handoff, even spawn failures are observable terminal tasks with a separate recovery result.
+        tauri::async_runtime::spawn(admission.run(
+            child,
+            deadline,
+            request.stdin,
+            Some(Box::pin(handoff.finish())),
+        ));
+    } else {
+        let child = session.spawn(&request, options)?;
+        drop(gate);
+        tauri::async_runtime::spawn(admission.run(Ok(child), deadline, request.stdin, None));
+    }
     session.require_live()?;
     Ok(task_id.to_string())
 }
@@ -588,7 +744,10 @@ pub async fn plugin_shell_read(
     require_shell_access(&state, &plugin_id, &expected_generation)?;
     session.require_live()?;
     task.require_retained()?;
-    if matches!(task.snapshot().state, ProcessPhase::Cancelling | ProcessPhase::Cancelled) {
+    if matches!(
+        task.snapshot().state,
+        ProcessPhase::Cancelling | ProcessPhase::Cancelled
+    ) {
         return Ok(PluginShellRead::Eof);
     }
     Ok(output)
@@ -738,7 +897,7 @@ mod tests {
         (
             id,
             task,
-            tokio::spawn(admission.run(child, deadline, request.stdin)),
+            tokio::spawn(admission.run(Ok(child), deadline, request.stdin, None)),
         )
     }
     async fn read_all(
@@ -889,6 +1048,89 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[cfg(not(windows))] // Windows test harness cannot link the native serial driver without its app manifest.
+    #[tokio::test]
+    async fn managed_tasks_recover_on_spawn_failure_and_do_not_reopen_a_disconnected_port() {
+        let registry = ProcessSessions::default();
+        let (_, session) = new_session(&registry, PLUGIN);
+        let serial = Arc::new(Mutex::new(crate::serial::SerialManager::new()));
+        let port = "COM-MOCK-DISCONNECTED";
+        let mut loan = ManagedPortLoan::reserve(serial.clone(), port.into(), 0).unwrap();
+        loan.wait_ready().unwrap();
+        assert!(ManagedPortLoan::reserve(serial.clone(), port.into(), 0).is_err());
+        let admission = session.admit(&registry.slots).unwrap();
+        let task = admission.task.clone();
+        let work = Arc::new(crate::commands::SerialWorkState::new());
+        let handoff = ManagedHandoff {
+            loan,
+            _work: work.admit().unwrap(),
+        };
+        let child = session.spawn(
+            &request("__hypercom_missing_tool__", &[]),
+            Default::default(),
+        );
+        assert!(child.is_err());
+        admission
+            .run(child, None, None, Some(Box::pin(handoff.finish())))
+            .await;
+        let status = task.wait(&session).await.unwrap();
+        assert_eq!(status.state, ProcessPhase::Failed);
+        assert_eq!(status.serial_recovery.unwrap().state, "not-connected");
+        assert!(status.error.is_some());
+        assert_eq!(work.active.load(Ordering::Acquire), 0);
+        assert!(ManagedPortLoan::reserve(serial, port.into(), 0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn managed_exit_keeps_actual_exit_code_and_waits_for_port_recovery_even_after_cancel() {
+        let registry = ProcessSessions::default();
+        let (_, session) = new_session(&registry, PLUGIN);
+        let admission = session.admit(&registry.slots).unwrap();
+        let task = admission.task.clone();
+        let (cleaning, cleaning_started) = tokio::sync::oneshot::channel();
+        let (release_cleanup, cleanup_done) = tokio::sync::oneshot::channel();
+        let recovery = Box::pin(async move {
+            cleaning.send(()).unwrap();
+            cleanup_done.await.unwrap();
+            SerialRecovery {
+                state: "failed",
+                error: Some("unplugged".into()),
+            }
+        });
+        let request = local_program("exit 7", "exit 7");
+        let child = session.spawn(&request, Default::default());
+        let runner = tokio::spawn(admission.run(child, None, None, Some(recovery)));
+        tokio::time::timeout(TEST_LIMIT, cleaning_started)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!task.snapshot().state.terminal());
+        task.request_cancel(); // a late cancel cannot change an exit code that already happened
+        release_cleanup.send(()).unwrap();
+        let result = task.wait(&session).await.unwrap();
+        assert_eq!(result.exit_code, Some(7));
+        assert_eq!(result.state, ProcessPhase::Exited);
+        assert_eq!(result.serial_recovery.unwrap().state, "failed");
+        runner.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn revocation_cancels_only_loans_for_the_affected_plugin() {
+        let registry = ProcessSessions::default();
+        let (_, session) = new_session(&registry, PLUGIN);
+        let (_, other) = new_session(&registry, "com.example.other");
+        let managed = session.admit(&registry.slots).unwrap();
+        let plain = session.admit(&registry.slots).unwrap();
+        let unaffected = other.admit(&registry.slots).unwrap();
+        for task in [&managed.task, &unaffected.task] {
+            task.managed_port.store(true, Ordering::Release);
+        }
+        registry.cancel_managed(PLUGIN);
+        assert_eq!(managed.task.snapshot().state, ProcessPhase::Cancelling);
+        assert_eq!(plain.task.snapshot().state, ProcessPhase::Running);
+        assert_eq!(unaffected.task.snapshot().state, ProcessPhase::Running);
     }
 
     #[tokio::test]

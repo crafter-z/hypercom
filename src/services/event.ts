@@ -65,6 +65,9 @@ export const eventService = {
     });
   },
 
+  onSerialToolLoan: (callback: (loan: { portId: string; active: boolean }) => void) =>
+    listen<{ portId: string; active: boolean }>('serial:tool-loan', event => callback(event.payload)),
+
   onSerialReconnectHint: (callback: (event: SerialReconnectHintEvent) => void) => {
     return listen<SerialReconnectHintEvent>('serial:reconnect_hint', (event) => {
       callback(event.payload);

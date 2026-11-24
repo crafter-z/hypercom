@@ -127,6 +127,10 @@ impl PluginShellRegistry {
         }
     }
 
+    pub(super) fn cancel_serial_loans(&self, plugin_id: &str) {
+        self.process_sessions.cancel_managed(plugin_id);
+    }
+
     /// Configuration restore can alter every plugin identity/permission at once.
     pub fn cancel_all(&self) {
         self.process_sessions.retire(None);

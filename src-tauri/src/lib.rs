@@ -175,8 +175,6 @@ pub struct AppState {
     pub shutdown_complete: std::sync::atomic::AtomicBool,
     /// Active serial/file/tool admission and coordinated shutdown gate.
     pub serial_work: std::sync::Arc<commands::SerialWorkState>,
-    /// Active external-tool ownership tokens, keyed by port.
-    pub tool_reservations: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// 正在运行的外部工具子进程（按 port_id 索引），供 kill_port_tool 终止
     pub tool_processes: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
     /// File-send ownership and cancellation state, keyed by port.
@@ -286,7 +284,6 @@ impl AppState {
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(system_info)),
             serial_work: std::sync::Arc::new(commands::SerialWorkState::new()),
-            tool_reservations: std::sync::Mutex::new(std::collections::HashMap::new()),
             tool_processes: std::sync::Mutex::new(std::collections::HashMap::new()),
             file_send_cancel: std::sync::Mutex::new(std::collections::HashMap::new()),
             shutdown_started: std::sync::atomic::AtomicBool::new(false),

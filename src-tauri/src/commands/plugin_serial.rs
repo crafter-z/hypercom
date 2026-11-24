@@ -104,7 +104,7 @@ pub struct PluginSerialCloseResult {
     pub result: &'static str,
 }
 
-fn validate_target(plugin_id: &str, port_id: &str) -> Result<(), CommandError> {
+pub(super) fn validate_target(plugin_id: &str, port_id: &str) -> Result<(), CommandError> {
     plugin::validate_plugin_id(plugin_id).map_err(CommandError::Other)?;
     if port_id.is_empty() || port_id.contains('\0') {
         return Err(CommandError::Serial(
@@ -223,23 +223,19 @@ fn scoped_serial_authority<'a>(
     send_port: Option<&str>,
 ) -> Result<tokio::sync::MutexGuard<'a, ()>, CommandError> {
     blocking_authority(super::plugin::acquire_plugin_io(state), || {
-        let directory = {
-            let manager = state
-                .config_manager
-                .lock()
-                .map_err(|error| CommandError::Lock(error.to_string()))?;
-            let entry = manager
-                .get_config()
-                .entities
-                .plugin_configs
-                .iter()
-                .find(|entry| entry.id == plugin_id)
-                .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
-            validate_entry(entry, plugin_id, expected_generation)?;
-            manager.plugins_dir().join(plugin_id)
-        };
-        // Resource-heavy full manifest validation stays on install/enable/reload paths.
-        let manifest = plugin::load_manifest_lite(&directory).map_err(CommandError::Io)?;
+        require_scoped_serial_access(state, plugin_id, expected_generation, control_port, send_port).map(|_| ())
+    })
+}
+
+/// Caller owns the plugin lifecycle gate; no config mutex is held across serial operations.
+pub(super) fn require_scoped_serial_access(
+    state: &AppState,
+    plugin_id: &str,
+    expected_generation: &str,
+    control_port: Option<&str>,
+    send_port: Option<&str>,
+) -> Result<PluginManifest, CommandError> {
+    let directory = {
         let manager = state
             .config_manager
             .lock()
@@ -251,19 +247,33 @@ fn scoped_serial_authority<'a>(
             .iter()
             .find(|entry| entry.id == plugin_id)
             .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
-        validate_access(
-            entry,
-            &manifest,
-            plugin_id,
-            expected_generation,
-            control_port,
-        )?;
-        if let Some(port_id) = send_port {
-            validate_port_permission(entry, &manifest, port_id, "serial:send")?;
-        }
-        drop(manager);
-        Ok(())
-    })
+        validate_entry(entry, plugin_id, expected_generation)?;
+        manager.plugins_dir().join(plugin_id)
+    };
+    // Resource-heavy full manifest validation stays on install/enable/reload paths.
+    let manifest = plugin::load_manifest_lite(&directory).map_err(CommandError::Io)?;
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|error| CommandError::Lock(error.to_string()))?;
+    let entry = manager
+        .get_config()
+        .entities
+        .plugin_configs
+        .iter()
+        .find(|entry| entry.id == plugin_id)
+        .ok_or_else(|| CommandError::Other(format!("插件未安装: {plugin_id}")))?;
+    validate_access(
+        entry,
+        &manifest,
+        plugin_id,
+        expected_generation,
+        control_port,
+    )?;
+    if let Some(port_id) = send_port {
+        validate_port_permission(entry, &manifest, port_id, "serial:send")?;
+    }
+    Ok(manifest)
 }
 
 fn serial_error(error: anyhow::Error) -> CommandError {

@@ -27,7 +27,7 @@ const MAX_MISSING_POLLS = 3;
 const SERIAL_PORT_KEYS: (keyof SerialPort)[] = [
   'id', 'name', 'alias', 'status', 'type', 'isHidden', 'groupId',
   'baudRate', 'dataBits', 'parity', 'stopBits', 'handshake',
-  'protocolTemplateId', 'toolRunning', 'mode', 'displayView',
+  'protocolTemplateId', 'toolRunning', 'pluginToolRunning', 'mode', 'displayView',
   'connectionGeneration', 'manufacturer', 'product',
 ];
 
@@ -91,11 +91,15 @@ export function mergePorts(
         handshake: prev.handshake,
         protocolTemplateId: prev.protocolTemplateId,
         toolRunning: prev.toolRunning,
+        pluginToolRunning: prev.pluginToolRunning,
         connectionGeneration: prev.connectionGeneration,
         // issue #11：保留持久化的工作模式，否则每 3s 轮询会把 TTY 重置回 TRX。
         mode: prev.mode,
         displayView: prev.displayView,
       });
+    } else if (prev.pluginToolRunning) {
+      // Bootloaders may temporarily remove a COM device during its native loan.
+      merged.set(prev.id, prev);
     } else if (prev.status === 'connected' || prev.status === 'connecting') {
       // Union back any live port that transiently vanished from the enumeration
       // (USB glitch / sleep-resume). Dropping a connected/connecting port while

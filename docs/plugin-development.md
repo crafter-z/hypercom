@@ -420,6 +420,29 @@ try {
 - `task.status()` 立即取状态，`task.wait()` 等待 `running/cancelling` 以外的 `exited/cancelled/timed-out/failed`；状态含 `exitCode`（失败/取消可为 null）与 `error`。`task.cancel()` 只请求该任务的直接子进程取消；`task.release()` 释放持有的任务记录，仍运行的进程由宿主继续回收，不能撤销进程树或已发生副作用。
 - `timeoutMs` 仍是调用方显式设置的单任务截止；缺省/0 不设默认时间。流任务的槽位是运行时资源准入（每 Worker 最多 8 个任务、全局最多 64 个），不是 stdout 总量配额；不要用槽位数字宣称吞吐 SLA。既有一次性 `shell.execute` 保持原返回形状。
 
+#### 将一个串口临时借给工具
+
+需要让下载器独占串口时，在 `shell.start` 的**第二个参数**中传 `serialLoan: {portId, expectedConnectionGeneration}`。从 `ports.status({portId})` 取得当前代次；未知目标或无法确认物理设备身份时不要启动。授权要求同时具备 `shell:execute` 和 `serial:control`，后者受 manifest 的端口白名单约束。该选项只接受操作系统串口，不接受 HyperCom 的 SIM/GIT 模拟端口。USB/J-Link 工具若不占用调试串口，不传这个选项即可。旧宿主不认识该选项时会拒绝；不要降级为插件自行 close/run/open。
+
+```js
+const port = await self.plugin.api['ports.status']({ portId });
+if (!port) throw new Error('未找到工位绑定的端口');
+const task = await self.plugin.shell.start({ program, args }, {
+  serialLoan: { portId, expectedConnectionGeneration: port.connectionGeneration },
+  stderr: 'discard', // 示例只需 stdout；保留两路时必须并行消费
+});
+try {
+  for await (const bytes of task.stdout) consumeToolOutput(bytes);
+  const { state, exitCode, error, serialRecovery } = await task.wait();
+  // state/exitCode/error 是进程结果；serialRecovery 是独立的串口归还结果。
+} finally { await task.release(); }
+```
+
+- 宿主先预留串口、等待旧读写句柄释放，再启动指定程序。`program`/`args` 按原样传递，**不**自动追加端口或替换 `{port}`。拿到任务并不代表设备或下载器已就绪；需要等待上电窗口时，消费下载器的就绪输出，再切电。
+- 启动前授权、代次或占用冲突会拒绝。已借出后，即使工具无法启动，也以任务结果报告失败与恢复结果。正常退出、非零退出、取消、超时、撤权或 Worker 退休均由宿主收尾，不依赖插件的 `finally` 重新打开串口。退休后旧 Worker 不能再读取结果。
+- 终态的 `serialRecovery.state` 是 `restored`（按原参数重开）、`not-connected`（原本未连，不打开）、`superseded`（新的连接意图或宿主关闭，不再恢复）或 `failed`（附 `error`）。普通无借用任务没有该字段。`task.cancel()` 是请求，**`task.wait()` 的终态才包括归还结果**；即使退出码为 0 也要检查恢复状态。断开期间的日志不能补回。
+- 直接启动持有串口的下载器，不要启动立即返回的 GUI 启动器、后台服务或脱离父进程的脚本。任务管理直接子进程，不承诺终止其全部后代；端口消失、重枚举或仍被占用时，重开可以失败，不会猜另一个 COM 口或自动重烧。
+
 ### 事件
 
 | 订阅 | 载荷 | 语义 |

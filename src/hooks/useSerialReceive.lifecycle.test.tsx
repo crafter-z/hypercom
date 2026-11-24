@@ -345,8 +345,8 @@ describe('useSerialReceive protocol lifecycle', () => {
     expect(sendToPort).toHaveBeenCalledTimes(1);
   });
 
-  it('tool-owned disconnect suppresses lost banner while still draining RX', () => {
-    useAppStore.getState().updatePort('COM1', { toolRunning: true });
+  it.each(['toolRunning', 'pluginToolRunning'] as const)('%s disconnect suppresses lost banner while still draining RX', (flag) => {
+    useAppStore.getState().updatePort('COM1', { [flag]: true });
     receive(utf8('a\nb\nc\n'));
     eventHandlers.status!({ port_id: 'COM1', status: 'disconnected' });
     expect(lostPortIds.has('COM1')).toBe(false);

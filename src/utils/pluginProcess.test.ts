@@ -61,6 +61,24 @@ describe('one shell process context per Worker epoch', () => {
     expect(service.closeSession).toHaveBeenCalledExactlyOnceWith(session);
   });
 
+  it('requires explicit serial control and the exact target, preserves the observed generation and separate outcomes', async () => {
+    const context = makeContext();
+    const serialLoan = { portId: 'COM9', expectedConnectionGeneration: 4 };
+    const allowed = { serial: { portWhitelist: ['COM9'] } };
+    const run = (target: unknown, manifest = allowed) => executePluginProcessApi(context, 'shell.start', { request, options: { serialLoan: target } }, undefined, manifest);
+    await expect(run(serialLoan)).rejects.toThrow('serial:control');
+    useAppStore.getState().setConfig({ pluginConfigs: [{ ...useAppStore.getState().config.pluginConfigs[0], grantedPermissions: ['serial:control', 'shell:execute'] }] });
+    await expect(run(serialLoan, { serial: { portWhitelist: [] } })).rejects.toThrow('全部端口拒绝');
+    await expect(run({ portId: 'COM9' })).rejects.toThrow('expectedConnectionGeneration');
+    expect(service.start).not.toHaveBeenCalled();
+    await run(serialLoan);
+    expect(service.start).toHaveBeenCalledExactlyOnceWith(session, request, { serialLoan });
+    const done = { state: 'exited', exitCode: 0, error: null, serialRecovery: { state: 'failed', error: 'port absent' } } as const;
+    service.status.mockResolvedValue(done);
+    await expect(executePluginProcessApi(context, 'shell.status', { taskId, wait: true })).resolves.toEqual(done);
+    context.stop();
+  });
+
   it('checks the grant and install generation before admission and again before delivering reads', async () => {
     const context = makeContext();
     configure(expectedGeneration, false);

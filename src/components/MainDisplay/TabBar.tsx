@@ -248,7 +248,7 @@ const TabBar: React.FC<TabBarProps> = ({
         items.push(
           toolRunning
             ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool?.(targetPortId), danger: true }
-            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(targetPortId) },
+            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(targetPortId), disabled: portMap.get(targetPortId)?.pluginToolRunning },
         );
       }
       if (onConfigTool) {

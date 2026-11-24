@@ -114,7 +114,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isC
     // 外部工具：执行入口始终可见；未配置时点击跳转配置页。运行中显示终止。
     port.toolRunning
       ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => actions.killTool(port.id), danger: true }
-      : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => actions.runTool(port.id) },
+      : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => actions.runTool(port.id), disabled: port.pluginToolRunning },
     { label: t('sidebar.port.contextMenu.configTool'), icon: <Wrench size={14} />, onClick: actions.configTool },
     { type: 'separator' },
     ...groupControlItems,
@@ -167,7 +167,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isC
             {port.alias && <span className="port-item-alias">{port.alias}</span>}
             {port.type === 'sim' && <span className="port-item-badge sim">{t('sidebar.port.badge.sim')}</span>}
             {port.type === 'virtual' && <span className="port-item-badge">{t('sidebar.port.badge.vcp')}</span>}
-            {port.toolRunning && <span className="port-item-badge tool">TOOL</span>}
+            {(port.toolRunning || port.pluginToolRunning) && <span className="port-item-badge tool">TOOL</span>}
           </div>
           <div className="port-item-meta">
             <span>{label}</span>

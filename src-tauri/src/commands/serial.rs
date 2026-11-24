@@ -87,28 +87,6 @@ impl Drop for FileSendGuard<'_> {
 
 use tauri::{AppHandle, Emitter, State};
 
-/// Removes a tool reservation on every exit path (including the early `?`
-/// returns between insertion and the final cleanup). Previously those paths
-/// left the port permanently marked as "Tool already running".
-struct ToolReservation<'a> {
-    reservations: &'a std::sync::Mutex<std::collections::HashMap<String, String>>,
-    port_id: String,
-    owner: String,
-}
-
-impl Drop for ToolReservation<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut reservations) = self.reservations.lock() {
-            if reservations
-                .get(&self.port_id)
-                .is_some_and(|current| current == &self.owner)
-            {
-                reservations.remove(&self.port_id);
-            }
-        }
-    }
-}
-
 use super::CommandError;
 use crate::{serial, AppState};
 
@@ -896,17 +874,11 @@ fn render_port_tool_command(template: &str, port_id: &str) -> String {
 
 /// Preserve tool outcome on normal exits, but never hide a failure that occurred
 /// after closing the port (and include any failed recovery in that error).
-fn finish_port_tool<F>(
+fn finish_port_tool(
     outcome: Result<i32, CommandError>,
-    params: Option<OpenPortArgs>,
-    reopen: F,
-) -> (Result<i32, CommandError>, bool)
-where
-    F: FnOnce(OpenPortArgs) -> anyhow::Result<()>,
-{
-    let recovery = params.map(reopen).unwrap_or(Ok(()));
-    let reopen_failed = recovery.is_err();
-    let result = match (outcome, recovery) {
+    recovery: anyhow::Result<()>,
+) -> Result<i32, CommandError> {
+    match (outcome, recovery) {
         (Ok(code), Ok(())) => Ok(code),
         (Ok(code), Err(e)) => {
             log::warn!("Failed to reopen port after tool exit (code {code}): {e}");
@@ -916,8 +888,7 @@ where
         (Err(e), Err(recovery)) => Err(CommandError::Other(format!(
             "{e}; port recovery failed: {recovery}"
         ))),
-    };
-    (result, reopen_failed)
+    }
 }
 
 /// 执行外部工具：关闭串口 → 运行命令 → 流式输出 → 命令退出 → 立即重开串口。
@@ -959,47 +930,13 @@ pub async fn run_port_tool(
             args.port_id
         )));
     }
-    let owner = uuid::Uuid::new_v4().to_string();
-    {
-        let mut reservations = state
-            .tool_reservations
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        if reservations.contains_key(&args.port_id) {
-            return Err(CommandError::Serial(format!(
-                "Tool already running for {}",
-                args.port_id
-            )));
-        }
-        reservations.insert(args.port_id.clone(), owner.clone());
-    }
-    let _reservation = ToolReservation {
-        reservations: &state.tool_reservations,
-        port_id: args.port_id.clone(),
-        owner: owner.clone(),
-    };
-    let (last_params, join_handle, tool_generation) = {
-        let mut mgr = state
-            .serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        let params = mgr.get_last_params(&args.port_id);
-        let generation = mgr.status_generation(&args.port_id).unwrap_or_default();
-        let jh = mgr
-            .close_port(&args.port_id)
-            .map_err(|e| CommandError::Serial(e.to_string()))?;
-        (params, jh, generation)
-    };
-    // Join outside the manager lock and off the async runtime worker. TTY
-    // teardown may wait for a bounded child/reader cleanup, so a direct join
-    // here would starve unrelated async serial commands.
-    if let Some(t) = join_handle {
-        tokio::task::spawn_blocking(move || {
-            let _ = t.join();
-        })
-        .await
-        .map_err(|e| CommandError::Other(format!("tool close join task failed: {e}")))?;
-    }
+    let mut loan = serial::ManagedPortLoan::reserve_legacy(state.serial_manager.clone(), args.port_id.clone())
+        .map_err(|error| CommandError::Serial(error.to_string()))?;
+    let loan = tokio::task::spawn_blocking(move || {
+        loan.wait_ready().map_err(|error| CommandError::Serial(error.to_string()))?;
+        Ok::<_, CommandError>(loan)
+    })
+    .await.map_err(|error| CommandError::Other(format!("tool close task failed: {error}")))??;
 
     let outcome = async {
         let cmd = render_port_tool_command(&args.command, &args.port_id);
@@ -1097,29 +1034,8 @@ pub async fn run_port_tool(
     }
     .await;
 
-    // Reopen on every post-close exit (invalid workdir/spawn/capture/wait included).
-    // open_blocking performs its blocking work outside the manager lock.
-    let recovery_params = if state
-        .serial_manager
-        .lock()
-        .map(|m| m.is_shutting_down())
-        .unwrap_or(true)
-    {
-        None
-    } else {
-        last_params
-    };
-    let (result, reopen_failed) = finish_port_tool(outcome, recovery_params, |params| {
-        serial::open_blocking(&state.serial_manager, params)
-    });
-    if reopen_failed {
-        serial::emit_status_if_current(
-            &app,
-            &args.port_id,
-            serial::PortStatus::Error,
-            tool_generation,
-        );
-    }
+    // Preserve the existing immediate native recovery path, including spawn failure.
+    let result = finish_port_tool(outcome, loan.finish().map(|_| ()));
     let code = result.as_ref().copied().unwrap_or(-1);
     let _ = app.emit(
         "tool:exit",
@@ -1224,6 +1140,8 @@ pub async fn shutdown_serial_work(
             .map_err(|e| CommandError::Lock(e.to_string()))?;
         manager.begin_shutdown();
     }
+    // Managed shell runners hold serial_work admission until recovery finishes.
+    state.plugin_shell.cancel_all();
     {
         let map = state
             .file_send_cancel
@@ -1491,24 +1409,10 @@ mod tests {
 
     #[test]
     fn tool_failure_preserves_original_error_and_recovery_failure() {
-        let params = super::OpenPortArgs {
-            port_id: "COM3".into(),
-            baud_rate: 9600,
-            data_bits: 8,
-            parity: "None".into(),
-            stop_bits: "One".into(),
-            handshake: "None".into(),
-            dtr: true,
-            rts: true,
-            cols: 80,
-            rows: 24,
-        };
-        let (result, failed) = finish_port_tool(
+        let result = finish_port_tool(
             Err(CommandError::Io("invalid workdir".into())),
-            Some(params),
-            |_| Err(anyhow::anyhow!("device unavailable")),
+            Err(anyhow::anyhow!("device unavailable")),
         );
-        assert!(failed);
         let error = result.unwrap_err().to_string();
         assert!(error.contains("invalid workdir"), "{error}");
         assert!(error.contains("device unavailable"), "{error}");

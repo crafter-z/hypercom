@@ -39,6 +39,8 @@ export interface SerialPort {
   protocolTemplateId?: string;
   // 外部工具是否正在运行（运行期间串口关闭，工具输出显示在终端）
   toolRunning?: boolean;
+  /** A plugin-owned native tool holds the port; not a legacy killPortTool target. */
+  pluginToolRunning?: boolean;
   // 端口工作模式：trx=传统收发 | tty=终端模式（issue #11）
   mode?: PortMode;
   displayView?: PluginViewPreference | null;
