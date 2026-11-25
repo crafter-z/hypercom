@@ -208,6 +208,7 @@ fn finish_download(owner: &str, id: &str, path: Option<PathBuf>) {
 
 pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate::plugin::UiView, mut resources: HashMap<String, Resource>, profile_directory: Option<PathBuf>) -> Result<(), String> {
     let trusted = session.trusted_web;
+    let clipboard = session.clipboard;
     if trusted != profile_directory.is_some() { return Err("可信网页配置文件目录不匹配".into()); }
     let directory = profile_directory.clone().unwrap_or_else(|| std::env::temp_dir().join(format!("hypercom-view-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
@@ -301,7 +302,9 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
         settings.SetIsStatusBarEnabled(false).map_err(|e| e.to_string())?;
         settings.SetIsZoomControlEnabled(false).map_err(|e| e.to_string())?;
         settings.SetIsBuiltInErrorPageEnabled(false).map_err(|e| e.to_string())?;
-        // Preserve isolated copy/cut; trusted pages also receive native paste.
+        // Browser-specific accelerators stay off for isolated views. Text-editing
+        // keys (copy/cut/paste) are unaffected by this setting; the accelerator
+        // handler below decides whether an isolated view may receive native paste.
         settings.cast::<ICoreWebView2Settings3>().and_then(|s| s.SetAreBrowserAcceleratorKeysEnabled(trusted)).map_err(|e| e.to_string())?;
         let settings4: ICoreWebView2Settings4 = settings.cast().map_err(|e| e.to_string())?;
         settings4.SetIsPasswordAutosaveEnabled(false).map_err(|e| e.to_string())?;
@@ -426,9 +429,15 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
                 let mut kind = COREWEBVIEW2_PERMISSION_KIND::default(); args.PermissionKind(&mut kind)?;
                 let mut uri = PWSTR::null(); args.Uri(&mut uri)?;
                 let uri = take_string(uri);
-                let allow = trusted && kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
-                    && uri.strip_prefix(&permission_origin).is_some_and(|path| path.starts_with('/'))
-                    && permission_session.upgrade().is_some_and(|session| session.alive.load(Ordering::Acquire));
+                let alive = permission_session.upgrade().is_some_and(|session| session.alive.load(Ordering::Acquire));
+                let same_origin = uri.strip_prefix(&permission_origin).is_some_and(|path| path.starts_with('/'));
+                // Trusted pages keep their existing read-only allowance. Isolated
+                // pages get async clipboard read only with the plugin-level
+                // `clipboard` grant. Async write has no WebView2 permission kind;
+                // it is governed by the view's Permissions-Policy header.
+                let allow = alive && same_origin
+                    && kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
+                    && (trusted || clipboard);
                 args.SetState(if allow { COREWEBVIEW2_PERMISSION_STATE_ALLOW } else { COREWEBVIEW2_PERMISSION_STATE_DENY })?;
             }
             Ok(())
@@ -492,11 +501,15 @@ pub fn create(window: &tauri::Window, session: Arc<Session>, declaration: crate:
                 let mut key = 0; args.VirtualKey(&mut key)?;
                 let control = GetKeyState(0x11) < 0;
                 let shift = GetKeyState(0x10) < 0;
-                if !trusted && ((control && key == 0x56) || (shift && key == 0x2d)) { args.SetHandled(true)?; }
+                // An isolated view without the clipboard grant never receives
+                // native paste. With the grant, WebView2 handles Ctrl+V and
+                // Shift+Insert normally; programmatic reads remain permission-
+                // and Permissions-Policy-gated.
+                if !trusted && !clipboard && ((control && key == 0x56) || (shift && key == 0x2d)) { args.SetHandled(true)?; }
             }
             Ok(())
         })), &mut token).map_err(|e| e.to_string())?;
-        ResourceServer { origin, trusted, resources, alive: session.alive.clone() }
+        ResourceServer { origin, trusted, clipboard, resources, alive: session.alive.clone() }
             .install(&core, env).map_err(|error| error.to_string())?;
     }
     if !trusted {

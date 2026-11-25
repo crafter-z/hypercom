@@ -16,11 +16,24 @@ use windows::{
 use super::super::resources::{Resource, ResourceContents};
 
 const ISOLATED_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-same-origin";
-const ISOLATED_PERMISSIONS: &str = "camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), usb=(), serial=(), hid=(), bluetooth=(), display-capture=(), payment=()";
+
+/// Isolated-view browser features. Clipboard is the only plugin-grantable
+/// exception; every other listed feature stays denied for the document.
+fn isolated_permissions(clipboard: bool) -> String {
+    let clipboard = if clipboard {
+        "clipboard-read=(self), clipboard-write=(self)"
+    } else {
+        "clipboard-read=(), clipboard-write=()"
+    };
+    format!("camera=(), microphone=(), geolocation=(), {clipboard}, usb=(), serial=(), hid=(), bluetooth=(), display-capture=(), payment=()")
+}
 
 pub(super) struct ResourceServer {
     pub origin: String,
     pub trusted: bool,
+    /// Effective plugin-level `clipboard` grant frozen for this isolated view at
+    /// creation. Ignored for trusted pages, which do not receive this header.
+    pub clipboard: bool,
     pub resources: Rc<HashMap<String, Resource>>,
     pub alive: Arc<AtomicBool>,
 }
@@ -137,7 +150,7 @@ impl ResourceServer {
     ) -> windows::core::Result<ICoreWebView2WebResourceResponse> {
         let mut headers = format!("Content-Type: {}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n", response.mime, response.length);
         if !self.trusted {
-            headers.push_str(&format!("Content-Security-Policy: {ISOLATED_CSP}\r\nPermissions-Policy: {ISOLATED_PERMISSIONS}\r\n"));
+            headers.push_str(&format!("Content-Security-Policy: {ISOLATED_CSP}\r\nPermissions-Policy: {}\r\n", isolated_permissions(self.clipboard)));
         }
         unsafe {
             env.CreateWebResourceResponse(
@@ -204,5 +217,26 @@ impl ResourceServer {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::isolated_permissions;
+
+    #[test]
+    fn clipboard_policy_follows_the_plugin_grant() {
+        let denied = isolated_permissions(false);
+        assert!(denied.contains("clipboard-read=(), clipboard-write=()"));
+        assert!(!denied.contains("clipboard-read=(self)"));
+        let granted = isolated_permissions(true);
+        assert!(granted.contains("clipboard-read=(self), clipboard-write=(self)"));
+        assert!(!granted.contains("clipboard-read=()"));
+        // Non-clipboard features stay denied in both modes.
+        for policy in [denied, granted] {
+            assert!(policy.contains("camera=()"));
+            assert!(policy.contains("serial=()"));
+            assert!(!policy.contains("clipboard-read=*"));
+        }
     }
 }

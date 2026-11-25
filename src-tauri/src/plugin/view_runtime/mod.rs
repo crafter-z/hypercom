@@ -101,6 +101,9 @@ struct DocumentState { current: Option<String> }
 pub struct Session {
     pub binding: Binding, pub alive: Arc<AtomicBool>, permission: Option<&'static str>,
     pub trusted_web: bool,
+    /// Plugin-level `clipboard` grant, frozen into this view's Permissions-Policy
+    /// and native paste policy at creation. Revoking it retires the view.
+    pub clipboard: bool,
     #[cfg(windows)]
     interaction_rate: Mutex<InteractionRate>,
     #[cfg(any(windows, test))]
@@ -156,6 +159,7 @@ fn authorized(app: &tauri::AppHandle, session: &Session) -> bool {
             && (!session.trusted_web || entry.trusted_web_granted)
             && entry.granted_permissions.iter().any(|p| p == "ui:view")
             && session.permission.is_none_or(|permission| entry.granted_permissions.iter().any(|p| p == permission))
+            && (!session.clipboard || entry.granted_permissions.iter().any(|p| p == "clipboard"))
     })
 }
 fn session(id: &str, app: &tauri::AppHandle) -> Result<Arc<Session>, CommandError> {
@@ -195,6 +199,12 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
             return Err(error(format!("视图缺少权限 {permission}")));
         }
     }
+    // The plugin-level clipboard grant is the only path that relaxes isolated
+    // view clipboard policy. Freeze it here: the Permissions-Policy response
+    // header cannot be changed for an already loaded document, so a later grant
+    // or revoke retires the view instead of mutating it in place.
+    let clipboard = manifest.permissions.iter().any(|p| p == "clipboard")
+        && entry.granted_permissions.iter().any(|p| p == "clipboard");
     validate_binding(&binding, &declaration)?;
     if binding.bound_port_id.is_some() {
         let mode = binding.port_mode.as_deref().ok_or_else(|| error("视图缺少当前端口工作模式"))?;
@@ -217,7 +227,7 @@ pub async fn create(source: tauri::Webview, state: &AppState, binding: Binding) 
     let resources = tokio::task::spawn_blocking(move || resources::snapshot_lazy(&dir, &resource_view))
         .await.map_err(|e| error(e.to_string()))?.map_err(error)?;
     let session = Arc::new(Session {
-        binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: declaration.is_trusted_web(), permission: input_permission(&declaration),
+        binding, alive: Arc::new(AtomicBool::new(true)), trusted_web: declaration.is_trusted_web(), clipboard, permission: input_permission(&declaration),
         // Only the native Windows backend receives page callbacks. Keep the pure
         // rate-limit and document checks available to tests on every platform.
         #[cfg(windows)]
@@ -425,11 +435,21 @@ pub async fn clear_web_data(app: &tauri::AppHandle, directory: &std::path::Path)
         }
     }).await
 }
+/// Whether a committed grant set no longer matches a live view's frozen
+/// capabilities. Clipboard is frozen into an isolated view's Permissions-Policy
+/// and native paste policy at creation, so both granting and revoking it retire
+/// the view; the next create applies the new policy. Trusted-web views keep their
+/// own clipboard behavior and are not retired by clipboard-only changes.
+fn view_retired_by_grants(session: &Session, grants: &[String]) -> bool {
+    !grants.iter().any(|p| p == "ui:view")
+        || session.permission.is_some_and(|permission| !grants.iter().any(|p| p == permission))
+        || (!session.trusted_web && session.clipboard != grants.iter().any(|p| p == "clipboard"))
+}
 pub async fn retire_denied(app: &tauri::AppHandle, plugin: &str, grants: &[String]) -> Result<(), CommandError> {
     let ids = {
         let mut registry = registry().lock().map_err(|e| error(e.to_string()))?;
         let ids: Vec<_> = registry.live.iter().filter(|(_, session)| session.binding.plugin_id == plugin
-            && (!grants.iter().any(|p| p == "ui:view") || session.permission.is_some_and(|permission| !grants.iter().any(|p| p == permission))))
+            && view_retired_by_grants(session, grants))
             .map(|(id, _)| id.clone()).collect();
         for id in &ids { if let Some(session) = registry.live.remove(id) { session.alive.store(false, Ordering::Release); } }
         #[cfg(any(windows, test))]
@@ -790,7 +810,7 @@ mod tests {
     fn documents_reject_replaced_and_unknown_identities() {
         let session = Session {
             binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
-            alive: Arc::new(AtomicBool::new(true)), trusted_web: false, permission: None,
+            alive: Arc::new(AtomicBool::new(true)), trusted_web: false, clipboard: false, permission: None,
             #[cfg(windows)]
             interaction_rate: Mutex::new(InteractionRate::new()),
             control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
@@ -860,5 +880,32 @@ mod tests {
         binding.bound_port_id = None; assert!(validate_binding(&binding, &view).is_err());
         binding.bound_port_id = Some("COM3".into()); binding.placement = "serial-content".into();
         assert!(validate_binding(&binding, &view).is_err());
+    }
+
+    #[test]
+    fn clipboard_grant_changes_retire_only_isolated_views() {
+        fn session(trusted_web: bool, clipboard: bool, permission: Option<&'static str>) -> Session {
+            Session {
+                binding: Binding { plugin_id: "com.example.view".into(), install_generation: "generation".into(), view_id: "view".into(), tab_id: String::new(), placement: "workspace-tab".into(), bound_port_id: None, tab_session_id: String::new(), view_instance_id: String::new(), port_mode: None, worker_epoch: 1, stream_epoch: 0 },
+                alive: Arc::new(AtomicBool::new(true)), trusted_web, clipboard, permission,
+                #[cfg(windows)]
+                interaction_rate: Mutex::new(InteractionRate::new()),
+                control_rate: Mutex::new(TokenBucket::new(128.0)), timeline_preview_rate: Mutex::new(TokenBucket::new(TIMELINE_PREVIEW_RATE)), timeline_control_rate: Mutex::new(TokenBucket::new(TIMELINE_CONTROL_RATE)),
+                #[cfg(windows)]
+                binary_rate_reported: AtomicBool::new(false),
+                document: Mutex::new(DocumentState::default()),
+            }
+        }
+        let grants = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        let storage = grants(&["ui:view", "storage"]);
+        let with_clipboard = grants(&["ui:view", "storage", "clipboard"]);
+        assert!(!view_retired_by_grants(&session(false, false, None), &storage));
+        assert!(view_retired_by_grants(&session(false, true, None), &storage), "revoking clipboard retires the frozen isolated view");
+        assert!(!view_retired_by_grants(&session(false, true, None), &with_clipboard), "matching grant keeps the view");
+        assert!(view_retired_by_grants(&session(false, false, None), &with_clipboard), "granting clipboard retires the view to apply the new policy");
+        assert!(!view_retired_by_grants(&session(true, true, None), &storage), "trusted-web clipboard is not policy-frozen");
+        assert!(!view_retired_by_grants(&session(true, false, None), &with_clipboard), "trusted-web views are not retired by clipboard-only changes");
+        assert!(view_retired_by_grants(&session(false, false, Some("rx:bytes")), &storage), "missing input permission retires");
+        assert!(view_retired_by_grants(&session(false, false, None), &grants(&["storage"])), "missing ui:view retires");
     }
 }

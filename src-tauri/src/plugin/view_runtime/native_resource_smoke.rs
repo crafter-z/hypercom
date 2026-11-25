@@ -52,6 +52,7 @@ fn fixture(root: &TestDirectory, html: &str) -> ResourceServer {
     ResourceServer {
         origin: super::trusted_origin(&manifest.id, &view.id),
         trusted: true,
+        clipboard: false,
         resources: Rc::new(resources),
         alive: Arc::new(AtomicBool::new(true)),
     }
