@@ -545,7 +545,9 @@ ${PLUGIN_PROCESS_FACADE_CODE}
   self.plugin = {
     api: api, http: http, on: on, rx: rx, views: views, tabs: tabs,
     fs: pluginFileSdk, serial: Object.freeze(serialTasks),
-    shell: Object.freeze({ start: startPluginProcess, execute: api['shell.execute'] })
+    shell: Object.freeze({ start: startPluginProcess, execute: api['shell.execute'] }),
+    // 宿主能力描述（可选 API 探测）；旧宿主没有该 op，调用会 reject。
+    host: Object.freeze({ info: function () { return api['host.info'](); } })
   };
 
   // 普通异步异常只上报诊断（宿主记录后保留 worker）；同步初始化失败发生在

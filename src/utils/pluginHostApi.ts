@@ -24,6 +24,7 @@ import { pluginKv } from './pluginKv';
 import { appendPluginPanel, clearPluginPanel, getPluginPanelSnapshot } from './pluginPanelRegistry';
 import { addPluginBytesObserver } from './pluginBytesObserver';
 import { checkOpAllowed, checkPortScope, isPluginSerialTaskOp, OP_PERMISSIONS } from './pluginRpc';
+import { PLUGIN_HOST_INFO } from './pluginHostInfo';
 import { isPluginFileHandleOperation, type PluginFileHandleHost } from './pluginFileHandle';
 import type { PluginSerialTaskContext } from './pluginSerialTask';
 import { executePluginProcessApi, isPluginProcessOp, type PluginProcessContext } from './pluginProcess';
@@ -265,6 +266,10 @@ export async function executeHostApi(
     case 'tabs.setTitle':
     case 'tabs.list':
       return executePluginViewApi(pluginId, op, args, manifest, beforeSend);
+    case 'host.info':
+      // 无权限只读能力描述：稳定字段而非宿主版本字符串。旧宿主没有该 op，
+      // 插件必须按「能力不可用」处理；返回 true 也不绕过任何真实调用校验。
+      return PLUGIN_HOST_INFO;
     case 'ports.list':
     case 'ports.status': {
       const entry = useAppStore.getState().config.pluginConfigs?.find(item => item.id === pluginId);

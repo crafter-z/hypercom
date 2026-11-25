@@ -175,6 +175,12 @@ describe('权限过滤矩阵（调用时校验，评审 v2 P7）', () => {
     expect(OP_PERMISSIONS['ports.list']).toBeNull();
     expect(OP_PERMISSIONS['notify']).toBe('notify');
   });
+
+  it('host.info is a permission-free read-only capability query', () => {
+    expect(OP_PERMISSIONS['host.info']).toBeNull();
+    expect(checkOpAllowed('host.info', [])).toBeNull();
+    expect(checkOpAllowed('host.info', ['serial:control'])).toBeNull();
+  });
 });
 
 describe('serial.send per-port 作用域（评审 v2 P10 / 复审补强）', () => {
@@ -264,5 +270,24 @@ describe('plugin worker event registration contract', () => {
     };
     new Function('self', PLUGIN_BRIDGE_CODE)(worker);
     expect(() => worker.plugin?.rx.onLine('not-a-function')).toThrow('event callback required');
+  });
+  it('exposes the permission-free host capability query as plugin.host.info()', async () => {
+    const posted: Array<{ seq: number; op: string; args: unknown }> = [];
+    const worker = {
+      postMessage: (message: { seq: number; op: string; args: unknown }) => posted.push(message),
+      addEventListener: () => {},
+    } as {
+      postMessage: (message: { seq: number; op: string; args: unknown }) => void;
+      addEventListener: () => void;
+      onmessage?: (event: { data: unknown }) => void;
+      plugin?: { host: { info: () => Promise<unknown> } };
+    };
+    new Function('self', PLUGIN_BRIDGE_CODE)(worker);
+    const pending = worker.plugin!.host.info();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ op: 'host.info', args: null });
+    const response = { apiVersion: 1, features: { serialLoan: true } };
+    worker.onmessage!({ data: { seq: posted[0].seq, ok: true, result: response } });
+    await expect(pending).resolves.toEqual(response);
   });
 });

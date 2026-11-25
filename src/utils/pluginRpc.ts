@@ -29,6 +29,8 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 只读端口信息（无需敏感权限——端口列表/状态是 UI 可见信息）
   'ports.list': null,
   'ports.status': null,
+  // 只读宿主能力描述（可选 API 探测）：不访问设备/文件/网络，旧宿主拒绝该 op。
+  'host.info': null,
   // RX 观察
   // Worker subscriptions use plugin.rx.onLine/onBytes(callback). These RPC names reject callbacks.
   'rx.onLine': 'terminal:read',
