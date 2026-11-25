@@ -132,14 +132,14 @@ manifest 不能超过 1 MiB；包内路径统一使用 `/`。包不应包含符�
 | `http:request` | 经宿主发起完整 HTTP（文本/二进制/流式/重定向/取消）；可选 urlWhitelist 收紧 |
 | `shell:open` | 在系统默认程序打开 http/https/mailto URL；不是执行 shell |
 | `shell:execute` | **高风险**：经宿主按操作系统语义启动程序并返回退出码及 UTF-8 stdout/stderr；程序可读写本机数据、访问网络或运行其他程序。需一次性授予敏感权限，用户负责审阅插件代码和参数 |
-| `clipboard` | 读/写剪贴板文本 |
+| `clipboard` | 读/写剪贴板文本；同时放行本插件隔离视图的原生粘贴与浏览器剪贴板 API（视图创建时冻结，授权变化会退休视图） |
 |
 otify` | 发出受限的非粘滞通知 |
 | `storage` | 通过 get/set 访问专属 JSON KV；只覆盖 data/state.json，不等于整个 data/ 的文件权限 |
 | `ui:view` | 显示声明的隔离页面、发布 JSON 模型及接收本页面交互，不隐含其他权限 |
 | `ui:tabs` | Worker 打开/激活/关闭/改标题/列出自身独立标签；不能管理其他插件或原始串口标签 |
 
-`ports.list`、`ports.status`、log 和自身 ui.panel 操作无需声明额外权限，但插件必须已启用。授权在调用时检查；运行中撤权后，旧 API 引用也不能继续使用该能力。RX 事件同样受当前读取权限控制。
+`ports.list`、`ports.status`、`host.info`、log 和自身 ui.panel 操作无需声明额外权限，但插件必须已启用。授权在调用时检查；运行中撤权后，旧 API 引用也不能继续使用该能力。RX 事件同样受当前读取权限控制。
 
 ### 串口作用域
 
@@ -196,6 +196,26 @@ otify` | 发出受限的非粘滞通知 |
 ## API 参考
 
 以下均为 **Worker API**。安装、授权管理等原生 Tauri 命令不是插件可用 API；不要复制架构文档中的 invoke 调用。
+
+### 宿主能力查询
+
+| 调用 | 权限 | 参数与结果 |
+|---|---|---|
+| `api['host.info']()` / `plugin.host.info()` | 无 | 返回 `{apiVersion, features}` 的宿主 Worker 能力描述；当前 `apiVersion` 为 1，`features.serialLoan` 为布尔值 |
+
+`host.info` 返回**稳定的能力字段，不是宿主应用版本字符串**：插件应按 `features` 分支探测可选 API，不要解析或比较宿主版本号（版本号会随发布漂移，同一版本也可能来自不同构建）。`apiVersion` 只是载荷形状版本，新能力以新字段增量加入；插件应检查具体能力字段。该调用只读、无副作用，不启动进程，也不访问串口、文件或网络。
+
+旧宿主没有这个 API，调用会 reject；插件应把它当作「能力未知/不可用」，保持 fail closed，不要退回版本号猜测。
+
+```js
+let serialLoan = false;
+try {
+  const info = await self.plugin.api['host.info']();
+  serialLoan = info?.features?.serialLoan === true;
+} catch {
+  // 旧宿主：无法正向确认，只能依赖真实调用结果或用户可见的兜底路径。
+}
+```
 
 ### 端口与串口
 
@@ -424,6 +444,8 @@ try {
 
 需要让下载器独占串口时，在 `shell.start` 的**第二个参数**中传 `serialLoan: {portId, expectedConnectionGeneration}`。从 `ports.status({portId})` 取得当前代次；未知目标或无法确认物理设备身份时不要启动。授权要求同时具备 `shell:execute` 和 `serial:control`，后者受 manifest 的端口白名单约束。该选项只接受操作系统串口，不接受 HyperCom 的 SIM/GIT 模拟端口。USB/J-Link 工具若不占用调试串口，不传这个选项即可。旧宿主不认识该选项时会拒绝；不要降级为插件自行 close/run/open。
 
+需要正向确认当前宿主构建实现了该契约时，查询 `host.info` 的 `features.serialLoan`（见[宿主能力查询](#宿主能力查询)）：明确为 `true` 表示当前构建接受该选项；旧宿主没有该 API、查询失败或返回 `false` 时应按能力不可用处理（fail closed），不要用宿主版本号猜测。能力查询只说明契约存在，**每次借用仍以 `shell.start` 的真实拒绝/回执和 `task.wait()` 的 `serialRecovery` 为准**，不要因为能力为 true 就跳过失败处理。
+
 ```js
 const port = await self.plugin.api['ports.status']({ portId });
 if (!port) throw new Error('未找到工位绑定的端口');
@@ -564,7 +586,7 @@ UI 脚本全局 `view` 与 Worker 会话对象不是同一对象：
 
 Worker 侧对象对称：`view.sendBinary(type, bytes)` / `view.onBinary(async ({type, bytes}) => …)`。二进制通道按「视图实例 + 当前文档 + Worker 代次」绑定；页面导航、关闭或插件交换代次会拒绝未完成传输，迟到的确认不会影响新页面。已在执行的插件异步逻辑本身不能假装被撤销。通道分块/ACK/取消细节见[视图二进制通道](architecture/plugin-views.md#视图二进制通道)。
 
-隔离模式 UI 不直接 fetch/WebSocket、不创建 frame/Worker、不打开文件或运行 Tauri 命令；需要敏感能力时发交互让 Worker 经已有授权 API 执行。**浏览器真实用户操作的原生复制/剪切是允许的边界例外**。可信网页的浏览器能力见上节；两种模式都不直接运行 Tauri 命令。
+隔离模式 UI 不直接 fetch/WebSocket、不创建 frame/Worker、不打开文件或运行 Tauri 命令；需要敏感能力时发交互让 Worker 经已有授权 API 执行。**浏览器真实用户操作的原生复制/剪切是允许的边界例外**。声明并由用户授予 `clipboard` 后，该视图还可用浏览器剪贴板 API 和原生粘贴；未授权时粘贴快捷键被原生拦截。授权在视图创建时冻结，增删授权会退休现有视图。可信网页的浏览器能力见上节；两种模式都不直接运行 Tauri 命令。
 
 ### 可选时间联动 API（UI 专用）
 

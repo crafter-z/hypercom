@@ -16,9 +16,9 @@
 
 资源快照只包含 entry/styles/assets 及隔离模式的宿主 shell/SDK，拒绝 data/、保留命名空间（`__host/` 不可被插件声明覆盖）、路径别名、链接/reparse/hardlinks、非普通文件及额度越界。插件脚本为普通 bundle，不直接拼入主窗 React DOM。Native send 只接受 `init`/`state`/`environment`/`binary-chunk`/`binary-ack`/`timeline-seek`/`timeline-cancel` JSON：按类型分别限制信封大小并转义为 SDK dispatcher（`__hypercomViewDispatch`）的固定调用，不接受源码 eval；未知类型、缺失文档身份或分片非法直接拒绝。
 
-隔离模式首文档加载前安装 WebView2 策略：一次宿主初始导航、后续顶层/子 frame 导航拒绝；全请求源拦截并静态响应；下载/新窗口/外部协议/拖入/浏览器权限拒绝；HTML 文件选择通过 acknowledged CDP interception 阻断；网络配置和 CSP 叠加防护。必需 COM/CDP 接口不可用时创建失败，不加载插件代码。
+隔离模式首文档加载前安装 WebView2 策略：一次宿主初始导航、后续顶层/子 frame 导航拒绝；全请求源拦截并静态响应；下载/新窗口/外部协议/拖入/浏览器权限默认拒绝（剪贴板见下条）；HTML 文件选择通过 acknowledged CDP interception 阻断；网络配置和 CSP 叠加防护。必需 COM/CDP 接口不可用时创建失败，不加载插件代码。
 
-**隔离模式明确例外**：浏览器真实用户操作的原生复制/剪切可写系统剪贴板，这是用户选择的边界；隔离页面程序化剪贴板读取及 Worker clipboard API 仍分别受原生拒绝/已有权限约束。可信网页边界见下节。
+**隔离模式明确例外**：浏览器真实用户操作的原生复制/剪切可写系统剪贴板，这是用户选择的边界。插件声明并由用户授予 `clipboard` 时，该授权同时放行本视图 origin 的异步剪贴板读写和原生粘贴：Permissions-Policy 下发 `clipboard-read=(self), clipboard-write=(self)`，`PermissionRequested` 只放行同源活跃文档的 CLIPBOARD_READ，`AcceleratorKeyPressed` 不再拦截 Ctrl+V / Shift+Insert。未授权时程序化读取与粘贴仍被原生拒绝。新增或撤销该授权都会退休现有视图，下一次创建按新策略生效；Worker clipboard API 仍按插件权限单独校验。可信网页边界见下节。
 
 安装/升级/卸载/禁用/必要撤权及配置备份恢复先使路由失效，控件销毁与代次提交协调，旧消息不能复活新代码。原生事件只定向 main，页面不能订阅全局串口事件。
 
@@ -30,7 +30,7 @@
 
 `PluginConfigEntry.trusted_web_granted` 默认 false，仅 `set_plugin_trusted_web` 主窗命令能够授予；启用、`create` 与消息/原生事件都检查实际批准，普通权限不隐含网页信任。升级清除批准；配置导入保持当前批准（不能新增或复活已撤销的信任），且导入时“已启用但缺网页信任”的可信插件会被强制禁用（manifest 不可读同样 fail closed）。撤销同时禁用并退休页面。所有变更复用 plugin_io、expectedGeneration 和 revision 快照。
 
-Windows 可信分支不安装离线/CDP 网络阻断、黑洞代理/DNS、隔离 CSP 或文件选择拦截，但仍关闭 devtools、宿主对象、默认右键菜单、自动填充/密码保存与外部拖入，并取消外部协议与 WebView 内新窗口。仅虚拟本地 origin 的请求被资源拦截（未声明路径 403，不回退网络），其他浏览器流量按标准 CORS/TLS 运行；WebView 内离开入口的顶层导航与 frame 导航按上节白名单取消，真实用户点击的外部顶层链接与外部新窗口改交系统浏览器。Clipboard read 权限只对本视图 origin 的活跃文档放行，粘贴快捷键恢复，其他浏览器权限拒绝。网页不共享主窗权限或 DOM。
+Windows 可信分支不安装离线/CDP 网络阻断、黑洞代理/DNS、隔离 CSP 或文件选择拦截，但仍关闭 devtools、宿主对象、默认右键菜单、自动填充/密码保存与外部拖入，并取消外部协议与 WebView 内新窗口。仅虚拟本地 origin 的请求被资源拦截（未声明路径 403，不回退网络），其他浏览器流量按标准 CORS/TLS 运行；WebView 内离开入口的顶层导航与 frame 导航按上节白名单取消，真实用户点击的外部顶层链接与外部新窗口改交系统浏览器。Clipboard read 权限只对本视图 origin 的活跃文档放行，粘贴快捷键恢复，其他浏览器权限拒绝。网页不共享主窗权限或 DOM。隔离视图获得 `clipboard` 授权后同样可粘贴并使用异步剪贴板；区别是它仍受隔离 CSP、资源拦截和默认右键菜单关闭的约束。
 
 `DownloadStarting` 默认取消并获取 deferral：隔离模式立即取消且不弹框；可信模式弹原生另存为，用户选择并成功设置路径后才放行，不显示自动打开下载的浏览器 UI。待选下载及运行下载由各 Control 拥有，退休取消并完成 deferral，迟到对话框不能写文件。Control 析构不能访问其他 thread_local 表，避免退出时表析构顺序导致崩溃；移除控件后在 RefCell 借用之外析构。
 
@@ -145,6 +145,6 @@ serial替换偏好 displayView保存在portMeta，走已有 CAS 安全元数据�
 
 ## 验证边界
 
-前端测试覆盖标签恢复、输入租约、JSON/状态边界、动作票据、文档代次、二进制 ACK、工作区布局和错误页；Rust 测试覆盖资源、权限、几何、可信 origin、导航白名单和分片信封。Playwright 使用浏览器与 mock IPC，不能证明原生隔离承载。
+前端测试覆盖标签恢复、输入租约、JSON/状态边界、动作票据、文档代次、二进制 ACK、工作区布局和错误页；Rust 测试覆盖资源、权限、几何、可信 origin、导航白名单、剪贴板策略和分片信封。Playwright 使用浏览器与 mock IPC，不能证明原生隔离承载。
 
 Windows 原生回归由 `retiring_plugin_children_preserves_host_resize` 和 `workerless_timeline_native_webview2_smoke` 提供，需要 WebView2 Runtime，并以 `--ignored` 显式运行。它们验证 child 生命周期、主窗尺寸同步、无 Worker 时间通道和文档代次；不代表完整 Tauri 授权、文件选择器、全部平台隔离或最终安装包已经验收。最终安装包边界见 [`release.md`](release.md)。
