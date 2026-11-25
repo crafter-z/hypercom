@@ -2,7 +2,7 @@
   "version": 1,
   "locale": "zh-CN",
   "homeId": "home",
-  "repositoryRef": "v1.2.1",
+  "repositoryRef": "v1.2.2",
   "articles": [
     {
       "id": "home",
@@ -496,7 +496,7 @@
                   "type": "link",
                   "target": {
                     "kind": "external",
-                    "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/plugin-development.md"
+                    "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/plugin-development.md"
                   },
                   "children": [
                     {
@@ -10730,7 +10730,7 @@
                       "type": "link",
                       "target": {
                         "kind": "external",
-                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/plugin-development.md"
+                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/plugin-development.md"
                       },
                       "children": [
                         {
@@ -11082,7 +11082,7 @@
               "type": "link",
               "target": {
                 "kind": "external",
-                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/plugin-development.md"
+                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/plugin-development.md"
               },
               "children": [
                 {
@@ -11337,7 +11337,7 @@
               "type": "link",
               "target": {
                 "kind": "external",
-                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/plugin-development.md#%E6%8F%92%E4%BB%B6%E5%B8%82%E5%9C%BA%E5%8F%91%E5%B8%83%E4%B8%8E%E6%9B%B4%E6%96%B0"
+                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/plugin-development.md#%E6%8F%92%E4%BB%B6%E5%B8%82%E5%9C%BA%E5%8F%91%E5%B8%83%E4%B8%8E%E6%9B%B4%E6%96%B0"
               },
               "children": [
                 {
@@ -11354,7 +11354,7 @@
               "type": "link",
               "target": {
                 "kind": "external",
-                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/examples/plugin-marketplace/README.md"
+                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/examples/plugin-marketplace/README.md"
               },
               "children": [
                 {
@@ -12580,7 +12580,7 @@
               "type": "link",
               "target": {
                 "kind": "external",
-                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/examples/plugin-views-demo/README.md"
+                "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/examples/plugin-views-demo/README.md"
               },
               "children": [
                 {
@@ -13381,7 +13381,7 @@
                       "type": "link",
                       "target": {
                         "kind": "external",
-                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/plugin-development.md"
+                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/plugin-development.md"
                       },
                       "children": [
                         {
@@ -13403,7 +13403,7 @@
                       "type": "link",
                       "target": {
                         "kind": "external",
-                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/architecture/plugins.md"
+                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/architecture/plugins.md"
                       },
                       "children": [
                         {
@@ -13425,7 +13425,7 @@
                       "type": "link",
                       "target": {
                         "kind": "external",
-                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.1/docs/architecture/plugin-views.md"
+                        "url": "https://github.com/crafter-z/hypercom/blob/v1.2.2/docs/architecture/plugin-views.md"
                       },
                       "children": [
                         {
