@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
 import { eventService, serialService, type FileProgressPayload } from '../../../services/tauri';
-import { notifyError, notifySuccess } from '../../../stores/useToastStore';
+import { notifyError, notifyInfo, notifySuccess } from '../../../stores/useToastStore';
 import { trafficStats } from '../../../utils/trafficStats';
 import { isFlowRunning, reserveSerialTask, resetFlowRuntime } from '../../../utils/flowRuntime';
 import { useFileSend, type FileSendControls } from './useFileSend';
@@ -16,7 +16,7 @@ vi.mock('../../../services/tauri', () => ({
   serialService: { sendFile: vi.fn(), cancelFileSend: vi.fn(async () => {}) },
 }));
 vi.mock('../../../stores/useToastStore', () => ({
-  notifyError: vi.fn(), notifySuccess: vi.fn(),
+  notifyError: vi.fn(), notifyInfo: vi.fn(), notifySuccess: vi.fn(),
   useToastStore: { getState: () => ({ push: vi.fn() }) },
 }));
 vi.mock('../../../utils/flowRuntime', async importOriginal => ({
@@ -191,10 +191,43 @@ describe('file send ownership and asynchronous boundaries', () => {
     expect(vi.mocked(trafficStats.addTx).mock.calls.map(call => call[1])).toEqual([3, 5]);
     const args = vi.mocked(serialService.sendFile).mock.calls[0][0];
     expect(args.expectedGeneration).toBe(7);
-    controls.cancelFileSend();
+    act(() => { controls.cancelFileSend(); });
     expect(serialService.cancelFileSend).toHaveBeenCalledWith('COM1', args.transferId);
+    expect(controls.progress?.cancelling).toBe(true);
     await act(async () => { emit(10, 10, true); transfer.resolve(10); await sending; });
     expect(vi.mocked(trafficStats.addTx).mock.calls.map(call => call[1])).toEqual([3, 5, 2]);
+    expect(notifySuccess).toHaveBeenCalledExactlyOnceWith('sendSection.file.sent');
+    expect(controls.progress).toBeNull();
+  });
+
+  it('notifies cancelled info toast when a user-cancelled transfer ends short of total', async () => {
+    const transfer = deferred<number>(); vi.mocked(serialService.sendFile).mockReturnValueOnce(transfer.promise);
+    const { sending } = await begin();
+    await act(async () => { emit(4, 10, false); });
+    act(() => { controls.cancelFileSend(); });
+    expect(controls.progress).toEqual({ sent: 4, total: 10, fileName: 'send.bin', cancelling: true });
+    await act(async () => { emit(4, 10, true); transfer.resolve(4); await sending; });
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(notifyInfo).toHaveBeenCalledExactlyOnceWith('sendSection.file.cancelled');
+    expect(controls.progress).toBeNull();
+  });
+
+  it('keeps an active transfer running across tab switches and restores live progress on return', async () => {
+    const transfer = deferred<number>(); vi.mocked(serialService.sendFile).mockReturnValueOnce(transfer.promise);
+    const { sending } = await begin();
+    await act(async () => { emit(3, 10, false); });
+    expect(controls.progress).toEqual({ sent: 3, total: 10, fileName: 'send.bin', cancelling: false });
+    await render('COM2');
+    expect(serialService.cancelFileSend).not.toHaveBeenCalled();
+    expect(controls.progress).toBeNull();
+    // Background progress continues updating TX stats without touching COM2's view.
+    await act(async () => { emit(7, 10, false); });
+    expect(controls.progress).toBeNull();
+    expect(vi.mocked(trafficStats.addTx).mock.calls.map(call => call[1])).toEqual([3, 4]);
+    // Returning to COM1 restores live progress and Cancel works.
+    await render('COM1');
+    expect(controls.progress).toEqual({ sent: 7, total: 10, fileName: 'send.bin', cancelling: false });
+    await act(async () => { emit(10, 10, true); transfer.resolve(10); await sending; });
     expect(notifySuccess).toHaveBeenCalledExactlyOnceWith('sendSection.file.sent');
     expect(controls.progress).toBeNull();
   });
@@ -227,7 +260,7 @@ describe('file send ownership and asynchronous boundaries', () => {
     const current = await begin();
     await act(async () => { oldPicker.resolve('C:/old.bin'); await old.sending; });
     expect(serialService.sendFile).toHaveBeenCalledTimes(1);
-    expect(controls.progress).toEqual({ sent: 0, total: 0 });
+    expect(controls.progress).toEqual({ sent: 0, total: 0, fileName: 'send.bin', cancelling: false });
     await act(async () => { newTransfer.resolve(10); await current.sending; });
   });
 
@@ -243,7 +276,7 @@ describe('file send ownership and asynchronous boundaries', () => {
       progress({ portId: 'COM1', transferId: oldId, sentBytes: 10, totalBytes: 10, done: true });
       oldTransfer.resolve(10); await old.sending;
     });
-    expect(controls.progress).toEqual({ sent: 0, total: 0 });
+    expect(controls.progress).toEqual({ sent: 0, total: 0, fileName: 'send.bin', cancelling: false });
     expect(notifySuccess).toHaveBeenCalledTimes(1);
     await act(async () => { emit(3); newTransfer.resolve(10); await current.sending; });
     expect(vi.mocked(trafficStats.addTx).mock.calls.map(call => call[1])).toEqual([10, 3, 7]);

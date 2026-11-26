@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../../../stores/useAppStore';
-import { notifyError, notifySuccess, useToastStore } from '../../../stores/useToastStore';
+import { notifyError, notifyInfo, notifySuccess, useToastStore } from '../../../stores/useToastStore';
 import { eventService, serialService } from '../../../services/tauri';
 import type { FileProgressPayload } from '../../../services/tauri';
 import { isSendablePort } from '../../../utils/sendGuard';
@@ -21,6 +21,8 @@ import type { PortTrafficLease } from '../../../utils/trafficStats';
 export interface FileSendProgress {
   sent: number;
   total: number;
+  fileName: string;
+  cancelling?: boolean;
 }
 
 export interface FileSendControls {
@@ -32,9 +34,14 @@ export interface FileSendControls {
 interface ActiveTransfer {
   transferId: string;
   portId: string;
+  fileName: string;
   lease: PortTrafficLease;
   countedBytes: number;
-  generation: number;
+  phase: 'picking' | 'sending';
+  progress: FileSendProgress | null;
+  cancelling: boolean;
+  settled: boolean;
+  pickerGeneration: number;
   connectionGeneration?: number;
 }
 
@@ -42,47 +49,63 @@ function newTransferId(): string {
   return crypto.randomUUID();
 }
 
+function extractFileName(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
 export function useFileSend(portId: string | null): FileSendControls {
   const [progress, setProgress] = useState<FileSendProgress | null>(null);
-  const activeRef = useRef<ActiveTransfer | null>(null);
-  const generationRef = useRef(0);
+  const transfersRef = useRef<Map<string, ActiveTransfer>>(new Map());
+  const currentPortIdRef = useRef<string | null>(portId);
+  currentPortIdRef.current = portId;
+  const pickerGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
   const ensureListenerRef = useRef<(() => Promise<boolean>) | null>(null);
 
+  // Switching tabs retires any open file picker (not yet sending), while keeping
+  // active in-flight transfers running per-port so switching back restores live progress.
   useEffect(() => {
-    const generation = ++generationRef.current;
-    const old = activeRef.current;
-    activeRef.current = null;
-    setProgress(null);
-    if (old) {
-      void serialService.cancelFileSend(old.portId, old.transferId).catch(() => undefined);
-    }
-    return () => {
-      if (generationRef.current === generation) {
-        generationRef.current += 1;
-        const current = activeRef.current;
-        activeRef.current = null;
-        if (current) void serialService.cancelFileSend(current.portId, current.transferId).catch(() => undefined);
+    const nextGen = ++pickerGenerationRef.current;
+    for (const [key, transfer] of [...transfersRef.current.entries()]) {
+      if (transfer.phase === 'picking' && transfer.pickerGeneration !== nextGen) {
+        transfersRef.current.delete(key);
       }
-    };
+    }
+    const activeForPort = portId ? transfersRef.current.get(portId) : undefined;
+    setProgress(activeForPort?.phase === 'sending' ? activeForPort.progress : null);
   }, [portId]);
 
   useEffect(() => {
+    mountedRef.current = true;
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     let pending: Promise<boolean> | null = null;
     const onProgress = (payload: FileProgressPayload) => {
       if (cancelled) return;
-      const active = activeRef.current;
-      if (!active || payload.transferId !== active.transferId || payload.portId !== active.portId) return;
+      const active = transfersRef.current.get(payload.portId);
+      if (!active || active.phase !== 'sending' || payload.transferId !== active.transferId) return;
       const delta = payload.sentBytes - active.countedBytes;
       if (delta > 0) trafficStats.addTx(active.portId, delta, active.lease);
       active.countedBytes = payload.done ? 0 : Math.max(active.countedBytes, payload.sentBytes);
       if (payload.done) {
-        activeRef.current = null;
-        setProgress(null);
-        if (payload.totalBytes > 0 && payload.sentBytes >= payload.totalBytes) notifySuccess('sendSection.file.sent');
+        active.settled = true;
+        transfersRef.current.delete(active.portId);
+        if (currentPortIdRef.current === active.portId) setProgress(null);
+        if (payload.totalBytes > 0 && payload.sentBytes >= payload.totalBytes) {
+          notifySuccess('sendSection.file.sent');
+        } else if (active.cancelling) {
+          notifyInfo('sendSection.file.cancelled');
+        }
       } else {
-        setProgress({ sent: payload.sentBytes, total: payload.totalBytes });
+        active.progress = {
+          sent: payload.sentBytes,
+          total: payload.totalBytes,
+          fileName: active.fileName,
+          cancelling: active.cancelling,
+        };
+        if (currentPortIdRef.current === active.portId) setProgress(active.progress);
       }
     };
     const ensureListener = (): Promise<boolean> => {
@@ -108,7 +131,15 @@ export function useFileSend(portId: string | null): FileSendControls {
     ensureListenerRef.current = ensureListener;
     void ensureListener();
     return () => {
+      mountedRef.current = false;
       cancelled = true;
+      pickerGenerationRef.current += 1;
+      for (const transfer of transfersRef.current.values()) {
+        if (transfer.phase === 'sending') {
+          void serialService.cancelFileSend(transfer.portId, transfer.transferId).catch(() => undefined);
+        }
+      }
+      transfersRef.current.clear();
       unlisten?.();
       if (ensureListenerRef.current === ensureListener) ensureListenerRef.current = null;
     };
@@ -116,7 +147,7 @@ export function useFileSend(portId: string | null): FileSendControls {
 
   const startFileSend = useCallback(async () => {
     const id = portId;
-    if (!id || activeRef.current) return;
+    if (!id || transfersRef.current.has(id)) return;
     const port = useAppStore.getState().ports.find((p) => p.id === id);
     if (!isSendablePort(port)) {
       useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.portClosedWarning', portId: id });
@@ -132,22 +163,30 @@ export function useFileSend(portId: string | null): FileSendControls {
     }
     // Reserve ownership BEFORE the dialog: repeated clicks must not create
     // competing dialogs, and a tab change must retire the pending selection.
-    const generation = generationRef.current;
+    const pickerGen = pickerGenerationRef.current;
     const transfer: ActiveTransfer = {
       transferId: newTransferId(),
       portId: id,
+      fileName: '',
       lease: trafficStats.capture(id),
       countedBytes: 0,
-      generation,
+      phase: 'picking',
+      progress: null,
+      cancelling: false,
+      settled: false,
+      pickerGeneration: pickerGen,
       connectionGeneration: port?.connectionGeneration,
     };
-    activeRef.current = transfer;
-    const ownsTransfer = () => generationRef.current === generation && activeRef.current === transfer;
+    transfersRef.current.set(id, transfer);
+    const ownsPicker = () =>
+      mountedRef.current &&
+      pickerGenerationRef.current === pickerGen &&
+      transfersRef.current.get(id) === transfer;
     try {
       const path = await open({ multiple: false });
-      if (!ownsTransfer() || !path || typeof path !== 'string') return;
+      if (!ownsPicker() || !path || typeof path !== 'string') return;
       const ready = await ensureListenerRef.current?.();
-      if (!ownsTransfer()) return;
+      if (!ownsPicker()) return;
       if (!ready) throw new Error('Unable to subscribe to file transfer progress');
       // Both dialog and listener registration are asynchronous. Recheck the
       // fixed session and the flow lock at the actual I/O boundary, not against
@@ -160,7 +199,10 @@ export function useFileSend(portId: string | null): FileSendControls {
         useToastStore.getState().push({ severity: 'warning', messageKey: 'sendSection.flowBusy', portId: id });
         return;
       }
-      setProgress({ sent: 0, total: 0 });
+      transfer.phase = 'sending';
+      transfer.fileName = extractFileName(path);
+      transfer.progress = { sent: 0, total: 0, fileName: transfer.fileName, cancelling: false };
+      if (currentPortIdRef.current === id) setProgress(transfer.progress);
       const sentBytes = await serialService.sendFile({
         portId: id,
         transferId: transfer.transferId,
@@ -172,23 +214,34 @@ export function useFileSend(portId: string | null): FileSendControls {
       // invoke settlement can overtake delivery of the last progress event.
       // Reconcile the confirmed total before retiring the owner (no double count).
       const delta = sentBytes - transfer.countedBytes;
-      if (activeRef.current === transfer && delta > 0) trafficStats.addTx(id, delta, transfer.lease);
+      if (transfersRef.current.get(id) === transfer && delta > 0) trafficStats.addTx(id, delta, transfer.lease);
     } catch (e) {
-      if (generationRef.current === generation) {
-        // A done event may already have cleared activeRef before invoke rejects.
+      if (mountedRef.current && (transfer.phase === 'sending' || pickerGenerationRef.current === pickerGen)) {
+        // A done event may already have cleared the map entry before invoke rejects.
         notifyError(e);
       }
     } finally {
-      if (activeRef.current === transfer) {
-        activeRef.current = null;
-        setProgress(null);
+      if (transfersRef.current.get(id) === transfer) {
+        transfersRef.current.delete(id);
+        if (mountedRef.current && currentPortIdRef.current === id) setProgress(null);
+        if (transfer.cancelling && !transfer.settled) {
+          transfer.settled = true;
+          notifyInfo('sendSection.file.cancelled');
+        }
       }
     }
   }, [portId]);
 
   const cancelFileSend = useCallback(() => {
-    const active = activeRef.current;
-    if (!active) return;
+    const id = currentPortIdRef.current;
+    const active = id ? transfersRef.current.get(id) : undefined;
+    if (!active || active.phase !== 'sending' || active.cancelling) return;
+    active.cancelling = true;
+    active.progress = {
+      ...(active.progress ?? { sent: 0, total: 0, fileName: active.fileName }),
+      cancelling: true,
+    };
+    setProgress(active.progress);
     void serialService.cancelFileSend(active.portId, active.transferId).catch((e) =>
       console.debug('[useFileSend] cancelFileSend failed:', e)
     );

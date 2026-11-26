@@ -249,4 +249,71 @@ describe('confirmed command parameter updates', () => {
     });
     expect(serialService.setSerialParams).not.toHaveBeenCalled();
   });
+
+  it('does not call setFlowControl on tab switch, preserves per-port DTR/RTS, and still applies explicit toggles', async () => {
+    vi.useFakeTimers();
+    useAppStore.setState({
+      ports: [
+        { id: 'COM1', name: 'COM1', status: 'connected', type: 'real', isHidden: false, mode: 'trx', baudRate: 115200, connectionGeneration: 1 },
+        { id: 'COM2', name: 'COM2', status: 'connected', type: 'real', isHidden: false, mode: 'trx', baudRate: 9600, connectionGeneration: 2 },
+      ],
+    });
+    const tab1 = useAppStore.getState().openTab('COM1');
+    const tab2 = useAppStore.getState().openTab('COM2');
+    useAppStore.setState({ activeTabId: tab1 });
+    await renderPanel();
+
+    // Toggling DTR on COM1 dispatches setFlowControl after 300ms debounce.
+    await act(async () => { useOperationStore.getState().setOpState({ dtr: true }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(serialService.setFlowControl).toHaveBeenCalledExactlyOnceWith('COM1', true, false, 1);
+    expect(serialService.setSerialParams).not.toHaveBeenCalled();
+
+    // Switching to COM2 loads COM2's default (false/false) WITHOUT dispatching setFlowControl.
+    vi.mocked(serialService.setFlowControl).mockClear();
+    await act(async () => { useAppStore.setState({ activeTabId: tab2 }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(useOperationStore.getState().dtr).toBe(false);
+    expect(serialService.setFlowControl).not.toHaveBeenCalled();
+
+    // Switching back to COM1 restores COM1's saved DTR=true WITHOUT dispatching setFlowControl.
+    await act(async () => { useAppStore.setState({ activeTabId: tab1 }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(useOperationStore.getState().dtr).toBe(true);
+    expect(serialService.setFlowControl).not.toHaveBeenCalled();
+  });
+
+  it('rolls back optimistic frame params when setSerialParams fails', async () => {
+    await setupParams();
+    vi.mocked(serialService.setSerialParams).mockRejectedValueOnce(new Error('invalid baud'));
+    await act(async () => { useOperationStore.getState().setOpState({ baudRate: 999999 }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(useOperationStore.getState().baudRate).toBe(9600);
+    expect(useAppStore.getState().ports.find(p => p.id === 'COM1')?.baudRate).toBe(9600);
+    // Rollback must not re-trigger another setSerialParams call.
+    vi.mocked(serialService.setSerialParams).mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(serialService.setSerialParams).not.toHaveBeenCalled();
+  });
+
+  it('shows semantic collapse toggle, collapsed plain/background loop badges, and omits baud for virtual ports', async () => {
+    useAppStore.setState({
+      ports: [
+        { id: 'SIM1', name: 'SIM1', status: 'connected', type: 'virtual', isHidden: false, mode: 'trx' },
+        { id: 'COM2', name: 'COM2', status: 'connected', type: 'real', isHidden: false, mode: 'trx' },
+      ],
+    });
+    useAppStore.setState({ activeTabId: useAppStore.getState().openTab('SIM1') });
+    useSystemStore.getState().setUIState({ isOperationPanelCollapsed: true });
+    useOperationStore.getState().setCyclicLoop('SIM1', true);
+    useOperationStore.getState().setCyclicLoop('COM2', true);
+    await renderPanel();
+
+    const toggle = container.querySelector<HTMLButtonElement>('.operation-panel-header-toggle')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.title).toBe('operationPanel.expand');
+    expect(container.querySelector('.operation-panel-port-dot.is-connected')).not.toBeNull();
+    expect(container.querySelector('.operation-panel-port-meta')).toBeNull();
+    expect(container.querySelectorAll('.op-flow-badge')).toHaveLength(2);
+  });
 });

@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../../stores/useAppStore';
 import { resetStoresForTests } from '../../stores/resetStores';
-import { clearTerminal, releaseViewportManager } from '../../utils/terminal/viewportManager';
+import { clearTerminal, getViewportManager, hasViewportManager, releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
 import ParamsSection from './ParamsSection';
@@ -14,7 +14,12 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 vi.mock('../../services/tauri', () => ({ storageService: { loadPortPresets: vi.fn(async () => []) } }));
-vi.mock('../../utils/terminal/viewportManager', () => ({ clearTerminal: vi.fn(), releaseViewportManager: vi.fn() }));
+vi.mock('../../utils/terminal/viewportManager', () => ({
+  clearTerminal: vi.fn(),
+  releaseViewportManager: vi.fn(),
+  hasViewportManager: vi.fn(() => false),
+  getViewportManager: vi.fn(() => ({ buffer: { length: 0 } })),
+}));
 vi.mock('../../utils/rxPipeline', () => {
   const pipeline = { flushAndReset: vi.fn() };
   return { getRxPipeline: () => pipeline };
@@ -127,5 +132,26 @@ describe('ParamsSection mode selection', () => {
     act(() => radios()[1].click());
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expectNoClear();
+  });
+
+  it('skips confirmation when disconnected with zero buffered lines, but confirms when buffered lines exist', () => {
+    act(() => { useAppStore.getState().updatePort('COM1', { status: 'disconnected' }); });
+    vi.mocked(hasViewportManager).mockReturnValue(false);
+    act(() => radios()[1].click());
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(mode('COM1')).toBe('tty');
+
+    vi.mocked(hasViewportManager).mockReturnValue(true);
+    vi.mocked(getViewportManager).mockReturnValue({ buffer: { length: 5 } } as ReturnType<typeof getViewportManager>);
+    act(() => radios()[0].click());
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(mode('COM1')).toBe('tty');
+  });
+
+  it('disables preset controls and renders a hint for virtual ports', () => {
+    act(() => { useAppStore.getState().updatePort('COM1', { type: 'virtual' }); });
+    expect(container.querySelector('.op-params-virtual-hint')).not.toBeNull();
+    const presetSelect = container.querySelector<HTMLSelectElement>('.op-param-item-wide select');
+    expect(presetSelect?.disabled).toBe(true);
   });
 });

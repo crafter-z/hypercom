@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useOperationStore } from '../../stores/useOperationStore';
-import { clearTerminal, releaseViewportManager } from '../../utils/terminal/viewportManager';
+import { clearTerminal, getViewportManager, hasViewportManager, releaseViewportManager } from '../../utils/terminal/viewportManager';
 import { useTranslation } from 'react-i18next';
 import type { DataBits, Parity, StopBits, Handshake, PortPreset, PortMode } from '../../types';
 import { storageService } from '../../services/tauri';
-import { notifySuccess, notifyError } from '../../stores/useToastStore';
+import { notifySuccess, notifyError, notifyInfo } from '../../stores/useToastStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
 import ConfirmDialog from '../shared/ConfirmDialog';
@@ -85,6 +85,24 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     loadPresets();
   }, [loadPresets]);
 
+  // Clear preset selection when live params diverge from the selected preset.
+  useEffect(() => {
+    if (!selectedPresetId) return;
+    const preset = presets.find((p) => p.id === selectedPresetId);
+    if (
+      !preset ||
+      preset.baudRate !== baudRate ||
+      preset.dataBits !== dataBits ||
+      preset.parity !== parity ||
+      preset.stopBits !== stopBits ||
+      preset.handshake !== handshake ||
+      preset.dtr !== dtr ||
+      preset.rts !== rts
+    ) {
+      setSelectedPresetId('');
+    }
+  }, [selectedPresetId, presets, baudRate, dataBits, parity, stopBits, handshake, dtr, rts]);
+
   const handleSelectPreset = (id: string) => {
     setSelectedPresetId(id);
     const preset = presets.find(p => p.id === id);
@@ -112,8 +130,24 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
   const handleSavePreset = useCallback(async () => {
     try {
       const op = useOperationStore.getState();
+      const duplicate = presets.find(
+        (p) =>
+          p.baudRate === op.baudRate &&
+          p.dataBits === op.dataBits &&
+          p.parity === op.parity &&
+          p.stopBits === op.stopBits &&
+          p.handshake === op.handshake &&
+          p.dtr === op.dtr &&
+          p.rts === op.rts
+      );
+      if (duplicate) {
+        setSelectedPresetId(duplicate.id);
+        notifyInfo('paramsSection.preset.alreadyExists');
+        return;
+      }
+      const id = `preset-${Date.now()}`;
       await storageService.savePortPreset({
-        id: `preset-${Date.now()}`,
+        id,
         name: autoPresetName(),
         baudRate: op.baudRate,
         dataBits: op.dataBits,
@@ -124,11 +158,12 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
         rts: op.rts,
       });
       await loadPresets();
+      setSelectedPresetId(id);
       notifySuccess('paramsSection.preset.saved');
     } catch (e) {
       notifyError(e);
     }
-  }, [autoPresetName, loadPresets]);
+  }, [autoPresetName, loadPresets, presets]);
 
   const handleDeletePreset = useCallback(async () => {
     if (!selectedPresetId) return;
@@ -162,19 +197,46 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     ttyService.clear(portId);
   }, [setPortMode]);
 
-  // Switching mode destroys the current display buffer; confirm first.
+  // Switching mode destroys the current display buffer; confirm unless the port
+  // is disconnected and has no buffered terminal lines to lose.
   const handleModeChange = useCallback((mode: PortMode) => {
-    const portId = getActivePortId(useAppStore.getState());
+    const state = useAppStore.getState();
+    const portId = getActivePortId(state);
     if (!portId || mode === portMode) return;
+    const port = state.ports.find((p) => p.id === portId);
+    if (port && port.status !== 'connected') {
+      const hasBufferedLines =
+        hasViewportManager(portId) && getViewportManager(portId).buffer.length > 0;
+      if (!hasBufferedLines) {
+        applyModeChange({ portId, mode });
+        return;
+      }
+    }
     setPendingMode({ portId, mode });
-  }, [portMode]);
+  }, [portMode, applyModeChange]);
+
+  const commitCustomBaud = useCallback(() => {
+    const parsed = Number(customBaudInput);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 4000000) {
+      setOpState({ baudRate: Math.round(parsed) });
+    } else {
+      setCustomBaudInput(String(baudRate));
+    }
+  }, [customBaudInput, baudRate, setOpState]);
+
+  const revertCustomBaud = useCallback(() => {
+    setCustomBaudInput(String(baudRate));
+    if (defaultBaudRates.includes(baudRate)) {
+      setIsCustomBaud(false);
+    }
+  }, [baudRate, defaultBaudRates]);
 
   return (
     <div className="op-section op-section-params">
       <div className="panel-card-title eyebrow">{t('paramsSection.cardTitle')}</div>
 
       <div className="op-params-grid">
-        <div className="op-param-item">
+        <div className="op-param-item op-param-item-wide">
           <span className="op-label">{t('params.mode')}</span>
           <SegmentedControl<PortMode>
             aria-label={t('params.mode')}
@@ -189,21 +251,26 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
         </div>
         <div className="op-param-item op-param-item-wide">
           <span className="op-label">{t('paramsSection.preset.label')}</span>
-          <select className="select op-param-select" value={selectedPresetId}
+          <select className="select op-param-select" disabled={!canConfigureSerial} value={selectedPresetId}
             onChange={e => handleSelectPreset(e.target.value)}>
             <option value="">{t('paramsSection.preset.selectPlaceholder')}</option>
             {presets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-          <button className="icon-btn" title={t('paramsSection.preset.save')} onClick={handleSavePreset}>
+          <button type="button" className="icon-btn" disabled={!canConfigureSerial} title={t('paramsSection.preset.save')} aria-label={t('paramsSection.preset.save')} onClick={handleSavePreset}>
             <Save size={14} />
           </button>
           {selectedPresetId && (
-            <button className="icon-btn" title={t('paramsSection.preset.delete')} onClick={handleDeletePreset}>
+            <button type="button" className="icon-btn" disabled={!canConfigureSerial} title={t('paramsSection.preset.delete')} aria-label={t('paramsSection.preset.delete')} onClick={handleDeletePreset}>
               <Trash2 size={14} />
             </button>
           )}
         </div>
-        <div className="op-param-item">
+        {isPortActive && !activePortIsReal && (
+          <div className="op-params-virtual-hint">
+            {t('paramsSection.virtualPortHint')}
+          </div>
+        )}
+        <div className={`op-param-item${isCustomBaud ? ' op-param-item-wide' : ''}`}>
           <span className="op-label">{t('paramsSection.baudRateLabel')}</span>
           <select className="select op-param-select" disabled={!canConfigureSerial} value={isCustomBaud ? '__custom__' : baudRate}
             onChange={e => {
@@ -215,18 +282,33 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
             <option value="__custom__">{t('paramsSection.baudRate.custom')}</option>
           </select>
           {isCustomBaud && (
-            <input className="input op-baud-custom-input" type="number" disabled={!canConfigureSerial}
-              value={customBaudInput}
-              onChange={e => setCustomBaudInput(e.target.value)}
-              onBlur={() => {
-                const parsed = Number(customBaudInput);
-                if (Number.isFinite(parsed) && parsed > 0 && parsed <= 4000000) {
-                  setOpState({ baudRate: parsed });
-                } else {
-                  setCustomBaudInput(String(baudRate));
-                }
-              }}
-              min={1} max={4000000} />
+            <>
+              <input
+                className="input op-baud-custom-input"
+                type="number"
+                autoFocus
+                disabled={!canConfigureSerial}
+                placeholder={t('paramsSection.baudRate.rangeHint')}
+                title={t('paramsSection.baudRate.rangeHint')}
+                value={customBaudInput}
+                onChange={e => setCustomBaudInput(e.target.value)}
+                onBlur={commitCustomBaud}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitCustomBaud();
+                    e.currentTarget.blur();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    revertCustomBaud();
+                    e.currentTarget.blur();
+                  }
+                }}
+                min={1}
+                max={4000000}
+              />
+              <span className="op-baud-range-hint">{t('paramsSection.baudRate.rangeHint')}</span>
+            </>
           )}
         </div>
         <div className="op-param-item">

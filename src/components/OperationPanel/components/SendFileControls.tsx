@@ -9,6 +9,12 @@ import { FileUp, Square } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { FileSendProgress } from '../hooks/useFileSend';
 
+export function formatFileBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 export interface SendFileButtonProps {
   progress: FileSendProgress | null;
   isConnected: boolean;
@@ -20,14 +26,24 @@ export function SendFileButton({ progress, isConnected, onStart, onCancel }: Sen
   const { t } = useTranslation();
 
   if (progress !== null) {
+    const label = progress.cancelling
+      ? t('sendSection.file.cancelling')
+      : t('sendSection.file.cancel');
     return (
-      <button className="btn btn-sm btn-danger" title={t('sendSection.file.cancel')} onClick={onCancel}>
-        <Square size={13} /> {t('sendSection.file.cancel')}
+      <button
+        type="button"
+        className="btn btn-sm btn-danger"
+        title={label}
+        disabled={!!progress.cancelling}
+        onClick={onCancel}
+      >
+        <Square size={13} /> {label}
       </button>
     );
   }
   return (
     <button
+      type="button"
       className="btn btn-sm"
       title={t('sendSection.file.button')}
       onClick={onStart}
@@ -39,15 +55,38 @@ export function SendFileButton({ progress, isConnected, onStart, onCancel }: Sen
 }
 
 export function FileSendProgress({ progress }: { progress: FileSendProgress }) {
-  const percent =
-    progress.total > 0 ? Math.round((progress.sent / progress.total) * 100) : 0;
+  const { t } = useTranslation();
+  const isIndeterminate = progress.total <= 0;
+  const percent = isIndeterminate
+    ? 0
+    : Math.min(100, Math.round((progress.sent / progress.total) * 100));
+
   return (
     <div className="op-file-progress">
-      <div className="op-file-progress-track">
-        <div className="op-file-progress-fill" style={{ width: `${percent}%` }} />
+      {progress.fileName && (
+        <span className="op-file-progress-name" title={progress.fileName}>
+          {progress.fileName}
+        </span>
+      )}
+      <div
+        className="op-file-progress-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={isIndeterminate ? undefined : percent}
+        aria-label={progress.fileName || t('sendSection.file.button')}
+      >
+        <div
+          className={`op-file-progress-fill${isIndeterminate ? ' is-indeterminate' : ''}`}
+          style={isIndeterminate ? undefined : { width: `${percent}%` }}
+        />
       </div>
       <span className="op-file-progress-label">
-        {progress.sent} / {progress.total} B
+        {progress.cancelling
+          ? t('sendSection.file.cancelling')
+          : isIndeterminate
+            ? formatFileBytes(progress.sent)
+            : `${percent}% · ${formatFileBytes(progress.sent)} / ${formatFileBytes(progress.total)}`}
       </span>
     </div>
   );

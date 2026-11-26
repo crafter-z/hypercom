@@ -13,23 +13,29 @@ export function LineEndingSelect() {
   const lineEnding = useOperationStore((s) => s.sendAppendLineEnding);
   const isHex = useOperationStore((s) => s.sendIsHex);
   const setOpState = useOperationStore((s) => s.setOpState);
+  const tooltip = isHex
+    ? t('sendSection.lineEnding.disabledInHex')
+    : t('sendSection.lineEnding.tooltip');
 
   return (
-    <select
-      className="select op-line-ending-select"
-      aria-label={t('quickSend.lineEnding')}
-      value={lineEnding}
-      // HEX sends never append line endings; retain the text-mode choice.
-      disabled={isHex}
-      onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-        setOpState({ sendAppendLineEnding: e.target.value as LineEnding })
-      }
-    >
-      {LINE_ENDING_VALUES.map((v) => (
-        <option key={v} value={v}>
-          {t(lineEndingLabelKey(v))}
-        </option>
-      ))}
-    </select>
+    <span className="op-line-ending-wrap" title={tooltip}>
+      <select
+        className="select op-line-ending-select"
+        aria-label={t('quickSend.lineEnding')}
+        title={tooltip}
+        value={lineEnding}
+        // HEX sends never append line endings; retain the text-mode choice.
+        disabled={isHex}
+        onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+          setOpState({ sendAppendLineEnding: e.target.value as LineEnding })
+        }
+      >
+        {LINE_ENDING_VALUES.map((v) => (
+          <option key={v} value={v}>
+            {t(lineEndingLabelKey(v))}
+          </option>
+        ))}
+      </select>
+    </span>
   );
 }

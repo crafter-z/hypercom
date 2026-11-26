@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import i18n from '../../../i18n';
 import { useAppStore } from '../../../stores/useAppStore';
 import { useOperationStore } from '../../../stores/useOperationStore';
 import { useRuleStore } from '../../../stores/useRuleStore';
@@ -22,6 +23,7 @@ import {
   setFlowStatus,
   type FlowPhase,
 } from '../../../utils/flowRuntime';
+import { clearCyclicStatus, setCyclicStatus } from './cyclicRuntime';
 
 /** 目标端口暂不可用（未连接）时的重试间隔——循环不终止，等端口恢复。 */
 const TARGET_WAIT_MS = 500;
@@ -68,6 +70,20 @@ function setStatus(portId: string, state: PortLoopState, phase: FlowPhase, detai
   });
 }
 
+function publishPlainStatus(portId: string, state: PortLoopState, waitingReconnect = false): void {
+  if (state.enhanced) return;
+  setCyclicStatus({
+    portId,
+    runId: state.runId,
+    name: state.commandSet.name,
+    round: state.completedRounds + 1,
+    totalRounds: state.commandSet.repeatCount > 0 ? state.commandSet.repeatCount : undefined,
+    step: state.currentCmdIdx + 1,
+    totalSteps: state.commandSet.commands.length,
+    waitingReconnect,
+  });
+}
+
 function currentPort(portId: string) {
   return useAppStore.getState().ports.find((port) => port.id === portId);
 }
@@ -82,7 +98,14 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
 
   const runStep = useCallback(async (portId: string, state: PortLoopState, context: SendLoopStepContext): Promise<number | null> => {
     const port = currentPort(portId);
-    if (!port || port.status !== 'connected') return TARGET_WAIT_MS;
+    if (!port || port.status !== 'connected') {
+      if (state.enhanced) {
+        setStatus(portId, state, 'waiting', i18n.t('flow.detail.waitingReconnect'));
+      } else {
+        publishPlainStatus(portId, state, true);
+      }
+      return TARGET_WAIT_MS;
+    }
 
     const currentSet = state.commandSet;
     const cmd = currentSet.commands[state.currentCmdIdx];
@@ -90,11 +113,15 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     if (kind === 'unknown') throw new Error('Unknown flow command step');
 
     if (kind === 'setParams') {
-      setStatus(portId, state, 'applyingParams', `baud ${cmd.baudRate}`);
+      setStatus(portId, state, 'applyingParams', i18n.t('flow.detail.baud', { baud: cmd.baudRate }));
       await applyCommandParams(portId, cmd, context.isCurrent);
       if (!context.isCurrent()) return null;
     } else {
-      setStatus(portId, state, 'running');
+      if (state.enhanced) {
+        setStatus(portId, state, 'running');
+      } else {
+        publishPlainStatus(portId, state, false);
+      }
       // Legacy guard refusals retry the current step. An accepted empty payload
       // is still a legitimate no-op and must retain its old advancement semantics.
       const bytesWritten = state.enhanced
@@ -122,7 +149,8 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     state.completedRounds = schedule.completedRounds;
     if (schedule.kind === 'finish') {
       state.terminalPhase = 'completed';
-      setStatus(portId, state, 'completed', 'done');
+      setStatus(portId, state, 'completed', i18n.t('flow.detail.done'));
+      clearCyclicStatus(portId, state.runId);
       useOperationStore.getState().setCyclicLoop(portId, false);
       return null;
     }
@@ -130,6 +158,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
     // 「之后等待」由调度器的计时器承担：把它显示出来，用户看到的是
     // 「等待 200 ms」而不是一个没有任何反馈的黑盒；停止会直接清掉这个计时器。
     if (schedule.delayMs > 0) setStatus(portId, state, 'waiting', `${schedule.delayMs} ms`);
+    if (!state.enhanced) publishPlainStatus(portId, state, false);
     return schedule.delayMs;
   }, []);
 
@@ -146,7 +175,8 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
       state.inFlight = false;
       if (state.stopRequested && !state.terminalPhase) {
         state.terminalPhase = 'stopped';
-        setStatus(portId, state, 'stopped', 'stopped by user');
+        setStatus(portId, state, 'stopped', i18n.t('flow.detail.stoppedByUser'));
+        clearCyclicStatus(portId, state.runId);
       }
     }
   }, [runStep]);
@@ -157,11 +187,12 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
       state.stopRequested = true;
       if (state.inFlight) {
         // 在途操作（发送 / 参数应用）有界收尾，期间保持独占。
-        setStatus(portId, state, 'stopping', 'stopping');
+        setStatus(portId, state, 'stopping', i18n.t('flow.detail.stopping'));
       } else {
         // 步骤之间的「之后等待」是调度器的计时器，`stop()` 会直接清掉它。
         state.terminalPhase = 'stopped';
-        setStatus(portId, state, 'stopped', 'stopped by user');
+        setStatus(portId, state, 'stopped', i18n.t('flow.detail.stoppedByUser'));
+        clearCyclicStatus(portId, state.runId);
       }
     }
     loopsRef.current.get(portId)?.stop();
@@ -200,7 +231,12 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
       stopRequested: false,
     };
     statesRef.current.set(portId, state);
-    setStatus(portId, state, state.enhanced ? 'starting' : 'running');
+    if (state.enhanced) {
+      setStatus(portId, state, 'starting');
+    } else {
+      const port = currentPort(portId);
+      publishPlainStatus(portId, state, !port || port.status !== 'connected');
+    }
     const loop = createSendLoop({
       step: (context) => step(portId, state, context),
       onStepError: (err) => {
@@ -221,6 +257,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
       onStop: () => {
         loopsRef.current.delete(portId);
         statesRef.current.delete(portId);
+        clearCyclicStatus(portId, state.runId);
         // Keep terminal status visible to the UI. A newer run may already own
         // the port, so do not overwrite its status. While a step is still in
         // flight the wrapper's `finally` publishes the terminal phase instead —
@@ -228,7 +265,7 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
         const status = getFlowStatus(portId);
         if (status?.runId === state.runId && !state.terminalPhase && !state.inFlight) {
           state.terminalPhase = 'stopped';
-          setStatus(portId, state, 'stopped', 'stopped');
+          setStatus(portId, state, 'stopped', i18n.t('flow.detail.stopped'));
         }
       },
     });
@@ -269,7 +306,8 @@ export function useCyclicSend(options: UseCyclicSendOptions): void {
         const state = statesRef.current.get(portId);
         if (state && !state.terminalPhase) {
           state.terminalPhase = 'stopped';
-          setStatus(portId, state, 'stopped', 'owner unmounted');
+          setStatus(portId, state, 'stopped', i18n.t('flow.detail.unmounted'));
+          clearCyclicStatus(portId, state.runId);
         }
         loop.stop();
       }

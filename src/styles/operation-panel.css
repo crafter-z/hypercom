@@ -50,11 +50,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-tertiary);
   box-shadow: var(--edge-top);
-  cursor: pointer;
   user-select: none;
   flex-shrink: 0;
 }
@@ -64,6 +64,50 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+}
+
+.operation-panel-header-toggle {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.operation-panel-header-toggle:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.operation-panel-header-badges {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.operation-panel-port-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  opacity: 0.7;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.operation-panel-port-dot.is-connected {
+  background: var(--text-success);
+  opacity: 1;
+}
+
+.operation-panel-port-dot.is-error {
+  background: var(--text-error);
+  opacity: 1;
 }
 
 /* One chevron, rotated by state — down when expanded, up when collapsed. */
@@ -240,9 +284,16 @@
   white-space: nowrap;
 }
 
-.op-flow-status-dismiss {
+.op-flow-status-dismiss,
+.op-flow-status-stop {
   margin-left: auto;
   flex-shrink: 0;
+}
+
+.op-flow-status-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 @keyframes op-flow-pulse {
@@ -541,7 +592,18 @@
   margin-top: 6px;
 }
 
+.op-file-progress-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
 .op-file-progress-track {
+  position: relative;
   flex: 1;
   height: 6px;
   border-radius: var(--radius-sm);
@@ -553,6 +615,16 @@
   height: 100%;
   background: var(--text-link);
   transition: width 0.1s linear;
+}
+
+.op-file-progress-fill.is-indeterminate {
+  width: 35%;
+  animation: op-file-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes op-file-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
 }
 
 .op-file-progress-label {
@@ -604,8 +676,21 @@
 }
 
 .op-baud-custom-input {
-  width: 80px;
+  width: 84px;
   margin-left: var(--space-1);
+}
+
+.op-baud-range-hint {
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.op-params-virtual-hint {
+  grid-column: 1 / -1;
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  opacity: 0.85;
 }
 
 /* ==================== View/Log Strip ==================== */
@@ -746,6 +831,7 @@
 }
 
 .op-send-input-wrap {
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
@@ -758,6 +844,46 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 52px;
+}
+
+.op-send-input-wrap .op-send-input.has-clear {
+  padding-right: 26px;
+}
+
+.op-send-clear-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  opacity: 0.6;
+}
+
+.op-send-clear-btn:hover {
+  opacity: 1;
+}
+
+.op-send-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 20px;
+  min-width: 0;
+}
+
+.op-send-shortcut-hint {
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+
+.op-line-ending-wrap {
+  display: inline-flex;
 }
 
 .op-send-options {
@@ -838,7 +964,8 @@
 @media (prefers-reduced-motion: reduce) {
   .op-loop-toggle.is-running,
   .op-flow-status-dot,
-  .op-flow-badge-dot {
+  .op-flow-badge-dot,
+  .op-file-progress-fill.is-indeterminate {
     animation: none;
   }
 }

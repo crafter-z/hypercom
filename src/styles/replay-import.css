@@ -22,6 +22,11 @@
   overflow: hidden;
 }
 
+.modal-dialog.replay-import-dialog.replay-import-single {
+  width: min(520px, 95vw);
+  max-width: min(520px, 95vw);
+}
+
 .replay-import-header {
   flex-shrink: 0;
   padding: 18px 22px 10px;
@@ -133,8 +138,9 @@
   font-size: 12px;
 }
 
-.replay-import-offset .input {
-  width: 96px;
+.replay-import-offset .input,
+.replay-import-offset .replay-import-tz-select {
+  width: 170px;
   flex-shrink: 0;
 }
 

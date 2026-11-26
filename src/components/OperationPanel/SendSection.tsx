@@ -4,12 +4,13 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { useRuleStore } from '../../stores/useRuleStore';
-import { Send, Edit3, Play, Square } from 'lucide-react';
+import { Send, Edit3, Play, Square, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { SendCommand, SendHistoryEntry } from '../../types';
 import { useHexCompose } from './hooks/useHexCompose';
 import { useFileSend } from './hooks/useFileSend';
 import { useSendHistoryRecall } from './hooks/useSendHistoryRecall';
+import { useCyclicStatus } from './hooks/cyclicRuntime';
 import { QuickSendStrip } from './components/QuickSendStrip';
 import { LineEndingSelect } from './components/LineEndingSelect';
 import { FileSendProgress, SendFileButton } from './components/SendFileControls';
@@ -70,9 +71,11 @@ const SendSection: React.FC<SendSectionProps> = ({
   // 都要置灰并拦截——统一入口 sendToPort 仍会兜底拒绝，界面不能给出假可用状态。
   const flowStatus = useFlowStatus(activePortId);
   const flowBusy = isFlowRunning(activePortId);
+  // 普通（非增强）循环发送的非独占运行态：只做可见性与停止入口，不锁手动发送。
+  const cyclicStatus = useCyclicStatus(activePortId);
 
   // HEX 预览/转换 + 字节计数（含非法输入的错误态）与发送历史召回各自成模块。
-  const { byteCount, inputErrorKey, toEditableValue, toggleHexMode } = useHexCompose({
+  const { byteCount, inputErrorKey, toEditableValue, formatPasteValue, toggleHexMode } = useHexCompose({
     sendInput,
     isHex: sendIsHex,
     encoding: encoding ?? 'ASCII',
@@ -188,9 +191,8 @@ const SendSection: React.FC<SendSectionProps> = ({
       {/* 次要内容容器：流程状态条 + 快捷发送条。面板被拖矮时这一块自己滚动/
           收缩，下面的发送行（主操作列）固定保留可见，绝不被挤出面板。 */}
       <div className="op-send-secondary">
-        {/* 增强流程状态条：显示当前阶段、轮次/步骤进度与终止原因；终止态保留到
-            用户清除，避免「流程为什么停了」无从查起。运行中不提供暂停，只有停止
-            （标题行的循环开关即该端口的停止入口）。 */}
+        {/* 增强流程状态条：显示当前阶段、轮次/步骤进度与终止原因；运行中提供内联停止入口，
+            终止态保留到用户清除，避免「流程为什么停了」无从查起。 */}
         {flowStatus && (
           <div className={`op-flow-status is-${flowStatus.phase}`} role="status">
             <span className="op-flow-status-dot" aria-hidden="true" />
@@ -208,7 +210,16 @@ const SendSection: React.FC<SendSectionProps> = ({
                 })}
               </span>
             )}
-            {!flowBusy && (
+            {flowBusy ? (
+              <button
+                type="button"
+                className="btn btn-sm op-flow-status-stop"
+                onClick={() => setCyclicLoop(flowStatus.portId, false)}
+              >
+                <Square size={11} />
+                {t('operationPanel.flowStop')}
+              </button>
+            ) : (
               <button
                 type="button"
                 className="btn btn-sm op-flow-status-dismiss"
@@ -217,6 +228,37 @@ const SendSection: React.FC<SendSectionProps> = ({
                 {t('flow.status.dismiss')}
               </button>
             )}
+          </div>
+        )}
+
+        {/* 普通循环发送的非独占状态条：不阻塞手动发送，同时提供进度、重连等待与停止入口。 */}
+        {!flowStatus && isLoopSending && activePortId && (
+          <div className="op-flow-status is-running is-cyclic" role="status">
+            <span className="op-flow-status-dot" aria-hidden="true" />
+            <span className="op-flow-status-text">
+              {cyclicStatus?.waitingReconnect
+                ? t('flow.status.waitingReconnect')
+                : t('rulesSection.loopRunning')}
+            </span>
+            {cyclicStatus && (
+              <span className="op-flow-status-progress">
+                {t(cyclicStatus.totalRounds ? 'flow.status.progress' : 'flow.status.progressOpen', {
+                  name: cyclicStatus.name,
+                  round: cyclicStatus.round,
+                  total: cyclicStatus.totalRounds ?? 0,
+                  step: cyclicStatus.step,
+                  totalSteps: cyclicStatus.totalSteps,
+                })}
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn btn-sm op-flow-status-stop"
+              onClick={() => setCyclicLoop(activePortId, false)}
+            >
+              <Square size={11} />
+              {t('rulesSection.stopLoop')}
+            </button>
           </div>
         )}
 
@@ -234,7 +276,7 @@ const SendSection: React.FC<SendSectionProps> = ({
           <div className="op-send-input-wrap">
             <textarea
               ref={textareaRef}
-              className={`input op-send-input${inputErrorKey !== null ? ' is-error' : ''}`}
+              className={`input op-send-input${inputErrorKey !== null ? ' is-error' : ''}${isPortActive && sendInput.length > 0 ? ' has-clear' : ''}`}
               placeholder={
                 !isPortActive
                   ? t('sendSection.input.placeholder.noPort')
@@ -246,44 +288,92 @@ const SendSection: React.FC<SendSectionProps> = ({
               aria-invalid={inputErrorKey !== null}
               value={sendInput}
               onChange={(e) => setOpState({ sendInput: toEditableValue(e.target.value) })}
+              onPaste={(e) => {
+                const pasted = e.clipboardData?.getData('text');
+                if (!pasted) return;
+                const formatted = formatPasteValue(pasted);
+                if (formatted === null) return;
+                e.preventDefault();
+                const el = e.currentTarget;
+                const start = el.selectionStart ?? sendInput.length;
+                const end = el.selectionEnd ?? sendInput.length;
+                const next = sendInput.slice(0, start) + formatted + sendInput.slice(end);
+                setOpState({ sendInput: next });
+                const caret = start + formatted.length;
+                window.setTimeout(() => {
+                  el.focus();
+                  el.setSelectionRange(caret, caret);
+                }, 0);
+              }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                    insertNewlineAtCursor(); // Ctrl/Meta/Shift+Enter: ALWAYS newline
-                  } else if (sendOnEnter) {
-                    handleSend(); // plain Enter: sends only when setting on
-                  } else {
-                    insertNewlineAtCursor();
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === 'Enter') {
+                  const isModEnter = e.ctrlKey || e.metaKey;
+                  if (sendOnEnter) {
+                    if (!isModEnter && !e.shiftKey) {
+                      e.preventDefault();
+                      void handleSend();
+                    } else if (isModEnter) {
+                      e.preventDefault();
+                      insertNewlineAtCursor();
+                    }
+                    // Shift+Enter lets the browser insert a newline natively so Ctrl+Z undo works.
+                  } else if (isModEnter) {
+                    e.preventDefault();
+                    void handleSend();
                   }
-                } else if (e.key === 'ArrowUp' && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  recallUp();
-                } else if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  recallDown();
+                  // Plain Enter and Shift+Enter when !sendOnEnter insert newlines natively.
+                } else if (e.key === 'ArrowUp') {
+                  const el = e.currentTarget;
+                  const start = el.selectionStart ?? 0;
+                  if (!el.value.slice(0, start).includes('\n')) {
+                    e.preventDefault();
+                    recallUp();
+                  }
+                } else if (e.key === 'ArrowDown') {
+                  const el = e.currentTarget;
+                  const end = el.selectionEnd ?? el.value.length;
+                  if (!el.value.slice(end).includes('\n')) {
+                    e.preventDefault();
+                    recallDown();
+                  }
                 }
               }}
             />
-            {/* 字节计数：非法 HEX 时（后端必然拒绝）显示原因而不是 "N B"（C4/K7）。 */}
+            {isPortActive && sendInput.length > 0 && (
+              <button
+                type="button"
+                className="icon-btn op-send-clear-btn"
+                title={t('sendSection.clearInput')}
+                aria-label={t('sendSection.clearInput')}
+                onClick={() => {
+                  setOpState({ sendInput: '' });
+                  textareaRef.current?.focus();
+                }}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+          {/* 底部紧凑状态条：字节数/HEX错误与快捷键提示位于输入框下方，输入奇数半字节不会挤压输入框宽度。 */}
+          <div className="op-send-footer">
             <div
               className={`chip op-send-byte-chip${inputErrorKey !== null ? ' is-error' : ''}`}
               title={inputErrorKey !== null ? t(inputErrorKey) : byteCount.tooltip}
             >
-              {inputErrorKey !== null ? (
-                t(inputErrorKey)
-              ) : (
-                <>
-                  {byteCount.count} {t('op.send.bytesLabel')}
-                </>
-              )}
+              {inputErrorKey !== null ? t(inputErrorKey) : byteCount.label}
             </div>
+            <span className="op-send-shortcut-hint">
+              {sendOnEnter ? t('sendSection.shortcutHint.enter') : t('sendSection.shortcutHint.ctrlEnter')}
+            </span>
           </div>
         </div>
         <div className="op-send-actions">
           <button
+            type="button"
             className="btn btn-primary op-send-btn"
             disabled={!isPortActive || inputErrorKey !== null || flowBusy}
+            title={sendOnEnter ? t('sendSection.sendButtonTitleEnter') : t('sendSection.sendButtonTitleCtrlEnter')}
             onClick={handleSend}
           >
             <Send size={14} />

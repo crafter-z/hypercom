@@ -1,8 +1,8 @@
 /**
- * 发送历史召回（输入框 ↑/↓）：把历史条目回填到操作面板的发送态。
+ * 发送历史召回（输入框 ↑/↓）：把历史条目（或离开历史时恢复的暂存草稿）回填到操作面板的发送态。
  *
- * 历史本身由 `useSerialSend` 持有（每端口内存 Map，cap 50）；这里只管「按方向
- * 取一条并回填」这一件事——包括「取不到（已到最新）时清空输入框」的既有语义。
+ * 历史本身与暂存草稿由 `useSerialSend` 持有（每端口内存 Map，cap 50）；
+ * 当 `historyUp`/`historyDown` 返回 `null`（空历史或已在实时草稿处按 ↓）时保持原输入不动。
  */
 import { useCallback } from 'react';
 import { useOperationStore } from '../../../stores/useOperationStore';
@@ -18,16 +18,12 @@ export function useSendHistoryRecall(
   historyDown: () => SendHistoryEntry | null
 ): SendHistoryRecall {
   const apply = useCallback((item: SendHistoryEntry | null) => {
-    const setOpState = useOperationStore.getState().setOpState;
-    if (item) {
-      setOpState({
-        sendInput: item.content,
-        sendIsHex: item.format === 'hex',
-        sendAppendLineEnding: item.lineEnding,
-      });
-    } else {
-      setOpState({ sendInput: '' });
-    }
+    if (!item) return;
+    useOperationStore.getState().setOpState({
+      sendInput: item.content,
+      sendIsHex: item.format === 'hex',
+      sendAppendLineEnding: item.lineEnding,
+    });
   }, []);
 
   return {

@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
-import { useOperationStore } from '../../stores/useOperationStore';
+import { useOperationStore, type ControlLines } from '../../stores/useOperationStore';
 import { clearTerminal } from '../../utils/terminal/viewportManager';
 import { useSerialSend, useSerialConnection } from '../../hooks';
 import { serialService, logService } from '../../services/tauri';
@@ -14,43 +14,89 @@ import SendSection from './SendSection';
 import ParamsSection from './ParamsSection';
 import { useLogReplay } from '../MainDisplay/hooks/useLogReplay';
 import { useCyclicSend } from './hooks/useCyclicSend';
+import { useCyclicStatus } from './hooks/cyclicRuntime';
 import { getPluginViewState, isRawSerialDisplay, subscribePluginViewState } from '../../utils/pluginViewRuntime';
 import { isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
+import type { DataBits, Handshake, Parity, StopBits } from '../../types';
+
+interface FrameParams {
+  baudRate: number;
+  dataBits: DataBits;
+  parity: Parity;
+  stopBits: StopBits;
+  handshake: Handshake;
+}
+
+function makeFrameKey(frame: FrameParams): string {
+  return `${frame.baudRate}-${frame.dataBits}-${frame.parity}-${frame.stopBits}-${frame.handshake}`;
+}
+
+function makeControlKey(control: ControlLines): string {
+  return `${control.dtr}-${control.rts}`;
+}
 
 export interface FlowRunningBadgeProps {
   /** 流程当前步骤（1-based）与总步数；缺失时只显示徽标文案。 */
   step?: number;
   totalSteps?: number;
+  /** 可选自定义徽标文案（缺省为增强流程文案）。 */
+  label?: string;
+  /** 可选停止按钮提示/无障碍标签（缺省为停止流程）。 */
+  stopLabel?: string;
   onStop: () => void;
 }
 
 /**
- * 折叠态流程徽标：操作面板收起后，运行中的增强流程在主窗里唯一的可见入口
+ * 折叠态流程徽标：操作面板收起后，运行中的增强流程或普通循环在主窗里唯一的可见入口
  * 与停止入口（展开态由 `.op-flow-status` 状态条承担，两处不重复显示）。
  *
  * 必须定义在模块级——组件函数体内定义会让它在每帧重建（仓库硬规则）。
- * 停止按钮同时要 `stopPropagation`：`.operation-panel-header` 自身是
- * 「点一下展开/收起」的开关，否则停流程会顺带把面板展开。
+ * 停止按钮同时要 `stopPropagation`：避免事件冒泡触发外层点击。
  */
-export function FlowRunningBadge({ step, totalSteps, onStop }: FlowRunningBadgeProps) {
+export function FlowRunningBadge({ step, totalSteps, label, stopLabel, onStop }: FlowRunningBadgeProps) {
   const { t } = useTranslation();
+  const resolvedLabel = label ?? t('operationPanel.flowBadge');
+  const resolvedStopLabel = stopLabel ?? t('operationPanel.flowStop');
   return (
     <span className="op-flow-badge">
       <span className="op-flow-badge-dot" aria-hidden="true" />
-      <span className="op-flow-badge-text">{t('operationPanel.flowBadge')}</span>
+      <span className="op-flow-badge-text">{resolvedLabel}</span>
       {step !== undefined && totalSteps !== undefined && (
         <span className="op-flow-badge-step">{t('operationPanel.flowBadgeStep', { step, totalSteps })}</span>
       )}
       <button
         type="button"
         className="btn btn-icon btn-sm op-flow-badge-stop"
-        title={t('operationPanel.flowStop')}
-        aria-label={t('operationPanel.flowStop')}
+        title={resolvedStopLabel}
+        aria-label={resolvedStopLabel}
         onClick={(event) => { event.stopPropagation(); onStop(); }}
       >
         <Square size={11} />
       </button>
     </span>
+  );
+}
+
+interface BackgroundLoopsBadgeProps {
+  portIds: string[];
+  onStopAll: () => void;
+}
+
+/** 折叠态后台端口循环徽标：其他非当前聚焦端口仍在循环发送时的可见提示与停止入口。 */
+function BackgroundLoopsBadge({ portIds, onStopAll }: BackgroundLoopsBadgeProps) {
+  const { t } = useTranslation();
+  const label = portIds.length === 1
+    ? t('operationPanel.bgLoopSingle', { port: portIds[0] })
+    : t('operationPanel.bgLoopCount', { count: portIds.length });
+  const stopLabel = portIds.length === 1
+    ? t('operationPanel.stopPortLoop', { port: portIds[0] })
+    : t('operationPanel.stopAllBgLoops');
+  return (
+    <FlowRunningBadge
+      label={label}
+      stopLabel={stopLabel}
+      onStop={onStopAll}
+    />
   );
 }
 
@@ -88,6 +134,11 @@ const OperationPanel: React.FC = () => {
     const portId = getActivePortId(state);
     return state.ports.find((port) => port.id === portId)?.status;
   });
+  const activePortIsReal = useAppStore((state) => {
+    const portId = getActivePortId(state);
+    return state.ports.find((port) => port.id === portId)?.type === 'real';
+  });
+  const cyclicLoops = useOperationStore((s) => s.cyclicLoops);
   const isConnected = activePortStatus === 'connected';
   const isConnecting = activePortStatus === 'connecting';
   const isPortError = activePortStatus === 'error';
@@ -99,20 +150,36 @@ const OperationPanel: React.FC = () => {
   // 聚焦端口查询状态。
   useCyclicSend({ sendData });
 
-  // 折叠态流程徽标（只读订阅，不新增 store 状态）：收起后运行中的增强流程
+  // 折叠态流程徽标（只读订阅，不新增 store 状态）：收起后运行中的增强流程与普通循环
   // 仍需在主窗可见、可停止。未运行时为 null / false，界面零变化。
   const flowStatus = useFlowStatus(activePortId);
   const flowRunning = isFlowRunning(activePortId);
+  const activeCyclicStatus = useCyclicStatus(activePortId);
+  const activePlainLoopRunning = !flowRunning && !!activePortId && !!cyclicLoops[activePortId];
+  const backgroundLoopPortIds = useMemo(
+    () => Object.keys(cyclicLoops).filter((id) => cyclicLoops[id] && id !== activePortId),
+    [cyclicLoops, activePortId],
+  );
 
-  // 参数同步（issue #4-2）：记录「已应用参数」的所属端口与签名，用于区分
-  // 「切换标签」与「参数变更」——切换标签时把该端口的已存参数载入操作面板；
-  // 参数变更时实时应用到后端（已连接）+ 回写端口字段同步显示 + 供重连使用。
+  // 参数同步（issue #4-2）：记录「已应用参数」的所属端口、帧参数与每端口 DTR/RTS 控制线，
+  // 区分「切换标签」与「用户手动修改」——切换标签只载入该端口已存参数与控制线，绝不静默
+  // 下发 setFlowControl；仅当用户实际修改帧参数或控制线时才防抖 300ms 应用到后端，失败回滚。
   const paramsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastAppliedRef = useRef<{ portId: string; frameKey: string; fullKey: string } | null>(null);
-  // Keep a frame update pending across debounce cancellations (for example, a
-  // DTR toggle immediately after changing baud rate must not swallow the frame
-  // update whose timer was replaced).
+  const lastAppliedRef = useRef<{
+    portId: string;
+    frame: FrameParams;
+    control: ControlLines;
+    frameKey: string;
+    controlKey: string;
+    fullKey: string;
+  } | null>(null);
+  const confirmedFrameBaselineRef = useRef<FrameParams | null>(null);
+  const confirmedControlBaselineRef = useRef<ControlLines | null>(null);
+  // Keep frame and control updates independently pending across debounce cancellations
+  // (e.g., toggling DTR immediately after changing baud rate dispatches both without
+  // swallowing the first timer).
   const pendingFrameSyncRef = useRef<string | null>(null);
+  const pendingControlSyncRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (paramsSyncTimerRef.current) {
@@ -120,51 +187,56 @@ const OperationPanel: React.FC = () => {
       paramsSyncTimerRef.current = null;
     }
     if (!activePortId) return;
-    const frameKey = `${baudRate}-${dataBits}-${parity}-${stopBits}-${handshake}`;
-    const fullKey = `${frameKey}-${dtr}-${rts}`;
+    const currentFrame: FrameParams = { baudRate, dataBits, parity, stopBits, handshake };
+    const currentControl: ControlLines = { dtr, rts };
+    const frameKey = makeFrameKey(currentFrame);
+    const controlKey = makeControlKey(currentControl);
+    const fullKey = `${frameKey}-${controlKey}`;
 
-    // 切换标签：把目标端口的已存帧参数载入操作面板（dtr/rts 为全局态，不载入）。
-    // 端口无已存参数时保留当前操作面板值作为默认工作集。
+    // 切换标签：载入目标端口已存帧参数与每端口 DTR/RTS 状态，不触发后端 setFlowControl。
     if (lastAppliedRef.current?.portId !== activePortId) {
       const port = useAppStore.getState().ports.find((p) => p.id === activePortId);
-      const loaded = {
+      const opState = useOperationStore.getState();
+      const loadedFrame: FrameParams = {
         baudRate: port?.baudRate ?? baudRate,
         dataBits: port?.dataBits ?? dataBits,
         parity: port?.parity ?? parity,
         stopBits: port?.stopBits ?? stopBits,
         handshake: port?.handshake ?? handshake,
       };
-      useOperationStore.getState().setOpState(loaded);
-      const loadedFrameKey = `${loaded.baudRate}-${loaded.dataBits}-${loaded.parity}-${loaded.stopBits}-${loaded.handshake}`;
+      const savedControl = opState.portControlLines[activePortId];
+      // Initial mount preserves pre-existing store dtr/rts; subsequent tab switches
+      // to an unconfigured port default cleanly to false/false without side effects.
+      const loadedControl: ControlLines = savedControl
+        ?? (lastAppliedRef.current === null ? { dtr, rts } : { dtr: false, rts: false });
+      opState.setOpState({ ...loadedFrame, dtr: loadedControl.dtr, rts: loadedControl.rts });
+      if (!savedControl) opState.setPortControlLines(activePortId, loadedControl);
+      const loadedFrameKey = makeFrameKey(loadedFrame);
+      const loadedControlKey = makeControlKey(loadedControl);
       pendingFrameSyncRef.current = null;
+      pendingControlSyncRef.current = null;
+      confirmedFrameBaselineRef.current = loadedFrame;
+      confirmedControlBaselineRef.current = loadedControl;
       lastAppliedRef.current = {
         portId: activePortId,
+        frame: loadedFrame,
+        control: loadedControl,
         frameKey: loadedFrameKey,
-        fullKey: `${loadedFrameKey}-${dtr}-${rts}`,
+        controlKey: loadedControlKey,
+        fullKey: `${loadedFrameKey}-${loadedControlKey}`,
       };
-      // DTR/RTS are global UI controls, but already-open ports may have been
-      // opened before the global value changed. Re-apply the current control
-      // lines when focusing a connected port so switching tabs cannot leave
-      // the selected port with stale modem-line state.
-      if (port?.status === 'connected' && port.type === 'real') {
-        const expectedGeneration = port.connectionGeneration;
-        paramsSyncTimerRef.current = setTimeout(() => {
-          if (getActivePortId(useAppStore.getState()) !== activePortId || isFlowRunning(activePortId)) return;
-          const current = useAppStore.getState().ports.find(item => item.id === activePortId);
-          if (current?.status !== 'connected' || current.connectionGeneration !== expectedGeneration) return;
-          serialService.setFlowControl(activePortId, dtr, rts, expectedGeneration).catch(e => {
-            console.debug('[OperationPanel] setFlowControl failed:', e);
-            notifyError(e);
-          });
-        }, 300);
-      }
       return;
     }
     if (fullKey === lastAppliedRef.current.fullKey) {
       // Opening a port applies the current frame values in its OpenPortArgs.
       // Do not carry a disconnected-session debounce marker into the first
       // DTR/RTS-only change after reconnecting.
-      if (isConnected) pendingFrameSyncRef.current = null;
+      if (isConnected) {
+        pendingFrameSyncRef.current = null;
+        pendingControlSyncRef.current = null;
+        confirmedFrameBaselineRef.current = currentFrame;
+        confirmedControlBaselineRef.current = currentControl;
+      }
       return;
     }
 
@@ -177,30 +249,61 @@ const OperationPanel: React.FC = () => {
     // but never dispatch unsupported settings to the backend.
     if (confirmed?.type !== 'real') {
       pendingFrameSyncRef.current = null;
+      pendingControlSyncRef.current = null;
       return;
     }
     const confirmedFrameKey = `${confirmed.baudRate ?? baudRate}-${confirmed.dataBits ?? dataBits}-${confirmed.parity ?? parity}-${confirmed.stopBits ?? stopBits}-${confirmed.handshake ?? handshake}`;
-    const flowControlUnchanged = lastAppliedRef.current.fullKey === `${lastAppliedRef.current.frameKey}-${dtr}-${rts}`;
+    const flowControlUnchanged = controlKey === lastAppliedRef.current.controlKey;
     const framingUnchanged = lastAppliedRef.current.frameKey.endsWith(`-${dataBits}-${parity}-${stopBits}-${handshake}`);
     if (confirmed?.baudRate !== undefined && confirmedFrameKey === frameKey && framingUnchanged && flowControlUnchanged) {
-      lastAppliedRef.current = { portId: activePortId, frameKey, fullKey };
+      confirmedFrameBaselineRef.current = currentFrame;
+      lastAppliedRef.current = {
+        portId: activePortId,
+        frame: currentFrame,
+        control: currentControl,
+        frameKey,
+        controlKey,
+        fullKey,
+      };
       return;
     }
 
     // 帧参数变化 → 回写端口字段（侧边栏 / 标题栏同步显示；重连时 openPort 读到最新值）。
-    // DTR/RTS 是独立的设备控制线；仅切换它们时不要重复提交整套帧参数，
-    // 否则会和流控调用同时竞争后端串口句柄锁。
+    // DTR/RTS 是独立的每端口控制线；仅切换它们时不重复提交整套帧参数。
     const frameChanged = frameKey !== lastAppliedRef.current.frameKey;
+    const controlChanged = controlKey !== lastAppliedRef.current.controlKey;
     if (frameChanged) {
+      if (pendingFrameSyncRef.current === null) {
+        confirmedFrameBaselineRef.current = lastAppliedRef.current.frame;
+      }
       pendingFrameSyncRef.current = frameKey;
-      useAppStore.getState().updatePort(activePortId, { baudRate, dataBits, parity, stopBits, handshake });
+      useAppStore.getState().updatePort(activePortId, currentFrame);
     }
-    lastAppliedRef.current = { portId: activePortId, frameKey, fullKey };
+    if (controlChanged) {
+      if (pendingControlSyncRef.current === null) {
+        confirmedControlBaselineRef.current = lastAppliedRef.current.control;
+      }
+      pendingControlSyncRef.current = controlKey;
+      useOperationStore.getState().setPortControlLines(activePortId, currentControl);
+    }
+    lastAppliedRef.current = {
+      portId: activePortId,
+      frame: currentFrame,
+      control: currentControl,
+      frameKey,
+      controlKey,
+      fullKey,
+    };
 
     // 已连接时实时应用（防抖 300ms 合并连续输入为一次后端调用）。
     if (!isConnected) return;
     const expectedGeneration = confirmed?.connectionGeneration;
     const frameSyncKey = pendingFrameSyncRef.current;
+    const controlSyncKey = pendingControlSyncRef.current;
+    const rollbackFrame = confirmedFrameBaselineRef.current;
+    const rollbackControl = confirmedControlBaselineRef.current;
+    if (frameSyncKey === null && controlSyncKey === null) return;
+
     paramsSyncTimerRef.current = setTimeout(() => {
       if (getActivePortId(useAppStore.getState()) !== activePortId || isFlowRunning(activePortId)) return;
       const port = useAppStore.getState().ports.find(item => item.id === activePortId);
@@ -214,10 +317,69 @@ const OperationPanel: React.FC = () => {
           handshake,
           expectedGeneration,
         }).then(() => {
-          if (pendingFrameSyncRef.current === frameSyncKey) pendingFrameSyncRef.current = null;
-        }).catch(e => { console.debug('[OperationPanel] setSerialParams failed:', e); notifyError(e); });
+          if (pendingFrameSyncRef.current === frameSyncKey) {
+            pendingFrameSyncRef.current = null;
+            confirmedFrameBaselineRef.current = currentFrame;
+          }
+        }).catch(e => {
+          console.debug('[OperationPanel] setSerialParams failed:', e);
+          notifyError(e);
+          // Roll back optimistic framing params if no newer edit superseded this request.
+          if (rollbackFrame && pendingFrameSyncRef.current === frameSyncKey) {
+            const latestPort = useAppStore.getState().ports.find(item => item.id === activePortId);
+            if (latestPort?.connectionGeneration === expectedGeneration) {
+              pendingFrameSyncRef.current = null;
+              useAppStore.getState().updatePort(activePortId, rollbackFrame);
+              if (getActivePortId(useAppStore.getState()) === activePortId && lastAppliedRef.current?.portId === activePortId) {
+                const rbFrameKey = makeFrameKey(rollbackFrame);
+                const curCtrl = lastAppliedRef.current.control;
+                const curCtrlKey = lastAppliedRef.current.controlKey;
+                lastAppliedRef.current = {
+                  portId: activePortId,
+                  frame: rollbackFrame,
+                  control: curCtrl,
+                  frameKey: rbFrameKey,
+                  controlKey: curCtrlKey,
+                  fullKey: `${rbFrameKey}-${curCtrlKey}`,
+                };
+                useOperationStore.getState().setOpState(rollbackFrame);
+              }
+            }
+          }
+        });
       }
-      serialService.setFlowControl(activePortId, dtr, rts, expectedGeneration).catch(e => { console.debug('[OperationPanel] setFlowControl failed:', e); notifyError(e); });
+      if (controlSyncKey !== null) {
+        serialService.setFlowControl(activePortId, dtr, rts, expectedGeneration).then(() => {
+          if (pendingControlSyncRef.current === controlSyncKey) {
+            pendingControlSyncRef.current = null;
+            confirmedControlBaselineRef.current = currentControl;
+          }
+        }).catch(e => {
+          console.debug('[OperationPanel] setFlowControl failed:', e);
+          notifyError(e);
+          if (rollbackControl && pendingControlSyncRef.current === controlSyncKey) {
+            const latestPort = useAppStore.getState().ports.find(item => item.id === activePortId);
+            if (latestPort?.connectionGeneration === expectedGeneration) {
+              pendingControlSyncRef.current = null;
+              useOperationStore.getState().setPortControlLines(activePortId, rollbackControl);
+              if (getActivePortId(useAppStore.getState()) === activePortId && lastAppliedRef.current?.portId === activePortId) {
+                const rbCtrlKey = makeControlKey(rollbackControl);
+                const curFrame = lastAppliedRef.current.frame;
+                const curFrameKey = lastAppliedRef.current.frameKey;
+                lastAppliedRef.current = {
+                  portId: activePortId,
+                  frame: curFrame,
+                  control: rollbackControl,
+                  frameKey: curFrameKey,
+                  controlKey: rbCtrlKey,
+                  fullKey: `${curFrameKey}-${rbCtrlKey}`,
+                };
+                useOperationStore.getState().setOpState(rollbackControl);
+              }
+            }
+          }
+        });
+      }
     }, 300);
   }, [activePortId, isConnected, baudRate, dataBits, parity, stopBits, handshake, dtr, rts]);
 
@@ -306,28 +468,63 @@ const OperationPanel: React.FC = () => {
       style={!collapsed ? { height: panelHeight } : undefined}
     >
       {replay.picked && <ReplayImportDialog picked={replay.picked} busy={replay.isImporting} onConfirm={replay.confirmImport} onCancel={replay.cancelImport} />}
-      <div
-        className="operation-panel-header"
-        title={t('operationPanel.collapse')}
-        onClick={toggleCollapse}
-      >
-        <div className="operation-panel-header-group">
+      <div className="operation-panel-header">
+        <button
+          type="button"
+          className="operation-panel-header-group operation-panel-header-toggle"
+          aria-expanded={!collapsed}
+          title={collapsed ? t('operationPanel.expand') : t('operationPanel.collapse')}
+          onClick={toggleCollapse}
+        >
           <ChevronDown size={12} className="operation-panel-chevron" />
           <span className="operation-panel-title">{t('operationPanel.title')}</span>
           {isPortActive && (
-            <span className="operation-panel-port" title={`${activePortId} · ${t('paramsSection.baudRateLabel')} ${baudRate}`}>
+            <span
+              className="operation-panel-port"
+              title={activePortIsReal ? `${activePortId} · ${t('paramsSection.baudRateLabel')} ${baudRate}` : activePortId}
+            >
+              {collapsed && (
+                <span
+                  className={`operation-panel-port-dot${isConnected ? ' is-connected' : isPortError ? ' is-error' : ''}`}
+                  aria-hidden="true"
+                />
+              )}
               <span className="operation-panel-port-name">{activePortId}</span>
-              <span className="operation-panel-port-meta">{t('paramsSection.baudRateLabel')} {baudRate}</span>
+              {activePortIsReal && (
+                <span className="operation-panel-port-meta">{t('paramsSection.baudRateLabel')} {baudRate}</span>
+              )}
             </span>
           )}
-        </div>
+        </button>
         {/* 收起后才显示：展开态已有 `.op-flow-status` 状态条，不重复。 */}
-        {collapsed && flowRunning && flowStatus && (
-          <FlowRunningBadge
-            step={flowStatus.step}
-            totalSteps={flowStatus.totalSteps}
-            onStop={() => useOperationStore.getState().setCyclicLoop(flowStatus.portId, false)}
-          />
+        {collapsed && (flowRunning && flowStatus || activePlainLoopRunning || backgroundLoopPortIds.length > 0) && (
+          <div className="operation-panel-header-badges">
+            {flowRunning && flowStatus && (
+              <FlowRunningBadge
+                step={flowStatus.step}
+                totalSteps={flowStatus.totalSteps}
+                onStop={() => useOperationStore.getState().setCyclicLoop(flowStatus.portId, false)}
+              />
+            )}
+            {activePlainLoopRunning && activePortId && (
+              <FlowRunningBadge
+                label={activeCyclicStatus?.waitingReconnect ? t('flow.status.waitingReconnect') : t('operationPanel.cyclicBadge')}
+                step={activeCyclicStatus?.step}
+                totalSteps={activeCyclicStatus?.totalSteps}
+                stopLabel={t('rulesSection.stopLoop')}
+                onStop={() => useOperationStore.getState().setCyclicLoop(activePortId, false)}
+              />
+            )}
+            {backgroundLoopPortIds.length > 0 && (
+              <BackgroundLoopsBadge
+                portIds={backgroundLoopPortIds}
+                onStopAll={() => {
+                  const op = useOperationStore.getState();
+                  for (const id of backgroundLoopPortIds) op.setCyclicLoop(id, false);
+                }}
+              />
+            )}
+          </div>
         )}
       </div>
 
@@ -354,9 +551,17 @@ const OperationPanel: React.FC = () => {
             </div>
             <div className="op-strip-group">
               <Type size={13} className="op-strip-icon" />
-              <input type="range" className="op-strip-slider" min={8} max={48} step={1}
+              <input
+                type="range"
+                className="op-strip-slider"
+                min={8}
+                max={48}
+                step={1}
+                aria-label={t('operationPanel.fontSize')}
+                title={t('operationPanel.fontSize')}
                 value={terminalFontSize}
-                onChange={e => setConfig({ terminalFontSize: Number(e.target.value) })} />
+                onChange={e => setConfig({ terminalFontSize: Number(e.target.value) })}
+              />
               <span className="op-strip-value">{terminalFontSize}px</span>
             </div>
           </div>
