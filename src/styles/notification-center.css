@@ -47,14 +47,22 @@
   height: 14px;
   padding: 0 3px;
   border-radius: 7px;
-  background: var(--status-error-solid);
-  color: var(--text-on-accent);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
   font-family: var(--font-terminal);
   font-size: var(--text-2xs);
-  line-height: 14px;
+  line-height: 12px;
   text-align: center;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+.notify-badge.is-urgent {
+  background: var(--status-error-solid);
+  border-color: transparent;
+  color: var(--text-on-accent);
+  line-height: 14px;
 }
 
 .notify-panel {
@@ -122,6 +130,11 @@
   color: var(--text-primary);
 }
 
+.notify-clear-all:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
 .notify-clear-all:disabled {
   opacity: 0.5;
   cursor: default;
@@ -135,9 +148,9 @@
 
 .notify-row {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 2px;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--space-1);
   padding: var(--space-2) var(--space-3);
   border: none;
   border-bottom: 1px solid var(--border-subtle);
@@ -152,6 +165,31 @@
   transition: background var(--transition-fast);
 }
 
+.notify-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+
+button.notify-row-main {
+  cursor: pointer;
+}
+
+button.notify-row-main:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
 .notify-row-actionable { cursor: pointer; }
 
 .notify-row:last-child {
@@ -160,11 +198,6 @@
 
 .notify-row:hover {
   background: var(--bg-hover);
-}
-
-.notify-row:focus-visible {
-  outline: 2px solid var(--accent-color);
-  outline-offset: -2px;
 }
 
 /* Severity accent: tinted left border, matching the live toast treatment. */
@@ -278,4 +311,9 @@
 .notify-row-dismiss:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.notify-row-dismiss:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
 }

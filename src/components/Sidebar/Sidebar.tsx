@@ -8,7 +8,7 @@ import {
 import { useToolbarPluginButtons, dispatchPluginUiClick } from '../../hooks/usePluginUi';
 import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import { runSequential } from '../../utils/sequential';
-import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, useDroppable, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import AliasDialog from './AliasDialog';
 import GuideCard from './GuideCard';
@@ -21,7 +21,46 @@ import GroupToolDialog from '../shared/GroupToolDialog';
 import ConfirmDialog from '../shared/ConfirmDialog';
 import { notifyInfo } from '../../stores/useToastStore';
 import { createEmptyGroup, createGroupWithPort } from './groupActions';
-import { usePortDragEnd } from './hooks/usePortDragEnd';
+import { usePortDragEnd, UNGROUPED_DROPPABLE_ID } from './hooks/usePortDragEnd';
+import type { SerialPort } from '../../types';
+
+/**
+ * Module-level droppable wrapper for the "Ungrouped" section. When all ports
+ * belong to groups, stays mounted as a compact drop zone during a grouped-port
+ * drag so users can drag ports back to ungrouped.
+ */
+const UngroupedSection: React.FC<{
+  ports: SerialPort[];
+  portIds: string[];
+  activePortId: string | null;
+  showEmptyDropHint: boolean;
+}> = ({ ports, portIds, activePortId, showEmptyDropHint }) => {
+  const { t } = useTranslation();
+  const { setNodeRef, isOver } = useDroppable({ id: UNGROUPED_DROPPABLE_ID });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`sidebar-section sidebar-ungrouped-section${isOver ? ' drop-active' : ''}`}
+    >
+      <div className="sidebar-section-header eyebrow">{t('sidebar.section.ungrouped')}</div>
+      {ports.length > 0 ? (
+        <SortableContext items={portIds} strategy={verticalListSortingStrategy}>
+          {ports.map(port => (
+            <SortablePortItem
+              key={port.id}
+              port={port}
+              isActive={activePortId === port.id}
+              isConnected={port.status === 'connected'}
+            />
+          ))}
+        </SortableContext>
+      ) : showEmptyDropHint ? (
+        <div className="sidebar-ungrouped-drop-hint">{t('sidebar.ungrouped.dropHint')}</div>
+      ) : null}
+    </div>
+  );
+};
 
 /**
  * 串口机架（侧边栏）。容器只做三件事：编排 store/hook 的数据、把动作交给
@@ -51,6 +90,9 @@ const Sidebar: React.FC = () => {
   } = usePortToolActions();
 
   const [showHidden, setShowHidden] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [draggingGroupedPort, setDraggingGroupedPort] = useState(false);
   const [bulkConfirm, setBulkConfirm] = useState<{ mode: 'open' | 'close'; portIds: string[] } | null>(null);
   const pluginButtons = useToolbarPluginButtons();
   const [search, setSearch] = useState('');
@@ -84,8 +126,15 @@ const Sidebar: React.FC = () => {
   }, [aliasDialog, updatePort]);
 
   const handleAddGroup = useCallback(() => {
-    createEmptyGroup(t('sidebar.addGroup.defaultName'));
+    const id = createEmptyGroup(t('sidebar.addGroup.defaultName'));
+    setEditingGroupId(id);
   }, [t]);
+
+  const handleRefresh = useCallback(() => {
+    if (refreshing) return;
+    setRefreshing(true);
+    void Promise.resolve(refreshPorts()).finally(() => setRefreshing(false));
+  }, [refreshPorts, refreshing]);
 
   const handleRenameGroup = useCallback((groupId: string, name: string) => {
     updateGroup(groupId, { name });
@@ -119,7 +168,12 @@ const Sidebar: React.FC = () => {
   const filteredPorts = useMemo(() => {
     if (!search) return ports;
     const searchLower = search.toLowerCase();
-    return ports.filter(p => p.id.toLowerCase().includes(searchLower) || (p.alias?.toLowerCase().includes(searchLower)));
+    return ports.filter(p =>
+      p.id.toLowerCase().includes(searchLower)
+      || p.alias?.toLowerCase().includes(searchLower)
+      || p.manufacturer?.toLowerCase().includes(searchLower)
+      || p.product?.toLowerCase().includes(searchLower)
+    );
   }, [ports, search]);
 
   // Hidden ports never appear in their normal location (group / ungrouped);
@@ -129,7 +183,8 @@ const Sidebar: React.FC = () => {
   const ungroupedPorts = filteredPorts.filter(p => !p.groupId && !p.isHidden);
   const ungroupedIds = useMemo(() => ungroupedPorts.map(p => p.id), [ungroupedPorts]);
   const hiddenPorts = useMemo(() => ports.filter(p => p.isHidden), [ports]);
-  const hiddenIds = useMemo(() => hiddenPorts.map(p => p.id), [hiddenPorts]);
+  const filteredHiddenPorts = useMemo(() => filteredPorts.filter(p => p.isHidden), [filteredPorts]);
+  const hiddenIds = useMemo(() => filteredHiddenPorts.map(p => p.id), [filteredHiddenPorts]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -177,15 +232,34 @@ const Sidebar: React.FC = () => {
     setBulkConfirm({ mode: 'close', portIds: connected.map(p => p.id) });
   }, [visiblePorts]);
 
-  const handleDragEnd = usePortDragEnd();
+  const portDragEnd = usePortDragEnd();
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    const activeId = String(event.active.id);
+    const port = useAppStore.getState().ports.find(p => p.id === activeId);
+    setDraggingGroupedPort(Boolean(port?.groupId));
+  }, []);
+
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    setDraggingGroupedPort(false);
+    portDragEnd(event);
+  }, [portDragEnd]);
+
+  const handleDragCancel = useCallback(() => {
+    setDraggingGroupedPort(false);
+  }, []);
+
+  const hiddenMatchedCount = search ? filteredHiddenPorts.length : 0;
 
   return (
     <SidebarActionsProvider actions={actions}>
       <div className="sidebar">
         <SidebarToolbar
           showHidden={showHidden}
+          hiddenCount={hiddenPorts.length}
           onToggleHidden={() => setShowHidden(!showHidden)}
-          onRefresh={refreshPorts}
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
           simulationMode={simulationMode}
           simulationAvailable={DEV_FEATURES_ENABLED}
           onToggleSimulation={toggleSimulation}
@@ -210,7 +284,13 @@ const Sidebar: React.FC = () => {
           {ports.length === 0 && !simulationMode && (
             <GuideCard onEnableSimulation={toggleSimulation} simulationAvailable={DEV_FEATURES_ENABLED} />
           )}
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+            onDragCancel={handleDragCancel}
+          >
             {groups.map(group => {
               const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id) && !p.isHidden);
               if (groupPorts.length === 0 && search) return null;
@@ -219,36 +299,31 @@ const Sidebar: React.FC = () => {
                   key={group.id}
                   group={group}
                   ports={filteredPorts}
+                  autoRename={editingGroupId === group.id}
+                  onRenameEnd={() => setEditingGroupId((cur) => (cur === group.id ? null : cur))}
                 />
               );
             })}
 
-            {ungroupedPorts.length > 0 && (
-              <div className="sidebar-section">
-                <div className="sidebar-section-header eyebrow">{t('sidebar.section.ungrouped')}</div>
-                <SortableContext items={ungroupedIds} strategy={verticalListSortingStrategy}>
-                  {ungroupedPorts.map(port => (
-                    <SortablePortItem
-                      key={port.id}
-                      port={port}
-                      isActive={activePortId === port.id}
-                       isConnected={port.status === 'connected'}
-                    />
-                  ))}
-                </SortableContext>
-              </div>
+            {(ungroupedPorts.length > 0 || draggingGroupedPort) && (
+              <UngroupedSection
+                ports={ungroupedPorts}
+                portIds={ungroupedIds}
+                activePortId={activePortId}
+                showEmptyDropHint={draggingGroupedPort && ungroupedPorts.length === 0}
+              />
             )}
 
-            {showHidden && hiddenPorts.length > 0 && (
+            {showHidden && filteredHiddenPorts.length > 0 && (
               <div className="sidebar-section">
                 <div className="sidebar-section-header eyebrow">{t('sidebar.section.hidden')}</div>
                 <SortableContext items={hiddenIds} strategy={verticalListSortingStrategy}>
-                  {hiddenPorts.map(port => (
+                  {filteredHiddenPorts.map(port => (
                     <SortablePortItem
                       key={port.id}
                       port={port}
                       isActive={activePortId === port.id}
-                       isConnected={port.status === 'connected'}
+                      isConnected={port.status === 'connected'}
                     />
                   ))}
                 </SortableContext>
@@ -256,17 +331,28 @@ const Sidebar: React.FC = () => {
             )}
           </DndContext>
 
-          {search && visiblePorts.length === 0 && (
+          {search && visiblePorts.length === 0 && (!showHidden || hiddenMatchedCount === 0) && (
             <div className="sidebar-no-results" role="status">
-              <span>{t('sidebar.search.noResults')}</span>
-              <button type="button" className="btn btn-sm" onClick={() => setSearch('')}>
-                {t('sidebar.search.clear')}
-              </button>
+              <span>
+                {!showHidden && hiddenMatchedCount > 0
+                  ? t('sidebar.search.hiddenMatches', { count: hiddenMatchedCount })
+                  : t('sidebar.search.noResults')}
+              </span>
+              <div className="sidebar-no-results-actions">
+                {!showHidden && hiddenMatchedCount > 0 && (
+                  <button type="button" className="btn btn-sm" onClick={() => setShowHidden(true)}>
+                    {t('sidebar.toolbar.showHidden')}
+                  </button>
+                )}
+                <button type="button" className="btn btn-sm" onClick={() => setSearch('')}>
+                  {t('sidebar.search.clear')}
+                </button>
+              </div>
             </div>
           )}
 
           <div className="sidebar-add-group">
-            <button className="btn sidebar-add-group-btn" onClick={handleAddGroup}>
+            <button type="button" className="btn sidebar-add-group-btn" onClick={handleAddGroup}>
               <Plus size={14} />
               {t('sidebar.addGroup.button')}
             </button>

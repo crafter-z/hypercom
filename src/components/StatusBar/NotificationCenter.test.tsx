@@ -51,40 +51,80 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('NotificationCenter rows', () => {
-  it('opens Settings → Plugins from a linked plugin-update notification and closes the center', () => {
+describe('NotificationCenter rows, Escape lifecycle, and unread badge', () => {
+  it('renders sibling buttons without nested interactive ARIA and opens Settings → Plugins', () => {
     pushToast({ message: '2 plugin updates', action: 'open-plugin-settings', durationMs: 0 });
     renderCenter();
     const item = row();
-    expect(item.getAttribute('role')).toBe('button');
-    expect(item.getAttribute('title')).toBeTruthy();
+    const mainBtn = item.querySelector<HTMLButtonElement>('button.notify-row-main');
+    const dismissBtn = item.querySelector<HTMLButtonElement>('button.notify-row-dismiss');
+    expect(mainBtn).not.toBeNull();
+    expect(dismissBtn).not.toBeNull();
+    // Ensure sibling structure — dismiss button is NOT nested inside the action button.
+    expect(mainBtn!.contains(dismissBtn!)).toBe(false);
+    expect(mainBtn!.getAttribute('title')).toBeTruthy();
 
-    act(() => item.click());
+    act(() => mainBtn!.click());
 
     expect(ui().isConfigOpen).toBe(true);
     expect(ui().configActiveTab).toBe('plugins');
     expect(useToastStore.getState().centerOpen).toBe(false);
   });
 
-  it.each(['Enter', ' '])('activates the plugin-update row with %s', (key) => {
-    pushToast({ message: '2 plugin updates', action: 'open-plugin-settings', durationMs: 0 });
-    renderCenter();
-    press(row(), key);
-
-    expect(ui().isConfigOpen).toBe(true);
-    expect(ui().configActiveTab).toBe('plugins');
-  });
-
-  it('keeps ordinary notifications non-actionable', () => {
+  it('keeps ordinary notifications non-actionable with only a dismiss button', () => {
     pushToast({ message: 'plain', durationMs: 4000 });
     renderCenter();
     const item = row();
-    expect(item.getAttribute('role')).toBe('group');
-    expect(item.tabIndex).toBe(-1);
+    expect(item.querySelector('button.notify-row-main')).toBeNull();
+    const mainDiv = item.querySelector<HTMLDivElement>('div.notify-row-main');
+    expect(mainDiv).not.toBeNull();
 
-    act(() => item.click());
+    act(() => mainDiv!.click());
 
     expect(ui().isConfigOpen).toBe(false);
     expect(useToastStore.getState().centerOpen).toBe(true);
+  });
+
+  it('closes ConfirmDialog on Escape without closing the underlying NotificationCenter', () => {
+    pushToast({ message: 'clear me', durationMs: 4000 });
+    renderCenter();
+    const clearBtn = container.querySelector<HTMLButtonElement>('.notify-clear-all');
+    expect(clearBtn).not.toBeNull();
+    act(() => clearBtn!.click());
+    expect(document.querySelector('[aria-modal="true"]')).not.toBeNull();
+
+    press(document.body, 'Escape');
+
+    expect(document.querySelector('[aria-modal="true"]')).toBeNull();
+    expect(useToastStore.getState().centerOpen).toBe(true);
+  });
+
+  it('tracks unread count with neutral vs urgent styling and marks read on open', () => {
+    useToastStore.setState({ centerOpen: false });
+    renderCenter();
+    expect(container.querySelector('.notify-badge')).toBeNull();
+
+    act(() => { pushToast({ severity: 'info', message: 'hello' }); });
+    const neutralBadge = container.querySelector('.notify-badge');
+    expect(neutralBadge?.textContent).toBe('1');
+    expect(neutralBadge?.classList.contains('is-urgent')).toBe(false);
+
+    act(() => { pushToast({ severity: 'error', message: 'boom' }); });
+    const urgentBadge = container.querySelector('.notify-badge');
+    expect(urgentBadge?.textContent).toBe('2');
+    expect(urgentBadge?.classList.contains('is-urgent')).toBe(true);
+
+    // Opening NotificationCenter marks existing items read.
+    act(() => { container.querySelector<HTMLButtonElement>('.notify-btn')!.click(); });
+    expect(container.querySelector('.notify-badge')).toBeNull();
+
+    // Closing keeps them read until a new notification arrives.
+    act(() => { container.querySelector<HTMLButtonElement>('.notify-btn')!.click(); });
+    expect(container.querySelector('.notify-badge')).toBeNull();
+
+    act(() => { pushToast({ severity: 'warning', message: 'warn' }); });
+    const nextBadge = container.querySelector('.notify-badge');
+    expect(nextBadge?.textContent).toBe('1');
+    expect(nextBadge?.classList.contains('is-urgent')).toBe(true);
   });
 });

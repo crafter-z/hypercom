@@ -9,7 +9,9 @@ import { pluginIcon } from './pluginIcon';
 
 interface SidebarToolbarProps {
   showHidden: boolean;
+  hiddenCount: number;
   onToggleHidden: () => void;
+  refreshing: boolean;
   onRefresh: () => void;
   simulationMode: boolean;
   simulationAvailable: boolean;
@@ -37,7 +39,7 @@ interface SidebarToolbarProps {
  * Group/layout changes persist themselves, so there is no "save layout" button.
  */
 const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
-  showHidden, onToggleHidden, onRefresh,
+  showHidden, hiddenCount, onToggleHidden, refreshing, onRefresh,
   simulationMode, simulationAvailable, onToggleSimulation,
   gitBashMode, gitBashAvailable, onToggleGitBash,
   onOpenAll, onCloseAll, canOpenAll, canCloseAll, onSortByPort, onSortByAdded, addedOrderActive, pluginButtons, onPluginClick,
@@ -45,9 +47,12 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
 
+  const hiddenBaseLabel = showHidden ? t('sidebar.toolbar.hideHidden') : t('sidebar.toolbar.showHidden');
+  const hiddenLabel = hiddenCount > 0 ? `${hiddenBaseLabel} (${hiddenCount})` : hiddenBaseLabel;
+
   const overflowItems: ContextMenuEntry[] = [
     {
-      label: showHidden ? t('sidebar.toolbar.hideHidden') : t('sidebar.toolbar.showHidden'),
+      label: hiddenLabel,
       icon: showHidden ? <Eye size={14} /> : <EyeOff size={14} />,
       onClick: onToggleHidden,
     },
@@ -61,6 +66,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
       <div className="sidebar-toolbar-actions">
         {simulationAvailable && (
           <button
+            type="button"
             className={`icon-btn${simulationMode ? ' active' : ''}`}
             title={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
             aria-label={simulationMode ? t('sidebar.toolbar.disableSimulation') : t('sidebar.toolbar.enableSimulation')}
@@ -71,6 +77,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
         )}
         {gitBashAvailable && (
           <button
+            type="button"
             className={`icon-btn${gitBashMode ? ' active' : ''}`}
             title={gitBashMode ? t('sidebar.toolbar.disableGitBashSim') : t('sidebar.toolbar.enableGitBashSim')}
             aria-label={gitBashMode ? t('sidebar.toolbar.disableGitBashSim') : t('sidebar.toolbar.enableGitBashSim')}
@@ -83,6 +90,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
           const button = reg.buttons[reg.buttonIndex];
           return (
             <button
+              type="button"
               key={`${reg.pluginId}:${button.id}`}
               className="icon-btn"
               title={`${reg.pluginName}: ${button.label}`}
@@ -93,17 +101,25 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
             </button>
           );
         })}
-        <button className="icon-btn" title={t('sidebar.toolbar.refresh')} aria-label={t('sidebar.toolbar.refresh')} onClick={onRefresh}>
-          <RefreshCw size={14} />
+        <button
+          type="button"
+          className="icon-btn"
+          title={t('sidebar.toolbar.refresh')}
+          aria-label={t('sidebar.toolbar.refresh')}
+          onClick={onRefresh}
+          disabled={refreshing}
+        >
+          <RefreshCw size={14} className={refreshing ? 'spin-icon' : undefined} />
         </button>
-        <button className="icon-btn" title={t('sidebar.toolbar.openAll')} aria-label={t('sidebar.toolbar.openAll')} onClick={onOpenAll} disabled={!canOpenAll}>
+        <button type="button" className="icon-btn" title={t('sidebar.toolbar.openAll')} aria-label={t('sidebar.toolbar.openAll')} onClick={onOpenAll} disabled={!canOpenAll}>
           <Play size={14} />
         </button>
-        <button className="icon-btn" title={t('sidebar.toolbar.closeAll')} aria-label={t('sidebar.toolbar.closeAll')} onClick={onCloseAll} disabled={!canCloseAll}>
+        <button type="button" className="icon-btn" title={t('sidebar.toolbar.closeAll')} aria-label={t('sidebar.toolbar.closeAll')} onClick={onCloseAll} disabled={!canCloseAll}>
           <Square size={14} />
         </button>
         <span className="toolbar-sep" />
         <button
+          type="button"
           className="icon-btn"
           title={t('sidebar.toolbar.more')}
           aria-label={t('sidebar.toolbar.more')}

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PortGroup, SerialPort } from '../../types';
 import { getActivePortId, useAppStore } from '../../stores/useAppStore';
@@ -7,7 +7,7 @@ import { useSidebarActions } from './SidebarActions';
 import { groupDroppableId } from './hooks/usePortDragEnd';
 import ConfirmDialog from '../shared/ConfirmDialog';
 import SortablePortItem from './SortablePortItem';
-import { Play, Square, Pencil, Trash2, Wrench, ChevronRight } from 'lucide-react';
+import { Play, Square, Pencil, Trash2, Wrench, ChevronRight, Ellipsis } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { runSequential } from '../../utils/sequential';
@@ -16,24 +16,20 @@ interface GroupItemProps {
   group: PortGroup;
   /** 已按搜索/隐藏过滤的端口列表（成员判断在组件内做）。 */
   ports: SerialPort[];
+  /** Auto-enter inline rename (e.g. immediately after creating a new group). */
+  autoRename?: boolean;
+  onRenameEnd?: () => void;
 }
 
 /**
- * Group header — chevron + name + connected-count, nothing else.
- * Connect-all / disconnect-all / rename / delete all live in the
- * right-click context menu. The header stays a droppable target for
- * cross-group port drops.
+ * Group header — chevron + name + connected-count + subtle hover/focus overflow
+ * menu trigger. Connect-all / disconnect-all / rename / delete live in the
+ * context menu. The header stays a droppable target for cross-group port drops.
  */
-const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
+const GroupItem: React.FC<GroupItemProps> = ({ group, ports, autoRename, onRenameEnd }) => {
   const { t } = useTranslation();
   const actions = useSidebarActions();
   const activePortId = useAppStore((s) => getActivePortId(s));
-  // Exclude hidden ports so "hide" actually works for grouped ports too
-  // (they reappear in the hidden section when toggled visible).
-  // Render in `group.portIds` order - that is the authoritative in-group order that
-  // drag-and-drop edits and `save_port_groups` persists. Global `ports` order only
-  // decides placement of ungrouped ports; filtering it here ignored every in-group
-  // reorder (the drop position was written but never rendered).
   const byId = new Map(ports.map(p => [p.id, p] as const));
   const groupPorts = group.portIds
     .map(id => byId.get(id))
@@ -42,8 +38,27 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(group.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const nameClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { show, showAt, element } = useContextMenu();
+
+  // Auto-enter inline rename when a new group is created.
+  useEffect(() => {
+    if (!autoRename) return;
+    setRenameValue(group.name);
+    setIsRenaming(true);
+  }, [autoRename, group.name]);
+
+  useEffect(() => {
+    if (isRenaming) {
+      renameInputRef.current?.select();
+    }
+  }, [isRenaming]);
+
+  useEffect(() => () => {
+    if (nameClickTimerRef.current !== null) clearTimeout(nameClickTimerRef.current);
+  }, []);
 
   // Make the group a droppable target so ports can be dropped onto the group
   // header itself (not just onto individual ports inside the group).
@@ -61,8 +76,30 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
     void runSequential(groupPorts.filter(p => p.status === 'connected'), (p) => actions.toggleConnect(p.id));
   };
 
+  const handleNameClick = (e: React.MouseEvent) => {
+    // Delay single-click toggle on the name so double-click rename doesn't
+    // fire toggleGroupExpand twice and jitter the list.
+    e.stopPropagation();
+    if (e.detail >= 2) {
+      if (nameClickTimerRef.current !== null) {
+        clearTimeout(nameClickTimerRef.current);
+        nameClickTimerRef.current = null;
+      }
+      return;
+    }
+    if (nameClickTimerRef.current !== null) clearTimeout(nameClickTimerRef.current);
+    nameClickTimerRef.current = setTimeout(() => {
+      nameClickTimerRef.current = null;
+      actions.toggleGroupExpand(group.id);
+    }, 180);
+  };
+
   const handleStartRename = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (nameClickTimerRef.current !== null) {
+      clearTimeout(nameClickTimerRef.current);
+      nameClickTimerRef.current = null;
+    }
     setRenameValue(group.name);
     setIsRenaming(true);
   };
@@ -73,6 +110,12 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
       actions.renameGroup(group.id, trimmed);
     }
     setIsRenaming(false);
+    onRenameEnd?.();
+  };
+
+  const handleCancelRename = () => {
+    setIsRenaming(false);
+    onRenameEnd?.();
   };
 
   const hasDisconnectable = groupPorts.some(p => p.status === 'connected');
@@ -97,58 +140,75 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
     >
       <div
         className="port-group-header"
-        role="button"
-        tabIndex={0}
-        aria-expanded={group.isExpanded}
-        aria-label={group.name}
-        onClick={() => actions.toggleGroupExpand(group.id)}
         onContextMenu={(e) => show(e, groupMenuItems)}
-        onKeyDown={(e) => {
-          if (e.target !== e.currentTarget) return;
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            actions.toggleGroupExpand(group.id);
-          } else if (e.key === 'F10' && e.shiftKey) {
-            e.preventDefault();
-            const rect = e.currentTarget.getBoundingClientRect();
-            showAt(rect.left, rect.bottom, groupMenuItems, e.currentTarget, group.name);
-          } else if (e.key === 'ContextMenu') {
-            e.preventDefault();
-            const rect = e.currentTarget.getBoundingClientRect();
-            showAt(rect.left, rect.bottom, groupMenuItems, e.currentTarget, group.name);
-          }
-        }}
       >
-        <ChevronRight
-          size={12}
-          className="port-group-chevron"
-          style={{ transform: group.isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
-        />
-        {isRenaming ? (
-          <input
-            className="input port-group-rename-input"
-            value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onBlur={handleCommitRename}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleCommitRename();
-              if (e.key === 'Escape') setIsRenaming(false);
-            }}
-            onClick={(e) => e.stopPropagation()}
-            autoFocus
+        <div
+          className="port-group-header-main"
+          role="button"
+          tabIndex={0}
+          aria-expanded={group.isExpanded}
+          aria-label={group.name}
+          onClick={() => {
+            if (!isRenaming) actions.toggleGroupExpand(group.id);
+          }}
+          onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return;
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              actions.toggleGroupExpand(group.id);
+            } else if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+              e.preventDefault();
+              const rect = e.currentTarget.getBoundingClientRect();
+              showAt(rect.left, rect.bottom, groupMenuItems, e.currentTarget, group.name);
+            }
+          }}
+        >
+          <ChevronRight
+            size={12}
+            className="port-group-chevron"
+            style={{ transform: group.isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
           />
-        ) : (
-          <span
-            className="port-group-name eyebrow"
-            onDoubleClick={handleStartRename}
-            title={t('sidebar.group.doubleClickRename')}
-          >
-            {group.name}
+          {isRenaming ? (
+            <input
+              ref={renameInputRef}
+              className="input port-group-rename-input"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onBlur={handleCommitRename}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCommitRename();
+                if (e.key === 'Escape') handleCancelRename();
+              }}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+            />
+          ) : (
+            <span
+              className="port-group-name eyebrow"
+              onClick={handleNameClick}
+              onDoubleClick={handleStartRename}
+              title={t('sidebar.group.doubleClickRename')}
+            >
+              {group.name}
+            </span>
+          )}
+          <span className={`port-group-count${connectedCount > 0 ? ' has-connected' : ''}`}>
+            {connectedCount}/{groupPorts.length}
           </span>
-        )}
-        <span className={`port-group-count${connectedCount > 0 ? ' has-connected' : ''}`}>
-          {connectedCount}/{groupPorts.length}
-        </span>
+        </div>
+        <button
+          type="button"
+          className="icon-btn port-group-menu-btn"
+          title={t('sidebar.group.moreActions')}
+          aria-label={t('sidebar.group.moreActions')}
+          onClick={(e) => {
+            e.stopPropagation();
+            const rect = e.currentTarget.getBoundingClientRect();
+            showAt(rect.left, rect.bottom, groupMenuItems, e.currentTarget, group.name);
+          }}
+        >
+          <Ellipsis size={13} />
+        </button>
       </div>
       {element}
       <ConfirmDialog
@@ -169,7 +229,7 @@ const GroupItem: React.FC<GroupItemProps> = ({ group, ports }) => {
                 key={port.id}
                 port={port}
                 isActive={activePortId === port.id}
-                 isConnected={port.status === 'connected'}
+                isConnected={port.status === 'connected'}
               />
             ))}
           </div>

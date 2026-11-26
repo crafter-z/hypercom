@@ -9,6 +9,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { Cpu, MemoryStick, ArrowUpCircle, ArrowDownCircle, PlugZap, Timer, Info } from 'lucide-react';
 import { useSystemStatus } from '../../hooks';
 import { readJsHeapMb } from '../../utils/jsHeap';
+import { trafficStats } from '../../utils/trafficStats';
 import DisconnectBanner from './DisconnectBanner';
 import NotificationCenter from './NotificationCenter';
 
@@ -49,6 +50,7 @@ const StatusBar: React.FC = () => {
   // makes every port's 1s traffic flush re-render the status bar even when the
   // user is looking at a different port.
   const activeTraffic = useSystemStore((s) => activePortId ? s.trafficStats[activePortId] : null);
+  const activeConnectedAt = useTerminalStore((s) => activePortId ? s.terminals[activePortId]?.connectedAt ?? null : null);
   const connectedCount = useAppStore((s) => s.ports.reduce(
     (count, port) => count + (port.status === 'connected' ? 1 : 0),
     0,
@@ -71,79 +73,100 @@ const StatusBar: React.FC = () => {
   const prevConnectedAtRef = useRef<number | null>(null);
   const prevRatePortRef = useRef<string | null>(null);
 
+  const computeRateDisplay = useCallback(() => {
+    const portId = getActivePortId(useAppStore.getState());
+    if (!portId) {
+      setRateDisplay(null);
+      prevRatePortRef.current = null;
+      prevConnectedAtRef.current = null;
+      rateWindowRef.current = [];
+      peakRef.current = { rx: 0, tx: 0 };
+      return;
+    }
+
+    const term = useTerminalStore.getState().terminals[portId];
+    const connectedAt = term?.connectedAt ?? null;
+
+    // Reset window + peak on reconnect or port change
+    if (portId !== prevRatePortRef.current || connectedAt !== prevConnectedAtRef.current) {
+      prevRatePortRef.current = portId;
+      prevConnectedAtRef.current = connectedAt;
+      rateWindowRef.current = [];
+      peakRef.current = { rx: 0, tx: 0 };
+    }
+
+    if (connectedAt == null) {
+      setRateDisplay(null);
+      return;
+    }
+
+    const stats = useSystemStore.getState().trafficStats[portId];
+    const rx = stats?.rxTotal ?? 0;
+    const tx = stats?.txTotal ?? 0;
+    const ts = Date.now();
+
+    // Push snapshot, keep last 6 (for 5-second window)
+    const window = rateWindowRef.current;
+    window.push({ ts, rx, tx });
+    if (window.length > 6) window.shift();
+
+    // Compute rate over the window
+    let rxRate = 0;
+    let txRate = 0;
+    if (window.length >= 2) {
+      const oldest = window[0];
+      const newest = window[window.length - 1];
+      const dtSec = (newest.ts - oldest.ts) / 1000;
+      if (dtSec > 0) {
+        rxRate = Math.max(0, (newest.rx - oldest.rx) / dtSec);
+        txRate = Math.max(0, (newest.tx - oldest.tx) / dtSec);
+      }
+    }
+
+    // Track peak
+    if (rxRate > peakRef.current.rx) peakRef.current.rx = rxRate;
+    if (txRate > peakRef.current.tx) peakRef.current.tx = txRate;
+
+    setRateDisplay({
+      duration: formatDuration(ts - connectedAt),
+      rxRate,
+      txRate,
+      peakRx: peakRef.current.rx,
+      peakTx: peakRef.current.tx,
+    });
+  }, []);
+
+  // Recompute immediately when switching active port or connection state so
+  // the previous port's readout never lingers for up to 1 second.
+  useEffect(() => {
+    computeRateDisplay();
+  }, [activePortId, activeConnectedAt, computeRateDisplay]);
+
   useEffect(() => {
     const timer = setInterval(() => {
       setNow(new Date());
-
-      const portId = getActivePortId(useAppStore.getState());
-      if (!portId) {
-        setRateDisplay(null);
-        prevRatePortRef.current = null;
-        prevConnectedAtRef.current = null;
-        rateWindowRef.current = [];
-        peakRef.current = { rx: 0, tx: 0 };
-        return;
-      }
-
-      const term = useTerminalStore.getState().terminals[portId];
-      const connectedAt = term?.connectedAt ?? null;
-
-      // Reset window + peak on reconnect or port change
-      if (portId !== prevRatePortRef.current || connectedAt !== prevConnectedAtRef.current) {
-        prevRatePortRef.current = portId;
-        prevConnectedAtRef.current = connectedAt;
-        rateWindowRef.current = [];
-        peakRef.current = { rx: 0, tx: 0 };
-      }
-
-      if (connectedAt == null) {
-        setRateDisplay(null);
-        return;
-      }
-
-      const stats = useSystemStore.getState().trafficStats[portId];
-      const rx = stats?.rxTotal ?? 0;
-      const tx = stats?.txTotal ?? 0;
-      const ts = Date.now();
-
-      // Push snapshot, keep last 6 (for 5-second window)
-      const window = rateWindowRef.current;
-      window.push({ ts, rx, tx });
-      if (window.length > 6) window.shift();
-
-      // Compute rate over the window
-      let rxRate = 0;
-      let txRate = 0;
-      if (window.length >= 2) {
-        const oldest = window[0];
-        const newest = window[window.length - 1];
-        const dtSec = (newest.ts - oldest.ts) / 1000;
-        if (dtSec > 0) {
-          rxRate = Math.max(0, (newest.rx - oldest.rx) / dtSec);
-          txRate = Math.max(0, (newest.tx - oldest.tx) / dtSec);
-        }
-      }
-
-      // Track peak
-      if (rxRate > peakRef.current.rx) peakRef.current.rx = rxRate;
-      if (txRate > peakRef.current.tx) peakRef.current.tx = txRate;
-
-      setRateDisplay({
-        duration: formatDuration(ts - connectedAt),
-        rxRate,
-        txRate,
-        peakRx: peakRef.current.rx,
-        peakTx: peakRef.current.tx,
-      });
+      computeRateDisplay();
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [computeRateDisplay]);
+
+  const handleResetTraffic = useCallback(() => {
+    const portId = getActivePortId(useAppStore.getState());
+    if (!portId) return;
+    trafficStats.flushNow();
+    useSystemStore.getState().clearTrafficStats(portId);
+    rateWindowRef.current = [];
+    peakRef.current = { rx: 0, tx: 0 };
+    computeRateDisplay();
+  }, [computeRateDisplay]);
 
   const formatBytes = (bytes: number): string => {
     if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
     if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KB`;
     return `${bytes} B`;
   };
+
+  const jsHeap = readJsHeapMb();
 
   return (
     <>
@@ -171,7 +194,7 @@ const StatusBar: React.FC = () => {
           aria-label={`${t('statusBar.processMem')} ${systemStatus.memoryUsedMb}MB · CPU ${systemStatus.cpuUsage.toFixed(1)}%`}
         >
           <MemoryStick size={12} />
-          {(() => { const jsHeap = readJsHeapMb(); return jsHeap > 0 ? `${t('statusBar.jsHeap')} ${jsHeap}MB · ` : ''; })()}
+          {jsHeap > 0 ? `${t('statusBar.jsHeap')} ${jsHeap}MB · ` : ''}
           {t('statusBar.processMem')} {systemStatus.memoryUsedMb}MB
           <Cpu size={12} /> {systemStatus.cpuUsage.toFixed(1)}%
         </span>
@@ -179,7 +202,7 @@ const StatusBar: React.FC = () => {
 
       <div className="statusbar-right">
         {rateDisplay && (
-          <span className="statusbar-item statusbar-rate-group statusbar-secondary" title={t('statusBar.rate.peak')}>
+          <span className="statusbar-item statusbar-rate-group statusbar-secondary" title={t('statusBar.rate.tooltip')}>
             <Timer size={12} />
             <span className="statusbar-duration">{rateDisplay.duration}</span>
             <span className="statusbar-rate-sep">|</span>
@@ -194,16 +217,22 @@ const StatusBar: React.FC = () => {
           </span>
         )}
         {activeTraffic ? (
-          <>
-            <span className="statusbar-item statusbar-tx statusbar-primary">
+          <button
+            type="button"
+            className="statusbar-traffic-btn statusbar-primary"
+            title={t('statusBar.resetTrafficTooltip')}
+            aria-label={t('statusBar.resetTrafficTooltip')}
+            onClick={handleResetTraffic}
+          >
+            <span className="statusbar-item statusbar-tx">
               <ArrowUpCircle size={12} />
               TX: {formatBytes(activeTraffic.txTotal)}
             </span>
-            <span className="statusbar-item statusbar-rx statusbar-primary">
+            <span className="statusbar-item statusbar-rx">
               <ArrowDownCircle size={12} />
               RX: {formatBytes(activeTraffic.rxTotal)}
             </span>
-          </>
+          </button>
         ) : activePortId ? (
           <span className="statusbar-item statusbar-primary">{t('statusBar.noTraffic')}</span>
         ) : (
@@ -216,7 +245,7 @@ const StatusBar: React.FC = () => {
           {detailsOpen && detailsReady && <div className="statusbar-details-panel" role="dialog" aria-label={t('statusBar.details')}>
             <strong>{t('statusBar.details')}</strong>
             <span>{t('statusBar.processMem')}: {systemStatus.memoryUsedMb} MB · CPU {systemStatus.cpuUsage.toFixed(1)}%</span>
-            <span>{t('statusBar.jsHeap')}: {readJsHeapMb()} MB</span>
+            {jsHeap > 0 && <span>{t('statusBar.jsHeap')}: {jsHeap} MB</span>}
             {rateDisplay && <>
               <span>{rateDisplay.duration}</span>
               <span>{t('statusBar.rate.rx')} {formatRate(rateDisplay.rxRate)} · {t('statusBar.rate.peak')} {formatRate(rateDisplay.peakRx)}</span>

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { filterLostTabIds } from './DisconnectBanner';
-import type { TabItem } from '../../types';
+import { filterLostTabIds, formatLostPortsSummary } from './DisconnectBanner';
+import type { SerialPort, TabItem } from '../../types';
 
 const makeTab = (id: string): TabItem => ({
   kind: 'serial',
@@ -46,5 +46,23 @@ describe('filterLostTabIds', () => {
       { ...plugin, id: 'tool-workspace', boundPortId: null },
     ];
     expect(filterLostTabIds(tabs, (portId) => portId === 'COM3' || portId === 'COM5')).toEqual(['serial-workspace', 'other-workspace']);
+  });
+});
+
+describe('formatLostPortsSummary', () => {
+  const makePort = (id: string, alias?: string): SerialPort => ({
+    id, name: id, alias, status: 'disconnected', type: 'real', isHidden: false,
+  });
+
+  it('includes alias for a single lost port', () => {
+    const tabs = [makeTab('COM3')];
+    const ports = [makePort('COM3', 'MCU')];
+    expect(formatLostPortsSummary(tabs, ports, ['COM3'])).toBe('COM3 (MCU)');
+  });
+
+  it('summarizes more than two lost ports with (+N)', () => {
+    const tabs = [makeTab('COM3'), makeTab('COM5'), makeTab('COM7')];
+    const ports = [makePort('COM3'), makePort('COM5'), makePort('COM7')];
+    expect(formatLostPortsSummary(tabs, ports, ['COM3', 'COM5', 'COM7'])).toBe('COM3, COM5 (+1)');
   });
 });

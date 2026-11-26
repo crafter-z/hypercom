@@ -74,6 +74,29 @@
   color: var(--terminal-rx-color);
 }
 
+.statusbar-traffic-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 20px;
+  padding: 0 var(--space-1);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.statusbar-traffic-btn:hover {
+  background: var(--bg-hover);
+}
+
+.statusbar-traffic-btn:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
 /* ==================== Disconnect Banner ==================== */
 .disconnect-banner {
   display: flex;
@@ -100,14 +123,26 @@
 
 .disconnect-banner-text {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.disconnect-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
 }
 
 .disconnect-banner-view-btn {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 2px 10px;
+  gap: 4px;
+  min-height: 22px;
+  padding: 1px 10px;
   border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: var(--border-radius);
   background: transparent;
@@ -117,8 +152,38 @@
   transition: background var(--transition-fast);
 }
 
-.disconnect-banner-view-btn:hover {
+.disconnect-banner-view-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.15);
+}
+
+.disconnect-banner-view-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.disconnect-banner-view-btn:focus-visible,
+.disconnect-banner-dismiss-btn:focus-visible {
+  outline: 2px solid var(--text-on-accent);
+  outline-offset: 1px;
+}
+
+.disconnect-banner-dismiss-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-on-accent);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.disconnect-banner-dismiss-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
 }
 
 /* ==================== Tab Warning Icon ==================== */

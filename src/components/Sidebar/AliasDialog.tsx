@@ -22,6 +22,8 @@ const AliasDialog: React.FC<AliasDialogProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
   if (!overlayReady) return null;
 
+  const handleSave = () => onSave(value.trim());
+
   return (
     <Modal
       open
@@ -41,11 +43,21 @@ const AliasDialog: React.FC<AliasDialogProps> = ({
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={t('aliasDialog.input.placeholder')}
-        onKeyDown={(e) => { if (e.key === 'Enter') onSave(value); if (e.key === 'Escape') onCancel(); }}
+        onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') onCancel(); }}
       />
       <div className="modal-dialog-actions">
-        <button className="btn" onClick={onCancel}>{t('aliasDialog.cancel')}</button>
-        <button className="btn btn-primary" onClick={() => onSave(value)}>{t('aliasDialog.confirm')}</button>
+        {currentAlias.trim().length > 0 && (
+          <button
+            type="button"
+            className="btn"
+            style={{ marginRight: 'auto' }}
+            onClick={() => onSave('')}
+          >
+            {t('aliasDialog.clear')}
+          </button>
+        )}
+        <button type="button" className="btn" onClick={onCancel}>{t('aliasDialog.cancel')}</button>
+        <button type="button" className="btn btn-primary" onClick={handleSave}>{t('aliasDialog.confirm')}</button>
       </div>
     </Modal>
   );

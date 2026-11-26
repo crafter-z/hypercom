@@ -25,8 +25,25 @@
 }
 
 .sidebar-resize-handle:hover,
-.sidebar-resize-handle.dragging {
+.sidebar-resize-handle.dragging,
+.sidebar-resize-handle:focus-visible {
   background: var(--accent-color);
+  outline: none;
+}
+
+.spin-icon {
+  animation: sidebar-spin 0.9s linear infinite;
+}
+
+@keyframes sidebar-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin-icon {
+    animation: none;
+  }
 }
 
 /* ---- Toolbar ---- */
@@ -99,6 +116,11 @@
 
 .sidebar-search-clear:hover {
   color: var(--text-primary);
+}
+
+.sidebar-search-clear:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
 }
 
 /* ---- List / sections ---- */
@@ -225,6 +247,14 @@
   text-overflow: ellipsis;
 }
 
+.port-item-product {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .port-item-badge {
   flex-shrink: 0;
   padding: 0 var(--space-1);
@@ -294,16 +324,54 @@
 .port-group-header {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
+  gap: 2px;
+  padding: 2px var(--space-1) 2px var(--space-2);
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border-subtle);
-  cursor: pointer;
   transition: background var(--transition-fast);
 }
 
 .port-group-header:hover {
   background: var(--bg-hover);
+}
+
+.port-group-header-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.port-group-menu-btn {
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.port-group-header:hover .port-group-menu-btn,
+.port-group-header:focus-within .port-group-menu-btn,
+.port-group-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-ungrouped-section.drop-active {
+  outline: 2px dashed var(--accent-color);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+
+.sidebar-ungrouped-drop-hint {
+  margin: var(--space-1) var(--space-2) var(--space-2);
+  padding: var(--space-2);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-align: center;
 }
 
 .port-group-chevron {
@@ -545,20 +613,26 @@
 /* Keyboard focus for the port rack: rows and group headers are operable
  * without a mouse (Enter opens/toggles, Space connects, Shift+F10 menu). */
 .port-item:focus-visible,
-.port-group-header:focus-visible {
+.port-group-header-main:focus-visible {
   outline: 2px solid var(--accent-color);
   outline-offset: -2px;
 }
 
 .sidebar-no-results {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--space-2);
   padding: var(--space-3);
   color: var(--text-secondary);
   font-size: var(--text-xs);
   border: 1px dashed var(--border-color);
   border-radius: var(--border-radius);
-  margin: var(--space-2) 0;
+  margin: var(--space-2);
+}
+
+.sidebar-no-results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }

@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bell, Pin, Trash2, X } from 'lucide-react';
 import { severityIcon } from '../shared/Toast/Toast';
@@ -43,6 +43,7 @@ const NotificationCenter: React.FC = () => {
   const setConfigActiveTab = useSystemStore((s) => s.setConfigActiveTab);
   const toggleConfigModal = useSystemStore((s) => s.toggleConfigModal);
   const [clearConfirm, setClearConfirm] = useState(false);
+  const [seenIds, setSeenIds] = useState<ReadonlySet<string>>(() => new Set());
   const overlayReady = usePluginViewOverlay(centerOpen);
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -50,13 +51,36 @@ const NotificationCenter: React.FC = () => {
   // All notifications, newest first. The live stack is newest-at-end and the
   // stash holds older overflow — sorting by createdAt is the single source of
   // order regardless of where each toast currently lives.
-  const all: ToastItem[] = [...stashed, ...toasts].sort((a, b) => b.createdAt - a.createdAt);
+  const all: ToastItem[] = useMemo(
+    () => [...stashed, ...toasts].sort((a, b) => b.createdAt - a.createdAt),
+    [stashed, toasts],
+  );
   const count = all.length;
 
-  // Outside click / Escape closes the panel. The bell button lives inside
-  // wrapRef, so clicking it never dismisses — the button's own onClick toggles.
+  // Mark all current notifications as read whenever NotificationCenter is open.
+  useEffect(() => {
+    if (!centerOpen) return;
+    setSeenIds((prev) => {
+      const currentIds = all.map((item) => item.id);
+      const changed = currentIds.length !== prev.size || currentIds.some((id) => !prev.has(id));
+      return changed ? new Set(currentIds) : prev;
+    });
+  }, [centerOpen, all]);
+
+  const unreadItems = useMemo(
+    () => (centerOpen ? [] : all.filter((item) => !seenIds.has(item.id))),
+    [centerOpen, all, seenIds],
+  );
+  const unreadCount = unreadItems.length;
+  const hasUrgentUnread = unreadItems.some(
+    (item) => item.severity === 'error' || item.severity === 'warning',
+  );
+
+  // Outside click / Escape closes the panel. Disabled while ConfirmDialog is
+  // open so Escape closes the modal cleanly instead of closing the underlying
+  // panel and eating the event.
   const closeCenter = useCallback(() => setCenterOpen(false), [setCenterOpen]);
-  useOutsideDismiss(wrapRef, closeCenter, centerOpen);
+  useOutsideDismiss(wrapRef, closeCenter, centerOpen && !clearConfirm);
 
   return (
     <div className="notify-wrap" ref={wrapRef}>
@@ -69,8 +93,10 @@ const NotificationCenter: React.FC = () => {
         onClick={() => setCenterOpen(!centerOpen)}
       >
         <Bell size={12} />
-        {count > 0 && (
-          <span className="notify-badge">{count > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : count}</span>
+        {unreadCount > 0 && (
+          <span className={`notify-badge${hasUrgentUnread ? ' is-urgent' : ''}`}>
+            {unreadCount > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : unreadCount}
+          </span>
         )}
       </button>
 
@@ -115,22 +141,8 @@ const NotificationCenter: React.FC = () => {
                     toggleConfigModal(true);
                   }
                 };
-                return (
-                  <div
-                    key={toast.id}
-                    className={`notify-row notify-${toast.severity}${actionable ? ' notify-row-actionable' : ''}`}
-                    role={actionable ? 'button' : 'group'}
-                    tabIndex={actionable ? 0 : -1}
-                    title={hasSource ? t('notify.openSource') : opensPluginSettings ? t('notify.openPluginSettings') : undefined}
-                    onClick={activate}
-                    onKeyDown={(event) => {
-                      if (event.target !== event.currentTarget || !actionable) return;
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        activate();
-                      }
-                    }}
-                  >
+                const rowContent = (
+                  <>
                     <div className="notify-row-heading">
                       <span className={`notify-severity-icon notify-severity-${toast.severity}`}><Icon size={14} aria-hidden="true" /></span>
                       {toast.title && <div className="notify-row-title">{toast.title}</div>}
@@ -142,16 +154,37 @@ const NotificationCenter: React.FC = () => {
                       {toast.portId && <span className="notify-row-port">{toast.portId}</span>}
                       <span className="notify-row-time">{formatNotifyTime(toast.createdAt)}</span>
                       {toast.durationMs === 0 && <Pin size={10} aria-hidden="true" />}
+                    </div>
+                  </>
+                );
+                return (
+                  <div
+                    key={toast.id}
+                    className={`notify-row notify-${toast.severity}${actionable ? ' notify-row-actionable' : ''}`}
+                  >
+                    {actionable ? (
                       <button
                         type="button"
-                        className="notify-row-dismiss"
-                        title={t('notify.dismiss')}
-                        aria-label={t('notify.dismiss')}
-                        onClick={(event) => { event.stopPropagation(); dismiss(toast.id); }}
+                        className="notify-row-main"
+                        title={hasSource ? t('notify.openSource') : t('notify.openPluginSettings')}
+                        onClick={activate}
                       >
-                        <X size={11} />
+                        {rowContent}
                       </button>
-                    </div>
+                    ) : (
+                      <div className="notify-row-main">
+                        {rowContent}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="notify-row-dismiss"
+                      title={t('notify.dismiss')}
+                      aria-label={t('notify.dismiss')}
+                      onClick={() => dismiss(toast.id)}
+                    >
+                      <X size={11} />
+                    </button>
                   </div>
                 );
               })}

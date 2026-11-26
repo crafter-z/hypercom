@@ -3,7 +3,7 @@ import type { DragEndEvent } from '@dnd-kit/core';
 import type { PortGroup, SerialPort } from '../../../types';
 import { resetStoresForTests } from '../../../stores/resetStores';
 import { useAppStore } from '../../../stores/useAppStore';
-import { handlePortDragEnd } from './usePortDragEnd';
+import { handlePortDragEnd, UNGROUPED_DROPPABLE_ID } from './usePortDragEnd';
 
 const makePort = (id: string, groupId?: string): SerialPort => ({
   id,
@@ -56,5 +56,18 @@ describe('sidebar port drag ordering', () => {
     handlePortDragEnd(drag('COM3', 'COM1'));
 
     expect(useAppStore.getState().ports.map(port => port.id)).toEqual(['COM3', 'COM1', 'COM2']);
+  });
+
+  it('moves a grouped port to ungrouped when dropped onto the ungrouped drop zone', () => {
+    useAppStore.setState({
+      ports: [makePort('COM1', 'g1')],
+      groups: [makeGroup('g1', ['COM1'])],
+    });
+
+    handlePortDragEnd(drag('COM1', UNGROUPED_DROPPABLE_ID));
+
+    const state = useAppStore.getState();
+    expect(state.ports[0].groupId).toBeUndefined();
+    expect(state.groups[0].portIds).toEqual([]);
   });
 });

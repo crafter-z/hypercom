@@ -7,6 +7,8 @@ import { useAppStore } from '../../../stores/useAppStore';
  * 组。两侧共用同一份拼装函数，避免「注册用 droppable-、解析用 drop-」这类漂移。
  */
 export const GROUP_DROPPABLE_PREFIX = 'droppable-';
+/** Droppable id for the "Ungrouped" section/zone so grouped ports can be dragged out even when no ungrouped ports exist. */
+export const UNGROUPED_DROPPABLE_ID = 'droppable-ungrouped';
 
 export function groupDroppableId(groupId: string): string {
   return `${GROUP_DROPPABLE_PREFIX}${groupId}`;
@@ -39,6 +41,9 @@ export function handlePortDragEnd(event: DragEndEvent): void {
   if (overPort) {
     // Dropped onto a port — use that port's group
     overGroupId = overPort.groupId;
+  } else if (overId === UNGROUPED_DROPPABLE_ID) {
+    // Dropped onto the explicit "Ungrouped" drop zone
+    overGroupId = undefined;
   } else if (overId.startsWith(GROUP_DROPPABLE_PREFIX)) {
     // Dropped onto a group header droppable — use that group directly
     overGroupId = overId.slice(GROUP_DROPPABLE_PREFIX.length);

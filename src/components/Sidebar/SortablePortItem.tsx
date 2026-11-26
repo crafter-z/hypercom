@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../../stores/useAppStore';
+import { findSerialTabByPortId, useAppStore } from '../../stores/useAppStore';
 import type { SerialPort } from '../../types';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import { useSidebarActions } from './SidebarActions';
@@ -8,7 +8,7 @@ import { usePortPluginMenuItems, dispatchPluginUiClick } from '../../hooks/usePl
 import { pluginIcon } from './pluginIcon';
 import {
   Play, Square, Eye, EyeOff, PlugZap, Pencil, Unplug, ExternalLink, GripVertical,
-  Wrench, TerminalSquare, FolderPlus, FolderInput, FolderMinus,
+  Wrench, TerminalSquare, FolderPlus, FolderInput, FolderMinus, Loader2,
 } from 'lucide-react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -72,6 +72,21 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isC
   const statusKey = STATUS_LABEL_KEY[port.status];
   const label = statusKey ? t(statusKey) : port.status;
   const metadataTitle = portMetadataTitle(port);
+  const isConnecting = port.status === 'connecting';
+  const productLabel = !port.alias ? port.product?.trim() : undefined;
+  const connectBtnLabel = isConnecting
+    ? t('sidebar.port.status.connecting')
+    : isConnected
+      ? t('sidebar.port.connectBtn.disconnect')
+      : t('sidebar.port.connectBtn.connect');
+
+  const handleRowClick = () => {
+    const state = useAppStore.getState();
+    const existing = findSerialTabByPortId(state, port.id);
+    if (existing && state.activeTabId !== existing.id) {
+      state.setActiveTab(existing.id);
+    }
+  };
 
   // 串口分组控制：
   //  - 已在组里：移出分组
@@ -140,6 +155,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isC
         tabIndex={0}
         aria-current={isActive ? 'true' : undefined}
         aria-label={`${port.alias || port.name} (${label})`}
+        onClick={handleRowClick}
         onDoubleClick={() => actions.openTab(port.id)}
         onContextMenu={(e) => show(e, items)}
         onKeyDown={(e) => {
@@ -165,6 +181,7 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isC
           <div className="port-item-title">
             <span className="port-item-name">{port.id}</span>
             {port.alias && <span className="port-item-alias">{port.alias}</span>}
+            {productLabel && <span className="port-item-product">{productLabel}</span>}
             {port.type === 'sim' && <span className="port-item-badge sim">{t('sidebar.port.badge.sim')}</span>}
             {port.type === 'virtual' && <span className="port-item-badge">{t('sidebar.port.badge.vcp')}</span>}
             {(port.toolRunning || port.pluginToolRunning) && <span className="port-item-badge tool">TOOL</span>}
@@ -179,12 +196,17 @@ const SortablePortItem: React.FC<SortablePortItemProps> = ({ port, isActive, isC
           </div>
         </div>
         <button
+          type="button"
           className={`icon-btn port-connect-btn${isConnected ? ' connected' : ''}`}
-          title={isConnected ? t('sidebar.port.connectBtn.disconnect') : t('sidebar.port.connectBtn.connect')}
+          title={connectBtnLabel}
+          aria-label={connectBtnLabel}
+          disabled={isConnecting}
           onClick={(e) => { e.stopPropagation(); actions.toggleConnect(port.id); }}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          {isConnected ? <Square size={12} /> : <Play size={12} />}
+          {isConnecting
+            ? <Loader2 size={12} className="spin-icon" />
+            : isConnected ? <Square size={12} /> : <Play size={12} />}
         </button>
       </div>
       {element}
