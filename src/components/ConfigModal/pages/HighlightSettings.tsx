@@ -16,6 +16,16 @@ const HighlightSettings: React.FC = () => {
     page.create({ id: crypto.randomUUID(), name: t('highlightSettings.addSet'), rules: [], isEnabled: true }, beforeId);
   };
 
+  const handleDuplicateSet = (set: HighlightRuleSet) => {
+    const index = page.items.findIndex(item => item.id === set.id);
+    page.create({
+      ...set,
+      id: crypto.randomUUID(),
+      name: t('ruleSetAccordion.duplicateName', { name: set.name }),
+      rules: set.rules.map(rule => ({ ...rule, id: crypto.randomUUID() })),
+    }, page.items[index + 1]?.id);
+  };
+
   const handleAddRule = (setId: string, beforeId?: string) => {
     const set = page.items.find(s => s.id === setId);
     if (!set) return;
@@ -42,6 +52,12 @@ const HighlightSettings: React.FC = () => {
       onSelect={page.toggleExpanded}
       onAdd={() => handleAddSet()}
       onInsert={handleAddSet}
+      onDuplicate={handleDuplicateSet}
+      matchesFilter={(set, q) =>
+        set.name.toLocaleLowerCase().includes(q)
+        || set.rules.some(rule =>
+          rule.name.toLocaleLowerCase().includes(q) || rule.pattern.toLocaleLowerCase().includes(q),
+        )}
       onReorder={page.reorder}
       onDiscard={page.discard}
       dirty={page.dirty}

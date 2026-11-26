@@ -1,5 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { RotateCcw } from 'lucide-react';
 import { useAppStore } from '../../../stores/useAppStore';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { configService, fileService, pluginService } from '../../../services/tauri';
@@ -8,8 +9,10 @@ import { notifyError, notifySuccess } from '../../../stores/useToastStore';
 import { syncPluginListSnapshot } from '../../../utils/pluginConfigSnapshot';
 import { requestEditorLeave } from '../../../utils/editorLeave';
 import { adoptEntityEditorBaselineFromConfig } from '../../../utils/entityEditor';
-import { markOrdinaryConfigSaved } from '../../../hooks/useConfigPersistence';
+import { getOrdinaryConfigDefaults, markOrdinaryConfigSaved, useConfigPersistence } from '../../../hooks/useConfigPersistence';
 import { enqueueConfigWrite } from '../../../utils/configWriteQueue';
+import { applyUiScale } from '../../../utils/uiScale';
+import ConfirmDialog from '../../shared/ConfirmDialog';
 
 /** 配置 bundle 标记，导入时校验文件来源 */
 const BUNDLE_APP = 'hypercom';
@@ -27,25 +30,32 @@ interface ConfigBundle {
   config?: AppConfig;
 }
 
-/** Validate an imported config bundle's config section. Returns error message or null if valid. */
-function validateConfigBundle(bundle: ConfigBundle): string | null {
-  if (!bundle || typeof bundle !== 'object') return 'Invalid bundle format';
+/** Validate an imported config bundle's config section. Returns localized error message or null if valid. */
+function validateConfigBundle(
+  bundle: ConfigBundle,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  if (!bundle || typeof bundle !== 'object') return t('backupSettings.validation.invalidBundle');
   if (bundle.config) {
     const c = bundle.config;
-    if (typeof c.maxDisplayLines !== 'number') return 'Invalid config: maxDisplayLines must be a number';
-    if (typeof c.theme !== 'string') return 'Invalid config: theme must be a string';
-    if (typeof c.language !== 'string') return 'Invalid config: language must be a string';
-    if (c.terminalFontSize !== undefined && typeof c.terminalFontSize !== 'number') return 'Invalid config: terminalFontSize must be a number';
-    if (c.uiScalePercent !== undefined && typeof c.uiScalePercent !== 'number') return 'Invalid config: uiScalePercent must be a number';
-    if (c.autoSaveLog !== undefined && typeof c.autoSaveLog !== 'boolean') return 'Invalid config: autoSaveLog must be a boolean';
+    if (typeof c.maxDisplayLines !== 'number') return t('backupSettings.validation.invalidField', { field: 'maxDisplayLines', type: 'number' });
+    if (typeof c.theme !== 'string') return t('backupSettings.validation.invalidField', { field: 'theme', type: 'string' });
+    if (typeof c.language !== 'string') return t('backupSettings.validation.invalidField', { field: 'language', type: 'string' });
+    if (c.terminalFontSize !== undefined && typeof c.terminalFontSize !== 'number') return t('backupSettings.validation.invalidField', { field: 'terminalFontSize', type: 'number' });
+    if (c.uiScalePercent !== undefined && typeof c.uiScalePercent !== 'number') return t('backupSettings.validation.invalidField', { field: 'uiScalePercent', type: 'number' });
+    if (c.autoSaveLog !== undefined && typeof c.autoSaveLog !== 'boolean') return t('backupSettings.validation.invalidField', { field: 'autoSaveLog', type: 'boolean' });
   }
   return null;
 }
 
 const BackupSettings: React.FC = () => {
   const { t } = useTranslation();
+  const { saveConfig } = useConfigPersistence();
   const importInFlight = React.useRef(false);
   const [importing, setImporting] = React.useState(false);
+  const [confirmReset, setConfirmReset] = React.useState(false);
+  const [resetting, setResetting] = React.useState(false);
+  const busy = importing || resetting;
 
   const handleExport = async () => {
     try {
@@ -82,7 +92,7 @@ const BackupSettings: React.FC = () => {
         notifyError(new Error(t('backupSettings.importInvalid')));
         return;
       }
-      const validationError = validateConfigBundle(bundle);
+      const validationError = validateConfigBundle(bundle, t);
       if (validationError) {
         notifyError(new Error(validationError));
         return;
@@ -117,6 +127,24 @@ const BackupSettings: React.FC = () => {
     }
   };
 
+  const handleResetAll = async () => {
+    setConfirmReset(false);
+    setResetting(true);
+    try {
+      const defaults = getOrdinaryConfigDefaults();
+      if (!(await saveConfig(defaults, true))) return;
+      useAppStore.getState().setConfig(defaults);
+      if (typeof defaults.uiScalePercent === 'number') {
+        void applyUiScale(defaults.uiScalePercent);
+      }
+      notifySuccess('backupSettings.resetSuccess');
+    } catch (e) {
+      notifyError(e);
+    } finally {
+      setResetting(false);
+    }
+  };
+
   return (
     <div className="config-page">
       <p className="config-page-summary">{t('backupSettings.exportImportHint')}</p>
@@ -124,15 +152,33 @@ const BackupSettings: React.FC = () => {
         <section className="backup-action-card" aria-labelledby="backup-export-title">
           <h3 id="backup-export-title" className="config-section-title">{t('backupSettings.exportTitle')}</h3>
           <p className="config-field-hint">{t('backupSettings.exportHint')}</p>
-          <button className="btn btn-sm btn-primary" disabled={importing} onClick={handleExport}>{t('backupSettings.exportButton')}</button>
+          <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={handleExport}>{t('backupSettings.exportButton')}</button>
         </section>
         <section className="backup-action-card backup-action-card-warning" aria-labelledby="backup-import-title">
           <h3 id="backup-import-title" className="config-section-title">{t('backupSettings.importTitle')}</h3>
           <p className="config-field-hint">{t('backupSettings.importHint')}</p>
           <p className="config-field-warning">{t('backupSettings.importRisk')}</p>
-          <button className="btn btn-sm btn-danger" disabled={importing} onClick={handleImport}>{t('backupSettings.importButton')}</button>
+          <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={handleImport}>{t('backupSettings.importButton')}</button>
         </section>
       </div>
+      <section className="backup-action-card backup-action-card-danger" aria-labelledby="backup-reset-title">
+        <h3 id="backup-reset-title" className="config-section-title">{t('backupSettings.resetTitle')}</h3>
+        <p className="config-field-hint">{t('backupSettings.resetHint')}</p>
+        <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => setConfirmReset(true)}>
+          <RotateCcw size={13} aria-hidden="true" />
+          {t('backupSettings.resetButton')}
+        </button>
+      </section>
+      <ConfirmDialog
+        open={confirmReset}
+        title={t('backupSettings.resetConfirmTitle')}
+        message={t('backupSettings.resetConfirmMessage')}
+        confirmLabel={t('backupSettings.resetButton')}
+        cancelLabel={t('confirmDialog.cancel')}
+        danger
+        onConfirm={() => { void handleResetAll(); }}
+        onCancel={() => setConfirmReset(false)}
+      />
     </div>
   );
 };

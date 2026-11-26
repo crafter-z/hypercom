@@ -1,5 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { AlertTriangle } from 'lucide-react';
 import type { PluginManifestView, PluginView } from '../../../types';
 import {
   capabilityDelta, effectivePermissions, groupedPermissions, hasTrustedViews, httpUrlScope, initialReviewSelection,
@@ -7,6 +8,8 @@ import {
 } from '../../../utils/pluginPermissionReview';
 import { useDialogLifecycle } from '../../shared/useDialogLifecycle';
 import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
+
+const ELEVATED_PERMISSIONS = new Set(['shell:execute']);
 
 export interface PendingPermissionReview {
   plugin: PluginView;
@@ -94,19 +97,38 @@ export function PluginPermissionDialog({ review, working, onCancel, onApply }: {
       {displayed.length === 0 && <p className="settings-hint">{t(editable ? 'plugins.noPermissions' : 'plugins.review.noGrants')}</p>}
       {groupedPermissions(displayed).map(({ group, permissions }) => <section key={group}>
         <strong>{t(`plugins.review.group.${group}`)}</strong>
-        <div>
-          {permissions.map(permission => editable ? <label key={permission} className="plugin-perm-item">
-            <input type="checkbox" checked={selected.includes(permission)} disabled={working} onChange={event => {
-              const checked = event.target.checked;
-              setSelected(current => checked ? [...current, permission] : current.filter(candidate => candidate !== permission));
-            }} />
-            <PermissionName permission={permission} />
-          </label> : <div key={permission} className="settings-hint"><PermissionName permission={permission} /></div>)}
+        <div className="plugin-perm-group-items">
+          {permissions.map(permission => {
+            const elevated = ELEVATED_PERMISSIONS.has(permission);
+            return editable ? (
+              <div key={permission} className={elevated ? 'plugin-perm-elevated-row' : undefined}>
+                <label className={`plugin-perm-item${elevated ? ' plugin-perm-item--elevated' : ''}`}>
+                  <input type="checkbox" checked={selected.includes(permission)} disabled={working} onChange={event => {
+                    const checked = event.target.checked;
+                    setSelected(current => checked ? [...current, permission] : current.filter(candidate => candidate !== permission));
+                  }} />
+                  {elevated && <AlertTriangle size={13} className="plugin-perm-risk-icon" aria-hidden="true" />}
+                  <PermissionName permission={permission} />
+                </label>
+                {elevated && <span className="plugin-perm-risk-badge">{t('plugins.review.elevatedBadge')}</span>}
+              </div>
+            ) : (
+              <div key={permission} className={elevated ? 'plugin-perm-elevated-readonly' : 'settings-hint'}>
+                {elevated && <AlertTriangle size={12} className="plugin-perm-risk-icon" aria-hidden="true" />}
+                <PermissionName permission={permission} />
+                {elevated && <span className="plugin-perm-risk-badge">{t('plugins.review.elevatedBadge')}</span>}
+              </div>
+            );
+          })}
         </div>
         <Scope manifest={manifest} permissions={permissions} />
       </section>)}
-      {needsTrust && <section>
-        <strong>{t('plugins.trustedWebTitle')}</strong>
+      {needsTrust && <section className="plugin-trusted-web-section plugin-trusted-web-section--elevated">
+        <div className="plugin-trusted-web-heading">
+          <AlertTriangle size={14} className="plugin-perm-risk-icon" aria-hidden="true" />
+          <strong>{t('plugins.trustedWebTitle')}</strong>
+          <span className="plugin-perm-risk-badge">{t('plugins.review.elevatedBadge')}</span>
+        </div>
         <p className="settings-hint">{t('plugins.trustedWebDescription')}</p>
         <ul className="settings-hint">
           <li>{t('plugins.trustedWebNetwork')}</li>
@@ -114,8 +136,9 @@ export function PluginPermissionDialog({ review, working, onCancel, onApply }: {
           <li>{t('plugins.trustedWebClipboard')}</li>
           <li>{t('plugins.trustedWebStorage')}</li>
         </ul>
-        <label className="plugin-perm-item">
+        <label className="plugin-perm-item plugin-perm-item--elevated">
           <input type="checkbox" checked={trustWeb} disabled={working} onChange={event => setTrustWeb(event.target.checked)} />
+          <AlertTriangle size={13} className="plugin-perm-risk-icon" aria-hidden="true" />
           {t('plugins.trustedWebAccept')}
         </label>
       </section>}
@@ -125,14 +148,23 @@ export function PluginPermissionDialog({ review, working, onCancel, onApply }: {
         {trustWeb && <p>{t('plugins.review.willTrust')}</p>}
         {!delta.added.length && !delta.removed.length && !trustWeb && <p>{t('plugins.review.noChanges')}</p>}
       </section>}
-      {staysDisabled && <p className="settings-hint">{t('plugins.review.trustRequired')}</p>}
       {(technicalPermissions.length > 0 || needsTrust || previewDiff?.trustChanged) && <details>
         <summary>{t('plugins.review.advanced')}</summary>
         <div className="plugin-permission-dialog-list">
-          {technicalPermissions.map(permission => <code key={permission}>{permission}</code>)}
-          {(needsTrust || previewDiff?.trustChanged) && <code>trusted-web</code>}
+          {technicalPermissions.map(permission => (
+            <code key={permission} className={ELEVATED_PERMISSIONS.has(permission) ? 'plugin-perm-code--elevated' : undefined}>
+              {permission}
+            </code>
+          ))}
+          {(needsTrust || previewDiff?.trustChanged) && <code className="plugin-perm-code--elevated">trusted-web</code>}
         </div>
       </details>}
+      {staysDisabled && (
+        <div className="plugin-permission-warning-callout" role="note">
+          <AlertTriangle size={14} className="plugin-perm-risk-icon" aria-hidden="true" />
+          <span>{t('plugins.review.trustRequired')}</span>
+        </div>
+      )}
       <div className="plugin-permission-dialog-actions">
         <button ref={cancelRef} className="btn" disabled={working} onClick={onCancel}>{t(intent === 'install' ? 'plugins.permissionPromptLater' : 'plugins.trustedWebCancel')}</button>
         <button className="btn btn-primary" disabled={working || staysDisabled || noChange}

@@ -15,11 +15,21 @@ export function canCancelDirectoryInstall(state: DirectoryInstallPanelState): bo
     (state.cancel === 'none' || state.cancel === 'failed');
 }
 
+export function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
 export function PluginSettingsInstallProgress({ state, onCancel }: {
   state: DirectoryInstallPanelState;
   onCancel: () => void;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const ready = usePluginViewOverlay();
   const dialogRef = React.useRef<HTMLDivElement>(null);
   const titleId = React.useId();
@@ -34,9 +44,13 @@ export function PluginSettingsInstallProgress({ state, onCancel }: {
     : cancelling ? 'plugins.installProgress.cancelling'
     : state.cancel === 'notFound' ? 'plugins.installProgress.finishing'
     : `plugins.installProgress.${phase}`);
-  const bytes = (value: number): string => value.toLocaleString(i18n?.resolvedLanguage);
   const copying = state.progress?.phase === 'copying' ? state.progress : null;
-  const detail = copying ? t('plugins.installProgress.amount', { copied: bytes(copying.copiedBytes), total: bytes(copying.totalBytes) }) : undefined;
+  const detail = copying
+    ? t('plugins.installProgress.amount', {
+        copied: formatByteSize(copying.copiedBytes),
+        total: formatByteSize(copying.totalBytes),
+      })
+    : undefined;
   return <div className="modal-overlay" role="presentation" onClick={event => event.stopPropagation()}>
     <div ref={dialogRef} className="modal-dialog-compact plugin-permission-dialog" tabIndex={-1}
       role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={statusId}>
@@ -46,7 +60,7 @@ export function PluginSettingsInstallProgress({ state, onCancel }: {
         <progress aria-label={t('plugins.installProgress.copying')} aria-valuetext={detail}
           max={Math.max(1, copying.totalBytes)} value={copying.copiedBytes} />
         <p>{detail}</p>
-        <p className="settings-hint">{t('plugins.installProgress.space', { available: bytes(copying.availableBytes) })}</p>
+        <p className="settings-hint">{t('plugins.installProgress.space', { available: formatByteSize(copying.availableBytes) })}</p>
       </> : <progress aria-label={status} />}
       {state.cancel === 'failed' && !publishing && <p role="alert">{t('plugins.installProgress.cancelFailed')}</p>}
       <div className="plugin-permission-dialog-actions">

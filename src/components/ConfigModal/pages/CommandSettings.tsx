@@ -1,16 +1,43 @@
-import React, { useId, useState } from 'react';
+import React, { useCallback, useId, useRef, useState } from 'react';
 import { CircleHelp, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SortableEditorList from '../../shared/SortableEditorList';
 import { orderedCommands, renumberCommands } from '../../../utils/commandOrder';
-import type { CommandStepKind, SendCommandSet } from '../../../types';
+import type { CommandStepKind, SendCommand, SendCommandSet } from '../../../types';
 import { createCommandStep, foldDelayIntoRoundGap, isEnhancedCommandSet, runsMultipleRounds } from '../../../utils/commandSteps';
 import { formatDurationMs, roundDurationMs, totalDurationMs } from '../../../utils/flowTiming';
 import RuleSetAccordion from '../RuleSetAccordion';
 import SendCmdEditor from '../editors/SendCmdEditor';
 import { useEntityPage } from '../hooks/useEntityPage';
 import { NumericInput } from '../../shared/NumericInput';
+import { useOutsideDismiss } from '../../shared/useOutsideDismiss';
 import '../../../styles/command-settings.css';
+
+const CommandBehaviorHelp: React.FC<{ set: SendCommandSet }> = ({ set }) => {
+  const { t } = useTranslation();
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const [open, setOpen] = useState(false);
+  const dismiss = useCallback(() => {
+    if (detailsRef.current) detailsRef.current.open = false;
+    setOpen(false);
+  }, []);
+  useOutsideDismiss(detailsRef, dismiss, open);
+  return (
+    <details
+      ref={detailsRef}
+      className="command-behavior-details"
+      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary title={t('commandSettings.behaviorDetails')} aria-label={t('commandSettings.behaviorDetails')}><CircleHelp size={14} /></summary>
+      <div className="command-help-content">
+        <p>{t('commandSettings.accordionDescription')} {t('editor.changesNextRun')}</p>
+        <p>{t('commandSettings.repeatTooltip')}</p>
+        <p>{t(isEnhancedCommandSet(set) ? 'commandSettings.enhancedHint' : 'commandSettings.legacyHint')}</p>
+        <p>{t('commandSettings.timingExcludesDevice')}</p>
+      </div>
+    </details>
+  );
+};
 
 /**
  * Command-set fields are not app settings, so their input range is local —
@@ -39,6 +66,16 @@ const CommandSettings: React.FC = () => {
     }, beforeId);
   };
 
+  const handleDuplicateSet = (set: SendCommandSet) => {
+    const index = page.items.findIndex(item => item.id === set.id);
+    page.create({
+      ...set,
+      id: crypto.randomUUID(),
+      name: t('ruleSetAccordion.duplicateName', { name: set.name }),
+      commands: renumberCommands(orderedCommands(set.commands).map(cmd => ({ ...cmd, id: crypto.randomUUID() }))),
+    }, page.items[index + 1]?.id);
+  };
+
   const handleAddCmd = (setId: string, beforeId?: string, kind: CommandStepKind = 'send') => {
     const set = page.items.find(s => s.id === setId);
     if (!set) return;
@@ -56,6 +93,22 @@ const CommandSettings: React.FC = () => {
     });
   };
 
+  const handleDuplicateCmd = (setId: string, cmd: SendCommand) => {
+    const set = page.items.find(s => s.id === setId);
+    if (!set) return;
+    const cmdId = crypto.randomUUID();
+    const commands = orderedCommands(set.commands);
+    const index = commands.findIndex(command => command.id === cmd.id);
+    const copy: SendCommand = {
+      ...cmd,
+      id: cmdId,
+      name: t('ruleSetAccordion.duplicateName', { name: cmd.name }),
+    };
+    commands.splice(index < 0 ? commands.length : index + 1, 0, copy);
+    setLastAddedCmdId(cmdId);
+    page.update(setId, { commands: renumberCommands(commands) });
+  };
+
   return (
     <div className="command-settings">
       <RuleSetAccordion<SendCommandSet>
@@ -67,6 +120,13 @@ const CommandSettings: React.FC = () => {
         onSelect={page.toggleExpanded}
         onAdd={() => handleAddSet()}
         onInsert={handleAddSet}
+        onDuplicate={handleDuplicateSet}
+        itemCount={(set) => set.commands.length}
+        matchesFilter={(set, q) =>
+          set.name.toLocaleLowerCase().includes(q)
+          || set.commands.some(cmd =>
+            cmd.name.toLocaleLowerCase().includes(q) || cmd.content.toLocaleLowerCase().includes(q),
+          )}
         onReorder={page.reorder}
         onDiscard={page.discard}
         dirty={page.dirty}
@@ -117,15 +177,7 @@ const CommandSettings: React.FC = () => {
                 <button type="button" className="btn btn-sm" disabled={page.saving} onClick={() => handleAddCmd(set.id)}><Plus size={12} />{t('commandSettings.addCommandButton')}</button>
                 <button type="button" className="btn btn-sm" disabled={page.saving} onClick={() => handleAddCmd(set.id, undefined, 'setParams')}><Plus size={12} />{t('commandSettings.addParams')}</button>
               </div>
-              <details className="command-behavior-details">
-                <summary title={t('commandSettings.behaviorDetails')} aria-label={t('commandSettings.behaviorDetails')}><CircleHelp size={14} /></summary>
-                <div className="command-help-content">
-                  <p>{t('commandSettings.accordionDescription')} {t('editor.changesNextRun')}</p>
-                  <p>{t('commandSettings.repeatTooltip')}</p>
-                  <p>{t(isEnhancedCommandSet(set) ? 'commandSettings.enhancedHint' : 'commandSettings.legacyHint')}</p>
-                  <p>{t('commandSettings.timingExcludesDevice')}</p>
-                </div>
-              </details>
+              <CommandBehaviorHelp set={set} />
             </div>
             {ordered.length > 0 && <div className="command-column-headings" aria-hidden="true">
               <span /><span>#</span><span>{t('sendCmdEditor.namePlaceholder')}</span>
@@ -141,6 +193,7 @@ const CommandSettings: React.FC = () => {
                 isRoundFinal={idx === ordered.length - 1}
                 loops={loops}
                 onFoldIntoRoundGap={() => page.update(set.id, foldDelayIntoRoundGap(set, cmd.id))}
+                onDuplicate={() => handleDuplicateCmd(set.id, cmd)}
                 onInsert={() => handleAddCmd(set.id, cmd.id)}
                 onInsertBelow={() => handleAddCmd(set.id, ordered[idx + 1]?.id)}
                 autoFocus={cmd.id === lastAddedCmdId}

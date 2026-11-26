@@ -1,11 +1,14 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDownToLine, ArrowUpToLine, CircleHelp, Trash2 } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, CircleHelp, Copy, Trash2 } from 'lucide-react';
 import type { CommandStepKind, SendCommand } from '../../../types';
+import { useAppStore } from '../../../stores/useAppStore';
 import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../../utils/sendUtils';
 import { COMMAND_BAUD_RATE, commandStepKindPatch, getCommandStepKind } from '../../../utils/commandSteps';
+import { isValidHexInput, parseHexBytes } from '../../../utils/hexUtils';
 import { AfterDelayField } from '../../shared/AfterDelayField';
 import { NumericInput } from '../../shared/NumericInput';
+import { useOutsideDismiss } from '../../shared/useOutsideDismiss';
 
 interface SendCmdEditorProps {
   cmd: SendCommand;
@@ -14,6 +17,7 @@ interface SendCmdEditorProps {
   onDelete: () => void;
   autoFocus?: boolean;
   handle?: React.ReactNode;
+  onDuplicate?: () => void;
   onInsert?: () => void;
   onInsertBelow?: () => void;
   /** 本轮最后一步的 delay 不生效，交给共享等待字段就地说明。 */
@@ -23,13 +27,26 @@ interface SendCmdEditorProps {
 }
 
 const SendCmdEditor: React.FC<SendCmdEditorProps> = ({
-  cmd, cmdIdx, onChange, onDelete, autoFocus, handle, onInsert, onInsertBelow,
+  cmd, cmdIdx, onChange, onDelete, autoFocus, handle, onDuplicate, onInsert, onInsertBelow,
   isRoundFinal = false, loops = false, onFoldIntoRoundGap,
 }) => {
   const { t } = useTranslation();
+  const defaultBaudRates = useAppStore((s) => s.config.defaultBaudRates);
+  const baudListId = useId();
   const contentRef = useRef<HTMLInputElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const helpRef = useRef<HTMLDetailsElement>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const dismissHelp = useCallback(() => {
+    if (helpRef.current) helpRef.current.open = false;
+    setHelpOpen(false);
+  }, []);
+  useOutsideDismiss(helpRef, dismissHelp, helpOpen);
+
   const kind = getCommandStepKind(cmd);
+  const isHex = kind === 'send' && cmd.type === 'hex';
+  const hexInvalid = isHex && !isValidHexInput(cmd.content);
+  const hexByteCount = isHex && !hexInvalid ? parseHexBytes(cmd.content).length : 0;
 
   useEffect(() => {
     if (autoFocus) {
@@ -66,23 +83,54 @@ const SendCmdEditor: React.FC<SendCmdEditorProps> = ({
           </label>
         </> : <span className="command-step-format-placeholder" />}
         <div className="command-step-actions">
+          {onDuplicate && <button type="button" className="btn btn-icon btn-sm" title={t('sendCmdEditor.duplicate')} aria-label={t('sendCmdEditor.duplicate')} onClick={onDuplicate}><Copy size={12} /></button>}
           {onInsert && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={onInsert}><ArrowUpToLine size={12} /></button>}
           {onInsertBelow && <button type="button" className="btn btn-icon btn-sm" title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={onInsertBelow}><ArrowDownToLine size={12} /></button>}
           <button type="button" className="btn btn-icon btn-sm command-step-delete" onClick={onDelete} title={t('sendCmdEditor.delete')} aria-label={t('sendCmdEditor.delete')}><Trash2 size={12} /></button>
         </div>
       </div>
       {kind !== 'unknown' ? <div className="command-step-payload">
-        {kind === 'send' ? <input ref={contentRef} className="input command-step-content" value={cmd.content} onChange={e => onChange({ content: e.target.value })} aria-label={t('sendCmdEditor.contentPlaceholder')} placeholder={t('sendCmdEditor.contentPlaceholder')} spellCheck={false} /> : <div className="command-step-params">
+        {kind === 'send' ? <div className="command-step-content-wrap">
+          <input
+            ref={contentRef}
+            className={`input command-step-content${hexInvalid ? ' is-invalid' : ''}`}
+            aria-invalid={hexInvalid}
+            value={cmd.content}
+            onChange={e => onChange({ content: e.target.value })}
+            aria-label={t('sendCmdEditor.contentPlaceholder')}
+            placeholder={t('sendCmdEditor.contentPlaceholder')}
+            spellCheck={false}
+          />
+          {isHex && !hexInvalid && hexByteCount > 0 && (
+            <span className="chip command-hex-bytes">{t('sendCmdEditor.hexByteCount', { count: hexByteCount })}</span>
+          )}
+        </div> : <div className="command-step-params">
           <label>{t('sendCmdEditor.baudRate')}
-            <NumericInput className="input" value={cmd.baudRate ?? 115200} min={COMMAND_BAUD_RATE[0]} max={COMMAND_BAUD_RATE[1]} onCommit={baudRate => onChange({ baudRate })} aria-label={t('sendCmdEditor.baudRate')} />
+            <NumericInput
+              className="input"
+              list={baudListId}
+              value={cmd.baudRate ?? 115200}
+              min={COMMAND_BAUD_RATE[0]}
+              max={COMMAND_BAUD_RATE[1]}
+              onCommit={baudRate => onChange({ baudRate })}
+              aria-label={t('sendCmdEditor.baudRate')}
+            />
           </label>
-          <details className="command-step-help">
+          <datalist id={baudListId}>
+            {defaultBaudRates.map(rate => <option key={rate} value={rate} />)}
+          </datalist>
+          <details
+            ref={helpRef}
+            className="command-step-help"
+            onToggle={(event) => setHelpOpen((event.currentTarget as HTMLDetailsElement).open)}
+          >
             <summary title={t('sendCmdEditor.paramsHint')} aria-label={t('sendCmdEditor.paramsHint')}><CircleHelp size={13} /></summary>
             <p className="command-help-content">{t('sendCmdEditor.paramsHint')}</p>
           </details>
         </div>}
         <AfterDelayField compact delay={cmd.delay} onCommit={delay => onChange({ delay })}
           isRoundFinal={isRoundFinal} loops={loops} onFoldIntoRoundGap={onFoldIntoRoundGap} />
+        {hexInvalid && <div className="command-hex-error" role="alert">{t('editor.invalidHex')}</div>}
       </div> : <div className="editor-error" role="alert">{t('editor.unknownCommandStep')}</div>}
     </div>
   );

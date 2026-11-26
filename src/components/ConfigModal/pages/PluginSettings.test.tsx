@@ -26,7 +26,10 @@ vi.mock('../../../hooks/useConfigPersistence', () => ({
 }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }));
 vi.mock('../../shared/usePluginViewOverlay', () => ({ usePluginViewOverlay: () => true }));
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('react-i18next', () => ({
+  initReactI18next: { type: '3rdParty', init: () => {} },
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const trustedPlugin = (): PluginView => ({
@@ -151,10 +154,12 @@ it('asks for explicit confirmation before replacing a same or lower version', as
     .mockRejectedValueOnce(new Error('plugin_replace_confirmation_required: 插件 demo 已安装（版本 1.0.0）'))
     .mockResolvedValueOnce(null);
   mocks.isReplaceError.mockReturnValue(true);
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
   await render();
   await click('plugins.installZip');
-  expect(confirm).toHaveBeenCalledTimes(1);
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(dialog).not.toBeNull();
+  expect(mocks.api.installPlugin).toHaveBeenCalledTimes(1);
+  await click('confirmDialog.confirm');
   expect(mocks.api.installPlugin).toHaveBeenNthCalledWith(1, 'archive.zip');
   expect(mocks.api.installPlugin).toHaveBeenNthCalledWith(2, 'archive.zip', true, 'generation-a');
 });
@@ -163,10 +168,11 @@ it('keeps the installed version when replacement is cancelled', async () => {
   mocks.open.mockResolvedValue('archive.zip');
   mocks.api.installPlugin.mockRejectedValueOnce(new Error('plugin_replace_confirmation_required: 插件 demo 已安装（版本 1.0.0）'));
   mocks.isReplaceError.mockReturnValue(true);
-  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
   await render();
   await click('plugins.installZip');
-  expect(confirm).toHaveBeenCalledTimes(1);
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(dialog).not.toBeNull();
+  await click('confirmDialog.cancel');
   expect(mocks.api.installPlugin).toHaveBeenCalledTimes(1);
   expect(container.querySelector('[role="dialog"]')).toBeNull();
 });

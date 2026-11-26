@@ -1,8 +1,10 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, ArrowDownToLine, ArrowUpToLine, Bold, Info, Italic, Moon, Sun, Trash2 } from 'lucide-react';
-import type { HighlightRule } from '../../../types';
+import type { AppConfig, HighlightRule } from '../../../types';
+import { useAppStore } from '../../../stores/useAppStore';
 import { safeCssColor } from '../../../utils/cssColor';
+import { isSafeRegexPattern } from '../../../utils/safeRegex';
 import '../../../styles/highlight-editor.css';
 import '../../../styles/rule-preview.css';
 
@@ -11,8 +13,31 @@ const LIGHT_SURFACE = [255, 255, 255] as const;
 const DARK_SURFACE = [25, 26, 30] as const;
 const CONTRAST_WARNING_THRESHOLD = 4.5;
 
+const CURATED_SWATCHES = [
+  '#f48771',
+  '#ff9e64',
+  '#e0af68',
+  '#4ec9b0',
+  '#5eafff',
+  '#bb9af7',
+  '#d32f2f',
+  '#1b5e20',
+] as const;
+
 type Rgba = [number, number, number, number];
 export type HighlightContrast = { light: number; dark: number };
+
+function resolveActiveTheme(themeSetting: AppConfig['theme']): 'light' | 'dark' {
+  if (themeSetting === 'light') return 'light';
+  if (themeSetting === 'dark') return 'dark';
+  if (typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light') {
+    return 'light';
+  }
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: light)').matches) {
+    return 'light';
+  }
+  return 'dark';
+}
 
 /**
  * Contrast is deliberately a small parser for the color spellings that can be
@@ -74,22 +99,57 @@ const HighlightRuleEditor: React.FC<{
   autoFocus?: boolean;
 }> = ({ rule, onChange, onDelete, handle, onInsert, onInsertBelow, autoFocus }) => {
   const { t } = useTranslation();
+  const themeSetting = useAppStore((s) => s.config.theme);
   const patternRef = useRef<HTMLInputElement>(null);
   const contrastId = useId();
   const [showContrast, setShowContrast] = useState(false);
+  const [colorDraft, setColorDraft] = useState(rule.color ?? '');
+  useEffect(() => { setColorDraft(rule.color ?? ''); }, [rule.color]);
+
+  const activeTheme = resolveActiveTheme(themeSetting);
   const previewColor = safeCssColor(rule.color);
-  const pickerColor = previewColor ?? (rule.color ? '#000000' : '#ff6b6b');
+  const pickerColor = previewColor && /^#[0-9a-fA-F]{6}$/.test(previewColor) ? previewColor : (rule.color ? '#000000' : '#ff6b6b');
+  const colorDraftInvalid = colorDraft.trim().length > 0 && !safeCssColor(colorDraft.trim());
+  const invalidRegex = rule.isRegex && rule.pattern.length > 0 && !isSafeRegexPattern(rule.pattern);
+
   const contrast = getHighlightContrast(rule.color);
-  const contrastWarning = contrast !== null && Math.min(contrast.light, contrast.dark) < CONTRAST_WARNING_THRESHOLD;
+  const activeContrast = contrast ? (activeTheme === 'light' ? contrast.light : contrast.dark) : null;
+  const oppositeContrast = contrast ? (activeTheme === 'light' ? contrast.dark : contrast.light) : null;
+  const failsActiveTheme = activeContrast !== null && activeContrast < CONTRAST_WARNING_THRESHOLD;
+  const failsOppositeTheme = !failsActiveTheme && oppositeContrast !== null && oppositeContrast < CONTRAST_WARNING_THRESHOLD;
+
   const previewStyle = {
     '--preview-color': previewColor ?? 'inherit',
     '--preview-weight': rule.bold ? 'bold' : 'normal',
     '--preview-style': rule.italic ? 'italic' : 'normal',
   } as React.CSSProperties;
   const sample = rule.pattern || t('highlightRuleEditor.emptyPattern');
+  const contrastHintText = failsActiveTheme
+    ? ` — ${t('highlightRuleEditor.contrastWarning')}`
+    : failsOppositeTheme
+      ? ` — ${t('highlightRuleEditor.contrastOtherThemeHint')}`
+      : '';
   const contrastLabel = contrast
-    ? `${t('highlightRuleEditor.backgroundLight')} · ${t('highlightRuleEditor.contrastRatio', { ratio: contrast.light.toFixed(1) })}; ${t('highlightRuleEditor.backgroundDark')} · ${t('highlightRuleEditor.contrastRatio', { ratio: contrast.dark.toFixed(1) })}${contrastWarning ? ` — ${t('highlightRuleEditor.contrastWarning')}` : ''}`
+    ? `${t('highlightRuleEditor.backgroundLight')} · ${t('highlightRuleEditor.contrastRatio', { ratio: contrast.light.toFixed(1) })}; ${t('highlightRuleEditor.backgroundDark')} · ${t('highlightRuleEditor.contrastRatio', { ratio: contrast.dark.toFixed(1) })}${contrastHintText}`
     : t('highlightRuleEditor.contrastUnavailable');
+
+  const handleColorTextChange = (raw: string) => {
+    setColorDraft(raw);
+    const trimmed = raw.trim();
+    if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(trimmed)) {
+      onChange({ color: trimmed });
+    }
+  };
+  const commitColorText = () => {
+    const trimmed = colorDraft.trim();
+    const safe = safeCssColor(trimmed);
+    if (safe) {
+      if (safe !== rule.color) onChange({ color: safe });
+      setColorDraft(safe);
+    } else {
+      setColorDraft(rule.color ?? '');
+    }
+  };
 
   useEffect(() => {
     if (autoFocus) {
@@ -103,14 +163,54 @@ const HighlightRuleEditor: React.FC<{
       <div className="highlight-rule-editor__line highlight-rule-editor__line--main">
         <span className="highlight-rule-editor__handle">{handle}</span>
         <input className="input highlight-rule-editor__name" value={rule.name} onChange={e => onChange({ name: e.target.value })} aria-label={t('highlightRuleEditor.namePlaceholder')} placeholder={t('highlightRuleEditor.namePlaceholder')} />
-        <input ref={patternRef} className="input highlight-rule-editor__pattern" value={rule.pattern} onChange={e => onChange({ pattern: e.target.value })} aria-label={t('highlightRuleEditor.patternPlaceholder')} placeholder={t('highlightRuleEditor.patternPlaceholder')} spellCheck={false} />
+        <input
+          ref={patternRef}
+          className={`input highlight-rule-editor__pattern${invalidRegex ? ' is-invalid' : ''}`}
+          aria-invalid={invalidRegex}
+          value={rule.pattern}
+          onChange={e => onChange({ pattern: e.target.value })}
+          aria-label={t('highlightRuleEditor.patternPlaceholder')}
+          placeholder={t('highlightRuleEditor.patternPlaceholder')}
+          spellCheck={false}
+        />
         <label className="checkbox-wrapper highlight-rule-editor__regex">
           <input type="checkbox" checked={rule.isRegex} onChange={e => onChange({ isRegex: e.target.checked })} />{t('highlightRuleEditor.regexLabel')}
         </label>
         <button type="button" className="icon-btn highlight-rule-editor__delete" onClick={onDelete} title={t('highlightRuleEditor.deleteRule')} aria-label={t('highlightRuleEditor.deleteRule')}><Trash2 size={13} /></button>
       </div>
+      {invalidRegex && (
+        <div className="highlight-rule-editor__validation" role="alert">{t('editor.invalidRegex')}</div>
+      )}
       <div className="highlight-rule-editor__line highlight-rule-editor__line--style">
-        <input className="highlight-rule-editor__color" type="color" value={pickerColor} onChange={e => onChange({ color: e.target.value })} aria-label={t('highlightRuleEditor.colorLabel')} />
+        <div className="highlight-rule-editor__color-group">
+          <input className="highlight-rule-editor__color" type="color" value={pickerColor} onChange={e => onChange({ color: e.target.value })} aria-label={t('highlightRuleEditor.colorLabel')} />
+          <input
+            type="text"
+            className={`input highlight-rule-editor__hex-input${colorDraftInvalid ? ' is-invalid' : ''}`}
+            value={colorDraft}
+            onChange={e => handleColorTextChange(e.target.value)}
+            onBlur={commitColorText}
+            onKeyDown={e => { if (e.key === 'Enter') commitColorText(); }}
+            aria-label={t('highlightRuleEditor.hexColorLabel')}
+            aria-invalid={colorDraftInvalid}
+            placeholder="#RRGGBB"
+            spellCheck={false}
+          />
+          <div className="highlight-rule-editor__swatches" role="group" aria-label={t('highlightRuleEditor.swatchesLabel')}>
+            {CURATED_SWATCHES.map(swatch => (
+              <button
+                key={swatch}
+                type="button"
+                className={`highlight-rule-editor__swatch${rule.color?.toLowerCase() === swatch ? ' is-active' : ''}`}
+                style={{ backgroundColor: swatch }}
+                title={swatch}
+                aria-label={swatch}
+                aria-pressed={rule.color?.toLowerCase() === swatch}
+                onClick={() => onChange({ color: swatch })}
+              />
+            ))}
+          </div>
+        </div>
         <button type="button" className={`icon-btn highlight-rule-editor__toggle${rule.bold ? ' active' : ''}`}
           aria-pressed={!!rule.bold} title={t('highlightRuleEditor.boldLabel')} aria-label={t('highlightRuleEditor.boldLabel')}
           onClick={() => onChange({ bold: !rule.bold })}><Bold size={14} /></button>
@@ -127,10 +227,16 @@ const HighlightRuleEditor: React.FC<{
             <span className="rule-preview__sample-text">{sample}</span>
           </div>
         </div>
-        <button type="button" className={`icon-btn highlight-rule-editor__contrast-toggle${contrastWarning ? ' rule-preview__contrast--warning' : ''}`}
-          aria-expanded={showContrast} aria-controls={showContrast ? contrastId : undefined} title={contrastLabel} aria-label={contrastLabel}
-          onClick={() => setShowContrast(value => !value)}>
-          {contrastWarning ? <AlertTriangle size={13} /> : <Info size={13} />}
+        <button
+          type="button"
+          className={`icon-btn highlight-rule-editor__contrast-toggle${failsActiveTheme ? ' rule-preview__contrast--warning' : failsOppositeTheme ? ' highlight-rule-editor__contrast--other' : ''}`}
+          aria-expanded={showContrast}
+          aria-controls={showContrast ? contrastId : undefined}
+          title={contrastLabel}
+          aria-label={contrastLabel}
+          onClick={() => setShowContrast(value => !value)}
+        >
+          {failsActiveTheme ? <AlertTriangle size={13} /> : <Info size={13} />}
         </button>
         <div className="highlight-rule-editor__insert-actions">
           {onInsert && <button type="button" className="icon-btn" title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={onInsert}><ArrowUpToLine size={12} /></button>}
@@ -141,7 +247,8 @@ const HighlightRuleEditor: React.FC<{
         {contrast ? <>
           <span>{t('highlightRuleEditor.backgroundLight')} · {t('highlightRuleEditor.contrastRatio', { ratio: contrast.light.toFixed(1) })}</span>
           <span>{t('highlightRuleEditor.backgroundDark')} · {t('highlightRuleEditor.contrastRatio', { ratio: contrast.dark.toFixed(1) })}</span>
-          {contrastWarning && <span className="highlight-rule-editor__contrast-note">{t('highlightRuleEditor.contrastWarning')}</span>}
+          {failsActiveTheme && <span className="highlight-rule-editor__contrast-note">{t('highlightRuleEditor.contrastWarning')}</span>}
+          {failsOppositeTheme && <span className="highlight-rule-editor__contrast-other-note">{t('highlightRuleEditor.contrastOtherThemeHint')}</span>}
         </> : t('highlightRuleEditor.contrastUnavailable')}
       </div>}
     </div>

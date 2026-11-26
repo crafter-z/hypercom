@@ -1,8 +1,10 @@
-import React, { useRef } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2 } from 'lucide-react';
 import type { ProtocolTemplate } from '../../../types';
 import { safeCssColor } from '../../../utils/cssColor';
+import { isValidHexInput, parseHexBytes } from '../../../utils/hexUtils';
+import { bytesToSpacedHex } from '../../../utils/hexFormat';
+import { ProtocolFrameReassembler } from '../../../utils/protocolParser';
 import { NumericInput } from '../../shared/NumericInput';
 import '../../../styles/rule-preview.css';
 
@@ -10,15 +12,17 @@ import '../../../styles/rule-preview.css';
  * Protocol template editor form.
  * Controlled component — all state lives in the parent (ProtocolSettings page).
  * The structure summary is a visualisation of the configured fields only; it
- * does not claim to parse a live frame.
+ * does not claim to parse a live frame. A separate collapsible tester below
+ * runs `ProtocolFrameReassembler` on user-supplied sample HEX bytes.
  */
 const ProtocolTemplateEditor: React.FC<{
   template: ProtocolTemplate;
   onChange: (patch: Partial<ProtocolTemplate>) => void;
-  onDelete: () => void;
-}> = ({ template, onChange, onDelete }) => {
+  onDelete?: () => void;
+}> = ({ template, onChange }) => {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
+  const [sampleHex, setSampleHex] = useState('');
 
   const focusField = (id: string) => {
     const field = document.getElementById(id);
@@ -32,6 +36,11 @@ const ProtocolTemplateEditor: React.FC<{
   const none = t('protocolEditor.structure.none');
   const header = template.headerBytes.trim() || none;
   const footer = template.footerBytes.trim() || none;
+  const headerInvalid = !isValidHexInput(template.headerBytes);
+  const footerInvalid = !isValidHexInput(template.footerBytes);
+  const endianDisabled = template.lengthFieldSize === 1;
+  const checksumOffsetDisabled = template.checksumAlgorithm === 'none';
+
   const lengthSize = template.lengthFieldSize === 2
     ? t('protocolEditor.lengthFieldSize.2bytes')
     : t('protocolEditor.lengthFieldSize.1byte');
@@ -45,6 +54,22 @@ const ProtocolTemplateEditor: React.FC<{
       : template.checksumAlgorithm === 'xor'
         ? 'XOR'
         : 'CRC-8';
+
+  const testResult = useMemo(() => {
+    const trimmed = sampleHex.trim();
+    if (!trimmed) return null;
+    if (headerInvalid || footerInvalid) {
+      return { error: 'templateInvalid' as const };
+    }
+    if (!isValidHexInput(trimmed)) {
+      return { error: 'sampleInvalid' as const };
+    }
+    const bytes = parseHexBytes(trimmed);
+    const reassembler = new ProtocolFrameReassembler(template);
+    const segments = reassembler.feed(bytes);
+    const buffered = reassembler.getBufferedLength();
+    return { error: null, segments, buffered };
+  }, [sampleHex, template, headerInvalid, footerInvalid]);
 
   return (
     <div ref={rootRef} className="protocol-template-editor">
@@ -113,12 +138,15 @@ const ProtocolTemplateEditor: React.FC<{
           <label className="protocol-template-editor__label" htmlFor={`protocol-header-${template.id}`}>{t('protocolEditor.headerLabel')}</label>
           <input
             id={`protocol-header-${template.id}`}
-            className="input protocol-template-editor__field"
+            className={`input protocol-template-editor__field${headerInvalid ? ' is-invalid' : ''}`}
+            aria-invalid={headerInvalid}
             value={template.headerBytes}
             onChange={e => onChange({ headerBytes: e.target.value })}
             placeholder={t('protocolEditor.headerPlaceholder')}
+            spellCheck={false}
           />
         </div>
+        {headerInvalid && <div className="editor-inline-error" role="alert">{t('editor.invalidHex')}</div>}
         <div className="protocol-template-editor__row">
           <label className="protocol-template-editor__label" htmlFor={`protocol-length-offset-${template.id}`}>{t('protocolEditor.lengthOffsetLabel')}</label>
           <NumericInput
@@ -147,6 +175,8 @@ const ProtocolTemplateEditor: React.FC<{
             id={`protocol-length-endian-${template.id}`}
             className="select protocol-template-editor__select protocol-template-editor__select--wide"
             value={template.lengthEndian}
+            disabled={endianDisabled}
+            title={endianDisabled ? t('protocolEditor.lengthEndianDisabledHint') : undefined}
             onChange={e => onChange({ lengthEndian: e.target.value as 'little' | 'big' })}
           >
             <option value="little">{t('protocolEditor.lengthEndian.little')}</option>
@@ -167,12 +197,15 @@ const ProtocolTemplateEditor: React.FC<{
           <label className="protocol-template-editor__label" htmlFor={`protocol-footer-${template.id}`}>{t('protocolEditor.footerLabel')}</label>
           <input
             id={`protocol-footer-${template.id}`}
-            className="input protocol-template-editor__field"
+            className={`input protocol-template-editor__field${footerInvalid ? ' is-invalid' : ''}`}
+            aria-invalid={footerInvalid}
             value={template.footerBytes}
             onChange={e => onChange({ footerBytes: e.target.value })}
             placeholder={t('protocolEditor.footerPlaceholder')}
+            spellCheck={false}
           />
         </div>
+        {footerInvalid && <div className="editor-inline-error" role="alert">{t('editor.invalidHex')}</div>}
       </div>
 
       <div className="protocol-template-editor__section">
@@ -199,6 +232,8 @@ const ProtocolTemplateEditor: React.FC<{
             min={0}
             max={65535}
             step={1}
+            disabled={checksumOffsetDisabled}
+            title={checksumOffsetDisabled ? t('protocolEditor.checksumOffsetDisabledHint') : undefined}
           />
           <span className="protocol-template-editor__hint">{t('protocolEditor.checksumOffsetHint')}</span>
         </div>
@@ -230,11 +265,76 @@ const ProtocolTemplateEditor: React.FC<{
         </div>
       </div>
 
-      <div className="protocol-template-editor__actions">
-        <button type="button" className="btn btn-sm btn-danger" onClick={onDelete} title={t('protocolEditor.deleteTemplate')}>
-          <Trash2 size={14} /> {t('protocolEditor.deleteTemplate')}
-        </button>
-      </div>
+      <details className="protocol-frame-tester">
+        <summary className="protocol-frame-tester__summary">{t('protocolEditor.tester.title')}</summary>
+        <div className="protocol-frame-tester__body">
+          <div className="protocol-template-editor__row">
+            <label className="protocol-template-editor__label" htmlFor={`protocol-sample-${template.id}`}>
+              {t('protocolEditor.tester.inputLabel')}
+            </label>
+            <input
+              id={`protocol-sample-${template.id}`}
+              className={`input protocol-template-editor__field rule-settings-terminal${testResult?.error === 'sampleInvalid' ? ' is-invalid' : ''}`}
+              aria-invalid={testResult?.error === 'sampleInvalid'}
+              value={sampleHex}
+              onChange={(e) => setSampleHex(e.target.value)}
+              placeholder={t('protocolEditor.tester.placeholder')}
+              spellCheck={false}
+            />
+          </div>
+          {testResult?.error === 'templateInvalid' && (
+            <div className="editor-inline-error" role="alert">{t('protocolEditor.tester.fixTemplateHex')}</div>
+          )}
+          {testResult?.error === 'sampleInvalid' && (
+            <div className="editor-inline-error" role="alert">{t('editor.invalidHex')}</div>
+          )}
+          {testResult && !testResult.error && (
+            <div className="protocol-frame-tester__results" aria-live="polite">
+              {testResult.segments.length === 0 && testResult.buffered === 0 && (
+                <div className="config-field-hint">{t('protocolEditor.tester.noFrames')}</div>
+              )}
+              {testResult.segments.map((segment, segIdx) => (
+                segment.kind === 'frame' ? (
+                  <div key={segIdx} className="protocol-frame-tester__frame">
+                    <div className="protocol-frame-tester__frame-header">
+                      <strong>{t('protocolEditor.tester.frameNumber', { index: segIdx + 1, bytes: segment.frame.bytes.length })}</strong>
+                      <span className={`chip protocol-frame-tester__validity ${segment.frame.isValid ? 'is-valid' : 'is-invalid'}`}>
+                        {t(segment.frame.isValid ? 'protocolEditor.tester.checksumValid' : 'protocolEditor.tester.checksumInvalid')}
+                      </span>
+                    </div>
+                    <div className="protocol-frame-tester__fields">
+                      {segment.frame.fields.map((field, fieldIdx) => (
+                        <span
+                          key={fieldIdx}
+                          className="protocol-frame-tester__field-chip"
+                          style={{ borderColor: safeCssColor(field.color) ?? 'var(--border-color)' }}
+                        >
+                          <span className="protocol-frame-tester__field-name" style={{ color: safeCssColor(field.color) ?? 'var(--text-secondary)' }}>
+                            {field.name}
+                          </span>
+                          <code className="rule-settings-terminal">
+                            {bytesToSpacedHex(segment.frame.bytes.slice(field.byteStart, field.byteEnd))}
+                          </code>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div key={segIdx} className="protocol-frame-tester__raw">
+                    <span className="config-field-hint">{t('protocolEditor.tester.rawBytes', { count: segment.bytes.length })}: </span>
+                    <code className="rule-settings-terminal">{bytesToSpacedHex(segment.bytes)}</code>
+                  </div>
+                )
+              ))}
+              {testResult.buffered > 0 && (
+                <div className="config-field-hint">
+                  {t('protocolEditor.tester.incompleteBytes', { count: testResult.buffered })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </details>
     </div>
   );
 };

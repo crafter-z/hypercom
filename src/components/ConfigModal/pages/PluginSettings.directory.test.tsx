@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { PluginDirectoryInstallRequest } from '../../../services/plugin';
 import i18n from '../../../i18n';
 import PluginSettings from './PluginSettings';
+import { formatByteSize } from './PluginSettingsInstallProgress';
 
 const mocks = vi.hoisted(() => ({ open: vi.fn(), install: vi.fn(), cancel: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }));
@@ -58,7 +59,8 @@ it('reports measured staged bytes and waits for preparation cleanup after cancel
   await act(async () => request.onProgress({ phase: 'copying', copiedBytes: 512, totalBytes: 70_000_000, availableBytes: 90_000_000 }));
   expect(dialog.querySelector('progress')?.value).toBe(512);
   expect(dialog.querySelector('progress')?.max).toBe(70_000_000);
-  expect(dialog.textContent).toContain(i18n.t('plugins.installProgress.space', { available: (90_000_000).toLocaleString(i18n.resolvedLanguage) }));
+  expect(dialog.textContent).toContain(i18n.t('plugins.installProgress.space', { available: formatByteSize(90_000_000) }));
+  expect(dialog.textContent).toContain(formatByteSize(70_000_000));
 
   mocks.cancel.mockResolvedValue('accepted');
   await click('plugins.trustedWebCancel');

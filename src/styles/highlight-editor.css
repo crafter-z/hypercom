@@ -28,9 +28,61 @@
   grid-template-columns: 24px minmax(76px, 0.8fr) minmax(100px, 2fr) auto 24px;
 }
 .highlight-rule-editor__line--style {
-  grid-template-columns: 24px 24px 24px minmax(0, 1fr) 24px auto;
+  grid-template-columns: auto 24px 24px minmax(0, 1fr) 24px auto;
   padding-left: 28px;
   margin-top: 3px;
+}
+.highlight-rule-editor__color-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.highlight-rule-editor .highlight-rule-editor__hex-input {
+  width: 72px;
+  flex-shrink: 0;
+  font-family: var(--font-terminal);
+  font-size: var(--text-xs);
+  padding: 2px 5px;
+}
+.highlight-rule-editor__swatches {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.highlight-rule-editor__swatch {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+}
+.highlight-rule-editor__swatch:hover {
+  transform: scale(1.12);
+}
+.highlight-rule-editor__swatch.is-active {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+.highlight-rule-editor__swatch:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+.highlight-rule-editor__validation {
+  margin: 3px 0 0 28px;
+  color: var(--text-error);
+  font-size: var(--text-xs);
+}
+.highlight-rule-editor__contrast--other {
+  color: var(--text-secondary);
+}
+.highlight-rule-editor__contrast-other-note {
+  flex-basis: 100%;
+  color: var(--text-secondary);
 }
 .highlight-rule-editor :is(.input, .select) {
   width: 100%;
@@ -98,13 +150,31 @@
 .highlight-rule-editor__contrast-note { flex-basis: 100%; color: var(--text-warning); }
 
 /* Narrow editor columns reflow rather than reducing hit targets or font size. */
+@container (max-width: 520px) {
+  .highlight-rule-editor__line--style {
+    grid-template-columns: auto 24px 24px 1fr auto;
+  }
+  .highlight-rule-editor__color-group {
+    flex-wrap: wrap;
+  }
+  .highlight-rule-editor .highlight-rule-editor__preview {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin: 0;
+  }
+  .highlight-rule-editor__contrast-toggle {
+    grid-column: 4;
+    grid-row: 1;
+    justify-self: end;
+  }
+  .highlight-rule-editor__insert-actions {
+    grid-column: 5;
+    grid-row: 1;
+  }
+}
 @container (max-width: 390px) {
   .highlight-rule-editor__line--main { grid-template-columns: 24px minmax(0, 1fr) auto 24px; }
   .highlight-rule-editor__pattern { grid-column: 2 / -1; grid-row: 2; }
   .highlight-rule-editor__regex { grid-column: 3; grid-row: 1; }
   .highlight-rule-editor__delete { grid-column: 4; grid-row: 1; }
-  .highlight-rule-editor__line--style { grid-template-columns: 24px 24px 24px 1fr auto; }
-  .highlight-rule-editor .highlight-rule-editor__preview { grid-column: 1 / -1; grid-row: 2; margin: 0; }
-  .highlight-rule-editor__contrast-toggle { grid-column: 4; grid-row: 1; justify-self: end; }
-  .highlight-rule-editor__insert-actions { grid-column: 5; grid-row: 1; }
 }

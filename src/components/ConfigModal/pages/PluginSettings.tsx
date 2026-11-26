@@ -14,6 +14,7 @@ import {
   Trash2,
   Power,
   FolderOpen,
+  FileArchive,
   RefreshCw,
   AlertTriangle,
 } from 'lucide-react';
@@ -23,6 +24,8 @@ import { PluginPermissionDialog, type PendingPermissionReview } from './PluginPe
 import { PluginSettingsInstallProgress, canCancelDirectoryInstall, type DirectoryInstallPanelState } from './PluginSettingsInstallProgress';
 import { pluginService } from '../../../services/plugin';
 import { useConfigPersistence } from '../../../hooks/useConfigPersistence';
+import { notifyError } from '../../../stores/useToastStore';
+import ConfirmDialog from '../../shared/ConfirmDialog';
 
 /** Uninstalling retires native webviews and clears browser data on the UI thread,
  *  which can take tens of seconds. The panel is painted before the invoke starts
@@ -92,6 +95,14 @@ const PluginSettings: React.FC = () => {
   } = usePluginList();
   const [review, setReview] = React.useState<PendingPermissionReview | null>(null);
   const [pendingClear, setPendingClear] = React.useState<PluginView | null>(null);
+  const [pendingUninstall, setPendingUninstall] = React.useState<PluginView | null>(null);
+  const [pendingReplace, setPendingReplace] = React.useState<{
+    selected: string;
+    source: 'directory' | 'zip';
+    name: string;
+    version: string;
+    expectedGeneration: string;
+  } | null>(null);
   const [working, setWorking] = React.useState(false);
   // One uninstall at a time; the panel outlives the click that started it.
   const [uninstalling, setUninstalling] = React.useState<{ name: string; startedAt: number } | null>(null);
@@ -125,6 +136,10 @@ const PluginSettings: React.FC = () => {
     checkUpdates: checkMarketplaceUpdates,
   } = usePluginMarketplace(pluginMarketplaceUrl);
   const [marketplaceBusyId, setMarketplaceBusyId] = React.useState<string | null>(null);
+  const [marketplaceOpen, setMarketplaceOpen] = React.useState(() => Boolean(pluginMarketplaceUrl.trim() || marketplaceIndex));
+  React.useEffect(() => {
+    if (marketplaceIndex) setMarketplaceOpen(true);
+  }, [marketplaceIndex]);
   const [directoryInstall, setDirectoryInstall] = React.useState<DirectoryInstallPanelState | null>(null);
   const installPickerBusy = React.useRef(false);
   const cancelBusy = React.useRef<string | null>(null);
@@ -144,6 +159,30 @@ const PluginSettings: React.FC = () => {
     }
   };
 
+  const runInstall = async (
+    source: 'directory' | 'zip',
+    selected: string,
+    replaceExisting?: boolean,
+    expectedGeneration?: string,
+  ): Promise<PluginView | null> => {
+    if (source === 'zip') {
+      return expectedGeneration === undefined
+        ? installPlugin(selected)
+        : installPlugin(selected, replaceExisting, expectedGeneration);
+    }
+    const requestId = crypto.randomUUID();
+    setDirectoryInstall({ requestId, progress: null, cancel: 'none' });
+    try {
+      return await installPlugin(selected, replaceExisting, expectedGeneration, {
+        requestId,
+        onProgress: progress => setDirectoryInstall(current => current?.requestId === requestId
+          ? { ...current, progress } : current),
+      });
+    } finally {
+      setDirectoryInstall(current => current?.requestId === requestId ? null : current);
+    }
+  };
+
   const handleInstall = async (source: 'directory' | 'zip'): Promise<void> => {
     if (installPickerBusy.current) return;
     installPickerBusy.current = true;
@@ -152,27 +191,9 @@ const PluginSettings: React.FC = () => {
         ? await open({ directory: true, multiple: false, title: t('plugins.installDirectory') })
         : await open({ multiple: false, filters: [{ name: 'Plugin archive', extensions: ['zip'] }], title: t('plugins.installZip') });
       if (typeof selected !== 'string') return;
-      const install = async (replaceExisting?: boolean, expectedGeneration?: string) => {
-        if (source === 'zip') {
-          return expectedGeneration === undefined
-            ? installPlugin(selected)
-            : installPlugin(selected, replaceExisting, expectedGeneration);
-        }
-        const requestId = crypto.randomUUID();
-        setDirectoryInstall({ requestId, progress: null, cancel: 'none' });
-        try {
-          return await installPlugin(selected, replaceExisting, expectedGeneration, {
-            requestId,
-            onProgress: progress => setDirectoryInstall(current => current?.requestId === requestId
-              ? { ...current, progress } : current),
-          });
-        } finally {
-          setDirectoryInstall(current => current?.requestId === requestId ? null : current);
-        }
-      };
       let installed: PluginView | null;
       try {
-        installed = await install();
+        installed = await runInstall(source, selected);
       } catch (error) {
         // Same/lower version: not a failure yet. Ask for an explicit
         // replacement (data preserved, grants/trust reset) before retrying.
@@ -181,11 +202,17 @@ const PluginSettings: React.FC = () => {
         const refreshed = await refresh();
         const reviewed = (refreshed ?? plugins).find(plugin => plugin.id === targetId);
         if (!reviewed?.installGeneration) {
-          throw new Error('无法确认待替换插件的当前安装代次，请刷新后重试');
+          notifyError(new Error(t('plugins.replaceGenerationError')));
+          return;
         }
-        if (!window.confirm(t('plugins.replaceConfirm', { name: reviewed.manifest?.name ?? reviewed.id,
-          version: reviewed.manifest?.version ?? '' }))) return;
-        installed = await install(true, reviewed.installGeneration);
+        setPendingReplace({
+          selected,
+          source,
+          name: reviewed.manifest?.name ?? reviewed.id,
+          version: reviewed.manifest?.version ?? '',
+          expectedGeneration: reviewed.installGeneration,
+        });
+        return;
       }
       if (installed?.manifest) setReview({ plugin: installed, intent: 'install' });
     } catch (error) {
@@ -193,6 +220,43 @@ const PluginSettings: React.FC = () => {
     } finally {
       installPickerBusy.current = false;
     }
+  };
+
+  const handleConfirmReplace = async (): Promise<void> => {
+    const target = pendingReplace;
+    setPendingReplace(null);
+    if (!target) return;
+    try {
+      const installed = await runInstall(target.source, target.selected, true, target.expectedGeneration);
+      if (installed?.manifest) setReview({ plugin: installed, intent: 'install' });
+    } catch (error) {
+      console.debug('[PluginSettings] replace install failed:', error);
+    }
+  };
+
+  const handleConfirmUninstall = (): void => {
+    const plugin = pendingUninstall;
+    setPendingUninstall(null);
+    if (!plugin) return;
+    const { id, installGeneration } = plugin;
+    if (!installGeneration || uninstallBusyRef.current || busyPluginRef.current.has(id)) return;
+    const name = plugin.manifest?.name ?? id;
+    if (!beginPluginBusy(id)) return;
+    uninstallBusyRef.current = true;
+    setUninstalling({ name, startedAt: Date.now() });
+    // Paint before native teardown. A timer races rAF because hidden documents pause rAF.
+    let started = false;
+    const begin = () => {
+      if (started) return;
+      started = true;
+      void uninstallPlugin(id, installGeneration).catch(() => {}).finally(() => {
+        uninstallBusyRef.current = false;
+        endPluginBusy(id);
+        setUninstalling(null);
+      });
+    };
+    requestAnimationFrame(() => requestAnimationFrame(begin));
+    setTimeout(begin, 250);
   };
 
   const persistMarketplaceSource = async (source: string): Promise<boolean> =>
@@ -256,54 +320,128 @@ const PluginSettings: React.FC = () => {
               <p className="settings-hint">{t('plugins.installedSectionHint')}</p>
             </div>
             <div className="plugin-settings-actions">
-              <button className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
+              <button type="button" className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
                 <RefreshCw size={14} /> {t('plugins.refresh')}
               </button>
-              <button className="btn btn-primary btn-sm" onClick={() => void handleInstall('directory')} disabled={loading}>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => void handleInstall('directory')} disabled={loading}>
                 <FolderOpen size={14} /> {t('plugins.installDirectory')}
               </button>
-              <button className="btn btn-sm" onClick={() => void handleInstall('zip')} disabled={loading}>
-                <FolderOpen size={14} /> {t('plugins.installZip')}
+              <button type="button" className="btn btn-sm" onClick={() => void handleInstall('zip')} disabled={loading}>
+                <FileArchive size={14} /> {t('plugins.installZip')}
               </button>
             </div>
           </div>
         </section>
 
-        <details className="plugin-proxy-section plugin-secondary-section">
-          <summary className="plugin-secondary-summary">
-            <span className="plugin-secondary-summary-copy">
-              <strong>{t('plugins.proxy.sectionTitle')}</strong>
-              <span className="settings-hint">{t('plugins.proxy.summary')}</span>
-            </span>
-          </summary>
-          <div className="plugin-secondary-body">
-          <p className="settings-hint">{t('plugins.proxy.saveHint')}</p>
-          <label className="checkbox-wrapper">
-            <input
-              type="checkbox"
-              checked={pluginProxyEnabled}
-              onChange={(e) => setConfig({ pluginProxyEnabled: e.target.checked })}
-            />
-            {t('plugins.proxy.enable')}
-          </label>
-
-          {pluginProxyEnabled && (
-            <div className="config-row">
-              <label htmlFor="plugin-proxy-url">{t('plugins.proxy.urlLabel')}</label>
-              <input
-                id="plugin-proxy-url"
-                className="input config-flex-input"
-                value={pluginProxy}
-                placeholder={t('plugins.proxy.urlPlaceholder')}
-                onChange={(e) => setConfig({ pluginProxy: e.target.value })}
-              />
-            </div>
-          )}
-          <p className="settings-hint">{t('plugins.proxy.hint')}</p>
+        {plugins.length === 0 ? (
+          <div className="plugin-empty">
+            <Plug size={32} />
+            <p>{t('plugins.emptyText')}</p>
+            <p className="settings-hint">{t('plugins.installHint')}</p>
           </div>
-        </details>
+        ) : (
+          <div className="plugin-list">
+            {plugins.map((plugin, index) => {
+              const declared = reviewablePermissions(plugin);
+              const source = plugin.source === 'marketplace' ? 'marketplace' : 'manual';
+              const previousSource = plugins[index - 1]?.source === 'marketplace' ? 'marketplace' : 'manual';
+              const showGroupTitle = index === 0 || source !== previousSource;
+              const granted = effectivePermissions(plugin);
+              return (
+                <React.Fragment key={plugin.id}>
+                  {showGroupTitle && <div className="plugin-list-group-title">
+                    {source === 'marketplace' ? t('plugins.localSourceMarketplace') : t('plugins.localSourceManual')}
+                  </div>}
+                  <div className={`plugin-card ${plugin.manifestError ? 'plugin-card-error' : ''}`}>
+                  <div className="plugin-card-header">
+                    <div className="plugin-card-title">
+                      <strong>{plugin.manifest?.name ?? plugin.id}</strong>
+                      <span className="plugin-card-id">{plugin.id}</span>
+                      {plugin.manifest && (
+                        <span className="plugin-card-version">
+                          {t('plugins.version', { version: plugin.manifest.version })} ·{' '}
+                          {t('plugins.apiVersion', { version: plugin.manifest.apiVersion })}
+                        </span>
+                      )}
+                      {hasTrustedViews(plugin.manifest) && <span className="plugin-card-version">{t(plugin.trustedWebGranted === true ? 'plugins.trustedWebBadge' : 'plugins.trustedWebPendingBadge')}</span>}
+                    </div>
+                    <div className="plugin-card-controls">
+                      {plugin.trustedWebGranted === true && <button type="button" className="btn btn-danger btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => {
+                        if (!beginPluginBusy(plugin.id)) return;
+                        void revokeTrustedWeb(plugin.id, plugin.installGeneration)
+                          .catch(() => {}).finally(() => endPluginBusy(plugin.id));
+                      }}>{t('plugins.revokeTrustedWeb')}</button>}
+                      {hasTrustedViews(plugin.manifest) && <button type="button" className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        title={t('plugins.reloadCodeHint')}
+                        onClick={() => {
+                          if (!beginPluginBusy(plugin.id)) return;
+                          void reloadPlugin(plugin.id, plugin.installGeneration)
+                            .catch(() => {}).finally(() => endPluginBusy(plugin.id));
+                        }}
+                        disabled={loading || busyPlugins.has(plugin.id) || !plugin.enabled || !!plugin.manifestError}
+                      >
+                        <RefreshCw size={13} /> {t('plugins.reloadCode')}
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn btn-sm${plugin.enabled ? ' active' : ''}`}
+                        onClick={() => handleToggleEnabled(plugin)}
+                        disabled={loading || busyPlugins.has(plugin.id) || !plugin.installGeneration || !!plugin.manifestError}
+                      >
+                        <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        disabled={loading || !!uninstalling || !plugin.installGeneration || busyPlugins.has(plugin.id)}
+                        onClick={() => {
+                          if (!plugin.installGeneration || uninstallBusyRef.current || busyPluginRef.current.has(plugin.id)) return;
+                          setPendingUninstall(plugin);
+                        }}
+                      >
+                        <Trash2 size={13} /> {t('plugins.uninstall')}
+                      </button>
+                    </div>
+                  </div>
 
-        <details open className="plugin-marketplace-section plugin-secondary-section">
+                  {plugin.manifestError ? (
+                    <div className="plugin-error-row">
+                      <AlertTriangle size={13} />
+                      <span>{t('plugins.manifestError', { error: plugin.manifestError })}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="plugin-desc">{plugin.manifest?.description}</p>
+
+                      <div className="plugin-perms">
+                        <div className="plugin-perms-header">
+                          <strong>{t('plugins.permissions')}</strong>
+                          {declared.length > 0 && <span className="settings-hint">
+                            {t('plugins.review.summary', { count: granted.length, total: declared.length })}
+                          </span>}
+                          {(declared.length > 0 || hasTrustedViews(plugin.manifest) && plugin.trustedWebGranted !== true) &&
+                            <button type="button" className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id) || !plugin.installGeneration}
+                              onClick={() => setReview({ plugin, intent: 'manage' })}>{t('plugins.review.manage')}</button>}
+                        </div>
+                        {declared.length === 0 && <p className="settings-hint">{t('plugins.noPermissions')}</p>}
+                      </div>
+                    </>
+                  )}
+                </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        )}
+
+        <details
+          open={marketplaceOpen}
+          onToggle={(event) => setMarketplaceOpen((event.currentTarget as HTMLDetailsElement).open)}
+          className="plugin-marketplace-section plugin-secondary-section"
+        >
           <summary className="plugin-secondary-summary">
             <span className="plugin-secondary-summary-copy">
               <strong>{t('plugins.marketplace.title')}</strong>
@@ -317,6 +455,7 @@ const PluginSettings: React.FC = () => {
             </div>
             <div className="plugin-settings-actions">
               <button
+                type="button"
                 className="btn btn-sm"
                 onClick={() => void handleMarketplaceRefresh()}
                 disabled={marketplaceLoading || !pluginMarketplaceUrl.trim()}
@@ -324,6 +463,7 @@ const PluginSettings: React.FC = () => {
                 <RefreshCw size={14} /> {t('plugins.marketplace.fetch')}
               </button>
               <button
+                type="button"
                 className="btn btn-sm"
                 onClick={() => void handleMarketplaceCheck()}
                 disabled={marketplaceLoading || !pluginMarketplaceUrl.trim()}
@@ -384,6 +524,7 @@ const PluginSettings: React.FC = () => {
                         </div>
                         <div className="plugin-marketplace-card-action">
                           <button
+                            type="button"
                             className="btn btn-primary btn-sm"
                             disabled={marketplaceLoading || loading || marketplaceBusyId !== null || busyPlugins.has(update.id) || !updateAvailable}
                             onClick={() => void handleMarketplaceInstall(update, installed?.installGeneration)}
@@ -403,124 +544,60 @@ const PluginSettings: React.FC = () => {
         </div>
         </details>
 
-      {plugins.length === 0 ? (
-        <div className="plugin-empty">
-          <Plug size={32} />
-          <p>{t('plugins.emptyText')}</p>
-          <p className="settings-hint">{t('plugins.installHint')}</p>
-        </div>
-      ) : (
-        <div className="plugin-list">
-          {plugins.map((plugin, index) => {
-            const declared = reviewablePermissions(plugin);
-            const source = plugin.source === 'marketplace' ? 'marketplace' : 'manual';
-            const previousSource = plugins[index - 1]?.source === 'marketplace' ? 'marketplace' : 'manual';
-            const showGroupTitle = index === 0 || source !== previousSource;
-            const granted = effectivePermissions(plugin);
-            return (
-              <React.Fragment key={plugin.id}>
-                {showGroupTitle && <div className="plugin-list-group-title">
-                  {source === 'marketplace' ? t('plugins.localSourceMarketplace') : t('plugins.localSourceManual')}
-                </div>}
-                <div className={`plugin-card ${plugin.manifestError ? 'plugin-card-error' : ''}`}>
-                <div className="plugin-card-header">
-                  <div className="plugin-card-title">
-                    <strong>{plugin.manifest?.name ?? plugin.id}</strong>
-                    <span className="plugin-card-id">{plugin.id}</span>
-                    {plugin.manifest && (
-                      <span className="plugin-card-version">
-                        {t('plugins.version', { version: plugin.manifest.version })} ·{' '}
-                        {t('plugins.apiVersion', { version: plugin.manifest.apiVersion })}
-                      </span>
-                    )}
-                    {hasTrustedViews(plugin.manifest) && <span className="plugin-card-version">{t(plugin.trustedWebGranted === true ? 'plugins.trustedWebBadge' : 'plugins.trustedWebPendingBadge')}</span>}
-                  </div>
-                  <div className="plugin-card-controls">
-                    {plugin.trustedWebGranted === true && <button className="btn btn-danger btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => {
-                      if (!beginPluginBusy(plugin.id)) return;
-                      void revokeTrustedWeb(plugin.id, plugin.installGeneration)
-                        .catch(() => {}).finally(() => endPluginBusy(plugin.id));
-                    }}>{t('plugins.revokeTrustedWeb')}</button>}
-                    {hasTrustedViews(plugin.manifest) && <button className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id)} onClick={() => setPendingClear(plugin)}>{t('plugins.clearWebData')}</button>}
-                    <button
-                      className="btn btn-sm"
-                      title={t('plugins.reloadCodeHint')}
-                      onClick={() => {
-                        if (!beginPluginBusy(plugin.id)) return;
-                        void reloadPlugin(plugin.id, plugin.installGeneration)
-                          .catch(() => {}).finally(() => endPluginBusy(plugin.id));
-                      }}
-                      disabled={loading || busyPlugins.has(plugin.id) || !plugin.enabled || !!plugin.manifestError}
-                    >
-                      <RefreshCw size={13} /> {t('plugins.reloadCode')}
-                    </button>
-                    <button
-                      className={`btn btn-sm${plugin.enabled ? ' active' : ''}`}
-                      onClick={() => handleToggleEnabled(plugin)}
-                      disabled={loading || busyPlugins.has(plugin.id) || !plugin.installGeneration || !!plugin.manifestError}
-                    >
-                      <Power size={13} /> {plugin.enabled ? t('plugins.disable') : t('plugins.enable')}
-                    </button>
-                    <button
-                      className="btn btn-danger btn-sm"
-                      disabled={loading || !!uninstalling || !plugin.installGeneration || busyPlugins.has(plugin.id)}
-                      onClick={() => {
-                        const { id, installGeneration } = plugin;
-                        if (!installGeneration || uninstallBusyRef.current || busyPluginRef.current.has(id)) return;
-                        const name = plugin.manifest?.name ?? id;
-                        if (!window.confirm(t('plugins.uninstallConfirm', { name })) || !beginPluginBusy(id)) return;
-                        uninstallBusyRef.current = true;
-                        setUninstalling({ name, startedAt: Date.now() });
-                        // Paint before native teardown. A timer races rAF because hidden documents pause rAF.
-                        let started = false;
-                        const begin = () => {
-                          if (started) return;
-                          started = true;
-                          void uninstallPlugin(id, installGeneration).catch(() => {}).finally(() => {
-                            uninstallBusyRef.current = false;
-                            endPluginBusy(id);
-                            setUninstalling(null);
-                          });
-                        };
-                        requestAnimationFrame(() => requestAnimationFrame(begin));
-                        setTimeout(begin, 250);
-                      }}
-                    >
-                      <Trash2 size={13} /> {t('plugins.uninstall')}
-                    </button>
-                  </div>
-                </div>
+        <details className="plugin-proxy-section plugin-secondary-section">
+          <summary className="plugin-secondary-summary">
+            <span className="plugin-secondary-summary-copy">
+              <strong>{t('plugins.proxy.sectionTitle')}</strong>
+              <span className="settings-hint">{t('plugins.proxy.summary')}</span>
+            </span>
+          </summary>
+          <div className="plugin-secondary-body">
+          <p className="settings-hint">{t('plugins.proxy.saveHint')}</p>
+          <label className="checkbox-wrapper">
+            <input
+              type="checkbox"
+              checked={pluginProxyEnabled}
+              onChange={(e) => setConfig({ pluginProxyEnabled: e.target.checked })}
+            />
+            {t('plugins.proxy.enable')}
+          </label>
 
-                {plugin.manifestError ? (
-                  <div className="plugin-error-row">
-                    <AlertTriangle size={13} />
-                    <span>{t('plugins.manifestError', { error: plugin.manifestError })}</span>
-                  </div>
-                ) : (
-                  <>
-                    <p className="plugin-desc">{plugin.manifest?.description}</p>
-
-                     <div className="plugin-perms">
-                       <div className="plugin-perms-header">
-                         <strong>{t('plugins.permissions')}</strong>
-                         {declared.length > 0 && <span className="settings-hint">
-                           {t('plugins.review.summary', { count: granted.length, total: declared.length })}
-                         </span>}
-                         {(declared.length > 0 || hasTrustedViews(plugin.manifest) && plugin.trustedWebGranted !== true) &&
-                           <button className="btn btn-sm" disabled={loading || busyPlugins.has(plugin.id) || !plugin.installGeneration}
-                             onClick={() => setReview({ plugin, intent: 'manage' })}>{t('plugins.review.manage')}</button>}
-                       </div>
-                       {declared.length === 0 && <p className="settings-hint">{t('plugins.noPermissions')}</p>}
-                     </div>
-                  </>
-                )}
-              </div>
-              </React.Fragment>
-            );
-          })}
-        </div>
-      )}
+          {pluginProxyEnabled && (
+            <div className="config-row">
+              <label htmlFor="plugin-proxy-url">{t('plugins.proxy.urlLabel')}</label>
+              <input
+                id="plugin-proxy-url"
+                className="input config-flex-input"
+                value={pluginProxy}
+                placeholder={t('plugins.proxy.urlPlaceholder')}
+                onChange={(e) => setConfig({ pluginProxy: e.target.value })}
+              />
+            </div>
+          )}
+          <p className="settings-hint">{t('plugins.proxy.hint')}</p>
+          </div>
+        </details>
       </div>
+    <ConfirmDialog
+      open={pendingReplace !== null}
+      title={t('plugins.replaceConfirmTitle')}
+      message={pendingReplace ? t('plugins.replaceConfirm', { name: pendingReplace.name, version: pendingReplace.version }) : ''}
+      confirmLabel={t('confirmDialog.confirm')}
+      cancelLabel={t('confirmDialog.cancel')}
+      danger
+      onConfirm={() => { void handleConfirmReplace(); }}
+      onCancel={() => setPendingReplace(null)}
+    />
+    <ConfirmDialog
+      open={pendingUninstall !== null}
+      title={t('plugins.uninstallConfirmTitle')}
+      message={pendingUninstall ? t('plugins.uninstallConfirm', { name: pendingUninstall.manifest?.name ?? pendingUninstall.id }) : ''}
+      confirmLabel={t('plugins.uninstall')}
+      cancelLabel={t('confirmDialog.cancel')}
+      danger
+      onConfirm={handleConfirmUninstall}
+      onCancel={() => setPendingUninstall(null)}
+    />
     {pendingClear && <ClearWebDataDialog
       plugin={pendingClear}
       working={working || loading}

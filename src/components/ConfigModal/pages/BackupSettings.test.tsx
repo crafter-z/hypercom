@@ -11,6 +11,9 @@ import { adoptEntityEditorBaselineFromConfig } from '../../../utils/entityEditor
 import { enqueueConfigWrite } from '../../../utils/configWriteQueue';
 import { useAppStore } from '../../../stores/useAppStore';
 
+const mocks = vi.hoisted(() => ({
+  saveConfig: vi.fn(async () => true),
+}));
 vi.mock('react-i18next', () => ({ initReactI18next: { type: '3rdParty', init: () => {} }, useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ confirm: vi.fn(async () => true) }));
 vi.mock('../../../services/tauri', () => ({
@@ -21,7 +24,12 @@ vi.mock('../../../services/tauri', () => ({
 vi.mock('../../../stores/useToastStore', () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 vi.mock('../../../utils/editorLeave', () => ({ requestEditorLeave: vi.fn(async () => true) }));
 vi.mock('../../../utils/entityEditor', () => ({ adoptEntityEditorBaselineFromConfig: vi.fn() }));
-vi.mock('../../../hooks/useConfigPersistence', () => ({ markOrdinaryConfigSaved: vi.fn() }));
+vi.mock('../../../utils/uiScale', () => ({ applyUiScale: vi.fn(async () => {}) }));
+vi.mock('../../../hooks/useConfigPersistence', () => ({
+  markOrdinaryConfigSaved: vi.fn(),
+  useConfigPersistence: () => ({ saveConfig: mocks.saveConfig }),
+  getOrdinaryConfigDefaults: () => ({ theme: 'dark', uiScalePercent: 100 }),
+}));
 vi.mock('../../../utils/pluginConfigSnapshot', () => ({ syncPluginListSnapshot: vi.fn() }));
 
 let host: HTMLDivElement;
@@ -77,5 +85,21 @@ describe('backup restore uses the common config write contract', () => {
     await act(async () => cancel(null));
     expect(configService.setConfig).not.toHaveBeenCalled();
     expect(button().disabled).toBe(false);
+  });
+
+  it('guards resetting all settings with ConfirmDialog and persists via saveConfig', async () => {
+    mocks.saveConfig.mockResolvedValueOnce(true);
+    const resetBtn = host.querySelector<HTMLButtonElement>('.backup-action-card-danger button')!;
+    expect(resetBtn).not.toBeNull();
+    await act(async () => resetBtn.click());
+    const dialog = host.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(mocks.saveConfig).not.toHaveBeenCalled();
+
+    const confirmBtn = dialog!.querySelector<HTMLButtonElement>('.btn-danger-solid')!;
+    await act(async () => confirmBtn.click());
+    expect(mocks.saveConfig).toHaveBeenCalledWith({ theme: 'dark', uiScalePercent: 100 }, true);
+    expect(notifySuccess).toHaveBeenCalledWith('backupSettings.resetSuccess');
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
   });
 });

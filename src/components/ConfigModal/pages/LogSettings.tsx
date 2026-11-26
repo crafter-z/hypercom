@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../../stores/useAppStore';
 import { open } from '@tauri-apps/plugin-dialog';
 import { logService } from '../../../services/tauri';
 import { notifyError, useToastStore } from '../../../stores/useToastStore';
+import { useConfigPersistence } from '../../../hooks/useConfigPersistence';
 import type { AppConfig } from '../../../types';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
 import { NumericInput } from '../../shared/NumericInput';
+import Modal from '../../shared/Modal';
+import { usePluginViewOverlay } from '../../shared/usePluginViewOverlay';
 
 interface DirChangeDialogProps {
   oldDir: string;
@@ -24,37 +27,51 @@ const DirChangeDialog: React.FC<DirChangeDialogProps> = ({
   oldDir, newDir, onSwitchOnly, onMigrate, onCancel, migrating,
 }) => {
   const { t } = useTranslation();
+  const titleId = useId();
+  const overlayReady = usePluginViewOverlay();
   return (
-    <div className="modal-overlay" onClick={migrating ? undefined : onCancel}>
-      <div className="modal-dialog-compact animate-slide-up" onClick={(e) => e.stopPropagation()}>
-        <h3 className="modal-dialog-title">{t('logSettings.dirChange.title')}</h3>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8, wordBreak: 'break-all' }}>
-          {t('logSettings.dirChange.message')}
-        </p>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 4, wordBreak: 'break-all' }}>
-          {t('logSettings.dirChange.from')}: {oldDir}
-        </p>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12, wordBreak: 'break-all' }}>
-          {t('logSettings.dirChange.to')}: {newDir}
-        </p>
-        <div className="modal-dialog-actions">
-          <button className="btn" onClick={onCancel} disabled={migrating}>
-            {t('logSettings.dirChange.cancel')}
-          </button>
-          <button className="btn" onClick={onSwitchOnly} disabled={migrating}>
-            {t('logSettings.dirChange.switchOnly')}
-          </button>
-          <button className="btn btn-primary" onClick={onMigrate} disabled={migrating}>
-            {migrating ? t('logSettings.dirChange.migrating') : t('logSettings.dirChange.migrate')}
-          </button>
-        </div>
+    <Modal
+      open={overlayReady}
+      onClose={migrating ? undefined : onCancel}
+      disableEscape={migrating}
+      labelledBy={titleId}
+      dialogClassName="modal-dialog-compact animate-slide-up"
+      onOverlayClick={migrating ? undefined : onCancel}
+    >
+      <h3 className="modal-dialog-title" id={titleId}>{t('logSettings.dirChange.title')}</h3>
+      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8, wordBreak: 'break-all' }}>
+        {t('logSettings.dirChange.message')}
+      </p>
+      <p style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 4, wordBreak: 'break-all' }}>
+        {t('logSettings.dirChange.from')}: {oldDir}
+      </p>
+      <p style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12, wordBreak: 'break-all' }}>
+        {t('logSettings.dirChange.to')}: {newDir}
+      </p>
+      <div className="modal-dialog-actions">
+        <button type="button" className="btn" onClick={onCancel} disabled={migrating}>
+          {t('logSettings.dirChange.cancel')}
+        </button>
+        <button type="button" className="btn" onClick={onSwitchOnly} disabled={migrating}>
+          {t('logSettings.dirChange.switchOnly')}
+        </button>
+        <button type="button" className="btn btn-primary" onClick={onMigrate} disabled={migrating}>
+          {migrating ? t('logSettings.dirChange.migrating') : t('logSettings.dirChange.migrate')}
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 };
 
 const LogSettings: React.FC = () => {
   const { t } = useTranslation();
+  const { saveConfig } = useConfigPersistence();
+  const dirId = useId();
+  const filenameId = useId();
+  const subdirId = useId();
+  const formatId = useId();
+  const encodingId = useId();
+  const splitSizeId = useId();
   const autoSaveLog = useAppStore(s => s.config.autoSaveLog);
   const logIncludeTimestamp = useAppStore(s => s.config.logIncludeTimestamp);
   const logIncludeDirection = useAppStore(s => s.config.logIncludeDirection);
@@ -96,6 +113,9 @@ const LogSettings: React.FC = () => {
     try {
       const count = await logService.migrateLogDirectory(logDirectory, pendingDir);
       setConfig({ logDirectory: pendingDir });
+      // Files have already moved on disk; commit logDirectory immediately via
+      // field-only CAS so cancelling ConfigModal never diverges config from disk.
+      await saveConfig({ logDirectory: pendingDir }, true);
       // 单次本地化 toast：有迁移文件时显示数量，否则仅提示目录已更新
       const message = count > 0
         ? t('logSettings.dirChange.migratedCount', { count })
@@ -123,20 +143,20 @@ const LogSettings: React.FC = () => {
       </label>
 
       <div className="config-row">
-        <label>{t('logSettings.directoryLabel')}</label>
-        <input className="input config-flex-input" value={logDirectory} placeholder={t('logSettings.directoryPlaceholder')} readOnly />
-        <button className="btn btn-sm" onClick={handleBrowse}>{t('logSettings.browseButton')}</button>
+        <label htmlFor={dirId}>{t('logSettings.directoryLabel')}</label>
+        <input id={dirId} className="input config-flex-input" value={logDirectory} placeholder={t('logSettings.directoryPlaceholder')} readOnly />
+        <button type="button" className="btn btn-sm" onClick={handleBrowse}>{t('logSettings.browseButton')}</button>
       </div>
 
       <div className="config-row">
-        <label>{t('logSettings.filenameFormatLabel')}</label>
-        <input className="input" value={logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
+        <label htmlFor={filenameId}>{t('logSettings.filenameFormatLabel')}</label>
+        <input id={filenameId} className="input" value={logFilenameFormat} onChange={(e) => setConfig({ logFilenameFormat: e.target.value })} />
         <span className="config-field-hint">{t('logSettings.filenameFormatHint')}</span>
       </div>
 
       <div className="config-row">
-        <label>{t('logSettings.subdirModeLabel')}</label>
-        <select className="select" value={logSubdirMode} onChange={(e) => setConfig({ logSubdirMode: e.target.value as AppConfig['logSubdirMode'] })}>
+        <label htmlFor={subdirId}>{t('logSettings.subdirModeLabel')}</label>
+        <select id={subdirId} className="select" value={logSubdirMode} onChange={(e) => setConfig({ logSubdirMode: e.target.value as AppConfig['logSubdirMode'] })}>
           <option value="none">{t('logSettings.subdirMode.none')}</option>
           <option value="date">{t('logSettings.subdirMode.date')}</option>
           <option value="port">{t('logSettings.subdirMode.port')}</option>
@@ -153,8 +173,8 @@ const LogSettings: React.FC = () => {
       </label>
 
       <div className="config-row">
-        <label>{t('logSettings.formatLabel')}</label>
-        <select className="select" value={logFormat} onChange={(e) => setConfig({ logFormat: e.target.value as AppConfig['logFormat'] })}>
+        <label htmlFor={formatId}>{t('logSettings.formatLabel')}</label>
+        <select id={formatId} className="select" value={logFormat} onChange={(e) => setConfig({ logFormat: e.target.value as AppConfig['logFormat'] })}>
           <option value="string">{t('logSettings.format.string')}</option>
           <option value="hex">{t('logSettings.format.hex')}</option>
           <option value="binary">{t('logSettings.format.binary')}</option>
@@ -162,8 +182,8 @@ const LogSettings: React.FC = () => {
       </div>
 
       <div className="config-row">
-        <label>{t('logSettings.encodingLabel')}</label>
-        <select className="select" value={logEncoding} onChange={(e) => setConfig({ logEncoding: e.target.value as AppConfig['logEncoding'] })}>
+        <label htmlFor={encodingId}>{t('logSettings.encodingLabel')}</label>
+        <select id={encodingId} className="select" value={logEncoding} onChange={(e) => setConfig({ logEncoding: e.target.value as AppConfig['logEncoding'] })}>
           <option value="ASCII">ASCII</option>
           <option value="UTF-8">UTF-8</option>
           <option value="GBK">GBK</option>
@@ -178,8 +198,8 @@ const LogSettings: React.FC = () => {
 
       {logSplitEnabled && (
         <div className="config-row">
-          <label>{t('logSettings.splitSizeLabel')}</label>
-          <NumericInput className="input config-number-input" value={logSplitSizeMb} onCommit={(value) => setConfig({ logSplitSizeMb: value })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
+          <label htmlFor={splitSizeId}>{t('logSettings.splitSizeLabel')}</label>
+          <NumericInput id={splitSizeId} className="input config-number-input" value={logSplitSizeMb} onCommit={(value) => setConfig({ logSplitSizeMb: value })} min={CONFIG_BOUNDS.logSplitSizeMb[0]} max={CONFIG_BOUNDS.logSplitSizeMb[1]} />
         </div>
       )}
 

@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { AlertTriangle } from 'lucide-react';
 import type { SerialPort, TriggerRule } from '../../types';
 import { evaluateTriggers, type TriggerAction } from '../../utils/triggerEngine';
 import { bytesToSpacedHex } from '../../utils/hexFormat';
 import { hexToString, isValidHexInput, parseHexBytes } from '../../utils/hexUtils';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import '../../styles/rule-preview.css';
 
 export interface TriggerTestPanelProps {
@@ -18,6 +20,7 @@ export interface TriggerTestPanelProps {
 }
 
 type TriggerSampleMode = 'text' | 'hex';
+type TriggerTestScope = 'selected' | 'all';
 
 interface Evaluation {
   actions: TriggerAction[];
@@ -47,8 +50,22 @@ const mutedStyle: React.CSSProperties = {
 };
 
 const errorStyle: React.CSSProperties = {
-  color: 'var(--danger-color, #f07178)',
+  color: 'var(--text-error)',
   fontSize: 11,
+};
+
+const disabledCalloutStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  margin: '6px 0',
+  padding: '6px 8px',
+  border: '1px solid color-mix(in srgb, var(--text-warning) 45%, transparent)',
+  borderRadius: 4,
+  background: 'color-mix(in srgb, var(--text-warning) 10%, transparent)',
+  color: 'var(--text-warning)',
+  fontSize: 11,
+  lineHeight: 1.4,
 };
 
 /**
@@ -70,7 +87,13 @@ const TriggerTestPanel: React.FC<TriggerTestPanelProps> = ({
   const effectiveSelectedRule = selectedId
     ? rules.find((rule) => rule.id === selectedId) ?? selectedRule ?? null
     : selectedRule ?? null;
-  const rulesToEvaluate = effectiveSelectedRule ? [effectiveSelectedRule] : [...rules];
+
+  const [scope, setScope] = useState<TriggerTestScope>(effectiveSelectedRule ? 'selected' : 'all');
+  const effectiveScope: TriggerTestScope = effectiveSelectedRule ? scope : 'all';
+  const rulesToEvaluate = useMemo(
+    () => (effectiveScope === 'selected' && effectiveSelectedRule ? [effectiveSelectedRule] : [...rules]),
+    [effectiveScope, effectiveSelectedRule, rules],
+  );
 
   const [sampleMode, setSampleMode] = useState<TriggerSampleMode>(
     effectiveSelectedRule?.matchType === 'hex' ? 'hex' : 'text',
@@ -79,20 +102,32 @@ const TriggerTestPanel: React.FC<TriggerTestPanelProps> = ({
   const [sampleHex, setSampleHex] = useState('');
   const [testPortId, setTestPortId] = useState('');
 
-  // A selected scoped rule is the least surprising initial test target. Keep a
-  // user-selected port when it remains available, but clear stale enumerations.
+  const missingSelectedPortId = effectiveSelectedRule?.portId
+    && !ports.some((port) => port.id === effectiveSelectedRule.portId)
+    ? effectiveSelectedRule.portId
+    : null;
+
+  // A selected scoped rule is the least surprising initial test target, even
+  // when its bound port is currently unplugged. Keep a user-selected port when
+  // it remains selectable, and clear stale enumerations otherwise.
   useEffect(() => {
     const preferred = effectiveSelectedRule?.portId ?? '';
-    if (preferred && ports.some((port) => port.id === preferred)) {
+    if (preferred) {
       setTestPortId(preferred);
       return;
     }
-    setTestPortId((current) => current && ports.some((port) => port.id === current) ? current : '');
+    setTestPortId((current) => {
+      if (!current) return '';
+      if (ports.some((port) => port.id === current)) return current;
+      return '';
+    });
   }, [effectiveSelectedRule?.id, effectiveSelectedRule?.portId, ports]);
 
   useEffect(() => {
     setSampleMode(effectiveSelectedRule?.matchType === 'hex' ? 'hex' : 'text');
   }, [effectiveSelectedRule?.id, effectiveSelectedRule?.matchType]);
+
+  const testingDisabledRule = effectiveScope === 'selected' && Boolean(effectiveSelectedRule && !effectiveSelectedRule.isEnabled);
 
   const evaluation = useMemo<Evaluation>(() => {
     const value = sampleMode === 'hex' ? sampleHex : sampleText;
@@ -140,12 +175,29 @@ const TriggerTestPanel: React.FC<TriggerTestPanelProps> = ({
 
   return (
     <section className="trigger-test-panel" style={panelStyle} aria-label={t('trigger.testPreview')}>
-      <div className="editor-page-heading" style={{ marginBottom: 6 }}>
+      <div className="editor-page-heading" style={{ marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
         <h4 className="config-section-title" style={{ margin: 0 }}>{t('trigger.testPreview')}</h4>
-        <span style={mutedStyle}>
-          {effectiveSelectedRule ? t('trigger.testPreviewFor', { name: effectiveSelectedRule.name }) : t('trigger.testAllRules')}
-        </span>
+        {effectiveSelectedRule ? (
+          <SegmentedControl
+            value={effectiveScope}
+            aria-label={t('trigger.testScope.label')}
+            options={[
+              { value: 'selected', label: t('trigger.testScope.selected') },
+              { value: 'all', label: t('trigger.testScope.allEnabled') },
+            ]}
+            onChange={(next) => setScope(next as TriggerTestScope)}
+          />
+        ) : (
+          <span style={mutedStyle}>{t('trigger.testAllRules')}</span>
+        )}
       </div>
+
+      {testingDisabledRule && (
+        <div className="trigger-test-disabled-callout" role="note" style={disabledCalloutStyle}>
+          <AlertTriangle size={13} style={{ flexShrink: 0 }} aria-hidden="true" />
+          <span>{t('trigger.testDisabledRuleHint')}</span>
+        </div>
+      )}
 
       <div className="rule-settings-editor">
         <div className="rule-settings-row">
@@ -170,6 +222,11 @@ const TriggerTestPanel: React.FC<TriggerTestPanelProps> = ({
             onChange={(event) => setTestPortId(event.target.value)}
           >
             <option value="">{t('trigger.portId.all')}</option>
+            {missingSelectedPortId && (
+              <option value={missingSelectedPortId}>
+                {t('trigger.missingPort', { port: missingSelectedPortId })}
+              </option>
+            )}
             {ports.map((port) => (
               <option key={port.id} value={port.id}>
                 {port.alias || port.name} ({port.id})

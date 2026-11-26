@@ -1,15 +1,23 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { RotateCcw } from 'lucide-react';
 import { useAppStore } from '../../../stores/useAppStore';
 import { configService } from '../../../services/tauri';
 import { updateTiming } from '../../../utils/updateService';
-import type { AppConfig } from '../../../types';
-import type { UpdateCheckMode } from '../../../types';
+import type { AppConfig, UpdateCheckMode } from '../../../types';
 import { CONFIG_BOUNDS } from '../../../utils/bounds';
 import { NumericInput } from '../../shared/NumericInput';
 
 const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
+  const closeBehaviorId = useId();
+  const maxDisplayLinesId = useId();
+  const languageId = useId();
+  const themeId = useId();
+  const maxRetriesId = useId();
+  const terminalFontId = useId();
+  const uiFontId = useId();
+  const uiScaleId = useId();
   const closeBehavior = useAppStore(s => s.config.closeBehavior);
   const maxDisplayLines = useAppStore(s => s.config.maxDisplayLines);
   const language = useAppStore(s => s.config.language);
@@ -36,12 +44,41 @@ const GeneralSettings: React.FC = () => {
     configService.getConfigPath().then(setConfigPath).catch(() => {});
   }, []);
 
+  const handleResetDefaults = () => {
+    const defaults = useAppStore.getInitialState().config;
+    setConfig({
+      closeBehavior: defaults.closeBehavior,
+      maxDisplayLines: defaults.maxDisplayLines,
+      language: defaults.language,
+      theme: defaults.theme,
+      preventScreenOff: defaults.preventScreenOff,
+      preventSleep: defaults.preventSleep,
+      restoreSession: defaults.restoreSession,
+      sendOnEnter: defaults.sendOnEnter,
+      autoReconnect: defaults.autoReconnect,
+      maxRetries: defaults.maxRetries,
+      terminalFont: defaults.terminalFont,
+      terminalFontSize: defaults.terminalFontSize,
+      uiFont: defaults.uiFont,
+      uiFontSize: defaults.uiFontSize,
+      uiScalePercent: defaults.uiScalePercent,
+      updateCheckMode: defaults.updateCheckMode,
+    });
+  };
+
   return (
     <div className="config-page">
-      <p className="config-page-summary">{t('generalSettings.summary')}</p>
+      <div className="config-page-top-bar">
+        <p className="config-page-summary">{t('generalSettings.summary')}</p>
+        <button type="button" className="btn btn-sm" onClick={handleResetDefaults}>
+          <RotateCcw size={13} aria-hidden="true" />
+          {t('configModal.resetPageDefaults')}
+        </button>
+      </div>
       <div className="config-row">
-        <label>{t('generalSettings.closeBehaviorLabel')}</label>
+        <label htmlFor={closeBehaviorId}>{t('generalSettings.closeBehaviorLabel')}</label>
         <select
+          id={closeBehaviorId}
           className="select"
           value={closeBehavior}
           onChange={(e) => setConfig({ closeBehavior: e.target.value as AppConfig['closeBehavior'] })}
@@ -53,8 +90,9 @@ const GeneralSettings: React.FC = () => {
 
       {/* issue #16：每端口终端最大显示行数，超限逐行覆盖最旧 */}
       <div className="config-row" title={t('generalSettings.maxDisplayLinesHint')}>
-        <label>{t('generalSettings.maxDisplayLinesLabel')}</label>
+        <label htmlFor={maxDisplayLinesId}>{t('generalSettings.maxDisplayLinesLabel')}</label>
         <NumericInput
+          id={maxDisplayLinesId}
           className="input"
           value={maxDisplayLines}
           onCommit={(value) => setConfig({ maxDisplayLines: value })}
@@ -65,8 +103,9 @@ const GeneralSettings: React.FC = () => {
       </div>
 
       <div className="config-row">
-        <label>{t('generalSettings.languageLabel')}</label>
+        <label htmlFor={languageId}>{t('generalSettings.languageLabel')}</label>
         <select
+          id={languageId}
           className="select"
           value={language}
           onChange={(e) => setConfig({ language: e.target.value as AppConfig['language'] })}
@@ -77,8 +116,9 @@ const GeneralSettings: React.FC = () => {
       </div>
 
       <div className="config-row">
-        <label>{t('generalSettings.themeLabel')}</label>
+        <label htmlFor={themeId}>{t('generalSettings.themeLabel')}</label>
         <select
+          id={themeId}
           className="select"
           value={theme}
           onChange={(e) => setConfig({ theme: e.target.value as AppConfig['theme'] })}
@@ -130,8 +170,9 @@ const GeneralSettings: React.FC = () => {
       </div>
 
       <div className={`config-row config-row-dependent${autoReconnect ? '' : ' is-disabled'}`} title={!autoReconnect ? t('settings.reconnect.maxRetriesDisabledHint') : undefined}>
-        <label>{t('settings.reconnect.maxRetries.label')}:</label>
+        <label htmlFor={maxRetriesId}>{t('settings.reconnect.maxRetries.label')}:</label>
         <NumericInput
+          id={maxRetriesId}
           className="input config-number-input"
           value={maxRetries}
           onCommit={(value) => setConfig({ maxRetries: value })}
@@ -150,8 +191,8 @@ const GeneralSettings: React.FC = () => {
       {/* issue #12：自动更新三态模式。模式变更的清账副作用（clearSnooze +
           clearLastCheck）在 ConfigModal.handleSave 保存边界执行——取消时不泄漏。 */}
       <div className="config-row" title={t('update.periodHint')}>
-        <label>{t('update.modeLabel')}</label>
-        <div className="config-option-stack">
+        <span className="config-row-label">{t('update.modeLabel')}</span>
+        <div className="config-option-stack" role="radiogroup" aria-label={t('update.modeLabel')}>
           {(['none', 'stable', 'preview'] as UpdateCheckMode[]).map((mode) => (
             <label key={mode} className="checkbox-wrapper">
               <input
@@ -169,7 +210,7 @@ const GeneralSettings: React.FC = () => {
       <p className="settings-hint">{t('update.pluginCheckHint')}</p>
 
       <div className="config-row">
-        <label>{t('update.lastCheckLabel')}</label>
+        <span className="config-row-label">{t('update.lastCheckLabel')}</span>
         <span className="config-value-hint">
           {lastCheckAt === null ? t('update.lastCheckNever') : new Date(lastCheckAt).toLocaleString()}
         </span>
@@ -179,23 +220,39 @@ const GeneralSettings: React.FC = () => {
       <h4 className="config-section-title">{t('generalSettings.fontSectionTitle')}</h4>
 
       <div className="config-row">
-        <label>{t('generalSettings.terminalFontLabel')}</label>
-        <input className="input" value={terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
-        <NumericInput className="input config-number-input" value={terminalFontSize} onCommit={(value) => setConfig({ terminalFontSize: value })} min={CONFIG_BOUNDS.terminalFontSize[0]} max={CONFIG_BOUNDS.terminalFontSize[1]} style={{ width: 60 }} />
+        <label htmlFor={terminalFontId}>{t('generalSettings.terminalFontLabel')}</label>
+        <input id={terminalFontId} className="input" value={terminalFont} onChange={(e) => setConfig({ terminalFont: e.target.value })} />
+        <NumericInput
+          className="input config-number-input"
+          aria-label={`${t('generalSettings.terminalFontLabel')} (${t('generalSettings.pxUnit')})`}
+          value={terminalFontSize}
+          onCommit={(value) => setConfig({ terminalFontSize: value })}
+          min={CONFIG_BOUNDS.terminalFontSize[0]}
+          max={CONFIG_BOUNDS.terminalFontSize[1]}
+          style={{ width: 60 }}
+        />
         <span className="config-unit">{t('generalSettings.pxUnit')}</span>
       </div>
 
       <div className="config-row">
-        <label>{t('generalSettings.uiFontLabel')}</label>
-        <input className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
-        <NumericInput className="input config-number-input" value={uiFontSize} onCommit={(value) => setConfig({ uiFontSize: value })} min={CONFIG_BOUNDS.uiFontSize[0]} max={CONFIG_BOUNDS.uiFontSize[1]} style={{ width: 60 }} />
+        <label htmlFor={uiFontId}>{t('generalSettings.uiFontLabel')}</label>
+        <input id={uiFontId} className="input" value={uiFont} onChange={(e) => setConfig({ uiFont: e.target.value })} />
+        <NumericInput
+          className="input config-number-input"
+          aria-label={`${t('generalSettings.uiFontLabel')} (${t('generalSettings.pxUnit')})`}
+          value={uiFontSize}
+          onCommit={(value) => setConfig({ uiFontSize: value })}
+          min={CONFIG_BOUNDS.uiFontSize[0]}
+          max={CONFIG_BOUNDS.uiFontSize[1]}
+          style={{ width: 60 }}
+        />
         <span className="config-unit">{t('generalSettings.pxUnit')}</span>
       </div>
       <div className="divider-h" />
       <h4 className="config-section-title">{t('generalSettings.uiScaleSectionTitle')}</h4>
       <div className="config-row" title={t('generalSettings.uiScaleHint')}>
-        <label>{t('generalSettings.uiScaleLabel')}</label>
-        <select className="select" value={uiScalePercent} onChange={(e) => setConfig({ uiScalePercent: Number(e.target.value) })}>
+        <label htmlFor={uiScaleId}>{t('generalSettings.uiScaleLabel')}</label>
+        <select id={uiScaleId} className="select" value={uiScalePercent} onChange={(e) => setConfig({ uiScalePercent: Number(e.target.value) })}>
           {[80, 90, 100, 110, 120, 125, 130, 140, 150, 175, 200].map((percent) => (
             <option key={percent} value={percent}>{percent}%</option>
           ))}

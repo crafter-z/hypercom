@@ -1,17 +1,23 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
 import { popoutEventService } from '../../services/tauri';
-import { useConfigPersistence, isOrdinaryConfigDirty, discardOrdinaryConfigDraft } from '../../hooks/useConfigPersistence';
+import {
+  useConfigPersistence,
+  isOrdinaryConfigDirty,
+  getDirtyOrdinaryConfigKeys,
+  discardOrdinaryConfigDraft,
+} from '../../hooks/useConfigPersistence';
 import { getCommittedUpdateMode, runAutoCheck } from '../../utils/updateService';
 import { runPluginAutoCheck } from '../../utils/pluginUpdateService';
 import { applyUiScale } from '../../utils/uiScale';
-import { listDirtyEntityKinds, subscribeEntityEditor } from '../../utils/entityEditor';
+import { listDirtyEntityKinds, subscribeEntityEditor, type EntityKey } from '../../utils/entityEditor';
 import { registerEditorParticipant, requestEditorLeave } from '../../utils/editorLeave';
 import { flushFocusedEditor } from '../../utils/flushFocusedEditor';
+import type { AppConfig } from '../../types';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X, Maximize2, Minimize2,
+  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X, Maximize2, Minimize2, Search, Check,
 } from 'lucide-react';
 import GeneralSettings from './pages/GeneralSettings';
 import LogSettings from './pages/LogSettings';
@@ -27,24 +33,89 @@ import Modal from '../shared/Modal';
 import HelpContextButton from '../Help/HelpContextButton';
 
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
+
 interface NavItem {
   id: string;
   labelKey: string;
+  keywordsKey: string;
+  groupId: NavGroupId;
   icon: React.ReactNode;
 }
 
-const navItems: NavItem[] = [
-  { id: 'general', labelKey: 'configModal.nav.general', icon: <Settings size={16} /> },
-  { id: 'log', labelKey: 'configModal.nav.log', icon: <FileText size={16} /> },
-  { id: 'backup', labelKey: 'configModal.nav.backup', icon: <HardDrive size={16} /> },
-  { id: 'display', labelKey: 'configModal.nav.display', icon: <Monitor size={16} /> },
-  { id: 'highlight', labelKey: 'configModal.nav.highlight', icon: <Palette size={16} /> },
-  { id: 'commands', labelKey: 'configModal.nav.commands', icon: <Send size={16} /> },
-  { id: 'protocol', labelKey: 'configModal.nav.protocol', icon: <Code2 size={16} /> },
-  { id: 'tools', labelKey: 'configModal.nav.tools', icon: <Wrench size={16} /> },
-  { id: 'triggers', labelKey: 'config.triggerSettings', icon: <Zap size={16} /> },
-  { id: 'plugins', labelKey: 'configModal.nav.plugins', icon: <Plug size={16} /> },
+type NavGroupId = 'generalDisplay' | 'loggingBackup' | 'rulesAutomation' | 'plugins';
+
+interface NavGroup {
+  id: NavGroupId;
+  labelKey: string;
+}
+
+const navGroups: NavGroup[] = [
+  { id: 'generalDisplay', labelKey: 'configModal.group.generalDisplay' },
+  { id: 'loggingBackup', labelKey: 'configModal.group.loggingBackup' },
+  { id: 'rulesAutomation', labelKey: 'configModal.group.rulesAutomation' },
+  { id: 'plugins', labelKey: 'configModal.group.plugins' },
 ];
+
+const navItems: NavItem[] = [
+  { id: 'general', labelKey: 'configModal.nav.general', keywordsKey: 'configModal.navKeywords.general', groupId: 'generalDisplay', icon: <Settings size={16} /> },
+  { id: 'display', labelKey: 'configModal.nav.display', keywordsKey: 'configModal.navKeywords.display', groupId: 'generalDisplay', icon: <Monitor size={16} /> },
+  { id: 'log', labelKey: 'configModal.nav.log', keywordsKey: 'configModal.navKeywords.log', groupId: 'loggingBackup', icon: <FileText size={16} /> },
+  { id: 'backup', labelKey: 'configModal.nav.backup', keywordsKey: 'configModal.navKeywords.backup', groupId: 'loggingBackup', icon: <HardDrive size={16} /> },
+  { id: 'highlight', labelKey: 'configModal.nav.highlight', keywordsKey: 'configModal.navKeywords.highlight', groupId: 'rulesAutomation', icon: <Palette size={16} /> },
+  { id: 'commands', labelKey: 'configModal.nav.commands', keywordsKey: 'configModal.navKeywords.commands', groupId: 'rulesAutomation', icon: <Send size={16} /> },
+  { id: 'protocol', labelKey: 'configModal.nav.protocol', keywordsKey: 'configModal.navKeywords.protocol', groupId: 'rulesAutomation', icon: <Code2 size={16} /> },
+  { id: 'triggers', labelKey: 'config.triggerSettings', keywordsKey: 'configModal.navKeywords.triggers', groupId: 'rulesAutomation', icon: <Zap size={16} /> },
+  { id: 'tools', labelKey: 'configModal.nav.tools', keywordsKey: 'configModal.navKeywords.tools', groupId: 'rulesAutomation', icon: <Wrench size={16} /> },
+  { id: 'plugins', labelKey: 'configModal.nav.plugins', keywordsKey: 'configModal.navKeywords.plugins', groupId: 'plugins', icon: <Plug size={16} /> },
+];
+
+const ENTITY_TO_TAB: Record<EntityKey, string> = {
+  highlightRuleSets: 'highlight',
+  sendCommandSets: 'commands',
+  protocolTemplates: 'protocol',
+  portToolConfigs: 'tools',
+  triggerRules: 'triggers',
+};
+
+const ORDINARY_KEY_TO_TAB: Partial<Record<keyof AppConfig, string>> = {
+  autoSaveLog: 'log',
+  logIncludeTimestamp: 'log',
+  logIncludeDirection: 'log',
+  logDirectory: 'log',
+  logFilenameFormat: 'log',
+  logSubdirMode: 'log',
+  logNewFilePerSession: 'log',
+  logFormat: 'log',
+  logEncoding: 'log',
+  logSplitEnabled: 'log',
+  logSplitSizeMb: 'log',
+  defaultBaudRates: 'display',
+  showPortType: 'display',
+  defaultLineEnding: 'display',
+  sendPrefix: 'display',
+  timestampMode: 'display',
+  timestampFormat: 'display',
+  backgroundImage: 'display',
+  backgroundImageEnabled: 'display',
+  backgroundImageOpacity: 'display',
+  backgroundImageBlur: 'display',
+  pluginProxyEnabled: 'plugins',
+  pluginProxy: 'plugins',
+  pluginMarketplaceUrl: 'plugins',
+};
+
+function computeDirtyTabs(): Set<string> {
+  const tabs = new Set<string>();
+  for (const kind of listDirtyEntityKinds()) {
+    tabs.add(ENTITY_TO_TAB[kind]);
+  }
+  for (const key of getDirtyOrdinaryConfigKeys()) {
+    tabs.add(ORDINARY_KEY_TO_TAB[key] ?? 'general');
+  }
+  return tabs;
+}
+
+const SAVED_PILL_DURATION_MS = 2500;
 
 const navTabId = (id: string) => `config-tab-${id}`;
 const navPanelId = (id: string) => `config-tabpanel-${id}`;
@@ -85,8 +156,26 @@ const ConfigModal: React.FC = () => {
   const activeNavRef = useRef<HTMLButtonElement | null>(null);
   const [saving, setSaving] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => { if (!isConfigOpen) setExpanded(false); }, [isConfigOpen]);
+  const [navSearch, setNavSearch] = useState('');
+  const [savedPill, setSavedPill] = useState(false);
+  const savedPillTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearSavedPill = useCallback(() => {
+    if (savedPillTimerRef.current !== null) {
+      clearTimeout(savedPillTimerRef.current);
+      savedPillTimerRef.current = null;
+    }
+    setSavedPill(false);
+  }, []);
+  useEffect(() => {
+    if (!isConfigOpen) {
+      setExpanded(false);
+      setNavSearch('');
+      clearSavedPill();
+    }
+  }, [isConfigOpen, clearSavedPill]);
+  useEffect(() => clearSavedPill, [clearSavedPill]);
   const [dirty, setDirty] = useState(false);
+  const [dirtyTabs, setDirtyTabs] = useState<Set<string>>(() => new Set());
   // NumericInput keeps an uncommitted raw buffer until blur/Enter. Track that
   // buffer independently so a clean footer still exposes Save while typing.
   const [focusedEditorPending, setFocusedEditorPending] = useState(false);
@@ -178,10 +267,30 @@ const ConfigModal: React.FC = () => {
     handleCancel();
   }, [handleCancel]);
 
+  const normalizedSearch = navSearch.trim().toLocaleLowerCase();
+  const visibleNavItems = useMemo(() => {
+    if (!normalizedSearch) return navItems;
+    return navItems.filter((item) => {
+      const label = t(item.labelKey).toLocaleLowerCase();
+      const keywords = t(item.keywordsKey, { defaultValue: '' }).toLocaleLowerCase();
+      return label.includes(normalizedSearch) || keywords.includes(normalizedSearch) || item.id.includes(normalizedSearch);
+    });
+  }, [normalizedSearch, t]);
+
+  const visibleNavGroups = useMemo(() => {
+    return navGroups
+      .map((group) => ({
+        group,
+        items: visibleNavItems.filter((item) => item.groupId === group.id),
+      }))
+      .filter((section) => section.items.length > 0);
+  }, [visibleNavItems]);
+
   const focusNavItem = useCallback((index: number) => {
-    const count = navItems.length;
+    const count = visibleNavItems.length;
+    if (count === 0) return;
     navRefs.current[((index % count) + count) % count]?.focus();
-  }, []);
+  }, [visibleNavItems.length]);
 
   const selectConfigTab = useCallback((id: string) => {
     if (savingRef.current) return;
@@ -205,26 +314,31 @@ const ConfigModal: React.FC = () => {
         break;
       case 'End':
         event.preventDefault();
-        focusNavItem(navItems.length - 1);
+        focusNavItem(visibleNavItems.length - 1);
         break;
       case 'Enter':
       case ' ':
         event.preventDefault();
-        selectConfigTab(navItems[index].id);
+        if (visibleNavItems[index]) selectConfigTab(visibleNavItems[index].id);
         break;
       default:
         break;
     }
-  }, [focusNavItem, selectConfigTab]);
+  }, [focusNavItem, selectConfigTab, visibleNavItems]);
 
   useEffect(() => {
     if (!isConfigOpen) return undefined;
-    const refresh = () => setDirty(isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0);
+    const refresh = () => {
+      const nextDirty = isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0;
+      setDirty(nextDirty);
+      setDirtyTabs(computeDirtyTabs());
+      if (nextDirty) clearSavedPill();
+    };
     refresh();
     const unsubscribeConfig = useAppStore.subscribe(refresh);
     const unsubscribeEntities = subscribeEntityEditor(refresh);
     return () => { unsubscribeConfig(); unsubscribeEntities(); };
-  }, [isConfigOpen, configActiveTab]);
+  }, [isConfigOpen, configActiveTab, clearSavedPill]);
 
   const handleSave = async () => {
     if (savingRef.current) return;
@@ -232,6 +346,7 @@ const ConfigModal: React.FC = () => {
     savingRef.current = true;
     setSaving(true);
     setSaveFailed(false);
+    clearSavedPill();
     const session = sessionRef.current;
     const current = useAppStore.getState().config;
     const modeChanged = getCommittedUpdateMode() !== current.updateCheckMode;
@@ -240,7 +355,13 @@ const ConfigModal: React.FC = () => {
       if (!mountedRef.current || session !== sessionRef.current || !useSystemStore.getState().ui.isConfigOpen) return;
       if (isOrdinaryConfigDirty() || listDirtyEntityKinds().length > 0) { setSaveFailed(true); return; }
       setDirty(false);
+      setDirtyTabs(new Set());
       setFocusedEditorPending(false);
+      setSavedPill(true);
+      savedPillTimerRef.current = setTimeout(() => {
+        savedPillTimerRef.current = null;
+        if (mountedRef.current) setSavedPill(false);
+      }, SAVED_PILL_DURATION_MS);
       const latest = useAppStore.getState().config;
       void applyUiScale(latest.uiScalePercent);
       void popoutEventService.emitUiScaleChanged(latest.uiScalePercent)
@@ -290,6 +411,29 @@ const ConfigModal: React.FC = () => {
       <div className="modal-nav">
         <div className="modal-nav-header">
           <h2 className="modal-nav-title" id={CONFIG_TITLE_ID}>{t('configModal.title')}</h2>
+          <div className="modal-nav-search">
+            <Search size={12} className="modal-nav-search-icon" aria-hidden="true" />
+            <input
+              type="search"
+              className="input modal-nav-search-input"
+              value={navSearch}
+              onChange={(event) => setNavSearch(event.target.value)}
+              placeholder={t('configModal.searchPlaceholder')}
+              aria-label={t('configModal.searchPlaceholder')}
+              disabled={saving}
+            />
+            {navSearch && (
+              <button
+                type="button"
+                className="icon-btn modal-nav-search-clear"
+                onClick={() => setNavSearch('')}
+                title={t('sidebar.search.clear')}
+                aria-label={t('sidebar.search.clear')}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
         </div>
         <div
           className="modal-nav-list"
@@ -297,30 +441,50 @@ const ConfigModal: React.FC = () => {
           aria-label={t('configModal.title')}
           aria-orientation="vertical"
         >
-          {navItems.map((item, index) => {
-            const selected = configActiveTab === item.id;
-            return (
-              <button
-                key={item.id}
-                ref={(element) => {
-                  navRefs.current[index] = element;
-                  if (selected) activeNavRef.current = element;
-                }}
-                type="button"
-                role="tab"
-                id={navTabId(item.id)}
-                aria-selected={selected}
-                aria-controls={selected ? navPanelId(item.id) : undefined}
-                tabIndex={selected ? 0 : -1}
-                className={`modal-nav-item${selected ? ' active' : ''}`}
-                onClick={() => selectConfigTab(item.id)}
-                onKeyDown={(event) => handleNavKeyDown(event, index)}
-              >
-                <span className="modal-nav-icon">{item.icon}</span>
-                {t(item.labelKey)}
-              </button>
-            );
-          })}
+          {visibleNavGroups.length === 0 ? (
+            <div className="modal-nav-empty" role="status">{t('configModal.searchEmpty')}</div>
+          ) : (
+            visibleNavGroups.map(({ group, items }) => (
+              <div key={group.id} className="modal-nav-group">
+                <div className="modal-nav-group-label">{t(group.labelKey)}</div>
+                <div className="modal-nav-group-items">
+                  {items.map((item) => {
+                    const flatIndex = visibleNavItems.indexOf(item);
+                    const selected = configActiveTab === item.id;
+                    const tabDirty = dirtyTabs.has(item.id);
+                    return (
+                      <button
+                        key={item.id}
+                        ref={(element) => {
+                          navRefs.current[flatIndex] = element;
+                          if (selected) activeNavRef.current = element;
+                        }}
+                        type="button"
+                        role="tab"
+                        id={navTabId(item.id)}
+                        aria-selected={selected}
+                        aria-controls={selected ? navPanelId(item.id) : undefined}
+                        tabIndex={selected || (!visibleNavItems.some((v) => v.id === configActiveTab) && flatIndex === 0) ? 0 : -1}
+                        className={`modal-nav-item${selected ? ' active' : ''}`}
+                        onClick={() => selectConfigTab(item.id)}
+                        onKeyDown={(event) => handleNavKeyDown(event, flatIndex)}
+                      >
+                        <span className="modal-nav-icon">{item.icon}</span>
+                        <span className="modal-nav-label">{t(item.labelKey)}</span>
+                        {tabDirty && (
+                          <span
+                            className="editor-dirty-dot modal-nav-dirty-dot"
+                            title={t('configModal.unsaved')}
+                            aria-label={t('configModal.unsaved')}
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -363,12 +527,17 @@ const ConfigModal: React.FC = () => {
           <div className="modal-save-error" role="alert">{t('configModal.saveFailed')}</div>
         )}
         <div className="modal-content-footer">
-          {showGlobalActions && <>
+          {showGlobalActions ? <>
             <span className="modal-save-scope" title={t('configModal.scope.globalSaveHint')}>
               {t('configModal.scope.allDrafts')}
             </span>
             {dirty && !saving && <span className="modal-dirty-hint">{t('configModal.unsaved')}</span>}
-          </>}
+          </> : savedPill ? (
+            <span className="modal-saved-pill" role="status" aria-live="polite">
+              <Check size={13} aria-hidden="true" />
+              {t('configModal.saved')}
+            </span>
+          ) : null}
           <button className="btn" disabled={saving} onClick={handleCancel}>
             {t(showGlobalActions ? 'configModal.cancel' : 'configModal.close')}
           </button>

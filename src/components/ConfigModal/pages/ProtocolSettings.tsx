@@ -31,6 +31,15 @@ const ProtocolSettings: React.FC = () => {
     }, beforeId);
   };
 
+  const handleDuplicateSet = (template: ProtocolTemplate) => {
+    const index = page.items.findIndex(item => item.id === template.id);
+    page.create({
+      ...template,
+      id: crypto.randomUUID(),
+      name: t('ruleSetAccordion.duplicateName', { name: template.name }),
+    }, page.items[index + 1]?.id);
+  };
+
   return (
     <RuleSetAccordion<ProtocolTemplate>
       title={t('protocolSettings.accordionTitle')}
@@ -42,6 +51,11 @@ const ProtocolSettings: React.FC = () => {
       onSelect={page.toggleExpanded}
       onAdd={() => handleAddSet()}
       onInsert={handleAddSet}
+      onDuplicate={handleDuplicateSet}
+      isNonEmpty={(template) => Boolean(template.headerBytes.trim() || template.footerBytes.trim() || template.checksumAlgorithm !== 'none')}
+      matchesFilter={(template, q) =>
+        [template.name, template.headerBytes, template.footerBytes]
+          .some(value => value.toLocaleLowerCase().includes(q))}
       onReorder={page.reorder}
       onDiscard={page.discard}
       dirty={page.dirty}
@@ -64,7 +78,6 @@ const ProtocolSettings: React.FC = () => {
         <ProtocolTemplateEditor
           template={template}
           onChange={(patch) => updateProtocolTemplate(template.id, patch)}
-          onDelete={() => page.remove(template.id)}
         />
       )}
     />
