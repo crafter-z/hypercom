@@ -19,8 +19,13 @@ const TitleBar: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) 
   const pinLabel = isPinned ? t('titleBar.unpinOnTop') : t('titleBar.pinOnTop');
   const maximizeLabel = isMaximized ? t('titleBar.restore') : t('titleBar.maximize');
 
-  // F.5: derive active port info with primitive selectors (no unnecessary re-renders)
+  // F.5: derive active tab / port info with primitive selectors (no unnecessary re-renders)
+  const activeTabTitle = useAppStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId)?.title ?? null);
   const activePortId = useAppStore((s) => getActivePortId(s));
+  const activePortAlias = useAppStore((s) => {
+    const portId = getActivePortId(s);
+    return s.ports.find((p) => p.id === portId)?.alias ?? null;
+  });
   const activePortStatus = useAppStore((s) => {
     const portId = getActivePortId(s);
     return s.ports.find((p) => p.id === portId)?.status ?? 'none';
@@ -31,11 +36,22 @@ const TitleBar: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) 
   });
 
   const titleText = useMemo(() => {
-    if (activePortId && activePortStatus === 'connected' && activePortBaudRate != null) {
-      return `${activePortId} (${activePortBaudRate}) — HyperCom`;
+    if (activePortId) {
+      const portLabel = activePortAlias ? `${activePortId} (${activePortAlias})` : activePortId;
+      if (activePortStatus === 'connected' && activePortBaudRate != null) {
+        return `${portLabel} · ${activePortBaudRate} — HyperCom`;
+      }
+      if (activePortStatus !== 'none') {
+        const statusText = t(`sidebar.port.status.${activePortStatus}`, { defaultValue: activePortStatus });
+        return `${portLabel} (${statusText}) — HyperCom`;
+      }
+      return `${portLabel} — HyperCom`;
+    }
+    if (activeTabTitle) {
+      return `${activeTabTitle} — HyperCom`;
     }
     return 'HyperCom';
-  }, [activePortId, activePortStatus, activePortBaudRate]);
+  }, [activePortId, activePortAlias, activePortStatus, activePortBaudRate, activeTabTitle, t]);
 
   // F.5: sync OS-level window title
   useEffect(() => {
@@ -103,9 +119,11 @@ const TitleBar: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) 
                 stroke="currentColor" strokeWidth="10" strokeLinecap="round" strokeLinejoin="miter"/>
         </svg>
         <button
+          type="button"
           className="btn btn-icon btn-sm titlebar-panel-toggle"
-          title={sidebarToggleLabel}
+          title={`${sidebarToggleLabel} (Ctrl+B)`}
           aria-label={sidebarToggleLabel}
+          aria-expanded={!sidebarCollapsed}
           onClick={() => setUIState({ sidebarCollapsed: !sidebarCollapsed })}
         >
           {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
@@ -124,6 +142,7 @@ const TitleBar: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) 
           <Search size={15} />
         </button>
         <button
+          type="button"
           className={`btn btn-icon btn-sm titlebar-help titlebar-pin${isPinned ? ' active' : ''}`}
           title={pinLabel}
           aria-label={pinLabel}
@@ -133,35 +152,50 @@ const TitleBar: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch }) 
           {isPinned ? <PinOff size={15} /> : <Pin size={15} />}
         </button>
         <button
+          type="button"
+          className="btn btn-icon btn-sm"
+          title={`${t('titleBar.settings')} (Ctrl+,)`}
+          aria-label={t('titleBar.settings')}
+          onClick={() => toggleConfigModal(true)}
+        >
+          <Settings size={15} />
+        </button>
+        <div className="titlebar-separator titlebar-separator-subtle" />
+        <button
+          type="button"
           className="btn btn-icon btn-sm titlebar-help"
-          title={t('help.title')}
+          title={`${t('help.title')} (F1)`}
           aria-label={t('help.title')}
           onClick={() => { void openHelpCenter(); }}
         >
           <BookOpen size={15} />
         </button>
         <button
+          type="button"
           className="btn btn-icon btn-sm titlebar-help"
-          title={t('hotkeys.title')}
+          title={`${t('hotkeys.title')} (Ctrl+/)`}
           aria-label={t('hotkeys.title')}
           onClick={() => setUIState({ isHotkeyHelpOpen: true })}
         >
           <Keyboard size={15} />
         </button>
-        <button className="btn btn-icon btn-sm titlebar-help" title={t('titleBar.about')} aria-label={t('titleBar.about')} onClick={() => setUIState({ isAboutOpen: true })}>
+        <button
+          type="button"
+          className="btn btn-icon btn-sm titlebar-help"
+          title={t('titleBar.about')}
+          aria-label={t('titleBar.about')}
+          onClick={() => setUIState({ isAboutOpen: true })}
+        >
           <Info size={15} />
         </button>
-        <button className="btn btn-icon btn-sm" title={t('titleBar.settings')} aria-label={t('titleBar.settings')} onClick={() => toggleConfigModal(true)}>
-          <Settings size={15} />
-        </button>
         <div className="titlebar-separator" />
-        <button className="titlebar-control" title={t('titleBar.minimize')} aria-label={t('titleBar.minimize')} onClick={handleMinimize}>
+        <button type="button" className="titlebar-control" title={t('titleBar.minimize')} aria-label={t('titleBar.minimize')} onClick={handleMinimize}>
           <Minus size={15} />
         </button>
-        <button className="titlebar-control" title={maximizeLabel} aria-label={maximizeLabel} onClick={handleMaximize}>
+        <button type="button" className="titlebar-control" title={maximizeLabel} aria-label={maximizeLabel} onClick={handleMaximize}>
           {isMaximized ? <Minimize2 size={13} /> : <Square size={13} />}
         </button>
-        <button className="titlebar-control titlebar-close" title={t('titleBar.close')} aria-label={t('titleBar.close')} onClick={handleClose}>
+        <button type="button" className="titlebar-control titlebar-close" title={t('titleBar.close')} aria-label={t('titleBar.close')} onClick={handleClose}>
           <X size={15} />
         </button>
       </div>

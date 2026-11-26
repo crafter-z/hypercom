@@ -3,8 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../../stores/useAppStore';
 import { useConfigPersistence } from '../../hooks';
 import { diagLogService, fileService } from '../../services/tauri';
-import { X, RefreshCw, Trash2, Download, Eraser } from 'lucide-react';
+import { X, RefreshCw, Trash2, Download, ArrowDownToLine } from 'lucide-react';
 import { clearDiagLog, parseDiagLogLine } from '../../utils/diagLog';
+import { notifyError, notifySuccess } from '../../stores/useToastStore';
 import { usePluginViewOverlay } from './usePluginViewOverlay';
 import ConfirmDialog from './ConfirmDialog';
 import Modal from './Modal';
@@ -87,8 +88,10 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
     try {
       await clearDiagLog();
       await refresh();
+      notifySuccess('diagLog.cleared');
     } catch (e) {
       console.debug('[DiagLog] clear failed:', e);
+      notifyError(e);
     } finally {
       setBusy(false);
     }
@@ -103,8 +106,10 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
         filters: [{ name: t('diagLog.exportDialog.filterName'), extensions: ['log', 'txt'] }],
       });
       if (saved === null) return;
+      notifySuccess('diagLog.exported');
     } catch (e) {
       console.debug('[DiagLog] export failed:', e);
+      notifyError(e);
     } finally {
       setBusy(false);
     }
@@ -141,6 +146,7 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
             value={levelFilter}
             onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
             title={t('diagLog.filter')}
+            aria-label={t('diagLog.filter')}
           >
             <option value="all">{t('diagLog.filterAll')}</option>
             <option value="INFO">INFO</option>
@@ -155,16 +161,16 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
             />
             {t('diagLog.autoRefresh')}
           </label>
-          <button className="btn btn-icon btn-sm" title={t('diagLog.refresh')} onClick={refresh} disabled={busy}>
+          <button type="button" className="btn btn-icon btn-sm" title={t('diagLog.refresh')} aria-label={t('diagLog.refresh')} onClick={refresh} disabled={busy}>
             <RefreshCw size={14} />
           </button>
-          <button className="btn btn-icon btn-sm" title={t('diagLog.export')} onClick={handleExport} disabled={busy}>
+          <button type="button" className="btn btn-icon btn-sm" title={t('diagLog.export')} aria-label={t('diagLog.export')} onClick={handleExport} disabled={busy}>
             <Download size={14} />
           </button>
-          <button className="btn btn-icon btn-sm" title={t('diagLog.clear')} onClick={() => setConfirmClear(true)} disabled={busy}>
+          <button type="button" className="btn btn-icon btn-sm" title={t('diagLog.clear')} aria-label={t('diagLog.clear')} onClick={() => setConfirmClear(true)} disabled={busy}>
             <Trash2 size={14} />
           </button>
-          <button className="btn btn-icon btn-sm" title={t('hotkeys.close')} onClick={onClose}>
+          <button type="button" className="btn btn-icon btn-sm" title={t('hotkeys.close')} aria-label={t('hotkeys.close')} onClick={onClose}>
             <X size={14} />
           </button>
         </div>
@@ -186,8 +192,8 @@ const DiagnosticLogDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => 
       </div>
 
       <div className="diag-log-footer">
-        <button className="btn btn-sm diag-log-clear-scroll" title={t('diagLog.scrollToLatest')} onClick={() => { const el = logRef.current; if (el) el.scrollTop = el.scrollHeight; }}>
-          <Eraser size={12} />
+        <button type="button" className="btn btn-sm diag-log-clear-scroll" title={t('diagLog.scrollToLatest')} onClick={() => { const el = logRef.current; if (el) el.scrollTop = el.scrollHeight; }}>
+          <ArrowDownToLine size={12} />
           {t('diagLog.scrollToLatest')}
         </button>
         <span className="diag-log-path" title={diagPath}>{diagPath || t('diagLog.loadingPath')}</span>

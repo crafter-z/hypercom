@@ -34,15 +34,20 @@ const PluginPanel: React.FC = () => {
 
   return (
     <div className="plugin-panel">
-      <div className="plugin-panel-header" onClick={() => setCollapsed((c) => !c)}>
+      <button
+        type="button"
+        className="plugin-panel-header"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((c) => !c)}
+      >
         <span className="plugin-panel-title">
-          {collapsed ? <PanelBottomOpen size={13} /> : <PanelBottomClose size={13} />}
+          {collapsed ? <PanelBottomOpen size={13} aria-hidden="true" /> : <PanelBottomClose size={13} aria-hidden="true" />}
           {t('plugins.panelTitle')}
         </span>
         <span className="plugin-panel-count">
           {t('plugins.panelPlugins', { count: activePlugins.length })}
         </span>
-      </div>
+      </button>
 
       {!collapsed && (
         <div className="plugin-panel-body">
@@ -52,22 +57,28 @@ const PluginPanel: React.FC = () => {
                 <strong>{pluginId}</strong>
                 <div className="plugin-panel-block-actions">
                   <button
+                    type="button"
                     className="icon-btn"
                     title={t('plugins.panelCopy')}
+                    aria-label={t('plugins.panelCopy')}
                     onClick={() => copyAll(pluginId)}
                   >
                     <Copy size={13} />
                   </button>
                   <button
+                    type="button"
                     className="icon-btn"
                     title={t('plugins.panelExport')}
+                    aria-label={t('plugins.panelExport')}
                     onClick={() => void exportPluginPanel(pluginId, p.buffer).catch(notifyError)}
                   >
                     <Download size={13} />
                   </button>
                   <button
+                    type="button"
                     className="icon-btn"
                     title={t('plugins.panelClear')}
+                    aria-label={t('plugins.panelClear')}
                     onClick={() => clearPluginPanel(pluginId)}
                   >
                     <X size={13} />

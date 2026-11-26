@@ -14,12 +14,16 @@ interface HelpCenterProps {
   initialAnchor?: string | null;
 }
 
+interface HistoryEntry extends HelpLocation {
+  searchQuery?: string;
+}
+
 const ARTICLE_IDS = [
   'quick-start', 'ports', 'terminal', 'transmission', 'logging', 'timeline',
   'rules', 'tools', 'settings', 'plugins', 'shortcuts',
 ] as const;
 
-type HistoryLocation = HelpLocation;
+type HistoryLocation = HistoryEntry;
 
 function getArticle(articleId: string): HelpArticle | undefined {
   return helpCatalog.getArticle(articleId);
@@ -125,10 +129,10 @@ const HelpCenter: React.FC<HelpCenterProps> = ({ initialArticleId, initialAnchor
     scrollToAnchor(anchor);
   }, [articleId, anchor, scrollToAnchor]);
 
-  const navigate = useCallback((location: HelpLocation, replace = false) => {
+  const navigate = useCallback((location: HelpLocation, replace = false, fromSearchQuery?: string) => {
     const nextId = location.articleId || 'home';
     if (!getArticle(nextId)) return;
-    const next = { articleId: nextId, anchor: location.anchor };
+    const next: HistoryLocation = { articleId: nextId, anchor: location.anchor };
     setArticleId(nextId);
     setAnchor(location.anchor);
     setQuery('');
@@ -136,7 +140,13 @@ const HelpCenter: React.FC<HelpCenterProps> = ({ initialArticleId, initialAnchor
       setHistory(current => current.map((item, index) => index === historyIndex ? next : item));
       return;
     }
-    setHistory(current => [...current.slice(0, historyIndex + 1), next]);
+    setHistory(current => {
+      const base = current.slice(0, historyIndex + 1);
+      if (fromSearchQuery && base.length > 0) {
+        base[base.length - 1] = { ...base[base.length - 1], searchQuery: fromSearchQuery };
+      }
+      return [...base, next];
+    });
     setHistoryIndex(index => index + 1);
   }, [historyIndex]);
 
@@ -159,17 +169,17 @@ const HelpCenter: React.FC<HelpCenterProps> = ({ initialArticleId, initialAnchor
     };
   }, [navigate]);
 
-  const goBack = () => {
+  const goBack = useCallback(() => {
     if (historyIndex <= 0) return;
     const nextIndex = historyIndex - 1;
     const location = history[nextIndex];
     setHistoryIndex(nextIndex);
     setArticleId(location.articleId);
     setAnchor(location.anchor);
-    setQuery('');
-  };
+    setQuery(location.searchQuery ?? '');
+  }, [history, historyIndex]);
 
-  const goForward = () => {
+  const goForward = useCallback(() => {
     if (historyIndex >= history.length - 1) return;
     const nextIndex = historyIndex + 1;
     const location = history[nextIndex];
@@ -177,7 +187,7 @@ const HelpCenter: React.FC<HelpCenterProps> = ({ initialArticleId, initialAnchor
     setArticleId(location.articleId);
     setAnchor(location.anchor);
     setQuery('');
-  };
+  }, [history, historyIndex]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -198,7 +208,7 @@ const HelpCenter: React.FC<HelpCenterProps> = ({ initialArticleId, initialAnchor
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  });
+  }, [goBack, goForward]);
 
   const openExternal = (url: string) => {
     const safeUrl = normalizeExternalUrl(url);
@@ -281,7 +291,7 @@ const HelpCenter: React.FC<HelpCenterProps> = ({ initialArticleId, initialAnchor
               ) : (
                 <div className="help-results-list">
                   {results.map(result => (
-                    <button type="button" className="help-result" key={`${result.articleId}:${result.anchor || ''}`} onClick={() => navigate({ articleId: result.articleId, anchor: result.anchor })}>
+                    <button type="button" className="help-result" key={`${result.articleId}:${result.anchor || ''}`} onClick={() => navigate({ articleId: result.articleId, anchor: result.anchor }, false, query)}>
                       <span className="help-result-title">{result.title}</span>
                       <span className="help-result-excerpt">{result.excerpt}</span>
                       <span className="help-result-path">{result.article.title}</span>

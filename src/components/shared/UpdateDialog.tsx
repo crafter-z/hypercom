@@ -144,7 +144,7 @@ const UpdateDialog: React.FC = () => {
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <h3 className="modal-dialog-title" id="update-dialog-title" style={{ margin: 0 }}>{t('update.title')}</h3>
-        <button className="btn btn-icon btn-sm" onClick={remindLater} title={t('hotkeys.close')} disabled={busy}>
+        <button type="button" className="btn btn-icon btn-sm" onClick={remindLater} title={t('hotkeys.close')} aria-label={t('hotkeys.close')} disabled={busy}>
           <X size={14} />
         </button>
       </div>
@@ -168,16 +168,31 @@ const UpdateDialog: React.FC = () => {
         )}
       </div>
 
-      {progress && (
-        <div className="update-download-progress">
-          {progress.phase === 'download'
-            ? t('update.downloading', {
-                percent: progress.total ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : 0,
-              })
-            : t('update.installing')}
-        </div>
-      )}
-      {error && <div className="update-error">{error}</div>}
+      {progress && (() => {
+        const pct = progress.phase === 'download' && progress.total
+          ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+          : 0;
+        const indeterminate = progress.phase !== 'download' || !progress.total;
+        return (
+          <div className="update-download-progress-wrap">
+            <div className="update-download-progress">
+              {progress.phase === 'download'
+                ? t('update.downloading', { percent: pct })
+                : t('update.installing')}
+            </div>
+            <div
+              className={`update-progress-track${indeterminate ? ' indeterminate' : ''}`}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={indeterminate ? undefined : pct}
+            >
+              <div className="update-progress-fill" style={indeterminate ? undefined : { width: `${pct}%` }} />
+            </div>
+          </div>
+        );
+      })()}
+      {error && <div className="update-error" role="alert">{error}</div>}
 
       <div className="update-actions">
         {/* issue #12 二轮：跳转该版本 GitHub Release 页（方案 §2.5 rawJson 预留的落地） */}

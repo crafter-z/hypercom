@@ -95,7 +95,7 @@ const AboutDialog: React.FC = () => {
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <h3 className="modal-dialog-title" id="about-dialog-title" style={{ margin: 0 }}>{t('about.title')}</h3>
-          <button className="btn btn-icon btn-sm" onClick={close} title={t('hotkeys.close')}>
+          <button type="button" className="btn btn-icon btn-sm" onClick={close} title={t('hotkeys.close')} aria-label={t('hotkeys.close')}>
             <X size={14} />
           </button>
         </div>

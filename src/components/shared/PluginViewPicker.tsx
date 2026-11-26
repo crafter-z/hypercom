@@ -179,6 +179,8 @@ const PluginViewPicker: React.FC<PluginViewPickerProps> = ({
     } else if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       chooseIndex(activeIndex);
+    } else if (event.key === 'Tab') {
+      setOpen(false);
     }
   };
 

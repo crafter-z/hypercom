@@ -79,7 +79,7 @@ const LicensesDialog: React.FC<LicensesDialogProps> = ({ onClose }) => {
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <h3 className="modal-dialog-title" id="licenses-dialog-title" style={{ margin: 0 }}>{t('about.licenses.title')}</h3>
-        <button className="btn btn-icon btn-sm" onClick={onClose} title={t('hotkeys.close')}>
+        <button type="button" className="btn btn-icon btn-sm" onClick={onClose} title={t('hotkeys.close')} aria-label={t('hotkeys.close')}>
           <X size={14} />
         </button>
       </div>
