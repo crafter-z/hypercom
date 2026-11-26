@@ -7,6 +7,7 @@ import { useTerminalStore } from '../../stores/useTerminalStore';
 import { timelineCoordinator, type DragSyncPolicy, type TimelineMemberSnapshot, type TimelineStatus } from '../../utils/timeline';
 import { usePluginViewOverlay } from '../shared/usePluginViewOverlay';
 import { SegmentedControl } from '../shared/SegmentedControl';
+import ConfirmDialog from '../shared/ConfirmDialog';
 import { safeCssColor } from '../../utils/cssColor';
 import { formatTimelineTime as clockLabel } from '../../utils/timeFormat';
 import './TimelineControls.css';
@@ -88,8 +89,22 @@ export const TimelineBadge: React.FC<{ tabId: string }> = ({ tabId }) => {
   const groupName = useGroupName(tabId);
   const groupColor = useSyncExternalStore(timelineCoordinator.subscribe, () => safeCssColor(timelineCoordinator.groupForSlot(tabId)?.color) ?? '');
   if (!groupId) return null;
-  const title = groupName && groupName !== groupLabel ? `${groupLabel} · ${groupName}` : t('timeline.title');
-  return <span className="timeline-badge" style={{ color: groupColor || undefined }} title={title}><Link2 size={10} />{groupLabel}</span>;
+  const title = groupName && groupName !== groupLabel
+    ? `${groupLabel} · ${groupName} · ${t('timeline.manage')}`
+    : `${groupLabel} · ${t('timeline.manage')}`;
+  return (
+    <button
+      type="button"
+      className="timeline-badge"
+      style={{ color: groupColor || undefined }}
+      title={title}
+      aria-label={title}
+      onClick={(event) => { event.stopPropagation(); openTimelinePanel(tabId); }}
+    >
+      <Link2 size={10} aria-hidden="true" />
+      {groupLabel}
+    </button>
+  );
 };
 
 const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
@@ -106,7 +121,9 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
   const [joinExisting, setJoinExisting] = useState(false);
   const [joinGroupId, setJoinGroupId] = useState(joinableGroups[0]?.id ?? '');
   const [error, setError] = useState('');
+  const [confirmDissolve, setConfirmDissolve] = useState(false);
   const dialogRef = useRef<HTMLElement>(null);
+  const initialFocusRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
   const ready = usePluginViewOverlay();
   const sourceIds = group ? [...new Set([...group.mappings.map(mapping => mapping.sourceId),
     ...group.memberSlots.map(slot => timelineCoordinator.participantForSlot(slot)?.sourceId).filter((id): id is string => !!id)])] : [];
@@ -128,20 +145,29 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
   const allUnavailable = !!group && group.members.length > 0 && group.members.every(member => member.state === 'unavailable');
   const mappingRequired = (group?.members ?? []).some(member => member.reason === 'mapping-required');
 
-  useDialogLifecycle({ open: ready, dialogRef, onClose: closePanel });
+  useDialogLifecycle({ open: ready, dialogRef, onClose: closePanel, initialFocusRef });
   const action = (work: () => void) => { try { work(); setError(''); } catch (cause) { setError(String(cause)); } };
-  const alignEvent = () => action(() => {
+  const alignEvent = () => {
     if (!group) return;
     const sources = new Set<string>();
-    for (const member of group.memberSlots) {
-      const participant = timelineCoordinator.participantForSlot(member);
-      const anchor = timelineCoordinator.readSlotAnchor(member);
-      if (!participant || !anchor || sources.has(participant.sourceId)) continue;
-      sources.add(participant.sourceId);
-      timelineCoordinator.setMapping(group.id, { sourceId: participant.sourceId, sourceTimeMs: anchor.timeMs, groupTimeMs: 0, clockEpoch: participant.clockEpoch });
+    try {
+      for (const member of group.memberSlots) {
+        const participant = timelineCoordinator.participantForSlot(member);
+        const anchor = timelineCoordinator.readSlotAnchor(member);
+        if (!participant || !anchor || sources.has(participant.sourceId)) continue;
+        sources.add(participant.sourceId);
+        timelineCoordinator.setMapping(group.id, { sourceId: participant.sourceId, sourceTimeMs: anchor.timeMs, groupTimeMs: 0, clockEpoch: participant.clockEpoch });
+      }
+      if (sources.size === 0) {
+        setError(t('timeline.alignHereNoAnchor'));
+        return;
+      }
+      timelineCoordinator.seek(group.id, 0);
+      setError('');
+    } catch (cause) {
+      setError(String(cause));
     }
-    timelineCoordinator.seek(group.id, 0);
-  });
+  };
   // Leaving a two-member group would strand a one-member group, so it dissolves instead.
   const leaveGroup = () => action(() => {
     if (!group) return;
@@ -182,6 +208,13 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
   };
   const sourceLabel = (sourceId: string) => tabs.filter(tab => timelineCoordinator.participantForSlot(tab.id)?.sourceId === sourceId).map(tab => tab.title).join(' / ') || sourceId;
 
+  const firstFocusableMemberTabId = group
+    ? (tabs.find(tab => {
+        const participant = timelineCoordinator.participantForSlot(tab.id);
+        return !(!participant && !originalSelection.current.includes(tab.id));
+      })?.id ?? tabs[0]?.id)
+    : undefined;
+
   return <div className="modal-overlay timeline-modal-overlay" style={{ visibility: ready ? 'visible' : 'hidden' }} onMouseDown={event => { if (event.target === event.currentTarget) closePanel(); }}>
     <section ref={dialogRef} tabIndex={-1} className="timeline-panel" role="dialog" aria-modal="true" aria-labelledby="timeline-panel-title" aria-describedby="timeline-panel-description">
       <header className="timeline-panel-header">
@@ -189,7 +222,7 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
           <h2 id="timeline-panel-title">{t('timeline.title')}</h2>
           <p id="timeline-panel-description">{t('timeline.description')}</p>
         </div>
-        <button type="button" className="icon-btn" data-initial-focus title={t('timeline.close')} aria-label={t('timeline.close')} onClick={closePanel}><X size={16} /></button>
+        <button type="button" className="icon-btn" title={t('timeline.close')} aria-label={t('timeline.close')} onClick={closePanel}><X size={16} /></button>
       </header>
       <form className="timeline-panel-form" onSubmit={submit}>
         <div className="timeline-panel-body">
@@ -202,7 +235,7 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
             </span>}
             <div className="timeline-group-actions" role="group" aria-label={t('timeline.groupActions')}>
               {group.memberSlots.length > 2 && <button type="button" className="btn btn-sm" onClick={leaveGroup}>{t('timeline.leaveGroup')}</button>}
-              <button type="button" className="btn btn-sm btn-danger" onClick={dissolveGroup}>{t('timeline.deleteGroup')}</button>
+              <button type="button" className="btn btn-sm btn-danger" onClick={() => setConfirmDissolve(true)}>{t('timeline.deleteGroup')}</button>
             </div>
           </div> : <div className="timeline-setup">
             {joinableGroups.length > 0 && <SegmentedControl
@@ -212,9 +245,9 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
               onChange={mode => setJoinExisting(mode === 'join')}
             />}
             <label className="timeline-field"><span>{t(joinExisting ? 'timeline.selectGroup' : 'timeline.groupName')}</span>
-              {joinExisting ? <select className="select" value={joinGroupId} onChange={event => setJoinGroupId(event.target.value)}>
+              {joinExisting ? <select ref={node => { initialFocusRef.current = node; }} className="select" value={joinGroupId} onChange={event => setJoinGroupId(event.target.value)}>
                 {joinableGroups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select> : <input className="toolbar-input" value={name} placeholder={`G${snapshot.groups.length + 1}`} onChange={event => setName(event.target.value)} />}
+              </select> : <input ref={node => { initialFocusRef.current = node; }} className="toolbar-input" value={name} placeholder={`G${snapshot.groups.length + 1}`} onChange={event => setName(event.target.value)} />}
             </label>
           </div>}
           {/* A clock-domain mismatch is a behavioural fallback, never a prompt: the member is
@@ -244,7 +277,13 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
                   : undefined;
                 const label = `${port?.alias ? `${port.alias} · ` : ''}${tab.title}`;
                 return <label key={tab.id} className={`timeline-member-row${checked ? ' is-selected' : ''}${unavailable ? ' is-unavailable' : ''}`}>
-                  <input type="checkbox" checked={checked} disabled={unavailable && !originalSelection.current.includes(tab.id)} onChange={event => setSelected(current => event.target.checked ? [...current, tab.id] : current.filter(id => id !== tab.id))} />
+                  <input
+                    ref={group && tab.id === firstFocusableMemberTabId ? (node => { initialFocusRef.current = node; }) : undefined}
+                    type="checkbox"
+                    checked={checked}
+                    disabled={unavailable && !originalSelection.current.includes(tab.id)}
+                    onChange={event => setSelected(current => event.target.checked ? [...current, tab.id] : current.filter(id => id !== tab.id))}
+                  />
                   <span className="timeline-member-name" title={label}>{label}</span>
                   <span className="timeline-member-kind" title={unavailable ? t('timeline.unsupportedView') : undefined}>{unavailable ? t('timeline.status.unsupported') : t(tab.kind === 'replay' ? 'timeline.replaySource' : 'timeline.liveSource')}</span>
                   {statusLabel && <span className={`timeline-member-status is-${tone}`} title={statusDetail}>{statusLabel}</span>}
@@ -280,20 +319,27 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
                     }} /><span className="timeline-unit">ms</span>
                 </label>)}
                 <div className="timeline-calibration-actions"><button type="button" className="btn btn-sm" onClick={alignEvent}>{t('timeline.alignEvents')}</button>
-                  <button type="button" className="btn btn-sm" onClick={() => action(() => {
+                  <button type="button" className="btn btn-sm" onClick={() => {
                     const participant = timelineCoordinator.participantForSlot(slotId);
                     const anchor = timelineCoordinator.readSlotAnchor(slotId);
-                    if (!participant || !anchor) return;
-                    const token = timelineCoordinator.beginNavigation(participant.participantId);
-                    if (token) timelineCoordinator.endNavigation(token, anchor);
-                  })}>{t('timeline.alignHere')}</button></div>
+                    if (!participant || !anchor) {
+                      setError(t('timeline.alignHereNoAnchor'));
+                      return;
+                    }
+                    action(() => {
+                      const token = timelineCoordinator.beginNavigation(participant.participantId);
+                      if (token) timelineCoordinator.endNavigation(token, anchor);
+                    });
+                  }}>{t('timeline.alignHere')}</button></div>
               </section>
               <section className="timeline-diagnostics"><h3>{t('timeline.results')}</h3>
                 {group.members.map(member => {
                   const reasonKey = member.reason ? REASON_KEYS[member.reason] : undefined;
-                  return <div key={member.slotId} className="timeline-result" title={reasonKey ? t(reasonKey) : member.reason}>
+                  const reasonText = reasonKey ? t(reasonKey) : member.reason;
+                  return <div key={member.slotId} className="timeline-result">
                     <span>{tabs.find(tab => tab.id === member.slotId)?.title ?? member.slotId}</span><span>{t(`timeline.status.${member.status ?? (member.state === 'active' ? 'loading' : 'unavailable')}`)}</span>
                     <small>{member.actualTimeMs != null ? `${clockLabel(member.actualTimeMs)} (${member.deltaMs ?? 0} ms)` : '—'}</small>
+                    {reasonText && <small className="timeline-result-reason">{reasonText}</small>}
                   </div>;
                 })}
               </section>
@@ -309,6 +355,16 @@ const TimelinePanel: React.FC<{ slotId: string }> = ({ slotId }) => {
         </footer>
       </form>
     </section>
+    <ConfirmDialog
+      open={confirmDissolve}
+      title={t('timeline.deleteGroupTitle')}
+      message={t('timeline.deleteGroupMessage', { name: group?.name ?? '' })}
+      confirmLabel={t('confirmDialog.confirm')}
+      cancelLabel={t('confirmDialog.cancel')}
+      danger
+      onConfirm={() => { setConfirmDissolve(false); dissolveGroup(); }}
+      onCancel={() => setConfirmDissolve(false)}
+    />
   </div>;
 };
 

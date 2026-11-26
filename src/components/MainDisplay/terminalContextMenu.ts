@@ -11,7 +11,7 @@
  */
 import type { TFunction } from 'i18next';
 import { fileService } from '../../services/tauri';
-import { hexToString, stringToHex } from '../../utils/hexUtils';
+import { hexToString, isValidHexInput, stringToHex } from '../../utils/hexUtils';
 import { formatTerminalTimestamp } from '../../utils/timeFormat';
 import { formatLineForCopy } from '../../utils/terminalSearch';
 import { getLineText } from '../../utils/lineText';
@@ -43,6 +43,10 @@ export interface TerminalContextMenuData {
   t: TFunction;
   /** Select-all needs the scroll container ref, so it stays a callback. */
   onSelectAll: () => void;
+  /** Opens/focuses local terminal search (Ctrl+F). */
+  onFind?: () => void;
+  /** Clears writable terminal buffer (Ctrl+L). Omitted for read-only views. */
+  onClear?: () => void;
   /** Captured before opening/focusing the menu; empty means no selection. */
   browserSelectionText?: string;
 }
@@ -83,11 +87,13 @@ export function buildTerminalContextMenuItems(
 ): ContextMenuEntry[] {
   const {
     portId, lines, range, timestampMode, isFirstInRound,
-    connectedAt, timestampFormat, encoding, t, onSelectAll,
+    connectedAt, timestampFormat, encoding, t, onSelectAll, onFind, onClear,
   } = data;
   // Capture once, before ContextMenu moves focus; callbacks must not read a
   // possibly collapsed/replaced document selection at activation time.
   const browserSelectionText = data.browserSelectionText ?? selectionText();
+  const hasBrowserSelection = browserSelectionText.length > 0;
+  const hasLines = lines.length > 0;
 
   // Timestamp cell for a given line index, honoring per-round muting.
   const lineTimestamp = (idx: number): string =>
@@ -137,24 +143,46 @@ export function buildTerminalContextMenuItems(
     }
   };
 
-  return [
+  const entries: ContextMenuEntry[] = [
+    { label: t('terminalView.contextMenu.copy'), onClick: copyBrowserSelection, disabled: !hasBrowserSelection },
     { label: t('terminal.context.copySelectedLines'), onClick: copySelected, disabled: range === null },
-    { label: t('terminal.context.copyVisible'), onClick: copyBrowserSelection },
-    { label: t('terminal.context.copyAll'), onClick: copyAll, disabled: lines.length === 0 },
+    { label: t('terminal.context.copyAll'), onClick: copyAll, disabled: !hasLines },
     { type: 'separator' },
-    { label: t('terminalView.contextMenu.selectAll'), onClick: onSelectAll },
-    { label: t('terminalView.contextMenu.copy'), onClick: copyBrowserSelection },
+    { label: t('terminalView.contextMenu.selectAll'), onClick: onSelectAll, disabled: !hasLines },
+    ...(onFind ? [{ label: t('terminalView.contextMenu.find'), onClick: onFind }] : []),
     { type: 'separator' },
-    { label: t('terminalView.contextMenu.copyAsHex'), onClick: () => {
-      const text = browserSelectionText;
-      if (text) void writeClipboardText(stringToHex(text)).catch(notifyError);
-    }},
-    { label: t('terminalView.contextMenu.hexToText'), onClick: () => {
-      const text = browserSelectionText;
-      if (text) void writeClipboardText(hexToString(text)).catch(notifyError);
-    }},
+    {
+      label: t('terminalView.contextMenu.copyAsHex'),
+      disabled: !hasBrowserSelection,
+      onClick: () => {
+        const text = browserSelectionText;
+        if (text) void writeClipboardText(stringToHex(text)).catch(notifyError);
+      },
+    },
+    {
+      label: t('terminalView.contextMenu.hexToText'),
+      disabled: !hasBrowserSelection,
+      onClick: () => {
+        const text = browserSelectionText;
+        if (!text) return;
+        if (!text.trim() || !isValidHexInput(text)) {
+          notifyError(t('sendSection.hexInput.invalid'));
+          return;
+        }
+        void writeClipboardText(hexToString(text)).catch(notifyError);
+      },
+    },
     { type: 'separator' },
-    { label: t('terminalView.contextMenu.exportTxt'), onClick: () => { void exportLines('txt'); } },
-    { label: t('terminalView.contextMenu.exportCsv'), onClick: () => { void exportLines('csv'); } },
+    { label: t('terminalView.contextMenu.exportTxt'), onClick: () => { void exportLines('txt'); }, disabled: !hasLines },
+    { label: t('terminalView.contextMenu.exportCsv'), onClick: () => { void exportLines('csv'); }, disabled: !hasLines },
   ];
+
+  if (onClear) {
+    entries.push(
+      { type: 'separator' },
+      { label: t('terminalView.contextMenu.clear'), onClick: onClear, disabled: !hasLines, danger: true },
+    );
+  }
+
+  return entries;
 }

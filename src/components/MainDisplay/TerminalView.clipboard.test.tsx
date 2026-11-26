@@ -111,7 +111,7 @@ describe('TerminalView copy entry parity', () => {
     await copy(output);
     expect(writeClipboard).toHaveBeenLastCalledWith(expected);
     await openMenu(content);
-    await activate('terminal.context.copyVisible');
+    await activate('terminalView.contextMenu.copy');
     expect(writeClipboard).toHaveBeenCalledTimes(2);
     expect(writeClipboard).toHaveBeenLastCalledWith(expected);
   });

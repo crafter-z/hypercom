@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { emit, listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-shell';
 import i18n from './i18n';
@@ -68,7 +68,22 @@ class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, Er
 
 const App: React.FC = () => {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
-  const openGlobalSearch = useCallback(() => setGlobalSearchOpen(true), []);
+  const [globalSearchInitialQuery, setGlobalSearchInitialQuery] = useState<string | undefined>(undefined);
+  const openGlobalSearch = useCallback((query?: string) => {
+    setGlobalSearchInitialQuery(typeof query === 'string' ? query : undefined);
+    setGlobalSearchOpen(true);
+  }, []);
+  const handleGlobalSearchTrigger = useCallback(() => openGlobalSearch(), [openGlobalSearch]);
+  const sidebarAsideRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const handleOpenGlobalSearch = (event: Event) => {
+      const query = (event as CustomEvent<{ query?: string }>).detail?.query;
+      openGlobalSearch(typeof query === 'string' ? query : undefined);
+    };
+    window.addEventListener('hypercom:open-global-search', handleOpenGlobalSearch);
+    return () => window.removeEventListener('hypercom:open-global-search', handleOpenGlobalSearch);
+  }, [openGlobalSearch]);
   useEditorWindowClose();
   useAppInit();
   // Serial event listeners (onSerialData / onSerialStatus /
@@ -144,6 +159,12 @@ const App: React.FC = () => {
   const { element: textEditMenuElement } = useTextEditContextMenu();
   const sidebarWidth = useSystemStore((s) => s.ui.sidebarWidth);
   const sidebarCollapsed = useSystemStore((s) => s.ui.sidebarCollapsed);
+  useLayoutEffect(() => {
+    const el = sidebarAsideRef.current;
+    if (!el) return;
+    if (sidebarCollapsed) el.setAttribute('inert', '');
+    else el.removeAttribute('inert');
+  }, [sidebarCollapsed]);
   const configReady = useSystemStore((s) => s.ui.configReady);
   // ConfigModal edits the store as a draft. Only apply the loaded value here;
   // saved changes are applied after a successful save in ConfigModal.
@@ -209,10 +230,15 @@ const App: React.FC = () => {
         <div className="app-root">
           <h1 className="sr-only">HyperCom</h1>
           <div className="app-background" aria-hidden="true" />
-          <TitleBar onGlobalSearch={openGlobalSearch} />
+          <TitleBar onGlobalSearch={handleGlobalSearchTrigger} />
 
           <main className="app-main">
-            <aside className="app-sidebar-col" style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}>
+            <aside
+              ref={sidebarAsideRef}
+              className="app-sidebar-col"
+              aria-hidden={sidebarCollapsed}
+              style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+            >
               <div style={{ width: sidebarWidth, height: '100%' }}>
                 <Sidebar />
               </div>
@@ -220,7 +246,7 @@ const App: React.FC = () => {
             {!sidebarCollapsed && <SidebarResizeHandle />}
 
             <div className="app-content-col">
-              <MainDisplay onGlobalSearch={openGlobalSearch} />
+              <MainDisplay onGlobalSearch={handleGlobalSearchTrigger} />
               <OperationPanelResizeHandle />
               <OperationPanel />
               <PluginPanel />
@@ -228,7 +254,11 @@ const App: React.FC = () => {
           </main>
 
           <StatusBar />
-          <GlobalTerminalSearchPanel open={globalSearchOpen} onClose={() => setGlobalSearchOpen(false)} />
+          <GlobalTerminalSearchPanel
+            open={globalSearchOpen}
+            initialQuery={globalSearchInitialQuery}
+            onClose={() => { setGlobalSearchOpen(false); setGlobalSearchInitialQuery(undefined); }}
+          />
           <ConfigModal />
           <HotkeyHelpDialog />
           <AboutDialog />

@@ -247,6 +247,35 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     nextMatch, prevMatch, searchOptions, setSearchOptions, searchSnapshot, cancelSearch,
   } = useTerminalSearch({ vm, onNavigate: onSearchNavigate });
 
+  const [searchFocusSeq, setSearchFocusSeq] = useState(0);
+  const openOrFocusSearch = useCallback(() => {
+    if (searchOpen) setSearchFocusSeq((n) => n + 1);
+    else openSearch();
+  }, [searchOpen, openSearch]);
+
+  useEffect(() => {
+    if (!tabId) return;
+    const onOpenTerminalSearch = () => {
+      if (tabId === useAppStore.getState().activeTabId) {
+        openOrFocusSearch();
+      }
+    };
+    window.addEventListener('hypercom:open-terminal-search', onOpenTerminalSearch);
+    return () => window.removeEventListener('hypercom:open-terminal-search', onOpenTerminalSearch);
+  }, [tabId, openOrFocusSearch]);
+
+  // Track the highest sequence number seen while pinned/at bottom so we can
+  // surface a compact "+N" unread badge on the bottom-jump button when detached.
+  const seenSeqRef = useRef<number>(vm.buffer.lastSeq);
+  const prevVmForSeenRef = useRef(vm);
+  if (prevVmForSeenRef.current !== vm) {
+    prevVmForSeenRef.current = vm;
+    seenSeqRef.current = vm.buffer.lastSeq;
+  }
+  if (effectiveScrollLocked || vm.buffer.lastSeq < seenSeqRef.current) {
+    seenSeqRef.current = vm.buffer.lastSeq;
+  }
+
   const searchableRawView = useAppStore(state => {
     const tab = state.tabs.find(item => item.id === tabId);
     return !tab || tab.kind === 'replay' || (tab.kind === 'serial' && !tab.poppedOut && !getTabViewPreference(tab));
@@ -330,7 +359,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
       },
     });
     navigationRef.current = lifecycle;
-    const scroll = () => lifecycle.scroll();
+    const scroll = () => {
+      if (isAtBottom(element.scrollTop, element.clientHeight, element.scrollHeight)) {
+        seenSeqRef.current = vm.buffer.lastSeq;
+      }
+      lifecycle.scroll();
+    };
     const pointerEnd = (event: PointerEvent) => lifecycle.release(event.pointerId);
     const mouseEnd = () => lifecycle.release();
     const visibility = () => { if (document.visibilityState === 'hidden') lifecycle.release(); };
@@ -435,6 +469,16 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     [vm, resumeHeldAlignment],
   );
 
+  const handleSelectAll = useCallback(() => {
+    const sel = window.getSelection();
+    if (sel && containerRef.current) {
+      const range = document.createRange();
+      range.selectNodeContents(containerRef.current);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }, []);
+
   // Right-click: record the seq; build the menu from the buffer snapshot.
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -477,22 +521,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         encoding,
         t,
         onSelectAll: handleSelectAll,
+        onFind: openOrFocusSearch,
+        onClear: portId && !vmLive.readonlySource ? () => vmLive.clear() : undefined,
       });
       setContextMenu({ x: e.clientX, y: e.clientY, items });
       contextLineSeqRef.current = null;
     },
-    [vm, portId, sourceId, tabId, selectedRange, timestampMode, connectedAt, timestampFormat, encoding, t],
+    [vm, portId, sourceId, tabId, selectedRange, timestampMode, connectedAt, timestampFormat, encoding, t, handleSelectAll, openOrFocusSearch],
   );
-
-  const handleSelectAll = useCallback(() => {
-    const sel = window.getSelection();
-    if (sel && containerRef.current) {
-      const range = document.createRange();
-      range.selectNodeContents(containerRef.current);
-      sel.removeAllRanges();
-      sel.addRange(range);
-    }
-  }, []);
 
   const handleCopy = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented) return;
@@ -516,8 +552,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
       e.stopPropagation();
-      if (searchOpen) handleSearchClose();
-      else openSearch();
+      openOrFocusSearch();
     } else if (e.key === 'F3') {
       e.preventDefault();
       e.stopPropagation();
@@ -529,7 +564,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
       e.stopPropagation();
       handleSearchClose();
     }
-  }, [searchOpen, openSearch, handleSearchClose, nextMatch, prevMatch]);
+  }, [searchOpen, openSearch, openOrFocusSearch, handleSearchClose, nextMatch, prevMatch]);
 
   // Output-only shortcuts must not clear from editable toolbar fields, or
   // bubble to the global active-tab handler and clear a different pane.
@@ -574,6 +609,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   }, [groupId, updateTerminalConfig, beginGesture, vm]);
 
   const jumpToBottom = useCallback(() => {
+    seenSeqRef.current = vm.buffer.lastSeq;
     const group = tabId ? timelineCoordinator.groupForSlot(tabId) : undefined;
     if (!group || timelineCoordinator.canSetLive(group.id)) {
       // Ensure follow, never toggle it off. Group LIVE owns time mapping and
@@ -591,6 +627,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
   // FilterBar readout (visible rows under filter/pause) — refreshed via the
   // manager subscription above.
   const matchCount = vm.getVisibleCount();
+  const pausedBufferedCount = paused
+    ? Math.max(0, vm.buffer.lastSeq - vm.createSearchSource().getState().lastSeq)
+    : 0;
+  const unreadCount = !effectiveScrollLocked && !paused
+    ? Math.max(0, vm.buffer.lastSeq - seenSeqRef.current)
+    : 0;
+  const isDetached = !effectiveScrollLocked && vm.buffer.length > 0;
 
   return (
     <div className="terminal-view-container" style={hidden ? { display: 'none' } : undefined} onKeyDown={handleSearchKeyDown}>
@@ -611,7 +654,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           </select>
         </div>
       )}
-      {vm.isLoading && <div className="timeline-note" role="status">{t('timeline.status.loading')}</div>}
+      {vm.isLoading && <div className="terminal-status-banner" role="status">{t('timeline.status.loading')}</div>}
       <TerminalFilterBar
         portId={portId}
         configId={tabId ?? sourceId ?? portId}
@@ -634,6 +677,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         showMatchCount={debouncedKeyword.trim().length > 0 && !vm.isLoading}
         paused={paused}
         onTogglePause={togglePause}
+        onOpenSearch={openOrFocusSearch}
+        searchOpen={searchOpen}
         viewPicker={(() => {
           const tab = useAppStore.getState().tabs.find(item => item.kind === 'serial' && item.portId === portId);
           const preference = tab ? getTabViewPreference(tab) : null;
@@ -651,9 +696,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           ) : null;
         })()}
       />
-      {vm.revealingOutsideFilter && <div className="timeline-note" role="status">
-        {t('terminal.search.revealingOutsideFilter')} <button type="button" className="btn btn-sm" onClick={() => vm.restoreSearchFilter()}>{t('terminal.search.restoreFilter')}</button>
-      </div>}
+      {vm.revealingOutsideFilter && (
+        <div className="terminal-status-banner terminal-status-warn" role="status">
+          <span className="terminal-status-banner-text">{t('terminal.search.revealingOutsideFilter')}</span>
+          <button type="button" className="btn btn-sm terminal-status-banner-action" onClick={() => vm.restoreSearchFilter()}>
+            {t('terminal.search.restoreFilter')}
+          </button>
+        </div>
+      )}
       {searchOpen && (
         <TerminalSearchBar
           query={searchQuery}
@@ -672,7 +722,21 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
           }}
           snapshot={searchSnapshot}
           onCancel={cancelSearch}
+          focusSignal={searchFocusSeq}
         />
+      )}
+      {paused && (
+        <div className="terminal-status-banner terminal-pause-banner" role="status" aria-live="polite">
+          <span className="terminal-filter-paused-dot" aria-hidden="true" />
+          <span className="terminal-status-banner-text">
+            {pausedBufferedCount > 0
+              ? t('terminal.pauseBanner.withCount', { count: pausedBufferedCount })
+              : t('terminal.pauseBanner.active')}
+          </span>
+          <button type="button" className="btn btn-sm terminal-status-banner-action" onClick={togglePause}>
+            {t('terminal.filter.resume')}
+          </button>
+        </div>
       )}
       <div className="terminal-scroll-wrap">
         <div
@@ -722,12 +786,15 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
         </button>
         <button
           type="button"
-          className={`terminal-jump-btn bottom${effectiveScrollLocked ? ' active' : ''}`}
+          className={`terminal-jump-btn bottom${effectiveScrollLocked ? ' active' : ''}${isDetached ? ' detached' : ''}${unreadCount > 0 ? ' has-unread' : ''}`}
           title={t('terminal.jumpToBottom')}
           aria-label={t('terminal.jumpToBottom')}
           onClick={jumpToBottom}
         >
           <ArrowDownToLine size={13} />
+          {unreadCount > 0 && (
+            <span className="terminal-jump-unread">+{unreadCount > 999 ? '999+' : unreadCount}</span>
+          )}
         </button>
       </div>
 

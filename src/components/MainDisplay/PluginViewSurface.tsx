@@ -11,7 +11,7 @@ import {
 import { subscribePluginViews, getPluginViews } from '../../utils/pluginConfigSnapshot';
 import { removeTabContentPlacement, setTabContentPlacement } from '../../utils/tabContentPlacement';
 import { notifyError } from '../../stores/useToastStore';
-import { Settings } from 'lucide-react';
+import { Settings, AlertTriangle } from 'lucide-react';
 import PluginViewPicker, { type PluginViewChoice } from '../shared/PluginViewPicker';
 import { TimelineButton } from './TimelineControls';
 
@@ -43,6 +43,7 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   // A rejected page must never look like a silent fallback: keep the toolbar (and
   // therefore the reason + actions) visible even when the raw terminal took over.
   const rejected = !!preference && state.status === 'unavailable';
+  const serialRejectedFallback = tab.kind === 'serial' && stockVisible && rejected;
   const showToolbar = !stockVisible || rejected;
   const retriable = isRetriablePluginViewFailure(state.code);
   const reasonKey = state.code ? `pluginViews.failure.${state.code}` : null;
@@ -84,40 +85,54 @@ const PluginViewSurface: React.FC<Props> = ({ tab, hidden }) => {
   // A structural rejection (changed install, missing grant/consent/view, wrong
   // port binding) cannot be fixed by retrying; offer the page that can fix it.
   const failureActions = rejected ? <>
-    <button className="btn btn-sm" onClick={openPluginSettings} title={t('pluginViews.failureHint')}>
+    <button type="button" className="btn btn-sm" onClick={openPluginSettings} title={t('pluginViews.failureHint')}>
       <Settings size={12} /> {t('pluginViews.openSettings')}
     </button>
-    {retriable && <button className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
+    {retriable && <button type="button" className="btn btn-sm" onClick={() => retryPluginView(tab.id)}>{t('pluginViews.retry')}</button>}
+    {serialRejectedFallback && (
+      <button type="button" className="btn btn-sm" onClick={() => choose(null)}>
+        {t('pluginViews.switchToTerminal')}
+      </button>
+    )}
   </> : null;
   const failureText = rejected
     ? <span className="plugin-view-error-inline" title={state.error ?? ''}>
+      {serialRejectedFallback && <AlertTriangle size={13} className="plugin-view-error-icon" aria-hidden="true" />}
       {t('pluginViews.failureLead', { reason: reasonKey ? t(reasonKey) : (state.error ?? '') })}
     </span>
     : null;
   return <div className="plugin-view-tab" style={{ display: hidden ? 'none' : 'flex' }}>
-    {showToolbar && <div className="plugin-view-toolbar">
-      {tab.kind === 'serial' ? (
-        <PluginViewPicker
-          choices={replacements}
-          value={selected}
-          rawOption={{ key: '', label: t('pluginViews.terminal') }}
-          fallbackOption={unavailablePreference}
-          triggerLabel={t('pluginViews.view')}
-          title={t('pluginViews.view')}
-          ariaLabel={t('pluginViews.view')}
-          onSelect={choose}
-        />
-      ) : (
-        <span className="plugin-view-source">
-          <span className="plugin-view-source-name">{pluginName}</span>
-          {portId && <span className="plugin-view-source-port">· {portId}</span>}
-        </span>
-      )}
-      <TimelineButton tabId={tab.id} />
-      <span className="plugin-view-toolbar-spacer" />
-      {failureText}
-      {failureActions}
-    </div>}
+    {showToolbar && (serialRejectedFallback ? (
+      <div className="plugin-view-toolbar plugin-view-toolbar-alert" role="alert">
+        {failureText}
+        <span className="plugin-view-toolbar-spacer" />
+        <div className="plugin-view-toolbar-actions">{failureActions}</div>
+      </div>
+    ) : (
+      <div className="plugin-view-toolbar">
+        {tab.kind === 'serial' ? (
+          <PluginViewPicker
+            choices={replacements}
+            value={selected}
+            rawOption={{ key: '', label: t('pluginViews.terminal') }}
+            fallbackOption={unavailablePreference}
+            triggerLabel={t('pluginViews.view')}
+            title={t('pluginViews.view')}
+            ariaLabel={t('pluginViews.view')}
+            onSelect={choose}
+          />
+        ) : (
+          <span className="plugin-view-source">
+            <span className="plugin-view-source-name">{pluginName}</span>
+            {portId && <span className="plugin-view-source-port">· {portId}</span>}
+          </span>
+        )}
+        <TimelineButton tabId={tab.id} />
+        <span className="plugin-view-toolbar-spacer" />
+        {failureText}
+        {failureActions}
+      </div>
+    ))}
     <div ref={bodyRef} className="plugin-view-body">
       {tab.kind === 'plugin' && rejected && <div className="plugin-view-placeholder">
         <strong>{t('pluginViews.unavailable')}</strong>

@@ -147,6 +147,13 @@ const MainDisplay: React.FC<{ onGlobalSearch: () => void }> = ({ onGlobalSearch 
                   direction={branch.direction}
                   value={Math.round(child.size / (child.size + siblings[idx + 1].size) * 100)}
                   onResize={handleResize}
+                  onReset={() => {
+                    const combined = child.size + siblings[idx + 1].size;
+                    const delta = (combined / 2) - child.size;
+                    if (Math.abs(delta) > 1e-4) {
+                      resizeChildren(branch.id, idx, delta);
+                    }
+                  }}
                 />
               )}
             </React.Fragment>

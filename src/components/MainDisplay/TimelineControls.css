@@ -12,8 +12,24 @@
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   padding: 1px 4px;
+  background: transparent;
+  font: inherit;
   font-size: var(--text-2xs);
+  line-height: 1.2;
   color: var(--accent-color);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.timeline-badge:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-color);
+}
+
+.timeline-badge:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
 }
 
 .timeline-modal-overlay { z-index: 2100; padding: var(--space-4); }
@@ -132,6 +148,7 @@
 .timeline-result > span { overflow-wrap: anywhere; }
 .timeline-result > span:nth-child(2) { text-align: right; color: var(--text-secondary); }
 .timeline-result small { grid-column: 1 / -1; font-size: var(--text-xs); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.timeline-result .timeline-result-reason { color: var(--text-warning); overflow-wrap: anywhere; }
 .timeline-error { color: var(--text-error); overflow-wrap: anywhere; }
 .timeline-panel-footer {
   display: flex;

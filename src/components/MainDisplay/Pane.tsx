@@ -15,7 +15,7 @@ import { notifyError, notifyInfo } from '../../stores/useToastStore';
 import { popoutService } from '../../services/tauri';
 import TabBar from './TabBar';
 import PluginViewSurface from './PluginViewSurface';
-import { X, Cable } from 'lucide-react';
+import { X, Cable, ExternalLink } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
 
 interface PaneProps {
@@ -106,12 +106,28 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     await runSequential(portIds.filter(id => state.ports.find(port => port.id === id)?.status === 'connected'), closePort);
   }, [closePort]);
 
+  // Global Ctrl/Cmd+W close-active-tab delegation: only the pane that owns
+  // the target tab executes cleanupClosedTab + store close.
+  useEffect(() => {
+    const handleCloseActiveTab = (event: Event) => {
+      const detail = (event as CustomEvent<{ tabId?: string }>).detail;
+      const targetId = detail?.tabId ?? useAppStore.getState().activeTabId;
+      if (!targetId || !tabIds.includes(targetId)) return;
+      const tab = useAppStore.getState().tabs.find((item) => item.id === targetId);
+      if (!tab || tab.isPinned) return;
+      closeTab(targetId);
+    };
+    window.addEventListener('hypercom:close-active-tab', handleCloseActiveTab);
+    return () => window.removeEventListener('hypercom:close-active-tab', handleCloseActiveTab);
+  }, [tabIds, closeTab]);
+
   // paneTabs must follow the pane's tabIds order, not the global tabs array order.
   // Array.filter preserves original array order, which breaks after reorderPaneTabIds.
   const paneTabs = tabIds.map(id => tabs.find(t => t.id === id)!).filter(Boolean);
   // visibleTabs: Chrome-style detach — popped-out tabs vanish from the main window's
   // TabBar but stay in the data model (tabs + paneTree.tabIds) for reattach-on-close.
   const visibleTabs = paneTabs.filter(tab => tab.kind !== 'serial' || !tab.poppedOut);
+  const poppedOutTabs = paneTabs.filter(tab => tab.kind === 'serial' && tab.poppedOut);
   const [localActiveTabId, setLocalActiveTabId] = useState<string | null>(null);
   // displayTabId is always a visible (non-popped) tab or null — popped tabs never
   // render their terminal content in the main pane.
@@ -182,13 +198,25 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
     }
   }, [tabIds, localActiveTabId]);
 
+  const handleSplit = useCallback((direction: 'horizontal' | 'vertical') => {
+    if (displayTabId) {
+      setActiveTab(displayTabId);
+    } else {
+      onFocus();
+    }
+    splitPane(direction, paneId);
+  }, [displayTabId, setActiveTab, onFocus, splitPane, paneId]);
+
   return (
     <div
       className={`pane-container-inner${isFocused ? ' pane-focused' : ''}`}
       onClick={onFocus}
     >
-      <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-secondary)' }}>
-        <div style={{ flex: 1, overflow: 'hidden' }}>
+      <div
+        ref={isMultiPane && paneTabs.length > 0 ? setDropRef : undefined}
+        className={`pane-tabbar-header${isMultiPane && paneTabs.length > 0 && isDropOver ? ' drop-active' : ''}`}
+      >
+        <div className="pane-tabbar-slot">
           <TabBar
             tabs={visibleTabs}
             activeTabId={displayTabId}
@@ -202,8 +230,9 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
             onPopOut={handlePopOut}
             moveToPaneTargets={otherPanes}
             onMoveToPane={handleMoveTabToPane}
-            onSplitVertical={() => { onFocus(); splitPane('vertical'); }}
-            onSplitHorizontal={() => { onFocus(); splitPane('horizontal'); }}
+            onSplitVertical={() => handleSplit('vertical')}
+            onSplitHorizontal={() => handleSplit('horizontal')}
+            onClosePane={isMultiPane ? () => removePane(paneId) : undefined}
             onConnectAllTabs={handleConnectAllTabs}
             onDisconnectAllTabs={handleDisconnectAllTabs}
             onRunTool={runTool}
@@ -212,6 +241,26 @@ const Pane: React.FC<PaneProps> = ({ paneId, tabIds, isFocused, isMultiPane, onF
           />
         </div>
       </div>
+
+      {visibleTabs.length > 0 && poppedOutTabs.length > 0 && (
+        <div className="pane-popped-strip" role="status">
+          <ExternalLink size={12} className="pane-popped-icon" aria-hidden="true" />
+          <div className="pane-popped-items">
+            {poppedOutTabs.map(pt => (
+              <span key={pt.id} className="pane-popped-chip">
+                <span>{t('terminalPopout.poppedOutHint', { port: pt.title || pt.id })}</span>
+                <button
+                  type="button"
+                  className="btn btn-sm pane-popped-reattach"
+                  onClick={(e) => { e.stopPropagation(); handleReattach(pt.id); }}
+                >
+                  {t('terminalPopout.reattach')}
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {visibleTabs.length > 0 && displayTab ? (
         <div

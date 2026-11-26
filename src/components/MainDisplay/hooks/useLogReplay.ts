@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { fileService, type ReplayPickedSources } from '../../../services/file';
 import { importReplaySources, openReplaySession, type ReplaySessionDescription, type ReplayTrackPlan } from '../../../utils/replay/replayRuntime';
 
 /** Native-authorized independent import. Never touches RX, traffic or a port buffer. */
 export function useLogReplay(replacing?: ReplaySessionDescription) {
+  const { t } = useTranslation();
   const [picked, setPicked] = useState<ReplayPickedSources | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
@@ -36,8 +38,8 @@ export function useLogReplay(replacing?: ReplaySessionDescription) {
     try {
       if (replacing) {
         const previous = replacing.tracks.flatMap(track => track.files);
-        if (previous.length !== source.sources.length || previous.some(file => !source.sources.some(item => item.path === file.path && item.size === file.size && item.fingerprint === file.fingerprint))) throw new Error('Replay source changed; import as a new session instead');
-        if (plans.length !== replacing.tracks.length) throw new Error('Restore requires the original track/shard arrangement');
+        if (previous.length !== source.sources.length || previous.some(file => !source.sources.some(item => item.path === file.path && item.size === file.size && item.fingerprint === file.fingerprint))) throw new Error(t('replay.error.sourceChanged'));
+        if (plans.length !== replacing.tracks.length) throw new Error(t('replay.error.trackMismatch'));
       }
       const session = await importReplaySources(source, plans, abort.signal, replacing);
       if (mounted.current && !abort.signal.aborted) { if (!replacing) openReplaySession(session); selected.current = null; setPicked(null); }
@@ -45,6 +47,6 @@ export function useLogReplay(replacing?: ReplaySessionDescription) {
       await fileService.releaseReplaySources(source.grantId).catch(error => console.debug('[replay] release failed', error));
       if (controller.current === abort) { controller.current = null; selected.current = null; if (mounted.current) { setPicked(null); setIsImporting(false); } }
     }
-  }, [replacing]);
+  }, [replacing, t]);
   return { picked, isImporting, isPicking, startImport, confirmImport, cancelImport };
 }

@@ -37,11 +37,12 @@
   flex-direction: column;
 }
 
-/* Small pill button riding the scrollbar edge; hover/active pick up the
- * accent treatment (active mirrors the filter-bar pin look). */
+/* Small pill button offset left of the vertical scrollbar so it never overlaps
+ * the scrollbar thumb or arrows. Bottom button salience is inverted: muted when
+ * pinned to the live tail, accented (with unread count) when detached. */
 .terminal-jump-btn {
   position: absolute;
-  right: 6px;
+  right: 18px;
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -58,13 +59,14 @@
   cursor: pointer;
   flex-shrink: 0;
   transition: background var(--transition-fast), color var(--transition-fast),
-              border-color var(--transition-fast);
+              border-color var(--transition-fast), opacity var(--transition-fast);
 }
 
 .terminal-jump-btn:hover {
   background: var(--bg-hover);
   border-color: var(--accent-color);
   color: var(--accent-color);
+  opacity: 1;
 }
 
 .terminal-jump-btn.top {
@@ -72,14 +74,83 @@
 }
 
 .terminal-jump-btn.bottom {
-  bottom: 6px;
+  bottom: 8px;
 }
 
-/* Follow-mode engaged (bottom button tracks scrollLocked). */
-.terminal-jump-btn.active {
+/* Actively pinned to live tail: deemphasize so it stays out of the way. */
+.terminal-jump-btn.bottom.active {
+  opacity: 0.45;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  border-color: var(--border-subtle);
+}
+
+.terminal-jump-btn.bottom.active:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+/* Detached from live tail: highlight so one-click return is unmistakable. */
+.terminal-jump-btn.bottom.detached {
   background: var(--bg-active);
   color: var(--accent-color);
   border-color: var(--accent-emphasis);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 24%);
+}
+
+.terminal-jump-btn.bottom.has-unread {
+  width: auto;
+  padding: 0 7px;
+  gap: 3px;
+  background: var(--accent-color);
+  color: var(--bg-primary);
+  border-color: var(--accent-color);
+}
+
+.terminal-jump-btn.bottom.has-unread:hover {
+  filter: brightness(1.08);
+  color: var(--bg-primary);
+}
+
+.terminal-jump-unread {
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* ==================== Terminal Status & Pause Banners ==================== */
+.terminal-status-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-2);
+  background: color-mix(in srgb, var(--accent-color) 8%, var(--bg-secondary));
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+.terminal-status-banner.terminal-status-warn,
+.terminal-status-banner.terminal-pause-banner {
+  background: color-mix(in srgb, var(--text-warning) 10%, var(--bg-secondary));
+  border-bottom-color: color-mix(in srgb, var(--text-warning) 35%, var(--border-subtle));
+  color: var(--text-warning);
+}
+
+.terminal-status-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.terminal-status-banner-action {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .terminal-jump-btn:focus-visible {
@@ -364,8 +435,42 @@
 
 /* ==================== Terminal Search Bar ==================== */
 .terminal-search-container { flex-shrink: 0; min-width: 0; background: var(--bg-secondary); }
-.terminal-search-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: 0 var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); }
-.terminal-search-feedback:empty { display: none; }
+.terminal-search-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.terminal-search-feedback.has-error {
+  background: color-mix(in srgb, var(--text-error) 8%, var(--bg-secondary));
+}
+.terminal-search-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-error);
+}
+.terminal-search-warning {
+  color: var(--text-warning);
+}
+.terminal-search-case-btn {
+  font-family: var(--font-terminal);
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  min-width: 24px;
+  padding: 0 4px;
+}
+.terminal-search-active-chip {
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  color: var(--accent-color);
+  border-color: color-mix(in srgb, var(--accent-color) 45%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+}
 .terminal-search-bar textarea { resize: vertical; min-height: 40px; max-height: 100px; }
 .terminal-search-bar {
   display: flex;

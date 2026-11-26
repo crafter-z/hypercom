@@ -10,7 +10,7 @@
  */
 import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pause, Play, Pin, Clock, WrapText } from 'lucide-react';
+import { Pause, Play, Pin, Clock, WrapText, Search, X } from 'lucide-react';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import type { DisplayFormat, Encoding, TerminalState } from '../../types';
@@ -51,6 +51,8 @@ interface TerminalFilterBarProps {
   showMatchCount: boolean; // true when a complete debounced keyword result is available
   paused: boolean;
   onTogglePause: () => void;
+  onOpenSearch?: () => void;
+  searchOpen?: boolean;
   viewPicker?: React.ReactNode;
 }
 
@@ -76,6 +78,8 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
   showMatchCount,
   paused,
   onTogglePause,
+  onOpenSearch,
+  searchOpen = false,
   viewPicker,
 }) => {
   const { t } = useTranslation();
@@ -124,14 +128,27 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
         >
           {DIRECTION_OPTIONS.map(d => <option key={d} value={d}>{t(DIRECTION_LABEL_KEYS[d])}</option>)}
         </select>
-        <input
-          type="text"
-          className="toolbar-input"
-          value={keyword}
-          placeholder={t('terminal.filter.keywordPlaceholder')}
-          onChange={(e) => onKeywordChange(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
+        <div className="terminal-filter-keyword-wrap">
+          <input
+            type="text"
+            className="toolbar-input"
+            value={keyword}
+            placeholder={t('terminal.filter.keywordPlaceholder')}
+            onChange={(e) => onKeywordChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          {keyword && (
+            <button
+              type="button"
+              className="terminal-filter-keyword-clear"
+              onClick={() => onKeywordChange('')}
+              title={t('sidebar.search.clear')}
+              aria-label={t('sidebar.search.clear')}
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
         {showMatchCount && (
           <span className={`chip terminal-filter-count${matchCount === 0 ? ' no-results' : ''}`}>
             {t('terminal.filter.matchCount', { count: matchCount })}
@@ -145,6 +162,18 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
             {t('terminal.filter.paused')}
           </span>
         )}
+        {onOpenSearch && (
+          <button
+            type="button"
+            className={`icon-btn terminal-search-trigger${searchOpen ? ' active' : ''}`}
+            onClick={onOpenSearch}
+            title={t('terminal.filter.searchTooltip')}
+            aria-label={t('terminal.filter.search')}
+            aria-pressed={searchOpen}
+          >
+            <Search size={13} />
+          </button>
+        )}
         <button
           type="button"
           className={`icon-btn${paused ? ' active-warn' : ''}`}
@@ -154,7 +183,10 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
         >
           {paused ? <Play size={13} /> : <Pause size={13} />}
         </button>
-        <label className="checkbox-wrapper terminal-noise-filter" title={t('terminal.filter.asciiNoiseHelp')}>
+        <label
+          className={`checkbox-wrapper terminal-noise-filter${displayFormat !== 'string' ? ' is-disabled' : ''}`}
+          title={displayFormat !== 'string' ? t('terminal.filter.textViewOnly') : t('terminal.filter.asciiNoiseHelp')}
+        >
           <input
             type="checkbox"
             checked={hideAsciiNoise}
@@ -186,9 +218,9 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
           <button
             type="button"
             className={`icon-btn terminal-wrap-toggle${wordWrap && displayFormat === 'string' ? ' active' : ''}`}
-            title={t('terminal.filter.wordWrapHelp')}
+            title={displayFormat !== 'string' ? t('terminal.filter.textViewOnly') : t('terminal.filter.wordWrapHelp')}
             aria-label={t('terminal.filter.wordWrap')}
-            aria-pressed={wordWrap}
+            aria-pressed={wordWrap && displayFormat === 'string'}
             disabled={displayFormat !== 'string'}
             onClick={() => updateConfig({ wordWrap: !wordWrap })}
           >
@@ -208,6 +240,7 @@ const TerminalFilterBar: React.FC<TerminalFilterBarProps> = ({
           <select
             id={`terminal-encoding-${configId ?? portId}`}
             className="select terminal-bar-select"
+            aria-label={t('pane.toolbar.encodingLabel')}
             value={encoding || 'UTF-8'}
             onChange={(e) => handleEncodingChange(e.target.value)}
           >

@@ -32,12 +32,51 @@
   min-width: 0;
 }
 
-/* Keyword input keeps its previous sizing now that it is no longer a direct
- * child of the bar (the old rule targeted `.terminal-filter-bar > ...`). */
-.terminal-filter-bar .terminal-filter-main > .toolbar-input {
+/* Keyword input wrapper with inline clear button. */
+.terminal-filter-bar .terminal-filter-main > .terminal-filter-keyword-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
   flex: 1 1 100px;
   min-width: min(80px, 100%);
   max-width: 240px;
+}
+
+.terminal-filter-bar .terminal-filter-keyword-wrap > .toolbar-input {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  padding-right: 22px;
+}
+
+.terminal-filter-bar .terminal-filter-keyword-clear {
+  position: absolute;
+  right: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.terminal-filter-bar .terminal-filter-keyword-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.terminal-filter-bar .terminal-filter-keyword-clear:focus-visible {
+  outline: 1px solid var(--accent-color);
+}
+
+.terminal-filter-bar .terminal-noise-filter.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .terminal-filter-bar .terminal-filter-main > .plugin-view-picker {
@@ -62,19 +101,32 @@
   white-space: nowrap;
 }
 
-/* Narrow pane: at most two chrome rows.
+/* Narrow pane: compact two-row layout without replacing localized labels.
  * Row 1 = view/timeline + direction + keyword (+ match count)
- * Row 2 = the full action cluster, left-aligned so `margin-left: auto` can
- * never push it past the right border of the pane. */
+ * Row 2 = search/pause/noise + display controls + encoding */
 @container terminal-filter (max-width: 700px) {
+  .terminal-filter-bar {
+    gap: 3px var(--space-1);
+    padding: 3px var(--space-2);
+  }
+
   .terminal-filter-bar .terminal-filter-main {
     flex-basis: 100%;
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
+  .terminal-filter-bar .terminal-filter-main > .terminal-filter-keyword-wrap {
+    flex: 1 1 70px;
+    min-width: 60px;
+    max-width: none;
   }
 
   .terminal-filter-bar .terminal-filter-actions {
     flex: 1 1 100%;
     margin-left: 0;
     justify-content: flex-start;
+    gap: 3px 6px;
     padding-left: 0;
     border-left: 0;
   }
@@ -82,20 +134,32 @@
   .terminal-filter-bar .terminal-filter-display-group {
     padding-left: 0;
     border-left: 0;
+    gap: 3px;
   }
 
-  .terminal-filter-bar .terminal-noise-label,
+  /* Select value ("UTF-8", "GBK", ...) already communicates encoding; aria-label + title remain. */
   .terminal-filter-bar .terminal-encoding-label {
-    font-size: 0;
+    display: none;
+  }
+}
+
+@container terminal-filter (max-width: 520px) {
+  .terminal-filter-bar .terminal-filter-main {
+    flex-wrap: wrap;
   }
 
-  .terminal-filter-bar .terminal-noise-label::after {
-    content: 'ASCII';
-    font-size: var(--text-xs);
-  }
-
-  .terminal-filter-bar .terminal-encoding-label::after {
-    content: 'ENC';
+  .terminal-filter-bar .terminal-noise-filter {
     font-size: var(--text-2xs);
+    gap: 3px;
+  }
+
+  .terminal-filter-bar .segmented-btn {
+    padding: 2px 6px;
+    font-size: var(--text-2xs);
+  }
+
+  .terminal-filter-bar .terminal-bar-select {
+    padding-left: 5px;
+    padding-right: 18px;
   }
 }

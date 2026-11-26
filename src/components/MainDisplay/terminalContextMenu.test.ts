@@ -59,10 +59,41 @@ describe('terminal selection copying', () => {
 
   it('uses the explicit snapshot for copy and conversions without re-reading later selections', () => {
     const menu = items({ browserSelectionText: '41 42' });
+    expect(menu.find(item => item.label === 'terminal.context.copyVisible')).toBeUndefined();
     menu.find(item => item.label === 'terminalView.contextMenu.hexToText')!.onClick();
     expect(clipboardWrite).toHaveBeenLastCalledWith('AB');
-    menu.find(item => item.label === 'terminal.context.copyVisible')!.onClick();
+    menu.find(item => item.label === 'terminalView.contextMenu.copy')!.onClick();
     expect(clipboardWrite).toHaveBeenLastCalledWith('41 42');
+  });
+
+  it('disables selection-dependent actions when selection is empty and export actions when empty buffer', () => {
+    const emptyMenu = items({ browserSelectionText: '', lines: [], range: null });
+    expect(emptyMenu.find(item => item.label === 'terminalView.contextMenu.copy')?.disabled).toBe(true);
+    expect(emptyMenu.find(item => item.label === 'terminalView.contextMenu.copyAsHex')?.disabled).toBe(true);
+    expect(emptyMenu.find(item => item.label === 'terminalView.contextMenu.hexToText')?.disabled).toBe(true);
+    expect(emptyMenu.find(item => item.label === 'terminalView.contextMenu.exportTxt')?.disabled).toBe(true);
+    expect(emptyMenu.find(item => item.label === 'terminalView.contextMenu.exportCsv')?.disabled).toBe(true);
+  });
+
+  it('rejects invalid HEX in hexToText with notifyError instead of writing empty string', () => {
+    const menu = items({ browserSelectionText: 'not-valid-hex' });
+    menu.find(item => item.label === 'terminalView.contextMenu.hexToText')!.onClick();
+    expect(clipboardWrite).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith('sendSection.hexInput.invalid');
+  });
+
+  it('includes Find and Clear actions when provided and omits Clear for read-only views', () => {
+    const onFind = vi.fn();
+    const onClear = vi.fn();
+    const writable = items({ onFind, onClear });
+    writable.find(item => item.label === 'terminalView.contextMenu.find')!.onClick();
+    writable.find(item => item.label === 'terminalView.contextMenu.clear')!.onClick();
+    expect(onFind).toHaveBeenCalledTimes(1);
+    expect(onClear).toHaveBeenCalledTimes(1);
+
+    const readOnly = items({ onFind });
+    expect(readOnly.find(item => item.label === 'terminalView.contextMenu.find')).toBeDefined();
+    expect(readOnly.find(item => item.label === 'terminalView.contextMenu.clear')).toBeUndefined();
   });
 
   it('honors an explicitly empty snapshot even when another view has a selection', () => {
@@ -79,7 +110,7 @@ describe('terminal selection copying', () => {
     const failed = new Error('clipboard write failed');
     clipboardWrite.mockRejectedValue(failed);
     const menu = items({ browserSelectionText: '41 42' });
-    const labels = ['terminal.context.copySelectedLines', 'terminal.context.copyVisible', 'terminal.context.copyAll',
+    const labels = ['terminal.context.copySelectedLines', 'terminal.context.copyAll',
       'terminalView.contextMenu.copy', 'terminalView.contextMenu.copyAsHex', 'terminalView.contextMenu.hexToText'];
     for (const label of labels) menu.find(item => item.label === label)!.onClick();
     await Promise.resolve();

@@ -14,11 +14,12 @@
   overflow: hidden;
 }
 
-/* 极简标题提示条：TTY 模式标识 + 端口号（可折叠的薄条，不占滚动区）。 */
+/* 标题提示条：TTY 模式标识 + 端口状态 + 快捷连接/操作按钮（不占滚动区）。 */
 .tty-titlebar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   flex-shrink: 0;
   padding: 0 0 var(--space-2);
   border-bottom: 1px solid var(--border-color);
@@ -34,6 +35,85 @@
   font-family: var(--font-terminal);
   font-size: var(--text-2xs);
   color: var(--text-secondary);
+}
+
+.tty-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: var(--radius-lg);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.tty-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.tty-status-badge.status-connected {
+  color: var(--text-success, #4ec9b0);
+  border-color: color-mix(in srgb, var(--text-success, #4ec9b0) 40%, transparent);
+  background: color-mix(in srgb, var(--text-success, #4ec9b0) 10%, transparent);
+}
+
+.tty-status-badge.status-connected .tty-status-dot {
+  background: var(--text-success, #4ec9b0);
+}
+
+.tty-status-badge.status-connecting {
+  color: var(--text-warning);
+  border-color: color-mix(in srgb, var(--text-warning) 40%, transparent);
+}
+
+.tty-status-badge.status-connecting .tty-status-dot {
+  background: var(--text-warning);
+}
+
+.tty-status-badge.status-error {
+  color: var(--text-error);
+  border-color: color-mix(in srgb, var(--text-error) 40%, transparent);
+}
+
+.tty-status-badge.status-error .tty-status-dot {
+  background: var(--text-error);
+}
+
+.tty-connect-btn {
+  flex-shrink: 0;
+}
+
+.tty-titlebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.tty-switch-trx-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tty-disconnected-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  margin-bottom: var(--space-2);
+  padding: 4px var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
 }
 
 /* xterm 宿主：flex:1 + min-height:0 打通滚动链；xterm 自带滚动条按应用样式渲染。 */
@@ -64,6 +144,7 @@
 .tty-view-hidden {
   display: none;
 }
+
 /* Enhanced flow owns the port's TX: keystrokes are dropped. Make that explicit
  * instead of leaving a silently dead terminal. */
 .tty-flow-lock {

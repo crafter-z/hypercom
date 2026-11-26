@@ -126,15 +126,23 @@ describe('plugin view failure surface', () => {
     expect(container.textContent).toContain(label('pluginViews.loading'));
   });
 
-  it('keeps the reason and the settings entry when a serial tab falls back to the raw terminal', async () => {
+  it('keeps the reason and the settings entry when a serial tab falls back to the raw terminal without duplicating picker/timeline', async () => {
     viewState = stateWith('view-missing');
     const serial: TabItem = { kind: 'serial', id: 'tab-1', portId: 'COM3', title: 'COM3', splitPaneId: 'main', isPinned: false };
     await act(async () => { root.render(createElement(PluginViewSurface, { tab: serial, hidden: false })); });
     // The raw terminal took over, but the user must still learn why.
-    expect(container.querySelector('.plugin-view-toolbar')).not.toBeNull();
+    const toolbar = container.querySelector('.plugin-view-toolbar');
+    expect(toolbar).not.toBeNull();
+    expect(toolbar?.classList.contains('plugin-view-toolbar-alert')).toBe(true);
+    expect(toolbar?.querySelector('.plugin-view-picker')).toBeNull();
     expect(container.textContent).toContain(label('pluginViews.failure.view-missing'));
     expect(buttonLabels()).toContain(label('pluginViews.openSettings'));
     expect(buttonLabels()).not.toContain(label('pluginViews.retry'));
+    // Switch back to Terminal clears the plugin view preference
+    const switchBtn = [...container.querySelectorAll('button')].find(btn => btn.textContent?.includes('pluginViews.switchToTerminal') || btn.textContent?.includes(label('pluginViews.switchToTerminal')))!;
+    expect(switchBtn).toBeTruthy();
+    await act(async () => { switchBtn.click(); });
+    expect(selectSerialPluginView).toHaveBeenCalledWith('tab-1', null);
   });
 
   it('never offers a retry for any structural code and always offers one for transient codes', async () => {

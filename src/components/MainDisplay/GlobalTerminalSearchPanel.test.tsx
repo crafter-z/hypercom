@@ -36,7 +36,10 @@ afterEach(async () => {
   await act(async () => root.unmount()); clearGlobalTerminalSearchRegistryForTests(); container.remove();
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
-async function mount(open = true, onClose = vi.fn()) { await act(async () => root.render(<GlobalTerminalSearchPanel open={open} onClose={onClose} />)); return onClose; }
+async function mount(open = true, onClose = vi.fn(), initialQuery?: string) {
+  await act(async () => root.render(<GlobalTerminalSearchPanel open={open} onClose={onClose} initialQuery={initialQuery} />));
+  return onClose;
+}
 async function typeQuery(value = 'needle') {
   await act(async () => {
     const query = container.querySelector<HTMLInputElement>('.global-terminal-search-query')!;
@@ -108,5 +111,38 @@ describe('global terminal search registry and panel', () => {
     await act(async () => (container.querySelector('.global-terminal-search-header .icon-btn') as HTMLButtonElement).click());
     expect(session.dispose).toHaveBeenCalled();
     await mount(false); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('seeds initialQuery, highlights spans, supports Arrow/Enter navigation, hides score sort outside fuzzy, preserves page on reopen, and toggles inline sources', async () => {
+    const onReveal = vi.fn();
+    registerGlobalTerminalSearch({ id: 'serial:a', portId: 'A', manager: manager(), onReveal });
+    registerGlobalTerminalSearch({ id: 'serial:b', portId: 'B', manager: manager('serial:b'), onReveal: vi.fn() });
+    await mount(true, vi.fn(), 'seeded');
+    await act(async () => vi.advanceTimersByTime(210));
+    const input = container.querySelector<HTMLInputElement>('.global-terminal-search-query')!;
+    expect(input.value).toBe('seeded');
+    // Match spans highlighted with <mark class="terminal-search-mark">
+    const firstMark = container.querySelector('.global-terminal-search-result-preview mark.terminal-search-mark');
+    expect(firstMark?.textContent).toBe('pr');
+    // Score sort hidden in literal mode
+    const sortValues = [...container.querySelectorAll('.global-terminal-search-sort option')].map(o => (o as HTMLOptionElement).value);
+    expect(sortValues).toEqual(['source', 'time']);
+    // Toggle inline source picker via N / M sources summary button
+    const sourceToggle = container.querySelector<HTMLButtonElement>('.global-terminal-search-source-toggle')!;
+    await act(async () => sourceToggle.click());
+    expect(container.querySelectorAll('.global-terminal-search-sources-inline input')).toHaveLength(2);
+    // Navigate to page 2, close and reopen with unchanged query -> page 2 preserved
+    await act(async () => (container.querySelector('button[aria-label="globalSearch.nextPage"]') as HTMLButtonElement).click());
+    expect(container.textContent).toContain('Page 2 / 2');
+    await mount(false);
+    await mount(true);
+    await act(async () => vi.advanceTimersByTime(210));
+    expect(container.textContent).toContain('Page 2 / 2');
+    // Keyboard ArrowDown + Enter reveals the highlighted item (second item on page 2 -> startSeq 51)
+    const activeInput = container.querySelector<HTMLInputElement>('.global-terminal-search-query')!;
+    await act(async () => { activeInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })); });
+    await act(async () => { activeInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+    expect(onReveal).toHaveBeenCalledTimes(1);
+    expect(onReveal.mock.calls[0][0].startSeq).toBe(51);
   });
 });

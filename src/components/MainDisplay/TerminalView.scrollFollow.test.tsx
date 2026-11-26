@@ -134,15 +134,49 @@ describe('TerminalView shortcut ownership', () => {
     expect(view.manager.getCurrentMatchIndex()).toBe(before);
   });
 
-  it('handles Ctrl+F and Escape while focus is in the search strip, returning focus to output', async () => {
+  it('refocuses search input on Ctrl+F while open and closes on Escape, returning focus to output', async () => {
     const view = await mount('search');
     await key(view.container, 'f', true);
-    await key(view.host.querySelector<HTMLInputElement>('.terminal-search-input')!, 'f', true);
-    expect(view.host.querySelector('.terminal-search-input')).toBeNull();
+    const input = view.host.querySelector<HTMLInputElement>('.terminal-search-input')!;
+    view.container.focus();
     expect(document.activeElement).toBe(view.container);
     await key(view.container, 'f', true);
-    await key(view.host.querySelector<HTMLInputElement>('.terminal-search-input')!, 'Escape');
+    expect(view.host.querySelector('.terminal-search-input')).not.toBeNull();
+    expect(document.activeElement).toBe(input);
+    await key(input, 'Escape');
+    expect(view.host.querySelector('.terminal-search-input')).toBeNull();
     expect(document.activeElement).toBe(view.container);
+  });
+
+  it('opens local search via hypercom:open-terminal-search only for the active tab', async () => {
+    const view = await mount('active-tab');
+    useAppStore.setState({ activeTabId: 'other-tab' });
+    await act(async () => { window.dispatchEvent(new CustomEvent('hypercom:open-terminal-search')); });
+    expect(view.host.querySelector('.terminal-search-input')).toBeNull();
+    useAppStore.setState({ activeTabId: 'active-tab' });
+    await act(async () => { window.dispatchEvent(new CustomEvent('hypercom:open-terminal-search')); });
+    expect(view.host.querySelector('.terminal-search-input')).not.toBeNull();
+  });
+
+  it('shows pause banner with buffered line count and one-click resume, plus detached unread badge', async () => {
+    const view = await mount('ergo');
+    // Detach scroll lock and append lines -> unread badge appears on bottom jump button
+    await click(view.pin());
+    await append(view, 5000);
+    expect(view.bottom().classList.contains('detached')).toBe(true);
+    expect(view.host.querySelector('.terminal-jump-unread')?.textContent).toBe('+20');
+    await click(view.bottom());
+    expect(view.host.querySelector('.terminal-jump-unread')).toBeNull();
+
+    // Pause display and append lines -> pause banner shows buffered count & resume button
+    const pauseBtn = view.host.querySelector<HTMLButtonElement>('button[title="terminal.filter.pause"]')!;
+    await click(pauseBtn);
+    await append(view, 6000);
+    const banner = view.host.querySelector('.terminal-pause-banner');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('terminal.pauseBanner.withCount');
+    await click(banner!.querySelector<HTMLButtonElement>('.terminal-status-banner-action')!);
+    expect(view.host.querySelector('.terminal-pause-banner')).toBeNull();
   });
 
   it.each([false, true])('does not also clear another active tab through global Ctrl+L (replay=%s)', async replay => {

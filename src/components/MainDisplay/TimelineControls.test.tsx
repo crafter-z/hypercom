@@ -2,7 +2,7 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TimelineButton, TimelineWorkspace, openTimelinePanel } from './TimelineControls';
+import { TimelineBadge, TimelineButton, TimelineWorkspace, openTimelinePanel } from './TimelineControls';
 import { timelineCoordinator, HOST_CLOCK_ID, type TimelineParticipant } from '../../utils/timeline';
 import { useAppStore } from '../../stores/useAppStore';
 import { resetStoresForTests } from '../../stores/resetStores';
@@ -44,7 +44,7 @@ async function mount(slot: string) {
 const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent?.trim() === text);
 
 describe('time group lifecycle stays in the panel body', () => {
-  it('offers dissolution without expanding Advanced', async () => {
+  it('offers dissolution without expanding Advanced and guards it with ConfirmDialog', async () => {
     const id = timelineCoordinator.createGroup({ name: 'G1', memberSlots: ['a', 'b'] });
     await mount('a');
     const advanced = container.querySelector('details.timeline-advanced');
@@ -55,6 +55,11 @@ describe('time group lifecycle stays in the panel body', () => {
     // The dissolve control lives in the group bar, not behind the collapsed disclosure.
     expect(advanced!.contains(dissolve!)).toBe(false);
     await act(async () => dissolve!.click());
+    // Still present until confirmed in ConfirmDialog.
+    expect(timelineCoordinator.getSnapshot().groups.some(group => group.id === id)).toBe(true);
+    const confirmBtn = [...document.querySelectorAll('button')].find(item => item.textContent?.trim() === 'confirmDialog.confirm');
+    expect(confirmBtn).toBeDefined();
+    await act(async () => confirmBtn!.click());
     expect(timelineCoordinator.getSnapshot().groups.some(group => group.id === id)).toBe(false);
   });
 
@@ -71,6 +76,8 @@ describe('time group lifecycle stays in the panel body', () => {
     await mount('a');
     expect(button('timeline.leaveGroup')).toBeUndefined();
     await act(async () => button('timeline.deleteGroup')!.click());
+    const confirmBtn = [...document.querySelectorAll('button')].find(item => item.textContent?.trim() === 'confirmDialog.confirm');
+    await act(async () => confirmBtn!.click());
     expect(timelineCoordinator.getSnapshot().groups).toHaveLength(0);
   });
 
@@ -199,5 +206,38 @@ describe('misalignment stays visible in the panel body', () => {
     expect(host.querySelector('.timeline-entry')?.getAttribute('title')).toBe('G1 · 设备对照 · timeline.manage');
     await act(async () => buttonRoot.unmount());
     host.remove();
+  });
+
+  it('renders TimelineBadge as a clickable button that opens the panel', async () => {
+    timelineCoordinator.createGroup({ name: 'G1', memberSlots: ['a', 'b'] });
+    await act(async () => root.render(createElement('div', null, createElement(TimelineBadge, { tabId: 'a' }), createElement(TimelineWorkspace))));
+    const badge = container.querySelector<HTMLButtonElement>('button.timeline-badge');
+    expect(badge).not.toBeNull();
+    await act(async () => badge!.click());
+    expect(container.querySelector('.timeline-panel')).not.toBeNull();
+  });
+
+  it('focuses the group name input on open (not the close X button) and shows inline align-here feedback', async () => {
+    await mount('a');
+    const nameInput = container.querySelector<HTMLInputElement>('.timeline-setup input.toolbar-input');
+    expect(nameInput).not.toBeNull();
+    expect(document.activeElement).toBe(nameInput);
+
+    // Mount existing group with no anchors and click Align here.
+    let host!: ReturnType<typeof timelineCoordinator.registerParticipant>;
+    let device!: ReturnType<typeof timelineCoordinator.registerParticipant>;
+    await act(async () => {
+      host = timelineCoordinator.registerParticipant(participant('a', HOST_CLOCK_ID));
+      device = timelineCoordinator.registerParticipant(participant('b', 'device-uptime'));
+      timelineCoordinator.createGroup({ name: 'G1', memberSlots: ['a', 'b'] });
+    });
+    await mount('a');
+    const alignHereBtn = button('timeline.alignHere');
+    expect(alignHereBtn).toBeDefined();
+    await act(async () => alignHereBtn!.click());
+    expect(container.querySelector('.timeline-error')?.textContent).toBe('timeline.alignHereNoAnchor');
+    // Inline diagnostic reason is rendered in Advanced diagnostics.
+    expect(container.querySelector('.timeline-result-reason')?.textContent).toBe('timeline.reason.mapping-required');
+    await act(async () => { host.dispose(); device.dispose(); });
   });
 });

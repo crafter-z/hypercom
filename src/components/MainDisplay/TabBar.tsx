@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { TabItem, LeafPane } from '../../types';
+import type { TabItem, LeafPane, SerialPort } from '../../types';
 import { useContextMenu } from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare } from 'lucide-react';
+import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare, PanelTopClose } from 'lucide-react';
 import PluginTabLauncher from './PluginTabLauncher';
 import { TimelineBadge, openTimelinePanel } from './TimelineControls';
 import {
@@ -12,7 +12,9 @@ import {
   horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { useAppStore, getTabPortId } from '../../stores/useAppStore';
+import { useAppStore, getTabPortId, getClosingTabIds } from '../../stores/useAppStore';
+import { collectLeaves } from '../../utils/paneTree';
+import { isPortLost } from '../../hooks';
 
 interface TabBarProps {
   tabs: TabItem[];
@@ -29,6 +31,7 @@ interface TabBarProps {
   onMoveToPane?: (tabId: string, targetPaneId: string) => void;
   onSplitVertical?: () => void;
   onSplitHorizontal?: () => void;
+  onClosePane?: () => void;
   /** 一次性打开（连接）全部标签页对应串口（issue #2-1）。 */
   onConnectAllTabs?: () => void;
   /** 一次性断开全部标签页对应串口（issue #2-1）。 */
@@ -44,7 +47,8 @@ interface TabBarProps {
 interface TabItemProps {
   tab: TabItem;
   isActive: boolean;
-  isPortDisconnected: boolean;
+  portStatus: SerialPort['status'] | null;
+  portWarningTitle?: string;
   closeLabel: string;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
@@ -56,13 +60,15 @@ const tabItemClassName = (tab: TabItem, isActive: boolean): string =>
 
 /** Presentational tab innards shared by the sortable and static shells —
  * the single source of truth for what a tab looks like. */
-const TabItemContent: React.FC<TabItemProps> = ({ tab, isPortDisconnected, closeLabel, onTabClose }) => (
+const TabItemContent: React.FC<TabItemProps> = ({ tab, portStatus, portWarningTitle, closeLabel, onTabClose }) => (
   <>
-    {getTabPortId(tab) !== null && <span className="tab-status-dot" />}
-    {isPortDisconnected && (
-      <AlertTriangle size={12} className="tab-warning-icon" />
+    {portStatus !== null && <span className={`tab-status-dot status-${portStatus}`} />}
+    {portWarningTitle && (
+      <span className="tab-warning-icon" title={portWarningTitle}>
+        <AlertTriangle size={12} aria-hidden="true" />
+      </span>
     )}
-    <span className="tab-title">{tab.title}</span>
+    <span className="tab-title" title={tab.title}>{tab.title}</span>
     <TimelineBadge tabId={tab.id} />
     {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
     {!tab.isPinned && (
@@ -85,6 +91,17 @@ const tabA11yProps = (tab: TabItem, isActive: boolean) => ({
   tabIndex: isActive ? 0 : -1,
   'data-tab-id': tab.id,
 });
+
+function handleMiddleClickMouseDown(e: React.MouseEvent): void {
+  if (e.button === 1) e.preventDefault();
+}
+
+function handleMiddleClickAux(e: React.MouseEvent, tab: TabItem, onTabClose: (tabId: string) => void): void {
+  if (e.button === 1 && !tab.isPinned) {
+    e.preventDefault();
+    onTabClose(tab.id);
+  }
+}
 
 /** DnD-enabled shell — used when reordering / cross-pane drag applies. */
 const SortableTab: React.FC<TabItemProps> = (props) => {
@@ -110,6 +127,8 @@ const SortableTab: React.FC<TabItemProps> = (props) => {
       style={style}
       className={tabItemClassName(props.tab, props.isActive)}
       onClick={() => props.onTabClick(props.tab.id)}
+      onMouseDown={handleMiddleClickMouseDown}
+      onAuxClick={(e) => handleMiddleClickAux(e, props.tab, props.onTabClose)}
       onContextMenu={(e) => props.onContextMenu(e, props.tab.id)}
       {...attributes}
       {...listeners}
@@ -125,6 +144,8 @@ const StaticTab: React.FC<TabItemProps> = (props) => (
   <div
     className={tabItemClassName(props.tab, props.isActive)}
     onClick={() => props.onTabClick(props.tab.id)}
+    onMouseDown={handleMiddleClickMouseDown}
+    onAuxClick={(e) => handleMiddleClickAux(e, props.tab, props.onTabClose)}
     onContextMenu={(e) => props.onContextMenu(e, props.tab.id)}
     {...tabA11yProps(props.tab, props.isActive)}
   >
@@ -149,6 +170,7 @@ const TabBar: React.FC<TabBarProps> = ({
   onMoveToPane,
   onSplitVertical,
   onSplitHorizontal,
+  onClosePane,
   onConnectAllTabs,
   onDisconnectAllTabs,
   onRunTool,
@@ -169,20 +191,50 @@ const TabBar: React.FC<TabBarProps> = ({
   /** Index to focus after the next `tabs` change (keyboard/close-button close). */
   const pendingFocusIndexRef = useRef<number | null>(null);
 
-  // Lookup: portId → is disconnected (status 'disconnected' or port missing).
-  // A missing port (USB unplug removed it from the list) is treated as
-  // disconnected so the warning icon stays visible on the stale tab.
-  const disconnectedPortIds = useMemo(() => {
+  // Per-tab status dot and warning tooltip. Warning icon is strictly reserved
+  // for unexpectedly lost ports or ports in error state — NOT normally disconnected ports.
+  const tabPortMeta = useMemo(() => {
     const portMap = new Map(ports.map(p => [p.id, p]));
-    const set = new Set<string>();
+    const map = new Map<string, { status: SerialPort['status'] | null; warningTitle?: string }>();
     for (const tab of tabs) {
       const portId = getTabPortId(tab);
-      if (!portId) continue;
+      if (!portId) {
+        map.set(tab.id, { status: null });
+        continue;
+      }
       const port = portMap.get(portId);
-      if (!port || port.status === 'disconnected') set.add(tab.id);
+      const status: SerialPort['status'] = port?.status ?? 'disconnected';
+      let warningTitle: string | undefined;
+      if (isPortLost(portId)) {
+        warningTitle = t('tabBar.portLostWarning');
+      } else if (status === 'error') {
+        warningTitle = t('tabBar.portErrorWarning');
+      }
+      map.set(tab.id, { status, warningTitle });
     }
-    return set;
-  }, [ports, tabs]);
+    return map;
+  }, [ports, tabs, t]);
+
+  // Keep the active tab scrolled into view when switching tabs.
+  useEffect(() => {
+    if (!activeTabId) return;
+    const cssEscape = globalThis.CSS?.escape;
+    const escaped = typeof cssEscape === 'function'
+      ? cssEscape(activeTabId)
+      : activeTabId.replace(/"/g, '\\"');
+    const el = tabsContainerRef.current?.querySelector<HTMLElement>(`[data-tab-id="${escaped}"]`);
+    el?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [activeTabId]);
+
+  // Vertical mouse wheel scrolls overflowing tabs horizontally.
+  const handleTabsWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const el = tabsContainerRef.current;
+    if (!el || el.scrollWidth <= el.clientWidth) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    }
+  }, []);
 
   // Move focus to a surviving tab after the close commits. The store's
   // successor may differ (global last tab), so index-focus is the predictable
@@ -256,18 +308,30 @@ const TabBar: React.FC<TabBarProps> = ({
       }
     }
 
+    const canCloseRight = getClosingTabIds(tabId, 'toRight').length > 0;
+    const canCloseLeft = getClosingTabIds(tabId, 'toLeft').length > 0;
+    const canCloseOthers = getClosingTabIds(tabId, 'others').length > 0;
+
     items.push(
       { type: 'separator' },
-      { label: t('tabBar.contextMenu.close'), onClick: () => requestCloseTab(tabId) },
-      { label: t('tabBar.contextMenu.closeToRight'), onClick: () => onCloseToRight(tabId) },
-      { label: t('tabBar.contextMenu.closeToLeft'), onClick: () => onCloseToLeft(tabId) },
-      { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId) },
+      { label: t('tabBar.contextMenu.close'), onClick: () => requestCloseTab(tabId), disabled: !!tab?.isPinned },
+      { label: t('tabBar.contextMenu.closeToRight'), onClick: () => onCloseToRight(tabId), disabled: !canCloseRight },
+      { label: t('tabBar.contextMenu.closeToLeft'), onClick: () => onCloseToLeft(tabId), disabled: !canCloseLeft },
+      { label: t('tabBar.contextMenu.closeOthers'), onClick: () => onCloseOthers(tabId), disabled: !canCloseOthers },
     );
 
     if (moveToPaneTargets && moveToPaneTargets.length > 0) {
+      const storeState = useAppStore.getState();
+      const allLeaves = collectLeaves(storeState.paneTree);
       items.push({ type: 'separator' });
       for (const targetPane of moveToPaneTargets) {
-        const label = t('tabBar.contextMenu.moveToPane', { target: targetPane.id.replace('pane-', '').slice(0, 4) });
+        const leafIdx = allLeaves.findIndex((leaf) => leaf.id === targetPane.id);
+        const paneNumber = leafIdx >= 0 ? leafIdx + 1 : 1;
+        const paneActiveOrFirst = targetPane.tabIds.includes(storeState.activeTabId ?? '')
+          ? storeState.tabs.find((item) => item.id === storeState.activeTabId)
+          : storeState.tabs.find((item) => targetPane.tabIds.includes(item.id) && (item.kind !== 'serial' || !item.poppedOut));
+        const targetLabel = paneActiveOrFirst ? `${paneNumber} — ${paneActiveOrFirst.title}` : String(paneNumber);
+        const label = t('tabBar.contextMenu.moveToPane', { target: targetLabel });
         items.push({
           label,
           onClick: () => onMoveToPane?.(tabId, targetPane.id),
@@ -291,8 +355,8 @@ const TabBar: React.FC<TabBarProps> = ({
 
   const handleTablistKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
-    // The close affordance is a native button with its own Enter/Space handling.
-    if (target.closest('.tab-close')) return;
+    // Close and timeline badge affordances are native buttons with their own Enter/Space handling.
+    if (target.closest('.tab-close, .timeline-badge')) return;
     const tabEl = target.closest<HTMLElement>('[role="tab"]');
     if (!tabEl || !e.currentTarget.contains(tabEl)) return;
     const index = tabs.findIndex(tab => tab.id === tabEl.dataset.tabId);
@@ -340,7 +404,7 @@ const TabBar: React.FC<TabBarProps> = ({
         break;
       case 'w':
       case 'W':
-        if (e.ctrlKey) {
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
           e.preventDefault();
           closeFocused();
         }
@@ -370,10 +434,12 @@ const TabBar: React.FC<TabBarProps> = ({
   const closeLabel = t('tabBar.contextMenu.close');
 
   const renderTab = (tab: TabItem) => {
+    const meta = tabPortMeta.get(tab.id);
     const itemProps: TabItemProps = {
       tab,
       isActive: tab.id === activeTabId,
-      isPortDisconnected: disconnectedPortIds.has(tab.id),
+      portStatus: meta?.status ?? null,
+      portWarningTitle: meta?.warningTitle,
       closeLabel,
       onTabClick,
       onTabClose: requestCloseTab,
@@ -397,21 +463,47 @@ const TabBar: React.FC<TabBarProps> = ({
           aria-label={t('tabBar.tabsLabel')}
           aria-orientation="horizontal"
           onKeyDown={handleTablistKeyDown}
+          onWheel={handleTabsWheel}
         >
           {tabs.map(renderTab)}
         </div>
         <div className="tab-bar-actions">
           <PluginTabLauncher portId={pluginLauncherPortId} />
-          {onSplitVertical && onSplitHorizontal && (
+          {((onSplitVertical && onSplitHorizontal) || onClosePane) && (
             <div className="tab-bar-split-group">
-              <button className="icon-btn" title={t('mainDisplay.toolbar.splitVertical')}
-                onClick={(e) => { e.stopPropagation(); onSplitVertical(); }}>
-                <Columns2 size={13} />
-              </button>
-              <button className="icon-btn" title={t('mainDisplay.toolbar.splitHorizontal')}
-                onClick={(e) => { e.stopPropagation(); onSplitHorizontal(); }}>
-                <Rows2 size={13} />
-              </button>
+              {onSplitVertical && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title={t('mainDisplay.toolbar.splitVertical')}
+                  aria-label={t('mainDisplay.toolbar.splitVertical')}
+                  onClick={(e) => { e.stopPropagation(); onSplitVertical(); }}
+                >
+                  <Columns2 size={13} />
+                </button>
+              )}
+              {onSplitHorizontal && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title={t('mainDisplay.toolbar.splitHorizontal')}
+                  aria-label={t('mainDisplay.toolbar.splitHorizontal')}
+                  onClick={(e) => { e.stopPropagation(); onSplitHorizontal(); }}
+                >
+                  <Rows2 size={13} />
+                </button>
+              )}
+              {onClosePane && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title={t('pane.closeAndMerge')}
+                  aria-label={t('pane.closeAndMerge')}
+                  onClick={(e) => { e.stopPropagation(); onClosePane(); }}
+                >
+                  <PanelTopClose size={13} />
+                </button>
+              )}
             </div>
           )}
         </div>

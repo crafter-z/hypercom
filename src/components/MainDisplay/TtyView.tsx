@@ -14,15 +14,24 @@
  * TerminalView（8–48px，同步 config + `--font-size-terminal` CSS 变量）。
  */
 
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { readText } from '@tauri-apps/plugin-clipboard-manager';
+import { ArrowLeftRight, Cable, ClipboardPaste, Copy, Trash2 } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
+import { notifyError } from '../../stores/useToastStore';
+import { useSerialConnection } from '../../hooks';
 import { CONFIG_BOUNDS } from '../../utils/bounds';
+import { writeClipboardText } from '../../utils/clipboard';
+import { getRxPipeline } from '../../utils/rxPipeline';
+import { clearTerminal } from '../../utils/terminal/viewportManager';
 import { ttyService } from '../../utils/ttyService';
 import { isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
+import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
+import ConfirmDialog from '../shared/ConfirmDialog';
 
 interface TtyViewProps {
   portId: string;
@@ -37,8 +46,21 @@ function cssVar(name: string, fallback: string): string {
   return value || fallback;
 }
 
+/** Read clipboard text via Tauri plugin first, with Web Clipboard API fallback. */
+async function readClipboardText(): Promise<string> {
+  try {
+    return await readText();
+  } catch (nativeError) {
+    if (typeof navigator === 'undefined' || typeof navigator.clipboard?.readText !== 'function') {
+      throw nativeError;
+    }
+    return await navigator.clipboard.readText();
+  }
+}
+
 const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const { t } = useTranslation();
+  const rootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -46,8 +68,56 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const backgroundImageEnabled = useAppStore((s) => s.config.backgroundImageEnabled);
   const theme = useAppStore((s) => s.config.theme);
+  const portStatus = useAppStore((s) => s.ports.find((p) => p.id === portId)?.status ?? 'disconnected');
+  const { toggleConnection } = useSerialConnection();
   const flowStatus = useFlowStatus(portId);
   const flowRunning = isFlowRunning(portId);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
+  const [confirmSwitchTrx, setConfirmSwitchTrx] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    const text = termRef.current?.getSelection();
+    if (text) void writeClipboardText(text).catch(notifyError);
+  }, []);
+
+  const handlePaste = useCallback(async () => {
+    if (isFlowRunning(portId)) {
+      notifyError(t('sendSection.flowBusy'));
+      return;
+    }
+    const status = useAppStore.getState().ports.find((p) => p.id === portId)?.status;
+    if (status !== 'connected') {
+      notifyError(t('sendSection.portClosedWarning'));
+      return;
+    }
+    try {
+      const text = await readClipboardText();
+      if (!text) return;
+      const term = termRef.current;
+      if (term && typeof term.paste === 'function') term.paste(text);
+      else ttyService.send(portId, text);
+    } catch (err) {
+      notifyError(err);
+    }
+  }, [portId, t]);
+
+  const handleClear = useCallback(() => {
+    ttyService.clear(portId);
+    termRef.current?.clear();
+  }, [portId]);
+
+  const applySwitchToTrx = useCallback(() => {
+    const state = useAppStore.getState();
+    const port = state.ports.find((item) => item.id === portId);
+    if (!port || (port.mode ?? 'trx') === 'trx') return;
+    getRxPipeline().flushAndReset(portId);
+    state.setPortMode(portId, 'trx');
+    clearTerminal(portId);
+    ttyService.clear(portId);
+  }, [portId]);
+
+  const pasteRef = useRef(handlePaste);
+  pasteRef.current = handlePaste;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -55,11 +125,12 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     // 挂载一次性用当前配置创建 Terminal。字体/字号**不入依赖**——变更走下方
     // options 活更新；若把字体字段放进 deps，effect 重跑 → cleanup dispose →
     // 整个终端缓冲被清空（修复 issue #11 的字体切换丢会话缺陷）。
+    const initialConnected = useAppStore.getState().ports.find((p) => p.id === portId)?.status === 'connected';
     const term = new Terminal({
       fontFamily: terminalFont || 'monospace',
       fontSize: terminalFontSize,
       scrollback: 5000,
-      cursorBlink: true,
+      cursorBlink: initialConnected,
       theme: {
         background: cssVar('--bg-primary', '#191a1e'),
         foreground: cssVar('--text-primary', '#c9cdd6'),
@@ -72,6 +143,27 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     fitRef.current = fitAddon;
+
+    // Ctrl+Shift+C copies selection, Ctrl+Shift+V pastes clipboard (keeping Ctrl+C as SIGINT).
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'c') {
+          const selected = term.getSelection();
+          if (selected) {
+            event.preventDefault();
+            void writeClipboardText(selected).catch(notifyError);
+            return false;
+          }
+        } else if (key === 'v') {
+          event.preventDefault();
+          void pasteRef.current();
+          return false;
+        }
+      }
+      return true;
+    });
 
     // TX：用户键入/粘贴 → 发送到串口（无本地回显，由对端 echo）。
     const onDataDisposable = term.onData((data) => {
@@ -165,13 +257,28 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [portId]);
 
-  // 字体/字号变更 → 直接写 xterm options（不重建 Terminal，保缓冲与滚动位置）。
+  // 字体/字号变更 → 直接写 xterm options 并重新 fit（不重建 Terminal，保缓冲与滚动位置）。
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
     term.options.fontFamily = terminalFont || 'monospace';
     term.options.fontSize = terminalFontSize;
+    const container = containerRef.current;
+    if (container && container.clientWidth > 0 && container.clientHeight > 0) {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        // 容器过渡中——等待下次 RO 回调
+      }
+    }
   }, [terminalFont, terminalFontSize]);
+
+  // 断开串口时抑制闪烁光标，避免误导用户以为仍可输入。
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.cursorBlink = portStatus === 'connected';
+  }, [portStatus]);
 
   // xterm 主题在创建时快照 CSS 变量；主题/玻璃开关切换后需整体重绘。
   // 子组件 effect 先于 ThemeProvider 的父 effect 执行，因此推迟一帧再读
@@ -222,9 +329,8 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     return () => cancelAnimationFrame(raf);
   }, [hidden]);
 
-  // Ctrl+滚轮缩放（镜像 TerminalView：同步 config + CSS 变量）。上下限取自
-  // CONFIG_BOUNDS（数值边界的唯一来源，K2）——本地再抄一份 8/48 会在调边界时漂移。
-  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+  // Native non-passive Ctrl+wheel zoom listener (React's onWheel is passive).
+  const handleWheel = useCallback((e: WheelEvent) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
     const store = useAppStore.getState();
@@ -237,12 +343,93 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
     }
   }, []);
 
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const hasSelection = !!termRef.current?.hasSelection();
+    const items: ContextMenuEntry[] = [
+      { label: t('contextMenu.copy'), icon: <Copy size={14} />, disabled: !hasSelection, onClick: handleCopy },
+      { label: t('contextMenu.paste'), icon: <ClipboardPaste size={14} />, disabled: flowRunning || portStatus !== 'connected', onClick: () => { void handlePaste(); } },
+      { type: 'separator' },
+      { label: t('sendSection.clearButton'), icon: <Trash2 size={14} />, onClick: handleClear },
+    ];
+    setContextMenu({ x: e.clientX, y: e.clientY, items });
+  }, [t, handleCopy, handlePaste, handleClear, flowRunning, portStatus]);
+
   return (
-    <div className={`tty-view${hidden ? ' tty-view-hidden' : ''}`} onWheel={handleWheel}>
+    <div ref={rootRef} className={`tty-view${hidden ? ' tty-view-hidden' : ''}`}>
       <div className="tty-titlebar">
         <span className="tty-titlebar-label eyebrow">{t('tty.title')}</span>
         <span className="tty-titlebar-port">{portId}</span>
+        <span className={`tty-status-badge status-${portStatus}`}>
+          <span className="tty-status-dot" aria-hidden="true" />
+          {t(`sidebar.port.status.${portStatus}`)}
+        </span>
+        <button
+          type="button"
+          className={`btn btn-sm tty-connect-btn${portStatus === 'connected' ? '' : ' btn-primary'}`}
+          disabled={portStatus === 'connecting'}
+          onClick={() => { void toggleConnection(portId); }}
+        >
+          {portStatus === 'connected'
+            ? t('sendSection.connectBtn.disconnect')
+            : portStatus === 'connecting'
+              ? t('sendSection.connectBtn.connecting')
+              : t('sendSection.connectBtn.open')}
+        </button>
+        <div className="tty-titlebar-actions">
+          <button
+            type="button"
+            className="icon-btn"
+            title={t('tty.action.copy')}
+            aria-label={t('contextMenu.copy')}
+            onClick={handleCopy}
+          >
+            <Copy size={13} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            disabled={flowRunning || portStatus !== 'connected'}
+            title={t('tty.action.paste')}
+            aria-label={t('contextMenu.paste')}
+            onClick={() => { void handlePaste(); }}
+          >
+            <ClipboardPaste size={13} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            title={t('sendSection.clearButton')}
+            aria-label={t('sendSection.clearButton')}
+            onClick={handleClear}
+          >
+            <Trash2 size={13} />
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm tty-switch-trx-btn"
+            title={t('tty.switchToTrx')}
+            onClick={() => setConfirmSwitchTrx(true)}
+          >
+            <ArrowLeftRight size={12} aria-hidden="true" />
+            <span>{t('tty.switchToTrx')}</span>
+          </button>
+        </div>
       </div>
+      {portStatus !== 'connected' && (
+        <div className="tty-disconnected-hint" role="status" aria-live="polite">
+          <Cable size={13} aria-hidden="true" />
+          <span>{portStatus === 'connecting' ? t('terminalView.connectingHint') : t('tty.disconnectedHint')}</span>
+        </div>
+      )}
       {flowRunning && (
         <div className="tty-flow-lock" role="status" aria-live="polite">
           <span className="tty-flow-lock-dot" aria-hidden="true" />
@@ -255,7 +442,28 @@ const TtyView: React.FC<TtyViewProps> = ({ portId, hidden }) => {
           <span className="tty-flow-lock-hint">{t('tty.flowLocked')}</span>
         </div>
       )}
-      <div className="tty-container" ref={containerRef} />
+      <div className="tty-container" ref={containerRef} onContextMenu={handleContextMenu} />
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+      <ConfirmDialog
+        open={confirmSwitchTrx}
+        title={t('paramsSection.modeSwitchTitle')}
+        message={t('paramsSection.modeSwitchMessage')}
+        confirmLabel={t('confirmDialog.confirm')}
+        cancelLabel={t('confirmDialog.cancel')}
+        danger
+        onConfirm={() => {
+          setConfirmSwitchTrx(false);
+          applySwitchToTrx();
+        }}
+        onCancel={() => setConfirmSwitchTrx(false)}
+      />
     </div>
   );
 };

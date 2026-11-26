@@ -16,6 +16,16 @@
   height: 100%;
   overflow-x: auto;
   overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.tab-bar-tabs::-webkit-scrollbar {
+  height: 3px;
+}
+
+.tab-bar-tabs::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 2px;
 }
 
 .tab-bar-actions {
@@ -75,17 +85,36 @@
   padding: 0 var(--space-2);
 }
 
-/* Status dot — idle gray, lit by the active tab (no inline styles). */
+/* Status dot — mirrors actual port connection status (matching Sidebar). */
 .tab-status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
-  background: var(--text-secondary);
+  background: var(--status-disconnected);
 }
 
-.tab-item.active .tab-status-dot {
-  background: var(--text-link);
+.tab-status-dot.status-connected {
+  background: var(--status-connected);
+}
+
+.tab-status-dot.status-connecting {
+  background: var(--status-connecting);
+}
+
+.tab-status-dot.status-error {
+  background: var(--status-error);
+}
+
+.tab-status-dot.status-disconnected {
+  background: var(--status-disconnected);
+}
+
+.tab-warning-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--status-error);
+  flex-shrink: 0;
 }
 
 .tab-title {

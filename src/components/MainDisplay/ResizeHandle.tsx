@@ -6,13 +6,15 @@ interface ResizeHandleProps {
   /** Called with the px movement of ONE mousemove event (the store's
    *  `resizeChildren` applies each delta relative to the current sizes). */
   onResize: (delta: number) => void;
+  /** Optional reset handler invoked on double-click (e.g. restore 50/50 split). */
+  onReset?: () => void;
   /** Split direction: 'vertical' = siblings side by side → vertical handle. */
   direction: 'horizontal' | 'vertical';
   /** Leading pane's share of the two adjacent panes, derived from paneTree. */
   value: number;
 }
 
-const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction, value }) => {
+const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, onReset, direction, value }) => {
   const { t } = useTranslation();
   const isVertical = direction === 'vertical';
   // useDragResize('delta') reports the offset since the drag STARTED, while the
@@ -36,9 +38,9 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction, value 
     const backward = isVertical ? event.key === 'ArrowLeft' : event.key === 'ArrowUp';
     if (!forward && !backward) return;
     event.preventDefault();
-    // A small fixed nudge keeps keyboard resizing predictable and avoids a
-    // second layout model; the pane tree remains the sole size source.
-    onResize((forward ? 1 : -1) * 8);
+    // Shift+Arrow uses a coarse 40px step; plain Arrow nudges by 8px.
+    const step = event.shiftKey ? 40 : 8;
+    onResize((forward ? 1 : -1) * step);
   };
 
   return (
@@ -51,7 +53,9 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ onResize, direction, value 
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={value}
+      title={onReset ? t('workspace.doubleClickResetSplit') : undefined}
       onKeyDown={handleKeyDown}
+      onDoubleClick={onReset}
       style={{
         width: isVertical ? 5 : '100%',
         height: isVertical ? '100%' : 5,

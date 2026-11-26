@@ -48,6 +48,63 @@
   outline-offset: -1px;
 }
 
+.pane-tabbar-header {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  transition: outline-color var(--transition-fast), background var(--transition-fast);
+}
+
+.pane-tabbar-header.drop-active {
+  outline: 2px dashed var(--accent-color);
+  outline-offset: -2px;
+  background: var(--bg-active);
+}
+
+.pane-tabbar-slot {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pane-popped-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding: 2px var(--space-2);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.pane-popped-icon {
+  flex-shrink: 0;
+  color: var(--accent-color);
+}
+
+.pane-popped-items {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pane-popped-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.pane-popped-reattach {
+  min-height: 20px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
 /* Click-to-activate wrapper around TerminalView (issue #5-8): clicking the
  * output area activates the pane's displayed tab. Must preserve the flex
  * column min-height:0 chain: .pane-container-inner > wrapper >
@@ -67,6 +124,23 @@
   background: var(--border-color);
   transition: background var(--transition-fast);
   z-index: 10;
+}
+
+/* Widened invisible hit target for easier pointer grabbing. */
+.pane-resize-handle::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+.pane-branch-row > .pane-resize-handle::before {
+  left: -3px;
+  right: -3px;
+}
+
+.pane-branch-column > .pane-resize-handle::before {
+  top: -3px;
+  bottom: -3px;
 }
 
 .pane-resize-handle::after {
