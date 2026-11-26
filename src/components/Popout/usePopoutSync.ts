@@ -315,6 +315,12 @@ export function usePopoutSync(): PopoutSync {
   const unresolved = generation.current !== acknowledged.current || pending || saving;
   useEffect(() => { reportClientState(unresolved); }, [unresolved, reportClientState]);
 
+  const refreshPorts = useCallback(() => {
+    void serialService.listAvailablePorts().then((list) => {
+      if (alive.current) setPorts(list);
+    }).catch((cause) => console.debug('[usePopoutSync] listAvailablePorts failed:', cause));
+  }, []);
+
   // A single owned listener group: keep late registration cleanup even after a
   // partial failure, and request the first snapshot only when every listener exists.
   useEffect(() => {
@@ -349,9 +355,12 @@ export function usePopoutSync(): PopoutSync {
           else next.delete(event.port_id);
           return next;
         });
+        refreshPorts();
       }).then(retain),
       popoutEventService.onPortStatusesSync(items => {
-        if (!cancelled) setConnectedPortIds(new Set(items.filter(item => item.status === 'connected').map(item => item.portId)));
+        if (cancelled) return;
+        setConnectedPortIds(new Set(items.filter(item => item.status === 'connected').map(item => item.portId)));
+        refreshPorts();
       }).then(retain),
     ]).then(async () => {
       if (!cancelled) { listenersReady.current = true; await requestSync(); }
@@ -367,15 +376,13 @@ export function usePopoutSync(): PopoutSync {
       unlisteners.splice(0).forEach(unlisten => unlisten());
       reportClientState(false);
     };
-  }, [receiveSnapshot, save, discard, requestSync, reportClientState, clientId]);
+  }, [receiveSnapshot, save, discard, requestSync, reportClientState, clientId, refreshPorts]);
 
   useEffect(() => {
-    let cancelled = false;
-    void serialService.listAvailablePorts().then(list => {
-      if (!cancelled) setPorts(list);
-    }).catch(cause => console.debug('[usePopoutSync] listAvailablePorts failed:', cause));
-    return () => { cancelled = true; };
-  }, []);
+    refreshPorts();
+    const timer = window.setInterval(refreshPorts, 3000);
+    return () => { window.clearInterval(timer); };
+  }, [refreshPorts]);
 
   const openSetEditor = useCallback(() => {
     void popoutEventService.emitOpenConfig({ page: 'commands' })

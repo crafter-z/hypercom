@@ -127,10 +127,21 @@ describe('staged popout command list', () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  it('disables both command and set drag handles while search is active', () => {
+  it('disables both command and set drag handles while search is active and shows sort notice even when clean', () => {
     act(() => { type(container.querySelector('.quicksend-search') as HTMLInputElement, 'Alpha'); });
+    expect(container.querySelector('.quicksend-draft-panel')).toBeNull();
+    expect(container.querySelector('.quicksend-sort-notice')?.textContent).toBe('editor.clearSearchToSort');
     expect(container.querySelector<HTMLButtonElement>('.quicksend-set-manager .editor-drag-handle')!.disabled).toBe(true);
     expect(container.querySelector<HTMLButtonElement>('.quicksend-row .editor-drag-handle')!.disabled).toBe(true);
+  });
+
+  it('shows inline HEX validation error in edit form and contextual disabled tooltip on send button', () => {
+    act(() => { click('.quicksend-edit-btn'); });
+    const format = container.querySelector('.quicksend-edit-form select[aria-label="quickSend.format"]') as HTMLSelectElement;
+    act(() => { format.value = 'hex'; format.dispatchEvent(new Event('change', { bubbles: true })); });
+    act(() => { type(container.querySelector('.quicksend-edit-form textarea') as HTMLTextAreaElement, 'A'); });
+    expect(container.querySelector('.quicksend-edit-error')?.getAttribute('role')).toBe('alert');
+    expect(container.querySelector<HTMLButtonElement>('.quicksend-send-btn')?.title).toBe('quickSend.sendDisabledEditing');
   });
 
   it('hides clean draft controls and keeps dirty controls separate from command sending', () => {

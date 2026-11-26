@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pin, PinOff, X } from 'lucide-react';
+import { ArrowDownLeft, Pin, PinOff, X } from 'lucide-react';
 import { configService, popoutEventService, popoutService } from '../../services/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore } from '../../stores/useAppStore';
 import { useSystemStore } from '../../stores/useSystemStore';
+import { notifyError } from '../../stores/useToastStore';
 import { applyUiScale } from '../../utils/uiScale';
 import { useTextEditContextMenu } from '../shared/TextEditContextMenu';
 import { EditorLeaveDialog, useEditorWindowClose } from '../shared/EditorLeaveDialog';
@@ -43,10 +44,17 @@ interface PopoutFrameProps extends PopoutShellProps {
 /** Shared native frame. It deliberately contains no editor or clipboard hooks. */
 const PopoutFrame: React.FC<PopoutFrameProps> = ({ kind, targetId, articleId, anchor, textEditMenuElement, editorLeaveDialog = false }) => {
   const { t } = useTranslation();
-  const [pinned, setPinned] = useState(true); // native windows are created on top
+  // Tool/terminal popouts start pinned; Help defaults to unpinned so it doesn't cover work.
+  const [pinned, setPinned] = useState(kind !== 'help');
   const configReady = useSystemStore((s) => s.ui.configReady);
   const liveScale = useRef<number | null>(null);
   const appliedScale = useRef(false);
+
+  useEffect(() => {
+    if (kind !== 'help') return;
+    void popoutService.setAlwaysOnTop(kind, targetId, false)
+      .catch((e) => console.debug('[PopoutShell] help default unpin failed:', e));
+  }, [kind, targetId]);
 
   useEffect(() => {
     if (kind === 'help') {
@@ -104,11 +112,17 @@ const PopoutFrame: React.FC<PopoutFrameProps> = ({ kind, targetId, articleId, an
     const next = !pinned;
     popoutService.setAlwaysOnTop(kind, targetId, next)
       .then(() => setPinned(next))
-      .catch((e) => console.debug('[PopoutShell] set_popout_always_on_top failed:', e));
+      .catch((e) => {
+        console.debug('[PopoutShell] set_popout_always_on_top failed:', e);
+        notifyError(e);
+      });
   };
   const handleClose = () => {
     void getCurrentWindow().close().catch((e) => console.debug('[PopoutShell] close failed:', e));
   };
+
+  const pinLabel = pinned ? t('popout.unpin') : t('popout.pin');
+  const closeLabel = kind === 'terminal' ? t('popout.closeTerminal') : t('popout.close');
 
   return (
     <div className={`popout-shell${kind === 'help' ? ' popout-shell-help' : ''}`}>
@@ -117,10 +131,28 @@ const PopoutFrame: React.FC<PopoutFrameProps> = ({ kind, targetId, articleId, an
           <span className="popout-title" data-tauri-drag-region>{title}</span>
         </div>
         <div className="popout-titlebar-actions" onPointerDown={(event) => event.stopPropagation()}>
-          <button type="button" className={`icon-btn${pinned ? ' active' : ''}`} title={t('popout.alwaysOnTop')} aria-label={t('popout.alwaysOnTop')} aria-pressed={pinned} onClick={handleTogglePin}>
+          {kind === 'terminal' && (
+            <button
+              type="button"
+              className="icon-btn popout-reattach"
+              title={t('terminalPopout.reattachTitle')}
+              aria-label={t('terminalPopout.reattach')}
+              onClick={handleClose}
+            >
+              <ArrowDownLeft size={14} />
+            </button>
+          )}
+          <button
+            type="button"
+            className={`icon-btn${pinned ? ' active' : ''}`}
+            title={pinLabel}
+            aria-label={pinLabel}
+            aria-pressed={pinned}
+            onClick={handleTogglePin}
+          >
             {pinned ? <Pin size={14} /> : <PinOff size={14} />}
           </button>
-          <button type="button" className="icon-btn popout-close" title={t('popout.close')} aria-label={t('popout.close')} onClick={handleClose}>
+          <button type="button" className="icon-btn popout-close" title={closeLabel} aria-label={closeLabel} onClick={handleClose}>
             <X size={14} />
           </button>
         </div>

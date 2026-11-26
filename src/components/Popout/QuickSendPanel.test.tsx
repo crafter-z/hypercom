@@ -36,24 +36,37 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-const ending = () => host.querySelector<HTMLSelectElement>('[aria-label="quickSend.lineEnding"]')!;
+const ending = () => host.querySelector<HTMLSelectElement>('[aria-label="quickSend.lineEnding"]');
 const formats = () => host.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="quickSend.format"] [role="radio"]');
+const modeTabs = () => host.querySelectorAll<HTMLButtonElement>('[role="tab"]');
 
 describe('popout send options use shared semantics', () => {
+  it('hides text-only line ending and format controls in list mode and shows explicit Follow target', () => {
+    expect(ending()).toBeNull();
+    expect(formats()).toHaveLength(0);
+    expect(host.querySelector('.quicksend-target-meta')).toBeNull();
+    const portSelect = host.querySelector<HTMLSelectElement>('[aria-label="quickSend.targetPort"]')!;
+    expect(portSelect.value).toBe('');
+    expect(portSelect.options[0].textContent).toBe('quickSend.followActivePort');
+    expect(host.querySelector('.quicksend-target-status')?.textContent).toBe('sidebar.port.status.connected');
+  });
+
   it('disables ineffective HEX line endings without losing the text-mode preference', async () => {
-    expect(ending().disabled).toBe(false);
-    expect(ending().value).toBe('\\r\\n');
+    await act(async () => modeTabs()[1].click());
+    expect(ending()!.disabled).toBe(false);
+    expect(ending()!.value).toBe('\\r\\n');
     await act(async () => formats()[1].click());
-    expect(ending().disabled).toBe(true);
-    expect(ending().value).toBe('\\r\\n');
+    expect(ending()!.disabled).toBe(true);
+    expect(ending()!.value).toBe('\\r\\n');
     expect(host.querySelector('.quicksend-target-meta')?.textContent?.trim()).toBe('HEX');
     await act(async () => formats()[0].click());
-    expect(ending().disabled).toBe(false);
-    expect(ending().value).toBe('\\r\\n');
+    expect(ending()!.disabled).toBe(false);
+    expect(ending()!.value).toBe('\\r\\n');
     expect(host.querySelector('.quicksend-target-meta')?.textContent).toContain('sendSection.lineEnding.crlf');
   });
 
   it('uses the same radio keyboard contract as the main-window mode control', async () => {
+    await act(async () => modeTabs()[1].click());
     formats()[0].focus();
     const event = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true });
     await act(async () => formats()[0].dispatchEvent(event));

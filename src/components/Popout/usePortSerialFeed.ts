@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { eventService } from '../../services/tauri';
 import { getRxPipeline } from '../../utils/rxPipeline';
+import type { PortStatus } from '../../types';
 
 /** 交接期间暂存的一个 serial:data 事件（原始 payload，不解析）。 */
 interface PendingRxEvent {
@@ -30,10 +31,18 @@ interface PendingRxEvent {
  * 兜底：主窗在个别时序下可能根本不回快照（例如端口的终端态尚未建立）。交接
  * 不能因此把实时显示永久静默——调用方在超时后以 `openGate(null)` 无条件开闸。
  */
+function toPortStatus(status: string): PortStatus {
+  if (status === 'connected' || status === 'connecting' || status === 'error') return status;
+  return 'disconnected';
+}
+
 export function usePortSerialFeed(portId: string): {
   /** 打开闸门：`snapshotLastTs` 为快照末行时间戳，null = 无快照（全部放行）。 */
   openGate: (snapshotLastTs: number | null) => void;
+  /** Reactive port connection status tracked from backend serial:status events. */
+  portStatus: PortStatus;
 } {
+  const [portStatus, setPortStatus] = useState<PortStatus>('connected');
   const pendingRef = useRef<PendingRxEvent[]>([]);
   const gateOpenRef = useRef(false);
   // A popout has its own store and does not receive the main window's port
@@ -48,6 +57,7 @@ export function usePortSerialFeed(portId: string): {
     gateOpenRef.current = false;
     connectedRef.current = true;
     generationRef.current = undefined;
+    setPortStatus('connected');
     const pipeline = getRxPipeline();
     let cancelled = false;
     let unlistenData: (() => void) | null = null;
@@ -57,6 +67,7 @@ export function usePortSerialFeed(portId: string): {
       .onSerialStatus((event) => {
         if (event.port_id !== portId) return;
         if (event.generation != null && generationRef.current != null && event.generation < generationRef.current) return;
+        setPortStatus(toPortStatus(event.status));
         if (event.status === 'connected') {
           connectedRef.current = true;
           generationRef.current = event.generation ?? undefined;
@@ -124,5 +135,5 @@ export function usePortSerialFeed(portId: string): {
     [portId],
   );
 
-  return { openGate };
+  return { openGate, portStatus };
 }

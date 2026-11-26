@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { flushSync } from 'react-dom';
 import { ArrowDownToLine, ArrowUpToLine, Pencil, Plus, Save, Search, Send, Trash2, Undo2 } from 'lucide-react';
-import { LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
+import { hexInputError, LINE_ENDING_VALUES, lineEndingLabelKey } from '../../utils/sendUtils';
 import { orderedCommands, renumberCommands } from '../../utils/commandOrder';
 import {
   COMMAND_BAUD_RATE,
@@ -96,7 +96,19 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
   const editable = ready && !saving;
   const draftDirty = dirty || focusedNumericInput;
   const showDraftPanel = !ready || draftDirty || pending || saving || !!error || !!conflict;
-  const sendDisabled = !active || !canSend || !ready || saving || pending || commands.some(command => editingIds[command.id]) || !!selectedSet && dirtyIds.has(selectedSet.id);
+  const hasEditingCommand = commands.some(command => editingIds[command.id]);
+  const isSetDirty = !!selectedSet && dirtyIds.has(selectedSet.id);
+  const sendDisabled = !active || !canSend || !ready || saving || pending || hasEditingCommand || isSetDirty;
+  const getSendButtonTitle = (command: SendCommand): string => {
+    if (!isExecutableCommand(command)) return t('editor.unknownCommandStep');
+    if (!ready) return t('quickSend.status.syncing');
+    if (saving) return t('editor.saving');
+    if (pending) return t('quickSend.status.syncingDraft');
+    if (hasEditingCommand) return t('quickSend.sendDisabledEditing');
+    if (isSetDirty) return t('quickSend.sendDisabledUnsaved');
+    if (!canSend) return t('quickSend.noActivePort');
+    return t('sendSection.sendButton');
+  };
 
   useEffect(() => { setCursor(value => Math.max(0, Math.min(value, filtered.length - 1))); }, [filtered.length]);
   useEffect(() => {
@@ -208,13 +220,16 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
           title={t('quickSend.setLabel')} onChange={event => { onSelectSet(event.target.value); setCursor(0); }}>
           {sets.map(set => <option key={set.id} value={set.id}>{set.name}{dirtyIds.has(set.id) ? ' *' : ''}</option>)}
         </select>
-        <button type="button" className="icon-btn" title={t('quickSend.editSet')} onClick={onOpenSetEditor}><Pencil size={13} /></button>
+        <button type="button" className="icon-btn" title={t('quickSend.openConfigEditor')} aria-label={t('quickSend.openConfigEditor')} onClick={onOpenSetEditor}><Pencil size={13} /></button>
         <button type="button" className="icon-btn" title={t('commandSettings.addSet')} aria-label={t('commandSettings.addSet')}
           disabled={!editable} onClick={() => insertSet()}><Plus size={13} /></button>
       </div>
+      {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
       {showDraftPanel && <div className="quicksend-draft-panel" role="region" aria-label={t('quickSend.editSet')}>
         <div className="quicksend-draft-actions">
-          {(!ready || saving || pending) && <span role="status">{t('editor.saving')}</span>}
+          {!ready && <span role="status">{t('quickSend.status.syncing')}</span>}
+          {ready && saving && <span role="status">{t('editor.saving')}</span>}
+          {ready && !saving && pending && <span role="status">{t('quickSend.status.syncingDraft')}</span>}
           {draftDirty && ready && !saving && !pending && <span role="status">{t('editor.unsaved')}</span>}
           <button type="button" className="btn btn-sm" disabled={!ready || saving} onClick={() => { void saveDraft(); }}><Save size={12} />{t('editor.save')}</button>
           <button type="button" className="btn btn-sm" disabled={!ready || saving || !draftDirty && !pending} onClick={() => { void onDiscard().then(discarded => { if (discarded) setEditingIds({}); }); }}><Undo2 size={12} />{t('editor.discard')}</button>
@@ -228,12 +243,11 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
               onClick={() => { void onReloadHost(); }}>{t('editor.reloadHostDraft')}</button>
           </span>}
         </div>}
-        {query.trim() && <div className="quicksend-sort-notice">{t('editor.clearSearchToSort')}</div>}
       </div>}
     </div>
     <div className="quicksend-list" ref={listRef} onFocusCapture={onListFocusCapture} onBlurCapture={onListBlurCapture}>
       <details className="quicksend-set-manager">
-        <summary>{t('quickSend.editSet')}</summary>
+        <summary>{t('quickSend.manageSets')}</summary>
         <SortableEditorList items={sets} disabled={!editable || !!query.trim()} onReorder={ids => onReplaceSets(ids.map(id => sets.find(set => set.id === id)!))}
           renderItem={(set, index, handle) => <div className="quicksend-set-manager-row">
             {handle}<button type="button" className="quicksend-set-name" onClick={() => onSelectSet(set.id)}>{set.name}</button>
@@ -242,16 +256,23 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
             <button type="button" className="icon-btn" disabled={!editable} title={t('ruleSetAccordion.delete')} aria-label={t('ruleSetAccordion.delete')} onClick={() => onReplaceSets(sets.filter(item => item.id !== set.id))}><Trash2 size={12} /></button>
           </div>} />
       </details>
-      {selectedSet && <fieldset className="quicksend-set-fields" disabled={!editable}>
-        <label>{t('editor.name')}<input className="input" value={selectedSet.name} onChange={event => updateSet({ name: event.target.value })} /></label>
-        <label className="quicksend-loop-label"><input type="checkbox" checked={selectedSet.isLoop} onChange={event => updateSet({ isLoop: event.target.checked })} />{t('commandSettings.loopCheckbox')}</label>
-        <label>{t('commandSettings.loopDelayTooltip')}<NumericInput className="input" min={0} max={3_600_000} value={selectedSet.loopDelay} onCommit={loopDelay => updateSet({ loopDelay })} /></label>
-        <label title={t('commandSettings.repeatTooltip')}>{t('commandSettings.repeatLabel')}<NumericInput className="input" min={0} max={1_000_000} value={selectedSet.repeatCount} onCommit={repeatCount => updateSet({ repeatCount })} /></label>
-      </fieldset>}
+      {selectedSet && (
+        <details className="quicksend-set-settings">
+          <summary>{t('quickSend.setSettings')}</summary>
+          <fieldset className="quicksend-set-fields" disabled={!editable}>
+            <label>{t('editor.name')}<input className="input" value={selectedSet.name} onChange={event => updateSet({ name: event.target.value })} /></label>
+            <label className="quicksend-loop-label"><input type="checkbox" checked={selectedSet.isLoop} onChange={event => updateSet({ isLoop: event.target.checked })} />{t('commandSettings.loopCheckbox')}</label>
+            <label>{t('commandSettings.loopDelayTooltip')}<NumericInput className="input" min={0} max={3_600_000} value={selectedSet.loopDelay} onCommit={loopDelay => updateSet({ loopDelay })} /></label>
+            <label title={t('commandSettings.repeatTooltip')}>{t('commandSettings.repeatLabel')}<NumericInput className="input" min={0} max={1_000_000} value={selectedSet.repeatCount} onCommit={repeatCount => updateSet({ repeatCount })} /></label>
+          </fieldset>
+        </details>
+      )}
       {!sets.length ? <div className="quicksend-empty">{t('quickSend.noSets')}</div> : !filtered.length ? <div className="quicksend-empty">{t('quickSend.empty')}</div> :
         <SortableEditorList items={filtered} disabled={!editable || !!query.trim()}
           onReorder={ids => updateSet({ commands: renumberCommands(ids.map(id => commands.find(command => command.id === id)!)) })}
-          renderItem={(command, index, handle) => <div
+          renderItem={(command, index, handle) => {
+            const hexErr = isSendCommand(command) && command.type === 'hex' ? hexInputError(command.content) : null;
+            return <div
             className={`quicksend-row${index === cursor ? ' is-cursor' : ''}${flashingId === command.id ? ' is-flash' : ''}${sendDisabled || !isExecutableCommand(command) ? ' is-send-disabled' : ''}`}
             role="group" aria-label={command.name}
             onMouseEnter={() => setCursor(index)} onClick={() => setCursor(index)}
@@ -269,7 +290,17 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
             {editingIds[command.id] ? <fieldset className="quicksend-edit-form" disabled={!editable} onClick={event => event.stopPropagation()}>
               <label>{t('quickSend.namePlaceholder')}<input className="input quicksend-edit-input" value={command.name} onChange={event => updateCommand(command.id, { name: event.target.value })} /></label>
               {isSendCommand(command) ? <>
-                <label>{t('quickSend.contentPlaceholder')}<textarea autoFocus className="input quicksend-edit-input" value={command.content} onChange={event => updateCommand(command.id, { content: event.target.value })} /></label>
+                <label>
+                  {t('quickSend.contentPlaceholder')}
+                  <textarea
+                    autoFocus
+                    className={`input quicksend-edit-input${hexErr !== null ? ' is-error' : ''}`}
+                    aria-invalid={hexErr !== null}
+                    value={command.content}
+                    onChange={event => updateCommand(command.id, { content: event.target.value })}
+                  />
+                </label>
+                {hexErr !== null && <span className="quicksend-edit-error" role="alert">{t(hexErr)}</span>}
                 <div className="quicksend-edit-row">
                   <span>{t('editor.order')}: {commands.findIndex(item => item.id === command.id) + 1}</span>
                   {renderDelayField(command)}
@@ -292,12 +323,13 @@ const QuickSendList: React.FC<QuickSendListProps> = ({
               </div>}
             </fieldset> : <span className="quicksend-content">{commandStepSummary(command)}</span>}
             <div className="quicksend-command-actions" onClick={event => event.stopPropagation()}>
-              <button type="button" className="icon-btn quicksend-send-btn" disabled={sendDisabled || !isExecutableCommand(command)} title={t('sendSection.sendButton')} aria-label={t('sendSection.sendButton')} onClick={() => onSend(command)}><Send size={12} /></button>
+              <button type="button" className="icon-btn quicksend-send-btn" disabled={sendDisabled || !isExecutableCommand(command)} title={getSendButtonTitle(command)} aria-label={t('sendSection.sendButton')} onClick={() => onSend(command)}><Send size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertAbove')} aria-label={t('editor.insertAbove')} onClick={() => insertCommand(command.id)}><ArrowUpToLine size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('editor.insertBelow')} aria-label={t('editor.insertBelow')} onClick={() => insertCommand(commands[commands.findIndex(item => item.id === command.id) + 1]?.id)}><ArrowDownToLine size={12} /></button>
               <button type="button" className="icon-btn" disabled={!editable} title={t('sendCmdEditor.delete')} aria-label={t('sendCmdEditor.delete')} onClick={() => updateSet({ commands: renumberCommands(commands.filter(item => item.id !== command.id)) })}><Trash2 size={12} /></button>
             </div>
-          </div>} />}
+          </div>;
+          }} />}
       {selectedSet && <button type="button" className="btn btn-sm quicksend-add-command" disabled={!editable} onClick={() => insertCommand()}><Plus size={12} />{t('commandSettings.addCommandButton')}</button>}
     </div>
   </>;

@@ -162,8 +162,12 @@ const QuickSendText: React.FC<QuickSendTextProps> = ({
     if (!targetPortId) return;
     runTargetRef.current = targetPortId;
     const cfg = configRef.current;
-    // 无可发送行（全空 / HEX 模式全非法）时不动状态，按钮语义等同禁用。
-    if (!ls.some((l) => l.trim() !== '' && (!cfg.isHex || isValidHexLine(l)))) return;
+    const nonEmpty = ls.filter((l) => l.trim() !== '');
+    if (nonEmpty.length === 0) return;
+    if (cfg.isHex && !nonEmpty.some((l) => isValidHexLine(l))) {
+      notifyInfo('quickSend.invalidHex');
+      return;
+    }
     runEpochRef.current += 1;
     run.mode = mode;
     run.pendingStart = true;

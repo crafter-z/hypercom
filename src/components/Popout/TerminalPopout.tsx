@@ -35,7 +35,7 @@ interface TerminalPopoutProps {
 const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
   const { t } = useTranslation();
   // PopoutShell loads the shared config once for this WebView.
-  const { openGate } = usePortSerialFeed(portId);
+  const { openGate, portStatus } = usePortSerialFeed(portId);
 
   useEffect(() => {
     // OS window title mirrors the main-window convention: "HyperCom — <portId>"
@@ -137,15 +137,19 @@ const TerminalPopout: React.FC<TerminalPopoutProps> = ({ portId }) => {
 
   return (
     <div className="popout-terminal">
-      {/* S-I4：弹窗与主窗的能力差异显式可见（不新增 i18n key，全部用既有文案组合）。 */}
       <div className="popout-capability-hint">
-        <span>{t('terminalPopout.poppedOutHint', { port: portId })}</span>
-        <span>
-          {t('terminalView.protocolLabel')}
-          {t('terminalView.protocolNone')}
-        </span>
-        <span>{t('terminal.filter.rxOnly')}</span>
+        <span>{t('terminalPopout.capabilityHint', { port: portId })}</span>
       </div>
+      {(portStatus === 'disconnected' || portStatus === 'error') && (
+        <div className={`popout-status-banner is-${portStatus}`} role="status">
+          <span className="popout-status-dot" aria-hidden="true" />
+          <span>
+            {portStatus === 'error'
+              ? t('terminalPopout.statusError', { port: portId })
+              : t('terminalPopout.statusDisconnected', { port: portId })}
+          </span>
+        </div>
+      )}
       <TerminalView portId={portId} />
     </div>
   );

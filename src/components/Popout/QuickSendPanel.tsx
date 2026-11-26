@@ -119,19 +119,22 @@ const QuickSendPanel: React.FC = () => {
         </button>
       </div>
 
-      {/* 共享参数栏（两种模式） */}
+      {/* 共享参数栏：目标串口为两种模式共用；行尾/格式/间隔仅属于文本模式（列表模式每条命令有独立配置）。 */}
       <div className="quicksend-params">
         <div className="quicksend-param-row">
           <label className="quicksend-param-label">{t('quickSend.targetPort')}</label>
           <select
             className="select quicksend-param-control"
-            value={config.portId || activePortId || ''}
-            disabled={ports.length === 0}
+            value={config.portId}
+            disabled={ports.length === 0 && !config.portId && !activePortId}
             onChange={(e) => patchConfig({ portId: e.target.value })}
             title={t('quickSend.targetPort')}
+            aria-label={t('quickSend.targetPort')}
           >
             <option value="">
-              {ports.length === 0 ? t('quickSend.noPorts') : activePortId ?? t('quickSend.noActivePort')}
+              {activePortId
+                ? t('quickSend.followActivePort', { port: activePortId })
+                : t('quickSend.followActivePortNone')}
             </option>
             {config.portId && !ports.some((port) => port.id === config.portId) && (
               <option value={config.portId}>{config.portId}</option>
@@ -144,32 +147,33 @@ const QuickSendPanel: React.FC = () => {
             ))}
           </select>
         </div>
-        <div className="quicksend-param-row">
-          <label className="quicksend-param-label">{t('quickSend.lineEnding')}</label>
-          <select
-            className="select quicksend-param-control"
-            value={config.lineEnding}
-            aria-label={t('quickSend.lineEnding')}
-            disabled={config.isHex}
-            onChange={(e) => patchConfig({ lineEnding: e.target.value as LineEnding })}
-          >
-            {LINE_ENDING_VALUES.map((v) => (
-              <option key={v} value={v}>
-                {t(lineEndingLabelKey(v, 'sendSection'))}
-              </option>
-            ))}
-          </select>
-          <label className="quicksend-param-label">{t('quickSend.format')}</label>
-          <SegmentedControl
-            className="quicksend-format-toggle"
-            aria-label={t('quickSend.format')}
-            value={config.isHex ? 'hex' : 'string'}
-            options={[{ value: 'string', label: 'STR' }, { value: 'hex', label: 'HEX' }]}
-            onChange={format => patchConfig({ isHex: format === 'hex' })}
-          />
-        </div>
         {mode === 'text' && (
           <>
+            <div className="quicksend-param-row">
+              <label className="quicksend-param-label">{t('quickSend.lineEnding')}</label>
+              <select
+                className="select quicksend-param-control"
+                value={config.lineEnding}
+                aria-label={t('quickSend.lineEnding')}
+                title={config.isHex ? t('sendSection.lineEnding.disabledInHex') : t('quickSend.lineEnding')}
+                disabled={config.isHex}
+                onChange={(e) => patchConfig({ lineEnding: e.target.value as LineEnding })}
+              >
+                {LINE_ENDING_VALUES.map((v) => (
+                  <option key={v} value={v}>
+                    {t(lineEndingLabelKey(v, 'sendSection'))}
+                  </option>
+                ))}
+              </select>
+              <label className="quicksend-param-label">{t('quickSend.format')}</label>
+              <SegmentedControl
+                className="quicksend-format-toggle"
+                aria-label={t('quickSend.format')}
+                value={config.isHex ? 'hex' : 'string'}
+                options={[{ value: 'string', label: 'STR' }, { value: 'hex', label: 'HEX' }]}
+                onChange={format => patchConfig({ isHex: format === 'hex' })}
+              />
+            </div>
             <div className="quicksend-param-row">
               <label className="quicksend-param-label">{t('quickSend.sendInterval')}</label>
               <NumericInput
@@ -220,7 +224,8 @@ const QuickSendPanel: React.FC = () => {
           onReloadHost={editor.reloadHost}
         />
       </div>
-      {mode === 'text' && (
+      {/* Keep QuickSendText mounted so switching tabs does not silently abort a running text sequence. */}
+      <div style={{ display: mode === 'text' ? 'contents' : 'none' }}>
         <QuickSendText
           text={text}
           onTextChange={setText}
@@ -229,7 +234,7 @@ const QuickSendPanel: React.FC = () => {
           targetPortId={effectivePortId}
           onSendLine={emitSendIntent}
         />
-      )}
+      </div>
 
       <div className="quicksend-footer">
         {effectivePortId ? (
@@ -241,13 +246,20 @@ const QuickSendPanel: React.FC = () => {
               aria-hidden="true"
             />
             <span className="quicksend-target-port">{effectivePortId}</span>
-            <span className="quicksend-target-meta">
-              {config.isHex ? 'HEX' : `STR · ${t(lineEndingLabelKey(config.lineEnding, 'sendSection'))}`}
+            <span className={`quicksend-target-status${connectedPortIds.has(effectivePortId) ? ' is-connected' : ''}`}>
+              {connectedPortIds.has(effectivePortId)
+                ? t('sidebar.port.status.connected')
+                : t('sidebar.port.status.disconnected')}
             </span>
+            {mode === 'text' && (
+              <span className="quicksend-target-meta">
+                {config.isHex ? 'HEX' : `STR · ${t(lineEndingLabelKey(config.lineEnding, 'sendSection'))}`}
+              </span>
+            )}
           </span>
         ) : (
           <span className="quicksend-target quicksend-target-muted">
-            {ports.length === 0 ? t('quickSend.noActivePort') : t('quickSend.portClosed')}
+            {ports.length === 0 ? t('quickSend.noPorts') : t('quickSend.noActivePort')}
           </span>
         )}
       </div>
