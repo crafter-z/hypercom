@@ -160,7 +160,7 @@ export interface AppStoreState {
   setActiveTab: (tabId: string) => void;
   setTabPoppedOut: (tabId: string, poppedOut: boolean) => void;
   moveTabToPane: (tabId: string, paneId: string) => void;
-  splitPane: (direction: 'horizontal' | 'vertical') => void;
+  splitPane: (direction: 'horizontal' | 'vertical', sourcePaneId?: string) => void;
   removePane: (paneId: string) => void;
   setFocusedPane: (paneId: string) => void;
   reorderPaneTabIds: (paneId: string, tabIds: string[]) => void;
@@ -467,26 +467,35 @@ export const useAppStore = create<AppStoreState>()(
       revalidateFocus(state);
     }),
 
-    splitPane: (direction) => set((state) => {
+    splitPane: (direction, sourcePaneId) => set((state) => {
       const activeTab = state.tabs.find(t => t.id === state.activeTabId);
-      const sourceLeafId = activeTab?.splitPaneId || state.focusedPaneId;
+      const sourceLeafId = sourcePaneId ?? activeTab?.splitPaneId ?? state.focusedPaneId;
       const sourceLeaf = findLeafById(state.paneTree, sourceLeafId);
       if (!sourceLeaf) return;
 
       const originalSize = sourceLeaf.size;
       const newLeafId = newPaneId('pane');
 
-      // Move active tab from source leaf to new leaf
-      if (activeTab) {
-        sourceLeaf.tabIds = sourceLeaf.tabIds.filter(id => id !== activeTab.id);
-        activeTab.splitPaneId = newLeafId;
+      // Only move a tab belonging to sourceLeaf: prefer activeTab if it is in
+      // sourceLeaf, otherwise fall back to the last tab in sourceLeaf (if any).
+      const tabToMove = (activeTab && sourceLeaf.tabIds.includes(activeTab.id))
+        ? activeTab
+        : (sourceLeaf.tabIds.length > 0
+          ? state.tabs.find(t => t.id === sourceLeaf.tabIds[sourceLeaf.tabIds.length - 1])
+          : undefined);
+
+      // Move selected tab from source leaf to new leaf
+      if (tabToMove) {
+        sourceLeaf.tabIds = sourceLeaf.tabIds.filter(id => id !== tabToMove.id);
+        tabToMove.splitPaneId = newLeafId;
+        state.activeTabId = tabToMove.id;
       }
       sourceLeaf.size = 0.5;
 
       const newLeaf: LeafPane = {
         id: newLeafId,
         type: 'leaf',
-        tabIds: activeTab ? [activeTab.id] : [],
+        tabIds: tabToMove ? [tabToMove.id] : [],
         size: 0.5,
       };
 

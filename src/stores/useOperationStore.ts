@@ -8,6 +8,11 @@ import type {
   StopBits,
 } from '../types';
 
+export interface ControlLines {
+  dtr: boolean;
+  rts: boolean;
+}
+
 interface OperationState {
   baudRate: number;
   dataBits: DataBits;
@@ -16,6 +21,8 @@ interface OperationState {
   handshake: Handshake;
   dtr: boolean;
   rts: boolean;
+  /** Per-port DTR/RTS state so switching tabs restores each port's control lines without side effects. */
+  portControlLines: Record<string, ControlLines>;
   ignoreEmptyChars: boolean;
   sendIsHex: boolean;
   sendAppendLineEnding: LineEnding;
@@ -27,7 +34,15 @@ interface OperationState {
    */
   cyclicLoops: Record<string, boolean>;
 
-  setOpState: (patch: Partial<Omit<OperationState, 'setOpState' | 'setCyclicLoop' | 'cyclicLoops'>>) => void;
+  setOpState: (
+    patch: Partial<
+      Omit<
+        OperationState,
+        'setOpState' | 'setCyclicLoop' | 'cyclicLoops' | 'setPortControlLines' | 'portControlLines'
+      >
+    >
+  ) => void;
+  setPortControlLines: (portId: string, lines: ControlLines) => void;
   setCyclicLoop: (portId: string, running: boolean) => void;
 }
 
@@ -40,6 +55,7 @@ export const useOperationStore = create<OperationState>()(
     handshake: 'None',
     dtr: false,
     rts: false,
+    portControlLines: {},
     ignoreEmptyChars: false,
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
@@ -48,6 +64,11 @@ export const useOperationStore = create<OperationState>()(
 
     setOpState: (patch) => set((state) => {
       Object.assign(state, patch);
+    }),
+
+    setPortControlLines: (portId, lines) => set((state) => {
+      if (!portId) return;
+      state.portControlLines[portId] = { dtr: lines.dtr, rts: lines.rts };
     }),
 
     // 每端口循环开关：running=true 启用该端口循环；false 停止。空 portId 为 no-op。

@@ -4,6 +4,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { useSystemStore } from '../stores/useSystemStore';
 import { configService, storageService } from '../services/tauri';
 import { notifyError } from '../stores/useToastStore';
+import i18n from '../i18n';
 import { commitUpdateMode, getCommittedUpdateMode } from '../utils/updateService';
 import {
   commitPluginMarketplaceUrl,
@@ -151,6 +152,16 @@ function mergeOrdinary(remote: AppConfig, local: Partial<AppConfig>, baseline: P
 export function isOrdinaryConfigDirty(): boolean {
   const current = useAppStore.getState().config;
   return ordinaryBaseline !== null && !jsonEqual(ordinaryValues(current), ordinaryValues(ordinaryBaseline));
+}
+
+export function getDirtyOrdinaryConfigKeys(): Array<keyof AppConfig> {
+  if (!ordinaryBaseline) return [];
+  const current = useAppStore.getState().config;
+  return ORDINARY_KEYS.filter(key => !jsonEqual(current[key], ordinaryBaseline![key]));
+}
+
+export function getOrdinaryConfigDefaults(): Partial<AppConfig> {
+  return ordinaryValues(useAppStore.getInitialState().config);
 }
 
 export function markOrdinaryConfigSaved(config: AppConfig = useAppStore.getState().config): void {
@@ -327,9 +338,11 @@ export function useConfigPersistence() {
       throw new Error('Config changed during save; please try again');
     } catch (err) {
       console.error('[useConfigPersistence] Failed to save config:', err);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = (err instanceof Error ? err.message : String(err)).trim();
       if (message.includes('editor.conflict') || message.includes('Config changed during save')) {
         notifyError(undefined, 'configModal.saveConflict');
+      } else if (/^editor\.[a-zA-Z0-9_.-]+$/.test(message) && (typeof i18n.exists !== 'function' || i18n.exists(message))) {
+        notifyError(i18n.t(message));
       } else {
         notifyError(err);
       }

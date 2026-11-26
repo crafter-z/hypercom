@@ -289,6 +289,21 @@ describe('Tab & Pane actions', () => {
     expect(findSerialTabByPortId(s, 'A')!.splitPaneId).toBe(newLeaf.id);
   });
 
+  it('splitPane with explicit sourcePaneId splits that exact pane instead of activeTab pane', () => {
+    seedTwoPanes(); // pane1[A(active),B,C] / pane2[X,Y]
+    useAppStore.getState().splitPane('vertical', 'pane2');
+    const s = useAppStore.getState();
+    expect(countLeaves(s.paneTree)).toBe(3);
+    // pane1 must remain completely untouched with all its original tabs
+    expect(findLeafById(s.paneTree, 'pane1')!.tabIds).toEqual(['A', 'B', 'C']);
+    // pane2 was split: X stays in pane2, Y moved to the newly created leaf
+    expect(findLeafById(s.paneTree, 'pane2')!.tabIds).toEqual(['X']);
+    const newLeaf = collectLeaves(s.paneTree).find(l => l.id !== 'pane1' && l.id !== 'pane2')!;
+    expect(newLeaf.tabIds).toEqual(['Y']);
+    expect(s.focusedPaneId).toBe(newLeaf.id);
+    expect(s.activeTabId).toBe('Y');
+  });
+
   it('moveTabToPane removes empty source pane and migrates active state', () => {
     useAppStore.setState({ ports: [makePort('A'), makePort('B')] });
     const { openTab, splitPane, moveTabToPane } = useAppStore.getState();

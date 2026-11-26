@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getActivePortId, useAppStore } from '../stores/useAppStore';
+import { useOperationStore } from '../stores/useOperationStore';
 import { appendTerminalLine } from '../utils/terminal/viewportManager';
 import { serialService } from '../services/tauri';
 import type { SendHistoryEntry, LineEnding } from '../types';
@@ -248,6 +249,7 @@ export function useSerialSend(): SerialSendActions {
   const activePortId = useAppStore((s) => getActivePortId(s));
   const [sendHistory, setSendHistory] = useState<SendHistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
+  const draftRef = useRef<SendHistoryEntry | null>(null);
   const mountedRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
@@ -258,13 +260,20 @@ export function useSerialSend(): SerialSendActions {
   useEffect(() => {
     setSendHistory(activePortId ? (sendHistoryMap.get(activePortId) ?? []) : []);
     historyIndexRef.current = -1;
+    draftRef.current = null;
   }, [activePortId]);
 
   const sendData = useCallback(
     async (portId: string, data: string, isHex: boolean, lineEnding: string, silent = false) => {
       const bytesWritten = await sendToPort(portId, data, isHex, lineEnding, silent);
       // Mirror the just-updated in-memory history for Up/Down recall.
-      if (mountedRef.current && getActivePortId(useAppStore.getState()) === portId) setSendHistory(sendHistoryMap.get(portId) ?? []);
+      if (mountedRef.current && getActivePortId(useAppStore.getState()) === portId) {
+        setSendHistory(sendHistoryMap.get(portId) ?? []);
+        if (bytesWritten > 0) {
+          historyIndexRef.current = -1;
+          draftRef.current = null;
+        }
+      }
       return bytesWritten;
     },
     []
@@ -274,6 +283,12 @@ export function useSerialSend(): SerialSendActions {
     if (sendHistory.length === 0) return null;
     let idx = historyIndexRef.current;
     if (idx === -1 || idx >= sendHistory.length) {
+      const op = useOperationStore.getState();
+      draftRef.current = {
+        content: op.sendInput,
+        format: op.sendIsHex ? 'hex' : 'string',
+        lineEnding: op.sendAppendLineEnding,
+      };
       idx = sendHistory.length - 1;
     } else if (idx > 0) {
       idx -= 1;
@@ -291,7 +306,15 @@ export function useSerialSend(): SerialSendActions {
       return sendHistory[idx] ?? null;
     }
     historyIndexRef.current = -1;
-    return null;
+    const restored = draftRef.current;
+    draftRef.current = null;
+    if (restored) return restored;
+    const op = useOperationStore.getState();
+    return {
+      content: '',
+      format: op.sendIsHex ? 'hex' : 'string',
+      lineEnding: op.sendAppendLineEnding,
+    };
   }, [sendHistory]);
 
   return { sendData, sendHistory, historyUp, historyDown };

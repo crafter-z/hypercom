@@ -10,6 +10,7 @@ beforeEach(() => {
     handshake: 'None',
     dtr: false,
     rts: false,
+    portControlLines: {},
     ignoreEmptyChars: false,
     sendIsHex: false,
     sendAppendLineEnding: '\\r\\n',
@@ -172,5 +173,17 @@ describe('setCyclicLoop', () => {
   it('is a no-op for empty port id', () => {
     useOperationStore.getState().setCyclicLoop('', true);
     expect(useOperationStore.getState().cyclicLoops).toEqual({});
+  });
+});
+
+describe('setPortControlLines', () => {
+  it('stores per-port DTR/RTS independently and ignores empty port id', () => {
+    useOperationStore.getState().setPortControlLines('COM1', { dtr: true, rts: false });
+    useOperationStore.getState().setPortControlLines('COM2', { dtr: false, rts: true });
+    useOperationStore.getState().setPortControlLines('', { dtr: true, rts: true });
+    expect(useOperationStore.getState().portControlLines).toEqual({
+      COM1: { dtr: true, rts: false },
+      COM2: { dtr: false, rts: true },
+    });
   });
 });
