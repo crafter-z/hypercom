@@ -17,7 +17,7 @@ import { registerEditorParticipant, requestEditorLeave } from '../../utils/edito
 import { flushFocusedEditor } from '../../utils/flushFocusedEditor';
 import type { AppConfig } from '../../types';
 import {
-  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, X, Maximize2, Minimize2, Search, Check,
+  Settings, FileText, HardDrive, Monitor, Palette, Send, Code2, Wrench, Zap, Plug, Radio, X, Maximize2, Minimize2, Search, Check,
 } from 'lucide-react';
 import GeneralSettings from './pages/GeneralSettings';
 import LogSettings from './pages/LogSettings';
@@ -29,6 +29,7 @@ import ProtocolSettings from './pages/ProtocolSettings';
 import ToolSettings from './pages/ToolSettings';
 import TriggerSettings from './pages/TriggerSettings';
 import PluginSettings from './pages/PluginSettings';
+import CollaborationSettings from './pages/CollaborationSettings';
 import Modal from '../shared/Modal';
 import HelpContextButton from '../Help/HelpContextButton';
 
@@ -42,7 +43,7 @@ interface NavItem {
   icon: React.ReactNode;
 }
 
-type NavGroupId = 'generalDisplay' | 'loggingBackup' | 'rulesAutomation' | 'plugins';
+type NavGroupId = 'generalDisplay' | 'loggingBackup' | 'rulesAutomation' | 'plugins' | 'collaboration';
 
 interface NavGroup {
   id: NavGroupId;
@@ -54,6 +55,7 @@ const navGroups: NavGroup[] = [
   { id: 'loggingBackup', labelKey: 'configModal.group.loggingBackup' },
   { id: 'rulesAutomation', labelKey: 'configModal.group.rulesAutomation' },
   { id: 'plugins', labelKey: 'configModal.group.plugins' },
+  { id: 'collaboration', labelKey: 'configModal.group.collaboration' },
 ];
 
 const navItems: NavItem[] = [
@@ -67,6 +69,7 @@ const navItems: NavItem[] = [
   { id: 'triggers', labelKey: 'config.triggerSettings', keywordsKey: 'configModal.navKeywords.triggers', groupId: 'rulesAutomation', icon: <Zap size={16} /> },
   { id: 'tools', labelKey: 'configModal.nav.tools', keywordsKey: 'configModal.navKeywords.tools', groupId: 'rulesAutomation', icon: <Wrench size={16} /> },
   { id: 'plugins', labelKey: 'configModal.nav.plugins', keywordsKey: 'configModal.navKeywords.plugins', groupId: 'plugins', icon: <Plug size={16} /> },
+  { id: 'collaboration', labelKey: 'configModal.nav.collaboration', keywordsKey: 'configModal.navKeywords.collaboration', groupId: 'collaboration', icon: <Radio size={16} /> },
 ];
 
 const ENTITY_TO_TAB: Record<EntityKey, string> = {
@@ -130,6 +133,7 @@ const CONFIG_HELP_ARTICLES: Record<string, string> = {
   tools: 'tools',
   triggers: 'rules',
   plugins: 'plugins',
+  collaboration: 'settings',
 };
 const CONFIG_TITLE_ID = 'config-modal-title';
 
@@ -389,6 +393,7 @@ const ConfigModal: React.FC = () => {
       case 'tools': return <ToolSettings />;
       case 'triggers': return <TriggerSettings />;
       case 'plugins': return <PluginSettings />;
+      case 'collaboration': return <CollaborationSettings />;
       default: return <GeneralSettings />;
     }
   };
