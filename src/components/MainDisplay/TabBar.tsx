@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { TabItem, LeafPane, SerialPort } from '../../types';
 import { useContextMenu } from '../shared/ContextMenu';
 import type { ContextMenuEntry } from '../shared/ContextMenu';
-import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare, PanelTopClose } from 'lucide-react';
+import { Pin, X, AlertTriangle, Columns2, Rows2, ExternalLink, PlugZap, Unplug, Wrench, TerminalSquare, PanelTopClose, Globe, Lock, RotateCcw } from 'lucide-react';
 import PluginTabLauncher from './PluginTabLauncher';
 import { TimelineBadge, openTimelinePanel } from './TimelineControls';
 import {
@@ -15,6 +15,9 @@ import { CSS } from '@dnd-kit/utilities';
 import { useAppStore, getTabPortId, getClosingTabIds } from '../../stores/useAppStore';
 import { collectLeaves } from '../../utils/paneTree';
 import { isPortLost } from '../../hooks';
+import { getPortCapabilities, isRemotePort, isRemotePortId, parseRemotePortId } from '../../utils/portCapabilities';
+import { controlService } from '../../services/tauri';
+import { notifyError, notifySuccess } from '../../stores/useToastStore';
 
 interface TabBarProps {
   tabs: TabItem[];
@@ -49,6 +52,9 @@ interface TabItemProps {
   isActive: boolean;
   portStatus: SerialPort['status'] | null;
   portWarningTitle?: string;
+  isRemote?: boolean;
+  titleTooltip?: string;
+  loanTitle?: string;
   closeLabel: string;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
@@ -60,7 +66,16 @@ const tabItemClassName = (tab: TabItem, isActive: boolean): string =>
 
 /** Presentational tab innards shared by the sortable and static shells —
  * the single source of truth for what a tab looks like. */
-const TabItemContent: React.FC<TabItemProps> = ({ tab, portStatus, portWarningTitle, closeLabel, onTabClose }) => (
+const TabItemContent: React.FC<TabItemProps> = ({
+  tab,
+  portStatus,
+  portWarningTitle,
+  isRemote,
+  titleTooltip,
+  loanTitle,
+  closeLabel,
+  onTabClose,
+}) => (
   <>
     {portStatus !== null && <span className={`tab-status-dot status-${portStatus}`} />}
     {portWarningTitle && (
@@ -68,7 +83,13 @@ const TabItemContent: React.FC<TabItemProps> = ({ tab, portStatus, portWarningTi
         <AlertTriangle size={12} aria-hidden="true" />
       </span>
     )}
-    <span className="tab-title" title={tab.title}>{tab.title}</span>
+    {isRemote && <Globe size={11} className="tab-remote-icon" aria-hidden="true" />}
+    <span className="tab-title" title={titleTooltip ?? tab.title}>{tab.title}</span>
+    {loanTitle && (
+      <span className="tab-loan-icon" title={loanTitle}>
+        <Lock size={11} aria-hidden="true" />
+      </span>
+    )}
     <TimelineBadge tabId={tab.id} />
     {tab.isPinned && <Pin size={10} className="tab-pin-icon" />}
     {!tab.isPinned && (
@@ -195,7 +216,13 @@ const TabBar: React.FC<TabBarProps> = ({
   // for unexpectedly lost ports or ports in error state — NOT normally disconnected ports.
   const tabPortMeta = useMemo(() => {
     const portMap = new Map(ports.map(p => [p.id, p]));
-    const map = new Map<string, { status: SerialPort['status'] | null; warningTitle?: string }>();
+    const map = new Map<string, {
+      status: SerialPort['status'] | null;
+      warningTitle?: string;
+      isRemote?: boolean;
+      titleTooltip?: string;
+      loanTitle?: string;
+    }>();
     for (const tab of tabs) {
       const portId = getTabPortId(tab);
       if (!portId) {
@@ -210,7 +237,22 @@ const TabBar: React.FC<TabBarProps> = ({
       } else if (status === 'error') {
         warningTitle = t('tabBar.portErrorWarning');
       }
-      map.set(tab.id, { status, warningTitle });
+      const isRemoteSerial = tab.kind === 'serial' && isRemotePortId(tab.portId);
+      let titleTooltip: string | undefined;
+      if (isRemoteSerial) {
+        const parsed = parseRemotePortId(tab.portId);
+        const hostLabel = (port?.hostLabel || port?.hostId || parsed?.hostId || '').trim();
+        const remotePortId = (port?.remotePortId || parsed?.remotePortId || port?.name || tab.portId).trim();
+        const roleLabel = port?.remoteRole ? t(`collaboration.role.${port.remoteRole}`) : undefined;
+        const parts = [hostLabel, remotePortId, roleLabel].filter((v): v is string => !!v);
+        if (parts.length > 0) {
+          titleTooltip = parts.join(' · ');
+        }
+      }
+      const loanTitle = tab.kind === 'serial' && port?.loan
+        ? (port.loan.reason ? `${port.loan.holder} · ${port.loan.reason}` : port.loan.holder)
+        : undefined;
+      map.set(tab.id, { status, warningTitle, isRemote: isRemoteSerial, titleTooltip, loanTitle });
     }
     return map;
   }, [ports, tabs, t]);
@@ -257,9 +299,26 @@ const TabBar: React.FC<TabBarProps> = ({
     onTabClose(tabId);
   }, [tabs, onTabClose]);
 
+  const handleReclaimLoan = useCallback(async (portId: string) => {
+    try {
+      const recovery = await controlService.reclaimPortLoan(portId);
+      if (recovery.error) {
+        notifyError(recovery.error);
+      } else {
+        notifySuccess('collaboration.loan.reclaimed');
+      }
+    } catch (err) {
+      notifyError(err);
+    }
+  }, []);
+
   const getContextMenuItems = useCallback((tabId: string): ContextMenuEntry[] => {
     const tab = tabs.find(t => t.id === tabId);
     const portMap = new Map(ports.map(p => [p.id, p]));
+    const targetPortId = getTabPortId(tab);
+    const targetPort = targetPortId ? portMap.get(targetPortId) : undefined;
+    const targetCaps = getPortCapabilities(targetPort);
+
     const items: ContextMenuEntry[] = [
       { label: tab?.isPinned ? t('tabBar.contextMenu.unpin') : t('tabBar.contextMenu.pin'), icon: <Pin size={14} />, onClick: () => onTabPin(tabId) },
     ];
@@ -275,14 +334,18 @@ const TabBar: React.FC<TabBarProps> = ({
       });
     }
 
-    // 批量连接/断开所有标签页对应的串口（issue #2-1）。
+    // 批量连接/断开所有标签页对应的串口（issue #2-1），仅纳入有控制权限的端口。
     if (onConnectAllTabs || onDisconnectAllTabs) {
       const hasConnectable = allTabs.some(tb => {
         const portId = getTabPortId(tb);
         const port = portId ? portMap.get(portId) : undefined;
-        return !!port && port.status !== 'connected' && port.status !== 'connecting';
+        return !!port && getPortCapabilities(port).canControl && !port.loan && port.status !== 'connected' && port.status !== 'connecting';
       });
-      const hasDisconnectable = allTabs.some(tb => { const id = getTabPortId(tb); return id !== null && portMap.get(id)?.status === 'connected'; });
+      const hasDisconnectable = allTabs.some(tb => {
+        const id = getTabPortId(tb);
+        const port = id ? portMap.get(id) : undefined;
+        return !!port && getPortCapabilities(port).canControl && port.status === 'connected';
+      });
       items.push(
         { type: 'separator' },
         { label: t('tabBar.contextMenu.openAll'), icon: <PlugZap size={14} />, onClick: () => onConnectAllTabs?.(), disabled: !hasConnectable },
@@ -290,17 +353,30 @@ const TabBar: React.FC<TabBarProps> = ({
       );
     }
 
+    // 借用收回：存在外部借用租约时允许从标签右键直接收回。
+    if (tab?.kind === 'serial' && targetPort?.loan) {
+      items.push(
+        { type: 'separator' },
+        {
+          label: t('sidebar.port.contextMenu.reclaimLoan'),
+          icon: <RotateCcw size={14} />,
+          danger: true,
+          disabled: targetCaps.isRemote && !targetCaps.canLoan,
+          onClick: () => { void handleReclaimLoan(tab.portId); },
+        },
+      );
+    }
+
     // 外部工具：与侧边栏端口右键菜单同文案同行为（issue #2-2）。
-    // 执行入口始终可见；未配置时点击跳转配置页。运行中显示终止。
-    const targetPortId = getTabPortId(tab);
-    if (targetPortId && (onRunTool || onConfigTool)) {
-      const toolRunning = portMap.get(targetPortId)?.toolRunning === true;
+    // 远程端口不支持本地外部工具，隐藏对应入口。
+    if (targetPortId && !isRemotePortId(targetPortId) && !isRemotePort(targetPort) && (onRunTool || onConfigTool)) {
+      const toolRunning = targetPort?.toolRunning === true;
       items.push({ type: 'separator' });
       if (onRunTool) {
         items.push(
           toolRunning
             ? { label: t('sidebar.port.contextMenu.killTool'), icon: <TerminalSquare size={14} />, onClick: () => onKillTool?.(targetPortId), danger: true }
-            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(targetPortId), disabled: portMap.get(targetPortId)?.pluginToolRunning },
+            : { label: t('sidebar.port.contextMenu.runTool'), icon: <Wrench size={14} />, onClick: () => onRunTool(targetPortId), disabled: targetPort?.pluginToolRunning },
         );
       }
       if (onConfigTool) {
@@ -340,7 +416,7 @@ const TabBar: React.FC<TabBarProps> = ({
     }
 
     return items;
-  }, [tabs, allTabs, ports, onTabPin, requestCloseTab, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, onConnectAllTabs, onDisconnectAllTabs, onRunTool, onKillTool, onConfigTool, t]);
+  }, [tabs, allTabs, ports, onTabPin, requestCloseTab, onCloseToRight, onCloseToLeft, onCloseOthers, onPopOut, moveToPaneTargets, onMoveToPane, onConnectAllTabs, onDisconnectAllTabs, onRunTool, onKillTool, onConfigTool, handleReclaimLoan, t]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     showContextMenu(e, getContextMenuItems(tabId));
@@ -440,6 +516,9 @@ const TabBar: React.FC<TabBarProps> = ({
       isActive: tab.id === activeTabId,
       portStatus: meta?.status ?? null,
       portWarningTitle: meta?.warningTitle,
+      isRemote: meta?.isRemote,
+      titleTooltip: meta?.titleTooltip,
+      loanTitle: meta?.loanTitle,
       closeLabel,
       onTabClick,
       onTabClose: requestCloseTab,

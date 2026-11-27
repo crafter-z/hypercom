@@ -8,6 +8,7 @@ import { storageService } from '../../services/tauri';
 import { notifySuccess, notifyError, notifyInfo } from '../../stores/useToastStore';
 import { getRxPipeline } from '../../utils/rxPipeline';
 import { ttyService } from '../../utils/ttyService';
+import { isRemotePortId } from '../../utils/portCapabilities';
 import ConfirmDialog from '../shared/ConfirmDialog';
 import { SegmentedControl } from '../shared/SegmentedControl';
 import { Save, Trash2 } from 'lucide-react';
@@ -39,7 +40,24 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
     const portId = getActivePortId(s);
     return s.ports.find((port) => port.id === portId)?.type === 'real';
   });
-  const canConfigureSerial = isPortActive && activePortIsReal;
+  const activePortType = useAppStore((s) => {
+    const portId = getActivePortId(s);
+    return s.ports.find((port) => port.id === portId)?.type;
+  });
+  const activePortRemoteRole = useAppStore((s) => {
+    const portId = getActivePortId(s);
+    return s.ports.find((port) => port.id === portId)?.remoteRole;
+  });
+  const activePortIsLoaned = useAppStore((s) => {
+    const portId = getActivePortId(s);
+    const port = s.ports.find((item) => item.id === portId);
+    return Boolean(port?.loan || port?.pluginToolRunning || port?.toolRunning);
+  });
+  const activePortId = useAppStore((s) => getActivePortId(s));
+  const activePortIsRemote = activePortType === 'remote' || isRemotePortId(activePortId);
+  const canRemoteControl = !activePortIsRemote || activePortRemoteRole === 'control';
+  const canSwitchMode = isPortActive && !activePortIsLoaned && (!activePortIsRemote || activePortRemoteRole === 'write' || activePortRemoteRole === 'control');
+  const canConfigureSerial = isPortActive && !activePortIsLoaned && canRemoteControl && (activePortIsReal || activePortIsRemote);
   const setPortMode = useAppStore(s => s.setPortMode);
   const portMode = useAppStore((s) => {
     const portId = getActivePortId(s);
@@ -241,7 +259,7 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
           <SegmentedControl<PortMode>
             aria-label={t('params.mode')}
             value={portMode}
-            disabled={!isPortActive}
+            disabled={!canSwitchMode}
             onChange={handleModeChange}
             options={[
               { value: 'trx', label: t('params.mode.trx') },
@@ -265,9 +283,13 @@ const ParamsSection: React.FC<ParamsSectionProps> = ({ isPortActive }) => {
             </button>
           )}
         </div>
-        {isPortActive && !activePortIsReal && (
+        {isPortActive && (activePortIsLoaned || (activePortIsRemote && !canRemoteControl) || (!activePortIsReal && !activePortIsRemote)) && (
           <div className="op-params-virtual-hint">
-            {t('paramsSection.virtualPortHint')}
+            {activePortIsLoaned
+              ? t('operationPanel.loanedHint')
+              : activePortIsRemote && !canRemoteControl
+                ? t('operationPanel.remoteControlHint')
+                : t('paramsSection.virtualPortHint')}
           </div>
         )}
         <div className={`op-param-item${isCustomBaud ? ' op-param-item-wide' : ''}`}>

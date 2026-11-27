@@ -29,6 +29,10 @@ export interface SendSectionProps {
   activePortId: string | null;
   isPortActive: boolean;
   isConnected: boolean;
+  canWrite?: boolean;
+  writeDisabledReason?: string;
+  canLocalFileSend?: boolean;
+  fileSendDisabledReason?: string;
   sendData: (portId: string, data: string, isHex: boolean, lineEnding: string) => Promise<number>;
   historyUp: () => SendHistoryEntry | null;
   historyDown: () => SendHistoryEntry | null;
@@ -38,6 +42,10 @@ const SendSection: React.FC<SendSectionProps> = ({
   activePortId,
   isPortActive,
   isConnected,
+  canWrite = true,
+  writeDisabledReason,
+  canLocalFileSend = true,
+  fileSendDisabledReason,
   sendData,
   historyUp,
   historyDown,
@@ -98,9 +106,11 @@ const SendSection: React.FC<SendSectionProps> = ({
     toggleConfigModal(true);
   };
 
+  const effectiveWriteAllowed = isPortActive && canWrite;
+
   const handleSend = async () => {
     const portId = getActivePortId(useAppStore.getState());
-    if (!portId || !sendInput.trim() || inputErrorKey !== null) return;
+    if (!portId || !canWrite || !sendInput.trim() || inputErrorKey !== null) return;
     // Enter sends even when the button is disabled — keep the flow lock explicit.
     if (isFlowRunning(portId)) return;
     const sentInput = sendInput;
@@ -172,9 +182,9 @@ const SendSection: React.FC<SendSectionProps> = ({
           </select>
           <button
             className={`btn btn-icon btn-sm op-loop-toggle${isLoopSending ? ' is-running' : ''}`}
-            disabled={!isLoopSending && (!isPortActive || !activeSendCommandSetId || !isConnected || flowBusy)}
+            disabled={!isLoopSending && (!effectiveWriteAllowed || !activeSendCommandSetId || !isConnected || flowBusy)}
             onClick={handleToggleLoop}
-            title={isLoopSending ? t('rulesSection.stopLoop') : t('rulesSection.startLoop')}
+            title={isLoopSending ? t('rulesSection.stopLoop') : (writeDisabledReason ?? t('rulesSection.startLoop'))}
           >
             {isLoopSending ? <Square size={13} /> : <Play size={13} />}
           </button>
@@ -264,27 +274,33 @@ const SendSection: React.FC<SendSectionProps> = ({
 
         <QuickSendStrip
           commands={activeCommands}
-          isPortActive={isPortActive}
+          isPortActive={effectiveWriteAllowed}
           isBusy={flowBusy}
           onSendCommand={handleQuickCommand}
           onConfigure={() => openConfigToTab('commands')}
         />
       </div>
 
+      {isPortActive && !canWrite && writeDisabledReason && (
+        <div className="op-capability-hint" role="status">{writeDisabledReason}</div>
+      )}
+
       <div className="op-send-row">
         <div className="op-send-editor">
           <div className="op-send-input-wrap">
             <textarea
               ref={textareaRef}
-              className={`input op-send-input${inputErrorKey !== null ? ' is-error' : ''}${isPortActive && sendInput.length > 0 ? ' has-clear' : ''}`}
+              className={`input op-send-input${inputErrorKey !== null ? ' is-error' : ''}${effectiveWriteAllowed && sendInput.length > 0 ? ' has-clear' : ''}`}
               placeholder={
                 !isPortActive
                   ? t('sendSection.input.placeholder.noPort')
-                  : sendIsHex
-                  ? t('sendSection.input.placeholder.hex')
-                  : t('sendSection.input.placeholder.active')
+                  : !canWrite && writeDisabledReason
+                    ? writeDisabledReason
+                    : sendIsHex
+                      ? t('sendSection.input.placeholder.hex')
+                      : t('sendSection.input.placeholder.active')
               }
-              disabled={!isPortActive}
+              disabled={!effectiveWriteAllowed}
               aria-invalid={inputErrorKey !== null}
               value={sendInput}
               onChange={(e) => setOpState({ sendInput: toEditableValue(e.target.value) })}
@@ -372,8 +388,8 @@ const SendSection: React.FC<SendSectionProps> = ({
           <button
             type="button"
             className="btn btn-primary op-send-btn"
-            disabled={!isPortActive || inputErrorKey !== null || flowBusy}
-            title={sendOnEnter ? t('sendSection.sendButtonTitleEnter') : t('sendSection.sendButtonTitleCtrlEnter')}
+            disabled={!effectiveWriteAllowed || inputErrorKey !== null || flowBusy}
+            title={writeDisabledReason ?? (sendOnEnter ? t('sendSection.sendButtonTitleEnter') : t('sendSection.sendButtonTitleCtrlEnter'))}
             onClick={handleSend}
           >
             <Send size={14} />
@@ -396,7 +412,8 @@ const SendSection: React.FC<SendSectionProps> = ({
           </div>
           <SendFileButton
             progress={progress}
-            isConnected={isConnected && !flowBusy}
+            isConnected={isConnected && !flowBusy && canLocalFileSend}
+            disabledTitle={fileSendDisabledReason}
             onStart={() => void startFileSend()}
             onCancel={cancelFileSend}
           />

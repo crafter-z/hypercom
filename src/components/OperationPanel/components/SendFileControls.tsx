@@ -18,11 +18,12 @@ export function formatFileBytes(bytes: number): string {
 export interface SendFileButtonProps {
   progress: FileSendProgress | null;
   isConnected: boolean;
+  disabledTitle?: string;
   onStart: () => void;
   onCancel: () => void;
 }
 
-export function SendFileButton({ progress, isConnected, onStart, onCancel }: SendFileButtonProps) {
+export function SendFileButton({ progress, isConnected, disabledTitle, onStart, onCancel }: SendFileButtonProps) {
   const { t } = useTranslation();
 
   if (progress !== null) {
@@ -45,7 +46,7 @@ export function SendFileButton({ progress, isConnected, onStart, onCancel }: Sen
     <button
       type="button"
       className="btn btn-sm"
-      title={t('sendSection.file.button')}
+      title={disabledTitle ?? t('sendSection.file.button')}
       onClick={onStart}
       disabled={!isConnected}
     >

@@ -17,6 +17,7 @@ import { useCyclicSend } from './hooks/useCyclicSend';
 import { useCyclicStatus } from './hooks/cyclicRuntime';
 import { getPluginViewState, isRawSerialDisplay, subscribePluginViewState } from '../../utils/pluginViewRuntime';
 import { isFlowRunning, useFlowStatus } from '../../utils/flowRuntime';
+import { getPortCapabilities, isRemotePortId } from '../../utils/portCapabilities';
 import type { DataBits, Handshake, Parity, StopBits } from '../../types';
 
 interface FrameParams {
@@ -138,11 +139,43 @@ const OperationPanel: React.FC = () => {
     const portId = getActivePortId(state);
     return state.ports.find((port) => port.id === portId)?.type === 'real';
   });
+  const activePortType = useAppStore((state) => {
+    const portId = getActivePortId(state);
+    return state.ports.find((port) => port.id === portId)?.type;
+  });
+  const activePortRemoteRole = useAppStore((state) => {
+    const portId = getActivePortId(state);
+    return state.ports.find((port) => port.id === portId)?.remoteRole;
+  });
+  const activePortIsLoaned = useAppStore((state) => {
+    const portId = getActivePortId(state);
+    const port = state.ports.find((item) => item.id === portId);
+    return Boolean(port?.loan || port?.pluginToolRunning || port?.toolRunning);
+  });
+  const isPortActive = !!activePortId;
+  const activePortIsRemote = activePortType === 'remote' || isRemotePortId(activePortId);
+  const canWrite = isPortActive && !activePortIsLoaned && (!activePortIsRemote || activePortRemoteRole === 'write' || activePortRemoteRole === 'control');
+  const canControl = isPortActive && !activePortIsLoaned && (!activePortIsRemote || activePortRemoteRole === 'control');
+  const canLocalFileSend = isPortActive && !activePortIsLoaned && !activePortIsRemote;
+  const writeDisabledReason = activePortIsLoaned
+    ? t('operationPanel.loanedHint')
+    : activePortIsRemote && !canWrite
+      ? t('operationPanel.remoteObserveHint')
+      : undefined;
+  const fileSendDisabledReason = activePortIsLoaned
+    ? t('operationPanel.loanedHint')
+    : activePortIsRemote
+      ? t('operationPanel.remoteFileSendDisabled')
+      : undefined;
+  const controlDisabledReason = activePortIsLoaned
+    ? t('operationPanel.loanedHint')
+    : activePortIsRemote && !canControl
+      ? t('operationPanel.remoteControlHint')
+      : undefined;
   const cyclicLoops = useOperationStore((s) => s.cyclicLoops);
   const isConnected = activePortStatus === 'connected';
   const isConnecting = activePortStatus === 'connecting';
   const isPortError = activePortStatus === 'error';
-  const isPortActive = !!activePortId;
 
   // 每端口独立循环发送引擎（issue #12）：目标端口由 hook 内部绑定——在哪个
   // 端口上启动就持续发给它，切换标签/窗口聚焦不影响已在运行的循环；运行标志
@@ -244,10 +277,10 @@ const OperationPanel: React.FC = () => {
     // mirroring controls. Adopt that confirmation instead of sending the same
     // params again 300 ms later (which could overwrite a subsequent step).
     const confirmed = useAppStore.getState().ports.find(port => port.id === activePortId);
-    // SIM/GIT:BASH ports do not expose real serial framing or modem-line
-    // controls. Keep their operation state for a future real-port selection,
-    // but never dispatch unsupported settings to the backend.
-    if (confirmed?.type !== 'real') {
+    const caps = getPortCapabilities(confirmed);
+    // SIM/GIT:BASH ports and remote observe/write or loaned ports must not
+    // auto-dispatch serial framing or modem-line controls to the backend.
+    if (!confirmed || (confirmed.type !== 'real' && !caps.isRemote) || !caps.canControl || caps.isLoaned) {
       pendingFrameSyncRef.current = null;
       pendingControlSyncRef.current = null;
       return;
@@ -399,8 +432,8 @@ const OperationPanel: React.FC = () => {
     : isPortError
     ? t('sendSection.connectBtn.retry')
     : t('sendSection.connectBtn.open');
-  const connectButtonDisabled = !isPortActive || isConnecting;
-  const showAccent = isPortActive && !isConnected && !isConnecting;
+  const connectButtonDisabled = !isPortActive || isConnecting || activePortIsLoaned || (activePortIsRemote && !canControl);
+  const showAccent = isPortActive && !isConnected && !isConnecting && !connectButtonDisabled;
 
   const handleToggleConnection = async () => {
     const portId = getActivePortId(useAppStore.getState());
@@ -536,6 +569,7 @@ const OperationPanel: React.FC = () => {
                 className={`btn btn-sm op-connect-btn${showAccent ? ' op-connect-accent' : ''}`}
                 onClick={handleToggleConnection}
                 disabled={connectButtonDisabled}
+                title={controlDisabledReason}
               >
                 <Cable size={13} /> {connectButtonLabel}
               </button>
@@ -570,6 +604,10 @@ const OperationPanel: React.FC = () => {
               activePortId={activePortId}
               isPortActive={isPortActive}
               isConnected={isConnected}
+              canWrite={canWrite}
+              writeDisabledReason={writeDisabledReason}
+              canLocalFileSend={canLocalFileSend}
+              fileSendDisabledReason={fileSendDisabledReason}
               sendData={sendData}
               historyUp={historyUp}
               historyDown={historyDown}

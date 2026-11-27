@@ -153,6 +153,53 @@
   flex-shrink: 0;
 }
 
+.terminal-remote-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px var(--space-2);
+  background: color-mix(in srgb, var(--accent-color) 6%, var(--bg-tertiary));
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+.terminal-remote-strip-text {
+  font-family: var(--font-terminal);
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-remote-role-pill {
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.terminal-remote-role-pill.role-control {
+  color: var(--accent-color);
+  border-color: color-mix(in srgb, var(--accent-color) 45%, var(--border-color));
+}
+
+.terminal-remote-role-pill.role-write {
+  color: var(--text-success);
+  border-color: color-mix(in srgb, var(--text-success) 45%, var(--border-color));
+}
+
+.terminal-status-banner.terminal-loan-banner {
+  background: color-mix(in srgb, #f5b942 12%, var(--bg-secondary));
+  border-bottom-color: color-mix(in srgb, #f5b942 40%, var(--border-subtle));
+  color: var(--text-primary);
+}
+
 .terminal-jump-btn:focus-visible {
   outline: 2px solid var(--accent-color);
   outline-offset: 1px;

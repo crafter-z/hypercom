@@ -117,6 +117,19 @@
   flex-shrink: 0;
 }
 
+.tab-remote-icon {
+  color: var(--accent-color);
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
+.tab-loan-icon {
+  display: inline-flex;
+  align-items: center;
+  color: #f5b942;
+  flex-shrink: 0;
+}
+
 .tab-title {
   flex: 1;
   font-size: var(--text-sm);

@@ -136,6 +136,16 @@
   padding: 1px 6px;
 }
 
+.op-capability-hint {
+  padding: 4px var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--text-warning) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--text-warning) 8%, var(--bg-tertiary));
+  color: var(--text-warning);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
 .operation-panel-content {
   flex: 1;
   display: flex;

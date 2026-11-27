@@ -22,11 +22,13 @@
  */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpToLine, ArrowDownToLine, Cable } from 'lucide-react';
+import { ArrowUpToLine, ArrowDownToLine, Cable, Globe, Lock, RotateCcw } from 'lucide-react';
 import { useAppStore } from '../../stores/useAppStore';
 import { useRuleStore } from '../../stores/useRuleStore';
 import { useTerminalStore } from '../../stores/useTerminalStore';
 import { useSerialConnection } from '../../hooks';
+import { controlService } from '../../services/tauri';
+import { isRemotePortId } from '../../utils/portCapabilities';
 import '../../styles/terminal-empty.css';
 import { getViewportManager, type TerminalViewportManager } from '../../utils/terminal/viewportManager';
 import type { TerminalState } from '../../types';
@@ -35,7 +37,7 @@ import { CONFIG_BOUNDS } from '../../utils/bounds';
 import { isAtBottom } from '../../utils/followLogic';
 import { isSameRound } from '../../utils/timeFormat';
 import { getAvailablePluginViews, getTabViewPreference, selectSerialPluginView } from '../../utils/pluginViewRuntime';
-import { notifyError } from '../../stores/useToastStore';
+import { notifyError, notifySuccess } from '../../stores/useToastStore';
 import ContextMenu, { type ContextMenuEntry } from '../shared/ContextMenu';
 import PluginViewPicker from '../shared/PluginViewPicker';
 import { buildTerminalContextMenuItems, selectionText } from './terminalContextMenu';
@@ -69,7 +71,14 @@ const SETTLE_MS = 120;
 const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, manager, terminalConfig, onTerminalConfigChange, timelineClockId, timelineEnabled = true, onUserNavigation, hidden }) => {
   const { t } = useTranslation();
   const portStatus = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.status : undefined));
+  const portType = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.type : undefined));
+  const portHostLabel = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.hostLabel : undefined));
+  const portRemoteId = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.remotePortId : undefined));
+  const portRemoteRole = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.remoteRole : undefined));
+  const portRemoteAllowLoan = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.remoteAllowLoan : undefined));
+  const portLoan = useAppStore((s) => (portId ? s.ports.find((port) => port.id === portId)?.loan : undefined));
   const { toggleConnection } = useSerialConnection();
+  const [reclaimingLoan, setReclaimingLoan] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuEntry[] } | null>(null);
   const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null);
@@ -635,8 +644,60 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
     : 0;
   const isDetached = !effectiveScrollLocked && vm.buffer.length > 0;
 
+  const isRemote = portType === 'remote' || isRemotePortId(portId);
+  const canControlPort = !isRemote || portRemoteRole === 'control';
+  const canReclaimLoan = !isRemote || (Boolean(portRemoteAllowLoan) && portRemoteRole === 'control');
+
+  const handleReclaimLoan = useCallback(async () => {
+    if (!portId || reclaimingLoan) return;
+    setReclaimingLoan(true);
+    try {
+      const res = await controlService.reclaimPortLoan(portId);
+      if (res.error) notifyError(res.error);
+      else notifySuccess('collaboration.loan.reclaimed');
+    } catch (err) {
+      notifyError(err);
+    } finally {
+      setReclaimingLoan(false);
+    }
+  }, [portId, reclaimingLoan]);
+
   return (
     <div className="terminal-view-container" style={hidden ? { display: 'none' } : undefined} onKeyDown={handleSearchKeyDown}>
+      {portId && isRemote && (
+        <div className="terminal-remote-strip" role="status">
+          <Globe size={12} aria-hidden="true" />
+          <span className="terminal-remote-strip-text">
+            {portHostLabel ? `${portHostLabel} · ` : ''}{portRemoteId ?? portId}
+          </span>
+          {portRemoteRole && (
+            <span className={`terminal-remote-role-pill role-${portRemoteRole}`}>
+              {t(`collaboration.role.${portRemoteRole}`)}
+            </span>
+          )}
+        </div>
+      )}
+      {portId && portLoan && (
+        <div className="terminal-status-banner terminal-loan-banner" role="status">
+          <Lock size={12} aria-hidden="true" />
+          <span className="terminal-status-banner-text">
+            {t('terminal.loan.banner', { holder: portLoan.holder })}
+            {portLoan.reason ? ` · ${portLoan.reason}` : ''}
+            {' · '}
+            {portLoan.autoReopen ? t('terminal.loan.autoReopen') : t('terminal.loan.manualReopen')}
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm terminal-status-banner-action"
+            disabled={reclaimingLoan || !canReclaimLoan}
+            title={!canReclaimLoan ? t('sidebar.port.remoteControlRequired') : undefined}
+            onClick={() => { void handleReclaimLoan(); }}
+          >
+            <RotateCcw size={11} aria-hidden="true" />
+            {reclaimingLoan ? t('terminal.loan.reclaiming') : t('terminal.loan.reclaim')}
+          </button>
+        </div>
+      )}
       {portId && protocolTemplates.length > 0 && (
         <div className="terminal-protocol-bar">
           <span className="eyebrow">{t('terminalView.protocolLabel')}</span>
@@ -763,7 +824,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ portId, tabId, sourceId, ma
                   ? t('terminalView.connectingHint')
                   : t('terminalView.disconnectedHint')}
               </div>
-              {portStatus !== 'connecting' && (
+              {portStatus !== 'connecting' && !portLoan && canControlPort && (
                 <button
                   type="button"
                   className="btn btn-primary terminal-empty-connect"
