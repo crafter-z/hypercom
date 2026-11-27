@@ -1,0 +1,17 @@
+[package]
+name = "hypercomctl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "hypercomctl"
+path = "src/main.rs"
+
+[dependencies]
+hypercom-protocol = { path = "../hypercom-protocol" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "process", "signal", "time", "sync"] }
+uuid = { version = "1", features = ["v4"] }

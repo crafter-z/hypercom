@@ -14,6 +14,9 @@
     "test:run": "vitest run",
     "test:rust": "node scripts/test-rust.mjs",
     "test:rust:runner": "node --test scripts/test-rust.test.mjs",
+    "build:cli": "cargo build --manifest-path src-tauri/hypercomctl/Cargo.toml --release",
+    "test:cli": "cargo test --manifest-path src-tauri/hypercomctl/Cargo.toml",
+    "test:protocol": "cargo test --manifest-path src-tauri/hypercom-protocol/Cargo.toml",
     "e2e": "playwright test",
     "e2e:ui": "playwright test --ui",
     "tauri": "node scripts/tauri.mjs"
