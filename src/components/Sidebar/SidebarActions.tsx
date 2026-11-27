@@ -31,6 +31,7 @@ export interface SidebarActions {
   toggleGroupExpand: (groupId: string) => void;
   renameGroup: (groupId: string, name: string) => void;
   removeGroup: (groupId: string) => void;
+  reclaimLoan: (portId: string) => Promise<void>;
 }
 
 const SidebarActionsContext = createContext<SidebarActions | null>(null);

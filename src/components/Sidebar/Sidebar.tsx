@@ -1,13 +1,16 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getActivePortId, findSerialTabByPortId, useAppStore } from '../../stores/useAppStore';
+import { useSystemStore } from '../../stores/useSystemStore';
 import { Plus } from 'lucide-react';
 import {
   useSerialPorts, useSerialConnection, useSimulation, usePortToolActions, useGitBashSim,
 } from '../../hooks';
+import { controlService } from '../../services/tauri';
 import { useToolbarPluginButtons, dispatchPluginUiClick } from '../../hooks/usePluginUi';
 import { DEV_FEATURES_ENABLED } from '../../utils/devMode';
 import { runSequential } from '../../utils/sequential';
+import { isRemotePort } from '../../utils/portCapabilities';
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, useDroppable, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import AliasDialog from './AliasDialog';
@@ -16,10 +19,11 @@ import SearchBox from './SearchBox';
 import SidebarToolbar from './SidebarToolbar';
 import SortablePortItem from './SortablePortItem';
 import GroupItem from './GroupItem';
+import RemoteHostsSection from './RemoteHostsSection';
 import { SidebarActionsProvider, type SidebarActions } from './SidebarActions';
 import GroupToolDialog from '../shared/GroupToolDialog';
 import ConfirmDialog from '../shared/ConfirmDialog';
-import { notifyInfo } from '../../stores/useToastStore';
+import { notifyError, notifyInfo, notifySuccess } from '../../stores/useToastStore';
 import { createEmptyGroup, createGroupWithPort } from './groupActions';
 import { usePortDragEnd, UNGROUPED_DROPPABLE_ID } from './hooks/usePortDragEnd';
 import type { SerialPort } from '../../types';
@@ -144,6 +148,26 @@ const Sidebar: React.FC = () => {
     useAppStore.getState().removeGroup(groupId);
   }, []);
 
+  const handleOpenCollaboration = useCallback(() => {
+    const sys = useSystemStore.getState();
+    sys.setConfigActiveTab('collaboration');
+    sys.toggleConfigModal(true);
+  }, []);
+
+  const handleReclaimLoan = useCallback(async (portId: string) => {
+    try {
+      const recovery = await controlService.reclaimPortLoan(portId);
+      if (recovery.error) {
+        notifyError(recovery.error);
+      } else {
+        notifySuccess('collaboration.loan.reclaimed');
+      }
+      void refreshPorts();
+    } catch (err) {
+      notifyError(err);
+    }
+  }, [refreshPorts]);
+
   const actions = useMemo<SidebarActions>(() => ({
     openTab: handleOpenTab,
     toggleConnect: toggleConnection,
@@ -159,10 +183,11 @@ const Sidebar: React.FC = () => {
     toggleGroupExpand: handleToggleExpand,
     renameGroup: handleRenameGroup,
     removeGroup: handleRemoveGroup,
+    reclaimLoan: handleReclaimLoan,
   }), [
     handleOpenTab, toggleConnection, handleSetAlias, handleHidePort, handleShowPort,
     runTool, killTool, configTool, runToolForGroup, handleToggleExpand, handleRenameGroup,
-    handleRemoveGroup, t,
+    handleRemoveGroup, handleReclaimLoan, t,
   ]);
 
   const filteredPorts = useMemo(() => {
@@ -173,17 +198,23 @@ const Sidebar: React.FC = () => {
       || p.alias?.toLowerCase().includes(searchLower)
       || p.manufacturer?.toLowerCase().includes(searchLower)
       || p.product?.toLowerCase().includes(searchLower)
+      || p.remotePortId?.toLowerCase().includes(searchLower)
+      || p.hostLabel?.toLowerCase().includes(searchLower)
     );
   }, [ports, search]);
+
+  const localPorts = useMemo(() => ports.filter(p => !isRemotePort(p)), [ports]);
+  const filteredLocalPorts = useMemo(() => filteredPorts.filter(p => !isRemotePort(p)), [filteredPorts]);
+  const filteredRemotePorts = useMemo(() => filteredPorts.filter(isRemotePort), [filteredPorts]);
 
   // Hidden ports never appear in their normal location (group / ungrouped);
   // they surface ONLY in the dedicated hidden section when toggled visible.
   // (Previously they double-rendered — once here and once in the hidden
   // section — producing duplicate @dnd-kit ids and broken dragging.)
-  const ungroupedPorts = filteredPorts.filter(p => !p.groupId && !p.isHidden);
+  const ungroupedPorts = filteredLocalPorts.filter(p => !p.groupId && !p.isHidden);
   const ungroupedIds = useMemo(() => ungroupedPorts.map(p => p.id), [ungroupedPorts]);
-  const hiddenPorts = useMemo(() => ports.filter(p => p.isHidden), [ports]);
-  const filteredHiddenPorts = useMemo(() => filteredPorts.filter(p => p.isHidden), [filteredPorts]);
+  const hiddenPorts = useMemo(() => localPorts.filter(p => p.isHidden), [localPorts]);
+  const filteredHiddenPorts = useMemo(() => filteredLocalPorts.filter(p => p.isHidden), [filteredLocalPorts]);
   const hiddenIds = useMemo(() => filteredHiddenPorts.map(p => p.id), [filteredHiddenPorts]);
 
   const sensors = useSensors(
@@ -204,10 +235,10 @@ const Sidebar: React.FC = () => {
     });
   }, [refreshPorts]);
   // 批量开/关：串行 + 100ms 间隔，避免并发 open/close 在后端抢串口句柄。
-  // 范围只取当前搜索可见的端口（隐藏端口不在机架里，不能被“全部”误伤）。
+  // 范围只取当前搜索可见的本地端口（隐藏端口与远程端口不在“全部”批操作内）。
   const visiblePorts = useMemo(
-    () => filteredPorts.filter(port => !port.isHidden),
-    [filteredPorts],
+    () => filteredLocalPorts.filter(port => !port.isHidden),
+    [filteredLocalPorts],
   );
 
   const runBulk = useCallback((mode: 'open' | 'close', portIds: string[]) => {
@@ -275,6 +306,7 @@ const Sidebar: React.FC = () => {
           addedOrderActive={portOrder === 'added'}
           pluginButtons={pluginButtons}
           onPluginClick={(reg, buttonId) => dispatchPluginUiClick(reg, buttonId, { portId: getActivePortId(useAppStore.getState()) ?? undefined })}
+          onOpenCollaboration={handleOpenCollaboration}
         />
         <SearchBox value={search} onChange={setSearch} />
 
@@ -292,13 +324,13 @@ const Sidebar: React.FC = () => {
             onDragCancel={handleDragCancel}
           >
             {groups.map(group => {
-              const groupPorts = filteredPorts.filter(p => group.portIds.includes(p.id) && !p.isHidden);
+              const groupPorts = filteredLocalPorts.filter(p => group.portIds.includes(p.id) && !p.isHidden);
               if (groupPorts.length === 0 && search) return null;
               return (
                 <GroupItem
                   key={group.id}
                   group={group}
-                  ports={filteredPorts}
+                  ports={filteredLocalPorts}
                   autoRename={editingGroupId === group.id}
                   onRenameEnd={() => setEditingGroupId((cur) => (cur === group.id ? null : cur))}
                 />
@@ -331,7 +363,15 @@ const Sidebar: React.FC = () => {
             )}
           </DndContext>
 
-          {search && visiblePorts.length === 0 && (!showHidden || hiddenMatchedCount === 0) && (
+          <RemoteHostsSection
+            remotePorts={filteredRemotePorts}
+            activePortId={activePortId}
+            searchActive={Boolean(search.trim())}
+            onOpenManage={handleOpenCollaboration}
+            onRefreshPorts={refreshPorts}
+          />
+
+          {search && visiblePorts.length === 0 && filteredRemotePorts.length === 0 && (!showHidden || hiddenMatchedCount === 0) && (
             <div className="sidebar-no-results" role="status">
               <span>
                 {!showHidden && hiddenMatchedCount > 0

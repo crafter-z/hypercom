@@ -2,7 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useContextMenu, type ContextMenuEntry } from '../shared/ContextMenu';
 import {
-  Eye, EyeOff, ArrowUpDown, RefreshCw, Play, Square, FlaskConical, Ellipsis, Terminal,
+  Eye, EyeOff, ArrowUpDown, RefreshCw, Play, Square, FlaskConical, Ellipsis, Terminal, Globe,
 } from 'lucide-react';
 import type { RegisteredPluginUi } from '../../utils/pluginUiRegistry';
 import { pluginIcon } from './pluginIcon';
@@ -28,6 +28,7 @@ interface SidebarToolbarProps {
   addedOrderActive: boolean;
   pluginButtons: Array<RegisteredPluginUi & { buttonIndex: number }>;
   onPluginClick: (reg: RegisteredPluginUi, buttonId: string) => void;
+  onOpenCollaboration?: () => void;
 }
 
 /**
@@ -42,7 +43,7 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
   showHidden, hiddenCount, onToggleHidden, refreshing, onRefresh,
   simulationMode, simulationAvailable, onToggleSimulation,
   gitBashMode, gitBashAvailable, onToggleGitBash,
-  onOpenAll, onCloseAll, canOpenAll, canCloseAll, onSortByPort, onSortByAdded, addedOrderActive, pluginButtons, onPluginClick,
+  onOpenAll, onCloseAll, canOpenAll, canCloseAll, onSortByPort, onSortByAdded, addedOrderActive, pluginButtons, onPluginClick, onOpenCollaboration,
 }) => {
   const { t } = useTranslation();
   const { show, element } = useContextMenu();
@@ -117,6 +118,17 @@ const SidebarToolbar: React.FC<SidebarToolbarProps> = ({
         <button type="button" className="icon-btn" title={t('sidebar.toolbar.closeAll')} aria-label={t('sidebar.toolbar.closeAll')} onClick={onCloseAll} disabled={!canCloseAll}>
           <Square size={14} />
         </button>
+        {onOpenCollaboration && (
+          <button
+            type="button"
+            className="icon-btn"
+            title={t('sidebar.toolbar.collaboration')}
+            aria-label={t('sidebar.toolbar.collaboration')}
+            onClick={onOpenCollaboration}
+          >
+            <Globe size={14} />
+          </button>
+        )}
         <span className="toolbar-sep" />
         <button
           type="button"

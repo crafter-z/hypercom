@@ -636,3 +636,133 @@
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+
+/* ==================== Loan & Remote Port Badges ==================== */
+.port-item-badge.loaned {
+  color: #f5b942;
+  border-color: color-mix(in srgb, #f5b942 55%, var(--border-color));
+  background: color-mix(in srgb, #f5b942 12%, transparent);
+}
+
+.port-item-badge.remote-role {
+  font-size: 9px;
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+
+.port-item-badge.remote-role.role-control {
+  color: var(--accent-color);
+  border-color: color-mix(in srgb, var(--accent-color) 45%, var(--border-color));
+}
+
+.port-item-badge.remote-role.role-write {
+  color: var(--text-success);
+  border-color: color-mix(in srgb, var(--text-success) 45%, var(--border-color));
+}
+
+.port-item-remote-indent {
+  width: 12px;
+  flex-shrink: 0;
+}
+
+/* ==================== Remote Hosts Section ==================== */
+.sidebar-remote-section {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-1);
+}
+
+.sidebar-remote-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+}
+
+.sidebar-remote-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.remote-host-port-count {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-terminal);
+  font-size: var(--text-2xs);
+  line-height: 1.4;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.remote-host-card {
+  margin-bottom: 2px;
+}
+
+.remote-host-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-1) 2px var(--space-2);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.remote-host-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remote-host-toggle:hover {
+  color: var(--text-active);
+}
+
+.remote-host-globe {
+  flex-shrink: 0;
+  color: var(--accent-color);
+}
+
+.remote-host-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.remote-host-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.remote-host-error {
+  padding: 3px var(--space-3);
+  font-size: var(--text-2xs);
+  color: var(--text-error);
+  background: color-mix(in srgb, var(--text-error) 8%, var(--bg-secondary));
+  border-bottom: 1px solid var(--border-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-host-empty {
+  padding: var(--space-1) var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
