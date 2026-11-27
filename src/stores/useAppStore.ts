@@ -40,6 +40,7 @@ import {
   pruneTree,
 } from '../utils/paneTree';
 import { DEFAULT_TERMINAL_FONT, DEFAULT_UI_FONT } from '../utils/fontDefaults';
+import { formatSerialTabTitle } from '../utils/portCapabilities';
 
 // ==================== 默认配置 ====================
 
@@ -300,18 +301,30 @@ export const useAppStore = create<AppStoreState>()(
 
     // --- Actions ---
 
-    setPorts: (ports) => set((state) => { state.ports = ports; }),
+    setPorts: (ports) => set((state) => {
+      state.ports = ports;
+      if (state.tabs.length > 0 && ports.length > 0) {
+        const byId = new Map(ports.map((p) => [p.id, p]));
+        for (const tab of state.tabs) {
+          if (tab.kind !== 'serial') continue;
+          const port = byId.get(tab.portId);
+          if (!port) continue;
+          const nextTitle = formatSerialTabTitle(port, tab.portId);
+          if (tab.title !== nextTitle) tab.title = nextTitle;
+        }
+      }
+    }),
     setPortOrder: (order) => set((state) => { state.portOrder = order; }),
 
     updatePort: (portId, patch) => set((state) => {
       const port = state.ports.find(p => p.id === portId);
       if (port) {
         Object.assign(port, patch);
-        // Update tab title when alias changes
-        if ('alias' in patch || 'name' in patch) {
+        // Update tab title when alias, name, or remote host metadata changes
+        if ('alias' in patch || 'name' in patch || 'hostLabel' in patch || 'hostId' in patch || 'remotePortId' in patch) {
           const tab = findSerialTabByPortId(state, portId);
           if (tab) {
-            tab.title = `${port.id} ${port.alias || ''}`.trim();
+            tab.title = formatSerialTabTitle(port, portId);
           }
         }
       }
@@ -374,7 +387,7 @@ export const useAppStore = create<AppStoreState>()(
         tabId = crypto.randomUUID();
         state.tabs.push({
           kind: 'serial', id: tabId, portId,
-          title: port ? `${port.id} ${port.alias || ''}`.trim() : portId,
+          title: formatSerialTabTitle(port, portId),
           isPinned: false, splitPaneId: state.focusedPaneId,
         });
         findLeafById(state.paneTree, state.focusedPaneId)?.tabIds.push(tabId);

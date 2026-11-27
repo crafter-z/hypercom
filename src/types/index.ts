@@ -18,11 +18,25 @@ export type PortMode = 'trx' | 'tty';
 export type ReleaseChannel = 'stable' | 'preview';
 
 /** 串口类型 */
-export type PortType = 'real' | 'virtual' | 'sim';
+export type PortType = 'real' | 'virtual' | 'sim' | 'remote';
+
+/** 远程访问权限角色 */
+export type RemoteRole = 'observe' | 'write' | 'control';
+
+/** 串口借用租约信息（CLI / Agent / 远端协作） */
+export interface PortLoanInfo {
+  leaseId: string;
+  holder: string;
+  reason?: string;
+  acquiredAtMs: number;
+  expiresAtMs?: number;
+  autoReopen: boolean;
+  connectionBound: boolean;
+}
 
 /** 串口数据结构 */
 export interface SerialPort {
-  id: string;              // 唯一标识，如 "COM3"
+  id: string;              // 唯一标识，如 "COM3" 或 "remote::<profileId>::<portId>"
   name: string;            // 显示名称
   alias?: string;          // 用户备注名
   status: PortStatus;
@@ -49,6 +63,13 @@ export interface SerialPort {
   /** USB metadata from the backend `PortInfo` (absent for non-USB ports). */
   manufacturer?: string;
   product?: string;
+  /** 远程宿主及借用租约元数据（仅远程端口 / 借用态存在） */
+  hostId?: string;
+  hostLabel?: string;
+  remotePortId?: string;
+  remoteRole?: RemoteRole;
+  remoteAllowLoan?: boolean;
+  loan?: PortLoanInfo;
 }
 
 /** 数据位 */

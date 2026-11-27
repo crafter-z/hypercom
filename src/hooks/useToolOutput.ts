@@ -63,12 +63,6 @@ export function useToolOutput() {
         return;
       }
       cleanups.push(unlistenExit);
-
-      const unlistenLoan = await eventService.onSerialToolLoan(({ portId, active }) => {
-        if (!cancelled) useAppStore.getState().updatePort(portId, { pluginToolRunning: active });
-      });
-      if (cancelled) { unlistenLoan(); return; }
-      cleanups.push(unlistenLoan);
     };
 
     const setupWithRetry = async (): Promise<void> => {

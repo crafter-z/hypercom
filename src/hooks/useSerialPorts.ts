@@ -1,8 +1,9 @@
 import { useEffect, useCallback } from 'react';
 import { useAppStore, type AppStoreState } from '../stores/useAppStore';
-import { serialService } from '../services/tauri';
+import { eventService, serialService } from '../services/tauri';
 import type { AvailablePortInfo } from '../services/tauri';
-import type { SerialPort, PortStatus } from '../types';
+import type { PortLoanInfo, SerialPort, PortStatus } from '../types';
+import { isRemotePort, normalizeRemoteRole } from '../utils/portCapabilities';
 
 /** 上一次端口列表刷新是否失败（用于连续失败时降级日志级别，避免 3s 轮询刷屏）。 */
 let lastListFailed = false;
@@ -29,33 +30,72 @@ const SERIAL_PORT_KEYS: (keyof SerialPort)[] = [
   'baudRate', 'dataBits', 'parity', 'stopBits', 'handshake',
   'protocolTemplateId', 'toolRunning', 'pluginToolRunning', 'mode', 'displayView',
   'connectionGeneration', 'manufacturer', 'product',
+  'hostId', 'hostLabel', 'remotePortId', 'remoteRole', 'remoteAllowLoan',
 ];
+
+function loansEqual(a?: PortLoanInfo, b?: PortLoanInfo): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.leaseId === b.leaseId
+    && a.holder === b.holder
+    && a.reason === b.reason
+    && a.acquiredAtMs === b.acquiredAtMs
+    && a.expiresAtMs === b.expiresAtMs
+    && a.autoReopen === b.autoReopen
+    && a.connectionBound === b.connectionBound;
+}
 
 export function areSerialPortsEqual(a: SerialPort[], b: SerialPort[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((port, index) => SERIAL_PORT_KEYS.every((key) => Object.is(port[key], b[index][key])));
+  return a.every((port, index) => {
+    const other = b[index];
+    return SERIAL_PORT_KEYS.every((key) => Object.is(port[key], other[key]))
+      && loansEqual(port.loan, other.loan);
+  });
+}
+
+function normalizeRemoteStatus(status?: string): PortStatus {
+  if (status === 'connected' || status === 'connecting' || status === 'error' || status === 'disconnected') {
+    return status;
+  }
+  return 'disconnected';
 }
 
 /**
  * 将后端 PortInfo 映射为前端 SerialPort
- * 后端的 port_type 是 "real"|"virtual"，前端 PortStatus 需要从后端获取或默认 disconnected
+ * 后端的 port_type 是 "real"|"virtual"|"sim"|"remote"
  */
 export function mapPortInfo(info: AvailablePortInfo): SerialPort {
-  const type = info.port_type === 'sim' ? 'sim' : info.port_type === 'real' ? 'real' : 'virtual';
+  const type = info.port_type === 'sim'
+    ? 'sim'
+    : info.port_type === 'real'
+      ? 'real'
+      : info.port_type === 'remote'
+        ? 'remote'
+        : 'virtual';
+  const isRemote = type === 'remote';
   return {
     id: info.id,
     name: info.name,
     alias: undefined,
-    status: 'disconnected' as PortStatus,
+    status: isRemote ? normalizeRemoteStatus(info.remote_status) : 'disconnected',
     type: type as SerialPort['type'],
     isHidden: false,
     groupId: undefined,
+    baudRate: isRemote ? info.remote_baud_rate : undefined,
+    connectionGeneration: isRemote ? info.remote_generation : undefined,
     // issue #11：枚举出的端口默认传统收发模式；持久化的 mode 由 mergePorts 回填。
     mode: 'trx' as const,
     // USB 厂商/产品名（Windows 注册表/SetupAPI 友好名解析）：原样透传，
     // 非 USB 端口后端省略字段 → 保持 undefined。
     manufacturer: info.manufacturer,
     product: info.product,
+    hostId: info.host_id,
+    hostLabel: info.host_label,
+    remotePortId: info.remote_port_id,
+    remoteRole: normalizeRemoteRole(info.remote_role),
+    remoteAllowLoan: info.remote_allow_loan,
+    loan: info.loan,
   };
 }
 
@@ -75,29 +115,32 @@ export function mergePorts(
       // 瞬时失败态（openPort 失败写入），新枚举证明端口现在可用——重置为
       // disconnected，这样「刷新按钮」能真正修复卡死的报错状态，无需重启。
       // connected / connecting 反映真实会话，必须保留。
-      const status = prev.status === 'error' ? 'disconnected' : prev.status;
-      // 端口仍在枚举中 → 幽灵计数清零
       ghostMissingPolls.delete(prev.id);
+      const remote = isRemotePort(fresh);
+      const status = remote
+        ? fresh.status
+        : prev.status === 'error' ? 'disconnected' : prev.status;
       merged.set(prev.id, {
         ...fresh,
         status,
         alias: prev.alias,
         isHidden: prev.isHidden,
         groupId: prev.groupId,
-        baudRate: prev.baudRate,
+        baudRate: remote ? (fresh.baudRate ?? prev.baudRate) : prev.baudRate,
         dataBits: prev.dataBits,
         parity: prev.parity,
         stopBits: prev.stopBits,
         handshake: prev.handshake,
         protocolTemplateId: prev.protocolTemplateId,
         toolRunning: prev.toolRunning,
-        pluginToolRunning: prev.pluginToolRunning,
-        connectionGeneration: prev.connectionGeneration,
+        pluginToolRunning: remote ? Boolean(fresh.loan) : prev.pluginToolRunning,
+        connectionGeneration: remote ? (fresh.connectionGeneration ?? prev.connectionGeneration) : prev.connectionGeneration,
         // issue #11：保留持久化的工作模式，否则每 3s 轮询会把 TTY 重置回 TRX。
         mode: prev.mode,
         displayView: prev.displayView,
+        loan: fresh.loan,
       });
-    } else if (prev.pluginToolRunning) {
+    } else if (prev.pluginToolRunning || prev.loan) {
       // Bootloaders may temporarily remove a COM device during its native loan.
       merged.set(prev.id, prev);
     } else if (prev.status === 'connected' || prev.status === 'connecting') {
@@ -186,11 +229,28 @@ export function useSerialPorts(pollIntervalMs: number = 3000) {
   }, [setPorts]);
 
   useEffect(() => {
-    if (pollIntervalMs > 0) {
-      refreshPorts();
-      const timer = setInterval(refreshPorts, pollIntervalMs);
-      return () => clearInterval(timer);
+    let cancelled = false;
+    let unlistenHosts: (() => void) | undefined;
+    if (typeof eventService?.onRemoteHostsChanged === 'function') {
+      void eventService.onRemoteHostsChanged(() => {
+        if (!cancelled) void refreshPorts();
+      }).then((unlisten) => {
+        if (cancelled) unlisten();
+        else unlistenHosts = unlisten;
+      }).catch((err) => {
+        console.debug('[useSerialPorts] Failed to subscribe to remote:hosts-changed:', err);
+      });
     }
+    let timer: ReturnType<typeof setInterval> | undefined;
+    if (pollIntervalMs > 0) {
+      void refreshPorts();
+      timer = setInterval(refreshPorts, pollIntervalMs);
+    }
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearInterval(timer);
+      unlistenHosts?.();
+    };
   }, [refreshPorts, pollIntervalMs]);
 
   return { refreshPorts };

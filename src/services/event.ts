@@ -52,6 +52,34 @@ export interface ToolExitPayload {
   code: number;
 }
 
+/** 端口借用事件 payload（camelCase wire） */
+export interface SerialToolLoanEvent {
+  portId: string;
+  active: boolean;
+  leaseId?: string;
+  holder?: string;
+  reason?: string;
+  expiresAtMs?: number;
+}
+
+/** 协作备注事件 payload（camelCase wire） */
+export interface SerialNoteEvent {
+  portId: string;
+  text: string;
+  source?: string;
+  timestamp: number;
+  generation: number;
+}
+
+/** 外部发送镜像事件 payload（camelCase wire） */
+export interface SerialExternalTxEvent {
+  portId: string;
+  timestamp: number;
+  generation: number;
+  data: number[];
+  source?: string;
+}
+
 export const eventService = {
   onSerialData: (callback: (event: SerialDataEvent) => void) => {
     return listen<SerialDataEvent>('serial:data', (event) => {
@@ -65,8 +93,17 @@ export const eventService = {
     });
   },
 
-  onSerialToolLoan: (callback: (loan: { portId: string; active: boolean }) => void) =>
-    listen<{ portId: string; active: boolean }>('serial:tool-loan', event => callback(event.payload)),
+  onSerialToolLoan: (callback: (loan: SerialToolLoanEvent) => void) =>
+    listen<SerialToolLoanEvent>('serial:tool-loan', event => callback(event.payload)),
+
+  onSerialNote: (callback: (event: SerialNoteEvent) => void) =>
+    listen<SerialNoteEvent>('serial:note', event => callback(event.payload)),
+
+  onSerialExternalTx: (callback: (event: SerialExternalTxEvent) => void) =>
+    listen<SerialExternalTxEvent>('serial:external-tx', event => callback(event.payload)),
+
+  onRemoteHostsChanged: (callback: () => void) =>
+    listen<unknown>('remote:hosts-changed', () => callback()),
 
   onSerialReconnectHint: (callback: (event: SerialReconnectHintEvent) => void) => {
     return listen<SerialReconnectHintEvent>('serial:reconnect_hint', (event) => {

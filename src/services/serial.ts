@@ -6,14 +6,24 @@
  * 镜像 wire 名。
  */
 import { invoke } from '@tauri-apps/api/core';
+import type { PortLoanInfo } from '../types';
 
 /** 后端返回的串口信息（后端未加 rename_all → wire 字段名保持 snake_case）。 */
 export interface AvailablePortInfo {
   id: string;
   name: string;
-  port_type: string; // "real" | "virtual" | "sim"
+  port_type: string; // "real" | "virtual" | "sim" | "remote"
   manufacturer?: string;
   product?: string;
+  host_id?: string;
+  host_label?: string;
+  remote_port_id?: string;
+  remote_role?: string;
+  remote_allow_loan?: boolean;
+  remote_status?: string;
+  remote_generation?: number;
+  remote_baud_rate?: number;
+  loan?: PortLoanInfo;
 }
 
 /** 打开串口参数（camelCase 公开 API；service 内部映射为 wire 的 snake_case）。 */

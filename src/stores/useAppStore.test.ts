@@ -464,6 +464,31 @@ describe('Edge cases', () => {
     expect(tab?.title).toBe('COM1 My Device');
   });
 
+  it('openTab and updatePort format remote serial tab titles consistently', () => {
+    useAppStore.setState({
+      ports: [{
+        ...makePort('remote::lab-a::COM7'),
+        name: 'COM7',
+        type: 'remote',
+        hostId: 'lab-a',
+        hostLabel: 'Bench A',
+        remotePortId: 'COM7',
+      }],
+    });
+    useAppStore.getState().openTab('remote::lab-a::COM7');
+    expect(findSerialTabByPortId(useAppStore.getState(), 'remote::lab-a::COM7')?.title).toBe('Bench A / COM7');
+
+    useAppStore.getState().updatePort('remote::lab-a::COM7', { alias: 'Sensor' });
+    expect(findSerialTabByPortId(useAppStore.getState(), 'remote::lab-a::COM7')?.title).toBe('Bench A / COM7 Sensor');
+
+    useAppStore.getState().updatePort('remote::lab-a::COM7', { hostLabel: 'Bench Alpha' });
+    expect(findSerialTabByPortId(useAppStore.getState(), 'remote::lab-a::COM7')?.title).toBe('Bench Alpha / COM7 Sensor');
+
+    // Fallback when remote port is not currently in ports list
+    useAppStore.getState().openTab('remote::lab-b::COM9');
+    expect(findSerialTabByPortId(useAppStore.getState(), 'remote::lab-b::COM9')?.title).toBe('lab-b / COM9');
+  });
+
   it('reorderPaneTabIds updates pane tab order', () => {
     useAppStore.setState({ ports: ['A', 'B', 'C'].map(p => makePort(p)) });
     const ids = ['A', 'B', 'C'].map((portId) => useAppStore.getState().openTab(portId));

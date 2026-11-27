@@ -19,6 +19,8 @@ import i18n from '../i18n';
 import type { PortStatus } from '../types';
 import { userClosingPortIds, lostPortIds } from './disconnectTracking';
 import { hasPortDisplayConsumers, hasPortLineConsumers, notifyPluginViewPortStatus, subscribePortInputConsumersChanged } from '../utils/pluginViewInput';
+import { appendTerminalLines } from '../utils/terminal/viewportManager';
+import { isRemotePortId } from '../utils/portCapabilities';
 
 // Alert toast throttle: same rule re-matched within this window (ms) must
 // not spam toasts — module-level so it survives the empty-deps effect.
@@ -168,6 +170,7 @@ function evaluateLineTriggers(portId: string, text: string, rawData: Uint8Array)
           durationMs: 0,
         });
       } else if (rule.actionType === 'respond') {
+        if (isRemotePortId(portId)) continue;
         const now = Date.now();
         if (isRecentTriggerResponseEcho(portId, rule.id, text, rawData, now)) {
           // The device echoed a response payload that would match this rule;
@@ -418,7 +421,7 @@ export function useSerialReceive() {
         // User-initiated closes are tracked and suppressed.
         if ((event.status === 'disconnected' || event.status === 'error') && !userClosingPortIds.has(event.port_id)) {
           const prevPort = useAppStore.getState().ports.find(p => p.id === event.port_id);
-          if (prevPort && prevPort.status === 'connected' && !prevPort.toolRunning && !prevPort.pluginToolRunning) {
+          if (prevPort && prevPort.status === 'connected' && !prevPort.toolRunning && !prevPort.pluginToolRunning && !prevPort.loan) {
             lostPortIds.add(event.port_id);
             const portName = prevPort.alias || prevPort.name;
             useToastStore.getState().push({
@@ -470,6 +473,92 @@ export function useSerialReceive() {
       }
 
       cleanups.push(unlistenStatus);
+
+      if (typeof eventService.onSerialToolLoan === 'function') {
+        const unlistenLoan = await eventService.onSerialToolLoan((event) => {
+          if (cancelled) return;
+          const prevPort = useAppStore.getState().ports.find((p) => p.id === event.portId);
+          if (event.active) {
+            const loan = event.leaseId || event.holder
+              ? {
+                  leaseId: event.leaseId ?? '',
+                  holder: event.holder ?? 'external',
+                  reason: event.reason,
+                  acquiredAtMs: prevPort?.loan && event.leaseId && prevPort.loan.leaseId === event.leaseId
+                    ? prevPort.loan.acquiredAtMs
+                    : Date.now(),
+                  expiresAtMs: event.expiresAtMs,
+                  autoReopen: prevPort?.loan?.autoReopen ?? true,
+                  connectionBound: prevPort?.loan?.connectionBound ?? false,
+                }
+              : undefined;
+            useAppStore.getState().updatePort(event.portId, {
+              pluginToolRunning: true,
+              loan,
+            });
+          } else {
+            useAppStore.getState().updatePort(event.portId, {
+              pluginToolRunning: false,
+              loan: undefined,
+            });
+          }
+        });
+        if (cancelled) {
+          unlistenLoan();
+          return;
+        }
+        cleanups.push(unlistenLoan);
+      }
+
+      if (typeof eventService.onSerialNote === 'function') {
+        const unlistenNote = await eventService.onSerialNote((event) => {
+          if (cancelled) return;
+          if (!hasPortLineConsumers(event.portId)) return;
+          pipeline.flushBeforeSend(event.portId);
+          const content = event.source && !event.text.startsWith(`[${event.source}]`)
+            ? `[${event.source}] ${event.text}`
+            : event.text;
+          appendTerminalLines(event.portId, [{
+            timestamp: event.timestamp || Date.now(),
+            direction: 'NOTE',
+            content,
+            isHex: false,
+          }]);
+        });
+        if (cancelled) {
+          unlistenNote();
+          return;
+        }
+        cleanups.push(unlistenNote);
+      }
+
+      if (typeof eventService.onSerialExternalTx === 'function') {
+        const unlistenExternalTx = await eventService.onSerialExternalTx((event) => {
+          if (cancelled) return;
+          const port = useAppStore.getState().ports.find((p) => p.id === event.portId);
+          if (port?.connectionGeneration != null && event.generation < port.connectionGeneration) return;
+          if (hasPortDisplayConsumers(event.portId) && event.data.length > 0) {
+            trafficStats.addTx(event.portId, event.data.length);
+          }
+          if (!hasPortLineConsumers(event.portId)) return;
+          const rawData = Uint8Array.from(event.data);
+          pipeline.flushBeforeSend(event.portId);
+          const decoded = pipeline.decodeText(event.portId, rawData);
+          const content = event.source ? `[${event.source}] ${decoded}` : decoded;
+          appendTerminalLines(event.portId, [{
+            timestamp: event.timestamp || Date.now(),
+            direction: 'TX',
+            content,
+            rawData,
+            isHex: false,
+          }]);
+        });
+        if (cancelled) {
+          unlistenExternalTx();
+          return;
+        }
+        cleanups.push(unlistenExternalTx);
+      }
     };
 
     let retryTimer: ReturnType<typeof setTimeout> | null = null;

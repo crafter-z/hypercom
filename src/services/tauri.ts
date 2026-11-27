@@ -32,3 +32,4 @@ export * from './tool';
 export * from './event';
 export * from './plugin';
 export * from './pluginView';
+export * from './control';

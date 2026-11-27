@@ -305,4 +305,85 @@ describe('mapPortInfo', () => {
     expect(mapped.manufacturer).toBeUndefined();
     expect(mapped.product).toBeUndefined();
   });
+
+  it('maps remote port metadata and loan fields cleanly', () => {
+    const mapped = mapPortInfo({
+      id: 'remote::lab1::COM5',
+      name: 'COM5 (Lab 1)',
+      port_type: 'remote',
+      host_id: 'lab1',
+      host_label: 'Lab 1',
+      remote_port_id: 'COM5',
+      remote_role: 'control',
+      remote_allow_loan: true,
+      remote_status: 'connected',
+      remote_generation: 42,
+      remote_baud_rate: 921600,
+      loan: {
+        leaseId: 'lease-99',
+        holder: 'hypercomctl',
+        reason: 'flash',
+        acquiredAtMs: 1234,
+        autoReopen: true,
+        connectionBound: false,
+      },
+    });
+    expect(mapped).toMatchObject({
+      id: 'remote::lab1::COM5',
+      type: 'remote',
+      status: 'connected',
+      hostId: 'lab1',
+      hostLabel: 'Lab 1',
+      remotePortId: 'COM5',
+      remoteRole: 'control',
+      remoteAllowLoan: true,
+      connectionGeneration: 42,
+      baudRate: 921600,
+    });
+    expect(mapped.loan?.leaseId).toBe('lease-99');
+  });
+
+  it('retains loaned local ports during enumeration gaps and merges remote updates', () => {
+    const loan = {
+      leaseId: 'lease-1',
+      holder: 'cli',
+      acquiredAtMs: 500,
+      autoReopen: true,
+      connectionBound: false,
+    };
+    const loanedLocal = makePort('COM8', { loan, alias: 'Target' });
+    expect(mergePorts([], [loanedLocal])).toEqual([loanedLocal]);
+
+    const prevRemote = makePort('remote::lab::COM2', {
+      type: 'remote',
+      status: 'disconnected',
+      remoteRole: 'observe',
+      hostId: 'lab',
+      hostLabel: 'Lab',
+      remotePortId: 'COM2',
+    });
+    const freshRemote = mapPortInfo({
+      id: 'remote::lab::COM2',
+      name: 'COM2 (Lab)',
+      port_type: 'remote',
+      host_id: 'lab',
+      host_label: 'Lab',
+      remote_port_id: 'COM2',
+      remote_role: 'control',
+      remote_status: 'connected',
+      remote_generation: 3,
+      remote_baud_rate: 115200,
+      loan,
+    });
+    const merged = mergePorts([freshRemote], [prevRemote]);
+    expect(merged[0]).toMatchObject({
+      status: 'connected',
+      remoteRole: 'control',
+      connectionGeneration: 3,
+      baudRate: 115200,
+      pluginToolRunning: true,
+    });
+    expect(areSerialPortsEqual([merged[0]], [{ ...merged[0], loan: { ...loan } }])).toBe(true);
+    expect(areSerialPortsEqual([merged[0]], [{ ...merged[0], loan: { ...loan, leaseId: 'lease-2' } }])).toBe(false);
+  });
 });
