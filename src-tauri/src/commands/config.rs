@@ -135,9 +135,18 @@ pub async fn set_config(
         // that filesystem work off the async worker's cooperative budget.
         tokio::task::block_in_place(|| state.apply_runtime_config(&cfg));
     }
-    // Retire views only after the imported configuration committed.
+    // Retire views and plugin leases only after the imported configuration committed.
     if let Some(entries) = restored_entries {
         for entry in entries {
+            if !entry.enabled || !entry.granted_permissions.iter().any(|p| p == "serial:control") {
+                state
+                    .lease_registry
+                    .release_by_owner_prefix(
+                        Some(&state.event_hub),
+                        &format!("plugin:{}:", entry.id),
+                    )
+                    .await;
+            }
             if !entry.enabled {
                 crate::plugin::view_runtime::retire_plugin(source.app_handle(), &entry.id).await?;
             } else {

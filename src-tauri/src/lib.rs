@@ -4,9 +4,11 @@
  */
 mod commands;
 mod config;
+mod control;
 mod diaglog;
 mod logger;
 mod plugin;
+mod remote_client;
 mod serial;
 mod system;
 mod update_network;
@@ -185,6 +187,14 @@ pub struct AppState {
     /// 关闭审批的待决请求：主窗确认保存/放弃前，原生关闭、托盘退出与 ExitRequested
     /// 共用同一个 token；只有带回匹配 requestId 的 complete/cancel 才能推进或清除它。
     pub pending_close: std::sync::Mutex<Option<PendingClose>>,
+    /// 串口实时事件总线（供本地 IPC / 远端 TLS / 期望匹配共享）。
+    pub event_hub: std::sync::Arc<serial::SerialEventHub>,
+    /// 串口显式借用租约注册表。
+    pub lease_registry: std::sync::Arc<serial::PortLeaseRegistry>,
+    /// 本地 IPC 与远端 TLS 1.3 控制面中心。
+    pub control_hub: std::sync::Arc<control::ControlHub>,
+    /// 已配对远端主机的客户端连接与状态同步管理器。
+    pub remote_clients: std::sync::Arc<remote_client::RemoteClientManager>,
 }
 
 /// Only a sharing violation proves that another process owns the Windows lock.
@@ -262,7 +272,7 @@ impl AppState {
             .map(std::path::PathBuf::from);
 
         // 先建 ConfigManager，再用其配置初始化运行期镜像（消除双数据源）
-        let config_manager = config::ConfigManager::new(config_arg)?;
+        let config_manager = config::ConfigManager::new(config_arg.clone())?;
         let system_info = sysinfo::System::new()
             .map_err(|error| anyhow::anyhow!("Failed to initialize system information: {error}"))?;
         let cfg = config_manager.get_config().clone();
@@ -270,17 +280,56 @@ impl AppState {
         // config.json/session.json (fixed temp names + per-process revision CAS).
         let instance_lock = acquire_instance_lock(config_manager.config_path())?;
 
+        let config_dir = config_manager
+            .config_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let control_state_dir = if config_arg.is_some() {
+            config_dir.join("control-authority")
+        } else {
+            hypercom_protocol::Authority::default_state_root()
+                .unwrap_or_else(|_| config_dir.join("control-authority"))
+        };
+        let client_profiles_dir = if config_arg.is_some() {
+            config_dir.join("client-profiles")
+        } else {
+            hypercom_protocol::ProfileStore::default_dir()
+                .unwrap_or_else(|_| control_state_dir.join("client-profiles"))
+        };
+        let client_labels_path = client_profiles_dir.with_file_name("client-profile-labels.json");
+
+        let event_hub = std::sync::Arc::new(serial::SerialEventHub::new());
+        let lease_registry = std::sync::Arc::new(serial::PortLeaseRegistry::new());
+        let log_manager = std::sync::Arc::new(logger::LogManager::new());
+        let mut serial_mgr = serial::SerialManager::new();
+        if commands::is_debug_build() && std::env::var_os("HYPERCOM_ENABLE_SIM").is_some() {
+            serial_mgr.set_simulate(true);
+        }
+        serial_mgr.set_event_hub(std::sync::Arc::clone(&event_hub));
+        let serial_manager = std::sync::Arc::new(std::sync::Mutex::new(serial_mgr));
+        let control_hub = std::sync::Arc::new(control::ControlHub::new(
+            std::sync::Arc::clone(&serial_manager),
+            std::sync::Arc::clone(&event_hub),
+            std::sync::Arc::clone(&lease_registry),
+            std::sync::Arc::clone(&log_manager),
+            control_state_dir,
+        ));
+        let remote_clients = std::sync::Arc::new(remote_client::RemoteClientManager::new(
+            client_profiles_dir,
+            client_labels_path,
+        ));
+        control_hub.set_remote_clients(std::sync::Arc::clone(&remote_clients));
+
         let state = Self {
             _instance_lock: instance_lock,
-            serial_manager: std::sync::Arc::new(
-                std::sync::Mutex::new(serial::SerialManager::new()),
-            ),
+            serial_manager,
             config_manager: std::sync::Mutex::new(config_manager),
             plugin_io: tokio::sync::Mutex::new(()),
             plugin_http: commands::PluginHttpRegistry::new(),
             plugin_fs: std::sync::Arc::new(commands::PluginFsRegistry::new()),
             plugin_shell: commands::PluginShellRegistry::new(),
-            log_manager: std::sync::Arc::new(logger::LogManager::new()),
+            log_manager,
             diag_logger,
             system_info: std::sync::Arc::new(std::sync::Mutex::new(system_info)),
             serial_work: std::sync::Arc::new(commands::SerialWorkState::new()),
@@ -290,6 +339,10 @@ impl AppState {
             shutdown_complete: std::sync::atomic::AtomicBool::new(false),
             popouts: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_close: std::sync::Mutex::new(None),
+            event_hub,
+            lease_registry,
+            control_hub,
+            remote_clients,
         };
         // 启动时把配置里的日志设置同步到 LogManager（与 set_config 命令同一入口）。
         state.apply_runtime_config(&cfg);
@@ -714,11 +767,29 @@ pub fn run() {
             commands::plugin_serial_task_begin,
             commands::plugin_serial_task_step,
             commands::plugin_serial_task_close,
+            commands::plugin_serial_loan_acquire,
+            commands::plugin_serial_loan_heartbeat,
+            commands::plugin_serial_loan_release,
             commands::plugin_open_external,
             commands::create_plugin_view,
             commands::update_plugin_view,
             commands::send_plugin_view_message,
             commands::destroy_plugin_view,
+            // ===== 协作控制面 & 远端命令 =====
+            commands::get_collaboration_status,
+            commands::reclaim_port_loan,
+            commands::list_port_leases,
+            commands::remote_host_start,
+            commands::remote_host_stop,
+            commands::remote_host_create_invite,
+            commands::remote_host_list_clients,
+            commands::remote_host_revoke_client,
+            commands::remote_client_inspect_invite,
+            commands::remote_client_pair,
+            commands::remote_client_list_profiles,
+            commands::remote_client_connect,
+            commands::remote_client_disconnect,
+            commands::remote_client_remove_profile,
              // ===== 插件市场命令 =====
              commands::fetch_plugin_marketplace,
              commands::check_plugin_updates,
@@ -736,6 +807,8 @@ pub fn run() {
                     "serial_manager mutex poisoned during setup; serial events will not be emitted"
                 );
             }
+            state.control_hub.set_app_handle(app_handle.clone());
+            state.control_hub.start();
             // drop(state) 对 borrow checker 有意义：State<'_, T> 是引用包装，
             // 显式 drop 确保 MutexGuard 临时值在 state 之前析构。
             #[allow(clippy::drop_non_drop)]

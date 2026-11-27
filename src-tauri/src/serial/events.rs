@@ -37,6 +37,46 @@ pub struct SerialReconnectHintEvent {
     pub port_name: String,
 }
 
+/// 协作备注事件（推送给前端）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialNoteEvent {
+    pub port_id: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub timestamp: i64,
+    pub generation: u64,
+}
+
+/// 外部发送镜像事件（CLI / 远端 / 协作写入后同步给前端）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialExternalTxEvent {
+    pub port_id: String,
+    pub timestamp: i64,
+    pub generation: u64,
+    pub data: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// 端口借用事件（本地 & 远端统一结构）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolLoanEvent<'a> {
+    pub port_id: &'a str,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+}
+
 /// `SerialStatusEvent.status` 的取值集合——用枚举收口，避免同一状态字符串
 /// 在「开/关/读线程异常退出」多条路径里各写一遍而拼错（拼错只会表现为前端
 /// 状态不更新，没有任何报错）。
@@ -57,6 +97,8 @@ impl PortStatus {
     }
 }
 
+use super::event_hub::SerialEventHub;
+
 /// 派发串口状态事件并维护该连接代次的日志 writer。
 pub(crate) fn emit_status(
     app_handle: &AppHandle,
@@ -65,6 +107,13 @@ pub(crate) fn emit_status(
     generation: Option<u64>,
 ) {
     if let Some(state) = app_handle.try_state::<crate::AppState>() {
+        record_status_in_hub(
+            &state.event_hub,
+            port_id,
+            status,
+            generation,
+            chrono::Utc::now().timestamp_millis(),
+        );
         match status {
             PortStatus::Connected => {
                 // Snapshot the two fields and release config_manager before the
@@ -148,6 +197,7 @@ pub(crate) fn emit_rx_event(app_handle: &AppHandle, port_id: &str, data: &[u8], 
     );
     // 日志落盘走 write_rx：字节级行聚合，完整行才落盘，跨事件的响应不再被切成碎片行。
     if let Some(state) = app_handle.try_state::<crate::AppState>() {
+        record_rx_in_hub(&state.event_hub, port_id, data, generation, timestamp_ms);
         if let Err(e) = state.log_manager.write_rx(port_id, &timestamp_str, data) {
             log::warn!("Failed to write RX log for {}: {}", port_id, e);
         }
@@ -162,6 +212,28 @@ pub(crate) fn emit_reconnect_hint(app_handle: &AppHandle, port_id: &str) {
             port_name: port_id.to_string(),
         },
     );
+}
+
+/// Record an RX chunk into `SerialEventHub` without locking `SerialManager`.
+pub(crate) fn record_rx_in_hub(
+    hub: &SerialEventHub,
+    port_id: &str,
+    data: &[u8],
+    generation: u64,
+    timestamp_ms: i64,
+) {
+    hub.publish_rx(port_id, generation, timestamp_ms, data);
+}
+
+/// Record a status transition into `SerialEventHub` without locking `SerialManager`.
+pub(crate) fn record_status_in_hub(
+    hub: &SerialEventHub,
+    port_id: &str,
+    status: PortStatus,
+    generation: Option<u64>,
+    timestamp_ms: i64,
+) {
+    hub.publish_status(port_id, generation.unwrap_or(0), timestamp_ms, status.as_str());
 }
 
 #[cfg(test)]

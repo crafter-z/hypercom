@@ -225,12 +225,18 @@ pub async fn list_available_ports(
     state: State<'_, AppState>,
 ) -> Result<Vec<serial::PortInfo>, CommandError> {
     let serial_manager = state.serial_manager.clone();
-    tokio::task::spawn_blocking(move || {
+    let mut ports = tokio::task::spawn_blocking(move || {
         serial::list_ports_blocking(&serial_manager)
             .map_err(|e| CommandError::Serial(e.to_string()))
     })
     .await
-    .map_err(|e| CommandError::Other(format!("List ports task panicked: {e}")))?
+    .map_err(|e| CommandError::Other(format!("List ports task panicked: {e}")))??;
+
+    for port in &mut ports {
+        port.loan = state.lease_registry.get_for_port(&port.id);
+    }
+    ports.extend(state.remote_clients.list_available_remote_ports());
+    Ok(ports)
 }
 
 /// 打开指定串口
@@ -274,57 +280,91 @@ fn default_tty_rows() -> u16 {
 /// `SerialManager::open_port` 内先于任何副作用执行。
 #[tauri::command]
 pub async fn open_serial_port(
-    args: OpenPortArgs,
+    mut args: OpenPortArgs,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let serial_manager = state.serial_manager.clone();
-    let port_id = args.port_id.clone();
-    serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?
-        .cancel_reconnect(&port_id);
-    tokio::task::spawn_blocking(move || {
-        serial::open_blocking(&serial_manager, args).map_err(|e| {
-            log::warn!("Failed to open port {}: {}", port_id, e);
-            CommandError::Serial(e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| CommandError::Other(format!("Open port task panicked: {e}")))?
+    match hypercom_protocol::PortRef::parse(&args.port_id)
+        .map_err(|err| CommandError::Serial(err.to_string()))?
+    {
+        hypercom_protocol::PortRef::Remote {
+            profile_id,
+            port_id,
+        } => {
+            let profile_id = profile_id.to_string();
+            args.port_id = port_id.to_string();
+            state
+                .remote_clients
+                .open_port(&profile_id, args, Some(&app))
+                .await
+        }
+        hypercom_protocol::PortRef::Local(_) => {
+            let serial_manager = state.serial_manager.clone();
+            let port_id = args.port_id.clone();
+            serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?
+                .cancel_reconnect(&port_id);
+            tokio::task::spawn_blocking(move || {
+                serial::open_blocking(&serial_manager, args).map_err(|e| {
+                    log::warn!("Failed to open port {}: {}", port_id, e);
+                    CommandError::Serial(e.to_string())
+                })
+            })
+            .await
+            .map_err(|e| CommandError::Other(format!("Open port task panicked: {e}")))?
+        }
+    }
 }
 
 /// 关闭指定串口
 #[tauri::command]
 pub async fn close_serial_port(
     port_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let serial_manager = state.serial_manager.clone();
-    // 持锁期间只停止读取线程并取出 JoinHandle，立即释放锁
-    let join_handle = {
-        let mut manager = serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager.close_port(&port_id).map_err(|e| {
-            log::warn!("Failed to close port {}: {}", port_id, e);
-            CommandError::Serial(e.to_string())
-        })?
-    };
-    // join 移到阻塞线程池执行，不占主线程——GIT:BASH 读线程需等 ConPTY 关闭
-    // （close_port 已 drop master）后才退出；即使读线程异常不退，同步 join 也不会
-    // 再冻结整个应用 UI。
-    if let Some(thread) = join_handle {
-        tokio::task::spawn_blocking(move || {
-            let _ = thread.join();
-        })
-        .await
-        .map_err(|e| CommandError::Other(format!("close port join task failed: {e}")))?;
+    match hypercom_protocol::PortRef::parse(&port_id)
+        .map_err(|err| CommandError::Serial(err.to_string()))?
+    {
+        hypercom_protocol::PortRef::Remote {
+            profile_id,
+            port_id,
+        } => {
+            state
+                .remote_clients
+                .close_port(profile_id, port_id, Some(&app))
+                .await
+        }
+        hypercom_protocol::PortRef::Local(_) => {
+            let serial_manager = state.serial_manager.clone();
+            // 持锁期间只停止读取线程并取出 JoinHandle，立即释放锁
+            let join_handle = {
+                let mut manager = serial_manager
+                    .lock()
+                    .map_err(|e| CommandError::Lock(e.to_string()))?;
+                manager.close_port(&port_id).map_err(|e| {
+                    log::warn!("Failed to close port {}: {}", port_id, e);
+                    CommandError::Serial(e.to_string())
+                })?
+            };
+            // join 移到阻塞线程池执行，不占主线程——GIT:BASH 读线程需等 ConPTY 关闭
+            // （close_port 已 drop master）后才退出；即使读线程异常不退，同步 join 也不会
+            // 再冻结整个应用 UI。
+            if let Some(thread) = join_handle {
+                tokio::task::spawn_blocking(move || {
+                    let _ = thread.join();
+                })
+                .await
+                .map_err(|e| CommandError::Other(format!("close port join task failed: {e}")))?;
+            }
+            serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?
+                .cleanup_real_close(&port_id);
+            Ok(())
+        }
     }
-    serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?
-        .cleanup_real_close(&port_id);
-    Ok(())
 }
 
 /// 向串口发送数据
@@ -352,92 +392,115 @@ pub struct SendDataArgs {
 /// `spawn_blocking` 把串口 IO 与日志写放到独立线程池——主线程发完命令立即返回。
 #[tauri::command]
 pub async fn send_serial_data(
-    args: SendDataArgs,
+    mut args: SendDataArgs,
     state: State<'_, AppState>,
 ) -> Result<usize, CommandError> {
     let _work = state
         .serial_work
         .admit()
         .ok_or_else(|| CommandError::Serial("Serial work is shutting down".into()))?;
-    // 从 State 克隆出 'static 的 Arc 句柄供 spawn_blocking 闭包使用
-    // （AppState 的 serial_manager / log_manager 是 Arc）。
-    let serial_manager = state.serial_manager.clone();
-    let log_manager = state.log_manager.clone();
-    let SendDataArgs {
-        port_id,
-        data,
-        is_hex,
-        append_line_ending,
-        expected_generation,
-    } = args;
-    let tx_reservation = state.serial_work.tx.legacy(&port_id)?;
-    tokio::task::spawn_blocking(move || {
-        let _tx_reservation = tx_reservation;
-        let tx = {
-            let manager = serial_manager
-                .lock()
-                .map_err(|e| CommandError::Lock(e.to_string()))?;
-            if let Some(expected) = expected_generation {
-                if !manager.connection_matches(&port_id, expected) {
-                    return Err(CommandError::Serial(
-                        "Port connection changed before send".into(),
-                    ));
-                }
-            }
-            let kind = serial::PortKind::of(&port_id);
-            match kind {
-                serial::PortKind::Real => {
-                    let write_port = manager
-                        .get_write_handle(&port_id)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    drop(manager);
-                    let mut port = write_port
+    match hypercom_protocol::PortRef::parse(&args.port_id)
+        .map_err(|err| CommandError::Serial(err.to_string()))?
+    {
+        hypercom_protocol::PortRef::Remote {
+            profile_id,
+            port_id,
+        } => {
+            let profile_id = profile_id.to_string();
+            args.port_id = port_id.to_string();
+            state.remote_clients.send_data(&profile_id, args).await
+        }
+        hypercom_protocol::PortRef::Local(_) => {
+            // 从 State 克隆出 'static 的 Arc 句柄供 spawn_blocking 闭包使用
+            // （AppState 的 serial_manager / log_manager 是 Arc）。
+            let serial_manager = state.serial_manager.clone();
+            let log_manager = state.log_manager.clone();
+            let event_hub = state.event_hub.clone();
+            let SendDataArgs {
+                port_id,
+                data,
+                is_hex,
+                append_line_ending,
+                expected_generation,
+            } = args;
+            let tx_reservation = state.serial_work.tx.legacy(&port_id)?;
+            tokio::task::spawn_blocking(move || {
+                let _tx_reservation = tx_reservation;
+                let (tx, generation) = {
+                    let manager = serial_manager
                         .lock()
                         .map_err(|e| CommandError::Lock(e.to_string()))?;
-                    serial::write_all_with_deadline(
+                    if let Some(expected) = expected_generation {
+                        if !manager.connection_matches(&port_id, expected) {
+                            return Err(CommandError::Serial(
+                                "Port connection changed before send".into(),
+                            ));
+                        }
+                    }
+                    let generation = manager.status_generation(&port_id).unwrap_or(0);
+                    let kind = serial::PortKind::of(&port_id);
+                    let tx = match kind {
+                        serial::PortKind::Real => {
+                            let write_port = manager
+                                .get_write_handle(&port_id)
+                                .map_err(|e| CommandError::Serial(e.to_string()))?;
+                            let bytes = serial::build_tx_bytes(&data, is_hex, &append_line_ending)
+                                .map_err(|e| CommandError::Serial(e.to_string()))?;
+                            drop(manager);
+                            let mut port = write_port
+                                .lock()
+                                .map_err(|e| CommandError::Lock(e.to_string()))?;
+                            serial::write_all_with_deadline(
+                                &port_id,
+                                &mut **port,
+                                &bytes,
+                                serial::WRITE_TOTAL_DEADLINE,
+                            )
+                            .map_err(|e| CommandError::Serial(e.to_string()))?;
+                            serial::TxOutcome::sent(bytes)
+                        }
+                        serial::PortKind::Tty => {
+                            let writer = manager
+                                .get_tty_write_handle(&port_id)
+                                .map_err(|e| CommandError::Serial(e.to_string()))?;
+                            let bytes = serial::build_tx_bytes(
+                                &data,
+                                is_hex,
+                                serial::codec::normalize_tty_line_ending(&append_line_ending),
+                            )
+                            .map_err(|e| CommandError::Serial(e.to_string()))?;
+                            drop(manager);
+                            let written = writer
+                                .write(&bytes)
+                                .map_err(|e| CommandError::Serial(e.to_string()))?;
+                            serial::TxOutcome::sent(bytes[..written].to_vec())
+                        }
+                        serial::PortKind::Sim => manager
+                            .send_data(&port_id, &data, is_hex, &append_line_ending)
+                            .map_err(|e| CommandError::Serial(e.to_string()))?,
+                    };
+                    (tx, generation)
+                };
+                if !tx.bytes.is_empty() {
+                    let now = chrono::Local::now();
+                    let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                    if let Err(e) = log_manager.write(&port_id, &timestamp, "TX", &tx.bytes) {
+                        log::warn!("Failed to write TX log for {}: {}", port_id, e);
+                    }
+                    event_hub.publish_tx(
                         &port_id,
-                        &mut **port,
-                        &bytes,
-                        serial::WRITE_TOTAL_DEADLINE,
-                    )
-                    .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    serial::TxOutcome::sent(bytes)
+                        generation,
+                        now.timestamp_millis(),
+                        &tx.bytes,
+                        Some("gui".to_string()),
+                    );
                 }
-                serial::PortKind::Tty => {
-                    let writer = manager
-                        .get_tty_write_handle(&port_id)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    let bytes = serial::build_tx_bytes(
-                        &data,
-                        is_hex,
-                        serial::codec::normalize_tty_line_ending(&append_line_ending),
-                    )
-                    .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    drop(manager);
-                    let written = writer
-                        .write(&bytes)
-                        .map_err(|e| CommandError::Serial(e.to_string()))?;
-                    serial::TxOutcome::sent(bytes[..written].to_vec())
-                }
-                serial::PortKind::Sim => manager
-                    .send_data(&port_id, &data, is_hex, &append_line_ending)
-                    .map_err(|e| CommandError::Serial(e.to_string()))?,
-            }
-        };
-        if !tx.bytes.is_empty() {
-            let timestamp = chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string();
-            if let Err(e) = log_manager.write(&port_id, &timestamp, "TX", &tx.bytes) {
-                log::warn!("Failed to write TX log for {}: {}", port_id, e);
-            }
+                Ok(tx.written)
+            })
+            .await
+            .map_err(|e| CommandError::Other(format!("Send task panicked: {e}")))?
         }
-        Ok(tx.written)
-    })
-    .await
-    .map_err(|e| CommandError::Other(format!("Send task panicked: {e}")))?
+    }
 }
 
 /// 文件发送进度事件 payload
@@ -734,39 +797,53 @@ pub struct SetSerialParamsArgs {
 
 #[tauri::command]
 pub async fn set_serial_params(
-    args: SetSerialParamsArgs,
+    mut args: SetSerialParamsArgs,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let serial_manager = state.serial_manager.clone();
-    let tx_reservation = state.serial_work.tx.legacy(&args.port_id)?;
-    tokio::task::spawn_blocking(move || {
-        let _tx_reservation = tx_reservation;
-        let mut manager = serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        if let Some(expected) = args.expected_generation {
-            if !manager.connection_matches(&args.port_id, expected) {
-                return Err(CommandError::Serial(
-                    "Port connection changed before applying parameters".into(),
-                ));
-            }
+    match hypercom_protocol::PortRef::parse(&args.port_id)
+        .map_err(|err| CommandError::Serial(err.to_string()))?
+    {
+        hypercom_protocol::PortRef::Remote {
+            profile_id,
+            port_id,
+        } => {
+            let profile_id = profile_id.to_string();
+            args.port_id = port_id.to_string();
+            state.remote_clients.set_params(&profile_id, args).await
         }
-        manager
-            .set_params(
-                &args.port_id,
-                args.baud_rate,
-                args.data_bits,
-                &args.parity,
-                &args.stop_bits,
-                &args.handshake,
-            )
-            .map_err(|e| {
-                log::warn!("Failed to set params for {}: {}", args.port_id, e);
-                CommandError::Serial(e.to_string())
+        hypercom_protocol::PortRef::Local(_) => {
+            let serial_manager = state.serial_manager.clone();
+            let tx_reservation = state.serial_work.tx.legacy(&args.port_id)?;
+            tokio::task::spawn_blocking(move || {
+                let _tx_reservation = tx_reservation;
+                let mut manager = serial_manager
+                    .lock()
+                    .map_err(|e| CommandError::Lock(e.to_string()))?;
+                if let Some(expected) = args.expected_generation {
+                    if !manager.connection_matches(&args.port_id, expected) {
+                        return Err(CommandError::Serial(
+                            "Port connection changed before applying parameters".into(),
+                        ));
+                    }
+                }
+                manager
+                    .set_params(
+                        &args.port_id,
+                        args.baud_rate,
+                        args.data_bits,
+                        &args.parity,
+                        &args.stop_bits,
+                        &args.handshake,
+                    )
+                    .map_err(|e| {
+                        log::warn!("Failed to set params for {}: {}", args.port_id, e);
+                        CommandError::Serial(e.to_string())
+                    })
             })
-    })
-    .await
-    .map_err(|e| CommandError::Other(format!("Set params task panicked: {e}")))?
+            .await
+            .map_err(|e| CommandError::Other(format!("Set params task panicked: {e}")))?
+        }
+    }
 }
 
 /// 尝试重新连接指定串口（异常断线后的自动恢复）
@@ -777,30 +854,46 @@ pub async fn set_serial_params(
 #[tauri::command]
 pub async fn attempt_reconnect(
     port_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let serial_manager = state.serial_manager.clone();
-    // Capture intent before queuing blocking work; a close can cancel a queued attempt too.
-    let cancel = serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?
-        .begin_reconnect(&port_id);
-    let cleanup_token = Arc::clone(&cancel);
-    let cleanup_port = port_id.clone();
-    let worker_manager = serial_manager.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        serial::reconnect_blocking(&worker_manager, &port_id, &cancel).map_err(|e| {
-            log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
-            CommandError::Serial(e.to_string())
-        })
-    })
-    .await
-    .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?;
-    serial_manager
-        .lock()
-        .map_err(|e| CommandError::Lock(e.to_string()))?
-        .finish_reconnect(&cleanup_port, &cleanup_token);
-    result
+    match hypercom_protocol::PortRef::parse(&port_id)
+        .map_err(|err| CommandError::Serial(err.to_string()))?
+    {
+        hypercom_protocol::PortRef::Remote {
+            profile_id,
+            port_id,
+        } => {
+            state
+                .remote_clients
+                .attempt_reconnect(profile_id, port_id, Some(&app))
+                .await
+        }
+        hypercom_protocol::PortRef::Local(_) => {
+            let serial_manager = state.serial_manager.clone();
+            // Capture intent before queuing blocking work; a close can cancel a queued attempt too.
+            let cancel = serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?
+                .begin_reconnect(&port_id);
+            let cleanup_token = Arc::clone(&cancel);
+            let cleanup_port = port_id.clone();
+            let worker_manager = serial_manager.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                serial::reconnect_blocking(&worker_manager, &port_id, &cancel).map_err(|e| {
+                    log::warn!("Auto-reconnect failed for {}: {}", port_id, e);
+                    CommandError::Serial(e.to_string())
+                })
+            })
+            .await
+            .map_err(|e| CommandError::Other(format!("Reconnect task panicked: {e}")))?;
+            serial_manager
+                .lock()
+                .map_err(|e| CommandError::Lock(e.to_string()))?
+                .finish_reconnect(&cleanup_port, &cleanup_token);
+            result
+        }
+    }
 }
 
 /// 设置流控（DTR/RTS/握手协议）
@@ -812,22 +905,37 @@ pub async fn set_flow_control(
     expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let serial_manager = state.serial_manager.clone();
-    let tx_reservation = state.serial_work.tx.legacy(&port_id)?;
-    tokio::task::spawn_blocking(move || {
-        let _tx_reservation = tx_reservation;
-        let mut manager = serial_manager
-            .lock()
-            .map_err(|e| CommandError::Lock(e.to_string()))?;
-        manager
-            .set_flow_control(&port_id, dtr, rts, expected_generation)
-            .map_err(|e| {
-                log::warn!("Failed to set flow control for {}: {}", port_id, e);
-                CommandError::Serial(e.to_string())
+    match hypercom_protocol::PortRef::parse(&port_id)
+        .map_err(|err| CommandError::Serial(err.to_string()))?
+    {
+        hypercom_protocol::PortRef::Remote {
+            profile_id,
+            port_id,
+        } => {
+            state
+                .remote_clients
+                .set_flow_control(profile_id, port_id, dtr, rts, expected_generation)
+                .await
+        }
+        hypercom_protocol::PortRef::Local(_) => {
+            let serial_manager = state.serial_manager.clone();
+            let tx_reservation = state.serial_work.tx.legacy(&port_id)?;
+            tokio::task::spawn_blocking(move || {
+                let _tx_reservation = tx_reservation;
+                let mut manager = serial_manager
+                    .lock()
+                    .map_err(|e| CommandError::Lock(e.to_string()))?;
+                manager
+                    .set_flow_control(&port_id, dtr, rts, expected_generation)
+                    .map_err(|e| {
+                        log::warn!("Failed to set flow control for {}: {}", port_id, e);
+                        CommandError::Serial(e.to_string())
+                    })
             })
-    })
-    .await
-    .map_err(|e| CommandError::Other(format!("Set flow control task panicked: {e}")))?
+            .await
+            .map_err(|e| CommandError::Other(format!("Set flow control task panicked: {e}")))?
+        }
+    }
 }
 
 // ==================== 外部工具执行 ====================
@@ -1133,6 +1241,12 @@ pub async fn shutdown_serial_work(
 ) -> Result<(), CommandError> {
     state.serial_work.begin_shutdown();
     super::plugin_serial_tasks::retire_plugin_serial_tasks(state, None);
+    state.control_hub.shutdown().await;
+    state.remote_clients.shutdown().await;
+    state
+        .lease_registry
+        .release_all_on_shutdown(Some(&state.event_hub))
+        .await;
     {
         let mut manager = state
             .serial_manager
@@ -1416,5 +1530,29 @@ mod tests {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("invalid workdir"), "{error}");
         assert!(error.contains("device unavailable"), "{error}");
+    }
+
+    #[test]
+    fn port_ref_routing_distinguishes_local_from_remote_profiles() {
+        use hypercom_protocol::PortRef;
+
+        assert_eq!(PortRef::parse("COM3").unwrap(), PortRef::Local("COM3"));
+        assert_eq!(
+            PortRef::parse("SIM:Loopback").unwrap(),
+            PortRef::Local("SIM:Loopback")
+        );
+        assert_eq!(
+            PortRef::parse("GIT:BASH").unwrap(),
+            PortRef::Local("GIT:BASH")
+        );
+        assert_eq!(
+            PortRef::parse("remote::bench-1::COM7").unwrap(),
+            PortRef::Remote {
+                profile_id: "bench-1",
+                port_id: "COM7",
+            }
+        );
+        assert!(PortRef::parse("remote::bad").is_err());
+        assert!(PortRef::parse("").is_err());
     }
 }

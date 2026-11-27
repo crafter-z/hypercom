@@ -205,13 +205,13 @@ pub(super) fn enumerate_system_ports() -> anyhow::Result<Vec<PortInfo>> {
                     serialport::SerialPortType::UsbPort(info) => (info.manufacturer, info.product),
                     _ => (None, None),
                 };
-                PortInfo {
-                    id: p.port_name.clone(),
-                    name: p.port_name,
-                    port_type: "real".to_string(),
+                PortInfo::local(
+                    p.port_name.clone(),
+                    p.port_name,
+                    "real".to_string(),
                     manufacturer,
                     product,
-                }
+                )
             })
             .collect())
     }

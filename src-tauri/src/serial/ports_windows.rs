@@ -58,13 +58,13 @@ pub(super) fn enumerate() -> anyhow::Result<Vec<PortInfo>> {
             .into_iter()
             .map(|port| {
                 let meta = usb_metadata(port.port_type);
-                PortInfo {
-                    id: port.port_name.clone(),
-                    name: port.port_name,
-                    port_type: "real".to_string(),
-                    manufacturer: meta.manufacturer,
-                    product: meta.product,
-                }
+                PortInfo::local(
+                    port.port_name.clone(),
+                    port.port_name,
+                    "real".to_string(),
+                    meta.manufacturer,
+                    meta.product,
+                )
             })
             .collect());
     }
@@ -77,13 +77,13 @@ pub(super) fn enumerate() -> anyhow::Result<Vec<PortInfo>> {
         .into_iter()
         .map(|name| {
             let meta = by_name.remove(&name).map(usb_metadata).unwrap_or_default();
-            PortInfo {
-                id: name.clone(),
+            PortInfo::local(
+                name.clone(),
                 name,
-                port_type: "real".to_string(),
-                manufacturer: meta.manufacturer,
-                product: meta.product,
-            }
+                "real".to_string(),
+                meta.manufacturer,
+                meta.product,
+            )
         })
         .collect())
 }

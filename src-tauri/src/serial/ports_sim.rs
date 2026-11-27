@@ -64,12 +64,14 @@ impl SimPortHandle {
 
 /// 列表条目（仅当 `simulate` 启用时由 `SerialManager` 追加到系统端口列表之后）。
 pub(super) fn virtual_port_infos() -> impl Iterator<Item = PortInfo> {
-    SIM_PORT_IDS.into_iter().map(|port_id| PortInfo {
-        id: port_id.to_string(),
-        name: format!("{} (模拟串口)", port_id),
-        port_type: "sim".to_string(),
-        manufacturer: None,
-        product: None,
+    SIM_PORT_IDS.into_iter().map(|port_id| {
+        PortInfo::local(
+            port_id.to_string(),
+            format!("{} (模拟串口)", port_id),
+            "sim".to_string(),
+            None,
+            None,
+        )
     })
 }
 

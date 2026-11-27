@@ -362,6 +362,10 @@ pub async fn reload_plugin(
     retire_plugin_serial_tasks(&state, Some(&id));
     state.plugin_http.cancel_plugin(&id);
     state.plugin_shell.cancel_plugin(&id);
+    state
+        .lease_registry
+        .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
+        .await;
     retire_plugin_file_io(&state, &id);
     revoke_plugin_directory_grants(&id);
     plugin::view_runtime::retire_plugin(window.app_handle(), &id).await?;
@@ -582,6 +586,10 @@ async fn install_prepared_transaction_observed(
     }, || async {
         state.plugin_http.cancel_plugin(&id);
         state.plugin_shell.cancel_plugin(&id);
+        state
+            .lease_registry
+            .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
+            .await;
         retire_plugin_file_io(state, &id);
         plugin::view_runtime::retire_plugin(app, &id).await
     }, || retire_plugin_serial_tasks(state, Some(&id)))
@@ -1200,6 +1208,10 @@ pub async fn uninstall_plugin(
         retire_plugin_file_io(&state, &id);
         state.plugin_http.cancel_plugin(&id);
         state.plugin_shell.cancel_plugin(&id);
+        state
+            .lease_registry
+            .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
+            .await;
         // The plugin is already gone from config. A stuck native teardown may
         // still freeze the UI thread, so the view runtime bounds it internally:
         // report the failure, keep the command responsive, and retry later.
@@ -1415,6 +1427,10 @@ pub async fn set_plugin_enabled(
     // Don’t retire views on primary failure; do retire them even if the backup
     // or recovery marker could not be finalized after the primary committed.
     if !enabled {
+        state
+            .lease_registry
+            .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
+            .await;
         if let Err(e) = plugin::view_runtime::retire_plugin(window.app_handle(), &id).await {
             log::warn!("Failed to retire disabled plugin views for {id}: {e}");
         }
@@ -1461,6 +1477,10 @@ pub async fn set_plugin_trusted_web(
         })?
     };
     let view_result = if !trusted {
+        state
+            .lease_registry
+            .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
+            .await;
         plugin::view_runtime::retire_plugin(window.app_handle(), &id).await
             .map_err(|e| CommandError::Other(format!("网页信任已撤销，但关闭视图失败: {e}")))
     } else {
@@ -1582,6 +1602,12 @@ pub async fn set_plugin_permissions(
             }
         })?
     };
+    if !permissions.iter().any(|p| p == "serial:control") {
+        state
+            .lease_registry
+            .release_by_owner_prefix(Some(&state.event_hub), &format!("plugin:{id}:"))
+            .await;
+    }
     let view_result = plugin::view_runtime::retire_denied(window.app_handle(), &id, &permissions).await;
     let snapshot = result.finish(view_result)?;
     log::info!("Plugin {id} permissions updated");

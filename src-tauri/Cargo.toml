@@ -52,6 +52,7 @@ sysinfo = "0.40"
 
 # 工具
 uuid = { version = "1", features = ["v4"] }
+hypercom-protocol = { path = "hypercom-protocol" }
 
 # 背景图 data URL 编码（issue #13）
 base64 = "0.23"

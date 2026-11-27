@@ -18,13 +18,13 @@ pub(super) const TTY_PORT_ID: &str = "GIT:BASH";
 
 /// 列表条目（仅当 `gitbash_sim` 启用时由 `SerialManager` 追加到系统端口列表之后）。
 pub(super) fn virtual_port_info() -> PortInfo {
-    PortInfo {
-        id: TTY_PORT_ID.to_string(),
-        name: "GIT:BASH (git bash 模拟终端)".to_string(),
-        port_type: "sim".to_string(),
-        manufacturer: None,
-        product: None,
-    }
+    PortInfo::local(
+        TTY_PORT_ID.to_string(),
+        "GIT:BASH (git bash 模拟终端)".to_string(),
+        "sim".to_string(),
+        None,
+        None,
+    )
 }
 
 /// 打开模拟终端端口（锁内；能力门控已由 `SerialManager::open_port` 校验）。

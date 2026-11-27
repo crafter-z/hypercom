@@ -465,13 +465,13 @@ pub async fn plugin_serial_list(
             .map_err(|error| CommandError::Lock(error.to_string()))?;
         for id in manager.active_port_ids() {
             if !ports.iter().any(|port| port.id == id) {
-                ports.push(serial::PortInfo {
-                    name: id.clone(),
+                ports.push(serial::PortInfo::local(
+                    id.clone(),
                     id,
-                    port_type: String::new(),
-                    manufacturer: None,
-                    product: None,
-                });
+                    String::new(),
+                    None,
+                    None,
+                ));
             }
         }
         Ok(ports
@@ -526,11 +526,218 @@ pub async fn plugin_serial_status(
     .map_err(|error| CommandError::Other(format!("Plugin port status task failed: {error}")))?
 }
 
+fn validate_plugin_loan_target(plugin_id: &str, port_id: &str) -> Result<(), CommandError> {
+    validate_target(plugin_id, port_id)?;
+    if hypercom_protocol::PortRef::is_remote_str(port_id) {
+        return Err(CommandError::Other("插件借用仅支持本地端口".into()));
+    }
+    if serial::PortKind::of(port_id) == serial::PortKind::Tty {
+        return Err(CommandError::Serial(format!(
+            "TTY port {port_id} cannot be leased"
+        )));
+    }
+    Ok(())
+}
+
+fn plugin_loan_owner_tag(plugin_id: &str, expected_generation: &str) -> String {
+    format!("plugin:{plugin_id}:{expected_generation}")
+}
+
+fn verify_plugin_lease_owner(
+    actual_owner_tag: &str,
+    plugin_id: &str,
+    expected_generation: &str,
+) -> Result<(), CommandError> {
+    if actual_owner_tag != plugin_loan_owner_tag(plugin_id, expected_generation) {
+        return Err(CommandError::Other(
+            "插件无权操作该串口租约".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn plugin_serial_loan_acquire(
+    plugin_id: String,
+    expected_generation: String,
+    port_id: String,
+    expected_connection_generation: Option<u64>,
+    reason: Option<String>,
+    ttl_ms: Option<u64>,
+    auto_reopen: Option<bool>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<hypercom_protocol::LoanInfoDto, CommandError> {
+    super::plugin::require_main_window(&window)?;
+    validate_plugin_loan_target(&plugin_id, &port_id)?;
+
+    {
+        let _gate = super::plugin::acquire_plugin_io(&state).await?;
+        require_scoped_serial_access(
+            &state,
+            &plugin_id,
+            &expected_generation,
+            Some(&port_id),
+            None,
+        )?;
+    }
+
+    let owner_tag = plugin_loan_owner_tag(&plugin_id, &expected_generation);
+    let meta = state
+        .lease_registry
+        .acquire(
+            &state.serial_manager,
+            Some(&state.event_hub),
+            serial::AcquireLeaseRequest {
+                port_id: port_id.clone(),
+                holder: format!("plugin:{plugin_id}"),
+                reason,
+                expected_generation: expected_connection_generation,
+                ttl_ms,
+                auto_reopen: auto_reopen.unwrap_or(true),
+                owner_tag,
+                connection_bound: true,
+            },
+        )
+        .await
+        .map_err(CommandError::Serial)?;
+
+    let recheck = {
+        let gate = super::plugin::acquire_plugin_io(&state).await;
+        match gate {
+            Ok(_gate) => require_scoped_serial_access(
+                &state,
+                &plugin_id,
+                &expected_generation,
+                Some(&port_id),
+                None,
+            )
+            .map(|_| ()),
+            Err(err) => Err(err),
+        }
+    };
+    if let Err(err) = recheck {
+        let _ = state
+            .lease_registry
+            .release(Some(&state.event_hub), &meta.lease_id, None)
+            .await;
+        return Err(err);
+    }
+
+    let generation = state
+        .serial_manager
+        .lock()
+        .map_err(|error| CommandError::Lock(error.to_string()))?
+        .status_generation(&port_id)
+        .unwrap_or(0);
+    let note_text = match &meta.reason {
+        Some(r) if !r.trim().is_empty() => {
+            format!("[协作] 插件 {plugin_id} 已借用 {port_id}（{}）", r.trim())
+        }
+        _ => format!("[协作] 插件 {plugin_id} 已借用 {port_id}"),
+    };
+    state.control_hub.emit_note(
+        &port_id,
+        &note_text,
+        Some(&meta.holder),
+        meta.acquired_at_ms,
+        generation,
+    );
+
+    Ok(crate::control::loan_meta_to_dto(&port_id, generation, meta))
+}
+
+#[tauri::command]
+pub async fn plugin_serial_loan_heartbeat(
+    plugin_id: String,
+    expected_generation: String,
+    lease_id: String,
+    extend_ttl_ms: Option<u64>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<hypercom_protocol::LoanInfoDto, CommandError> {
+    super::plugin::require_main_window(&window)?;
+    plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+
+    let (port_id, generation, _, owner_tag) = state
+        .lease_registry
+        .get_entry(&lease_id)
+        .ok_or_else(|| CommandError::Serial(format!("Lease not found: {lease_id}")))?;
+    verify_plugin_lease_owner(&owner_tag, &plugin_id, &expected_generation)?;
+
+    {
+        let _gate = super::plugin::acquire_plugin_io(&state).await?;
+        require_scoped_serial_access(
+            &state,
+            &plugin_id,
+            &expected_generation,
+            Some(&port_id),
+            None,
+        )?;
+    }
+
+    let meta = state
+        .lease_registry
+        .heartbeat(&state.serial_manager, &lease_id, extend_ttl_ms)
+        .map_err(CommandError::Serial)?;
+
+    Ok(crate::control::loan_meta_to_dto(&port_id, generation, meta))
+}
+
+#[tauri::command]
+pub async fn plugin_serial_loan_release(
+    plugin_id: String,
+    expected_generation: String,
+    lease_id: String,
+    reopen_override: Option<bool>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<serial::LeaseRecovery, CommandError> {
+    super::plugin::require_main_window(&window)?;
+    plugin::validate_plugin_id(&plugin_id).map_err(CommandError::Other)?;
+
+    let (port_id, generation, meta, owner_tag) = state
+        .lease_registry
+        .get_entry(&lease_id)
+        .ok_or_else(|| CommandError::Serial(format!("Lease not found: {lease_id}")))?;
+    verify_plugin_lease_owner(&owner_tag, &plugin_id, &expected_generation)?;
+
+    {
+        let _gate = super::plugin::acquire_plugin_io(&state).await?;
+        require_scoped_serial_access(
+            &state,
+            &plugin_id,
+            &expected_generation,
+            Some(&port_id),
+            None,
+        )?;
+    }
+
+    let recovery = state
+        .lease_registry
+        .release(Some(&state.event_hub), &lease_id, reopen_override)
+        .await
+        .map_err(CommandError::Serial)?;
+
+    let note_text = format!("[协作] 插件 {plugin_id} 已归还 {port_id} ({})", recovery.state);
+    state.control_hub.emit_note(
+        &port_id,
+        &note_text,
+        Some(&meta.holder),
+        chrono::Utc::now().timestamp_millis(),
+        generation,
+    );
+
+    Ok(recovery)
+}
+
 #[cfg(test)]
 mod tests {
     // Explicit imports keep serialport FFI out of the Windows test binary.
     use super::{
-        blocking_authority, serial_error, validate_access, validate_target,
+        blocking_authority, plugin_loan_owner_tag, serial_error, validate_access,
+        validate_plugin_loan_target, validate_target, verify_plugin_lease_owner,
         PluginSerialCloseResult, PluginSerialOpenResult, PluginSerialParams, PluginSerialPort,
     };
     use crate::commands::CommandError;
@@ -751,5 +958,19 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(result, Err(CommandError::Other(_))));
+    }
+
+    #[test]
+    fn plugin_loan_rejects_remote_and_tty_and_enforces_owner_tag() {
+        assert!(validate_plugin_loan_target(ID, "COM9").is_ok());
+        assert!(validate_plugin_loan_target(ID, "SIM:Loopback").is_ok());
+        assert!(validate_plugin_loan_target(ID, "remote::lab::COM9").is_err());
+        assert!(validate_plugin_loan_target(ID, "GIT:BASH").is_err());
+
+        let tag = plugin_loan_owner_tag(ID, GENERATION);
+        assert!(verify_plugin_lease_owner(&tag, ID, GENERATION).is_ok());
+        assert!(verify_plugin_lease_owner(&tag, ID, "other-gen").is_err());
+        assert!(verify_plugin_lease_owner(&tag, "com.example.other", GENERATION).is_err());
+        assert!(verify_plugin_lease_owner("ipc:123", ID, GENERATION).is_err());
     }
 }

@@ -23,7 +23,9 @@ use tauri::{AppHandle, Emitter};
 use crate::commands::OpenPortArgs;
 
 pub(crate) mod codec;
+pub(crate) mod event_hub;
 pub(crate) mod events;
+pub(crate) mod lease;
 mod ports_real;
 mod managed_loan;
 mod ports_sim;
@@ -36,12 +38,19 @@ pub use codec::{
     build_tx_bytes, write_all_with_deadline, write_with_deadline_progress, TxOutcome,
     WRITE_TOTAL_DEADLINE,
 };
+#[allow(unused_imports)] // Re-exported for Step 2 wiring in AppState / commands.
+pub use event_hub::{
+    HubEvent, HubEventKind, HubEventPage, SerialEventHub, MAX_HISTORY_BYTES, MAX_HISTORY_EVENTS,
+};
 pub(crate) use events::{
     emit_reconnect_hint, emit_rx_event, emit_status, emit_status_if_current, PortStatus,
+    SerialExternalTxEvent, SerialNoteEvent, ToolLoanEvent,
 };
-pub(crate) use ports_real::open_blocking_authorized;
+pub use lease::{AcquireLeaseRequest, LeaseRecovery, PortLeaseRegistry};
+pub use managed_loan::LoanMetadata;
 pub(crate) use managed_loan::ManagedPortLoan;
 pub use ports_real::{open_blocking, reconnect_blocking, PortClose, RealWriteHandle};
+pub(crate) use ports_real::open_blocking_authorized;
 
 /// 模拟串口 id 前缀（`PortKind` 的判定依据）
 pub(crate) const SIM_PORT_PREFIX: &str = "SIM:";
@@ -53,13 +62,58 @@ pub(crate) const TTY_PORT_PREFIX: &str = "GIT:";
 pub struct PortInfo {
     pub id: String,
     pub name: String,
-    pub port_type: String, // "real" | "sim"
+    pub port_type: String, // "real" | "sim" | "remote"
     /// USB 厂商名（仅 USB 串口有值；PCI/蓝牙/模拟口为空，序列化时省略）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manufacturer: Option<String>,
     /// USB 产品名（仅 USB 串口有值；PCI/蓝牙/模拟口为空，序列化时省略）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_port_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_allow_loan: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_baud_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loan: Option<LoanMetadata>,
+}
+
+impl PortInfo {
+    pub fn local(
+        id: String,
+        name: String,
+        port_type: String,
+        manufacturer: Option<String>,
+        product: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            port_type,
+            manufacturer,
+            product,
+            host_id: None,
+            host_label: None,
+            remote_port_id: None,
+            remote_role: None,
+            remote_allow_loan: None,
+            remote_status: None,
+            remote_generation: None,
+            remote_baud_rate: None,
+            loan: None,
+        }
+    }
 }
 
 /// 端口类别：由 port_id 前缀决定（`GIT:` → Tty，`SIM:` → Sim，其余 → Real）。
@@ -151,6 +205,8 @@ pub struct SerialManager {
     shutting_down: bool,
     /// Tauri AppHandle：事件推送与日志落盘的唯一入口
     app_handle: Option<AppHandle>,
+    /// Optional event hub for recording loan and serial events without Tauri IPC.
+    event_hub: Option<Arc<SerialEventHub>>,
     /// 上次成功连接的参数，用于自动重连
     last_params: HashMap<String, OpenPortArgs>,
 }
@@ -168,6 +224,7 @@ impl SerialManager {
             connection_generations: HashMap::new(),
             shutting_down: false,
             app_handle: None,
+            event_hub: None,
             last_params: HashMap::new(),
         }
     }
@@ -175,6 +232,20 @@ impl SerialManager {
     /// 设置 AppHandle（在 Tauri setup 钩子中调用）
     pub fn set_app_handle(&mut self, handle: AppHandle) {
         self.app_handle = Some(handle);
+    }
+
+    #[allow(dead_code)] // Wired into AppState in Step 2.
+    pub fn set_event_hub(&mut self, hub: Arc<SerialEventHub>) {
+        self.event_hub = Some(hub);
+    }
+
+    #[allow(dead_code)] // Wired into AppState in Step 2.
+    pub fn event_hub(&self) -> Option<Arc<SerialEventHub>> {
+        self.event_hub.clone()
+    }
+
+    pub(crate) fn event_hub_addr(&self) -> Option<usize> {
+        self.event_hub.as_ref().map(|h| Arc::as_ptr(h) as usize)
     }
 
     /// 启用/禁用模拟模式
@@ -263,19 +334,64 @@ impl SerialManager {
         Ok(())
     }
 
+    #[allow(dead_code)] // Backwards-compatible wrapper used when no LoanMetadata is attached.
     pub(crate) fn emit_tool_loan(&self, port_id: &str, active: bool) {
+        self.emit_tool_loan_detail(port_id, active, None);
+    }
+
+    pub(crate) fn emit_tool_loan_detail(
+        &self,
+        port_id: &str,
+        active: bool,
+        meta: Option<&LoanMetadata>,
+    ) {
         if let Some(app) = &self.app_handle {
-            #[derive(Clone, Serialize)]
-            #[serde(rename_all = "camelCase")]
-            struct ToolLoanEvent<'a> {
-                port_id: &'a str,
-                active: bool,
-            }
             let _ = app.emit(
                 "serial:tool-loan",
-                ToolLoanEvent { port_id, active },
+                ToolLoanEvent {
+                    port_id,
+                    active,
+                    lease_id: meta.map(|m| m.lease_id.as_str()),
+                    holder: meta.map(|m| m.holder.as_str()),
+                    reason: meta.and_then(|m| m.reason.as_deref()),
+                    expires_at_ms: meta.and_then(|m| m.expires_at_ms),
+                },
             );
         }
+        if let Some(hub) = &self.event_hub {
+            let generation = self.status_generation(port_id).unwrap_or(0);
+            hub.publish_loan(
+                port_id,
+                generation,
+                chrono::Utc::now().timestamp_millis(),
+                active,
+                meta.cloned(),
+                None,
+            );
+        }
+    }
+
+    #[allow(dead_code)] // Used by PortLeaseRegistry::heartbeat.
+    pub(crate) fn update_loan_expiry(
+        &mut self,
+        port_id: &str,
+        owner: uuid::Uuid,
+        expires_at_ms: Option<i64>,
+    ) {
+        if let Some(entry) = self.tool_loans.get_mut(port_id) {
+            if entry.owner == owner {
+                if let Some(meta) = entry.meta.as_mut() {
+                    meta.expires_at_ms = expires_at_ms;
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)] // Queried by IPC / status inspection in Step 2.
+    pub fn active_loan_meta(&self, port_id: &str) -> Option<LoanMetadata> {
+        self.tool_loans
+            .get(port_id)
+            .and_then(|entry| entry.meta.clone())
     }
 
     /// Unlike registry membership, this excludes handles whose reader has exited.
