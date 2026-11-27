@@ -29,6 +29,8 @@ export interface PluginHostInfo {
   readonly features: {
     /** `shell.start(request, {serialLoan})` 接受串口借用并报告原生归还结果。 */
     readonly serialLoan: boolean;
+    /** `plugin.serial.loan` 显式串口租约控制（acquire / heartbeat / release）。 */
+    readonly portLease: boolean;
     // 未来能力在这里增量添加；不要复用/改变已有字段语义。
   };
 }
@@ -36,5 +38,5 @@ export interface PluginHostInfo {
 /** 当前宿主构建的能力描述。返回值会被结构化克隆，插件得到普通对象。 */
 export const PLUGIN_HOST_INFO: PluginHostInfo = Object.freeze({
   apiVersion: PLUGIN_HOST_API_VERSION,
-  features: Object.freeze({ serialLoan: true }),
+  features: Object.freeze({ serialLoan: true, portLease: true }),
 });

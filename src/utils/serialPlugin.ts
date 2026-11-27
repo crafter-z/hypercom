@@ -1,5 +1,12 @@
 /** Strict Worker serial lifecycle facade. Authorization mapping stays in pluginRpc. */
-import { serialService } from '../services/tauri';
+import { pluginService, serialService } from '../services/tauri';
+import type {
+  PluginSerialLoanAcquireRequest,
+  PluginSerialLoanHeartbeatRequest,
+  PluginSerialLoanInfo,
+  PluginSerialLoanReleaseRequest,
+  PluginSerialLoanReleaseResult,
+} from '../services/plugin';
 import type {
   PluginSerialCloseRequest,
   PluginSerialCloseResult,
@@ -142,4 +149,113 @@ export async function executePluginSerialClose(pluginId: string, args: unknown, 
   });
   if (completed.value === undefined) throw new Error('插件串口关闭未返回结果');
   return { ...completed.value, port: pluginPort(completed.value.port) };
+}
+
+const MAX_PLUGIN_LOAN_REASON_CHARS = 256;
+
+function localLoanPortId(value: unknown, name: string): string {
+  const id = portId(value);
+  if (id.trimStart().startsWith('remote::')) throw new Error(`${name} 不支持远程端口`);
+  return id;
+}
+
+function loanLeaseId(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) {
+    throw new Error('serial loan leaseId 必须为非空且不含 NUL 的字符串');
+  }
+  return value;
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') throw new Error(`${name} 必须为布尔值`);
+  return value;
+}
+
+export function parsePluginSerialLoanAcquireRequest(args: unknown): PluginSerialLoanAcquireRequest {
+  const a = object(args, 'serial.loan.acquire');
+  keys(a, ['portId', 'expectedConnectionGeneration', 'reason', 'ttlMs', 'autoReopen'], 'serial.loan.acquire');
+  const request: PluginSerialLoanAcquireRequest = {
+    portId: localLoanPortId(a.portId, 'serial.loan.acquire'),
+  };
+  if (a.expectedConnectionGeneration !== undefined) {
+    request.expectedConnectionGeneration = integer(
+      a.expectedConnectionGeneration,
+      'expectedConnectionGeneration',
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+  }
+  if (a.reason !== undefined) {
+    if (typeof a.reason !== 'string') throw new Error('reason 必须为字符串');
+    if (a.reason.length > MAX_PLUGIN_LOAN_REASON_CHARS) {
+      throw new Error(`reason 不能超过 ${MAX_PLUGIN_LOAN_REASON_CHARS} 个字符`);
+    }
+    request.reason = a.reason;
+  }
+  if (a.ttlMs !== undefined) {
+    request.ttlMs = integer(a.ttlMs, 'ttlMs', 1, Number.MAX_SAFE_INTEGER);
+  }
+  const autoReopen = optionalBoolean(a.autoReopen, 'autoReopen');
+  if (autoReopen !== undefined) request.autoReopen = autoReopen;
+  return request;
+}
+
+export function parsePluginSerialLoanHeartbeatRequest(args: unknown): PluginSerialLoanHeartbeatRequest {
+  const a = object(args, 'serial.loan.heartbeat');
+  keys(a, ['leaseId', 'extendTtlMs'], 'serial.loan.heartbeat');
+  const request: PluginSerialLoanHeartbeatRequest = {
+    leaseId: loanLeaseId(a.leaseId),
+  };
+  if (a.extendTtlMs !== undefined) {
+    request.extendTtlMs = integer(a.extendTtlMs, 'extendTtlMs', 1, Number.MAX_SAFE_INTEGER);
+  }
+  return request;
+}
+
+export function parsePluginSerialLoanReleaseRequest(args: unknown): PluginSerialLoanReleaseRequest {
+  const a = object(args, 'serial.loan.release');
+  keys(a, ['leaseId', 'reopenOverride'], 'serial.loan.release');
+  const request: PluginSerialLoanReleaseRequest = {
+    leaseId: loanLeaseId(a.leaseId),
+  };
+  const reopenOverride = optionalBoolean(a.reopenOverride, 'reopenOverride');
+  if (reopenOverride !== undefined) request.reopenOverride = reopenOverride;
+  return request;
+}
+
+export async function executePluginSerialLoanAcquire(
+  pluginId: string,
+  args: unknown,
+  beforeSend?: () => void,
+): Promise<PluginSerialLoanInfo> {
+  const request = parsePluginSerialLoanAcquireRequest(args);
+  const authority = pluginAuthority(pluginId, beforeSend);
+  const info = await pluginService.pluginSerialLoanAcquire(pluginId, authority.generation, request);
+  authority.assert();
+  return info;
+}
+
+export async function executePluginSerialLoanHeartbeat(
+  pluginId: string,
+  args: unknown,
+  beforeSend?: () => void,
+): Promise<PluginSerialLoanInfo> {
+  const request = parsePluginSerialLoanHeartbeatRequest(args);
+  const authority = pluginAuthority(pluginId, beforeSend);
+  const info = await pluginService.pluginSerialLoanHeartbeat(pluginId, authority.generation, request);
+  authority.assert();
+  return info;
+}
+
+export async function executePluginSerialLoanRelease(
+  pluginId: string,
+  args: unknown,
+  beforeSend?: () => void,
+): Promise<PluginSerialLoanReleaseResult> {
+  const request = parsePluginSerialLoanReleaseRequest(args);
+  const authority = pluginAuthority(pluginId, beforeSend);
+  const result = await pluginService.pluginSerialLoanRelease(pluginId, authority.generation, request);
+  authority.assert();
+  return result;
 }

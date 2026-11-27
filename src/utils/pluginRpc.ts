@@ -40,6 +40,9 @@ export const OP_PERMISSIONS: PermissionMap = {
   // 串口控制与发送分开授权（敏感）；发送权限不隐式允许打开或关闭。
   'serial.open': 'serial:control',
   'serial.close': 'serial:control',
+  'serial.loan.acquire': 'serial:control',
+  'serial.loan.heartbeat': 'serial:control',
+  'serial.loan.release': 'serial:control',
   'serial.send': 'serial:send',
   'serial.beginSend': 'serial:send',
   'serial.sendStep': 'serial:send',

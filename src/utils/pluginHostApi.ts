@@ -34,7 +34,13 @@ import { exportPluginPanel } from './pluginPanelExport';
 import { executePluginViewApi } from './pluginViewRuntime';
 import { executePluginHttp } from './pluginHttp';
 import { executePluginShell } from './pluginShell';
-import { executePluginSerialOpen, executePluginSerialClose } from './serialPlugin';
+import {
+  executePluginSerialClose,
+  executePluginSerialLoanAcquire,
+  executePluginSerialLoanHeartbeat,
+  executePluginSerialLoanRelease,
+  executePluginSerialOpen,
+} from './serialPlugin';
 import { acquirePluginDialog } from './pluginDialogBudget';
 import { decodeBytes } from './lineText';
 import type { PluginFsContext } from './pluginFs';
@@ -316,6 +322,20 @@ export async function executeHostApi(
         ? executePluginSerialOpen(pluginId, args, assertAuthority)
         : executePluginSerialClose(pluginId, args, assertAuthority);
     }
+    case 'serial.loan.acquire': {
+      const portId = requireString(args, 'portId');
+      const assertAuthority = (): void => {
+        beforeSend?.();
+        const denied = checkPortScope(manifest, portId);
+        if (denied) throw new Error(denied);
+      };
+      assertAuthority();
+      return executePluginSerialLoanAcquire(pluginId, args, assertAuthority);
+    }
+    case 'serial.loan.heartbeat':
+      return executePluginSerialLoanHeartbeat(pluginId, args, beforeSend);
+    case 'serial.loan.release':
+      return executePluginSerialLoanRelease(pluginId, args, beforeSend);
     case 'serial.send': {
       const a = requireObject(args);
       const portId = requireString(a, 'portId');

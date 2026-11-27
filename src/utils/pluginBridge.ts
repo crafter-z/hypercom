@@ -41,7 +41,7 @@ export function isPluginCleanupRpc(op: string): boolean {
 
 /** Business operations wait for their native result; the same policy is injected into the Worker. */
 const NO_RPC_DEADLINE_OPS = new Set<string>([
-  'serial.open', 'serial.close', ...PLUGIN_SERIAL_TASK_OPS,
+  'serial.open', 'serial.close', 'serial.loan.acquire', 'serial.loan.heartbeat', 'serial.loan.release', ...PLUGIN_SERIAL_TASK_OPS,
   'fs.exportFile', 'fs.saveFile', 'fs.read', 'fs.openDialog', 'fs.openDirectoryDialog',
   'fs.listDirectory', 'fs.readDirectoryFile', 'fs.statDirectoryEntry', ...FS_WINDOW_OPS, 'fs.cancel', ...PLUGIN_FILE_HANDLE_OPS,
   'fs.writeDirectoryFile', 'fs.createDirectory', 'fs.removeDirectoryEntry', 'fs.renameDirectoryEntry',
@@ -542,9 +542,31 @@ export const PLUGIN_BRIDGE_CODE = `
 ${PLUGIN_FILE_HANDLE_SDK}
 ${PLUGIN_SERIAL_TASK_SDK_CODE}
 ${PLUGIN_PROCESS_FACADE_CODE}
+  var serialLoan = Object.freeze({
+    acquire: function (options) {
+      return api['serial.loan.acquire'](options).then(function (info) {
+        if (!info || typeof info !== 'object') return info;
+        var leaseId = info.leaseId;
+        return Object.assign({}, info, {
+          heartbeat: function (extendTtlMs) {
+            var args = { leaseId: leaseId };
+            if (extendTtlMs !== undefined) args.extendTtlMs = extendTtlMs;
+            return api['serial.loan.heartbeat'](args);
+          },
+          release: function (reopenOverride) {
+            var args = { leaseId: leaseId };
+            if (reopenOverride !== undefined) args.reopenOverride = reopenOverride;
+            return api['serial.loan.release'](args);
+          }
+        });
+      });
+    },
+    heartbeat: function (options) { return api['serial.loan.heartbeat'](options); },
+    release: function (options) { return api['serial.loan.release'](options); }
+  });
   self.plugin = {
     api: api, http: http, on: on, rx: rx, views: views, tabs: tabs,
-    fs: pluginFileSdk, serial: Object.freeze(serialTasks),
+    fs: pluginFileSdk, serial: Object.freeze(Object.assign({}, serialTasks, { loan: serialLoan })),
     shell: Object.freeze({ start: startPluginProcess, execute: api['shell.execute'] }),
     // 宿主能力描述（可选 API 探测）；旧宿主没有该 op，调用会 reject。
     host: Object.freeze({ info: function () { return api['host.info'](); } })

@@ -286,7 +286,7 @@ describe('plugin worker event registration contract', () => {
     const pending = worker.plugin!.host.info();
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({ op: 'host.info', args: null });
-    const response = { apiVersion: 1, features: { serialLoan: true } };
+    const response = { apiVersion: 1, features: { serialLoan: true, portLease: true } };
     worker.onmessage!({ data: { seq: posted[0].seq, ok: true, result: response } });
     await expect(pending).resolves.toEqual(response);
   });

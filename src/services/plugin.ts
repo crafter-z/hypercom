@@ -29,6 +29,41 @@ export interface PluginDirectoryInstallRequest {
 
 export type PluginInstallCancelResult = 'accepted' | 'tooLate' | 'notFound';
 
+export interface PluginSerialLoanInfo {
+  leaseId: string;
+  portId: string;
+  holder: string;
+  reason?: string;
+  acquiredAtMs: number;
+  expiresAtMs?: number;
+  generation: number;
+  autoReopen: boolean;
+  connectionBound: boolean;
+}
+
+export interface PluginSerialLoanAcquireRequest {
+  portId: string;
+  expectedConnectionGeneration?: number;
+  reason?: string;
+  ttlMs?: number;
+  autoReopen?: boolean;
+}
+
+export interface PluginSerialLoanHeartbeatRequest {
+  leaseId: string;
+  extendTtlMs?: number;
+}
+
+export interface PluginSerialLoanReleaseRequest {
+  leaseId: string;
+  reopenOverride?: boolean;
+}
+
+export interface PluginSerialLoanReleaseResult {
+  state: string;
+  error?: string;
+}
+
 export const pluginService = {
   listPlugins: (): Promise<PluginListResponse> => invoke('list_plugins'),
   installPlugin: (
@@ -102,6 +137,42 @@ export const pluginService = {
     request: PluginShellRequest,
   ): Promise<PluginShellResult> =>
     invoke('plugin_shell_execute', { pluginId, expectedGeneration, request }),
+  pluginSerialLoanAcquire: (
+    pluginId: string,
+    expectedGeneration: string,
+    request: PluginSerialLoanAcquireRequest,
+  ): Promise<PluginSerialLoanInfo> =>
+    invoke('plugin_serial_loan_acquire', {
+      pluginId,
+      expectedGeneration,
+      portId: request.portId,
+      expectedConnectionGeneration: request.expectedConnectionGeneration,
+      reason: request.reason,
+      ttlMs: request.ttlMs,
+      autoReopen: request.autoReopen,
+    }),
+  pluginSerialLoanHeartbeat: (
+    pluginId: string,
+    expectedGeneration: string,
+    request: PluginSerialLoanHeartbeatRequest,
+  ): Promise<PluginSerialLoanInfo> =>
+    invoke('plugin_serial_loan_heartbeat', {
+      pluginId,
+      expectedGeneration,
+      leaseId: request.leaseId,
+      extendTtlMs: request.extendTtlMs,
+    }),
+  pluginSerialLoanRelease: (
+    pluginId: string,
+    expectedGeneration: string,
+    request: PluginSerialLoanReleaseRequest,
+  ): Promise<PluginSerialLoanReleaseResult> =>
+    invoke('plugin_serial_loan_release', {
+      pluginId,
+      expectedGeneration,
+      leaseId: request.leaseId,
+      reopenOverride: request.reopenOverride,
+    }),
   /** Fetch the configured marketplace index from an explicitly reviewed source. */
   fetchPluginMarketplace: (sourceUrl: string): Promise<MarketplaceIndex> =>
     invoke('fetch_plugin_marketplace', { sourceUrl }),
