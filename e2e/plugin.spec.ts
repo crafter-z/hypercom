@@ -151,8 +151,27 @@ const MOCK = `
         'load_trigger_rules',
         'load_port_presets',
         'get_log_files',
+        'list_port_leases',
+        'remote_host_list_clients',
+        'remote_client_list_profiles',
+        'remote_list_plugin_views',
       ].includes(cmd)) {
         return [];
+      }
+      if ([
+        'remote_host_stop',
+        'remote_client_disconnect',
+        'remote_client_remove_profile',
+        'control_sync_plugin_tools',
+        'control_plugin_reply',
+        'control_plugin_job_event',
+        'control_remote_view_event',
+        'remote_open_plugin_view',
+        'remote_close_plugin_view',
+        'remote_pick_and_upload_artifact',
+        'create_projected_plugin_view',
+      ].includes(cmd)) {
+        return null;
       }
       if (cmd === 'get_config') return getConfigFixture();
       if (cmd === 'get_config_path') return 'C:/mock/config.json';

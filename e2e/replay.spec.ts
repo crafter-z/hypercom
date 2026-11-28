@@ -17,7 +17,7 @@ const mock = `(() => {
     invoke: async (cmd,args) => {
       window.__REPLAY_CALLS__.push({cmd,args});
       if(cmd==='get_config') { const {useAppStore}=await import('/src/stores/useAppStore.ts'); return {...structuredClone(useAppStore.getState().config),restoreSession:false,autoSaveLog:false}; }
-      if(cmd==='list_available_ports' || cmd.startsWith('load_') || cmd==='get_log_files') return [];
+      if(cmd==='list_available_ports' || cmd.startsWith('load_') || cmd==='get_log_files' || cmd==='list_port_leases' || cmd==='remote_host_list_clients' || cmd==='remote_client_list_profiles' || cmd==='remote_list_plugin_views') return [];
       if(cmd==='list_plugins') return {revision:0,plugins:[],pluginConfigs:[]};
       if(cmd==='get_system_status') return {status:'normal',memoryUsedMb:0,cpuUsage:0};
       if(cmd==='plugin:app|version') return 'e2e';

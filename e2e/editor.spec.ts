@@ -65,7 +65,14 @@ async function installBackend(page: Page) {
         if (command === 'get_session_snapshot' || command === 'update_session_snapshot' || command === 'append_diag_log') return null;
         if (command === 'get_system_status') return { status: 'normal', memoryUsedMb: 0, cpuUsage: 0 };
         if (command === 'get_config_path') return 'editor-regression/config.json';
-        if (command === 'get_log_files') return [];
+        if (command === 'get_log_files' || command === 'list_port_leases'
+          || command === 'remote_host_list_clients' || command === 'remote_client_list_profiles'
+          || command === 'remote_list_plugin_views') return [];
+        if (command === 'remote_host_stop' || command === 'remote_client_disconnect' || command === 'remote_client_remove_profile'
+          || command === 'control_sync_plugin_tools' || command === 'control_plugin_reply'
+          || command === 'control_plugin_job_event' || command === 'control_remote_view_event'
+          || command === 'remote_open_plugin_view' || command === 'remote_close_plugin_view'
+          || command === 'remote_pick_and_upload_artifact' || command === 'create_projected_plugin_view') return null;
         if (command === 'plugin:event|listen') {
           const id = nextId++;
           listeners.set(id, { event: String(args.event), handler: Number(args.handler) });
